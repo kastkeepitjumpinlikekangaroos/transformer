@@ -1,0 +1,54 @@
+module(name = "transformer")
+
+bazel_dep(name = "rules_java", version = "8.14.0")
+bazel_dep(name = "rules_jvm_external", version = "6.6")
+bazel_dep(name = "rules_scala", version = "7.0.0")
+
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+maven.install(
+    artifacts = [
+        # SQL parser
+        "com.github.jsqlparser:jsqlparser:5.0",
+
+        # Parquet (local FS only; Hadoop libs are minimal, no daemons)
+        "org.apache.parquet:parquet-hadoop:1.14.3",
+        "org.apache.parquet:parquet-column:1.14.3",
+        "org.apache.parquet:parquet-common:1.14.3",
+        "org.apache.parquet:parquet-encoding:1.14.3",
+        "org.apache.parquet:parquet-format-structures:1.14.3",
+        "org.apache.hadoop:hadoop-common:3.3.6",
+        "org.apache.hadoop:hadoop-mapreduce-client-core:3.3.6",
+        "commons-collections:commons-collections:3.2.2",
+        "org.slf4j:slf4j-api:2.0.13",
+        "org.slf4j:slf4j-nop:2.0.13",
+
+        # Testing
+        "junit:junit:4.13.2",
+    ],
+    repositories = [
+        "https://repo1.maven.org/maven2",
+    ],
+    fetch_sources = False,
+    duplicate_version_warning = "none",
+)
+use_repo(maven, "maven")
+
+# Scala toolchain configuration
+scala_config = use_extension(
+    "@rules_scala//scala/extensions:config.bzl",
+    "scala_config",
+)
+scala_config.settings(scala_version = "2.13.16")
+
+scala_deps = use_extension(
+    "@rules_scala//scala/extensions:deps.bzl",
+    "scala_deps",
+)
+scala_deps.scala()
+scala_deps.junit()
+
+scala_toolchains = use_extension(
+    "@rules_scala//scala/extensions:toolchains.bzl",
+    "scala_toolchains",
+)
+scala_toolchains.testing()

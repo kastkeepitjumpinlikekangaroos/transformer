@@ -1,0 +1,13 @@
+load("@rules_scala//scala:scala.bzl", "scala_junit_test")
+
+scala_junit_test(
+    name = "sql_engine_test",
+    srcs = ["SqlEngineTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/csv",
+        "//src/main/scala/com/transformer/sql/exec",
+        "@maven//:junit_junit",
+    ],
+)

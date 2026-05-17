@@ -1,0 +1,22 @@
+load("@rules_scala//scala:scala.bzl", "scala_junit_test")
+
+scala_junit_test(
+    name = "csv_row_parser_test",
+    srcs = ["CsvRowParserTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/read/csv",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "csv_reader_test",
+    srcs = ["CsvReaderTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/csv",
+        "@maven//:junit_junit",
+    ],
+)

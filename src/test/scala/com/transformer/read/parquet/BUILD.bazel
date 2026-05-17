@@ -1,0 +1,14 @@
+load("@rules_scala//scala:scala.bzl", "scala_junit_test")
+
+scala_junit_test(
+    name = "parquet_roundtrip_test",
+    srcs = ["ParquetRoundtripTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/write/parquet",
+        "@maven//:junit_junit",
+    ],
+)

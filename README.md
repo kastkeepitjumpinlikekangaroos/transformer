@@ -1,0 +1,319 @@
+# transformer
+
+A Scala library for building standalone JVM ETL jobs. Read data from disparate
+sources into memory, run SQL transforms with a built-in parallel execution
+engine, write to disparate destinations. Inspired by Apache Spark's batch SQL
+model but with no Spark dependency — the SQL parser, logical planner, physical
+planner, and executor are all in this repo.
+
+Compiles to a self-contained deploy jar via Bazel + rules_scala. Memory and CPU
+are scaled by giving the JVM more hardware; the library is designed for
+single-node parallelism, not distributed execution.
+
+## Status
+
+**v1 (this release):**
+
+- Local CSV read/write (folder or glob, schema inference)
+- Local Parquet read/write (snappy, all primitive types)
+- Full SQL: SELECT, WHERE, JOIN (INNER/LEFT/RIGHT/FULL), GROUP BY, HAVING,
+  ORDER BY, LIMIT, DISTINCT, UNION/UNION ALL, CASE, CAST, scalar functions
+- DBT-style data-quality validations
+- Jinja-style temporal templating in SQL and output paths
+- Bazel-deployable example app
+
+**v1.1 (planned):** `gs://` and `s3://` paths. The `InputFilePath` /
+`OutputFilePath` API already accepts them; today they raise a clear
+`UnsupportedOperationException` with the cache directory already wired up.
+
+## Quick start
+
+```bash
+# Build + test everything.
+bazel test //...
+
+# Build the example deploy jar.
+bazel build //examples/scala_app:example_job_deploy.jar
+
+# Run it.
+java -jar bazel-bin/examples/scala_app/example_job_deploy.jar \
+    examples/scala_app/data/input \
+    /tmp/transformer-example-out
+```
+
+The example reads two CSVs, joins them, aggregates spend per user tier with a
+templated output path (`day=20260101/`), runs a validation, and exits 0.
+
+## Example usage
+
+```scala
+import com.transformer.job._
+import com.transformer.temporal.TemporalVariables
+import java.time.Instant
+
+val job = DataJob(
+  temporalVariables = Some(TemporalVariables(Instant.parse("2026-01-01T05:30:21Z"))),
+  inputs = Seq(
+    InputFilePath("data/events/*.csv", viewName = "events"),
+    InputFilePath("data/users.parquet", viewName = "users")
+  ),
+  sql = Seq(
+    SQLTask(
+      name      = Some("enrich"),
+      sqlString = Some(
+        """SELECT e.user_id, u.name, u.tier, e.event, e.amount
+          |FROM events e
+          |LEFT JOIN users u ON e.user_id = u.user_id
+          |""".stripMargin),
+      outputFile = Some(OutputFilePath("out/day={{ today }}/enriched.csv")),
+      viewName   = Some("enriched")
+    ),
+    SQLTask(
+      name      = Some("spend_by_tier"),
+      sqlString = Some(
+        """SELECT tier, COUNT(*) AS n, SUM(amount) AS total
+          |FROM enriched
+          |WHERE event = 'buy'
+          |GROUP BY tier
+          |ORDER BY tier
+          |""".stripMargin),
+      outputFile = Some(OutputFilePath("out/day={{ today }}/spend_by_tier.parquet")),
+      validations = Seq(
+        Validation(
+          name      = "no_null_tiers",
+          sqlString = Some("SELECT * FROM result WHERE tier IS NULL")
+        )
+      )
+    )
+  )
+)
+
+val result = job.run()
+if (!result.succeeded) sys.exit(1)
+```
+
+`DataJob.run()` returns a `JobResult` describing per-task status, row counts,
+and durations. If a validation fails the corresponding task is marked
+`ValidationFailed`, its output is persisted regardless (for debugging), and a
+CSV of failure samples is dumped to `validationResultsOutput` (defaults to
+`validation_results/{{ epoch_millis }}.csv`).
+
+## Supported file formats
+
+### CSV
+
+- Read: hand-rolled state-machine parser. RFC 4180 doubled-quote escape,
+  separate escape character, embedded delimiters, embedded newlines, CR/LF
+  line endings.
+- Write: atomic temp-file + rename, header from `Schema`.
+- Schema inference: samples first 1000 rows of the first file.
+  Type priority `Int → Long → Double → Boolean → Date → Timestamp → String`.
+
+Options (passed via `InputFilePath.options` / `OutputFilePath.options`):
+
+| Key | Default | Notes |
+|---|---|---|
+| `header` | `true` | First line contains column names |
+| `delimiter` | `,` | Pass `\t` for TSV |
+| `quote` | `"` | |
+| `escape` | `"` | RFC 4180 doubled-quote escape when equal to `quote` |
+| `nullValue` | `""` | Empty string = null |
+| `inferSchema` | `true` | If false, `columns` is required (input) |
+| `charset` | `UTF-8` | |
+| `compression` (output, parquet only) | `snappy` | `uncompressed` / `snappy` / `gzip` |
+
+When `inferSchema = false`, pass an explicit schema:
+
+```scala
+InputFilePath("data.csv",
+  viewName = "t",
+  options  = Map("inferSchema" -> "false", "header" -> "false"))
+// then set columns programmatically via CsvOptions if you build the reader
+// directly; or build CsvOptions from the option bag and override columns.
+```
+
+### Parquet
+
+- Read: `parquet-hadoop` with `GroupReadSupport`, local FS only. One row group
+  per partition for built-in parallelism.
+- Write: `ExampleParquetWriter` with `GroupWriteSupport`, snappy by default.
+- All transformer primitive types map: `Int`, `Long`, `Float`, `Double`,
+  `Boolean`, `String` (UTF-8 logical type), `Binary`, `Date` (INT32 days),
+  `Timestamp` (INT64 micros).
+
+Parquet support is loaded by adding `//src/main/scala/com/transformer/read/parquet`
+to your `scala_binary` deps. The first reference auto-installs hooks the job
+runner uses.
+
+### Cloud (`gs://` / `s3://`)
+
+v1: any cloud path triggers `UnsupportedOperationException` with a clear v1.1
+message. The cache directory layout (`./.transformer-cache/<sha1(path)>/`) is
+already in the design; v1.1 will populate it from GCS/S3.
+
+## SQL features
+
+The engine supports the standard SQL-92 SELECT shape:
+
+```
+SELECT [DISTINCT] <projections>
+FROM <table> [<alias>]
+[ {INNER|LEFT|RIGHT|FULL} JOIN <table> [<alias>] ON <predicate> ]*
+[ WHERE <predicate> ]
+[ GROUP BY <exprs> [ HAVING <predicate> ] ]
+[ ORDER BY <exprs> [ASC|DESC] ]
+[ LIMIT <n> ]
+```
+
+**Aggregates:** `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `SUM`, `AVG`,
+`MIN`, `MAX`.
+
+**Scalar functions:** `LENGTH`/`LEN`, `UPPER`, `LOWER`, `TRIM`, `SUBSTRING`,
+`CONCAT`, `COALESCE`, `IF`, `NULLIF`, `ABS`, `ROUND`, `FLOOR`, `CEIL`/`CEILING`,
+`MOD`, `POW`/`POWER`, `CURRENT_DATE`, `CURRENT_TIMESTAMP`.
+
+**Operators:** `+ - * / %`, `=  <>  <  <=  >  >=`, `AND OR NOT`, `||` (concat),
+`LIKE`, `IS NULL` / `IS NOT NULL`, `IN (...)`, `BETWEEN`, `CASE WHEN`,
+`CAST(expr AS type)`.
+
+**Types in CAST:** `INT`, `INTEGER`, `BIGINT`, `LONG`, `FLOAT`, `REAL`,
+`DOUBLE`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`, `DATE`,
+`TIMESTAMP`.
+
+**Subqueries:** not in v1. Use a multi-task pipeline with `viewName` to chain
+results.
+
+**NULL handling:** three-valued logic in boolean contexts; NULL propagates
+through arithmetic and string ops; `IS NULL` / `IS NOT NULL` for explicit
+checks.
+
+## Temporal templating
+
+`TemplateRenderer` substitutes `{{ ... }}` expressions in SQL strings and
+output paths against a `TemporalVariables.executionTime` (defaults to job-start
+wall clock). All times are interpreted in **UTC**.
+
+Every variable supports `± N` in its natural unit. The reference time
+`2026-01-01T05:30:21Z` produces, for example:
+
+| Template | Result | Unit for arithmetic |
+|---|---|---|
+| `{{ today }}` | `20260101` | days |
+| `{{ today - 5 }}` | `20251227` | days |
+| `{{ yesterday }}` | `20251231` | days |
+| `{{ tomorrow }}` | `20260102` | days |
+| `{{ iso_date }}` | `2026-01-01` | days |
+| `{{ iso_datetime }}` | `2026-01-01T05:30:21` | seconds |
+| `{{ iso_timestamp }}` | `2026-01-01T05:30:21Z` | seconds |
+| `{{ year_month }}` | `202601` | months |
+| `{{ current_year }}` | `2026` | years |
+| `{{ current_month }}` / `{{ current_month_pad }}` | `1` / `01` | months |
+| `{{ current_day }}` / `{{ current_day_pad }}` | `1` / `01` | days |
+| `{{ current_hour }}` / `{{ current_hour_pad }}` | `5` / `05` | hours |
+| `{{ current_minute }}` / `{{ current_minute_pad }}` | `30` / `30` | minutes |
+| `{{ current_second }}` / `{{ current_second_pad }}` | `21` / `21` | seconds |
+| `{{ current_dow }}` | `4` (1=Mon … 7=Sun) | days |
+| `{{ current_doy }}` | `1` | days |
+| `{{ current_week }}` / `{{ current_week_pad }}` | `1` / `01` | weeks |
+| `{{ current_quarter }}` | `1` | quarters (= 3 months) |
+| `{{ epoch_seconds }}` | `1767245421` | seconds |
+| `{{ epoch_millis }}` | `1767245421000` | milliseconds |
+| `{{ year }}`/`{{ month }}`/`{{ day }}`/`{{ hour }}`/`{{ minute }}`/`{{ second }}` | aliases for `current_*` | |
+
+Compound offsets work the way you'd guess: `{{ yesterday - 1 }}` is
+`20251230` (today minus 2 days). Arithmetic on padded variants stays padded:
+`{{ current_hour_pad - 5 }}` is `00`.
+
+Unknown variables raise `IllegalArgumentException` listing all known names.
+
+## Project layout
+
+```
+.
+├── MODULE.bazel               Bazel deps: rules_scala 7.0.0, scala 2.13.16,
+│                              jsqlparser 5.0, parquet-hadoop 1.14.3 (+ minimal
+│                              hadoop), junit
+├── .bazelrc                   JDK 21 toolchain
+├── examples/scala_app/        Bazel-deployable example app
+├── src/main/scala/com/transformer/
+│   ├── core/                  DataType, Schema, ColumnarBatch, Catalog,
+│   │                          SqlExecutor boundary + registry
+│   ├── temporal/              TemporalVariables, TemplateRenderer
+│   ├── read/
+│   │   ├── csv/               CsvOptions, CsvRowParser, CsvSchemaInferer,
+│   │   │                      PathGlob, CsvReader
+│   │   └── parquet/           ParquetReader, ParquetSupport (hook installer)
+│   ├── sql/
+│   │   ├── parse/             JSqlParser façade
+│   │   ├── plan/              Expr ADT, Ops/Funcs/Casts, LogicalPlan,
+│   │   │                      LogicalBuilder (JSqlParser → bound LogicalPlan),
+│   │   │                      Analyzer (name resolution + implicit casts)
+│   │   └── exec/              PhysicalPlan (Scan/Filter/Project/Limit),
+│   │                          HashAggregateExec, HashJoinExec, SortExec,
+│   │                          DistinctExec, UnionExec, PhysicalPlanner,
+│   │                          SqlEngine (registry self-install)
+│   ├── write/
+│   │   ├── csv/               CsvWriter
+│   │   └── parquet/           ParquetSchema, ParquetWriter
+│   └── job/                   InputFilePath, OutputFilePath, SQLTask,
+│                              Validation, JobResult, InputResolver, DataJob,
+│                              ParquetReaderHook, ParquetWriterHook,
+│                              ParquetResolverHook
+└── src/test/scala/com/transformer/...   (mirrors src/main/scala layout)
+```
+
+## Building your own job
+
+Create a `scala_binary` target. Minimal `BUILD.bazel`:
+
+```python
+load("@rules_scala//scala:scala.bzl", "scala_binary")
+
+scala_binary(
+    name = "my_job",
+    srcs = ["MyJob.scala"],
+    main_class = "com.acme.MyJob",
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/temporal",
+        # add this if you read or write parquet:
+        # "//src/main/scala/com/transformer/read/parquet",
+    ],
+)
+```
+
+Then:
+
+```bash
+bazel build //path/to/your:my_job_deploy.jar
+java -jar bazel-bin/path/to/your/my_job_deploy.jar [args]
+```
+
+The `_deploy.jar` is fat — all transitive deps inlined. Ship it to anywhere with
+a JDK 21.
+
+## Limitations
+
+- **Single-node**: large hash-joins / aggregations / sorts can OOM. Mitigation:
+  give the JVM more heap. Spill-to-disk is not in v1.
+- **No subqueries**: chain `SQLTask`s via `viewName`.
+- **No window functions** (`OVER (PARTITION BY ...)`): planned post-v1.
+- **Cloud paths recognized but unimplemented**: see v1.1 above.
+- **Schema is inferred from the first file** in a glob; mixed schemas across
+  files in the same view are not validated. Explicit schemas via the
+  `inferSchema = false` route avoid this.
+
+## Running tests
+
+```bash
+bazel test //...                                     # everything
+bazel test //src/test/scala/com/transformer/...      # same, different syntax
+bazel test //src/test/scala/com/transformer/sql/...  # just the SQL tests
+```
+
+Each leaf test directory has its own `scala_junit_test` target.
+
+## License
+
+To be added.

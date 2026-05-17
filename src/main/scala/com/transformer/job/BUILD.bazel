@@ -1,0 +1,15 @@
+load("@rules_scala//scala:scala.bzl", "scala_library")
+
+scala_library(
+    name = "job",
+    srcs = glob(["**/*.scala"]),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/csv",
+        "//src/main/scala/com/transformer/temporal",
+        "//src/main/scala/com/transformer/write/csv",
+        # Force the SQL engine onto the classpath so it self-registers.
+        "//src/main/scala/com/transformer/sql/exec",
+    ],
+)

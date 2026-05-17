@@ -1,0 +1,23 @@
+package com.transformer.sql.exec
+
+import com.transformer.core.{Catalog, ColumnarBatch, ExecutedQuery, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.sql.plan.LogicalBuilder
+
+/** Wires the SQL stack into [[SqlExecutorRegistry]]. Calling `init()` is
+  * idempotent; the job module's `DataJob.run()` calls it lazily.
+  */
+object SqlEngine extends SqlExecutor {
+
+  def init(): Unit = SqlExecutorRegistry.install(this)
+
+  // Self-install on class load so simply linking against this module is enough.
+  init()
+
+  def execute(sql: String, catalog: Catalog): ExecutedQuery = {
+    val logical = LogicalBuilder.build(sql, catalog)
+    val physical = PhysicalPlanner.plan(logical)
+    val batches: Iterator[ColumnarBatch] =
+      (0 until physical.numPartitions).iterator.flatMap(physical.execute)
+    new ExecutedQuery(physical.outputSchema, batches)
+  }
+}

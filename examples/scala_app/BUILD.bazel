@@ -1,0 +1,15 @@
+load("@rules_scala//scala:scala.bzl", "scala_binary")
+
+scala_binary(
+    name = "example_job",
+    srcs = glob(["src/main/scala/**/*.scala"]),
+    main_class = "com.example.ExampleJob",
+    data = glob(["data/**"]),
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/temporal",
+        # Parquet support is optional — uncomment if your job uses parquet:
+        # "//src/main/scala/com/transformer/read/parquet",
+    ],
+)

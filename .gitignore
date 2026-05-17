@@ -1,0 +1,23 @@
+__pycache__
+# Bazel build outputs
+bazel-*
+
+# Bazel lock file
+MODULE.bazel.lock
+
+# Bazel convenience symlinks
+/bazel-bin
+/bazel-out
+/bazel-testlogs
+/bazel-transformer
+
+# Local cache for downloaded cloud objects
+.transformer-cache/
+
+# Validation result dumps from default location
+validation_results/
+
+# IDE / OS noise
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,23 @@
+load("@rules_scala//scala:scala.bzl", "scala_library")
+
+scala_library(
+    name = "parquet",
+    srcs = glob(["**/*.scala"]),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/read/csv",
+        "//src/main/scala/com/transformer/write/parquet",
+        "@maven//:commons_collections_commons_collections",
+        "@maven//:org_apache_hadoop_hadoop_common",
+        "@maven//:org_apache_hadoop_hadoop_mapreduce_client_core",
+        "@maven//:org_apache_parquet_parquet_column",
+        "@maven//:org_apache_parquet_parquet_common",
+        "@maven//:org_apache_parquet_parquet_encoding",
+        "@maven//:org_apache_parquet_parquet_format_structures",
+        "@maven//:org_apache_parquet_parquet_hadoop",
+        "@maven//:org_slf4j_slf4j_api",
+        "@maven//:org_slf4j_slf4j_nop",
+    ],
+)
