@@ -43,11 +43,21 @@ object DirectoryJobLoader {
   def load(jobDir: Path, temporalVariables: TemporalVariables): DataJob =
     load(jobDir, outputDir = None, temporalVariables = Some(temporalVariables))
 
+  /** Default location for the job-level run record: `<resolvedOutputDir>/job.json`
+    * — co-located with the per-task data so an output directory is a
+    * self-contained, inspectable snapshot of one run (job.json + per-task
+    * subdirs with `_run.json` + `part-*` files).
+    *
+    * To keep run-by-run history, template `outputDir` itself
+    * (e.g. `/data/runs/{{ today }}`): each execution time writes to a
+    * fresh subdir with its own job.json, and the parent dir becomes a
+    * multi-run layout the GUI can browse.
+    */
   def load(
       jobDir: Path,
       outputDir: Option[String] = None,
       temporalVariables: Option[TemporalVariables] = None,
-      validationResultsOutput: Option[OutputFilePath] = None
+      jobRunOutput: Option[OutputFilePath] = None
   ): DataJob = {
     if (!Files.isDirectory(jobDir)) {
       throw new IllegalArgumentException(
@@ -56,6 +66,9 @@ object DirectoryJobLoader {
     }
     val absJobDir = jobDir.toAbsolutePath.normalize()
     val resolvedOutputDir = outputDir.getOrElse(absJobDir.resolve("output").toString)
+    val resolvedJobRunOutput = jobRunOutput.orElse(
+      Some(OutputFilePath(joinPath(resolvedOutputDir, "job.json")))
+    )
 
     val inputs = loadInputs(absJobDir.resolve("inputs"), absJobDir)
     val tables = loadTables(absJobDir.resolve("tables"), resolvedOutputDir)
@@ -64,7 +77,7 @@ object DirectoryJobLoader {
       inputs = inputs,
       sql = tables,
       temporalVariables = temporalVariables,
-      validationResultsOutput = validationResultsOutput
+      jobRunOutput = resolvedJobRunOutput
     )
   }
 

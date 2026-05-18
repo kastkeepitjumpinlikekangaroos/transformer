@@ -1,6 +1,6 @@
 package com.transformer.gui
 
-import com.transformer.job.RunMarker
+import com.transformer.job.{TaskRunRecord, TaskRunStatus}
 
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -35,14 +35,22 @@ class JobSessionTest {
     }
   }
 
-  private def writeMarker(dir: Path, format: String): Unit = {
+  private def writeRecord(dir: Path, format: String): Unit = {
     Files.createDirectories(dir)
-    RunMarker.write(dir, RunMarker(
-      executionTime = Instant.parse("2026-01-01T00:00:00Z"),
-      writtenAt     = Instant.parse("2026-01-01T00:00:00Z"),
+    val t = Instant.parse("2026-01-01T00:00:00Z")
+    TaskRunRecord.write(dir, TaskRunRecord(
+      schemaVersion = TaskRunRecord.SchemaVersion,
+      taskName      = "test",
+      status        = TaskRunStatus.Succeeded,
+      errorMessage  = None,
+      executionTime = t,
+      startedAt     = t,
+      finishedAt    = t,
+      writtenAt     = t,
       rowsProduced  = 0L,
       format        = format,
-      outputFiles   = Seq(s"part-00000.$format")
+      outputFiles   = Seq(s"part-00000.$format"),
+      validations   = Nil
     ))
   }
 
@@ -53,7 +61,10 @@ class JobSessionTest {
     */
   @Test def readOutputAsViewUsesMarkerFormatForExtlessParquetDir(): Unit = {
     val dir = tmpDir.resolve("test")
-    writeMarker(dir, "parquet")
+    writeRecord(dir, "parquet")
+    // Drop a fake part file so the CSV fallback (if the routing were wrong)
+    // would at least find something to open and produce its CSV-specific
+    // error — distinguishing routing failure from "no files at all".
     Files.writeString(dir.resolve("part-00000.parquet"), "PAR1binary")
 
     val ex = try { JobSession.readOutputAsView(dir.toString); null }
@@ -72,7 +83,7 @@ class JobSessionTest {
     */
   @Test def readOutputAsViewMarkerCsvOverridesPathSubstring(): Unit = {
     val dir = tmpDir.resolve("runs.parquet").resolve("test")
-    writeMarker(dir, "csv")
+    writeRecord(dir, "csv")
     Files.writeString(dir.resolve("part-00000.csv"), "id,name\n1,alpha\n")
 
     val view = JobSession.readOutputAsView(dir.toString)

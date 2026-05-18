@@ -12,9 +12,10 @@ navigation hint, not a comprehensive directory listing.
   is probably where it lands.
 - `sql/exec/WindowExec.scala` (~345 LOC) — partition, sort, frame computation
   for every supported window function.
-- `job/DataJob.scala` (~440 LOC) — runner orchestration: input materialization
-  pool, DAG scheduler, writeOutput, validation re-read, `_SUCCESS` marker
-  write.
+- `job/DataJob.scala` (~600 LOC) — runner orchestration: input materialization
+  pool, DAG scheduler, writeOutput, validation re-read, per-status
+  `_run.json` writes + per-failure `_validation-<slug>.csv` sample writes +
+  per-job `job.json` write + consistency checks.
 - `gui/ResultsTabPane.scala` (~360 LOC) — partition picker + background
   output loader + run-log rendering.
 - `core/ColumnarBatch.scala` (~320 LOC) — defines ten `ColumnVector`

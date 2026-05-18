@@ -1,7 +1,7 @@
 package com.transformer.gui
 
 import com.transformer.core.{ColumnarBatch, MaterializedView}
-import com.transformer.job.{OutputFilePath, RunMarker}
+import com.transformer.job.{OutputFilePath, TaskRunRecord, TaskRunStatus}
 import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
 import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
 
@@ -18,10 +18,10 @@ import scala.util.control.NonFatal
   * The result's partition layout drives output partitioning, capped by
   * [[OutputFilePath.maxPartitions]] just like the SQLTask runner does.
   *
-  * On success a [[RunMarker]] is stamped into the directory so the output
-  * shows up as a normal "run" in the GUI's historical-runs picker — using
-  * the wall-clock time as `executionTime` since interactive queries have no
-  * job-level temporal variables.
+  * On success a [[TaskRunRecord]] is stamped into the directory so the
+  * output shows up as a normal Succeeded run in the GUI's historical-runs
+  * picker — wall-clock time stands in for `executionTime` since interactive
+  * queries have no job-level temporal variables.
   */
 object ResultPersister {
 
@@ -34,9 +34,10 @@ object ResultPersister {
     )
     val coalesced = coalescedPartitions(view, ofp.maxPartitions)
     val dir = Paths.get(ofp.path)
-    // Wipe a prior successful run's files so a format / partition-count change
-    // doesn't leave stale outputs in the directory.
-    RunMarker.clearIfMarked(dir)
+    // Wipe a prior run's files so a format / partition-count change doesn't
+    // leave stale outputs in the directory.
+    TaskRunRecord.clearIfMarked(dir)
+    val started = Instant.now()
     val rowsWritten = ofp.detectedFormat match {
       case "csv" =>
         CsvWriter.writePartitioned(
@@ -47,7 +48,7 @@ object ResultPersister {
       case other =>
         throw new IllegalArgumentException(s"Unsupported output format '$other' for '${ofp.path}'")
     }
-    writeMarker(ofp, rowsWritten)
+    writeRunRecord(ofp, rowsWritten, started)
     rowsWritten
   }
 
@@ -74,16 +75,23 @@ object ResultPersister {
     }
   }
 
-  private def writeMarker(ofp: OutputFilePath, rowsProduced: Long): Unit = try {
+  private def writeRunRecord(ofp: OutputFilePath, rowsProduced: Long, started: Instant): Unit = try {
     val dir = Paths.get(ofp.path)
-    val files = RunMarker.listPartFiles(dir)
+    val files = TaskRunRecord.listPartFiles(dir)
     val now = Instant.now()
-    RunMarker.write(dir, RunMarker(
+    TaskRunRecord.write(dir, TaskRunRecord(
+      schemaVersion = TaskRunRecord.SchemaVersion,
+      taskName = "interactive query",
+      status = TaskRunStatus.Succeeded,
+      errorMessage = None,
       executionTime = now,
+      startedAt = started,
+      finishedAt = now,
       writtenAt = now,
       rowsProduced = rowsProduced,
       format = ofp.detectedFormat,
-      outputFiles = files
+      outputFiles = files,
+      validations = Nil
     ))
   } catch { case NonFatal(_) => () }
 }

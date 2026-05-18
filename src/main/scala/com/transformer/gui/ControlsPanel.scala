@@ -1,14 +1,16 @@
 package com.transformer.gui
 
 import com.transformer.core.SqlExecutorRegistry
-import com.transformer.job.{TaskProgressListener, TaskResult}
+import com.transformer.job.{JobRunRecord, TaskProgressListener, TaskResult, TaskRunStatus}
 
 import javafx.geometry.{Insets, Orientation, Pos}
 import javafx.scene.control._
 import javafx.scene.layout.{HBox, Priority, VBox}
 import javafx.stage.Stage
 
+import java.nio.file.Path
 import java.time.{Instant, LocalDate, LocalDateTime, LocalTime, ZoneOffset}
+import java.time.format.DateTimeFormatter
 import scala.util.control.NonFatal
 
 /** Top horizontal panel: job-dir status, execution-time picker, output-dir
@@ -77,6 +79,25 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends HBox 
   outputRow.setAlignment(Pos.CENTER_LEFT)
   private val outputSection = section("Output directory", outputRow)
 
+  // ---- Run picker section ----
+  // Visible only when 2+ run snapshots exist at the parent of the rendered
+  // jobRunOutput path — i.e. the user has templated `outputDir` to vary by
+  // run (e.g. `/data/runs/{{ today }}`) and multiple snapshots are on disk.
+  // Selecting an entry rehydrates the GUI from that run's job.json without
+  // re-running anything.
+  private val runPickerCombo = new ComboBox[JobRunChoice]()
+  runPickerCombo.setPrefWidth(360)
+  private var runPickerSuppressed: Boolean = false
+  runPickerCombo.getSelectionModel.selectedItemProperty().addListener((_, _, choice) => {
+    if (!runPickerSuppressed && choice != null) session.selectRun(choice.dir)
+  })
+  private val runPickerRow = new HBox(6, runPickerCombo)
+  runPickerRow.setAlignment(Pos.CENTER_LEFT)
+  private val runPickerSection = section("Inspect run", runPickerRow)
+  // Default hidden — refreshFromSession reveals it when 2+ runs exist.
+  runPickerSection.setVisible(false)
+  runPickerSection.setManaged(false)
+
   // ---- Run button + status ----
   private val runButton = new Button("Run")
   runButton.setStyle("-fx-background-color: #3d6ee8; -fx-text-fill: white;")
@@ -95,6 +116,7 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends HBox 
     new Separator(Orientation.VERTICAL),
     outputSection,
     new Separator(Orientation.VERTICAL),
+    runPickerSection,
     runButton,
     statusLabel
   )
@@ -197,11 +219,37 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends HBox 
     effectiveOutputTip.setText(effectiveOutputText)
     runButton.setDisable(!session.canRun)
     statusLabel.setText(statusMessage)
+    refreshRunPicker()
     // The "New…" button is only really useful before a job is loaded; once
     // one is open it just clutters the panel.
     val hasJob = session.jobDir.isDefined
     newProjectButton.setVisible(!hasJob)
     newProjectButton.setManaged(!hasJob)
+  }
+
+  private val runPickerTimeFmt: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'").withZone(ZoneOffset.UTC)
+
+  private def refreshRunPicker(): Unit = {
+    val runs = session.availableRuns
+    // Hide the section entirely when there's no choice to make: zero runs
+    // (nothing to inspect) or one run (the default — picker would be noise).
+    val show = runs.size >= 2
+    runPickerSection.setVisible(show)
+    runPickerSection.setManaged(show)
+    runPickerSuppressed = true
+    try {
+      runPickerCombo.getItems.clear()
+      runs.foreach { case (dir, rec) =>
+        runPickerCombo.getItems.add(JobRunChoice(dir, rec, runPickerTimeFmt))
+      }
+      // Highlight whichever run the session considers active.
+      val activeDir = session.selectedRunDir.orElse(runs.headOption.map(_._1))
+      activeDir.foreach { d =>
+        val idx = runs.indexWhere(_._1 == d)
+        if (idx >= 0) runPickerCombo.getSelectionModel.select(idx)
+      }
+    } finally runPickerSuppressed = false
   }
 
   private def effectiveOutputText: String = {
@@ -262,5 +310,18 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends HBox 
     }, "transformer-gui-runner")
     worker.setDaemon(true)
     worker.start()
+  }
+}
+
+/** Label format requested by the run-picker UX: "exec=<isoTime> •
+  * finished=<wallClock UTC> • <succeeded>/<total> succeeded". Each ComboBox
+  * row renders via `toString`, so the label lives there. */
+private final case class JobRunChoice(dir: Path, record: JobRunRecord, fmt: DateTimeFormatter) {
+  override def toString: String = {
+    val total = record.tasks.size
+    val succeeded = record.tasks.count(_.status == TaskRunStatus.Succeeded)
+    val exec = record.executionTime.toString
+    val finished = fmt.format(record.finishedAt)
+    f"exec=$exec  •  finished=$finished  •  $succeeded%d/$total%d succeeded"
   }
 }

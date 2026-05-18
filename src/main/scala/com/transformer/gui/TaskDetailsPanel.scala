@@ -1,6 +1,6 @@
 package com.transformer.gui
 
-import com.transformer.job.{InputFilePath, JobFiles, RunMarker, TaskStatus, Validation}
+import com.transformer.job.{InputFilePath, JobFiles, TaskRunRecord, TaskRunStatus, TaskStatus, Validation}
 
 import java.nio.file.{Path, Paths}
 import java.time.ZoneOffset
@@ -477,7 +477,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
         outputPathLabel.setTooltip(null)
     }
     outputHeader.setText(verb)
-    outputMetaLabel.setText(formatMarkerMeta(session.markerFor(i)))
+    outputMetaLabel.setText(formatRecordMeta(session.taskRecordFor(i)))
     val total = session.historicalRunsFor(i).size
     historyHintLabel.setText(
       if (total >= 2) s"$total historical run${if (total == 1) "" else "s"} on disk — double-click the node to browse them in the Output tab."
@@ -490,18 +490,25 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
   }
 
   /** Compact one-line `2 rows • 1 part file • written 2026-…` summary of the
-    * task's most recent `_SUCCESS` marker, plus a note if the marker's
-    * executionTime differs from the session's.
+    * task's most recent `_run.json` record, plus a note if the recorded
+    * executionTime differs from the session's and a status tag for non-
+    * Succeeded outcomes (Validation failures, runtime errors, skips).
     */
-  private def formatMarkerMeta(marker: Option[RunMarker]): String = marker match {
+  private def formatRecordMeta(record: Option[TaskRunRecord]): String = record match {
     case None => ""
-    case Some(m) =>
-      val plural = if (m.outputFiles.size == 1) "" else "s"
+    case Some(r) =>
+      val plural = if (r.outputFiles.size == 1) "" else "s"
       val mismatch =
-        if (m.executionTime != session.executionTime)
-          s" • this run's exec=${TimeFmt.format(m.executionTime)} differs from selected ${TimeFmt.format(session.executionTime)}"
+        if (r.executionTime != session.executionTime)
+          s" • this run's exec=${TimeFmt.format(r.executionTime)} differs from selected ${TimeFmt.format(session.executionTime)}"
         else ""
-      f"${m.rowsProduced}%,d rows • ${m.outputFiles.size} part file$plural • written ${TimeFmt.format(m.writtenAt)}$mismatch"
+      val statusTag = r.status match {
+        case TaskRunStatus.Succeeded        => ""
+        case TaskRunStatus.ValidationFailed => " • validation failed"
+        case TaskRunStatus.Failed           => " • failed"
+        case TaskRunStatus.Skipped          => " • skipped"
+      }
+      f"${r.rowsProduced}%,d rows • ${r.outputFiles.size} part file$plural • written ${TimeFmt.format(r.writtenAt)}$statusTag$mismatch"
   }
 
   private def updateErrorPanel(i: Int): Unit = {

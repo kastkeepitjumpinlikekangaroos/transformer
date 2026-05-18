@@ -21,8 +21,9 @@ single-node parallelism, not distributed execution.
 - DBT-style data-quality validations
 - Jinja-style temporal templating in SQL and output paths
 - Per-task path-template partitioning (one partition per run keyed off the
-  job's execution time), with `_SUCCESS` markers preserving the temporal
-  variables used to produce each partition
+  job's execution time), with per-task `_run.json` records that capture
+  status, timings, validation results, and failure samples — plus a
+  per-job `job.json` manifest referencing all task records
 - Two ways to define a job: programmatic (`DataJob(...)`) or directory-driven
   (`DirectoryJobLoader.load(dir)`)
 - A JavaFX GUI for browsing a job directory, editing execution time + output
@@ -152,10 +153,11 @@ if (!result.succeeded) sys.exit(1)
 ```
 
 `DataJob.run()` returns a `JobResult` describing per-task status, row counts,
-and durations. If a validation fails the corresponding task is marked
-`ValidationFailed`, its output is persisted regardless (for debugging), and a
-CSV of failure samples is dumped to `validationResultsOutput` (defaults to
-`validation_results/{{ epoch_millis }}.csv`).
+durations, and any consistency warnings. If a validation fails the
+corresponding task is marked `ValidationFailed`, its output is persisted
+regardless (for debugging), and a sample of failing rows is written to
+`_validation-<name>.csv` next to that task's `_run.json` — see [Run
+records](#run-records-and-historical-runs) below.
 
 ## Defining jobs from a directory
 
@@ -283,11 +285,14 @@ the `ValidationFailed → downstream Skipped` scheduler path.
   in a few minutes — remove the `timestamp_received < …` clause in
   `tables/stg_orderbook/main.sql` to process the full ≈131M-row day.
 - Produces 17 parquet outputs in a staging → intermediate → mart → final
-  layering. Every output is partitioned by `day={{ today }}` and stamped with
-  `_SUCCESS` on success (the two failed/skipped tasks deliberately do *not*
-  get a marker).
+  layering. Every output is partitioned by `day={{ today }}`. Every task
+  (including the deliberately-failed and skipped ones) gets a `_run.json`
+  record, and the whole run is rolled up into `job.json` next to the output
+  dir — so the GUI's run picker can replay this run's exact statuses later.
 - Carries 58 validations across the 17 tables (2-5 per table), all in the
-  DBT-style "this query should return zero rows" shape.
+  DBT-style "this query should return zero rows" shape. Failure samples for
+  the intentionally-failing validation land in
+  `<output>/mart_orderbook_quality_check/.../_validation-zzz_no_observable_snapshot_latency_intentional_failure.csv`.
 - **Intentionally fails one branch:** `mart_orderbook_quality_check` has a
   validation that asserts no market has snapshot latency above zero. Real-feed
   data does, so the validation fails, the task is marked `ValidationFailed`,
@@ -317,43 +322,80 @@ bump higher (and expect much longer runs) if you remove the time-window
 filter to process the full ≈131M-row day, or expand `raw_orderbook` to
 multiple daily files.
 
-## Run markers and historical runs
+## Run records and historical runs
 
-After every successful task with an `outputFile`, the runner atomically
-writes a `_SUCCESS` file into the output directory:
+The runner persists a full run record for every task **at every termination
+status** — Succeeded, ValidationFailed, Failed, Skipped — so reopening the
+GUI against a previous run shows the exact same status, validation
+detail, and error messages it did during the live run. Reruns at the same
+templated output path completely overwrite prior state.
+
+There are two artifacts.
+
+### Per-task `_run.json`
+
+Each task with an `outputFile` writes `_run.json` into its output directory:
 
 ```
-/tmp/out/day=20260101/spend_by_tier/_SUCCESS
+/tmp/out/day=20260101/spend_by_tier/_run.json
 /tmp/out/day=20260101/spend_by_tier/part-00000.csv
+/tmp/out/day=20260101/spend_by_tier/_validation-customer_id_unique.csv  # only when that validation fails
 ```
 
-`_SUCCESS` is a small JSON blob capturing:
+The record captures everything needed to reconstruct the task's UI state:
 
 ```json
 {
+  "schemaVersion": 1,
+  "taskName": "spend_by_tier",
+  "status": "ValidationFailed",
+  "errorMessage": null,
   "executionTime": "2026-01-01T05:30:21Z",
-  "writtenAt":     "2026-05-18T03:17:03.099Z",
+  "startedAt":     "2026-05-18T03:17:02.612Z",
+  "finishedAt":    "2026-05-18T03:17:03.099Z",
+  "writtenAt":     "2026-05-18T03:17:03.103Z",
   "rowsProduced":  2,
   "format":        "csv",
-  "outputFiles":   ["part-00000.csv"]
+  "outputFiles":   ["part-00000.csv"],
+  "validations": [
+    { "name": "customer_id_unique", "passed": false, "failedRowCount": 7,
+      "sampleFile": "_validation-customer_id_unique.csv" },
+    { "name": "row_count_positive", "passed": true, "failedRowCount": 0,
+      "sampleFile": null }
+  ]
 }
 ```
 
-The underscore prefix means CSV/Parquet readers skip it automatically (via
-`PathGlob.expand`'s dotfile/underscore filter). The file is intentionally
-informative — it preserves the **temporal variables used to produce the
-output**, so a later viewer can show "this partition was written by execution
-time T" even after the producing process is gone.
+The underscore prefix means CSV/Parquet readers skip both the record and the
+validation samples when re-reading the directory as data.
+`TaskRunRecord.discover(templatedPattern)` glob-walks the filesystem and
+returns every directory matching the pattern that contains a `_run.json`,
+sorted newest-first. This is what powers the GUI's partition picker — open
+a job that's been run a few times against `out/day={{today}}/<view>` and
+the picker lists every historical `day=*` partition with its preserved
+execution time + status.
 
-`RunMarker.discover(templatedPattern)` glob-walks the filesystem and returns
-every directory matching the pattern that contains a `_SUCCESS`, sorted
-newest-first. This is what powers the GUI's partition picker — open a job
-that's been run a few times against `out/day={{today}}/<view>` and the picker
-lists every historical `day=*` partition with its preserved execution time.
+### Per-job `job.json`
 
-`_SUCCESS` is NOT written for failed tasks or for tasks whose validations
-failed (the part files are still on disk, but the directory is unblessed).
-Failures and skips never produce a marker.
+`DataJob.jobRunOutput` (defaulted by `DirectoryJobLoader` to
+`<outputDir>/job.json` — co-located with the data so an output directory
+is a self-contained snapshot of one run) is a single file written at the
+end of every run, listing every task with a pointer to its per-task
+`_run.json` plus a short summary (status, rows, error). Loading this one
+file is the GUI's entry point for hydrating the whole job; per-task
+records are loaded lazily as the user drills into each task. Consistency
+checks (declared part file missing, referenced `runFile` not on disk,
+etc.) land in the manifest's `warnings` array and surface in the GUI's
+run-log panel.
+
+Reruns at the same `outputDir` overwrite the manifest in place. To keep
+run-by-run history, template `outputDir` itself
+(e.g. `/data/runs/{{ today }}`): each execution time writes to a fresh
+subdir with its own `job.json` + per-task data, and the parent dir
+becomes a multi-run layout. When the GUI's controls panel finds 2+
+sibling runs at the parent of the rendered `jobRunOutput`, it surfaces a
+run picker — switching the picker rehydrates the entire UI from the
+chosen `job.json` without re-running anything.
 
 ## GUI
 
@@ -380,28 +422,32 @@ Layout:
   double-click to load its output rows.
 - **Right** — selected task's source SQL, rendered (post-template) SQL,
   status, error/validation summary, planned vs. actual output path, and any
-  `_SUCCESS` provenance.
+  `_run.json` provenance.
 - **Center bottom** — five tabs: task details, output data table (with a
   partition picker above it when 2+ historical runs exist for the activated
-  task), Validations (per-validation cards with Edit / Save / Cancel / Delete
-  buttons that write back to `tables/<view>/validations/<name>.sql`), an
-  ad-hoc SQL console, and a run log.
+  task), Validations (per-validation cards with an Edit… button that pops
+  out the `AddValidationDialog.showEdit` editor and writes back to
+  `tables/<view>/validations/<name>.sql`), an ad-hoc SQL console, and a run
+  log.
 
 Node colors:
 
 | Color | Meaning |
 |---|---|
-| Grey | Pending — never run, no `_SUCCESS` on disk |
+| Grey | Pending — never run, no `_run.json` on disk |
 | Blue | Running |
-| Green | Succeeded (either freshly this session, or hydrated from `_SUCCESS`) |
-| Red | Failed |
-| Orange | Validation failed |
+| Green | Succeeded (either freshly this session, or hydrated from `_run.json`) |
+| Red | Failed (error message + timing reloaded from disk) |
+| Orange | Validation failed (per-validation pass/fail + sample CSV reloaded from disk) |
 | Light grey + dashed | Skipped (upstream failure) |
 
-When you open a job directory the GUI calls `RunMarker.discover` on each
-task's templated output path, hydrates UI state with the most-recent
-discovered run, and exposes the full list via the partition picker — so you
-can flip between historical runs without re-running anything.
+When you open a job directory the GUI loads `<outputDir>/job.json` if it
+exists and follows each task's `runFile` pointer to its per-task
+`_run.json` — reconstructing the full status (including validation failure
+detail with sample rows) without re-running anything. The picker dropdown
+above the output-data table is populated by `TaskRunRecord.discover` over
+each task's templated output path, so you can flip between historical
+partitions inline.
 
 `DataJob.run(executor, listener)` fires `TaskProgressListener.onTaskStart` /
 `onTaskFinish` from runner worker threads; the GUI's Run button installs a
@@ -574,7 +620,8 @@ Unknown variables raise `IllegalArgumentException` listing all known names.
 │   ├── write/{csv,parquet}/   Format-specific writers + shared ParquetSchema.
 │   ├── job/                   User-facing API: InputFilePath, OutputFilePath,
 │   │                          SQLTask, DataJob runner, DirectoryJobLoader,
-│   │                          TaskDag, RunMarker, Json parser.
+│   │                          TaskDag, TaskRunRecord, JobRunRecord,
+│   │                          JobOutputLayout, Json parser.
 │   └── gui/                   JavaFX visualiser/runner.
 └── src/test/scala/com/transformer/...   (mirrors src/main/scala layout)
 ```

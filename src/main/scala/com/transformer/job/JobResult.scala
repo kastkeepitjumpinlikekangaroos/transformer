@@ -29,8 +29,17 @@ final case class TaskResult(
   def succeeded: Boolean = status == TaskStatus.Succeeded
 }
 
+/** Final outcome of a [[DataJob.run]] call.
+  *
+  * `warnings` carries non-fatal consistency findings — disk state that
+  * disagrees with the manifest (e.g. a declared part file that's missing, a
+  * `runFile` reference that no longer exists). They don't fail the run on
+  * their own; the GUI's run-log panel surfaces them so the user notices
+  * drift before acting on the data.
+  */
 final case class JobResult(
     succeeded: Boolean,
     tasks: Seq[TaskResult],
-    error: Option[String] = None
+    error: Option[String] = None,
+    warnings: Seq[String] = Nil
 )

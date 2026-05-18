@@ -260,8 +260,33 @@ class DirectoryJobLoaderTest {
     assertTrue(result.error.getOrElse("(none)"), result.succeeded)
     val rendered = outputDir.resolve("t/day=20260517")
     assertTrue(s"$rendered should be a directory", Files.isDirectory(rendered))
-    assertTrue("_SUCCESS expected in partitioned dir",
-      Files.isRegularFile(rendered.resolve("_SUCCESS")))
+    assertTrue("_run.json expected in partitioned dir",
+      Files.isRegularFile(rendered.resolve("_run.json")))
+    // Default jobRunOutput now lives in the output dataset folder so the
+    // dir is a self-contained snapshot of the run.
+    assertTrue("job.json should land in <outputDir>",
+      Files.isRegularFile(outputDir.resolve("job.json")))
+  }
+
+  @Test def defaultJobRunOutputLandsInOutputDir(): Unit = {
+    val jobDir = tmpDir("djl-jrr-default-")
+    writeFile(jobDir.resolve("data/events.csv"), "id\n1\n2\n")
+    writeFile(jobDir.resolve("inputs/events/config.json"),
+      """{"path": "data/events.csv"}""")
+    writeFile(jobDir.resolve("tables/t/main.sql"), "SELECT id FROM events")
+    val outputDir = tmpDir("djl-jrr-default-out-")
+    val job = DirectoryJobLoader.load(jobDir, outputDir = Some(outputDir.toString))
+    // The loader's default puts job.json directly in the output dataset
+    // folder. Programmatic callers still control this via the `jobRunOutput`
+    // parameter.
+    assertEquals(
+      outputDir.resolve("job.json").toString,
+      job.jobRunOutput.map(_.path).orNull
+    )
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(none)"), result.succeeded)
+    assertTrue("job.json should be on disk at the default location",
+      Files.isRegularFile(outputDir.resolve("job.json")))
   }
 
   @Test def perTableOutputJsonAbsentLeavesPathUnchanged(): Unit = {
