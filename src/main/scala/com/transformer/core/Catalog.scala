@@ -12,6 +12,15 @@ trait CatalogView {
     * a unit of parallelism for the executor.
     */
   def readPartition(p: Int): Iterator[ColumnarBatch]
+
+  /** Exact row count if the view can produce it without decoding any column data.
+    * Parquet returns the sum of per-row-group counts from the footer; in-memory
+    * views return their materialized row count. CSV-style views return None.
+    *
+    * Used by the SQL planner to short-circuit `SELECT COUNT(*) FROM <view>` —
+    * no scan, no aggregate pipeline, one row produced directly.
+    */
+  def exactRowCount: Option[Long] = None
 }
 
 /** Registry of named views available to SQL execution. View lookups are case-insensitive. */

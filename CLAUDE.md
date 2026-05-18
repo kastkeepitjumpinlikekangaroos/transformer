@@ -115,8 +115,11 @@ The top-level executor drains the root operator's partitions sequentially
 (usually `numPartitions = 1` after any breaker).
 
 This means parallelism scales with input partitioning. CSV → one partition
-per file. Parquet → one partition per row group. Plan accordingly when you
-care about throughput.
+per file. Parquet → one partition per file (we used to split per row group,
+but `HParquetReader` has no skip-by-row-group API and seeking by reading-and-
+discarding rows allocated a `SimpleGroup` per skipped row — O(rows²) over
+wide schemas, fatal under GC pressure). Plan accordingly when you care
+about throughput.
 
 ### 3a. Output is always a directory of part files
 
@@ -138,6 +141,24 @@ Validation re-reads use `CsvReader.fromPath(dir)` / `ParquetReader.fromPath(dir)
 both treat a bare directory as "every visible file inside" (via
 `PathGlob.expand`, which skips dotfiles + underscore-prefixed files — needed
 so we don't trip on Hadoop's CRC sidecars).
+
+### 3b. Input caching: opt-out via `cache: false`
+
+By default (`InputFilePath.cache = true`) every input is eagerly drained into a
+`MaterializedView` during `DataJob.run`'s Phase 1, so SQL execution hits
+in-memory batches with no further I/O. This is fine for typical CSV seeds
+(MB-sized) but fatal for multi-GB parquet inputs — decompressed + boxed in
+`ColumnarBatch`es they easily blow past a default heap.
+
+Set `cache: false` (in the input's `config.json` or `InputFilePath(cache = false)`)
+to skip materialization for that input. The raw streaming `CatalogView` (e.g.
+the `ParquetReader` itself, partitioned per row group) gets registered directly,
+and each query re-reads the underlying file(s). For aggregations / filters this
+is cheap; for projection-heavy DAGs with many downstream readers it pays the
+I/O cost N times — pick per-input.
+
+When materialization OOMs anyway, `DataJob` appends a hint to the error message
+pointing at this flag (see `oomHint` in `DataJob.scala`).
 
 Above the operator level, `DataJob` runs SQLTasks as a DAG: `TaskDag.build`
 parses each task's rendered SQL (main + every validation) with JSqlParser's
@@ -530,6 +551,20 @@ need them. Cloud is opt-in.
 - **`TaskDag` / `TaskDagNode` are public** despite living next to runner
   internals — the GUI needs them to render structure without re-implementing
   the analyzer. Don't accidentally narrow visibility when refactoring.
+- **Parquet write parallelism is capped at 4 by default**, not `cores`.
+  Each in-flight `ParquetWriter` pins a 32MB row-group buffer plus per-column
+  dictionary pages (≈1MB × column count) — on a 10-core box, the default
+  `min(n, cores)` blew past 2GB heap on wide schemas before any data flushed.
+  See `ParquetWriter.DefaultWriteParallelism` / `DefaultRowGroupSize`.
+  Override per-task via `options("parquet_write_parallelism")` and
+  `options("parquet_row_group_size")` if you've got headroom.
+- **`SELECT COUNT(*) FROM <view>` short-circuits to footer metadata** when
+  the view's [[CatalogView.exactRowCount]] is defined (parquet + in-memory).
+  The planner emits `CountStarMetadataExec` directly; no scan happens. The
+  pattern is strict — any WHERE / GROUP BY / HAVING / extra agg sends it back
+  through `HashAggregateExec`. Adding new readers? Implementing
+  `exactRowCount` is "free" when you already know the row count, "expensive"
+  if you'd have to count rows yourself — return None and the slow path runs.
 
 ## What's intentionally NOT done
 

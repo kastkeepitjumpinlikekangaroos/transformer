@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, ExecutedQuery, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, ExecutedQuery, MaterializedView, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.temporal.TemporalVariables
 import org.junit.Assert._
 import org.junit.Assume.assumeTrue
@@ -692,5 +692,78 @@ class DataJobTest {
       case _: TaskStatus.Skipped => // ok
       case other                 => fail(s"expected downstream=Skipped, got $other")
     }
+  }
+
+  @Test def cacheTrueRegistersMaterializedView(): Unit = {
+    val inDir = tmpDir("dj-cache-true-")
+    writeCsv(inDir, "a.csv", "x\n1\n2\n3\n")
+    val outDir = tmpDir("dj-cache-true-out-").resolve("out")
+    val captured = new java.util.concurrent.atomic.AtomicReference[CatalogView]()
+    val real = { com.transformer.sql.exec.SqlEngine.init(); SqlExecutorRegistry.get }
+    val capturing = new SqlExecutor {
+      def execute(sql: String, catalog: Catalog): ExecutedQuery = {
+        captured.compareAndSet(null, catalog("t"))
+        real.execute(sql, catalog)
+      }
+    }
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t", cache = true)),
+      sql = Seq(SQLTask(sqlString = Some("SELECT * FROM t"),
+        outputFile = Some(OutputFilePath(outDir.toString))))
+    )
+    assertTrue(job.run(capturing).succeeded)
+    assertNotNull("executor should have observed the registered view", captured.get)
+    assertTrue(s"cache=true should register a MaterializedView, got ${captured.get.getClass.getName}",
+      captured.get.isInstanceOf[MaterializedView])
+  }
+
+  @Test def cacheFalseRegistersRawStreamingView(): Unit = {
+    val inDir = tmpDir("dj-cache-false-")
+    writeCsv(inDir, "a.csv", "x\n1\n2\n3\n")
+    val outDir = tmpDir("dj-cache-false-out-").resolve("out")
+    val captured = new java.util.concurrent.atomic.AtomicReference[CatalogView]()
+    val real = { com.transformer.sql.exec.SqlEngine.init(); SqlExecutorRegistry.get }
+    val capturing = new SqlExecutor {
+      def execute(sql: String, catalog: Catalog): ExecutedQuery = {
+        captured.compareAndSet(null, catalog("t"))
+        real.execute(sql, catalog)
+      }
+    }
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t", cache = false)),
+      sql = Seq(SQLTask(sqlString = Some("SELECT * FROM t"),
+        outputFile = Some(OutputFilePath(outDir.toString))))
+    )
+    assertTrue(job.run(capturing).succeeded)
+    assertNotNull(captured.get)
+    assertFalse(s"cache=false should NOT materialize, got ${captured.get.getClass.getName}",
+      captured.get.isInstanceOf[MaterializedView])
+    // And the actual output is still correct.
+    assertEquals("x\n1\n2\n3\n", readOutputDir(outDir))
+  }
+
+  @Test def mixedCachedAndStreamedInputsBothWork(): Unit = {
+    val aDir = tmpDir("dj-mixed-a-")
+    val bDir = tmpDir("dj-mixed-b-")
+    writeCsv(aDir, "a.csv", "x\n1\n2\n")
+    writeCsv(bDir, "b.csv", "y\n10\n20\n")
+    val outA = tmpDir("dj-mixed-outA-").resolve("oa")
+    val outB = tmpDir("dj-mixed-outB-").resolve("ob")
+    val job = DataJob(
+      inputs = Seq(
+        InputFilePath(aDir.toString + "/*.csv", viewName = "a", cache = true),
+        InputFilePath(bDir.toString + "/*.csv", viewName = "b", cache = false)
+      ),
+      sql = Seq(
+        SQLTask(sqlString = Some("SELECT SUM(x) AS sx FROM a"),
+          outputFile = Some(OutputFilePath(outA.toString))),
+        SQLTask(sqlString = Some("SELECT SUM(y) AS sy FROM b"),
+          outputFile = Some(OutputFilePath(outB.toString)))
+      )
+    )
+    val result = job.run()
+    assertTrue(result.error.getOrElse(""), result.succeeded)
+    assertEquals("sx\n3\n", readOutputDir(outA))
+    assertEquals("sy\n30\n", readOutputDir(outB))
   }
 }

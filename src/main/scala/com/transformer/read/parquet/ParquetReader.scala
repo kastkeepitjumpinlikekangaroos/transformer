@@ -13,28 +13,25 @@ import org.apache.parquet.hadoop.util.HadoopInputFile
 
 import java.nio.file.Path
 import java.util.concurrent.{Callable, Executors, TimeUnit}
-import scala.collection.mutable
 
 /** Reads a folder/glob of Parquet files as a single named view.
   *
-  * Partition unit = one row group. Larger files end up with multiple partitions,
-  * each independently parallelizable.
+  * Partition unit = one file. We used to split per row group, but `HParquetReader`
+  * has no public skip-by-row-group API — seeking to partition `i` meant reading
+  * and discarding every row before it, which is O(rows²) over a file and pegs the
+  * GC on wide schemas (each discarded record is a heap-heavy `SimpleGroup`).
+  * One partition per file keeps reads strictly sequential. For a glob, file count
+  * is the parallelism unit.
   */
 final class ParquetReader(files: IndexedSeq[Path], batchSize: Int) extends CatalogView {
   require(files.nonEmpty, "ParquetReader requires at least one file")
 
   private val hadoopConf: Configuration = ParquetReader.defaultConf
 
-  /** Per row-group partition descriptor. `rowsBefore` is the cumulative row
-    * count from all earlier row groups in the same file, so the partition
-    * iterator can skip into its slice without re-reading the footer.
+  /** Per-file descriptor: total row count from the footer's row-group sum, and
+    * the open-input-file handle so we don't re-resolve on partition reads.
     */
-  private[parquet] case class PartitionMeta(
-      hif: HadoopInputFile,
-      rowGroupIdx: Int,
-      rowCount: Long,
-      rowsBefore: Long
-  )
+  private[parquet] case class PartitionMeta(hif: HadoopInputFile, rowCount: Long)
 
   /** Materialize the partition layout + schema in one pass. Footer reads across
     * files run on a shared short-lived pool so a many-file glob doesn't pay the
@@ -45,31 +42,24 @@ final class ParquetReader(files: IndexedSeq[Path], batchSize: Int) extends Catal
     val pool = Executors.newFixedThreadPool(nThreads)
     try {
       val futures = files.map { f =>
-        pool.submit(new Callable[(Schema, IndexedSeq[PartitionMeta])] {
-          def call(): (Schema, IndexedSeq[PartitionMeta]) = {
+        pool.submit(new Callable[(Schema, PartitionMeta)] {
+          def call(): (Schema, PartitionMeta) = {
             val hif = HadoopInputFile.fromPath(new HPath(f.toUri), hadoopConf)
             val reader = ParquetFileReader.open(hif)
             try {
               val schema = ParquetSchema.toSchema(reader.getFooter.getFileMetaData.getSchema)
               val blocks = reader.getRowGroups
-              val meta = mutable.ArrayBuffer.empty[PartitionMeta]
+              var rc = 0L
               var i = 0
-              var cum = 0L
-              while (i < blocks.size) {
-                val rc = blocks.get(i).getRowCount
-                meta += PartitionMeta(hif, i, rc, cum)
-                cum += rc
-                i += 1
-              }
-              (schema, meta.toIndexedSeq)
+              while (i < blocks.size) { rc += blocks.get(i).getRowCount; i += 1 }
+              (schema, PartitionMeta(hif, rc))
             } finally reader.close()
           }
         })
       }
       val results = futures.map(_.get())
       val schema = results.head._1
-      val flat = results.flatMap(_._2).toIndexedSeq
-      (schema, flat)
+      (schema, results.map(_._2).toIndexedSeq)
     } finally {
       pool.shutdown()
       pool.awaitTermination(1, TimeUnit.MINUTES)
@@ -82,7 +72,18 @@ final class ParquetReader(files: IndexedSeq[Path], batchSize: Int) extends Catal
 
   def readPartition(p: Int): Iterator[ColumnarBatch] = {
     val m = partitions(p)
-    new ParquetPartitionIterator(m.hif, m.rowCount, m.rowsBefore, schema, batchSize)
+    new ParquetPartitionIterator(m.hif, schema, batchSize)
+  }
+
+  /** Sum the per-file counts already collected from each footer. Used by the SQL
+    * planner to short-circuit `SELECT COUNT(*) FROM <parquet>` — we already paid
+    * for the footer reads at construction time.
+    */
+  override val exactRowCount: Option[Long] = {
+    var sum = 0L
+    var i = 0
+    while (i < partitions.length) { sum += partitions(i).rowCount; i += 1 }
+    Some(sum)
   }
 }
 
@@ -102,17 +103,14 @@ object ParquetReader {
   }
 }
 
-/** Iterator that reads one Parquet row group as batches of `batchSize`.
+/** Iterator that reads one Parquet file end-to-end as batches of `batchSize`.
   *
-  * Uses [[HParquetReader]] with [[GroupReadSupport]]. The reader is opened on
-  * the whole file then advanced past `rowsBefore` rows so this partition only
-  * sees its slice. Row counts come from the parent reader's footer pass — we
-  * never re-open the file just to count rows.
+  * Uses [[HParquetReader]] with [[GroupReadSupport]]; reads are strictly
+  * sequential so there is no skip-by-row-group cost. The reader is closed when
+  * the iterator is drained.
   */
 final class ParquetPartitionIterator(
     hif: org.apache.parquet.hadoop.util.HadoopInputFile,
-    rowCount: Long,
-    rowsBefore: Long,
     schema: Schema,
     batchSize: Int
 ) extends Iterator[ColumnarBatch] {
@@ -124,24 +122,11 @@ final class ParquetPartitionIterator(
       .build()
   }
 
-  private var rowsRemaining: Long = rowCount
-  private var skippedHead: Boolean = false
   private var peeked: Group = _
 
   private def advance(): Boolean = {
-    if (!skippedHead) {
-      var i: Long = 0
-      while (i < rowsBefore) {
-        val g = reader.read()
-        if (g == null) { rowsRemaining = 0; skippedHead = true; return false }
-        i += 1
-      }
-      skippedHead = true
-    }
-    if (rowsRemaining <= 0) { peeked = null; return false }
     peeked = reader.read()
-    if (peeked == null) { rowsRemaining = 0; false }
-    else { rowsRemaining -= 1; true }
+    peeked != null
   }
 
   private var primed: Boolean = advance()

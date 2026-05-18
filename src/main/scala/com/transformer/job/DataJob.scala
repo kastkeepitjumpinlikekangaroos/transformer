@@ -55,11 +55,13 @@ final case class DataJob(
     val vars = temporalVariables.getOrElse(TemporalVariables())
     val catalog = new Catalog
 
-    // Phase 1: resolve every input in parallel, then eagerly drain every input
-    // partition into memory on the same shared pool. The pool is sized to all
-    // available cores so independent (input, partition) reads saturate the CPU
-    // even with a mix of small + large inputs. After this, SQL execution hits
-    // in-memory MaterializedViews — no further I/O on the input side.
+    // Phase 1: resolve every input in parallel, then drain inputs marked
+    // `cache = true` into memory on the same shared pool. Inputs marked
+    // `cache = false` register their raw streaming CatalogView (e.g. the
+    // ParquetReader itself) — each query re-reads from disk instead of
+    // holding all decompressed data in heap. The pool is sized to all
+    // available cores so independent (input, partition) reads saturate the
+    // CPU even with a mix of small + large inputs.
     val cores = math.max(1, Runtime.getRuntime.availableProcessors)
     val inputPool = Executors.newFixedThreadPool(cores)
     try {
@@ -74,17 +76,27 @@ final case class DataJob(
       }
       val resolved: Seq[(String, CatalogView)] = resolveFutures.map(_.get())
 
-      // 1b: drain every (view, partition) on the same pool — one Callable per
-      // partition across every view, so the pool naturally interleaves small
-      // and large inputs.
-      val materialized = MaterializedView.materializeManyInParallel(resolved.map(_._2), inputPool)
-      resolved.iterator.zip(materialized.iterator).foreach { case ((name, _), mv) =>
-        catalog.register(name, mv)
+      // 1b: drain `cache = true` inputs across every partition on the same pool —
+      // one Callable per partition across every cached view, so the pool naturally
+      // interleaves small and large inputs. `cache = false` inputs skip this step.
+      val cachedPairs: Seq[(Int, CatalogView)] = inputs.iterator.zipWithIndex.collect {
+        case (in, i) if in.cache => (i, resolved(i)._2)
+      }.toSeq
+      val cachedMaterialized: IndexedSeq[MaterializedView] =
+        if (cachedPairs.isEmpty) IndexedSeq.empty
+        else MaterializedView.materializeManyInParallel(cachedPairs.map(_._2), inputPool)
+      val materializedByIdx: Map[Int, MaterializedView] =
+        cachedPairs.iterator.map(_._1).zip(cachedMaterialized.iterator).toMap
+
+      resolved.iterator.zipWithIndex.foreach { case ((name, raw), i) =>
+        catalog.register(name, materializedByIdx.getOrElse(i, raw))
       }
     } catch {
       case NonFatal(e) =>
         inputPool.shutdownNow()
-        return JobResult(succeeded = false, tasks = Nil, error = Some(s"Failed to load inputs: ${e.getMessage}"))
+        val hint = oomHint(e)
+        return JobResult(succeeded = false, tasks = Nil,
+          error = Some(s"Failed to load inputs: ${e.getMessage}$hint"))
     } finally {
       inputPool.shutdown()
       inputPool.awaitTermination(1, TimeUnit.MINUTES)
@@ -417,6 +429,26 @@ final case class DataJob(
   }
 
   private def quote(s: String): String = "\"" + s.replace("\"", "\"\"") + "\""
+
+  /** Detect an OOM anywhere in the cause chain and append a hint pointing at the
+    * `cache: false` escape hatch. Empty string when the failure isn't memory-related.
+    *
+    * Why: input materialization runs futures on a pool, so a real OOM in the
+    * drain loop comes back as `ExecutionException` whose cause is the OOM —
+    * `getMessage` alone hides what actually went wrong.
+    */
+  private def oomHint(t: Throwable): String = {
+    var cur: Throwable = t
+    while (cur != null) {
+      if (cur.isInstanceOf[OutOfMemoryError]) {
+        return "\nHint: an input is too large to cache in memory. Set `cache: false` " +
+          "on the input (in its config.json, or via InputFilePath(cache = false)) so it streams " +
+          "from disk on each query instead of being fully materialized."
+      }
+      cur = cur.getCause
+    }
+    ""
+  }
 }
 
 /** Hooks the parquet write module installs into so DataJob doesn't pull parquet in

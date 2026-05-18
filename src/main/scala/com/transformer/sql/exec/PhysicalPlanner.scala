@@ -14,6 +14,12 @@ object PhysicalPlanner {
     case LogicalScan(_, view, _) => ScanExec(view)
     case LogicalFilter(child, pred) => FilterExec(plan(child), pred)
     case LogicalProject(child, projs) => ProjectExec(plan(child), projs)
+    // Fast path: `SELECT COUNT(*) FROM <view>` with no WHERE, no GROUP BY, no HAVING.
+    // The view can answer from metadata (parquet footer, in-memory row count) so
+    // we skip the entire scan + per-row aggregation pipeline.
+    case LogicalAggregate(LogicalScan(_, view, _), Seq(), Seq((AggExprCountStar(), name)), None)
+        if view.exactRowCount.isDefined =>
+      CountStarMetadataExec(view.exactRowCount.get, name)
     case LogicalAggregate(child, gks, aggs, _) => HashAggregateExec(plan(child), gks, aggs)
     case LogicalSort(child, keys) => SortExec(plan(child), keys)
     case LogicalDistinct(child) => DistinctExec(plan(child))

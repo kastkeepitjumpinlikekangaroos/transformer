@@ -145,4 +145,52 @@ class ParquetRoundtripTest {
     val values = collectRows(out).map(_("w").asInstanceOf[Int]).sorted
     assertEquals(Vector(2, 4, 6, 8), values)
   }
+
+  @Test def parquetReaderExposesExactRowCount(): Unit = {
+    val schema = Schema(Field("v", DataType.IntType))
+    val inDir = Files.createTempDirectory("pq-rc-in-")
+    TParquetWriter.writeAll(inDir.resolve("a.parquet"), schema,
+      Iterator(makeBatch(schema, Seq(Seq(1), Seq(2), Seq(3)))))
+    TParquetWriter.writeAll(inDir.resolve("b.parquet"), schema,
+      Iterator(makeBatch(schema, Seq(Seq(4), Seq(5)))))
+    val reader = ParquetReader.fromPath(inDir.toString + "/*.parquet")
+    assertEquals(Some(5L), reader.exactRowCount)
+  }
+
+  @Test def parquetRowGroupSizeOptionRoundTrips(): Unit = {
+    // Write 3072 rows with a tiny row-group cap so multiple row groups end up
+    // in the same file. Verify the read path stitches them back together —
+    // partition unit is one file, exactRowCount comes from footer metadata,
+    // and the full row content reads cleanly.
+    val schema = Schema(Field("v", DataType.IntType))
+    val rows = (0 until 1024).map(i => Seq[Any](i))
+    val batch = makeBatch(schema, rows)
+    val target = Files.createTempFile("transformer-pq-rg-", ".parquet")
+    Files.delete(target)
+    TParquetWriter.writeAll(target, schema, Iterator(batch, batch, batch),
+      options = Map("parquet_row_group_size" -> "1024"))  // 1KB — well below one batch
+
+    val reader = ParquetReader.fromPath(target.toString)
+    assertEquals(1, reader.numPartitions)            // partition = file
+    assertEquals(Some(3072L), reader.exactRowCount)  // metadata sum across row groups
+    val all = collectRows(reader)
+    assertEquals(3072, all.size)
+  }
+
+  @Test def parquetPartitionEqualsFile(): Unit = {
+    // Even when input files contain multiple row groups (tiny row-group-size),
+    // ParquetReader exposes exactly one partition per file. This is the contract
+    // that prevents the old O(rowsBefore²) seek-by-skipping-rows pattern.
+    val schema = Schema(Field("v", DataType.IntType))
+    val rows = (0 until 256).map(i => Seq[Any](i))
+    val opts = Map("parquet_row_group_size" -> "256")
+    val inDir = Files.createTempDirectory("pq-part-eq-file-")
+    TParquetWriter.writeAll(inDir.resolve("a.parquet"), schema,
+      Iterator(makeBatch(schema, rows), makeBatch(schema, rows)), opts)
+    TParquetWriter.writeAll(inDir.resolve("b.parquet"), schema,
+      Iterator(makeBatch(schema, rows), makeBatch(schema, rows), makeBatch(schema, rows)), opts)
+    val reader = ParquetReader.fromPath(inDir.toString + "/*.parquet")
+    assertEquals(2, reader.numPartitions)
+    assertEquals(Some((256 * 2 + 256 * 3).toLong), reader.exactRowCount)
+  }
 }

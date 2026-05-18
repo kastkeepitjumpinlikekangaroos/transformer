@@ -19,6 +19,26 @@ final case class ScanExec(view: CatalogView) extends PhysicalPlan {
   def execute(partition: Int): Iterator[ColumnarBatch] = view.readPartition(partition)
 }
 
+/** Constant single-row output for the `SELECT COUNT(*) FROM <view>` fast path —
+  * the planner emits this when the view exposes [[CatalogView.exactRowCount]]
+  * (parquet via footer metadata, in-memory views from their materialized count).
+  *
+  * No data is decoded, so even multi-GB inputs answer in microseconds. The
+  * output column is named to match the aggregate's synthetic alias so downstream
+  * Project/Sort/Limit bind unchanged.
+  */
+final case class CountStarMetadataExec(count: Long, columnName: String) extends PhysicalPlan {
+  val outputSchema: Schema = Schema(Vector(Field(columnName, DataType.LongType)))
+  def numPartitions: Int = 1
+  def execute(partition: Int): Iterator[ColumnarBatch] = {
+    require(partition == 0)
+    val out = new ColumnarBatch(outputSchema, 1)
+    out.column(0).asInstanceOf[LongVector].set(0, count)
+    out.setNumRows(1)
+    Iterator.single(out)
+  }
+}
+
 final case class FilterExec(child: PhysicalPlan, predicate: Expr) extends PhysicalPlan {
   def outputSchema: Schema = child.outputSchema
   def numPartitions: Int = child.numPartitions

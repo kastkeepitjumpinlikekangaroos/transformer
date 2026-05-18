@@ -32,6 +32,8 @@ final class MaterializedView(
     }
     sum
   }
+
+  override def exactRowCount: Option[Long] = Some(totalRows)
 }
 
 object MaterializedView {

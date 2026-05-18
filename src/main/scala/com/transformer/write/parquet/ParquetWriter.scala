@@ -5,7 +5,7 @@ import com.transformer.core._
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{Path => HPath}
 import org.apache.parquet.example.data.simple.SimpleGroup
-import org.apache.parquet.hadoop.ParquetWriter.{DEFAULT_BLOCK_SIZE, DEFAULT_PAGE_SIZE}
+import org.apache.parquet.hadoop.ParquetWriter.DEFAULT_PAGE_SIZE
 import org.apache.parquet.hadoop.example.{ExampleParquetWriter, GroupWriteSupport}
 import org.apache.parquet.hadoop.metadata.CompressionCodecName
 import org.apache.parquet.io.api.Binary
@@ -43,11 +43,19 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
     case Some(other) => throw new IllegalArgumentException(s"Unsupported parquet compression: $other")
   }
 
+  // Row group size = peak heap held per writer (uncompressed buffer waiting to flush).
+  // parquet-mr's 128MB default × N parallel partition writers blows past modest heaps
+  // in writePartitioned. 32MB is a healthy compromise: still good IO patterns and
+  // compression ratios, but bounded enough that 10 in-flight writers fit in <1GB.
+  // Override via options("parquet_row_group_size") (bytes).
+  private val rowGroupSize: Long =
+    options.get("parquet_row_group_size").map(_.toLong).getOrElse(ParquetWriter.DefaultRowGroupSize)
+
   private val writer = ExampleParquetWriter.builder(new HPath(tmp.toUri))
     .withConf(conf)
     .withType(messageType)
     .withCompressionCodec(codec)
-    .withRowGroupSize(DEFAULT_BLOCK_SIZE.toLong)
+    .withRowGroupSize(rowGroupSize)
     .withPageSize(DEFAULT_PAGE_SIZE)
     .withDictionaryEncoding(true)
     .build()
@@ -98,6 +106,21 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
 }
 
 object ParquetWriter {
+  /** Per-writer row-group buffer cap. parquet-mr defaults to 128MB which OOMs
+    * when several writers run in parallel under a modest heap; 32MB keeps page
+    * dictionaries effective while letting `writePartitioned` fan out safely.
+    */
+  val DefaultRowGroupSize: Long = 32L * 1024L * 1024L
+
+  /** Default fan-out for `writePartitioned`. Each in-flight parquet writer
+    * pins a row-group buffer + per-column dictionaries — so even on a 10-core
+    * box, 10 simultaneous writers can exhaust a 2GB heap on wide schemas.
+    * 4 is a safe heuristic; benchmarks with the snapshots dataset hit a hard
+    * wall at this many readers + writers in flight. Override per-task via
+    * options("parquet_write_parallelism").
+    */
+  val DefaultWriteParallelism: Int = 4
+
   /** Drain an iterator of batches into a single Parquet file. Returns rows written. */
   def writeAll(target: Path, schema: Schema, batches: Iterator[ColumnarBatch],
                options: Map[String, String] = Map.empty): Long = {
@@ -125,7 +148,12 @@ object ParquetWriter {
     Files.createDirectories(targetDir)
     val n = partitions.length
     if (n == 0) return 0L
-    val parallelism = math.max(1, math.min(n, Runtime.getRuntime.availableProcessors))
+    // Cap concurrency low for parquet: each in-flight writer holds a row-group buffer
+    // (32MB) + per-column dictionary pages (≈1MB × column count). On wide schemas a
+    // pool of `cores` writers blows past a modest heap before any data flushes.
+    // Override via options("parquet_write_parallelism").
+    val cap = options.get("parquet_write_parallelism").map(_.toInt).getOrElse(DefaultWriteParallelism)
+    val parallelism = math.max(1, math.min(n, math.min(cap, Runtime.getRuntime.availableProcessors)))
     val pool = Executors.newFixedThreadPool(parallelism)
     val writers = new Array[ParquetWriter](n)
     try {

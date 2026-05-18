@@ -433,4 +433,50 @@ class SqlEngineTest {
     assertNotNull(ex)
     assertTrue(ex.getMessage.toLowerCase.contains("window function"))
   }
+
+  // ---- COUNT(*) metadata fast path ----
+
+  /** Stand-in for a "knows its own count" view (e.g. parquet). `readPartition`
+    * throws so the test fails loudly if the planner regresses and falls back
+    * to the per-row aggregate path.
+    */
+  private final class MetadataOnlyView(val n: Long) extends CatalogView {
+    val schema: Schema = Schema(Vector(Field("x", DataType.IntType)))
+    def numPartitions: Int = 1
+    def readPartition(p: Int): Iterator[ColumnarBatch] =
+      throw new AssertionError("planner should have short-circuited to metadata; no scan expected")
+    override val exactRowCount: Option[Long] = Some(n)
+  }
+
+  @Test def countStarUsesExactRowCountWithoutScanning(): Unit = {
+    val cat = catalogWith("t" -> new MetadataOnlyView(123456L))
+    val q = SqlEngine.execute("SELECT COUNT(*) AS n FROM t", cat)
+    val rows = collectAllRows(q)
+    assertEquals(1, rows.size)
+    assertEquals(123456L, rows.head("n"))
+  }
+
+  @Test def countStarMetadataPathWorksWithoutAlias(): Unit = {
+    val cat = catalogWith("t" -> new MetadataOnlyView(7L))
+    val q = SqlEngine.execute("SELECT COUNT(*) FROM t", cat)
+    val rows = collectAllRows(q)
+    assertEquals(1, rows.size)
+    assertEquals(7L, rows.head(q.schema.fieldNames.head))
+  }
+
+  @Test def countStarWithWhereStillScans(): Unit = {
+    // Filter requires actually reading rows — the fast path must not engage.
+    val p = tmpCsv("a.csv", "x\n1\n2\n3\n4\n5\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT COUNT(*) AS n FROM t WHERE x > 2", cat)
+    assertEquals(3L, collectAllRows(q).head("n"))
+  }
+
+  @Test def countStarWithGroupByStillScans(): Unit = {
+    val p = tmpCsv("a.csv", "cat\nA\nA\nB\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT cat, COUNT(*) AS n FROM t GROUP BY cat", cat)
+    val rows = collectAllRows(q).sortBy(_("cat").toString)
+    assertEquals(Seq(("A", 2L), ("B", 1L)), rows.map(r => (r("cat"), r("n"))))
+  }
 }
