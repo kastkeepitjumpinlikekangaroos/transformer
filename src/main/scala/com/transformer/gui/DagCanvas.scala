@@ -45,7 +45,8 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
   widthProperty().addListener((_, _, _) => render())
   heightProperty().addListener((_, _, _) => render())
 
-  // Mouse: pan via right-button or middle-button drag, click/double-click to select/activate.
+  // Mouse: primary-drag pans, click/double-click selects/activates. JavaFX suppresses
+  // MOUSE_CLICKED after a significant drag, so panning never also triggers a click.
   addEventHandler(MouseEvent.MOUSE_PRESSED, (e: MouseEvent) => handleMousePressed(e))
   addEventHandler(MouseEvent.MOUSE_DRAGGED, (e: MouseEvent) => handleMouseDragged(e))
   addEventHandler(MouseEvent.MOUSE_RELEASED, (e: MouseEvent) => handleMouseReleased(e))
@@ -249,7 +250,7 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
 
   private def drawHud(gc: GraphicsContext, w: Double, h: Double): Unit = {
     val state = f"zoom ${zoom * 100}%.0f%% • pan ($panX%.0f, $panY%.0f)"
-    val hint = "drag right/middle to pan • scroll to zoom • click to select • double-click to view output"
+    val hint = "drag to pan • scroll to zoom • click node to select • double-click to view output"
     gc.setFont(Font.font("Sans", FontWeight.BOLD, 11))
     gc.setFill(Color.web("#9ba2b8"))
     gc.fillText(state, 12, h - 26)
@@ -264,13 +265,14 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
   // -------------------- interaction --------------------
 
   private def handleMousePressed(e: MouseEvent): Unit = {
-    val button = e.getButton
-    if (button == MouseButton.MIDDLE || button == MouseButton.SECONDARY ||
-        (button == MouseButton.PRIMARY && e.isAltDown)) {
-      dragging = true
-      lastDragX = e.getX
-      lastDragY = e.getY
-    }
+    if (e.getButton != MouseButton.PRIMARY) return
+    // Always arm a pan on primary press; MOUSE_DRAGGED will move the canvas
+    // and JavaFX will suppress the subsequent MOUSE_CLICKED if the cursor
+    // moved enough to count as a drag — so a real drag pans without firing
+    // selection logic, and a still click still selects.
+    dragging = true
+    lastDragX = e.getX
+    lastDragY = e.getY
   }
 
   private def handleMouseDragged(e: MouseEvent): Unit = {
