@@ -7,7 +7,7 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javafx.geometry.{Insets, Pos}
 import javafx.scene.control.{Alert, Button, ButtonType, Label, ScrollPane, Separator, Toggle, ToggleButton, ToggleGroup, Tooltip}
-import javafx.scene.layout.{FlowPane, HBox, Priority, VBox}
+import javafx.scene.layout.{FlowPane, HBox, Priority, Region, VBox}
 import javafx.scene.text.{Font, FontWeight}
 import javafx.stage.Stage
 import scala.util.control.NonFatal
@@ -46,9 +46,10 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
   setPadding(new Insets(14))
   setStyle(s"-fx-background-color: $PanelBg;")
 
-  // ---- Toolbar (edit / add / delete) ----------------------------------------
+  // ---- Toolbar (edit attrs / add / delete) ----------------------------------
   // Buttons whose enabled-state depends on the kind of node selected (task vs
-  // input vs nothing) and whether an inline SQL edit is in progress. See
+  // input vs nothing). Edit/Save/Cancel-SQL live in the SQL header row below,
+  // so they sit right next to the SQL viewer they act on. See
   // [[updateToolbarState]] for the truth table.
   private val editAttrsButton      = makeToolButton("Edit attrs…")
   private val editSqlButton        = makeToolButton("Edit SQL")
@@ -71,8 +72,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
   cancelSqlButton.setVisible(false); cancelSqlButton.setManaged(false)
 
   private val toolbar = new HBox(6,
-    editAttrsButton, editSqlButton, saveSqlButton, cancelSqlButton,
-    addTableButton, addValidationButton, deleteButton
+    editAttrsButton, addTableButton, addValidationButton, deleteButton
   )
   toolbar.setAlignment(Pos.CENTER_LEFT)
 
@@ -161,7 +161,16 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
   }
   sourceToggle.setSelected(true)
   private val sqlHeader = sectionLabel("SQL")
-  private val sqlHeaderRow = new HBox(8, sqlHeader, sourceToggle, renderedToggle)
+  private val sqlHeaderSpacer = new Region()
+  HBox.setHgrow(sqlHeaderSpacer, Priority.ALWAYS)
+  // Edit / Save / Cancel sit on the right side of the SQL header so the
+  // controls are immediately adjacent to the viewer they act on. The toolbar
+  // up top is reserved for whole-task actions.
+  private val sqlHeaderRow = new HBox(8,
+    sqlHeader, sourceToggle, renderedToggle,
+    sqlHeaderSpacer,
+    editSqlButton, saveSqlButton, cancelSqlButton
+  )
   sqlHeaderRow.setAlignment(Pos.CENTER_LEFT)
   private val sqlView = new SqlView(showOpenInEditor = true)
   sqlView.setPrefHeight(280)

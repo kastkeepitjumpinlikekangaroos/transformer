@@ -174,23 +174,27 @@ object LikeExpr {
 
 /** Aggregate expression. The planner replaces these with column refs to the
   * aggregate's output position before scalar evaluation happens.
+  *
+  * `args` is the full argument list — most aggregates take one expression, but
+  * bivariate aggregates (COVAR, CORR) carry two. Column projection pushdown and
+  * other plan rewrites visit every entry.
   */
 sealed trait AggExpr {
   def name: String
-  def arg: Option[Expr]
+  def args: Seq[Expr]
   def distinct: Boolean
   def resultType: DataType
 }
 final case class AggExprCountStar() extends AggExpr {
-  val name = "COUNT"; val arg: Option[Expr] = None; val distinct = false
+  val name = "COUNT"; val args: Seq[Expr] = Nil; val distinct = false
   val resultType: DataType = DataType.LongType
 }
 final case class AggExprCount(child: Expr, distinct: Boolean) extends AggExpr {
-  val name = "COUNT"; val arg: Option[Expr] = Some(child)
+  val name = "COUNT"; val args: Seq[Expr] = Seq(child)
   val resultType: DataType = DataType.LongType
 }
 final case class AggExprSum(child: Expr) extends AggExpr {
-  val name = "SUM"; val arg: Option[Expr] = Some(child); val distinct = false
+  val name = "SUM"; val args: Seq[Expr] = Seq(child); val distinct = false
   val resultType: DataType = child.dataType match {
     case DataType.IntType | DataType.LongType => DataType.LongType
     case DataType.FloatType | DataType.DoubleType => DataType.DoubleType
@@ -198,18 +202,42 @@ final case class AggExprSum(child: Expr) extends AggExpr {
   }
 }
 final case class AggExprAvg(child: Expr) extends AggExpr {
-  val name = "AVG"; val arg: Option[Expr] = Some(child); val distinct = false
+  val name = "AVG"; val args: Seq[Expr] = Seq(child); val distinct = false
   val resultType: DataType = DataType.DoubleType
 }
 final case class AggExprMin(child: Expr) extends AggExpr {
-  val name = "MIN"; val arg: Option[Expr] = Some(child); val distinct = false
+  val name = "MIN"; val args: Seq[Expr] = Seq(child); val distinct = false
   val resultType: DataType = child.dataType
 }
 final case class AggExprMax(child: Expr) extends AggExpr {
-  val name = "MAX"; val arg: Option[Expr] = Some(child); val distinct = false
+  val name = "MAX"; val args: Seq[Expr] = Seq(child); val distinct = false
   val resultType: DataType = child.dataType
 }
 final case class AggExprCountIf(child: Expr) extends AggExpr {
-  val name = "COUNT_IF"; val arg: Option[Expr] = Some(child); val distinct = false
+  val name = "COUNT_IF"; val args: Seq[Expr] = Seq(child); val distinct = false
   val resultType: DataType = DataType.LongType
+}
+/** Sample/population standard deviation and variance. `sample = true` divides
+  * by N-1, otherwise by N. Returns NULL when not enough values are present
+  * (count == 0 for population; count < 2 for sample). */
+final case class AggExprStddev(child: Expr, sample: Boolean) extends AggExpr {
+  val name: String = if (sample) "STDDEV_SAMP" else "STDDEV_POP"
+  val args: Seq[Expr] = Seq(child); val distinct = false
+  val resultType: DataType = DataType.DoubleType
+}
+final case class AggExprVariance(child: Expr, sample: Boolean) extends AggExpr {
+  val name: String = if (sample) "VAR_SAMP" else "VAR_POP"
+  val args: Seq[Expr] = Seq(child); val distinct = false
+  val resultType: DataType = DataType.DoubleType
+}
+/** Bivariate aggregates: covariance and Pearson correlation. Pairs are
+  * skipped when either side is NULL. */
+final case class AggExprCovar(x: Expr, y: Expr, sample: Boolean) extends AggExpr {
+  val name: String = if (sample) "COVAR_SAMP" else "COVAR_POP"
+  val args: Seq[Expr] = Seq(x, y); val distinct = false
+  val resultType: DataType = DataType.DoubleType
+}
+final case class AggExprCorr(x: Expr, y: Expr) extends AggExpr {
+  val name = "CORR"; val args: Seq[Expr] = Seq(x, y); val distinct = false
+  val resultType: DataType = DataType.DoubleType
 }

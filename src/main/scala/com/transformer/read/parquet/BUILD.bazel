@@ -6,7 +6,6 @@ scala_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/main/scala/com/transformer/core",
-        "//src/main/scala/com/transformer/job",
         "//src/main/scala/com/transformer/read/csv",
         "//src/main/scala/com/transformer/write/parquet",
         "@maven//:commons_collections_commons_collections",

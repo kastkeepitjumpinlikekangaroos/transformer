@@ -1,9 +1,7 @@
 load("@rules_scala//scala:scala.bzl", "scala_binary")
 
-# Launcher for the JavaFX GUI. Bundles parquet read+write so the GUI can preview
-# parquet outputs and run jobs that use parquet inputs. Point the GUI at
-# `examples/directory_app/job` after launch (or pass it as the first CLI arg) to
-# try the sample job.
+# Launcher for the JavaFX GUI. Point the GUI at `examples/directory_app/job`
+# after launch (or pass it as the first CLI arg) to try the sample job.
 scala_binary(
     name = "gui_app",
     srcs = glob(["src/main/scala/**/*.scala"]),
@@ -15,14 +13,11 @@ scala_binary(
     # bypasses them — pass `-Xmx2g` (or larger) explicitly in that case.
     jvm_flags = ["-Xmx2g"],
     deps = [
-        # strict-deps: SqlEngine.init returns a type from core, so we need to
-        # list core even though gui already depends on it transitively.
+        # strict-deps: SqlEngine.init returns a type from core, so we list core
+        # explicitly even though gui already depends on it transitively.
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/gui",
-        "//src/main/scala/com/transformer/job",
-        "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/sql/exec",
-        "//src/main/scala/com/transformer/write/parquet",
         "@maven//:org_openjfx_javafx_base",
         "@maven//:org_openjfx_javafx_base_mac_aarch64",
         "@maven//:org_openjfx_javafx_controls",

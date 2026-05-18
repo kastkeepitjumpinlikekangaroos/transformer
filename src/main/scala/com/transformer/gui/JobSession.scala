@@ -1,8 +1,9 @@
 package com.transformer.gui
 
 import com.transformer.core.{Catalog, CatalogView}
-import com.transformer.job.{DataJob, DirectoryJobLoader, InputFilePath, InputResolver, JobResult, ParquetReaderHook, RunMarker, TaskDag, TaskResult, TaskStatus}
+import com.transformer.job.{DataJob, DirectoryJobLoader, InputFilePath, InputResolver, JobResult, RunMarker, TaskDag, TaskResult, TaskStatus}
 import com.transformer.read.csv.{CsvOptions, CsvReader}
+import com.transformer.read.parquet.ParquetReader
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
 import java.nio.file.{Files, Path, Paths}
@@ -369,7 +370,7 @@ final class JobSession {
     *
     * Populates one view per:
     *   - input — resolved via [[InputResolver]] against its rendered path, so
-    *     CSV options and parquet hooks behave the same way they would for a
+    *     CSV options and parquet reads behave the same way they would for a
     *     real run.
     *   - task with a persisted output — most-recent `_SUCCESS`-marked partition
     *     (or the path captured during the last in-session run), read back from
@@ -474,12 +475,8 @@ object JobSession {
         val lower = path.toLowerCase
         lower.endsWith(".parquet") || lower.contains(".parquet")
     }
-    if (isParquet) ParquetReaderHook.get match {
-      case Some(fn) => fn(path)
-      case None => throw new UnsupportedOperationException(
-        "parquet read module not on classpath — add //src/main/scala/com/transformer/read/parquet to the launcher deps"
-      )
-    } else CsvReader.fromPath(path, CsvOptions())
+    if (isParquet) ParquetReader.fromPath(path)
+    else CsvReader.fromPath(path, CsvOptions())
   }
 }
 

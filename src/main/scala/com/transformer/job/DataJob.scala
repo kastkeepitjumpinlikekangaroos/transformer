@@ -1,8 +1,10 @@
 package com.transformer.job
 
 import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, MaterializedView, Schema, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.read.parquet.ParquetReader
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
+import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
 
 import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
@@ -289,13 +291,7 @@ final case class DataJob(
         CsvWriter.writePartitioned(dir, q.schema, parts, CsvWriteOptions.fromMap(ofp.options))
         ()
       case "parquet" =>
-        ParquetWriterHook.get match {
-          case Some(fn) => fn(dir, q.schema, parts, ofp.options)
-          case None =>
-            throw new UnsupportedOperationException(
-              "Parquet output requires the parquet write module on the classpath."
-            )
-        }
+        TParquetWriter.writePartitioned(dir, q.schema, parts, ofp.options)
         ()
       case other =>
         throw new IllegalArgumentException(s"Unsupported output format '$other' for '$renderedPath'")
@@ -351,12 +347,7 @@ final case class DataJob(
               )
             )
           case "parquet" =>
-            ParquetReaderHook.get match {
-              case Some(fn) => fn(dir)
-              case None => throw new UnsupportedOperationException(
-                "Parquet validation re-read requires the parquet read module on the classpath."
-              )
-            }
+            ParquetReader.fromPath(dir)
           case other =>
             throw new IllegalArgumentException(s"Cannot re-read output of unknown format '$other': $dir")
         }
@@ -454,23 +445,3 @@ final case class DataJob(
   }
 }
 
-/** Hooks the parquet write module installs into so DataJob doesn't pull parquet in
-  * at compile time. The hook receives the *output directory* and the executor's
-  * per-partition iterators (already coalesced to OutputFilePath.maxPartitions).
-  */
-object ParquetWriterHook {
-  @volatile private var writer: Option[(Path, Schema, IndexedSeq[Iterator[ColumnarBatch]], Map[String, String]) => Long] = None
-  def install(f: (Path, Schema, IndexedSeq[Iterator[ColumnarBatch]], Map[String, String]) => Long): Unit = {
-    writer = Some(f)
-  }
-  def get: Option[(Path, Schema, IndexedSeq[Iterator[ColumnarBatch]], Map[String, String]) => Long] = writer
-}
-
-/** Hook installed by the parquet read module. Used to re-read just-written parquet
-  * directories for validations.
-  */
-object ParquetReaderHook {
-  @volatile private var reader: Option[String => CatalogView] = None
-  def install(f: String => CatalogView): Unit = { reader = Some(f) }
-  def get: Option[String => CatalogView] = reader
-}

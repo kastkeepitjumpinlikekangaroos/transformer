@@ -1,8 +1,9 @@
 package com.transformer.gui
 
 import com.transformer.core.{ColumnarBatch, Schema}
-import com.transformer.job.{InputFilePath, InputResolver, ParquetReaderHook, RunMarker, TaskStatus, Validation}
+import com.transformer.job.{InputFilePath, InputResolver, RunMarker, TaskStatus, Validation}
 import com.transformer.read.csv.{CsvOptions, CsvReader}
+import com.transformer.read.parquet.ParquetReader
 
 import javafx.beans.property.ReadOnlyStringWrapper
 import javafx.collections.{FXCollections, ObservableList}
@@ -324,13 +325,7 @@ final class ResultsTabPane(
       .toLowerCase
     fmt match {
       case "parquet" =>
-        ParquetReaderHook.get match {
-          case Some(reader) => collectRows(reader(path))
-          case None => throw new RuntimeException(
-            "parquet read module not on classpath — add //src/main/scala/com/transformer/read/parquet " +
-              "to the launcher deps to preview parquet output"
-          )
-        }
+        collectRows(ParquetReader.fromPath(path))
       case _ => // CSV (and default)
         val view = CsvReader.fromPath(path, CsvOptions())
         collectRows(view)
@@ -425,7 +420,7 @@ final class ResultsTabPane(
               val state = session.taskStates.lift(i)
               task.validations.iterator.zipWithIndex.foreach { case (v, vi) =>
                 val rendered = node.renderedValidationSqls.lift(vi).getOrElse("")
-                validationsContainer.getChildren.add(buildValidationCard(v, rendered, state))
+                validationsContainer.getChildren.add(buildValidationCard(v, rendered, state, task.viewName))
               }
             }
           case None =>
@@ -445,16 +440,25 @@ final class ResultsTabPane(
     l
   }
 
-  private def buildValidationCard(v: Validation, renderedSql: String, state: Option[UiTaskState]): javafx.scene.Node = {
+  private def buildValidationCard(
+      v: Validation,
+      renderedSql: String,
+      state: Option[UiTaskState],
+      tableViewName: Option[String]
+  ): javafx.scene.Node = {
     val (statusText, statusStyle, failureSample) = validationStatusFor(v, state)
-    // Header: name + status pill + open-in-editor.
+    // Header: name + status pill + Edit button (right-aligned, next to the SQL
+    // viewer this validation card owns).
     val nameLabel = new Label(v.name)
     nameLabel.setStyle("-fx-text-fill: #e8ecf5; -fx-font-weight: bold; -fx-font-size: 13px;")
     val statusPill = new Label(statusText)
     statusPill.setStyle(statusStyle)
     val headerSpacer = new javafx.scene.layout.Region()
     HBox.setHgrow(headerSpacer, Priority.ALWAYS)
-    val cardHeader = new HBox(8, nameLabel, statusPill, headerSpacer)
+    val editButton = makeValidationEditButton()
+    editButton.setDisable(session.jobDir.isEmpty || tableViewName.isEmpty)
+    editButton.setOnAction(_ => tableViewName.foreach(name => openValidationEditor(name, v)))
+    val cardHeader = new HBox(8, nameLabel, statusPill, headerSpacer, editButton)
     cardHeader.setAlignment(Pos.CENTER_LEFT)
 
     // SQL: a small SqlView showing the rendered query.
@@ -484,6 +488,35 @@ final class ResultsTabPane(
     card.setStyle("-fx-background-color: #34384a; -fx-background-radius: 6;")
     card.getChildren.addAll(cardChildren)
     card
+  }
+
+  /** Opens the validation edit dialog. Mirrors [[TaskDetailsPanel.openValidationEditor]]
+    * so users can trigger the edit from either the right-side chip or the card
+    * sitting next to the SQL viewer.
+    */
+  private def openValidationEditor(tableViewName: String, v: Validation): Unit = {
+    val dir = session.jobDir.getOrElse(return)
+    AddValidationDialog.showEdit(owner(), dir, tableViewName, v.name, v.sqlFile).foreach { _ =>
+      session.reloadPreservingSelection(Some(tableViewName))
+    }
+  }
+
+  private def makeValidationEditButton(): Button = {
+    val b = new Button("Edit…")
+    val base  = "#3a3f55"
+    val hover = "#4a5070"
+    val press = "#2a2f45"
+    def style(bg: String): String =
+      s"-fx-background-color: $bg; -fx-text-fill: #d7dcec; " +
+        "-fx-background-radius: 4; -fx-padding: 4 12; " +
+        "-fx-font-size: 11px; -fx-cursor: hand;"
+    b.setStyle(style(base))
+    b.setOnMouseEntered(_ => if (!b.isDisabled) b.setStyle(style(hover)))
+    b.setOnMouseExited(_ => b.setStyle(style(base)))
+    b.setOnMousePressed(_ => if (!b.isDisabled) b.setStyle(style(press)))
+    b.setOnMouseReleased(_ => b.setStyle(style(if (b.isHover && !b.isDisabled) hover else base)))
+    b.setTooltip(new Tooltip("Edit this validation's name, SQL, or delete it"))
+    b
   }
 
   /** Returns (status label, CSS for the status pill, optional sample CSV of failing rows). */

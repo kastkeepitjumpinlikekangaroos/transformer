@@ -11,13 +11,10 @@ scala_binary(
     # them — pass `-Xmx2g` (or larger) explicitly in that case.
     jvm_flags = ["-Xmx2g"],
     deps = [
+        # strict-deps: job.run() returns a type from core, so we list core
+        # explicitly even though job already depends on it transitively.
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",
-        # Force the parquet read/write modules onto the classpath so the
-        # ParquetSupport object installs its hooks at class-load time. The
-        # example writes every table as parquet via per-table output.json.
-        "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/temporal",
-        "//src/main/scala/com/transformer/write/parquet",
     ],
 )

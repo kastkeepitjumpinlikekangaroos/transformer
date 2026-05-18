@@ -6,7 +6,10 @@ specific traps.
 
 - **Scala 2.13.16.** rules_scala pins this. Match the version in the reference
   project `~/grid-game`.
-- **JDK 21** via `.bazelrc`.
+- **JDK 21** via `.bazelrc` for the build toolchain. The deploy jar runs on
+  JDK 21 or newer — tested through JDK 25. Don't downgrade hadoop-common
+  below 3.4.3 without restoring a JDK-23 runtime ceiling (see
+  [gotchas.md](gotchas.md)).
 - **`sealed trait` lives in the same file as its case classes/objects.** Scala
   enforces this; if you split, you'll get the "illegal inheritance from sealed
   trait" error. The original `PhysicalPlan` was `sealed`; it's now an open
