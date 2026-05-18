@@ -57,6 +57,7 @@ the JIT keeps this acceptably fast.
 | `examples/directory_app/` | Sample app using `DirectoryJobLoader` — whole job is a folder of JSON configs + SQL files. | `src/main/scala/com/example/directory/DirectoryJobExample.scala`, `job/inputs/<view>/config.json`, `job/tables/<view>/main.sql`, `job/tables/<view>/validations/*.sql`. Accepts optional 3rd CLI arg for `executionTime` (ISO instant) so the same job can produce multiple partitions for testing. |
 | `examples/jaffle_shop/` | Port of [dbt-labs/jaffle-shop](https://github.com/dbt-labs/jaffle-shop) to the directory format. 6 raw seed CSVs → 6 staging tables → 3 intermediate aggregations → 3 marts (`customers`, `orders`, `order_items`) + 3 passthroughs (`locations`, `products`, `supplies`). 26 DBT data_tests ported as zero-row validation queries. Exercises the DAG scheduler at a realistic scale (~150k rows, 15 tasks). Omissions vs. DBT: `metricflow_time_spine` (needs `dbt_date`); `customer_order_number` ROW_NUMBER column on `orders` (no window functions); semantic models / metrics / saved_queries / unit_tests (no equivalent layer). DBT CTEs are split — each `with X as (...)` becomes its own SQLTask, since `LogicalBuilder.fromItem` only accepts `Table` in FROM. | `src/main/scala/com/example/jaffle/JaffleShopExample.scala`, `job/data/raw_*.csv`, `job/inputs/<view>/config.json`, `job/tables/<view>/{main.sql,validations/}`. |
 | `examples/gui_app/` | Sample app launching the GUI. Pulls in `gui/` + `sql/exec/` + `read/parquet/` + `write/parquet/` so the GUI's parquet preview + parquet I/O Just Work. | `src/main/scala/com/example/gui/GuiAppLauncher.scala` |
+| `tools/parquet_peek/` | Stand-alone CLI for inspecting a parquet file or glob — schema, partition count, footer-derived `exactRowCount`, and a configurable sample of decoded rows. Reader-only; no SQL engine. Strings >80 chars are truncated so JSON-blob columns stay legible. | `tools/parquet_peek/ParquetPeek.scala` |
 
 ## Cross-cutting patterns
 
@@ -302,6 +303,12 @@ java -jar bazel-bin/examples/jaffle_shop/jaffle_shop_deploy.jar \
 # Build + launch the JavaFX GUI.
 bazel build //examples/gui_app:gui_app_deploy.jar
 java -jar bazel-bin/examples/gui_app/gui_app_deploy.jar [job-dir]
+
+# Inspect a parquet file or glob — schema, partition count, footer-derived
+# row count, and a few decoded rows. Reader-only; no SQL engine pulled in.
+bazel build //tools/parquet_peek:parquet_peek_deploy.jar
+java -jar bazel-bin/tools/parquet_peek/parquet_peek_deploy.jar \
+    'path/or/glob/*.parquet' [--rows N]
 ```
 
 Tests are JUnit 4 via `scala_junit_test`. Each leaf test directory has a

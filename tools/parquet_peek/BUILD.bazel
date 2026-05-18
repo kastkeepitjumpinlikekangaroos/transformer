@@ -1,0 +1,14 @@
+load("@rules_scala//scala:scala.bzl", "scala_binary")
+
+# Standalone CLI for inspecting parquet files: schema, partition count,
+# footer-derived row count, and a few decoded rows. No write deps — strictly
+# a reader-side utility.
+scala_binary(
+    name = "parquet_peek",
+    srcs = ["ParquetPeek.scala"],
+    main_class = "com.transformer.tools.parquet_peek.ParquetPeek",
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/parquet",
+    ],
+)
