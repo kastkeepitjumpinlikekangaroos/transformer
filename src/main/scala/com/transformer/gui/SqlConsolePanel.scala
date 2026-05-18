@@ -216,7 +216,7 @@ final class SqlConsolePanel(session: JobSession, owner: () => javafx.stage.Stage
             QueryOutcome.Failed(Option(e.getMessage).getOrElse(e.toString))
         }
         FxHelpers.onFx {
-          if (loadToken.get() == token) applyOutcome(outcome)
+          if (loadToken.get() == token) applyOutcome(outcome, sql)
         }
       }
     }, s"transformer-gui-sql-console-$token")
@@ -224,7 +224,7 @@ final class SqlConsolePanel(session: JobSession, owner: () => javafx.stage.Stage
     worker.start()
   }
 
-  private def applyOutcome(outcome: QueryOutcome): Unit = {
+  private def applyOutcome(outcome: QueryOutcome, sql: String): Unit = {
     resultsTable.getColumns.clear()
     resultsTable.getItems.clear()
     outcome match {
@@ -252,7 +252,8 @@ final class SqlConsolePanel(session: JobSession, owner: () => javafx.stage.Stage
       case QueryOutcome.Failed(err) =>
         lastResult = None
         persistButton.setDisable(true)
-        setStatusError(err)
+        setStatusError("Query failed — see error popup.")
+        SqlErrorDialog.show(owner(), "Query failed", err, Some(sql))
     }
   }
 
@@ -328,7 +329,8 @@ final class SqlConsolePanel(session: JobSession, owner: () => javafx.stage.Stage
             case PersistOutcome.Success(dir, rows) =>
               setStatusOk(f"Persisted $rows%,d row(s) → $dir")
             case PersistOutcome.Failed(err) =>
-              setStatusError(s"Persist failed: $err")
+              setStatusError("Persist failed — see error popup.")
+              SqlErrorDialog.show(owner(), "Persist failed", err, None)
           }
         }
       }
