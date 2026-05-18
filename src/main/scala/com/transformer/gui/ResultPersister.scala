@@ -33,14 +33,16 @@ object ResultPersister {
       maxPartitions = cfg.maxPartitions
     )
     val coalesced = coalescedPartitions(view, ofp.maxPartitions)
+    val dir = Paths.get(ofp.path)
+    // Wipe a prior successful run's files so a format / partition-count change
+    // doesn't leave stale outputs in the directory.
+    RunMarker.clearIfMarked(dir)
     val rowsWritten = ofp.detectedFormat match {
       case "csv" =>
-        val dir = Paths.get(ofp.path)
         CsvWriter.writePartitioned(
           dir, view.schema, coalesced, CsvWriteOptions.fromMap(ofp.options)
         )
       case "parquet" =>
-        val dir = Paths.get(ofp.path)
         ParquetWriterHook.get match {
           case Some(fn) => fn(dir, view.schema, coalesced, ofp.options)
           case None => throw new UnsupportedOperationException(

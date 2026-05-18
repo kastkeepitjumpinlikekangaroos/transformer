@@ -28,9 +28,60 @@ object LogicalBuilder {
 
   type Sources = Seq[(Option[String], Schema)]
 
-  def build(sql: String, catalog: Catalog): LogicalPlan = {
-    val select = SqlParser.parseSelect(sql)
-    buildSelect(select, catalog)
+  def build(sql: String, catalog: Catalog): LogicalPlan =
+    buildAnySelect(SqlParser.parseSelect(sql), catalog)
+
+  /** Dispatch over the SELECT subtype: a single `PlainSelect`, a UNION /
+    * INTERSECT / EXCEPT [[SetOperationList]], or a parenthesized wrapper.
+    */
+  private def buildAnySelect(sel: Select, catalog: Catalog): LogicalPlan = sel match {
+    case ps: PlainSelect => buildSelect(ps, catalog)
+    case sol: SetOperationList => buildSetOperationList(sol, catalog)
+    case wrap: ParenthesedSelect => buildAnySelect(wrap.getSelect, catalog)
+    case other =>
+      throw new IllegalArgumentException(s"Unsupported SELECT shape: ${other.getClass.getSimpleName}")
+  }
+
+  /** Fold a `SetOperationList` into a left-associative chain of
+    * [[LogicalUnion]]s. Each [[UnionOp]] contributes its own `ALL` flag; the
+    * planner wraps non-ALL unions with a [[LogicalDistinct]] downstream.
+    * INTERSECT / EXCEPT / MINUS aren't implemented in v1 — reject with a clear
+    * message instead of producing a wrong plan.
+    */
+  private def buildSetOperationList(sol: SetOperationList, catalog: Catalog): LogicalPlan = {
+    val selects = sol.getSelects.asScala.toVector
+    val ops = sol.getOperations.asScala.toVector
+    if (selects.size < 2 || ops.size != selects.size - 1) {
+      throw new IllegalArgumentException(
+        s"Malformed set operation list: ${selects.size} selects, ${ops.size} operations")
+    }
+    // Outer ORDER BY / LIMIT on a UNION binds against the union output schema —
+    // not supported in v1 (wrap with a separate task if you need it).
+    Option(sol.getOrderByElements).filter(!_.isEmpty).foreach { _ =>
+      throw new IllegalArgumentException("ORDER BY on a UNION is not supported")
+    }
+    Option(sol.getLimit).foreach { _ =>
+      throw new IllegalArgumentException("LIMIT on a UNION is not supported")
+    }
+
+    val first = buildAnySelect(selects.head, catalog)
+    ops.iterator.zipWithIndex.foldLeft(first) { case (acc, (op, i)) =>
+      op match {
+        case u: UnionOp =>
+          val rhs = buildAnySelect(selects(i + 1), catalog)
+          if (acc.outputSchema.length != rhs.outputSchema.length) {
+            throw new IllegalArgumentException(
+              s"UNION arms have different column counts: " +
+                s"${acc.outputSchema.length} vs ${rhs.outputSchema.length}")
+          }
+          // JSqlParser sets `all=true` only for explicit UNION ALL; bare UNION
+          // (and the rarely-used UNION DISTINCT) both dedup.
+          LogicalUnion(acc, rhs, all = u.isAll)
+        case other =>
+          throw new IllegalArgumentException(
+            s"Unsupported set operation: ${other.getClass.getSimpleName} (only UNION / UNION ALL are supported)")
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

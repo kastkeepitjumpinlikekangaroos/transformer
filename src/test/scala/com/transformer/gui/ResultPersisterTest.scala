@@ -111,6 +111,32 @@ class ResultPersisterTest {
     assertEquals("id,name\n1,a\n2,b\n3,c\n", all)
   }
 
+  @Test def persistClearsStaleOutputsWhenMarkerPresent(): Unit = {
+    val dir = tmpDir.resolve("rerun")
+    Files.createDirectories(dir)
+    // Pre-seed a stale part file + marker from a previous "run".
+    val stale = dir.resolve("part-00099.csv")
+    Files.writeString(stale, "old\n999\n")
+    RunMarker.write(dir, RunMarker(
+      executionTime = java.time.Instant.now(),
+      writtenAt = java.time.Instant.now(),
+      rowsProduced = 1, format = "csv",
+      outputFiles = Seq("part-00099.csv")
+    ))
+
+    val mv = mvOfPartitions(Seq(Seq((1, "alpha"))))
+    val cfg = PersistConfig(
+      outputDir = dir.toString, format = "csv",
+      maxPartitions = None, csvHeader = true
+    )
+    ResultPersister.persist(mv, cfg)
+
+    assertFalse(s"stale part file should be deleted: $stale", Files.exists(stale))
+    assertTrue(Files.isRegularFile(dir.resolve("part-00000.csv")))
+    val marker = RunMarker.read(dir).getOrElse(fail("expected fresh marker").asInstanceOf[RunMarker])
+    assertFalse(marker.outputFiles.contains("part-00099.csv"))
+  }
+
   @Test def persistRejectsUnknownFormat(): Unit = {
     val mv = mvOfPartitions(Seq(Seq((1, "alpha"))))
     val cfg = PersistConfig(

@@ -279,13 +279,16 @@ final case class DataJob(
   private def writeOutput(
       ofp: OutputFilePath, renderedPath: String, q: ExecutedQuery): Unit = {
     val parts = coalescedPartitions(q, ofp.maxPartitions)
+    val dir = Paths.get(renderedPath)
+    // If a prior successful run is stamped in this directory, wipe its files
+    // first so a format / partition-count change doesn't leave stale outputs
+    // that break the next reader (e.g. `.csv` files inside a parquet dir).
+    RunMarker.clearIfMarked(dir)
     ofp.detectedFormat match {
       case "csv" =>
-        val dir = Paths.get(renderedPath)
         CsvWriter.writePartitioned(dir, q.schema, parts, CsvWriteOptions.fromMap(ofp.options))
         ()
       case "parquet" =>
-        val dir = Paths.get(renderedPath)
         ParquetWriterHook.get match {
           case Some(fn) => fn(dir, q.schema, parts, ofp.options)
           case None =>

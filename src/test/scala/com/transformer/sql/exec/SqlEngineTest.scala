@@ -571,4 +571,60 @@ class SqlEngineTest {
     // Full schema used → planner shouldn't bother asking for a projection.
     assertEquals(None, view.projectedTo)
   }
+
+  // ---- UNION / UNION ALL ----
+
+  @Test def unionAllConcatenatesRows(): Unit = {
+    val p = tmpCsv("a.csv", "id,name\n1,alice\n2,bob\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT * FROM t UNION ALL SELECT * FROM t", cat)
+    assertEquals(Vector("id", "name"), q.schema.fieldNames)
+    val rows = collectAllRows(q)
+    assertEquals(4, rows.size)
+    assertEquals(Seq(1, 2, 1, 2), rows.map(_("id")))
+  }
+
+  @Test def unionDedupsDuplicateRows(): Unit = {
+    val p = tmpCsv("a.csv", "id,name\n1,alice\n2,bob\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT * FROM t UNION SELECT * FROM t", cat)
+    val rows = collectAllRows(q).sortBy(_("id").asInstanceOf[Int])
+    assertEquals(2, rows.size)
+    assertEquals(Seq(1, 2), rows.map(_("id")))
+  }
+
+  @Test def unionAllChainsThreeArms(): Unit = {
+    val a = tmpCsv("a.csv", "id\n1\n")
+    val b = tmpCsv("b.csv", "id\n2\n")
+    val c = tmpCsv("c.csv", "id\n3\n")
+    val cat = new Catalog
+    cat.register("a", CsvReader.fromPath(a.toString, CsvOptions()))
+    cat.register("b", CsvReader.fromPath(b.toString, CsvOptions()))
+    cat.register("c", CsvReader.fromPath(c.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT id FROM a UNION ALL SELECT id FROM b UNION ALL SELECT id FROM c", cat)
+    assertEquals(Seq(1, 2, 3), collectAllRows(q).map(_("id")))
+  }
+
+  @Test def unionMismatchedColumnCountRejected(): Unit = {
+    val p = tmpCsv("a.csv", "id,name\n1,alice\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val ex = try {
+      SqlEngine.execute("SELECT * FROM t UNION ALL SELECT id FROM t", cat)
+      null
+    } catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage.toLowerCase.contains("column count"))
+  }
+
+  @Test def intersectRejected(): Unit = {
+    val p = tmpCsv("a.csv", "id\n1\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val ex = try {
+      SqlEngine.execute("SELECT id FROM t INTERSECT SELECT id FROM t", cat)
+      null
+    } catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage.toUpperCase.contains("UNION"))
+  }
 }

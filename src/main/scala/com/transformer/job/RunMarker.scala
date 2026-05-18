@@ -140,6 +140,37 @@ object RunMarker {
   private def segmentCount(p: String): Int =
     p.split("[/\\\\]").count(_.nonEmpty)
 
+  /** If `dir` contains a [[FileName]] marker, delete every regular file at the
+    * top level of `dir` (including the marker itself) and return true.
+    * Returns false when no marker is present — the directory is left untouched.
+    *
+    * Why: the marker signals "this directory holds the output of a prior
+    * successful run." Without clearing, a rerun that changes output format
+    * (CSV → Parquet) leaves stale `part-NNNNN.csv` files alongside the new
+    * `part-NNNNN.parquet` files, which breaks any subsequent read of the dir
+    * as a single dataset (the parquet reader trips on the leftover CSV).
+    *
+    * Subdirectories are deliberately left alone — our output layout is flat
+    * (part files + marker), so any nested directory is not "ours" to wipe.
+    * The marker is deleted first so an interrupted clear leaves a directory
+    * that no longer claims success.
+    */
+  def clearIfMarked(dir: Path): Boolean = {
+    if (!Files.isDirectory(dir)) return false
+    val markerPath = dir.resolve(FileName)
+    if (!Files.isRegularFile(markerPath)) return false
+    Files.deleteIfExists(markerPath)
+    val stream = Files.list(dir)
+    try {
+      val it = stream.iterator()
+      while (it.hasNext) {
+        val p = it.next()
+        if (Files.isRegularFile(p)) Files.deleteIfExists(p)
+      }
+    } finally stream.close()
+    true
+  }
+
   /** Convenience: enumerate the bare `part-*` file names in `dir`. Used by the
     * runner to fill in [[RunMarker.outputFiles]] before writing the marker.
     */

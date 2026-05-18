@@ -2,7 +2,7 @@ package com.transformer.sql.parse
 
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
 import net.sf.jsqlparser.statement.Statement
-import net.sf.jsqlparser.statement.select.{PlainSelect, Select}
+import net.sf.jsqlparser.statement.select.Select
 
 object SqlParser {
 
@@ -16,13 +16,14 @@ object SqlParser {
     }
   }
 
-  /** Convenience: parse and require a `SELECT` (the only kind v1 executes). */
-  def parseSelect(sql: String): PlainSelect = parse(sql) match {
-    case sel: Select =>
-      sel.getPlainSelect match {
-        case ps: PlainSelect => ps
-        case other => throw new IllegalArgumentException(s"Unsupported SELECT shape: ${other.getClass.getSimpleName}")
-      }
+  /** Convenience: parse and require a `SELECT` (the only kind v1 executes).
+    * Returns the abstract [[Select]] base — callers dispatch over `PlainSelect`
+    * vs `SetOperationList` (UNION) vs `ParenthesedSelect` themselves rather
+    * than going through `Select#getPlainSelect`, which `ClassCastException`s
+    * on set operations.
+    */
+  def parseSelect(sql: String): Select = parse(sql) match {
+    case sel: Select => sel
     case other =>
       throw new IllegalArgumentException(s"Only SELECT statements are supported (got ${other.getClass.getSimpleName})")
   }

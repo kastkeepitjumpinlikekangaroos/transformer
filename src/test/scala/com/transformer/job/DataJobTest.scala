@@ -742,6 +742,121 @@ class DataJobTest {
     assertEquals("x\n1\n2\n3\n", readOutputDir(outDir))
   }
 
+  @Test def rerunClearsStaleOutputsWhenMarkerPresent(): Unit = {
+    // Reproduces the CSV → Parquet rerun footgun: an earlier successful run
+    // stamped a _SUCCESS marker, and now a second run targets the same dir.
+    // The directory must be wiped before the second run so leftover files
+    // from the previous run can't poison a later read.
+    val inDir = tmpDir("dj-rerun-stale-in-")
+    writeCsv(inDir, "events.csv", "id\n1\n2\n3\n")
+    val outDir = tmpDir("dj-rerun-stale-out-").resolve("out")
+    Files.createDirectories(outDir)
+
+    // Simulate a previous run's leftovers — a stale part file we want gone,
+    // and a marker that signals "this dir was a successful run".
+    val stalePart = outDir.resolve("part-00099.csv")
+    Files.writeString(stalePart, "old_col\n999\n")
+    RunMarker.write(outDir, RunMarker(
+      executionTime = Instant.parse("2026-05-17T00:00:00Z"),
+      writtenAt = Instant.parse("2026-05-17T00:00:00Z"),
+      rowsProduced = 1, format = "csv",
+      outputFiles = Seq("part-00099.csv")
+    ))
+    assertTrue(Files.isRegularFile(stalePart))
+
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT id FROM events"),
+        outputFile = Some(OutputFilePath(outDir.toString))
+      ))
+    )
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+
+    assertFalse(s"stale part file should have been deleted: $stalePart",
+      Files.exists(stalePart))
+    // The new part file is there with the fresh contents.
+    assertEquals("id\n1\n2\n3\n", readOutputDir(outDir))
+    // Fresh marker stamped, listing only the new part file(s).
+    val marker = RunMarker.read(outDir).getOrElse(fail("marker should be rewritten").asInstanceOf[RunMarker])
+    assertFalse(s"marker outputFiles should not reference the stale part: ${marker.outputFiles}",
+      marker.outputFiles.contains("part-00099.csv"))
+  }
+
+  @Test def rerunDoesNotTouchDirectoryWithoutMarker(): Unit = {
+    // Without a _SUCCESS marker we can't be sure the dir is one of ours — so
+    // we leave its contents alone and let the writer overwrite by path.
+    val inDir = tmpDir("dj-rerun-nomarker-in-")
+    writeCsv(inDir, "events.csv", "id\n1\n")
+    val outDir = tmpDir("dj-rerun-nomarker-out-").resolve("out")
+    Files.createDirectories(outDir)
+    val foreign = outDir.resolve("user_notes.txt")
+    Files.writeString(foreign, "do not delete me")
+
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT id FROM events"),
+        outputFile = Some(OutputFilePath(outDir.toString))
+      ))
+    )
+    assertTrue(job.run().succeeded)
+    assertTrue(s"file outside a marked directory should be preserved: $foreign",
+      Files.isRegularFile(foreign))
+    assertEquals("do not delete me", Files.readString(foreign))
+  }
+
+  @Test def clearIfMarkedDeletesTopLevelFilesAndMarker(): Unit = {
+    val dir = tmpDir("dj-cim-")
+    Files.writeString(dir.resolve("part-00000.csv"), "a\n1\n")
+    Files.writeString(dir.resolve("part-00001.csv"), "a\n2\n")
+    RunMarker.write(dir, RunMarker(
+      executionTime = Instant.now(), writtenAt = Instant.now(),
+      rowsProduced = 2, format = "csv",
+      outputFiles = Seq("part-00000.csv", "part-00001.csv")
+    ))
+    assertTrue(RunMarker.clearIfMarked(dir))
+    assertFalse(Files.exists(dir.resolve("part-00000.csv")))
+    assertFalse(Files.exists(dir.resolve("part-00001.csv")))
+    assertFalse(Files.exists(dir.resolve(RunMarker.FileName)))
+    assertTrue("the directory itself should still exist", Files.isDirectory(dir))
+  }
+
+  @Test def clearIfMarkedNoOpWithoutMarker(): Unit = {
+    val dir = tmpDir("dj-cim-nomarker-")
+    Files.writeString(dir.resolve("user_file.txt"), "keep")
+    assertFalse(RunMarker.clearIfMarked(dir))
+    assertTrue("user file should be untouched when no marker is present",
+      Files.isRegularFile(dir.resolve("user_file.txt")))
+  }
+
+  @Test def clearIfMarkedNoOpWhenDirectoryMissing(): Unit = {
+    val parent = tmpDir("dj-cim-missing-")
+    val dir = parent.resolve("does-not-exist")
+    assertFalse(RunMarker.clearIfMarked(dir))
+    assertFalse(Files.exists(dir))
+  }
+
+  @Test def clearIfMarkedPreservesSubdirectories(): Unit = {
+    // The clear is top-level only — any nested directories are not part of
+    // our flat output layout, so we don't touch them.
+    val dir = tmpDir("dj-cim-subdirs-")
+    Files.writeString(dir.resolve("part-00000.csv"), "a\n1\n")
+    val sub = dir.resolve("nested")
+    Files.createDirectories(sub)
+    Files.writeString(sub.resolve("inner.txt"), "keep me")
+    RunMarker.write(dir, RunMarker(
+      executionTime = Instant.now(), writtenAt = Instant.now(),
+      rowsProduced = 1, format = "csv", outputFiles = Seq("part-00000.csv")
+    ))
+
+    assertTrue(RunMarker.clearIfMarked(dir))
+    assertFalse(Files.exists(dir.resolve("part-00000.csv")))
+    assertTrue("subdirectory should be preserved", Files.isDirectory(sub))
+    assertEquals("keep me", Files.readString(sub.resolve("inner.txt")))
+  }
+
   @Test def mixedCachedAndStreamedInputsBothWork(): Unit = {
     val aDir = tmpDir("dj-mixed-a-")
     val bDir = tmpDir("dj-mixed-b-")
