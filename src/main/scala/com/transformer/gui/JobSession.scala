@@ -5,7 +5,7 @@ import com.transformer.job.{DataJob, DirectoryJobLoader, InputFilePath, InputRes
 import com.transformer.read.csv.{CsvOptions, CsvReader}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
-import java.nio.file.{Path, Paths}
+import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
 import scala.collection.mutable
 import scala.util.control.NonFatal
@@ -450,10 +450,30 @@ object JobSession {
   /** Read an on-disk task output directory as a [[CatalogView]]. Mirrors the
     * format detection used by `ResultsTabPane` for output previews so the
     * interactive SQL catalog sees the same data the preview tab does.
+    *
+    * Detection order:
+    *   1. `_SUCCESS` marker's `format` field (the source of truth — written
+    *      by the runner alongside the part files).
+    *   2. `.parquet` / `.csv` substring in the path (legacy single-file paths
+    *      that pre-date the marker, and ad-hoc paths the user types in).
+    *
+    * Without (1) the path-substring check is the only signal, and
+    * `DirectoryJobLoader` deliberately writes parquet to ext-less directories
+    * (e.g. `output/<view>/`) — so a plain extension check would route a
+    * parquet directory to the CSV reader, which would then parse the raw
+    * `PAR1`-magic bytes as a CSV header.
     */
   private[gui] def readOutputAsView(path: String): CatalogView = {
-    val lower = path.toLowerCase
-    val isParquet = lower.endsWith(".parquet") || lower.contains(".parquet")
+    val p = try Paths.get(path) catch { case NonFatal(_) => null }
+    val markerFormat: Option[String] =
+      if (p != null && Files.isDirectory(p)) RunMarker.read(p).map(_.format.toLowerCase)
+      else None
+    val isParquet = markerFormat match {
+      case Some(f) => f == "parquet"
+      case None =>
+        val lower = path.toLowerCase
+        lower.endsWith(".parquet") || lower.contains(".parquet")
+    }
     if (isParquet) ParquetReaderHook.get match {
       case Some(fn) => fn(path)
       case None => throw new UnsupportedOperationException(
