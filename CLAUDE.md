@@ -52,9 +52,10 @@ the JIT keeps this acceptably fast.
 | `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `LogicalPlan.scala`, `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo) |
 | `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala`, `SortExec.scala`, `DistinctExec.scala`, `UnionExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala`, `SqlEngine.scala` |
 | `job/` | User-facing API + runner. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala` (+ `ParquetResolverHook`, `ParquetReaderHook`, `ParquetWriterHook`), `TaskDag.scala` (DAG analyzer/builder from SQL refs; `TaskDag` + `TaskDagNode` are public so the GUI can render without re-implementing), `TaskProgressListener.scala` (per-task callbacks fired from runner worker threads), `RunMarker.scala` (`_SUCCESS` write/read/discover for per-task success markers), `DirectoryJobLoader.scala` (DBT-style directory loader; supports optional per-table `output.json` with `partitionBy`), `Json.scala` (stdlib JSON parser used by the loader + RunMarker.read) |
-| `gui/` | JavaFX visualizer/runner. Depends on `job/`, `core/`, `read/csv/`, `sql/exec/`, `temporal/`, plus `org.openjfx:javafx-{base,controls,graphics}` (bare jars + platform-classifier jars). | `GuiApp.scala` (Application boot + BorderPane wiring), `JobSession.scala` (mutable FX-thread session state — jobDir, executionTime, outputDir, DAG, per-task UI states, markers, historical runs), `DagLayout.scala` (pure-Scala layered DAG layout), `DagCanvas.scala` (custom Canvas: pan/zoom/click/double-click), `ControlsPanel.scala` (open dir, exec-time pickers, output-dir field, Run button on worker thread), `TaskDetailsPanel.scala` (selected task's source + rendered SQL + status + provenance), `ResultsTabPane.scala` (Output data tab with partition picker + run log tab), `FxHelpers.scala` |
+| `gui/` | JavaFX visualizer/runner. Depends on `job/`, `core/`, `read/csv/`, `sql/exec/`, `temporal/`, plus `org.openjfx:javafx-{base,controls,graphics}` (bare jars + platform-classifier jars). | `GuiApp.scala` (Application boot + BorderPane wiring), `JobSession.scala` (mutable FX-thread session state — jobDir, executionTime, outputDir, DAG, per-task UI states, markers, historical runs), `DagLayout.scala` (pure-Scala layered DAG layout), `DagCanvas.scala` (custom Canvas: pan/zoom/click/double-click), `ControlsPanel.scala` (open dir, exec-time pickers, output-dir field, Run button on worker thread), `TaskDetailsPanel.scala` (selected task's source + rendered SQL + status + provenance — uses `SqlView` for highlighted SQL and chips for status/deps/metrics), `SqlHighlighter.scala` (pure-Scala tokenizer: keywords/functions/strings/numbers/comments/templates — testable, no JavaFX deps), `SqlView.scala` (read-only highlighted SQL pane built on `HBox` per line inside a `ScrollPane`; toolbar with Copy + optional Open-in-editor button), `ExternalEditor.scala` (launches `TRANSFORMER_EDITOR` if set, else macOS Terminal+`nvim`; no-wait launch via `ProcessBuilder`), `ResultsTabPane.scala` (Output data tab with partition picker + run log tab), `FxHelpers.scala` |
 | `examples/scala_app/` | Sample app built as a `scala_binary` deploy jar — programmatic `DataJob(...)` API. | `src/main/scala/com/example/ExampleJob.scala` |
 | `examples/directory_app/` | Sample app using `DirectoryJobLoader` — whole job is a folder of JSON configs + SQL files. | `src/main/scala/com/example/directory/DirectoryJobExample.scala`, `job/inputs/<view>/config.json`, `job/tables/<view>/main.sql`, `job/tables/<view>/validations/*.sql`. Accepts optional 3rd CLI arg for `executionTime` (ISO instant) so the same job can produce multiple partitions for testing. |
+| `examples/jaffle_shop/` | Port of [dbt-labs/jaffle-shop](https://github.com/dbt-labs/jaffle-shop) to the directory format. 6 raw seed CSVs → 6 staging tables → 3 intermediate aggregations → 3 marts (`customers`, `orders`, `order_items`) + 3 passthroughs (`locations`, `products`, `supplies`). 26 DBT data_tests ported as zero-row validation queries. Exercises the DAG scheduler at a realistic scale (~150k rows, 15 tasks). Omissions vs. DBT: `metricflow_time_spine` (needs `dbt_date`); `customer_order_number` ROW_NUMBER column on `orders` (no window functions); semantic models / metrics / saved_queries / unit_tests (no equivalent layer). DBT CTEs are split — each `with X as (...)` becomes its own SQLTask, since `LogicalBuilder.fromItem` only accepts `Table` in FROM. | `src/main/scala/com/example/jaffle/JaffleShopExample.scala`, `job/data/raw_*.csv`, `job/inputs/<view>/config.json`, `job/tables/<view>/{main.sql,validations/}`. |
 | `examples/gui_app/` | Sample app launching the GUI. Pulls in `gui/` + `sql/exec/` + `read/parquet/` + `write/parquet/` so the GUI's parquet preview + parquet I/O Just Work. | `src/main/scala/com/example/gui/GuiAppLauncher.scala` |
 
 ## Cross-cutting patterns
@@ -243,6 +244,11 @@ java -jar bazel-bin/examples/directory_app/directory_example_deploy.jar \
 # useful for producing several partitioned outputs from one job to demo the
 # GUI's historical-run picker.
 
+bazel build //examples/jaffle_shop:jaffle_shop_deploy.jar
+java -jar bazel-bin/examples/jaffle_shop/jaffle_shop_deploy.jar \
+    [examples/jaffle_shop/job] [/tmp/transformer-jaffle-out] [executionTime]
+# Port of dbt-labs/jaffle-shop — 15-task DAG over the full DBT seed dataset.
+
 # Build + launch the JavaFX GUI.
 bazel build //examples/gui_app:gui_app_deploy.jar
 java -jar bazel-bin/examples/gui_app/gui_app_deploy.jar [job-dir]
@@ -356,6 +362,19 @@ add new state to JobSession unless multiple panels need it.
 To wire a new `DataJob` event into the GUI: extend `TaskProgressListener`
 (non-breaking — defaulted to `NoOp`) and have `ControlsPanel`'s listener
 forward to a new `JobSession.markXxx` method.
+
+To extend SQL syntax highlighting: `SqlHighlighter.scala` is a pure-Scala,
+single-pass tokenizer with no JavaFX deps. Add new keywords/functions by
+editing the in-file sets at the top, and cover the change in
+`gui/sql_highlighter_test`. Token colours live in `SqlView.colorFor` (palette
+intentionally mirrors VS Code's dark+ theme).
+
+To change the editor that "Open in editor" launches: users set
+`TRANSFORMER_EDITOR=<cmd>` in their environment (the file path is appended
+as a single trailing arg, no shell). With no override `ExternalEditor` opens
+`Terminal.app` and runs `nvim <file>` via `osascript` on macOS, and throws a
+helpful error on other platforms. Buttons surface launch failures through an
+`Alert`.
 
 ### Add a SQL operator (e.g., subqueries)
 
@@ -482,9 +501,10 @@ need them. Cloud is opt-in.
 | `job/task_dag_test` | Pure dependency analyzer + DAG builder: table-name extraction, independent roots, linear chain, diamond, cycle detection, unknown reference, duplicate viewName, viewName/input collision, main-SQL self-reference, validation self-reference allowed, validation peer reference, duplicate output path, empty input, template rendering before extraction |
 | `job/json_test` | The stdlib JSON parser in `job/Json.scala` — scalars, escapes, nested objects, arrays, type errors, trailing content, scalar→string coercion for the option map |
 | `job/directory_job_loader_test` | End-to-end `DirectoryJobLoader.load(...)`: basic run, relative vs absolute input paths, validations dir (success + failure), templated input paths + outputDir, alphabetical chaining, default outputDir, JSON scalar→option-map coercion, error cases (no/multiple `.json`, missing `main.sql`, missing jobDir), **per-table `output.json` `partitionBy` extends output path, absent leaves path unchanged, malformed throws** |
+| `gui/sql_highlighter_test` | The pure-Scala SQL tokenizer in `gui/SqlHighlighter.scala` — null/empty input, case-insensitive keywords + functions, identifier classification, integer/decimal/scientific numerics, single-quoted strings with `''` escape + unterminated, line / block / unclosed-block comments, top-level `{{ template }}` tokens, template inside a string stays a string, punctuation tagging, full SELECT query round-trips losslessly, line splitting preserves content + handles block comments spanning lines |
 
-The GUI module currently has no JUnit tests (it's a thin UI over engine APIs
-that are themselves covered). Smoke-test by launching
+The other GUI components (`SqlView`, `TaskDetailsPanel`, `DagCanvas`, etc.) have
+no JUnit tests — they're thin UI over engine APIs. Smoke-test by launching
 `bazel-bin/examples/gui_app/gui_app_deploy.jar` and pointing it at a job dir.
 
 ## File-size hot spots

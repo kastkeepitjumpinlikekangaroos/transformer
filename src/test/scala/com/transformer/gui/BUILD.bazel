@@ -1,0 +1,11 @@
+load("@rules_scala//scala:scala.bzl", "scala_junit_test")
+
+scala_junit_test(
+    name = "sql_highlighter_test",
+    srcs = ["SqlHighlighterTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/gui",
+        "@maven//:junit_junit",
+    ],
+)

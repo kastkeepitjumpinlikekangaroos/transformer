@@ -194,10 +194,14 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
   }
 
   private def drawHud(gc: GraphicsContext, w: Double, h: Double): Unit = {
-    val hud = f"zoom ${zoom * 100}%.0f%% • pan ($panX%.0f, $panY%.0f) • drag with right/middle • scroll to zoom • double-click a node to view output"
-    gc.setFill(Color.web("#7e8aa6"))
+    val state = f"zoom ${zoom * 100}%.0f%% • pan ($panX%.0f, $panY%.0f)"
+    val hint = "drag right/middle to pan • scroll to zoom • click to select • double-click to view output"
+    gc.setFont(Font.font("Sans", FontWeight.BOLD, 11))
+    gc.setFill(Color.web("#9ba2b8"))
+    gc.fillText(state, 12, h - 26)
     gc.setFont(Font.font("Sans", FontWeight.NORMAL, 11))
-    gc.fillText(hud, 10, h - 10)
+    gc.setFill(Color.web("#6a708a"))
+    gc.fillText(hint, 12, h - 10)
   }
 
   private def truncate(s: String, max: Int): String =

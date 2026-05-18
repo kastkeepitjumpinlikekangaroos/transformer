@@ -1,76 +1,119 @@
 package com.transformer.gui
 
-import com.transformer.job.TaskStatus
+import com.transformer.job.{RunMarker, TaskStatus}
 
-import javafx.geometry.Insets
-import javafx.scene.control.{Label, ScrollPane, Separator, TextArea}
-import javafx.scene.layout.{Priority, VBox}
+import java.nio.file.Paths
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import javafx.geometry.{Insets, Pos}
+import javafx.scene.control.{Label, ScrollPane, Separator, Tooltip}
+import javafx.scene.layout.{FlowPane, HBox, Priority, VBox}
 import javafx.scene.text.{Font, FontWeight}
 
 /** Right-side panel: shows full details for the currently-selected task.
   *
-  * Sections (top → bottom):
-  *   * Name + status pill
-  *   * Dependencies (comma-separated viewNames)
-  *   * Error / validation summary (only when relevant)
-  *   * Source SQL (read-only monospace)
-  *   * Rendered SQL (post-template, read-only monospace)
+  * Layout, top → bottom:
+  *   * Header: task name + colored status pill + duration/rows chips
+  *   * "Reads from": dep chips (clickable would be nice; out of scope for v1)
+  *   * "Writes to": output path + provenance + historical-runs hint
+  *   * Error panel: only visible when status is Failed / ValidationFailed
+  *   * Source SQL pane (syntax-highlighted, with Copy + Open in editor)
+  *   * Rendered SQL pane (syntax-highlighted, with Copy)
   */
 final class TaskDetailsPanel(session: JobSession) extends VBox {
 
-  setSpacing(8)
-  setPadding(new Insets(12))
-  setPrefWidth(420)
-  setStyle("-fx-background-color: #2a2c38;")
+  private val PanelBg     = "#2a2c38"
+  private val MutedText   = "#9ba2b8"
+  private val Heading     = "#e8ecf5"
+  private val PathColor   = "#8ab4f8"
 
+  private val TimeFmt: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'").withZone(ZoneOffset.UTC)
+
+  setSpacing(10)
+  setPadding(new Insets(14))
+  setPrefWidth(440)
+  setStyle(s"-fx-background-color: $PanelBg;")
+
+  // ---- Header row -----------------------------------------------------------
   private val nameLabel = new Label("(no task selected)")
-  nameLabel.setStyle("-fx-text-fill: #f7f7fb;")
-  nameLabel.setFont(Font.font("Sans", FontWeight.BOLD, 16))
+  nameLabel.setStyle(s"-fx-text-fill: $Heading;")
+  nameLabel.setFont(Font.font("Sans", FontWeight.BOLD, 17))
   nameLabel.setWrapText(true)
+  HBox.setHgrow(nameLabel, Priority.ALWAYS)
+  nameLabel.setMaxWidth(Double.MaxValue)
 
-  private val statusLabel = new Label("")
-  statusLabel.setStyle("-fx-text-fill: #c5cad8;")
-  statusLabel.setWrapText(true)
+  private val statusPill = new Label("")
+  styleChip(statusPill, ChipPalette.Neutral)
+  statusPill.setVisible(false)
+  statusPill.setManaged(false)
 
-  private val depsLabel = new Label("")
-  depsLabel.setStyle("-fx-text-fill: #c5cad8; -fx-font-size: 11px;")
-  depsLabel.setWrapText(true)
+  private val header = new HBox(8, nameLabel, statusPill)
+  header.setAlignment(Pos.CENTER_LEFT)
 
+  // ---- Stat chips (rows, duration, validations) -----------------------------
+  private val statChips = new FlowPane(6, 4)
+  statChips.setAlignment(Pos.CENTER_LEFT)
+
+  // ---- Dependencies ---------------------------------------------------------
+  private val depsHeader = sectionLabel("Reads from")
+  private val depsBox = new FlowPane(6, 4)
+  depsBox.setAlignment(Pos.CENTER_LEFT)
+  private val noDepsLabel = mutedLabel("(no upstream tasks)")
+
+  // ---- Output path ----------------------------------------------------------
+  private val outputHeader = sectionLabel("Writes to")
   private val outputPathLabel = new Label("")
-  outputPathLabel.setStyle("-fx-text-fill: #8ab4f8; -fx-font-size: 11px; -fx-font-family: monospace;")
+  outputPathLabel.setStyle(s"-fx-text-fill: $PathColor; -fx-font-size: 12px; -fx-font-family: monospace;")
   outputPathLabel.setWrapText(true)
+  private val outputMetaLabel = mutedLabel("")
+  outputMetaLabel.setStyle(s"-fx-text-fill: $MutedText; -fx-font-size: 11px;")
+  outputMetaLabel.setWrapText(true)
+  private val historyHintLabel = mutedLabel("")
+  historyHintLabel.setStyle("-fx-text-fill: #b9c2db; -fx-font-size: 11px; -fx-font-style: italic;")
+  historyHintLabel.setWrapText(true)
+  private val outputBox = new VBox(3, outputPathLabel, outputMetaLabel, historyHintLabel)
 
+  // ---- Error block (only visible when relevant) ----------------------------
   private val errorLabel = new Label("")
-  errorLabel.setStyle("-fx-text-fill: #f8a3a3; -fx-font-family: monospace;")
+  errorLabel.setStyle("-fx-text-fill: #f8a3a3; -fx-font-family: monospace; -fx-font-size: 11px;")
   errorLabel.setWrapText(true)
   private val errorScroll = new ScrollPane(errorLabel)
   errorScroll.setFitToWidth(true)
-  errorScroll.setStyle("-fx-background-color: transparent;")
-  errorScroll.setPrefHeight(80)
+  errorScroll.setPrefHeight(90)
+  errorScroll.setStyle("-fx-background: #3a2128; -fx-background-color: #3a2128;")
   errorScroll.setVisible(false)
   errorScroll.setManaged(false)
 
-  private val sourceSqlArea = makeCodeArea("Source SQL (from main.sql)")
-  private val renderedSqlArea = makeCodeArea("Rendered SQL (post-template)")
+  // ---- SQL views ------------------------------------------------------------
+  private val sourceSqlView = new SqlView(showOpenInEditor = true)
+  private val renderedSqlView = new SqlView(showOpenInEditor = false)
+  sourceSqlView.setPrefHeight(220)
+  renderedSqlView.setPrefHeight(220)
+  VBox.setVgrow(sourceSqlView, Priority.ALWAYS)
+  VBox.setVgrow(renderedSqlView, Priority.ALWAYS)
 
-  VBox.setVgrow(sourceSqlArea, Priority.ALWAYS)
-  VBox.setVgrow(renderedSqlArea, Priority.ALWAYS)
-
+  // ---- Assemble -------------------------------------------------------------
   getChildren.addAll(
-    nameLabel,
-    statusLabel,
-    depsLabel,
-    outputPathLabel,
+    header,
+    statChips,
+    new Separator(),
+    depsHeader,
+    depsBox,
+    outputHeader,
+    outputBox,
     errorScroll,
     new Separator(),
     sectionLabel("Source SQL"),
-    sourceSqlArea,
+    sourceSqlView,
     sectionLabel("Rendered SQL"),
-    renderedSqlArea
+    renderedSqlView
   )
 
   session.addListener(() => refresh())
   refresh()
+
+  // --------------------------------------------------------------------------
 
   private def refresh(): Unit = {
     val sel = session.selectedTaskIndex
@@ -81,83 +124,140 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
         val node = d.nodes(i)
         val task = node.task
         nameLabel.setText(task.displayName)
-        statusLabel.setText(formatStatus(i))
-        depsLabel.setText(formatDeps(node))
-        outputPathLabel.setText(formatOutputPath(i))
-        sourceSqlArea.setText(safeLoad(task.loadSql _))
-        renderedSqlArea.setText(node.renderedMainSql)
+        renderStatus(i)
+        renderStatChips(i)
+        renderDeps(node)
+        renderOutput(i)
         updateErrorPanel(i)
+        sourceSqlView.setSql(safeLoad(task.loadSql _))
+        sourceSqlView.setSourceFile(task.sqlFile.map(Paths.get(_)))
+        renderedSqlView.setSql(node.renderedMainSql)
+        renderedSqlView.setSourceFile(None)
       case _ =>
         nameLabel.setText("(no task selected)")
-        statusLabel.setText("Click a node to view its details. Double-click to load its output rows.")
-        depsLabel.setText("")
-        outputPathLabel.setText("")
-        sourceSqlArea.clear()
-        renderedSqlArea.clear()
+        statusPill.setVisible(false); statusPill.setManaged(false)
+        statChips.getChildren.clear()
+        depsBox.getChildren.setAll(noDepsLabel)
+        outputPathLabel.setText("Click a task node to inspect it.")
+        outputMetaLabel.setText("Double-click a task node to load its output rows.")
+        historyHintLabel.setText("")
         setErrorText("")
+        sourceSqlView.clear()
+        sourceSqlView.setSourceFile(None)
+        renderedSqlView.clear()
+        renderedSqlView.setSourceFile(None)
     }
   }
 
-  /** "Will write to" before run; "Wrote to" after run; "(no outputFile)" if the
-    * task has none. Paths are rendered against the session's executionTime so
-    * any `{{ today }}`-style templates are resolved. When a previous run's
-    * `_SUCCESS` marker is on disk for the path we append a provenance line.
-    */
-  private def formatOutputPath(i: Int): String = {
+  private def renderStatus(i: Int): Unit = {
+    val states = session.taskStates
+    if (i >= states.size) {
+      statusPill.setVisible(false); statusPill.setManaged(false)
+      return
+    }
+    val (label, palette) = states(i) match {
+      case UiTaskState.Pending => ("pending", ChipPalette.Neutral)
+      case UiTaskState.Running => ("running", ChipPalette.Running)
+      case UiTaskState.Done(result) =>
+        result.status match {
+          case TaskStatus.Succeeded            => ("succeeded", ChipPalette.Success)
+          case TaskStatus.Failed(_)            => ("failed", ChipPalette.Failed)
+          case TaskStatus.ValidationFailed(_)  => ("validation failed", ChipPalette.Warning)
+          case TaskStatus.Skipped(_)           => ("skipped", ChipPalette.Neutral)
+          case TaskStatus.Pending              => ("pending", ChipPalette.Neutral)
+        }
+    }
+    statusPill.setText(label.toUpperCase)
+    styleChip(statusPill, palette)
+    statusPill.setVisible(true); statusPill.setManaged(true)
+  }
+
+  private def renderStatChips(i: Int): Unit = {
+    statChips.getChildren.clear()
+    val states = session.taskStates
+    if (i >= states.size) return
+    states(i) match {
+      case UiTaskState.Done(result) if result.status == TaskStatus.Succeeded =>
+        statChips.getChildren.add(metricChip(f"${result.rowsProduced}%,d rows"))
+        statChips.getChildren.add(metricChip(s"${result.durationMillis} ms"))
+        validationsCountChip(i).foreach(statChips.getChildren.add)
+      case UiTaskState.Done(result) =>
+        statChips.getChildren.add(metricChip(s"${result.durationMillis} ms"))
+        validationsCountChip(i).foreach(statChips.getChildren.add)
+      case UiTaskState.Running =>
+        statChips.getChildren.add(metricChip("running…"))
+      case UiTaskState.Pending =>
+        validationsCountChip(i).foreach(statChips.getChildren.add)
+    }
+  }
+
+  private def validationsCountChip(i: Int): Option[Label] = {
+    val n = session.dag.flatMap(_.nodes.lift(i)).map(_.task.validations.size).getOrElse(0)
+    if (n == 0) None else Some(metricChip(s"$n validation${if (n == 1) "" else "s"}"))
+  }
+
+  private def renderDeps(node: com.transformer.job.TaskDagNode): Unit = {
+    depsBox.getChildren.clear()
+    val dag = session.dag.getOrElse(return)
+    if (node.deps.isEmpty) {
+      depsBox.getChildren.add(noDepsLabel)
+      return
+    }
+    node.deps.toSeq.sorted.foreach { d =>
+      val name = dag.nodes(d).task.displayName
+      depsBox.getChildren.add(depChip(name))
+    }
+  }
+
+  private def renderOutput(i: Int): Unit = {
     val planned = session.plannedOutputPathFor(i)
     val written = session.outputPathFor(i)
     val state = session.taskStates.lift(i)
-    val base = (planned, state, written) match {
-      case (Some(p), Some(UiTaskState.Done(_)), Some(actual)) if actual == p => s"Wrote to: $p"
-      case (Some(p), Some(UiTaskState.Done(_)), Some(actual))                => s"Wrote to: $actual\n(planned: $p)"
-      case (Some(p), _, _)                                                   => s"Will write to: $p"
-      case (None, _, _)                                                      => "(no outputFile configured for this task — nothing will be persisted)"
+    val (verb, path) = (planned, state, written) match {
+      case (Some(p), Some(UiTaskState.Done(_)), Some(actual)) if actual == p => ("Wrote to", Some(p))
+      case (Some(p), Some(UiTaskState.Done(_)), Some(actual))                => ("Wrote to", Some(actual))
+      case (Some(p), _, _)                                                   => ("Will write to", Some(p))
+      case (None, _, _)                                                      => ("Output", None)
     }
-    val markerLine = session.markerFor(i) match {
-      case Some(m) =>
-        val sessionTime = session.executionTime
-        val timeNote =
-          if (m.executionTime == sessionTime) ""
-          else s"\nNote: this run used executionTime ${m.executionTime}, current is $sessionTime"
-        s"\nLoaded from _SUCCESS — ${m.rowsProduced} row(s), ${m.outputFiles.size} part file(s), written ${m.writtenAt}$timeNote"
-      case None => ""
+    path match {
+      case Some(p) =>
+        outputPathLabel.setText(p)
+        outputPathLabel.setTooltip(new Tooltip(p))
+      case None =>
+        outputPathLabel.setText("(no outputFile — nothing will be persisted)")
+        outputPathLabel.setTooltip(null)
     }
-    val historicalLine = session.historicalRunsFor(i).size match {
-      case n if n >= 2 => s"\n$n historical run(s) on disk — double-click the node to pick one in the Output data tab."
-      case _ => ""
-    }
-    s"$base$markerLine$historicalLine"
+    outputHeader.setText(verb)
+    outputMetaLabel.setText(formatMarkerMeta(session.markerFor(i)))
+    val total = session.historicalRunsFor(i).size
+    historyHintLabel.setText(
+      if (total >= 2) s"$total historical run${if (total == 1) "" else "s"} on disk — double-click the node to browse them in the Output tab."
+      else ""
+    )
+    outputMetaLabel.setVisible(outputMetaLabel.getText.nonEmpty)
+    outputMetaLabel.setManaged(outputMetaLabel.getText.nonEmpty)
+    historyHintLabel.setVisible(historyHintLabel.getText.nonEmpty)
+    historyHintLabel.setManaged(historyHintLabel.getText.nonEmpty)
   }
 
-  private def formatStatus(i: Int): String = {
-    val states = session.taskStates
-    if (i >= states.size) return ""
-    states(i) match {
-      case UiTaskState.Pending => "Status: pending"
-      case UiTaskState.Running => "Status: running…"
-      case UiTaskState.Done(result) =>
-        result.status match {
-          case TaskStatus.Succeeded => f"Status: succeeded • ${result.rowsProduced}%,d rows • ${result.durationMillis} ms"
-          case TaskStatus.Failed(_) => s"Status: failed • ${result.durationMillis} ms"
-          case TaskStatus.ValidationFailed(fs) => s"Status: validation failed (${fs.size}) • ${result.durationMillis} ms"
-          case TaskStatus.Skipped(_) => "Status: skipped"
-          case TaskStatus.Pending => "Status: pending"
-        }
-    }
-  }
-
-  private def formatDeps(node: com.transformer.job.TaskDagNode): String = {
-    val depNames = session.dag match {
-      case Some(d) => node.deps.toSeq.sorted.map(i => d.nodes(i).task.displayName)
-      case None => Nil
-    }
-    if (depNames.isEmpty) "Dependencies: (none)"
-    else s"Dependencies: ${depNames.mkString(", ")}"
+  /** Compact one-line `2 rows • 1 part file • written 2026-…` summary of the
+    * task's most recent `_SUCCESS` marker, plus a note if the marker's
+    * executionTime differs from the session's.
+    */
+  private def formatMarkerMeta(marker: Option[RunMarker]): String = marker match {
+    case None => ""
+    case Some(m) =>
+      val plural = if (m.outputFiles.size == 1) "" else "s"
+      val mismatch =
+        if (m.executionTime != session.executionTime)
+          s" • this run's exec=${TimeFmt.format(m.executionTime)} differs from selected ${TimeFmt.format(session.executionTime)}"
+        else ""
+      f"${m.rowsProduced}%,d rows • ${m.outputFiles.size} part file$plural • written ${TimeFmt.format(m.writtenAt)}$mismatch"
   }
 
   private def updateErrorPanel(i: Int): Unit = {
     val states = session.taskStates
-    if (i >= states.size) return setErrorText("")
+    if (i >= states.size) { setErrorText(""); return }
     states(i) match {
       case UiTaskState.Done(result) =>
         result.status match {
@@ -190,20 +290,63 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
 
   private def sectionLabel(text: String): Label = {
     val l = new Label(text)
-    l.setStyle("-fx-text-fill: #c5cad8; -fx-font-size: 11px;")
+    l.setStyle(s"-fx-text-fill: $Heading; -fx-font-size: 11px; -fx-font-weight: bold;")
     l
   }
 
-  private def makeCodeArea(prompt: String): TextArea = {
-    val a = new TextArea()
-    a.setEditable(false)
-    a.setWrapText(false)
-    a.setPromptText(prompt)
-    a.setFont(Font.font("Monospaced", 12))
-    a.setStyle("-fx-control-inner-background: #1e1e2a; -fx-text-fill: #d4d4d4;")
-    a
+  private def mutedLabel(text: String): Label = {
+    val l = new Label(text)
+    l.setStyle(s"-fx-text-fill: $MutedText; -fx-font-size: 11px;")
+    l
+  }
+
+  private def metricChip(text: String): Label = {
+    val l = new Label(text)
+    l.setStyle(
+      "-fx-background-color: #34384a; " +
+        "-fx-text-fill: #d7dcec; " +
+        "-fx-padding: 1 8; " +
+        "-fx-background-radius: 10; " +
+        "-fx-font-size: 11px;"
+    )
+    l
+  }
+
+  private def depChip(text: String): Label = {
+    val l = new Label(text)
+    l.setStyle(
+      "-fx-background-color: #2b4f7a; " +
+        "-fx-text-fill: #d7dcec; " +
+        "-fx-padding: 2 10; " +
+        "-fx-background-radius: 10; " +
+        "-fx-border-color: #4a90e2; " +
+        "-fx-border-radius: 10; " +
+        "-fx-font-size: 11px; " +
+        "-fx-font-family: monospace;"
+    )
+    l
+  }
+
+  private def styleChip(label: Label, palette: ChipPalette): Unit = {
+    label.setStyle(
+      s"-fx-background-color: ${palette.bg}; " +
+        s"-fx-text-fill: ${palette.fg}; " +
+        "-fx-padding: 3 10; " +
+        "-fx-background-radius: 10; " +
+        "-fx-font-size: 11px; " +
+        "-fx-font-weight: bold;"
+    )
   }
 
   private def indent(s: String, prefix: String): String =
     s.split('\n').iterator.map(prefix + _).mkString("\n")
+}
+
+private final case class ChipPalette(bg: String, fg: String)
+private object ChipPalette {
+  val Neutral = ChipPalette("#3a3f55", "#d7dcec")
+  val Running = ChipPalette("#2b4f7a", "#ffffff")
+  val Success = ChipPalette("#1f5b30", "#ffffff")
+  val Warning = ChipPalette("#7a5a22", "#ffffff")
+  val Failed  = ChipPalette("#5a2828", "#ffffff")
 }
