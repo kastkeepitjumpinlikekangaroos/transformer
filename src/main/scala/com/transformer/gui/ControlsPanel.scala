@@ -3,101 +3,98 @@ package com.transformer.gui
 import com.transformer.core.SqlExecutorRegistry
 import com.transformer.job.{TaskProgressListener, TaskResult}
 
-import javafx.geometry.{Insets, Pos}
+import javafx.geometry.{Insets, Orientation, Pos}
 import javafx.scene.control._
 import javafx.scene.layout.{HBox, Priority, VBox}
-import javafx.scene.text.{Font, FontWeight}
 import javafx.stage.Stage
 
 import java.time.{Instant, LocalDate, LocalDateTime, LocalTime, ZoneOffset}
 import scala.util.control.NonFatal
 
-/** Left-side panel: job-dir status, execution-time picker, output-dir override,
-  * and the Run button.
+/** Top horizontal panel: job-dir status, execution-time picker, output-dir
+  * override, and a compact Run button.
   *
   * Mutations flow into [[JobSession]] (which notifies the rest of the UI).
   * Pressing Run launches a worker thread that calls `dataJob.run` with a
   * [[TaskProgressListener]] marshalling task events back onto the FX thread.
   */
-final class ControlsPanel(session: JobSession, owner: () => Stage) extends VBox {
+final class ControlsPanel(session: JobSession, owner: () => Stage) extends HBox {
 
-  setSpacing(8)
-  setPadding(new Insets(12))
-  setPrefWidth(280)
+  setSpacing(12)
+  setPadding(new Insets(8, 12, 8, 12))
+  setAlignment(Pos.CENTER_LEFT)
   setStyle("-fx-background-color: #2a2c38;")
 
   // ---- Job directory section ----
   private val jobDirField = new TextField()
   jobDirField.setEditable(false)
   jobDirField.setPromptText("(no job loaded)")
-  HBox.setHgrow(jobDirField, Priority.ALWAYS)
+  jobDirField.setPrefColumnCount(22)
   private val openButton = new Button("Open…")
   openButton.setOnAction(_ => onOpen())
-  private val openRow = new HBox(6, jobDirField, openButton)
-  openRow.setAlignment(Pos.CENTER_LEFT)
-  private val newProjectButton = new Button("Create new project…")
-  newProjectButton.setMaxWidth(Double.MaxValue)
-  newProjectButton.setStyle("-fx-padding: 6 0; -fx-background-color: #3a3f55; -fx-text-fill: #d7dcec;")
+  private val newProjectButton = new Button("New…")
+  newProjectButton.setStyle("-fx-background-color: #3a3f55; -fx-text-fill: #d7dcec;")
   newProjectButton.setOnAction(_ => onNewProject())
+  private val jobDirRow = new HBox(6, jobDirField, openButton, newProjectButton)
+  jobDirRow.setAlignment(Pos.CENTER_LEFT)
+  private val jobDirSection = section("Job directory", jobDirRow)
 
   // ---- Execution time section ----
   private val datePicker = new DatePicker()
-  datePicker.setMaxWidth(Double.MaxValue)
-  private val hourSpinner = makeIntSpinner(0, 23, 0)
+  datePicker.setPrefWidth(130)
+  private val hourSpinner   = makeIntSpinner(0, 23, 0)
   private val minuteSpinner = makeIntSpinner(0, 59, 0)
   private val secondSpinner = makeIntSpinner(0, 59, 0)
-  private val timeRow = new HBox(4, hourSpinner, new Label(":"), minuteSpinner, new Label(":"), secondSpinner)
-  timeRow.setAlignment(Pos.CENTER_LEFT)
-  private val resetTimeBtn = new Button("Reset to now")
+  private val resetTimeBtn = new Button("Now")
   resetTimeBtn.setOnAction(_ => setExecutionUiToInstant(Instant.now()))
   datePicker.valueProperty().addListener((_, _, _) => pushExecutionTime())
   hourSpinner.valueProperty().addListener((_, _, _) => pushExecutionTime())
   minuteSpinner.valueProperty().addListener((_, _, _) => pushExecutionTime())
   secondSpinner.valueProperty().addListener((_, _, _) => pushExecutionTime())
+  private val timeRow = new HBox(
+    4,
+    datePicker, hourSpinner, new Label(":"), minuteSpinner, new Label(":"), secondSpinner, resetTimeBtn
+  )
+  timeRow.setAlignment(Pos.CENTER_LEFT)
+  private val timeSection = section("Execution time (UTC)", timeRow)
 
   // ---- Output dir override section ----
   private val outputDirField = new TextField()
   outputDirField.setPromptText("<jobDir>/output (default)")
-  HBox.setHgrow(outputDirField, Priority.ALWAYS)
+  outputDirField.setPrefColumnCount(20)
   private val outputDirBrowse = new Button("Choose…")
   outputDirBrowse.setOnAction(_ => onChooseOutputDir())
   outputDirField.focusedProperty().addListener((_, _, isFocused) => {
     if (!isFocused) pushOutputDir()
   })
   outputDirField.setOnAction(_ => pushOutputDir())
+  // Always-on hint showing the path the job will actually write under. Now a
+  // tooltip on the field — the multi-line label didn't fit horizontally, but
+  // the rendered path is still useful when debugging templated outputs.
+  private val effectiveOutputTip = new Tooltip("")
+  outputDirField.setTooltip(effectiveOutputTip)
   private val outputRow = new HBox(6, outputDirField, outputDirBrowse)
   outputRow.setAlignment(Pos.CENTER_LEFT)
-  // Always-on hint showing the path the job will actually write under, even
-  // when the user hasn't typed an override. Templated paths show as-rendered.
-  private val effectiveOutputLabel = new Label("")
-  effectiveOutputLabel.setStyle("-fx-text-fill: #8ab4f8; -fx-font-size: 11px; -fx-font-family: monospace;")
-  effectiveOutputLabel.setWrapText(true)
+  private val outputSection = section("Output directory", outputRow)
 
   // ---- Run button + status ----
-  private val runButton = new Button("Run pipeline")
-  runButton.setMaxWidth(Double.MaxValue)
-  runButton.setFont(Font.font("Sans", FontWeight.BOLD, 14))
-  runButton.setStyle("-fx-padding: 10 0; -fx-background-color: #3d6ee8; -fx-text-fill: white;")
+  private val runButton = new Button("Run")
+  runButton.setStyle("-fx-background-color: #3d6ee8; -fx-text-fill: white;")
+  runButton.setTooltip(new Tooltip("Run pipeline (⌘R)"))
   runButton.setOnAction(_ => onRun())
   private val statusLabel = new Label("Ready.")
-  statusLabel.setWrapText(true)
   statusLabel.setStyle("-fx-text-fill: #c5cad8;")
+  statusLabel.setMaxWidth(Double.MaxValue)
+  HBox.setHgrow(statusLabel, Priority.ALWAYS)
 
   // Assemble.
   getChildren.addAll(
-    sectionHeader("Job directory"),
-    openRow,
-    newProjectButton,
-    new Separator(),
-    sectionHeader("Execution time (UTC)"),
-    datePicker,
-    timeRow,
-    resetTimeBtn,
-    new Separator(),
-    sectionHeader("Output directory"),
-    outputRow,
-    effectiveOutputLabel,
-    new Separator(),
+    jobDirSection,
+    new Separator(Orientation.VERTICAL),
+    timeSection,
+    new Separator(Orientation.VERTICAL),
+    outputSection,
+    new Separator(Orientation.VERTICAL),
     runButton,
     statusLabel
   )
@@ -110,6 +107,11 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends VBox 
   session.addListener(() => refreshFromSession())
   refreshFromSession()
 
+  /** Public entrypoint so the CMD+R accelerator wired in [[GuiApp]] fires the
+    * same code path as the Run button. No-op when the button is disabled
+    * (no job loaded, or a run is already in flight). */
+  def triggerRun(): Unit = if (!runButton.isDisabled) onRun()
+
   // -------------------- internal helpers --------------------
 
   private def sectionHeader(text: String): Label = {
@@ -118,10 +120,16 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends VBox 
     l
   }
 
+  private def section(headerText: String, body: javafx.scene.Node): VBox = {
+    val box = new VBox(2, sectionHeader(headerText), body)
+    box.setAlignment(Pos.CENTER_LEFT)
+    box
+  }
+
   private def makeIntSpinner(min: Int, max: Int, init: Int): Spinner[Integer] = {
     val s = new Spinner[Integer](min, max, init)
     s.setEditable(true)
-    s.setPrefWidth(70)
+    s.setPrefWidth(60)
     s
   }
 
@@ -186,11 +194,11 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends VBox 
         session.effectiveOutputDir.map(s => s"$s (default)").getOrElse("<jobDir>/output (default)")
       )
     }
-    effectiveOutputLabel.setText(effectiveOutputText)
+    effectiveOutputTip.setText(effectiveOutputText)
     runButton.setDisable(!session.canRun)
     statusLabel.setText(statusMessage)
-    // The "Create new project" button is only really useful before a job is
-    // loaded; once one is open it just clutters the panel.
+    // The "New…" button is only really useful before a job is loaded; once
+    // one is open it just clutters the panel.
     val hasJob = session.jobDir.isDefined
     newProjectButton.setVisible(!hasJob)
     newProjectButton.setManaged(!hasJob)

@@ -303,10 +303,11 @@ java -jar bazel-bin/examples/gui_app/gui_app_deploy.jar \
 
 Layout:
 
-- **Top** — menu bar (File: Open / Reload / Quit; View: Fit DAG)
-- **Left** — open job dir, execution time (UTC date + h/m/s spinners),
-  output dir field, Run button. The effective output directory (after
-  template rendering) is always shown.
+- **Top** — menu bar (File: Open / Reload / Quit; View: Fit DAG) stacked
+  above a horizontal controls strip: open job dir, execution time (UTC date
+  + h/m/s spinners), output dir field, a small Run button (⌘R / Ctrl+R),
+  and run status. Hover the output-dir field for the effective rendered
+  path.
 - **Center top** — DAG canvas. Pan with right- or middle-mouse drag (or
   Alt+left-drag), zoom with the scroll wheel. Click a node to select it;
   double-click to load its output rows.

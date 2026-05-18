@@ -5,7 +5,7 @@ import javafx.geometry.Orientation
 import javafx.scene.Scene
 import javafx.scene.control.{Menu, MenuBar, MenuItem, SplitPane}
 import javafx.scene.input.{KeyCode, KeyCodeCombination, KeyCombination}
-import javafx.scene.layout.{BorderPane, Pane}
+import javafx.scene.layout.{BorderPane, Pane, VBox}
 import javafx.stage.Stage
 
 import java.nio.file.Paths
@@ -13,8 +13,8 @@ import java.nio.file.Paths
 /** Top-level JavaFX Application for the transformer GUI.
   *
   * Layout:
-  *   * Top — menu bar
-  *   * Left — [[ControlsPanel]] (open dir, execution time, output dir, Run)
+  *   * Top — menu bar stacked above the horizontal [[ControlsPanel]] (open
+  *     dir, execution time, output dir, Run)
   *   * Center — vertical [[SplitPane]] with the DAG canvas above and the
   *     [[ResultsTabPane]] below. The tab pane hosts every secondary panel
   *     (task details, output data, validations, SQL console, run log) so the
@@ -49,11 +49,18 @@ final class GuiApp extends Application {
     centerSplit.setDividerPositions(0.6)
 
     val root = new BorderPane()
-    root.setTop(buildMenuBar(primaryStage, session, canvas))
-    root.setLeft(controls)
+    val topStack = new VBox(buildMenuBar(primaryStage, session, canvas), controls)
+    root.setTop(topStack)
     root.setCenter(centerSplit)
 
     val scene = new Scene(root, 1400, 900)
+    // CMD+R (CTRL+R on Linux/Windows) triggers the same code path as the Run
+    // button. Wired on the scene rather than as a MenuItem accelerator so the
+    // shortcut works without us needing to expose Run in the menu bar.
+    scene.getAccelerators.put(
+      new KeyCodeCombination(KeyCode.R, KeyCombination.SHORTCUT_DOWN),
+      new Runnable { def run(): Unit = controls.triggerRun() }
+    )
     primaryStage.setScene(scene)
     primaryStage.show()
 
@@ -80,7 +87,10 @@ final class GuiApp extends Application {
     })
 
     val reloadItem = new MenuItem("Reload")
-    reloadItem.setAccelerator(new KeyCodeCombination(KeyCode.R, KeyCombination.SHORTCUT_DOWN))
+    // CMD+SHIFT+R — CMD+R is reserved for Run pipeline (wired on the scene).
+    reloadItem.setAccelerator(
+      new KeyCodeCombination(KeyCode.R, KeyCombination.SHORTCUT_DOWN, KeyCombination.SHIFT_DOWN)
+    )
     reloadItem.setOnAction(_ => session.jobDir.foreach(session.openJobDir))
 
     val addInputItem = new MenuItem("Add Input…")
