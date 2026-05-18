@@ -222,10 +222,11 @@ final class ResultsTabPane(
     val nameOpt = explicitName.orElse(
       currentTaskIndex.flatMap(i => session.dag.flatMap(_.nodes.lift(i))).map(_.task.displayName)
     )
+    val formatHint = choice.map(_.marker.format)
     val worker = new Thread(new Runnable {
       def run(): Unit = {
         val outcome =
-          try LoadOutcome.Success(loadFromDisk(path))
+          try LoadOutcome.Success(loadFromDisk(path, formatHint))
           catch { case NonFatal(e) => LoadOutcome.Failed(Option(e.getMessage).getOrElse(e.toString)) }
         FxHelpers.onFx {
           if (loadToken.get() == token) applyOutcome(nameOpt, path, outcome, choice)
@@ -314,10 +315,14 @@ final class ResultsTabPane(
     }
   }
 
-  private def loadFromDisk(path: String): LoadedRows = {
+  private def loadFromDisk(path: String, formatHint: Option[String]): LoadedRows = {
     val p = Paths.get(path)
     if (!Files.exists(p)) throw new RuntimeException(s"output path does not exist: $path")
-    detectFormat(p) match {
+    val fmt = formatHint
+      .orElse(if (Files.isDirectory(p)) RunMarker.read(p).map(_.format) else None)
+      .getOrElse(detectFormat(p))
+      .toLowerCase
+    fmt match {
       case "parquet" =>
         ParquetReaderHook.get match {
           case Some(reader) => collectRows(reader(path))
