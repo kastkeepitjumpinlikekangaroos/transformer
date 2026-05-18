@@ -275,6 +275,20 @@ class DirectoryJobLoaderTest {
     assertTrue(s"path should end with /t (no partition), got '$path'", path.endsWith("/t"))
   }
 
+  @Test def perTableOutputJsonFormatOverridesDefault(): Unit = {
+    val jobDir = tmpDir("djl-fmt-")
+    writeFile(jobDir.resolve("data/events.csv"), "id\n1\n")
+    writeFile(jobDir.resolve("inputs/events/config.json"), """{"path":"data/events.csv"}""")
+    writeFile(jobDir.resolve("tables/csv_t/main.sql"), "SELECT id FROM events")
+    writeFile(jobDir.resolve("tables/pq_t/main.sql"), "SELECT id FROM events")
+    writeFile(jobDir.resolve("tables/pq_t/output.json"), """{"format":"parquet"}""")
+    val outputDir = tmpDir("djl-fmt-out-")
+    val job = DirectoryJobLoader.load(jobDir, outputDir = Some(outputDir.toString))
+    val byView = job.sql.map(t => t.viewName.get -> t.outputFile.get.format).toMap
+    assertEquals(Some("csv"), byView("csv_t"))
+    assertEquals(Some("parquet"), byView("pq_t"))
+  }
+
   @Test def perTableOutputJsonMalformedThrows(): Unit = {
     val jobDir = tmpDir("djl-bad-part-")
     writeFile(jobDir.resolve("data/x.csv"), "n\n1\n")

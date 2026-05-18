@@ -97,7 +97,8 @@ object DirectoryJobLoader {
       }
       val validations = loadValidations(dir.resolve("validations"))
       val basePath = joinPath(outputDir, viewName)
-      val outputPath = loadOutputConfig(dir, viewName) match {
+      val cfg = loadOutputConfig(dir, viewName)
+      val outputPath = cfg.partitionBy match {
         case Some(partition) if partition.nonEmpty => joinPath(basePath, partition)
         case _                                     => basePath
       }
@@ -105,28 +106,36 @@ object DirectoryJobLoader {
         name = Some(viewName),
         viewName = Some(viewName),
         sqlFile = Some(mainSql.toString),
-        outputFile = Some(OutputFilePath(outputPath, format = Some("csv"))),
+        outputFile = Some(OutputFilePath(outputPath, format = Some(cfg.format.getOrElse("csv")))),
         validations = validations
       )
     }
   }
 
-  /** Optional `tables/<viewName>/output.json` config. Today the only supported
-    * field is `partitionBy` — a string appended to the task's output path. The
-    * string is templated against [[com.transformer.temporal.TemporalVariables]]
-    * at run time, so `"day={{today}}"` produces a partition-per-run layout:
+  /** Parsed `tables/<viewName>/output.json` config — both fields optional. */
+  private final case class OutputConfig(partitionBy: Option[String], format: Option[String])
+
+  /** Optional `tables/<viewName>/output.json` config. Supported fields:
     *
-    *   <outputDir>/<viewName>/day=YYYYMMDD/part-NNNNN.csv
+    *   - `partitionBy` — string appended to the task's output path. Templated
+    *     against [[com.transformer.temporal.TemporalVariables]] at run time, so
+    *     `"day={{today}}"` produces a partition-per-run layout:
+    *     `<outputDir>/<viewName>/day=YYYYMMDD/part-NNNNN.<ext>`.
+    *   - `format` — output format (e.g. `"csv"`, `"parquet"`). Defaults to
+    *     `"csv"` if omitted.
     *
-    * Returns None if `output.json` is absent. Throws [[IllegalArgumentException]]
-    * if it exists but is malformed.
+    * Returns an empty [[OutputConfig]] if `output.json` is absent. Throws
+    * [[IllegalArgumentException]] if it exists but is malformed.
     */
-  private def loadOutputConfig(tableDir: Path, viewName: String): Option[String] = {
+  private def loadOutputConfig(tableDir: Path, viewName: String): OutputConfig = {
     val configPath = tableDir.resolve("output.json")
-    if (!Files.isRegularFile(configPath)) return None
+    if (!Files.isRegularFile(configPath)) return OutputConfig(None, None)
     val ctx = s"table '$viewName' (output.json)"
     val obj = Json.parse(Files.readString(configPath)).asObject(ctx)
-    obj.optString("partitionBy", ctx).map(_.trim).filter(_.nonEmpty)
+    OutputConfig(
+      partitionBy = obj.optString("partitionBy", ctx).map(_.trim).filter(_.nonEmpty),
+      format = obj.optString("format", ctx).map(_.trim).filter(_.nonEmpty)
+    )
   }
 
   private def loadValidations(validationsDir: Path): Seq[Validation] = {
