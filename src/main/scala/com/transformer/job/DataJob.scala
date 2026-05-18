@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, Schema, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, MaterializedView, Schema, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
 
@@ -35,10 +35,16 @@ final case class DataJob(
     val vars = temporalVariables.getOrElse(TemporalVariables())
     val catalog = new Catalog
 
-    // Phase 1: load every input into the catalog in parallel.
-    val inputPool = Executors.newFixedThreadPool(math.max(1, math.min(inputs.size, Runtime.getRuntime.availableProcessors)))
+    // Phase 1: resolve every input in parallel, then eagerly drain every input
+    // partition into memory on the same shared pool. The pool is sized to all
+    // available cores so independent (input, partition) reads saturate the CPU
+    // even with a mix of small + large inputs. After this, SQL execution hits
+    // in-memory MaterializedViews — no further I/O on the input side.
+    val cores = math.max(1, Runtime.getRuntime.availableProcessors)
+    val inputPool = Executors.newFixedThreadPool(cores)
     try {
-      val futures = inputs.map { in =>
+      // 1a: resolve in parallel (schema inference for CSV, footer reads for Parquet).
+      val resolveFutures = inputs.map { in =>
         inputPool.submit(new Callable[(String, CatalogView)] {
           def call(): (String, CatalogView) = {
             val rendered = in.copy(path = TemplateRenderer.render(in.path, vars))
@@ -46,9 +52,14 @@ final case class DataJob(
           }
         })
       }
-      futures.foreach { f =>
-        val (name, view) = f.get()
-        catalog.register(name, view)
+      val resolved: Seq[(String, CatalogView)] = resolveFutures.map(_.get())
+
+      // 1b: drain every (view, partition) on the same pool — one Callable per
+      // partition across every view, so the pool naturally interleaves small
+      // and large inputs.
+      val materialized = MaterializedView.materializeManyInParallel(resolved.map(_._2), inputPool)
+      resolved.iterator.zip(materialized.iterator).foreach { case ((name, _), mv) =>
+        catalog.register(name, mv)
       }
     } catch {
       case NonFatal(e) =>
