@@ -14,8 +14,11 @@ import scala.jdk.CollectionConverters._
   * other tasks whose `viewName` is referenced in this task's main SQL or any of its
   * validation SQLs). References to Phase 1 input views are NOT deps — those are
   * pre-loaded into the catalog before any task runs.
+  *
+  * Public so external surfaces (e.g. the GUI module) can render the DAG without
+  * having to re-implement the analyzer.
   */
-private[job] final case class TaskDagNode(
+final case class TaskDagNode(
     index: Int,
     task: SQLTask,
     renderedMainSql: String,
@@ -23,13 +26,16 @@ private[job] final case class TaskDagNode(
     deps: Set[Int]
 )
 
-/** A fully-validated DAG of [[SQLTask]]s ready to be executed by the scheduler. */
-private[job] final case class TaskDag(
+/** A fully-validated DAG of [[SQLTask]]s ready to be executed by the scheduler.
+  *
+  * Public for the same reason as [[TaskDagNode]] — see scaladoc there.
+  */
+final case class TaskDag(
     nodes: Vector[TaskDagNode],
     dependents: Vector[Set[Int]]
 )
 
-private[job] object TaskDag {
+object TaskDag {
 
   /** Build a DAG over `tasks`, validating uniqueness/references/cycles upfront.
     *

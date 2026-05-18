@@ -475,4 +475,93 @@ class DataJobTest {
       }
     }
   }
+
+  @Test def buildDagExposesNodesAndDepsWithoutRunning(): Unit = {
+    val inDir = tmpDir("dj-bd-")
+    writeCsv(inDir, "events.csv", "id,x\n1,1\n")
+    val outDir = tmpDir("dj-bd-out-")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(
+        SQLTask(name = Some("a"), viewName = Some("a"),
+          sqlString = Some("SELECT id, x FROM events"),
+          outputFile = Some(OutputFilePath(outDir.resolve("a").toString))),
+        SQLTask(name = Some("b"),
+          sqlString = Some("SELECT id, x + 1 AS y FROM a"),
+          outputFile = Some(OutputFilePath(outDir.resolve("b").toString)))
+      )
+    )
+    val dag = job.buildDag()
+    assertEquals(2, dag.nodes.size)
+    assertEquals(Set.empty[Int], dag.nodes(0).deps)
+    assertEquals(Set(0), dag.nodes(1).deps)
+    // Calling buildDag must not have created any output (no I/O happened).
+    assertFalse("output dir should not exist after buildDag", Files.exists(outDir.resolve("a")))
+  }
+
+  @Test def progressListenerFiresStartAndFinishForEveryRunningTask(): Unit = {
+    val inDir = tmpDir("dj-pl-")
+    writeCsv(inDir, "events.csv", "id,x\n1,1\n2,2\n3,3\n")
+    val outDir = tmpDir("dj-pl-out-")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(
+        SQLTask(name = Some("a"), viewName = Some("a"),
+          sqlString = Some("SELECT id, x FROM events"),
+          outputFile = Some(OutputFilePath(outDir.resolve("a").toString))),
+        SQLTask(name = Some("b"),
+          sqlString = Some("SELECT id, x + 1 AS y FROM a"),
+          outputFile = Some(OutputFilePath(outDir.resolve("b").toString)))
+      )
+    )
+    val started = new java.util.concurrent.ConcurrentLinkedQueue[Integer]()
+    val finished = new java.util.concurrent.ConcurrentHashMap[Integer, TaskResult]()
+    val listener = new TaskProgressListener {
+      def onTaskStart(taskIndex: Int, taskName: String): Unit = { started.add(taskIndex); () }
+      def onTaskFinish(taskIndex: Int, result: TaskResult): Unit = { finished.put(taskIndex, result); () }
+    }
+    com.transformer.sql.exec.SqlEngine.init()
+    val result = job.run(SqlExecutorRegistry.get, listener)
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+    val startedSet = started.iterator().asScala.toSet
+    assertEquals(Set[Integer](0, 1), startedSet)
+    assertEquals(Set[Integer](0, 1), finished.keySet().asScala.toSet)
+    assertTrue(finished.get(0).succeeded)
+    assertTrue(finished.get(1).succeeded)
+  }
+
+  @Test def progressListenerReceivesSkippedFinishForUpstreamFailure(): Unit = {
+    val inDir = tmpDir("dj-pl-skip-")
+    writeCsv(inDir, "events.csv", "id,x\n1,1\n")
+    val outDir = tmpDir("dj-pl-skip-out-")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(
+        SQLTask(name = Some("bad"), viewName = Some("bad"),
+          sqlString = Some("SELECT no_such_col FROM events"),
+          outputFile = Some(OutputFilePath(outDir.resolve("bad").toString))),
+        SQLTask(name = Some("downstream"),
+          sqlString = Some("SELECT * FROM bad"),
+          outputFile = Some(OutputFilePath(outDir.resolve("down").toString)))
+      )
+    )
+    val finished = new java.util.concurrent.ConcurrentHashMap[Integer, TaskResult]()
+    val started = new java.util.concurrent.ConcurrentLinkedQueue[Integer]()
+    val listener = new TaskProgressListener {
+      def onTaskStart(taskIndex: Int, taskName: String): Unit = { started.add(taskIndex); () }
+      def onTaskFinish(taskIndex: Int, result: TaskResult): Unit = { finished.put(taskIndex, result); () }
+    }
+    com.transformer.sql.exec.SqlEngine.init()
+    job.run(SqlExecutorRegistry.get, listener)
+    // bad runs (and fails); downstream is skipped — onTaskStart must NOT fire for it.
+    val startedSet = started.iterator().asScala.toSet
+    assertTrue(s"bad should have started: $startedSet", startedSet.contains(0))
+    assertFalse(s"downstream should be skipped, never started: $startedSet", startedSet.contains(1))
+    // Both must receive a finish event.
+    assertEquals(Set[Integer](0, 1), finished.keySet().asScala.toSet)
+    finished.get(1).status match {
+      case _: TaskStatus.Skipped => // ok
+      case other                 => fail(s"expected downstream=Skipped, got $other")
+    }
+  }
 }

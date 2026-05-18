@@ -27,11 +27,31 @@ final case class DataJob(
   def run(): JobResult = {
     // Touch the SQL engine to make sure it has self-registered.
     com.transformer.sql.exec.SqlEngine.init()
-    run(SqlExecutorRegistry.get)
+    run(SqlExecutorRegistry.get, TaskProgressListener.NoOp)
   }
 
-  /** Run with an explicit executor — useful for tests, advanced wiring, or alternate engines. */
-  def run(executor: SqlExecutor): JobResult = {
+  def run(executor: SqlExecutor): JobResult = run(executor, TaskProgressListener.NoOp)
+
+  /** Build (and validate) the SQLTask DAG without running any I/O.
+    *
+    * Useful for UI surfaces that want to visualize a job's structure before the user
+    * presses Run. Returns the same [[TaskDag]] the runner builds internally — so the
+    * same load-time errors (cycles, unknown refs, duplicate viewNames, duplicate
+    * output paths, self-cycles) surface here as [[IllegalArgumentException]].
+    */
+  def buildDag(): TaskDag = {
+    val vars = temporalVariables.getOrElse(TemporalVariables())
+    val inputViewNames = inputs.iterator.map(_.viewName.toLowerCase).toSet
+    TaskDag.build(sql, inputViewNames, vars)
+  }
+
+  /** Run with an explicit executor and progress listener.
+    *
+    * `listener` callbacks fire from the runner's worker threads — implementations that
+    * touch UI state should marshal back to the UI thread themselves (e.g.
+    * `Platform.runLater`).
+    */
+  def run(executor: SqlExecutor, listener: TaskProgressListener): JobResult = {
     val vars = temporalVariables.getOrElse(TemporalVariables())
     val catalog = new Catalog
 
@@ -79,7 +99,7 @@ final case class DataJob(
         case NonFatal(e) =>
           return JobResult(succeeded = false, tasks = Nil, error = Some(e.getMessage))
       }
-    val results = runDag(dag, executor, catalog, vars)
+    val results = runDag(dag, executor, catalog, vars, listener)
 
     val validationFailures: Seq[(String, Seq[ValidationFailure])] =
       results.iterator.collect {
@@ -98,7 +118,8 @@ final case class DataJob(
       dag: TaskDag,
       executor: SqlExecutor,
       catalog: Catalog,
-      vars: TemporalVariables
+      vars: TemporalVariables,
+      listener: TaskProgressListener
   ): Array[TaskResult] = {
     val n = dag.nodes.size
     val results = Array.ofDim[TaskResult](n)
@@ -122,7 +143,11 @@ final case class DataJob(
                   TaskResult(dag.nodes(i).task.displayName,
                     TaskStatus.Skipped(s"upstream failure: $names"),
                     0L, None, now, now)
-                } else runOneTask(dag.nodes(i), executor, catalog, vars)
+                } else {
+                  try listener.onTaskStart(i, dag.nodes(i).task.displayName)
+                  catch { case _: Throwable => () }
+                  runOneTask(dag.nodes(i), executor, catalog, vars)
+                }
             } catch {
               case t: Throwable =>
                 // Defensive — runOneTask catches NonFatal itself. This only fires on
@@ -135,6 +160,8 @@ final case class DataJob(
                   0L, None, now, now
                 )
             } finally {
+              try listener.onTaskFinish(i, results(i))
+              catch { case _: Throwable => () }
               completed.put(i)
             }
             null

@@ -1,0 +1,30 @@
+load("@rules_scala//scala:scala.bzl", "scala_library")
+
+# JavaFX GUI library: visualize and run a transformer DataJob (typically loaded
+# via DirectoryJobLoader) with live DAG status and post-run output preview.
+#
+# This library deliberately doesn't depend on parquet — if the caller wants
+# parquet input/output to work, the launcher should also depend on
+# //src/main/scala/com/transformer/read/parquet so the parquet hooks self-install.
+scala_library(
+    name = "gui",
+    srcs = glob(["**/*.scala"]),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/read/csv",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/temporal",
+        "@maven//:org_openjfx_javafx_base",
+        "@maven//:org_openjfx_javafx_controls",
+        "@maven//:org_openjfx_javafx_graphics",
+        # On JavaFX 21+ the bare jars are metadata only — the actual classes
+        # live in the platform-specific classifier jars. Depend on the mac
+        # variants here; the launcher BUILD.bazel can add other platforms
+        # (win/linux) if cross-platform binaries are needed.
+        "@maven//:org_openjfx_javafx_base_mac_aarch64",
+        "@maven//:org_openjfx_javafx_controls_mac_aarch64",
+        "@maven//:org_openjfx_javafx_graphics_mac_aarch64",
+    ],
+)

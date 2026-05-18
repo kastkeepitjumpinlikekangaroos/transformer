@@ -22,6 +22,19 @@ maven.install(
         "org.slf4j:slf4j-api:2.0.13",
         "org.slf4j:slf4j-nop:2.0.13",
 
+        # JavaFX — used only by the //src/main/scala/com/transformer/gui module
+        # and the //examples/gui_app launcher. Other modules don't pull this in.
+        "org.openjfx:javafx-base:21.0.1",
+        "org.openjfx:javafx-controls:21.0.1",
+        "org.openjfx:javafx-graphics:21.0.1",
+        # Platform-specific native libraries.
+        "org.openjfx:javafx-base:jar:mac-aarch64:21.0.1",
+        "org.openjfx:javafx-controls:jar:mac-aarch64:21.0.1",
+        "org.openjfx:javafx-graphics:jar:mac-aarch64:21.0.1",
+        "org.openjfx:javafx-base:jar:win:21.0.1",
+        "org.openjfx:javafx-controls:jar:win:21.0.1",
+        "org.openjfx:javafx-graphics:jar:win:21.0.1",
+
         # Testing
         "junit:junit:4.13.2",
     ],
