@@ -426,9 +426,9 @@ InputFilePath("data.csv",
   `Boolean`, `String` (UTF-8 logical type), `Binary`, `Date` (INT32 days),
   `Timestamp` (INT64 micros).
 
-Parquet support is loaded by adding `//src/main/scala/com/transformer/read/parquet`
-to your `scala_binary` deps. The first reference auto-installs hooks the job
-runner uses.
+Parquet is a first-class format — `job/` depends on the parquet read/write
+modules directly, so any user of the `DataJob` API gets parquet support out
+of the box.
 
 ### Cloud (`gs://` / `s3://`)
 
@@ -450,12 +450,24 @@ FROM <table> [<alias>]
 [ LIMIT <n> ]
 ```
 
-**Aggregates:** `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `SUM`, `AVG`,
-`MIN`, `MAX`.
+**Aggregates:** `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `COUNT_IF(pred)`,
+`SUM`, `AVG`, `MIN`, `MAX`,
+`STDDEV`/`STDDEV_SAMP`/`STDDEV_POP`, `VARIANCE`/`VAR_SAMP`/`VAR_POP`,
+`COVAR_SAMP`/`COVAR_POP`, `CORR`. Univariate variance/stddev (and `COUNT_IF`)
+are also available as window aggregates with `OVER (...)`. Variance and stddev
+use Welford + Chan's parallel merge for numerical stability; `*_SAMP` returns
+NULL when fewer than two non-NULL inputs are present.
 
-**Scalar functions:** `LENGTH`/`LEN`, `UPPER`, `LOWER`, `TRIM`, `SUBSTRING`,
-`CONCAT`, `COALESCE`, `IF`, `NULLIF`, `ABS`, `ROUND`, `FLOOR`, `CEIL`/`CEILING`,
-`MOD`, `POW`/`POWER`, `CURRENT_DATE`, `CURRENT_TIMESTAMP`.
+**Scalar functions:** strings — `LENGTH`/`LEN`, `UPPER`, `LOWER`, `TRIM`,
+`SUBSTRING`, `CONCAT`; flow — `COALESCE`, `IF`, `NULLIF`, `GREATEST`, `LEAST`;
+numeric — `ABS`, `ROUND`, `FLOOR`, `CEIL`/`CEILING`, `TRUNC`/`TRUNCATE`,
+`MOD`, `POW`/`POWER`, `SIGN`; math — `SQRT`, `CBRT`, `EXP`, `LN`, `LOG(x)`,
+`LOG(base, x)`, `LOG10`, `LOG2`; trig — `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`,
+`ATAN`, `ATAN2(y, x)`, `SINH`, `COSH`, `TANH`, `DEGREES`, `RADIANS`;
+constants — `PI()`, `E()`; non-deterministic — `RAND()` / `RAND(seed)`;
+temporal — `CURRENT_DATE`, `CURRENT_TIMESTAMP`. NULL propagates through every
+math function; `GREATEST`/`LEAST` skip NULLs and return NULL only when every
+argument is NULL.
 
 **Operators:** `+ - * / %`, `=  <>  <  <=  >  >=`, `AND OR NOT`, `||` (concat),
 `LIKE`, `IS NULL` / `IS NOT NULL`, `IN (...)`, `BETWEEN`, `CASE WHEN`,
@@ -517,8 +529,8 @@ Unknown variables raise `IllegalArgumentException` listing all known names.
 .
 ├── MODULE.bazel               Bazel deps: rules_scala 7.0.0, scala 2.13.16,
 │                              jsqlparser 5.0, parquet-hadoop 1.14.3 (+ minimal
-│                              hadoop), openjfx 21.0.1 (gui only), junit
-├── .bazelrc                   JDK 21 toolchain
+│                              hadoop 3.4.3), openjfx 21.0.1 (gui only), junit
+├── .bazelrc                   JDK 21 build toolchain (runtime is JDK 21+)
 ├── docs/                      Contributor documentation (architecture,
 │                              conventions, extending, gotchas, testing).
 ├── examples/                  Bazel-deployable example apps (programmatic,
@@ -528,14 +540,14 @@ Unknown variables raise `IllegalArgumentException` listing all known names.
 │   ├── core/                  Shared types: DataType, Schema, ColumnarBatch,
 │   │                          Catalog, SqlExecutor boundary + registry.
 │   ├── temporal/              TemporalVariables, TemplateRenderer.
-│   ├── read/{csv,parquet}/    Format-specific readers + parquet hook installer.
+│   ├── read/{csv,parquet}/    Format-specific readers.
 │   ├── sql/{parse,plan,exec}/ JSqlParser façade, logical plan + builder,
 │   │                          physical operators + planner + engine.
 │   ├── write/{csv,parquet}/   Format-specific writers + shared ParquetSchema.
 │   ├── job/                   User-facing API: InputFilePath, OutputFilePath,
 │   │                          SQLTask, DataJob runner, DirectoryJobLoader,
 │   │                          TaskDag, TaskRunRecord, JobRunRecord,
-│   │                          parquet hooks, Json parser.
+│   │                          JobOutputLayout, Json parser.
 │   └── gui/                   JavaFX visualiser/runner.
 └── src/test/scala/com/transformer/...   (mirrors src/main/scala layout)
 ```
@@ -573,7 +585,7 @@ java -jar bazel-bin/path/to/your/my_job_deploy.jar [args]
 ```
 
 The `_deploy.jar` is fat — all transitive deps inlined. Ship it to anywhere with
-a JDK 21.
+JDK 21 or newer (tested through JDK 25).
 
 ## Limitations
 

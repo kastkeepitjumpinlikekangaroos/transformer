@@ -38,9 +38,8 @@ ship a fix or move something from "not done" to "done".
   Scala won't unify because of Java type invariance. `ParquetSchema.toMessageType`
   maps `_.asInstanceOf[Type]` first.
 - **No circular module deps.** `read/parquet` depends on `write/parquet` for
-  the shared `ParquetSchema` converter; the reverse direction goes through
-  hooks (`ParquetSupport` lives in `read/parquet` and installs into
-  `job/`-owned hook objects).
+  the shared `ParquetSchema` converter; `job/` depends on both. Neither
+  parquet module depends on `job/`, so the cycle stays open.
 - **CSV writer's `needsQuotingChars` must be initialized before the header is
   written.** Class-body order matters; put it above the `if (options.header)`
   block.
@@ -51,6 +50,14 @@ ship a fix or move something from "not done" to "done".
   directory path (e.g. `output/totals`) needs `format = Some("parquet")` or
   the default (CSV) wins. `DirectoryJobLoader` sets `format` explicitly to keep
   the per-table dir name clean (`output/<view>/...` rather than `output/<view>.csv/...`).
+- **Hadoop-common pre-3.4.3 breaks on JDK 24+.** `UserGroupInformation.getCurrentUser()`
+  in 3.3.x/3.4.0/.1/.2 calls `Subject.getSubject(AccessControlContext)`, which
+  throws `UnsupportedOperationException` once JEP 486 (Security Manager
+  permanently disabled) lands — default in JDK 24+, hard-fails in JDK 25.
+  3.4.3 switches to `SubjectUtil.current()` via HADOOP-18583. Every parquet
+  read/write goes through `Path.getFileSystem` → `FileSystem.Cache.Key` → UGI,
+  so the whole parquet path blows up on older Hadoop + new JDKs. If you need
+  to pin Hadoop lower than 3.4.3, hold the runtime to JDK 23.
 - **Hadoop's `LocalFileSystem` writes hidden `.crc` sidecars** alongside any
   Parquet temp file; the atomic rename leaves them stranded inside the output
   directory. `PathGlob.expand` skips dotfiles and `_`-prefixed files so re-reads
@@ -115,8 +122,11 @@ ship a fix or move something from "not done" to "done".
   CURRENT ROW` this is correct unless the ORDER BY produces ties (where RANGE
   would include all tying rows in the current "row group"). Document this if a
   user depends on RANGE behaviour. Supported window functions: ROW_NUMBER, RANK,
-  DENSE_RANK, LAG, LEAD, plus aggregates SUM/AVG/MIN/MAX/COUNT(*)/COUNT(expr)/COUNT_IF(pred).
-  No FIRST_VALUE/LAST_VALUE/NTH_VALUE/PERCENT_RANK/CUME_DIST/NTILE yet.
+  DENSE_RANK, LAG, LEAD, plus aggregates SUM/AVG/MIN/MAX/COUNT(*)/COUNT(expr)/COUNT_IF(pred)
+  and the univariate stats STDDEV/STDDEV_SAMP/STDDEV_POP/VARIANCE/VAR_SAMP/VAR_POP.
+  No FIRST_VALUE/LAST_VALUE/NTH_VALUE/PERCENT_RANK/CUME_DIST/NTILE yet, and
+  COVAR_SAMP/COVAR_POP/CORR are GROUP BY only (no OVER form yet — JSqlParser's
+  `AnalyticExpression` exposes a single argument slot).
 - **No dynamic column-value partitioning.** The multi-file output we *do*
   support is along the executor's partition axis (file-per-input-file for
   CSV; file-per-row-group for Parquet), capped by `OutputFilePath.maxPartitions`.

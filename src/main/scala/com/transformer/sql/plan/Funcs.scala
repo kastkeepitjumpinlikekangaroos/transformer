@@ -19,8 +19,21 @@ object Funcs {
     case "ABS" if argTypes.size == 1 => Some(argTypes.head)
     case "ROUND" if argTypes.size >= 1 => Some(DataType.DoubleType)
     case "FLOOR" | "CEIL" | "CEILING" if argTypes.size == 1 => Some(DataType.DoubleType)
+    case "TRUNC" | "TRUNCATE" if argTypes.size == 1 || argTypes.size == 2 => Some(DataType.DoubleType)
     case "MOD" if argTypes.size == 2 => Some(DataType.widerNumeric(argTypes(0), argTypes(1)))
     case "POW" | "POWER" if argTypes.size == 2 => Some(DataType.DoubleType)
+    case "SQRT" | "CBRT" | "EXP" if argTypes.size == 1 => Some(DataType.DoubleType)
+    case "LN" if argTypes.size == 1 => Some(DataType.DoubleType)
+    case "LOG" if argTypes.size == 1 || argTypes.size == 2 => Some(DataType.DoubleType)
+    case "LOG10" | "LOG2" if argTypes.size == 1 => Some(DataType.DoubleType)
+    case "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" if argTypes.size == 1 => Some(DataType.DoubleType)
+    case "SINH" | "COSH" | "TANH" if argTypes.size == 1 => Some(DataType.DoubleType)
+    case "ATAN2" if argTypes.size == 2 => Some(DataType.DoubleType)
+    case "DEGREES" | "RADIANS" if argTypes.size == 1 => Some(DataType.DoubleType)
+    case "SIGN" if argTypes.size == 1 => Some(DataType.IntType)
+    case "PI" | "E" if argTypes.isEmpty => Some(DataType.DoubleType)
+    case "RAND" | "RANDOM" if argTypes.isEmpty || argTypes.size == 1 => Some(DataType.DoubleType)
+    case "GREATEST" | "LEAST" if argTypes.nonEmpty => Some(widestNonNull(argTypes))
     case "CURRENT_DATE" if argTypes.isEmpty => Some(DataType.DateType)
     case "CURRENT_TIMESTAMP" if argTypes.isEmpty => Some(DataType.TimestampType)
     case _ => None
@@ -31,6 +44,12 @@ object Funcs {
     if (nonNull.isEmpty) DataType.NullType
     else if (nonNull.forall(DataType.isNumeric)) nonNull.reduce(DataType.widerNumeric)
     else nonNull.head
+  }
+
+  /** Per-thread RNG so RAND() is safe under parallel execution. Seeded RAND(x) returns
+    * a deterministic value (not a per-row stream) — sufficient for tests and tagging. */
+  private val threadRng: ThreadLocal[java.util.Random] = new ThreadLocal[java.util.Random] {
+    override def initialValue(): java.util.Random = new java.util.Random()
   }
 
   def apply(name: String, args: Seq[Any], resultType: DataType, argTypes: Seq[DataType]): Any =
@@ -74,16 +93,90 @@ object Funcs {
           case _ => null
         }
       case "ROUND" =>
-        val v = args.head.asInstanceOf[Number].doubleValue
-        val scale = if (args.size >= 2) args(1).asInstanceOf[Number].intValue else 0
-        val factor = math.pow(10, scale)
-        math.round(v * factor) / factor
-      case "FLOOR" => math.floor(args.head.asInstanceOf[Number].doubleValue)
-      case "CEIL" | "CEILING" => math.ceil(args.head.asInstanceOf[Number].doubleValue)
+        if (args.head == null) null
+        else {
+          val v = args.head.asInstanceOf[Number].doubleValue
+          val scale = if (args.size >= 2) args(1).asInstanceOf[Number].intValue else 0
+          val factor = math.pow(10, scale)
+          math.round(v * factor) / factor
+        }
+      case "FLOOR" =>
+        if (args.head == null) null else math.floor(args.head.asInstanceOf[Number].doubleValue)
+      case "CEIL" | "CEILING" =>
+        if (args.head == null) null else math.ceil(args.head.asInstanceOf[Number].doubleValue)
+      case "TRUNC" | "TRUNCATE" =>
+        if (args.head == null) null
+        else {
+          val v = args.head.asInstanceOf[Number].doubleValue
+          val scale = if (args.size >= 2) {
+            if (args(1) == null) return null
+            args(1).asInstanceOf[Number].intValue
+          } else 0
+          val factor = math.pow(10, scale)
+          val truncated = math.signum(v) * math.floor(math.abs(v) * factor) / factor
+          if (truncated == 0.0) 0.0 else truncated
+        }
       case "MOD" =>
-        Ops.apply("%", args(0), args(1), argTypes(0), argTypes(1), resultType)
+        if (args(0) == null || args(1) == null) null
+        else Ops.apply("%", args(0), args(1), argTypes(0), argTypes(1), resultType)
       case "POW" | "POWER" =>
-        math.pow(args(0).asInstanceOf[Number].doubleValue, args(1).asInstanceOf[Number].doubleValue)
+        if (args(0) == null || args(1) == null) null
+        else math.pow(args(0).asInstanceOf[Number].doubleValue, args(1).asInstanceOf[Number].doubleValue)
+      case "SQRT" =>
+        if (args.head == null) null else math.sqrt(args.head.asInstanceOf[Number].doubleValue)
+      case "CBRT" =>
+        if (args.head == null) null else math.cbrt(args.head.asInstanceOf[Number].doubleValue)
+      case "EXP" =>
+        if (args.head == null) null else math.exp(args.head.asInstanceOf[Number].doubleValue)
+      case "LN" =>
+        if (args.head == null) null else math.log(args.head.asInstanceOf[Number].doubleValue)
+      case "LOG" =>
+        if (args.exists(_ == null)) null
+        else if (args.size == 1) math.log(args.head.asInstanceOf[Number].doubleValue)
+        else {
+          val base = args(0).asInstanceOf[Number].doubleValue
+          val x = args(1).asInstanceOf[Number].doubleValue
+          math.log(x) / math.log(base)
+        }
+      case "LOG10" =>
+        if (args.head == null) null else math.log10(args.head.asInstanceOf[Number].doubleValue)
+      case "LOG2" =>
+        if (args.head == null) null
+        else math.log(args.head.asInstanceOf[Number].doubleValue) / math.log(2.0)
+      case "SIN" => if (args.head == null) null else math.sin(args.head.asInstanceOf[Number].doubleValue)
+      case "COS" => if (args.head == null) null else math.cos(args.head.asInstanceOf[Number].doubleValue)
+      case "TAN" => if (args.head == null) null else math.tan(args.head.asInstanceOf[Number].doubleValue)
+      case "ASIN" => if (args.head == null) null else math.asin(args.head.asInstanceOf[Number].doubleValue)
+      case "ACOS" => if (args.head == null) null else math.acos(args.head.asInstanceOf[Number].doubleValue)
+      case "ATAN" => if (args.head == null) null else math.atan(args.head.asInstanceOf[Number].doubleValue)
+      case "ATAN2" =>
+        if (args(0) == null || args(1) == null) null
+        else math.atan2(args(0).asInstanceOf[Number].doubleValue, args(1).asInstanceOf[Number].doubleValue)
+      case "SINH" => if (args.head == null) null else math.sinh(args.head.asInstanceOf[Number].doubleValue)
+      case "COSH" => if (args.head == null) null else math.cosh(args.head.asInstanceOf[Number].doubleValue)
+      case "TANH" => if (args.head == null) null else math.tanh(args.head.asInstanceOf[Number].doubleValue)
+      case "DEGREES" =>
+        if (args.head == null) null else math.toDegrees(args.head.asInstanceOf[Number].doubleValue)
+      case "RADIANS" =>
+        if (args.head == null) null else math.toRadians(args.head.asInstanceOf[Number].doubleValue)
+      case "SIGN" =>
+        if (args.head == null) null
+        else {
+          val d = args.head.asInstanceOf[Number].doubleValue
+          if (d > 0.0) 1 else if (d < 0.0) -1 else 0
+        }
+      case "PI" => math.Pi
+      case "E"  => math.E
+      case "RAND" | "RANDOM" =>
+        if (args.isEmpty) threadRng.get().nextDouble()
+        else {
+          val seed = args.head.asInstanceOf[Number].longValue
+          new java.util.Random(seed).nextDouble()
+        }
+      case "GREATEST" =>
+        pickByOrdering(args, argTypes, resultType, greatest = true)
+      case "LEAST" =>
+        pickByOrdering(args, argTypes, resultType, greatest = false)
       case "CURRENT_DATE" =>
         java.time.LocalDate.now(java.time.ZoneOffset.UTC).toEpochDay.toInt
       case "CURRENT_TIMESTAMP" =>
@@ -91,4 +184,22 @@ object Funcs {
         now.getEpochSecond * 1000000L + now.getNano / 1000L
       case other => throw new IllegalArgumentException(s"Unsupported function '$other'")
     }
+
+  private def pickByOrdering(args: Seq[Any], argTypes: Seq[DataType], resultType: DataType, greatest: Boolean): Any = {
+    var best: Any = null
+    var i = 0
+    while (i < args.size) {
+      val v = args(i)
+      if (v != null) {
+        val cast = Casts.cast(v, argTypes(i), resultType)
+        if (best == null) best = cast
+        else {
+          val c = Ops.cmp(cast, best)
+          if ((greatest && c > 0) || (!greatest && c < 0)) best = cast
+        }
+      }
+      i += 1
+    }
+    best
+  }
 }

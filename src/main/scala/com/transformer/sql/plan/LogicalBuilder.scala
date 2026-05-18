@@ -603,6 +603,20 @@ object LogicalBuilder {
         AggExprMax(bindExpr(params.head, sources))
       case "COUNT_IF" if params.size == 1 =>
         AggExprCountIf(Analyzer.implicitCast(bindExpr(params.head, sources), DataType.BooleanType))
+      case "STDDEV" | "STDDEV_SAMP" | "STDEV" if params.size == 1 =>
+        AggExprStddev(bindExpr(params.head, sources), sample = true)
+      case "STDDEV_POP" | "STDEVP" if params.size == 1 =>
+        AggExprStddev(bindExpr(params.head, sources), sample = false)
+      case "VARIANCE" | "VAR_SAMP" | "VAR" if params.size == 1 =>
+        AggExprVariance(bindExpr(params.head, sources), sample = true)
+      case "VAR_POP" | "VARP" if params.size == 1 =>
+        AggExprVariance(bindExpr(params.head, sources), sample = false)
+      case "COVAR_SAMP" if params.size == 2 =>
+        AggExprCovar(bindExpr(params(0), sources), bindExpr(params(1), sources), sample = true)
+      case "COVAR_POP" if params.size == 2 =>
+        AggExprCovar(bindExpr(params(0), sources), bindExpr(params(1), sources), sample = false)
+      case "CORR" if params.size == 2 =>
+        AggExprCorr(bindExpr(params(0), sources), bindExpr(params(1), sources))
       case _ =>
         throw new IllegalArgumentException(s"Unsupported aggregate: ${f.getName}(${params.size} args)")
     }
@@ -612,7 +626,12 @@ object LogicalBuilder {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private val AggFns: Set[String] = Set("COUNT", "SUM", "AVG", "MIN", "MAX", "COUNT_IF")
+  private val AggFns: Set[String] = Set(
+    "COUNT", "SUM", "AVG", "MIN", "MAX", "COUNT_IF",
+    "STDDEV", "STDDEV_SAMP", "STDDEV_POP", "STDEV", "STDEVP",
+    "VARIANCE", "VAR_SAMP", "VAR_POP", "VAR", "VARP",
+    "COVAR_SAMP", "COVAR_POP", "CORR"
+  )
   private def isAggFn(name: String): Boolean = AggFns.contains(name.toUpperCase)
 
   private def containsAggregate(e: Expression): Boolean = e match {
@@ -723,6 +742,18 @@ object LogicalBuilder {
         val bound = binder(argExpr.getOrElse(
           throw new IllegalArgumentException("COUNT_IF requires an argument")))
         WindowFnAgg(AggExprCountIf(Analyzer.implicitCast(bound, DataType.BooleanType)))
+      case "STDDEV" | "STDDEV_SAMP" | "STDEV" =>
+        WindowFnAgg(AggExprStddev(binder(argExpr.getOrElse(
+          throw new IllegalArgumentException(s"$fnName requires an argument"))), sample = true))
+      case "STDDEV_POP" | "STDEVP" =>
+        WindowFnAgg(AggExprStddev(binder(argExpr.getOrElse(
+          throw new IllegalArgumentException(s"$fnName requires an argument"))), sample = false))
+      case "VARIANCE" | "VAR_SAMP" | "VAR" =>
+        WindowFnAgg(AggExprVariance(binder(argExpr.getOrElse(
+          throw new IllegalArgumentException(s"$fnName requires an argument"))), sample = true))
+      case "VAR_POP" | "VARP" =>
+        WindowFnAgg(AggExprVariance(binder(argExpr.getOrElse(
+          throw new IllegalArgumentException(s"$fnName requires an argument"))), sample = false))
       case other =>
         throw new IllegalArgumentException(s"Unsupported window function: $other")
     }

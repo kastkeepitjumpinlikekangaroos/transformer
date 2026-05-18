@@ -748,4 +748,230 @@ class SqlEngineTest {
     assertEquals(Seq(1, 1), rows.map(_("one")))
     assertEquals(Some(Seq("n")), view.projectedTo)
   }
+
+  // ---------------------------------------------------------------------------
+  // Math scalar functions
+  // ---------------------------------------------------------------------------
+
+  private val DoubleEps = 1e-9
+
+  @Test def mathLogarithmsAndExp(): Unit = {
+    val p = tmpCsv("a.csv", "x\n1.0\n2.71828182845904523536\n10.0\n8.0\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT LN(x) AS ln, LOG(x) AS log1, LOG(2, x) AS log2_, " +
+        "LOG10(x) AS l10, LOG2(x) AS l2, EXP(0) AS e0, EXP(1) AS e1 FROM t",
+      cat)
+    val rows = collectAllRows(q)
+    assertEquals(4, rows.size)
+    // LN(1) == 0; LOG(1) == LN(1) for our MySQL-style LOG(x)
+    assertEquals(0.0, rows(0)("ln").asInstanceOf[Double], DoubleEps)
+    assertEquals(0.0, rows(0)("log1").asInstanceOf[Double], DoubleEps)
+    // LN(e) ≈ 1
+    assertEquals(1.0, rows(1)("ln").asInstanceOf[Double], 1e-6)
+    // LOG10(10) == 1, LOG2(8) == 3
+    assertEquals(1.0, rows(2)("l10").asInstanceOf[Double], DoubleEps)
+    assertEquals(3.0, rows(3)("l2").asInstanceOf[Double], DoubleEps)
+    // LOG(2, 8) == 3
+    assertEquals(3.0, rows(3)("log2_").asInstanceOf[Double], DoubleEps)
+    // EXP(0) == 1, EXP(1) ≈ e
+    assertEquals(1.0, rows(0)("e0").asInstanceOf[Double], DoubleEps)
+    assertEquals(math.E, rows(0)("e1").asInstanceOf[Double], 1e-12)
+  }
+
+  @Test def mathSqrtCbrtAndSign(): Unit = {
+    val p = tmpCsv("a.csv", "x\n9.0\n-27.0\n0.0\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT SQRT(ABS(x)) AS s, CBRT(x) AS c, SIGN(x) AS sg FROM t",
+      cat)
+    val rows = collectAllRows(q)
+    assertEquals(3.0, rows(0)("s").asInstanceOf[Double], DoubleEps)
+    assertEquals(-3.0, rows(1)("c").asInstanceOf[Double], DoubleEps)
+    assertEquals(1, rows(0)("sg"))
+    assertEquals(-1, rows(1)("sg"))
+    assertEquals(0, rows(2)("sg"))
+  }
+
+  @Test def mathTrigAndConversions(): Unit = {
+    val p = tmpCsv("a.csv", "x\n0\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT SIN(0) AS s0, COS(0) AS c0, TAN(0) AS t0, " +
+        "ATAN2(1, 1) AS a, DEGREES(PI()) AS deg, RADIANS(180) AS rad, " +
+        "PI() AS pi, E() AS e FROM t",
+      cat)
+    val rows = collectAllRows(q)
+    assertEquals(1, rows.size)
+    val r = rows.head
+    assertEquals(0.0, r("s0").asInstanceOf[Double], DoubleEps)
+    assertEquals(1.0, r("c0").asInstanceOf[Double], DoubleEps)
+    assertEquals(0.0, r("t0").asInstanceOf[Double], DoubleEps)
+    assertEquals(math.Pi / 4, r("a").asInstanceOf[Double], DoubleEps)
+    assertEquals(180.0, r("deg").asInstanceOf[Double], 1e-9)
+    assertEquals(math.Pi, r("rad").asInstanceOf[Double], 1e-9)
+    assertEquals(math.Pi, r("pi").asInstanceOf[Double], DoubleEps)
+    assertEquals(math.E, r("e").asInstanceOf[Double], DoubleEps)
+  }
+
+  @Test def mathTruncTwoArg(): Unit = {
+    val p = tmpCsv("a.csv", "x\n3.14159\n-3.789\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT TRUNC(x) AS t0, TRUNC(x, 2) AS t2 FROM t", cat)
+    val rows = collectAllRows(q)
+    assertEquals(3.0, rows(0)("t0").asInstanceOf[Double], DoubleEps)
+    assertEquals(3.14, rows(0)("t2").asInstanceOf[Double], DoubleEps)
+    assertEquals(-3.0, rows(1)("t0").asInstanceOf[Double], DoubleEps)
+    assertEquals(-3.78, rows(1)("t2").asInstanceOf[Double], DoubleEps)
+  }
+
+  @Test def mathGreatestLeastSkipsNulls(): Unit = {
+    val p = tmpCsv("a.csv", "a,b,c\n1,5,3\n,7,2\n,,\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT GREATEST(a, b, c) AS g, LEAST(a, b, c) AS l FROM t", cat)
+    val rows = collectAllRows(q)
+    assertEquals(5, rows(0)("g"))
+    assertEquals(1, rows(0)("l"))
+    assertEquals(7, rows(1)("g"))
+    assertEquals(2, rows(1)("l"))
+    assertNull(rows(2)("g"))
+    assertNull(rows(2)("l"))
+  }
+
+  @Test def mathNullInputsReturnNull(): Unit = {
+    val p = tmpCsv("a.csv", "id,x\n1,\n2,4\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions(inferSchema = false,
+      columns = Some(Seq(Field("id", DataType.IntType), Field("x", DataType.DoubleType))))))
+    val q = SqlEngine.execute(
+      "SELECT id, LN(x) AS l, SQRT(x) AS s, SIN(x) AS sn, SIGN(x) AS sg FROM t",
+      cat)
+    val rows = collectAllRows(q).sortBy(_("id").asInstanceOf[Int])
+    assertNull(rows(0)("l"))
+    assertNull(rows(0)("s"))
+    assertNull(rows(0)("sn"))
+    assertNull(rows(0)("sg"))
+    assertEquals(math.log(4.0), rows(1)("l").asInstanceOf[Double], DoubleEps)
+    assertEquals(2.0, rows(1)("s").asInstanceOf[Double], DoubleEps)
+  }
+
+  @Test def randIsBoundedDouble(): Unit = {
+    val p = tmpCsv("a.csv", "x\n1\n2\n3\n4\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT RAND() AS r, RAND(42) AS rs FROM t", cat)
+    val rows = collectAllRows(q)
+    assertEquals(4, rows.size)
+    rows.foreach { r =>
+      val v = r("r").asInstanceOf[Double]
+      assertTrue(s"RAND() not in [0,1): $v", v >= 0.0 && v < 1.0)
+      val s = r("rs").asInstanceOf[Double]
+      assertTrue(s"RAND(42) not in [0,1): $s", s >= 0.0 && s < 1.0)
+    }
+    // Seed should be deterministic across rows in a batch.
+    assertEquals(rows.head("rs"), rows.last("rs"))
+  }
+
+  // ---------------------------------------------------------------------------
+  // Statistical aggregates
+  // ---------------------------------------------------------------------------
+
+  @Test def stddevAndVarianceSampleAndPop(): Unit = {
+    val p = tmpCsv("a.csv", "x\n2\n4\n4\n4\n5\n5\n7\n9\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT VAR_POP(x) AS vp, VAR_SAMP(x) AS vs, " +
+        "STDDEV_POP(x) AS sp, STDDEV_SAMP(x) AS ss, " +
+        "VARIANCE(x) AS ve, STDDEV(x) AS sde FROM t",
+      cat)
+    val rows = collectAllRows(q)
+    assertEquals(1, rows.size)
+    // Reference values: mean=5, sum sq dev = 32, n=8.
+    // pop variance = 32/8 = 4 ; sample variance = 32/7 ≈ 4.5714286
+    assertEquals(4.0, rows.head("vp").asInstanceOf[Double], 1e-9)
+    assertEquals(32.0 / 7.0, rows.head("vs").asInstanceOf[Double], 1e-9)
+    assertEquals(2.0, rows.head("sp").asInstanceOf[Double], 1e-9)
+    assertEquals(math.sqrt(32.0 / 7.0), rows.head("ss").asInstanceOf[Double], 1e-9)
+    // VARIANCE / STDDEV default to sample.
+    assertEquals(32.0 / 7.0, rows.head("ve").asInstanceOf[Double], 1e-9)
+    assertEquals(math.sqrt(32.0 / 7.0), rows.head("sde").asInstanceOf[Double], 1e-9)
+  }
+
+  @Test def stddevIgnoresNullsAndSingleRowSampleIsNull(): Unit = {
+    val p = tmpCsv("a.csv", "id,x\n1,10\n2,\n3,10\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions(inferSchema = false,
+      columns = Some(Seq(Field("id", DataType.IntType), Field("x", DataType.IntType))))))
+    val q = SqlEngine.execute(
+      "SELECT STDDEV_SAMP(x) AS ss, STDDEV_POP(x) AS sp, " +
+        "VAR_SAMP(x) AS vs, VAR_POP(x) AS vp, COUNT(x) AS c FROM t",
+      cat)
+    val rows = collectAllRows(q)
+    // Two equal non-null values (NULL row skipped) → variance 0; count 2.
+    assertEquals(2L, rows.head("c"))
+    assertEquals(0.0, rows.head("ss").asInstanceOf[Double], 1e-12)
+    assertEquals(0.0, rows.head("sp").asInstanceOf[Double], 1e-12)
+    assertEquals(0.0, rows.head("vs").asInstanceOf[Double], 1e-12)
+    assertEquals(0.0, rows.head("vp").asInstanceOf[Double], 1e-12)
+
+    val p2 = tmpCsv("b.csv", "id,x\n1,42\n")
+    val cat2 = catalogWith("t" -> CsvReader.fromPath(p2.toString, CsvOptions(inferSchema = false,
+      columns = Some(Seq(Field("id", DataType.IntType), Field("x", DataType.IntType))))))
+    val q2 = SqlEngine.execute("SELECT STDDEV_SAMP(x) AS ss, STDDEV_POP(x) AS sp FROM t", cat2)
+    val r2 = collectAllRows(q2).head
+    // Sample stddev requires n >= 2.
+    assertNull(r2("ss"))
+    assertEquals(0.0, r2("sp").asInstanceOf[Double], 1e-12)
+  }
+
+  @Test def stddevWithGroupBy(): Unit = {
+    val p = tmpCsv("a.csv", "cat,x\nA,1\nA,3\nA,5\nB,10\nB,20\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT cat, STDDEV_POP(x) AS sp, VAR_POP(x) AS vp FROM t GROUP BY cat",
+      cat)
+    val rows = collectAllRows(q).sortBy(_("cat").toString)
+    // A: values 1,3,5 → mean 3, m2 = 8, varpop = 8/3
+    assertEquals(8.0 / 3.0, rows(0)("vp").asInstanceOf[Double], 1e-9)
+    assertEquals(math.sqrt(8.0 / 3.0), rows(0)("sp").asInstanceOf[Double], 1e-9)
+    // B: values 10,20 → mean 15, m2 = 50, varpop = 25
+    assertEquals(25.0, rows(1)("vp").asInstanceOf[Double], 1e-9)
+    assertEquals(5.0, rows(1)("sp").asInstanceOf[Double], 1e-9)
+  }
+
+  @Test def covarianceAndCorrelation(): Unit = {
+    val p = tmpCsv("a.csv", "x,y\n1,2\n2,4\n3,6\n4,8\n5,10\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT COVAR_POP(x, y) AS cp, COVAR_SAMP(x, y) AS cs, CORR(x, y) AS r FROM t",
+      cat)
+    val rows = collectAllRows(q)
+    // y = 2x. mean(x)=3, mean(y)=6. dev products: (-2*-4)+(-1*-2)+0+(1*2)+(2*4) = 8+2+0+2+8 = 20.
+    // pop covariance = 20/5 = 4. sample = 20/4 = 5. CORR = 1 (perfect linear).
+    assertEquals(4.0, rows.head("cp").asInstanceOf[Double], 1e-9)
+    assertEquals(5.0, rows.head("cs").asInstanceOf[Double], 1e-9)
+    assertEquals(1.0, rows.head("r").asInstanceOf[Double], 1e-9)
+  }
+
+  @Test def correlationConstantSeriesIsNull(): Unit = {
+    // CORR is undefined when either series has zero variance.
+    val p = tmpCsv("a.csv", "x,y\n1,5\n2,5\n3,5\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT CORR(x, y) AS r FROM t", cat)
+    val rows = collectAllRows(q)
+    assertNull(rows.head("r"))
+  }
+
+  @Test def stddevAsWindowAggregate(): Unit = {
+    val p = tmpCsv("a.csv", "cat,x\nA,1\nA,3\nA,5\nB,10\nB,20\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT cat, x, STDDEV_POP(x) OVER (PARTITION BY cat) AS sp FROM t",
+      cat)
+    val rows = collectAllRows(q).sortBy(r => (r("cat").toString, r("x").asInstanceOf[Int]))
+    // A rows share the same partition stddev (sqrt(8/3)); B rows share 5.0.
+    val a = math.sqrt(8.0 / 3.0)
+    assertEquals(a, rows(0)("sp").asInstanceOf[Double], 1e-9)
+    assertEquals(a, rows(1)("sp").asInstanceOf[Double], 1e-9)
+    assertEquals(a, rows(2)("sp").asInstanceOf[Double], 1e-9)
+    assertEquals(5.0, rows(3)("sp").asInstanceOf[Double], 1e-9)
+    assertEquals(5.0, rows(4)("sp").asInstanceOf[Double], 1e-9)
+  }
 }

@@ -15,7 +15,7 @@ navigation hint, not a comprehensive directory listing.
 - `job/DataJob.scala` (~600 LOC) — runner orchestration: input materialization
   pool, DAG scheduler, writeOutput, validation re-read, per-status
   `_run.json` writes + per-failure `_validation-<slug>.csv` sample writes +
-  per-job `job.json` write + consistency checks, parquet hooks.
+  per-job `job.json` write + consistency checks.
 - `gui/ResultsTabPane.scala` (~360 LOC) — partition picker + background
   output loader + run-log rendering.
 - `core/ColumnarBatch.scala` (~320 LOC) — defines ten `ColumnVector`

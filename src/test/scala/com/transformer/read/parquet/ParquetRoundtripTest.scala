@@ -73,9 +73,6 @@ class ParquetRoundtripTest {
   }
 
   @Test def dataJobWithParquetInputAndOutput(): Unit = {
-    // Force-load Parquet hooks (via touching the object).
-    ParquetSupport.init()
-
     val inSchema = Schema(
       Field("id", DataType.IntType),
       Field("name", DataType.StringType),
@@ -114,7 +111,6 @@ class ParquetRoundtripTest {
   }
 
   @Test def parquetMultiPartitionInputProducesMultipleOutputFiles(): Unit = {
-    ParquetSupport.init()
     val schema = Schema(Field("v", DataType.IntType))
 
     val inDir = Files.createTempDirectory("pq-multi-in-")

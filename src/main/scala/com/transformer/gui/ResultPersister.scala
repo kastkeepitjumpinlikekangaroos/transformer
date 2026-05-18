@@ -1,8 +1,9 @@
 package com.transformer.gui
 
 import com.transformer.core.{ColumnarBatch, MaterializedView}
-import com.transformer.job.{OutputFilePath, ParquetWriterHook, TaskRunRecord, TaskRunStatus}
+import com.transformer.job.{OutputFilePath, TaskRunRecord, TaskRunStatus}
 import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
+import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
 
 import java.nio.file.Paths
 import java.time.Instant
@@ -12,8 +13,7 @@ import scala.util.control.NonFatal
   * machinery a real `SQLTask.outputFile` would use:
   *
   *   - CSV: [[CsvWriter.writePartitioned]] (atomic temp+rename per part file).
-  *   - Parquet: [[ParquetWriterHook]] when the parquet-write module is on
-  *     the classpath.
+  *   - Parquet: [[TParquetWriter.writePartitioned]].
   *
   * The result's partition layout drives output partitioning, capped by
   * [[OutputFilePath.maxPartitions]] just like the SQLTask runner does.
@@ -44,12 +44,7 @@ object ResultPersister {
           dir, view.schema, coalesced, CsvWriteOptions.fromMap(ofp.options)
         )
       case "parquet" =>
-        ParquetWriterHook.get match {
-          case Some(fn) => fn(dir, view.schema, coalesced, ofp.options)
-          case None => throw new UnsupportedOperationException(
-            "Parquet output requires the parquet write module on the classpath."
-          )
-        }
+        TParquetWriter.writePartitioned(dir, view.schema, coalesced, ofp.options)
       case other =>
         throw new IllegalArgumentException(s"Unsupported output format '$other' for '${ofp.path}'")
     }

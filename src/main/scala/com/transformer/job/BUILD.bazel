@@ -7,9 +7,11 @@ scala_library(
     deps = [
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/read/csv",
+        "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/sql/parse",
         "//src/main/scala/com/transformer/temporal",
         "//src/main/scala/com/transformer/write/csv",
+        "//src/main/scala/com/transformer/write/parquet",
         # Force the SQL engine onto the classpath so it self-registers.
         "//src/main/scala/com/transformer/sql/exec",
         "@maven//:com_github_jsqlparser_jsqlparser",

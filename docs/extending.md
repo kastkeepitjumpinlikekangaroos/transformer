@@ -48,23 +48,25 @@ as their own `WindowFn` ADT cases in `sql/plan/Window.scala`. To add one:
 5. Update the supported list in [`README.md`'s "SQL features"](../README.md#sql-features)
    and the omissions block in [`docs/gotchas.md`](gotchas.md#whats-intentionally-not-done).
 
-Aggregate window functions (SUM/AVG/MIN/MAX/COUNT/COUNT_IF) reuse the existing
-`AggExpr` and `AggState` machinery via `WindowFnAgg(agg)` — see the previous
-section. New `AggExpr`s become available as window aggregates automatically.
+Aggregate window functions (SUM/AVG/MIN/MAX/COUNT/COUNT_IF and the univariate
+stats STDDEV*/VAR*) reuse the existing `AggExpr` and `AggState` machinery via
+`WindowFnAgg(agg)` — see the previous section. New `AggExpr`s become available
+as window aggregates automatically once they're wired into both
+`LogicalBuilder.bindAgg` (group context) and `LogicalBuilder.bindAnalytic`
+(window context). Multi-arg aggregates (e.g. `COVAR`, `CORR`) store all their
+operand expressions on `AggExpr.args: Seq[Expr]` so column-projection
+pushdown reaches every referenced column.
 
 ## Add a new file format (e.g., JSON)
 
 1. `read/json/` module with a `JsonReader extends CatalogView` and BUILD file.
 2. `write/json/` with a `JsonWriter` (atomic temp + rename pattern).
-3. Either:
-   a. Add to `InputResolver.resolve` directly if it has no heavy deps (like CSV), or
-   b. Install via a new hook (like `ParquetResolverHook`) if it pulls in
-      transitive deps users may not want — see
-      [architecture.md §1](architecture.md#1-the-hook-system-avoids-dependency-cycles).
+3. Add `read/json` + `write/json` to `job/BUILD.bazel`'s deps and extend
+   `InputResolver.resolve`, `DataJob.writeOutput`, and
+   `DataJob.materializeIfNeeded` with the new case (same pattern as parquet).
 4. Update `InputFilePath.detectedFormat` and `OutputFilePath.detectedFormat`
    to recognize the extension.
-5. Update `DataJob.materializeIfNeeded` so validation re-reads work.
-6. Update [`README.md`'s "Supported file formats"](../README.md#supported-file-formats)
+5. Update [`README.md`'s "Supported file formats"](../README.md#supported-file-formats)
    and the module map in [`docs/architecture.md`](architecture.md#module-map).
 
 ## Add a config field to the directory loader
@@ -115,8 +117,8 @@ Conventions baked into the loader:
 ## Extend the GUI
 
 `gui/` is a JavaFX library; `examples/gui_app/` is the launcher that bundles
-it with sql/exec + read/parquet + write/parquet so everything Just Works at
-runtime. Pattern recap:
+it with sql/exec. Parquet support is built into `gui/` directly via the same
+modules `job/` uses. Pattern recap:
 
 1. **Mutable session, not Property-bound.** `JobSession` holds the truth;
    panels register a `() => Unit` listener and call `session.…` mutators on
@@ -159,10 +161,10 @@ To extend the interactive SQL console (`SqlConsolePanel`): the catalog comes
 from `JobSession.buildInteractiveCatalog` — inputs are resolved via
 `InputResolver.resolve`, task outputs are read by `JobSession.readOutputAsView`
 under each task's `viewName`. Add a new view source by extending that method
-(format dispatch already covers CSV + Parquet via `ParquetReaderHook`).
+(format dispatch already covers CSV + Parquet directly).
 Results are materialized into a `MaterializedView` after each Run so Persist
 can replay the same partitions into `ResultPersister.persist` — which routes
-to `CsvWriter.writePartitioned` or the parquet writer hook, honouring
+to `CsvWriter.writePartitioned` or `ParquetWriter.writePartitioned`, honouring
 `OutputFilePath.maxPartitions` semantics. To add a new persist format,
 extend the format switch in `ResultPersister` and the dropdown in
 `PersistDialog`.
@@ -192,8 +194,8 @@ The interfaces are already in place:
   resolver.
 - Same for `DataJob.writeOutput` on the output side: upload the locally-
   written file after successful close.
-- Add `read/cloud/` with GCS + S3 helpers; ideally hook-installed so the
-  `job/` module doesn't compile against the cloud SDKs.
+- Add `read/cloud/` with GCS + S3 helpers, and list it in `job/BUILD.bazel`'s
+  deps so the resolver can call into it directly (same pattern as parquet).
 
 Don't pull in `google-cloud-storage` or `aws-sdk-v2` in modules that don't
 need them. Cloud is opt-in.

@@ -1,7 +1,5 @@
 package com.transformer.gui
 
-import com.transformer.job.ParquetWriterHook
-
 import java.io.File
 import javafx.event.ActionEvent
 import javafx.geometry.{Insets, Pos}
@@ -63,13 +61,6 @@ object PersistDialog {
     val formatCombo = new ComboBox[String]()
     formatCombo.getItems.addAll("csv", "parquet")
     formatCombo.setValue(defaultFormat)
-    if (ParquetWriterHook.get.isEmpty) {
-      formatCombo.getItems.remove("parquet")
-      formatCombo.setValue("csv")
-      formatCombo.setTooltip(new Tooltip(
-        "Parquet output requires the parquet write module on the launcher's classpath."
-      ))
-    }
 
     val maxPartsField = new TextField()
     maxPartsField.setPromptText("default: one file per source partition")

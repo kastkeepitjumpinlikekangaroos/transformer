@@ -39,13 +39,7 @@ import java.time.Instant
   */
 object JaffleShopExample {
 
-  // Force class-load so ParquetSupport's object initializer installs the
-  // resolver/reader/writer hooks before any task runs. Every table writes
-  // parquet (see each tables/<view>/output.json).
-  private val _parquetSupport: AnyRef = com.transformer.read.parquet.ParquetSupport
-
   def main(args: Array[String]): Unit = {
-    val _ = _parquetSupport
     val jobDir = Paths.get(args.headOption.getOrElse(autoDetectJobDir()))
     val outputDir =
       args.lift(1).getOrElse(System.getProperty("java.io.tmpdir") + "/transformer-jaffle-out")
