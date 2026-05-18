@@ -87,6 +87,55 @@ class SqlEngineTest {
     assertEquals(12L, rows(1)("s"))
   }
 
+  @Test def groupByPositionalOrdinal(): Unit = {
+    val p = tmpCsv("a.csv",
+      "product_id,is_food_item\n1,true\n1,false\n2,true\n2,true\n3,false\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // `GROUP BY 2` should mean "group by the 2nd select item" (product_id),
+    // matching BigQuery/Postgres semantics.
+    val q = SqlEngine.execute(
+      "SELECT MAX(CASE WHEN is_food_item THEN 1 ELSE 0 END) AS m, product_id " +
+        "FROM t GROUP BY 2", cat)
+    val rows = collectAllRows(q).sortBy(_("product_id").toString)
+    assertEquals(3, rows.size)
+    assertEquals(1, rows(0)("product_id"))
+    assertEquals(1, rows(0)("m"))
+    assertEquals(2, rows(1)("product_id"))
+    assertEquals(1, rows(1)("m"))
+    assertEquals(3, rows(2)("product_id"))
+    assertEquals(0, rows(2)("m"))
+  }
+
+  @Test def groupByOrdinalMixedWithColumn(): Unit = {
+    val p = tmpCsv("a.csv", "cat,sub,score\nA,x,1\nA,x,2\nA,y,3\nB,x,4\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT cat, sub, SUM(score) AS s FROM t GROUP BY 1, sub", cat)
+    val rows = collectAllRows(q).sortBy(r => (r("cat").toString, r("sub").toString))
+    assertEquals(3, rows.size)
+    assertEquals(("A", "x", 3L), (rows(0)("cat"), rows(0)("sub"), rows(0)("s")))
+    assertEquals(("A", "y", 3L), (rows(1)("cat"), rows(1)("sub"), rows(1)("s")))
+    assertEquals(("B", "x", 4L), (rows(2)("cat"), rows(2)("sub"), rows(2)("s")))
+  }
+
+  @Test def groupByOrdinalOutOfRangeRejected(): Unit = {
+    val p = tmpCsv("a.csv", "x\n1\n2\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val ex = try { SqlEngine.execute("SELECT x, COUNT(*) FROM t GROUP BY 5", cat); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.contains("GROUP BY position 5"))
+  }
+
+  @Test def groupByOrdinalReferencingAggregateRejected(): Unit = {
+    val p = tmpCsv("a.csv", "cat,score\nA,1\nA,2\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val ex = try { SqlEngine.execute("SELECT cat, SUM(score) FROM t GROUP BY 2", cat); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.contains("aggregate"))
+  }
+
   @Test def countDistinct(): Unit = {
     val p = tmpCsv("a.csv", "cat\nA\nA\nB\nB\nC\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
