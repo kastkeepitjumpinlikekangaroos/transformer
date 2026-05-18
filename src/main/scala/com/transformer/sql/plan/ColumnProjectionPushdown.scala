@@ -1,5 +1,7 @@
 package com.transformer.sql.plan
 
+import com.transformer.core.{DataType, Schema}
+
 /** Rewrites a logical plan so each `LogicalScan` decodes only the columns its
   * ancestors actually reference.
   *
@@ -39,10 +41,16 @@ object ColumnProjectionPushdown {
       val full = s.outputSchema.fieldNames
       // Keep original order; the view's contract is to do the same.
       val keep = full.iterator.filter(neededByParent.contains).toList
-      if (keep.isEmpty || keep.length == full.length) {
+      if (keep.length == full.length) {
         (s, identityRemap(full.length))
       } else {
-        view.withProjectedColumns(keep) match {
+        // When the consumer references zero columns the scan still has to
+        // drive batches forward (row counts feed `COUNT(*)` / `COUNT(<lit>)`,
+        // `LIMIT n`, etc.) but column *values* go unused. Picking the
+        // narrowest column lets parquet skip multi-MB JSON-blob columns that
+        // otherwise dominate decode time.
+        val request = if (keep.isEmpty) Seq(narrowestColumn(s.outputSchema)) else keep
+        view.withProjectedColumns(request) match {
           case Some(projected) =>
             val newCols = projected.schema.fieldNames
             val remap = full.iterator.zipWithIndex.collect {
@@ -168,5 +176,23 @@ object ColumnProjectionPushdown {
     case AggExprMin(c) => AggExprMin(rewriteExpr(c, remap))
     case AggExprMax(c) => AggExprMax(rewriteExpr(c, remap))
     case AggExprCountIf(c) => AggExprCountIf(rewriteExpr(c, remap))
+  }
+
+  /** Pick a single column from `schema` to project to when the consumer
+    * doesn't need any column values. Fixed-size primitives beat variable-width
+    * strings/binaries; ties break on declared order so the choice is stable.
+    */
+  private def narrowestColumn(schema: Schema): String =
+    schema.fields.iterator.zipWithIndex
+      .minBy { case (f, i) => (approxRowWidth(f.dataType), i) }
+      ._1.name
+
+  private def approxRowWidth(dt: DataType): Int = dt match {
+    case DataType.BooleanType => 1
+    case DataType.NullType => 1
+    case DataType.IntType | DataType.FloatType | DataType.DateType => 4
+    case DataType.LongType | DataType.DoubleType | DataType.TimestampType => 8
+    case _: DataType.DecimalType => 16
+    case DataType.StringType | DataType.BinaryType => 1024
   }
 }

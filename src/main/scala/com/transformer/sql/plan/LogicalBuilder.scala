@@ -43,10 +43,19 @@ object LogicalBuilder {
   }
 
   /** Fold a `SetOperationList` into a left-associative chain of
-    * [[LogicalUnion]]s. Each [[UnionOp]] contributes its own `ALL` flag; the
-    * planner wraps non-ALL unions with a [[LogicalDistinct]] downstream.
-    * INTERSECT / EXCEPT / MINUS aren't implemented in v1 — reject with a clear
-    * message instead of producing a wrong plan.
+    * [[LogicalUnion]]s, then apply any outer ORDER BY / LIMIT.
+    *
+    * JSqlParser attaches a bare trailing `ORDER BY` / `LIMIT` to the *last
+    * arm* rather than the `SetOperationList`, but in standard SQL (Postgres /
+    * BigQuery / Snowflake) those clauses apply to the union as a whole. We
+    * hoist them up — unless the user disambiguated by wrapping the last arm
+    * in parens (then it's a `ParenthesedSelect`, our `case ps: PlainSelect`
+    * doesn't match, and the limit stays per-arm).
+    *
+    * Each [[UnionOp]] contributes its own `ALL` flag; the planner wraps
+    * non-ALL unions with a [[LogicalDistinct]] downstream. INTERSECT /
+    * EXCEPT / MINUS aren't implemented in v1 — reject with a clear message
+    * instead of producing a wrong plan.
     */
   private def buildSetOperationList(sol: SetOperationList, catalog: Catalog): LogicalPlan = {
     val selects = sol.getSelects.asScala.toVector
@@ -55,17 +64,24 @@ object LogicalBuilder {
       throw new IllegalArgumentException(
         s"Malformed set operation list: ${selects.size} selects, ${ops.size} operations")
     }
-    // Outer ORDER BY / LIMIT on a UNION binds against the union output schema —
-    // not supported in v1 (wrap with a separate task if you need it).
-    Option(sol.getOrderByElements).filter(!_.isEmpty).foreach { _ =>
-      throw new IllegalArgumentException("ORDER BY on a UNION is not supported")
-    }
-    Option(sol.getLimit).foreach { _ =>
-      throw new IllegalArgumentException("LIMIT on a UNION is not supported")
+
+    // Detect-and-strip the hoistable trailing clauses on the last bare arm.
+    // We mutate the AST in place; nothing downstream holds an earlier snapshot.
+    val lastArm = selects.last
+    val (hoistedOrderBy, hoistedLimit) = lastArm match {
+      case ps: PlainSelect =>
+        val ob = Option(ps.getOrderByElements).filter(!_.isEmpty)
+          .filter(_ => Option(sol.getOrderByElements).forall(_.isEmpty))
+        val li = Option(ps.getLimit)
+          .filter(_ => Option(sol.getLimit).isEmpty)
+        if (ob.isDefined) ps.setOrderByElements(null)
+        if (li.isDefined) ps.setLimit(null)
+        (ob, li)
+      case _ => (None, None)
     }
 
     val first = buildAnySelect(selects.head, catalog)
-    ops.iterator.zipWithIndex.foldLeft(first) { case (acc, (op, i)) =>
+    val union = ops.iterator.zipWithIndex.foldLeft(first) { case (acc, (op, i)) =>
       op match {
         case u: UnionOp =>
           val rhs = buildAnySelect(selects(i + 1), catalog)
@@ -81,6 +97,27 @@ object LogicalBuilder {
           throw new IllegalArgumentException(
             s"Unsupported set operation: ${other.getClass.getSimpleName} (only UNION / UNION ALL are supported)")
       }
+    }
+
+    // ORDER BY / LIMIT bind against the union's output (column names come from
+    // the leftmost arm — that's what `LogicalUnion.outputSchema` exposes).
+    val unionSources: Sources = Seq((None, union.outputSchema))
+    val orderBy = Option(sol.getOrderByElements).filter(!_.isEmpty).orElse(hoistedOrderBy)
+    val afterSort: LogicalPlan = orderBy match {
+      case Some(list) =>
+        val keys = list.asScala.map { obe =>
+          (bindExpr(obe.getExpression, unionSources), obe.isAsc)
+        }.toSeq
+        LogicalSort(union, keys)
+      case None => union
+    }
+
+    val limit = Option(sol.getLimit).orElse(hoistedLimit)
+    limit.flatMap(l => Option(l.getRowCount)) match {
+      case Some(rc: LongValue) => LogicalLimit(afterSort, rc.getValue)
+      case Some(other) =>
+        throw new IllegalArgumentException(s"LIMIT must be an integer literal, got ${other.getClass.getSimpleName}")
+      case None => afterSort
     }
   }
 

@@ -627,4 +627,125 @@ class SqlEngineTest {
     assertNotNull(ex)
     assertTrue(ex.getMessage.toUpperCase.contains("UNION"))
   }
+
+  @Test def unionAllOrderByOnUnionOutput(): Unit = {
+    val a = tmpCsv("a.csv", "id\n2\n4\n")
+    val b = tmpCsv("b.csv", "id\n1\n3\n")
+    val cat = new Catalog
+    cat.register("a", CsvReader.fromPath(a.toString, CsvOptions()))
+    cat.register("b", CsvReader.fromPath(b.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT id FROM a UNION ALL SELECT id FROM b ORDER BY id DESC", cat)
+    assertEquals(Seq(4, 3, 2, 1), collectAllRows(q).map(_("id")))
+  }
+
+  @Test def unionAllLimit(): Unit = {
+    val a = tmpCsv("a.csv", "id\n1\n2\n3\n")
+    val b = tmpCsv("b.csv", "id\n4\n5\n6\n")
+    val cat = new Catalog
+    cat.register("a", CsvReader.fromPath(a.toString, CsvOptions()))
+    cat.register("b", CsvReader.fromPath(b.toString, CsvOptions()))
+    // JSqlParser parks the trailing `LIMIT 4` on the last arm; we hoist it to
+    // the union to match Postgres-style semantics. Result: 4 rows across both
+    // arms in arrival order (a's three rows first, then b's first row).
+    val q = SqlEngine.execute(
+      "SELECT id FROM a UNION ALL SELECT id FROM b LIMIT 4", cat)
+    val rows = collectAllRows(q).map(_("id"))
+    assertEquals(Seq(1, 2, 3, 4), rows)
+  }
+
+  @Test def unionAllPerArmLimitWithParens(): Unit = {
+    // Parens around the last arm should keep the LIMIT per-arm, not hoist it.
+    val a = tmpCsv("a.csv", "id\n1\n2\n3\n")
+    val b = tmpCsv("b.csv", "id\n4\n5\n6\n")
+    val cat = new Catalog
+    cat.register("a", CsvReader.fromPath(a.toString, CsvOptions()))
+    cat.register("b", CsvReader.fromPath(b.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT id FROM a UNION ALL (SELECT id FROM b LIMIT 2)", cat)
+    val rows = collectAllRows(q).map(_("id"))
+    assertEquals(Seq(1, 2, 3, 4, 5), rows)
+  }
+
+  @Test def unionAllOrderByLimitTogether(): Unit = {
+    val a = tmpCsv("a.csv", "id\n5\n1\n")
+    val b = tmpCsv("b.csv", "id\n4\n2\n3\n")
+    val cat = new Catalog
+    cat.register("a", CsvReader.fromPath(a.toString, CsvOptions()))
+    cat.register("b", CsvReader.fromPath(b.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT id FROM a UNION ALL SELECT id FROM b ORDER BY id ASC LIMIT 3", cat)
+    assertEquals(Seq(1, 2, 3), collectAllRows(q).map(_("id")))
+  }
+
+  @Test def unionOrderByUsesLeftArmColumnName(): Unit = {
+    // UNION output schema comes from the leftmost arm — so ORDER BY references
+    // the left arm's column name even if the right arm aliases differently.
+    val a = tmpCsv("a.csv", "x\n3\n1\n")
+    val b = tmpCsv("b.csv", "y\n2\n4\n")
+    val cat = new Catalog
+    cat.register("a", CsvReader.fromPath(a.toString, CsvOptions()))
+    cat.register("b", CsvReader.fromPath(b.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT x FROM a UNION ALL SELECT y FROM b ORDER BY x ASC", cat)
+    assertEquals(Vector("x"), q.schema.fieldNames)
+    assertEquals(Seq(1, 2, 3, 4), collectAllRows(q).map(_("x")))
+  }
+
+  @Test def projectionPushdownPicksNarrowestColumnWhenNoneReferenced(): Unit = {
+    // COUNT(1) doesn't reference any column, but the scan still has to drive
+    // batches forward to feed the per-row count. Without push-down it would
+    // decode every column — including the multi-MB string blob — to produce
+    // a single Long. We should ask the view for its narrowest column instead.
+    val schema = Schema(Vector(
+      Field("big_blob", DataType.StringType),
+      Field("ts", DataType.LongType),
+      Field("flag", DataType.BooleanType)
+    ))
+    val view = new TrackingProjectableView(schema, Map(
+      "big_blob" -> Array[Any]("aaa", "bbb", "ccc", "ddd"),
+      "ts" -> Array[Any](1L, 2L, 3L, 4L),
+      "flag" -> Array[Any](true, false, true, false)
+    ))
+    val cat = catalogWith("t" -> view)
+    val q = SqlEngine.execute("SELECT COUNT(1) AS n FROM t", cat)
+    val rows = collectAllRows(q)
+    assertEquals(4L, rows.head("n"))
+    assertEquals(Some(Seq("flag")), view.projectedTo)
+  }
+
+  @Test def projectionPushdownNarrowestSkipsStringWhenPrimitiveAvailable(): Unit = {
+    // Tie-break preference: fixed-width primitives over variable-width strings,
+    // regardless of column order in the source schema.
+    val schema = Schema(Vector(
+      Field("blob", DataType.StringType),
+      Field("id", DataType.IntType)
+    ))
+    val view = new TrackingProjectableView(schema, Map(
+      "blob" -> Array[Any]("x", "y"),
+      "id"   -> Array[Any](1, 2)
+    ))
+    val cat = catalogWith("t" -> view)
+    SqlEngine.execute("SELECT COUNT(1) FROM t", cat).batches.foreach(_ => ())
+    assertEquals(Some(Seq("id")), view.projectedTo)
+  }
+
+  @Test def projectionPushdownNarrowestForLiteralProject(): Unit = {
+    // `SELECT 1 FROM t LIMIT 2` evaluates a literal per row — no column refs
+    // anywhere. Same narrowest-column push-down should apply.
+    val schema = Schema(Vector(
+      Field("payload", DataType.StringType),
+      Field("n", DataType.IntType)
+    ))
+    val view = new TrackingProjectableView(schema, Map(
+      "payload" -> Array[Any]("aaa", "bbb", "ccc"),
+      "n" -> Array[Any](1, 2, 3)
+    ))
+    val cat = catalogWith("t" -> view)
+    val q = SqlEngine.execute("SELECT 1 AS one FROM t LIMIT 2", cat)
+    val rows = collectAllRows(q)
+    assertEquals(2, rows.size)
+    assertEquals(Seq(1, 1), rows.map(_("one")))
+    assertEquals(Some(Seq("n")), view.projectedTo)
+  }
 }
