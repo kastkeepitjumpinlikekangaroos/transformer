@@ -479,4 +479,96 @@ class SqlEngineTest {
     val rows = collectAllRows(q).sortBy(_("cat").toString)
     assertEquals(Seq(("A", 2L), ("B", 1L)), rows.map(r => (r("cat"), r("n"))))
   }
+
+  // ---- Column projection push-down ----
+
+  /** Tracks which columns the SQL engine asked the view to project. `readPartition`
+    * decodes only those (asserted via the projected schema), and the test inspects
+    * `projectedTo` to verify push-down happened.
+    */
+  private final class TrackingProjectableView(
+      val fullSchema: Schema,
+      rowsByCol: Map[String, Array[Any]]
+  ) extends CatalogView {
+    val schema: Schema = fullSchema
+    def numPartitions: Int = 1
+    @volatile var projectedTo: Option[Seq[String]] = None
+    def readPartition(p: Int): Iterator[ColumnarBatch] = readWith(fullSchema)
+    private def readWith(s: Schema): Iterator[ColumnarBatch] = {
+      val n = rowsByCol.values.head.length
+      val batch = new ColumnarBatch(s, math.max(1, n))
+      var c = 0
+      while (c < s.length) {
+        val name = s.fields(c).name
+        val data = rowsByCol(name)
+        var r = 0
+        while (r < n) { batch.column(c).setBoxed(r, data(r)); r += 1 }
+        c += 1
+      }
+      batch.setNumRows(n)
+      Iterator.single(batch)
+    }
+    override def withProjectedColumns(names: Seq[String]): Option[CatalogView] = {
+      val keep = names.toSet
+      val pruned = Schema(fullSchema.fields.filter(f => keep.contains(f.name)))
+      projectedTo = Some(pruned.fieldNames)
+      Some(new CatalogView {
+        val schema: Schema = pruned
+        def numPartitions: Int = 1
+        def readPartition(p: Int): Iterator[ColumnarBatch] = readWith(pruned)
+      })
+    }
+  }
+
+  @Test def projectionPushdownDropsUnusedColumns(): Unit = {
+    val schema = Schema(Vector(
+      Field("a", DataType.IntType),
+      Field("big_blob", DataType.StringType),
+      Field("b", DataType.IntType)
+    ))
+    val view = new TrackingProjectableView(schema, Map(
+      "a" -> Array[Any](1, 2, 3),
+      "big_blob" -> Array[Any]("x", "y", "z"),
+      "b" -> Array[Any](10, 20, 30)
+    ))
+    val cat = catalogWith("t" -> view)
+    val q = SqlEngine.execute("SELECT a + b AS s FROM t ORDER BY a", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq(11, 22, 33), rows.map(_("s")))
+    assertEquals(Some(Seq("a", "b")), view.projectedTo)
+  }
+
+  @Test def projectionPushdownThroughAggregate(): Unit = {
+    val schema = Schema(Vector(
+      Field("cat", DataType.StringType),
+      Field("score", DataType.IntType),
+      Field("ignored", DataType.StringType)
+    ))
+    val view = new TrackingProjectableView(schema, Map(
+      "cat" -> Array[Any]("A", "A", "B"),
+      "score" -> Array[Any](1, 2, 3),
+      "ignored" -> Array[Any]("x", "y", "z")
+    ))
+    val cat = catalogWith("t" -> view)
+    val q = SqlEngine.execute(
+      "SELECT cat, SUM(score) AS s FROM t GROUP BY cat", cat)
+    val rows = collectAllRows(q).sortBy(_("cat").toString)
+    assertEquals(Seq(("A", 3L), ("B", 3L)), rows.map(r => (r("cat"), r("s"))))
+    assertEquals(Some(Seq("cat", "score")), view.projectedTo)
+  }
+
+  @Test def projectionPushdownAllColumnsUsedSkipsRewrite(): Unit = {
+    val schema = Schema(Vector(
+      Field("a", DataType.IntType),
+      Field("b", DataType.IntType)
+    ))
+    val view = new TrackingProjectableView(schema, Map(
+      "a" -> Array[Any](1, 2),
+      "b" -> Array[Any](3, 4)
+    ))
+    val cat = catalogWith("t" -> view)
+    SqlEngine.execute("SELECT a, b FROM t", cat).batches.foreach(_ => ())
+    // Full schema used → planner shouldn't bother asking for a projection.
+    assertEquals(None, view.projectedTo)
+  }
 }

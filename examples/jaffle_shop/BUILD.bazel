@@ -5,6 +5,11 @@ scala_binary(
     srcs = glob(["src/main/scala/**/*.scala"]),
     main_class = "com.example.jaffle.JaffleShopExample",
     data = glob(["job/**"]),
+    # JVM default heap is too small for realistic parquet workloads — see the
+    # raw_test input case (3.9GB compressed → multi-GB decoded). The wrapper
+    # script honors these; running `java -jar jaffle_shop_deploy.jar` bypasses
+    # them — pass `-Xmx2g` (or larger) explicitly in that case.
+    jvm_flags = ["-Xmx2g"],
     deps = [
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",

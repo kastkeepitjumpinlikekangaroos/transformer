@@ -23,7 +23,11 @@ import java.util.concurrent.{Callable, Executors, TimeUnit}
   * One partition per file keeps reads strictly sequential. For a glob, file count
   * is the parallelism unit.
   */
-final class ParquetReader(files: IndexedSeq[Path], batchSize: Int) extends CatalogView {
+final class ParquetReader private (
+    files: IndexedSeq[Path],
+    batchSize: Int,
+    projectedNames: Option[Set[String]]
+) extends CatalogView {
   require(files.nonEmpty, "ParquetReader requires at least one file")
 
   private val hadoopConf: Configuration = ParquetReader.defaultConf
@@ -66,24 +70,43 @@ final class ParquetReader(files: IndexedSeq[Path], batchSize: Int) extends Catal
     }
   }
 
-  val schema: Schema = parquetSchema_
+  /** Effective output schema. With projection, only the kept fields, in the
+    * order they appear in the underlying file's schema (we never reorder —
+    * callers' ColRefExpr indices only need a name → new-position lookup).
+    */
+  val schema: Schema = projectedNames match {
+    case Some(keep) => Schema(parquetSchema_.fields.filter(f => keep.contains(f.name)))
+    case None => parquetSchema_
+  }
 
   def numPartitions: Int = partitions.length
 
   def readPartition(p: Int): Iterator[ColumnarBatch] = {
     val m = partitions(p)
-    new ParquetPartitionIterator(m.hif, schema, batchSize)
+    new ParquetPartitionIterator(m.hif, schema, batchSize, projectedNames.isDefined)
   }
 
   /** Sum the per-file counts already collected from each footer. Used by the SQL
     * planner to short-circuit `SELECT COUNT(*) FROM <parquet>` — we already paid
-    * for the footer reads at construction time.
+    * for the footer reads at construction time. Unaffected by projection.
     */
   override val exactRowCount: Option[Long] = {
     var sum = 0L
     var i = 0
     while (i < partitions.length) { sum += partitions(i).rowCount; i += 1 }
     Some(sum)
+  }
+
+  /** Return a reader that decodes only the named columns. Names not present in
+    * the underlying schema are silently dropped (matches `MessageType.intersection`
+    * semantics on the parquet side). Returns None only if no requested name
+    * matches anything — in that case the caller stays on the full scan.
+    */
+  override def withProjectedColumns(names: Seq[String]): Option[CatalogView] = {
+    val available = parquetSchema_.fieldNames.toSet
+    val keep = names.iterator.filter(available.contains).toSet
+    if (keep.isEmpty || keep.size == parquetSchema_.length) None
+    else Some(new ParquetReader(files, batchSize, Some(keep)))
   }
 }
 
@@ -99,7 +122,7 @@ object ParquetReader {
     val files = PathGlob.expand(pathOrGlob)
     if (files.isEmpty)
       throw new IllegalArgumentException(s"No Parquet files matched '$pathOrGlob'")
-    new ParquetReader(files.toIndexedSeq, batchSize)
+    new ParquetReader(files.toIndexedSeq, batchSize, projectedNames = None)
   }
 }
 
@@ -108,15 +131,29 @@ object ParquetReader {
   * Uses [[HParquetReader]] with [[GroupReadSupport]]; reads are strictly
   * sequential so there is no skip-by-row-group cost. The reader is closed when
   * the iterator is drained.
+  *
+  * If `projected = true`, `schema` is a subset of the file's column set and we
+  * push it down via `parquet.read.schema` so parquet-mr skips the unselected
+  * column chunks entirely. parquet-mr intersects the requested schema against
+  * the file schema by field name; types come from the file.
   */
 final class ParquetPartitionIterator(
     hif: org.apache.parquet.hadoop.util.HadoopInputFile,
     schema: Schema,
-    batchSize: Int
+    batchSize: Int,
+    projected: Boolean = false
 ) extends Iterator[ColumnarBatch] {
 
   private val reader: HParquetReader[Group] = {
     val conf = ParquetReader.defaultConf
+    if (projected) {
+      // parquet-mr reads `parquet.read.schema` from the conf and intersects with
+      // the file schema. Going Schema → MessageType discards any per-column
+      // logical-type annotations that won't match the file 1:1, but intersection
+      // resolves by name so this is safe.
+      val mt = ParquetSchema.toMessageType(schema)
+      conf.set(org.apache.parquet.hadoop.api.ReadSupport.PARQUET_READ_SCHEMA, mt.toString)
+    }
     HParquetReader.builder(new GroupReadSupport, new HPath(hif.getPath.toUri))
       .withConf(conf)
       .build()

@@ -21,6 +21,24 @@ trait CatalogView {
     * no scan, no aggregate pipeline, one row produced directly.
     */
   def exactRowCount: Option[Long] = None
+
+  /** Optional column projection. If supported, returns a view that decodes only
+    * the named columns; its [[schema]] contains exactly those columns in the
+    * order they appear in *this* view's schema (callers don't get to reorder).
+    * Returning None means the view can't prune — callers fall back to a full
+    * scan.
+    *
+    * Used by the SQL planner's column-pruning pass: scans under analytical
+    * queries skip the wide JSON-blob columns the query never references.
+    * Parquet implements it via `parquet.read.schema`; row-oriented views
+    * (CSV today) leave the default None.
+    *
+    * `names` must be a subset of this view's [[schema.fieldNames]]. Order in
+    * `names` is ignored; the returned view's schema follows the original
+    * column order so already-bound ColRefExpr indices remain consistent
+    * after a single name → new-index lookup.
+    */
+  def withProjectedColumns(names: Seq[String]): Option[CatalogView] = None
 }
 
 /** Registry of named views available to SQL execution. View lookups are case-insensitive. */

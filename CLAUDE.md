@@ -300,9 +300,13 @@ java -jar bazel-bin/examples/jaffle_shop/jaffle_shop_deploy.jar \
     [examples/jaffle_shop/job] [/tmp/transformer-jaffle-out] [executionTime]
 # Port of dbt-labs/jaffle-shop — 15-task DAG over the full DBT seed dataset.
 
-# Build + launch the JavaFX GUI.
-bazel build //examples/gui_app:gui_app_deploy.jar
-java -jar bazel-bin/examples/gui_app/gui_app_deploy.jar [job-dir]
+# Build + launch the JavaFX GUI. Prefer the wrapper script over the deploy_jar
+# — it bakes in `-Xmx2g` (the deploy_jar doesn't, since `java -jar` ignores
+# `jvm_flags`). With JVM-default heap a non-trivial parquet workload will OOM
+# or thrash on macOS / inside containers.
+bazel build //examples/gui_app:gui_app
+bazel-bin/examples/gui_app/gui_app [job-dir]
+# (or `java -Xmx2g -jar bazel-bin/examples/gui_app/gui_app_deploy.jar [job-dir]`)
 
 # Inspect a parquet file or glob — schema, partition count, footer-derived
 # row count, and a few decoded rows. Reader-only; no SQL engine pulled in.
@@ -572,6 +576,18 @@ need them. Cloud is opt-in.
   through `HashAggregateExec`. Adding new readers? Implementing
   `exactRowCount` is "free" when you already know the row count, "expensive"
   if you'd have to count rows yourself — return None and the slow path runs.
+- **Column projection push-down rewrites `ColRefExpr` indices.** Before
+  `PhysicalPlanner.plan`, `ColumnProjectionPushdown` walks the logical tree
+  to figure out which scan columns each ancestor actually references, asks
+  the view for a pruned variant via [[CatalogView.withProjectedColumns]],
+  and remaps every column-ref index above the new scan. The remap is local —
+  Project and Aggregate emit their own schemas, so above them positions are
+  identity. Pruning is skipped under joins, unions, and window operators
+  (their output positions are sensitive to combined schemas and would need
+  coordinated remaps across siblings). Parquet pushes the projection via
+  `parquet.read.schema`; CSV (and any other view leaving the default `None`)
+  is a no-op. The shaved decode cost is 5–20× on wide schemas with one big
+  unused column — the snapshots dataset's `data` blob is the canonical case.
 
 ## What's intentionally NOT done
 

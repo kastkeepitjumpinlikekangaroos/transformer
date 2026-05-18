@@ -8,6 +8,12 @@ scala_binary(
     name = "gui_app",
     srcs = glob(["src/main/scala/**/*.scala"]),
     main_class = "com.example.gui.GuiAppLauncher",
+    # JVM default heap (~25% of RAM, sometimes much less on macOS / inside
+    # containers) is too small for any non-trivial parquet workload — a
+    # 3.9GB compressed input streams through ~10+GB of decoded batches.
+    # The wrapper script honors these; running `java -jar gui_app_deploy.jar`
+    # bypasses them — pass `-Xmx2g` (or larger) explicitly in that case.
+    jvm_flags = ["-Xmx2g"],
     deps = [
         # strict-deps: SqlEngine.init returns a type from core, so we need to
         # list core even though gui already depends on it transitively.
