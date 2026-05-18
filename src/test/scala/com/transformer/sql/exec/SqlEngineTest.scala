@@ -289,6 +289,17 @@ class SqlEngineTest {
     assertEquals(Seq(2L, 2L, 2L, 1L, 1L), rows.map(_("hi")))
   }
 
+  @Test def countIfLowercaseIsNotNull(): Unit = {
+    val p = tmpCsv("a.csv", "prev_order_for_product\n1\n\n2\n\n3\n")
+    val cat = catalogWith("raw_test" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT count_if(prev_order_for_product is not null) FROM raw_test LIMIT 100",
+      cat)
+    val rows = collectAllRows(q)
+    assertEquals(1, rows.size)
+    assertEquals(3L, rows.head(q.schema.fieldNames.head))
+  }
+
   // ---------------------------------------------------------------------------
   // Window functions
   // ---------------------------------------------------------------------------
