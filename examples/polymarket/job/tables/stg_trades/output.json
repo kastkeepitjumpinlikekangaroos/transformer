@@ -1,0 +1,4 @@
+{
+  "format": "parquet",
+  "partitionBy": "day={{ today }}"
+}

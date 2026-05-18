@@ -73,6 +73,14 @@ java -jar bazel-bin/examples/jaffle_shop/jaffle_shop_deploy.jar \
     [examples/jaffle_shop/job] [/tmp/transformer-jaffle-out] [executionTime]
 # Port of dbt-labs/jaffle-shop — 15-task DAG over the full DBT seed dataset.
 
+bazel build //examples/polymarket:polymarket_deploy.jar
+java -Xmx12g -jar bazel-bin/examples/polymarket/polymarket_deploy.jar \
+    [examples/polymarket/job] [/tmp/transformer-polymarket-out] [executionTime]
+# 17-task pipeline over the Polymarket tick-level orderbook Kaggle dataset
+# (~140M parquet rows across 5 inputs). One branch is intentionally constructed
+# to ValidationFail and block its downstream — launcher exits 0 iff that exact
+# pattern holds. Needs `~/Downloads/archive/` dataset checkout.
+
 # Build + launch the JavaFX GUI. Prefer the wrapper script over the deploy_jar
 # — it bakes in `-Xmx2g` (the deploy_jar doesn't, since `java -jar` ignores
 # `jvm_flags`). With JVM-default heap a non-trivial parquet workload will OOM

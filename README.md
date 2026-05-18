@@ -81,6 +81,18 @@ java -jar bazel-bin/examples/directory_app/directory_example_deploy.jar \
 bazel build //examples/gui_app:gui_app_deploy.jar
 java -jar bazel-bin/examples/gui_app/gui_app_deploy.jar \
     examples/directory_app/job
+
+# Heavy-load example: a 17-task pipeline over the Polymarket tick-level
+# orderbook dataset. Reads ~85M parquet rows across 5 inputs (a 6-hour slice
+# of one orderbook day, 21 days of snapshots, full features/trades/markets),
+# writes 17 parquet outputs, runs 58 validations, and intentionally fails one
+# branch to exercise the "failed validation blocks downstream" scheduler path.
+# ~5 min on a fast Mac with -Xmx12g; needs the dataset at `~/Downloads/archive/`.
+bazel build //examples/polymarket:polymarket_deploy.jar
+java -Xmx12g -jar bazel-bin/examples/polymarket/polymarket_deploy.jar \
+    examples/polymarket/job \
+    /tmp/transformer-polymarket-out \
+    2026-03-26T00:00:00Z
 ```
 
 The programmatic example reads two CSVs, joins them, aggregates spend per user
@@ -88,7 +100,8 @@ tier with a templated output path (`day=20260101/`), runs a validation, and
 exits 0. The directory example is the same job re-expressed as a folder of
 JSON configs and SQL files — see
 [Defining jobs from a directory](#defining-jobs-from-a-directory). The GUI is
-a thin reader over either layout; see [GUI](#gui).
+a thin reader over either layout; see [GUI](#gui). The polymarket example is
+described in [Heavy-load example: polymarket](#heavy-load-example-polymarket).
 
 ## Example usage
 
@@ -250,6 +263,60 @@ java -jar bazel-bin/examples/directory_app/directory_example_deploy.jar \
 # → outputs land under day=20260102/, alongside any prior day=20260101/ run
 ```
 
+## Heavy-load example: polymarket
+
+`examples/polymarket/` is a 17-task pipeline over the
+[Polymarket tick-level orderbook dataset](https://www.kaggle.com/datasets/marvingozo/polymarket-tick-level-orderbook-dataset)
+(Kaggle, ~40GB across 5 parquet sources). It exists to stretch the executor on
+a realistic high-volume workload while exercising every layer of the runner:
+streaming parquet input, multi-stage parquet output, parallel branches, and
+the `ValidationFailed → downstream Skipped` scheduler path.
+
+**What it does:**
+
+- Reads 5 parquet inputs (1 daily orderbook ≈131M rows / ~900MB compressed,
+  21 daily snapshot files / 51M rows, the pre-built 1-minute feature parquet
+  / 5.6M rows, all 4.1M trade executions, the 124K-row market-metadata
+  parquet).
+- The shipped `stg_orderbook` filters the orderbook day to its first 6 hours
+  (≈27M rows) so the single-partition single-threaded parquet scan finishes
+  in a few minutes — remove the `timestamp_received < …` clause in
+  `tables/stg_orderbook/main.sql` to process the full ≈131M-row day.
+- Produces 17 parquet outputs in a staging → intermediate → mart → final
+  layering. Every output is partitioned by `day={{ today }}` and stamped with
+  `_SUCCESS` on success (the two failed/skipped tasks deliberately do *not*
+  get a marker).
+- Carries 58 validations across the 17 tables (2-5 per table), all in the
+  DBT-style "this query should return zero rows" shape.
+- **Intentionally fails one branch:** `mart_orderbook_quality_check` has a
+  validation that asserts no market has snapshot latency above zero. Real-feed
+  data does, so the validation fails, the task is marked `ValidationFailed`,
+  and its downstream `mart_quality_report` is `Skipped`. The other three mart
+  branches (overview, high-activity, volatility) continue and feed
+  `final_combined_report`. The launcher exits 0 iff this exact pattern holds.
+
+**Prerequisite:** unpack the Kaggle dataset into `~/Downloads/archive/` so the
+input paths in `job/inputs/raw_*/config.json` resolve. The launcher hardcodes
+`/Users/owenchristie/Downloads/archive/...` paths — edit the configs if your
+checkout lives elsewhere.
+
+**Run:**
+
+```bash
+bazel build //examples/polymarket:polymarket_deploy.jar
+java -Xmx12g -jar bazel-bin/examples/polymarket/polymarket_deploy.jar \
+    examples/polymarket/job /tmp/transformer-polymarket-out \
+    2026-03-26T00:00:00Z
+# Runs in ~5 min on a fast Mac. Output:
+# 15 Succeeded, 1 ValidationFailed (mart_orderbook_quality_check),
+# 1 Skipped (mart_quality_report), 0 Failed. Exit 0.
+```
+
+`-Xmx12g` is the floor for the shipped 6-hour-orderbook-slice configuration;
+bump higher (and expect much longer runs) if you remove the time-window
+filter to process the full ≈131M-row day, or expand `raw_orderbook` to
+multiple daily files.
+
 ## Run markers and historical runs
 
 After every successful task with an `outputFile`, the runner atomically
@@ -314,8 +381,11 @@ Layout:
 - **Right** — selected task's source SQL, rendered (post-template) SQL,
   status, error/validation summary, planned vs. actual output path, and any
   `_SUCCESS` provenance.
-- **Center bottom** — output data table (with a partition picker above it
-  when 2+ historical runs exist for the activated task), plus a run log tab.
+- **Center bottom** — five tabs: task details, output data table (with a
+  partition picker above it when 2+ historical runs exist for the activated
+  task), Validations (per-validation cards with Edit / Save / Cancel / Delete
+  buttons that write back to `tables/<view>/validations/<name>.sql`), an
+  ad-hoc SQL console, and a run log.
 
 Node colors:
 

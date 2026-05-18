@@ -1,0 +1,31 @@
+load("@rules_scala//scala:scala.bzl", "scala_binary")
+
+# Heavy-load pipeline over the Polymarket tick-level orderbook dataset. Reads
+# 5 parquet sources (one ~900MB orderbook day, 21 snapshot days, features,
+# trades, markets), produces 17 parquet outputs across staging / intermediate
+# / mart / final layers, and exercises every table with 3-5 validations. One
+# branch is intentionally constructed to ValidationFail and block its
+# downstream — see job/tables/mart_orderbook_quality_check/validations/.
+scala_binary(
+    name = "polymarket",
+    srcs = glob(["src/main/scala/**/*.scala"]),
+    main_class = "com.example.polymarket.PolymarketExample",
+    data = glob(["job/**"]),
+    # The job streams the orderbook from parquet but still holds aggregation
+    # state and the materialized smaller inputs (features, trades, markets)
+    # plus the intermediate join hashtables in heap. 12g is comfortable on a
+    # 32GB machine; bump higher if you also expand `raw_orderbook` to multiple
+    # daily files. Running `java -jar polymarket_deploy.jar` bypasses these
+    # flags — pass `-Xmx12g` (or larger) explicitly in that case.
+    jvm_flags = ["-Xmx12g"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        # Required: every input and every output is parquet. Touching the
+        # ParquetSupport object during class init installs the read/write
+        # hooks the job runner uses.
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/temporal",
+        "//src/main/scala/com/transformer/write/parquet",
+    ],
+)

@@ -18,6 +18,14 @@ ship a fix or move something from "not done" to "done".
 - **`COUNT(*)` in JSqlParser is a `Function` with `AllColumns` in its
   parameter list, not an empty parameter list.** `bindAgg` checks both
   `isAllColumns` and `params(0).isInstanceOf[AllColumns]`.
+- **JSqlParser parses `(a - b)` as a `ParenthesedExpressionList`, not a
+  parenthesized binary expression.** `LogicalBuilder.bindExpr` does NOT handle
+  `ExpressionList`/`ParenthesedExpressionList` and dies with `Unsupported
+  expression: ParenthesedExpressionList`. Workaround: drop the parens — `a - b
+  AS c` parses fine and the operator-precedence vs. `AS` is unambiguous. If
+  parens are needed for grouping (rare in SELECT items), bind the inner
+  expression first into a sub-task. The polymarket example's `stg_orderbook`
+  was an early casualty of this.
 - **Aggregate inside HAVING / ORDER BY** must be rebound against the aggregate
   output, not the source schema. `LogicalBuilder.bindExprWithAggs` takes an
   `aggResolver: Function => Option[Expr]` that returns a `ColRefExpr` into the

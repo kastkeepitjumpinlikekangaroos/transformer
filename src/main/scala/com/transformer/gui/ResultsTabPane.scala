@@ -1,7 +1,7 @@
 package com.transformer.gui
 
 import com.transformer.core.{ColumnarBatch, Schema}
-import com.transformer.job.{InputFilePath, InputResolver, ParquetReaderHook, RunMarker, TaskStatus, Validation}
+import com.transformer.job.{InputFilePath, InputResolver, JobFiles, ParquetReaderHook, RunMarker, TaskStatus, Validation}
 import com.transformer.read.csv.{CsvOptions, CsvReader}
 
 import javafx.beans.property.ReadOnlyStringWrapper
@@ -15,6 +15,7 @@ import java.nio.file.{Files, Path, Paths}
 import java.time.format.DateTimeFormatter
 import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicLong
+import scala.collection.mutable
 import scala.util.control.NonFatal
 
 /** Bottom panel: five tabs.
@@ -129,6 +130,13 @@ final class ResultsTabPane(
 
   private val loadToken = new AtomicLong(0L)
   private var currentTaskIndex: Option[Int] = None
+
+  /** Edit buffers for validations currently being inline-edited in the
+    * Validations tab. Keyed by `(tableViewName, validationName)`. Survives
+    * session refreshes so a run completing mid-edit doesn't blow the user's
+    * unsaved text away. Cleared on Save or Cancel.
+    */
+  private val validationEdits = mutable.Map.empty[(String, String), String]
 
   /** Activate the output tab, populate the partition picker, and load the
     * task's persisted output on a background thread. Safe to call from the FX
@@ -425,7 +433,9 @@ final class ResultsTabPane(
               val state = session.taskStates.lift(i)
               task.validations.iterator.zipWithIndex.foreach { case (v, vi) =>
                 val rendered = node.renderedValidationSqls.lift(vi).getOrElse("")
-                validationsContainer.getChildren.add(buildValidationCard(v, rendered, state))
+                validationsContainer.getChildren.add(
+                  buildValidationCard(v, rendered, state, task.viewName)
+                )
               }
             }
           case None =>
@@ -445,23 +455,151 @@ final class ResultsTabPane(
     l
   }
 
-  private def buildValidationCard(v: Validation, renderedSql: String, state: Option[UiTaskState]): javafx.scene.Node = {
+  private def buildValidationCard(
+      v: Validation,
+      renderedSql: String,
+      state: Option[UiTaskState],
+      tableViewName: Option[String]
+  ): javafx.scene.Node = {
     val (statusText, statusStyle, failureSample) = validationStatusFor(v, state)
-    // Header: name + status pill + open-in-editor.
+
+    // Editing is only possible when (a) a writeable job dir is loaded,
+    // (b) the parent task has a viewName (so JobFiles can find the right
+    // dir), and (c) this validation has an on-disk source file. Programmatic
+    // validations built with sqlString are read-only by design.
+    val editKey: Option[(String, String)] = tableViewName.map(name => (name, v.name))
+    val canEdit = session.jobDir.isDefined && editKey.isDefined && v.sqlFile.isDefined
+    val pendingBuffer: Option[String] = editKey.flatMap(validationEdits.get)
+
+    // Header: name + status pill + edit/delete (or save/cancel during edit).
     val nameLabel = new Label(v.name)
     nameLabel.setStyle("-fx-text-fill: #e8ecf5; -fx-font-weight: bold; -fx-font-size: 13px;")
     val statusPill = new Label(statusText)
     statusPill.setStyle(statusStyle)
     val headerSpacer = new javafx.scene.layout.Region()
     HBox.setHgrow(headerSpacer, Priority.ALWAYS)
-    val cardHeader = new HBox(8, nameLabel, statusPill, headerSpacer)
+
+    val editButton   = cardButton("Edit",   primary = false)
+    val deleteButton = cardButton("Delete", primary = false)
+    val saveButton   = cardButton("Save",   primary = true)
+    val cancelButton = cardButton("Cancel", primary = false)
+    if (!canEdit) {
+      editButton.setDisable(true)
+      deleteButton.setDisable(true)
+      val why =
+        if (session.jobDir.isEmpty)                  "No job directory loaded."
+        else if (tableViewName.isEmpty)              "Parent task has no viewName."
+        else                                         "This validation has no on-disk source file."
+      editButton.setTooltip(new Tooltip(why))
+      deleteButton.setTooltip(new Tooltip(why))
+    }
+
+    val cardHeader = new HBox(8,
+      nameLabel, statusPill, headerSpacer,
+      editButton, deleteButton, saveButton, cancelButton
+    )
     cardHeader.setAlignment(Pos.CENTER_LEFT)
 
-    // SQL: a small SqlView showing the rendered query.
+    // SQL: a small SqlView. Read-only mode shows the template-rendered query;
+    // edit mode swaps in the on-disk source and accepts text edits.
     val sqlView = new SqlView(showOpenInEditor = true)
-    sqlView.setSql(renderedSql)
     sqlView.setSourceFile(v.sqlFile.map(Paths.get(_)))
     sqlView.setPrefHeight(140)
+
+    def showButtons(editing: Boolean): Unit = {
+      editButton.setVisible(!editing);   editButton.setManaged(!editing)
+      deleteButton.setVisible(!editing); deleteButton.setManaged(!editing)
+      saveButton.setVisible(editing);    saveButton.setManaged(editing)
+      cancelButton.setVisible(editing);  cancelButton.setManaged(editing)
+    }
+
+    def enterEditMode(initialText: Option[String]): Unit = {
+      val sourceSql = initialText.getOrElse {
+        try v.loadSql()
+        catch {
+          case NonFatal(e) =>
+            FxHelpers.showError(owner(), "Couldn't load validation source",
+              Option(e.getMessage).getOrElse(e.toString))
+            return
+        }
+      }
+      sqlView.setSql(sourceSql)
+      sqlView.setEditable(true)
+      showButtons(editing = true)
+    }
+
+    def exitEditMode(): Unit = {
+      sqlView.setEditable(false)
+      sqlView.setSql(renderedSql)
+      showButtons(editing = false)
+      editKey.foreach(validationEdits.remove)
+    }
+
+    // Default state: read-only display of the rendered SQL.
+    sqlView.setSql(renderedSql)
+    showButtons(editing = false)
+
+    // Handler bodies are nested defs so their early `return`s escape only the
+    // local def, not the surrounding method (which returns javafx.scene.Node).
+    def doSave(): Unit = {
+      val dir = session.jobDir.getOrElse { exitEditMode(); return }
+      val (tableName, valName) = editKey.getOrElse { exitEditMode(); return }
+      val newSql = Option(sqlView.getCurrentSql).getOrElse("")
+      if (newSql.trim.isEmpty) {
+        FxHelpers.showError(owner(), "Couldn't save validation",
+          "Validation SQL cannot be empty.")
+        return
+      }
+      try JobFiles.writeValidationSql(dir, tableName, valName, newSql)
+      catch {
+        case NonFatal(e) =>
+          FxHelpers.showError(owner(), "Couldn't save validation",
+            Option(e.getMessage).getOrElse(e.toString))
+          return
+      }
+      // Reload — rebuilds every card from disk, so this card's new content
+      // shows up naturally and the templated body is re-rendered.
+      validationEdits.remove((tableName, valName))
+      session.reloadPreservingSelection(Some(tableName))
+    }
+
+    def doDelete(): Unit = {
+      val dir = session.jobDir.getOrElse(return)
+      val (tableName, valName) = editKey.getOrElse(return)
+      val alert = new Alert(Alert.AlertType.CONFIRMATION,
+        s"Delete validation '$valName'? The .sql file will be removed.")
+      alert.initOwner(owner())
+      alert.setHeaderText("Delete validation")
+      alert.setTitle("Confirm delete")
+      val pick = alert.showAndWait()
+      if (pick.isPresent && pick.get() == ButtonType.OK) {
+        try JobFiles.deleteValidation(dir, tableName, valName)
+        catch {
+          case NonFatal(e) =>
+            FxHelpers.showError(owner(), "Couldn't delete validation",
+              Option(e.getMessage).getOrElse(e.toString))
+            return
+        }
+        validationEdits.remove((tableName, valName))
+        session.reloadPreservingSelection(Some(tableName))
+      }
+    }
+
+    editButton.setOnAction(_ => enterEditMode(initialText = None))
+    cancelButton.setOnAction(_ => exitEditMode())
+    saveButton.setOnAction(_ => doSave())
+    deleteButton.setOnAction(_ => doDelete())
+
+    // Capture in-progress text into the shared map so a session refresh (e.g.
+    // mid-run task completion) doesn't drop the user's unsaved edits when the
+    // container rebuilds. Live updates also let exitEditMode discard cleanly.
+    sqlView.editTextProperty.addListener((_, _, newVal) =>
+      if (sqlView.isEditing) editKey.foreach(k => validationEdits.update(k, newVal))
+    )
+
+    // If a buffer survived from before the rebuild, re-enter edit mode
+    // immediately and seed the editor with the preserved text.
+    if (canEdit) pendingBuffer.foreach(buf => enterEditMode(Some(buf)))
 
     val cardChildren = new java.util.ArrayList[javafx.scene.Node]()
     cardChildren.add(cardHeader)
@@ -484,6 +622,30 @@ final class ResultsTabPane(
     card.setStyle("-fx-background-color: #34384a; -fx-background-radius: 6;")
     card.getChildren.addAll(cardChildren)
     card
+  }
+
+  /** Button styling for the per-validation card header. Mirrors the
+    * TaskDetailsPanel toolbar look so the two surfaces feel like the same UI.
+    */
+  private def cardButton(text: String, primary: Boolean): Button = {
+    val b = new Button(text)
+    val (base, hover, press) =
+      if (primary) ("#3d6ee8", "#4f7ef0", "#2c5dc5")
+      else         ("#3a3f55", "#4a5070", "#2a2f45")
+    val fg = if (primary) "#ffffff" else "#d7dcec"
+    def style(bg: String): String =
+      s"-fx-background-color: $bg; " +
+        s"-fx-text-fill: $fg; " +
+        "-fx-background-radius: 4; " +
+        "-fx-padding: 3 10; " +
+        "-fx-font-size: 11px; " +
+        "-fx-cursor: hand;"
+    b.setStyle(style(base))
+    b.setOnMouseEntered(_ => if (!b.isDisabled) b.setStyle(style(hover)))
+    b.setOnMouseExited(_ => b.setStyle(style(base)))
+    b.setOnMousePressed(_ => if (!b.isDisabled) b.setStyle(style(press)))
+    b.setOnMouseReleased(_ => b.setStyle(style(if (b.isHover && !b.isDisabled) hover else base)))
+    b
   }
 
   /** Returns (status label, CSS for the status pill, optional sample CSV of failing rows). */

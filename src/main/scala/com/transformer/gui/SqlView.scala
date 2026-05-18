@@ -130,6 +130,12 @@ final class SqlView(showOpenInEditor: Boolean) extends BorderPane {
     */
   def getCurrentSql: String = if (editing) editArea.getText else currentSql
 
+  /** Observable view of the editable text buffer. Hosting panels can attach a
+    * listener to capture in-progress edits (e.g. so a session refresh that
+    * rebuilds the surrounding container doesn't drop unsaved work).
+    */
+  def editTextProperty: javafx.beans.value.ObservableStringValue = editArea.textProperty()
+
   /** True iff the view is currently accepting edits. */
   def isEditing: Boolean = editing
 
