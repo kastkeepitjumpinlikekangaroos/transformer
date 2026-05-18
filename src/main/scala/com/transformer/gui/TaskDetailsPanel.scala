@@ -1,14 +1,16 @@
 package com.transformer.gui
 
-import com.transformer.job.{InputFilePath, RunMarker, TaskStatus, Validation}
+import com.transformer.job.{InputFilePath, JobFiles, RunMarker, TaskStatus, Validation}
 
 import java.nio.file.{Path, Paths}
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javafx.geometry.{Insets, Pos}
-import javafx.scene.control.{Button, Label, ScrollPane, Separator, Toggle, ToggleButton, ToggleGroup, Tooltip}
+import javafx.scene.control.{Alert, Button, ButtonType, Label, ScrollPane, Separator, Toggle, ToggleButton, ToggleGroup, Tooltip}
 import javafx.scene.layout.{FlowPane, HBox, Priority, VBox}
 import javafx.scene.text.{Font, FontWeight}
+import javafx.stage.Stage
+import scala.util.control.NonFatal
 
 /** Right-side panel: shows full details for the currently-selected node — either
   * a SQLTask or an input view.
@@ -24,7 +26,7 @@ import javafx.scene.text.{Font, FontWeight}
   *
   * Input layout swaps SQL views for input options and a "used by" task list.
   */
-final class TaskDetailsPanel(session: JobSession) extends VBox {
+final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) extends VBox {
 
   private val PanelBg     = "#2a2c38"
   private val MutedText   = "#9ba2b8"
@@ -43,6 +45,36 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
   setSpacing(10)
   setPadding(new Insets(14))
   setStyle(s"-fx-background-color: $PanelBg;")
+
+  // ---- Toolbar (edit / add / delete) ----------------------------------------
+  // Buttons whose enabled-state depends on the kind of node selected (task vs
+  // input vs nothing) and whether an inline SQL edit is in progress. See
+  // [[updateToolbarState]] for the truth table.
+  private val editAttrsButton      = makeToolButton("Edit attrs…")
+  private val editSqlButton        = makeToolButton("Edit SQL")
+  private val saveSqlButton        = makePrimaryToolButton("Save SQL")
+  private val cancelSqlButton      = makeToolButton("Cancel")
+  private val addTableButton       = makeToolButton("+ Table…")
+  private val addValidationButton  = makeToolButton("+ Validation…")
+  private val deleteButton         = makeToolButton("Delete…")
+
+  editAttrsButton.setOnAction(_ => onEditAttrs())
+  editSqlButton.setOnAction(_ => onBeginSqlEdit())
+  saveSqlButton.setOnAction(_ => onSaveSqlEdit())
+  cancelSqlButton.setOnAction(_ => onCancelSqlEdit())
+  addTableButton.setOnAction(_ => onAddTable())
+  addValidationButton.setOnAction(_ => onAddValidation())
+  deleteButton.setOnAction(_ => onDeleteSelected())
+
+  // Save/Cancel only appear while editing SQL.
+  saveSqlButton.setVisible(false);   saveSqlButton.setManaged(false)
+  cancelSqlButton.setVisible(false); cancelSqlButton.setManaged(false)
+
+  private val toolbar = new HBox(6,
+    editAttrsButton, editSqlButton, saveSqlButton, cancelSqlButton,
+    addTableButton, addValidationButton, deleteButton
+  )
+  toolbar.setAlignment(Pos.CENTER_LEFT)
 
   // ---- Header row -----------------------------------------------------------
   private val nameLabel = new Label("(no task selected)")
@@ -142,6 +174,12 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
   private var currentRenderedSql: String = ""
   private var currentSourceFile: Option[Path] = None
 
+  // Inline edit-mode bookkeeping. Only the task's main SQL is edited in place;
+  // attribute changes and validation edits open their own modal dialogs.
+  // Selection changes while editing are treated as an implicit cancel.
+  private var sqlEditing: Boolean = false
+  private var editingViewName: Option[String] = None
+
   // Keep one toggle always selected (forbid the unselected-both state JavaFX
   // otherwise allows when the user clicks an already-active toggle).
   sqlToggleGroup.selectedToggleProperty().addListener((_, oldT: Toggle, newT: Toggle) => {
@@ -168,6 +206,8 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
 
   // ---- Assemble -------------------------------------------------------------
   getChildren.addAll(
+    toolbar,
+    new Separator(),
     header,
     statChips,
     new Separator(),
@@ -189,6 +229,14 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
   // --------------------------------------------------------------------------
 
   private def refresh(): Unit = {
+    // If the user moved the selection while editing SQL, drop the edit silently —
+    // the alternative (auto-saving or blocking the navigation) is more surprising.
+    if (sqlEditing) {
+      val stillOnTarget = session.selectedTaskIndex.flatMap { idx =>
+        session.dag.flatMap(_.nodes.lift(idx)).flatMap(_.task.viewName)
+      }
+      if (stillOnTarget != editingViewName) cancelSqlEditState()
+    }
     session.selection match {
       case Some(Selection.Task(i)) =>
         showTask(i)
@@ -197,6 +245,7 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
       case None =>
         showNothing()
     }
+    updateToolbarState()
   }
 
   private def showTask(i: Int): Unit = {
@@ -485,7 +534,11 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
     val state = session.taskStates.lift(i)
     validations.foreach { v =>
       val (label, palette) = validationStatusFor(v, state)
-      validationsSummary.getChildren.add(smallChip(s"${v.name}: $label", palette))
+      val chip = smallChip(s"${v.name}: $label", palette)
+      chip.setTooltip(new Tooltip("Click to edit or delete this validation"))
+      chip.setStyle(chip.getStyle + " -fx-cursor: hand;")
+      chip.setOnMouseClicked(_ => openValidationEditor(i, v))
+      validationsSummary.getChildren.add(chip)
     }
   }
 
@@ -508,6 +561,193 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
       }
     case Some(UiTaskState.Running) => ("running", ChipPalette.Running)
     case Some(UiTaskState.Pending) | None => ("pending", ChipPalette.Neutral)
+  }
+
+  // ---- Toolbar action handlers ----------------------------------------------
+
+  /** True only when the GUI has a writeable job dir loaded. Without one, no
+    * action button can do anything useful. */
+  private def hasJobDir: Boolean = session.jobDir.isDefined
+
+  private def updateToolbarState(): Unit = {
+    val taskSelected = session.selectedTaskIndex.isDefined
+    val inputSelected = session.selectedInputIndex.isDefined
+    val anySelected = taskSelected || inputSelected
+
+    // Edit/save/cancel-SQL: only meaningful for tasks.
+    if (sqlEditing) {
+      editAttrsButton.setVisible(false);   editAttrsButton.setManaged(false)
+      editSqlButton.setVisible(false);     editSqlButton.setManaged(false)
+      saveSqlButton.setVisible(true);      saveSqlButton.setManaged(true)
+      cancelSqlButton.setVisible(true);    cancelSqlButton.setManaged(true)
+      addTableButton.setDisable(true)
+      addValidationButton.setDisable(true)
+      deleteButton.setDisable(true)
+    } else {
+      editAttrsButton.setVisible(true);    editAttrsButton.setManaged(true)
+      editSqlButton.setVisible(true);      editSqlButton.setManaged(true)
+      saveSqlButton.setVisible(false);     saveSqlButton.setManaged(false)
+      cancelSqlButton.setVisible(false);   cancelSqlButton.setManaged(false)
+      editAttrsButton.setDisable(!hasJobDir || !anySelected)
+      editSqlButton.setDisable(!hasJobDir || !taskSelected)
+      // "+ Table" is enabled whenever a job is loaded (a selected node just
+      // pre-fills the FROM stub; no selection is fine too).
+      addTableButton.setDisable(!hasJobDir)
+      addValidationButton.setDisable(!hasJobDir || !taskSelected)
+      deleteButton.setDisable(!hasJobDir || !anySelected)
+    }
+  }
+
+  private def onEditAttrs(): Unit = {
+    val dir = session.jobDir.getOrElse(return)
+    session.selection match {
+      case Some(Selection.Task(i)) =>
+        session.dag.flatMap(_.nodes.lift(i)).foreach { node =>
+          AddTableDialog.showEdit(ownerStage(), dir, node.task).foreach { name =>
+            session.reloadPreservingSelection(Some(name))
+          }
+        }
+      case Some(Selection.Input(i)) =>
+        session.inputs.lift(i).foreach { in =>
+          AddInputDialog.showEdit(ownerStage(), dir, in).foreach { name =>
+            session.reloadPreservingSelection(Some(name))
+          }
+        }
+      case None => ()
+    }
+  }
+
+  private def onBeginSqlEdit(): Unit = {
+    if (!session.jobDir.isDefined) return
+    val idx = session.selectedTaskIndex.getOrElse(return)
+    val task = session.dag.flatMap(_.nodes.lift(idx)).map(_.task).getOrElse(return)
+    val viewName = task.viewName.getOrElse(return)
+    // Force the Source toggle on — editing the rendered SQL would be confusing
+    // (the user's writing the file, not the post-template version). Disabling
+    // the toggle while editing avoids the trap of clicking it mid-edit and
+    // having setSql() clobber the edit buffer.
+    sourceToggle.setSelected(true)
+    sourceToggle.setDisable(true)
+    renderedToggle.setDisable(true)
+    sqlEditing = true
+    editingViewName = Some(viewName)
+    sqlView.setEditable(true)
+    updateToolbarState()
+  }
+
+  private def onSaveSqlEdit(): Unit = {
+    val dir = session.jobDir.getOrElse { cancelSqlEditState(); return }
+    val viewName = editingViewName.getOrElse { cancelSqlEditState(); return }
+    val newSql = sqlView.getCurrentSql
+    try {
+      JobFiles.writeMainSql(dir, viewName, newSql)
+    } catch {
+      case NonFatal(e) =>
+        FxHelpers.showError(ownerStage(), "Couldn't save SQL",
+          Option(e.getMessage).getOrElse(e.toString))
+        return
+    }
+    cancelSqlEditState()
+    session.reloadPreservingSelection(Some(viewName))
+  }
+
+  private def onCancelSqlEdit(): Unit = {
+    cancelSqlEditState()
+    refresh()
+  }
+
+  /** Clear edit-mode state without touching the rest of the UI. Used both by
+    * the explicit Cancel button and by [[refresh]] when the user navigates
+    * away mid-edit.
+    */
+  private def cancelSqlEditState(): Unit = {
+    sqlEditing = false
+    editingViewName = None
+    sqlView.setEditable(false)
+    sourceToggle.setDisable(false)
+    renderedToggle.setDisable(false)
+    updateToolbarState()
+  }
+
+  private def onAddTable(): Unit = {
+    val dir = session.jobDir.getOrElse(return)
+    val upstream = currentUpstreamViewName
+    AddTableDialog.showAdd(ownerStage(), dir, upstream).foreach { name =>
+      session.reloadPreservingSelection(Some(name))
+    }
+  }
+
+  private def onAddValidation(): Unit = {
+    val dir = session.jobDir.getOrElse(return)
+    val idx = session.selectedTaskIndex.getOrElse(return)
+    val viewName = session.dag.flatMap(_.nodes.lift(idx)).flatMap(_.task.viewName).getOrElse(return)
+    AddValidationDialog.showAdd(ownerStage(), dir, viewName).foreach { _ =>
+      session.reloadPreservingSelection(Some(viewName))
+    }
+  }
+
+  private def onDeleteSelected(): Unit = {
+    val dir = session.jobDir.getOrElse(return)
+    session.selection match {
+      case Some(Selection.Task(i)) =>
+        session.dag.flatMap(_.nodes.lift(i)).flatMap(_.task.viewName).foreach { name =>
+          if (confirmDelete(s"Delete table '$name'?",
+              s"$name's main.sql, output.json, and validations/ will be removed from disk.")) {
+            try {
+              JobFiles.deleteTable(dir, name)
+              session.reloadPreservingSelection(None)
+            } catch {
+              case NonFatal(e) =>
+                FxHelpers.showError(ownerStage(), "Couldn't delete table",
+                  Option(e.getMessage).getOrElse(e.toString))
+            }
+          }
+        }
+      case Some(Selection.Input(i)) =>
+        session.inputs.lift(i).foreach { in =>
+          if (confirmDelete(s"Delete input '${in.viewName}'?",
+              s"${in.viewName}'s config.json will be removed from disk (the data file itself is not touched).")) {
+            try {
+              JobFiles.deleteInput(dir, in.viewName)
+              session.reloadPreservingSelection(None)
+            } catch {
+              case NonFatal(e) =>
+                FxHelpers.showError(ownerStage(), "Couldn't delete input",
+                  Option(e.getMessage).getOrElse(e.toString))
+            }
+          }
+        }
+      case None => ()
+    }
+  }
+
+  /** The viewName for the currently-selected node, regardless of kind. Used to
+    * pre-fill the upstream FROM stub when adding a new table. */
+  private def currentUpstreamViewName: Option[String] =
+    session.selectedTaskIndex.flatMap(i =>
+      session.dag.flatMap(_.nodes.lift(i)).flatMap(_.task.viewName)
+    ).orElse(
+      session.selectedInputIndex.flatMap(i => session.inputs.lift(i).map(_.viewName))
+    )
+
+  /** Open a validation in its edit dialog (with a Delete button). Triggered by
+    * clicking the validation's chip in the summary row. */
+  private def openValidationEditor(taskIndex: Int, v: Validation): Unit = {
+    val dir = session.jobDir.getOrElse(return)
+    val tableViewName = session.dag.flatMap(_.nodes.lift(taskIndex))
+      .flatMap(_.task.viewName).getOrElse(return)
+    AddValidationDialog.showEdit(ownerStage(), dir, tableViewName, v.name, v.sqlFile).foreach { _ =>
+      session.reloadPreservingSelection(Some(tableViewName))
+    }
+  }
+
+  private def confirmDelete(header: String, body: String): Boolean = {
+    val alert = new Alert(Alert.AlertType.CONFIRMATION, body)
+    alert.initOwner(ownerStage())
+    alert.setHeaderText(header)
+    alert.setTitle("Confirm delete")
+    val result = alert.showAndWait()
+    result.isPresent && result.get() == ButtonType.OK
   }
 
   private def setErrorText(s: String): Unit = {
@@ -586,6 +826,34 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
         "-fx-font-size: 11px;"
     )
     l
+  }
+
+  private def makeToolButton(text: String): Button = makeToolButtonStyled(text, primary = false)
+  private def makePrimaryToolButton(text: String): Button = makeToolButtonStyled(text, primary = true)
+
+  /** Toolbar button styling. Primary variant uses the same blue as the main
+    * Run button to visually mark the destructive-confirmation flow's "yes,
+    * do it" action.
+    */
+  private def makeToolButtonStyled(text: String, primary: Boolean): Button = {
+    val b = new Button(text)
+    val (base, hover, press) =
+      if (primary) ("#3d6ee8", "#4f7ef0", "#2c5dc5")
+      else         ("#3a3f55", "#4a5070", "#2a2f45")
+    val fg = if (primary) "#ffffff" else "#d7dcec"
+    def style(bg: String): String =
+      s"-fx-background-color: $bg; " +
+        s"-fx-text-fill: $fg; " +
+        "-fx-background-radius: 4; " +
+        "-fx-padding: 4 12; " +
+        "-fx-font-size: 11px; " +
+        "-fx-cursor: hand;"
+    b.setStyle(style(base))
+    b.setOnMouseEntered(_ => if (!b.isDisabled) b.setStyle(style(hover)))
+    b.setOnMouseExited(_ => b.setStyle(style(base)))
+    b.setOnMousePressed(_ => if (!b.isDisabled) b.setStyle(style(press)))
+    b.setOnMouseReleased(_ => b.setStyle(style(if (b.isHover && !b.isDisabled) hover else base)))
+    b
   }
 
   private def styleChip(label: Label, palette: ChipPalette): Unit = {

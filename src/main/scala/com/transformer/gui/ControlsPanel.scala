@@ -35,6 +35,10 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends VBox 
   openButton.setOnAction(_ => onOpen())
   private val openRow = new HBox(6, jobDirField, openButton)
   openRow.setAlignment(Pos.CENTER_LEFT)
+  private val newProjectButton = new Button("Create new project…")
+  newProjectButton.setMaxWidth(Double.MaxValue)
+  newProjectButton.setStyle("-fx-padding: 6 0; -fx-background-color: #3a3f55; -fx-text-fill: #d7dcec;")
+  newProjectButton.setOnAction(_ => onNewProject())
 
   // ---- Execution time section ----
   private val datePicker = new DatePicker()
@@ -83,6 +87,7 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends VBox 
   getChildren.addAll(
     sectionHeader("Job directory"),
     openRow,
+    newProjectButton,
     new Separator(),
     sectionHeader("Execution time (UTC)"),
     datePicker,
@@ -160,6 +165,10 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends VBox 
     }
   }
 
+  private def onNewProject(): Unit = {
+    NewProjectDialog.show(owner()).foreach(p => session.openJobDir(p))
+  }
+
   private def onChooseOutputDir(): Unit = {
     val initial = session.effectiveOutputDir.map(new java.io.File(_))
     FxHelpers.chooseDirectory(owner(), "Choose output directory", initial).foreach { f =>
@@ -180,6 +189,11 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends VBox 
     effectiveOutputLabel.setText(effectiveOutputText)
     runButton.setDisable(!session.canRun)
     statusLabel.setText(statusMessage)
+    // The "Create new project" button is only really useful before a job is
+    // loaded; once one is open it just clutters the panel.
+    val hasJob = session.jobDir.isDefined
+    newProjectButton.setVisible(!hasJob)
+    newProjectButton.setManaged(!hasJob)
   }
 
   private def effectiveOutputText: String = {

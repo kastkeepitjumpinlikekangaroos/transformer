@@ -289,6 +289,39 @@ class DirectoryJobLoaderTest {
     assertEquals(Some("parquet"), byView("pq_t"))
   }
 
+  @Test def perTableOutputJsonMaxPartitionsThreadsThrough(): Unit = {
+    val jobDir = tmpDir("djl-maxp-")
+    writeFile(jobDir.resolve("data/x.csv"), "n\n1\n2\n3\n")
+    writeFile(jobDir.resolve("inputs/x/config.json"), """{"path":"data/x.csv"}""")
+    writeFile(jobDir.resolve("tables/t/main.sql"), "SELECT n FROM x")
+    writeFile(jobDir.resolve("tables/t/output.json"), """{"maxPartitions": 3}""")
+    val outputDir = tmpDir("djl-maxp-out-")
+    val job = DirectoryJobLoader.load(jobDir, outputDir = Some(outputDir.toString))
+    assertEquals(Some(3), job.sql.head.outputFile.get.maxPartitions)
+  }
+
+  @Test def perTableOutputJsonMaxPartitionsRejectsZero(): Unit = {
+    val jobDir = tmpDir("djl-maxp-zero-")
+    writeFile(jobDir.resolve("data/x.csv"), "n\n1\n")
+    writeFile(jobDir.resolve("inputs/x/config.json"), """{"path":"data/x.csv"}""")
+    writeFile(jobDir.resolve("tables/t/main.sql"), "SELECT n FROM x")
+    writeFile(jobDir.resolve("tables/t/output.json"), """{"maxPartitions": 0}""")
+    val ex = assertThrows(classOf[IllegalArgumentException], () =>
+      DirectoryJobLoader.load(jobDir, outputDir = Some(tmpDir("o-").toString)))
+    assertTrue(ex.getMessage, ex.getMessage.contains("maxPartitions"))
+  }
+
+  @Test def perTableOutputJsonMaxPartitionsRejectsNonNumeric(): Unit = {
+    val jobDir = tmpDir("djl-maxp-str-")
+    writeFile(jobDir.resolve("data/x.csv"), "n\n1\n")
+    writeFile(jobDir.resolve("inputs/x/config.json"), """{"path":"data/x.csv"}""")
+    writeFile(jobDir.resolve("tables/t/main.sql"), "SELECT n FROM x")
+    writeFile(jobDir.resolve("tables/t/output.json"), """{"maxPartitions": "two"}""")
+    val ex = assertThrows(classOf[IllegalArgumentException], () =>
+      DirectoryJobLoader.load(jobDir, outputDir = Some(tmpDir("o-").toString)))
+    assertTrue(ex.getMessage, ex.getMessage.contains("maxPartitions"))
+  }
+
   @Test def perTableOutputJsonMalformedThrows(): Unit = {
     val jobDir = tmpDir("djl-bad-part-")
     writeFile(jobDir.resolve("data/x.csv"), "n\n1\n")

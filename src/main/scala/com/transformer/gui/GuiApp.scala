@@ -28,7 +28,7 @@ final class GuiApp extends Application {
     val session = new JobSession()
     val canvas = new DagCanvas(session)
     val controls = new ControlsPanel(session, () => primaryStage)
-    val details = new TaskDetailsPanel(session)
+    val details = new TaskDetailsPanel(session, () => primaryStage)
     val results = new ResultsTabPane(session, () => primaryStage, details)
 
     // Wire canvas double-click → load output rows at the bottom.
@@ -66,6 +66,12 @@ final class GuiApp extends Application {
   }
 
   private def buildMenuBar(stage: Stage, session: JobSession, canvas: DagCanvas): MenuBar = {
+    val newProjectItem = new MenuItem("New Project…")
+    newProjectItem.setAccelerator(new KeyCodeCombination(KeyCode.N, KeyCombination.SHORTCUT_DOWN))
+    newProjectItem.setOnAction(_ => {
+      NewProjectDialog.show(stage).foreach(p => session.openJobDir(p))
+    })
+
     val openItem = new MenuItem("Open Job Directory…")
     openItem.setAccelerator(new KeyCodeCombination(KeyCode.O, KeyCombination.SHORTCUT_DOWN))
     openItem.setOnAction(_ => {
@@ -77,12 +83,51 @@ final class GuiApp extends Application {
     reloadItem.setAccelerator(new KeyCodeCombination(KeyCode.R, KeyCombination.SHORTCUT_DOWN))
     reloadItem.setOnAction(_ => session.jobDir.foreach(session.openJobDir))
 
+    val addInputItem = new MenuItem("Add Input…")
+    addInputItem.setOnAction(_ => session.jobDir.foreach { dir =>
+      AddInputDialog.showAdd(stage, dir).foreach { name =>
+        session.reloadPreservingSelection(Some(name))
+      }
+    })
+
+    val addTableItem = new MenuItem("Add Table…")
+    addTableItem.setOnAction(_ => session.jobDir.foreach { dir =>
+      val upstream = session.selectedTaskIndex.flatMap(i =>
+        session.dag.flatMap(_.nodes.lift(i)).flatMap(_.task.viewName)
+      ).orElse(
+        session.selectedInputIndex.flatMap(i => session.inputs.lift(i).map(_.viewName))
+      )
+      AddTableDialog.showAdd(stage, dir, upstream).foreach { name =>
+        session.reloadPreservingSelection(Some(name))
+      }
+    })
+
+    // Add Input/Table only make sense once a job is loaded — bind enabled-ness
+    // to the session so the menu items reflect that.
+    def syncEnabled(): Unit = {
+      val haveJob = session.jobDir.isDefined
+      addInputItem.setDisable(!haveJob)
+      addTableItem.setDisable(!haveJob)
+      reloadItem.setDisable(!haveJob)
+    }
+    session.addListener(() => syncEnabled())
+    syncEnabled()
+
     val quitItem = new MenuItem("Quit")
     quitItem.setAccelerator(new KeyCodeCombination(KeyCode.Q, KeyCombination.SHORTCUT_DOWN))
     quitItem.setOnAction(_ => stage.close())
 
     val fileMenu = new Menu("File")
-    fileMenu.getItems.addAll(openItem, reloadItem, quitItem)
+    fileMenu.getItems.addAll(
+      newProjectItem,
+      openItem,
+      reloadItem,
+      new javafx.scene.control.SeparatorMenuItem(),
+      addInputItem,
+      addTableItem,
+      new javafx.scene.control.SeparatorMenuItem(),
+      quitItem
+    )
 
     val fitItem = new MenuItem("Fit DAG to window")
     fitItem.setAccelerator(new KeyCodeCombination(KeyCode.DIGIT0, KeyCombination.SHORTCUT_DOWN))

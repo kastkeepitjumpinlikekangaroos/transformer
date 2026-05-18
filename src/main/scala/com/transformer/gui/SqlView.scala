@@ -3,7 +3,7 @@ package com.transformer.gui
 import java.nio.file.Path
 import javafx.animation.PauseTransition
 import javafx.geometry.{Insets, Pos}
-import javafx.scene.control.{Alert, Button, Label, ScrollPane, Tooltip}
+import javafx.scene.control.{Alert, Button, Label, ScrollPane, TextArea, Tooltip}
 import javafx.scene.input.{Clipboard, ClipboardContent}
 import javafx.scene.layout.{BorderPane, HBox, Priority, Region, VBox}
 import javafx.scene.paint.Color
@@ -36,6 +36,7 @@ final class SqlView(showOpenInEditor: Boolean) extends BorderPane {
 
   private var currentSql: String = ""
   private var currentFile: Option[Path] = None
+  private var editing: Boolean = false
 
   private val placeholderLabel = new Label("(no SQL)")
   placeholderLabel.setStyle(s"-fx-text-fill: #6a708a; -fx-padding: 12; -fx-font-style: italic;")
@@ -52,6 +53,20 @@ final class SqlView(showOpenInEditor: Boolean) extends BorderPane {
   scroll.setPannable(true)
   scroll.setStyle(s"-fx-background: $Background; -fx-background-color: $Background;")
   VBox.setVgrow(scroll, Priority.ALWAYS)
+
+  // Editable buffer shown only in edit mode. Hosted alongside the read-only
+  // viewer (we swap them via BorderPane.setCenter) so highlighting in view
+  // mode stays unchanged.
+  private val editArea = new TextArea()
+  editArea.setStyle(
+    s"-fx-control-inner-background: $Background; " +
+      "-fx-text-fill: #d4d4d4; " +
+      "-fx-highlight-fill: #2b4f7a; " +
+      "-fx-highlight-text-fill: #ffffff; " +
+      "-fx-font-family: Monospaced; " +
+      "-fx-font-size: 13px;"
+  )
+  editArea.setWrapText(false)
 
   private val copyButton = makeToolbarButton("Copy")
   copyButton.setTooltip(new Tooltip("Copy SQL to the clipboard"))
@@ -77,11 +92,46 @@ final class SqlView(showOpenInEditor: Boolean) extends BorderPane {
   setCenter(scroll)
   linesBox.getChildren.add(placeholderLabel)
 
-  /** Replace the displayed SQL. Passing `null` or `""` clears the view. */
+  /** Replace the displayed SQL. Passing `null` or `""` clears the view. If the
+    * view is currently in edit mode, the editable buffer is reseeded too so
+    * `getCurrentSql` reflects the new content immediately.
+    */
   def setSql(sql: String): Unit = {
     currentSql = if (sql == null) "" else sql
+    if (editing) editArea.setText(currentSql)
     rebuild()
   }
+
+  /** Switch between read-only (default) and editable display. In edit mode the
+    * line-by-line highlighted renderer is hidden and a plain monospace
+    * TextArea takes its place, seeded with the current SQL.
+    *
+    * Save/Cancel buttons are owned by the parent panel — call
+    * [[getCurrentSql]] to read out the buffer when the user clicks Save.
+    */
+  def setEditable(editable: Boolean): Unit = {
+    if (editing == editable) return
+    editing = editable
+    if (editing) {
+      editArea.setText(currentSql)
+      setCenter(editArea)
+      // Read-only-only actions don't apply while editing.
+      copyButton.setDisable(true)
+      openEditorButton.setDisable(true)
+    } else {
+      setCenter(scroll)
+      copyButton.setDisable(false)
+      openEditorButton.setDisable(currentFile.isEmpty || !showOpenInEditor)
+    }
+  }
+
+  /** Returns the editable buffer's current text when in edit mode; otherwise
+    * returns the last value passed to [[setSql]].
+    */
+  def getCurrentSql: String = if (editing) editArea.getText else currentSql
+
+  /** True iff the view is currently accepting edits. */
+  def isEditing: Boolean = editing
 
   /** Bind an on-disk source file to the "Open in editor" button. Pass `None`
     * (e.g. for the rendered-SQL view, or when the task is built from

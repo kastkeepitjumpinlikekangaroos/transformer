@@ -168,6 +168,41 @@ final class JobSession {
     reloadJob()
   }
 
+  /** Re-read the on-disk job dir and, after the new DAG is built, re-select the
+    * node whose viewName matches `preferredViewName` (if given) or the
+    * currently-selected node's viewName (if `preferredViewName` is None) —
+    * even if its index has shifted. If the viewName is gone (e.g. the user
+    * deleted it), selection is cleared.
+    *
+    * Used after the GUI writes files (add/edit/delete) so the user's
+    * selection survives the round-trip through disk.
+    */
+  def reloadPreservingSelection(preferredViewName: Option[String]): Unit = {
+    val target = preferredViewName.orElse(currentSelectedViewName)
+    reloadJob()
+    val newSel = target.flatMap(indexOfViewName)
+    if (newSel != _selection) {
+      _selection = newSel
+      notifyListeners()
+    }
+  }
+
+  private def currentSelectedViewName: Option[String] = _selection.flatMap {
+    case Selection.Task(i)  => _dag.flatMap(_.nodes.lift(i)).flatMap(_.task.viewName)
+    case Selection.Input(i) => _inputs.lift(i).map(_.viewName)
+  }
+
+  private def indexOfViewName(name: String): Option[Selection] = {
+    val taskIdx = _dag.flatMap { dag =>
+      val i = dag.nodes.indexWhere(_.task.viewName.exists(_.equalsIgnoreCase(name)))
+      if (i >= 0) Some(i) else None
+    }
+    taskIdx.map(Selection.Task(_)).orElse {
+      val i = _inputs.indexWhere(_.viewName.equalsIgnoreCase(name))
+      if (i >= 0) Some(Selection.Input(i)) else None
+    }
+  }
+
   /** Re-resolve the DataJob + DAG from the current jobDir / executionTime /
     * outputDir. Resets per-task UI state to Pending. Records load failures as
     * [[RunState.LoadFailed]] so the UI can surface them.

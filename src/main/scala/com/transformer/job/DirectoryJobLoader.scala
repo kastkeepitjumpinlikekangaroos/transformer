@@ -106,14 +106,22 @@ object DirectoryJobLoader {
         name = Some(viewName),
         viewName = Some(viewName),
         sqlFile = Some(mainSql.toString),
-        outputFile = Some(OutputFilePath(outputPath, format = Some(cfg.format.getOrElse("csv")))),
+        outputFile = Some(OutputFilePath(
+          outputPath,
+          format = Some(cfg.format.getOrElse("csv")),
+          maxPartitions = cfg.maxPartitions
+        )),
         validations = validations
       )
     }
   }
 
-  /** Parsed `tables/<viewName>/output.json` config — both fields optional. */
-  private final case class OutputConfig(partitionBy: Option[String], format: Option[String])
+  /** Parsed `tables/<viewName>/output.json` config — every field optional. */
+  private final case class OutputConfig(
+      partitionBy: Option[String],
+      format: Option[String],
+      maxPartitions: Option[Int]
+  )
 
   /** Optional `tables/<viewName>/output.json` config. Supported fields:
     *
@@ -123,18 +131,30 @@ object DirectoryJobLoader {
     *     `<outputDir>/<viewName>/day=YYYYMMDD/part-NNNNN.<ext>`.
     *   - `format` — output format (e.g. `"csv"`, `"parquet"`). Defaults to
     *     `"csv"` if omitted.
+    *   - `maxPartitions` — cap on the number of `part-*` files written. See
+    *     [[OutputFilePath.maxPartitions]] for the coalescing semantics.
     *
     * Returns an empty [[OutputConfig]] if `output.json` is absent. Throws
     * [[IllegalArgumentException]] if it exists but is malformed.
     */
   private def loadOutputConfig(tableDir: Path, viewName: String): OutputConfig = {
     val configPath = tableDir.resolve("output.json")
-    if (!Files.isRegularFile(configPath)) return OutputConfig(None, None)
+    if (!Files.isRegularFile(configPath)) return OutputConfig(None, None, None)
     val ctx = s"table '$viewName' (output.json)"
     val obj = Json.parse(Files.readString(configPath)).asObject(ctx)
+    val maxPartitions = obj.get("maxPartitions").map { v =>
+      val n = try v.stringValue.toInt catch {
+        case _: NumberFormatException =>
+          throw new IllegalArgumentException(s"$ctx: 'maxPartitions' must be an integer")
+      }
+      if (n < 1)
+        throw new IllegalArgumentException(s"$ctx: 'maxPartitions' must be >= 1; got $n")
+      n
+    }
     OutputConfig(
       partitionBy = obj.optString("partitionBy", ctx).map(_.trim).filter(_.nonEmpty),
-      format = obj.optString("format", ctx).map(_.trim).filter(_.nonEmpty)
+      format = obj.optString("format", ctx).map(_.trim).filter(_.nonEmpty),
+      maxPartitions = maxPartitions
     )
   }
 
