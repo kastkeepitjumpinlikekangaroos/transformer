@@ -1,17 +1,19 @@
 package com.transformer.gui
 
 import com.transformer.core.{ColumnarBatch, Schema}
-import com.transformer.job.{JobResult, ParquetReaderHook, TaskStatus}
+import com.transformer.job.{JobResult, ParquetReaderHook, RunMarker, TaskStatus}
 import com.transformer.read.csv.{CsvOptions, CsvReader}
 
 import javafx.beans.property.ReadOnlyStringWrapper
 import javafx.collections.{FXCollections, ObservableList}
-import javafx.geometry.Insets
+import javafx.geometry.{Insets, Pos}
 import javafx.scene.control._
-import javafx.scene.layout.{StackPane, VBox}
+import javafx.scene.layout.{HBox, Priority, StackPane, VBox}
 import javafx.scene.text.Font
 
 import java.nio.file.{Files, Path, Paths}
+import java.time.format.DateTimeFormatter
+import java.time.{Instant, ZoneOffset}
 import java.util.concurrent.atomic.AtomicLong
 import scala.util.control.NonFatal
 
@@ -34,11 +36,31 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
       "Tasks without persisted output cannot be previewed — they will show a message instead."
   ))
   outputTable.setStyle("-fx-font-family: monospace; -fx-font-size: 12px;")
+
+  // Partition picker — only visible when the currently-activated task has 2+
+  // historical runs on disk.
+  private val pickerLabel = new Label("Run:")
+  pickerLabel.setStyle("-fx-text-fill: #c5cad8; -fx-padding: 0 6 0 0;")
+  private val pickerCombo = new ComboBox[RunChoice]()
+  pickerCombo.setPrefWidth(560)
+  private val pickerRow = new HBox(pickerLabel, pickerCombo)
+  pickerRow.setAlignment(Pos.CENTER_LEFT)
+  pickerRow.setPadding(new Insets(4, 8, 4, 8))
+  pickerRow.setVisible(false)
+  pickerRow.setManaged(false)
+
+  // Setting items / value triggers the selection listener, which would
+  // re-enter loadFromPath in unwanted ways during programmatic setup.
+  private var pickerSuppressed: Boolean = false
+  pickerCombo.valueProperty().addListener((_, _, newVal) => {
+    if (!pickerSuppressed && newVal != null) loadFromPath(newVal.path.toString, Some(newVal))
+  })
+
   private val outputStatus = new Label("")
   outputStatus.setStyle("-fx-text-fill: #c5cad8; -fx-padding: 4 8;")
   outputStatus.setWrapText(true)
-  private val outputBox = new VBox(outputStatus, outputTable)
-  VBox.setVgrow(outputTable, javafx.scene.layout.Priority.ALWAYS)
+  private val outputBox = new VBox(pickerRow, outputStatus, outputTable)
+  VBox.setVgrow(outputTable, Priority.ALWAYS)
   private val outputTab = new Tab("Output data", outputBox)
   outputTab.setClosable(false)
 
@@ -58,40 +80,94 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
   session.addListener(() => refreshRunLog())
 
   private val loadToken = new AtomicLong(0L)
+  private var currentTaskIndex: Option[Int] = None
 
-  /** Activate the output tab and start loading the task's persisted output on a
-    * background thread. Safe to call from the FX thread.
+  /** Activate the output tab, populate the partition picker, and load the
+    * task's persisted output on a background thread. Safe to call from the FX
+    * thread.
+    *
+    * If the task has 2+ historical runs the picker is shown above the table;
+    * selecting another partition re-loads the table for that run.
     */
   def loadTaskOutput(taskIndex: Int): Unit = {
     getSelectionModel.select(outputTab)
+    currentTaskIndex = Some(taskIndex)
+
+    val nameOpt = session.dag.flatMap(_.nodes.lift(taskIndex)).map(_.task.displayName)
+    val runs = session.historicalRunsFor(taskIndex)
+    val planned = session.plannedOutputPathFor(taskIndex)
+    val state = session.taskStates.lift(taskIndex)
+
+    populatePicker(runs, planned)
+
+    runs.headOption match {
+      case Some((path, marker)) =>
+        // Select either the planned path (if it's one of the runs) or the latest.
+        val initial = runs.find { case (p, _) => planned.contains(p.toString) }
+          .getOrElse((path, marker))
+        pickerSuppressed = true
+        try pickerCombo.getSelectionModel.select(toChoice(initial._1, initial._2))
+        finally pickerSuppressed = false
+        loadFromPath(initial._1.toString, Some(toChoice(initial._1, initial._2)), nameOpt)
+      case None =>
+        outputTable.getColumns.clear()
+        outputTable.getItems.clear()
+        outputStatus.setText(noOutputMessage(nameOpt, state.collect { case UiTaskState.Done(r) => r.status }))
+    }
+  }
+
+  private def populatePicker(runs: Seq[(Path, RunMarker)], planned: Option[String]): Unit = {
+    pickerSuppressed = true
+    try {
+      pickerCombo.getItems.clear()
+      runs.foreach { case (p, m) =>
+        pickerCombo.getItems.add(toChoice(p, m, planned.contains(p.toString)))
+      }
+    } finally pickerSuppressed = false
+    val shouldShow = runs.size >= 2
+    pickerRow.setVisible(shouldShow)
+    pickerRow.setManaged(shouldShow)
+  }
+
+  private val pickerTimeFmt: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'").withZone(ZoneOffset.UTC)
+
+  private def toChoice(path: Path, marker: RunMarker, isPlanned: Boolean = false): RunChoice =
+    RunChoice(
+      path = path,
+      marker = marker,
+      label = {
+        val wrote = pickerTimeFmt.format(marker.writtenAt)
+        val exec = pickerTimeFmt.format(marker.executionTime)
+        val pin = if (isPlanned) "  ← current execution time" else ""
+        f"$wrote  •  exec=$exec  •  ${marker.rowsProduced}%,d row(s)  •  $path$pin"
+      }
+    )
+
+  /** Start a background load of `path` and apply the outcome to the table when
+    * it completes (guarded by the load-token so stale loads can't clobber a
+    * fresher one).
+    */
+  private def loadFromPath(path: String, choice: Option[RunChoice], explicitName: Option[String] = None): Unit = {
     val token = loadToken.incrementAndGet()
     outputStatus.setText("Loading…")
     outputTable.getColumns.clear()
     outputTable.getItems.clear()
-
-    val nameOpt = session.dag.flatMap(_.nodes.lift(taskIndex)).map(_.task.displayName)
-    val pathOpt = session.outputPathFor(taskIndex)
-    val state = session.taskStates.lift(taskIndex)
-
-    (pathOpt, state) match {
-      case (None, Some(UiTaskState.Done(result))) =>
-        outputStatus.setText(noOutputMessage(nameOpt, Some(result.status)))
-      case (None, _) =>
-        outputStatus.setText(noOutputMessage(nameOpt, None))
-      case (Some(path), _) =>
-        val worker = new Thread(new Runnable {
-          def run(): Unit = {
-            val outcome =
-              try LoadOutcome.Success(loadFromDisk(path))
-              catch { case NonFatal(e) => LoadOutcome.Failed(Option(e.getMessage).getOrElse(e.toString)) }
-            FxHelpers.onFx {
-              if (loadToken.get() == token) applyOutcome(nameOpt, path, outcome)
-            }
-          }
-        }, s"transformer-gui-output-loader-$token")
-        worker.setDaemon(true)
-        worker.start()
-    }
+    val nameOpt = explicitName.orElse(
+      currentTaskIndex.flatMap(i => session.dag.flatMap(_.nodes.lift(i))).map(_.task.displayName)
+    )
+    val worker = new Thread(new Runnable {
+      def run(): Unit = {
+        val outcome =
+          try LoadOutcome.Success(loadFromDisk(path))
+          catch { case NonFatal(e) => LoadOutcome.Failed(Option(e.getMessage).getOrElse(e.toString)) }
+        FxHelpers.onFx {
+          if (loadToken.get() == token) applyOutcome(nameOpt, path, outcome, choice)
+        }
+      }
+    }, s"transformer-gui-output-loader-$token")
+    worker.setDaemon(true)
+    worker.start()
   }
 
   private def noOutputMessage(name: Option[String], status: Option[TaskStatus]): String = {
@@ -106,7 +182,12 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
     s"$who: no persisted output available — $why."
   }
 
-  private def applyOutcome(name: Option[String], path: String, outcome: LoadOutcome): Unit = {
+  private def applyOutcome(
+      name: Option[String],
+      path: String,
+      outcome: LoadOutcome,
+      choice: Option[RunChoice]
+  ): Unit = {
     outputTable.getColumns.clear()
     outputTable.getItems.clear()
     outcome match {
@@ -129,7 +210,12 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
         outputTable.setItems(items)
         val truncated = if (loaded.truncated) " (preview truncated)" else ""
         val who = name.map(n => s"'$n'").getOrElse("Task")
-        outputStatus.setText(f"$who • $path • ${items.size}%,d row(s) loaded$truncated")
+        val runInfo = choice.map { c =>
+          val wrote = pickerTimeFmt.format(c.marker.writtenAt)
+          val exec = pickerTimeFmt.format(c.marker.executionTime)
+          s" • exec=$exec • written=$wrote"
+        }.getOrElse("")
+        outputStatus.setText(f"$who • $path • ${items.size}%,d row(s) loaded$truncated$runInfo")
       case LoadOutcome.Failed(err) =>
         outputStatus.setText(s"Failed to load $path:\n$err")
     }
@@ -210,7 +296,15 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
   private def refreshRunLog(): Unit = {
     val sb = new StringBuilder()
     session.runState match {
-      case RunState.Idle => sb.append("(no run yet)\n")
+      case RunState.Idle =>
+        val dag = session.dag
+        val cachedTasks = dag.toSeq.flatMap(_.nodes).count(n => session.markerFor(n.index).isDefined)
+        val totalTasks = dag.map(_.nodes.size).getOrElse(0)
+        if (cachedTasks > 0) {
+          sb.append(s"$cachedTasks of $totalTasks task(s) restored from _SUCCESS markers (previous run). Press Run to refresh.\n")
+        } else {
+          sb.append("(no run yet)\n")
+        }
       case RunState.Running => sb.append("Running…\n")
       case RunState.LoadFailed(err) => sb.append(s"Load failed:\n$err\n")
       case RunState.Done(result) =>
@@ -252,4 +346,11 @@ private sealed trait LoadOutcome
 private object LoadOutcome {
   final case class Success(loaded: LoadedRows) extends LoadOutcome
   final case class Failed(error: String) extends LoadOutcome
+}
+
+/** One entry in the partition picker. ComboBox renders entries by their
+  * `toString`, so the label goes there.
+  */
+private final case class RunChoice(path: Path, marker: RunMarker, label: String) {
+  override def toString: String = label
 }

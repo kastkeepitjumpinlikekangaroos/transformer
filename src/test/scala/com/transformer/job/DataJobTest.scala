@@ -530,6 +530,135 @@ class DataJobTest {
     assertTrue(finished.get(1).succeeded)
   }
 
+  @Test def successWritesSuccessMarkerWithExecutionTimeAndFiles(): Unit = {
+    val inDir = tmpDir("dj-mk-")
+    writeCsv(inDir, "events.csv", "id,x\n1,1\n2,2\n3,3\n")
+    val outDir = tmpDir("dj-mk-out-").resolve("out")
+    val execTime = Instant.parse("2026-05-17T20:00:00Z")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT id, x FROM events"),
+        outputFile = Some(OutputFilePath(outDir.toString))
+      )),
+      temporalVariables = Some(TemporalVariables(execTime))
+    )
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+
+    val marker = RunMarker.read(outDir)
+    assertTrue(s"_SUCCESS should exist in $outDir", marker.isDefined)
+    val m = marker.get
+    assertEquals("executionTime should round-trip", execTime, m.executionTime)
+    assertEquals("rowsProduced should match", 3L, m.rowsProduced)
+    assertEquals("format should be csv", "csv", m.format)
+    assertTrue(s"outputFiles should be non-empty (got ${m.outputFiles})",
+      m.outputFiles.nonEmpty && m.outputFiles.forall(_.startsWith("part-")))
+  }
+
+  @Test def failedTaskDoesNotWriteSuccessMarker(): Unit = {
+    val inDir = tmpDir("dj-mk-fail-")
+    writeCsv(inDir, "events.csv", "id,x\n1,1\n")
+    val outDir = tmpDir("dj-mk-fail-out-").resolve("bad")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT no_such_col FROM events"),
+        outputFile = Some(OutputFilePath(outDir.toString))
+      ))
+    )
+    job.run()
+    assertEquals(s"no _SUCCESS expected on failed task: $outDir",
+      None, RunMarker.read(outDir))
+  }
+
+  @Test def runMarkerDiscoverFindsMultiplePartitionsSortedNewestFirst(): Unit = {
+    val base = tmpDir("dj-disc-")
+    val p1 = base.resolve("day=20260101"); Files.createDirectories(p1)
+    val p2 = base.resolve("day=20260102"); Files.createDirectories(p2)
+    val p3 = base.resolve("day=20260103"); Files.createDirectories(p3)
+    // Stamp markers with explicit writtenAt so ordering is deterministic.
+    RunMarker.write(p1, RunMarker(
+      executionTime = Instant.parse("2026-01-01T00:00:00Z"),
+      writtenAt = Instant.parse("2026-01-01T12:00:00Z"),
+      rowsProduced = 1, format = "csv", outputFiles = Seq("part-00000.csv")))
+    RunMarker.write(p3, RunMarker(
+      executionTime = Instant.parse("2026-01-03T00:00:00Z"),
+      writtenAt = Instant.parse("2026-01-03T12:00:00Z"),
+      rowsProduced = 3, format = "csv", outputFiles = Seq("part-00000.csv")))
+    RunMarker.write(p2, RunMarker(
+      executionTime = Instant.parse("2026-01-02T00:00:00Z"),
+      writtenAt = Instant.parse("2026-01-02T12:00:00Z"),
+      rowsProduced = 2, format = "csv", outputFiles = Seq("part-00000.csv")))
+
+    val found = RunMarker.discover(s"${base.toString}/day={{today}}")
+    assertEquals(3, found.size)
+    // Newest first.
+    assertEquals(Instant.parse("2026-01-03T12:00:00Z"), found(0)._2.writtenAt)
+    assertEquals(Instant.parse("2026-01-02T12:00:00Z"), found(1)._2.writtenAt)
+    assertEquals(Instant.parse("2026-01-01T12:00:00Z"), found(2)._2.writtenAt)
+  }
+
+  @Test def runMarkerDiscoverWithoutTemplateMatchesExactPath(): Unit = {
+    val base = tmpDir("dj-disc-exact-")
+    val p = base.resolve("out"); Files.createDirectories(p)
+    RunMarker.write(p, RunMarker(
+      executionTime = Instant.parse("2026-01-01T00:00:00Z"),
+      writtenAt = Instant.parse("2026-01-01T12:00:00Z"),
+      rowsProduced = 1, format = "csv", outputFiles = Seq("part-00000.csv")))
+    val found = RunMarker.discover(p.toString)
+    assertEquals(1, found.size)
+    assertEquals(p.toAbsolutePath.normalize().toString, found.head._1.toString)
+  }
+
+  @Test def runMarkerDiscoverReturnsEmptyWhenNoMarkers(): Unit = {
+    val base = tmpDir("dj-disc-empty-")
+    Files.createDirectories(base.resolve("day=20260101"))
+    Files.createDirectories(base.resolve("day=20260102"))
+    val found = RunMarker.discover(s"${base.toString}/day={{today}}")
+    assertEquals(0, found.size)
+  }
+
+  @Test def runMarkerDiscoverIsolatesSiblingTasks(): Unit = {
+    val base = tmpDir("dj-disc-sibs-")
+    val a = base.resolve("a/day=20260101"); Files.createDirectories(a)
+    val b = base.resolve("b/day=20260101"); Files.createDirectories(b)
+    RunMarker.write(a, RunMarker(Instant.now(), Instant.now(), 1, "csv", Seq("part-00000.csv")))
+    RunMarker.write(b, RunMarker(Instant.now(), Instant.now(), 2, "csv", Seq("part-00000.csv")))
+    // Pattern includes the sibling viewName, so only its partitions match.
+    val foundA = RunMarker.discover(s"${base.toString}/a/day={{today}}")
+    assertEquals(1, foundA.size)
+    assertEquals(a.toAbsolutePath.normalize().toString, foundA.head._1.toString)
+  }
+
+  @Test def validationFailureDoesNotWriteSuccessMarker(): Unit = {
+    val inDir = tmpDir("dj-mk-vf-")
+    writeCsv(inDir, "events.csv", "id,x\n1,1\n2,2\n")
+    val outDir = tmpDir("dj-mk-vf-out-").resolve("out")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(SQLTask(
+        name = Some("t"), viewName = Some("t"),
+        sqlString = Some("SELECT id, x FROM events"),
+        outputFile = Some(OutputFilePath(outDir.toString)),
+        validations = Seq(Validation(
+          name = "non_empty",
+          sqlString = Some("SELECT * FROM t WHERE id > 0")
+        ))
+      ))
+    )
+    val result = job.run()
+    assertFalse("job should not succeed when a validation fails", result.succeeded)
+    assertEquals(s"no _SUCCESS expected on validation failure: $outDir",
+      None, RunMarker.read(outDir))
+    // Sanity: the part files themselves should still exist (writeOutput happened
+    // before validations ran), it's just the marker that gates "blessed".
+    val parts = Files.list(outDir)
+    try assertTrue("part files should exist on disk",
+      parts.iterator().asScala.exists(_.getFileName.toString.startsWith("part-")))
+    finally parts.close()
+  }
+
   @Test def progressListenerReceivesSkippedFinishForUpstreamFailure(): Unit = {
     val inDir = tmpDir("dj-pl-skip-")
     writeCsv(inDir, "events.csv", "id,x\n1,1\n")

@@ -96,14 +96,37 @@ object DirectoryJobLoader {
         )
       }
       val validations = loadValidations(dir.resolve("validations"))
+      val basePath = joinPath(outputDir, viewName)
+      val outputPath = loadOutputConfig(dir, viewName) match {
+        case Some(partition) if partition.nonEmpty => joinPath(basePath, partition)
+        case _                                     => basePath
+      }
       SQLTask(
         name = Some(viewName),
         viewName = Some(viewName),
         sqlFile = Some(mainSql.toString),
-        outputFile = Some(OutputFilePath(joinPath(outputDir, viewName), format = Some("csv"))),
+        outputFile = Some(OutputFilePath(outputPath, format = Some("csv"))),
         validations = validations
       )
     }
+  }
+
+  /** Optional `tables/<viewName>/output.json` config. Today the only supported
+    * field is `partitionBy` — a string appended to the task's output path. The
+    * string is templated against [[com.transformer.temporal.TemporalVariables]]
+    * at run time, so `"day={{today}}"` produces a partition-per-run layout:
+    *
+    *   <outputDir>/<viewName>/day=YYYYMMDD/part-NNNNN.csv
+    *
+    * Returns None if `output.json` is absent. Throws [[IllegalArgumentException]]
+    * if it exists but is malformed.
+    */
+  private def loadOutputConfig(tableDir: Path, viewName: String): Option[String] = {
+    val configPath = tableDir.resolve("output.json")
+    if (!Files.isRegularFile(configPath)) return None
+    val ctx = s"table '$viewName' (output.json)"
+    val obj = Json.parse(Files.readString(configPath)).asObject(ctx)
+    obj.optString("partitionBy", ctx).map(_.trim).filter(_.nonEmpty)
   }
 
   private def loadValidations(validationsDir: Path): Seq[Validation] = {

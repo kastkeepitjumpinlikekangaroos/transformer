@@ -36,6 +36,10 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
   depsLabel.setStyle("-fx-text-fill: #c5cad8; -fx-font-size: 11px;")
   depsLabel.setWrapText(true)
 
+  private val outputPathLabel = new Label("")
+  outputPathLabel.setStyle("-fx-text-fill: #8ab4f8; -fx-font-size: 11px; -fx-font-family: monospace;")
+  outputPathLabel.setWrapText(true)
+
   private val errorLabel = new Label("")
   errorLabel.setStyle("-fx-text-fill: #f8a3a3; -fx-font-family: monospace;")
   errorLabel.setWrapText(true)
@@ -56,6 +60,7 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
     nameLabel,
     statusLabel,
     depsLabel,
+    outputPathLabel,
     errorScroll,
     new Separator(),
     sectionLabel("Source SQL"),
@@ -78,6 +83,7 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
         nameLabel.setText(task.displayName)
         statusLabel.setText(formatStatus(i))
         depsLabel.setText(formatDeps(node))
+        outputPathLabel.setText(formatOutputPath(i))
         sourceSqlArea.setText(safeLoad(task.loadSql _))
         renderedSqlArea.setText(node.renderedMainSql)
         updateErrorPanel(i)
@@ -85,10 +91,42 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
         nameLabel.setText("(no task selected)")
         statusLabel.setText("Click a node to view its details. Double-click to load its output rows.")
         depsLabel.setText("")
+        outputPathLabel.setText("")
         sourceSqlArea.clear()
         renderedSqlArea.clear()
         setErrorText("")
     }
+  }
+
+  /** "Will write to" before run; "Wrote to" after run; "(no outputFile)" if the
+    * task has none. Paths are rendered against the session's executionTime so
+    * any `{{ today }}`-style templates are resolved. When a previous run's
+    * `_SUCCESS` marker is on disk for the path we append a provenance line.
+    */
+  private def formatOutputPath(i: Int): String = {
+    val planned = session.plannedOutputPathFor(i)
+    val written = session.outputPathFor(i)
+    val state = session.taskStates.lift(i)
+    val base = (planned, state, written) match {
+      case (Some(p), Some(UiTaskState.Done(_)), Some(actual)) if actual == p => s"Wrote to: $p"
+      case (Some(p), Some(UiTaskState.Done(_)), Some(actual))                => s"Wrote to: $actual\n(planned: $p)"
+      case (Some(p), _, _)                                                   => s"Will write to: $p"
+      case (None, _, _)                                                      => "(no outputFile configured for this task — nothing will be persisted)"
+    }
+    val markerLine = session.markerFor(i) match {
+      case Some(m) =>
+        val sessionTime = session.executionTime
+        val timeNote =
+          if (m.executionTime == sessionTime) ""
+          else s"\nNote: this run used executionTime ${m.executionTime}, current is $sessionTime"
+        s"\nLoaded from _SUCCESS — ${m.rowsProduced} row(s), ${m.outputFiles.size} part file(s), written ${m.writtenAt}$timeNote"
+      case None => ""
+    }
+    val historicalLine = session.historicalRunsFor(i).size match {
+      case n if n >= 2 => s"\n$n historical run(s) on disk — double-click the node to pick one in the Output data tab."
+      case _ => ""
+    }
+    s"$base$markerLine$historicalLine"
   }
 
   private def formatStatus(i: Int): String = {
@@ -98,15 +136,13 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
       case UiTaskState.Pending => "Status: pending"
       case UiTaskState.Running => "Status: running…"
       case UiTaskState.Done(result) =>
-        val base = result.status match {
+        result.status match {
           case TaskStatus.Succeeded => f"Status: succeeded • ${result.rowsProduced}%,d rows • ${result.durationMillis} ms"
           case TaskStatus.Failed(_) => s"Status: failed • ${result.durationMillis} ms"
           case TaskStatus.ValidationFailed(fs) => s"Status: validation failed (${fs.size}) • ${result.durationMillis} ms"
           case TaskStatus.Skipped(_) => "Status: skipped"
           case TaskStatus.Pending => "Status: pending"
         }
-        val outPath = result.outputPath.map(p => s"\nOutput path: $p").getOrElse("")
-        base + outPath
     }
   }
 

@@ -219,20 +219,45 @@ final case class DataJob(
         val outputPath = writtenOutput.map(_._2)
         if (failures.nonEmpty)
           TaskResult(taskName, TaskStatus.ValidationFailed(failures), q.rowsProduced, outputPath, started, Instant.now())
-        else
+        else {
+          maybeWriteMarker(writtenOutput, q.rowsProduced, vars)
           TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, Instant.now())
+        }
       } else {
         if (writtenOutput.isEmpty) {
           // No output, no downstream view: drain the result so any side-effects of
           // execution (and `rowsProduced`) still happen.
           while (q.batches.hasNext) q.batches.next()
         }
+        maybeWriteMarker(writtenOutput, q.rowsProduced, vars)
         TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, writtenOutput.map(_._2), started, Instant.now())
       }
     } catch {
       case NonFatal(e) =>
         TaskResult(taskName, TaskStatus.Failed(e.getMessage), 0L, None, started, Instant.now())
     }
+  }
+
+  /** Stamp a [[RunMarker]] into the task's output directory iff the task wrote
+    * one. Skipped silently if writing the marker itself fails — a missing
+    * marker should never poison an otherwise-successful run.
+    */
+  private def maybeWriteMarker(
+      writtenOutput: Option[(OutputFilePath, String)],
+      rowsProduced: Long,
+      vars: TemporalVariables
+  ): Unit = writtenOutput.foreach { case (ofp, renderedPath) =>
+    try {
+      val dir = Paths.get(renderedPath)
+      val files = RunMarker.listPartFiles(dir)
+      RunMarker.write(dir, RunMarker(
+        executionTime = vars.executionTime,
+        writtenAt = Instant.now(),
+        rowsProduced = rowsProduced,
+        format = ofp.detectedFormat,
+        outputFiles = files
+      ))
+    } catch { case NonFatal(_) => () }
   }
 
   /** Drains `q` into a directory of part files at `renderedPath`. Parts are

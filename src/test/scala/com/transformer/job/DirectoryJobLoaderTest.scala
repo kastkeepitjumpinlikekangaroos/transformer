@@ -233,4 +233,56 @@ class DirectoryJobLoaderTest {
       DirectoryJobLoader.load(notReal, outputDir = Some(tmpDir("o-").toString)))
     assertTrue(ex.getMessage, ex.getMessage.contains("does not exist"))
   }
+
+  @Test def perTableOutputJsonPartitionByExtendsOutputPath(): Unit = {
+    val jobDir = tmpDir("djl-part-")
+    writeFile(jobDir.resolve("data/events.csv"), "id\n1\n2\n")
+    writeFile(jobDir.resolve("inputs/events/config.json"),
+      """{"path": "data/events.csv"}""")
+    writeFile(jobDir.resolve("tables/t/main.sql"), "SELECT id FROM events")
+    writeFile(jobDir.resolve("tables/t/output.json"),
+      """{"partitionBy": "day={{today}}"}""")
+
+    val outputDir = tmpDir("djl-part-out-")
+    val job = DirectoryJobLoader.load(
+      jobDir,
+      outputDir = Some(outputDir.toString),
+      temporalVariables = Some(TemporalVariables(Instant.parse("2026-05-17T00:00:00Z")))
+    )
+
+    val task = job.sql.head
+    val path = task.outputFile.get.path
+    assertTrue(s"path should end with /t/day={{today}}, got '$path'",
+      path.endsWith("/t/day={{today}}"))
+
+    // Running the job materializes the rendered partition under day=20260517.
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(none)"), result.succeeded)
+    val rendered = outputDir.resolve("t/day=20260517")
+    assertTrue(s"$rendered should be a directory", Files.isDirectory(rendered))
+    assertTrue("_SUCCESS expected in partitioned dir",
+      Files.isRegularFile(rendered.resolve("_SUCCESS")))
+  }
+
+  @Test def perTableOutputJsonAbsentLeavesPathUnchanged(): Unit = {
+    val jobDir = tmpDir("djl-no-part-")
+    writeFile(jobDir.resolve("data/events.csv"), "id\n1\n")
+    writeFile(jobDir.resolve("inputs/events/config.json"), """{"path":"data/events.csv"}""")
+    writeFile(jobDir.resolve("tables/t/main.sql"), "SELECT id FROM events")
+    val outputDir = tmpDir("djl-no-part-out-")
+    val job = DirectoryJobLoader.load(jobDir, outputDir = Some(outputDir.toString))
+    val path = job.sql.head.outputFile.get.path
+    assertTrue(s"path should end with /t (no partition), got '$path'", path.endsWith("/t"))
+  }
+
+  @Test def perTableOutputJsonMalformedThrows(): Unit = {
+    val jobDir = tmpDir("djl-bad-part-")
+    writeFile(jobDir.resolve("data/x.csv"), "n\n1\n")
+    writeFile(jobDir.resolve("inputs/x/config.json"), """{"path":"data/x.csv"}""")
+    writeFile(jobDir.resolve("tables/t/main.sql"), "SELECT n FROM x")
+    writeFile(jobDir.resolve("tables/t/output.json"), "not valid json")
+    val ex = assertThrows(classOf[IllegalArgumentException], () =>
+      DirectoryJobLoader.load(jobDir, outputDir = Some(tmpDir("o-").toString)))
+    assertTrue(ex.getMessage, ex.getMessage.toLowerCase.contains("json"))
+  }
 }

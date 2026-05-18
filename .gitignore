@@ -21,3 +21,5 @@ validation_results/
 .idea/
 .vscode/
 .DS_Store
+
+examples/directory_app/job/output

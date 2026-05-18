@@ -35,7 +35,8 @@ object DirectoryJobExample {
     val jobDir = Paths.get(args.headOption.getOrElse(autoDetectJobDir()))
     val outputDir =
       args.lift(1).getOrElse(System.getProperty("java.io.tmpdir") + "/transformer-directory-out")
-    val executionTime = Instant.parse("2026-01-01T05:30:21Z")
+    val executionTime =
+      args.lift(2).map(Instant.parse).getOrElse(Instant.parse("2026-01-01T05:30:21Z"))
 
     println(s"Loading job from: $jobDir")
     println(s"Writing to:       $outputDir (templated)")

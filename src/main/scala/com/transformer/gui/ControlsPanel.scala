@@ -63,6 +63,11 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends VBox 
   outputDirField.setOnAction(_ => pushOutputDir())
   private val outputRow = new HBox(6, outputDirField, outputDirBrowse)
   outputRow.setAlignment(Pos.CENTER_LEFT)
+  // Always-on hint showing the path the job will actually write under, even
+  // when the user hasn't typed an override. Templated paths show as-rendered.
+  private val effectiveOutputLabel = new Label("")
+  effectiveOutputLabel.setStyle("-fx-text-fill: #8ab4f8; -fx-font-size: 11px; -fx-font-family: monospace;")
+  effectiveOutputLabel.setWrapText(true)
 
   // ---- Run button + status ----
   private val runButton = new Button("Run pipeline")
@@ -86,6 +91,7 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends VBox 
     new Separator(),
     sectionHeader("Output directory"),
     outputRow,
+    effectiveOutputLabel,
     new Separator(),
     runButton,
     statusLabel
@@ -171,8 +177,21 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends VBox 
         session.effectiveOutputDir.map(s => s"$s (default)").getOrElse("<jobDir>/output (default)")
       )
     }
+    effectiveOutputLabel.setText(effectiveOutputText)
     runButton.setDisable(!session.canRun)
     statusLabel.setText(statusMessage)
+  }
+
+  private def effectiveOutputText: String = {
+    val baseRendered = session.effectiveOutputDirRendered
+    val source =
+      if (session.outputDirOverride.isDefined) "from field"
+      else if (session.jobDir.isDefined) "default <jobDir>/output"
+      else "open a job dir first"
+    baseRendered match {
+      case Some(p) => s"Effective output dir ($source):\n$p"
+      case None    => s"Effective output dir: $source"
+    }
   }
 
   private def statusMessage: String = session.runState match {

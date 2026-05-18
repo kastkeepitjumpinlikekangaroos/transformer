@@ -1,7 +1,7 @@
 package com.transformer.gui
 
-import com.transformer.job.{DataJob, DirectoryJobLoader, JobResult, TaskDag, TaskResult, TaskStatus}
-import com.transformer.temporal.TemporalVariables
+import com.transformer.job.{DataJob, DirectoryJobLoader, JobResult, RunMarker, TaskDag, TaskResult, TaskStatus}
+import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
 import java.nio.file.{Path, Paths}
 import java.time.Instant
@@ -49,6 +49,13 @@ final class JobSession {
   private var _selectedTaskIndex: Option[Int] = None
   // Per-task resolved output paths captured from JobResult so we can re-read after run.
   private var _outputPaths: Vector[Option[String]] = Vector.empty
+  // Per-task RunMarkers loaded from disk on job-dir open. Populates UI state with
+  // the previous run's results so the GUI is non-empty before the user presses Run.
+  private var _markers: Vector[Option[RunMarker]] = Vector.empty
+  // All historical runs discovered under each task's templated output path.
+  // Sorted newest-first by writtenAt. Used by the GUI to render a partition
+  // picker when a task has 2+ persisted runs.
+  private var _historicalRuns: Vector[Seq[(Path, RunMarker)]] = Vector.empty
 
   private val listeners = mutable.ArrayBuffer.empty[() => Unit]
 
@@ -77,6 +84,45 @@ final class JobSession {
   def runState: RunState = _runState
   def selectedTaskIndex: Option[Int] = _selectedTaskIndex
   def outputPathFor(taskIndex: Int): Option[String] = _outputPaths.lift(taskIndex).flatten
+
+  /** Cached `_SUCCESS` marker for this task, if any was discovered when the job
+    * directory was opened (or after the most recent run). Used by the UI to show
+    * "Loaded from previous run" provenance.
+    */
+  def markerFor(taskIndex: Int): Option[RunMarker] = _markers.lift(taskIndex).flatten
+
+  /** All historical runs discovered under this task's templated output path,
+    * newest-first. Surfaces a partition picker in the UI when 2+ runs exist.
+    *
+    * Each entry is `(partitionPath, marker)` — the path is the on-disk output
+    * directory for that specific run, ready to feed to a reader.
+    */
+  def historicalRunsFor(taskIndex: Int): Seq[(Path, RunMarker)] =
+    _historicalRuns.lift(taskIndex).getOrElse(Nil)
+
+  /** The job-wide output directory the runner will actually use, with any
+    * `{{ today }}`-style template variables already resolved against
+    * [[executionTime]]. None if no job dir is loaded.
+    */
+  def effectiveOutputDirRendered: Option[String] =
+    effectiveOutputDir.map { raw =>
+      try TemplateRenderer.render(raw, TemporalVariables(_executionTime))
+      catch { case NonFatal(_) => raw }
+    }
+
+  /** The per-task on-disk path the runner will write to (template variables in
+    * the path are pre-rendered against [[executionTime]]). None if the selected
+    * task has no `outputFile` set.
+    */
+  def plannedOutputPathFor(taskIndex: Int): Option[String] =
+    for {
+      d <- _dag
+      node <- d.nodes.lift(taskIndex)
+      ofp <- node.task.outputFile
+    } yield {
+      try TemplateRenderer.render(ofp.path, TemporalVariables(_executionTime))
+      catch { case NonFatal(_) => ofp.path }
+    }
 
   // ---- Mutators (FX-thread only) -------------------------------------------
 
@@ -114,6 +160,7 @@ final class JobSession {
         _layout = None
         _taskStates = Vector.empty
         _outputPaths = Vector.empty
+        _markers = Vector.empty
         _runState = RunState.Idle
       case Some(dir) =>
         try {
@@ -128,7 +175,9 @@ final class JobSession {
           _layout = Some(DagLayout.compute(dag))
           _taskStates = Vector.fill(dag.nodes.size)(UiTaskState.Pending)
           _outputPaths = Vector.fill(dag.nodes.size)(None)
+          _markers = Vector.fill(dag.nodes.size)(None)
           _runState = RunState.Idle
+          hydrateFromMarkers(dag, job)
         } catch {
           case NonFatal(e) =>
             _dataJob = None
@@ -136,10 +185,51 @@ final class JobSession {
             _layout = None
             _taskStates = Vector.empty
             _outputPaths = Vector.empty
+            _markers = Vector.empty
             _runState = RunState.LoadFailed(Option(e.getMessage).getOrElse(e.toString))
         }
     }
     notifyListeners()
+  }
+
+  /** Discover `_SUCCESS` markers from previous runs and pre-populate per-task
+    * UI state as Done so the canvas isn't an empty sea of grey on first open.
+    *
+    * Uses [[RunMarker.discover]] to walk the task's templated output pattern,
+    * so partitioned outputs (e.g. `day={{today}}`) surface every historical
+    * partition. The most-recent run hydrates UI state; the full list is kept
+    * for the partition picker.
+    */
+  private def hydrateFromMarkers(dag: TaskDag, job: DataJob): Unit = {
+    val states = Array.fill[UiTaskState](dag.nodes.size)(UiTaskState.Pending)
+    val outputs = Array.fill[Option[String]](dag.nodes.size)(None)
+    val markers = Array.fill[Option[RunMarker]](dag.nodes.size)(None)
+    val historicals = Array.fill[Seq[(Path, RunMarker)]](dag.nodes.size)(Nil)
+    var i = 0
+    while (i < dag.nodes.size) {
+      val node = dag.nodes(i)
+      node.task.outputFile.foreach { ofp =>
+        val runs = try RunMarker.discover(ofp.path) catch { case NonFatal(_) => Nil }
+        historicals(i) = runs
+        runs.headOption.foreach { case (path, m) =>
+          markers(i) = Some(m)
+          outputs(i) = Some(path.toString)
+          states(i) = UiTaskState.Done(TaskResult(
+            taskName = node.task.displayName,
+            status = TaskStatus.Succeeded,
+            rowsProduced = m.rowsProduced,
+            outputPath = Some(path.toString),
+            startedAt = m.writtenAt,
+            finishedAt = m.writtenAt
+          ))
+        }
+      }
+      i += 1
+    }
+    _taskStates = states.toVector
+    _outputPaths = outputs.toVector
+    _markers = markers.toVector
+    _historicalRuns = historicals.toVector
   }
 
   /** Mark a task as Running. No-ops if no DAG is loaded or the index is bogus. */
@@ -154,6 +244,21 @@ final class JobSession {
     if (taskIndex >= 0 && taskIndex < _taskStates.size) {
       _taskStates = _taskStates.updated(taskIndex, UiTaskState.Done(result))
       _outputPaths = _outputPaths.updated(taskIndex, result.outputPath)
+      // Refresh the marker so post-run UI reflects the freshest on-disk state.
+      val freshMarker = result.outputPath.flatMap { p =>
+        try RunMarker.read(Paths.get(p)) catch { case NonFatal(_) => None }
+      }
+      _markers = _markers.updated(taskIndex, freshMarker)
+      // Re-discover historical partitions so a brand-new run is immediately
+      // visible in the picker dropdown.
+      _dag.foreach { dag =>
+        dag.nodes.lift(taskIndex).foreach { node =>
+          node.task.outputFile.foreach { ofp =>
+            val runs = try RunMarker.discover(ofp.path) catch { case NonFatal(_) => Nil }
+            _historicalRuns = _historicalRuns.updated(taskIndex, runs)
+          }
+        }
+      }
       notifyListeners()
     }
   }
@@ -162,6 +267,9 @@ final class JobSession {
     _runState = RunState.Running
     _taskStates = _taskStates.map(_ => UiTaskState.Pending)
     _outputPaths = _outputPaths.map(_ => None)
+    _markers = _markers.map(_ => None)
+    // Keep historicalRuns intact — they're still on disk and useful in the
+    // picker. They get refreshed after the run completes via reloadHistoricals.
     notifyListeners()
   }
 
