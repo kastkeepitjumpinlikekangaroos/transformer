@@ -16,8 +16,8 @@ object SqlEngine extends SqlExecutor {
   def execute(sql: String, catalog: Catalog): ExecutedQuery = {
     val logical = LogicalBuilder.build(sql, catalog)
     val physical = PhysicalPlanner.plan(logical)
-    val batches: Iterator[ColumnarBatch] =
-      (0 until physical.numPartitions).iterator.flatMap(physical.execute)
-    new ExecutedQuery(physical.outputSchema, batches)
+    val parts: IndexedSeq[Iterator[ColumnarBatch]] =
+      (0 until physical.numPartitions).map(p => physical.execute(p))
+    new ExecutedQuery(physical.outputSchema, parts)
   }
 }

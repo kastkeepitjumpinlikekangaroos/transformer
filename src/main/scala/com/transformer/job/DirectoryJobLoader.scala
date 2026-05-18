@@ -24,8 +24,9 @@ import scala.jdk.CollectionConverters._
   *
   * Directory names are the view names. Each input config is a JSON object accepting
   * the fields supported by [[InputFilePath]] except `viewName` (taken from the
-  * directory). Each table writes its result to `<outputDir>/<viewName>.csv` and is
-  * registered in the catalog so downstream tables can reference it.
+  * directory). Each table writes its result into the directory
+  * `<outputDir>/<viewName>/` as one or more `part-NNNNN.csv` files, and the
+  * directory is registered in the catalog so downstream tables can reference it.
   *
   * Tables run in alphabetical order. To express "table B depends on table A", name
   * the directories so A sorts before B (the simplest convention is numeric prefixes
@@ -99,7 +100,7 @@ object DirectoryJobLoader {
         name = Some(viewName),
         viewName = Some(viewName),
         sqlFile = Some(mainSql.toString),
-        outputFile = Some(OutputFilePath(joinPath(outputDir, s"$viewName.csv"))),
+        outputFile = Some(OutputFilePath(joinPath(outputDir, viewName), format = Some("csv"))),
         validations = validations
       )
     }

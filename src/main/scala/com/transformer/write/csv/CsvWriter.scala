@@ -5,6 +5,7 @@ import com.transformer.core._
 import java.io.{BufferedWriter, OutputStreamWriter}
 import java.nio.charset.{Charset, StandardCharsets}
 import java.nio.file.{Files, Path, Paths, StandardCopyOption}
+import java.util.concurrent.{Callable, Executors, TimeUnit}
 
 final case class CsvWriteOptions(
     header: Boolean = true,
@@ -175,7 +176,7 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
 }
 
 object CsvWriter {
-  /** Drain an iterator of batches into a CSV file. Returns rows written. */
+  /** Drain an iterator of batches into a single CSV file. Returns rows written. */
   def writeAll(target: Path, schema: Schema, batches: Iterator[ColumnarBatch],
                options: CsvWriteOptions = CsvWriteOptions()): Long = {
     val w = new CsvWriter(target, schema, options)
@@ -186,6 +187,75 @@ object CsvWriter {
       case e: Throwable =>
         w.abort()
         throw e
+    }
+  }
+
+  /** Write a sequence of partition iterators into `targetDir` as
+    * `part-00000.csv`, `part-00001.csv`, ... — one file per input partition,
+    * each written in parallel via its own [[CsvWriter]] (atomic temp + rename).
+    *
+    * If any partition fails, every in-flight part writer is aborted and the
+    * thrown exception is rethrown.
+    *
+    * Returns the total number of rows written across all parts.
+    */
+  def writePartitioned(
+      targetDir: Path,
+      schema: Schema,
+      partitions: IndexedSeq[Iterator[ColumnarBatch]],
+      options: CsvWriteOptions = CsvWriteOptions()
+  ): Long = {
+    Files.createDirectories(targetDir)
+    val n = partitions.length
+    if (n == 0) return 0L
+    val parallelism = math.max(1, math.min(n, Runtime.getRuntime.availableProcessors))
+    val pool = Executors.newFixedThreadPool(parallelism)
+    val writers = new Array[CsvWriter](n)
+    try {
+      val futures = (0 until n).map { i =>
+        pool.submit(new Callable[Long] {
+          def call(): Long = {
+            val target = targetDir.resolve(f"part-$i%05d.csv")
+            val w = new CsvWriter(target, schema, options)
+            writers(i) = w
+            val it = partitions(i)
+            while (it.hasNext) w.write(it.next())
+            w.close()
+          }
+        })
+      }
+      var total = 0L
+      var firstError: Throwable = null
+      futures.foreach { f =>
+        try total += f.get()
+        catch {
+          case e: java.util.concurrent.ExecutionException =>
+            if (firstError == null) firstError = e.getCause
+          case t: Throwable =>
+            if (firstError == null) firstError = t
+        }
+      }
+      if (firstError != null) {
+        abortAll(writers)
+        throw firstError
+      }
+      total
+    } catch {
+      case t: Throwable =>
+        abortAll(writers)
+        throw t
+    } finally {
+      pool.shutdown()
+      pool.awaitTermination(1, TimeUnit.MINUTES)
+    }
+  }
+
+  private def abortAll(writers: Array[CsvWriter]): Unit = {
+    var i = 0
+    while (i < writers.length) {
+      val w = writers(i)
+      if (w != null) try w.abort() catch { case _: Throwable => () }
+      i += 1
     }
   }
 }

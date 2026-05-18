@@ -8,6 +8,7 @@ import org.junit.Test
 
 import java.nio.file.{Files, Path}
 import java.time.Instant
+import scala.jdk.CollectionConverters._
 
 class DataJobTest {
 
@@ -21,17 +22,55 @@ class DataJobTest {
 
   private def readCsv(p: Path): String = Files.readString(p)
 
+  /** Concatenate every part file in an output directory, in lexical order, preserving
+    * one header (from the first file). Multi-file output writes one part-NNNNN.csv per
+    * source partition; for assertions we want the full contents.
+    */
+  private def readOutputDir(dir: Path): String = {
+    val files = Files.list(dir)
+    try {
+      val parts = files.iterator().asScala.toVector
+        .filter(p => Files.isRegularFile(p) && p.getFileName.toString.startsWith("part-"))
+        .sortBy(_.getFileName.toString)
+      if (parts.isEmpty) ""
+      else {
+        val sb = new java.lang.StringBuilder()
+        val first = Files.readString(parts.head)
+        sb.append(first)
+        val headerEnd = first.indexOf('\n')
+        val header = if (headerEnd < 0) first else first.substring(0, headerEnd + 1)
+        parts.tail.foreach { p =>
+          val content = Files.readString(p)
+          if (content.startsWith(header)) sb.append(content.substring(header.length))
+          else sb.append(content)
+        }
+        sb.toString
+      }
+    } finally files.close()
+  }
+
+  /** Convenience: when we expect exactly one part file. */
+  private def soleOutputFile(dir: Path): Path = {
+    val files = Files.list(dir)
+    try {
+      val parts = files.iterator().asScala.toVector
+        .filter(p => Files.isRegularFile(p) && p.getFileName.toString.startsWith("part-"))
+      assertEquals(s"expected exactly one part file in $dir, got ${parts.map(_.getFileName)}", 1, parts.size)
+      parts.head
+    } finally files.close()
+  }
+
   @Test def endToEndCsvFilterAndSelectWritesOutput(): Unit = {
     val inDir = tmpDir("dj-in-")
     writeCsv(inDir, "events.csv",
       "user_id,event,amount\n1,click,3\n2,buy,42\n1,buy,17\n3,click,1\n2,buy,7\n")
-    val outFile = tmpDir("dj-out-").resolve("out.csv")
+    val outDir = tmpDir("dj-out-").resolve("out")
 
     val job = DataJob(
       inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
       sql = Seq(SQLTask(
         sqlString = Some("SELECT user_id, SUM(amount) AS total FROM events WHERE event = 'buy' GROUP BY user_id ORDER BY user_id"),
-        outputFile = Some(OutputFilePath(outFile.toString))
+        outputFile = Some(OutputFilePath(outDir.toString))
       ))
     )
     val result = job.run()
@@ -39,7 +78,9 @@ class DataJobTest {
     assertEquals(1, result.tasks.size)
     assertEquals(2L, result.tasks.head.rowsProduced)
 
-    val out = readCsv(outFile)
+    // Aggregate collapses to one partition, so one part file is expected.
+    assertTrue(Files.isDirectory(outDir))
+    val out = Files.readString(soleOutputFile(outDir))
     assertEquals("user_id,total\n2,49\n1,17\n", normalizeOrder(out))
   }
 
@@ -63,46 +104,48 @@ class DataJobTest {
       inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
       sql = Seq(SQLTask(
         sqlString = Some("SELECT * FROM t"),
-        outputFile = Some(OutputFilePath(outDir.toString + "/day={{ today }}/data.csv"))
+        outputFile = Some(OutputFilePath(outDir.toString + "/day={{ today }}/data"))
       )),
       temporalVariables = Some(vars)
     )
     val result = job.run()
     assertTrue(result.succeeded)
-    val expectedPath = outDir.resolve("day=20260101").resolve("data.csv")
-    assertTrue(s"Expected file $expectedPath to exist", Files.exists(expectedPath))
+    val expectedDir = outDir.resolve("day=20260101").resolve("data")
+    assertTrue(s"Expected directory $expectedDir to exist", Files.isDirectory(expectedDir))
+    assertTrue(s"Expected at least one part file in $expectedDir",
+      Files.list(expectedDir).iterator().asScala.exists(_.getFileName.toString.startsWith("part-")))
   }
 
   @Test def temporalTemplateInSqlString(): Unit = {
     val inDir = tmpDir("dj-tsql-")
     writeCsv(inDir, "a.csv", "label,score\nA,1\nB,2\n")
-    val outFile = tmpDir("dj-tsqlout-").resolve("out.csv")
+    val outDir = tmpDir("dj-tsqlout-").resolve("out")
     val vars = TemporalVariables(Instant.parse("2026-01-01T05:30:21Z"))
 
     val job = DataJob(
       inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
       sql = Seq(SQLTask(
         sqlString = Some("SELECT '{{ today }}' AS day, label, score FROM t ORDER BY label"),
-        outputFile = Some(OutputFilePath(outFile.toString))
+        outputFile = Some(OutputFilePath(outDir.toString))
       )),
       temporalVariables = Some(vars)
     )
     assertTrue(job.run().succeeded)
-    val out = readCsv(outFile)
+    val out = readOutputDir(outDir)
     assertEquals("day,label,score\n20260101,A,1\n20260101,B,2\n", out)
   }
 
   @Test def validationFailureTriggersAbortAndDiagnostic(): Unit = {
     val inDir = tmpDir("dj-val-")
     writeCsv(inDir, "a.csv", "id,value\n1,ok\n2,bad\n3,ok\n")
-    val outFile = tmpDir("dj-valout-").resolve("out.csv")
+    val outDir = tmpDir("dj-valout-").resolve("out")
     val valFile = tmpDir("dj-valdiag-").resolve("diag.csv")
 
     val job = DataJob(
       inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
       sql = Seq(SQLTask(
         sqlString = Some("SELECT * FROM t"),
-        outputFile = Some(OutputFilePath(outFile.toString)),
+        outputFile = Some(OutputFilePath(outDir.toString)),
         viewName = Some("result"),
         validations = Seq(Validation(
           name = "no_bad",
@@ -122,7 +165,7 @@ class DataJobTest {
       case other => fail(s"Expected ValidationFailed, got $other")
     }
     // Output should still exist (we persist on validation failure for debugging).
-    assertTrue(Files.exists(outFile))
+    assertTrue(Files.isDirectory(outDir))
     assertTrue(Files.exists(valFile))
     val diag = readCsv(valFile)
     assertTrue(diag.contains("no_bad"))
@@ -131,8 +174,8 @@ class DataJobTest {
   @Test def downstreamTaskSeesUpstreamView(): Unit = {
     val inDir = tmpDir("dj-chain-")
     writeCsv(inDir, "a.csv", "x\n1\n2\n3\n4\n5\n")
-    val mid = tmpDir("dj-mid-").resolve("mid.csv")
-    val out = tmpDir("dj-chainout-").resolve("out.csv")
+    val mid = tmpDir("dj-mid-").resolve("mid")
+    val out = tmpDir("dj-chainout-").resolve("out")
 
     val job = DataJob(
       inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
@@ -149,7 +192,7 @@ class DataJobTest {
       )
     )
     assertTrue(job.run().succeeded)
-    assertEquals("s\n150\n", readCsv(out))
+    assertEquals("s\n150\n", readOutputDir(out))
   }
 
   @Test def diamondDagAllTasksSucceedAndOrderRespected(): Unit = {
@@ -161,16 +204,16 @@ class DataJobTest {
       sql = Seq(
         SQLTask(name = Some("a"), viewName = Some("a"),
           sqlString = Some("SELECT id, x FROM events"),
-          outputFile = Some(OutputFilePath(outDir.resolve("a.csv").toString))),
+          outputFile = Some(OutputFilePath(outDir.resolve("a").toString))),
         SQLTask(name = Some("b"), viewName = Some("b"),
           sqlString = Some("SELECT id, x + 10 AS y FROM a"),
-          outputFile = Some(OutputFilePath(outDir.resolve("b.csv").toString))),
+          outputFile = Some(OutputFilePath(outDir.resolve("b").toString))),
         SQLTask(name = Some("c"), viewName = Some("c"),
           sqlString = Some("SELECT id, x * 2 AS z FROM a"),
-          outputFile = Some(OutputFilePath(outDir.resolve("c.csv").toString))),
+          outputFile = Some(OutputFilePath(outDir.resolve("c").toString))),
         SQLTask(name = Some("d"),
           sqlString = Some("SELECT b.y + c.z AS s FROM b JOIN c ON b.id = c.id"),
-          outputFile = Some(OutputFilePath(outDir.resolve("d.csv").toString)))
+          outputFile = Some(OutputFilePath(outDir.resolve("d").toString)))
       )
     )
     val result = job.run()
@@ -193,13 +236,13 @@ class DataJobTest {
       sql = Seq(
         SQLTask(name = Some("bad"), viewName = Some("bad"),
           sqlString = Some("SELECT no_such_col FROM events"),
-          outputFile = Some(OutputFilePath(outDir.resolve("bad.csv").toString))),
+          outputFile = Some(OutputFilePath(outDir.resolve("bad").toString))),
         SQLTask(name = Some("downstream"), viewName = Some("downstream"),
           sqlString = Some("SELECT * FROM bad"),
-          outputFile = Some(OutputFilePath(outDir.resolve("down.csv").toString))),
+          outputFile = Some(OutputFilePath(outDir.resolve("down").toString))),
         SQLTask(name = Some("indep"),
           sqlString = Some("SELECT id FROM events"),
-          outputFile = Some(OutputFilePath(outDir.resolve("indep.csv").toString)))
+          outputFile = Some(OutputFilePath(outDir.resolve("indep").toString)))
       )
     )
     val result = job.run()
@@ -216,8 +259,8 @@ class DataJobTest {
     }
     assertEquals(s"indep should succeed: ${byName("indep").status}",
       TaskStatus.Succeeded, byName("indep").status)
-    assertTrue("indep output should exist",
-      Files.exists(outDir.resolve("indep.csv")))
+    assertTrue("indep output dir should exist",
+      Files.isDirectory(outDir.resolve("indep")))
   }
 
   @Test def validationFailurePropagatesAsSkippedDownstream(): Unit = {
@@ -229,12 +272,12 @@ class DataJobTest {
       sql = Seq(
         SQLTask(name = Some("a"), viewName = Some("a"),
           sqlString = Some("SELECT * FROM t"),
-          outputFile = Some(OutputFilePath(outDir.resolve("a.csv").toString)),
+          outputFile = Some(OutputFilePath(outDir.resolve("a").toString)),
           validations = Seq(Validation("no_bad",
             sqlString = Some("SELECT * FROM a WHERE value = 'bad'")))),
         SQLTask(name = Some("b"),
           sqlString = Some("SELECT id FROM a"),
-          outputFile = Some(OutputFilePath(outDir.resolve("b.csv").toString)))
+          outputFile = Some(OutputFilePath(outDir.resolve("b").toString)))
       )
     )
     val result = job.run()
@@ -285,10 +328,10 @@ class DataJobTest {
       sql = Seq(
         SQLTask(name = Some("ta"),
           sqlString = Some("SELECT * FROM a"),
-          outputFile = Some(OutputFilePath(outDir.resolve("a.csv").toString))),
+          outputFile = Some(OutputFilePath(outDir.resolve("a").toString))),
         SQLTask(name = Some("tb"),
           sqlString = Some("SELECT * FROM b"),
-          outputFile = Some(OutputFilePath(outDir.resolve("b.csv").toString)))
+          outputFile = Some(OutputFilePath(outDir.resolve("b").toString)))
       )
     )
     val result = job.run(sleepy)
@@ -299,6 +342,127 @@ class DataJobTest {
       s"expected overlap: a=[${a.startedAt}, ${a.finishedAt}], b=[${b.startedAt}, ${b.finishedAt}]",
       a.startedAt.isBefore(b.finishedAt) && b.startedAt.isBefore(a.finishedAt)
     )
+  }
+
+  @Test def multiPartitionInputWritesOneFilePerPartition(): Unit = {
+    // 3 input CSV files => CsvReader produces 3 partitions => projection-only SQL
+    // preserves the partition count => 3 part files in the output directory.
+    val inDir = tmpDir("dj-multi-in-")
+    writeCsv(inDir, "a.csv", "x\n1\n2\n")
+    writeCsv(inDir, "b.csv", "x\n3\n4\n")
+    writeCsv(inDir, "c.csv", "x\n5\n6\n")
+    val outDir = tmpDir("dj-multi-out-").resolve("doubled")
+
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT x * 2 AS y FROM t"),
+        outputFile = Some(OutputFilePath(outDir.toString))
+      ))
+    )
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+    assertEquals(6L, result.tasks.head.rowsProduced)
+
+    val parts = Files.list(outDir).iterator().asScala.toVector
+      .filter(p => p.getFileName.toString.startsWith("part-") && p.getFileName.toString.endsWith(".csv"))
+      .sortBy(_.getFileName.toString)
+    assertEquals(s"expected 3 part files, got ${parts.map(_.getFileName)}", 3, parts.size)
+    assertEquals("part-00000.csv", parts.head.getFileName.toString)
+    // Every part has its own header row.
+    parts.foreach { p =>
+      val text = Files.readString(p)
+      assertTrue(s"$p missing header", text.startsWith("y\n"))
+    }
+    val allRows = parts.flatMap { p =>
+      Files.readString(p).split('\n').toVector.drop(1).filter(_.nonEmpty)
+    }.sorted
+    assertEquals(Vector("10", "12", "2", "4", "6", "8"), allRows)
+  }
+
+  @Test def maxPartitionsCoalescesPartsBelowSourcePartitions(): Unit = {
+    val inDir = tmpDir("dj-coalesce-in-")
+    writeCsv(inDir, "a.csv", "x\n1\n")
+    writeCsv(inDir, "b.csv", "x\n2\n")
+    writeCsv(inDir, "c.csv", "x\n3\n")
+    writeCsv(inDir, "d.csv", "x\n4\n")
+    val outDir = tmpDir("dj-coalesce-out-").resolve("merged")
+
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT * FROM t"),
+        outputFile = Some(OutputFilePath(outDir.toString, maxPartitions = Some(2)))
+      ))
+    )
+    assertTrue(job.run().succeeded)
+    val parts = Files.list(outDir).iterator().asScala.toVector
+      .filter(_.getFileName.toString.startsWith("part-"))
+    assertEquals(s"expected 2 part files, got ${parts.size}", 2, parts.size)
+  }
+
+  @Test def maxPartitionsAboveSourceCountIsNoOp(): Unit = {
+    val inDir = tmpDir("dj-cap-noop-in-")
+    writeCsv(inDir, "only.csv", "x\n1\n2\n")
+    val outDir = tmpDir("dj-cap-noop-out-").resolve("out")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT * FROM t"),
+        outputFile = Some(OutputFilePath(outDir.toString, maxPartitions = Some(8)))
+      ))
+    )
+    assertTrue(job.run().succeeded)
+    val parts = Files.list(outDir).iterator().asScala.toVector
+      .filter(_.getFileName.toString.startsWith("part-"))
+    assertEquals(1, parts.size)
+  }
+
+  @Test def maxPartitionsOneCollapsesToSingleFile(): Unit = {
+    val inDir = tmpDir("dj-single-in-")
+    writeCsv(inDir, "a.csv", "x\n1\n2\n")
+    writeCsv(inDir, "b.csv", "x\n3\n4\n")
+    writeCsv(inDir, "c.csv", "x\n5\n6\n")
+    val outDir = tmpDir("dj-single-out-").resolve("out")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT * FROM t"),
+        outputFile = Some(OutputFilePath(outDir.toString, maxPartitions = Some(1)))
+      ))
+    )
+    assertTrue(job.run().succeeded)
+    val parts = Files.list(outDir).iterator().asScala.toVector
+      .filter(_.getFileName.toString.startsWith("part-"))
+    assertEquals(1, parts.size)
+    val content = Files.readString(parts.head)
+    val rows = content.split('\n').toVector.drop(1).filter(_.nonEmpty).sorted
+    assertEquals(Vector("1", "2", "3", "4", "5", "6"), rows)
+  }
+
+  @Test def downstreamTaskReadsAllPartFilesFromUpstreamView(): Unit = {
+    // The upstream task produces multiple part files; the downstream aggregate
+    // must read every part. This exercises the "directory as a single view"
+    // materializeIfNeeded path.
+    val inDir = tmpDir("dj-multi-chain-in-")
+    writeCsv(inDir, "a.csv", "x\n1\n2\n")
+    writeCsv(inDir, "b.csv", "x\n3\n4\n")
+    val outDir = tmpDir("dj-multi-chain-out-")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(
+        SQLTask(name = Some("doubled"), viewName = Some("doubled"),
+          sqlString = Some("SELECT x * 2 AS y FROM t"),
+          outputFile = Some(OutputFilePath(outDir.resolve("doubled").toString))),
+        SQLTask(name = Some("summed"),
+          sqlString = Some("SELECT SUM(y) AS s FROM doubled"),
+          outputFile = Some(OutputFilePath(outDir.resolve("summed").toString)))
+      )
+    )
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+    assertEquals(4L, result.tasks.head.rowsProduced)
+    assertEquals("s\n20\n", readOutputDir(outDir.resolve("summed")))
   }
 
   private def sleepyExecutor(ms: Long): SqlExecutor = {

@@ -13,9 +13,15 @@ object PathGlob {
     if (!hasGlobChars(pathOrGlob)) {
       val p = Paths.get(pathOrGlob).toAbsolutePath.normalize()
       if (Files.isDirectory(p)) {
-        // Bare directory → all regular files directly inside (single level).
+        // Bare directory → all visible regular files directly inside (single level).
+        // Skip dotfiles (e.g. macOS '.DS_Store', Hadoop CRC sidecars '.part-...crc')
+        // to match Spark/Hadoop conventions.
         val stream = Files.list(p)
-        try stream.iterator().asScala.filter(Files.isRegularFile(_)).toVector.sortBy(_.toString)
+        try stream.iterator().asScala
+          .filter(Files.isRegularFile(_))
+          .filterNot(isHidden)
+          .toVector
+          .sortBy(_.toString)
         finally stream.close()
       } else if (Files.exists(p)) Seq(p)
       else Seq.empty
@@ -30,7 +36,7 @@ object PathGlob {
         val it = stream.iterator()
         while (it.hasNext) {
           val p = it.next()
-          if (Files.isRegularFile(p)) {
+          if (Files.isRegularFile(p) && !isHidden(p)) {
             val rel = basePath.relativize(p)
             if (matcher.matches(rel)) results += p
           }
@@ -38,6 +44,11 @@ object PathGlob {
       } finally stream.close()
       results.sortBy(_.toString).toVector
     }
+  }
+
+  private def isHidden(p: Path): Boolean = {
+    val name = p.getFileName.toString
+    name.startsWith(".") || name.startsWith("_")
   }
 
   private def hasGlobChars(s: String): Boolean =

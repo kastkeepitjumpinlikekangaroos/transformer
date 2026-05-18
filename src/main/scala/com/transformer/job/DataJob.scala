@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, Schema, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, Schema, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
 
@@ -10,7 +10,13 @@ import java.util.concurrent.{Callable, Executors, LinkedBlockingQueue, TimeUnit}
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
-/** Top-level user-facing entry point. See README/example app for usage. */
+/** Top-level user-facing entry point. See README/example app for usage.
+  *
+  * Output paths refer to *directories*. Each task writes one or more
+  * `part-NNNNN.<ext>` files inside its directory (one per source partition by
+  * default; capped by [[OutputFilePath.maxPartitions]] when set). Part files
+  * are written in parallel.
+  */
 final case class DataJob(
     inputs: Seq[InputFilePath],
     sql: Seq[SQLTask],
@@ -158,27 +164,32 @@ final case class DataJob(
     try {
       val q = executor.execute(node.renderedMainSql, catalog)
 
-      val outputPath: Option[String] = task.outputFile.map { ofp =>
+      val writtenOutput: Option[(OutputFilePath, String)] = task.outputFile.map { ofp =>
         val rendered = TemplateRenderer.render(ofp.path, vars)
         if (ofp.isCloud) throw new UnsupportedOperationException(
           s"Cloud output paths not yet implemented (v1.1). Got: '${ofp.path}'"
         )
-        writeOutput(ofp, rendered, q.schema, q.batches)
-        rendered
+        writeOutput(ofp, rendered, q)
+        (ofp, rendered)
       }
 
       if (task.viewName.isDefined || task.validations.nonEmpty) {
         val name = task.viewName.getOrElse(s"__task_${node.index}")
-        val materialized = materializeIfNeeded(q.schema, outputPath)
+        val materialized = materializeIfNeeded(q.schema, writtenOutput)
         catalog.replace(name, materialized)
         val failures = runValidations(node, executor, catalog)
+        val outputPath = writtenOutput.map(_._2)
         if (failures.nonEmpty)
           TaskResult(taskName, TaskStatus.ValidationFailed(failures), q.rowsProduced, outputPath, started, Instant.now())
         else
           TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, Instant.now())
       } else {
-        while (q.batches.hasNext) q.batches.next()
-        TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, Instant.now())
+        if (writtenOutput.isEmpty) {
+          // No output, no downstream view: drain the result so any side-effects of
+          // execution (and `rowsProduced`) still happen.
+          while (q.batches.hasNext) q.batches.next()
+        }
+        TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, writtenOutput.map(_._2), started, Instant.now())
       }
     } catch {
       case NonFatal(e) =>
@@ -186,52 +197,90 @@ final case class DataJob(
     }
   }
 
+  /** Drains `q` into a directory of part files at `renderedPath`. Parts are
+    * coalesced down to [[OutputFilePath.maxPartitions]] if that's set and the
+    * source produced more partitions than the cap.
+    */
   private def writeOutput(
-      ofp: OutputFilePath, renderedPath: String, schema: Schema,
-      batches: Iterator[ColumnarBatch]): Unit = {
+      ofp: OutputFilePath, renderedPath: String, q: ExecutedQuery): Unit = {
+    val parts = coalescedPartitions(q, ofp.maxPartitions)
     ofp.detectedFormat match {
       case "csv" =>
-        val target = Paths.get(renderedPath)
-        CsvWriter.writeAll(target, schema, batches, CsvWriteOptions.fromMap(ofp.options))
+        val dir = Paths.get(renderedPath)
+        CsvWriter.writePartitioned(dir, q.schema, parts, CsvWriteOptions.fromMap(ofp.options))
+        ()
       case "parquet" =>
-        val target = Paths.get(renderedPath)
+        val dir = Paths.get(renderedPath)
         ParquetWriterHook.get match {
-          case Some(fn) => fn(target, schema, batches, ofp.options)
+          case Some(fn) => fn(dir, q.schema, parts, ofp.options)
           case None =>
             throw new UnsupportedOperationException(
               "Parquet output requires the parquet write module on the classpath."
             )
         }
+        ()
       case other =>
         throw new IllegalArgumentException(s"Unsupported output format '$other' for '$renderedPath'")
     }
   }
 
-  /** If the task already wrote to disk, register a re-readable view backed by the
-    * just-written file (so validations work even on huge results). Otherwise, we
-    * need to materialize the result in memory — which can fail for large queries.
-    *
-    * v1 always re-reads from the output file when available; otherwise an in-memory
-    * cached view is built (small queries only).
+  /** Map the executor's `numPartitions` source partitions to at most
+    * `maxPartitions` output partitions using contiguous chunking. With
+    * `maxPartitions = None` (default) we use one output partition per source
+    * partition. `maxPartitions = Some(k)` with k >= numPartitions is a no-op
+    * (we never inflate beyond the natural partitioning).
     */
-  private def materializeIfNeeded(schema: Schema, outputPath: Option[String]): CatalogView = {
-    outputPath match {
-      case Some(p) =>
-        // Re-read the just-written file so validations can stream over it.
-        val pathLower = p.toLowerCase
-        if (pathLower.endsWith(".csv")) {
-          com.transformer.read.csv.CsvReader.fromPath(
-            p, com.transformer.read.csv.CsvOptions(inferSchema = false, columns = Some(schema.fields))
-          )
-        } else if (pathLower.endsWith(".parquet")) {
-          ParquetReaderHook.get match {
-            case Some(fn) => fn(p)
-            case None => throw new UnsupportedOperationException(
-              "Parquet validation re-read requires the parquet read module on the classpath."
+  private def coalescedPartitions(
+      q: ExecutedQuery,
+      maxPartitions: Option[Int]
+  ): IndexedSeq[Iterator[ColumnarBatch]] = {
+    val n = q.numPartitions
+    if (n == 0) return IndexedSeq.empty
+    val cap = maxPartitions.getOrElse(n)
+    val k = math.max(1, math.min(cap, n))
+    if (k == n) (0 until n).map(q.partition)
+    else {
+      val perGroup = (n + k - 1) / k
+      (0 until k).map { g =>
+        val from = g * perGroup
+        val to = math.min(n, from + perGroup)
+        (from until to).iterator.flatMap(p => q.partition(p))
+      }
+    }
+  }
+
+  /** Re-read the just-written output as a view so validations and downstream
+    * tasks can stream over it. Both CSV and Parquet readers treat a bare
+    * directory as "every file inside", which is exactly the part-file layout
+    * we produce.
+    */
+  private def materializeIfNeeded(schema: Schema, writtenOutput: Option[(OutputFilePath, String)]): CatalogView = {
+    writtenOutput match {
+      case Some((ofp, dir)) =>
+        ofp.detectedFormat match {
+          case "csv" =>
+            val opts = CsvWriteOptions.fromMap(ofp.options)
+            com.transformer.read.csv.CsvReader.fromPath(
+              dir,
+              com.transformer.read.csv.CsvOptions(
+                inferSchema = false,
+                columns = Some(schema.fields),
+                header = opts.header,
+                delimiter = opts.delimiter,
+                quote = opts.quote,
+                nullValue = opts.nullValue,
+                charset = opts.charset
+              )
             )
-          }
-        } else {
-          throw new IllegalArgumentException(s"Cannot re-read output of unknown format: $p")
+          case "parquet" =>
+            ParquetReaderHook.get match {
+              case Some(fn) => fn(dir)
+              case None => throw new UnsupportedOperationException(
+                "Parquet validation re-read requires the parquet read module on the classpath."
+              )
+            }
+          case other =>
+            throw new IllegalArgumentException(s"Cannot re-read output of unknown format '$other': $dir")
         }
       case None =>
         throw new UnsupportedOperationException(
@@ -308,18 +357,19 @@ final case class DataJob(
 }
 
 /** Hooks the parquet write module installs into so DataJob doesn't pull parquet in
-  * at compile time.
+  * at compile time. The hook receives the *output directory* and the executor's
+  * per-partition iterators (already coalesced to OutputFilePath.maxPartitions).
   */
 object ParquetWriterHook {
-  @volatile private var writer: Option[(Path, Schema, Iterator[ColumnarBatch], Map[String, String]) => Unit] = None
-  def install(f: (Path, Schema, Iterator[ColumnarBatch], Map[String, String]) => Unit): Unit = {
+  @volatile private var writer: Option[(Path, Schema, IndexedSeq[Iterator[ColumnarBatch]], Map[String, String]) => Long] = None
+  def install(f: (Path, Schema, IndexedSeq[Iterator[ColumnarBatch]], Map[String, String]) => Long): Unit = {
     writer = Some(f)
   }
-  def get: Option[(Path, Schema, Iterator[ColumnarBatch], Map[String, String]) => Unit] = writer
+  def get: Option[(Path, Schema, IndexedSeq[Iterator[ColumnarBatch]], Map[String, String]) => Long] = writer
 }
 
 /** Hook installed by the parquet read module. Used to re-read just-written parquet
-  * files for validations.
+  * directories for validations.
   */
 object ParquetReaderHook {
   @volatile private var reader: Option[String => CatalogView] = None

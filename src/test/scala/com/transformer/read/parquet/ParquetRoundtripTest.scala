@@ -90,26 +90,59 @@ class ParquetRoundtripTest {
       Seq(4, "bob", 40.0)
     ))
     TParquetWriter.writeAll(inFile, inSchema, Iterator(batch))
-    val outDir = Files.createTempDirectory("pq-out-")
-    val outFile = outDir.resolve("totals.parquet")
+    val outBase = Files.createTempDirectory("pq-out-")
+    val outDir = outBase.resolve("totals")
 
     val job = DataJob(
       inputs = Seq(InputFilePath(inDir.toString + "/*.parquet", viewName = "scores")),
       sql = Seq(SQLTask(
         sqlString = Some("SELECT name, SUM(score) AS total FROM scores GROUP BY name ORDER BY name"),
-        outputFile = Some(OutputFilePath(outFile.toString))
+        outputFile = Some(OutputFilePath(outDir.toString, format = Some("parquet")))
       ))
     )
     val result = job.run()
     assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
-    assertTrue(Files.exists(outFile))
+    assertTrue(s"$outDir should be a directory", Files.isDirectory(outDir))
 
-    val out = ParquetReader.fromPath(outFile.toString)
+    val out = ParquetReader.fromPath(outDir.toString)
     val rows = collectRows(out)
     assertEquals(2, rows.size)
     assertEquals("alice", rows.head("name"))
     assertEquals(40.0, rows.head("total"))
     assertEquals("bob", rows(1)("name"))
     assertEquals(60.0, rows(1)("total"))
+  }
+
+  @Test def parquetMultiPartitionInputProducesMultipleOutputFiles(): Unit = {
+    ParquetSupport.init()
+    val schema = Schema(Field("v", DataType.IntType))
+
+    val inDir = Files.createTempDirectory("pq-multi-in-")
+    // Two files => two source partitions => two part files in the output dir.
+    val rows1 = makeBatch(schema, Seq(Seq(1), Seq(2)))
+    val rows2 = makeBatch(schema, Seq(Seq(3), Seq(4)))
+    TParquetWriter.writeAll(inDir.resolve("a.parquet"), schema, Iterator(rows1))
+    TParquetWriter.writeAll(inDir.resolve("b.parquet"), schema, Iterator(rows2))
+
+    val outDir = Files.createTempDirectory("pq-multi-out-").resolve("doubled")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.parquet", viewName = "src")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT v * 2 AS w FROM src"),
+        outputFile = Some(OutputFilePath(outDir.toString, format = Some("parquet")))
+      ))
+    )
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+    val parts = Files.list(outDir).iterator()
+    var count = 0
+    while (parts.hasNext) {
+      val p = parts.next()
+      if (p.getFileName.toString.startsWith("part-")) count += 1
+    }
+    assertEquals(2, count)
+    val out = ParquetReader.fromPath(outDir.toString)
+    val values = collectRows(out).map(_("w").asInstanceOf[Int]).sorted
+    assertEquals(Vector(2, 4, 6, 8), values)
   }
 }

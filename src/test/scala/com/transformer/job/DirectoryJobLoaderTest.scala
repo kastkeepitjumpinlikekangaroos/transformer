@@ -6,6 +6,7 @@ import org.junit.Test
 
 import java.nio.file.{Files, Path}
 import java.time.Instant
+import scala.jdk.CollectionConverters._
 
 class DirectoryJobLoaderTest {
 
@@ -15,6 +16,30 @@ class DirectoryJobLoaderTest {
     if (p.getParent != null) Files.createDirectories(p.getParent)
     Files.writeString(p, contents)
     p
+  }
+
+  /** Read all part files inside an output directory, preserving the header once. */
+  private def readPartFiles(dir: Path): String = {
+    val files = Files.list(dir)
+    try {
+      val parts = files.iterator().asScala.toVector
+        .filter(p => Files.isRegularFile(p) && p.getFileName.toString.startsWith("part-"))
+        .sortBy(_.getFileName.toString)
+      if (parts.isEmpty) ""
+      else {
+        val first = Files.readString(parts.head)
+        val headerEnd = first.indexOf('\n')
+        val header = if (headerEnd < 0) first else first.substring(0, headerEnd + 1)
+        val sb = new java.lang.StringBuilder()
+        sb.append(first)
+        parts.tail.foreach { p =>
+          val c = Files.readString(p)
+          if (c.startsWith(header)) sb.append(c.substring(header.length))
+          else sb.append(c)
+        }
+        sb.toString
+      }
+    } finally files.close()
   }
 
   @Test def loadsAndRunsBasicJob(): Unit = {
@@ -35,9 +60,9 @@ class DirectoryJobLoaderTest {
 
     val result = job.run()
     assertTrue(result.error.getOrElse("(none)"), result.succeeded)
-    val outFile = outputDir.resolve("passthrough.csv")
-    assertTrue(s"$outFile should exist", Files.exists(outFile))
-    assertEquals("id,value\n1,a\n2,b\n", Files.readString(outFile))
+    val outSubdir = outputDir.resolve("passthrough")
+    assertTrue(s"$outSubdir should be a directory", Files.isDirectory(outSubdir))
+    assertEquals("id,value\n1,a\n2,b\n", readPartFiles(outSubdir))
   }
 
   @Test def relativeInputPathIsResolvedAgainstJobDir(): Unit = {
@@ -55,7 +80,7 @@ class DirectoryJobLoaderTest {
       job.inputs.head.path.startsWith(abs)
     )
     assertTrue(job.run().succeeded)
-    assertEquals("m\n14\n", Files.readString(outputDir.resolve("t.csv")))
+    assertEquals("m\n14\n", readPartFiles(outputDir.resolve("t")))
   }
 
   @Test def absoluteInputPathIsLeftAlone(): Unit = {
@@ -126,9 +151,9 @@ class DirectoryJobLoaderTest {
 
     val result = job.run()
     assertTrue(result.error.getOrElse("(none)"), result.succeeded)
-    val outPath = outputBase.resolve("day=20260101").resolve("derived.csv")
-    assertTrue(s"$outPath should exist", Files.exists(outPath))
-    assertEquals("d,id\n20260101,10\n", Files.readString(outPath))
+    val outDir = outputBase.resolve("day=20260101").resolve("derived")
+    assertTrue(s"$outDir should be a directory", Files.isDirectory(outDir))
+    assertEquals("d,id\n20260101,10\n", readPartFiles(outDir))
   }
 
   @Test def downstreamTableCanReferenceUpstreamAlphabetically(): Unit = {
@@ -143,7 +168,7 @@ class DirectoryJobLoaderTest {
     val job = DirectoryJobLoader.load(jobDir, outputDir = Some(outputDir.toString))
     val result = job.run()
     assertTrue(result.error.getOrElse("(none)"), result.succeeded)
-    assertEquals("s\n120\n", Files.readString(outputDir.resolve("b_summed.csv")))
+    assertEquals("s\n120\n", readPartFiles(outputDir.resolve("b_summed")))
   }
 
   @Test def defaultOutputDirIsUnderJobDir(): Unit = {
@@ -153,8 +178,8 @@ class DirectoryJobLoaderTest {
     writeFile(jobDir.resolve("tables/t/main.sql"), "SELECT * FROM x")
     val job = DirectoryJobLoader.load(jobDir)
     assertTrue(job.run().succeeded)
-    val expected = jobDir.toAbsolutePath.normalize().resolve("output").resolve("t.csv")
-    assertTrue(s"$expected should exist", Files.exists(expected))
+    val expected = jobDir.toAbsolutePath.normalize().resolve("output").resolve("t")
+    assertTrue(s"$expected should be a directory", Files.isDirectory(expected))
   }
 
   @Test def jsonScalarOptionsBecomeStringMap(): Unit = {

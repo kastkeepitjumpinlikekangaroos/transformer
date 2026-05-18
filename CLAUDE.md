@@ -91,6 +91,12 @@ Operators emit batches in two ways:
   to `numPartitions = 1` and materialize across partitions in parallel via an
   `Executors.newFixedThreadPool`.
 
+`SqlEngine.execute` returns an `ExecutedQuery` that exposes both `numPartitions`
++ `partition(i)` and a flattened `batches` view. The writer pipeline pulls
+per-partition iterators so it can fan out one output part file per partition
+in parallel; in-process callers (validation drains, in-memory materialization)
+use the flat view.
+
 When operators need to evaluate an `Expr` over a *materialized row* (sort
 comparators, hash-join keys, residual predicates), they use `RowBuf`:
 a reusable 1-row batch that the surrounding loop refills with `.set(rowArr)`
@@ -108,6 +114,27 @@ The top-level executor drains the root operator's partitions sequentially
 This means parallelism scales with input partitioning. CSV → one partition
 per file. Parquet → one partition per row group. Plan accordingly when you
 care about throughput.
+
+### 3a. Output is always a directory of part files
+
+`OutputFilePath.path` is always interpreted as a *directory*. The writer fans
+out one `part-NNNNN.<ext>` per source partition into that directory, using a
+`min(numPartitions, cores)` thread pool inside `CsvWriter.writePartitioned` /
+`ParquetWriter.writePartitioned`. Each part file is written via the existing
+single-file writer with the atomic temp + rename pattern, so any failure aborts
+all in-flight parts before throwing.
+
+`OutputFilePath.maxPartitions: Option[Int]` caps the number of output files.
+With `maxPartitions = Some(k)` and `k < q.numPartitions`, `DataJob.coalescedPartitions`
+groups source partitions into contiguous chunks; with `k >= q.numPartitions`
+it's a no-op (we don't artificially split a single partition into multiple
+files). `maxPartitions = Some(1)` collapses everything into a single
+`part-00000.<ext>` — the closest equivalent of the old single-file output.
+
+Validation re-reads use `CsvReader.fromPath(dir)` / `ParquetReader.fromPath(dir)`;
+both treat a bare directory as "every visible file inside" (via
+`PathGlob.expand`, which skips dotfiles + underscore-prefixed files — needed
+so we don't trip on Hadoop's CRC sidecars).
 
 Above the operator level, `DataJob` runs SQLTasks as a DAG: `TaskDag.build`
 parses each task's rendered SQL (main + every validation) with JSqlParser's
@@ -307,6 +334,18 @@ need them. Cloud is opt-in.
 - **CSV writer's `needsQuotingChars` must be initialized before the header is
   written.** Class-body order matters; put it above the `if (options.header)`
   block.
+- **Output paths are directories, not files.** Anything Spark/Hive-y you might
+  expect (`output/foo.csv`) is now a directory of `part-NNNNN.csv` files; older
+  examples that wrote a single named file have been renamed. Path-based format
+  detection still looks for `.csv` / `.parquet` substrings, so an ext-less
+  directory path (e.g. `output/totals`) needs `format = Some("parquet")` or
+  the default (CSV) wins. `DirectoryJobLoader` sets `format` explicitly to keep
+  the per-table dir name clean (`output/<view>/...` rather than `output/<view>.csv/...`).
+- **Hadoop's `LocalFileSystem` writes hidden `.crc` sidecars** alongside any
+  Parquet temp file; the atomic rename leaves them stranded inside the output
+  directory. `PathGlob.expand` skips dotfiles and `_`-prefixed files so re-reads
+  ignore those (and macOS `.DS_Store`, and any `_SUCCESS` marker we may add
+  later).
 
 ## What's intentionally NOT done
 
@@ -319,9 +358,12 @@ need them. Cloud is opt-in.
 - **No window functions** (`ROW_NUMBER`, `LAG`, `LEAD`, etc.). Common ask
   post-v1.
 - **No subqueries** (scalar, IN, EXISTS, derived tables).
-- **No partitioned output** other than templated paths. If a user writes to
-  `out/day={{ today }}/file.csv`, the date is fixed for the whole job — we
-  don't dynamic-partition on a column value.
+- **No dynamic column-value partitioning.** If a user writes to
+  `out/day={{ today }}/data`, the date is fixed for the whole job. The
+  multi-file output we *do* support is along the executor's partition axis
+  (file-per-input-file for CSV; file-per-row-group for Parquet), capped by
+  `OutputFilePath.maxPartitions`. We don't bucket on a column like Spark's
+  `partitionBy("col")`.
 - **No INFORMATION_SCHEMA / catalog introspection.** Views are
   programmatically registered via `DataJob.inputs`.
 - **No bytecode-level optimizations.** Hot loops use `while` and indexed
@@ -344,7 +386,7 @@ need them. Cloud is opt-in.
 | `write/csv/csv_writer_test` | Quoting, nulls, roundtrip with reader, abort cleanup |
 | `read/parquet/parquet_roundtrip_test` | All-primitive write+read, end-to-end DataJob with parquet I/O |
 | `sql/exec/sql_engine_test` | 16 tests covering SELECT/WHERE/projection arithmetic, CASE, GROUP BY + COUNT/SUM/AVG/MIN/MAX, COUNT DISTINCT, INNER/LEFT JOIN, ORDER BY DESC + LIMIT, DISTINCT, HAVING, LIKE, IS NULL, scalar fns, empty-input aggregation |
-| `job/data_job_test` | End-to-end CSV → SQL → CSV, templated output path, templated SQL, validation failure path, multi-task pipeline with view chaining, diamond DAG ordering, failed-task skip propagation with independent sibling success, validation-failure skip propagation, empty `sql`, setup error reporting, concurrent sibling execution |
+| `job/data_job_test` | End-to-end CSV → SQL → CSV, templated output path, templated SQL, validation failure path, multi-task pipeline with view chaining, diamond DAG ordering, failed-task skip propagation with independent sibling success, validation-failure skip propagation, empty `sql`, setup error reporting, concurrent sibling execution, multi-partition input → multiple part files, `maxPartitions` coalesce / no-op / single-file, downstream task reads all upstream part files |
 | `job/task_dag_test` | Pure dependency analyzer + DAG builder: table-name extraction, independent roots, linear chain, diamond, cycle detection, unknown reference, duplicate viewName, viewName/input collision, main-SQL self-reference, validation self-reference allowed, validation peer reference, duplicate output path, empty input, template rendering before extraction |
 | `job/json_test` | The stdlib JSON parser in `job/Json.scala` — scalars, escapes, nested objects, arrays, type errors, trailing content, scalar→string coercion for the option map |
 | `job/directory_job_loader_test` | End-to-end `DirectoryJobLoader.load(...)`: basic run, relative vs absolute input paths, validations dir (success + failure), templated input paths + outputDir, alphabetical chaining, default outputDir, JSON scalar→option-map coercion, error cases (no/multiple `.json`, missing `main.sql`, missing jobDir) |

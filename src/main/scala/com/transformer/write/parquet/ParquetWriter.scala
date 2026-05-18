@@ -12,6 +12,7 @@ import org.apache.parquet.io.api.Binary
 import org.apache.parquet.schema.MessageType
 
 import java.nio.file.{Files, Path, StandardCopyOption}
+import java.util.concurrent.{Callable, Executors, TimeUnit}
 
 /** Writes a stream of [[ColumnarBatch]]es to a single Parquet file.
   *
@@ -97,6 +98,7 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
 }
 
 object ParquetWriter {
+  /** Drain an iterator of batches into a single Parquet file. Returns rows written. */
   def writeAll(target: Path, schema: Schema, batches: Iterator[ColumnarBatch],
                options: Map[String, String] = Map.empty): Long = {
     val w = new ParquetWriter(target, schema, options)
@@ -107,6 +109,70 @@ object ParquetWriter {
       case e: Throwable =>
         w.abort()
         throw e
+    }
+  }
+
+  /** Write a sequence of partition iterators into `targetDir` as
+    * `part-00000.parquet`, ... — one file per input partition, each written
+    * in parallel. On any failure, every in-flight writer is aborted.
+    */
+  def writePartitioned(
+      targetDir: Path,
+      schema: Schema,
+      partitions: IndexedSeq[Iterator[ColumnarBatch]],
+      options: Map[String, String] = Map.empty
+  ): Long = {
+    Files.createDirectories(targetDir)
+    val n = partitions.length
+    if (n == 0) return 0L
+    val parallelism = math.max(1, math.min(n, Runtime.getRuntime.availableProcessors))
+    val pool = Executors.newFixedThreadPool(parallelism)
+    val writers = new Array[ParquetWriter](n)
+    try {
+      val futures = (0 until n).map { i =>
+        pool.submit(new Callable[Long] {
+          def call(): Long = {
+            val target = targetDir.resolve(f"part-$i%05d.parquet")
+            val w = new ParquetWriter(target, schema, options)
+            writers(i) = w
+            val it = partitions(i)
+            while (it.hasNext) w.write(it.next())
+            w.close()
+          }
+        })
+      }
+      var total = 0L
+      var firstError: Throwable = null
+      futures.foreach { f =>
+        try total += f.get()
+        catch {
+          case e: java.util.concurrent.ExecutionException =>
+            if (firstError == null) firstError = e.getCause
+          case t: Throwable =>
+            if (firstError == null) firstError = t
+        }
+      }
+      if (firstError != null) {
+        abortAll(writers)
+        throw firstError
+      }
+      total
+    } catch {
+      case t: Throwable =>
+        abortAll(writers)
+        throw t
+    } finally {
+      pool.shutdown()
+      pool.awaitTermination(1, TimeUnit.MINUTES)
+    }
+  }
+
+  private def abortAll(writers: Array[ParquetWriter]): Unit = {
+    var i = 0
+    while (i < writers.length) {
+      val w = writers(i)
+      if (w != null) try w.abort() catch { case _: Throwable => () }
+      i += 1
     }
   }
 }

@@ -43,7 +43,7 @@ object ExampleJob {
               |FROM events e
               |LEFT JOIN users u ON e.user_id = u.user_id
               |""".stripMargin),
-          outputFile = Some(OutputFilePath(s"$outputDir/day={{ today }}/enriched.csv")),
+          outputFile = Some(OutputFilePath(s"$outputDir/day={{ today }}/enriched", format = Some("csv"))),
           viewName = Some("enriched")
         ),
         // Task 2: aggregate spend per tier with a DBT-style validation.
@@ -56,7 +56,7 @@ object ExampleJob {
               |GROUP BY tier
               |ORDER BY tier
               |""".stripMargin),
-          outputFile = Some(OutputFilePath(s"$outputDir/day={{ today }}/spend_by_tier.csv")),
+          outputFile = Some(OutputFilePath(s"$outputDir/day={{ today }}/spend_by_tier", format = Some("csv"))),
           viewName = Some("spend_by_tier"),
           validations = Seq(
             Validation(

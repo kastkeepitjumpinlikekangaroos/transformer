@@ -32,9 +32,9 @@ object ParquetSupport {
 
   private def reReadOutput(path: String): CatalogView = ParquetReader.fromPath(path)
 
-  private def writeBatches(target: Path, schema: Schema, batches: Iterator[ColumnarBatch],
-                           options: Map[String, String]): Unit = {
-    TWriter.writeAll(target, schema, batches, options)
-    ()
+  private def writeBatches(targetDir: Path, schema: Schema,
+                           partitions: IndexedSeq[Iterator[ColumnarBatch]],
+                           options: Map[String, String]): Long = {
+    TWriter.writePartitioned(targetDir, schema, partitions, options)
   }
 }
