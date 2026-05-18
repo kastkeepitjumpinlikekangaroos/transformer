@@ -21,3 +21,15 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+scala_junit_test(
+    name = "result_persister_test",
+    srcs = ["ResultPersisterTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/gui",
+        "//src/main/scala/com/transformer/job",
+        "@maven//:junit_junit",
+    ],
+)

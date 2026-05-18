@@ -143,6 +143,7 @@ object AggState {
     case _: AggExprAvg => new AvgState()
     case m: AggExprMin => new MinMaxState(min = true, m.resultType)
     case m: AggExprMax => new MinMaxState(min = false, m.resultType)
+    case _: AggExprCountIf => new CountIfState()
   }
 }
 
@@ -170,6 +171,16 @@ final class CountDistinctState extends AggState {
   }
   def merge(o: AggState): Unit = set.addAll(o.asInstanceOf[CountDistinctState].set)
   def finish(): Any = set.size.toLong
+}
+
+final class CountIfState extends AggState {
+  private var c: Long = 0L
+  def update(agg: AggExpr, b: ColumnarBatch, r: Int): Unit = {
+    val v = agg.asInstanceOf[AggExprCountIf].child.eval(b, r)
+    if (v != null && v.asInstanceOf[Boolean]) c += 1
+  }
+  def merge(o: AggState): Unit = c += o.asInstanceOf[CountIfState].c
+  def finish(): Any = c
 }
 
 sealed trait SumState extends AggState

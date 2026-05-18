@@ -15,9 +15,10 @@ import java.nio.file.Paths
   * Layout:
   *   * Top — menu bar
   *   * Left — [[ControlsPanel]] (open dir, execution time, output dir, Run)
-  *   * Center — vertical [[SplitPane]] with the DAG canvas above and the results
-  *     tabs below
-  *   * Right — [[TaskDetailsPanel]] (selected task's SQL + status)
+  *   * Center — vertical [[SplitPane]] with the DAG canvas above and the
+  *     [[ResultsTabPane]] below. The tab pane hosts every secondary panel
+  *     (task details, output data, validations, SQL console, run log) so the
+  *     DAG canvas gets the full window width.
   */
 final class GuiApp extends Application {
 
@@ -28,12 +29,13 @@ final class GuiApp extends Application {
     val canvas = new DagCanvas(session)
     val controls = new ControlsPanel(session, () => primaryStage)
     val details = new TaskDetailsPanel(session)
-    val results = new ResultsTabPane(session)
+    val results = new ResultsTabPane(session, () => primaryStage, details)
 
     // Wire canvas double-click → load output rows at the bottom.
     canvas.setOnTaskActivated(idx => results.loadTaskOutput(idx))
     canvas.setOnInputActivated(idx => results.loadInputData(idx))
-    // Right-side "Inspect validations" button → switch to the Validations tab.
+    // "Inspect validations" button inside the details panel → switch to the
+    // Validations tab.
     details.setOnInspectValidations(idx => results.focusValidations(idx))
 
     val canvasPane = new Pane(canvas)
@@ -44,13 +46,12 @@ final class GuiApp extends Application {
     val centerSplit = new SplitPane()
     centerSplit.setOrientation(Orientation.VERTICAL)
     centerSplit.getItems.addAll(canvasPane, results)
-    centerSplit.setDividerPositions(0.65)
+    centerSplit.setDividerPositions(0.6)
 
     val root = new BorderPane()
     root.setTop(buildMenuBar(primaryStage, session, canvas))
     root.setLeft(controls)
     root.setCenter(centerSplit)
-    root.setRight(details)
 
     val scene = new Scene(root, 1400, 900)
     primaryStage.setScene(scene)

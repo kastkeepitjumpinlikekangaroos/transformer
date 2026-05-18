@@ -512,6 +512,8 @@ object LogicalBuilder {
         AggExprMin(bindExpr(params.head, sources))
       case "MAX" if params.size == 1 =>
         AggExprMax(bindExpr(params.head, sources))
+      case "COUNT_IF" if params.size == 1 =>
+        AggExprCountIf(Analyzer.implicitCast(bindExpr(params.head, sources), DataType.BooleanType))
       case _ =>
         throw new IllegalArgumentException(s"Unsupported aggregate: ${f.getName}(${params.size} args)")
     }
@@ -521,7 +523,7 @@ object LogicalBuilder {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private val AggFns: Set[String] = Set("COUNT", "SUM", "AVG", "MIN", "MAX")
+  private val AggFns: Set[String] = Set("COUNT", "SUM", "AVG", "MIN", "MAX", "COUNT_IF")
   private def isAggFn(name: String): Boolean = AggFns.contains(name.toUpperCase)
 
   private def containsAggregate(e: Expression): Boolean = e match {
@@ -628,6 +630,10 @@ object LogicalBuilder {
       case "MAX" =>
         WindowFnAgg(AggExprMax(binder(argExpr.getOrElse(
           throw new IllegalArgumentException("MAX requires an argument")))))
+      case "COUNT_IF" =>
+        val bound = binder(argExpr.getOrElse(
+          throw new IllegalArgumentException("COUNT_IF requires an argument")))
+        WindowFnAgg(AggExprCountIf(Analyzer.implicitCast(bound, DataType.BooleanType)))
       case other =>
         throw new IllegalArgumentException(s"Unsupported window function: $other")
     }

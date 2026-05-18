@@ -2,11 +2,11 @@ package com.transformer.gui
 
 import com.transformer.job.{InputFilePath, RunMarker, TaskStatus, Validation}
 
-import java.nio.file.Paths
+import java.nio.file.{Path, Paths}
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javafx.geometry.{Insets, Pos}
-import javafx.scene.control.{Button, Label, ScrollPane, Separator, Tooltip}
+import javafx.scene.control.{Button, Label, ScrollPane, Separator, Toggle, ToggleButton, ToggleGroup, Tooltip}
 import javafx.scene.layout.{FlowPane, HBox, Priority, VBox}
 import javafx.scene.text.{Font, FontWeight}
 
@@ -42,7 +42,6 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
 
   setSpacing(10)
   setPadding(new Insets(14))
-  setPrefWidth(440)
   setStyle(s"-fx-background-color: $PanelBg;")
 
   // ---- Header row -----------------------------------------------------------
@@ -113,15 +112,52 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
   validationsBox.setVisible(false)
   validationsBox.setManaged(false)
 
-  // ---- SQL views ------------------------------------------------------------
-  private val sourceSqlHeader = sectionLabel("Source SQL")
-  private val sourceSqlView = new SqlView(showOpenInEditor = true)
-  private val renderedSqlHeader = sectionLabel("Rendered SQL")
-  private val renderedSqlView = new SqlView(showOpenInEditor = false)
-  sourceSqlView.setPrefHeight(220)
-  renderedSqlView.setPrefHeight(220)
-  VBox.setVgrow(sourceSqlView, Priority.ALWAYS)
-  VBox.setVgrow(renderedSqlView, Priority.ALWAYS)
+  // ---- SQL view (Source / Rendered toggle) ----------------------------------
+  // One SqlView swapped between the on-disk source and the template-rendered
+  // body via a two-button toggle group. Keeps the panel short enough to live
+  // in a bottom tab instead of needing the full window height for two stacked
+  // viewers.
+  private val sourceToggle = new ToggleButton("Source")
+  private val renderedToggle = new ToggleButton("Rendered")
+  private val sqlToggleGroup = new ToggleGroup()
+  Seq(sourceToggle, renderedToggle).foreach { tb =>
+    tb.setToggleGroup(sqlToggleGroup)
+    tb.setStyle(
+      "-fx-background-color: #3a3f55; -fx-text-fill: #d7dcec; " +
+        "-fx-padding: 2 12; -fx-font-size: 11px; -fx-background-radius: 4;"
+    )
+  }
+  sourceToggle.setSelected(true)
+  private val sqlHeader = sectionLabel("SQL")
+  private val sqlHeaderRow = new HBox(8, sqlHeader, sourceToggle, renderedToggle)
+  sqlHeaderRow.setAlignment(Pos.CENTER_LEFT)
+  private val sqlView = new SqlView(showOpenInEditor = true)
+  sqlView.setPrefHeight(280)
+  VBox.setVgrow(sqlView, Priority.ALWAYS)
+
+  // Backing state — the SqlView is reused, but we keep both bodies around so
+  // toggling between Source / Rendered is instant (no reload of the source
+  // file or re-render of templates).
+  private var currentSourceSql: String = ""
+  private var currentRenderedSql: String = ""
+  private var currentSourceFile: Option[Path] = None
+
+  // Keep one toggle always selected (forbid the unselected-both state JavaFX
+  // otherwise allows when the user clicks an already-active toggle).
+  sqlToggleGroup.selectedToggleProperty().addListener((_, oldT: Toggle, newT: Toggle) => {
+    if (newT == null && oldT != null) oldT.setSelected(true)
+    else updateSqlView()
+  })
+
+  private def updateSqlView(): Unit = {
+    if (renderedToggle.isSelected) {
+      sqlView.setSql(currentRenderedSql)
+      sqlView.setSourceFile(None)
+    } else {
+      sqlView.setSql(currentSourceSql)
+      sqlView.setSourceFile(currentSourceFile)
+    }
+  }
 
   // ---- Input-only widgets ---------------------------------------------------
   private val inputOptionsHeader = sectionLabel("Options")
@@ -143,10 +179,8 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
     validationsBox,
     inputOptionsContainer,
     new Separator(),
-    sourceSqlHeader,
-    sourceSqlView,
-    renderedSqlHeader,
-    renderedSqlView
+    sqlHeaderRow,
+    sqlView
   )
 
   session.addListener(() => refresh())
@@ -180,10 +214,10 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
     renderOutput(i)
     updateErrorPanel(i)
     renderValidationsSummary(i)
-    sourceSqlView.setSql(safeLoad(task.loadSql _))
-    sourceSqlView.setSourceFile(task.sqlFile.map(Paths.get(_)))
-    renderedSqlView.setSql(node.renderedMainSql)
-    renderedSqlView.setSourceFile(None)
+    currentSourceSql = safeLoad(task.loadSql _)
+    currentRenderedSql = node.renderedMainSql
+    currentSourceFile = task.sqlFile.map(Paths.get(_))
+    updateSqlView()
   }
 
   private def showInput(i: Int): Unit = {
@@ -224,17 +258,15 @@ final class TaskDetailsPanel(session: JobSession) extends VBox {
     historyHintLabel.setVisible(false); historyHintLabel.setManaged(false)
     setErrorText("")
     validationsBox.setVisible(false); validationsBox.setManaged(false)
-    sourceSqlView.clear()
-    sourceSqlView.setSourceFile(None)
-    renderedSqlView.clear()
-    renderedSqlView.setSourceFile(None)
+    currentSourceSql = ""
+    currentRenderedSql = ""
+    currentSourceFile = None
+    updateSqlView()
   }
 
   private def setSqlMode(visible: Boolean): Unit = {
-    sourceSqlHeader.setVisible(visible); sourceSqlHeader.setManaged(visible)
-    sourceSqlView.setVisible(visible);   sourceSqlView.setManaged(visible)
-    renderedSqlHeader.setVisible(visible); renderedSqlHeader.setManaged(visible)
-    renderedSqlView.setVisible(visible);   renderedSqlView.setManaged(visible)
+    sqlHeaderRow.setVisible(visible); sqlHeaderRow.setManaged(visible)
+    sqlView.setVisible(visible);      sqlView.setManaged(visible)
   }
 
   private def setInputMode(visible: Boolean): Unit = {

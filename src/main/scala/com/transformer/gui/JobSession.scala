@@ -1,6 +1,8 @@
 package com.transformer.gui
 
-import com.transformer.job.{DataJob, DirectoryJobLoader, InputFilePath, JobResult, RunMarker, TaskDag, TaskResult, TaskStatus}
+import com.transformer.core.{Catalog, CatalogView}
+import com.transformer.job.{DataJob, DirectoryJobLoader, InputFilePath, InputResolver, JobResult, ParquetReaderHook, RunMarker, TaskDag, TaskResult, TaskStatus}
+import com.transformer.read.csv.{CsvOptions, CsvReader}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
 import java.nio.file.{Path, Paths}
@@ -327,6 +329,75 @@ final class JobSession {
 
   /** True iff we have a job loaded and it's safe to press Run. */
   def canRun: Boolean = _dataJob.isDefined && _dag.exists(_.nodes.nonEmpty) && !isRunning
+
+  /** Build a fresh [[Catalog]] for interactive (ad-hoc) SQL execution.
+    *
+    * Populates one view per:
+    *   - input — resolved via [[InputResolver]] against its rendered path, so
+    *     CSV options and parquet hooks behave the same way they would for a
+    *     real run.
+    *   - task with a persisted output — most-recent `_SUCCESS`-marked partition
+    *     (or the path captured during the last in-session run), read back from
+    *     disk under the task's `viewName`. Tasks with no on-disk output are
+    *     skipped.
+    *
+    * Failures resolving any single view are recorded in [[InteractiveCatalog.errors]]
+    * rather than thrown — interactive SQL is best-effort and the user still
+    * benefits from a partial catalog. View names match what the task DAG
+    * scheduler would use, so the same queries the user writes in `.sql` files
+    * work here.
+    */
+  def buildInteractiveCatalog(): InteractiveCatalog = {
+    val cat = new Catalog
+    val views = mutable.ArrayBuffer.empty[InteractiveViewSpec]
+    val errors = mutable.ArrayBuffer.empty[String]
+    val seen = mutable.Set.empty[String]
+
+    _inputs.iterator.zipWithIndex.foreach { case (in, i) =>
+      val rendered = _renderedInputPaths.lift(i).getOrElse(in.path)
+      try {
+        val view = InputResolver.resolve(in.copy(path = rendered))
+        cat.register(in.viewName, view)
+        seen += in.viewName.toLowerCase
+        views += InteractiveViewSpec(
+          name = in.viewName,
+          kind = ViewKind.Input,
+          path = Some(rendered),
+          schema = view.schema.fieldNames
+        )
+      } catch {
+        case NonFatal(e) =>
+          errors += s"input '${in.viewName}': ${Option(e.getMessage).getOrElse(e.toString)}"
+      }
+    }
+
+    _dag.foreach { dag =>
+      dag.nodes.foreach { node =>
+        val viewNameOpt = node.task.viewName
+        val taskOutputPath: Option[String] = _outputPaths.lift(node.index).flatten
+          .orElse(_historicalRuns.lift(node.index).flatMap(_.headOption).map(_._1.toString))
+        (viewNameOpt, taskOutputPath) match {
+          case (Some(name), Some(path)) if !seen.contains(name.toLowerCase) =>
+            try {
+              val view = JobSession.readOutputAsView(path)
+              cat.replace(name, view)
+              seen += name.toLowerCase
+              views += InteractiveViewSpec(
+                name = name,
+                kind = ViewKind.Task,
+                path = Some(path),
+                schema = view.schema.fieldNames
+              )
+            } catch {
+              case NonFatal(e) =>
+                errors += s"task '${node.task.displayName}': ${Option(e.getMessage).getOrElse(e.toString)}"
+            }
+          case _ => ()
+        }
+      }
+    }
+    InteractiveCatalog(cat, views.toVector, errors.toVector)
+  }
 }
 
 /** Static helpers — kept here to avoid sprawling another small file. */
@@ -340,4 +411,46 @@ object JobSession {
     if (trimmed.isEmpty) None
     else try Some(Paths.get(trimmed)) catch { case NonFatal(_) => None }
   }
+
+  /** Read an on-disk task output directory as a [[CatalogView]]. Mirrors the
+    * format detection used by `ResultsTabPane` for output previews so the
+    * interactive SQL catalog sees the same data the preview tab does.
+    */
+  private[gui] def readOutputAsView(path: String): CatalogView = {
+    val lower = path.toLowerCase
+    val isParquet = lower.endsWith(".parquet") || lower.contains(".parquet")
+    if (isParquet) ParquetReaderHook.get match {
+      case Some(fn) => fn(path)
+      case None => throw new UnsupportedOperationException(
+        "parquet read module not on classpath — add //src/main/scala/com/transformer/read/parquet to the launcher deps"
+      )
+    } else CsvReader.fromPath(path, CsvOptions())
+  }
 }
+
+/** A view available to interactive SQL — either an input or a task's persisted
+  * output. Surfaced in the SQL console UI so the user knows what they can
+  * query.
+  */
+final case class InteractiveViewSpec(
+    name: String,
+    kind: ViewKind,
+    path: Option[String],
+    schema: Seq[String]
+)
+
+sealed trait ViewKind
+object ViewKind {
+  case object Input extends ViewKind
+  case object Task  extends ViewKind
+}
+
+/** Result of [[JobSession.buildInteractiveCatalog]]. The catalog is what the
+  * SQL engine actually executes against; `views` is the user-facing listing
+  * and `errors` collects per-view resolution failures.
+  */
+final case class InteractiveCatalog(
+    catalog: Catalog,
+    views: Vector[InteractiveViewSpec],
+    errors: Vector[String]
+)

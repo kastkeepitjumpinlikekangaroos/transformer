@@ -17,20 +17,30 @@ import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicLong
 import scala.util.control.NonFatal
 
-/** Bottom panel: three tabs.
+/** Bottom panel: five tabs.
   *
+  *  - **Task details** — selected task/input metadata + a single Source/Rendered-
+  *    toggle SQL viewer. Hosts the `TaskDetailsPanel` that used to live in the
+  *    right-side BorderPane slot.
   *  - **Output data** — rows from the selected/activated task's persisted output,
   *    or an activated input's raw data. Loaded on demand on a background thread.
   *  - **Validations** — per-validation cards (name + status + SQL + failing rows
   *    sample) for the currently-selected task. Always reflects the current
   *    selection; no explicit load step needed.
+  *  - **SQL console** — interactive ad-hoc SQL over the inputs and task outputs
+  *    with an optional Persist button that writes the result to disk via the
+  *    library's standard CSV/Parquet writers.
   *  - **Run log** — overall job summary, per-task statuses, and error details.
   *
   * Output loading is triggered explicitly via [[loadTaskOutput]] / [[loadInputData]]
   * (the canvas's double-click handler). A load-token guards against stale loads
   * when the user activates a new node before the previous load completes.
   */
-final class ResultsTabPane(session: JobSession) extends TabPane {
+final class ResultsTabPane(
+    session: JobSession,
+    owner: () => javafx.stage.Stage,
+    details: TaskDetailsPanel
+) extends TabPane {
 
   private val MaxPreviewRows = 1000
 
@@ -84,6 +94,20 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
   private val validationsTab = new Tab("Validations", validationsBox)
   validationsTab.setClosable(false)
 
+  // ---- Task details tab ----
+  // Host the right-side metadata panel here so the whole window's bottom area
+  // is one consistent tab pane.
+  private val detailsScroll = new ScrollPane(details)
+  detailsScroll.setFitToWidth(true)
+  detailsScroll.setStyle("-fx-background: #2a2c38; -fx-background-color: #2a2c38;")
+  private val detailsTab = new Tab("Task details", detailsScroll)
+  detailsTab.setClosable(false)
+
+  // ---- SQL console tab ----
+  private val sqlConsole = new SqlConsolePanel(session, owner)
+  private val sqlConsoleTab = new Tab("SQL console", sqlConsole)
+  sqlConsoleTab.setClosable(false)
+
   // ---- Run log tab ----
   private val runLog = new TextArea("(no run yet)")
   runLog.setEditable(false)
@@ -93,7 +117,7 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
   private val runLogTab = new Tab("Run log", runLog)
   runLogTab.setClosable(false)
 
-  getTabs.addAll(outputTab, validationsTab, runLogTab)
+  getTabs.addAll(detailsTab, outputTab, validationsTab, sqlConsoleTab, runLogTab)
   setPadding(Insets.EMPTY)
   setStyle("-fx-background-color: #2a2c38;")
 

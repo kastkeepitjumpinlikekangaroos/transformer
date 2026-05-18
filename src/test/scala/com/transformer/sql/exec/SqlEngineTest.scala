@@ -195,6 +195,51 @@ class SqlEngineTest {
     assertNull(rows.head("s"))
   }
 
+  @Test def countIfWithoutGroupBy(): Unit = {
+    val p = tmpCsv("a.csv", "x\n1\n2\n3\n4\n5\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT COUNT_IF(x > 2) AS c FROM t", cat)
+    val rows = collectAllRows(q)
+    assertEquals(1, rows.size)
+    assertEquals(3L, rows.head("c"))
+  }
+
+  @Test def countIfGroupedAndIgnoresNulls(): Unit = {
+    val p = tmpCsv("a.csv", "cat,x\nA,1\nA,\nA,5\nB,2\nB,4\nB,6\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT cat, COUNT_IF(x > 3) AS hi, COUNT_IF(x IS NULL) AS n FROM t GROUP BY cat",
+      cat)
+    val rows = collectAllRows(q).sortBy(_("cat").toString)
+    assertEquals(2, rows.size)
+    assertEquals("A", rows(0)("cat"))
+    assertEquals(1L, rows(0)("hi"))
+    assertEquals(1L, rows(0)("n"))
+    assertEquals("B", rows(1)("cat"))
+    assertEquals(2L, rows(1)("hi"))
+    assertEquals(0L, rows(1)("n"))
+  }
+
+  @Test def countIfEmptyInputReturnsZero(): Unit = {
+    val p = tmpCsv("a.csv", "x\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions(inferSchema = false,
+      columns = Some(Seq(Field("x", DataType.IntType))))))
+    val q = SqlEngine.execute("SELECT COUNT_IF(x > 0) AS c FROM t", cat)
+    val rows = collectAllRows(q)
+    assertEquals(1, rows.size)
+    assertEquals(0L, rows.head("c"))
+  }
+
+  @Test def countIfAsWindowAggregate(): Unit = {
+    val p = tmpCsv("a.csv", "cat,score\nA,10\nA,40\nA,60\nB,5\nB,80\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT cat, score, COUNT_IF(score >= 30) OVER (PARTITION BY cat) AS hi FROM t",
+      cat)
+    val rows = collectAllRows(q).sortBy(r => (r("cat").toString, r("score").asInstanceOf[Int]))
+    assertEquals(Seq(2L, 2L, 2L, 1L, 1L), rows.map(_("hi")))
+  }
+
   // ---------------------------------------------------------------------------
   // Window functions
   // ---------------------------------------------------------------------------

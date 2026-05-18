@@ -16,6 +16,7 @@ scala_library(
         "//src/main/scala/com/transformer/read/csv",
         "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/temporal",
+        "//src/main/scala/com/transformer/write/csv",
         "@maven//:org_openjfx_javafx_base",
         "@maven//:org_openjfx_javafx_controls",
         "@maven//:org_openjfx_javafx_graphics",

@@ -209,3 +209,7 @@ final case class AggExprMax(child: Expr) extends AggExpr {
   val name = "MAX"; val arg: Option[Expr] = Some(child); val distinct = false
   val resultType: DataType = child.dataType
 }
+final case class AggExprCountIf(child: Expr) extends AggExpr {
+  val name = "COUNT_IF"; val arg: Option[Expr] = Some(child); val distinct = false
+  val resultType: DataType = DataType.LongType
+}
