@@ -33,3 +33,15 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+scala_junit_test(
+    name = "job_session_test",
+    srcs = ["JobSessionTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/gui",
+        "//src/main/scala/com/transformer/job",
+        "@maven//:junit_junit",
+    ],
+)
