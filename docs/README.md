@@ -6,7 +6,7 @@ guide for Claude sessions and links here for detail.
 
 | File | What's in it |
 |---|---|
-| [architecture.md](architecture.md) | Mental model, module map, and the cross-cutting patterns every contributor should internalise (hooks, `ColumnarBatch` + `RowBuf`, parallel execution, output-as-directory, input caching, `_SUCCESS` markers, expression evaluation, window functions, DAG scheduling). |
+| [architecture.md](architecture.md) | Mental model, module map, and the cross-cutting patterns every contributor should internalise (hooks, `ColumnarBatch` + `RowBuf`, parallel execution, output-as-directory, input caching, per-task `_run.json` + per-job `job.json` records, expression evaluation, window functions, DAG scheduling). |
 | [conventions.md](conventions.md) | Scala / Bazel / docs conventions enforced across the repo (sealed traits in one file, val initialisation order, strict-deps, no emojis, etc.). |
 | [extending.md](extending.md) | Step-by-step recipes for adding scalar functions, aggregates, window functions, file formats, directory-loader config fields, GUI panels, SQL operators, and cloud support. |
 | [testing.md](testing.md) | Build / test commands, the full test inventory, and the testing workflow expected on every change (unit tests + jaffle end-to-end). |

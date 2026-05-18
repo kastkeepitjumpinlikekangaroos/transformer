@@ -1,7 +1,7 @@
 package com.transformer.gui
 
 import com.transformer.core.{ColumnarBatch, DataType, Field, IntVector, MaterializedView, Schema, StringVector}
-import com.transformer.job.RunMarker
+import com.transformer.job.{TaskRunRecord, TaskRunStatus}
 
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -11,8 +11,8 @@ import java.util.Comparator
 import scala.jdk.CollectionConverters._
 
 /** Drives [[ResultPersister]] end-to-end against a synthetic in-memory result
-  * so we exercise the per-partition write + `_SUCCESS` marker stamping without
-  * spinning up the SQL engine.
+  * so we exercise the per-partition write + `_run.json` record stamping
+  * without spinning up the SQL engine.
   */
 class ResultPersisterTest {
 
@@ -49,7 +49,7 @@ class ResultPersisterTest {
   private def mvOfPartitions(parts: Seq[Seq[(Int, String)]]): MaterializedView =
     new MaterializedView(schema, parts.map(rows => IndexedSeq(makeBatch(rows))).toIndexedSeq)
 
-  @Test def persistCsvWritesOnePartPerPartitionAndStampsMarker(): Unit = {
+  @Test def persistCsvWritesOnePartPerPartitionAndStampsRecord(): Unit = {
     val mv = mvOfPartitions(Seq(
       Seq((1, "alpha"), (2, "beta")),
       Seq((3, "gamma"))
@@ -69,11 +69,12 @@ class ResultPersisterTest {
     assertEquals("id,name\n1,alpha\n2,beta\n", part0)
     val part1 = Files.readString(dir.resolve("part-00001.csv"))
     assertEquals("id,name\n3,gamma\n", part1)
-    // _SUCCESS marker stamped with 3 rows + both part files listed.
-    val marker = RunMarker.read(dir).getOrElse(fail("expected _SUCCESS marker").asInstanceOf[RunMarker])
-    assertEquals(3L, marker.rowsProduced)
-    assertEquals("csv", marker.format)
-    assertEquals(Seq("part-00000.csv", "part-00001.csv"), marker.outputFiles)
+    // _run.json stamped with Succeeded status and both part files listed.
+    val record = TaskRunRecord.read(dir).getOrElse(fail("expected _run.json").asInstanceOf[TaskRunRecord])
+    assertEquals(TaskRunStatus.Succeeded, record.status)
+    assertEquals(3L, record.rowsProduced)
+    assertEquals("csv", record.format)
+    assertEquals(Seq("part-00000.csv", "part-00001.csv"), record.outputFiles)
   }
 
   @Test def persistCsvHonoursHeaderFalse(): Unit = {
@@ -111,17 +112,25 @@ class ResultPersisterTest {
     assertEquals("id,name\n1,a\n2,b\n3,c\n", all)
   }
 
-  @Test def persistClearsStaleOutputsWhenMarkerPresent(): Unit = {
+  @Test def persistClearsStaleOutputsWhenRecordPresent(): Unit = {
     val dir = tmpDir.resolve("rerun")
     Files.createDirectories(dir)
-    // Pre-seed a stale part file + marker from a previous "run".
+    // Pre-seed a stale part file + run record from a previous "run".
     val stale = dir.resolve("part-00099.csv")
     Files.writeString(stale, "old\n999\n")
-    RunMarker.write(dir, RunMarker(
-      executionTime = java.time.Instant.now(),
-      writtenAt = java.time.Instant.now(),
+    val t = java.time.Instant.now()
+    TaskRunRecord.write(dir, TaskRunRecord(
+      schemaVersion = TaskRunRecord.SchemaVersion,
+      taskName = "stale",
+      status = TaskRunStatus.Succeeded,
+      errorMessage = None,
+      executionTime = t,
+      startedAt = t,
+      finishedAt = t,
+      writtenAt = t,
       rowsProduced = 1, format = "csv",
-      outputFiles = Seq("part-00099.csv")
+      outputFiles = Seq("part-00099.csv"),
+      validations = Nil
     ))
 
     val mv = mvOfPartitions(Seq(Seq((1, "alpha"))))
@@ -133,8 +142,8 @@ class ResultPersisterTest {
 
     assertFalse(s"stale part file should be deleted: $stale", Files.exists(stale))
     assertTrue(Files.isRegularFile(dir.resolve("part-00000.csv")))
-    val marker = RunMarker.read(dir).getOrElse(fail("expected fresh marker").asInstanceOf[RunMarker])
-    assertFalse(marker.outputFiles.contains("part-00099.csv"))
+    val record = TaskRunRecord.read(dir).getOrElse(fail("expected fresh record").asInstanceOf[TaskRunRecord])
+    assertFalse(record.outputFiles.contains("part-00099.csv"))
   }
 
   @Test def persistRejectsUnknownFormat(): Unit = {

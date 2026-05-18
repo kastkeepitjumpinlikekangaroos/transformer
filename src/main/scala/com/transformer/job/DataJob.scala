@@ -21,7 +21,7 @@ final case class DataJob(
     inputs: Seq[InputFilePath],
     sql: Seq[SQLTask],
     temporalVariables: Option[TemporalVariables] = None,
-    validationResultsOutput: Option[OutputFilePath] = None
+    jobRunOutput: Option[OutputFilePath] = None
 ) {
 
   def run(): JobResult = {
@@ -53,6 +53,7 @@ final case class DataJob(
     */
   def run(executor: SqlExecutor, listener: TaskProgressListener): JobResult = {
     val vars = temporalVariables.getOrElse(TemporalVariables())
+    val runStarted = Instant.now()
     val catalog = new Catalog
 
     // Phase 1: resolve every input in parallel, then drain inputs marked
@@ -112,17 +113,17 @@ final case class DataJob(
           return JobResult(succeeded = false, tasks = Nil, error = Some(e.getMessage))
       }
     val results = runDag(dag, executor, catalog, vars, listener)
+    val runFinished = Instant.now()
 
-    val validationFailures: Seq[(String, Seq[ValidationFailure])] =
-      results.iterator.collect {
-        case TaskResult(name, TaskStatus.ValidationFailed(fs), _, _, _, _) => name -> fs
-      }.toSeq
-    if (validationFailures.nonEmpty) writeValidationDiagnostics(validationFailures, vars)
+    val warnings = runConsistencyChecks(results.toSeq)
+    val succeeded = results.forall(_.succeeded)
+    writeJobRecord(results.toSeq, vars, runStarted, runFinished, succeeded, None, warnings)
 
     JobResult(
-      succeeded = results.forall(_.succeeded),
+      succeeded = succeeded,
       tasks = results.toSeq,
-      error = None
+      error = None,
+      warnings = warnings
     )
   }
 
@@ -151,9 +152,12 @@ final case class DataJob(
               results(i) =
                 if (failedDeps.nonEmpty) {
                   val names = failedDeps.map(_.taskName).mkString(", ")
+                  val reason = s"upstream failure: $names"
                   val now = Instant.now()
-                  TaskResult(dag.nodes(i).task.displayName,
-                    TaskStatus.Skipped(s"upstream failure: $names"),
+                  val node = dag.nodes(i)
+                  writeSkippedRecord(node, reason, now, vars)
+                  TaskResult(node.task.displayName,
+                    TaskStatus.Skipped(reason),
                     0L, None, now, now)
                 } else {
                   try listener.onTaskStart(i, dag.nodes(i).task.displayName)
@@ -166,9 +170,12 @@ final case class DataJob(
                 // Fatal or an impl bug; convert to Failed so the scheduler can never
                 // deadlock waiting on a worker that swallowed its own exception.
                 val now = Instant.now()
+                val node = dag.nodes(i)
+                val msg = s"orchestration error: ${t.getMessage}"
+                writeFailedRecord(node, msg, now, now, vars)
                 results(i) = TaskResult(
-                  dag.nodes(i).task.displayName,
-                  TaskStatus.Failed(s"orchestration error: ${t.getMessage}"),
+                  node.task.displayName,
+                  TaskStatus.Failed(msg),
                   0L, None, now, now
                 )
             } finally {
@@ -211,14 +218,18 @@ final case class DataJob(
     val task = node.task
     val started = Instant.now()
     val taskName = task.displayName
+    // Track the rendered output path even on failure so we can stamp the
+    // _run.json into the same directory the data would have landed in.
+    var renderedOutputForRecord: Option[(OutputFilePath, String)] = None
     try {
       val q = executor.execute(node.renderedMainSql, catalog)
 
       val writtenOutput: Option[(OutputFilePath, String)] = task.outputFile.map { ofp =>
-        val rendered = TemplateRenderer.render(ofp.path, vars)
         if (ofp.isCloud) throw new UnsupportedOperationException(
           s"Cloud output paths not yet implemented (v1.1). Got: '${ofp.path}'"
         )
+        val rendered = TemplateRenderer.render(ofp.path, vars)
+        renderedOutputForRecord = Some((ofp, rendered))
         writeOutput(ofp, rendered, q)
         (ofp, rendered)
       }
@@ -229,11 +240,13 @@ final case class DataJob(
         catalog.replace(name, materialized)
         val failures = runValidations(node, executor, catalog)
         val outputPath = writtenOutput.map(_._2)
-        if (failures.nonEmpty)
-          TaskResult(taskName, TaskStatus.ValidationFailed(failures), q.rowsProduced, outputPath, started, Instant.now())
-        else {
-          maybeWriteMarker(writtenOutput, q.rowsProduced, vars)
-          TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, Instant.now())
+        val finished = Instant.now()
+        if (failures.nonEmpty) {
+          writeValidationFailedRecord(node, writtenOutput, q.rowsProduced, failures, started, finished, vars)
+          TaskResult(taskName, TaskStatus.ValidationFailed(failures), q.rowsProduced, outputPath, started, finished)
+        } else {
+          writeSucceededRecord(node, writtenOutput, q.rowsProduced, started, finished, vars)
+          TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, finished)
         }
       } else {
         if (writtenOutput.isEmpty) {
@@ -241,33 +254,165 @@ final case class DataJob(
           // execution (and `rowsProduced`) still happen.
           while (q.batches.hasNext) q.batches.next()
         }
-        maybeWriteMarker(writtenOutput, q.rowsProduced, vars)
-        TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, writtenOutput.map(_._2), started, Instant.now())
+        val finished = Instant.now()
+        writeSucceededRecord(node, writtenOutput, q.rowsProduced, started, finished, vars)
+        TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, writtenOutput.map(_._2), started, finished)
       }
     } catch {
       case NonFatal(e) =>
-        TaskResult(taskName, TaskStatus.Failed(e.getMessage), 0L, None, started, Instant.now())
+        val finished = Instant.now()
+        val msg = Option(e.getMessage).getOrElse(e.toString)
+        writeFailedRecord(node, msg, started, finished, vars)
+        TaskResult(taskName, TaskStatus.Failed(msg), 0L, None, started, finished)
     }
   }
 
-  /** Stamp a [[RunMarker]] into the task's output directory iff the task wrote
-    * one. Skipped silently if writing the marker itself fails — a missing
-    * marker should never poison an otherwise-successful run.
-    */
-  private def maybeWriteMarker(
+  /** Stamp a Succeeded [[TaskRunRecord]] when the task ran cleanly. Silently
+    * swallows write failures — a missing record should never poison an
+    * otherwise-successful run. */
+  private def writeSucceededRecord(
+      node: TaskDagNode,
       writtenOutput: Option[(OutputFilePath, String)],
       rowsProduced: Long,
+      startedAt: Instant,
+      finishedAt: Instant,
       vars: TemporalVariables
   ): Unit = writtenOutput.foreach { case (ofp, renderedPath) =>
     try {
       val dir = Paths.get(renderedPath)
-      val files = RunMarker.listPartFiles(dir)
-      RunMarker.write(dir, RunMarker(
+      val files = TaskRunRecord.listPartFiles(dir)
+      val validations = node.task.validations.map { v =>
+        ValidationRecord(name = v.name, passed = true, failedRowCount = 0L, sampleFile = None)
+      }
+      TaskRunRecord.write(dir, TaskRunRecord(
+        schemaVersion = TaskRunRecord.SchemaVersion,
+        taskName = node.task.displayName,
+        status = TaskRunStatus.Succeeded,
+        errorMessage = None,
         executionTime = vars.executionTime,
+        startedAt = startedAt,
+        finishedAt = finishedAt,
         writtenAt = Instant.now(),
         rowsProduced = rowsProduced,
         format = ofp.detectedFormat,
-        outputFiles = files
+        outputFiles = files,
+        validations = validations
+      ))
+    } catch { case NonFatal(_) => () }
+  }
+
+  /** Stamp a ValidationFailed [[TaskRunRecord]] alongside per-validation
+    * `_validation-<slug>.csv` sample files. Part files are left on disk — the
+    * data was successfully produced, only the integrity checks disagreed.
+    */
+  private def writeValidationFailedRecord(
+      node: TaskDagNode,
+      writtenOutput: Option[(OutputFilePath, String)],
+      rowsProduced: Long,
+      failures: Seq[ValidationFailure],
+      startedAt: Instant,
+      finishedAt: Instant,
+      vars: TemporalVariables
+  ): Unit = writtenOutput.foreach { case (ofp, renderedPath) =>
+    try {
+      val dir = Paths.get(renderedPath)
+      val files = TaskRunRecord.listPartFiles(dir)
+      val failureByName = failures.iterator.map(f => f.validationName -> f).toMap
+      val validations = node.task.validations.map { v =>
+        failureByName.get(v.name) match {
+          case Some(f) =>
+            val sampleName =
+              try Some(TaskRunRecord.writeValidationSample(dir, v.name, f.sampleRowsCsv))
+              catch { case NonFatal(_) => None }
+            ValidationRecord(
+              name = v.name,
+              passed = false,
+              failedRowCount = f.rowCount,
+              sampleFile = sampleName
+            )
+          case None =>
+            ValidationRecord(name = v.name, passed = true, failedRowCount = 0L, sampleFile = None)
+        }
+      }
+      TaskRunRecord.write(dir, TaskRunRecord(
+        schemaVersion = TaskRunRecord.SchemaVersion,
+        taskName = node.task.displayName,
+        status = TaskRunStatus.ValidationFailed,
+        errorMessage = None,
+        executionTime = vars.executionTime,
+        startedAt = startedAt,
+        finishedAt = finishedAt,
+        writtenAt = Instant.now(),
+        rowsProduced = rowsProduced,
+        format = ofp.detectedFormat,
+        outputFiles = files,
+        validations = validations
+      ))
+    } catch { case NonFatal(_) => () }
+  }
+
+  /** Stamp a Failed [[TaskRunRecord]] for a task that threw during execution.
+    * Renders the task's outputFile path on a best-effort basis — if rendering
+    * itself throws, the failure is recorded only in [[JobRunRecord]]. */
+  private def writeFailedRecord(
+      node: TaskDagNode,
+      errorMessage: String,
+      startedAt: Instant,
+      finishedAt: Instant,
+      vars: TemporalVariables
+  ): Unit = node.task.outputFile.foreach { ofp =>
+    if (ofp.isCloud) return
+    try {
+      val rendered = TemplateRenderer.render(ofp.path, vars)
+      val dir = Paths.get(rendered)
+      // Wipe any prior data so the directory's state matches "tried, failed".
+      TaskRunRecord.clearIfMarked(dir)
+      TaskRunRecord.write(dir, TaskRunRecord(
+        schemaVersion = TaskRunRecord.SchemaVersion,
+        taskName = node.task.displayName,
+        status = TaskRunStatus.Failed,
+        errorMessage = Some(errorMessage),
+        executionTime = vars.executionTime,
+        startedAt = startedAt,
+        finishedAt = finishedAt,
+        writtenAt = Instant.now(),
+        rowsProduced = 0L,
+        format = ofp.detectedFormat,
+        outputFiles = Nil,
+        validations = node.task.validations.map(v =>
+          ValidationRecord(v.name, passed = false, failedRowCount = 0L, sampleFile = None)
+        )
+      ))
+    } catch { case NonFatal(_) => () }
+  }
+
+  /** Stamp a Skipped [[TaskRunRecord]] for a task whose upstream failed. */
+  private def writeSkippedRecord(
+      node: TaskDagNode,
+      reason: String,
+      now: Instant,
+      vars: TemporalVariables
+  ): Unit = node.task.outputFile.foreach { ofp =>
+    if (ofp.isCloud) return
+    try {
+      val rendered = TemplateRenderer.render(ofp.path, vars)
+      val dir = Paths.get(rendered)
+      TaskRunRecord.clearIfMarked(dir)
+      TaskRunRecord.write(dir, TaskRunRecord(
+        schemaVersion = TaskRunRecord.SchemaVersion,
+        taskName = node.task.displayName,
+        status = TaskRunStatus.Skipped,
+        errorMessage = Some(reason),
+        executionTime = vars.executionTime,
+        startedAt = now,
+        finishedAt = now,
+        writtenAt = Instant.now(),
+        rowsProduced = 0L,
+        format = ofp.detectedFormat,
+        outputFiles = Nil,
+        validations = node.task.validations.map(v =>
+          ValidationRecord(v.name, passed = false, failedRowCount = 0L, sampleFile = None)
+        )
       ))
     } catch { case NonFatal(_) => () }
   }
@@ -280,10 +425,11 @@ final case class DataJob(
       ofp: OutputFilePath, renderedPath: String, q: ExecutedQuery): Unit = {
     val parts = coalescedPartitions(q, ofp.maxPartitions)
     val dir = Paths.get(renderedPath)
-    // If a prior successful run is stamped in this directory, wipe its files
-    // first so a format / partition-count change doesn't leave stale outputs
-    // that break the next reader (e.g. `.csv` files inside a parquet dir).
-    RunMarker.clearIfMarked(dir)
+    // If a prior run is recorded in this directory, wipe its files first so a
+    // format / partition-count / status change doesn't leave stale outputs
+    // (e.g. `.csv` files inside a parquet dir, or a stale Failed marker
+    // beside fresh data).
+    TaskRunRecord.clearIfMarked(dir)
     ofp.detectedFormat match {
       case "csv" =>
         CsvWriter.writePartitioned(dir, q.schema, parts, CsvWriteOptions.fromMap(ofp.options))
@@ -406,32 +552,91 @@ final case class DataJob(
     sb.toString
   }
 
-  private def writeValidationDiagnostics(failures: Seq[(String, Seq[ValidationFailure])], vars: TemporalVariables): Unit = {
-    val outPath: Path = validationResultsOutput match {
-      case Some(ofp) =>
-        if (ofp.isCloud) {
-          System.err.println(s"Cloud validation paths not supported in v1; ignoring '${ofp.path}'.")
-          return
+  /** Build the per-job [[JobRunRecord]] and atomically write it to
+    * `jobRunOutput` (when configured). Each task's full record lives in its
+    * own output directory; this file aggregates them with a `runFile`
+    * pointer per task so the GUI can load one file to find everything. */
+  private def writeJobRecord(
+      results: Seq[TaskResult],
+      vars: TemporalVariables,
+      startedAt: Instant,
+      finishedAt: Instant,
+      succeeded: Boolean,
+      errorMessage: Option[String],
+      warnings: Seq[String]
+  ): Unit = jobRunOutput.foreach { ofp =>
+    if (ofp.isCloud) {
+      System.err.println(s"Cloud job-run paths not supported in v1; ignoring '${ofp.path}'.")
+      return
+    }
+    try {
+      val target = Paths.get(TemplateRenderer.render(ofp.path, vars))
+      val summaries = results.map { r =>
+        val (status, errMsg) = r.status match {
+          case TaskStatus.Succeeded               => (TaskRunStatus.Succeeded,        None)
+          case TaskStatus.ValidationFailed(_)     => (TaskRunStatus.ValidationFailed, None)
+          case TaskStatus.Failed(msg)             => (TaskRunStatus.Failed,           Some(msg))
+          case TaskStatus.Skipped(reason)         => (TaskRunStatus.Skipped,          Some(reason))
+          case TaskStatus.Pending                 => (TaskRunStatus.Failed,           Some("never ran"))
         }
-        Paths.get(TemplateRenderer.render(ofp.path, vars))
-      case None =>
-        Paths.get(TemplateRenderer.render("validation_results/{{ epoch_millis }}.csv", vars))
-    }
-    if (outPath.getParent != null) Files.createDirectories(outPath.getParent)
-    val sb = new java.lang.StringBuilder()
-    sb.append("task,validation,row_count,sample\n")
-    failures.foreach { case (taskName, vfs) =>
-      vfs.foreach { vf =>
-        sb.append(quote(taskName)).append(',')
-        sb.append(quote(vf.validationName)).append(',')
-        sb.append(vf.rowCount).append(',')
-        sb.append(quote(vf.sampleRowsCsv)).append('\n')
+        val failedValidationCount = r.status match {
+          case TaskStatus.ValidationFailed(fs) => fs.size
+          case _                               => 0
+        }
+        val runFile = r.outputPath.map(p => Paths.get(p).resolve(TaskRunRecord.FileName).toString)
+        JobTaskSummary(
+          taskName = r.taskName,
+          status = status,
+          runFile = runFile,
+          rowsProduced = r.rowsProduced,
+          failedValidationCount = failedValidationCount,
+          errorMessage = errMsg
+        )
       }
-    }
-    Files.writeString(outPath, sb.toString)
+      JobRunRecord.write(target, JobRunRecord(
+        schemaVersion = JobRunRecord.SchemaVersion,
+        succeeded = succeeded,
+        errorMessage = errorMessage,
+        executionTime = vars.executionTime,
+        startedAt = startedAt,
+        finishedAt = finishedAt,
+        tasks = summaries,
+        warnings = warnings
+      ))
+    } catch { case NonFatal(_) => () }
   }
 
-  private def quote(s: String): String = "\"" + s.replace("\"", "\"\"") + "\""
+  /** Compare each task's in-memory [[TaskResult]] to the on-disk state and
+    * emit a human-readable warning per drift. These are non-fatal —
+    * surfaced in the GUI's run-log panel and persisted in
+    * [[JobRunRecord.warnings]] so the user notices, but the run still
+    * "succeeded" if every task's status is Succeeded. */
+  private def runConsistencyChecks(results: Seq[TaskResult]): Seq[String] = {
+    val warnings = mutable.ArrayBuffer.empty[String]
+    results.foreach { r =>
+      r.outputPath.foreach { outPath =>
+        val dir = Paths.get(outPath)
+        TaskRunRecord.read(dir) match {
+          case None =>
+            // We just wrote a record for every terminal-status task with an
+            // outputFile; not seeing one here means a write failed.
+            warnings += s"task '${r.taskName}': missing _run.json in $outPath"
+          case Some(rec) =>
+            rec.outputFiles.foreach { f =>
+              if (!Files.isRegularFile(dir.resolve(f)))
+                warnings += s"task '${r.taskName}': declared part file missing on disk: $f"
+            }
+            rec.validations.foreach { v =>
+              v.sampleFile.foreach { sf =>
+                if (!Files.isRegularFile(dir.resolve(sf)))
+                  warnings += s"task '${r.taskName}': declared validation sample missing: $sf"
+              }
+            }
+        }
+      }
+    }
+    warnings.toSeq
+  }
 
   /** Detect an OOM anywhere in the cause chain and append a hint pointing at the
     * `cache: false` escape hatch. Empty string when the failure isn't memory-related.

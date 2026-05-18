@@ -54,8 +54,9 @@ ship a fix or move something from "not done" to "done".
 - **Hadoop's `LocalFileSystem` writes hidden `.crc` sidecars** alongside any
   Parquet temp file; the atomic rename leaves them stranded inside the output
   directory. `PathGlob.expand` skips dotfiles and `_`-prefixed files so re-reads
-  ignore those (and macOS `.DS_Store`, and the `_SUCCESS` markers we now stamp
-  per task — see [architecture.md §4](architecture.md#4-_success-markers-and-historical-run-discovery)).
+  ignore those (and macOS `.DS_Store`, and the `_run.json` records + per-task
+  `_validation-<slug>.csv` failure samples we stamp per task — see
+  [architecture.md §4](architecture.md#4-run-records-and-historical-run-discovery)).
 - **JavaFX 21+ ships classes only in platform-classifier jars.** The bare
   `org.openjfx:javafx-{base,controls,graphics}` artifacts are metadata-only —
   depending on them alone gives "not found: type Stage" at compile time. The

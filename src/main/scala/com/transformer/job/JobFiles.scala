@@ -313,7 +313,7 @@ ${parts.mkString(",\n")}
     if (s.endsWith("\n")) s else s + "\n"
   }
 
-  /** Atomic temp-then-rename write. Mirrors [[RunMarker.write]]. */
+  /** Atomic temp-then-rename write. Mirrors [[TaskRunRecord.write]]. */
   private def writeAtomic(target: Path, content: String): Unit = {
     val parent = target.getParent
     if (parent != null && !Files.isDirectory(parent)) Files.createDirectories(parent)

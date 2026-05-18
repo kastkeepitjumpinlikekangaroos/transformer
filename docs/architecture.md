@@ -41,8 +41,8 @@ the JIT keeps this acceptably fast.
 | `sql/parse/` | JSqlParser façade. | `SqlParser.scala` |
 | `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo) |
 | `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala`, `SortExec.scala`, `DistinctExec.scala`, `UnionExec.scala`, `WindowExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala`, `SqlEngine.scala` |
-| `job/` | User-facing API + runner. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala` (+ `ParquetResolverHook`, `ParquetReaderHook`, `ParquetWriterHook`), `TaskDag.scala` (DAG analyzer/builder from SQL refs; `TaskDag` + `TaskDagNode` are public so the GUI can render without re-implementing), `TaskProgressListener.scala` (per-task callbacks fired from runner worker threads), `RunMarker.scala` (`_SUCCESS` write/read/discover for per-task success markers), `DirectoryJobLoader.scala` (DBT-style directory loader; supports optional per-table `output.json` with `partitionBy`), `Json.scala` (stdlib JSON parser used by the loader + RunMarker.read) |
-| `gui/` | JavaFX visualizer/runner. Depends on `job/`, `core/`, `read/csv/`, `write/csv/`, `sql/exec/`, `temporal/`, plus `org.openjfx:javafx-{base,controls,graphics}` (bare jars + platform-classifier jars). | `GuiApp.scala` (Application boot + BorderPane: top stack of menu bar + horizontal ControlsPanel, vertical split of DAG canvas above + ResultsTabPane below — no side panels, all secondary panels live in the bottom tabs; scene-level ⌘R / Ctrl+R accelerator calls `controls.triggerRun()`), `JobSession.scala` (mutable FX-thread session state — jobDir, executionTime, outputDir, DAG, per-task UI states, markers, historical runs; `buildInteractiveCatalog` assembles a Catalog over inputs + persisted task outputs for ad-hoc SQL), `DagLayout.scala` (pure-Scala layered DAG layout), `DagCanvas.scala` (custom Canvas: pan/zoom/click/double-click), `ControlsPanel.scala` (horizontal top strip: open dir, exec-time pickers, output-dir field, compact Run button on worker thread; exposes `triggerRun()` for the keyboard accelerator), `TaskDetailsPanel.scala` (selected task/input metadata + a single Source/Rendered-toggle SQL viewer — uses `SqlView` and chips for status/deps/metrics), `SqlHighlighter.scala` (pure-Scala tokenizer: keywords/functions/strings/numbers/comments/templates — testable, no JavaFX deps), `SqlView.scala` (read-only highlighted SQL pane built on `HBox` per line inside a `ScrollPane`; toolbar with Copy + optional Open-in-editor button), `ExternalEditor.scala` (launches `TRANSFORMER_EDITOR` if set, else macOS Terminal+`nvim`; no-wait launch via `ProcessBuilder`), `ResultsTabPane.scala` (5 tabs: **Task details**, Output data, Validations, **SQL console**, Run log), `SqlConsolePanel.scala` (ad-hoc SQL editor in a horizontal SplitPane with the results table; ⌘⏎ / Ctrl+Enter runs the query at the panel level; chips for registered views + Persist button — runs queries on a worker thread and materializes results in memory so Persist can replay them), `PersistDialog.scala` (modal: output dir, format, maxPartitions, CSV header — mirrors `OutputFilePath` fields), `ResultPersister.scala` (writes a `MaterializedView` via `CsvWriter.writePartitioned` / `ParquetWriterHook` + stamps a `_SUCCESS` marker), `FxHelpers.scala` |
+| `job/` | User-facing API + runner. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala` (+ `ParquetResolverHook`, `ParquetReaderHook`, `ParquetWriterHook`), `TaskDag.scala` (DAG analyzer/builder from SQL refs; `TaskDag` + `TaskDagNode` are public so the GUI can render without re-implementing), `TaskProgressListener.scala` (per-task callbacks fired from runner worker threads), `TaskRunRecord.scala` (`_run.json` write/read/discover for per-task run records — every status, with `_validation-<slug>.csv` failure samples), `JobRunRecord.scala` (`job.json` aggregate manifest pointing at every task's record + consistency warnings), `DirectoryJobLoader.scala` (DBT-style directory loader; supports optional per-table `output.json` with `partitionBy`; threads default `<outputDir>/job.json` as `jobRunOutput` so the manifest lives alongside its data), `Json.scala` (stdlib JSON parser used by the loader + record readers) |
+| `gui/` | JavaFX visualizer/runner. Depends on `job/`, `core/`, `read/csv/`, `write/csv/`, `sql/exec/`, `temporal/`, plus `org.openjfx:javafx-{base,controls,graphics}` (bare jars + platform-classifier jars). | `GuiApp.scala` (Application boot + BorderPane: top stack of menu bar + horizontal ControlsPanel, vertical split of DAG canvas above + ResultsTabPane below — no side panels, all secondary panels live in the bottom tabs; scene-level ⌘R / Ctrl+R accelerator calls `controls.triggerRun()`), `JobSession.scala` (mutable FX-thread session state — jobDir, executionTime, outputDir, DAG, per-task UI states, task records, historical runs, job manifest, available run snapshots, selected run; loads `<outputDir>/job.json` (or any sibling snapshot the user picks) and follows each task's `runFile` to reconstruct full `TaskStatus` including `ValidationFailed(failures)` with sample CSVs; `buildInteractiveCatalog` assembles a Catalog over inputs + persisted task outputs for ad-hoc SQL), `DagLayout.scala` (pure-Scala layered DAG layout), `DagCanvas.scala` (custom Canvas: pan/zoom/click/double-click), `ControlsPanel.scala` (horizontal top strip: open dir, exec-time pickers, output-dir field, compact Run button on worker thread; exposes `triggerRun()` for the keyboard accelerator), `TaskDetailsPanel.scala` (selected task/input metadata + a single Source/Rendered-toggle SQL viewer — uses `SqlView` and chips for status/deps/metrics), `SqlHighlighter.scala` (pure-Scala tokenizer: keywords/functions/strings/numbers/comments/templates — testable, no JavaFX deps), `SqlView.scala` (read-only highlighted SQL pane built on `HBox` per line inside a `ScrollPane`; toolbar with Copy + optional Open-in-editor button), `ExternalEditor.scala` (launches `TRANSFORMER_EDITOR` if set, else macOS Terminal+`nvim`; no-wait launch via `ProcessBuilder`), `ResultsTabPane.scala` (5 tabs: **Task details**, Output data, Validations, **SQL console**, Run log), `SqlConsolePanel.scala` (ad-hoc SQL editor in a horizontal SplitPane with the results table; ⌘⏎ / Ctrl+Enter runs the query at the panel level; chips for registered views + Persist button — runs queries on a worker thread and materializes results in memory so Persist can replay them), `PersistDialog.scala` (modal: output dir, format, maxPartitions, CSV header — mirrors `OutputFilePath` fields), `ResultPersister.scala` (writes a `MaterializedView` via `CsvWriter.writePartitioned` / `ParquetWriterHook` + stamps a `_run.json` record with status=Succeeded), `FxHelpers.scala` |
 | `examples/scala_app/` | Sample app built as a `scala_binary` deploy jar — programmatic `DataJob(...)` API. | `src/main/scala/com/example/ExampleJob.scala` |
 | `examples/directory_app/` | Sample app using `DirectoryJobLoader` — whole job is a folder of JSON configs + SQL files. | `src/main/scala/com/example/directory/DirectoryJobExample.scala`, `job/inputs/<view>/config.json`, `job/tables/<view>/main.sql`, `job/tables/<view>/validations/*.sql`. Accepts optional 3rd CLI arg for `executionTime` (ISO instant) so the same job can produce multiple partitions for testing. |
 | `examples/jaffle_shop/` | Port of [dbt-labs/jaffle-shop](https://github.com/dbt-labs/jaffle-shop) to the directory format. 6 raw seed CSVs → 6 staging tables → 3 intermediate aggregations → 3 marts (`customers`, `orders`, `order_items`) + 3 passthroughs (`locations`, `products`, `supplies`). 26 DBT data_tests ported as zero-row validation queries. Exercises the DAG scheduler at a realistic scale (~150k rows, 15 tasks). Omissions vs. DBT: `metricflow_time_spine` (needs `dbt_date`); `customer_order_number` ROW_NUMBER column on `orders` (no window functions); semantic models / metrics / saved_queries / unit_tests (no equivalent layer). DBT CTEs are split — each `with X as (...)` becomes its own SQLTask, since `LogicalBuilder.fromItem` only accepts `Table` in FROM. | `src/main/scala/com/example/jaffle/JaffleShopExample.scala`, `job/data/raw_*.csv`, `job/inputs/<view>/config.json`, `job/tables/<view>/{main.sql,validations/}`. |
@@ -162,38 +162,101 @@ a failure become `TaskStatus.Skipped`; independent siblings keep going. Setup-
 time validation rejects unknown refs, duplicate viewNames, self-cycles, cycles,
 and duplicate post-render output paths before any task runs.
 
-### 4. `_SUCCESS` markers and historical-run discovery
+### 4. Run records and historical-run discovery
 
-After each successful task (`TaskStatus.Succeeded` only — not Failed, not
-ValidationFailed) `DataJob.runOneTask` calls `RunMarker.write(dir, marker)`
-which atomically stamps `<taskOutputDir>/_SUCCESS` with a small JSON blob:
+The runner persists a per-task `_run.json` for **every termination status**
+(Succeeded, ValidationFailed, Failed, Skipped) plus a per-job `job.json`
+aggregate. The two files together let the GUI reconstruct the exact same
+state on reload that it showed during the live run — validation pass/fail
+detail, sample failing rows, error messages, durations — and let the
+runner flag drift between disk state and the manifest.
+
+#### Per-task record (`_run.json`)
+
+`DataJob.writeSucceededRecord` / `writeValidationFailedRecord` /
+`writeFailedRecord` / `writeSkippedRecord` each stamp
+`<taskOutputDir>/_run.json` via `TaskRunRecord.write` (atomic temp-then-
+rename). The shape:
 
 ```json
 {
+  "schemaVersion": 1,
+  "taskName": "spend_by_tier",
+  "status": "ValidationFailed",
+  "errorMessage": null,
   "executionTime": "2026-01-01T05:30:21Z",
-  "writtenAt":     "2026-05-18T03:17:03.099Z",
-  "rowsProduced":  1234,
-  "format":        "csv",
-  "outputFiles":   ["part-00000.csv", "part-00001.csv"]
+  "startedAt":  "2026-05-18T03:17:02.612Z",
+  "finishedAt": "2026-05-18T03:17:03.099Z",
+  "writtenAt":  "2026-05-18T03:17:03.103Z",
+  "rowsProduced": 1234,
+  "format": "csv",
+  "outputFiles": ["part-00000.csv", "part-00001.csv"],
+  "validations": [
+    { "name": "customer_id_unique", "passed": false, "failedRowCount": 7,
+      "sampleFile": "_validation-customer_id_unique.csv" }
+  ]
 }
 ```
 
-The marker pulls together three things the user/GUI later cares about: the
-*temporal variables used to produce the output* (executionTime), a freshness
-hint distinct from executionTime (writtenAt), and an inventory of what's in
-the directory. `PathGlob.expand` skips dotfiles and underscore-prefixed files,
-so the marker is invisible to any CSV/Parquet re-read.
+For failed validations, the runner writes the sample CSV (up to 10 rows
+returned by the validation SQL) to a sibling
+`_validation-<slugified-name>.csv` file and links it via `sampleFile`. The
+GUI loads samples lazily — only when the user inspects a specific task's
+validation card.
 
-`RunMarker.discover(templatedPattern)` is the partner operation: it replaces
-every `{{...}}` in the pattern with `*`, walks the longest static prefix of
-the result, and returns every directory under it that contains a marker —
-sorted newest-first by `writtenAt`. This is how the GUI surfaces historical
-runs for a partitioned output (`out/day={{today}}/<view>` → all `day=*`
-partitions). The walk is depth-bounded so a pattern with a leading `*`
-doesn't accidentally scan the whole disk.
+The `_` prefix means `PathGlob.expand` skips both the record and the
+sample files when the directory is re-read as data.
 
-Marker-write failures are swallowed by the runner — a missing marker must
-never poison an otherwise-successful run.
+`TaskRunRecord.discover(templatedPattern)` is the partner operation: it
+replaces every `{{...}}` in the pattern with a glob wildcard, walks the
+longest static prefix of the result, and returns every directory under it
+that contains a `_run.json` — sorted newest-first by `writtenAt`. The walk
+is depth-bounded so a pattern with a leading wildcard doesn't accidentally
+scan the whole disk.
+
+Record-write failures are swallowed by the runner — a missing record must
+never poison an otherwise-successful run. The exception is rerun cleanup:
+before writing data, `writeOutput` calls `TaskRunRecord.clearIfMarked(dir)`
+which wipes every top-level regular file in a directory that already
+contains a `_run.json`, so reruns at the same templated path completely
+overwrite prior state.
+
+#### Per-job manifest (`job.json`)
+
+`DataJob.writeJobRecord` writes a `JobRunRecord` to the path configured by
+`jobRunOutput` (defaulted by `DirectoryJobLoader` to
+`<outputDir>/job.json` — co-located with the per-task data so an output
+directory is a self-contained snapshot of one run). The manifest lists
+every task with status, row count, error message, and a `runFile` pointer
+to the per-task record file. It's the GUI's single entry point on reload
+— load one file, follow the pointers, hydrate the whole job.
+
+The manifest also carries a `warnings` array populated by
+`DataJob.runConsistencyChecks`: declared part files that aren't on disk,
+referenced `runFile` paths that don't exist, missing validation samples,
+etc. These are non-fatal — the run still `succeeded` if every task is
+Succeeded — but they surface in the GUI's run-log panel so the user
+notices.
+
+Like per-task records, reruns at the same `jobRunOutput` path completely
+overwrite the manifest. To keep job-level history, template `outputDir`
+itself (e.g. `/data/runs/{{ today }}`); each execution time writes to its
+own subdir with its own `job.json`, and the parent becomes a multi-run
+layout the GUI can browse.
+
+#### Multi-run layout discovery
+
+[[JobOutputLayout.detect]] classifies a directory at one of:
+  * `SingleRun(dir, record)` — `<dir>/job.json` is present.
+  * `MultiRun(runs)` — `<dir>/<sub>/job.json` is present in 1+
+    subdirectories, sorted newest-first by `finishedAt`.
+  * `Empty` — neither.
+
+The walk is one level deep. `JobSession` calls this on the *parent* of
+the rendered `jobRunOutput` path: when the user has templated `outputDir`
+to vary by run, the parent holds multiple sibling snapshots, and the GUI
+surfaces a run picker in the controls panel for switching between them
+without re-running anything.
 
 ### 5. Expression evaluation
 

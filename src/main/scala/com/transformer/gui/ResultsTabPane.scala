@@ -1,7 +1,7 @@
 package com.transformer.gui
 
 import com.transformer.core.{ColumnarBatch, Schema}
-import com.transformer.job.{InputFilePath, InputResolver, ParquetReaderHook, RunMarker, TaskStatus, Validation}
+import com.transformer.job.{InputFilePath, InputResolver, ParquetReaderHook, TaskRunRecord, TaskRunStatus, TaskStatus, Validation}
 import com.transformer.read.csv.{CsvOptions, CsvReader}
 
 import javafx.beans.property.ReadOnlyStringWrapper
@@ -182,12 +182,12 @@ final class ResultsTabPane(
     loadInputFromResolver(input, renderedPath)
   }
 
-  private def populatePicker(runs: Seq[(Path, RunMarker)], planned: Option[String]): Unit = {
+  private def populatePicker(runs: Seq[(Path, TaskRunRecord)], planned: Option[String]): Unit = {
     pickerSuppressed = true
     try {
       pickerCombo.getItems.clear()
-      runs.foreach { case (p, m) =>
-        pickerCombo.getItems.add(toChoice(p, m, planned.contains(p.toString)))
+      runs.foreach { case (p, r) =>
+        pickerCombo.getItems.add(toChoice(p, r, planned.contains(p.toString)))
       }
     } finally pickerSuppressed = false
     val shouldShow = runs.size >= 2
@@ -198,15 +198,21 @@ final class ResultsTabPane(
   private val pickerTimeFmt: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'").withZone(ZoneOffset.UTC)
 
-  private def toChoice(path: Path, marker: RunMarker, isPlanned: Boolean = false): RunChoice =
+  private def toChoice(path: Path, record: TaskRunRecord, isPlanned: Boolean = false): RunChoice =
     RunChoice(
       path = path,
-      marker = marker,
+      record = record,
       label = {
-        val wrote = pickerTimeFmt.format(marker.writtenAt)
-        val exec = pickerTimeFmt.format(marker.executionTime)
+        val wrote = pickerTimeFmt.format(record.writtenAt)
+        val exec = pickerTimeFmt.format(record.executionTime)
+        val statusTag = record.status match {
+          case TaskRunStatus.Succeeded        => ""
+          case TaskRunStatus.ValidationFailed => "  •  validation failed"
+          case TaskRunStatus.Failed           => "  •  failed"
+          case TaskRunStatus.Skipped          => "  •  skipped"
+        }
         val pin = if (isPlanned) "  ← current execution time" else ""
-        f"$wrote  •  exec=$exec  •  ${marker.rowsProduced}%,d row(s)  •  $path$pin"
+        f"$wrote  •  exec=$exec  •  ${record.rowsProduced}%,d row(s)$statusTag  •  $path$pin"
       }
     )
 
@@ -222,7 +228,7 @@ final class ResultsTabPane(
     val nameOpt = explicitName.orElse(
       currentTaskIndex.flatMap(i => session.dag.flatMap(_.nodes.lift(i))).map(_.task.displayName)
     )
-    val formatHint = choice.map(_.marker.format)
+    val formatHint = choice.map(_.record.format)
     val worker = new Thread(new Runnable {
       def run(): Unit = {
         val outcome =
@@ -305,8 +311,8 @@ final class ResultsTabPane(
         val truncated = if (loaded.truncated) " (preview truncated)" else ""
         val who = name.map(n => s"'$n'").getOrElse("Task")
         val runInfo = choice.map { c =>
-          val wrote = pickerTimeFmt.format(c.marker.writtenAt)
-          val exec = pickerTimeFmt.format(c.marker.executionTime)
+          val wrote = pickerTimeFmt.format(c.record.writtenAt)
+          val exec = pickerTimeFmt.format(c.record.executionTime)
           s" • exec=$exec • written=$wrote"
         }.getOrElse("")
         outputStatus.setText(f"$who • $path • ${items.size}%,d row(s) loaded$truncated$runInfo")
@@ -319,7 +325,7 @@ final class ResultsTabPane(
     val p = Paths.get(path)
     if (!Files.exists(p)) throw new RuntimeException(s"output path does not exist: $path")
     val fmt = formatHint
-      .orElse(if (Files.isDirectory(p)) RunMarker.read(p).map(_.format) else None)
+      .orElse(if (Files.isDirectory(p)) TaskRunRecord.read(p).map(_.format) else None)
       .getOrElse(detectFormat(p))
       .toLowerCase
     fmt match {
@@ -525,18 +531,20 @@ final class ResultsTabPane(
     session.runState match {
       case RunState.Idle =>
         val dag = session.dag
-        val cachedTasks = dag.toSeq.flatMap(_.nodes).count(n => session.markerFor(n.index).isDefined)
+        val cachedTasks = dag.toSeq.flatMap(_.nodes).count(n => session.taskRecordFor(n.index).isDefined)
         val totalTasks = dag.map(_.nodes.size).getOrElse(0)
         if (cachedTasks > 0) {
-          sb.append(s"$cachedTasks of $totalTasks task(s) restored from _SUCCESS markers (previous run). Press Run to refresh.\n")
+          sb.append(s"$cachedTasks of $totalTasks task(s) restored from _run.json records (previous run). Press Run to refresh.\n")
         } else {
           sb.append("(no run yet)\n")
         }
+        appendJobWarnings(sb, session.jobRecord.map(_.warnings).getOrElse(Nil))
       case RunState.Running => sb.append("Running…\n")
       case RunState.LoadFailed(err) => sb.append(s"Load failed:\n$err\n")
       case RunState.Done(result) =>
         sb.append(if (result.succeeded) "Run succeeded.\n" else "Run finished with failure(s).\n")
         result.error.foreach(e => sb.append(s"\nJob-level error: $e\n"))
+        appendJobWarnings(sb, result.warnings)
         if (result.tasks.nonEmpty) {
           sb.append(s"\n${result.tasks.size} task(s):\n")
           result.tasks.foreach { tr =>
@@ -556,6 +564,13 @@ final class ResultsTabPane(
         }
     }
     runLog.setText(sb.toString)
+  }
+
+  private def appendJobWarnings(sb: StringBuilder, warnings: Seq[String]): Unit = {
+    if (warnings.nonEmpty) {
+      sb.append(s"\n${warnings.size} consistency warning(s):\n")
+      warnings.foreach(w => sb.append(s"  [warn] $w\n"))
+    }
   }
 
   private def describeStatus(status: TaskStatus): String = status match {
@@ -578,6 +593,6 @@ private object LoadOutcome {
 /** One entry in the partition picker. ComboBox renders entries by their
   * `toString`, so the label goes there.
   */
-private final case class RunChoice(path: Path, marker: RunMarker, label: String) {
+private final case class RunChoice(path: Path, record: TaskRunRecord, label: String) {
   override def toString: String = label
 }
