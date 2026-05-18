@@ -1,7 +1,9 @@
 package com.transformer.job
 
+import com.transformer.core.{Catalog, ExecutedQuery, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.temporal.TemporalVariables
 import org.junit.Assert._
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 import java.nio.file.{Files, Path}
@@ -148,5 +150,165 @@ class DataJobTest {
     )
     assertTrue(job.run().succeeded)
     assertEquals("s\n150\n", readCsv(out))
+  }
+
+  @Test def diamondDagAllTasksSucceedAndOrderRespected(): Unit = {
+    val inDir = tmpDir("dj-diam-")
+    writeCsv(inDir, "events.csv", "id,x\n1,1\n2,2\n3,3\n")
+    val outDir = tmpDir("dj-diam-out-")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(
+        SQLTask(name = Some("a"), viewName = Some("a"),
+          sqlString = Some("SELECT id, x FROM events"),
+          outputFile = Some(OutputFilePath(outDir.resolve("a.csv").toString))),
+        SQLTask(name = Some("b"), viewName = Some("b"),
+          sqlString = Some("SELECT id, x + 10 AS y FROM a"),
+          outputFile = Some(OutputFilePath(outDir.resolve("b.csv").toString))),
+        SQLTask(name = Some("c"), viewName = Some("c"),
+          sqlString = Some("SELECT id, x * 2 AS z FROM a"),
+          outputFile = Some(OutputFilePath(outDir.resolve("c.csv").toString))),
+        SQLTask(name = Some("d"),
+          sqlString = Some("SELECT b.y + c.z AS s FROM b JOIN c ON b.id = c.id"),
+          outputFile = Some(OutputFilePath(outDir.resolve("d.csv").toString)))
+      )
+    )
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+    assertEquals(4, result.tasks.size)
+    val byName = result.tasks.map(t => t.taskName -> t).toMap
+    val dStarted = byName("d").startedAt
+    assertFalse(s"d.started=$dStarted should be at-or-after b.finished=${byName("b").finishedAt}",
+      dStarted.isBefore(byName("b").finishedAt))
+    assertFalse(s"d.started=$dStarted should be at-or-after c.finished=${byName("c").finishedAt}",
+      dStarted.isBefore(byName("c").finishedAt))
+  }
+
+  @Test def failedTaskCausesDownstreamSkippedAndIndependentSiblingSucceeds(): Unit = {
+    val inDir = tmpDir("dj-fail-")
+    writeCsv(inDir, "events.csv", "id,x\n1,10\n2,20\n")
+    val outDir = tmpDir("dj-fail-out-")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(
+        SQLTask(name = Some("bad"), viewName = Some("bad"),
+          sqlString = Some("SELECT no_such_col FROM events"),
+          outputFile = Some(OutputFilePath(outDir.resolve("bad.csv").toString))),
+        SQLTask(name = Some("downstream"), viewName = Some("downstream"),
+          sqlString = Some("SELECT * FROM bad"),
+          outputFile = Some(OutputFilePath(outDir.resolve("down.csv").toString))),
+        SQLTask(name = Some("indep"),
+          sqlString = Some("SELECT id FROM events"),
+          outputFile = Some(OutputFilePath(outDir.resolve("indep.csv").toString)))
+      )
+    )
+    val result = job.run()
+    assertFalse("job should fail overall", result.succeeded)
+    val byName = result.tasks.map(t => t.taskName -> t).toMap
+    byName("bad").status match {
+      case _: TaskStatus.Failed => // ok
+      case other                 => fail(s"expected bad=Failed, got $other")
+    }
+    byName("downstream").status match {
+      case s: TaskStatus.Skipped =>
+        assertTrue(s.reason, s.reason.contains("bad"))
+      case other => fail(s"expected downstream=Skipped, got $other")
+    }
+    assertEquals(s"indep should succeed: ${byName("indep").status}",
+      TaskStatus.Succeeded, byName("indep").status)
+    assertTrue("indep output should exist",
+      Files.exists(outDir.resolve("indep.csv")))
+  }
+
+  @Test def validationFailurePropagatesAsSkippedDownstream(): Unit = {
+    val inDir = tmpDir("dj-vfail-")
+    writeCsv(inDir, "t.csv", "id,value\n1,ok\n2,bad\n")
+    val outDir = tmpDir("dj-vfail-out-")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(
+        SQLTask(name = Some("a"), viewName = Some("a"),
+          sqlString = Some("SELECT * FROM t"),
+          outputFile = Some(OutputFilePath(outDir.resolve("a.csv").toString)),
+          validations = Seq(Validation("no_bad",
+            sqlString = Some("SELECT * FROM a WHERE value = 'bad'")))),
+        SQLTask(name = Some("b"),
+          sqlString = Some("SELECT id FROM a"),
+          outputFile = Some(OutputFilePath(outDir.resolve("b.csv").toString)))
+      )
+    )
+    val result = job.run()
+    assertFalse(result.succeeded)
+    val byName = result.tasks.map(t => t.taskName -> t).toMap
+    byName("a").status match {
+      case _: TaskStatus.ValidationFailed => // ok
+      case other                          => fail(s"expected a=ValidationFailed, got $other")
+    }
+    byName("b").status match {
+      case s: TaskStatus.Skipped => assertTrue(s.reason, s.reason.contains("a"))
+      case other                 => fail(s"expected b=Skipped, got $other")
+    }
+  }
+
+  @Test def emptySqlSucceedsTrivially(): Unit = {
+    val result = DataJob(inputs = Nil, sql = Nil).run()
+    assertTrue(result.error.getOrElse(""), result.succeeded)
+    assertEquals(0, result.tasks.size)
+  }
+
+  @Test def setupErrorReportedAsJobError(): Unit = {
+    val inDir = tmpDir("dj-setup-")
+    writeCsv(inDir, "events.csv", "id\n1\n")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(SQLTask(name = Some("a"), viewName = Some("a"),
+        sqlString = Some("SELECT * FROM a")))  // self-reference
+    )
+    val result = job.run()
+    assertFalse(result.succeeded)
+    assertTrue(result.error.isDefined)
+    assertTrue(result.error.get, result.error.get.toLowerCase.contains("self-cycle"))
+  }
+
+  @Test def independentRootsRunConcurrently(): Unit = {
+    assumeTrue("requires >=2 CPUs", Runtime.getRuntime.availableProcessors >= 2)
+    val inDir = tmpDir("dj-par-")
+    writeCsv(inDir, "a.csv", "x\n1\n")
+    writeCsv(inDir, "b.csv", "x\n1\n")
+    val outDir = tmpDir("dj-par-out-")
+    val sleepy = sleepyExecutor(120L)
+    val job = DataJob(
+      inputs = Seq(
+        InputFilePath(inDir.resolve("a.csv").toString, viewName = "a"),
+        InputFilePath(inDir.resolve("b.csv").toString, viewName = "b")
+      ),
+      sql = Seq(
+        SQLTask(name = Some("ta"),
+          sqlString = Some("SELECT * FROM a"),
+          outputFile = Some(OutputFilePath(outDir.resolve("a.csv").toString))),
+        SQLTask(name = Some("tb"),
+          sqlString = Some("SELECT * FROM b"),
+          outputFile = Some(OutputFilePath(outDir.resolve("b.csv").toString)))
+      )
+    )
+    val result = job.run(sleepy)
+    assertTrue(result.error.getOrElse(""), result.succeeded)
+    val a = result.tasks.find(_.taskName == "ta").get
+    val b = result.tasks.find(_.taskName == "tb").get
+    assertTrue(
+      s"expected overlap: a=[${a.startedAt}, ${a.finishedAt}], b=[${b.startedAt}, ${b.finishedAt}]",
+      a.startedAt.isBefore(b.finishedAt) && b.startedAt.isBefore(a.finishedAt)
+    )
+  }
+
+  private def sleepyExecutor(ms: Long): SqlExecutor = {
+    com.transformer.sql.exec.SqlEngine.init()
+    val real = SqlExecutorRegistry.get
+    new SqlExecutor {
+      override def execute(sql: String, catalog: Catalog): ExecutedQuery = {
+        Thread.sleep(ms)
+        real.execute(sql, catalog)
+      }
+    }
   }
 }

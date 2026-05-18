@@ -51,8 +51,9 @@ the JIT keeps this acceptably fast.
 | `sql/parse/` | JSqlParser façade. | `SqlParser.scala` |
 | `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `LogicalPlan.scala`, `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo) |
 | `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala`, `SortExec.scala`, `DistinctExec.scala`, `UnionExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala`, `SqlEngine.scala` |
-| `job/` | User-facing API + runner. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala` (+ `ParquetResolverHook`, `ParquetReaderHook`, `ParquetWriterHook`) |
-| `examples/scala_app/` | Sample app built as a `scala_binary` deploy jar. | `src/main/scala/com/example/ExampleJob.scala` |
+| `job/` | User-facing API + runner. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala` (+ `ParquetResolverHook`, `ParquetReaderHook`, `ParquetWriterHook`), `TaskDag.scala` (DAG analyzer/builder from SQL refs), `DirectoryJobLoader.scala` (DBT-style directory loader), `Json.scala` (stdlib JSON parser used by the loader) |
+| `examples/scala_app/` | Sample app built as a `scala_binary` deploy jar — programmatic `DataJob(...)` API. | `src/main/scala/com/example/ExampleJob.scala` |
+| `examples/directory_app/` | Sample app using `DirectoryJobLoader` — whole job is a folder of JSON configs + SQL files. | `src/main/scala/com/example/directory/DirectoryJobExample.scala`, `job/inputs/<view>/config.json`, `job/tables/<view>/main.sql`, `job/tables/<view>/validations/*.sql` |
 
 ## Cross-cutting patterns
 
@@ -108,6 +109,16 @@ This means parallelism scales with input partitioning. CSV → one partition
 per file. Parquet → one partition per row group. Plan accordingly when you
 care about throughput.
 
+Above the operator level, `DataJob` runs SQLTasks as a DAG: `TaskDag.build`
+parses each task's rendered SQL (main + every validation) with JSqlParser's
+`TablesNamesFinder` and builds adjacency based on task viewName references.
+`DataJob.runDag` then schedules tasks on a `min(tasks.size, availableProcessors)`
+fixed pool, draining a `LinkedBlockingQueue` of finished indices to submit
+newly-ready nodes. Independent branches run concurrently; downstream tasks of
+a failure become `TaskStatus.Skipped`; independent siblings keep going. Setup-
+time validation rejects unknown refs, duplicate viewNames, self-cycles, cycles,
+and duplicate post-render output paths before any task runs.
+
 ### 4. Expression evaluation
 
 `Expr.eval(batch, row): Any` — boxed return. Pattern:
@@ -158,10 +169,14 @@ bazel test  //...                     # run every junit target
 bazel test  //src/test/scala/com/transformer/sql/...   # just the SQL tests
 bazel build //src/main/scala/com/transformer/<module>:<name>   # one module
 
-# Build the example deploy jar.
+# Build the example deploy jars.
 bazel build //examples/scala_app:example_job_deploy.jar
 java -jar bazel-bin/examples/scala_app/example_job_deploy.jar \
     examples/scala_app/data/input /tmp/transformer-example-out
+
+bazel build //examples/directory_app:directory_example_deploy.jar
+java -jar bazel-bin/examples/directory_app/directory_example_deploy.jar \
+    examples/directory_app/job /tmp/transformer-directory-out
 ```
 
 Tests are JUnit 4 via `scala_junit_test`. Each leaf test directory has a
@@ -198,6 +213,41 @@ discovery rule).
 4. Update `InputFilePath.detectedFormat` and `OutputFilePath.detectedFormat`
    to recognize the extension.
 5. Update `DataJob.materializeIfNeeded` so validation re-reads work.
+
+### Add a config field to the directory loader
+
+`DirectoryJobLoader` (in `job/`) is a thin DBT-style layer over the programmatic
+`DataJob` API. It walks `<jobDir>/inputs/<viewName>/*.json` and
+`<jobDir>/tables/<viewName>/{main.sql,validations/*.sql}` and emits regular
+`InputFilePath` / `SQLTask` values — there's no separate runtime. The JSON parser
+itself is in `job/Json.scala` (stdlib only — no Jackson, no circe).
+
+To accept a new field in an input JSON config:
+1. Add the field to `InputFilePath` (if it isn't there already).
+2. Read it via the `JsonObject` accessors (`requiredString`, `optString`,
+   `optBool`, `optStringMap`) inside `loadInputs` in `DirectoryJobLoader.scala`.
+3. Test it in `DirectoryJobLoaderTest`.
+
+Same pattern for tables (`main.sql`, optional `validations/` and any new
+sibling files). Today there's no per-table JSON file; if a table-level config
+field is needed, introduce a conventional filename (e.g., `output.json`) and
+read it inside `loadTables`.
+
+Conventions baked into the loader:
+- View name comes from the directory name, never from JSON. JSON `viewName` is
+  silently ignored (we don't fail to keep the loader lenient).
+- Tables are listed in **alphabetical order of directory name**. This only
+  determines task *declared index* (and any synthetic `__task_N` viewName for
+  tasks without an explicit one) — `DataJob` builds a DAG from each task's SQL
+  and parallelizes independent branches, so listing order does NOT constrain
+  execution order. Numeric prefixes are still useful as documentation, not as
+  a scheduling hint.
+- Relative input paths are resolved against the job directory before
+  `InputResolver.resolve` sees them; cloud paths (`gs://`, `s3://`) and
+  absolute paths are passed through.
+- Default `outputDir` is `<jobDir>/output`; both `outputDir` and JSON `path`
+  strings flow through `TemplateRenderer` at run time, so they may contain
+  `{{ today }}` etc.
 
 ### Add a SQL operator (e.g., subqueries)
 
@@ -276,6 +326,12 @@ need them. Cloud is opt-in.
   programmatically registered via `DataJob.inputs`.
 - **No bytecode-level optimizations.** Hot loops use `while` and indexed
   arrays. That's enough.
+- **No shared executor across DAG- and operator-level parallelism.** With N
+  SQLTasks running concurrently (via `DataJob.runDag`) and each query's
+  pipeline-breakers spawning their own `min(partitions, cores)` pool, peak
+  thread count is `N × min(maxPartitions, cores)`. JVM handles it; cache
+  thrash in worst-case CPU-bound jobs is the trade-off. Post-v1: thread a
+  single shared executor through both layers.
 
 ## Test inventory
 
@@ -288,7 +344,10 @@ need them. Cloud is opt-in.
 | `write/csv/csv_writer_test` | Quoting, nulls, roundtrip with reader, abort cleanup |
 | `read/parquet/parquet_roundtrip_test` | All-primitive write+read, end-to-end DataJob with parquet I/O |
 | `sql/exec/sql_engine_test` | 16 tests covering SELECT/WHERE/projection arithmetic, CASE, GROUP BY + COUNT/SUM/AVG/MIN/MAX, COUNT DISTINCT, INNER/LEFT JOIN, ORDER BY DESC + LIMIT, DISTINCT, HAVING, LIKE, IS NULL, scalar fns, empty-input aggregation |
-| `job/data_job_test` | End-to-end CSV → SQL → CSV, templated output path, templated SQL, validation failure path, multi-task pipeline with view chaining |
+| `job/data_job_test` | End-to-end CSV → SQL → CSV, templated output path, templated SQL, validation failure path, multi-task pipeline with view chaining, diamond DAG ordering, failed-task skip propagation with independent sibling success, validation-failure skip propagation, empty `sql`, setup error reporting, concurrent sibling execution |
+| `job/task_dag_test` | Pure dependency analyzer + DAG builder: table-name extraction, independent roots, linear chain, diamond, cycle detection, unknown reference, duplicate viewName, viewName/input collision, main-SQL self-reference, validation self-reference allowed, validation peer reference, duplicate output path, empty input, template rendering before extraction |
+| `job/json_test` | The stdlib JSON parser in `job/Json.scala` — scalars, escapes, nested objects, arrays, type errors, trailing content, scalar→string coercion for the option map |
+| `job/directory_job_loader_test` | End-to-end `DirectoryJobLoader.load(...)`: basic run, relative vs absolute input paths, validations dir (success + failure), templated input paths + outputDir, alphabetical chaining, default outputDir, JSON scalar→option-map coercion, error cases (no/multiple `.json`, missing `main.sql`, missing jobDir) |
 
 ## File-size hot spots
 

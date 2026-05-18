@@ -6,7 +6,7 @@ import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
 
 import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
-import java.util.concurrent.{Executors, TimeUnit}
+import java.util.concurrent.{Callable, Executors, LinkedBlockingQueue, TimeUnit}
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
@@ -28,13 +28,12 @@ final case class DataJob(
   def run(executor: SqlExecutor): JobResult = {
     val vars = temporalVariables.getOrElse(TemporalVariables())
     val catalog = new Catalog
-    val taskResults = mutable.ArrayBuffer.empty[TaskResult]
 
     // Phase 1: load every input into the catalog in parallel.
-    val pool = Executors.newFixedThreadPool(math.max(1, math.min(inputs.size, Runtime.getRuntime.availableProcessors)))
+    val inputPool = Executors.newFixedThreadPool(math.max(1, math.min(inputs.size, Runtime.getRuntime.availableProcessors)))
     try {
       val futures = inputs.map { in =>
-        pool.submit(new java.util.concurrent.Callable[(String, CatalogView)] {
+        inputPool.submit(new Callable[(String, CatalogView)] {
           def call(): (String, CatalogView) = {
             val rendered = in.copy(path = TemplateRenderer.render(in.path, vars))
             (in.viewName, InputResolver.resolve(rendered))
@@ -47,70 +46,144 @@ final case class DataJob(
       }
     } catch {
       case NonFatal(e) =>
-        pool.shutdownNow()
-        return JobResult(succeeded = false, tasks = taskResults.toSeq, error = Some(s"Failed to load inputs: ${e.getMessage}"))
+        inputPool.shutdownNow()
+        return JobResult(succeeded = false, tasks = Nil, error = Some(s"Failed to load inputs: ${e.getMessage}"))
     } finally {
-      pool.shutdown()
-      pool.awaitTermination(1, TimeUnit.MINUTES)
+      inputPool.shutdown()
+      inputPool.awaitTermination(1, TimeUnit.MINUTES)
     }
 
-    val validationFailures = mutable.ArrayBuffer.empty[(String, Seq[ValidationFailure])]
-
-    // Phase 2: execute SQL tasks sequentially.
-    var aborted = false
-    val sqlIter = sql.iterator
-    while (sqlIter.hasNext && !aborted) {
-      val task = sqlIter.next()
-      val started = Instant.now()
-      val taskName = task.displayName
-      try {
-        val renderedSql = TemplateRenderer.render(task.loadSql(), vars)
-        val q = executor.execute(renderedSql, catalog)
-
-        val outputPath: Option[String] = task.outputFile.map { ofp =>
-          val rendered = TemplateRenderer.render(ofp.path, vars)
-          if (ofp.isCloud) throw new UnsupportedOperationException(
-            s"Cloud output paths not yet implemented (v1.1). Got: '${ofp.path}'"
-          )
-          writeOutput(ofp, rendered, q.schema, q.batches)
-          rendered
-        }
-
-        // For validations we need the result registered as a view. If the user didn't
-        // give it a viewName, we still publish under a synthetic one for validation.
-        if (task.viewName.isDefined || task.validations.nonEmpty) {
-          val name = task.viewName.getOrElse(s"__task_${taskResults.length}")
-          val materialized = materializeIfNeeded(q.schema, outputPath)
-          catalog.replace(name, materialized)
-          val failures = runValidations(task, name, executor, catalog, vars)
-          if (failures.nonEmpty) {
-            validationFailures += (taskName -> failures)
-            taskResults += TaskResult(taskName, TaskStatus.ValidationFailed(failures), q.rowsProduced, outputPath, started, Instant.now())
-            aborted = true
-          } else {
-            taskResults += TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, Instant.now())
-          }
-        } else {
-          // Drain any batches the writer didn't already consume.
-          while (q.batches.hasNext) q.batches.next()
-          taskResults += TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, Instant.now())
-        }
-      } catch {
+    // Phase 2: build a DAG from each task's SQL (main + validations) and execute it
+    // in parallel — independent branches run concurrently; downstream tasks of a failed
+    // task are Skipped; independent siblings keep going.
+    val dag =
+      try TaskDag.build(sql, catalog.viewNames.iterator.map(_.toLowerCase).toSet, vars)
+      catch {
         case NonFatal(e) =>
-          taskResults += TaskResult(taskName, TaskStatus.Failed(e.getMessage), 0L, None, started, Instant.now())
-          aborted = true
+          return JobResult(succeeded = false, tasks = Nil, error = Some(e.getMessage))
       }
-    }
+    val results = runDag(dag, executor, catalog, vars)
 
-    if (validationFailures.nonEmpty) {
-      writeValidationDiagnostics(validationFailures.toSeq, vars)
-    }
+    val validationFailures: Seq[(String, Seq[ValidationFailure])] =
+      results.iterator.collect {
+        case TaskResult(name, TaskStatus.ValidationFailed(fs), _, _, _, _) => name -> fs
+      }.toSeq
+    if (validationFailures.nonEmpty) writeValidationDiagnostics(validationFailures, vars)
 
     JobResult(
-      succeeded = taskResults.forall(_.succeeded) && !aborted,
-      tasks = taskResults.toSeq,
+      succeeded = results.forall(_.succeeded),
+      tasks = results.toSeq,
       error = None
     )
+  }
+
+  private def runDag(
+      dag: TaskDag,
+      executor: SqlExecutor,
+      catalog: Catalog,
+      vars: TemporalVariables
+  ): Array[TaskResult] = {
+    val n = dag.nodes.size
+    val results = Array.ofDim[TaskResult](n)
+    if (n == 0) return results
+    val inDegree = Array.tabulate(n)(i => dag.nodes(i).deps.size)
+    val completed = new LinkedBlockingQueue[Int]()
+    val taskPool = Executors.newFixedThreadPool(
+      math.max(1, math.min(n, Runtime.getRuntime.availableProcessors))
+    )
+    try {
+      def submit(i: Int): Unit = {
+        taskPool.submit(new Callable[Void] {
+          def call(): Void = {
+            try {
+              val depResults = dag.nodes(i).deps.iterator.map(results).toSeq
+              val failedDeps = depResults.filter(_.status != TaskStatus.Succeeded)
+              results(i) =
+                if (failedDeps.nonEmpty) {
+                  val names = failedDeps.map(_.taskName).mkString(", ")
+                  val now = Instant.now()
+                  TaskResult(dag.nodes(i).task.displayName,
+                    TaskStatus.Skipped(s"upstream failure: $names"),
+                    0L, None, now, now)
+                } else runOneTask(dag.nodes(i), executor, catalog, vars)
+            } catch {
+              case t: Throwable =>
+                // Defensive — runOneTask catches NonFatal itself. This only fires on
+                // Fatal or an impl bug; convert to Failed so the scheduler can never
+                // deadlock waiting on a worker that swallowed its own exception.
+                val now = Instant.now()
+                results(i) = TaskResult(
+                  dag.nodes(i).task.displayName,
+                  TaskStatus.Failed(s"orchestration error: ${t.getMessage}"),
+                  0L, None, now, now
+                )
+            } finally {
+              completed.put(i)
+            }
+            null
+          }
+        })
+        ()
+      }
+      var i = 0
+      while (i < n) {
+        if (inDegree(i) == 0) submit(i)
+        i += 1
+      }
+      var done = 0
+      while (done < n) {
+        val finished = completed.take()
+        done += 1
+        dag.dependents(finished).foreach { j =>
+          inDegree(j) -= 1
+          if (inDegree(j) == 0) submit(j)
+        }
+      }
+    } finally {
+      taskPool.shutdown()
+      taskPool.awaitTermination(1, TimeUnit.MINUTES)
+    }
+    results
+  }
+
+  private def runOneTask(
+      node: TaskDagNode,
+      executor: SqlExecutor,
+      catalog: Catalog,
+      vars: TemporalVariables
+  ): TaskResult = {
+    val task = node.task
+    val started = Instant.now()
+    val taskName = task.displayName
+    try {
+      val q = executor.execute(node.renderedMainSql, catalog)
+
+      val outputPath: Option[String] = task.outputFile.map { ofp =>
+        val rendered = TemplateRenderer.render(ofp.path, vars)
+        if (ofp.isCloud) throw new UnsupportedOperationException(
+          s"Cloud output paths not yet implemented (v1.1). Got: '${ofp.path}'"
+        )
+        writeOutput(ofp, rendered, q.schema, q.batches)
+        rendered
+      }
+
+      if (task.viewName.isDefined || task.validations.nonEmpty) {
+        val name = task.viewName.getOrElse(s"__task_${node.index}")
+        val materialized = materializeIfNeeded(q.schema, outputPath)
+        catalog.replace(name, materialized)
+        val failures = runValidations(node, executor, catalog)
+        if (failures.nonEmpty)
+          TaskResult(taskName, TaskStatus.ValidationFailed(failures), q.rowsProduced, outputPath, started, Instant.now())
+        else
+          TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, Instant.now())
+      } else {
+        while (q.batches.hasNext) q.batches.next()
+        TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, Instant.now())
+      }
+    } catch {
+      case NonFatal(e) =>
+        TaskResult(taskName, TaskStatus.Failed(e.getMessage), 0L, None, started, Instant.now())
+    }
   }
 
   private def writeOutput(
@@ -169,24 +242,17 @@ final case class DataJob(
   }
 
   private def runValidations(
-      task: SQLTask,
-      taskViewName: String,
+      node: TaskDagNode,
       executor: SqlExecutor,
-      catalog: Catalog,
-      vars: TemporalVariables): Seq[ValidationFailure] = {
-    task.validations.flatMap { v =>
-      val sql = TemplateRenderer.render(v.loadSql(), vars)
+      catalog: Catalog): Seq[ValidationFailure] = {
+    node.task.validations.iterator.zip(node.renderedValidationSqls.iterator).flatMap { case (v, sql) =>
       val q = executor.execute(sql, catalog)
       val rows = mutable.ArrayBuffer.empty[ColumnarBatch]
       while (q.batches.hasNext) rows += q.batches.next()
       val total = rows.iterator.map(_.numRows.toLong).sum
       if (total == 0L) None
-      else {
-        // Build a small CSV sample of the failing rows.
-        val sample = sampleAsCsv(q.schema, rows.toSeq, maxRows = 10)
-        Some(ValidationFailure(v.name, total, sample))
-      }
-    }
+      else Some(ValidationFailure(v.name, total, sampleAsCsv(q.schema, rows.toSeq, maxRows = 10)))
+    }.toSeq
   }
 
   private def sampleAsCsv(schema: Schema, batches: Seq[ColumnarBatch], maxRows: Int): String = {

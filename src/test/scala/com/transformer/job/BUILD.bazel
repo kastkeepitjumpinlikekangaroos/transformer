@@ -7,6 +7,40 @@ scala_junit_test(
     deps = [
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/temporal",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "json_test",
+    srcs = ["JsonTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/job",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "directory_job_loader_test",
+    srcs = ["DirectoryJobLoaderTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/temporal",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "task_dag_test",
+    srcs = ["TaskDagTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/job",
         "//src/main/scala/com/transformer/temporal",
         "@maven//:junit_junit",
     ],

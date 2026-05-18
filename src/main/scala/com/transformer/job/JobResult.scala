@@ -8,6 +8,7 @@ object TaskStatus {
   case object Succeeded extends TaskStatus
   final case class Failed(reason: String) extends TaskStatus
   final case class ValidationFailed(failures: Seq[ValidationFailure]) extends TaskStatus
+  final case class Skipped(reason: String) extends TaskStatus
 }
 
 final case class ValidationFailure(

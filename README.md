@@ -20,7 +20,9 @@ single-node parallelism, not distributed execution.
   ORDER BY, LIMIT, DISTINCT, UNION/UNION ALL, CASE, CAST, scalar functions
 - DBT-style data-quality validations
 - Jinja-style temporal templating in SQL and output paths
-- Bazel-deployable example app
+- Two ways to define a job: programmatic (`DataJob(...)`) or directory-driven
+  (`DirectoryJobLoader.load(dir)`)
+- Bazel-deployable example apps (programmatic + directory-driven)
 
 **v1.1 (planned):** `gs://` and `s3://` paths. The `InputFilePath` /
 `OutputFilePath` API already accepts them; today they raise a clear
@@ -43,6 +45,11 @@ java -jar bazel-bin/examples/scala_app/example_job_deploy.jar \
 
 The example reads two CSVs, joins them, aggregates spend per user tier with a
 templated output path (`day=20260101/`), runs a validation, and exits 0.
+
+A second example (`examples/directory_app/`) shows the directory-driven flow —
+the entire job is expressed as a folder of JSON configs and SQL files instead
+of Scala. See [Defining jobs from a directory](#defining-jobs-from-a-directory)
+below.
 
 ## Example usage
 
@@ -97,6 +104,87 @@ and durations. If a validation fails the corresponding task is marked
 `ValidationFailed`, its output is persisted regardless (for debugging), and a
 CSV of failure samples is dumped to `validationResultsOutput` (defaults to
 `validation_results/{{ epoch_millis }}.csv`).
+
+## Defining jobs from a directory
+
+For lighter-weight DBT-style projects you can express the whole job as a
+directory tree and skip the Scala builder. Point `DirectoryJobLoader` at a job
+directory and it returns the same `DataJob` you'd otherwise build by hand.
+
+### Expected layout
+
+```
+<jobDir>/
+  inputs/
+    <viewName>/
+      <any>.json                  # InputFilePath config (exactly one .json file)
+  tables/
+    <viewName>/
+      main.sql                    # required: the SELECT for this table
+      validations/                # optional
+        <validationName>.sql
+```
+
+Directory names become catalog view names. Each `inputs/<viewName>/` contains
+exactly one `.json` file whose fields match `InputFilePath`:
+
+```json
+{
+  "path": "data/events.csv",
+  "format": "csv",
+  "options": {"delimiter": ",", "header": true},
+  "cache": true
+}
+```
+
+The directory name is the view name — don't set `viewName` in the JSON (a
+`viewName` field there is silently ignored). Relative `path` values are
+resolved against the job directory; absolute paths and cloud URLs (`gs://`,
+`s3://`) are passed through unchanged. Template variables (`{{ today }}`,
+etc.) inside `path` are expanded at run time.
+
+Tables run in **alphabetical order of their directory names**, so a downstream
+table B can `SELECT FROM` an upstream table A only if A's directory sorts
+before B's. Use numeric prefixes (`01_raw/`, `02_clean/`) if you need explicit
+ordering.
+
+### Loading and running
+
+```scala
+import com.transformer.job.DirectoryJobLoader
+import com.transformer.temporal.TemporalVariables
+import java.nio.file.Paths
+import java.time.Instant
+
+val job = DirectoryJobLoader.load(
+  jobDir            = Paths.get("examples/directory_app/job"),
+  outputDir         = Some("/tmp/transformer-directory-out/day={{ today }}"),
+  temporalVariables = Some(TemporalVariables(Instant.parse("2026-01-01T05:30:21Z")))
+)
+
+val result = job.run()
+```
+
+`outputDir` is templated like any output path. Each table writes to
+`<outputDir>/<viewName>.csv` and is registered in the catalog so subsequent
+tables can reference it. If you don't pass `outputDir` the default is
+`<jobDir>/output/`.
+
+### Example app
+
+```bash
+bazel build //examples/directory_app:directory_example_deploy.jar
+java -jar bazel-bin/examples/directory_app/directory_example_deploy.jar \
+    examples/directory_app/job \
+    /tmp/transformer-directory-out
+```
+
+The job reads two CSVs (events, users), produces an `enriched_events` table
+with `'{{ iso_timestamp }}' AS execution_time`, then a `spend_by_tier`
+aggregate with `'{{ today }}' AS execution_date` and a `no_null_tiers`
+validation. Output lands under
+`/tmp/transformer-directory-out/day=20260101/` (path templated from the
+execution time).
 
 ## Supported file formats
 
@@ -234,7 +322,8 @@ Unknown variables raise `IllegalArgumentException` listing all known names.
 │                              jsqlparser 5.0, parquet-hadoop 1.14.3 (+ minimal
 │                              hadoop), junit
 ├── .bazelrc                   JDK 21 toolchain
-├── examples/scala_app/        Bazel-deployable example app
+├── examples/scala_app/        Bazel-deployable example app (programmatic)
+├── examples/directory_app/    Bazel-deployable example app (directory-driven)
 ├── src/main/scala/com/transformer/
 │   ├── core/                  DataType, Schema, ColumnarBatch, Catalog,
 │   │                          SqlExecutor boundary + registry
@@ -258,7 +347,8 @@ Unknown variables raise `IllegalArgumentException` listing all known names.
 │   └── job/                   InputFilePath, OutputFilePath, SQLTask,
 │                              Validation, JobResult, InputResolver, DataJob,
 │                              ParquetReaderHook, ParquetWriterHook,
-│                              ParquetResolverHook
+│                              ParquetResolverHook, DirectoryJobLoader, Json
+│                              (stdlib JSON parser used by the loader)
 └── src/test/scala/com/transformer/...   (mirrors src/main/scala layout)
 ```
 
