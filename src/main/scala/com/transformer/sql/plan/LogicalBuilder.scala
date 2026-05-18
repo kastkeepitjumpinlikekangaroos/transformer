@@ -177,10 +177,11 @@ object LogicalBuilder {
       ps: PlainSelect,
       expandedItems: Seq[(Expression, String)]): (LogicalPlan, BinderFactory) = {
 
-    val groupExprs: Seq[Expression] = Option(ps.getGroupBy)
+    val rawGroupExprs: Seq[Expression] = Option(ps.getGroupBy)
       .flatMap(g => Option(g.getGroupByExpressionList))
       .map(_.asScala.toSeq)
       .getOrElse(Nil)
+    val groupExprs: Seq[Expression] = rawGroupExprs.map(resolveGroupOrdinal(_, expandedItems))
     val groupBound: Seq[(Expr, String)] = groupExprs.map { e =>
       val b = bindExpr(e, sources)
       (b, deriveAlias(e))
@@ -691,6 +692,26 @@ object LogicalBuilder {
       childRewriter: Expression => Expr): Expr = e match {
     case p: Parenthesis => childRewriter(p.getExpression)
     case _ => bindExpr(e, sources)
+  }
+
+  /** Resolve `GROUP BY N` (1-based positional reference) to the underlying
+    * SELECT-list expression. Matches BigQuery / Postgres / MySQL behavior.
+    * Only bare integer literals are treated as ordinals — `GROUP BY (1)` or
+    * `GROUP BY +1` remain literal expressions. */
+  private def resolveGroupOrdinal(
+      e: Expression,
+      expandedItems: Seq[(Expression, String)]): Expression = e match {
+    case lv: LongValue =>
+      val v = lv.getValue
+      if (v < 1 || v > expandedItems.size)
+        throw new IllegalArgumentException(
+          s"GROUP BY position $v is not in select list (size ${expandedItems.size})")
+      val (expr, _) = expandedItems((v - 1).toInt)
+      if (containsAggregate(expr))
+        throw new IllegalArgumentException(
+          s"GROUP BY position $v cannot refer to aggregate expression in select list")
+      expr
+    case _ => e
   }
 
   private def canonicalSql(e: Expression): String = e.toString.toLowerCase
