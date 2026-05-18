@@ -4,9 +4,10 @@ import com.transformer.core.{Catalog, DataType, Schema}
 import com.transformer.sql.parse.SqlParser
 
 import net.sf.jsqlparser.expression.{
-  AllValue, CaseExpression, CastExpression, DateValue, DoubleValue,
+  AllValue, AnalyticExpression, CaseExpression, CastExpression, DateValue, DoubleValue,
   Expression, Function, LongValue, NotExpression, NullValue, Parenthesis,
-  SignedExpression, StringValue, TimestampValue, TimeValue, WhenClause
+  SignedExpression, StringValue, TimestampValue, TimeValue, WhenClause,
+  WindowElement, WindowOffset
 }
 import net.sf.jsqlparser.expression.operators.arithmetic.{
   Addition, Concat, Division, Modulo, Multiplication, Subtraction
@@ -82,17 +83,54 @@ object LogicalBuilder {
     val itemsContainAgg = expandedItems.exists { case (e, _) => containsAggregate(e) }
     val isAggregation = hasGroupBy || itemsContainAgg
 
-    // Build:
-    //   preProject: the plan whose output ORDER BY and the final projection both see
-    //   bindForOrderBy/Project: function that binds an expression against preProject's sources
-    val (preProject, projections, exprBinder): (LogicalPlan, Seq[(Expr, String)], Expression => Expr) =
-      if (isAggregation) {
-        val (planAfterHaving, projs, rebinder) = buildAggregation2(afterWhere, sources, ps, expandedItems)
-        (planAfterHaving, projs, rebinder)
-      } else {
-        val bound = expandedItems.map { case (e, name) => (bindExpr(e, sources), name) }
-        (afterWhere, bound, (e: Expression) => bindExpr(e, sources))
+    // Stage 1: aggregation. `binderFactory` produces a binder parameterized by a
+    // window resolver — we call it twice: once with the empty resolver (for
+    // window-spec collection) and once with the populated one (for the final
+    // projections / ORDER BY).
+    val (preWindow, binderFactory): (LogicalPlan, BinderFactory) =
+      if (isAggregation) buildAggregation(afterWhere, sources, ps, expandedItems)
+      else {
+        val factory: BinderFactory = wr => e => bindExprWithAggs(e, sources, _ => None, wr)
+        (afterWhere, factory)
       }
+
+    val preWindowBinder: Expression => Expr = binderFactory(_ => None)
+
+    // Stage 2: collect every distinct `OVER (...)` referenced by SELECT items
+    // or ORDER BY. The window-function call's internal expressions (partition
+    // keys, order keys, function args) bind against the post-aggregation plan
+    // via `preWindowBinder`.
+    val windowDefs = mutable.LinkedHashMap.empty[String, WindowDef]
+    def collectWindows(e: Expression): Unit = e match {
+      case ae: AnalyticExpression =>
+        val key = canonicalSql(ae)
+        if (!windowDefs.contains(key)) {
+          val name = s"_win${windowDefs.size}"
+          val wd = bindAnalytic(ae, preWindowBinder).copy(outputName = name)
+          windowDefs.put(key, wd)
+        }
+      case _ => childExpressions(e).foreach(collectWindows)
+    }
+    expandedItems.foreach { case (e, _) => collectWindows(e) }
+    Option(ps.getOrderByElements).foreach(_.asScala.foreach(obe => collectWindows(obe.getExpression)))
+
+    val (preProject, exprBinder): (LogicalPlan, Expression => Expr) =
+      if (windowDefs.isEmpty) (preWindow, preWindowBinder)
+      else {
+        val baseLen = preWindow.outputSchema.length
+        val keyToWindow: Map[String, (Int, WindowDef)] = windowDefs.zipWithIndex.map {
+          case ((k, wd), i) => k -> (baseLen + i, wd)
+        }.toMap
+        val windowResolver: AnalyticExpression => Option[Expr] = ae =>
+          keyToWindow.get(canonicalSql(ae)).map { case (i, wd) =>
+            ColRefExpr(i, wd.outputName, wd.fn.resultType)
+          }
+        (LogicalWindow(preWindow, windowDefs.values.toSeq), binderFactory(windowResolver))
+      }
+
+    val projections: Seq[(Expr, String)] = expandedItems.map { case (e, name) =>
+      (exprBinder(e), name)
+    }
 
     val afterSort: LogicalPlan = Option(ps.getOrderByElements) match {
       case Some(list) if !list.isEmpty =>
@@ -122,15 +160,22 @@ object LogicalBuilder {
   // Aggregation
   // ---------------------------------------------------------------------------
 
-  /** Build aggregation pieces but do not place the final projection. Returns the
-    * pre-projection plan (with HAVING applied), the rebound SELECT projections,
-    * and a rebinder used to bind ORDER BY against the same post-aggregate sources.
+  /** A "binder factory": given an `AnalyticExpression => Option[Expr]` window
+    * resolver, returns a function that binds JSqlParser expressions to bound
+    * [[Expr]] trees over the post-aggregation (or pre-aggregation) schema.
     */
-  private def buildAggregation2(
+  private type BinderFactory = (AnalyticExpression => Option[Expr]) => (Expression => Expr)
+
+  /** Build aggregation pieces but do not place the final projection. Returns the
+    * pre-projection plan (with HAVING applied) and a rebinder factory used for
+    * both window collection (with an empty windowResolver) and the final
+    * projection / ORDER BY (with a populated windowResolver).
+    */
+  private def buildAggregation(
       child: LogicalPlan,
       sources: Sources,
       ps: PlainSelect,
-      expandedItems: Seq[(Expression, String)]): (LogicalPlan, Seq[(Expr, String)], Expression => Expr) = {
+      expandedItems: Seq[(Expression, String)]): (LogicalPlan, BinderFactory) = {
 
     val groupExprs: Seq[Expression] = Option(ps.getGroupBy)
       .flatMap(g => Option(g.getGroupByExpressionList))
@@ -144,6 +189,7 @@ object LogicalBuilder {
     // Collect every distinct aggregate referenced by SELECT or HAVING, assign synthetic names.
     val aggMap = mutable.LinkedHashMap.empty[String, (AggExpr, String)]
     def collect(e: Expression): Unit = e match {
+      case _: AnalyticExpression => ()  // window's inner aggregates are scoped to the window
       case f: Function if isAggFn(f.getName) =>
         val key = canonicalSql(f)
         if (!aggMap.contains(key)) {
@@ -157,7 +203,6 @@ object LogicalBuilder {
 
     val agg = LogicalAggregate(child, groupBound, aggMap.values.toSeq, None)
 
-    // Rebind SELECT/HAVING expressions against aggregation output: group keys + aggregates.
     val aggOutSources: Sources = Seq((None, agg.outputSchema))
     val aggIndexes: Map[String, Int] = {
       val gks = groupBound.zipWithIndex.map { case ((_, _), i) => (canonicalSql(groupExprs(i)), i) }
@@ -176,8 +221,11 @@ object LogicalBuilder {
       } else None
     }
 
-    def rebindAfterAgg(e: Expression): Expr = {
-      e match {
+    val factory: BinderFactory = { windowResolver =>
+      def rebind(e: Expression): Expr = e match {
+        case ae: AnalyticExpression =>
+          windowResolver(ae).getOrElse(throw new IllegalArgumentException(
+            s"Window function in non-window position: $ae"))
         case f: Function if isAggFn(f.getName) =>
           val key = canonicalSql(f)
           val (_, name) = aggMap(key)
@@ -189,21 +237,20 @@ object LogicalBuilder {
             case Some(i) =>
               ColRefExpr(i, aggOutFieldNames(i), agg.outputSchema.fields(i).dataType)
             case None =>
-              bindExprWithAggs(e, aggOutSources, aggResolver)
+              bindExprWithAggs(e, aggOutSources, aggResolver, windowResolver)
           }
       }
+      rebind
     }
 
+    val havingBinder = factory(_ => None)
     val afterHaving: LogicalPlan = Option(ps.getHaving) match {
       case Some(h) =>
-        LogicalFilter(agg, Analyzer.implicitCast(rebindAfterAgg(h), DataType.BooleanType))
+        LogicalFilter(agg, Analyzer.implicitCast(havingBinder(h), DataType.BooleanType))
       case None => agg
     }
 
-    val projections: Seq[(Expr, String)] = expandedItems.map { case (e, name) =>
-      (rebindAfterAgg(e), name)
-    }
-    (afterHaving, projections, rebindAfterAgg)
+    (afterHaving, factory)
   }
 
   // ---------------------------------------------------------------------------
@@ -254,17 +301,20 @@ object LogicalBuilder {
   // ---------------------------------------------------------------------------
 
   def bindExpr(e: Expression, sources: Sources): Expr =
-    bindExprWithAggs(e, sources, _ => None)
+    bindExprWithAggs(e, sources, _ => None, _ => None)
 
   /** Variant used inside aggregation: `aggResolver` returns a ColRef into the
     * aggregate output when called with an aggregate Function — letting expressions
-    * like `COUNT(*) > 1` (in HAVING / ORDER BY) bind cleanly.
+    * like `COUNT(*) > 1` (in HAVING / ORDER BY) bind cleanly. `windowResolver`
+    * plays the same role for [[AnalyticExpression]]s after [[LogicalWindow]]
+    * has appended their output columns to the schema.
     */
   def bindExprWithAggs(
       e: Expression,
       sources: Sources,
-      aggResolver: Function => Option[Expr]): Expr = {
-    def b(x: Expression): Expr = bindExprWithAggs(x, sources, aggResolver)
+      aggResolver: Function => Option[Expr],
+      windowResolver: AnalyticExpression => Option[Expr] = _ => None): Expr = {
+    def b(x: Expression): Expr = bindExprWithAggs(x, sources, aggResolver, windowResolver)
     e match {
     case p: Parenthesis => b(p.getExpression)
     case c: Column =>
@@ -298,11 +348,11 @@ object LogicalBuilder {
 
     case _: AllValue => throw new IllegalArgumentException("ALL is not supported in this position")
 
-    case a: Addition => binopGeneric("+", a.getLeftExpression, a.getRightExpression, sources, aggResolver)
-    case a: Subtraction => binopGeneric("-", a.getLeftExpression, a.getRightExpression, sources, aggResolver)
-    case a: Multiplication => binopGeneric("*", a.getLeftExpression, a.getRightExpression, sources, aggResolver)
-    case a: Division => binopGeneric("/", a.getLeftExpression, a.getRightExpression, sources, aggResolver)
-    case a: Modulo => binopGeneric("%", a.getLeftExpression, a.getRightExpression, sources, aggResolver)
+    case a: Addition => binopGeneric("+", a.getLeftExpression, a.getRightExpression, sources, aggResolver, windowResolver)
+    case a: Subtraction => binopGeneric("-", a.getLeftExpression, a.getRightExpression, sources, aggResolver, windowResolver)
+    case a: Multiplication => binopGeneric("*", a.getLeftExpression, a.getRightExpression, sources, aggResolver, windowResolver)
+    case a: Division => binopGeneric("/", a.getLeftExpression, a.getRightExpression, sources, aggResolver, windowResolver)
+    case a: Modulo => binopGeneric("%", a.getLeftExpression, a.getRightExpression, sources, aggResolver, windowResolver)
     case a: Concat =>
       val l = b(a.getLeftExpression); val r = b(a.getRightExpression)
       BinOpExpr("||", l, r, DataType.StringType)
@@ -316,12 +366,12 @@ object LogicalBuilder {
       val r = Analyzer.implicitCast(b(a.getRightExpression), DataType.BooleanType)
       BinOpExpr("OR", l, r, DataType.BooleanType)
 
-    case x: EqualsTo => cmpOpGeneric("=", x.getLeftExpression, x.getRightExpression, sources, aggResolver)
-    case x: NotEqualsTo => cmpOpGeneric("<>", x.getLeftExpression, x.getRightExpression, sources, aggResolver)
-    case x: GreaterThan => cmpOpGeneric(">", x.getLeftExpression, x.getRightExpression, sources, aggResolver)
-    case x: GreaterThanEquals => cmpOpGeneric(">=", x.getLeftExpression, x.getRightExpression, sources, aggResolver)
-    case x: MinorThan => cmpOpGeneric("<", x.getLeftExpression, x.getRightExpression, sources, aggResolver)
-    case x: MinorThanEquals => cmpOpGeneric("<=", x.getLeftExpression, x.getRightExpression, sources, aggResolver)
+    case x: EqualsTo => cmpOpGeneric("=", x.getLeftExpression, x.getRightExpression, sources, aggResolver, windowResolver)
+    case x: NotEqualsTo => cmpOpGeneric("<>", x.getLeftExpression, x.getRightExpression, sources, aggResolver, windowResolver)
+    case x: GreaterThan => cmpOpGeneric(">", x.getLeftExpression, x.getRightExpression, sources, aggResolver, windowResolver)
+    case x: GreaterThanEquals => cmpOpGeneric(">=", x.getLeftExpression, x.getRightExpression, sources, aggResolver, windowResolver)
+    case x: MinorThan => cmpOpGeneric("<", x.getLeftExpression, x.getRightExpression, sources, aggResolver, windowResolver)
+    case x: MinorThanEquals => cmpOpGeneric("<=", x.getLeftExpression, x.getRightExpression, sources, aggResolver, windowResolver)
 
     case in: InExpression =>
       val left = b(in.getLeftExpression)
@@ -386,8 +436,12 @@ object LogicalBuilder {
         case None =>
           if (isAggFn(f.getName))
             throw new IllegalArgumentException(s"Aggregate '${f.getName}' used in non-aggregating position")
-          bindScalarFunctionWithAggs(f, sources, aggResolver)
+          bindScalarFunctionWithAggs(f, sources, aggResolver, windowResolver)
       }
+
+    case ae: AnalyticExpression =>
+      windowResolver(ae).getOrElse(throw new IllegalArgumentException(
+        s"Window function '${ae.getName}' used in non-window position"))
 
     case other =>
       throw new IllegalArgumentException(s"Unsupported expression: ${other.getClass.getSimpleName}: $other")
@@ -395,17 +449,19 @@ object LogicalBuilder {
   }
 
   private def binopGeneric(op: String, l: Expression, r: Expression, sources: Sources,
-                           aggResolver: Function => Option[Expr]): Expr = {
+                           aggResolver: Function => Option[Expr],
+                           windowResolver: AnalyticExpression => Option[Expr]): Expr = {
     val (le, re, t) = Analyzer.promotePair(
-      bindExprWithAggs(l, sources, aggResolver),
-      bindExprWithAggs(r, sources, aggResolver))
+      bindExprWithAggs(l, sources, aggResolver, windowResolver),
+      bindExprWithAggs(r, sources, aggResolver, windowResolver))
     BinOpExpr(op, le, re, t)
   }
   private def cmpOpGeneric(op: String, l: Expression, r: Expression, sources: Sources,
-                           aggResolver: Function => Option[Expr]): Expr = {
+                           aggResolver: Function => Option[Expr],
+                           windowResolver: AnalyticExpression => Option[Expr]): Expr = {
     val (le, re, _) = Analyzer.promotePair(
-      bindExprWithAggs(l, sources, aggResolver),
-      bindExprWithAggs(r, sources, aggResolver))
+      bindExprWithAggs(l, sources, aggResolver, windowResolver),
+      bindExprWithAggs(r, sources, aggResolver, windowResolver))
     BinOpExpr(op, le, re, DataType.BooleanType)
   }
 
@@ -425,9 +481,10 @@ object LogicalBuilder {
   }
 
   private def bindScalarFunctionWithAggs(f: Function, sources: Sources,
-                                          aggResolver: Function => Option[Expr]): Expr = {
+                                          aggResolver: Function => Option[Expr],
+                                          windowResolver: AnalyticExpression => Option[Expr]): Expr = {
     val args: Seq[Expr] = Option(f.getParameters)
-      .map(_.asInstanceOf[ExpressionList[_]].asScala.asInstanceOf[Iterable[Expression]].toSeq.map(bindExprWithAggs(_, sources, aggResolver)))
+      .map(_.asInstanceOf[ExpressionList[_]].asScala.asInstanceOf[Iterable[Expression]].toSeq.map(bindExprWithAggs(_, sources, aggResolver, windowResolver)))
       .getOrElse(Nil)
     val argTypes = args.map(_.dataType)
     val rt = Funcs.returnType(f.getName, argTypes)
@@ -468,6 +525,7 @@ object LogicalBuilder {
   private def isAggFn(name: String): Boolean = AggFns.contains(name.toUpperCase)
 
   private def containsAggregate(e: Expression): Boolean = e match {
+    case _: AnalyticExpression => false  // window aggregates are not group aggregates
     case f: Function if isAggFn(f.getName) => true
     case _ => childExpressions(e).exists(containsAggregate)
   }
@@ -509,7 +567,112 @@ object LogicalBuilder {
       Option(f.getParameters)
         .map(_.asInstanceOf[ExpressionList[_]].asScala.asInstanceOf[Iterable[Expression]].toSeq)
         .getOrElse(Nil)
+    // Window functions own their inner expressions (partition keys, order keys,
+    // function arg); they are NOT children of the outer expression's scope.
+    case _: AnalyticExpression => Nil
     case _ => Nil
+  }
+
+  // ---------------------------------------------------------------------------
+  // Window functions
+  // ---------------------------------------------------------------------------
+
+  /** Convert a JSqlParser [[AnalyticExpression]] into a bound [[WindowDef]].
+    * The window's internal expressions (partition keys, order keys, function
+    * arg) bind via `binder` against the post-aggregation (or raw-source) schema.
+    * `outputName` is filled in by the caller — we pass an empty placeholder.
+    */
+  private def bindAnalytic(ae: AnalyticExpression, binder: Expression => Expr): WindowDef = {
+    val partitionExprs: Seq[Expression] = Option(ae.getPartitionExpressionList)
+      .map(_.asScala.asInstanceOf[Iterable[Expression]].toSeq).getOrElse(Nil)
+    val partitionKeys: Seq[Expr] = partitionExprs.map(binder)
+
+    val orderEls = Option(ae.getOrderByElements).map(_.asScala.toSeq).getOrElse(Nil)
+    val orderKeys: Seq[(Expr, Boolean)] = orderEls.map(obe => (binder(obe.getExpression), obe.isAsc))
+
+    val frame = bindFrame(Option(ae.getWindowElement), orderEls.nonEmpty)
+    val fnName = ae.getName.toUpperCase
+
+    val argExpr: Option[Expression] = Option(ae.getExpression).filterNot(_.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns])
+    val isStarArg: Boolean = ae.isAllColumns ||
+      Option(ae.getExpression).exists(_.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns])
+
+    val fn: WindowFn = fnName match {
+      case "ROW_NUMBER" => WindowFnRowNumber()
+      case "RANK" => WindowFnRank()
+      case "DENSE_RANK" => WindowFnDenseRank()
+      case "LAG" =>
+        val arg = argExpr.map(binder).getOrElse(
+          throw new IllegalArgumentException("LAG requires an argument"))
+        val offset = Option(ae.getOffset).map(extractNonNegativeInt("LAG offset")).getOrElse(1)
+        val default = Option(ae.getDefaultValue).map(binder)
+        WindowFnLag(arg, offset, default)
+      case "LEAD" =>
+        val arg = argExpr.map(binder).getOrElse(
+          throw new IllegalArgumentException("LEAD requires an argument"))
+        val offset = Option(ae.getOffset).map(extractNonNegativeInt("LEAD offset")).getOrElse(1)
+        val default = Option(ae.getDefaultValue).map(binder)
+        WindowFnLead(arg, offset, default)
+      case "COUNT" =>
+        if (isStarArg || argExpr.isEmpty) WindowFnAgg(AggExprCountStar())
+        else WindowFnAgg(AggExprCount(binder(argExpr.get), distinct = ae.isDistinct))
+      case "SUM" =>
+        WindowFnAgg(AggExprSum(binder(argExpr.getOrElse(
+          throw new IllegalArgumentException("SUM requires an argument")))))
+      case "AVG" =>
+        WindowFnAgg(AggExprAvg(binder(argExpr.getOrElse(
+          throw new IllegalArgumentException("AVG requires an argument")))))
+      case "MIN" =>
+        WindowFnAgg(AggExprMin(binder(argExpr.getOrElse(
+          throw new IllegalArgumentException("MIN requires an argument")))))
+      case "MAX" =>
+        WindowFnAgg(AggExprMax(binder(argExpr.getOrElse(
+          throw new IllegalArgumentException("MAX requires an argument")))))
+      case other =>
+        throw new IllegalArgumentException(s"Unsupported window function: $other")
+    }
+
+    WindowDef(WindowSpec(partitionKeys, orderKeys, frame), fn, outputName = "")
+  }
+
+  private def bindFrame(we: Option[WindowElement], hasOrderBy: Boolean): WindowFrame = we match {
+    case None => WindowFrame.defaultFor(hasOrderBy)
+    case Some(elem) =>
+      val frameType: FrameType = elem.getType match {
+        case WindowElement.Type.ROWS => FrameType.Rows
+        case WindowElement.Type.RANGE => FrameType.Range
+      }
+      // Two shapes: BETWEEN ... AND ... → range; or single bound → offset.
+      val (start, end): (FrameBound, FrameBound) =
+        Option(elem.getRange) match {
+          case Some(range) =>
+            (bindFrameBound(range.getStart), bindFrameBound(range.getEnd))
+          case None =>
+            val s = Option(elem.getOffset).map(bindFrameBound).getOrElse(FrameBound.UnboundedPreceding)
+            (s, FrameBound.CurrentRow)
+        }
+      WindowFrame(frameType, start, end)
+  }
+
+  private def bindFrameBound(wo: WindowOffset): FrameBound = wo.getType match {
+    case WindowOffset.Type.CURRENT => FrameBound.CurrentRow
+    case WindowOffset.Type.PRECEDING =>
+      Option(wo.getExpression) match {
+        case None => FrameBound.UnboundedPreceding
+        case Some(e) => FrameBound.Preceding(extractNonNegativeInt("PRECEDING offset")(e).toLong)
+      }
+    case WindowOffset.Type.FOLLOWING =>
+      Option(wo.getExpression) match {
+        case None => FrameBound.UnboundedFollowing
+        case Some(e) => FrameBound.Following(extractNonNegativeInt("FOLLOWING offset")(e).toLong)
+      }
+    case WindowOffset.Type.EXPR =>
+      throw new IllegalArgumentException(s"Unsupported frame bound: ${wo}")
+  }
+
+  private def extractNonNegativeInt(label: String)(e: Expression): Int = e match {
+    case lv: LongValue if lv.getValue >= 0 && lv.getValue <= Int.MaxValue => lv.getValue.toInt
+    case _ => throw new IllegalArgumentException(s"$label must be a non-negative integer literal, got: $e")
   }
 
   /** Reconstruct an Expression bound against a new source set, recursing through

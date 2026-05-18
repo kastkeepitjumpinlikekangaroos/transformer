@@ -49,8 +49,8 @@ the JIT keeps this acceptably fast.
 | `write/csv/` | CSV output. Stdlib only. | `CsvWriter.scala` |
 | `write/parquet/` | Parquet output + shared `ParquetSchema` converter. | `ParquetSchema.scala`, `ParquetWriter.scala` |
 | `sql/parse/` | JSqlParser façade. | `SqlParser.scala` |
-| `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `LogicalPlan.scala`, `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo) |
-| `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala`, `SortExec.scala`, `DistinctExec.scala`, `UnionExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala`, `SqlEngine.scala` |
+| `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo) |
+| `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala`, `SortExec.scala`, `DistinctExec.scala`, `UnionExec.scala`, `WindowExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala`, `SqlEngine.scala` |
 | `job/` | User-facing API + runner. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala` (+ `ParquetResolverHook`, `ParquetReaderHook`, `ParquetWriterHook`), `TaskDag.scala` (DAG analyzer/builder from SQL refs; `TaskDag` + `TaskDagNode` are public so the GUI can render without re-implementing), `TaskProgressListener.scala` (per-task callbacks fired from runner worker threads), `RunMarker.scala` (`_SUCCESS` write/read/discover for per-task success markers), `DirectoryJobLoader.scala` (DBT-style directory loader; supports optional per-table `output.json` with `partitionBy`), `Json.scala` (stdlib JSON parser used by the loader + RunMarker.read) |
 | `gui/` | JavaFX visualizer/runner. Depends on `job/`, `core/`, `read/csv/`, `sql/exec/`, `temporal/`, plus `org.openjfx:javafx-{base,controls,graphics}` (bare jars + platform-classifier jars). | `GuiApp.scala` (Application boot + BorderPane wiring), `JobSession.scala` (mutable FX-thread session state — jobDir, executionTime, outputDir, DAG, per-task UI states, markers, historical runs), `DagLayout.scala` (pure-Scala layered DAG layout), `DagCanvas.scala` (custom Canvas: pan/zoom/click/double-click), `ControlsPanel.scala` (open dir, exec-time pickers, output-dir field, Run button on worker thread), `TaskDetailsPanel.scala` (selected task's source + rendered SQL + status + provenance — uses `SqlView` for highlighted SQL and chips for status/deps/metrics), `SqlHighlighter.scala` (pure-Scala tokenizer: keywords/functions/strings/numbers/comments/templates — testable, no JavaFX deps), `SqlView.scala` (read-only highlighted SQL pane built on `HBox` per line inside a `ScrollPane`; toolbar with Copy + optional Open-in-editor button), `ExternalEditor.scala` (launches `TRANSFORMER_EDITOR` if set, else macOS Terminal+`nvim`; no-wait launch via `ProcessBuilder`), `ResultsTabPane.scala` (Output data tab with partition picker + run log tab), `FxHelpers.scala` |
 | `examples/scala_app/` | Sample app built as a `scala_binary` deploy jar — programmatic `DataJob(...)` API. | `src/main/scala/com/example/ExampleJob.scala` |
@@ -200,6 +200,35 @@ Arithmetic and comparison are NULL-propagating via the `lv == null || rv == null
 `Double`, strings lexicographic, booleans natural). `Ops.eq` is the canonical
 NULL-free equality. Both are used by sort, join, IN, and `=`.
 
+### 6. Window functions: two-stage logical binding
+
+A `fn() OVER (...)` clause is **not** a regular `Expr` — it can't be evaluated
+per-row in isolation because it depends on the whole partition. `LogicalBuilder`
+handles this with a two-stage rewrite:
+
+1. **Pre-window stage.** Aggregation (if any) is built first, producing a
+   plan + a `BinderFactory: (AnalyticExpression => Option[Expr]) => Expression
+   => Expr`. The factory is called with an empty resolver to get a binder used
+   to bind the partition keys, order keys, and function arg of each `OVER (...)`.
+2. **Collect windows.** Walk SELECT items + ORDER BY. Every distinct
+   `AnalyticExpression` (deduped by canonical SQL) becomes a `WindowDef` with
+   a synthetic output column name (`_win0`, `_win1`, …).
+3. **Insert `LogicalWindow`** above the post-aggregation plan. Its output
+   schema is `child.outputSchema ++ windowOutputs` — original column indices
+   are preserved.
+4. **Post-window binding.** Call the same `BinderFactory` with the populated
+   resolver; the resulting binder substitutes each `AnalyticExpression` with
+   a `ColRefExpr` into the window-output position. SELECT projections and
+   ORDER BY then bind cleanly.
+
+`WindowExec` is a pipeline breaker (`numPartitions = 1`). It materializes all
+child rows, groups `WindowDef`s by `WindowSpec` so that partitioning + sorting
+happens once per spec, and writes one output column per window. Ranking
+functions and LAG/LEAD ignore the frame; aggregates with ORDER BY and no
+explicit frame use running aggregation; aggregates without ORDER BY cover
+the entire partition. `RANGE` frames execute as `ROWS` (documented in "What's
+intentionally NOT done").
+
 ## Conventions
 
 - **Scala 2.13.16.** rules_scala pins this. Match the version in the reference
@@ -276,6 +305,30 @@ discovery rule).
 3. Wire it in `AggState.init` (`AggregateExec.scala`) and
    `LogicalBuilder.bindAgg` (`sql/plan/LogicalBuilder.scala`).
 4. Test it.
+
+Any new `AggExpr` is automatically usable as a window aggregate too, because
+`WindowExec.computeAggOverPartition` calls `AggState.init(agg)` over the
+frame's rows. To expose it as a window function by name, also add a case to
+`LogicalBuilder.bindAnalytic`'s `fnName match { ... }`.
+
+### Add a window function
+
+Non-aggregate window functions (ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD) live
+as their own `WindowFn` ADT cases in `sql/plan/Window.scala`. To add one:
+
+1. New `WindowFn*` case in `sql/plan/Window.scala`. Set `name`, `resultType`,
+   and `respectsFrame` (false for ranking/offset functions; true only if the
+   function's value changes with the frame).
+2. Add a `case` in `LogicalBuilder.bindAnalytic` that recognises the function
+   name and returns the new `WindowFn`.
+3. Add a `case` in `WindowExec.computeFunctions` that implements the per-row
+   computation (it gets the sorted partition's row indices, the original
+   row buffer, and the output column to populate).
+4. Test it in `SqlEngineTest`.
+
+Aggregate window functions (SUM/AVG/MIN/MAX/COUNT) reuse the existing
+`AggExpr` and `AggState` machinery via `WindowFnAgg(agg)` — see the previous
+section. New `AggExpr`s become available as window aggregates automatically.
 
 ### Add a new file format (e.g., JSON)
 
@@ -422,7 +475,17 @@ need them. Cloud is opt-in.
   output, not the source schema. `LogicalBuilder.bindExprWithAggs` takes an
   `aggResolver: Function => Option[Expr]` that returns a `ColRefExpr` into the
   aggregate output for known aggregates. The plain `bindExpr` passes
-  `_ => None` and fails on any agg.
+  `_ => None` and fails on any agg. The same parameter pattern is used for
+  window functions via `windowResolver: AnalyticExpression => Option[Expr]`.
+- **`AnalyticExpression` is its own JSqlParser node, NOT a `Function`.** So
+  `SUM(x) OVER (...)` won't match `case f: Function` in `containsAggregate`
+  / `childExpressions`. Both helpers explicitly short-circuit on
+  `AnalyticExpression` so the window's inner expressions don't leak into
+  outer-scope aggregate collection.
+- **`COUNT(*) OVER ()` parses with `getExpression` returning an
+  `AllColumns`, but `isAllColumns` is false.** Detect star args by checking
+  *both* `ae.isAllColumns` and `ae.getExpression instanceof AllColumns`
+  (`LogicalBuilder.bindAnalytic` does this).
 - **Parquet `MessageType` constructor takes `java.util.List[Type]`, but a
   `Vector[PrimitiveType].asJava` gives `java.util.List[PrimitiveType]`.**
   Scala won't unify because of Java type invariance. `ParquetSchema.toMessageType`
@@ -464,9 +527,14 @@ need them. Cloud is opt-in.
 - **No whole-stage codegen**, no Janino, no LLVM. Boxed eval is plenty for v1
   and easy to reason about.
 - **No multi-statement SQL.** `SqlParser.parseSelect` only accepts a SELECT.
-- **No window functions** (`ROW_NUMBER`, `LAG`, `LEAD`, etc.). Common ask
-  post-v1.
 - **No subqueries** (scalar, IN, EXISTS, derived tables).
+- **Window functions: ROWS frames only.** `RANGE BETWEEN` is parsed and accepted
+  but executed with ROWS semantics — for `RANGE BETWEEN UNBOUNDED PRECEDING AND
+  CURRENT ROW` this is correct unless the ORDER BY produces ties (where RANGE
+  would include all tying rows in the current "row group"). Document this if a
+  user depends on RANGE behaviour. Supported window functions: ROW_NUMBER, RANK,
+  DENSE_RANK, LAG, LEAD, plus aggregates SUM/AVG/MIN/MAX/COUNT(*)/COUNT(expr).
+  No FIRST_VALUE/LAST_VALUE/NTH_VALUE/PERCENT_RANK/CUME_DIST/NTILE yet.
 - **No dynamic column-value partitioning.** The multi-file output we *do*
   support is along the executor's partition axis (file-per-input-file for
   CSV; file-per-row-group for Parquet), capped by `OutputFilePath.maxPartitions`.
@@ -496,12 +564,12 @@ need them. Cloud is opt-in.
 | `read/csv/csv_reader_test` | Inference, null handling, explicit schema, glob, bare dir, batch splitting |
 | `write/csv/csv_writer_test` | Quoting, nulls, roundtrip with reader, abort cleanup |
 | `read/parquet/parquet_roundtrip_test` | All-primitive write+read, end-to-end DataJob with parquet I/O |
-| `sql/exec/sql_engine_test` | 16 tests covering SELECT/WHERE/projection arithmetic, CASE, GROUP BY + COUNT/SUM/AVG/MIN/MAX, COUNT DISTINCT, INNER/LEFT JOIN, ORDER BY DESC + LIMIT, DISTINCT, HAVING, LIKE, IS NULL, scalar fns, empty-input aggregation |
+| `sql/exec/sql_engine_test` | 27 tests covering SELECT/WHERE/projection arithmetic, CASE, GROUP BY + COUNT/SUM/AVG/MIN/MAX, COUNT DISTINCT, INNER/LEFT JOIN, ORDER BY DESC + LIMIT, DISTINCT, HAVING, LIKE, IS NULL, scalar fns, empty-input aggregation; **window functions: ROW_NUMBER, RANK + DENSE_RANK ties, LAG/LEAD with default, running SUM over ORDER BY, aggregates over PARTITION BY, window without PARTITION BY, ROWS BETWEEN sliding frame, ORDER BY referencing a window expression, window function inside arithmetic, window after GROUP BY referencing the aggregate, window function in WHERE rejected** |
 | `job/data_job_test` | End-to-end CSV → SQL → CSV; templated output path; templated SQL; validation failure path; multi-task pipeline with view chaining; diamond DAG ordering; failed-task skip propagation with independent sibling success; validation-failure skip propagation; empty `sql`; setup error reporting; concurrent sibling execution; multi-partition input → multiple part files; `maxPartitions` coalesce / no-op / single-file; downstream task reads all upstream part files; **`buildDag` returns nodes/deps without I/O**; **`TaskProgressListener` fires onStart+onFinish for executed tasks and only onFinish (Skipped) for upstream-failed downstreams**; **`_SUCCESS` marker written on success, NOT on Failed or ValidationFailed**; **`RunMarker.discover` finds multi-partition layouts newest-first, exact path with no template, empty when no markers, sibling-task isolation** |
 | `job/task_dag_test` | Pure dependency analyzer + DAG builder: table-name extraction, independent roots, linear chain, diamond, cycle detection, unknown reference, duplicate viewName, viewName/input collision, main-SQL self-reference, validation self-reference allowed, validation peer reference, duplicate output path, empty input, template rendering before extraction |
 | `job/json_test` | The stdlib JSON parser in `job/Json.scala` — scalars, escapes, nested objects, arrays, type errors, trailing content, scalar→string coercion for the option map |
 | `job/directory_job_loader_test` | End-to-end `DirectoryJobLoader.load(...)`: basic run, relative vs absolute input paths, validations dir (success + failure), templated input paths + outputDir, alphabetical chaining, default outputDir, JSON scalar→option-map coercion, error cases (no/multiple `.json`, missing `main.sql`, missing jobDir), **per-table `output.json` `partitionBy` extends output path, absent leaves path unchanged, malformed throws** |
-| `gui/sql_highlighter_test` | The pure-Scala SQL tokenizer in `gui/SqlHighlighter.scala` — null/empty input, case-insensitive keywords + functions, identifier classification, integer/decimal/scientific numerics, single-quoted strings with `''` escape + unterminated, line / block / unclosed-block comments, top-level `{{ template }}` tokens, template inside a string stays a string, punctuation tagging, full SELECT query round-trips losslessly, line splitting preserves content + handles block comments spanning lines |
+| `gui/sql_highlighter_test` | The pure-Scala SQL tokenizer in `gui/SqlHighlighter.scala` — null/empty input, case-insensitive keywords + functions, identifier classification, integer/decimal/scientific numerics, single-quoted strings with `''` escape + unterminated, line / block / unclosed-block comments, top-level `{{ template }}` tokens, template inside a string stays a string, punctuation tagging, full SELECT query round-trips losslessly, line splitting preserves content + handles block comments spanning lines, **window-function keywords (OVER/PARTITION/ROWS/UNBOUNDED/PRECEDING/CURRENT/ROW) and RANK as a function** |
 
 The other GUI components (`SqlView`, `TaskDetailsPanel`, `DagCanvas`, etc.) have
 no JUnit tests — they're thin UI over engine APIs. Smoke-test by launching
@@ -509,9 +577,11 @@ no JUnit tests — they're thin UI over engine APIs. Smoke-test by launching
 
 ## File-size hot spots
 
-- `sql/plan/LogicalBuilder.scala` (~545 LOC) — biggest file. Pattern matches
+- `sql/plan/LogicalBuilder.scala` (~700 LOC) — biggest file. Pattern matches
   every JSqlParser expression node. If you're adding a syntax feature, this
   is probably where it lands.
+- `sql/exec/WindowExec.scala` (~345 LOC) — partition, sort, frame computation
+  for every supported window function.
 - `job/DataJob.scala` (~440 LOC) — runner orchestration: input materialization
   pool, DAG scheduler, writeOutput, validation re-read, `_SUCCESS` marker
   write, parquet hooks.

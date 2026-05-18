@@ -31,7 +31,10 @@ final class GuiApp extends Application {
     val results = new ResultsTabPane(session)
 
     // Wire canvas double-click → load output rows at the bottom.
-    canvas.setOnActivated(idx => results.loadTaskOutput(idx))
+    canvas.setOnTaskActivated(idx => results.loadTaskOutput(idx))
+    canvas.setOnInputActivated(idx => results.loadInputData(idx))
+    // Right-side "Inspect validations" button → switch to the Validations tab.
+    details.setOnInspectValidations(idx => results.focusValidations(idx))
 
     val canvasPane = new Pane(canvas)
     canvasPane.setStyle("-fx-background-color: #1e1e2a;")

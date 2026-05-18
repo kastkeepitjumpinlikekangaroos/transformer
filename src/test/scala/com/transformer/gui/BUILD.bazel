@@ -9,3 +9,15 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+scala_junit_test(
+    name = "dag_layout_test",
+    srcs = ["DagLayoutTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/gui",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/temporal",
+        "@maven//:junit_junit",
+    ],
+)

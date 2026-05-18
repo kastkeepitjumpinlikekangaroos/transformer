@@ -1,29 +1,34 @@
 package com.transformer.gui
 
 import com.transformer.core.{ColumnarBatch, Schema}
-import com.transformer.job.{JobResult, ParquetReaderHook, RunMarker, TaskStatus}
+import com.transformer.job.{InputFilePath, InputResolver, ParquetReaderHook, RunMarker, TaskStatus, Validation}
 import com.transformer.read.csv.{CsvOptions, CsvReader}
 
 import javafx.beans.property.ReadOnlyStringWrapper
 import javafx.collections.{FXCollections, ObservableList}
 import javafx.geometry.{Insets, Pos}
 import javafx.scene.control._
-import javafx.scene.layout.{HBox, Priority, StackPane, VBox}
+import javafx.scene.layout.{HBox, Priority, VBox}
 import javafx.scene.text.Font
 
 import java.nio.file.{Files, Path, Paths}
 import java.time.format.DateTimeFormatter
-import java.time.{Instant, ZoneOffset}
+import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicLong
 import scala.util.control.NonFatal
 
-/** Bottom panel: two tabs — the selected task's output rows (loaded on demand from
-  * disk) and a run log showing overall job + per-task failure reasons.
+/** Bottom panel: three tabs.
   *
-  * Output loading is triggered explicitly via [[loadTaskOutput]] (called by the
-  * canvas's double-click handler). It runs on a background thread; a load-token
-  * pattern guards against stale loads when the user activates a new task before
-  * the previous load completes.
+  *  - **Output data** — rows from the selected/activated task's persisted output,
+  *    or an activated input's raw data. Loaded on demand on a background thread.
+  *  - **Validations** — per-validation cards (name + status + SQL + failing rows
+  *    sample) for the currently-selected task. Always reflects the current
+  *    selection; no explicit load step needed.
+  *  - **Run log** — overall job summary, per-task statuses, and error details.
+  *
+  * Output loading is triggered explicitly via [[loadTaskOutput]] / [[loadInputData]]
+  * (the canvas's double-click handler). A load-token guards against stale loads
+  * when the user activates a new node before the previous load completes.
   */
 final class ResultsTabPane(session: JobSession) extends TabPane {
 
@@ -32,7 +37,7 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
   // ---- Output data tab ----
   private val outputTable = new TableView[Array[Any]]()
   outputTable.setPlaceholder(new Label(
-    "Double-click a task node in the DAG to load its output.\n" +
+    "Double-click a task or input node in the DAG to load its data.\n" +
       "Tasks without persisted output cannot be previewed — they will show a message instead."
   ))
   outputTable.setStyle("-fx-font-family: monospace; -fx-font-size: 12px;")
@@ -64,6 +69,21 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
   private val outputTab = new Tab("Output data", outputBox)
   outputTab.setClosable(false)
 
+  // ---- Validations tab ----
+  private val validationsHeaderLabel = new Label("Select a task to see its validations.")
+  validationsHeaderLabel.setStyle("-fx-text-fill: #c5cad8; -fx-padding: 4 8;")
+  validationsHeaderLabel.setWrapText(true)
+  private val validationsContainer = new VBox(10)
+  validationsContainer.setPadding(new Insets(8))
+  validationsContainer.setStyle("-fx-background-color: #2a2c38;")
+  private val validationsScroll = new ScrollPane(validationsContainer)
+  validationsScroll.setFitToWidth(true)
+  validationsScroll.setStyle("-fx-background: #2a2c38; -fx-background-color: #2a2c38;")
+  private val validationsBox = new VBox(validationsHeaderLabel, validationsScroll)
+  VBox.setVgrow(validationsScroll, Priority.ALWAYS)
+  private val validationsTab = new Tab("Validations", validationsBox)
+  validationsTab.setClosable(false)
+
   // ---- Run log tab ----
   private val runLog = new TextArea("(no run yet)")
   runLog.setEditable(false)
@@ -73,11 +93,15 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
   private val runLogTab = new Tab("Run log", runLog)
   runLogTab.setClosable(false)
 
-  getTabs.addAll(outputTab, runLogTab)
+  getTabs.addAll(outputTab, validationsTab, runLogTab)
   setPadding(Insets.EMPTY)
   setStyle("-fx-background-color: #2a2c38;")
 
-  session.addListener(() => refreshRunLog())
+  session.addListener(() => {
+    refreshRunLog()
+    refreshValidationsTab()
+  })
+  refreshValidationsTab()
 
   private val loadToken = new AtomicLong(0L)
   private var currentTaskIndex: Option[Int] = None
@@ -114,6 +138,24 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
         outputTable.getItems.clear()
         outputStatus.setText(noOutputMessage(nameOpt, state.collect { case UiTaskState.Done(r) => r.status }))
     }
+  }
+
+  /** Activate the output tab and load the raw rows of an input view on a
+    * background thread. Inputs don't have run history, so the partition picker
+    * stays hidden.
+    */
+  def loadInputData(inputIndex: Int): Unit = {
+    getSelectionModel.select(outputTab)
+    currentTaskIndex = None
+    populatePicker(Nil, None)
+    val input = session.inputs.lift(inputIndex).getOrElse {
+      outputTable.getColumns.clear()
+      outputTable.getItems.clear()
+      outputStatus.setText("(unknown input)")
+      return
+    }
+    val renderedPath = session.renderedInputPath(inputIndex).getOrElse(input.path)
+    loadInputFromResolver(input, renderedPath)
   }
 
   private def populatePicker(runs: Seq[(Path, RunMarker)], planned: Option[String]): Unit = {
@@ -166,6 +208,33 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
         }
       }
     }, s"transformer-gui-output-loader-$token")
+    worker.setDaemon(true)
+    worker.start()
+  }
+
+  /** Load via [[InputResolver]] so cloud paths, parquet options, and CSV
+    * options all behave the same way they would for a real run.
+    */
+  private def loadInputFromResolver(input: InputFilePath, renderedPath: String): Unit = {
+    val token = loadToken.incrementAndGet()
+    outputStatus.setText("Loading…")
+    outputTable.getColumns.clear()
+    outputTable.getItems.clear()
+    val nameOpt = Some(s"input ${input.viewName}")
+    val worker = new Thread(new Runnable {
+      def run(): Unit = {
+        val outcome =
+          try {
+            val resolved = input.copy(path = renderedPath)
+            LoadOutcome.Success(collectRows(InputResolver.resolve(resolved)))
+          } catch {
+            case NonFatal(e) => LoadOutcome.Failed(Option(e.getMessage).getOrElse(e.toString))
+          }
+        FxHelpers.onFx {
+          if (loadToken.get() == token) applyOutcome(nameOpt, renderedPath, outcome, None)
+        }
+      }
+    }, s"transformer-gui-input-loader-$token")
     worker.setDaemon(true)
     worker.start()
   }
@@ -291,6 +360,135 @@ final class ResultsTabPane(session: JobSession) extends TabPane {
     case bd: java.math.BigDecimal => bd.toPlainString
     case bytes: Array[Byte] => s"<binary ${bytes.length} bytes>"
     case other => String.valueOf(other)
+  }
+
+  // -------------------- validations tab --------------------
+
+  /** Switch to the Validations tab. Used by the right-side details panel's
+    * "Inspect validations" button.
+    */
+  def focusValidations(taskIndex: Int): Unit = {
+    session.select(Some(Selection.Task(taskIndex)))
+    getSelectionModel.select(validationsTab)
+  }
+
+  private def refreshValidationsTab(): Unit = {
+    validationsContainer.getChildren.clear()
+    session.selection match {
+      case Some(Selection.Task(i)) =>
+        val dag = session.dag.getOrElse {
+          validationsHeaderLabel.setText("(no DAG loaded)")
+          return
+        }
+        dag.nodes.lift(i) match {
+          case Some(node) =>
+            val task = node.task
+            validationsHeaderLabel.setText(
+              s"Validations for: ${task.displayName} " +
+                s"(${task.validations.size} declared)"
+            )
+            if (task.validations.isEmpty) {
+              validationsContainer.getChildren.add(emptyHint(
+                "This task has no validations. Add files under " +
+                  "tables/<viewName>/validations/*.sql to define some."
+              ))
+            } else {
+              val state = session.taskStates.lift(i)
+              task.validations.iterator.zipWithIndex.foreach { case (v, vi) =>
+                val rendered = node.renderedValidationSqls.lift(vi).getOrElse("")
+                validationsContainer.getChildren.add(buildValidationCard(v, rendered, state))
+              }
+            }
+          case None =>
+            validationsHeaderLabel.setText("(unknown task)")
+        }
+      case Some(Selection.Input(_)) =>
+        validationsHeaderLabel.setText("Inputs do not have validations. Click a task node to see its validations.")
+      case None =>
+        validationsHeaderLabel.setText("Select a task to see its validations.")
+    }
+  }
+
+  private def emptyHint(text: String): javafx.scene.Node = {
+    val l = new Label(text)
+    l.setStyle("-fx-text-fill: #9ba2b8; -fx-padding: 8; -fx-font-style: italic;")
+    l.setWrapText(true)
+    l
+  }
+
+  private def buildValidationCard(v: Validation, renderedSql: String, state: Option[UiTaskState]): javafx.scene.Node = {
+    val (statusText, statusStyle, failureSample) = validationStatusFor(v, state)
+    // Header: name + status pill + open-in-editor.
+    val nameLabel = new Label(v.name)
+    nameLabel.setStyle("-fx-text-fill: #e8ecf5; -fx-font-weight: bold; -fx-font-size: 13px;")
+    val statusPill = new Label(statusText)
+    statusPill.setStyle(statusStyle)
+    val headerSpacer = new javafx.scene.layout.Region()
+    HBox.setHgrow(headerSpacer, Priority.ALWAYS)
+    val cardHeader = new HBox(8, nameLabel, statusPill, headerSpacer)
+    cardHeader.setAlignment(Pos.CENTER_LEFT)
+
+    // SQL: a small SqlView showing the rendered query.
+    val sqlView = new SqlView(showOpenInEditor = true)
+    sqlView.setSql(renderedSql)
+    sqlView.setSourceFile(v.sqlFile.map(Paths.get(_)))
+    sqlView.setPrefHeight(140)
+
+    val cardChildren = new java.util.ArrayList[javafx.scene.Node]()
+    cardChildren.add(cardHeader)
+    cardChildren.add(sqlView)
+    failureSample.foreach { sample =>
+      val sampleLabel = new Label("Failing rows (first 10):")
+      sampleLabel.setStyle("-fx-text-fill: #f8a3a3; -fx-font-size: 11px; -fx-font-weight: bold;")
+      val sampleArea = new TextArea(sample)
+      sampleArea.setEditable(false)
+      sampleArea.setWrapText(false)
+      sampleArea.setPrefRowCount(math.min(10, math.max(2, sample.count(_ == '\n') + 1)))
+      sampleArea.setFont(Font.font("Monospaced", 11))
+      sampleArea.setStyle("-fx-control-inner-background: #3a2128; -fx-text-fill: #f8a3a3;")
+      cardChildren.add(sampleLabel)
+      cardChildren.add(sampleArea)
+    }
+
+    val card = new VBox(6)
+    card.setPadding(new Insets(10))
+    card.setStyle("-fx-background-color: #34384a; -fx-background-radius: 6;")
+    card.getChildren.addAll(cardChildren)
+    card
+  }
+
+  /** Returns (status label, CSS for the status pill, optional sample CSV of failing rows). */
+  private def validationStatusFor(v: Validation, state: Option[UiTaskState]): (String, String, Option[String]) = {
+    def pill(bg: String, fg: String): String =
+      s"-fx-background-color: $bg; -fx-text-fill: $fg; -fx-padding: 2 10; " +
+        "-fx-background-radius: 10; -fx-font-size: 11px; -fx-font-weight: bold;"
+    val pass    = pill("#1f5b30", "#ffffff")
+    val fail    = pill("#5a2828", "#ffffff")
+    val neutral = pill("#3a3f55", "#d7dcec")
+    val running = pill("#2b4f7a", "#ffffff")
+    state match {
+      case Some(UiTaskState.Done(result)) =>
+        result.status match {
+          case TaskStatus.Succeeded =>
+            ("PASSED", pass, None)
+          case TaskStatus.ValidationFailed(fs) =>
+            fs.find(_.validationName == v.name) match {
+              case Some(f) =>
+                val plural = if (f.rowCount == 1) "" else "s"
+                (s"FAILED • ${f.rowCount} row$plural", fail, Some(f.sampleRowsCsv))
+              case None =>
+                ("PASSED", pass, None)
+            }
+          case TaskStatus.Failed(_) =>
+            ("NOT RUN (task failed)", neutral, None)
+          case TaskStatus.Skipped(_) =>
+            ("NOT RUN (task skipped)", neutral, None)
+          case TaskStatus.Pending =>
+            ("PENDING", neutral, None)
+        }
+      case Some(UiTaskState.Running) => ("RUNNING", running, None)
+      case Some(UiTaskState.Pending) | None => ("PENDING", neutral, None)
+    }
   }
 
   private def refreshRunLog(): Unit = {

@@ -194,4 +194,138 @@ class SqlEngineTest {
     assertEquals(0L, rows.head("c"))
     assertNull(rows.head("s"))
   }
+
+  // ---------------------------------------------------------------------------
+  // Window functions
+  // ---------------------------------------------------------------------------
+
+  @Test def rowNumberPartitionedAndOrdered(): Unit = {
+    val p = tmpCsv("a.csv", "cat,score\nA,10\nA,30\nA,20\nB,50\nB,40\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT cat, score, ROW_NUMBER() OVER (PARTITION BY cat ORDER BY score DESC) AS rn FROM t",
+      cat)
+    assertEquals(Vector("cat", "score", "rn"), q.schema.fieldNames)
+    val rows = collectAllRows(q).sortBy(r => (r("cat").toString, -r("score").asInstanceOf[Int]))
+    assertEquals(Seq(1L, 2L, 3L, 1L, 2L), rows.map(_("rn")))
+    assertEquals(Seq("A", "A", "A", "B", "B"), rows.map(_("cat")))
+    assertEquals(Seq(30, 20, 10, 50, 40), rows.map(_("score")))
+  }
+
+  @Test def rankWithTies(): Unit = {
+    val p = tmpCsv("a.csv", "score\n100\n90\n90\n80\n70\n70\n70\n60\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT score, RANK() OVER (ORDER BY score DESC) AS r, DENSE_RANK() OVER (ORDER BY score DESC) AS dr FROM t",
+      cat)
+    val rows = collectAllRows(q).sortBy(r => (-r("score").asInstanceOf[Int], r("r").asInstanceOf[Long]))
+    assertEquals(Seq(1L, 2L, 2L, 4L, 5L, 5L, 5L, 8L), rows.map(_("r")))
+    assertEquals(Seq(1L, 2L, 2L, 3L, 4L, 4L, 4L, 5L), rows.map(_("dr")))
+  }
+
+  @Test def lagAndLeadWithDefault(): Unit = {
+    val p = tmpCsv("a.csv", "id,val\n1,10\n2,20\n3,30\n4,40\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT id, val, " +
+        "LAG(val) OVER (ORDER BY id) AS prev, " +
+        "LEAD(val) OVER (ORDER BY id) AS nxt, " +
+        "LAG(val, 2, -1) OVER (ORDER BY id) AS prev2 " +
+        "FROM t",
+      cat)
+    val rows = collectAllRows(q).sortBy(_("id").asInstanceOf[Int])
+    assertEquals(Seq(null, 10, 20, 30), rows.map(_("prev")))
+    assertEquals(Seq(20, 30, 40, null), rows.map(_("nxt")))
+    assertEquals(Seq(-1, -1, 10, 20), rows.map(_("prev2")))
+  }
+
+  @Test def runningSumWithOrderBy(): Unit = {
+    val p = tmpCsv("a.csv", "id,score\n1,10\n2,20\n3,30\n4,40\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT id, SUM(score) OVER (ORDER BY id) AS running FROM t",
+      cat)
+    val rows = collectAllRows(q).sortBy(_("id").asInstanceOf[Int])
+    assertEquals(Seq(10L, 30L, 60L, 100L), rows.map(_("running")))
+  }
+
+  @Test def aggregateOverEntirePartition(): Unit = {
+    val p = tmpCsv("a.csv", "cat,score\nA,10\nA,20\nA,30\nB,100\nB,200\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT cat, score, " +
+        "SUM(score) OVER (PARTITION BY cat) AS s, " +
+        "AVG(score) OVER (PARTITION BY cat) AS a, " +
+        "COUNT(*) OVER (PARTITION BY cat) AS c " +
+        "FROM t",
+      cat)
+    val rows = collectAllRows(q).sortBy(r => (r("cat").toString, r("score").asInstanceOf[Int]))
+    assertEquals(Seq(60L, 60L, 60L, 300L, 300L), rows.map(_("s")))
+    assertEquals(Seq(20.0, 20.0, 20.0, 150.0, 150.0), rows.map(_("a").asInstanceOf[Double]))
+    assertEquals(Seq(3L, 3L, 3L, 2L, 2L), rows.map(_("c")))
+  }
+
+  @Test def windowWithoutPartitionByCoversWholeInput(): Unit = {
+    val p = tmpCsv("a.csv", "x\n1\n2\n3\n4\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT x, SUM(x) OVER () AS total FROM t", cat)
+    val rows = collectAllRows(q)
+    assertEquals(4, rows.size)
+    rows.foreach(r => assertEquals(10L, r("total")))
+  }
+
+  @Test def rowsBetweenSlidingFrame(): Unit = {
+    val p = tmpCsv("a.csv", "id,val\n1,1\n2,2\n3,3\n4,4\n5,5\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT id, SUM(val) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS s FROM t",
+      cat)
+    val rows = collectAllRows(q).sortBy(_("id").asInstanceOf[Int])
+    // Frame: [-1, +1] inclusive. Row 1: 1+2=3. Row 2: 1+2+3=6. Row 3: 2+3+4=9. Row 4: 3+4+5=12. Row 5: 4+5=9.
+    assertEquals(Seq(3L, 6L, 9L, 12L, 9L), rows.map(_("s")))
+  }
+
+  @Test def orderByReferencesWindowExpression(): Unit = {
+    val p = tmpCsv("a.csv", "name,score\nalice,90\nbob,70\ncarol,80\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT name FROM t ORDER BY ROW_NUMBER() OVER (ORDER BY score DESC)",
+      cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq("alice", "carol", "bob"), rows.map(_("name")))
+  }
+
+  @Test def windowFunctionInExpression(): Unit = {
+    val p = tmpCsv("a.csv", "id,val\n1,10\n2,20\n3,30\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT id, val - LAG(val) OVER (ORDER BY id) AS delta FROM t",
+      cat)
+    val rows = collectAllRows(q).sortBy(_("id").asInstanceOf[Int])
+    assertEquals(Seq(null, 10, 10), rows.map(_("delta")))
+  }
+
+  @Test def windowFunctionAfterGroupBy(): Unit = {
+    val p = tmpCsv("a.csv", "cat,score\nA,1\nA,2\nB,3\nB,4\nB,5\nC,1\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT cat, COUNT(*) AS n, RANK() OVER (ORDER BY COUNT(*) DESC) AS r FROM t GROUP BY cat",
+      cat)
+    val rows = collectAllRows(q).sortBy(_("r").asInstanceOf[Long])
+    // B has 3 (rank 1), A has 2 (rank 2), C has 1 (rank 3).
+    assertEquals(Seq("B", "A", "C"), rows.map(_("cat")))
+    assertEquals(Seq(3L, 2L, 1L), rows.map(_("n")))
+    assertEquals(Seq(1L, 2L, 3L), rows.map(_("r")))
+  }
+
+  @Test def windowFunctionInNonWindowPositionThrows(): Unit = {
+    val p = tmpCsv("a.csv", "x\n1\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val ex = try {
+      SqlEngine.execute("SELECT x FROM t WHERE ROW_NUMBER() OVER (ORDER BY x) = 1", cat)
+      null
+    } catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage.toLowerCase.contains("window function"))
+  }
 }

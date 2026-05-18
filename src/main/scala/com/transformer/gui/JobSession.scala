@@ -1,6 +1,6 @@
 package com.transformer.gui
 
-import com.transformer.job.{DataJob, DirectoryJobLoader, JobResult, RunMarker, TaskDag, TaskResult, TaskStatus}
+import com.transformer.job.{DataJob, DirectoryJobLoader, InputFilePath, JobResult, RunMarker, TaskDag, TaskResult, TaskStatus}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
 import java.nio.file.{Path, Paths}
@@ -28,6 +28,15 @@ object RunState {
   final case class LoadFailed(error: String) extends RunState
 }
 
+/** What's currently selected in the DAG canvas. */
+sealed trait Selection
+object Selection {
+  /** A SQLTask node (index into [[TaskDag.nodes]]). */
+  final case class Task(index: Int) extends Selection
+  /** An input view node (index into [[JobSession.inputs]]). */
+  final case class Input(index: Int) extends Selection
+}
+
 /** Mutable, FX-thread-affinity session state shared by every panel.
   *
   * The session does NOT own threads or fire callbacks from background work — callers
@@ -43,10 +52,12 @@ final class JobSession {
   private var _outputDir: Option[String] = None // user override; falls back to <jobDir>/output
   private var _dataJob: Option[DataJob] = None
   private var _dag: Option[TaskDag] = None
+  private var _inputs: Vector[InputFilePath] = Vector.empty
+  private var _renderedInputPaths: Vector[String] = Vector.empty
   private var _layout: Option[DagLayout] = None
   private var _taskStates: Vector[UiTaskState] = Vector.empty
   private var _runState: RunState = RunState.Idle
-  private var _selectedTaskIndex: Option[Int] = None
+  private var _selection: Option[Selection] = None
   // Per-task resolved output paths captured from JobResult so we can re-read after run.
   private var _outputPaths: Vector[Option[String]] = Vector.empty
   // Per-task RunMarkers loaded from disk on job-dir open. Populates UI state with
@@ -79,10 +90,17 @@ final class JobSession {
   def outputDirOverride: Option[String] = _outputDir
   def dataJob: Option[DataJob] = _dataJob
   def dag: Option[TaskDag] = _dag
+  def inputs: Vector[InputFilePath] = _inputs
+  /** The on-disk path each input resolves to with template variables substituted. */
+  def renderedInputPath(inputIndex: Int): Option[String] = _renderedInputPaths.lift(inputIndex)
   def layout: Option[DagLayout] = _layout
   def taskStates: Vector[UiTaskState] = _taskStates
   def runState: RunState = _runState
-  def selectedTaskIndex: Option[Int] = _selectedTaskIndex
+  def selection: Option[Selection] = _selection
+  /** Convenience: returns the selected task's index if a task is selected, else None. */
+  def selectedTaskIndex: Option[Int] = _selection.collect { case Selection.Task(i) => i }
+  /** Convenience: returns the selected input's index if an input is selected, else None. */
+  def selectedInputIndex: Option[Int] = _selection.collect { case Selection.Input(i) => i }
   def outputPathFor(taskIndex: Int): Option[String] = _outputPaths.lift(taskIndex).flatten
 
   /** Cached `_SUCCESS` marker for this task, if any was discovered when the job
@@ -144,7 +162,7 @@ final class JobSession {
   def openJobDir(dir: Path): Unit = {
     _jobDir = Some(dir)
     // Reset any previous selection — the new job's indices won't match.
-    _selectedTaskIndex = None
+    _selection = None
     reloadJob()
   }
 
@@ -157,10 +175,13 @@ final class JobSession {
       case None =>
         _dataJob = None
         _dag = None
+        _inputs = Vector.empty
+        _renderedInputPaths = Vector.empty
         _layout = None
         _taskStates = Vector.empty
         _outputPaths = Vector.empty
         _markers = Vector.empty
+        _historicalRuns = Vector.empty
         _runState = RunState.Idle
       case Some(dir) =>
         try {
@@ -172,7 +193,13 @@ final class JobSession {
           val dag = job.buildDag()
           _dataJob = Some(job)
           _dag = Some(dag)
-          _layout = Some(DagLayout.compute(dag))
+          _inputs = job.inputs.toVector
+          val tv = TemporalVariables(_executionTime)
+          _renderedInputPaths = _inputs.map { in =>
+            try TemplateRenderer.render(in.path, tv)
+            catch { case NonFatal(_) => in.path }
+          }
+          _layout = Some(DagLayout.compute(dag, _inputs))
           _taskStates = Vector.fill(dag.nodes.size)(UiTaskState.Pending)
           _outputPaths = Vector.fill(dag.nodes.size)(None)
           _markers = Vector.fill(dag.nodes.size)(None)
@@ -182,10 +209,13 @@ final class JobSession {
           case NonFatal(e) =>
             _dataJob = None
             _dag = None
+            _inputs = Vector.empty
+            _renderedInputPaths = Vector.empty
             _layout = None
             _taskStates = Vector.empty
             _outputPaths = Vector.empty
             _markers = Vector.empty
+            _historicalRuns = Vector.empty
             _runState = RunState.LoadFailed(Option(e.getMessage).getOrElse(e.toString))
         }
     }
@@ -278,12 +308,19 @@ final class JobSession {
     notifyListeners()
   }
 
-  def select(taskIndex: Option[Int]): Unit = {
-    if (_selectedTaskIndex != taskIndex) {
-      _selectedTaskIndex = taskIndex
+  /** Set or clear the current selection. The DAG canvas calls this with either a
+    * [[Selection.Task]] or a [[Selection.Input]] when the user clicks a node, or
+    * `None` when they click empty space.
+    */
+  def select(sel: Option[Selection]): Unit = {
+    if (_selection != sel) {
+      _selection = sel
       notifyListeners()
     }
   }
+
+  /** Shortcut used by callers (tests, helpers) that only care about task selection. */
+  def selectTask(taskIndex: Option[Int]): Unit = select(taskIndex.map(Selection.Task(_)))
 
   /** True iff a Run is currently in flight. */
   def isRunning: Boolean = _runState == RunState.Running

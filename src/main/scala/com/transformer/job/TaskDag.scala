@@ -15,6 +15,11 @@ import scala.jdk.CollectionConverters._
   * validation SQLs). References to Phase 1 input views are NOT deps — those are
   * pre-loaded into the catalog before any task runs.
   *
+  * `inputDeps` is the set of lowercased *input* viewNames the task reads from (main
+  * SQL + any validation SQL). Surfaced so UIs can draw input → task edges without
+  * re-parsing the SQL themselves; the runner ignores it because inputs are already
+  * materialized in the catalog before tasks run.
+  *
   * Public so external surfaces (e.g. the GUI module) can render the DAG without
   * having to re-implement the analyzer.
   */
@@ -23,7 +28,8 @@ final case class TaskDagNode(
     task: SQLTask,
     renderedMainSql: String,
     renderedValidationSqls: Seq[String],
-    deps: Set[Int]
+    deps: Set[Int],
+    inputDeps: Set[String] = Set.empty
 )
 
 /** A fully-validated DAG of [[SQLTask]]s ready to be executed by the scheduler.
@@ -135,6 +141,10 @@ object TaskDag {
       val refs = mainRefs(i) ++ validationRefs(i)
       refs.iterator.flatMap(viewNameToTaskIdx.get).filter(_ != i).toSet
     }
+    val inputDeps: IndexedSeq[Set[String]] = tasks.indices.map { i =>
+      val refs = mainRefs(i) ++ validationRefs(i)
+      refs.iterator.filter(inputViewNames.contains).toSet
+    }
 
     val inDeg = Array.tabulate(tasks.size)(i => deps(i).size)
     val dependentsAdj: IndexedSeq[mutable.Set[Int]] =
@@ -166,7 +176,8 @@ object TaskDag {
         task = tasks(i),
         renderedMainSql = renderedMains(i),
         renderedValidationSqls = renderedValidations(i),
-        deps = deps(i)
+        deps = deps(i),
+        inputDeps = inputDeps(i)
       )
     }.toVector
 

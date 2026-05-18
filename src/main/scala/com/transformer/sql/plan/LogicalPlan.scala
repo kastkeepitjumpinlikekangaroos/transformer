@@ -75,3 +75,13 @@ final case class LogicalUnion(left: LogicalPlan, right: LogicalPlan, all: Boolea
   def outputSchema: Schema = left.outputSchema
   def children: Seq[LogicalPlan] = Seq(left, right)
 }
+
+/** Window-function projection: appends one output column per [[WindowDef]]
+  * to the child's schema. Output indices for child columns are preserved.
+  */
+final case class LogicalWindow(child: LogicalPlan, windows: Seq[WindowDef]) extends LogicalPlan {
+  def outputSchema: Schema = Schema(
+    child.outputSchema.fields ++ windows.map(w => Field(w.outputName, w.fn.resultType))
+  )
+  def children: Seq[LogicalPlan] = Seq(child)
+}

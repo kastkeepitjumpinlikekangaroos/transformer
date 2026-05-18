@@ -36,7 +36,9 @@ object SqlHighlighter {
     "null", "like", "between", "exists", "case", "when", "then", "else",
     "end", "if", "true", "false", "union", "all", "intersect", "except",
     "asc", "desc", "with", "over", "partition", "window", "any", "some",
-    "cast", "into", "values", "default"
+    "cast", "into", "values", "default",
+    "rows", "range", "preceding", "following", "unbounded", "current", "row",
+    "nulls", "first", "last"
   )
 
   private val Functions: Set[String] = Set(
@@ -45,7 +47,8 @@ object SqlHighlighter {
     "substring", "concat", "coalesce", "nullif",
     "abs", "round", "floor", "ceil", "ceiling",
     "mod", "pow", "power",
-    "current_date", "current_timestamp"
+    "current_date", "current_timestamp",
+    "row_number", "rank", "dense_rank", "lag", "lead"
   )
 
   def tokenize(sql: String): Vector[Token] = {

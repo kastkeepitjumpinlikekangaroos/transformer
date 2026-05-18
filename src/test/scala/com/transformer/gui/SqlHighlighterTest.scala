@@ -149,6 +149,21 @@ class SqlHighlighterTest {
     assertEquals("WHERE x = 1", lines(3).map(_.text).mkString)
   }
 
+  @Test def windowFunctionKeywords(): Unit = {
+    val sql = "SELECT RANK() OVER (PARTITION BY cat ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+    val toks = SqlHighlighter.tokenize(sql).filterNot(_.kind == Kind.Whitespace)
+    val funcs = toks.filter(_.kind == Kind.Function).map(_.text.toUpperCase).toSet
+    val keywords = toks.filter(_.kind == Kind.Keyword).map(_.text.toUpperCase).toSet
+    assertTrue("RANK should be a function", funcs.contains("RANK"))
+    assertTrue("OVER", keywords.contains("OVER"))
+    assertTrue("PARTITION", keywords.contains("PARTITION"))
+    assertTrue("ROWS", keywords.contains("ROWS"))
+    assertTrue("UNBOUNDED", keywords.contains("UNBOUNDED"))
+    assertTrue("PRECEDING", keywords.contains("PRECEDING"))
+    assertTrue("CURRENT", keywords.contains("CURRENT"))
+    assertTrue("ROW", keywords.contains("ROW"))
+  }
+
   @Test def splitIntoLinesHandlesBlockCommentSpanningLines(): Unit = {
     val sql = "SELECT /* hi\nthere */ 1"
     val lines = SqlHighlighter.splitIntoLines(SqlHighlighter.tokenize(sql))

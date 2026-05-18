@@ -29,6 +29,8 @@ object PhysicalPlanner {
       val right = plan(r)
       val (leftKeys, rightKeys, extra) = splitEqualityKeys(cond, l.outputSchema.length, r.outputSchema.length)
       HashJoinExec(left, right, leftKeys, rightKeys, extra, kind)
+    case LogicalWindow(child, windows) =>
+      WindowExec(plan(child), windows)
   }
 
   /** Split an AND-chain of conjuncts into (leftKey, rightKey) equality pairs and a

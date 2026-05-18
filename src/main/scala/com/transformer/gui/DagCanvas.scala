@@ -1,15 +1,15 @@
 package com.transformer.gui
 
-import com.transformer.job.{TaskDag, TaskStatus}
+import com.transformer.job.{InputFilePath, TaskDag, TaskStatus}
 
 import javafx.scene.canvas.{Canvas, GraphicsContext}
 import javafx.scene.input.{MouseButton, MouseEvent, ScrollEvent}
 import javafx.scene.paint.Color
 import javafx.scene.text.{Font, FontWeight, TextAlignment}
 
-/** JavaFX Canvas that draws the loaded [[com.transformer.job.TaskDag]] and lets
-  * the user pan, zoom, single-click to select, and double-click to inspect a
-  * task's output.
+/** JavaFX Canvas that draws the loaded [[com.transformer.job.TaskDag]] (plus its
+  * input views) and lets the user pan, zoom, single-click to select, and
+  * double-click to inspect a task's output or an input's contents.
   *
   * Coordinates: the layout assigns world-space positions to every node. The
   * canvas keeps a pan offset `(panX, panY)` and a `zoom` factor, and converts
@@ -32,9 +32,11 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
   private var lastDragX: Double = 0.0
   private var lastDragY: Double = 0.0
 
-  // External callbacks.
-  private var onActivated: Int => Unit = _ => ()
-  def setOnActivated(handler: Int => Unit): Unit = { onActivated = handler }
+  // External callbacks fired on double-click.
+  private var onTaskActivated: Int => Unit = _ => ()
+  private var onInputActivated: Int => Unit = _ => ()
+  def setOnTaskActivated(handler: Int => Unit): Unit = { onTaskActivated = handler }
+  def setOnInputActivated(handler: Int => Unit): Unit = { onInputActivated = handler }
 
   // Always redraw when the session changes.
   session.addListener(() => { autoFitIfNewDag(); render() })
@@ -72,7 +74,8 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
         gc.translate(panX, panY)
         gc.scale(zoom, zoom)
         drawEdges(gc, layout)
-        drawNodes(gc, layout)
+        drawInputNodes(gc, layout)
+        drawTaskNodes(gc, layout)
         gc.restore()
         drawHud(gc, w, h)
     }
@@ -98,19 +101,29 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
   private def drawEdges(gc: GraphicsContext, layout: DagLayout): Unit = {
     val dag = session.dag.get
     gc.setLineWidth(1.5)
-    gc.setStroke(Color.web("#5b6175"))
     var i = 0
     while (i < dag.nodes.size) {
-      val toBox = layout.nodes(i)
+      val toBox = layout.taskBoxes(i)
+      // Task → Task edges (existing).
+      gc.setStroke(Color.web("#5b6175"))
       dag.nodes(i).deps.foreach { d =>
-        val fromBox = layout.nodes(d)
-        drawEdge(gc, fromBox, toBox)
+        val fromBox = layout.taskBoxes(d)
+        drawEdge(gc, fromBox, toBox, Color.web("#5b6175"))
+      }
+      // Input → Task edges (new). Subtler colour so the eye can distinguish
+      // "data lineage" from "task ordering".
+      val inputEdgeColor = Color.web("#3f6f5c")
+      gc.setStroke(inputEdgeColor)
+      dag.nodes(i).inputDeps.foreach { name =>
+        layout.boxForInputName(name).foreach { fromBox =>
+          drawEdge(gc, fromBox, toBox, inputEdgeColor)
+        }
       }
       i += 1
     }
   }
 
-  private def drawEdge(gc: GraphicsContext, from: NodeBox, to: NodeBox): Unit = {
+  private def drawEdge(gc: GraphicsContext, from: NodeBox, to: NodeBox, color: Color): Unit = {
     val x1 = from.right
     val y1 = from.centerY
     val x2 = to.x
@@ -129,25 +142,66 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
     gc.lineTo(x2 - ah, y2 - ah / 2.0)
     gc.lineTo(x2 - ah, y2 + ah / 2.0)
     gc.closePath()
-    gc.setFill(Color.web("#5b6175"))
+    gc.setFill(color)
     gc.fill()
   }
 
-  private def drawNodes(gc: GraphicsContext, layout: DagLayout): Unit = {
-    val dag = session.dag.get
-    val states = session.taskStates
-    val selected = session.selectedTaskIndex
+  private def drawInputNodes(gc: GraphicsContext, layout: DagLayout): Unit = {
+    val inputs = session.inputs
+    val selected = session.selectedInputIndex
     var i = 0
-    while (i < layout.nodes.size) {
-      val box = layout.nodes(i)
-      val task = dag.nodes(i).task
-      val state = if (i < states.size) states(i) else UiTaskState.Pending
-      drawNode(gc, box, task.displayName, state, selected.contains(i))
+    while (i < layout.inputBoxes.size && i < inputs.size) {
+      drawInputNode(gc, layout.inputBoxes(i), inputs(i), selected.contains(i))
       i += 1
     }
   }
 
-  private def drawNode(
+  private def drawInputNode(gc: GraphicsContext, box: NodeBox, in: InputFilePath, isSelected: Boolean): Unit = {
+    val fill = Color.web("#2b4a3a")
+    val stroke = Color.web("#5fa17a")
+    gc.setFill(fill)
+    gc.fillRoundRect(box.x, box.y, box.width, box.height, 12, 12)
+    gc.setStroke(if (isSelected) Color.web("#ffd166") else stroke)
+    gc.setLineWidth(if (isSelected) 3.0 else 1.5)
+    gc.strokeRoundRect(box.x, box.y, box.width, box.height, 12, 12)
+    // Small "INPUT" tag on the top-left corner so inputs are unmistakable.
+    gc.setFill(Color.web("#9bd1ad"))
+    gc.setFont(Font.font("Sans", FontWeight.BOLD, 9))
+    gc.setTextAlign(TextAlignment.LEFT)
+    gc.fillText(s"INPUT • ${in.detectedFormat.toUpperCase}", box.x + 12, box.y + 14)
+    // View name (the headline).
+    gc.setFill(Color.web("#f7f7fb"))
+    gc.setFont(Font.font("Sans", FontWeight.BOLD, 13))
+    gc.setTextAlign(TextAlignment.CENTER)
+    gc.fillText(truncate(in.viewName, 26), box.centerX, box.y + 32, box.width - 16)
+    // File name footer (basename of the resolved path).
+    gc.setFill(Color.web("#c5cad8"))
+    gc.setFont(Font.font("Sans", FontWeight.NORMAL, 11))
+    gc.fillText(truncate(basename(in.path), 30), box.centerX, box.y + 50, box.width - 16)
+    gc.setTextAlign(TextAlignment.LEFT)
+  }
+
+  private def basename(path: String): String = {
+    val cleaned = path.replace('\\', '/')
+    val slash = cleaned.lastIndexOf('/')
+    if (slash < 0) cleaned else cleaned.substring(slash + 1)
+  }
+
+  private def drawTaskNodes(gc: GraphicsContext, layout: DagLayout): Unit = {
+    val dag = session.dag.get
+    val states = session.taskStates
+    val selected = session.selectedTaskIndex
+    var i = 0
+    while (i < layout.taskBoxes.size) {
+      val box = layout.taskBoxes(i)
+      val task = dag.nodes(i).task
+      val state = if (i < states.size) states(i) else UiTaskState.Pending
+      drawTaskNode(gc, box, task.displayName, state, selected.contains(i))
+      i += 1
+    }
+  }
+
+  private def drawTaskNode(
       gc: GraphicsContext,
       box: NodeBox,
       label: String,
@@ -238,11 +292,16 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
     val (wx, wy) = screenToWorld(e.getX, e.getY)
     session.layout.flatMap(_.hitTest(wx, wy)) match {
       case Some(box) =>
+        val sel = box.kind match {
+          case NodeKind.Task => Selection.Task(box.index)
+          case NodeKind.Input => Selection.Input(box.index)
+        }
+        session.select(Some(sel))
         if (e.getClickCount >= 2) {
-          session.select(Some(box.index))
-          onActivated(box.index)
-        } else {
-          session.select(Some(box.index))
+          box.kind match {
+            case NodeKind.Task => onTaskActivated(box.index)
+            case NodeKind.Input => onInputActivated(box.index)
+          }
         }
       case None =>
         // Clicked empty space — only clear selection on a single click; a stray
