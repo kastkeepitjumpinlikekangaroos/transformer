@@ -26,49 +26,11 @@ import java.util.concurrent.{Callable, Executors, TimeUnit}
 final class ParquetReader private (
     files: IndexedSeq[Path],
     batchSize: Int,
-    projectedNames: Option[Set[String]]
+    projectedNames: Option[Set[String]],
+    parquetSchema_ : Schema,
+    partitions: IndexedSeq[ParquetReader.PartitionMeta]
 ) extends CatalogView {
   require(files.nonEmpty, "ParquetReader requires at least one file")
-
-  private val hadoopConf: Configuration = ParquetReader.defaultConf
-
-  /** Per-file descriptor: total row count from the footer's row-group sum, and
-    * the open-input-file handle so we don't re-resolve on partition reads.
-    */
-  private[parquet] case class PartitionMeta(hif: HadoopInputFile, rowCount: Long)
-
-  /** Materialize the partition layout + schema in one pass. Footer reads across
-    * files run on a shared short-lived pool so a many-file glob doesn't pay the
-    * per-file open cost serially.
-    */
-  private val (parquetSchema_, partitions): (Schema, IndexedSeq[PartitionMeta]) = {
-    val nThreads = math.max(1, math.min(files.length, Runtime.getRuntime.availableProcessors))
-    val pool = Executors.newFixedThreadPool(nThreads)
-    try {
-      val futures = files.map { f =>
-        pool.submit(new Callable[(Schema, PartitionMeta)] {
-          def call(): (Schema, PartitionMeta) = {
-            val hif = HadoopInputFile.fromPath(new HPath(f.toUri), hadoopConf)
-            val reader = ParquetFileReader.open(hif)
-            try {
-              val schema = ParquetSchema.toSchema(reader.getFooter.getFileMetaData.getSchema)
-              val blocks = reader.getRowGroups
-              var rc = 0L
-              var i = 0
-              while (i < blocks.size) { rc += blocks.get(i).getRowCount; i += 1 }
-              (schema, PartitionMeta(hif, rc))
-            } finally reader.close()
-          }
-        })
-      }
-      val results = futures.map(_.get())
-      val schema = results.head._1
-      (schema, results.map(_._2).toIndexedSeq)
-    } finally {
-      pool.shutdown()
-      pool.awaitTermination(1, TimeUnit.MINUTES)
-    }
-  }
 
   /** Effective output schema. With projection, only the kept fields, in the
     * order they appear in the underlying file's schema (we never reorder —
@@ -101,12 +63,16 @@ final class ParquetReader private (
     * the underlying schema are silently dropped (matches `MessageType.intersection`
     * semantics on the parquet side). Returns None only if no requested name
     * matches anything — in that case the caller stays on the full scan.
+    *
+    * Schema + per-file footer counts already live in this reader; the projected
+    * variant reuses them so the planner can ask for narrow projections under
+    * the metadata fast path without paying the open-every-file cost again.
     */
   override def withProjectedColumns(names: Seq[String]): Option[CatalogView] = {
     val available = parquetSchema_.fieldNames.toSet
     val keep = names.iterator.filter(available.contains).toSet
     if (keep.isEmpty || keep.size == parquetSchema_.length) None
-    else Some(new ParquetReader(files, batchSize, Some(keep)))
+    else Some(new ParquetReader(files, batchSize, Some(keep), parquetSchema_, partitions))
   }
 }
 
@@ -118,11 +84,50 @@ object ParquetReader {
     c
   }
 
+  /** Per-file descriptor: total row count from the footer's row-group sum, and
+    * the open-input-file handle so we don't re-resolve on partition reads.
+    */
+  private[parquet] final case class PartitionMeta(hif: HadoopInputFile, rowCount: Long)
+
   def fromPath(pathOrGlob: String, batchSize: Int = ColumnarBatch.DefaultCapacity): ParquetReader = {
-    val files = PathGlob.expand(pathOrGlob)
+    val files = PathGlob.expand(pathOrGlob).toIndexedSeq
     if (files.isEmpty)
       throw new IllegalArgumentException(s"No Parquet files matched '$pathOrGlob'")
-    new ParquetReader(files.toIndexedSeq, batchSize, projectedNames = None)
+    val (schema, parts) = readFooters(files)
+    new ParquetReader(files, batchSize, projectedNames = None, schema, parts)
+  }
+
+  /** Open every file in parallel, decode the footer once, and return the shared
+    * schema + per-file row-group counts. Reused by `withProjectedColumns` so a
+    * pruned variant doesn't re-open the world.
+    */
+  private def readFooters(files: IndexedSeq[Path]): (Schema, IndexedSeq[PartitionMeta]) = {
+    val conf = defaultConf
+    val nThreads = math.max(1, math.min(files.length, Runtime.getRuntime.availableProcessors))
+    val pool = Executors.newFixedThreadPool(nThreads)
+    try {
+      val futures = files.map { f =>
+        pool.submit(new Callable[(Schema, PartitionMeta)] {
+          def call(): (Schema, PartitionMeta) = {
+            val hif = HadoopInputFile.fromPath(new HPath(f.toUri), conf)
+            val reader = ParquetFileReader.open(hif)
+            try {
+              val schema = ParquetSchema.toSchema(reader.getFooter.getFileMetaData.getSchema)
+              val blocks = reader.getRowGroups
+              var rc = 0L
+              var i = 0
+              while (i < blocks.size) { rc += blocks.get(i).getRowCount; i += 1 }
+              (schema, PartitionMeta(hif, rc))
+            } finally reader.close()
+          }
+        })
+      }
+      val results = futures.map(_.get())
+      (results.head._1, results.map(_._2).toIndexedSeq)
+    } finally {
+      pool.shutdown()
+      pool.awaitTermination(1, TimeUnit.MINUTES)
+    }
   }
 }
 

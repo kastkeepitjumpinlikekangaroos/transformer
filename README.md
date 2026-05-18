@@ -34,6 +34,27 @@ single-node parallelism, not distributed execution.
 `OutputFilePath` API already accepts them; today they raise a clear
 `UnsupportedOperationException` with the cache directory already wired up.
 
+## Documentation
+
+This README is the user-facing intro. For deeper material — architecture,
+extension recipes, conventions, gotchas — see the [docs/](docs/) directory:
+
+- [docs/architecture.md](docs/architecture.md) — mental model, module map,
+  cross-cutting patterns.
+- [docs/conventions.md](docs/conventions.md) — Scala / Bazel / docs
+  conventions.
+- [docs/extending.md](docs/extending.md) — how to add SQL functions, file
+  formats, GUI panels, etc.
+- [docs/gotchas.md](docs/gotchas.md) — known pitfalls and what's intentionally
+  not done.
+- [docs/testing.md](docs/testing.md) — build/test commands and the test
+  inventory.
+- [docs/code-map.md](docs/code-map.md) — file-size hot spots and external
+  reference material.
+
+Future Claude sessions should also read [CLAUDE.md](CLAUDE.md), which links
+back here and into `docs/`.
+
 ## Quick start
 
 ```bash
@@ -455,43 +476,29 @@ Unknown variables raise `IllegalArgumentException` listing all known names.
 │                              jsqlparser 5.0, parquet-hadoop 1.14.3 (+ minimal
 │                              hadoop), openjfx 21.0.1 (gui only), junit
 ├── .bazelrc                   JDK 21 toolchain
-├── examples/scala_app/        Bazel-deployable example app (programmatic)
-├── examples/directory_app/    Bazel-deployable example app (directory-driven)
-├── examples/gui_app/          Bazel-deployable example app (JavaFX GUI launcher)
+├── docs/                      Contributor documentation (architecture,
+│                              conventions, extending, gotchas, testing).
+├── examples/                  Bazel-deployable example apps (programmatic,
+│                              directory-driven, jaffle-shop, GUI launcher).
+├── tools/                     Stand-alone CLIs (e.g. `parquet_peek`).
 ├── src/main/scala/com/transformer/
-│   ├── core/                  DataType, Schema, ColumnarBatch, Catalog,
-│   │                          SqlExecutor boundary + registry
-│   ├── temporal/              TemporalVariables, TemplateRenderer
-│   ├── read/
-│   │   ├── csv/               CsvOptions, CsvRowParser, CsvSchemaInferer,
-│   │   │                      PathGlob, CsvReader
-│   │   └── parquet/           ParquetReader, ParquetSupport (hook installer)
-│   ├── sql/
-│   │   ├── parse/             JSqlParser façade
-│   │   ├── plan/              Expr ADT, Ops/Funcs/Casts, LogicalPlan,
-│   │   │                      LogicalBuilder (JSqlParser → bound LogicalPlan),
-│   │   │                      Analyzer (name resolution + implicit casts)
-│   │   └── exec/              PhysicalPlan (Scan/Filter/Project/Limit),
-│   │                          HashAggregateExec, HashJoinExec, SortExec,
-│   │                          DistinctExec, UnionExec, PhysicalPlanner,
-│   │                          SqlEngine (registry self-install)
-│   ├── write/
-│   │   ├── csv/               CsvWriter
-│   │   └── parquet/           ParquetSchema, ParquetWriter
-│   ├── job/                   InputFilePath, OutputFilePath, SQLTask,
-│   │                          Validation, JobResult, InputResolver, DataJob,
-│   │                          TaskDag (+ public node types for the GUI),
-│   │                          TaskProgressListener (per-task callbacks),
-│   │                          RunMarker (`_SUCCESS` write/read/discover),
-│   │                          ParquetReaderHook, ParquetWriterHook,
-│   │                          ParquetResolverHook, DirectoryJobLoader (+ per-
-│   │                          table `output.json` `partitionBy`), Json
-│   │                          (stdlib JSON parser)
-│   └── gui/                   GuiApp, JobSession, DagLayout, DagCanvas,
-│                              ControlsPanel, TaskDetailsPanel,
-│                              ResultsTabPane, FxHelpers
+│   ├── core/                  Shared types: DataType, Schema, ColumnarBatch,
+│   │                          Catalog, SqlExecutor boundary + registry.
+│   ├── temporal/              TemporalVariables, TemplateRenderer.
+│   ├── read/{csv,parquet}/    Format-specific readers + parquet hook installer.
+│   ├── sql/{parse,plan,exec}/ JSqlParser façade, logical plan + builder,
+│   │                          physical operators + planner + engine.
+│   ├── write/{csv,parquet}/   Format-specific writers + shared ParquetSchema.
+│   ├── job/                   User-facing API: InputFilePath, OutputFilePath,
+│   │                          SQLTask, DataJob runner, DirectoryJobLoader,
+│   │                          TaskDag, RunMarker, parquet hooks, Json parser.
+│   └── gui/                   JavaFX visualiser/runner.
 └── src/test/scala/com/transformer/...   (mirrors src/main/scala layout)
 ```
+
+For the full module-by-module breakdown — key files, responsibilities,
+cross-cutting patterns — see
+[docs/architecture.md](docs/architecture.md#module-map).
 
 ## Building your own job
 

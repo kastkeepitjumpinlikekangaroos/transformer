@@ -571,4 +571,61 @@ class SqlEngineTest {
     // Full schema used → planner shouldn't bother asking for a projection.
     assertEquals(None, view.projectedTo)
   }
+
+  @Test def projectionPushdownPicksNarrowestColumnWhenNoneReferenced(): Unit = {
+    // COUNT(1) doesn't reference any column, but the scan still has to drive
+    // batches forward to feed the per-row count. Without push-down it would
+    // decode every column — including the multi-MB string blob — to produce
+    // a single Long. We should ask the view for its narrowest column instead.
+    val schema = Schema(Vector(
+      Field("big_blob", DataType.StringType),
+      Field("ts", DataType.LongType),
+      Field("flag", DataType.BooleanType)
+    ))
+    val view = new TrackingProjectableView(schema, Map(
+      "big_blob" -> Array[Any]("aaa", "bbb", "ccc", "ddd"),
+      "ts" -> Array[Any](1L, 2L, 3L, 4L),
+      "flag" -> Array[Any](true, false, true, false)
+    ))
+    val cat = catalogWith("t" -> view)
+    val q = SqlEngine.execute("SELECT COUNT(1) AS n FROM t", cat)
+    val rows = collectAllRows(q)
+    assertEquals(4L, rows.head("n"))
+    assertEquals(Some(Seq("flag")), view.projectedTo)
+  }
+
+  @Test def projectionPushdownNarrowestSkipsStringWhenPrimitiveAvailable(): Unit = {
+    // Tie-break preference: fixed-width primitives over variable-width strings,
+    // regardless of column order in the source schema.
+    val schema = Schema(Vector(
+      Field("blob", DataType.StringType),
+      Field("id", DataType.IntType)
+    ))
+    val view = new TrackingProjectableView(schema, Map(
+      "blob" -> Array[Any]("x", "y"),
+      "id"   -> Array[Any](1, 2)
+    ))
+    val cat = catalogWith("t" -> view)
+    SqlEngine.execute("SELECT COUNT(1) FROM t", cat).batches.foreach(_ => ())
+    assertEquals(Some(Seq("id")), view.projectedTo)
+  }
+
+  @Test def projectionPushdownNarrowestForLiteralProject(): Unit = {
+    // `SELECT 1 FROM t LIMIT 2` evaluates a literal per row — no column refs
+    // anywhere. Same narrowest-column push-down should apply.
+    val schema = Schema(Vector(
+      Field("payload", DataType.StringType),
+      Field("n", DataType.IntType)
+    ))
+    val view = new TrackingProjectableView(schema, Map(
+      "payload" -> Array[Any]("aaa", "bbb", "ccc"),
+      "n" -> Array[Any](1, 2, 3)
+    ))
+    val cat = catalogWith("t" -> view)
+    val q = SqlEngine.execute("SELECT 1 AS one FROM t LIMIT 2", cat)
+    val rows = collectAllRows(q)
+    assertEquals(2, rows.size)
+    assertEquals(Seq(1, 1), rows.map(_("one")))
+    assertEquals(Some(Seq("n")), view.projectedTo)
+  }
 }
