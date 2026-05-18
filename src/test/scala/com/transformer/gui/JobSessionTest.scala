@@ -1,6 +1,6 @@
 package com.transformer.gui
 
-import com.transformer.job.{ParquetReaderHook, RunMarker}
+import com.transformer.job.RunMarker
 
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -47,44 +47,22 @@ class JobSessionTest {
   }
 
   /** Ext-less directory with a parquet-format marker must be routed to the
-    * parquet reader hook, NOT to `CsvReader`. We don't install the hook in
-    * this test classpath, so a correct routing surfaces the
-    * "parquet read module not on classpath" error — a wrong routing would
-    * surface CSV's "No CSV files matched" instead.
+    * parquet reader, NOT to `CsvReader`. We feed it a fake `PAR1` part file
+    * so a wrong (CSV) routing would surface a CSV-specific error — a correct
+    * (parquet) routing surfaces a parquet error instead.
     */
   @Test def readOutputAsViewUsesMarkerFormatForExtlessParquetDir(): Unit = {
     val dir = tmpDir.resolve("test")
     writeMarker(dir, "parquet")
-    // Drop a fake part file so the CSV fallback (if the routing were wrong)
-    // would at least find something to open and produce its CSV-specific
-    // error — distinguishing routing failure from "no files at all".
     Files.writeString(dir.resolve("part-00000.parquet"), "PAR1binary")
 
-    val installed = ParquetReaderHook.get.isDefined
     val ex = try { JobSession.readOutputAsView(dir.toString); null }
              catch { case t: Throwable => t }
 
-    if (installed) {
-      // If some other test in the same JVM has installed a real hook, the
-      // call should succeed in dispatching to it (we don't care what error
-      // the real reader throws on a fake parquet file — only that we got
-      // past the CSV trap).
-      // No further assertion needed: a CSV-trap routing would have thrown
-      // an IllegalArgumentException("No CSV files matched ...") with no
-      // mention of parquet, which we'd catch and fail on below.
-      if (ex != null) {
-        val msg = Option(ex.getMessage).getOrElse("").toLowerCase
-        assertFalse(s"routed through CSV reader: ${ex.getMessage}",
-          msg.contains("no csv files"))
-      }
-    } else {
-      assertNotNull("expected an error because no parquet hook is installed", ex)
-      val msg = ex.getMessage.toLowerCase
-      assertTrue(s"expected parquet-routing error, got: ${ex.getMessage}",
-        msg.contains("parquet read module"))
-      assertFalse(s"unexpectedly routed through CSV: ${ex.getMessage}",
-        msg.contains("no csv files"))
-    }
+    assertNotNull("expected a parquet decode error on the fake file", ex)
+    val msg = Option(ex.getMessage).getOrElse("").toLowerCase
+    assertFalse(s"unexpectedly routed through CSV: ${ex.getMessage}",
+      msg.contains("no csv files"))
   }
 
   /** A directory whose marker says `csv` must still be routed to the CSV

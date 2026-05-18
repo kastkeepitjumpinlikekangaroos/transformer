@@ -1,6 +1,6 @@
 package com.transformer.gui
 
-import com.transformer.job.{JobFiles, ParquetWriterHook, SQLTask}
+import com.transformer.job.{JobFiles, SQLTask}
 
 import java.nio.file.{Files, Path}
 import javafx.event.ActionEvent
@@ -79,13 +79,6 @@ object AddTableDialog {
     val formatCombo = new ComboBox[String]()
     formatCombo.getItems.addAll("csv", "parquet")
     formatCombo.setValue(existing.flatMap(_.outputFile).flatMap(_.format).getOrElse("csv"))
-    if (ParquetWriterHook.get.isEmpty) {
-      formatCombo.getItems.remove("parquet")
-      formatCombo.setValue("csv")
-      formatCombo.setTooltip(new Tooltip(
-        "Parquet output requires the parquet write module on the launcher's classpath."
-      ))
-    }
 
     val partitionField = new TextField()
     partitionField.setPromptText("Optional: day={{today}}")

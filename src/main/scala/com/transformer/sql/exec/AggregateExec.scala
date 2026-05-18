@@ -144,6 +144,10 @@ object AggState {
     case m: AggExprMin => new MinMaxState(min = true, m.resultType)
     case m: AggExprMax => new MinMaxState(min = false, m.resultType)
     case _: AggExprCountIf => new CountIfState()
+    case s: AggExprStddev => new MomentState(sample = s.sample, stddev = true)
+    case v: AggExprVariance => new MomentState(sample = v.sample, stddev = false)
+    case c: AggExprCovar => new CovarState(sample = c.sample)
+    case _: AggExprCorr => new CorrState()
   }
 }
 
@@ -264,4 +268,149 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
     }
   }
   def finish(): Any = current
+}
+
+/** Univariate variance / standard deviation via Welford + Chan's parallel
+  * merge. Numerically stable vs. the naive sum-of-squares formula and works
+  * across partial-aggregation boundaries. */
+final class MomentState(sample: Boolean, stddev: Boolean) extends AggState {
+  private var n: Long = 0L
+  private var mean: Double = 0.0
+  private var m2: Double = 0.0
+  private def childOf(agg: AggExpr): Expr = agg match {
+    case s: AggExprStddev => s.child
+    case v: AggExprVariance => v.child
+    case _ => throw new IllegalStateException
+  }
+  def update(agg: AggExpr, b: ColumnarBatch, r: Int): Unit = {
+    val v = childOf(agg).eval(b, r)
+    if (v != null) {
+      val x = v.asInstanceOf[Number].doubleValue
+      n += 1
+      val delta = x - mean
+      mean += delta / n
+      m2 += delta * (x - mean)
+    }
+  }
+  def merge(o: AggState): Unit = {
+    val that = o.asInstanceOf[MomentState]
+    if (that.n == 0L) return
+    if (n == 0L) {
+      n = that.n; mean = that.mean; m2 = that.m2
+    } else {
+      val newN = n + that.n
+      val delta = that.mean - mean
+      m2 = m2 + that.m2 + delta * delta * n.toDouble * that.n.toDouble / newN.toDouble
+      mean = mean + delta * that.n.toDouble / newN.toDouble
+      n = newN
+    }
+  }
+  def finish(): Any = {
+    val varianceOpt: Option[Double] =
+      if (sample) { if (n < 2L) None else Some(m2 / (n - 1).toDouble) }
+      else { if (n < 1L) None else Some(m2 / n.toDouble) }
+    varianceOpt match {
+      case None => null
+      case Some(v) => if (stddev) math.sqrt(v) else v
+    }
+  }
+}
+
+/** Bivariate covariance via the parallel Welford / Pébay update. Pairs are
+  * skipped when either side is NULL. */
+final class CovarState(sample: Boolean) extends AggState {
+  protected var n: Long = 0L
+  protected var meanX: Double = 0.0
+  protected var meanY: Double = 0.0
+  protected var c: Double = 0.0
+  protected def xOf(agg: AggExpr): Expr = agg.asInstanceOf[AggExprCovar].x
+  protected def yOf(agg: AggExpr): Expr = agg.asInstanceOf[AggExprCovar].y
+  def update(agg: AggExpr, b: ColumnarBatch, r: Int): Unit = {
+    val vx = xOf(agg).eval(b, r)
+    val vy = yOf(agg).eval(b, r)
+    if (vx != null && vy != null) {
+      val x = vx.asInstanceOf[Number].doubleValue
+      val y = vy.asInstanceOf[Number].doubleValue
+      n += 1
+      val dx = x - meanX
+      meanX += dx / n
+      val dy = y - meanY
+      meanY += dy / n
+      c += dx * (y - meanY)
+    }
+  }
+  def merge(o: AggState): Unit = {
+    val that = o.asInstanceOf[CovarState]
+    if (that.n == 0L) return
+    if (n == 0L) {
+      n = that.n; meanX = that.meanX; meanY = that.meanY; c = that.c
+    } else {
+      val newN = n + that.n
+      val dx = that.meanX - meanX
+      val dy = that.meanY - meanY
+      c = c + that.c + dx * dy * n.toDouble * that.n.toDouble / newN.toDouble
+      meanX = meanX + dx * that.n.toDouble / newN.toDouble
+      meanY = meanY + dy * that.n.toDouble / newN.toDouble
+      n = newN
+    }
+  }
+  def finish(): Any =
+    if (sample) { if (n < 2L) null else c / (n - 1).toDouble }
+    else { if (n < 1L) null else c / n.toDouble }
+}
+
+/** Pearson correlation: tracks the same partial sums as covariance plus
+  * second moments for x and y to normalize. */
+final class CorrState extends AggState {
+  private var n: Long = 0L
+  private var meanX: Double = 0.0
+  private var meanY: Double = 0.0
+  private var m2x: Double = 0.0
+  private var m2y: Double = 0.0
+  private var c: Double = 0.0
+  def update(agg: AggExpr, b: ColumnarBatch, r: Int): Unit = {
+    val corr = agg.asInstanceOf[AggExprCorr]
+    val vx = corr.x.eval(b, r)
+    val vy = corr.y.eval(b, r)
+    if (vx != null && vy != null) {
+      val x = vx.asInstanceOf[Number].doubleValue
+      val y = vy.asInstanceOf[Number].doubleValue
+      n += 1
+      val dx = x - meanX
+      val dy = y - meanY
+      meanX += dx / n
+      meanY += dy / n
+      val dx2 = x - meanX
+      val dy2 = y - meanY
+      m2x += dx * dx2
+      m2y += dy * dy2
+      c += dx * dy2
+    }
+  }
+  def merge(o: AggState): Unit = {
+    val that = o.asInstanceOf[CorrState]
+    if (that.n == 0L) return
+    if (n == 0L) {
+      n = that.n; meanX = that.meanX; meanY = that.meanY
+      m2x = that.m2x; m2y = that.m2y; c = that.c
+    } else {
+      val newN = n + that.n
+      val dx = that.meanX - meanX
+      val dy = that.meanY - meanY
+      val na = n.toDouble; val nb = that.n.toDouble; val nc = newN.toDouble
+      m2x = m2x + that.m2x + dx * dx * na * nb / nc
+      m2y = m2y + that.m2y + dy * dy * na * nb / nc
+      c   = c   + that.c   + dx * dy * na * nb / nc
+      meanX = meanX + dx * nb / nc
+      meanY = meanY + dy * nb / nc
+      n = newN
+    }
+  }
+  def finish(): Any = {
+    if (n < 2L) null
+    else {
+      val denom = math.sqrt(m2x * m2y)
+      if (denom == 0.0) null else c / denom
+    }
+  }
 }

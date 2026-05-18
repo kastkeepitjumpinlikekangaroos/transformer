@@ -147,7 +147,7 @@ object ColumnProjectionPushdown {
   }
 
   private def aggColRefNames(a: AggExpr): Set[String] =
-    a.arg.map(colRefNames).getOrElse(Set.empty)
+    a.args.iterator.flatMap(colRefNames).toSet
 
   /** Rewrite every [[ColRefExpr]] inside `e` using `remap`. Indices not in the
     * map pass through unchanged — Project / Aggregate emit identity-remapped
@@ -176,6 +176,10 @@ object ColumnProjectionPushdown {
     case AggExprMin(c) => AggExprMin(rewriteExpr(c, remap))
     case AggExprMax(c) => AggExprMax(rewriteExpr(c, remap))
     case AggExprCountIf(c) => AggExprCountIf(rewriteExpr(c, remap))
+    case AggExprStddev(c, s) => AggExprStddev(rewriteExpr(c, remap), s)
+    case AggExprVariance(c, s) => AggExprVariance(rewriteExpr(c, remap), s)
+    case AggExprCovar(x, y, s) => AggExprCovar(rewriteExpr(x, remap), rewriteExpr(y, remap), s)
+    case AggExprCorr(x, y) => AggExprCorr(rewriteExpr(x, remap), rewriteExpr(y, remap))
   }
 
   /** Pick a single column from `schema` to project to when the consumer

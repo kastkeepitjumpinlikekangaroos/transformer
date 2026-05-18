@@ -19,13 +19,11 @@ scala_binary(
     # flags — pass `-Xmx12g` (or larger) explicitly in that case.
     jvm_flags = ["-Xmx12g"],
     deps = [
+        # strict-deps: job.run() returns a type from core, so we list core
+        # explicitly even though job already depends on it transitively.
+        # Parquet read/write is reached transitively through job/.
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",
-        # Required: every input and every output is parquet. Touching the
-        # ParquetSupport object during class init installs the read/write
-        # hooks the job runner uses.
-        "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/temporal",
-        "//src/main/scala/com/transformer/write/parquet",
     ],
 )

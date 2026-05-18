@@ -1,4 +1,5 @@
 SELECT
+  '{{ today }}' as exec_date,
   c.customer_id,
   c.customer_name,
   s.count_lifetime_orders,
