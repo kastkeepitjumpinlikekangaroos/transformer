@@ -85,18 +85,34 @@ To accept a new field in an input JSON config:
 4. Update the schema in [`README.md`'s "Defining jobs from a directory"](../README.md#defining-jobs-from-a-directory).
 
 For per-table config there's an optional `tables/<viewName>/output.json`
-(`loadOutputConfig` reads it). Today it carries one field:
+(`loadOutputConfig` reads it). Supported fields:
 
 ```json
-{ "partitionBy": "day={{today}}" }
+{
+  "partitionBy": "day={{today}}",
+  "format": "parquet",
+  "maxPartitions": 4,
+  "options": {
+    "compression": "snappy",
+    "parquet_row_group_size": "67108864",
+    "parquet_write_parallelism": "16"
+  }
+}
 ```
 
 `partitionBy` is appended to the task's output path; the resulting templated
 path goes through `TemplateRenderer` at run time, so the output lands under
-`<outputDir>/<viewName>/day=YYYYMMDD/`. To add another field, extend
-`loadOutputConfig` to read it and adjust the `SQLTask` / `OutputFilePath`
-construction in `loadTables`. Cover both presence and absence in
-`DirectoryJobLoaderTest`.
+`<outputDir>/<viewName>/day=YYYYMMDD/`. `format` selects the writer (`csv`
+or `parquet`; defaults to `csv` when omitted). `maxPartitions` caps the
+number of part files. `options` is a flat string-keyed map forwarded to the
+writer — for parquet the recognized keys are `compression` (`SNAPPY` /
+`GZIP` / `UNCOMPRESSED`, default `SNAPPY`), `parquet_row_group_size`
+(bytes), and `parquet_write_parallelism`. CSV writer options are read by
+`CsvWriteOptions.fromMap`.
+
+To add another field, extend `loadOutputConfig` to read it and adjust the
+`SQLTask` / `OutputFilePath` construction in `loadTables`. Cover both
+presence and absence in `DirectoryJobLoaderTest`.
 
 Conventions baked into the loader:
 - View name comes from the directory name, never from JSON. JSON `viewName` is

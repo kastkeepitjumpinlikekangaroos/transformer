@@ -555,6 +555,7 @@ final class ResultsTabPane(
             ("PENDING", neutral, None)
         }
       case Some(UiTaskState.Running) => ("RUNNING", running, None)
+      case Some(UiTaskState.Queued)  => ("QUEUED", running, None)
       case Some(UiTaskState.Pending) | None => ("PENDING", neutral, None)
     }
   }

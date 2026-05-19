@@ -5,7 +5,7 @@ import com.transformer.core._
 import java.io.{BufferedWriter, OutputStreamWriter}
 import java.nio.charset.{Charset, StandardCharsets}
 import java.nio.file.{Files, Path, Paths, StandardCopyOption}
-import java.util.concurrent.{Callable, Executors, TimeUnit}
+import java.util.concurrent.Callable
 
 final case class CsvWriteOptions(
     header: Boolean = true,
@@ -208,46 +208,36 @@ object CsvWriter {
     Files.createDirectories(targetDir)
     val n = partitions.length
     if (n == 0) return 0L
-    val parallelism = math.max(1, math.min(n, Runtime.getRuntime.availableProcessors))
-    val pool = Executors.newFixedThreadPool(parallelism)
     val writers = new Array[CsvWriter](n)
-    try {
-      val futures = (0 until n).map { i =>
-        pool.submit(new Callable[Long] {
-          def call(): Long = {
-            val target = targetDir.resolve(f"part-$i%05d.csv")
-            val w = new CsvWriter(target, schema, options)
-            writers(i) = w
-            val it = partitions(i)
-            while (it.hasNext) w.write(it.next())
-            w.close()
-          }
-        })
-      }
-      var total = 0L
-      var firstError: Throwable = null
-      futures.foreach { f =>
-        try total += f.get()
-        catch {
-          case e: java.util.concurrent.ExecutionException =>
-            if (firstError == null) firstError = e.getCause
-          case t: Throwable =>
-            if (firstError == null) firstError = t
+    val tasks: Seq[Callable[Long]] = (0 until n).map { i =>
+      new Callable[Long] {
+        def call(): Long = {
+          val target = targetDir.resolve(f"part-$i%05d.csv")
+          val w = new CsvWriter(target, schema, options)
+          writers(i) = w
+          val it = partitions(i)
+          while (it.hasNext) w.write(it.next())
+          w.close()
         }
       }
-      if (firstError != null) {
-        abortAll(writers)
-        throw firstError
-      }
-      total
-    } catch {
-      case t: Throwable =>
-        abortAll(writers)
-        throw t
-    } finally {
-      pool.shutdown()
-      pool.awaitTermination(1, TimeUnit.MINUTES)
     }
+    val futures = tasks.map(Scheduler.submit(_))
+    var total = 0L
+    var firstError: Throwable = null
+    futures.foreach { f =>
+      try total += f.get()
+      catch {
+        case e: java.util.concurrent.ExecutionException =>
+          if (firstError == null) firstError = e.getCause
+        case t: Throwable =>
+          if (firstError == null) firstError = t
+      }
+    }
+    if (firstError != null) {
+      abortAll(writers)
+      throw firstError
+    }
+    total
   }
 
   private def abortAll(writers: Array[CsvWriter]): Unit = {

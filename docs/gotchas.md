@@ -81,13 +81,41 @@ ship a fix or move something from "not done" to "done".
 - **`TaskDag` / `TaskDagNode` are public** despite living next to runner
   internals — the GUI needs them to render structure without re-implementing
   the analyzer. Don't accidentally narrow visibility when refactoring.
-- **Parquet write parallelism is capped at 4 by default**, not `cores`.
+- **Parquet write parallelism is heap-bounded, not `cores`-bounded.**
   Each in-flight `ParquetWriter` pins a 32MB row-group buffer plus per-column
-  dictionary pages (≈1MB × column count) — on a 10-core box, the default
-  `min(n, cores)` blew past 2GB heap on wide schemas before any data flushed.
-  See `ParquetWriter.DefaultWriteParallelism` / `DefaultRowGroupSize`.
+  dictionary pages (≈1MB × column count). `defaultWriteParallelism = min(cores,
+  maxHeap / 256MB)` — on a 2GB heap that's 8; on a 12GB heap (the GUI default
+  via `-XX:MaxRAMPercentage=75.0` on a 16GB box) it's `min(cores, 48)`.
   Override per-task via `options("parquet_write_parallelism")` and
-  `options("parquet_row_group_size")` if you've got headroom.
+  `options("parquet_row_group_size")` if the schema is narrow enough that you
+  can push harder.
+- **Default parquet write compression is `snappy`** (matches Spark / pyarrow
+  / DuckDB). The intuition "snappy is just CPU overhead, intermediate parquet
+  on SSD is fine uncompressed" is wrong for high-cardinality string columns:
+  dictionary encoding (always on) makes the dictionary pages dominate the
+  on-disk bytes, and snappy compresses those 30-50% — net write time goes
+  DOWN under snappy on snapshots-shaped data (`market_id`-style 66-char hex
+  strings repeated millions of times). Benchmark from one ~5M-row write:
+  uncompressed 9.1s/86MB vs snappy 7.3s/54MB. For genuinely narrow-numeric
+  tables (orderbook prices + timestamps) override per-table via
+  `output.json`'s `options.compression = "uncompressed"`; the legacy alias
+  `NONE` is accepted for symmetry with Spark.
+- **Parquet decode is vectorized**, not row-at-a-time. `ParquetPartitionIterator`
+  uses `ColumnReadStoreImpl` to expose one `ColumnReader` per column per row
+  group and copies values straight into `ColumnarBatch` primitive vectors —
+  no `Group`/`SimpleGroup` allocations, no `Integer`/`Long` boxing per cell.
+  If you add a new `DataType`, extend `decodeColumn`'s outer match on
+  `PrimitiveTypeName` (and `BatchWriteSupport.write` on the encode side);
+  forgetting either side leaves a `MatchError` at runtime, not a compile
+  failure.
+- **Predicate pushdown into parquet is best-effort partial.** Only
+  `c <op> lit` shapes (and `NOT`/`AND`/`OR` over them) translate; everything
+  else is dropped from the AND-chain. The `FilterExec` always stays above
+  the scan to catch per-row precision — stats can prove a row group doesn't
+  match but can't prove it does. Don't add a "predicate is fully pushed,
+  skip the FilterExec" optimization without proving the translator handles
+  every conjunct shape; missing one means rows that don't match the SQL
+  filter sneak through.
 - **`SELECT COUNT(*) FROM <view>` short-circuits to footer metadata** when
   the view's `CatalogView.exactRowCount` is defined (parquet + in-memory).
   The planner emits `CountStarMetadataExec` directly; no scan happens. The
@@ -115,14 +143,36 @@ ship a fix or move something from "not done" to "done".
   snapshots-shaped data. `ParquetReader.withProjectedColumns` reuses the
   parent's footer-derived partition layout so the pruned variant doesn't
   re-open every file.
+- **Don't do I/O on the FX thread during a run.** Every parallel call in this
+  library funnels through `Scheduler.pool` (a `2 × cores`-sized `ForkJoinPool`
+  by default; configurable via `transformer.scheduler.parallelism`). When
+  a job is running, those workers are tied up scanning + writing partitions.
+  An FX-thread caller that submits to the pool via
+  `Scheduler.submitAndAwaitAll` (e.g. `ParquetReader.fromPath` reading footers
+  for a schema chip) will block on `.get()` waiting for a worker — and since
+  the FX thread is NOT a `ForkJoinWorkerThread`, FJP compensation doesn't
+  apply. The whole GUI freezes for as long as the pool is busy. The pattern
+  this came from was `SqlConsolePanel.refreshViewsListing` rebuilding the
+  catalog (which opens every input + output to read schemas) on every
+  `notifyListeners` fire — 60+ rebuilds per run, each blocking FX. Fix: guard
+  with `if (session.isRunning) return` so listener-driven catalog rebuilds
+  wait until `endRun` fires its single post-run `notifyListeners`. Same rule
+  applies to any future panel that wants to do I/O off a session listener —
+  either gate on `isRunning` or spawn a background thread and marshal results
+  back via `FxHelpers.onFx`.
 
 ## What's intentionally NOT done
 
 - **No spill-to-disk** for hash-aggregate/hash-join/sort. v1 holds all keys in
   memory. Document this if exposed to users; consider adding a
   `RowsToDiskOnPressure` operator post-v1.
-- **No whole-stage codegen**, no Janino, no LLVM. Boxed eval is plenty for v1
-  and easy to reason about.
+- **No whole-stage codegen**, no Janino, no LLVM. The closest analogue is
+  `Expr.evalVec` (see [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec))
+  — one call per Expr per batch, primitive-array inner loops, no codegen step.
+  `ProjectExec` and `FilterExec` use it; everything else (sort/join/window
+  per-row callbacks, aggregate state updates over `RowBuf`) still uses boxed
+  `eval(batch, row)` because those are 1-row paths where vectorization gives
+  nothing back.
 - **No multi-statement SQL.** `SqlParser.parseSelect` only accepts a SELECT.
 - **No subqueries** (scalar, IN, EXISTS, derived tables).
 - **Window functions: ROWS frames only.** `RANGE BETWEEN` is parsed and accepted
@@ -147,9 +197,9 @@ ship a fix or move something from "not done" to "done".
   programmatically registered via `DataJob.inputs`.
 - **No bytecode-level optimizations.** Hot loops use `while` and indexed
   arrays. That's enough.
-- **No shared executor across DAG- and operator-level parallelism.** With N
-  SQLTasks running concurrently (via `DataJob.runDag`) and each query's
-  pipeline-breakers spawning their own `min(partitions, cores)` pool, peak
-  thread count is `N × min(maxPartitions, cores)`. JVM handles it; cache
-  thrash in worst-case CPU-bound jobs is the trade-off. Post-v1: thread a
-  single shared executor through both layers.
+- **Heap is not fully exercised under the default config.** Each in-flight
+  parquet writer pins ~32MB row group buffer + a few MB of column dictionaries;
+  with the default fan-out of `min(cores, heap/256MB)` only ~`cores × 50MB` of
+  heap is in flight at any moment. For huge-heap boxes you can bump the row
+  group cap via `options("parquet_row_group_size")` (per-task in `output.json`),
+  but there's no automatic "use all the heap" mode yet.

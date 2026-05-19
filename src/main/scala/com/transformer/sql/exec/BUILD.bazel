@@ -6,6 +6,9 @@ scala_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/main/scala/com/transformer/core",
+        # read/parquet is reached so PhysicalPlanner can call
+        # ParquetReader.withPushdownFilter to push predicates into the scan.
+        "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/sql/parse",
         "//src/main/scala/com/transformer/sql/plan",
     ],

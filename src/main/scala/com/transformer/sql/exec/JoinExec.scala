@@ -4,7 +4,7 @@ import com.transformer.core._
 import com.transformer.sql.plan._
 
 import java.util
-import java.util.concurrent.{Callable, Executors, TimeUnit}
+import java.util.concurrent.Callable
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
@@ -50,18 +50,13 @@ final case class HashJoinExec(
 
   /** Materialize the right side: list of full-row arrays plus a multi-map from key. */
   private def buildSide(): BuildSide = {
-    val pool = Executors.newFixedThreadPool(math.max(1, math.min(right.numPartitions, Runtime.getRuntime.availableProcessors)))
-    val partials: Seq[mutable.ArrayBuffer[Array[Any]]] = try {
-      val futures = (0 until right.numPartitions).map { p =>
-        pool.submit(new Callable[mutable.ArrayBuffer[Array[Any]]] {
+    val tasks: Seq[Callable[mutable.ArrayBuffer[Array[Any]]]] =
+      (0 until right.numPartitions).map { p =>
+        new Callable[mutable.ArrayBuffer[Array[Any]]] {
           def call(): mutable.ArrayBuffer[Array[Any]] = collectPartition(right, p)
-        })
+        }
       }
-      futures.map(_.get())
-    } finally {
-      pool.shutdown()
-      pool.awaitTermination(5, TimeUnit.MINUTES)
-    }
+    val partials = Scheduler.submitAndAwaitAll(tasks)
     val rows = mutable.ArrayBuffer.empty[Array[Any]]
     partials.foreach(rows ++= _)
     val keyMap = new util.HashMap[Seq[Any], util.ArrayList[Int]]()
@@ -102,15 +97,13 @@ final case class HashJoinExec(
   private def probeIterator(build: BuildSide, matchedRight: util.HashSet[Int]): Iterator[ColumnarBatch] = {
     val capacity = ColumnarBatch.DefaultCapacity
     val schema = outputSchema
-    val outputs = mutable.ArrayBuffer.empty[ColumnarBatch]
-    val pool = Executors.newFixedThreadPool(math.max(1, math.min(left.numPartitions, Runtime.getRuntime.availableProcessors)))
 
     val joinedRows = mutable.ArrayBuffer.empty[Array[Any]]
     val matchedSet = if (matchedRight != null) matchedRight else new util.HashSet[Int]()
 
-    try {
-      val futures = (0 until left.numPartitions).map { lp =>
-        pool.submit(new Callable[(mutable.ArrayBuffer[Array[Any]], util.HashSet[Int])] {
+    val tasks: Seq[Callable[(mutable.ArrayBuffer[Array[Any]], util.HashSet[Int])]] =
+      (0 until left.numPartitions).map { lp =>
+        new Callable[(mutable.ArrayBuffer[Array[Any]], util.HashSet[Int])] {
           def call(): (mutable.ArrayBuffer[Array[Any]], util.HashSet[Int]) = {
             val local = mutable.ArrayBuffer.empty[Array[Any]]
             val localMatched = new util.HashSet[Int]()
@@ -151,16 +144,11 @@ final case class HashJoinExec(
             }
             (local, localMatched)
           }
-        })
+        }
       }
-      futures.foreach { f =>
-        val (rows, m) = f.get()
-        joinedRows ++= rows
-        matchedSet.addAll(m)
-      }
-    } finally {
-      pool.shutdown()
-      pool.awaitTermination(5, TimeUnit.MINUTES)
+    Scheduler.submitAndAwaitAll(tasks).foreach { case (rows, m) =>
+      joinedRows ++= rows
+      matchedSet.addAll(m)
     }
 
     if (matchedRight != null) {

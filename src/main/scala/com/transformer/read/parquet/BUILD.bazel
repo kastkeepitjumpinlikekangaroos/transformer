@@ -7,6 +7,9 @@ scala_library(
     deps = [
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/read/csv",
+        # sql/plan supplies Expr — needed by ParquetFilterTranslator to lower a
+        # bound transformer predicate into parquet-mr's FilterApi.
+        "//src/main/scala/com/transformer/sql/plan",
         "//src/main/scala/com/transformer/write/parquet",
         "@maven//:commons_collections_commons_collections",
         "@maven//:org_apache_hadoop_hadoop_common",

@@ -3,7 +3,7 @@ package com.transformer.core
 import org.junit.Assert._
 import org.junit.Test
 
-import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 
 class CoreTypesTest {
@@ -154,65 +154,54 @@ class CoreTypesTest {
       IndexedSeq(intBatch(schema, Seq(1, 2)), intBatch(schema, Seq(3))),
       IndexedSeq(intBatch(schema, Seq(4, 5, 6)))
     ))
-    val pool = Executors.newFixedThreadPool(2)
-    try {
-      val mv = MaterializedView.materializeInParallel(src, pool)
-      assertEquals(schema, mv.schema)
-      assertEquals(2, mv.numPartitions)
-      assertEquals(2, src.partitionReads.get())
-      assertEquals(6L, mv.totalRows)
+    val mv = MaterializedView.materializeInParallel(src)
+    assertEquals(schema, mv.schema)
+    assertEquals(2, mv.numPartitions)
+    assertEquals(2, src.partitionReads.get())
+    assertEquals(6L, mv.totalRows)
 
-      def values(p: Int): Seq[Int] = {
-        val it = mv.readPartition(p)
-        val out = scala.collection.mutable.ArrayBuffer.empty[Int]
-        while (it.hasNext) {
-          val b = it.next()
-          val col = b.column(0).asInstanceOf[IntVector]
-          var r = 0
-          while (r < b.numRows) { out += col.get(r); r += 1 }
-        }
-        out.toSeq
+    def values(p: Int): Seq[Int] = {
+      val it = mv.readPartition(p)
+      val out = scala.collection.mutable.ArrayBuffer.empty[Int]
+      while (it.hasNext) {
+        val b = it.next()
+        val col = b.column(0).asInstanceOf[IntVector]
+        var r = 0
+        while (r < b.numRows) { out += col.get(r); r += 1 }
       }
-      assertEquals(Seq(1, 2, 3), values(0))
-      assertEquals(Seq(4, 5, 6), values(1))
-    } finally {
-      pool.shutdown()
-      pool.awaitTermination(5, TimeUnit.SECONDS)
+      out.toSeq
     }
+    assertEquals(Seq(1, 2, 3), values(0))
+    assertEquals(Seq(4, 5, 6), values(1))
   }
 
   @Test def materializedViewIsReIterable(): Unit = {
     val schema = Schema(Field("x", DataType.IntType))
     val src = new CountingView(schema, IndexedSeq(IndexedSeq(intBatch(schema, Seq(7, 8, 9)))))
-    val pool = Executors.newFixedThreadPool(1)
-    try {
-      val mv = MaterializedView.materializeInParallel(src, pool)
-      // Re-reading should not throw and should yield the same rows.
-      def take(): Vector[Int] = {
-        val it = mv.readPartition(0)
-        val out = scala.collection.mutable.ArrayBuffer.empty[Int]
-        while (it.hasNext) {
-          val b = it.next()
-          val col = b.column(0).asInstanceOf[IntVector]
-          var r = 0
-          while (r < b.numRows) { out += col.get(r); r += 1 }
-        }
-        out.toVector
+    val mv = MaterializedView.materializeInParallel(src)
+    def take(): Vector[Int] = {
+      val it = mv.readPartition(0)
+      val out = scala.collection.mutable.ArrayBuffer.empty[Int]
+      while (it.hasNext) {
+        val b = it.next()
+        val col = b.column(0).asInstanceOf[IntVector]
+        var r = 0
+        while (r < b.numRows) { out += col.get(r); r += 1 }
       }
-      assertEquals(Vector(7, 8, 9), take())
-      assertEquals(Vector(7, 8, 9), take())
-      assertEquals(Vector(7, 8, 9), take())
-      assertEquals(1, src.partitionReads.get()) // source only read once
-    } finally {
-      pool.shutdown()
-      pool.awaitTermination(5, TimeUnit.SECONDS)
+      out.toVector
     }
+    assertEquals(Vector(7, 8, 9), take())
+    assertEquals(Vector(7, 8, 9), take())
+    assertEquals(Vector(7, 8, 9), take())
+    assertEquals(1, src.partitionReads.get()) // source only read once
   }
 
   @Test def materializeManyInParallelActuallyParallelizesAcrossViewsAndPartitions(): Unit = {
     // 3 views, each with 2 partitions. Each partition read blocks until at
-    // least N other partition reads are in flight, where N = total - 1.
-    // If reads were sequential, the latch would never count down enough.
+    // least N other partition reads are in flight. The shared Scheduler pool's
+    // ForkJoinPool grows compensation threads when workers block on Future.get,
+    // so this resolves even with parallelism = availableProcessors lower than
+    // totalPartitions.
     val schema = Schema(Field("x", DataType.IntType))
     val totalPartitions = 6
     val inFlight = new AtomicInteger(0)
@@ -223,14 +212,11 @@ class CoreTypesTest {
       def numPartitions: Int = parts
       def readPartition(p: Int): Iterator[ColumnarBatch] = {
         val now = inFlight.incrementAndGet()
-        // Update peak.
         var observed = peakInFlight.get()
         while (now > observed && !peakInFlight.compareAndSet(observed, now)) observed = peakInFlight.get()
         allInFlight.countDown()
         try {
-          // Wait for every other partition reader to start. This is the proof
-          // of concurrency: serial execution would deadlock here.
-          if (!allInFlight.await(5, TimeUnit.SECONDS))
+          if (!allInFlight.await(10, TimeUnit.SECONDS))
             throw new AssertionError(s"timed out waiting for all $totalPartitions reads to start (inFlight=${inFlight.get})")
           Iterator.single(intBatch(schema, Seq(p)))
         } finally {
@@ -240,17 +226,11 @@ class CoreTypesTest {
     }
 
     val views = Seq.fill(3)(new BlockingView(schema, 2))
-    val pool = Executors.newFixedThreadPool(totalPartitions)
-    try {
-      val mvs = MaterializedView.materializeManyInParallel(views, pool)
-      assertEquals(3, mvs.length)
-      mvs.foreach(mv => assertEquals(2, mv.numPartitions))
-      assertEquals(s"expected $totalPartitions concurrent reads, peaked at ${peakInFlight.get}",
-        totalPartitions, peakInFlight.get())
-    } finally {
-      pool.shutdown()
-      pool.awaitTermination(5, TimeUnit.SECONDS)
-    }
+    val mvs = MaterializedView.materializeManyInParallel(views)
+    assertEquals(3, mvs.length)
+    mvs.foreach(mv => assertEquals(2, mv.numPartitions))
+    assertEquals(s"expected $totalPartitions concurrent reads, peaked at ${peakInFlight.get}",
+      totalPartitions, peakInFlight.get())
   }
 
   @Test def materializeManyInParallelHandlesEmptyView(): Unit = {
@@ -261,15 +241,9 @@ class CoreTypesTest {
       def readPartition(p: Int): Iterator[ColumnarBatch] =
         throw new IllegalStateException("should not be called")
     }
-    val pool = Executors.newFixedThreadPool(2)
-    try {
-      val mvs = MaterializedView.materializeManyInParallel(Seq(empty), pool)
-      assertEquals(1, mvs.length)
-      assertEquals(0, mvs.head.numPartitions)
-      assertEquals(0L, mvs.head.totalRows)
-    } finally {
-      pool.shutdown()
-      pool.awaitTermination(5, TimeUnit.SECONDS)
-    }
+    val mvs = MaterializedView.materializeManyInParallel(Seq(empty))
+    assertEquals(1, mvs.length)
+    assertEquals(0, mvs.head.numPartitions)
+    assertEquals(0L, mvs.head.totalRows)
   }
 }

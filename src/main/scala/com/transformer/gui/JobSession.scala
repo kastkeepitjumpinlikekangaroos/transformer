@@ -11,15 +11,31 @@ import java.time.Instant
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
-/** Per-task UI status. Distinct from [[TaskStatus]] because we need a 'Running'
-  * state that the engine doesn't track (it goes straight from pending to a
-  * terminal result).
-  */
+/** Per-task UI status. Distinct from [[TaskStatus]] because we need 'Queued'
+  * and 'Running' states that the engine doesn't track (it goes straight from
+  * pending to a terminal result).
+  *
+  * Lifecycle: `Pending` (not yet eligible) → `Queued` (deps satisfied, waiting
+  * for a worker thread) → `Running` (worker picked up) → `Done(result)`. The
+  * Queued ↔ Running gap is where the user-perceived "stuck" feeling lives — it
+  * appears as queue-wait time in the task result. */
 sealed trait UiTaskState
 object UiTaskState {
   case object Pending extends UiTaskState
+  case object Queued extends UiTaskState
   case object Running extends UiTaskState
   final case class Done(result: TaskResult) extends UiTaskState
+}
+
+/** Per-input UI status. Inputs are now scheduled as DAG nodes alongside tasks
+  * so the GUI can render them as Loading instead of static "always there"
+  * grey boxes. */
+sealed trait UiInputState
+object UiInputState {
+  case object Pending extends UiInputState
+  case object Loading extends UiInputState
+  case object Loaded extends UiInputState
+  final case class Failed(error: String) extends UiInputState
 }
 
 /** Top-level run lifecycle. */
@@ -59,6 +75,7 @@ final class JobSession {
   private var _renderedInputPaths: Vector[String] = Vector.empty
   private var _layout: Option[DagLayout] = None
   private var _taskStates: Vector[UiTaskState] = Vector.empty
+  private var _inputStates: Vector[UiInputState] = Vector.empty
   private var _runState: RunState = RunState.Idle
   private var _selection: Option[Selection] = None
   // Per-task resolved output paths captured from JobResult so we can re-read after run.
@@ -112,6 +129,9 @@ final class JobSession {
   def renderedInputPath(inputIndex: Int): Option[String] = _renderedInputPaths.lift(inputIndex)
   def layout: Option[DagLayout] = _layout
   def taskStates: Vector[UiTaskState] = _taskStates
+  def inputStates: Vector[UiInputState] = _inputStates
+  def inputStateFor(inputIndex: Int): UiInputState =
+    _inputStates.lift(inputIndex).getOrElse(UiInputState.Pending)
   def runState: RunState = _runState
   def selection: Option[Selection] = _selection
   /** Convenience: returns the selected task's index if a task is selected, else None. */
@@ -254,6 +274,7 @@ final class JobSession {
         _renderedInputPaths = Vector.empty
         _layout = None
         _taskStates = Vector.empty
+        _inputStates = Vector.empty
         _outputPaths = Vector.empty
         _taskRecords = Vector.empty
         _historicalRuns = Vector.empty
@@ -279,6 +300,7 @@ final class JobSession {
           }
           _layout = Some(DagLayout.compute(dag, _inputs))
           _taskStates = Vector.fill(dag.nodes.size)(UiTaskState.Pending)
+          _inputStates = Vector.fill(_inputs.size)(UiInputState.Pending)
           _outputPaths = Vector.fill(dag.nodes.size)(None)
           _taskRecords = Vector.fill(dag.nodes.size)(None)
           _runState = RunState.Idle
@@ -291,6 +313,7 @@ final class JobSession {
             _renderedInputPaths = Vector.empty
             _layout = None
             _taskStates = Vector.empty
+            _inputStates = Vector.empty
             _outputPaths = Vector.empty
             _taskRecords = Vector.empty
             _historicalRuns = Vector.empty
@@ -490,10 +513,38 @@ final class JobSession {
     )
   }
 
+  /** Mark a task as Queued — its deps are satisfied but no worker has picked it
+    * up yet. Distinguishes "queued for too long" from "running for too long" in
+    * the GUI. No-ops if no DAG is loaded or the index is bogus. */
+  def markTaskQueued(taskIndex: Int): Unit = {
+    if (taskIndex >= 0 && taskIndex < _taskStates.size) {
+      _taskStates = _taskStates.updated(taskIndex, UiTaskState.Queued)
+      notifyListeners()
+    }
+  }
+
   /** Mark a task as Running. No-ops if no DAG is loaded or the index is bogus. */
   def markTaskRunning(taskIndex: Int): Unit = {
     if (taskIndex >= 0 && taskIndex < _taskStates.size) {
       _taskStates = _taskStates.updated(taskIndex, UiTaskState.Running)
+      notifyListeners()
+    }
+  }
+
+  /** Mark an input as Loading. */
+  def markInputLoading(inputIndex: Int): Unit = {
+    if (inputIndex >= 0 && inputIndex < _inputStates.size) {
+      _inputStates = _inputStates.updated(inputIndex, UiInputState.Loading)
+      notifyListeners()
+    }
+  }
+
+  /** Mark an input as Loaded or Failed. */
+  def markInputFinished(inputIndex: Int, succeeded: Boolean, error: Option[String]): Unit = {
+    if (inputIndex >= 0 && inputIndex < _inputStates.size) {
+      val state = if (succeeded) UiInputState.Loaded
+                  else UiInputState.Failed(error.getOrElse("load failed"))
+      _inputStates = _inputStates.updated(inputIndex, state)
       notifyListeners()
     }
   }
@@ -524,6 +575,7 @@ final class JobSession {
   def beginRun(): Unit = {
     _runState = RunState.Running
     _taskStates = _taskStates.map(_ => UiTaskState.Pending)
+    _inputStates = _inputStates.map(_ => UiInputState.Pending)
     _outputPaths = _outputPaths.map(_ => None)
     _taskRecords = _taskRecords.map(_ => None)
     // Keep historicalRuns intact — they're still on disk and useful in the

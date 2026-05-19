@@ -5,24 +5,99 @@ import com.transformer.core._
 /** Bound (analyzed) expression. ColumnRefs have been resolved to column indices
   * against a child plan's output schema; type-checking and implicit casts have run.
   *
-  * v1 uses boxed-value evaluation (`Any`) for clarity. Per-batch dispatch and
-  * typed accessors can replace this without changing callers.
+  * Two evaluation entry points:
+  *   - [[eval]] returns one boxed `Any` for a single row — used by RowBuf-driven
+  *     paths (sort comparators, hash-join key reads, window per-row callbacks).
+  *   - [[evalVec]] returns a column vector for the whole batch — used by
+  *     pipeline operators (Project, Filter) where eliminating per-row dispatch
+  *     and boxing is the dominant speedup. Hot nodes override; everything else
+  *     falls back to a default per-row writer that keeps results correct.
   */
 sealed trait Expr {
   def dataType: DataType
   /** Evaluate against one row of a batch. Returns `null` for SQL NULL. */
   def eval(batch: ColumnarBatch, row: Int): Any
+
+  /** Evaluate against every row of `batch`. Returns a [[ColumnVector]] whose
+    * `dataType` equals [[dataType]] and whose valid range is `[0, batch.numRows)`.
+    *
+    * The returned vector may alias storage inside `batch` (e.g. [[ColRefExpr]]
+    * returns the underlying column zero-copy). Callers must treat the result
+    * as read-only — operators that need to OWN a result column should copy.
+    *
+    * The default implementation loops [[eval]] row-by-row and writes via
+    * `setBoxed`. Hot nodes override for primitive-array speed.
+    */
+  def evalVec(batch: ColumnarBatch): ColumnVector = {
+    val n = batch.numRows
+    val out = ColumnVector.allocate(dataType, math.max(1, n))
+    var i = 0
+    while (i < n) {
+      val v = eval(batch, i)
+      if (v == null) out.setNull(i) else out.setBoxed(i, v)
+      i += 1
+    }
+    out
+  }
 }
 
 /** Literal. `value` must be of the type implied by `dataType` (or `null`). */
 final case class LitExpr(value: Any, dataType: DataType) extends Expr {
   def eval(batch: ColumnarBatch, row: Int): Any = value
+
+  /** Broadcast the constant across the batch. Specialized for primitive types
+    * so the fill is one `Arrays.fill` instead of N `setBoxed` calls. */
+  override def evalVec(batch: ColumnarBatch): ColumnVector = {
+    val n = batch.numRows
+    val cap = math.max(1, n)
+    if (value == null) {
+      val out = ColumnVector.allocate(dataType, cap)
+      var i = 0
+      while (i < n) { out.setNull(i); i += 1 }
+      return out
+    }
+    dataType match {
+      case DataType.IntType =>
+        val arr = new Array[Int](cap)
+        java.util.Arrays.fill(arr, 0, n, value.asInstanceOf[Number].intValue)
+        new IntVector(arr, new java.util.BitSet(cap), cap)
+      case DataType.LongType =>
+        val arr = new Array[Long](cap)
+        java.util.Arrays.fill(arr, 0, n, value.asInstanceOf[Number].longValue)
+        new LongVector(arr, new java.util.BitSet(cap), cap)
+      case DataType.FloatType =>
+        val arr = new Array[Float](cap)
+        java.util.Arrays.fill(arr, 0, n, value.asInstanceOf[Number].floatValue)
+        new FloatVector(arr, new java.util.BitSet(cap), cap)
+      case DataType.DoubleType =>
+        val arr = new Array[Double](cap)
+        java.util.Arrays.fill(arr, 0, n, value.asInstanceOf[Number].doubleValue)
+        new DoubleVector(arr, new java.util.BitSet(cap), cap)
+      case DataType.BooleanType =>
+        val arr = new Array[Boolean](cap)
+        java.util.Arrays.fill(arr, 0, n, value.asInstanceOf[Boolean])
+        new BooleanVector(arr, new java.util.BitSet(cap), cap)
+      case DataType.StringType =>
+        val arr = new Array[String](cap)
+        java.util.Arrays.fill(arr.asInstanceOf[Array[AnyRef]], 0, n, value.asInstanceOf[AnyRef])
+        new StringVector(arr, cap)
+      case _ =>
+        val out = ColumnVector.allocate(dataType, cap)
+        var i = 0
+        while (i < n) { out.setBoxed(i, value); i += 1 }
+        out
+    }
+  }
 }
 
 /** Reference to a column at a known index in the child plan's schema. */
 final case class ColRefExpr(index: Int, name: String, dataType: DataType) extends Expr {
   def eval(batch: ColumnarBatch, row: Int): Any =
     if (batch.column(index).isNull(row)) null else batch.column(index).getBoxed(row)
+
+  /** Zero-copy: return the input column directly. Callers must treat the
+    * result as read-only — operators that need ownership copy. */
+  override def evalVec(batch: ColumnarBatch): ColumnVector = batch.column(index)
 }
 
 final case class CastExpr(child: Expr, target: DataType) extends Expr {
@@ -30,6 +105,11 @@ final case class CastExpr(child: Expr, target: DataType) extends Expr {
   def eval(batch: ColumnarBatch, row: Int): Any = {
     val v = child.eval(batch, row)
     if (v == null) null else Casts.cast(v, child.dataType, target)
+  }
+
+  override def evalVec(batch: ColumnarBatch): ColumnVector = {
+    val c = child.evalVec(batch)
+    VecOps.cast(c, child.dataType, target, batch.numRows)
   }
 }
 
@@ -48,6 +128,16 @@ final case class UnaryOpExpr(op: String, child: Expr, dataType: DataType) extend
           case _ => throw new IllegalStateException(s"Unary - on $dataType")
         }
       case "+" => v
+      case other => throw new IllegalStateException(s"Unknown unary op '$other'")
+    }
+  }
+
+  override def evalVec(batch: ColumnarBatch): ColumnVector = {
+    val c = child.evalVec(batch)
+    op match {
+      case "+" => c
+      case "-" => VecOps.negate(c, dataType, batch.numRows)
+      case "NOT" => VecOps.not(c, batch.numRows)
       case other => throw new IllegalStateException(s"Unknown unary op '$other'")
     }
   }
@@ -81,6 +171,20 @@ final case class BinOpExpr(op: String, left: Expr, right: Expr, dataType: DataTy
         else Ops.apply(op, lv, rv, left.dataType, right.dataType, dataType)
     }
   }
+
+  override def evalVec(batch: ColumnarBatch): ColumnVector = {
+    val n = batch.numRows
+    op match {
+      case "AND" => VecOps.and(left.evalVec(batch), right.evalVec(batch), n)
+      case "OR" => VecOps.or(left.evalVec(batch), right.evalVec(batch), n)
+      case "||" => VecOps.concat(left.evalVec(batch), right.evalVec(batch), n)
+      case "=" | "==" | "<>" | "!=" | "<" | "<=" | ">" | ">=" =>
+        VecOps.compare(op, left.evalVec(batch), right.evalVec(batch), left.dataType, right.dataType, n)
+      case "+" | "-" | "*" | "/" | "%" =>
+        VecOps.arith(op, left.evalVec(batch), right.evalVec(batch), dataType, n)
+      case other => throw new IllegalStateException(s"Unknown binary op '$other'")
+    }
+  }
 }
 
 final case class FuncExpr(name: String, args: Seq[Expr], dataType: DataType) extends Expr {
@@ -110,6 +214,9 @@ final case class IsNullExpr(child: Expr, negated: Boolean) extends Expr {
     val isnull = v == null
     if (negated) !isnull else isnull
   }
+
+  override def evalVec(batch: ColumnarBatch): ColumnVector =
+    VecOps.isNull(child.evalVec(batch), negated, batch.numRows)
 }
 
 /** `x IN (a, b, …)`. */

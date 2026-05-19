@@ -152,14 +152,25 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
     val selected = session.selectedInputIndex
     var i = 0
     while (i < layout.inputBoxes.size && i < inputs.size) {
-      drawInputNode(gc, layout.inputBoxes(i), inputs(i), selected.contains(i))
+      drawInputNode(gc, layout.inputBoxes(i), inputs(i),
+        session.inputStateFor(i), selected.contains(i))
       i += 1
     }
   }
 
-  private def drawInputNode(gc: GraphicsContext, box: NodeBox, in: InputFilePath, isSelected: Boolean): Unit = {
-    val fill = Color.web("#2b4a3a")
-    val stroke = Color.web("#5fa17a")
+  private def drawInputNode(
+      gc: GraphicsContext,
+      box: NodeBox,
+      in: InputFilePath,
+      state: UiInputState,
+      isSelected: Boolean
+  ): Unit = {
+    val (fill, stroke, footerOverride) = state match {
+      case UiInputState.Pending     => (Color.web("#2b4a3a"), Color.web("#5fa17a"), None)
+      case UiInputState.Loading     => (Color.web("#324f6b"), Color.web("#4a90e2"), Some("loading…"))
+      case UiInputState.Loaded      => (Color.web("#244c2f"), Color.web("#4caf50"), None)
+      case UiInputState.Failed(err) => (Color.web("#5a2828"), Color.web("#e57373"), Some(s"failed: ${truncate(err, 28)}"))
+    }
     gc.setFill(fill)
     gc.fillRoundRect(box.x, box.y, box.width, box.height, 12, 12)
     gc.setStroke(if (isSelected) Color.web("#ffd166") else stroke)
@@ -175,10 +186,11 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
     gc.setFont(Font.font("Sans", FontWeight.BOLD, 13))
     gc.setTextAlign(TextAlignment.CENTER)
     gc.fillText(truncate(in.viewName, 26), box.centerX, box.y + 32, box.width - 16)
-    // File name footer (basename of the resolved path).
+    // Footer: state-dependent status, falling back to the file basename.
     gc.setFill(Color.web("#c5cad8"))
     gc.setFont(Font.font("Sans", FontWeight.NORMAL, 11))
-    gc.fillText(truncate(basename(in.path), 30), box.centerX, box.y + 50, box.width - 16)
+    val footer = footerOverride.getOrElse(truncate(basename(in.path), 30))
+    gc.fillText(footer, box.centerX, box.y + 50, box.width - 16)
     gc.setTextAlign(TextAlignment.LEFT)
   }
 
@@ -229,18 +241,22 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
 
   private def nodeColors(state: UiTaskState): (Color, Color, String) = state match {
     case UiTaskState.Pending => (Color.web("#3a3f55"), Color.web("#5b6175"), "pending")
+    case UiTaskState.Queued  => (Color.web("#3e4a78"), Color.web("#6e80c5"), "queued…")
     case UiTaskState.Running => (Color.web("#2b4f7a"), Color.web("#4a90e2"), "running…")
     case UiTaskState.Done(result) =>
+      val durLine = if (result.queueWaitMillis > 0L)
+        f"${result.durationMillis} ms (+${result.queueWaitMillis} ms queued)"
+      else s"${result.durationMillis} ms"
       result.status match {
         case TaskStatus.Succeeded =>
           (Color.web("#244c2f"), Color.web("#4caf50"),
-            f"succeeded • ${result.rowsProduced}%,d rows • ${result.durationMillis} ms")
+            f"succeeded • ${result.rowsProduced}%,d rows • $durLine")
         case TaskStatus.Failed(_) =>
           (Color.web("#5a2828"), Color.web("#e57373"),
-            s"failed • ${result.durationMillis} ms")
+            s"failed • $durLine")
         case TaskStatus.ValidationFailed(fs) =>
           (Color.web("#5a4322"), Color.web("#ffa726"),
-            s"validation failed (${fs.size}) • ${result.durationMillis} ms")
+            s"validation failed (${fs.size}) • $durLine")
         case TaskStatus.Skipped(_) =>
           (Color.web("#34384a"), Color.web("#7a8095"), "skipped")
         case TaskStatus.Pending =>

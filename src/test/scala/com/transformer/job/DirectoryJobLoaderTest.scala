@@ -314,6 +314,23 @@ class DirectoryJobLoaderTest {
     assertEquals(Some("parquet"), byView("pq_t"))
   }
 
+  @Test def perTableOutputJsonOptionsThreadThrough(): Unit = {
+    // Per-table options block (e.g. `compression`, `parquet_row_group_size`)
+    // must reach the writer via OutputFilePath.options. Regression test for
+    // the wiring added when parquet compression was made per-table.
+    val jobDir = tmpDir("djl-opts-")
+    writeFile(jobDir.resolve("data/x.csv"), "n\n1\n")
+    writeFile(jobDir.resolve("inputs/x/config.json"), """{"path":"data/x.csv"}""")
+    writeFile(jobDir.resolve("tables/t/main.sql"), "SELECT n FROM x")
+    writeFile(jobDir.resolve("tables/t/output.json"),
+      """{"format":"parquet","options":{"compression":"snappy","parquet_row_group_size":67108864}}""")
+    val outputDir = tmpDir("djl-opts-out-")
+    val job = DirectoryJobLoader.load(jobDir, outputDir = Some(outputDir.toString))
+    val opts = job.sql.head.outputFile.get.options
+    assertEquals(Some("snappy"), opts.get("compression"))
+    assertEquals(Some("67108864"), opts.get("parquet_row_group_size"))
+  }
+
   @Test def perTableOutputJsonMaxPartitionsThreadsThrough(): Unit = {
     val jobDir = tmpDir("djl-maxp-")
     writeFile(jobDir.resolve("data/x.csv"), "n\n1\n2\n3\n")

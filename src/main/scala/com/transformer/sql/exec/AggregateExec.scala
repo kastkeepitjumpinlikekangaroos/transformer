@@ -4,7 +4,7 @@ import com.transformer.core._
 import com.transformer.sql.plan._
 
 import java.util
-import java.util.concurrent.{Callable, Executors, TimeUnit}
+import java.util.concurrent.Callable
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
@@ -28,21 +28,14 @@ final case class HashAggregateExec(
 
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0)
-    val nthreads = math.max(1, math.min(child.numPartitions, Runtime.getRuntime.availableProcessors))
-    val pool = Executors.newFixedThreadPool(nthreads)
-    val partials: Seq[mutable.LinkedHashMap[Seq[Any], Array[AggState]]] =
-      try {
-        val futures = (0 until child.numPartitions).map { p =>
-          pool.submit(new Callable[mutable.LinkedHashMap[Seq[Any], Array[AggState]]] {
-            def call(): mutable.LinkedHashMap[Seq[Any], Array[AggState]] =
-              partialAggregate(p)
-          })
+    val tasks: Seq[Callable[mutable.LinkedHashMap[Seq[Any], Array[AggState]]]] =
+      (0 until child.numPartitions).map { p =>
+        new Callable[mutable.LinkedHashMap[Seq[Any], Array[AggState]]] {
+          def call(): mutable.LinkedHashMap[Seq[Any], Array[AggState]] = partialAggregate(p)
         }
-        futures.map(_.get())
-      } finally {
-        pool.shutdown()
-        pool.awaitTermination(5, TimeUnit.MINUTES)
       }
+    val partials: Seq[mutable.LinkedHashMap[Seq[Any], Array[AggState]]] =
+      Scheduler.submitAndAwaitAll(tasks)
 
     val merged = partials.reduceOption(merge).getOrElse(mutable.LinkedHashMap.empty)
     // For aggregations with no GROUP BY: SQL requires one row of aggregate output

@@ -3,7 +3,7 @@ package com.transformer.sql.exec
 import com.transformer.core._
 import com.transformer.sql.plan._
 
-import java.util.concurrent.{Callable, Executors, TimeUnit}
+import java.util.concurrent.Callable
 import scala.collection.mutable
 
 /** Global sort: each partition sorts locally in parallel, then a k-way merge
@@ -15,20 +15,13 @@ final case class SortExec(child: PhysicalPlan, keys: Seq[(Expr, Boolean)]) exten
 
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0)
-    val nthreads = math.max(1, math.min(child.numPartitions, Runtime.getRuntime.availableProcessors))
-    val pool = Executors.newFixedThreadPool(nthreads)
-    val partials: Seq[mutable.ArrayBuffer[Array[Any]]] =
-      try {
-        val futures = (0 until child.numPartitions).map { p =>
-          pool.submit(new Callable[mutable.ArrayBuffer[Array[Any]]] {
-            def call(): mutable.ArrayBuffer[Array[Any]] = sortPartition(p)
-          })
+    val tasks: Seq[Callable[mutable.ArrayBuffer[Array[Any]]]] =
+      (0 until child.numPartitions).map { p =>
+        new Callable[mutable.ArrayBuffer[Array[Any]]] {
+          def call(): mutable.ArrayBuffer[Array[Any]] = sortPartition(p)
         }
-        futures.map(_.get())
-      } finally {
-        pool.shutdown()
-        pool.awaitTermination(5, TimeUnit.MINUTES)
       }
+    val partials: Seq[mutable.ArrayBuffer[Array[Any]]] = Scheduler.submitAndAwaitAll(tasks)
 
     // Concatenate all sorted partitions, then sort globally — keys are already
     // computed inline so we sort with a comparator on the data rows.

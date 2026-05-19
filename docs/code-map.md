@@ -7,24 +7,31 @@ navigation hint, not a comprehensive directory listing.
 
 ## File-size hot spots
 
-- `sql/plan/LogicalBuilder.scala` (~700 LOC) — biggest file. Pattern matches
+- `sql/plan/LogicalBuilder.scala` (~855 LOC) — biggest file. Pattern matches
   every JSqlParser expression node. If you're adding a syntax feature, this
   is probably where it lands.
-- `sql/exec/WindowExec.scala` (~345 LOC) — partition, sort, frame computation
-  for every supported window function.
-- `job/DataJob.scala` (~600 LOC) — runner orchestration: input materialization
-  pool, DAG scheduler, writeOutput, validation re-read, per-status
+- `gui/JobSession.scala` (~795 LOC) — mutable FX-thread state for the GUI;
+  also tracks per-input UI state (Pending/Loading/Loaded/Failed) now that
+  inputs flow through the unified scheduler.
+- `job/DataJob.scala` (~720 LOC) — runner orchestration: unified input + task
+  DAG scheduler (`runUnifiedDag`), writeOutput, validation re-read, per-status
   `_run.json` writes + per-failure `_validation-<slug>.csv` sample writes +
   per-job `job.json` write + consistency checks.
+- `sql/exec/WindowExec.scala` (~345 LOC) — partition, sort, frame computation
+  for every supported window function.
 - `gui/ResultsTabPane.scala` (~360 LOC) — partition picker + background
   output loader + run-log rendering.
 - `core/ColumnarBatch.scala` (~320 LOC) — defines ten `ColumnVector`
   subclasses. Adding a new `DataType` requires a new vector + companion case
   in `ColumnVector.allocate`.
-- `gui/JobSession.scala` (~305 LOC) — mutable FX-thread state for the GUI.
-- `gui/DagCanvas.scala` (~300 LOC) — Canvas drawing + pan/zoom/click.
+- `gui/DagCanvas.scala` (~300 LOC) — Canvas drawing + pan/zoom/click; renders
+  per-input load state alongside per-task status.
 - `sql/exec/AggregateExec.scala` (~255 LOC) — adding new aggregates means
   adding an `AggState`.
+- `core/Scheduler.scala` (~80 LOC) — the shared `ForkJoinPool` every parallel
+  call site funnels through. Daemon threads, default size `2 × availableProcessors`
+  (override via `transformer.scheduler.parallelism` system property or
+  `TRANSFORMER_SCHEDULER_PARALLELISM` env var).
 
 ## Useful pointers
 

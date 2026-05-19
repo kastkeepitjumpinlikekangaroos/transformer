@@ -8,6 +8,9 @@ scala_junit_test(
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",
         "//src/main/scala/com/transformer/read/parquet",
+        # sql/plan supplies Expr — needed to construct the predicate fed to
+        # ParquetReader.withPushdownFilter in the pushdown test.
+        "//src/main/scala/com/transformer/sql/plan",
         "//src/main/scala/com/transformer/write/parquet",
         "@maven//:junit_junit",
     ],

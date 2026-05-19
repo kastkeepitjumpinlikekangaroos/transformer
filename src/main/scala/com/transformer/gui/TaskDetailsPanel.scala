@@ -340,6 +340,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     }
     val (label, palette) = states(i) match {
       case UiTaskState.Pending => ("pending", ChipPalette.Neutral)
+      case UiTaskState.Queued  => ("queued", ChipPalette.Running)
       case UiTaskState.Running => ("running", ChipPalette.Running)
       case UiTaskState.Done(result) =>
         result.status match {
@@ -363,10 +364,16 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
       case UiTaskState.Done(result) if result.status == TaskStatus.Succeeded =>
         statChips.getChildren.add(metricChip(f"${result.rowsProduced}%,d rows"))
         statChips.getChildren.add(metricChip(s"${result.durationMillis} ms"))
+        if (result.queueWaitMillis > 0L)
+          statChips.getChildren.add(metricChip(s"${result.queueWaitMillis} ms queued"))
         validationsCountChip(i).foreach(statChips.getChildren.add)
       case UiTaskState.Done(result) =>
         statChips.getChildren.add(metricChip(s"${result.durationMillis} ms"))
+        if (result.queueWaitMillis > 0L)
+          statChips.getChildren.add(metricChip(s"${result.queueWaitMillis} ms queued"))
         validationsCountChip(i).foreach(statChips.getChildren.add)
+      case UiTaskState.Queued =>
+        statChips.getChildren.add(metricChip("queued…"))
       case UiTaskState.Running =>
         statChips.getChildren.add(metricChip("running…"))
       case UiTaskState.Pending =>
@@ -576,6 +583,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
         case TaskStatus.Pending    => ("pending", ChipPalette.Neutral)
       }
     case Some(UiTaskState.Running) => ("running", ChipPalette.Running)
+    case Some(UiTaskState.Queued)  => ("queued", ChipPalette.Running)
     case Some(UiTaskState.Pending) | None => ("pending", ChipPalette.Neutral)
   }
 

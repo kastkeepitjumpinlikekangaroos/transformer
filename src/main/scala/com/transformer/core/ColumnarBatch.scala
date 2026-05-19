@@ -9,14 +9,20 @@ import java.util
   * primitive arrays; reference columns (string, binary, decimal) store nulls
   * inline as `null`.
   */
-final class ColumnarBatch(val schema: Schema, val capacity: Int) {
+final class ColumnarBatch private (
+    val schema: Schema,
+    val capacity: Int,
+    val columns: Array[ColumnVector]) {
   require(capacity > 0, s"capacity must be positive, got $capacity")
+  require(columns.length == schema.length,
+    s"columns.length ${columns.length} != schema.length ${schema.length}")
+
+  /** Allocate a fresh batch with empty (default-allocated) columns. */
+  def this(schema: Schema, capacity: Int) =
+    this(schema, capacity, Array.tabulate(schema.length)(i =>
+      ColumnVector.allocate(schema.fields(i).dataType, capacity)))
 
   private var _numRows: Int = 0
-
-  val columns: Array[ColumnVector] = Array.tabulate(schema.length) { i =>
-    ColumnVector.allocate(schema.fields(i).dataType, capacity)
-  }
 
   def numRows: Int = _numRows
   def setNumRows(n: Int): Unit = {
@@ -68,7 +74,38 @@ final class ColumnarBatch(val schema: Schema, val capacity: Int) {
 }
 
 object ColumnarBatch {
-  val DefaultCapacity: Int = 4096
+  /** Capacity of one batch in rows. Larger batches amortize per-batch overhead
+    * (operator dispatch, writer flush boundaries, iterator hasNext checks) at
+    * the cost of more memory held in flight per partition. 8192 is comfortable
+    * for the wide parquet schemas this library targets — N concurrent writers
+    * × 8192 rows × ~12 columns × 8B ≈ low MB of in-flight batch memory. Bump
+    * higher only after profiling.
+    */
+  val DefaultCapacity: Int = 8192
+
+  /** Build a batch around pre-built column vectors. Capacity is the smallest
+    * column capacity across all columns (each column must hold at least
+    * `numRows` valid rows). Used by vectorized [[ProjectExec]] to assemble
+    * output directly from `Expr.evalVec` results without copying.
+    */
+  def fromColumns(schema: Schema, columns: Array[ColumnVector], numRows: Int): ColumnarBatch = {
+    require(columns.length == schema.length,
+      s"columns.length ${columns.length} != schema.length ${schema.length}")
+    val cap = if (columns.length == 0) math.max(1, numRows) else {
+      var m = Int.MaxValue
+      var i = 0
+      while (i < columns.length) {
+        if (columns(i).capacity < m) m = columns(i).capacity
+        i += 1
+      }
+      m
+    }
+    require(numRows >= 0 && numRows <= cap,
+      s"numRows $numRows out of range [0,$cap]")
+    val b = new ColumnarBatch(schema, cap, columns)
+    b.setNumRows(numRows)
+    b
+  }
 }
 
 /** Sealed ADT for typed columns. Operators dispatch by pattern-matching once per batch,

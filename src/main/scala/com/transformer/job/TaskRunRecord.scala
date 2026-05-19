@@ -38,7 +38,8 @@ final case class TaskRunRecord(
     rowsProduced: Long,
     format: String,
     outputFiles: Seq[String],
-    validations: Seq[ValidationRecord]
+    validations: Seq[ValidationRecord],
+    enqueuedAt: Option[Instant] = None
 ) {
   /** True when the recorded status implies on-disk part files (and so a
     * missing one is a consistency warning). */
@@ -148,7 +149,8 @@ object TaskRunRecord {
         rowsProduced = obj.get("rowsProduced").map(_.stringValue.toLong).getOrElse(0L),
         format = obj.optString("format", ctx).getOrElse("csv"),
         outputFiles = outputFiles,
-        validations = validations
+        validations = validations,
+        enqueuedAt = obj.optString("enqueuedAt", ctx).map(Instant.parse)
       ))
     } catch {
       case NonFatal(_) => None
@@ -290,6 +292,9 @@ object TaskRunRecord {
       case None      => sb.append("  \"errorMessage\": null,\n")
     }
     sb.append("  \"executionTime\": \"").append(escape(r.executionTime.toString)).append("\",\n")
+    r.enqueuedAt.foreach { ea =>
+      sb.append("  \"enqueuedAt\": \"").append(escape(ea.toString)).append("\",\n")
+    }
     sb.append("  \"startedAt\": \"").append(escape(r.startedAt.toString)).append("\",\n")
     sb.append("  \"finishedAt\": \"").append(escape(r.finishedAt.toString)).append("\",\n")
     sb.append("  \"writtenAt\": \"").append(escape(r.writtenAt.toString)).append("\",\n")

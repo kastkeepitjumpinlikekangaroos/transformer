@@ -3,7 +3,7 @@ package com.transformer.sql.exec
 import com.transformer.core._
 
 import java.util
-import java.util.concurrent.{Callable, Executors, TimeUnit}
+import java.util.concurrent.Callable
 import scala.collection.mutable
 
 /** SELECT DISTINCT. Builds a HashSet of full-row tuples. Single global partition. */
@@ -13,19 +13,13 @@ final case class DistinctExec(child: PhysicalPlan) extends PhysicalPlan {
 
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0)
-    val nthreads = math.max(1, math.min(child.numPartitions, Runtime.getRuntime.availableProcessors))
-    val pool = Executors.newFixedThreadPool(nthreads)
-    val partials: Seq[util.LinkedHashSet[Seq[Any]]] = try {
-      val futures = (0 until child.numPartitions).map { p =>
-        pool.submit(new Callable[util.LinkedHashSet[Seq[Any]]] {
+    val tasks: Seq[Callable[util.LinkedHashSet[Seq[Any]]]] =
+      (0 until child.numPartitions).map { p =>
+        new Callable[util.LinkedHashSet[Seq[Any]]] {
           def call(): util.LinkedHashSet[Seq[Any]] = collect(p)
-        })
+        }
       }
-      futures.map(_.get())
-    } finally {
-      pool.shutdown()
-      pool.awaitTermination(5, TimeUnit.MINUTES)
-    }
+    val partials = Scheduler.submitAndAwaitAll(tasks)
     val merged = new util.LinkedHashSet[Seq[Any]]()
     partials.foreach(merged.addAll)
     emit(merged)

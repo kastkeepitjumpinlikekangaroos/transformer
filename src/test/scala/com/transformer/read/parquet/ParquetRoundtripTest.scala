@@ -173,14 +173,14 @@ class ParquetRoundtripTest {
     assertEquals(3072, all.size)
   }
 
-  @Test def parquetPartitionEqualsFile(): Unit = {
-    // Even when input files contain multiple row groups (tiny row-group-size),
-    // ParquetReader exposes exactly one partition per file. This is the contract
-    // that prevents the old O(rowsBefore²) seek-by-skipping-rows pattern.
+  @Test def smallFilesPackIntoOnePartitionEach(): Unit = {
+    // With the default 256MB partition target, tiny files (a few KB of row
+    // groups) pack all their row groups into a single partition — one
+    // partition per file. This is the "small CSV-like input" regression case.
     val schema = Schema(Field("v", DataType.IntType))
     val rows = (0 until 256).map(i => Seq[Any](i))
-    val opts = Map("parquet_row_group_size" -> "256")
-    val inDir = Files.createTempDirectory("pq-part-eq-file-")
+    val opts = Map("parquet_row_group_size" -> "256")  // bytes — forces multiple row groups
+    val inDir = Files.createTempDirectory("pq-small-files-")
     TParquetWriter.writeAll(inDir.resolve("a.parquet"), schema,
       Iterator(makeBatch(schema, rows), makeBatch(schema, rows)), opts)
     TParquetWriter.writeAll(inDir.resolve("b.parquet"), schema,
@@ -188,5 +188,109 @@ class ParquetRoundtripTest {
     val reader = ParquetReader.fromPath(inDir.toString + "/*.parquet")
     assertEquals(2, reader.numPartitions)
     assertEquals(Some((256 * 2 + 256 * 3).toLong), reader.exactRowCount)
+  }
+
+  @Test def largeFileSplitsIntoMultiplePartitionsWhenTargetIsSmall(): Unit = {
+    // Force the row-group-byte target very low so a file with multiple row
+    // groups splits into multiple partitions — proves the
+    // skipNextRowGroup()-based seek lands correctly.
+    val schema = Schema(Field("v", DataType.IntType))
+    val rows = (0 until 1024).map(i => Seq[Any](i))
+    val target = Files.createTempFile("pq-large-split-", ".parquet")
+    Files.delete(target)
+    // 4 batches × 1024 rows. With row group size 1KB the writer flushes a row
+    // group between batches; with target = 1 byte per partition every row
+    // group becomes its own partition (the packer never adds a second one
+    // because the first already exceeds target).
+    TParquetWriter.writeAll(target, schema,
+      Iterator(makeBatch(schema, rows), makeBatch(schema, rows),
+               makeBatch(schema, rows), makeBatch(schema, rows)),
+      options = Map("parquet_row_group_size" -> "1024"))
+
+    val reader = ParquetReader.fromPath(target.toString,
+      ColumnarBatch.DefaultCapacity, targetBytesPerPartition = 1L)
+    assertTrue(s"expected >1 partitions, got ${reader.numPartitions}",
+      reader.numPartitions > 1)
+    assertEquals(Some(4096L), reader.exactRowCount)
+    // Total rows across partitions must round-trip exactly.
+    val collected = collectRows(reader)
+    assertEquals(4096, collected.size)
+    // Per-partition row counts must sum to the total — independent reads
+    // through skipNextRowGroup must not overlap or miss rows.
+    val perPartitionCounts = (0 until reader.numPartitions).map { p =>
+      val it = reader.readPartition(p)
+      var n = 0L
+      while (it.hasNext) { n += it.next().numRows; () }
+      n
+    }
+    assertEquals(4096L, perPartitionCounts.sum)
+  }
+
+  @Test def pushdownFilterSkipsNonMatchingRowGroups(): Unit = {
+    // Statistics-level pushdown: `n < 100` against a glob of two files (one
+    // with n in [0..99], one with n in [100..199]) should keep all rows from
+    // the first file's row group and skip the entire second file's row group.
+    // Row-level precision is still the caller's responsibility (FilterExec
+    // stays above the scan), but the SCAN must not surface rows from the
+    // dropped group.
+    val schema = Schema(Field("n", DataType.IntType))
+    val dir = Files.createTempDirectory("pq-pushdown-")
+    val lowFile = dir.resolve("low.parquet")
+    val highFile = dir.resolve("high.parquet")
+    TParquetWriter.writeAll(lowFile, schema,
+      Iterator(makeBatch(schema, (0 until 100).map(i => Seq[Any](i)))))
+    TParquetWriter.writeAll(highFile, schema,
+      Iterator(makeBatch(schema, (100 until 200).map(i => Seq[Any](i)))))
+
+    val reader = ParquetReader.fromPath(dir.toString)
+    // Two files → two row groups → two scan partitions worth of stats to test.
+    assertEquals(Some(200L), reader.exactRowCount)
+
+    import com.transformer.sql.plan._
+    val pred = BinOpExpr("<",
+      ColRefExpr(0, "n", DataType.IntType),
+      LitExpr(java.lang.Integer.valueOf(100), DataType.IntType),
+      DataType.BooleanType)
+    val pushed = reader.withPushdownFilter(pred).getOrElse(
+      fail("expected predicate to push").asInstanceOf[CatalogView])
+    val collected = collectRows(pushed)
+    // Only the rows from the low file survive — the high file's row group
+    // (stats min=100, max=199) is proven not to satisfy n<100 and is skipped
+    // without its column data being read.
+    assertEquals(100, collected.size)
+    val ns = collected.map(_("n").asInstanceOf[Int])
+    assertEquals(0, ns.min)
+    assertEquals(99, ns.max)
+  }
+
+  @Test def projectionStillWorksWithRowGroupSplit(): Unit = {
+    // Column projection (`setRequestedSchema`) must remain effective when
+    // partitions don't start at row group 0. The wide-column / narrow-projection
+    // pattern is the worst case for the old approach.
+    val schema = Schema(
+      Field("k", DataType.IntType),
+      Field("payload", DataType.StringType))
+    val rows = (0 until 512).map(i => Seq[Any](i, s"payload-$i"))
+    val target = Files.createTempFile("pq-proj-split-", ".parquet")
+    Files.delete(target)
+    TParquetWriter.writeAll(target, schema,
+      Iterator(makeBatch(schema, rows), makeBatch(schema, rows),
+               makeBatch(schema, rows)),
+      options = Map("parquet_row_group_size" -> "512"))
+
+    val reader = ParquetReader.fromPath(target.toString,
+      ColumnarBatch.DefaultCapacity, targetBytesPerPartition = 1L)
+    val projected = reader.withProjectedColumns(Seq("k"))
+      .getOrElse(fail("expected projection to return a pruned view").asInstanceOf[CatalogView])
+    // Pruned schema keeps file order: just "k" remains.
+    assertEquals(Seq("k"), projected.schema.fieldNames)
+    assertEquals(reader.numPartitions, projected.numPartitions)
+    val collected = collectRows(projected)
+    assertEquals(1536, collected.size)
+    // Each row's k must match its source index (0..511 repeated 3 times).
+    val ks = collected.map(_("k").asInstanceOf[Int])
+    assertEquals(1536, ks.length)
+    assertEquals(0, ks.min)
+    assertEquals(511, ks.max)
   }
 }

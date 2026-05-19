@@ -15,7 +15,9 @@ WHERE market_id IS NOT NULL
   AND best_bid >= 0 AND best_bid <= 1
   AND best_ask >= 0 AND best_ask <= 1
   AND change_size >= 0
-  -- Limit to the first ~6 hours of 2026-03-26 (midnight UTC + 21,600,000 ms)
-  -- to keep the heavy single-partition orderbook scan under ~10 minutes.
-  -- Remove this clause to process the full ~131M-row day.
-  AND timestamp_received < 1774504800000
+  -- Limit to the last ~18 hours of 2026-03-26.
+  -- With parquet predicate pushdown, this also lets the reader skip whole
+  -- row groups whose `timestamp_received` min/max is past the threshold —
+  -- so on a 21-day glob, 20 days' files get eliminated at the stats level
+  -- and never have their column data read.
+  AND timestamp_received > 1774504800000

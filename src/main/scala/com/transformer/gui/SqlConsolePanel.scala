@@ -129,7 +129,25 @@ final class SqlConsolePanel(session: JobSession, owner: () => javafx.stage.Stage
 
   // -------------------- listing --------------------
 
+  /** Rebuild the chips row by inspecting `session.buildInteractiveCatalog()`.
+    *
+    * IMPORTANT: this opens every input + persisted-output parquet/CSV via
+    * [[InputResolver.resolve]] / [[JobSession.readOutputAsView]] to read
+    * footers for the schema chips. Those reads run on the shared
+    * [[com.transformer.core.Scheduler]] pool. If a job is currently running,
+    * the pool's workers are tied up scanning + writing partitions and any
+    * footer read submitted from the FX thread would queue behind them — the
+    * FX thread blocks waiting for its `.get()` call, and the GUI freezes.
+    *
+    * Skip the rebuild while a run is in progress. [[JobSession.endRun]]
+    * calls [[JobSession.notifyListeners]] after flipping `_runState`, so this
+    * listener fires again the moment the run finishes and we get one clean
+    * rebuild then. The chip row stays at its pre-run snapshot during the
+    * run, which is correct anyway: outputs aren't readable on disk until
+    * their owning task completes.
+    */
   private def refreshViewsListing(): Unit = {
+    if (session.isRunning) return
     viewsFlow.getChildren.clear()
     val cat = session.buildInteractiveCatalog()
     if (cat.views.isEmpty) {

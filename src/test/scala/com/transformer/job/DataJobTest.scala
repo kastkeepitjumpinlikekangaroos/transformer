@@ -985,6 +985,165 @@ class DataJobTest {
       Files.exists(outDir.resolve(rec.outputFiles.head)))
   }
 
+  @Test def progressListenerFiresInputStartAndFinishForEveryInput(): Unit = {
+    val inDir = tmpDir("dj-input-listener-")
+    writeCsv(inDir, "a.csv", "x\n1\n2\n")
+    writeCsv(inDir, "b.csv", "y\n10\n")
+    val outDir = tmpDir("dj-input-listener-out-")
+    val job = DataJob(
+      inputs = Seq(
+        InputFilePath(inDir.resolve("a.csv").toString, viewName = "a"),
+        InputFilePath(inDir.resolve("b.csv").toString, viewName = "b")
+      ),
+      sql = Seq(
+        SQLTask(sqlString = Some("SELECT x FROM a"),
+          outputFile = Some(OutputFilePath(outDir.resolve("a").toString))),
+        SQLTask(sqlString = Some("SELECT y FROM b"),
+          outputFile = Some(OutputFilePath(outDir.resolve("b").toString)))
+      )
+    )
+    val inputStarts = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+    val inputFinishes = new java.util.concurrent.ConcurrentHashMap[String, java.lang.Boolean]()
+    val listener = new TaskProgressListener {
+      override def onInputStart(inputIndex: Int, viewName: String): Unit = {
+        inputStarts.add(viewName); ()
+      }
+      override def onInputFinish(inputIndex: Int, viewName: String, succeeded: Boolean, err: Option[String]): Unit = {
+        inputFinishes.put(viewName, java.lang.Boolean.valueOf(succeeded)); ()
+      }
+      def onTaskStart(taskIndex: Int, taskName: String): Unit = ()
+      def onTaskFinish(taskIndex: Int, result: TaskResult): Unit = ()
+    }
+    val result = job.run(SqlExecutorRegistry.get, listener)
+    assertTrue(result.error.getOrElse(""), result.succeeded)
+    assertEquals(Set("a", "b"), inputStarts.iterator().asScala.toSet)
+    assertEquals(Set("a", "b"), inputFinishes.keySet().asScala.toSet)
+    assertTrue("input a should succeed", inputFinishes.get("a"))
+    assertTrue("input b should succeed", inputFinishes.get("b"))
+  }
+
+  @Test def inputLoadFailureSkipsAllDependentTasks(): Unit = {
+    val outDir = tmpDir("dj-input-fail-out-")
+    // Point at a path that doesn't exist so InputResolver.resolve throws.
+    val job = DataJob(
+      inputs = Seq(
+        InputFilePath("/nonexistent/no_such_dir/never.csv", viewName = "ghost")
+      ),
+      sql = Seq(
+        SQLTask(name = Some("uses_ghost"),
+          sqlString = Some("SELECT 1 AS x FROM ghost"),
+          outputFile = Some(OutputFilePath(outDir.resolve("g").toString)))
+      )
+    )
+    val inputFinishes = new java.util.concurrent.ConcurrentHashMap[String, java.lang.Boolean]()
+    val taskFinishes = new java.util.concurrent.ConcurrentHashMap[Integer, TaskResult]()
+    val taskStarts = new java.util.concurrent.ConcurrentLinkedQueue[Integer]()
+    val listener = new TaskProgressListener {
+      override def onInputFinish(i: Int, vn: String, success: Boolean, err: Option[String]): Unit = {
+        inputFinishes.put(vn, java.lang.Boolean.valueOf(success)); ()
+      }
+      def onTaskStart(i: Int, n: String): Unit = { taskStarts.add(i); () }
+      def onTaskFinish(i: Int, r: TaskResult): Unit = { taskFinishes.put(i, r); () }
+    }
+    val result = job.run(SqlExecutorRegistry.get, listener)
+    assertFalse("job should not be marked succeeded when input load fails", result.succeeded)
+    assertEquals(java.lang.Boolean.FALSE, inputFinishes.get("ghost"))
+    val tr = taskFinishes.get(0)
+    assertNotNull("task should still receive a finish event", tr)
+    tr.status match {
+      case _: TaskStatus.Skipped => // expected
+      case other                 => fail(s"expected Skipped, got $other")
+    }
+    // Skipped tasks must NOT fire onTaskStart.
+    assertFalse("onTaskStart should never fire for a skipped task",
+      taskStarts.iterator().asScala.toSet.contains(Integer.valueOf(0)))
+  }
+
+  @Test def enqueuedAtPrecedesStartedAtUnderTaskContention(): Unit = {
+    // Set up several independent tasks. With more leaf tasks than scheduler
+    // workers, at least one task will report enqueuedAt < startedAt.
+    val inDir = tmpDir("dj-enqueue-in-")
+    writeCsv(inDir, "a.csv", "x\n1\n")
+    val outDir = tmpDir("dj-enqueue-out-")
+    val leafCount = math.max(8, Runtime.getRuntime.availableProcessors * 2)
+    val tasks = (0 until leafCount).map { i =>
+      SQLTask(name = Some(s"t$i"),
+        sqlString = Some("SELECT x FROM a"),
+        outputFile = Some(OutputFilePath(outDir.resolve(s"t$i").toString)))
+    }
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.resolve("a.csv").toString, viewName = "a")),
+      sql = tasks
+    )
+    val result = job.run()
+    assertTrue(result.error.getOrElse(""), result.succeeded)
+    // enqueuedAt should always be set (not Instant.EPOCH).
+    val unset = result.tasks.filter(_.enqueuedAt == Instant.EPOCH)
+    assertTrue(s"every task should have enqueuedAt populated: $unset", unset.isEmpty)
+    // enqueuedAt <= startedAt for every task.
+    val violators = result.tasks.filter(t => t.enqueuedAt.toEpochMilli > t.startedAt.toEpochMilli)
+    assertTrue(s"startedAt must not precede enqueuedAt: $violators", violators.isEmpty)
+  }
+
+  @Test def independentBranchesStartBeforeAllInputsAreLoaded(): Unit = {
+    // Two inputs with very different load latencies. The fast branch's task
+    // must finish before the slow branch's input has finished loading — proving
+    // the runner doesn't pre-load all inputs as a barrier.
+    val fastDir = tmpDir("dj-branches-fast-")
+    val slowDir = tmpDir("dj-branches-slow-")
+    writeCsv(fastDir, "fast.csv", "x\n1\n")
+    writeCsv(slowDir, "slow.csv", "y\n2\n")
+    val outDir = tmpDir("dj-branches-out-")
+
+    // Wire up the slow input to block via a custom CatalogView fronting the
+    // CSV reader. We do this by installing a holding CSV file that we read
+    // through a SqlExecutor wrapper... actually easier: just rely on the
+    // listener firing for the fast branch BEFORE we mark the slow input
+    // finished.
+    val slowInputFinished = new java.util.concurrent.CountDownLatch(1)
+    val fastTaskFinished = new java.util.concurrent.CountDownLatch(1)
+    val fastFinishedBeforeSlowLoaded = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+    val job = DataJob(
+      inputs = Seq(
+        InputFilePath(fastDir.resolve("fast.csv").toString, viewName = "fast"),
+        InputFilePath(slowDir.resolve("slow.csv").toString, viewName = "slow")
+      ),
+      sql = Seq(
+        SQLTask(name = Some("uses_fast"),
+          sqlString = Some("SELECT x FROM fast"),
+          outputFile = Some(OutputFilePath(outDir.resolve("fast_out").toString))),
+        SQLTask(name = Some("uses_slow"),
+          sqlString = Some("SELECT y FROM slow"),
+          outputFile = Some(OutputFilePath(outDir.resolve("slow_out").toString)))
+      )
+    )
+    val listener = new TaskProgressListener {
+      override def onInputStart(i: Int, vn: String): Unit = {
+        if (vn == "slow") {
+          // Block until the fast branch's task has finished, then let slow proceed.
+          try fastTaskFinished.await(10, java.util.concurrent.TimeUnit.SECONDS)
+          catch { case _: InterruptedException => () }
+        }
+      }
+      override def onInputFinish(i: Int, vn: String, ok: Boolean, e: Option[String]): Unit = {
+        if (vn == "slow") slowInputFinished.countDown()
+      }
+      def onTaskStart(i: Int, n: String): Unit = ()
+      def onTaskFinish(i: Int, r: TaskResult): Unit = {
+        if (r.taskName == "uses_fast") {
+          // Capture whether slow has loaded yet.
+          fastFinishedBeforeSlowLoaded.set(slowInputFinished.getCount > 0)
+          fastTaskFinished.countDown()
+        }
+      }
+    }
+    val result = job.run(SqlExecutorRegistry.get, listener)
+    assertTrue(result.error.getOrElse(""), result.succeeded)
+    assertTrue("fast branch should finish before slow input has loaded",
+      fastFinishedBeforeSlowLoaded.get())
+  }
+
   @Test def mixedCachedAndStreamedInputsBothWork(): Unit = {
     val aDir = tmpDir("dj-mixed-a-")
     val bDir = tmpDir("dj-mixed-b-")

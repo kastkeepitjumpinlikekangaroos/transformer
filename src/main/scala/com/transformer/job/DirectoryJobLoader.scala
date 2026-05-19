@@ -121,6 +121,7 @@ object DirectoryJobLoader {
         sqlFile = Some(mainSql.toString),
         outputFile = Some(OutputFilePath(
           outputPath,
+          options = cfg.options,
           format = Some(cfg.format.getOrElse("csv")),
           maxPartitions = cfg.maxPartitions
         )),
@@ -133,7 +134,8 @@ object DirectoryJobLoader {
   private final case class OutputConfig(
       partitionBy: Option[String],
       format: Option[String],
-      maxPartitions: Option[Int]
+      maxPartitions: Option[Int],
+      options: Map[String, String]
   )
 
   /** Optional `tables/<viewName>/output.json` config. Supported fields:
@@ -146,13 +148,18 @@ object DirectoryJobLoader {
     *     `"csv"` if omitted.
     *   - `maxPartitions` — cap on the number of `part-*` files written. See
     *     [[OutputFilePath.maxPartitions]] for the coalescing semantics.
+    *   - `options` — flat string-keyed map forwarded to the writer. Format-
+    *     specific; for parquet the supported keys are `compression`
+    *     (`"SNAPPY"` / `"GZIP"` / `"UNCOMPRESSED"`, default uncompressed),
+    *     `parquet_row_group_size` (bytes), and `parquet_write_parallelism`.
+    *     For CSV see [[com.transformer.write.csv.CsvWriteOptions.fromMap]].
     *
     * Returns an empty [[OutputConfig]] if `output.json` is absent. Throws
     * [[IllegalArgumentException]] if it exists but is malformed.
     */
   private def loadOutputConfig(tableDir: Path, viewName: String): OutputConfig = {
     val configPath = tableDir.resolve("output.json")
-    if (!Files.isRegularFile(configPath)) return OutputConfig(None, None, None)
+    if (!Files.isRegularFile(configPath)) return OutputConfig(None, None, None, Map.empty)
     val ctx = s"table '$viewName' (output.json)"
     val obj = Json.parse(Files.readString(configPath)).asObject(ctx)
     val maxPartitions = obj.get("maxPartitions").map { v =>
@@ -167,7 +174,8 @@ object DirectoryJobLoader {
     OutputConfig(
       partitionBy = obj.optString("partitionBy", ctx).map(_.trim).filter(_.nonEmpty),
       format = obj.optString("format", ctx).map(_.trim).filter(_.nonEmpty),
-      maxPartitions = maxPartitions
+      maxPartitions = maxPartitions,
+      options = obj.optStringMap("options", ctx).getOrElse(Map.empty)
     )
   }
 

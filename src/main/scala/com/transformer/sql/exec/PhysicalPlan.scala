@@ -44,11 +44,15 @@ final case class FilterExec(child: PhysicalPlan, predicate: Expr) extends Physic
   def numPartitions: Int = child.numPartitions
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     child.execute(partition).flatMap { batch =>
-      val mask = new Array[Boolean](batch.numRows)
+      val n = batch.numRows
+      // One vectorized predicate eval per batch — primitive bool array, no
+      // per-row Expr dispatch.
+      val resultCol = predicate.evalVec(batch).asInstanceOf[BooleanVector]
+      val mask = new Array[Boolean](n)
       var i = 0
-      while (i < batch.numRows) {
-        val v = predicate.eval(batch, i)
-        mask(i) = (v != null) && v.asInstanceOf[Boolean]
+      while (i < n) {
+        // WHERE: NULL is treated as false (rows excluded).
+        mask(i) = !resultCol.isNull(i) && resultCol.values(i)
         i += 1
       }
       val filtered = batch.select(mask)
@@ -61,27 +65,24 @@ final case class ProjectExec(child: PhysicalPlan, projections: Seq[(Expr, String
   val outputSchema: Schema = Schema(
     projections.iterator.map { case (e, name) => Field(name, e.dataType) }.toVector
   )
+  private val projArr: Array[Expr] = projections.iterator.map(_._1).toArray
   def numPartitions: Int = child.numPartitions
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     child.execute(partition).map(projectBatch)
   }
   private def projectBatch(batch: ColumnarBatch): ColumnarBatch = {
-    val out = new ColumnarBatch(outputSchema, math.max(1, batch.numRows))
-    val ncols = projections.size
+    val n = batch.numRows
+    val ncols = projArr.length
+    val outCols = new Array[ColumnVector](ncols)
     var c = 0
     while (c < ncols) {
-      val (expr, _) = projections(c)
-      val outCol = out.column(c)
-      var r = 0
-      while (r < batch.numRows) {
-        val v = expr.eval(batch, r)
-        if (v == null) outCol.setNull(r) else outCol.setBoxed(r, v)
-        r += 1
-      }
+      // One evalVec call per projection. The returned vector may alias the
+      // input batch (ColRefExpr) or be a freshly-allocated compute result —
+      // either is fine, downstream operators treat batch columns as read-only.
+      outCols(c) = projArr(c).evalVec(batch)
       c += 1
     }
-    out.setNumRows(batch.numRows)
-    out
+    ColumnarBatch.fromColumns(outputSchema, outCols, n)
   }
 }
 

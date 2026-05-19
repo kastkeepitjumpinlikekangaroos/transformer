@@ -281,9 +281,12 @@ the `ValidationFailed → downstream Skipped` scheduler path.
   / 5.6M rows, all 4.1M trade executions, the 124K-row market-metadata
   parquet).
 - The shipped `stg_orderbook` filters the orderbook day to its first 6 hours
-  (≈27M rows) so the single-partition single-threaded parquet scan finishes
-  in a few minutes — remove the `timestamp_received < …` clause in
-  `tables/stg_orderbook/main.sql` to process the full ≈131M-row day.
+  (≈27M rows) so the scan finishes in a few minutes. The orderbook file has
+  139 row groups, so the row-group-level partitioner splits it into ~4
+  partitions of ~256MB each — the scan now runs across multiple cores
+  concurrently instead of single-threaded. Remove the
+  `timestamp_received < …` clause in `tables/stg_orderbook/main.sql` to
+  process the full ≈131M-row day.
 - Produces 17 parquet outputs in a staging → intermediate → mart → final
   layering. Every output is partitioned by `day={{ today }}`. Every task
   (including the deliberately-failed and skipped ones) gets a `_run.json`
@@ -351,6 +354,7 @@ The record captures everything needed to reconstruct the task's UI state:
   "status": "ValidationFailed",
   "errorMessage": null,
   "executionTime": "2026-01-01T05:30:21Z",
+  "enqueuedAt":    "2026-05-18T03:17:02.508Z",
   "startedAt":     "2026-05-18T03:17:02.612Z",
   "finishedAt":    "2026-05-18T03:17:03.099Z",
   "writtenAt":     "2026-05-18T03:17:03.103Z",
@@ -365,6 +369,12 @@ The record captures everything needed to reconstruct the task's UI state:
   ]
 }
 ```
+
+`enqueuedAt` is the moment all of the task's inputs and upstream task results
+were available — i.e. when the runner *would* have started the task if the
+shared worker pool had a free thread. `startedAt - enqueuedAt` is the
+queue-wait time the GUI surfaces alongside the run duration, so you can tell
+"this task ran fast but waited 3s for a worker" from "this task ran for 3s".
 
 The underscore prefix means CSV/Parquet readers skip both the record and the
 validation samples when re-reading the directory as data.
@@ -479,7 +489,7 @@ Options (passed via `InputFilePath.options` / `OutputFilePath.options`):
 | `nullValue` | `""` | Empty string = null |
 | `inferSchema` | `true` | If false, `columns` is required (input) |
 | `charset` | `UTF-8` | |
-| `compression` (output, parquet only) | `snappy` | `uncompressed` / `snappy` / `gzip` |
+| `compression` (output, parquet only) | `snappy` | `uncompressed` / `snappy` / `gzip` — `none` is an alias for `uncompressed`. Set `uncompressed` on tables whose schema is narrow-numeric (timestamps + prices etc.) where dictionary encoding alone is enough — they pay snappy CPU for negligible disk-size savings. |
 
 When `inferSchema = false`, pass an explicit schema:
 
@@ -493,9 +503,24 @@ InputFilePath("data.csv",
 
 ### Parquet
 
-- Read: `parquet-hadoop` with `GroupReadSupport`, local FS only. One row group
-  per partition for built-in parallelism.
-- Write: `ExampleParquetWriter` with `GroupWriteSupport`, snappy by default.
+- Read: vectorized — `parquet-hadoop` open + `ColumnReadStoreImpl` decode
+  straight into `ColumnarBatch` primitive vectors. No `Group`/`SimpleGroup`
+  objects allocated per row. Row groups are packed into ~256MB partitions so a
+  multi-GB single file still saturates worker threads.
+- Read predicate pushdown: `WHERE c <op> lit` and `NOT`/`AND`/`OR` over those
+  forms are translated to parquet-mr's `FilterApi` and applied against each
+  row group's column statistics — groups proven not to match are skipped
+  entirely. The original `FilterExec` still runs above the scan for per-row
+  precision (stats can prove non-matching, never matching). Unsupported
+  conjuncts (computed expressions, two-column predicates, `LIKE`,
+  `IS NULL` / `IS NOT NULL`, decimal columns) drop through as residual
+  filtering.
+- Write: vectorized — custom `WriteSupport[BatchRowRef]` drives parquet-mr's
+  `RecordConsumer` straight from `ColumnarBatch` vectors. No `SimpleGroup` per
+  row, no `Integer`/`Long` boxing per cell. Compression defaults to `snappy`
+  (see the options table above); override per-table via `output.json`'s
+  `options.compression` — `uncompressed` is the right opt-in for pure
+  narrow-numeric tables where dictionary encoding alone is enough.
 - All transformer primitive types map: `Int`, `Long`, `Float`, `Double`,
   `Boolean`, `String` (UTF-8 logical type), `Binary`, `Date` (INT32 days),
   `Timestamp` (INT64 micros).

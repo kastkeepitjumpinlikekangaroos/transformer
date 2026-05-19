@@ -1,6 +1,7 @@
 package com.transformer.sql.exec
 
-import com.transformer.core.DataType
+import com.transformer.core.{CatalogView, DataType}
+import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
 
 import scala.collection.mutable
@@ -12,6 +13,12 @@ object PhysicalPlanner {
 
   def plan(logical: LogicalPlan): PhysicalPlan = logical match {
     case LogicalScan(_, view, _) => ScanExec(view)
+    case LogicalFilter(LogicalScan(name, view, schema), pred) =>
+      // Best-effort: try to push the predicate into the scan view. The original
+      // FilterExec stays in place — pushdown only enables row-group skipping
+      // (stats can prove non-matching groups, never prove matching ones).
+      val pushed = tryPushdown(view, pred)
+      FilterExec(ScanExec(pushed.getOrElse(view)), pred)
     case LogicalFilter(child, pred) => FilterExec(plan(child), pred)
     case LogicalProject(child, projs) => ProjectExec(plan(child), projs)
     // Fast path: `SELECT COUNT(*) FROM <view>` with no WHERE, no GROUP BY, no HAVING.
@@ -37,6 +44,16 @@ object PhysicalPlanner {
       HashJoinExec(left, right, leftKeys, rightKeys, extra, kind)
     case LogicalWindow(child, windows) =>
       WindowExec(plan(child), windows)
+  }
+
+  /** Try to push a bound predicate into the underlying view. Today only
+    * [[ParquetReader]] participates — its `withPushdownFilter` translates the
+    * expression to a parquet `FilterPredicate` and returns a new view that
+    * skips row groups whose column statistics rule them out. Other view
+    * implementations return None and the planner stays on the original. */
+  private def tryPushdown(view: CatalogView, predicate: Expr): Option[CatalogView] = view match {
+    case p: ParquetReader => p.withPushdownFilter(predicate)
+    case _                => None
   }
 
   /** Split an AND-chain of conjuncts into (leftKey, rightKey) equality pairs and a

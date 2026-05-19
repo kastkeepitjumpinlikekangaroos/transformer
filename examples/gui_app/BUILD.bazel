@@ -8,10 +8,15 @@ scala_binary(
     main_class = "com.example.gui.GuiAppLauncher",
     # JVM default heap (~25% of RAM, sometimes much less on macOS / inside
     # containers) is too small for any non-trivial parquet workload — a
-    # 3.9GB compressed input streams through ~10+GB of decoded batches.
-    # The wrapper script honors these; running `java -jar gui_app_deploy.jar`
-    # bypasses them — pass `-Xmx2g` (or larger) explicitly in that case.
-    jvm_flags = ["-Xmx2g"],
+    # 3.9GB compressed input streams through ~10+GB of decoded batches. The
+    # GUI is opened against arbitrary workloads (jaffle_shop, polymarket,
+    # whatever the user points at) so we can't pin a fixed -Xmx that's right
+    # for all of them. MaxRAMPercentage lets the JVM scale to whatever box
+    # the GUI runs on — 75% leaves headroom for the OS, IDE, browser, etc.
+    # The wrapper script honors this; running `java -jar gui_app_deploy.jar`
+    # bypasses it — pass `-XX:MaxRAMPercentage=75.0` (or a fixed `-Xmx`)
+    # explicitly in that case.
+    jvm_flags = ["-XX:MaxRAMPercentage=75.0"],
     deps = [
         # strict-deps: SqlEngine.init returns a type from core, so we list core
         # explicitly even though gui already depends on it transitively.

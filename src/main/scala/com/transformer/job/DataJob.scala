@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, MaterializedView, Schema, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, MaterializedView, Scheduler, Schema, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
@@ -8,7 +8,7 @@ import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
 
 import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
-import java.util.concurrent.{Callable, Executors, LinkedBlockingQueue, TimeUnit}
+import java.util.concurrent.{Callable, LinkedBlockingQueue}
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
@@ -18,6 +18,15 @@ import scala.util.control.NonFatal
   * `part-NNNNN.<ext>` files inside its directory (one per source partition by
   * default; capped by [[OutputFilePath.maxPartitions]] when set). Part files
   * are written in parallel.
+  *
+  * Scheduling model: inputs and SQL tasks are scheduled together on a single
+  * shared [[com.transformer.core.Scheduler]] work-stealing pool. Each input
+  * load is a top-level node; each SQL task waits for its referenced input
+  * loads and any upstream task results before it becomes eligible. Independent
+  * branches (e.g. `raw_features → stg_features → ...` and
+  * `raw_orderbook → stg_orderbook → ...`) run concurrently from the very first
+  * worker tick — there is no pre-task barrier where every input must finish
+  * loading before any SQL runs.
   */
 final case class DataJob(
     inputs: Seq[InputFilePath],
@@ -58,63 +67,15 @@ final case class DataJob(
     val runStarted = Instant.now()
     val catalog = new Catalog
 
-    // Phase 1: resolve every input in parallel, then drain inputs marked
-    // `cache = true` into memory on the same shared pool. Inputs marked
-    // `cache = false` register their raw streaming CatalogView (e.g. the
-    // ParquetReader itself) — each query re-reads from disk instead of
-    // holding all decompressed data in heap. The pool is sized to all
-    // available cores so independent (input, partition) reads saturate the
-    // CPU even with a mix of small + large inputs.
-    val cores = math.max(1, Runtime.getRuntime.availableProcessors)
-    val inputPool = Executors.newFixedThreadPool(cores)
-    try {
-      // 1a: resolve in parallel (schema inference for CSV, footer reads for Parquet).
-      val resolveFutures = inputs.map { in =>
-        inputPool.submit(new Callable[(String, CatalogView)] {
-          def call(): (String, CatalogView) = {
-            val rendered = in.copy(path = TemplateRenderer.render(in.path, vars))
-            (in.viewName, InputResolver.resolve(rendered))
-          }
-        })
-      }
-      val resolved: Seq[(String, CatalogView)] = resolveFutures.map(_.get())
-
-      // 1b: drain `cache = true` inputs across every partition on the same pool —
-      // one Callable per partition across every cached view, so the pool naturally
-      // interleaves small and large inputs. `cache = false` inputs skip this step.
-      val cachedPairs: Seq[(Int, CatalogView)] = inputs.iterator.zipWithIndex.collect {
-        case (in, i) if in.cache => (i, resolved(i)._2)
-      }.toSeq
-      val cachedMaterialized: IndexedSeq[MaterializedView] =
-        if (cachedPairs.isEmpty) IndexedSeq.empty
-        else MaterializedView.materializeManyInParallel(cachedPairs.map(_._2), inputPool)
-      val materializedByIdx: Map[Int, MaterializedView] =
-        cachedPairs.iterator.map(_._1).zip(cachedMaterialized.iterator).toMap
-
-      resolved.iterator.zipWithIndex.foreach { case ((name, raw), i) =>
-        catalog.register(name, materializedByIdx.getOrElse(i, raw))
-      }
-    } catch {
-      case NonFatal(e) =>
-        inputPool.shutdownNow()
-        val hint = oomHint(e)
-        return JobResult(succeeded = false, tasks = Nil,
-          error = Some(s"Failed to load inputs: ${e.getMessage}$hint"))
-    } finally {
-      inputPool.shutdown()
-      inputPool.awaitTermination(1, TimeUnit.MINUTES)
-    }
-
-    // Phase 2: build a DAG from each task's SQL (main + validations) and execute it
-    // in parallel — independent branches run concurrently; downstream tasks of a failed
-    // task are Skipped; independent siblings keep going.
+    val inputViewNames = inputs.iterator.map(_.viewName.toLowerCase).toSet
     val dag =
-      try TaskDag.build(sql, catalog.viewNames.iterator.map(_.toLowerCase).toSet, vars)
+      try TaskDag.build(sql, inputViewNames, vars)
       catch {
         case NonFatal(e) =>
           return JobResult(succeeded = false, tasks = Nil, error = Some(e.getMessage))
       }
-    val results = runDag(dag, executor, catalog, vars, listener)
+
+    val results = runUnifiedDag(dag, executor, catalog, vars, listener)
     val runFinished = Instant.now()
 
     val warnings = runConsistencyChecks(results.toSeq)
@@ -129,99 +90,213 @@ final case class DataJob(
     )
   }
 
-  private def runDag(
+  /** Unified completion-driven scheduler over inputs + SQL tasks.
+    *
+    * Lifecycle of one task:
+    *   1. Initial state: `pendingTaskDeps(i)` + `pendingInputDeps(i)` count what's
+    *      still outstanding.
+    *   2. When an input load completes (success OR failure), every SQL task that
+    *      referenced it sees its `pendingInputDeps` decremented.
+    *   3. When a task completes, every dependent's `pendingTaskDeps` decrements.
+    *   4. A task with both counts at 0 fires `onTaskEnqueued`, captures
+    *      `enqueuedAt`, and submits to the pool. The worker stamps `startedAt`
+    *      when it picks the task up — so queue-wait time is observable.
+    *   5. If any upstream (input or task) failed, the task is marked Skipped
+    *      immediately when it becomes "ready" — no work is submitted to the pool
+    *      for it.
+    *
+    * The main scheduler thread is the calling thread; workers complete and push
+    * events onto a [[LinkedBlockingQueue]] which the scheduler drains in order.
+    * That gives us serialized state updates without locks while keeping the work
+    * itself fully parallel on the shared pool.
+    */
+  private def runUnifiedDag(
       dag: TaskDag,
       executor: SqlExecutor,
       catalog: Catalog,
       vars: TemporalVariables,
       listener: TaskProgressListener
   ): Array[TaskResult] = {
-    val n = dag.nodes.size
-    val results = Array.ofDim[TaskResult](n)
-    if (n == 0) return results
-    val inDegree = Array.tabulate(n)(i => dag.nodes(i).deps.size)
-    val completed = new LinkedBlockingQueue[Int]()
-    val taskPool = Executors.newFixedThreadPool(
-      math.max(1, math.min(n, Runtime.getRuntime.availableProcessors))
-    )
-    try {
-      def submit(i: Int): Unit = {
-        taskPool.submit(new Callable[Void] {
-          def call(): Void = {
-            try {
-              val depResults = dag.nodes(i).deps.iterator.map(results).toSeq
-              val failedDeps = depResults.filter(_.status != TaskStatus.Succeeded)
-              results(i) =
-                if (failedDeps.nonEmpty) {
-                  val names = failedDeps.map(_.taskName).mkString(", ")
-                  val reason = s"upstream failure: $names"
-                  val now = Instant.now()
-                  val node = dag.nodes(i)
-                  writeSkippedRecord(node, reason, now, vars)
-                  TaskResult(node.task.displayName,
-                    TaskStatus.Skipped(reason),
-                    0L, None, now, now)
-                } else {
-                  try listener.onTaskStart(i, dag.nodes(i).task.displayName)
-                  catch { case _: Throwable => () }
-                  runOneTask(dag.nodes(i), executor, catalog, vars)
-                }
-            } catch {
-              case t: Throwable =>
-                // Defensive — runOneTask catches NonFatal itself. This only fires on
-                // Fatal or an impl bug; convert to Failed so the scheduler can never
-                // deadlock waiting on a worker that swallowed its own exception.
-                val now = Instant.now()
-                val node = dag.nodes(i)
-                val msg = s"orchestration error: ${t.getMessage}"
-                writeFailedRecord(node, msg, now, now, vars)
-                results(i) = TaskResult(
-                  node.task.displayName,
-                  TaskStatus.Failed(msg),
-                  0L, None, now, now
-                )
-            } finally {
-              try listener.onTaskFinish(i, results(i))
-              catch { case _: Throwable => () }
-              completed.put(i)
-            }
-            null
-          }
-        })
-        ()
-      }
-      var i = 0
-      while (i < n) {
-        if (inDegree(i) == 0) submit(i)
-        i += 1
-      }
-      var done = 0
-      while (done < n) {
-        val finished = completed.take()
-        done += 1
-        dag.dependents(finished).foreach { j =>
-          inDegree(j) -= 1
-          if (inDegree(j) == 0) submit(j)
+    val nTasks = dag.nodes.size
+    val taskResults = Array.ofDim[TaskResult](nTasks)
+
+    // ---- Input-dep bookkeeping ---------------------------------------------
+    // For each lowercased input name → set of task indices that consume it.
+    // Mutating these sets is single-threaded (only the scheduler loop touches them).
+    val taskDependents: Array[mutable.Set[Int]] =
+      Array.fill(nTasks)(mutable.Set.empty[Int])
+    dag.nodes.iterator.foreach { node =>
+      node.deps.foreach(d => taskDependents(d) += node.index)
+    }
+
+    val pendingTaskDeps = Array.tabulate(nTasks)(i => dag.nodes(i).deps.size)
+    val pendingInputDeps = Array.tabulate(nTasks)(i => dag.nodes(i).inputDeps.size)
+    // Once any of a task's upstreams (task or input) fails, this flips true and
+    // the task is Skipped when it becomes ready. We carry the failure reason
+    // through so the recorded "Skipped" record names the actual failing upstream.
+    val upstreamFailed = Array.fill(nTasks)(false)
+    val upstreamFailReason = Array.fill[Option[String]](nTasks)(None)
+
+    val inputDependents: Map[String, Vector[Int]] = {
+      val builder = mutable.Map.empty[String, mutable.ArrayBuffer[Int]]
+      dag.nodes.iterator.foreach { node =>
+        node.inputDeps.foreach { name =>
+          builder.getOrElseUpdate(name, mutable.ArrayBuffer.empty[Int]) += node.index
         }
       }
-    } finally {
-      taskPool.shutdown()
-      taskPool.awaitTermination(1, TimeUnit.MINUTES)
+      builder.iterator.map { case (k, v) => k -> v.toVector }.toMap
     }
-    results
+
+    // ---- Event queue --------------------------------------------------------
+    sealed trait Event
+    final case class InputCompleted(name: String, success: Boolean, error: Option[String]) extends Event
+    final case class TaskCompleted(index: Int, result: TaskResult) extends Event
+
+    val events = new LinkedBlockingQueue[Event]()
+
+    // ---- Input loading ------------------------------------------------------
+    val nInputs = inputs.size
+
+    // Submit one Callable per input. The input load resolves the path, optionally
+    // materializes for cache=true, registers the view in the catalog, and posts
+    // an `InputCompleted` event onto the scheduler queue.
+    inputs.iterator.zipWithIndex.foreach { case (in, i) =>
+      val key = in.viewName.toLowerCase
+      Scheduler.submit(new Callable[Unit] {
+        def call(): Unit = {
+          try listener.onInputStart(i, in.viewName) catch { case _: Throwable => () }
+          val (success, error) =
+            try {
+              val rendered = in.copy(path = TemplateRenderer.render(in.path, vars))
+              val raw = InputResolver.resolve(rendered)
+              val view: CatalogView =
+                if (in.cache) MaterializedView.materializeInParallel(raw)
+                else raw
+              catalog.register(in.viewName, view)
+              (true, None)
+            } catch {
+              case NonFatal(e) =>
+                val hint = oomHint(e)
+                (false, Some(s"failed to load input '${in.viewName}': ${e.getMessage}$hint"))
+            }
+          try listener.onInputFinish(i, in.viewName, success, error)
+          catch { case _: Throwable => () }
+          events.put(InputCompleted(key, success, error))
+        }
+      })
+    }
+
+    // ---- Task submission ----------------------------------------------------
+    def maybeSubmit(i: Int): Unit = {
+      if (pendingTaskDeps(i) == 0 && pendingInputDeps(i) == 0 && taskResults(i) == null) {
+        val node = dag.nodes(i)
+        val enqueuedAt = Instant.now()
+        if (upstreamFailed(i)) {
+          val reason = upstreamFailReason(i).getOrElse("upstream failure")
+          writeSkippedRecord(node, reason, enqueuedAt, vars)
+          val tr = TaskResult(
+            node.task.displayName, TaskStatus.Skipped(reason), 0L, None,
+            startedAt = enqueuedAt, finishedAt = enqueuedAt, enqueuedAt = enqueuedAt
+          )
+          taskResults(i) = tr
+          try listener.onTaskFinish(i, tr) catch { case _: Throwable => () }
+          // Propagate Skipped to downstream
+          taskDependents(i).foreach { d =>
+            if (!upstreamFailed(d)) {
+              upstreamFailed(d) = true
+              upstreamFailReason(d) = Some(s"upstream skipped: ${node.task.displayName}")
+            }
+            pendingTaskDeps(d) -= 1
+            maybeSubmit(d)
+          }
+        } else {
+          try listener.onTaskEnqueued(i, node.task.displayName)
+          catch { case _: Throwable => () }
+          val needsView = taskDependents(i).nonEmpty
+          Scheduler.submit(new Callable[Unit] {
+            def call(): Unit = {
+              try listener.onTaskStart(i, node.task.displayName)
+              catch { case _: Throwable => () }
+              val result = runOneTask(node, executor, catalog, vars, enqueuedAt, needsView)
+              try listener.onTaskFinish(i, result) catch { case _: Throwable => () }
+              events.put(TaskCompleted(i, result))
+            }
+          })
+        }
+      }
+    }
+
+    def handleInputCompletion(name: String, success: Boolean, error: Option[String]): Unit = {
+      inputDependents.getOrElse(name, Vector.empty).foreach { i =>
+        pendingInputDeps(i) -= 1
+        if (!success && !upstreamFailed(i)) {
+          upstreamFailed(i) = true
+          upstreamFailReason(i) = error.orElse(Some(s"upstream input '$name' failed"))
+        }
+        maybeSubmit(i)
+      }
+    }
+
+    def handleTaskCompletion(i: Int, result: TaskResult): Unit = {
+      taskDependents(i).foreach { d =>
+        if (!result.succeeded && !upstreamFailed(d)) {
+          upstreamFailed(d) = true
+          upstreamFailReason(d) = Some(s"upstream ${describeUpstreamFailure(result)}: ${result.taskName}")
+        }
+        pendingTaskDeps(d) -= 1
+        maybeSubmit(d)
+      }
+    }
+
+    // Kick off any tasks that had zero deps from the start (no task-deps AND no
+    // input-deps). Such tasks are rare but possible — e.g. a task with a literal
+    // SELECT or a UNION of constants — and the loop below assumes the initial
+    // ready set has already been kicked.
+    var i = 0
+    while (i < nTasks) {
+      maybeSubmit(i)
+      i += 1
+    }
+
+    // ---- Drain events until every input + task is resolved ------------------
+    var remainingInputs = nInputs
+    var remainingTasks = nTasks - taskResults.count(_ != null)
+    while (remainingInputs > 0 || remainingTasks > 0) {
+      events.take() match {
+        case InputCompleted(name, success, error) =>
+          remainingInputs -= 1
+          handleInputCompletion(name, success, error)
+        case TaskCompleted(idx, result) =>
+          taskResults(idx) = result
+          remainingTasks -= 1
+          handleTaskCompletion(idx, result)
+      }
+      // The early-skip path inside maybeSubmit may have synchronously filled
+      // taskResults for transitively-skipped descendants; recount.
+      remainingTasks = nTasks - taskResults.count(_ != null)
+    }
+
+    taskResults
+  }
+
+  private def describeUpstreamFailure(result: TaskResult): String = result.status match {
+    case TaskStatus.Failed(_)           => "failed"
+    case TaskStatus.ValidationFailed(_) => "validation failed"
+    case TaskStatus.Skipped(_)          => "skipped"
+    case _                              => "unsuccessful"
   }
 
   private def runOneTask(
       node: TaskDagNode,
       executor: SqlExecutor,
       catalog: Catalog,
-      vars: TemporalVariables
+      vars: TemporalVariables,
+      enqueuedAt: Instant,
+      hasDownstreamConsumers: Boolean
   ): TaskResult = {
     val task = node.task
     val started = Instant.now()
     val taskName = task.displayName
-    // Track the rendered output path even on failure so we can stamp the
-    // _run.json into the same directory the data would have landed in.
     var renderedOutputForRecord: Option[(OutputFilePath, String)] = None
     try {
       val q = executor.execute(node.renderedMainSql, catalog)
@@ -236,7 +311,14 @@ final case class DataJob(
         (ofp, rendered)
       }
 
-      if (task.viewName.isDefined || task.validations.nonEmpty) {
+      // Re-publish the freshly-written output to the catalog ONLY when something
+      // downstream still needs to read it: a DAG dependent task, or this task's
+      // own validations. A task with `viewName` declared but no consumers and no
+      // validations doesn't need the parquet/CSV re-read — we'd just be re-opening
+      // footers and discarding the view. For the polymarket workload that re-read
+      // dominates the per-task tail latency on the leaf mart_* tables.
+      val needsCatalogView = hasDownstreamConsumers || task.validations.nonEmpty
+      if (needsCatalogView) {
         val name = task.viewName.getOrElse(s"__task_${node.index}")
         val materialized = materializeIfNeeded(q.schema, writtenOutput)
         catalog.replace(name, materialized)
@@ -244,28 +326,26 @@ final case class DataJob(
         val outputPath = writtenOutput.map(_._2)
         val finished = Instant.now()
         if (failures.nonEmpty) {
-          writeValidationFailedRecord(node, writtenOutput, q.rowsProduced, failures, started, finished, vars)
-          TaskResult(taskName, TaskStatus.ValidationFailed(failures), q.rowsProduced, outputPath, started, finished)
+          writeValidationFailedRecord(node, writtenOutput, q.rowsProduced, failures, enqueuedAt, started, finished, vars)
+          TaskResult(taskName, TaskStatus.ValidationFailed(failures), q.rowsProduced, outputPath, started, finished, enqueuedAt)
         } else {
-          writeSucceededRecord(node, writtenOutput, q.rowsProduced, started, finished, vars)
-          TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, finished)
+          writeSucceededRecord(node, writtenOutput, q.rowsProduced, enqueuedAt, started, finished, vars)
+          TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, finished, enqueuedAt)
         }
       } else {
         if (writtenOutput.isEmpty) {
-          // No output, no downstream view: drain the result so any side-effects of
-          // execution (and `rowsProduced`) still happen.
           while (q.batches.hasNext) q.batches.next()
         }
         val finished = Instant.now()
-        writeSucceededRecord(node, writtenOutput, q.rowsProduced, started, finished, vars)
-        TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, writtenOutput.map(_._2), started, finished)
+        writeSucceededRecord(node, writtenOutput, q.rowsProduced, enqueuedAt, started, finished, vars)
+        TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, writtenOutput.map(_._2), started, finished, enqueuedAt)
       }
     } catch {
       case NonFatal(e) =>
         val finished = Instant.now()
         val msg = Option(e.getMessage).getOrElse(e.toString)
-        writeFailedRecord(node, msg, started, finished, vars)
-        TaskResult(taskName, TaskStatus.Failed(msg), 0L, None, started, finished)
+        writeFailedRecord(node, msg, enqueuedAt, started, finished, vars)
+        TaskResult(taskName, TaskStatus.Failed(msg), 0L, None, started, finished, enqueuedAt)
     }
   }
 
@@ -276,6 +356,7 @@ final case class DataJob(
       node: TaskDagNode,
       writtenOutput: Option[(OutputFilePath, String)],
       rowsProduced: Long,
+      enqueuedAt: Instant,
       startedAt: Instant,
       finishedAt: Instant,
       vars: TemporalVariables
@@ -298,7 +379,8 @@ final case class DataJob(
         rowsProduced = rowsProduced,
         format = ofp.detectedFormat,
         outputFiles = files,
-        validations = validations
+        validations = validations,
+        enqueuedAt = Some(enqueuedAt)
       ))
     } catch { case NonFatal(_) => () }
   }
@@ -312,6 +394,7 @@ final case class DataJob(
       writtenOutput: Option[(OutputFilePath, String)],
       rowsProduced: Long,
       failures: Seq[ValidationFailure],
+      enqueuedAt: Instant,
       startedAt: Instant,
       finishedAt: Instant,
       vars: TemporalVariables
@@ -348,7 +431,8 @@ final case class DataJob(
         rowsProduced = rowsProduced,
         format = ofp.detectedFormat,
         outputFiles = files,
-        validations = validations
+        validations = validations,
+        enqueuedAt = Some(enqueuedAt)
       ))
     } catch { case NonFatal(_) => () }
   }
@@ -359,6 +443,7 @@ final case class DataJob(
   private def writeFailedRecord(
       node: TaskDagNode,
       errorMessage: String,
+      enqueuedAt: Instant,
       startedAt: Instant,
       finishedAt: Instant,
       vars: TemporalVariables
@@ -367,7 +452,6 @@ final case class DataJob(
     try {
       val rendered = TemplateRenderer.render(ofp.path, vars)
       val dir = Paths.get(rendered)
-      // Wipe any prior data so the directory's state matches "tried, failed".
       TaskRunRecord.clearIfMarked(dir)
       TaskRunRecord.write(dir, TaskRunRecord(
         schemaVersion = TaskRunRecord.SchemaVersion,
@@ -383,7 +467,8 @@ final case class DataJob(
         outputFiles = Nil,
         validations = node.task.validations.map(v =>
           ValidationRecord(v.name, passed = false, failedRowCount = 0L, sampleFile = None)
-        )
+        ),
+        enqueuedAt = Some(enqueuedAt)
       ))
     } catch { case NonFatal(_) => () }
   }
@@ -414,7 +499,8 @@ final case class DataJob(
         outputFiles = Nil,
         validations = node.task.validations.map(v =>
           ValidationRecord(v.name, passed = false, failedRowCount = 0L, sampleFile = None)
-        )
+        ),
+        enqueuedAt = Some(now)
       ))
     } catch { case NonFatal(_) => () }
   }
@@ -427,10 +513,6 @@ final case class DataJob(
       ofp: OutputFilePath, renderedPath: String, q: ExecutedQuery): Unit = {
     val parts = coalescedPartitions(q, ofp.maxPartitions)
     val dir = Paths.get(renderedPath)
-    // If a prior run is recorded in this directory, wipe its files first so a
-    // format / partition-count / status change doesn't leave stale outputs
-    // (e.g. `.csv` files inside a parquet dir, or a stale Failed marker
-    // beside fresh data).
     TaskRunRecord.clearIfMarked(dir)
     ofp.detectedFormat match {
       case "csv" =>
@@ -609,8 +691,6 @@ final case class DataJob(
         val dir = Paths.get(outPath)
         TaskRunRecord.read(dir) match {
           case None =>
-            // We just wrote a record for every terminal-status task with an
-            // outputFile; not seeing one here means a write failed.
             warnings += s"task '${r.taskName}': missing _run.json in $outPath"
           case Some(rec) =>
             rec.outputFiles.foreach { f =>
@@ -632,8 +712,8 @@ final case class DataJob(
   /** Detect an OOM anywhere in the cause chain and append a hint pointing at the
     * `cache: false` escape hatch. Empty string when the failure isn't memory-related.
     *
-    * Why: input materialization runs futures on a pool, so a real OOM in the
-    * drain loop comes back as `ExecutionException` whose cause is the OOM —
+    * Why: input materialization runs on a shared pool, so a real OOM in the drain
+    * loop comes back wrapped in `ExecutionException` whose cause is the OOM —
     * `getMessage` alone hides what actually went wrong.
     */
   private def oomHint(t: Throwable): String = {
@@ -649,4 +729,3 @@ final case class DataJob(
     ""
   }
 }
-

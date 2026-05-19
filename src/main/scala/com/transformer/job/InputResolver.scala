@@ -18,7 +18,10 @@ object InputResolver {
       case "csv" =>
         CsvReader.fromPath(input.path, CsvOptions.fromMap(input.options))
       case "parquet" =>
-        ParquetReader.fromPath(input.path)
+        val target = input.options.get("read_partition_size_bytes")
+          .map(_.toLong).getOrElse(ParquetReader.DefaultTargetBytesPerPartition)
+        ParquetReader.fromPath(input.path,
+          com.transformer.core.ColumnarBatch.DefaultCapacity, target)
       case other =>
         throw new IllegalArgumentException(
           s"Unsupported format '$other' for path '${input.path}'. Supported: csv, parquet."

@@ -285,10 +285,16 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends HBox 
     session.beginRun()
 
     val listener = new TaskProgressListener {
+      override def onTaskEnqueued(taskIndex: Int, taskName: String): Unit =
+        FxHelpers.onFx(session.markTaskQueued(taskIndex))
       def onTaskStart(taskIndex: Int, taskName: String): Unit =
         FxHelpers.onFx(session.markTaskRunning(taskIndex))
       def onTaskFinish(taskIndex: Int, result: TaskResult): Unit =
         FxHelpers.onFx(session.markTaskFinished(taskIndex, result))
+      override def onInputStart(inputIndex: Int, viewName: String): Unit =
+        FxHelpers.onFx(session.markInputLoading(inputIndex))
+      override def onInputFinish(inputIndex: Int, viewName: String, succeeded: Boolean, errorMessage: Option[String]): Unit =
+        FxHelpers.onFx(session.markInputFinished(inputIndex, succeeded, errorMessage))
     }
 
     val worker = new Thread(new Runnable {
