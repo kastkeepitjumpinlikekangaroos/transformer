@@ -1080,8 +1080,9 @@ class SqlEngineTest {
   // strings, NULL keys grouping together, multi-column joins with NULLs,
   // wide DISTINCT.
 
-  @Test def groupByLongOnlyExercisesPackedCodec(): Unit = {
-    // Single Long key → PackedBytesCodec, fast encodeFromBatch path.
+  @Test def groupByLongOnlyExercisesLongHashMapFastPath(): Unit = {
+    // Single Long-fittable ColRef key → LongHashMap (Phase 6 fast path),
+    // primitive long stored unboxed in the hash table.
     val p = tmpCsv("a.csv", "k,v\n100,1\n200,2\n100,3\n200,4\n100,5\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
     val q = SqlEngine.execute("SELECT k, SUM(v) AS s, COUNT(*) AS n FROM t GROUP BY k", cat)
@@ -1199,8 +1200,9 @@ class SqlEngineTest {
   }
 
   @Test def joinOnTwoLongKeysHitsPackedCodec(): Unit = {
-    // Both join columns are integers → PackedBytesCodec on the probe-side
-    // encodeFromBatchSkipIfAnyNull fast path.
+    // Both join columns are integers, multi-column → PackedBytesCodec on the
+    // probe-side encodeFromBatchSkipIfAnyNull fast path (not LongHashMap —
+    // that needs a single column).
     val left = tmpCsv("l.csv", "a,b,n\n1,10,one\n2,20,two\n3,30,three\n")
     val right = tmpCsv("r.csv", "a,b,m\n1,10,X\n2,20,Y\n2,21,Z\n")
     val cat = new Catalog
@@ -1212,5 +1214,61 @@ class SqlEngineTest {
     assertEquals(2, rows.size)
     assertEquals(Seq("one", "two"), rows.map(_("n")))
     assertEquals(Seq("X", "Y"), rows.map(_("m")))
+  }
+
+  @Test def joinOnSingleLongKeyHitsLongHashMapFastPath(): Unit = {
+    // Single Long-fittable ColRef on both sides → LongHashMap (Phase 6 fast
+    // path). Includes NULL keys on both sides — must produce no-match per SQL
+    // 3VL, identical to the codec path.
+    val left = tmpCsv("l.csv",
+      "id,n\n1,alice\n2,bob\n3,charlie\n,danny\n")
+    val right = tmpCsv("r.csv",
+      "user_id,score\n1,100\n3,50\n,99\n4,80\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.n, s.score FROM u JOIN s ON u.id = s.user_id ORDER BY u.n", cat)
+    val rows = collectAllRows(q)
+    assertEquals(2, rows.size) // alice + charlie; danny's NULL id matches nothing
+    assertEquals(Seq("alice", "charlie"), rows.map(_("n")))
+    assertEquals(Seq(100, 50), rows.map(_("score")))
+  }
+
+  @Test def leftJoinOnSingleLongKeyPreservesUnmatched(): Unit = {
+    // LEFT outer with single-Long join key — LongHashMap fast path must still
+    // emit unmatched-left rows with NULL right-side columns, including the
+    // left row whose key is NULL itself.
+    val left = tmpCsv("l.csv",
+      "id,n\n1,alice\n2,bob\n,danny\n")
+    val right = tmpCsv("r.csv",
+      "user_id,score\n1,100\n3,50\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.n, s.score FROM u LEFT JOIN s ON u.id = s.user_id ORDER BY u.n", cat)
+    val rows = collectAllRows(q)
+    assertEquals(3, rows.size)
+    assertEquals(Seq("alice", "bob", "danny"), rows.map(_("n")))
+    assertEquals(Seq(100, null, null), rows.map(_("score")))
+  }
+
+  @Test def groupBySingleLongWithNullKeyOnLongHashMapPath(): Unit = {
+    // Single-Long GROUP BY with NULL keys — LongHashMap path must put all
+    // NULL-keyed rows into one bucket (matching SQL GROUP BY semantics).
+    val p = tmpCsv("a.csv", "k,v\n1,10\n,20\n1,30\n,40\n2,50\n,60\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions(
+      inferSchema = false,
+      columns = Some(Seq(Field("k", DataType.LongType), Field("v", DataType.IntType))))))
+    val q = SqlEngine.execute("SELECT k, COUNT(*) AS n, SUM(v) AS s FROM t GROUP BY k", cat)
+    val rows = collectAllRows(q)
+    val byKey: Map[Any, (Long, Long)] = rows.map { r =>
+      (r("k"), (r("n").asInstanceOf[Long], r("s").asInstanceOf[Long]))
+    }.toMap
+    assertEquals(3, byKey.size)
+    assertEquals((2L, 40L), byKey(1L))     // k=1: 10+30
+    assertEquals((1L, 50L), byKey(2L))     // k=2: 50
+    assertEquals((3L, 120L), byKey(null))  // NULL: 20+40+60
   }
 }

@@ -10,8 +10,18 @@ relevant module lives, and that you'll follow the workflow in
 1. Add it to `Funcs.returnType` in `sql/plan/Funcs.scala` so the analyzer
    knows the return type.
 2. Add an `apply` case in the same file with the runtime semantics.
-3. Add a test in `src/test/scala/com/transformer/sql/exec/SqlEngineTest.scala`.
-4. Update [`README.md`'s "SQL features"](../README.md#sql-features) so users
+3. **For hot functions, also add a `Funcs.applyVec` case and a `VecFuncs`
+   helper.** The vectorized path eliminates per-row Expr dispatch in
+   `ProjectExec` / `FilterExec` and per-row key eval in
+   `HashAggregateExec` / `HashJoinExec` / `WindowExec` for `GROUP BY f(...)`
+   shapes. "Hot" = appears in jaffle / polymarket SELECT lists or WHERE
+   predicates over millions of rows. Unknown / unsupported names fall
+   through to the default boxed loop — correct, just slow.
+4. **Add a `FuncExpr` parity case to `ExprBatchTest`** when you add a
+   vectorized path. Cover no-null / mixed-null / all-null inputs and any
+   special branches (variadic args, null arg propagation rules).
+5. Add an end-to-end test in `src/test/scala/com/transformer/sql/exec/SqlEngineTest.scala`.
+6. Update [`README.md`'s "SQL features"](../README.md#sql-features) so users
    can see the new function in the supported list.
 
 ## Add an aggregate function
@@ -19,10 +29,17 @@ relevant module lives, and that you'll follow the workflow in
 1. New `AggExpr*` case class in `sql/plan/Expr.scala`. Set `resultType`.
 2. New `AggState` subclass in `sql/exec/AggregateExec.scala` implementing
    `update`/`merge`/`finish`.
-3. Wire it in `AggState.init` (`AggregateExec.scala`) and
+3. **For primitive aggregates, override `AggState.updateBatch`** to read
+   the aggregate's argument vector via `Expr.evalVec` and walk it with the
+   column-type pattern match hoisted outside the row loop. The default
+   loops the per-row `update` (correct, but pays per-row `Expr.eval`); the
+   override is what wins on the no-GROUP-BY fast path in
+   `HashAggregateExec`. See `LongSumState.updateBatch` for the canonical
+   shape (pattern match on `LongVector` / `IntVector` / generic fallback).
+4. Wire it in `AggState.init` (`AggregateExec.scala`) and
    `LogicalBuilder.bindAgg` (`sql/plan/LogicalBuilder.scala`).
-4. Test it.
-5. Update [`README.md`'s "SQL features"](../README.md#sql-features) and (if
+5. Test it.
+6. Update [`README.md`'s "SQL features"](../README.md#sql-features) and (if
    the change affects window behaviour) the window-fn note in
    [architecture.md §6](architecture.md#6-window-functions-two-stage-logical-binding).
 

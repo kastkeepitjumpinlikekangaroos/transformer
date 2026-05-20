@@ -389,4 +389,141 @@ class HashKeysTest {
     map.put(codec.encodeFromBatch(b1, 0), 7)
     assertEquals(java.lang.Integer.valueOf(7), map.get(codec.encodeFromBatch(b2, 0)))
   }
+
+  // ---------------------------------------------------------------------------
+  // LongHashMap
+  // ---------------------------------------------------------------------------
+
+  @Test def longHashMapBasicPutAndGet(): Unit = {
+    val m = new LongHashMap[String]()
+    assertEquals(0, m.size)
+    assertNull(m.get(42L))
+    assertNull(m.put(42L, "answer"))
+    assertEquals("answer", m.get(42L))
+    assertEquals(1, m.size)
+    assertEquals("answer", m.put(42L, "new"))
+    assertEquals("new", m.get(42L))
+    assertEquals(1, m.size)
+  }
+
+  @Test def longHashMapNullKey(): Unit = {
+    val m = new LongHashMap[String]()
+    assertNull(m.getNull)
+    assertEquals("absent", m.getOrInsertNull("absent"))
+    assertEquals("absent", m.getNull)
+    assertEquals("absent", m.getOrInsertNull("ignored"))
+    assertEquals(1, m.size)
+  }
+
+  @Test def longHashMapGetOrInsertOnlyEvaluatesOnAbsent(): Unit = {
+    val m = new LongHashMap[String]()
+    var calls = 0
+    def supplier: String = { calls += 1; "v" }
+    m.getOrInsert(1L, supplier)
+    m.getOrInsert(1L, supplier)
+    m.getOrInsert(1L, supplier)
+    assertEquals(1, calls)
+  }
+
+  @Test def longHashMapInsertionOrderPreserved(): Unit = {
+    val m = new LongHashMap[String]()
+    m.put(3L, "three")
+    m.put(1L, "one")
+    m.getOrInsertNull("null")
+    m.put(2L, "two")
+    m.put(1L, "one-overwrite") // overwrite doesn't change position
+    val pairs = m.iterator.toList
+    assertEquals(4, pairs.size)
+    assertEquals(java.lang.Long.valueOf(3L), pairs(0)._1); assertEquals("three", pairs(0)._2)
+    assertEquals(java.lang.Long.valueOf(1L), pairs(1)._1); assertEquals("one-overwrite", pairs(1)._2)
+    assertNull(pairs(2)._1);                                assertEquals("null", pairs(2)._2)
+    assertEquals(java.lang.Long.valueOf(2L), pairs(3)._1); assertEquals("two", pairs(3)._2)
+  }
+
+  @Test def longHashMapResizesWithoutLosingEntries(): Unit = {
+    // Force several resize cycles: 16 → 32 → 64 → 128 → 256.
+    val m = new LongHashMap[java.lang.Long]()
+    var i = 0L
+    while (i < 200L) { m.put(i, java.lang.Long.valueOf(i * 10L)); i += 1L }
+    assertEquals(200, m.size)
+    i = 0L
+    while (i < 200L) {
+      assertEquals(s"key $i lookup", java.lang.Long.valueOf(i * 10L), m.get(i))
+      i += 1L
+    }
+    // Insertion order preserved across resizes
+    val keys = m.iterator.map(_._1.longValue).toList
+    assertEquals((0L until 200L).toList, keys)
+  }
+
+  @Test def longHashMapHandlesNegativeAndExtremeKeys(): Unit = {
+    val m = new LongHashMap[String]()
+    m.put(0L, "zero")
+    m.put(-1L, "neg-one")
+    m.put(Long.MaxValue, "max")
+    m.put(Long.MinValue, "min")
+    m.put(1L, "one")
+    assertEquals("zero", m.get(0L))
+    assertEquals("neg-one", m.get(-1L))
+    assertEquals("max", m.get(Long.MaxValue))
+    assertEquals("min", m.get(Long.MinValue))
+    assertEquals("one", m.get(1L))
+    assertEquals(5, m.size)
+  }
+
+  @Test def longHashMapForEachAvoidsBoxing(): Unit = {
+    val m = new LongHashMap[String]()
+    m.put(10L, "a")
+    m.put(20L, "b")
+    m.getOrInsertNull("c")
+    m.put(30L, "d")
+    val collected = scala.collection.mutable.ArrayBuffer.empty[(Boolean, Long, String)]
+    m.forEach { (isNull, k, v) => collected += ((isNull, k, v)) }
+    assertEquals(4, collected.size)
+    assertEquals((false, 10L, "a"), collected(0))
+    assertEquals((false, 20L, "b"), collected(1))
+    assertEquals((true,   0L, "c"), collected(2))
+    assertEquals((false, 30L, "d"), collected(3))
+  }
+
+  @Test def isLongFittableMatchesExpectedTypes(): Unit = {
+    assertTrue(KeyCodec.isLongFittable(DataType.IntType))
+    assertTrue(KeyCodec.isLongFittable(DataType.LongType))
+    assertTrue(KeyCodec.isLongFittable(DataType.BooleanType))
+    assertTrue(KeyCodec.isLongFittable(DataType.DateType))
+    assertTrue(KeyCodec.isLongFittable(DataType.TimestampType))
+    assertFalse(KeyCodec.isLongFittable(DataType.FloatType))
+    assertFalse(KeyCodec.isLongFittable(DataType.DoubleType))
+    assertFalse(KeyCodec.isLongFittable(DataType.StringType))
+    assertFalse(KeyCodec.isLongFittable(DataType.BinaryType))
+    assertFalse(KeyCodec.isLongFittable(DataType.DecimalType(10, 2)))
+  }
+
+  @Test def readAsLongRoundTripsThroughWriteLongTo(): Unit = {
+    val schema = Schema(
+      Field("i", DataType.IntType),
+      Field("l", DataType.LongType),
+      Field("b", DataType.BooleanType),
+      Field("dt", DataType.DateType),
+      Field("ts", DataType.TimestampType)
+    )
+    val src = new ColumnarBatch(schema, 1)
+    src.column(0).asInstanceOf[IntVector].set(0, Int.MinValue)
+    src.column(1).asInstanceOf[LongVector].set(0, Long.MaxValue)
+    src.column(2).asInstanceOf[BooleanVector].set(0, true)
+    src.column(3).asInstanceOf[DateVector].set(0, 12345)
+    src.column(4).asInstanceOf[TimestampVector].set(0, 1700000000000000L)
+    src.setNumRows(1)
+    val dst = new ColumnarBatch(schema, 1); dst.setNumRows(1)
+    var c = 0
+    while (c < schema.length) {
+      KeyCodec.writeLongTo(dst.column(c), 0, KeyCodec.readAsLong(src.column(c), 0))
+      c += 1
+    }
+    assertEquals(Int.MinValue, dst.column(0).asInstanceOf[IntVector].values(0))
+    assertEquals(Long.MaxValue, dst.column(1).asInstanceOf[LongVector].values(0))
+    assertTrue(dst.column(2).asInstanceOf[BooleanVector].values(0))
+    assertEquals(12345, dst.column(3).asInstanceOf[DateVector].values(0))
+    assertEquals(1700000000000000L, dst.column(4).asInstanceOf[TimestampVector].values(0))
+  }
 }

@@ -192,6 +192,13 @@ final case class FuncExpr(name: String, args: Seq[Expr], dataType: DataType) ext
     val vals = args.map(_.eval(batch, row))
     Funcs.apply(name, vals, dataType, args.map(_.dataType))
   }
+
+  /** Fast path for the hot subset of scalar functions (see [[Funcs.applyVec]]
+    * — COALESCE, LOWER/UPPER/TRIM/LENGTH/CONCAT/SUBSTRING, ABS/FLOOR/CEIL/
+    * ROUND/TRUNC, IF/NULLIF). Everything else falls back to the default
+    * `Expr.evalVec` row loop. */
+  override def evalVec(batch: ColumnarBatch): ColumnVector =
+    Funcs.applyVec(name, args, dataType, batch).getOrElse(super.evalVec(batch))
 }
 
 /** CASE WHEN cond THEN value … [ELSE default] END. */
@@ -204,6 +211,62 @@ final case class CaseExpr(branches: Seq[(Expr, Expr)], elseExpr: Option[Expr], d
       if (c != null && c.asInstanceOf[Boolean]) return value.eval(batch, row)
     }
     elseExpr.map(_.eval(batch, row)).orNull
+  }
+
+  /** Vectorized CASE.
+    *
+    * Branches are evaluated eagerly (each predicate AND value across the
+    * whole batch), then we walk masks in order to fill unmatched rows. The
+    * row-form `eval` lazily evaluates only the first matching branch's
+    * value, so this path does extra work — acceptable because every `Expr`
+    * is side-effect-free today. The win is one Expr-tree dispatch per branch
+    * per batch instead of per row.
+    *
+    * Short-circuit: when every row has been claimed by an earlier branch,
+    * skip remaining branch evaluations entirely. */
+  override def evalVec(batch: ColumnarBatch): ColumnVector = {
+    val n = batch.numRows
+    val cap = math.max(1, n)
+    val out = ColumnVector.allocate(dataType, cap)
+    val taken = new java.util.BitSet(cap)
+    var remaining = n
+    val it = branches.iterator
+    while (it.hasNext && remaining > 0) {
+      val (cond, value) = it.next()
+      val condVec = cond.evalVec(batch).asInstanceOf[BooleanVector]
+      val valueVec = value.evalVec(batch)
+      var i = 0
+      while (i < n) {
+        if (!taken.get(i) && !condVec.isNull(i) && condVec.values(i)) {
+          if (valueVec.isNull(i)) out.setNull(i)
+          else out.setBoxed(i, valueVec.getBoxed(i))
+          taken.set(i)
+          remaining -= 1
+        }
+        i += 1
+      }
+    }
+    if (remaining > 0) {
+      elseExpr match {
+        case Some(e) =>
+          val elseVec = e.evalVec(batch)
+          var i = 0
+          while (i < n) {
+            if (!taken.get(i)) {
+              if (elseVec.isNull(i)) out.setNull(i)
+              else out.setBoxed(i, elseVec.getBoxed(i))
+            }
+            i += 1
+          }
+        case None =>
+          var i = 0
+          while (i < n) {
+            if (!taken.get(i)) out.setNull(i)
+            i += 1
+          }
+      }
+    }
+    out
   }
 }
 
@@ -236,6 +299,103 @@ final case class InListExpr(child: Expr, items: Seq[Expr], negated: Boolean) ext
       if (sawNull) null else negated
     }
   }
+
+  override def evalVec(batch: ColumnarBatch): ColumnVector = {
+    val n = batch.numRows
+    val cap = math.max(1, n)
+    val values = new Array[Boolean](cap)
+    val nulls = new java.util.BitSet(cap)
+    val cv = child.evalVec(batch)
+
+    val allLits = items.forall(_.isInstanceOf[LitExpr])
+    if (allLits) {
+      // Hoist literal values out of the per-row loop; choose a HashSet keyed
+      // by the comparator-relevant form so the inner loop is a single
+      // `.contains` call. Cross-numeric equality goes through doubleValue
+      // (matches Ops.eq); strings/booleans/dates compare structurally.
+      val nItems = items.length
+      val lits = items.iterator.map(_.asInstanceOf[LitExpr].value).toArray
+      var sawNullItem = false
+      var i = 0
+      while (i < nItems) { if (lits(i) == null) sawNullItem = true; i += 1 }
+
+      val numericSet: java.util.HashSet[java.lang.Double] =
+        if (DataType.isNumeric(child.dataType)) {
+          val s = new java.util.HashSet[java.lang.Double]()
+          var k = 0
+          while (k < nItems) {
+            val v = lits(k)
+            if (v != null) s.add(java.lang.Double.valueOf(v.asInstanceOf[Number].doubleValue))
+            k += 1
+          }
+          s
+        } else null
+
+      val stringSet: java.util.HashSet[String] =
+        if (child.dataType == DataType.StringType) {
+          val s = new java.util.HashSet[String]()
+          var k = 0
+          while (k < nItems) {
+            val v = lits(k)
+            if (v != null) s.add(v.toString)
+            k += 1
+          }
+          s
+        } else null
+
+      var r = 0
+      while (r < n) {
+        if (cv.isNull(r)) nulls.set(r)
+        else {
+          val v = cv.getBoxed(r)
+          var found = false
+          if (numericSet != null) {
+            found = numericSet.contains(java.lang.Double.valueOf(v.asInstanceOf[Number].doubleValue))
+          } else if (stringSet != null) {
+            found = stringSet.contains(v.toString)
+          } else {
+            // Boolean / Date / Timestamp / other — linear scan with Ops.eq.
+            var k = 0
+            while (k < nItems && !found) {
+              val item = lits(k)
+              if (item != null && Ops.eq(v, item)) found = true
+              k += 1
+            }
+          }
+          if (found) values(r) = !negated
+          else if (sawNullItem) nulls.set(r)
+          else values(r) = negated
+        }
+        r += 1
+      }
+    } else {
+      // General path: evaluate each item once per batch into a vector, then
+      // per-row linear scan. Still saves one Expr-dispatch per row per item.
+      val itemVecs = items.iterator.map(_.evalVec(batch)).toArray
+      val nItems = itemVecs.length
+      var r = 0
+      while (r < n) {
+        if (cv.isNull(r)) nulls.set(r)
+        else {
+          val v = cv.getBoxed(r)
+          var found = false
+          var sawNull = false
+          var k = 0
+          while (k < nItems && !found) {
+            val iv = itemVecs(k)
+            if (iv.isNull(r)) sawNull = true
+            else if (Ops.eq(v, iv.getBoxed(r))) found = true
+            k += 1
+          }
+          if (found) values(r) = !negated
+          else if (sawNull) nulls.set(r)
+          else values(r) = negated
+        }
+        r += 1
+      }
+    }
+    new BooleanVector(values, nulls, cap)
+  }
 }
 
 final case class LikeExpr(child: Expr, pattern: Expr, negated: Boolean) extends Expr {
@@ -249,6 +409,55 @@ final case class LikeExpr(child: Expr, pattern: Expr, negated: Boolean) extends 
       val m = re.matcher(v.toString).matches()
       if (negated) !m else m
     }
+  }
+
+  /** Vectorized LIKE.
+    *
+    * Literal-pattern fast path: compile + build the [[java.util.regex.Matcher]]
+    * once outside the row loop and `.reset(input)` per row (re-using the
+    * Matcher avoids the per-row state allocation the per-row `eval` path was
+    * making through the global pattern cache).
+    *
+    * Column-pattern path: still one regex compile per row (via the global
+    * cache hit), but with one Expr-tree dispatch per batch instead of per
+    * row. Documented as the slow path. */
+  override def evalVec(batch: ColumnarBatch): ColumnVector = {
+    val n = batch.numRows
+    val cap = math.max(1, n)
+    val values = new Array[Boolean](cap)
+    val nulls = new java.util.BitSet(cap)
+    val cv = child.evalVec(batch)
+
+    pattern match {
+      case LitExpr(p, _) if p == null =>
+        // SQL: input LIKE NULL → NULL for every row.
+        var i = 0
+        while (i < n) { nulls.set(i); i += 1 }
+      case LitExpr(p, _) =>
+        val matcher = LikeExpr.toRegex(p.toString).matcher("")
+        var i = 0
+        while (i < n) {
+          if (cv.isNull(i)) nulls.set(i)
+          else {
+            matcher.reset(cv.getBoxed(i).toString)
+            val m = matcher.matches()
+            values(i) = if (negated) !m else m
+          }
+          i += 1
+        }
+      case _ =>
+        val pv = pattern.evalVec(batch)
+        var i = 0
+        while (i < n) {
+          if (cv.isNull(i) || pv.isNull(i)) nulls.set(i)
+          else {
+            val m = LikeExpr.toRegex(pv.getBoxed(i).toString).matcher(cv.getBoxed(i).toString).matches()
+            values(i) = if (negated) !m else m
+          }
+          i += 1
+        }
+    }
+    new BooleanVector(values, nulls, cap)
   }
 }
 

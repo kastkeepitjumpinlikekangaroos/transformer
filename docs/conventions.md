@@ -61,3 +61,14 @@ specific traps.
   representation from key types; the ColRefExpr fast path
   (`encodeFromBatch`) is the boxing-free fast path. See
   [architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers).
+- **Hot `Expr` subtypes override `evalVec`; everything else inherits the
+  default boxed loop.** The rule of thumb: anything that shows up in a
+  pipeline operator's per-row inner loop (Filter predicate, Project
+  expression, GROUP BY / JOIN / WINDOW key) is hot enough to override.
+  Every new override extends `ExprBatchTest` first with NULL-handling
+  parity, divide-by-zero parity, and per-type result-shape parity — never
+  the other way around. See
+  [architecture.md §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec).
+  The same pattern applies to `AggState.updateBatch`: primitive states
+  override; everything else loops the default per-row `update`. See
+  [architecture.md §5c](architecture.md#5c-vectorized-aggregate-state-updates-no-group-by-fast-path).

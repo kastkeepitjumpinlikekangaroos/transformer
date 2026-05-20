@@ -14,6 +14,14 @@ import scala.collection.mutable
   * Output schema is `child.outputSchema ++ windowOutputs` — original column
   * indices are preserved so projections bound against the child can still
   * reference them by index.
+  *
+  * Vectorization: during the single materialization pass we also eval each
+  * [[WindowSpec]]'s partition keys and order keys once per scan batch via
+  * [[Expr.evalVec]] and stash the per-row values alongside the boxed rows.
+  * Downstream partitioning + sorting + rank tie-detection read from those
+  * cached values instead of re-running per-row `Expr.eval` against a
+  * [[RowBuf]]. LAG/LEAD args and aggregate args still go through the
+  * per-row path — a follow-up.
   */
 final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extends PhysicalPlan {
 
@@ -29,13 +37,37 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
     val childWidth = childSchema.length
     val nWindows = windows.size
 
-    // 1. Materialize every child row.
+    // Distinct specs in declaration order. One spec → one partitioning pass.
+    val specs: Array[WindowSpec] = windows.iterator.map(_.spec).toArray.distinct
+    val nSpecs = specs.length
+    val specPartKeyExprs: Array[Array[Expr]] = specs.map(_.partitionKeys.toArray)
+    val specOrderKeyExprs: Array[Array[Expr]] = specs.map(_.orderKeys.iterator.map(_._1).toArray)
+
+    // Per-spec per-row key caches. partKeysByRow(si) and orderKeysByRow(si)
+    // are parallel to `rows`. Each element is the boxed key values for one
+    // row under that spec.
+    val partKeysByRow: Array[mutable.ArrayBuffer[Array[Any]]] =
+      Array.tabulate(nSpecs)(_ => mutable.ArrayBuffer.empty[Array[Any]])
+    val orderKeysByRow: Array[mutable.ArrayBuffer[Array[Any]]] =
+      Array.tabulate(nSpecs)(_ => mutable.ArrayBuffer.empty[Array[Any]])
+
+    // 1. Materialize every child row. Same pass: for each batch, evalVec each
+    // spec's partition keys + order keys once, then per-row stash the boxed
+    // values. This eliminates the per-row Expr.eval against RowBuf the old
+    // `processSpec` paid for non-ColRef keys.
     val rows = mutable.ArrayBuffer.empty[Array[Any]]
     val it = (0 until child.numPartitions).iterator.flatMap(child.execute)
     while (it.hasNext) {
       val b = it.next()
+      val nrows = b.numRows
+      val partVecs: Array[Array[ColumnVector]] = Array.tabulate(nSpecs) { si =>
+        specPartKeyExprs(si).map(_.evalVec(b))
+      }
+      val orderVecs: Array[Array[ColumnVector]] = Array.tabulate(nSpecs) { si =>
+        specOrderKeyExprs(si).map(_.evalVec(b))
+      }
       var r = 0
-      while (r < b.numRows) {
+      while (r < nrows) {
         val arr = new Array[Any](childWidth)
         var c = 0
         while (c < childWidth) {
@@ -43,6 +75,13 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
           c += 1
         }
         rows += arr
+
+        var si = 0
+        while (si < nSpecs) {
+          partKeysByRow(si) += readVecsAt(partVecs(si), r)
+          orderKeysByRow(si) += readVecsAt(orderVecs(si), r)
+          si += 1
+        }
         r += 1
       }
     }
@@ -51,14 +90,25 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
     val windowValues = Array.ofDim[Any](n, nWindows)
 
     if (n > 0) {
-      // 2. Group windows by spec so partitioning + sorting happens once per spec.
-      val specGroups: Map[WindowSpec, Seq[(WindowFn, Int)]] =
+      // 2. Group windows by spec; one partitioning + sort pass per spec.
+      val specFns: Map[WindowSpec, IndexedSeq[(WindowFn, Int)]] =
         windows.zipWithIndex.groupBy { case (w, _) => w.spec }
           .map { case (s, ws) => s -> ws.map { case (w, i) => (w.fn, i) }.toIndexedSeq }
 
       val buf = new RowBuf(childSchema)
-      specGroups.foreach { case (spec, fns) =>
-        processSpec(rows, spec, fns, windowValues, buf)
+      var si = 0
+      while (si < nSpecs) {
+        val spec = specs(si)
+        val fns = specFns(spec)
+        processSpec(
+          rows,
+          partKeysByRow(si).toArray,
+          orderKeysByRow(si).toArray,
+          spec,
+          fns,
+          windowValues,
+          buf)
+        si += 1
       }
     }
 
@@ -66,10 +116,24 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
     emit(rows, windowValues, childSchema, childWidth, nWindows)
   }
 
+  /** Snapshot the per-row values from a batch's pre-computed key vectors. */
+  private def readVecsAt(vecs: Array[ColumnVector], r: Int): Array[Any] = {
+    val len = vecs.length
+    val out = new Array[Any](len)
+    var i = 0
+    while (i < len) {
+      out(i) = if (vecs(i).isNull(r)) null else vecs(i).getBoxed(r)
+      i += 1
+    }
+    out
+  }
+
   // ---------------------------------------------------------------------------
 
   private def processSpec(
       rows: mutable.ArrayBuffer[Array[Any]],
+      partKeysByRow: Array[Array[Any]],
+      orderKeysByRow: Array[Array[Any]],
       spec: WindowSpec,
       fns: Seq[(WindowFn, Int)],
       out: Array[Array[Any]],
@@ -77,39 +141,18 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
 
     val n = rows.length
 
-    // Partition rows by partition key. The key is encoded via [[KeyCodec]] —
-    // packed `byte[]` for fixed-width-only keys, cached-hash `Array[AnyRef]`
-    // otherwise — to skip the `Seq[Any]` allocation + walk the original loop
-    // paid per row. Empty partition keys → one partition (EmptyKeyCodec
-    // collapses every encode to a singleton sentinel).
-    val partKeys: Array[Expr] = spec.partitionKeys.toArray
-    val nPartKeys = partKeys.length
-    val partKeysAreColRefs: Boolean = partKeys.forall(_.isInstanceOf[ColRefExpr])
-    val partKeyColIndices: Array[Int] =
-      if (partKeysAreColRefs) partKeys.map(_.asInstanceOf[ColRefExpr].index) else null
+    // Partition rows by partition key. Keys are pre-encoded values from the
+    // materialization pass; the codec only handles encoding into its hashmap
+    // wrapper here. EmptyKeyCodec collapses the no-PARTITION-BY case.
+    val partKeyTypes = spec.partitionKeys.iterator.map(_.dataType).toArray
     val partCodec: KeyCodec = KeyCodec.forColumns(
-      if (partKeysAreColRefs) partKeyColIndices else new Array[Int](nPartKeys),
-      partKeys.map(_.dataType)
-    )
+      new Array[Int](partKeyTypes.length),
+      partKeyTypes)
 
     val partitions = mutable.LinkedHashMap.empty[AnyRef, mutable.ArrayBuffer[Int]]
-    val keyBuf: Array[Any] = if (partKeysAreColRefs) null else new Array[Any](nPartKeys)
     var i = 0
     while (i < n) {
-      val row = rows(i)
-      val key: AnyRef =
-        if (partKeysAreColRefs) {
-          // Read partition columns directly out of the boxed row array.
-          var k = 0
-          val tmp = new Array[Any](nPartKeys)
-          while (k < nPartKeys) { tmp(k) = row(partKeyColIndices(k)); k += 1 }
-          partCodec.encodeBoxed(tmp)
-        } else {
-          buf.set(row)
-          var k = 0
-          while (k < nPartKeys) { keyBuf(k) = partKeys(k).eval(buf.batch, 0); k += 1 }
-          partCodec.encodeBoxed(keyBuf)
-        }
+      val key = partCodec.encodeBoxed(partKeysByRow(i))
       val bucket = partitions.getOrElseUpdate(key, mutable.ArrayBuffer.empty)
       bucket += i
       i += 1
@@ -117,26 +160,26 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
 
     val orderKeys = spec.orderKeys
     partitions.values.foreach { part =>
-      if (orderKeys.nonEmpty) sortPartition(part, rows, orderKeys, buf)
-      computeFunctions(part, rows, spec, fns, out, buf)
+      if (orderKeys.nonEmpty) sortPartition(part, orderKeysByRow, orderKeys)
+      computeFunctions(part, rows, orderKeysByRow, spec, fns, out, buf)
     }
   }
 
   private def sortPartition(
       part: mutable.ArrayBuffer[Int],
-      rows: mutable.ArrayBuffer[Array[Any]],
-      orderKeys: Seq[(Expr, Boolean)],
-      buf: RowBuf): Unit = {
-    val arr = part.toArray
+      orderKeysByRow: Array[Array[Any]],
+      orderKeys: Seq[(Expr, Boolean)]): Unit = {
+    val orderArr: Array[(Expr, Boolean)] = orderKeys.toArray
+    val nKeys = orderArr.length
     val ord = new java.util.Comparator[Integer] {
       def compare(a: Integer, b: Integer): Int = {
+        val ka = orderKeysByRow(a)
+        val kb = orderKeysByRow(b)
         var k = 0
-        while (k < orderKeys.size) {
-          val (expr, asc) = orderKeys(k)
-          buf.set(rows(a))
-          val va = expr.eval(buf.batch, 0)
-          buf.set(rows(b))
-          val vb = expr.eval(buf.batch, 0)
+        while (k < nKeys) {
+          val asc = orderArr(k)._2
+          val va = ka(k)
+          val vb = kb(k)
           val c = (va, vb) match {
             case (null, null) => 0
             case (null, _) => if (asc) -1 else 1
@@ -149,6 +192,7 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
         0
       }
     }
+    val arr = part.toArray
     val boxed: Array[Integer] = arr.map(Integer.valueOf)
     java.util.Arrays.sort(boxed, ord)
     var i = 0
@@ -158,6 +202,7 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
   private def computeFunctions(
       part: mutable.ArrayBuffer[Int],
       rows: mutable.ArrayBuffer[Array[Any]],
+      orderKeysByRow: Array[Array[Any]],
       spec: WindowSpec,
       fns: Seq[(WindowFn, Int)],
       out: Array[Array[Any]],
@@ -172,9 +217,9 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
         case _: WindowFnRank =>
           var r = 0
           var rank = 1L
-          var prevKey: Seq[Any] = null
+          var prevKey: Array[Any] = null
           while (r < n) {
-            val key = orderKey(part(r), spec.orderKeys, rows, buf)
+            val key = orderKeysByRow(part(r))
             if (prevKey != null && !sameKey(key, prevKey)) rank = (r + 1).toLong
             out(part(r))(outCol) = rank
             prevKey = key
@@ -184,9 +229,9 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
         case _: WindowFnDenseRank =>
           var r = 0
           var rank = 1L
-          var prevKey: Seq[Any] = null
+          var prevKey: Array[Any] = null
           while (r < n) {
-            val key = orderKey(part(r), spec.orderKeys, rows, buf)
+            val key = orderKeysByRow(part(r))
             if (prevKey != null && !sameKey(key, prevKey)) rank += 1
             out(part(r))(outCol) = rank
             prevKey = key
@@ -307,19 +352,10 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
     (lo, hi)
   }
 
-  private def orderKey(
-      rowIdx: Int,
-      orderKeys: Seq[(Expr, Boolean)],
-      rows: mutable.ArrayBuffer[Array[Any]],
-      buf: RowBuf): Seq[Any] = {
-    buf.set(rows(rowIdx))
-    orderKeys.map { case (e, _) => e.eval(buf.batch, 0) }
-  }
-
-  private def sameKey(a: Seq[Any], b: Seq[Any]): Boolean = {
-    if (a.size != b.size) return false
+  private def sameKey(a: Array[Any], b: Array[Any]): Boolean = {
+    if (a.length != b.length) return false
     var i = 0
-    while (i < a.size) {
+    while (i < a.length) {
       val av = a(i); val bv = b(i)
       val same = (av == null && bv == null) || (av != null && bv != null && Ops.eq(av, bv))
       if (!same) return false

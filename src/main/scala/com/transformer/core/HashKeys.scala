@@ -99,6 +99,56 @@ object KeyCodec {
     case DataType.BooleanType | DataType.DateType | DataType.TimestampType => true
     case _ => false
   }
+
+  /** True iff a value of `t` round-trips through a `Long` without loss — the
+    * gate for [[LongHashMap]]'s single-column primitive-key fast path. Float
+    * / Double are deliberately excluded (NaN canonicalization + `-0.0` vs
+    * `+0.0` make the bit-level conversion subtly diverge from `Double.equals`;
+    * they use [[PackedBytesCodec]] instead). */
+  def isLongFittable(t: DataType): Boolean = t match {
+    case DataType.IntType | DataType.LongType | DataType.BooleanType => true
+    case DataType.DateType | DataType.TimestampType => true
+    case _ => false
+  }
+
+  /** Read column `col` at `row` as a primitive long. Callers must check
+    * `col.isNull(row)` first — this is a NULL-unsafe primitive read. */
+  def readAsLong(col: ColumnVector, row: Int): Long = col match {
+    case v: LongVector      => v.values(row)
+    case v: IntVector       => v.values(row).toLong
+    case v: BooleanVector   => if (v.values(row)) 1L else 0L
+    case v: DateVector      => v.values(row).toLong
+    case v: TimestampVector => v.values(row)
+    case other              => throw new IllegalStateException(
+      s"readAsLong: unsupported column type ${other.dataType}")
+  }
+
+  /** Write a primitive long into `col` at `row`, narrowing to the column's
+    * type. Inverse of [[readAsLong]]. */
+  def writeLongTo(col: ColumnVector, row: Int, v: Long): Unit = col match {
+    case c: LongVector      => c.set(row, v)
+    case c: IntVector       => c.set(row, v.toInt)
+    case c: BooleanVector   => c.set(row, v != 0L)
+    case c: DateVector      => c.set(row, v.toInt)
+    case c: TimestampVector => c.set(row, v)
+    case other              => throw new IllegalStateException(
+      s"writeLongTo: unsupported column type ${other.dataType}")
+  }
+
+  /** Unbox a value that came out of `ColumnVector.getBoxed` for a long-fittable
+    * type back into a primitive `Long`. Used by [[HashJoinExec]]'s build-side
+    * keymap build path, where rows are materialized as `Array[Any]` (boxed)
+    * but the keymap stores primitive long keys. */
+  def boxedToLong(v: Any, t: DataType): Long = t match {
+    case DataType.LongType      => v.asInstanceOf[java.lang.Long].longValue
+    case DataType.IntType       => v.asInstanceOf[java.lang.Integer].intValue.toLong
+    case DataType.BooleanType   => if (v.asInstanceOf[java.lang.Boolean].booleanValue) 1L else 0L
+    case DataType.DateType      => v.asInstanceOf[java.time.LocalDate].toEpochDay
+    case DataType.TimestampType =>
+      val i = v.asInstanceOf[java.time.Instant]
+      i.getEpochSecond * 1000000L + i.getNano / 1000L
+    case other => throw new IllegalStateException(s"boxedToLong: unsupported type $other")
+  }
 }
 
 /** Hashmap-suitable wrapper around a `byte[]`. Caches `hashCode`; `equals`
@@ -357,6 +407,193 @@ final class PackedBytesCodec private[core] (
     ((bytes(off + 5).toLong  & 0xffL) << 40)    |
     ((bytes(off + 6).toLong  & 0xffL) << 48)    |
     ((bytes(off + 7).toLong  & 0xffL) << 56)
+}
+
+/** Open-addressing primitive-long-keyed map, ordered by insertion. Used by
+  * the operator fast path when the key reduces to a single fixed-width
+  * numeric column (Int / Long / Date / Timestamp / Boolean) — values fit in
+  * a `Long`, the table stores them unboxed, the inner loop pays neither a
+  * `Seq` allocation nor a `Long` boxing per row.
+  *
+  * Layout:
+  *   - **Slot table** (open-addressing, power-of-two capacity): `slotKeys`
+  *     primitive `Long`s + `slotEntryIdx` pointing into the insertion-order
+  *     arrays + `slotOccupied` bitset (every `Long` value is a legal key, so
+  *     a sentinel doesn't work — the bitset is the source of truth for
+  *     "this slot has an entry").
+  *   - **Entry arrays** (insertion-order): `entryKeys` + `entryValues` +
+  *     `entryIsNull` (the NULL-keyed entry's `entryKeys` slot is ignored).
+  *     `entryIsNull` makes the NULL entry an integral part of insertion
+  *     order so emit re-materializes it at the right place.
+  *
+  * Resize doubles `capacity`, rehashes the slot table, and updates pointers.
+  * Entry arrays grow independently when full — slot indices stored in
+  * `slotEntryIdx` stay valid across grows.
+  *
+  * Thread safety: same as `mutable.LinkedHashMap` — one writer at a time. */
+final class LongHashMap[V >: Null <: AnyRef](initialCapacity: Int = 16, loadFactor: Float = 0.75f) {
+  require(initialCapacity > 0 && (initialCapacity & (initialCapacity - 1)) == 0,
+    s"initialCapacity $initialCapacity must be a positive power of 2")
+  require(loadFactor > 0f && loadFactor < 1f, s"loadFactor must be in (0,1)")
+
+  private var capacity: Int = initialCapacity
+  private var mask: Int = capacity - 1
+  private var threshold: Int = math.max(1, (capacity * loadFactor).toInt)
+  private var slotKeys: Array[Long] = new Array[Long](capacity)
+  private var slotEntryIdx: Array[Int] = new Array[Int](capacity)
+  private var slotOccupied: java.util.BitSet = new java.util.BitSet(capacity)
+
+  private var entryKeys: Array[Long] = new Array[Long](16)
+  private var entryValues: Array[AnyRef] = new Array[AnyRef](16)
+  private var entryIsNull: java.util.BitSet = new java.util.BitSet(16)
+  private var _size: Int = 0
+  private var nullEntryIdx: Int = -1
+
+  def size: Int = _size
+  def isEmpty: Boolean = _size == 0
+
+  /** Look up the value for a primitive-long key. Returns `null` if absent. */
+  def get(key: Long): V = {
+    var i = hash(key) & mask
+    while (slotOccupied.get(i)) {
+      if (slotKeys(i) == key) return entryValues(slotEntryIdx(i)).asInstanceOf[V]
+      i = (i + 1) & mask
+    }
+    null
+  }
+
+  /** Look up the value for the NULL key. Returns `null` if no NULL entry exists. */
+  def getNull: V = {
+    if (nullEntryIdx >= 0) entryValues(nullEntryIdx).asInstanceOf[V] else null
+  }
+
+  /** If `key` is absent, evaluate `supplier`, store it, and return it; else
+    * return the existing value. The supplier is lazy (Scala by-name), so a
+    * fresh `Array[AggState]` initializer only runs on insert. */
+  def getOrInsert(key: Long, supplier: => V): V = {
+    var i = hash(key) & mask
+    while (slotOccupied.get(i)) {
+      if (slotKeys(i) == key) return entryValues(slotEntryIdx(i)).asInstanceOf[V]
+      i = (i + 1) & mask
+    }
+    val v = supplier
+    val entryIdx = appendEntry(key, v, isNull = false)
+    slotKeys(i) = key
+    slotEntryIdx(i) = entryIdx
+    slotOccupied.set(i)
+    if (_size > threshold) resize()
+    v
+  }
+
+  /** [[getOrInsert]] for the NULL key. */
+  def getOrInsertNull(supplier: => V): V = {
+    if (nullEntryIdx >= 0) return entryValues(nullEntryIdx).asInstanceOf[V]
+    val v = supplier
+    nullEntryIdx = appendEntry(0L, v, isNull = true)
+    v
+  }
+
+  /** Unconditionally store `value` at `key`. Overwrites if `key` already
+    * exists; preserves the original insertion position. Returns the previous
+    * value (or `null`). */
+  def put(key: Long, value: V): V = {
+    var i = hash(key) & mask
+    while (slotOccupied.get(i)) {
+      if (slotKeys(i) == key) {
+        val prev = entryValues(slotEntryIdx(i))
+        entryValues(slotEntryIdx(i)) = value
+        return prev.asInstanceOf[V]
+      }
+      i = (i + 1) & mask
+    }
+    val entryIdx = appendEntry(key, value, isNull = false)
+    slotKeys(i) = key
+    slotEntryIdx(i) = entryIdx
+    slotOccupied.set(i)
+    if (_size > threshold) resize()
+    null
+  }
+
+  /** Iterate `(boxed key, value)` pairs in insertion order. NULL key yields
+    * `(null, value)`. The boxing is per-group (not per-row), so this is the
+    * idiomatic merge entry point. */
+  def iterator: Iterator[(java.lang.Long, V)] = new Iterator[(java.lang.Long, V)] {
+    private var pos = 0
+    def hasNext: Boolean = pos < _size
+    def next(): (java.lang.Long, V) = {
+      val key: java.lang.Long = if (entryIsNull.get(pos)) null else java.lang.Long.valueOf(entryKeys(pos))
+      val v = entryValues(pos).asInstanceOf[V]
+      pos += 1
+      (key, v)
+    }
+  }
+
+  /** Iterate entries WITHOUT boxing the key. The callback receives
+    * `(isNull, keyIfNotNull, value)`. Used by hot merge loops where the
+    * per-group boxing in [[iterator]] is itself the bottleneck. */
+  def forEach(action: (Boolean, Long, V) => Unit): Unit = {
+    var pos = 0
+    while (pos < _size) {
+      val isNull = entryIsNull.get(pos)
+      val key = if (isNull) 0L else entryKeys(pos)
+      action(isNull, key, entryValues(pos).asInstanceOf[V])
+      pos += 1
+    }
+  }
+
+  // ---- internal --------------------------------------------------------------
+
+  private def appendEntry(key: Long, v: V, isNull: Boolean): Int = {
+    if (_size >= entryKeys.length) growEntries()
+    val idx = _size
+    entryKeys(idx) = key
+    entryValues(idx) = v
+    if (isNull) entryIsNull.set(idx)
+    _size += 1
+    idx
+  }
+
+  private def growEntries(): Unit = {
+    val newCap = entryKeys.length * 2
+    entryKeys = java.util.Arrays.copyOf(entryKeys, newCap)
+    entryValues = java.util.Arrays.copyOf(entryValues, newCap)
+    // entryIsNull is a BitSet — grows automatically when high bits are set.
+  }
+
+  private def resize(): Unit = {
+    val newCap = capacity * 2
+    val newMask = newCap - 1
+    val newSlotKeys = new Array[Long](newCap)
+    val newSlotEntryIdx = new Array[Int](newCap)
+    val newOccupied = new java.util.BitSet(newCap)
+    var i = 0
+    while (i < capacity) {
+      if (slotOccupied.get(i)) {
+        val k = slotKeys(i)
+        var j = hash(k) & newMask
+        while (newOccupied.get(j)) j = (j + 1) & newMask
+        newSlotKeys(j) = k
+        newSlotEntryIdx(j) = slotEntryIdx(i)
+        newOccupied.set(j)
+      }
+      i += 1
+    }
+    slotKeys = newSlotKeys
+    slotEntryIdx = newSlotEntryIdx
+    slotOccupied = newOccupied
+    capacity = newCap
+    mask = newMask
+    threshold = math.max(1, (capacity * loadFactor).toInt)
+  }
+
+  /** Mix the long to spread the low bits across the slot index. Uses Murmur's
+    * 64-bit constant for avalanche; the result is xor-folded to fit in an
+    * `Int` slot index. Avoids the pathological clustering plain `Long.hashCode`
+    * causes when keys are dense small integers. */
+  private def hash(key: Long): Int = {
+    val h = key * 0x9E3779B97F4A7C15L
+    ((h ^ (h >>> 32)) & 0x7FFFFFFFL).toInt
+  }
 }
 
 /** Boxed-values codec for keys that include at least one variable-width

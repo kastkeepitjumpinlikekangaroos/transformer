@@ -85,6 +85,19 @@ final case class HashJoinExec(
     KeyCodec.forColumns(indices, keyTypes)
   }
 
+  // Fast path: single fixed-width-numeric-fittable ColRef join key on BOTH
+  // sides → swap out the AnyRef keymap for [[LongHashMap]]. Probe-side reads
+  // the primitive long straight from the source `ColumnVector` (no boxing),
+  // build-side unboxes once from the materialized `Array[Any]` row.
+  private val useJoinLongKey: Boolean =
+    nKeys == 1 &&
+    buildKeysAreColRefs && probeKeysAreColRefs &&
+    KeyCodec.isLongFittable(keyTypes(0))
+  private val buildKeyLongIdx: Int =
+    if (useJoinLongKey) buildKeyColIndices(0) else -1
+  private val probeKeyLongIdx: Int =
+    if (useJoinLongKey) probeKeyColIndices(0) else -1
+
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0)
     val build = buildSide()
@@ -100,58 +113,122 @@ final case class HashJoinExec(
     probeIter ++ unmatchedBuildTail
   }
 
-  /** Materialize the build side: list of full-row arrays plus a multi-map from key. */
+  /** Materialize the build side: list of full-row arrays plus a multi-map
+    * from key. For non-ColRef build keys we evaluate each key expression
+    * once per scan batch via `evalVec` (instead of per row through `RowBuf`)
+    * and stash the encoded key alongside the materialized row. */
   private def buildSide(): BuildSide = {
-    val tasks: Seq[Callable[mutable.ArrayBuffer[Array[Any]]]] =
+    val tasks: Seq[Callable[CollectedBuildPartition]] =
       (0 until buildPlan.numPartitions).map { p =>
-        new Callable[mutable.ArrayBuffer[Array[Any]]] {
-          def call(): mutable.ArrayBuffer[Array[Any]] = collectPartition(buildPlan, p)
+        new Callable[CollectedBuildPartition] {
+          def call(): CollectedBuildPartition = collectBuildPartition(p)
         }
       }
     val partials = Scheduler.submitAndAwaitAll(tasks)
     val rows = mutable.ArrayBuffer.empty[Array[Any]]
-    partials.foreach(rows ++= _)
-    val keyMap = new util.HashMap[AnyRef, util.ArrayList[Int]]()
-    val keyBuf = new Array[Any](nKeys)
-    val rb: RowBuf = if (buildKeysAreColRefs) null else new RowBuf(buildPlan.outputSchema)
-    var i = 0
-    while (i < rows.length) {
-      val row = rows(i)
-      if (buildKeysAreColRefs) {
-        var k = 0
-        while (k < nKeys) { keyBuf(k) = row(buildKeyColIndices(k)); k += 1 }
-      } else {
-        rb.set(row)
-        var k = 0
-        while (k < nKeys) { keyBuf(k) = buildKeyExprs(k).eval(rb.batch, 0); k += 1 }
-      }
-      val key = keyCodec.encodeBoxed(keyBuf)
-      val list = keyMap.computeIfAbsent(key, _ => new util.ArrayList[Int]())
-      list.add(i)
-      i += 1
+    val keys: mutable.ArrayBuffer[AnyRef] =
+      if (buildKeysAreColRefs || useJoinLongKey) null
+      else mutable.ArrayBuffer.empty[AnyRef]
+    partials.foreach { part =>
+      rows ++= part.rows
+      if (keys != null) keys ++= part.keys
     }
-    BuildSide(rows, keyMap)
+    if (useJoinLongKey) buildLongKeyMap(rows)
+    else buildCodecKeyMap(rows, keys)
   }
 
-  private def collectPartition(plan: PhysicalPlan, p: Int): mutable.ArrayBuffer[Array[Any]] = {
-    val buf = mutable.ArrayBuffer.empty[Array[Any]]
-    val it = plan.execute(p)
-    val n = plan.outputSchema.length
+  private def buildLongKeyMap(rows: mutable.ArrayBuffer[Array[Any]]): BuildSide = {
+    val keyMap = new LongHashMap[util.ArrayList[Int]]()
+    val keyType = keyTypes(0)
+    var i = 0
+    while (i < rows.length) {
+      val v = rows(i)(buildKeyLongIdx)
+      if (v != null) {
+        // NULL build keys can never match (equi-join, 3VL) — drop them from
+        // the keymap; the row stays in `rows` so outer-join "unmatched build"
+        // emission still surfaces it.
+        val k = KeyCodec.boxedToLong(v, keyType)
+        val list = keyMap.getOrInsert(k, new util.ArrayList[Int]())
+        list.add(i)
+      }
+      i += 1
+    }
+    BuildSide(rows, null, keyMap)
+  }
+
+  private def buildCodecKeyMap(
+      rows: mutable.ArrayBuffer[Array[Any]],
+      precomputedKeys: mutable.ArrayBuffer[AnyRef]): BuildSide = {
+    val keyMap = new util.HashMap[AnyRef, util.ArrayList[Int]]()
+    if (buildKeysAreColRefs) {
+      // ColRef path: keys derive directly from the materialized row array.
+      // No Expr.eval involved here even before vectorization — keep it.
+      val keyBuf = new Array[Any](nKeys)
+      var i = 0
+      while (i < rows.length) {
+        val row = rows(i)
+        var k = 0
+        while (k < nKeys) { keyBuf(k) = row(buildKeyColIndices(k)); k += 1 }
+        val key = keyCodec.encodeBoxed(keyBuf)
+        val list = keyMap.computeIfAbsent(key, _ => new util.ArrayList[Int]())
+        list.add(i)
+        i += 1
+      }
+    } else {
+      // Computed-key path: keys were already encoded once per source batch
+      // by `collectBuildPartition` using `evalVec`. Walk the parallel array
+      // and slot each one into the keymap.
+      var i = 0
+      while (i < rows.length) {
+        val key = precomputedKeys(i)
+        val list = keyMap.computeIfAbsent(key, _ => new util.ArrayList[Int]())
+        list.add(i)
+        i += 1
+      }
+    }
+    BuildSide(rows, keyMap, null)
+  }
+
+  /** Materialize one build-side partition. Also pre-encodes the key for each
+    * row when build keys are computed (non-ColRef), eliminating the per-row
+    * `RowBuf`-driven `Expr.eval` that `buildCodecKeyMap` used to do over the
+    * already-materialized boxed row array. */
+  private def collectBuildPartition(p: Int): CollectedBuildPartition = {
+    val rowsBuf = mutable.ArrayBuffer.empty[Array[Any]]
+    val keysBuf: mutable.ArrayBuffer[AnyRef] =
+      if (buildKeysAreColRefs || useJoinLongKey) null
+      else mutable.ArrayBuffer.empty[AnyRef]
+    val keyBufRow: Array[Any] = if (keysBuf != null) new Array[Any](nKeys) else null
+    val it = buildPlan.execute(p)
+    val nCols = buildPlan.outputSchema.length
     while (it.hasNext) {
       val b = it.next()
+      val nrows = b.numRows
+      val keyVecs: Array[ColumnVector] =
+        if (keysBuf != null) Array.tabulate(nKeys)(i => buildKeyExprs(i).evalVec(b))
+        else null
       var r = 0
-      while (r < b.numRows) {
-        val arr = new Array[Any](n)
+      while (r < nrows) {
+        val arr = new Array[Any](nCols)
         var c = 0
-        while (c < n) {
+        while (c < nCols) {
           arr(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
           c += 1
         }
-        buf += arr
+        rowsBuf += arr
+        if (keysBuf != null) {
+          var k = 0
+          while (k < nKeys) {
+            val kv = keyVecs(k)
+            keyBufRow(k) = if (kv.isNull(r)) null else kv.getBoxed(r)
+            k += 1
+          }
+          keysBuf += keyCodec.encodeBoxed(keyBufRow)
+        }
         r += 1
       }
     }
-    buf
+    CollectedBuildPartition(rowsBuf, keysBuf)
   }
 
   private def probeIterator(build: BuildSide, matchedBuild: util.HashSet[Int]): Iterator[ColumnarBatch] = {
@@ -172,28 +249,44 @@ final case class HashJoinExec(
             val keyBuf: Array[Any] = if (probeKeysAreColRefs) null else new Array[Any](nKeys)
             while (probeIt.hasNext) {
               val b = probeIt.next()
+              val nrows = b.numRows
+              // For non-ColRef probe keys, hoist Expr.eval out of the per-row
+              // loop. ColRef keys go through `encodeFromBatchSkipIfAnyNull`
+              // which already reads typed primitives directly; the long-key
+              // fast path reads its single primitive even more directly.
+              val probeKeyVecs: Array[ColumnVector] =
+                if (probeKeysAreColRefs || useJoinLongKey) null
+                else Array.tabulate(nKeys)(i => probeKeyExprs(i).evalVec(b))
               var r = 0
-              while (r < b.numRows) {
+              while (r < nrows) {
                 val probeRow = new Array[Any](probeSchema.length)
                 var c = 0
                 while (c < probeSchema.length) {
                   probeRow(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
                   c += 1
                 }
-                val key: AnyRef =
-                  if (probeKeysAreColRefs) keyCodec.encodeFromBatchSkipIfAnyNull(b, r)
-                  else {
-                    var k = 0
-                    var anyNull = false
-                    while (k < nKeys) {
-                      val v = probeKeyExprs(k).eval(b, r)
-                      if (v == null) anyNull = true
-                      keyBuf(k) = v
-                      k += 1
-                    }
-                    if (anyNull) null else keyCodec.encodeBoxed(keyBuf)
+                val matches: util.ArrayList[Int] =
+                  if (useJoinLongKey) {
+                    val col = b.column(probeKeyLongIdx)
+                    if (col.isNull(r)) null
+                    else build.keyMapLong.get(KeyCodec.readAsLong(col, r))
+                  } else {
+                    val key: AnyRef =
+                      if (probeKeysAreColRefs) keyCodec.encodeFromBatchSkipIfAnyNull(b, r)
+                      else {
+                        var k = 0
+                        var anyNull = false
+                        while (k < nKeys) {
+                          val kv = probeKeyVecs(k)
+                          val v: Any = if (kv.isNull(r)) null else kv.getBoxed(r)
+                          if (v == null) anyNull = true
+                          keyBuf(k) = v
+                          k += 1
+                        }
+                        if (anyNull) null else keyCodec.encodeBoxed(keyBuf)
+                      }
+                    if (key == null) null else build.keyMap.get(key)
                   }
-                val matches = if (key == null) null else build.keyMap.get(key)
                 var matchedAny = false
                 if (matches != null && !matches.isEmpty) {
                   val it = matches.iterator()
@@ -300,4 +393,17 @@ final case class HashJoinExec(
   }
 }
 
-private[exec] final case class BuildSide(rows: mutable.ArrayBuffer[Array[Any]], keyMap: util.HashMap[AnyRef, util.ArrayList[Int]])
+/** Materialized build side. Exactly one of `keyMap` / `keyMapLong` is non-null
+  * — `keyMapLong` when the equi-join key is a single fixed-width-numeric ColRef
+  * on both sides, `keyMap` otherwise. */
+private[exec] final case class BuildSide(
+    rows: mutable.ArrayBuffer[Array[Any]],
+    keyMap: util.HashMap[AnyRef, util.ArrayList[Int]],
+    keyMapLong: LongHashMap[util.ArrayList[Int]])
+
+/** One partition's worth of materialized build rows plus the pre-encoded
+  * keys for those rows (when build keys are computed expressions — `keys` is
+  * null for the ColRef and single-long fast paths). */
+private[exec] final case class CollectedBuildPartition(
+    rows: mutable.ArrayBuffer[Array[Any]],
+    keys: mutable.ArrayBuffer[AnyRef])

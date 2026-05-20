@@ -134,6 +134,22 @@ null bits / null elements; for hash-join probes that need NULL to short-
 circuit a non-match, the codec exposes `encodeFromBatchSkipIfAnyNull`,
 which returns the Java `null` sentinel instead of a key.
 
+**Single-Long fast path (`LongHashMap`).** When `GROUP BY` / `JOIN ON` boils
+down to one fixed-width-numeric ColRef key (Int / Long / Date / Timestamp /
+Boolean — `KeyCodec.isLongFittable`), `HashAggregateExec` and `HashJoinExec`
+bypass the codec entirely and use `LongHashMap[V]` — a hand-rolled open-
+addressing primitive-long-keyed map in `core/HashKeys.scala`. The keymap
+stores primitive `long` values directly (no `BytesKey` allocation, no
+`java.lang.Long` boxing); the probe / per-row loop reads
+`KeyCodec.readAsLong(batch.column(idx), row)` straight off the typed
+`ColumnVector`. NULL keys are tracked separately (a single sidecar slot per
+map), so GROUP BY NULL still groups together while equi-join NULL still
+short-circuits to no-match. Insertion order is preserved by a parallel
+`(entryKeys, entryValues)` pair indexed alongside the hash table, so
+`HashAggregateExec`'s emit order matches the codec-path `LinkedHashMap`
+order. The single-Long shape is the most common one for foreign-key joins
+and integer-ID group-bys, so the fast path is worth its weight.
+
 ### 3. Parallel execution
 
 All parallel work — DAG scheduling, pipeline-breaking operators, partitioned
@@ -440,9 +456,8 @@ RowBuf-driven sites (sort/join/window/aggregate-state updates) still call
 vectorization gives nothing back.
 
 The trait carries a default implementation that allocates an output vector and
-loops per-row `eval` writing through `setBoxed` — so any `Expr` (including
-`FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr`) is correct out of the box.
-Hot nodes override for primitive-array speed:
+loops per-row `eval` writing through `setBoxed` — so any `Expr` is correct out
+of the box. Hot nodes override for primitive-array speed:
 
 - `LitExpr.evalVec` — `Arrays.fill` of a single primitive across the batch.
 - `ColRefExpr.evalVec` — returns `batch.column(index)` zero-copy. The caller
@@ -451,8 +466,27 @@ Hot nodes override for primitive-array speed:
 - `UnaryOpExpr.evalVec` — `VecOps.negate` / `VecOps.not`.
 - `BinOpExpr.evalVec` — dispatches to `VecOps.{and,or,arith,compare,concat}`.
 - `IsNullExpr.evalVec` — `VecOps.isNull`.
+- `FuncExpr.evalVec` — delegates to `Funcs.applyVec` for the hot subset
+  (`COALESCE`, `LENGTH`, `UPPER`/`LOWER`/`TRIM`, `CONCAT`, `SUBSTRING`,
+  `ABS`, `FLOOR`/`CEIL[ING]`, `ROUND`, `TRUNC[ATE]`, `IF`, `NULLIF`); falls
+  through to the default boxed loop for unknown / unsupported functions.
+- `CaseExpr.evalVec` — eagerly evaluates every branch's predicate + value
+  vector and walks masks in order. Trade-off: branches that the row path
+  would skip do extra work, acceptable because every `Expr` is side-effect-
+  free. Short-circuits once every row is claimed by an earlier branch.
+- `InListExpr.evalVec` — when items are all literals, pre-builds a typed
+  HashSet (`Double` for numerics keyed via `Number.doubleValue` to match
+  `Ops.eq`'s cross-numeric semantics; `String` for string columns; linear
+  scan for booleans/dates). Non-literal items go through one column-eval
+  per item per batch + a per-row linear scan. NULL items are tracked for
+  SQL 3VL.
+- `LikeExpr.evalVec` — literal-pattern fast path compiles the regex once
+  outside the row loop and re-uses a single `Matcher` via `.reset(input)`
+  per row. Column-pattern path still goes through the global pattern cache
+  per row (rare; documented slow path).
 
-`VecOps` (in `sql/plan/Ops.scala`) is the column-at-a-time companion to `Ops`.
+`VecOps` (in `sql/plan/Ops.scala`) is the column-at-a-time companion to `Ops`;
+`VecFuncs` (in `sql/plan/Funcs.scala`) is the same idea for scalar functions.
 Each helper:
 
 1. Allocates one typed output vector sized to the batch.
@@ -490,6 +524,65 @@ saves real time. Leave the default for one-off shapes (rarely-used scalar
 functions, string-heavy operations where boxing isn't the bottleneck). The
 fallback is one ColumnVector allocation + N `setBoxed` calls per batch —
 slightly more allocation than the pre-`evalVec` row loop, but still correct.
+
+Parity is verified by `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala`
+— a JUnit suite that builds 64-row batches with controlled NULL placements,
+runs both `eval(batch, row)` and `evalVec(batch)`, and asserts equality at
+every row for every subtype that overrides `evalVec`. When you add a new
+override, extend this suite first — the test enforces NULL-handling parity,
+divide-by-zero parity, and per-type result-shape parity (after normalizing
+to the declared `dataType`, which matters for cases like FloatType arithmetic
+where `eval` returns `Double` and the FloatVector narrows on store).
+
+### 5b. Vectorized key extraction in pipeline breakers
+
+`HashAggregateExec`, `HashJoinExec`, and `WindowExec` all derive a "key" from
+each input row to drive a HashMap lookup. When the key expression is a pure
+`ColRefExpr` (the common case for `GROUP BY a`, `JOIN ON x = y`, `PARTITION BY
+p`) the existing `KeyCodec.encodeFromBatch` path reads typed primitives
+directly from the source `ColumnVector`s — no boxing, no Expr dispatch.
+
+When the key is a computed expression (`GROUP BY a + b`, `JOIN ON x.id =
+y.user_id + 1`), the operators evaluate each key Expr **once per batch via
+`evalVec`** and read the boxed per-row value from the resulting vector,
+instead of running per-row `Expr.eval` through a `RowBuf`. The win compounds
+with the `evalVec` overrides above: `BinOpExpr.evalVec` returns a single
+typed vector for the whole batch instead of N recursive `Expr.eval` calls.
+
+- **`HashAggregateExec.partialAggregate`** computes `keyVecs: Array[ColumnVector]`
+  once per scan batch for non-ColRef keys. The per-row loop reads
+  `keyVecs(i).getBoxed(r)` into the key buffer instead of calling
+  `keyExprs(i).eval(batch, r)`.
+- **`HashJoinExec`** does the same on both sides. Build-side keys are
+  pre-encoded per scan batch in `collectBuildPartition` (eliminating the
+  former RowBuf-driven walk in `buildCodecKeyMap`). Probe-side keys are
+  pre-evaluated per probe batch in the probe worker.
+- **`WindowExec`** is more invasive: during the single materialization pass
+  it eval-vecs each spec's partition keys + order keys per scan batch and
+  stashes the per-row values in `Array[Array[Any]]` arrays. Downstream
+  partitioning (`processSpec`), the sort comparator (`sortPartition`), and
+  rank / dense_rank tie detection all read from those pre-computed arrays.
+  LAG/LEAD args and aggregate args still go through the per-row path — a
+  follow-up that pairs with plan 04 (sharding).
+
+### 5c. Vectorized aggregate state updates (no-GROUP-BY fast path)
+
+`AggState` exposes two update paths:
+
+- **`update(agg, batch, row)`** — per-row, state evaluates the aggregate's
+  args itself via `agg.args(i).eval(batch, row)`. Used by the GROUP BY path
+  (per-row state dispatch is fundamental there) and by `WindowExec` (1-row
+  `RowBuf` batches).
+- **`updateBatch(agg, batch)`** — whole-batch. Default loops per-row through
+  `update`. Primitive states (`CountStarState`, `CountState`, `CountIfState`,
+  `LongSumState`, `DoubleSumState`, `AvgState`, `MinMaxState`) override to
+  eval the aggregate's args once via `Expr.evalVec` and walk the typed
+  vector with the column-type pattern match hoisted outside the row loop.
+
+`HashAggregateExec` calls `updateBatch` in the no-GROUP-BY fast path
+(every row aggregates into one bucket, so per-row state dispatch is wasted
+work). The GROUP BY path stays on `update` because rows fan out to
+different states per row.
 
 ### 6. Window functions: two-stage logical binding
 
