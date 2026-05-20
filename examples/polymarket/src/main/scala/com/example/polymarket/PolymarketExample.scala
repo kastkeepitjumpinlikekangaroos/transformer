@@ -20,14 +20,23 @@ import java.time.Instant
   * and produces 17 dependent parquet outputs across staging / intermediate /
   * mart / final layers. Every table carries 3-5 DBT-style validations.
   *
-  * One branch is INTENTIONALLY designed to fail: `mart_orderbook_quality_check`
-  * carries a validation `zzz_no_observable_snapshot_latency_INTENTIONAL_FAILURE`
-  * that asserts no market has snapshot latency above zero. Real-feed data has
-  * nonzero latencies on virtually every market, so the validation returns rows
-  * and the runner marks the task `ValidationFailed`. The downstream task
-  * `mart_quality_report` selects FROM that table and is therefore Skipped, while
-  * the other three mart branches (overview, high-activity, volatility) continue
-  * to completion and feed `final_combined_report`.
+  * TWO branches are EXPECTED to ValidationFail on real-feed data:
+  *
+  *   1. `mart_orderbook_quality_check` carries an INTENTIONAL validation
+  *      `zzz_no_observable_snapshot_latency_INTENTIONAL_FAILURE` that
+  *      asserts no market has snapshot latency above zero. Real data has
+  *      nonzero latencies on virtually every market. Its downstream
+  *      `mart_quality_report` selects FROM it and is therefore Skipped.
+  *   2. `final_combined_report`'s `category_not_null` validation. The
+  *      report groups by `category_normalized`, which originates in
+  *      `int_markets_categorized` (joined into `mart_market_overview`
+  *      via LEFT JOIN). Markets whose `condition_id` doesn't match a
+  *      row in `int_markets_categorized` propagate a NULL category
+  *      through the LEFT JOIN — the validation surfaces that data-
+  *      quality fact rather than papering over it with COALESCE.
+  *
+  * The other three mart branches (overview, high-activity, volatility) all
+  * succeed.
   *
   * Build + run:
   *
@@ -82,37 +91,49 @@ object PolymarketExample {
       println(f"  ${t.taskName}%-36s  rows=${t.rowsProduced}%9d  ${t.durationMillis}%6d ms  status=${t.status}")
     }
 
-    // The intentional failure is part of the design — we exit 0 if the job's
-    // outcome matches our expectation:
-    //   - mart_orderbook_quality_check is ValidationFailed
-    //   - mart_quality_report is Skipped
+    // The two expected failures (see class comment) are part of the design —
+    // we exit 0 iff the job's outcome matches exactly:
+    //   - mart_orderbook_quality_check is ValidationFailed (INTENTIONAL)
+    //   - final_combined_report is ValidationFailed (category_not_null
+    //     surfaces NULLs from the LEFT JOIN in mart_market_overview)
+    //   - mart_quality_report is Skipped (downstream of the intentional fail)
     //   - everything else Succeeded
-    val expectedFailed = "mart_orderbook_quality_check"
-    val expectedSkipped = "mart_quality_report"
-    val failedAsExpected = result.tasks.exists(t =>
-      t.taskName == expectedFailed && t.status.isInstanceOf[TaskStatus.ValidationFailed])
-    val skippedAsExpected = result.tasks.exists(t =>
-      t.taskName == expectedSkipped && t.status.isInstanceOf[TaskStatus.Skipped])
-    val unexpectedFailures = result.tasks.exists { t =>
-      t.taskName != expectedFailed && t.taskName != expectedSkipped &&
-        (t.status.isInstanceOf[TaskStatus.Failed] ||
-          t.status.isInstanceOf[TaskStatus.ValidationFailed] ||
-          t.status.isInstanceOf[TaskStatus.Skipped])
-    }
+    val expectedValidationFailed: Set[String] =
+      Set("mart_orderbook_quality_check", "final_combined_report")
+    val expectedSkipped: Set[String] = Set("mart_quality_report")
+    val actualValidationFailed: Set[String] =
+      result.tasks.filter(_.status.isInstanceOf[TaskStatus.ValidationFailed]).map(_.taskName).toSet
+    val actualSkipped: Set[String] =
+      result.tasks.filter(_.status.isInstanceOf[TaskStatus.Skipped]).map(_.taskName).toSet
+    val actualFailed: Set[String] =
+      result.tasks.filter(_.status.isInstanceOf[TaskStatus.Failed]).map(_.taskName).toSet
+    val validationFailedMatches = actualValidationFailed == expectedValidationFailed
+    val skippedMatches = actualSkipped == expectedSkipped
+    val noUnexpectedHardFailures = actualFailed.isEmpty
 
     println()
-    if (failedAsExpected && skippedAsExpected && !unexpectedFailures) {
-      println(s"OK: intentional failure on '$expectedFailed' triggered skip of '$expectedSkipped';")
+    if (validationFailedMatches && skippedMatches && noUnexpectedHardFailures) {
+      println("OK: expected ValidationFailed tasks " +
+        expectedValidationFailed.toSeq.sorted.mkString("{", ", ", "}") +
+        s" triggered skip of ${expectedSkipped.toSeq.sorted.mkString("{", ", ", "}")};")
       println("    all other branches Succeeded as expected.")
       System.exit(0)
     } else {
       System.err.println("UNEXPECTED outcome:")
-      if (!failedAsExpected)
-        System.err.println(s"  expected $expectedFailed to be ValidationFailed")
-      if (!skippedAsExpected)
-        System.err.println(s"  expected $expectedSkipped to be Skipped")
-      if (unexpectedFailures)
-        System.err.println("  unexpected failures/skips in other branches")
+      if (!validationFailedMatches) {
+        val missing = expectedValidationFailed -- actualValidationFailed
+        val extra   = actualValidationFailed -- expectedValidationFailed
+        if (missing.nonEmpty) System.err.println(s"  missing ValidationFailed: $missing")
+        if (extra.nonEmpty)   System.err.println(s"  unexpected ValidationFailed: $extra")
+      }
+      if (!skippedMatches) {
+        val missing = expectedSkipped -- actualSkipped
+        val extra   = actualSkipped -- expectedSkipped
+        if (missing.nonEmpty) System.err.println(s"  missing Skipped: $missing")
+        if (extra.nonEmpty)   System.err.println(s"  unexpected Skipped: $extra")
+      }
+      if (actualFailed.nonEmpty)
+        System.err.println(s"  hard-Failed tasks: $actualFailed")
       result.error.foreach(e => System.err.println(s"Job error: $e"))
       System.exit(1)
     }

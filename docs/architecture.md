@@ -51,7 +51,7 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 | `examples/directory_app/` | Sample app using `DirectoryJobLoader` — whole job is a folder of JSON configs + SQL files. | `src/main/scala/com/example/directory/DirectoryJobExample.scala`, `job/inputs/<view>/config.json`, `job/tables/<view>/main.sql`, `job/tables/<view>/validations/*.sql`. Accepts optional 3rd CLI arg for `executionTime` (ISO instant) so the same job can produce multiple partitions for testing. |
 | `examples/jaffle_shop/` | Port of [dbt-labs/jaffle-shop](https://github.com/dbt-labs/jaffle-shop) to the directory format. 6 raw seed CSVs → 6 staging tables → 3 intermediate aggregations → 3 marts (`customers`, `orders`, `order_items`) + 3 passthroughs (`locations`, `products`, `supplies`). 26 DBT data_tests ported as zero-row validation queries. Exercises the DAG scheduler at a realistic scale (~150k rows, 15 tasks). Omissions vs. DBT: `metricflow_time_spine` (needs `dbt_date`); `customer_order_number` ROW_NUMBER column on `orders` (no window functions); semantic models / metrics / saved_queries / unit_tests (no equivalent layer). DBT CTEs are split — each `with X as (...)` becomes its own SQLTask, since `LogicalBuilder.fromItem` only accepts `Table` in FROM. | `src/main/scala/com/example/jaffle/JaffleShopExample.scala`, `job/data/raw_*.csv`, `job/inputs/<view>/config.json`, `job/tables/<view>/{main.sql,validations/}`. |
 | `examples/gui_app/` | Sample app launching the GUI. Pulls in `gui/` + `sql/exec/`; parquet support comes transitively through `gui/`. | `src/main/scala/com/example/gui/GuiAppLauncher.scala` |
-| `examples/polymarket/` | Heavy-load directory-driven pipeline over the [Polymarket tick-level orderbook Kaggle dataset](https://www.kaggle.com/datasets/marvingozo/polymarket-tick-level-orderbook-dataset). 5 parquet inputs (1 daily orderbook ≈131M rows — the shipped `stg_orderbook` filters to its first 6 hours / ≈27M rows; 21 daily snapshot files / 51M rows; ml features / 5.6M rows; 4.1M trades; 124K markets), 17 parquet output tables in staging / intermediate / mart / final layers, 58 validations. One branch (`mart_orderbook_quality_check`) carries a validation that asserts no market has snapshot latency above zero — real-feed data has nonzero latencies on every market, so the validation fails, the task is marked `ValidationFailed`, and its downstream `mart_quality_report` is `Skipped` while the other mart branches run to completion. Launcher exits 0 iff that exact 15-Succeeded / 1-ValidationFailed / 1-Skipped pattern matches. Exercises: row-group-level parallel parquet scans of multi-GB inputs (a single 1GB file with 139 row groups splits into ~4 partitions packed to ~256MB each), glob-fed multi-partition parallel scans (snapshots), parallel-branch DAG scheduling, the failed-validation → skipped-downstream propagation path, the `partitionBy: "day={{ today }}"` template-driven partition layout, the `_run.json` + `job.json` run-records written by every task (the failed and skipped tasks get their own records too, so the GUI's run picker can replay the failure later). Needs `~/Downloads/archive/` dataset checkout and `-Xmx12g`. ~4 min on a fast Mac with the shipped 6-hour filter (was ~8 min before row-group splits). | `src/main/scala/com/example/polymarket/PolymarketExample.scala`, `job/inputs/raw_{orderbook,snapshots,features,trades,markets}/config.json`, `job/tables/{stg,int,mart,final}_*/{main.sql,output.json,validations/}` |
+| `examples/polymarket/` | Heavy-load directory-driven pipeline over the [Polymarket tick-level orderbook Kaggle dataset](https://www.kaggle.com/datasets/marvingozo/polymarket-tick-level-orderbook-dataset). 5 parquet inputs (1 daily orderbook ≈131M rows — the shipped `stg_orderbook` filters to its first 6 hours / ≈27M rows; 21 daily snapshot files / 51M rows; ml features / 5.6M rows; 4.1M trades; 124K markets), 17 parquet output tables in staging / intermediate / mart / final layers, 58 validations. Two branches are EXPECTED to ValidationFail on real-feed data: `mart_orderbook_quality_check` carries an INTENTIONAL validation asserting no market has snapshot latency above zero (real data does, so the task is `ValidationFailed` and its downstream `mart_quality_report` is `Skipped`); `final_combined_report` carries a `category_not_null` validation that surfaces NULL `category_normalized` rows propagated through `mart_market_overview`'s LEFT JOIN against `int_markets_categorized` (orderbook rows whose `condition_id` doesn't match a market row leave a NULL category in the rollup). The other three mart branches (overview, high-activity, volatility) run to completion. Launcher exits 0 iff that exact 14-Succeeded / 2-ValidationFailed / 1-Skipped pattern matches. Exercises: row-group-level parallel parquet scans of multi-GB inputs (a single 1GB file with 139 row groups splits into ~4 partitions packed to ~256MB each), glob-fed multi-partition parallel scans (snapshots), parallel-branch DAG scheduling, the failed-validation → skipped-downstream propagation path, the `partitionBy: "day={{ today }}"` template-driven partition layout, the `_run.json` + `job.json` run-records written by every task (the failed and skipped tasks get their own records too, so the GUI's run picker can replay the failure later). Needs `~/Downloads/archive/` dataset checkout and `-Xmx12g`. ~4 min on a fast Mac with the shipped 6-hour filter (was ~8 min before row-group splits). | `src/main/scala/com/example/polymarket/PolymarketExample.scala`, `job/inputs/raw_{orderbook,snapshots,features,trades,markets}/config.json`, `job/tables/{stg,int,mart,final}_*/{main.sql,output.json,validations/}` |
 | `tools/parquet_peek/` | Stand-alone CLI for inspecting a parquet file or glob — schema, partition count, footer-derived `exactRowCount`, and a configurable sample of decoded rows. Reader-only; no SQL engine. Strings >80 chars are truncated so JSON-blob columns stay legible. | `tools/parquet_peek/ParquetPeek.scala` |
 
 ## Cross-cutting patterns
@@ -226,12 +226,20 @@ filter still has to run.
 
 `ParquetFilterTranslator.translate` is a best-effort lowering. Supported
 shapes today: `c = lit`, `c != lit`, `c < lit`, `c <= lit`, `c > lit`,
-`c >= lit` (and the swapped `lit OP c` forms), plus `NOT`, `AND`, `OR` over
-those. Unsupported (left as residual): computed expressions (`a - b > 0`),
-two-column predicates (`a > b`), `LIKE`, `IS NULL` / `IS NOT NULL`,
-`IN (...)` with non-literal items, decimal columns. The translator drops
-unsupported conjuncts from the AND-chain rather than refusing to push the
-whole predicate; the residual `FilterExec` covers them.
+`c >= lit` (and the swapped `lit OP c` forms); `c IS NULL` / `c IS NOT NULL`
+(translates to `FilterApi.eq(col, null)` / `notEq(col, null)`, so the stats
+filter uses `numNulls` / `numRows` to drop all-null or no-null groups);
+`c IN (lit, lit, …)` / `c NOT IN (…)` over a homogeneous literal list
+(decomposed to an OR of equalities, wrapped in `not(...)` for NOT IN);
+`c BETWEEN lo AND hi` (lowered by LogicalBuilder to `c >= lo AND c <= hi`
+so each half hits the comparator path); plus `NOT`, `AND`, `OR` over those.
+Unsupported (left as residual): computed expressions (`a - b > 0`),
+two-column predicates (`a > b`), `LIKE`, `IN` containing a NULL literal
+(SQL three-valued-logic semantics make stats-level skipping unsafe in that
+case — the translator bails), `IN (…)` with non-literal items, decimal
+columns. The translator drops unsupported conjuncts from the AND-chain
+rather than refusing to push the whole predicate; the residual `FilterExec`
+covers them.
 
 ### 3e. Skip materialize re-read when no downstream consumes
 
@@ -476,3 +484,68 @@ functions and LAG/LEAD ignore the frame; aggregates with ORDER BY and no
 explicit frame use running aggregation; aggregates without ORDER BY cover
 the entire partition. `RANGE` frames execute as `ROWS` (documented in
 [gotchas.md](gotchas.md#whats-intentionally-not-done)).
+
+### 7. Plan-time cardinality estimation
+
+`LogicalPlanCardinality.estimate(plan): Option[Long]` walks a bound
+`LogicalPlan` and returns a best-effort row count. It's consulted by
+`PhysicalPlanner` to pick the build side of a hash join (the rest of the
+planner is structural; estimates only feed the join build decision today).
+
+The estimator's leaves are `CatalogView.exactRowCount` — `MaterializedView`
+and `ParquetReader` both populate it; CSV doesn't, so any plan rooted in a
+streaming CSV scan returns `None`. Filters apply a fixed-selectivity table
+(`= → 0.1`, range `→ 0.3`, `IS NULL → 0.1`, `LIKE → 0.5`, default `0.5`);
+aggregates divide by `groupKeys × 100` (capped at the input count); joins
+fold the per-side estimates by kind (inner → `max`, left → left, right →
+right, full → `left + right`). All constants live as named `private[plan]
+val`s in `LogicalPlanCardinality.scala` so they're tweakable as a unit if
+profiling shows misestimates dominating real workloads.
+
+**The estimator does not collect statistics.** No sampling, no sketches, no
+histograms. The contract is *coarse discrimination only* — "1000 rows vs.
+1 million" — which is enough to choose a build side correctly without
+acquiring statistics-catalog infrastructure. When you add a new operator
+(plan 05 didn't, but a future operator might) contribute an
+`estimate(plan)` case if it's a row-count-changing shape; pass-through
+shapes (project / sort / window) just return the child's estimate.
+
+### 8. Hash-join build-side selection
+
+`PhysicalPlanner.shouldBuildRight(l, r, kind)` decides which side of a
+`LogicalJoin` becomes the build side of the resulting `HashJoinExec`. The
+default — and the historic shape — is to build from the right side and
+probe from the left. The planner overrides this when:
+
+- **Inner join, left is materially smaller.** `LogicalPlanCardinality.estimate`
+  reports both sides; if `leftEst × 2 ≤ rightEst` the planner sets
+  `buildRight = false` so the smaller side ends up in the hash. The 2× gate
+  keeps near-equal estimates pinned to the default (small ratio differences
+  are a wash and not worth the risk of a bad estimate flipping a stable
+  plan).
+- **Right outer join.** Always `false`. RIGHT outer must preserve right-side
+  rows, and the cleanest way is to keep right as the streaming probe — the
+  matched-build tracking then surfaces every right row, including unmatched
+  ones with NULL left columns. Schema and column order remain `left ++
+  right` regardless.
+- **Left outer / full outer.** Always `true` (no swap). LEFT outer preserves
+  left rows, so left must stay on the probe side; FULL outer's matched-build
+  set is the only path for unmatched-build rows, and the symmetry buys
+  nothing.
+- **No estimate available** (e.g. a CSV-rooted side). Falls back to `true`.
+  Best to be conservative when there's nothing to base a decision on.
+
+`HashJoinExec` carries `buildRight` as its 7th parameter (defaulted to
+`true` for back-compat with hand-built plans in tests). Internally it
+mirrors build/probe roles through `probeIsLeft`/`buildIsLeft` flags;
+`mergeMatch` / `mergeUnmatchedProbe` / `mergeUnmatchedBuild` use those flags
+to write each row into the correct half of the output array, so callers
+never observe the swap.
+
+Non-equi joins (no equality conjunct after `splitEqualityKeys`) plan as a
+degenerate hash join — every probe row matches the single empty-key bucket
+holding every build row, which gives correct nested-loop semantics. To stop
+that from silently materializing an O(N*M) cartesian over millions of rows,
+`PhysicalPlanner.enforceNestedLoopGuard` refuses the plan when both
+estimates exist and `min(left, right) > 5000`. CSV-rooted joins (no
+estimate) keep working — the guard is conservative.

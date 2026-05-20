@@ -21,17 +21,29 @@ import org.apache.parquet.io.api.Binary
   *
   *   - `c = lit`, `c != lit`, `c < lit`, `c <= lit`, `c > lit`, `c >= lit`
   *     (and the swapped `lit OP c` forms)
+  *   - `c IS NULL` / `c IS NOT NULL` — translates to `FilterApi.eq(col, null)`
+  *     / `FilterApi.notEq(col, null)`. The stats filter then uses
+  *     `numNulls` / `numRows` to drop row groups that are proven all-null
+  *     (for IS NOT NULL) or contain no nulls (for IS NULL). Big win on
+  *     sparse columns: e.g. polymarket's `data` JSON blob is empty in many
+  *     rows, so `WHERE data IS NOT NULL` skips entire row groups.
+  *   - `c IN (lit1, lit2, …)` over a homogeneous literal list — lowered to
+  *     `(c = lit1) OR (c = lit2) OR …`. `NOT IN` wraps that in `FilterApi.not`.
+  *   - `c BETWEEN lo AND hi` — already lowered to `c >= lo AND c <= hi` by
+  *     the LogicalBuilder, so both halves go through the standard comparator
+  *     path. Verified by [[ParquetFilterTranslatorTest]].
   *   - `NOT(<above>)`
   *   - `<above> AND <above>`, `<above> OR <above>`
   *
   * Not pushed (left as residual in the FilterExec):
-  *   - `IS NULL` / `IS NOT NULL` — parquet-mr's null-aware FilterApi requires
-  *     erasure gymnastics from Scala that aren't worth the row-group savings
-  *     (column null-counts rarely flip whole groups in real datasets).
   *   - predicates over computed expressions (`a - b > 0`)
   *   - predicates referencing two columns (`a > b`)
   *   - `LIKE` patterns (no public FilterApi LIKE)
-  *   - `IN (...)` lists with non-literal items
+  *   - `IN (…)` with a NULL literal in the list — SQL semantics for NULL in
+  *     the list interact with three-valued logic in ways a row-group skip
+  *     can't safely approximate (see [[translateInList]] for the bailout
+  *     and the test that pins the behaviour).
+  *   - `IN (…)` with non-literal items
   *   - decimal columns
   *
   * Returns None when nothing could be pushed.
@@ -74,7 +86,88 @@ object ParquetFilterTranslator {
       // Swap the comparator so it reads "column OP literal" — e.g. `5 > x`
       // becomes `x < 5`.
       compareToLiteral(name, dt, swap(op), v)
+    case IsNullExpr(ColRefExpr(_, name, dt), negated) =>
+      nullPredicate(name, dt, negated)
+    case InListExpr(ColRefExpr(_, name, dt), items, negated) =>
+      translateInList(name, dt, items, negated)
     case _ => None
+  }
+
+  /** Build `column IS NULL` (or `IS NOT NULL` when `negated`). Parquet-mr's
+    * `FilterApi.eq(col, null)` is the "match null" predicate; the statistics
+    * filter then uses `numNulls` to drop whole row groups (groups with zero
+    * nulls can't satisfy IS NULL; groups whose every row is null can't
+    * satisfy IS NOT NULL).
+    *
+    * The `null.asInstanceOf[java.lang.Integer]` shape is the price of the
+    * Java overload set: `FilterApi.eq` is generic over the column's element
+    * type `T extends Comparable<T>`, and Scala's untyped `null` doesn't
+    * satisfy the bound until we ascribe it.
+    */
+  private def nullPredicate(name: String, dt: DataType, negated: Boolean): Option[FilterPredicate] = {
+    dt match {
+      case DataType.IntType | DataType.DateType =>
+        val col = FilterApi.intColumn(name)
+        val nullLit = null.asInstanceOf[java.lang.Integer]
+        Some(if (negated) FilterApi.notEq(col, nullLit) else FilterApi.eq(col, nullLit))
+      case DataType.LongType | DataType.TimestampType =>
+        val col = FilterApi.longColumn(name)
+        val nullLit = null.asInstanceOf[java.lang.Long]
+        Some(if (negated) FilterApi.notEq(col, nullLit) else FilterApi.eq(col, nullLit))
+      case DataType.FloatType =>
+        val col = FilterApi.floatColumn(name)
+        val nullLit = null.asInstanceOf[java.lang.Float]
+        Some(if (negated) FilterApi.notEq(col, nullLit) else FilterApi.eq(col, nullLit))
+      case DataType.DoubleType =>
+        val col = FilterApi.doubleColumn(name)
+        val nullLit = null.asInstanceOf[java.lang.Double]
+        Some(if (negated) FilterApi.notEq(col, nullLit) else FilterApi.eq(col, nullLit))
+      case DataType.BooleanType =>
+        val col = FilterApi.booleanColumn(name)
+        val nullLit = null.asInstanceOf[java.lang.Boolean]
+        Some(if (negated) FilterApi.notEq(col, nullLit) else FilterApi.eq(col, nullLit))
+      case DataType.StringType | DataType.BinaryType =>
+        val col = FilterApi.binaryColumn(name)
+        val nullLit = null.asInstanceOf[Binary]
+        Some(if (negated) FilterApi.notEq(col, nullLit) else FilterApi.eq(col, nullLit))
+      case _: DataType.DecimalType | DataType.NullType => None
+    }
+  }
+
+  /** Decompose `c IN (lit1, lit2, …)` to `c = lit1 OR c = lit2 OR …` so each
+    * disjunct can be checked against per-row-group stats. `NOT IN` wraps the
+    * disjunction in `FilterApi.not`.
+    *
+    * Bails (returns None) in three cases — partial translation here would
+    * over-prune row groups:
+    *
+    *   - Empty list (SQL grammar forbids it; defensive guard).
+    *   - Any non-literal item (subqueries, expressions). Caller's residual
+    *     FilterExec handles it.
+    *   - Any NULL literal in the list. SQL three-valued logic says
+    *     `x IN (1, NULL)` is NULL when x≠1 (not false), and `x NOT IN (…NULL…)`
+    *     is NULL for every row. Pushing as an `=` chain would over-prune.
+    */
+  private def translateInList(
+      name: String,
+      dt: DataType,
+      items: Seq[Expr],
+      negated: Boolean
+  ): Option[FilterPredicate] = {
+    if (items.isEmpty) return None
+    val lits = new scala.collection.mutable.ArrayBuffer[Any](items.length)
+    val it = items.iterator
+    while (it.hasNext) {
+      it.next() match {
+        case LitExpr(null, _) => return None  // NULL in list — bail (3VL).
+        case LitExpr(v, _)    => lits += v
+        case _                => return None  // non-literal — bail.
+      }
+    }
+    val eqs = lits.iterator.flatMap(v => compareToLiteral(name, dt, "=", v)).toIndexedSeq
+    if (eqs.length != lits.length) return None
+    val disjunction = eqs.reduceLeft((a, b) => FilterApi.or(a, b))
+    Some(if (negated) FilterApi.not(disjunction) else disjunction)
   }
 
   /** Build a parquet `FilterPredicate` for `<column> <op> <literal>`.

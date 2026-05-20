@@ -7,7 +7,8 @@ import com.transformer.sql.plan._
 import scala.collection.mutable
 
 /** Logical → physical conversion. Applies a small set of rewrites first
-  * (projection pruning, predicate pushdown for join keys, equality split).
+  * (projection pruning, predicate pushdown for join keys, equality split,
+  * build-side selection for hash joins).
   */
 object PhysicalPlanner {
 
@@ -41,9 +42,72 @@ object PhysicalPlanner {
       val left = plan(l)
       val right = plan(r)
       val (leftKeys, rightKeys, extra) = splitEqualityKeys(cond, l.outputSchema.length, r.outputSchema.length)
-      HashJoinExec(left, right, leftKeys, rightKeys, extra, kind)
+      if (leftKeys.isEmpty && rightKeys.isEmpty) enforceNestedLoopGuard(l, r)
+      val buildRight = shouldBuildRight(l, r, kind)
+      HashJoinExec(left, right, leftKeys, rightKeys, extra, kind, buildRight)
     case LogicalWindow(child, windows) =>
       WindowExec(plan(child), windows)
+  }
+
+  /** Minimum size ratio at which we'll swap the join build side. Keeps near-
+    * equal estimates pinned to the default plan — the win below this ratio is
+    * a wash and not worth the risk that the estimator was wrong.
+    */
+  private val JoinSwapRatio: Double = 2.0
+
+  /** Refuse a nested-loop-style join (no equality conjuncts) when both
+    * estimated sides exceed this row count. Below the threshold the
+    * degenerate-hash path is fine — small × small is cheap. Above it, the
+    * planner forces the user to add equality keys rather than silently
+    * planning an O(N*M) join over millions of rows. */
+  private val NestedLoopMaxRows: Long = 5000L
+
+  /** Decide which side of a join to build into the hash table.
+    *
+    * Returns `true` when the right side should be built (the historic shape).
+    * Returns `false` when the planner should swap to building the left side.
+    *
+    * The decision is driven by [[LogicalPlanCardinality.estimate]] for inner
+    * joins (build the smaller side, with a threshold to ignore near-equal
+    * sizes), and pinned by join kind for outer joins (the preserved side
+    * stays the probe, so a RIGHT outer always swaps and a LEFT outer never
+    * does — there's no symmetric "build smaller" call to make once the
+    * preservation requirement is fixed). FULL outer stays at the default
+    * because both sides emit unmatched rows regardless of build choice.
+    *
+    * If estimates are unavailable for either side (e.g. CSV inputs with no
+    * exactRowCount), fall back to `true` — no information beats a guess.
+    */
+  private def shouldBuildRight(l: LogicalPlan, r: LogicalPlan, kind: JoinKind): Boolean = kind match {
+    case JoinKind.Inner =>
+      (LogicalPlanCardinality.estimate(l), LogicalPlanCardinality.estimate(r)) match {
+        case (Some(lc), Some(rc)) if lc.toDouble * JoinSwapRatio <= rc.toDouble => false
+        case _ => true
+      }
+    case JoinKind.Left  => true
+    case JoinKind.Right => false
+    case JoinKind.Full  => true
+  }
+
+  /** Throw when a non-equi join would have to scan a known-large input on
+    * both sides. The check is intentionally conservative: it never refuses a
+    * plan we can't size (estimates are `None` for streaming CSV inputs, so
+    * those still get a degenerate-hash plan). Only when both sides expose an
+    * exact row count and the smaller of the two exceeds [[NestedLoopMaxRows]]
+    * do we bail — at that point the user has the information to add
+    * equality keys and we have no business silently materializing a
+    * cartesian product.
+    */
+  private def enforceNestedLoopGuard(l: LogicalPlan, r: LogicalPlan): Unit = {
+    val lEst = LogicalPlanCardinality.estimate(l)
+    val rEst = LogicalPlanCardinality.estimate(r)
+    (lEst, rEst) match {
+      case (Some(lc), Some(rc)) if math.min(lc, rc) > NestedLoopMaxRows =>
+        throw new UnsupportedOperationException(
+          s"non-equi join over >$NestedLoopMaxRows rows requires equality keys " +
+          s"(left=$lc, right=$rc rows)")
+      case _ => ()
+    }
   }
 
   /** Try to push a bound predicate into the underlying view. Today only

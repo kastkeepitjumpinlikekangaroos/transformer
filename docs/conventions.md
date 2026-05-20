@@ -33,3 +33,11 @@ specific traps.
   project is that the planner + executor are hand-built — see the opening
   paragraph of [CLAUDE.md](../CLAUDE.md). If a feature looks impossible
   without one, stop and ask the user.
+- **Selectivity / cardinality constants live as named `private[plan] val`s**
+  in `LogicalPlanCardinality.scala` (`SelectivityEq`, `SelectivityRange`,
+  `SelectivityIsNull`, …). New shapes added to `filterSelectivity` should
+  follow the same pattern — name the constant, document the source ("from
+  Spark's defaults" / "from profiling jaffle_shop"), and pin tests to the
+  named constant rather than the literal value so the test stays meaningful
+  when the constant moves. The same convention applies to the planner's
+  `JoinSwapRatio` / `NestedLoopMaxRows` thresholds.

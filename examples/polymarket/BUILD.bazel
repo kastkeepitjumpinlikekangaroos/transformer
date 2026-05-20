@@ -3,9 +3,14 @@ load("@rules_scala//scala:scala.bzl", "scala_binary")
 # Heavy-load pipeline over the Polymarket tick-level orderbook dataset. Reads
 # 5 parquet sources (one ~900MB orderbook day, 21 snapshot days, features,
 # trades, markets), produces 17 parquet outputs across staging / intermediate
-# / mart / final layers, and exercises every table with 3-5 validations. One
-# branch is intentionally constructed to ValidationFail and block its
-# downstream — see job/tables/mart_orderbook_quality_check/validations/.
+# / mart / final layers, and exercises every table with 3-5 validations. Two
+# branches are EXPECTED to ValidationFail on real-feed data — the intentional
+# zzz_no_observable_snapshot_latency_INTENTIONAL_FAILURE on
+# mart_orderbook_quality_check (which blocks its downstream
+# mart_quality_report as Skipped), and category_not_null on
+# final_combined_report (which surfaces unmatched-condition_id NULLs that
+# propagate through mart_market_overview's LEFT JOIN). See
+# PolymarketExample.scala for the exit-code contract.
 scala_binary(
     name = "polymarket",
     srcs = glob(["src/main/scala/**/*.scala"]),

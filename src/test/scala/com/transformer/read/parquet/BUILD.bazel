@@ -15,3 +15,20 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+scala_junit_test(
+    name = "parquet_filter_translator_test",
+    srcs = ["ParquetFilterTranslatorTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/sql/plan",
+        "//src/main/scala/com/transformer/write/parquet",
+        # parquet-column exports FilterPredicate; the translator's public
+        # return type leaks it to callers, so strict-deps wants it here even
+        # though the test itself never names it.
+        "@maven//:org_apache_parquet_parquet_column",
+        "@maven//:junit_junit",
+    ],
+)

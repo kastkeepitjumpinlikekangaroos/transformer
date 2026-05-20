@@ -1,0 +1,12 @@
+load("@rules_scala//scala:scala.bzl", "scala_junit_test")
+
+scala_junit_test(
+    name = "logical_plan_cardinality_test",
+    srcs = ["LogicalPlanCardinalityTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)

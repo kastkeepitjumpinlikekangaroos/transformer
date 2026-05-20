@@ -198,6 +198,14 @@ extend the format switch in `ResultPersister` and the dropdown in
 5. Move the feature from "intentionally NOT done" in
    [`docs/gotchas.md`](gotchas.md#whats-intentionally-not-done) to the
    supported list in [`README.md`'s "SQL features"](../README.md#sql-features).
+6. **Decide whether to contribute a `LogicalPlanCardinality.estimate` case.**
+   If the operator changes row count (filter / aggregate / limit / join /
+   distinct) add a case that returns the new estimate. If it preserves row
+   count (project / sort / window) return `estimate(child)` directly. The
+   default — falling through to the pattern match — will throw a
+   `MatchError`, which is the right failure mode (load-bearing planner
+   decisions silently treating a new operator as `None` would be worse).
+   Pin tests in `LogicalPlanCardinalityTest` to the new shape.
 
 ## Add cloud support (v1.1 work)
 

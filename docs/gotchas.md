@@ -108,14 +108,50 @@ ship a fix or move something from "not done" to "done".
   `PrimitiveTypeName` (and `BatchWriteSupport.write` on the encode side);
   forgetting either side leaves a `MatchError` at runtime, not a compile
   failure.
-- **Predicate pushdown into parquet is best-effort partial.** Only
-  `c <op> lit` shapes (and `NOT`/`AND`/`OR` over them) translate; everything
-  else is dropped from the AND-chain. The `FilterExec` always stays above
-  the scan to catch per-row precision — stats can prove a row group doesn't
+- **Predicate pushdown into parquet is best-effort partial.** The translator
+  in `ParquetFilterTranslator` handles `c <op> lit` and its swapped form,
+  `c IS NULL` / `c IS NOT NULL`, `c IN (lit, lit, …)` / `c NOT IN (…)` over
+  homogeneous literal lists, `c BETWEEN lo AND hi` (because LogicalBuilder
+  already lowers it to `c >= lo AND c <= hi`), and `NOT`/`AND`/`OR` over
+  those. `IN` with a NULL literal in the list bails out — SQL three-valued
+  logic on NULL-in-list interacts with row-group skipping in a way the
+  current translator can't safely approximate; let the residual FilterExec
+  handle it. Computed expressions (`a - b > 0`), two-column predicates
+  (`a > b`), `LIKE`, decimal columns, and `IN` with non-literal items are
+  also dropped from the AND-chain. The `FilterExec` always stays above the
+  scan to catch per-row precision — stats can prove a row group doesn't
   match but can't prove it does. Don't add a "predicate is fully pushed,
   skip the FilterExec" optimization without proving the translator handles
   every conjunct shape; missing one means rows that don't match the SQL
   filter sneak through.
+- **The planner may swap join build sides relative to how the SQL is
+  written.** `PhysicalPlanner` consults `LogicalPlanCardinality.estimate`
+  and the join kind to pick which side ends up as the build side of the
+  resulting `HashJoinExec`. INNER joins with a left side significantly
+  smaller than the right (`leftEst × 2 ≤ rightEst`) swap so the smaller
+  side is built; RIGHT outer joins always swap (matched-build tracking
+  preserves right-side rows); LEFT outer and FULL outer never swap.
+  `HashJoinExec.buildRight` carries the decision; output schema and
+  column order are always `left ++ right` regardless of swap. Downstream
+  operators don't see the swap, but EXPLAIN-style debug code that peeks
+  at a join's `buildRight` flag (test fixtures, future planner tracing)
+  will notice that the build side is no longer 1:1 with how the user
+  wrote `FROM a JOIN b`. See
+  [architecture.md §8](architecture.md#8-hash-join-build-side-selection).
+- **Non-equi joins are refused over large known inputs.** When a join's
+  ON clause has no equality conjunct, `HashJoinExec` runs as a
+  degenerate hash (one bucket = whole build side) — correct nested-loop
+  semantics but O(N*M). `PhysicalPlanner.enforceNestedLoopGuard` throws
+  `UnsupportedOperationException("non-equi join over >5000 rows
+  requires equality keys (left=…, right=…)")` when both sides expose a
+  `CatalogView.exactRowCount` and the smaller of the two exceeds 5000
+  rows. CSV-rooted joins (no exactRowCount) keep working because the
+  guard refuses to refuse without evidence. If you hit this on a
+  workload that genuinely needs the cartesian, either add a
+  redundant-but-cheap equality conjunct (`ON 1 = 1` won't help — it has
+  no side info) or restructure the predicate so the planner can extract
+  one. There's deliberately no per-task escape hatch — the threshold is
+  the contract.
 - **`SELECT COUNT(*) FROM <view>` short-circuits to footer metadata** when
   the view's `CatalogView.exactRowCount` is defined (parquet + in-memory).
   The planner emits `CountStarMetadataExec` directly; no scan happens. The

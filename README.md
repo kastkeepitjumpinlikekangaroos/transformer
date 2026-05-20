@@ -296,12 +296,17 @@ the `ValidationFailed → downstream Skipped` scheduler path.
   DBT-style "this query should return zero rows" shape. Failure samples for
   the intentionally-failing validation land in
   `<output>/mart_orderbook_quality_check/.../_validation-zzz_no_observable_snapshot_latency_intentional_failure.csv`.
-- **Intentionally fails one branch:** `mart_orderbook_quality_check` has a
-  validation that asserts no market has snapshot latency above zero. Real-feed
-  data does, so the validation fails, the task is marked `ValidationFailed`,
-  and its downstream `mart_quality_report` is `Skipped`. The other three mart
-  branches (overview, high-activity, volatility) continue and feed
-  `final_combined_report`. The launcher exits 0 iff this exact pattern holds.
+- **Two branches expected to ValidationFail on real-feed data:**
+  `mart_orderbook_quality_check` has a validation that asserts no market has
+  snapshot latency above zero — real data does, so the task is marked
+  `ValidationFailed` and its downstream `mart_quality_report` is `Skipped`.
+  `final_combined_report` carries a `category_not_null` validation that
+  surfaces the NULL `category_normalized` values propagated through
+  `mart_market_overview`'s LEFT JOIN against `int_markets_categorized` (any
+  orderbook row whose `condition_id` doesn't match a market row leaves a NULL
+  category in the rollup). The other three mart branches (overview,
+  high-activity, volatility) continue and feed `final_combined_report`. The
+  launcher exits 0 iff this exact pattern holds.
 
 **Prerequisite:** unpack the Kaggle dataset into `~/Downloads/archive/` so the
 input paths in `job/inputs/raw_*/config.json` resolve. The launcher hardcodes
@@ -316,7 +321,8 @@ java -Xmx12g -jar bazel-bin/examples/polymarket/polymarket_deploy.jar \
     examples/polymarket/job /tmp/transformer-polymarket-out \
     2026-03-26T00:00:00Z
 # Runs in ~5 min on a fast Mac. Output:
-# 15 Succeeded, 1 ValidationFailed (mart_orderbook_quality_check),
+# 14 Succeeded,
+# 2 ValidationFailed (mart_orderbook_quality_check, final_combined_report),
 # 1 Skipped (mart_quality_report), 0 Failed. Exit 0.
 ```
 
@@ -507,14 +513,15 @@ InputFilePath("data.csv",
   straight into `ColumnarBatch` primitive vectors. No `Group`/`SimpleGroup`
   objects allocated per row. Row groups are packed into ~256MB partitions so a
   multi-GB single file still saturates worker threads.
-- Read predicate pushdown: `WHERE c <op> lit` and `NOT`/`AND`/`OR` over those
-  forms are translated to parquet-mr's `FilterApi` and applied against each
-  row group's column statistics — groups proven not to match are skipped
-  entirely. The original `FilterExec` still runs above the scan for per-row
-  precision (stats can prove non-matching, never matching). Unsupported
-  conjuncts (computed expressions, two-column predicates, `LIKE`,
-  `IS NULL` / `IS NOT NULL`, decimal columns) drop through as residual
-  filtering.
+- Read predicate pushdown: `WHERE c <op> lit`, `c IS NULL` / `c IS NOT NULL`,
+  `c IN (lit, lit, …)` / `c NOT IN (…)`, `c BETWEEN lo AND hi`, and
+  `NOT`/`AND`/`OR` over those forms are translated to parquet-mr's `FilterApi`
+  and applied against each row group's column statistics — groups proven not
+  to match are skipped entirely. The original `FilterExec` still runs above
+  the scan for per-row precision (stats can prove non-matching, never
+  matching). Unsupported conjuncts (computed expressions, two-column
+  predicates, `LIKE`, `IN` with a NULL literal in the list, decimal columns)
+  drop through as residual filtering.
 - Write: vectorized — custom `WriteSupport[BatchRowRef]` drives parquet-mr's
   `RecordConsumer` straight from `ColumnarBatch` vectors. No `SimpleGroup` per
   row, no `Integer`/`Long` boxing per cell. Compression defaults to `snappy`
@@ -582,6 +589,16 @@ results.
 **NULL handling:** three-valued logic in boolean contexts; NULL propagates
 through arithmetic and string ops; `IS NULL` / `IS NOT NULL` for explicit
 checks.
+
+**Join planning:** for hash joins the planner picks the build side based on
+estimated row counts. INNER joins build the smaller side when the size ratio
+exceeds 2×; LEFT outer always builds right (left stays on probe to preserve
+unmatched-left rows); RIGHT outer always builds left (right stays on probe);
+FULL outer keeps the default. Output schema and column order are always
+`left ++ right` regardless of which side ends up in the hash — `SELECT a.*,
+b.*` keeps its layout. Non-equi joins (no equality conjunct) work for tiny
+inputs but are refused when both sides expose a row count and the smaller
+side exceeds 5000 rows — at that scale you should add an equality key.
 
 ## Temporal templating
 
