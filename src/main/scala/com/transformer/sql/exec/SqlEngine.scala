@@ -1,6 +1,6 @@
 package com.transformer.sql.exec
 
-import com.transformer.core.{Catalog, ColumnarBatch, ExecutedQuery, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, ColumnarBatch, ExecutedQuery, ExecutionOptions, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer}
 
 /** Wires the SQL stack into [[SqlExecutorRegistry]]. Calling `init()` is
@@ -13,10 +13,10 @@ object SqlEngine extends SqlExecutor {
   // Self-install on class load so simply linking against this module is enough.
   init()
 
-  def execute(sql: String, catalog: Catalog): ExecutedQuery = {
+  def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
     val logical = LogicalBuilder.build(sql, catalog)
     val optimized = LogicalOptimizer.optimize(logical)
-    val physical = PhysicalPlanner.plan(optimized)
+    val physical = PhysicalPlanner.plan(optimized, opts)
     val parts: IndexedSeq[Iterator[ColumnarBatch]] =
       (0 until physical.numPartitions).map(p => physical.execute(p))
     new ExecutedQuery(physical.outputSchema, parts)

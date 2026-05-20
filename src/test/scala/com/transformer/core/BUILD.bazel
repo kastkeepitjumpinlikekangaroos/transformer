@@ -19,3 +19,23 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+scala_junit_test(
+    name = "execution_options_test",
+    srcs = ["ExecutionOptionsTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "spill_test",
+    srcs = ["SpillTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)

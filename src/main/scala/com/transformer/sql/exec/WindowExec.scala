@@ -1,8 +1,11 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
+import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
 
+import java.nio.file.Path
 import scala.collection.mutable
 
 /** Window-function projection: materializes the child, groups rows by spec,
@@ -24,12 +27,31 @@ import scala.collection.mutable
   *     planner's cardinality estimate is below
   *     [[com.transformer.sql.plan.LogicalPlanCardinality.MinShardableSize]].
   *
-  * All child rows in the relevant scope are buffered in memory;
-  * this matches the codebase's v1 stance ("no spill-to-disk").
-  *
   * Output schema is `child.outputSchema ++ windowOutputs` — original column
   * indices are preserved so projections bound against the child can still
   * reference them by index.
+  *
+  * ## Spill (plan 09 Phase 7)
+  *
+  * Window's correctness requires full visibility within each partition. The
+  * spill design exploits the same property: route every input row to
+  * `hash(partitionKey) % K` (K=16) disk parquet buckets, then process each
+  * bucket independently — every row sharing a partition key collocates in
+  * the same bucket, so the in-memory window computation per bucket sees a
+  * complete view of every partition it contains.
+  *
+  * Gated on `opts.spillEnabled && canSpill`, where `canSpill` requires all
+  * window specs to agree on the same non-empty PARTITION BY key set (the
+  * same gate the planner uses for sharded windows). When specs disagree or
+  * the window spans the whole result (empty PARTITION BY), spill is
+  * silently disabled — the in-memory path runs unchanged.
+  *
+  * Limitations:
+  *   - A single PARTITION BY key whose rows exceed heap will still OOM at
+  *     the bucket-processing step. Recursive sub-bucketing is v1.1.
+  *   - LAG / LEAD / aggregate frames all stay correct because the bucket
+  *     holds every row of every partition it contains. No cross-bucket
+  *     reads are ever needed.
   *
   * Vectorization: during the single materialization pass we also eval each
   * [[WindowSpec]]'s partition keys and order keys once per scan batch via
@@ -39,7 +61,11 @@ import scala.collection.mutable
   * [[RowBuf]]. LAG/LEAD args and aggregate args still go through the
   * per-row path — a follow-up.
   */
-final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extends PhysicalPlan {
+final case class WindowExec(
+    child: PhysicalPlan,
+    windows: Seq[WindowDef],
+    opts: ExecutionOptions = ExecutionOptions.Default
+) extends PhysicalPlan {
 
   val outputSchema: Schema = Schema(
     child.outputSchema.fields ++ windows.map(w => Field(w.outputName, w.fn.resultType))
@@ -53,9 +79,170 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
 
   def numPartitions: Int = if (isSharded) child.numPartitions else 1
 
+  /** Spill-eligibility check. We can only safely bucket child rows when
+    * every WindowSpec agrees on the same non-empty PARTITION BY key set
+    * — same gate the planner uses for sharded windows. Empty PARTITION
+    * BY (whole-result window) means a single global partition that can't
+    * be bucketed without losing visibility; mixed PARTITION BYs would
+    * each need a different bucketing. */
+  private val canSpill: Boolean = {
+    val distinctParts = windows.map(_.spec.partitionKeys).distinct
+    distinctParts.length == 1 && distinctParts.head.nonEmpty
+  }
+
+  private val spillEnabled: Boolean = opts.spillEnabled && canSpill
+
+  /** Bucket count for the spill path. Fixed at 16 — same default as
+    * [[HashJoinExec]]'s grace hash. Power-of-two so `& (K-1)` works for
+    * the modulo. Recursive sub-bucketing for hot keys is v1.1. */
+  private val SpillBuckets: Int = 16
+
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     require(partition >= 0 && partition < numPartitions,
       s"partition $partition out of range [0,$numPartitions)")
+    if (spillEnabled) executeSpilled(partition)
+    else {
+      val it: Iterator[ColumnarBatch] =
+        if (isSharded) child.execute(partition)
+        else (0 until child.numPartitions).iterator.flatMap(child.execute)
+      processBatches(it)
+    }
+  }
+
+  /** Spill execute path: route every input row into K disk parquet buckets
+    * keyed by `hash(partitionKey) % K`, then run the in-memory window
+    * pipeline over each bucket independently. Bucket iterators chain so
+    * peak memory is one bucket's materialized state at a time. */
+  private def executeSpilled(partition: Int): Iterator[ColumnarBatch] = {
+    val K = SpillBuckets
+    val spillDir = Spill.openOperatorDir("window")
+    val childParts: Seq[Int] =
+      if (isSharded) Seq(partition) else 0 until child.numPartitions
+
+    val bucketFiles = routeChildToBuckets(childParts, K, spillDir)
+
+    val concat = bucketFiles.iterator.flatMap { file =>
+      if (file == null) Iterator.empty
+      else {
+        val reader = ParquetReader.fromPath(file.toString)
+        val batchIt = (0 until reader.numPartitions).iterator.flatMap(reader.readPartition)
+        processBatches(batchIt)
+      }
+    }
+    wrapWithSpillCleanup(concat, spillDir)
+  }
+
+  /** Wrap `inner` so the spill subdir is wiped when the consumer drains
+    * the iterator. */
+  private def wrapWithSpillCleanup(
+      inner: Iterator[ColumnarBatch],
+      spillDir: OperatorSpillDir): Iterator[ColumnarBatch] =
+    new Iterator[ColumnarBatch] {
+      def hasNext: Boolean = {
+        val h = inner.hasNext
+        if (!h) spillDir.close()
+        h
+      }
+      def next(): ColumnarBatch = inner.next()
+    }
+
+  /** Route every input row into K bucket files by
+    * `fmix32(hash(partitionKey)) % K`. Returns the K file paths (null
+    * entries for buckets that received no rows). The routing key is the
+    * shared PARTITION BY key set, guaranteed non-empty by [[canSpill]]. */
+  private def routeChildToBuckets(
+      parts: Seq[Int],
+      K: Int,
+      spillDir: OperatorSpillDir): Array[Path] = {
+    val schema = child.outputSchema
+    val ncols = schema.length
+    val routingKeyExprs = windows.head.spec.partitionKeys.toArray
+    val nKeys = routingKeyExprs.length
+
+    val files = new Array[Path](K)
+    val writers = new Array[TParquetWriter](K)
+    val pending = Array.fill(K)(new ColumnarBatch(schema, ColumnarBatch.DefaultCapacity))
+    val pendingCounts = new Array[Int](K)
+
+    def flushBucket(b: Int): Unit = {
+      val n = pendingCounts(b)
+      if (n == 0) return
+      val out = pending(b)
+      out.setNumRows(n)
+      if (writers(b) == null) {
+        files(b) = spillDir.newSpillFile(s".window.b$b.parquet")
+        writers(b) = new TParquetWriter(files(b), schema, Map.empty)
+      }
+      writers(b).write(out)
+      pending(b) = new ColumnarBatch(schema, ColumnarBatch.DefaultCapacity)
+      pendingCounts(b) = 0
+    }
+
+    parts.foreach { p =>
+      val it = child.execute(p)
+      while (it.hasNext) {
+        val batch = it.next()
+        val nrows = batch.numRows
+        if (nrows > 0) {
+          // Evaluate the partition-key columns once per batch.
+          val keyVecs = new Array[ColumnVector](nKeys)
+          var k = 0
+          while (k < nKeys) { keyVecs(k) = routingKeyExprs(k).evalVec(batch); k += 1 }
+          var r = 0
+          while (r < nrows) {
+            val bucket = bucketIndex(keyVecs, r, K)
+            val dst = pending(bucket)
+            val dstRow = pendingCounts(bucket)
+            var c = 0
+            while (c < ncols) {
+              batch.column(c).copyTo(r, dst.column(c), dstRow)
+              c += 1
+            }
+            pendingCounts(bucket) = dstRow + 1
+            if (pendingCounts(bucket) >= ColumnarBatch.DefaultCapacity) flushBucket(bucket)
+            r += 1
+          }
+        }
+      }
+    }
+    var b = 0
+    while (b < K) { flushBucket(b); b += 1 }
+    b = 0
+    while (b < K) {
+      val w = writers(b)
+      if (w != null) w.close()
+      b += 1
+    }
+    files
+  }
+
+  /** Bucket index = `fmix32(combinedHash(partitionKeys)) % K`. Mirrors the
+    * mixing strategy used by [[HashJoinExec]]'s grace hash (same shape as
+    * `HashPartitioner.fmix32`). NULL partition keys deterministically
+    * land in bucket 0 — equivalent rows go together so window semantics
+    * survive (NULL is its own partition under SQL's `GROUP BY` rules). */
+  private def bucketIndex(keyVecs: Array[ColumnVector], row: Int, K: Int): Int = {
+    var h = 1
+    var anyNull = false
+    var k = 0
+    val nKeys = keyVecs.length
+    while (k < nKeys) {
+      val col = keyVecs(k)
+      if (col.isNull(row)) anyNull = true
+      else h = 31 * h + HashJoinExec.columnHashCode(col, row)
+      k += 1
+    }
+    if (anyNull) return 0
+    val mixed = HashJoinExec.fmix32(h)
+    (mixed & 0x7FFFFFFF) % K
+  }
+
+  /** The original execute() body, parameterized by a batch iterator. Used
+    * by both the in-memory path (whole-input iterator) and the spill path
+    * (one iterator per bucket file). Memory bound = the iterator's full
+    * row content; correctness depends on every row sharing a partition
+    * key collocating in this iterator's input. */
+  private def processBatches(it: Iterator[ColumnarBatch]): Iterator[ColumnarBatch] = {
     val childSchema = child.outputSchema
     val childWidth = childSchema.length
     val nWindows = windows.size
@@ -66,24 +253,12 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
     val specPartKeyExprs: Array[Array[Expr]] = specs.map(_.partitionKeys.toArray)
     val specOrderKeyExprs: Array[Array[Expr]] = specs.map(_.orderKeys.iterator.map(_._1).toArray)
 
-    // Per-spec per-row key caches. partKeysByRow(si) and orderKeysByRow(si)
-    // are parallel to `rows`. Each element is the boxed key values for one
-    // row under that spec.
     val partKeysByRow: Array[mutable.ArrayBuffer[Array[Any]]] =
       Array.tabulate(nSpecs)(_ => mutable.ArrayBuffer.empty[Array[Any]])
     val orderKeysByRow: Array[mutable.ArrayBuffer[Array[Any]]] =
       Array.tabulate(nSpecs)(_ => mutable.ArrayBuffer.empty[Array[Any]])
 
-    // 1. Materialize the in-scope child rows. Sharded mode reads only the
-    //    requested shard; collapsing mode reads every child partition. Same
-    //    inner pass either way: for each batch, evalVec each spec's
-    //    partition keys + order keys once, then per-row stash the boxed
-    //    values. This eliminates the per-row Expr.eval against RowBuf the
-    //    old `processSpec` paid for non-ColRef keys.
     val rows = mutable.ArrayBuffer.empty[Array[Any]]
-    val it: Iterator[ColumnarBatch] =
-      if (isSharded) child.execute(partition)
-      else (0 until child.numPartitions).iterator.flatMap(child.execute)
     while (it.hasNext) {
       val b = it.next()
       val nrows = b.numRows
@@ -117,7 +292,6 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
     val windowValues = Array.ofDim[Any](n, nWindows)
 
     if (n > 0) {
-      // 2. Group windows by spec; one partitioning + sort pass per spec.
       val specFns: Map[WindowSpec, IndexedSeq[(WindowFn, Int)]] =
         windows.zipWithIndex.groupBy { case (w, _) => w.spec }
           .map { case (s, ws) => s -> ws.map { case (w, i) => (w.fn, i) }.toIndexedSeq }
@@ -139,7 +313,6 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
       }
     }
 
-    // 3. Emit batches.
     emit(rows, windowValues, childSchema, childWidth, nWindows)
   }
 

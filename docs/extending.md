@@ -236,6 +236,51 @@ eval into a reusable `Array[Any]` and call `encodeBoxed`. The codec exposes
 join-probe NULL short-circuiting. See
 [architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers).
 
+## Add spill to an existing operator
+
+`SortExec`, `HashAggregateExec`, `DistinctExec`, and `HashJoinExec` are
+spill-capable. To add spill to another breaker (e.g., a future
+`WindowExec` spill in v1.1):
+
+1. **Accept `opts: ExecutionOptions = ExecutionOptions.Default`** as the
+   last field on the operator's `case class`. Update
+   `PhysicalPlanner.plan(...)` to pass through `opts` when constructing
+   the operator.
+2. **Compute `spillEnabled` once** — `opts.spillEnabled` plus any
+   operator-specific capability gate (e.g.,
+   `AggStateSerde.allSpillable(aggs)` in `HashAggregateExec`).
+3. **Compute the threshold lazily** via
+   `Spill.effectiveThresholdBytes(opts, Scheduler.parallelism)`.
+4. **Use `Spill.openOperatorDir("op-name")`** to allocate the per-call
+   temp directory. Wrap the emit iterator with a wrapper that calls
+   `OperatorSpillDir.close()` when exhausted; the JVM shutdown hook in
+   `Spill` catches abandoned iterators.
+5. **Accumulate `Spill.estimateBytes(batch)`** per input batch; flush
+   the current state to a parquet file under `spillDir` when over
+   threshold, then reset the in-memory state. Cap total runs at
+   `opts.spillMaxRuns` with a clear error message.
+6. **Fold spill files back at emit time.** The pattern from
+   `AggSpiller.foldCodecSpillFiles` works for any in-memory map:
+   `ParquetReader.fromPath(file.toString)`, iterate batches, decode
+   each row, merge into the live state.
+7. **Add a `*SpillTest`** asserting bit-equal output between
+   `spillEnabled=false` and `spillEnabled=true` with a 1-byte
+   threshold. Cover empty inputs, single-row inputs, and a
+   `spill_max_runs` overflow.
+
+For state with novel encoding (think `WindowExec`'s per-partition
+buffered rows), follow the `AggStateSerde` pattern: add a `writeSelf` /
+`readSelf` pair to whatever serializable state the operator carries,
+then a thin dispatcher object that knows how to read it back given the
+operator's plan-time metadata.
+
+Operators that *can't* meaningfully spill (state doesn't round-trip
+through a typed schema, or partitioning logic is incompatible) should
+silently fall back to the in-memory path when spill is requested
+rather than throwing — exposes the limitation to documentation, not
+to users at run time. See `HashAggregateExec.spillEnabled`'s
+`AggStateSerde.allSpillable` guard for the pattern.
+
 ## Add a logical-plan optimizer pass
 
 `LogicalOptimizer.optimize` (in `sql/plan/`) runs each pass once in a fixed

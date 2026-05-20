@@ -72,3 +72,17 @@ specific traps.
   The same pattern applies to `AggState.updateBatch`: primitive states
   override; everything else loops the default per-row `update`. See
   [architecture.md §5c](architecture.md#5c-vectorized-aggregate-state-updates-no-group-by-fast-path).
+- **Spill-capable operators thread `ExecutionOptions` through their
+  constructor.** `SortExec`, `HashAggregateExec`, and `DistinctExec`
+  follow the pattern: an `opts: ExecutionOptions` field, an `spillEnabled`
+  guard derived from `opts.spillEnabled` (plus operator-specific
+  capability checks like `AggStateSerde.allSpillable`), a lazy
+  `spillThresholdBytes` from `Spill.effectiveThresholdBytes`, and a
+  `wrapWithSpillCleanup` wrapper around the output iterator. The same
+  per-batch input-byte accumulator drives the flush decision; flushed
+  state lives in temp parquet files under a per-operator
+  `OperatorSpillDir` and is folded back at emit time. New operators
+  considering spill MUST add a `*SpillTest` proving bit-equal output
+  against the non-spill path at a 1-byte threshold. See
+  [architecture.md §2c](architecture.md#2c-spill-to-disk-for-breakers-opt-in)
+  and `plans/perf/09-spill-to-disk.md`.

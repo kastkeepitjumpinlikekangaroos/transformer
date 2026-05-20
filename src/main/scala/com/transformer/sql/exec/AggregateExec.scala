@@ -1,10 +1,15 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
+import com.transformer.write.parquet.ParquetWriter
 
+import java.io.{DataInput, DataOutput}
+import java.nio.file.Path
 import java.util
 import java.util.concurrent.Callable
+import scala.collection.mutable
 
 /** Hash-based GROUP BY. Two execution modes share this one operator,
   * selected by whether `child` is an [[ExchangeExec]]:
@@ -45,7 +50,8 @@ import java.util.concurrent.Callable
 final case class HashAggregateExec(
     child: PhysicalPlan,
     groupKeys: Seq[(Expr, String)],
-    aggregates: Seq[(AggExpr, String)]
+    aggregates: Seq[(AggExpr, String)],
+    opts: ExecutionOptions = ExecutionOptions.Default
 ) extends PhysicalPlan {
 
   val outputSchema: Schema = Schema(
@@ -79,6 +85,17 @@ final case class HashAggregateExec(
   private val longKeyColIdx: Int =
     if (useLongKey) keyExprs(0).asInstanceOf[ColRefExpr].index else -1
 
+  // Effective spill switch: user opted in AND every aggregate is spillable.
+  // Mixed-aggregate queries with a CountDistinct fall back to the heap-only
+  // path — see plan 09's "CountDistinct fall back" risk.
+  private val spillEnabled: Boolean =
+    opts.spillEnabled && AggStateSerde.allSpillable(aggregates.iterator.map(_._1).toIndexedSeq)
+
+  /** Effective threshold in bytes. Lazy so the Runtime.maxMemory() call is
+    * paid once per plan, not per task. */
+  private lazy val spillThresholdBytes: Long =
+    Spill.effectiveThresholdBytes(opts, Scheduler.parallelism)
+
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     if (isSharded) executePerShard(partition)
     else if (useLongKey) executeCollapsingLong(partition)
@@ -92,8 +109,16 @@ final case class HashAggregateExec(
       s"partition $partition out of range [0,$numPartitions)")
     // One final map per shard. No fan-out across child.numPartitions; the
     // exchange already routed rows so each shard's input is key-disjoint.
-    if (useLongKey) emitLong(partialAggregateLong(partition))
-    else emit(partialAggregate(partition))
+    val spillDir = if (spillEnabled) Some(Spill.openOperatorDir("agg-shard")) else None
+    if (useLongKey) {
+      val pa = partialAggregateLong(partition, spillDir)
+      AggSpiller.foldLongSpillFiles(pa.spillFiles, aggArr, pa.map)
+      wrapWithSpillCleanup(emitLong(pa.map), spillDir)
+    } else {
+      val pa = partialAggregate(partition, spillDir)
+      AggSpiller.foldCodecSpillFiles(pa.spillFiles, keyCodec, nKeys, aggArr, pa.map)
+      wrapWithSpillCleanup(emit(pa.map), spillDir)
+    }
   }
 
   // ---- Collapsing paths: no exchange; fan out + merge -----------------------
@@ -105,23 +130,30 @@ final case class HashAggregateExec(
   private def executeCollapsing(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0,
       s"collapsing aggregate has only one partition; got partition=$partition")
-    val tasks: Seq[Callable[util.LinkedHashMap[AnyRef, Array[AggState]]]] =
+    val spillDir = if (spillEnabled) Some(Spill.openOperatorDir("agg")) else None
+    val tasks: Seq[Callable[PartialAgg]] =
       (0 until child.numPartitions).map { p =>
-        new Callable[util.LinkedHashMap[AnyRef, Array[AggState]]] {
-          def call(): util.LinkedHashMap[AnyRef, Array[AggState]] = partialAggregate(p)
+        new Callable[PartialAgg] {
+          def call(): PartialAgg = partialAggregate(p, spillDir)
         }
       }
-    val partials: Seq[util.LinkedHashMap[AnyRef, Array[AggState]]] =
-      Scheduler.submitAndAwaitAll(tasks)
-    val merged = partials.reduceOption(merge)
+    val partials: Seq[PartialAgg] = Scheduler.submitAndAwaitAll(tasks)
+    val merged = partials.map(_.map).reduceOption(merge)
       .getOrElse(new util.LinkedHashMap[AnyRef, Array[AggState]]())
+    // Fold every partition's spill files into the merged map. The dependency
+    // direction is forward: spill files written during ingestion contain
+    // partial states that must be combined with anything currently in
+    // `merged` for the same key.
+    partials.foreach { p =>
+      AggSpiller.foldCodecSpillFiles(p.spillFiles, keyCodec, nKeys, aggArr, merged)
+    }
     // No-GROUP-BY aggregates require one row of output even on empty input
     // (e.g., `COUNT(*) FROM <empty>` → 0). With group keys, an empty input
     // is correctly an empty output (no groups).
     if (groupKeys.isEmpty && merged.isEmpty) {
       merged.put(keyCodec.encodeBoxed(EmptyKeyBuf), newStates())
     }
-    emit(merged)
+    wrapWithSpillCleanup(emit(merged), spillDir)
   }
 
   /** Long-key collapsing path. Same fan-out + merge shape as
@@ -133,15 +165,20 @@ final case class HashAggregateExec(
   private def executeCollapsingLong(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0,
       s"collapsing aggregate has only one partition; got partition=$partition")
-    val tasks: Seq[Callable[LongHashMap[Array[AggState]]]] =
+    val spillDir = if (spillEnabled) Some(Spill.openOperatorDir("agg-long")) else None
+    val tasks: Seq[Callable[PartialAggLong]] =
       (0 until child.numPartitions).map { p =>
-        new Callable[LongHashMap[Array[AggState]]] {
-          def call(): LongHashMap[Array[AggState]] = partialAggregateLong(p)
+        new Callable[PartialAggLong] {
+          def call(): PartialAggLong = partialAggregateLong(p, spillDir)
         }
       }
     val partials = Scheduler.submitAndAwaitAll(tasks)
-    val merged = partials.reduceOption(mergeLong).getOrElse(new LongHashMap[Array[AggState]]())
-    emitLong(merged)
+    val merged = partials.map(_.map).reduceOption(mergeLong)
+      .getOrElse(new LongHashMap[Array[AggState]]())
+    partials.foreach { p =>
+      AggSpiller.foldLongSpillFiles(p.spillFiles, aggArr, merged)
+    }
+    wrapWithSpillCleanup(emitLong(merged), spillDir)
   }
 
   /** Merge `b` into `a` for the long-key map, in place. Used by
@@ -168,6 +205,31 @@ final case class HashAggregateExec(
   // per-batch arg-eval loop doesn't allocate a new Seq.toArray view per batch.
   private val aggArgsArr: Array[Array[Expr]] =
     aggArr.map(_.args.toArray)
+
+  /** Schema of the group key columns alone. Spill writers add Binary
+    * state columns on top of this, one per aggregate. The field names
+    * are pulled from the user's [[groupKeys]] aliases so the spill file
+    * is human-readable in `parquet-tools meta`. */
+  private val groupKeySchema: Schema =
+    Schema(groupKeys.map { case (e, n) => Field(n, e.dataType) }.toVector)
+
+  /** Wrap `inner` so the spill subdir is wiped when the consumer drains
+    * the iterator. The shutdown hook in [[Spill]] catches the abandoned
+    * case. */
+  private def wrapWithSpillCleanup(
+      inner: Iterator[ColumnarBatch],
+      spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] = spillDir match {
+    case None => inner
+    case Some(d) =>
+      new Iterator[ColumnarBatch] {
+        def hasNext: Boolean = {
+          val h = inner.hasNext
+          if (!h) d.close()
+          h
+        }
+        def next(): ColumnarBatch = inner.next()
+      }
+  }
 
   private def newStates(): Array[AggState] = {
     val out = new Array[AggState](aggCount)
@@ -225,8 +287,11 @@ final case class HashAggregateExec(
     }
   }
 
-  private def partialAggregate(p: Int): util.LinkedHashMap[AnyRef, Array[AggState]] = {
+  private def partialAggregate(p: Int, spillDir: Option[OperatorSpillDir]): PartialAgg = {
     val map = new util.LinkedHashMap[AnyRef, Array[AggState]]()
+    val spillFiles = mutable.ArrayBuffer.empty[Path]
+    val threshold = if (spillDir.isDefined) spillThresholdBytes else Long.MaxValue
+    var bytesSinceFlush: Long = 0L
     val it = child.execute(p)
     val keyBuf: Array[Any] = if (keysAreColRefs) null else new Array[Any](nKeys)
     val keyVecsScratch: Array[ColumnVector] = if (keysAreColRefs) null else new Array[ColumnVector](nKeys)
@@ -240,6 +305,7 @@ final case class HashAggregateExec(
     while (it.hasNext) {
       val batch = it.next()
       val nrows = batch.numRows
+      if (spillDir.isDefined) bytesSinceFlush += Spill.estimateBytes(batch)
       if (nrows > 0) {
         val argVecsByAgg = argVecsCache.populate(batch)
         if (groupKeys.isEmpty) {
@@ -297,8 +363,19 @@ final case class HashAggregateExec(
           }
         }
       }
+      if (bytesSinceFlush >= threshold && spillDir.isDefined && !map.isEmpty) {
+        val file = spillDir.get.newSpillFile(".parquet")
+        AggSpiller.writeCodecMap(file, keyCodec, groupKeySchema, aggArr, map)
+        map.clear()
+        spillFiles += file
+        bytesSinceFlush = 0L
+        if (spillFiles.length > opts.spillMaxRuns)
+          throw new RuntimeException(
+            s"HashAggregateExec produced ${spillFiles.length} spill runs in partition $p, " +
+            s"exceeding spill_max_runs=${opts.spillMaxRuns}.")
+      }
     }
-    map
+    PartialAgg(map, spillFiles.toArray)
   }
 
   private def merge(
@@ -353,14 +430,20 @@ final case class HashAggregateExec(
   // `nKeys == 1`, which implies `groupKeys.nonEmpty`, which routes
   // `execute` into `executePerShard`. No cross-shard merge needed.
 
-  private def partialAggregateLong(p: Int): LongHashMap[Array[AggState]] = {
-    val map = new LongHashMap[Array[AggState]]()
+  private def partialAggregateLong(p: Int, spillDir: Option[OperatorSpillDir]): PartialAggLong = {
+    // var so we can swap in a fresh map after a spill flush (LongHashMap
+    // has no `clear()` and grows in place).
+    var map = new LongHashMap[Array[AggState]]()
+    val spillFiles = mutable.ArrayBuffer.empty[Path]
+    val threshold = if (spillDir.isDefined) spillThresholdBytes else Long.MaxValue
+    var bytesSinceFlush: Long = 0L
     val it = child.execute(p)
     val argVecsCache = new ArgVecsCache()
     while (it.hasNext) {
       val batch = it.next()
       val col = batch.column(longKeyColIdx)
       val nrows = batch.numRows
+      if (spillDir.isDefined) bytesSinceFlush += Spill.estimateBytes(batch)
       if (nrows > 0) {
         val argVecsByAgg = argVecsCache.populate(batch)
         var r = 0
@@ -383,8 +466,19 @@ final case class HashAggregateExec(
           r += 1
         }
       }
+      if (bytesSinceFlush >= threshold && spillDir.isDefined && map.size > 0) {
+        val file = spillDir.get.newSpillFile(".parquet")
+        AggSpiller.writeLongMap(file, groupKeySchema.fields(0), aggArr, map)
+        map = new LongHashMap[Array[AggState]]()
+        spillFiles += file
+        bytesSinceFlush = 0L
+        if (spillFiles.length > opts.spillMaxRuns)
+          throw new RuntimeException(
+            s"HashAggregateExec produced ${spillFiles.length} spill runs in partition $p (long key), " +
+            s"exceeding spill_max_runs=${opts.spillMaxRuns}.")
+      }
     }
-    map
+    PartialAggLong(map, spillFiles.toArray)
   }
 
   private def emitLong(map: LongHashMap[Array[AggState]]): Iterator[ColumnarBatch] = {
@@ -475,6 +569,26 @@ sealed trait AggState {
 
   def merge(other: AggState): Unit
   def finish(): Any
+
+  /** Write this state's internal accumulator fields to `out`. Used by
+    * [[AggStateSerde]] when an operator spills a partial map to disk. The
+    * default throws — only states the plan promises to support
+    * (Count, Sum, Avg, Min, Max, CountIf, Moment, Covar, Corr) override.
+    * `CountDistinctState` deliberately does not (HashSet round-trip is out
+    * of scope per plan 09).
+    *
+    * The on-disk encoding is opaque to the operator — `writeSelf` /
+    * `readSelf` are paired by type, never by external schema. Operators
+    * may store the resulting bytes in any container (a Binary parquet
+    * column, an inline buffer, etc). */
+  private[exec] def writeSelf(out: DataOutput): Unit =
+    throw new UnsupportedOperationException(s"${getClass.getSimpleName} cannot be spilled in v1")
+
+  /** Mutate this state in place by reading fields written by [[writeSelf]].
+    * Caller is responsible for constructing the right state subtype first
+    * (typically via `AggState.init(agg)`) before invoking `readSelf`. */
+  private[exec] def readSelf(in: DataInput): Unit =
+    throw new UnsupportedOperationException(s"${getClass.getSimpleName} cannot be spilled in v1")
 }
 
 object AggState {
@@ -502,6 +616,9 @@ final class CountStarState extends AggState {
   override def updateBatch(agg: AggExpr, b: ColumnarBatch): Unit = { c += b.numRows }
   def merge(o: AggState): Unit = c += o.asInstanceOf[CountStarState].c
   def finish(): Any = c
+
+  override private[exec] def writeSelf(out: DataOutput): Unit = out.writeLong(c)
+  override private[exec] def readSelf(in: DataInput): Unit = { c = in.readLong() }
 }
 
 final class CountState extends AggState {
@@ -516,6 +633,9 @@ final class CountState extends AggState {
   }
   def merge(o: AggState): Unit = c += o.asInstanceOf[CountState].c
   def finish(): Any = c
+
+  override private[exec] def writeSelf(out: DataOutput): Unit = out.writeLong(c)
+  override private[exec] def readSelf(in: DataInput): Unit = { c = in.readLong() }
 }
 
 final class CountDistinctState extends AggState {
@@ -553,6 +673,9 @@ final class CountIfState extends AggState {
   }
   def merge(o: AggState): Unit = c += o.asInstanceOf[CountIfState].c
   def finish(): Any = c
+
+  override private[exec] def writeSelf(out: DataOutput): Unit = out.writeLong(c)
+  override private[exec] def readSelf(in: DataInput): Unit = { c = in.readLong() }
 }
 
 sealed trait SumState extends AggState
@@ -605,6 +728,13 @@ final class LongSumState extends SumState {
     sawAny = sawAny || that.sawAny
   }
   def finish(): Any = if (sawAny) sum else null
+
+  override private[exec] def writeSelf(out: DataOutput): Unit = {
+    out.writeBoolean(sawAny); out.writeLong(sum)
+  }
+  override private[exec] def readSelf(in: DataInput): Unit = {
+    sawAny = in.readBoolean(); sum = in.readLong()
+  }
 }
 final class DoubleSumState extends SumState {
   private var sum: Double = 0.0
@@ -665,6 +795,13 @@ final class DoubleSumState extends SumState {
     sawAny = sawAny || that.sawAny
   }
   def finish(): Any = if (sawAny) sum else null
+
+  override private[exec] def writeSelf(out: DataOutput): Unit = {
+    out.writeBoolean(sawAny); out.writeDouble(sum)
+  }
+  override private[exec] def readSelf(in: DataInput): Unit = {
+    sawAny = in.readBoolean(); sum = in.readDouble()
+  }
 }
 
 final class AvgState extends AggState {
@@ -726,6 +863,13 @@ final class AvgState extends AggState {
     count += that.count
   }
   def finish(): Any = if (count == 0L) null else sum / count
+
+  override private[exec] def writeSelf(out: DataOutput): Unit = {
+    out.writeLong(count); out.writeDouble(sum)
+  }
+  override private[exec] def readSelf(in: DataInput): Unit = {
+    count = in.readLong(); sum = in.readDouble()
+  }
 }
 
 final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
@@ -901,6 +1045,89 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
       case DataType.DoubleType => java.lang.Double.valueOf(doubleCur)
       case _ => currentBoxed
     }
+
+  // Spill SerDe. Encoded shape depends on `dt`:
+  //   hasValue (boolean) -> if false, that's the whole record.
+  //   Otherwise:
+  //     - Int/Long/Date/Timestamp/Boolean: longCur (long)
+  //     - Float/Double: doubleCur (double)
+  //     - reference types (String/Binary/Decimal/Null): nullable boxed
+  //       payload — encoded by type.
+  override private[exec] def writeSelf(out: DataOutput): Unit = {
+    out.writeBoolean(hasValue)
+    if (hasValue) dt match {
+      case DataType.IntType | DataType.LongType | DataType.DateType
+         | DataType.TimestampType | DataType.BooleanType =>
+        out.writeLong(longCur)
+      case DataType.FloatType | DataType.DoubleType =>
+        out.writeDouble(doubleCur)
+      case _ => MinMaxState.writeBoxed(out, dt, currentBoxed)
+    }
+  }
+  override private[exec] def readSelf(in: DataInput): Unit = {
+    hasValue = in.readBoolean()
+    if (hasValue) dt match {
+      case DataType.IntType | DataType.LongType | DataType.DateType
+         | DataType.TimestampType | DataType.BooleanType =>
+        longCur = in.readLong()
+      case DataType.FloatType | DataType.DoubleType =>
+        doubleCur = in.readDouble()
+      case _ => currentBoxed = MinMaxState.readBoxed(in, dt)
+    }
+  }
+}
+
+object MinMaxState {
+  /** Reference-type serialization for `currentBoxed`. The boxed value is
+    * never `null` once `hasValue == true` — every state class only flips
+    * `hasValue` after observing a non-null input — but the serializer is
+    * defensive: a one-byte `nonNull` flag precedes each payload. */
+  private[exec] def writeBoxed(out: DataOutput, dt: DataType, v: Any): Unit = {
+    if (v == null) { out.writeBoolean(false); return }
+    out.writeBoolean(true)
+    dt match {
+      case DataType.StringType =>
+        val s = v.asInstanceOf[String]
+        val bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8)
+        out.writeInt(bytes.length); out.write(bytes)
+      case DataType.BinaryType =>
+        val a = v.asInstanceOf[Array[Byte]]
+        out.writeInt(a.length); out.write(a)
+      case _: DataType.DecimalType =>
+        val bd = v.asInstanceOf[java.math.BigDecimal]
+        val unscaled = bd.unscaledValue.toByteArray
+        out.writeInt(unscaled.length); out.write(unscaled)
+        out.writeInt(bd.scale)
+      case DataType.NullType =>
+        () // no payload — the type's only inhabitant is null, and we already wrote nonNull=true defensively
+      case other =>
+        throw new UnsupportedOperationException(
+          s"MinMaxState cannot serialize reference-typed value of $other")
+    }
+  }
+
+  private[exec] def readBoxed(in: DataInput, dt: DataType): Any = {
+    if (!in.readBoolean()) return null
+    dt match {
+      case DataType.StringType =>
+        val n = in.readInt()
+        val bytes = new Array[Byte](n); in.readFully(bytes)
+        new String(bytes, java.nio.charset.StandardCharsets.UTF_8)
+      case DataType.BinaryType =>
+        val n = in.readInt()
+        val a = new Array[Byte](n); in.readFully(a)
+        a
+      case _: DataType.DecimalType =>
+        val n = in.readInt()
+        val unscaled = new Array[Byte](n); in.readFully(unscaled)
+        val scale = in.readInt()
+        new java.math.BigDecimal(new java.math.BigInteger(unscaled), scale)
+      case DataType.NullType => null
+      case other =>
+        throw new UnsupportedOperationException(
+          s"MinMaxState cannot deserialize reference-typed value of $other")
+    }
+  }
 }
 
 /** Univariate variance / standard deviation via Welford + Chan's parallel
@@ -950,6 +1177,15 @@ final class MomentState(sample: Boolean, stddev: Boolean) extends AggState {
       case Some(v) => if (stddev) math.sqrt(v) else v
     }
   }
+
+  // `sample` / `stddev` flags come from the AggExpr at construction time
+  // (AggState.init) and never change — no need to round-trip them.
+  override private[exec] def writeSelf(out: DataOutput): Unit = {
+    out.writeLong(n); out.writeDouble(mean); out.writeDouble(m2)
+  }
+  override private[exec] def readSelf(in: DataInput): Unit = {
+    n = in.readLong(); mean = in.readDouble(); m2 = in.readDouble()
+  }
 }
 
 /** Bivariate covariance via the parallel Welford / Pébay update. Pairs are
@@ -998,6 +1234,13 @@ final class CovarState(sample: Boolean) extends AggState {
   def finish(): Any =
     if (sample) { if (n < 2L) null else cAcc / (n - 1).toDouble }
     else { if (n < 1L) null else cAcc / n.toDouble }
+
+  override private[exec] def writeSelf(out: DataOutput): Unit = {
+    out.writeLong(n); out.writeDouble(meanX); out.writeDouble(meanY); out.writeDouble(cAcc)
+  }
+  override private[exec] def readSelf(in: DataInput): Unit = {
+    n = in.readLong(); meanX = in.readDouble(); meanY = in.readDouble(); cAcc = in.readDouble()
+  }
 }
 
 /** Pearson correlation: tracks the same partial sums as covariance plus
@@ -1058,6 +1301,226 @@ final class CorrState extends AggState {
     else {
       val denom = math.sqrt(m2x * m2y)
       if (denom == 0.0) null else cAcc / denom
+    }
+  }
+
+  override private[exec] def writeSelf(out: DataOutput): Unit = {
+    out.writeLong(n)
+    out.writeDouble(meanX); out.writeDouble(meanY)
+    out.writeDouble(m2x); out.writeDouble(m2y); out.writeDouble(cAcc)
+  }
+  override private[exec] def readSelf(in: DataInput): Unit = {
+    n = in.readLong()
+    meanX = in.readDouble(); meanY = in.readDouble()
+    m2x = in.readDouble(); m2y = in.readDouble(); cAcc = in.readDouble()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Spill support (plan 09 Phase 4). The PartialAgg / PartialAggLong wrappers
+// carry both the in-memory tail of a partition's aggregation AND any spill
+// files written mid-stream. AggSpiller is the read/write boundary for those
+// spill files; the per-file format is one parquet file with
+// (groupKey-columns ++ N Binary columns of serialized state).
+// ---------------------------------------------------------------------------
+
+private[exec] final case class PartialAgg(
+    map: java.util.LinkedHashMap[AnyRef, Array[AggState]],
+    spillFiles: Array[Path])
+
+private[exec] final case class PartialAggLong(
+    map: LongHashMap[Array[AggState]],
+    spillFiles: Array[Path])
+
+private[exec] object AggSpiller {
+
+  /** Spill file schema: groupKey columns + N Binary columns, one per agg.
+    * Aggregate columns are named `_agg0`/`_agg1`/... so they don't collide
+    * with user-chosen aliases on the group keys. */
+  def spillSchema(groupKeySchema: Schema, numAggs: Int): Schema = {
+    val stateFields = (0 until numAggs).map(i => Field(s"_agg$i", DataType.BinaryType))
+    Schema(groupKeySchema.fields ++ stateFields.toVector)
+  }
+
+  // ---- Codec map (LinkedHashMap[AnyRef, Array[AggState]]) ------------------
+
+  def writeCodecMap(
+      file: Path,
+      codec: KeyCodec,
+      groupKeySchema: Schema,
+      aggs: Array[AggExpr],
+      map: java.util.LinkedHashMap[AnyRef, Array[AggState]]): Unit = {
+    if (map.isEmpty) return
+    val outSchema = spillSchema(groupKeySchema, aggs.length)
+    val nKeys = groupKeySchema.length
+    val nAggs = aggs.length
+    val capacity = ColumnarBatch.DefaultCapacity
+    val entryIter = map.entrySet().iterator()
+    val batchIter = new Iterator[ColumnarBatch] {
+      def hasNext: Boolean = entryIter.hasNext
+      def next(): ColumnarBatch = {
+        val out = new ColumnarBatch(outSchema, capacity)
+        var r = 0
+        while (r < capacity && entryIter.hasNext) {
+          val entry = entryIter.next()
+          codec.decode(entry.getKey, out, 0, r)
+          val states = entry.getValue
+          var a = 0
+          while (a < nAggs) {
+            val bytes = AggStateSerde.serializeBytes(states(a))
+            out.column(nKeys + a).asInstanceOf[BinaryVector].set(r, bytes)
+            a += 1
+          }
+          r += 1
+        }
+        out.setNumRows(r)
+        out
+      }
+    }
+    ParquetWriter.writeAll(file, outSchema, batchIter)
+  }
+
+  /** Fold every spill file's entries into `target`. For each row in each
+    * spill file, decode the key via `codec.encodeBoxed` (uniform across the
+    * ColRef/computed-key axis since the spill file's key columns are at
+    * indices [0, nKeys)) and either merge into an existing entry or insert
+    * a freshly-constructed state array. */
+  def foldCodecSpillFiles(
+      files: Array[Path],
+      codec: KeyCodec,
+      nKeys: Int,
+      aggs: Array[AggExpr],
+      target: java.util.LinkedHashMap[AnyRef, Array[AggState]]): Unit = {
+    if (files.isEmpty) return
+    val nAggs = aggs.length
+    val keyBuf = new Array[Any](nKeys)
+    var f = 0
+    while (f < files.length) {
+      val reader = ParquetReader.fromPath(files(f).toString)
+      var part = 0
+      while (part < reader.numPartitions) {
+        val batchIt = reader.readPartition(part)
+        while (batchIt.hasNext) {
+          val batch = batchIt.next()
+          var r = 0
+          while (r < batch.numRows) {
+            var k = 0
+            while (k < nKeys) {
+              val col = batch.column(k)
+              keyBuf(k) = if (col.isNull(r)) null else col.getBoxed(r)
+              k += 1
+            }
+            val key = codec.encodeBoxed(keyBuf)
+            val existing = target.get(key)
+            if (existing != null) {
+              var a = 0
+              while (a < nAggs) {
+                val bytes = batch.column(nKeys + a).asInstanceOf[BinaryVector].get(r)
+                val incoming = AggStateSerde.deserializeBytes(aggs(a), bytes)
+                existing(a).merge(incoming)
+                a += 1
+              }
+            } else {
+              val states = new Array[AggState](nAggs)
+              var a = 0
+              while (a < nAggs) {
+                val bytes = batch.column(nKeys + a).asInstanceOf[BinaryVector].get(r)
+                states(a) = AggStateSerde.deserializeBytes(aggs(a), bytes)
+                a += 1
+              }
+              target.put(key, states)
+            }
+            r += 1
+          }
+        }
+        part += 1
+      }
+      f += 1
+    }
+  }
+
+  // ---- Long map (LongHashMap[Array[AggState]]) -----------------------------
+
+  def writeLongMap(
+      file: Path,
+      keyField: Field,
+      aggs: Array[AggExpr],
+      map: LongHashMap[Array[AggState]]): Unit = {
+    if (map.isEmpty) return
+    val outSchema = spillSchema(Schema(Vector(keyField)), aggs.length)
+    val nAggs = aggs.length
+    val capacity = ColumnarBatch.DefaultCapacity
+    val it = map.iterator
+    val batchIter = new Iterator[ColumnarBatch] {
+      def hasNext: Boolean = it.hasNext
+      def next(): ColumnarBatch = {
+        val out = new ColumnarBatch(outSchema, capacity)
+        val keyCol = out.column(0)
+        var r = 0
+        while (r < capacity && it.hasNext) {
+          val (boxedKey, states) = it.next()
+          if (boxedKey == null) keyCol.setNull(r)
+          else KeyCodec.writeLongTo(keyCol, r, boxedKey.longValue)
+          var a = 0
+          while (a < nAggs) {
+            val bytes = AggStateSerde.serializeBytes(states(a))
+            out.column(1 + a).asInstanceOf[BinaryVector].set(r, bytes)
+            a += 1
+          }
+          r += 1
+        }
+        out.setNumRows(r)
+        out
+      }
+    }
+    ParquetWriter.writeAll(file, outSchema, batchIter)
+  }
+
+  def foldLongSpillFiles(
+      files: Array[Path],
+      aggs: Array[AggExpr],
+      target: LongHashMap[Array[AggState]]): Unit = {
+    if (files.isEmpty) return
+    val nAggs = aggs.length
+    var f = 0
+    while (f < files.length) {
+      val reader = ParquetReader.fromPath(files(f).toString)
+      var part = 0
+      while (part < reader.numPartitions) {
+        val batchIt = reader.readPartition(part)
+        while (batchIt.hasNext) {
+          val batch = batchIt.next()
+          val keyCol = batch.column(0)
+          var r = 0
+          while (r < batch.numRows) {
+            val isNull = keyCol.isNull(r)
+            val k = if (isNull) 0L else KeyCodec.readAsLong(keyCol, r)
+            val existing: Array[AggState] =
+              if (isNull) target.getNull else target.get(k)
+            if (existing != null) {
+              var a = 0
+              while (a < nAggs) {
+                val bytes = batch.column(1 + a).asInstanceOf[BinaryVector].get(r)
+                val incoming = AggStateSerde.deserializeBytes(aggs(a), bytes)
+                existing(a).merge(incoming)
+                a += 1
+              }
+            } else {
+              val states = new Array[AggState](nAggs)
+              var a = 0
+              while (a < nAggs) {
+                val bytes = batch.column(1 + a).asInstanceOf[BinaryVector].get(r)
+                states(a) = AggStateSerde.deserializeBytes(aggs(a), bytes)
+                a += 1
+              }
+              if (isNull) target.putNull(states) else target.put(k, states)
+            }
+            r += 1
+          }
+        }
+        part += 1
+      }
+      f += 1
     }
   }
 }

@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, MaterializedView, Scheduler, Schema, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, ExecutionOptions, MaterializedView, Scheduler, Schema, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
@@ -299,7 +299,15 @@ final case class DataJob(
     val taskName = task.displayName
     var renderedOutputForRecord: Option[(OutputFilePath, String)] = None
     try {
-      val q = executor.execute(node.renderedMainSql, catalog)
+      // Per-task execution knobs (spill, thresholds) live alongside writer
+      // options inside `OutputFilePath.options`. Tasks with no outputFile
+      // run with [[ExecutionOptions.Default]] (spill disabled) — they're
+      // memory-only feeders for downstream views.
+      val opts: ExecutionOptions = task.outputFile match {
+        case Some(ofp) => ExecutionOptions.fromOutputOptions(ofp.options)
+        case None      => ExecutionOptions.Default
+      }
+      val q = executor.execute(node.renderedMainSql, catalog, opts)
 
       val writtenOutput: Option[(OutputFilePath, String)] = task.outputFile.map { ofp =>
         if (ofp.isCloud) throw new UnsupportedOperationException(
@@ -322,7 +330,7 @@ final case class DataJob(
         val name = task.viewName.getOrElse(s"__task_${node.index}")
         val materialized = materializeIfNeeded(q.schema, writtenOutput)
         catalog.replace(name, materialized)
-        val failures = runValidations(node, executor, catalog)
+        val failures = runValidations(node, executor, catalog, opts)
         val outputPath = writtenOutput.map(_._2)
         val finished = Instant.now()
         if (failures.nonEmpty) {
@@ -590,9 +598,10 @@ final case class DataJob(
   private def runValidations(
       node: TaskDagNode,
       executor: SqlExecutor,
-      catalog: Catalog): Seq[ValidationFailure] = {
+      catalog: Catalog,
+      opts: ExecutionOptions): Seq[ValidationFailure] = {
     node.task.validations.iterator.zip(node.renderedValidationSqls.iterator).flatMap { case (v, sql) =>
-      val q = executor.execute(sql, catalog)
+      val q = executor.execute(sql, catalog, opts)
       val rows = mutable.ArrayBuffer.empty[ColumnarBatch]
       while (q.batches.hasNext) rows += q.batches.next()
       val total = rows.iterator.map(_.numRows.toLong).sum

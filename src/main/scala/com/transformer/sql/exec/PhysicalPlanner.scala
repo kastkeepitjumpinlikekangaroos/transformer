@@ -1,6 +1,6 @@
 package com.transformer.sql.exec
 
-import com.transformer.core.{CatalogView, DataType}
+import com.transformer.core.{CatalogView, DataType, ExecutionOptions}
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
 
@@ -9,10 +9,16 @@ import scala.collection.mutable
 /** Logical → physical conversion. Applies a small set of rewrites first
   * (projection pruning, predicate pushdown for join keys, equality split,
   * build-side selection for hash joins).
+  *
+  * Accepts [[ExecutionOptions]] (defaults to [[ExecutionOptions.Default]] for
+  * callers that don't carry per-task config). Spill-capable operators read the
+  * `opts` value at construction; today no operator consumes it, so the field
+  * is plumbed but functionally inert — Phase 1 of the spill plan is plumbing
+  * only.
   */
 object PhysicalPlanner {
 
-  def plan(logical: LogicalPlan): PhysicalPlan = logical match {
+  def plan(logical: LogicalPlan, opts: ExecutionOptions = ExecutionOptions.Default): PhysicalPlan = logical match {
     case LogicalScan(_, view, _) => ScanExec(view)
     case LogicalFilter(LogicalScan(name, view, schema), pred) =>
       // Best-effort: try to push the predicate into the scan view. The original
@@ -20,8 +26,8 @@ object PhysicalPlanner {
       // (stats can prove non-matching groups, never prove matching ones).
       val pushed = tryPushdown(view, pred)
       FilterExec(ScanExec(pushed.getOrElse(view)), pred)
-    case LogicalFilter(child, pred) => FilterExec(plan(child), pred)
-    case LogicalProject(child, projs) => ProjectExec(plan(child), projs)
+    case LogicalFilter(child, pred) => FilterExec(plan(child, opts), pred)
+    case LogicalProject(child, projs) => ProjectExec(plan(child, opts), projs)
     // Fast path: `SELECT COUNT(*) FROM <view>` with no WHERE, no GROUP BY, no HAVING.
     // The view can answer from metadata (parquet footer, in-memory row count) so
     // we skip the entire scan + per-row aggregation pipeline.
@@ -29,12 +35,12 @@ object PhysicalPlanner {
         if view.exactRowCount.isDefined =>
       CountStarMetadataExec(view.exactRowCount.get, name)
     case LogicalAggregate(child, gks, aggs, _) =>
-      val physChild = plan(child)
+      val physChild = plan(child, opts)
       if (gks.isEmpty || !shouldShardForSize(child)) {
         // No GROUP BY, OR the estimated input is small enough that the
         // exchange-shard overhead would dominate the per-shard parallelism.
         // Fall back to the collapsing aggregate (fan out + merge).
-        HashAggregateExec(physChild, gks, aggs)
+        HashAggregateExec(physChild, gks, aggs, opts)
       } else {
         val partitionBy = gks.iterator.map(_._1).toSeq
         val exchanged = ExchangeExec(
@@ -42,25 +48,25 @@ object PhysicalPlanner {
           partitionBy,
           ExchangeExec.defaultNumShards,
           HashPartitioner.NullsToLast)
-        HashAggregateExec(exchanged, gks, aggs)
+        HashAggregateExec(exchanged, gks, aggs, opts)
       }
-    case LogicalSort(child, keys) => SortExec(plan(child), keys)
+    case LogicalSort(child, keys) => SortExec(plan(child, opts), keys, opts)
     case LogicalDistinct(child) =>
-      val physChild = plan(child)
-      if (shouldShardForSize(child)) buildShardedDistinct(physChild)
-      else DistinctExec(physChild)
+      val physChild = plan(child, opts)
+      if (shouldShardForSize(child)) buildShardedDistinct(physChild, opts)
+      else DistinctExec(physChild, opts)
     case LogicalUnion(l, r, all) =>
-      val u = UnionExec(plan(l), plan(r))
+      val u = UnionExec(plan(l, opts), plan(r, opts))
       if (all) u
-      else if (shouldShardUnion(l, r)) buildShardedDistinct(u)
-      else DistinctExec(u)
+      else if (shouldShardUnion(l, r)) buildShardedDistinct(u, opts)
+      else DistinctExec(u, opts)
     case LogicalLimit(child, n) =>
-      val p = plan(child)
+      val p = plan(child, opts)
       if (p.numPartitions <= 1) LocalLimitExec(p, n)
       else GlobalLimitExec(LocalLimitExec(p, n), n)
     case LogicalJoin(l, r, cond, kind) =>
-      val left = plan(l)
-      val right = plan(r)
+      val left = plan(l, opts)
+      val right = plan(r, opts)
       val (leftKeys, rightKeys, extra) = splitEqualityKeys(cond, l.outputSchema.length, r.outputSchema.length)
       if (leftKeys.isEmpty && rightKeys.isEmpty) enforceNestedLoopGuard(l, r)
       val buildRight = shouldBuildRight(l, r, kind)
@@ -70,7 +76,7 @@ object PhysicalPlanner {
         // build one side, stream the other. Sharding both sides forces an
         // extra pass over the *large* side just to redistribute rows; with
         // a small build that pass dominates the join itself.
-        HashJoinExec(left, right, leftKeys, rightKeys, extra, kind, buildRight)
+        HashJoinExec(left, right, leftKeys, rightKeys, extra, kind, buildRight, opts)
       } else {
         // Equi-join with both sides large enough to benefit from sharded
         // build+probe. Hash-partition both sides by their respective keys so
@@ -80,11 +86,11 @@ object PhysicalPlanner {
         val K = ExchangeExec.defaultNumShards
         val leftExch = ExchangeExec(left, leftKeys, K, HashPartitioner.NullsToZero)
         val rightExch = ExchangeExec(right, rightKeys, K, HashPartitioner.NullsToZero)
-        HashJoinExec(leftExch, rightExch, leftKeys, rightKeys, extra, kind, buildRight)
+        HashJoinExec(leftExch, rightExch, leftKeys, rightKeys, extra, kind, buildRight, opts)
       }
     case LogicalWindow(child, windows) =>
-      val physChild = plan(child)
-      buildWindow(physChild, child, windows)
+      val physChild = plan(child, opts)
+      buildWindow(physChild, child, windows, opts)
   }
 
   /** Wrap a window's child in `ExchangeExec` when sharding is both safe
@@ -101,7 +107,8 @@ object PhysicalPlanner {
   private def buildWindow(
       physChild: PhysicalPlan,
       logicalChild: LogicalPlan,
-      windows: Seq[WindowDef]): WindowExec = {
+      windows: Seq[WindowDef],
+      opts: ExecutionOptions): WindowExec = {
     val distinctParts = windows.map(_.spec.partitionKeys).distinct
     val canShard =
       distinctParts.length == 1 && distinctParts.head.nonEmpty &&
@@ -113,9 +120,9 @@ object PhysicalPlanner {
         partitionBy,
         ExchangeExec.defaultNumShards,
         HashPartitioner.NullsToLast)
-      WindowExec(exchanged, windows)
+      WindowExec(exchanged, windows, opts)
     } else {
-      WindowExec(physChild, windows)
+      WindowExec(physChild, windows, opts)
     }
   }
 
@@ -124,7 +131,7 @@ object PhysicalPlanner {
     * dedup keys on — every output column becomes a [[ColRefExpr]], so two
     * rows are equal iff they collide on every column, the same predicate
     * DistinctExec's per-shard HashSet uses. */
-  private def buildShardedDistinct(child: PhysicalPlan): DistinctExec = {
+  private def buildShardedDistinct(child: PhysicalPlan, opts: ExecutionOptions): DistinctExec = {
     val schema = child.outputSchema
     val ncols = schema.length
     val partitionBy = (0 until ncols).map { i =>
@@ -136,7 +143,7 @@ object PhysicalPlanner {
       partitionBy,
       ExchangeExec.defaultNumShards,
       HashPartitioner.NullsToLast)
-    DistinctExec(exchanged)
+    DistinctExec(exchanged, opts)
   }
 
   /** Cardinality gate for aggregate / distinct sharding: insert an

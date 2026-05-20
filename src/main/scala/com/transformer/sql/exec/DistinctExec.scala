@@ -1,9 +1,13 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.read.parquet.ParquetReader
+import com.transformer.write.parquet.ParquetWriter
 
+import java.nio.file.Path
 import java.util
 import java.util.concurrent.Callable
+import scala.collection.mutable
 
 /** SELECT DISTINCT. Two execution modes share this one operator, selected
   * by whether `child` is an [[ExchangeExec]]:
@@ -23,8 +27,24 @@ import java.util.concurrent.Callable
   * schemas; cached-hash `Array[AnyRef]` otherwise) — avoids the
   * `Seq[Any]` allocation + per-element dynamic-dispatch hashCode/equals walk
   * the original implementation paid on every row.
+  *
+  * ## Spill (plan 09 Phase 5)
+  *
+  * When `opts.spillEnabled`, each per-partition `collect` watches its
+  * accumulated input bytes; when over threshold it flushes the current set
+  * to a parquet file (one row per distinct key — same column layout as the
+  * operator's output) and resets the set. At emit time the final set is
+  * unioned with every row from every spill file.
+  *
+  * Bit-equal with the non-spill path: the set is deterministic up to
+  * insertion order, and the emit iterator never relies on a specific row
+  * order (DISTINCT is unordered). The parity check in
+  * [[DistinctExecSpillTest]] asserts multiset equality on output rows.
   */
-final case class DistinctExec(child: PhysicalPlan) extends PhysicalPlan {
+final case class DistinctExec(
+    child: PhysicalPlan,
+    opts: ExecutionOptions = ExecutionOptions.Default
+) extends PhysicalPlan {
   def outputSchema: Schema = child.outputSchema
 
   /** True when the planner inserted `ExchangeExec` above this operator.
@@ -41,6 +61,10 @@ final case class DistinctExec(child: PhysicalPlan) extends PhysicalPlan {
     child.outputSchema.fields.iterator.map(_.dataType).toArray
   )
 
+  private val spillEnabled: Boolean = opts.spillEnabled
+  private lazy val spillThresholdBytes: Long =
+    Spill.effectiveThresholdBytes(opts, Scheduler.parallelism)
+
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     if (isSharded) executePerShard(partition)
     else executeCollapsing(partition)
@@ -49,30 +73,58 @@ final case class DistinctExec(child: PhysicalPlan) extends PhysicalPlan {
   private def executePerShard(partition: Int): Iterator[ColumnarBatch] = {
     require(partition >= 0 && partition < numPartitions,
       s"partition $partition out of range [0,$numPartitions)")
-    emit(collect(partition))
+    val spillDir = if (spillEnabled) Some(Spill.openOperatorDir("distinct-shard")) else None
+    val r = collect(partition, spillDir)
+    DistinctSpiller.foldSpillFiles(r.spillFiles, codec, ncols, r.set)
+    wrapWithSpillCleanup(emit(r.set), spillDir)
   }
 
   private def executeCollapsing(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0,
       s"collapsing distinct has only one partition; got partition=$partition")
-    val tasks: Seq[Callable[util.LinkedHashSet[AnyRef]]] =
+    val spillDir = if (spillEnabled) Some(Spill.openOperatorDir("distinct")) else None
+    val tasks: Seq[Callable[DistinctExec.PartialSet]] =
       (0 until child.numPartitions).map { p =>
-        new Callable[util.LinkedHashSet[AnyRef]] {
-          def call(): util.LinkedHashSet[AnyRef] = collect(p)
+        new Callable[DistinctExec.PartialSet] {
+          def call(): DistinctExec.PartialSet = collect(p, spillDir)
         }
       }
     val partials = Scheduler.submitAndAwaitAll(tasks)
     val merged = new util.LinkedHashSet[AnyRef]()
-    partials.foreach(merged.addAll)
-    emit(merged)
+    partials.foreach(p => merged.addAll(p.set))
+    partials.foreach { p =>
+      DistinctSpiller.foldSpillFiles(p.spillFiles, codec, ncols, merged)
+    }
+    wrapWithSpillCleanup(emit(merged), spillDir)
   }
 
-  private def collect(p: Int): util.LinkedHashSet[AnyRef] = {
+  /** Wrap `inner` so the spill subdir is wiped when the consumer drains
+    * the iterator. */
+  private def wrapWithSpillCleanup(
+      inner: Iterator[ColumnarBatch],
+      spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] = spillDir match {
+    case None => inner
+    case Some(d) =>
+      new Iterator[ColumnarBatch] {
+        def hasNext: Boolean = {
+          val h = inner.hasNext
+          if (!h) d.close()
+          h
+        }
+        def next(): ColumnarBatch = inner.next()
+      }
+  }
+
+  private def collect(p: Int, spillDir: Option[OperatorSpillDir]): DistinctExec.PartialSet = {
     val set = new util.LinkedHashSet[AnyRef]()
+    val spillFiles = mutable.ArrayBuffer.empty[Path]
+    val threshold = if (spillDir.isDefined) spillThresholdBytes else Long.MaxValue
+    var bytesSinceFlush: Long = 0L
     val scratch = codec.newScratch()
     val it = child.execute(p)
     while (it.hasNext) {
       val b = it.next()
+      if (spillDir.isDefined) bytesSinceFlush += Spill.estimateBytes(b)
       var r = 0
       while (r < b.numRows) {
         // Probe with the scratch wrapper to avoid the per-row key allocation
@@ -83,8 +135,19 @@ final case class DistinctExec(child: PhysicalPlan) extends PhysicalPlan {
         if (!set.contains(scratch)) set.add(codec.ownFromScratch(scratch))
         r += 1
       }
+      if (bytesSinceFlush >= threshold && spillDir.isDefined && !set.isEmpty) {
+        val file = spillDir.get.newSpillFile(".parquet")
+        DistinctSpiller.writeSet(file, codec, child.outputSchema, set)
+        set.clear()
+        spillFiles += file
+        bytesSinceFlush = 0L
+        if (spillFiles.length > opts.spillMaxRuns)
+          throw new RuntimeException(
+            s"DistinctExec produced ${spillFiles.length} spill runs in partition $p, " +
+            s"exceeding spill_max_runs=${opts.spillMaxRuns}.")
+      }
     }
-    set
+    DistinctExec.PartialSet(set, spillFiles.toArray)
   }
 
   private def emit(set: util.LinkedHashSet[AnyRef]): Iterator[ColumnarBatch] = {
@@ -103,6 +166,73 @@ final case class DistinctExec(child: PhysicalPlan) extends PhysicalPlan {
         out.setNumRows(r)
         out
       }
+    }
+  }
+}
+
+object DistinctExec {
+  private[exec] final case class PartialSet(set: util.LinkedHashSet[AnyRef], spillFiles: Array[Path])
+}
+
+/** Spill helpers for [[DistinctExec]]. Spill file schema mirrors the
+  * operator's output schema — one row per distinct key. */
+private[exec] object DistinctSpiller {
+
+  def writeSet(
+      file: Path,
+      codec: KeyCodec,
+      schema: Schema,
+      set: util.LinkedHashSet[AnyRef]): Unit = {
+    if (set.isEmpty) return
+    val capacity = ColumnarBatch.DefaultCapacity
+    val it = set.iterator()
+    val batchIter = new Iterator[ColumnarBatch] {
+      def hasNext: Boolean = it.hasNext
+      def next(): ColumnarBatch = {
+        val out = new ColumnarBatch(schema, capacity)
+        var r = 0
+        while (r < capacity && it.hasNext) {
+          codec.decode(it.next(), out, 0, r)
+          r += 1
+        }
+        out.setNumRows(r)
+        out
+      }
+    }
+    ParquetWriter.writeAll(file, schema, batchIter)
+  }
+
+  def foldSpillFiles(
+      files: Array[Path],
+      codec: KeyCodec,
+      ncols: Int,
+      target: util.LinkedHashSet[AnyRef]): Unit = {
+    if (files.isEmpty) return
+    val keyBuf = new Array[Any](ncols)
+    var f = 0
+    while (f < files.length) {
+      val reader = ParquetReader.fromPath(files(f).toString)
+      var part = 0
+      while (part < reader.numPartitions) {
+        val batchIt = reader.readPartition(part)
+        while (batchIt.hasNext) {
+          val batch = batchIt.next()
+          var r = 0
+          while (r < batch.numRows) {
+            var c = 0
+            while (c < ncols) {
+              val col = batch.column(c)
+              keyBuf(c) = if (col.isNull(r)) null else col.getBoxed(r)
+              c += 1
+            }
+            val key = codec.encodeBoxed(keyBuf)
+            target.add(key)
+            r += 1
+          }
+        }
+        part += 1
+      }
+      f += 1
     }
   }
 }

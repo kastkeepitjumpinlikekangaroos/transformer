@@ -7,8 +7,12 @@ scala_library(
     deps = [
         "//src/main/scala/com/transformer/core",
         # read/parquet is reached so PhysicalPlanner can call
-        # ParquetReader.withPushdownFilter to push predicates into the scan.
+        # ParquetReader.withPushdownFilter to push predicates into the scan
+        # and SortExec spill can re-read its spill files.
         "//src/main/scala/com/transformer/read/parquet",
+        # write/parquet is reached by SortExec spill to flush sorted runs
+        # to disk (plan 09 Phase 3).
+        "//src/main/scala/com/transformer/write/parquet",
         "//src/main/scala/com/transformer/sql/parse",
         "//src/main/scala/com/transformer/sql/plan",
     ],

@@ -13,11 +13,25 @@ navigation hint, not a comprehensive directory listing.
 - `gui/JobSession.scala` (~795 LOC) — mutable FX-thread state for the GUI;
   also tracks per-input UI state (Pending/Loading/Loaded/Failed) now that
   inputs flow through the unified scheduler.
-- `sql/exec/AggregateExec.scala` (~790 LOC) — every `AggState` subclass plus
-  the codec / LongHashMap GROUP BY paths. Primitive states (`CountStarState`,
-  `CountState`, `CountIfState`, `LongSumState`, `DoubleSumState`, `AvgState`,
-  `MinMaxState`) override `updateBatch` to read typed `ColumnVector`s
-  directly for the no-GROUP-BY fast path.
+- `sql/exec/AggregateExec.scala` (~1320 LOC) — every `AggState` subclass
+  plus the codec / LongHashMap GROUP BY paths. Primitive states
+  (`CountStarState`, `CountState`, `CountIfState`, `LongSumState`,
+  `DoubleSumState`, `AvgState`, `MinMaxState`) override `updateBatch` to
+  read typed `ColumnVector`s directly for the no-GROUP-BY fast path.
+  Each spillable state additionally implements `writeSelf` / `readSelf`
+  (plan 09 Phase 4); the `AggSpiller` helper at the bottom of the file
+  handles per-partition parquet flush + fold-back at emit time.
+- `sql/exec/AggStateSerde.scala` (~75 LOC) — dispatcher that pairs
+  `AggExpr` types with the right `AggState` subtype for round-trip
+  serialization. `isSpillable` gates the operator-level switch
+  (`CountDistinct` is the only false case).
+- `core/Spill.scala` (~155 LOC) — temp-dir lifecycle, per-operator subdir
+  allocation, `ColumnarBatch` byte estimator, and the
+  `effectiveThresholdBytes` helper that turns `ExecutionOptions` into a
+  concrete flush threshold.
+- `core/ExecutionOptions.scala` (~75 LOC) — per-query knobs threaded from
+  `DataJob.runOneTask` to spill-capable operators. `fromOutputOptions`
+  parses the `output.json` `options` map with tolerance for typos.
 - `job/DataJob.scala` (~720 LOC) — runner orchestration: unified input + task
   DAG scheduler (`runUnifiedDag`), writeOutput, validation re-read, per-status
   `_run.json` writes + per-failure `_validation-<slug>.csv` sample writes +
@@ -36,12 +50,22 @@ navigation hint, not a comprehensive directory listing.
   in `ColumnVector.allocate`.
 - `gui/DagCanvas.scala` (~300 LOC) — Canvas drawing + pan/zoom/click; renders
   per-input load state alongside per-task status.
-- `sql/exec/JoinExec.scala` (~410 LOC) — equi-join build + probe paths with
-  build/probe role mirroring, the LongHashMap fast path, and per-batch
-  `evalVec` key extraction for computed join keys on both sides.
-- `sql/exec/WindowExec.scala` (~410 LOC) — partition, sort, frame computation
-  for every supported window function; pre-computes per-spec partition/order
-  keys per row during the single materialization pass.
+- `sql/exec/JoinExec.scala` (~770 LOC) — equi-join build + probe paths
+  with build/probe role mirroring, the LongHashMap fast path, and
+  per-batch `evalVec` key extraction for computed join keys on both
+  sides. Grace hash join (plan 09 Phase 6) is the additional
+  `executeGraceHash` path that buckets both sides into K=16 disk parquet
+  files via `fmix32(hash(joinKeys)) % K` and processes bucket pairs
+  sequentially; per-bucket unmatched-build tracking preserves outer-join
+  semantics.
+- `sql/exec/WindowExec.scala` (~470 LOC) — partition, sort, frame
+  computation for every supported window function; pre-computes per-spec
+  partition/order keys per row during the single materialization pass.
+  Bucketed spill (plan 09 Phase 7) routes child rows into K=16 disk
+  parquet buckets by `fmix32(hash(partitionKey)) % K` and processes each
+  bucket through the same in-memory pipeline — every row sharing a
+  partition key collocates in one bucket so LAG/LEAD/frame correctness
+  is preserved.
 - `core/HashKeys.scala` (~520 LOC) — `KeyCodec` (`PackedBytesCodec`,
   `ObjectArrayCodec`, `EmptyKeyCodec`) + `BytesKey` / `ObjectArrayKey`
   wrappers + `LongHashMap[V]` (open-addressing primitive-long-keyed map for

@@ -1,8 +1,11 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
+import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
 
+import java.nio.file.Path
 import java.util
 import java.util.concurrent.Callable
 import scala.collection.mutable
@@ -60,7 +63,8 @@ final case class HashJoinExec(
     rightKeys: Seq[Expr],
     extra: Option[Expr],
     kind: JoinKind,
-    buildRight: Boolean = true
+    buildRight: Boolean = true,
+    opts: ExecutionOptions = ExecutionOptions.Default
 ) extends PhysicalPlan {
 
   val outputSchema: Schema = Schema(left.outputSchema.fields ++ right.outputSchema.fields)
@@ -134,8 +138,18 @@ final case class HashJoinExec(
 
   def numPartitions: Int = if (isSharded) left.numPartitions else 1
 
+  /** Grace hash join is enabled when:
+    *   - the user opted in via `output.json -> options.spill=true`, AND
+    *   - the join has equi-keys (`nKeys > 0`).
+    *
+    * Non-equi joins (the cartesian-shaped collapsing path) don't qualify
+    * because there's no key to hash-bucket on; their size guard is
+    * [[PhysicalPlanner.enforceNestedLoopGuard]] above the planner. */
+  private val graceEnabled: Boolean = opts.spillEnabled && nKeys > 0
+
   def execute(partition: Int): Iterator[ColumnarBatch] = {
-    if (isSharded) executePerShard(partition)
+    if (graceEnabled) executeGraceHash(partition)
+    else if (isSharded) executePerShard(partition)
     else executeCollapsing(partition)
   }
 
@@ -498,6 +512,399 @@ final case class HashJoinExec(
       val view = RowView(outputSchema, row)
       val v = e.eval(view, 0)
       v != null && v.asInstanceOf[Boolean]
+  }
+
+  // ---- Grace hash path (plan 09 Phase 6) -----------------------------------
+  //
+  // When `opts.spillEnabled` and the join has equi-keys, route both sides into
+  // K disk buckets keyed by `hash(joinKey) % K`. Then process each bucket pair
+  // (build_k, probe_k) sequentially: load build_k's rows into a fresh in-memory
+  // BuildSide and stream probe_k against it. Memory bound per bucket pair ≈
+  // size of one bucket's build side (≈ totalBuild / K).
+  //
+  // Bucket count K is fixed at `GraceBuckets` for v1 — recursive bucketing on
+  // skewed data is v1.1 (a bucket too big to fit in memory will OOM). NULL join
+  // keys deterministically land in bucket 0; they never match (3VL) but still
+  // surface in outer-join unmatched-build / unmatched-probe emission.
+
+  private val GraceBuckets: Int = 16
+
+  private def executeGraceHash(partition: Int): Iterator[ColumnarBatch] = {
+    require(graceEnabled, "executeGraceHash called with graceEnabled=false")
+    val K = GraceBuckets
+    val spillDir = Spill.openOperatorDir("hashjoin")
+
+    val buildParts: Seq[Int] =
+      if (isSharded) {
+        require(partition >= 0 && partition < numPartitions,
+          s"partition $partition out of range [0,$numPartitions)")
+        Seq(partition)
+      } else {
+        require(partition == 0,
+          s"non-sharded join collapses to one partition; got partition=$partition")
+        0 until buildPlan.numPartitions
+      }
+    val probeParts: Seq[Int] = if (isSharded) Seq(partition) else 0 until probePlan.numPartitions
+
+    val buildBuckets = bucketSide(
+      sideName = "build",
+      parts = buildParts,
+      plan = buildPlan,
+      keyExprs = buildKeyExprs,
+      keysAreColRefs = buildKeysAreColRefs,
+      keyColIndices = buildKeyColIndices,
+      K = K,
+      spillDir = spillDir)
+    val probeBuckets = bucketSide(
+      sideName = "probe",
+      parts = probeParts,
+      plan = probePlan,
+      keyExprs = probeKeyExprs,
+      keysAreColRefs = probeKeysAreColRefs,
+      keyColIndices = probeKeyColIndices,
+      K = K,
+      spillDir = spillDir)
+
+    val out = mutable.ArrayBuffer.empty[Array[Any]]
+    var k = 0
+    while (k < K) {
+      processBucketPair(buildBuckets(k), probeBuckets(k), out)
+      k += 1
+    }
+    spillDir.close()
+    rowsToBatches(out.toArray, outputSchema, ColumnarBatch.DefaultCapacity)
+  }
+
+  /** Route all rows from `parts` of `plan` into K bucket files inside
+    * `spillDir`, keyed by `hash(joinKey) % K`. Returns one file path per
+    * bucket; a `null` entry means that bucket was empty (no file written). */
+  private def bucketSide(
+      sideName: String,
+      parts: Seq[Int],
+      plan: PhysicalPlan,
+      keyExprs: Array[Expr],
+      keysAreColRefs: Boolean,
+      keyColIndices: Array[Int],
+      K: Int,
+      spillDir: OperatorSpillDir): Array[Path] = {
+    val schema = plan.outputSchema
+    val ncols = schema.length
+    val files = new Array[Path](K)
+    val writers = new Array[TParquetWriter](K)
+    // Per-bucket pending batches; flushed when full or at end.
+    val pending = Array.fill(K)(new ColumnarBatch(schema, ColumnarBatch.DefaultCapacity))
+    val pendingCounts = new Array[Int](K)
+
+    def flushBucket(b: Int): Unit = {
+      val n = pendingCounts(b)
+      if (n == 0) return
+      val out = pending(b)
+      out.setNumRows(n)
+      if (writers(b) == null) {
+        files(b) = spillDir.newSpillFile(s".${sideName}.b$b.parquet")
+        writers(b) = new TParquetWriter(files(b), schema, Map.empty)
+      }
+      writers(b).write(out)
+      pending(b) = new ColumnarBatch(schema, ColumnarBatch.DefaultCapacity)
+      pendingCounts(b) = 0
+    }
+
+    parts.foreach { p =>
+      val it = plan.execute(p)
+      while (it.hasNext) {
+        val batch = it.next()
+        if (batch.numRows > 0) routeBatchToBuckets(
+          batch, ncols, keyExprs, keysAreColRefs, keyColIndices, K,
+          pending, pendingCounts, flushBucket _)
+      }
+    }
+    // Final flush.
+    var b = 0
+    while (b < K) { flushBucket(b); b += 1 }
+    // Close writers.
+    b = 0
+    while (b < K) {
+      val w = writers(b)
+      if (w != null) w.close()
+      b += 1
+    }
+    files
+  }
+
+  /** Compute a 32-bit hash of the join key columns at each row of `batch`
+    * and append the row to the corresponding bucket's pending batch. */
+  private def routeBatchToBuckets(
+      batch: ColumnarBatch,
+      ncols: Int,
+      keyExprs: Array[Expr],
+      keysAreColRefs: Boolean,
+      keyColIndices: Array[Int],
+      K: Int,
+      pending: Array[ColumnarBatch],
+      pendingCounts: Array[Int],
+      flushBucket: Int => Unit): Unit = {
+    val nrows = batch.numRows
+    // Evaluate each key expression to a vector. For ColRef keys, evalVec
+    // aliases the column.
+    val keyVecs = new Array[ColumnVector](nKeys)
+    var k = 0
+    while (k < nKeys) {
+      keyVecs(k) =
+        if (keysAreColRefs) batch.column(keyColIndices(k))
+        else keyExprs(k).evalVec(batch)
+      k += 1
+    }
+    var r = 0
+    while (r < nrows) {
+      val bucket = bucketIndex(keyVecs, r, K)
+      val dst = pending(bucket)
+      val dstRow = pendingCounts(bucket)
+      var c = 0
+      while (c < ncols) {
+        batch.column(c).copyTo(r, dst.column(c), dstRow)
+        c += 1
+      }
+      pendingCounts(bucket) = dstRow + 1
+      if (pendingCounts(bucket) >= ColumnarBatch.DefaultCapacity) flushBucket(bucket)
+      r += 1
+    }
+  }
+
+  /** Bucket index = `fmix32(hash(joinKeys)) & (K-1)`. Mirrors the
+    * mixing strategy in [[HashPartitioner]] so small contiguous integer
+    * keys don't cluster into one bucket. K is forced to a power of two by
+    * construction (we set [[GraceBuckets]]). NULL keys deterministically
+    * land in bucket 0. */
+  private def bucketIndex(keyVecs: Array[ColumnVector], row: Int, K: Int): Int = {
+    // Any-null check: NULL join keys can never match (3VL) — bucket 0 is fine
+    // as a deterministic destination; they'll match nothing in their bucket.
+    var k = 0
+    var anyNull = false
+    while (k < nKeys && !anyNull) {
+      if (keyVecs(k).isNull(row)) anyNull = true
+      k += 1
+    }
+    if (anyNull) return 0
+    // Combined hash across columns. Same shape as Java's Objects.hash but
+    // with primitive specialization to avoid per-row boxing.
+    var h = 1
+    k = 0
+    while (k < nKeys) {
+      val col = keyVecs(k)
+      val hi = HashJoinExec.columnHashCode(col, row)
+      h = 31 * h + hi
+      k += 1
+    }
+    val mixed = HashJoinExec.fmix32(h)
+    (mixed & 0x7FFFFFFF) % K
+  }
+
+  /** Process one bucket pair: build a fresh in-memory map from `buildFile`
+    * (if non-null), stream `probeFile` against it (if non-null), emit
+    * matches into `out`. For outer joins with `preserveBuildOuter`, also
+    * emit unmatched build rows from this bucket.
+    *
+    * Why per-bucket unmatched emission preserves correctness: each bucket's
+    * build rows can only match probe rows in the SAME bucket (since both
+    * sides hash by the same join key). A build row in bucket k whose key
+    * is unmatched in this bucket's probe is unmatched globally. */
+  private def processBucketPair(
+      buildFile: Path,
+      probeFile: Path,
+      out: mutable.ArrayBuffer[Array[Any]]): Unit = {
+    val build = loadBuildFromBucket(buildFile)
+    val matched = if (preserveBuildOuter) new util.HashSet[Int]() else null
+    if (build != null && probeFile != null) probeBucket(probeFile, build, out, matched)
+    else if (probeFile != null && preserveProbeOuter) {
+      // Probe-only bucket: every probe row is unmatched. Stream and null-pad.
+      streamProbeAsUnmatched(probeFile, out)
+    }
+    if (build != null && preserveBuildOuter) {
+      var i = 0
+      while (i < build.rows.length) {
+        if (!matched.contains(i)) out += mergeUnmatchedBuild(build.rows(i))
+        i += 1
+      }
+    }
+  }
+
+  /** Load every row of `file` into an in-memory [[BuildSide]] using the
+    * existing keymap-build primitives. Returns `null` for empty / absent
+    * files. */
+  private def loadBuildFromBucket(file: Path): BuildSide = {
+    if (file == null) return null
+    val reader = ParquetReader.fromPath(file.toString)
+    val rows = mutable.ArrayBuffer.empty[Array[Any]]
+    val keys: mutable.ArrayBuffer[AnyRef] =
+      if (buildKeysAreColRefs || useJoinLongKey) null
+      else mutable.ArrayBuffer.empty[AnyRef]
+    val keyBufRow: Array[Any] = if (keys != null) new Array[Any](nKeys) else null
+    val schema = buildPlan.outputSchema
+    val ncols = schema.length
+    var part = 0
+    while (part < reader.numPartitions) {
+      val it = reader.readPartition(part)
+      while (it.hasNext) {
+        val b = it.next()
+        val n = b.numRows
+        val keyVecs: Array[ColumnVector] =
+          if (keys != null) Array.tabulate(nKeys)(i => buildKeyExprs(i).evalVec(b))
+          else null
+        var r = 0
+        while (r < n) {
+          val arr = new Array[Any](ncols)
+          var c = 0
+          while (c < ncols) {
+            arr(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
+            c += 1
+          }
+          rows += arr
+          if (keys != null) {
+            var k = 0
+            while (k < nKeys) {
+              val kv = keyVecs(k)
+              keyBufRow(k) = if (kv.isNull(r)) null else kv.getBoxed(r)
+              k += 1
+            }
+            keys += keyCodec.encodeBoxed(keyBufRow)
+          }
+          r += 1
+        }
+      }
+      part += 1
+    }
+    if (rows.isEmpty) return null
+    if (useJoinLongKey) buildLongKeyMap(rows)
+    else buildCodecKeyMap(rows, keys)
+  }
+
+  /** Stream one probe bucket against a freshly-built BuildSide, appending
+    * matches (and outer-probe-unmatched null-pads) to `out`. */
+  private def probeBucket(
+      file: Path,
+      build: BuildSide,
+      out: mutable.ArrayBuffer[Array[Any]],
+      matchedBuild: util.HashSet[Int]): Unit = {
+    val reader = ParquetReader.fromPath(file.toString)
+    val probeSchema = probePlan.outputSchema
+    val probeWidth = probeSchema.length
+    val keyBuf: Array[Any] = if (probeKeysAreColRefs) null else new Array[Any](nKeys)
+    var part = 0
+    while (part < reader.numPartitions) {
+      val it = reader.readPartition(part)
+      while (it.hasNext) {
+        val b = it.next()
+        val nrows = b.numRows
+        val probeKeyVecs: Array[ColumnVector] =
+          if (probeKeysAreColRefs || useJoinLongKey) null
+          else Array.tabulate(nKeys)(i => probeKeyExprs(i).evalVec(b))
+        var r = 0
+        while (r < nrows) {
+          val matches: util.ArrayList[Int] =
+            if (useJoinLongKey) {
+              val col = b.column(probeKeyLongIdx)
+              if (col.isNull(r)) null
+              else build.keyMapLong.get(KeyCodec.readAsLong(col, r))
+            } else {
+              val key: AnyRef =
+                if (probeKeysAreColRefs) keyCodec.encodeFromBatchSkipIfAnyNull(b, r)
+                else {
+                  var k = 0; var anyNull = false
+                  while (k < nKeys) {
+                    val kv = probeKeyVecs(k)
+                    val v: Any = if (kv.isNull(r)) null else kv.getBoxed(r)
+                    if (v == null) anyNull = true
+                    keyBuf(k) = v
+                    k += 1
+                  }
+                  if (anyNull) null else keyCodec.encodeBoxed(keyBuf)
+                }
+              if (key == null) null else build.keyMap.get(key)
+            }
+          var probeRow: Array[Any] = null
+          var matchedAny = false
+          if (matches != null && !matches.isEmpty) {
+            val mIt = matches.iterator()
+            while (mIt.hasNext) {
+              val buildIdx = mIt.next()
+              if (probeRow == null) probeRow = materializeProbeRow(b, r, probeWidth)
+              val combined = mergeMatch(probeRow, build.rows(buildIdx))
+              if (passesExtra(combined)) {
+                out += combined
+                matchedAny = true
+                if (matchedBuild != null) matchedBuild.add(buildIdx)
+              }
+            }
+          }
+          if (!matchedAny && preserveProbeOuter) {
+            if (probeRow == null) probeRow = materializeProbeRow(b, r, probeWidth)
+            out += mergeUnmatchedProbe(probeRow)
+          }
+          r += 1
+        }
+      }
+      part += 1
+    }
+  }
+
+  /** Stream a probe-side bucket where the build bucket is empty — every
+    * probe row is unmatched. Only invoked for outer joins that preserve
+    * the probe side. */
+  private def streamProbeAsUnmatched(
+      file: Path,
+      out: mutable.ArrayBuffer[Array[Any]]): Unit = {
+    val reader = ParquetReader.fromPath(file.toString)
+    val probeWidth = probePlan.outputSchema.length
+    var part = 0
+    while (part < reader.numPartitions) {
+      val it = reader.readPartition(part)
+      while (it.hasNext) {
+        val b = it.next()
+        val n = b.numRows
+        var r = 0
+        while (r < n) {
+          out += mergeUnmatchedProbe(materializeProbeRow(b, r, probeWidth))
+          r += 1
+        }
+      }
+      part += 1
+    }
+  }
+}
+
+object HashJoinExec {
+  /** Avalanche the combined column hash so contiguous small-integer keys
+    * spread across buckets instead of clustering. Identical mixer to
+    * [[HashPartitioner.fmix32]] (we don't reach across packages from
+    * `sql.exec` into `core` for this trivial constant). */
+  private[exec] def fmix32(h0: Int): Int = {
+    var h = h0
+    h ^= (h >>> 16)
+    h *= 0x85ebca6b
+    h ^= (h >>> 13)
+    h *= 0xc2b2ae35
+    h ^= (h >>> 16)
+    h
+  }
+
+  /** Per-column hashCode that avoids per-row boxing on the primitive
+    * vectors. Reference vectors fall back to the boxed `hashCode` via
+    * `getBoxed`. */
+  private[exec] def columnHashCode(col: ColumnVector, row: Int): Int = col match {
+    case lv: LongVector =>
+      val v = lv.values(row); (v ^ (v >>> 32)).toInt
+    case iv: IntVector => iv.values(row)
+    case dv: DoubleVector =>
+      val v = java.lang.Double.doubleToLongBits(dv.values(row))
+      (v ^ (v >>> 32)).toInt
+    case fv: FloatVector => java.lang.Float.floatToIntBits(fv.values(row))
+    case bv: BooleanVector => if (bv.values(row)) 1231 else 1237
+    case tv: TimestampVector =>
+      val v = tv.values(row); (v ^ (v >>> 32)).toInt
+    case dv: DateVector => dv.values(row)
+    case other =>
+      val boxed = other.getBoxed(row)
+      if (boxed == null) 0 else boxed.hashCode
   }
 }
 

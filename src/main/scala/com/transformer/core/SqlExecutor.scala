@@ -4,9 +4,20 @@ import java.util.concurrent.atomic.LongAdder
 
 /** Boundary between the job runner and the SQL engine. Implementations live in
   * the `sql` module. The job runner gets one via [[SqlExecutorRegistry]].
+  *
+  * Two overloads:
+  *   - `execute(sql, catalog, opts)` is the primary; concrete implementations
+  *     must override this and may consult [[ExecutionOptions]] to enable
+  *     spill, set per-operator thresholds, etc.
+  *   - `execute(sql, catalog)` is a `final` shim that delegates with
+  *     [[ExecutionOptions.Default]]. Callers that don't carry per-task config
+  *     (GUI SQL Console, ad-hoc tests) use it without thinking about opts.
   */
 trait SqlExecutor {
-  def execute(sql: String, catalog: Catalog): ExecutedQuery
+  def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery
+
+  final def execute(sql: String, catalog: Catalog): ExecutedQuery =
+    execute(sql, catalog, ExecutionOptions.Default)
 }
 
 /** Result of running one SQL statement.

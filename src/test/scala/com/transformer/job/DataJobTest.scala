@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, CatalogView, ExecutedQuery, MaterializedView, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, ExecutedQuery, ExecutionOptions, MaterializedView, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.temporal.TemporalVariables
 import org.junit.Assert._
 import org.junit.Assume.assumeTrue
@@ -507,11 +507,74 @@ class DataJobTest {
     com.transformer.sql.exec.SqlEngine.init()
     val real = SqlExecutorRegistry.get
     new SqlExecutor {
-      override def execute(sql: String, catalog: Catalog): ExecutedQuery = {
+      override def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
         Thread.sleep(ms)
-        real.execute(sql, catalog)
+        real.execute(sql, catalog, opts)
       }
     }
+  }
+
+  /** Plumbing test for Plan 09 Phase 1: confirm DataJob.runOneTask reads spill
+    * config out of `OutputFilePath.options` and threads the resulting
+    * [[ExecutionOptions]] into every `SqlExecutor.execute` call (main SQL +
+    * validations). No operator consumes opts yet; this guards against the
+    * plumbing silently degrading to defaults when phases 2+ start to depend
+    * on it. */
+  @Test def runOneTaskThreadsExecutionOptionsFromOutputOptions(): Unit = {
+    val inDir = tmpDir("dj-opts-")
+    writeCsv(inDir, "a.csv", "x\n1\n2\n3\n")
+    val outDir = tmpDir("dj-opts-out-").resolve("out")
+    val seen = new java.util.concurrent.atomic.AtomicReference[ExecutionOptions](null)
+    val real = { com.transformer.sql.exec.SqlEngine.init(); SqlExecutorRegistry.get }
+    val capturing = new SqlExecutor {
+      def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
+        seen.compareAndSet(null, opts)
+        real.execute(sql, catalog, opts)
+      }
+    }
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT * FROM t"),
+        outputFile = Some(OutputFilePath(
+          outDir.toString,
+          options = Map(
+            "spill" -> "true",
+            "spill_threshold_bytes" -> "65536",
+            "spill_max_runs" -> "7"
+          )
+        ))
+      ))
+    )
+    assertTrue(job.run(capturing).succeeded)
+    val opts = seen.get()
+    assertNotNull("executor.execute should have been called at least once", opts)
+    assertTrue("spill should be enabled from output.json options", opts.spillEnabled)
+    assertEquals(Some(65536L), opts.spillThresholdBytes)
+    assertEquals(7, opts.spillMaxRuns)
+  }
+
+  /** A task with no outputFile (drain-and-discard) runs with default opts —
+    * there is no `output.json` to read spill config from. */
+  @Test def runOneTaskWithoutOutputFileUsesDefaultExecutionOptions(): Unit = {
+    val inDir = tmpDir("dj-opts-noout-")
+    writeCsv(inDir, "a.csv", "x\n1\n")
+    val seen = new java.util.concurrent.atomic.AtomicReference[ExecutionOptions](null)
+    val real = { com.transformer.sql.exec.SqlEngine.init(); SqlExecutorRegistry.get }
+    val capturing = new SqlExecutor {
+      def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
+        seen.compareAndSet(null, opts)
+        real.execute(sql, catalog, opts)
+      }
+    }
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(sqlString = Some("SELECT * FROM t")))
+    )
+    assertTrue(job.run(capturing).succeeded)
+    val opts = seen.get()
+    assertNotNull(opts)
+    assertEquals(ExecutionOptions.Default, opts)
   }
 
   @Test def buildDagExposesNodesAndDepsWithoutRunning(): Unit = {
@@ -745,9 +808,9 @@ class DataJobTest {
     val captured = new java.util.concurrent.atomic.AtomicReference[CatalogView]()
     val real = { com.transformer.sql.exec.SqlEngine.init(); SqlExecutorRegistry.get }
     val capturing = new SqlExecutor {
-      def execute(sql: String, catalog: Catalog): ExecutedQuery = {
+      def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
         captured.compareAndSet(null, catalog("t"))
-        real.execute(sql, catalog)
+        real.execute(sql, catalog, opts)
       }
     }
     val job = DataJob(
@@ -768,9 +831,9 @@ class DataJobTest {
     val captured = new java.util.concurrent.atomic.AtomicReference[CatalogView]()
     val real = { com.transformer.sql.exec.SqlEngine.init(); SqlExecutorRegistry.get }
     val capturing = new SqlExecutor {
-      def execute(sql: String, catalog: Catalog): ExecutedQuery = {
+      def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
         captured.compareAndSet(null, catalog("t"))
-        real.execute(sql, catalog)
+        real.execute(sql, catalog, opts)
       }
     }
     val job = DataJob(

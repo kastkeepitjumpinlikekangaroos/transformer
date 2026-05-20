@@ -229,9 +229,26 @@ ship a fix or move something from "not done" to "done".
 
 ## What's intentionally NOT done
 
-- **No spill-to-disk** for hash-aggregate/hash-join/sort. v1 holds all keys in
-  memory. Document this if exposed to users; consider adding a
-  `RowsToDiskOnPressure` operator post-v1.
+- **Spill-to-disk** is implemented for `SortExec`, `HashAggregateExec`,
+  `DistinctExec`, `HashJoinExec` (grace hash, equi-join only), and
+  `WindowExec` (bucketed by PARTITION BY) but **disabled by default**.
+  Opt in per-task via `output.json`'s `options.spill = "true"` (with
+  optional `spill_threshold_bytes` and `spill_max_runs`). See
+  `plans/perf/09-spill-to-disk.md` for the full design. Caveats:
+  - Non-equi joins (cartesian-shaped) ignore the spill option — they're
+    rejected above [[PhysicalPlanner.NestedLoopMaxRows]] anyway.
+  - `COUNT(DISTINCT …)` aggregates fall back to the in-memory path even
+    when spill is enabled — the underlying HashSet state doesn't
+    round-trip through a typed schema in v1, so a query mixing
+    `COUNT(DISTINCT)` with other aggregates silently disables spill for
+    that operator. Document the heap limit if a workload is hitting it.
+  - `WindowExec` spill requires a non-empty PARTITION BY that's
+    consistent across every window spec in the projection. Empty
+    PARTITION BY (whole-result window) or mixed PARTITION BYs silently
+    fall back to the in-memory path — there's no key set to bucket by.
+  - Grace hash and window spill both use a fixed bucket count of 16
+    (no recursive bucketing). Hot keys whose bucket exceeds heap will
+    still OOM at probe/process time; that's a v1.1 issue.
 - **No whole-stage codegen**, no Janino, no LLVM. The closest analogue is
   `Expr.evalVec` (see [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec))
   — one call per Expr per batch, primitive-array inner loops, no codegen step.

@@ -47,3 +47,92 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+scala_junit_test(
+    name = "agg_state_serde_test",
+    srcs = ["AggStateSerdeTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "sort_exec_spill_test",
+    srcs = ["SortExecSpillTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "hash_aggregate_spill_test",
+    srcs = ["HashAggregateSpillTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "distinct_exec_spill_test",
+    srcs = ["DistinctExecSpillTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "hash_join_spill_test",
+    srcs = ["HashJoinSpillTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "window_exec_spill_test",
+    srcs = ["WindowExecSpillTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Plan 09 Phase 8 stress test. Pushes each spill-capable operator through
+# many spill rounds against a synthetic dataset and verifies output via
+# closed-form analytical checks (no in-memory oracle). Stays under ~20s
+# on a modest box so it runs as part of `bazel test //...`; for real
+# above-heap pressure, scale the row counts up and run with `-Xmx` outside
+# Bazel.
+scala_junit_test(
+    name = "spill_stress_test",
+    srcs = ["SpillStressTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)

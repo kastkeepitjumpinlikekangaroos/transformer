@@ -254,6 +254,78 @@ different shards from different worker threads — share the materialized
 result. The memory cost is roughly what `HashAggregate.partialAggregate`
 already paid; no new spill semantics are introduced.
 
+### 2c. Spill-to-disk for breakers (opt-in)
+
+`SortExec`, `HashAggregateExec`, and `DistinctExec` can spill partial
+state to local parquet files when their in-memory buffer crosses a
+byte threshold. The spill path is **disabled by default**; tasks opt in
+via `output.json`'s `options` map:
+
+```json
+{
+  "format": "parquet",
+  "options": {
+    "spill": "true",
+    "spill_threshold_bytes": "1073741824",
+    "spill_max_runs": "500"
+  }
+}
+```
+
+The plumbing flows from `DataJob.runOneTask` (which builds an
+`ExecutionOptions` from `OutputFilePath.options`) through
+`SqlExecutor.execute(_, _, opts)` and `PhysicalPlanner.plan(_, opts)` to
+each spill-capable operator. With spill disabled the cost is one boolean
+check per operator — `ExecutionOptions.Default` short-circuits all
+threshold tracking. Ad-hoc SQL Console queries always use defaults so
+spill never activates for exploratory work.
+
+Per-operator format:
+- `SortExec` writes per-partition sorted "runs" as parquet files;
+  the K-way merge heap consumes both in-memory tails and disk-resident
+  runs via a uniform `SortCursor` abstraction.
+- `HashAggregateExec` writes one row per group with `groupKey columns`
+  + N `Binary` columns containing serialized `AggState`s (see
+  `AggStateSerde`). At emit time every partition's spill files are
+  folded back into the merged map. The codec map path and the
+  `LongHashMap` fast path each spill independently.
+- `DistinctExec` writes one row per distinct key (same schema as the
+  operator's output) and the union step folds spill files back into the
+  final set.
+- `HashJoinExec` uses **grace hash**: with spill enabled, both sides
+  are routed into K=16 disk buckets by `fmix32(hash(joinKeys)) % K`,
+  then each `(build_k, probe_k)` pair is processed sequentially —
+  load `build_k` into an in-memory keymap, stream `probe_k` against
+  it, emit matches. Outer-join unmatched-build emission happens
+  per-bucket (a build row unmatched in its bucket is unmatched
+  globally because both sides hash on the same key). Restricted to
+  equi-joins; non-equi joins ignore the spill option since they have
+  no key to bucket on.
+- `WindowExec` uses **bucketed spill**: with spill enabled and a
+  consistent non-empty PARTITION BY across every window spec, child
+  rows route into K=16 disk buckets keyed by
+  `fmix32(hash(partitionKey)) % K`. Each bucket is processed
+  independently — load every row, group by exact partition key, sort
+  within partition, compute window functions, emit. Window functions
+  that need full partition visibility (LAG/LEAD, whole-partition
+  aggregates) stay correct because every row sharing a partition key
+  collocates in the same bucket. Empty PARTITION BY or mixed
+  partition-keys across specs silently disable spill (there's no key
+  set to bucket by); same gate the planner uses for sharded windows.
+
+Limitations: `COUNT(DISTINCT …)` aggregates silently disable spill on
+the whole operator because the underlying `HashSet[Any]` doesn't
+round-trip through a typed schema. Grace hash and window spill both
+use a fixed bucket count of 16 with no recursive bucketing — hot keys
+whose bucket exceeds heap will still OOM at processing time (v1.1).
+The temp-file root defaults to `${java.io.tmpdir}/transformer-spill`,
+overridable via the `transformer.spill.dir` system property;
+subdirectories are wiped when the result iterator drains, and a
+shutdown hook catches abandoned iterators. Stress-test parity
+(bit-equal output with spill on vs off at 1-byte threshold) is
+enforced for every spill-capable operator in its respective
+`*SpillTest`.
+
 ### 3. Parallel execution
 
 All parallel work — DAG scheduling, pipeline-breaking operators, partitioned

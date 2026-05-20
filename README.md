@@ -705,8 +705,27 @@ JDK 21 or newer (tested through JDK 25).
 
 ## Limitations
 
-- **Single-node**: large hash-joins / aggregations / sorts can OOM. Mitigation:
-  give the JVM more heap. Spill-to-disk is not in v1.
+- **Single-node**: heavy workloads can OOM if the JVM heap is too small.
+  Mitigations: give the JVM more heap, OR opt into **spill-to-disk** for
+  `ORDER BY` / `GROUP BY` / `DISTINCT` / equi `JOIN` / window functions
+  with a non-empty `PARTITION BY` (the five operators that currently
+  support it) by adding to a task's `output.json`:
+
+  ```json
+  {
+    "options": {
+      "spill": "true",
+      "spill_threshold_bytes": "1073741824"
+    }
+  }
+  ```
+
+  Spill defaults to **off** per task (no overhead when not needed) and is
+  not exposed as a global toggle. Temp files land under
+  `${java.io.tmpdir}/transformer-spill` by default — override via the
+  `transformer.spill.dir` system property. `COUNT(DISTINCT …)` aggregates
+  silently disable spill on the whole operator (its state doesn't
+  round-trip through a typed schema in v1).
 - **No subqueries**: chain `SQLTask`s via `viewName`.
 - **No window functions** (`OVER (PARTITION BY ...)`): planned post-v1.
 - **Cloud paths recognized but unimplemented**: see v1.1 above.
