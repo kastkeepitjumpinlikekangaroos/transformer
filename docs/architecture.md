@@ -83,9 +83,27 @@ typed:
 Operators emit batches in two ways:
 - **Pipeline operators** (Scan/Filter/Project/LocalLimit) preserve `numPartitions`
   and stream batches via `Iterator[ColumnarBatch]`.
-- **Pipeline breakers** (HashAggregate/HashJoin/Sort/Distinct/GlobalLimit) collapse
-  to `numPartitions = 1` and materialize across partitions in parallel via an
-  `Executors.newFixedThreadPool`.
+- **Pipeline breakers** materialize across child partitions before they can emit.
+  How they reshape output partitions depends on whether the planner inserts an
+  `ExchangeExec` above them (see §2b):
+  - **Sharded breakers** — HashAggregate (with non-empty `GROUP BY`),
+    Distinct, equi-HashJoin, and Window (when every spec shares the same
+    non-empty PARTITION BY) all carry an exchange-aware path the planner
+    activates by wrapping their child(ren) in `ExchangeExec`. When activated,
+    the breaker's `execute(p)` consumes only shard `p`, builds its state for
+    that one shard, and emits `numPartitions = K` — downstream operators stay
+    parallel. Joins exchange both sides by their respective equi-join keys
+    with the same K so matching rows collocate; per-shard build + probe +
+    outer-emit needs no cross-shard coordination. Whether the planner
+    activates the sharded path is gated on
+    [[com.transformer.sql.plan.LogicalPlanCardinality]] estimates (see §2b).
+  - **Collapsing breakers** — Sort, GlobalLimit, and any of the above when
+    the planner's cardinality gates aren't met (most aggregates by default;
+    joins with one side small enough to broadcast; non-equi joins; windows
+    whose specs disagree on PARTITION BY or whose PARTITION BY is empty).
+    Fan out across the child's partitions via `Scheduler.submitAndAwaitAll`
+    to build their state, merge across the partials, and emit
+    `numPartitions = 1`.
 
 `SqlEngine.execute` returns an `ExecutedQuery` that exposes both `numPartitions`
 + `partition(i)` and a flattened `batches` view. The writer pipeline pulls
@@ -149,6 +167,70 @@ short-circuits to no-match. Insertion order is preserved by a parallel
 `HashAggregateExec`'s emit order matches the codec-path `LinkedHashMap`
 order. The single-Long shape is the most common one for foreign-key joins
 and integer-ID group-bys, so the fast path is worth its weight.
+
+### 2b. ExchangeExec — hash-partition between pipeline breakers
+
+Sharded pipeline breakers read from an `ExchangeExec` that hash-partitions
+their input into `K` key-disjoint shards by the same key set the breaker
+groups / joins / partitions by. Rows with the same key always land in the
+same downstream shard, so each shard processes independently with no
+cross-shard coordination — the K output partitions stay parallel through
+the rest of the plan. The operators all carry both an exchange-aware
+per-shard execution path AND a collapsing path (fan out + merge across
+the child's natural partitions); the planner picks which based on
+[[com.transformer.sql.plan.LogicalPlanCardinality]] estimates.
+
+**Planner gates** (`PhysicalPlanner`):
+- **HashAggregate / Distinct / Window** — insert `ExchangeExec` only when
+  the estimated input row count is `≥ LogicalPlanCardinality.MinShardableSize`.
+  Defaults to `Long.MaxValue` (sharding off), because the exchange's
+  full-input scatter is a real cost that beats the cross-partition merge
+  only when GROUP BY / PARTITION BY cardinality is high relative to input
+  size; we don't have per-key NDV estimates yet. Workloads that profile as
+  merge-bottlenecked can opt back in via the
+  `transformer.scheduler.shard_min_size` system property. Window has an
+  additional structural gate — every `WindowSpec` in the operator must
+  share the same non-empty PARTITION BY key set, otherwise no single
+  sharding satisfies all specs.
+- **HashJoin** — broadcast-vs-shuffle decision: insert exchanges on
+  both sides only when the smaller side estimate is
+  `≥ LogicalPlanCardinality.BroadcastBuildThreshold` (default 1M, overridable
+  via `transformer.scheduler.broadcast_threshold`). Below that, the
+  build map fits in heap and the historic collapsing path (build small,
+  stream-probe large) is faster than scattering both sides.
+
+Operators detect their mode by inspecting whether `child` (or both sides,
+for joins) is an `ExchangeExec`. Direct construction of a breaker over a
+non-exchange child silently picks collapsing mode — robust for tests and
+future callers that bypass the planner.
+
+The exchange is the intra-JVM analog of Spark's shuffle exchange — no
+serialization, no disk, no network; the materialized shuffle is K arrays
+of `ColumnarBatch`es held in heap. `K` defaults to `Scheduler.parallelism`;
+override with the `transformer.scheduler.shard_count` system property or
+`TRANSFORMER_SCHEDULER_SHARD_COUNT` env var.
+
+Routing uses a pinned Murmur3-style cell mix in `HashPartitioner.hashRow`.
+The function dispatches on the key vector's concrete subtype so primitive
+cells stay unboxed; reference cells (String/Binary/Decimal) go through
+`hashCode` / `Arrays.hashCode`. Cross-column combination is a 31-style
+accumulator wrapped in Murmur3's 32-bit finalizer (`fmix32`) — the
+finalizer spreads bits enough that the `% numShards` step distributes
+contiguous small-integer keys evenly instead of clustering them into one
+shard. NULL keys route by policy: `NullsToLast` (GROUP BY / DISTINCT /
+PARTITION BY) puts every NULL-key row in shard `K-1` so SQL's "all NULLs
+group together" semantics survive; `NullsToZero` (equi-join probes) puts
+them in shard `0` so the outer-join "unmatched probe" emission still sees
+them. Both policies are deterministic and pinned across runs.
+
+Materialization is lazy and one-shot: the first `execute(s)` call on any
+shard triggers the full build (all child partitions read in parallel
+through `Scheduler.submitAndAwaitAll`, every row routed and scattered into
+K size-exact output batches), guarded by `@volatile` double-checked
+locking. Subsequent `execute(s)` calls — including concurrent reads of
+different shards from different worker threads — share the materialized
+result. The memory cost is roughly what `HashAggregate.partialAggregate`
+already paid; no new spill semantics are introduced.
 
 ### 3. Parallel execution
 
@@ -605,12 +687,18 @@ handles this with a two-stage rewrite:
    a `ColRefExpr` into the window-output position. SELECT projections and
    ORDER BY then bind cleanly.
 
-`WindowExec` is a pipeline breaker (`numPartitions = 1`). It materializes all
-child rows, groups `WindowDef`s by `WindowSpec` so that partitioning + sorting
-happens once per spec, and writes one output column per window. Ranking
-functions and LAG/LEAD ignore the frame; aggregates with ORDER BY and no
-explicit frame use running aggregation; aggregates without ORDER BY cover
-the entire partition. `RANGE` frames execute as `ROWS` (documented in
+`WindowExec` is a pipeline breaker that materializes the rows in scope and
+groups `WindowDef`s by `WindowSpec` so that partitioning + sorting happens
+once per spec, then writes one output column per window. Mode is selected
+by whether `child` is an `ExchangeExec` (see §2 and §2b): in **sharded**
+mode the planner has hash-partitioned by the shared PARTITION BY keys, so
+each shard processes its rows independently and `numPartitions = K`; in
+**collapsing** mode (no exchange — empty PARTITION BY, disagreeing specs,
+or sub-threshold input size) the operator reads every child partition and
+emits as a single output partition. Ranking functions and LAG/LEAD ignore
+the frame; aggregates with ORDER BY and no explicit frame use running
+aggregation; aggregates without ORDER BY cover the entire partition.
+`RANGE` frames execute as `ROWS` (documented in
 [gotchas.md](gotchas.md#whats-intentionally-not-done)).
 
 ### 7. Plan-time cardinality estimation

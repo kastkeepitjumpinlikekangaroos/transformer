@@ -6,7 +6,6 @@ import com.transformer.sql.plan._
 import java.util
 import java.util.concurrent.Callable
 import scala.collection.mutable
-import scala.jdk.CollectionConverters._
 
 /** Hash join.
   *
@@ -20,6 +19,23 @@ import scala.jdk.CollectionConverters._
   * holding every build row) — see [[PhysicalPlanner]]'s size guard for the
   * cutoff above which that's rejected.
   *
+  * Two execution modes share this operator:
+  *
+  *   - **Per-shard** (equi-join, `leftKeys` non-empty): the planner has
+  *     wrapped both sides in [[ExchangeExec]]s that hash-partition by the
+  *     respective join keys with the same K. Same-key rows land in the same
+  *     shard on both sides, so each shard builds + probes independently with
+  *     no cross-shard coordination. Outer-join unmatched-side emission is
+  *     also per-shard — a build row in shard `s` that wasn't matched in
+  *     shard `s` truly has no match anywhere (a matching probe row would
+  *     have hashed to `s` as well). `numPartitions = K`.
+  *   - **Collapsing** (non-equi join, both key lists empty): no exchange.
+  *     The build side fans out across `Scheduler` partitions, accumulates
+  *     into one global keymap (which holds the lone empty-key bucket), and
+  *     the probe side fans out and tests every row against it. `numPartitions = 1`.
+  *     The size guard at [[PhysicalPlanner.enforceNestedLoopGuard]] keeps
+  *     this path off truly large inputs.
+  *
   * `buildRight` selects which side is built:
   *   - `true` (default): right is built, left is probed. Cheapest when right
   *     is smaller — the historic shape.
@@ -29,6 +45,13 @@ import scala.jdk.CollectionConverters._
   *     RIGHT outer (so the preserved side stays the streaming probe). Output
   *     schema and column order are unchanged — `left.outputSchema ++ right.outputSchema`
   *     either way — so downstream operators don't see the swap.
+  *
+  * Invariant: when `leftKeys.nonEmpty`, both `left` and `right` must be
+  * partitioned by the equi-join key set with the same K (the planner enforces
+  * this by wrapping both children in `ExchangeExec`s with matching K and the
+  * pinned [[HashPartitioner]] hash). Direct construction over non-partitioned
+  * children produces wrong results — same-key rows would land in different
+  * shards and the per-shard probe would miss matches.
   */
 final case class HashJoinExec(
     left: PhysicalPlan,
@@ -42,7 +65,6 @@ final case class HashJoinExec(
 
   val outputSchema: Schema = Schema(left.outputSchema.fields ++ right.outputSchema.fields)
 
-  def numPartitions: Int = 1
   private val nLeftCols = left.outputSchema.length
   private val nRightCols = right.outputSchema.length
   private val nCols = nLeftCols + nRightCols
@@ -98,26 +120,76 @@ final case class HashJoinExec(
   private val probeKeyLongIdx: Int =
     if (useJoinLongKey) probeKeyColIndices(0) else -1
 
+  /** True when the planner has wrapped both sides in `ExchangeExec`s. The
+    * planner does this for equi-joins whose smaller side is above
+    * [[com.transformer.sql.plan.LogicalPlanCardinality.BroadcastBuildThreshold]]
+    * — below that threshold, even equi-joins go through the collapsing path
+    * (build small side, stream-probe the large one) because shuffling the
+    * large probe just to redistribute rows costs more than the join itself.
+    *
+    * Detected via child type rather than a flag so direct construction over
+    * non-exchange children (existing tests, future callers) still works. */
+  private val isSharded: Boolean =
+    left.isInstanceOf[ExchangeExec] && right.isInstanceOf[ExchangeExec]
+
+  def numPartitions: Int = if (isSharded) left.numPartitions else 1
+
   def execute(partition: Int): Iterator[ColumnarBatch] = {
-    require(partition == 0)
-    val build = buildSide()
-    val matchedBuild: util.HashSet[Int] =
-      if (preserveBuildOuter) new util.HashSet[Int]() else null
-
-    val probeIter = probeIterator(build, matchedBuild)
-
-    val unmatchedBuildTail: Iterator[ColumnarBatch] =
-      if (matchedBuild != null) emitUnmatchedBuild(build, matchedBuild)
-      else Iterator.empty
-
-    probeIter ++ unmatchedBuildTail
+    if (isSharded) executePerShard(partition)
+    else executeCollapsing(partition)
   }
 
-  /** Materialize the build side: list of full-row arrays plus a multi-map
-    * from key. For non-ColRef build keys we evaluate each key expression
-    * once per scan batch via `evalVec` (instead of per row through `RowBuf`)
-    * and stash the encoded key alongside the materialized row. */
-  private def buildSide(): BuildSide = {
+  // ---- Per-shard path ------------------------------------------------------
+
+  private def executePerShard(partition: Int): Iterator[ColumnarBatch] = {
+    require(partition >= 0 && partition < numPartitions,
+      s"partition $partition out of range [0,$numPartitions)")
+    val build = buildSideForShard(partition)
+    val matchedBuild: util.HashSet[Int] =
+      if (preserveBuildOuter) new util.HashSet[Int]() else null
+    val joined = probeShard(partition, build, matchedBuild)
+    val unmatchedTail: Iterator[ColumnarBatch] =
+      if (matchedBuild != null) emitUnmatchedBuild(build, matchedBuild)
+      else Iterator.empty
+    joined ++ unmatchedTail
+  }
+
+  private def buildSideForShard(p: Int): BuildSide = {
+    val part = collectBuildPartition(p)
+    val rows = mutable.ArrayBuffer.empty[Array[Any]]
+    rows ++= part.rows
+    if (useJoinLongKey) buildLongKeyMap(rows)
+    else buildCodecKeyMap(rows, part.keys)
+  }
+
+  private def probeShard(
+      partition: Int,
+      build: BuildSide,
+      matchedBuild: util.HashSet[Int]): Iterator[ColumnarBatch] = {
+    val (rows, matched) = probeOnePartition(partition, build)
+    if (matchedBuild != null) matchedBuild.addAll(matched)
+    rowsToBatches(rows.toArray, outputSchema, ColumnarBatch.DefaultCapacity)
+  }
+
+  // ---- Collapsing path (non-equi joins) ------------------------------------
+
+  private def executeCollapsing(partition: Int): Iterator[ColumnarBatch] = {
+    require(partition == 0,
+      s"non-equi join collapses to one partition; got partition=$partition")
+    val build = buildSideAcrossAllPartitions()
+    val matchedBuild: util.HashSet[Int] =
+      if (preserveBuildOuter) new util.HashSet[Int]() else null
+    val joined = probeAcrossAllPartitions(build, matchedBuild)
+    val unmatchedTail: Iterator[ColumnarBatch] =
+      if (matchedBuild != null) emitUnmatchedBuild(build, matchedBuild)
+      else Iterator.empty
+    joined ++ unmatchedTail
+  }
+
+  /** Materialize the build side across every build partition in parallel.
+    * Used by the collapsing (non-equi) path; per-shard execution materializes
+    * just the one shard via [[buildSideForShard]]. */
+  private def buildSideAcrossAllPartitions(): BuildSide = {
     val tasks: Seq[Callable[CollectedBuildPartition]] =
       (0 until buildPlan.numPartitions).map { p =>
         new Callable[CollectedBuildPartition] {
@@ -136,6 +208,26 @@ final case class HashJoinExec(
     if (useJoinLongKey) buildLongKeyMap(rows)
     else buildCodecKeyMap(rows, keys)
   }
+
+  private def probeAcrossAllPartitions(
+      build: BuildSide,
+      matchedBuild: util.HashSet[Int]): Iterator[ColumnarBatch] = {
+    val joinedRows = mutable.ArrayBuffer.empty[Array[Any]]
+    val tasks: Seq[Callable[(mutable.ArrayBuffer[Array[Any]], util.HashSet[Int])]] =
+      (0 until probePlan.numPartitions).map { pp =>
+        new Callable[(mutable.ArrayBuffer[Array[Any]], util.HashSet[Int])] {
+          def call(): (mutable.ArrayBuffer[Array[Any]], util.HashSet[Int]) =
+            probeOnePartition(pp, build)
+        }
+      }
+    Scheduler.submitAndAwaitAll(tasks).foreach { case (rows, m) =>
+      joinedRows ++= rows
+      if (matchedBuild != null) matchedBuild.addAll(m)
+    }
+    rowsToBatches(joinedRows.toArray, outputSchema, ColumnarBatch.DefaultCapacity)
+  }
+
+  // ---- Shared per-partition primitives -------------------------------------
 
   private def buildLongKeyMap(rows: mutable.ArrayBuffer[Array[Any]]): BuildSide = {
     val keyMap = new LongHashMap[util.ArrayList[Int]]()
@@ -231,95 +323,78 @@ final case class HashJoinExec(
     CollectedBuildPartition(rowsBuf, keysBuf)
   }
 
-  private def probeIterator(build: BuildSide, matchedBuild: util.HashSet[Int]): Iterator[ColumnarBatch] = {
-    val capacity = ColumnarBatch.DefaultCapacity
-    val schema = outputSchema
-
-    val joinedRows = mutable.ArrayBuffer.empty[Array[Any]]
-    val matchedSet = if (matchedBuild != null) matchedBuild else new util.HashSet[Int]()
+  /** Probe one partition's worth of rows against the build keymap. Returns
+    * (joined rows, build indices that matched). The caller stitches these
+    * together across partitions (collapsing path) or uses one shard's
+    * result directly (per-shard path). */
+  private def probeOnePartition(
+      partitionIdx: Int,
+      build: BuildSide): (mutable.ArrayBuffer[Array[Any]], util.HashSet[Int]) = {
+    val local = mutable.ArrayBuffer.empty[Array[Any]]
+    val localMatched = new util.HashSet[Int]()
+    val probeIt = probePlan.execute(partitionIdx)
     val probeSchema = probePlan.outputSchema
-
-    val tasks: Seq[Callable[(mutable.ArrayBuffer[Array[Any]], util.HashSet[Int])]] =
-      (0 until probePlan.numPartitions).map { pp =>
-        new Callable[(mutable.ArrayBuffer[Array[Any]], util.HashSet[Int])] {
-          def call(): (mutable.ArrayBuffer[Array[Any]], util.HashSet[Int]) = {
-            val local = mutable.ArrayBuffer.empty[Array[Any]]
-            val localMatched = new util.HashSet[Int]()
-            val probeIt = probePlan.execute(pp)
-            val keyBuf: Array[Any] = if (probeKeysAreColRefs) null else new Array[Any](nKeys)
-            while (probeIt.hasNext) {
-              val b = probeIt.next()
-              val nrows = b.numRows
-              // For non-ColRef probe keys, hoist Expr.eval out of the per-row
-              // loop. ColRef keys go through `encodeFromBatchSkipIfAnyNull`
-              // which already reads typed primitives directly; the long-key
-              // fast path reads its single primitive even more directly.
-              val probeKeyVecs: Array[ColumnVector] =
-                if (probeKeysAreColRefs || useJoinLongKey) null
-                else Array.tabulate(nKeys)(i => probeKeyExprs(i).evalVec(b))
-              var r = 0
-              while (r < nrows) {
-                val probeRow = new Array[Any](probeSchema.length)
-                var c = 0
-                while (c < probeSchema.length) {
-                  probeRow(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
-                  c += 1
+    val keyBuf: Array[Any] = if (probeKeysAreColRefs) null else new Array[Any](nKeys)
+    while (probeIt.hasNext) {
+      val b = probeIt.next()
+      val nrows = b.numRows
+      // For non-ColRef probe keys, hoist Expr.eval out of the per-row loop.
+      // ColRef keys go through `encodeFromBatchSkipIfAnyNull` which already
+      // reads typed primitives directly; the long-key fast path reads its
+      // single primitive even more directly.
+      val probeKeyVecs: Array[ColumnVector] =
+        if (probeKeysAreColRefs || useJoinLongKey) null
+        else Array.tabulate(nKeys)(i => probeKeyExprs(i).evalVec(b))
+      var r = 0
+      while (r < nrows) {
+        val probeRow = new Array[Any](probeSchema.length)
+        var c = 0
+        while (c < probeSchema.length) {
+          probeRow(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
+          c += 1
+        }
+        val matches: util.ArrayList[Int] =
+          if (useJoinLongKey) {
+            val col = b.column(probeKeyLongIdx)
+            if (col.isNull(r)) null
+            else build.keyMapLong.get(KeyCodec.readAsLong(col, r))
+          } else {
+            val key: AnyRef =
+              if (probeKeysAreColRefs) keyCodec.encodeFromBatchSkipIfAnyNull(b, r)
+              else {
+                var k = 0
+                var anyNull = false
+                while (k < nKeys) {
+                  val kv = probeKeyVecs(k)
+                  val v: Any = if (kv.isNull(r)) null else kv.getBoxed(r)
+                  if (v == null) anyNull = true
+                  keyBuf(k) = v
+                  k += 1
                 }
-                val matches: util.ArrayList[Int] =
-                  if (useJoinLongKey) {
-                    val col = b.column(probeKeyLongIdx)
-                    if (col.isNull(r)) null
-                    else build.keyMapLong.get(KeyCodec.readAsLong(col, r))
-                  } else {
-                    val key: AnyRef =
-                      if (probeKeysAreColRefs) keyCodec.encodeFromBatchSkipIfAnyNull(b, r)
-                      else {
-                        var k = 0
-                        var anyNull = false
-                        while (k < nKeys) {
-                          val kv = probeKeyVecs(k)
-                          val v: Any = if (kv.isNull(r)) null else kv.getBoxed(r)
-                          if (v == null) anyNull = true
-                          keyBuf(k) = v
-                          k += 1
-                        }
-                        if (anyNull) null else keyCodec.encodeBoxed(keyBuf)
-                      }
-                    if (key == null) null else build.keyMap.get(key)
-                  }
-                var matchedAny = false
-                if (matches != null && !matches.isEmpty) {
-                  val it = matches.iterator()
-                  while (it.hasNext) {
-                    val buildIdx = it.next()
-                    val combined = mergeMatch(probeRow, build.rows(buildIdx))
-                    if (passesExtra(combined)) {
-                      local += combined
-                      matchedAny = true
-                      localMatched.add(buildIdx)
-                    }
-                  }
-                }
-                if (!matchedAny && preserveProbeOuter) {
-                  local += mergeUnmatchedProbe(probeRow)
-                }
-                r += 1
+                if (anyNull) null else keyCodec.encodeBoxed(keyBuf)
               }
+            if (key == null) null else build.keyMap.get(key)
+          }
+        var matchedAny = false
+        if (matches != null && !matches.isEmpty) {
+          val it = matches.iterator()
+          while (it.hasNext) {
+            val buildIdx = it.next()
+            val combined = mergeMatch(probeRow, build.rows(buildIdx))
+            if (passesExtra(combined)) {
+              local += combined
+              matchedAny = true
+              localMatched.add(buildIdx)
             }
-            (local, localMatched)
           }
         }
+        if (!matchedAny && preserveProbeOuter) {
+          local += mergeUnmatchedProbe(probeRow)
+        }
+        r += 1
       }
-    Scheduler.submitAndAwaitAll(tasks).foreach { case (rows, m) =>
-      joinedRows ++= rows
-      matchedSet.addAll(m)
     }
-
-    if (matchedBuild != null) {
-      matchedSet.iterator().asScala.foreach(matchedBuild.add)
-    }
-
-    rowsToBatches(joinedRows.toArray, schema, capacity)
+    (local, localMatched)
   }
 
   private def emitUnmatchedBuild(build: BuildSide, matched: util.HashSet[Int]): Iterator[ColumnarBatch] = {

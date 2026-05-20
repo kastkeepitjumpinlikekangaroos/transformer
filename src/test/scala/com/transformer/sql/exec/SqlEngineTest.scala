@@ -1271,4 +1271,206 @@ class SqlEngineTest {
     assertEquals((1L, 50L), byKey(2L))     // k=2: 50
     assertEquals((3L, 120L), byKey(null))  // NULL: 20+40+60
   }
+
+  // ---- Plan 04 Phase 2: HashAggregate via ExchangeExec ---------------------
+
+  @Test def groupBySmallCsvInputUsesCollapsingPath(): Unit = {
+    // Phase 6 gate: CSV inputs report no exactRowCount, so the planner can't
+    // prove the input is ≥ MinShardableSize and skips the exchange — small
+    // GROUP BYs go through the historic collapsing aggregate. The point of
+    // this test is the correctness path: the result must still be right
+    // (8 distinct keys, count = 1 each) and the output must be a single
+    // partition because no exchange was inserted.
+    val p = tmpCsv("a.csv", "k,v\n1,10\n2,20\n3,30\n4,40\n5,50\n6,60\n7,70\n8,80\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT k, COUNT(*) AS n FROM t GROUP BY k", cat)
+    assertEquals("collapsing path emits one partition", 1, q.numPartitions)
+    val rows = collectAllRows(q).sortBy(_("k").toString.toInt)
+    assertEquals(8, rows.size)
+    assertEquals((1 to 8).toVector, rows.map(_("k").asInstanceOf[Int]).toVector)
+    assertEquals(Vector.fill(8)(1L), rows.map(_("n").asInstanceOf[Long]).toVector)
+  }
+
+  @Test def groupByOverEmptyInputEmitsNoRows(): Unit = {
+    // GROUP BY contract: with no input rows there are no groups, so the
+    // output is empty. Distinct from the no-GROUP-BY case (covered by
+    // `emptyAggregationReturnsOneRow`), which surfaces one zero-row per SQL
+    // semantics. Per-shard execution must not leak a spurious zero-row from
+    // any shard.
+    val p = tmpCsv("a.csv", "k,v\n")  // header only, no rows
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions(inferSchema = false,
+      columns = Some(Seq(Field("k", DataType.IntType), Field("v", DataType.IntType))))))
+    val q = SqlEngine.execute("SELECT k, COUNT(*) AS n, SUM(v) AS s FROM t GROUP BY k", cat)
+    val rows = collectAllRows(q)
+    assertEquals(0, rows.size)
+  }
+
+  @Test def groupByManyDistinctKeysAcrossShardsAllSurface(): Unit = {
+    // Insert enough distinct keys (1..200) that the hash partitioner spreads
+    // them across multiple shards. Every key must surface exactly once with
+    // its correct aggregate, regardless of which shard it landed in.
+    val sb = new StringBuilder("k,v\n")
+    var i = 1
+    while (i <= 200) { sb.append(i).append(',').append(i * 10).append('\n'); i += 1 }
+    val p = tmpCsv("a.csv", sb.toString)
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT k, SUM(v) AS s FROM t GROUP BY k", cat)
+    val rows = collectAllRows(q)
+    assertEquals("every distinct key must surface exactly once", 200, rows.size)
+    val byKey: Map[Int, Long] = rows.map { r =>
+      r("k").asInstanceOf[Int] -> r("s").asInstanceOf[Long]
+    }.toMap
+    assertEquals("no key duplicated or missing", 200, byKey.size)
+    var k = 1
+    while (k <= 200) {
+      assertEquals(s"sum for key $k", (k * 10).toLong, byKey(k))
+      k += 1
+    }
+  }
+
+  @Test def equiJoinOnSmallCsvUsesBroadcastPath(): Unit = {
+    // Phase 6 gate: CSV inputs have no exactRowCount, so the planner can't
+    // prove either side is ≥ BroadcastBuildThreshold and falls back to the
+    // historic broadcast hash-join (build one side, stream the other —
+    // collapses to one output partition). The point is correctness on the
+    // broadcast path remains intact; the partition-shape changes are
+    // exercised at the operator level in [[ExchangeExecTest]] / [[JoinSwapTest]].
+    val left = tmpCsv("l.csv", "id,name\n1,a\n2,b\n3,c\n4,d\n5,e\n6,f\n7,g\n8,h\n")
+    val right = tmpCsv("r.csv", "uid,score\n1,10\n2,20\n3,30\n4,40\n5,50\n6,60\n7,70\n8,80\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.name, s.score FROM u JOIN s ON u.id = s.uid", cat)
+    assertEquals("broadcast path emits one partition", 1, q.numPartitions)
+    val rows = collectAllRows(q).sortBy(_("name").toString)
+    assertEquals(8, rows.size)
+    assertEquals(Vector("a", "b", "c", "d", "e", "f", "g", "h"),
+      rows.map(_("name").asInstanceOf[String]).toVector)
+    assertEquals(Vector(10, 20, 30, 40, 50, 60, 70, 80),
+      rows.map(_("score").asInstanceOf[Int]).toVector)
+  }
+
+  @Test def leftOuterJoinAcrossShardsPreservesUnmatchedLeft(): Unit = {
+    // Per-shard outer-join semantics: an unmatched left row must still
+    // surface even though the join runs K independent times. Left's
+    // unmatched-probe emission lives inside the per-shard probe loop.
+    val left = tmpCsv("l.csv",
+      "id,name\n1,alice\n2,bob\n3,charlie\n4,danny\n5,eve\n6,frank\n")
+    val right = tmpCsv("r.csv", "uid,score\n1,100\n3,30\n5,50\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.name, s.score FROM u LEFT JOIN s ON u.id = s.uid", cat)
+    val rows = collectAllRows(q).sortBy(_("name").toString)
+    assertEquals(6, rows.size)
+    val byName = rows.map(r => r("name").toString -> r("score")).toMap
+    assertEquals(100, byName("alice"))
+    assertNull(byName("bob"))
+    assertEquals(30, byName("charlie"))
+    assertNull(byName("danny"))
+    assertEquals(50, byName("eve"))
+    assertNull(byName("frank"))
+  }
+
+  @Test def rightOuterJoinAcrossShardsPreservesUnmatchedBuild(): Unit = {
+    // Per-shard outer-join semantics for the "unmatched build" emission —
+    // each shard tracks its own matched-build bitset and after probing
+    // emits the build rows in that shard that no probe row hit. Correct
+    // because matching probe rows would have hashed to the same shard.
+    val left = tmpCsv("l.csv", "id,name\n1,alice\n3,charlie\n5,eve\n")
+    val right = tmpCsv("r.csv",
+      "uid,score\n1,100\n2,200\n3,30\n4,400\n5,50\n6,600\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.name, s.score FROM u RIGHT JOIN s ON u.id = s.uid", cat)
+    val rows = collectAllRows(q).sortBy(_("score").toString.toInt)
+    assertEquals(6, rows.size)
+    val byScore = rows.map(r => r("score").asInstanceOf[Int] -> r("name")).toMap
+    assertEquals("alice", byScore(100))
+    assertNull(byScore(200))
+    assertEquals("charlie", byScore(30))
+    assertNull(byScore(400))
+    assertEquals("eve", byScore(50))
+    assertNull(byScore(600))
+  }
+
+  @Test def fullOuterJoinAcrossShardsPreservesBothSides(): Unit = {
+    // FULL OUTER: both per-shard "unmatched probe" and per-shard "unmatched
+    // build" emissions must fire. The shards' unmatched rows compose into
+    // the global unmatched set without any cross-shard coordination.
+    val left = tmpCsv("l.csv", "id,name\n1,a\n2,b\n3,c\n")
+    val right = tmpCsv("r.csv", "uid,score\n2,20\n3,30\n4,40\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.id, u.name, s.uid, s.score FROM u FULL OUTER JOIN s ON u.id = s.uid", cat)
+    val rows = collectAllRows(q)
+    assertEquals(4, rows.size)
+    // Build a name → matched-rhs map so the assertions are order-agnostic.
+    val byKey: Map[String, (Any, Any)] = rows.map { r =>
+      val left = if (r("id") != null) r("id").toString else "NULL"
+      val right = if (r("uid") != null) r("uid").toString else "NULL"
+      s"$left-$right" -> (r("name"), r("score"))
+    }.toMap
+    assertEquals(("a", null), byKey("1-NULL"))         // unmatched left
+    assertEquals(("b", 20), byKey("2-2"))               // matched
+    assertEquals(("c", 30), byKey("3-3"))               // matched
+    assertEquals((null, 40), byKey("NULL-4"))           // unmatched right
+  }
+
+  @Test def equiJoinManyDistinctKeysAcrossShardsAllMatch(): Unit = {
+    // Insert enough distinct join keys (1..200) that the hash partitioner
+    // spreads them across many shards. Every probe key with a matching
+    // build key must surface; the per-shard build/probe must not lose a
+    // match because the keys happened to land in different shards (the
+    // pinned HashPartitioner guarantees they don't).
+    val lsb = new StringBuilder("id,name\n")
+    val rsb = new StringBuilder("uid,score\n")
+    var i = 1
+    while (i <= 200) {
+      lsb.append(i).append(",name").append(i).append('\n')
+      rsb.append(i).append(',').append(i * 10).append('\n')
+      i += 1
+    }
+    val left = tmpCsv("l.csv", lsb.toString)
+    val right = tmpCsv("r.csv", rsb.toString)
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.id, s.score FROM u JOIN s ON u.id = s.uid", cat)
+    val rows = collectAllRows(q)
+    assertEquals(200, rows.size)
+    val byId: Map[Int, Int] = rows.map { r =>
+      r("id").asInstanceOf[Int] -> r("score").asInstanceOf[Int]
+    }.toMap
+    assertEquals(200, byId.size)
+    var k = 1
+    while (k <= 200) {
+      assertEquals(s"score for id $k", k * 10, byId(k))
+      k += 1
+    }
+  }
+
+  @Test def groupByThenOrderByLimitWorksAcrossShards(): Unit = {
+    // ORDER BY + LIMIT downstream of a sharded GROUP BY: the sort still
+    // collapses to a single output partition (the planner above the sort
+    // wraps in GlobalLimit), so the top-N over K shards is correct.
+    val sb = new StringBuilder("k,v\n")
+    var i = 1
+    while (i <= 50) { sb.append(i).append(',').append(i).append('\n'); i += 1 }
+    val p = tmpCsv("a.csv", sb.toString)
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT k, SUM(v) AS s FROM t GROUP BY k ORDER BY SUM(v) DESC LIMIT 5", cat)
+    val rows = collectAllRows(q)
+    assertEquals(5, rows.size)
+    assertEquals(Vector(50, 49, 48, 47, 46), rows.map(_("k").asInstanceOf[Int]).toVector)
+    assertEquals(Vector(50L, 49L, 48L, 47L, 46L), rows.map(_("s").asInstanceOf[Long]).toVector)
+  }
 }

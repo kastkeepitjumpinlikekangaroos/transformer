@@ -1,6 +1,6 @@
 package com.transformer.sql.plan
 
-import com.transformer.core.{Catalog, DataType, Schema}
+import com.transformer.core.{Catalog, DataType, Field, Schema}
 import com.transformer.sql.parse.SqlParser
 
 import net.sf.jsqlparser.expression.{
@@ -220,27 +220,46 @@ object LogicalBuilder {
       (exprBinder(e), name)
     }
 
-    val afterSort: LogicalPlan = Option(ps.getOrderByElements) match {
-      case Some(list) if !list.isEmpty =>
-        val keys = list.asScala.map { obe =>
-          (exprBinder(obe.getExpression), obe.isAsc)
-        }.toSeq
+    val hasDistinct: Boolean = ps.getDistinct != null
+    val orderByList: Option[Seq[OrderByElement]] =
+      Option(ps.getOrderByElements).map(_.asScala.toSeq).filter(_.nonEmpty)
+
+    // ORDER BY placement: when there's no DISTINCT we keep the historical
+    // shape (Sort below Project) so unprojected ORDER BY columns can still
+    // resolve via the pre-project sources. When DISTINCT is present we hoist
+    // Sort above Distinct so per-shard dedup can't scramble the user's
+    // requested order — and bind the keys against the post-project schema
+    // (SQL's restriction that ORDER BY of a DISTINCT must reference
+    // projected columns makes this binding well-defined).
+    val afterSort: LogicalPlan = (orderByList, hasDistinct) match {
+      case (Some(list), false) =>
+        val keys = list.map(obe => (exprBinder(obe.getExpression), obe.isAsc))
         LogicalSort(preProject, keys)
       case _ => preProject
     }
 
     val projected: LogicalPlan = LogicalProject(afterSort, projections)
 
-    val afterDistinct: LogicalPlan = Option(ps.getDistinct) match {
-      case Some(_) => LogicalDistinct(projected)
-      case None => projected
+    val afterDistinct: LogicalPlan =
+      if (hasDistinct) LogicalDistinct(projected) else projected
+
+    val afterDistinctSort: LogicalPlan = (orderByList, hasDistinct) match {
+      case (Some(list), true) =>
+        val projSchema = Schema(
+          projections.iterator.map { case (e, n) => Field(n, e.dataType) }.toVector)
+        val sources: Sources = Seq((None, projSchema))
+        val keys = list.map { obe =>
+          (bindExpr(obe.getExpression, sources), obe.isAsc)
+        }
+        LogicalSort(afterDistinct, keys)
+      case _ => afterDistinct
     }
 
     Option(ps.getLimit).flatMap(l => Option(l.getRowCount)) match {
-      case Some(rc: LongValue) => LogicalLimit(afterDistinct, rc.getValue)
+      case Some(rc: LongValue) => LogicalLimit(afterDistinctSort, rc.getValue)
       case Some(other) =>
         throw new IllegalArgumentException(s"LIMIT must be an integer literal, got ${other.getClass.getSimpleName}")
-      case None => afterDistinct
+      case None => afterDistinctSort
     }
   }
 

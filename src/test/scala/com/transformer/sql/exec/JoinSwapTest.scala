@@ -439,6 +439,74 @@ class JoinSwapTest {
     assertEquals(25, rows.size)
   }
 
+  // ---------------------------------------------------------------------------
+  // Plan 04 Phase 6: broadcast-vs-shuffle gate for equi-joins.
+  // The planner inserts ExchangeExec on both sides only when the smaller
+  // side is above LogicalPlanCardinality.BroadcastBuildThreshold (1M default).
+  // Below that, the historic broadcast shape (build small, stream-probe
+  // large) is faster than scattering both sides.
+  // ---------------------------------------------------------------------------
+
+  /** Both sides below the broadcast threshold → no exchange. The join's
+    * `left` and `right` children are the original scans, not exchanges. */
+  @Test def equiJoinSmallSidesSkipsExchange(): Unit = {
+    val l = emptyView(LeftSchema, Some(100L))
+    val r = emptyView(RightSchema, Some(100L))
+    val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
+    val join = findHashJoin(plan)
+    assertFalse("left should not be wrapped in ExchangeExec for small × small",
+      join.left.isInstanceOf[ExchangeExec])
+    assertFalse("right should not be wrapped in ExchangeExec for small × small",
+      join.right.isInstanceOf[ExchangeExec])
+    assertEquals("collapsing join emits one partition", 1, join.numPartitions)
+  }
+
+  /** One side small enough to broadcast (under threshold) → still no
+    * exchange even though the other side is huge. The historic broadcast
+    * shape is the right plan: build the small side, stream the big one. */
+  @Test def equiJoinOneSideSmallSkipsExchange(): Unit = {
+    val l = emptyView(LeftSchema, Some(100L))
+    val r = emptyView(RightSchema, Some(10_000_000L))
+    val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
+    val join = findHashJoin(plan)
+    assertFalse("broadcast-shaped join must not wrap left in ExchangeExec",
+      join.left.isInstanceOf[ExchangeExec])
+    assertFalse("broadcast-shaped join must not wrap right in ExchangeExec",
+      join.right.isInstanceOf[ExchangeExec])
+  }
+
+  /** Both sides above the broadcast threshold → exchange both sides so the
+    * per-shard hash-join can run K builds + probes in parallel. The shared
+    * `K = ExchangeExec.defaultNumShards` ensures matching keys collocate. */
+  @Test def equiJoinBothSidesLargeShardsBothChildren(): Unit = {
+    // Both sides at 2_000_000 (≥ 1M default BroadcastBuildThreshold).
+    val l = emptyView(LeftSchema, Some(2_000_000L))
+    val r = emptyView(RightSchema, Some(2_000_000L))
+    val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
+    val join = findHashJoin(plan)
+    assertTrue("sharded join must wrap left in ExchangeExec",
+      join.left.isInstanceOf[ExchangeExec])
+    assertTrue("sharded join must wrap right in ExchangeExec",
+      join.right.isInstanceOf[ExchangeExec])
+    assertEquals("sharded join numPartitions matches exchange K",
+      ExchangeExec.defaultNumShards, join.numPartitions)
+  }
+
+  /** Unknown estimate on either side → planner can't prove both sides
+    * exceed the broadcast threshold, so falls back to the historic
+    * collapsing shape. Conservative: better to broadcast (one possible
+    * perf trap) than to shard a potentially-huge unknown side. */
+  @Test def equiJoinUnknownSizeFallsBackToCollapsing(): Unit = {
+    val l = emptyView(LeftSchema, None)
+    val r = emptyView(RightSchema, Some(2_000_000L))
+    val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
+    val join = findHashJoin(plan)
+    assertFalse("unknown-size side → no exchange wrap on left",
+      join.left.isInstanceOf[ExchangeExec])
+    assertFalse("unknown-size side → no exchange wrap on right",
+      join.right.isInstanceOf[ExchangeExec])
+  }
+
   /** Post-impl expectation: a residual non-equi predicate (kept on the join
     * after equality split) must still apply correctly after the swap. The
     * `l.lv < r.rv` filter rules out no rows here (all right values are 10x

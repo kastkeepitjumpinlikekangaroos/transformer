@@ -28,12 +28,32 @@ object PhysicalPlanner {
     case LogicalAggregate(LogicalScan(_, view, _), Seq(), Seq((AggExprCountStar(), name)), None)
         if view.exactRowCount.isDefined =>
       CountStarMetadataExec(view.exactRowCount.get, name)
-    case LogicalAggregate(child, gks, aggs, _) => HashAggregateExec(plan(child), gks, aggs)
+    case LogicalAggregate(child, gks, aggs, _) =>
+      val physChild = plan(child)
+      if (gks.isEmpty || !shouldShardForSize(child)) {
+        // No GROUP BY, OR the estimated input is small enough that the
+        // exchange-shard overhead would dominate the per-shard parallelism.
+        // Fall back to the collapsing aggregate (fan out + merge).
+        HashAggregateExec(physChild, gks, aggs)
+      } else {
+        val partitionBy = gks.iterator.map(_._1).toSeq
+        val exchanged = ExchangeExec(
+          physChild,
+          partitionBy,
+          ExchangeExec.defaultNumShards,
+          HashPartitioner.NullsToLast)
+        HashAggregateExec(exchanged, gks, aggs)
+      }
     case LogicalSort(child, keys) => SortExec(plan(child), keys)
-    case LogicalDistinct(child) => DistinctExec(plan(child))
+    case LogicalDistinct(child) =>
+      val physChild = plan(child)
+      if (shouldShardForSize(child)) buildShardedDistinct(physChild)
+      else DistinctExec(physChild)
     case LogicalUnion(l, r, all) =>
       val u = UnionExec(plan(l), plan(r))
-      if (all) u else DistinctExec(u)
+      if (all) u
+      else if (shouldShardUnion(l, r)) buildShardedDistinct(u)
+      else DistinctExec(u)
     case LogicalLimit(child, n) =>
       val p = plan(child)
       if (p.numPartitions <= 1) LocalLimitExec(p, n)
@@ -44,9 +64,119 @@ object PhysicalPlanner {
       val (leftKeys, rightKeys, extra) = splitEqualityKeys(cond, l.outputSchema.length, r.outputSchema.length)
       if (leftKeys.isEmpty && rightKeys.isEmpty) enforceNestedLoopGuard(l, r)
       val buildRight = shouldBuildRight(l, r, kind)
-      HashJoinExec(left, right, leftKeys, rightKeys, extra, kind, buildRight)
+      if (leftKeys.isEmpty || !shouldShardJoin(l, r)) {
+        // Either non-equi (no keys to shard by) OR the smaller side is
+        // broadcast-shaped (fits in heap) so we keep the historic shape:
+        // build one side, stream the other. Sharding both sides forces an
+        // extra pass over the *large* side just to redistribute rows; with
+        // a small build that pass dominates the join itself.
+        HashJoinExec(left, right, leftKeys, rightKeys, extra, kind, buildRight)
+      } else {
+        // Equi-join with both sides large enough to benefit from sharded
+        // build+probe. Hash-partition both sides by their respective keys so
+        // matching keys collocate. NullsToZero policy — NULL keys never
+        // match (SQL 3VL) but must still land in some shard so outer-join
+        // unmatched emission sees them.
+        val K = ExchangeExec.defaultNumShards
+        val leftExch = ExchangeExec(left, leftKeys, K, HashPartitioner.NullsToZero)
+        val rightExch = ExchangeExec(right, rightKeys, K, HashPartitioner.NullsToZero)
+        HashJoinExec(leftExch, rightExch, leftKeys, rightKeys, extra, kind, buildRight)
+      }
     case LogicalWindow(child, windows) =>
-      WindowExec(plan(child), windows)
+      val physChild = plan(child)
+      buildWindow(physChild, child, windows)
+  }
+
+  /** Wrap a window's child in `ExchangeExec` when sharding is both safe
+    * (every [[WindowSpec]] agrees on the same non-empty PARTITION BY key
+    * set) AND cardinality-justified (input estimate ≥
+    * [[LogicalPlanCardinality.MinShardableSize]]).
+    *
+    * Disagreeing PARTITION BYs would each need a different sharding — no
+    * single exchange satisfies both — so we fall back to the historic
+    * collapsing window. Empty PARTITION BY means the window spans the
+    * whole result; sharding would split rows that must be computed
+    * together. Below the cardinality threshold, the exchange overhead
+    * isn't worth the parallelism (the same Phase 6 gate as aggregates). */
+  private def buildWindow(
+      physChild: PhysicalPlan,
+      logicalChild: LogicalPlan,
+      windows: Seq[WindowDef]): WindowExec = {
+    val distinctParts = windows.map(_.spec.partitionKeys).distinct
+    val canShard =
+      distinctParts.length == 1 && distinctParts.head.nonEmpty &&
+      shouldShardForSize(logicalChild)
+    if (canShard) {
+      val partitionBy = distinctParts.head
+      val exchanged = ExchangeExec(
+        physChild,
+        partitionBy,
+        ExchangeExec.defaultNumShards,
+        HashPartitioner.NullsToLast)
+      WindowExec(exchanged, windows)
+    } else {
+      WindowExec(physChild, windows)
+    }
+  }
+
+  /** Wrap a physical plan in `ExchangeExec → DistinctExec` so dedup runs
+    * per-shard. The exchange's `partitionBy` is the full column set the
+    * dedup keys on — every output column becomes a [[ColRefExpr]], so two
+    * rows are equal iff they collide on every column, the same predicate
+    * DistinctExec's per-shard HashSet uses. */
+  private def buildShardedDistinct(child: PhysicalPlan): DistinctExec = {
+    val schema = child.outputSchema
+    val ncols = schema.length
+    val partitionBy = (0 until ncols).map { i =>
+      val f = schema.fields(i)
+      ColRefExpr(i, f.name, f.dataType)
+    }
+    val exchanged = ExchangeExec(
+      child,
+      partitionBy,
+      ExchangeExec.defaultNumShards,
+      HashPartitioner.NullsToLast)
+    DistinctExec(exchanged)
+  }
+
+  /** Cardinality gate for aggregate / distinct sharding: insert an
+    * `ExchangeExec` only when the planner can prove the input is at least
+    * [[LogicalPlanCardinality.MinShardableSize]] rows. Unknown size (`None`)
+    * defaults to NOT sharding — the exchange's full materialization +
+    * scatter overhead is a real cost, and silently paying it on inputs
+    * whose size we can't reason about (streaming CSV) is the wrong default.
+    * Callers with known-large inputs (parquet, in-memory views) get the
+    * sharded parallelism; everyone else gets the collapsing path that ran
+    * before plan 04 landed. */
+  private def shouldShardForSize(child: LogicalPlan): Boolean =
+    LogicalPlanCardinality.estimate(child).exists(_ >= LogicalPlanCardinality.MinShardableSize)
+
+  /** Cardinality gate for [[LogicalUnion]]'s downstream `DistinctExec`. The
+    * union's row count is the sum of the two sides; we shard the dedup only
+    * when that sum is large enough to justify the exchange. Unknown on
+    * either side defaults to not sharding (conservative). */
+  private def shouldShardUnion(l: LogicalPlan, r: LogicalPlan): Boolean = {
+    val total = for {
+      lc <- LogicalPlanCardinality.estimate(l)
+      rc <- LogicalPlanCardinality.estimate(r)
+    } yield lc + rc
+    total.exists(_ >= LogicalPlanCardinality.MinShardableSize)
+  }
+
+  /** Cardinality gate for hash-join sharding: shard both sides only when
+    * the *smaller* side is above [[LogicalPlanCardinality.BroadcastBuildThreshold]].
+    * Below that, the smaller side fits in heap and the historic broadcast
+    * shape (build small once, stream-probe large) is faster than scattering
+    * the large side just to redistribute rows. */
+  private def shouldShardJoin(l: LogicalPlan, r: LogicalPlan): Boolean = {
+    (LogicalPlanCardinality.estimate(l), LogicalPlanCardinality.estimate(r)) match {
+      case (Some(lc), Some(rc)) =>
+        math.min(lc, rc) >= LogicalPlanCardinality.BroadcastBuildThreshold
+      case _ =>
+        // Either side unknown — broadcast via the historic collapsing path
+        // rather than risk the perf trap of scattering a huge unknown input.
+        false
+    }
   }
 
   /** Minimum size ratio at which we'll swap the join build side. Keeps near-

@@ -8,8 +8,25 @@ import java.util.concurrent.Callable
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
-/** Hash-based GROUP BY. Each input partition builds a partial map of
-  * `groupKey -> AggStates`; the merge step combines partials into the final result.
+/** Hash-based GROUP BY. Two execution modes share this one operator,
+  * selected by whether `child` is an [[ExchangeExec]]:
+  *
+  *   - **Per-shard** (child is `ExchangeExec`): the planner has inserted an
+  *     exchange above this operator that hash-partitions by the group keys
+  *     into K shards. Each shard is key-disjoint from every other, so this
+  *     operator's `execute(p)` consumes only shard `p`, builds one final
+  *     map, and emits it. No cross-shard merge. The operator's
+  *     `numPartitions` equals the child exchange's K so downstream
+  *     operators see all K partitions in parallel.
+  *   - **Collapsing** (child is anything else): no exchange. The operator
+  *     fans out across the child's partitions through [[Scheduler]] in
+  *     `executeCollapsing`, merges the partials, and emits a single
+  *     output partition. Reached when `groupKeys.isEmpty` (every row
+  *     aggregates into the same bucket) or when the planner's cardinality
+  *     estimate is below [[LogicalPlanCardinality.MinShardableSize]] — the
+  *     exchange overhead would outweigh the per-shard parallelism. The
+  *     zero-row insertion for `COUNT(*) FROM <empty>`-style queries lives
+  *     in this mode (only fires when `groupKeys.isEmpty`).
   *
   * Output schema = group keys ++ aggregate results (in the order given).
   *
@@ -31,7 +48,12 @@ final case class HashAggregateExec(
       aggregates.map { case (a, n) => Field(n, a.resultType) }).toVector
   )
 
-  def numPartitions: Int = 1
+  /** True when the planner has wrapped `child` in an `ExchangeExec` that
+    * has hash-partitioned by the same `groupKeys`. Drives the per-shard vs
+    * collapsing dispatch in [[execute]]. */
+  private val isSharded: Boolean = child.isInstanceOf[ExchangeExec]
+
+  def numPartitions: Int = if (isSharded) child.numPartitions else 1
 
   private val keyExprs: Array[Expr] = groupKeys.iterator.map(_._1).toArray
   private val nKeys: Int = keyExprs.length
@@ -53,14 +75,31 @@ final case class HashAggregateExec(
     if (useLongKey) keyExprs(0).asInstanceOf[ColRefExpr].index else -1
 
   def execute(partition: Int): Iterator[ColumnarBatch] = {
-    require(partition == 0)
-    if (useLongKey) executeLongPath()
-    else executeCodecPath()
+    if (isSharded) executePerShard(partition)
+    else if (useLongKey) executeCollapsingLong(partition)
+    else executeCollapsing(partition)
   }
 
-  // ---- Codec path: every key shape except the single-long fast path --------
+  // ---- Per-shard path: exchange above; one shard per `execute(p)` -----------
 
-  private def executeCodecPath(): Iterator[ColumnarBatch] = {
+  private def executePerShard(partition: Int): Iterator[ColumnarBatch] = {
+    require(partition >= 0 && partition < numPartitions,
+      s"partition $partition out of range [0,$numPartitions)")
+    // One final map per shard. No fan-out across child.numPartitions; the
+    // exchange already routed rows so each shard's input is key-disjoint.
+    if (useLongKey) emitLong(partialAggregateLong(partition))
+    else emit(partialAggregate(partition))
+  }
+
+  // ---- Collapsing paths: no exchange; fan out + merge -----------------------
+
+  /** Codec / no-GROUP-BY path. Each child partition builds a partial
+    * `LinkedHashMap` (keyed by the encoded codec key, or the empty-key
+    * sentinel for no-GROUP-BY), and the merge step combines partials. The
+    * empty-input zero-row insertion lives here. */
+  private def executeCollapsing(partition: Int): Iterator[ColumnarBatch] = {
+    require(partition == 0,
+      s"collapsing aggregate has only one partition; got partition=$partition")
     val tasks: Seq[Callable[mutable.LinkedHashMap[AnyRef, Array[AggState]]]] =
       (0 until child.numPartitions).map { p =>
         new Callable[mutable.LinkedHashMap[AnyRef, Array[AggState]]] {
@@ -69,14 +108,51 @@ final case class HashAggregateExec(
       }
     val partials: Seq[mutable.LinkedHashMap[AnyRef, Array[AggState]]] =
       Scheduler.submitAndAwaitAll(tasks)
-
     val merged = partials.reduceOption(merge).getOrElse(mutable.LinkedHashMap.empty)
-    // For aggregations with no GROUP BY: SQL requires one row of aggregate output
-    // even when input is empty (e.g., COUNT(*) over empty source = 0).
+    // No-GROUP-BY aggregates require one row of output even on empty input
+    // (e.g., `COUNT(*) FROM <empty>` → 0). With group keys, an empty input
+    // is correctly an empty output (no groups).
     if (groupKeys.isEmpty && merged.isEmpty) {
       merged += (keyCodec.encodeBoxed(EmptyKeyBuf) -> newStates())
     }
     emit(merged)
+  }
+
+  /** Long-key collapsing path. Same fan-out + merge shape as
+    * [[executeCollapsing]], but each partition builds a [[LongHashMap]]
+    * keyed by the primitive long extracted directly from the source
+    * column. Used when GROUP BY is a single fixed-width-numeric ColRef —
+    * the codec / boxing-free fast path that the planner picks at runtime
+    * (`useLongKey`). */
+  private def executeCollapsingLong(partition: Int): Iterator[ColumnarBatch] = {
+    require(partition == 0,
+      s"collapsing aggregate has only one partition; got partition=$partition")
+    val tasks: Seq[Callable[LongHashMap[Array[AggState]]]] =
+      (0 until child.numPartitions).map { p =>
+        new Callable[LongHashMap[Array[AggState]]] {
+          def call(): LongHashMap[Array[AggState]] = partialAggregateLong(p)
+        }
+      }
+    val partials = Scheduler.submitAndAwaitAll(tasks)
+    val merged = partials.reduceOption(mergeLong).getOrElse(new LongHashMap[Array[AggState]]())
+    emitLong(merged)
+  }
+
+  /** Merge `b` into `a` for the long-key map, in place. Used by
+    * [[executeCollapsingLong]] to combine per-partition partials. */
+  private def mergeLong(
+      a: LongHashMap[Array[AggState]],
+      b: LongHashMap[Array[AggState]]): LongHashMap[Array[AggState]] = {
+    b.forEach { (isNull, k, bs) =>
+      val existing = if (isNull) a.getNull else a.get(k)
+      if (existing != null) {
+        var i = 0
+        while (i < existing.length) { existing(i).merge(bs(i)); i += 1 }
+      } else {
+        if (isNull) a.getOrInsertNull(bs) else a.getOrInsert(k, bs)
+      }
+    }
+    a
   }
 
   private val EmptyKeyBuf: Array[Any] = new Array[Any](0)
@@ -198,18 +274,9 @@ final case class HashAggregateExec(
   }
 
   // ---- Long-key path: single Int / Long / Date / Timestamp / Boolean ColRef -
-
-  private def executeLongPath(): Iterator[ColumnarBatch] = {
-    val tasks: Seq[Callable[LongHashMap[Array[AggState]]]] =
-      (0 until child.numPartitions).map { p =>
-        new Callable[LongHashMap[Array[AggState]]] {
-          def call(): LongHashMap[Array[AggState]] = partialAggregateLong(p)
-        }
-      }
-    val partials = Scheduler.submitAndAwaitAll(tasks)
-    val merged = partials.reduceOption(mergeLong).getOrElse(new LongHashMap[Array[AggState]]())
-    emitLong(merged)
-  }
+  // Only reached from the per-shard path — `useLongKey` requires
+  // `nKeys == 1`, which implies `groupKeys.nonEmpty`, which routes
+  // `execute` into `executePerShard`. No cross-shard merge needed.
 
   private def partialAggregateLong(p: Int): LongHashMap[Array[AggState]] = {
     val map = new LongHashMap[Array[AggState]]()
@@ -228,21 +295,6 @@ final case class HashAggregateExec(
       }
     }
     map
-  }
-
-  private def mergeLong(
-      a: LongHashMap[Array[AggState]],
-      b: LongHashMap[Array[AggState]]): LongHashMap[Array[AggState]] = {
-    b.forEach { (isNull, k, bs) =>
-      val existing = if (isNull) a.getNull else a.get(k)
-      if (existing != null) {
-        var i = 0
-        while (i < existing.length) { existing(i).merge(bs(i)); i += 1 }
-      } else {
-        if (isNull) a.getOrInsertNull(bs) else a.getOrInsert(k, bs)
-      }
-    }
-    a
   }
 
   private def emitLong(map: LongHashMap[Array[AggState]]): Iterator[ColumnarBatch] = {

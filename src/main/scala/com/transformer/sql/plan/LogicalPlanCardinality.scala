@@ -30,6 +30,51 @@ object LogicalPlanCardinality {
   private[plan] val SelectivityInList: Double  = 0.5
   private[plan] val SelectivityDefault: Double = 0.5
 
+  /** Minimum estimated row count above which the planner inserts
+    * `ExchangeExec` above an aggregate or distinct. Default `Long.MaxValue`
+    * — i.e. aggregate/distinct sharding is OFF by default. The exchange's
+    * full pass over input rows plus the K-shard heap materialization is a
+    * real cost that can be much larger than the cross-partition merge it
+    * eliminates, especially when GROUP BY cardinality is low relative to
+    * input size (one group having 100M rows hashed to 1 shard is strictly
+    * worse than the historic streaming partial-aggregate path). Until we
+    * have per-key cardinality estimates and/or a streaming exchange (plan
+    * 08), the safe default is to leave the historic shape on.
+    *
+    * Override per-JVM via the `transformer.scheduler.shard_min_size`
+    * system property or `TRANSFORMER_SCHEDULER_SHARD_MIN_SIZE` env var.
+    * Workloads with provably high distinct-key counts (where the cross-
+    * partition merge actually is the wall) can set this to e.g. 1_000_000
+    * to opt back in. */
+  val MinShardableSize: Long = {
+    val configured = Option(System.getProperty("transformer.scheduler.shard_min_size"))
+      .orElse(Option(System.getenv("TRANSFORMER_SCHEDULER_SHARD_MIN_SIZE")))
+      .map(_.trim).filter(_.nonEmpty)
+      .flatMap(s => try Some(s.toLong) catch { case _: NumberFormatException => None })
+    configured.getOrElse(Long.MaxValue)
+  }
+
+  /** Threshold for the broadcast-vs-shuffle decision on hash joins. If the
+    * smaller side's estimate is below this, the planner refuses to insert
+    * the exchanges on both sides — it builds the small side once, streams
+    * the large probe through it directly (the historic shape). Sharding both
+    * sides forces an extra pass over the *large* side just to redistribute
+    * rows, and on a 100M-row probe × 100k-row build that's a 10x slowdown.
+    *
+    * 1M is a conservative ceiling on what we'll broadcast — the build map
+    * stays well inside the heap (~80MB at 80B/row), and any join above this
+    * threshold is large enough that the per-shard parallelism gain
+    * dominates the extra shuffle pass. Override per-JVM via the
+    * `transformer.scheduler.broadcast_threshold` system property or
+    * `TRANSFORMER_SCHEDULER_BROADCAST_THRESHOLD` env var. */
+  val BroadcastBuildThreshold: Long = {
+    val configured = Option(System.getProperty("transformer.scheduler.broadcast_threshold"))
+      .orElse(Option(System.getenv("TRANSFORMER_SCHEDULER_BROADCAST_THRESHOLD")))
+      .map(_.trim).filter(_.nonEmpty)
+      .flatMap(s => try Some(s.toLong) catch { case _: NumberFormatException => None })
+    configured.getOrElse(1_000_000L)
+  }
+
   /** Estimate the number of rows produced by `plan`. */
   def estimate(plan: LogicalPlan): Option[Long] = plan match {
     case LogicalScan(_, view, _) =>

@@ -8,7 +8,23 @@ import scala.collection.mutable
 /** Window-function projection: materializes the child, groups rows by spec,
   * sorts within partition, and writes one output column per [[WindowDef]].
   *
-  * Pipeline breaker (numPartitions=1). All child rows are buffered in memory;
+  * Two execution modes, selected by whether `child` is an [[ExchangeExec]]:
+  *
+  *   - **Per-shard** (child is `ExchangeExec`): the planner has wrapped the
+  *     child in an exchange partitioned by the windows' shared PARTITION BY
+  *     keys (only possible when every [[WindowSpec]] in `windows` shares the
+  *     same non-empty `partitionKeys`). Rows belonging to the same window
+  *     partition land in the same shard, so each shard processes its rows
+  *     independently — no cross-shard coordination. `numPartitions = K`.
+  *   - **Collapsing** (child is anything else): no exchange. The operator
+  *     reads every child partition, materializes all rows into one buffer,
+  *     and emits as a single output partition. Reached when PARTITION BY is
+  *     empty (whole-result window), when window specs disagree on their
+  *     PARTITION BY keys (no single sharding satisfies both), or when the
+  *     planner's cardinality estimate is below
+  *     [[com.transformer.sql.plan.LogicalPlanCardinality.MinShardableSize]].
+  *
+  * All child rows in the relevant scope are buffered in memory;
   * this matches the codebase's v1 stance ("no spill-to-disk").
   *
   * Output schema is `child.outputSchema ++ windowOutputs` — original column
@@ -29,10 +45,17 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
     child.outputSchema.fields ++ windows.map(w => Field(w.outputName, w.fn.resultType))
   )
 
-  def numPartitions: Int = 1
+  /** True when the planner has wrapped `child` in an `ExchangeExec`
+    * partitioned by the shared PARTITION BY keys of every WindowSpec. The
+    * planner only does this when all specs agree on a single non-empty
+    * PARTITION BY key set; the operator just trusts the wrapper. */
+  private val isSharded: Boolean = child.isInstanceOf[ExchangeExec]
+
+  def numPartitions: Int = if (isSharded) child.numPartitions else 1
 
   def execute(partition: Int): Iterator[ColumnarBatch] = {
-    require(partition == 0)
+    require(partition >= 0 && partition < numPartitions,
+      s"partition $partition out of range [0,$numPartitions)")
     val childSchema = child.outputSchema
     val childWidth = childSchema.length
     val nWindows = windows.size
@@ -51,12 +74,16 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
     val orderKeysByRow: Array[mutable.ArrayBuffer[Array[Any]]] =
       Array.tabulate(nSpecs)(_ => mutable.ArrayBuffer.empty[Array[Any]])
 
-    // 1. Materialize every child row. Same pass: for each batch, evalVec each
-    // spec's partition keys + order keys once, then per-row stash the boxed
-    // values. This eliminates the per-row Expr.eval against RowBuf the old
-    // `processSpec` paid for non-ColRef keys.
+    // 1. Materialize the in-scope child rows. Sharded mode reads only the
+    //    requested shard; collapsing mode reads every child partition. Same
+    //    inner pass either way: for each batch, evalVec each spec's
+    //    partition keys + order keys once, then per-row stash the boxed
+    //    values. This eliminates the per-row Expr.eval against RowBuf the
+    //    old `processSpec` paid for non-ColRef keys.
     val rows = mutable.ArrayBuffer.empty[Array[Any]]
-    val it = (0 until child.numPartitions).iterator.flatMap(child.execute)
+    val it: Iterator[ColumnarBatch] =
+      if (isSharded) child.execute(partition)
+      else (0 until child.numPartitions).iterator.flatMap(child.execute)
     while (it.hasNext) {
       val b = it.next()
       val nrows = b.numRows

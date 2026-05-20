@@ -5,7 +5,19 @@ import com.transformer.core._
 import java.util
 import java.util.concurrent.Callable
 
-/** SELECT DISTINCT. Builds a HashSet of full-row keys. Single global partition.
+/** SELECT DISTINCT. Two execution modes share this one operator, selected
+  * by whether `child` is an [[ExchangeExec]]:
+  *
+  *   - **Per-shard** (child is `ExchangeExec`): the exchange has hash-
+  *     partitioned by every output column, so duplicates of any row land
+  *     together. `execute(p)` dedupes one shard's batches into a local
+  *     HashSet and emits. `numPartitions = K`; downstream stays parallel.
+  *   - **Collapsing** (child is anything else): no exchange. Fan out
+  *     across the child's partitions through [[Scheduler]], union the
+  *     per-partition HashSets, emit as one output partition. Reached when
+  *     [[PhysicalPlanner]] decides the input is below
+  *     [[com.transformer.sql.plan.LogicalPlanCardinality.MinShardableSize]]
+  *     — the exchange's scatter overhead would dominate.
   *
   * Keys are encoded via [[KeyCodec]] (packed `byte[]` for fixed-width-only
   * schemas; cached-hash `Array[AnyRef]` otherwise) — avoids the
@@ -14,7 +26,14 @@ import java.util.concurrent.Callable
   */
 final case class DistinctExec(child: PhysicalPlan) extends PhysicalPlan {
   def outputSchema: Schema = child.outputSchema
-  def numPartitions: Int = 1
+
+  /** True when the planner inserted `ExchangeExec` above this operator.
+    * Same gate as [[HashAggregateExec.isSharded]] / [[HashJoinExec.isSharded]]
+    * — runtime detection via the child's concrete type so direct construction
+    * over a non-exchange child still works (collapsing mode). */
+  private val isSharded: Boolean = child.isInstanceOf[ExchangeExec]
+
+  def numPartitions: Int = if (isSharded) child.numPartitions else 1
 
   private val ncols: Int = child.outputSchema.length
   private val codec: KeyCodec = KeyCodec.forColumns(
@@ -23,7 +42,19 @@ final case class DistinctExec(child: PhysicalPlan) extends PhysicalPlan {
   )
 
   def execute(partition: Int): Iterator[ColumnarBatch] = {
-    require(partition == 0)
+    if (isSharded) executePerShard(partition)
+    else executeCollapsing(partition)
+  }
+
+  private def executePerShard(partition: Int): Iterator[ColumnarBatch] = {
+    require(partition >= 0 && partition < numPartitions,
+      s"partition $partition out of range [0,$numPartitions)")
+    emit(collect(partition))
+  }
+
+  private def executeCollapsing(partition: Int): Iterator[ColumnarBatch] = {
+    require(partition == 0,
+      s"collapsing distinct has only one partition; got partition=$partition")
     val tasks: Seq[Callable[util.LinkedHashSet[AnyRef]]] =
       (0 until child.numPartitions).map { p =>
         new Callable[util.LinkedHashSet[AnyRef]] {
