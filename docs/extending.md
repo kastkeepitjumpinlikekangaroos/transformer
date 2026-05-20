@@ -207,6 +207,57 @@ extend the format switch in `ResultPersister` and the dropdown in
    decisions silently treating a new operator as `None` would be worse).
    Pin tests in `LogicalPlanCardinalityTest` to the new shape.
 
+**If the operator hashes per-row keys (group-by, set semantics, partition
+keys, join keys), use `core/HashKeys.scala`'s `KeyCodec` rather than
+building a `Seq[Any]` per row.** Construct it via
+`KeyCodec.forColumns(indices, types)` with the column indices and types of
+the key columns; for keys that are pure `ColRefExpr` use `encodeFromBatch`
+(skips per-row boxing on fixed-width columns), for computed expressions
+eval into a reusable `Array[Any]` and call `encodeBoxed`. The codec exposes
+`decode` for re-materializing keys into output columns (used by
+`HashAggregateExec`'s emit path), and `encodeFromBatchSkipIfAnyNull` for
+join-probe NULL short-circuiting. See
+[architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers).
+
+## Add a logical-plan optimizer pass
+
+`LogicalOptimizer.optimize` (in `sql/plan/`) runs each pass once in a fixed
+order — `FilterPushdown` then `ColumnProjectionPushdown` today. To add a new
+pass:
+
+1. New file `sql/plan/<MyPass>.scala` exposing a single
+   `def apply(plan: LogicalPlan): LogicalPlan`. The body is a recursive
+   `rewrite` matching every `LogicalPlan` case — Scala's exhaustivity
+   check will flag missed cases. Pass-through nodes (Project, Sort, Limit,
+   Distinct, Union, Window, …) just recurse on their children; the
+   interesting work happens on the shape your pass targets.
+2. **Don't drift `ColRefExpr` indices without remapping.** Any rewrite
+   that prunes columns, reorders output, or inserts a new producer must
+   update every ancestor's `ColRefExpr` indices accordingly. Use the
+   `(plan, remap)` pattern that `ColumnProjectionPushdown` uses — the
+   caller composes the child's remap with its own. For join-level
+   helpers (`sideOf`, `shiftToRight`), pull from `JoinSideAnalysis.scala`
+   so you're not duplicating the recursive Expr traversal.
+3. **Validate at plan time.** If your pass can introduce an index/remap
+   bug that wouldn't surface until execution, add a `verify` helper
+   modeled on `ColumnProjectionPushdown.verify`: walk the rewritten tree
+   and assert every `ColRefExpr`'s `(index, dataType)` matches the
+   relevant child schema. Gate behind a `private val VerifyRewrites:
+   Boolean = true` if perf ever becomes a concern (cheap at plan time —
+   probably stays always-on).
+4. **Wire into `LogicalOptimizer.optimize`** by adding a line. Order
+   matters; place your pass where its preconditions hold and document
+   *why* it must run before/after existing passes in the optimize body.
+   Don't introduce a generic rule engine — explicit calls keep the
+   ordering inspectable.
+5. **Test the new pass directly.** Add `src/test/scala/com/transformer/sql/plan/<MyPass>Test.scala`
+   with a `scala_junit_test` entry — pattern-match on the rewritten plan
+   shape so the test fails loudly when an index-remap regresses, and
+   include at least one round-trip through `SqlEngineTest` to confirm
+   end-to-end query correctness is unchanged.
+6. Update [`docs/architecture.md`'s "Logical plan optimization"](architecture.md#9-logical-plan-optimization)
+   to describe the new pass and where it sits in the order.
+
 ## Add cloud support (v1.1 work)
 
 The interfaces are already in place:

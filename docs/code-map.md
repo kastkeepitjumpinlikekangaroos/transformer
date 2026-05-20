@@ -28,6 +28,11 @@ navigation hint, not a comprehensive directory listing.
   per-input load state alongside per-task status.
 - `sql/exec/AggregateExec.scala` (~255 LOC) — adding new aggregates means
   adding an `AggState`.
+- `core/HashKeys.scala` (~330 LOC) — `KeyCodec` (`PackedBytesCodec`,
+  `ObjectArrayCodec`, `EmptyKeyCodec`) + `BytesKey` / `ObjectArrayKey`
+  wrappers. Used by every pipeline-breaking operator that keys into a HashMap
+  (HashAggregate / HashJoin / Distinct / WindowExec partition keys). See
+  [architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers).
 - `core/Scheduler.scala` (~80 LOC) — the shared `ForkJoinPool` every parallel
   call site funnels through. Daemon threads, default size `2 × availableProcessors`
   (override via `transformer.scheduler.parallelism` system property or

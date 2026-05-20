@@ -77,12 +77,39 @@ final case class WindowExec(child: PhysicalPlan, windows: Seq[WindowDef]) extend
 
     val n = rows.length
 
-    // Partition rows by partition-key tuple. Empty partition keys → one partition.
-    val partitions = mutable.LinkedHashMap.empty[Seq[Any], mutable.ArrayBuffer[Int]]
+    // Partition rows by partition key. The key is encoded via [[KeyCodec]] —
+    // packed `byte[]` for fixed-width-only keys, cached-hash `Array[AnyRef]`
+    // otherwise — to skip the `Seq[Any]` allocation + walk the original loop
+    // paid per row. Empty partition keys → one partition (EmptyKeyCodec
+    // collapses every encode to a singleton sentinel).
+    val partKeys: Array[Expr] = spec.partitionKeys.toArray
+    val nPartKeys = partKeys.length
+    val partKeysAreColRefs: Boolean = partKeys.forall(_.isInstanceOf[ColRefExpr])
+    val partKeyColIndices: Array[Int] =
+      if (partKeysAreColRefs) partKeys.map(_.asInstanceOf[ColRefExpr].index) else null
+    val partCodec: KeyCodec = KeyCodec.forColumns(
+      if (partKeysAreColRefs) partKeyColIndices else new Array[Int](nPartKeys),
+      partKeys.map(_.dataType)
+    )
+
+    val partitions = mutable.LinkedHashMap.empty[AnyRef, mutable.ArrayBuffer[Int]]
+    val keyBuf: Array[Any] = if (partKeysAreColRefs) null else new Array[Any](nPartKeys)
     var i = 0
     while (i < n) {
-      buf.set(rows(i))
-      val key: Seq[Any] = spec.partitionKeys.map(_.eval(buf.batch, 0))
+      val row = rows(i)
+      val key: AnyRef =
+        if (partKeysAreColRefs) {
+          // Read partition columns directly out of the boxed row array.
+          var k = 0
+          val tmp = new Array[Any](nPartKeys)
+          while (k < nPartKeys) { tmp(k) = row(partKeyColIndices(k)); k += 1 }
+          partCodec.encodeBoxed(tmp)
+        } else {
+          buf.set(row)
+          var k = 0
+          while (k < nPartKeys) { keyBuf(k) = partKeys(k).eval(buf.batch, 0); k += 1 }
+          partCodec.encodeBoxed(keyBuf)
+        }
       val bucket = partitions.getOrElseUpdate(key, mutable.ArrayBuffer.empty)
       bucket += i
       i += 1

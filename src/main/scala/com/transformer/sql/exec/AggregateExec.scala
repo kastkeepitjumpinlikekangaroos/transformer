@@ -12,6 +12,13 @@ import scala.jdk.CollectionConverters._
   * `groupKey -> AggStates`; the merge step combines partials into the final result.
   *
   * Output schema = group keys ++ aggregate results (in the order given).
+  *
+  * Group keys are encoded via [[KeyCodec]] — packed `byte[]` (with cached
+  * hashCode and `Arrays.equals` equality) for fixed-width-only keys, cached-
+  * hash `Array[AnyRef]` otherwise. When every group expression is a pure
+  * [[ColRefExpr]] (the common case) the codec reads primitives directly from
+  * the batch's typed [[ColumnVector]]s, avoiding the per-row boxing the old
+  * `Seq[Any]`-keyed implementation paid.
   */
 final case class HashAggregateExec(
     child: PhysicalPlan,
@@ -26,15 +33,26 @@ final case class HashAggregateExec(
 
   def numPartitions: Int = 1
 
+  private val keyExprs: Array[Expr] = groupKeys.iterator.map(_._1).toArray
+  private val nKeys: Int = keyExprs.length
+  private val keyTypes: Array[DataType] = keyExprs.map(_.dataType)
+  private val keysAreColRefs: Boolean = keyExprs.forall(_.isInstanceOf[ColRefExpr])
+  private val keyCodec: KeyCodec = {
+    val indices =
+      if (keysAreColRefs) keyExprs.map(_.asInstanceOf[ColRefExpr].index)
+      else new Array[Int](nKeys)
+    KeyCodec.forColumns(indices, keyTypes)
+  }
+
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0)
-    val tasks: Seq[Callable[mutable.LinkedHashMap[Seq[Any], Array[AggState]]]] =
+    val tasks: Seq[Callable[mutable.LinkedHashMap[AnyRef, Array[AggState]]]] =
       (0 until child.numPartitions).map { p =>
-        new Callable[mutable.LinkedHashMap[Seq[Any], Array[AggState]]] {
-          def call(): mutable.LinkedHashMap[Seq[Any], Array[AggState]] = partialAggregate(p)
+        new Callable[mutable.LinkedHashMap[AnyRef, Array[AggState]]] {
+          def call(): mutable.LinkedHashMap[AnyRef, Array[AggState]] = partialAggregate(p)
         }
       }
-    val partials: Seq[mutable.LinkedHashMap[Seq[Any], Array[AggState]]] =
+    val partials: Seq[mutable.LinkedHashMap[AnyRef, Array[AggState]]] =
       Scheduler.submitAndAwaitAll(tasks)
 
     val merged = partials.reduceOption(merge).getOrElse(mutable.LinkedHashMap.empty)
@@ -42,20 +60,29 @@ final case class HashAggregateExec(
     // even when input is empty (e.g., COUNT(*) over empty source = 0).
     if (groupKeys.isEmpty && merged.isEmpty) {
       val seed = Array.tabulate(aggregates.size)(i => AggState.init(aggregates(i)._1))
-      merged += (Seq.empty[Any] -> seed)
+      merged += (keyCodec.encodeBoxed(EmptyKeyBuf) -> seed)
     }
     emit(merged)
   }
 
-  private def partialAggregate(p: Int): mutable.LinkedHashMap[Seq[Any], Array[AggState]] = {
-    val map = mutable.LinkedHashMap.empty[Seq[Any], Array[AggState]]
+  private val EmptyKeyBuf: Array[Any] = new Array[Any](0)
+
+  private def partialAggregate(p: Int): mutable.LinkedHashMap[AnyRef, Array[AggState]] = {
+    val map = mutable.LinkedHashMap.empty[AnyRef, Array[AggState]]
     val it = child.execute(p)
+    val keyBuf: Array[Any] = if (keysAreColRefs) null else new Array[Any](nKeys)
     while (it.hasNext) {
       val batch = it.next()
       val nrows = batch.numRows
       var r = 0
       while (r < nrows) {
-        val key: Seq[Any] = groupKeys.map { case (e, _) => e.eval(batch, r) }
+        val key: AnyRef =
+          if (keysAreColRefs) keyCodec.encodeFromBatch(batch, r)
+          else {
+            var i = 0
+            while (i < nKeys) { keyBuf(i) = keyExprs(i).eval(batch, r); i += 1 }
+            keyCodec.encodeBoxed(keyBuf)
+          }
         val states = map.getOrElseUpdate(key, {
           Array.tabulate(aggregates.size)(i => AggState.init(aggregates(i)._1))
         })
@@ -71,8 +98,8 @@ final case class HashAggregateExec(
   }
 
   private def merge(
-      a: mutable.LinkedHashMap[Seq[Any], Array[AggState]],
-      b: mutable.LinkedHashMap[Seq[Any], Array[AggState]]): mutable.LinkedHashMap[Seq[Any], Array[AggState]] = {
+      a: mutable.LinkedHashMap[AnyRef, Array[AggState]],
+      b: mutable.LinkedHashMap[AnyRef, Array[AggState]]): mutable.LinkedHashMap[AnyRef, Array[AggState]] = {
     b.foreach { case (k, bs) =>
       a.get(k) match {
         case Some(as) =>
@@ -84,7 +111,7 @@ final case class HashAggregateExec(
     a
   }
 
-  private def emit(map: mutable.LinkedHashMap[Seq[Any], Array[AggState]]): Iterator[ColumnarBatch] = {
+  private def emit(map: mutable.LinkedHashMap[AnyRef, Array[AggState]]): Iterator[ColumnarBatch] = {
     val capacity = ColumnarBatch.DefaultCapacity
     val iter = map.iterator
     new Iterator[ColumnarBatch] {
@@ -94,16 +121,11 @@ final case class HashAggregateExec(
         var row = 0
         while (row < capacity && iter.hasNext) {
           val (key, states) = iter.next()
-          var c = 0
-          while (c < groupKeys.size) {
-            val v = key(c)
-            if (v == null) out.column(c).setNull(row) else out.column(c).setBoxed(row, v)
-            c += 1
-          }
+          keyCodec.decode(key, out, 0, row)
           var a = 0
           while (a < states.length) {
             val v = states(a).finish()
-            val idx = groupKeys.size + a
+            val idx = nKeys + a
             if (v == null) out.column(idx).setNull(row) else out.column(idx).setBoxed(row, v)
             a += 1
           }

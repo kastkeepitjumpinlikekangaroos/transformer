@@ -165,20 +165,50 @@ ship a fix or move something from "not done" to "done".
   the view for a pruned variant via `CatalogView.withProjectedColumns`,
   and remaps every column-ref index above the new scan. The remap is local —
   Project and Aggregate emit their own schemas, so above them positions are
-  identity. Pruning is skipped under joins, unions, and window operators
-  (their output positions are sensitive to combined schemas and would need
-  coordinated remaps across siblings). Parquet pushes the projection via
-  `parquet.read.schema`; CSV (and any other view leaving the default `None`)
-  is a no-op. The shaved decode cost is 5–20× on wide schemas with one big
-  unused column — the snapshots dataset's `data` blob is the canonical case.
-  When the consumer references *zero* columns (e.g. `COUNT(1) FROM t`,
-  `SELECT 1 FROM t LIMIT n`), the pushdown still projects to a single column
-  picked by `narrowestColumn` — fixed-size primitives win over strings/binaries.
-  The scan has to drive batches forward to feed row counts; decoding one Long
-  instead of a multi-MB JSON blob makes `COUNT(1)` 20–25× faster on
-  snapshots-shaped data. `ParquetReader.withProjectedColumns` reuses the
-  parent's footer-derived partition layout so the pruned variant doesn't
-  re-open every file.
+  identity. Joins prune through too: parent-needed names get split by side,
+  the join condition's own ColRef indices are remapped, and the parent
+  receives a combined remap covering both halves. Self-joins (both sides
+  sharing column names) keep both sides' refs pessimistically — name-based
+  filtering can't distinguish `l.x` from `r.x`, so we keep them all; the
+  result stays correct, just with one extra column per name-collision.
+  Pruning is still skipped under unions and window operators (their output
+  positions interact with sibling schemas / synthetic `_winN` columns).
+  Parquet pushes the projection via `parquet.read.schema`; CSV (and any
+  other view leaving the default `None`) is a no-op. The shaved decode
+  cost is 5–20× on wide schemas with one big unused column — the snapshots
+  dataset's `data` blob is the canonical case. When the consumer references
+  *zero* columns (e.g. `COUNT(1) FROM t`, `SELECT 1 FROM t LIMIT n`), the
+  pushdown still projects to a single column picked by `narrowestColumn` —
+  fixed-size primitives win over strings/binaries. The scan has to drive
+  batches forward to feed row counts; decoding one Long instead of a
+  multi-MB JSON blob makes `COUNT(1)` 20–25× faster on snapshots-shaped
+  data. `ParquetReader.withProjectedColumns` reuses the parent's
+  footer-derived partition layout so the pruned variant doesn't re-open
+  every file. The pass guards itself with a plan-time `verify` that
+  asserts every rewritten `ColRefExpr` lines up with its child's schema
+  by index range and `dataType` — index bugs surface as targeted
+  `IllegalStateException`s at plan time instead of `ArrayIndexOutOfBoundsException`s
+  deep inside the executor.
+- **Filter push-down sinks WHERE conjuncts through joins.** Before
+  projection pruning, `FilterPushdown` walks the logical tree, splits any
+  `LogicalFilter(LogicalJoin(...), pred)` by `JoinSideAnalysis.sideOf`,
+  and pushes each conjunct under the matching child where the join kind
+  allows. Inner joins push both sides; LEFT outer pushes left-only
+  conjuncts (right-side ones must NOT be pushed — they'd kill the
+  null-extended rows that LEFT JOIN preserves when the right side has
+  no match); RIGHT outer is symmetric; FULL outer pushes nothing.
+  Conjuncts touching both sides stay above. Stacked Filter(Filter(...))
+  is flattened before the split, and a conjunct that lands above a deeper
+  join cascades further on the recursive call. The win compounds with
+  parquet predicate pushdown — a filter that sinks all the way to a
+  parquet scan often triggers row-group skipping in
+  `ParquetReader.withPushdownFilter`. **Do not extend the pass to push
+  filters on the null-extended side of an outer join.** A `LEFT JOIN`
+  with `WHERE r.x IS NULL` is a classic anti-join shape and depends on
+  the post-join filter seeing null-extended rows; pushing the IS NULL
+  into the right child destroys the semantics. The pass is conservative
+  by construction — if you find yourself trying to push on the outer
+  null-extended side, stop.
 - **Don't do I/O on the FX thread during a run.** Every parallel call in this
   library funnels through `Scheduler.pool` (a `2 × cores`-sized `ForkJoinPool`
   by default; configurable via `transformer.scheduler.parallelism`). When

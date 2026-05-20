@@ -63,6 +63,28 @@ final case class HashJoinExec(
   private val buildKeys: Seq[Expr]    = if (buildRight) rightKeys else leftKeys
   private val probeKeys: Seq[Expr]    = if (buildRight) leftKeys else rightKeys
 
+  // Key encoding. Both sides share one codec (its bit/byte layout depends only
+  // on key TYPES, not column positions). The codec's bound indices are set up
+  // for the probe side because that's the side that uses [[KeyCodec.encodeFromBatch]];
+  // the build side reads from already-materialized `Array[Any]` rows and goes
+  // through [[KeyCodec.encodeBoxed]] (indices unused).
+  private val nKeys: Int = buildKeys.length
+  private val keyTypes: Array[DataType] = buildKeys.iterator.map(_.dataType).toArray
+  private val buildKeyExprs: Array[Expr] = buildKeys.toArray
+  private val probeKeyExprs: Array[Expr] = probeKeys.toArray
+  private val buildKeysAreColRefs: Boolean = buildKeyExprs.forall(_.isInstanceOf[ColRefExpr])
+  private val probeKeysAreColRefs: Boolean = probeKeyExprs.forall(_.isInstanceOf[ColRefExpr])
+  private val buildKeyColIndices: Array[Int] =
+    if (buildKeysAreColRefs) buildKeyExprs.map(_.asInstanceOf[ColRefExpr].index) else null
+  private val probeKeyColIndices: Array[Int] =
+    if (probeKeysAreColRefs) probeKeyExprs.map(_.asInstanceOf[ColRefExpr].index) else null
+  private val keyCodec: KeyCodec = {
+    val indices =
+      if (probeKeysAreColRefs) probeKeyColIndices
+      else new Array[Int](nKeys)
+    KeyCodec.forColumns(indices, keyTypes)
+  }
+
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0)
     val build = buildSide()
@@ -89,13 +111,21 @@ final case class HashJoinExec(
     val partials = Scheduler.submitAndAwaitAll(tasks)
     val rows = mutable.ArrayBuffer.empty[Array[Any]]
     partials.foreach(rows ++= _)
-    val keyMap = new util.HashMap[Seq[Any], util.ArrayList[Int]]()
-    val buildSchema = buildPlan.outputSchema
-    val rb = new RowBuf(buildSchema)
+    val keyMap = new util.HashMap[AnyRef, util.ArrayList[Int]]()
+    val keyBuf = new Array[Any](nKeys)
+    val rb: RowBuf = if (buildKeysAreColRefs) null else new RowBuf(buildPlan.outputSchema)
     var i = 0
     while (i < rows.length) {
-      rb.set(rows(i))
-      val key: Seq[Any] = buildKeys.map(_.eval(rb.batch, 0))
+      val row = rows(i)
+      if (buildKeysAreColRefs) {
+        var k = 0
+        while (k < nKeys) { keyBuf(k) = row(buildKeyColIndices(k)); k += 1 }
+      } else {
+        rb.set(row)
+        var k = 0
+        while (k < nKeys) { keyBuf(k) = buildKeyExprs(k).eval(rb.batch, 0); k += 1 }
+      }
+      val key = keyCodec.encodeBoxed(keyBuf)
       val list = keyMap.computeIfAbsent(key, _ => new util.ArrayList[Int]())
       list.add(i)
       i += 1
@@ -139,20 +169,31 @@ final case class HashJoinExec(
             val local = mutable.ArrayBuffer.empty[Array[Any]]
             val localMatched = new util.HashSet[Int]()
             val probeIt = probePlan.execute(pp)
-            val pb = new RowBuf(probeSchema)
+            val keyBuf: Array[Any] = if (probeKeysAreColRefs) null else new Array[Any](nKeys)
             while (probeIt.hasNext) {
               val b = probeIt.next()
               var r = 0
               while (r < b.numRows) {
-                pb.setFromBatch(b, r)
                 val probeRow = new Array[Any](probeSchema.length)
                 var c = 0
                 while (c < probeSchema.length) {
                   probeRow(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
                   c += 1
                 }
-                val key: Seq[Any] = probeKeys.map(_.eval(pb.batch, 0))
-                val matches = if (key.exists(_ == null)) null else build.keyMap.get(key)
+                val key: AnyRef =
+                  if (probeKeysAreColRefs) keyCodec.encodeFromBatchSkipIfAnyNull(b, r)
+                  else {
+                    var k = 0
+                    var anyNull = false
+                    while (k < nKeys) {
+                      val v = probeKeyExprs(k).eval(b, r)
+                      if (v == null) anyNull = true
+                      keyBuf(k) = v
+                      k += 1
+                    }
+                    if (anyNull) null else keyCodec.encodeBoxed(keyBuf)
+                  }
+                val matches = if (key == null) null else build.keyMap.get(key)
                 var matchedAny = false
                 if (matches != null && !matches.isEmpty) {
                   val it = matches.iterator()
@@ -259,4 +300,4 @@ final case class HashJoinExec(
   }
 }
 
-private[exec] final case class BuildSide(rows: mutable.ArrayBuffer[Array[Any]], keyMap: util.HashMap[Seq[Any], util.ArrayList[Int]])
+private[exec] final case class BuildSide(rows: mutable.ArrayBuffer[Array[Any]], keyMap: util.HashMap[AnyRef, util.ArrayList[Int]])

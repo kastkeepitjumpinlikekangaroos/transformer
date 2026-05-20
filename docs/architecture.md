@@ -99,6 +99,41 @@ a reusable 1-row batch that the surrounding loop refills with `.set(rowArr)`
 or `.setFromBatch(srcBatch, srcRow)`. Don't allocate fresh `ColumnarBatch`es
 per row in tight loops — that defeats the JIT.
 
+### 2a. KeyCodec — packed keys for pipeline breakers
+
+`HashAggregate`, `HashJoin`, `Distinct`, and `WindowExec.processSpec` all
+key into a `HashMap` per row. The old implementation built a `Seq[Any]` per
+row (allocation + boxed-element walk on every `hashCode`/`equals`), which
+dominated CPU once group cardinality climbed into the millions.
+`core/HashKeys.scala` replaces that with a small codec hierarchy:
+
+- **`PackedBytesCodec`** — chosen when every key column is a fixed-width
+  primitive (Int / Long / Float / Double / Boolean / Date / Timestamp).
+  Packs the key into a `byte[]` (`ceil(nKeys/8)` null bits + concatenated
+  primitive value bytes) wrapped in a `BytesKey` whose `equals` calls
+  `Arrays.equals` (JIT-intrinsifies to SIMD) and whose `hashCode` is cached
+  at construction. The fast `encodeFromBatch(batch, row)` path reads
+  primitives straight from the typed `ColumnVector`s — zero boxing.
+- **`ObjectArrayCodec`** — chosen when any key column is variable-width
+  (String / Binary / Decimal / NullType). Copies the row's key values into
+  a fresh `Array[AnyRef]` wrapped in an `ObjectArrayKey` (cached hashCode,
+  element-wise `equals` with `Array[Byte]` special-cased for structural
+  equality). Still one allocation per row + two on insert, but the `Seq`
+  wrapper overhead and dynamic-dispatch walk are gone.
+- **`EmptyKeyCodec`** — singleton sentinel for zero-column keys
+  (`GROUP BY ()` from `SELECT COUNT(*)`). Every encode collapses to the
+  same object so all rows land in one bucket.
+
+`KeyCodec.forColumns(indices, types)` selects the right codec from key
+column types. Operators detect when every key expression is a pure
+`ColRefExpr` (the common case — `GROUP BY a, b` resolves to plain column
+references) and use `encodeFromBatch` for the boxing-free fast path;
+otherwise they eval the expressions into a reusable `Array[Any]` and call
+`encodeBoxed`. NULL keys group together (GROUP BY semantics) via dedicated
+null bits / null elements; for hash-join probes that need NULL to short-
+circuit a non-match, the codec exposes `encodeFromBatchSkipIfAnyNull`,
+which returns the Java `null` sentinel instead of a key.
+
 ### 3. Parallel execution
 
 All parallel work — DAG scheduling, pipeline-breaking operators, partitioned
@@ -549,3 +584,56 @@ that from silently materializing an O(N*M) cartesian over millions of rows,
 `PhysicalPlanner.enforceNestedLoopGuard` refuses the plan when both
 estimates exist and `min(left, right) > 5000`. CSV-rooted joins (no
 estimate) keep working — the guard is conservative.
+
+### 9. Logical plan optimization
+
+`SqlEngine.execute` runs `LogicalOptimizer.optimize(plan)` after binding and
+before physical planning. The optimizer is two explicit passes, called once
+each in a fixed order:
+
+1. **`FilterPushdown`** sinks filter conjuncts as close to scans as
+   correctness allows. The pattern is
+   `LogicalFilter(LogicalJoin(...), pred)`: each conjunct of `pred` is
+   classified by `JoinSideAnalysis.sideOf` and either pushed under the
+   matching child or left above the join. Inner joins push both sides;
+   LEFT outer pushes left-only conjuncts (right-side ones would change
+   results — they'd drop the null-extended rows that LEFT JOIN preserves
+   when the right side has no match); RIGHT outer is symmetric; FULL outer
+   pushes nothing. Conjuncts touching both sides stay above. The pass also
+   flattens stacked Filter(Filter(...)) into a single conjunct list before
+   deciding, so a pushed filter that lands above another join cascades
+   further down on the recursive call.
+
+2. **`ColumnProjectionPushdown`** prunes unreferenced columns out of
+   scans, threading through joins so each side reads only the columns its
+   ancestors actually use plus the columns the join condition itself
+   needs. The combined output shrinks on both sides, so the condition's
+   `ColRefExpr` indices are rebuilt against the new combined schema, and
+   the parent receives a remap that updates its own expressions. A
+   plan-time `verify` walks the rewritten tree and asserts every
+   `ColRefExpr` lines up with the relevant child schema by index range
+   and `dataType` — index/remap bugs surface at plan time with a
+   targeted error rather than as an `ArrayIndexOutOfBoundsException`
+   deep inside the executor.
+
+Order matters: filter pushdown can shift which columns the joined
+sides need (a pushed filter may add or remove ColRef references), so
+projection pruning runs second. The framework is deliberately minimal —
+two explicit calls in `LogicalOptimizer.optimize`, not a rule engine.
+Adding a new pass means adding another line; if a new pass needs to run
+before existing ones, reorder the lines and document why.
+
+`JoinSideAnalysis` (`sql/plan/JoinSideAnalysis.scala`) is the shared
+utility both passes lean on: it walks an expression's `ColRefExpr` indices
+against `leftWidth` and classifies the expression as `LeftOnly` /
+`RightOnly` / `Both` / `Neither`. The physical planner also uses it for
+join-key extraction (`splitEqualityKeys`) and right-side index shifting
+(`shiftToRight`). Index-based classification matters for self-joins,
+where the two sides share field names — index says definitively which
+side a ref belongs to.
+
+Joins are now pruned through; unions and window operators still are not.
+Union pruning requires identical column sets and remaps on both arms;
+window's output is `child ++ syntheticWinN`, so pruning the child shifts
+the synthetic column positions. Both are viable extensions deferred to a
+future pass (see the optional Phase 5 in `plans/perf/07-push-through-joins.md`).

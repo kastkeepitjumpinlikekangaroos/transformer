@@ -131,13 +131,13 @@ object PhysicalPlanner {
     val rest = mutable.ArrayBuffer.empty[Expr]
     conjuncts.foreach {
       case BinOpExpr("=", l, r, _) =>
-        (sideOf(l, leftWidth), sideOf(r, leftWidth)) match {
-          case (LeftSide, RightSide) =>
+        (JoinSideAnalysis.sideOf(l, leftWidth), JoinSideAnalysis.sideOf(r, leftWidth)) match {
+          case (JoinSide.LeftOnly, JoinSide.RightOnly) =>
             leftKeys += l
-            rightKeys += shiftToRight(r, leftWidth)
-          case (RightSide, LeftSide) =>
+            rightKeys += JoinSideAnalysis.shiftToRight(r, leftWidth)
+          case (JoinSide.RightOnly, JoinSide.LeftOnly) =>
             leftKeys += r
-            rightKeys += shiftToRight(l, leftWidth)
+            rightKeys += JoinSideAnalysis.shiftToRight(l, leftWidth)
           case _ => rest += BinOpExpr("=", l, r, DataType.BooleanType)
         }
       case other => rest += other
@@ -149,55 +149,5 @@ object PhysicalPlanner {
   private def collectConjuncts(e: Expr): Seq[Expr] = e match {
     case BinOpExpr("AND", l, r, _) => collectConjuncts(l) ++ collectConjuncts(r)
     case other => Seq(other)
-  }
-
-  private sealed trait Side
-  private case object LeftSide extends Side
-  private case object RightSide extends Side
-  private case object BothSides extends Side
-  private case object NoSide extends Side
-
-  private def sideOf(e: Expr, leftWidth: Int): Side = e match {
-    case ColRefExpr(i, _, _) => if (i < leftWidth) LeftSide else RightSide
-    case LitExpr(_, _) => NoSide
-    case CastExpr(c, _) => sideOf(c, leftWidth)
-    case BinOpExpr(_, l, r, _) => merge(sideOf(l, leftWidth), sideOf(r, leftWidth))
-    case UnaryOpExpr(_, c, _) => sideOf(c, leftWidth)
-    case FuncExpr(_, args, _) => args.map(sideOf(_, leftWidth)).foldLeft[Side](NoSide)(merge)
-    case CaseExpr(branches, elseE, _) =>
-      val all = branches.flatMap { case (a, b) => Seq(sideOf(a, leftWidth), sideOf(b, leftWidth)) } ++
-        elseE.map(sideOf(_, leftWidth))
-      all.foldLeft[Side](NoSide)(merge)
-    case IsNullExpr(c, _) => sideOf(c, leftWidth)
-    case InListExpr(c, items, _) =>
-      (sideOf(c, leftWidth) +: items.map(sideOf(_, leftWidth))).foldLeft[Side](NoSide)(merge)
-    case LikeExpr(s, p, _) => merge(sideOf(s, leftWidth), sideOf(p, leftWidth))
-  }
-
-  private def merge(a: Side, b: Side): Side = (a, b) match {
-    case (NoSide, x) => x
-    case (x, NoSide) => x
-    case (LeftSide, LeftSide) => LeftSide
-    case (RightSide, RightSide) => RightSide
-    case _ => BothSides
-  }
-
-  /** Re-index a right-side expression so column refs (which currently use combined
-    * indices >= leftWidth) refer to indices 0..rightWidth into the right plan's
-    * output. This is what [[HashJoinExec]] expects for its `rightKeys`.
-    */
-  private def shiftToRight(e: Expr, leftWidth: Int): Expr = e match {
-    case ColRefExpr(i, n, dt) => ColRefExpr(i - leftWidth, n, dt)
-    case CastExpr(c, t) => CastExpr(shiftToRight(c, leftWidth), t)
-    case BinOpExpr(op, l, r, dt) => BinOpExpr(op, shiftToRight(l, leftWidth), shiftToRight(r, leftWidth), dt)
-    case UnaryOpExpr(op, c, dt) => UnaryOpExpr(op, shiftToRight(c, leftWidth), dt)
-    case FuncExpr(n, args, dt) => FuncExpr(n, args.map(shiftToRight(_, leftWidth)), dt)
-    case CaseExpr(branches, elseE, dt) =>
-      CaseExpr(branches.map { case (a, b) => (shiftToRight(a, leftWidth), shiftToRight(b, leftWidth)) },
-        elseE.map(shiftToRight(_, leftWidth)), dt)
-    case IsNullExpr(c, neg) => IsNullExpr(shiftToRight(c, leftWidth), neg)
-    case InListExpr(c, items, neg) => InListExpr(shiftToRight(c, leftWidth), items.map(shiftToRight(_, leftWidth)), neg)
-    case LikeExpr(s, p, neg) => LikeExpr(shiftToRight(s, leftWidth), shiftToRight(p, leftWidth), neg)
-    case lit: LitExpr => lit
   }
 }

@@ -41,3 +41,23 @@ specific traps.
   named constant rather than the literal value so the test stays meaningful
   when the constant moves. The same convention applies to the planner's
   `JoinSwapRatio` / `NestedLoopMaxRows` thresholds.
+- **Logical-plan rewrites are explicit passes called in order, not a rule
+  engine.** `LogicalOptimizer.optimize` calls each pass by name (`FilterPushdown`,
+  `ColumnProjectionPushdown`) in a fixed order — adding a new pass is one
+  more line. Don't introduce a generic optimizer-pass framework. A rewrite
+  that touches `ColRefExpr` indices must do its own remap on every
+  affected expression and validate the result (`ColumnProjectionPushdown.verify`
+  is the model: walk the rewritten tree, assert every `ColRefExpr` matches
+  the child schema by index range and `dataType`). Shared helpers around
+  join-level expressions (`sideOf`, `shiftToRight`) live in
+  `JoinSideAnalysis.scala` so the planner and any new pass can reuse them
+  without duplicating the recursive Expr traversal.
+- **Pipeline-breaking operators that key into a HashMap go through
+  `core/HashKeys.scala`'s `KeyCodec`, not raw `Seq[Any]`.** That's the
+  shared abstraction `HashAggregateExec`, `HashJoinExec`, `DistinctExec`,
+  and `WindowExec` use to skip per-row Seq allocation + boxed-element walk
+  hashing. New per-row hashing in the engine should land on the same path —
+  `KeyCodec.forColumns` picks the packed-bytes or object-array
+  representation from key types; the ColRefExpr fast path
+  (`encodeFromBatch`) is the boxing-free fast path. See
+  [architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers).

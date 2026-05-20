@@ -181,6 +181,105 @@ class SqlEngineTest {
     assertEquals(Seq(100, null, 50), rows.map(_("score")))
   }
 
+  @Test def innerJoinWithLeftSideFilterStillCorrect(): Unit = {
+    // Exercises FilterPushdown: l.id = 1 should push under the left scan.
+    val left = tmpCsv("l.csv", "id,name\n1,alice\n2,bob\n3,charlie\n")
+    val right = tmpCsv("r.csv", "user_id,score\n1,100\n2,80\n3,50\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.name, s.score FROM u JOIN s ON u.id = s.user_id WHERE u.id = 1", cat)
+    val rows = collectAllRows(q)
+    assertEquals(1, rows.size)
+    assertEquals("alice", rows.head("name"))
+    assertEquals(100, rows.head("score"))
+  }
+
+  @Test def innerJoinWithRightSideFilterStillCorrect(): Unit = {
+    // s.score > 70 should push under the right scan.
+    val left = tmpCsv("l.csv", "id,name\n1,alice\n2,bob\n3,charlie\n")
+    val right = tmpCsv("r.csv", "user_id,score\n1,100\n2,80\n3,50\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.name, s.score FROM u JOIN s ON u.id = s.user_id WHERE s.score > 70 ORDER BY u.id", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq("alice", "bob"), rows.map(_("name")))
+    assertEquals(Seq(100, 80), rows.map(_("score")))
+  }
+
+  @Test def innerJoinWithCrossSideFilterStillCorrect(): Unit = {
+    // u.id + s.score > 100 — references both sides, must stay above the join.
+    val left = tmpCsv("l.csv", "id,name\n1,alice\n2,bob\n3,charlie\n")
+    val right = tmpCsv("r.csv", "user_id,score\n1,100\n2,80\n3,50\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.name, s.score FROM u JOIN s ON u.id = s.user_id WHERE u.id + s.score > 100 ORDER BY u.id", cat)
+    val rows = collectAllRows(q)
+    // u.id + s.score: (1,100)=101>100, (2,80)=82, (3,50)=53. Only alice qualifies.
+    assertEquals(1, rows.size)
+    assertEquals("alice", rows.head("name"))
+  }
+
+  @Test def leftOuterJoinWithRightSideFilterStillKeepsUnmatchedAsNull(): Unit = {
+    // Critical correctness: `WHERE s.score > 60` on a LEFT JOIN must NOT be
+    // pushed into the right child — pushing it would change the result for
+    // unmatched left rows (which should still survive as null-extended, but
+    // become subject to `null > 60` = unknown = filtered out, matching the
+    // post-join filter semantics). The optimizer leaves it above and SQL
+    // behaviour is preserved.
+    //
+    // Expected results: SQL's natural WHERE-filters-null behaviour drops bob
+    // (no match) and charlie (score=50). Only alice (score=100) survives.
+    val left = tmpCsv("l.csv", "id,name\n1,alice\n2,bob\n3,charlie\n")
+    val right = tmpCsv("r.csv", "user_id,score\n1,100\n3,50\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.name, s.score FROM u LEFT JOIN s ON u.id = s.user_id WHERE s.score > 60", cat)
+    val rows = collectAllRows(q)
+    assertEquals(1, rows.size)
+    assertEquals("alice", rows.head("name"))
+    assertEquals(100, rows.head("score"))
+  }
+
+  @Test def leftOuterJoinAntiJoinPatternStillWorks(): Unit = {
+    // WHERE s.user_id IS NULL — the classic anti-join shape. Pushing the
+    // IS NULL into the right child would change its semantics (test the
+    // actual right-side user_id values rather than the null-extended ones
+    // from unmatched left rows). The optimizer keeps it above.
+    val left = tmpCsv("l.csv", "id,name\n1,alice\n2,bob\n3,charlie\n")
+    val right = tmpCsv("r.csv", "user_id,score\n1,100\n3,50\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.name FROM u LEFT JOIN s ON u.id = s.user_id WHERE s.user_id IS NULL", cat)
+    val rows = collectAllRows(q)
+    // Only bob (id=2) lacks a match on the right side.
+    assertEquals(1, rows.size)
+    assertEquals("bob", rows.head("name"))
+  }
+
+  @Test def selfJoinThroughOptimizerStillCorrect(): Unit = {
+    // Self-join with the optimizer's name-based pruning would over-keep
+    // colliding column names — but the RESULT must be correct.
+    val p = tmpCsv("t.csv", "k,x\n1,10\n2,20\n3,30\n")
+    val cat = new Catalog
+    cat.register("t", CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT a.x AS ax, b.x AS bx FROM t a JOIN t b ON a.k = b.k ORDER BY a.k", cat)
+    val rows = collectAllRows(q)
+    assertEquals(3, rows.size)
+    assertEquals(Seq(10, 20, 30), rows.map(_("ax")))
+    assertEquals(Seq(10, 20, 30), rows.map(_("bx")))
+  }
+
   @Test def orderByDescAndLimit(): Unit = {
     val p = tmpCsv("a.csv", "id,score\n1,10\n2,90\n3,30\n4,75\n5,5\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
@@ -973,5 +1072,145 @@ class SqlEngineTest {
     assertEquals(a, rows(2)("sp").asInstanceOf[Double], 1e-9)
     assertEquals(5.0, rows(3)("sp").asInstanceOf[Double], 1e-9)
     assertEquals(5.0, rows(4)("sp").asInstanceOf[Double], 1e-9)
+  }
+
+  // ---- KeyCodec coverage ---------------------------------------------------
+  // Tests below stress every codec path the pipeline-breaking operators pick
+  // — single-Long PackedBytes, multi-Long PackedBytes, ObjectArray with
+  // strings, NULL keys grouping together, multi-column joins with NULLs,
+  // wide DISTINCT.
+
+  @Test def groupByLongOnlyExercisesPackedCodec(): Unit = {
+    // Single Long key → PackedBytesCodec, fast encodeFromBatch path.
+    val p = tmpCsv("a.csv", "k,v\n100,1\n200,2\n100,3\n200,4\n100,5\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT k, SUM(v) AS s, COUNT(*) AS n FROM t GROUP BY k", cat)
+    val rows = collectAllRows(q).sortBy(_("k").asInstanceOf[Int])
+    assertEquals(2, rows.size)
+    assertEquals((100, 9L, 3L), (rows(0)("k"), rows(0)("s"), rows(0)("n")))
+    assertEquals((200, 6L, 2L), (rows(1)("k"), rows(1)("s"), rows(1)("n")))
+  }
+
+  @Test def groupByThreeLongsExercisesPackedCodec(): Unit = {
+    // 3-column packed key → PackedBytesCodec with 24 value bytes + 1 null byte.
+    val p = tmpCsv("a.csv", "a,b,c,v\n1,1,1,10\n1,2,1,20\n1,1,1,30\n2,1,1,40\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT a, b, c, SUM(v) AS s FROM t GROUP BY a, b, c", cat)
+    val rows = collectAllRows(q).sortBy(r =>
+      (r("a").asInstanceOf[Int], r("b").asInstanceOf[Int], r("c").asInstanceOf[Int]))
+    assertEquals(3, rows.size)
+    assertEquals((1, 1, 1, 40L), (rows(0)("a"), rows(0)("b"), rows(0)("c"), rows(0)("s")))
+    assertEquals((1, 2, 1, 20L), (rows(1)("a"), rows(1)("b"), rows(1)("c"), rows(1)("s")))
+    assertEquals((2, 1, 1, 40L), (rows(2)("a"), rows(2)("b"), rows(2)("c"), rows(2)("s")))
+  }
+
+  @Test def groupByLongAndStringExercisesObjectArrayCodec(): Unit = {
+    // Mixed key (String + Long) → ObjectArrayCodec.
+    val p = tmpCsv("a.csv", "cat,k,v\nA,100,1\nB,100,2\nA,100,3\nA,200,4\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT cat, k, SUM(v) AS s FROM t GROUP BY cat, k", cat)
+    val rows = collectAllRows(q).sortBy(r => (r("cat").toString, r("k").asInstanceOf[Int]))
+    assertEquals(3, rows.size)
+    assertEquals(("A", 100, 4L), (rows(0)("cat"), rows(0)("k"), rows(0)("s")))
+    assertEquals(("A", 200, 4L), (rows(1)("cat"), rows(1)("k"), rows(1)("s")))
+    assertEquals(("B", 100, 2L), (rows(2)("cat"), rows(2)("k"), rows(2)("s")))
+  }
+
+  @Test def groupByNullKeysCollapseTogether(): Unit = {
+    // SQL GROUP BY puts all NULLs in one bucket. The packed codec uses a null
+    // bit per column; the object-array codec uses element == null.
+    val p = tmpCsv("a.csv", "cat,v\nA,1\n,2\nA,3\n,4\nB,5\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT cat, SUM(v) AS s FROM t GROUP BY cat", cat)
+    val rows = collectAllRows(q).sortBy(r => Option(r("cat")).map(_.toString).getOrElse("~"))
+    assertEquals(3, rows.size)
+    assertEquals("A", rows(0)("cat")); assertEquals(4L, rows(0)("s"))
+    assertEquals("B", rows(1)("cat")); assertEquals(5L, rows(1)("s"))
+    assertNull(rows(2)("cat"));        assertEquals(6L, rows(2)("s"))
+  }
+
+  @Test def groupByNullPackedKeysCollapseTogether(): Unit = {
+    // Same property on the PackedBytesCodec path (numeric column with NULLs).
+    val p = tmpCsv("a.csv", "k,v\n1,10\n,20\n1,30\n,40\n2,50\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions(
+      inferSchema = false,
+      columns = Some(Seq(Field("k", DataType.LongType), Field("v", DataType.IntType))))))
+    val q = SqlEngine.execute("SELECT k, SUM(v) AS s FROM t GROUP BY k", cat)
+    val rows = collectAllRows(q)
+    val nullRows = rows.filter(r => r("k") == null)
+    val nonNullRows = rows.filter(r => r("k") != null).sortBy(_("k").asInstanceOf[Long])
+    assertEquals(1, nullRows.size)
+    assertEquals(60L, nullRows.head("s"))
+    assertEquals(2, nonNullRows.size)
+    assertEquals(40L, nonNullRows(0)("s")) // k=1: 10+30
+    assertEquals(50L, nonNullRows(1)("s")) // k=2: 50
+  }
+
+  @Test def distinctOverWideMixedSchemaRoundTrips(): Unit = {
+    // 5-column key mixing int, long, string, double, boolean → ObjectArrayCodec.
+    // Two duplicate rows + two distinct rows ⇒ 3 output rows.
+    val p = tmpCsv("a.csv",
+      "i,l,s,d,b\n" +
+      "1,100,alice,1.5,true\n" +
+      "1,100,alice,1.5,true\n" +
+      "2,200,bob,2.5,false\n" +
+      "3,300,charlie,3.5,true\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT DISTINCT i, l, s, d, b FROM t", cat)
+    val rows = collectAllRows(q).sortBy(_("i").asInstanceOf[Int])
+    assertEquals(3, rows.size)
+    assertEquals((1, 100, "alice", 1.5, true),
+      (rows(0)("i"), rows(0)("l"), rows(0)("s"), rows(0)("d"), rows(0)("b")))
+    assertEquals(2, rows(1)("i"))
+    assertEquals("charlie", rows(2)("s"))
+  }
+
+  @Test def distinctOverFixedWidthOnlyExercisesPackedCodec(): Unit = {
+    // No variable-width columns → PackedBytesCodec for the whole-row key.
+    val p = tmpCsv("a.csv", "i,l,b\n1,100,true\n1,100,true\n2,200,false\n2,200,false\n3,300,true\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT DISTINCT i, l, b FROM t", cat)
+    val rows = collectAllRows(q).sortBy(_("i").asInstanceOf[Int])
+    assertEquals(3, rows.size)
+    assertEquals((1, 100, true), (rows(0)("i"), rows(0)("l"), rows(0)("b")))
+    assertEquals((2, 200, false), (rows(1)("i"), rows(1)("l"), rows(1)("b")))
+    assertEquals((3, 300, true), (rows(2)("i"), rows(2)("l"), rows(2)("b")))
+  }
+
+  @Test def joinOnMultiColumnKeyHonorsNullSemantics(): Unit = {
+    // Equi-join on (k1, k2). Rows where any key column is NULL must not match
+    // anything — SQL three-valued logic. The PackedBytesCodec /
+    // ObjectArrayCodec must round-trip the same way the old Seq[Any] keys did.
+    val left = tmpCsv("l.csv",
+      "k1,k2,name\n1,A,alice\n2,B,bob\n3,,charlie\n,A,danny\n")
+    val right = tmpCsv("r.csv",
+      "k1,k2,score\n1,A,100\n2,B,80\n3,A,50\n,A,99\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.name, s.score FROM u JOIN s ON u.k1 = s.k1 AND u.k2 = s.k2 ORDER BY u.name", cat)
+    val rows = collectAllRows(q)
+    assertEquals(2, rows.size)
+    assertEquals(Seq("alice", "bob"), rows.map(_("name")))
+    assertEquals(Seq(100, 80), rows.map(_("score")))
+  }
+
+  @Test def joinOnTwoLongKeysHitsPackedCodec(): Unit = {
+    // Both join columns are integers → PackedBytesCodec on the probe-side
+    // encodeFromBatchSkipIfAnyNull fast path.
+    val left = tmpCsv("l.csv", "a,b,n\n1,10,one\n2,20,two\n3,30,three\n")
+    val right = tmpCsv("r.csv", "a,b,m\n1,10,X\n2,20,Y\n2,21,Z\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT n, m FROM u JOIN s ON u.a = s.a AND u.b = s.b ORDER BY n", cat)
+    val rows = collectAllRows(q)
+    assertEquals(2, rows.size)
+    assertEquals(Seq("one", "two"), rows.map(_("n")))
+    assertEquals(Seq("X", "Y"), rows.map(_("m")))
   }
 }

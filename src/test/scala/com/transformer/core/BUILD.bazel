@@ -9,3 +9,13 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+scala_junit_test(
+    name = "hash_keys_test",
+    srcs = ["HashKeysTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)
