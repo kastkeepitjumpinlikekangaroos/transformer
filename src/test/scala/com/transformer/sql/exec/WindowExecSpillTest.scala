@@ -1,6 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.core.metrics.MetricsNode
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -259,5 +260,28 @@ class WindowExecSpillTest {
     val expected = drainRows(WindowExec(plan, Seq(win)).execute(0), outSchema)
     val actual = drainRows(WindowExec(plan, Seq(win), spillyOpts()).execute(0), outSchema)
     assertEquals(expected, actual)
+  }
+
+  // ---- Sub-plan 2: spill + metrics composition ------------------------------
+
+  @Test def spillAndMetricsComposeReportingNonZeroSpillCounters(): Unit = {
+    val plan = kvPlan(N = 5000, K = 7, seed = 99L)
+    val k = ColRefExpr(0, "k", DataType.IntType)
+    val v = ColRefExpr(1, "v", DataType.LongType)
+    val spec = WindowSpec(Seq(k), Seq((v, true)), WindowFrame.defaultFor(hasOrderBy = true))
+    val win = WindowDef(spec, WindowFnRowNumber(), "rn")
+    val node = new MetricsNode(0, "WindowExec", 0, WindowExec.IdxCounterNames)
+    val w = WindowExec(plan, Seq(win), spillyOpts(), node)
+    val it = w.execute(0)
+    while (it.hasNext) it.next()
+    val snap = node.snapshot()
+    assertTrue(s"partitionSpillEvents must be > 0, got ${snap.counter("partitionSpillEvents")}",
+      snap.counter("partitionSpillEvents") > 0L)
+    assertTrue(s"bytesSpilled must be > 0, got ${snap.counter("bytesSpilled")}",
+      snap.counter("bytesSpilled") > 0L)
+    // Each bucket produces its own partitionCount / peakPartitionRows
+    // accumulation, so the counter reflects sum across buckets.
+    assertTrue(s"partitionCount must be > 0, got ${snap.counter("partitionCount")}",
+      snap.counter("partitionCount") > 0L)
   }
 }

@@ -2,6 +2,8 @@ package com.transformer.core
 
 import java.util.concurrent.atomic.LongAdder
 
+import com.transformer.core.metrics.QueryMetrics
+
 /** Boundary between the job runner and the SQL engine. Implementations live in
   * the `sql` module. The job runner gets one via [[SqlExecutorRegistry]].
   *
@@ -31,12 +33,23 @@ trait SqlExecutor {
   * `rowsProduced` is filled in lazily as batches are pulled; it is safe to
   * read from any thread once all partitions have been drained (it uses a
   * [[LongAdder]] internally).
+  *
+  * Metrics: when the executor was invoked with
+  * [[ExecutionOptions.metricsEnabled]] = true, [[metricsSnapshot]] returns
+  * a fresh [[QueryMetrics]] computed from the underlying operator tree —
+  * call after the partitions have been drained so the counter values are
+  * final. Returns None when metrics were disabled.
   */
 final class ExecutedQuery(
     val schema: Schema,
     partitionSources: IndexedSeq[Iterator[ColumnarBatch]]
 ) {
   private val _rows = new LongAdder()
+
+  // Lazy snapshot supplier. The captured operator tree is mutable and only
+  // settles after the partition iterators have been drained, so we don't
+  // freeze the snapshot at executor construction time.
+  @volatile private var _metricsSupplier: () => QueryMetrics = null
 
   def numPartitions: Int = partitionSources.length
 
@@ -63,6 +76,26 @@ final class ExecutedQuery(
     (0 until numPartitions).iterator.flatMap(partition)
 
   def rowsProduced: Long = _rows.sum()
+
+  /** Hook the SQL engine uses to attach a metrics snapshot supplier. The
+    * supplier is called on demand by [[metricsSnapshot]]; consumers should
+    * call it AFTER the partition iterators have been drained so the counter
+    * values are final. Public so unit tests can verify metrics plumbing
+    * without an end-to-end DataJob run; not part of the user-facing API.
+    */
+  def attachMetrics(supplier: () => QueryMetrics): Unit = {
+    _metricsSupplier = supplier
+  }
+
+  /** Snapshot of per-query metrics. Returns None when metrics were disabled
+    * for this execution (`opts.metricsEnabled = false`). When enabled, each
+    * call materializes a fresh snapshot from the live operator-metrics tree
+    * — callers that snapshot mid-drain see partial counts and that is
+    * intentional. */
+  def metricsSnapshot: Option[QueryMetrics] = {
+    val s = _metricsSupplier
+    if (s == null) None else Some(s())
+  }
 }
 
 object ExecutedQuery {

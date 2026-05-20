@@ -17,6 +17,13 @@ corresponding `src/test/scala/...` target. New behaviour without a test is
 not done — find the relevant target in the [test inventory](#test-inventory)
 below.
 
+The default `bazel test //...` excludes the perf-tagged regression test
+under `//src/test/scala/com/transformer/bench` via the
+`--test_tag_filters=-perf` line in `.bazelrc`. Opt in via
+`bazel test //... --test_tag_filters=perf` after changes that intentionally
+affect engine performance — see [Performance regression guard](#performance-regression-guard)
+below.
+
 **2. Run the jaffle-shop end-to-end example.** It's the largest realistic
 job in the repo (15-task DAG, ~150k rows, full DBT data_test suite) — the
 fastest way to find regressions that unit tests miss (planner edge cases,
@@ -138,7 +145,34 @@ discovery rule).
 | `job/job_output_layout_test` | `JobOutputLayout.detect`: SingleRun when `<dir>/job.json` is a direct child, MultiRun when `<dir>/<sub>/job.json` is present (sorted newest-first by `finishedAt`), Empty for dirs lacking either, skips subdirs without job.json, ignores malformed manifests |
 | `gui/sql_highlighter_test` | The pure-Scala SQL tokenizer in `gui/SqlHighlighter.scala` — null/empty input, case-insensitive keywords + functions, identifier classification, integer/decimal/scientific numerics, single-quoted strings with `''` escape + unterminated, line / block / unclosed-block comments, top-level `{{ template }}` tokens, template inside a string stays a string, punctuation tagging, full SELECT query round-trips losslessly, line splitting preserves content + handles block comments spanning lines, **window-function keywords (OVER/PARTITION/ROWS/UNBOUNDED/PRECEDING/CURRENT/ROW) and RANK as a function** |
 | `gui/result_persister_test` | Interactive-SQL persist path: one part file per source partition with `_run.json` record stamping status=Succeeded + the right row count + format + file list, `csvHeader=false` toggle, `maxPartitions=Some(1)` coalesces multiple partitions into a single part file, unknown format rejected |
+| `core/metrics/metrics_collector_test` | Sub-plan 1 of the instrumentation work — disabled-path identity (planner returns un-wrapped operators given default `ExecutionOptions`), enabled-path shape (`OperatorMetrics` tree for a Scan→Filter→Project query), `TaskMetricsRecord` round-trip including the operator tree + per-task CPU / allocation / GC fields, partial-counts survival on a failed task. Also covers `MetricsCollector.parseBool` semantics + `globalDefault` resolution + ThreadMXBean `isInstanceOf` guard |
+| `core/metrics/operator_counters_test` | Sub-plan 2 — per-operator custom counters across HashAggregate / HashJoin / Sort / Distinct / Window / Scan / Exchange. Index-drift asserts (`IdxCounterNames.length == highest Idx + 1`) for each operator catch counter-array vs index-constant mismatches; per-operator populated-counter tests build a small fixture, drain through a `MetricsNode`, assert `groupCount` / `buildSideRows` / `comparatorCalls` / `partitionCount` / `bytesRead` / `rowsRoutedShard*` populate to the expected values. Covers the spill-on path for HashAggregate too — a tiny-threshold spill fixture asserts non-zero `spillEvents` + `bytesSpilled` |
+| `sql/exec/metrics_plan_wrap_test` | `PhysicalPlanner.plan` wrap path — confirms that when `opts.metricsEnabled = true` every operator in the returned tree carries a `metricsNode`, ids are pre-order indices, and the wrapped tree's `execute(p)` chains through `MeteredIterator`. When `metricsEnabled = false` the planner returns the un-wrapped tree byte-for-byte (object-identity gate on the operator references). |
+| `bench/jaffle_regression_test` | **Perf-tagged.** Opt-in via `bazel test //... --test_tag_filters=perf`. Runs jaffle twice (spill-off and spill-on), parses each iteration's `_perf.json` files, asserts no task's median wall time regressed by more than 20% (spill-off) or 25% (spill-on) against `benchmarks/baseline/jaffle_shop{,_spill}.json`. Excluded from the default `bazel test //...` invocation via `.bazelrc`'s `--test_tag_filters=-perf` because the baselines are machine-dependent — see [Performance regression guard](#performance-regression-guard) |
 
 The other GUI components (`SqlView`, `TaskDetailsPanel`, `DagCanvas`, etc.) have
 no JUnit tests — they're thin UI over engine APIs. Smoke-test by launching
 `bazel-bin/examples/gui_app/gui_app_deploy.jar` and pointing it at a job dir.
+
+## Performance regression guard
+
+[`docs/benchmarking.md`](benchmarking.md) is the full reference for the
+instrumentation framework, microbench harness, macro bench runner, and
+the perf-tagged regression test. Short summary:
+
+- `_perf.json` per task with the operator tree + per-task CPU / allocation /
+  GC deltas. Enable via per-task `options.metrics = "true"`, sysprop
+  `transformer.metrics.enabled`, or env var `TRANSFORMER_METRICS_ENABLED`.
+- Microbenches under `//benchmarks/micro/` (JMH via the programmatic
+  Runner pattern). The most important is `DisabledOverheadBench` which
+  gates the disabled-path overhead at < 1%.
+- Macro bench under `//benchmarks/macro/`: drives the deploy jar N times,
+  aggregates per-task wall-time statistics, diffs against a checked-in
+  baseline. Checked-in baselines: `benchmarks/baseline/jaffle_shop.json`
+  (spill-off) and `benchmarks/baseline/jaffle_shop_spill.json` (spill-on).
+  Polymarket is dev-local (`benchmarks/baseline/local.polymarket.json`,
+  gitignored).
+- `jaffle_regression_test` is the perf-tagged JUnit guard. Opt-in via
+  `--test_tag_filters=perf`. Re-capture baselines after intentional perf
+  changes — see the procedure in
+  [`docs/benchmarking.md` §5](benchmarking.md#5-regression-guard).

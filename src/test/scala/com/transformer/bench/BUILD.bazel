@@ -1,0 +1,45 @@
+load("@rules_scala//scala:scala.bzl", "scala_junit_test")
+
+# Perf-tagged regression guard for the jaffle workload.
+#
+# Tagged `perf` so it's opt-in via `bazel test //... --test_tag_filters=perf`.
+# The default `bazel test //...` invocation does NOT run this — it's slow
+# (~10s in-process per iteration × 5 iterations × 2 modes ≈ 100s) and the
+# baselines it compares against are machine-dependent. Re-capture the
+# baselines via the procedure in docs/benchmarking.md before relying on the
+# regression numbers on a new machine.
+#
+# Pulls in:
+#   - //src/main/scala/com/transformer/job — DataJob.ForceSpillPropertyName +
+#     DirectoryJobLoader for in-process jaffle invocation.
+#   - //src/main/scala/com/transformer/core — TaskMetricsRecord for reading
+#     the `_perf.json` files written into each iteration's output dir.
+#   - //src/main/scala/com/transformer/temporal — TemporalVariables for the
+#     fixed jaffle execution time.
+#   - //benchmarks/macro:macro_bench_lib — MacroBenchRunner.median +
+#     BenchDiff.parseBenchJson. Test-only dep; production code never reaches
+#     for the bench library.
+#   - data = jaffle job files + checked-in baselines, so they live in the
+#     runfiles tree.
+scala_junit_test(
+    name = "jaffle_regression_test",
+    srcs = ["JaffleRegressionTest.scala"],
+    suffixes = ["Test"],
+    # `perf` tag plus the default `--test_tag_filters=-perf` in .bazelrc:
+    # the default `bazel test //...` invocation excludes this target;
+    # opt-in via `bazel test //... --test_tag_filters=perf`. See the
+    # comment in `.bazelrc` for the rationale.
+    tags = ["perf"],
+    size = "large",
+    data = [
+        "//benchmarks/baseline:baseline_files",
+        "//examples/jaffle_shop:jaffle_job_data",
+    ],
+    deps = [
+        "//benchmarks/macro:macro_bench_lib",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/temporal",
+        "@maven//:junit_junit",
+    ],
+)

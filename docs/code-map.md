@@ -77,6 +77,39 @@ navigation hint, not a comprehensive directory listing.
   call site funnels through. Daemon threads, default size `2 × availableProcessors`
   (override via `transformer.scheduler.parallelism` system property or
   `TRANSFORMER_SCHEDULER_PARALLELISM` env var).
+- `core/metrics/` — in-tree instrumentation framework. `MetricsCollector.scala`
+  (global default + ThreadMXBean helpers + GC sample), `MeteredIterator.scala`
+  (the `final class` wrapper applied to operator iterators at planner time),
+  `MetricsNode.scala` (`Array[LongAdder]` counter container, one per
+  operator), `OperatorMetrics.scala` + `QueryMetrics.scala` (immutable
+  snapshots + hand-rolled serializers), `TaskMetricsRecord.scala` (the
+  `_perf.json` on-disk record). `JsonMini.scala` is the stdlib-only JSON
+  reader scoped to this package (the `job/` module's `Json.scala` sits
+  above `core/` in the deps DAG; replicating just enough here keeps the
+  dependency graph one-way). See [docs/benchmarking.md](benchmarking.md)
+  for the consumer-facing surface and [architecture.md §2d](architecture.md#2d-per-operator-instrumentation-opt-in)
+  for the planner-wrap pattern.
+- `benchmarks/micro/` — JMH microbench harness (Pattern B / programmatic
+  Runner). 10 benchmarks covering hot kernels (`KeyCodec`, `ExprEval`,
+  `SortComparator`, `ParquetDecode`, `ColumnarBatch`, `AggStateSerde`,
+  `SpillEstimate`, `ExternalSortMerge`) plus `DisabledOverheadBench`
+  which gates the disabled-path overhead at < 1% and `SmokeBench` for
+  "is JMH wiring alive". JMH artifacts are scoped to this package — no
+  production / example deploy_jar pulls them in.
+- `benchmarks/macro/` — macro-bench runner + diff tool. `MacroBenchRunner`
+  invokes a deploy jar N times via ProcessBuilder with
+  `TRANSFORMER_METRICS_ENABLED=1`, aggregates per-task wall-time stats
+  (median / p95 / stddev) and emits a single result JSON. `BenchDiff`
+  compares two of those JSONs and exits non-zero on regression. Driven
+  by the perf-tagged regression test under
+  `//src/test/scala/com/transformer/bench/` and by the manual baseline
+  regeneration procedure documented in `docs/benchmarking.md`.
+- `benchmarks/baseline/` — checked-in macro-bench baselines.
+  `jaffle_shop.json` (spill-off) and `jaffle_shop_spill.json` (spill-on)
+  are the regression-guard baselines for the jaffle workload;
+  `polymarket.json.example` is a template (the real polymarket baseline
+  is gitignored — `local.polymarket.json`). Re-capture by running the
+  macro bench runner; see `docs/benchmarking.md` for the procedure.
 
 ### Test suites
 

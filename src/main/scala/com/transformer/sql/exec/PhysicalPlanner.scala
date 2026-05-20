@@ -1,6 +1,7 @@
 package com.transformer.sql.exec
 
-import com.transformer.core.{CatalogView, DataType, ExecutionOptions}
+import com.transformer.core.{CatalogView, ColumnarBatch, DataType, ExecutionOptions, Schema}
+import com.transformer.core.metrics.{MeteredIterator, MetricsNode}
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
 
@@ -15,10 +16,41 @@ import scala.collection.mutable
   * `opts` value at construction; today no operator consumes it, so the field
   * is plumbed but functionally inert — Phase 1 of the spill plan is plumbing
   * only.
+  *
+  * Metrics: when `opts.metricsEnabled` is true (Sub-plan 1 of the
+  * instrumentation work), each operator's `execute(p)` is wrapped in a
+  * [[MeteredIterator]] via a one-shot recursive walk in [[plan]]. The
+  * planner-time wrap means the disabled path is a single branch + load
+  * (`if (opts.metricsEnabled)`) and the per-row inner loops are untouched.
+  * Use [[planWithMetrics]] when the caller wants both the wrapped tree and
+  * the root [[MetricsNode]] for snapshotting after the iterator drains.
   */
 object PhysicalPlanner {
 
-  def plan(logical: LogicalPlan, opts: ExecutionOptions = ExecutionOptions.Default): PhysicalPlan = logical match {
+  def plan(logical: LogicalPlan, opts: ExecutionOptions = ExecutionOptions.Default): PhysicalPlan = {
+    val raw = planInner(logical, opts)
+    if (opts.metricsEnabled) wrapWithMetrics(raw)._1 else raw
+  }
+
+  /** Variant of [[plan]] that returns both the planned tree and the root
+    * [[MetricsNode]] for the operator tree. The `MetricsNode` is `Some` iff
+    * `opts.metricsEnabled` is true; when `None` no wrapping was performed
+    * and the caller does not need to capture a tree.
+    *
+    * The returned root carries a pre-order set of child nodes (recursively),
+    * one per `(operator, partition)`. Sub-plan 2 will extend each operator
+    * to hold a reference to its own [[MetricsNode]] so it can populate
+    * custom counters.
+    */
+  def planWithMetrics(logical: LogicalPlan, opts: ExecutionOptions): (PhysicalPlan, Option[MetricsNode]) = {
+    val raw = planInner(logical, opts)
+    if (opts.metricsEnabled) {
+      val (wrapped, node) = wrapWithMetrics(raw)
+      (wrapped, Some(node))
+    } else (raw, None)
+  }
+
+  private def planInner(logical: LogicalPlan, opts: ExecutionOptions): PhysicalPlan = logical match {
     case LogicalScan(_, view, _) => ScanExec(view)
     case LogicalFilter(LogicalScan(name, view, schema), pred) =>
       // Best-effort: try to push the predicate into the scan view. The original
@@ -26,8 +58,8 @@ object PhysicalPlanner {
       // (stats can prove non-matching groups, never prove matching ones).
       val pushed = tryPushdown(view, pred)
       FilterExec(ScanExec(pushed.getOrElse(view)), pred)
-    case LogicalFilter(child, pred) => FilterExec(plan(child, opts), pred)
-    case LogicalProject(child, projs) => ProjectExec(plan(child, opts), projs)
+    case LogicalFilter(child, pred) => FilterExec(planInner(child, opts), pred)
+    case LogicalProject(child, projs) => ProjectExec(planInner(child, opts), projs)
     // Fast path: `SELECT COUNT(*) FROM <view>` with no WHERE, no GROUP BY, no HAVING.
     // The view can answer from metadata (parquet footer, in-memory row count) so
     // we skip the entire scan + per-row aggregation pipeline.
@@ -35,7 +67,7 @@ object PhysicalPlanner {
         if view.exactRowCount.isDefined =>
       CountStarMetadataExec(view.exactRowCount.get, name)
     case LogicalAggregate(child, gks, aggs, _) =>
-      val physChild = plan(child, opts)
+      val physChild = planInner(child, opts)
       if (gks.isEmpty || !shouldShardForSize(child)) {
         // No GROUP BY, OR the estimated input is small enough that the
         // exchange-shard overhead would dominate the per-shard parallelism.
@@ -50,23 +82,23 @@ object PhysicalPlanner {
           HashPartitioner.NullsToLast)
         HashAggregateExec(exchanged, gks, aggs, opts)
       }
-    case LogicalSort(child, keys) => SortExec(plan(child, opts), keys, opts)
+    case LogicalSort(child, keys) => SortExec(planInner(child, opts), keys, opts)
     case LogicalDistinct(child) =>
-      val physChild = plan(child, opts)
+      val physChild = planInner(child, opts)
       if (shouldShardForSize(child)) buildShardedDistinct(physChild, opts)
       else DistinctExec(physChild, opts)
     case LogicalUnion(l, r, all) =>
-      val u = UnionExec(plan(l, opts), plan(r, opts))
+      val u = UnionExec(planInner(l, opts), planInner(r, opts))
       if (all) u
       else if (shouldShardUnion(l, r)) buildShardedDistinct(u, opts)
       else DistinctExec(u, opts)
     case LogicalLimit(child, n) =>
-      val p = plan(child, opts)
+      val p = planInner(child, opts)
       if (p.numPartitions <= 1) LocalLimitExec(p, n)
       else GlobalLimitExec(LocalLimitExec(p, n), n)
     case LogicalJoin(l, r, cond, kind) =>
-      val left = plan(l, opts)
-      val right = plan(r, opts)
+      val left = planInner(l, opts)
+      val right = planInner(r, opts)
       val (leftKeys, rightKeys, extra) = splitEqualityKeys(cond, l.outputSchema.length, r.outputSchema.length)
       if (leftKeys.isEmpty && rightKeys.isEmpty) enforceNestedLoopGuard(l, r)
       val buildRight = shouldBuildRight(l, r, kind)
@@ -89,7 +121,7 @@ object PhysicalPlanner {
         HashJoinExec(leftExch, rightExch, leftKeys, rightKeys, extra, kind, buildRight, opts)
       }
     case LogicalWindow(child, windows) =>
-      val physChild = plan(child, opts)
+      val physChild = planInner(child, opts)
       buildWindow(physChild, child, windows, opts)
   }
 
@@ -287,4 +319,169 @@ object PhysicalPlanner {
     case BinOpExpr("AND", l, r, _) => collectConjuncts(l) ++ collectConjuncts(r)
     case other => Seq(other)
   }
+
+  // ----------------------------------------------------------------------
+  // Metrics wrapping (Sub-plan 1 of the instrumentation work).
+  //
+  // When opts.metricsEnabled is true, [[plan]] runs the raw planner first
+  // (planInner), then post-walks the result to:
+  //   1. Assign each operator a stable pre-order id.
+  //   2. Build a matching MetricsNode tree.
+  //   3. Substitute each operator's children with metered wrappers, so that
+  //      when the parent operator pulls from `child.execute(p)` the iterator
+  //      it sees is a MeteredIterator and the child's counters get populated.
+  //   4. Wrap the operator itself in a MeteredPhysicalPlan so the parent
+  //      (or the SqlEngine, at the root) reads metered output.
+  //
+  // Disabled-path discipline: the only added cost when metricsEnabled is
+  // false is the single `if (opts.metricsEnabled)` branch in [[plan]] above.
+  // No allocation, no traversal, no override calls on the operator interior.
+  // ----------------------------------------------------------------------
+
+  /** Recursively wrap an un-metered plan tree, returning the wrapped root
+    * plus its root metrics node. Mutable accumulator for monotonically
+    * increasing operator ids — pre-order traversal so ids match the natural
+    * read order of `_perf.json`. */
+  private[exec] def wrapWithMetrics(root: PhysicalPlan): (PhysicalPlan, MetricsNode) = {
+    val idCounter = new java.util.concurrent.atomic.AtomicInteger(0)
+    walkAndWrap(root, idCounter)
+  }
+
+  /** Per-operator counter name array used to size [[MetricsNode]] at wrap
+    * time. Each operator that owns custom counters exposes an
+    * `IdxCounterNames` constant in its companion object (Sub-plan 2). New
+    * operators not listed here fall back to an empty array — their
+    * iterator-level counters still populate, just no custom slots. */
+  private def counterNamesFor(plan: PhysicalPlan): Array[String] = plan match {
+    case _: HashAggregateExec => HashAggregateExec.IdxCounterNames
+    case _: HashJoinExec      => HashJoinExec.IdxCounterNames
+    case _: SortExec          => SortExec.IdxCounterNames
+    case _: DistinctExec      => DistinctExec.IdxCounterNames
+    case _: WindowExec        => WindowExec.IdxCounterNames
+    case e: ExchangeExec      => ExchangeExec.counterNamesFor(e.numShards)
+    case _: ScanExec          => ScanExec.IdxCounterNames
+    case _                    => MeteredPlan.EmptyCounterNames
+  }
+
+  private def walkAndWrap(
+      plan: PhysicalPlan,
+      idCounter: java.util.concurrent.atomic.AtomicInteger): (PhysicalPlan, MetricsNode) = {
+    val id = idCounter.getAndIncrement()
+    val name = plan.getClass.getSimpleName
+    val node = new MetricsNode(id, name, partition = 0, counterNames = counterNamesFor(plan))
+    // Wrap children first (pre-order id assignment is already done above).
+    // Pass the node down so each rebuilt operator gets a MetricsNode it can
+    // populate custom counters into. The MeteredPlan wrapper still handles
+    // framework-level row/batch counts via MeteredIterator.
+    val (wrappedPlan, childNodes) = wrapChildren(plan, idCounter, node)
+    node.children = childNodes
+    (new MeteredPlan(wrappedPlan, node), node)
+  }
+
+  /** Rebuild a [[PhysicalPlan]] with its immediate children replaced by
+    * metered wrappers AND with `metricsNode = node` threaded into the
+    * operator's constructor so custom counters reach the same node the
+    * wrapping [[MeteredPlan]] reads at snapshot time. Returns the rebuilt
+    * plan plus the child metrics nodes (already populated with their own
+    * subtrees).
+    *
+    * Pattern-matched per operator: each branch knows the operator's
+    * child-arity and reconstructs the case class with new children. New
+    * operators added in the future need a branch here OR a fallback that
+    * leaves them unwrapped (the default below). Leaving an operator
+    * unwrapped is safe — it just means its children's iterators aren't
+    * metered.
+    */
+  private def wrapChildren(
+      plan: PhysicalPlan,
+      idCounter: java.util.concurrent.atomic.AtomicInteger,
+      node: MetricsNode): (PhysicalPlan, Vector[MetricsNode]) = plan match {
+    case s: ScanExec =>
+      // Leaf — no children to wrap. Rebuild with the metrics node so
+      // ParquetReader-backed views can populate scan-side counters.
+      (ScanExec(s.view, node), Vector.empty)
+    case _: CountStarMetadataExec =>
+      (plan, Vector.empty)
+    case FilterExec(child, pred) =>
+      val (wc, cn) = walkAndWrap(child, idCounter)
+      (FilterExec(wc, pred), Vector(cn))
+    case ProjectExec(child, projs) =>
+      val (wc, cn) = walkAndWrap(child, idCounter)
+      (ProjectExec(wc, projs), Vector(cn))
+    case LocalLimitExec(child, n) =>
+      val (wc, cn) = walkAndWrap(child, idCounter)
+      (LocalLimitExec(wc, n), Vector(cn))
+    case GlobalLimitExec(child, n) =>
+      val (wc, cn) = walkAndWrap(child, idCounter)
+      (GlobalLimitExec(wc, n), Vector(cn))
+    case HashAggregateExec(child, gks, aggs, opts, _) =>
+      val (wc, cn) = walkAndWrap(child, idCounter)
+      (HashAggregateExec(wc, gks, aggs, opts, node), Vector(cn))
+    case HashJoinExec(left, right, lk, rk, extra, kind, br, opts, _) =>
+      val (wl, ln) = walkAndWrap(left, idCounter)
+      val (wr, rn) = walkAndWrap(right, idCounter)
+      (HashJoinExec(wl, wr, lk, rk, extra, kind, br, opts, node), Vector(ln, rn))
+    case SortExec(child, keys, opts, _) =>
+      val (wc, cn) = walkAndWrap(child, idCounter)
+      (SortExec(wc, keys, opts, node), Vector(cn))
+    case DistinctExec(child, opts, _) =>
+      val (wc, cn) = walkAndWrap(child, idCounter)
+      (DistinctExec(wc, opts, node), Vector(cn))
+    case ExchangeExec(child, keys, k, policy, _) =>
+      val (wc, cn) = walkAndWrap(child, idCounter)
+      (ExchangeExec(wc, keys, k, policy, node), Vector(cn))
+    case WindowExec(child, windows, opts, _) =>
+      val (wc, cn) = walkAndWrap(child, idCounter)
+      (WindowExec(wc, windows, opts, node), Vector(cn))
+    case UnionExec(left, right) =>
+      val (wl, ln) = walkAndWrap(left, idCounter)
+      val (wr, rn) = walkAndWrap(right, idCounter)
+      (UnionExec(wl, wr), Vector(ln, rn))
+    case other =>
+      // Future operators land here until they get an explicit branch. The
+      // iterator they emit is still wrapped (by walkAndWrap above), but
+      // their children are not visible to the metrics tree.
+      (other, Vector.empty)
+  }
+}
+
+/** Iterator-wrap delegator placed at planner time over every operator when
+  * `opts.metricsEnabled` is true. Delegates schema and partition count to
+  * the wrapped operator; intercepts `execute(p)` to wrap the returned
+  * iterator in a [[MeteredIterator]].
+  *
+  * The node holds the per-operator-per-partition counter container; the
+  * iterator increments its framework-managed fields (rowsIn / rowsOut /
+  * batches / wallNanos). Custom counters are populated by the operator
+  * itself in Sub-plan 2; here in Sub-plan 1 the node's counter array is
+  * always empty.
+  *
+  * Why a separate class instead of overriding inside each operator: the
+  * disabled path stays byte-for-byte the un-wrapped tree, the wrap pass
+  * runs only when the user opted in, and Sub-plans 2+ remain strictly
+  * additive — each operator gets a constructor arg for its `MetricsNode`,
+  * but the wrap itself stays the same shape.
+  */
+private[exec] final class MeteredPlan(inner: PhysicalPlan, val node: MetricsNode) extends PhysicalPlan {
+  def outputSchema: Schema = inner.outputSchema
+  def numPartitions: Int = inner.numPartitions
+  def execute(partition: Int): Iterator[ColumnarBatch] = {
+    // Partition-aware nodes — Sub-plan 1 records the partition the iterator
+    // was created for. The MetricsNode itself is shared across partitions
+    // because the planner builds one tree; row/batch counters accumulate
+    // across partitions, mirroring the per-partition fan-out today's
+    // operators already use.
+    new MeteredIterator(inner.execute(partition), node)
+  }
+  /** Expose the wrapped plan for tests that need to assert the planner
+    * produced the right shape. */
+  def underlying: PhysicalPlan = inner
+}
+
+private[exec] object MeteredPlan {
+  /** Sub-plan 1's per-operator counter list is empty — only the framework-
+    * managed iterator counters are populated. Sub-plan 2 replaces this with
+    * each operator's own [[CounterNames]] when the operator gains custom
+    * counters. */
+  val EmptyCounterNames: Array[String] = Array.empty
 }

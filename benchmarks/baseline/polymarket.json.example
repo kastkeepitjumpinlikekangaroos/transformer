@@ -1,0 +1,10 @@
+{
+  "_comment": "TEMPLATE ONLY — the real polymarket baseline is dev-local (benchmarks/baseline/local.polymarket.json, gitignored). Polymarket numbers are machine-dependent and need the Kaggle dataset checkout at ~/Downloads/archive/ — they belong in PR descriptions, not the repo. Re-capture locally by running: bazel run //benchmarks/macro:macro_bench_runner -- --workload polymarket --iterations 3 --warmup 1 --output benchmarks/baseline/local.polymarket.json. See docs/benchmarking.md for the full procedure.",
+  "schemaVersion": 1,
+  "workload": "polymarket",
+  "iterations": 3,
+  "warmup": 1,
+  "forceSpill": false,
+  "capturedAt": "1970-01-01T00:00:00Z",
+  "tasks": []
+}

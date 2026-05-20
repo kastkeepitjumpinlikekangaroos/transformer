@@ -1,6 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.core.metrics.MetricsNode
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -247,5 +248,32 @@ class HashJoinSpillTest {
     val (l, r, lk, rk) = longKeyPlans(Seq.empty, Seq.empty)
     val actual = runJoin(l, r, Seq(lk), Seq(rk), JoinKind.Full, spillyOpts())
     assertEquals(Vector.empty[Vector[Any]], actual)
+  }
+
+  // ---- Sub-plan 2: spill + metrics composition ------------------------------
+
+  /** Grace hash + metrics: the operator's MetricsNode must report non-zero
+    * bucket / spill-byte counters. */
+  @Test def graceHashAndMetricsComposeReportingNonZeroBucketCounters(): Unit = {
+    val rng = new Random(99L)
+    val lefts = (0 until 500).map(_ => (rng.nextInt(50), rng.nextLong() & 0xFFFFL))
+    val rights = (0 until 500).map(_ => (rng.nextInt(50), rng.nextLong() & 0xFFFFL))
+    val (l, r, lk, rk) = longKeyPlans(lefts, rights)
+    val node = new MetricsNode(0, "HashJoinExec", 0, HashJoinExec.IdxCounterNames)
+    val j = HashJoinExec(l, r, Seq(lk), Seq(rk), None, JoinKind.Inner,
+      buildRight = true, opts = spillyOpts(), metricsNode = node)
+    val out = (0 until j.numPartitions).iterator.flatMap(j.execute)
+    while (out.hasNext) out.next()
+    val snap = node.snapshot()
+    assertTrue(s"bucketCount must be > 0, got ${snap.counter("bucketCount")}",
+      snap.counter("bucketCount") > 0L)
+    assertTrue(s"bytesSpilledBuild must be > 0, got ${snap.counter("bytesSpilledBuild")}",
+      snap.counter("bytesSpilledBuild") > 0L)
+    assertTrue(s"bytesSpilledProbe must be > 0, got ${snap.counter("bytesSpilledProbe")}",
+      snap.counter("bytesSpilledProbe") > 0L)
+    assertTrue(s"buildSideRows must be > 0, got ${snap.counter("buildSideRows")}",
+      snap.counter("buildSideRows") > 0L)
+    assertTrue(s"probeSideRows must be > 0, got ${snap.counter("probeSideRows")}",
+      snap.counter("probeSideRows") > 0L)
   }
 }

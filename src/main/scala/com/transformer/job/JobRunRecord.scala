@@ -18,6 +18,13 @@ import scala.util.control.NonFatal
   * `runFile` is missing from disk, a task claims data files that aren't
   * there, etc. Surfaced in the GUI's run-log panel so the user notices
   * drift between the manifest and the filesystem.
+  *
+  * The [[perfManifest]] field lists the per-task `_perf.json` paths emitted
+  * by this run when metrics were enabled (Sub-plan 1 of the instrumentation
+  * work). `None` when metrics were disabled on every task — keeps the
+  * default `job.json` shape unchanged for unmetered runs. The macro bench
+  * runner (Sub-plan 4) reads this list to find every `_perf.json` in one
+  * query without re-walking the output tree.
   */
 final case class JobRunRecord(
     schemaVersion: Int,
@@ -27,7 +34,8 @@ final case class JobRunRecord(
     startedAt: Instant,
     finishedAt: Instant,
     tasks: Seq[JobTaskSummary],
-    warnings: Seq[String]
+    warnings: Seq[String],
+    perfManifest: Option[Seq[String]] = None
 )
 
 /** Compact per-task entry in [[JobRunRecord.tasks]]. `runFile` is `Some(path)`
@@ -93,6 +101,11 @@ object JobRunRecord {
         case Some(JsonArray(items)) => items.iterator.map(_.stringValue).toVector
         case _                       => Vector.empty
       }
+      val perfManifest = obj.get("perfManifest") match {
+        case Some(JsonArray(items)) => Some(items.iterator.map(_.stringValue).toVector: Seq[String])
+        case Some(JsonNull)         => None
+        case _                       => None
+      }
       Some(JobRunRecord(
         schemaVersion = obj.get("schemaVersion").map(_.stringValue.toInt).getOrElse(SchemaVersion),
         succeeded = obj.optBool("succeeded", ctx).getOrElse(false),
@@ -101,7 +114,8 @@ object JobRunRecord {
         startedAt = Instant.parse(obj.requiredString("startedAt", ctx)),
         finishedAt = Instant.parse(obj.requiredString("finishedAt", ctx)),
         tasks = tasks,
-        warnings = warnings
+        warnings = warnings,
+        perfManifest = perfManifest
       ))
     } catch {
       case NonFatal(_) => None
@@ -159,8 +173,26 @@ object JobRunRecord {
       }
       sb.append("  ")
     }
-    sb.append("]\n")
-    sb.append("}\n")
+    sb.append("]")
+    r.perfManifest match {
+      case Some(paths) =>
+        sb.append(",\n  \"perfManifest\": [")
+        if (paths.nonEmpty) {
+          sb.append('\n')
+          var k = 0
+          val arr = paths.toIndexedSeq
+          while (k < arr.size) {
+            sb.append("    \"").append(escape(arr(k))).append('"')
+            if (k < arr.size - 1) sb.append(',')
+            sb.append('\n')
+            k += 1
+          }
+          sb.append("  ")
+        }
+        sb.append("]")
+      case None => ()
+    }
+    sb.append('\n').append("}\n")
     sb.toString
   }
 

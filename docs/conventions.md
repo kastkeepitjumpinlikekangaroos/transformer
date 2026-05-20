@@ -86,3 +86,46 @@ specific traps.
   against the non-spill path at a 1-byte threshold. See
   [architecture.md §2c](architecture.md#2c-spill-to-disk-for-breakers-opt-in)
   and `plans/perf/09-spill-to-disk.md`.
+
+## Counter discipline
+
+Per-operator counters wired into the instrumentation framework (see
+[architecture.md §2d](architecture.md#2d-per-operator-instrumentation-opt-in))
+must follow these rules. Deviations get caught by `OperatorCountersTest`
+or by the `DisabledOverheadBench` perf gate; either way it's faster to
+land it right than fix it later.
+
+- **Counters are `Array[LongAdder]`, never `Map[String, Long]`.** Storage
+  is sized at `MetricsNode` construction from the operator's
+  `IdxCounterNames` array. Hash-map storage would re-allocate on every
+  insert and box the names; the array layout keeps inserts allocation-free
+  and the JIT can const-fold the index constants. See
+  `core/metrics/MetricsNode.scala`.
+- **`Idx<Name>: Int` constants live in the operator's companion object,
+  named identically to the JSON key.** Counter constants are
+  `final val IdxName: Int = N` so the JIT can const-fold the array
+  offset; the parallel `IdxCounterNames: Array[String]` ships the names
+  used as keys in `_perf.json`'s counter map. Per-operator unit tests
+  in `OperatorCountersTest` assert
+  `IdxCounterNames.length == highest Idx<Name> + 1` — adding a new
+  counter without bumping the names array trips the test immediately.
+- **No allocation on the per-row hot path.** Counter writes are
+  `if (metricsNode != null) metricsNode.counters(IdxX).add(d)` — one
+  branch, one array load, one `LongAdder.add` (allocation-free in
+  steady state). Don't read `getClass.getSimpleName` or build a
+  formatted string on the hot loop; do that work in
+  `PhysicalPlanner.plan` when the `MetricsNode` is constructed and
+  ship the result via the counter-names array.
+- **`AggStateSerde`'s on-disk format must never change for
+  instrumentation.** Spill files written by a metered run must be
+  binary-compatible with an unmetered restore. Timing instrumentation
+  goes through the additive `SerdeStats` overload that
+  `AggStateSerde.serialize(state, stats)` /
+  `deserialize(bytes, stats)` accept — never inside the encoded bytes.
+- **Disabled-path cost is the most important invariant.** When
+  `opts.metricsEnabled = false`, the operator tree returned by
+  `PhysicalPlanner.plan` must be byte-for-byte the un-wrapped tree
+  it was before this work; the only added cost is one branch +
+  load in `PhysicalPlanner.plan`. The
+  `DisabledOverheadBench` microbench under `benchmarks/micro/` gates
+  this at < 1%.

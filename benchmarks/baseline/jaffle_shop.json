@@ -1,0 +1,862 @@
+{
+  "schemaVersion": 1,
+  "workload": "jaffle",
+  "iterations": 5,
+  "warmup": 1,
+  "forceSpill": false,
+  "capturedAt": "2026-05-20T17:16:40.222942Z",
+  "_comment": "Machine-dependent baseline. Re-capture by running `bazel run //benchmarks/macro:macro_bench_runner -- --workload jaffle --iterations 5 --output benchmarks/baseline/jaffle_shop.json` and committing the result. See docs/benchmarking.md for the full procedure.",
+  "tasks": [
+    {
+      "taskName": "customer_orders_summary",
+      "wallNanosMedian": 50567000,
+      "wallNanosP95": 52204000,
+      "wallNanosStddev": 2204970,
+      "wallNanosSamples": [47092000, 50567000, 48894000, 52204000, 52183000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 935,
+    "rowsOut": 935,
+    "batchesIn": 1,
+    "batchesOut": 1,
+    "wallNanos": 806167,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "HashAggregateExec",
+        "partition": 0,
+        "rowsIn": 935,
+        "rowsOut": 935,
+        "batchesIn": 1,
+        "batchesOut": 1,
+        "wallNanos": 783292,
+        "counters": {
+          "groupCount": 935,
+          "hashMapPeakSize": 935,
+          "keyCodecPath": 2,
+          "mergeNanos": 9958,
+          "partialAggregateNanos": 29865000,
+          "spillEvents": 0,
+          "bytesSpilled": 0,
+          "spillRunsWritten": 0,
+          "spillRunsRead": 0,
+          "serdeWriteNanos": 0,
+          "serdeReadNanos": 0,
+          "mergeFromSpillNanos": 5208,
+          "peakInMemoryBytes": 0
+        },
+        "children": [
+          {
+            "id": 2,
+            "name": "ScanExec",
+            "partition": 0,
+            "rowsIn": 61948,
+            "rowsOut": 61948,
+            "batchesIn": 8,
+            "batchesOut": 8,
+            "wallNanos": 15467998,
+            "counters": {
+              "bytesRead": 3197475,
+              "rowGroupsRead": 1,
+              "rowGroupsSkipped": 0,
+              "predicatePushedDownCount": 0
+            },
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "customers",
+      "wallNanosMedian": 47798000,
+      "wallNanosP95": 53031000,
+      "wallNanosStddev": 2757786,
+      "wallNanosSamples": [47798000, 45637000, 47484000, 48949000, 53031000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 935,
+    "rowsOut": 935,
+    "batchesIn": 1,
+    "batchesOut": 1,
+    "wallNanos": 220499,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "HashJoinExec",
+        "partition": 0,
+        "rowsIn": 935,
+        "rowsOut": 935,
+        "batchesIn": 1,
+        "batchesOut": 1,
+        "wallNanos": 64167,
+        "counters": {
+          "buildSideRows": 935,
+          "probeSideRows": 935,
+          "matchedRows": 935,
+          "unmatchedRows": 0,
+          "buildNanos": 3541958,
+          "probeNanos": 2815542,
+          "keyCodecPath": 2,
+          "bucketCount": 0,
+          "bytesSpilledBuild": 0,
+          "bytesSpilledProbe": 0,
+          "bucketsLoadedNanos": 0,
+          "peakBucketBytes": 0
+        },
+        "children": [
+          {
+            "id": 2,
+            "name": "ScanExec",
+            "partition": 0,
+            "rowsIn": 935,
+            "rowsOut": 935,
+            "batchesIn": 1,
+            "batchesOut": 1,
+            "wallNanos": 355542,
+            "counters": {
+              "bytesRead": 43659,
+              "rowGroupsRead": 1,
+              "rowGroupsSkipped": 0,
+              "predicatePushedDownCount": 0
+            },
+            "children": []
+          },
+          {
+            "id": 3,
+            "name": "ScanExec",
+            "partition": 0,
+            "rowsIn": 935,
+            "rowsOut": 935,
+            "batchesIn": 1,
+            "batchesOut": 1,
+            "wallNanos": 764457,
+            "counters": {
+              "bytesRead": 62505,
+              "rowGroupsRead": 1,
+              "rowGroupsSkipped": 0,
+              "predicatePushedDownCount": 0
+            },
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "locations",
+      "wallNanosMedian": 27913000,
+      "wallNanosP95": 33284000,
+      "wallNanosStddev": 2997190,
+      "wallNanosSamples": [30472000, 27913000, 33284000, 25542000, 27486000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 6,
+    "rowsOut": 6,
+    "batchesIn": 1,
+    "batchesOut": 1,
+    "wallNanos": 3201791,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "ScanExec",
+        "partition": 0,
+        "rowsIn": 6,
+        "rowsOut": 6,
+        "batchesIn": 1,
+        "batchesOut": 1,
+        "wallNanos": 3183959,
+        "counters": {
+          "bytesRead": 565,
+          "rowGroupsRead": 1,
+          "rowGroupsSkipped": 0,
+          "predicatePushedDownCount": 0
+        },
+        "children": []
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "order_items",
+      "wallNanosMedian": 425447000,
+      "wallNanosP95": 461038000,
+      "wallNanosStddev": 19415309,
+      "wallNanosSamples": [420925000, 416658000, 461038000, 425447000, 449303000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 90900,
+    "rowsOut": 90900,
+    "batchesIn": 12,
+    "batchesOut": 12,
+    "wallNanos": 7024541,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "HashJoinExec",
+        "partition": 0,
+        "rowsIn": 90900,
+        "rowsOut": 90900,
+        "batchesIn": 12,
+        "batchesOut": 12,
+        "wallNanos": 6863582,
+        "counters": {
+          "buildSideRows": 10,
+          "probeSideRows": 90900,
+          "matchedRows": 10,
+          "unmatchedRows": 0,
+          "buildNanos": 3450708,
+          "probeNanos": 149883583,
+          "keyCodecPath": 2,
+          "bucketCount": 0,
+          "bytesSpilledBuild": 0,
+          "bytesSpilledProbe": 0,
+          "bucketsLoadedNanos": 0,
+          "peakBucketBytes": 0
+        },
+        "children": [
+          {
+            "id": 2,
+            "name": "HashJoinExec",
+            "partition": 0,
+            "rowsIn": 90900,
+            "rowsOut": 90900,
+            "batchesIn": 12,
+            "batchesOut": 12,
+            "wallNanos": 6323750,
+            "counters": {
+              "buildSideRows": 10,
+              "probeSideRows": 90900,
+              "matchedRows": 10,
+              "unmatchedRows": 0,
+              "buildNanos": 3067875,
+              "probeNanos": 112014958,
+              "keyCodecPath": 2,
+              "bucketCount": 0,
+              "bytesSpilledBuild": 0,
+              "bytesSpilledProbe": 0,
+              "bucketsLoadedNanos": 0,
+              "peakBucketBytes": 0
+            },
+            "children": [
+              {
+                "id": 3,
+                "name": "HashJoinExec",
+                "partition": 0,
+                "rowsIn": 90900,
+                "rowsOut": 90900,
+                "batchesIn": 12,
+                "batchesOut": 12,
+                "wallNanos": 4348249,
+                "counters": {
+                  "buildSideRows": 61948,
+                  "probeSideRows": 90900,
+                  "matchedRows": 61465,
+                  "unmatchedRows": 0,
+                  "buildNanos": 27839916,
+                  "probeNanos": 49511125,
+                  "keyCodecPath": 2,
+                  "bucketCount": 0,
+                  "bytesSpilledBuild": 0,
+                  "bytesSpilledProbe": 0,
+                  "bucketsLoadedNanos": 0,
+                  "peakBucketBytes": 0
+                },
+                "children": [
+                  {
+                    "id": 4,
+                    "name": "ScanExec",
+                    "partition": 0,
+                    "rowsIn": 90900,
+                    "rowsOut": 90900,
+                    "batchesIn": 12,
+                    "batchesOut": 12,
+                    "wallNanos": 31249250,
+                    "counters": {
+                      "bytesRead": 5658805,
+                      "rowGroupsRead": 1,
+                      "rowGroupsSkipped": 0,
+                      "predicatePushedDownCount": 0
+                    },
+                    "children": []
+                  },
+                  {
+                    "id": 5,
+                    "name": "ScanExec",
+                    "partition": 0,
+                    "rowsIn": 61948,
+                    "rowsOut": 61948,
+                    "batchesIn": 8,
+                    "batchesOut": 8,
+                    "wallNanos": 11563875,
+                    "counters": {
+                      "bytesRead": 2994149,
+                      "rowGroupsRead": 1,
+                      "rowGroupsSkipped": 0,
+                      "predicatePushedDownCount": 0
+                    },
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": 6,
+                "name": "ScanExec",
+                "partition": 0,
+                "rowsIn": 10,
+                "rowsOut": 10,
+                "batchesIn": 1,
+                "batchesOut": 1,
+                "wallNanos": 311126,
+                "counters": {
+                  "bytesRead": 1079,
+                  "rowGroupsRead": 1,
+                  "rowGroupsSkipped": 0,
+                  "predicatePushedDownCount": 0
+                },
+                "children": []
+              }
+            ]
+          },
+          {
+            "id": 7,
+            "name": "ScanExec",
+            "partition": 0,
+            "rowsIn": 10,
+            "rowsOut": 10,
+            "batchesIn": 1,
+            "batchesOut": 1,
+            "wallNanos": 280792,
+            "counters": {
+              "bytesRead": 201,
+              "rowGroupsRead": 1,
+              "rowGroupsSkipped": 0,
+              "predicatePushedDownCount": 0
+            },
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "order_items_summary",
+      "wallNanosMedian": 142289000,
+      "wallNanosP95": 198835000,
+      "wallNanosStddev": 34494970,
+      "wallNanosSamples": [198835000, 182150000, 141604000, 113028000, 142289000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 61465,
+    "rowsOut": 61465,
+    "batchesIn": 8,
+    "batchesOut": 8,
+    "wallNanos": 3570831,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "HashAggregateExec",
+        "partition": 0,
+        "rowsIn": 61465,
+        "rowsOut": 61465,
+        "batchesIn": 8,
+        "batchesOut": 8,
+        "wallNanos": 3490959,
+        "counters": {
+          "groupCount": 61465,
+          "hashMapPeakSize": 61465,
+          "keyCodecPath": 2,
+          "mergeNanos": 10584,
+          "partialAggregateNanos": 62020750,
+          "spillEvents": 0,
+          "bytesSpilled": 0,
+          "spillRunsWritten": 0,
+          "spillRunsRead": 0,
+          "serdeWriteNanos": 0,
+          "serdeReadNanos": 0,
+          "mergeFromSpillNanos": 6667,
+          "peakInMemoryBytes": 0
+        },
+        "children": [
+          {
+            "id": 2,
+            "name": "ScanExec",
+            "partition": 0,
+            "rowsIn": 90900,
+            "rowsOut": 90900,
+            "batchesIn": 12,
+            "batchesOut": 12,
+            "wallNanos": 34815666,
+            "counters": {
+              "bytesRead": 6264594,
+              "rowGroupsRead": 1,
+              "rowGroupsSkipped": 0,
+              "predicatePushedDownCount": 0
+            },
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "order_supplies_summary",
+      "wallNanosMedian": 37354000,
+      "wallNanosP95": 41786000,
+      "wallNanosStddev": 3014231,
+      "wallNanosSamples": [41786000, 35562000, 35585000, 37354000, 41203000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 10,
+    "rowsOut": 10,
+    "batchesIn": 1,
+    "batchesOut": 1,
+    "wallNanos": 106167,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "HashAggregateExec",
+        "partition": 0,
+        "rowsIn": 10,
+        "rowsOut": 10,
+        "batchesIn": 1,
+        "batchesOut": 1,
+        "wallNanos": 86500,
+        "counters": {
+          "groupCount": 10,
+          "hashMapPeakSize": 10,
+          "keyCodecPath": 2,
+          "mergeNanos": 13000,
+          "partialAggregateNanos": 9069916,
+          "spillEvents": 0,
+          "bytesSpilled": 0,
+          "spillRunsWritten": 0,
+          "spillRunsRead": 0,
+          "serdeWriteNanos": 0,
+          "serdeReadNanos": 0,
+          "mergeFromSpillNanos": 7583,
+          "peakInMemoryBytes": 0
+        },
+        "children": [
+          {
+            "id": 2,
+            "name": "ScanExec",
+            "partition": 0,
+            "rowsIn": 65,
+            "rowsOut": 65,
+            "batchesIn": 1,
+            "batchesOut": 1,
+            "wallNanos": 2422666,
+            "counters": {
+              "bytesRead": 1521,
+              "rowGroupsRead": 1,
+              "rowGroupsSkipped": 0,
+              "predicatePushedDownCount": 0
+            },
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "orders",
+      "wallNanosMedian": 273131000,
+      "wallNanosP95": 299451000,
+      "wallNanosStddev": 14977057,
+      "wallNanosSamples": [263788000, 262930000, 299451000, 280374000, 273131000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 61948,
+    "rowsOut": 61948,
+    "batchesIn": 8,
+    "batchesOut": 8,
+    "wallNanos": 10076084,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "HashJoinExec",
+        "partition": 0,
+        "rowsIn": 61948,
+        "rowsOut": 61948,
+        "batchesIn": 8,
+        "batchesOut": 8,
+        "wallNanos": 7852874,
+        "counters": {
+          "buildSideRows": 61465,
+          "probeSideRows": 61948,
+          "matchedRows": 61465,
+          "unmatchedRows": 0,
+          "buildNanos": 25682791,
+          "probeNanos": 49278083,
+          "keyCodecPath": 2,
+          "bucketCount": 0,
+          "bytesSpilledBuild": 0,
+          "bytesSpilledProbe": 0,
+          "bucketsLoadedNanos": 0,
+          "peakBucketBytes": 0
+        },
+        "children": [
+          {
+            "id": 2,
+            "name": "ScanExec",
+            "partition": 0,
+            "rowsIn": 61948,
+            "rowsOut": 61948,
+            "batchesIn": 8,
+            "batchesOut": 8,
+            "wallNanos": 19812668,
+            "counters": {
+              "bytesRead": 2994149,
+              "rowGroupsRead": 1,
+              "rowGroupsSkipped": 0,
+              "predicatePushedDownCount": 0
+            },
+            "children": []
+          },
+          {
+            "id": 3,
+            "name": "ScanExec",
+            "partition": 0,
+            "rowsIn": 61465,
+            "rowsOut": 61465,
+            "batchesIn": 8,
+            "batchesOut": 8,
+            "wallNanos": 14472168,
+            "counters": {
+              "bytesRead": 2399687,
+              "rowGroupsRead": 1,
+              "rowGroupsSkipped": 0,
+              "predicatePushedDownCount": 0
+            },
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "products",
+      "wallNanosMedian": 28125000,
+      "wallNanosP95": 33685000,
+      "wallNanosStddev": 4899184,
+      "wallNanosSamples": [33685000, 28595000, 28125000, 21871000, 22393000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 10,
+    "rowsOut": 10,
+    "batchesIn": 1,
+    "batchesOut": 1,
+    "wallNanos": 1051334,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "ScanExec",
+        "partition": 0,
+        "rowsIn": 10,
+        "rowsOut": 10,
+        "batchesIn": 1,
+        "batchesOut": 1,
+        "wallNanos": 977167,
+        "counters": {
+          "bytesRead": 1079,
+          "rowGroupsRead": 1,
+          "rowGroupsSkipped": 0,
+          "predicatePushedDownCount": 0
+        },
+        "children": []
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "stg_customers",
+      "wallNanosMedian": 672198000,
+      "wallNanosP95": 736481000,
+      "wallNanosStddev": 42334064,
+      "wallNanosSamples": [736481000, 666294000, 672198000, 715764000, 629661000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 935,
+    "rowsOut": 935,
+    "batchesIn": 1,
+    "batchesOut": 1,
+    "wallNanos": 787876,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "ScanExec",
+        "partition": 0,
+        "rowsIn": 935,
+        "rowsOut": 935,
+        "batchesIn": 1,
+        "batchesOut": 1,
+        "wallNanos": 4959,
+        "counters": {
+          "bytesRead": 0,
+          "rowGroupsRead": 0,
+          "rowGroupsSkipped": 0,
+          "predicatePushedDownCount": 0
+        },
+        "children": []
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "stg_locations",
+      "wallNanosMedian": 684880000,
+      "wallNanosP95": 750037000,
+      "wallNanosStddev": 42502616,
+      "wallNanosSamples": [750037000, 684880000, 682062000, 734259000, 645222000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 6,
+    "rowsOut": 6,
+    "batchesIn": 1,
+    "batchesOut": 1,
+    "wallNanos": 22375,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "ScanExec",
+        "partition": 0,
+        "rowsIn": 6,
+        "rowsOut": 6,
+        "batchesIn": 1,
+        "batchesOut": 1,
+        "wallNanos": 999,
+        "counters": {
+          "bytesRead": 0,
+          "rowGroupsRead": 0,
+          "rowGroupsSkipped": 0,
+          "predicatePushedDownCount": 0
+        },
+        "children": []
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "stg_order_items",
+      "wallNanosMedian": 249735000,
+      "wallNanosP95": 269966000,
+      "wallNanosStddev": 13651707,
+      "wallNanosSamples": [269966000, 254049000, 231839000, 249735000, 248165000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 90900,
+    "rowsOut": 90900,
+    "batchesIn": 12,
+    "batchesOut": 12,
+    "wallNanos": 139879,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "ScanExec",
+        "partition": 0,
+        "rowsIn": 90900,
+        "rowsOut": 90900,
+        "batchesIn": 12,
+        "batchesOut": 12,
+        "wallNanos": 6247,
+        "counters": {
+          "bytesRead": 0,
+          "rowGroupsRead": 0,
+          "rowGroupsSkipped": 0,
+          "predicatePushedDownCount": 0
+        },
+        "children": []
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "stg_orders",
+      "wallNanosMedian": 372521000,
+      "wallNanosP95": 432420000,
+      "wallNanosStddev": 27834678,
+      "wallNanosSamples": [379682000, 368437000, 364954000, 432420000, 372521000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 61948,
+    "rowsOut": 61948,
+    "batchesIn": 8,
+    "batchesOut": 8,
+    "wallNanos": 14590042,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "ScanExec",
+        "partition": 0,
+        "rowsIn": 61948,
+        "rowsOut": 61948,
+        "batchesIn": 8,
+        "batchesOut": 8,
+        "wallNanos": 13043,
+        "counters": {
+          "bytesRead": 0,
+          "rowGroupsRead": 0,
+          "rowGroupsSkipped": 0,
+          "predicatePushedDownCount": 0
+        },
+        "children": []
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "stg_products",
+      "wallNanosMedian": 685189000,
+      "wallNanosP95": 750580000,
+      "wallNanosStddev": 42866635,
+      "wallNanosSamples": [750580000, 685189000, 681535000, 734437000, 644791000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 10,
+    "rowsOut": 10,
+    "batchesIn": 1,
+    "batchesOut": 1,
+    "wallNanos": 1311875,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "ScanExec",
+        "partition": 0,
+        "rowsIn": 10,
+        "rowsOut": 10,
+        "batchesIn": 1,
+        "batchesOut": 1,
+        "wallNanos": 1000,
+        "counters": {
+          "bytesRead": 0,
+          "rowGroupsRead": 0,
+          "rowGroupsSkipped": 0,
+          "predicatePushedDownCount": 0
+        },
+        "children": []
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "stg_supplies",
+      "wallNanosMedian": 684859000,
+      "wallNanosP95": 749899000,
+      "wallNanosStddev": 42784884,
+      "wallNanosSamples": [749899000, 684859000, 681618000, 734186000, 644307000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 65,
+    "rowsOut": 65,
+    "batchesIn": 1,
+    "batchesOut": 1,
+    "wallNanos": 1568752,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "ScanExec",
+        "partition": 0,
+        "rowsIn": 65,
+        "rowsOut": 65,
+        "batchesIn": 1,
+        "batchesOut": 1,
+        "wallNanos": 750,
+        "counters": {
+          "bytesRead": 0,
+          "rowGroupsRead": 0,
+          "rowGroupsSkipped": 0,
+          "predicatePushedDownCount": 0
+        },
+        "children": []
+      }
+    ]
+  }
+    },
+    {
+      "taskName": "supplies",
+      "wallNanosMedian": 25299000,
+      "wallNanosP95": 30122000,
+      "wallNanosStddev": 4685797,
+      "wallNanosSamples": [30122000, 19162000, 29472000, 22217000, 25299000],
+      "operatorTreeMedian": {
+    "id": 0,
+    "name": "ProjectExec",
+    "partition": 0,
+    "rowsIn": 65,
+    "rowsOut": 65,
+    "batchesIn": 1,
+    "batchesOut": 1,
+    "wallNanos": 1537292,
+    "counters": {},
+    "children": [
+      {
+        "id": 1,
+        "name": "ScanExec",
+        "partition": 0,
+        "rowsIn": 65,
+        "rowsOut": 65,
+        "batchesIn": 1,
+        "batchesOut": 1,
+        "wallNanos": 1526374,
+        "counters": {
+          "bytesRead": 1521,
+          "rowGroupsRead": 1,
+          "rowGroupsSkipped": 0,
+          "predicatePushedDownCount": 0
+        },
+        "children": []
+      }
+    ]
+  }
+    }
+  ]
+}

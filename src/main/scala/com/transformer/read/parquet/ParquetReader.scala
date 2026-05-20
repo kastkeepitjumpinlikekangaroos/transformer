@@ -80,7 +80,24 @@ final class ParquetReader private (
   def readPartition(p: Int): Iterator[ColumnarBatch] = {
     val m = partitions(p)
     new ParquetPartitionIterator(m.hif, schema, batchSize, projectedNames.isDefined,
-      m.startRowGroup, m.endRowGroup, pushdownFilter)
+      m.startRowGroup, m.endRowGroup, pushdownFilter, null)
+  }
+
+  /** Instrumented partition read — funnels per-partition decode statistics
+    * into `recorder`. Behavior is identical to [[readPartition]] otherwise;
+    * the only change is per-row-group / per-batch bookkeeping that bumps
+    * the recorder.
+    *
+    * Called by [[com.transformer.sql.exec.ScanExec]] when metrics are
+    * enabled and the wrapped view is a [[ParquetReader]]. */
+  def readPartitionWithMetrics(p: Int, recorder: ParquetReader.MetricsRecorder): Iterator[ColumnarBatch] = {
+    val m = partitions(p)
+    // Record whether a predicate is pushed down for this partition's reader.
+    // The check fires once per partition; the per-row-group skip counting
+    // happens inside ParquetPartitionIterator's loadNextGroup.
+    if (pushdownFilter.isDefined) recorder.addPredicatePushedDown(1L)
+    new ParquetPartitionIterator(m.hif, schema, batchSize, projectedNames.isDefined,
+      m.startRowGroup, m.endRowGroup, pushdownFilter, recorder)
   }
 
   /** Sum the per-partition row counts already collected from each footer. Used
@@ -128,6 +145,30 @@ final class ParquetReader private (
 }
 
 object ParquetReader {
+  /** Per-partition decode statistics surfaced through
+    * [[ParquetReader.readPartitionWithMetrics]]. Sub-plan 2 wires the
+    * concrete implementation in [[com.transformer.sql.exec.ScanExec]] —
+    * the trait stays in `read.parquet` so it doesn't introduce a reverse
+    * dependency on `sql.exec`.
+    *
+    * All methods are bumped from the partition's own thread (the iterator
+    * is single-threaded per partition). Implementations route bumps to a
+    * `MetricsNode.counters(...).add(n)` against the operator's slot.
+    *
+    * Bytes accounting: we report the row group's compressed size as the IO
+    * cost proxy. Decompressed size would require summing per-column page
+    * metadata at read time and is not currently surfaced through parquet-mr
+    * cheaply enough. */
+  trait MetricsRecorder {
+    def addBytesRead(n: Long): Unit
+    def addRowGroupsRead(n: Long): Unit
+    def addRowGroupsSkipped(n: Long): Unit
+    /** Bumped once per partition iterator when the wrapped reader has a
+      * pushdown filter set. Not per-row-group — the filter is set or unset
+      * for the whole partition. */
+    def addPredicatePushedDown(n: Long): Unit
+  }
+
   private[parquet] def defaultConf: Configuration = {
     val c = new Configuration()
     // Pin local FS — no HDFS, no Hadoop runtime.
@@ -277,7 +318,8 @@ final class ParquetPartitionIterator(
     projected: Boolean = false,
     startRowGroup: Int = 0,
     endRowGroup: Int = Int.MaxValue,
-    pushdownFilter: Option[FilterPredicate] = None
+    pushdownFilter: Option[FilterPredicate] = None,
+    metricsRecorder: ParquetReader.MetricsRecorder = null
 ) extends Iterator[ColumnarBatch] {
 
   // Open once: same handle drives schema lookup, projection pushdown,
@@ -368,6 +410,7 @@ final class ParquetPartitionIterator(
       if (canDrop) {
         // Skip this group's column data without decoding.
         try reader.skipNextRowGroup() catch { case _: Throwable => () }
+        if (metricsRecorder != null) metricsRecorder.addRowGroupsSkipped(1L)
       } else {
         val pages: PageReadStore = reader.readNextRowGroup()
         if (pages == null) {
@@ -389,6 +432,15 @@ final class ParquetPartitionIterator(
         // row group's page buffers are no longer valid once that row group's
         // pages are released.
         java.util.Arrays.fill(stringInternCache.asInstanceOf[Array[AnyRef]], null)
+        if (metricsRecorder != null) {
+          metricsRecorder.addRowGroupsRead(1L)
+          // Compressed bytes for the row group from the footer — cheap and
+          // attributable. Total decompressed size would require summing per-
+          // column page sizes which is expensive; the compressed total is
+          // the practical IO-cost proxy.
+          val block = allBlocks.get(absoluteIdx)
+          metricsRecorder.addBytesRead(block.getCompressedSize)
+        }
         return true
       }
     }

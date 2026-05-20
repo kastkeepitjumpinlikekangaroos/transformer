@@ -1,6 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.core.metrics.MetricsNode
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
 import com.transformer.write.parquet.ParquetWriter
@@ -51,7 +52,8 @@ final case class HashAggregateExec(
     child: PhysicalPlan,
     groupKeys: Seq[(Expr, String)],
     aggregates: Seq[(AggExpr, String)],
-    opts: ExecutionOptions = ExecutionOptions.Default
+    opts: ExecutionOptions = ExecutionOptions.Default,
+    metricsNode: MetricsNode = null
 ) extends PhysicalPlan {
 
   val outputSchema: Schema = Schema(
@@ -85,6 +87,19 @@ final case class HashAggregateExec(
   private val longKeyColIdx: Int =
     if (useLongKey) keyExprs(0).asInstanceOf[ColRefExpr].index else -1
 
+  // Encode which key-encoding path runs for this operator. Stable across the
+  // whole task: per-shard / collapsing chooses the same codec. Surfaced once
+  // at execute() entry into the keyCodecPath counter; downstream consumers
+  // read it from `_perf.json` to attribute time to packed-bytes vs object-
+  // array codec performance under different schemas. See [[HashAggregateExec]]
+  // companion for the Idx<Name> constants.
+  private val keyCodecPathCode: Long = {
+    if (useLongKey) HashAggregateExec.KeyPathLong
+    else if (nKeys == 0) HashAggregateExec.KeyPathPacked  // EmptyKeyCodec — treat as packed (no boxing)
+    else if (keyTypes.forall(KeyCodec.isPackable)) HashAggregateExec.KeyPathPacked
+    else HashAggregateExec.KeyPathObject
+  }
+
   // Effective spill switch: user opted in AND every aggregate is spillable.
   // Mixed-aggregate queries with a CountDistinct fall back to the heap-only
   // path — see plan 09's "CountDistinct fall back" risk.
@@ -95,6 +110,14 @@ final case class HashAggregateExec(
     * paid once per plan, not per task. */
   private lazy val spillThresholdBytes: Long =
     Spill.effectiveThresholdBytes(opts, Scheduler.parallelism)
+
+  // Stamp the constant key-codec path code into the metrics node once at
+  // construction. The path is stable across every partition / shard for a
+  // given operator, so a single write at init avoids redundant per-partition
+  // bookkeeping. See [[HashAggregateExec]] companion for the path codes.
+  if (metricsNode != null) {
+    metricsNode.counters(HashAggregateExec.IdxKeyCodecPath).add(keyCodecPathCode)
+  }
 
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     if (isSharded) executePerShard(partition)
@@ -110,13 +133,34 @@ final case class HashAggregateExec(
     // One final map per shard. No fan-out across child.numPartitions; the
     // exchange already routed rows so each shard's input is key-disjoint.
     val spillDir = if (spillEnabled) Some(Spill.openOperatorDir("agg-shard")) else None
+    val stats = if (metricsNode == null) null else new AggStateSerde.SerdeStats
     if (useLongKey) {
       val pa = partialAggregateLong(partition, spillDir)
-      AggSpiller.foldLongSpillFiles(pa.spillFiles, aggArr, pa.map)
+      val tMerge = if (metricsNode != null) System.nanoTime() else 0L
+      AggSpiller.foldLongSpillFiles(pa.spillFiles, aggArr, pa.map, stats)
+      if (metricsNode != null) {
+        metricsNode.counters(HashAggregateExec.IdxMergeFromSpillNanos).add(System.nanoTime() - tMerge)
+        metricsNode.counters(HashAggregateExec.IdxSpillRunsRead).add(pa.spillFiles.length.toLong)
+        metricsNode.counters(HashAggregateExec.IdxGroupCount).add(pa.map.size.toLong)
+        if (stats != null) {
+          metricsNode.counters(HashAggregateExec.IdxSerdeReadNanos).add(stats.readNanos)
+          metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
+        }
+      }
       wrapWithSpillCleanup(emitLong(pa.map), spillDir)
     } else {
       val pa = partialAggregate(partition, spillDir)
-      AggSpiller.foldCodecSpillFiles(pa.spillFiles, keyCodec, nKeys, aggArr, pa.map)
+      val tMerge = if (metricsNode != null) System.nanoTime() else 0L
+      AggSpiller.foldCodecSpillFiles(pa.spillFiles, keyCodec, nKeys, aggArr, pa.map, stats)
+      if (metricsNode != null) {
+        metricsNode.counters(HashAggregateExec.IdxMergeFromSpillNanos).add(System.nanoTime() - tMerge)
+        metricsNode.counters(HashAggregateExec.IdxSpillRunsRead).add(pa.spillFiles.length.toLong)
+        metricsNode.counters(HashAggregateExec.IdxGroupCount).add(pa.map.size.toLong)
+        if (stats != null) {
+          metricsNode.counters(HashAggregateExec.IdxSerdeReadNanos).add(stats.readNanos)
+          metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
+        }
+      }
       wrapWithSpillCleanup(emit(pa.map), spillDir)
     }
   }
@@ -138,14 +182,28 @@ final case class HashAggregateExec(
         }
       }
     val partials: Seq[PartialAgg] = Scheduler.submitAndAwaitAll(tasks)
+    val tMerge = if (metricsNode != null) System.nanoTime() else 0L
     val merged = partials.map(_.map).reduceOption(merge)
       .getOrElse(new util.LinkedHashMap[AnyRef, Array[AggState]]())
+    if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxMergeNanos).add(System.nanoTime() - tMerge)
     // Fold every partition's spill files into the merged map. The dependency
     // direction is forward: spill files written during ingestion contain
     // partial states that must be combined with anything currently in
     // `merged` for the same key.
+    val stats = if (metricsNode == null) null else new AggStateSerde.SerdeStats
+    val tFoldStart = if (metricsNode != null) System.nanoTime() else 0L
+    var runsRead = 0L
     partials.foreach { p =>
-      AggSpiller.foldCodecSpillFiles(p.spillFiles, keyCodec, nKeys, aggArr, merged)
+      AggSpiller.foldCodecSpillFiles(p.spillFiles, keyCodec, nKeys, aggArr, merged, stats)
+      runsRead += p.spillFiles.length.toLong
+    }
+    if (metricsNode != null) {
+      metricsNode.counters(HashAggregateExec.IdxMergeFromSpillNanos).add(System.nanoTime() - tFoldStart)
+      metricsNode.counters(HashAggregateExec.IdxSpillRunsRead).add(runsRead)
+      if (stats != null) {
+        metricsNode.counters(HashAggregateExec.IdxSerdeReadNanos).add(stats.readNanos)
+        metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
+      }
     }
     // No-GROUP-BY aggregates require one row of output even on empty input
     // (e.g., `COUNT(*) FROM <empty>` → 0). With group keys, an empty input
@@ -153,6 +211,7 @@ final case class HashAggregateExec(
     if (groupKeys.isEmpty && merged.isEmpty) {
       merged.put(keyCodec.encodeBoxed(EmptyKeyBuf), newStates())
     }
+    if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxGroupCount).add(merged.size.toLong)
     wrapWithSpillCleanup(emit(merged), spillDir)
   }
 
@@ -173,10 +232,25 @@ final case class HashAggregateExec(
         }
       }
     val partials = Scheduler.submitAndAwaitAll(tasks)
+    val tMerge = if (metricsNode != null) System.nanoTime() else 0L
     val merged = partials.map(_.map).reduceOption(mergeLong)
       .getOrElse(new LongHashMap[Array[AggState]]())
+    if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxMergeNanos).add(System.nanoTime() - tMerge)
+    val stats = if (metricsNode == null) null else new AggStateSerde.SerdeStats
+    val tFoldStart = if (metricsNode != null) System.nanoTime() else 0L
+    var runsRead = 0L
     partials.foreach { p =>
-      AggSpiller.foldLongSpillFiles(p.spillFiles, aggArr, merged)
+      AggSpiller.foldLongSpillFiles(p.spillFiles, aggArr, merged, stats)
+      runsRead += p.spillFiles.length.toLong
+    }
+    if (metricsNode != null) {
+      metricsNode.counters(HashAggregateExec.IdxMergeFromSpillNanos).add(System.nanoTime() - tFoldStart)
+      metricsNode.counters(HashAggregateExec.IdxSpillRunsRead).add(runsRead)
+      metricsNode.counters(HashAggregateExec.IdxGroupCount).add(merged.size.toLong)
+      if (stats != null) {
+        metricsNode.counters(HashAggregateExec.IdxSerdeReadNanos).add(stats.readNanos)
+        metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
+      }
     }
     wrapWithSpillCleanup(emitLong(merged), spillDir)
   }
@@ -288,10 +362,13 @@ final case class HashAggregateExec(
   }
 
   private def partialAggregate(p: Int, spillDir: Option[OperatorSpillDir]): PartialAgg = {
+    val tStart = if (metricsNode != null) System.nanoTime() else 0L
     val map = new util.LinkedHashMap[AnyRef, Array[AggState]]()
     val spillFiles = mutable.ArrayBuffer.empty[Path]
     val threshold = if (spillDir.isDefined) spillThresholdBytes else Long.MaxValue
     var bytesSinceFlush: Long = 0L
+    var peakMapSize: Long = 0L
+    var peakBytes: Long = 0L
     val it = child.execute(p)
     val keyBuf: Array[Any] = if (keysAreColRefs) null else new Array[Any](nKeys)
     val keyVecsScratch: Array[ColumnVector] = if (keysAreColRefs) null else new Array[ColumnVector](nKeys)
@@ -305,7 +382,11 @@ final case class HashAggregateExec(
     while (it.hasNext) {
       val batch = it.next()
       val nrows = batch.numRows
-      if (spillDir.isDefined) bytesSinceFlush += Spill.estimateBytes(batch)
+      if (spillDir.isDefined) {
+        val est = Spill.estimateBytes(batch)
+        bytesSinceFlush += est
+        if (bytesSinceFlush > peakBytes) peakBytes = bytesSinceFlush
+      }
       if (nrows > 0) {
         val argVecsByAgg = argVecsCache.populate(batch)
         if (groupKeys.isEmpty) {
@@ -363,9 +444,22 @@ final case class HashAggregateExec(
           }
         }
       }
+      // Track peak in-memory map size across the whole partition. Reset on
+      // spill flush below — the metric is "peak resident size", not
+      // "cumulative".
+      val sz = map.size.toLong
+      if (sz > peakMapSize) peakMapSize = sz
       if (bytesSinceFlush >= threshold && spillDir.isDefined && !map.isEmpty) {
         val file = spillDir.get.newSpillFile(".parquet")
-        AggSpiller.writeCodecMap(file, keyCodec, groupKeySchema, aggArr, map)
+        val stats = if (metricsNode == null) null else new AggStateSerde.SerdeStats
+        AggSpiller.writeCodecMap(file, keyCodec, groupKeySchema, aggArr, map, stats)
+        if (metricsNode != null) {
+          val sb = file.toFile.length()
+          metricsNode.counters(HashAggregateExec.IdxSpillEvents).increment()
+          metricsNode.counters(HashAggregateExec.IdxBytesSpilled).add(sb)
+          metricsNode.counters(HashAggregateExec.IdxSpillRunsWritten).increment()
+          if (stats != null) metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
+        }
         map.clear()
         spillFiles += file
         bytesSinceFlush = 0L
@@ -374,6 +468,16 @@ final case class HashAggregateExec(
             s"HashAggregateExec produced ${spillFiles.length} spill runs in partition $p, " +
             s"exceeding spill_max_runs=${opts.spillMaxRuns}.")
       }
+    }
+    if (metricsNode != null) {
+      metricsNode.counters(HashAggregateExec.IdxPartialAggregateNanos).add(System.nanoTime() - tStart)
+      // Use sumThenReset-style probe: peak is a max-reduction across partitions.
+      // `LongAdder.max` doesn't exist; we accumulate the per-partition peak
+      // into the counter so the consumer reads a sum-of-peaks (worst case per
+      // partition). For peak-of-peaks across partitions, divide by partitions
+      // or rely on per-partition observation (Sub-plan 1 reserved that).
+      metricsNode.counters(HashAggregateExec.IdxHashMapPeakSize).add(peakMapSize)
+      metricsNode.counters(HashAggregateExec.IdxPeakInMemoryBytes).add(peakBytes)
     }
     PartialAgg(map, spillFiles.toArray)
   }
@@ -431,19 +535,26 @@ final case class HashAggregateExec(
   // `execute` into `executePerShard`. No cross-shard merge needed.
 
   private def partialAggregateLong(p: Int, spillDir: Option[OperatorSpillDir]): PartialAggLong = {
+    val tStart = if (metricsNode != null) System.nanoTime() else 0L
     // var so we can swap in a fresh map after a spill flush (LongHashMap
     // has no `clear()` and grows in place).
     var map = new LongHashMap[Array[AggState]]()
     val spillFiles = mutable.ArrayBuffer.empty[Path]
     val threshold = if (spillDir.isDefined) spillThresholdBytes else Long.MaxValue
     var bytesSinceFlush: Long = 0L
+    var peakMapSize: Long = 0L
+    var peakBytes: Long = 0L
     val it = child.execute(p)
     val argVecsCache = new ArgVecsCache()
     while (it.hasNext) {
       val batch = it.next()
       val col = batch.column(longKeyColIdx)
       val nrows = batch.numRows
-      if (spillDir.isDefined) bytesSinceFlush += Spill.estimateBytes(batch)
+      if (spillDir.isDefined) {
+        val est = Spill.estimateBytes(batch)
+        bytesSinceFlush += est
+        if (bytesSinceFlush > peakBytes) peakBytes = bytesSinceFlush
+      }
       if (nrows > 0) {
         val argVecsByAgg = argVecsCache.populate(batch)
         var r = 0
@@ -466,9 +577,19 @@ final case class HashAggregateExec(
           r += 1
         }
       }
+      val sz = map.size.toLong
+      if (sz > peakMapSize) peakMapSize = sz
       if (bytesSinceFlush >= threshold && spillDir.isDefined && map.size > 0) {
         val file = spillDir.get.newSpillFile(".parquet")
-        AggSpiller.writeLongMap(file, groupKeySchema.fields(0), aggArr, map)
+        val stats = if (metricsNode == null) null else new AggStateSerde.SerdeStats
+        AggSpiller.writeLongMap(file, groupKeySchema.fields(0), aggArr, map, stats)
+        if (metricsNode != null) {
+          val sb = file.toFile.length()
+          metricsNode.counters(HashAggregateExec.IdxSpillEvents).increment()
+          metricsNode.counters(HashAggregateExec.IdxBytesSpilled).add(sb)
+          metricsNode.counters(HashAggregateExec.IdxSpillRunsWritten).increment()
+          if (stats != null) metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
+        }
         map = new LongHashMap[Array[AggState]]()
         spillFiles += file
         bytesSinceFlush = 0L
@@ -477,6 +598,11 @@ final case class HashAggregateExec(
             s"HashAggregateExec produced ${spillFiles.length} spill runs in partition $p (long key), " +
             s"exceeding spill_max_runs=${opts.spillMaxRuns}.")
       }
+    }
+    if (metricsNode != null) {
+      metricsNode.counters(HashAggregateExec.IdxPartialAggregateNanos).add(System.nanoTime() - tStart)
+      metricsNode.counters(HashAggregateExec.IdxHashMapPeakSize).add(peakMapSize)
+      metricsNode.counters(HashAggregateExec.IdxPeakInMemoryBytes).add(peakBytes)
     }
     PartialAggLong(map, spillFiles.toArray)
   }
@@ -508,6 +634,52 @@ final case class HashAggregateExec(
       }
     }
   }
+}
+
+object HashAggregateExec {
+  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // In-memory path counters: always populated when metrics enabled, regardless
+  // of spill outcome.
+  final val IdxGroupCount: Int             = 0
+  final val IdxHashMapPeakSize: Int        = 1
+  final val IdxKeyCodecPath: Int           = 2
+  final val IdxMergeNanos: Int             = 3
+  final val IdxPartialAggregateNanos: Int  = 4
+  // Spill path counters: zero on sub-threshold workloads. Disjoint index range
+  // so the in-memory + spill counter groups never collide.
+  final val IdxSpillEvents: Int            = 5
+  final val IdxBytesSpilled: Int           = 6
+  final val IdxSpillRunsWritten: Int       = 7
+  final val IdxSpillRunsRead: Int          = 8
+  final val IdxSerdeWriteNanos: Int        = 9
+  final val IdxSerdeReadNanos: Int         = 10
+  final val IdxMergeFromSpillNanos: Int    = 11
+  final val IdxPeakInMemoryBytes: Int      = 12
+
+  /** Path codes written into the `keyCodecPath` counter. Consumers map back
+    * to the named strategy via this table; the codes are stable across
+    * releases. */
+  final val KeyPathLong: Long   = 0L
+  final val KeyPathPacked: Long = 1L
+  final val KeyPathObject: Long = 2L
+
+  /** Name array parallel to the Idx* constants above. Length is asserted to
+    * equal `highest Idx<Name> + 1` in `operator_counters_test.scala` so a
+    * later counter add can't silently leave a gap. */
+  val IdxCounterNames: Array[String] = Array(
+    "groupCount",
+    "hashMapPeakSize",
+    "keyCodecPath",
+    "mergeNanos",
+    "partialAggregateNanos",
+    "spillEvents",
+    "bytesSpilled",
+    "spillRunsWritten",
+    "spillRunsRead",
+    "serdeWriteNanos",
+    "serdeReadNanos",
+    "mergeFromSpillNanos",
+    "peakInMemoryBytes")
 }
 
 // ---------------------------------------------------------------------------
@@ -1349,7 +1521,19 @@ private[exec] object AggSpiller {
       codec: KeyCodec,
       groupKeySchema: Schema,
       aggs: Array[AggExpr],
-      map: java.util.LinkedHashMap[AnyRef, Array[AggState]]): Unit = {
+      map: java.util.LinkedHashMap[AnyRef, Array[AggState]]): Unit =
+    writeCodecMap(file, codec, groupKeySchema, aggs, map, null)
+
+  /** Instrumented variant: timings (when `stats != null`) flow into
+    * `stats.writeNanos`. Bytes written are unchanged; only the caller's
+    * counters see a difference. */
+  def writeCodecMap(
+      file: Path,
+      codec: KeyCodec,
+      groupKeySchema: Schema,
+      aggs: Array[AggExpr],
+      map: java.util.LinkedHashMap[AnyRef, Array[AggState]],
+      stats: AggStateSerde.SerdeStats): Unit = {
     if (map.isEmpty) return
     val outSchema = spillSchema(groupKeySchema, aggs.length)
     val nKeys = groupKeySchema.length
@@ -1367,7 +1551,7 @@ private[exec] object AggSpiller {
           val states = entry.getValue
           var a = 0
           while (a < nAggs) {
-            val bytes = AggStateSerde.serializeBytes(states(a))
+            val bytes = AggStateSerde.serializeBytes(states(a), stats)
             out.column(nKeys + a).asInstanceOf[BinaryVector].set(r, bytes)
             a += 1
           }
@@ -1390,7 +1574,17 @@ private[exec] object AggSpiller {
       codec: KeyCodec,
       nKeys: Int,
       aggs: Array[AggExpr],
-      target: java.util.LinkedHashMap[AnyRef, Array[AggState]]): Unit = {
+      target: java.util.LinkedHashMap[AnyRef, Array[AggState]]): Unit =
+    foldCodecSpillFiles(files, codec, nKeys, aggs, target, null)
+
+  /** Instrumented variant: deserialize time flows into `stats.readNanos`. */
+  def foldCodecSpillFiles(
+      files: Array[Path],
+      codec: KeyCodec,
+      nKeys: Int,
+      aggs: Array[AggExpr],
+      target: java.util.LinkedHashMap[AnyRef, Array[AggState]],
+      stats: AggStateSerde.SerdeStats): Unit = {
     if (files.isEmpty) return
     val nAggs = aggs.length
     val keyBuf = new Array[Any](nKeys)
@@ -1416,7 +1610,7 @@ private[exec] object AggSpiller {
               var a = 0
               while (a < nAggs) {
                 val bytes = batch.column(nKeys + a).asInstanceOf[BinaryVector].get(r)
-                val incoming = AggStateSerde.deserializeBytes(aggs(a), bytes)
+                val incoming = AggStateSerde.deserializeBytes(aggs(a), bytes, stats)
                 existing(a).merge(incoming)
                 a += 1
               }
@@ -1425,7 +1619,7 @@ private[exec] object AggSpiller {
               var a = 0
               while (a < nAggs) {
                 val bytes = batch.column(nKeys + a).asInstanceOf[BinaryVector].get(r)
-                states(a) = AggStateSerde.deserializeBytes(aggs(a), bytes)
+                states(a) = AggStateSerde.deserializeBytes(aggs(a), bytes, stats)
                 a += 1
               }
               target.put(key, states)
@@ -1445,7 +1639,16 @@ private[exec] object AggSpiller {
       file: Path,
       keyField: Field,
       aggs: Array[AggExpr],
-      map: LongHashMap[Array[AggState]]): Unit = {
+      map: LongHashMap[Array[AggState]]): Unit =
+    writeLongMap(file, keyField, aggs, map, null)
+
+  /** Instrumented variant: serialize time flows into `stats.writeNanos`. */
+  def writeLongMap(
+      file: Path,
+      keyField: Field,
+      aggs: Array[AggExpr],
+      map: LongHashMap[Array[AggState]],
+      stats: AggStateSerde.SerdeStats): Unit = {
     if (map.isEmpty) return
     val outSchema = spillSchema(Schema(Vector(keyField)), aggs.length)
     val nAggs = aggs.length
@@ -1463,7 +1666,7 @@ private[exec] object AggSpiller {
           else KeyCodec.writeLongTo(keyCol, r, boxedKey.longValue)
           var a = 0
           while (a < nAggs) {
-            val bytes = AggStateSerde.serializeBytes(states(a))
+            val bytes = AggStateSerde.serializeBytes(states(a), stats)
             out.column(1 + a).asInstanceOf[BinaryVector].set(r, bytes)
             a += 1
           }
@@ -1479,7 +1682,15 @@ private[exec] object AggSpiller {
   def foldLongSpillFiles(
       files: Array[Path],
       aggs: Array[AggExpr],
-      target: LongHashMap[Array[AggState]]): Unit = {
+      target: LongHashMap[Array[AggState]]): Unit =
+    foldLongSpillFiles(files, aggs, target, null)
+
+  /** Instrumented variant: deserialize time flows into `stats.readNanos`. */
+  def foldLongSpillFiles(
+      files: Array[Path],
+      aggs: Array[AggExpr],
+      target: LongHashMap[Array[AggState]],
+      stats: AggStateSerde.SerdeStats): Unit = {
     if (files.isEmpty) return
     val nAggs = aggs.length
     var f = 0
@@ -1501,7 +1712,7 @@ private[exec] object AggSpiller {
               var a = 0
               while (a < nAggs) {
                 val bytes = batch.column(1 + a).asInstanceOf[BinaryVector].get(r)
-                val incoming = AggStateSerde.deserializeBytes(aggs(a), bytes)
+                val incoming = AggStateSerde.deserializeBytes(aggs(a), bytes, stats)
                 existing(a).merge(incoming)
                 a += 1
               }
@@ -1510,7 +1721,7 @@ private[exec] object AggSpiller {
               var a = 0
               while (a < nAggs) {
                 val bytes = batch.column(1 + a).asInstanceOf[BinaryVector].get(r)
-                states(a) = AggStateSerde.deserializeBytes(aggs(a), bytes)
+                states(a) = AggStateSerde.deserializeBytes(aggs(a), bytes, stats)
                 a += 1
               }
               if (isNull) target.putNull(states) else target.put(k, states)

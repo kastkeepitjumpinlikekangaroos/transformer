@@ -12,6 +12,21 @@ scala_junit_test(
     ],
 )
 
+# Sub-plan 1 verification: PhysicalPlanner.plan returns the un-wrapped
+# tree when metricsEnabled is false, wraps every operator in a
+# MeteredPlan when true, and operator counters populate after drain.
+scala_junit_test(
+    name = "metrics_plan_wrap_test",
+    srcs = ["MetricsPlanWrapTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 scala_junit_test(
     name = "sort_exec_test",
     srcs = ["SortExecTest.scala"],
@@ -91,6 +106,7 @@ scala_junit_test(
     deps = [
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
         "@maven//:junit_junit",
     ],
 )

@@ -1,0 +1,54 @@
+load("@rules_scala//scala:scala.bzl", "scala_binary", "scala_library")
+
+# Macro bench harness — Sub-plan 4 of the instrumentation work.
+#
+# Two binaries:
+#   - macro_bench_runner: drives a deploy_jar N times with
+#     TRANSFORMER_METRICS_ENABLED=1, harvests every `_perf.json` via the
+#     job-level `job.json.perfManifest`, aggregates per-task wall-time stats
+#     (median / p95 / stddev) and emits a single result JSON.
+#   - bench_diff: compares two of those result JSONs and exits non-zero on
+#     regression. Used by the perf-tagged regression test
+#     (//src/test/scala/com/transformer/bench:jaffle_regression_test).
+#
+# Both depend ONLY on //src/main/scala/com/transformer/core (for
+# TaskMetricsRecord + QueryMetrics + DataJob.ForceSpillPropertyName) and the
+# stdlib — no new Maven deps, no JMH leak (JMH lives only under
+# //benchmarks/micro/).
+#
+# The runner intentionally uses subprocess invocation (ProcessBuilder against
+# the deploy jar) rather than in-process JaffleShopExample.main, so each
+# iteration starts cold (no JIT carryover, no parquet reader cache reuse) —
+# matching the steady-state cost of a real deploy.
+
+scala_library(
+    name = "macro_bench_lib",
+    srcs = glob(["src/main/scala/**/*.scala"]),
+    # Visible to the perf-tagged regression test under
+    # //src/test/scala/com/transformer/bench, which reuses
+    # `MacroBenchRunner.median` + `BenchDiff.parseBenchJson`. The library
+    # itself is intentionally not depended on by production / example
+    # deploy_jars.
+    visibility = [
+        "//src/test/scala/com/transformer/bench:__pkg__",
+    ],
+    deps = [
+        # TaskMetricsRecord.read + the DataJob.ForceSpillPropertyName constant.
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+    ],
+)
+
+scala_binary(
+    name = "macro_bench_runner",
+    main_class = "com.transformer.bench.MacroBenchRunner",
+    visibility = ["//visibility:public"],
+    runtime_deps = [":macro_bench_lib"],
+)
+
+scala_binary(
+    name = "bench_diff",
+    main_class = "com.transformer.bench.BenchDiff",
+    visibility = ["//visibility:public"],
+    runtime_deps = [":macro_bench_lib"],
+)

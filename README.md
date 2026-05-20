@@ -733,6 +733,34 @@ JDK 21 or newer (tested through JDK 25).
   files in the same view are not validated. Explicit schemas via the
   `inferSchema = false` route avoid this.
 
+## Performance instrumentation
+
+Per-operator metrics are **off by default** — the engine is byte-for-byte the
+un-instrumented baseline. Three opt-in routes:
+
+```bash
+# Global enable via env var (every task in this JVM gets metrics):
+TRANSFORMER_METRICS_ENABLED=1 java -jar bazel-bin/examples/jaffle_shop/jaffle_shop_deploy.jar
+
+# Per-task enable via output.json (wins over the global default):
+# tables/<table>/output.json:
+# { "options": { "metrics": "true" } }
+
+# Or via sysprop:
+java -Dtransformer.metrics.enabled=true -jar ...
+```
+
+When enabled, each task with an `outputFile` writes a sibling `_perf.json` next
+to `_run.json` containing the per-operator counter tree (rows in/out, batches,
+wall nanos, plus operator-specific counters like `groupCount`, `bytesRead`,
+`spillEvents`). The `job.json` manifest gains a `perfManifest` array listing
+every `_perf.json` the run produced so post-processing tools find them in one
+read.
+
+See [docs/benchmarking.md](docs/benchmarking.md) for the full counter inventory,
+the JMH microbench harness under `benchmarks/micro/`, the macro-bench runner
+under `benchmarks/macro/`, and the perf-tagged regression test.
+
 ## Running tests
 
 ```bash

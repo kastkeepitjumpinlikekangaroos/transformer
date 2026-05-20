@@ -1,6 +1,7 @@
 package com.transformer.job
 
 import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, ExecutionOptions, MaterializedView, Scheduler, Schema, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.metrics.{MetricsCollector, TaskMetricsRecord}
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
@@ -298,15 +299,20 @@ final case class DataJob(
     val started = Instant.now()
     val taskName = task.displayName
     var renderedOutputForRecord: Option[(OutputFilePath, String)] = None
+    // Per-task execution knobs (spill, thresholds, metrics) live alongside
+    // writer options inside `OutputFilePath.options`. Tasks with no outputFile
+    // run with [[ExecutionOptions.Default]] (spill + metrics disabled) — they
+    // are memory-only feeders for downstream views.
+    val opts: ExecutionOptions = buildExecutionOptions(task)
+    // Capture per-thread sampling baselines for the task body. The thread that
+    // runs this task body and the thread that signs the metrics snapshot are
+    // the same (the executor's scheduler call), so the per-thread CPU /
+    // allocation reads here are meaningful. GC is process-wide.
+    val tid = Thread.currentThread.getId
+    val cpu0 = if (opts.metricsEnabled) MetricsCollector.currentCpuNanos() else -1L
+    val alloc0 = if (opts.metricsEnabled) MetricsCollector.currentAllocatedBytes(tid) else -1L
+    val gc0 = if (opts.metricsEnabled) MetricsCollector.gcSample() else com.transformer.core.metrics.GcSample.Zero
     try {
-      // Per-task execution knobs (spill, thresholds) live alongside writer
-      // options inside `OutputFilePath.options`. Tasks with no outputFile
-      // run with [[ExecutionOptions.Default]] (spill disabled) — they're
-      // memory-only feeders for downstream views.
-      val opts: ExecutionOptions = task.outputFile match {
-        case Some(ofp) => ExecutionOptions.fromOutputOptions(ofp.options)
-        case None      => ExecutionOptions.Default
-      }
       val q = executor.execute(node.renderedMainSql, catalog, opts)
 
       val writtenOutput: Option[(OutputFilePath, String)] = task.outputFile.map { ofp =>
@@ -335,17 +341,23 @@ final case class DataJob(
         val finished = Instant.now()
         if (failures.nonEmpty) {
           writeValidationFailedRecord(node, writtenOutput, q.rowsProduced, failures, enqueuedAt, started, finished, vars)
-          TaskResult(taskName, TaskStatus.ValidationFailed(failures), q.rowsProduced, outputPath, started, finished, enqueuedAt)
         } else {
           writeSucceededRecord(node, writtenOutput, q.rowsProduced, enqueuedAt, started, finished, vars)
-          TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, finished, enqueuedAt)
         }
+        maybeWritePerfRecord(opts, taskName, writtenOutput, q, vars, enqueuedAt, started, finished,
+          cpu0, alloc0, gc0, tid)
+        if (failures.nonEmpty)
+          TaskResult(taskName, TaskStatus.ValidationFailed(failures), q.rowsProduced, outputPath, started, finished, enqueuedAt)
+        else
+          TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, finished, enqueuedAt)
       } else {
         if (writtenOutput.isEmpty) {
           while (q.batches.hasNext) q.batches.next()
         }
         val finished = Instant.now()
         writeSucceededRecord(node, writtenOutput, q.rowsProduced, enqueuedAt, started, finished, vars)
+        maybeWritePerfRecord(opts, taskName, writtenOutput, q, vars, enqueuedAt, started, finished,
+          cpu0, alloc0, gc0, tid)
         TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, writtenOutput.map(_._2), started, finished, enqueuedAt)
       }
     } catch {
@@ -354,6 +366,88 @@ final case class DataJob(
         val msg = Option(e.getMessage).getOrElse(e.toString)
         writeFailedRecord(node, msg, enqueuedAt, started, finished, vars)
         TaskResult(taskName, TaskStatus.Failed(msg), 0L, None, started, finished, enqueuedAt)
+    }
+  }
+
+  /** Build the per-task [[ExecutionOptions]] from the output config's options
+    * map, applying the global metrics default when the per-task value is
+    * unset.
+    *
+    * Precedence (highest wins): per-task `options.metrics` if explicitly
+    * present in the output config → [[MetricsCollector.globalDefault]]
+    * (from sysprop / env). Tasks without an `outputFile` have nowhere to
+    * carry per-task config; for them metrics enablement comes solely from
+    * the global default.
+    *
+    * The `transformer.macro.force_spill` sysprop flips `spillEnabled = true`
+    * on every task's options when set to `"true"`/`"1"`. Used by the macro
+    * bench runner (benchmarks/macro/) to capture the spill-on baseline
+    * without modifying the underlying job config. Mirrors the global override
+    * pattern that [[MetricsCollector.globalDefault]] uses for metrics: a
+    * single sysprop / env override that overrides every per-task config.
+    * Has no effect when unset (default behaviour: spill comes from per-task
+    * `options.spill` only).
+    */
+  private[job] def buildExecutionOptions(task: SQLTask): ExecutionOptions = task.outputFile match {
+    case Some(ofp) =>
+      val base = ExecutionOptions.fromOutputOptions(ofp.options)
+      val triState = ExecutionOptions.triState(ofp.options, ExecutionOptions.MetricsKey)
+      val metrics =
+        if (triState == ExecutionOptions.UnsetTri) MetricsCollector.globalDefault
+        else triState == ExecutionOptions.TrueTri
+      base.copy(
+        metricsEnabled = metrics,
+        spillEnabled = base.spillEnabled || DataJob.forceSpillFromSysprop)
+    case None =>
+      ExecutionOptions.Default.copy(
+        metricsEnabled = MetricsCollector.globalDefault,
+        spillEnabled = DataJob.forceSpillFromSysprop)
+  }
+
+  /** Write `_perf.json` next to the task's `_run.json` when metrics were
+    * enabled for this task. No-op when [[ExecutionOptions.metricsEnabled]]
+    * is false or when the task has no output directory.
+    *
+    * Failure is swallowed via `try/catch NonFatal` — a failed perf write
+    * must never poison an otherwise-successful task. */
+  private def maybeWritePerfRecord(
+      opts: ExecutionOptions,
+      taskName: String,
+      writtenOutput: Option[(OutputFilePath, String)],
+      q: ExecutedQuery,
+      vars: TemporalVariables,
+      enqueuedAt: Instant,
+      startedAt: Instant,
+      finishedAt: Instant,
+      cpu0: Long,
+      alloc0: Long,
+      gc0: com.transformer.core.metrics.GcSample,
+      threadId: Long
+  ): Unit = {
+    if (!opts.metricsEnabled) return
+    writtenOutput.foreach { case (_, renderedPath) =>
+      try {
+        val cpu1 = MetricsCollector.currentCpuNanos()
+        val alloc1 = MetricsCollector.currentAllocatedBytes(threadId)
+        val gc1 = MetricsCollector.gcSample()
+        val cpuDelta = if (cpu0 < 0L || cpu1 < 0L) -1L else cpu1 - cpu0
+        val allocDelta = if (alloc0 < 0L || alloc1 < 0L) -1L else alloc1 - alloc0
+        val gcDelta = gc1.delta(gc0)
+        val record = TaskMetricsRecord(
+          schemaVersion = TaskMetricsRecord.SchemaVersion,
+          taskName = taskName,
+          executionTime = vars.executionTime,
+          enqueuedAt = enqueuedAt,
+          startedAt = startedAt,
+          finishedAt = finishedAt,
+          query = q.metricsSnapshot,
+          cpuNanos = cpuDelta,
+          allocBytes = allocDelta,
+          gcDeltaCount = gcDelta.count,
+          gcDeltaNanos = gcDelta.nanos
+        )
+        TaskMetricsRecord.write(Paths.get(renderedPath), record)
+      } catch { case NonFatal(_) => () }
     }
   }
 
@@ -675,6 +769,17 @@ final case class DataJob(
           errorMessage = errMsg
         )
       }
+      // perfManifest collects every `_perf.json` actually written under the
+      // tasks' output directories. Populated only when at least one task
+      // emitted a perf record — keeps `job.json`'s default shape unchanged
+      // for unmetered runs.
+      val perfPaths: Vector[String] = results.iterator.flatMap { r =>
+        r.outputPath.flatMap { outPath =>
+          val perfFile = Paths.get(outPath).resolve(TaskMetricsRecord.FileName)
+          if (Files.isRegularFile(perfFile)) Some(perfFile.toString) else None
+        }
+      }.toVector
+      val perfManifest: Option[Seq[String]] = if (perfPaths.nonEmpty) Some(perfPaths) else None
       JobRunRecord.write(target, JobRunRecord(
         schemaVersion = JobRunRecord.SchemaVersion,
         succeeded = succeeded,
@@ -683,7 +788,8 @@ final case class DataJob(
         startedAt = startedAt,
         finishedAt = finishedAt,
         tasks = summaries,
-        warnings = warnings
+        warnings = warnings,
+        perfManifest = perfManifest
       ))
     } catch { case NonFatal(_) => () }
   }
@@ -736,5 +842,32 @@ final case class DataJob(
       cur = cur.getCause
     }
     ""
+  }
+}
+
+object DataJob {
+
+  /** Name of the sysprop the macro bench runner sets to force spill on every
+    * task. See [[buildExecutionOptions]]'s scaladoc for the full contract.
+    *
+    * One concrete consumer: the macro bench runner in `benchmarks/macro/`
+    * captures the spill-on baseline by invoking the deploy jar with
+    * `-Dtransformer.macro.force_spill=true`, which is cheaper than rewriting
+    * every task's `output.json` to add `options.spill = "true"`. */
+  val ForceSpillPropertyName: String = "transformer.macro.force_spill"
+
+  /** Env-var alternative to [[ForceSpillPropertyName]]. Set to `"true"` /
+    * `"1"` to force spill on every task. */
+  val ForceSpillEnvVarName: String = "TRANSFORMER_MACRO_FORCE_SPILL"
+
+  /** Resolved once at class load. True iff [[ForceSpillPropertyName]] or
+    * [[ForceSpillEnvVarName]] parse as truthy. */
+  val forceSpillFromSysprop: Boolean = {
+    val sys = Option(System.getProperty(ForceSpillPropertyName)).map(_.trim).filter(_.nonEmpty)
+    val env = Option(System.getenv(ForceSpillEnvVarName)).map(_.trim).filter(_.nonEmpty)
+    sys.orElse(env).exists { s =>
+      val t = s.toLowerCase
+      t == "true" || t == "1"
+    }
   }
 }

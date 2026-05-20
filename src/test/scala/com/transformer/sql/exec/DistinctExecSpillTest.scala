@@ -1,6 +1,8 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.core.metrics.MetricsNode
+import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
 
@@ -163,5 +165,32 @@ class DistinctExecSpillTest {
       case e: RuntimeException =>
         assertTrue(s"message: ${e.getMessage}", e.getMessage.contains("spill_max_runs"))
     }
+  }
+
+  // ---- Sub-plan 2: spill + metrics composition ------------------------------
+
+  @Test def spillAndMetricsComposeReportingNonZeroSpillCounters(): Unit = {
+    val schema = Schema(Vector(Field("k", DataType.IntType), Field("v", DataType.IntType)))
+    val rng = new Random(31L)
+    val parts = (0 until 4).map { _ =>
+      (0 until 5000).map { _ =>
+        Array[Any](
+          java.lang.Integer.valueOf(rng.nextInt(100)),
+          java.lang.Integer.valueOf(rng.nextInt(100)))
+      }.toVector
+    }.toVector
+    val plan = new InMemoryPlan(schema, parts)
+    val node = new MetricsNode(0, "DistinctExec", 0, DistinctExec.IdxCounterNames)
+    val d = DistinctExec(plan, spillyOpts(), node)
+    val it = (0 until d.numPartitions).iterator.flatMap(d.execute)
+    while (it.hasNext) it.next()
+    val snap = node.snapshot()
+    assertTrue(s"spillEvents must be > 0, got ${snap.counter("spillEvents")}",
+      snap.counter("spillEvents") > 0L)
+    assertTrue(s"bytesSpilled must be > 0, got ${snap.counter("bytesSpilled")}",
+      snap.counter("bytesSpilled") > 0L)
+    assertTrue(s"groupCount must be > 0, got ${snap.counter("groupCount")}",
+      snap.counter("groupCount") > 0L)
+    assertEquals(DistinctExec.KeyPathPacked, snap.counter("keyCodecPath"))
   }
 }

@@ -1,6 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.core.metrics.MetricsNode
 import com.transformer.sql.plan._
 
 import java.util.concurrent.Callable
@@ -61,7 +62,8 @@ final case class ExchangeExec(
     child: PhysicalPlan,
     partitionBy: Seq[Expr],
     numShards: Int,
-    nullPolicy: HashPartitioner.NullPolicy = HashPartitioner.NullsToLast)
+    nullPolicy: HashPartitioner.NullPolicy = HashPartitioner.NullsToLast,
+    metricsNode: MetricsNode = null)
     extends PhysicalPlan {
 
   require(numShards > 0, s"numShards must be positive, got $numShards")
@@ -152,9 +154,22 @@ final case class ExchangeExec(
 
     // 2. Assign every row to a shard. One Int per row.
     val shardOf = new Array[Int](n)
+    var nullKeyRowsHere: Long = 0L
     var r = 0
     while (r < n) {
       shardOf(r) = HashPartitioner.shardIdx(keyVecs, r, numShards, nullPolicy)
+      if (metricsNode != null && nKeys > 0) {
+        // Count rows where at least one partition key is NULL — surfaced as
+        // `keyNullCount`. Only the first nKeys check is cheap because we
+        // already evaluated the key vectors above.
+        var ki = 0
+        var anyNull = false
+        while (ki < nKeys && !anyNull) {
+          if (keyVecs(ki).isNull(r)) anyNull = true
+          ki += 1
+        }
+        if (anyNull) nullKeyRowsHere += 1L
+      }
       r += 1
     }
 
@@ -162,6 +177,19 @@ final case class ExchangeExec(
     val counts = new Array[Int](numShards)
     r = 0
     while (r < n) { counts(shardOf(r)) += 1; r += 1 }
+
+    // Surface counters: keyNullCount + per-shard row counts. The shard slots
+    // are sequentially numbered IdxShard0..IdxShard(K-1) so the consumer can
+    // read skew directly from `_perf.json`.
+    if (metricsNode != null) {
+      if (nullKeyRowsHere > 0L) metricsNode.counters(ExchangeExec.IdxKeyNullCount).add(nullKeyRowsHere)
+      var s = 0
+      while (s < numShards) {
+        val c = counts(s)
+        if (c > 0) metricsNode.counters(ExchangeExec.IdxShardBase + s).add(c.toLong)
+        s += 1
+      }
+    }
 
     // 4. Allocate per-shard output batches. Skip empty shards entirely —
     // ColumnarBatch requires capacity > 0 and downstream operators see
@@ -220,5 +248,33 @@ object ExchangeExec {
       .map(_.trim).filter(_.nonEmpty)
       .flatMap(s => try Some(s.toInt) catch { case _: NumberFormatException => None })
     math.max(1, configured.getOrElse(Scheduler.parallelism))
+  }
+
+  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // ExchangeExec's counter array length depends on the configured shard
+  // count: one slot per shard plus a single `keyNullCount` slot. Sub-plan 1's
+  // OperatorMetrics JSON shape stores each counter as one Long, so we use
+  // individual `IdxShardN` slots rather than encoding the array into a single
+  // counter — the JSON consumer reads them as named keys.
+  //
+  // Layout (length = 1 + numShards):
+  //   [0]                       keyNullCount
+  //   [1 .. numShards]          shard0Rows, shard1Rows, ..., shardN-1 rows
+  final val IdxKeyNullCount: Int = 0
+  final val IdxShardBase: Int    = 1
+
+  /** Produce the IdxCounterNames array for an ExchangeExec with `numShards`
+    * shards. Different instances of ExchangeExec in the same query may have
+    * different shard counts (the planner picks K per breaker), so the array
+    * is per-instance. */
+  def counterNamesFor(numShards: Int): Array[String] = {
+    val names = new Array[String](1 + numShards)
+    names(0) = "keyNullCount"
+    var i = 0
+    while (i < numShards) {
+      names(1 + i) = s"rowsRoutedShard$i"
+      i += 1
+    }
+    names
   }
 }

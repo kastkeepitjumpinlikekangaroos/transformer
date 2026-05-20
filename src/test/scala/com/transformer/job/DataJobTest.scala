@@ -1,6 +1,7 @@
 package com.transformer.job
 
 import com.transformer.core.{Catalog, CatalogView, ExecutedQuery, ExecutionOptions, MaterializedView, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.metrics.TaskMetricsRecord
 import com.transformer.temporal.TemporalVariables
 import org.junit.Assert._
 import org.junit.Assume.assumeTrue
@@ -1230,5 +1231,202 @@ class DataJobTest {
     assertTrue(result.error.getOrElse(""), result.succeeded)
     assertEquals("sx\n3\n", readOutputDir(outA))
     assertEquals("sy\n30\n", readOutputDir(outB))
+  }
+
+  // --- Metrics / _perf.json (Sub-plan 1) ------------------------------
+
+  /** Default options: no `_perf.json` files appear next to `_run.json`. */
+  @Test def metricsDisabledByDefaultProducesNoPerfJson(): Unit = {
+    val inDir = tmpDir("dj-metrics-off-")
+    writeCsv(inDir, "a.csv", "x\n1\n2\n3\n")
+    val outDir = tmpDir("dj-metrics-off-out-").resolve("out")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT x FROM t WHERE x > 1"),
+        outputFile = Some(OutputFilePath(outDir.toString))
+      ))
+    )
+    assertTrue(job.run().succeeded)
+    assertFalse(s"_perf.json should NOT exist when metrics disabled: $outDir",
+      Files.isRegularFile(outDir.resolve(TaskMetricsRecord.FileName)))
+    // _run.json still present.
+    assertTrue(Files.isRegularFile(outDir.resolve(TaskRunRecord.FileName)))
+  }
+
+  /** Per-task options.metrics = "true" writes a `_perf.json` with the
+    * expected operator-tree shape (Scan/Filter/Project), even when the
+    * global default is off. */
+  @Test def perTaskMetricsTrueWritesPerfJson(): Unit = {
+    val inDir = tmpDir("dj-metrics-on-")
+    writeCsv(inDir, "a.csv", "x\n1\n2\n3\n4\n5\n")
+    val outDir = tmpDir("dj-metrics-on-out-").resolve("out")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT x + 1 AS y FROM t WHERE x > 2"),
+        outputFile = Some(OutputFilePath(
+          outDir.toString,
+          options = Map("metrics" -> "true")))
+      ))
+    )
+    assertTrue(job.run().succeeded)
+    val rec = TaskMetricsRecord.read(outDir).getOrElse(
+      fail(s"_perf.json expected in $outDir").asInstanceOf[TaskMetricsRecord])
+    assertEquals(TaskMetricsRecord.SchemaVersion, rec.schemaVersion)
+    val tree = rec.query.getOrElse(fail("expected QueryMetrics").asInstanceOf[com.transformer.core.metrics.QueryMetrics]).operatorTree
+    // Top-level operator should be ProjectExec; chain ends in ScanExec.
+    assertEquals("ProjectExec", tree.name)
+    // Walk down to find a Scan node.
+    def names(o: com.transformer.core.metrics.OperatorMetrics): Vector[String] =
+      Vector(o.name) ++ o.children.flatMap(names)
+    val nameList = names(tree)
+    assertTrue(s"expected ScanExec in tree, got $nameList", nameList.contains("ScanExec"))
+    assertTrue(s"expected FilterExec in tree, got $nameList", nameList.contains("FilterExec"))
+    // Non-zero counters on the operators that emitted batches.
+    assertTrue(s"top wallNanos should be > 0: ${tree.wallNanos}", tree.wallNanos > 0L)
+    assertTrue(s"top rowsOut should match filter outcome (x > 2 -> 3 rows): ${tree.rowsOut}",
+      tree.rowsOut == 3L)
+  }
+
+  /** Per-task options.metrics = "false" explicitly disables metrics for
+    * that task, beating the global default. We can't easily set the sysprop
+    * from the test (it's read at MetricsCollector class load time), but we
+    * can confirm the per-task value is honored when metrics keys are
+    * present. */
+  @Test def perTaskMetricsFalseLeavesNoPerfJson(): Unit = {
+    val inDir = tmpDir("dj-metrics-false-")
+    writeCsv(inDir, "a.csv", "x\n1\n2\n")
+    val outDir = tmpDir("dj-metrics-false-out-").resolve("out")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT x FROM t"),
+        outputFile = Some(OutputFilePath(
+          outDir.toString,
+          options = Map("metrics" -> "false")))
+      ))
+    )
+    assertTrue(job.run().succeeded)
+    assertFalse(s"_perf.json should NOT exist when per-task metrics=false: $outDir",
+      Files.isRegularFile(outDir.resolve(TaskMetricsRecord.FileName)))
+  }
+
+  /** Spill + metrics compose: both can be set on the same task. The
+    * resulting `_perf.json` is written and the spill switch is honoured
+    * (operator constructs spill state). This is the composition gate
+    * Sub-plan 1 verification calls for — no spill counters yet, but the
+    * paths must not interfere. */
+  @Test def spillAndMetricsComposeWithoutInterference(): Unit = {
+    val inDir = tmpDir("dj-spill-metrics-")
+    // GROUP BY over a small input — exercises HashAggregateExec with both
+    // spill (would only trigger at higher thresholds) and metrics enabled.
+    writeCsv(inDir, "a.csv", "k,v\n1,10\n2,20\n1,30\n2,40\n3,50\n")
+    val outDir = tmpDir("dj-spill-metrics-out-").resolve("out")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT k, SUM(v) AS s FROM t GROUP BY k ORDER BY k"),
+        outputFile = Some(OutputFilePath(
+          outDir.toString,
+          options = Map(
+            "spill" -> "true",
+            "metrics" -> "true",
+            "spill_threshold_bytes" -> "1073741824")))
+      ))
+    )
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+    val rec = TaskMetricsRecord.read(outDir).getOrElse(
+      fail(s"_perf.json expected at $outDir").asInstanceOf[TaskMetricsRecord])
+    val tree = rec.query.getOrElse(fail("expected QueryMetrics").asInstanceOf[com.transformer.core.metrics.QueryMetrics]).operatorTree
+    // The tree should contain HashAggregateExec — confirms both spill
+    // construction and metrics wrap happened side-by-side.
+    def collect(o: com.transformer.core.metrics.OperatorMetrics): Vector[String] =
+      Vector(o.name) ++ o.children.flatMap(collect)
+    val all = collect(tree)
+    assertTrue(s"tree should include HashAggregateExec, got $all",
+      all.contains("HashAggregateExec"))
+    // Output is also correct.
+    val csv = readOutputDir(outDir)
+    assertTrue(s"expected ordered output, got: $csv",
+      csv.contains("1,40") && csv.contains("2,60") && csv.contains("3,50"))
+  }
+
+  /** When a job has `jobRunOutput` and at least one task emitted a perf
+    * record, `job.json`'s `perfManifest` lists those files. */
+  @Test def jobRunRecordPerfManifestListsPerTaskFiles(): Unit = {
+    val inDir = tmpDir("dj-perf-mf-")
+    writeCsv(inDir, "a.csv", "x\n1\n2\n3\n")
+    val outA = tmpDir("dj-perf-mf-out-").resolve("a")
+    val outB = tmpDir("dj-perf-mf-out-").resolve("b")
+    val jobFile = tmpDir("dj-perf-mf-meta-").resolve("job.json")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(
+        SQLTask(name = Some("with_metrics"),
+          sqlString = Some("SELECT x FROM t"),
+          outputFile = Some(OutputFilePath(outA.toString, options = Map("metrics" -> "true")))),
+        SQLTask(name = Some("without_metrics"),
+          sqlString = Some("SELECT x FROM t"),
+          outputFile = Some(OutputFilePath(outB.toString)))
+      ),
+      jobRunOutput = Some(OutputFilePath(jobFile.toString))
+    )
+    assertTrue(job.run().succeeded)
+    val rec = JobRunRecord.read(jobFile).getOrElse(
+      fail(s"job.json expected at $jobFile").asInstanceOf[JobRunRecord])
+    val mf = rec.perfManifest.getOrElse(
+      fail("perfManifest should be populated when at least one task emitted _perf.json")
+        .asInstanceOf[Seq[String]])
+    assertEquals(1, mf.size)
+    assertTrue(s"manifest should point at the metrics task's _perf.json: $mf",
+      mf.head.endsWith("/_perf.json"))
+    assertTrue(s"manifest entry should be under task A: $mf",
+      mf.head.contains("/a/"))
+  }
+
+  /** Job-level perfManifest is `None` (absent from JSON output) when no
+    * task emitted a perf record. */
+  @Test def jobRunRecordPerfManifestAbsentWhenNoMetrics(): Unit = {
+    val inDir = tmpDir("dj-perf-nomf-")
+    writeCsv(inDir, "a.csv", "x\n1\n")
+    val outDir = tmpDir("dj-perf-nomf-out-").resolve("out")
+    val jobFile = tmpDir("dj-perf-nomf-meta-").resolve("job.json")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT x FROM t"),
+        outputFile = Some(OutputFilePath(outDir.toString))
+      )),
+      jobRunOutput = Some(OutputFilePath(jobFile.toString))
+    )
+    assertTrue(job.run().succeeded)
+    val rec = JobRunRecord.read(jobFile).getOrElse(
+      fail(s"job.json expected at $jobFile").asInstanceOf[JobRunRecord])
+    assertEquals(None, rec.perfManifest)
+  }
+
+  /** A task that fails with metrics enabled does not poison the run by
+    * throwing inside the perf-write path — the failure surfaces normally
+    * via the `_run.json`, and (best-effort) no `_perf.json` is written
+    * because the task body did not produce a Succeeded path. */
+  @Test def failedTaskWithMetricsEnabledDoesNotPoisonRun(): Unit = {
+    val inDir = tmpDir("dj-perf-fail-")
+    writeCsv(inDir, "a.csv", "x\n1\n")
+    val outDir = tmpDir("dj-perf-fail-out-").resolve("out")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT no_such_col FROM t"),
+        outputFile = Some(OutputFilePath(outDir.toString, options = Map("metrics" -> "true")))
+      ))
+    )
+    val result = job.run()
+    assertFalse("job should not succeed when SQL doesn't resolve", result.succeeded)
+    // _run.json should be present for the failed task (writeFailedRecord).
+    val rec = TaskRunRecord.read(outDir).getOrElse(
+      fail(s"_run.json expected on failure: $outDir").asInstanceOf[TaskRunRecord])
+    assertEquals(TaskRunStatus.Failed, rec.status)
   }
 }

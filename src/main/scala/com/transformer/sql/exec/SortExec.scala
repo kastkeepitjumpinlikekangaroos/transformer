@@ -1,6 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.core.metrics.MetricsNode
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
 import com.transformer.write.parquet.ParquetWriter
@@ -39,7 +40,8 @@ import scala.collection.mutable
 final case class SortExec(
     child: PhysicalPlan,
     keys: Seq[(Expr, Boolean)],
-    opts: ExecutionOptions = ExecutionOptions.Default
+    opts: ExecutionOptions = ExecutionOptions.Default,
+    metricsNode: MetricsNode = null
 ) extends PhysicalPlan {
   def outputSchema: Schema = child.outputSchema
   def numPartitions: Int = 1
@@ -85,6 +87,7 @@ final case class SortExec(
     val buf = mutable.ArrayBuffer.empty[Array[Any]]
     val tracksBytes = spillDir.isDefined
     var bufBytes: Long = 0L
+    var inputRowsHere: Long = 0L
     val runs = mutable.ArrayBuffer.empty[Path]
     val it = child.execute(p)
     while (it.hasNext) {
@@ -105,8 +108,14 @@ final case class SortExec(
         buf += arr
         r += 1
       }
+      inputRowsHere += b.numRows.toLong
       if (bufBytes >= threshold && buf.length > 0 && spillDir.isDefined) {
         flushRun(buf, runs, spillDir.get, schema)
+        if (metricsNode != null) {
+          val sb = runs.last.toFile.length()
+          metricsNode.counters(SortExec.IdxRunsWritten).increment()
+          metricsNode.counters(SortExec.IdxBytesSpilled).add(sb)
+        }
         bufBytes = 0L
         if (runs.length > opts.spillMaxRuns)
           throw new RuntimeException(
@@ -116,6 +125,7 @@ final case class SortExec(
       }
     }
     val sorted = sortBuffer(buf)
+    if (metricsNode != null) metricsNode.counters(SortExec.IdxInputRows).add(inputRowsHere)
     SortExec.PartitionResult(inMemory = sorted, diskRuns = runs.toArray)
   }
 
@@ -207,28 +217,44 @@ final case class SortExec(
     // up front, so when any partition spilled we skip the optimization.
     if (!anyDiskRuns && numCursors == 1) {
       val res = closeCursorAndUseUnderlying(cursorList(0))
+      if (metricsNode != null) {
+        metricsNode.counters(SortExec.IdxPath).add(SortExec.PathSmallN)
+        metricsNode.counters(SortExec.IdxOutputRows).add(res.length.toLong)
+      }
       val it = emit(res)
       return wrapWithSpillCleanup(it, spillDir)
     }
     if (!anyDiskRuns && total < SortExec.SmallNThreshold) {
       val arrs = cursorList.iterator.map(closeCursorAndUseUnderlying).toIndexedSeq
+      if (metricsNode != null) {
+        metricsNode.counters(SortExec.IdxPath).add(SortExec.PathSmallN)
+        metricsNode.counters(SortExec.IdxOutputRows).add(total)
+      }
       val it = smallNSortAndEmit(arrs, total.toInt)
       return wrapWithSpillCleanup(it, spillDir)
     }
 
     val ord = rowOrdering
     val cursors = cursorList.toArray
+    if (metricsNode != null) {
+      metricsNode.counters(SortExec.IdxPath).add(SortExec.PathKWay)
+      metricsNode.counters(SortExec.IdxMergeRunsActive).add(numCursors.toLong)
+    }
     val heapCmp = new java.util.Comparator[java.lang.Integer] {
-      def compare(a: java.lang.Integer, b: java.lang.Integer): Int =
+      def compare(a: java.lang.Integer, b: java.lang.Integer): Int = {
+        if (metricsNode != null) metricsNode.counters(SortExec.IdxComparatorCalls).increment()
         ord.compare(cursors(a.intValue).current(), cursors(b.intValue).current())
+      }
     }
     val heap = new java.util.PriorityQueue[java.lang.Integer](numCursors, heapCmp)
     var i = 0
     while (i < numCursors) { heap.add(java.lang.Integer.valueOf(i)); i += 1 }
 
+    val tMergeStart = if (metricsNode != null) System.nanoTime() else 0L
     val capacity = ColumnarBatch.DefaultCapacity
     val mergedIt = new Iterator[ColumnarBatch] {
       private var done = false
+      private var outputRowsLocal: Long = 0L
       def hasNext: Boolean = !done && !heap.isEmpty
       def next(): ColumnarBatch = {
         if (done || heap.isEmpty)
@@ -244,12 +270,23 @@ final case class SortExec(
             if (row(c) == null) out.column(c).setNull(r) else out.column(c).setBoxed(r, row(c))
             c += 1
           }
-          if (cur.advance()) heap.add(java.lang.Integer.valueOf(cIdx))
+          val tDec = if (metricsNode != null && cur.isInstanceOf[DiskRunCursor]) System.nanoTime() else 0L
+          val advanced = cur.advance()
+          if (metricsNode != null && tDec != 0L)
+            metricsNode.counters(SortExec.IdxRunDecodeNanos).add(System.nanoTime() - tDec)
+          if (advanced) heap.add(java.lang.Integer.valueOf(cIdx))
           else cur.close()
           r += 1
         }
         out.setNumRows(r)
-        if (heap.isEmpty) done = true
+        outputRowsLocal += r.toLong
+        if (heap.isEmpty) {
+          done = true
+          if (metricsNode != null) {
+            metricsNode.counters(SortExec.IdxMergeNanos).add(System.nanoTime() - tMergeStart)
+            metricsNode.counters(SortExec.IdxOutputRows).add(outputRowsLocal)
+          }
+        }
         out
       }
     }
@@ -359,6 +396,36 @@ object SortExec {
     * buffer instead of the heap merge. Heap startup + per-batch allocation
     * outweighs the merge savings on tiny inputs. */
   private[exec] val SmallNThreshold: Int = 4096
+
+  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // In-memory path counters.
+  final val IdxComparatorCalls: Int = 0
+  final val IdxInputRows: Int       = 1
+  final val IdxOutputRows: Int      = 2
+  final val IdxPath: Int            = 3
+  // External-merge counters.
+  final val IdxRunsWritten: Int     = 4
+  final val IdxBytesSpilled: Int    = 5
+  final val IdxMergeRunsActive: Int = 6
+  final val IdxMergeNanos: Int      = 7
+  final val IdxRunDecodeNanos: Int  = 8
+
+  /** Path codes written into the `path` counter. */
+  final val PathSmallN: Long = 0L
+  final val PathKWay: Long   = 1L
+
+  /** Name array parallel to the Idx* constants above. Asserted length =
+    * `highest Idx<Name> + 1` in `operator_counters_test.scala`. */
+  val IdxCounterNames: Array[String] = Array(
+    "comparatorCalls",
+    "inputRows",
+    "outputRows",
+    "path",
+    "runsWritten",
+    "bytesSpilled",
+    "mergeRunsActive",
+    "mergeNanos",
+    "runDecodeNanos")
 
   /** Result of `sortPartition`: the in-memory sorted tail plus the paths
     * of any on-disk runs flushed mid-stream. */

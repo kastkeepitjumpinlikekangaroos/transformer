@@ -23,3 +23,10 @@ validation_results/
 .DS_Store
 
 examples/directory_app/job/output
+
+# Dev-local macro-bench baselines (e.g. polymarket numbers, which depend on
+# the Kaggle dataset checkout at ~/Downloads/archive/). The checked-in
+# baselines under benchmarks/baseline/ are the spill-off / spill-on jaffle
+# baselines + the polymarket.json.example template; everything else stays
+# local to the developer.
+benchmarks/baseline/local.*.json

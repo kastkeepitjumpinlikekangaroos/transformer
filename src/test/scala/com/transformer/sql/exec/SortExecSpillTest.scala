@@ -1,6 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.core.metrics.MetricsNode
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -165,6 +166,27 @@ class SortExecSpillTest {
         assertTrue(s"expected mention of spill_max_runs in: ${e.getMessage}",
           e.getMessage.contains("spill_max_runs"))
     }
+  }
+
+  // ---- Sub-plan 2: spill + metrics composition ------------------------------
+
+  /** External-merge sort + metrics: the operator's MetricsNode must report
+    * non-zero `runsWritten` / `bytesSpilled`. */
+  @Test def externalSortAndMetricsComposeReportingNonZeroSpillCounters(): Unit = {
+    val parts = uniqueKeyedRows(n = 5000, parts = 4, seed = 99L)
+    val plan = new InMemoryPartitionedPlanForSpillTest(schema, parts)
+    val node = new MetricsNode(0, "SortExec", 0, SortExec.IdxCounterNames)
+    val sort = SortExec(plan, keysAsc, spillyOpts(), node)
+    val it = sort.execute(0)
+    while (it.hasNext) it.next()
+    val snap = node.snapshot()
+    assertTrue(s"runsWritten must be > 0, got ${snap.counter("runsWritten")}",
+      snap.counter("runsWritten") > 0L)
+    assertTrue(s"bytesSpilled must be > 0, got ${snap.counter("bytesSpilled")}",
+      snap.counter("bytesSpilled") > 0L)
+    assertEquals(SortExec.PathKWay, snap.counter("path"))
+    assertEquals(5000L, snap.counter("inputRows"))
+    assertEquals(5000L, snap.counter("outputRows"))
   }
 }
 

@@ -1,6 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.core.metrics.MetricsNode
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
 import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
@@ -64,7 +65,8 @@ final case class HashJoinExec(
     extra: Option[Expr],
     kind: JoinKind,
     buildRight: Boolean = true,
-    opts: ExecutionOptions = ExecutionOptions.Default
+    opts: ExecutionOptions = ExecutionOptions.Default,
+    metricsNode: MetricsNode = null
 ) extends PhysicalPlan {
 
   val outputSchema: Schema = Schema(left.outputSchema.fields ++ right.outputSchema.fields)
@@ -147,6 +149,18 @@ final case class HashJoinExec(
     * [[PhysicalPlanner.enforceNestedLoopGuard]] above the planner. */
   private val graceEnabled: Boolean = opts.spillEnabled && nKeys > 0
 
+  // Stamp the constant key-codec path code into the metrics node once at
+  // construction. See [[HashJoinExec]] companion for the path codes.
+  private val keyCodecPathCode: Long = {
+    if (useJoinLongKey) HashJoinExec.KeyPathLong
+    else if (nKeys == 0) HashJoinExec.KeyPathObject // non-equi (cartesian) — no codec
+    else if (keyTypes.forall(KeyCodec.isPackable)) HashJoinExec.KeyPathPacked
+    else HashJoinExec.KeyPathObject
+  }
+  if (metricsNode != null) {
+    metricsNode.counters(HashJoinExec.IdxKeyCodecPath).add(keyCodecPathCode)
+  }
+
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     if (graceEnabled) executeGraceHash(partition)
     else if (isSharded) executePerShard(partition)
@@ -158,10 +172,17 @@ final case class HashJoinExec(
   private def executePerShard(partition: Int): Iterator[ColumnarBatch] = {
     require(partition >= 0 && partition < numPartitions,
       s"partition $partition out of range [0,$numPartitions)")
+    val tBuild = if (metricsNode != null) System.nanoTime() else 0L
     val build = buildSideForShard(partition)
+    if (metricsNode != null) {
+      metricsNode.counters(HashJoinExec.IdxBuildNanos).add(System.nanoTime() - tBuild)
+      metricsNode.counters(HashJoinExec.IdxBuildSideRows).add(build.rows.length.toLong)
+    }
     val matchedBuild: util.HashSet[Int] =
       if (preserveBuildOuter) new util.HashSet[Int]() else null
+    val tProbe = if (metricsNode != null) System.nanoTime() else 0L
     val joined = probeShard(partition, build, matchedBuild)
+    if (metricsNode != null) metricsNode.counters(HashJoinExec.IdxProbeNanos).add(System.nanoTime() - tProbe)
     val unmatchedTail: Iterator[ColumnarBatch] =
       if (matchedBuild != null) emitUnmatchedBuild(build, matchedBuild)
       else Iterator.empty
@@ -182,6 +203,10 @@ final case class HashJoinExec(
       matchedBuild: util.HashSet[Int]): Iterator[ColumnarBatch] = {
     val (rows, matched) = probeOnePartition(partition, build)
     if (matchedBuild != null) matchedBuild.addAll(matched)
+    if (metricsNode != null) {
+      metricsNode.counters(HashJoinExec.IdxProbeSideRows).add(rows.length.toLong)
+      metricsNode.counters(HashJoinExec.IdxMatchedRows).add(matched.size.toLong)
+    }
     rowsToBatches(rows.toArray, outputSchema, ColumnarBatch.DefaultCapacity)
   }
 
@@ -190,10 +215,17 @@ final case class HashJoinExec(
   private def executeCollapsing(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0,
       s"non-equi join collapses to one partition; got partition=$partition")
+    val tBuild = if (metricsNode != null) System.nanoTime() else 0L
     val build = buildSideAcrossAllPartitions()
+    if (metricsNode != null) {
+      metricsNode.counters(HashJoinExec.IdxBuildNanos).add(System.nanoTime() - tBuild)
+      metricsNode.counters(HashJoinExec.IdxBuildSideRows).add(build.rows.length.toLong)
+    }
     val matchedBuild: util.HashSet[Int] =
       if (preserveBuildOuter) new util.HashSet[Int]() else null
+    val tProbe = if (metricsNode != null) System.nanoTime() else 0L
     val joined = probeAcrossAllPartitions(build, matchedBuild)
+    if (metricsNode != null) metricsNode.counters(HashJoinExec.IdxProbeNanos).add(System.nanoTime() - tProbe)
     val unmatchedTail: Iterator[ColumnarBatch] =
       if (matchedBuild != null) emitUnmatchedBuild(build, matchedBuild)
       else Iterator.empty
@@ -227,6 +259,7 @@ final case class HashJoinExec(
       build: BuildSide,
       matchedBuild: util.HashSet[Int]): Iterator[ColumnarBatch] = {
     val joinedRows = mutable.ArrayBuffer.empty[Array[Any]]
+    var totalMatched = 0L
     val tasks: Seq[Callable[(mutable.ArrayBuffer[Array[Any]], util.HashSet[Int])]] =
       (0 until probePlan.numPartitions).map { pp =>
         new Callable[(mutable.ArrayBuffer[Array[Any]], util.HashSet[Int])] {
@@ -237,6 +270,11 @@ final case class HashJoinExec(
     Scheduler.submitAndAwaitAll(tasks).foreach { case (rows, m) =>
       joinedRows ++= rows
       if (matchedBuild != null) matchedBuild.addAll(m)
+      totalMatched += m.size.toLong
+    }
+    if (metricsNode != null) {
+      metricsNode.counters(HashJoinExec.IdxProbeSideRows).add(joinedRows.length.toLong)
+      metricsNode.counters(HashJoinExec.IdxMatchedRows).add(totalMatched)
     }
     rowsToBatches(joinedRows.toArray, outputSchema, ColumnarBatch.DefaultCapacity)
   }
@@ -453,6 +491,9 @@ final case class HashJoinExec(
       if (!matched.contains(i)) unmatched += mergeUnmatchedBuild(build.rows(i))
       i += 1
     }
+    if (metricsNode != null && unmatched.nonEmpty) {
+      metricsNode.counters(HashJoinExec.IdxUnmatchedRows).add(unmatched.length.toLong)
+    }
     rowsToBatches(unmatched.toArray, schema, capacity)
   }
 
@@ -533,6 +574,7 @@ final case class HashJoinExec(
     require(graceEnabled, "executeGraceHash called with graceEnabled=false")
     val K = GraceBuckets
     val spillDir = Spill.openOperatorDir("hashjoin")
+    if (metricsNode != null) metricsNode.counters(HashJoinExec.IdxBucketCount).add(K.toLong)
 
     val buildParts: Seq[Int] =
       if (isSharded) {
@@ -554,7 +596,8 @@ final case class HashJoinExec(
       keysAreColRefs = buildKeysAreColRefs,
       keyColIndices = buildKeyColIndices,
       K = K,
-      spillDir = spillDir)
+      spillDir = spillDir,
+      side = HashJoinExec.SideBuild)
     val probeBuckets = bucketSide(
       sideName = "probe",
       parts = probeParts,
@@ -563,21 +606,29 @@ final case class HashJoinExec(
       keysAreColRefs = probeKeysAreColRefs,
       keyColIndices = probeKeyColIndices,
       K = K,
-      spillDir = spillDir)
+      spillDir = spillDir,
+      side = HashJoinExec.SideProbe)
 
     val out = mutable.ArrayBuffer.empty[Array[Any]]
+    val tLoad = if (metricsNode != null) System.nanoTime() else 0L
     var k = 0
     while (k < K) {
       processBucketPair(buildBuckets(k), probeBuckets(k), out)
       k += 1
     }
+    if (metricsNode != null) metricsNode.counters(HashJoinExec.IdxBucketsLoadedNanos).add(System.nanoTime() - tLoad)
     spillDir.close()
     rowsToBatches(out.toArray, outputSchema, ColumnarBatch.DefaultCapacity)
   }
 
   /** Route all rows from `parts` of `plan` into K bucket files inside
     * `spillDir`, keyed by `hash(joinKey) % K`. Returns one file path per
-    * bucket; a `null` entry means that bucket was empty (no file written). */
+    * bucket; a `null` entry means that bucket was empty (no file written).
+    *
+    * Sub-plan 2 adds `side` for counter attribution. The bucket-write
+    * threshold doesn't change behavior — the count of bytes-on-disk after
+    * close is the source of truth for `bytesSpilledBuild` /
+    * `bytesSpilledProbe`, both populated from the final `files`. */
   private def bucketSide(
       sideName: String,
       parts: Seq[Int],
@@ -586,7 +637,8 @@ final case class HashJoinExec(
       keysAreColRefs: Boolean,
       keyColIndices: Array[Int],
       K: Int,
-      spillDir: OperatorSpillDir): Array[Path] = {
+      spillDir: OperatorSpillDir,
+      side: Int): Array[Path] = {
     val schema = plan.outputSchema
     val ncols = schema.length
     val files = new Array[Path](K)
@@ -627,6 +679,30 @@ final case class HashJoinExec(
       val w = writers(b)
       if (w != null) w.close()
       b += 1
+    }
+    // Attribute spill bytes per-side. Done after close so the size on disk
+    // is final. Also surface peak bucket bytes (max across buckets) for
+    // skew detection.
+    if (metricsNode != null) {
+      var total: Long = 0L
+      var peak: Long = 0L
+      var i = 0
+      while (i < K) {
+        val f = files(i)
+        if (f != null) {
+          val sz = f.toFile.length()
+          total += sz
+          if (sz > peak) peak = sz
+        }
+        i += 1
+      }
+      if (side == HashJoinExec.SideBuild)
+        metricsNode.counters(HashJoinExec.IdxBytesSpilledBuild).add(total)
+      else
+        metricsNode.counters(HashJoinExec.IdxBytesSpilledProbe).add(total)
+      // peakBucketBytes is a max across both sides; we accumulate per-side
+      // and the consumer reads the resulting sum-of-peaks across sides.
+      if (peak > 0L) metricsNode.counters(HashJoinExec.IdxPeakBucketBytes).add(peak)
     }
     files
   }
@@ -713,6 +789,9 @@ final case class HashJoinExec(
       probeFile: Path,
       out: mutable.ArrayBuffer[Array[Any]]): Unit = {
     val build = loadBuildFromBucket(buildFile)
+    if (metricsNode != null && build != null) {
+      metricsNode.counters(HashJoinExec.IdxBuildSideRows).add(build.rows.length.toLong)
+    }
     val matched = if (preserveBuildOuter) new util.HashSet[Int]() else null
     if (build != null && probeFile != null) probeBucket(probeFile, build, out, matched)
     else if (probeFile != null && preserveProbeOuter) {
@@ -720,11 +799,14 @@ final case class HashJoinExec(
       streamProbeAsUnmatched(probeFile, out)
     }
     if (build != null && preserveBuildOuter) {
+      var unmatchedHere = 0L
       var i = 0
       while (i < build.rows.length) {
-        if (!matched.contains(i)) out += mergeUnmatchedBuild(build.rows(i))
+        if (!matched.contains(i)) { out += mergeUnmatchedBuild(build.rows(i)); unmatchedHere += 1 }
         i += 1
       }
+      if (metricsNode != null && unmatchedHere > 0L)
+        metricsNode.counters(HashJoinExec.IdxUnmatchedRows).add(unmatchedHere)
     }
   }
 
@@ -789,12 +871,15 @@ final case class HashJoinExec(
     val probeSchema = probePlan.outputSchema
     val probeWidth = probeSchema.length
     val keyBuf: Array[Any] = if (probeKeysAreColRefs) null else new Array[Any](nKeys)
+    var probeRowsHere: Long = 0L
+    var matchedHere: Long = 0L
     var part = 0
     while (part < reader.numPartitions) {
       val it = reader.readPartition(part)
       while (it.hasNext) {
         val b = it.next()
         val nrows = b.numRows
+        probeRowsHere += nrows.toLong
         val probeKeyVecs: Array[ColumnVector] =
           if (probeKeysAreColRefs || useJoinLongKey) null
           else Array.tabulate(nKeys)(i => probeKeyExprs(i).evalVec(b))
@@ -832,6 +917,7 @@ final case class HashJoinExec(
               if (passesExtra(combined)) {
                 out += combined
                 matchedAny = true
+                matchedHere += 1L
                 if (matchedBuild != null) matchedBuild.add(buildIdx)
               }
             }
@@ -844,6 +930,10 @@ final case class HashJoinExec(
         }
       }
       part += 1
+    }
+    if (metricsNode != null) {
+      metricsNode.counters(HashJoinExec.IdxProbeSideRows).add(probeRowsHere)
+      metricsNode.counters(HashJoinExec.IdxMatchedRows).add(matchedHere)
     }
   }
 
@@ -873,6 +963,48 @@ final case class HashJoinExec(
 }
 
 object HashJoinExec {
+  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // In-memory path counters.
+  final val IdxBuildSideRows: Int      = 0
+  final val IdxProbeSideRows: Int      = 1
+  final val IdxMatchedRows: Int        = 2
+  final val IdxUnmatchedRows: Int      = 3
+  final val IdxBuildNanos: Int         = 4
+  final val IdxProbeNanos: Int         = 5
+  final val IdxKeyCodecPath: Int       = 6
+  // Spill (grace hash) counters.
+  final val IdxBucketCount: Int        = 7
+  final val IdxBytesSpilledBuild: Int  = 8
+  final val IdxBytesSpilledProbe: Int  = 9
+  final val IdxBucketsLoadedNanos: Int = 10
+  final val IdxPeakBucketBytes: Int    = 11
+
+  /** Side discriminator for [[HashJoinExec.bucketSide]]'s instrumentation. */
+  private[exec] final val SideBuild: Int = 0
+  private[exec] final val SideProbe: Int = 1
+
+  /** Key-codec path codes — same convention as
+    * [[HashAggregateExec.KeyPathLong]] etc. */
+  final val KeyPathLong: Long   = 0L
+  final val KeyPathPacked: Long = 1L
+  final val KeyPathObject: Long = 2L
+
+  /** Name array parallel to the Idx* constants above. Length asserted equal
+    * to `highest Idx<Name> + 1` in `operator_counters_test.scala`. */
+  val IdxCounterNames: Array[String] = Array(
+    "buildSideRows",
+    "probeSideRows",
+    "matchedRows",
+    "unmatchedRows",
+    "buildNanos",
+    "probeNanos",
+    "keyCodecPath",
+    "bucketCount",
+    "bytesSpilledBuild",
+    "bytesSpilledProbe",
+    "bucketsLoadedNanos",
+    "peakBucketBytes")
+
   /** Avalanche the combined column hash so contiguous small-integer keys
     * spread across buckets instead of clustering. Identical mixer to
     * [[HashPartitioner.fmix32]] (we don't reach across packages from

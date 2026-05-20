@@ -1,0 +1,6 @@
+# Benchmarks live here, peer to //examples. JMH dependencies (jmh-core,
+# jmh-generator-bytecode) live only under //benchmarks/micro:* targets and
+# must never appear in production / example deploy_jar deps. The
+# Sub-plan 3 verification gate runs
+#   bazel query "kind('java_library', deps(//examples/...))" | grep jmh
+# and expects empty output.

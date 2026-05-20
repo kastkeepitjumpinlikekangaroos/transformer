@@ -1,6 +1,8 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.core.metrics.MetricsNode
+import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
 
 /** Physical operator. One partition = one independent stream of [[ColumnarBatch]].
@@ -12,11 +14,47 @@ trait PhysicalPlan {
   def execute(partition: Int): Iterator[ColumnarBatch]
 }
 
-/** Reads from a [[CatalogView]]. One view partition per physical partition. */
-final case class ScanExec(view: CatalogView) extends PhysicalPlan {
+/** Reads from a [[CatalogView]]. One view partition per physical partition.
+  *
+  * When the wrapping [[com.transformer.sql.exec.PhysicalPlanner]] passes a
+  * non-null [[MetricsNode]] and the underlying view is a [[ParquetReader]],
+  * scan-side counters (bytesRead, rowGroupsRead / rowGroupsSkipped,
+  * predicatePushedDownCount) flow into the node via a per-call recorder. For
+  * non-parquet views (CSV, in-memory) the counters stay zero — those readers
+  * have no row-group metadata to attribute. */
+final case class ScanExec(view: CatalogView, metricsNode: MetricsNode = null) extends PhysicalPlan {
   def outputSchema: Schema = view.schema
   def numPartitions: Int = view.numPartitions
-  def execute(partition: Int): Iterator[ColumnarBatch] = view.readPartition(partition)
+  def execute(partition: Int): Iterator[ColumnarBatch] = view match {
+    case pr: ParquetReader if metricsNode != null =>
+      pr.readPartitionWithMetrics(partition, new ParquetReader.MetricsRecorder {
+        def addBytesRead(n: Long): Unit =
+          metricsNode.counters(ScanExec.IdxBytesRead).add(n)
+        def addRowGroupsRead(n: Long): Unit =
+          metricsNode.counters(ScanExec.IdxRowGroupsRead).add(n)
+        def addRowGroupsSkipped(n: Long): Unit =
+          metricsNode.counters(ScanExec.IdxRowGroupsSkipped).add(n)
+        def addPredicatePushedDown(n: Long): Unit =
+          metricsNode.counters(ScanExec.IdxPredicatePushedDownCount).add(n)
+      })
+    case _ => view.readPartition(partition)
+  }
+}
+
+object ScanExec {
+  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // Scan-side counters surfaced by ParquetReader. Non-parquet views leave
+  // them all at zero — those views have no row-group / pushdown notion.
+  final val IdxBytesRead: Int                 = 0
+  final val IdxRowGroupsRead: Int             = 1
+  final val IdxRowGroupsSkipped: Int          = 2
+  final val IdxPredicatePushedDownCount: Int  = 3
+
+  val IdxCounterNames: Array[String] = Array(
+    "bytesRead",
+    "rowGroupsRead",
+    "rowGroupsSkipped",
+    "predicatePushedDownCount")
 }
 
 /** Constant single-row output for the `SELECT COUNT(*) FROM <view>` fast path —

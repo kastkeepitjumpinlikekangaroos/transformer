@@ -2,3 +2,10 @@ build --java_runtime_version=remotejdk_21
 build --tool_java_runtime_version=remotejdk_21
 build --java_language_version=21
 build --tool_java_language_version=21
+
+# Sub-plan 4 of the instrumentation work added a perf-tagged regression test
+# under //src/test/scala/com/transformer/bench. It's opt-in via
+# `bazel test //... --test_tag_filters=perf` — the default invocation
+# excludes it because the machine-dependent baselines make the assertion
+# meaningless outside the developer machine that captured them.
+test --test_tag_filters=-perf

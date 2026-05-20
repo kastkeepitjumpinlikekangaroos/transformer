@@ -281,6 +281,48 @@ rather than throwing — exposes the limitation to documentation, not
 to users at run time. See `HashAggregateExec.spillEnabled`'s
 `AggStateSerde.allSpillable` guard for the pattern.
 
+## Add a counter to an operator
+
+Per-operator counters surface in `_perf.json` and are read by the macro
+bench, the perf-tagged regression test, and (eventually) the GUI. Adding
+one is mechanical but every step matters — a counter that allocates on
+the hot loop or drifts the names array out of sync will trip
+`DisabledOverheadBench` or `OperatorCountersTest`. Procedure:
+
+1. **Declare the constant.** In the operator's companion object, add
+   `final val IdxYourCounter: Int = <highest existing Idx + 1>`. The
+   constant is `final val` so the JIT can const-fold the array offset
+   in the inner loop.
+2. **Extend the names array.** Add `"yourCounter"` to the operator's
+   `IdxCounterNames: Array[String]` (or, for `ExchangeExec`, the
+   `counterNamesFor(numShards)` helper) at the position matching the
+   index. The name lands verbatim as a JSON key in `_perf.json`.
+3. **Increment in the operator.** Use the existing pattern:
+   ```scala
+   if (metricsNode != null) metricsNode.counters(IdxYourCounter).add(delta)
+   ```
+   Allocation-free, one branch, one `LongAdder.add` call. Don't read
+   strings or build collections on the per-row hot path.
+4. **Extend the index-drift test.** In
+   `src/test/scala/com/transformer/core/metrics/OperatorCountersTest.scala`,
+   bump the corresponding `IdxCounterNames.length must equal highest
+   Idx + 1` assertion's right-hand side to point at your new constant.
+   This catches the case where someone bumps the index but forgets the
+   names array (or vice versa).
+5. **Add a populated-counter test case.** Either extend an existing
+   `<operatorName>ExecPopulatesInMemoryCounters` test or add a new
+   `@Test` method. Build a small fixture, drain the operator with a
+   freshly-constructed `MetricsNode`, snapshot, assert the counter
+   incremented to the expected value.
+6. **Update the counter inventory in `docs/benchmarking.md` §2.** Add a
+   one-line description of the new counter so consumers know what it
+   measures.
+
+If the counter is on the spill code path only (zero when spill never
+fires), document that explicitly — readers of `_perf.json` need to know
+whether "0" means "the path didn't trigger" vs "the path triggered but
+nothing happened".
+
 ## Add a logical-plan optimizer pass
 
 `LogicalOptimizer.optimize` (in `sql/plan/`) runs each pass once in a fixed

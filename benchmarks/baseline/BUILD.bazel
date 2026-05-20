@@ -1,0 +1,17 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
+# Checked-in macro-bench baselines. Two jaffle baselines (spill-off and
+# spill-on) plus a polymarket template; the real polymarket numbers live in
+# the gitignored `local.polymarket.json`. The perf-tagged regression test
+# (//src/test/scala/com/transformer/bench:jaffle_regression_test) lists
+# `baseline_files` in its data so the runfiles tree has the JSON files at
+# the same relative path the test's `locateWorkspace()` walks to.
+filegroup(
+    name = "baseline_files",
+    srcs = [
+        "jaffle_shop.json",
+        "jaffle_shop_spill.json",
+        "polymarket.json.example",
+    ],
+    visibility = ["//visibility:public"],
+)

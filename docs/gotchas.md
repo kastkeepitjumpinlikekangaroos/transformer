@@ -227,6 +227,31 @@ ship a fix or move something from "not done" to "done".
   either gate on `isRunning` or spawn a background thread and marshal results
   back via `FxHelpers.onFx`.
 
+- **Per-thread allocation accounting is HotSpot-specific.** The
+  instrumentation framework reads
+  `com.sun.management.ThreadMXBean.getThreadAllocatedBytes` to surface
+  `allocBytes` in `_perf.json`. That class is an Oracle / OpenJDK
+  extension to the standard `java.lang.management.ThreadMXBean`. On
+  Oracle / OpenJDK / Temurin (i.e. every JVM we test against) it works;
+  on a hypothetical non-HotSpot JVM the `isInstanceOf` guard in
+  `MetricsCollector.currentAllocatedBytes` falls back to `-1` so
+  `allocBytes: -1` in `_perf.json` is the documented "unsupported" sentinel
+  rather than a measurement bug. Other fields in `_perf.json` remain
+  accurate. Same story for `cpuNanos`: we enable
+  `setThreadCpuTimeEnabled(true)` once at class load; if the JVM refuses,
+  the field is `-1`.
+- **Metrics opt-in is per-task by default, with sysprop / env-var
+  override.** `options.metrics = "true"` on a task's `output.json` wins
+  over `transformer.metrics.enabled` / `TRANSFORMER_METRICS_ENABLED`.
+  An explicit `options.metrics = "false"` overrides the global default;
+  unset falls through to the global default. The override pattern
+  matches what `options.spill` does — same parser, same semantics. The
+  same precedence rule applies to the macro bench's
+  `transformer.macro.force_spill` sysprop, which is a global override
+  that flips `spillEnabled = true` on every task regardless of the
+  per-task config. See [docs/benchmarking.md](benchmarking.md) for the
+  full enablement matrix.
+
 ## What's intentionally NOT done
 
 - **Spill-to-disk** is implemented for `SortExec`, `HashAggregateExec`,

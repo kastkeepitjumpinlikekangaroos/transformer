@@ -1,6 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.core.metrics.MetricsNode
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.write.parquet.ParquetWriter
 
@@ -43,7 +44,8 @@ import scala.collection.mutable
   */
 final case class DistinctExec(
     child: PhysicalPlan,
-    opts: ExecutionOptions = ExecutionOptions.Default
+    opts: ExecutionOptions = ExecutionOptions.Default,
+    metricsNode: MetricsNode = null
 ) extends PhysicalPlan {
   def outputSchema: Schema = child.outputSchema
 
@@ -65,6 +67,19 @@ final case class DistinctExec(
   private lazy val spillThresholdBytes: Long =
     Spill.effectiveThresholdBytes(opts, Scheduler.parallelism)
 
+  // Stamp the constant key-codec path code into the metrics node once at
+  // construction. DistinctExec keys are always every output column, so the
+  // codec choice is fixed for the operator's lifetime.
+  private val keyCodecPathCode: Long = {
+    val types = child.outputSchema.fields.map(_.dataType)
+    if (types.isEmpty) DistinctExec.KeyPathPacked  // EmptyKeyCodec (degenerate)
+    else if (types.forall(KeyCodec.isPackable)) DistinctExec.KeyPathPacked
+    else DistinctExec.KeyPathObject
+  }
+  if (metricsNode != null) {
+    metricsNode.counters(DistinctExec.IdxKeyCodecPath).add(keyCodecPathCode)
+  }
+
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     if (isSharded) executePerShard(partition)
     else executeCollapsing(partition)
@@ -75,7 +90,13 @@ final case class DistinctExec(
       s"partition $partition out of range [0,$numPartitions)")
     val spillDir = if (spillEnabled) Some(Spill.openOperatorDir("distinct-shard")) else None
     val r = collect(partition, spillDir)
+    val tMerge = if (metricsNode != null) System.nanoTime() else 0L
     DistinctSpiller.foldSpillFiles(r.spillFiles, codec, ncols, r.set)
+    if (metricsNode != null) {
+      metricsNode.counters(DistinctExec.IdxMergeNanos).add(System.nanoTime() - tMerge)
+      metricsNode.counters(DistinctExec.IdxSpillRunsRead).add(r.spillFiles.length.toLong)
+      metricsNode.counters(DistinctExec.IdxGroupCount).add(r.set.size.toLong)
+    }
     wrapWithSpillCleanup(emit(r.set), spillDir)
   }
 
@@ -90,10 +111,18 @@ final case class DistinctExec(
         }
       }
     val partials = Scheduler.submitAndAwaitAll(tasks)
+    val tMerge = if (metricsNode != null) System.nanoTime() else 0L
     val merged = new util.LinkedHashSet[AnyRef]()
     partials.foreach(p => merged.addAll(p.set))
+    if (metricsNode != null) metricsNode.counters(DistinctExec.IdxMergeNanos).add(System.nanoTime() - tMerge)
+    var runsRead = 0L
     partials.foreach { p =>
       DistinctSpiller.foldSpillFiles(p.spillFiles, codec, ncols, merged)
+      runsRead += p.spillFiles.length.toLong
+    }
+    if (metricsNode != null) {
+      metricsNode.counters(DistinctExec.IdxSpillRunsRead).add(runsRead)
+      metricsNode.counters(DistinctExec.IdxGroupCount).add(merged.size.toLong)
     }
     wrapWithSpillCleanup(emit(merged), spillDir)
   }
@@ -116,15 +145,21 @@ final case class DistinctExec(
   }
 
   private def collect(p: Int, spillDir: Option[OperatorSpillDir]): DistinctExec.PartialSet = {
+    val tStart = if (metricsNode != null) System.nanoTime() else 0L
     val set = new util.LinkedHashSet[AnyRef]()
     val spillFiles = mutable.ArrayBuffer.empty[Path]
     val threshold = if (spillDir.isDefined) spillThresholdBytes else Long.MaxValue
     var bytesSinceFlush: Long = 0L
+    var peakSize: Long = 0L
+    var peakBytes: Long = 0L
     val scratch = codec.newScratch()
     val it = child.execute(p)
     while (it.hasNext) {
       val b = it.next()
-      if (spillDir.isDefined) bytesSinceFlush += Spill.estimateBytes(b)
+      if (spillDir.isDefined) {
+        bytesSinceFlush += Spill.estimateBytes(b)
+        if (bytesSinceFlush > peakBytes) peakBytes = bytesSinceFlush
+      }
       var r = 0
       while (r < b.numRows) {
         // Probe with the scratch wrapper to avoid the per-row key allocation
@@ -135,9 +170,16 @@ final case class DistinctExec(
         if (!set.contains(scratch)) set.add(codec.ownFromScratch(scratch))
         r += 1
       }
+      val sz = set.size.toLong
+      if (sz > peakSize) peakSize = sz
       if (bytesSinceFlush >= threshold && spillDir.isDefined && !set.isEmpty) {
         val file = spillDir.get.newSpillFile(".parquet")
         DistinctSpiller.writeSet(file, codec, child.outputSchema, set)
+        if (metricsNode != null) {
+          val sb = file.toFile.length()
+          metricsNode.counters(DistinctExec.IdxSpillEvents).increment()
+          metricsNode.counters(DistinctExec.IdxBytesSpilled).add(sb)
+        }
         set.clear()
         spillFiles += file
         bytesSinceFlush = 0L
@@ -146,6 +188,11 @@ final case class DistinctExec(
             s"DistinctExec produced ${spillFiles.length} spill runs in partition $p, " +
             s"exceeding spill_max_runs=${opts.spillMaxRuns}.")
       }
+    }
+    if (metricsNode != null) {
+      metricsNode.counters(DistinctExec.IdxPartialAggregateNanos).add(System.nanoTime() - tStart)
+      metricsNode.counters(DistinctExec.IdxHashMapPeakSize).add(peakSize)
+      metricsNode.counters(DistinctExec.IdxPeakInMemoryBytes).add(peakBytes)
     }
     DistinctExec.PartialSet(set, spillFiles.toArray)
   }
@@ -171,6 +218,38 @@ final case class DistinctExec(
 }
 
 object DistinctExec {
+  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // In-memory counters mirror HashAggregateExec's shape (DistinctExec IS an
+  // aggregate with no value columns).
+  final val IdxGroupCount: Int             = 0
+  final val IdxHashMapPeakSize: Int        = 1
+  final val IdxKeyCodecPath: Int           = 2
+  final val IdxMergeNanos: Int             = 3
+  final val IdxPartialAggregateNanos: Int  = 4
+  // Spill counters (narrower than HashAggregateExec's set per Sub-plan 2's
+  // scoping note).
+  final val IdxSpillEvents: Int            = 5
+  final val IdxBytesSpilled: Int           = 6
+  final val IdxSpillRunsRead: Int          = 7
+  final val IdxPeakInMemoryBytes: Int      = 8
+
+  /** Key-codec path codes (Long path doesn't apply to multi-column distinct,
+    * so only Packed and Object are possible). */
+  final val KeyPathPacked: Long = 1L
+  final val KeyPathObject: Long = 2L
+
+  /** Name array parallel to the Idx* constants above. */
+  val IdxCounterNames: Array[String] = Array(
+    "groupCount",
+    "hashMapPeakSize",
+    "keyCodecPath",
+    "mergeNanos",
+    "partialAggregateNanos",
+    "spillEvents",
+    "bytesSpilled",
+    "spillRunsRead",
+    "peakInMemoryBytes")
+
   private[exec] final case class PartialSet(set: util.LinkedHashSet[AnyRef], spillFiles: Array[Path])
 }
 

@@ -18,3 +18,13 @@ scala_binary(
         "//src/main/scala/com/transformer/temporal",
     ],
 )
+
+# Filegroup exposing the jaffle job tree as `data` for downstream targets
+# (notably the perf-tagged regression test under
+# //src/test/scala/com/transformer/bench). Keeps the regression test from
+# duplicating the glob.
+filegroup(
+    name = "jaffle_job_data",
+    srcs = glob(["job/**"]),
+    visibility = ["//visibility:public"],
+)

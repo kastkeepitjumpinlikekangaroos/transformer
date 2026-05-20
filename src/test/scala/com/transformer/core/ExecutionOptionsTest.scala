@@ -90,4 +90,62 @@ class ExecutionOptionsTest {
     assertEquals(None, opts.spillThresholdBytes)
     assertEquals(ExecutionOptions.DefaultSpillMaxRuns, opts.spillMaxRuns)
   }
+
+  // --- metricsEnabled (Sub-plan 1 of the instrumentation work) ----------
+
+  @Test def defaultDisablesMetrics(): Unit = {
+    assertFalse(ExecutionOptions.Default.metricsEnabled)
+  }
+
+  @Test def metricsTrueEnablesMetrics(): Unit = {
+    val opts = ExecutionOptions.fromOutputOptions(Map("metrics" -> "true"))
+    assertTrue(opts.metricsEnabled)
+  }
+
+  @Test def metricsOneEnablesMetrics(): Unit = {
+    val opts = ExecutionOptions.fromOutputOptions(Map("metrics" -> "1"))
+    assertTrue(opts.metricsEnabled)
+  }
+
+  @Test def metricsIsCaseInsensitive(): Unit = {
+    assertTrue(ExecutionOptions.fromOutputOptions(Map("metrics" -> "TRUE")).metricsEnabled)
+    assertTrue(ExecutionOptions.fromOutputOptions(Map("metrics" -> "True")).metricsEnabled)
+  }
+
+  @Test def metricsTolerantOfTypo(): Unit = {
+    // Mirrors the spill parse semantics — typos silently disable metrics
+    // rather than throwing.
+    assertFalse(ExecutionOptions.fromOutputOptions(Map("metrics" -> "yes")).metricsEnabled)
+    assertFalse(ExecutionOptions.fromOutputOptions(Map("metrics" -> "false")).metricsEnabled)
+    assertFalse(ExecutionOptions.fromOutputOptions(Map("metrics" -> "0")).metricsEnabled)
+    assertFalse(ExecutionOptions.fromOutputOptions(Map("metrics" -> "")).metricsEnabled)
+  }
+
+  @Test def metricsComposesWithSpill(): Unit = {
+    // Sub-plan 1 verification: both spill and metrics can be set on the same
+    // task. The composition path is exercised end-to-end in DataJobTest.
+    val opts = ExecutionOptions.fromOutputOptions(Map(
+      "spill" -> "true",
+      "metrics" -> "true",
+      "spill_threshold_bytes" -> "1048576"))
+    assertTrue(opts.spillEnabled)
+    assertTrue(opts.metricsEnabled)
+    assertEquals(Some(1048576L), opts.spillThresholdBytes)
+  }
+
+  @Test def triStateReturnsExpectedSentinels(): Unit = {
+    // No key -> UnsetTri (global default applies).
+    assertEquals(ExecutionOptions.UnsetTri,
+      ExecutionOptions.triState(Map.empty[String, String], ExecutionOptions.MetricsKey))
+    // Key present and truthy -> TrueTri.
+    assertEquals(ExecutionOptions.TrueTri,
+      ExecutionOptions.triState(Map(ExecutionOptions.MetricsKey -> "true"), ExecutionOptions.MetricsKey))
+    assertEquals(ExecutionOptions.TrueTri,
+      ExecutionOptions.triState(Map(ExecutionOptions.MetricsKey -> "1"), ExecutionOptions.MetricsKey))
+    // Key present but falsy (including typos) -> FalseTri.
+    assertEquals(ExecutionOptions.FalseTri,
+      ExecutionOptions.triState(Map(ExecutionOptions.MetricsKey -> "false"), ExecutionOptions.MetricsKey))
+    assertEquals(ExecutionOptions.FalseTri,
+      ExecutionOptions.triState(Map(ExecutionOptions.MetricsKey -> "yes"), ExecutionOptions.MetricsKey))
+  }
 }

@@ -1,0 +1,28 @@
+load("@rules_scala//scala:scala.bzl", "scala_junit_test")
+
+scala_junit_test(
+    name = "metrics_collector_test",
+    srcs = ["MetricsCollectorTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Sub-plan 2: per-operator custom counter coverage. Each test builds a
+# small fixture, enables metrics by passing a freshly-constructed
+# MetricsNode, drains the operator, and asserts counters populate to the
+# expected values. Index-drift asserts at the top of the file catch
+# Idx<Name> / IdxCounterNames mismatches.
+scala_junit_test(
+    name = "operator_counters_test",
+    srcs = ["OperatorCountersTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)

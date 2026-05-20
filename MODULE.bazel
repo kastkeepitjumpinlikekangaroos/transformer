@@ -43,6 +43,17 @@ maven.install(
 
         # Testing
         "junit:junit:4.13.2",
+
+        # JMH — microbenchmarks under //benchmarks/micro. Pattern B
+        # (programmatic Runner) so we don't need the annotation-processor
+        # generator on the build path; jmh-core's runtime API still wants
+        # its bytecode classes available, which jmh-generator-bytecode
+        # supplies. Both artifacts are scoped to //benchmarks/micro:* —
+        # production targets and examples never depend on them, asserted
+        # by `bazel query "kind('java_library', deps(//examples/...))" |
+        # grep jmh` returning empty in the Sub-plan 3 verification gate.
+        "org.openjdk.jmh:jmh-core:1.37",
+        "org.openjdk.jmh:jmh-generator-bytecode:1.37",
     ],
     repositories = [
         "https://repo1.maven.org/maven2",

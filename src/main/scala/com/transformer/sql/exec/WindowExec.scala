@@ -1,6 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.core.metrics.MetricsNode
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
 import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
@@ -64,7 +65,8 @@ import scala.collection.mutable
 final case class WindowExec(
     child: PhysicalPlan,
     windows: Seq[WindowDef],
-    opts: ExecutionOptions = ExecutionOptions.Default
+    opts: ExecutionOptions = ExecutionOptions.Default,
+    metricsNode: MetricsNode = null
 ) extends PhysicalPlan {
 
   val outputSchema: Schema = Schema(
@@ -163,6 +165,7 @@ final case class WindowExec(
     val writers = new Array[TParquetWriter](K)
     val pending = Array.fill(K)(new ColumnarBatch(schema, ColumnarBatch.DefaultCapacity))
     val pendingCounts = new Array[Int](K)
+    var peakBuffered: Long = 0L
 
     def flushBucket(b: Int): Unit = {
       val n = pendingCounts(b)
@@ -174,6 +177,7 @@ final case class WindowExec(
         writers(b) = new TParquetWriter(files(b), schema, Map.empty)
       }
       writers(b).write(out)
+      if (metricsNode != null) metricsNode.counters(WindowExec.IdxPartitionSpillEvents).increment()
       pending(b) = new ColumnarBatch(schema, ColumnarBatch.DefaultCapacity)
       pendingCounts(b) = 0
     }
@@ -199,6 +203,7 @@ final case class WindowExec(
               c += 1
             }
             pendingCounts(bucket) = dstRow + 1
+            if (pendingCounts(bucket) > peakBuffered) peakBuffered = pendingCounts(bucket).toLong
             if (pendingCounts(bucket) >= ColumnarBatch.DefaultCapacity) flushBucket(bucket)
             r += 1
           }
@@ -212,6 +217,17 @@ final case class WindowExec(
       val w = writers(b)
       if (w != null) w.close()
       b += 1
+    }
+    if (metricsNode != null) {
+      metricsNode.counters(WindowExec.IdxPeakBufferedRows).add(peakBuffered)
+      var total: Long = 0L
+      var i = 0
+      while (i < K) {
+        val f = files(i)
+        if (f != null) total += f.toFile.length()
+        i += 1
+      }
+      metricsNode.counters(WindowExec.IdxBytesSpilled).add(total)
     }
     files
   }
@@ -358,11 +374,23 @@ final case class WindowExec(
       i += 1
     }
 
+    if (metricsNode != null) {
+      var peakRows: Long = 0L
+      partitions.values.foreach { p =>
+        val sz = p.length.toLong
+        if (sz > peakRows) peakRows = sz
+      }
+      metricsNode.counters(WindowExec.IdxPartitionCount).add(partitions.size.toLong)
+      metricsNode.counters(WindowExec.IdxPeakPartitionRows).add(peakRows)
+    }
+
     val orderKeys = spec.orderKeys
+    val tFrame = if (metricsNode != null) System.nanoTime() else 0L
     partitions.values.foreach { part =>
       if (orderKeys.nonEmpty) sortPartition(part, orderKeysByRow, orderKeys)
       computeFunctions(part, rows, orderKeysByRow, spec, fns, out, buf)
     }
+    if (metricsNode != null) metricsNode.counters(WindowExec.IdxFrameEvalNanos).add(System.nanoTime() - tFrame)
   }
 
   private def sortPartition(
@@ -605,4 +633,25 @@ final case class WindowExec(
       }
     }
   }
+}
+
+object WindowExec {
+  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // In-memory path counters.
+  final val IdxPartitionCount: Int       = 0
+  final val IdxPeakPartitionRows: Int    = 1
+  final val IdxFrameEvalNanos: Int       = 2
+  // Spill (per-partition bucket spill) counters.
+  final val IdxPartitionSpillEvents: Int = 3
+  final val IdxBytesSpilled: Int         = 4
+  final val IdxPeakBufferedRows: Int     = 5
+
+  /** Name array parallel to the Idx* constants above. */
+  val IdxCounterNames: Array[String] = Array(
+    "partitionCount",
+    "peakPartitionRows",
+    "frameEvalNanos",
+    "partitionSpillEvents",
+    "bytesSpilled",
+    "peakBufferedRows")
 }

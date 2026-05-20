@@ -1,0 +1,144 @@
+load("@rules_java//java:defs.bzl", "java_import")
+load("@rules_scala//scala:scala.bzl", "scala_binary", "scala_library")
+
+# JMH microbenchmark harness. Pattern B (programmatic Runner) wired into
+# Bazel via the build-time generator pipeline:
+#
+#   bench_lib (scala_library)
+#       └── compiled @Benchmark methods
+#   bench_generated (genrule via jmh_generate)
+#       └── runs JmhBytecodeGenerator on bench_lib, compiles emitted Java,
+#           packs (original classes + generated classes + META-INF) into a jar
+#   bench_all (scala_binary)
+#       └── runtime_deps: bench_generated, MicroBench dispatcher
+#
+# Running `java -jar bench_all_deploy.jar` finds META-INF/BenchmarkList on
+# the classpath and dispatches to the generated *_jmhTest classes the
+# bytecode generator produced.
+#
+# JMH artifacts (jmh-core + jmh-generator-bytecode + transitive
+# jmh-generator-asm/-reflection + asm) appear only inside this package's
+# targets. Production / example deploy_jars don't pull them in — asserted
+# by `bazel query "kind('java_library', deps(//examples/...))" | grep jmh`
+# returning empty.
+
+# Scala benchmark library. Hosts the @Benchmark-annotated classes plus the
+# MicroBench runner. JMH annotations are loaded from the runtime classpath
+# at warmup time; the @Benchmark methods themselves are bytecode-rewritten
+# by the build-time generator step below.
+scala_library(
+    name = "bench_lib",
+    srcs = glob(["src/main/scala/**/*.scala"]),
+    visibility = ["//visibility:private"],
+    deps = [
+        # transformer modules under benchmark.
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/write/parquet",
+        # JMH runtime — the annotations (@Benchmark, @State, @BenchmarkMode,
+        # ...) and the Runner used by MicroBench.
+        "@maven//:org_openjdk_jmh_jmh_core",
+    ],
+)
+
+# Build-time Scala tool: runs JMH's bytecode generator over bench_lib's
+# classes and bundles classes + generated wrappers + META-INF into a
+# single jar consumable as a runtime_dep. Pulls jmh-core plus the
+# generator artifacts on its classpath; runs javac in-process to compile
+# JMH's emitted Java sources.
+#
+# Why scala_binary, not java_binary: JMH's bytecode generator opens each
+# Scala-compiled class with ASM and calls Class.forName for every
+# referenced signature type, including scala.runtime.* and
+# scala.collection.* — those classes must be resolvable on the
+# generator's runtime classpath. scala_binary places scala-library on
+# that classpath automatically; a plain java_binary cannot resolve the
+# Scala runtime types and crashes with NoClassDefFoundError before
+# producing any output. Build-time only — never in the runtime deploy
+# jar.
+scala_binary(
+    name = "jmh_generate",
+    srcs = ["tools/jmh_generate/JmhGenerateMain.scala"],
+    main_class = "com.transformer.bench.internal.JmhGenerateMain",
+    visibility = ["//visibility:private"],
+    deps = [
+        "@maven//:org_openjdk_jmh_jmh_core",
+        "@maven//:org_openjdk_jmh_jmh_generator_bytecode",
+    ],
+    runtime_deps = [
+        # jmh-generator-bytecode dispatches to either jmh-generator-asm or
+        # jmh-generator-reflection at runtime via a configuration string;
+        # we pin to "asm" in JmhGenerateMain.scala but include both so the
+        # implementation classes are resolvable.
+        "@maven//:org_openjdk_jmh_jmh_generator_asm",
+        "@maven//:org_openjdk_jmh_jmh_generator_reflection",
+        # JMH's bytecode generator calls `Class.forName(name)` from its own
+        # ClassInfoRepo to resolve every referenced signature type while
+        # scanning bench classes. The bench classes reference transformer's
+        # public APIs (`ColumnarBatch`, `ExecutionOptions`, etc) — those
+        # must be loadable from the system class loader where JMH lives.
+        # Adding the bench-target deps as runtime_deps to `jmh_generate`
+        # puts the same transitive classes on the tool's classpath that
+        # appear on `bench_lib`'s, so `Class.forName` resolves at scan
+        # time.
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/write/parquet",
+    ],
+)
+
+# Run the JMH generator over the bench library and emit the combined jar
+# (original classes + generated *_jmhTest classes + META-INF resources).
+# This genrule is the integration point — it transforms the Scala-compiled
+# bench_lib into a JMH-discoverable jar.
+#
+# JMH's ASM walker calls `Class.forName(name)` on every referenced
+# signature type while scanning the input bench classes. The thin
+# `bench_lib.jar` carries only the bench classes themselves; their
+# references to `com.transformer.core.ColumnarBatch` etc. must resolve
+# against the `jmh_generate` tool's *system* classpath at scan time —
+# which is why `jmh_generate` lists the same transformer libraries as
+# `bench_lib` does, even though only the bench jar gets unpacked and
+# scanned here.
+genrule(
+    name = "bench_generated_jar",
+    srcs = [":bench_lib"],
+    outs = ["bench_generated.jar"],
+    tools = [":jmh_generate"],
+    cmd = "$(location :jmh_generate) " +
+          "--bench-jar $(location :bench_lib) " +
+          "--output $@",
+)
+
+# Import the generated jar back into Bazel as a java_import so the
+# downstream scala_binary can list it as a runtime_dep.
+java_import(
+    name = "bench_generated",
+    jars = ["bench_generated.jar"],
+    visibility = ["//visibility:private"],
+    runtime_deps = [
+        "@maven//:org_openjdk_jmh_jmh_core",
+    ],
+)
+
+# `bench_all` runs the full benchmark suite via the MicroBench dispatcher.
+# Smoke run: `bazel build //benchmarks/micro:bench_all_deploy.jar &&
+# java -jar bazel-bin/benchmarks/micro/bench_all_deploy.jar -w 1s -i 3 -f 1`.
+scala_binary(
+    name = "bench_all",
+    main_class = "com.transformer.bench.MicroBench",
+    # Plenty of heap — the ParquetDecode benchmark allocates a 1M-row
+    # fixture, expression benchmarks materialize ColumnarBatches up to
+    # 100k rows. 2g is comfortable on the same machine that runs
+    # jaffle_shop.
+    jvm_flags = ["-Xmx2g"],
+    visibility = ["//visibility:public"],
+    runtime_deps = [
+        ":bench_generated",
+        ":bench_lib",
+    ],
+)

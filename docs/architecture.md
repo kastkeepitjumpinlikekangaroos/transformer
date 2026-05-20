@@ -326,6 +326,44 @@ shutdown hook catches abandoned iterators. Stress-test parity
 enforced for every spill-capable operator in its respective
 `*SpillTest`.
 
+### 2d. Per-operator instrumentation (opt-in)
+
+Every operator has a per-partition counter set wired in at planner time.
+When `ExecutionOptions.metricsEnabled = false` (the default),
+`PhysicalPlanner.plan` returns the un-wrapped operator tree and the cost
+on the disabled path is one branch + load — measured by
+`benchmarks/micro/DisabledOverheadBench` to be below 1%. When enabled,
+the planner wraps each operator's `execute(p)` iterator in a `final
+class MeteredIterator` (final so the JIT inlines `hasNext` / `next`),
+attaches a `MetricsNode` whose counter array is sized at construction
+from the operator's `IdxCounterNames` array, and `DataJob.runOneTask`
+writes a sibling `_perf.json` next to `_run.json` with the operator
+tree snapshot plus per-task `ThreadMXBean` CPU / allocation / GC deltas.
+
+Enablement plumbing mirrors spill: a new `metricsEnabled: Boolean` field
+on `ExecutionOptions` threaded through `SqlExecutor.execute` →
+`SqlEngine.execute` → `PhysicalPlanner.plan` to the operator
+constructors. Three routes: per-task `options.metrics = "true"` in
+`output.json` (wins when explicitly set), sysprop
+`transformer.metrics.enabled`, or env var `TRANSFORMER_METRICS_ENABLED`.
+
+Counter storage is `Array[LongAdder]` (lock-free, contention-tolerant)
+indexed by `final val Idx<Name>: Int` constants declared in each
+operator's companion object. Names live in a parallel `IdxCounterNames:
+Array[String]`; a per-operator unit test asserts
+`IdxCounterNames.length == highest Idx<Name> + 1` so adding a counter
+without bumping the array trips the build immediately. Increments on
+the per-row hot path are `if (metricsNode != null)
+metricsNode.counters(IdxX).add(d)` — allocation-free, single branch.
+The on-disk format of `AggStateSerde` is untouched; timing-only
+`SerdeStats` overloads let the operator attribute serde nanos to its
+own counters without changing the bytes a spill run writes.
+
+The full counter inventory plus enable-by-route + macro-bench + JMH
+harness documentation lives in [benchmarking.md](benchmarking.md). The
+on-disk `_perf.json` schema is defined in
+`core/metrics/TaskMetricsRecord.scala` (schema version 1).
+
 ### 3. Parallel execution
 
 All parallel work — DAG scheduling, pipeline-breaking operators, partitioned

@@ -1,6 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
+import com.transformer.core.metrics.MetricsNode
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -223,6 +224,44 @@ class HashAggregateSpillTest {
   }
 
   // ---- CountDistinct opt-out ------------------------------------------------
+
+  // ---- Sub-plan 2: spill + metrics composition ------------------------------
+
+  /** With a tiny spill threshold AND metrics enabled, the operator's
+    * MetricsNode must report non-zero `spillEvents` and `bytesSpilled`. This
+    * is the composition gate: spill bookkeeping must continue to fire under
+    * metering. */
+  @Test def spillAndMetricsComposeReportingNonZeroSpillCounters(): Unit = {
+    val rng = new Random(1234L)
+    val parts = (0 until 4).map { p =>
+      (0 until 5000).map { _ =>
+        val k = rng.nextInt(200)
+        val v = rng.nextLong() & 0xFFFFFFL
+        (k, v)
+      }.toVector
+    }.toVector
+    val schema = Schema(Vector(Field("k", DataType.IntType), Field("v", DataType.LongType)))
+    val rowsByPart = parts.map(_.map(kv => Array[Any](
+      java.lang.Integer.valueOf(kv._1), java.lang.Long.valueOf(kv._2))))
+    val plan = new InMemoryPartitionedPlanForAggSpill(schema, rowsByPart)
+    val k = ColRefExpr(0, "k", DataType.IntType)
+    val v = ColRefExpr(1, "v", DataType.LongType)
+    val node = new MetricsNode(0, "HashAggregateExec", 0, HashAggregateExec.IdxCounterNames)
+    val agg = HashAggregateExec(
+      plan, Seq((k, "k")), Seq((AggExprSum(v), "sumv")), spillyOpts(), node)
+    // Drain.
+    val it = (0 until agg.numPartitions).iterator.flatMap(agg.execute)
+    while (it.hasNext) it.next()
+    val snap = node.snapshot()
+    assertTrue(s"spillEvents must be > 0, got ${snap.counter("spillEvents")}",
+      snap.counter("spillEvents") > 0L)
+    assertTrue(s"bytesSpilled must be > 0, got ${snap.counter("bytesSpilled")}",
+      snap.counter("bytesSpilled") > 0L)
+    assertTrue(s"spillRunsWritten must be > 0, got ${snap.counter("spillRunsWritten")}",
+      snap.counter("spillRunsWritten") > 0L)
+    assertTrue(s"groupCount must be > 0, got ${snap.counter("groupCount")}",
+      snap.counter("groupCount") > 0L)
+  }
 
   @Test def countDistinctDisablesSpillNotErrors(): Unit = {
     // A task that asks for spill but contains a CountDistinct aggregate
