@@ -240,7 +240,13 @@ final case class HashJoinExec(
         // the keymap; the row stays in `rows` so outer-join "unmatched build"
         // emission still surfaces it.
         val k = KeyCodec.boxedToLong(v, keyType)
-        val list = keyMap.getOrInsert(k, new util.ArrayList[Int]())
+        // Inline get-then-put to avoid the per-row Function0 allocation
+        // `getOrInsert` would create from its by-name parameter.
+        var list = keyMap.get(k)
+        if (list == null) {
+          list = new util.ArrayList[Int]()
+          keyMap.put(k, list)
+        }
         list.add(i)
       }
       i += 1
@@ -262,7 +268,14 @@ final case class HashJoinExec(
         var k = 0
         while (k < nKeys) { keyBuf(k) = row(buildKeyColIndices(k)); k += 1 }
         val key = keyCodec.encodeBoxed(keyBuf)
-        val list = keyMap.computeIfAbsent(key, _ => new util.ArrayList[Int]())
+        // computeIfAbsent's lambda is a per-call allocation; do the get/put
+        // by hand to avoid the closure on cache hits (the common path once
+        // the keymap is warm).
+        var list = keyMap.get(key)
+        if (list == null) {
+          list = new util.ArrayList[Int]()
+          keyMap.put(key, list)
+        }
         list.add(i)
         i += 1
       }
@@ -273,7 +286,11 @@ final case class HashJoinExec(
       var i = 0
       while (i < rows.length) {
         val key = precomputedKeys(i)
-        val list = keyMap.computeIfAbsent(key, _ => new util.ArrayList[Int]())
+        var list = keyMap.get(key)
+        if (list == null) {
+          list = new util.ArrayList[Int]()
+          keyMap.put(key, list)
+        }
         list.add(i)
         i += 1
       }
@@ -326,7 +343,14 @@ final case class HashJoinExec(
   /** Probe one partition's worth of rows against the build keymap. Returns
     * (joined rows, build indices that matched). The caller stitches these
     * together across partitions (collapsing path) or uses one shard's
-    * result directly (per-shard path). */
+    * result directly (per-shard path).
+    *
+    * The probe row's `Array[Any]` materialization is deferred to the
+    * point we know we'll emit at least one output row — inner joins where
+    * the probe row has no match skip the boxing entirely. For
+    * `preserveProbeOuter` joins the unmatched-probe emission still has to
+    * box, but at most once per row.
+    */
   private def probeOnePartition(
       partitionIdx: Int,
       build: BuildSide): (mutable.ArrayBuffer[Array[Any]], util.HashSet[Int]) = {
@@ -334,6 +358,7 @@ final case class HashJoinExec(
     val localMatched = new util.HashSet[Int]()
     val probeIt = probePlan.execute(partitionIdx)
     val probeSchema = probePlan.outputSchema
+    val probeWidth = probeSchema.length
     val keyBuf: Array[Any] = if (probeKeysAreColRefs) null else new Array[Any](nKeys)
     while (probeIt.hasNext) {
       val b = probeIt.next()
@@ -347,12 +372,6 @@ final case class HashJoinExec(
         else Array.tabulate(nKeys)(i => probeKeyExprs(i).evalVec(b))
       var r = 0
       while (r < nrows) {
-        val probeRow = new Array[Any](probeSchema.length)
-        var c = 0
-        while (c < probeSchema.length) {
-          probeRow(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
-          c += 1
-        }
         val matches: util.ArrayList[Int] =
           if (useJoinLongKey) {
             val col = b.column(probeKeyLongIdx)
@@ -375,11 +394,13 @@ final case class HashJoinExec(
               }
             if (key == null) null else build.keyMap.get(key)
           }
+        var probeRow: Array[Any] = null
         var matchedAny = false
         if (matches != null && !matches.isEmpty) {
           val it = matches.iterator()
           while (it.hasNext) {
             val buildIdx = it.next()
+            if (probeRow == null) probeRow = materializeProbeRow(b, r, probeWidth)
             val combined = mergeMatch(probeRow, build.rows(buildIdx))
             if (passesExtra(combined)) {
               local += combined
@@ -389,12 +410,24 @@ final case class HashJoinExec(
           }
         }
         if (!matchedAny && preserveProbeOuter) {
+          if (probeRow == null) probeRow = materializeProbeRow(b, r, probeWidth)
           local += mergeUnmatchedProbe(probeRow)
         }
         r += 1
       }
     }
     (local, localMatched)
+  }
+
+  private def materializeProbeRow(b: ColumnarBatch, r: Int, width: Int): Array[Any] = {
+    val arr = new Array[Any](width)
+    var c = 0
+    while (c < width) {
+      val col = b.column(c)
+      arr(c) = if (col.isNull(r)) null else col.getBoxed(r)
+      c += 1
+    }
+    arr
   }
 
   private def emitUnmatchedBuild(build: BuildSide, matched: util.HashSet[Int]): Iterator[ColumnarBatch] = {

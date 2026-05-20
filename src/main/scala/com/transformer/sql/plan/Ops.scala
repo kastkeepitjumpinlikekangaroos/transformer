@@ -213,6 +213,68 @@ object VecOps {
     new BooleanVector(values, nulls, cap)
   }
 
+  /** Fold an AND chain into a single result vector by mutating `acc` in place
+    * with the three-valued AND of each `addend`. `acc` MUST be a freshly-
+    * allocated [[BooleanVector]] (not an aliased column from the input batch
+    * — the caller's responsibility), otherwise this method's writes would
+    * corrupt the shared column.
+    *
+    * Used by [[com.transformer.sql.plan.BinOpExpr.evalVec]] to collapse
+    * a left-deep tree of `AND` nodes into a single output allocation. The
+    * 9-conjunct WHERE clauses common to ETL scans go from N intermediate
+    * `BooleanVector` allocations per batch down to 1.
+    */
+  def andInto(acc: BooleanVector, addend: BooleanVector, n: Int): Unit = {
+    val av = acc.values
+    val an = acc.nulls
+    val bv = addend.values
+    val bn = addend.nulls
+    var i = 0
+    while (i < n) {
+      val aNull = an.get(i)
+      val bNull = bn.get(i)
+      val aFalse = !aNull && !av(i)
+      val bFalse = !bNull && !bv(i)
+      if (aFalse || bFalse) {
+        av(i) = false
+        if (aNull) an.clear(i)
+      } else if (aNull || bNull) {
+        an.set(i)
+        av(i) = false
+      } else {
+        av(i) = true
+      }
+      i += 1
+    }
+  }
+
+  /** OR-fold counterpart of [[andInto]]. Mutates `acc` in place with the
+    * three-valued OR of `addend`. Same aliasing contract.
+    */
+  def orInto(acc: BooleanVector, addend: BooleanVector, n: Int): Unit = {
+    val av = acc.values
+    val an = acc.nulls
+    val bv = addend.values
+    val bn = addend.nulls
+    var i = 0
+    while (i < n) {
+      val aNull = an.get(i)
+      val bNull = bn.get(i)
+      val aTrue = !aNull && av(i)
+      val bTrue = !bNull && bv(i)
+      if (aTrue || bTrue) {
+        av(i) = true
+        if (aNull) an.clear(i)
+      } else if (aNull || bNull) {
+        an.set(i)
+        av(i) = false
+      } else {
+        av(i) = false
+      }
+      i += 1
+    }
+  }
+
   /** Three-valued OR. `true OR null = true`; `false OR null = null`. */
   def or(l: ColumnVector, r: ColumnVector, n: Int): BooleanVector = {
     val cap = math.max(1, n)
@@ -281,13 +343,40 @@ object VecOps {
     new BooleanVector(values, nulls, cap)
   }
 
-  /** Vectorized IS NULL / IS NOT NULL. Returns BooleanVector with no nulls. */
+  /** Vectorized IS NULL / IS NOT NULL. Returns BooleanVector with no nulls.
+    *
+    * Fast path: for primitive columns whose null bitset is empty (no nulls in
+    * the batch — the common case for cleaned-up input), the result is the
+    * constant `!negated` for every row. A single `Arrays.fill` avoids the
+    * per-row `isNull(i)` dispatch. Reference columns (String/Binary/Decimal)
+    * store nulls inline in the values array, so we still scan per row for
+    * those.
+    */
   def isNull(c: ColumnVector, negated: Boolean, n: Int): BooleanVector = {
     val cap = math.max(1, n)
     val values = new Array[Boolean](cap)
     val nulls = new util.BitSet(cap)
-    var i = 0
-    while (i < n) { values(i) = c.isNull(i) ^ negated; i += 1 }
+    val emptyNullBitset: Boolean = c match {
+      case v: IntVector       => v.nulls.isEmpty
+      case v: LongVector      => v.nulls.isEmpty
+      case v: FloatVector     => v.nulls.isEmpty
+      case v: DoubleVector    => v.nulls.isEmpty
+      case v: BooleanVector   => v.nulls.isEmpty
+      case v: DateVector      => v.nulls.isEmpty
+      case v: TimestampVector => v.nulls.isEmpty
+      case _                  => false
+    }
+    if (emptyNullBitset) {
+      // No nulls — result is !negated for every row.
+      if (!negated) {
+        // IS NULL with no nulls present → all false; the zeroed array is correct.
+      } else {
+        java.util.Arrays.fill(values, 0, n, true)
+      }
+    } else {
+      var i = 0
+      while (i < n) { values(i) = c.isNull(i) ^ negated; i += 1 }
+    }
     new BooleanVector(values, nulls, cap)
   }
 

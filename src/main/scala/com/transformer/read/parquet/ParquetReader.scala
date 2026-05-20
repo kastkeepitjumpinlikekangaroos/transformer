@@ -319,6 +319,18 @@ final class ParquetPartitionIterator(
     columnDescriptors.map(_.getMaxDefinitionLevel)
   private val primitiveTypeNames: Array[PrimitiveTypeName] =
     columnDescriptors.map(_.getPrimitiveType.getPrimitiveTypeName)
+  // Per-column String intern cache. parquet-mr decoders return a fresh
+  // `Binary` per row and converting that to a `String` via `toStringUsingUTF8`
+  // allocates a brand-new `String` on every call. In ETL workloads it's
+  // typical for a single column (foreign-key columns like `market_id`) to
+  // hold a tiny dictionary of unique values repeated millions of times — so
+  // we cache `Binary → String` per row group and reuse the same `String`
+  // instance for matching subsequent rows. The cache is reset at row-group
+  // boundaries because `Binary` references point into the page buffers
+  // freed when the next row group is read. Null entries mean "not a string
+  // column" — populated lazily in `decodeColumn`.
+  private val stringInternCache: Array[java.util.HashMap[org.apache.parquet.io.api.Binary, String]] =
+    new Array[java.util.HashMap[org.apache.parquet.io.api.Binary, String]](columnDescriptors.length)
 
   private val groupsToProcess: Int = math.max(0, endRowGroup - startRowGroup)
   private var groupsAdvanced: Int = 0
@@ -373,6 +385,10 @@ final class ParquetPartitionIterator(
         )
         columnReaders = columnDescriptors.map(crs.getColumnReader)
         currentRowsRemaining = pages.getRowCount
+        // Reset the per-column intern caches — Binary refs from the prior
+        // row group's page buffers are no longer valid once that row group's
+        // pages are released.
+        java.util.Arrays.fill(stringInternCache.asInstanceOf[Array[AnyRef]], null)
         return true
       }
     }
@@ -492,10 +508,29 @@ final class ParquetPartitionIterator(
         schema.fields(col).dataType match {
           case DataType.StringType =>
             val v = vec.asInstanceOf[StringVector]
+            // Lazily build the row-group-scoped intern cache. After the first
+            // ~K distinct values are seen the cache hits dominate and we save
+            // a `String` allocation per row. For columns with very high
+            // distinct cardinality (a UUID per row, say) the cache stays
+            // ineffective but the overhead is one HashMap lookup per row —
+            // negligible next to the avoided allocation on the common case.
+            var cache = stringInternCache(col)
+            if (cache == null) {
+              cache = new java.util.HashMap[org.apache.parquet.io.api.Binary, String]()
+              stringInternCache(col) = cache
+            }
             var r = 0
             while (r < rowCount) {
               if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
-              else v.set(r, cr.getBinary.toStringUsingUTF8)
+              else {
+                val bin = cr.getBinary
+                var s = cache.get(bin)
+                if (s == null) {
+                  s = bin.toStringUsingUTF8
+                  cache.put(bin, s)
+                }
+                v.set(r, s)
+              }
               cr.consume(); r += 1
             }
           case _ =>

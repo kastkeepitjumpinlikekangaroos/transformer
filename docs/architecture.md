@@ -117,6 +117,17 @@ a reusable 1-row batch that the surrounding loop refills with `.set(rowArr)`
 or `.setFromBatch(srcBatch, srcRow)`. Don't allocate fresh `ColumnarBatch`es
 per row in tight loops — that defeats the JIT.
 
+`ColumnarBatch.selectByBoolean(mask: BooleanVector)` is the canonical
+WHERE-applies-NULL-as-false filter primitive. It carries an
+all-pass fast path: when every row passes the mask the original batch is
+returned unchanged (no per-column copy, no fresh vector allocations) —
+typical for the leaf-scan filters in ETL workloads where the parquet
+row-group skip has already discarded the non-matching rows at the stats
+level. `FilterExec.execute` evaluates the predicate via `Expr.evalVec`
+and hands the resulting `BooleanVector` straight to `selectByBoolean`,
+which removes the intermediate `Array[Boolean]` mask the older path
+allocated as a bridge.
+
 ### 2a. KeyCodec — packed keys for pipeline breakers
 
 `HashAggregate`, `HashJoin`, `Distinct`, and `WindowExec.processSpec` all
@@ -138,6 +149,17 @@ dominated CPU once group cardinality climbed into the millions.
   element-wise `equals` with `Array[Byte]` special-cased for structural
   equality). Still one allocation per row + two on insert, but the `Seq`
   wrapper overhead and dynamic-dispatch walk are gone.
+
+**Scratch-key lookup path.** Operators that probe a `HashMap` per row
+(`HashAggregateExec`, `DistinctExec`) hold a reusable scratch wrapper —
+`BytesKeyScratch` for the packed codec, `ObjectArrayKeyScratch` for the
+object-array codec — and rewrite its bytes/values in place via
+`KeyCodec.encodeIntoScratch(scratch, batch, row)` before each probe. On a
+HashMap hit the scratch stays unmaterialized; on a miss the operator clones
+it into an owned key via `KeyCodec.ownFromScratch`. For aggregations with
+high group repeat factors (`int_orderbook_market_summary` groups 105M rows
+into 13K keys) this collapses the per-row two-allocation cost of
+`encodeFromBatch` down to roughly one allocation per unique key.
 - **`EmptyKeyCodec`** — singleton sentinel for zero-column keys
   (`GROUP BY ()` from `SELECT COUNT(*)`). Every encode collapses to the
   same object so all rows land in one bucket.
@@ -343,6 +365,19 @@ Both directions skip the `Group`/`SimpleGroup` row-object model that
 per-batch dispatch (hasNext checks, allocations, writer flush boundaries) at
 the cost of more in-flight memory; lower it if you have very wide schemas.
 
+**Per-row-group String intern cache.** `ParquetPartitionIterator` holds a
+per-output-column `HashMap[Binary, String]` that's lazily allocated on the
+first String-typed column it decodes and reset at every row-group
+boundary (because the underlying `Binary` references point into the
+just-freed page buffers). On any column with significant duplication —
+the typical case for foreign-key columns like `market_id`, status flags,
+side enums — the cache collapses the per-row `Binary.toStringUsingUTF8()`
+allocation down to one `String` per unique value per row group. On the
+polymarket orderbook scan that's ~13K String objects instead of ~210M,
+which eliminates the dominant young-gen allocation source AND lets
+downstream `ObjectArrayCodec`-keyed group-bys hit identity-equality
+fast paths on the cached `String`'s cached `hashCode`.
+
 ### 3d. Parquet predicate pushdown
 
 `ParquetReader.withPushdownFilter(predicate: Expr)` translates a bound
@@ -546,8 +581,17 @@ of the box. Hot nodes override for primitive-array speed:
   treats the result as read-only.
 - `CastExpr.evalVec` — delegates to `VecOps.cast`.
 - `UnaryOpExpr.evalVec` — `VecOps.negate` / `VecOps.not`.
-- `BinOpExpr.evalVec` — dispatches to `VecOps.{and,or,arith,compare,concat}`.
-- `IsNullExpr.evalVec` — `VecOps.isNull`.
+- `BinOpExpr.evalVec` — dispatches to `VecOps.{arith,compare,concat}` for
+  the binary ops. `AND` / `OR` chains take a fold path: the operator
+  flattens the left-deep `AND`/`OR` tree, allocates ONE intermediate
+  `BooleanVector` from the first conjunct, and folds every subsequent
+  conjunct in via `VecOps.andInto` / `VecOps.orInto` mutating in place.
+  A 9-conjunct `WHERE` clause goes from N intermediate `BooleanVector`s
+  per batch down to 1.
+- `IsNullExpr.evalVec` — `VecOps.isNull`. Carries a fast path for primitive
+  columns whose null bitset is empty: when no rows are null the result is
+  the constant `!negated` for every row and we skip the per-row
+  `isNull(i)` dispatch.
 - `FuncExpr.evalVec` — delegates to `Funcs.applyVec` for the hot subset
   (`COALESCE`, `LENGTH`, `UPPER`/`LOWER`/`TRIM`, `CONCAT`, `SUBSTRING`,
   `ABS`, `FLOOR`/`CEIL[ING]`, `ROUND`, `TRUNC[ATE]`, `IF`, `NULLIF`); falls
@@ -647,24 +691,41 @@ typed vector for the whole batch instead of N recursive `Expr.eval` calls.
   LAG/LEAD args and aggregate args still go through the per-row path — a
   follow-up that pairs with plan 04 (sharding).
 
-### 5c. Vectorized aggregate state updates (no-GROUP-BY fast path)
+### 5c. Vectorized aggregate state updates
 
-`AggState` exposes two update paths:
+`AggState` exposes three update entry points:
 
-- **`update(agg, batch, row)`** — per-row, state evaluates the aggregate's
-  args itself via `agg.args(i).eval(batch, row)`. Used by the GROUP BY path
-  (per-row state dispatch is fundamental there) and by `WindowExec` (1-row
-  `RowBuf` batches).
-- **`updateBatch(agg, batch)`** — whole-batch. Default loops per-row through
-  `update`. Primitive states (`CountStarState`, `CountState`, `CountIfState`,
-  `LongSumState`, `DoubleSumState`, `AvgState`, `MinMaxState`) override to
-  eval the aggregate's args once via `Expr.evalVec` and walk the typed
-  vector with the column-type pattern match hoisted outside the row loop.
+- **`updateAt(argVecs: Array[ColumnVector], row: Int)`** — fast path used by
+  `HashAggregateExec`'s GROUP BY loop. The caller pre-evaluates each
+  aggregate's args once per batch via `Expr.evalVec` (caching the result
+  vectors in an `ArgVecsCache` reused across batches) and the state reads
+  typed primitives directly from the vector — no per-row `Expr.eval`
+  dispatch, no per-row boxing. Primitive states (`CountStarState`,
+  `CountState`, `CountIfState`, `LongSumState`, `DoubleSumState`,
+  `AvgState`, `MinMaxState`, `MomentState`, `CovarState`, `CorrState`)
+  override with a pattern match on the argument vector's concrete subtype
+  for typed reads.
+- **`updateBatchAt(argVecs, n)`** — whole-batch variant used by the
+  no-GROUP-BY fast path. The column-type pattern match is hoisted outside
+  the row loop so a `SUM(spread)` over a `DoubleVector` ends up as a tight
+  primitive-array sum loop.
+- **`update(agg, batch, row)`** — legacy row-form, kept only for
+  `WindowExec` which feeds 1-row `RowBuf` batches where vectorized pre-eval
+  gives nothing back. The default implementation pre-evaluates each arg
+  once per call and delegates to `updateAt`, so ColRef args alias the
+  RowBuf's underlying column at zero alloc cost.
 
-`HashAggregateExec` calls `updateBatch` in the no-GROUP-BY fast path
-(every row aggregates into one bucket, so per-row state dispatch is wasted
-work). The GROUP BY path stays on `update` because rows fan out to
-different states per row.
+`HashAggregateExec.partialAggregate` pre-evaluates `argVecsByAgg` once per
+batch, then per-row looks up the state and calls `updateAt` for every
+aggregate. On 100M+ row scales this collapses the per-row work to one map
+lookup + N typed primitive reads, instead of the old N-per-row
+`Expr.eval`-and-box dispatches that dominated young-gen GC.
+
+`MinMaxState` also carries primitive specialization: rather than holding
+the current extremum in a boxed `Any` slot that allocated a fresh
+`java.lang.Long`/`Double` every time the extremum advanced, it tracks the
+running value in unboxed `longCur` / `doubleCur` slots and only boxes once
+at `finish()`. The result type field decides which slot is canonical.
 
 ### 6. Window functions: two-stage logical binding
 

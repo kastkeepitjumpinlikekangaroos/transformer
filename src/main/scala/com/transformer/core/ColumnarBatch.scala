@@ -52,6 +52,7 @@ final class ColumnarBatch private (
     var kept = 0
     var i = 0
     while (i < _numRows) { if (mask(i)) kept += 1; i += 1 }
+    if (kept == _numRows) return this
     val out = new ColumnarBatch(schema, math.max(1, kept))
     var c = 0
     while (c < schema.length) {
@@ -61,6 +62,40 @@ final class ColumnarBatch private (
       var dstRow = 0
       while (srcRow < _numRows) {
         if (mask(srcRow)) {
+          src.copyTo(srcRow, dst, dstRow)
+          dstRow += 1
+        }
+        srcRow += 1
+      }
+      c += 1
+    }
+    out.setNumRows(kept)
+    out
+  }
+
+  /** Returns a new batch containing only rows where `mask.values(i) == true` and
+    * `mask.isNull(i) == false` (SQL WHERE semantics — NULL treated as false).
+    * Saves the intermediate `Array[Boolean]` allocation [[FilterExec]] would
+    * otherwise build to bridge between [[Expr.evalVec]] and [[select]]. */
+  def selectByBoolean(mask: BooleanVector): ColumnarBatch = {
+    val maskValues = mask.values
+    val maskNulls = mask.nulls
+    var kept = 0
+    var i = 0
+    while (i < _numRows) {
+      if (!maskNulls.get(i) && maskValues(i)) kept += 1
+      i += 1
+    }
+    if (kept == _numRows) return this
+    val out = new ColumnarBatch(schema, math.max(1, kept))
+    var c = 0
+    while (c < schema.length) {
+      val src = columns(c)
+      val dst = out.columns(c)
+      var srcRow = 0
+      var dstRow = 0
+      while (srcRow < _numRows) {
+        if (!maskNulls.get(srcRow) && maskValues(srcRow)) {
           src.copyTo(srcRow, dst, dstRow)
           dstRow += 1
         }

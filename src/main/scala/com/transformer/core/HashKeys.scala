@@ -64,6 +64,24 @@ sealed trait KeyCodec {
     * at row `outRow`. The target columns must have the same [[DataType]]s as
     * the key columns this codec was built for. */
   def decode(key: AnyRef, out: ColumnarBatch, baseCol: Int, outRow: Int): Unit
+
+  /** Allocate a scratch key wrapper sized for this codec, suitable for
+    * reuse across many lookups in a row loop. Each worker holds its own
+    * scratch — they're stateful. */
+  def newScratch(): AnyRef
+
+  /** Rewrite the scratch wrapper to encode the key at `(batch, row)` and
+    * recompute its cached hash. After this call the scratch is a valid
+    * lookup key in a `HashMap` keyed by the codec's owned key type
+    * ([[BytesKey]] for fixed-width, [[ObjectArrayKey]] for variable-width).
+    * On a hit, no further allocation is needed. On a miss the caller
+    * materializes an owned copy via [[ownFromScratch]] before inserting. */
+  def encodeIntoScratch(scratch: AnyRef, batch: ColumnarBatch, row: Int): Unit
+
+  /** Materialize an immutable owned key from the current scratch state.
+    * Use this on the insert-into-map branch — the scratch must NOT be
+    * inserted directly since the operator will rewrite it on the next row. */
+  def ownFromScratch(scratch: AnyRef): AnyRef
 }
 
 object KeyCodec {
@@ -152,9 +170,14 @@ object KeyCodec {
 }
 
 /** Hashmap-suitable wrapper around a `byte[]`. Caches `hashCode`; `equals`
-  * does `Arrays.equals` after a same-hash check. */
-final class BytesKey(val bytes: Array[Byte]) {
-  private val hash: Int = java.util.Arrays.hashCode(bytes)
+  * does `Arrays.equals` after a same-hash check.
+  *
+  * Subclassed by [[BytesKeyScratch]] which lets the operator reuse one
+  * wrapper across many lookups in a row loop. The stored-key path always
+  * allocates a fresh `BytesKey` so the bytes are stable.
+  */
+sealed class BytesKey(val bytes: Array[Byte], protected var hash: Int) {
+  def this(bytes: Array[Byte]) = this(bytes, java.util.Arrays.hashCode(bytes))
   override def hashCode(): Int = hash
   override def equals(other: Any): Boolean = other match {
     case k: BytesKey => (k eq this) || (k.hash == hash && java.util.Arrays.equals(bytes, k.bytes))
@@ -162,27 +185,47 @@ final class BytesKey(val bytes: Array[Byte]) {
   }
 }
 
+/** Mutable lookup wrapper. The operator holds one of these per worker and
+  * rewrites its `bytes` slice in place per row, then uses it to probe the
+  * `HashMap`. On a hit no allocation happens; on a miss the operator clones
+  * the bytes into a fresh [[BytesKey]] to insert. The probe path's hash is
+  * recomputed in place via [[setHashFor]] (called by the codec after
+  * rewriting). */
+final class BytesKeyScratch(initialCapacity: Int)
+    extends BytesKey(new Array[Byte](initialCapacity), 0) {
+  /** Ensure the backing array is at least `len` bytes. May resize. Returns
+    * the backing array for direct rewriting. */
+  def writableBuffer(len: Int): Array[Byte] = {
+    // The codec sizes the buffer at construction time and never grows it
+    // (the packed layout is static per codec). We sanity-check here.
+    if (bytes.length != len)
+      throw new IllegalStateException(
+        s"BytesKeyScratch capacity ${bytes.length} != requested $len — codec size mismatch")
+    // Wipe the bytes before re-use so stale data from the previous row
+    // can't bleed into a key whose new content happens to be shorter.
+    java.util.Arrays.fill(bytes, 0.toByte)
+    bytes
+  }
+  /** Recompute the hash for the current `bytes` content. Called by the codec
+    * after rewriting `bytes`. */
+  def recomputeHash(): Unit = {
+    hash = java.util.Arrays.hashCode(bytes)
+  }
+  /** Materialize an immutable copy for insertion. */
+  def toOwned: BytesKey = new BytesKey(bytes.clone(), hash)
+}
+
 /** Hashmap-suitable wrapper around an `Array[AnyRef]`. Caches `hashCode`;
   * `equals` is element-wise with `Array[Byte]` special-cased for structural
   * equality (raw arrays would fall back to reference equality otherwise, which
-  * is incorrect for any non-singleton binary key). */
-final class ObjectArrayKey(val values: Array[AnyRef]) {
-  private val hash: Int = {
-    var h = 1
-    var i = 0
-    while (i < values.length) {
-      val v = values(i)
-      val eh =
-        if (v == null) 0
-        else v match {
-          case b: Array[Byte] => java.util.Arrays.hashCode(b)
-          case other          => other.hashCode
-        }
-      h = 31 * h + eh
-      i += 1
-    }
-    h
-  }
+  * is incorrect for any non-singleton binary key).
+  *
+  * Subclassed by [[ObjectArrayKeyScratch]] for in-place lookup reuse — the
+  * stored-key path always allocates a fresh `ObjectArrayKey` so the values
+  * array is stable.
+  */
+sealed class ObjectArrayKey(val values: Array[AnyRef], protected var hash: Int) {
+  def this(values: Array[AnyRef]) = this(values, ObjectArrayKey.computeHash(values))
   override def hashCode(): Int = hash
   override def equals(other: Any): Boolean = other match {
     case k: ObjectArrayKey =>
@@ -206,6 +249,40 @@ final class ObjectArrayKey(val values: Array[AnyRef]) {
   }
 }
 
+object ObjectArrayKey {
+  def computeHash(values: Array[AnyRef]): Int = {
+    var h = 1
+    var i = 0
+    while (i < values.length) {
+      val v = values(i)
+      val eh =
+        if (v == null) 0
+        else v match {
+          case b: Array[Byte] => java.util.Arrays.hashCode(b)
+          case other          => other.hashCode
+        }
+      h = 31 * h + eh
+      i += 1
+    }
+    h
+  }
+}
+
+/** Mutable lookup wrapper. The operator holds one per worker and rewrites
+  * its `values` array in place per row before probing the `HashMap`. On a
+  * hit no allocation happens; on a miss the operator clones the values into
+  * a fresh [[ObjectArrayKey]]. The probe's hash is recomputed via
+  * [[recomputeHash]] after rewriting. */
+final class ObjectArrayKeyScratch(numKeys: Int)
+    extends ObjectArrayKey(new Array[AnyRef](numKeys), 0) {
+  def writableValues: Array[AnyRef] = values
+  def recomputeHash(): Unit = {
+    hash = ObjectArrayKey.computeHash(values)
+  }
+  /** Materialize an immutable copy for insertion. */
+  def toOwned: ObjectArrayKey = new ObjectArrayKey(values.clone(), hash)
+}
+
 /** Codec for zero-column keys (e.g. ungrouped aggregation). Every encode
   * returns the same sentinel object so all rows collapse into one bucket. */
 object EmptyKeyCodec extends KeyCodec {
@@ -215,6 +292,9 @@ object EmptyKeyCodec extends KeyCodec {
   def encodeFromBatch(batch: ColumnarBatch, row: Int): AnyRef = SENTINEL
   def encodeFromBatchSkipIfAnyNull(batch: ColumnarBatch, row: Int): AnyRef = SENTINEL
   def decode(key: AnyRef, out: ColumnarBatch, baseCol: Int, outRow: Int): Unit = ()
+  def newScratch(): AnyRef = SENTINEL
+  def encodeIntoScratch(scratch: AnyRef, batch: ColumnarBatch, row: Int): Unit = ()
+  def ownFromScratch(scratch: AnyRef): AnyRef = SENTINEL
 }
 
 /** Fixed-width packed codec. Key layout in the resulting `byte[]`:
@@ -300,6 +380,24 @@ final class PackedBytesCodec private[core] (
       i += 1
     }
   }
+
+  def newScratch(): AnyRef = new BytesKeyScratch(totalBytes)
+
+  def encodeIntoScratch(scratch: AnyRef, batch: ColumnarBatch, row: Int): Unit = {
+    val s = scratch.asInstanceOf[BytesKeyScratch]
+    val bytes = s.writableBuffer(totalBytes)
+    var i = 0
+    while (i < numKeys) {
+      val col = batch.column(columnIndices(i))
+      if (col.isNull(row)) setNullBit(bytes, i)
+      else writeFromBatch(bytes, valueOffsets(i), columnTypes(i), col, row)
+      i += 1
+    }
+    s.recomputeHash()
+  }
+
+  def ownFromScratch(scratch: AnyRef): AnyRef =
+    scratch.asInstanceOf[BytesKeyScratch].toOwned
 
   // ---- helpers --------------------------------------------------------------
 
@@ -493,6 +591,20 @@ final class LongHashMap[V >: Null <: AnyRef](initialCapacity: Int = 16, loadFact
     v
   }
 
+  /** Strict-arg variant of [[getOrInsertNull]] for hot paths that already
+    * built the value and want to skip the by-name Function0 allocation
+    * Scala creates per call site. Returns the previous value (or `null` if
+    * the NULL key wasn't present). */
+  def putNull(value: V): V = {
+    if (nullEntryIdx >= 0) {
+      val prev = entryValues(nullEntryIdx).asInstanceOf[V]
+      entryValues(nullEntryIdx) = value
+      return prev
+    }
+    nullEntryIdx = appendEntry(0L, value, isNull = true)
+    null
+  }
+
   /** Unconditionally store `value` at `key`. Overwrites if `key` already
     * exists; preserves the original insertion position. Returns the previous
     * value (or `null`). */
@@ -650,4 +762,23 @@ final class ObjectArrayCodec private[core] (
       i += 1
     }
   }
+
+  def newScratch(): AnyRef = new ObjectArrayKeyScratch(numKeys)
+
+  def encodeIntoScratch(scratch: AnyRef, batch: ColumnarBatch, row: Int): Unit = {
+    val s = scratch.asInstanceOf[ObjectArrayKeyScratch]
+    val arr = s.writableValues
+    var i = 0
+    while (i < numKeys) {
+      val col = batch.column(columnIndices(i))
+      arr(i) =
+        if (col.isNull(row)) null
+        else col.getBoxed(row).asInstanceOf[AnyRef]
+      i += 1
+    }
+    s.recomputeHash()
+  }
+
+  def ownFromScratch(scratch: AnyRef): AnyRef =
+    scratch.asInstanceOf[ObjectArrayKeyScratch].toOwned
 }

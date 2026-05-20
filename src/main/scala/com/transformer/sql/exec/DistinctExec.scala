@@ -69,12 +69,18 @@ final case class DistinctExec(child: PhysicalPlan) extends PhysicalPlan {
 
   private def collect(p: Int): util.LinkedHashSet[AnyRef] = {
     val set = new util.LinkedHashSet[AnyRef]()
+    val scratch = codec.newScratch()
     val it = child.execute(p)
     while (it.hasNext) {
       val b = it.next()
       var r = 0
       while (r < b.numRows) {
-        set.add(codec.encodeFromBatch(b, r))
+        // Probe with the scratch wrapper to avoid the per-row key allocation
+        // on dedup HITS (the common case once the set is warm). On a miss we
+        // pay one alloc for the owned key, the same as before. Skipping the
+        // wrapper alloc on hit eliminates two allocations per duplicate row.
+        codec.encodeIntoScratch(scratch, b, r)
+        if (!set.contains(scratch)) set.add(codec.ownFromScratch(scratch))
         r += 1
       }
     }

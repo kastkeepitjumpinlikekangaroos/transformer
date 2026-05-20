@@ -44,18 +44,14 @@ final case class FilterExec(child: PhysicalPlan, predicate: Expr) extends Physic
   def numPartitions: Int = child.numPartitions
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     child.execute(partition).flatMap { batch =>
-      val n = batch.numRows
       // One vectorized predicate eval per batch — primitive bool array, no
-      // per-row Expr dispatch.
+      // per-row Expr dispatch. We pass the BooleanVector straight to
+      // `selectByBoolean` so the intermediate `Array[Boolean]` the old path
+      // allocated as a bridge is gone, and the pass-through fast path inside
+      // `selectByBoolean` returns the original batch when every row passes
+      // (no per-column copy).
       val resultCol = predicate.evalVec(batch).asInstanceOf[BooleanVector]
-      val mask = new Array[Boolean](n)
-      var i = 0
-      while (i < n) {
-        // WHERE: NULL is treated as false (rows excluded).
-        mask(i) = !resultCol.isNull(i) && resultCol.values(i)
-        i += 1
-      }
-      val filtered = batch.select(mask)
+      val filtered = batch.selectByBoolean(resultCol)
       if (filtered.numRows == 0) Iterator.empty else Iterator.single(filtered)
     }
   }

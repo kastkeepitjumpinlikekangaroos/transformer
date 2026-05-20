@@ -175,8 +175,8 @@ final case class BinOpExpr(op: String, left: Expr, right: Expr, dataType: DataTy
   override def evalVec(batch: ColumnarBatch): ColumnVector = {
     val n = batch.numRows
     op match {
-      case "AND" => VecOps.and(left.evalVec(batch), right.evalVec(batch), n)
-      case "OR" => VecOps.or(left.evalVec(batch), right.evalVec(batch), n)
+      case "AND" => evalAndChain(batch, n)
+      case "OR" => evalOrChain(batch, n)
       case "||" => VecOps.concat(left.evalVec(batch), right.evalVec(batch), n)
       case "=" | "==" | "<>" | "!=" | "<" | "<=" | ">" | ">=" =>
         VecOps.compare(op, left.evalVec(batch), right.evalVec(batch), left.dataType, right.dataType, n)
@@ -184,6 +184,74 @@ final case class BinOpExpr(op: String, left: Expr, right: Expr, dataType: DataTy
         VecOps.arith(op, left.evalVec(batch), right.evalVec(batch), dataType, n)
       case other => throw new IllegalStateException(s"Unknown binary op '$other'")
     }
+  }
+
+  /** Flatten a left-deep `BinOpExpr("AND", ...)` chain and fold all conjuncts
+    * into a single [[BooleanVector]] allocation. The first conjunct's result
+    * vector is COPIED into a fresh owned vector before folding — `BooleanVector`s
+    * returned by `Expr.evalVec` may alias storage in the input batch
+    * (e.g. a `ColRefExpr` to a Boolean column), and mutating an aliased vector
+    * would corrupt the shared column. Subsequent conjuncts are folded in
+    * place via [[VecOps.andInto]] so the chain pays one allocation total
+    * instead of N intermediate vectors. */
+  private def evalAndChain(batch: ColumnarBatch, n: Int): BooleanVector = {
+    val conjuncts = collectAndConjuncts()
+    val first = conjuncts.head.evalVec(batch).asInstanceOf[BooleanVector]
+    val acc = copyBooleanVector(first, n)
+    var i = 1
+    while (i < conjuncts.length) {
+      val next = conjuncts(i).evalVec(batch).asInstanceOf[BooleanVector]
+      VecOps.andInto(acc, next, n)
+      i += 1
+    }
+    acc
+  }
+
+  private def evalOrChain(batch: ColumnarBatch, n: Int): BooleanVector = {
+    val conjuncts = collectOrConjuncts()
+    val first = conjuncts.head.evalVec(batch).asInstanceOf[BooleanVector]
+    val acc = copyBooleanVector(first, n)
+    var i = 1
+    while (i < conjuncts.length) {
+      val next = conjuncts(i).evalVec(batch).asInstanceOf[BooleanVector]
+      VecOps.orInto(acc, next, n)
+      i += 1
+    }
+    acc
+  }
+
+  private def collectAndConjuncts(): Array[Expr] = {
+    // Flatten the AND tree once at evalVec time. The tree shape doesn't change
+    // between batches but we don't bother caching across calls — building a
+    // ~10-element array dispatched per batch is negligible next to the per-row
+    // work it replaces.
+    val buf = new scala.collection.mutable.ArrayBuffer[Expr](4)
+    collectAndInto(this, buf)
+    buf.toArray
+  }
+  private def collectOrConjuncts(): Array[Expr] = {
+    val buf = new scala.collection.mutable.ArrayBuffer[Expr](4)
+    collectOrInto(this, buf)
+    buf.toArray
+  }
+  private def collectAndInto(e: Expr, out: scala.collection.mutable.ArrayBuffer[Expr]): Unit = e match {
+    case BinOpExpr("AND", l, r, _) =>
+      collectAndInto(l, out)
+      collectAndInto(r, out)
+    case other => out += other
+  }
+  private def collectOrInto(e: Expr, out: scala.collection.mutable.ArrayBuffer[Expr]): Unit = e match {
+    case BinOpExpr("OR", l, r, _) =>
+      collectOrInto(l, out)
+      collectOrInto(r, out)
+    case other => out += other
+  }
+  private def copyBooleanVector(src: BooleanVector, n: Int): BooleanVector = {
+    val cap = math.max(1, n)
+    val values = java.util.Arrays.copyOf(src.values, cap)
+    val nulls = new java.util.BitSet(cap)
+    nulls.or(src.nulls)
+    new BooleanVector(values, nulls, cap)
   }
 }
 
