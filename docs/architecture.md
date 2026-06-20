@@ -43,8 +43,8 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 | `write/csv/` | CSV output. Stdlib only. | `CsvWriter.scala` |
 | `write/parquet/` | Parquet output + shared `ParquetSchema` converter. | `ParquetSchema.scala`, `ParquetWriter.scala` |
 | `sql/parse/` | JSqlParser façade. | `SqlParser.scala` |
-| `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo) |
-| `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala`, `SortExec.scala`, `DistinctExec.scala`, `UnionExec.scala`, `WindowExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala`, `SqlEngine.scala` |
+| `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `PendingCteView.scala` (placeholder for an unresolved CTE reference), `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo) |
+| `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala`, `SortExec.scala`, `DistinctExec.scala`, `UnionExec.scala`, `WindowExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala`, `CteResolver.scala` (inline-vs-materialize CTE pass + `PhysicalPlanView`), `SqlEngine.scala` |
 | `job/` | User-facing API + runner. Depends directly on `read/{csv,parquet}` and `write/{csv,parquet}` — parquet is a first-class format. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala`, `JobFiles.scala` (filesystem ops for the GUI's edit-validation flow — `writeValidationSql` / `deleteValidation`), `TaskDag.scala` (DAG analyzer/builder from SQL refs; `TaskDag` + `TaskDagNode` are public so the GUI can render without re-implementing), `TaskProgressListener.scala` (per-task callbacks fired from runner worker threads), `TaskRunRecord.scala` (`_run.json` write/read/discover for per-task run records — every status, with `_validation-<slug>.csv` failure samples), `JobRunRecord.scala` (`job.json` aggregate manifest pointing at every task's record + consistency warnings), `JobOutputLayout.scala` (classifies an output dir as `SingleRun`/`MultiRun`/`Empty` for the GUI's run picker), `DirectoryJobLoader.scala` (DBT-style directory loader; supports optional per-table `output.json` with `partitionBy`; threads default `<outputDir>/job.json` as `jobRunOutput` so the manifest lives alongside its data), `Json.scala` (stdlib JSON parser used by the loader + record readers) |
 | `gui/` | JavaFX visualizer/runner. Depends on `job/`, `core/`, `read/{csv,parquet}/`, `write/{csv,parquet}/`, `sql/exec/`, `temporal/`, plus `org.openjfx:javafx-{base,controls,graphics}` (bare jars + platform-classifier jars). | `GuiApp.scala` (Application boot + BorderPane: top stack of menu bar + horizontal ControlsPanel, vertical split of DAG canvas above + ResultsTabPane below — no side panels, all secondary panels live in the bottom tabs; scene-level ⌘R / Ctrl+R accelerator calls `controls.triggerRun()`), `JobSession.scala` (mutable FX-thread session state — jobDir, executionTime, outputDir, DAG, per-task UI states, task records, historical runs, job manifest, available run snapshots, selected run; loads `<outputDir>/job.json` (or any sibling snapshot the user picks) and follows each task's `runFile` to reconstruct full `TaskStatus` including `ValidationFailed(failures)` with sample CSVs; `buildInteractiveCatalog` assembles a Catalog over inputs + persisted task outputs for ad-hoc SQL), `DagLayout.scala` (pure-Scala layered DAG layout), `DagCanvas.scala` (custom Canvas: pan/zoom/click/double-click), `ControlsPanel.scala` (horizontal top strip: open dir, exec-time pickers, output-dir field, optional run picker for multi-run output dirs, compact Run button on worker thread; exposes `triggerRun()` for the keyboard accelerator), `TaskDetailsPanel.scala` (selected task/input metadata + a single Source/Rendered-toggle SQL viewer — uses `SqlView` and chips for status/deps/metrics), `SqlHighlighter.scala` (pure-Scala tokenizer: keywords/functions/strings/numbers/comments/templates — testable, no JavaFX deps), `SqlView.scala` (read-only highlighted SQL pane built on `HBox` per line inside a `ScrollPane`; toolbar with Copy + optional Open-in-editor button), `ExternalEditor.scala` (launches `TRANSFORMER_EDITOR` if set, else macOS Terminal+`nvim`; no-wait launch via `ProcessBuilder`), `ResultsTabPane.scala` (5 tabs: **Task details**, Output data, Validations — per-validation cards with an Edit… button that pops out the `AddValidationDialog.showEdit` editor (round-trips through `JobFiles.writeValidationSql` / `deleteValidation`) — **SQL console**, Run log), `AddValidationDialog.scala` (the validation editor dialog used by both the task-details chip and the per-card Edit button; supports add + edit + delete), `SqlConsolePanel.scala` (ad-hoc SQL editor in a horizontal SplitPane with the results table; ⌘⏎ / Ctrl+Enter runs the query at the panel level; chips for registered views + Persist button — runs queries on a worker thread and materializes results in memory so Persist can replay them), `PersistDialog.scala` (modal: output dir, format, maxPartitions, CSV header — mirrors `OutputFilePath` fields), `ResultPersister.scala` (writes a `MaterializedView` via `CsvWriter.writePartitioned` / `ParquetWriter.writePartitioned` + stamps a `_run.json` record with status=Succeeded), `FxHelpers.scala` |
 | `examples/scala_app/` | Sample app built as a `scala_binary` deploy jar — programmatic `DataJob(...)` API. | `src/main/scala/com/example/ExampleJob.scala` |
@@ -872,30 +872,65 @@ aggregation; aggregates without ORDER BY cover the entire partition.
 `RANGE` frames execute as `ROWS` (documented in
 [gotchas.md](gotchas.md#whats-intentionally-not-done)).
 
-### 6b. CTE inlining (`WITH`)
+### 6b. CTE resolution: inline vs materialize
 
-CTEs are resolved entirely in `LogicalBuilder` — there is no `LogicalCTE`
-node and the planner, optimizer, and cardinality estimator are untouched.
-`buildAnySelect` reads `Select.getWithItemsList` (the WITH clause attaches to
-the top-level `Select`, including a `SetOperationList`, so both UNION arms see
-the same scope), then folds the items into a `cteScope: Map[String,
-LogicalPlan]`:
+CTEs need no `LogicalCTE` node and leave the optimizer, physical planner, and
+cardinality estimator untouched: by the time they run, every `WITH` reference
+is either an inlined body subtree or a `LogicalScan` over a `MaterializedView`.
+This happens in two stages — a builder change plus a resolve pass that runs
+*between* `LogicalBuilder.build` and `LogicalOptimizer.optimize`.
 
-1. Each `WithItem` is built in order via a recursive `buildAnySelect`, so a
-   later CTE can reference an earlier one (the partially-built scope is passed
-   down). `WITH RECURSIVE` is rejected up front.
-2. An explicit column-alias list (`WITH c(x, y) AS (...)`) wraps the body in a
-   rename `LogicalProject`; an arity mismatch against the body's schema throws.
-3. The resolved name (lower-cased) maps to the CTE's `LogicalPlan`.
+**Stage 1 — builder emits placeholders (`LogicalBuilder`).** `buildAnySelect`
+reads `Select.getWithItemsList` (the WITH clause attaches to the top-level
+`Select`, including a `SetOperationList`, so both UNION arms see the same
+scope) and folds the items into a `cteScope`. The builder can't yet decide
+inline-vs-materialize (that needs the reference count, unknown until the whole
+enclosing query is built), so for each **outermost-scope** CTE it instead emits
+a unique `PendingCteView` — a placeholder `CatalogView` that throws if it ever
+reaches execution — and collects a `CteDef(name, pending, body)`. `fromItem`
+returns a `LogicalScan` over that pending view (alias handling identical to a
+real table, so column resolution downstream is unchanged), consulting the scope
+before the catalog so a CTE name still **shadows** a like-named view. Building
+proceeds in declaration order so a later CTE can reference an earlier one; an
+explicit column-alias list (`WITH c(x, y) AS (...)`) wraps the body in a rename
+`LogicalProject` (arity mismatch throws); `WITH RECURSIVE` is rejected up front.
+`build` returns a `BuiltQuery(main, ctes)`. A CTE declared *inside* another
+CTE's body is **not** outermost-scope: it is inlined directly (the historic
+behaviour), so only top-level CTEs are materialization candidates.
 
-`fromItem` consults `cteScope` before the catalog, so a CTE name **shadows** a
-like-named view, and a reference returns the *same* plan object — the CTE's
-subtree is inlined at each use site. Inlining means a CTE referenced N times is
-planned N times (structurally identical to an N-way self-join over the source),
-and every downstream rewrite (`FilterPushdown`, `ColumnProjectionPushdown`,
-build-side selection) applies to each occurrence independently. There is no
-materialization or CTE-result reuse — the plans stay immutable, so sharing one
-object across two FROM positions is safe.
+**Stage 2 — `CteResolver.resolve` (in `sql/exec`).** One linear pass over the
+declaration-ordered defs. For each def it counts references (`view eq pending`,
+identity) across the not-yet-resolved later bodies plus the main plan — earlier
+bodies can't mention it — then:
+
+- **&ge; 2 references → materialize once.** Optimize + physically plan the body
+  in isolation and drain it through `MaterializedView.materializeInParallel`
+  (via a tiny `PhysicalPlanView` `CatalogView` adapter over the physical plan),
+  then replace every reference with a shared `LogicalScan` over that one
+  `MaterializedView`. The body runs once; each site replays in-memory. Because
+  the same MV object is shared, a non-deterministic body (`RAND()`,
+  `CURRENT_TIMESTAMP`) yields identical rows to every reference — an
+  optimization fence inlining doesn't provide.
+- **&le; 1 reference → inline.** Substitute the body subtree at the (single or
+  zero) site, structurally identical to today's plan; a zero-reference CTE is
+  never executed.
+
+Substitution uses `LogicalPlan.withChildren` (the structural inverse of
+`children`) so the rewrite touches no node type by name. Resolving in
+declaration order means a materialized `b` that reads `a` first has its body
+rewritten to scan `a`'s already-materialized view, so `b`'s single execution
+reads `a` once. Invariant: `MaterializedView.schema == body.outputSchema`
+exactly (asserted in `materialize`), so swapping a pending scan for the MV scan
+never shifts a bound column index. A bonus: `MaterializedView.exactRowCount`
+gives the main planner an exact CTE cardinality (better hash-join build-side
+selection) and lets `SELECT COUNT(*) FROM <materialized cte>` hit the
+metadata fast-path. The measured path times the whole pass as
+`QueryMetrics.cteMaterializeNanos`; the body sub-executions run unmeasured.
+
+Heap is the cost: a materialized body is buffered whole, with no spill yet
+(a [plan 09](../plans/perf/09-spill-to-disk.md) tie-in). The policy is
+unconditional at `refs >= 2` — recomputing a huge body N times is also
+expensive, so materialize-once is usually the better of two heavy options.
 
 ### 7. Plan-time cardinality estimation
 

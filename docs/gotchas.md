@@ -282,16 +282,22 @@ ship a fix or move something from "not done" to "done".
   `eval(batch, row)` because those are 1-row paths where vectorization gives
   nothing back.
 - **No multi-statement SQL.** `SqlParser.parseSelect` only accepts a SELECT.
-- **CTEs (`WITH`) are supported, but inlined and non-recursive.** Each CTE
-  reference is substituted with the CTE's logical plan at build time —
-  `LogicalBuilder.buildAnySelect` reads `Select.getWithItemsList`, builds each
-  CTE in order (so later CTEs can reference earlier ones), and threads a
-  `cteScope: Map[String, LogicalPlan]` into `fromItem`, which consults it before
-  the catalog (so a CTE name shadows a like-named view). Because references are
-  inlined, a CTE used N times is planned and executed N times — there is no
-  result caching/materialization, and an optimizer that wanted CTE reuse would
-  have to materialize explicitly. `WITH RECURSIVE` is rejected with a clear
-  error rather than silently mis-planned.
+- **CTEs (`WITH`) are supported and non-recursive; multiply-referenced ones are
+  materialized.** `LogicalBuilder` emits a placeholder `PendingCteView` scan per
+  outermost-scope CTE and `CteResolver` (a pass between build and optimize)
+  resolves each reference: a CTE referenced **&ge; 2 times** is executed once
+  into an in-memory `MaterializedView` that every reference scans (compute-once
+  + an optimization fence for non-deterministic bodies); a CTE referenced
+  **&le; 1 time** is inlined, exactly as before (a declared-but-unused CTE is
+  never executed). The optimizer, physical planner, and pushdowns are untouched
+  — they only ever see an inlined body subtree or a `LogicalScan` over a
+  `MaterializedView`. Caveats: materialization **buffers the whole body in heap**
+  (no spill yet — see [plan 09](../plans/perf/09-spill-to-disk.md)); only
+  **outermost-scope** CTEs are materialization candidates, so a CTE declared
+  *inside* another CTE body is always inlined regardless of its reference count;
+  and there is still no result caching *across* SQL statements (use `viewName`
+  chaining for that). `WITH RECURSIVE` is rejected with a clear error. See
+  [architecture §6b](architecture.md#6b-cte-resolution-inline-vs-materialize).
 - **No subqueries** (scalar, IN, EXISTS, derived tables in FROM). A derived
   table in FROM still throws from `LogicalBuilder.fromItem`; reach for a `WITH`
   CTE where the shape allows.

@@ -208,12 +208,15 @@ extend the format switch in `ResultPersister` and the dropdown in
    `Table` and CTE-name references resolved from `cteScope`). For subqueries
    you'd add a case for `net.sf.jsqlparser.statement.select.PlainSelect` /
    `ParenthesedSelect` and recurse into `buildAnySelect`, then either inline
-   the returned `LogicalPlan` directly (the way CTEs do — see
-   [architecture §6b](architecture.md#6b-cte-inlining-with)) or wrap it as a
-   synthetic `CatalogView` over a materialized batch list / new
-   `LogicalSubquery` node. Inlining a plan subtree needs no planner or
-   optimizer changes; a new `LogicalPlan` node does (every exhaustive match
-   over the sealed trait must learn the case).
+   the returned `LogicalPlan` directly or share its result. CTEs already do
+   both (see [architecture §6b](architecture.md#6b-cte-resolution-inline-vs-materialize)):
+   a single-use CTE is inlined, while a multiply-referenced one is run once
+   into a `MaterializedView` and referenced via a `LogicalScan` over it — the
+   same `MaterializedView` + `PhysicalPlanView` machinery (`CteResolver`) is
+   the shared-result option to reach for, and it needs no new `LogicalPlan`
+   node. Inlining a plan subtree needs no planner or optimizer changes; a new
+   `LogicalPlan` node does (every exhaustive match over the sealed trait must
+   learn the case).
 2. Logical → physical mapping in `PhysicalPlanner.plan`.
 3. Optionally a new physical operator (one file in `sql/exec/`).
 4. Test against `SqlEngineTest`.

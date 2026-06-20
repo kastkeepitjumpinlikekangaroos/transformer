@@ -1541,8 +1541,10 @@ class SqlEngineTest {
   }
 
   @Test def cteReferencedTwiceActsLikeSelfJoin(): Unit = {
-    // Same CTE name appears twice in FROM. The inlined plan is shared; each
-    // reference scans the source independently (exactly like `FROM t a JOIN t b`).
+    // Same CTE name appears twice in FROM. Referenced twice, `c` is materialized
+    // once and both references scan the shared result; the output is still the
+    // self-join (exactly like `FROM t a JOIN t b`). Compute-once is asserted
+    // directly in CteMaterializationTest; here we only pin the result.
     val p = tmpCsv("a.csv", "id,score\n1,10\n2,10\n3,30\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
     val q = SqlEngine.execute(

@@ -587,8 +587,12 @@ argument is NULL.
 **CTEs (`WITH`):** supported, non-recursive. `WITH a AS (...), b AS (SELECT ...
 FROM a) SELECT ... FROM b` — later CTEs may reference earlier ones, a CTE can
 carry an explicit column-alias list (`WITH c(x, y) AS (...)`), and a CTE name
-shadows a catalog view of the same name. CTEs are *inlined* at each reference
-(no result materialization), so a CTE referenced N times is recomputed N times.
+shadows a catalog view of the same name. A CTE referenced **two or more times**
+is materialized once into an in-memory result that every reference replays — so
+`FROM c x JOIN c y` executes the body once, not twice (and a non-deterministic
+body like `RAND()` yields the same rows to every reference). A CTE referenced at
+most once stays inlined (zero overhead, streaming preserved); a declared-but-
+unused CTE is never executed. Materialization buffers the body in heap.
 `WITH RECURSIVE` is rejected.
 
 **Subqueries:** not in v1 (scalar, IN/EXISTS, derived tables in FROM). Use a

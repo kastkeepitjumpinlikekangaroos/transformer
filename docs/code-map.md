@@ -7,10 +7,12 @@ navigation hint, not a comprehensive directory listing.
 
 ## File-size hot spots
 
-- `sql/plan/LogicalBuilder.scala` (~910 LOC) — biggest file. Pattern matches
-  every JSqlParser expression node, dispatches SELECT shapes, and resolves
-  CTEs (`WITH`) by inlining. If you're adding a syntax feature, this is
-  probably where it lands.
+- `sql/plan/LogicalBuilder.scala` (~960 LOC) — biggest file. Pattern matches
+  every JSqlParser expression node, dispatches SELECT shapes, and (for
+  outermost-scope `WITH` CTEs) emits placeholder `PendingCteView` scans +
+  collects `CteDef`s into a `BuiltQuery`, which `sql/exec/CteResolver.scala`
+  later inlines or materializes (see [architecture §6b](architecture.md#6b-cte-resolution-inline-vs-materialize)).
+  If you're adding a syntax feature, this is probably where it lands.
 - `gui/JobSession.scala` (~795 LOC) — mutable FX-thread state for the GUI;
   also tracks per-input UI state (Pending/Loading/Loaded/Failed) now that
   inputs flow through the unified scheduler.
