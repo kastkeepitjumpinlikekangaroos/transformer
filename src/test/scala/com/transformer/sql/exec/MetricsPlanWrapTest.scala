@@ -34,7 +34,11 @@ class MetricsPlanWrapTest {
 
   private def filterProjectScanLogical(catalog: Catalog): LogicalPlan = {
     catalog.register("t", new TinyView)
-    LogicalBuilder.build("SELECT id, x + 1 AS y FROM t WHERE x > 15", catalog)
+    // build now returns a BuiltQuery; resolve to the bound LogicalPlan the
+    // same way SqlEngine does (no CTEs here, so resolve is a no-op passthrough).
+    CteResolver.resolve(
+      LogicalBuilder.build("SELECT id, x + 1 AS y FROM t WHERE x > 15", catalog),
+      ExecutionOptions.Default)
   }
 
   @Test def disabledOptionsReturnUnwrappedTree(): Unit = {

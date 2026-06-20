@@ -23,13 +23,39 @@ import net.sf.jsqlparser.statement.select._
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
+/** A top-level CTE definition collected during build: its name, the unique
+  * [[PendingCteView]] every reference scan points at, and the bound body plan.
+  * [[com.transformer.sql.exec.CteResolver]] decides per def whether to inline
+  * the body or materialize it once (when referenced `>= 2` times). */
+final case class CteDef(name: String, pending: PendingCteView, body: LogicalPlan)
+
+/** Result of [[LogicalBuilder.build]]: the main query plan plus the ordered
+  * list of outermost-scope CTE definitions. `ctes` is in declaration order;
+  * because a CTE can only reference earlier siblings (recursion is rejected),
+  * resolving them left-to-right means every dependency is already resolved.
+  * For a query with no top-level `WITH`, `ctes` is empty and `main` is
+  * byte-identical to the pre-CTE-materialization plan. */
+final case class BuiltQuery(main: LogicalPlan, ctes: Seq[CteDef])
+
 /** Builds a bound [[LogicalPlan]] from a SQL string, given a [[Catalog]]. */
 object LogicalBuilder {
 
   type Sources = Seq[(Option[String], Schema)]
 
-  def build(sql: String, catalog: Catalog): LogicalPlan =
-    buildAnySelect(SqlParser.parseSelect(sql), catalog, Map.empty)
+  /** A name in CTE scope resolves either to a materialization-candidate
+    * (outermost-scope) CTE — referenced via its [[PendingCteView]] so the
+    * resolver can count references and choose inline-vs-materialize — or to an
+    * already-inlined nested CTE body (the historic behaviour, preserved for
+    * CTEs declared inside another CTE body). */
+  private sealed trait CteScopeEntry
+  private final case class PendingCte(name: String, pending: PendingCteView) extends CteScopeEntry
+  private final case class InlineCte(plan: LogicalPlan) extends CteScopeEntry
+
+  def build(sql: String, catalog: Catalog): BuiltQuery = {
+    val collector = mutable.ArrayBuffer.empty[CteDef]
+    val main = buildAnySelect(SqlParser.parseSelect(sql), catalog, Map.empty, Some(collector))
+    BuiltQuery(main, collector.toSeq)
+  }
 
   /** Dispatch over the SELECT subtype: a single `PlainSelect`, a UNION /
     * INTERSECT / EXCEPT [[SetOperationList]], or a parenthesized wrapper.
@@ -40,14 +66,26 @@ object LogicalBuilder {
     * WITH clause. The resolved scope is threaded into `fromItem` so that any
     * reference to a CTE name in FROM / JOIN is satisfied by the pre-built
     * plan rather than a catalog lookup.
+    *
+    * `collector` distinguishes the outermost WITH clause (where defs become
+    * materialization candidates — `Some(buf)`, each emitting a [[PendingCteView]]
+    * placeholder the resolver later inlines or materializes) from nested WITH
+    * clauses inside a CTE body (`None` — inlined unconditionally, the historic
+    * behaviour). Only the top-level `build` call passes `Some`; every recursive
+    * call (CTE bodies, set-operation arms, parenthesized inner) passes `None`.
     */
-  private def buildAnySelect(sel: Select, catalog: Catalog, outerCteScope: Map[String, LogicalPlan]): LogicalPlan = {
+  private def buildAnySelect(
+      sel: Select,
+      catalog: Catalog,
+      outerCteScope: Map[String, CteScopeEntry],
+      collector: Option[mutable.ArrayBuffer[CteDef]]): LogicalPlan = {
     val withItems = Option(sel.getWithItemsList).map(_.asScala.toSeq).getOrElse(Nil)
-    val cteScope: Map[String, LogicalPlan] = withItems.foldLeft(outerCteScope) { (scope, item) =>
+    val cteScope: Map[String, CteScopeEntry] = withItems.foldLeft(outerCteScope) { (scope, item) =>
       if (item.isRecursive)
         throw new IllegalArgumentException("Recursive CTEs (WITH RECURSIVE) are not supported")
       val cteName = item.getAlias.getName
-      val cteBody = buildAnySelect(item.getSelect, catalog, scope)
+      // A CTE body is always a nested scope: its own WITH (if any) inlines.
+      val cteBody = buildAnySelect(item.getSelect, catalog, scope, None)
       // If the CTE has an explicit column alias list — WITH cte(a, b) AS (...) —
       // wrap the body in a rename projection so the chosen names take effect.
       val colAliases = Option(item.getWithItemList).map(_.asScala.toSeq).getOrElse(Nil)
@@ -62,7 +100,16 @@ object LogicalBuilder {
         }
         LogicalProject(cteBody, renames)
       }
-      scope + (cteName.toLowerCase -> ctePlan)
+      collector match {
+        case Some(buf) =>
+          // Outermost scope: emit a placeholder the resolver resolves later.
+          val pending = new PendingCteView(cteName, ctePlan.outputSchema)
+          buf += CteDef(cteName, pending, ctePlan)
+          scope + (cteName.toLowerCase -> PendingCte(cteName, pending))
+        case None =>
+          // Nested scope: inline directly, as before.
+          scope + (cteName.toLowerCase -> InlineCte(ctePlan))
+      }
     }
 
     sel match {
@@ -70,7 +117,7 @@ object LogicalBuilder {
         "WithItem reached buildAnySelect dispatch — this is a bug in the CTE builder")
       case ps: PlainSelect => buildSelect(ps, catalog, cteScope)
       case sol: SetOperationList => buildSetOperationList(sol, catalog, cteScope)
-      case wrap: ParenthesedSelect => buildAnySelect(wrap.getSelect, catalog, cteScope)
+      case wrap: ParenthesedSelect => buildAnySelect(wrap.getSelect, catalog, cteScope, None)
       case other =>
         throw new IllegalArgumentException(s"Unsupported SELECT shape: ${other.getClass.getSimpleName}")
     }
@@ -91,7 +138,7 @@ object LogicalBuilder {
     * EXCEPT / MINUS aren't implemented in v1 — reject with a clear message
     * instead of producing a wrong plan.
     */
-  private def buildSetOperationList(sol: SetOperationList, catalog: Catalog, cteScope: Map[String, LogicalPlan]): LogicalPlan = {
+  private def buildSetOperationList(sol: SetOperationList, catalog: Catalog, cteScope: Map[String, CteScopeEntry]): LogicalPlan = {
     val selects = sol.getSelects.asScala.toVector
     val ops = sol.getOperations.asScala.toVector
     if (selects.size < 2 || ops.size != selects.size - 1) {
@@ -114,11 +161,11 @@ object LogicalBuilder {
       case _ => (None, None)
     }
 
-    val first = buildAnySelect(selects.head, catalog, cteScope)
+    val first = buildAnySelect(selects.head, catalog, cteScope, None)
     val union = ops.iterator.zipWithIndex.foldLeft(first) { case (acc, (op, i)) =>
       op match {
         case u: UnionOp =>
-          val rhs = buildAnySelect(selects(i + 1), catalog, cteScope)
+          val rhs = buildAnySelect(selects(i + 1), catalog, cteScope, None)
           if (acc.outputSchema.length != rhs.outputSchema.length) {
             throw new IllegalArgumentException(
               s"UNION arms have different column counts: " +
@@ -159,7 +206,7 @@ object LogicalBuilder {
   // SELECT / FROM
   // ---------------------------------------------------------------------------
 
-  private def buildSelect(ps: PlainSelect, catalog: Catalog, cteScope: Map[String, LogicalPlan]): LogicalPlan = {
+  private def buildSelect(ps: PlainSelect, catalog: Catalog, cteScope: Map[String, CteScopeEntry]): LogicalPlan = {
     val (from, sources) = buildFromAndJoins(ps, catalog, cteScope)
 
     // WHERE
@@ -399,7 +446,7 @@ object LogicalBuilder {
   // FROM + JOINs
   // ---------------------------------------------------------------------------
 
-  private def buildFromAndJoins(ps: PlainSelect, catalog: Catalog, cteScope: Map[String, LogicalPlan]): (LogicalPlan, Sources) = {
+  private def buildFromAndJoins(ps: PlainSelect, catalog: Catalog, cteScope: Map[String, CteScopeEntry]): (LogicalPlan, Sources) = {
     val (root, rootSources) = fromItem(ps.getFromItem, catalog, cteScope)
     val joins = Option(ps.getJoins).map(_.asScala.toSeq).getOrElse(Nil)
 
@@ -428,12 +475,17 @@ object LogicalBuilder {
     (plan, srcs)
   }
 
-  private def fromItem(item: FromItem, catalog: Catalog, cteScope: Map[String, LogicalPlan]): (LogicalPlan, Sources) = item match {
+  private def fromItem(item: FromItem, catalog: Catalog, cteScope: Map[String, CteScopeEntry]): (LogicalPlan, Sources) = item match {
     case t: net.sf.jsqlparser.schema.Table =>
       val name = t.getName
       val alias = Option(t.getAlias).map(_.getName).orElse(Some(name))
       cteScope.get(name.toLowerCase) match {
-        case Some(ctePlan) =>
+        case Some(PendingCte(cteName, pending)) =>
+          // Placeholder scan; the resolver swaps it for the inlined body or a
+          // scan over the materialized result. Alias handling is identical to a
+          // real table, so column resolution downstream is unchanged.
+          (LogicalScan(cteName, pending, alias), Seq((alias, pending.schema)))
+        case Some(InlineCte(ctePlan)) =>
           (ctePlan, Seq((alias, ctePlan.outputSchema)))
         case None =>
           val view = catalog(name)

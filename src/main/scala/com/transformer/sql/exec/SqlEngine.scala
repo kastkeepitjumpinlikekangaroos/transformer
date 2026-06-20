@@ -24,8 +24,9 @@ object SqlEngine extends SqlExecutor {
     * the `if (!opts.metricsEnabled)` branch above and the same branch in
     * `PhysicalPlanner.plan`. */
   private def executeUnmeasured(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
-    val logical = LogicalBuilder.build(sql, catalog)
-    val optimized = LogicalOptimizer.optimize(logical)
+    val built = LogicalBuilder.build(sql, catalog)
+    val resolved = CteResolver.resolve(built, opts)
+    val optimized = LogicalOptimizer.optimize(resolved)
     val physical = PhysicalPlanner.plan(optimized, opts)
     val parts: IndexedSeq[Iterator[ColumnarBatch]] =
       (0 until physical.numPartitions).map(p => physical.execute(p))
@@ -39,9 +40,10 @@ object SqlEngine extends SqlExecutor {
     * the partitions have been drained. */
   private def executeMeasured(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
     val t0 = System.nanoTime()
-    val logical = LogicalBuilder.build(sql, catalog)
+    val built = LogicalBuilder.build(sql, catalog)
+    val resolved = CteResolver.resolve(built, opts)
     val t1 = System.nanoTime()
-    val optimized = LogicalOptimizer.optimize(logical)
+    val optimized = LogicalOptimizer.optimize(resolved)
     val t2 = System.nanoTime()
     val (physical, maybeNode) = PhysicalPlanner.planWithMetrics(optimized, opts)
     val t3 = System.nanoTime()
