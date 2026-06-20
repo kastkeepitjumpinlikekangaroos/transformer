@@ -1,7 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core._
-import com.transformer.sql.plan.{LogicalBuilder, LogicalPlan, LogicalScan}
+import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer, LogicalPlan, LogicalScan}
 
 import org.junit.Assert._
 import org.junit.Test
@@ -345,5 +345,44 @@ class CteMaterializationTest {
     assertEquals(
       s"source read ${reads.get()} times, expected ${view.numPartitions} (once per partition)",
       view.numPartitions, reads.get())
+  }
+
+  // ---------------------------------------------------------------------------
+  // 7. COUNT(*) over a materialized CTE hits the metadata fast-path.
+  // ---------------------------------------------------------------------------
+
+  /** Count `CountStarMetadataExec` nodes in a physical plan — the marker that
+    * `SELECT COUNT(*)` answered from `CatalogView.exactRowCount` (here a
+    * MaterializedView's row count) without scanning any data. */
+  private def countMetadataFastPaths(p: PhysicalPlan): Int = p match {
+    case _: CountStarMetadataExec => 1
+    case UnionExec(l, r)          => countMetadataFastPaths(l) + countMetadataFastPaths(r)
+    case ProjectExec(c, _)        => countMetadataFastPaths(c)
+    case FilterExec(c, _)         => countMetadataFastPaths(c)
+    case LocalLimitExec(c, _)     => countMetadataFastPaths(c)
+    case GlobalLimitExec(c, _)    => countMetadataFastPaths(c)
+    case _                        => 0
+  }
+
+  @Test def countStarOverMaterializedCteUsesMetadataFastPath(): Unit = {
+    // `c` is referenced twice (both UNION arms) -> materialized once into a
+    // MaterializedView, which reports exactRowCount. Each `SELECT COUNT(*) FROM c`
+    // therefore collapses to a CountStarMetadataExec that returns the row count
+    // from MV metadata -- no scan of the materialized data.
+    val sql =
+      "WITH c AS (SELECT id, score FROM t) " +
+        "SELECT COUNT(*) AS n FROM c UNION ALL SELECT COUNT(*) AS n FROM c"
+
+    // Behavioral: both arms report the CTE's row count (4).
+    val cat = catalogWith("t", idScoreView(new AtomicInteger(0)))
+    val rows = collectAllRows(SqlEngine.execute(sql, cat, ExecutionOptions.Default))
+    assertEquals(Seq(4L, 4L), rows.map(r => asLong(r("n"))))
+
+    // White-box: both COUNT(*) arms planned to the metadata fast-path over the MV.
+    val cat2 = catalogWith("t", idScoreView(new AtomicInteger(0)))
+    val resolved = CteResolver.resolve(LogicalBuilder.build(sql, cat2), ExecutionOptions.Default)
+    val physical = PhysicalPlanner.plan(LogicalOptimizer.optimize(resolved), ExecutionOptions.Default)
+    assertEquals("both COUNT(*) arms over the materialized CTE must hit the metadata fast-path",
+      2, countMetadataFastPaths(physical))
   }
 }

@@ -41,20 +41,25 @@ object SqlEngine extends SqlExecutor {
   private def executeMeasured(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
     val t0 = System.nanoTime()
     val built = LogicalBuilder.build(sql, catalog)
-    val resolved = CteResolver.resolve(built, opts)
     val t1 = System.nanoTime()
-    val optimized = LogicalOptimizer.optimize(resolved)
+    // The resolve pass includes the sub-executions that materialize any CTE
+    // referenced >= 2 times. Those body executions run unmeasured (they don't
+    // appear in the operator tree); their cost is captured here as one number.
+    val resolved = CteResolver.resolve(built, opts)
     val t2 = System.nanoTime()
-    val (physical, maybeNode) = PhysicalPlanner.planWithMetrics(optimized, opts)
+    val optimized = LogicalOptimizer.optimize(resolved)
     val t3 = System.nanoTime()
+    val (physical, maybeNode) = PhysicalPlanner.planWithMetrics(optimized, opts)
+    val t4 = System.nanoTime()
     val parts: IndexedSeq[Iterator[ColumnarBatch]] =
       (0 until physical.numPartitions).map(p => physical.execute(p))
-    val t4 = System.nanoTime()
+    val t5 = System.nanoTime()
 
     val parseNanos = t1 - t0
-    val optimizeNanos = t2 - t1
-    val physicalPlanNanos = t3 - t2
-    val executeNanos = t4 - t3
+    val cteMaterializeNanos = t2 - t1
+    val optimizeNanos = t3 - t2
+    val physicalPlanNanos = t4 - t3
+    val executeNanos = t5 - t4
 
     val q = new ExecutedQuery(physical.outputSchema, parts)
     maybeNode.foreach { rootNode =>
@@ -64,6 +69,7 @@ object SqlEngine extends SqlExecutor {
       // final values.
       q.attachMetrics(() => QueryMetrics(
         parseNanos = parseNanos,
+        cteMaterializeNanos = cteMaterializeNanos,
         optimizeNanos = optimizeNanos,
         physicalPlanNanos = physicalPlanNanos,
         executeNanos = executeNanos,

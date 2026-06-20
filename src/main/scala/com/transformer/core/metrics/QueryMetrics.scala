@@ -4,15 +4,22 @@ package com.transformer.core.metrics
   * snapshot. Captured once per `SqlExecutor.execute` call when
   * `opts.metricsEnabled` is true.
   *
-  * The four `*Nanos` fields are *not* a partition of total execute time. They
-  * cover the SQL compile + plan phase (parse → optimize → physical-plan) and
-  * the wall time the executor spent constructing the per-partition iterators
-  * + draining them at the query boundary. The operator tree's
-  * [[OperatorMetrics.wallNanos]] gives the per-operator share of execute
+  * The five `*Nanos` fields are *not* a partition of total execute time. They
+  * cover the SQL compile + plan phase (parse → CTE-materialize → optimize →
+  * physical-plan) and the wall time the executor spent constructing the
+  * per-partition iterators + draining them at the query boundary. The operator
+  * tree's [[OperatorMetrics.wallNanos]] gives the per-operator share of execute
   * time — that is the field consumers should use to attribute query latency
   * to individual operators.
   *
   * @param parseNanos        Time spent in `LogicalBuilder.build`.
+  * @param cteMaterializeNanos Time spent in `CteResolver.resolve` — the whole
+  *                          CTE resolve pass, including the sub-executions that
+  *                          materialize any CTE referenced `>= 2` times. Those
+  *                          body executions run unmeasured (they don't appear
+  *                          in `operatorTree`); their cost is this single
+  *                          number. Zero for queries with no CTEs and for
+  *                          all-inlined CTEs.
   * @param optimizeNanos     Time spent in `LogicalOptimizer.optimize`.
   * @param physicalPlanNanos Time spent in `PhysicalPlanner.plan` including
   *                          the metrics-wrap pass.
@@ -23,6 +30,7 @@ package com.transformer.core.metrics
   */
 final case class QueryMetrics(
     parseNanos: Long,
+    cteMaterializeNanos: Long,
     optimizeNanos: Long,
     physicalPlanNanos: Long,
     executeNanos: Long,
@@ -45,6 +53,7 @@ object QueryMetrics {
     * {{{
     *   {
     *     "parseNanos": 123,
+    *     "cteMaterializeNanos": 0,
     *     "optimizeNanos": 45,
     *     "physicalPlanNanos": 67,
     *     "executeNanos": 890,
@@ -56,6 +65,7 @@ object QueryMetrics {
     val sb = new java.lang.StringBuilder()
     sb.append("{\n")
     sb.append("  \"parseNanos\": ").append(q.parseNanos).append(",\n")
+    sb.append("  \"cteMaterializeNanos\": ").append(q.cteMaterializeNanos).append(",\n")
     sb.append("  \"optimizeNanos\": ").append(q.optimizeNanos).append(",\n")
     sb.append("  \"physicalPlanNanos\": ").append(q.physicalPlanNanos).append(",\n")
     sb.append("  \"executeNanos\": ").append(q.executeNanos).append(",\n")

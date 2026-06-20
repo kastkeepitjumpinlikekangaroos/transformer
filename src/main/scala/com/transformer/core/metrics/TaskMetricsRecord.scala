@@ -168,6 +168,8 @@ object TaskMetricsRecord {
 
   private def parseQuery(o: JsonMini.JObj): QueryMetrics = QueryMetrics(
     parseNanos = o.field("parseNanos").asLong,
+    // Tolerate records written before this phase field existed (default 0).
+    cteMaterializeNanos = o.optField("cteMaterializeNanos").map(_.asLong).getOrElse(0L),
     optimizeNanos = o.field("optimizeNanos").asLong,
     physicalPlanNanos = o.field("physicalPlanNanos").asLong,
     executeNanos = o.field("executeNanos").asLong,

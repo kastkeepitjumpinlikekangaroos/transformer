@@ -127,7 +127,7 @@ class MetricsCollectorTest {
       counters = Array.empty, counterNames = Array.empty,
       children = Vector(leaf))
     val qm = QueryMetrics(
-      parseNanos = 10L, optimizeNanos = 20L,
+      parseNanos = 10L, cteMaterializeNanos = 15L, optimizeNanos = 20L,
       physicalPlanNanos = 30L, executeNanos = 40L,
       operatorTree = root)
     val rec = TaskMetricsRecord(
@@ -155,6 +155,7 @@ class MetricsCollectorTest {
     assertEquals(rec.gcDeltaNanos, read.gcDeltaNanos)
     val rq = read.query.getOrElse(fail("expected query metrics").asInstanceOf[QueryMetrics])
     assertEquals(qm.parseNanos, rq.parseNanos)
+    assertEquals(qm.cteMaterializeNanos, rq.cteMaterializeNanos)
     assertEquals(qm.executeNanos, rq.executeNanos)
     val rt = rq.operatorTree
     assertEquals("FilterExec", rt.name)
@@ -181,7 +182,7 @@ class MetricsCollectorTest {
       enqueuedAt = Instant.parse("2026-05-20T00:00:00Z"),
       startedAt = Instant.parse("2026-05-20T00:00:00Z"),
       finishedAt = Instant.parse("2026-05-20T00:00:00Z"),
-      query = Some(QueryMetrics(0L, 0L, 0L, 0L, tree)),
+      query = Some(QueryMetrics(0L, 0L, 0L, 0L, 0L, tree)),
       cpuNanos = -1L, allocBytes = -1L,
       gcDeltaCount = 0L, gcDeltaNanos = 0L)
     val dir = java.nio.file.Files.createTempDirectory("metrics-counters-")
