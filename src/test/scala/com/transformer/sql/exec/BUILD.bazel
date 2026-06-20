@@ -12,6 +12,22 @@ scala_junit_test(
     ],
 )
 
+# CTE materialization: a CTE referenced >= 2 times is executed once into a
+# shared in-memory result and replayed per reference (compute-once via a
+# counting view + the RAND() determinism fence); a CTE referenced <= 1 time is
+# inlined (negative control asserts no MaterializedView scan is introduced).
+scala_junit_test(
+    name = "cte_materialization_test",
+    srcs = ["CteMaterializationTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 # Sub-plan 1 verification: PhysicalPlanner.plan returns the un-wrapped
 # tree when metricsEnabled is false, wraps every operator in a
 # MeteredPlan when true, and operator counters populate after drain.
