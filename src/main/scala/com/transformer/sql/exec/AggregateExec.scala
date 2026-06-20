@@ -97,6 +97,7 @@ final case class HashAggregateExec(
     if (useLongKey) HashAggregateExec.KeyPathLong
     else if (nKeys == 0) HashAggregateExec.KeyPathPacked  // EmptyKeyCodec — treat as packed (no boxing)
     else if (keyTypes.forall(KeyCodec.isPackable)) HashAggregateExec.KeyPathPacked
+    else if (nKeys == 1) HashAggregateExec.KeyPathSingleObject  // SingleObjectKeyCodec
     else HashAggregateExec.KeyPathObject
   }
 
@@ -659,9 +660,10 @@ object HashAggregateExec {
   /** Path codes written into the `keyCodecPath` counter. Consumers map back
     * to the named strategy via this table; the codes are stable across
     * releases. */
-  final val KeyPathLong: Long   = 0L
-  final val KeyPathPacked: Long = 1L
-  final val KeyPathObject: Long = 2L
+  final val KeyPathLong: Long         = 0L
+  final val KeyPathPacked: Long       = 1L
+  final val KeyPathObject: Long       = 2L
+  final val KeyPathSingleObject: Long = 3L
 
   /** Name array parallel to the Idx* constants above. Length is asserted to
     * equal `highest Idx<Name> + 1` in `operator_counters_test.scala` so a

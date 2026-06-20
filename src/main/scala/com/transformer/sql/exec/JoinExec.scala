@@ -155,6 +155,7 @@ final case class HashJoinExec(
     if (useJoinLongKey) HashJoinExec.KeyPathLong
     else if (nKeys == 0) HashJoinExec.KeyPathObject // non-equi (cartesian) — no codec
     else if (keyTypes.forall(KeyCodec.isPackable)) HashJoinExec.KeyPathPacked
+    else if (nKeys == 1) HashJoinExec.KeyPathSingleObject  // SingleObjectKeyCodec
     else HashJoinExec.KeyPathObject
   }
   if (metricsNode != null) {
@@ -985,9 +986,10 @@ object HashJoinExec {
 
   /** Key-codec path codes — same convention as
     * [[HashAggregateExec.KeyPathLong]] etc. */
-  final val KeyPathLong: Long   = 0L
-  final val KeyPathPacked: Long = 1L
-  final val KeyPathObject: Long = 2L
+  final val KeyPathLong: Long         = 0L
+  final val KeyPathPacked: Long       = 1L
+  final val KeyPathObject: Long       = 2L
+  final val KeyPathSingleObject: Long = 3L
 
   /** Name array parallel to the Idx* constants above. Length asserted equal
     * to `highest Idx<Name> + 1` in `operator_counters_test.scala`. */

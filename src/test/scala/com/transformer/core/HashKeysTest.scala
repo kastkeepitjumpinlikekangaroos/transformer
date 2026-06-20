@@ -7,7 +7,9 @@ class HashKeysTest {
 
   // ---------------------------------------------------------------------------
   // Selection: forColumns picks PackedBytesCodec for fixed-width-only keys,
-  // ObjectArrayCodec when any column is variable-width, EmptyKeyCodec for zero.
+  // SingleObjectKeyCodec for one variable-width column (the common GROUP BY
+  // market_id shape), ObjectArrayCodec when two+ columns include a variable-
+  // width one, EmptyKeyCodec for zero.
   // ---------------------------------------------------------------------------
 
   @Test def forColumnsPicksPackedBytesForFixedWidthOnly(): Unit = {
@@ -20,14 +22,19 @@ class HashKeysTest {
     assertTrue(c.isInstanceOf[ObjectArrayCodec])
   }
 
-  @Test def forColumnsPicksObjectArrayForDecimal(): Unit = {
+  @Test def forColumnsPicksSingleObjectForSingleDecimal(): Unit = {
     val c = KeyCodec.forColumns(Array(0), Array(DataType.DecimalType(10, 2)))
-    assertTrue(c.isInstanceOf[ObjectArrayCodec])
+    assertTrue(c.isInstanceOf[SingleObjectKeyCodec])
   }
 
-  @Test def forColumnsPicksObjectArrayForBinary(): Unit = {
+  @Test def forColumnsPicksSingleObjectForSingleBinary(): Unit = {
     val c = KeyCodec.forColumns(Array(0), Array(DataType.BinaryType))
-    assertTrue(c.isInstanceOf[ObjectArrayCodec])
+    assertTrue(c.isInstanceOf[SingleObjectKeyCodec])
+  }
+
+  @Test def forColumnsPicksSingleObjectForSingleString(): Unit = {
+    val c = KeyCodec.forColumns(Array(0), Array(DataType.StringType))
+    assertTrue(c.isInstanceOf[SingleObjectKeyCodec])
   }
 
   @Test def forColumnsReturnsEmptyKeyCodecForZero(): Unit = {

@@ -173,6 +173,12 @@ object ParquetReader {
     val c = new Configuration()
     // Pin local FS — no HDFS, no Hadoop runtime.
     c.set("fs.defaultFS", "file:///")
+    // Use RawLocalFileSystem to match the writer's choice. Hadoop's default
+    // ChecksumFileSystem would verify a sibling `.<name>.crc` file on every
+    // open; the writer no longer emits those, so verifying them would either
+    // fail or fall back silently. Skipping the wrapper also avoids the small
+    // open()/lookup() cost of the checksum-file probe on each parquet open.
+    c.set("fs.file.impl", "org.apache.hadoop.fs.RawLocalFileSystem")
     c
   }
 

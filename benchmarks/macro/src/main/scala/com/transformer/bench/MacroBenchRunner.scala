@@ -118,6 +118,7 @@ object MacroBenchRunner {
     var forceSpill: Boolean = false
     var outputDir: Option[String] = None
     var executionTime: Option[String] = None
+    var xmx: String = "2g"
     var i = 0
     def take(flag: String): String = {
       i += 1
@@ -135,6 +136,7 @@ object MacroBenchRunner {
         case "--output-dir"     => outputDir = Some(take("--output-dir"))
         case "--execution-time" => executionTime = Some(take("--execution-time"))
         case "--force-spill"    => forceSpill = true
+        case "--xmx"            => xmx = take("--xmx")
         case "-h" | "--help"    => printUsage(); System.exit(0)
         case other              => throw new IllegalArgumentException(s"unknown flag: $other")
       }
@@ -154,7 +156,8 @@ object MacroBenchRunner {
       forceSpill = forceSpill,
       outputPath = Paths.get(resolvedOutput),
       benchOutputDir = outputDir.map(Paths.get(_)),
-      executionTime = executionTime)
+      executionTime = executionTime,
+      xmx = xmx)
   }
 
   /** Resolve `--workload jaffle|polymarket|custom` into a (deployJar, jobDir)
@@ -197,6 +200,7 @@ object MacroBenchRunner {
         |  --output-dir <path>                     job's output dir (default: /tmp/transformer-macro-<workload>)
         |  --execution-time <ISO>                  fixed execution time for the workload (jaffle/polymarket only)
         |  --force-spill                           run with -Dtransformer.macro.force_spill=true
+        |  --xmx <size>                            JVM heap size per iteration (default 2g; polymarket wants 12g+)
         |  -h / --help                             this message
         |""".stripMargin)
   }
@@ -265,7 +269,7 @@ object MacroBenchRunner {
     val javaBin = Paths.get(System.getProperty("java.home")).resolve("bin").resolve("java").toString
     val cmd = mutable.ArrayBuffer.empty[String]
     cmd += javaBin
-    cmd += "-Xmx2g"
+    cmd += s"-Xmx${args.xmx}"
     if (args.forceSpill) cmd += s"-D${com.transformer.job.DataJob.ForceSpillPropertyName}=true"
     cmd += "-jar"
     cmd += args.deployJar.toString
@@ -530,7 +534,8 @@ object MacroBenchRunner {
       forceSpill: Boolean,
       outputPath: Path,
       benchOutputDir: Option[Path],
-      executionTime: Option[String])
+      executionTime: Option[String],
+      xmx: String)
 
   /** One per-iteration sample for one task: the operator-tree-root wall
     * time and the full operator tree JSON (kept verbatim so we can write

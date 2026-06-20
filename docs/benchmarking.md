@@ -74,7 +74,7 @@ In-memory counters:
 |---|---|
 | `groupCount` | Distinct group keys emitted. |
 | `hashMapPeakSize` | Maximum size of the in-memory keymap at any point during the partial-aggregate phase. |
-| `keyCodecPath` | 0 = LongHashMap fast path, 1 = `PackedBytesCodec`, 2 = `ObjectArrayCodec`. |
+| `keyCodecPath` | 0 = LongHashMap fast path, 1 = `PackedBytesCodec`, 2 = `ObjectArrayCodec`, 3 = `SingleObjectKeyCodec` (single non-packable column — e.g. `GROUP BY market_id`). |
 | `mergeNanos` | Time spent merging partial AggStates from sibling partitions / spill runs. |
 | `partialAggregateNanos` | Time spent in the per-batch update loop. |
 
@@ -105,7 +105,7 @@ In-memory counters:
 | `unmatchedRows` | Probe (or build, for LEFT outer) rows that surfaced as unmatched in the outer-join emission. |
 | `buildNanos` | Time spent building the keymap. |
 | `probeNanos` | Time spent probing. |
-| `keyCodecPath` | 0 = LongHashMap fast path, 1 = `PackedBytesCodec`, 2 = `ObjectArrayCodec`. |
+| `keyCodecPath` | 0 = LongHashMap fast path, 1 = `PackedBytesCodec`, 2 = `ObjectArrayCodec`, 3 = `SingleObjectKeyCodec` (single non-packable column — e.g. `GROUP BY market_id`). |
 
 Grace-hash spill counters:
 
@@ -258,6 +258,7 @@ workload's checked-in config.
 | `--output-dir <path>` | `${java.io.tmpdir}/transformer-macro-<workload>` | Directory the workload writes into each iteration. |
 | `--execution-time <ISO>` | `2026-01-01T00:00:00Z` (set by the workload itself) | Override the workload's templated execution time. |
 | `--force-spill` | unset | Pass `-Dtransformer.macro.force_spill=true` to every subprocess. |
+| `--xmx <size>` | `2g` | JVM heap size per iteration. Default fits the jaffle workload comfortably; the polymarket workload needs `--xmx 12g` (or larger) to avoid GC-thrashing — see [`examples/polymarket/BUILD.bazel`](../examples/polymarket/BUILD.bazel) for the rationale. |
 
 ### Output format
 

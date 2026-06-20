@@ -40,6 +40,15 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
   private val conf: Configuration = {
     val c = new Configuration()
     c.set("fs.defaultFS", "file:///")
+    // Use RawLocalFileSystem (no checksum sidecars) for the file:// scheme.
+    // Hadoop's default LocalFileSystem wraps RawLocalFileSystem in a
+    // ChecksumFileSystem that writes a `.<name>.crc` sibling for every data
+    // file. parquet-mr's own write supports already include per-page CRC32
+    // checksums in the parquet footer, so Hadoop's sibling .crc adds nothing
+    // — it just doubles the FS syscall count per file and leaves orphaned
+    // `.crc` files after the writer's atomic temp→target rename (the rename
+    // moves the data file but not the checksum sidecar).
+    c.set("fs.file.impl", "org.apache.hadoop.fs.RawLocalFileSystem")
     c
   }
 
@@ -182,10 +191,21 @@ object ParquetWriter {
 
     def writerTask(i: Int): Callable[Long] = new Callable[Long] {
       def call(): Long = {
+        val it = partitions(i)
+        // Skip empty partitions: opening a writer creates a parquet
+        // header + footer + atomic-renames an empty file. Filter-pushdown
+        // workloads (e.g. polymarket's orderbook scan, which eliminates
+        // 98% of row groups) leave most partitions empty after the upstream
+        // operator drains; emitting them as zero-row part-files costs an
+        // open/write/close round-trip here AND forces downstream readers
+        // to open + parse each empty footer. The hasNext peek runs the
+        // partition's full scan-+-filter-+-project chain to first non-zero
+        // batch (or end-of-stream), so the work is the same — we just skip
+        // the file IO when nothing survived.
+        if (!it.hasNext) return 0L
         val target = targetDir.resolve(f"part-$i%05d.parquet")
         val w = new ParquetWriter(target, schema, options)
         writers(i) = w
-        val it = partitions(i)
         while (it.hasNext) w.write(it.next())
         w.close()
       }
@@ -221,6 +241,30 @@ object ParquetWriter {
     if (firstError != null) {
       abortAll(writers)
       throw firstError
+    }
+    // Ensure at least one parquet file exists in `targetDir` so downstream
+    // `ParquetReader.fromPath(dir)` (which throws on an empty glob) can
+    // re-open the materialized view. When every partition's iterator was
+    // empty we wrote zero files above; emit a header-only placeholder
+    // here so the materialize path stays uniform. Cost: a few hundred
+    // bytes of parquet header + footer once per all-empty job.
+    if (total == 0L) {
+      var anyWritten = false
+      var k = 0
+      while (k < writers.length && !anyWritten) {
+        if (writers(k) != null) anyWritten = true
+        k += 1
+      }
+      if (!anyWritten) {
+        val placeholder = targetDir.resolve("part-00000.parquet")
+        val w = new ParquetWriter(placeholder, schema, options)
+        try w.close()
+        catch {
+          case e: Throwable =>
+            w.abort()
+            throw e
+        }
+      }
     }
     total
   }

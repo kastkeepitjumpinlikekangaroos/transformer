@@ -102,6 +102,7 @@ object KeyCodec {
         i += 1
       }
       if (allPackable) new PackedBytesCodec(columnIndices.clone(), columnTypes.clone())
+      else if (columnTypes.length == 1) new SingleObjectKeyCodec(columnIndices(0), columnTypes(0))
       else new ObjectArrayCodec(columnIndices.clone(), columnTypes.clone())
     }
   }
@@ -781,4 +782,127 @@ final class ObjectArrayCodec private[core] (
 
   def ownFromScratch(scratch: AnyRef): AnyRef =
     scratch.asInstanceOf[ObjectArrayKeyScratch].toOwned
+}
+
+/** Hashmap-suitable wrapper around a single `AnyRef` key value. Caches
+  * `hashCode`; `equals` is element-equality with `Array[Byte]` special-cased
+  * for structural equality (same rule as [[ObjectArrayKey]] — for binary
+  * column keys raw arrays would otherwise fall back to reference equality
+  * and break the GROUP BY contract).
+  *
+  * Used by [[SingleObjectKeyCodec]] when the codec wraps a single
+  * variable-width column (the common `GROUP BY market_id` shape in
+  * polymarket-style workloads). Saves the `Array[AnyRef]` indirection
+  * [[ObjectArrayKey]] pays for one-element arrays — one fewer object header
+  * + length word + indirection in the hot hashCode/equals path.
+  *
+  * Subclassed by [[SingleObjectKeyScratch]] for in-place lookup reuse — the
+  * stored-key path always allocates a fresh [[SingleObjectKey]] so the
+  * value is stable across map operations.
+  */
+sealed class SingleObjectKey(protected var _value: AnyRef, protected var hash: Int) {
+  def this(value: AnyRef) = this(value, SingleObjectKey.computeHash(value))
+  /** Read the wrapped key. Effectively immutable for stored entries; the
+    * scratch subclass mutates `_value` in place per probe. */
+  def value: AnyRef = _value
+  override def hashCode(): Int = hash
+  override def equals(other: Any): Boolean = other match {
+    case k: SingleObjectKey =>
+      if (k eq this) return true
+      if (k.hash != hash) return false
+      val a = _value; val b = k._value
+      if (a == null) b == null
+      else if (b == null) false
+      else (a, b) match {
+        case (x: Array[Byte], y: Array[Byte]) => java.util.Arrays.equals(x, y)
+        case (x, y)                           => x.equals(y)
+      }
+    case _ => false
+  }
+}
+
+object SingleObjectKey {
+  def computeHash(v: AnyRef): Int = {
+    val eh =
+      if (v == null) 0
+      else v match {
+        case b: Array[Byte] => java.util.Arrays.hashCode(b)
+        case other          => other.hashCode
+      }
+    // Match [[ObjectArrayKey.computeHash]]'s 31*1 + eh form so a single-key
+    // wrapper hashes identically to a one-element ObjectArrayKey covering
+    // the same value. Lets a future refactor that materializes a one-key
+    // map under either codec migrate without re-hashing.
+    31 + eh
+  }
+}
+
+/** Mutable lookup wrapper. The operator holds one per worker and rewrites
+  * its value in place per row before probing the `HashMap`. On a hit no
+  * allocation happens; on a miss the operator clones the value into a fresh
+  * [[SingleObjectKey]]. The probe's hash is recomputed via
+  * [[recomputeHash]] after rewriting. */
+final class SingleObjectKeyScratch
+    extends SingleObjectKey(null, 0) {
+  def writableSet(v: AnyRef): Unit = { _value = v }
+  def recomputeHash(): Unit = {
+    hash = SingleObjectKey.computeHash(_value)
+  }
+  /** Materialize an immutable copy for insertion. */
+  def toOwned: SingleObjectKey = new SingleObjectKey(_value, hash)
+}
+
+/** Single-column variable-width codec. The single GROUP BY / DISTINCT /
+  * JOIN key column is read directly from the source [[ColumnVector]] and
+  * stored as the wrapper's `value` field — no enclosing `Array[AnyRef]`,
+  * one fewer indirection in the hot hashCode/equals path.
+  *
+  * Picked by [[KeyCodec.forColumns]] when `numKeys == 1` and the key
+  * column's type is not [[KeyCodec.isPackable]] (i.e. String / Binary /
+  * Decimal / NullType). The dominant target shape in the polymarket
+  * pipeline is `GROUP BY market_id` over an aggregation of 100M+ rows,
+  * where `market_id` is a fixed-width hex string the parquet decoder has
+  * already interned per row group — so `encodeFromBatch` returns a stable
+  * reference into the intern cache and the wrapper carries it through the
+  * map without copying. */
+final class SingleObjectKeyCodec private[core] (
+    private val columnIndex: Int,
+    private val columnType: DataType) extends KeyCodec {
+
+  val numKeys: Int = 1
+
+  def encodeFromBatch(batch: ColumnarBatch, row: Int): AnyRef = {
+    val col = batch.column(columnIndex)
+    val v: AnyRef = if (col.isNull(row)) null else col.getBoxed(row).asInstanceOf[AnyRef]
+    new SingleObjectKey(v)
+  }
+
+  def encodeFromBatchSkipIfAnyNull(batch: ColumnarBatch, row: Int): AnyRef = {
+    val col = batch.column(columnIndex)
+    if (col.isNull(row)) return null
+    new SingleObjectKey(col.getBoxed(row).asInstanceOf[AnyRef])
+  }
+
+  def encodeBoxed(values: Array[Any]): AnyRef = {
+    val v = values(0)
+    new SingleObjectKey(if (v == null) null else v.asInstanceOf[AnyRef])
+  }
+
+  def decode(key: AnyRef, out: ColumnarBatch, baseCol: Int, outRow: Int): Unit = {
+    val v = key.asInstanceOf[SingleObjectKey].value
+    val outCol = out.column(baseCol)
+    if (v == null) outCol.setNull(outRow) else outCol.setBoxed(outRow, v)
+  }
+
+  def newScratch(): AnyRef = new SingleObjectKeyScratch()
+
+  def encodeIntoScratch(scratch: AnyRef, batch: ColumnarBatch, row: Int): Unit = {
+    val s = scratch.asInstanceOf[SingleObjectKeyScratch]
+    val col = batch.column(columnIndex)
+    s.writableSet(if (col.isNull(row)) null else col.getBoxed(row).asInstanceOf[AnyRef])
+    s.recomputeHash()
+  }
+
+  def ownFromScratch(scratch: AnyRef): AnyRef =
+    scratch.asInstanceOf[SingleObjectKeyScratch].toOwned
 }
