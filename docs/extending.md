@@ -204,11 +204,16 @@ extend the format switch in `ResultPersister` and the dropdown in
 
 ## Add a SQL operator (e.g., subqueries)
 
-1. AST handling in `LogicalBuilder.fromItem` (which currently only handles
-   plain `Table`). For subqueries you'd add a case for
-   `net.sf.jsqlparser.statement.select.PlainSelect` and recurse into
-   `buildSelect`, then wrap as a synthetic `CatalogView` over a materialized
-   batch list or a new `LogicalSubquery` node.
+1. AST handling in `LogicalBuilder.fromItem` (which today handles plain
+   `Table` and CTE-name references resolved from `cteScope`). For subqueries
+   you'd add a case for `net.sf.jsqlparser.statement.select.PlainSelect` /
+   `ParenthesedSelect` and recurse into `buildAnySelect`, then either inline
+   the returned `LogicalPlan` directly (the way CTEs do — see
+   [architecture §6b](architecture.md#6b-cte-inlining-with)) or wrap it as a
+   synthetic `CatalogView` over a materialized batch list / new
+   `LogicalSubquery` node. Inlining a plan subtree needs no planner or
+   optimizer changes; a new `LogicalPlan` node does (every exhaustive match
+   over the sealed trait must learn the case).
 2. Logical → physical mapping in `PhysicalPlanner.plan`.
 3. Optionally a new physical operator (one file in `sql/exec/`).
 4. Test against `SqlEngineTest`.

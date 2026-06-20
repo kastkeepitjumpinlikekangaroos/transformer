@@ -282,7 +282,19 @@ ship a fix or move something from "not done" to "done".
   `eval(batch, row)` because those are 1-row paths where vectorization gives
   nothing back.
 - **No multi-statement SQL.** `SqlParser.parseSelect` only accepts a SELECT.
-- **No subqueries** (scalar, IN, EXISTS, derived tables).
+- **CTEs (`WITH`) are supported, but inlined and non-recursive.** Each CTE
+  reference is substituted with the CTE's logical plan at build time —
+  `LogicalBuilder.buildAnySelect` reads `Select.getWithItemsList`, builds each
+  CTE in order (so later CTEs can reference earlier ones), and threads a
+  `cteScope: Map[String, LogicalPlan]` into `fromItem`, which consults it before
+  the catalog (so a CTE name shadows a like-named view). Because references are
+  inlined, a CTE used N times is planned and executed N times — there is no
+  result caching/materialization, and an optimizer that wanted CTE reuse would
+  have to materialize explicitly. `WITH RECURSIVE` is rejected with a clear
+  error rather than silently mis-planned.
+- **No subqueries** (scalar, IN, EXISTS, derived tables in FROM). A derived
+  table in FROM still throws from `LogicalBuilder.fromItem`; reach for a `WITH`
+  CTE where the shape allows.
 - **Window functions: ROWS frames only.** `RANGE BETWEEN` is parsed and accepted
   but executed with ROWS semantics — for `RANGE BETWEEN UNBOUNDED PRECEDING AND
   CURRENT ROW` this is correct unless the ORDER BY produces ties (where RANGE

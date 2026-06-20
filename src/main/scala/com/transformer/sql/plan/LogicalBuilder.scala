@@ -29,17 +29,51 @@ object LogicalBuilder {
   type Sources = Seq[(Option[String], Schema)]
 
   def build(sql: String, catalog: Catalog): LogicalPlan =
-    buildAnySelect(SqlParser.parseSelect(sql), catalog)
+    buildAnySelect(SqlParser.parseSelect(sql), catalog, Map.empty)
 
   /** Dispatch over the SELECT subtype: a single `PlainSelect`, a UNION /
     * INTERSECT / EXCEPT [[SetOperationList]], or a parenthesized wrapper.
+    *
+    * CTE definitions in the WITH clause are extracted here and accumulated
+    * into `cteScope` before the inner query body is planned. Each CTE is
+    * built in order so later CTEs can reference earlier ones in the same
+    * WITH clause. The resolved scope is threaded into `fromItem` so that any
+    * reference to a CTE name in FROM / JOIN is satisfied by the pre-built
+    * plan rather than a catalog lookup.
     */
-  private def buildAnySelect(sel: Select, catalog: Catalog): LogicalPlan = sel match {
-    case ps: PlainSelect => buildSelect(ps, catalog)
-    case sol: SetOperationList => buildSetOperationList(sol, catalog)
-    case wrap: ParenthesedSelect => buildAnySelect(wrap.getSelect, catalog)
-    case other =>
-      throw new IllegalArgumentException(s"Unsupported SELECT shape: ${other.getClass.getSimpleName}")
+  private def buildAnySelect(sel: Select, catalog: Catalog, outerCteScope: Map[String, LogicalPlan]): LogicalPlan = {
+    val withItems = Option(sel.getWithItemsList).map(_.asScala.toSeq).getOrElse(Nil)
+    val cteScope: Map[String, LogicalPlan] = withItems.foldLeft(outerCteScope) { (scope, item) =>
+      if (item.isRecursive)
+        throw new IllegalArgumentException("Recursive CTEs (WITH RECURSIVE) are not supported")
+      val cteName = item.getAlias.getName
+      val cteBody = buildAnySelect(item.getSelect, catalog, scope)
+      // If the CTE has an explicit column alias list — WITH cte(a, b) AS (...) —
+      // wrap the body in a rename projection so the chosen names take effect.
+      val colAliases = Option(item.getWithItemList).map(_.asScala.toSeq).getOrElse(Nil)
+      val ctePlan: LogicalPlan = if (colAliases.isEmpty) cteBody else {
+        if (colAliases.size != cteBody.outputSchema.length)
+          throw new IllegalArgumentException(
+            s"CTE '$cteName' declares ${colAliases.size} column alias(es) but its body " +
+              s"produces ${cteBody.outputSchema.length} column(s)")
+        val renames: Seq[(Expr, String)] = cteBody.outputSchema.fields.zipWithIndex.map { case (f, i) =>
+          val alias = colAliases(i).getExpression.asInstanceOf[Column].getColumnName
+          (ColRefExpr(i, f.name, f.dataType): Expr, alias)
+        }
+        LogicalProject(cteBody, renames)
+      }
+      scope + (cteName.toLowerCase -> ctePlan)
+    }
+
+    sel match {
+      case _: WithItem => throw new IllegalArgumentException(
+        "WithItem reached buildAnySelect dispatch — this is a bug in the CTE builder")
+      case ps: PlainSelect => buildSelect(ps, catalog, cteScope)
+      case sol: SetOperationList => buildSetOperationList(sol, catalog, cteScope)
+      case wrap: ParenthesedSelect => buildAnySelect(wrap.getSelect, catalog, cteScope)
+      case other =>
+        throw new IllegalArgumentException(s"Unsupported SELECT shape: ${other.getClass.getSimpleName}")
+    }
   }
 
   /** Fold a `SetOperationList` into a left-associative chain of
@@ -57,7 +91,7 @@ object LogicalBuilder {
     * EXCEPT / MINUS aren't implemented in v1 — reject with a clear message
     * instead of producing a wrong plan.
     */
-  private def buildSetOperationList(sol: SetOperationList, catalog: Catalog): LogicalPlan = {
+  private def buildSetOperationList(sol: SetOperationList, catalog: Catalog, cteScope: Map[String, LogicalPlan]): LogicalPlan = {
     val selects = sol.getSelects.asScala.toVector
     val ops = sol.getOperations.asScala.toVector
     if (selects.size < 2 || ops.size != selects.size - 1) {
@@ -80,11 +114,11 @@ object LogicalBuilder {
       case _ => (None, None)
     }
 
-    val first = buildAnySelect(selects.head, catalog)
+    val first = buildAnySelect(selects.head, catalog, cteScope)
     val union = ops.iterator.zipWithIndex.foldLeft(first) { case (acc, (op, i)) =>
       op match {
         case u: UnionOp =>
-          val rhs = buildAnySelect(selects(i + 1), catalog)
+          val rhs = buildAnySelect(selects(i + 1), catalog, cteScope)
           if (acc.outputSchema.length != rhs.outputSchema.length) {
             throw new IllegalArgumentException(
               s"UNION arms have different column counts: " +
@@ -125,8 +159,8 @@ object LogicalBuilder {
   // SELECT / FROM
   // ---------------------------------------------------------------------------
 
-  private def buildSelect(ps: PlainSelect, catalog: Catalog): LogicalPlan = {
-    val (from, sources) = buildFromAndJoins(ps, catalog)
+  private def buildSelect(ps: PlainSelect, catalog: Catalog, cteScope: Map[String, LogicalPlan]): LogicalPlan = {
+    val (from, sources) = buildFromAndJoins(ps, catalog, cteScope)
 
     // WHERE
     val afterWhere: LogicalPlan = Option(ps.getWhere) match {
@@ -365,14 +399,14 @@ object LogicalBuilder {
   // FROM + JOINs
   // ---------------------------------------------------------------------------
 
-  private def buildFromAndJoins(ps: PlainSelect, catalog: Catalog): (LogicalPlan, Sources) = {
-    val (root, rootSources) = fromItem(ps.getFromItem, catalog)
+  private def buildFromAndJoins(ps: PlainSelect, catalog: Catalog, cteScope: Map[String, LogicalPlan]): (LogicalPlan, Sources) = {
+    val (root, rootSources) = fromItem(ps.getFromItem, catalog, cteScope)
     val joins = Option(ps.getJoins).map(_.asScala.toSeq).getOrElse(Nil)
 
     var plan = root
     var srcs = rootSources
     joins.foreach { j =>
-      val (rightPlan, rightSources) = fromItem(j.getRightItem, catalog)
+      val (rightPlan, rightSources) = fromItem(j.getRightItem, catalog, cteScope)
       val combinedSources = srcs ++ rightSources
       val onExprs = Option(j.getOnExpressions).map(_.asScala.toSeq).getOrElse(Nil)
       val condition: Expr =
@@ -394,12 +428,17 @@ object LogicalBuilder {
     (plan, srcs)
   }
 
-  private def fromItem(item: FromItem, catalog: Catalog): (LogicalPlan, Sources) = item match {
+  private def fromItem(item: FromItem, catalog: Catalog, cteScope: Map[String, LogicalPlan]): (LogicalPlan, Sources) = item match {
     case t: net.sf.jsqlparser.schema.Table =>
       val name = t.getName
       val alias = Option(t.getAlias).map(_.getName).orElse(Some(name))
-      val view = catalog(name)
-      (LogicalScan(name, view, alias), Seq((alias, view.schema)))
+      cteScope.get(name.toLowerCase) match {
+        case Some(ctePlan) =>
+          (ctePlan, Seq((alias, ctePlan.outputSchema)))
+        case None =>
+          val view = catalog(name)
+          (LogicalScan(name, view, alias), Seq((alias, view.schema)))
+      }
     case other =>
       throw new IllegalArgumentException(s"Unsupported FROM item: ${other.getClass.getSimpleName}")
   }

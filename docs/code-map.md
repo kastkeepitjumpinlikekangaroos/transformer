@@ -7,9 +7,10 @@ navigation hint, not a comprehensive directory listing.
 
 ## File-size hot spots
 
-- `sql/plan/LogicalBuilder.scala` (~855 LOC) — biggest file. Pattern matches
-  every JSqlParser expression node. If you're adding a syntax feature, this
-  is probably where it lands.
+- `sql/plan/LogicalBuilder.scala` (~910 LOC) — biggest file. Pattern matches
+  every JSqlParser expression node, dispatches SELECT shapes, and resolves
+  CTEs (`WITH`) by inlining. If you're adding a syntax feature, this is
+  probably where it lands.
 - `gui/JobSession.scala` (~795 LOC) — mutable FX-thread state for the GUI;
   also tracks per-input UI state (Pending/Loading/Loaded/Failed) now that
   inputs flow through the unified scheduler.

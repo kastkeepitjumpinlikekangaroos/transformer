@@ -17,7 +17,7 @@ single-node parallelism, not distributed execution.
 - Local CSV read/write (folder or glob, schema inference)
 - Local Parquet read/write (snappy, all primitive types)
 - Full SQL: SELECT, WHERE, JOIN (INNER/LEFT/RIGHT/FULL), GROUP BY, HAVING,
-  ORDER BY, LIMIT, DISTINCT, UNION/UNION ALL, CASE, CAST, scalar functions
+  ORDER BY, LIMIT, DISTINCT, UNION/UNION ALL, CTEs (`WITH`), CASE, CAST, scalar functions
 - DBT-style data-quality validations
 - Jinja-style temporal templating in SQL and output paths
 - Per-task path-template partitioning (one partition per run keyed off the
@@ -547,6 +547,7 @@ already in the design; v1.1 will populate it from GCS/S3.
 The engine supports the standard SQL-92 SELECT shape:
 
 ```
+[ WITH <name> [(<col>, ...)] AS (<select>) [, ...] ]
 SELECT [DISTINCT] <projections>
 FROM <table> [<alias>]
 [ {INNER|LEFT|RIGHT|FULL} JOIN <table> [<alias>] ON <predicate> ]*
@@ -583,8 +584,15 @@ argument is NULL.
 `DOUBLE`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`, `DATE`,
 `TIMESTAMP`.
 
-**Subqueries:** not in v1. Use a multi-task pipeline with `viewName` to chain
-results.
+**CTEs (`WITH`):** supported, non-recursive. `WITH a AS (...), b AS (SELECT ...
+FROM a) SELECT ... FROM b` — later CTEs may reference earlier ones, a CTE can
+carry an explicit column-alias list (`WITH c(x, y) AS (...)`), and a CTE name
+shadows a catalog view of the same name. CTEs are *inlined* at each reference
+(no result materialization), so a CTE referenced N times is recomputed N times.
+`WITH RECURSIVE` is rejected.
+
+**Subqueries:** not in v1 (scalar, IN/EXISTS, derived tables in FROM). Use a
+`WITH` CTE, or chain results across a multi-task pipeline with `viewName`.
 
 **NULL handling:** three-valued logic in boolean contexts; NULL propagates
 through arithmetic and string ops; `IS NULL` / `IS NOT NULL` for explicit
@@ -726,7 +734,8 @@ JDK 21 or newer (tested through JDK 25).
   `transformer.spill.dir` system property. `COUNT(DISTINCT …)` aggregates
   silently disable spill on the whole operator (its state doesn't
   round-trip through a typed schema in v1).
-- **No subqueries**: chain `SQLTask`s via `viewName`.
+- **No subqueries** (scalar, IN/EXISTS, derived tables in FROM): use a `WITH`
+  CTE, or chain `SQLTask`s via `viewName`.
 - **No window functions** (`OVER (PARTITION BY ...)`): planned post-v1.
 - **Cloud paths recognized but unimplemented**: see v1.1 above.
 - **Schema is inferred from the first file** in a glob; mixed schemas across

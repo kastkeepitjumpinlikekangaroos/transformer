@@ -1473,4 +1473,163 @@ class SqlEngineTest {
     assertEquals(Vector(50, 49, 48, 47, 46), rows.map(_("k").asInstanceOf[Int]).toVector)
     assertEquals(Vector(50L, 49L, 48L, 47L, 46L), rows.map(_("s").asInstanceOf[Long]).toVector)
   }
+
+  // ---------------------------------------------------------------------------
+  // CTEs (WITH clause)
+  // ---------------------------------------------------------------------------
+
+  @Test def simpleCte(): Unit = {
+    val p = tmpCsv("a.csv", "id,name\n1,alice\n2,bob\n3,charlie\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("WITH c AS (SELECT id, name FROM t) SELECT id, name FROM c", cat)
+    assertEquals(Vector("id", "name"), q.schema.fieldNames)
+    val rows = collectAllRows(q)
+    assertEquals(Seq(1, 2, 3), rows.map(_("id")))
+    assertEquals(Seq("alice", "bob", "charlie"), rows.map(_("name")))
+  }
+
+  @Test def cteOuterFilterReferencesCarriedColumn(): Unit = {
+    // The CTE projects `score`; the outer query both filters on it and drops it
+    // from its own SELECT list. The carried column must resolve in outer scope.
+    val p = tmpCsv("a.csv", "id,score\n1,10\n2,90\n3,30\n4,75\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "WITH hi AS (SELECT id, score FROM t WHERE score > 20) SELECT id FROM hi WHERE score > 50 ORDER BY id", cat)
+    assertEquals(Vector("id"), q.schema.fieldNames)
+    val rows = collectAllRows(q)
+    assertEquals(Seq(2, 4), rows.map(_("id")))
+  }
+
+  @Test def cteChainReferencesEarlierCte(): Unit = {
+    // `top` reads from `base`, an earlier CTE in the same WITH clause.
+    val p = tmpCsv("a.csv", "id,score\n1,10\n2,90\n3,30\n4,75\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "WITH base AS (SELECT id, score FROM t WHERE score > 20), " +
+        "top AS (SELECT id FROM base WHERE score > 50) " +
+        "SELECT id FROM top ORDER BY id", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq(2, 4), rows.map(_("id")))
+  }
+
+  @Test def multipleCtesJoined(): Unit = {
+    val p = tmpCsv("a.csv", "id,score\n1,10\n2,90\n3,30\n4,75\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "WITH a AS (SELECT id, score FROM t WHERE score >= 30), " +
+        "b AS (SELECT id, score FROM t WHERE score <= 75) " +
+        "SELECT a.id AS id, a.score AS ascore, b.score AS bscore " +
+        "FROM a JOIN b ON a.id = b.id ORDER BY a.id", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq(3, 4), rows.map(_("id")))
+    assertEquals(Seq(30, 75), rows.map(_("ascore")))
+    assertEquals(Seq(30, 75), rows.map(_("bscore")))
+  }
+
+  @Test def cteJoinedToRealTable(): Unit = {
+    val left = tmpCsv("l.csv", "id,name\n1,alice\n2,bob\n3,charlie\n")
+    val right = tmpCsv("r.csv", "user_id,score\n1,100\n2,40\n3,80\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "WITH big AS (SELECT user_id, score FROM s WHERE score > 60) " +
+        "SELECT u.name, big.score FROM u JOIN big ON u.id = big.user_id ORDER BY u.id", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq("alice", "charlie"), rows.map(_("name")))
+    assertEquals(Seq(100, 80), rows.map(_("score")))
+  }
+
+  @Test def cteReferencedTwiceActsLikeSelfJoin(): Unit = {
+    // Same CTE name appears twice in FROM. The inlined plan is shared; each
+    // reference scans the source independently (exactly like `FROM t a JOIN t b`).
+    val p = tmpCsv("a.csv", "id,score\n1,10\n2,10\n3,30\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "WITH c AS (SELECT id, score FROM t) " +
+        "SELECT x.id AS xid, y.id AS yid FROM c x JOIN c y ON x.score = y.score " +
+        "WHERE x.id < y.id ORDER BY x.id, y.id", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq(1), rows.map(_("xid")))
+    assertEquals(Seq(2), rows.map(_("yid")))
+  }
+
+  @Test def cteWithAggregateInsideFilteredOutside(): Unit = {
+    val p = tmpCsv("a.csv", "cat,score\nA,1\nA,2\nB,3\nB,4\nB,5\nC,9\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "WITH agg AS (SELECT cat, COUNT(*) AS n FROM t GROUP BY cat) " +
+        "SELECT cat, n FROM agg WHERE n > 1 ORDER BY cat", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq("A", "B"), rows.map(_("cat")))
+    assertEquals(Seq(2L, 3L), rows.map(_("n")))
+  }
+
+  @Test def cteWithExplicitColumnAliasList(): Unit = {
+    // WITH c(uid, sc) AS (...) renames the body's output columns.
+    val p = tmpCsv("a.csv", "id,score\n1,10\n2,20\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "WITH c(uid, sc) AS (SELECT id, score FROM t) SELECT uid, sc FROM c ORDER BY uid", cat)
+    assertEquals(Vector("uid", "sc"), q.schema.fieldNames)
+    val rows = collectAllRows(q)
+    assertEquals(Seq(1, 2), rows.map(_("uid")))
+    assertEquals(Seq(10, 20), rows.map(_("sc")))
+  }
+
+  @Test def cteInUnionAll(): Unit = {
+    // WITH clause attaches to the top-level SetOperationList; both arms must
+    // see the CTE scope.
+    val p = tmpCsv("a.csv", "id,score\n1,10\n2,90\n3,30\n4,75\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "WITH lo AS (SELECT id FROM t WHERE score < 40), " +
+        "hi AS (SELECT id FROM t WHERE score > 60) " +
+        "SELECT id FROM lo UNION ALL SELECT id FROM hi ORDER BY id", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq(1, 2, 3, 4), rows.map(_("id")))
+  }
+
+  @Test def cteNameIsCaseInsensitive(): Unit = {
+    val p = tmpCsv("a.csv", "id,name\n1,alice\n2,bob\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("WITH MyCte AS (SELECT id FROM t) SELECT id FROM mycte ORDER BY id", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq(1, 2), rows.map(_("id")))
+  }
+
+  @Test def cteShadowsCatalogTable(): Unit = {
+    // A CTE named `t` takes precedence over a registered view also named `t`.
+    val realT = tmpCsv("real.csv", "id,v\n9,9\n")
+    val src = tmpCsv("src.csv", "id,v\n1,100\n2,10\n3,80\n")
+    val cat = new Catalog
+    cat.register("t", CsvReader.fromPath(realT.toString, CsvOptions()))
+    cat.register("src", CsvReader.fromPath(src.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "WITH t AS (SELECT id, v FROM src WHERE v > 50) SELECT id, v FROM t ORDER BY id", cat)
+    val rows = collectAllRows(q)
+    // If the CTE shadowed the view we see src's filtered rows, not the real t's (9,9).
+    assertEquals(Seq(1, 3), rows.map(_("id")))
+    assertEquals(Seq(100, 80), rows.map(_("v")))
+  }
+
+  @Test def recursiveCteRejected(): Unit = {
+    val p = tmpCsv("a.csv", "id\n1\n2\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val ex = try {
+      SqlEngine.execute("WITH RECURSIVE c AS (SELECT id FROM t) SELECT id FROM c", cat); null
+    } catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.contains("Recursive"))
+  }
+
+  @Test def cteColumnAliasArityMismatchRejected(): Unit = {
+    val p = tmpCsv("a.csv", "id,score\n1,10\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val ex = try {
+      SqlEngine.execute("WITH c(a, b, x) AS (SELECT id, score FROM t) SELECT a FROM c", cat); null
+    } catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.contains("column alias"))
+  }
 }
