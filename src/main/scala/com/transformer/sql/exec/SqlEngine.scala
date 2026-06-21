@@ -20,8 +20,8 @@ object SqlEngine extends SqlExecutor {
   }
 
   /** Disabled-path: no `System.nanoTime` calls, no [[QueryMetrics]]
-    * allocation. The only added cost vs the pre-instrumentation engine is
-    * the `if (!opts.metricsEnabled)` branch above and the same branch in
+    * allocation. The only added cost vs running without metrics is the
+    * `if (!opts.metricsEnabled)` branch above and the same branch in
     * `PhysicalPlanner.plan`. */
   private def executeUnmeasured(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
     val built = LogicalBuilder.build(sql, catalog)

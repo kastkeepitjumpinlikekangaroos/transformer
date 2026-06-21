@@ -146,10 +146,10 @@ final class ParquetReader private (
 
 object ParquetReader {
   /** Per-partition decode statistics surfaced through
-    * [[ParquetReader.readPartitionWithMetrics]]. Sub-plan 2 wires the
-    * concrete implementation in [[com.transformer.sql.exec.ScanExec]] —
-    * the trait stays in `read.parquet` so it doesn't introduce a reverse
-    * dependency on `sql.exec`.
+    * [[ParquetReader.readPartitionWithMetrics]]. The concrete implementation
+    * is wired in [[com.transformer.sql.exec.ScanExec]] — the trait stays in
+    * `read.parquet` so it doesn't introduce a reverse dependency on
+    * `sql.exec`.
     *
     * All methods are bumped from the partition's own thread (the iterator
     * is single-threaded per partition). Implementations route bumps to a

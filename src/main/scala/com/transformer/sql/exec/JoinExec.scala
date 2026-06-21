@@ -556,7 +556,7 @@ final case class HashJoinExec(
       v != null && v.asInstanceOf[Boolean]
   }
 
-  // ---- Grace hash path (plan 09 Phase 6) -----------------------------------
+  // ---- Grace hash path -----------------------------------------------------
   //
   // When `opts.spillEnabled` and the join has equi-keys, route both sides into
   // K disk buckets keyed by `hash(joinKey) % K`. Then process each bucket pair
@@ -626,7 +626,7 @@ final case class HashJoinExec(
     * `spillDir`, keyed by `hash(joinKey) % K`. Returns one file path per
     * bucket; a `null` entry means that bucket was empty (no file written).
     *
-    * Sub-plan 2 adds `side` for counter attribution. The bucket-write
+    * `sideName` drives counter attribution. The bucket-write
     * threshold doesn't change behavior — the count of bytes-on-disk after
     * close is the source of truth for `bytesSpilledBuild` /
     * `bytesSpilledProbe`, both populated from the final `files`. */
@@ -964,7 +964,7 @@ final case class HashJoinExec(
 }
 
 object HashJoinExec {
-  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // ---- Counter indices ------------------------------------------------------
   // In-memory path counters.
   final val IdxBuildSideRows: Int      = 0
   final val IdxProbeSideRows: Int      = 1

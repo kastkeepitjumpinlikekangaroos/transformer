@@ -10,26 +10,23 @@ package com.transformer.core.metrics
   * fanned out across the scheduler stay correct without per-partition
   * sharding of the node tree.
   *
-  * Why a single node per operator (not per partition): the snapshot consumer
-  * — `_perf.json` and the macro-bench aggregator (Sub-plan 4) — wants the
-  * accumulated counters per operator, summed across partitions. The plan
-  * mentions per-partition observation but Sub-plan 1 only needs the
-  * aggregate; Sub-plan 4's macro bench computes per-run aggregates from
-  * many runs, so per-partition skew can be surfaced there. If a future PR
-  * needs per-partition breakdowns, the simplest extension is one MetricsNode
-  * per (operator, partition) maintained inside the operator (Sub-plan 2
-  * already needs to thread its `MetricsNode` through the operator's
-  * constructor; adding a `partition` accessor to [[MeteredIterator]]'s
-  * constructor argument is a small follow-up).
+  * Why a single node per operator (not per partition): the snapshot consumers
+  * — `_perf.json` and the macro-bench aggregator — want the accumulated
+  * counters per operator, summed across partitions, so one node that every
+  * partition's [[MeteredIterator]] bumps is enough. If per-partition
+  * breakdowns are ever needed, the simplest extension is one MetricsNode per
+  * (operator, partition): operators already thread their `MetricsNode` through
+  * their constructor, so adding a `partition` accessor to [[MeteredIterator]]
+  * would be a small follow-up.
   *
-  * Counter discipline (Sub-plan 2 will extend this):
+  * Counter discipline:
   *
   *   - Custom counters live in [[counters]], a fixed-size
   *     `Array[LongAdder]` sized at construction from the operator's
-  *     compile-time counter list. In Sub-plan 1 every operator is wrapped
-  *     with an empty counter array (size 0); Sub-plan 2 adds per-operator
-  *     counter groups (e.g. `HashAggregateExec` gets `groupCount`,
-  *     `mergeNanos`, `spillEvents`, ...).
+  *     compile-time counter list. Operators that declare counters (e.g.
+  *     `HashAggregateExec` with `groupCount`, `mergeNanos`, `spillEvents`,
+  *     ...) get one slot per name; operators without custom counters get an
+  *     empty array and only the framework-managed row/batch counters below.
   *   - Counter *names* live in [[counterNames]]; per-operator unit tests
   *     assert `counterNames.length == counters.length` to catch index drift
   *     when a counter is added.
@@ -50,11 +47,11 @@ package com.transformer.core.metrics
   *   `getClass.getSimpleName` at wrap time so future operator subclasses
   *   are picked up without further wiring.
   * @param partition
-  *   Reserved for future per-partition observation (Sub-plan 2+); currently
-  *   always 0 — the node's counters aggregate across every partition.
+  *   Reserved for future per-partition observation; currently always 0 — the
+  *   node's counters aggregate across every partition.
   * @param counterNames
-  *   Compile-time counter names supplied by the operator (length 0 in
-  *   Sub-plan 1; populated in Sub-plan 2). Size-locked at construction.
+  *   Compile-time counter names supplied by the operator (empty for operators
+  *   without custom counters). Size-locked at construction.
   */
 final class MetricsNode(
     val id: Int,
@@ -64,9 +61,9 @@ final class MetricsNode(
 
   import java.util.concurrent.atomic.LongAdder
 
-  /** Per-operator custom counters as adders. Sub-plan 1 leaves this empty;
-    * Sub-plan 2 extends operator constructors to bump entries via
-    * `counters(IdxBuildNanos).add(delta)`. */
+  /** Per-operator custom counters as adders, one slot per [[counterNames]]
+    * entry (empty for operators without custom counters). Operators bump
+    * entries via `counters(IdxBuildNanos).add(delta)`. */
   val counters: Array[LongAdder] = Array.fill(counterNames.length)(new LongAdder)
 
   /** Number of input rows the operator pulled from its child(ren). Same

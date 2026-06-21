@@ -4,9 +4,9 @@ package com.transformer.core.metrics
   * once per query (in `SqlEngine.execute` after the iterators have been
   * drained) and embedded in [[QueryMetrics]] / written to `_perf.json`.
   *
-  * Sub-plan 1's snapshot is intentionally narrow — `id`, `name`, the
-  * iterator-level row/batch counters, and the operator's custom
-  * counter array (empty in Sub-plan 1, populated in Sub-plan 2). The
+  * The snapshot is intentionally narrow — `id`, `name`, the iterator-level
+  * row/batch counters, and the operator's custom counter array (empty for
+  * operators without custom counters). The
   * `children: Vector[OperatorMetrics]` field carries the recursive tree
   * shape so consumers can render the plan in the GUI without re-parsing
   * the original logical/physical plan.
@@ -21,7 +21,8 @@ package com.transformer.core.metrics
   * @param wallNanos    Wall time spent inside this operator's
   *                     `hasNext`/`next` calls (excludes child time).
   * @param counters     Per-operator custom counter values, indexed by
-  *                     `counterNames`. Length 0 in Sub-plan 1.
+  *                     `counterNames`. Empty for operators that declare no
+  *                     custom counters.
   * @param counterNames Names of the custom counters, used as keys in the
   *                     serialized JSON. Same length as [[counters]].
   * @param children     Snapshots of child operators (pre-order).
@@ -45,8 +46,8 @@ final case class OperatorMetrics(
   def nodeCount: Int = 1 + children.iterator.map(_.nodeCount).sum
 
   /** Look up a custom counter by name; returns 0L when the counter is
-    * absent. Linear scan — Sub-plan 1 has no counters and Sub-plan 2's
-    * operators each declare a handful, so a [[Map]] would be overkill.
+    * absent. Linear scan — operators each declare at most a handful of
+    * counters, so a [[Map]] would be overkill.
     * Consumers that want fast lookup should index via the operator's
     * `Idx<Name>` constant on the raw [[counters]] array. */
   def counter(name: String): Long = {

@@ -64,9 +64,9 @@ final class MeteredIterator(inner: Iterator[ColumnarBatch], node: MetricsNode)
     // discrepancy between rowsIn and rowsOut on the filter itself. The
     // child's own MeteredIterator independently records what *it* emitted,
     // so consumers compute "rows discarded by filter" as
-    // `child.rowsOut - filter.rowsOut`. Sub-plan 2's per-operator custom
-    // counters add explicit "discarded" counters where the difference
-    // matters for diagnostics.
+    // `child.rowsOut - filter.rowsOut`. Operators with custom counters can
+    // add explicit "discarded" counters where the difference matters for
+    // diagnostics.
     node.rowsIn.add(n)
     node.rowsOut.add(n)
     node.batchesIn.increment()

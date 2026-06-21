@@ -23,7 +23,7 @@ import scala.collection.mutable
   * concat + `Arrays.sort` because heap startup + per-batch allocation
   * dominates wall time on tiny inputs.
   *
-  * ## Spill (plan 09 Phase 3)
+  * ## Spill
   *
   * When `opts.spillEnabled`, each per-partition sort watches its accumulator
   * size and flushes "runs" to disk parquet files when the byte threshold is
@@ -397,7 +397,7 @@ object SortExec {
     * outweighs the merge savings on tiny inputs. */
   private[exec] val SmallNThreshold: Int = 4096
 
-  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // ---- Counter indices ------------------------------------------------------
   // In-memory path counters.
   final val IdxComparatorCalls: Int = 0
   final val IdxInputRows: Int       = 1

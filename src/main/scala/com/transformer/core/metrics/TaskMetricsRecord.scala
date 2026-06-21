@@ -12,15 +12,15 @@ import java.time.Instant
   *
   * Schema versioning: this file is **developer-facing**. Unlike `_run.json` —
   * which the GUI hydrates and a future GUI integration may render — `_perf.json`
-  * is consumed by `benchmarks/macro/` (Sub-plan 4) and ad-hoc developer
-  * tooling, and is free to evolve. Each release bumps [[SchemaVersion]] if the
+  * is consumed by `benchmarks/macro/` and ad-hoc developer tooling, and is
+  * free to evolve. Each release bumps [[SchemaVersion]] if the
   * schema changes; consumers should check it and reject older versions rather
   * than try to back-fill missing fields.
   *
   * On rerun the file is overwritten in place (most-recent-only), matching
   * `_run.json`'s policy. Historical perf data lives in
   * `benchmarks/macro/` outputs and the checked-in
-  * `benchmarks/baseline/jaffle_shop.json` (Sub-plan 4).
+  * `benchmarks/baseline/jaffle_shop.json`.
   *
   * @param schemaVersion   Always [[SchemaVersion]] when written.
   * @param taskName        Task display name, matches `_run.json.taskName`.

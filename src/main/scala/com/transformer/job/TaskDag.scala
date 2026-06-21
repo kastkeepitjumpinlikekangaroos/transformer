@@ -12,13 +12,15 @@ import scala.jdk.CollectionConverters._
   *
   * `deps` is the set of declared-indices of upstream tasks this task reads from (i.e.,
   * other tasks whose `viewName` is referenced in this task's main SQL or any of its
-  * validation SQLs). References to Phase 1 input views are NOT deps — those are
-  * pre-loaded into the catalog before any task runs.
+  * validation SQLs). References to *input* views are NOT counted here — they're
+  * tracked separately in `inputDeps`.
   *
   * `inputDeps` is the set of lowercased *input* viewNames the task reads from (main
-  * SQL + any validation SQL). Surfaced so UIs can draw input → task edges without
-  * re-parsing the SQL themselves; the runner ignores it because inputs are already
-  * materialized in the catalog before tasks run.
+  * SQL + any validation SQL). The unified scheduler gates task eligibility on these:
+  * a task runs only once every input it reads has finished loading. Input loads run
+  * concurrently with tasks rather than as a pre-task barrier (see
+  * `DataJob.runUnifiedDag`), and UIs use these to draw input → task edges without
+  * re-parsing the SQL.
   *
   * Public so external surfaces (e.g. the GUI module) can render the DAG without
   * having to re-implement the analyzer.
@@ -46,7 +48,9 @@ object TaskDag {
   /** Build a DAG over `tasks`, validating uniqueness/references/cycles upfront.
     *
     * @param tasks          the job's SQLTasks, in declared order
-    * @param inputViewNames lowercased viewNames already registered by Phase 1
+    * @param inputViewNames lowercased viewNames of the job's inputs, used to classify
+    *                       table references as input-reads vs task-reads (and to reject
+    *                       references to views that are neither)
     * @param vars           temporal variables; SQL is rendered against these so that
     *                       template-injected table names (e.g. `FROM events_{{ today }}`)
     *                       resolve correctly

@@ -250,9 +250,9 @@ object ExchangeExec {
     math.max(1, configured.getOrElse(Scheduler.parallelism))
   }
 
-  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // ---- Counter indices ------------------------------------------------------
   // ExchangeExec's counter array length depends on the configured shard
-  // count: one slot per shard plus a single `keyNullCount` slot. Sub-plan 1's
+  // count: one slot per shard plus a single `keyNullCount` slot. The
   // OperatorMetrics JSON shape stores each counter as one Long, so we use
   // individual `IdxShardN` slots rather than encoding the array into a single
   // counter — the JSON consumer reads them as named keys.

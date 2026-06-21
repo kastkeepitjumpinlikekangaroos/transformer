@@ -32,7 +32,7 @@ import scala.collection.mutable
   * indices are preserved so projections bound against the child can still
   * reference them by index.
   *
-  * ## Spill (plan 09 Phase 7)
+  * ## Spill
   *
   * Window's correctness requires full visibility within each partition. The
   * spill design exploits the same property: route every input row to
@@ -636,7 +636,7 @@ final case class WindowExec(
 }
 
 object WindowExec {
-  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // ---- Counter indices ------------------------------------------------------
   // In-memory path counters.
   final val IdxPartitionCount: Int       = 0
   final val IdxPeakPartitionRows: Int    = 1

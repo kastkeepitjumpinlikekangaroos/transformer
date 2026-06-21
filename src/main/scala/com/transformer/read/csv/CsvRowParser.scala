@@ -38,12 +38,10 @@ final class CsvRowParser(in: Reader, opts: CsvOptions) {
       if (r < 0) {
         // EOF
         if (state == FIELD_START && !sawAnything) return None
-        if (state == FIELD_START && sawAnything) {
-          // Trailing delimiter on last line: e.g. "a,b,\n" => 3 fields, last empty.
-          fields += cur.toString
-        } else {
-          fields += cur.toString
-        }
+        // Flush the in-progress field as the final one: in FIELD_START it's the
+        // empty field left by a trailing delimiter at EOF ("a,b," => 3 fields,
+        // last empty); in the other states it's the accumulated field content.
+        fields += cur.toString
         done = true
       } else {
         val c = r.toChar

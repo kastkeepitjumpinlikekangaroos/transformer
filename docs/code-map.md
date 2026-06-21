@@ -7,8 +7,9 @@ navigation hint, not a comprehensive directory listing.
 
 ## File-size hot spots
 
-- `sql/plan/LogicalBuilder.scala` (~960 LOC) — biggest file. Pattern matches
-  every JSqlParser expression node, dispatches SELECT shapes, and (for
+- `sql/plan/LogicalBuilder.scala` (~960 LOC) — largest file in `sql/plan`.
+  Pattern matches every JSqlParser expression node, dispatches SELECT shapes,
+  and (for
   outermost-scope `WITH` CTEs) emits placeholder `PendingCteView` scans +
   collects `CteDef`s into a `BuiltQuery`, which `sql/exec/CteResolver.scala`
   later inlines or materializes (see [architecture §6b](architecture.md#6b-cte-resolution-inline-vs-materialize)).
@@ -16,7 +17,7 @@ navigation hint, not a comprehensive directory listing.
 - `gui/JobSession.scala` (~795 LOC) — mutable FX-thread state for the GUI;
   also tracks per-input UI state (Pending/Loading/Loaded/Failed) now that
   inputs flow through the unified scheduler.
-- `sql/exec/AggregateExec.scala` (~1320 LOC) — every `AggState` subclass
+- `sql/exec/AggregateExec.scala` (~1740 LOC) — biggest file. Every `AggState` subclass
   plus the codec / LongHashMap GROUP BY paths. Primitive states
   (`CountStarState`, `CountState`, `CountIfState`, `LongSumState`,
   `DoubleSumState`, `AvgState`, `MinMaxState`) override `updateBatch` to
@@ -24,36 +25,36 @@ navigation hint, not a comprehensive directory listing.
   Each spillable state additionally implements `writeSelf` / `readSelf`
   (plan 09 Phase 4); the `AggSpiller` helper at the bottom of the file
   handles per-partition parquet flush + fold-back at emit time.
-- `sql/exec/AggStateSerde.scala` (~75 LOC) — dispatcher that pairs
+- `sql/exec/AggStateSerde.scala` (~110 LOC) — dispatcher that pairs
   `AggExpr` types with the right `AggState` subtype for round-trip
   serialization. `isSpillable` gates the operator-level switch
   (`CountDistinct` is the only false case).
-- `core/Spill.scala` (~155 LOC) — temp-dir lifecycle, per-operator subdir
+- `core/Spill.scala` (~200 LOC) — temp-dir lifecycle, per-operator subdir
   allocation, `ColumnarBatch` byte estimator, and the
   `effectiveThresholdBytes` helper that turns `ExecutionOptions` into a
   concrete flush threshold.
-- `core/ExecutionOptions.scala` (~75 LOC) — per-query knobs threaded from
+- `core/ExecutionOptions.scala` (~120 LOC) — per-query knobs threaded from
   `DataJob.runOneTask` to spill-capable operators. `fromOutputOptions`
   parses the `output.json` `options` map with tolerance for typos.
-- `job/DataJob.scala` (~720 LOC) — runner orchestration: unified input + task
+- `job/DataJob.scala` (~875 LOC) — runner orchestration: unified input + task
   DAG scheduler (`runUnifiedDag`), writeOutput, validation re-read, per-status
   `_run.json` writes + per-failure `_validation-<slug>.csv` sample writes +
   per-job `job.json` write + consistency checks.
-- `sql/plan/Expr.scala` (~560 LOC) — `Expr` ADT plus `eval` and `evalVec`
+- `sql/plan/Expr.scala` (~625 LOC) — `Expr` ADT plus `eval` and `evalVec`
   per subtype. `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` each carry
   an `evalVec` override; the rest of the hot subtypes delegate to `VecOps`.
 - `sql/plan/Funcs.scala` (~550 LOC) — scalar function registry. `Funcs.apply`
   is the row-form dispatcher; `Funcs.applyVec` + the `VecFuncs` object
   carry the vectorized implementations for the hot subset (COALESCE,
   string ops, ABS/FLOOR/CEIL/ROUND/TRUNC, IF, NULLIF, SUBSTRING).
-- `gui/ResultsTabPane.scala` (~360 LOC) — partition picker + background
+- `gui/ResultsTabPane.scala` (~630 LOC) — partition picker + background
   output loader + run-log rendering.
-- `core/ColumnarBatch.scala` (~320 LOC) — defines ten `ColumnVector`
+- `core/ColumnarBatch.scala` (~390 LOC) — defines ten `ColumnVector`
   subclasses. Adding a new `DataType` requires a new vector + companion case
   in `ColumnVector.allocate`.
-- `gui/DagCanvas.scala` (~300 LOC) — Canvas drawing + pan/zoom/click; renders
+- `gui/DagCanvas.scala` (~380 LOC) — Canvas drawing + pan/zoom/click; renders
   per-input load state alongside per-task status.
-- `sql/exec/JoinExec.scala` (~770 LOC) — equi-join build + probe paths
+- `sql/exec/JoinExec.scala` (~1060 LOC) — equi-join build + probe paths
   with build/probe role mirroring, the LongHashMap fast path, and
   per-batch `evalVec` key extraction for computed join keys on both
   sides. Grace hash join (plan 09 Phase 6) is the additional
@@ -61,7 +62,7 @@ navigation hint, not a comprehensive directory listing.
   files via `fmix32(hash(joinKeys)) % K` and processes bucket pairs
   sequentially; per-bucket unmatched-build tracking preserves outer-join
   semantics.
-- `sql/exec/WindowExec.scala` (~470 LOC) — partition, sort, frame
+- `sql/exec/WindowExec.scala` (~655 LOC) — partition, sort, frame
   computation for every supported window function; pre-computes per-spec
   partition/order keys per row during the single materialization pass.
   Bucketed spill (plan 09 Phase 7) routes child rows into K=16 disk
@@ -69,14 +70,14 @@ navigation hint, not a comprehensive directory listing.
   bucket through the same in-memory pipeline — every row sharing a
   partition key collocates in one bucket so LAG/LEAD/frame correctness
   is preserved.
-- `core/HashKeys.scala` (~520 LOC) — `KeyCodec` (`PackedBytesCodec`,
+- `core/HashKeys.scala` (~910 LOC) — `KeyCodec` (`PackedBytesCodec`,
   `ObjectArrayCodec`, `EmptyKeyCodec`) + `BytesKey` / `ObjectArrayKey`
   wrappers + `LongHashMap[V]` (open-addressing primitive-long-keyed map for
   the single-Long fast path in HashAggregate / HashJoin). Used by every
   pipeline-breaking operator that keys into a HashMap (HashAggregate /
   HashJoin / Distinct / WindowExec partition keys). See
   [architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers).
-- `core/Scheduler.scala` (~80 LOC) — the shared `ForkJoinPool` every parallel
+- `core/Scheduler.scala` (~100 LOC) — the shared `ForkJoinPool` every parallel
   call site funnels through. Daemon threads, default size `2 × availableProcessors`
   (override via `transformer.scheduler.parallelism` system property or
   `TRANSFORMER_SCHEDULER_PARALLELISM` env var).

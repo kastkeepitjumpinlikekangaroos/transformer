@@ -29,7 +29,7 @@ import scala.collection.mutable
   * `Seq[Any]` allocation + per-element dynamic-dispatch hashCode/equals walk
   * the original implementation paid on every row.
   *
-  * ## Spill (plan 09 Phase 5)
+  * ## Spill
   *
   * When `opts.spillEnabled`, each per-partition `collect` watches its
   * accumulated input bytes; when over threshold it flushes the current set
@@ -218,7 +218,7 @@ final case class DistinctExec(
 }
 
 object DistinctExec {
-  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // ---- Counter indices ------------------------------------------------------
   // In-memory counters mirror HashAggregateExec's shape (DistinctExec IS an
   // aggregate with no value columns).
   final val IdxGroupCount: Int             = 0
@@ -226,8 +226,7 @@ object DistinctExec {
   final val IdxKeyCodecPath: Int           = 2
   final val IdxMergeNanos: Int             = 3
   final val IdxPartialAggregateNanos: Int  = 4
-  // Spill counters (narrower than HashAggregateExec's set per Sub-plan 2's
-  // scoping note).
+  // Spill counters (a narrower set than HashAggregateExec's).
   final val IdxSpillEvents: Int            = 5
   final val IdxBytesSpilled: Int           = 6
   final val IdxSpillRunsRead: Int          = 7

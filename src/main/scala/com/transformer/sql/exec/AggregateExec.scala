@@ -103,7 +103,7 @@ final case class HashAggregateExec(
 
   // Effective spill switch: user opted in AND every aggregate is spillable.
   // Mixed-aggregate queries with a CountDistinct fall back to the heap-only
-  // path — see plan 09's "CountDistinct fall back" risk.
+  // path (its HashSet[Any] doesn't round-trip through the typed spill schema).
   private val spillEnabled: Boolean =
     opts.spillEnabled && AggStateSerde.allSpillable(aggregates.iterator.map(_._1).toIndexedSeq)
 
@@ -476,7 +476,8 @@ final case class HashAggregateExec(
       // `LongAdder.max` doesn't exist; we accumulate the per-partition peak
       // into the counter so the consumer reads a sum-of-peaks (worst case per
       // partition). For peak-of-peaks across partitions, divide by partitions
-      // or rely on per-partition observation (Sub-plan 1 reserved that).
+      // or add per-partition observation (MetricsNode.partition is reserved
+      // for that but unused today).
       metricsNode.counters(HashAggregateExec.IdxHashMapPeakSize).add(peakMapSize)
       metricsNode.counters(HashAggregateExec.IdxPeakInMemoryBytes).add(peakBytes)
     }
@@ -638,7 +639,7 @@ final case class HashAggregateExec(
 }
 
 object HashAggregateExec {
-  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // ---- Counter indices ------------------------------------------------------
   // In-memory path counters: always populated when metrics enabled, regardless
   // of spill outcome.
   final val IdxGroupCount: Int             = 0
@@ -748,8 +749,8 @@ sealed trait AggState {
     * [[AggStateSerde]] when an operator spills a partial map to disk. The
     * default throws — only states the plan promises to support
     * (Count, Sum, Avg, Min, Max, CountIf, Moment, Covar, Corr) override.
-    * `CountDistinctState` deliberately does not (HashSet round-trip is out
-    * of scope per plan 09).
+    * `CountDistinctState` deliberately does not — a `HashSet[Any]` has no
+    * typed-schema round-trip.
     *
     * The on-disk encoding is opaque to the operator — `writeSelf` /
     * `readSelf` are paired by type, never by external schema. Operators
@@ -1491,7 +1492,7 @@ final class CorrState extends AggState {
 }
 
 // ---------------------------------------------------------------------------
-// Spill support (plan 09 Phase 4). The PartialAgg / PartialAggLong wrappers
+// Spill support. The PartialAgg / PartialAggLong wrappers
 // carry both the in-memory tail of a partition's aggregation AND any spill
 // files written mid-stream. AggSpiller is the read/write boundary for those
 // spill files; the per-file format is one parquet file with

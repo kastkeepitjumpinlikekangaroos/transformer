@@ -6,16 +6,16 @@ import scala.jdk.CollectionConverters._
 
 /** Process-level helpers for the in-tree instrumentation framework.
   *
-  * Sub-plan 1 of the instrumentation work lives here. The framework as a whole
-  * is opt-in per [[com.transformer.core.ExecutionOptions.metricsEnabled]]; this
-  * object provides:
+  * The process- and thread-level sampling helpers live here. The framework as
+  * a whole is opt-in per [[com.transformer.core.ExecutionOptions.metricsEnabled]];
+  * this object provides:
   *
   *   - [[globalDefault]] — the boolean default consulted by
   *     `DataJob.runOneTask` when a task's own `options.metrics` is unset.
   *     Resolved once at class load from the system property
   *     `transformer.metrics.enabled` (preferred) or the env var
-  *     `TRANSFORMER_METRICS_ENABLED`. Mirrors the pattern in
-  *     `Scheduler.parallelism` (see `Scheduler.scala:63-71`).
+  *     `TRANSFORMER_METRICS_ENABLED`. Mirrors the sysprop-then-env pattern
+  *     in `Scheduler.parallelism`.
   *   - Per-thread sampling helpers ([[currentCpuNanos]],
   *     [[currentAllocatedBytes]]) used at task boundaries to capture
   *     ThreadMXBean snapshots. Both fall back gracefully to `-1L` when the

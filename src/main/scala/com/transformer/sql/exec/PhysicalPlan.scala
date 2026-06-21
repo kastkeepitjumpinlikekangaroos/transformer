@@ -42,7 +42,7 @@ final case class ScanExec(view: CatalogView, metricsNode: MetricsNode = null) ex
 }
 
 object ScanExec {
-  // ---- Counter indices (Sub-plan 2 instrumentation) ------------------------
+  // ---- Counter indices ------------------------------------------------------
   // Scan-side counters surfaced by ParquetReader. Non-parquet views leave
   // them all at zero — those views have no row-group / pushdown notion.
   final val IdxBytesRead: Int                 = 0

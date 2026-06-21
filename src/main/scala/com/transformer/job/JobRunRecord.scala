@@ -20,11 +20,10 @@ import scala.util.control.NonFatal
   * drift between the manifest and the filesystem.
   *
   * The [[perfManifest]] field lists the per-task `_perf.json` paths emitted
-  * by this run when metrics were enabled (Sub-plan 1 of the instrumentation
-  * work). `None` when metrics were disabled on every task — keeps the
-  * default `job.json` shape unchanged for unmetered runs. The macro bench
-  * runner (Sub-plan 4) reads this list to find every `_perf.json` in one
-  * query without re-walking the output tree.
+  * by this run when metrics were enabled. `None` when metrics were disabled
+  * on every task — keeps the default `job.json` shape unchanged for unmetered
+  * runs. The macro bench runner reads this list to find every `_perf.json` in
+  * one query without re-walking the output tree.
   */
 final case class JobRunRecord(
     schemaVersion: Int,

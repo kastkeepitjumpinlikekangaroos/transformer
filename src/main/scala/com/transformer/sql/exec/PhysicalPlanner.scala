@@ -12,18 +12,19 @@ import scala.collection.mutable
   * build-side selection for hash joins).
   *
   * Accepts [[ExecutionOptions]] (defaults to [[ExecutionOptions.Default]] for
-  * callers that don't carry per-task config). Spill-capable operators read the
-  * `opts` value at construction; today no operator consumes it, so the field
-  * is plumbed but functionally inert — Phase 1 of the spill plan is plumbing
-  * only.
+  * callers that don't carry per-task config). Spill-capable operators
+  * (`SortExec`, `HashAggregateExec`, `DistinctExec`, and the grace-hash /
+  * bucketed-window paths) read the `opts` value at construction to decide
+  * whether to spill to disk; with spill disabled (the default) the cost is a
+  * single boolean check per operator.
   *
-  * Metrics: when `opts.metricsEnabled` is true (Sub-plan 1 of the
-  * instrumentation work), each operator's `execute(p)` is wrapped in a
-  * [[MeteredIterator]] via a one-shot recursive walk in [[plan]]. The
-  * planner-time wrap means the disabled path is a single branch + load
-  * (`if (opts.metricsEnabled)`) and the per-row inner loops are untouched.
-  * Use [[planWithMetrics]] when the caller wants both the wrapped tree and
-  * the root [[MetricsNode]] for snapshotting after the iterator drains.
+  * Metrics: when `opts.metricsEnabled` is true, each operator's `execute(p)`
+  * is wrapped in a [[MeteredIterator]] via a one-shot recursive walk in
+  * [[plan]]. The planner-time wrap means the disabled path is a single branch
+  * + load (`if (opts.metricsEnabled)`) and the per-row inner loops are
+  * untouched. Use [[planWithMetrics]] when the caller wants both the wrapped
+  * tree and the root [[MetricsNode]] for snapshotting after the iterator
+  * drains.
   */
 object PhysicalPlanner {
 
@@ -38,8 +39,8 @@ object PhysicalPlanner {
     * and the caller does not need to capture a tree.
     *
     * The returned root carries a pre-order set of child nodes (recursively),
-    * one per `(operator, partition)`. Sub-plan 2 will extend each operator
-    * to hold a reference to its own [[MetricsNode]] so it can populate
+    * one per operator. Each operator also holds a reference to its own
+    * [[MetricsNode]] (threaded in by [[wrapChildren]]) so it can populate its
     * custom counters.
     */
   def planWithMetrics(logical: LogicalPlan, opts: ExecutionOptions): (PhysicalPlan, Option[MetricsNode]) = {
@@ -135,7 +136,7 @@ object PhysicalPlanner {
     * collapsing window. Empty PARTITION BY means the window spans the
     * whole result; sharding would split rows that must be computed
     * together. Below the cardinality threshold, the exchange overhead
-    * isn't worth the parallelism (the same Phase 6 gate as aggregates). */
+    * isn't worth the parallelism (the same cardinality gate as aggregates). */
   private def buildWindow(
       physChild: PhysicalPlan,
       logicalChild: LogicalPlan,
@@ -185,8 +186,8 @@ object PhysicalPlanner {
     * scatter overhead is a real cost, and silently paying it on inputs
     * whose size we can't reason about (streaming CSV) is the wrong default.
     * Callers with known-large inputs (parquet, in-memory views) get the
-    * sharded parallelism; everyone else gets the collapsing path that ran
-    * before plan 04 landed. */
+    * sharded parallelism; everyone else gets the collapsing path (fan out
+    * across the child's partitions and merge). */
   private def shouldShardForSize(child: LogicalPlan): Boolean =
     LogicalPlanCardinality.estimate(child).exists(_ >= LogicalPlanCardinality.MinShardableSize)
 
@@ -321,7 +322,7 @@ object PhysicalPlanner {
   }
 
   // ----------------------------------------------------------------------
-  // Metrics wrapping (Sub-plan 1 of the instrumentation work).
+  // Metrics wrapping.
   //
   // When opts.metricsEnabled is true, [[plan]] runs the raw planner first
   // (planInner), then post-walks the result to:
@@ -349,9 +350,9 @@ object PhysicalPlanner {
 
   /** Per-operator counter name array used to size [[MetricsNode]] at wrap
     * time. Each operator that owns custom counters exposes an
-    * `IdxCounterNames` constant in its companion object (Sub-plan 2). New
-    * operators not listed here fall back to an empty array — their
-    * iterator-level counters still populate, just no custom slots. */
+    * `IdxCounterNames` constant in its companion object. New operators not
+    * listed here fall back to an empty array — their iterator-level counters
+    * still populate, just no custom slots. */
   private def counterNamesFor(plan: PhysicalPlan): Array[String] = plan match {
     case _: HashAggregateExec => HashAggregateExec.IdxCounterNames
     case _: HashJoinExec      => HashJoinExec.IdxCounterNames
@@ -450,27 +451,23 @@ object PhysicalPlanner {
   * the wrapped operator; intercepts `execute(p)` to wrap the returned
   * iterator in a [[MeteredIterator]].
   *
-  * The node holds the per-operator-per-partition counter container; the
-  * iterator increments its framework-managed fields (rowsIn / rowsOut /
-  * batches / wallNanos). Custom counters are populated by the operator
-  * itself in Sub-plan 2; here in Sub-plan 1 the node's counter array is
-  * always empty.
+  * The node holds the per-operator counter container; the iterator increments
+  * its framework-managed fields (rowsIn / rowsOut / batches / wallNanos).
+  * Custom counters are populated by the operator itself, which receives the
+  * same [[MetricsNode]] through its constructor.
   *
   * Why a separate class instead of overriding inside each operator: the
-  * disabled path stays byte-for-byte the un-wrapped tree, the wrap pass
-  * runs only when the user opted in, and Sub-plans 2+ remain strictly
-  * additive — each operator gets a constructor arg for its `MetricsNode`,
-  * but the wrap itself stays the same shape.
+  * disabled path stays byte-for-byte the un-wrapped tree, and the wrap pass
+  * runs only when the user opted in.
   */
 private[exec] final class MeteredPlan(inner: PhysicalPlan, val node: MetricsNode) extends PhysicalPlan {
   def outputSchema: Schema = inner.outputSchema
   def numPartitions: Int = inner.numPartitions
   def execute(partition: Int): Iterator[ColumnarBatch] = {
-    // Partition-aware nodes — Sub-plan 1 records the partition the iterator
-    // was created for. The MetricsNode itself is shared across partitions
-    // because the planner builds one tree; row/batch counters accumulate
-    // across partitions, mirroring the per-partition fan-out today's
-    // operators already use.
+    // The MetricsNode is shared across this operator's partitions (the planner
+    // builds one tree); row/batch counters accumulate across partitions,
+    // mirroring the per-partition fan-out operators already use. Per-partition
+    // breakdowns aren't recorded today — see MetricsNode.partition.
     new MeteredIterator(inner.execute(partition), node)
   }
   /** Expose the wrapped plan for tests that need to assert the planner
@@ -479,9 +476,8 @@ private[exec] final class MeteredPlan(inner: PhysicalPlan, val node: MetricsNode
 }
 
 private[exec] object MeteredPlan {
-  /** Sub-plan 1's per-operator counter list is empty — only the framework-
-    * managed iterator counters are populated. Sub-plan 2 replaces this with
-    * each operator's own [[CounterNames]] when the operator gains custom
-    * counters. */
+  /** Counter-name array for operators that declare no custom counters — only
+    * the framework-managed iterator counters are populated. Operators with
+    * custom counters supply their own `IdxCounterNames` instead. */
   val EmptyCounterNames: Array[String] = Array.empty
 }
