@@ -67,7 +67,10 @@ specific traps.
   expression, GROUP BY / JOIN / WINDOW key) is hot enough to override.
   Every new override extends `ExprBatchTest` first with NULL-handling
   parity, divide-by-zero parity, and per-type result-shape parity — never
-  the other way around. See
+  the other way around. The property-based `ExprParityFuzzTest` is the
+  generative net over that gate; keep `ExprGen` in sync when you add an
+  `Expr` node (see [extending.md](extending.md#add-a-property--generator)).
+  See
   [architecture.md §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec).
   The same pattern applies to `AggState.updateBatch`: primitive states
   override; everything else loops the default per-row `update`. See

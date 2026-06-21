@@ -71,7 +71,22 @@ object Ops {
           case Div => if (r == 0L) null else l / r
           case Mod => if (r == 0L) null else l % r
         }
-      case DataType.FloatType | DataType.DoubleType =>
+      case DataType.FloatType =>
+        // Compute in double (like VecOps.floatArith) then narrow to Float at
+        // THIS node. The row path must narrow per-node, not just at the final
+        // store: a float-typed intermediate that stays in double precision would
+        // diverge from evalVec, which narrows every result on its FloatVector
+        // store. Narrowing here keeps eval and evalVec equal under composition.
+        val l = lv.asInstanceOf[Number].doubleValue
+        val r = rv.asInstanceOf[Number].doubleValue
+        (op match {
+          case Plus => l + r
+          case Minus => l - r
+          case Times => l * r
+          case Div => l / r
+          case Mod => l % r
+        }).toFloat
+      case DataType.DoubleType =>
         val l = lv.asInstanceOf[Number].doubleValue
         val r = rv.asInstanceOf[Number].doubleValue
         op match {

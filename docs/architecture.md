@@ -761,14 +761,24 @@ functions, string-heavy operations where boxing isn't the bottleneck). The
 fallback is one ColumnVector allocation + N `setBoxed` calls per batch —
 slightly more allocation than the pre-`evalVec` row loop, but still correct.
 
-Parity is verified by `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala`
-— a JUnit suite that builds 64-row batches with controlled NULL placements,
-runs both `eval(batch, row)` and `evalVec(batch)`, and asserts equality at
-every row for every subtype that overrides `evalVec`. When you add a new
-override, extend this suite first — the test enforces NULL-handling parity,
-divide-by-zero parity, and per-type result-shape parity (after normalizing
-to the declared `dataType`, which matters for cases like FloatType arithmetic
-where `eval` returns `Double` and the FloatVector narrows on store).
+Parity is verified two ways. `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala`
+is the hand-written gate — a JUnit suite that builds 64-row batches with
+controlled NULL placements, runs both `eval(batch, row)` and `evalVec(batch)`,
+and asserts equality at every row for every subtype that overrides `evalVec`.
+When you add a new override, extend this suite first — it enforces NULL-handling
+parity, divide-by-zero parity, and per-type result-shape parity (after
+normalizing to the declared `dataType`). The property-based
+`ExprParityFuzzTest` (`src/test/scala/com/transformer/fuzz/`) generalizes it:
+it generates random type-correct `Expr` trees over random batches and asserts
+the same per-row agreement across many seeds (see
+[testing.md](testing.md#property-based-testing-fuzz)).
+
+That fuzzer is what surfaced the compositional FloatType case: `eval` narrows
+float arithmetic and `ABS` to Float at **each node** (`Ops.arith` /
+`Funcs.apply`) so it matches `evalVec`, which narrows on every `FloatVector`
+store. Without per-node narrowing a nested float intermediate like `(a*b)+c`
+stayed in double precision through `eval` and diverged by ~1 ULP from the
+vectorized path once it fed the enclosing `+`.
 
 ### 5b. Vectorized key extraction in pipeline breakers
 

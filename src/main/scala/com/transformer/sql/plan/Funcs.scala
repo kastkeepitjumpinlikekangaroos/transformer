@@ -90,6 +90,10 @@ object Funcs {
           case n: java.lang.Number => resultType match {
             case DataType.IntType => math.abs(n.intValue)
             case DataType.LongType => math.abs(n.longValue)
+            // Narrow on a Float result so eval matches VecFuncs.abs (which
+            // stores a narrowed Float); leaving it a Double would diverge once
+            // the value feeds an enclosing operation.
+            case DataType.FloatType => math.abs(n.doubleValue).toFloat
             case _ => math.abs(n.doubleValue)
           }
           case _ => null

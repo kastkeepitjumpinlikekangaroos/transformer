@@ -23,10 +23,12 @@ import java.util
   *   - N=64 rows so loops are large enough to exercise pattern dispatch but
   *     small enough to inspect on failure.
   *   - NULL placements: none, every-other, all.
-  *   - Result comparison normalizes to the declared `dataType` so e.g. a
-  *     `Double` returned by `eval` and a `Float` stored by `evalVec` (real
-  *     existing behaviour on FloatType arithmetic — `Ops.arith` widens to
-  *     Double, FloatVector narrows on store) both compare to the same Float.
+  *   - Result comparison normalizes to the declared `dataType` so cross-numeric
+  *     boxings compare equal — e.g. an `Integer` from `eval` against a value
+  *     declared `LongType`, or the `LocalDate` / epoch-day forms of a Date.
+  *     FloatType arithmetic narrows to Float in BOTH paths now (`Ops.arith`
+  *     narrows per node to match FloatVector's narrow-on-store), so those
+  *     already agree before normalization.
   */
 class ExprBatchTest {
 
@@ -102,11 +104,11 @@ class ExprBatchTest {
   // Parity assertion.
   //
   // `eval` returns the operand's declared boxed shape (e.g. java.lang.Long for
-  // LongType, java.lang.Double for arithmetic on FloatType — `Ops.arith`
-  // widens). `evalVec` returns a vector typed by `expr.dataType`, whose
-  // `getBoxed` returns the type matching that schema. Normalize both to
-  // `expr.dataType` before comparing so the parity check reflects the value a
-  // downstream batch would actually see.
+  // LongType, java.lang.Float for arithmetic on FloatType — `Ops.arith` narrows
+  // per node to match FloatVector). `evalVec` returns a vector typed by
+  // `expr.dataType`, whose `getBoxed` returns the type matching that schema.
+  // Normalize both to `expr.dataType` before comparing so the parity check
+  // reflects the value a downstream batch would actually see.
   // ---------------------------------------------------------------------------
 
   private def assertParity(expr: Expr, b: ColumnarBatch): Unit = {
@@ -482,6 +484,33 @@ class ExprBatchTest {
         ColRefExpr(1, "r", DataType.LongType),
         DataType.LongType),
       b)
+  }
+
+  /** Regression (found by `com.transformer.fuzz.ExprParityFuzzTest`): a
+    * FloatType arithmetic result feeding another FloatType node. `eval` must
+    * narrow the intermediate `(a * b)` to Float at THAT node — matching
+    * `evalVec`, which narrows on every `FloatVector` store. Keeping the
+    * intermediate in double precision (the old `Ops.arith` behaviour) diverged
+    * by ~1 ULP once it fed the outer `+`. Row 1 here (`0.1 * 1234.5 + 3.14159`)
+    * is a value triple that exposed the gap. Covers both narrowing sites:
+    * `Ops.arith` and `Funcs.apply`'s ABS. */
+  @Test def binOpNestedFloatArithNarrowsPerNode(): Unit = {
+    val av = Array(2.5f, 0.1f, 3.14159f, 1234.5f, 0.25f, 42.0f)
+    val bv = Array(3.14159f, 1234.5f, 0.1f, 42.0f, 100.0f, 2.5f)
+    val cv = Array(0.1f, 3.14159f, 42.0f, 0.25f, 2.5f, 1234.5f)
+    val b = batch(
+      "a" -> floatCol(i => av(i % av.length), EveryOther),
+      "b" -> floatCol(i => bv(i % bv.length)),
+      "c" -> floatCol(i => cv(i % cv.length), i => i % 5 == 0)
+    )
+    val a = ColRefExpr(0, "a", DataType.FloatType)
+    val bb = ColRefExpr(1, "b", DataType.FloatType)
+    val c = ColRefExpr(2, "c", DataType.FloatType)
+    val mul = BinOpExpr("*", a, bb, DataType.FloatType)
+    assertParity(BinOpExpr("+", mul, c, DataType.FloatType), b)
+    // ABS over the float intermediate is the other narrowing site.
+    assertParity(
+      BinOpExpr("-", FuncExpr("ABS", Seq(mul), DataType.FloatType), c, DataType.FloatType), b)
   }
 
   // ===========================================================================

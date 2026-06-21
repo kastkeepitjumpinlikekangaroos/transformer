@@ -244,6 +244,43 @@ eval into a reusable `Array[Any]` and call `encodeBoxed`. The codec exposes
 join-probe NULL short-circuiting. See
 [architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers).
 
+## Add a property / generator
+
+The property-based testing harness lives in `src/test/scala/com/transformer/fuzz/`
+(a `testonly` `scala_library` named `fuzz`). `Rng`, `Props`, `Shrinker`, and
+`RowOracle` are the reusable core; `ExprGen` + `oracle/ExprParity` are the first
+property (eval-vs-`evalVec` parity). See
+[testing.md](testing.md#property-based-testing-fuzz) for how it runs.
+
+**To add a new property** over an existing generator:
+
+1. Write a `*Test` class (so `suffixes = ["Test"]` discovers it) that depends on
+   `:fuzz`. Call `Props.forAll(name, gen, shrink)(prop)`. `gen: Rng => A` builds
+   the value, `shrink: A => Iterator[A]` yields strictly-smaller candidates
+   (compose `Shrinker.{int,long,string,list}` or write your own), and `prop`
+   throws on a counterexample (a plain `AssertionError` is fine — `Props`
+   catches it, minimizes, and prints the seed).
+2. Draw randomness only through `Rng` (`oneOf` / `weighted` / `between` / `bool`
+   / `split`). Determinism is the contract: same seed must reproduce exactly, so
+   never reach for wall-clock time or `Math.random` in a generator.
+
+**To teach `ExprGen` a new `Expr` node** (do this whenever you add one to the
+engine — the parity fuzzer then guards its `evalVec` override automatically):
+
+1. Add a producer to the matching target dispatch — `genBoolean`, `genNumeric`,
+   or `genString` (or a new branch in `genTyped` for a new result category).
+   A producer is a `() => Expr` thunk that builds the node to the requested
+   target `DataType` and recurses for children via the local `sub(t)`.
+2. Hold the two invariants `ExprGen` documents: **type-correct** (the node's
+   `dataType` must equal the requested target — `generate` asserts this) and
+   **total** (never generate inputs that throw — mirror the existing exclusions
+   for partial casts, NULL `ROUND`/`SUBSTRING` scale args, and float/double
+   `ordering` / `IN`). If your node genuinely composes a new partial shape,
+   extend `oracle/ExprParity` rather than letting the generator throw.
+3. Also add the deterministic case to
+   `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` — that suite is
+   the per-override gate; the fuzzer is the generative net over it.
+
 ## Add spill to an existing operator
 
 `SortExec`, `HashAggregateExec`, `DistinctExec`, and `HashJoinExec` are
