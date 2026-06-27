@@ -281,6 +281,38 @@ engine — the parity fuzzer then guards its `evalVec` override automatically):
    `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` — that suite is
    the per-override gate; the fuzzer is the generative net over it.
 
+**To add a SQL shape to `QueryGen`** (the mode-differential fuzzer's query
+generator): add it to the structured `GenQuery` (a new `AggSpec` for an
+aggregate, a new producer in `genValue` / `genPredicate` for a scalar shape, or a
+new clause field), render it in the matching `render` / `SqlRender` branch, and
+extend the `Shrinker.queryCase` moves so it still minimizes. Two invariants keep
+the reject rate near zero and the property sound:
+
+- **Total** — never generate SQL that throws at execution (mirror the existing
+  exclusions: numeric->numeric / anything->string casts only, non-null
+  `ROUND`/`SUBSTRING` scales). A query that binds must run, in every mode.
+- **Paren-free-safe** — the SQL frontend rejects grouping parentheses (it parses
+  `(x)` as a single-element `ParenthesedExpressionList` the binder does not
+  accept), so `SqlRender` emits none and relies on precedence. Only generate
+  trees that stay type-correct under a precedence-only reparse: arithmetic
+  operands numeric, `||` operands string, comparisons same-category (never a
+  boolean operand), and `NOT` only over a boolean leaf (the frontend binds `NOT`
+  tighter than comparison). Confirm with the `bindRejectRateIsLow` guard before
+  merging.
+
+Exclude anything non-deterministic (`RAND()`, the clock functions) or
+mode-unstable (`LIMIT` — top-`n` with ties returns a different row subset
+depending on merge order). If a new shape needs a comparison tolerance, add it to
+`RowOracle.multisetEquals` (today only `Double` columns are tolerant).
+
+**To add a mode to `ModeDifferential`**: add an entry to the `modes` sequence — a
+`(label, MaterializedView, ExecutionOptions)` triple. Layout modes come from
+`Dataset` (`singlePartition` / `evenPartitions` / `withEmptyPartitions`); option
+modes flip `ExecutionOptions` flags. Keep the count modest (each entry is one
+extra engine run per case) and remember the gate that is NOT a mode here:
+sharded-vs-collapsing aggregation is frozen at class load
+(`LogicalPlanCardinality.MinShardableSize`), so it cannot be toggled within a JVM.
+
 ## Add spill to an existing operator
 
 `SortExec`, `HashAggregateExec`, `DistinctExec`, and `HashJoinExec` are

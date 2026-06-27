@@ -39,11 +39,16 @@ object Props {
   def seedCount: Int = intConfig("fuzz.seeds", "FUZZ_SEEDS", DefaultSeeds)
   def baseSeed: Long = longConfig("fuzz.seed", "FUZZ_SEED", DefaultBaseSeed)
 
-  /** Run `prop` over `count` generated values. On the first failure, minimize
-    * and fail the enclosing JUnit test. */
-  def forAll[A](name: String, gen: Rng => A, shrink: A => Iterator[A])(prop: A => Unit): Unit = {
+  /** The configured `fuzz.seeds` budget if the user set one, else `default`.
+    * Lets a heavier property (e.g. one that runs the engine several times per
+    * case) keep a smaller default budget while still scaling under an explicit
+    * `-Dfuzz.seeds=N` campaign. */
+  def seedCountOr(default: Int): Int = intConfig("fuzz.seeds", "FUZZ_SEEDS", default)
+
+  /** Run `prop` over `count` generated values (default: the global [[seedCount]]).
+    * On the first failure, minimize and fail the enclosing JUnit test. */
+  def forAll[A](name: String, gen: Rng => A, shrink: A => Iterator[A], count: Int = seedCount)(prop: A => Unit): Unit = {
     val base = baseSeed
-    val count = seedCount
     var i = 0
     while (i < count) {
       val seed = base + i

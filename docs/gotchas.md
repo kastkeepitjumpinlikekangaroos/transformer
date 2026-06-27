@@ -264,6 +264,43 @@ ship a fix or move something from "not done" to "done".
   stays green; reconciling the two paths in `src/main` is a candidate follow-up.
   (Equality `= <>` agrees on these values and is covered.)
 
+- **Mode-differential comparison is a multiset with a `Double`-only tolerance.**
+  The `mode_differential_fuzz_test` asserts one `(data, query)` gives the same
+  result across spill on/off, metrics on/off, and partition/batch layouts. Two
+  comparison gotchas, both in `RowOracle.multisetEquals`:
+  - **Multiset, not positional.** The K-way merge in `SortExec` is not stable
+    (`sort_exec_test`) and the collapsing aggregate emits groups in a
+    layout-dependent order, so equality is over multisets, never row positions.
+    For an `ORDER BY` query the oracle additionally checks each run is *sorted*
+    (the multiset check alone would not catch an unsorted result).
+  - **Tolerance on `Double` columns only.** The order-dependent aggregates
+    (`SUM`/`AVG`/`STDDEV`/`VAR`/`COVAR`/`CORR`) accumulate in `double`, so a
+    different reduction order (a different layout or spill flush order) yields a
+    result that differs by rounding — those columns compare within a small
+    relative+absolute tolerance. Every other column (integer `SUM` in `Long`,
+    `COUNT`, `MIN`/`MAX`, `Float` reductions, projected/group-key values) is
+    bit-identical and compares exactly, so the tolerance can never mask a wrong
+    group or a dropped row. `COUNT(DISTINCT …)` silently disables spill (it is
+    not spillable), so the spill-on run takes the in-memory path — parity still
+    holds, and the fuzzer does not special-case it.
+
+- **The SQL frontend rejects grouping parentheses.** `SELECT (a + b) * c` and
+  `WHERE (x = y)` do not bind: this JSqlParser version parses `(expr)` as a
+  single-element `ParenthesedExpressionList`, and the binder only handles the
+  legacy `Parenthesis` node, so every grouping paren falls through to
+  "Unsupported expression". The engine's own queries avoid grouping parens and
+  rely on precedence; `QueryGen` renders paren-free for the same reason. `TRIM(x)`
+  is similarly unbindable (it parses to a `TrimFunction` node the binder does not
+  handle, though `UPPER`/`LOWER` bind fine). Reconciling these in the binder is a
+  candidate follow-up.
+
+- **`MIN`/`MAX` over a `BooleanType` column returns NULL under spill.**
+  `MinMaxState.updateAt` stores a boolean in the boxed `currentBoxed` slot (the
+  `other` branch), but `writeSelf`/`readSelf` route `BooleanType` through the
+  primitive `longCur` slot, so the value is lost on a spill round-trip (the
+  in-memory path is correct). Found by `mode_differential_fuzz_test`; `QueryGen`
+  excludes `MIN`/`MAX` over Boolean columns until the engine is fixed.
+
 ## What's intentionally NOT done
 
 - **Spill-to-disk** is implemented for `SortExec`, `HashAggregateExec`,

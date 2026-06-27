@@ -134,6 +134,7 @@ discovery rule).
 | `sql/exec/cte_materialization_test` | CTE materialization policy + the compute-once proof. **compute-once**: a counting `CatalogView` under a 3-reference CTE (`c x JOIN c y JOIN c z`) is read exactly once per partition (not 3×) and the result equals the inline self-join; **empty CTE referenced twice** still reads the source once; **dependent CTEs** (`b` reads `a`, both ≥ 2 refs) read the source once (`b` sees materialized `a`); **UNION arms sharing a CTE** read the source once; **determinism fence**: a `RAND()` body referenced twice agrees on every row (`x.r = y.r`), which inlining would not; **planner controls**: a single-ref CTE introduces no `MaterializedView` scan and never executes the body during resolve, a two-ref CTE introduces the shared MV scan; **COUNT(\*) fast-path**: `SELECT COUNT(*)` over a materialized CTE collapses to `CountStarMetadataExec` (MV `exactRowCount`, no scan) |
 | `sql/plan/expr_batch_test` | Parity gate for every `Expr.evalVec` override. Builds 64-row batches with no-null / every-other-null / all-null placements and asserts `eval(batch, row) == evalVec(batch).getBoxed(row)` (after normalizing to the declared `dataType`) for every row. Covers: `LitExpr` per primitive type + NULL literal; `ColRefExpr` per column type; `CastExpr` between representative numeric/string pairs; `UnaryOpExpr` (`+`, `-`, `NOT`); `BinOpExpr` AND/OR 3VL truth table, comparisons (`= == <> != < <= > >=`), arithmetic (`+ - * / %`) including divide-by-zero and both-sides-null, `\|\|` string concat with NULLs, cross-numeric Int-vs-Long comparison; `IsNullExpr` over mixed / no-null / all-null inputs and over a computed expression; `FuncExpr` for the entire `Funcs.applyVec` fast-path list (`COALESCE` 2-arg / literal fallback / all-null / string, `LENGTH`, `UPPER`/`LOWER`, `TRIM`, `CONCAT` null-propagating + 3-arg, `SUBSTRING` 2-arg + 3-arg, `ABS` int + double, `FLOOR`/`CEIL`/`CEILING`, `ROUND` 1-arg + 2-arg, `TRUNC` with null-scale propagation, `IF`, `NULLIF`) plus a `SQRT` case that exercises the unknown-function fallback; `CaseExpr` 2-branch + ELSE, no-ELSE NULL default, every-row-claimed short-circuit, NULL value in branch, column-expr value; `InListExpr` literal lists per type, NULL-in-items 3VL, cross-numeric literals (Int col against Long literals via the typed HashSet path), column items (general path); `LikeExpr` literal `%` suffix / `_` single-char / `%` in middle / NULL pattern → NULL / column pattern; one nested composite (`(a + b) > 0 AND NOT(c IS NULL)`) to verify overrides compose; **a nested-FloatType regression (`(a*b)+c` and `ABS(a*b)-c`) proving `eval` narrows float arithmetic per node, found by the parity fuzzer**. Any new `evalVec` override MUST extend this suite before merging |
 | `fuzz/expr_parity_fuzz_test` | Property-based generalization of `expr_batch_test`. Generates random type-correct `Expr` trees over random `ColumnarBatch`es (varied null masks incl. all-null / no-null, the 8192 capacity boundary + 1-row, capacity-pad tails) and asserts `eval` and `evalVec` agree per row — same normalized value, both NULL, or both throw the same exception class — via `oracle/ExprParity`. Also: shrinker minimizes to a single failing node, same-seed reproducibility, and the generator's own type invariant. Default run is a small fixed-seed batch (`Props.DefaultSeeds`); see [Property-based testing](#property-based-testing-fuzz) for long campaigns. Exercises the full `evalVec`-override surface + the `Funcs.applyVec` fast-path list |
+| `fuzz/mode_differential_fuzz_test` | Property-based generalization of the `*SpillTest` parity checks. Generates an in-memory dataset (`DataGen` — narrow value domains so GROUP BY / DISTINCT keys collide, tunable NULL density, 0-row / 1-row boundaries) and a single-table `SELECT` (`QueryGen` — projection / WHERE / GROUP BY / HAVING / aggregates incl. COUNT[DISTINCT] / DISTINCT / ORDER BY), then runs the SAME `(data, query)` under spill on/off, metrics on/off, and several partition/batch layouts (1 big batch, tiny batches, many partitions, empty partitions) and asserts the result MULTISETS match via `RowOracle.multisetEquals` (exact on every column except `Double`, which compares with a tolerance because order-dependent aggregates accumulate in `double`). ORDER BY queries additionally assert each run is sorted. Also: a bind-reject-rate guard, same-seed reproducibility, and hand-written regressions (GROUP BY / DISTINCT / ORDER BY-with-ties / empty-input global aggregate / COUNT(*) metadata fast path / float-aggregate tolerance) plus `multisetEquals` unit checks. Default budget is small (the engine runs ~7× per case); see [Property-based testing](#property-based-testing-fuzz) for campaigns |
 | `sql/plan/logical_plan_cardinality_test` | `LogicalPlanCardinality.estimate` for every plan node: scan / project / filter selectivity (per shape: `=` / range / `IS NULL` / `LIKE` / `NOT` inversion / default), AND multiplies / OR widens, limit caps both ways, distinct shrinks, aggregate without group keys collapses to 1, aggregate with group keys stays bounded by input, joins per kind (Inner=max / Left=left / Right=right / Full=sum) + None propagates when either side unknown, union sums and propagates unknown, sort / window pass through, `filterSelectivity` constants pinned to named `private[plan] val`s |
 | `sql/plan/filter_pushdown_test` | `FilterPushdown` over every join kind: inner pushes left-only / right-only conjuncts into the matching child and re-indexes right-side ColRefs; inner with cross-side or mixed conjuncts splits correctly; stacked Filter(Filter(Join)) flattens before pushing; LEFT outer pushes left-only conjuncts and refuses right-only (including the `r.x IS NULL` anti-join shape); RIGHT outer is symmetric; FULL outer never pushes; cascaded inner joins push all the way to the relevant leaf scan with the right per-side shifts; filter above an aggregate is not pushed across; idempotent when re-run |
 | `sql/plan/column_projection_pushdown_test` | Join pruning: parent + join-key columns survive on each side, columns referenced by neither are dropped; `SELECT *` leaves the join unchanged; self-join keeps colliding names on both sides (correctness over optimality); cross-side filter above a join still allows both sides to prune to the union of (parent + filter + join-key) refs; the plan-time `verify` rejects an out-of-range `ColRefExpr` with a targeted `IllegalStateException` |
@@ -161,47 +162,74 @@ no JUnit tests — they're thin UI over engine APIs. Smoke-test by launching
 `src/test/scala/com/transformer/fuzz/` holds a small hand-rolled property-based
 testing harness (no new dependency — PBT by hand is the point, same as the SQL
 engine). It is a `testonly` `scala_library` named `fuzz` plus the
-`expr_parity_fuzz_test` target. The pieces:
+`expr_parity_fuzz_test` and `mode_differential_fuzz_test` targets. The pieces:
 
 - `Rng` — seeded, splittable random source over `java.util.SplittableRandom`.
   The top-level seed is the repro key; iteration `i` uses seed `base + i`.
-- `Props.forAll` — the property runner. Loops a seed budget, generates a value,
-  runs the property, and on the first failure greedily **shrinks** to a minimal
-  counterexample before failing the JUnit test with the seed.
+- `Props.forAll` — the property runner. Loops a seed budget (overridable
+  per-property via the `count` argument / `Props.seedCountOr`), generates a
+  value, runs the property, and on the first failure greedily **shrinks** to a
+  minimal counterexample before failing the JUnit test with the seed.
 - `Shrinker` — integrated, strictly-decreasing shrink combinators plus the
   `Expr`-tree shrinker (collapse to a child, replace with a literal / NULL,
-  drop CASE branches / IN items / variadic args, recurse into children).
+  drop CASE branches / IN items / variadic args, recurse into children) and the
+  `QueryCase` shrinker (drop dataset rows, drop a trailing unreferenced column,
+  strip query clauses, drop a projection / aggregate / GROUP BY key, simplify a
+  contained expression).
 - `RowOracle` — the scalar `normalize` / `scalarEquals` lifted from
-  `ExprBatchTest` (NaN-aware so two NaNs count as agreement).
+  `ExprBatchTest` (NaN-aware so two NaNs count as agreement), plus
+  `multisetEquals` for whole-row, order-insensitive comparison with a tolerance
+  on `Double` columns only (see [gotchas.md](gotchas.md)).
 - `ExprGen` — generates a random `ColumnarBatch` + a typed `Expr`, **type-correct
   and total by construction** (asserts its own `dataType` invariant; excludes
   `RAND()` and the shapes where the engine's row and vector paths legitimately
   differ — float/double *ordering* comparisons and float/double `IN` lists,
   where `eval` orders via `Double.compare` / `Double.equals` and `evalVec` uses
   primitive IEEE ops, disagreeing only on `NaN` / `-0.0`).
-- `oracle/ExprParity.check` — the property: `eval` and `evalVec` agree on every
-  row (same normalized value, both NULL, or both throw the same exception class).
+- `oracle/ExprParity.check` — the eval-vs-`evalVec` property (same normalized
+  value, both NULL, or both throw the same exception class).
+- `DataGen` — generates an in-memory `Dataset` (narrow value domains so GROUP BY
+  / DISTINCT keys collide; tunable NULL density; 0-row / 1-row boundaries) plus
+  `reshape` / `singlePartition` / `evenPartitions` / `withEmptyPartitions` that
+  rebuild the same logical rows as a `MaterializedView` under a chosen
+  partition/batch layout.
+- `QueryGen` — generates a single-table `SELECT` (projection, WHERE, GROUP BY +
+  aggregates, HAVING, DISTINCT, ORDER BY) as a structured `GenQuery` rendered to
+  SQL by `SqlRender`. Total by construction (a query that binds also runs) and
+  **paren-free** — the SQL frontend rejects grouping parentheses, so expressions
+  rely on operator precedence (see [gotchas.md](gotchas.md)). Excludes `RAND()`,
+  the clock functions, and `LIMIT`.
+- `oracle/ModeDifferential.check` — the mode-differential property: one
+  `(data, query)` must produce the same result multiset under spill on/off,
+  metrics on/off, and every partition/batch layout (and stay sorted when the
+  query has ORDER BY).
 
-The default `bazel test //...` runs a **small fixed-seed batch** (`Props.DefaultSeeds`),
-so it is deterministic and fast. Run a longer campaign by raising the budget;
-`--test_env` (env-var path) reliably re-runs the action, whereas `--jvmopt` may
-hit the cached test result:
+The default `bazel test //...` runs each property over a **small fixed-seed
+batch**, so it is deterministic and fast (the `*_fuzz_test` targets; the
+mode-differential default is smaller still since it runs the engine ~7× per
+case). Run a longer campaign against the `fuzz`-tagged `*_fuzz_campaign` targets.
+Two flags matter: `--test_tag_filters=` clears the default `-perf,-fuzz` filter
+(otherwise the tagged campaign is excluded even when named explicitly), and the
+`--test_env` (env-var) budget reliably re-runs the action, whereas `--jvmopt`
+may hit the cached test result:
 
 ```bash
-bazel test //src/test/scala/com/transformer/fuzz:expr_parity_fuzz_test \
-    --test_env=FUZZ_SEEDS=200000 --nocache_test_results --test_timeout=1800
+bazel test //src/test/scala/com/transformer/fuzz:mode_differential_fuzz_campaign \
+    --test_tag_filters= --test_env=FUZZ_SEEDS=50000 \
+    --nocache_test_results --test_timeout=3600
 ```
 
 Both `fuzz.seeds` / `fuzz.seed` (system properties) and `FUZZ_SEEDS` / `FUZZ_SEED`
-(env vars) are read. A failure prints the exact seed; reproduce a single case
-with `FUZZ_SEED=<seed> FUZZ_SEEDS=1`. When the fuzzer finds a real divergence,
-distill it into a named regression in `ExprBatchTest` (the nested-FloatType case
-is the worked example) and keep the generator general so it stays guarded.
+(env vars) are read. A failure prints the exact seed and the minimized
+counterexample; reproduce a single case with `FUZZ_SEED=<seed> FUZZ_SEEDS=1`.
+When the fuzzer finds a real divergence, distill it into a named regression here
+(and, for an `eval`/`evalVec` gap, into `ExprBatchTest`; for an operator parity
+gap, into the matching `*SpillTest`) and keep the generator general so it stays
+guarded.
 
-There is no separately-tagged long-campaign target yet, so `.bazelrc` carries no
-`fuzz` tag filter — the default-budget `expr_parity_fuzz_test` is part of the
-normal `bazel test //...` run, and campaigns use the budget override above. Add
-a new generator / property by following the recipe in
+`.bazelrc` excludes the `fuzz` tag from the default run (`-perf,-fuzz`), so the
+small `*_fuzz_test` targets are part of `bazel test //...` while the campaigns
+are opt-in. Add a new generator / property by following the recipe in
 [extending.md](extending.md#add-a-property--generator).
 
 ## Performance regression guard

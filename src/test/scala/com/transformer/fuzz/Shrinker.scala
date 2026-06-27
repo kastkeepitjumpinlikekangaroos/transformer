@@ -1,6 +1,7 @@
 package com.transformer.fuzz
 
-import com.transformer.core.DataType
+import com.transformer.core.{DataType, Schema}
+import com.transformer.fuzz.QueryGen._
 import com.transformer.sql.plan._
 
 /** Hand-rolled, integrated-style shrinking: given a failing value, produce an
@@ -178,6 +179,164 @@ object Shrinker {
     case IsNullExpr(c, _) => Seq(c)
     case InListExpr(c, items, _) => c +: items
     case LikeExpr(c, p, _) => Seq(c, p)
+  }
+
+  // ---- QueryCase shrinker (mode-differential) -----------------------------
+
+  /** Strictly-smaller candidates for a `(dataset, query)` case. Every move
+    * shrinks a well-founded measure (row count, column count, clause count,
+    * projection/aggregate count, or expression node count / literal magnitude),
+    * so the greedy loop terminates. Any move that would produce an unbindable
+    * query is harmless: the oracle returns `Rejected` for it, which the property
+    * treats as a pass, so the shrinker never settles on it.
+    *
+    * Moves, in roughly most-reductive-first order: drop dataset rows; strip query
+    * clauses (DISTINCT / WHERE / HAVING / ORDER BY); drop a projection item,
+    * aggregate, or GROUP BY key; simplify a contained expression via [[expr]];
+    * drop a trailing column the query no longer references. The canonical minimal
+    * counterexample this converges to is a couple of rows, one column, and a
+    * single aggregate. */
+  def queryCase(qc: QueryCase): Iterator[QueryCase] = {
+    val ds = qc.dataset
+    val sameQuery = (rows: IndexedSeq[Array[Any]]) =>
+      QueryCase(DataGen.Dataset(ds.schema, rows), qc.query)
+    val sameData = (q: GenQuery) => QueryCase(ds, q)
+
+    val dropRows: Iterator[QueryCase] = shrinkRows(ds.rows).map(sameQuery)
+    val simplerQuery: Iterator[QueryCase] = shrinkQuery(qc.query).map(sameData)
+    val dropColumn: Iterator[QueryCase] = dropTrailingColumn(qc)
+
+    dropRows ++ simplerQuery ++ dropColumn
+  }
+
+  /** Drop rows: the second half, the first half, then single-row removals. The
+    * halves reach a small dataset in log steps; the single drops fine-tune. */
+  private def shrinkRows(rows: IndexedSeq[Array[Any]]): Iterator[IndexedSeq[Array[Any]]] = {
+    if (rows.isEmpty) return Iterator.empty
+    val half = rows.length / 2
+    val halves: Iterator[IndexedSeq[Array[Any]]] =
+      if (half > 0) Iterator(rows.take(half), rows.drop(half)) else Iterator.empty
+    val singles: Iterator[IndexedSeq[Array[Any]]] =
+      rows.indices.iterator.map(i => rows.patch(i, Nil, 1))
+    halves ++ singles
+  }
+
+  /** Drop the last column when the query no longer references it — no reindexing
+    * needed because every surviving `ColRefExpr` points below the dropped index. */
+  private def dropTrailingColumn(qc: QueryCase): Iterator[QueryCase] = {
+    val schema = qc.dataset.schema
+    val last = schema.length - 1
+    if (last < 1 || referencedColumns(qc.query).contains(last)) Iterator.empty
+    else {
+      val newSchema = Schema(schema.fields.dropRight(1))
+      val newRows = qc.dataset.rows.map(_.dropRight(1))
+      Iterator(QueryCase(DataGen.Dataset(newSchema, newRows), qc.query))
+    }
+  }
+
+  private def shrinkQuery(q: GenQuery): Iterator[GenQuery] = q match {
+    case p: ProjectQuery => shrinkProject(p)
+    case a: AggregateQuery => shrinkAggregate(a)
+  }
+
+  private def shrinkProject(p: ProjectQuery): Iterator[GenQuery] = {
+    val orderNames = p.orderBy.map(_._1.name).toSet
+    val dropDistinct = if (p.distinct) Iterator[GenQuery](p.copy(distinct = false)) else Iterator.empty
+    val dropWhere = if (p.where.isDefined) Iterator[GenQuery](p.copy(where = None)) else Iterator.empty
+    val dropOrder = if (p.orderBy.nonEmpty) Iterator[GenQuery](p.copy(orderBy = Vector.empty)) else Iterator.empty
+    // Drop a projection item that is not an order key (order keys must stay
+    // projected while ORDER BY references them).
+    val dropItem: Iterator[GenQuery] =
+      if (p.projection.length <= 1) Iterator.empty
+      else p.projection.indices.iterator.collect {
+        case i if !orderNames.contains(p.projection(i)._2) =>
+          p.copy(projection = p.projection.patch(i, Nil, 1))
+      }
+    val simplifyItem: Iterator[GenQuery] =
+      p.projection.indices.iterator.flatMap { i =>
+        val (e, name) = p.projection(i)
+        expr(e).map(se => p.copy(projection = p.projection.updated(i, (se, name))))
+      }
+    val simplifyWhere: Iterator[GenQuery] =
+      p.where.iterator.flatMap(w => expr(w).map(sw => p.copy(where = Some(sw))))
+
+    dropDistinct ++ dropWhere ++ dropOrder ++ dropItem ++ simplifyItem ++ simplifyWhere
+  }
+
+  private def shrinkAggregate(a: AggregateQuery): Iterator[GenQuery] = {
+    val orderIdx = a.orderBy.map(_._1.index).toSet
+    val havingIdx = a.having.toSet.flatMap((h: HavingSpec) => h.refs)
+    val pinned = orderIdx ++ havingIdx // group keys these clauses still reference
+
+    val dropWhere = if (a.where.isDefined) Iterator[GenQuery](a.copy(where = None)) else Iterator.empty
+    val dropHaving = if (a.having.isDefined) Iterator[GenQuery](a.copy(having = None)) else Iterator.empty
+    val dropOrder = if (a.orderBy.nonEmpty) Iterator[GenQuery](a.copy(orderBy = Vector.empty)) else Iterator.empty
+    val dropAgg: Iterator[GenQuery] =
+      if (a.aggregates.length <= 1) Iterator.empty
+      else a.aggregates.indices.iterator.map(i => a.copy(aggregates = a.aggregates.patch(i, Nil, 1)))
+    // Drop a GROUP BY key not pinned by ORDER BY / HAVING. Removing the last key
+    // turns the query into a (valid) global aggregate.
+    val dropKey: Iterator[GenQuery] =
+      a.groupKeys.indices.iterator.collect {
+        case i if !pinned.contains(a.groupKeys(i).index) =>
+          val keys = a.groupKeys.patch(i, Nil, 1)
+          a.copy(groupKeys = keys, groupByOrdinals = a.groupByOrdinals && keys.nonEmpty)
+      }
+    val simplifyArg: Iterator[GenQuery] =
+      a.aggregates.indices.iterator.flatMap { i =>
+        val (spec, name) = a.aggregates(i)
+        shrinkAggSpec(spec).map(s => a.copy(aggregates = a.aggregates.updated(i, (s, name))))
+      }
+    val simplifyWhere: Iterator[GenQuery] =
+      a.where.iterator.flatMap(w => expr(w).map(sw => a.copy(where = Some(sw))))
+
+    dropWhere ++ dropHaving ++ dropOrder ++ dropAgg ++ dropKey ++ simplifyArg ++ simplifyWhere
+  }
+
+  /** Simplify an aggregate's argument expression(s). Bare-column args yield
+    * nothing (a `ColRefExpr` does not shrink), so only computed args reduce. */
+  private def shrinkAggSpec(spec: AggSpec): Iterator[AggSpec] = spec match {
+    case CountStar => Iterator.empty
+    case Count(arg, d) => expr(arg).map(Count(_, d))
+    case Sum(arg) => expr(arg).map(Sum(_))
+    case Avg(arg) => expr(arg).map(Avg(_))
+    case Min(arg) => expr(arg).map(Min(_))
+    case Max(arg) => expr(arg).map(Max(_))
+    case CountIf(arg) => expr(arg).map(CountIf(_))
+    case Stat(fn, arg) => expr(arg).map(Stat(fn, _))
+    case Bivar(fn, x, y) => expr(x).map(Bivar(fn, _, y)) ++ expr(y).map(Bivar(fn, x, _))
+  }
+
+  /** Column indices the query references (so [[dropTrailingColumn]] never drops a
+    * live column). */
+  private def referencedColumns(q: GenQuery): Set[Int] = q match {
+    case p: ProjectQuery =>
+      p.projection.iterator.flatMap { case (e, _) => exprCols(e) }.toSet ++
+        p.where.iterator.flatMap(exprCols).toSet ++
+        p.orderBy.iterator.map(_._1.index).toSet
+    case a: AggregateQuery =>
+      a.groupKeys.iterator.map(_.index).toSet ++
+        a.aggregates.iterator.flatMap { case (s, _) => aggCols(s) }.toSet ++
+        a.where.iterator.flatMap(exprCols).toSet ++
+        a.having.iterator.flatMap(_.refs).toSet ++
+        a.orderBy.iterator.map(_._1.index).toSet
+  }
+
+  private def exprCols(e: Expr): Set[Int] = e match {
+    case ColRefExpr(i, _, _) => Set(i)
+    case _ => childrenOf(e).iterator.flatMap(exprCols).toSet
+  }
+
+  private def aggCols(spec: AggSpec): Set[Int] = spec match {
+    case CountStar => Set.empty
+    case Count(arg, _) => exprCols(arg)
+    case Sum(arg) => exprCols(arg)
+    case Avg(arg) => exprCols(arg)
+    case Min(arg) => exprCols(arg)
+    case Max(arg) => exprCols(arg)
+    case CountIf(arg) => exprCols(arg)
+    case Stat(_, arg) => exprCols(arg)
+    case Bivar(_, x, y) => exprCols(x) ++ exprCols(y)
   }
 
   /** Reassemble `e` from a new child list of the same length and shape as

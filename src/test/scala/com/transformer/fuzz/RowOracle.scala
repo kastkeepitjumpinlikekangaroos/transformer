@@ -1,6 +1,8 @@
 package com.transformer.fuzz
 
-import com.transformer.core.DataType
+import com.transformer.core.{DataType, Schema}
+
+import scala.collection.mutable
 
 /** Scalar normalization + comparison shared by the parity oracles.
   *
@@ -75,4 +77,167 @@ object RowOracle {
   /** Render a boxed value with its runtime class for failure messages. */
   def describe(v: Any): String =
     if (v == null) "null" else s"$v (${v.getClass.getName})"
+
+  // ---- whole-row multiset comparison (mode-differential oracle) -----------
+  //
+  // The mode-differential property (`oracle/ModeDifferential`) runs one fixed
+  // (data, query) under spill on/off, metrics on/off, and several partition /
+  // batch layouts, then asserts the result *multisets* match. Two reasons this
+  // is a multiset compare with a tolerance, unlike the EXACT per-row
+  // `scalarEquals` above:
+  //
+  //   - '''Multiset, not positional.''' The K-way merge in `SortExec` is not
+  //     stable (see `sort_exec_test`), and the collapsing aggregate emits
+  //     groups in an order that depends on partition fan-out, so two runs that
+  //     hold the same rows can emit them in different orders. Equality is
+  //     therefore over multisets.
+  //
+  //   - '''Tolerance on `Double` columns only.''' Of the columns a query can
+  //     produce, exactly the order-dependent aggregates land in a `Double`
+  //     result column: `SUM`/`AVG`/`STDDEV`/`VAR`/`COVAR`/`CORR` accumulate in
+  //     `double`, so a different summation order (different layout / spill flush
+  //     order) yields a result that differs by rounding. Every other column is
+  //     bit-identical across modes — integer `SUM` accumulates in `Long`,
+  //     `COUNT` is exact, `MIN`/`MAX` are order-independent reductions, `Float`
+  //     reductions stay `Float`, and projected/group-key values are copied
+  //     straight from the (identical) input. So `Double` columns compare with a
+  //     relative+absolute tolerance and all others compare exactly. The exact
+  //     columns carry the discriminating identity, so a tolerance on the
+  //     `Double` columns cannot mask a wrong group or a dropped row.
+
+  /** Relative tolerance for `Double`-column comparison. Sized for the rounding a
+    * different reduction order introduces on a well-conditioned `double` sum
+    * (parts-per-million is orders of magnitude above that yet far below any real
+    * divergence, which is order-of-magnitude, not ppm). The generator keeps
+    * aggregate inputs well-conditioned (narrow integral/decimal domains) so this
+    * stays comfortably slack; it is never widened to make a real failure pass. */
+  val DefaultRelTol: Double = 1e-6
+
+  /** Absolute tolerance floor, for `Double` results near zero where a relative
+    * tolerance vanishes. */
+  val DefaultAbsTol: Double = 1e-9
+
+  /** Sentinel standing in for SQL NULL inside an exact comparison key, so a NULL
+    * cell groups with other NULLs and never collides with a real value. */
+  private object NullKey { override def toString: String = "NULL" }
+
+  /** Tolerant `Double` equality used for the order-dependent aggregate columns.
+    * `NaN` agrees only with `NaN`; an infinity agrees only with the same-signed
+    * infinity; `+0.0`/`-0.0` agree; finite values agree within
+    * `absTol + relTol * max(|a|, |b|)`. */
+  def doublesWithinTolerance(a: Double, b: Double, relTol: Double, absTol: Double): Boolean = {
+    if (a == b) return true // exact, incl. same-signed Inf and +0.0 == -0.0
+    val aNaN = java.lang.Double.isNaN(a)
+    val bNaN = java.lang.Double.isNaN(b)
+    if (aNaN || bNaN) return aNaN && bNaN
+    if (a.isInfinite || b.isInfinite) return false // one Inf, other finite/opposite-Inf
+    math.abs(a - b) <= absTol + relTol * math.max(math.abs(a), math.abs(b))
+  }
+
+  /** Compare two result sets as multisets: `None` when equal, `Some(diff)` with a
+    * readable first-N-rows-each-way message when not. `Double` columns compare
+    * with tolerance, all others exactly — see the section comment above. Rows are
+    * `Array[Any]` aligned to `schema` field order (NULL as `null`). */
+  def multisetEquals(
+      schema: Schema,
+      baseline: Seq[Array[Any]],
+      other: Seq[Array[Any]],
+      relTol: Double = DefaultRelTol,
+      absTol: Double = DefaultAbsTol): Option[String] = {
+    if (baseline.length != other.length)
+      return Some(s"row count differs: baseline=${baseline.length}, mode=${other.length}")
+
+    val ncols = schema.length
+    val tolerant = Array.tabulate(ncols)(c => schema.fields(c).dataType == DataType.DoubleType)
+
+    // Identity of a row for grouping: its exact (non-Double) cells, normalized so
+    // Int-vs-Long / Float boxing differences never split a group, with NULL mapped
+    // to a sentinel.
+    def exactKey(row: Array[Any]): Vector[Any] = {
+      val b = Vector.newBuilder[Any]
+      var c = 0
+      while (c < ncols) {
+        if (!tolerant(c)) {
+          val v = row(c)
+          b += (if (v == null) NullKey else normalize(v, schema.fields(c).dataType))
+        }
+        c += 1
+      }
+      b.result()
+    }
+    // The Double cells that must match within tolerance once two rows share an
+    // exact key.
+    def tolTuple(row: Array[Any]): Array[Any] = {
+      val out = mutable.ArrayBuffer.empty[Any]
+      var c = 0
+      while (c < ncols) { if (tolerant(c)) out += row(c); c += 1 }
+      out.toArray
+    }
+    def tolTupleEquals(a: Array[Any], b: Array[Any]): Boolean = {
+      if (a.length != b.length) return false
+      var i = 0
+      while (i < a.length) {
+        val x = a(i); val y = b(i)
+        if (x == null || y == null) { if (x != null || y != null) return false }
+        else if (!doublesWithinTolerance(
+            x.asInstanceOf[Number].doubleValue, y.asInstanceOf[Number].doubleValue, relTol, absTol))
+          return false
+        i += 1
+      }
+      true
+    }
+
+    def group(rows: Seq[Array[Any]]): mutable.LinkedHashMap[Vector[Any], mutable.ArrayBuffer[Array[Any]]] = {
+      val m = mutable.LinkedHashMap.empty[Vector[Any], mutable.ArrayBuffer[Array[Any]]]
+      rows.foreach(r => m.getOrElseUpdate(exactKey(r), mutable.ArrayBuffer.empty) += r)
+      m
+    }
+    val ga = group(baseline)
+    val gb = group(other)
+
+    val onlyBaseline = mutable.ArrayBuffer.empty[Array[Any]]
+    val onlyOther = mutable.ArrayBuffer.empty[Array[Any]]
+
+    ga.foreach { case (k, rowsA) =>
+      gb.get(k) match {
+        case None => onlyBaseline ++= rowsA
+        case Some(rowsB) =>
+          // Same exact key: greedily match Double-tuples; tiny groups make greedy
+          // matching exact in practice (group size is 1 for unique group keys).
+          val used = new Array[Boolean](rowsB.length)
+          rowsA.foreach { ra =>
+            val ta = tolTuple(ra)
+            var matched = -1
+            var j = 0
+            while (j < rowsB.length && matched < 0) {
+              if (!used(j) && tolTupleEquals(ta, tolTuple(rowsB(j)))) matched = j
+              j += 1
+            }
+            if (matched >= 0) used(matched) = true else onlyBaseline += ra
+          }
+          var j = 0
+          while (j < rowsB.length) { if (!used(j)) onlyOther += rowsB(j); j += 1 }
+      }
+    }
+    gb.foreach { case (k, rowsB) => if (!ga.contains(k)) onlyOther ++= rowsB }
+
+    if (onlyBaseline.isEmpty && onlyOther.isEmpty) None
+    else Some(renderDiff(schema, onlyBaseline.toSeq, onlyOther.toSeq))
+  }
+
+  private def renderDiff(schema: Schema, onlyBaseline: Seq[Array[Any]], onlyOther: Seq[Array[Any]]): String = {
+    val show = 5
+    def block(label: String, rows: Seq[Array[Any]]): String = {
+      val head = rows.take(show).map(renderRow(schema, _)).mkString("\n    ", "\n    ", "")
+      val more = if (rows.length > show) s"\n    ... (${rows.length - show} more)" else ""
+      s"  $label (${rows.length}):$head$more"
+    }
+    s"""multiset mismatch:
+       |${block("in baseline, missing under this mode", onlyBaseline)}
+       |${block("under this mode, not in baseline", onlyOther)}""".stripMargin
+  }
+
+  private def renderRow(schema: Schema, row: Array[Any]): String =
+    schema.fieldNames.iterator.zip(row.iterator)
+      .map { case (n, v) => s"$n=${describe(v)}" }.mkString("{", ", ", "}")
 }

@@ -3,9 +3,13 @@ build --tool_java_runtime_version=remotejdk_21
 build --java_language_version=21
 build --tool_java_language_version=21
 
-# Sub-plan 4 of the instrumentation work added a perf-tagged regression test
-# under //src/test/scala/com/transformer/bench. It's opt-in via
-# `bazel test //... --test_tag_filters=perf` — the default invocation
-# excludes it because the machine-dependent baselines make the assertion
-# meaningless outside the developer machine that captured them.
-test --test_tag_filters=-perf
+# Two tag families are excluded from the default `bazel test //...`:
+#  - `perf`: the perf-tagged regression test under
+#    //src/test/scala/com/transformer/bench, opt-in via
+#    `bazel test //... --test_tag_filters=perf` — its machine-dependent
+#    baselines make the assertion meaningless off the machine that captured them.
+#  - `fuzz`: the long-campaign property-based targets under
+#    //src/test/scala/com/transformer/fuzz (the `*_fuzz_campaign` targets). The
+#    small default-budget `*_fuzz_test` targets stay in the normal run; the
+#    campaigns are run on demand with a large `FUZZ_SEEDS` budget.
+test --test_tag_filters=-perf,-fuzz
