@@ -310,8 +310,56 @@ depending on merge order). If a new shape needs a comparison tolerance, add it t
 `Dataset` (`singlePartition` / `evenPartitions` / `withEmptyPartitions`); option
 modes flip `ExecutionOptions` flags. Keep the count modest (each entry is one
 extra engine run per case) and remember the gate that is NOT a mode here:
-sharded-vs-collapsing aggregation is frozen at class load
-(`LogicalPlanCardinality.MinShardableSize`), so it cannot be toggled within a JVM.
+sharded-vs-collapsing aggregation and broadcast-vs-shuffle joins are frozen at
+class load (`LogicalPlanCardinality.{MinShardableSize, BroadcastBuildThreshold}`),
+so they cannot be toggled within a JVM — the `sharded_mode_fuzz_test` target
+exercises the sharded path instead, in a separate JVM via `jvm_flags` (see
+[testing.md](testing.md#property-based-testing-fuzz)).
+
+## Add a metamorphic relation
+
+The metamorphic fuzzers (`metamorphic_fuzz_test`, and its sharded re-run
+`sharded_mode_fuzz_test`) check multi-relation SQL against invariants decided by
+SQL semantics alone — no reference engine, so they catch SEMANTIC bugs every
+execution mode agrees on. `MetaQueryGen` is the generator;
+`oracle/{Tlp, NoRec, MetaModeDifferential}` are the three live relations. See
+[testing.md](testing.md#property-based-testing-fuzz).
+
+**To add a new metamorphic relation** (a new semantic invariant over a generated
+`MetaQuery`):
+
+1. Add an `oracle/*.scala` with `check(mc: MetaCase): RelEngine.Verdict`. Run the
+   query (or its variants) via `RelEngine.execute` / `collectRows`, compare with
+   `RowOracle.multisetEquals`, and return `Held` / `Skipped` / `Rejected`. Return
+   `Rejected(RelEngine.rejectReason(e))` for a bind/plan `IllegalArgumentException`
+   so it counts toward the bind-reject rate rather than reading as a finding;
+   throw `AssertionError` only on a genuine semantic violation (`Props` minimizes
+   it via `Shrinker.metaCase`).
+2. Add a `@Test` to `MetamorphicFuzzTest` — and, if the relation should also hold
+   under sharded planning, the same `@Test` to `ShardedModeFuzzTest` — calling
+   `Props.forAll(MetaQueryGen.generate, Shrinker.metaCase)`. Keep the default
+   budget small (each case runs the engine several times); the campaign scales it.
+
+**Three rules keep generated SQL sound and bindable** — hold them in any new
+relation or generator extension:
+
+- **Qualifier-in-name, scope-correct.** Every column reference carries its table
+  qualifier inside `ColRefExpr.name` (e.g. `"t0.c0"`), and the generator only
+  references columns in scope for the clause it builds (a join ON sees both
+  sides; a `UNION` arm sees only its own FROM). Stay paren-free — the SQL
+  frontend rejects grouping parentheses (see [gotchas.md](gotchas.md)).
+- **TLP partition keys must be type-reliable.** `QueryCore.tlpCandidates`
+  restricts the partition column to non-float output columns whose runtime type
+  survives a precedence-only reparse. A computed `Int`-labelled column can reparse
+  to `Double` (e.g. `-1.0 % c`); a `NaN` there falls into none of `p` / `NOT p` /
+  `p IS NULL`, breaking the reassembly through no fault of the engine. Float and
+  double keys are excluded for the same reason.
+- **TLP partitions the OUTPUT, not the input.** The base is a CTE wrapper,
+  `WITH [cte defs,] q AS (<body>) SELECT * FROM q [WHERE <partition>]`
+  (`MetaQuery.tlpBase`), so the relation holds for aggregates, windows, unions,
+  and joins with no aggregate-level decomposition (which is unsound for
+  non-distributive aggregates). Derived-table subqueries in FROM are unsupported
+  by the binder, so the CTE wrapper is how output-level partitioning is expressed.
 
 ## Add spill to an existing operator
 

@@ -152,6 +152,25 @@ ship a fix or move something from "not done" to "done".
   no side info) or restructure the predicate so the planner can extract
   one. There's deliberately no per-task escape hatch — the threshold is
   the contract.
+- **Grace-hash join spill crashes when the probe rows are join-derived.**
+  (Known `src/main` bug, surfaced by the metamorphic fuzzer, not yet fixed.)
+  With spill enabled (`options.spill = "true"` + a low `spill_threshold_bytes`),
+  a `HashJoinExec` whose input is itself a join NPEs reading a spilled bucket
+  back: the spilled partition's parquet `DataPage` comes back null and
+  `HashJoinExec.probeBucket` -> `ParquetPartitionIterator.loadNextGroup`
+  (in `ParquetReader.scala`) dereferences it. Two-way joins over base scans
+  spill fine — the bug needs join-DERIVED rows under spill. Minimal repro
+  (`spill_threshold_bytes = 1`):
+
+  ```
+  a(k,v) = {(1,1)},  b(k,v) = {(1,9)}
+  SELECT t2.v FROM a t0 JOIN b t1 ON t0.k = t1.k JOIN b t2 ON t1.k = t2.k
+  ```
+
+  Surfaced by the metamorphic mode-agreement oracle (`MetaModeDifferential`),
+  which gates around it by skipping the spill mode for any query containing a
+  join (`hasAnyJoin`); TLP and the non-spill modes still exercise join queries
+  fully. Fixing it is a separate change from the fuzz harness.
 - **`SELECT COUNT(*) FROM <view>` short-circuits to footer metadata** when
   the view's `CatalogView.exactRowCount` is defined (parquet + in-memory).
   The planner emits `CountStarMetadataExec` directly; no scan happens. The
@@ -227,6 +246,37 @@ ship a fix or move something from "not done" to "done".
   either gate on `isRunning` or spawn a background thread and marshal results
   back via `FxHelpers.onFx`.
 
+- **Sharded execution deadlocks at K>1: nested pipeline breakers block-await on
+  the shared `Scheduler.pool`.** (Known `src/main` bug, surfaced by the
+  metamorphic fuzzer, NOT yet fixed.) Sharding is off by default
+  (`MinShardableSize = Long.MaxValue`, `BroadcastBuildThreshold = 1M`), so the
+  collapsing paths the rest of the engine uses never reach this. But with sharding
+  forced on, every breaker (`ExchangeExec`, `HashJoinExec`, `DistinctExec`,
+  `HashAggregateExec`) blocks awaiting per-partition sub-tasks on the SAME bounded
+  pool, and sharded plans nest deeply (exchange over join over exchange over
+  distinct ...). Two failure modes compound:
+  - **Monitor across a pool-blocking call.** `ExchangeExec.ensureMaterialized` is
+    `synchronized` and holds the instance monitor across its pool-driven
+    `materialize()`. A worker blocked *entering* that monitor is invisible to the
+    pool's work-stealing and cannot be compensated for, so when several workers
+    fan `execute(s)` onto the same exchange, one holds the monitor + blocks on the
+    pool while the rest pile onto the monitor — starving the pool the holder needs
+    (observed: 14 workers blocked on two exchange monitors, 0% CPU).
+  - **Nested blocking on a bounded pool.** `Scheduler.submitAndAwaitAll` waits via
+    a plain `ForkJoinTask.get`, which parks the worker WITHOUT pool compensation;
+    deep sharded fan-out parks every worker awaiting sub-tasks that then have no
+    thread to run on. (Wrapping the wait in a `ForkJoinPool.ManagedBlocker` so the
+    pool compensates removes the worst of it, but at full shard count deep plans
+    still out-nest the compensation and starve — so even that is only a partial
+    mitigation.)
+  A real fix is architectural (a dedicated growable executor for breaker
+  materialization, or non-blocking breaker execution) and is out of scope for the
+  fuzz harness. Until then sharded execution at K>1 is unsafe; the sharded fuzzer
+  (`sharded_mode_fuzz_test`) pins `transformer.scheduler.shard_count=1`, which
+  keeps each breaker's per-shard fan-out to one task — exercising the sharded code
+  paths for correctness without the deep concurrent nesting that deadlocks. The
+  general rule the bug teaches: never hold a JVM monitor across a
+  `Scheduler.pool`-blocking call, and prefer managed blocking for nested waits.
 - **Per-thread allocation accounting is HotSpot-specific.** The
   instrumentation framework reads
   `com.sun.management.ThreadMXBean.getThreadAllocatedBytes` to surface
@@ -264,25 +314,64 @@ ship a fix or move something from "not done" to "done".
   stays green; reconciling the two paths in `src/main` is a candidate follow-up.
   (Equality `= <>` agrees on these values and is covered.)
 
-- **Mode-differential comparison is a multiset with a `Double`-only tolerance.**
-  The `mode_differential_fuzz_test` asserts one `(data, query)` gives the same
-  result across spill on/off, metrics on/off, and partition/batch layouts. Two
-  comparison gotchas, both in `RowOracle.multisetEquals`:
+- **Mode-differential comparison is a multiset with a floating-point tolerance.**
+  The `mode_differential_fuzz_test` (and the metamorphic `MetaModeDifferential`)
+  assert one `(data, query)` gives the same result across spill on/off, metrics
+  on/off, and partition/batch layouts. Two comparison gotchas, both in
+  `RowOracle.multisetEquals`:
   - **Multiset, not positional.** The K-way merge in `SortExec` is not stable
     (`sort_exec_test`) and the collapsing aggregate emits groups in a
     layout-dependent order, so equality is over multisets, never row positions.
     For an `ORDER BY` query the oracle additionally checks each run is *sorted*
     (the multiset check alone would not catch an unsorted result).
-  - **Tolerance on `Double` columns only.** The order-dependent aggregates
-    (`SUM`/`AVG`/`STDDEV`/`VAR`/`COVAR`/`CORR`) accumulate in `double`, so a
-    different reduction order (a different layout or spill flush order) yields a
-    result that differs by rounding — those columns compare within a small
-    relative+absolute tolerance. Every other column (integer `SUM` in `Long`,
-    `COUNT`, `MIN`/`MAX`, `Float` reductions, projected/group-key values) is
-    bit-identical and compares exactly, so the tolerance can never mask a wrong
-    group or a dropped row. `COUNT(DISTINCT …)` silently disables spill (it is
-    not spillable), so the spill-on run takes the in-memory path — parity still
-    holds, and the fuzzer does not special-case it.
+  - **Floating-point (`Double` and `Float`) columns use a `NaN`-aware tolerant
+    comparator; every other column compares exactly.** The order-dependent
+    aggregates (`SUM`/`AVG`/`STDDEV`/`VAR`/`COVAR`/`CORR`) accumulate in `double`,
+    so a different reduction order (a different layout or spill flush order)
+    yields a `Double` result that differs by rounding — those columns compare
+    within a small relative+absolute tolerance. `Float` columns do NOT reorder (a
+    `Float` reduction stays bit-identical across modes), but a *computed* `Float`
+    projection can produce `NaN` (a float divide-by-zero), and a boxed `NaN`
+    cannot be an exact grouping key — Scala's `==` on a boxed `NaN` is `false`, so
+    two identical `NaN` rows would fail to match themselves. So `Float` is routed
+    through the same comparator purely for `NaN`-awareness; the tolerance itself
+    is never exercised for it (a bit-identical `Float` still compares equal).
+    Treating `Float` as an exact key was a latent harness bug the metamorphic
+    fuzzer surfaced; `Float` now shares the `Double` path. Every
+    non-floating-point column (integer `SUM` in `Long`, `COUNT`, `MIN`/`MAX`,
+    projected/group-key values) is bit-identical and compares exactly, so the
+    tolerance can never mask a wrong group or a dropped row. `COUNT(DISTINCT …)`
+    silently disables spill (it is not spillable), so the spill-on run takes the
+    in-memory path — parity still holds, and the fuzzer does not special-case it.
+
+- **The metamorphic TLP oracle partitions the query OUTPUT, never decomposes an
+  aggregate.** `Tlp` checks `Q ≡ (Q WHERE p) ⊎ (Q WHERE NOT p) ⊎ (Q WHERE p IS
+  NULL)`. Pushing that partition into the *input* of an aggregate (the
+  "aggregate-TLP" form — split the input three ways, aggregate each, recombine)
+  is UNSOUND for non-distributive aggregates (`COUNT(DISTINCT)`, `AVG`, `STDDEV`,
+  and others do not recombine by union). So the oracle wraps the whole query and
+  partitions its OUTPUT — `WITH q AS (<body>) SELECT * FROM q WHERE <partition>`
+  (`MetaQuery.tlpBase`) — which is sound for every shape (aggregate, window,
+  union, join) because it splits a finished result multiset with no aggregate
+  algebra. Input-level and aggregate-decomposition TLP are deliberately NOT used.
+  The same wrap could be a derived-table subquery in FROM, but the binder rejects
+  those (see "No subqueries" below), so the CTE form is the only route. The
+  partition column is also restricted to type-reliable non-float output columns:
+  a computed `Int`-labelled column can reparse to `Double` (`-1.0 % c`) and a
+  `NaN` there falls into none of the three partitions, breaking the reassembly
+  through no engine fault.
+
+- **The sharding gates are frozen at class load, so testing the sharded path
+  needs a separate JVM.** `LogicalPlanCardinality.MinShardableSize`
+  (aggregate/distinct exchange) and `BroadcastBuildThreshold`
+  (broadcast-vs-shuffle join) are `val`s resolved once from system properties /
+  env vars at class load. A test cannot flip them mid-JVM to compare
+  collapsing-vs-sharded plans — the `val` is already bound, and a
+  `System.setProperty` in `@Before` runs too late. So the sharded path gets its
+  own target, `sharded_mode_fuzz_test`, with `jvm_flags` setting both to `1`; its
+  `shardingGateIsActive` test asserts the flags took effect. This is the same gate
+  `ModeDifferential` notes it cannot toggle as an in-JVM mode. See
+  [testing.md](testing.md#property-based-testing-fuzz).
 
 - **The SQL frontend rejects grouping parentheses.** `SELECT (a + b) * c` and
   `WHERE (x = y)` do not bind: this JSqlParser version parses `(expr)` as a

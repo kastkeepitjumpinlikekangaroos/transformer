@@ -67,6 +67,36 @@ scala_junit_test(
     ],
 )
 
+# The metamorphic gate re-run under SHARDED planning. The sharding gates
+# (LogicalPlanCardinality.{MinShardableSize, BroadcastBuildThreshold}) are vals
+# read at class load, so they need a separate JVM: jvm_flags set both to 1,
+# forcing every query onto the shuffle-join + sharded-aggregate paths the
+# default gate never exercises. Untagged, so it runs as part of
+# `bazel test //...`.
+scala_junit_test(
+    name = "sharded_mode_fuzz_test",
+    srcs = ["ShardedModeFuzzTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = [
+        "-Dtransformer.scheduler.shard_min_size=1",
+        "-Dtransformer.scheduler.broadcast_threshold=1",
+        # K=1 keeps each breaker's per-shard fan-out to a single task. Sharded
+        # execution at K>1 has a known nested-pool-blocking deadlock (deep plans
+        # park every Scheduler.pool worker awaiting sub-tasks — see
+        # docs/gotchas.md), so the fuzzer would hang at the default shard count.
+        # K=1 still exercises every sharded CODE path (exchange insertion,
+        # per-shard join / distinct / aggregate) for result correctness; the
+        # multi-shard routing itself is covered by exchange_exec_test.
+        "-Dtransformer.scheduler.shard_count=1",
+    ],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 # Long-campaign variants. Tagged `fuzz` so the default `bazel test //...`
 # (--test_tag_filters=-perf,-fuzz) skips them; run on demand with a large budget,
 # e.g.:
@@ -104,6 +134,31 @@ scala_junit_test(
     name = "metamorphic_fuzz_campaign",
     srcs = ["MetamorphicFuzzTest.scala"],
     suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "sharded_mode_fuzz_campaign",
+    srcs = ["ShardedModeFuzzTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = [
+        "-Dtransformer.scheduler.shard_min_size=1",
+        "-Dtransformer.scheduler.broadcast_threshold=1",
+        # K=1 keeps each breaker's per-shard fan-out to a single task. Sharded
+        # execution at K>1 has a known nested-pool-blocking deadlock (deep plans
+        # park every Scheduler.pool worker awaiting sub-tasks — see
+        # docs/gotchas.md), so the fuzzer would hang at the default shard count.
+        # K=1 still exercises every sharded CODE path (exchange insertion,
+        # per-shard join / distinct / aggregate) for result correctness; the
+        # multi-shard routing itself is covered by exchange_exec_test.
+        "-Dtransformer.scheduler.shard_count=1",
+    ],
     tags = ["fuzz"],
     deps = [
         ":fuzz",

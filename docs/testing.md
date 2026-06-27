@@ -135,6 +135,8 @@ discovery rule).
 | `sql/plan/expr_batch_test` | Parity gate for every `Expr.evalVec` override. Builds 64-row batches with no-null / every-other-null / all-null placements and asserts `eval(batch, row) == evalVec(batch).getBoxed(row)` (after normalizing to the declared `dataType`) for every row. Covers: `LitExpr` per primitive type + NULL literal; `ColRefExpr` per column type; `CastExpr` between representative numeric/string pairs; `UnaryOpExpr` (`+`, `-`, `NOT`); `BinOpExpr` AND/OR 3VL truth table, comparisons (`= == <> != < <= > >=`), arithmetic (`+ - * / %`) including divide-by-zero and both-sides-null, `\|\|` string concat with NULLs, cross-numeric Int-vs-Long comparison; `IsNullExpr` over mixed / no-null / all-null inputs and over a computed expression; `FuncExpr` for the entire `Funcs.applyVec` fast-path list (`COALESCE` 2-arg / literal fallback / all-null / string, `LENGTH`, `UPPER`/`LOWER`, `TRIM`, `CONCAT` null-propagating + 3-arg, `SUBSTRING` 2-arg + 3-arg, `ABS` int + double, `FLOOR`/`CEIL`/`CEILING`, `ROUND` 1-arg + 2-arg, `TRUNC` with null-scale propagation, `IF`, `NULLIF`) plus a `SQRT` case that exercises the unknown-function fallback; `CaseExpr` 2-branch + ELSE, no-ELSE NULL default, every-row-claimed short-circuit, NULL value in branch, column-expr value; `InListExpr` literal lists per type, NULL-in-items 3VL, cross-numeric literals (Int col against Long literals via the typed HashSet path), column items (general path); `LikeExpr` literal `%` suffix / `_` single-char / `%` in middle / NULL pattern → NULL / column pattern; one nested composite (`(a + b) > 0 AND NOT(c IS NULL)`) to verify overrides compose; **a nested-FloatType regression (`(a*b)+c` and `ABS(a*b)-c`) proving `eval` narrows float arithmetic per node, found by the parity fuzzer**. Any new `evalVec` override MUST extend this suite before merging |
 | `fuzz/expr_parity_fuzz_test` | Property-based generalization of `expr_batch_test`. Generates random type-correct `Expr` trees over random `ColumnarBatch`es (varied null masks incl. all-null / no-null, the 8192 capacity boundary + 1-row, capacity-pad tails) and asserts `eval` and `evalVec` agree per row — same normalized value, both NULL, or both throw the same exception class — via `oracle/ExprParity`. Also: shrinker minimizes to a single failing node, same-seed reproducibility, and the generator's own type invariant. Default run is a small fixed-seed batch (`Props.DefaultSeeds`); see [Property-based testing](#property-based-testing-fuzz) for long campaigns. Exercises the full `evalVec`-override surface + the `Funcs.applyVec` fast-path list |
 | `fuzz/mode_differential_fuzz_test` | Property-based generalization of the `*SpillTest` parity checks. Generates an in-memory dataset (`DataGen` — narrow value domains so GROUP BY / DISTINCT keys collide, tunable NULL density, 0-row / 1-row boundaries) and a single-table `SELECT` (`QueryGen` — projection / WHERE / GROUP BY / HAVING / aggregates incl. COUNT[DISTINCT] / DISTINCT / ORDER BY), then runs the SAME `(data, query)` under spill on/off, metrics on/off, and several partition/batch layouts (1 big batch, tiny batches, many partitions, empty partitions) and asserts the result MULTISETS match via `RowOracle.multisetEquals` (exact on every column except `Double`, which compares with a tolerance because order-dependent aggregates accumulate in `double`). ORDER BY queries additionally assert each run is sorted. Also: a bind-reject-rate guard, same-seed reproducibility, and hand-written regressions (GROUP BY / DISTINCT / ORDER BY-with-ties / empty-input global aggregate / COUNT(*) metadata fast path / float-aggregate tolerance) plus `multisetEquals` unit checks. Default budget is small (the engine runs ~7× per case); see [Property-based testing](#property-based-testing-fuzz) for campaigns |
+| `fuzz/metamorphic_fuzz_test` | Property-based **metamorphic** gate over multi-relation SQL — finds SEMANTIC bugs (wrong answers every execution mode agrees on, which mode-differential is blind to). `MetaQueryGen` builds a `RelEnv` of 2–3 base relations sharing one narrow join-key domain plus a scope-/type-correct, paren-free `MetaQuery` (left-deep joins of every kind incl. self-joins, WHERE, a projection or GROUP BY core, an optional `UNION`/`UNION ALL` arm, optional CTEs incl. referenced-twice, an optional window). Three relations, each decided by SQL semantics alone (no reference engine): **TLP** — `Q ≡ (Q WHERE p) ⊎ (Q WHERE NOT p) ⊎ (Q WHERE p IS NULL)` as multisets, partitioning `Q`'s OUTPUT via a CTE wrapper so it is sound for joins / aggregates / windows / unions / CTEs with no aggregate decomposition (partition key restricted to type-reliable non-float output columns); **NoREC** — `COUNT(*) WHERE p == SUM(CASE WHEN p THEN 1 ELSE 0 END)` over a single-relation predicate (empty-relation NULL→0 normalized); **multi-relation mode agreement** — the join extension of `mode_differential` (same result multiset across partition/batch layouts, metrics on/off, and spill), with spill gated OFF for join queries (the grace-hash join spill NPE — see [gotchas.md](gotchas.md)). Plus a bind-reject-rate guard (≈0 over 500 seeds), a shape-coverage guard (joins / unions / CTEs / windows / aggregates all reached), shrinker termination + reduction, same-seed reproducibility, and hand-written regressions (LEFT/FULL join null-extension, aggregate-output partition, `NOT IN` with NULL, `UNION`/`UNION ALL`, CTE-referenced-twice, window-column partition, self-join mode agreement). Default budget is small (each case runs the engine several times); campaign via `metamorphic_fuzz_campaign` |
+| `fuzz/sharded_mode_fuzz_test` | The metamorphic gate (TLP / NoREC / multi-relation mode agreement — same generators + oracles + shrinker as `metamorphic_fuzz_test`) re-run in a **separate JVM under sharded planning**. The sharding levers `LogicalPlanCardinality.{MinShardableSize, BroadcastBuildThreshold}` are `val`s frozen at class load, so this target sets both to `1` via `jvm_flags`, forcing every query onto the shuffle-join + sharded-aggregate/distinct paths the default gate never reaches. It also pins `shard_count=1`: sharded execution at K>1 has a known nested-pool-blocking deadlock (see [gotchas.md](gotchas.md)), so K=1 keeps each breaker's fan-out to one task while still driving the sharded code paths for correctness (multi-shard routing is covered by `exchange_exec_test`). `shardingGateIsActive` asserts the flags actually arrived (else the target would silently re-run the default gate). Scope is narrow — do the metamorphic relations still hold under sharding? — so bind-reject / coverage are NOT duplicated here. Campaign via `sharded_mode_fuzz_campaign` (same `jvm_flags`) |
 | `sql/plan/logical_plan_cardinality_test` | `LogicalPlanCardinality.estimate` for every plan node: scan / project / filter selectivity (per shape: `=` / range / `IS NULL` / `LIKE` / `NOT` inversion / default), AND multiplies / OR widens, limit caps both ways, distinct shrinks, aggregate without group keys collapses to 1, aggregate with group keys stays bounded by input, joins per kind (Inner=max / Left=left / Right=right / Full=sum) + None propagates when either side unknown, union sums and propagates unknown, sort / window pass through, `filterSelectivity` constants pinned to named `private[plan] val`s |
 | `sql/plan/filter_pushdown_test` | `FilterPushdown` over every join kind: inner pushes left-only / right-only conjuncts into the matching child and re-indexes right-side ColRefs; inner with cross-side or mixed conjuncts splits correctly; stacked Filter(Filter(Join)) flattens before pushing; LEFT outer pushes left-only conjuncts and refuses right-only (including the `r.x IS NULL` anti-join shape); RIGHT outer is symmetric; FULL outer never pushes; cascaded inner joins push all the way to the relevant leaf scan with the right per-side shifts; filter above an aggregate is not pushed across; idempotent when re-run |
 | `sql/plan/column_projection_pushdown_test` | Join pruning: parent + join-key columns survive on each side, columns referenced by neither are dropped; `SELECT *` leaves the join unchanged; self-join keeps colliding names on both sides (correctness over optimality); cross-side filter above a join still allows both sides to prune to the union of (parent + filter + join-key) refs; the plan-time `verify` rejects an out-of-range `ColRefExpr` with a targeted `IllegalStateException` |
@@ -162,7 +164,8 @@ no JUnit tests — they're thin UI over engine APIs. Smoke-test by launching
 `src/test/scala/com/transformer/fuzz/` holds a small hand-rolled property-based
 testing harness (no new dependency — PBT by hand is the point, same as the SQL
 engine). It is a `testonly` `scala_library` named `fuzz` plus the
-`expr_parity_fuzz_test` and `mode_differential_fuzz_test` targets. The pieces:
+`expr_parity_fuzz_test`, `mode_differential_fuzz_test`, `metamorphic_fuzz_test`,
+and `sharded_mode_fuzz_test` targets. The pieces:
 
 - `Rng` — seeded, splittable random source over `java.util.SplittableRandom`.
   The top-level seed is the repro key; iteration `i` uses seed `base + i`.
@@ -203,6 +206,38 @@ engine). It is a `testonly` `scala_library` named `fuzz` plus the
   `(data, query)` must produce the same result multiset under spill on/off,
   metrics on/off, and every partition/batch layout (and stay sorted when the
   query has ORDER BY).
+- `MetaQueryGen` — the multi-relation generator (the metamorphic fuzzers' query
+  source). A `RelEnv` of 2–3 base relations sharing one narrow join-key
+  type/domain, plus a `MetaQuery` AST: a left-deep `FromClause` (joins of every
+  kind incl. self-joins), a WHERE, a `QueryCore` that is a `ProjectCore` or an
+  `AggCore`, an optional `setOp` `UNION`/`UNION ALL` arm, optional `ctes` (incl.
+  the referenced-twice/materialized shape), and optional window items. Emits
+  scope-/type-correct, paren-free, total SQL (the table qualifier rides in
+  `ColRefExpr.name`; reuses `QueryGen.AggSpec` + `SqlRender`). Also `NoRecCase`
+  (a single relation + a predicate). Derived-table subqueries in FROM are
+  unsupported by the binder, so the generator never emits them — the TLP CTE
+  wrapper supplies output-level partitioning without them.
+- `oracle/RelEngine` — shared engine-run helpers for the metamorphic oracles
+  (run a SQL string against a catalog, collect rows, scalar reads) plus the
+  `Verdict` ADT (`Held` / `Skipped` / `Rejected`). A bind/plan rejection of the
+  generator's own SQL is counted toward the bind-reject rate, never a finding.
+- `oracle/Tlp.check` — output-level TLP: `WITH [cte defs,] q AS (<body>) SELECT *
+  FROM q [WHERE <partition>]`, run for all four partition variants
+  (`p` / `NOT p` / `p IS NULL` / none) on ONE fixed single-partition layout, then
+  asserting the three partition multisets reassemble the unpartitioned whole.
+  Partitioning the OUTPUT keeps it sound for joins / aggregates / windows /
+  unions / CTEs with no aggregate decomposition; the partition key is restricted
+  to type-reliable non-float output columns. See
+  [extending.md](extending.md#add-a-metamorphic-relation).
+- `oracle/NoRec.check` — `COUNT(*) WHERE p == SUM(CASE WHEN p THEN 1 ELSE 0 END)`
+  over a single relation, normalizing the empty-relation `SUM` NULL to 0.
+- `oracle/MetaModeDifferential.check` — the multi-relation extension of
+  `ModeDifferential` (the join paths: exchange insertion, build-side swap). Same
+  result multiset across partition/batch layouts, metrics on/off, and spill;
+  comparison tolerates `Double` columns only. Only multiset-stable shapes are
+  checked (a window whose ORDER BY has ties is layout-dependent and left to `Tlp`
+  on a fixed layout). Spill is skipped for join queries (the grace-hash join
+  spill NPE — see [gotchas.md](gotchas.md)).
 
 The default `bazel test //...` runs each property over a **small fixed-seed
 batch**, so it is deterministic and fast (the `*_fuzz_test` targets; the
@@ -228,9 +263,20 @@ gap, into the matching `*SpillTest`) and keep the generator general so it stays
 guarded.
 
 `.bazelrc` excludes the `fuzz` tag from the default run (`-perf,-fuzz`), so the
-small `*_fuzz_test` targets are part of `bazel test //...` while the campaigns
-are opt-in. Add a new generator / property by following the recipe in
-[extending.md](extending.md#add-a-property--generator).
+small `*_fuzz_test` targets (now including `metamorphic_fuzz_test` and
+`sharded_mode_fuzz_test`) are part of `bazel test //...` while the campaigns are
+opt-in. `sharded_mode_fuzz_test` / `sharded_mode_fuzz_campaign` additionally
+carry `jvm_flags` that set
+`transformer.scheduler.{shard_min_size,broadcast_threshold}=1`: those gates are
+`val`s read at class load, so forcing the sharded shuffle-join +
+sharded-aggregate/distinct paths needs a separate JVM, not an in-test toggle (see
+[gotchas.md](gotchas.md)). They also set `shard_count=1` — sharded execution at
+K>1 has a known nested-pool-blocking deadlock, so K=1 drives the sharded code
+paths for correctness without the deep concurrent fan-out that hangs. Its
+`shardingGateIsActive` test asserts the gate flags arrived. Add a new generator /
+property by following the recipe in
+[extending.md](extending.md#add-a-property--generator), or a new metamorphic
+relation via [extending.md](extending.md#add-a-metamorphic-relation).
 
 ## Performance regression guard
 

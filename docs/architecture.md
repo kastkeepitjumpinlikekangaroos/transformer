@@ -249,10 +249,18 @@ Materialization is lazy and one-shot: the first `execute(s)` call on any
 shard triggers the full build (all child partitions read in parallel
 through `Scheduler.submitAndAwaitAll`, every row routed and scattered into
 K size-exact output batches), guarded by `@volatile` double-checked
-locking. Subsequent `execute(s)` calls — including concurrent reads of
-different shards from different worker threads — share the materialized
-result. The memory cost is roughly what `HashAggregate.partialAggregate`
-already paid; no new spill semantics are introduced.
+locking. Subsequent `execute(s)` calls — including concurrent
+reads of different shards from different worker threads — share the
+materialized result. The memory cost is roughly what
+`HashAggregate.partialAggregate` already paid; no new spill semantics are
+introduced.
+
+Caveat: sharded execution has a known, unfixed deadlock at K>1 — pipeline
+breakers stacked over exchanges block-await per-partition sub-tasks on the
+shared `Scheduler.pool`, and deep plans park every worker (the
+`synchronized` materialize above is one ingredient). Sharding is off by
+default, so the collapsing paths never hit it; the sharded fuzz target pins
+`shard_count=1`. See [gotchas.md](gotchas.md).
 
 ### 2c. Spill-to-disk for breakers (opt-in)
 
@@ -1059,3 +1067,37 @@ Union pruning requires identical column sets and remaps on both arms;
 window's output is `child ++ syntheticWinN`, so pruning the child shifts
 the synthetic column positions. Both are viable extensions deferred to a
 future pass (see the optional Phase 5 in `plans/perf/07-push-through-joins.md`).
+
+## Property-based testing
+
+Alongside the example-based unit tests, `src/test/scala/com/transformer/fuzz/`
+holds a hand-rolled property-based harness (no new dependency — PBT by hand, like
+the engine itself). Each property generates random-but-valid inputs, checks an
+invariant over many seeds, and shrinks any counterexample to a minimal repro.
+Four oracle families, in increasing semantic reach:
+
+- **Expression parity** (`oracle/ExprParity`) — a generated type-correct `Expr`
+  over a random `ColumnarBatch` must evaluate identically through the scalar
+  `eval` and the vectorized `evalVec` paths. Guards every `evalVec` override.
+- **Mode-differential** (`oracle/ModeDifferential`, and its multi-relation
+  extension `oracle/MetaModeDifferential`) — one `(data, query)` must produce the
+  same result multiset under spill on/off, metrics on/off, and every
+  partition/batch layout. The metamorphic variant covers joins; a separate
+  sharded JVM (`ShardedModeFuzzTest`, `jvm_flags` force the sharding gates) re-runs
+  it on the shuffle-join + sharded-aggregate paths. Differential by nature: it
+  catches disagreements between execution modes but is blind to a wrong answer
+  they all share.
+- **TLP** (`oracle/Tlp`, ternary logic partitioning) — a query's output, split by
+  a predicate into the `p` / `NOT p` / `p IS NULL` partitions, must reassemble (as
+  a multiset) into the unpartitioned output. Decided by SQL semantics alone, so it
+  catches wrong answers every execution mode agrees on. Partitioning the OUTPUT
+  via a CTE wrapper keeps it sound for aggregates, windows, unions, and joins.
+- **NoREC** (`oracle/NoRec`, non-optimizing reference engine construction) —
+  `COUNT(*) WHERE p` must equal `SUM(CASE WHEN p THEN 1 ELSE 0 END)`: the same
+  predicate as a filter vs. as a projection.
+
+The default `bazel test //...` runs each over a small fixed-seed batch; the
+`*_fuzz_campaign` targets scale to long runs. Full mechanics, the generators, and
+recipes for adding a property or a metamorphic relation are in
+[testing.md](testing.md#property-based-testing-fuzz) and
+[extending.md](extending.md#add-a-metamorphic-relation).
