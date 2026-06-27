@@ -40,34 +40,29 @@ import com.transformer.fuzz.RowOracle
   */
 object Tlp {
 
-  /** The CTE name the base query is wrapped under. Relations are named `r0..`, so
-    * this never collides with a generated relation. */
-  private val Q = "q"
-
   def check(mc: MetaCase): RelEngine.Verdict = mc.tlp match {
     case None => RelEngine.Skipped // no non-float output column to partition on
     case Some(pred) =>
-      val body = mc.query.renderBody
-      val cte = s"WITH $Q AS ($body) SELECT * FROM $Q"
+      val base = mc.query.tlpBase // WITH [cte defs,] q AS (...) SELECT * FROM q
       val catalog = mc.env.catalog() // one fixed single-partition layout for all four
 
       // The CTE base doubles as the bind/plan probe: a rejection here is the
       // generator's own un-bindable SQL, not a finding.
       val baseQ =
-        try RelEngine.execute(catalog, cte, ExecutionOptions.Default)
+        try RelEngine.execute(catalog, base, ExecutionOptions.Default)
         catch { case e: IllegalArgumentException => return RelEngine.Rejected(RelEngine.rejectReason(e)) }
 
       val schema = baseQ.schema
       val baseRows = RelEngine.collectRows(baseQ)
       val partRows =
-        RelEngine.runRows(catalog, s"$cte WHERE ${pred.truePred}", ExecutionOptions.Default) ++
-        RelEngine.runRows(catalog, s"$cte WHERE ${pred.falsePred}", ExecutionOptions.Default) ++
-        RelEngine.runRows(catalog, s"$cte WHERE ${pred.nullPred}", ExecutionOptions.Default)
+        RelEngine.runRows(catalog, s"$base WHERE ${pred.truePred}", ExecutionOptions.Default) ++
+        RelEngine.runRows(catalog, s"$base WHERE ${pred.falsePred}", ExecutionOptions.Default) ++
+        RelEngine.runRows(catalog, s"$base WHERE ${pred.nullPred}", ExecutionOptions.Default)
 
       RowOracle.multisetEquals(schema, baseRows, partRows).foreach { diff =>
         throw new AssertionError(
           s"[TLP] base != (p ⊎ NOT p ⊎ p IS NULL).\n" +
-            s"  base      = $cte\n" +
+            s"  base      = $base\n" +
             s"  partition = ${describe(pred)}\n$diff")
       }
       RelEngine.Held

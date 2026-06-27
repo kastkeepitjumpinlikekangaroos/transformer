@@ -47,6 +47,23 @@ object MetaQueryGen {
     * so cross-relation joins collide). */
   final case class Relation(name: String, dataset: DataGen.Dataset, keyCols: Vector[Int]) {
     def schema: Schema = dataset.schema
+    def asSource: FromSource = FromSource(name, schema.fields.toVector, keyCols)
+  }
+
+  /** Something a FROM clause can scan by name: a base relation or a CTE. Carries
+    * its column fields and the indices eligible as equi-join keys (key-typed
+    * columns), so the generator can build matching equi-joins regardless of
+    * whether the leaf is a table or a CTE. */
+  final case class FromSource(name: String, fields: Vector[Field], keyCols: Vector[Int])
+
+  /** A `WITH` common table expression: a name and a body query over the base
+    * relations. Referenced from the outer FROM by name (a CTE referenced twice is
+    * materialized once by the engine; referenced once it is inlined). `keyCols`
+    * are the body's key-typed output columns, so a CTE is joinable like a table. */
+  final case class CteDef(name: String, body: MetaQuery, keyCols: Vector[Int]) {
+    def fields: Vector[Field] = body.outputSchema.map { case (n, t) => Field(n, t) }
+    def asSource: FromSource = FromSource(name, fields, keyCols)
+    def render: String = s"$name AS (${body.renderBody})"
   }
 
   /** A handful of relations sharing a join-key type + domain. Registered into a
@@ -117,31 +134,49 @@ object MetaQueryGen {
 
   // ---- the query core (projection vs aggregation) ------------------------
 
+  /** One window-function SELECT item, rendered straight to SQL (the engine has no
+    * window `Expr` node — windows live at the logical-plan level). `dataType` is
+    * the function's reliable output type (`ROW_NUMBER`/`RANK`/`DENSE_RANK` -> Long,
+    * `LAG`/`LEAD` -> the argument's type, aggregate windows per the aggregate). */
+  final case class WinItem(sql: String, name: String, dataType: DataType)
+
   sealed trait QueryCore {
     /** Output column names + types — the schema of the query body, which the
       * mode-agreement oracle compares over. */
     def outputSchema: Vector[(String, DataType)]
     /** Output columns whose declared type is RELIABLE and non-float — the only
       * columns TLP may partition on. A bare column reference / group key / aggregate
-      * output binds to its declared type exactly; a computed expression does not,
-      * because its paren-free SQL can reparse to a wider type (e.g. an `Int`-labelled
-      * `-1.0 % c` reparses to `Double`, whose `NaN` would fall into none of TLP's
-      * three partitions). Restricting to reliable non-float columns keeps a TLP
-      * comparison UNKNOWN exactly when an operand is NULL. */
+      * / window output binds to its declared type exactly; a computed expression
+      * does not, because its paren-free SQL can reparse to a wider type (e.g. an
+      * `Int`-labelled `-1.0 % c` reparses to `Double`, whose `NaN` would fall into
+      * none of TLP's three partitions). Restricting to reliable non-float columns
+      * keeps a TLP comparison UNKNOWN exactly when an operand is NULL. */
     def tlpCandidates: Vector[(String, DataType)]
+    /** Whether this core projects a window function. A window output multiset is
+      * layout-dependent (a tie on the ORDER BY breaks differently across partition
+      * fan-out), so such a query is checked by TLP on a fixed layout only, never by
+      * the mode-agreement oracle. */
+    def hasWindow: Boolean
     def renderSelect: String
     def groupSql: String
     def havingSql: String
   }
 
-  /** `SELECT [DISTINCT] <items>`. */
-  final case class ProjectCore(items: Vector[(Expr, String)], distinct: Boolean) extends QueryCore {
-    def outputSchema: Vector[(String, DataType)] = items.map { case (e, n) => (n, e.dataType) }
-    def tlpCandidates: Vector[(String, DataType)] = items.collect {
-      case (c: ColRefExpr, n) if isPartitionable(c.dataType) => (n, c.dataType)
-    }
+  /** `SELECT [DISTINCT] <items>, <window items>`. */
+  final case class ProjectCore(
+      items: Vector[(Expr, String)],
+      distinct: Boolean,
+      windows: Vector[WinItem] = Vector.empty) extends QueryCore {
+    def outputSchema: Vector[(String, DataType)] =
+      items.map { case (e, n) => (n, e.dataType) } ++ windows.map(w => (w.name, w.dataType))
+    def tlpCandidates: Vector[(String, DataType)] =
+      items.collect { case (c: ColRefExpr, n) if isPartitionable(c.dataType) => (n, c.dataType) } ++
+        windows.collect { case w if isPartitionable(w.dataType) => (w.name, w.dataType) }
+    def hasWindow: Boolean = windows.nonEmpty
     def renderSelect: String = {
-      val sel = items.iterator.map { case (e, n) => s"${SqlRender.expr(e)} AS $n" }.mkString(", ")
+      val itemSql = items.iterator.map { case (e, n) => s"${SqlRender.expr(e)} AS $n" }
+      val winSql = windows.iterator.map(w => s"${w.sql} AS ${w.name}")
+      val sel = (itemSql ++ winSql).mkString(", ")
       if (distinct) s"DISTINCT $sel" else sel
     }
     def groupSql: String = ""
@@ -159,6 +194,7 @@ object MetaQueryGen {
     def tlpCandidates: Vector[(String, DataType)] =
       groupKeys.collect { case (c: ColRefExpr, n) if isPartitionable(c.dataType) => (n, c.dataType) } ++
         aggs.collect { case (a, n) if isPartitionable(aggType(a)) => (n, aggType(a)) }
+    def hasWindow: Boolean = false
     def renderSelect: String = {
       val g = groupKeys.map { case (e, n) => s"${SqlRender.expr(e)} AS $n" }
       val a = aggs.map { case (spec, n) => s"${spec.render} AS $n" }
@@ -223,37 +259,59 @@ object MetaQueryGen {
 
   /** The query body (the text that becomes a CTE body / the base query).
     *
-    * `setOp` carries an optional `UNION` / `UNION ALL` right arm — a second
-    * [[MetaQuery]] over the same relation environment producing a schema-compatible
-    * output (the binder takes the union's column names + types from the LEFT arm,
-    * so [[outputSchema]] / [[tlpCandidates]] are this arm's). */
+    * `ctes` are the leading `WITH` definitions (empty for a plain query); `setOp`
+    * carries an optional `UNION` / `UNION ALL` right arm — a second [[MetaQuery]]
+    * over the same sources producing a schema-compatible output (the binder takes
+    * the union's column names + types from the LEFT arm, so [[outputSchema]] /
+    * [[tlpCandidates]] are this arm's). */
   final case class MetaQuery(
       from: FromClause,
       where: Option[Expr],
       core: QueryCore,
-      setOp: Option[(MetaQuery, Boolean)] = None) {
+      setOp: Option[(MetaQuery, Boolean)] = None,
+      ctes: Vector[CteDef] = Vector.empty) {
     def outputSchema: Vector[(String, DataType)] = core.outputSchema
     def tlpCandidates: Vector[(String, DataType)] = core.tlpCandidates
     def whereSql: String = where.map(w => s" WHERE ${SqlRender.expr(w)}").getOrElse("")
 
-    private def armSql: String =
-      s"SELECT ${core.renderSelect} FROM ${from.render}$whereSql${core.groupSql}${core.havingSql}"
-    def renderBody: String = setOp match {
-      case None => armSql
-      case Some((rhs, all)) => s"$armSql UNION ${if (all) "ALL " else ""}${rhs.renderBody}"
+    /** The `WITH` definitions without the `WITH` keyword (empty when no CTEs). */
+    def cteClause: String = if (ctes.isEmpty) "" else ctes.map(_.render).mkString(", ")
+
+    /** The `SELECT ... [UNION ...]` part, excluding any leading `WITH`. */
+    def mainSelectSql: String = {
+      val armSql = s"SELECT ${core.renderSelect} FROM ${from.render}$whereSql${core.groupSql}${core.havingSql}"
+      setOp match {
+        case None => armSql
+        case Some((rhs, all)) => s"$armSql UNION ${if (all) "ALL " else ""}${rhs.mainSelectSql}"
+      }
+    }
+
+    def renderBody: String = if (ctes.isEmpty) mainSelectSql else s"WITH $cteClause $mainSelectSql"
+
+    /** The TLP base: the query's output wrapped in a CTE `q` so a partition
+      * predicate can filter it. Any existing `WITH` definitions are HOISTED to sit
+      * beside `q` (rather than nesting a `WITH` inside `q`'s body), which the
+      * binder resolves identically. Append ` WHERE <partition>` for a partition. */
+    def tlpBase: String = {
+      val qDef = s"q AS ($mainSelectSql)"
+      val withClause = if (ctes.isEmpty) qDef else s"$cteClause, $qDef"
+      s"WITH $withClause SELECT * FROM q"
     }
 
     /** Whether the output multiset is independent of the physical input layout.
-      * Projection / join / aggregate / distinct / union bodies are all
-      * layout-invariant (their result multiset is determined by the input rows,
-      * not by partition fan-out), so the mode-agreement oracle can replay them
-      * across layouts. */
-    def isLayoutInvariant: Boolean = true
+      * Projection / join / aggregate / distinct / union / CTE bodies are
+      * layout-invariant; a window function is NOT (a tie on its ORDER BY breaks
+      * differently across partition fan-out), so a windowed query is checked by
+      * TLP on a fixed layout only. */
+    def isLayoutInvariant: Boolean =
+      !core.hasWindow && setOp.forall(_._1.isLayoutInvariant) && ctes.forall(_.body.isLayoutInvariant)
 
-    /** Whether any arm of the query (this body or a union arm) contains a join —
-      * the gate the mode-agreement oracle uses to skip the spill mode (the
-      * grace-hash join spill path is buggy; see [[oracle.MetaModeDifferential]]). */
-    def hasAnyJoin: Boolean = from.joins.nonEmpty || setOp.exists(_._1.hasAnyJoin)
+    /** Whether any arm of the query (this body, a union arm, or a CTE body)
+      * contains a join — the gate the mode-agreement oracle uses to skip the spill
+      * mode (the grace-hash join spill path is buggy; see
+      * [[oracle.MetaModeDifferential]]). */
+    def hasAnyJoin: Boolean =
+      from.joins.nonEmpty || setOp.exists(_._1.hasAnyJoin) || ctes.exists(_.body.hasAnyJoin)
   }
 
   /** A single relation plus a predicate over its columns (aliased `t`) — the
@@ -356,62 +414,94 @@ object MetaQueryGen {
 
   // ---- query generation ---------------------------------------------------
 
-  private def genQuery(rng: Rng, env: RelEnv): MetaQuery =
-    if (rng.bool(0.2)) genUnion(rng, env) else genSelect(rng, env)
+  private def genQuery(rng: Rng, env: RelEnv): MetaQuery = {
+    // CTEs are scanned by the outer query like tables. A CTE referenced twice is
+    // materialized once by the engine, referenced once it is inlined — both
+    // covered because the outer FROM draws CTE names from the same source pool as
+    // base relations (so the same CTE can be picked for two leaves / both union
+    // arms). CTE bodies read only base relations, so resolution order is simple.
+    val ctes = genCtes(rng, env)
+    val sources = env.relations.map(_.asSource) ++ ctes.map(_.asSource)
+    val q = if (rng.bool(0.2)) genUnion(rng, sources) else genSelect(rng, sources)
+    q.copy(ctes = ctes)
+  }
 
-  private def genSelect(rng: Rng, env: RelEnv): MetaQuery = {
-    val from = genFrom(rng, env)
+  private def genSelect(rng: Rng, sources: Vector[FromSource]): MetaQuery = {
+    val from = genFrom(rng, sources)
     val scope = from.scope
     val where = if (rng.bool(0.6)) Some(genPredicate(rng, scope, rng.between(1, 3))) else None
     val core = if (rng.bool(0.5)) genAggCore(rng, scope) else genProjectCore(rng, scope)
     MetaQuery(from, where, core)
   }
 
-  /** A `UNION` / `UNION ALL` of two single-relation arms that both project one
-    * bare key column. The arms are schema-compatible by construction: every
-    * relation in the env shares the key type, so both arms output `[o0: keyType]`.
-    * UNION (distinct) and UNION ALL (multiset) are both generated; TLP over the
-    * union output and the dedup-vs-concat distinction are what this exercises. */
-  private def genUnion(rng: Rng, env: RelEnv): MetaQuery = {
+  /** A `UNION` / `UNION ALL` of two single-source arms that both project one bare
+    * key column. The arms are schema-compatible by construction: every source
+    * shares the env key type, so both arms output `[o0: keyType]`. UNION (distinct)
+    * and UNION ALL (multiset) are both generated; TLP over the union output and the
+    * dedup-vs-concat distinction are what this exercises. When the source pool
+    * holds a CTE, both arms can reference it (a CTE feeding both union arms). */
+  private def genUnion(rng: Rng, sources: Vector[FromSource]): MetaQuery = {
     val all = rng.bool()
-    val arm1 = genUnionArm(rng, env)
-    val arm2 = genUnionArm(rng, env)
+    val arm1 = genUnionArm(rng, sources)
+    val arm2 = genUnionArm(rng, sources)
     arm1.copy(setOp = Some((arm2, all)))
   }
 
-  private def genUnionArm(rng: Rng, env: RelEnv): MetaQuery = {
+  private def genUnionArm(rng: Rng, sources: Vector[FromSource]): MetaQuery = {
+    val src = rng.oneOf(sources.filter(_.keyCols.nonEmpty))
+    val alias = "t0"
+    val cols = src.fields.map(f => ScopeCol(alias, f.name, f.dataType)).toVector
+    val keyCol = cols(rng.oneOf(src.keyCols))
+    val where = if (rng.bool(0.5)) Some(genPredicate(rng, cols, rng.between(1, 2))) else None
+    val core = ProjectCore(Vector((keyCol.ref, "o0")), distinct = rng.bool(0.3))
+    MetaQuery(FromClause(FromLeaf(src.name, alias, cols), Vector.empty), where, core)
+  }
+
+  /** 0-2 CTEs, each a single-relation projection of the relation's key column(s)
+    * plus an optional extra column, so every CTE exposes a key-typed (joinable)
+    * output. CTE bodies read only base relations (not other CTEs). */
+  private def genCtes(rng: Rng, env: RelEnv): Vector[CteDef] =
+    if (!rng.bool(0.35)) Vector.empty
+    else (0 until rng.between(1, 2)).map(i => genCte(rng, env, s"w$i")).toVector
+
+  private def genCte(rng: Rng, env: RelEnv, name: String): CteDef = {
     val rel = rng.oneOf(env.relations)
     val alias = "t0"
     val cols = rel.schema.fields.map(f => ScopeCol(alias, f.name, f.dataType)).toVector
-    val keyCol = cols(rng.oneOf(rel.keyCols))
+    val keyType = rel.schema.fields(rel.keyCols.head).dataType
+    val projKeys = distinctSubset(rng, rel.keyCols.map(cols), rng.between(1, rel.keyCols.length))
+    val extra = if (rng.bool(0.5)) Vector(rng.oneOf(cols)) else Vector.empty
+    val projected = projKeys ++ extra
+    val items = projected.zipWithIndex.map { case (c, i) => (c.ref, s"o$i") }
     val where = if (rng.bool(0.5)) Some(genPredicate(rng, cols, rng.between(1, 2))) else None
-    val core = ProjectCore(Vector((keyCol.ref, "o0")), distinct = rng.bool(0.3))
-    MetaQuery(FromClause(FromLeaf(rel.name, alias, cols), Vector.empty), where, core)
+    val body = MetaQuery(FromClause(FromLeaf(rel.name, alias, cols), Vector.empty), where,
+      ProjectCore(items, distinct = rng.bool(0.2)))
+    val keyCols = body.outputSchema.zipWithIndex.collect { case ((_, t), i) if t == keyType => i }.toVector
+    CteDef(name, body, keyCols)
   }
 
-  /** A left-deep FROM: a root relation plus 0-2 joins. A join's right relation may
-    * be the same catalog relation (self-join) under a fresh alias. */
-  private def genFrom(rng: Rng, env: RelEnv): FromClause = {
+  /** A left-deep FROM over the source pool (base relations + CTEs): a root source
+    * plus 0-2 joins. The same source may appear under several fresh aliases (a
+    * self-join, or a CTE referenced twice). */
+  private def genFrom(rng: Rng, sources: Vector[FromSource]): FromClause = {
     var aliasN = 0
     def freshAlias(): String = { val a = s"t$aliasN"; aliasN += 1; a }
-    def leafOf(rel: Relation): FromLeaf = {
+    def leafOf(src: FromSource): (FromLeaf, Vector[Int]) = {
       val alias = freshAlias()
-      FromLeaf(rel.name, alias, rel.schema.fields.zipWithIndex.map { case (f, _) =>
-        ScopeCol(alias, f.name, f.dataType) }.toVector)
+      val cols = src.fields.map(f => ScopeCol(alias, f.name, f.dataType)).toVector
+      (FromLeaf(src.name, alias, cols), src.keyCols)
     }
 
-    val rootRel = rng.oneOf(env.relations)
-    val root = leafOf(rootRel)
+    val (root, _) = leafOf(rng.oneOf(sources))
     val nJoins = rng.weighted((2, 0), (5, 1), (2, 2))
     var scope = root.cols
     val joins = Vector.newBuilder[JoinItem]
     var i = 0
     while (i < nJoins) {
-      val rel = rng.oneOf(env.relations)
-      val leaf = leafOf(rel)
+      val (leaf, keyCols) = leafOf(rng.oneOf(sources))
       val kind = rng.weighted(
         (4, JoinKind.Inner), (3, JoinKind.Left), (2, JoinKind.Right), (2, JoinKind.Full))
-      val on = genJoinOn(rng, scope, leaf, rel)
+      val on = genJoinOn(rng, scope, leaf, keyCols)
       joins += JoinItem(kind, leaf, on)
       scope = scope ++ leaf.cols
       i += 1
@@ -420,10 +510,10 @@ object MetaQueryGen {
   }
 
   /** An ON predicate: an equi-join between a same-typed (left-scope, right-leaf)
-    * column pair — preferring designated key columns so the join matches — and an
-    * optional extra comparison conjunct. */
-  private def genJoinOn(rng: Rng, leftScope: Vector[ScopeCol], rightLeaf: FromLeaf, rightRel: Relation): Expr = {
-    val rightKeyCols = rightRel.keyCols.map(i => rightLeaf.cols(i))
+    * column pair — preferring the right source's key columns so the join matches —
+    * and an optional extra comparison conjunct. */
+  private def genJoinOn(rng: Rng, leftScope: Vector[ScopeCol], rightLeaf: FromLeaf, rightKeyColIdx: Vector[Int]): Expr = {
+    val rightKeyCols = rightKeyColIdx.map(i => rightLeaf.cols(i))
     // Same-typed pairs (leftScopeCol, rightLeafCol), keys first for match likelihood.
     val keyPairs = for {
       l <- leftScope if l.dataType == rightKeyCols.headOption.map(_.dataType).getOrElse(DataType.NullType)
@@ -456,7 +546,55 @@ object MetaQueryGen {
         val t = rng.oneOf(Seq(DataType.IntType, DataType.LongType, DataType.StringType, DataType.DoubleType))
         Vector((genValue(rng, scope, t, 2), s"o${bareItems.length}"))
       } else Vector.empty
-    ProjectCore(bareItems ++ computed, distinct)
+    val items = bareItems ++ computed
+    // Sometimes append window-function columns. A windowed query is checked by TLP
+    // (on a fixed layout) only — its output multiset is layout-dependent.
+    val windows: Vector[WinItem] =
+      if (rng.bool(0.3)) (0 until rng.between(1, 2)).map(i => genWindowItem(rng, scope, items.length + i)).toVector
+      else Vector.empty
+    ProjectCore(items, distinct, windows)
+  }
+
+  // ---- window functions ---------------------------------------------------
+
+  /** One `<fn>() OVER (PARTITION BY ... ORDER BY ... [frame])` column. Aggregate
+    * arguments and LAG/LEAD targets are bare columns so the output type is exact.
+    * The OVER parentheses are function syntax, not grouping parens, so this stays
+    * paren-free-safe. */
+  private def genWindowItem(rng: Rng, scope: Vector[ScopeCol], idx: Int): WinItem = {
+    val name = s"o$idx"
+    val partCols = distinctSubset(rng, scope, rng.between(0, math.min(2, scope.length)))
+    val orderCols = distinctSubset(rng, scope, rng.between(1, math.min(2, scope.length)))
+    val partBy = if (partCols.isEmpty) "" else "PARTITION BY " + partCols.map(_.qualified).mkString(", ")
+    val orderBy = "ORDER BY " + orderCols.map(c => s"${c.qualified} ${if (rng.bool()) "ASC" else "DESC"}").mkString(", ")
+    def over(body: String): String = s"OVER (${Seq(partBy, body).filter(_.nonEmpty).mkString(" ")})"
+
+    val numeric = scope.filter(c => DataType.isNumeric(c.dataType))
+    val nonBool = scope.filter(_.dataType != DataType.BooleanType)
+    val choices = scala.collection.mutable.ArrayBuffer.empty[(Int, () => WinItem)]
+    choices += ((3, () => WinItem(s"ROW_NUMBER() ${over(orderBy)}", name, DataType.LongType)))
+    choices += ((2, () => WinItem(s"${rng.oneOf(Seq("RANK", "DENSE_RANK"))}() ${over(orderBy)}", name, DataType.LongType)))
+    choices += ((2, () => WinItem(s"COUNT(*) ${over("")}", name, DataType.LongType)))
+    if (numeric.nonEmpty) {
+      choices += ((2, () => { val c = rng.oneOf(numeric); WinItem(s"SUM(${c.qualified}) ${over(orderBy)}", name, sumType(c.dataType)) }))
+      choices += ((1, () => { val c = rng.oneOf(numeric); WinItem(s"AVG(${c.qualified}) ${over(orderBy)}", name, DataType.DoubleType) }))
+      choices += ((1, () => { val c = rng.oneOf(numeric)
+        WinItem(s"SUM(${c.qualified}) OVER (${Seq(partBy, orderBy, frame(rng)).filter(_.nonEmpty).mkString(" ")})", name, sumType(c.dataType)) }))
+    }
+    if (nonBool.nonEmpty)
+      choices += ((1, () => { val c = rng.oneOf(nonBool); WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType) }))
+    choices += ((2, () => { val c = rng.oneOf(scope); WinItem(s"${rng.oneOf(Seq("LAG", "LEAD"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType) }))
+    rng.weighted(choices.toSeq: _*)()
+  }
+
+  /** A `ROWS BETWEEN ... AND ...` frame clause. */
+  private def frame(rng: Rng): String =
+    s"ROWS BETWEEN ${rng.oneOf(Seq("UNBOUNDED PRECEDING", "1 PRECEDING", "0 PRECEDING"))} " +
+      s"AND ${rng.oneOf(Seq("CURRENT ROW", "1 FOLLOWING", "UNBOUNDED FOLLOWING"))}"
+
+  private def sumType(dt: DataType): DataType = dt match {
+    case DataType.IntType | DataType.LongType => DataType.LongType
+    case _ => DataType.DoubleType
   }
 
   private def genAggCore(rng: Rng, scope: Vector[ScopeCol]): AggCore = {

@@ -129,7 +129,7 @@ class MetamorphicFuzzTest {
 
   /** Does the engine accept the TLP base (the CTE-wrapped query)? Parse+bind only. */
   private def tlpBaseReject(mc: MetaCase): Option[String] =
-    try { LogicalBuilder.build(s"WITH q AS (${mc.bodySql}) SELECT * FROM q", mc.env.catalog()); None }
+    try { LogicalBuilder.build(mc.query.tlpBase, mc.env.catalog()); None }
     catch { case e: IllegalArgumentException => Some(RelEngine.rejectReason(e)) }
 
   private def noRecReject(nc: NoRecCase): Option[String] = {
@@ -138,6 +138,35 @@ class MetamorphicFuzzTest {
     val sql = s"SELECT COUNT(*) AS c FROM ${nc.relation.name} ${nc.alias} WHERE ${SqlRender.expr(nc.predicate)}"
     try { LogicalBuilder.build(sql, cat); None }
     catch { case e: IllegalArgumentException => Some(RelEngine.rejectReason(e)) }
+  }
+
+  /** Coverage guard + report: the generator must actually reach every SQL shape
+    * the metamorphic relations target. A shape silently dropping to zero (a
+    * generation regression) would make the campaign pass vacuously, so each shape
+    * is asserted present over a fixed block of seeds. Prints the tally for the PR. */
+  @Test def generatorCoversShapes(): Unit = {
+    val n = 2000
+    var joins, unions, ctes, windows, aggregates, tlpWindowKeys = 0
+    var seed = 0
+    while (seed < n) {
+      val mc = MetaQueryGen.generate(new Rng(seed.toLong))
+      if (mc.query.hasAnyJoin) joins += 1
+      if (mc.query.setOp.isDefined) unions += 1
+      if (mc.query.ctes.nonEmpty) ctes += 1
+      if (!mc.query.isLayoutInvariant) windows += 1
+      if (mc.query.core.isInstanceOf[AggCore]) aggregates += 1
+      // A window output column actually chosen as the TLP partition key.
+      if (mc.query.core.hasWindow && mc.tlp.isDefined &&
+        mc.query.core.tlpCandidates.exists { case (nm, _) => mc.tlp.get.toString.contains(nm) }) tlpWindowKeys += 1
+      seed += 1
+    }
+    println(f"[metamorphic] shape coverage over $n seeds: joins=$joins unions=$unions ctes=$ctes " +
+      f"windows=$windows aggregates=$aggregates tlpOnWindowCol=$tlpWindowKeys")
+    assertTrue(s"joins=$joins", joins > 100)
+    assertTrue(s"unions=$unions", unions > 50)
+    assertTrue(s"ctes=$ctes", ctes > 100)
+    assertTrue(s"windows=$windows", windows > 50)
+    assertTrue(s"aggregates=$aggregates", aggregates > 100)
   }
 
   /** Same seed reproduces the exact query + env — the repro contract failure
@@ -255,6 +284,42 @@ class MetamorphicFuzzTest {
     val union = arm("r0").copy(setOp = Some((arm("r1"), false))) // UNION (dedup)
     assertEquals(RelEngine.Held, MetaModeDifferential.check(MetaCase(env, union, None)))
     assertTlpHeld(MetaCase(env, union, Some(TlpCmpLit("o0", ">=", "<", "2"))))
+  }
+
+  /** CTE referenced twice (materialized once) then self-joined; TLP over the
+    * materialized output. Exercises the materialize-on-2+-refs path under a
+    * semantic relation. */
+  @Test def regressionTlpOverCteReferencedTwice(): Unit = {
+    val r = rel("r0", intInt, IndexedSeq(
+      Array[Any](1, 10), Array[Any](1, 11), Array[Any](2, 20), Array[Any](null, 30)), Vector(0))
+    val env = RelEnv(Vector(r))
+    val cteBody = MetaQuery(
+      FromClause(FromLeaf("r0", "t0", Vector(sc("t0", intInt, 0), sc("t0", intInt, 1))), Vector.empty),
+      None, ProjectCore(Vector((sc("t0", intInt, 0).ref, "o0"), (sc("t0", intInt, 1).ref, "o1")), distinct = false))
+    val cte = MetaQueryGen.CteDef("w0", cteBody, Vector(0))
+    val xo0 = ScopeCol("x", "o0", DataType.IntType); val yo1 = ScopeCol("y", "o1", DataType.IntType)
+    val from = FromClause(
+      FromLeaf("w0", "x", Vector(xo0, ScopeCol("x", "o1", DataType.IntType))),
+      Vector(JoinItem(JoinKind.Inner, FromLeaf("w0", "y", Vector(ScopeCol("y", "o0", DataType.IntType), yo1)),
+        BinOpExpr("=", xo0.ref, ScopeCol("y", "o0", DataType.IntType).ref, DataType.BooleanType))))
+    val q = MetaQuery(from, None, ProjectCore(Vector((xo0.ref, "o0"), (yo1.ref, "o1")), distinct = false),
+      setOp = None, ctes = Vector(cte))
+    assertTlpHeld(MetaCase(env, q, Some(TlpCmpLit("o0", ">", "<=", "1"))))
+  }
+
+  /** TLP partitioned on a window output column (ROW_NUMBER). The window query is
+    * checked on a fixed layout (its multiset is layout-dependent), where the four
+    * partition runs are deterministic. */
+  @Test def regressionTlpOverWindowColumn(): Unit = {
+    val r = rel("r0", intInt, IndexedSeq(
+      Array[Any](1, 10), Array[Any](1, 20), Array[Any](2, 30), Array[Any](2, 30), Array[Any](null, 40)), Vector(0))
+    val env = RelEnv(Vector(r))
+    val from = FromClause(FromLeaf("r0", "t0", Vector(sc("t0", intInt, 0), sc("t0", intInt, 1))), Vector.empty)
+    val win = WinItem("ROW_NUMBER() OVER (PARTITION BY t0.c0 ORDER BY t0.c1)", "o1", DataType.LongType)
+    val core = ProjectCore(Vector((sc("t0", intInt, 0).ref, "o0")), distinct = false, windows = Vector(win))
+    val mc = MetaCase(env, MetaQuery(from, None, core), Some(TlpCmpLit("o1", ">", "<=", "1")))
+    assertFalse("windowed query is not layout-invariant", mc.query.isLayoutInvariant)
+    assertTlpHeld(mc)
   }
 
   /** Mode agreement over a self-join: the same join result multiset across spill /
