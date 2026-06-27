@@ -50,6 +50,23 @@ scala_junit_test(
     ],
 )
 
+# Metamorphic fuzzer: multi-relation SELECTs (joins of every kind, self-joins)
+# checked against the TLP and NoREC metamorphic relations + multi-relation mode
+# agreement. Finds SEMANTIC bugs (wrong answers every execution mode agrees on).
+# Default budget is small (each case runs the engine several times), part of
+# `bazel test //...`.
+scala_junit_test(
+    name = "metamorphic_fuzz_test",
+    srcs = ["MetamorphicFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 # Long-campaign variants. Tagged `fuzz` so the default `bazel test //...`
 # (--test_tag_filters=-perf,-fuzz) skips them; run on demand with a large budget,
 # e.g.:
@@ -82,3 +99,17 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+scala_junit_test(
+    name = "metamorphic_fuzz_campaign",
+    srcs = ["MetamorphicFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+

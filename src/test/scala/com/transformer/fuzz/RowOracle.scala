@@ -92,18 +92,23 @@ object RowOracle {
   //     hold the same rows can emit them in different orders. Equality is
   //     therefore over multisets.
   //
-  //   - '''Tolerance on `Double` columns only.''' Of the columns a query can
-  //     produce, exactly the order-dependent aggregates land in a `Double`
-  //     result column: `SUM`/`AVG`/`STDDEV`/`VAR`/`COVAR`/`CORR` accumulate in
-  //     `double`, so a different summation order (different layout / spill flush
-  //     order) yields a result that differs by rounding. Every other column is
-  //     bit-identical across modes — integer `SUM` accumulates in `Long`,
-  //     `COUNT` is exact, `MIN`/`MAX` are order-independent reductions, `Float`
-  //     reductions stay `Float`, and projected/group-key values are copied
-  //     straight from the (identical) input. So `Double` columns compare with a
-  //     relative+absolute tolerance and all others compare exactly. The exact
-  //     columns carry the discriminating identity, so a tolerance on the
-  //     `Double` columns cannot mask a wrong group or a dropped row.
+  //   - '''Tolerance on the floating-point (`Double`/`Float`) columns.''' Of the
+  //     columns a query can produce, the order-dependent aggregates land in a
+  //     `Double` result column: `SUM`/`AVG`/`STDDEV`/`VAR`/`COVAR`/`CORR`
+  //     accumulate in `double`, so a different summation order (different layout /
+  //     spill flush order) yields a result that differs by rounding. `Float`
+  //     columns do NOT reorder (a `Float` reduction stays `Float`, bit-identical
+  //     across modes), but a computed `Float` projection can produce `NaN` (a
+  //     float divide-by-zero) — and `NaN` cannot be an exact grouping key, because
+  //     Scala's `==` on a boxed `NaN` is `false`, so two identical `NaN` rows would
+  //     not match. Both float kinds therefore go through the tolerant comparator,
+  //     which is `NaN`-aware (and on which a bit-identical `Float` still compares
+  //     equal — the tolerance is never actually exercised for it). Every other
+  //     column is bit-identical and compares exactly: integer `SUM` accumulates in
+  //     `Long`, `COUNT` is exact, `MIN`/`MAX` are order-independent reductions, and
+  //     projected/group-key values are copied straight from the (identical) input.
+  //     The exact columns carry the discriminating identity, so a tolerance on the
+  //     floating-point columns cannot mask a wrong group or a dropped row.
 
   /** Relative tolerance for `Double`-column comparison. Sized for the rounding a
     * different reduction order introduces on a well-conditioned `double` sum
@@ -135,9 +140,10 @@ object RowOracle {
   }
 
   /** Compare two result sets as multisets: `None` when equal, `Some(diff)` with a
-    * readable first-N-rows-each-way message when not. `Double` columns compare
-    * with tolerance, all others exactly — see the section comment above. Rows are
-    * `Array[Any]` aligned to `schema` field order (NULL as `null`). */
+    * readable first-N-rows-each-way message when not. Floating-point (`Double` /
+    * `Float`) columns compare with the `NaN`-aware tolerant comparator, all others
+    * exactly — see the section comment above. Rows are `Array[Any]` aligned to
+    * `schema` field order (NULL as `null`). */
   def multisetEquals(
       schema: Schema,
       baseline: Seq[Array[Any]],
@@ -148,7 +154,10 @@ object RowOracle {
       return Some(s"row count differs: baseline=${baseline.length}, mode=${other.length}")
 
     val ncols = schema.length
-    val tolerant = Array.tabulate(ncols)(c => schema.fields(c).dataType == DataType.DoubleType)
+    val tolerant = Array.tabulate(ncols) { c =>
+      val dt = schema.fields(c).dataType
+      dt == DataType.DoubleType || dt == DataType.FloatType
+    }
 
     // Identity of a row for grouping: its exact (non-Double) cells, normalized so
     // Int-vs-Long / Float boxing differences never split a group, with NULL mapped

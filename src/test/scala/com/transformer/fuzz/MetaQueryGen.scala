@@ -1,0 +1,589 @@
+package com.transformer.fuzz
+
+import com.transformer.core._
+import com.transformer.sql.plan._
+
+/** Generator of a multi-relation `SELECT` over a small environment of generated
+  * relations, for the metamorphic oracles (`oracle/Tlp`, `oracle/NoRec`,
+  * `oracle/MetaModeDifferential`).
+  *
+  * Where [[QueryGen]] (Plan 02) generates a single-table query for the
+  * mode-differential property, this generator reaches the planner's hardest
+  * transforms — equi-joins of every kind, including self-joins — so the
+  * metamorphic relations bite where the subtlest semantic bugs live (LEFT/RIGHT/
+  * FULL null-extension, 3VL join keys).
+  *
+  * Three invariants make a generated query a fair oracle input:
+  *
+  *   - '''Scope-correct by construction.''' The FROM scope grows left-to-right as
+  *     joins are added; every generated column reference is drawn from the scope
+  *     in effect at that point, so a reference always resolves. Columns render
+  *     '''alias-qualified''' (`t0.c0`) so a self-join's colliding names stay
+  *     unambiguous — the qualifier rides in the [[ColRefExpr]] `name` (its
+  *     `index` is unused; the engine re-binds from the rendered text).
+  *
+  *   - '''Type-correct by construction.''' Equi-join keys are drawn same-typed;
+  *     arithmetic operands are numeric, `||` operands string, comparisons
+  *     same-category — the same discipline [[QueryGen]] uses so a precedence-only
+  *     reparse stays type-correct.
+  *
+  *   - '''Total + paren-free.''' Nothing here builds a tree that throws for
+  *     in-range input or that needs a grouping paren (the SQL frontend rejects
+  *     grouping parens). So a query that binds also runs, in every mode.
+  *
+  * Excluded so the output multiset is well-defined for the metamorphic relations:
+  * `RAND()` / clock functions (mode-dependent) and `LIMIT` (top-`n` with ties
+  * returns a layout-dependent subset, which TLP's four separate executions would
+  * disagree on). The relations share a narrow join-key domain so equi-joins
+  * actually match — wide-random keys would make every outer join all-unmatched
+  * and hide the null-extension bugs the oracles target.
+  */
+object MetaQueryGen {
+
+  // ---- relation environment ----------------------------------------------
+
+  /** One generated base relation: a name (its catalog key) plus the column
+    * indices eligible as equi-join keys (drawn from the env's shared key domain,
+    * so cross-relation joins collide). */
+  final case class Relation(name: String, dataset: DataGen.Dataset, keyCols: Vector[Int]) {
+    def schema: Schema = dataset.schema
+  }
+
+  /** A handful of relations sharing a join-key type + domain. Registered into a
+    * fresh [[Catalog]] per execution; [[reshape]] lays every relation out under a
+    * chosen partition/batch layout so the mode-agreement oracle can replay the
+    * same rows through different physical shapes. */
+  final case class RelEnv(relations: Vector[Relation]) {
+    def relation(name: String): Relation = relations.find(_.name == name).get
+
+    /** Register every relation as a single-partition view. */
+    def catalog(): Catalog = catalog(_.singlePartition())
+
+    /** Register every relation, laid out by `layout`. */
+    def catalog(layout: DataGen.Dataset => MaterializedView): Catalog = {
+      val c = new Catalog
+      relations.foreach(r => c.register(r.name, layout(r.dataset)))
+      c
+    }
+
+    override def toString: String =
+      relations.map(r => s"${r.name}${r.dataset.toString.stripPrefix("Dataset")}").mkString("RelEnv(", "; ", ")")
+  }
+
+  // ---- FROM scope ---------------------------------------------------------
+
+  /** A column visible in the FROM scope. Renders alias-qualified so a self-join's
+    * duplicate column names stay distinct. */
+  final case class ScopeCol(alias: String, col: String, dataType: DataType) {
+    def qualified: String = s"$alias.$col"
+    /** A bound-shaped reference whose `name` carries the qualifier; the engine
+      * re-binds from the rendered SQL, so the `index` is never read. */
+    def ref: Expr = ColRefExpr(0, qualified, dataType)
+  }
+
+  // ---- FROM clause (left-deep joins) -------------------------------------
+
+  /** A relation occurrence in FROM: its catalog name, the alias it is bound under
+    * here, and its columns projected into the scope under that alias. */
+  final case class FromLeaf(relName: String, alias: String, cols: Vector[ScopeCol]) {
+    def render: String = s"$relName AS $alias"
+  }
+
+  /** One join step: `<KIND> JOIN <leaf> ON <pred>`. Left-deep, matching how the
+    * binder folds `ps.getJoins` into a chain of [[LogicalJoin]]s. */
+  final case class JoinItem(kind: JoinKind, leaf: FromLeaf, on: Expr)
+
+  final case class FromClause(root: FromLeaf, joins: Vector[JoinItem]) {
+    /** Columns in scope at the end of the FROM clause (root then each join leaf,
+      * left-to-right). */
+    def scope: Vector[ScopeCol] = root.cols ++ joins.flatMap(_.leaf.cols)
+
+    def render: String = {
+      val sb = new StringBuilder(root.render)
+      joins.foreach { j =>
+        sb.append(' ').append(joinKeyword(j.kind)).append(" JOIN ").append(j.leaf.render)
+          .append(" ON ").append(SqlRender.expr(j.on))
+      }
+      sb.toString
+    }
+  }
+
+  private def joinKeyword(k: JoinKind): String = k match {
+    case JoinKind.Inner => "INNER"
+    case JoinKind.Left => "LEFT"
+    case JoinKind.Right => "RIGHT"
+    case JoinKind.Full => "FULL"
+  }
+
+  // ---- the query core (projection vs aggregation) ------------------------
+
+  sealed trait QueryCore {
+    /** Output column names + types — the schema of the query body, which the
+      * mode-agreement oracle compares over. */
+    def outputSchema: Vector[(String, DataType)]
+    /** Output columns whose declared type is RELIABLE and non-float — the only
+      * columns TLP may partition on. A bare column reference / group key / aggregate
+      * output binds to its declared type exactly; a computed expression does not,
+      * because its paren-free SQL can reparse to a wider type (e.g. an `Int`-labelled
+      * `-1.0 % c` reparses to `Double`, whose `NaN` would fall into none of TLP's
+      * three partitions). Restricting to reliable non-float columns keeps a TLP
+      * comparison UNKNOWN exactly when an operand is NULL. */
+    def tlpCandidates: Vector[(String, DataType)]
+    def renderSelect: String
+    def groupSql: String
+    def havingSql: String
+  }
+
+  /** `SELECT [DISTINCT] <items>`. */
+  final case class ProjectCore(items: Vector[(Expr, String)], distinct: Boolean) extends QueryCore {
+    def outputSchema: Vector[(String, DataType)] = items.map { case (e, n) => (n, e.dataType) }
+    def tlpCandidates: Vector[(String, DataType)] = items.collect {
+      case (c: ColRefExpr, n) if isPartitionable(c.dataType) => (n, c.dataType)
+    }
+    def renderSelect: String = {
+      val sel = items.iterator.map { case (e, n) => s"${SqlRender.expr(e)} AS $n" }.mkString(", ")
+      if (distinct) s"DISTINCT $sel" else sel
+    }
+    def groupSql: String = ""
+    def havingSql: String = ""
+  }
+
+  /** `SELECT <group cols>, <aggs> [GROUP BY ...] [HAVING ...]`. Empty `groupKeys`
+    * is a global aggregate (one output row). */
+  final case class AggCore(
+      groupKeys: Vector[(Expr, String)],
+      aggs: Vector[(QueryGen.AggSpec, String)],
+      having: Option[Expr]) extends QueryCore {
+    def outputSchema: Vector[(String, DataType)] =
+      groupKeys.map { case (e, n) => (n, e.dataType) } ++ aggs.map { case (a, n) => (n, aggType(a)) }
+    def tlpCandidates: Vector[(String, DataType)] =
+      groupKeys.collect { case (c: ColRefExpr, n) if isPartitionable(c.dataType) => (n, c.dataType) } ++
+        aggs.collect { case (a, n) if isPartitionable(aggType(a)) => (n, aggType(a)) }
+    def renderSelect: String = {
+      val g = groupKeys.map { case (e, n) => s"${SqlRender.expr(e)} AS $n" }
+      val a = aggs.map { case (spec, n) => s"${spec.render} AS $n" }
+      (g ++ a).mkString(", ")
+    }
+    def groupSql: String =
+      if (groupKeys.isEmpty) "" else " GROUP BY " + groupKeys.map { case (e, _) => SqlRender.expr(e) }.mkString(", ")
+    def havingSql: String = having.map(h => s" HAVING ${SqlRender.expr(h)}").getOrElse("")
+  }
+
+  /** The result type of an aggregate spec (the engine's `AggExpr.resultType`). */
+  private def aggType(spec: QueryGen.AggSpec): DataType = spec match {
+    case QueryGen.CountStar | _: QueryGen.Count | _: QueryGen.CountIf => DataType.LongType
+    case QueryGen.Sum(arg) => arg.dataType match {
+      case DataType.IntType | DataType.LongType => DataType.LongType
+      case DataType.FloatType | DataType.DoubleType => DataType.DoubleType
+      case other => other
+    }
+    case _: QueryGen.Avg | _: QueryGen.Stat | _: QueryGen.Bivar => DataType.DoubleType
+    case QueryGen.Min(arg) => arg.dataType
+    case QueryGen.Max(arg) => arg.dataType
+  }
+
+  // ---- the metamorphic case ----------------------------------------------
+
+  /** A predicate over the query's OUTPUT columns, in the three TLP partitions.
+    * Each shape renders all three variants paren-free; restricted to non-float
+    * output columns so a comparison is NULL exactly when an operand is NULL (no
+    * NaN can fall into none of the three partitions). */
+  sealed trait TlpPred {
+    def truePred: String
+    def falsePred: String
+    def nullPred: String
+  }
+  /** Boolean output column `b`: `b` / `NOT b` / `b IS NULL`. */
+  final case class TlpBool(col: String) extends TlpPred {
+    def truePred: String = col
+    def falsePred: String = s"NOT $col"
+    def nullPred: String = s"$col IS NULL"
+  }
+  /** `x op y` over two output columns: `x op y` / `x negOp y` / `x IS NULL OR y IS NULL`. */
+  final case class TlpCmpCols(x: String, op: String, negOp: String, y: String) extends TlpPred {
+    def truePred: String = s"$x $op $y"
+    def falsePred: String = s"$x $negOp $y"
+    def nullPred: String = s"$x IS NULL OR $y IS NULL"
+  }
+  /** `x op lit` over one output column: `x op lit` / `x negOp lit` / `x IS NULL`. */
+  final case class TlpCmpLit(x: String, op: String, negOp: String, lit: String) extends TlpPred {
+    def truePred: String = s"$x $op $lit"
+    def falsePred: String = s"$x $negOp $lit"
+    def nullPred: String = s"$x IS NULL"
+  }
+
+  /** A generated relation environment + a row-producing query over it, plus the
+    * TLP partition predicate chosen over the query's output columns. The seed
+    * reproduces all three exactly. */
+  final case class MetaCase(env: RelEnv, query: MetaQuery, tlp: Option[TlpPred]) {
+    def bodySql: String = query.renderBody
+    override def toString: String =
+      s"MetaCase(\n  body = $bodySql\n  tlp  = ${tlp.getOrElse("<none>")}\n  env  = $env)"
+  }
+
+  /** The query body (the text that becomes a CTE body / the base query). */
+  final case class MetaQuery(from: FromClause, where: Option[Expr], core: QueryCore) {
+    def outputSchema: Vector[(String, DataType)] = core.outputSchema
+    def tlpCandidates: Vector[(String, DataType)] = core.tlpCandidates
+    def whereSql: String = where.map(w => s" WHERE ${SqlRender.expr(w)}").getOrElse("")
+    def renderBody: String =
+      s"SELECT ${core.renderSelect} FROM ${from.render}$whereSql${core.groupSql}${core.havingSql}"
+
+    /** Whether the output multiset is independent of the physical input layout.
+      * Projection / join / aggregate / distinct bodies are all layout-invariant
+      * (their result multiset is determined by the input rows, not by partition
+      * fan-out), so the mode-agreement oracle can replay them across layouts. */
+    def isLayoutInvariant: Boolean = true
+  }
+
+  /** A single relation plus a predicate over its columns (aliased `t`) — the
+    * input to the NoREC optimizer-equivalence relation. */
+  final case class NoRecCase(relation: Relation, predicate: Expr) {
+    def alias: String = "t"
+    override def toString: String =
+      s"NoRecCase(\n  rel  = ${relation.name}${relation.dataset.toString.stripPrefix("Dataset")}\n" +
+        s"  pred = ${SqlRender.expr(predicate)})"
+  }
+
+  // ---- top-level generation ----------------------------------------------
+
+  def generate(rng: Rng): MetaCase = {
+    val env = genEnv(rng.split())
+    val q = genQuery(rng.split(), env)
+    val tlp = genTlpPred(rng.split(), q.tlpCandidates)
+    MetaCase(env, q, tlp)
+  }
+
+  /** Generate a single relation + a predicate over it, for the NoREC relation. */
+  def generateNoRec(rng: Rng): NoRecCase = {
+    val keyType = rng.oneOf(KeyTypes)
+    val keyDomain = sharedKeyDomain(rng.split(), keyType)
+    val rel = genRelation(rng.split(), "r0", keyType, keyDomain)
+    val scope = rel.schema.fields.map(f => ScopeCol("t", f.name, f.dataType)).toVector
+    val pred = genPredicate(rng.split(), scope, rng.between(1, 3))
+    NoRecCase(rel, pred)
+  }
+
+  // ---- relation environment generation -----------------------------------
+
+  private val KeyTypes: Seq[DataType] = Seq(DataType.IntType, DataType.LongType, DataType.StringType)
+  private val PayloadTypes: Seq[DataType] = Seq(
+    DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType,
+    DataType.BooleanType, DataType.StringType)
+  private val StringPool: IndexedSeq[String] = IndexedSeq("a", "b", "c", "d", "")
+  private val DoublePool: IndexedSeq[Double] = IndexedSeq(0.0, 0.5, 1.0, 2.0, -1.0, 10.0)
+
+  private def genEnv(rng: Rng): RelEnv = {
+    val keyType = rng.oneOf(KeyTypes)
+    val keyDomain = sharedKeyDomain(rng, keyType)
+    val n = rng.between(2, 3)
+    val relations = (0 until n).map(i => genRelation(rng.split(), s"r$i", keyType, keyDomain)).toVector
+    RelEnv(relations)
+  }
+
+  /** The shared join-key value pool — small so cross-relation keys collide. */
+  private def sharedKeyDomain(rng: Rng, keyType: DataType): IndexedSeq[Any] = keyType match {
+    case DataType.IntType =>
+      val w = rng.between(2, 4); val base = rng.oneOf(Seq(0, 1)); (0 until w).map(i => (base + i): Any)
+    case DataType.LongType =>
+      val w = rng.between(2, 4); val base = rng.oneOf(Seq(0L, 1L)); (0 until w).map(i => (base + i): Any)
+    case DataType.StringType =>
+      val w = rng.between(2, 4); StringPool.take(w).map(_.asInstanceOf[Any])
+    case other => throw new IllegalArgumentException(s"unsupported key type $other")
+  }
+
+  private def genRelation(rng: Rng, name: String, keyType: DataType, keyDomain: IndexedSeq[Any]): Relation = {
+    val nKeys = rng.between(1, 2)
+    val nPayload = rng.between(1, 3)
+    val keyFields = (0 until nKeys).map(i => Field(s"c$i", keyType))
+    val payloadFields = (0 until nPayload).map(i => Field(s"c${nKeys + i}", rng.oneOf(PayloadTypes)))
+    val schema = Schema((keyFields ++ payloadFields).toVector)
+    val keyCols = (0 until nKeys).toVector
+
+    // Per-column (nullProb, domain): key columns draw from the shared domain
+    // (sometimes nullable, exercising 3VL join keys + outer null-extension).
+    val specs: IndexedSeq[(Double, IndexedSeq[Any])] = schema.fields.zipWithIndex.map { case (f, idx) =>
+      if (idx < nKeys) (rng.weighted((5, 0.0), (2, 0.2)) match { case 0 => 0.0; case _ => 0.2 }, keyDomain)
+      else (payloadNullProb(rng), payloadDomain(rng, f.dataType))
+    }
+    val numRows = rng.weighted((2, 0), (3, 1), (5, 2), (2, 3)) match {
+      case 0 => 0
+      case 1 => 1
+      case 2 => rng.between(2, 10)
+      case _ => rng.between(11, 24)
+    }
+    val rows = IndexedSeq.tabulate(numRows) { _ =>
+      Array.tabulate[Any](schema.length) { c =>
+        val (nullProb, domain) = specs(c)
+        if (rng.bool(nullProb)) null else rng.oneOf(domain)
+      }
+    }
+    Relation(name, DataGen.Dataset(schema, rows), keyCols)
+  }
+
+  private def payloadNullProb(rng: Rng): Double =
+    rng.weighted((5, 0.0), (3, 0.2), (1, 0.5)) match { case 0 => 0.0; case 1 => 0.2; case _ => 0.5 }
+
+  private def payloadDomain(rng: Rng, dt: DataType): IndexedSeq[Any] = dt match {
+    case DataType.IntType => val b = rng.oneOf(Seq(-1, 0, 1)); (0 until rng.between(2, 4)).map(i => (b + i): Any)
+    case DataType.LongType => val b = rng.oneOf(Seq(-1L, 0L, 1L)); (0 until rng.between(2, 4)).map(i => (b + i): Any)
+    case DataType.FloatType => DoublePool.take(rng.between(2, 4)).map(_.toFloat.asInstanceOf[Any])
+    case DataType.DoubleType => DoublePool.take(rng.between(2, 4)).map(_.asInstanceOf[Any])
+    case DataType.BooleanType => IndexedSeq[Any](true, false)
+    case DataType.StringType => StringPool.take(rng.between(2, 4)).map(_.asInstanceOf[Any])
+    case other => throw new IllegalArgumentException(s"unsupported payload type $other")
+  }
+
+  // ---- query generation ---------------------------------------------------
+
+  private def genQuery(rng: Rng, env: RelEnv): MetaQuery = {
+    val from = genFrom(rng, env)
+    val scope = from.scope
+    val where = if (rng.bool(0.6)) Some(genPredicate(rng, scope, rng.between(1, 3))) else None
+    val core = if (rng.bool(0.5)) genAggCore(rng, scope) else genProjectCore(rng, scope)
+    MetaQuery(from, where, core)
+  }
+
+  /** A left-deep FROM: a root relation plus 0-2 joins. A join's right relation may
+    * be the same catalog relation (self-join) under a fresh alias. */
+  private def genFrom(rng: Rng, env: RelEnv): FromClause = {
+    var aliasN = 0
+    def freshAlias(): String = { val a = s"t$aliasN"; aliasN += 1; a }
+    def leafOf(rel: Relation): FromLeaf = {
+      val alias = freshAlias()
+      FromLeaf(rel.name, alias, rel.schema.fields.zipWithIndex.map { case (f, _) =>
+        ScopeCol(alias, f.name, f.dataType) }.toVector)
+    }
+
+    val rootRel = rng.oneOf(env.relations)
+    val root = leafOf(rootRel)
+    val nJoins = rng.weighted((2, 0), (5, 1), (2, 2))
+    var scope = root.cols
+    val joins = Vector.newBuilder[JoinItem]
+    var i = 0
+    while (i < nJoins) {
+      val rel = rng.oneOf(env.relations)
+      val leaf = leafOf(rel)
+      val kind = rng.weighted(
+        (4, JoinKind.Inner), (3, JoinKind.Left), (2, JoinKind.Right), (2, JoinKind.Full))
+      val on = genJoinOn(rng, scope, leaf, rel)
+      joins += JoinItem(kind, leaf, on)
+      scope = scope ++ leaf.cols
+      i += 1
+    }
+    FromClause(root, joins.result())
+  }
+
+  /** An ON predicate: an equi-join between a same-typed (left-scope, right-leaf)
+    * column pair — preferring designated key columns so the join matches — and an
+    * optional extra comparison conjunct. */
+  private def genJoinOn(rng: Rng, leftScope: Vector[ScopeCol], rightLeaf: FromLeaf, rightRel: Relation): Expr = {
+    val rightKeyCols = rightRel.keyCols.map(i => rightLeaf.cols(i))
+    // Same-typed pairs (leftScopeCol, rightLeafCol), keys first for match likelihood.
+    val keyPairs = for {
+      l <- leftScope if l.dataType == rightKeyCols.headOption.map(_.dataType).getOrElse(DataType.NullType)
+      r <- rightKeyCols if r.dataType == l.dataType
+    } yield (l, r)
+    val anyPairs = for { l <- leftScope; r <- rightLeaf.cols if r.dataType == l.dataType } yield (l, r)
+    val pairs = if (keyPairs.nonEmpty) keyPairs else anyPairs
+    if (pairs.isEmpty) {
+      // No comparable columns — degenerate to a TRUE (cross) join.
+      LitExpr(true, DataType.BooleanType)
+    } else {
+      val (l, r) = rng.oneOf(pairs)
+      val equi: Expr = BinOpExpr("=", l.ref, r.ref, DataType.BooleanType)
+      if (rng.bool(0.25)) {
+        val extra = genAtom(rng, leftScope ++ rightLeaf.cols, 1)
+        BinOpExpr("AND", equi, extra, DataType.BooleanType)
+      } else equi
+    }
+  }
+
+  private def genProjectCore(rng: Rng, scope: Vector[ScopeCol]): ProjectCore = {
+    val distinct = rng.bool(0.4)
+    // Always project a couple of bare columns (TLP needs a non-float output
+    // column to partition on); occasionally add a shallow computed column.
+    val bareCount = rng.between(1, math.min(3, scope.length))
+    val bare = distinctSubset(rng, scope, bareCount)
+    val bareItems: Vector[(Expr, String)] = bare.zipWithIndex.map { case (sc, i) => (sc.ref, s"o$i") }
+    val computed: Vector[(Expr, String)] =
+      if (rng.bool(0.4)) {
+        val t = rng.oneOf(Seq(DataType.IntType, DataType.LongType, DataType.StringType, DataType.DoubleType))
+        Vector((genValue(rng, scope, t, 2), s"o${bareItems.length}"))
+      } else Vector.empty
+    ProjectCore(bareItems ++ computed, distinct)
+  }
+
+  private def genAggCore(rng: Rng, scope: Vector[ScopeCol]): AggCore = {
+    // Group keys: bare non-float scope columns (float group keys are legal but a
+    // poor TLP partition source). A global aggregate (no keys) is allowed too.
+    val groupable = scope.filter(c => isPartitionable(c.dataType))
+    val keys: Vector[ScopeCol] =
+      if (groupable.nonEmpty && rng.bool(0.8))
+        distinctSubset(rng, groupable, rng.between(1, math.min(2, groupable.length)))
+      else Vector.empty
+    val groupKeys: Vector[(Expr, String)] = keys.zipWithIndex.map { case (sc, i) => (sc.ref, s"o$i") }
+    val nAgg = rng.between(1, 2)
+    val aggs: Vector[(QueryGen.AggSpec, String)] =
+      (0 until nAgg).map(i => (genAggSpec(rng, scope), s"o${groupKeys.length + i}")).toVector
+    // HAVING over a grouped query: `COUNT(*) cmp <small int>` — the canonical
+    // filter-over-aggregate shape, always bindable and paren-free.
+    val having =
+      if (groupKeys.nonEmpty && rng.bool(0.3))
+        Some(BinOpExpr(rng.oneOf(Seq(">", ">=", "<", "<=")), countStarRef,
+          LitExpr(rng.between(0, 2), DataType.IntType), DataType.BooleanType))
+      else None
+    AggCore(groupKeys, aggs, having)
+  }
+
+  /** A bound shape that renders to `COUNT(*)` for HAVING (the binder rebinds the
+    * aggregate from the rendered text; only the rendered SQL matters, so the
+    * `index` is unused). */
+  private val countStarRef: Expr = ColRefExpr(0, "COUNT(*)", DataType.LongType)
+
+  private def genAggSpec(rng: Rng, scope: Vector[ScopeCol]): QueryGen.AggSpec = {
+    val numeric = scope.filter(c => DataType.isNumeric(c.dataType))
+    val integral = scope.filter(c => DataType.isIntegral(c.dataType))
+    val options = scala.collection.mutable.ArrayBuffer.empty[(Int, () => QueryGen.AggSpec)]
+    options += ((3, () => QueryGen.CountStar))
+    options += ((2, () => QueryGen.Count(rng.oneOf(scope).ref, distinct = rng.bool(0.5))))
+    val minMax = scope.filter(_.dataType != DataType.BooleanType)
+    if (minMax.nonEmpty) {
+      options += ((2, () => QueryGen.Min(rng.oneOf(minMax).ref)))
+      options += ((2, () => QueryGen.Max(rng.oneOf(minMax).ref)))
+    }
+    if (numeric.nonEmpty) {
+      options += ((3, () => QueryGen.Sum(rng.oneOf(numeric).ref)))
+      options += ((3, () => QueryGen.Avg(rng.oneOf(numeric).ref)))
+    }
+    if (integral.nonEmpty)
+      options += ((1, () => QueryGen.Stat(rng.oneOf(Seq("STDDEV_SAMP", "STDDEV_POP", "VAR_SAMP", "VAR_POP")),
+        rng.oneOf(integral).ref)))
+    rng.weighted(options.toSeq: _*)()
+  }
+
+  // ---- scope-aware scalar generators (paren-free, total) ------------------
+
+  private val Numerics: Seq[DataType] =
+    Seq(DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType)
+  private val ArithOps = Seq("+", "-", "*", "/", "%")
+  private val RelOps = Seq("<", "<=", ">", ">=", "=", "<>")
+
+  private def leafProb(depth: Int): Double = if (depth <= 1) 0.6 else 0.35
+
+  /** A non-boolean value expression of `target` over `scope`. */
+  private def genValue(rng: Rng, scope: Vector[ScopeCol], target: DataType, depth: Int): Expr = {
+    if (depth <= 0 || rng.bool(leafProb(depth))) genLeafValue(rng, scope, target)
+    else if (target == DataType.StringType)
+      BinOpExpr("||", genValue(rng, scope, DataType.StringType, depth - 1),
+        genValue(rng, scope, DataType.StringType, depth - 1), DataType.StringType)
+    else rng.weighted(
+      (4, () => BinOpExpr(rng.oneOf(ArithOps), genValue(rng, scope, rng.oneOf(Numerics), depth - 1),
+        genValue(rng, scope, rng.oneOf(Numerics), depth - 1), target)),
+      (2, () => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(genValue(rng, scope, target, depth - 1)), target)),
+      (1, () => FuncExpr("ABS", Seq(genValue(rng, scope, target, depth - 1)), target)))()
+  }
+
+  private def genLeafValue(rng: Rng, scope: Vector[ScopeCol], target: DataType): Expr = {
+    val cols = scope.filter(_.dataType == target)
+    if (cols.nonEmpty && rng.bool(0.8)) rng.oneOf(cols).ref
+    else if (rng.bool(0.15)) LitExpr(null, target)
+    else LitExpr(genLit(rng, target), target)
+  }
+
+  /** A boolean predicate over `scope`. Paren-free: AND/OR compose by precedence;
+    * comparisons are same-category; `NOT` wraps only a boolean leaf. */
+  private def genPredicate(rng: Rng, scope: Vector[ScopeCol], depth: Int): Expr = {
+    if (depth <= 0 || rng.bool(leafProb(depth))) genAtom(rng, scope, depth)
+    else rng.weighted(
+      (3, () => BinOpExpr("AND", genPredicate(rng, scope, depth - 1), genPredicate(rng, scope, depth - 1), DataType.BooleanType)),
+      (3, () => BinOpExpr("OR", genPredicate(rng, scope, depth - 1), genPredicate(rng, scope, depth - 1), DataType.BooleanType)),
+      (2, () => UnaryOpExpr("NOT", genBoolLeaf(rng, scope), DataType.BooleanType)),
+      (5, () => genAtom(rng, scope, depth)))()
+  }
+
+  private def genBoolLeaf(rng: Rng, scope: Vector[ScopeCol]): Expr = {
+    val boolCols = scope.filter(_.dataType == DataType.BooleanType)
+    if (boolCols.nonEmpty && rng.bool(0.8)) rng.oneOf(boolCols).ref else LitExpr(rng.bool(), DataType.BooleanType)
+  }
+
+  private def genAtom(rng: Rng, scope: Vector[ScopeCol], depth: Int): Expr = {
+    def sub(t: DataType): Expr = genValue(rng, scope, t, math.max(0, depth - 1))
+    val boolCols = scope.filter(_.dataType == DataType.BooleanType)
+    val strCols = scope.filter(_.dataType == DataType.StringType)
+    val options = scala.collection.mutable.ArrayBuffer.empty[(Int, () => Expr)]
+    options += ((4, () => BinOpExpr(rng.oneOf(RelOps), sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics)), DataType.BooleanType)))
+    if (strCols.nonEmpty)
+      options += ((2, () => BinOpExpr(rng.oneOf(RelOps), sub(DataType.StringType), sub(DataType.StringType), DataType.BooleanType)))
+    options += ((2, () => IsNullExpr(sub(rng.oneOf(Numerics :+ DataType.StringType)), rng.bool())))
+    if (strCols.nonEmpty)
+      options += ((1, () => LikeExpr(rng.oneOf(strCols).ref, LitExpr(rng.oneOf(Seq("%", "a%", "%a%", "_")), DataType.StringType), rng.bool())))
+    if (boolCols.nonEmpty) options += ((2, () => rng.oneOf(boolCols).ref))
+    options += ((1, () => LitExpr(rng.bool(), DataType.BooleanType)))
+    rng.weighted(options.toSeq: _*)()
+  }
+
+  private def genLit(rng: Rng, dt: DataType): Any = dt match {
+    case DataType.IntType => rng.between(0, 3): Any
+    case DataType.LongType => rng.between(0, 3).toLong: Any
+    case DataType.FloatType => rng.oneOf(DoublePool).toFloat: Any
+    case DataType.DoubleType => rng.oneOf(DoublePool): Any
+    case DataType.BooleanType => rng.bool(): Any
+    case DataType.StringType => rng.oneOf(StringPool): Any
+    case other => throw new IllegalArgumentException(s"genLit: unsupported $other")
+  }
+
+  // ---- TLP partition-predicate selection ---------------------------------
+
+  /** Non-float, comparison-clean output types eligible as TLP partition keys. */
+  private def isPartitionable(dt: DataType): Boolean = dt match {
+    case DataType.IntType | DataType.LongType | DataType.StringType | DataType.BooleanType => true
+    case _ => false
+  }
+  private def isOrdered(dt: DataType): Boolean = dt match {
+    case DataType.IntType | DataType.LongType | DataType.StringType => true
+    case _ => false
+  }
+
+  /** Choose a TLP partition predicate over the query's type-reliable, non-float
+    * output columns ([[QueryCore.tlpCandidates]]), or `None` when there are none. */
+  private def genTlpPred(rng: Rng, cand: Vector[(String, DataType)]): Option[TlpPred] = {
+    if (cand.isEmpty) return None
+    val boolCols = cand.collect { case (n, DataType.BooleanType) => n }
+    val orderedCols = cand.filter { case (_, t) => isOrdered(t) }
+    val choices = scala.collection.mutable.ArrayBuffer.empty[(Int, () => TlpPred)]
+    if (boolCols.nonEmpty) choices += ((2, () => TlpBool(rng.oneOf(boolCols))))
+    if (orderedCols.nonEmpty) {
+      choices += ((2, () => {
+        val (n, t) = rng.oneOf(orderedCols)
+        val (op, neg) = rng.oneOf(cmpPairs)
+        TlpCmpLit(n, op, neg, SqlRender.expr(LitExpr(genLit(rng, t), t)))
+      }))
+      // Two same-typed ordered columns -> column/column comparison.
+      val byType = orderedCols.groupBy(_._2).values.filter(_.length >= 2).toSeq
+      if (byType.nonEmpty) choices += ((2, () => {
+        val pair = rng.oneOf(byType)
+        val a = rng.oneOf(pair)
+        val b = rng.oneOf(pair.filterNot(_._1 == a._1))
+        val (op, neg) = rng.oneOf(cmpPairs)
+        TlpCmpCols(a._1, op, neg, b._1)
+      }))
+    }
+    if (choices.isEmpty) None else Some(rng.weighted(choices.toSeq: _*)())
+  }
+
+  /** (op, negatedOp) pairs: for non-null operands exactly one of the two holds. */
+  private val cmpPairs: Seq[(String, String)] =
+    Seq("=" -> "<>", "<>" -> "=", "<" -> ">=", "<=" -> ">", ">" -> "<=", ">=" -> "<")
+
+  // ---- helpers ------------------------------------------------------------
+
+  private def distinctSubset[A](rng: Rng, xs: Vector[A], count: Int): Vector[A] = {
+    val want = math.max(0, math.min(count, xs.length))
+    val pool = scala.collection.mutable.ArrayBuffer.from(xs)
+    val out = Vector.newBuilder[A]
+    var k = 0
+    while (k < want && pool.nonEmpty) { out += pool.remove(rng.between(0, pool.length - 1)); k += 1 }
+    out.result()
+  }
+}
