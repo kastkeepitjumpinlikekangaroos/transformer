@@ -1,6 +1,7 @@
 package com.transformer.fuzz
 
 import com.transformer.core.{DataType, Schema}
+import com.transformer.fuzz.MetaQueryGen.{AggCore, MetaCase, MetaQuery, NoRecCase, ProjectCore, QueryCore, RelEnv}
 import com.transformer.fuzz.QueryGen._
 import com.transformer.sql.plan._
 
@@ -356,5 +357,76 @@ object Shrinker {
     case IsNullExpr(_, neg) => IsNullExpr(kids.head, neg)
     case InListExpr(_, items, neg) => InListExpr(kids.head, kids.drop(1).take(items.length), neg)
     case LikeExpr(_, _, neg) => LikeExpr(kids(0), kids(1), neg)
+  }
+
+  // ---- multi-relation MetaCase / NoRecCase shrinkers (metamorphic) ---------
+
+  /** Strictly-smaller candidates for a metamorphic `(env, query)` case. Each move
+    * shrinks a well-founded measure — relation rows, join count, CTE count, union
+    * arm, window/projection/aggregate count, or a contained expression's node
+    * count — so the greedy loop terminates. A move that yields an unbindable query
+    * (e.g. dropping a join a projection still references) or one whose TLP key
+    * vanished is harmless: the oracle returns `Rejected` / `Skipped`, which the
+    * property treats as a pass, so the shrinker never settles on it. The canonical
+    * minimum a join bug converges to is "a couple of rows each side, one join key,
+    * `... FROM a LEFT JOIN b ON a.k = b.k`". */
+  def metaCase(mc: MetaCase): Iterator[MetaCase] = {
+    val shrinkEnvRows: Iterator[MetaCase] = mc.env.relations.indices.iterator.flatMap { i =>
+      val rel = mc.env.relations(i)
+      shrinkRows(rel.dataset.rows).map { rows =>
+        val ds = DataGen.Dataset(rel.dataset.schema, rows)
+        mc.copy(env = RelEnv(mc.env.relations.updated(i, rel.copy(dataset = ds))))
+      }
+    }
+    val shrinkQuery: Iterator[MetaCase] = shrinkMetaQuery(mc.query).map(q => mc.copy(query = q))
+    shrinkEnvRows ++ shrinkQuery
+  }
+
+  /** Strictly-smaller candidates for a NoREC `(relation, predicate)` case: drop
+    * relation rows, then simplify the predicate. */
+  def noRecCase(nc: NoRecCase): Iterator[NoRecCase] = {
+    val dropRows: Iterator[NoRecCase] = shrinkRows(nc.relation.dataset.rows).map { rows =>
+      nc.copy(relation = nc.relation.copy(dataset = DataGen.Dataset(nc.relation.dataset.schema, rows)))
+    }
+    val simplerPred: Iterator[NoRecCase] = expr(nc.predicate).map(p => nc.copy(predicate = p))
+    dropRows ++ simplerPred
+  }
+
+  private def shrinkMetaQuery(q: MetaQuery): Iterator[MetaQuery] = {
+    val unwrapUnion: Iterator[MetaQuery] = q.setOp.iterator.map(_ => q.copy(setOp = None))
+    val dropWhere: Iterator[MetaQuery] = if (q.where.isDefined) Iterator(q.copy(where = None)) else Iterator.empty
+    val dropCte: Iterator[MetaQuery] = q.ctes.indices.iterator.map(i => q.copy(ctes = q.ctes.patch(i, Nil, 1)))
+    val dropJoin: Iterator[MetaQuery] = q.from.joins.indices.iterator.map(i =>
+      q.copy(from = q.from.copy(joins = q.from.joins.patch(i, Nil, 1))))
+    val shrinkCoreQ: Iterator[MetaQuery] = shrinkCore(q.core).map(c => q.copy(core = c))
+    val simplifyWhere: Iterator[MetaQuery] =
+      q.where.iterator.flatMap(w => expr(w).map(sw => q.copy(where = Some(sw))))
+    val simplifyOn: Iterator[MetaQuery] = q.from.joins.indices.iterator.flatMap { i =>
+      val j = q.from.joins(i)
+      expr(j.on).map(so => q.copy(from = q.from.copy(joins = q.from.joins.updated(i, j.copy(on = so)))))
+    }
+    unwrapUnion ++ dropWhere ++ dropJoin ++ dropCte ++ shrinkCoreQ ++ simplifyWhere ++ simplifyOn
+  }
+
+  private def shrinkCore(core: QueryCore): Iterator[QueryCore] = core match {
+    case p: ProjectCore =>
+      val dropWindow: Iterator[QueryCore] =
+        p.windows.indices.iterator.map(i => p.copy(windows = p.windows.patch(i, Nil, 1)))
+      val dropItem: Iterator[QueryCore] =
+        if (p.items.length <= 1) Iterator.empty
+        else p.items.indices.iterator.map(i => p.copy(items = p.items.patch(i, Nil, 1)))
+      val simplifyItem: Iterator[QueryCore] = p.items.indices.iterator.flatMap { i =>
+        val (e, n) = p.items(i)
+        expr(e).map(se => p.copy(items = p.items.updated(i, (se, n))))
+      }
+      dropWindow ++ dropItem ++ simplifyItem
+    case a: AggCore =>
+      val dropHaving: Iterator[QueryCore] = if (a.having.isDefined) Iterator(a.copy(having = None)) else Iterator.empty
+      val dropAgg: Iterator[QueryCore] =
+        if (a.aggs.length <= 1) Iterator.empty
+        else a.aggs.indices.iterator.map(i => a.copy(aggs = a.aggs.patch(i, Nil, 1)))
+      val dropKey: Iterator[QueryCore] =
+        a.groupKeys.indices.iterator.map(i => a.copy(groupKeys = a.groupKeys.patch(i, Nil, 1)))
+      dropHaving ++ dropAgg ++ dropKey
   }
 }

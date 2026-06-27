@@ -112,4 +112,3 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
-

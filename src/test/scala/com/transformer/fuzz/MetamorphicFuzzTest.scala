@@ -75,7 +75,7 @@ class MetamorphicFuzzTest {
     Props.forAll[MetaCase](
       name = "tlp",
       gen = MetaQueryGen.generate,
-      shrink = _ => Iterator.empty, // multi-relation shrinking lands in Shrinker.metaCase
+      shrink = Shrinker.metaCase,
       count = Props.seedCountOr(DefaultMetaSeeds)
     ) { mc => Tlp.check(mc); () }
 
@@ -83,7 +83,7 @@ class MetamorphicFuzzTest {
     Props.forAll[NoRecCase](
       name = "norec",
       gen = MetaQueryGen.generateNoRec,
-      shrink = _ => Iterator.empty,
+      shrink = Shrinker.noRecCase,
       count = Props.seedCountOr(DefaultMetaSeeds * 2) // NoREC is cheap (2 queries)
     ) { nc => NoRec.check(nc); () }
 
@@ -91,7 +91,7 @@ class MetamorphicFuzzTest {
     Props.forAll[MetaCase](
       name = "meta-mode-differential",
       gen = MetaQueryGen.generate,
-      shrink = _ => Iterator.empty,
+      shrink = Shrinker.metaCase,
       count = Props.seedCountOr(DefaultMetaSeeds)
     ) { mc => MetaModeDifferential.check(mc); () }
 
@@ -167,6 +167,30 @@ class MetamorphicFuzzTest {
     assertTrue(s"ctes=$ctes", ctes > 100)
     assertTrue(s"windows=$windows", windows > 50)
     assertTrue(s"aggregates=$aggregates", aggregates > 100)
+  }
+
+  /** The multi-relation shrinker produces valid, strictly-reducing candidates and
+    * reaches a fixpoint — a machinery check independent of any real failure (the
+    * campaign never fails, so this is the only place shrinking is exercised).
+    * Greedily follows the first candidate (an always-failing oracle) to a
+    * fixpoint and asserts it terminated and reduced the row count. */
+  @Test def shrinkerTerminatesAndReduces(): Unit = {
+    val start = MetaQueryGen.generate(new Rng(181L))
+    val startRows = start.env.relations.map(_.dataset.numRows).sum
+    assertTrue("seed has rows to shrink", startRows > 0)
+    var cur = start
+    var steps = 0
+    var progressed = true
+    while (progressed && steps < 5000) {
+      progressed = false
+      val it = Shrinker.metaCase(cur)
+      if (it.hasNext) { cur = it.next(); progressed = true; steps += 1 }
+    }
+    assertTrue(s"terminated (steps=$steps)", steps < 5000)
+    val endRows = cur.env.relations.map(_.dataset.numRows).sum
+    assertTrue(s"reduced rows $startRows -> $endRows", endRows < startRows)
+    // Every emitted candidate must still render to non-empty SQL (no broken AST).
+    Shrinker.metaCase(start).take(20).foreach(c => assertTrue(c.query.renderBody.nonEmpty))
   }
 
   /** Same seed reproduces the exact query + env — the repro contract failure
