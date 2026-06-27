@@ -221,19 +221,39 @@ object MetaQueryGen {
       s"MetaCase(\n  body = $bodySql\n  tlp  = ${tlp.getOrElse("<none>")}\n  env  = $env)"
   }
 
-  /** The query body (the text that becomes a CTE body / the base query). */
-  final case class MetaQuery(from: FromClause, where: Option[Expr], core: QueryCore) {
+  /** The query body (the text that becomes a CTE body / the base query).
+    *
+    * `setOp` carries an optional `UNION` / `UNION ALL` right arm — a second
+    * [[MetaQuery]] over the same relation environment producing a schema-compatible
+    * output (the binder takes the union's column names + types from the LEFT arm,
+    * so [[outputSchema]] / [[tlpCandidates]] are this arm's). */
+  final case class MetaQuery(
+      from: FromClause,
+      where: Option[Expr],
+      core: QueryCore,
+      setOp: Option[(MetaQuery, Boolean)] = None) {
     def outputSchema: Vector[(String, DataType)] = core.outputSchema
     def tlpCandidates: Vector[(String, DataType)] = core.tlpCandidates
     def whereSql: String = where.map(w => s" WHERE ${SqlRender.expr(w)}").getOrElse("")
-    def renderBody: String =
+
+    private def armSql: String =
       s"SELECT ${core.renderSelect} FROM ${from.render}$whereSql${core.groupSql}${core.havingSql}"
+    def renderBody: String = setOp match {
+      case None => armSql
+      case Some((rhs, all)) => s"$armSql UNION ${if (all) "ALL " else ""}${rhs.renderBody}"
+    }
 
     /** Whether the output multiset is independent of the physical input layout.
-      * Projection / join / aggregate / distinct bodies are all layout-invariant
-      * (their result multiset is determined by the input rows, not by partition
-      * fan-out), so the mode-agreement oracle can replay them across layouts. */
+      * Projection / join / aggregate / distinct / union bodies are all
+      * layout-invariant (their result multiset is determined by the input rows,
+      * not by partition fan-out), so the mode-agreement oracle can replay them
+      * across layouts. */
     def isLayoutInvariant: Boolean = true
+
+    /** Whether any arm of the query (this body or a union arm) contains a join —
+      * the gate the mode-agreement oracle uses to skip the spill mode (the
+      * grace-hash join spill path is buggy; see [[oracle.MetaModeDifferential]]). */
+    def hasAnyJoin: Boolean = from.joins.nonEmpty || setOp.exists(_._1.hasAnyJoin)
   }
 
   /** A single relation plus a predicate over its columns (aliased `t`) — the
@@ -336,12 +356,37 @@ object MetaQueryGen {
 
   // ---- query generation ---------------------------------------------------
 
-  private def genQuery(rng: Rng, env: RelEnv): MetaQuery = {
+  private def genQuery(rng: Rng, env: RelEnv): MetaQuery =
+    if (rng.bool(0.2)) genUnion(rng, env) else genSelect(rng, env)
+
+  private def genSelect(rng: Rng, env: RelEnv): MetaQuery = {
     val from = genFrom(rng, env)
     val scope = from.scope
     val where = if (rng.bool(0.6)) Some(genPredicate(rng, scope, rng.between(1, 3))) else None
     val core = if (rng.bool(0.5)) genAggCore(rng, scope) else genProjectCore(rng, scope)
     MetaQuery(from, where, core)
+  }
+
+  /** A `UNION` / `UNION ALL` of two single-relation arms that both project one
+    * bare key column. The arms are schema-compatible by construction: every
+    * relation in the env shares the key type, so both arms output `[o0: keyType]`.
+    * UNION (distinct) and UNION ALL (multiset) are both generated; TLP over the
+    * union output and the dedup-vs-concat distinction are what this exercises. */
+  private def genUnion(rng: Rng, env: RelEnv): MetaQuery = {
+    val all = rng.bool()
+    val arm1 = genUnionArm(rng, env)
+    val arm2 = genUnionArm(rng, env)
+    arm1.copy(setOp = Some((arm2, all)))
+  }
+
+  private def genUnionArm(rng: Rng, env: RelEnv): MetaQuery = {
+    val rel = rng.oneOf(env.relations)
+    val alias = "t0"
+    val cols = rel.schema.fields.map(f => ScopeCol(alias, f.name, f.dataType)).toVector
+    val keyCol = cols(rng.oneOf(rel.keyCols))
+    val where = if (rng.bool(0.5)) Some(genPredicate(rng, cols, rng.between(1, 2))) else None
+    val core = ProjectCore(Vector((keyCol.ref, "o0")), distinct = rng.bool(0.3))
+    MetaQuery(FromClause(FromLeaf(rel.name, alias, cols), Vector.empty), where, core)
   }
 
   /** A left-deep FROM: a root relation plus 0-2 joins. A join's right relation may

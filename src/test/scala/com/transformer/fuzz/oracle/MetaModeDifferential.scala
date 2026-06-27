@@ -77,7 +77,7 @@ object MetaModeDifferential {
       ("layout=empty-partitions", env.catalog(_.withEmptyPartitions(5, batchRows = 4)), ExecutionOptions.Default),
       ("metrics-on", env.catalog(), MetricsOn))
     val spill =
-      if (mc.query.from.joins.nonEmpty) Nil
+      if (mc.query.hasAnyJoin) Nil
       else Seq(("spill-on", env.catalog(), SpillOn))
     layoutAndMetrics ++ spill
   }

@@ -228,6 +228,35 @@ class MetamorphicFuzzTest {
     assertNoRecHeld(NoRecCase(r, pred))
   }
 
+  private val oneLong = Schema(Vector(Field("c0", DataType.LongType)))
+
+  /** TLP over a `UNION ALL` (multiset concat): partitioning the concatenated
+    * output must recover every row, including duplicates across arms. */
+  @Test def regressionTlpOverUnionAll(): Unit = {
+    val a = rel("r0", oneLong, IndexedSeq(Array[Any](1L), Array[Any](2L), Array[Any](null)), Vector(0))
+    val b = rel("r1", oneLong, IndexedSeq(Array[Any](2L), Array[Any](3L)), Vector(0))
+    val env = RelEnv(Vector(a, b))
+    def arm(name: String): MetaQuery =
+      MetaQuery(FromClause(FromLeaf(name, "t0", Vector(sc("t0", oneLong, 0))), Vector.empty),
+        None, ProjectCore(Vector((sc("t0", oneLong, 0).ref, "o0")), distinct = false))
+    val union = arm("r0").copy(setOp = Some((arm("r1"), true)))
+    assertTlpHeld(MetaCase(env, union, Some(TlpCmpLit("o0", ">", "<=", "1"))))
+  }
+
+  /** TLP over a `UNION` (distinct): partitioning the deduped output must recover
+    * every distinct row exactly once. */
+  @Test def regressionTlpOverUnionDistinct(): Unit = {
+    val a = rel("r0", oneLong, IndexedSeq(Array[Any](1L), Array[Any](1L), Array[Any](2L)), Vector(0))
+    val b = rel("r1", oneLong, IndexedSeq(Array[Any](2L), Array[Any](2L), Array[Any](3L), Array[Any](null)), Vector(0))
+    val env = RelEnv(Vector(a, b))
+    def arm(name: String): MetaQuery =
+      MetaQuery(FromClause(FromLeaf(name, "t0", Vector(sc("t0", oneLong, 0))), Vector.empty),
+        None, ProjectCore(Vector((sc("t0", oneLong, 0).ref, "o0")), distinct = false))
+    val union = arm("r0").copy(setOp = Some((arm("r1"), false))) // UNION (dedup)
+    assertEquals(RelEngine.Held, MetaModeDifferential.check(MetaCase(env, union, None)))
+    assertTlpHeld(MetaCase(env, union, Some(TlpCmpLit("o0", ">=", "<", "2"))))
+  }
+
   /** Mode agreement over a self-join: the same join result multiset across spill /
     * metrics / partition layouts. */
   @Test def regressionSelfJoinModeAgreement(): Unit = {
