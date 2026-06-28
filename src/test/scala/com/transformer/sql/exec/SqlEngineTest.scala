@@ -1634,4 +1634,49 @@ class SqlEngineTest {
     assertNotNull(ex)
     assertTrue(ex.getMessage, ex.getMessage.contains("column alias"))
   }
+
+  /** plans/bugfixes/01 end-to-end repro. `a JOIN b JOIN b` builds an inner
+    * result with a duplicate-named schema `[k, v, k, v]`; routing that through
+    * the outer join's grace-hash spill used to NPE reading the spilled bucket
+    * back (parquet addresses columns by name). Positional spill names fix it.
+    * Compares the spilled run against the non-spill baseline. */
+  @Test def joinDerivedDuplicateColumnsSpillEndToEnd(): Unit = {
+    val schema = Schema(Vector(Field("k", DataType.IntType), Field("v", DataType.LongType)))
+    def view(rows: Seq[(Int, Long)]): MaterializedView = {
+      val b = new ColumnarBatch(schema, math.max(1, rows.length))
+      rows.zipWithIndex.foreach { case ((k, v), i) =>
+        b.column(0).setBoxed(i, java.lang.Integer.valueOf(k))
+        b.column(1).setBoxed(i, java.lang.Long.valueOf(v))
+      }
+      b.setNumRows(rows.length)
+      new MaterializedView(schema, IndexedSeq(IndexedSeq(b)))
+    }
+    def catalog(): Catalog = {
+      val c = new Catalog
+      c.register("a", view(Seq((1, 1L), (2, 2L))))
+      c.register("b", view(Seq((1, 9L), (2, 8L), (1, 90L))))
+      c
+    }
+    val sql = "SELECT t2.v FROM a t0 JOIN b t1 ON t0.k = t1.k JOIN b t2 ON t1.k = t2.k"
+    def run(opts: ExecutionOptions): Seq[Long] = {
+      val q = SqlEngine.execute(sql, catalog(), opts)
+      val col = q.schema.fieldNames.head
+      collectAllRows(q).map(_(col).asInstanceOf[java.lang.Long].longValue)
+    }
+
+    val expected = run(ExecutionOptions.Default).sorted
+    // Isolate spill output under a throwaway dir (spill is otherwise unused in
+    // this test class, so the lazy Spill.rootDir initializes here).
+    val prevProp = System.getProperty(Spill.SpillDirProperty)
+    val tmp = Files.createTempDirectory("sqlengine-spill-")
+    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
+    try {
+      val actual = run(ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))).sorted
+      assertTrue("expected a non-empty result", expected.nonEmpty)
+      assertEquals(expected, actual)
+    } finally {
+      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
+      else System.setProperty(Spill.SpillDirProperty, prevProp)
+    }
+  }
 }

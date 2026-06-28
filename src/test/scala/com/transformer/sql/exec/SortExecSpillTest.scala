@@ -188,6 +188,54 @@ class SortExecSpillTest {
     assertEquals(5000L, snap.counter("inputRows"))
     assertEquals(5000L, snap.counter("outputRows"))
   }
+
+  // ---- Regression: duplicate-named child schema under spill -----------------
+  //
+  // A child whose output schema has two columns sharing a name (`[k, k]`, as a
+  // join output `[k, v, k, v]` would) used to write spill runs with duplicate
+  // parquet column paths, which read back null and NPE'd in DiskRunCursor. The
+  // runs now use positional names. See plans/bugfixes/01.
+  @Test def duplicateNamedChildSchemaUnderSpill(): Unit = {
+    val dupSchema = Schema(Vector(Field("k", DataType.IntType), Field("k", DataType.IntType)))
+    val rng = new Random(2026L)
+    val keys = rng.shuffle((0 until 5000).toVector)
+    val rows = keys.map(kv =>
+      Array[Any](java.lang.Integer.valueOf(kv), java.lang.Integer.valueOf(kv * 2))).toVector
+    val perPart = (rows.length + 3) / 4
+    val parts = rows.grouped(perPart).toVector
+    val sortKey = ColRefExpr(0, "k", DataType.IntType)
+
+    def run(opts: ExecutionOptions): Vector[Array[Any]] = {
+      val plan = new InMemoryPartitionedPlanForSpillTest(dupSchema, parts)
+      val sort = SortExec(plan, Seq((sortKey, true)), opts)
+      val it = sort.execute(0)
+      val buf = mutable.ArrayBuffer.empty[Array[Any]]
+      while (it.hasNext) {
+        val b = it.next()
+        assertEquals("emitted batch must carry the logical schema, not spilled _cN names",
+          dupSchema.fields.map(_.name), b.schema.fields.map(_.name))
+        var r = 0
+        while (r < b.numRows) {
+          buf += Array[Any](
+            if (b.column(0).isNull(r)) null else b.column(0).getBoxed(r),
+            if (b.column(1).isNull(r)) null else b.column(1).getBoxed(r))
+          r += 1
+        }
+      }
+      buf.toVector
+    }
+
+    val expected = run(ExecutionOptions.Default)
+    val actual = run(spillyOpts())
+    assertEquals(5000, actual.length)
+    // Unique keys → positional equality on the sort key.
+    assertEquals(
+      expected.map(_(0).asInstanceOf[Integer].intValue),
+      actual.map(_(0).asInstanceOf[Integer].intValue))
+    val expMs = expected.map(_.toVector).groupBy(identity).view.mapValues(_.size).toMap
+    val actMs = actual.map(_.toVector).groupBy(identity).view.mapValues(_.size).toMap
+    assertEquals(expMs, actMs)
+  }
 }
 
 /** Local copy of the in-memory partitioned plan used by [[SortExecTest]] —

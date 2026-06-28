@@ -262,12 +262,17 @@ private[exec] object DistinctSpiller {
       schema: Schema,
       set: util.LinkedHashSet[AnyRef]): Unit = {
     if (set.isEmpty) return
+    // Spill files are read back by index (see foldSpillFiles); positional names
+    // keep a duplicate-named child schema round-trippable through parquet's
+    // by-name column model. See Spill.positionalSchema. The decode below writes
+    // key columns by index, so it is unaffected by the rename.
+    val spillFileSchema = Spill.positionalSchema(schema)
     val capacity = ColumnarBatch.DefaultCapacity
     val it = set.iterator()
     val batchIter = new Iterator[ColumnarBatch] {
       def hasNext: Boolean = it.hasNext
       def next(): ColumnarBatch = {
-        val out = new ColumnarBatch(schema, capacity)
+        val out = new ColumnarBatch(spillFileSchema, capacity)
         var r = 0
         while (r < capacity && it.hasNext) {
           codec.decode(it.next(), out, 0, r)
@@ -277,7 +282,7 @@ private[exec] object DistinctSpiller {
         out
       }
     }
-    ParquetWriter.writeAll(file, schema, batchIter)
+    ParquetWriter.writeAll(file, spillFileSchema, batchIter)
   }
 
   def foldSpillFiles(

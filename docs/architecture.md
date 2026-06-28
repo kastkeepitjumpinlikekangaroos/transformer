@@ -297,9 +297,9 @@ Per-operator format:
   `AggStateSerde`). At emit time every partition's spill files are
   folded back into the merged map. The codec map path and the
   `LongHashMap` fast path each spill independently.
-- `DistinctExec` writes one row per distinct key (same schema as the
-  operator's output) and the union step folds spill files back into the
-  final set.
+- `DistinctExec` writes one row per distinct key (the operator's output
+  columns, positionally renamed — see below) and the union step folds
+  spill files back into the final set.
 - `HashJoinExec` uses **grace hash**: with spill enabled, both sides
   are routed into K=16 disk buckets by `fmix32(hash(joinKeys)) % K`,
   then each `(build_k, probe_k)` pair is processed sequentially —
@@ -320,6 +320,18 @@ Per-operator format:
   collocates in the same bucket. Empty PARTITION BY or mixed
   partition-keys across specs silently disable spill (there's no key
   set to bucket by); same gate the planner uses for sharded windows.
+
+Spill files use **positional column names**, not the logical schema's.
+Every read path above addresses spilled columns by INDEX and reinterprets
+types from the operator's own logical schema, so the on-disk names carry
+no information — and parquet's by-name column model cannot round-trip two
+columns that share a name (a join output like `[k, v, k, v]`, or
+name-colliding GROUP BY keys). Each write site wraps its schema in
+`Spill.positionalSchema` (`_c0`, `_c1`, ...); `AggSpiller.spillSchema`
+renames the group-key columns to `_k0`, `_k1`, ... ahead of the `_agg*`
+state columns. This is spill-only — real output files (the non-spill
+`ParquetWriter` callers) keep their real column names. See
+[plans/bugfixes/01](../plans/bugfixes/01-spill-duplicate-column-names.md).
 
 Limitations: `COUNT(DISTINCT …)` aggregates silently disable spill on
 the whole operator because the underlying `HashSet[Any]` doesn't

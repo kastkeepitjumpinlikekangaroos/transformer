@@ -157,6 +157,10 @@ final case class WindowExec(
       K: Int,
       spillDir: OperatorSpillDir): Array[Path] = {
     val schema = child.outputSchema
+    // Buckets are read back by index (see processBatches); positional names
+    // keep a duplicate-named child schema round-trippable. See
+    // Spill.positionalSchema.
+    val spillFileSchema = Spill.positionalSchema(schema)
     val ncols = schema.length
     val routingKeyExprs = windows.head.spec.partitionKeys.toArray
     val nKeys = routingKeyExprs.length
@@ -174,7 +178,7 @@ final case class WindowExec(
       out.setNumRows(n)
       if (writers(b) == null) {
         files(b) = spillDir.newSpillFile(s".window.b$b.parquet")
-        writers(b) = new TParquetWriter(files(b), schema, Map.empty)
+        writers(b) = new TParquetWriter(files(b), spillFileSchema, Map.empty)
       }
       writers(b).write(out)
       if (metricsNode != null) metricsNode.counters(WindowExec.IdxPartitionSpillEvents).increment()

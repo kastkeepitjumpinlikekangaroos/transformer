@@ -117,6 +117,27 @@ object Spill {
     total
   }
 
+  /** A copy of `schema` with field names replaced by positional, collision-free
+    * placeholders (`_c0`, `_c1`, ...) and types/order preserved. Every field is
+    * made nullable (parquet OPTIONAL) so any null value round-trips regardless
+    * of the logical schema's repetition flags.
+    *
+    * Spill files are read back by column INDEX, never by name (every spill read
+    * path materializes rows positionally and reinterprets types from the
+    * operator's own logical schema), so the original names carry no information
+    * the reader uses. They are also actively harmful: parquet's by-name column
+    * model cannot round-trip two columns that share a name — a join output like
+    * `[k, v, k, v]`, or name-colliding GROUP BY keys — because the second
+    * column's pages resolve to `null` on read and the decoder NPEs. Writing
+    * positional names sidesteps that entirely.
+    *
+    * Spill-only: do not route real output files (the non-spill `ParquetWriter`
+    * callers) through here — those must keep their real column names. */
+  def positionalSchema(schema: Schema): Schema =
+    Schema(schema.fields.iterator.zipWithIndex.map {
+      case (f, i) => Field(s"_c$i", f.dataType)
+    }.toVector)
+
   /** Sweep stale `${rootDir}/transformer-spill-*` directories from prior
     * JVM runs. Bounded by listing the immediate children of `parent`; does
     * not recurse beyond one level. Failures are swallowed — a missing parent

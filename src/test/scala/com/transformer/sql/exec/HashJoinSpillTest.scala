@@ -71,6 +71,31 @@ class HashJoinSpillTest {
   private def multiset(v: Vector[Vector[Any]]): Map[Vector[Any], Int] =
     v.groupBy(identity).view.mapValues(_.size).toMap
 
+  /** Drain while asserting every emitted batch carries `expected`'s field
+    * names — guards against a spilled `_cN` positional schema leaking to the
+    * parent instead of the operator's logical output schema. */
+  private def drainAssertingSchema(
+      it: Iterator[ColumnarBatch], expected: Schema): Vector[Vector[Any]] = {
+    val buf = mutable.ArrayBuffer.empty[Vector[Any]]
+    while (it.hasNext) {
+      val b = it.next()
+      assertEquals("emitted batch must carry the logical output schema, not spilled _cN names",
+        expected.fields.map(_.name), b.schema.fields.map(_.name))
+      var r = 0
+      while (r < b.numRows) {
+        val arr = new Array[Any](expected.length)
+        var c = 0
+        while (c < expected.length) {
+          arr(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
+          c += 1
+        }
+        buf += arr.toVector
+        r += 1
+      }
+    }
+    buf.toVector
+  }
+
   private def spillyOpts(): ExecutionOptions =
     ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))
 
@@ -275,5 +300,79 @@ class HashJoinSpillTest {
       snap.counter("buildSideRows") > 0L)
     assertTrue(s"probeSideRows must be > 0, got ${snap.counter("probeSideRows")}",
       snap.counter("probeSideRows") > 0L)
+  }
+
+  // ---- Regression: spill of a join-DERIVED (duplicate-named) input ----------
+  //
+  // `a JOIN b ON a.k=b.k` over two relations that share column names yields a
+  // schema with duplicate field names `[k, v, k, v]`. Routing that through a
+  // parent join's grace-hash spill used to write a parquet file with two
+  // columns named `k` (and two named `v`); on read-back the second of each
+  // pair resolved to a null page and the engine NPE'd in ParquetReader. The
+  // fix writes spill files with positional names. These reproduce the exact
+  // scenario from plans/bugfixes/01 — once on the probe side (the captured
+  // stack trace), once on the build side.
+
+  /** `a(k,v) JOIN b(k,v) ON a.k=b.k`, output schema `[k, v, k, v]`. */
+  private def dupNamedInnerJoin(): HashJoinExec = {
+    val kv = Schema(Vector(Field("k", DataType.IntType), Field("v", DataType.LongType)))
+    def rows(pairs: Seq[(Int, Long)]): Vector[Array[Any]] =
+      pairs.map(t => Array[Any](java.lang.Integer.valueOf(t._1), java.lang.Long.valueOf(t._2))).toVector
+    val a = new InMemoryPlan(kv, Vector(rows(Seq((1, 10L), (2, 20L), (1, 11L), (3, 30L)))))
+    val b = new InMemoryPlan(kv, Vector(rows(Seq((1, 100L), (2, 200L), (1, 101L)))))
+    HashJoinExec(a, b, Seq(ColRefExpr(0, "k", DataType.IntType)),
+      Seq(ColRefExpr(0, "k", DataType.IntType)), None, JoinKind.Inner,
+      buildRight = true, opts = ExecutionOptions.Default)
+  }
+
+  /** Outer relation `c(k, w)` joined against the duplicate-named inner join. */
+  private def cPlan(): InMemoryPlan = {
+    val cSchema = Schema(Vector(Field("k", DataType.IntType), Field("w", DataType.LongType)))
+    val rows = Vector(
+      Array[Any](java.lang.Integer.valueOf(1), java.lang.Long.valueOf(7L)),
+      Array[Any](java.lang.Integer.valueOf(2), java.lang.Long.valueOf(8L)),
+      Array[Any](java.lang.Integer.valueOf(3), java.lang.Long.valueOf(9L)))
+    new InMemoryPlan(cSchema, Vector(rows))
+  }
+
+  @Test def probeInputJoinDerivedDuplicateSchemaUnderSpill(): Unit = {
+    // Outer join's PROBE side (left) is the duplicate-named inner join — this
+    // is the path in the captured NPE (probeBucket → ParquetReader). Join on
+    // the inner's second `k` column (index 2, i.e. b.k).
+    def outer(opts: ExecutionOptions): HashJoinExec =
+      HashJoinExec(dupNamedInnerJoin(), cPlan(),
+        Seq(ColRefExpr(2, "k", DataType.IntType)),
+        Seq(ColRefExpr(0, "k", DataType.IntType)),
+        None, JoinKind.Inner, buildRight = true, opts = opts)
+    val expectedPlan = outer(ExecutionOptions.Default)
+    val expected = drainRows(
+      (0 until expectedPlan.numPartitions).iterator.flatMap(expectedPlan.execute),
+      expectedPlan.outputSchema)
+    val actualPlan = outer(spillyOpts())
+    val actual = drainAssertingSchema(
+      (0 until actualPlan.numPartitions).iterator.flatMap(actualPlan.execute),
+      actualPlan.outputSchema)
+    assertTrue("expected at least one joined row", expected.nonEmpty)
+    assertEquals(multiset(expected), multiset(actual))
+  }
+
+  @Test def buildInputJoinDerivedDuplicateSchemaUnderSpill(): Unit = {
+    // Outer join's BUILD side (right) is the duplicate-named inner join — this
+    // exercises loadBuildFromBucket's read-back of a positional spill file.
+    def outer(opts: ExecutionOptions): HashJoinExec =
+      HashJoinExec(cPlan(), dupNamedInnerJoin(),
+        Seq(ColRefExpr(0, "k", DataType.IntType)),
+        Seq(ColRefExpr(0, "k", DataType.IntType)),
+        None, JoinKind.Inner, buildRight = true, opts = opts)
+    val expectedPlan = outer(ExecutionOptions.Default)
+    val expected = drainRows(
+      (0 until expectedPlan.numPartitions).iterator.flatMap(expectedPlan.execute),
+      expectedPlan.outputSchema)
+    val actualPlan = outer(spillyOpts())
+    val actual = drainAssertingSchema(
+      (0 until actualPlan.numPartitions).iterator.flatMap(actualPlan.execute),
+      actualPlan.outputSchema)
+    assertTrue("expected at least one joined row", expected.nonEmpty)
+    assertEquals(multiset(expected), multiset(actual))
   }
 }

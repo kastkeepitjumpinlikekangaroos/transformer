@@ -152,25 +152,31 @@ ship a fix or move something from "not done" to "done".
   no side info) or restructure the predicate so the planner can extract
   one. There's deliberately no per-task escape hatch — the threshold is
   the contract.
-- **Grace-hash join spill crashes when the probe rows are join-derived.**
-  (Known `src/main` bug, surfaced by the metamorphic fuzzer, not yet fixed.)
-  With spill enabled (`options.spill = "true"` + a low `spill_threshold_bytes`),
-  a `HashJoinExec` whose input is itself a join NPEs reading a spilled bucket
-  back: the spilled partition's parquet `DataPage` comes back null and
-  `HashJoinExec.probeBucket` -> `ParquetPartitionIterator.loadNextGroup`
-  (in `ParquetReader.scala`) dereferences it. Two-way joins over base scans
-  spill fine — the bug needs join-DERIVED rows under spill. Minimal repro
-  (`spill_threshold_bytes = 1`):
+- **Spill files use positional column names, never the logical schema's.**
+  Every spill-capable breaker (`HashJoinExec`, `HashAggregateExec`, `SortExec`,
+  `DistinctExec`, `WindowExec`) writes its working set to temp parquet and reads
+  it back by column INDEX. Parquet addresses columns by name-path, so a spilled
+  schema with two equal field names — a join output like `[k, v, k, v]`, or
+  name-colliding GROUP BY keys (`GROUP BY t0.k, t1.k` → `[k, k, ...]`) — used to
+  write a file the reader couldn't disambiguate: the second column's pages came
+  back null and `ParquetPartitionIterator.loadNextGroup` NPE'd dereferencing a
+  null `DataPage`. This crashed on the repro below (`spill_threshold_bytes = 1`)
+  and was the bug the metamorphic fuzzer gated around:
 
   ```
   a(k,v) = {(1,1)},  b(k,v) = {(1,9)}
   SELECT t2.v FROM a t0 JOIN b t1 ON t0.k = t1.k JOIN b t2 ON t1.k = t2.k
   ```
 
-  Surfaced by the metamorphic mode-agreement oracle (`MetaModeDifferential`),
-  which gates around it by skipping the spill mode for any query containing a
-  join (`hasAnyJoin`); TLP and the non-spill modes still exercise join queries
-  fully. Fixing it is a separate change from the fuzz harness.
+  Fixed by writing spill files through `Spill.positionalSchema` (`_c0`, `_c1`,
+  ...); `AggSpiller.spillSchema` renames the group-key columns to `_k0`, `_k1`,
+  ... too. **If you add a spill write site, wrap its schema the same way** — the
+  read paths are all index-only, so names carry nothing and duplicates break the
+  round-trip. This is spill-only: real (non-spill) `ParquetWriter` output keeps
+  its real column names. Regression coverage is a duplicate-named spill case in
+  each operator's `*SpillTest`, the end-to-end repro in `SqlEngineTest`, and the
+  metamorphic + sharded fuzzers, which now run the spill mode on join queries
+  (`MetaModeDifferential` no longer skips `hasAnyJoin`).
 - **`SELECT COUNT(*) FROM <view>` short-circuits to footer metadata** when
   the view's `CatalogView.exactRowCount` is defined (parquet + in-memory).
   The planner emits `CountStarMetadataExec` directly; no scan happens. The

@@ -281,6 +281,48 @@ class HashAggregateSpillTest {
     val rows = drainRows(out, agg.outputSchema)
     assertEquals(5, rows.length) // 5 distinct keys
   }
+
+  // ---- Regression: name-colliding GROUP BY keys under spill -----------------
+  //
+  // `GROUP BY t0.k, t1.k` renders two group-key columns both named "k". The
+  // spill schema used to keep those names, so writeCodecMap emitted a parquet
+  // file with two columns named "k"; on read-back foldCodecSpillFiles got a
+  // null page for the second and NPE'd. The spillSchema now names key columns
+  // positionally (_k0, _k1). See plans/bugfixes/01.
+  @Test def collidingGroupKeyNamesUnderSpill(): Unit = {
+    val schema = Schema(Vector(
+      Field("k0", DataType.IntType),
+      Field("k1", DataType.IntType),
+      Field("v", DataType.LongType)))
+    val rng = new Random(2026L)
+    val parts = (0 until 3).map { _ =>
+      (0 until 3000).map { _ =>
+        Array[Any](
+          java.lang.Integer.valueOf(rng.nextInt(15)),
+          java.lang.Integer.valueOf(rng.nextInt(15)),
+          java.lang.Long.valueOf(rng.nextLong() & 0xFFFFL))
+      }.toVector
+    }.toVector
+    val plan = new InMemoryPartitionedPlanForAggSpill(schema, parts)
+    val k0 = ColRefExpr(0, "k0", DataType.IntType)
+    val k1 = ColRefExpr(1, "k1", DataType.IntType)
+    val v = ColRefExpr(2, "v", DataType.LongType)
+    // Both group keys aliased to the SAME name "k".
+    def run(opts: ExecutionOptions, node: MetricsNode = null): Vector[Vector[Any]] = {
+      val agg = HashAggregateExec(plan, Seq((k0, "k"), (k1, "k")),
+        Seq((AggExprSum(v), "sumv")), opts, node)
+      val out = (0 until agg.numPartitions).iterator.flatMap(agg.execute)
+      drainRows(out, agg.outputSchema)
+    }
+    val expected = run(ExecutionOptions.Default)
+    val node = new MetricsNode(0, "HashAggregateExec", 0, HashAggregateExec.IdxCounterNames)
+    val actual = run(spillyOpts(), node)
+    assertTrue("expected non-empty result", expected.nonEmpty)
+    assertEquals(expected.toSet, actual.toSet)
+    // Prove the spill path actually ran — otherwise the regression is vacuous.
+    assertTrue(s"spillEvents must be > 0, got ${node.snapshot().counter("spillEvents")}",
+      node.snapshot().counter("spillEvents") > 0L)
+  }
 }
 
 private final class InMemoryPartitionedPlanForAggSpill(

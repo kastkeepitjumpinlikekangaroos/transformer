@@ -284,4 +284,63 @@ class WindowExecSpillTest {
     assertTrue(s"partitionCount must be > 0, got ${snap.counter("partitionCount")}",
       snap.counter("partitionCount") > 0L)
   }
+
+  // ---- Regression: duplicate-named child schema under spill -----------------
+  //
+  // A child whose output schema has two columns sharing a name (`[k, k]`, as a
+  // join output `[k, v, k, v]` would) used to write disk buckets with
+  // duplicate parquet column paths, which read back null and NPE'd in
+  // processBatches. Buckets now use positional names. See plans/bugfixes/01.
+  @Test def duplicateNamedChildSchemaUnderSpill(): Unit = {
+    val schema = Schema(Vector(Field("k", DataType.IntType), Field("k", DataType.IntType)))
+    val rng = new Random(2026L)
+    val rows = (0 until 5000).map { _ =>
+      Array[Any](
+        java.lang.Integer.valueOf(rng.nextInt(7)),
+        java.lang.Integer.valueOf(rng.nextInt(1000)))
+    }.toVector
+    val plan = new InMemoryPlan(schema, Vector(rows))
+    // PARTITION BY the first column, ORDER BY the second; ROW_NUMBER.
+    val partKey = ColRefExpr(0, "k", DataType.IntType)
+    val orderKey = ColRefExpr(1, "k", DataType.IntType)
+    val spec = WindowSpec(Seq(partKey), Seq((orderKey, true)), WindowFrame.defaultFor(hasOrderBy = true))
+    val win = WindowDef(spec, WindowFnRowNumber(), "rn")
+    val outSchema = Schema(schema.fields :+ Field("rn", DataType.LongType))
+
+    val expected = drainRows(WindowExec(plan, Seq(win)).execute(0), outSchema)
+
+    // Spill run, drained manually so we can assert no positional-name leak.
+    val node = new MetricsNode(0, "WindowExec", 0, WindowExec.IdxCounterNames)
+    val it = WindowExec(plan, Seq(win), spillyOpts(), node).execute(0)
+    val buf = mutable.ArrayBuffer.empty[Vector[Any]]
+    while (it.hasNext) {
+      val b = it.next()
+      assertEquals("emitted batch must carry the logical output schema, not spilled _cN names",
+        outSchema.fields.map(_.name), b.schema.fields.map(_.name))
+      var r = 0
+      while (r < b.numRows) {
+        val arr = new Array[Any](outSchema.length)
+        var c = 0
+        while (c < outSchema.length) {
+          arr(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
+          c += 1
+        }
+        buf += arr.toVector
+        r += 1
+      }
+    }
+    val actual = buf.toVector
+
+    // ROW_NUMBER within each partition must be 1..|partition|, order aside.
+    expected.groupBy(_(0)).foreach { case (key, erows) =>
+      val rns = erows.map(_(2).asInstanceOf[java.lang.Long].longValue).sorted
+      val actRns = actual.filter(_(0) == key)
+        .map(_(2).asInstanceOf[java.lang.Long].longValue).sorted
+      assertEquals(s"row_number multiset for key=$key", rns, actRns)
+      assertEquals(s"row_number must be 1..${erows.size} for key=$key",
+        (1L to erows.size).toVector, rns.toVector)
+    }
+    assertTrue(s"partitionSpillEvents must be > 0, got ${node.snapshot().counter("partitionSpillEvents")}",
+      node.snapshot().counter("partitionSpillEvents") > 0L)
+  }
 }

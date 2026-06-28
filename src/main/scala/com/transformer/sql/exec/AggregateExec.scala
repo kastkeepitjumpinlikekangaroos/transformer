@@ -281,10 +281,11 @@ final case class HashAggregateExec(
   private val aggArgsArr: Array[Array[Expr]] =
     aggArr.map(_.args.toArray)
 
-  /** Schema of the group key columns alone. Spill writers add Binary
-    * state columns on top of this, one per aggregate. The field names
-    * are pulled from the user's [[groupKeys]] aliases so the spill file
-    * is human-readable in `parquet-tools meta`. */
+  /** Schema of the group key columns alone, carrying the user's [[groupKeys]]
+    * aliases. Used to size and type the spill file's key columns; the spill
+    * writer renames them positionally (`_k0`, `_k1`, ...) via
+    * [[AggSpiller.spillSchema]] so name-colliding keys round-trip through
+    * parquet, and adds one Binary state column per aggregate on top. */
   private val groupKeySchema: Schema =
     Schema(groupKeys.map { case (e, n) => Field(n, e.dataType) }.toVector)
 
@@ -1509,12 +1510,20 @@ private[exec] final case class PartialAggLong(
 
 private[exec] object AggSpiller {
 
-  /** Spill file schema: groupKey columns + N Binary columns, one per agg.
-    * Aggregate columns are named `_agg0`/`_agg1`/... so they don't collide
-    * with user-chosen aliases on the group keys. */
+  /** Spill file schema: N group-key columns + N Binary columns, one per agg.
+    * Both key and state columns get positional, collision-free names (`_k0`,
+    * `_k1`, ... then `_agg0`, `_agg1`, ...). Renaming the keys matters: two
+    * GROUP BY keys that render to the same name (`GROUP BY t0.k, t1.k`) would
+    * otherwise emit two parquet columns sharing the path `k`, and parquet's
+    * by-name column model reads the second one back as null (see
+    * [[com.transformer.core.Spill.positionalSchema]]). The fold path addresses
+    * key columns by index `[0, nKeys)` and state columns by `nKeys + a`, so the
+    * names are never read back. */
   def spillSchema(groupKeySchema: Schema, numAggs: Int): Schema = {
-    val stateFields = (0 until numAggs).map(i => Field(s"_agg$i", DataType.BinaryType))
-    Schema(groupKeySchema.fields ++ stateFields.toVector)
+    val keyFields = Vector.tabulate(groupKeySchema.length)(i =>
+      Field(s"_k$i", groupKeySchema.fields(i).dataType))
+    val stateFields = Vector.tabulate(numAggs)(i => Field(s"_agg$i", DataType.BinaryType))
+    Schema(keyFields ++ stateFields)
   }
 
   // ---- Codec map (LinkedHashMap[AnyRef, Array[AggState]]) ------------------

@@ -641,6 +641,10 @@ final case class HashJoinExec(
       spillDir: OperatorSpillDir,
       side: Int): Array[Path] = {
     val schema = plan.outputSchema
+    // Spill files are addressed by index on read-back; positional names keep a
+    // join-derived input like `[k, v, k, v]` from colliding in parquet's
+    // by-name column model. See Spill.positionalSchema.
+    val spillFileSchema = Spill.positionalSchema(schema)
     val ncols = schema.length
     val files = new Array[Path](K)
     val writers = new Array[TParquetWriter](K)
@@ -655,7 +659,7 @@ final case class HashJoinExec(
       out.setNumRows(n)
       if (writers(b) == null) {
         files(b) = spillDir.newSpillFile(s".${sideName}.b$b.parquet")
-        writers(b) = new TParquetWriter(files(b), schema, Map.empty)
+        writers(b) = new TParquetWriter(files(b), spillFileSchema, Map.empty)
       }
       writers(b).write(out)
       pending(b) = new ColumnarBatch(schema, ColumnarBatch.DefaultCapacity)

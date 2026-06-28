@@ -193,4 +193,48 @@ class DistinctExecSpillTest {
       snap.counter("groupCount") > 0L)
     assertEquals(DistinctExec.KeyPathPacked, snap.counter("keyCodecPath"))
   }
+
+  // ---- Regression: duplicate-named child schema under spill -----------------
+  //
+  // A child whose output schema has two columns sharing a name (`[a, a]`, as a
+  // join output `[k, v, k, v]` would) used to write its spilled set with
+  // duplicate parquet column paths, which read back null and NPE'd in
+  // foldSpillFiles. The spill set now uses positional names. See
+  // plans/bugfixes/01.
+  @Test def duplicateNamedChildSchemaUnderSpill(): Unit = {
+    val schema = Schema(Vector(Field("a", DataType.IntType), Field("a", DataType.IntType)))
+    val rng = new Random(2026L)
+    val parts = (0 until 4).map { _ =>
+      (0 until 5000).map { _ =>
+        Array[Any](
+          java.lang.Integer.valueOf(rng.nextInt(60)),
+          java.lang.Integer.valueOf(rng.nextInt(60)))
+      }.toVector
+    }.toVector
+    val expected = runDistinct(schema, parts, ExecutionOptions.Default)
+
+    // Spill run, drained manually so we can assert no positional-name leak.
+    val plan = new InMemoryPlan(schema, parts)
+    val node = new MetricsNode(0, "DistinctExec", 0, DistinctExec.IdxCounterNames)
+    val d = DistinctExec(plan, spillyOpts(), node)
+    val it = (0 until d.numPartitions).iterator.flatMap(d.execute)
+    val buf = mutable.ArrayBuffer.empty[Vector[Any]]
+    while (it.hasNext) {
+      val b = it.next()
+      assertEquals("emitted batch must carry the logical schema, not spilled _cN names",
+        schema.fields.map(_.name), b.schema.fields.map(_.name))
+      var r = 0
+      while (r < b.numRows) {
+        buf += Vector[Any](
+          if (b.column(0).isNull(r)) null else b.column(0).getBoxed(r),
+          if (b.column(1).isNull(r)) null else b.column(1).getBoxed(r))
+        r += 1
+      }
+    }
+
+    assertTrue("expected non-empty distinct set", expected.nonEmpty)
+    assertEquals(expected, buf.toSet)
+    assertTrue(s"spillEvents must be > 0, got ${node.snapshot().counter("spillEvents")}",
+      node.snapshot().counter("spillEvents") > 0L)
+  }
 }
