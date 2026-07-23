@@ -24,15 +24,19 @@ import java.nio.file.{Files, Path}
   * [[shardingGateIsActive]] asserts the flags actually arrived, so a misconfigured
   * target fails loudly instead of silently re-running the default gate.
   *
-  * The target also sets `transformer.scheduler.shard_count=1`. Sharded execution
-  * at K>1 has a KNOWN, unfixed nested-pool-blocking deadlock: deep sharded plans
-  * (a breaker over an exchange over a breaker over an exchange ...) park every
-  * `Scheduler.pool` worker awaiting sub-tasks, starving the pool of threads to
-  * run them (see docs/gotchas.md). At the default shard count the fuzzer hangs.
-  * K=1 keeps each breaker's per-shard fan-out to a single task — no nested
-  * starvation — while still driving every sharded CODE path (exchange insertion,
-  * the `executePerShard` aggregate/distinct/join paths) for result correctness;
-  * the multi-shard routing itself is covered operator-level by `exchange_exec_test`.
+  * The target also pins `transformer.scheduler.shard_count=4`, so every breaker
+  * fans out to four shards and the fuzzer exercises real nested multi-shard plans
+  * (a breaker over an exchange over a breaker over an exchange ...). Sharded
+  * execution at K>1 was long feared to deadlock the shared `Scheduler.pool` (deep
+  * plans park every worker awaiting sub-tasks); plans/bugfixes/02a refuted that on
+  * JDK 21 — `ForkJoinTask.get()` work-helps, so an awaiting worker steals and runs
+  * the very sub-tasks it awaits, materialising the nested exchange tree on one
+  * worker's stack rather than starving the pool. (A `ForkJoinPool.managedBlock`
+  * compensation variant was tried in 02b and reverted — under deep K-shard nesting
+  * it spawned a spare-thread storm that wedged the pool; see docs/gotchas.md.)
+  * A fixed K rather than the default (`= Scheduler.parallelism`) keeps behaviour
+  * deterministic across machines with different core counts. Operator-level
+  * multi-shard routing is covered by `exchange_exec_test`.
   *
   * The properties are the same generators + oracles + shrinker as
   * [[MetamorphicFuzzTest]]; the scope here is narrow: do the metamorphic

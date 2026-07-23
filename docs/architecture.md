@@ -248,19 +248,24 @@ them. Both policies are deterministic and pinned across runs.
 Materialization is lazy and one-shot: the first `execute(s)` call on any
 shard triggers the full build (all child partitions read in parallel
 through `Scheduler.submitAndAwaitAll`, every row routed and scattered into
-K size-exact output batches), guarded by `@volatile` double-checked
-locking. Subsequent `execute(s)` calls — including concurrent
-reads of different shards from different worker threads — share the
-materialized result. The memory cost is roughly what
-`HashAggregate.partialAggregate` already paid; no new spill semantics are
-introduced.
+K size-exact output batches), guarded by a `@volatile` double-checked lock.
+The first caller holds the instance monitor while it runs `materialize()`;
+concurrent readers of other shards block *entering* the monitor until it is
+published, then share the result via a single `@volatile` read. The memory
+cost is roughly what `HashAggregate.partialAggregate` already paid; no new
+spill semantics are introduced.
 
-Caveat: sharded execution has a known, unfixed deadlock at K>1 — pipeline
-breakers stacked over exchanges block-await per-partition sub-tasks on the
-shared `Scheduler.pool`, and deep plans park every worker (the
-`synchronized` materialize above is one ingredient). Sharding is off by
-default, so the collapsing paths never hit it; the sharded fuzz target pins
-`shard_count=1`. See [gotchas.md](gotchas.md).
+Caveat: sharded execution at K>1 is a monitor-serialisation throughput cliff
+(not a hard deadlock on JDK 21 — `ForkJoinTask.get` work-helping serialises a
+nested exchange tree onto one worker rather than starving it). Holding the
+monitor across the pool-driven `materialize()` serialises concurrent
+shard-readers; a monitor-free CAS + latch would remove that cliff, but the
+attempt in plans/bugfixes/02b *also* wrapped every pool wait in
+`ForkJoinPool.managedBlock`, which under deep K-shard nesting spawned a
+spare-thread storm that wedged the pool, so 02b was reverted. Sharding is still
+off by default, so the collapsing paths never build an exchange; the sharded
+fuzz target is un-gated to `shard_count=4` to exercise real multi-shard nesting.
+See [gotchas.md](gotchas.md).
 
 ### 2c. Spill-to-disk for breakers (opt-in)
 
@@ -397,9 +402,16 @@ blocks JVM exit). The 2× factor matters because the work is a mix of CPU-bound
 a worker blocked on disk I/O can't steal CPU-bound work, so strict `cores`
 sizing leaves the box idle whenever the heavy task is in its I/O phase. Each
 call site submits Callables via `Scheduler.submit(c).get()` or the convenience
-`Scheduler.submitAndAwaitAll`; nested submission is safe because a
-`ForkJoinTask.get` from inside a worker cooperates with the pool's compensation
-logic.
+`Scheduler.submitAndAwaitAll`. Nested submission is safe because a worker
+awaiting its children with `ForkJoinTask.get`/`.join` work-*helps* — it steals
+and runs the awaited tasks on its own stack, so an arbitrarily deep breaker tree
+materialises without starving the pool. Do NOT "harden" this with
+`ForkJoinPool.managedBlock`: plans/bugfixes/02b wrapped these waits in a
+`ManagedBlocker`, whose compensation spawned a spare-thread storm that wedged the
+pool under deep sharded nesting (reverted — see §2b and gotchas.md). Holding a JVM
+monitor across a pool-blocking call is a related footgun (invisible to
+work-stealing); `ExchangeExec`'s `synchronized` materialize does exactly that,
+tolerated only because sharding is off by default (see §2b).
 
 Before this consolidation, every pipeline breaker (`HashAggregateExec`,
 `HashJoinExec`, `SortExec`, `DistinctExec`), every partitioned writer

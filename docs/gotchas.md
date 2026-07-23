@@ -252,37 +252,72 @@ ship a fix or move something from "not done" to "done".
   either gate on `isRunning` or spawn a background thread and marshal results
   back via `FxHelpers.onFx`.
 
-- **Sharded execution deadlocks at K>1: nested pipeline breakers block-await on
-  the shared `Scheduler.pool`.** (Known `src/main` bug, surfaced by the
-  metamorphic fuzzer, NOT yet fixed.) Sharding is off by default
-  (`MinShardableSize = Long.MaxValue`, `BroadcastBuildThreshold = 1M`), so the
-  collapsing paths the rest of the engine uses never reach this. But with sharding
+- **Sharded execution at K>1 is a throughput cliff, not a hard deadlock (on
+  JDK 21).** (Hazard surfaced by the metamorphic fuzzer; investigated in
+  plans/bugfixes/02a; a compensation "fix" attempted in 02b was reverted — see
+  below.) Sharding is off by default (`MinShardableSize = Long.MaxValue`,
+  `BroadcastBuildThreshold = 1M`), so nothing users run reaches this. With sharding
   forced on, every breaker (`ExchangeExec`, `HashJoinExec`, `DistinctExec`,
-  `HashAggregateExec`) blocks awaiting per-partition sub-tasks on the SAME bounded
-  pool, and sharded plans nest deeply (exchange over join over exchange over
-  distinct ...). Two failure modes compound:
+  `HashAggregateExec`) materialises by blocking on the shared bounded
+  `Scheduler.pool` while awaiting per-partition sub-tasks, and sharded plans nest
+  breakers deeply (exchange over join over exchange over distinct ...). This was
+  once recorded here as a hard deadlock ("14 workers parked on two exchange
+  monitors, 0% CPU"); that reading did **not** reproduce on JDK 21 (see the
+  investigation below). Two mechanisms are real but do not combine into a hang for
+  the plan shapes the planner generates:
   - **Monitor across a pool-blocking call.** `ExchangeExec.ensureMaterialized` is
-    `synchronized` and holds the instance monitor across its pool-driven
-    `materialize()`. A worker blocked *entering* that monitor is invisible to the
-    pool's work-stealing and cannot be compensated for, so when several workers
-    fan `execute(s)` onto the same exchange, one holds the monitor + blocks on the
-    pool while the rest pile onto the monitor — starving the pool the holder needs
-    (observed: 14 workers blocked on two exchange monitors, 0% CPU).
-  - **Nested blocking on a bounded pool.** `Scheduler.submitAndAwaitAll` waits via
-    a plain `ForkJoinTask.get`, which parks the worker WITHOUT pool compensation;
-    deep sharded fan-out parks every worker awaiting sub-tasks that then have no
-    thread to run on. (Wrapping the wait in a `ForkJoinPool.ManagedBlocker` so the
-    pool compensates removes the worst of it, but at full shard count deep plans
-    still out-nest the compensation and starve — so even that is only a partial
-    mitigation.)
-  A real fix is architectural (a dedicated growable executor for breaker
-  materialization, or non-blocking breaker execution) and is out of scope for the
-  fuzz harness. Until then sharded execution at K>1 is unsafe; the sharded fuzzer
-  (`sharded_mode_fuzz_test`) pins `transformer.scheduler.shard_count=1`, which
-  keeps each breaker's per-shard fan-out to one task — exercising the sharded code
-  paths for correctness without the deep concurrent nesting that deadlocks. The
-  general rule the bug teaches: never hold a JVM monitor across a
-  `Scheduler.pool`-blocking call, and prefer managed blocking for nested waits.
+    `synchronized`, holding the instance monitor across its pool-driven
+    `materialize()`. When several consumers fan `execute(s)` onto the same exchange,
+    one holds the monitor + blocks inside `materialize()` while the rest block
+    *entering* the monitor (invisible to the pool) — serialising concurrent
+    shard-readers of one exchange (a throughput cliff). It does not *cycle*:
+    monitor-acquisition order follows the plan's (acyclic) parent→child topology,
+    so no two threads can hold `{E1 then E2}` and `{E2 then E1}`.
+  - **Nested blocking on a bounded pool — rescued by work-helping.**
+    `Scheduler.submitAndAwaitAll` waits via `ForkJoinTask.get()`. From a pool worker
+    `.get()` does not merely park — it work-*helps*, stealing and running the very
+    sub-tasks it awaits, descending the breaker tree depth-first on one worker's
+    stack, so a single worker alone materialises an arbitrarily deep *tree* of
+    exchanges. Workers that block on I/O (e.g. parquet spill) rather than on a pool
+    task ARE compensated by the FJP. The external top-level drain thread parks
+    without consuming a pool worker.
+
+  Investigation (plan 02a; JDK 21, 8-core): the sharded fuzzer runs GREEN at
+  multi-shard K — the `shard_count=4` pin, default K (= `Scheduler.parallelism` =
+  16), and the worst realistic regime (`parallelism=2`, `shard_count=8`, 1500 seeds
+  of joins / self-joins / CTEs-referenced-twice / windows). Direct probes — a 6-deep
+  sharded plan drained by K concurrent *external* threads, and a diamond where two
+  breakers share one `ExchangeExec` instance — also complete. The hazard is masked,
+  not absent: the same nested fan-out with a NON-helping wait
+  (`CountDownLatch.await()` in place of `.get()`) deadlocks a 2-thread pool
+  immediately. So `.get()` work-helping is the load-bearing reason there is no
+  hang — an FJP implementation detail, not a contract.
+
+  **A compensation "fix" (02b) was attempted and reverted.** 02b tried to (a) wrap
+  every pool wait in a `ForkJoinPool.ManagedBlocker` and (b) replace the exchange
+  monitor with a CAS-claim + `CountDownLatch`, on the theory that managed blocking
+  is safer insurance than the work-helping implementation detail. In practice it
+  REGRESSED K>1 from green (4.3s) into a hard hang: under deep K-shard nesting the
+  `managedBlock` compensation spawned a spare-thread storm that wedged the pool (a
+  timeout thread dump showed every worker idle in `awaitWork` while the external
+  submitter parked on an un-run task). Bisection (plans/bugfixes/02c): reverting
+  only the managed-blocking waits — back to plain `.get()` / `latch.await()` —
+  restores green, isolating `managedBlock` as the sole culprit. 02b was reverted in
+  full; the code stays on the monitor DCL exchange + plain `.get()` work-helping.
+  Lesson: for THIS workload work-helping is not merely adequate, it is *better* than
+  compensation — `managedBlock` turns a bounded nested fan-out into unbounded thread
+  creation.
+
+  Net: at K>1 sharded execution is safe for *correctness* and live via work-helping,
+  but pays a monitor-serialisation throughput cliff — not usable as a performance
+  default, and a latent liveness footgun (a future non-worker or non-helping wait
+  over these breakers could wedge). The sharded fuzzer (`sharded_mode_fuzz_test`) is
+  un-gated to `transformer.scheduler.shard_count=4`, exercising real multi-shard
+  nesting (operator-level multi-shard routing is also covered by
+  `exchange_exec_test`). The general rule: never hold a JVM monitor across a
+  `Scheduler.pool`-blocking call, and prefer work-helping for nested waits — do not
+  reach for `ForkJoinPool.managedBlock` as a blanket wrapper on pool-task waits
+  (02b's mistake).
 - **Per-thread allocation accounting is HotSpot-specific.** The
   instrumentation framework reads
   `com.sun.management.ThreadMXBean.getThreadAllocatedBytes` to surface

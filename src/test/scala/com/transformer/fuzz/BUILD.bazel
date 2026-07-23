@@ -80,14 +80,20 @@ scala_junit_test(
     jvm_flags = [
         "-Dtransformer.scheduler.shard_min_size=1",
         "-Dtransformer.scheduler.broadcast_threshold=1",
-        # K=1 keeps each breaker's per-shard fan-out to a single task. Sharded
-        # execution at K>1 has a known nested-pool-blocking deadlock (deep plans
-        # park every Scheduler.pool worker awaiting sub-tasks — see
-        # docs/gotchas.md), so the fuzzer would hang at the default shard count.
-        # K=1 still exercises every sharded CODE path (exchange insertion,
-        # per-shard join / distinct / aggregate) for result correctness; the
-        # multi-shard routing itself is covered by exchange_exec_test.
-        "-Dtransformer.scheduler.shard_count=1",
+        # K=4 pins a fixed multi-shard fan-out, so every breaker splits into four
+        # shards and this target exercises real nested multi-shard plans (a breaker
+        # over an exchange over a breaker ...), deterministically across hosts of
+        # different core counts. Sharded execution at K>1 was long feared to
+        # deadlock the shared Scheduler.pool (deep plans park every worker awaiting
+        # sub-tasks); plans/bugfixes/02a refuted that on JDK 21 -- ForkJoinTask.get()
+        # work-helps (an awaiting worker steals and runs the very sub-tasks it
+        # awaits, materialising the nested tree on one stack), so the pool does not
+        # starve. A ForkJoinPool.managedBlock "compensation" variant (02b) was tried
+        # and reverted: under deep K-shard nesting it spawned a spare-thread storm
+        # that wedged the pool. A fixed K rather than the default
+        # (= Scheduler.parallelism) keeps CI wall time from drifting with
+        # availableProcessors. See docs/gotchas.md.
+        "-Dtransformer.scheduler.shard_count=4",
     ],
     deps = [
         ":fuzz",
@@ -150,14 +156,20 @@ scala_junit_test(
     jvm_flags = [
         "-Dtransformer.scheduler.shard_min_size=1",
         "-Dtransformer.scheduler.broadcast_threshold=1",
-        # K=1 keeps each breaker's per-shard fan-out to a single task. Sharded
-        # execution at K>1 has a known nested-pool-blocking deadlock (deep plans
-        # park every Scheduler.pool worker awaiting sub-tasks — see
-        # docs/gotchas.md), so the fuzzer would hang at the default shard count.
-        # K=1 still exercises every sharded CODE path (exchange insertion,
-        # per-shard join / distinct / aggregate) for result correctness; the
-        # multi-shard routing itself is covered by exchange_exec_test.
-        "-Dtransformer.scheduler.shard_count=1",
+        # K=4 pins a fixed multi-shard fan-out, so every breaker splits into four
+        # shards and this target exercises real nested multi-shard plans (a breaker
+        # over an exchange over a breaker ...), deterministically across hosts of
+        # different core counts. Sharded execution at K>1 was long feared to
+        # deadlock the shared Scheduler.pool (deep plans park every worker awaiting
+        # sub-tasks); plans/bugfixes/02a refuted that on JDK 21 -- ForkJoinTask.get()
+        # work-helps (an awaiting worker steals and runs the very sub-tasks it
+        # awaits, materialising the nested tree on one stack), so the pool does not
+        # starve. A ForkJoinPool.managedBlock "compensation" variant (02b) was tried
+        # and reverted: under deep K-shard nesting it spawned a spare-thread storm
+        # that wedged the pool. A fixed K rather than the default
+        # (= Scheduler.parallelism) keeps CI wall time from drifting with
+        # availableProcessors. See docs/gotchas.md.
+        "-Dtransformer.scheduler.shard_count=4",
     ],
     tags = ["fuzz"],
     deps = [

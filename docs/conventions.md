@@ -89,6 +89,20 @@ specific traps.
   against the non-spill path at a 1-byte threshold. See
   [architecture.md §2c](architecture.md#2c-spill-to-disk-for-breakers-opt-in)
   and `plans/perf/09-spill-to-disk.md`.
+- **Prefer work-helping over managed blocking for nested pool waits.**
+  `Scheduler.submitAndAwaitAll` awaits its child tasks with `ForkJoinTask.get()`,
+  which from a pool worker work-*helps* — it steals and runs the very sub-tasks it
+  awaits, so a deep nested fan-out (breaker over exchange over breaker ...)
+  materialises on one worker's stack without starving the pool. Do NOT wrap these
+  pool-task waits in `ForkJoinPool.managedBlock` as "insurance": under deep fan-out
+  its compensation spawns unbounded spare threads and can wedge the pool —
+  plans/bugfixes/02b tried exactly that and was reverted (see gotchas.md). Holding
+  a JVM monitor across a pool-blocking call is a related footgun (a monitor is
+  invisible to work-stealing); the one place that happens today,
+  `ExchangeExec.ensureMaterialized`'s `synchronized` double-checked lock, is a
+  known throughput cliff tolerated only because sharding is off by default. See
+  [architecture.md §3](architecture.md#3-parallel-execution) and
+  [gotchas.md](gotchas.md).
 
 ## Counter discipline
 
