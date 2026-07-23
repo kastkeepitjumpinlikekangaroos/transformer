@@ -5,6 +5,8 @@ import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.Test
 
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch}
+import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.mutable
 import scala.util.Random
 
@@ -239,6 +241,99 @@ class ExchangeExecTest {
     assertKeyCollocated("concurrent execute", drained, _(0))
   }
 
+  @Test(timeout = 20000) def materializesExactlyOnceUnderConcurrentCallers(): Unit = {
+    // N >> K external threads race execute(s) on ONE exchange. The CAS claim
+    // must admit exactly one materializer, so the child's execute(p) runs
+    // child.numPartitions times total — never N x that — and every racer of
+    // the same shard sees identical rows.
+    val parts = Vector.tabulate(4) { p =>
+      Vector.tabulate(250)(i => row(i % 11, p * 1000 + i))
+    }
+    val counting = new CountingPlan(new InMemoryPartitionedPlan(intSchema, parts))
+    val K = 4
+    val N = 32
+    val ex = ExchangeExec(counting, Seq(intKey), numShards = K)
+
+    val start = new CountDownLatch(1)
+    val results = new Array[Vector[Vector[Any]]](N)
+    val failures = new ConcurrentLinkedQueue[Throwable]
+    val threads = (0 until N).map { i =>
+      val t = new Thread(() => {
+        try {
+          start.await()
+          results(i) = toComparable(drainRows(ex.execute(i % K), intSchema))
+        } catch { case t: Throwable => failures.add(t) }
+      })
+      t.start()
+      t
+    }
+    start.countDown()
+    threads.foreach(_.join())
+
+    assertTrue(s"racing callers failed: $failures", failures.isEmpty)
+    assertEquals("child.execute(p) calls (materialize ran exactly once)",
+      counting.numPartitions, counting.executeCalls.get)
+    (0 until N).foreach { i =>
+      assertEquals(s"caller $i disagrees with another reader of shard ${i % K}",
+        results(i % K), results(i))
+    }
+    assertPermutationOf("racing callers reassemble the input", parts,
+      (0 until K).flatMap(s => results(s)).toVector.map(_.toArray))
+  }
+
+  @Test(timeout = 20000) def materializationFailurePropagatesToEveryConcurrentCaller(): Unit = {
+    // A throwing child fails the single materialize(). The winner AND every
+    // latch-waiting loser must observe the wrapped failure with the original
+    // cause preserved somewhere in the chain, and the failed materialization
+    // is never retried: the failing partition executes exactly once.
+    val marker = "synthetic exchange child failure"
+    val child = new ThrowingPlan(intSchema, nParts = 3, failPartition = 1, marker)
+    val K = 4
+    val N = 32
+    val ex = ExchangeExec(child, Seq(intKey), numShards = K)
+
+    val start = new CountDownLatch(1)
+    val observed = new ConcurrentLinkedQueue[Throwable]
+    val unexpected = new ConcurrentLinkedQueue[String]
+    val threads = (0 until N).map { i =>
+      val t = new Thread(() => {
+        try {
+          start.await()
+          ex.execute(i % K)
+          unexpected.add(s"caller $i succeeded")
+        } catch { case t: Throwable => observed.add(t) }
+      })
+      t.start()
+      t
+    }
+    start.countDown()
+    threads.foreach(_.join())
+
+    assertTrue(s"callers unexpectedly succeeded: $unexpected", unexpected.isEmpty)
+    assertEquals("every caller observed the failure", N, observed.size)
+    observed.forEach { t =>
+      assertTrue(s"wrong exception shape: $t", t.isInstanceOf[RuntimeException]
+        && t.getMessage == "ExchangeExec materialization failed")
+      var cause = t.getCause
+      var found = false
+      while (cause != null && !found) {
+        if (marker == cause.getMessage) found = true
+        cause = cause.getCause
+      }
+      assertTrue(s"original cause lost from chain: $t", found)
+    }
+    assertEquals("failing partition executed exactly once (no retry)",
+      1, child.failCalls.get)
+    // A caller arriving after the failure gets the same wrapped failure.
+    try {
+      ex.execute(0)
+      fail("expected materialization failure to persist")
+    } catch {
+      case t: RuntimeException =>
+        assertEquals("ExchangeExec materialization failed", t.getMessage)
+    }
+  }
+
   @Test def invalidPartitionIndexThrows(): Unit = {
     val plan = new InMemoryPartitionedPlan(intSchema, Vector(Vector(row(1, 1))))
     val ex = ExchangeExec(plan, Seq(intKey), numShards = 4)
@@ -342,6 +437,36 @@ class ExchangeExecTest {
   }
 
   private def row(values: Any*): Array[Any] = values.toArray
+}
+
+/** Wraps a plan and counts `execute(p)` calls, so tests can assert the child
+  * was drained exactly `numPartitions` times under racing exchange readers. */
+private final class CountingPlan(inner: PhysicalPlan) extends PhysicalPlan {
+  val executeCalls = new AtomicInteger(0)
+  def outputSchema: Schema = inner.outputSchema
+  def numPartitions: Int = inner.numPartitions
+  def execute(partition: Int): Iterator[ColumnarBatch] = {
+    executeCalls.incrementAndGet()
+    inner.execute(partition)
+  }
+}
+
+/** Plan whose partition `failPartition` always throws `marker`; the other
+  * partitions yield no batches. Counts attempts on the failing partition so
+  * tests can assert a failed materialization is never retried. */
+private final class ThrowingPlan(
+    schema: Schema,
+    nParts: Int,
+    failPartition: Int,
+    marker: String) extends PhysicalPlan {
+  val failCalls = new AtomicInteger(0)
+  def outputSchema: Schema = schema
+  def numPartitions: Int = nParts
+  def execute(partition: Int): Iterator[ColumnarBatch] =
+    if (partition == failPartition) {
+      failCalls.incrementAndGet()
+      throw new RuntimeException(marker)
+    } else Iterator.empty
 }
 
 /** Hand-rolled [[PhysicalPlan]] that hands back pre-supplied rows partitioned

@@ -4,7 +4,8 @@ import com.transformer.core._
 import com.transformer.core.metrics.MetricsNode
 import com.transformer.sql.plan._
 
-import java.util.concurrent.Callable
+import java.util.concurrent.{Callable, CountDownLatch}
+import java.util.concurrent.atomic.AtomicBoolean
 import scala.collection.mutable
 
 /** Hash-partitioning exchange. Reshapes its child's output from
@@ -21,7 +22,10 @@ import scala.collection.mutable
   *
   * Lazy materialization: the first `execute(s)` call on any shard triggers
   * the full materialization (all child partitions read, every row routed to
-  * its shard buffer). Subsequent `execute(s)` calls — including for other
+  * its shard buffer). Concurrent first-callers race a CAS claim — exactly one
+  * winner runs `materialize()` with no JVM monitor held, the rest park on a
+  * latch until the result is published (see [[ensureMaterialized]] for what
+  * this does and does not guarantee). Subsequent `execute(s)` calls — including for other
   * shards from other worker threads — return iterators over the already-built
   * shard arrays. Materialization itself runs the child's partitions in
   * parallel through the shared [[Scheduler]] pool.
@@ -73,10 +77,16 @@ final case class ExchangeExec(
 
   private val keyExprs: Array[Expr] = partitionBy.toArray
 
-  // Double-checked-locking-style lazy init. `@volatile` so the first thread
-  // to publish a non-null `shards` makes its writes visible to other threads
-  // skipping the synchronized block.
+  // Monitor-free lazy init: the first caller to win the CAS claim runs
+  // `materialize()`; everyone else parks on `ready` until the winner counts it
+  // down. No JVM monitor is ever held across the pool-blocking `materialize()`
+  // (the docs/conventions.md rule), and all waiting shard-readers wake
+  // together on `countDown` instead of serialising through a lock.
   @volatile private var shards: Array[Array[ColumnarBatch]] = null
+  private val claimed = new AtomicBoolean(false)
+  @volatile private var claimer: Thread = null
+  private val ready = new CountDownLatch(1)
+  @volatile private var matFailure: Throwable = null
 
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     require(partition >= 0 && partition < numShards,
@@ -85,13 +95,72 @@ final case class ExchangeExec(
     mat(partition).iterator
   }
 
+  /** CAS-claim + latch. The loser-wait is a plain, deliberately UNCOMPENSATED
+    * `ready.await()` — do not wrap it in `ForkJoinPool.managedBlock`: under
+    * deep K-shard nesting that compensation spawns a spare-thread storm that
+    * wedges the pool (the plans/bugfixes/02b regression).
+    *
+    * What this fixes: no JVM monitor is held across the pool-blocking
+    * `materialize()` (the docs/conventions.md rule), and waiting shard-readers
+    * wake together on `countDown` instead of serialising through a lock — the
+    * K>1 throughput cliff.
+    *
+    * Two helpJoin hazards, one handled here, one open. helpJoin runs tasks
+    * from stealers' queues that need not be descendants of the awaited task,
+    * so while the winner parks in `materialize()`'s fan-out await it can have
+    * a CONSUMER of this very exchange inlined onto a stack:
+    *
+    *   - **Onto the winner's own stack (handled).** The guest would lose the
+    *     CAS to its carrier thread and park on a latch only that same thread
+    *     can open — a self-deadlock the old reentrant `synchronized` monitor
+    *     silently avoided by double-materializing. `ensureMaterialized`
+    *     detects winner-reentrancy via `claimer` and materializes a private,
+    *     unpublished copy instead (duplicate work, live).
+    *   - **Onto another worker's stack (OPEN).** A guest inlined beneath a
+    *     shard-task frame on a different worker parks here as an ordinary
+    *     loser, closing a winner -> shard-task -> inlined-consumer -> exchange
+    *     cycle that no choice of monitor vs latch avoids. Reproduced as a
+    *     permanent wedge at fuzz-campaign scale; see docs/gotchas.md and
+    *     plans/bugfixes/02e. Sharding stays off by default; the real fix is
+    *     non-blocking materialization (parent plan 02 Option D).
+    *
+    * The tree-shaped work-helping that everything else relies on is guarded
+    * by `//src/test/scala/com/transformer/core:scheduler_test`.
+    *
+    * A `materialize()` failure is captured once in `matFailure` and re-thrown
+    * (wrapped) to the winner and every waiter; `claimed` stays set, so a
+    * failed materialization is never retried. */
   private def ensureMaterialized(): Array[Array[ColumnarBatch]] = {
     val s = shards
     if (s != null) return s
-    synchronized {
-      if (shards == null) shards = materialize()
-      shards
+    if (claimed.compareAndSet(false, true)) { // exactly one publishing materializer
+      claimer = Thread.currentThread()
+      try shards = materialize()
+      catch { case t: Throwable => matFailure = t }
+      finally {
+        claimer = null
+        ready.countDown()
+      }
+    } else if (claimer eq Thread.currentThread()) {
+      // Winner-stack reentrancy: while the winner parks in materialize()'s
+      // submitAndAwaitAll, ForkJoinTask.get()'s helpJoin can inline a stolen
+      // task that CONSUMES this exchange beneath the winner's own frames
+      // (helping runs tasks from stealers' queues, not just descendants of
+      // the awaited task — observed live, see plans/bugfixes/02e). Parking
+      // that guest on `ready` would deadlock the thread against itself, so
+      // materialize a private copy and leave publication to the outer winner
+      // frame. Duplicate work on a rare path — the same behavior the old
+      // reentrant `synchronized` monitor gave implicitly. The guest's
+      // sub-tasks only compute `child` partitions (the plan is acyclic, so
+      // the child subtree cannot read this exchange back), which is why the
+      // local build cannot re-park on `ready`.
+      return materialize()
+    } else {
+      ready.await()
     }
+    if (matFailure != null)
+      throw new RuntimeException("ExchangeExec materialization failed", matFailure)
+    shards
   }
 
   private def materialize(): Array[Array[ColumnarBatch]] = {

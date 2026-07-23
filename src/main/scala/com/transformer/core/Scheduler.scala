@@ -18,9 +18,12 @@ import java.util.concurrent.{Callable, ForkJoinPool, ForkJoinTask, ForkJoinWorke
   *
   * This single pool gives the whole library cooperative parallelism: any thread
   * (worker OR main) submitting `Callable`s to `pool` gets work-stealing for free.
-  * Nested submission is safe because `ForkJoinTask.get`/`.join` cooperates with
-  * the pool — a worker blocked waiting for its child tasks won't deadlock the
-  * scheduler.
+  * Nested submission of a pure task TREE is safe because `ForkJoinTask.get`/
+  * `.join` work-helps — a worker blocked waiting for its child tasks runs them
+  * on its own stack instead of deadlocking the scheduler. Helping is not a
+  * blanket liveness guarantee, though: its helpJoin path runs tasks from
+  * stealers' queues that need not be descendants of the awaited task, which is
+  * how K>1 sharded exchanges can still deadlock (see docs/gotchas.md).
   *
   * Threads are daemon so the pool never blocks JVM exit. Default size is
   * `2 × availableProcessors` (see [[parallelism]] for why — mixed CPU + I/O
@@ -89,9 +92,16 @@ object Scheduler {
     * submission order. Convenience for the common "fan out N partitions, wait
     * for them all" pattern in pipeline-breaking operators.
     *
-    * Any `Throwable` from a task is rethrown (unwrapping `ExecutionException`).
-    * Caller is responsible for cleanup ordering; everything else is best-effort
-    * draining.
+    * A task failure surfaces as the `ExecutionException` thrown by
+    * `ForkJoinTask.get` — NOT unwrapped — with the task's throwable in its
+    * cause chain. Caller is responsible for cleanup ordering; everything else
+    * is best-effort draining.
+    *
+    * The await is deliberately a plain `.get()`: from a pool worker it
+    * work-helps, which is what keeps nested fan-outs live on this bounded
+    * pool. Do not swap it for a latch or `ForkJoinPool.managedBlock` —
+    * `//src/test/scala/com/transformer/core:scheduler_test` fails if the
+    * helping mechanism goes away.
     */
   def submitAndAwaitAll[T](tasks: Seq[Callable[T]]): IndexedSeq[T] = {
     val ftasks = tasks.iterator.map(pool.submit(_)).toIndexedSeq

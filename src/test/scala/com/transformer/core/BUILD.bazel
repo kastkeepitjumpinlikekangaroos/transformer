@@ -39,3 +39,20 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+# Work-helping mechanism guard (plans/bugfixes/02a H4, promoted to CI by 02d).
+# Nested sharded materialization stays live only because ForkJoinTask.get()
+# work-helps; this suite proves a depth-5/fan-4 fan-out completes on a 2-thread
+# pool via Scheduler.submitAndAwaitAll but wedges when the same shape awaits
+# through a non-helping CountDownLatch. Needs its own JVM because
+# Scheduler.parallelism is a val read at class load.
+scala_junit_test(
+    name = "scheduler_test",
+    srcs = ["SchedulerTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = ["-Dtransformer.scheduler.parallelism=2"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)

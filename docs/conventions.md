@@ -96,11 +96,17 @@ specific traps.
   materialises on one worker's stack without starving the pool. Do NOT wrap these
   pool-task waits in `ForkJoinPool.managedBlock` as "insurance": under deep fan-out
   its compensation spawns unbounded spare threads and can wedge the pool —
-  plans/bugfixes/02b tried exactly that and was reverted (see gotchas.md). Holding
-  a JVM monitor across a pool-blocking call is a related footgun (a monitor is
-  invisible to work-stealing); the one place that happens today,
-  `ExchangeExec.ensureMaterialized`'s `synchronized` double-checked lock, is a
-  known throughput cliff tolerated only because sharding is off by default. See
+  plans/bugfixes/02b tried exactly that and was reverted (see gotchas.md). Never
+  hold a JVM monitor across a pool-blocking call either (a monitor is invisible to
+  work-stealing); the in-tree exemplar of the compliant pattern is
+  `ExchangeExec.ensureMaterialized` — a CAS claim + published `CountDownLatch`, so
+  no monitor is held across the pool-driven `materialize()` and the loser-wait
+  stays a plain (uncompensated) `await()`. The helping mechanism itself is pinned
+  by `//src/test/scala/com/transformer/core:scheduler_test`. Know its limit:
+  helping is a tree-shape guarantee only — helpJoin can inline non-descendant
+  tasks under a worker's stack, and combined with an exactly-once gate that can
+  still deadlock K>1 sharded plans (sharding stays off by default; see
+  gotchas.md). See
   [architecture.md §3](architecture.md#3-parallel-execution) and
   [gotchas.md](gotchas.md).
 

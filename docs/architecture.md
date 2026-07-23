@@ -248,24 +248,34 @@ them. Both policies are deterministic and pinned across runs.
 Materialization is lazy and one-shot: the first `execute(s)` call on any
 shard triggers the full build (all child partitions read in parallel
 through `Scheduler.submitAndAwaitAll`, every row routed and scattered into
-K size-exact output batches), guarded by a `@volatile` double-checked lock.
-The first caller holds the instance monitor while it runs `materialize()`;
-concurrent readers of other shards block *entering* the monitor until it is
-published, then share the result via a single `@volatile` read. The memory
-cost is roughly what `HashAggregate.partialAggregate` already paid; no new
-spill semantics are introduced.
+K size-exact output batches). Concurrent first-callers race a CAS claim
+(`AtomicBoolean`): exactly one winner runs `materialize()` with **no JVM
+monitor held**, publishes the result through a `@volatile` field, and opens a
+`CountDownLatch`; the losers park on a plain **uncompensated** `ready.await()`
+and wake together. A materialization failure latches and re-throws (wrapped)
+to every caller — never retried. The loser-wait is deliberately not
+`ForkJoinPool.managedBlock`-wrapped (that compensation was the reverted
+plans/bugfixes/02b regression — see §3). The memory cost is roughly what
+`HashAggregate.partialAggregate` already paid; no new spill semantics are
+introduced.
 
-Caveat: sharded execution at K>1 is a monitor-serialisation throughput cliff
-(not a hard deadlock on JDK 21 — `ForkJoinTask.get` work-helping serialises a
-nested exchange tree onto one worker rather than starving it). Holding the
-monitor across the pool-driven `materialize()` serialises concurrent
-shard-readers; a monitor-free CAS + latch would remove that cliff, but the
-attempt in plans/bugfixes/02b *also* wrapped every pool wait in
-`ForkJoinPool.managedBlock`, which under deep K-shard nesting spawned a
-spare-thread storm that wedged the pool, so 02b was reverted. Sharding is still
-off by default, so the collapsing paths never build an exchange; the sharded
-fuzz target is un-gated to `shard_count=4` to exercise real multi-shard nesting.
-See [gotchas.md](gotchas.md).
+Caveat: this is a throughput + convention fix, **not a liveness guarantee**.
+The winner still blocks on the shared pool inside `materialize()`, and
+`ForkJoinTask.get()`'s helpJoin can inline a consumer of the same exchange
+beneath one of the awaited shard-task frames (helping runs tasks from
+stealers' queues, which need not be descendants of the awaited task). That
+closes a winner → shard-task → consumer → exchange cycle no monitor-vs-latch
+choice avoids — reproduced as a permanent wedge at fuzz-campaign scale (see
+[gotchas.md](gotchas.md) and plans/bugfixes/02e). When the guest lands on the
+winner's *own* stack, `ensureMaterialized` detects the reentrancy (a `claimer`
+thread check) and builds a private unpublished copy — duplicate work, live —
+matching what the old reentrant monitor did implicitly; only the cross-thread
+variant remains open. Sharding is off by default,
+so the collapsing paths never build an exchange; the sharded fuzz target
+stays un-gated at `shard_count=4` (deterministic default seeds, green in
+seconds), while long sharded campaigns can wedge and must run under
+`--test_timeout`. `//src/test/scala/com/transformer/core:scheduler_test`
+pins the tree-shaped work-helping mechanism everything else rests on.
 
 ### 2c. Spill-to-disk for breakers (opt-in)
 
@@ -410,8 +420,14 @@ materialises without starving the pool. Do NOT "harden" this with
 `ManagedBlocker`, whose compensation spawned a spare-thread storm that wedged the
 pool under deep sharded nesting (reverted — see §2b and gotchas.md). Holding a JVM
 monitor across a pool-blocking call is a related footgun (invisible to
-work-stealing); `ExchangeExec`'s `synchronized` materialize does exactly that,
-tolerated only because sharding is off by default (see §2b).
+work-stealing); `ExchangeExec`'s materialize used to do exactly that and is now
+monitor-free (CAS claim + latch, see §2b) — keep it that way. Both sides of the
+helping assumption are pinned by
+`//src/test/scala/com/transformer/core:scheduler_test`: the same nested fan-out
+completes via `.get()` on a 2-thread pool and wedges via a non-helping wait.
+Helping is a tree-shape guarantee, not a blanket one: its helpJoin path can
+inline non-descendant tasks beneath a worker's stack, which is how a K>1
+sharded exchange can still deadlock (see §2b and gotchas.md).
 
 Before this consolidation, every pipeline breaker (`HashAggregateExec`,
 `HashJoinExec`, `SortExec`, `DistinctExec`), every partitioned writer
