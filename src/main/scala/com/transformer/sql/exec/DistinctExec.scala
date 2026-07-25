@@ -127,22 +127,11 @@ final case class DistinctExec(
     wrapWithSpillCleanup(emit(merged), spillDir)
   }
 
-  /** Wrap `inner` so the spill subdir is wiped when the consumer drains
-    * the iterator. */
+  /** Wipe the spill subdir once the consumer drains the iterator. */
   private def wrapWithSpillCleanup(
       inner: Iterator[ColumnarBatch],
-      spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] = spillDir match {
-    case None => inner
-    case Some(d) =>
-      new Iterator[ColumnarBatch] {
-        def hasNext: Boolean = {
-          val h = inner.hasNext
-          if (!h) d.close()
-          h
-        }
-        def next(): ColumnarBatch = inner.next()
-      }
-  }
+      spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] =
+    spillDir.fold(inner)(_.closeOnDrain(inner))
 
   private def collect(p: Int, spillDir: Option[OperatorSpillDir]): DistinctExec.PartialSet = {
     val tStart = if (metricsNode != null) System.nanoTime() else 0L

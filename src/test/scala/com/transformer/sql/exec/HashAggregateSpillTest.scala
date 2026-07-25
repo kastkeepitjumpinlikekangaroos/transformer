@@ -10,7 +10,7 @@ import java.nio.file.{Files, Path}
 import scala.collection.mutable
 import scala.util.Random
 
-/** Plan 09 Phase 4 parity: with spill enabled at a tiny threshold, the codec
+/** Aggregate spill parity: with spill enabled at a tiny threshold, the codec
   * and LongHashMap paths in [[HashAggregateExec]] must each produce the
   * same per-group aggregates as the non-spill path. We assert multiset
   * equality (groups are output in insertion order which differs once spill

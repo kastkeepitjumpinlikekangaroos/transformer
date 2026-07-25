@@ -59,7 +59,7 @@ class FilterPushdownTest {
   private def fullJoin: LogicalJoin = LogicalJoin(leftScan, rightScan, joinEq, JoinKind.Full)
 
   // ---------------------------------------------------------------------------
-  // Phase 1: inner-join pushdown
+  // Inner-join pushdown
   // ---------------------------------------------------------------------------
 
   @Test def innerJoinLeftConjunctPushedIntoLeftChild(): Unit = {
@@ -155,7 +155,7 @@ class FilterPushdownTest {
   }
 
   // ---------------------------------------------------------------------------
-  // Phase 2: outer-join pushdown (conservative — never push on null-extended side)
+  // Outer-join pushdown (conservative — never push on null-extended side)
   // ---------------------------------------------------------------------------
 
   @Test def leftJoinLeftConjunctPushedIntoLeftChild(): Unit = {

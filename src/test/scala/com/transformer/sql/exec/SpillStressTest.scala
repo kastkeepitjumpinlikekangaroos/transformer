@@ -8,7 +8,7 @@ import org.junit.{After, Before, Test}
 import java.nio.file.{Files, Path}
 import scala.collection.mutable
 
-/** Plan 09 Phase 8 stress test. Each test pushes one operator through many
+/** Spill stress test. Each test pushes one operator through many
   * spill rounds (1-byte threshold + ~100k–1M rows) and verifies the output
   * matches a closed-form analytical answer — no in-memory oracle is built
   * over the whole dataset, so this also catches correctness bugs that the

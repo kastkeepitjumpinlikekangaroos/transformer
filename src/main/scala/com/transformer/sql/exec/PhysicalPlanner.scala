@@ -51,6 +51,66 @@ object PhysicalPlanner {
     } else (raw, None)
   }
 
+  /** Materialize every [[ExchangeExec]] in `plan` bottom-up (post-order:
+    * children before parents), BEFORE any consumer of the plan runs. Both
+    * engine drain paths call this right after planning ([[SqlEngine]]'s two
+    * execute paths and [[CteResolver]]'s CTE-body materialization), so by the
+    * time consumer tasks exist every exchange is published and `execute(s)`
+    * is a plain array read.
+    *
+    * This ordering is the K>1 sharded-execution liveness fix
+    * (plans/bugfixes/02f). Every deadlock cycle observed at campaign scale
+    * (02e) runs through a thread waiting on an exchange that is not yet
+    * materialized — the one wait in the engine that does not follow the
+    * task-creation tree, so the one wait `ForkJoinTask.get()` work-helping
+    * cannot rescue once helpJoin has inlined a consumer of the exchange
+    * beneath the materializer's own frames. Materializing in dependency
+    * order removes that wait entirely: when an exchange materializes here,
+    * every exchange in its child subtree is already published, so its
+    * `Scheduler` fan-out is a pure task tree (work-helping completes it —
+    * the `core:scheduler_test` invariant) and no readiness wait exists
+    * anywhere in flight. Plans with no exchanges (sharding off — the
+    * shipping default) walk and find nothing.
+    *
+    * Shared subtrees (CTE inlining shares plan nodes, making the tree a DAG)
+    * are visited once, by identity, so a diamond-shared exchange
+    * materializes exactly once. [[MeteredPlan]] wrappers are transparent. */
+  def preMaterializeExchanges(plan: PhysicalPlan): Unit = {
+    val visited = java.util.Collections.newSetFromMap(
+      new java.util.IdentityHashMap[PhysicalPlan, java.lang.Boolean])
+    def walk(p: PhysicalPlan): Unit = {
+      if (!visited.add(p)) return
+      childrenOf(p).foreach(walk)
+      p match {
+        case e: ExchangeExec => e.materializeNow()
+        case _               => ()
+      }
+    }
+    walk(plan)
+  }
+
+  /** Immediate children of a physical operator, for [[preMaterializeExchanges]]'
+    * walk. Mirrors [[wrapChildren]]'s arity knowledge — a new operator with
+    * children needs a branch in BOTH places (here, a missed branch means a
+    * subtree's exchanges escape pre-materialization and fall back to the lazy
+    * latch path, whose nesting hazards `ExchangeExec.ensureMaterialized`
+    * documents). */
+  private def childrenOf(plan: PhysicalPlan): Seq[PhysicalPlan] = plan match {
+    case m: MeteredPlan           => Seq(m.underlying)
+    case f: FilterExec            => Seq(f.child)
+    case p: ProjectExec           => Seq(p.child)
+    case l: LocalLimitExec        => Seq(l.child)
+    case g: GlobalLimitExec       => Seq(g.child)
+    case a: HashAggregateExec     => Seq(a.child)
+    case j: HashJoinExec          => Seq(j.left, j.right)
+    case s: SortExec              => Seq(s.child)
+    case d: DistinctExec          => Seq(d.child)
+    case e: ExchangeExec          => Seq(e.child)
+    case w: WindowExec            => Seq(w.child)
+    case u: UnionExec             => Seq(u.left, u.right)
+    case _                        => Seq.empty // leaves: ScanExec, CountStarMetadataExec
+  }
+
   private def planInner(logical: LogicalPlan, opts: ExecutionOptions): PhysicalPlan = logical match {
     case LogicalScan(_, view, _) => ScanExec(view)
     case LogicalFilter(LogicalScan(name, view, schema), pred) =>
@@ -391,7 +451,8 @@ object PhysicalPlanner {
     * operators added in the future need a branch here OR a fallback that
     * leaves them unwrapped (the default below). Leaving an operator
     * unwrapped is safe — it just means its children's iterators aren't
-    * metered.
+    * metered. (New operators with children also need a [[childrenOf]]
+    * branch, where the fallback is NOT safe for exchange-bearing subtrees.)
     */
   private def wrapChildren(
       plan: PhysicalPlan,

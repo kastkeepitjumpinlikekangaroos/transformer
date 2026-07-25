@@ -10,7 +10,7 @@ import java.nio.file.{Files, Path}
 import scala.collection.mutable
 import scala.util.Random
 
-/** Plan 09 Phase 5 parity: with spill at a tiny threshold, DistinctExec's
+/** Distinct spill parity: with spill at a tiny threshold, DistinctExec's
   * output must be a multiset-equal permutation of the non-spill output. */
 class DistinctExecSpillTest {
 

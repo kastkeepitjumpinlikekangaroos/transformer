@@ -80,8 +80,9 @@ specific traps.
   follow the pattern: an `opts: ExecutionOptions` field, an `spillEnabled`
   guard derived from `opts.spillEnabled` (plus operator-specific
   capability checks like `AggStateSerde.allSpillable`), a lazy
-  `spillThresholdBytes` from `Spill.effectiveThresholdBytes`, and a
-  `wrapWithSpillCleanup` wrapper around the output iterator. The same
+  `spillThresholdBytes` from `Spill.effectiveThresholdBytes`, and an
+  output iterator wrapped by `OperatorSpillDir.closeOnDrain` (each
+  operator's `wrapWithSpillCleanup` delegates to it). The same
   per-batch input-byte accumulator drives the flush decision; flushed
   state lives in temp parquet files under a per-operator
   `OperatorSpillDir` and is folded back at emit time. New operators
@@ -104,11 +105,24 @@ specific traps.
   stays a plain (uncompensated) `await()`. The helping mechanism itself is pinned
   by `//src/test/scala/com/transformer/core:scheduler_test`. Know its limit:
   helping is a tree-shape guarantee only — helpJoin can inline non-descendant
-  tasks under a worker's stack, and combined with an exactly-once gate that can
-  still deadlock K>1 sharded plans (sharding stays off by default; see
-  gotchas.md). See
+  tasks under a worker's stack, and combined with an exactly-once readiness gate
+  that deadlocks K>1 sharded plans (see gotchas.md). See
   [architecture.md §3](architecture.md#3-parallel-execution) and
   [gotchas.md](gotchas.md).
+- **Never let a pool task wait on a lazily-shared breaker result — publish it
+  first.** Engine plans pre-materialize every `ExchangeExec` bottom-up via
+  `PhysicalPlanner.preMaterializeExchanges` before consumers exist (both
+  `SqlEngine` execute paths + `CteResolver.materialize` call it right after
+  planning), so no worker ever parks on exchange readiness — the K>1 liveness
+  fix (plans/bugfixes/02f). Two obligations follow: (a) a new physical operator
+  with children needs a `PhysicalPlanner.childrenOf` branch (a missed branch
+  silently exempts its subtree's exchanges from the pass); (b) a new
+  exchange-like structure — any once-computed result that multiple pool tasks
+  might wait on — must either be wired into the pass or be published eagerly
+  before pool tasks can reach it (CTE materialization is the in-tree exemplar).
+  Draining lazily-nested exchanges from pool tasks without the pass reproduces
+  the 02e wedge (`sql/exec:exchange_deadlock_stress_test` with `STRESS_LAZY=1`
+  demonstrates it on demand).
 
 ## Counter discipline
 

@@ -515,12 +515,12 @@ class DataJobTest {
     }
   }
 
-  /** Plumbing test for Plan 09 Phase 1: confirm DataJob.runOneTask reads spill
-    * config out of `OutputFilePath.options` and threads the resulting
-    * [[ExecutionOptions]] into every `SqlExecutor.execute` call (main SQL +
-    * validations). No operator consumes opts yet; this guards against the
-    * plumbing silently degrading to defaults when phases 2+ start to depend
-    * on it. */
+  /** Plumbing test: confirm DataJob.runOneTask reads spill config out of
+    * `OutputFilePath.options` and threads the resulting [[ExecutionOptions]]
+    * into every `SqlExecutor.execute` call (main SQL + validations). The
+    * spill-capable operators consume these opts at construction, so a
+    * plumbing regression here would silently run every task on defaults
+    * (spill off) no matter what the user configured. */
   @Test def runOneTaskThreadsExecutionOptionsFromOutputOptions(): Unit = {
     val inDir = tmpDir("dj-opts-")
     writeCsv(inDir, "a.csv", "x\n1\n2\n3\n")

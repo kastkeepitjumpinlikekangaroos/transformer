@@ -245,37 +245,45 @@ group together" semantics survive; `NullsToZero` (equi-join probes) puts
 them in shard `0` so the outer-join "unmatched probe" emission still sees
 them. Both policies are deterministic and pinned across runs.
 
-Materialization is lazy and one-shot: the first `execute(s)` call on any
-shard triggers the full build (all child partitions read in parallel
-through `Scheduler.submitAndAwaitAll`, every row routed and scattered into
-K size-exact output batches). Concurrent first-callers race a CAS claim
-(`AtomicBoolean`): exactly one winner runs `materialize()` with **no JVM
-monitor held**, publishes the result through a `@volatile` field, and opens a
-`CountDownLatch`; the losers park on a plain **uncompensated** `ready.await()`
-and wake together. A materialization failure latches and re-throws (wrapped)
-to every caller — never retried. The loser-wait is deliberately not
-`ForkJoinPool.managedBlock`-wrapped (that compensation was the reverted
-plans/bugfixes/02b regression — see §3). The memory cost is roughly what
+Materialization is **eager and bottom-up for engine-planned queries**:
+right after physical planning, both drain entry points (`SqlEngine`'s two
+execute paths and `CteResolver`'s CTE-body materialization) run
+`PhysicalPlanner.preMaterializeExchanges`, a post-order walk (identity-
+deduped, `MeteredPlan`-transparent) that publishes every exchange children-
+first before any consumer task exists. Each exchange's build reads all
+child partitions in parallel through `Scheduler.submitAndAwaitAll`, routes
+every row, and scatters into K size-exact output batches; consumers then
+only ever take the published fast path — `execute(s)` is an array read.
+A materialization failure re-throws (wrapped) out of the pass at
+`SqlEngine.execute` time — never retried. The memory cost is roughly what
 `HashAggregate.partialAggregate` already paid; no new spill semantics are
 introduced.
 
-Caveat: this is a throughput + convention fix, **not a liveness guarantee**.
-The winner still blocks on the shared pool inside `materialize()`, and
-`ForkJoinTask.get()`'s helpJoin can inline a consumer of the same exchange
-beneath one of the awaited shard-task frames (helping runs tasks from
-stealers' queues, which need not be descendants of the awaited task). That
-closes a winner → shard-task → consumer → exchange cycle no monitor-vs-latch
-choice avoids — reproduced as a permanent wedge at fuzz-campaign scale (see
-[gotchas.md](gotchas.md) and plans/bugfixes/02e). When the guest lands on the
-winner's *own* stack, `ensureMaterialized` detects the reentrancy (a `claimer`
-thread check) and builds a private unpublished copy — duplicate work, live —
-matching what the old reentrant monitor did implicitly; only the cross-thread
-variant remains open. Sharding is off by default,
-so the collapsing paths never build an exchange; the sharded fuzz target
-stays un-gated at `shard_count=4` (deterministic default seeds, green in
-seconds), while long sharded campaigns can wedge and must run under
-`--test_timeout`. `//src/test/scala/com/transformer/core:scheduler_test`
-pins the tree-shaped work-helping mechanism everything else rests on.
+The bottom-up ordering is the K>1 **liveness guarantee** (plans/bugfixes/02f):
+a wait on an unready exchange was the one wait in the engine that does not
+follow the task-creation tree, so the one wait `ForkJoinTask.get()`
+work-helping cannot rescue — helpJoin can inline a *consumer* of an exchange
+beneath that exchange's own materialization frames (helping runs tasks from
+stealers' queues, which need not be descendants of the awaited task), closing
+a winner → shard-task → consumer → exchange cycle no monitor-vs-latch choice
+avoids (reproduced at campaign scale, plans/bugfixes/02e). With every
+exchange published before its consumers run, no worker ever waits on
+exchange readiness; every remaining pool wait is a pure tree await, which
+work-helping completes — the mechanism
+`//src/test/scala/com/transformer/core:scheduler_test` pins, and the wedge
+shape `sql/exec:exchange_deadlock_stress_test` re-drives green under churn.
+
+Directly-constructed exchanges (tests, embedders that bypass the planner)
+fall back to lazy one-shot materialization: concurrent first-callers race a
+CAS claim (`AtomicBoolean`); exactly one winner runs `materialize()` with
+**no JVM monitor held**, publishes through a `@volatile` field, and opens a
+`CountDownLatch`; losers park on a plain **uncompensated** `ready.await()`
+and wake together. The loser-wait is deliberately not
+`ForkJoinPool.managedBlock`-wrapped (that compensation was the reverted
+plans/bugfixes/02b regression — see §3). This fallback keeps the helpJoin
+hazard: do not drain lazily-nested exchanges from pool tasks — run the
+pre-materialization pass first, like the engine does (see
+[gotchas.md](gotchas.md)).
 
 ### 2c. Spill-to-disk for breakers (opt-in)
 

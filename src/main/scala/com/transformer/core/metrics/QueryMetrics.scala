@@ -23,9 +23,11 @@ package com.transformer.core.metrics
   * @param optimizeNanos     Time spent in `LogicalOptimizer.optimize`.
   * @param physicalPlanNanos Time spent in `PhysicalPlanner.plan` including
   *                          the metrics-wrap pass.
-  * @param executeNanos      Time spent constructing the per-partition
-  *                          iterators in `SqlEngine.execute` (not the
-  *                          drain — that is the consumer's wall time).
+  * @param executeNanos      Time spent in `SqlEngine.execute` after planning:
+  *                          the exchange pre-materialization pass (a sharded
+  *                          plan's shuffle cost lands here; zero exchanges =
+  *                          ~zero) plus per-partition iterator construction.
+  *                          Not the drain — that is the consumer's wall time.
   * @param operatorTree      Root of the operator-metrics tree.
   */
 final case class QueryMetrics(

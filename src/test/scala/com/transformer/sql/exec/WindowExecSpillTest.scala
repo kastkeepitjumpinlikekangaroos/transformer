@@ -10,7 +10,7 @@ import java.nio.file.{Files, Path}
 import scala.collection.mutable
 import scala.util.Random
 
-/** Plan 09 Phase 7 parity: with `opts.spillEnabled` and a PARTITION BY
+/** Bucketed-window spill parity: with `opts.spillEnabled` and a PARTITION BY
   * present, [[WindowExec]] routes child rows through K disk buckets
   * keyed by `hash(partitionKey)`. Bucket processing must produce the
   * same per-row window values as the in-memory path — every row sharing

@@ -217,4 +217,17 @@ final class OperatorSpillDir private[core] (val dir: java.nio.file.Path) extends
     closed = true
     try Spill.deleteRecursively(dir) catch { case _: Throwable => () }
   }
+
+  /** Wrap `inner` so this directory is wiped when the consumer drains the
+    * iterator. The [[Spill]] shutdown hook covers the abandoned-iterator
+    * case. Shared by every spill-capable operator's emit path. */
+  def closeOnDrain(inner: Iterator[ColumnarBatch]): Iterator[ColumnarBatch] =
+    new Iterator[ColumnarBatch] {
+      def hasNext: Boolean = {
+        val h = inner.hasNext
+        if (!h) close()
+        h
+      }
+      def next(): ColumnarBatch = inner.next()
+    }
 }

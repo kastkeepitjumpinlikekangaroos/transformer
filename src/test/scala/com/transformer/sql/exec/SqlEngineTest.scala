@@ -1081,7 +1081,7 @@ class SqlEngineTest {
   // wide DISTINCT.
 
   @Test def groupByLongOnlyExercisesLongHashMapFastPath(): Unit = {
-    // Single Long-fittable ColRef key → LongHashMap (Phase 6 fast path),
+    // Single Long-fittable ColRef key → LongHashMap fast path,
     // primitive long stored unboxed in the hash table.
     val p = tmpCsv("a.csv", "k,v\n100,1\n200,2\n100,3\n200,4\n100,5\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
@@ -1217,7 +1217,7 @@ class SqlEngineTest {
   }
 
   @Test def joinOnSingleLongKeyHitsLongHashMapFastPath(): Unit = {
-    // Single Long-fittable ColRef on both sides → LongHashMap (Phase 6 fast
+    // Single Long-fittable ColRef on both sides → LongHashMap (fast
     // path). Includes NULL keys on both sides — must produce no-match per SQL
     // 3VL, identical to the codec path.
     val left = tmpCsv("l.csv",
@@ -1272,10 +1272,10 @@ class SqlEngineTest {
     assertEquals((3L, 120L), byKey(null))  // NULL: 20+40+60
   }
 
-  // ---- Plan 04 Phase 2: HashAggregate via ExchangeExec ---------------------
+  // ---- Sharded aggregation: HashAggregate via ExchangeExec -----------------
 
   @Test def groupBySmallCsvInputUsesCollapsingPath(): Unit = {
-    // Phase 6 gate: CSV inputs report no exactRowCount, so the planner can't
+    // Cardinality gate: CSV inputs report no exactRowCount, so the planner can't
     // prove the input is ≥ MinShardableSize and skips the exchange — small
     // GROUP BYs go through the historic collapsing aggregate. The point of
     // this test is the correctness path: the result must still be right
@@ -1329,7 +1329,7 @@ class SqlEngineTest {
   }
 
   @Test def equiJoinOnSmallCsvUsesBroadcastPath(): Unit = {
-    // Phase 6 gate: CSV inputs have no exactRowCount, so the planner can't
+    // Cardinality gate: CSV inputs have no exactRowCount, so the planner can't
     // prove either side is ≥ BroadcastBuildThreshold and falls back to the
     // historic broadcast hash-join (build one side, stream the other —
     // collapses to one output partition). The point is correctness on the

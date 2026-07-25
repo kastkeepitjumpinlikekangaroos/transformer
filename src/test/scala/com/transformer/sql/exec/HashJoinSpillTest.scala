@@ -10,7 +10,7 @@ import java.nio.file.{Files, Path}
 import scala.collection.mutable
 import scala.util.Random
 
-/** Plan 09 Phase 6 parity: grace hash join must produce the same row
+/** Grace-hash-join parity: grace hash join must produce the same row
   * multiset as the in-memory hash join under inner / LEFT outer / RIGHT
   * outer / FULL outer for both equi-key types (single-Long fast path +
   * codec multi-key path).

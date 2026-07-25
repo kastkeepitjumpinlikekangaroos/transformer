@@ -28,6 +28,10 @@ object SqlEngine extends SqlExecutor {
     val resolved = CteResolver.resolve(built, opts)
     val optimized = LogicalOptimizer.optimize(resolved)
     val physical = PhysicalPlanner.plan(optimized, opts)
+    // Publish every exchange bottom-up before handing out iterators, so no
+    // consumer task can ever wait on exchange readiness (the K>1 liveness
+    // fix — see preMaterializeExchanges' scaladoc). No-op without exchanges.
+    PhysicalPlanner.preMaterializeExchanges(physical)
     val parts: IndexedSeq[Iterator[ColumnarBatch]] =
       (0 until physical.numPartitions).map(p => physical.execute(p))
     new ExecutedQuery(physical.outputSchema, parts)
@@ -51,6 +55,11 @@ object SqlEngine extends SqlExecutor {
     val t3 = System.nanoTime()
     val (physical, maybeNode) = PhysicalPlanner.planWithMetrics(optimized, opts)
     val t4 = System.nanoTime()
+    // Exchange pre-materialization runs inside the execute-timed region:
+    // sharded plans genuinely spend their shuffle cost here, and before this
+    // pass existed that cost hid in the caller's post-return drain where
+    // executeNanos never saw it.
+    PhysicalPlanner.preMaterializeExchanges(physical)
     val parts: IndexedSeq[Iterator[ColumnarBatch]] =
       (0 until physical.numPartitions).map(p => physical.execute(p))
     val t5 = System.nanoTime()

@@ -20,15 +20,23 @@ import scala.collection.mutable
   *
   * ## Execution model
   *
-  * Lazy materialization: the first `execute(s)` call on any shard triggers
-  * the full materialization (all child partitions read, every row routed to
-  * its shard buffer). Concurrent first-callers race a CAS claim — exactly one
-  * winner runs `materialize()` with no JVM monitor held, the rest park on a
-  * latch until the result is published (see [[ensureMaterialized]] for what
-  * this does and does not guarantee). Subsequent `execute(s)` calls — including for other
-  * shards from other worker threads — return iterators over the already-built
-  * shard arrays. Materialization itself runs the child's partitions in
-  * parallel through the shared [[Scheduler]] pool.
+  * Engine-planned exchanges are materialized EAGERLY, bottom-up, by
+  * [[PhysicalPlanner.preMaterializeExchanges]] before any consumer task
+  * exists — a consumer's `execute(s)` only ever takes the published fast
+  * path. That ordering is what makes K>1 sharded plans deadlock-free: no
+  * worker thread ever waits on this exchange's readiness (see the liveness
+  * note on `preMaterializeExchanges` and docs/gotchas.md "Sharded execution
+  * at K>1").
+  *
+  * Directly-constructed exchanges (tests, embedders) may instead hit the
+  * lazy fallback: the first `execute(s)` call triggers the full
+  * materialization (all child partitions read, every row routed to its shard
+  * buffer). Concurrent first-callers race a CAS claim — exactly one winner
+  * runs `materialize()` with no JVM monitor held, the rest park on a latch
+  * until the result is published (see [[ensureMaterialized]] for what this
+  * does and does not guarantee — in particular do NOT drain lazily-nested
+  * exchanges from pool tasks). Materialization itself runs the child's
+  * partitions in parallel through the shared [[Scheduler]] pool.
   *
   * ## Row routing
   *
@@ -95,34 +103,49 @@ final case class ExchangeExec(
     mat(partition).iterator
   }
 
-  /** CAS-claim + latch. The loser-wait is a plain, deliberately UNCOMPENSATED
-    * `ready.await()` — do not wrap it in `ForkJoinPool.managedBlock`: under
-    * deep K-shard nesting that compensation spawns a spare-thread storm that
-    * wedges the pool (the plans/bugfixes/02b regression).
+  /** Eager entry for [[PhysicalPlanner.preMaterializeExchanges]]: engine
+    * plans materialize every exchange bottom-up through here before any
+    * consumer runs, so `ensureMaterialized`'s contention machinery below is
+    * structurally unreachable for planned queries — the pass's calling
+    * thread is always the first toucher and the fan-out below it is a pure
+    * task tree (every nested exchange is already published). */
+  private[exec] def materializeNow(): Unit = ensureMaterialized()
+
+  /** CAS-claim + latch — the lazy fallback for DIRECTLY-CONSTRUCTED
+    * exchanges; engine-planned ones arrive through [[materializeNow]] with
+    * no concurrent callers. The loser-wait is a plain, deliberately
+    * UNCOMPENSATED `ready.await()` — do not wrap it in
+    * `ForkJoinPool.managedBlock`: under deep K-shard nesting that
+    * compensation spawns a spare-thread storm that wedges the pool (the
+    * plans/bugfixes/02b regression).
     *
-    * What this fixes: no JVM monitor is held across the pool-blocking
-    * `materialize()` (the docs/conventions.md rule), and waiting shard-readers
-    * wake together on `countDown` instead of serialising through a lock — the
-    * K>1 throughput cliff.
+    * What the CAS+latch fixes: no JVM monitor is held across the
+    * pool-blocking `materialize()` (the docs/conventions.md rule), and
+    * waiting shard-readers wake together on `countDown` instead of
+    * serialising through a lock — the K>1 throughput cliff.
     *
-    * Two helpJoin hazards, one handled here, one open. helpJoin runs tasks
+    * What it does NOT fix — why lazily-nested exchanges must never be
+    * drained from pool tasks: `ForkJoinTask.get()`'s helpJoin runs tasks
     * from stealers' queues that need not be descendants of the awaited task,
-    * so while the winner parks in `materialize()`'s fan-out await it can have
-    * a CONSUMER of this very exchange inlined onto a stack:
+    * so while a winner parks in `materialize()`'s fan-out await, a CONSUMER
+    * of this very exchange can be inlined onto a stack:
     *
-    *   - **Onto the winner's own stack (handled).** The guest would lose the
-    *     CAS to its carrier thread and park on a latch only that same thread
-    *     can open — a self-deadlock the old reentrant `synchronized` monitor
-    *     silently avoided by double-materializing. `ensureMaterialized`
-    *     detects winner-reentrancy via `claimer` and materializes a private,
-    *     unpublished copy instead (duplicate work, live).
-    *   - **Onto another worker's stack (OPEN).** A guest inlined beneath a
-    *     shard-task frame on a different worker parks here as an ordinary
-    *     loser, closing a winner -> shard-task -> inlined-consumer -> exchange
-    *     cycle that no choice of monitor vs latch avoids. Reproduced as a
-    *     permanent wedge at fuzz-campaign scale; see docs/gotchas.md and
-    *     plans/bugfixes/02e. Sharding stays off by default; the real fix is
-    *     non-blocking materialization (parent plan 02 Option D).
+    *   - **Onto the winner's own stack (escaped here).** The guest would
+    *     lose the CAS to its carrier thread and park on a latch only that
+    *     same thread can open — a self-deadlock the old reentrant
+    *     `synchronized` monitor silently avoided by double-materializing.
+    *     `ensureMaterialized` detects winner-reentrancy via `claimer` and
+    *     materializes a private, unpublished copy instead (duplicate work,
+    *     live).
+    *   - **Onto another worker's stack (NOT escapable at this level).** A
+    *     guest inlined beneath a shard-task frame on a different worker
+    *     parks here as an ordinary loser, closing a winner -> shard-task ->
+    *     inlined-consumer -> exchange cycle that no choice of monitor vs
+    *     latch avoids — reproduced as a permanent wedge at fuzz-campaign
+    *     scale AND by `exchange_deadlock_stress_test` under `STRESS_LAZY=1`
+    *     (plans/bugfixes/02e, 02f). Engine execution is immune because the
+    *     pre-materialization pass leaves nothing for a consumer to wait on;
+    *     that pass, not this latch, is the liveness fix.
     *
     * The tree-shaped work-helping that everything else relies on is guarded
     * by `//src/test/scala/com/transformer/core:scheduler_test`.

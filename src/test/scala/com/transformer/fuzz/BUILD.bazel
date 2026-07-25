@@ -84,18 +84,17 @@ scala_junit_test(
         # shards and this target exercises real nested multi-shard plans (a breaker
         # over an exchange over a breaker ...), deterministically across hosts of
         # different core counts -- and the deterministic default seed budget keeps
-        # this green in seconds. NOTE: sharded execution at K>1 CAN hard-deadlock
-        # the shared Scheduler.pool at campaign volume (reproduced 2026-07-23 at
-        # FUZZ_SEEDS=20000: an exchange's materializing winner awaits a shard task
-        # on a worker under whose frame ForkJoinTask.get()'s helpJoin inlined a
-        # consumer of that same exchange -- a cycle no monitor-vs-latch choice
-        # avoids; see docs/gotchas.md and plans/bugfixes/02e). Long campaigns may
-        # therefore wedge until non-blocking materialization (plan 02 Option D)
-        # lands -- always pass --test_timeout. A ForkJoinPool.managedBlock
-        # "compensation" variant (02b) was tried and reverted: it wedged the pool
-        # even faster (spare-thread storm under deep K-shard nesting). A fixed K
-        # rather than the default (= Scheduler.parallelism) keeps CI wall time
-        # from drifting with availableProcessors.
+        # this green in seconds. The K>1 campaign-volume hard-deadlock this
+        # target used to hit (helpJoin inlining a consumer of an exchange
+        # beneath that exchange's own materialization frames -- reproduced
+        # 2026-07-23 at FUZZ_SEEDS=20000, plans/bugfixes/02e) is FIXED by
+        # bottom-up exchange pre-materialization (plans/bugfixes/02f): the
+        # 20000-seed campaign now completes. Still pass --test_timeout on long
+        # campaigns as hygiene. A ForkJoinPool.managedBlock "compensation"
+        # variant (02b) was tried and reverted: it wedged the pool even faster
+        # (spare-thread storm under deep K-shard nesting). A fixed K rather
+        # than the default (= Scheduler.parallelism) keeps CI wall time from
+        # drifting with availableProcessors.
         "-Dtransformer.scheduler.shard_count=4",
     ],
     deps = [
@@ -163,18 +162,17 @@ scala_junit_test(
         # shards and this target exercises real nested multi-shard plans (a breaker
         # over an exchange over a breaker ...), deterministically across hosts of
         # different core counts -- and the deterministic default seed budget keeps
-        # this green in seconds. NOTE: sharded execution at K>1 CAN hard-deadlock
-        # the shared Scheduler.pool at campaign volume (reproduced 2026-07-23 at
-        # FUZZ_SEEDS=20000: an exchange's materializing winner awaits a shard task
-        # on a worker under whose frame ForkJoinTask.get()'s helpJoin inlined a
-        # consumer of that same exchange -- a cycle no monitor-vs-latch choice
-        # avoids; see docs/gotchas.md and plans/bugfixes/02e). Long campaigns may
-        # therefore wedge until non-blocking materialization (plan 02 Option D)
-        # lands -- always pass --test_timeout. A ForkJoinPool.managedBlock
-        # "compensation" variant (02b) was tried and reverted: it wedged the pool
-        # even faster (spare-thread storm under deep K-shard nesting). A fixed K
-        # rather than the default (= Scheduler.parallelism) keeps CI wall time
-        # from drifting with availableProcessors.
+        # this green in seconds. The K>1 campaign-volume hard-deadlock this
+        # target used to hit (helpJoin inlining a consumer of an exchange
+        # beneath that exchange's own materialization frames -- reproduced
+        # 2026-07-23 at FUZZ_SEEDS=20000, plans/bugfixes/02e) is FIXED by
+        # bottom-up exchange pre-materialization (plans/bugfixes/02f): the
+        # 20000-seed campaign now completes. Still pass --test_timeout on long
+        # campaigns as hygiene. A ForkJoinPool.managedBlock "compensation"
+        # variant (02b) was tried and reverted: it wedged the pool even faster
+        # (spare-thread storm under deep K-shard nesting). A fixed K rather
+        # than the default (= Scheduler.parallelism) keeps CI wall time from
+        # drifting with availableProcessors.
         "-Dtransformer.scheduler.shard_count=4",
     ],
     tags = ["fuzz"],

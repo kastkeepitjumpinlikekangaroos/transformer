@@ -252,13 +252,15 @@ ship a fix or move something from "not done" to "done".
   either gate on `isRunning` or spawn a background thread and marshal results
   back via `FxHelpers.onFx`.
 
-- **Sharded execution at K>1 can hard-deadlock the shared pool — reproduced at
-  campaign scale; sharding stays off by default; never `managedBlock` these
-  waits.** (Hazard surfaced by the metamorphic fuzzer; investigated in
-  plans/bugfixes/02a, which refuted it at small fuzz budgets; a compensation
-  "fix" attempted in 02b was reverted; the exchange monitor was removed in 02d —
-  whose pre-change baseline campaign then REPRODUCED the hang, see
-  plans/bugfixes/02e.) Sharding is off by default
+- **Sharded execution at K>1 used to hard-deadlock the shared pool — FIXED
+  for engine execution by bottom-up exchange pre-materialization
+  (plans/bugfixes/02f); sharding stays off by default; never `managedBlock`
+  these waits; never drain lazily-nested exchanges from pool tasks.** (Hazard
+  surfaced by the metamorphic fuzzer; investigated in plans/bugfixes/02a,
+  which refuted it at small fuzz budgets; a compensation "fix" attempted in
+  02b was reverted; the exchange monitor was removed in 02d — whose pre-change
+  baseline campaign then REPRODUCED the hang, see plans/bugfixes/02e; 02f then
+  removed the wait the cycle needs.) Sharding is off by default
   (`MinShardableSize = Long.MaxValue`, `BroadcastBuildThreshold = 1M`), so nothing
   users run reaches this. With sharding forced on, every breaker (`ExchangeExec`,
   `HashJoinExec`, `DistinctExec`, `HashAggregateExec`) materialises by blocking on
@@ -290,7 +292,8 @@ ship a fix or move something from "not done" to "done".
     deep *tree* of exchanges. Workers that block on I/O (e.g. parquet spill)
     rather than on a pool task ARE compensated by the FJP. The external top-level
     drain thread parks without consuming a pool worker.
-  - **`helpJoin` breaks stack discipline — the real deadlock (OPEN).** Helping
+  - **`helpJoin` breaks stack discipline — the real deadlock (FIXED by 02f:
+    engine plans no longer contain the wait the cycle needs).** Helping
     is not restricted to descendants of the awaited task: `ForkJoinTask.get()`'s
     helpJoin path runs tasks from stealers' queues wholesale. In the captured
     wedge, an exchange's materializing winner awaited one of its shard tasks on
@@ -312,8 +315,16 @@ ship a fix or move something from "not done" to "done".
     its own latch (this bit 02d's first cut: the default-seed fuzzer, green
     for months, timed out). `ensureMaterialized` therefore detects
     winner-reentrancy via a `claimer` thread check and materializes a private
-    unpublished copy (duplicate work, live). Only the cross-thread variant
-    remains open.
+    unpublished copy (duplicate work, live). The cross-thread variant admits
+    no such point escape (a cross-exchange pair of hosts evades any
+    "am I above a producer of THIS exchange" check), which is why the fix
+    removes the wait instead: every deadlock cycle must pass through an
+    exchange-readiness wait — the one wait that does not follow the
+    task-creation tree — and `PhysicalPlanner.preMaterializeExchanges`
+    publishes every exchange bottom-up at the drain choke points
+    (`SqlEngine`'s two execute paths, `CteResolver.materialize`) before any
+    consumer task exists, so no worker ever performs that wait
+    (plans/bugfixes/02f).
 
   Investigation (plan 02a; JDK 21, 8-core): the sharded fuzzer runs GREEN at
   multi-shard K for small budgets — the `shard_count=4` pin, default K
@@ -348,21 +359,27 @@ ship a fix or move something from "not done" to "done".
   into unbounded thread creation.
 
   Net: 02d's CAS+latch removed the monitor-serialisation cliff (losers wake
-  together on `countDown`; no JVM monitor is held across a pool wait anywhere in
-  the tree), but it is a **perf + convention fix, not a liveness fix**: at K>1
-  sharded execution can still hard-deadlock via the helpJoin cycle, which is
-  monitor-agnostic. Mitigations in force: sharding is off by default; the
-  default-seed K=4 fuzzer (`sharded_mode_fuzz_test`) is deterministic and green
-  in seconds (real multi-shard correctness coverage); long sharded campaigns can
-  wedge and must run under `--test_timeout`. Guards:
+  together on `countDown`; no JVM monitor is held across a pool wait anywhere
+  in the tree); 02f removed the deadlock itself for engine execution by making
+  the exchange-readiness wait unreachable — the pre-materialization pass runs
+  at both drain choke points, and plans with zero exchanges (the shipping
+  default) walk and find nothing. The 20000-seed K=4 campaign that wedged
+  HEAD in ~1-3 minutes completes under 02f. Guards:
   `//src/test/scala/com/transformer/core:scheduler_test` pins the tree-shaped
-  work-helping mechanism (the same depth-5/fan-4 fan-out completes on a 2-thread
-  pool via `submitAndAwaitAll`'s `.get()` and wedges through a non-helping
-  `CountDownLatch`), and `exchange_exec_test` pins exactly-once materialization +
-  failure propagation under racing readers. The real elimination is non-blocking /
-  event-driven breaker materialization (parent plan 02 Option D); its trigger is
-  no longer hypothetical — reopen it before sharding is ever promoted toward a
-  shipping default. The general rules stand: never hold a JVM monitor across a
+  work-helping mechanism (the same depth-5/fan-4 fan-out completes on a
+  2-thread pool via `submitAndAwaitAll`'s `.get()` and wedges through a
+  non-helping `CountDownLatch`); `exchange_exec_test` pins exactly-once
+  materialization + failure propagation under racing readers plus the pass
+  itself (diamond-shared exchange publishes once; `MeteredPlan` wrappers are
+  transparent); `sql/exec:exchange_deadlock_stress_test` re-drives the exact
+  captured wedge topology through the pass under heavy steal churn (green
+  ~2s in the default suite; `STRESS_LAZY=1` skips the pass and reproduces the
+  historical wedge in seconds as a manual red instrument). RESIDUAL: the lazy
+  `ensureMaterialized` fallback still exists for directly-constructed
+  exchanges, and draining lazily-NESTED exchanges from pool tasks without the
+  pass can still wedge — don't do that; run
+  `PhysicalPlanner.preMaterializeExchanges` first like the engine does. The
+  general rules stand: never hold a JVM monitor across a
   `Scheduler.pool`-blocking call (`ExchangeExec.ensureMaterialized` is the
   in-tree exemplar of the compliant pattern), and do not reach for
   `ForkJoinPool.managedBlock` as a blanket wrapper on pool-task waits (02b's

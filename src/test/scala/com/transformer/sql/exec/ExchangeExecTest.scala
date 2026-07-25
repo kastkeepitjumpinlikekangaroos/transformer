@@ -334,6 +334,51 @@ class ExchangeExecTest {
     }
   }
 
+  // ---- preMaterializeExchanges (the 02f engine pass) ------------------------
+
+  @Test def preMaterializePassPublishesADiamondSharedExchangeOnce(): Unit = {
+    // CTE inlining shares plan subtrees, so one ExchangeExec instance can have
+    // two parents. The pass must walk by identity: one materialization, both
+    // parents read the published shards.
+    val parts = Vector.tabulate(3) { p =>
+      Vector.tabulate(40)(i => row(i % 5, p * 100 + i))
+    }
+    val counting = new CountingPlan(new InMemoryPartitionedPlan(intSchema, parts))
+    val ex = ExchangeExec(counting, Seq(intKey), numShards = 4)
+    val diamond = UnionExec(ex, ex)
+
+    PhysicalPlanner.preMaterializeExchanges(diamond)
+    assertEquals("child drained exactly once by the pass",
+      counting.numPartitions, counting.executeCalls.get)
+
+    val drained = (0 until diamond.numPartitions)
+      .flatMap(p => drainRows(diamond.execute(p), intSchema)).toVector
+    assertEquals("each row appears twice through the two parents",
+      2 * parts.map(_.length).sum, drained.length)
+    assertEquals("no further child executions on consumption",
+      counting.numPartitions, counting.executeCalls.get)
+  }
+
+  @Test def preMaterializePassSeesThroughMeteredPlanWrappers(): Unit = {
+    // Metrics-enabled plans wrap every operator in MeteredPlan; the pass must
+    // still find and publish the exchange underneath before consumers run.
+    val parts = Vector.tabulate(2) { p =>
+      Vector.tabulate(30)(i => row(i % 3, p * 100 + i))
+    }
+    val counting = new CountingPlan(new InMemoryPartitionedPlan(intSchema, parts))
+    val ex = ExchangeExec(counting, Seq(intKey), numShards = 4)
+    val (wrapped, _) = PhysicalPlanner.wrapWithMetrics(ex)
+
+    PhysicalPlanner.preMaterializeExchanges(wrapped)
+    assertEquals("exchange under MeteredPlan published by the pass",
+      counting.numPartitions, counting.executeCalls.get)
+
+    val total = (0 until wrapped.numPartitions)
+      .map(s => drainRows(wrapped.execute(s), intSchema).length).sum
+    assertEquals("metered consumption reads the published shards",
+      parts.map(_.length).sum, total)
+  }
+
   @Test def invalidPartitionIndexThrows(): Unit = {
     val plan = new InMemoryPartitionedPlan(intSchema, Vector(Vector(row(1, 1))))
     val ex = ExchangeExec(plan, Seq(intKey), numShards = 4)

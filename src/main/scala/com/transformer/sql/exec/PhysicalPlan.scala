@@ -126,21 +126,8 @@ final case class ProjectExec(child: PhysicalPlan, projections: Seq[(Expr, String
 final case class LocalLimitExec(child: PhysicalPlan, n: Long) extends PhysicalPlan {
   def outputSchema: Schema = child.outputSchema
   def numPartitions: Int = child.numPartitions
-  def execute(partition: Int): Iterator[ColumnarBatch] = {
-    var remaining = n
-    child.execute(partition).takeWhile(_ => remaining > 0).map { b =>
-      if (b.numRows <= remaining) {
-        remaining -= b.numRows
-        b
-      } else {
-        val mask = new Array[Boolean](b.numRows)
-        var i = 0
-        while (i < remaining.toInt) { mask(i) = true; i += 1 }
-        remaining = 0
-        b.select(mask)
-      }
-    }
-  }
+  def execute(partition: Int): Iterator[ColumnarBatch] =
+    LimitExec.truncate(child.execute(partition), n)
 }
 
 /** Global limit collapses all partitions into one stream, stops after `n` rows. */
@@ -149,8 +136,16 @@ final case class GlobalLimitExec(child: PhysicalPlan, n: Long) extends PhysicalP
   def numPartitions: Int = 1
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0)
+    LimitExec.truncate((0 until child.numPartitions).iterator.flatMap(child.execute), n)
+  }
+}
+
+private[exec] object LimitExec {
+  /** Pass batches through until `n` rows have been emitted, trimming the batch
+    * that crosses the boundary. Shared by [[LocalLimitExec]] (per-partition
+    * cap) and [[GlobalLimitExec]] (single-stream cap). */
+  def truncate(it: Iterator[ColumnarBatch], n: Long): Iterator[ColumnarBatch] = {
     var remaining = n
-    val it = (0 until child.numPartitions).iterator.flatMap(child.execute)
     it.takeWhile(_ => remaining > 0).map { b =>
       if (b.numRows <= remaining) {
         remaining -= b.numRows

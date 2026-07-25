@@ -38,7 +38,7 @@ class ColumnProjectionPushdownTest {
     ColRefExpr(i, n, DataType.StringType)
 
   // ---------------------------------------------------------------------------
-  // Phase 3 tests
+  // Join pruning: both sides keep projected + join-key columns
   // ---------------------------------------------------------------------------
 
   @Test def joinPrunesBothSidesKeepingProjectedAndJoinKeyColumns(): Unit = {

@@ -49,7 +49,7 @@ final case class SortExec(
   /** Whether this sort may spill at runtime. Computed once at planning time
     * from `opts`; per-partition tasks consult [[spillThresholdBytes]] for the
     * actual flush threshold. */
-  private val mayspill: Boolean = opts.spillEnabled
+  private val maySpill: Boolean = opts.spillEnabled
 
   /** Effective per-partition threshold in bytes. Resolved against the
     * runtime heap / parallelism via [[Spill.effectiveThresholdBytes]]. */
@@ -62,8 +62,8 @@ final case class SortExec(
     // parquet handles; the directory is wiped when the iterator finishes
     // (or via JVM shutdown hook if the consumer abandons it).
     val spillDir: Option[OperatorSpillDir] =
-      if (mayspill) Some(Spill.openOperatorDir("sort")) else None
-    val threshold = if (mayspill) spillThresholdBytes else Long.MaxValue
+      if (maySpill) Some(Spill.openOperatorDir("sort")) else None
+    val threshold = if (maySpill) spillThresholdBytes else Long.MaxValue
 
     val tasks: Seq[Callable[SortExec.PartitionResult]] =
       (0 until child.numPartitions).map { p =>
@@ -146,9 +146,9 @@ final case class SortExec(
     runs += file
   }
 
-  /** Convert sorted rows into a batch iterator suitable for parquet write.
-    * Reuses the existing [[emit]] logic shape but inline so we don't allocate
-    * the outer Iterator wrapper twice. */
+  /** Stream sorted rows as capacity-sized batches. Serves both the in-memory
+    * emit paths (via [[emit]], which fixes the schema to [[outputSchema]]) and
+    * the spill-run parquet writes in [[flushRun]]. */
   private def batchIterator(sorted: Array[Array[Any]], schema: Schema): Iterator[ColumnarBatch] = {
     val capacity = ColumnarBatch.DefaultCapacity
     val totalRows = sorted.length
@@ -295,22 +295,11 @@ final case class SortExec(
     wrapWithSpillCleanup(mergedIt, spillDir)
   }
 
-  /** Wrap `inner` so the spill subdir is wiped when the consumer drains the
-    * iterator. The shutdown hook in [[Spill]] catches the abandoned case. */
+  /** Wipe the spill subdir once the consumer drains the iterator. */
   private def wrapWithSpillCleanup(
       inner: Iterator[ColumnarBatch],
-      spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] = spillDir match {
-    case None => inner
-    case Some(d) =>
-      new Iterator[ColumnarBatch] {
-        def hasNext: Boolean = {
-          val h = inner.hasNext
-          if (!h) d.close()
-          h
-        }
-        def next(): ColumnarBatch = inner.next()
-      }
-  }
+      spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] =
+    spillDir.fold(inner)(_.closeOnDrain(inner))
 
   /** Extract the underlying [[Array[Array[Any]]]] from an in-memory cursor
     * without consuming it through the heap. Cheap escape hatch for the
@@ -365,32 +354,8 @@ final case class SortExec(
     emit(merged)
   }
 
-  private def emit(sorted: Array[Array[Any]]): Iterator[ColumnarBatch] = {
-    val capacity = ColumnarBatch.DefaultCapacity
-    val schema = outputSchema
-    val totalRows = sorted.length
-    var produced = 0
-    new Iterator[ColumnarBatch] {
-      def hasNext: Boolean = produced < totalRows
-      def next(): ColumnarBatch = {
-        val take = math.min(capacity, totalRows - produced)
-        val out = new ColumnarBatch(schema, take max 1)
-        var r = 0
-        while (r < take) {
-          val row = sorted(produced + r)
-          var c = 0
-          while (c < schema.length) {
-            if (row(c) == null) out.column(c).setNull(r) else out.column(c).setBoxed(r, row(c))
-            c += 1
-          }
-          r += 1
-        }
-        out.setNumRows(take)
-        produced += take
-        out
-      }
-    }
-  }
+  private def emit(sorted: Array[Array[Any]]): Iterator[ColumnarBatch] =
+    batchIterator(sorted, outputSchema)
 }
 
 object SortExec {

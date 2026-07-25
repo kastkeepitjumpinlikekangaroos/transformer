@@ -69,6 +69,10 @@ object CteResolver {
     * pending scan for the MV scan never shifts a bound column index. */
   private def materialize(name: String, body: LogicalPlan, opts: ExecutionOptions): LogicalPlan = {
     val physical = PhysicalPlanner.plan(LogicalOptimizer.optimize(body), opts.copy(metricsEnabled = false))
+    // A CTE body is drained through the pool below; publish its exchanges
+    // first so that drain never waits on exchange readiness (same K>1
+    // liveness rule as SqlEngine's main-plan pass).
+    PhysicalPlanner.preMaterializeExchanges(physical)
     val mv = MaterializedView.materializeInParallel(new PhysicalPlanView(physical))
     require(mv.schema == body.outputSchema,
       s"CTE '$name' materialized schema ${mv.schema.fieldNames.mkString("[", ",", "]")} != " +

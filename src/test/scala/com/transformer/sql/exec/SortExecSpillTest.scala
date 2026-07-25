@@ -10,7 +10,7 @@ import java.nio.file.{Files, Path}
 import scala.collection.mutable
 import scala.util.Random
 
-/** Plan 09 Phase 3 parity guarantee: with spill enabled at a tiny threshold
+/** External-sort parity guarantee: with spill enabled at a tiny threshold
   * (forcing many flushes), [[SortExec]] must produce the *same global sort*
   * — same row multiset, sorted under the same comparator — as the non-spill
   * path. We can't assert position-by-position equality because the heap

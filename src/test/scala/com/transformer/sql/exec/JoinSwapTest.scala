@@ -9,9 +9,9 @@ import scala.collection.mutable
 
 /** Planner-level tests for cardinality-driven join build-side swapping.
   *
-  * The implementation (Phase 2) adds a 7th param `buildRight: Boolean` to
-  * [[HashJoinExec]] and teaches [[PhysicalPlanner]] to set it based on
-  * estimated child cardinalities and join kind:
+  * The implementation is the `buildRight: Boolean` param on [[HashJoinExec]],
+  * which [[PhysicalPlanner]] sets based on estimated child cardinalities and
+  * join kind:
   *
   *   - Inner:       swap (buildRight=false) when leftEst * 2 <= rightEst.
   *   - Left outer:  never swap (buildRight stays true).
@@ -440,7 +440,7 @@ class JoinSwapTest {
   }
 
   // ---------------------------------------------------------------------------
-  // Plan 04 Phase 6: broadcast-vs-shuffle gate for equi-joins.
+  // Broadcast-vs-shuffle gate for equi-joins.
   // The planner inserts ExchangeExec on both sides only when the smaller
   // side is above LogicalPlanCardinality.BroadcastBuildThreshold (1M default).
   // Below that, the historic broadcast shape (build small, stream-probe

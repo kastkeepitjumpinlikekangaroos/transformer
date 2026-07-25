@@ -101,8 +101,8 @@ In-memory counters:
 |---|---|
 | `buildSideRows` | Rows ingested into the build-side keymap. |
 | `probeSideRows` | Rows probed against the build map. |
-| `matchedRows` | Probe rows that found at least one match. |
-| `unmatchedRows` | Probe (or build, for LEFT outer) rows that surfaced as unmatched in the outer-join emission. |
+| `matchedRows` | Probe rows with at least one match surviving the residual (`extra`) predicate. |
+| `unmatchedRows` | Rows emitted null-padded by outer-join preservation — unmatched probe rows and unmatched build rows both count. |
 | `buildNanos` | Time spent building the keymap. |
 | `probeNanos` | Time spent probing. |
 | `keyCodecPath` | 0 = LongHashMap fast path, 1 = `PackedBytesCodec`, 2 = `ObjectArrayCodec`, 3 = `SingleObjectKeyCodec` (single non-packable column — e.g. `GROUP BY market_id`). |

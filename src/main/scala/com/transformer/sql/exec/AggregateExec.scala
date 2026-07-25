@@ -26,11 +26,12 @@ import scala.collection.mutable
   *     fans out across the child's partitions through [[Scheduler]] in
   *     `executeCollapsing`, merges the partials, and emits a single
   *     output partition. Reached when `groupKeys.isEmpty` (every row
-  *     aggregates into the same bucket) or when the planner's cardinality
-  *     estimate is below [[LogicalPlanCardinality.MinShardableSize]] — the
-  *     exchange overhead would outweigh the per-shard parallelism. The
-  *     zero-row insertion for `COUNT(*) FROM <empty>`-style queries lives
-  *     in this mode (only fires when `groupKeys.isEmpty`).
+  *     aggregates into the same bucket) or when the planner can't prove
+  *     the input has at least [[LogicalPlanCardinality.MinShardableSize]]
+  *     rows (small or unknown-size inputs — the exchange overhead would
+  *     outweigh the per-shard parallelism). The zero-row insertion for
+  *     `COUNT(*) FROM <empty>`-style queries lives in this mode (only
+  *     fires when `groupKeys.isEmpty`).
   *
   * Output schema = group keys ++ aggregate results (in the order given).
   *
@@ -137,31 +138,17 @@ final case class HashAggregateExec(
     val stats = if (metricsNode == null) null else new AggStateSerde.SerdeStats
     if (useLongKey) {
       val pa = partialAggregateLong(partition, spillDir)
-      val tMerge = if (metricsNode != null) System.nanoTime() else 0L
+      val tFold = if (metricsNode != null) System.nanoTime() else 0L
       AggSpiller.foldLongSpillFiles(pa.spillFiles, aggArr, pa.map, stats)
-      if (metricsNode != null) {
-        metricsNode.counters(HashAggregateExec.IdxMergeFromSpillNanos).add(System.nanoTime() - tMerge)
-        metricsNode.counters(HashAggregateExec.IdxSpillRunsRead).add(pa.spillFiles.length.toLong)
-        metricsNode.counters(HashAggregateExec.IdxGroupCount).add(pa.map.size.toLong)
-        if (stats != null) {
-          metricsNode.counters(HashAggregateExec.IdxSerdeReadNanos).add(stats.readNanos)
-          metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
-        }
-      }
+      recordSpillFoldMetrics(tFold, pa.spillFiles.length.toLong, stats)
+      if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxGroupCount).add(pa.map.size.toLong)
       wrapWithSpillCleanup(emitLong(pa.map), spillDir)
     } else {
       val pa = partialAggregate(partition, spillDir)
-      val tMerge = if (metricsNode != null) System.nanoTime() else 0L
+      val tFold = if (metricsNode != null) System.nanoTime() else 0L
       AggSpiller.foldCodecSpillFiles(pa.spillFiles, keyCodec, nKeys, aggArr, pa.map, stats)
-      if (metricsNode != null) {
-        metricsNode.counters(HashAggregateExec.IdxMergeFromSpillNanos).add(System.nanoTime() - tMerge)
-        metricsNode.counters(HashAggregateExec.IdxSpillRunsRead).add(pa.spillFiles.length.toLong)
-        metricsNode.counters(HashAggregateExec.IdxGroupCount).add(pa.map.size.toLong)
-        if (stats != null) {
-          metricsNode.counters(HashAggregateExec.IdxSerdeReadNanos).add(stats.readNanos)
-          metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
-        }
-      }
+      recordSpillFoldMetrics(tFold, pa.spillFiles.length.toLong, stats)
+      if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxGroupCount).add(pa.map.size.toLong)
       wrapWithSpillCleanup(emit(pa.map), spillDir)
     }
   }
@@ -192,20 +179,13 @@ final case class HashAggregateExec(
     // partial states that must be combined with anything currently in
     // `merged` for the same key.
     val stats = if (metricsNode == null) null else new AggStateSerde.SerdeStats
-    val tFoldStart = if (metricsNode != null) System.nanoTime() else 0L
+    val tFold = if (metricsNode != null) System.nanoTime() else 0L
     var runsRead = 0L
     partials.foreach { p =>
       AggSpiller.foldCodecSpillFiles(p.spillFiles, keyCodec, nKeys, aggArr, merged, stats)
       runsRead += p.spillFiles.length.toLong
     }
-    if (metricsNode != null) {
-      metricsNode.counters(HashAggregateExec.IdxMergeFromSpillNanos).add(System.nanoTime() - tFoldStart)
-      metricsNode.counters(HashAggregateExec.IdxSpillRunsRead).add(runsRead)
-      if (stats != null) {
-        metricsNode.counters(HashAggregateExec.IdxSerdeReadNanos).add(stats.readNanos)
-        metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
-      }
-    }
+    recordSpillFoldMetrics(tFold, runsRead, stats)
     // No-GROUP-BY aggregates require one row of output even on empty input
     // (e.g., `COUNT(*) FROM <empty>` → 0). With group keys, an empty input
     // is correctly an empty output (no groups).
@@ -238,21 +218,14 @@ final case class HashAggregateExec(
       .getOrElse(new LongHashMap[Array[AggState]]())
     if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxMergeNanos).add(System.nanoTime() - tMerge)
     val stats = if (metricsNode == null) null else new AggStateSerde.SerdeStats
-    val tFoldStart = if (metricsNode != null) System.nanoTime() else 0L
+    val tFold = if (metricsNode != null) System.nanoTime() else 0L
     var runsRead = 0L
     partials.foreach { p =>
       AggSpiller.foldLongSpillFiles(p.spillFiles, aggArr, merged, stats)
       runsRead += p.spillFiles.length.toLong
     }
-    if (metricsNode != null) {
-      metricsNode.counters(HashAggregateExec.IdxMergeFromSpillNanos).add(System.nanoTime() - tFoldStart)
-      metricsNode.counters(HashAggregateExec.IdxSpillRunsRead).add(runsRead)
-      metricsNode.counters(HashAggregateExec.IdxGroupCount).add(merged.size.toLong)
-      if (stats != null) {
-        metricsNode.counters(HashAggregateExec.IdxSerdeReadNanos).add(stats.readNanos)
-        metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
-      }
-    }
+    recordSpillFoldMetrics(tFold, runsRead, stats)
+    if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxGroupCount).add(merged.size.toLong)
     wrapWithSpillCleanup(emitLong(merged), spillDir)
   }
 
@@ -289,22 +262,48 @@ final case class HashAggregateExec(
   private val groupKeySchema: Schema =
     Schema(groupKeys.map { case (e, n) => Field(n, e.dataType) }.toVector)
 
-  /** Wrap `inner` so the spill subdir is wiped when the consumer drains
-    * the iterator. The shutdown hook in [[Spill]] catches the abandoned
-    * case. */
+  /** Wipe the spill subdir once the consumer drains the iterator. */
   private def wrapWithSpillCleanup(
       inner: Iterator[ColumnarBatch],
-      spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] = spillDir match {
-    case None => inner
-    case Some(d) =>
-      new Iterator[ColumnarBatch] {
-        def hasNext: Boolean = {
-          val h = inner.hasNext
-          if (!h) d.close()
-          h
-        }
-        def next(): ColumnarBatch = inner.next()
-      }
+      spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] =
+    spillDir.fold(inner)(_.closeOnDrain(inner))
+
+  /** Record the counters for folding spill runs back into a final map: fold
+    * wall time, run-file count, and codec serde time. `IdxGroupCount` is
+    * deliberately NOT recorded here — the collapsing path counts groups only
+    * after its empty-input zero-row insertion, so each caller records it at
+    * the point its map is final. */
+  private def recordSpillFoldMetrics(
+      tFoldStart: Long, runsRead: Long, stats: AggStateSerde.SerdeStats): Unit = {
+    if (metricsNode == null) return
+    metricsNode.counters(HashAggregateExec.IdxMergeFromSpillNanos).add(System.nanoTime() - tFoldStart)
+    metricsNode.counters(HashAggregateExec.IdxSpillRunsRead).add(runsRead)
+    if (stats != null) {
+      metricsNode.counters(HashAggregateExec.IdxSerdeReadNanos).add(stats.readNanos)
+      metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
+    }
+  }
+
+  /** Record one mid-stream spill flush: event count, bytes on disk (read
+    * after the writer closed, so the size is final), run count, serde write
+    * time. */
+  private def recordSpillFlushMetrics(file: Path, stats: AggStateSerde.SerdeStats): Unit = {
+    if (metricsNode == null) return
+    metricsNode.counters(HashAggregateExec.IdxSpillEvents).increment()
+    metricsNode.counters(HashAggregateExec.IdxBytesSpilled).add(file.toFile.length())
+    metricsNode.counters(HashAggregateExec.IdxSpillRunsWritten).increment()
+    if (stats != null) metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
+  }
+
+  /** Record one partition's ingestion pass: wall time plus peak resident map
+    * size / estimated bytes. Peaks accumulate across partitions into a
+    * sum-of-peaks (`LongAdder` has no max-reduction); consumers read it as
+    * a per-partition worst-case aggregate. */
+  private def recordPartialMetrics(tStart: Long, peakMapSize: Long, peakBytes: Long): Unit = {
+    if (metricsNode == null) return
+    metricsNode.counters(HashAggregateExec.IdxPartialAggregateNanos).add(System.nanoTime() - tStart)
+    metricsNode.counters(HashAggregateExec.IdxHashMapPeakSize).add(peakMapSize)
+    metricsNode.counters(HashAggregateExec.IdxPeakInMemoryBytes).add(peakBytes)
   }
 
   private def newStates(): Array[AggState] = {
@@ -455,13 +454,7 @@ final case class HashAggregateExec(
         val file = spillDir.get.newSpillFile(".parquet")
         val stats = if (metricsNode == null) null else new AggStateSerde.SerdeStats
         AggSpiller.writeCodecMap(file, keyCodec, groupKeySchema, aggArr, map, stats)
-        if (metricsNode != null) {
-          val sb = file.toFile.length()
-          metricsNode.counters(HashAggregateExec.IdxSpillEvents).increment()
-          metricsNode.counters(HashAggregateExec.IdxBytesSpilled).add(sb)
-          metricsNode.counters(HashAggregateExec.IdxSpillRunsWritten).increment()
-          if (stats != null) metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
-        }
+        recordSpillFlushMetrics(file, stats)
         map.clear()
         spillFiles += file
         bytesSinceFlush = 0L
@@ -471,17 +464,7 @@ final case class HashAggregateExec(
             s"exceeding spill_max_runs=${opts.spillMaxRuns}.")
       }
     }
-    if (metricsNode != null) {
-      metricsNode.counters(HashAggregateExec.IdxPartialAggregateNanos).add(System.nanoTime() - tStart)
-      // Use sumThenReset-style probe: peak is a max-reduction across partitions.
-      // `LongAdder.max` doesn't exist; we accumulate the per-partition peak
-      // into the counter so the consumer reads a sum-of-peaks (worst case per
-      // partition). For peak-of-peaks across partitions, divide by partitions
-      // or add per-partition observation (MetricsNode.partition is reserved
-      // for that but unused today).
-      metricsNode.counters(HashAggregateExec.IdxHashMapPeakSize).add(peakMapSize)
-      metricsNode.counters(HashAggregateExec.IdxPeakInMemoryBytes).add(peakBytes)
-    }
+    recordPartialMetrics(tStart, peakMapSize, peakBytes)
     PartialAgg(map, spillFiles.toArray)
   }
 
@@ -533,9 +516,10 @@ final case class HashAggregateExec(
   }
 
   // ---- Long-key path: single Int / Long / Date / Timestamp / Boolean ColRef -
-  // Only reached from the per-shard path — `useLongKey` requires
-  // `nKeys == 1`, which implies `groupKeys.nonEmpty`, which routes
-  // `execute` into `executePerShard`. No cross-shard merge needed.
+  // Reached from both dispatch routes: per-shard (exchange above) through
+  // `executePerShard`, and collapsing (no exchange — small-cardinality or
+  // unknown-size plans) through `executeCollapsingLong`, which combines the
+  // per-partition partials with `mergeLong`.
 
   private def partialAggregateLong(p: Int, spillDir: Option[OperatorSpillDir]): PartialAggLong = {
     val tStart = if (metricsNode != null) System.nanoTime() else 0L
@@ -586,13 +570,7 @@ final case class HashAggregateExec(
         val file = spillDir.get.newSpillFile(".parquet")
         val stats = if (metricsNode == null) null else new AggStateSerde.SerdeStats
         AggSpiller.writeLongMap(file, groupKeySchema.fields(0), aggArr, map, stats)
-        if (metricsNode != null) {
-          val sb = file.toFile.length()
-          metricsNode.counters(HashAggregateExec.IdxSpillEvents).increment()
-          metricsNode.counters(HashAggregateExec.IdxBytesSpilled).add(sb)
-          metricsNode.counters(HashAggregateExec.IdxSpillRunsWritten).increment()
-          if (stats != null) metricsNode.counters(HashAggregateExec.IdxSerdeWriteNanos).add(stats.writeNanos)
-        }
+        recordSpillFlushMetrics(file, stats)
         map = new LongHashMap[Array[AggState]]()
         spillFiles += file
         bytesSinceFlush = 0L
@@ -602,11 +580,7 @@ final case class HashAggregateExec(
             s"exceeding spill_max_runs=${opts.spillMaxRuns}.")
       }
     }
-    if (metricsNode != null) {
-      metricsNode.counters(HashAggregateExec.IdxPartialAggregateNanos).add(System.nanoTime() - tStart)
-      metricsNode.counters(HashAggregateExec.IdxHashMapPeakSize).add(peakMapSize)
-      metricsNode.counters(HashAggregateExec.IdxPeakInMemoryBytes).add(peakBytes)
-    }
+    recordPartialMetrics(tStart, peakMapSize, peakBytes)
     PartialAggLong(map, spillFiles.toArray)
   }
 
@@ -781,6 +755,18 @@ object AggState {
     case v: AggExprVariance => new MomentState(sample = v.sample, stddev = false)
     case c: AggExprCovar => new CovarState(sample = c.sample)
     case _: AggExprCorr => new CorrState()
+  }
+
+  /** Read a numeric cell as a Double with the vector-type dispatch in one
+    * place. Shared by the bivariate states (Covar / Corr), whose two-arg
+    * update can't hoist the match out of the row loop the way the
+    * single-arg states do. */
+  private[exec] def readNumericAsDouble(c: ColumnVector, r: Int): Double = c match {
+    case dv: DoubleVector => dv.values(r)
+    case fv: FloatVector => fv.values(r).toDouble
+    case lv: LongVector => lv.values(r).toDouble
+    case iv: IntVector => iv.values(r).toDouble
+    case other => other.getBoxed(r).asInstanceOf[Number].doubleValue
   }
 }
 
@@ -1375,8 +1361,8 @@ final class CovarState(sample: Boolean) extends AggState {
     val vxCol = argVecs(0)
     val vyCol = argVecs(1)
     if (!vxCol.isNull(r) && !vyCol.isNull(r)) {
-      val x = readDouble(vxCol, r)
-      val y = readDouble(vyCol, r)
+      val x = AggState.readNumericAsDouble(vxCol, r)
+      val y = AggState.readNumericAsDouble(vyCol, r)
       n += 1
       val dx = x - meanX
       meanX += dx / n
@@ -1384,13 +1370,6 @@ final class CovarState(sample: Boolean) extends AggState {
       meanY += dy / n
       cAcc += dx * (y - meanY)
     }
-  }
-  private def readDouble(c: ColumnVector, r: Int): Double = c match {
-    case dv: DoubleVector => dv.values(r)
-    case fv: FloatVector => fv.values(r).toDouble
-    case lv: LongVector => lv.values(r).toDouble
-    case iv: IntVector => iv.values(r).toDouble
-    case other => other.getBoxed(r).asInstanceOf[Number].doubleValue
   }
   def merge(o: AggState): Unit = {
     val that = o.asInstanceOf[CovarState]
@@ -1432,8 +1411,8 @@ final class CorrState extends AggState {
     val vxCol = argVecs(0)
     val vyCol = argVecs(1)
     if (!vxCol.isNull(r) && !vyCol.isNull(r)) {
-      val x = readDouble(vxCol, r)
-      val y = readDouble(vyCol, r)
+      val x = AggState.readNumericAsDouble(vxCol, r)
+      val y = AggState.readNumericAsDouble(vyCol, r)
       n += 1
       val dx = x - meanX
       val dy = y - meanY
@@ -1445,13 +1424,6 @@ final class CorrState extends AggState {
       m2y += dy * dy2
       cAcc += dx * dy2
     }
-  }
-  private def readDouble(c: ColumnVector, r: Int): Double = c match {
-    case dv: DoubleVector => dv.values(r)
-    case fv: FloatVector => fv.values(r).toDouble
-    case lv: LongVector => lv.values(r).toDouble
-    case iv: IntVector => iv.values(r).toDouble
-    case other => other.getBoxed(r).asInstanceOf[Number].doubleValue
   }
   def merge(o: AggState): Unit = {
     val that = o.asInstanceOf[CorrState]

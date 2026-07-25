@@ -131,22 +131,8 @@ final case class WindowExec(
         processBatches(batchIt)
       }
     }
-    wrapWithSpillCleanup(concat, spillDir)
+    spillDir.closeOnDrain(concat)
   }
-
-  /** Wrap `inner` so the spill subdir is wiped when the consumer drains
-    * the iterator. */
-  private def wrapWithSpillCleanup(
-      inner: Iterator[ColumnarBatch],
-      spillDir: OperatorSpillDir): Iterator[ColumnarBatch] =
-    new Iterator[ColumnarBatch] {
-      def hasNext: Boolean = {
-        val h = inner.hasNext
-        if (!h) spillDir.close()
-        h
-      }
-      def next(): ColumnarBatch = inner.next()
-    }
 
   /** Route every input row into K bucket files by
     * `fmix32(hash(partitionKey)) % K`. Returns the K file paths (null

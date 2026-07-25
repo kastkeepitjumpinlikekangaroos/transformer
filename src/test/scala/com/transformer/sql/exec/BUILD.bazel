@@ -79,6 +79,39 @@ scala_junit_test(
     ],
 )
 
+# Regression stress for the K>1 sharded-execution deadlock family
+# (docs/gotchas.md "Sharded execution at K>1"; diagnosed in plans/bugfixes/02e,
+# fixed in 02f). Rebuilds the captured wedge's plan shape from real exec
+# classes and loops it under heavy steal churn with the 02f
+# preMaterializeExchanges pass applied per iteration — the engine drain
+# contract — and must stay green (~2s). STRESS_LAZY=1 skips the pass and
+# reproduces the historical wedge on the lazy fallback path within seconds
+# (manual red instrument, not a CI assertion — the hit is probabilistic):
+#   bazel test //src/test/scala/com/transformer/sql/exec:exchange_deadlock_stress_test \
+#       --test_tag_filters= --nocache_test_results --test_timeout=420 \
+#       --test_env=STRESS_LAZY=1
+scala_junit_test(
+    name = "exchange_deadlock_stress_test",
+    srcs = ["ExchangeDeadlockStressTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = [
+        # Pinned, not the 2x-cores default: the (lazy-mode) wedge needs idle
+        # workers ready to steal a fresh shard task while unclaimed consumer
+        # tasks persist as helpJoin bait. Measured on an 8-core host:
+        # parallelism=16 wedges lazy mode in ~100-400 iterations every trial;
+        # parallelism=8 mostly completes. Without the pin the lazy-mode hit
+        # rate (and this test's power against a regression) would collapse on
+        # smaller CI hosts.
+        "-Dtransformer.scheduler.parallelism=16",
+    ],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 scala_junit_test(
     name = "agg_state_serde_test",
     srcs = ["AggStateSerdeTest.scala"],

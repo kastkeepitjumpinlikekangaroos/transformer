@@ -202,13 +202,10 @@ final case class HashJoinExec(
       partition: Int,
       build: BuildSide,
       matchedBuild: util.HashSet[Int]): Iterator[ColumnarBatch] = {
-    val (rows, matched) = probeOnePartition(partition, build)
-    if (matchedBuild != null) matchedBuild.addAll(matched)
-    if (metricsNode != null) {
-      metricsNode.counters(HashJoinExec.IdxProbeSideRows).add(rows.length.toLong)
-      metricsNode.counters(HashJoinExec.IdxMatchedRows).add(matched.size.toLong)
-    }
-    rowsToBatches(rows.toArray, outputSchema, ColumnarBatch.DefaultCapacity)
+    val res = probeOnePartition(partition, build)
+    if (matchedBuild != null) matchedBuild.addAll(res.matchedBuild)
+    recordProbeMetrics(res.tallies)
+    rowsToBatches(res.rows.toArray, outputSchema, ColumnarBatch.DefaultCapacity)
   }
 
   // ---- Collapsing path (non-equi joins) ------------------------------------
@@ -260,23 +257,19 @@ final case class HashJoinExec(
       build: BuildSide,
       matchedBuild: util.HashSet[Int]): Iterator[ColumnarBatch] = {
     val joinedRows = mutable.ArrayBuffer.empty[Array[Any]]
-    var totalMatched = 0L
-    val tasks: Seq[Callable[(mutable.ArrayBuffer[Array[Any]], util.HashSet[Int])]] =
+    val totals = new ProbeTallies
+    val tasks: Seq[Callable[ProbePartitionResult]] =
       (0 until probePlan.numPartitions).map { pp =>
-        new Callable[(mutable.ArrayBuffer[Array[Any]], util.HashSet[Int])] {
-          def call(): (mutable.ArrayBuffer[Array[Any]], util.HashSet[Int]) =
-            probeOnePartition(pp, build)
+        new Callable[ProbePartitionResult] {
+          def call(): ProbePartitionResult = probeOnePartition(pp, build)
         }
       }
-    Scheduler.submitAndAwaitAll(tasks).foreach { case (rows, m) =>
-      joinedRows ++= rows
-      if (matchedBuild != null) matchedBuild.addAll(m)
-      totalMatched += m.size.toLong
+    Scheduler.submitAndAwaitAll(tasks).foreach { res =>
+      joinedRows ++= res.rows
+      if (matchedBuild != null) matchedBuild.addAll(res.matchedBuild)
+      totals.add(res.tallies)
     }
-    if (metricsNode != null) {
-      metricsNode.counters(HashJoinExec.IdxProbeSideRows).add(joinedRows.length.toLong)
-      metricsNode.counters(HashJoinExec.IdxMatchedRows).add(totalMatched)
-    }
+    recordProbeMetrics(totals)
     rowsToBatches(joinedRows.toArray, outputSchema, ColumnarBatch.DefaultCapacity)
   }
 
@@ -363,113 +356,148 @@ final case class HashJoinExec(
     val keyBufRow: Array[Any] = if (keysBuf != null) new Array[Any](nKeys) else null
     val it = buildPlan.execute(p)
     val nCols = buildPlan.outputSchema.length
-    while (it.hasNext) {
-      val b = it.next()
-      val nrows = b.numRows
-      val keyVecs: Array[ColumnVector] =
-        if (keysBuf != null) Array.tabulate(nKeys)(i => buildKeyExprs(i).evalVec(b))
-        else null
-      var r = 0
-      while (r < nrows) {
-        val arr = new Array[Any](nCols)
-        var c = 0
-        while (c < nCols) {
-          arr(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
-          c += 1
-        }
-        rowsBuf += arr
-        if (keysBuf != null) {
-          var k = 0
-          while (k < nKeys) {
-            val kv = keyVecs(k)
-            keyBufRow(k) = if (kv.isNull(r)) null else kv.getBoxed(r)
-            k += 1
-          }
-          keysBuf += keyCodec.encodeBoxed(keyBufRow)
-        }
-        r += 1
-      }
-    }
+    while (it.hasNext) appendBuildBatch(it.next(), nCols, rowsBuf, keysBuf, keyBufRow)
     CollectedBuildPartition(rowsBuf, keysBuf)
   }
 
-  /** Probe one partition's worth of rows against the build keymap. Returns
-    * (joined rows, build indices that matched). The caller stitches these
-    * together across partitions (collapsing path) or uses one shard's
-    * result directly (per-shard path).
-    *
-    * The probe row's `Array[Any]` materialization is deferred to the
-    * point we know we'll emit at least one output row — inner joins where
-    * the probe row has no match skip the boxing entirely. For
-    * `preserveProbeOuter` joins the unmatched-probe emission still has to
-    * box, but at most once per row.
-    */
-  private def probeOnePartition(
-      partitionIdx: Int,
-      build: BuildSide): (mutable.ArrayBuffer[Array[Any]], util.HashSet[Int]) = {
+  /** Materialize one batch's rows into `rows` as boxed arrays. When `keys` is
+    * non-null (computed, non-ColRef build keys) also pre-encode each row's
+    * join key into it, evaluating each key expression once per batch via
+    * `evalVec`. Shared by the streaming build collection and the grace-hash
+    * bucket reload. */
+  private def appendBuildBatch(
+      b: ColumnarBatch,
+      ncols: Int,
+      rows: mutable.ArrayBuffer[Array[Any]],
+      keys: mutable.ArrayBuffer[AnyRef],
+      keyBufRow: Array[Any]): Unit = {
+    val nrows = b.numRows
+    val keyVecs: Array[ColumnVector] =
+      if (keys != null) Array.tabulate(nKeys)(i => buildKeyExprs(i).evalVec(b))
+      else null
+    var r = 0
+    while (r < nrows) {
+      val arr = new Array[Any](ncols)
+      var c = 0
+      while (c < ncols) {
+        arr(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
+        c += 1
+      }
+      rows += arr
+      if (keys != null) {
+        var k = 0
+        while (k < nKeys) {
+          val kv = keyVecs(k)
+          keyBufRow(k) = if (kv.isNull(r)) null else kv.getBoxed(r)
+          k += 1
+        }
+        keys += keyCodec.encodeBoxed(keyBufRow)
+      }
+      r += 1
+    }
+  }
+
+  /** Probe one partition of the probe plan against the build keymap. The
+    * caller stitches results across partitions (collapsing path) or uses one
+    * shard's result directly (per-shard path). */
+  private def probeOnePartition(partitionIdx: Int, build: BuildSide): ProbePartitionResult = {
     val local = mutable.ArrayBuffer.empty[Array[Any]]
     val localMatched = new util.HashSet[Int]()
+    val tallies = new ProbeTallies
     val probeIt = probePlan.execute(partitionIdx)
-    val probeSchema = probePlan.outputSchema
-    val probeWidth = probeSchema.length
+    while (probeIt.hasNext) probeBatchInto(probeIt.next(), build, local, localMatched, tallies)
+    ProbePartitionResult(local, localMatched, tallies)
+  }
+
+  /** Probe every row of one batch against `build`, appending joined rows (and
+    * outer-preserved unmatched probe rows) to `out`. Matched build indices go
+    * into `matchedBuild` when non-null (joins that preserve the build side);
+    * row counts accumulate into `tallies`. Shared by the in-memory probe
+    * paths and the grace-hash bucket probe, so match semantics can't drift
+    * between them.
+    *
+    * The probe row's `Array[Any]` materialization is deferred to the point we
+    * know we'll emit at least one output row — inner joins where the probe
+    * row has no match skip the boxing entirely. For `preserveProbeOuter`
+    * joins the unmatched-probe emission still has to box, but at most once
+    * per row. */
+  private def probeBatchInto(
+      b: ColumnarBatch,
+      build: BuildSide,
+      out: mutable.ArrayBuffer[Array[Any]],
+      matchedBuild: util.HashSet[Int],
+      tallies: ProbeTallies): Unit = {
+    val nrows = b.numRows
+    tallies.inputRows += nrows.toLong
+    val probeWidth = probePlan.outputSchema.length
+    // For non-ColRef probe keys, hoist Expr.eval out of the per-row loop.
+    // ColRef keys go through `encodeFromBatchSkipIfAnyNull` which already
+    // reads typed primitives directly; the long-key fast path reads its
+    // single primitive even more directly.
+    val probeKeyVecs: Array[ColumnVector] =
+      if (probeKeysAreColRefs || useJoinLongKey) null
+      else Array.tabulate(nKeys)(i => probeKeyExprs(i).evalVec(b))
     val keyBuf: Array[Any] = if (probeKeysAreColRefs) null else new Array[Any](nKeys)
-    while (probeIt.hasNext) {
-      val b = probeIt.next()
-      val nrows = b.numRows
-      // For non-ColRef probe keys, hoist Expr.eval out of the per-row loop.
-      // ColRef keys go through `encodeFromBatchSkipIfAnyNull` which already
-      // reads typed primitives directly; the long-key fast path reads its
-      // single primitive even more directly.
-      val probeKeyVecs: Array[ColumnVector] =
-        if (probeKeysAreColRefs || useJoinLongKey) null
-        else Array.tabulate(nKeys)(i => probeKeyExprs(i).evalVec(b))
-      var r = 0
-      while (r < nrows) {
-        val matches: util.ArrayList[Int] =
-          if (useJoinLongKey) {
-            val col = b.column(probeKeyLongIdx)
-            if (col.isNull(r)) null
-            else build.keyMapLong.get(KeyCodec.readAsLong(col, r))
-          } else {
-            val key: AnyRef =
-              if (probeKeysAreColRefs) keyCodec.encodeFromBatchSkipIfAnyNull(b, r)
-              else {
-                var k = 0
-                var anyNull = false
-                while (k < nKeys) {
-                  val kv = probeKeyVecs(k)
-                  val v: Any = if (kv.isNull(r)) null else kv.getBoxed(r)
-                  if (v == null) anyNull = true
-                  keyBuf(k) = v
-                  k += 1
-                }
-                if (anyNull) null else keyCodec.encodeBoxed(keyBuf)
+    var r = 0
+    while (r < nrows) {
+      val matches: util.ArrayList[Int] =
+        if (useJoinLongKey) {
+          val col = b.column(probeKeyLongIdx)
+          if (col.isNull(r)) null
+          else build.keyMapLong.get(KeyCodec.readAsLong(col, r))
+        } else {
+          val key: AnyRef =
+            if (probeKeysAreColRefs) keyCodec.encodeFromBatchSkipIfAnyNull(b, r)
+            else {
+              var k = 0
+              var anyNull = false
+              while (k < nKeys) {
+                val kv = probeKeyVecs(k)
+                val v: Any = if (kv.isNull(r)) null else kv.getBoxed(r)
+                if (v == null) anyNull = true
+                keyBuf(k) = v
+                k += 1
               }
-            if (key == null) null else build.keyMap.get(key)
-          }
-        var probeRow: Array[Any] = null
-        var matchedAny = false
-        if (matches != null && !matches.isEmpty) {
-          val it = matches.iterator()
-          while (it.hasNext) {
-            val buildIdx = it.next()
-            if (probeRow == null) probeRow = materializeProbeRow(b, r, probeWidth)
-            val combined = mergeMatch(probeRow, build.rows(buildIdx))
-            if (passesExtra(combined)) {
-              local += combined
-              matchedAny = true
-              localMatched.add(buildIdx)
+              if (anyNull) null else keyCodec.encodeBoxed(keyBuf)
             }
+          if (key == null) null else build.keyMap.get(key)
+        }
+      var probeRow: Array[Any] = null
+      var matchedAny = false
+      if (matches != null && !matches.isEmpty) {
+        val it = matches.iterator()
+        while (it.hasNext) {
+          val buildIdx = it.next()
+          if (probeRow == null) probeRow = materializeProbeRow(b, r, probeWidth)
+          val combined = mergeMatch(probeRow, build.rows(buildIdx))
+          if (passesExtra(combined)) {
+            out += combined
+            matchedAny = true
+            if (matchedBuild != null) matchedBuild.add(buildIdx)
           }
         }
-        if (!matchedAny && preserveProbeOuter) {
-          if (probeRow == null) probeRow = materializeProbeRow(b, r, probeWidth)
-          local += mergeUnmatchedProbe(probeRow)
-        }
-        r += 1
       }
+      if (matchedAny) tallies.matchedProbeRows += 1L
+      else if (preserveProbeOuter) {
+        if (probeRow == null) probeRow = materializeProbeRow(b, r, probeWidth)
+        out += mergeUnmatchedProbe(probeRow)
+        tallies.unmatchedProbeRows += 1L
+      }
+      r += 1
     }
-    (local, localMatched)
+  }
+
+  /** Record the probe-side counters with the meanings documented in
+    * docs/benchmarking.md: rows probed, probe rows with at least one match
+    * surviving `extra`, and probe rows emitted null-padded by outer-join
+    * preservation. (Unmatched BUILD rows are counted separately at
+    * unmatched-build emission.) */
+  private def recordProbeMetrics(t: ProbeTallies): Unit = {
+    if (metricsNode == null) return
+    metricsNode.counters(HashJoinExec.IdxProbeSideRows).add(t.inputRows)
+    metricsNode.counters(HashJoinExec.IdxMatchedRows).add(t.matchedProbeRows)
+    if (t.unmatchedProbeRows > 0L)
+      metricsNode.counters(HashJoinExec.IdxUnmatchedRows).add(t.unmatchedProbeRows)
   }
 
   private def materializeProbeRow(b: ColumnarBatch, r: Int, width: Int): Array[Any] = {
@@ -590,25 +618,23 @@ final case class HashJoinExec(
     val probeParts: Seq[Int] = if (isSharded) Seq(partition) else 0 until probePlan.numPartitions
 
     val buildBuckets = bucketSide(
-      sideName = "build",
+      side = HashJoinExec.SideBuild,
       parts = buildParts,
       plan = buildPlan,
       keyExprs = buildKeyExprs,
       keysAreColRefs = buildKeysAreColRefs,
       keyColIndices = buildKeyColIndices,
       K = K,
-      spillDir = spillDir,
-      side = HashJoinExec.SideBuild)
+      spillDir = spillDir)
     val probeBuckets = bucketSide(
-      sideName = "probe",
+      side = HashJoinExec.SideProbe,
       parts = probeParts,
       plan = probePlan,
       keyExprs = probeKeyExprs,
       keysAreColRefs = probeKeysAreColRefs,
       keyColIndices = probeKeyColIndices,
       K = K,
-      spillDir = spillDir,
-      side = HashJoinExec.SideProbe)
+      spillDir = spillDir)
 
     val out = mutable.ArrayBuffer.empty[Array[Any]]
     val tLoad = if (metricsNode != null) System.nanoTime() else 0L
@@ -626,20 +652,20 @@ final case class HashJoinExec(
     * `spillDir`, keyed by `hash(joinKey) % K`. Returns one file path per
     * bucket; a `null` entry means that bucket was empty (no file written).
     *
-    * `sideName` drives counter attribution. The bucket-write
-    * threshold doesn't change behavior — the count of bytes-on-disk after
-    * close is the source of truth for `bytesSpilledBuild` /
-    * `bytesSpilledProbe`, both populated from the final `files`. */
+    * `side` drives counter attribution and the spill-file naming. The
+    * bytes-on-disk after close is the source of truth for
+    * `bytesSpilledBuild` / `bytesSpilledProbe`, both populated from the
+    * final `files`. */
   private def bucketSide(
-      sideName: String,
+      side: Int,
       parts: Seq[Int],
       plan: PhysicalPlan,
       keyExprs: Array[Expr],
       keysAreColRefs: Boolean,
       keyColIndices: Array[Int],
       K: Int,
-      spillDir: OperatorSpillDir,
-      side: Int): Array[Path] = {
+      spillDir: OperatorSpillDir): Array[Path] = {
+    val sideName = if (side == HashJoinExec.SideBuild) "build" else "probe"
     val schema = plan.outputSchema
     // Spill files are addressed by index on read-back; positional names keep a
     // join-derived input like `[k, v, k, v]` from colliding in parquet's
@@ -826,38 +852,11 @@ final case class HashJoinExec(
       if (buildKeysAreColRefs || useJoinLongKey) null
       else mutable.ArrayBuffer.empty[AnyRef]
     val keyBufRow: Array[Any] = if (keys != null) new Array[Any](nKeys) else null
-    val schema = buildPlan.outputSchema
-    val ncols = schema.length
+    val ncols = buildPlan.outputSchema.length
     var part = 0
     while (part < reader.numPartitions) {
       val it = reader.readPartition(part)
-      while (it.hasNext) {
-        val b = it.next()
-        val n = b.numRows
-        val keyVecs: Array[ColumnVector] =
-          if (keys != null) Array.tabulate(nKeys)(i => buildKeyExprs(i).evalVec(b))
-          else null
-        var r = 0
-        while (r < n) {
-          val arr = new Array[Any](ncols)
-          var c = 0
-          while (c < ncols) {
-            arr(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
-            c += 1
-          }
-          rows += arr
-          if (keys != null) {
-            var k = 0
-            while (k < nKeys) {
-              val kv = keyVecs(k)
-              keyBufRow(k) = if (kv.isNull(r)) null else kv.getBoxed(r)
-              k += 1
-            }
-            keys += keyCodec.encodeBoxed(keyBufRow)
-          }
-          r += 1
-        }
-      }
+      while (it.hasNext) appendBuildBatch(it.next(), ncols, rows, keys, keyBufRow)
       part += 1
     }
     if (rows.isEmpty) return null
@@ -866,80 +865,22 @@ final case class HashJoinExec(
   }
 
   /** Stream one probe bucket against a freshly-built BuildSide, appending
-    * matches (and outer-probe-unmatched null-pads) to `out`. */
+    * matches (and outer-probe-unmatched null-pads) to `out`. Same per-row
+    * semantics as the in-memory paths via [[probeBatchInto]]. */
   private def probeBucket(
       file: Path,
       build: BuildSide,
       out: mutable.ArrayBuffer[Array[Any]],
       matchedBuild: util.HashSet[Int]): Unit = {
     val reader = ParquetReader.fromPath(file.toString)
-    val probeSchema = probePlan.outputSchema
-    val probeWidth = probeSchema.length
-    val keyBuf: Array[Any] = if (probeKeysAreColRefs) null else new Array[Any](nKeys)
-    var probeRowsHere: Long = 0L
-    var matchedHere: Long = 0L
+    val tallies = new ProbeTallies
     var part = 0
     while (part < reader.numPartitions) {
       val it = reader.readPartition(part)
-      while (it.hasNext) {
-        val b = it.next()
-        val nrows = b.numRows
-        probeRowsHere += nrows.toLong
-        val probeKeyVecs: Array[ColumnVector] =
-          if (probeKeysAreColRefs || useJoinLongKey) null
-          else Array.tabulate(nKeys)(i => probeKeyExprs(i).evalVec(b))
-        var r = 0
-        while (r < nrows) {
-          val matches: util.ArrayList[Int] =
-            if (useJoinLongKey) {
-              val col = b.column(probeKeyLongIdx)
-              if (col.isNull(r)) null
-              else build.keyMapLong.get(KeyCodec.readAsLong(col, r))
-            } else {
-              val key: AnyRef =
-                if (probeKeysAreColRefs) keyCodec.encodeFromBatchSkipIfAnyNull(b, r)
-                else {
-                  var k = 0; var anyNull = false
-                  while (k < nKeys) {
-                    val kv = probeKeyVecs(k)
-                    val v: Any = if (kv.isNull(r)) null else kv.getBoxed(r)
-                    if (v == null) anyNull = true
-                    keyBuf(k) = v
-                    k += 1
-                  }
-                  if (anyNull) null else keyCodec.encodeBoxed(keyBuf)
-                }
-              if (key == null) null else build.keyMap.get(key)
-            }
-          var probeRow: Array[Any] = null
-          var matchedAny = false
-          if (matches != null && !matches.isEmpty) {
-            val mIt = matches.iterator()
-            while (mIt.hasNext) {
-              val buildIdx = mIt.next()
-              if (probeRow == null) probeRow = materializeProbeRow(b, r, probeWidth)
-              val combined = mergeMatch(probeRow, build.rows(buildIdx))
-              if (passesExtra(combined)) {
-                out += combined
-                matchedAny = true
-                matchedHere += 1L
-                if (matchedBuild != null) matchedBuild.add(buildIdx)
-              }
-            }
-          }
-          if (!matchedAny && preserveProbeOuter) {
-            if (probeRow == null) probeRow = materializeProbeRow(b, r, probeWidth)
-            out += mergeUnmatchedProbe(probeRow)
-          }
-          r += 1
-        }
-      }
+      while (it.hasNext) probeBatchInto(it.next(), build, out, matchedBuild, tallies)
       part += 1
     }
-    if (metricsNode != null) {
-      metricsNode.counters(HashJoinExec.IdxProbeSideRows).add(probeRowsHere)
-      metricsNode.counters(HashJoinExec.IdxMatchedRows).add(matchedHere)
-    }
+    recordProbeMetrics(tallies)
   }
 
   /** Stream a probe-side bucket where the build bucket is empty — every
@@ -950,6 +891,7 @@ final case class HashJoinExec(
       out: mutable.ArrayBuffer[Array[Any]]): Unit = {
     val reader = ParquetReader.fromPath(file.toString)
     val probeWidth = probePlan.outputSchema.length
+    var rowsHere: Long = 0L
     var part = 0
     while (part < reader.numPartitions) {
       val it = reader.readPartition(part)
@@ -961,8 +903,13 @@ final case class HashJoinExec(
           out += mergeUnmatchedProbe(materializeProbeRow(b, r, probeWidth))
           r += 1
         }
+        rowsHere += n.toLong
       }
       part += 1
+    }
+    if (metricsNode != null && rowsHere > 0L) {
+      metricsNode.counters(HashJoinExec.IdxProbeSideRows).add(rowsHere)
+      metricsNode.counters(HashJoinExec.IdxUnmatchedRows).add(rowsHere)
     }
   }
 }
@@ -1060,3 +1007,25 @@ private[exec] final case class BuildSide(
 private[exec] final case class CollectedBuildPartition(
     rows: mutable.ArrayBuffer[Array[Any]],
     keys: mutable.ArrayBuffer[AnyRef])
+
+/** Probe-side row counts accumulated by `HashJoinExec.probeBatchInto` and
+  * surfaced through the `probeSideRows` / `matchedRows` / `unmatchedRows`
+  * counters (see docs/benchmarking.md for their meanings). */
+private[exec] final class ProbeTallies {
+  var inputRows: Long = 0L
+  var matchedProbeRows: Long = 0L
+  var unmatchedProbeRows: Long = 0L
+  def add(other: ProbeTallies): Unit = {
+    inputRows += other.inputRows
+    matchedProbeRows += other.matchedProbeRows
+    unmatchedProbeRows += other.unmatchedProbeRows
+  }
+}
+
+/** One probe partition's output: joined rows, the build indices that matched
+  * (consumed by unmatched-build emission for outer joins), and the row
+  * tallies for metrics. */
+private[exec] final case class ProbePartitionResult(
+    rows: mutable.ArrayBuffer[Array[Any]],
+    matchedBuild: util.HashSet[Int],
+    tallies: ProbeTallies)
