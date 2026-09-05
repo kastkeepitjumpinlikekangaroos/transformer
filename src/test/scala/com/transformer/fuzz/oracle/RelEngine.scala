@@ -6,8 +6,9 @@ import com.transformer.sql.exec.SqlEngine
 import scala.collection.mutable
 
 /** Shared engine-run helpers for the metamorphic oracles (`Tlp`, `NoRec`,
-  * `MetaModeDifferential`): run a SQL string against a catalog and collect its
-  * rows, plus the common [[Verdict]] the oracles return.
+  * `MetaModeDifferential`, `JoinCommutativity`, `AggDecomposition`): run a SQL
+  * string against a catalog and collect its rows, plus the common [[Verdict]] the
+  * oracles return.
   *
   * A query the engine REJECTS at bind/plan time (an `IllegalArgumentException`
   * from the generator's own SQL) is not a finding — the oracles return

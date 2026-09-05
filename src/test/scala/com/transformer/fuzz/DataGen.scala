@@ -134,14 +134,12 @@ object DataGen {
 
   private def genColumnSpec(rng: Rng, dt: DataType): ColumnSpec = {
     // Mostly low null density; sometimes ~half; occasionally all-NULL (a column
-    // that collapses to a single NULL group / dedups to one NULL row).
-    val nullProb = rng.weighted((5, 0.0), (4, 0.15), (2, 0.5), (1, 1.0)) match {
-      case 0 => 0.0
-      case 1 => 0.15
-      case 2 => 0.5
-      case _ => 1.0
-    }
-    ColumnSpec(nullProb, genDomain(rng, dt))
+    // that collapses to a single NULL group / dedups to one NULL row). The
+    // weights ARE the distribution — `weighted` returns the chosen value, so
+    // there is no tag to re-map (re-mapping a Double tag through an Int-literal
+    // match silently collapsed most of this distribution onto all-NULL; see
+    // `generatedCorpusCoversTheInterestingShapes`).
+    ColumnSpec(rng.weighted((5, 0.0), (4, 0.15), (2, 0.5), (1, 1.0)), genDomain(rng, dt))
   }
 
   // Small, well-separated pools. Doubles/floats are spaced well above the

@@ -51,10 +51,13 @@ scala_junit_test(
 )
 
 # Metamorphic fuzzer: multi-relation SELECTs (joins of every kind, self-joins)
-# checked against the TLP and NoREC metamorphic relations + multi-relation mode
-# agreement. Finds SEMANTIC bugs (wrong answers every execution mode agrees on).
-# Default budget is small (each case runs the engine several times), part of
-# `bazel test //...`.
+# checked against five relations decided by SQL semantics alone -- TLP, NoREC,
+# multi-relation mode agreement, join commutativity (A JOIN B == B JOIN A with
+# the kind flipped, the only one that varies the build side), and aggregate
+# decomposition (one-shot == group-then-re-aggregate, which drives the
+# partial/final merge and AggState spill serde). Finds SEMANTIC bugs (wrong
+# answers every execution mode agrees on). Default budget is small (each case
+# runs the engine several times), part of `bazel test //...`.
 scala_junit_test(
     name = "metamorphic_fuzz_test",
     srcs = ["MetamorphicFuzzTest.scala"],

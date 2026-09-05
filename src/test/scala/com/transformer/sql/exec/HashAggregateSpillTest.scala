@@ -323,6 +323,52 @@ class HashAggregateSpillTest {
     assertTrue(s"spillEvents must be > 0, got ${node.snapshot().counter("spillEvents")}",
       node.snapshot().counter("spillEvents") > 0L)
   }
+
+  // ---- Regression: MIN/MAX over a Boolean column under spill ----------------
+  //
+  // `MinMaxState` accumulated a Boolean extremum in the BOXED slot while its
+  // spill format wrote the LONG slot, so a spilled state restored with
+  // hasValue=true and a null boxed value: MIN(bool)/MAX(bool) came back NULL
+  // under spill and correct off-spill. Booleans now ride the long slot as 0/1
+  // on every path. Surfaced by `fuzz/mode_differential_fuzz_test`, which had
+  // the shape gated out of its generator until the engine was fixed.
+  @Test def booleanMinMaxUnderSpill(): Unit = {
+    val schema = Schema(Vector(
+      Field("k", DataType.IntType),
+      Field("b", DataType.BooleanType)))
+    val rng = new Random(20260725L)
+    // Every group sees a mix, an all-TRUE run, or an all-FALSE run, so MIN and
+    // MAX each return both values across the output and an all-TRUE MIN (the
+    // value an unwritten long slot would misreport as FALSE) is covered.
+    val parts = (0 until 3).map { p =>
+      (0 until 3000).map { i =>
+        val k = rng.nextInt(15)
+        val b = k % 3 match {
+          case 0 => true
+          case 1 => false
+          case _ => (i + p) % 2 == 0
+        }
+        Array[Any](java.lang.Integer.valueOf(k), java.lang.Boolean.valueOf(b))
+      }.toVector
+    }.toVector
+    val plan = new InMemoryPartitionedPlanForAggSpill(schema, parts)
+    val k = ColRefExpr(0, "k", DataType.IntType)
+    val b = ColRefExpr(1, "b", DataType.BooleanType)
+    def run(opts: ExecutionOptions, node: MetricsNode = null): Vector[Vector[Any]] = {
+      val agg = HashAggregateExec(plan, Seq((k, "k")),
+        Seq((AggExprMin(b), "minb"), (AggExprMax(b), "maxb")), opts, node)
+      val out = (0 until agg.numPartitions).iterator.flatMap(agg.execute)
+      drainRows(out, agg.outputSchema)
+    }
+    val expected = run(ExecutionOptions.Default)
+    val node = new MetricsNode(0, "HashAggregateExec", 0, HashAggregateExec.IdxCounterNames)
+    val actual = run(spillyOpts(), node)
+    assertTrue("expected non-empty result", expected.nonEmpty)
+    assertTrue("expected a non-NULL MIN off-spill", expected.exists(_(1) != null))
+    assertEquals(expected.toSet, actual.toSet)
+    assertTrue(s"spillEvents must be > 0, got ${node.snapshot().counter("spillEvents")}",
+      node.snapshot().counter("spillEvents") > 0L)
+  }
 }
 
 private final class InMemoryPartitionedPlanForAggSpill(

@@ -13,11 +13,11 @@ import com.transformer.sql.plan._
   *
   * Two query shapes are produced:
   *   - '''projection''' — `SELECT [DISTINCT] <items> FROM t [WHERE p]
-  *     [ORDER BY <cols>]`, exercising `ProjectExec` / `FilterExec` / `DistinctExec`
-  *     / `SortExec`;
+  *     [ORDER BY <cols>] [LIMIT n]`, exercising `ProjectExec` / `FilterExec` /
+  *     `DistinctExec` / `SortExec` / `LocalLimitExec` + `GlobalLimitExec`;
   *   - '''aggregation''' — `SELECT <group cols>, <aggs> FROM t [WHERE p]
-  *     [GROUP BY ...] [HAVING h] [ORDER BY <group cols>]` (or a global aggregate
-  *     with no GROUP BY → one row), exercising `HashAggregateExec`.
+  *     [GROUP BY ...] [HAVING h] [ORDER BY <group cols>] [LIMIT n]` (or a global
+  *     aggregate with no GROUP BY → one row), exercising `HashAggregateExec`.
   *
   * The expression generators ([[genValue]] / [[genPredicate]]) are written for
   * this property rather than reusing the bound-`Expr` shapes from [[ExprGen]],
@@ -41,10 +41,13 @@ import com.transformer.sql.plan._
   *
   * Excluded so the result multiset stays mode-invariant: `RAND()` and the clock
   * functions (`CURRENT_DATE`/`CURRENT_TIMESTAMP`) — they make modes legitimately
-  * disagree — and `LIMIT` — top-`n` with ties at the cutoff returns a different
-  * SUBSET of the tied rows depending on partition/merge order. Order-sensitivity
-  * is still covered: `ORDER BY` without `LIMIT` keeps the full multiset and the
-  * oracle additionally checks the output is sorted.
+  * disagree. `LIMIT` IS generated, but only over a '''total''' ORDER BY (every
+  * output column an order key), where rows tied at the cutoff are identical rows
+  * and top-`n` therefore yields a layout-independent multiset; a bare `LIMIT`
+  * would return a different SUBSET of the tied rows per partition/merge order.
+  * The soundness condition is checked in `render`, so a shrink that drops an
+  * order key or a projection item drops the `LIMIT` with it rather than
+  * manufacturing a false counterexample.
   */
 object QueryGen {
 
@@ -81,12 +84,23 @@ object QueryGen {
     def orderBy: Vector[(ColRefExpr, Boolean)]
   }
 
-  /** `SELECT [DISTINCT] <items> FROM view [WHERE p] [ORDER BY <cols>]`. */
+  /** `SELECT [DISTINCT] <items> FROM view [WHERE p] [ORDER BY <cols>] [LIMIT n]`. */
   final case class ProjectQuery(
       distinct: Boolean,
       projection: Vector[(Expr, String)],
       where: Option[Expr],
-      orderBy: Vector[(ColRefExpr, Boolean)]) extends GenQuery {
+      orderBy: Vector[(ColRefExpr, Boolean)],
+      limit: Option[Long] = None) extends GenQuery {
+
+    /** ORDER BY is a TOTAL order over the output: every projected item is a bare
+      * column and every one of them is an order key. Two rows that tie on such a
+      * key are identical rows, so which of them top-`n` keeps cannot change the
+      * result multiset. */
+    private def totallyOrdered: Boolean =
+      projection.forall(_._1.isInstanceOf[ColRefExpr]) &&
+        projection.map(_._2).toSet == orderBy.map(_._1.name).toSet
+
+    private def effectiveLimit: Option[Long] = if (totallyOrdered) limit else None
 
     def render(view: String): String = {
       val sel = projection.iterator.map { case (e, name) =>
@@ -96,20 +110,30 @@ object QueryGen {
       val d = if (distinct) "DISTINCT " else ""
       val w = where.map(p => s" WHERE ${SqlRender.expr(p)}").getOrElse("")
       val o = SqlRender.orderByClause(orderBy)
-      s"SELECT $d$sel FROM $view$w$o"
+      val l = effectiveLimit.map(n => s" LIMIT $n").getOrElse("")
+      s"SELECT $d$sel FROM $view$w$o$l"
     }
   }
 
   /** `SELECT <group cols>, <aggs> FROM view [WHERE p] [GROUP BY ...] [HAVING h]
-    * [ORDER BY <group cols>]`. Empty `groupKeys` is a global aggregate (one row,
-    * no GROUP BY / ORDER BY). */
+    * [ORDER BY <group cols>] [LIMIT n]`. Empty `groupKeys` is a global aggregate
+    * (one row, no GROUP BY / ORDER BY). */
   final case class AggregateQuery(
       groupKeys: Vector[ColRefExpr],
       aggregates: Vector[(AggSpec, String)],
       where: Option[Expr],
       having: Option[HavingSpec],
       groupByOrdinals: Boolean,
-      orderBy: Vector[(ColRefExpr, Boolean)]) extends GenQuery {
+      orderBy: Vector[(ColRefExpr, Boolean)],
+      limit: Option[Long] = None) extends GenQuery {
+
+    /** ORDER BY covers every GROUP BY key, and the keys uniquely identify an
+      * output row — so the order is total and top-`n` selects the same groups
+      * under every layout. */
+    private def totallyOrdered: Boolean =
+      groupKeys.nonEmpty && orderBy.map(_._1.index).toSet == groupKeys.map(_.index).toSet
+
+    private def effectiveLimit: Option[Long] = if (totallyOrdered) limit else None
 
     def render(view: String): String = {
       val groupSel = groupKeys.map(_.name)
@@ -122,7 +146,8 @@ object QueryGen {
         else s" GROUP BY ${groupKeys.map(_.name).mkString(", ")}"
       val h = having.map(hs => s" HAVING ${hs.render}").getOrElse("")
       val o = SqlRender.orderByClause(orderBy)
-      s"SELECT $sel FROM $view$w$g$h$o"
+      val l = effectiveLimit.map(n => s" LIMIT $n").getOrElse("")
+      s"SELECT $sel FROM $view$w$g$h$o$l"
     }
   }
 
@@ -166,14 +191,21 @@ object QueryGen {
   private def genProjectQuery(rng: Rng, schema: Schema): ProjectQuery = {
     val n = schema.length
     val distinct = rng.bool(0.4)
+    // A top-N shape: project bare columns only and order by all of them, the
+    // total order LIMIT needs (see `ProjectQuery.totallyOrdered`).
+    val topN = rng.bool(0.2)
 
     val orderCols: Vector[Int] =
-      if (rng.bool(0.5)) distinctIndices(rng, n, rng.between(1, math.min(2, n))) else Vector.empty
-    val extraBare: Vector[Int] = distinctIndices(rng, n, rng.between(0, math.min(2, n)))
+      if (topN) distinctIndices(rng, n, rng.between(1, math.min(3, n)))
+      else if (rng.bool(0.5)) distinctIndices(rng, n, rng.between(1, math.min(2, n)))
+      else Vector.empty
+    val extraBare: Vector[Int] =
+      if (topN) Vector.empty else distinctIndices(rng, n, rng.between(0, math.min(2, n)))
     val bareCols: Vector[Int] = (orderCols ++ extraBare).distinct
 
     val computed: Vector[(Expr, String)] =
-      (0 until rng.between(0, 3)).iterator.map { i =>
+      if (topN) Vector.empty
+      else (0 until rng.between(0, 3)).iterator.map { i =>
         (genValue(rng, schema, rng.oneOf(ValueTypes), rng.between(2, 4)), s"p$i")
       }.toVector
 
@@ -184,9 +216,16 @@ object QueryGen {
 
     val where = if (rng.bool(0.6)) Some(genPredicate(rng, schema, rng.between(2, 4))) else None
     val orderBy = orderCols.map(i => (colRef(schema, i), rng.bool()))
+    val limit = if (topN) Some(genLimit(rng)) else None
 
-    ProjectQuery(distinct, projection, where, orderBy)
+    ProjectQuery(distinct, projection, where, orderBy, limit)
   }
+
+  /** A LIMIT row count spanning the interesting cutoffs: none at all, one row,
+    * a handful (a cut mid-batch and mid-partition), and past the end of the
+    * data (the limit never binds). */
+  private def genLimit(rng: Rng): Long = rng.weighted(
+    (1, 0L), (3, 1L), (4, 2L), (4, 5L), (2, 17L), (2, 1000L))
 
   private def genAggregateQuery(rng: Rng, schema: Schema): AggregateQuery = {
     val n = schema.length
@@ -204,12 +243,17 @@ object QueryGen {
     val where = if (rng.bool(0.5)) Some(genPredicate(rng, schema, rng.between(2, 4))) else None
     val having = if (rng.bool(0.4)) Some(genHaving(rng, groupKeys)) else None
     val groupByOrdinals = groupKeys.nonEmpty && rng.bool(0.3)
+    // A top-N shape orders by EVERY group key, the total order LIMIT needs (see
+    // `AggregateQuery.totallyOrdered`); the ordinary shape orders by a subset.
+    val topN = groupKeys.nonEmpty && rng.bool(0.2)
     val orderBy =
-      if (groupKeys.nonEmpty && rng.bool(0.4))
+      if (topN) groupKeys.map(cr => (cr, rng.bool()))
+      else if (groupKeys.nonEmpty && rng.bool(0.4))
         distinctSubset(rng, groupKeys, rng.between(1, math.min(2, groupKeys.length))).map(cr => (cr, rng.bool()))
       else Vector.empty
+    val limit = if (topN) Some(genLimit(rng)) else None
 
-    AggregateQuery(groupKeys, aggregates, where, having, groupByOrdinals, orderBy)
+    AggregateQuery(groupKeys, aggregates, where, having, groupByOrdinals, orderBy, limit)
   }
 
   private def genAggSpec(rng: Rng, schema: Schema, numeric: Vector[Int], integral: Vector[Int]): AggSpec = {
@@ -217,16 +261,10 @@ object QueryGen {
     val options = scala.collection.mutable.ArrayBuffer.empty[(Int, () => AggSpec)]
     options += ((3, () => CountStar))
     options += ((2, () => Count(colRef(schema, rng.between(0, n - 1)), distinct = rng.bool(0.5))))
-    // MIN/MAX over non-Boolean columns. (MIN/MAX of a Boolean column is excluded:
-    // it returns NULL under spill but the value off-spill, because
-    // MinMaxState.writeSelf routes BooleanType through the long slot while
-    // updateAt stores it boxed — a genuine spill-parity bug surfaced by this
-    // fuzzer, kept out so the suite is green until the engine is fixed.)
-    val minMaxCols = (0 until n).filter(i => schema.fields(i).dataType != DataType.BooleanType).toVector
-    if (minMaxCols.nonEmpty) {
-      options += ((2, () => Min(colRef(schema, rng.oneOf(minMaxCols)))))
-      options += ((2, () => Max(colRef(schema, rng.oneOf(minMaxCols)))))
-    }
+    // MIN/MAX over any column type, Boolean included — Booleans order FALSE <
+    // TRUE and round-trip through spill like any other primitive.
+    options += ((2, () => Min(colRef(schema, rng.between(0, n - 1)))))
+    options += ((2, () => Max(colRef(schema, rng.between(0, n - 1)))))
     options += ((2, () => CountIf(genPredicate(rng, schema, rng.between(1, 3)))))
     if (numeric.nonEmpty) {
       options += ((3, () => Sum(numericArg(rng, schema, numeric))))

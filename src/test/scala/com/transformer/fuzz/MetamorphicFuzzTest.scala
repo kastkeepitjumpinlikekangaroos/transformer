@@ -2,7 +2,7 @@ package com.transformer.fuzz
 
 import com.transformer.core._
 import com.transformer.fuzz.MetaQueryGen._
-import com.transformer.fuzz.oracle.{MetaModeDifferential, NoRec, RelEngine, Tlp}
+import com.transformer.fuzz.oracle.{AggDecomposition, JoinCommutativity, MetaModeDifferential, NoRec, RelEngine, Tlp}
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -13,14 +13,19 @@ import java.nio.file.{Files, Path}
   * SEMANTIC bugs (wrong answers every execution mode agrees on, which
   * mode-differential is blind to).
   *
-  * Three relations are checked, each decided by SQL semantics alone with no
+  * Five relations are checked, each decided by SQL semantics alone with no
   * reference engine:
   *   - [[Tlp]] — `Q ≡ (Q WHERE p) ⊎ (Q WHERE NOT p) ⊎ (Q WHERE p IS NULL)` as
   *     multisets, partitioning `Q`'s output via a CTE wrapper (sound for joins,
   *     aggregates, and every other shape — no aggregate decomposition);
   *   - [[NoRec]] — `COUNT(*) WHERE p == SUM(CASE WHEN p THEN 1 ELSE 0 END)`;
   *   - [[MetaModeDifferential]] — the multi-relation extension of Plan 02's mode
-  *     agreement (joins under spill/metrics/layout variation).
+  *     agreement (joins under spill/metrics/layout variation);
+  *   - [[JoinCommutativity]] — `A <kind> JOIN B` ≡ `B <flipped kind> JOIN A`, the
+  *     only relation that varies which side of a join is the BUILD side;
+  *   - [[AggDecomposition]] — one-shot aggregation ≡ group-then-re-aggregate,
+  *     which drives the partial/final merge and spill-serde paths a global
+  *     aggregate never reaches.
   *
   * Each case runs the engine several times, so the default budget is small; scale
   * it for a campaign with `-Dfuzz.seeds=N` / `FUZZ_SEEDS=N`:
@@ -95,6 +100,25 @@ class MetamorphicFuzzTest {
       count = Props.seedCountOr(DefaultMetaSeeds)
     ) { mc => MetaModeDifferential.check(mc); () }
 
+  @Test def fuzzJoinCommutativity(): Unit =
+    Props.forAll[MetaCase](
+      name = "join-commutativity",
+      gen = MetaQueryGen.generate,
+      shrink = Shrinker.metaCase,
+      count = Props.seedCountOr(DefaultMetaSeeds * 2) // cheap: two executions per case
+    ) { mc => JoinCommutativity.check(mc); () }
+
+  @Test def fuzzAggDecomposition(): Unit =
+    Props.forAll[MetaCase](
+      name = "agg-decomposition",
+      gen = MetaQueryGen.generate,
+      shrink = Shrinker.metaCase,
+      // The heaviest property here — each case runs ~7 decompositions under two
+      // modes, i.e. ~28 executions — so the DEFAULT budget is a quarter of the
+      // others'. An explicit `-Dfuzz.seeds=N` still scales it for a campaign.
+      count = Props.seedCountOr(DefaultMetaSeeds / 4)
+    ) { mc => AggDecomposition.check(mc); () }
+
   /** Bind-reject-rate report + guard. A rejection is the engine refusing the
     * generator's own multi-relation SQL at bind time — expected to be rare (the
     * generator aims for always-bindable, scope-correct SQL); a spike means the
@@ -146,7 +170,7 @@ class MetamorphicFuzzTest {
     * is asserted present over a fixed block of seeds. Prints the tally for the PR. */
   @Test def generatorCoversShapes(): Unit = {
     val n = 2000
-    var joins, unions, ctes, windows, aggregates, tlpWindowKeys = 0
+    var joins, unions, ctes, windows, aggregates, tlpWindowKeys, topNs, boolMinMax = 0
     var seed = 0
     while (seed < n) {
       val mc = MetaQueryGen.generate(new Rng(seed.toLong))
@@ -155,18 +179,94 @@ class MetamorphicFuzzTest {
       if (mc.query.ctes.nonEmpty) ctes += 1
       if (!mc.query.isLayoutInvariant) windows += 1
       if (mc.query.core.isInstanceOf[AggCore]) aggregates += 1
+      if (mc.query.hasTopN) topNs += 1
+      if (hasBooleanMinMax(mc.query)) boolMinMax += 1
       // A window output column actually chosen as the TLP partition key.
       if (mc.query.core.hasWindow && mc.tlp.isDefined &&
         mc.query.core.tlpCandidates.exists { case (nm, _) => mc.tlp.get.toString.contains(nm) }) tlpWindowKeys += 1
       seed += 1
     }
     println(f"[metamorphic] shape coverage over $n seeds: joins=$joins unions=$unions ctes=$ctes " +
-      f"windows=$windows aggregates=$aggregates tlpOnWindowCol=$tlpWindowKeys")
+      f"windows=$windows aggregates=$aggregates tlpOnWindowCol=$tlpWindowKeys topN=$topNs boolMinMax=$boolMinMax")
     assertTrue(s"joins=$joins", joins > 100)
     assertTrue(s"unions=$unions", unions > 50)
     assertTrue(s"ctes=$ctes", ctes > 100)
     assertTrue(s"windows=$windows", windows > 50)
     assertTrue(s"aggregates=$aggregates", aggregates > 100)
+    // A generated `limit` renders nothing unless the projection is still totally
+    // ordered, so this counts queries that actually carry a LIMIT.
+    assertTrue(s"topN=$topNs", topNs > 100)
+    // MIN/MAX over a Boolean column: the accumulator-slot shape that returned NULL
+    // under spill until the engine was fixed. It was kept OUT of the generator
+    // while the bug stood, so an assertion that it is back is what stops the
+    // exclusion from silently returning. Narrow shape (~1.4% of seeds — the column
+    // must be Boolean AND draw a MIN/MAX), so the bound separates "rare" from
+    // "gone"; `aggDecompositionCoversEveryColumnType` is the dense guard on it.
+    assertTrue(s"boolMinMax=$boolMinMax", boolMinMax > 10)
+  }
+
+  /** Whether any arm of `q` takes `MIN`/`MAX` over a `Boolean` column — as an
+    * aggregate or as a window function, in the main arm, a UNION arm, or a CTE
+    * body. */
+  private def hasBooleanMinMax(q: MetaQuery): Boolean = {
+    val here = q.core match {
+      case a: AggCore => a.aggs.exists {
+        case (QueryGen.Min(arg), _) => arg.dataType == DataType.BooleanType
+        case (QueryGen.Max(arg), _) => arg.dataType == DataType.BooleanType
+        case _ => false
+      }
+      case p: ProjectCore => p.windows.exists(w =>
+        w.dataType == DataType.BooleanType && (w.sql.startsWith("MIN(") || w.sql.startsWith("MAX(")))
+    }
+    here || q.setOp.exists { case (rhs, _) => hasBooleanMinMax(rhs) } || q.ctes.exists(c => hasBooleanMinMax(c.body))
+  }
+
+  /** Coverage guard for the aggregate-decomposition relation. Two things can make
+    * it green and worthless, and neither is visible from the property itself:
+    * it could start SKIPPING (nothing to check), or it could stop reaching the
+    * column types whose accumulator slot differs — `MIN`/`MAX` picks its slot from
+    * the type, which is how the `Boolean` slot bug survived. Reads
+    * `AggDecomposition.coveredTypes`, which reports what `check` would exercise
+    * without running a query, so this stays a generation-only guard. */
+  @Test def aggDecompositionCoversEveryColumnType(): Unit = {
+    val n = 2000
+    val perType = scala.collection.mutable.LinkedHashMap.empty[DataType, Int]
+    var skipped = 0
+    var seed = 0
+    while (seed < n) {
+      AggDecomposition.coveredTypes(MetaQueryGen.generate(new Rng(seed.toLong))) match {
+        case None => skipped += 1
+        case Some(types) => types.foreach(t => perType(t) = perType.getOrElse(t, 0) + 1)
+      }
+      seed += 1
+    }
+    println(s"[metamorphic] agg-decomposition over $n seeds: skipped=$skipped types=" +
+      perType.toSeq.sortBy(-_._2).map { case (t, c) => s"$t=$c" }.mkString(" "))
+    assertEquals("agg-decomposition has nothing to check on some seeds", 0, skipped)
+    MetaQueryGen.PayloadTypes.foreach { t =>
+      assertTrue(s"agg-decomposition never aggregates a $t column", perType.getOrElse(t, 0) > 20)
+    }
+  }
+
+  /** The join-commutativity relation must actually RUN, not skip, on a healthy
+    * share of seeds. It has nothing to check for a join-free query and skips a
+    * windowed one (whose tie-break legitimately follows the order the join emits
+    * rows in), so a generator drifting toward those shapes would leave the
+    * property green and vacuous. Prints the verdict split for the PR. */
+  @Test def joinCommutativityIsNotVacuous(): Unit = {
+    val n = 400
+    var held, skipped, rejected = 0
+    var seed = 0
+    while (seed < n) {
+      JoinCommutativity.check(MetaQueryGen.generate(new Rng(seed.toLong))) match {
+        case RelEngine.Held => held += 1
+        case RelEngine.Skipped => skipped += 1
+        case _: RelEngine.Rejected => rejected += 1
+      }
+      seed += 1
+    }
+    println(s"[metamorphic] join-commutativity over $n seeds: held=$held skipped=$skipped rejected=$rejected")
+    assertTrue(s"relation ran on only $held of $n seeds", held > n / 5)
   }
 
   /** The multi-relation shrinker produces valid, strictly-reducing candidates and
@@ -344,6 +444,76 @@ class MetamorphicFuzzTest {
     val mc = MetaCase(env, MetaQuery(from, None, core), Some(TlpCmpLit("o1", ">", "<=", "1")))
     assertFalse("windowed query is not layout-invariant", mc.query.isLayoutInvariant)
     assertTlpHeld(mc)
+  }
+
+  /** Join commutativity over a LEFT JOIN with unmatched rows on BOTH sides: the
+    * commuted form is a RIGHT JOIN, so the swap moves both the build side and the
+    * direction the null-extension is generated in. Getting one of those wrong drops
+    * or invents exactly the unmatched rows this data has. */
+  @Test def regressionJoinCommutativityLeftBecomesRight(): Unit = {
+    val left = rel("r0", intInt, IndexedSeq(
+      Array[Any](1, 10), Array[Any](1, 11), Array[Any](2, 20), Array[Any](4, 40), Array[Any](null, 50)))
+    val right = rel("r1", intInt, IndexedSeq(
+      Array[Any](1, 100), Array[Any](2, 200), Array[Any](2, 201), Array[Any](3, 300)))
+    val env = RelEnv(Vector(left, right))
+    val from = FromClause(
+      FromLeaf("r0", "t0", Vector(sc("t0", intInt, 0), sc("t0", intInt, 1))),
+      Vector(JoinItem(JoinKind.Left, FromLeaf("r1", "t1", Vector(sc("t1", intInt, 0), sc("t1", intInt, 1))),
+        BinOpExpr("=", sc("t0", intInt, 0).ref, sc("t1", intInt, 0).ref, DataType.BooleanType))))
+    val core = ProjectCore(Vector((sc("t0", intInt, 1).ref, "o0"), (sc("t1", intInt, 1).ref, "o1")), distinct = false)
+    assertEquals(RelEngine.Held, JoinCommutativity.check(MetaCase(env, MetaQuery(from, None, core), None)))
+  }
+
+  /** Aggregate decomposition over a relation whose payload is BOOLEAN — the shape
+    * that returned NULL under spill while `MinMaxState` accumulated Booleans in the
+    * boxed slot and serialized the long one. The relation aggregates the key column
+    * and the LAST field, so the Boolean payload is the one it decomposes. */
+  @Test def regressionAggDecompositionBooleanMinMax(): Unit = {
+    val schema = Schema(Vector(Field("c0", DataType.IntType), Field("c1", DataType.BooleanType)))
+    val r = rel("r0", schema, IndexedSeq(
+      Array[Any](1, true), Array[Any](1, false), Array[Any](2, true), Array[Any](2, true),
+      Array[Any](3, false), Array[Any](null, true), Array[Any](4, null)), Vector(0))
+    val env = RelEnv(Vector(r))
+    val from = FromClause(FromLeaf("r0", "t0", Vector(sc("t0", schema, 0), sc("t0", schema, 1))), Vector.empty)
+    val core = ProjectCore(Vector((sc("t0", schema, 0).ref, "o0")), distinct = false)
+    assertEquals(Some(Set[DataType](DataType.IntType, DataType.BooleanType)),
+      AggDecomposition.coveredTypes(MetaCase(env, MetaQuery(from, None, core), None)))
+    assertEquals(RelEngine.Held, AggDecomposition.check(MetaCase(env, MetaQuery(from, None, core), None)))
+  }
+
+  /** A top-n query whose `LIMIT` cutoff falls between two IDENTICAL rows — the case
+    * the total-order condition exists for. Whichever of the tied rows the engine
+    * keeps, the result multiset is the same, so both TLP (four executions) and mode
+    * agreement (many layouts) must hold. */
+  @Test def regressionTopNLimitAcrossTiedRows(): Unit = {
+    val r = rel("r0", intInt, IndexedSeq(
+      Array[Any](1, 10), Array[Any](1, 10), Array[Any](2, 20), Array[Any](3, 30), Array[Any](null, 40)))
+    val env = RelEnv(Vector(r))
+    val from = FromClause(FromLeaf("r0", "t0", Vector(sc("t0", intInt, 0), sc("t0", intInt, 1))), Vector.empty)
+    val core = ProjectCore(Vector((sc("t0", intInt, 0).ref, "o0"), (sc("t0", intInt, 1).ref, "o1")), distinct = false)
+    val q = MetaQuery(from, None, core, limit = Some(2L))
+    assertTrue(s"expected a rendered LIMIT, got ${q.renderBody}", q.hasTopN)
+    val mc = MetaCase(env, q, Some(TlpCmpLit("o1", ">", "<=", "10")))
+    assertTlpHeld(mc)
+    assertEquals(RelEngine.Held, MetaModeDifferential.check(mc))
+  }
+
+  /** A generated `limit` renders only while the projection stays totally ordered:
+    * add a computed item or a DISTINCT and the `LIMIT` drops out rather than
+    * turning a layout-dependent top-n into a false counterexample. This is what
+    * makes every shrink of a top-n case sound. */
+  @Test def topNLimitDropsWhenTheOrderStopsBeingTotal(): Unit = {
+    val from = FromClause(FromLeaf("r0", "t0", Vector(sc("t0", intInt, 0), sc("t0", intInt, 1))), Vector.empty)
+    val bare = Vector[(Expr, String)]((sc("t0", intInt, 0).ref, "o0"))
+    assertTrue(MetaQuery(from, None, ProjectCore(bare, distinct = false), limit = Some(2L)).hasTopN)
+    assertFalse("DISTINCT rebinds ORDER BY to the projection, so the source name no longer resolves",
+      MetaQuery(from, None, ProjectCore(bare, distinct = true), limit = Some(2L)).hasTopN)
+    val computed = bare :+ ((BinOpExpr("+", sc("t0", intInt, 1).ref, LitExpr(1, DataType.IntType), DataType.IntType), "o1"))
+    assertFalse("a computed item is not an orderable source column",
+      MetaQuery(from, None, ProjectCore(computed, distinct = false), limit = Some(2L)).hasTopN)
+    val win = WinItem("ROW_NUMBER() OVER (ORDER BY t0.c1)", "o1", DataType.LongType)
+    assertFalse("a window output has no source column to order by",
+      MetaQuery(from, None, ProjectCore(bare, distinct = false, windows = Vector(win)), limit = Some(2L)).hasTopN)
   }
 
   /** Mode agreement over a self-join: the same join result multiset across spill /

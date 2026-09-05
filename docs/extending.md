@@ -322,7 +322,8 @@ The metamorphic fuzzers (`metamorphic_fuzz_test`, and its sharded re-run
 `sharded_mode_fuzz_test`) check multi-relation SQL against invariants decided by
 SQL semantics alone — no reference engine, so they catch SEMANTIC bugs every
 execution mode agrees on. `MetaQueryGen` is the generator;
-`oracle/{Tlp, NoRec, MetaModeDifferential}` are the three live relations. See
+`oracle/{Tlp, NoRec, MetaModeDifferential, JoinCommutativity, AggDecomposition}`
+are the five live relations. See
 [testing.md](testing.md#property-based-testing-fuzz).
 
 **To add a new metamorphic relation** (a new semantic invariant over a generated
@@ -339,6 +340,24 @@ execution mode agrees on. `MetaQueryGen` is the generator;
    under sharded planning, the same `@Test` to `ShardedModeFuzzTest` — calling
    `Props.forAll(MetaQueryGen.generate, Shrinker.metaCase)`. Keep the default
    budget small (each case runs the engine several times); the campaign scales it.
+3. Add a **coverage guard** next to it. A relation that silently skips every case
+   — or that stops reaching the shape it was written for — is green and worthless,
+   and nothing else notices. Two models, pick by cost:
+   - `joinCommutativityIsNotVacuous` runs `check` over a fixed block of seeds and
+     asserts a healthy `Held` share. Use it when the relation is cheap (two
+     executions per case).
+   - `aggDecompositionCoversEveryColumnType` asserts over the GENERATED CORPUS
+     instead, via a `private[fuzz]` helper on the oracle
+     (`AggDecomposition.coveredTypes`) that reports what `check` *would* exercise
+     without running a query. Use it when the relation is expensive — and whenever
+     the thing at risk is which VALUES or TYPES the relation reaches, not merely
+     whether it ran. `MIN`/`MAX` picks its accumulator slot from the column type,
+     so "every payload type still reaches a `MIN`/`MAX` decomposition" is the
+     assertion that keeps a slot bug from hiding again.
+
+   Set the bound to separate "rare" from "gone", not to pin the current number:
+   the corpus is a fixed seed block, so counts are stable, but a bound sitting one
+   or two seeds under the observed rate turns any generator tweak into a failure.
 
 **Three rules keep generated SQL sound and bindable** — hold them in any new
 relation or generator extension:

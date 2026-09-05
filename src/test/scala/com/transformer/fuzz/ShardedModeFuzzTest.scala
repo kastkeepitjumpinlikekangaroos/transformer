@@ -2,7 +2,7 @@ package com.transformer.fuzz
 
 import com.transformer.core._
 import com.transformer.fuzz.MetaQueryGen._
-import com.transformer.fuzz.oracle.{MetaModeDifferential, NoRec, Tlp}
+import com.transformer.fuzz.oracle.{AggDecomposition, JoinCommutativity, MetaModeDifferential, NoRec, Tlp}
 import com.transformer.sql.plan.LogicalPlanCardinality
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -40,10 +40,10 @@ import java.nio.file.{Files, Path}
   *
   * The properties are the same generators + oracles + shrinker as
   * [[MetamorphicFuzzTest]]; the scope here is narrow: do the metamorphic
-  * relations ([[Tlp]], [[NoRec]]) and in-JVM mode agreement
-  * ([[MetaModeDifferential]]) still hold when the planner shards? Bind-reject
-  * rate and shape coverage are planner-independent and stay in
-  * [[MetamorphicFuzzTest]]; they are not duplicated here.
+  * relations ([[Tlp]], [[NoRec]], [[JoinCommutativity]], [[AggDecomposition]])
+  * and in-JVM mode agreement ([[MetaModeDifferential]]) still hold when the
+  * planner shards? Bind-reject rate and shape coverage are planner-independent
+  * and stay in [[MetamorphicFuzzTest]]; they are not duplicated here.
   *
   * Budgets are small (each case runs the engine several times); scale for a
   * campaign with `-Dfuzz.seeds=N` / `FUZZ_SEEDS=N` against
@@ -57,8 +57,7 @@ class ShardedModeFuzzTest {
   private val DefaultShardedSeeds: Int = 60
 
   // Isolate spill files in a temp dir (the spill-on mode flushes at a 1-byte
-  // threshold; it still runs for the non-join queries the join-spill bug spares)
-  // so the default spill location is never littered.
+  // threshold) so the default spill location is never littered.
   private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
   private var tmpRoot: Path = _
 
@@ -123,4 +122,27 @@ class ShardedModeFuzzTest {
       shrink = Shrinker.metaCase,
       count = Props.seedCountOr(DefaultShardedSeeds)
     ) { mc => MetaModeDifferential.check(mc); () }
+
+  /** Commuting a join matters most here: under `broadcast_threshold=1` the
+    * planner takes the shuffle-join path, so the swap moves which side is
+    * shuffled and built, not merely which side is the in-heap hash table. */
+  @Test def fuzzJoinCommutativity(): Unit =
+    Props.forAll[MetaCase](
+      name = "sharded-join-commutativity",
+      gen = MetaQueryGen.generate,
+      shrink = Shrinker.metaCase,
+      count = Props.seedCountOr(DefaultShardedSeeds * 2) // cheap: two executions per case
+    ) { mc => JoinCommutativity.check(mc); () }
+
+  /** Under `shard_min_size=1` the grouped side of a decomposition really is a
+    * partial/final pair across an exchange, so this is where the partial-merge
+    * path it targets is fully wired. Budget is a quarter of the others' — each
+    * case runs ~7 decompositions under two modes. */
+  @Test def fuzzAggDecomposition(): Unit =
+    Props.forAll[MetaCase](
+      name = "sharded-agg-decomposition",
+      gen = MetaQueryGen.generate,
+      shrink = Shrinker.metaCase,
+      count = Props.seedCountOr(DefaultShardedSeeds / 4)
+    ) { mc => AggDecomposition.check(mc); () }
 }

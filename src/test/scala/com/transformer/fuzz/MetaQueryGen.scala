@@ -32,11 +32,15 @@ import com.transformer.sql.plan._
   *     grouping parens). So a query that binds also runs, in every mode.
   *
   * Excluded so the output multiset is well-defined for the metamorphic relations:
-  * `RAND()` / clock functions (mode-dependent) and `LIMIT` (top-`n` with ties
-  * returns a layout-dependent subset, which TLP's four separate executions would
-  * disagree on). The relations share a narrow join-key domain so equi-joins
-  * actually match — wide-random keys would make every outer join all-unmatched
-  * and hide the null-extension bugs the oracles target.
+  * `RAND()` and the clock functions, which are mode-dependent. `LIMIT` IS
+  * generated, but only in the '''top-n''' shape — a bare, type-reliable,
+  * non-float projection ordered by every one of its columns (see
+  * [[MetaQuery.totalOrderKeys]]). Rows tied at the cutoff are then identical rows,
+  * so the top-`n` multiset is the same under every layout, every build-side swap,
+  * and in each of TLP's four separate executions. The relations share a narrow
+  * join-key domain so equi-joins actually match — wide-random keys would make
+  * every outer join all-unmatched and hide the null-extension bugs the oracles
+  * target.
   */
 object MetaQueryGen {
 
@@ -269,17 +273,56 @@ object MetaQueryGen {
       where: Option[Expr],
       core: QueryCore,
       setOp: Option[(MetaQuery, Boolean)] = None,
-      ctes: Vector[CteDef] = Vector.empty) {
+      ctes: Vector[CteDef] = Vector.empty,
+      limit: Option[Long] = None) {
     def outputSchema: Vector[(String, DataType)] = core.outputSchema
     def tlpCandidates: Vector[(String, DataType)] = core.tlpCandidates
     def whereSql: String = where.map(w => s" WHERE ${SqlRender.expr(w)}").getOrElse("")
+
+    /** The SOURCE columns behind every projected item, when the SELECT list is all
+      * bare, type-reliable, non-float column references — the condition under which
+      * `ORDER BY` over all of them is a TOTAL order on the output, so two rows tied
+      * at a `LIMIT` cutoff are identical rows and top-`n` yields one fixed multiset.
+      * `None` (and so no `LIMIT`) for every other shape.
+      *
+      * Ordering by the SOURCE column, not the output alias, is what the engine
+      * binds: `ORDER BY` resolves against the scope at that point in the plan, so
+      * `ORDER BY o0` over `SELECT t0.c0 AS o0` fails with "Unknown column 'o0'".
+      * That is also why `DISTINCT` is excluded — past the dedup the scope is the
+      * projection, and the source name no longer resolves — along with windows and
+      * aggregates (no source column to name) and a `UNION` (the clause would bind
+      * to the whole set operation, not to this arm).
+      *
+      * Deriving the keys instead of storing them keeps every shrink sound: drop a
+      * projection item and the order shrinks with it, still total; make the list
+      * non-bare and the `LIMIT` disappears rather than manufacturing a false
+      * counterexample. */
+    def totalOrderKeys: Option[Vector[String]] = core match {
+      case ProjectCore(items, false, windows) if windows.isEmpty && items.nonEmpty && setOp.isEmpty =>
+        val cols = items.collect { case (c: ColRefExpr, _) if isPartitionable(c.dataType) => c.name }
+        if (cols.length == items.length) Some(cols.distinct) else None
+      case _ => None
+    }
+
+    /** ` ORDER BY <every output column's source> LIMIT n` — empty unless a `LIMIT`
+      * was generated AND [[totalOrderKeys]] still holds. */
+    def topNSql: String = (limit, totalOrderKeys) match {
+      case (Some(n), Some(keys)) => s" ORDER BY ${keys.mkString(", ")} LIMIT $n"
+      case _ => ""
+    }
+
+    /** Whether this query actually renders a `LIMIT`. The shape-coverage guard
+      * reads this rather than `limit.isDefined`: a generated limit that fails the
+      * soundness condition renders nothing, and counting the field would
+      * overstate the coverage. */
+    def hasTopN: Boolean = topNSql.nonEmpty
 
     /** The `WITH` definitions without the `WITH` keyword (empty when no CTEs). */
     def cteClause: String = if (ctes.isEmpty) "" else ctes.map(_.render).mkString(", ")
 
     /** The `SELECT ... [UNION ...]` part, excluding any leading `WITH`. */
     def mainSelectSql: String = {
-      val armSql = s"SELECT ${core.renderSelect} FROM ${from.render}$whereSql${core.groupSql}${core.havingSql}"
+      val armSql = s"SELECT ${core.renderSelect} FROM ${from.render}$whereSql${core.groupSql}${core.havingSql}$topNSql"
       setOp match {
         case None => armSql
         case Some((rhs, all)) => s"$armSql UNION ${if (all) "ALL " else ""}${rhs.mainSelectSql}"
@@ -307,9 +350,11 @@ object MetaQueryGen {
       !core.hasWindow && setOp.forall(_._1.isLayoutInvariant) && ctes.forall(_.body.isLayoutInvariant)
 
     /** Whether any arm of the query (this body, a union arm, or a CTE body)
-      * contains a join — the gate the mode-agreement oracle uses to skip the spill
-      * mode (the grace-hash join spill path is buggy; see
-      * [[oracle.MetaModeDifferential]]). */
+      * contains a join. Read by the shape-coverage guard, which asserts the
+      * generator keeps reaching join plans. (It was once also a gate that skipped
+      * the spill mode for joins, around the grace-hash spill NPE; that engine bug
+      * is fixed and spill now runs for every query — see
+      * [[oracle.MetaModeDifferential]].) */
     def hasAnyJoin: Boolean =
       from.joins.nonEmpty || setOp.exists(_._1.hasAnyJoin) || ctes.exists(_.body.hasAnyJoin)
   }
@@ -345,7 +390,9 @@ object MetaQueryGen {
   // ---- relation environment generation -----------------------------------
 
   private val KeyTypes: Seq[DataType] = Seq(DataType.IntType, DataType.LongType, DataType.StringType)
-  private val PayloadTypes: Seq[DataType] = Seq(
+  /** Payload (non-key) column types. `private[fuzz]` so the coverage guards can
+    * assert every one of them still reaches the oracles. */
+  private[fuzz] val PayloadTypes: Seq[DataType] = Seq(
     DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType,
     DataType.BooleanType, DataType.StringType)
   private val StringPool: IndexedSeq[String] = IndexedSeq("a", "b", "c", "d", "")
@@ -381,7 +428,7 @@ object MetaQueryGen {
     // Per-column (nullProb, domain): key columns draw from the shared domain
     // (sometimes nullable, exercising 3VL join keys + outer null-extension).
     val specs: IndexedSeq[(Double, IndexedSeq[Any])] = schema.fields.zipWithIndex.map { case (f, idx) =>
-      if (idx < nKeys) (rng.weighted((5, 0.0), (2, 0.2)) match { case 0 => 0.0; case _ => 0.2 }, keyDomain)
+      if (idx < nKeys) (rng.weighted((5, 0.0), (2, 0.2)), keyDomain)
       else (payloadNullProb(rng), payloadDomain(rng, f.dataType))
     }
     val numRows = rng.weighted((2, 0), (3, 1), (5, 2), (2, 3)) match {
@@ -399,8 +446,7 @@ object MetaQueryGen {
     Relation(name, DataGen.Dataset(schema, rows), keyCols)
   }
 
-  private def payloadNullProb(rng: Rng): Double =
-    rng.weighted((5, 0.0), (3, 0.2), (1, 0.5)) match { case 0 => 0.0; case 1 => 0.2; case _ => 0.5 }
+  private def payloadNullProb(rng: Rng): Double = rng.weighted((5, 0.0), (3, 0.2), (1, 0.5))
 
   private def payloadDomain(rng: Rng, dt: DataType): IndexedSeq[Any] = dt match {
     case DataType.IntType => val b = rng.oneOf(Seq(-1, 0, 1)); (0 until rng.between(2, 4)).map(i => (b + i): Any)
@@ -430,8 +476,30 @@ object MetaQueryGen {
     val from = genFrom(rng, sources)
     val scope = from.scope
     val where = if (rng.bool(0.6)) Some(genPredicate(rng, scope, rng.between(1, 3))) else None
-    val core = if (rng.bool(0.5)) genAggCore(rng, scope) else genProjectCore(rng, scope)
-    MetaQuery(from, where, core)
+    // A top-n query needs a core that satisfies `MetaQuery.totalOrderKeys`, which a
+    // freely-generated one rarely does (a computed item, a window, or DISTINCT each
+    // break it), so the shape is generated deliberately rather than hoped for.
+    val topN = rng.bool(0.2) && scope.exists(c => isPartitionable(c.dataType))
+    val core =
+      if (topN) genTopNCore(rng, scope)
+      else if (rng.bool(0.5)) genAggCore(rng, scope)
+      else genProjectCore(rng, scope)
+    MetaQuery(from, where, core, limit = if (topN) Some(genLimit(rng)) else None)
+  }
+
+  /** A `LIMIT` row count spanning the interesting cutoffs: none at all, one row, a
+    * handful (a cut mid-batch and mid-partition), and past the end of the data
+    * (the limit never binds). Mirrors [[QueryGen]]'s. */
+  private def genLimit(rng: Rng): Long = rng.weighted(
+    (1, 0L), (3, 1L), (4, 2L), (4, 5L), (2, 17L), (2, 1000L))
+
+  /** The projection a `LIMIT` is sound over: 1-3 bare, type-reliable, non-float
+    * columns, no DISTINCT, no window, no computed item — so the rendered
+    * `ORDER BY` covers every output column and the order is total. */
+  private def genTopNCore(rng: Rng, scope: Vector[ScopeCol]): ProjectCore = {
+    val orderable = scope.filter(c => isPartitionable(c.dataType))
+    val cols = distinctSubset(rng, orderable, rng.between(1, math.min(3, orderable.length)))
+    ProjectCore(cols.zipWithIndex.map { case (c, i) => (c.ref, s"o$i") }, distinct = false)
   }
 
   /** A `UNION` / `UNION ALL` of two single-source arms that both project one bare
@@ -570,7 +638,6 @@ object MetaQueryGen {
     def over(body: String): String = s"OVER (${Seq(partBy, body).filter(_.nonEmpty).mkString(" ")})"
 
     val numeric = scope.filter(c => DataType.isNumeric(c.dataType))
-    val nonBool = scope.filter(_.dataType != DataType.BooleanType)
     val choices = scala.collection.mutable.ArrayBuffer.empty[(Int, () => WinItem)]
     choices += ((3, () => WinItem(s"ROW_NUMBER() ${over(orderBy)}", name, DataType.LongType)))
     choices += ((2, () => WinItem(s"${rng.oneOf(Seq("RANK", "DENSE_RANK"))}() ${over(orderBy)}", name, DataType.LongType)))
@@ -581,8 +648,7 @@ object MetaQueryGen {
       choices += ((1, () => { val c = rng.oneOf(numeric)
         WinItem(s"SUM(${c.qualified}) OVER (${Seq(partBy, orderBy, frame(rng)).filter(_.nonEmpty).mkString(" ")})", name, sumType(c.dataType)) }))
     }
-    if (nonBool.nonEmpty)
-      choices += ((1, () => { val c = rng.oneOf(nonBool); WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType) }))
+    choices += ((1, () => { val c = rng.oneOf(scope); WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType) }))
     choices += ((2, () => { val c = rng.oneOf(scope); WinItem(s"${rng.oneOf(Seq("LAG", "LEAD"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType) }))
     rng.weighted(choices.toSeq: _*)()
   }
@@ -630,11 +696,8 @@ object MetaQueryGen {
     val options = scala.collection.mutable.ArrayBuffer.empty[(Int, () => QueryGen.AggSpec)]
     options += ((3, () => QueryGen.CountStar))
     options += ((2, () => QueryGen.Count(rng.oneOf(scope).ref, distinct = rng.bool(0.5))))
-    val minMax = scope.filter(_.dataType != DataType.BooleanType)
-    if (minMax.nonEmpty) {
-      options += ((2, () => QueryGen.Min(rng.oneOf(minMax).ref)))
-      options += ((2, () => QueryGen.Max(rng.oneOf(minMax).ref)))
-    }
+    options += ((2, () => QueryGen.Min(rng.oneOf(scope).ref)))
+    options += ((2, () => QueryGen.Max(rng.oneOf(scope).ref)))
     if (numeric.nonEmpty) {
       options += ((3, () => QueryGen.Sum(rng.oneOf(numeric).ref)))
       options += ((3, () => QueryGen.Avg(rng.oneOf(numeric).ref)))

@@ -1,6 +1,6 @@
 package com.transformer.sql.exec
 
-import com.transformer.core.{ColumnVector, ColumnarBatch, DataType, DoubleVector, Field, IntVector, LongVector, Schema, StringVector}
+import com.transformer.core.{BooleanVector, ColumnVector, ColumnarBatch, DataType, DoubleVector, Field, IntVector, LongVector, Schema, StringVector}
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.Test
@@ -44,6 +44,19 @@ class AggStateSerdeTest {
     val schema = Schema(Field("x", DataType.IntType))
     val b = new ColumnarBatch(schema, math.max(1, vals.size))
     val v = b.column(0).asInstanceOf[IntVector]
+    vals.zipWithIndex.foreach { case (o, i) => o match {
+      case Some(x) => v.set(i, x)
+      case None    => v.setNull(i)
+    }}
+    b.setNumRows(vals.size)
+    b
+  }
+
+  /** Build a 1-column BooleanVector batch. */
+  private def booleanBatch(vals: Seq[Option[Boolean]]): ColumnarBatch = {
+    val schema = Schema(Field("x", DataType.BooleanType))
+    val b = new ColumnarBatch(schema, math.max(1, vals.size))
+    val v = b.column(0).asInstanceOf[BooleanVector]
     vals.zipWithIndex.foreach { case (o, i) => o match {
       case Some(x) => v.set(i, x)
       case None    => v.setNull(i)
@@ -166,6 +179,41 @@ class AggStateSerdeTest {
     val aggMax = AggExprMax(colRef(0, DataType.StringType))
     val (_, restoredMax) = roundtrip(aggMax, b)
     assertEquals("cherry", restoredMax.finish())
+  }
+
+  /** `BooleanType` is the one MIN/MAX result type whose accumulator slot is not
+    * obvious from the vector: it rides the `longCur` slot as 0/1, the same slot
+    * the spill format writes. Round-trip, and the merge of a restored partial
+    * with a live one, must both preserve it. */
+  @Test def minMaxRoundtripBooleanType(): Unit = {
+    val aggMin = AggExprMin(colRef(0, DataType.BooleanType))
+    val (_, restoredMin) = roundtrip(aggMin, booleanBatch(Seq(Some(true), Some(false), Some(true))))
+    assertEquals(java.lang.Boolean.FALSE, restoredMin.finish())
+
+    val aggMax = AggExprMax(colRef(0, DataType.BooleanType))
+    val (_, restoredMax) = roundtrip(aggMax, booleanBatch(Seq(Some(false), Some(true), Some(false))))
+    assertEquals(java.lang.Boolean.TRUE, restoredMax.finish())
+
+    // All-true input under MIN, so the answer is the value the `longCur` slot
+    // would report if it were never written (0 == false) — the shape that made
+    // the old boxed-slot mismatch look like a plausible NULL.
+    val (_, restoredAllTrue) = roundtrip(aggMin, booleanBatch(Seq(Some(true), Some(true))))
+    assertEquals(java.lang.Boolean.TRUE, restoredAllTrue.finish())
+
+    // Null-only input stays NULL across the round-trip.
+    val (_, restoredNull) = roundtrip(aggMax, booleanBatch(Seq(None, None)))
+    assertNull(restoredNull.finish())
+
+    // A restored partial merged with an in-memory partial.
+    val partA = AggState.init(aggMax)
+    val first = booleanBatch(Seq(Some(false)))
+    updateAll(partA, Array(first.column(0)), first.numRows)
+    val restoredA = AggStateSerde.deserializeBytes(aggMax, AggStateSerde.serializeBytes(partA))
+    val partB = AggState.init(aggMax)
+    val second = booleanBatch(Seq(Some(true)))
+    updateAll(partB, Array(second.column(0)), second.numRows)
+    restoredA.merge(partB)
+    assertEquals(java.lang.Boolean.TRUE, restoredA.finish())
   }
 
   @Test def minMaxNoInputSerializesAsHasValueFalse(): Unit = {

@@ -109,6 +109,90 @@ class ModeDifferentialFuzzTest {
     assertTrue(s"bind-reject rate $rate too high — the generator is emitting malformed SQL", rate < 0.25)
   }
 
+  /** Shape-coverage guard over the generated corpus. A generator can silently
+    * stop reaching a shape (a mis-mapped weight table, a predicate that never
+    * fires) and the property stays green while testing far less than it claims,
+    * so the shapes the modes actually differ on are asserted to be reached:
+    * a `LIMIT` (the `LocalLimitExec` / `GlobalLimitExec` pair), and columns
+    * across the null-density spectrum — no NULLs, some NULLs, all NULLs — since
+    * an all-NULL column collapses every GROUP BY to one group and tests little. */
+  @Test def generatedCorpusCoversTheInterestingShapes(): Unit = {
+    val n = 500
+    var withLimit = 0
+    var withBoolMinMax = 0
+    var noNullCols = 0
+    var someNullCols = 0
+    var allNullCols = 0
+    var totalCols = 0
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      if (qc.sql.contains(" LIMIT ")) withLimit += 1
+      if (hasBooleanMinMax(qc.query)) withBoolMinMax += 1
+      val ds = qc.dataset
+      if (ds.numRows > 0) {
+        ds.schema.fields.indices.foreach { c =>
+          val nulls = ds.rows.count(_(c) == null)
+          totalCols += 1
+          if (nulls == 0) noNullCols += 1
+          else if (nulls == ds.numRows) allNullCols += 1
+          else someNullCols += 1
+        }
+      }
+      seed += 1
+    }
+    println(f"[mode-differential] over $n seeds: LIMIT in $withLimit; MIN/MAX over a " +
+      f"Boolean column in $withBoolMinMax; columns " +
+      f"no-null=$noNullCols some-null=$someNullCols all-null=$allNullCols of $totalCols")
+    assertTrue(s"no LIMIT query generated over $n seeds", withLimit >= n / 20)
+    // This fuzzer found `MIN`/`MAX` over a Boolean column returning NULL under
+    // spill, and the shape was then GATED OUT of the generator until the engine was
+    // fixed. Asserting it is back is what keeps that exclusion from returning
+    // unnoticed and re-hiding an accumulator-slot bug. It is a narrow shape (an
+    // aggregate query, a MIN/MAX among its aggregates, a Boolean column drawn for
+    // it) and lands on ~3.5% of seeds, so the bound only has to separate "rare"
+    // from "gone".
+    assertTrue(s"no MIN/MAX over a Boolean column generated over $n seeds", withBoolMinMax >= n / 100)
+    assertTrue("no all-non-null column generated", noNullCols >= totalCols / 10)
+    assertTrue("no partially-NULL column generated", someNullCols >= totalCols / 10)
+    assertTrue("no all-NULL column generated", allNullCols > 0)
+    // The all-NULL density is the deliberate rarity — a corpus where it
+    // dominates is a mis-mapped weight table, not a stronger fuzzer.
+    assertTrue(s"all-NULL columns dominate the corpus ($allNullCols of $totalCols)",
+      allNullCols < totalCols / 4)
+  }
+
+  /** Whether `q` takes `MIN`/`MAX` over a `Boolean` column. */
+  private def hasBooleanMinMax(q: QueryGen.GenQuery): Boolean = q match {
+    case a: QueryGen.AggregateQuery => a.aggregates.exists {
+      case (QueryGen.Min(arg), _) => arg.dataType == DataType.BooleanType
+      case (QueryGen.Max(arg), _) => arg.dataType == DataType.BooleanType
+      case _ => false
+    }
+    case _ => false
+  }
+
+  /** Top-n over a TOTAL order, with the cutoff falling between two IDENTICAL rows.
+    * Every mode must agree on the multiset — which of the tied rows survives is not
+    * observable, because they are the same row. The condition this pins is the one
+    * that makes `LIMIT` generatable at all: drop an order key and the top-n becomes
+    * a layout-dependent SUBSET instead. */
+  @Test def regressionTopNLimitOverTotalOrder(): Unit = {
+    val schema = Schema(Vector(Field("c0", DataType.IntType), Field("c1", DataType.StringType)))
+    val rows = IndexedSeq[Array[Any]](
+      Array[Any](1, "a"), Array[Any](1, "a"), Array[Any](1, "b"),
+      Array[Any](2, "a"), Array[Any](null, "a"), Array[Any](3, null))
+    val q = QueryGen.ProjectQuery(
+      distinct = false,
+      projection = Vector((ColRefExpr(0, "c0", DataType.IntType), "c0"), (ColRefExpr(1, "c1", DataType.StringType), "c1")),
+      where = None,
+      orderBy = Vector((ColRefExpr(0, "c0", DataType.IntType), true), (ColRefExpr(1, "c1", DataType.StringType), true)),
+      limit = Some(3L))
+    val qc = QueryGen.QueryCase(DataGen.Dataset(schema, rows), q)
+    assertTrue(s"expected a rendered LIMIT, got ${qc.sql}", qc.sql.contains(" LIMIT 3"))
+    ModeDifferential.check(qc)
+  }
+
   /** Same seed reproduces the exact dataset and SQL — the repro contract failure
     * messages rely on. */
   @Test def sameSeedReproduces(): Unit = {

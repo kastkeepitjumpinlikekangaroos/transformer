@@ -122,11 +122,13 @@ navigation hint, not a comprehensive directory listing.
 - `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` (~1060 LOC)
   — the parity gate for every `Expr.evalVec` override. New overrides extend
   this first; see [testing.md](testing.md) for the coverage matrix.
-- `src/test/scala/com/transformer/fuzz/` (~1000 LOC) — the hand-rolled
-  property-based testing harness (`Rng`, `Props`, `Shrinker`, `RowOracle`)
-  plus `ExprGen` + `oracle/ExprParity`, the generative generalization of
-  `ExprBatchTest`. See [testing.md §Property-based testing](testing.md#property-based-testing-fuzz)
-  and the recipe in [extending.md](extending.md#add-a-property--generator).
+- `src/test/scala/com/transformer/fuzz/` (~4800 LOC) — the hand-rolled
+  property-based testing harness (`Rng`, `Props`, `Shrinker`, `RowOracle`), the
+  generators (`ExprGen`, `DataGen`, `QueryGen`, `MetaQueryGen`), and the oracles
+  under `oracle/` (`ExprParity`, `ModeDifferential`, `MetaModeDifferential`,
+  `Tlp`, `NoRec`, `JoinCommutativity`, `AggDecomposition`). See
+  [testing.md §Property-based testing](testing.md#property-based-testing-fuzz)
+  and the recipes in [extending.md](extending.md#add-a-property--generator).
 
 ## Useful pointers
 

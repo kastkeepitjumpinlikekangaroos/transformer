@@ -490,12 +490,35 @@ ship a fix or move something from "not done" to "done".
   handle, though `UPPER`/`LOWER` bind fine). Reconciling these in the binder is a
   candidate follow-up.
 
-- **`MIN`/`MAX` over a `BooleanType` column returns NULL under spill.**
-  `MinMaxState.updateAt` stores a boolean in the boxed `currentBoxed` slot (the
-  `other` branch), but `writeSelf`/`readSelf` route `BooleanType` through the
-  primitive `longCur` slot, so the value is lost on a spill round-trip (the
-  in-memory path is correct). Found by `mode_differential_fuzz_test`; `QueryGen`
-  excludes `MIN`/`MAX` over Boolean columns until the engine is fixed.
+- **`ORDER BY` binds against the scope at that point in the plan, and an ordinal
+  is a silent no-op.** `ORDER BY` resolves its columns where the sort sits in the
+  plan, not against the SELECT list: over a plain projection or join that is the
+  FROM scope, so `SELECT t0.c0 AS o0 FROM r0 AS t0 ORDER BY o0` fails with
+  `Unknown column 'o0'. Available: [t0.c0, t0.c1]` and `ORDER BY t0.c0` is what
+  binds. Past a `GROUP BY` the scope is the aggregate output (`ORDER BY c0`), and
+  past a `DISTINCT` it is the projection — so there the alias binds and the source
+  name no longer does. Separately, `ORDER BY <ordinal>` parses but does NOT sort:
+  `ORDER BY 2 DESC` returns scan order, because the ordinal binds as an integer
+  literal (a constant sort key) rather than as the second output column, unlike
+  `GROUP BY <ordinal>`, which the binder does resolve positionally. Nothing in the
+  engine or the fuzzers relies on ORDER BY ordinals; resolving them positionally
+  (or rejecting them) is a candidate follow-up. These rules are why
+  `MetaQueryGen.totalOrderKeys` orders a top-n query by its SOURCE columns and
+  emits no `LIMIT` for a `DISTINCT`, windowed, aggregate, or `UNION` shape.
+
+- **An `AggState`'s accumulator slot must match its spill format, per type.**
+  `MinMaxState` keeps a typed extremum in one of three slots — `longCur`,
+  `doubleCur`, or `currentBoxed` — chosen from the result `DataType`. `MIN`/`MAX`
+  over a `BooleanType` column used to return NULL under spill (and the right
+  answer off-spill) because `updateAt` stored the boolean boxed while
+  `writeSelf`/`readSelf` wrote and read `longCur`: the restored state had
+  `hasValue = true` and a null boxed value. Booleans now ride `longCur` as 0/1 on
+  every path (update / merge / finish / serde), which also orders them the SQL
+  way, FALSE < TRUE. Found by `mode_differential_fuzz_test`. When adding a type
+  to any `AggState`, change all four paths together — the on-disk format is the
+  only one a global aggregate never exercises, so the mismatch is invisible until
+  a grouped query spills. `fuzz/metamorphic_fuzz_test`'s `agg-decomposition`
+  relation is the general guard.
 
 ## What's intentionally NOT done
 

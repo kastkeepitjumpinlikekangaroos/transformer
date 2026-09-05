@@ -1039,8 +1039,11 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
   // to avoid the `java.lang.Long`/`Double`/`Integer` wrapper allocation the
   // older `current: Any` path created on every row that updated the extremum.
   // `currentBoxed` holds the boxed extremum ONLY for reference types
-  // (String, Date, Decimal); for primitives it's null and the primitive
-  // slots are the source of truth.
+  // (String, Binary, Decimal); for primitives it's null and the primitive
+  // slots are the source of truth. Booleans are primitives here: they ride
+  // `longCur` as 0/1, which orders them the SQL way (FALSE < TRUE). Every
+  // path — update, merge, finish, and the spill format — must agree on which
+  // slot a given `dt` uses, or a spilled state restores as NULL.
   private var hasValue: Boolean = false
   private var longCur: Long = 0L
   private var doubleCur: Double = 0.0
@@ -1080,6 +1083,12 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
     case dv: DateVector =>
       if (!dv.isNull(r)) {
         val v = dv.values(r).toLong
+        if (!hasValue) { longCur = v; hasValue = true }
+        else if ((min && v < longCur) || (!min && v > longCur)) longCur = v
+      }
+    case bv: BooleanVector =>
+      if (!bv.isNull(r)) {
+        val v = if (bv.values(r)) 1L else 0L
         if (!hasValue) { longCur = v; hasValue = true }
         else if ((min && v < longCur) || (!min && v > longCur)) longCur = v
       }
@@ -1155,6 +1164,16 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
         }
         r += 1
       }
+    case bv: BooleanVector =>
+      var r = 0
+      while (r < n) {
+        if (!bv.isNull(r)) {
+          val v = if (bv.values(r)) 1L else 0L
+          if (!hasValue) { longCur = v; hasValue = true }
+          else if ((min && v < longCur) || (!min && v > longCur)) longCur = v
+        }
+        r += 1
+      }
     case other =>
       var r = 0
       while (r < n) {
@@ -1183,7 +1202,8 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
       // carry their value in longCur/doubleCur; reference types use
       // currentBoxed. This keeps merge boxing-free for primitives.
       dt match {
-        case DataType.IntType | DataType.LongType | DataType.DateType | DataType.TimestampType =>
+        case DataType.IntType | DataType.LongType | DataType.DateType
+           | DataType.TimestampType | DataType.BooleanType =>
           val v = that.longCur
           if ((min && v < longCur) || (!min && v > longCur)) longCur = v
         case DataType.FloatType | DataType.DoubleType =>
@@ -1205,6 +1225,7 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
       case DataType.TimestampType => java.lang.Long.valueOf(longCur)
       case DataType.FloatType => java.lang.Float.valueOf(doubleCur.toFloat)
       case DataType.DoubleType => java.lang.Double.valueOf(doubleCur)
+      case DataType.BooleanType => java.lang.Boolean.valueOf(longCur != 0L)
       case _ => currentBoxed
     }
 

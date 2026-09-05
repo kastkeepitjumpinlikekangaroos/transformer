@@ -1122,7 +1122,7 @@ Alongside the example-based unit tests, `src/test/scala/com/transformer/fuzz/`
 holds a hand-rolled property-based harness (no new dependency — PBT by hand, like
 the engine itself). Each property generates random-but-valid inputs, checks an
 invariant over many seeds, and shrinks any counterexample to a minimal repro.
-Four oracle families, in increasing semantic reach:
+Six oracle families, in increasing semantic reach:
 
 - **Expression parity** (`oracle/ExprParity`) — a generated type-correct `Expr`
   over a random `ColumnarBatch` must evaluate identically through the scalar
@@ -1143,6 +1143,16 @@ Four oracle families, in increasing semantic reach:
 - **NoREC** (`oracle/NoRec`, non-optimizing reference engine construction) —
   `COUNT(*) WHERE p` must equal `SUM(CASE WHEN p THEN 1 ELSE 0 END)`: the same
   predicate as a filter vs. as a projection.
+- **Join commutativity** (`oracle/JoinCommutativity`) — `A <kind> JOIN B ON p`
+  must equal `B <flipped kind> JOIN A ON p` (INNER/FULL unchanged, LEFT↔RIGHT),
+  with the rest of the query reused verbatim. The only relation that varies which
+  side of a join the planner builds, so it bites on the build-side swap and the
+  null-extension direction.
+- **Aggregate decomposition** (`oracle/AggDecomposition`) — aggregating in one
+  shot must equal grouping by an arbitrary key and re-aggregating the per-group
+  results. Run in heap and under spill, it drives the partial/final merge and the
+  `AggState` spill serde that a global aggregate (one accumulator, never flushed)
+  never reaches.
 
 The default `bazel test //...` runs each over a small fixed-seed batch; the
 `*_fuzz_campaign` targets scale to long runs. Full mechanics, the generators, and
