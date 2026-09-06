@@ -1429,4 +1429,119 @@ class DataJobTest {
       fail(s"_run.json expected on failure: $outDir").asInstanceOf[TaskRunRecord])
     assertEquals(TaskRunStatus.Failed, rec.status)
   }
+
+  /** A task with no `outputFile` is a memory-only feeder: it publishes its
+    * `viewName` for downstream tasks without writing anything to disk. This
+    * used to throw `UnsupportedOperationException` from inside the worker, so
+    * the feeder ended up `Failed` and every consumer cascaded to `Skipped` —
+    * a mid-run failure for a job whose structure was fine. Found by
+    * `fuzz/dag_scheduler_fuzz_test`. */
+  @Test def memoryOnlyTaskFeedsDownstreamTaskWithoutWritingOutput(): Unit = {
+    val inDir = tmpDir("dj-mem-feed-")
+    writeCsv(inDir, "events.csv", "user_id,amount\n1,3\n2,42\n1,17\n")
+    val outDir = tmpDir("dj-mem-feed-out-").resolve("out")
+
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(
+        // No outputFile: the result only ever lives in heap.
+        SQLTask(
+          name = Some("feeder"),
+          sqlString = Some("SELECT user_id, amount FROM events WHERE amount > 5"),
+          viewName = Some("big_events")
+        ),
+        SQLTask(
+          name = Some("rollup"),
+          sqlString = Some(
+            "SELECT user_id, SUM(amount) AS total FROM big_events GROUP BY user_id ORDER BY user_id"),
+          outputFile = Some(OutputFilePath(outDir.toString))
+        )
+      )
+    )
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+    assertEquals(Seq(TaskStatus.Succeeded, TaskStatus.Succeeded), result.tasks.map(_.status))
+    // The feeder wrote nothing.
+    assertTrue("memory-only task must not report an output path", result.tasks.head.outputPath.isEmpty)
+    assertEquals(2L, result.tasks.head.rowsProduced)
+    // The rollup carries ORDER BY, and an aggregate collapses to one part file,
+    // so the output order is fixed.
+    assertEquals("user_id,total\n1,17\n2,42\n", readOutputDir(outDir))
+  }
+
+  /** The same lift, for the other consumer of a task's own view: a validation.
+    * A memory-only task with a validation has no file to re-read either. */
+  @Test def memoryOnlyTaskRunsItsOwnValidations(): Unit = {
+    val inDir = tmpDir("dj-mem-valid-")
+    writeCsv(inDir, "events.csv", "user_id,amount\n1,3\n2,-1\n")
+
+    def run(predicate: String): JobResult = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(SQLTask(
+        name = Some("checked"),
+        sqlString = Some("SELECT user_id, amount FROM events"),
+        viewName = Some("checked_events"),
+        validations = Seq(Validation("non_negative",
+          sqlString = Some(s"SELECT * FROM checked_events WHERE $predicate")))
+      ))
+    ).run()
+
+    val failing = run("amount < 0")
+    assertFalse("validation returning rows must fail the task", failing.succeeded)
+    failing.tasks.head.status match {
+      case TaskStatus.ValidationFailed(fs) => assertEquals(1L, fs.head.rowCount)
+      case other => fail(s"expected ValidationFailed, got $other")
+    }
+
+    val passing = run("amount < -1000")
+    assertTrue(passing.error.getOrElse("(no error)"), passing.succeeded)
+  }
+
+  /** `job.json` must point at the per-task `_run.json` for EVERY terminal
+    * status, not just the ones that produced output. The runner stamps a record
+    * for a Failed and for a Skipped task too (both have an `outputFile`), but
+    * the manifest used to derive `runFile` from `TaskResult.outputPath` — which
+    * is None for both — so the GUI reopened the run with only the compact
+    * summary and could not reach the timestamps and validation entries sitting
+    * on disk. Found by `fuzz/dag_scheduler_fuzz_test`. */
+  @Test def jobRunRecordPointsAtRunFileForFailedAndSkippedTasks(): Unit = {
+    val inDir = tmpDir("dj-jrr-runfile-")
+    writeCsv(inDir, "events.csv", "id\n1\n2\n")
+    val root = tmpDir("dj-jrr-runfile-out-")
+    val jobFile = root.resolve("job.json")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(
+        SQLTask(
+          name = Some("broken"),
+          sqlString = Some("SELECT no_such_col FROM events"),
+          viewName = Some("broken"),
+          outputFile = Some(OutputFilePath(root.resolve("broken").toString))
+        ),
+        SQLTask(
+          name = Some("downstream"),
+          sqlString = Some("SELECT no_such_col AS c FROM broken"),
+          outputFile = Some(OutputFilePath(root.resolve("downstream").toString))
+        )
+      ),
+      jobRunOutput = Some(OutputFilePath(jobFile.toString))
+    )
+    val result = job.run()
+    assertFalse(result.succeeded)
+    assertEquals(Seq("Failed", "Skipped"), result.tasks.map(_.status match {
+      case TaskStatus.Failed(_) => "Failed"
+      case TaskStatus.Skipped(_) => "Skipped"
+      case other => other.toString
+    }))
+
+    val rec = JobRunRecord.read(jobFile).getOrElse(
+      fail(s"job.json expected at $jobFile").asInstanceOf[JobRunRecord])
+    assertEquals(Seq(TaskRunStatus.Failed, TaskRunStatus.Skipped), rec.tasks.map(_.status))
+    rec.tasks.foreach { t =>
+      val rf = t.runFile.getOrElse(
+        fail(s"manifest has no runFile for '${t.taskName}'").asInstanceOf[String])
+      assertTrue(s"manifest runFile '$rf' for '${t.taskName}' does not exist",
+        Files.isRegularFile(java.nio.file.Paths.get(rf)))
+    }
+  }
 }

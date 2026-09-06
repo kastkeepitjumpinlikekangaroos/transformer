@@ -54,6 +54,30 @@ object MaterializedView {
     new MaterializedView(view.schema, partitions)
   }
 
+  /** Drain a finished query into a [[MaterializedView]], one pool task per
+    * output partition, preserving the query's partition layout.
+    *
+    * This is how a result that was never written to disk becomes readable
+    * again: an [[ExecutedQuery]]'s partition iterators are single-use, so a
+    * consumer that needs to read the result more than once (a validation, a
+    * downstream task) has to hold it somewhere. Draining through
+    * `q.partition(p)` also keeps [[ExecutedQuery.rowsProduced]] accurate, so
+    * the caller can still report the row count afterwards.
+    *
+    * The whole result is held in heap for as long as the view is referenced —
+    * the same trade the `cache = true` input path and CTE materialization make.
+    */
+  def fromQuery(q: ExecutedQuery): MaterializedView = {
+    val n = q.numPartitions
+    if (n == 0) return new MaterializedView(q.schema, IndexedSeq.empty)
+    val tasks: Seq[Callable[IndexedSeq[ColumnarBatch]]] = (0 until n).map { p =>
+      new Callable[IndexedSeq[ColumnarBatch]] {
+        def call(): IndexedSeq[ColumnarBatch] = drain(q.partition(p))
+      }
+    }
+    new MaterializedView(q.schema, Scheduler.submitAndAwaitAll(tasks))
+  }
+
   /** Drain many views concurrently on the shared [[Scheduler]] pool. All input
     * partitions across all views are submitted as independent tasks so the
     * cores-sized pool stays saturated even with mixes of small + large inputs.

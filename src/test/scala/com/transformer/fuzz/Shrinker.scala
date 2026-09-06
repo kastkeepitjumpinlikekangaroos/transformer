@@ -432,4 +432,65 @@ object Shrinker {
         a.groupKeys.indices.iterator.map(i => a.copy(groupKeys = a.groupKeys.patch(i, Nil, 1)))
       dropHaving ++ dropAgg ++ dropKey
   }
+
+  // ---- JobCase shrinker (DAG scheduler) -----------------------------------
+
+  /** Strictly-smaller candidates for a generated job DAG. Every move reduces a
+    * well-founded measure — task count, edge count, injected-failure count, or
+    * per-task output config — so the greedy loop terminates. Dropping the LAST
+    * task keeps the remaining indices (and hence every `t<j>` reference) valid,
+    * which is why only the tail is peeled; edges are then removed one at a time,
+    * so a scheduling bug converges to the smallest DAG that still shows it.
+    * Dropping an input is unsafe (the surviving tasks reference it by name), so
+    * an input is healed rather than removed. */
+  def jobCase(jc: JobDagGen.JobCase): Iterator[JobDagGen.JobCase] = {
+    // A task the tail depends on cannot be dropped, so peel only from the end.
+    val dropLastTask: Iterator[JobDagGen.JobCase] =
+      if (jc.tasks.length <= 1) Iterator.empty
+      else Iterator(JobDagGen.JobCase(jc.inputs, jc.tasks.init))
+
+    val dropValidationEdge: Iterator[JobDagGen.JobCase] =
+      jc.tasks.indices.iterator.filter(jc.tasks(_).validationTaskSrc.isDefined).map { i =>
+        jc.copy(tasks = jc.tasks.updated(i, jc.tasks(i).copy(validationTaskSrc = None)))
+      }
+
+    val healInput: Iterator[JobDagGen.JobCase] =
+      jc.inputs.indices.iterator.filter(jc.inputs(_).broken).map { i =>
+        jc.copy(inputs = jc.inputs.updated(i, jc.inputs(i).copy(broken = false)))
+      }
+
+    val healTask: Iterator[JobDagGen.JobCase] =
+      jc.tasks.indices.iterator.filter(jc.tasks(_).outcome != JobDagGen.Ok).map { i =>
+        jc.copy(tasks = jc.tasks.updated(i, jc.tasks(i).copy(outcome = JobDagGen.Ok)))
+      }
+
+    val dropEdge: Iterator[JobDagGen.JobCase] = jc.tasks.indices.iterator.flatMap { i =>
+      val t = jc.tasks(i)
+      val dropTaskEdge = t.taskSrcs.indices.iterator
+        .filter(_ => t.sources > 1)
+        .map(k => jc.copy(tasks = jc.tasks.updated(i, t.copy(taskSrcs = t.taskSrcs.patch(k, Nil, 1)))))
+      val dropInputEdge = t.inputSrcs.indices.iterator
+        .filter(_ => t.sources > 1)
+        .map(k => jc.copy(tasks = jc.tasks.updated(i, t.copy(inputSrcs = t.inputSrcs.patch(k, Nil, 1)))))
+      dropTaskEdge ++ dropInputEdge
+    }
+
+    val dropOutput: Iterator[JobDagGen.JobCase] =
+      jc.tasks.indices.iterator.filter(jc.tasks(_).output.isDefined).map { i =>
+        jc.copy(tasks = jc.tasks.updated(i, jc.tasks(i).copy(output = None)))
+      }
+
+    val dropValidation: Iterator[JobDagGen.JobCase] =
+      jc.tasks.indices.iterator.filter(jc.tasks(_).passingValidation).map { i =>
+        jc.copy(tasks = jc.tasks.updated(i, jc.tasks(i).copy(passingValidation = false)))
+      }
+
+    val shrinkRowCount: Iterator[JobDagGen.JobCase] =
+      jc.inputs.indices.iterator.filter(jc.inputs(_).rows > 1).map { i =>
+        jc.copy(inputs = jc.inputs.updated(i, jc.inputs(i).copy(rows = jc.inputs(i).rows - 1)))
+      }
+
+    dropLastTask ++ dropEdge ++ dropValidationEdge ++ healInput ++ healTask ++ dropOutput ++
+      dropValidation ++ shrinkRowCount
+  }
 }

@@ -584,6 +584,15 @@ will read it. The old code unconditionally re-read for any task with a
 `viewName`, which on the polymarket leaf `mart_*` tasks doubled the per-task
 tail latency for no benefit.
 
+When a task DOES have a consumer, how its view gets published depends on
+whether it wrote anything. A task with an `outputFile` re-reads its own output
+directory, so the published view stays backed by disk. A task without one has
+nothing to re-read, so `MaterializedView.fromQuery` drains the finished
+`ExecutedQuery` — one pool task per output partition, preserving the partition
+layout and keeping `rowsProduced` accurate — and publishes that. The result then
+lives in heap for the rest of the run, which is why it is only done when
+something actually needs the view.
+
 ### 3f. Unified input + task DAG scheduling
 
 `DataJob.runUnifiedDag` is the single completion-driven scheduler over both

@@ -334,7 +334,7 @@ final case class DataJob(
       val needsCatalogView = hasDownstreamConsumers || task.validations.nonEmpty
       if (needsCatalogView) {
         val name = task.viewName.getOrElse(s"__task_${node.index}")
-        val materialized = materializeIfNeeded(q.schema, writtenOutput)
+        val materialized = materializeIfNeeded(q, writtenOutput)
         catalog.replace(name, materialized)
         val failures = runValidations(node, executor, catalog, opts)
         val outputPath = writtenOutput.map(_._2)
@@ -653,12 +653,23 @@ final case class DataJob(
     }
   }
 
-  /** Re-read the just-written output as a view so validations and downstream
-    * tasks can stream over it. Both CSV and Parquet readers treat a bare
-    * directory as "every file inside", which is exactly the part-file layout
-    * we produce.
+  /** Publish a finished task's result as a view so validations and downstream
+    * tasks can read it.
+    *
+    * A task with an `outputFile` re-reads what it just wrote: both CSV and
+    * Parquet readers treat a bare directory as "every file inside", which is
+    * exactly the part-file layout we produce, and the re-read keeps the
+    * published view backed by disk rather than heap.
+    *
+    * A task with NO `outputFile` is a memory-only feeder — it has nothing on
+    * disk to re-read, so its result is drained into a [[MaterializedView]]
+    * instead. That holds the whole result in heap for the rest of the run (the
+    * same trade cached inputs and materialized CTEs make), which is why it is
+    * only done when something actually needs the view: a downstream task or
+    * this task's own validations.
     */
-  private def materializeIfNeeded(schema: Schema, writtenOutput: Option[(OutputFilePath, String)]): CatalogView = {
+  private def materializeIfNeeded(q: ExecutedQuery, writtenOutput: Option[(OutputFilePath, String)]): CatalogView = {
+    val schema = q.schema
     writtenOutput match {
       case Some((ofp, dir)) =>
         ofp.detectedFormat match {
@@ -681,11 +692,7 @@ final case class DataJob(
           case other =>
             throw new IllegalArgumentException(s"Cannot re-read output of unknown format '$other': $dir")
         }
-      case None =>
-        throw new UnsupportedOperationException(
-          "v1 requires an outputFile to run validations or publish a SQLTask as a downstream view. " +
-            "Set SQLTask.outputFile or remove validations/viewName."
-        )
+      case None => MaterializedView.fromQuery(q)
     }
   }
 
@@ -747,7 +754,7 @@ final case class DataJob(
     }
     try {
       val target = Paths.get(TemplateRenderer.render(ofp.path, vars))
-      val summaries = results.map { r =>
+      val summaries: Seq[JobTaskSummary] = results.iterator.zipWithIndex.map { case (r, i) =>
         val (status, errMsg) = r.status match {
           case TaskStatus.Succeeded               => (TaskRunStatus.Succeeded,        None)
           case TaskStatus.ValidationFailed(_)     => (TaskRunStatus.ValidationFailed, None)
@@ -759,7 +766,17 @@ final case class DataJob(
           case TaskStatus.ValidationFailed(fs) => fs.size
           case _                               => 0
         }
-        val runFile = r.outputPath.map(p => Paths.get(p).resolve(TaskRunRecord.FileName).toString)
+        // Point at the per-task record whenever the task is CONFIGURED with an
+        // output directory, not just when it produced output: the runner stamps
+        // a `_run.json` there for every terminal status, and a Failed or Skipped
+        // task's `TaskResult` carries no `outputPath`. Deriving it from the
+        // result instead left those records on disk but unreachable from the
+        // manifest, so reopening the run showed only this compact summary. A
+        // cloud path writes no record at all, so it gets no pointer.
+        val runFile = sql(i).outputFile
+          .filterNot(_.isCloud)
+          .map(taskOut => Paths.get(TemplateRenderer.render(taskOut.path, vars))
+            .resolve(TaskRunRecord.FileName).toString)
         JobTaskSummary(
           taskName = r.taskName,
           status = status,
@@ -768,7 +785,7 @@ final case class DataJob(
           failedValidationCount = failedValidationCount,
           errorMessage = errMsg
         )
-      }
+      }.toSeq
       // perfManifest collects every `_perf.json` actually written under the
       // tasks' output directories. Populated only when at least one task
       // emitted a perf record — keeps `job.json`'s default shape unchanged

@@ -152,6 +152,14 @@ val result = job.run()
 if (!result.succeeded) sys.exit(1)
 ```
 
+A task's `outputFile` is optional. Set it and the result is persisted, and any
+downstream task or validation reads it back from disk. Leave it out and the task
+is a **memory-only feeder**: it still registers its `viewName` for downstream
+tasks and validations, but the result is held in heap for the rest of the run
+instead of being written — useful for an intermediate step whose output nobody
+needs on disk, at the cost of keeping it in memory (the same trade a cached
+input or a multiply-referenced CTE makes).
+
 `DataJob.run()` returns a `JobResult` describing per-task status, row counts,
 durations, and any consistency warnings. If a validation fails the
 corresponding task is marked `ValidationFailed`, its output is persisted

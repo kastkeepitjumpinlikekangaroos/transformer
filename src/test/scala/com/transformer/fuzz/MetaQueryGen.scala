@@ -141,8 +141,22 @@ object MetaQueryGen {
   /** One window-function SELECT item, rendered straight to SQL (the engine has no
     * window `Expr` node — windows live at the logical-plan level). `dataType` is
     * the function's reliable output type (`ROW_NUMBER`/`RANK`/`DENSE_RANK` -> Long,
-    * `LAG`/`LEAD` -> the argument's type, aggregate windows per the aggregate). */
-  final case class WinItem(sql: String, name: String, dataType: DataType)
+    * `LAG`/`LEAD` -> the argument's type, aggregate windows per the aggregate).
+    *
+    * `tieSensitive` says whether two rows tied on the window's ORDER BY can get
+    * DIFFERENT values from this function. That decides whether a query carrying it
+    * has a layout-invariant output multiset ([[MetaQuery.isLayoutInvariant]]), and
+    * so whether the mode-agreement oracle may run it:
+    *
+    *   - Tie-INsensitive: `RANK`/`DENSE_RANK` (peers share a rank, and the rank of
+    *     a row depends only on the multiset of order-key values in its partition),
+    *     and any aggregate window with NO ORDER BY (the frame is the whole
+    *     partition, so the value depends only on the partition's row multiset).
+    *   - Tie-sensitive: `ROW_NUMBER`, `LAG`/`LEAD`, and every aggregate window WITH
+    *     an ORDER BY. The engine treats RANGE frames as ROWS (see
+    *     `plan/Window.scala`), so a running aggregate really does split peers, and
+    *     which peer comes first varies with the partition fan-out. */
+  final case class WinItem(sql: String, name: String, dataType: DataType, tieSensitive: Boolean)
 
   sealed trait QueryCore {
     /** Output column names + types — the schema of the query body, which the
@@ -156,11 +170,15 @@ object MetaQueryGen {
       * none of TLP's three partitions). Restricting to reliable non-float columns
       * keeps a TLP comparison UNKNOWN exactly when an operand is NULL. */
     def tlpCandidates: Vector[(String, DataType)]
-    /** Whether this core projects a window function. A window output multiset is
-      * layout-dependent (a tie on the ORDER BY breaks differently across partition
-      * fan-out), so such a query is checked by TLP on a fixed layout only, never by
-      * the mode-agreement oracle. */
+    /** Whether this core projects a window function at all — the shape-coverage
+      * tally reads this. */
     def hasWindow: Boolean
+    /** Whether this core projects a window function whose value can differ between
+      * rows tied on its ORDER BY. Such a query's output multiset is layout-
+      * dependent, so it is checked by TLP on a fixed layout only; a query whose
+      * windows are all tie-insensitive is checked by the mode-agreement oracle
+      * like any other shape (see [[WinItem.tieSensitive]]). */
+    def hasTieSensitiveWindow: Boolean
     def renderSelect: String
     def groupSql: String
     def havingSql: String
@@ -177,6 +195,7 @@ object MetaQueryGen {
       items.collect { case (c: ColRefExpr, n) if isPartitionable(c.dataType) => (n, c.dataType) } ++
         windows.collect { case w if isPartitionable(w.dataType) => (w.name, w.dataType) }
     def hasWindow: Boolean = windows.nonEmpty
+    def hasTieSensitiveWindow: Boolean = windows.exists(_.tieSensitive)
     def renderSelect: String = {
       val itemSql = items.iterator.map { case (e, n) => s"${SqlRender.expr(e)} AS $n" }
       val winSql = windows.iterator.map(w => s"${w.sql} AS ${w.name}")
@@ -199,6 +218,7 @@ object MetaQueryGen {
       groupKeys.collect { case (c: ColRefExpr, n) if isPartitionable(c.dataType) => (n, c.dataType) } ++
         aggs.collect { case (a, n) if isPartitionable(aggType(a)) => (n, aggType(a)) }
     def hasWindow: Boolean = false
+    def hasTieSensitiveWindow: Boolean = false
     def renderSelect: String = {
       val g = groupKeys.map { case (e, n) => s"${SqlRender.expr(e)} AS $n" }
       val a = aggs.map { case (spec, n) => s"${spec.render} AS $n" }
@@ -343,11 +363,25 @@ object MetaQueryGen {
 
     /** Whether the output multiset is independent of the physical input layout.
       * Projection / join / aggregate / distinct / union / CTE bodies are
-      * layout-invariant; a window function is NOT (a tie on its ORDER BY breaks
-      * differently across partition fan-out), so a windowed query is checked by
-      * TLP on a fixed layout only. */
+      * layout-invariant, and so is a window function whose value cannot differ
+      * between rows tied on its ORDER BY — `RANK`/`DENSE_RANK`, and aggregate
+      * windows with no ORDER BY. Only a TIE-SENSITIVE window (`ROW_NUMBER`,
+      * `LAG`/`LEAD`, a running aggregate) is layout-dependent, and only those
+      * queries are left to TLP on a fixed layout.
+      *
+      * The distinction is what lets `WindowExec` be checked across layouts, spill
+      * and — in the sharded target — against `ExchangeExec`-partitioned windows,
+      * which excluding every window from the oracle previously prevented. */
     def isLayoutInvariant: Boolean =
-      !core.hasWindow && setOp.forall(_._1.isLayoutInvariant) && ctes.forall(_.body.isLayoutInvariant)
+      !core.hasTieSensitiveWindow && setOp.forall(_._1.isLayoutInvariant) &&
+        ctes.forall(_.body.isLayoutInvariant)
+
+    /** Whether any arm of the query projects a layout-invariant window — the
+      * coverage signal that windows really are reaching the mode-agreement
+      * oracle rather than all being filtered out as tie-sensitive. */
+    def hasInvariantWindow: Boolean =
+      (core.hasWindow && !core.hasTieSensitiveWindow) ||
+        setOp.exists(_._1.hasInvariantWindow) || ctes.exists(_.body.hasInvariantWindow)
 
     /** Whether any arm of the query (this body, a union arm, or a CTE body)
       * contains a join. Read by the shape-coverage guard, which asserts the
@@ -615,8 +649,9 @@ object MetaQueryGen {
         Vector((genValue(rng, scope, t, 2), s"o${bareItems.length}"))
       } else Vector.empty
     val items = bareItems ++ computed
-    // Sometimes append window-function columns. A windowed query is checked by TLP
-    // (on a fixed layout) only — its output multiset is layout-dependent.
+    // Sometimes append window-function columns. A window whose value can differ
+    // between rows tied on its ORDER BY leaves the query TLP-only; the
+    // tie-insensitive shapes stay layout-invariant and reach every oracle.
     val windows: Vector[WinItem] =
       if (rng.bool(0.3)) (0 until rng.between(1, 2)).map(i => genWindowItem(rng, scope, items.length + i)).toVector
       else Vector.empty
@@ -639,17 +674,33 @@ object MetaQueryGen {
 
     val numeric = scope.filter(c => DataType.isNumeric(c.dataType))
     val choices = scala.collection.mutable.ArrayBuffer.empty[(Int, () => WinItem)]
-    choices += ((3, () => WinItem(s"ROW_NUMBER() ${over(orderBy)}", name, DataType.LongType)))
-    choices += ((2, () => WinItem(s"${rng.oneOf(Seq("RANK", "DENSE_RANK"))}() ${over(orderBy)}", name, DataType.LongType)))
-    choices += ((2, () => WinItem(s"COUNT(*) ${over("")}", name, DataType.LongType)))
+    // Tie-sensitive: the value depends on which of two tied rows comes first.
+    choices += ((3, () => WinItem(s"ROW_NUMBER() ${over(orderBy)}", name, DataType.LongType, tieSensitive = true)))
+    choices += ((2, () => { val c = rng.oneOf(scope)
+      WinItem(s"${rng.oneOf(Seq("LAG", "LEAD"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType, tieSensitive = true) }))
+    // Tie-insensitive: peers share a rank, and a no-ORDER-BY aggregate window
+    // frames the whole partition. These are the shapes the mode-agreement oracle
+    // may run, which is how the sharded window path gets differential coverage.
+    choices += ((3, () => WinItem(s"${rng.oneOf(Seq("RANK", "DENSE_RANK"))}() ${over(orderBy)}", name, DataType.LongType, tieSensitive = false)))
+    choices += ((3, () => WinItem(s"COUNT(*) ${over("")}", name, DataType.LongType, tieSensitive = false)))
     if (numeric.nonEmpty) {
-      choices += ((2, () => { val c = rng.oneOf(numeric); WinItem(s"SUM(${c.qualified}) ${over(orderBy)}", name, sumType(c.dataType)) }))
-      choices += ((1, () => { val c = rng.oneOf(numeric); WinItem(s"AVG(${c.qualified}) ${over(orderBy)}", name, DataType.DoubleType) }))
+      choices += ((2, () => { val c = rng.oneOf(numeric)
+        WinItem(s"SUM(${c.qualified}) ${over(orderBy)}", name, sumType(c.dataType), tieSensitive = true) }))
       choices += ((1, () => { val c = rng.oneOf(numeric)
-        WinItem(s"SUM(${c.qualified}) OVER (${Seq(partBy, orderBy, frame(rng)).filter(_.nonEmpty).mkString(" ")})", name, sumType(c.dataType)) }))
+        WinItem(s"AVG(${c.qualified}) ${over(orderBy)}", name, DataType.DoubleType, tieSensitive = true) }))
+      choices += ((1, () => { val c = rng.oneOf(numeric)
+        WinItem(s"SUM(${c.qualified}) OVER (${Seq(partBy, orderBy, frame(rng)).filter(_.nonEmpty).mkString(" ")})",
+          name, sumType(c.dataType), tieSensitive = true) }))
+      // Whole-partition aggregate windows: no ORDER BY, so no frame to split peers.
+      choices += ((2, () => { val c = rng.oneOf(numeric)
+        WinItem(s"SUM(${c.qualified}) ${over("")}", name, sumType(c.dataType), tieSensitive = false) }))
+      choices += ((1, () => { val c = rng.oneOf(numeric)
+        WinItem(s"AVG(${c.qualified}) ${over("")}", name, DataType.DoubleType, tieSensitive = false) }))
     }
-    choices += ((1, () => { val c = rng.oneOf(scope); WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType) }))
-    choices += ((2, () => { val c = rng.oneOf(scope); WinItem(s"${rng.oneOf(Seq("LAG", "LEAD"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType) }))
+    choices += ((1, () => { val c = rng.oneOf(scope)
+      WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType, tieSensitive = true) }))
+    choices += ((2, () => { val c = rng.oneOf(scope)
+      WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over("")}", name, c.dataType, tieSensitive = false) }))
     rng.weighted(choices.toSeq: _*)()
   }
 

@@ -1,11 +1,12 @@
 load("@rules_scala//scala:scala.bzl", "scala_junit_test", "scala_library")
 
 # Shared property-based testing harness (Rng, Props, Shrinker, RowOracle) plus
-# the generators (ExprGen, DataGen, QueryGen) and the parity oracles. testonly so
-# it never leaks into a production target. Throws plain AssertionError on failure,
-# so it needs no JUnit dependency — only the engine it generates over. Depends on
-# the SQL exec module because the mode-differential oracle drives whole queries
-# through SqlEngine.execute.
+# the generators (ExprGen, DataGen, QueryGen, MetaQueryGen, JobDagGen) and the
+# oracles. testonly so it never leaks into a production target. Throws plain
+# AssertionError on failure, so it needs no JUnit dependency — only the code it
+# generates over: the SQL exec module (the mode-differential oracle drives whole
+# queries through SqlEngine.execute) and the job module (the DAG-scheduler oracle
+# builds and runs whole DataJobs).
 scala_library(
     name = "fuzz",
     testonly = True,
@@ -16,6 +17,7 @@ scala_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
         "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/sql/plan",
     ],
@@ -108,6 +110,24 @@ scala_junit_test(
     ],
 )
 
+# DAG-scheduler fuzzer: a generated job (inputs + a task DAG, some rigged to
+# fail) must schedule to the statuses, orderings and timestamps the DAG alone
+# implies, and must terminate. Covers `DataJob.runUnifiedDag` — readiness
+# counting, skip propagation, and pool liveness when many tasks each fan nested
+# work onto the same shared Scheduler pool. Default budget is small (every case
+# runs a whole job with real file I/O), part of `bazel test //...`.
+scala_junit_test(
+    name = "dag_scheduler_fuzz_test",
+    srcs = ["DagSchedulerFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "@maven//:junit_junit",
+    ],
+)
+
 # Long-campaign variants. Tagged `fuzz` so the default `bazel test //...`
 # (--test_tag_filters=-perf,-fuzz) skips them; run on demand with a large budget,
 # e.g.:
@@ -183,6 +203,69 @@ scala_junit_test(
         ":fuzz",
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "dag_scheduler_fuzz_campaign",
+    srcs = ["DagSchedulerFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The DAG-scheduler fuzzer re-run with the sharding gates forced on, so every
+# task body also fans out into shuffle joins and sharded aggregates while the DAG
+# scheduler is fanning out the tasks themselves. That is the nested-submission
+# shape the shared Scheduler pool is most likely to starve on; a job that stops
+# making progress fails with a thread dump rather than hanging. Same jvm_flags as
+# `sharded_mode_fuzz_test`.
+scala_junit_test(
+    name = "sharded_dag_scheduler_fuzz_campaign",
+    srcs = ["DagSchedulerFuzzTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = [
+        "-Dtransformer.scheduler.shard_min_size=1",
+        "-Dtransformer.scheduler.broadcast_threshold=1",
+        "-Dtransformer.scheduler.shard_count=4",
+    ],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The DAG-scheduler fuzzer with the shared pool deliberately STARVED: two worker
+# threads for a job of up to ten tasks, each of which fans its own nested work
+# (scan partitions, writer parts, shuffle shards) onto that same pool. Every
+# await in the engine is a work-helping `ForkJoinTask.get()`, so this must still
+# terminate; a wedge here is the pool-starvation deadlock the sharded exchange
+# work has been chasing, and it fails with a thread dump rather than hanging.
+# The sharding gates are on too, so task bodies also build exchanges.
+scala_junit_test(
+    name = "starved_dag_scheduler_fuzz_campaign",
+    srcs = ["DagSchedulerFuzzTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = [
+        "-Dtransformer.scheduler.parallelism=2",
+        "-Dtransformer.scheduler.shard_min_size=1",
+        "-Dtransformer.scheduler.broadcast_threshold=1",
+        "-Dtransformer.scheduler.shard_count=4",
+    ],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
         "@maven//:junit_junit",
     ],
 )

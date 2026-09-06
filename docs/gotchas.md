@@ -506,6 +506,53 @@ ship a fix or move something from "not done" to "done".
   `MetaQueryGen.totalOrderKeys` orders a top-n query by its SOURCE columns and
   emits no `LIMIT` for a `DISTINCT`, windowed, aggregate, or `UNION` shape.
 
+- **Layout invariance is a property of the window FUNCTION, not of "has a
+  window".** The mode-agreement oracles compare result multisets across
+  partition/batch layouts, so they may only run a query whose output multiset is
+  layout-independent. `MetaQueryGen` used to exclude every windowed query from
+  them, which left `WindowExec` — and the sharded window path, where the planner
+  puts an `ExchangeExec` under it — checked by `Tlp` on a single fixed layout
+  only. The distinction that matters is whether two rows TIED on the window's
+  `ORDER BY` can get different values: `ROW_NUMBER`, `LAG`/`LEAD` and every
+  running aggregate can (the engine treats `RANGE` frames as `ROWS`, so peers do
+  not share a running value), while `RANK`/`DENSE_RANK` cannot (peers share a
+  rank, and a rank depends only on the multiset of order-key values in the
+  partition) and neither can an aggregate window with no `ORDER BY` (its frame is
+  the whole partition). `WinItem.tieSensitive` carries the classification and
+  `MetaQuery.isLayoutInvariant` reads it, so the tie-insensitive shapes now flow
+  through mode agreement and join commutativity. The `invariantWindows` coverage
+  guard in `generatorCoversShapes` is what stops the blind spot returning.
+
+- **`job.json`'s `runFile` follows the task's CONFIG, not its result.** The
+  aggregate manifest indexes each task's full `_run.json`, and `JobSession`
+  hydration follows that pointer to rebuild a finished run (timestamps, per-
+  validation records, the output directory) — falling back to the compact
+  summary when it is absent. `DataJob.writeJobRecord` used to derive the pointer
+  from `TaskResult.outputPath`, which is `None` for a `Failed` or `Skipped`
+  task even when that task has an `outputFile` and the runner stamped a record
+  there (`writeFailedRecord` / `writeSkippedRecord` both do). So those records
+  sat on disk unreachable from the manifest that exists to index them,
+  contradicting `JobTaskSummary`'s own scaladoc. The pointer is now derived from
+  `SQLTask.outputFile` (rendered, cloud paths excluded — those write no record),
+  so it is present for every terminal status. Found by
+  `fuzz/dag_scheduler_fuzz_test`.
+
+- **A task with no `outputFile` can feed downstream views and validations.**
+  It could not until recently: `DataJob.materializeIfNeeded` threw
+  `UnsupportedOperationException("v1 requires an outputFile ...")` whenever a
+  memory-only task had a DAG dependent or a validation, even though `SQLTask`'s
+  own scaladoc advertised memory-only feeder tasks. Worse, it threw at RUN time,
+  from inside the worker, so half the DAG had already executed and every
+  downstream task cascaded to `Skipped` — a structural mistake surfacing as a
+  mid-run failure rather than at `DataJob.buildDag()` like every other one
+  (cycles, unknown views, duplicate output paths). The limitation is gone: such a
+  task's result is drained into a `MaterializedView` via
+  `MaterializedView.fromQuery` and published like any other view. The trade is
+  explicit — the whole result stays in heap for the rest of the run, the same
+  deal `cache = true` inputs and materialized CTEs make — so a task that writes
+  an `outputFile` still publishes by re-reading its own output rather than
+  holding it twice. Found by `fuzz/dag_scheduler_fuzz_test`.
+
 - **An `AggState`'s accumulator slot must match its spill format, per type.**
   `MinMaxState` keeps a typed extremum in one of three slots — `longCur`,
   `doubleCur`, or `currentBoxed` — chosen from the result `DataType`. `MIN`/`MAX`

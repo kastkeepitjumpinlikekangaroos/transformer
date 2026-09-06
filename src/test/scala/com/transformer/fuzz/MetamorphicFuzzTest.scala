@@ -170,14 +170,15 @@ class MetamorphicFuzzTest {
     * is asserted present over a fixed block of seeds. Prints the tally for the PR. */
   @Test def generatorCoversShapes(): Unit = {
     val n = 2000
-    var joins, unions, ctes, windows, aggregates, tlpWindowKeys, topNs, boolMinMax = 0
+    var joins, unions, ctes, windows, invariantWindows, aggregates, tlpWindowKeys, topNs, boolMinMax = 0
     var seed = 0
     while (seed < n) {
       val mc = MetaQueryGen.generate(new Rng(seed.toLong))
       if (mc.query.hasAnyJoin) joins += 1
       if (mc.query.setOp.isDefined) unions += 1
       if (mc.query.ctes.nonEmpty) ctes += 1
-      if (!mc.query.isLayoutInvariant) windows += 1
+      if (mc.query.core.hasWindow) windows += 1
+      if (mc.query.hasInvariantWindow && mc.query.isLayoutInvariant) invariantWindows += 1
       if (mc.query.core.isInstanceOf[AggCore]) aggregates += 1
       if (mc.query.hasTopN) topNs += 1
       if (hasBooleanMinMax(mc.query)) boolMinMax += 1
@@ -187,11 +188,19 @@ class MetamorphicFuzzTest {
       seed += 1
     }
     println(f"[metamorphic] shape coverage over $n seeds: joins=$joins unions=$unions ctes=$ctes " +
-      f"windows=$windows aggregates=$aggregates tlpOnWindowCol=$tlpWindowKeys topN=$topNs boolMinMax=$boolMinMax")
+      f"windows=$windows invariantWindows=$invariantWindows aggregates=$aggregates " +
+      f"tlpOnWindowCol=$tlpWindowKeys topN=$topNs boolMinMax=$boolMinMax")
     assertTrue(s"joins=$joins", joins > 100)
     assertTrue(s"unions=$unions", unions > 50)
     assertTrue(s"ctes=$ctes", ctes > 100)
     assertTrue(s"windows=$windows", windows > 50)
+    // Windows whose value cannot differ between rows tied on the ORDER BY
+    // (RANK/DENSE_RANK, a no-ORDER-BY aggregate window). These are the ONLY
+    // window queries the mode-agreement and join-commutativity oracles accept,
+    // so WindowExec's cross-layout / spill / sharded coverage is exactly this
+    // count. A generator drift back to all-tie-sensitive windows would restore
+    // the old blind spot silently.
+    assertTrue(s"invariantWindows=$invariantWindows", invariantWindows > 50)
     assertTrue(s"aggregates=$aggregates", aggregates > 100)
     // A generated `limit` renders nothing unless the projection is still totally
     // ordered, so this counts queries that actually carry a LIMIT.
@@ -439,7 +448,8 @@ class MetamorphicFuzzTest {
       Array[Any](1, 10), Array[Any](1, 20), Array[Any](2, 30), Array[Any](2, 30), Array[Any](null, 40)), Vector(0))
     val env = RelEnv(Vector(r))
     val from = FromClause(FromLeaf("r0", "t0", Vector(sc("t0", intInt, 0), sc("t0", intInt, 1))), Vector.empty)
-    val win = WinItem("ROW_NUMBER() OVER (PARTITION BY t0.c0 ORDER BY t0.c1)", "o1", DataType.LongType)
+    val win = WinItem("ROW_NUMBER() OVER (PARTITION BY t0.c0 ORDER BY t0.c1)", "o1", DataType.LongType,
+      tieSensitive = true)
     val core = ProjectCore(Vector((sc("t0", intInt, 0).ref, "o0")), distinct = false, windows = Vector(win))
     val mc = MetaCase(env, MetaQuery(from, None, core), Some(TlpCmpLit("o1", ">", "<=", "1")))
     assertFalse("windowed query is not layout-invariant", mc.query.isLayoutInvariant)
@@ -511,7 +521,7 @@ class MetamorphicFuzzTest {
     val computed = bare :+ ((BinOpExpr("+", sc("t0", intInt, 1).ref, LitExpr(1, DataType.IntType), DataType.IntType), "o1"))
     assertFalse("a computed item is not an orderable source column",
       MetaQuery(from, None, ProjectCore(computed, distinct = false), limit = Some(2L)).hasTopN)
-    val win = WinItem("ROW_NUMBER() OVER (ORDER BY t0.c1)", "o1", DataType.LongType)
+    val win = WinItem("ROW_NUMBER() OVER (ORDER BY t0.c1)", "o1", DataType.LongType, tieSensitive = true)
     assertFalse("a window output has no source column to order by",
       MetaQuery(from, None, ProjectCore(bare, distinct = false, windows = Vector(win)), limit = Some(2L)).hasTopN)
   }

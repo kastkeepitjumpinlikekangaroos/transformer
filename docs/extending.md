@@ -316,6 +316,32 @@ so they cannot be toggled within a JVM — the `sharded_mode_fuzz_test` target
 exercises the sharded path instead, in a separate JVM via `jvm_flags` (see
 [testing.md](testing.md#property-based-testing-fuzz)).
 
+**To add a shape to `JobDagGen`** (the DAG-scheduler fuzzer's job generator):
+the generated job is not a SQL corpus — its bodies are deliberately trivial
+row-monotone `UNION ALL`s — so a new shape belongs there only if it changes what
+the SCHEDULER has to decide: a new way to acquire a dependency, a new terminal
+status, a new per-task config that changes which code path a worker takes. Three
+invariants keep `oracle/DagSchedule` an exact oracle, and a new shape must hold
+all three:
+
+- **Acyclic by construction** — a task references only inputs and tasks with a
+  lower index, so `TaskDag.build` never rejects the job and the expected status
+  is one forward pass.
+- **The expected outcome must be forced, not hoped for** — a `ValidationFails`
+  task's check must return rows on every seed, which is why bodies never filter
+  and inputs are never empty. A shape whose outcome depends on the data makes
+  the oracle unsound, not merely noisy.
+- **Injected failures must reach the WORKER** — `Fails` selects a column that
+  does not exist, so the statement still parses and `TaskDag` recovers the same
+  edges. A failure that instead trips `TaskDag.build` aborts the whole job and
+  tests nothing about propagation.
+
+Then teach three places about it together: `DagSchedule.expectedStatuses` (if it
+affects status), `Shrinker.jobCase` (a strictly-reducing move that removes it),
+and `generatorCoversScheduleShapes` (a tally plus an assertion that it is
+reached). The measure in `shrinkerTerminatesAndReduces` must count the new field
+too, or the shrinker will appear to stall on it.
+
 ## Add a metamorphic relation
 
 The metamorphic fuzzers (`metamorphic_fuzz_test`, and its sharded re-run

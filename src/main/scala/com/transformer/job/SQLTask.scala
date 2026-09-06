@@ -5,11 +5,15 @@ import java.nio.file.{Files, Paths}
 /** One SQL transform inside a [[DataJob]].
   *
   * Exactly one of `sqlString` / `sqlFile` must be set. `outputFile`, when present,
-  * persists the task's result; if absent the result is materialized in memory and
-  * discarded (useful for tasks whose only purpose is to feed downstream views).
+  * persists the task's result.
   *
   * If `viewName` is set, the result is also registered in the catalog so subsequent
-  * SQLTasks can reference it.
+  * SQLTasks can reference it, and so can this task's own validations. How that view
+  * is published depends on `outputFile`: with one, the runner re-reads the directory
+  * it just wrote, so the view stays backed by disk; without one, the task is a
+  * memory-only feeder and its result is held in heap for the rest of the run. A
+  * result nothing reads — no downstream task, no validation — is drained and
+  * discarded either way.
   */
 final case class SQLTask(
     sqlString: Option[String] = None,
