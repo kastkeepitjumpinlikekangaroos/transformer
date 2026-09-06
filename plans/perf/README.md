@@ -1,48 +1,75 @@
-# Performance plans — index and launch prompts
+# Performance plans — index and status
 
-Nine focused plans for moving transformer's performance forward, in the
-order they should be tackled. Each plan is self-contained: read the
-file, paste the launch prompt into a fresh Claude session, and the
-agent should have everything it needs.
+Twelve plans covering transformer's performance workstream. Each plan is
+self-contained: read the file, and if it still has open work, the launch
+prompt at the bottom of that file says how to pick it up.
 
-## Priority and dependency table
+**Most of this workstream has shipped.** Ten of the twelve plans are
+landed — four of them (02, 09, 10, 11) with nothing at all left, the
+other six with one optional, evidence-gated phase still open. Plan 06 is
+partial exactly as its own file describes, and plan 08 is deliberately
+unstarted pending profiler evidence. Read the status column before
+starting anything here — the standing failure mode for this directory is
+a session re-implementing work that already exists and is covered by
+tests.
 
-| # | Plan | Tier | Effort | Risk | Depends on |
-|---|------|------|--------|------|------------|
-| [01](01-kway-merge-sortexec.md) | K-way merge in SortExec | 2 | ~1 day | low | — |
-| [02](02-packed-aggregate-keys.md) | Packed hash-aggregate/distinct keys | 2 | 3-5 days | medium | — |
-| [03](03-vectorized-expr-eval.md) | Vectorized expression evaluation | 1 | 1-3 weeks (Phases 1-4 done; 0/5/7 remain) | medium | — |
-| [04](04-hash-partition-breakers.md) | Hash-partition between breakers | 1 | 4-8 weeks | high | 02, 03 |
-| [05](05-join-planner.md) | Smarter join planner | 2 | 2-4 days | low-med | — |
-| [06](06-expand-parquet-pushdown.md) | Expand parquet predicate pushdown | 3 | 2-3 days | low | — |
-| [07](07-push-through-joins.md) | Push predicates/projections through joins | 3 | 2-4 days | medium | — |
-| [08](08-stream-emit-breakers.md) | Stream emit from breakers | 3 | 2-3 days | medium | — |
-| [09](09-spill-to-disk.md) | Spill-to-disk for breakers | cross-cutting | 3-6 weeks | high | 01, 04 |
-| [10](10-instrumentation.md) | In-tree instrumentation framework | cross-cutting | 2-3 days | low | 09 (only for spill counter coverage) |
-| [11](11-benchmarking.md) | Microbench + macro bench + regression guard | cross-cutting | 3-5 days | medium | 10 |
-| [12](12-cte-materialization.md) | Materialize multiply-referenced CTEs once | 2 | 3-5 days (Phases 1-3 done; Phase 4 refinements deferred) | medium | — (optional 09 tie-in for spill-backed materialization) |
+## Status table
 
-## Recommended sequence
+Verified against `src/main` on 2026-09-06.
 
-**Quick wins (do first, in parallel):**
-- 01 (k-way merge) — local, low-risk, immediately visible.
-- 06 (expanded pushdown) — local, low-risk, cumulative with other plans.
-- 05 (join planner) — independent, modest scope.
+| # | Plan | Status | Evidence |
+|---|------|--------|----------|
+| [01](01-kway-merge-sortexec.md) | K-way merge in SortExec | done | `SortExec.mergeEmit` runs a `java.util.PriorityQueue` heap merge over the sorted partials (`SortExec.scala:193`) |
+| [02](02-packed-aggregate-keys.md) | Packed hash-aggregate/distinct/join keys | done | `core/HashKeys.scala` (`KeyCodec`, `PackedBytesCodec`, `ObjectArrayCodec`, `SingleObjectKeyCodec`, `LongHashMap`), consumed by `AggregateExec`, `DistinctExec`, `JoinExec`, `WindowExec`, `HashPartitioner` |
+| [03](03-vectorized-expr-eval.md) | Vectorized expression evaluation | done | every `Expr` subtype overrides `evalVec`; `ExprBatchTest` + `expr_parity_fuzz_test` are the parity gate; breakers extract keys batch-at-a-time |
+| [04](04-hash-partition-breakers.md) | Hash-partition between breakers | done | `ExchangeExec` + `HashPartitioner`, inserted by `PhysicalPlanner` above aggregate / join / window / union-distinct |
+| [05](05-join-planner.md) | Smarter join planner | done | `LogicalPlanCardinality.estimate` drives `PhysicalPlanner`'s build-side swap and `enforceNestedLoopGuard` |
+| [06](06-expand-parquet-pushdown.md) | Expand parquet predicate pushdown | partial, by design | `ParquetFilterTranslator` covers IS NULL / IS NOT NULL / IN / BETWEEN; decimal returns `None` at `:133` and `:258` |
+| [07](07-push-through-joins.md) | Push predicates/projections through joins | done | `FilterPushdown.scala` + `ColumnProjectionPushdown.scala`, run in order from `LogicalOptimizer.apply` |
+| [08](08-stream-emit-breakers.md) | Stream emit from breakers | not started | nothing under `sql/` streams; no producer/consumer queue exists there |
+| [09](09-spill-to-disk.md) | Spill-to-disk for breakers | done | `core/Spill.scala` + `AggStateSerde`; all five breakers spill, opt-in via `ExecutionOptions.spillEnabled`; `SpillStressTest` |
+| [10](10-instrumentation.md) | In-tree instrumentation framework | done | `core/metrics/*`, `_perf.json`, `metrics_collector_test` / `operator_counters_test` / `metrics_plan_wrap_test` |
+| [11](11-benchmarking.md) | Microbench + macro bench + regression guard | done | `benchmarks/{micro,macro,baseline}`, `docs/benchmarking.md` |
+| [12](12-cte-materialization.md) | Materialize multiply-referenced CTEs once | done | `sql/exec/CteResolver.scala` + `sql/plan/PendingCteView.scala` |
 
-**Mid-tier (do next):**
-- 02 (packed keys) — big hotspot, moderate scope. Plan 04 will need it.
-- 07 (push through joins) — orthogonal to the rest. Watch outer-join correctness.
-- 08 (stream emit) — only valuable if profiling confirms writer is starved.
+## What's actually left
 
-**Structural commitments (long-running, do last):**
-- 03 (vectorized eval) — Phases 1-4 already in main. Remaining work
-  (Phase 0 parity tests + Phase 5 Func/Case/InList/Like overrides +
-  Phase 7 breaker key extraction) is 1-3 weeks. **Phase 7 is what
-  actually unlocks the speedup on agg- and join-heavy workloads.**
-- 04 (hash-partition breakers) — the biggest architectural change. Requires 02 + 03 Phase 7.
+Every item below is optional and gated on evidence. None of them is
+blocking, and several were written as "only if profiling says so" from
+the start. Do not pick one up because it appears on a list — pick it up
+because a profile or a workload demands it.
 
-**Survival (only if production data growth demands it):**
-- 09 (spill) — requires 01 + 04. Most workloads will never hit the limits this fixes.
+- **08 — stream emit from breakers.** The only wholly unstarted plan.
+  Its own launch prompt gates it: profile a polymarket join + parquet-write
+  task first, and if writer wall time is under 10% of total, the
+  complexity is not worth it. Report and stop.
+- **03 — `DATE_TRUNC` and the other date functions still take the boxed
+  row loop.** `Funcs.applyVec` covers the string, numeric and conditional
+  hot set but no date function, even though plan 03 Phase 5 named
+  `DATE_TRUNC` as jaffle's hot one. The smallest piece of real work left
+  in this directory: one `VecFuncs` helper plus an `ExprBatchTest` parity
+  case.
+- **03 Phase 8 — intermediate vector pooling.** Land only if
+  async-profiler puts `ColumnVector.allocate` above ~3% of CPU. Note the
+  trap: `ColRefExpr.evalVec` aliases the input column, so pooling a
+  vector whose lifetime crosses an operator boundary is a correctness
+  bug, not just a leak.
+- **01 Phase 3 — pre-computed sort-key tuples.** `SortExec`'s comparator
+  still calls `Expr.eval` per comparison (`SortExec.scala:322`). Marked
+  optional and separate-PR from the start.
+- **04 Phase 7 / Phase 8 — range-partition SortExec, skew salting.** Both
+  optional. Skew handling in particular was explicitly deferred out of
+  plan 04's scope.
+- **05 Phase 4 — tune the selectivity constants.** They sit at the plan's
+  defaults on purpose (`LogicalPlanCardinality.Selectivity*`); the plan
+  says leave them there unless profiling shows a regression.
+- **06 Phase 4 — decimal parquet pushdown.** Explicitly skipped unless a
+  workload shows decimal-column filters are a hotspot.
+- **07 Phase 5 — union projection pruning.** `ColumnProjectionPushdown`
+  returns a `LogicalUnion` untouched with an identity remap; pruning it
+  needs identical column sets and identical remaps on both sides.
+- **12 Phase 4 — CTE materialization refinements.** Deferred in the
+  plan's own status line.
 
 ## Required workflow gates (applies to every plan)
 
@@ -65,7 +92,14 @@ Project-wide rules from `CLAUDE.md`:
 - Prefer editing existing files to creating new ones.
 - No backwards-compatibility shims unless asked.
 
-## Launch prompts (copy-paste into a fresh Claude Code session)
+## Launch prompts
+
+**Read the status table first.** Most prompts below launched work that
+has since landed; they are kept as a record of how each plan was run, not
+as an invitation to run it again. Each is marked. Only 08 is still live
+as written, and it is gated on profiling — for the optional phases listed
+under "What's actually left", the current prompt lives at the bottom of
+that plan's own file.
 
 Each session's prompt is also embedded at the bottom of its own plan
 file. The launch prompts are designed for a fresh session with no prior
@@ -76,7 +110,7 @@ phases to follow, and what to stop and ask about.
 > (or invoke `/effort max` in the session) before pasting. Each
 > workstream is large enough that max effort pays off.
 
-### 01 — K-way merge in SortExec
+### 01 — K-way merge in SortExec (landed; historical — do not re-run)
 
 ```
 Read plans/perf/01-kway-merge-sortexec.md and implement it end-to-end.
@@ -99,7 +133,7 @@ Stop and ask before: removing the old code path, changing the comparator
 interface, or touching anything outside SortExec.scala and its tests.
 ```
 
-### 02 — Packed hash-aggregate / distinct keys
+### 02 — Packed hash-aggregate / distinct keys (landed; historical — do not re-run)
 
 ```
 Read plans/perf/02-packed-aggregate-keys.md and implement it end-to-end.
@@ -123,7 +157,7 @@ Include in the PR description: HashAggregate wall-time before/after on
 Polymarket stg→int tasks.
 ```
 
-### 03 — Vectorized expression evaluation (Phases 1-4 done; finish 0/5/7)
+### 03 — Vectorized expression evaluation (landed; historical — do not re-run. Only Phase 8 is open; its prompt is at the bottom of the plan file)
 
 ```
 Read plans/perf/03-vectorized-expr-eval.md and finish the remaining work.
@@ -181,7 +215,7 @@ polymarket mart_* join tasks), async-profiler flame graph confirming
 the boxed eval call is gone from the relevant hot loop.
 ```
 
-### 04 — Hash-partition between breakers
+### 04 — Hash-partition between breakers (landed; historical — do not re-run)
 
 ```
 Read plans/perf/04-hash-partition-breakers.md and implement it end-to-end.
@@ -213,7 +247,7 @@ end-to-end, K-by-K scaling chart (wall time vs K), async-profiler flame
 graph confirming downstream operators are now running parallel.
 ```
 
-### 05 — Smarter join planner
+### 05 — Smarter join planner (landed; historical — do not re-run)
 
 ```
 Read plans/perf/05-join-planner.md and implement it end-to-end.
@@ -240,7 +274,7 @@ after, polymarket mart_* task wall times before/after, list of joins
 where the planner now swaps build side.
 ```
 
-### 06 — Expand parquet predicate pushdown
+### 06 — Expand parquet predicate pushdown (Phases 1-3 landed; historical. Phase 4 is decimal-only and deliberately skipped)
 
 ```
 Read plans/perf/06-expand-parquet-pushdown.md and implement it end-to-end.
@@ -269,7 +303,7 @@ Include in PR description: before/after row-group skip count and wall
 time on a polymarket task that exercises the new shape.
 ```
 
-### 07 — Push predicates and projections through joins
+### 07 — Push predicates and projections through joins (landed; historical — do not re-run)
 
 ```
 Read plans/perf/07-push-through-joins.md and implement it end-to-end.
@@ -301,7 +335,7 @@ before/after; bytes decoded from parquet on the joined sides before/
 after.
 ```
 
-### 08 — Stream emit from breakers
+### 08 — Stream emit from breakers (still live — but read the profiling gate in the first paragraph)
 
 ```
 Read plans/perf/08-stream-emit-breakers.md and implement it end-to-end.
@@ -336,7 +370,7 @@ task before/after; total wall time before/after; flame graph
 confirming writer threads now active during breaker CPU.
 ```
 
-### 09 — Spill-to-disk for breakers
+### 09 — Spill-to-disk for breakers (landed; historical — do not re-run)
 
 ```
 Read plans/perf/09-spill-to-disk.md and implement it end-to-end.
@@ -375,7 +409,7 @@ above-heap workload completing successfully (eg. polymarket full-day
 orderbook).
 ```
 
-### 10 — In-tree instrumentation framework
+### 10 — In-tree instrumentation framework (landed; historical — do not re-run)
 
 ```
 Read plans/perf/10-instrumentation.md and implement Sub-plans 1 + 2 in
@@ -419,7 +453,7 @@ IdxCounterNames.length asserts for every operator passing in the
 OperatorCountersTest.
 ```
 
-### 11 — Microbench + macro bench + regression guard
+### 11 — Microbench + macro bench + regression guard (landed; historical — do not re-run)
 
 ```
 Read plans/perf/11-benchmarking.md and implement Sub-plans 3 + 4 in
@@ -464,7 +498,7 @@ test result, macro_bench_runner output snippet on jaffle, the count of
 new docs files / lines of doc.
 ```
 
-### 12 — Materialize multiply-referenced CTEs once
+### 12 — Materialize multiply-referenced CTEs once (Phases 1-3 landed; historical. Phase 4 refinements deferred)
 
 ```
 Read plans/perf/12-cte-materialization.md and implement it end-to-end.

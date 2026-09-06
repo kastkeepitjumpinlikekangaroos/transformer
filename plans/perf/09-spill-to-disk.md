@@ -1,10 +1,14 @@
 # Plan 09: Spill-to-disk for breakers
 
-> Status: not started · Tier: cross-cutting · Effort: 3-6 weeks · Risk: high
->
-> Prereqs satisfied: plan 01 (k-way merge in SortExec) and plan 04
-> (ExchangeExec / hash-partition breakers) are both landed. The grace-hash
-> Phase 6 and sort-spill Phase 3 can proceed without further dependencies.
+> Status: **done** — all eight phases landed, including the optional Phase 7.
+> `ExecutionOptions` carries `spillEnabled` / `spillThresholdBytes` /
+> `spillMaxRuns` (all opt-in, spill off by default, read from `output.json`'s
+> `spill` key); `core/Spill.scala` and `sql/exec/AggStateSerde.scala` hold the
+> shared machinery; and `SortExec`, `HashAggregateExec`, `DistinctExec`,
+> `HashJoinExec` (16-bucket grace hash) and `WindowExec` all spill.
+> `SpillStressTest` is the Phase 8 stress target. `CountDistinctState` is
+> excluded from spill exactly as the plan specified.
+> · Tier: cross-cutting · Effort: 3-6 weeks · Risk: high
 
 ## Goal
 

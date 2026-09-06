@@ -1,6 +1,12 @@
 # Plan 05: Smarter join planner
 
-> Status: not started · Tier: 2 · Effort: 2-4 days · Risk: low-medium
+> Status: **done** — Phases 1-3 landed. `LogicalPlanCardinality.estimate`
+> drives `PhysicalPlanner`'s build-side swap (`shouldBuildRight`, gated on
+> `BuildSwapRatio`) and `enforceNestedLoopGuard` refuses oversized
+> non-equi joins. Phase 4 is a tuning pass only — the selectivity
+> constants sit at the plan's defaults deliberately, per this plan's own
+> instruction to leave them until profiling says otherwise.
+> · Tier: 2 · Effort: 2-4 days · Risk: low-medium
 
 ## Goal
 

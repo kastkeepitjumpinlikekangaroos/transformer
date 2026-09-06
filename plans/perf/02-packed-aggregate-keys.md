@@ -1,6 +1,14 @@
 # Plan 02: Packed keys for `HashAggregateExec` / `DistinctExec` / `HashJoinExec`
 
-> Status: not started · Tier: 2 · Effort: ~3-5 days · Risk: medium
+> Status: **done** — all six phases landed, including the "deferred"
+> Phase 6. `core/HashKeys.scala` holds `KeyCodec`, `PackedBytesCodec`,
+> `ObjectArrayCodec`, `SingleObjectKeyCodec`, `EmptyKeyCodec` and
+> `LongHashMap`; `KeyCodec.forColumns` picks the strategy and
+> `AggregateExec` / `DistinctExec` / `JoinExec` / `WindowExec` /
+> `HashPartitioner` all consume it. The single-Long path
+> (`KeyCodec.isLongFittable` + `LongHashMap`) is live in `AggregateExec`
+> and `JoinExec`.
+> · Tier: 2 · Effort: ~3-5 days · Risk: medium
 
 ## Goal
 

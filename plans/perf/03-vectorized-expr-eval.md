@@ -1,30 +1,40 @@
 # Plan 03: Vectorized expression evaluation
 
-> Status: **partial — Phases 1-4 landed in main; Phases 0/5/6/7 remain** · Tier: 1 (structural) · Remaining effort: 1-3 weeks · Risk: medium
+> Status: **done** — Phases 0-5 and 7a/b/c all landed. `ExprBatchTest` is
+> the parity harness, generalized by the `expr_parity_fuzz_test` property
+> fuzzer; every `Expr` subtype named below overrides `evalVec`; and
+> `HashAggregateExec`,
+> `HashJoinExec`, `WindowExec` and `ExchangeExec` all extract keys
+> batch-at-a-time. Only Phase 8 (intermediate vector pooling) is open, and
+> it stays gated on profiler evidence. `SortExec`'s comparator is still on
+> the row path by design — that is plan 01 Phase 3.
+> · Tier: 1 (structural) · Effort spent: 1-3 weeks · Risk: medium
 
 ## TL;DR
 
-The expression-side foundation of `evalVec` is shipped: the trait method
-exists with a default boxed-loop fallback, and the high-frequency Expr
-subtypes (`LitExpr`, `ColRefExpr`, `CastExpr`, `UnaryOpExpr`,
-`BinOpExpr`, `IsNullExpr`) override it via a `VecOps` helper. `FilterExec`
-and `ProjectExec` use `evalVec` in their hot loops.
+`Expr.evalVec(batch): ColumnVector` is shipped end to end. The trait
+method carries a default boxed-loop fallback, every `Expr` subtype worth
+vectorizing overrides it via a `VecOps` / `Funcs.applyVec` helper, and
+both the streaming operators (`FilterExec`, `ProjectExec`) and the
+pipeline breakers (`HashAggregateExec`, `HashJoinExec`, `WindowExec`,
+`ExchangeExec`) drive it in their hot loops.
 
-**What's still missing** is the part that actually moves the needle on
-agg- and join-heavy workloads:
-1. **No parity tests reference `evalVec`** — every existing override is
-   only validated indirectly through `SqlEngineTest`.
-2. **`FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` have no
-   `evalVec` override** — they fall through to the boxed default.
-3. **No breaker uses `evalVec` for key extraction.** `HashAggregateExec`,
-   `HashJoinExec`, `WindowExec`, and `SortExec` still loop `eval(batch,
-   row)` row-by-row, so Filter/Project see a vectorized world but the
-   downstream breaker doesn't.
+The three gaps this plan was written to close are closed:
+1. **Parity tests exist** — `ExprBatchTest` compares `evalVec(b)(i)`
+   against `eval(b, i)` per subtype, per NULL configuration, per boundary
+   value, and `fuzz/expr_parity_fuzz_test` generalizes it to random
+   type-correct `Expr` trees over random batches via `oracle/ExprParity`.
+2. **`FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` all override
+   `evalVec`** — unknown scalar functions still fall through to the boxed
+   default, which is correct and just slow.
+3. **Breakers extract keys batch-at-a-time.** `HashAggregateExec`,
+   `HashJoinExec` (build and probe), `WindowExec` and `ExchangeExec` call
+   `evalVec` once per batch per key and read primitives out of the
+   returned vectors, feeding plan 02's `KeyCodec` directly.
 
-Result: the API spec from this plan is implemented, but the performance
-promise is not yet realized. The remaining work is the higher-impact
-half. **Do Phase 0 first** — without parity tests every new override is
-a correctness gamble.
+Two things stay deliberately on the row path: `SortExec`'s comparator
+(plan 01 Phase 3) and `HashJoinExec`'s residual non-equi predicate over a
+1-row `RowBuf`, where per-row eval is fundamental.
 
 ## Why it matters (re-stated)
 
@@ -69,48 +79,63 @@ subtypes are correct but slow.
 
 ### Per-subtype overrides (status)
 
-| Expr subtype           | `evalVec` override | Location              |
-|------------------------|--------------------|-----------------------|
-| `LitExpr`              | ✅ done — primitive `Arrays.fill` broadcast | `Expr.scala:50-90` |
-| `ColRefExpr`           | ✅ done — zero-copy column reference | `Expr.scala:100` |
-| `CastExpr`             | ✅ done — `VecOps.cast` | `Expr.scala:110-113` |
-| `UnaryOpExpr`          | ✅ done — `+`, `-`, `NOT` | `Expr.scala:135-143` |
-| `BinOpExpr`            | ✅ done — `AND`, `OR`, `\|\|`, all comparisons, `+`/`-`/`*`/`/`/`%` | `Expr.scala:175-187` |
-| `IsNullExpr`           | ✅ done — `VecOps.isNull` | `Expr.scala:218-219` |
-| `FuncExpr`             | ❌ row path only | `Expr.scala:190-195` |
-| `CaseExpr`             | ❌ row path only | `Expr.scala:198-208` |
-| `InListExpr`           | ❌ row path only | `Expr.scala:223-239` |
-| `LikeExpr`             | ❌ row path only | `Expr.scala:241-253` |
+All ten are done. Line numbers are the `override def evalVec` for each.
 
-### `VecOps` (`src/main/scala/com/transformer/sql/plan/Ops.scala:152-...`)
+| Expr subtype           | `evalVec` override | Location            |
+|------------------------|--------------------|---------------------|
+| `LitExpr`              | done — primitive `Arrays.fill` broadcast | `Expr.scala:50` |
+| `ColRefExpr`           | done — zero-copy column reference | `Expr.scala:100` |
+| `CastExpr`             | done — `VecOps.cast` | `Expr.scala:110` |
+| `UnaryOpExpr`          | done — `+`, `-`, `NOT` | `Expr.scala:135` |
+| `BinOpExpr`            | done — `AND`, `OR`, `\|\|`, all comparisons, `+`/`-`/`*`/`/`/`%` | `Expr.scala:175` |
+| `IsNullExpr`           | done — `VecOps.isNull` | `Expr.scala:349` |
+| `FuncExpr`             | done — `Funcs.applyVec` for the hot subset, boxed default otherwise | `Expr.scala:268` |
+| `CaseExpr`             | done — eager branch masks | `Expr.scala:295` |
+| `InListExpr`           | done — literal-items `HashSet` fast path | `Expr.scala:371` |
+| `LikeExpr`             | done — hoisted pattern compile | `Expr.scala:492` |
 
-Helper surface that the overrides delegate to. Already implemented:
-`arith`, `compare`, `concat`, `and`, `or`, `negate`, `not`, `isNull`,
-`cast`. Plus private helpers per primitive type (`longArith`,
-`intArith`, `doubleArith`, `floatArith`, `numericCompare`,
-`genericCompare`).
+### `VecOps` (`src/main/scala/com/transformer/sql/plan/Ops.scala:167-...`)
+
+Helper surface that the overrides delegate to: `arith`, `compare`,
+`concat`, `and`, `or`, `negate`, `not`, `isNull`, `cast`, plus the
+in-place mask accumulators `andInto` / `orInto`. Those two let
+`BinOpExpr` flatten a left-deep AND/OR chain and fold every conjunct
+into one `BooleanVector` allocation instead of N intermediates
+(`Expr.scala:195-220`) — it copies the first conjunct's vector first,
+because `evalVec` results may alias a Boolean column in the input batch
+and folding in place would corrupt it. Private helpers per primitive
+type underneath (`longArith`, `intArith`, `doubleArith`, `floatArith`,
+`numericCompare`, `genericCompare`).
 
 ### Operator adoption
 
-| Operator              | Uses `evalVec`? | Row-path call sites still present |
-|-----------------------|-----------------|-----------------------------------|
-| `FilterExec`          | ✅ yes — predicate | `PhysicalPlan.scala:50` |
-| `ProjectExec`         | ✅ yes — per projection | `PhysicalPlan.scala:82` |
-| `HashAggregateExec`   | ❌ no | GROUP BY key extraction `AggregateExec.scala:58`; every `AggState.update` body — lines 157, 166, 176, 194, 208, 223, 241-242, 279, 322-323, 366-367 |
-| `HashJoinExec`        | ❌ no | build-side key `JoinExec.scala:98`; probe-side key `:154`; residual extra predicate `:257` |
-| `WindowExec`          | ❌ no | partition key `WindowExec.scala:85`; order-key comparator `:110-112`; LAG/LEAD arg `:198, 202`; order-key collection `:289` |
-| `SortExec`            | ❌ no | comparator `SortExec.scala:170-171` |
-| `DistinctExec`        | n/a — reads columns via `getBoxed` directly; no Expr eval |
+| Operator              | Uses `evalVec`? | Where |
+|-----------------------|-----------------|-------|
+| `FilterExec`          | yes — predicate | `PhysicalPlan.scala:91` |
+| `ProjectExec`         | yes — per projection | `PhysicalPlan.scala:116` |
+| `HashAggregateExec`   | yes — GROUP BY keys and every aggregate's args | keys `AggregateExec.scala:428`; args `:337`, consumed by `AggState.updateAt` / `updateBatchAt` |
+| `HashJoinExec`        | yes — build and probe keys | build `JoinExec.scala:376`; probe `:439`; grace-hash repartition `:761`. Residual non-equi predicate stays row-path by design |
+| `WindowExec`          | yes — routing, partition and order keys | routing `WindowExec.scala:184`; partition `:272`; order `:275`. `AggState.update` over 1-row `RowBuf` batches stays row-path — vectorizing a 1-row batch buys nothing |
+| `ExchangeExec`        | yes — partition keys | `ExchangeExec.scala:245` |
+| `SortExec`            | no — by design | comparator `SortExec.scala:322-323`; belongs to plan 01 Phase 3 |
+| `DistinctExec`        | n/a — encodes whole rows through plan 02's `KeyCodec`; no Expr eval | `DistinctExec.scala:158` |
 
 ### Test coverage
 
-`grep -rln evalVec src/test/` returns nothing. **No file in the test
-tree references `evalVec`.** Existing overrides are validated only
-indirectly through whatever `SqlEngineTest` cases happen to exercise
-`FilterExec` / `ProjectExec` end-to-end. This is the largest unflagged
-risk in the codebase right now.
+`src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` (target
+`//src/test/scala/com/transformer/sql/plan:expr_batch_test`) is the parity
+harness this plan's Phase 0 called for: it builds batches with controlled
+NULL placements and boundary values and asserts `evalVec(batch)(i)` equals
+`eval(batch, i)` for every subtype. `fuzz/expr_parity_fuzz_test`
+generalizes that into a property test — random type-correct `Expr` trees
+over random batches, compared through `oracle/ExprParity` — with a
+long-campaign variant at `fuzz/expr_parity_fuzz_campaign`.
 
-## What's still missing
+## The gaps this plan closed
+
+Kept verbatim as the design record for how each override was built. All
+six are closed; the shipped shape is noted where it diverged from the
+sketch below.
 
 ### Gap 1 — Parity tests (urgent)
 
@@ -118,6 +143,12 @@ There is no `ExprBatchTest` or equivalent. The plan from day one called
 for `evalVec(b)(i) == eval(b, i)` parity tests per subtype, per NULL
 configuration, per boundary value. None exist. **Land this before any
 further override**, or the next override silently corrupts results.
+
+> Closed: `ExprBatchTest` does exactly this, and
+> `fuzz/expr_parity_fuzz_test` generalizes it into a property test over
+> randomly generated `Expr` trees. It earned its keep: `eval` narrows
+> float arithmetic per node where `evalVec` does not, a bug the fuzzer
+> found and `ExprBatchTest` now pins as a nested-FloatType regression.
 
 ### Gap 2 — `FuncExpr.evalVec`
 
@@ -135,6 +166,14 @@ The override should:
   monomorphic inner loop.
 - For unknown functions, fall back to the default per-row loop.
 
+> Closed: `FuncExpr.evalVec` delegates to `Funcs.applyVec`, which covers
+> COALESCE, LENGTH/LEN, UPPER/LOWER/TRIM, CONCAT, SUBSTRING, ABS,
+> FLOOR/CEIL[ING], ROUND, TRUNC[ATE], IF and NULLIF, returning `None` for
+> anything else so the boxed default fires. **`DATE_TRUNC` is not in that
+> set** even though this gap named it as jaffle's hot function — date
+> functions still take the boxed row loop. That is the one piece of Phase
+> 5 that did not land.
+
 ### Gap 3 — `CaseExpr.evalVec`
 
 `CaseExpr.eval` (`Expr.scala:199-207`) evaluates branches lazily per
@@ -145,6 +184,8 @@ row. Vectorized version:
   side-effect-free Exprs which is all we have).
 - Walk masks in order to fill the output vector; use the else branch
   (or NULL) where no mask matches.
+
+> Closed as designed — see `Expr.scala:295`.
 
 ### Gap 4 — `InListExpr.evalVec`
 
@@ -157,6 +198,10 @@ Vectorized version:
 - Propagate NULLs per SQL `IN` semantics (NULL in items → result NULL
   for non-matching values).
 
+> Closed as designed — see `Expr.scala:371`. The row/vector `IN` NULL
+> semantics needed a follow-up fix; see
+> `plans/followups/03-eval-evalvec-nan-parity.md`.
+
 ### Gap 5 — `LikeExpr.evalVec`
 
 `LikeExpr.eval` (`Expr.scala:243-253`) already caches compiled regex
@@ -167,6 +212,8 @@ version:
 - Inner loop applies the precompiled `Matcher` per row.
 - When the pattern is a literal `LitExpr`, compile once at plan time
   (or first eval).
+
+> Closed as designed — see `Expr.scala:492`.
 
 ### Gap 6 — Breaker key extraction
 
@@ -217,6 +264,15 @@ from the input vector being read primitive-per-row instead of boxed.
 For `JoinExec.scala:257` (residual extra predicate over a single
 joined row), this is the `RowBuf`-backed path; per-row eval is
 fundamental. Leave on the row path.
+
+> Closed. The shipped `AggState` surface is `updateAt(argVecs, row)` plus
+> a whole-batch `updateBatchAt(argVecs, n)` that primitive states override
+> — not the `updateVec(agg, vec, nullMask, n)` shape sketched above. The
+> caller pre-evaluates each aggregate's args once per batch and the state
+> reads typed primitives straight off the vectors. `AggState.update(agg,
+> batch, row)` survives as the row-form entry point `WindowExec` uses for
+> its 1-row `RowBuf` batches. `SortExec`'s comparator and `JoinExec`'s
+> residual predicate stayed on the row path exactly as instructed.
 
 ## Proposed design
 
@@ -418,17 +474,20 @@ workloads won't reach this.
 
 Re-numbered to reflect what's done:
 
-- ✅ Phase 1 — API + default impl + Filter/Project switchover (done)
-- ✅ Phase 2 — `ColRefExpr`, `LitExpr` overrides (done)
-- ✅ Phase 3 — `BinOpExpr` arithmetic + comparison + AND/OR (done)
-- ✅ Phase 4 — `UnaryOpExpr`, `CastExpr`, `IsNullExpr` (done)
-- 🟡 **Phase 0 — Parity tests (DO THIS FIRST)**
-- 🟡 Phase 5 — `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` overrides
-- 🟡 Phase 7 — Operator integration:
-  - 7a. `HashAggregateExec` key extraction + `AggState.updateVec`
+- Phase 1 — API + default impl + Filter/Project switchover — done
+- Phase 2 — `ColRefExpr`, `LitExpr` overrides — done
+- Phase 3 — `BinOpExpr` arithmetic + comparison + AND/OR — done
+- Phase 4 — `UnaryOpExpr`, `CastExpr`, `IsNullExpr` — done
+- Phase 0 — Parity tests (`ExprBatchTest`) — done
+- Phase 5 — `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` overrides — done
+- Phase 7 — Operator integration — done:
+  - 7a. `HashAggregateExec` key extraction + `AggState.updateAt` /
+    `updateBatchAt`
   - 7b. `HashJoinExec` build + probe key extraction
   - 7c. `WindowExec` partition + order key extraction
-- ⏸ Phase 8 — Intermediate vector pooling (deferred; only if profiles demand)
+  - (unplanned) `ExchangeExec` partition-key extraction, added with plan 04
+- Phase 8 — Intermediate vector pooling — open, still deferred; land only
+  if async-profiler shows `ColumnVector.allocate` above ~3% of CPU
 
 `SortExec` comparator vectorization is intentionally **omitted** here —
 it belongs to plan 01 Phase 3 (k-way merge with pre-computed sort
@@ -453,58 +512,34 @@ keys). Don't duplicate.
 
 ## Launch prompt
 
+Phases 0-5 and 7a/b/c are landed, so the original "finish the remaining
+work" prompt no longer applies — reissuing it would send a session to
+re-implement shipped code. Only Phase 8 is open, and it is conditional:
+
 ```
-Read plans/perf/03-vectorized-expr-eval.md and finish the remaining work.
+Read plans/perf/03-vectorized-expr-eval.md, Phase 8 only.
 
-CONTEXT: Phases 1-4 of this plan are already landed in main — evalVec
-exists on the Expr trait with a default boxed-loop fallback, and the
-common Expr subtypes (LitExpr, ColRefExpr, CastExpr, UnaryOpExpr,
-BinOpExpr, IsNullExpr) override it via VecOps. FilterExec and ProjectExec
-use evalVec. Do NOT re-do that work.
+CONTEXT: everything else in this plan is landed. evalVec is overridden on
+every Expr subtype worth vectorizing, ExprBatchTest is the parity harness,
+and HashAggregateExec / HashJoinExec / WindowExec / ExchangeExec all
+extract keys batch-at-a-time. Do NOT re-do any of that.
 
-WHAT'S REMAINING (in order):
-- Phase 0: parity tests (ExprBatchTest). NONE exist today; this is the
-  urgent gap. Land before any new override.
-- Phase 5: evalVec overrides on FuncExpr, CaseExpr, InListExpr, LikeExpr.
-- Phase 7: operator integration in HashAggregateExec, HashJoinExec,
-  WindowExec for batch-at-a-time key extraction (and AggState.updateVec
-  for primitive aggregate states).
+GATE FIRST: run async-profiler on a polymarket aggregate-heavy task and
+confirm ColumnVector.allocate is above ~3% of CPU. If it isn't, stop and
+report that Phase 8 is still not worth doing — that is a successful
+outcome, not a failure.
 
-Use max effort. Honor CLAUDE.md: no new heavy deps, no codegen libs,
-bazel test //... must pass at every phase, jaffle_shop and polymarket
-deploy jars must pass at every phase. Land docs in the same PRs.
+Only if the gate passes: implement intermediate vector pooling per the
+Phase 8 sketch. Use max effort. Honor CLAUDE.md: no new heavy deps, no
+codegen libs, bazel test //... green, jaffle_shop 15/15 and polymarket
+15/1/1. Land docs in the same PR.
 
-CRITICAL ORDER: Phase 0 first. Without parity tests every new override
-is a correctness gamble — the codebase has no test that compares
-evalVec(b)(i) against eval(b, i). Build the test infrastructure in
-Phase 0 and extend it as each later phase adds an override.
+Stop and ask before: (a) changing the Expr trait shape, (b) modifying
+ColumnarBatch storage layout, (c) vectorizing the SortExec comparator
+(that's plan 01 Phase 3), (d) pooling anything whose lifetime crosses an
+operator boundary — ColRefExpr.evalVec aliases the input column, so a
+pooled vector handed downstream is a correctness bug, not just a leak.
 
-COORDINATION:
-- Plan 02 (packed keys): the codec must consume Array[ColumnVector]
-  from evalVec. If plan 02 has already landed assuming row eval,
-  Phase 7 has to refactor it.
-- Plan 01 (k-way merge): SortExec comparator vectorization is plan 01
-  Phase 3. Do NOT duplicate here.
-
-Phase boundaries:
-- Phase 5 lands as one PR (all four remaining Expr overrides + their
-  parity cases).
-- Phase 7 lands as three PRs: 7a (HashAggregate), 7b (HashJoin),
-  7c (WindowExec).
-
-Spawn parallel sub-agents for: (a) building ExprBatchTest while
-implementing Phase 5, (b) profiling polymarket between phases to track
-cumulative speedup.
-
-Stop and ask before: (a) changing the Expr trait shape beyond what
-exists, (b) modifying ColumnarBatch storage layout, (c) adding
-vectorization for SortExec comparator (that's plan 01), (d) adding any
-caching or pooling for intermediate ColumnVectors (that's Phase 8,
-deferred).
-
-Include in each PR description: parity test status, before/after wall
-time on the relevant workload (Phase 5 = jaffle_shop with DATE_TRUNC/
-COALESCE; Phase 7a = polymarket stg→int aggregate tasks; Phase 7b =
-polymarket mart_* join tasks), async-profiler flame graph confirming
-the boxed eval call is gone from the relevant hot loop.
+Include in the PR description: the before/after flame graph fractions for
+ColumnVector.allocate and wall time on the profiled task.
 ```

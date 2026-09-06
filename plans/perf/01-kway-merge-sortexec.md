@@ -1,6 +1,11 @@
 # Plan 01: K-way merge in `SortExec`
 
-> Status: not started · Tier: 2 (quick win) · Effort: ~1 day · Risk: low
+> Status: **done** — Phases 1-2 landed. `SortExec.mergeEmit` runs a
+> `java.util.PriorityQueue` K-way heap merge over the sorted partials
+> (`SortExec.scala:193-260`). Phase 3 (pre-computed sort-key tuples) is
+> still open and still optional: the comparator calls `Expr.eval` per
+> comparison at `SortExec.scala:322-323`.
+> · Tier: 2 (quick win) · Effort: ~1 day · Risk: low
 
 ## Goal
 

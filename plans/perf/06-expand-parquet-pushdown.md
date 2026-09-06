@@ -1,6 +1,13 @@
 # Plan 06: Expand parquet predicate pushdown
 
-> Status: not started · Tier: 3 · Effort: 2-3 days · Risk: low
+> Status: **partial, by design** — Phases 1-3 landed.
+> `ParquetFilterTranslator` translates `IS NULL` / `IS NOT NULL`
+> (`nullPredicate`), `IN` over literals (`translateInList`), and `BETWEEN`
+> via the AND-lowering the analyzer already performs. Phase 4 (decimal)
+> is deliberately not done: `DecimalType` returns `None` at
+> `ParquetFilterTranslator.scala:133` and `:258`, matching this plan's own
+> "skip unless profiling shows need".
+> · Tier: 3 · Effort: 2-3 days · Risk: low
 
 ## Goal
 

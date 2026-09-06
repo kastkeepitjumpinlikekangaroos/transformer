@@ -1,6 +1,12 @@
 # Plan 07: Push predicates and projections through joins
 
-> Status: not started · Tier: 3 · Effort: 2-4 days · Risk: medium
+> Status: **done** — Phases 1-4 landed. `sql/plan/FilterPushdown.scala`
+> and `sql/plan/ColumnProjectionPushdown.scala` run in that order from
+> `LogicalOptimizer.apply`, with the conservative null-rejecting rule on
+> outer joins the plan called the landmine. Phase 5 (union pruning) is
+> still open as designed — `ColumnProjectionPushdown` returns a
+> `LogicalUnion` untouched with an identity remap.
+> · Tier: 3 · Effort: 2-4 days · Risk: medium
 
 ## Goal
 

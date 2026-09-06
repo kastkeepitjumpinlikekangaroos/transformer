@@ -1,6 +1,10 @@
 # Plan 04: Reconcile `plans/perf/` against what's actually shipped
 
-> Status: not started · Effort: ~half a day · Risk: none (docs only, no behavior change)
+> Status: **done** (2026-09-06). Every verdict below was re-verified
+> against `src/main` before the rewrite, and two of this file's own
+> claims turned out to be wrong — see "Corrections found while doing
+> the work" at the bottom.
+> · Effort: ~half a day · Risk: none (docs only, no behavior change)
 
 ## Problem
 
@@ -65,11 +69,12 @@ declarations are the source of truth for what to search for.
    both claim Phase 5/7 are outstanding. Correct both, or the next session
    that opens this file specifically (rather than the README) will repeat
    the same mistake.
-4. **Add a "Status:" line to every plan file that lacks one** (01, 02, 04,
-   05, 06, 07, 08, 09, 10, 11), matching the style already used in 03 and
-   12's headers, so a future reader doesn't have to cross-reference the
-   README to know whether a given plan file describes shipped or
-   speculative work.
+4. **Correct the "Status:" line on every plan file that carries a stale
+   one** (01, 02, 04, 05, 06, 07, 09 all said "not started"; 08's needed
+   the evidence gate spelled out), matching the style already used in 10,
+   11 and 12's headers, so a future reader doesn't have to
+   cross-reference the README to know whether a given plan file describes
+   shipped or speculative work.
 5. Leave the plan files' body content (design rationale, phase breakdowns)
    otherwise untouched — they're accurate historical design records, just
    missing a "this happened" marker at the top.
@@ -113,3 +118,43 @@ anything it shouldn't have.
 Stop and ask before: changing any plan file's design/rationale content —
 this is a status-accuracy pass only, not a rewrite of the technical content.
 ```
+
+## Corrections found while doing the work
+
+Both are errors in this file, not in the perf plans, and both are the same
+kind of mistake — a claim asserted from a partial read.
+
+1. **"Add a Status: line to every plan file that lacks one."** No plan file
+   lacked one; all twelve already had a `> Status:` header. The actual
+   problem was that seven of them (01, 02, 04, 05, 06, 07, 09) said "not
+   started" about shipped work. Plan 09's was self-contradictory on its
+   own: `Status: not started` directly above a "Prereqs satisfied: plans
+   01 and 04 are both landed" note. Item 4 above is corrected accordingly.
+
+2. **Plan 02's Phase 6 is implemented, not merely "covered".** The verdict
+   table said the single-Long fast path "covers what the plan's deferred
+   Phase 6 (`LongHashMap`) asked for". `LongHashMap` is a real class at
+   `core/HashKeys.scala:533`, used by `AggregateExec` (`keyMapLong`,
+   `emitLong`, the spill merge paths) and `JoinExec` (`BuildSide.keyMapLong`).
+   Phase 6 shipped. This matters because "covered by an equivalent" invites
+   a future session to go implement the real thing.
+
+A third, smaller drift worth recording: plan 03's body carried two status
+tables and a "Test coverage" paragraph asserting that no test in the tree
+references `evalVec`. Both `ExprBatchTest` and the `expr_parity_fuzz_test`
+property fuzzer do. Those tables and that paragraph were rewritten with
+verified line numbers; the six "Gap" sections underneath them were left
+verbatim as the design record, each with a one-line closure note. Plan
+03's launch prompt was replaced outright — the old one told a session to
+build `ExprBatchTest` and the Phase 5/7 overrides that already exist,
+which is the single most expensive stale instruction in the tree.
+
+One genuinely open item surfaced that no plan file tracked: `DATE_TRUNC`
+has no `Funcs.applyVec` case, so date functions still take the boxed row
+loop even though plan 03 Phase 5 named `DATE_TRUNC` as jaffle's hot
+function. It is now listed under "What's actually left" in
+`plans/perf/README.md` and in plan 03's Gap 2 closure note.
+
+The general lesson is the one this file already names in its own "Caution"
+paragraph, and it applied to the file itself: verify the claim against the
+artifact, not against another claim.

@@ -1,6 +1,12 @@
 # Plan 04: Hash-partition between pipeline breakers
 
-> Status: not started · Tier: 1 (structural) · Effort: 4-8 weeks · Risk: high
+> Status: **done** — Phases 1-6 landed. `ExchangeExec` + `HashPartitioner`
+> exist and `PhysicalPlanner` inserts an exchange above aggregate, join,
+> window and union-distinct behind the `LogicalPlanCardinality` gates.
+> Phase 7 (range-partition `SortExec`) and Phase 8 (skew salting) remain
+> open, both flagged optional from the start. See `docs/gotchas.md` for
+> the deadlock family this machinery produced and how it was closed.
+> · Tier: 1 (structural) · Effort: 4-8 weeks · Risk: high
 
 ## Goal
 
