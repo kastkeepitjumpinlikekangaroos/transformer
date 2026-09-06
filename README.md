@@ -582,8 +582,11 @@ are also available as window aggregates with `OVER (...)`. Variance and stddev
 use Welford + Chan's parallel merge for numerical stability; `*_SAMP` returns
 NULL when fewer than two non-NULL inputs are present.
 
-**Scalar functions:** strings — `LENGTH`/`LEN`, `UPPER`, `LOWER`, `TRIM`,
-`SUBSTRING`, `CONCAT`; flow — `COALESCE`, `IF`, `NULLIF`, `GREATEST`, `LEAST`;
+**Scalar functions:** strings — `LENGTH`/`LEN`, `UPPER`, `LOWER`, `TRIM`
+(single-argument whitespace trim only — `TRIM([LEADING|TRAILING|BOTH] [str]
+FROM x)` and `TRIM(x, str)` are rejected with a clear error, and there is no
+`LTRIM`/`RTRIM`), `SUBSTRING`, `CONCAT`; flow — `COALESCE`, `IF`, `NULLIF`,
+`GREATEST`, `LEAST`;
 numeric — `ABS`, `ROUND`, `FLOOR`, `CEIL`/`CEILING`, `TRUNC`/`TRUNCATE`,
 `MOD`, `POW`/`POWER`, `SIGN`; math — `SQRT`, `CBRT`, `EXP`, `LN`, `LOG(x)`,
 `LOG(base, x)`, `LOG10`, `LOG2`; trig — `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`,
@@ -595,7 +598,11 @@ argument is NULL.
 
 **Operators:** `+ - * / %`, `=  <>  <  <=  >  >=`, `AND OR NOT`, `||` (concat),
 `LIKE`, `IS NULL` / `IS NOT NULL`, `IN (...)`, `BETWEEN`, `CASE WHEN`,
-`CAST(expr AS type)`.
+`CAST(expr AS type)`. Grouping parentheses work anywhere an expression does —
+`SELECT (a + b) * c`, `WHERE (x = y)`, `ON (a = b)`, `HAVING (COUNT(*) > 1)` —
+and are transparent to column naming (`SELECT (a)` yields a column named `a`)
+and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
+(`(a, b) = (c, d)`) are not supported.
 
 **Types in CAST:** `INT`, `INTEGER`, `BIGINT`, `LONG`, `FLOAT`, `REAL`,
 `DOUBLE`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`, `DATE`,

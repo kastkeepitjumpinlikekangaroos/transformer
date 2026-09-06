@@ -272,6 +272,189 @@ class SqlEngineTest {
     assertEquals(Seq(30, 10, -25), rows.map(_("delta")))
   }
 
+  // --- Grouping parentheses -------------------------------------------------
+  // JSqlParser parses `(expr)` as a single-element ParenthesedExpressionList,
+  // so every AST walk in LogicalBuilder has to see through it. These pin the
+  // shapes that reach a different walk: the binder, `childExpressions` (which
+  // drives aggregate / window collection), the post-aggregation rebinder, alias
+  // derivation, and ordinal recognition.
+
+  @Test def groupingParenNestedInArithmetic(): Unit = {
+    val p = tmpCsv("a.csv", "a,b,c\n2,3,4\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // The paren node is NOT at the top here — it is the Multiplication's left
+    // operand, so the binder only reaches it by recursing.
+    val q = SqlEngine.execute("SELECT (a + b) * c AS s FROM t", cat)
+    assertEquals(Seq(20), collectAllRows(q).map(_("s")))
+  }
+
+  @Test def groupingParenChangesPrecedence(): Unit = {
+    val p = tmpCsv("a.csv", "a,b,c\n2,3,4\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // The parens have to actually group: same operands, different answer.
+    val parens = SqlEngine.execute("SELECT (a + b) * c AS s FROM t", cat)
+    val bare = SqlEngine.execute("SELECT a + b * c AS s FROM t", cat)
+    assertEquals(Seq(20), collectAllRows(parens).map(_("s")))
+    assertEquals(Seq(14), collectAllRows(bare).map(_("s")))
+  }
+
+  @Test def groupingParenAtTopOfSelectItem(): Unit = {
+    val p = tmpCsv("a.csv", "a\n1\n2\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // Parens are transparent to naming too — `(a)` names its output `a`, the
+    // same as a bare `a` would, matching Postgres and DuckDB.
+    val q = SqlEngine.execute("SELECT (a) FROM t", cat)
+    assertEquals(Vector("a"), q.schema.fieldNames)
+    assertEquals(Seq(1, 2), collectAllRows(q).map(_("a")))
+  }
+
+  @Test def groupingParenNestedTwice(): Unit = {
+    val p = tmpCsv("a.csv", "a,b\n2,3\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT ((a + b)) AS s FROM t", cat)
+    assertEquals(Seq(5), collectAllRows(q).map(_("s")))
+  }
+
+  @Test def groupingParenInWhereAndJoinOn(): Unit = {
+    val left = tmpCsv("l.csv", "id,name\n1,alice\n2,bob\n3,carol\n")
+    val right = tmpCsv("r.csv", "user_id,score\n1,100\n2,50\n3,99\n")
+    val cat = new Catalog
+    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT u.name FROM u JOIN s ON (u.id = s.user_id) WHERE (s.score > 60) ORDER BY u.id", cat)
+    assertEquals(Seq("alice", "carol"), collectAllRows(q).map(_("name")))
+  }
+
+  @Test def groupingParenAroundBareAggregate(): Unit = {
+    val p = tmpCsv("a.csv", "x\n10\n20\n30\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // Reaches `childExpressions`: without a paren case there the aggregate is
+    // never collected and the binder reports "used in non-aggregating position".
+    val q = SqlEngine.execute("SELECT (SUM(x)) AS s FROM t", cat)
+    assertEquals(Seq(60L), collectAllRows(q).map(_("s")))
+  }
+
+  @Test def groupingParenAroundAggregateInArithmetic(): Unit = {
+    val p = tmpCsv("a.csv", "a,b\n10,1\n10,2\n20,5\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT (a + SUM(b)) AS s FROM t GROUP BY a ORDER BY a", cat)
+    assertEquals(Seq(13L, 25L), collectAllRows(q).map(_("s")))
+  }
+
+  @Test def groupingParenAroundGroupKeyExpression(): Unit = {
+    val p = tmpCsv("a.csv", "a,b\n1,2\n1,2\n3,4\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // The post-aggregation rebinder matches a projection to a group key by
+    // canonical text, so it has to strip the paren before looking `a + b` up.
+    val q = SqlEngine.execute("SELECT (a + b) AS s FROM t GROUP BY a + b ORDER BY 1", cat)
+    assertEquals(Seq(3, 7), collectAllRows(q).map(_("s")))
+  }
+
+  @Test def groupingParenAroundWindowFunction(): Unit = {
+    val p = tmpCsv("a.csv", "name,score\na,10\nb,30\nc,20\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // Reaches `collectWindows`, the third walk over `childExpressions`.
+    val q = SqlEngine.execute(
+      "SELECT name, (ROW_NUMBER() OVER (ORDER BY score DESC)) AS rn FROM t ORDER BY name", cat)
+    assertEquals(Seq(3L, 1L, 2L), collectAllRows(q).map(_("rn")))
+  }
+
+  @Test def groupingParenInHaving(): Unit = {
+    val p = tmpCsv("a.csv", "cat\nA\nA\nB\nC\nC\nC\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT cat, COUNT(*) AS n FROM t GROUP BY cat HAVING (COUNT(*) > 1) ORDER BY cat", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq("A", "C"), rows.map(_("cat")))
+    assertEquals(Seq(2L, 3L), rows.map(_("n")))
+  }
+
+  @Test def orderByParenthesizedOrdinal(): Unit = {
+    val p = tmpCsv("a.csv", "id,score\n1,10\n2,90\n3,30\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // Postgres and MySQL both drop a redundant paren before the positional
+    // check, so `(2)` is position 2, not a constant sort key that silently
+    // leaves scan order in place.
+    val q = SqlEngine.execute("SELECT id, score FROM t ORDER BY (2) DESC", cat)
+    assertEquals(Seq(2, 3, 1), collectAllRows(q).map(_("id")))
+
+    val ex = try { SqlEngine.execute("SELECT id, score FROM t ORDER BY (5)", cat); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.contains("ORDER BY position 5"))
+  }
+
+  @Test def rowValueConstructorStillRejected(): Unit = {
+    val p = tmpCsv("a.csv", "a,b,c,d\n1,2,1,2\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // A multi-element list is a row-value constructor, not a grouping paren.
+    // It stays on the catch-all rather than binding to its first element.
+    val ex = try { SqlEngine.execute("SELECT a FROM t WHERE (a, b) = (c, d)", cat); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.contains("ParenthesedExpressionList"))
+  }
+
+  // --- TRIM -----------------------------------------------------------------
+  // JSqlParser gives TRIM its own node (TrimFunction) rather than the generic
+  // Function node UPPER / LOWER get, because it carries the extended
+  // `TRIM([LEADING|TRAILING|BOTH] [remstr] FROM str)` grammar. `Funcs`
+  // implements the single-argument whitespace trim only.
+
+  @Test def trimSingleArgument(): Unit = {
+    val p = tmpCsv("a.csv", "name\n  alice  \nbob \n carol\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT TRIM(name) AS n FROM t", cat)
+    assertEquals(Vector("n"), q.schema.fieldNames)
+    assertEquals(Seq("alice", "bob", "carol"), collectAllRows(q).map(_("n")))
+  }
+
+  @Test def trimComposesWithOtherExpressions(): Unit = {
+    val p = tmpCsv("a.csv", "name\n  alice  \n bob\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT UPPER(TRIM(name)) AS u, TRIM(UPPER(name)) AS v, LENGTH(TRIM((name))) AS len " +
+        "FROM t WHERE TRIM(name) = 'alice'", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq("ALICE"), rows.map(_("u")))
+    assertEquals(Seq("ALICE"), rows.map(_("v")))
+    assertEquals(Seq(5), rows.map(_("len")))
+  }
+
+  @Test def trimOverAggregateOutput(): Unit = {
+    val p = tmpCsv("a.csv", "g,name\nA,  ann  \nA, amy\nB,  bea\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // `childExpressions` has to report TRIM's operand, or MAX is never
+    // collected and the binder rejects it as non-aggregating.
+    val q = SqlEngine.execute("SELECT g, TRIM(MAX(name)) AS m FROM t GROUP BY g ORDER BY g", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq("A", "B"), rows.map(_("g")))
+    assertEquals(Seq("amy", "bea"), rows.map(_("m")))
+  }
+
+  @Test def trimExtendedGrammarRejected(): Unit = {
+    val p = tmpCsv("a.csv", "name\nxxaxx\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // Every extended form parks the string to trim in `getFromExpression` and
+    // the remstr in `getExpression`, so binding `getExpression` would trim the
+    // wrong operand (or hit a null). Reject loudly instead.
+    val forms = Seq(
+      "SELECT TRIM(BOTH 'x' FROM name) AS n FROM t",
+      "SELECT TRIM(LEADING FROM name) AS n FROM t",
+      "SELECT TRIM(TRAILING 'x' FROM name) AS n FROM t",
+      "SELECT TRIM('x' FROM name) AS n FROM t",
+      "SELECT TRIM(BOTH name) AS n FROM t",
+      "SELECT TRIM(name, 'x') AS n FROM t")
+    forms.foreach { sql =>
+      val ex = try { SqlEngine.execute(sql, cat); null }
+        catch { case e: IllegalArgumentException => e }
+      assertNotNull(sql, ex)
+      assertTrue(s"$sql -> ${ex.getMessage}",
+        ex.getMessage.contains("single-argument TRIM(x)"))
+    }
+  }
+
   @Test def countDistinct(): Unit = {
     val p = tmpCsv("a.csv", "cat\nA\nA\nB\nB\nC\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))

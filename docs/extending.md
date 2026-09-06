@@ -232,6 +232,23 @@ extend the format switch in `ResultPersister` and the dropdown in
    decisions silently treating a new operator as `None` would be worse).
    Pin tests in `LogicalPlanCardinalityTest` to the new shape.
 
+**Teaching the binder a new JSqlParser *expression* node is a different, and
+smaller, job — but it takes two edits, not one.** Add the case to
+`LogicalBuilder.bindExprWithAggs`, and add the node's operands to
+`LogicalBuilder.childExpressions`. The second is easy to miss because its
+catch-all is `case _ => Nil`, which fails silently: `childExpressions` drives
+`containsAggregate`, the aggregate `collect`, and `collectWindows`, so a node
+missing from it hides any aggregate or window function nested inside it and the
+query dies with "Aggregate 'SUM' used in non-aggregating position" — an error
+that points at the wrong thing entirely. Three more walks care about node shape
+and may need the case too: `buildAggregation`'s `rebind` (matches a projection
+to a group key by canonical text), `deriveAlias` (names the output column), and
+`selectListOrdinal` (decides what counts as an `ORDER BY` / `GROUP BY`
+position). Grouping parentheses needed all five; see
+[gotchas.md](gotchas.md). If the node wraps a function the runtime doesn't
+fully implement, reject the unsupported forms explicitly rather than binding
+the operand you *can* reach — `TrimFunction` is the cautionary case there.
+
 **If the operator hashes per-row keys (group-by, set semantics, partition
 keys, join keys), use `core/HashKeys.scala`'s `KeyCodec` rather than
 building a `Seq[Any]` per row.** Construct it via
@@ -291,9 +308,10 @@ the reject rate near zero and the property sound:
 - **Total** — never generate SQL that throws at execution (mirror the existing
   exclusions: numeric->numeric / anything->string casts only, non-null
   `ROUND`/`SUBSTRING` scales). A query that binds must run, in every mode.
-- **Paren-free-safe** — the SQL frontend rejects grouping parentheses (it parses
-  `(x)` as a single-element `ParenthesedExpressionList` the binder does not
-  accept), so `SqlRender` emits none and relies on precedence. Only generate
+- **Paren-free-safe** — `SqlRender` emits no grouping parentheses and relies on
+  precedence. (The binder rejected them historically; it accepts them now, so
+  teaching `SqlRender` to emit them is an open widening opportunity — but until
+  it does, the rule below still binds.) Only generate
   trees that stay type-correct under a precedence-only reparse: arithmetic
   operands numeric, `||` operands string, comparisons same-category (never a
   boolean operand), and `NOT` only over a boolean leaf (the frontend binds `NOT`
@@ -391,8 +409,9 @@ relation or generator extension:
 - **Qualifier-in-name, scope-correct.** Every column reference carries its table
   qualifier inside `ColRefExpr.name` (e.g. `"t0.c0"`), and the generator only
   references columns in scope for the clause it builds (a join ON sees both
-  sides; a `UNION` arm sees only its own FROM). Stay paren-free — the SQL
-  frontend rejects grouping parentheses (see [gotchas.md](gotchas.md)).
+  sides; a `UNION` arm sees only its own FROM). Stay paren-free — `SqlRender`
+  emits none, so every generated tree must stay type-correct under a
+  precedence-only reparse (see [gotchas.md](gotchas.md)).
 - **TLP partition keys must be type-reliable.** `QueryCore.tlpCandidates`
   restricts the partition column to non-float output columns whose runtime type
   survives a precedence-only reparse. A computed `Int`-labelled column can reparse

@@ -19,13 +19,16 @@ ship a fix or move something from "not done" to "done".
   parameter list, not an empty parameter list.** `bindAgg` checks both
   `isAllColumns` and `params(0).isInstanceOf[AllColumns]`.
 - **JSqlParser parses `(a - b)` as a `ParenthesedExpressionList`, not a
-  parenthesized binary expression.** `LogicalBuilder.bindExpr` does NOT handle
-  `ExpressionList`/`ParenthesedExpressionList` and dies with `Unsupported
-  expression: ParenthesedExpressionList`. Workaround: drop the parens — `a - b
-  AS c` parses fine and the operator-precedence vs. `AS` is unambiguous. If
-  parens are needed for grouping (rare in SELECT items), bind the inner
-  expression first into a sub-task. The polymarket example's `stg_orderbook`
-  was an early casualty of this.
+  parenthesized binary expression.** There is no parenthesis node in the 5.0 AST
+  at all: the deprecated `Parenthesis` class still ships but nothing in the jar
+  constructs it, so `(expr)` reaches the binder as a one-element list and
+  `(a, b)` as a two-element one. Anything in `LogicalBuilder` that walks the AST
+  therefore has to see through the one-element case or a paren the user wrote
+  for grouping changes what the query means. `LogicalBuilder.Grouped` is that
+  one rule, and every walk matches on it — see "grouping parentheses" below for
+  the five sites and what happens if you add a sixth walk without it. A list of
+  two or more elements is a row-value constructor (`(a, b) = (c, d)`), which the
+  binder does not support and rejects by node name.
 - **Aggregate inside HAVING / ORDER BY** must be rebound against the aggregate
   output, not the source schema. `LogicalBuilder.bindExprWithAggs` takes an
   `aggResolver: Function => Option[Expr]` that returns a `ColRefExpr` into the
@@ -480,15 +483,49 @@ ship a fix or move something from "not done" to "done".
   `ModeDifferential` notes it cannot toggle as an in-JVM mode. See
   [testing.md](testing.md#property-based-testing-fuzz).
 
-- **The SQL frontend rejects grouping parentheses.** `SELECT (a + b) * c` and
-  `WHERE (x = y)` do not bind: this JSqlParser version parses `(expr)` as a
-  single-element `ParenthesedExpressionList`, and the binder only handles the
-  legacy `Parenthesis` node, so every grouping paren falls through to
-  "Unsupported expression". The engine's own queries avoid grouping parens and
-  rely on precedence; `QueryGen` renders paren-free for the same reason. `TRIM(x)`
-  is similarly unbindable (it parses to a `TrimFunction` node the binder does not
-  handle, though `UPPER`/`LOWER` bind fine). Reconciling these in the binder is a
-  candidate follow-up.
+- **The SQL frontend used to reject grouping parentheses and `TRIM(x)` —
+  fixed.** `SELECT (a + b) * c`, `WHERE (x = y)`, `ON (a = b)`,
+  `HAVING (COUNT(*) > 1)` and `TRIM(name)` all bind now. Two things are worth
+  knowing about the shape of that fix.
+
+  **A grouping paren is transparent at five walks, not one.** Adding the
+  `ParenthesedExpressionList` case to `bindExprWithAggs` alone leaves the engine
+  reporting a *misleading* error rather than the honest one: `childExpressions`
+  is a second walk over the same AST (it drives `containsAggregate`, the
+  aggregate `collect`, and `collectWindows`), and with no paren case there it
+  returns `Nil` silently — so `SELECT (SUM(x)) FROM t` never collects its
+  aggregate and dies with "Aggregate 'SUM' used in non-aggregating position",
+  and `SELECT (ROW_NUMBER() OVER (ORDER BY x))` with "Window function used in
+  non-window position". Three more walks matter: the post-aggregation `rebind`
+  in `buildAggregation` matches a projection to a group key by canonical text,
+  so without a paren case `SELECT (a + b) ... GROUP BY a + b` fails with
+  "Unknown column 'a'. Available: [a + b]"; `deriveAlias` decides the output
+  column name, so `SELECT (a)` would be named `(a)` rather than `a`; and
+  `selectListOrdinal` decides what counts as a position, so `ORDER BY (1)` would
+  quietly become a constant sort key. All five match `LogicalBuilder.Grouped`;
+  a new walk over the AST must too.
+
+  **Only single-argument `TRIM(x)` is supported, and the rejection is
+  deliberate.** JSqlParser gives TRIM its own `TrimFunction` node (not the
+  generic `Function` node `UPPER`/`LOWER` get) so it can carry
+  `TRIM([LEADING|TRAILING|BOTH] [remstr] FROM str)` and MySQL's
+  `TRIM(str, remstr)`. Its accessors are a trap: `getExpression` is the
+  **remstr**, not the string being trimmed, in every extended form —
+  `TRIM(BOTH ' ' FROM x)` gives `getExpression=' '`, `getFromExpression=x`, and
+  `TRIM(LEADING FROM x)` gives `getExpression=null`. Binding `getExpression`
+  blindly (the obvious-looking implementation) trims the wrong operand
+  silently: `TRIM(BOTH 'x' FROM 'xxaxx')` returns `x`. `TRIM(x, 'a')` is worse,
+  because it sets neither the specification nor the FROM keyword — the remstr
+  just lands in `getFromExpression` and gets dropped. So `Funcs` implements the
+  single-argument whitespace trim (`Funcs.scala` gates TRIM on
+  `argTypes.size == 1` in both `returnType` and `applyVec`) and the binder
+  rejects every other form with "Only the single-argument TRIM(x) is
+  supported". `LTRIM`/`RTRIM` parse as ordinary `Function`s and are simply
+  unknown functions.
+
+  `QueryGen` / `MetaQueryGen` still render paren-free — that is now an unused
+  widening opportunity rather than a constraint (see
+  [testing.md](testing.md#property-based-testing-fuzz)).
 
 - **A named `ORDER BY` key binds against the scope at that point in the plan, not
   against the SELECT list.** `ORDER BY` resolves its columns where the sort sits:
@@ -519,10 +556,15 @@ ship a fix or move something from "not done" to "done".
   ordinal, so `ORDER BY +1` (a JSqlParser `SignedExpression`) stays a constant
   sort key; an ORDER BY position **may** point at an aggregate
   (`SELECT a, SUM(b) ... ORDER BY 2` is standard SQL) where a GROUP BY position
-  may not; and parens are clause-dependent because JSqlParser drops them in
-  `GROUP BY (1)` (a bare `LongValue`, so it *does* resolve positionally, despite
-  what the old doc comment claimed) but keeps `ORDER BY (1)` as a
-  `ParenthesedExpressionList`, which the binder rejects outright.
+  may not; and parens used to be clause-dependent, because JSqlParser drops them
+  in `GROUP BY (1)` (a bare `LongValue`, so it *does* resolve positionally,
+  despite what the old doc comment claimed) but keeps `ORDER BY (1)` as a
+  `ParenthesedExpressionList`. Now that the binder accepts grouping parens the
+  resolver strips them first, so both clauses agree and `ORDER BY (1)` is
+  position 1 — which is also what Postgres and MySQL do, since their grammars
+  drop a redundant paren before the positional check ever runs. Leaving the
+  paren opaque there would have made `ORDER BY (1)` a constant sort key: a
+  silent no-op, the exact bug this entry records fixing.
 
 - **Layout invariance is a property of the window FUNCTION, not of "has a
   window".** The mode-agreement oracles compare result multisets across

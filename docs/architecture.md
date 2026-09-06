@@ -924,7 +924,13 @@ handles this with a two-stage rewrite:
    to bind the partition keys, order keys, and function arg of each `OVER (...)`.
 2. **Collect windows.** Walk SELECT items + ORDER BY. Every distinct
    `AnalyticExpression` (deduped by canonical SQL) becomes a `WindowDef` with
-   a synthetic output column name (`_win0`, `_win1`, …).
+   a synthetic output column name (`_win0`, `_win1`, …). The walk recurses
+   through `LogicalBuilder.childExpressions`, the same traversal
+   `containsAggregate` and the aggregate `collect` use — a node shape missing
+   from it returns `Nil` silently, so the function it contains is never
+   collected and the binder later reports it as being used in the wrong
+   position. See [gotchas.md](gotchas.md) on grouping parentheses for the
+   worked example.
 3. **Insert `LogicalWindow`** above the post-aggregation plan. Its output
    schema is `child.outputSchema ++ windowOutputs` — original column indices
    are preserved.

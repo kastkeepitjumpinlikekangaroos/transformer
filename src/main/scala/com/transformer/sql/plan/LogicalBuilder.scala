@@ -5,8 +5,8 @@ import com.transformer.sql.parse.SqlParser
 
 import net.sf.jsqlparser.expression.{
   AllValue, AnalyticExpression, CaseExpression, CastExpression, DateValue, DoubleValue,
-  Expression, Function, LongValue, NotExpression, NullValue, Parenthesis,
-  SignedExpression, StringValue, TimestampValue, TimeValue, WhenClause,
+  Expression, Function, LongValue, NotExpression, NullValue,
+  SignedExpression, StringValue, TimestampValue, TimeValue, TrimFunction, WhenClause,
   WindowElement, WindowOffset
 }
 import net.sf.jsqlparser.expression.operators.arithmetic.{
@@ -15,7 +15,8 @@ import net.sf.jsqlparser.expression.operators.arithmetic.{
 import net.sf.jsqlparser.expression.operators.conditional.{AndExpression, OrExpression}
 import net.sf.jsqlparser.expression.operators.relational.{
   Between, EqualsTo, ExpressionList, GreaterThan, GreaterThanEquals, InExpression,
-  IsNullExpression, LikeExpression, MinorThan, MinorThanEquals, NotEqualsTo
+  IsNullExpression, LikeExpression, MinorThan, MinorThanEquals, NotEqualsTo,
+  ParenthesedExpressionList
 }
 import net.sf.jsqlparser.schema.Column
 import net.sf.jsqlparser.statement.select._
@@ -412,6 +413,9 @@ object LogicalBuilder {
 
     val factory: BinderFactory = { windowResolver =>
       def rebind(e: Expression): Expr = e match {
+        // Strip grouping parens before the group-key lookup below, so
+        // `SELECT (a + b) ... GROUP BY a + b` still matches its key by text.
+        case Grouped(inner) => rebind(inner)
         case ae: AnalyticExpression =>
           windowResolver(ae).getOrElse(throw new IllegalArgumentException(
             s"Window function in non-window position: $ae"))
@@ -499,6 +503,25 @@ object LogicalBuilder {
   // Expression binding
   // ---------------------------------------------------------------------------
 
+  /** Matches a grouping paren, yielding the expression inside it. JSqlParser
+    * parses `(expr)` as a single-element [[ParenthesedExpressionList]] rather
+    * than as a node of the inner expression's own type, so every walk over the
+    * AST — binding, child traversal, post-aggregation rebinding, alias
+    * derivation, ordinal recognition — has to see through it, or a paren the
+    * user wrote for grouping changes what the query means.
+    *
+    * Two or more elements is a row-value constructor (`(a, b) = (c, d)`), which
+    * this binder does not support: it deliberately does not match here, so it
+    * reaches the caller's catch-all and is rejected by node name.
+    */
+  private object Grouped {
+    def unapply(e: Expression): Option[Expression] = e match {
+      case pel: ParenthesedExpressionList[_] if pel.size() == 1 =>
+        Some(pel.get(0).asInstanceOf[Expression])
+      case _ => None
+    }
+  }
+
   def bindExpr(e: Expression, sources: Sources): Expr =
     bindExprWithAggs(e, sources, _ => None, _ => None)
 
@@ -515,7 +538,7 @@ object LogicalBuilder {
       windowResolver: AnalyticExpression => Option[Expr] = _ => None): Expr = {
     def b(x: Expression): Expr = bindExprWithAggs(x, sources, aggResolver, windowResolver)
     e match {
-    case p: Parenthesis => b(p.getExpression)
+    case Grouped(inner) => b(inner)
     case c: Column =>
       val q = Option(c.getTable).map(_.getName)
       val raw = c.getColumnName
@@ -628,6 +651,21 @@ object LogicalBuilder {
       val inner = b(ce.getLeftExpression)
       val target = parseTypeName(ce.getColDataType.getDataType)
       CastExpr(inner, target)
+
+    case tf: TrimFunction =>
+      // JSqlParser gives TRIM a node of its own so it can carry the extended
+      // `TRIM([LEADING|TRAILING|BOTH] [remstr] FROM str)` grammar and the
+      // two-argument `TRIM(str, remstr)`. `Funcs` implements the single-argument
+      // whitespace trim only, and in every extended form the string to trim
+      // lives in `getFromExpression` while `getExpression` holds the remstr — so
+      // binding `getExpression` unconditionally would trim the wrong operand on
+      // `TRIM(BOTH ' ' FROM x)` and hit a null on `TRIM(LEADING FROM x)`. Reject
+      // the extended forms instead of answering the wrong question quietly.
+      if (tf.getTrimSpecification != null || tf.isUsingFromKeyword ||
+          tf.getFromExpression != null || tf.getExpression == null)
+        throw new IllegalArgumentException(
+          s"Only the single-argument TRIM(x) is supported, got: $tf")
+      FuncExpr("TRIM", Seq(b(tf.getExpression)), DataType.StringType)
 
     case f: Function =>
       aggResolver(f) match {
@@ -751,7 +789,7 @@ object LogicalBuilder {
   }
 
   private def childExpressions(e: Expression): Seq[Expression] = e match {
-    case p: Parenthesis => Seq(p.getExpression)
+    case Grouped(inner) => Seq(inner)
     case n: NotExpression => Seq(n.getExpression)
     case s: SignedExpression => Seq(s.getExpression)
     case a: Addition => Seq(a.getLeftExpression, a.getRightExpression)
@@ -783,6 +821,10 @@ object LogicalBuilder {
           Seq(w.asInstanceOf[WhenClause].getWhenExpression, w.asInstanceOf[WhenClause].getThenExpression)) ++
         Option(c.getElseExpression).toSeq
     case ce: CastExpression => Seq(ce.getLeftExpression)
+    // Both TRIM operands: the extended forms this binder rejects still have to
+    // report their children, so an aggregate under one is classified before the
+    // binder gets to the rejection.
+    case tf: TrimFunction => Option(tf.getExpression).toSeq ++ Option(tf.getFromExpression).toSeq
     case f: Function =>
       Option(f.getParameters)
         .map(_.asInstanceOf[ExpressionList[_]].asScala.asInstanceOf[Iterable[Expression]].toSeq)
@@ -911,27 +953,17 @@ object LogicalBuilder {
     case _ => throw new IllegalArgumentException(s"$label must be a non-negative integer literal, got: $e")
   }
 
-  /** Reconstruct an Expression bound against a new source set, recursing through
-    * `childRewriter` (used to substitute aggregate output column refs).
-    */
-  private def rebuildExpr(
-      e: Expression,
-      sources: Sources,
-      postAgg: Boolean,
-      childRewriter: Expression => Expr): Expr = e match {
-    case p: Parenthesis => childRewriter(p.getExpression)
-    case _ => bindExpr(e, sources)
-  }
-
   /** A bare integer literal in `GROUP BY` / `ORDER BY` is a 1-based reference
     * into the SELECT list rather than a constant. Returns the 0-based position,
     * or None when `e` is an ordinary expression. Matches BigQuery / Postgres /
     * MySQL: only a *bare* integer counts, so `+1` stays a literal (JSqlParser
-    * gives it as a `SignedExpression`). Parens differ by clause — JSqlParser
-    * drops them in `GROUP BY (1)`, leaving a `LongValue` that does resolve
-    * positionally, but keeps `ORDER BY (1)` as a `ParenthesedExpressionList`,
-    * which stays an expression. */
+    * gives it as a `SignedExpression`), while grouping parens are transparent —
+    * `ORDER BY (1)` is position 1, as it is in Postgres and MySQL, whose
+    * grammars drop a redundant paren before the positional check ever runs.
+    * (JSqlParser drops it only in `GROUP BY`, so `ORDER BY` needs [[Grouped]]
+    * to reach the same answer.) */
   private def selectListOrdinal(clause: String, e: Expression, size: Int): Option[Int] = e match {
+    case Grouped(inner) => selectListOrdinal(clause, inner, size)
     case lv: LongValue =>
       val v = lv.getValue
       if (v < 1 || v > size)
@@ -987,6 +1019,7 @@ object LogicalBuilder {
   private def canonicalSql(e: Expression): String = e.toString.toLowerCase
 
   private def deriveAlias(e: Expression): String = e match {
+    case Grouped(inner) => deriveAlias(inner)
     case c: Column => c.getColumnName
     case _ => e.toString.toLowerCase
   }
