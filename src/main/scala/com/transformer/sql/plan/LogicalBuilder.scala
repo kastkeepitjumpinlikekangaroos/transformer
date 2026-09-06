@@ -181,15 +181,12 @@ object LogicalBuilder {
     }
 
     // ORDER BY / LIMIT bind against the union's output (column names come from
-    // the leftmost arm — that's what `LogicalUnion.outputSchema` exposes).
-    val unionSources: Sources = Seq((None, union.outputSchema))
+    // the leftmost arm — that's what `LogicalUnion.outputSchema` exposes), so
+    // an ORDER BY ordinal is a position in that schema.
     val orderBy = Option(sol.getOrderByElements).filter(!_.isEmpty).orElse(hoistedOrderBy)
     val afterSort: LogicalPlan = orderBy match {
       case Some(list) =>
-        val keys = list.asScala.map { obe =>
-          (bindExpr(obe.getExpression, unionSources), obe.isAsc)
-        }.toSeq
-        LogicalSort(union, keys)
+        LogicalSort(union, list.asScala.map(bindOrderKey(_, union.outputSchema)).toSeq)
       case None => union
     }
 
@@ -307,14 +304,15 @@ object LogicalBuilder {
 
     // ORDER BY placement: when there's no DISTINCT we keep the historical
     // shape (Sort below Project) so unprojected ORDER BY columns can still
-    // resolve via the pre-project sources. When DISTINCT is present we hoist
-    // Sort above Distinct so per-shard dedup can't scramble the user's
-    // requested order — and bind the keys against the post-project schema
-    // (SQL's restriction that ORDER BY of a DISTINCT must reference
-    // projected columns makes this binding well-defined).
+    // resolve via the pre-project sources. An ordinal is expanded to the
+    // SELECT-list expression it names first, then bound through `exprBinder` —
+    // the same binder the projection uses, so it lands on the aggregate or
+    // window output column when the query has one.
     val afterSort: LogicalPlan = (orderByList, hasDistinct) match {
       case (Some(list), false) =>
-        val keys = list.map(obe => (exprBinder(obe.getExpression), obe.isAsc))
+        val keys = list.map { obe =>
+          (exprBinder(resolveOrderOrdinal(obe.getExpression, expandedItems)), obe.isAsc)
+        }
         LogicalSort(preProject, keys)
       case _ => preProject
     }
@@ -324,15 +322,17 @@ object LogicalBuilder {
     val afterDistinct: LogicalPlan =
       if (hasDistinct) LogicalDistinct(projected) else projected
 
+    // With DISTINCT we hoist Sort above Distinct so per-shard dedup can't
+    // scramble the user's requested order, and bind the keys against the
+    // post-project schema (SQL's restriction that ORDER BY of a DISTINCT must
+    // reference projected columns makes this binding well-defined). That scope
+    // is the SELECT list 1:1 by position, so an ordinal points straight at a
+    // field rather than re-binding through a source expression.
     val afterDistinctSort: LogicalPlan = (orderByList, hasDistinct) match {
       case (Some(list), true) =>
         val projSchema = Schema(
           projections.iterator.map { case (e, n) => Field(n, e.dataType) }.toVector)
-        val sources: Sources = Seq((None, projSchema))
-        val keys = list.map { obe =>
-          (bindExpr(obe.getExpression, sources), obe.isAsc)
-        }
-        LogicalSort(afterDistinct, keys)
+        LogicalSort(afterDistinct, list.map(bindOrderKey(_, projSchema)))
       case _ => afterDistinct
     }
 
@@ -923,24 +923,65 @@ object LogicalBuilder {
     case _ => bindExpr(e, sources)
   }
 
-  /** Resolve `GROUP BY N` (1-based positional reference) to the underlying
-    * SELECT-list expression. Matches BigQuery / Postgres / MySQL behavior.
-    * Only bare integer literals are treated as ordinals — `GROUP BY (1)` or
-    * `GROUP BY +1` remain literal expressions. */
-  private def resolveGroupOrdinal(
-      e: Expression,
-      expandedItems: Seq[(Expression, String)]): Expression = e match {
+  /** A bare integer literal in `GROUP BY` / `ORDER BY` is a 1-based reference
+    * into the SELECT list rather than a constant. Returns the 0-based position,
+    * or None when `e` is an ordinary expression. Matches BigQuery / Postgres /
+    * MySQL: only a *bare* integer counts, so `+1` stays a literal (JSqlParser
+    * gives it as a `SignedExpression`). Parens differ by clause — JSqlParser
+    * drops them in `GROUP BY (1)`, leaving a `LongValue` that does resolve
+    * positionally, but keeps `ORDER BY (1)` as a `ParenthesedExpressionList`,
+    * which stays an expression. */
+  private def selectListOrdinal(clause: String, e: Expression, size: Int): Option[Int] = e match {
     case lv: LongValue =>
       val v = lv.getValue
-      if (v < 1 || v > expandedItems.size)
+      if (v < 1 || v > size)
         throw new IllegalArgumentException(
-          s"GROUP BY position $v is not in select list (size ${expandedItems.size})")
-      val (expr, _) = expandedItems((v - 1).toInt)
-      if (containsAggregate(expr))
-        throw new IllegalArgumentException(
-          s"GROUP BY position $v cannot refer to aggregate expression in select list")
-      expr
-    case _ => e
+          s"$clause position $v is not in select list (size $size)")
+      Some((v - 1).toInt)
+    case _ => None
+  }
+
+  /** Resolve `GROUP BY N` to the SELECT-list expression it names. A GROUP BY
+    * position may not point at an aggregate. */
+  private def resolveGroupOrdinal(
+      e: Expression,
+      expandedItems: Seq[(Expression, String)]): Expression =
+    selectListOrdinal("GROUP BY", e, expandedItems.size) match {
+      case Some(i) =>
+        val (expr, _) = expandedItems(i)
+        if (containsAggregate(expr))
+          throw new IllegalArgumentException(
+            s"GROUP BY position ${i + 1} cannot refer to aggregate expression in select list")
+        expr
+      case None => e
+    }
+
+  /** Resolve `ORDER BY N` to the SELECT-list expression it names, for the site
+    * that binds sort keys against the pre-projection scope. Unlike GROUP BY, a
+    * position may point at an aggregate — `SELECT a, SUM(b) ... ORDER BY 2` is
+    * standard SQL, and re-binding through the projection's own binder maps that
+    * aggregate to its output column. */
+  private def resolveOrderOrdinal(
+      e: Expression,
+      expandedItems: Seq[(Expression, String)]): Expression =
+    selectListOrdinal("ORDER BY", e, expandedItems.size) match {
+      case Some(i) => expandedItems(i)._1
+      case None => e
+    }
+
+  /** Bind one ORDER BY key where the sort's scope IS its output schema, 1:1 by
+    * position — above a `DISTINCT` or above a `UNION`. An ordinal indexes that
+    * schema directly; anything else binds against it as a single source. */
+  private def bindOrderKey(obe: OrderByElement, schema: Schema): (Expr, Boolean) = {
+    val key = selectListOrdinal("ORDER BY", obe.getExpression, schema.length) match {
+      case Some(i) =>
+        val f = schema.fields(i)
+        ColRefExpr(i, f.name, f.dataType)
+      case None =>
+        val sources: Sources = Seq((None, schema))
+        bindExpr(obe.getExpression, sources)
+    }
+    (key, obe.isAsc)
   }
 
   private def canonicalSql(e: Expression): String = e.toString.toLowerCase

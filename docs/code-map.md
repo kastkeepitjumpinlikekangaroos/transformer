@@ -7,7 +7,7 @@ navigation hint, not a comprehensive directory listing.
 
 ## File-size hot spots
 
-- `sql/plan/LogicalBuilder.scala` (~960 LOC) — largest file in `sql/plan`.
+- `sql/plan/LogicalBuilder.scala` (~1005 LOC) — largest file in `sql/plan`.
   Pattern matches every JSqlParser expression node, dispatches SELECT shapes,
   and (for
   outermost-scope `WITH` CTEs) emits placeholder `PendingCteView` scans +

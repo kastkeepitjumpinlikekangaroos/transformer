@@ -4,6 +4,7 @@ Four small, independent workstreams surfaced by a full read of
 `docs/gotchas.md` and the `plans/` tree on 2026-09-05. Three are real SQL
 engine gaps the gotchas doc itself already flags as "a candidate follow-up";
 the fourth is a docs-accuracy pass the same audit turned up as a side effect.
+Plans 04 and 01 are done; 02 and 03 remain.
 Each plan is self-contained: read the file, paste the launch prompt into a
 fresh Claude session, and the agent has what it needs.
 
@@ -21,7 +22,7 @@ free to start.
 | # | Plan | What | Status | Effort | Risk | Depends on |
 |---|------|------|--------|--------|------|------------|
 | [04](04-perf-docs-reconciliation.md) | Reconcile `plans/perf/` status against actual code | **done** 2026-09-06 | ~half a day | none (docs only) | — |
-| [01](01-order-by-ordinal.md) | `ORDER BY <ordinal>` parses but silently doesn't sort | not started | ~1 day | low | — |
+| [01](01-order-by-ordinal.md) | `ORDER BY <ordinal>` parses but silently doesn't sort | **done** 2026-09-06 | ~1 day | low | — |
 | [02](02-binder-grouping-parens-and-trim.md) | Binder rejects `(a + b) * c`, `WHERE (x = y)`, `TRIM(x)` | not started | ~1 day | low | — |
 | [03](03-eval-evalvec-nan-parity.md) | `eval` vs `evalVec` disagree on NaN/-0.0 ordering and IN | not started | 2-3 days | medium | — |
 
@@ -37,11 +38,22 @@ and every plan file's own status header was corrected. Two claims in plan
 04's own audit turned out to be wrong and are recorded at the bottom of
 that file.
 
+**Done:** plan 01. All three ORDER BY sort sites — below `Project`, above
+`Distinct`, above `Union` — now resolve a bare-integer ordinal to the
+SELECT-list position it names, through a `selectListOrdinal` helper shared with
+`GROUP BY` (whose behavior and error strings are unchanged). Out-of-range is now
+an error rather than a silent no-op, and an ORDER BY position may point at an
+aggregate where a GROUP BY position may not. 13 regressions in `SqlEngineTest`.
+The plan file had two wrong claims of its own, both corrected in place and
+recorded there: it counted three binding sites in a heading but enumerated only
+two (the UNION site was missing and was equally broken), and it misattributed
+`MetaQueryGen`'s source-column ordering to the ordinal bug rather than to the
+alias-scope rule.
+
 **Remaining — real engine gaps, in severity order:**
-- Plan 01 — silent wrong results (no error, the requested order is just
-  ignored). Highest priority of the three because it fails quietly.
 - Plan 02 — blocks valid SQL with a hard parse-time error. Annoying but
-  loud, so lower urgency than a silent-wrong-answer bug.
+  loud, so lower urgency than a silent-wrong-answer bug. Now the highest
+  priority of the two remaining.
 - Plan 03 — narrowest in practice: only float/double columns actually
   carrying NaN or -0.0 are affected, and the fuzzers already exclude the
   shapes that would catch it, which is exactly why it's shipped unnoticed.
@@ -50,7 +62,8 @@ that file.
 ## How this list was produced
 
 Read `docs/gotchas.md` end to end. Its "Known gotchas" section explicitly
-flags three items as "a candidate follow-up" — those are plans 01-03 above.
+flagged three items as "a candidate follow-up" — those are plans 01-03 above.
+(Two remain flagged there today; plan 01's entry moved to fixed when it landed.)
 Separately, cross-checked `plans/perf/README.md`'s priority table against
 the actual `src/main` code for all 12 perf plans. Ten are landed (01, 02,
 03, 04, 05, 07, 09, 10, 11, 12) — four with nothing left at all, the rest

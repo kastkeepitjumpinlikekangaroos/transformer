@@ -565,6 +565,15 @@ FROM <table> [<alias>]
 [ LIMIT <n> ]
 ```
 
+`GROUP BY` and `ORDER BY` also accept a **positional ordinal** — a bare integer
+naming a SELECT-list position, as in BigQuery / Postgres / MySQL. `ORDER BY 2
+DESC` sorts by the second output column, and unlike the named form it reaches an
+aliased expression (`SELECT a + b AS s FROM t ORDER BY 1` works; `ORDER BY s`
+does not — see [docs/gotchas.md](docs/gotchas.md) on ORDER BY scope). Only a bare
+integer counts: `ORDER BY +1` is a constant, not a position. A `GROUP BY` ordinal
+may not point at an aggregate; an `ORDER BY` ordinal may. An out-of-range
+position is an error.
+
 **Aggregates:** `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `COUNT_IF(pred)`,
 `SUM`, `AVG`, `MIN`, `MAX`,
 `STDDEV`/`STDDEV_SAMP`/`STDDEV_POP`, `VARIANCE`/`VAR_SAMP`/`VAR_POP`,

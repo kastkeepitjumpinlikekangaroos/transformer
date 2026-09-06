@@ -136,6 +136,142 @@ class SqlEngineTest {
     assertTrue(ex.getMessage, ex.getMessage.contains("aggregate"))
   }
 
+  @Test def orderByPositionalOrdinal(): Unit = {
+    val p = tmpCsv("a.csv", "id,score\n1,10\n2,90\n3,30\n4,75\n5,5\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // `ORDER BY 2 DESC` means "sort by the 2nd select item" (score), matching
+    // BigQuery/Postgres semantics and `GROUP BY <ordinal>` above.
+    val q = SqlEngine.execute("SELECT id, score FROM t ORDER BY 2 DESC", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq(2, 4, 3, 1, 5), rows.map(_("id")))
+    assertEquals(Seq(90, 75, 30, 10, 5), rows.map(_("score")))
+  }
+
+  @Test def orderByOrdinalMixedWithColumnAndDirections(): Unit = {
+    val p = tmpCsv("a.csv", "cat,score\nB,1\nA,2\nB,3\nA,1\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT cat, score FROM t ORDER BY 1 ASC, score DESC", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq("A", "A", "B", "B"), rows.map(_("cat")))
+    assertEquals(Seq(2, 1, 3, 1), rows.map(_("score")))
+  }
+
+  @Test def orderByOrdinalReferencingAggregate(): Unit = {
+    val p = tmpCsv("a.csv", "cat,score\nA,1\nA,2\nB,30\nB,4\nC,7\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // Unlike GROUP BY, an ORDER BY position may point at an aggregate output.
+    val q = SqlEngine.execute(
+      "SELECT cat, SUM(score) AS s FROM t GROUP BY cat ORDER BY 2 DESC", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq("B", "C", "A"), rows.map(_("cat")))
+    assertEquals(Seq(34L, 7L, 3L), rows.map(_("s")))
+  }
+
+  @Test def orderByOrdinalReferencingGroupKey(): Unit = {
+    val p = tmpCsv("a.csv", "cat,score\nA,1\nC,2\nB,30\nB,4\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT cat, COUNT(*) AS n FROM t GROUP BY cat ORDER BY 1 DESC", cat)
+    assertEquals(Seq("C", "B", "A"), collectAllRows(q).map(_("cat")))
+  }
+
+  @Test def orderByOrdinalOverDistinct(): Unit = {
+    val p = tmpCsv("a.csv", "a,b\n1,x\n2,y\n1,x\n3,z\n2,y\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // With DISTINCT the sort sits above the dedup and binds against the
+    // projection, so the ordinal is a direct position in the output schema.
+    val q = SqlEngine.execute("SELECT DISTINCT a, b FROM t ORDER BY 2 DESC", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq("z", "y", "x"), rows.map(_("b")))
+    assertEquals(Seq(3, 2, 1), rows.map(_("a")))
+  }
+
+  @Test def orderByOrdinalOverDistinctExpression(): Unit = {
+    val p = tmpCsv("a.csv", "x\n3\n1\n3\n2\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT DISTINCT x * 10 AS s FROM t ORDER BY 1", cat)
+    assertEquals(Seq(10, 20, 30), collectAllRows(q).map(_("s")))
+  }
+
+  @Test def orderByOrdinalOverUnion(): Unit = {
+    val a = tmpCsv("a.csv", "id,v\n2,b\n4,d\n")
+    val b = tmpCsv("b.csv", "id,v\n1,a\n3,c\n")
+    val cat = new Catalog
+    cat.register("a", CsvReader.fromPath(a.toString, CsvOptions()))
+    cat.register("b", CsvReader.fromPath(b.toString, CsvOptions()))
+    // The union's ORDER BY binds against the union output, so the ordinal is a
+    // position in that schema (names come from the leftmost arm).
+    val q = SqlEngine.execute(
+      "SELECT id, v FROM a UNION ALL SELECT id, v FROM b ORDER BY 1 DESC", cat)
+    assertEquals(Seq(4, 3, 2, 1), collectAllRows(q).map(_("id")))
+  }
+
+  @Test def orderByOrdinalOverWindowColumn(): Unit = {
+    val p = tmpCsv("a.csv", "name,score\na,10\nb,30\nc,20\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val q = SqlEngine.execute(
+      "SELECT name, ROW_NUMBER() OVER (ORDER BY score DESC) AS rn FROM t ORDER BY 2", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq("b", "c", "a"), rows.map(_("name")))
+    assertEquals(Seq(1L, 2L, 3L), rows.map(_("rn")))
+  }
+
+  @Test def orderByOrdinalOutOfRangeRejected(): Unit = {
+    val p = tmpCsv("a.csv", "x\n1\n2\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val ex = try { SqlEngine.execute("SELECT x FROM t ORDER BY 5", cat); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.contains("ORDER BY position 5"))
+  }
+
+  @Test def orderByOrdinalZeroRejected(): Unit = {
+    val p = tmpCsv("a.csv", "x\n1\n2\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val ex = try { SqlEngine.execute("SELECT DISTINCT x FROM t ORDER BY 0", cat); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.contains("ORDER BY position 0"))
+  }
+
+  @Test def orderBySignedLiteralIsNotAnOrdinal(): Unit = {
+    val p = tmpCsv("a.csv", "id,score\n3,10\n1,90\n2,30\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // Only a BARE integer literal is an ordinal; `+1` parses as a
+    // SignedExpression and stays a constant sort key, matching GROUP BY and
+    // BigQuery/Postgres/MySQL. Out-of-range bounds don't apply to it either.
+    val q = SqlEngine.execute("SELECT id, score FROM t ORDER BY +9", cat)
+    assertEquals(Seq(3, 1, 2), collectAllRows(q).map(_("id")))
+  }
+
+  @Test def orderByOrdinalReachesAliasThatNameLookupCannot(): Unit = {
+    val p = tmpCsv("a.csv", "a,b\n1,5\n4,4\n2,1\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // Without DISTINCT the sort sits below the projection, so a SELECT alias is
+    // not in scope by name (see docs/gotchas.md). An ordinal is: it expands to
+    // the select item's expression before binding, which is how you sort by a
+    // computed column here.
+    val named = try { SqlEngine.execute("SELECT a + b AS s FROM t ORDER BY s", cat); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(named)
+    assertTrue(named.getMessage, named.getMessage.contains("Unknown column"))
+
+    val q = SqlEngine.execute("SELECT a + b AS s FROM t ORDER BY 1 DESC", cat)
+    assertEquals(Seq(8, 6, 3), collectAllRows(q).map(_("s")))
+  }
+
+  @Test def orderByOrdinalOverWindowInsideArithmetic(): Unit = {
+    val p = tmpCsv("a.csv", "id,val\n1,10\n2,40\n3,15\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // The ordinal expands to `val - LAG(val) OVER (...)`, which rebinds through
+    // the same window resolver the projection uses.
+    val q = SqlEngine.execute(
+      "SELECT id, val - LAG(val, 1, 0) OVER (ORDER BY id) AS delta FROM t ORDER BY 2 DESC", cat)
+    val rows = collectAllRows(q)
+    assertEquals(Seq(2, 1, 3), rows.map(_("id")))
+    assertEquals(Seq(30, 10, -25), rows.map(_("delta")))
+  }
+
   @Test def countDistinct(): Unit = {
     val p = tmpCsv("a.csv", "cat\nA\nA\nB\nB\nC\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))

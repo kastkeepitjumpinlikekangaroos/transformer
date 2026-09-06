@@ -490,21 +490,39 @@ ship a fix or move something from "not done" to "done".
   handle, though `UPPER`/`LOWER` bind fine). Reconciling these in the binder is a
   candidate follow-up.
 
-- **`ORDER BY` binds against the scope at that point in the plan, and an ordinal
-  is a silent no-op.** `ORDER BY` resolves its columns where the sort sits in the
-  plan, not against the SELECT list: over a plain projection or join that is the
-  FROM scope, so `SELECT t0.c0 AS o0 FROM r0 AS t0 ORDER BY o0` fails with
+- **A named `ORDER BY` key binds against the scope at that point in the plan, not
+  against the SELECT list.** `ORDER BY` resolves its columns where the sort sits:
+  over a plain projection or join that is the FROM scope, so
+  `SELECT t0.c0 AS o0 FROM r0 AS t0 ORDER BY o0` fails with
   `Unknown column 'o0'. Available: [t0.c0, t0.c1]` and `ORDER BY t0.c0` is what
   binds. Past a `GROUP BY` the scope is the aggregate output (`ORDER BY c0`), and
   past a `DISTINCT` it is the projection — so there the alias binds and the source
-  name no longer does. Separately, `ORDER BY <ordinal>` parses but does NOT sort:
-  `ORDER BY 2 DESC` returns scan order, because the ordinal binds as an integer
-  literal (a constant sort key) rather than as the second output column, unlike
-  `GROUP BY <ordinal>`, which the binder does resolve positionally. Nothing in the
-  engine or the fuzzers relies on ORDER BY ordinals; resolving them positionally
-  (or rejecting them) is a candidate follow-up. These rules are why
+  name no longer does. An **ordinal is the exception**: `ORDER BY 1` names a
+  SELECT-list position and is resolved before binding at all three sort sites, so
+  it reaches an aliased expression the name form cannot. These rules are why
   `MetaQueryGen.totalOrderKeys` orders a top-n query by its SOURCE columns and
-  emits no `LIMIT` for a `DISTINCT`, windowed, aggregate, or `UNION` shape.
+  emits no `LIMIT` for a `DISTINCT`, windowed, aggregate, or `UNION` shape. That
+  generator was written against the name form only; now that ordinals bind at
+  every sort site they would give a total order in exactly those excluded shapes,
+  so teaching it to emit them is an open widening opportunity, not a constraint.
+
+- **`ORDER BY <ordinal>` used to parse and then silently not sort — fixed.**
+  `ORDER BY 2 DESC` returned scan order, because the ordinal bound as an integer
+  literal (a constant sort key, which the comparator can never use to separate
+  two rows) rather than as the second output column. `GROUP BY <ordinal>` always
+  resolved positionally; ORDER BY never got the equivalent treatment at any of
+  its three binding sites — below a `Project`, above a `Distinct`, and above a
+  `Union`. All three now resolve through `LogicalBuilder.selectListOrdinal`, and
+  an out-of-range position is a hard error (`ORDER BY position 5 is not in select
+  list (size 2)`) instead of a no-op. Two shape rules the resolver inherits from
+  `GROUP BY`, and one that differs: only a **bare** integer literal is an
+  ordinal, so `ORDER BY +1` (a JSqlParser `SignedExpression`) stays a constant
+  sort key; an ORDER BY position **may** point at an aggregate
+  (`SELECT a, SUM(b) ... ORDER BY 2` is standard SQL) where a GROUP BY position
+  may not; and parens are clause-dependent because JSqlParser drops them in
+  `GROUP BY (1)` (a bare `LongValue`, so it *does* resolve positionally, despite
+  what the old doc comment claimed) but keeps `ORDER BY (1)` as a
+  `ParenthesedExpressionList`, which the binder rejects outright.
 
 - **Layout invariance is a property of the window FUNCTION, not of "has a
   window".** The mode-agreement oracles compare result multisets across
