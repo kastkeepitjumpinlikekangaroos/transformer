@@ -19,13 +19,20 @@ import com.transformer.sql.plan._
   *     Concretely it avoids the engine's only partial shapes: `RAND()` (no
   *     parity meaning — excluded entirely), casts that parse (`String ->`
   *     numeric/date, `Boolean ->` float/double), and `ROUND`/`SUBSTRING` with
-  *     NULL numeric arguments (NPE). It also keeps float/double operands out of
-  *     ordering comparisons and `IN` lists: the row path orders via
-  *     `Double.compare` (a total order) while the vector path uses primitive
-  *     IEEE comparisons, and `IN`'s numeric `HashSet` uses `Double.equals` —
-  *     both disagree on `NaN`/`-0.0`, a real pre-existing divergence a
-  *     test-only harness must not trip. Equality (`= <>`) over floats is fine
-  *     (it agrees on those values) and is generated.
+  *     NULL numeric arguments (NPE).
+  *
+  * Float and double leaves draw `NaN`, `±Infinity` and `-0.0` at a low rate
+  * ([[SpecialFloatProb]]), and those operands reach ordering comparisons and
+  * `IN` lists like any other. That is deliberate and load-bearing: the two
+  * shapes AND the values were all held out while `eval` and `evalVec`
+  * disagreed on them (the row path ordered via `Double.compare` while
+  * `VecOps` compared IEEE, and `IN`'s numeric `HashSet` keyed on
+  * `Double.equals`). The engine now agrees on both, so the fuzzer guards the
+  * shapes instead of dodging them, and
+  * `ExprParityFuzzTest.generatorReachesIeeeSpecialValues` asserts — via
+  * [[specialValueCoverage]] — that the corpus really carries `NaN` and `-0.0`
+  * into each, since re-enabling a shape over a corpus that lacks the values
+  * would be green and worthless.
   */
 object ExprGen {
 
@@ -49,7 +56,7 @@ object ExprGen {
         DataType.BooleanType, DataType.StringType)
   private val Numerics: Seq[DataType] =
     Seq(DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType)
-  private val Integrals: Seq[DataType] = Seq(DataType.IntType, DataType.LongType)
+  private val Floatings: Seq[DataType] = Seq(DataType.FloatType, DataType.DoubleType)
 
   private val ArithOps = Seq("+", "-", "*", "/", "%")
   private val EqOps = Seq("=", "==", "<>", "!=")
@@ -80,6 +87,69 @@ object ExprGen {
       expr.dataType == target,
       s"ExprGen type invariant violated: produced ${expr.dataType} for target $target -> $expr")
     new ExprCase(batch, expr)
+  }
+
+  // ---- coverage reporting -------------------------------------------------
+
+  /** Which IEEE special values a generated case actually feeds to the two
+    * operations that once disagreed between `eval` and `evalVec`. Reported
+    * without running either path over the whole tree, so the coverage guard in
+    * `ExprParityFuzzTest` stays a generation-only check.
+    *
+    * `shape` flags say the node exists with a float/double operand; the `nan` /
+    * `negZero` flags say a value of that kind actually reaches it on some row.
+    * Both halves matter: the shapes were held out of this generator while the
+    * engine diverged, and so were the values, so a guard on either alone can be
+    * satisfied while the corpus tests nothing. */
+  final case class SpecialValueCoverage(
+      orderingShape: Boolean,
+      orderingNan: Boolean,
+      orderingNegZero: Boolean,
+      inListShape: Boolean,
+      inListNan: Boolean,
+      inListNegZero: Boolean)
+
+  def specialValueCoverage(c: ExprCase): SpecialValueCoverage = {
+    var ordShape, ordNan, ordNegZero, inShape, inNan, inNegZero = false
+
+    // Does any row of `e` evaluate to NaN / to -0.0? `-0.0` is exactly the
+    // value that is `== 0.0` yet sorts below it in the total order both paths
+    // now compare by.
+    def sawNan(e: Expr): Boolean = anyRow(e)(java.lang.Double.isNaN)
+    def sawNegZero(e: Expr): Boolean =
+      anyRow(e)(d => d == 0.0 && java.lang.Double.compare(d, 0.0) < 0)
+
+    def anyRow(e: Expr)(p: Double => Boolean): Boolean = {
+      var r = 0
+      while (r < c.batch.numRows) {
+        e.eval(c.batch, r) match {
+          case n: java.lang.Number => if (p(n.doubleValue)) return true
+          case _ => ()
+        }
+        r += 1
+      }
+      false
+    }
+
+    def walk(e: Expr): Unit = {
+      e match {
+        case BinOpExpr(op, l, r, _) if OrdOps.contains(op) &&
+          DataType.isNumeric(l.dataType) && DataType.isNumeric(r.dataType) =>
+          if (Floatings.contains(l.dataType) || Floatings.contains(r.dataType)) ordShape = true
+          if (!ordNan) ordNan = sawNan(l) || sawNan(r)
+          if (!ordNegZero) ordNegZero = sawNegZero(l) || sawNegZero(r)
+        case InListExpr(child, items, _) if DataType.isNumeric(child.dataType) =>
+          if (Floatings.contains(child.dataType)) inShape = true
+          val operands = child +: items
+          if (!inNan) inNan = operands.exists(sawNan)
+          if (!inNegZero) inNegZero = operands.exists(sawNegZero)
+        case _ => ()
+      }
+      Shrinker.childrenOf(e).foreach(walk)
+    }
+
+    walk(c.expr)
+    SpecialValueCoverage(ordShape, ordNan, ordNegZero, inShape, inNan, inNegZero)
   }
 
   // ---- batch generation ---------------------------------------------------
@@ -136,8 +206,10 @@ object ExprGen {
     col
   }
 
-  /** A divergence-safe boxed value of `dt`: finite numerics, no `NaN`/`Inf`/
-    * `-0.0`, drawn from small domains so equality / `IN` / `LIKE` actually hit. */
+  /** A boxed value of `dt`, drawn from small domains so equality / `IN` /
+    * `LIKE` actually hit. Float and double additionally draw an IEEE special
+    * value ([[SpecialFloatProb]] of the time) — the operands on which a naive
+    * vectorized ordering or membership test drifts from the row path. */
   private def genValue(r: Rng, dt: DataType): Any = dt match {
     case DataType.IntType =>
       val k = r.between(0, 9)
@@ -151,8 +223,10 @@ object ExprGen {
       else if (k < 7) r.between(-1000, 1000).toLong
       else if (k < 9) r.nextLong() / 1024L
       else r.oneOf(Seq(0L, 1L, -1L, Long.MaxValue, Long.MinValue))
-    case DataType.FloatType => cleanFloat(genDouble(r).toFloat)
-    case DataType.DoubleType => cleanDouble(genDouble(r))
+    case DataType.FloatType =>
+      if (r.bool(SpecialFloatProb)) r.oneOf(SpecialFloats) else genDouble(r).toFloat
+    case DataType.DoubleType =>
+      if (r.bool(SpecialFloatProb)) r.oneOf(SpecialDoubles) else genDouble(r)
     case DataType.BooleanType => r.bool()
     case DataType.StringType => r.oneOf(StringPool)
     case other => throw new IllegalArgumentException(s"genValue: unsupported $other")
@@ -166,10 +240,24 @@ object ExprGen {
     if (r.bool(0.5)) r.oneOf(FloatPool)
     else r.between(-100000, 100000).toDouble / r.oneOf(Seq(1, 2, 4, 8, 100, 1000))
 
-  // Normalize away -0.0 (and guard the impossible NaN/Inf) so generated values
-  // never feed the row-vs-vector ordering divergence on those inputs.
-  private def cleanDouble(d: Double): Double = if (d == 0.0 || d.isNaN || d.isInfinite) 0.0 else d
-  private def cleanFloat(f: Float): Float = if (f == 0.0f || f.isNaN || f.isInfinite) 0.0f else f
+  /** How often a float/double leaf draws an IEEE special value instead of a
+    * finite one. Most float leaves are LITERALS — a schema of 1-3 columns holds
+    * one of the requested float type only about a third of the time — and a
+    * literal gets a single draw, so this rate, not the per-column density, is
+    * what decides whether `NaN` and `-0.0` reach a comparison at all. High
+    * enough for that; low enough that the finite domains still dominate and
+    * keep colliding, which is what makes equality and `IN` interesting.
+    * `generatorReachesIeeeSpecialValues` measures the resulting rate rather
+    * than assuming it. */
+  private val SpecialFloatProb = 0.25
+
+  /** The values the finite generators cannot produce. `+0.0` is deliberately
+    * absent — [[FloatPool]] already carries it, so spending pool weight on it
+    * would only dilute `NaN` and `-0.0`. */
+  private val SpecialDoubles: Seq[Double] = Seq(
+    Double.NaN, -0.0, Double.PositiveInfinity, Double.NegativeInfinity)
+  private val SpecialFloats: Seq[Float] = Seq(
+    Float.NaN, -0.0f, Float.PositiveInfinity, Float.NegativeInfinity)
 
   private def sentinel(dt: DataType): Any = dt match {
     case DataType.IntType => 987654321
@@ -213,9 +301,12 @@ object ExprGen {
       3 -> (() => BinOpExpr("AND", sub(DataType.BooleanType), sub(DataType.BooleanType), DataType.BooleanType)),
       3 -> (() => BinOpExpr("OR", sub(DataType.BooleanType), sub(DataType.BooleanType), DataType.BooleanType)),
       2 -> (() => UnaryOpExpr("NOT", sub(DataType.BooleanType), DataType.BooleanType)),
-      5 -> (() => genComparison(r, schema, depth)),
+      // Comparisons are the densest source of the shapes this fuzzer exists
+      // for: three-valued results, cross-numeric promotion, and the one
+      // operator family whose semantics depend on the operand type.
+      8 -> (() => genComparison(r, schema, depth)),
       2 -> (() => IsNullExpr(sub(r.oneOf(GenTypes)), r.bool())),
-      2 -> (() => genInList(r, schema, depth)),
+      3 -> (() => genInList(r, schema, depth)),
       2 -> (() => genLike(r, schema, depth)),
       1 -> (() => genCaseExpr(r, schema, DataType.BooleanType, depth)),
       1 -> (() => genBoolFunc(r, schema, depth)),
@@ -225,16 +316,26 @@ object ExprGen {
 
   private def genComparison(r: Rng, schema: Schema, depth: Int): Expr = {
     def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
-    // numEq: equality over any numerics (agrees on the excluded NaN/-0).
-    // intOrd: ordering over integrals only (no float/double ordering).
+    // numEq / numOrd: equality and ordering over any numerics, float and double
+    // included.
+    // floatOrd: ordering with at least one floating operand — its own case
+    // because ordering is where the operand type changes the semantics
+    // (`< <= > >=` follow `Double.compare`'s total order, so `NaN` and `-0.0`
+    // answer differently from IEEE), and drawing operand types uniformly leaves
+    // that shape too rare for the property to reach it often.
     // strCmp / boolEq: string ordering + equality, boolean equality.
     r.weighted(
-      (4, 0), (4, 1), (3, 2), (2, 3)) match {
+      (4, 0), (4, 1), (4, 2), (3, 3), (2, 4)) match {
       case 0 =>
         BinOpExpr(r.oneOf(EqOps), sub(r.oneOf(Numerics)), sub(r.oneOf(Numerics)), DataType.BooleanType)
       case 1 =>
-        BinOpExpr(r.oneOf(OrdOps), sub(r.oneOf(Integrals)), sub(r.oneOf(Integrals)), DataType.BooleanType)
+        BinOpExpr(r.oneOf(OrdOps), sub(r.oneOf(Numerics)), sub(r.oneOf(Numerics)), DataType.BooleanType)
       case 2 =>
+        val (lt, rt) =
+          if (r.bool()) (r.oneOf(Floatings), r.oneOf(Numerics))
+          else (r.oneOf(Numerics), r.oneOf(Floatings))
+        BinOpExpr(r.oneOf(OrdOps), sub(lt), sub(rt), DataType.BooleanType)
+      case 3 =>
         BinOpExpr(r.oneOf(EqOps ++ OrdOps), sub(DataType.StringType), sub(DataType.StringType), DataType.BooleanType)
       case _ =>
         BinOpExpr(r.oneOf(EqOps), sub(DataType.BooleanType), sub(DataType.BooleanType), DataType.BooleanType)
@@ -305,11 +406,11 @@ object ExprGen {
     CaseExpr(branches, elseExpr, target)
   }
 
+  /** `x IN (…)` over any generated type. A float/double child routes the
+    * all-literal case through the hoisted numeric `HashSet`, which is the shape
+    * that used to key on `Double.equals` and disagree with `eval`'s `Ops.eq`. */
   private def genInList(r: Rng, schema: Schema, depth: Int): Expr = {
-    // Restricted to Int/Long/String/Boolean: float/double IN lists would feed
-    // the numeric HashSet (Double.equals), which disagrees with eval's Ops.eq
-    // on NaN/-0.0.
-    val childType = r.oneOf(Seq(DataType.IntType, DataType.LongType, DataType.StringType, DataType.BooleanType))
+    val childType = r.oneOf(GenTypes)
     val child = genTyped(r, schema, childType, depth - 1)
     val nItems = r.between(1, 4)
     val items = (0 until nItems).map(_ => genInListItem(r, schema, childType, depth))
@@ -320,8 +421,8 @@ object ExprGen {
     val k = r.between(0, 9)
     if (k < 5) LitExpr(genValue(r, childType), childType) // literal, fast path
     else if (k < 6) LitExpr(null, childType) // NULL item -> 3VL
-    else if (k < 8 && Integrals.contains(childType)) { // cross-numeric literal
-      val other = if (childType == DataType.IntType) DataType.LongType else DataType.IntType
+    else if (k < 8 && DataType.isNumeric(childType)) { // cross-numeric literal
+      val other = r.oneOf(Numerics.filter(_ != childType))
       LitExpr(genValue(r, other), other)
     } else genTyped(r, schema, childType, depth - 1) // subtree -> general path
   }

@@ -369,6 +369,146 @@ class HashAggregateSpillTest {
     assertTrue(s"spillEvents must be > 0, got ${node.snapshot().counter("spillEvents")}",
       node.snapshot().counter("spillEvents") > 0L)
   }
+
+  // ---- Regression: MIN/MAX over a NaN-carrying float column ----------------
+  //
+  // `MinMaxState` advanced its primitive `doubleCur` accumulator with raw IEEE
+  // `v < doubleCur` / `v > doubleCur` in `updateAt`, `updateBatchAt` AND
+  // `merge`. Every comparison against NaN is false in both directions, so the
+  // answer depended on where the NaN landed: seen first it seeded the
+  // accumulator and nothing could beat it, seen later it was skipped. MAX over
+  // [NaN, 5.0] was NaN; over [5.0, NaN] it was 5.0. Because `merge` had the
+  // same shape, partition fan-out and spill flush order moved the answer too.
+  // All three sites now use `java.lang.Double.compare`, the total order
+  // `Ops.cmp` already gives reference types, `ORDER BY` and GREATEST/LEAST:
+  // NaN sorts above every other value, so MAX of a NaN-carrying column is NaN
+  // and MIN is the smallest non-NaN. -0.0 sorts below 0.0 on the same order.
+
+  /** The four values every NaN regression below aggregates, in a fixed order.
+    * MIN is -2.0 and MAX is NaN under the total order, whatever the row order. */
+  private val NanMix: Vector[Double] = Vector(Double.NaN, 5.0, -2.0, 1.0)
+
+  private def nanMixSchema: Schema = Schema(Vector(
+    Field("k", DataType.IntType),
+    Field("d", DataType.DoubleType),
+    Field("f", DataType.FloatType)))
+
+  private def nanMixRow(k: Int, v: Double): Array[Any] = Array[Any](
+    java.lang.Integer.valueOf(k),
+    java.lang.Double.valueOf(v),
+    java.lang.Float.valueOf(v.toFloat))
+
+  /** MIN(d), MAX(d), MIN(f), MAX(f) over `parts`, grouped by `k` when
+    * `grouped`, global otherwise. */
+  private def runNanMinMax(
+      parts: Vector[Vector[Array[Any]]],
+      grouped: Boolean,
+      opts: ExecutionOptions,
+      node: MetricsNode = null): Vector[Vector[Any]] = {
+    val schema = nanMixSchema
+    val plan = new InMemoryPartitionedPlanForAggSpill(schema, parts)
+    val k = ColRefExpr(0, "k", DataType.IntType)
+    val d = ColRefExpr(1, "d", DataType.DoubleType)
+    val f = ColRefExpr(2, "f", DataType.FloatType)
+    val agg = HashAggregateExec(
+      plan,
+      if (grouped) Seq((k, "k")) else Seq.empty,
+      Seq((AggExprMin(d), "mind"), (AggExprMax(d), "maxd"),
+        (AggExprMin(f), "minf"), (AggExprMax(f), "maxf")),
+      opts, node)
+    val out = (0 until agg.numPartitions).iterator.flatMap(agg.execute)
+    drainRows(out, agg.outputSchema)
+  }
+
+  /** The MIN/MAX cells of a one-row result, as the total order requires. */
+  private def assertNanMixExtrema(label: String, row: Vector[Any], offset: Int): Unit = {
+    assertEquals(s"$label MIN(d)", java.lang.Double.valueOf(-2.0), row(offset))
+    assertEquals(s"$label MAX(d)", java.lang.Double.valueOf(Double.NaN), row(offset + 1))
+    assertEquals(s"$label MIN(f)", java.lang.Float.valueOf(-2.0f), row(offset + 2))
+    assertEquals(s"$label MAX(f)", java.lang.Float.valueOf(Float.NaN), row(offset + 3))
+  }
+
+  @Test def minMaxOverNaNIsRowOrderIndependent(): Unit = {
+    // One group per rotation of the same four values: every group holds the
+    // same multiset, only the row order differs. Grouped aggregation takes
+    // `MinMaxState.updateAt`.
+    val rows = NanMix.indices.flatMap { g =>
+      NanMix.indices.map(i => nanMixRow(g, NanMix((g + i) % NanMix.length)))
+    }.toVector
+    val out = runNanMinMax(Vector(rows), grouped = true, ExecutionOptions.Default)
+    assertEquals(NanMix.length, out.length)
+    out.foreach(r => assertNanMixExtrema(s"group ${r(0)}", r, 1))
+  }
+
+  @Test def globalMinMaxOverNaNIsRowOrderIndependent(): Unit = {
+    // No GROUP BY: the whole-batch `MinMaxState.updateBatchAt` path.
+    val forward = NanMix.map(nanMixRow(0, _))
+    val reversed = forward.reverse
+    val a = runNanMinMax(Vector(forward), grouped = false, ExecutionOptions.Default)
+    val b = runNanMinMax(Vector(reversed), grouped = false, ExecutionOptions.Default)
+    assertEquals(1, a.length)
+    assertNanMixExtrema("forward", a.head, 0)
+    assertNanMixExtrema("reversed", b.head, 0)
+  }
+
+  @Test def minMaxOverNaNIsPartitionSplitIndependent(): Unit = {
+    // One row per partition, so every value arrives through `MinMaxState.merge`
+    // rather than through an update loop. Each permutation of the partitions
+    // must give the same answer.
+    val perms = Vector(
+      Vector(0, 1, 2, 3), Vector(3, 2, 1, 0), Vector(1, 3, 0, 2), Vector(2, 0, 3, 1))
+    perms.foreach { perm =>
+      val parts = perm.map(i => Vector(nanMixRow(0, NanMix(i))))
+      val out = runNanMinMax(parts, grouped = false, ExecutionOptions.Default)
+      assertEquals(1, out.length)
+      assertNanMixExtrema(s"partitions ${perm.mkString(",")}", out.head, 0)
+    }
+  }
+
+  @Test def minMaxOverNaNUnderSpillMatchesHeap(): Unit = {
+    // Spill flushes partial states to disk and folds them back through `merge`,
+    // so the restored NaN meets the accumulator in flush order rather than row
+    // order. Enough groups and rows to force several runs.
+    val rng = new Random(20260909L)
+    val parts = (0 until 3).map { _ =>
+      (0 until 3000).map(i => nanMixRow(rng.nextInt(15), NanMix(i % NanMix.length))).toVector
+    }.toVector
+    val expected = runNanMinMax(parts, grouped = true, ExecutionOptions.Default)
+    val node = new MetricsNode(0, "HashAggregateExec", 0, HashAggregateExec.IdxCounterNames)
+    val actual = runNanMinMax(parts, grouped = true, spillyOpts(), node)
+    assertTrue("expected non-empty result", expected.nonEmpty)
+    expected.foreach(r => assertNanMixExtrema(s"heap group ${r(0)}", r, 1))
+    actual.foreach(r => assertNanMixExtrema(s"spill group ${r(0)}", r, 1))
+    // Group keys only: a whole-row multiset compare cannot be used here, because
+    // Scala's `==` on a boxed NaN is primitive `NaN == NaN`, which is false, so
+    // two identical NaN-carrying rows would never match. `assertNanMixExtrema`
+    // above compares the aggregate cells with `java.lang.Double.equals`, which
+    // is bit-exact and agrees with itself on NaN.
+    assertEquals(expected.map(_(0)).toSet, actual.map(_(0)).toSet)
+    assertEquals(expected.length, actual.length)
+    assertTrue(s"spillEvents must be > 0, got ${node.snapshot().counter("spillEvents")}",
+      node.snapshot().counter("spillEvents") > 0L)
+  }
+
+  @Test def minMaxOverSignedZeroFollowsTheTotalOrder(): Unit = {
+    // The same total order separates -0.0 from 0.0, where raw IEEE finds them
+    // equal and keeps whichever arrived first. One value per partition so the
+    // merge site decides, and both orders must agree.
+    def run(values: Vector[Double]): Vector[Any] = {
+      val parts = values.map(v => Vector(nanMixRow(0, v)))
+      val out = runNanMinMax(parts, grouped = false, ExecutionOptions.Default)
+      assertEquals(1, out.length)
+      out.head
+    }
+    Vector(Vector(0.0, -0.0), Vector(-0.0, 0.0)).foreach { values =>
+      val row = run(values)
+      val label = values.mkString(",")
+      assertEquals(s"$label MIN(d)", java.lang.Double.valueOf(-0.0), row(0))
+      assertEquals(s"$label MAX(d)", java.lang.Double.valueOf(0.0), row(1))
+      assertEquals(s"$label MIN(f)", java.lang.Float.valueOf(-0.0f), row(2))
+      assertEquals(s"$label MAX(f)", java.lang.Float.valueOf(0.0f), row(3))
+    }
+  }
 }
 
 private final class InMemoryPartitionedPlanForAggSpill(

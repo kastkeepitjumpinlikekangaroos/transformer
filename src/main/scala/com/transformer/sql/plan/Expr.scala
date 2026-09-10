@@ -381,6 +381,14 @@ final case class InListExpr(child: Expr, items: Seq[Expr], negated: Boolean) ext
       // by the comparator-relevant form so the inner loop is a single
       // `.contains` call. Cross-numeric equality goes through doubleValue
       // (matches Ops.eq); strings/booleans/dates compare structurally.
+      //
+      // The numeric set keys on a value canonicalized by `InListExpr.setKey`,
+      // because boxing imports `java.lang.Double.equals` — bit-pattern
+      // equality, which is the opposite of `Ops.eq`'s primitive `==` on signed
+      // zero (`-0.0` and `0.0` are distinct keys but equal values). `NaN` is
+      // the other half of that mismatch and is handled at the probe instead:
+      // it cannot be expressed as a hash key, since `Ops.eq(NaN, NaN)` is
+      // false.
       val nItems = items.length
       val lits = items.iterator.map(_.asInstanceOf[LitExpr].value).toArray
       var sawNullItem = false
@@ -393,7 +401,7 @@ final case class InListExpr(child: Expr, items: Seq[Expr], negated: Boolean) ext
           var k = 0
           while (k < nItems) {
             val v = lits(k)
-            if (v != null) s.add(java.lang.Double.valueOf(v.asInstanceOf[Number].doubleValue))
+            if (v != null) s.add(java.lang.Double.valueOf(InListExpr.setKey(v.asInstanceOf[Number].doubleValue)))
             k += 1
           }
           s
@@ -418,7 +426,15 @@ final case class InListExpr(child: Expr, items: Seq[Expr], negated: Boolean) ext
           val v = cv.getBoxed(r)
           var found = false
           if (numericSet != null) {
-            found = numericSet.contains(java.lang.Double.valueOf(v.asInstanceOf[Number].doubleValue))
+            val d = v.asInstanceOf[Number].doubleValue
+            // A NaN probe matches no item — `Ops.eq(NaN, x)` is false for every
+            // x, NaN included — so skip the set rather than probe it, since
+            // `java.lang.Double.equals` would report a hit on a NaN literal.
+            // `found` stays false and the row falls through to the branches
+            // below, which keeps three-valued logic intact: `NaN IN (1.0,
+            // NULL)` is NULL, not FALSE.
+            found = !java.lang.Double.isNaN(d) &&
+              numericSet.contains(java.lang.Double.valueOf(InListExpr.setKey(d)))
           } else if (stringSet != null) {
             found = stringSet.contains(v.toString)
           } else {
@@ -464,6 +480,15 @@ final case class InListExpr(child: Expr, items: Seq[Expr], negated: Boolean) ext
     }
     new BooleanVector(values, nulls, cap)
   }
+}
+
+object InListExpr {
+  /** Key a numeric value for the hoisted membership set so that boxed equality
+    * agrees with [[Ops.eq]]'s primitive `==`. Only signed zero needs it:
+    * `-0.0 == 0.0` is true but the two box to different bit patterns, so both
+    * collapse to `+0.0`. `NaN` is not representable as a key at all (it equals
+    * nothing under `Ops.eq`) and is filtered at the probe. */
+  private[plan] def setKey(d: Double): Double = if (d == 0.0) 0.0 else d
 }
 
 final case class LikeExpr(child: Expr, pattern: Expr, negated: Boolean) extends Expr {

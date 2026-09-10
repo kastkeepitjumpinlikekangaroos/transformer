@@ -101,6 +101,21 @@ class ExprBatchTest {
   private val AllNulls: Int => Boolean = _ => true
 
   // ---------------------------------------------------------------------------
+  // Floating-point values on which a naive IEEE implementation and the
+  // `java.lang.Double.compare` total order disagree, plus enough ordinary
+  // values around them for the comparisons to have something to order. Eight
+  // entries so a 64-row batch can carry every ordered pair.
+  // ---------------------------------------------------------------------------
+
+  private val SpecialDoubles: Seq[Double] = Seq(
+    Double.NaN, 0.0, -0.0, 1.0, -1.0,
+    Double.PositiveInfinity, Double.NegativeInfinity, 3.5)
+
+  private val SpecialFloats: Seq[Float] = Seq(
+    Float.NaN, 0.0f, -0.0f, 1.0f, -1.0f,
+    Float.PositiveInfinity, Float.NegativeInfinity, 3.5f)
+
+  // ---------------------------------------------------------------------------
   // Parity assertion.
   //
   // `eval` returns the operand's declared boxed shape (e.g. java.lang.Long for
@@ -562,6 +577,65 @@ class ExprBatchTest {
     }
   }
 
+  /** Ordering over a `Double` column carrying `NaN`, `-0.0` and the infinities.
+    *
+    * Both paths order by `java.lang.Double.compare`'s total order (`NaN` above
+    * every other value and equal to itself, `-0.0 < 0.0`), not by IEEE
+    * primitive comparison, which is not a total order and cannot be: `Ops.cmp`
+    * backs the sort comparators, so the row path is fixed and the vector path
+    * follows it. `l`/`r` walk the pool at different strides so all 8x8 operand
+    * pairs appear across the 64 rows.
+    */
+  @Test def binOpOrderingDoubleNanAndSignedZero(): Unit = {
+    val b = batch(
+      "l" -> doubleCol(i => SpecialDoubles(i % 8)),
+      "r" -> doubleCol(i => SpecialDoubles(i / 8))
+    )
+    Seq("=", "<>", "<", "<=", ">", ">=").foreach { op =>
+      assertParity(
+        BinOpExpr(op,
+          ColRefExpr(0, "l", DataType.DoubleType),
+          ColRefExpr(1, "r", DataType.DoubleType),
+          DataType.BooleanType),
+        b)
+    }
+  }
+
+  /** `Float` counterpart of [[binOpOrderingDoubleNanAndSignedZero]]. Both paths
+    * widen to `double` before comparing — `Ops.cmp` via `Number.doubleValue`,
+    * `VecOps.numericCompare` via its `readDouble` accessor — so `Float` has no
+    * comparison branch of its own and rides the same total order. */
+  @Test def binOpOrderingFloatNanAndSignedZero(): Unit = {
+    val b = batch(
+      "l" -> floatCol(i => SpecialFloats(i % 8)),
+      "r" -> floatCol(i => SpecialFloats(i / 8))
+    )
+    Seq("=", "<>", "<", "<=", ">", ">=").foreach { op =>
+      assertParity(
+        BinOpExpr(op,
+          ColRefExpr(0, "l", DataType.FloatType),
+          ColRefExpr(1, "r", DataType.FloatType),
+          DataType.BooleanType),
+        b)
+    }
+  }
+
+  /** The literal-operand shape (`x > NaN`, `x >= 0.0`), which a WHERE clause
+    * reaches far more often than a column-to-column comparison. NULLs on the
+    * column side too, so the three-valued path runs alongside. */
+  @Test def binOpOrderingDoubleAgainstSpecialLiterals(): Unit = {
+    val b = batch("x" -> doubleCol(i => SpecialDoubles(i % 8), EveryOther))
+    for {
+      lit <- SpecialDoubles
+      op <- Seq("<", "<=", ">", ">=")
+    } assertParity(
+      BinOpExpr(op,
+        ColRefExpr(0, "x", DataType.DoubleType),
+        LitExpr(lit, DataType.DoubleType),
+        DataType.BooleanType),
+      b)
+  }
+
   /** Cross-numeric comparison (Int vs Long). The optimizer doesn't always
     * normalize this through a CAST, so VecOps.compare falls back to its
     * generic accessor path — verify it still matches `eval`. */
@@ -1008,6 +1082,92 @@ class ExprBatchTest {
       LitExpr(2, DataType.IntType))
     assertParity(
       InListExpr(ColRefExpr(0, "x", DataType.IntType), items, negated = false), b)
+  }
+
+  /** `IN` over a `Double` column carrying `NaN` and `-0.0`, against an
+    * all-literal list — the hoisted `HashSet` fast path.
+    *
+    * Membership follows `Ops.eq`, i.e. primitive `==`: `NaN` matches nothing
+    * (not even itself) and `-0.0` matches `0.0`. That is the opposite of what
+    * `java.lang.Double.equals` gives on both counts, so the set has to
+    * canonicalize signed zero and the `NaN` probe has to bypass it. */
+  @Test def inListDoubleNanAndSignedZeroLiterals(): Unit = {
+    val b = batch("x" -> doubleCol(i => SpecialDoubles(i % 8), i => i % 16 == 0))
+    val itemSets = Seq(
+      Seq(Double.NaN),
+      Seq(0.0),
+      Seq(-0.0),
+      Seq(Double.NaN, 1.0),
+      Seq(0.0, -0.0, Double.NaN),
+      Seq(Double.PositiveInfinity, Double.NegativeInfinity))
+    for {
+      values <- itemSets
+      negated <- Seq(false, true)
+    } assertParity(
+      InListExpr(
+        ColRefExpr(0, "x", DataType.DoubleType),
+        values.map(v => LitExpr(v, DataType.DoubleType)),
+        negated),
+      b)
+  }
+
+  /** `Float` counterpart of [[inListDoubleNanAndSignedZeroLiterals]]. Both
+    * paths key on `Number.doubleValue`, so `Float` shares the same set. */
+  @Test def inListFloatNanAndSignedZeroLiterals(): Unit = {
+    val b = batch("x" -> floatCol(i => SpecialFloats(i % 8), i => i % 16 == 0))
+    val itemSets = Seq(
+      Seq(Float.NaN),
+      Seq(0.0f),
+      Seq(-0.0f),
+      Seq(Float.NaN, -0.0f))
+    for {
+      values <- itemSets
+      negated <- Seq(false, true)
+    } assertParity(
+      InListExpr(
+        ColRefExpr(0, "x", DataType.FloatType),
+        values.map(v => LitExpr(v, DataType.FloatType)),
+        negated),
+      b)
+  }
+
+  /** The `NaN`-probe short-circuit must not skip three-valued logic. A `NaN`
+    * matches no item, but a NULL item still makes the result NULL rather than
+    * FALSE — so "not found" has to fall through to the NULL-item branch, not
+    * short-circuit past it to a boolean. */
+  @Test def inListNanProbeWithNullItemStaysThreeValued(): Unit = {
+    val b = batch("x" -> doubleCol(i => SpecialDoubles(i % 8)))
+    val itemSets = Seq(
+      Seq[Any](null, 1.0),
+      Seq[Any](null, Double.NaN),
+      Seq[Any](null, 0.0, Double.NaN))
+    for {
+      values <- itemSets
+      negated <- Seq(false, true)
+    } assertParity(
+      InListExpr(
+        ColRefExpr(0, "x", DataType.DoubleType),
+        values.map(v => LitExpr(v, DataType.DoubleType)),
+        negated),
+      b)
+  }
+
+  /** The same `NaN` / `-0.0` list through the general (non-literal-item) path,
+    * which scans with `Ops.eq` per row. It agrees with `eval` by construction;
+    * the case pins that the fast path above did not diverge FROM it. */
+  @Test def inListNanGeneralPath(): Unit = {
+    val b = batch(
+      "x" -> doubleCol(i => SpecialDoubles(i % 8), i => i % 16 == 0),
+      "y" -> doubleCol(i => SpecialDoubles(i / 8))
+    )
+    val items = Seq(
+      ColRefExpr(1, "y", DataType.DoubleType),
+      LitExpr(Double.NaN, DataType.DoubleType),
+      LitExpr(-0.0, DataType.DoubleType))
+    Seq(false, true).foreach { negated =>
+      assertParity(
+        InListExpr(ColRefExpr(0, "x", DataType.DoubleType), items, negated), b)
+    }
   }
 
   // ===========================================================================

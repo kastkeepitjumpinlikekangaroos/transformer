@@ -17,7 +17,7 @@ navigation hint, not a comprehensive directory listing.
 - `gui/JobSession.scala` (~795 LOC) — mutable FX-thread state for the GUI;
   also tracks per-input UI state (Pending/Loading/Loaded/Failed) now that
   inputs flow through the unified scheduler.
-- `sql/exec/AggregateExec.scala` (~1720 LOC) — biggest file. Every `AggState` subclass
+- `sql/exec/AggregateExec.scala` (~1765 LOC) — biggest file. Every `AggState` subclass
   plus the codec / LongHashMap GROUP BY paths. Primitive states
   (`CountStarState`, `CountState`, `CountIfState`, `LongSumState`,
   `DoubleSumState`, `AvgState`, `MinMaxState`) override `updateBatch` to
@@ -41,9 +41,14 @@ navigation hint, not a comprehensive directory listing.
   DAG scheduler (`runUnifiedDag`), writeOutput, validation re-read, per-status
   `_run.json` writes + per-failure `_validation-<slug>.csv` sample writes +
   per-job `job.json` write + consistency checks.
-- `sql/plan/Expr.scala` (~625 LOC) — `Expr` ADT plus `eval` and `evalVec`
+- `sql/plan/Expr.scala` (~650 LOC) — `Expr` ADT plus `eval` and `evalVec`
   per subtype. `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` each carry
   an `evalVec` override; the rest of the hot subtypes delegate to `VecOps`.
+- `sql/plan/Ops.scala` (~745 LOC) — `Ops` (row-at-a-time binary ops, `eq`,
+  `cmp`), `Casts`, and `VecOps` (one specialized loop per (op, output type)
+  pair, which is most of the length). The floating-point comparison contract
+  both `Expr` paths follow lives on `VecOps.numericCompare`; see
+  [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec).
 - `sql/plan/Funcs.scala` (~550 LOC) — scalar function registry. `Funcs.apply`
   is the row-form dispatcher; `Funcs.applyVec` + the `VecFuncs` object
   carry the vectorized implementations for the hot subset (COALESCE,
@@ -119,10 +124,10 @@ navigation hint, not a comprehensive directory listing.
 
 ### Test suites
 
-- `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` (~1060 LOC)
+- `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` (~1220 LOC)
   — the parity gate for every `Expr.evalVec` override. New overrides extend
   this first; see [testing.md](testing.md) for the coverage matrix.
-- `src/test/scala/com/transformer/fuzz/` (~5600 LOC) — the hand-rolled
+- `src/test/scala/com/transformer/fuzz/` (~5950 LOC) — the hand-rolled
   property-based testing harness (`Rng`, `Props`, `Shrinker`, `RowOracle`), the
   generators (`ExprGen`, `DataGen`, `QueryGen`, `MetaQueryGen` for SQL,
   `JobDagGen` for whole jobs), and the oracles under `oracle/` (`ExprParity`,

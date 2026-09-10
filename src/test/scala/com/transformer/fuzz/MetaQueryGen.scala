@@ -482,11 +482,22 @@ object MetaQueryGen {
 
   private def payloadNullProb(rng: Rng): Double = rng.weighted((5, 0.0), (3, 0.2), (1, 0.5))
 
+  /** A payload column's candidate non-null values. Float/Double columns can also
+    * carry `NaN` / `-0.0` / an infinity, through `DataGen.withSpecialDoubles` —
+    * the pool and the rate live there, so this corpus and the mode-differential
+    * one widen together. PAYLOAD columns only: `KeyTypes` is Int/Long/String, so
+    * a join or GROUP BY key never draws one. What a `NaN` KEY does is a separate
+    * question from what `MIN`/`MAX` does with a `NaN` VALUE (see
+    * `docs/architecture.md` §2a for the answer). */
   private def payloadDomain(rng: Rng, dt: DataType): IndexedSeq[Any] = dt match {
     case DataType.IntType => val b = rng.oneOf(Seq(-1, 0, 1)); (0 until rng.between(2, 4)).map(i => (b + i): Any)
     case DataType.LongType => val b = rng.oneOf(Seq(-1L, 0L, 1L)); (0 until rng.between(2, 4)).map(i => (b + i): Any)
-    case DataType.FloatType => DoublePool.take(rng.between(2, 4)).map(_.toFloat.asInstanceOf[Any])
-    case DataType.DoubleType => DoublePool.take(rng.between(2, 4)).map(_.asInstanceOf[Any])
+    case DataType.FloatType =>
+      DataGen.withSpecialDoubles(
+        rng, DoublePool.take(rng.between(2, 4)).map(_.toFloat.asInstanceOf[Any]), _.toFloat)
+    case DataType.DoubleType =>
+      DataGen.withSpecialDoubles(
+        rng, DoublePool.take(rng.between(2, 4)).map(_.asInstanceOf[Any]), identity)
     case DataType.BooleanType => IndexedSeq[Any](true, false)
     case DataType.StringType => StringPool.take(rng.between(2, 4)).map(_.asInstanceOf[Any])
     case other => throw new IllegalArgumentException(s"unsupported payload type $other")

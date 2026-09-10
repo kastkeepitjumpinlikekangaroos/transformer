@@ -109,6 +109,15 @@ object RowOracle {
   //     projected/group-key values are copied straight from the (identical) input.
   //     The exact columns carry the discriminating identity, so a tolerance on the
   //     floating-point columns cannot mask a wrong group or a dropped row.
+  //
+  //     One thing the tolerance DOES hide, now that `DataGen` draws IEEE specials:
+  //     `+0.0` and `-0.0` compare equal here, so a `MIN`/`MAX` that picked the
+  //     wrong signed zero under one layout would not be reported. That is a
+  //     deliberate trade — reordering a `SUM` over signed zeros legitimately flips
+  //     the sign of a zero result (`-0.0 + -0.0` is `-0.0`, `-0.0 + 0.0` is
+  //     `0.0`), so the comparator cannot separate them without failing on correct
+  //     runs. Signed-zero `MIN`/`MAX` is pinned deterministically instead, by
+  //     `HashAggregateSpillTest.minMaxOverSignedZeroFollowsTheTotalOrder`.
 
   /** Relative tolerance for `Double`-column comparison. Sized for the rounding a
     * different reduction order introduces on a well-conditioned `double` sum

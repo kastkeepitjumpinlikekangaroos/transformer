@@ -626,6 +626,20 @@ unused CTE is never executed. Materialization buffers the body in heap.
 through arithmetic and string ops; `IS NULL` / `IS NOT NULL` for explicit
 checks.
 
+**`NaN` and `-0.0`:** equality follows IEEE and ordering follows a total order,
+so on `FLOAT` / `DOUBLE` columns `NaN = NaN` is FALSE but `NaN <= NaN` is TRUE,
+and `-0.0 = 0.0` is TRUE but `-0.0 < 0.0` is also TRUE. `IN` follows equality, so
+`NaN IN (NaN)` is FALSE — matching `NaN = NaN` and therefore **differing from
+Postgres**, which treats `NaN` as equal to itself. Ordering matches Postgres:
+`NaN` sorts above every other value. Everything that orders follows that one
+total order — `ORDER BY`, `GREATEST`/`LEAST`, and the `MIN`/`MAX` aggregates
+(including as window functions) — so `MAX` over a column containing `NaN` is
+`NaN`, `MIN` over one is the smallest non-`NaN` value, and `MIN` over `0.0` and
+`-0.0` is `-0.0`. Those answers do not depend on row order, partition count or
+whether the aggregate spilled. Both evaluation paths (row-at-a-time and
+vectorized) agree on all of this; see [docs/gotchas.md](docs/gotchas.md) for why
+the two operator families differ.
+
 **Join planning:** for hash joins the planner picks the build side based on
 estimated row counts. INNER joins build the smaller side when the size ratio
 exceeds 2×; LEFT outer always builds right (left stays on probe to preserve

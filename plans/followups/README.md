@@ -4,7 +4,9 @@ Four small, independent workstreams surfaced by a full read of
 `docs/gotchas.md` and the `plans/` tree on 2026-09-05. Three are real SQL
 engine gaps the gotchas doc itself already flags as "a candidate follow-up";
 the fourth is a docs-accuracy pass the same audit turned up as a side effect.
-Plans 04, 01 and 02 are done; 03 remains.
+Plan 05 is a fifth, found while implementing plan 03. Plan 06 is a sixth, found
+by the fuzzers within hours of plan 05 landing the corpus that reaches it.
+**Five are done; 06 is open.**
 Each plan is self-contained: read the file, paste the launch prompt into a
 fresh Claude session, and the agent has what it needs.
 
@@ -24,14 +26,21 @@ free to start.
 | [04](04-perf-docs-reconciliation.md) | Reconcile `plans/perf/` status against actual code | **done** 2026-09-06 | ~half a day | none (docs only) | — |
 | [01](01-order-by-ordinal.md) | `ORDER BY <ordinal>` parses but silently doesn't sort | **done** 2026-09-06 | ~1 day | low | — |
 | [02](02-binder-grouping-parens-and-trim.md) | Binder rejects `(a + b) * c`, `WHERE (x = y)`, `TRIM(x)` | **done** 2026-09-06 | ~1 day | low | — |
-| [03](03-eval-evalvec-nan-parity.md) | `eval` vs `evalVec` disagree on NaN/-0.0 ordering and IN | not started | 2-3 days | medium | — |
+| [03](03-eval-evalvec-nan-parity.md) | `eval` vs `evalVec` disagree on NaN/-0.0 ordering and IN | **done** 2026-09-06 | 2-3 days | medium | — |
+| [05](05-minmax-nan-order-dependence.md) | `MIN`/`MAX` over a NaN-carrying float column is order-dependent | **done** 2026-09-09 | ~1 day | medium | — |
+| [06](06-window-rank-peer-total-order.md) | `RANK`/`DENSE_RANK` rank tied rows separately when the ORDER BY key is NaN | not started | ~half a day | low | 05 (its corpus reaches the bug) |
 
 No plan depends on another. **They do not all touch disjoint files, though** —
 an earlier version of this line claimed they did, and it was wrong: 01 and 02
 both edit `LogicalBuilder.scala` and `SqlEngineTest.scala`, and 02's
 `selectListOrdinal` change lands inside the helper 01 introduced. Run those two
 in sequence, branching the second off the first rather than off `main`. 03
-touches `Expr.scala` / `Ops.scala` and is genuinely independent of both.
+touches `Expr.scala` / `Ops.scala` and is genuinely independent of both. All
+three do edit `docs/gotchas.md` and `docs/testing.md`, so a plan branched off
+`main` after another has landed will conflict there. 05 touches
+`AggregateExec.scala` plus the fuzz generators and oracles (`DataGen`,
+`MetaQueryGen`, `AggDecomposition`, `RowOracle`) and shares no source file with
+any of them — but it edits the same two docs, so the same rule applies.
 
 ## Recommended sequence
 
@@ -67,17 +76,61 @@ along with the uncalled `rebuildExpr` that shared it); and it named one AST
 traversal where there are five — missing the last of them would have made
 `ORDER BY (1)` a silent no-op, re-creating plan 01's bug in a new spelling.
 
-**Remaining — one real engine gap:**
-- Plan 03 — narrowest in practice: only float/double columns actually
-  carrying NaN or -0.0 are affected, and the fuzzers already exclude the
-  shapes that would catch it, which is exactly why it's shipped unnoticed.
+**Done:** plan 03. Numeric ordering (`< <= > >=`) in the vector path now goes
+through `java.lang.Double.compare`, matching `Ops.cmp`'s total order, and the
+`IN` fast path's boxed `HashSet` no longer imports `Double.equals` — signed
+zero is canonicalized into the set and a `NaN` probe bypasses it, falling
+through to the NULL-item branch so `NaN IN (1.0, NULL)` stays NULL. 6
+regressions in `ExprBatchTest` (all six fail against the old code). The fuzzer's
+exclusion came off and a coverage guard went on; 2,000,000 seeds green. Four
+claims in the plan file were wrong or incomplete and are corrected there — most
+consequentially, it named two generator gates where there were three (the third
+being the value generator, which normalized every NaN and -0.0 away, so
+removing only the shape gates would have produced a green and vacuous fuzzer).
+
+**Done:** plan 05. `MinMaxState`'s `Float`/`Double` slot advances through
+`java.lang.Double.compare` at all three sites — `updateAt`, `updateBatchAt` and
+`merge` — instead of raw IEEE `<` / `>`, so `MAX` over a column containing `NaN`
+is `NaN` and `MIN` over one is the smallest non-`NaN`, matching `ORDER BY`,
+`GREATEST`/`LEAST` and Postgres, and no longer moving with row order, partition
+fan-out or spill flush order. That is a user-visible semantic change to an
+aggregate, not only a determinism fix. Five regressions in
+`hash_aggregate_spill_test`, all five failing against the old comparison. The
+corpus half took two generators, not one: `DataGen` and
+`MetaQueryGen.payloadDomain` are independent value pools, and only the first is
+what `DataGen.generate` feeds — so widening `DataGen` alone would have left the
+aggregate-decomposition relation, the one that actually drives `merge`, on an
+all-finite corpus. Both now draw `NaN` / `-0.0` / `±Infinity` through the shared
+`DataGen.withSpecialDoubles`, with a coverage guard on each side. Two claims in
+the plan file were wrong and are corrected there — most consequentially the
+one-corpus assumption above, and a claim that `HashKeys` excludes `Float` /
+`Double` from packed keys (it does not: `isPackable` includes them, and it is
+`isLongFittable`, a different gate, that excludes them).
+
+**Open:** plan 06. `WindowExec.sameKey` compares ORDER BY peers with `Ops.eq`
+while the sort that produced the order used `Ops.cmp`, so `RANK`/`DENSE_RANK`
+give tied `NaN` rows different ranks (a wrong answer, not just a
+layout-dependence) and give strictly-ordered `-0.0`/`0.0` rows the same rank.
+Pre-existing — `WindowExec` is untouched by plan 05 and the failing query holds
+no aggregate — but reachable only since plan 05 widened the corpora, so
+`metamorphic_fuzz_campaign` and `sharded_mode_fuzz_campaign` are **red at seed
+16502 until 06 lands**, deliberately: the alternative was gating the generator
+back down, which is how this repo has hidden engine bugs before. Everything
+else is green — `bazel test //...`, jaffle_shop, `mode_differential_fuzz_campaign`
+at 20000 seeds, and 7 of 8 seed blocks in each of the other two campaigns.
 
 ## How this list was produced
 
 Read `docs/gotchas.md` end to end. Its "Known gotchas" section explicitly
 flagged three items as "a candidate follow-up" — those are plans 01-03 above.
-(One remains flagged there today; plans 01 and 02 moved their entries to fixed
-when they landed.)
+All three have moved to fixed there, and so has the fourth that plan 03's
+implementation added and plan 05 then closed. `docs/gotchas.md` flags exactly
+one "candidate follow-up" today, and the fuzzers wrote it rather than an audit:
+the `RANK`/`DENSE_RANK` peer entry plan 06 covers, which
+`metamorphic_fuzz_campaign` found at seed 16502 once plan 05 widened the corpus
+to carry `NaN`. That is the list feeding itself — each fix in this value domain
+has exposed the next one, and all three so far have been the same mistake in a
+different file.
 Separately, cross-checked `plans/perf/README.md`'s priority table against
 the actual `src/main` code for all 12 perf plans. Ten are landed (01, 02,
 03, 04, 05, 07, 09, 10, 11, 12) — four with nothing left at all, the rest

@@ -60,6 +60,52 @@ class ExprParityFuzzTest {
     }
   }
 
+  /** Coverage guard: the corpus must actually carry `NaN` and `-0.0` into a
+    * float/double ordering comparison and into a numeric `IN` list.
+    *
+    * Those are the two operations where the row and vector paths used to
+    * disagree, and the generator held out BOTH the shapes (ordering restricted
+    * to integrals, `IN` restricted to Int/Long/String/Boolean) and the values
+    * (every generated `NaN`/`Inf`/`-0.0` normalized to `0.0`) while the engine
+    * diverged. Re-enabling only the shapes would leave the fuzzer green over a
+    * corpus that never produces the values that break them, so both halves are
+    * measured. Prints the tally for the PR. */
+  @Test def generatorReachesIeeeSpecialValues(): Unit = {
+    val n = 4000
+    var ordShape, ordNan, ordNegZero, inShape, inNan, inNegZero = 0
+    var seed = 0
+    while (seed < n) {
+      val cov = ExprGen.specialValueCoverage(ExprGen.generate(new Rng(seed.toLong)))
+      if (cov.orderingShape) ordShape += 1
+      if (cov.orderingNan) ordNan += 1
+      if (cov.orderingNegZero) ordNegZero += 1
+      if (cov.inListShape) inShape += 1
+      if (cov.inListNan) inNan += 1
+      if (cov.inListNegZero) inNegZero += 1
+      seed += 1
+    }
+    println(f"[expr-parity] IEEE special-value coverage over $n seeds: " +
+      f"float ordering shape=$ordShape (NaN=$ordNan, -0.0=$ordNegZero); " +
+      f"float IN shape=$inShape (NaN=$inNan, -0.0=$inNegZero)")
+    // The shape half: a float/double operand reaching an ordering comparison
+    // (~6% of seeds) or an IN list (~1.8%). Both are narrow by construction —
+    // each needs a Boolean-typed node, then that specific producer, then a
+    // floating operand type — so every bound below separates "rare" from
+    // "gone" with a 2-3x margin rather than pinning the measured rate.
+    assertTrue(s"no float/double ordering comparison generated (shape=$ordShape)", ordShape > 100)
+    assertTrue(s"no float/double IN list generated (shape=$inShape)", inShape > 30)
+    // The value half, ~1% and ~0.7% of seeds. Rarer than the shapes because the
+    // operand also has to CARRY the value: a literal gets one draw, and a
+    // subtree above a column washes -0.0 out (though not NaN, which
+    // propagates). This half is the one that would silently go to zero if the
+    // value generator drifted back to normalizing NaN/-0.0 away, leaving the
+    // re-enabled shapes green over a corpus that cannot break them.
+    assertTrue(s"NaN never reaches an ordering comparison (nan=$ordNan)", ordNan > 10)
+    assertTrue(s"-0.0 never reaches an ordering comparison (negZero=$ordNegZero)", ordNegZero > 10)
+    assertTrue(s"NaN never reaches an IN list (nan=$inNan)", inNan > 8)
+    assertTrue(s"-0.0 never reaches an IN list (negZero=$inNegZero)", inNegZero > 8)
+  }
+
   /** The generator's own type invariant holds across a block of seeds:
     * `generate` asserts `expr.dataType == target` internally, so a violation
     * would throw here. */

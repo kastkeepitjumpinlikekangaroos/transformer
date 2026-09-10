@@ -36,10 +36,20 @@ relevant module lives, and that you'll follow the workflow in
    override is what wins on the no-GROUP-BY fast path in
    `HashAggregateExec`. See `LongSumState.updateBatch` for the canonical
    shape (pattern match on `LongVector` / `IntVector` / generic fallback).
-4. Wire it in `AggState.init` (`AggregateExec.scala`) and
+4. **If the state ORDERS its input**, compare through the engine's total order,
+   not raw IEEE `<` / `>`. On a primitive `double` slot that is
+   `java.lang.Double.compare` (`Ops.cmp`'s order, no boxing); on a boxed slot it
+   is `Ops.cmp` itself. Every comparison against `NaN` is false in both
+   directions, so a raw `<` makes the answer depend on row order, partition
+   fan-out and spill flush order — which is exactly what `MinMaxState` did (see
+   [gotchas.md](gotchas.md)). The corpus half matters as much as the code half:
+   `DataGen` and `MetaQueryGen.payloadDomain` draw `NaN` / `-0.0` / `±Infinity`
+   into float columns, and a new ordering state wants a coverage guard asserting
+   they reach it.
+5. Wire it in `AggState.init` (`AggregateExec.scala`) and
    `LogicalBuilder.bindAgg` (`sql/plan/LogicalBuilder.scala`).
-5. Test it.
-6. Update [`README.md`'s "SQL features"](../README.md#sql-features) and (if
+6. Test it.
+7. Update [`README.md`'s "SQL features"](../README.md#sql-features) and (if
    the change affects window behaviour) the window-fn note in
    [architecture.md §6](architecture.md#6-window-functions-two-stage-logical-binding).
 
@@ -291,9 +301,13 @@ engine — the parity fuzzer then guards its `evalVec` override automatically):
 2. Hold the two invariants `ExprGen` documents: **type-correct** (the node's
    `dataType` must equal the requested target — `generate` asserts this) and
    **total** (never generate inputs that throw — mirror the existing exclusions
-   for partial casts, NULL `ROUND`/`SUBSTRING` scale args, and float/double
-   `ordering` / `IN`). If your node genuinely composes a new partial shape,
-   extend `oracle/ExprParity` rather than letting the generator throw.
+   for partial casts and NULL `ROUND`/`SUBSTRING` scale args). If your node
+   genuinely composes a new partial shape, extend `oracle/ExprParity` rather
+   than letting the generator throw. Totality is the *only* reason to exclude a
+   shape: a shape held out because the engine diverges on it needs an engine
+   fix plus a coverage guard on the way back in, not a permanent gate — see
+   `generatorReachesIeeeSpecialValues` and the `NaN`/`-0.0` entry in
+   [gotchas.md](gotchas.md).
 3. Also add the deterministic case to
    `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` — that suite is
    the per-override gate; the fuzzer is the generative net over it.

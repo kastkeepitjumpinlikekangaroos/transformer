@@ -257,6 +257,36 @@ class MetamorphicFuzzTest {
     }
   }
 
+  /** The aggregate-decomposition relation reaches `NaN` / `-0.0` / infinite
+    * inputs, not just every column TYPE. It is the relation that drives
+    * `MinMaxState.merge` — the one-shot side keeps a single accumulator while
+    * the grouped side merges one per group across partitions and spill runs —
+    * so it is the relation that would have caught `MIN`/`MAX` over a
+    * `NaN`-carrying float column being order-dependent. It did not, because
+    * `MetaQueryGen`'s payload pool was all-finite: the relation was checking the
+    * right thing over inputs that could not break it. This guard is what stops
+    * that pool narrowing back. */
+  @Test def aggDecompositionReachesIeeeSpecialValues(): Unit = {
+    val n = 2000
+    var nan, negZero, infinite = 0
+    var seed = 0
+    while (seed < n) {
+      AggDecomposition.specialValueCoverage(MetaQueryGen.generate(new Rng(seed.toLong))).foreach { c =>
+        if (c.nan) nan += 1
+        if (c.negZero) negZero += 1
+        if (c.infinite) infinite += 1
+      }
+      seed += 1
+    }
+    println(s"[metamorphic] agg-decomposition IEEE coverage over $n seeds: " +
+      s"NaN=$nan -0.0=$negZero infinity=$infinite")
+    // Bounds ~3x below the measured rates: they separate a pool that stopped
+    // producing the value from one that merely drifted, and do not pin a rate.
+    assertTrue(s"agg-decomposition never aggregates a NaN (nan=$nan)", nan > 25)
+    assertTrue(s"agg-decomposition never aggregates a -0.0 (negZero=$negZero)", negZero > 15)
+    assertTrue(s"agg-decomposition never aggregates an infinity (infinite=$infinite)", infinite > 12)
+  }
+
   /** The join-commutativity relation must actually RUN, not skip, on a healthy
     * share of seeds. It has nothing to check for a join-free query and skips a
     * windowed one (whose tie-break legitimately follows the order the join emits

@@ -167,8 +167,10 @@ object Shrinker {
   }
 
   /** Immediate `Expr` children, flattened left-to-right. Paired with
-    * [[rebuild]] so the recursion can swap one child and reassemble the node. */
-  private def childrenOf(e: Expr): Seq[Expr] = e match {
+    * [[rebuild]] so the recursion can swap one child and reassemble the node;
+    * `private[fuzz]` because [[ExprGen.specialValueCoverage]] walks trees with
+    * it too, and one traversal is easier to keep exhaustive than two. */
+  private[fuzz] def childrenOf(e: Expr): Seq[Expr] = e match {
     case LitExpr(_, _) => Nil
     case ColRefExpr(_, _, _) => Nil
     case CastExpr(c, _) => Seq(c)

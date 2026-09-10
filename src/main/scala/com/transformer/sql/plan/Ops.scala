@@ -633,7 +633,28 @@ object VecOps {
   }
 
   /** Numeric comparison via double promotion — matches [[Ops.cmp]]'s
-    * cross-numeric semantics. */
+    * cross-numeric semantics.
+    *
+    * The two operator families use deliberately different primitives, because
+    * [[Ops]] does:
+    *
+    *   - '''Equality''' (`=` `<>`) is primitive `==` / `!=`, matching
+    *     [[Ops.eq]]'s `x.doubleValue == y.doubleValue`. IEEE rules: `NaN`
+    *     equals nothing (itself included), `-0.0 == 0.0`.
+    *   - '''Ordering''' (`< <= > >=`) goes through `java.lang.Double.compare`,
+    *     matching [[Ops.cmp]]. That is a total order — `NaN` sorts above every
+    *     other value and equals itself, `-0.0` sorts below `0.0` — and it has
+    *     to be, since `Ops.cmp` also backs the sort comparators, where IEEE
+    *     comparison would violate the `Comparator` contract. Using the raw
+    *     `<` operator here instead would make the same `Expr` answer
+    *     differently depending on whether the caller reached `eval` or
+    *     `evalVec`. `Double.compare` takes primitive `double`s, so this costs
+    *     no boxing.
+    *
+    * `Float` has no branch of its own: `readDouble` widens `FloatVector` (and
+    * `LongVector` / `IntVector`) to `double` exactly as `Number.doubleValue`
+    * does on the row side, so one implementation covers every numeric type.
+    */
   private def numericCompare(
       op: String,
       l: ColumnVector,
@@ -660,28 +681,28 @@ object VecOps {
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readDouble(l, i) < readDouble(r, i)
+          else values(i) = java.lang.Double.compare(readDouble(l, i), readDouble(r, i)) < 0
           i += 1
         }
       case "<=" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readDouble(l, i) <= readDouble(r, i)
+          else values(i) = java.lang.Double.compare(readDouble(l, i), readDouble(r, i)) <= 0
           i += 1
         }
       case ">" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readDouble(l, i) > readDouble(r, i)
+          else values(i) = java.lang.Double.compare(readDouble(l, i), readDouble(r, i)) > 0
           i += 1
         }
       case ">=" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readDouble(l, i) >= readDouble(r, i)
+          else values(i) = java.lang.Double.compare(readDouble(l, i), readDouble(r, i)) >= 0
           i += 1
         }
       case other => throw new IllegalStateException(s"Unknown numeric compare op '$other'")

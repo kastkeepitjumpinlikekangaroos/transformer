@@ -174,6 +174,23 @@ null bits / null elements; for hash-join probes that need NULL to short-
 circuit a non-match, the codec exposes `encodeFromBatchSkipIfAnyNull`,
 which returns the Java `null` sentinel instead of a key.
 
+**A `NaN` or `-0.0` key.** Float / Double keys are packed, so `PackedBytesCodec`
+writes them through `Float.floatToIntBits` / `Double.doubleToLongBits`. Those
+canonicalize every `NaN` payload to one bit pattern and keep `-0.0` distinct
+from `0.0`, so all `NaN` rows land in one group and signed zeros land in two.
+`ObjectArrayCodec` (a mixed key that includes a float column) and
+`CountDistinctState`'s `java.util.HashSet` both compare with
+`java.lang.Double.equals`, which is the same bit-level rule — so grouping,
+`DISTINCT`, `COUNT(DISTINCT …)` and equi-join (every equi-join is a
+`HashJoinExec`, and it keys through the same codecs) all agree with each other
+on these values, whichever codec a given key shape picks. Note this is NOT
+`Ops.eq`'s answer, which follows IEEE: `NaN = NaN` is FALSE and `-0.0 = 0.0` is
+TRUE, the opposite of the key rule on both. A grouping key is an identity, not
+an equality predicate — SQL groups `NULL` with `NULL` on the same reasoning —
+but the split is ours, not Postgres's: Postgres has no split here because its
+`float8` `=` already treats `NaN` as equal to itself and `-0.0` as distinct from
+`0.0`. See the `NaN` / `-0.0` note in [gotchas.md](gotchas.md).
+
 **Single-Long fast path (`LongHashMap`).** When `GROUP BY` / `JOIN ON` boils
 down to one fixed-width-numeric ColRef key (Int / Long / Date / Timestamp /
 Boolean — `KeyCodec.isLongFittable`), `HashAggregateExec` and `HashJoinExec`
@@ -819,6 +836,20 @@ If you write a new operator that needs to OWN an output column (e.g. to
 mutate it after construction), copy via `ColumnVector.copyTo` instead of
 relying on the alias.
 
+**Floating-point comparison contract.** A vectorized helper may not reach for
+the raw primitive operator just because the operands are `double`. Equality
+(`= <>`) is primitive `==` / `!=` and ordering (`< <= > >=`) is
+`java.lang.Double.compare`, in *both* paths — so `NaN = NaN` is FALSE while
+`NaN <= NaN` is TRUE, and `-0.0 = 0.0` is TRUE while `-0.0 < 0.0` is also TRUE.
+That is not an accident of two implementations: `Ops.cmp` backs the sort
+comparators as well, and IEEE comparison is not a total order, so ordering has
+an obligation equality does not. The same rule reaches `IN`, where the
+literal-hoisting `HashSet` would otherwise import `java.lang.Double.equals`
+(bit-pattern equality — the opposite of `Ops.eq` on both `NaN` and `-0.0`);
+`InListExpr.setKey` canonicalizes signed zero into the set and a `NaN` probe
+bypasses it. Both were live divergences until recently; see
+[gotchas.md](gotchas.md).
+
 **When to override `evalVec` on a new `Expr`.** Override when the expression
 shows up in `ProjectExec` / `FilterExec` hot paths and a primitive-array loop
 saves real time. Leave the default for one-off shapes (rarely-used scalar
@@ -910,7 +941,14 @@ lookup + N typed primitive reads, instead of the old N-per-row
 the current extremum in a boxed `Any` slot that allocated a fresh
 `java.lang.Long`/`Double` every time the extremum advanced, it tracks the
 running value in unboxed `longCur` / `doubleCur` slots and only boxes once
-at `finish()`. The result type field decides which slot is canonical.
+at `finish()`. The result type field decides which slot is canonical. The
+`doubleCur` slot advances through `java.lang.Double.compare`, not raw IEEE
+`<` / `>` — the same total order `Ops.cmp` gives the boxed slot, `SortExec`
+gives `ORDER BY`, and `Funcs.pickByOrdering` gives `GREATEST`/`LEAST`, so
+`NaN` is the largest value and a `MIN`/`MAX` over one does not move with row
+order, partition fan-out or spill flush order. `compare` takes primitives, so
+the total order costs no boxing in the loop the slot exists to keep
+allocation-free.
 
 ### 6. Window functions: two-stage logical binding
 

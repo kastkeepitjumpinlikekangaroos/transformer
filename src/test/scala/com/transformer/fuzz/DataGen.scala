@@ -142,13 +142,36 @@ object DataGen {
     ColumnSpec(rng.weighted((5, 0.0), (4, 0.15), (2, 0.5), (1, 1.0)), genDomain(rng, dt))
   }
 
-  // Small, well-separated pools. Doubles/floats are spaced well above the
-  // comparison tolerance so a Double group key never gets merged with a
+  // Small, well-separated pools. The finite doubles/floats are spaced well above
+  // the comparison tolerance so a Double group key never gets merged with a
   // neighbour by RowOracle's tolerant compare.
   private val DoublePool: IndexedSeq[Double] =
     IndexedSeq(0.0, 0.25, 0.5, 1.0, 2.0, -1.0, -2.5, 3.5, 10.0, 100.0)
   private val StringPool: IndexedSeq[String] =
     IndexedSeq("", "a", "b", "c", "d", "ab", "abc", "x", "y", "z")
+
+  /** IEEE values a Float/Double column's domain can carry on top of
+    * [[DoublePool]]. Ordered by how much of the engine they exercise, because
+    * [[withSpecialDoubles]] takes a prefix: `NaN` is what raw IEEE comparisons
+    * get wrong (every comparison against it is false in both directions), `-0.0`
+    * is the value that is `== 0.0` yet sorts below it, and the infinities cover
+    * the saturating end of arithmetic. `+0.0` is not here — [[DoublePool]]
+    * already has it, and listing it again would only dilute the rest. Same pool
+    * and same reasoning as `ExprGen.SpecialDoubles`, which widened the
+    * EXPRESSION corpus; this widens the DATA corpus, which is what the
+    * layout-differential properties aggregate over. */
+  private[fuzz] val SpecialDoubles: IndexedSeq[Double] =
+    IndexedSeq(Double.NaN, -0.0, Double.PositiveInfinity, Double.NegativeInfinity)
+
+  /** Probability that a Float/Double column's domain carries IEEE specials at
+    * all. A quarter of float columns is low enough to leave most of the corpus
+    * on ordinary finite arithmetic and high enough that `MIN`/`MAX` over a
+    * `NaN`-carrying column lands on a workable share of seeds — the shape is
+    * only reached on ~7% of them to begin with. The joint rate is measured by
+    * `ModeDifferentialFuzzTest.generatorReachesMinMaxOverIeeeSpecialValues` and
+    * `MetamorphicFuzzTest.aggDecompositionReachesIeeeSpecialValues`, which are
+    * what stop it drifting back to zero. */
+  private val SpecialValueProb = 0.25
 
   /** A column's candidate non-null values: a small slice of a pool (or a narrow
     * integer window), guaranteeing collisions. */
@@ -162,9 +185,9 @@ object DataGen {
       val base = rng.oneOf(Seq(-2L, -1L, 0L))
       (0 until w).map(i => (base + i): Any)
     case DataType.FloatType =>
-      pickSubset(rng, DoublePool.map(_.toFloat))
+      withSpecialDoubles(rng, pickSubset(rng, DoublePool.map(_.toFloat)), _.toFloat)
     case DataType.DoubleType =>
-      pickSubset(rng, DoublePool)
+      withSpecialDoubles(rng, pickSubset(rng, DoublePool), identity)
     case DataType.BooleanType =>
       rng.oneOf(Seq(
         IndexedSeq[Any](true, false),
@@ -175,6 +198,23 @@ object DataGen {
     case other =>
       throw new IllegalArgumentException(s"DataGen.genDomain: unsupported $other")
   }
+
+  /** `base` plus a prefix of [[SpecialDoubles]], on [[SpecialValueProb]] of the
+    * columns it is asked about. A prefix rather than a random subset so `NaN` —
+    * the one value whose absence made `MIN`/`MAX` order-dependence invisible for
+    * as long as it did — is present whenever specials are on at all, while the
+    * infinities ride along less often. `narrow` maps a `Double` into the
+    * column's own boxed type.
+    *
+    * Shared with `MetaQueryGen.payloadDomain`: the metamorphic and sharded
+    * fuzzers build their relations from their own value pools, not from
+    * [[generate]], so widening this generator alone would have left the
+    * aggregate-decomposition relation — the one that drives `MinMaxState.merge`
+    * — on an all-finite corpus. */
+  private[fuzz] def withSpecialDoubles(
+      rng: Rng, base: IndexedSeq[Any], narrow: Double => Any): IndexedSeq[Any] =
+    if (!rng.bool(SpecialValueProb)) base
+    else base ++ SpecialDoubles.take(rng.between(1, SpecialDoubles.length)).map(narrow)
 
   /** A non-empty contiguous slice of `pool`, sized for collisions (2..min(pool,6)). */
   private def pickSubset[A](rng: Rng, pool: IndexedSeq[A]): IndexedSeq[Any] = {

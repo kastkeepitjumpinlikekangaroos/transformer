@@ -411,18 +411,115 @@ ship a fix or move something from "not done" to "done".
   that flips `spillEnabled = true` on every task regardless of the
   per-task config. See [docs/benchmarking.md](benchmarking.md) for the
   full enablement matrix.
-- **`eval` and `evalVec` disagree on `NaN` / `-0.0` ordering.** Numeric
-  *ordering* comparisons (`< <= > >=`) take different code in the two paths:
-  the row path (`Ops.cmp`) uses `java.lang.Double.compare` (a total order — `NaN`
-  sorts above everything, `-0.0 < 0.0`), while the vector path
-  (`VecOps.numericCompare`) uses primitive IEEE comparisons (`NaN` compares
-  false everywhere, `-0.0 == 0.0`). For all finite, non-`-0.0` values they
-  agree; they diverge only on `NaN` / `-0.0` operands, which a float/double
-  column can carry (e.g. `x / 0.0`). The numeric `IN` path has the same shape
-  (`Double.equals` in the vector HashSet vs `Ops.eq` per row). `ExprParityFuzzTest`
-  deliberately does not generate float/double ordering or `IN` so the suite
-  stays green; reconciling the two paths in `src/main` is a candidate follow-up.
-  (Equality `= <>` agrees on these values and is covered.)
+- **`eval` and `evalVec` used to disagree on `NaN` / `-0.0` — fixed, and the
+  two operator families deliberately follow different rules.** Numeric
+  *ordering* (`< <= > >=`) and `IN`-list membership each took different code in
+  the two paths and diverged, in opposite directions, on exactly the operands a
+  float/double column can carry but the finite generators never produced
+  (`0.0 / 0.0`, `-1.0 * 0.0`):
+
+  - **Ordering.** The row path (`Ops.cmp`) uses `java.lang.Double.compare` — a
+    total order, `NaN` above everything and equal to itself, `-0.0 < 0.0` —
+    while `VecOps.numericCompare` compared raw IEEE (`NaN` false everywhere,
+    `-0.0 == 0.0`). The vector path now goes through `Double.compare` too. The
+    direction was forced: `Ops.cmp` also backs the sort comparators, and IEEE
+    comparison is not a total order, so it cannot satisfy the `Comparator`
+    contract. `Double.compare` takes primitive `double`s, so this costs no
+    boxing. `Float` has no branch of its own — `VecOps.readDouble` widens it
+    exactly as `Number.doubleValue` does on the row side.
+  - **`IN`-list membership.** The row path calls `Ops.eq` (primitive `==`:
+    `NaN` matches nothing, `-0.0 == 0.0`), while `InListExpr.evalVec`'s
+    literal-hoisting fast path boxed into a `HashSet[java.lang.Double]` and so
+    inherited `Double.equals` — bit-pattern equality, the opposite on *both*
+    counts. The set now keys through `InListExpr.setKey`, which collapses
+    `-0.0` to `0.0`, and a `NaN` probe skips the set entirely. Skipping (rather
+    than answering FALSE) is what keeps three-valued logic intact: a `NaN` that
+    matches nothing still falls into the NULL-item branch, so
+    `NaN IN (1.0, NULL)` is NULL, not FALSE.
+
+  So equality and ordering answer differently on the same operands by design —
+  `NaN = NaN` is FALSE while `NaN <= NaN` is TRUE — because ordering has a
+  total-order obligation equality does not. **This diverges from Postgres**,
+  whose `float8` treats `NaN` as equal to itself and `-0.0` as distinct from
+  `0.0` in *both* families. We match Postgres on ordering (it too sorts `NaN`
+  highest) and not on `=` / `IN`. The alternative — making `IN` follow
+  `Double.equals` — would have split `x IN (y)` from `x = y`, which is a
+  contradiction inside the engine rather than a difference from another one; an
+  internal contradiction is the worse of the two, so the engine's own `Ops.eq`
+  won.
+
+  `ExprParityFuzzTest` used to hold out three things at once: float/double
+  ordering, float/double `IN`, *and* every `NaN`/`Inf`/`-0.0` value (normalized
+  to `0.0` in `ExprGen.genValue`). All three are gone, and
+  `generatorReachesIeeeSpecialValues` asserts both the shapes and the values are
+  reached — removing the shape gates alone would have left the fuzzer green over
+  a corpus that could not break them.
+
+- **`MIN`/`MAX` over a `NaN`-carrying float column used to be order-dependent —
+  fixed.** `MinMaxState` kept a primitive `doubleCur` accumulator for
+  `Float`/`Double` and advanced it with raw IEEE `v < doubleCur` /
+  `v > doubleCur`, in `updateAt`, `updateBatchAt` *and* `merge`
+  (`AggregateExec.scala`). Every `NaN` comparison is false, so the result
+  depended on where the `NaN` landed: seen **first** it became the accumulator
+  and stuck forever (nothing could beat it), seen **later** it was skipped
+  entirely. `MAX(x)` over `[NaN, 5.0]` was `NaN`; over `[5.0, NaN]` it was
+  `5.0`. Because `merge` had the same shape, the answer also moved with
+  partition fan-out and spill flush order, not just row order within a batch.
+
+  All three sites now advance through `java.lang.Double.compare`, the total
+  order the class's own reference-type branch already used (`Ops.cmp`), and the
+  one `ORDER BY` (`SortExec.rowOrdering`) and `GREATEST`/`LEAST`
+  (`Funcs.pickByOrdering`) follow. So **`MAX` of a column containing `NaN` is
+  `NaN` and `MIN` of one is the smallest non-`NaN`**, agreeing with
+  `ORDER BY x DESC LIMIT 1` and with Postgres; `-0.0` sorts below `0.0` on the
+  same order, so `MIN` over signed zeros is `-0.0` rather than whichever arrived
+  first. `compare` takes primitive doubles, so the fix costs no boxing in loops
+  the primitive slots exist to keep allocation-free — `Ops.cmp(a: Any, b: Any)`
+  would have. This is a user-visible semantic change to an aggregate, not just a
+  determinism fix.
+
+  It was **not** an `eval`/`evalVec` parity bug — both paths use the same
+  accumulator and agreed with each other — which is why none of the
+  `ExprBatchTest` / `ExprParityFuzzTest` gates reached it. It is a
+  layout-dependence bug of exactly the kind the mode-differential and
+  metamorphic fuzzers exist to catch, and they missed it only because the
+  corpora were all-finite. Fixing the comparison was therefore half the work:
+  `DataGen` (the mode-differential corpus) and `MetaQueryGen.payloadDomain` (the
+  metamorphic and sharded corpora, which build their relations from their own
+  pool and do **not** call `DataGen.generate`) now draw `NaN`, `-0.0` and
+  `±Infinity` into a quarter of float columns through the shared
+  `DataGen.withSpecialDoubles`, and two coverage guards
+  (`generatorReachesMinMaxOverIeeeSpecialValues`,
+  `aggDecompositionReachesIeeeSpecialValues`) assert the values really reach a
+  `MIN`/`MAX`. Deterministic regressions in `hash_aggregate_spill_test` pin row
+  order, batch shape, partition split and spill flush order. One residue worth
+  knowing: `RowOracle`'s tolerant comparator treats `+0.0` and `-0.0` as equal
+  (it must — reordering a `SUM` over signed zeros legitimately flips the sign of
+  a zero), so a signed-zero `MIN`/`MAX` divergence is invisible to the
+  layout-differential properties and is pinned by the deterministic regression
+  instead.
+
+- **`RANK` / `DENSE_RANK` rank tied rows separately when the ORDER BY key is
+  `NaN` — a candidate follow-up.** `WindowExec.sameKey` decides whether two rows
+  are ORDER BY peers and compares with `Ops.eq`, but the rows were sorted with
+  `Ops.cmp`. The two disagree on exactly the values the rest of the engine now
+  reconciles: `Ops.eq(NaN, NaN)` is FALSE where the sort ties them, so tied rows
+  get different ranks; `Ops.eq(-0.0, 0.0)` is TRUE where the sort separates them,
+  so strictly-ordered rows share a rank. The `NaN` direction is a plainly wrong
+  answer — `DENSE_RANK()` over a partition whose rows all tie must be `1` for
+  every row, and it is not. Only `RANK` (`:441`) and `DENSE_RANK` (`:453`) call
+  `sameKey`; `ROW_NUMBER`, `LAG`/`LEAD` and `PARTITION BY` are unaffected, the
+  last because partitioning goes through the key codecs (see
+  [architecture.md](architecture.md) §2a).
+
+  Third instance of one family, after the `evalVec` ordering comparisons and
+  `MinMaxState`'s accumulator: an ordering site that reached for raw IEEE
+  instead of the engine's one total order. Found by
+  `metamorphic_fuzz_campaign` and `sharded_mode_fuzz_campaign`, both red at
+  seed 16502, immediately after the `MIN`/`MAX` fix above widened the corpora to
+  carry `NaN` — the bug is older than that widening, which only made it
+  reachable. Reproduce with `FUZZ_SEED=16502 FUZZ_SEEDS=1`. See
+  [plan 06](../plans/followups/06-window-rank-peer-total-order.md).
 
 - **Mode-differential comparison is a multiset with a floating-point tolerance.**
   The `mode_differential_fuzz_test` (and the metamorphic `MetaModeDifferential`)

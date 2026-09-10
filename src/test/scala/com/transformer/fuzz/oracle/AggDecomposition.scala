@@ -102,6 +102,31 @@ object AggDecomposition {
     else Some(aggColumns(rel).map(i => rel.schema.fields(i).dataType).toSet)
   }
 
+  /** Whether the columns [[check]] aggregates carry IEEE special values on some
+    * row. `MinMaxState.merge` — the site row-order-only coverage never reaches —
+    * is what the grouped side of this relation drives, so the relation is only
+    * as strong as the values `MetaQueryGen` puts in those columns.
+    * `MetamorphicFuzzTest.aggDecompositionReachesIeeeSpecialValues` is the guard
+    * that keeps them there. `None` when the relation has nothing to check, the
+    * same condition [[coveredTypes]] reports. */
+  private[fuzz] def specialValueCoverage(mc: MetaCase): Option[SpecialValues] = {
+    val rel = mc.env.relations.head
+    if (rel.keyCols.isEmpty || decompositions(rel).isEmpty) return None
+    val cols = aggColumns(rel)
+    def anyCell(p: Double => Boolean): Boolean =
+      cols.exists(c => rel.dataset.rows.exists(_(c) match {
+        case x: java.lang.Number => p(x.doubleValue)
+        case _ => false
+      }))
+    Some(SpecialValues(
+      nan = anyCell(java.lang.Double.isNaN),
+      negZero = anyCell(d => d == 0.0 && java.lang.Double.compare(d, 0.0) < 0),
+      infinite = anyCell(_.isInfinite)))
+  }
+
+  /** Which IEEE special values one case's aggregated columns actually carry. */
+  private[fuzz] final case class SpecialValues(nan: Boolean, negZero: Boolean, infinite: Boolean)
+
   /** The decompositions checked for `rel`, grouped on its first key column. */
   private def decompositions(rel: Relation): Seq[Pair] = {
     val fields = rel.schema.fields

@@ -67,14 +67,29 @@ specific traps.
   expression, GROUP BY / JOIN / WINDOW key) is hot enough to override.
   Every new override extends `ExprBatchTest` first with NULL-handling
   parity, divide-by-zero parity, and per-type result-shape parity — never
-  the other way around. The property-based `ExprParityFuzzTest` is the
-  generative net over that gate; keep `ExprGen` in sync when you add an
-  `Expr` node (see [extending.md](extending.md#add-a-property--generator)).
+  the other way around. On floating-point operands, `NaN` / `-0.0` parity
+  too: equality is primitive `==` and ordering is
+  `java.lang.Double.compare`, in both paths, so a vectorized helper may not
+  reach for the raw `<` just because the operands are `double`. The
+  property-based `ExprParityFuzzTest` is the generative net over that gate;
+  keep `ExprGen` in sync when you add an `Expr` node (see
+  [extending.md](extending.md#add-a-property--generator)).
   See
   [architecture.md §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec).
   The same pattern applies to `AggState.updateBatch`: primitive states
   override; everything else loops the default per-row `update`. See
   [architecture.md §5c](architecture.md#5c-vectorized-aggregate-state-updates-no-group-by-fast-path).
+- **Anything that ORDERS values compares through the one total order,
+  wherever it lives.** Boxed: `Ops.cmp`. Primitive `double` slot:
+  `java.lang.Double.compare`, which is the same order without the boxing. The
+  rule is not confined to `evalVec` — `SortExec.rowOrdering`,
+  `Funcs.pickByOrdering` and `MinMaxState`'s accumulator are all ordering sites,
+  and `MinMaxState`'s was the one that reached for the raw `<` because its slot
+  was a primitive. Every comparison against `NaN` is false in both directions,
+  so a raw `<` silently makes the answer depend on the order values arrive in.
+  An accumulator makes that worse than an expression does: it also depends on
+  partition fan-out and spill flush order, which no `eval`/`evalVec` parity gate
+  can see. See [gotchas.md](gotchas.md).
 - **Spill-capable operators thread `ExecutionOptions` through their
   constructor.** `SortExec`, `HashAggregateExec`, and `DistinctExec`
   follow the pattern: an `opts: ExecutionOptions` field, an `spillEnabled`

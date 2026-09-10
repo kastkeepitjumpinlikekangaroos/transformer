@@ -1044,6 +1044,16 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
   // `longCur` as 0/1, which orders them the SQL way (FALSE < TRUE). Every
   // path — update, merge, finish, and the spill format — must agree on which
   // slot a given `dt` uses, or a spilled state restores as NULL.
+  //
+  // The Float/Double slot advances through `java.lang.Double.compare`, not raw
+  // IEEE `<` / `>`. That is the total order `Ops.cmp` gives the reference-typed
+  // branch below, and the one `ORDER BY` (`SortExec.rowOrdering`) and
+  // GREATEST/LEAST (`Funcs.pickByOrdering`) already use: NaN above every other
+  // value, -0.0 below 0.0. Raw IEEE compares false against NaN in both
+  // directions, which made the extremum depend on where the NaN landed — on row
+  // order, on partition fan-out, and on spill flush order, since `merge` had the
+  // same shape. `compare` takes primitive doubles, so unlike `Ops.cmp(a: Any,
+  // b: Any)` it keeps these loops allocation-free.
   private var hasValue: Boolean = false
   private var longCur: Long = 0L
   private var doubleCur: Double = 0.0
@@ -1066,13 +1076,19 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
       if (!dv.isNull(r)) {
         val v = dv.values(r)
         if (!hasValue) { doubleCur = v; hasValue = true }
-        else if ((min && v < doubleCur) || (!min && v > doubleCur)) doubleCur = v
+        else {
+          val c = java.lang.Double.compare(v, doubleCur)
+          if ((min && c < 0) || (!min && c > 0)) doubleCur = v
+        }
       }
     case fv: FloatVector =>
       if (!fv.isNull(r)) {
         val v = fv.values(r).toDouble
         if (!hasValue) { doubleCur = v; hasValue = true }
-        else if ((min && v < doubleCur) || (!min && v > doubleCur)) doubleCur = v
+        else {
+          val c = java.lang.Double.compare(v, doubleCur)
+          if ((min && c < 0) || (!min && c > 0)) doubleCur = v
+        }
       }
     case tv: TimestampVector =>
       if (!tv.isNull(r)) {
@@ -1130,7 +1146,10 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
         if (!dv.isNull(r)) {
           val v = dv.values(r)
           if (!hasValue) { doubleCur = v; hasValue = true }
-          else if ((min && v < doubleCur) || (!min && v > doubleCur)) doubleCur = v
+          else {
+            val c = java.lang.Double.compare(v, doubleCur)
+            if ((min && c < 0) || (!min && c > 0)) doubleCur = v
+          }
         }
         r += 1
       }
@@ -1140,7 +1159,10 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
         if (!fv.isNull(r)) {
           val v = fv.values(r).toDouble
           if (!hasValue) { doubleCur = v; hasValue = true }
-          else if ((min && v < doubleCur) || (!min && v > doubleCur)) doubleCur = v
+          else {
+            val c = java.lang.Double.compare(v, doubleCur)
+            if ((min && c < 0) || (!min && c > 0)) doubleCur = v
+          }
         }
         r += 1
       }
@@ -1208,7 +1230,8 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
           if ((min && v < longCur) || (!min && v > longCur)) longCur = v
         case DataType.FloatType | DataType.DoubleType =>
           val v = that.doubleCur
-          if ((min && v < doubleCur) || (!min && v > doubleCur)) doubleCur = v
+          val c = java.lang.Double.compare(v, doubleCur)
+          if ((min && c < 0) || (!min && c > 0)) doubleCur = v
         case _ =>
           val v = that.currentBoxed
           val c = Ops.cmp(v, currentBoxed)

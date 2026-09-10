@@ -162,6 +162,63 @@ class ModeDifferentialFuzzTest {
       allNullCols < totalCols / 4)
   }
 
+  /** The corpus reaches `MIN`/`MAX` over a float column that actually CARRIES a
+    * `NaN`, an infinity or a `-0.0` — the input on which `MinMaxState` used to
+    * return a different extremum depending on row order, partition fan-out and
+    * spill flush order. Both halves have to hold: `QueryGen` has to build the
+    * aggregate over a float column (~7% of seeds — the shape half, which was
+    * always there), and `DataGen` has to put a special value in that column's
+    * domain AND have a row draw it (~1% — the value half, which was missing for
+    * as long as the bug lived). The layout-differential property here is exactly
+    * the one that would have caught the bug; it ran the whole time over a corpus
+    * that could not produce the input.
+    *
+    * 2000 seeds rather than the 500 the shape guard above uses: the joint rate is
+    * ~1%, so a smaller block would not separate "rare" from "gone". Generation
+    * only — no query runs here. */
+  @Test def generatorReachesMinMaxOverIeeeSpecialValues(): Unit = {
+    val n = 2000
+    var shape, nan, negZero, infinite = 0
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val cols = floatMinMaxColumns(qc.query)
+      if (cols.nonEmpty) shape += 1
+      def aggregatedCellExists(p: Double => Boolean): Boolean =
+        cols.exists(c => qc.dataset.rows.exists(_(c) match {
+          case x: java.lang.Number => p(x.doubleValue)
+          case _ => false
+        }))
+      if (aggregatedCellExists(java.lang.Double.isNaN)) nan += 1
+      if (aggregatedCellExists(d => d == 0.0 && java.lang.Double.compare(d, 0.0) < 0)) negZero += 1
+      if (aggregatedCellExists(_.isInfinite)) infinite += 1
+      seed += 1
+    }
+    println(s"[mode-differential] over $n seeds: MIN/MAX over a float column in $shape " +
+      s"(carrying NaN=$nan, -0.0=$negZero, an infinity=$infinite)")
+    assertTrue(s"no MIN/MAX over a float column generated (shape=$shape)", shape > 40)
+    // Each bound sits ~3x below the measured rate, so it separates a corpus that
+    // stopped producing the value from one that merely drifted.
+    assertTrue(s"MIN/MAX never sees a NaN (nan=$nan)", nan > 5)
+    assertTrue(s"MIN/MAX never sees a -0.0 (negZero=$negZero)", negZero > 5)
+    assertTrue(s"MIN/MAX never sees an infinity (infinite=$infinite)", infinite > 5)
+  }
+
+  /** Indices of the columns `q` takes `MIN`/`MAX` over, restricted to
+    * `Float`/`Double` bare column references (the only aggregate argument shape
+    * `QueryGen` builds for `MIN`/`MAX`). */
+  private def floatMinMaxColumns(q: QueryGen.GenQuery): Seq[Int] = q match {
+    case a: QueryGen.AggregateQuery => a.aggregates.flatMap {
+      case (QueryGen.Min(arg: ColRefExpr), _) if isFloating(arg.dataType) => Some(arg.index)
+      case (QueryGen.Max(arg: ColRefExpr), _) if isFloating(arg.dataType) => Some(arg.index)
+      case _ => None
+    }
+    case _ => Seq.empty
+  }
+
+  private def isFloating(t: DataType): Boolean =
+    t == DataType.FloatType || t == DataType.DoubleType
+
   /** Whether `q` takes `MIN`/`MAX` over a `Boolean` column. */
   private def hasBooleanMinMax(q: QueryGen.GenQuery): Boolean = q match {
     case a: QueryGen.AggregateQuery => a.aggregates.exists {
