@@ -570,12 +570,25 @@ final case class WindowExec(
     (lo, hi)
   }
 
+  /** Are two rows ORDER BY **peers** — the tie predicate `RANK` and
+    * `DENSE_RANK` share a rank on? It must be the tie predicate of the sort
+    * that produced the order, so it compares through `Ops.cmp` exactly as
+    * [[sortPartition]] does (the ASC/DESC flip there negates the sign, which
+    * leaves `== 0` unchanged). IEEE equality would disagree with the sort on
+    * the values the engine's total order reconciles: it splits two tied `NaN`s
+    * and ties a strictly-ordered `-0.0` / `0.0` pair. Two nulls are peers,
+    * matching the comparator's `(null, null) => 0`.
+    *
+    * `Ops.cmp` boxes, but this runs once per row per rank function over an
+    * already-materialized partition, and the operands are the boxed order-key
+    * values cached by the materialization pass — there is no primitive slot
+    * here to keep. */
   private def sameKey(a: Array[Any], b: Array[Any]): Boolean = {
     if (a.length != b.length) return false
     var i = 0
     while (i < a.length) {
       val av = a(i); val bv = b(i)
-      val same = (av == null && bv == null) || (av != null && bv != null && Ops.eq(av, bv))
+      val same = (av == null && bv == null) || (av != null && bv != null && Ops.cmp(av, bv) == 0)
       if (!same) return false
       i += 1
     }

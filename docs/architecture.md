@@ -191,6 +191,13 @@ but the split is ours, not Postgres's: Postgres has no split here because its
 `float8` `=` already treats `NaN` as equal to itself and `-0.0` as distinct from
 `0.0`. See the `NaN` / `-0.0` note in [gotchas.md](gotchas.md).
 
+`WindowExec` applies both rules at once, deliberately: `PARTITION BY` is an
+identity and goes through a `KeyCodec` like every other breaker's key, while the
+`ORDER BY` peer groups `RANK`/`DENSE_RANK` share a rank on are an ordering
+question and go through `Ops.cmp` — the same comparison `sortPartition` used, so
+the peer test and the sort cannot disagree. `sameKey` asked `Ops.eq` instead
+until plan 06; see [gotchas.md](gotchas.md).
+
 **Single-Long fast path (`LongHashMap`).** When `GROUP BY` / `JOIN ON` boils
 down to one fixed-width-numeric ColRef key (Int / Long / Date / Timestamp /
 Boolean — `KeyCodec.isLongFittable`), `HashAggregateExec` and `HashJoinExec`
@@ -751,9 +758,14 @@ Three-valued boolean logic is handled inside `BinOpExpr` for `AND`/`OR`.
 Arithmetic and comparison are NULL-propagating via the `lv == null || rv == null
 => null` short-circuit at the top of the generic branch.
 
-`Ops.cmp` is the canonical NULL-free comparator (numbers compared as
-`Double`, strings lexicographic, booleans natural). `Ops.eq` is the canonical
-NULL-free equality. Both are used by sort, join, IN, and `=`.
+`Ops.cmp` is the canonical NULL-free comparator (numbers compared as `Double`
+through `Double.compare`'s total order, strings lexicographic, booleans natural)
+and decides every ORDERING question: `ORDER BY`, `< <= > >=`, and any tie test
+that has to agree with a sort. `Ops.eq` is the canonical NULL-free EQUALITY and
+decides `=`, `IN` and `NULLIF`; it follows IEEE. The two are **not**
+interchangeable — `cmp(a, b) == 0` and `eq(a, b)` disagree on `NaN` (tied, not
+equal) and on `-0.0` / `0.0` (equal, not tied), which is what made
+`WindowExec.sameKey` wrong when it asked `eq` whether two sorted rows tied.
 
 ### 5a. Vectorized expression evaluation (`evalVec`)
 

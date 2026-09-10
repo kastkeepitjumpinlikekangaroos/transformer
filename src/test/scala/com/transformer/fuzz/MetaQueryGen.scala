@@ -155,8 +155,19 @@ object MetaQueryGen {
     *   - Tie-sensitive: `ROW_NUMBER`, `LAG`/`LEAD`, and every aggregate window WITH
     *     an ORDER BY. The engine treats RANGE frames as ROWS (see
     *     `plan/Window.scala`), so a running aggregate really does split peers, and
-    *     which peer comes first varies with the partition fan-out. */
-  final case class WinItem(sql: String, name: String, dataType: DataType, tieSensitive: Boolean)
+    *     which peer comes first varies with the partition fan-out.
+    *
+    * `orderCols` are the window's ORDER BY columns, empty for the shapes with no
+    * ORDER BY. They are carried for coverage accounting: the peer test a rank
+    * function applies to them is a float-comparison site, so the coverage guard
+    * needs to know which columns reach it (it also asserts every ordered shape
+    * fills this in). Hand-written regressions may leave it empty. */
+  final case class WinItem(
+      sql: String,
+      name: String,
+      dataType: DataType,
+      tieSensitive: Boolean,
+      orderCols: Vector[ScopeCol] = Vector.empty)
 
   sealed trait QueryCore {
     /** Output column names + types — the schema of the query body, which the
@@ -686,22 +697,27 @@ object MetaQueryGen {
     val numeric = scope.filter(c => DataType.isNumeric(c.dataType))
     val choices = scala.collection.mutable.ArrayBuffer.empty[(Int, () => WinItem)]
     // Tie-sensitive: the value depends on which of two tied rows comes first.
-    choices += ((3, () => WinItem(s"ROW_NUMBER() ${over(orderBy)}", name, DataType.LongType, tieSensitive = true)))
+    choices += ((3, () => WinItem(s"ROW_NUMBER() ${over(orderBy)}", name, DataType.LongType,
+      tieSensitive = true, orderCols)))
     choices += ((2, () => { val c = rng.oneOf(scope)
-      WinItem(s"${rng.oneOf(Seq("LAG", "LEAD"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType, tieSensitive = true) }))
+      WinItem(s"${rng.oneOf(Seq("LAG", "LEAD"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType,
+        tieSensitive = true, orderCols) }))
     // Tie-insensitive: peers share a rank, and a no-ORDER-BY aggregate window
     // frames the whole partition. These are the shapes the mode-agreement oracle
     // may run, which is how the sharded window path gets differential coverage.
-    choices += ((3, () => WinItem(s"${rng.oneOf(Seq("RANK", "DENSE_RANK"))}() ${over(orderBy)}", name, DataType.LongType, tieSensitive = false)))
+    choices += ((3, () => WinItem(s"${rng.oneOf(Seq("RANK", "DENSE_RANK"))}() ${over(orderBy)}", name,
+      DataType.LongType, tieSensitive = false, orderCols)))
     choices += ((3, () => WinItem(s"COUNT(*) ${over("")}", name, DataType.LongType, tieSensitive = false)))
     if (numeric.nonEmpty) {
       choices += ((2, () => { val c = rng.oneOf(numeric)
-        WinItem(s"SUM(${c.qualified}) ${over(orderBy)}", name, sumType(c.dataType), tieSensitive = true) }))
+        WinItem(s"SUM(${c.qualified}) ${over(orderBy)}", name, sumType(c.dataType),
+          tieSensitive = true, orderCols) }))
       choices += ((1, () => { val c = rng.oneOf(numeric)
-        WinItem(s"AVG(${c.qualified}) ${over(orderBy)}", name, DataType.DoubleType, tieSensitive = true) }))
+        WinItem(s"AVG(${c.qualified}) ${over(orderBy)}", name, DataType.DoubleType,
+          tieSensitive = true, orderCols) }))
       choices += ((1, () => { val c = rng.oneOf(numeric)
         WinItem(s"SUM(${c.qualified}) OVER (${Seq(partBy, orderBy, frame(rng)).filter(_.nonEmpty).mkString(" ")})",
-          name, sumType(c.dataType), tieSensitive = true) }))
+          name, sumType(c.dataType), tieSensitive = true, orderCols) }))
       // Whole-partition aggregate windows: no ORDER BY, so no frame to split peers.
       choices += ((2, () => { val c = rng.oneOf(numeric)
         WinItem(s"SUM(${c.qualified}) ${over("")}", name, sumType(c.dataType), tieSensitive = false) }))
@@ -709,7 +725,8 @@ object MetaQueryGen {
         WinItem(s"AVG(${c.qualified}) ${over("")}", name, DataType.DoubleType, tieSensitive = false) }))
     }
     choices += ((1, () => { val c = rng.oneOf(scope)
-      WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType, tieSensitive = true) }))
+      WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType,
+        tieSensitive = true, orderCols) }))
     choices += ((2, () => { val c = rng.oneOf(scope)
       WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over("")}", name, c.dataType, tieSensitive = false) }))
     rng.weighted(choices.toSeq: _*)()

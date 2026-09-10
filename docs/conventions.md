@@ -89,7 +89,16 @@ specific traps.
   so a raw `<` silently makes the answer depend on the order values arrive in.
   An accumulator makes that worse than an expression does: it also depends on
   partition fan-out and spill flush order, which no `eval`/`evalVec` parity gate
-  can see. See [gotchas.md](gotchas.md).
+  can see.
+
+  **A TIE test is an ordering site too**, and it is the one this rule has been
+  broken at three times now: `evalVec`'s comparisons, `MinMaxState`'s
+  accumulator, and `WindowExec.sameKey`, the `RANK`/`DENSE_RANK` peer test, which
+  asked `Ops.eq` whether two rows tied while the sort beside it asked `Ops.cmp`.
+  Where a tie decides an answer, compare with the comparison that produced the
+  order — `cmp(a, b) == 0`, never `eq(a, b)`. The two differ on exactly `NaN`
+  (tied, not equal) and `-0.0` / `0.0` (equal, not tied), so the bug hides until
+  the corpus carries those values. See [gotchas.md](gotchas.md).
 - **Spill-capable operators thread `ExecutionOptions` through their
   constructor.** `SortExec`, `HashAggregateExec`, and `DistinctExec`
   follow the pattern: an `opts: ExecutionOptions` field, an `spillEnabled`

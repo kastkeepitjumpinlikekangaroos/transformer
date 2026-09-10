@@ -499,26 +499,39 @@ ship a fix or move something from "not done" to "done".
   layout-differential properties and is pinned by the deterministic regression
   instead.
 
-- **`RANK` / `DENSE_RANK` rank tied rows separately when the ORDER BY key is
-  `NaN` — a candidate follow-up.** `WindowExec.sameKey` decides whether two rows
-  are ORDER BY peers and compares with `Ops.eq`, but the rows were sorted with
-  `Ops.cmp`. The two disagree on exactly the values the rest of the engine now
-  reconciles: `Ops.eq(NaN, NaN)` is FALSE where the sort ties them, so tied rows
-  get different ranks; `Ops.eq(-0.0, 0.0)` is TRUE where the sort separates them,
-  so strictly-ordered rows share a rank. The `NaN` direction is a plainly wrong
-  answer — `DENSE_RANK()` over a partition whose rows all tie must be `1` for
-  every row, and it is not. Only `RANK` (`:441`) and `DENSE_RANK` (`:453`) call
-  `sameKey`; `ROW_NUMBER`, `LAG`/`LEAD` and `PARTITION BY` are unaffected, the
-  last because partitioning goes through the key codecs (see
-  [architecture.md](architecture.md) §2a).
+- **`RANK`/`DENSE_RANK` used to rank tied rows separately when the ORDER BY key
+  was `NaN` — fixed.** `WindowExec.sameKey` decides whether two rows are ORDER BY
+  peers and compared them with `Ops.eq`, but the rows were sorted with `Ops.cmp`
+  (`sortPartition`). The two disagree on exactly the values the rest of the
+  engine reconciles: `Ops.eq(NaN, NaN)` is FALSE where the sort ties them, so
+  tied rows got different ranks; `Ops.eq(-0.0, 0.0)` is TRUE where the sort
+  separates them, so strictly-ordered rows shared a rank. The `NaN` direction was
+  a plainly wrong answer — `DENSE_RANK()` over a partition whose rows all tie
+  must be `1` for every row, and it was not; the rank then moved with the order
+  rows reached the window in, which is how a join-commutativity flip surfaced it.
+
+  `sameKey` now compares with `Ops.cmp(av, bv) == 0`, so the peer test IS the
+  tie predicate of the sort that produced the order (the comparator's ASC/DESC
+  flip negates the sign, which leaves `== 0` alone). Two nulls stay peers,
+  matching the comparator's `(null, null) => 0`. The `-0.0` half is a behaviour
+  change with no failing seed behind it: `-0.0` and `0.0` used to share a rank
+  and now rank 1 and 2, agreeing with the row order `ORDER BY` already produces.
+  Only `RANK` and `DENSE_RANK` call `sameKey`; `ROW_NUMBER`, `LAG`/`LEAD` and
+  every frame bound are positional, and `PARTITION BY` goes through the key
+  codecs (see [architecture.md](architecture.md) §2a) — so one operator
+  deliberately applies two different float rules, identity for partitioning and
+  the total order for peers.
 
   Third instance of one family, after the `evalVec` ordering comparisons and
   `MinMaxState`'s accumulator: an ordering site that reached for raw IEEE
-  instead of the engine's one total order. Found by
-  `metamorphic_fuzz_campaign` and `sharded_mode_fuzz_campaign`, both red at
-  seed 16502, immediately after the `MIN`/`MAX` fix above widened the corpora to
-  carry `NaN` — the bug is older than that widening, which only made it
-  reachable. Reproduce with `FUZZ_SEED=16502 FUZZ_SEEDS=1`. See
+  instead of the engine's one total order. Found by `metamorphic_fuzz_campaign`
+  and `sharded_mode_fuzz_campaign`, both red at seed 16502 immediately after the
+  `MIN`/`MAX` fix above widened the corpora to carry `NaN` — the bug was older
+  than that widening, which only made it reachable. Pinned by three regressions
+  in `window_exec_spill_test` and by
+  `MetamorphicFuzzTest.rankWindowsReachIeeeSpecialOrderKeys`, which measures the
+  thinnest chain in the corpus: a rank window lands on ~2% of seeds, a float
+  ORDER BY key on ~0.5%, and one carrying a `NaN` on ~0.06%. See
   [plan 06](../plans/followups/06-window-rank-peer-total-order.md).
 
 - **Mode-differential comparison is a multiset with a floating-point tolerance.**
@@ -679,6 +692,12 @@ ship a fix or move something from "not done" to "done".
   `MetaQuery.isLayoutInvariant` reads it, so the tie-insensitive shapes now flow
   through mode agreement and join commutativity. The `invariantWindows` coverage
   guard in `generatorCoversShapes` is what stops the blind spot returning.
+
+  The classification is only as sound as the engine's peer test: while
+  `WindowExec.sameKey` compared ORDER BY peers with IEEE equality, `RANK` over a
+  `NaN` key WAS tie-sensitive, and the relations duly reported the disagreement
+  (the `sameKey` entry above). Classifying a function as tie-insensitive is
+  therefore a claim about the engine, not only about SQL.
 
 - **`job.json`'s `runFile` follows the task's CONFIG, not its result.** The
   aggregate manifest indexes each task's full `_run.json`, and `JobSession`

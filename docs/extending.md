@@ -70,7 +70,12 @@ as their own `WindowFn` ADT cases in `sql/plan/Window.scala`. To add one:
    name and returns the new `WindowFn`.
 3. Add a `case` in `WindowExec.computeFunctions` that implements the per-row
    computation (it gets the sorted partition's row indices, the original
-   row buffer, and the output column to populate).
+   row buffer, and the output column to populate). **If it has a notion of
+   ORDER BY peers** (a ranking function, `PERCENT_RANK`, `CUME_DIST`, `NTILE`'s
+   tie rule), decide ties with `sameKey`, which compares through the same
+   `Ops.cmp` the partition was sorted with — never with `Ops.eq`, which ties
+   `-0.0` with `0.0` and splits two `NaN`s the sort had tied (see
+   [gotchas.md](gotchas.md)).
 4. Test it in `SqlEngineTest`.
 5. Update the supported list in [`README.md`'s "SQL features"](../README.md#sql-features)
    and the omissions block in [`docs/gotchas.md`](gotchas.md#whats-intentionally-not-done).
@@ -412,6 +417,13 @@ are the five live relations. See
      whether it ran. `MIN`/`MAX` picks its accumulator slot from the column type,
      so "every payload type still reaches a `MIN`/`MAX` decomposition" is the
      assertion that keeps a slot bug from hiding again.
+
+   Then size the seed block from the MEASURED rate, not from what the guard
+   beside it uses. A corpus-reading guard costs nothing per seed, and the chain
+   it asserts can be very thin: `rankWindowsReachIeeeSpecialOrderKeys` needs a
+   rank window AND a float ORDER BY key AND a `NaN` in it, which is 0.06% of
+   seeds — over the 2000 its siblings read, the count is 1 and no bound
+   distinguishes rare from gone, so it reads 20000.
 
    Set the bound to separate "rare" from "gone", not to pin the current number:
    the corpus is a fixed seed block, so counts are stable, but a bound sitting one

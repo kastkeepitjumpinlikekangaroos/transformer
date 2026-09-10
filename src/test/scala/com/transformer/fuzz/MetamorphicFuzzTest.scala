@@ -287,6 +287,97 @@ class MetamorphicFuzzTest {
     assertTrue(s"agg-decomposition never aggregates an infinity (infinite=$infinite)", infinite > 12)
   }
 
+  /** `RANK` / `DENSE_RANK` peer coverage. The peer test those two apply to their
+    * ORDER BY keys is a float-comparison site — it compared with IEEE equality
+    * while the sort compared with the total order, so tied `NaN` rows took
+    * different ranks — and the shape half alone does not reach it: the corpus
+    * must produce a rank window ORDERED BY a float column AND that column must
+    * actually carry a `NaN`. The join-commutativity relation caught it at seed
+    * 16502, once the payload pool started drawing specials.
+    *
+    * The seed block is the CAMPAIGN's 20000 rather than the 2000 its sibling
+    * guards use, because this is the thinnest chain in either corpus: a rank
+    * window lands on ~2% of seeds, a float ORDER BY key on ~0.5%, and one
+    * carrying a `NaN` on ~0.06% — at 2000 seeds the count is 1 and cannot tell
+    * rare from gone. Generation only (no query runs), so 20000 seeds costs well
+    * under a second.
+    *
+    * Also asserts every ordered window fills in `orderCols`, since a shape that
+    * left it empty would silently drop out of this tally. */
+  @Test def rankWindowsReachIeeeSpecialOrderKeys(): Unit = {
+    val n = 20000
+    var ranks, floatKeys, nan, negZero, orderedWindows, missingOrderCols = 0
+    var seed = 0
+    while (seed < n) {
+      val mc = MetaQueryGen.generate(new Rng(seed.toLong))
+      val wins = allWindows(mc.query)
+      wins.foreach { case (_, w) =>
+        if (w.sql.contains("ORDER BY")) {
+          orderedWindows += 1
+          if (w.orderCols.isEmpty) missingOrderCols += 1
+        }
+      }
+      val rankWins = wins.filter { case (_, w) => isRank(w) }
+      if (rankWins.nonEmpty) ranks += 1
+      val keyCells = rankWins.flatMap { case (from, w) =>
+        w.orderCols.filter(c => isFloat(c.dataType)).map(c => columnCells(mc.env, from, c))
+      }
+      if (keyCells.nonEmpty) floatKeys += 1
+      if (keyCells.exists(cs => anyCell(cs, java.lang.Double.isNaN))) nan += 1
+      if (keyCells.exists(cs => anyCell(cs, d => d == 0.0 && java.lang.Double.compare(d, 0.0) < 0))) negZero += 1
+      seed += 1
+    }
+    println(s"[metamorphic] RANK/DENSE_RANK order-key coverage over $n seeds: " +
+      s"rankWindow=$ranks floatOrderKey=$floatKeys NaN=$nan -0.0=$negZero " +
+      s"(orderedWindows=$orderedWindows)")
+    assertEquals("an ordered window carries no orderCols, so it is invisible to this tally",
+      0, missingOrderCols)
+    // Bounds ~3x below the measured rates (428 / 108 / 12 / 8 over these 20000
+    // seeds): they separate a corpus that stopped producing the shape or the
+    // value from one that merely drifted, and do not pin a rate.
+    assertTrue(s"generator never ranks over any ORDER BY (ranks=$ranks)", ranks > 140)
+    assertTrue(s"a rank window never orders by a float column (floatKeys=$floatKeys)", floatKeys > 35)
+    assertTrue(s"a rank window's float order key never carries a NaN (nan=$nan)", nan > 3)
+    assertTrue(s"a rank window's float order key never carries a -0.0 (negZero=$negZero)", negZero > 2)
+  }
+
+  private def isRank(w: WinItem): Boolean =
+    w.sql.startsWith("RANK(") || w.sql.startsWith("DENSE_RANK(")
+
+  private def isFloat(dt: DataType): Boolean =
+    dt == DataType.FloatType || dt == DataType.DoubleType
+
+  /** Every window in any arm of `q` (this body, a UNION arm, a CTE body), paired
+    * with the FROM clause its `orderCols` resolve against. */
+  private def allWindows(q: MetaQuery): Vector[(FromClause, WinItem)] = {
+    val here: Vector[(FromClause, WinItem)] = q.core match {
+      case p: ProjectCore => p.windows.map(w => (q.from, w))
+      case _: AggCore => Vector.empty
+    }
+    here ++ q.setOp.toVector.flatMap { case (rhs, _) => allWindows(rhs) } ++
+      q.ctes.flatMap(c => allWindows(c.body))
+  }
+
+  /** The values `c` takes in the base relation its alias resolves to. Empty when
+    * the alias names a CTE, whose rows are computed rather than stored — that
+    * under-counts coverage rather than over-counting it. */
+  private def columnCells(env: RelEnv, from: FromClause, c: ScopeCol): IndexedSeq[Any] = {
+    val leaf = (from.root +: from.joins.map(_.leaf)).find(_.alias == c.alias)
+    val rel = leaf.flatMap(l => env.relations.find(_.name == l.relName))
+    rel match {
+      case None => IndexedSeq.empty
+      case Some(r) =>
+        val i = r.schema.fields.indexWhere(_.name == c.col)
+        if (i < 0) IndexedSeq.empty else r.dataset.rows.map(_(i))
+    }
+  }
+
+  private def anyCell(cells: IndexedSeq[Any], p: Double => Boolean): Boolean =
+    cells.exists {
+      case x: java.lang.Number => p(x.doubleValue)
+      case _ => false
+    }
+
   /** The join-commutativity relation must actually RUN, not skip, on a healthy
     * share of seeds. It has nothing to check for a join-free query and skips a
     * windowed one (whose tie-break legitimately follows the order the join emits

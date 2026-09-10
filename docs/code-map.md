@@ -69,7 +69,7 @@ navigation hint, not a comprehensive directory listing.
   files via `fmix32(hash(joinKeys)) % K` and processes bucket pairs
   sequentially; per-bucket unmatched-build tracking preserves outer-join
   semantics.
-- `sql/exec/WindowExec.scala` (~645 LOC) — partition, sort, frame
+- `sql/exec/WindowExec.scala` (~660 LOC) — partition, sort, frame
   computation for every supported window function; pre-computes per-spec
   partition/order keys per row during the single materialization pass.
   Bucketed spill routes child rows into K=16 disk

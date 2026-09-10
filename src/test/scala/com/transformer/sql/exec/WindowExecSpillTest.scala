@@ -21,7 +21,12 @@ import scala.util.Random
   * row, so output order differences (buckets emit sequentially) don't
   * mask correctness. For ties on the partition key + non-unique
   * ORDER BY rows, both paths produce the same multiset under their
-  * (unstable) sorts. */
+  * (unstable) sorts.
+  *
+  * The file also pins `RANK`/`DENSE_RANK` peer semantics against the
+  * engine's total order (the last section), on both the heap and the
+  * spill path — those ranks are a property of the sort, not of spill,
+  * but asserting them through both paths costs one extra run. */
 class WindowExecSpillTest {
 
   private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
@@ -343,4 +348,79 @@ class WindowExecSpillTest {
     assertTrue(s"partitionSpillEvents must be > 0, got ${node.snapshot().counter("partitionSpillEvents")}",
       node.snapshot().counter("partitionSpillEvents") > 0L)
   }
+
+  // ---- RANK / DENSE_RANK peers follow the sort's total order ----------------
+  //
+  // A rank's peer groups are exactly the ties of the sort that produced the
+  // order, so `sameKey` compares order keys with `Ops.cmp` — the comparison
+  // `sortPartition` used. It once compared with `Ops.eq`, raw IEEE equality,
+  // and the two disagree on the values the rest of the engine reconciles:
+  // `NaN` ties with `NaN` under the total order but is not IEEE-equal to it,
+  // so tied rows took different ranks (a wrong answer — every row of an
+  // all-tied partition must rank 1); `-0.0` sorts strictly below `0.0` but is
+  // IEEE-equal to it, so strictly-ordered rows shared a rank. See
+  // plans/followups/06-window-rank-peer-total-order.md.
+
+  private val kdSchema = Schema(Vector(
+    Field("k", DataType.IntType),
+    Field("d", DataType.DoubleType),
+    Field("id", DataType.IntType)))
+
+  /** RANK and DENSE_RANK over `PARTITION BY k ORDER BY d`, as `id -> (rank,
+    * denseRank)`. Every row carries `k = 1` (one partition, and a non-empty
+    * PARTITION BY so the spill path is eligible) and `id` = its index in
+    * `ds`, which is how each row's rank is identified without depending on
+    * emit order. */
+  private def ranksById(ds: Seq[Double], asc: Boolean, opts: ExecutionOptions): Map[Int, (Long, Long)] = {
+    val rows = ds.iterator.zipWithIndex.map { case (d, i) =>
+      Array[Any](java.lang.Integer.valueOf(1), java.lang.Double.valueOf(d), java.lang.Integer.valueOf(i))
+    }.toVector
+    val k = ColRefExpr(0, "k", DataType.IntType)
+    val d = ColRefExpr(1, "d", DataType.DoubleType)
+    val spec = WindowSpec(Seq(k), Seq((d, asc)), WindowFrame.defaultFor(hasOrderBy = true))
+    val wins = Seq(
+      WindowDef(spec, WindowFnRank(), "rk"),
+      WindowDef(spec, WindowFnDenseRank(), "dr"))
+    val outSchema = Schema(kdSchema.fields ++
+      Vector(Field("rk", DataType.LongType), Field("dr", DataType.LongType)))
+    val out = drainRows(
+      WindowExec(new InMemoryPlan(kdSchema, Vector(rows)), wins, opts).execute(0), outSchema)
+    assertEquals("every input row must come back", ds.length, out.length)
+    out.iterator.map { row =>
+      row(2).asInstanceOf[Integer].intValue ->
+        ((row(3).asInstanceOf[java.lang.Long].longValue, row(4).asInstanceOf[java.lang.Long].longValue))
+    }.toMap
+  }
+
+  /** The same ranks on the heap path and the spill path. */
+  private def assertRanks(label: String, expected: Map[Int, (Long, Long)], ds: Seq[Double], asc: Boolean): Unit = {
+    assertEquals(s"$label (heap)", expected, ranksById(ds, asc, ExecutionOptions.Default))
+    assertEquals(s"$label (spill)", expected, ranksById(ds, asc, spillyOpts()))
+  }
+
+  /** A partition whose ORDER BY key is NaN on every row is one peer group, so
+    * every row ranks 1 under both RANK and DENSE_RANK. */
+  @Test def allNaNOrderKeysAreOnePeerGroup(): Unit =
+    assertRanks("every row ties on NaN", Map(0 -> (1L, 1L), 1 -> (1L, 1L), 2 -> (1L, 1L)),
+      Seq(Double.NaN, Double.NaN, Double.NaN), asc = true)
+
+  /** NaN ties with NaN and sorts above every finite value, so a mixed partition
+    * ranks the NaN rows last and ranks them equally. DESC reverses the order
+    * without splitting the peer group. */
+  @Test def nanOrderKeysTieAboveEveryFiniteValue(): Unit = {
+    val ds = Seq(1.0, Double.NaN, Double.NaN, 2.0)
+    // ASC:  1.0, 2.0, NaN, NaN -> rank 1, 2, 3, 3 / dense 1, 2, 3, 3
+    assertRanks("NaN last, tied", Map(0 -> (1L, 1L), 3 -> (2L, 2L), 1 -> (3L, 3L), 2 -> (3L, 3L)),
+      ds, asc = true)
+    // DESC: NaN, NaN, 2.0, 1.0 -> rank 1, 1, 3, 4 / dense 1, 1, 2, 3
+    assertRanks("NaN first, tied", Map(1 -> (1L, 1L), 2 -> (1L, 1L), 3 -> (3L, 2L), 0 -> (4L, 3L)),
+      ds, asc = false)
+  }
+
+  /** `-0.0` sorts strictly below `0.0`, so the two rows are not peers and rank
+    * 1 and 2 — the rank agrees with the row order ORDER BY produces, where
+    * IEEE equality would have called them one peer group. */
+  @Test def signedZeroOrderKeysAreNotPeers(): Unit =
+    assertRanks("-0.0 ranks below 0.0", Map(1 -> (1L, 1L), 0 -> (2L, 2L)),
+      Seq(0.0, -0.0), asc = true)
 }

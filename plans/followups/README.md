@@ -6,7 +6,7 @@ engine gaps the gotchas doc itself already flags as "a candidate follow-up";
 the fourth is a docs-accuracy pass the same audit turned up as a side effect.
 Plan 05 is a fifth, found while implementing plan 03. Plan 06 is a sixth, found
 by the fuzzers within hours of plan 05 landing the corpus that reaches it.
-**Five are done; 06 is open.**
+**All six are done.**
 Each plan is self-contained: read the file, paste the launch prompt into a
 fresh Claude session, and the agent has what it needs.
 
@@ -28,7 +28,7 @@ free to start.
 | [02](02-binder-grouping-parens-and-trim.md) | Binder rejects `(a + b) * c`, `WHERE (x = y)`, `TRIM(x)` | **done** 2026-09-06 | ~1 day | low | — |
 | [03](03-eval-evalvec-nan-parity.md) | `eval` vs `evalVec` disagree on NaN/-0.0 ordering and IN | **done** 2026-09-06 | 2-3 days | medium | — |
 | [05](05-minmax-nan-order-dependence.md) | `MIN`/`MAX` over a NaN-carrying float column is order-dependent | **done** 2026-09-09 | ~1 day | medium | — |
-| [06](06-window-rank-peer-total-order.md) | `RANK`/`DENSE_RANK` rank tied rows separately when the ORDER BY key is NaN | not started | ~half a day | low | 05 (its corpus reaches the bug) |
+| [06](06-window-rank-peer-total-order.md) | `RANK`/`DENSE_RANK` rank tied rows separately when the ORDER BY key is NaN | **done** 2026-09-10 | ~half a day | low | 05 (its corpus reaches the bug) |
 
 No plan depends on another. **They do not all touch disjoint files, though** —
 an earlier version of this line claimed they did, and it was wrong: 01 and 02
@@ -40,7 +40,11 @@ three do edit `docs/gotchas.md` and `docs/testing.md`, so a plan branched off
 `main` after another has landed will conflict there. 05 touches
 `AggregateExec.scala` plus the fuzz generators and oracles (`DataGen`,
 `MetaQueryGen`, `AggDecomposition`, `RowOracle`) and shares no source file with
-any of them — but it edits the same two docs, so the same rule applies.
+any of them — but it edits the same two docs, so the same rule applies. 06 is
+the one real dependency in the table: it is independent in FILES (it touches
+`WindowExec.scala`, `WindowExecSpillTest.scala`, and — for its coverage guard —
+`MetaQueryGen` / `MetamorphicFuzzTest`, none of them 05's) but not in time, since
+05's widened corpora are what make its bug reachable. Branch it off 05.
 
 ## Recommended sequence
 
@@ -107,30 +111,37 @@ one-corpus assumption above, and a claim that `HashKeys` excludes `Float` /
 `Double` from packed keys (it does not: `isPackable` includes them, and it is
 `isLongFittable`, a different gate, that excludes them).
 
-**Open:** plan 06. `WindowExec.sameKey` compares ORDER BY peers with `Ops.eq`
-while the sort that produced the order used `Ops.cmp`, so `RANK`/`DENSE_RANK`
-give tied `NaN` rows different ranks (a wrong answer, not just a
-layout-dependence) and give strictly-ordered `-0.0`/`0.0` rows the same rank.
-Pre-existing — `WindowExec` is untouched by plan 05 and the failing query holds
-no aggregate — but reachable only since plan 05 widened the corpora, so
-`metamorphic_fuzz_campaign` and `sharded_mode_fuzz_campaign` are **red at seed
-16502 until 06 lands**, deliberately: the alternative was gating the generator
-back down, which is how this repo has hidden engine bugs before. Everything
-else is green — `bazel test //...`, jaffle_shop, `mode_differential_fuzz_campaign`
-at 20000 seeds, and 7 of 8 seed blocks in each of the other two campaigns.
+**Done:** plan 06. `WindowExec.sameKey` now decides ORDER BY peers with
+`Ops.cmp(a, b) == 0` — the tie predicate of the sort that produced the order —
+instead of `Ops.eq`, so `RANK`/`DENSE_RANK` give tied `NaN` rows one rank (a
+wrong answer before, not just a layout-dependence) and give strictly-ordered
+`-0.0`/`0.0` rows two. The second half is a user-visible behaviour change with no
+failing seed behind it; it makes the rank agree with the row order `ORDER BY`
+already produces. Three regressions in `window_exec_spill_test`, each asserted on
+the heap and the spill path, all three failing against the old comparison. The
+corpus already reached the bug, so nothing was widened — but the chain is the
+thinnest in either corpus (a rank window on 2.1% of seeds, a float ORDER BY key
+on 0.54%, a `NaN` in it on 0.06%), so the new coverage guard reads a 20000-seed
+block where its siblings read 2000, and `WinItem` gained an `orderCols` field so
+there was something structured to measure. Two claims in the plan file were wrong
+and are corrected there — most consequentially its repro command, which omitted
+`--test_env=` and therefore ran the default seed budget and PASSED, reporting the
+known-red seed as green.
 
 ## How this list was produced
 
 Read `docs/gotchas.md` end to end. Its "Known gotchas" section explicitly
 flagged three items as "a candidate follow-up" — those are plans 01-03 above.
-All three have moved to fixed there, and so has the fourth that plan 03's
-implementation added and plan 05 then closed. `docs/gotchas.md` flags exactly
-one "candidate follow-up" today, and the fuzzers wrote it rather than an audit:
-the `RANK`/`DENSE_RANK` peer entry plan 06 covers, which
+All three have moved to fixed there, and so have the fourth that plan 03's
+implementation added and plan 05 then closed, and the fifth plan 06 closed.
+`docs/gotchas.md` flags NO "candidate follow-up" today. The last one was written
+by the fuzzers rather than by an audit: the `RANK`/`DENSE_RANK` peer entry, which
 `metamorphic_fuzz_campaign` found at seed 16502 once plan 05 widened the corpus
 to carry `NaN`. That is the list feeding itself — each fix in this value domain
-has exposed the next one, and all three so far have been the same mistake in a
-different file.
+exposed the next one, and all three were the same mistake in a different file (an
+ordering site reaching for raw IEEE). A fourth instance, if there is one, will be
+found the same way: by a corpus that carries the values, not by reading the
+code.
 Separately, cross-checked `plans/perf/README.md`'s priority table against
 the actual `src/main` code for all 12 perf plans. Ten are landed (01, 02,
 03, 04, 05, 07, 09, 10, 11, 12) — four with nothing left at all, the rest

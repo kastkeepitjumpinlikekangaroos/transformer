@@ -582,6 +582,16 @@ are also available as window aggregates with `OVER (...)`. Variance and stddev
 use Welford + Chan's parallel merge for numerical stability; `*_SAMP` returns
 NULL when fewer than two non-NULL inputs are present.
 
+**Window functions:** `<fn>() OVER ([PARTITION BY <exprs>] [ORDER BY <exprs>]
+[<frame>])` — `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`/`LEAD` (with the SQL
+`offset` and `default` arguments), and the aggregate forms above. Frames are
+`ROWS BETWEEN ... AND ...`; `RANGE` is accepted and executed as `ROWS`, which
+differs only when the `ORDER BY` has ties. `RANK` and `DENSE_RANK` tie exactly
+the rows the `ORDER BY` ties, on the same total order described below — so
+`DENSE_RANK()` over a partition whose order key is equal on every row is `1`
+everywhere. No `FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`/`PERCENT_RANK`/
+`CUME_DIST`/`NTILE` yet.
+
 **Scalar functions:** strings — `LENGTH`/`LEN`, `UPPER`, `LOWER`, `TRIM`
 (single-argument whitespace trim only — `TRIM([LEADING|TRAILING|BOTH] [str]
 FROM x)` and `TRIM(x, str)` are rejected with a clear error, and there is no
@@ -632,11 +642,14 @@ and `-0.0 = 0.0` is TRUE but `-0.0 < 0.0` is also TRUE. `IN` follows equality, s
 `NaN IN (NaN)` is FALSE — matching `NaN = NaN` and therefore **differing from
 Postgres**, which treats `NaN` as equal to itself. Ordering matches Postgres:
 `NaN` sorts above every other value. Everything that orders follows that one
-total order — `ORDER BY`, `GREATEST`/`LEAST`, and the `MIN`/`MAX` aggregates
-(including as window functions) — so `MAX` over a column containing `NaN` is
-`NaN`, `MIN` over one is the smallest non-`NaN` value, and `MIN` over `0.0` and
-`-0.0` is `-0.0`. Those answers do not depend on row order, partition count or
-whether the aggregate spilled. Both evaluation paths (row-at-a-time and
+total order — `ORDER BY`, `GREATEST`/`LEAST`, the `MIN`/`MAX` aggregates
+(including as window functions), and the ORDER BY peer groups `RANK` /
+`DENSE_RANK` share a rank on — so `MAX` over a column containing `NaN` is `NaN`,
+`MIN` over one is the smallest non-`NaN` value, `MIN` over `0.0` and `-0.0` is
+`-0.0`, and `DENSE_RANK()` over a partition whose order key is `NaN` on every row
+is `1` on every row (while `-0.0` and `0.0` rank 1 and 2, since the order
+separates them). Those answers do not depend on row order, partition count or
+whether the operator spilled. Both evaluation paths (row-at-a-time and
 vectorized) agree on all of this; see [docs/gotchas.md](docs/gotchas.md) for why
 the two operator families differ.
 
@@ -778,7 +791,11 @@ JDK 21 or newer (tested through JDK 25).
   round-trip through a typed schema in v1).
 - **No subqueries** (scalar, IN/EXISTS, derived tables in FROM): use a `WITH`
   CTE, or chain `SQLTask`s via `viewName`.
-- **No window functions** (`OVER (PARTITION BY ...)`): planned post-v1.
+- **Window functions: `ROWS` frames only.** They are supported (see
+  [SQL features](#sql-features) for the list), but a `RANGE` frame is executed
+  as `ROWS`, so a running aggregate does not share one value across `ORDER BY`
+  peers the way the standard requires. `COVAR_SAMP`/`COVAR_POP`/`CORR` are
+  `GROUP BY` only.
 - **Cloud paths recognized but unimplemented**: see v1.1 above.
 - **Schema is inferred from the first file** in a glob; mixed schemas across
   files in the same view are not validated. Explicit schemas via the
