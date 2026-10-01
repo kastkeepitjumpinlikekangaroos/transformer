@@ -122,6 +122,7 @@ class ModeDifferentialFuzzTest {
     var withLimit = 0
     var withOffset = 0
     var withPlacement = 0
+    var withDistinctAgg = 0
     var withBoolMinMax = 0
     var noNullCols = 0
     var someNullCols = 0
@@ -133,6 +134,7 @@ class ModeDifferentialFuzzTest {
       if (qc.sql.contains(" LIMIT ")) withLimit += 1
       if (qc.sql.contains(" OFFSET ")) withOffset += 1
       if (qc.sql.contains(" NULLS ")) withPlacement += 1
+      if (qc.sql.contains("SUM(DISTINCT") || qc.sql.contains("AVG(DISTINCT")) withDistinctAgg += 1
       if (hasBooleanMinMax(qc.query)) withBoolMinMax += 1
       val ds = qc.dataset
       if (ds.numRows > 0) {
@@ -147,7 +149,7 @@ class ModeDifferentialFuzzTest {
       seed += 1
     }
     println(f"[mode-differential] over $n seeds: LIMIT in $withLimit; OFFSET in $withOffset; " +
-      f"NULLS FIRST/LAST in $withPlacement; MIN/MAX over a " +
+      f"NULLS FIRST/LAST in $withPlacement; SUM/AVG(DISTINCT) in $withDistinctAgg; MIN/MAX over a " +
       f"Boolean column in $withBoolMinMax; columns " +
       f"no-null=$noNullCols some-null=$someNullCols all-null=$allNullCols of $totalCols")
     assertTrue(s"no LIMIT query generated over $n seeds", withLimit >= n / 20)
@@ -155,6 +157,7 @@ class ModeDifferentialFuzzTest {
     // "gone"; offsetIsGeneratedAndObservable checks that it actually drops rows.
     assertTrue(s"no OFFSET query generated over $n seeds", withOffset >= n / 50)
     assertTrue(s"no NULLS FIRST / NULLS LAST generated over $n seeds", withPlacement >= n / 20)
+    assertTrue(s"no SUM/AVG(DISTINCT) generated over $n seeds", withDistinctAgg >= n / 20)
     // This fuzzer found `MIN`/`MAX` over a Boolean column returning NULL under
     // spill, and the shape was then GATED OUT of the generator until the engine was
     // fixed. Asserting it is back is what keeps that exclusion from returning
@@ -303,6 +306,65 @@ class ModeDifferentialFuzzTest {
       s"generated=$placed, result shows both NULL and non-NULL keys=$observable")
     assertTrue(s"placed=$placed", placed >= n / 20)
     assertTrue(s"observable=$observable of $placed", observable >= n / 100)
+  }
+
+  /** The SUM / AVG(DISTINCT) guard's value half: DISTINCT only tests anything
+    * when some group repeats a value, so run each query again with DISTINCT
+    * dropped and count the ones whose answer changes. */
+  @Test def distinctAggregatesAreGeneratedAndObservable(): Unit = {
+    // Duplicates within a group are scarce in these small datasets, so this
+    // reads more seeds than the other guards: only the DISTINCT queries run.
+    val n = 2000
+    var generated, observable = 0
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      qc.query match {
+        case a: AggregateQuery if a.aggregates.exists {
+              case (s: Sum, _) => s.distinct
+              case (v: Avg, _) => v.distinct
+              case _ => false
+            } =>
+          generated += 1
+          val plain = a.copy(aggregates = a.aggregates.map {
+            case (s: Sum, nm) => (s.copy(distinct = false), nm)
+            case (v: Avg, nm) => (v.copy(distinct = false), nm)
+            case other => other
+          })
+          val cat = new Catalog
+          cat.register(QueryGen.ViewName, qc.dataset.singlePartition())
+          val differs = Try {
+            val q1 = RelEngine.execute(cat, a.render(QueryGen.ViewName), ExecutionOptions.Default)
+            val q2 = RelEngine.execute(cat, plain.render(QueryGen.ViewName), ExecutionOptions.Default)
+            RowOracle.multisetEquals(q1.schema, RelEngine.collectRows(q1), RelEngine.collectRows(q2)).isDefined
+          }.getOrElse(false)
+          if (differs) observable += 1
+        case _ => ()
+      }
+      seed += 1
+    }
+    println(s"[mode-differential] SUM/AVG(DISTINCT) over $n seeds: generated=$generated, " +
+      s"dropping DISTINCT changes the answer=$observable")
+    assertTrue(s"generated=$generated", generated >= n / 20)
+    assertTrue(s"observable=$observable of $generated", observable >= n / 200)
+  }
+
+  /** SUM(DISTINCT) / AVG(DISTINCT) over a value repeated within and across
+    * partitions: every layout must merge the partials' value sets before the
+    * replay, and spill must fall back to the in-memory path, so all modes agree. */
+  @Test def regressionDistinctSumAvgAcrossModes(): Unit = {
+    val schema = Schema(Vector(Field("c0", DataType.IntType), Field("c1", DataType.DoubleType)))
+    val rows = IndexedSeq[Array[Any]](
+      Array[Any](1, 0.5), Array[Any](1, 0.5), Array[Any](1, 1.5), Array[Any](2, 0.5),
+      Array[Any](2, 2.5), Array[Any](2, 2.5), Array[Any](1, null), Array[Any](null, 0.5))
+    val c0 = ColRefExpr(0, "c0", DataType.IntType)
+    val c1 = ColRefExpr(1, "c1", DataType.DoubleType)
+    val q = AggregateQuery(Vector(c0),
+      Vector((Sum(c1, distinct = true), "a0"), (Avg(c1, distinct = true), "a1"), (Sum(c1), "a2")),
+      where = None, having = None, groupByOrdinals = false, orderBy = Vector(OrderKey(c0, asc = true)))
+    val qc = QueryGen.QueryCase(DataGen.Dataset(schema, rows), q)
+    assertTrue(qc.sql, qc.sql.contains("SUM(DISTINCT c1)") && qc.sql.contains("AVG(DISTINCT c1)"))
+    ModeDifferential.check(qc)
   }
 
   /** NULLS FIRST and NULLS LAST against each direction, over a key with NULLs:

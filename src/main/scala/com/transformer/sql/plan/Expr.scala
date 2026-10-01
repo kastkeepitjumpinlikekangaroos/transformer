@@ -650,3 +650,15 @@ final case class AggExprCorr(x: Expr, y: Expr) extends AggExpr {
   val name = "CORR"; val args: Seq[Expr] = Seq(x, y); val distinct = false
   val resultType: DataType = DataType.DoubleType
 }
+/** `inner` over the DISTINCT non-NULL values of its argument — `SUM(DISTINCT x)`
+  * and `AVG(DISTINCT x)`. Same name, argument and result type as `inner`; only
+  * the input is de-duplicated. `COUNT(DISTINCT x)` predates this and keeps its
+  * own flag on [[AggExprCount]]; `MIN` / `MAX` never need it, since DISTINCT
+  * cannot change an extreme. */
+final case class AggExprDistinct(inner: AggExpr) extends AggExpr {
+  require(inner.args.length == 1, s"DISTINCT takes a one-argument aggregate, got ${inner.name}")
+  val name: String = inner.name
+  val args: Seq[Expr] = inner.args
+  val distinct = true
+  val resultType: DataType = inner.resultType
+}

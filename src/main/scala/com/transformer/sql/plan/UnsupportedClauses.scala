@@ -205,6 +205,7 @@ object UnsupportedClauses {
     "isUsingBrackets" -> "whether the list was parenthesized")
 
   private val RankingFunctions = Set("ROW_NUMBER", "RANK", "DENSE_RANK")
+  private val DistinctAggregates = Set("COUNT", "SUM", "AVG", "MIN", "MAX")
   private val OffsetFunctions = Set("LAG", "LEAD")
 
   // ---------------------------------------------------------------------------
@@ -303,11 +304,11 @@ object UnsupportedClauses {
 
   private val FunctionAudit = audit(
     Seq(
-      rejectsWhen[Function]("isDistinct")("DISTINCT inside an aggregate other than COUNT",
-        example = "SELECT SUM(DISTINCT a) FROM t",
+      rejectsWhen[Function]("isDistinct")("DISTINCT inside an aggregate other than COUNT, SUM, AVG, MIN or MAX",
+        example = "SELECT STDDEV(DISTINCT a) FROM t",
         partial = true,
         describe = f => s"${upper(f.getName)}(DISTINCT ...)"
-      )(f => f.isDistinct && !"COUNT".equalsIgnoreCase(f.getName)),
+      )(f => f.isDistinct && !DistinctAggregates(upper(f.getName))),
       // JSqlParser sets isAllColumns for the ALL quantifier, not for `*` (which
       // arrives as an AllColumns parameter). The binder takes it to mean `*`.
       rejectsWhen[Function]("isAllColumns")("COUNT(ALL x)",

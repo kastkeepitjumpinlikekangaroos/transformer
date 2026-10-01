@@ -574,9 +574,10 @@ ship a fix or move something from "not done" to "done".
     fuzzer surfaced; `Float` now shares the `Double` path. Every
     non-floating-point column (integer `SUM` in `Long`, `COUNT`, `MIN`/`MAX`,
     projected/group-key values) is bit-identical and compares exactly, so the
-    tolerance can never mask a wrong group or a dropped row. `COUNT(DISTINCT …)`
-    silently disables spill (it is not spillable), so the spill-on run takes the
-    in-memory path — parity still holds, and the fuzzer does not special-case it.
+    tolerance can never mask a wrong group or a dropped row. A DISTINCT aggregate
+    (`COUNT`, `SUM` or `AVG(DISTINCT …)`) silently disables spill (it is not
+    spillable), so the spill-on run takes the in-memory path — parity still holds,
+    and the fuzzer does not special-case it.
 
 - **The metamorphic TLP oracle partitions the query OUTPUT, never decomposes an
   aggregate.** `Tlp` checks `Q ≡ (Q WHERE p) ⊎ (Q WHERE NOT p) ⊎ (Q WHERE p IS
@@ -866,11 +867,11 @@ writer. Plans 04-07 in that directory close those three holes.
   `plans/perf/09-spill-to-disk.md` for the full design. Caveats:
   - Non-equi joins (cartesian-shaped) ignore the spill option — they're
     rejected above [[PhysicalPlanner.NestedLoopMaxRows]] anyway.
-  - `COUNT(DISTINCT …)` aggregates fall back to the in-memory path even
-    when spill is enabled — the underlying HashSet state doesn't
-    round-trip through a typed schema in v1, so a query mixing
-    `COUNT(DISTINCT)` with other aggregates silently disables spill for
-    that operator. Document the heap limit if a workload is hitting it.
+  - DISTINCT aggregates (`COUNT`, `SUM` and `AVG(DISTINCT …)`) fall back to
+    the in-memory path even when spill is enabled — the underlying HashSet
+    state doesn't round-trip through a typed schema in v1, so a query mixing
+    one with other aggregates silently disables spill for that operator.
+    Document the heap limit if a workload is hitting it.
   - `WindowExec` spill requires a non-empty PARTITION BY that's
     consistent across every window spec in the projection. Empty
     PARTITION BY (whole-result window) or mixed PARTITION BYs silently

@@ -597,8 +597,8 @@ WHERE`. Rejected, among others: `JOIN ... USING`, `NATURAL`, `SEMI` and `APPLY`
 joins, a bare `OUTER JOIN` and Oracle's `(+)`; `FETCH FIRST`, `TOP n`, and
 `ORDER BY` / `LIMIT` / `OFFSET` after a parenthesized query; `QUALIFY`,
 `DISTINCT ON`, `GROUPING SETS` and `WITH ROLLUP`; `FILTER (WHERE ...)`,
-`WITHIN GROUP`, `IGNORE NULLS` and named `WINDOW`s; `DISTINCT` inside any
-aggregate but `COUNT`, and `COUNT(ALL x)`; `ILIKE`, `RLIKE` / `REGEXP`,
+`WITHIN GROUP`, `IGNORE NULLS` and named `WINDOW`s; `DISTINCT` inside
+`STDDEV`, `VARIANCE`, `COUNT_IF`, `COVAR` or `CORR`, and `COUNT(ALL x)`; `ILIKE`, `RLIKE` / `REGEXP`,
 `SIMILAR TO`, `LIKE ... ESCAPE` and `x NOTNULL`; `TRY_CAST`, array types and
 subscripts; `* EXCEPT` / `* REPLACE`; `PIVOT`, `TABLESAMPLE`, `CONNECT BY` and
 schema-qualified table names; `SELECT ... INTO`, `FOR UPDATE`, and vendor
@@ -607,7 +607,8 @@ reason for each, is
 [`UnsupportedClauses.scala`](src/main/scala/com/transformer/sql/plan/UnsupportedClauses.scala).
 
 **Aggregates:** `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `COUNT_IF(pred)`,
-`SUM`, `AVG`, `MIN`, `MAX`,
+`SUM`, `AVG`, `MIN`, `MAX` (each of these four also as `SUM(DISTINCT col)` and so
+on, which aggregates each distinct non-NULL value once),
 `STDDEV`/`STDDEV_SAMP`/`STDDEV_POP`, `VARIANCE`/`VAR_SAMP`/`VAR_POP`,
 `COVAR_SAMP`/`COVAR_POP`, `CORR`. Univariate variance/stddev (and `COUNT_IF`)
 are also available as window aggregates with `OVER (...)`. Variance and stddev
@@ -820,9 +821,9 @@ JDK 21 or newer (tested through JDK 25).
   Spill defaults to **off** per task (no overhead when not needed) and is
   not exposed as a global toggle. Temp files land under
   `${java.io.tmpdir}/transformer-spill` by default — override via the
-  `transformer.spill.dir` system property. `COUNT(DISTINCT …)` aggregates
-  silently disable spill on the whole operator (its state doesn't
-  round-trip through a typed schema in v1).
+  `transformer.spill.dir` system property. DISTINCT aggregates
+  (`COUNT`, `SUM` and `AVG(DISTINCT …)`) silently disable spill on the whole
+  operator (their state doesn't round-trip through a typed schema in v1).
 - **No subqueries** (scalar, IN/EXISTS, derived tables in FROM): use a `WITH`
   CTE, or chain `SQLTask`s via `viewName`.
 - **Window functions: `ROWS` frames only.** They are supported (see

@@ -11,8 +11,9 @@ import java.io.{ByteArrayInputStream, ByteArrayOutputStream, DataInput, DataInpu
   *      type is determined by the originating [[AggExpr]]).
   *   2. `Array[Byte]` convenience wrappers around the streaming pair.
   *   3. The `isSpillable` predicate. Operators must consult this before
-  *      enabling spill — `COUNT(DISTINCT …)` deliberately falls back to
-  *      the non-spill path in v1 (see plans/perf/09-spill-to-disk.md).
+  *      enabling spill — the DISTINCT aggregates (`COUNT`, `SUM` and
+  *      `AVG(DISTINCT …)`) deliberately fall back to the non-spill path in v1
+  *      (see plans/perf/09-spill-to-disk.md).
   *
   * Why this file lives in `sql.exec` and not `core`: `AggState` is sealed
   * inside this package; the spill format references its internal fields.
@@ -26,14 +27,16 @@ object AggStateSerde {
     * aggregate is non-spillable, the whole map stays in heap. */
   def allSpillable(aggs: Iterable[AggExpr]): Boolean = aggs.forall(isSpillable)
 
-  /** Per-aggregate spillability check. `COUNT(DISTINCT col)` is the only
-    * non-spillable aggregate in v1 — its `HashSet[Any]` doesn't round-trip
-    * through a typed schema, and CountDistinct on >threshold cardinality
-    * is uncommon enough that the heap fallback is the documented behavior.
+  /** Per-aggregate spillability check. The DISTINCT aggregates are the
+    * non-spillable ones in v1 — the set of values they keep (a
+    * `HashSet[Any]`) doesn't round-trip through a typed schema, and a
+    * DISTINCT aggregate over >threshold cardinality is uncommon enough that
+    * the heap fallback is the documented behavior.
     */
   def isSpillable(agg: AggExpr): Boolean = agg match {
     case AggExprCount(_, true) => false
-    case _                      => true
+    case _: AggExprDistinct    => false
+    case _                     => true
   }
 
   /** Stream the state's accumulator fields into `out`. Delegates to

@@ -771,9 +771,10 @@ object LogicalBuilder {
       case "COUNT" if params.size == 1 =>
         AggExprCount(bindExpr(params.head, sources), distinct)
       case "SUM" if params.size == 1 =>
-        AggExprSum(bindExpr(params.head, sources))
+        distinctIf(distinct, AggExprSum(bindExpr(params.head, sources)))
       case "AVG" if params.size == 1 =>
-        AggExprAvg(bindExpr(params.head, sources))
+        distinctIf(distinct, AggExprAvg(bindExpr(params.head, sources)))
+      // DISTINCT cannot change an extreme, so MIN / MAX ignore it.
       case "MIN" if params.size == 1 =>
         AggExprMin(bindExpr(params.head, sources))
       case "MAX" if params.size == 1 =>
@@ -798,6 +799,9 @@ object LogicalBuilder {
         throw new IllegalArgumentException(s"Unsupported aggregate: ${f.getName}(${params.size} args)")
     }
   }
+
+  private def distinctIf(distinct: Boolean, agg: AggExpr): AggExpr =
+    if (distinct) AggExprDistinct(agg) else agg
 
   // ---------------------------------------------------------------------------
   // Helpers

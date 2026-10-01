@@ -172,8 +172,12 @@ object QueryGen {
   final case class Count(arg: Expr, distinct: Boolean) extends AggSpec {
     def render: String = s"COUNT(${if (distinct) "DISTINCT " else ""}${SqlRender.expr(arg)})"
   }
-  final case class Sum(arg: Expr) extends AggSpec { def render = s"SUM(${SqlRender.expr(arg)})" }
-  final case class Avg(arg: Expr) extends AggSpec { def render = s"AVG(${SqlRender.expr(arg)})" }
+  final case class Sum(arg: Expr, distinct: Boolean = false) extends AggSpec {
+    def render: String = s"SUM(${if (distinct) "DISTINCT " else ""}${SqlRender.expr(arg)})"
+  }
+  final case class Avg(arg: Expr, distinct: Boolean = false) extends AggSpec {
+    def render: String = s"AVG(${if (distinct) "DISTINCT " else ""}${SqlRender.expr(arg)})"
+  }
   final case class Min(arg: Expr) extends AggSpec { def render = s"MIN(${SqlRender.expr(arg)})" }
   final case class Max(arg: Expr) extends AggSpec { def render = s"MAX(${SqlRender.expr(arg)})" }
   final case class CountIf(arg: Expr) extends AggSpec { def render = s"COUNT_IF(${SqlRender.expr(arg)})" }
@@ -264,6 +268,16 @@ object QueryGen {
   private def withNullPlacement(rng: Rng, keys: Vector[OrderKey]): Vector[OrderKey] =
     keys.map(k => k.copy(nullsFirst = genNullPlacement(rng)))
 
+  /** Make some SUM / AVG aggregates `SUM(DISTINCT x)` / `AVG(DISTINCT x)`. Drawn
+    * after every other draw for the query, and only for those two, so every
+    * other query is the draw sequence it always was. */
+  private def withDistinctInputs(rng: Rng, aggs: Vector[(AggSpec, String)]): Vector[(AggSpec, String)] =
+    aggs.map {
+      case (s: Sum, name) => (s.copy(distinct = rng.bool(0.4)), name)
+      case (a: Avg, name) => (a.copy(distinct = rng.bool(0.4)), name)
+      case other => other
+    }
+
   /** An OFFSET spanning the cutoffs [[genLimit]] does: zero (a no-op), one row, a
     * handful (a cut mid-batch and mid-partition), and past the end of the data
     * (nothing left). Weighted to the small skips, because generated results are
@@ -296,9 +310,10 @@ object QueryGen {
         distinctSubset(rng, groupKeys, rng.between(1, math.min(2, groupKeys.length))).map(cr => OrderKey(cr, rng.bool()))
       else Vector.empty
     val (limit, offset) = withOffset(rng, topN, if (topN) Some(genLimit(rng)) else None)
+    val placedOrderBy = withNullPlacement(rng, orderBy)
 
-    AggregateQuery(groupKeys, aggregates, where, having, groupByOrdinals,
-      withNullPlacement(rng, orderBy), limit, offset)
+    AggregateQuery(groupKeys, withDistinctInputs(rng, aggregates), where, having, groupByOrdinals,
+      placedOrderBy, limit, offset)
   }
 
   private def genAggSpec(rng: Rng, schema: Schema, numeric: Vector[Int], integral: Vector[Int]): AggSpec = {

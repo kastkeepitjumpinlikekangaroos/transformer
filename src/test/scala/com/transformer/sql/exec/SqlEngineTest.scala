@@ -1994,9 +1994,39 @@ class SqlEngineTest {
     assertRejected("SELECT t.a FROM t4 t, s WHERE t.a = s.a(+)", cat, "(+)")
   }
 
-  @Test def sumDistinctRejected(): Unit =
-    // DISTINCT was dropped: SUM(DISTINCT a) over 1,2,2,3 returned 8, not 6.
-    assertRejected("SELECT SUM(DISTINCT a) AS s FROM t", clauseCatalog(), "SUM(DISTINCT ...)")
+  @Test def distinctAggregatesSeeEachValueOnce(): Unit = {
+    val cat = clauseCatalog() // t.a is 1, 2, 2, 3; tn.a adds a NULL
+    // The plan's case: 6. The dropped DISTINCT gave 8.
+    assertEquals(Seq(6L), column("SELECT SUM(DISTINCT a) AS s FROM t", cat, "s"))
+    assertEquals(Seq(2.0), column("SELECT AVG(DISTINCT a) AS v FROM t", cat, "v"))
+    // DISTINCT cannot move an extreme.
+    assertEquals(Seq(1), column("SELECT MIN(DISTINCT a) AS m FROM t", cat, "m"))
+    assertEquals(Seq(3), column("SELECT MAX(DISTINCT a) AS m FROM t", cat, "m"))
+    // A NULL is skipped, as the plain aggregates skip it.
+    assertEquals(Seq(6L), column("SELECT SUM(DISTINCT a) AS s FROM tn", cat, "s"))
+    // No input at all is NULL, like SUM.
+    assertEquals(Seq(null), column("SELECT SUM(DISTINCT a) AS s FROM t WHERE a > 10", cat, "s"))
+    // Beside the plain form and COUNT(DISTINCT) in one query: separate slots.
+    val row = collectAllRows(SqlEngine.execute(
+      "SELECT SUM(a) AS s, SUM(DISTINCT a) AS d, COUNT(DISTINCT a) AS c, AVG(a) AS v FROM t", cat)).head
+    assertEquals(Seq(8L, 6L, 3L, 2.0), Seq(row("s"), row("d"), row("c"), row("v")))
+    // The aggregates DISTINCT is not implemented for still say so.
+    assertRejected("SELECT STDDEV(DISTINCT a) FROM t", cat, "STDDEV(DISTINCT ...)")
+    assertRejected("SELECT COUNT_IF(DISTINCT a > 1) FROM t", cat, "COUNT_IF(DISTINCT ...)")
+  }
+
+  @Test def distinctAggregatesPerGroupInHavingAndOrderBy(): Unit = {
+    val p = tmpCsv("d.csv", "g,a\nx,1\nx,1\nx,2\ny,5\ny,5\nz,\n")
+    val cat = catalogWith("d" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val rows = collectAllRows(SqlEngine.execute(
+      "SELECT g, SUM(DISTINCT a) AS s, AVG(DISTINCT a) AS v FROM d GROUP BY g ORDER BY g", cat))
+    assertEquals(Seq("x", "y", "z"), rows.map(_("g")))
+    assertEquals(Seq(3L, 5L, null), rows.map(_("s")))
+    assertEquals(Seq(1.5, 5.0, null), rows.map(_("v")))
+    assertEquals(Seq("y"), column("SELECT g FROM d GROUP BY g HAVING SUM(DISTINCT a) > 4", cat, "g"))
+    assertEquals(Seq("y", "x"),
+      column("SELECT g, SUM(DISTINCT a) AS s FROM d GROUP BY g HAVING COUNT(a) > 0 ORDER BY SUM(DISTINCT a) DESC", cat, "g"))
+  }
 
   @Test def aggregateFilterRejected(): Unit = {
     // FILTER parses as a window function, so it dropped the predicate AND

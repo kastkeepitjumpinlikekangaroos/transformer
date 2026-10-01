@@ -103,8 +103,9 @@ final case class HashAggregateExec(
   }
 
   // Effective spill switch: user opted in AND every aggregate is spillable.
-  // Mixed-aggregate queries with a CountDistinct fall back to the heap-only
-  // path (its HashSet[Any] doesn't round-trip through the typed spill schema).
+  // Queries with a DISTINCT aggregate (COUNT / SUM / AVG(DISTINCT ...)) fall
+  // back to the heap-only path: the HashSet[Any] of values doesn't round-trip
+  // through the typed spill schema.
   private val spillEnabled: Boolean =
     opts.spillEnabled && AggStateSerde.allSpillable(aggregates.iterator.map(_._1).toIndexedSeq)
 
@@ -724,8 +725,8 @@ sealed trait AggState {
     * [[AggStateSerde]] when an operator spills a partial map to disk. The
     * default throws — only states the plan promises to support
     * (Count, Sum, Avg, Min, Max, CountIf, Moment, Covar, Corr) override.
-    * `CountDistinctState` deliberately does not — a `HashSet[Any]` has no
-    * typed-schema round-trip.
+    * `CountDistinctState` and `DistinctState` deliberately do not — a
+    * `HashSet[Any]` has no typed-schema round-trip.
     *
     * The on-disk encoding is opaque to the operator — `writeSelf` /
     * `readSelf` are paired by type, never by external schema. Operators
@@ -746,6 +747,7 @@ object AggState {
     case _: AggExprCountStar => new CountStarState()
     case AggExprCount(_, false) => new CountState()
     case AggExprCount(_, true) => new CountDistinctState()
+    case d: AggExprDistinct => new DistinctState(d.inner)
     case s: AggExprSum => SumState.init(s)
     case _: AggExprAvg => new AvgState()
     case m: AggExprMin => new MinMaxState(min = true, m.resultType)
@@ -808,6 +810,34 @@ final class CountDistinctState extends AggState {
   }
   def merge(o: AggState): Unit = set.addAll(o.asInstanceOf[CountDistinctState].set)
   def finish(): Any = set.size.toLong
+}
+
+/** `AGG(DISTINCT x)` for an aggregate other than COUNT: the distinct non-NULL
+  * values seen, under the same `equals` as [[CountDistinctState]] so the two
+  * agree on what DISTINCT means, replayed into the inner aggregate's own state
+  * at `finish`. The replay runs in `Ops.cmp` order, so a DOUBLE sum does not
+  * depend on the order values arrived or partials merged in. Like
+  * `CountDistinctState` it holds every distinct value in heap and has no spill
+  * encoding, so an aggregate carrying one runs on the in-memory path. */
+final class DistinctState(inner: AggExpr) extends AggState {
+  private val set = new util.HashSet[Any]()
+  def updateAt(argVecs: Array[ColumnVector], r: Int): Unit = {
+    val vec = argVecs(0)
+    if (!vec.isNull(r)) set.add(vec.getBoxed(r))
+  }
+  def merge(o: AggState): Unit = set.addAll(o.asInstanceOf[DistinctState].set)
+  def finish(): Any = {
+    val values: Array[AnyRef] = set.toArray
+    java.util.Arrays.sort(values, (a: AnyRef, b: AnyRef) => Ops.cmp(a, b))
+    val n = values.length
+    val batch = new ColumnarBatch(Schema(Vector(Field("v", inner.args.head.dataType))), math.max(1, n))
+    var i = 0
+    while (i < n) { batch.column(0).setBoxed(i, values(i)); i += 1 }
+    batch.setNumRows(n)
+    val state = AggState.init(inner)
+    state.updateBatchAt(Array(batch.column(0)), n)
+    state.finish()
+  }
 }
 
 final class CountIfState extends AggState {

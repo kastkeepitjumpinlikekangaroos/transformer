@@ -243,7 +243,7 @@ object MetaQueryGen {
   /** The result type of an aggregate spec (the engine's `AggExpr.resultType`). */
   private def aggType(spec: QueryGen.AggSpec): DataType = spec match {
     case QueryGen.CountStar | _: QueryGen.Count | _: QueryGen.CountIf => DataType.LongType
-    case QueryGen.Sum(arg) => arg.dataType match {
+    case QueryGen.Sum(arg, _) => arg.dataType match {
       case DataType.IntType | DataType.LongType => DataType.LongType
       case DataType.FloatType | DataType.DoubleType => DataType.DoubleType
       case other => other

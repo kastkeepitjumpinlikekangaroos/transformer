@@ -311,8 +311,12 @@ object Shrinker {
   private def shrinkAggSpec(spec: AggSpec): Iterator[AggSpec] = spec match {
     case CountStar => Iterator.empty
     case Count(arg, d) => expr(arg).map(Count(_, d))
-    case Sum(arg) => expr(arg).map(Sum(_))
-    case Avg(arg) => expr(arg).map(Avg(_))
+    case s: Sum =>
+      (if (s.distinct) Iterator[AggSpec](s.copy(distinct = false)) else Iterator.empty) ++
+        expr(s.arg).map(a => s.copy(arg = a))
+    case a: Avg =>
+      (if (a.distinct) Iterator[AggSpec](a.copy(distinct = false)) else Iterator.empty) ++
+        expr(a.arg).map(x => a.copy(arg = x))
     case Min(arg) => expr(arg).map(Min(_))
     case Max(arg) => expr(arg).map(Max(_))
     case CountIf(arg) => expr(arg).map(CountIf(_))
@@ -343,8 +347,8 @@ object Shrinker {
   private def aggCols(spec: AggSpec): Set[Int] = spec match {
     case CountStar => Set.empty
     case Count(arg, _) => exprCols(arg)
-    case Sum(arg) => exprCols(arg)
-    case Avg(arg) => exprCols(arg)
+    case s: Sum => exprCols(s.arg)
+    case a: Avg => exprCols(a.arg)
     case Min(arg) => exprCols(arg)
     case Max(arg) => exprCols(arg)
     case CountIf(arg) => exprCols(arg)

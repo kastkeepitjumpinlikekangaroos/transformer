@@ -179,10 +179,10 @@ which returns the Java `null` sentinel instead of a key.
 writes them through `Float.floatToIntBits` / `Double.doubleToLongBits`. Those
 canonicalize every `NaN` payload to one bit pattern and keep `-0.0` distinct
 from `0.0`, so all `NaN` rows land in one group and signed zeros land in two.
-`ObjectArrayCodec` (a mixed key that includes a float column) and
-`CountDistinctState`'s `java.util.HashSet` both compare with
-`java.lang.Double.equals`, which is the same bit-level rule — so grouping,
-`DISTINCT`, `COUNT(DISTINCT …)` and equi-join (every equi-join is a
+`ObjectArrayCodec` (a mixed key that includes a float column) and the
+`java.util.HashSet` behind `CountDistinctState` and `DistinctState` all compare
+with `java.lang.Double.equals`, which is the same bit-level rule — so grouping,
+`DISTINCT`, `COUNT` / `SUM` / `AVG(DISTINCT …)` and equi-join (every equi-join is a
 `HashJoinExec`, and it keys through the same codecs) all agree with each other
 on these values, whichever codec a given key shape picks. Note this is NOT
 `Ops.eq`'s answer, which follows IEEE: `NaN = NaN` is FALSE and `-0.0 = 0.0` is
@@ -381,9 +381,9 @@ state columns. This is spill-only — real output files (the non-spill
 `ParquetWriter` callers) keep their real column names. See
 [plans/bugfixes/01](../plans/bugfixes/01-spill-duplicate-column-names.md).
 
-Limitations: `COUNT(DISTINCT …)` aggregates silently disable spill on
-the whole operator because the underlying `HashSet[Any]` doesn't
-round-trip through a typed schema. Grace hash and window spill both
+Limitations: DISTINCT aggregates (`COUNT`, `SUM` and `AVG(DISTINCT …)`)
+silently disable spill on the whole operator because the underlying
+`HashSet[Any]` doesn't round-trip through a typed schema. Grace hash and window spill both
 use a fixed bucket count of 16 with no recursive bucketing — hot keys
 whose bucket exceeds heap will still OOM at processing time (v1.1).
 The temp-file root defaults to `${java.io.tmpdir}/transformer-spill`,
@@ -1205,9 +1205,9 @@ clause found this way raises `UnsupportedClauseException`, an
 `IllegalArgumentException` that names the clause and carries the entry.
 
 Some getters the binder honours for some uses and drops for others —
-`Function.isDistinct` is read for `COUNT(DISTINCT x)` only. Those carry a
-*partial* rejection that tests the node (function name, argument shape) and
-lets the honoured uses through.
+`Function.isDistinct` is honoured for `COUNT`, `SUM`, `AVG`, `MIN` and `MAX`
+and not for `STDDEV` or `CORR`. Those carry a *partial* rejection that tests
+the node (function name, argument shape) and lets the honoured uses through.
 
 The invariant is enforced, not maintained. `sql/plan:unsupported_clauses_test`
 derives what the binder reads from `LogicalBuilder`'s compiled class files —

@@ -300,6 +300,26 @@ LIMIT keeps), so the guards' bounds separate "rare" from "gone": 18 of 125 place
 primary keys show it in mode-differential, and flipping the placement changes 14
 of 152 metamorphic answers.
 
+**SUM / AVG / MIN / MAX(DISTINCT x).** `MIN` / `MAX` ignore the flag (DISTINCT
+cannot move an extreme). `SUM` and `AVG` wrap their aggregate in
+`AggExprDistinct`, whose `DistinctState` keeps the distinct non-NULL values under
+the same `equals` as `COUNT(DISTINCT)` (so the two agree on what distinct means),
+unions them in `merge`, and at `finish` replays them into the inner aggregate's
+own state in `Ops.cmp` order, so a DOUBLE sum does not depend on arrival or merge
+order. Like `COUNT(DISTINCT)` it is not spillable, and the operator falls back to
+the heap path. DISTINCT inside `STDDEV`, `VARIANCE`, `COUNT_IF`, `COVAR` and `CORR`
+stays a partial rejection, and so does any DISTINCT under `OVER` but `COUNT`'s.
+A mutation check found my own operator-level test too weak at first: with every
+partition holding the same values, a `merge` that dropped the other partial still
+produced the right sum. Its partitions now overlap only partly. `QueryGen` marks
+some SUM / AVG aggregates DISTINCT (drawn last); observability is low in these
+small datasets (a group must repeat a value), so that guard reads 2000 seeds:
+26 of 193 answers change when DISTINCT is dropped.
+
+Found along the way, outside this plan's table: an aggregate named only in ORDER
+BY (`SELECT g FROM t GROUP BY g ORDER BY SUM(a)`) was never collected, and
+binding died with an internal `NoSuchElementException`. Fixed in its own commit.
+
 ## Launch prompt
 
 ```

@@ -282,6 +282,38 @@ class HashAggregateSpillTest {
     assertEquals(5, rows.length) // 5 distinct keys
   }
 
+  /** SUM(DISTINCT v) / AVG(DISTINCT v): the partials' value sets merge before
+    * the replay, so a value seen in two partitions counts once and a value seen
+    * in only one still counts. Like COUNT(DISTINCT) the state has no spill
+    * encoding, so asking for spill falls back to the in-memory path and must
+    * give the same answer. */
+  @Test def distinctSumAndAvgMergeAcrossPartitionsAndIgnoreSpill(): Unit = {
+    val schema = Schema(Vector(Field("k", DataType.IntType), Field("v", DataType.LongType)))
+    // Partition p holds v = 2p+1 .. 2p+6 for keys 0 and 1: neighbours overlap by
+    // four values, and together they cover 1..12. Losing a partial or counting
+    // an overlap twice both change the answer.
+    val parts = Vector.tabulate(4)(p => (for (k <- 0 to 1; v <- (2 * p + 1) to (2 * p + 6)) yield
+      Array[Any](java.lang.Integer.valueOf(k), java.lang.Long.valueOf(v.toLong))).toVector)
+    val k = ColRefExpr(0, "k", DataType.IntType)
+    val v = ColRefExpr(1, "v", DataType.LongType)
+    def run(opts: ExecutionOptions): Map[Any, (Any, Any, Any)] = {
+      val agg = HashAggregateExec(
+        new InMemoryPartitionedPlanForAggSpill(schema, parts),
+        groupKeys = Seq((k, "k")),
+        aggregates = Seq(
+          (AggExprDistinct(AggExprSum(v)), "sd"),
+          (AggExprDistinct(AggExprAvg(v)), "ad"),
+          (AggExprSum(v), "s")),
+        opts = opts)
+      drainRows((0 until agg.numPartitions).iterator.flatMap(agg.execute), agg.outputSchema)
+        .map(r => r(0) -> ((r(1), r(2), r(3)))).toMap
+    }
+    // DISTINCT: 1..12 sums to 78, averages 6.5. Plain SUM: 21 + 33 + 45 + 57.
+    val expected = Map[Any, (Any, Any, Any)](0 -> ((78L, 6.5, 156L)), 1 -> ((78L, 6.5, 156L)))
+    assertEquals(expected, run(ExecutionOptions.Default))
+    assertEquals(expected, run(spillyOpts()))
+  }
+
   // ---- Regression: name-colliding GROUP BY keys under spill -----------------
   //
   // `GROUP BY t0.k, t1.k` renders two group-key columns both named "k". The

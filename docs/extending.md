@@ -47,7 +47,11 @@ relevant module lives, and that you'll follow the workflow in
    into float columns, and a new ordering state wants a coverage guard asserting
    they reach it.
 5. Wire it in `AggState.init` (`AggregateExec.scala`) and
-   `LogicalBuilder.bindAgg` (`sql/plan/LogicalBuilder.scala`).
+   `LogicalBuilder.bindAgg` (`sql/plan/LogicalBuilder.scala`). A one-argument
+   aggregate gets `DISTINCT` by wrapping it in `AggExprDistinct` in `bindAgg`
+   (`DistinctState` replays the distinct values into the aggregate's own state)
+   and adding its name to `UnsupportedClauses.DistinctAggregates`; until then
+   `AGG(DISTINCT x)` is rejected, never bound as plain `AGG(x)`.
 6. Test it.
 7. Update [`README.md`'s "SQL features"](../README.md#sql-features) and (if
    the change affects window behaviour) the window-fn note in

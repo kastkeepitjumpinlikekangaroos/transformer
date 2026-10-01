@@ -234,6 +234,7 @@ object ColumnProjectionPushdown {
     case AggExprVariance(c, s) => AggExprVariance(rewriteExpr(c, remap), s)
     case AggExprCovar(x, y, s) => AggExprCovar(rewriteExpr(x, remap), rewriteExpr(y, remap), s)
     case AggExprCorr(x, y) => AggExprCorr(rewriteExpr(x, remap), rewriteExpr(y, remap))
+    case AggExprDistinct(inner) => AggExprDistinct(rewriteAgg(inner, remap))
   }
 
   /** Pick a single column from `schema` to project to when the consumer

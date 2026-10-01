@@ -34,8 +34,8 @@ navigation hint, not a comprehensive directory listing.
   handles per-partition parquet flush + fold-back at emit time.
 - `sql/exec/AggStateSerde.scala` (~110 LOC) — dispatcher that pairs
   `AggExpr` types with the right `AggState` subtype for round-trip
-  serialization. `isSpillable` gates the operator-level switch
-  (`CountDistinct` is the only false case).
+  serialization. `isSpillable` gates the operator-level switch (false for
+  the DISTINCT aggregates, `CountDistinctState` and `DistinctState`).
 - `core/Spill.scala` (~230 LOC) — temp-dir lifecycle, per-operator subdir
   allocation (`OperatorSpillDir`, whose `closeOnDrain` wipes the subdir
   when an operator's output iterator drains), `ColumnarBatch` byte
