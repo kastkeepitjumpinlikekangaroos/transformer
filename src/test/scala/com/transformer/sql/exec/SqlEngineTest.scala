@@ -1954,6 +1954,154 @@ class SqlEngineTest {
     assertTrue(ex.getMessage, ex.getMessage.contains("column alias"))
   }
 
+  // --- Clauses JSqlParser parses but the binder does not implement ----------
+  // Each of these used to parse, run, and answer a different question than the
+  // one asked (plans/robustness/01). UnsupportedClauses now rejects them before
+  // binding. The data is the plan's, so the comment on each case records the
+  // answer the clause used to give.
+
+  private def clauseCatalog(): Catalog = {
+    val c = new Catalog
+    def csv(name: String, contents: String): Unit =
+      c.register(name, CsvReader.fromPath(tmpCsv(s"$name.csv", contents).toString, CsvOptions()))
+    csv("t", "a\n1\n2\n2\n3\n")
+    csv("s", "a\n2\n3\n")
+    csv("t4", "a\n1\n2\n3\n4\n")
+    csv("tn", "id,a\n1,1\n2,2\n3,2\n4,3\n5,\n")
+    csv("ts", "id,s\n1,Ab\n2,\n3,xy\n4,A_b\n")
+    csv("tg", "g,a\nx,1\nx,2\ny,3\ny,4\n")
+    c
+  }
+
+  /** `sql` fails at bind time with a message naming `clause`. */
+  private def assertRejected(sql: String, cat: Catalog, clause: String): Unit = {
+    val ex = try { SqlEngine.execute(sql, cat); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(s"$sql was accepted", ex)
+    assertTrue(s"$sql -> ${ex.getMessage}", ex.getMessage.contains(clause))
+    assertTrue(s"$sql -> ${ex.getMessage}", ex.getMessage.contains("is not supported"))
+  }
+
+  @Test def joinConditionClausesRejected(): Unit = {
+    val cat = clauseCatalog()
+    // Both dropped the join condition: 8 rows, the cartesian product, not 3.
+    assertRejected("SELECT * FROM t JOIN s USING (a)", cat, "JOIN ... USING")
+    assertRejected("SELECT * FROM t NATURAL JOIN s", cat, "NATURAL JOIN")
+    // A semi join ran as a left outer join: (1)(2)(3)(4), not (2)(3).
+    assertRejected("SELECT t.a FROM t4 t LEFT SEMI JOIN s u ON t.a = u.a", cat, "SEMI JOIN")
+    // Both ran as INNER joins: (2)(3) instead of the outer join's (1)(2)(3)(4).
+    assertRejected("SELECT t.a FROM t4 t OUTER JOIN s ON t.a = s.a", cat, "OUTER JOIN without LEFT")
+    assertRejected("SELECT t.a FROM t4 t, s WHERE t.a = s.a(+)", cat, "(+)")
+  }
+
+  @Test def sumDistinctRejected(): Unit =
+    // DISTINCT was dropped: SUM(DISTINCT a) over 1,2,2,3 returned 8, not 6.
+    assertRejected("SELECT SUM(DISTINCT a) AS s FROM t", clauseCatalog(), "SUM(DISTINCT ...)")
+
+  @Test def aggregateFilterRejected(): Unit = {
+    // FILTER parses as a window function, so it dropped the predicate AND
+    // stopped the aggregate collapsing: five rows of 8, not one row of 7.
+    val cat = clauseCatalog()
+    assertRejected("SELECT SUM(a) FILTER (WHERE a > 1) AS s FROM tn", cat, "FILTER (WHERE ...)")
+    assertRejected("SELECT COUNT(*) FILTER (WHERE a > 1) AS c FROM tn", cat, "FILTER (WHERE ...)")
+  }
+
+  @Test def offsetRejected(): Unit = {
+    val cat = clauseCatalog()
+    // The wrong page, (1)(2) instead of (2)(2).
+    assertRejected("SELECT a FROM t ORDER BY a LIMIT 2 OFFSET 1", cat, "OFFSET")
+    // Four rows instead of three.
+    assertRejected("SELECT a FROM t OFFSET 1", cat, "OFFSET")
+    // MySQL's LIMIT offset, count: the offset was dropped too.
+    assertRejected("SELECT a FROM t ORDER BY a LIMIT 1, 2", cat, "LIMIT offset, count")
+  }
+
+  @Test def countAllRejected(): Unit =
+    // Bound as COUNT(*), so it counted the NULL: 5, not 4.
+    assertRejected("SELECT COUNT(ALL a) AS c FROM tn", clauseCatalog(), "COUNT(ALL x)")
+
+  @Test def nullOrderingRejected(): Unit = {
+    // NULLS LAST was dropped and NULL sorted first.
+    val cat = clauseCatalog()
+    assertRejected("SELECT a FROM tn ORDER BY a NULLS LAST", cat, "NULLS FIRST / NULLS LAST")
+    assertRejected("SELECT a, ROW_NUMBER() OVER (ORDER BY a NULLS LAST) AS n FROM tn", cat,
+      "NULLS FIRST / NULLS LAST")
+  }
+
+  @Test def topAndFetchFirstRejected(): Unit = {
+    // Both returned all four rows.
+    val cat = clauseCatalog()
+    assertRejected("SELECT TOP 2 a FROM t", cat, "TOP n")
+    assertRejected("SELECT a FROM t FETCH FIRST 2 ROWS ONLY", cat, "FETCH FIRST")
+  }
+
+  @Test def ilikeRejected(): Unit =
+    // Ran as a case-sensitive LIKE: no rows, not (1).
+    assertRejected("SELECT id FROM ts WHERE s ILIKE 'ab'", clauseCatalog(), "ILIKE")
+
+  @Test def likeEscapeRejected(): Unit =
+    // The escape character was ignored: no rows, not (4).
+    assertRejected("SELECT id FROM ts WHERE s LIKE 'A!_b' ESCAPE '!'", clauseCatalog(), "LIKE ... ESCAPE")
+
+  @Test def selectWithoutFromRejected(): Unit = {
+    // Used to die with an internal NullPointerException.
+    val p = tmpCsv("a.csv", "a\n1\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val ex = try { SqlEngine.execute("SELECT 1 AS x", cat); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.contains("SELECT without FROM"))
+  }
+
+  @Test def groupingSetsRejectedWithoutLeakingAnInternalName(): Unit = {
+    // Used to fail binding with "Unknown column 'g'. Available: [_agg0]".
+    val cat = clauseCatalog()
+    val sql = "SELECT g, SUM(a) FROM tg GROUP BY GROUPING SETS ((g), ())"
+    assertRejected(sql, cat, "GROUPING SETS")
+    val ex = try { SqlEngine.execute(sql, cat); null } catch { case e: IllegalArgumentException => e }
+    assertFalse(ex.getMessage, ex.getMessage.contains("_agg"))
+  }
+
+  @Test def otherDroppedClausesRejected(): Unit = {
+    val cat = clauseCatalog()
+    val cases = Seq(
+      // All four rows, as if the clause were absent.
+      ("SELECT a, ROW_NUMBER() OVER (ORDER BY a) AS n FROM t QUALIFY n = 1", "QUALIFY"),
+      // Plain DISTINCT, four rows instead of one per g.
+      ("SELECT DISTINCT ON (g) a FROM tg", "DISTINCT ON"),
+      // A plain LAG: (NULL)(Ab)(NULL)(xy) instead of skipping the NULL.
+      ("SELECT id, LAG(s) IGNORE NULLS OVER (ORDER BY id) AS l FROM ts", "IGNORE NULLS"),
+      // No rollup row.
+      ("SELECT g, SUM(a) FROM tg GROUP BY g WITH ROLLUP", "WITH ROLLUP"),
+      // Returned the rows and created no table.
+      ("SELECT a INTO newtab FROM t", "SELECT ... INTO"),
+      // The window specification was dropped, so the numbering followed scan order.
+      ("SELECT a, ROW_NUMBER() OVER w AS n FROM t WINDOW w AS (ORDER BY a DESC)", "WINDOW <name> AS"),
+      // NOTNULL ran as IS NULL: (2), not (1)(3)(4).
+      ("SELECT id FROM ts WHERE s NOTNULL", "NOTNULL"),
+      // RLIKE ran as LIKE, matching 'A.b' literally.
+      ("SELECT id FROM ts WHERE s RLIKE 'A.b'", "RLIKE"),
+      // ORDER BY and LIMIT after the parentheses were both dropped.
+      ("(SELECT a FROM t) ORDER BY a DESC LIMIT 1", "after a parenthesized query"),
+      // The pivot, the column exclusion and the hierarchy were all dropped.
+      ("SELECT * FROM tg PIVOT (SUM(a) FOR g IN ('x', 'y'))", "PIVOT"),
+      ("SELECT * EXCEPT (id) FROM ts", "* EXCEPT"),
+      ("SELECT a FROM t START WITH a = 1 CONNECT BY PRIOR a = a", "CONNECT BY"),
+      // UNIQUE was dropped: 4, not 3.
+      ("SELECT COUNT(UNIQUE a) FROM t", "COUNT(UNIQUE ...)"),
+      // Ran as a running SUM over the WITHIN GROUP order: (1)(3)(5)(8).
+      ("SELECT SUM(a) WITHIN GROUP (ORDER BY a) FROM t", "WITHIN GROUP"),
+      // The argument and the second argument were ignored.
+      ("SELECT ROW_NUMBER(a) OVER (ORDER BY a) FROM t", "ROW_NUMBER with an argument"),
+      ("SELECT SUM(a, 2) OVER () FROM t", "SUM with more than one argument"),
+      // The array type and the subscript were dropped.
+      ("SELECT CAST(a AS INT[]) FROM t", "array type"),
+      ("SELECT ts.s[1] FROM ts", "array subscript"),
+      // The schema was dropped and the name resolved to t.
+      ("SELECT a FROM other.t", "qualified table name"))
+    cases.foreach { case (sql, clause) => assertRejected(sql, cat, clause) }
+  }
+
   /** plans/bugfixes/01 end-to-end repro. `a JOIN b JOIN b` builds an inner
     * result with a duplicate-named schema `[k, v, k, v]`; routing that through
     * the outer join's grace-hash spill used to NPE reading the spilled bucket

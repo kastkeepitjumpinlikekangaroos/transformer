@@ -13,6 +13,7 @@ InputFilePath  → InputResolver → CatalogView   (one per registered "view")
                                       ▼
                                    Catalog ────► SqlExecutor (SqlEngine)
                                                   │  parse  → JSqlParser AST
+                                                  │  reject → every clause bind can't read
                                                   │  bind   → LogicalPlan
                                                   │  plan   → PhysicalPlan
                                                   │  execute (ForkJoinPool)
@@ -43,7 +44,7 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 | `write/csv/` | CSV output. Stdlib only. | `CsvWriter.scala` |
 | `write/parquet/` | Parquet output + shared `ParquetSchema` converter. | `ParquetSchema.scala`, `ParquetWriter.scala` |
 | `sql/parse/` | JSqlParser façade. | `SqlParser.scala` |
-| `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `PendingCteView.scala` (placeholder for an unresolved CTE reference), `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo) |
+| `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `PendingCteView.scala` (placeholder for an unresolved CTE reference), `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo), `UnsupportedClauses.scala` (the rejection pass that runs before binding, and its audit of every JSqlParser getter the binder does not read — see §10) |
 | `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala`, `SortExec.scala`, `DistinctExec.scala`, `UnionExec.scala`, `WindowExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala`, `CteResolver.scala` (inline-vs-materialize CTE pass + `PhysicalPlanView`), `SqlEngine.scala` |
 | `job/` | User-facing API + runner. Depends directly on `read/{csv,parquet}` and `write/{csv,parquet}` — parquet is a first-class format. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala`, `JobFiles.scala` (filesystem ops for the GUI's edit-validation flow — `writeValidationSql` / `deleteValidation`), `TaskDag.scala` (DAG analyzer/builder from SQL refs; `TaskDag` + `TaskDagNode` are public so the GUI can render without re-implementing), `TaskProgressListener.scala` (per-task callbacks fired from runner worker threads), `TaskRunRecord.scala` (`_run.json` write/read/discover for per-task run records — every status, with `_validation-<slug>.csv` failure samples), `JobRunRecord.scala` (`job.json` aggregate manifest pointing at every task's record + consistency warnings), `JobOutputLayout.scala` (classifies an output dir as `SingleRun`/`MultiRun`/`Empty` for the GUI's run picker), `DirectoryJobLoader.scala` (DBT-style directory loader; supports optional per-table `output.json` with `partitionBy`; threads default `<outputDir>/job.json` as `jobRunOutput` so the manifest lives alongside its data), `Json.scala` (stdlib JSON parser used by the loader + record readers) |
 | `gui/` | JavaFX visualizer/runner. Depends on `job/`, `core/`, `read/{csv,parquet}/`, `write/{csv,parquet}/`, `sql/exec/`, `temporal/`, plus `org.openjfx:javafx-{base,controls,graphics}` (bare jars + platform-classifier jars). | `GuiApp.scala` (Application boot + BorderPane: top stack of menu bar + horizontal ControlsPanel, vertical split of DAG canvas above + ResultsTabPane below — no side panels, all secondary panels live in the bottom tabs; scene-level ⌘R / Ctrl+R accelerator calls `controls.triggerRun()`), `JobSession.scala` (mutable FX-thread session state — jobDir, executionTime, outputDir, DAG, per-task UI states, task records, historical runs, job manifest, available run snapshots, selected run; loads `<outputDir>/job.json` (or any sibling snapshot the user picks) and follows each task's `runFile` to reconstruct full `TaskStatus` including `ValidationFailed(failures)` with sample CSVs; `buildInteractiveCatalog` assembles a Catalog over inputs + persisted task outputs for ad-hoc SQL), `DagLayout.scala` (pure-Scala layered DAG layout), `DagCanvas.scala` (custom Canvas: pan/zoom/click/double-click), `ControlsPanel.scala` (horizontal top strip: open dir, exec-time pickers, output-dir field, optional run picker for multi-run output dirs, compact Run button on worker thread; exposes `triggerRun()` for the keyboard accelerator), `TaskDetailsPanel.scala` (selected task/input metadata + a single Source/Rendered-toggle SQL viewer — uses `SqlView` and chips for status/deps/metrics), `SqlHighlighter.scala` (pure-Scala tokenizer: keywords/functions/strings/numbers/comments/templates — testable, no JavaFX deps), `SqlView.scala` (read-only highlighted SQL pane built on `HBox` per line inside a `ScrollPane`; toolbar with Copy + optional Open-in-editor button), `ExternalEditor.scala` (launches `TRANSFORMER_EDITOR` if set, else macOS Terminal+`nvim`; no-wait launch via `ProcessBuilder`), `ResultsTabPane.scala` (5 tabs: **Task details**, Output data, Validations — per-validation cards with an Edit… button that pops out the `AddValidationDialog.showEdit` editor (round-trips through `JobFiles.writeValidationSql` / `deleteValidation`) — **SQL console**, Run log), `AddValidationDialog.scala` (the validation editor dialog used by both the task-details chip and the per-card Edit button; supports add + edit + delete), `SqlConsolePanel.scala` (ad-hoc SQL editor in a horizontal SplitPane with the results table; ⌘⏎ / Ctrl+Enter runs the query at the panel level; chips for registered views + Persist button — runs queries on a worker thread and materializes results in memory so Persist can replay them), `PersistDialog.scala` (modal: output dir, format, maxPartitions, CSV header — mirrors `OutputFilePath` fields), `ResultPersister.scala` (writes a `MaterializedView` via `CsvWriter.writePartitioned` / `ParquetWriter.writePartitioned` + stamps a `_run.json` record with status=Succeeded), `FxHelpers.scala` |
@@ -1180,6 +1181,44 @@ Union pruning requires identical column sets and remaps on both arms;
 window's output is `child ++ syntheticWinN`, so pruning the child shifts
 the synthetic column positions. Both are viable extensions deferred to a
 future pass (see the optional Phase 5 in `plans/perf/07-push-through-joins.md`).
+
+### 10. Nothing the parser accepts is silently dropped
+
+`LogicalBuilder` binds the JSqlParser AST by calling the getters it knows
+about. That makes binding readable, but it also means a clause carried by a
+getter the binder never calls does not fail — it simply never reaches the plan.
+JSqlParser parses a great deal of vendor SQL (`QUALIFY`, `OFFSET`, `USING`,
+`PIVOT`, Oracle's `(+)`), so before this pass existed a query could bind
+cleanly and answer a different question from the one asked.
+
+`UnsupportedClauses.reject` runs between parsing and binding
+(`LogicalBuilder.build` calls it first). Its data is an audit with one entry per
+AST class the binder reaches; each entry lists the class's getters the binder
+does not read, as either a `Rejection` (clause name, advice, and example SQL) or
+inert, with the reason. A getter the binder does read needs no entry. The pass
+walks the statement reflectively: at each node it runs the class's rejections,
+then descends through every getter that is neither inert nor totally rejected —
+which is, by the audit's invariant, exactly the getters the binder reads. So it
+visits the nodes binding will visit, in every position they can occur, and
+stops at any class without an audit (the binder rejects those by name). A
+clause found this way raises `UnsupportedClauseException`, an
+`IllegalArgumentException` that names the clause and carries the entry.
+
+Some getters the binder honours for some uses and drops for others —
+`Function.isDistinct` is read for `COUNT(DISTINCT x)` only. Those carry a
+*partial* rejection that tests the node (function name, argument shape) and
+lets the honoured uses through.
+
+The invariant is enforced, not maintained. `sql/plan:unsupported_clauses_test`
+derives what the binder reads from `LogicalBuilder`'s compiled class files —
+their constant pools name every JSqlParser class the binder matches on and every
+member it calls — and fails unless every public getter and field of every
+audited class is read, rejected or inert exactly once, every class the binder
+reaches (and every JSqlParser subclass of one) is audited, and every rejection's
+example reaches that rejection. A JSqlParser upgrade cannot add a getter that is
+silently ignored, and the binder cannot start honouring a clause the pass still
+rejects. See [extending.md](extending.md#honor-a-clause-the-binder-rejects) for
+the workflow and [gotchas.md](gotchas.md) for what the test cannot see.
 
 ## Property-based testing
 

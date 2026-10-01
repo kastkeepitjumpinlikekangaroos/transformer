@@ -574,6 +574,25 @@ integer counts: `ORDER BY +1` is a constant, not a position. A `GROUP BY` ordina
 may not point at an aggregate; an `ORDER BY` ordinal may. An out-of-range
 position is an error.
 
+**SQL outside this grammar is rejected, not ignored.** The parser accepts far
+more SQL than the engine implements, and a clause the binder does not read used
+to vanish without an error — `JOIN ... USING` ran as a cartesian product,
+`OFFSET` returned the wrong page. Every such clause now fails at bind time with
+an `IllegalArgumentException` naming it, for example `QUALIFY is not supported;
+compute the window function in a WITH clause and filter on it in the outer
+WHERE`. Rejected, among others: `JOIN ... USING`, `NATURAL`, `SEMI` and `APPLY`
+joins, a bare `OUTER JOIN` and Oracle's `(+)`; `OFFSET`, `FETCH FIRST`, `TOP n`
+and `LIMIT offset, count`; `NULLS FIRST` / `NULLS LAST`; `QUALIFY`,
+`DISTINCT ON`, `GROUPING SETS` and `WITH ROLLUP`; `FILTER (WHERE ...)`,
+`WITHIN GROUP`, `IGNORE NULLS` and named `WINDOW`s; `DISTINCT` inside any
+aggregate but `COUNT`, and `COUNT(ALL x)`; `ILIKE`, `RLIKE` / `REGEXP`,
+`SIMILAR TO`, `LIKE ... ESCAPE` and `x NOTNULL`; `TRY_CAST`, array types and
+subscripts; `* EXCEPT` / `* REPLACE`; `PIVOT`, `TABLESAMPLE`, `CONNECT BY` and
+schema-qualified table names; `SELECT ... INTO`, `FOR UPDATE`, and vendor
+hints. A `SELECT` with no `FROM` is rejected too. The complete list, with the
+reason for each, is
+[`UnsupportedClauses.scala`](src/main/scala/com/transformer/sql/plan/UnsupportedClauses.scala).
+
 **Aggregates:** `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `COUNT_IF(pred)`,
 `SUM`, `AVG`, `MIN`, `MAX`,
 `STDDEV`/`STDDEV_SAMP`/`STDDEV_POP`, `VARIANCE`/`VAR_SAMP`/`VAR_POP`,

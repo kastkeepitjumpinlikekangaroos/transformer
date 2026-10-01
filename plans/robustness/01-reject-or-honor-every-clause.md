@@ -1,8 +1,15 @@
 # Plan 01: the binder silently drops every clause it does not read
 
-> Status: **not started** · Effort: 2-3 days · Risk: medium (it changes what
-> the engine accepts — queries that "worked" will start erroring, which is the
-> point)
+> Status: **half 1 done** 2026-10-01 (every unread clause rejected, plus the
+> reflection test); half 2 in progress · Effort: 2-3 days · Risk: medium (it
+> changes what the engine accepts — queries that "worked" will start erroring,
+> which is the point)
+>
+> The table below was right at `d4bb409` and re-verified at `e743778` before
+> any change: every "got" reproduces. One row's SQL has a typo — the semi-join
+> row's `ON t.a = u.a` has no `u` in scope and fails with `Unknown column
+> 'u.a'`; `t LEFT SEMI JOIN s u ON t.a = u.a` reproduces the `(1)(2)(3)(4)`.
+> Eighteen was an undercount: see ["What landed"](#what-landed).
 
 ## How this was found
 
@@ -159,6 +166,85 @@ whole class, plus the reflection test as the guard), `docs/testing.md` (the new
 test target and what it covers), `docs/extending.md` (the recipe: when you teach
 `LogicalBuilder` a new getter, move it from the rejection table to the consumed
 set — the test enforces that it lands in exactly one).
+
+## What landed
+
+### Half 1 — nothing is silently dropped
+
+`sql/plan/UnsupportedClauses.scala` holds the audit and the pass;
+`LogicalBuilder.build` calls `UnsupportedClauses.reject` between parsing and
+binding. Three departures from the design above, each for a reason found while
+building it:
+
+- **The consumed set is not a list.** "LogicalBuilder's consumed set" would have
+  been one more table to keep in sync by hand, which is the failure this plan
+  exists to remove. `unsupported_clauses_test` reads it out of `LogicalBuilder`'s
+  compiled class files instead: the constant pool names every JSqlParser class
+  the binder matches on and every getter it calls (a call through a supertype,
+  like `Select.getWithItemsList`, counts for every subclass; a call through a
+  subclass, like `WithItem.getAlias`, does not count for the parent). The audit
+  then only lists what the binder does *not* read, as a rejection or as inert
+  with the reason, and the test fails on any getter in neither list or in both.
+- **The audit covers every class the binder reaches, not the seven named
+  above.** Fifty-six classes, found mechanically: every concrete class the
+  binder's bytecode names, plus every concrete class a getter it calls returns
+  (`Distinct` arrives that way — the binder tests it for null and never looks
+  inside, which is the whole `DISTINCT ON` bug). Every JSqlParser subclass of an
+  audited class must be audited too, or listed as unreachable with the reason,
+  because a `case f: Function` arm binds a subclass of `Function` as well.
+  Public fields are audited with getters: `TRY_CAST` differs from `CAST` only in
+  `CastExpression.keyword`, which has no getter.
+- **The pass walks the AST reflectively** and descends only through getters the
+  binder reads, so it checks exactly the nodes binding visits, in every position
+  — `NULLS LAST` inside `OVER (...)` meets the same entry as in `ORDER BY`. A
+  rejection is an `UnsupportedClauseException` (an `IllegalArgumentException`)
+  naming the clause and carrying its entry, which is what plan 05's generator
+  can read.
+
+**Eighteen was an undercount.** Classifying every getter turned up 93
+rejections; the ones that gave wrong answers rather than merely vendor hints
+being ignored: a bare `OUTER JOIN` and Oracle's `a = b(+)` ran as INNER joins;
+`x NOTNULL` ran as `x IS NULL` (JSqlParser stores that negation in
+`isUseNotNull`, not `isNot`); `RLIKE` / `REGEXP` / `SIMILAR TO` ran as `LIKE`;
+MySQL's `LIMIT 1, 2` dropped the offset; `ORDER BY` / `LIMIT` / `OFFSET` written
+after a parenthesized query were dropped; `COUNT(UNIQUE x)` ignored `UNIQUE`;
+`ROW_NUMBER(a)` ignored its argument and `SUM(a, 2) OVER ()` its second one;
+`SUM(DISTINCT a) OVER ()` ignored `DISTINCT`; `COUNT(ALL a) OVER ()` counted
+NULLs like the plain form; `SUM(a) WITHIN GROUP (ORDER BY a)` computed a running
+sum; `CAST(x AS INT[])` dropped the array; `t.s[1]` dropped the subscript;
+`* EXCEPT` / `* REPLACE` / `* EXCLUDE` were dropped; `PIVOT`, `UNPIVOT`,
+`TABLESAMPLE`, `CONNECT BY`, `LATERAL VIEW` and `TOP n PERCENT` were dropped;
+`E'...'` / `B'...'` string prefixes were dropped; `FROM other.t` silently
+resolved to `t`; and `SKIP n` / `FIRST n` were dropped. `COUNT(ALL x)` was also
+misdiagnosed above: the binder does not ignore `ALL`, it misreads
+`Function.isAllColumns` — JSqlParser's flag for the `ALL` quantifier — as the
+star.
+
+The adjacent defects: `SELECT 1 AS x` is now a plain rejection ("SELECT without
+FROM is not supported") rather than an NPE, and `GROUPING SETS` is rejected by
+name before binding, so the `_agg0` leak cannot happen.
+
+Three things the reflection test cannot see, recorded so nobody trusts it for
+them: a getter the binder reads in one context and ignores in another (these
+are the six *partial* rejections, found by reading the binder — `DISTINCT`
+outside `COUNT`, `ALL` in `COUNT`, the ranking functions' argument, the second
+and third window-function arguments outside `LAG`/`LEAD`, `DISTINCT` and `ALL`
+under `OVER`); whether an *inert* reason is true (`Table.getDBLinkName` looks
+like a clause and returns the table's own name on every plain table, which the
+negative-control corpus caught); and SQL JSqlParser refuses to parse.
+
+Four of the 93 entries have no example, because no SELECT text JSqlParser 5.0
+accepts reaches the getter where the walk looks: `getForXmlPath` (the parser
+never sets it; `FOR XML PATH` lands in `getForClause`), `PIVOT` / `UNPIVOT` on a
+parenthesized query (does not parse), a KSQL windowed join (no parsing form
+found), and `Limit.getByExpressions` (reached only through `Select.getLimitBy`,
+which is rejected first). They stand guard against a grammar change. Every other
+entry's example runs in the test and must reach that entry and no other.
+
+Regressions: `sql_engine_test` rejects every row of the table end-to-end on the
+plan's own data (each case comments the wrong answer it used to give), plus the
+worst of the new finds; all 12 new test methods fail against the parent binder.
+`unsupported_clauses_test` is new. `bazel test //...` green; jaffle_shop 15/15.
 
 ## Launch prompt
 

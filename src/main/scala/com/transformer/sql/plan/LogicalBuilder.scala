@@ -53,8 +53,13 @@ object LogicalBuilder {
   private final case class InlineCte(plan: LogicalPlan) extends CteScopeEntry
 
   def build(sql: String, catalog: Catalog): BuiltQuery = {
+    val select = SqlParser.parseSelect(sql)
+    // Everything below reads the AST through the getters it knows about, so a
+    // clause carried by any other getter would vanish without an error. The
+    // pass rejects those first; see UnsupportedClauses.
+    UnsupportedClauses.reject(select)
     val collector = mutable.ArrayBuffer.empty[CteDef]
-    val main = buildAnySelect(SqlParser.parseSelect(sql), catalog, Map.empty, Some(collector))
+    val main = buildAnySelect(select, catalog, Map.empty, Some(collector))
     BuiltQuery(main, collector.toSeq)
   }
 
@@ -451,6 +456,8 @@ object LogicalBuilder {
   // ---------------------------------------------------------------------------
 
   private def buildFromAndJoins(ps: PlainSelect, catalog: Catalog, cteScope: Map[String, CteScopeEntry]): (LogicalPlan, Sources) = {
+    if (ps.getFromItem == null)
+      throw new IllegalArgumentException("SELECT without FROM is not supported")
     val (root, rootSources) = fromItem(ps.getFromItem, catalog, cteScope)
     val joins = Option(ps.getJoins).map(_.asScala.toSeq).getOrElse(Nil)
 

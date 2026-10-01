@@ -263,6 +263,40 @@ position). Grouping parentheses needed all five; see
 [gotchas.md](gotchas.md). If the node wraps a function the runtime doesn't
 fully implement, reject the unsupported forms explicitly rather than binding
 the operand you *can* reach — `TrimFunction` is the cautionary case there.
+A test enforces one more edit: the node's class needs an audit in
+`UnsupportedClauses`, which `sql/plan:unsupported_clauses_test` asks for by name
+as soon as `LogicalBuilder` matches on the class (see the next section).
+
+## Honor a clause the binder rejects
+
+`UnsupportedClauses` rejects every clause JSqlParser parses that `LogicalBuilder`
+does not implement, keyed by the AST getter that carries it. To implement one:
+
+1. Teach `LogicalBuilder` to read the getter and bind what it means. Mind every
+   position the node can occur in: an `OrderByElement` is read at three sort
+   sites and inside every `OVER (...)`, and the walk in `UnsupportedClauses`
+   checks all of them, so a rejection you delete must be honoured in all of them.
+2. Delete the getter's rejection from `UnsupportedClauses`. If the binder now
+   honours only some uses — one function, one position — keep the entry, mark it
+   `partial = true`, and narrow its test to the uses still unsupported (the
+   `DISTINCT` entry on `Function`, which lets `COUNT` through, is the model).
+   `unsupported_clauses_test` holds you to the choice: a getter `LogicalBuilder`
+   reads may not carry a total rejection, and a partial rejection must sit on a
+   getter it reads. It learns what the binder reads from the compiled
+   `LogicalBuilder` class files, so there is no list to update by hand — but if
+   binding moves into another object, add that object to the test's
+   `BinderClassPrefixes`.
+3. Replace the clause's rejection regression in `SqlEngineTest` with one that
+   asserts the answer, and move the clause in `README.md` from the "rejected,
+   not ignored" list into the supported grammar.
+
+When `unsupported_clauses_test` fails after a JSqlParser upgrade, the message
+names the new getter (or subclass). Decide whether it can change what a query
+means: if it can, add a rejection with an example that reaches it; if it cannot
+(a spelling, a structural accessor, another view of a value the binder reads),
+list it as inert with the reason. Check the reason against real parser output —
+`Table.getDBLinkName` looks like a clause and returns the table's own name on
+every plain table.
 
 **If the operator hashes per-row keys (group-by, set semantics, partition
 keys, join keys), use `core/HashKeys.scala`'s `KeyCodec` rather than

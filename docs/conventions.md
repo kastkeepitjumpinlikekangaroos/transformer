@@ -33,6 +33,17 @@ specific traps.
   project is that the planner + executor are hand-built — see the opening
   paragraph of [CLAUDE.md](../CLAUDE.md). If a feature looks impossible
   without one, stop and ask the user.
+- **Every JSqlParser getter the binder does not read is accounted for, and a
+  clause the engine cannot honour is rejected, never half-bound.**
+  `LogicalBuilder` reads the AST through getters, so an unread getter is a
+  clause that silently vanishes. `sql/plan/UnsupportedClauses.scala` lists each
+  one as a rejection (with an example that reaches it) or as inert (with the
+  reason), and `sql/plan:unsupported_clauses_test` derives what the binder reads
+  from its bytecode and fails on any getter in neither list or in both. When a
+  node carries something the runtime does not implement, reject it with a message
+  naming the clause rather than binding the part you understand —
+  `TrimFunction`'s extended forms and `COUNT(ALL x)` are the cautionary cases.
+  See [extending.md](extending.md#honor-a-clause-the-binder-rejects).
 - **Selectivity / cardinality constants live as named `private[plan] val`s**
   in `LogicalPlanCardinality.scala` (`SelectivityEq`, `SelectivityRange`,
   `SelectivityIsNull`, …). New shapes added to `filterSelectivity` should

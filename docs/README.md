@@ -6,9 +6,9 @@ guide for Claude sessions and links here for detail.
 
 | File | What's in it |
 |---|---|
-| [architecture.md](architecture.md) | Mental model, module map, and the cross-cutting patterns every contributor should internalise (hooks, `ColumnarBatch` + `RowBuf`, parallel execution, output-as-directory, input caching, per-task `_run.json` + per-job `job.json` records, expression evaluation, window functions, DAG scheduling, per-operator instrumentation). |
+| [architecture.md](architecture.md) | Mental model, module map, and the cross-cutting patterns every contributor should internalise (hooks, `ColumnarBatch` + `RowBuf`, parallel execution, output-as-directory, input caching, per-task `_run.json` + per-job `job.json` records, expression evaluation, window functions, DAG scheduling, per-operator instrumentation, the pre-binding rejection pass). |
 | [conventions.md](conventions.md) | Scala / Bazel / docs conventions enforced across the repo (sealed traits in one file, val initialisation order, strict-deps, no emojis, counter discipline, etc.). |
-| [extending.md](extending.md) | Step-by-step recipes for adding scalar functions, aggregates, window functions, file formats, directory-loader config fields, GUI panels, SQL operators, instrumentation counters, and cloud support. |
+| [extending.md](extending.md) | Step-by-step recipes for adding scalar functions, aggregates, window functions, file formats, directory-loader config fields, GUI panels, SQL operators, honouring a SQL clause the binder rejects, instrumentation counters, and cloud support. |
 | [testing.md](testing.md) | Build / test commands, the full test inventory, and the testing workflow expected on every change (unit tests + jaffle end-to-end + perf-tagged regression guard). |
 | [gotchas.md](gotchas.md) | Known JSqlParser / Bazel / JVM / Hadoop / JavaFX pitfalls, plus what's intentionally NOT done in v1 (subqueries, RANGE-as-ROWS, etc.). |
 | [code-map.md](code-map.md) | File-size hot spots and pointers to external reference material (`INIT.md`, the `~/grid-game` reference project, JSqlParser jar). |

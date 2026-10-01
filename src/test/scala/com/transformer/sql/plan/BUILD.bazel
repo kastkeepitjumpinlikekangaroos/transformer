@@ -43,3 +43,23 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+# The rejection pass's audit (UnsupportedClauses) checked against the two
+# things it can drift from: the JSqlParser jar and LogicalBuilder's compiled
+# bytecode, whose constant pool says which getters the binder actually reads.
+# Every public getter / field of every audited class must be read, rejected or
+# inert exactly once; every class the binder reaches (and every subclass of an
+# audited class) must be audited; every rejection's example must reach that
+# rejection; and supported SQL must pass untouched.
+scala_junit_test(
+    name = "unsupported_clauses_test",
+    srcs = ["UnsupportedClausesTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/parse",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:com_github_jsqlparser_jsqlparser",
+        "@maven//:junit_junit",
+    ],
+)

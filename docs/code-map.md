@@ -14,6 +14,13 @@ navigation hint, not a comprehensive directory listing.
   collects `CteDef`s into a `BuiltQuery`, which `sql/exec/CteResolver.scala`
   later inlines or materializes (see [architecture §6b](architecture.md#6b-cte-resolution-inline-vs-materialize)).
   If you're adding a syntax feature, this is probably where it lands.
+- `sql/plan/UnsupportedClauses.scala` (~675 LOC) — the rejection pass that runs
+  before binding, and its audit: for each of the ~55 JSqlParser classes the
+  binder reaches, every getter the binder does not read, as a rejection (clause,
+  advice, example SQL) or inert (with the reason). Most of the length is that
+  table. Teaching `LogicalBuilder` a clause means deleting its entry here;
+  `sql/plan:unsupported_clauses_test` enforces it (see
+  [architecture §10](architecture.md#10-nothing-the-parser-accepts-is-silently-dropped)).
 - `gui/JobSession.scala` (~795 LOC) — mutable FX-thread state for the GUI;
   also tracks per-input UI state (Pending/Loading/Loaded/Failed) now that
   inputs flow through the unified scheduler.

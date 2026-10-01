@@ -16,8 +16,13 @@ ship a fix or move something from "not done" to "done".
   inference.** `LogicalBuilder.buildSelect` annotates the list as
   `Seq[SelectItem[_ <: Expression]]` to keep `getExpression` typed.
 - **`COUNT(*)` in JSqlParser is a `Function` with `AllColumns` in its
-  parameter list, not an empty parameter list.** `bindAgg` checks both
-  `isAllColumns` and `params(0).isInstanceOf[AllColumns]`.
+  parameter list, not an empty parameter list — and `Function.isAllColumns` is
+  not the star.** JSqlParser sets `isAllColumns` for the `ALL` quantifier:
+  `COUNT(ALL a)` arrives with `isAllColumns = true` and `a` in its parameters,
+  while `COUNT(*)` leaves it false. `bindAgg` still takes it for the star, which
+  made `COUNT(ALL a)` count NULLs, so `UnsupportedClauses` rejects `COUNT(ALL x)`
+  until the binder reads the flag for what it is. `SUM(ALL a)` and the other
+  aggregates ignore it, which is correct: `ALL` is the default.
 - **JSqlParser parses `(a - b)` as a `ParenthesedExpressionList`, not a
   parenthesized binary expression.** There is no parenthesis node in the 5.0 AST
   at all: the deprecated `Parenthesis` class still ships but nothing in the jar
@@ -41,9 +46,10 @@ ship a fix or move something from "not done" to "done".
   `AnalyticExpression` so the window's inner expressions don't leak into
   outer-scope aggregate collection.
 - **`COUNT(*) OVER ()` parses with `getExpression` returning an
-  `AllColumns`, but `isAllColumns` is false.** Detect star args by checking
-  *both* `ae.isAllColumns` and `ae.getExpression instanceof AllColumns`
-  (`LogicalBuilder.bindAnalytic` does this).
+  `AllColumns`, and `isAllColumns` false.** As on `Function` (above),
+  `AnalyticExpression.isAllColumns` is the `ALL` quantifier, so the star is
+  `getExpression instanceof AllColumns` alone. `LogicalBuilder.bindAnalytic`
+  still checks both, which is why `COUNT(ALL x) OVER (...)` is rejected too.
 - **Parquet `MessageType` constructor takes `java.util.List[Type]`, but a
   `Vector[PrimitiveType].asJava` gives `java.util.List[PrimitiveType]`.**
   Scala won't unify because of Java type invariance. `ParquetSchema.toMessageType`
@@ -653,6 +659,61 @@ ship a fix or move something from "not done" to "done".
   every sort site they would give a total order in exactly those excluded shapes,
   so teaching it to emit them is an open widening opportunity, not a constraint.
 
+- **A clause the binder does not read used to vanish — every one is now
+  rejected, and a test keeps it that way.** `LogicalBuilder` binds the
+  JSqlParser AST by calling the getters it knows about, so a clause carried by
+  any other getter never errored: it was dropped, and the query answered a
+  different question from the one asked. The 2026-09-10 audit
+  ([plans/robustness/01](../plans/robustness/01-reject-or-honor-every-clause.md))
+  found eighteen, five of them badly wrong: `JOIN ... USING` and `NATURAL JOIN`
+  ran as cartesian products, `LEFT SEMI JOIN` as a left outer join,
+  `SUM(DISTINCT x)` ignored `DISTINCT`, and `agg FILTER (WHERE p)` dropped the
+  predicate and stopped the aggregate collapsing. Classifying every getter
+  found many more: a bare `OUTER JOIN` and Oracle's `a = b(+)` ran as INNER
+  joins, `x NOTNULL` ran as `x IS NULL`, `RLIKE` / `REGEXP` ran as `LIKE`,
+  `LIMIT 1, 2` dropped its offset, `ORDER BY` / `LIMIT` after a parenthesized
+  query were dropped, `COUNT(UNIQUE x)` ignored `UNIQUE`, `ROW_NUMBER(a)` and
+  `SUM(a, 2) OVER ()` ignored arguments, `SUM(a) WITHIN GROUP (...)` computed a
+  running sum, and `CAST(x AS INT[])`, `t.s[1]`, `* EXCEPT (c)` and
+  `FROM other.t` dropped the array type, the subscript, the exclusion and the
+  schema.
+
+  `sql/plan/UnsupportedClauses.scala` is the fix. For every AST class the binder
+  reaches, each getter the binder does not read is listed either as a rejection
+  (the clause, advice, and SQL that reaches it) or as inert (a spelling such as
+  `!` for `NOT`, a structural accessor, another view of a value the binder
+  reads), with the reason. `LogicalBuilder.build` runs `UnsupportedClauses.reject`
+  before binding. It walks the statement reflectively and descends only through
+  the getters the binder reads, so it inspects exactly the nodes binding would
+  and in every position they occur — `NULLS LAST` inside `OVER (...)` meets the
+  same entry as in the outer `ORDER BY`. A `SELECT` with no `FROM` (an internal
+  `NullPointerException` before) is a plain rejection now, and `GROUPING SETS`
+  no longer leaks the `_agg0` slot name into its error.
+
+  **The guard is `sql/plan:unsupported_clauses_test`, and it is mechanical.** It
+  reads which getters the binder calls out of `LogicalBuilder`'s compiled class
+  files — the constant pool names every class the binder matches on and every
+  method it calls — and requires every public getter and field of every audited
+  class to be read, rejected or inert, exactly once; every class the binder
+  reaches, and every JSqlParser subclass of an audited class, to be audited; and
+  every rejection's example to reach that rejection. A JSqlParser upgrade that
+  adds a getter fails it until someone decides what the getter means, and so
+  does a binder change that starts reading a rejected getter without deleting
+  the rejection. **What it cannot see is a getter the binder reads in one
+  context and ignores in another**: `DISTINCT` is honoured in `COUNT` and was
+  dropped in `SUM`; an argument is read for `LAG` and was ignored for
+  `ROW_NUMBER`. Those are *partial* rejections, found by reading the binder. When
+  you teach the binder to read a getter for one function or one position, check
+  what it does in the others.
+
+  Three JSqlParser traps the audit stepped on: `Table.getDBLinkName` returns the
+  table's own name when there is no `@link` and `getDatabase` is a non-null empty
+  object for an unqualified table, so "the getter returned something" is not
+  presence for either; `Function.getAttributeName` throws on every call without
+  an attribute; and `TRY_CAST` / `SAFE_CAST` differ from `CAST` only in
+  `CastExpression.keyword`, a public field with no getter, which is why the test
+  audits public fields as well as getters.
+
 - **`ORDER BY <ordinal>` used to parse and then silently not sort — fixed.**
   `ORDER BY 2 DESC` returned scan order, because the ordinal bound as an integer
   literal (a constant sort key, which the comparator can never use to separate
@@ -745,24 +806,14 @@ ship a fix or move something from "not done" to "done".
 
 ## Known wrong answers, open (found 2026-09-10, not yet fixed)
 
-Three clusters of confirmed defects from an audit of the surfaces the fuzzers
+Two clusters of confirmed defects from an audit of the surfaces the fuzzers
 cannot reach. Each was executed against `SqlEngine` at commit `d4bb409`, not
 inferred. Plans, evidence and repro SQL are in
 [`plans/robustness/`](../plans/robustness/README.md); this list exists so a
-reader of the docs does not have to find the plans first.
+reader of the docs does not have to find the plans first. The audit's third
+cluster, SQL clauses the binder silently dropped, is fixed: see "A clause the
+binder does not read used to vanish" above.
 
-- **A SQL clause `LogicalBuilder` does not read is silently dropped, not
-  rejected.** Eighteen confirmed, and five give badly wrong answers:
-  `JOIN ... USING (c)` and `NATURAL JOIN` drop the join condition and become a
-  **cartesian product**; `LEFT SEMI JOIN` becomes a left outer join;
-  `SUM(DISTINCT x)` ignores `DISTINCT`; `agg FILTER (WHERE p)` drops the
-  predicate *and* stops the aggregate collapsing. Also silently ignored:
-  `OFFSET`, `FETCH FIRST`, `TOP n`, `NULLS FIRST`/`NULLS LAST`, `COUNT(ALL x)`
-  (binds as `COUNT(*)`, so it counts NULLs), `QUALIFY`, `DISTINCT ON`, `ILIKE`
-  (runs case-sensitively), `LIKE ... ESCAPE`, `IGNORE NULLS`, `WITH ROLLUP`,
-  named `WINDOW` definitions and `SELECT ... INTO`. Stay inside the documented
-  grammar in the README; do not assume a clause works because it parses.
-  See [plan 01](../plans/robustness/01-reject-or-honor-every-clause.md).
 - **`Ops.eq` / `Ops.cmp` are wrong for `BinaryType` and lossy for
   `DecimalType`.** A byte array is neither a `Number` nor `Comparable`, so `eq`
   falls through to reference equality and `cmp` to `toString` on the identity
@@ -791,8 +842,8 @@ reader of the docs does not have to find the plans first.
   `DecimalType` at all. See
   [plan 03](../plans/robustness/03-parquet-external-format-fidelity.md).
 
-All three hid for the same reason, and it is the lesson to carry: the fuzz
-generators render SQL from their own typed AST (so the corpus is exactly the
+All three clusters hid for the same reason, and it is the lesson to carry: the
+fuzz generators render SQL from their own typed AST (so the corpus is exactly the
 supported grammar), `DataGen.ColumnTypes` and `ExprGen.GenTypes` list six of the
 engine's ten `DataType`s, and every file-format fixture is written by our own
 writer. Plans 04-07 in that directory close those three holes.
@@ -846,6 +897,10 @@ writer. Plans 04-07 in that directory close those three holes.
 - **No subqueries** (scalar, IN, EXISTS, derived tables in FROM). A derived
   table in FROM still throws from `LogicalBuilder.fromItem`; reach for a `WITH`
   CTE where the shape allows.
+- **No SQL beyond the README's grammar.** `QUALIFY`, `GROUPING SETS`,
+  `FILTER (WHERE ...)`, `PIVOT`, `USING` joins and the rest are rejected with an
+  error naming the clause, never ignored; `sql/plan/UnsupportedClauses.scala`
+  lists every one with its reason.
 - **Window functions: ROWS frames only.** `RANGE BETWEEN` is parsed and accepted
   but executed with ROWS semantics — for `RANGE BETWEEN UNBOUNDED PRECEDING AND
   CURRENT ROW` this is correct unless the ORDER BY produces ties (where RANGE
