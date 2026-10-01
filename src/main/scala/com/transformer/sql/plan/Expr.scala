@@ -491,14 +491,29 @@ object InListExpr {
   private[plan] def setKey(d: Double): Double = if (d == 0.0) 0.0 else d
 }
 
-final case class LikeExpr(child: Expr, pattern: Expr, negated: Boolean) extends Expr {
+/** How a LIKE pattern is read. `caseInsensitive` is ILIKE: letters match
+  * regardless of case (Unicode case folding, as `Pattern.UNICODE_CASE` does). */
+final case class LikeSyntax(caseInsensitive: Boolean = false)
+
+object LikeSyntax {
+  val Default: LikeSyntax = LikeSyntax()
+}
+
+/** `child LIKE pattern`, or ILIKE per `syntax`. Code that rebuilds a LikeExpr
+  * with new children uses `copy`, so a field added to [[LikeSyntax]] cannot be
+  * dropped on the way through a rewrite. */
+final case class LikeExpr(
+    child: Expr,
+    pattern: Expr,
+    negated: Boolean,
+    syntax: LikeSyntax = LikeSyntax.Default) extends Expr {
   def dataType: DataType = DataType.BooleanType
   def eval(batch: ColumnarBatch, row: Int): Any = {
     val v = child.eval(batch, row)
     val p = pattern.eval(batch, row)
     if (v == null || p == null) null
     else {
-      val re = LikeExpr.toRegex(p.toString)
+      val re = LikeExpr.toRegex(p.toString, syntax)
       val m = re.matcher(v.toString).matches()
       if (negated) !m else m
     }
@@ -527,7 +542,7 @@ final case class LikeExpr(child: Expr, pattern: Expr, negated: Boolean) extends 
         var i = 0
         while (i < n) { nulls.set(i); i += 1 }
       case LitExpr(p, _) =>
-        val matcher = LikeExpr.toRegex(p.toString).matcher("")
+        val matcher = LikeExpr.toRegex(p.toString, syntax).matcher("")
         var i = 0
         while (i < n) {
           if (cv.isNull(i)) nulls.set(i)
@@ -544,7 +559,7 @@ final case class LikeExpr(child: Expr, pattern: Expr, negated: Boolean) extends 
         while (i < n) {
           if (cv.isNull(i) || pv.isNull(i)) nulls.set(i)
           else {
-            val m = LikeExpr.toRegex(pv.getBoxed(i).toString).matcher(cv.getBoxed(i).toString).matches()
+            val m = LikeExpr.toRegex(pv.getBoxed(i).toString, syntax).matcher(cv.getBoxed(i).toString).matches()
             values(i) = if (negated) !m else m
           }
           i += 1
@@ -555,9 +570,10 @@ final case class LikeExpr(child: Expr, pattern: Expr, negated: Boolean) extends 
 }
 
 object LikeExpr {
-  private val cache = new java.util.concurrent.ConcurrentHashMap[String, java.util.regex.Pattern]()
-  def toRegex(like: String): java.util.regex.Pattern = {
-    val cached = cache.get(like)
+  private val cache = new java.util.concurrent.ConcurrentHashMap[(String, LikeSyntax), java.util.regex.Pattern]()
+  def toRegex(like: String, syntax: LikeSyntax = LikeSyntax.Default): java.util.regex.Pattern = {
+    val key = (like, syntax)
+    val cached = cache.get(key)
     if (cached != null) return cached
     val sb = new java.lang.StringBuilder("^")
     var i = 0
@@ -575,8 +591,11 @@ object LikeExpr {
       i += 1
     }
     sb.append("$")
-    val p = java.util.regex.Pattern.compile(sb.toString, java.util.regex.Pattern.DOTALL)
-    cache.put(like, p)
+    val caseFlags =
+      if (syntax.caseInsensitive) java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE
+      else 0
+    val p = java.util.regex.Pattern.compile(sb.toString, java.util.regex.Pattern.DOTALL | caseFlags)
+    cache.put(key, p)
     p
   }
 }

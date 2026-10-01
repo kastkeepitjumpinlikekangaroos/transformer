@@ -251,7 +251,7 @@ class ColumnProjectionPushdownTest {
     case IsNullExpr(c, _) => assertValidExprIndices(c, schema)
     case InListExpr(c, items, _) =>
       assertValidExprIndices(c, schema); items.foreach(assertValidExprIndices(_, schema))
-    case LikeExpr(s, p, _) => assertValidExprIndices(s, schema); assertValidExprIndices(p, schema)
+    case LikeExpr(s, p, _, _) => assertValidExprIndices(s, schema); assertValidExprIndices(p, schema)
     case _: LitExpr => ()
   }
 }

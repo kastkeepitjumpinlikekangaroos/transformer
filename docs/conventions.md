@@ -33,6 +33,12 @@ specific traps.
   project is that the planner + executor are hand-built — see the opening
   paragraph of [CLAUDE.md](../CLAUDE.md). If a feature looks impossible
   without one, stop and ask the user.
+- **A rewrite that rebuilds an `Expr` with new children uses `copy`.**
+  `l.copy(child = ..., pattern = ...)`, never `LikeExpr(newChild, newPattern,
+  l.negated)`: rebuilding from listed parts silently resets any field the
+  rewrite did not name to its default, which is how an ILIKE would turn back
+  into a LIKE inside `ColumnProjectionPushdown`. The pushdown, `JoinSideAnalysis`
+  and the fuzz `Shrinker` all rebuild `LikeExpr` this way.
 - **Every JSqlParser getter the binder does not read is accounted for, and a
   clause the engine cannot honour is rejected, never half-bound.**
   `LogicalBuilder` reads the AST through getters, so an unread getter is a

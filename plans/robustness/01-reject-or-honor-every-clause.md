@@ -327,6 +327,19 @@ so the fix is to stop reading the flag: the star is found only as an
 `AllColumns` parameter, in `bindAgg` and in `bindAnalytic` alike, and the audit
 moves `isAllColumns` from two partial rejections to inert.
 
+**ILIKE.** Not by lowering both sides, which the plan offered: with a letter as
+the ESCAPE character, lower-casing the pattern changes which characters escape.
+`LikeExpr` gained a `LikeSyntax` options value (`caseInsensitive` now, the escape
+character next) and an ILIKE pattern compiles with `CASE_INSENSITIVE |
+UNICODE_CASE`, so both evaluation paths and the literal fast path are unchanged.
+Four places rebuilt `LikeExpr` from its parts — two in `ColumnProjectionPushdown`,
+`JoinSideAnalysis`, and the fuzz `Shrinker` — and each would have reset the new
+field to its default, quietly turning ILIKE back into LIKE: this plan's bug class,
+inside the engine. They use `copy` now; a mutation that restores one of them
+fails `sql_engine_test`. RLIKE / REGEXP and SIMILAR TO become partial rejections,
+since the binder reads the keyword for LIKE and ILIKE. Fuzzer reach: `ExprGen`
+makes some LIKE nodes ILIKE, under the eval / evalVec parity property.
+
 ## Launch prompt
 
 ```

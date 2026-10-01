@@ -1205,6 +1205,24 @@ class ExprBatchTest {
       b)
   }
 
+  @Test def ilikeMatchesRegardlessOfCaseOnBothPaths(): Unit = {
+    val ilike = LikeSyntax(caseInsensitive = true)
+    val s = ColRefExpr(0, "s", DataType.StringType)
+    val b = batch("s" -> stringCol(i => Seq(s"FOO$i", s"foo$i", s"bar$i", s"Föö$i")(i % 4), EveryOther))
+    assertParity(LikeExpr(s, LitExpr("Foo%", DataType.StringType), negated = false, ilike), b)
+    assertParity(LikeExpr(s, LitExpr("Foo%", DataType.StringType), negated = true, ilike), b)
+    assertParity(LikeExpr(s, LitExpr("FÖÖ%", DataType.StringType), negated = false, ilike), b)
+    val withPattern = batch(
+      "s" -> stringCol(i => s"Item$i", EveryOther),
+      "p" -> stringCol(i => if (i % 2 == 0) "ITEM%" else "%NO%", i => i % 6 == 0))
+    assertParity(
+      LikeExpr(s, ColRefExpr(1, "p", DataType.StringType), negated = false, ilike), withPattern)
+    // A different predicate from LIKE, which stays case-sensitive.
+    val one = batch("s" -> stringCol(_ => "FOO0"))
+    assertEquals(true, LikeExpr(s, LitExpr("foo%", DataType.StringType), negated = false, ilike).eval(one, 0))
+    assertEquals(false, LikeExpr(s, LitExpr("foo%", DataType.StringType), negated = false).eval(one, 0))
+  }
+
   @Test def likeColumnPattern(): Unit = {
     val b = batch(
       "s" -> stringCol(i => s"item$i", EveryOther),

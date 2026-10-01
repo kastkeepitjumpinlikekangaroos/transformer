@@ -435,7 +435,7 @@ object ExprGen {
       (1, () => LitExpr(null, DataType.StringType)), // NULL pattern -> all NULL
       (3, () => sub(DataType.StringType)) // column/computed pattern -> slow path
     )()
-    LikeExpr(child, pattern, r.bool())
+    LikeExpr(child, pattern, r.bool(), LikeSyntax(caseInsensitive = r.bool(0.3)))
   }
 
   private def genBoolFunc(r: Rng, schema: Schema, depth: Int): Expr = {

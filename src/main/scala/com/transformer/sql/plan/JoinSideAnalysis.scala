@@ -52,7 +52,7 @@ object JoinSideAnalysis {
     case InListExpr(c, items, _) =>
       val all = sideOf(c, leftWidth) +: items.map(sideOf(_, leftWidth))
       all.foldLeft[JoinSide](JoinSide.Neither)(merge)
-    case LikeExpr(s, p, _) => merge(sideOf(s, leftWidth), sideOf(p, leftWidth))
+    case LikeExpr(s, p, _, _) => merge(sideOf(s, leftWidth), sideOf(p, leftWidth))
   }
 
   def merge(a: JoinSide, b: JoinSide): JoinSide = (a, b) match {
@@ -88,7 +88,7 @@ object JoinSideAnalysis {
     case IsNullExpr(c, neg) => IsNullExpr(shiftToRight(c, leftWidth), neg)
     case InListExpr(c, items, neg) =>
       InListExpr(shiftToRight(c, leftWidth), items.map(shiftToRight(_, leftWidth)), neg)
-    case LikeExpr(s, p, neg) =>
-      LikeExpr(shiftToRight(s, leftWidth), shiftToRight(p, leftWidth), neg)
+    case l: LikeExpr =>
+      l.copy(child = shiftToRight(l.child, leftWidth), pattern = shiftToRight(l.pattern, leftWidth))
   }
 }

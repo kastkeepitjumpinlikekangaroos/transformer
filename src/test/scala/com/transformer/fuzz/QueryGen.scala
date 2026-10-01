@@ -577,7 +577,8 @@ object SqlRender {
     case InListExpr(c, items, neg) =>
       if (items.isEmpty) if (neg) "TRUE" else "FALSE" // defensive: IN () is not valid SQL
       else s"${expr(c)} ${if (neg) "NOT " else ""}IN (${items.map(expr).mkString(", ")})"
-    case LikeExpr(c, p, neg) => s"${expr(c)} ${if (neg) "NOT " else ""}LIKE ${expr(p)}"
+    case LikeExpr(c, p, neg, syntax) =>
+      s"${expr(c)} ${if (neg) "NOT " else ""}${if (syntax.caseInsensitive) "ILIKE" else "LIKE"} ${expr(p)}"
   }
 
   def orderByClause(keys: Vector[QueryGen.OrderKey]): String =

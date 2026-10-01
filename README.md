@@ -598,8 +598,8 @@ joins, a bare `OUTER JOIN` and Oracle's `(+)`; `FETCH FIRST`, `TOP n`, and
 `ORDER BY` / `LIMIT` / `OFFSET` after a parenthesized query; `QUALIFY`,
 `DISTINCT ON`, `GROUPING SETS` and `WITH ROLLUP`; `FILTER (WHERE ...)`,
 `WITHIN GROUP`, `IGNORE NULLS` and named `WINDOW`s; `DISTINCT` inside
-`STDDEV`, `VARIANCE`, `COUNT_IF`, `COVAR` or `CORR`; `ILIKE`, `RLIKE` / `REGEXP`,
-`SIMILAR TO`, `LIKE ... ESCAPE` and `x NOTNULL`; `TRY_CAST`, array types and
+`STDDEV`, `VARIANCE`, `COUNT_IF`, `COVAR` or `CORR`; `RLIKE` / `REGEXP`, `SIMILAR TO`,
+`LIKE ... ESCAPE` and `x NOTNULL`; `TRY_CAST`, array types and
 subscripts; `* EXCEPT` / `* REPLACE`; `PIVOT`, `TABLESAMPLE`, `CONNECT BY` and
 schema-qualified table names; `SELECT ... INTO`, `FOR UPDATE`, and vendor
 hints. A `SELECT` with no `FROM` is rejected too. The complete list, with the
@@ -642,8 +642,8 @@ math function; `GREATEST`/`LEAST` skip NULLs and return NULL only when every
 argument is NULL.
 
 **Operators:** `+ - * / %`, `=  <>  <  <=  >  >=`, `AND OR NOT`, `||` (concat),
-`LIKE`, `IS NULL` / `IS NOT NULL`, `IN (...)`, `BETWEEN`, `CASE WHEN`,
-`CAST(expr AS type)`. Grouping parentheses work anywhere an expression does —
+`LIKE` and `ILIKE` (its case-insensitive form; `\` escapes a `%` or `_`),
+`IS NULL` / `IS NOT NULL`, `IN (...)`, `BETWEEN`, `CASE WHEN`, `CAST(expr AS type)`. Grouping parentheses work anywhere an expression does —
 `SELECT (a + b) * c`, `WHERE (x = y)`, `ON (a = b)`, `HAVING (COUNT(*) > 1)` —
 and are transparent to column naming (`SELECT (a)` yields a column named `a`)
 and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors

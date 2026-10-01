@@ -2182,9 +2182,18 @@ class SqlEngineTest {
     assertRejected("SELECT a FROM t FETCH FIRST 2 ROWS ONLY", cat, "FETCH FIRST")
   }
 
-  @Test def ilikeRejected(): Unit =
-    // Ran as a case-sensitive LIKE: no rows, not (1).
-    assertRejected("SELECT id FROM ts WHERE s ILIKE 'ab'", clauseCatalog(), "ILIKE")
+  @Test def ilikeMatchesRegardlessOfCase(): Unit = {
+    val cat = clauseCatalog() // ts.s is 'Ab', NULL, 'xy', 'A_b'
+    // The plan's case: (1). It used to run as a case-sensitive LIKE: no rows.
+    assertEquals(Seq(1), column("SELECT id FROM ts WHERE s ILIKE 'ab'", cat, "id"))
+    assertEquals(Seq(1, 4), column("SELECT id FROM ts WHERE s ILIKE 'a%' ORDER BY id", cat, "id"))
+    // NOT ILIKE, with the NULL row dropped as NOT LIKE drops it.
+    assertEquals(Seq(3, 4), column("SELECT id FROM ts WHERE s NOT ILIKE 'ab' ORDER BY id", cat, "id"))
+    // A computed pattern takes the per-row path.
+    assertEquals(Seq(1, 3, 4), column("SELECT id FROM ts WHERE LOWER(s) ILIKE UPPER(s) ORDER BY id", cat, "id"))
+    // LIKE itself stays case-sensitive.
+    assertEquals(Nil, column("SELECT id FROM ts WHERE s LIKE 'ab'", cat, "id"))
+  }
 
   @Test def likeEscapeRejected(): Unit =
     // The escape character was ignored: no rows, not (4).

@@ -195,7 +195,7 @@ object ColumnProjectionPushdown {
         branches.foreach { case (a, c) => go(a); go(c) }; elseE.foreach(go)
       case IsNullExpr(c, _) => go(c)
       case InListExpr(c, items, _) => go(c); items.foreach(go)
-      case LikeExpr(s, p, _) => go(s); go(p)
+      case LikeExpr(s, p, _, _) => go(s); go(p)
     }
     go(e); b.result()
   }
@@ -219,7 +219,7 @@ object ColumnProjectionPushdown {
         elseE.map(rewriteExpr(_, remap)), dt)
     case IsNullExpr(c, neg) => IsNullExpr(rewriteExpr(c, remap), neg)
     case InListExpr(c, items, neg) => InListExpr(rewriteExpr(c, remap), items.map(rewriteExpr(_, remap)), neg)
-    case LikeExpr(s, p, neg) => LikeExpr(rewriteExpr(s, remap), rewriteExpr(p, remap), neg)
+    case l: LikeExpr => l.copy(child = rewriteExpr(l.child, remap), pattern = rewriteExpr(l.pattern, remap))
   }
 
   private def rewriteAgg(a: AggExpr, remap: Map[Int, Int]): AggExpr = a match {
@@ -275,7 +275,7 @@ object ColumnProjectionPushdown {
         elseE.foreach(go)
       case IsNullExpr(c, _) => go(c)
       case InListExpr(c, items, _) => go(c); items.foreach(go)
-      case LikeExpr(s, p, _) => go(s); go(p)
+      case LikeExpr(s, p, _, _) => go(s); go(p)
     }
     go(cond)
     (leftNames.result(), rightNames.result())
@@ -307,7 +307,7 @@ object ColumnProjectionPushdown {
         CaseExpr(branches.map { case (a, b) => (go(a), go(b)) }, elseE.map(go), dt)
       case IsNullExpr(c, neg) => IsNullExpr(go(c), neg)
       case InListExpr(c, items, neg) => InListExpr(go(c), items.map(go), neg)
-      case LikeExpr(s, p, neg) => LikeExpr(go(s), go(p), neg)
+      case l: LikeExpr => l.copy(child = go(l.child), pattern = go(l.pattern))
     }
     go(cond)
   }
@@ -358,7 +358,7 @@ object ColumnProjectionPushdown {
       case IsNullExpr(c, _) => checkExpr(c, schema, ctx)
       case InListExpr(c, items, _) =>
         checkExpr(c, schema, ctx); items.foreach(checkExpr(_, schema, ctx))
-      case LikeExpr(s, p, _) => checkExpr(s, schema, ctx); checkExpr(p, schema, ctx)
+      case LikeExpr(s, p, _, _) => checkExpr(s, schema, ctx); checkExpr(p, schema, ctx)
     }
 
     def checkAgg(a: AggExpr, schema: Schema, ctx: String): Unit =

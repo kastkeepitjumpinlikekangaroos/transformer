@@ -395,22 +395,22 @@ object UnsupportedClauses {
   private val LikeAudit = audit(
     Seq(
       rejects("getEscape")("LIKE ... ESCAPE", example = "SELECT a FROM t WHERE s LIKE 'a!_b' ESCAPE '!'"),
-      rejectsWhen[LikeExpression]("getLikeKeyWord")("ILIKE",
-        advice = "compare LOWER(x) LIKE LOWER(pattern)",
-        example = "SELECT a FROM t WHERE s ILIKE 'ab'"
-      )(_.getLikeKeyWord == LikeExpression.KeyWord.ILIKE),
+      // The binder reads the keyword for LIKE and ILIKE; the other spellings are
+      // different operators it does not implement.
       rejectsWhen[LikeExpression]("getLikeKeyWord")("RLIKE / REGEXP",
         advice = "the engine has no regular-expression matching",
         example = "SELECT a FROM t WHERE s RLIKE 'a.b'",
+        partial = true,
         describe = lk => String.valueOf(lk.getLikeKeyWord)
       )(lk => lk.getLikeKeyWord == LikeExpression.KeyWord.RLIKE ||
         lk.getLikeKeyWord == LikeExpression.KeyWord.REGEXP),
       rejectsWhen[LikeExpression]("getLikeKeyWord")("SIMILAR TO",
-        example = "SELECT a FROM t WHERE s SIMILAR TO 'a%'"
+        example = "SELECT a FROM t WHERE s SIMILAR TO 'a%'",
+        partial = true
       )(_.getLikeKeyWord == LikeExpression.KeyWord.SIMILAR_TO)
     ),
     Seq(
-      "isCaseInsensitive" -> "true exactly when the keyword is ILIKE, which is rejected above",
+      "isCaseInsensitive" -> "true exactly when the keyword is ILIKE, which the binder reads through getLikeKeyWord",
       "getStringExpression" -> "the keyword as written",
       "isUseBinary" -> "MySQL's LIKE BINARY asks for a case-sensitive match, which this engine's LIKE always is"))
 

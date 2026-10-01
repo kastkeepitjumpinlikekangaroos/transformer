@@ -652,7 +652,10 @@ object LogicalBuilder {
 
     case lk: LikeExpression =>
       val s = b(lk.getLeftExpression); val p = b(lk.getRightExpression)
-      LikeExpr(Analyzer.implicitCast(s, DataType.StringType), Analyzer.implicitCast(p, DataType.StringType), lk.isNot)
+      // UnsupportedClauses has already rejected every keyword but LIKE and ILIKE.
+      val syntax = LikeSyntax(caseInsensitive = lk.getLikeKeyWord == LikeExpression.KeyWord.ILIKE)
+      LikeExpr(Analyzer.implicitCast(s, DataType.StringType), Analyzer.implicitCast(p, DataType.StringType),
+        lk.isNot, syntax)
 
     case isn: IsNullExpression =>
       IsNullExpr(b(isn.getLeftExpression), negated = isn.isNot)
