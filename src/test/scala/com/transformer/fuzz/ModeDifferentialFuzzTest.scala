@@ -121,6 +121,7 @@ class ModeDifferentialFuzzTest {
     val n = 500
     var withLimit = 0
     var withOffset = 0
+    var withPlacement = 0
     var withBoolMinMax = 0
     var noNullCols = 0
     var someNullCols = 0
@@ -131,6 +132,7 @@ class ModeDifferentialFuzzTest {
       val qc = QueryGen.generate(new Rng(seed.toLong))
       if (qc.sql.contains(" LIMIT ")) withLimit += 1
       if (qc.sql.contains(" OFFSET ")) withOffset += 1
+      if (qc.sql.contains(" NULLS ")) withPlacement += 1
       if (hasBooleanMinMax(qc.query)) withBoolMinMax += 1
       val ds = qc.dataset
       if (ds.numRows > 0) {
@@ -144,13 +146,15 @@ class ModeDifferentialFuzzTest {
       }
       seed += 1
     }
-    println(f"[mode-differential] over $n seeds: LIMIT in $withLimit; OFFSET in $withOffset; MIN/MAX over a " +
+    println(f"[mode-differential] over $n seeds: LIMIT in $withLimit; OFFSET in $withOffset; " +
+      f"NULLS FIRST/LAST in $withPlacement; MIN/MAX over a " +
       f"Boolean column in $withBoolMinMax; columns " +
       f"no-null=$noNullCols some-null=$someNullCols all-null=$allNullCols of $totalCols")
     assertTrue(s"no LIMIT query generated over $n seeds", withLimit >= n / 20)
     // OFFSET rides on the top-n shape, so the bound separates "rare" from
     // "gone"; offsetIsGeneratedAndObservable checks that it actually drops rows.
     assertTrue(s"no OFFSET query generated over $n seeds", withOffset >= n / 50)
+    assertTrue(s"no NULLS FIRST / NULLS LAST generated over $n seeds", withPlacement >= n / 20)
     // This fuzzer found `MIN`/`MAX` over a Boolean column returning NULL under
     // spill, and the shape was then GATED OUT of the generator until the engine was
     // fixed. Asserting it is back is what keeps that exclusion from returning
@@ -271,6 +275,57 @@ class ModeDifferentialFuzzTest {
     assertTrue(s"observable=$observable of $offsets", observable >= n / 50)
   }
 
+  /** The NULLS FIRST / NULLS LAST guard's value half. The oracle checks where
+    * the PRIMARY key's NULLs land, and that is only visible when the result
+    * holds both NULL and non-NULL values of that key; otherwise any placement
+    * passes. Counts the queries whose primary key carries an explicit placement
+    * and whose result can show it. */
+  @Test def nullPlacementIsGeneratedAndObservable(): Unit = {
+    val n = 500
+    var placed, observable = 0
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      qc.query.orderBy.headOption.filter(_.nullsFirst.isDefined).foreach { primary =>
+        placed += 1
+        val cat = new Catalog
+        cat.register(QueryGen.ViewName, qc.dataset.singlePartition())
+        Try {
+          val q = RelEngine.execute(cat, qc.sql, ExecutionOptions.Default)
+          val idx = q.schema.indexOf(primary.col.name)
+          val values = RelEngine.collectRows(q).map(_(idx))
+          if (values.exists(_ == null) && values.exists(_ != null)) observable += 1
+        }
+      }
+      seed += 1
+    }
+    println(s"[mode-differential] explicit NULL placement on the primary key over $n seeds: " +
+      s"generated=$placed, result shows both NULL and non-NULL keys=$observable")
+    assertTrue(s"placed=$placed", placed >= n / 20)
+    assertTrue(s"observable=$observable of $placed", observable >= n / 100)
+  }
+
+  /** NULLS FIRST and NULLS LAST against each direction, over a key with NULLs:
+    * every mode must put the NULLs at the end the key names (the oracle's
+    * sortedness check asserts the placement, not only the order of the
+    * non-NULL values) and agree on the multiset. */
+  @Test def regressionExplicitNullPlacementAcrossModes(): Unit = {
+    val schema = Schema(Vector(Field("c0", DataType.IntType), Field("c1", DataType.StringType)))
+    val rows = IndexedSeq[Array[Any]](
+      Array[Any](3, "a"), Array[Any](null, "b"), Array[Any](1, "c"),
+      Array[Any](null, "d"), Array[Any](2, null), Array[Any](1, "e"))
+    val c0 = ColRefExpr(0, "c0", DataType.IntType)
+    val c1 = ColRefExpr(1, "c1", DataType.StringType)
+    for (asc <- Seq(true, false); first <- Seq(true, false)) {
+      val q = QueryGen.ProjectQuery(distinct = false,
+        projection = Vector((c0: Expr, "c0"), (c1: Expr, "c1")), where = None,
+        orderBy = Vector(OrderKey(c0, asc, Some(first)), OrderKey(c1, asc = true)))
+      val qc = QueryGen.QueryCase(DataGen.Dataset(schema, rows), q)
+      assertTrue(s"expected an explicit placement, got ${qc.sql}", qc.sql.contains(" NULLS "))
+      ModeDifferential.check(qc)
+    }
+  }
+
   /** OFFSET over the same total order, cutting between IDENTICAL rows — with a
     * LIMIT after it and on its own. Every layout must keep the same multiset. */
   @Test def regressionTopNOffsetOverTotalOrder(): Unit = {
@@ -279,7 +334,7 @@ class ModeDifferentialFuzzTest {
       Array[Any](1, "a"), Array[Any](1, "a"), Array[Any](1, "b"),
       Array[Any](2, "a"), Array[Any](null, "a"), Array[Any](3, null))
     val cols = Vector((ColRefExpr(0, "c0", DataType.IntType), "c0"), (ColRefExpr(1, "c1", DataType.StringType), "c1"))
-    val order = Vector((ColRefExpr(0, "c0", DataType.IntType), true), (ColRefExpr(1, "c1", DataType.StringType), true))
+    val order = Vector(OrderKey(ColRefExpr(0, "c0", DataType.IntType), true), OrderKey(ColRefExpr(1, "c1", DataType.StringType), true))
     Seq((Some(2L), Some(1L), " LIMIT 2 OFFSET 1"), (None, Some(2L), " OFFSET 2")).foreach { case (limit, offset, tail) =>
       val q = QueryGen.ProjectQuery(distinct = false, projection = cols.map { case (c, n) => (c: Expr, n) },
         where = None, orderBy = order, limit = limit, offset = offset)
@@ -298,7 +353,7 @@ class ModeDifferentialFuzzTest {
       distinct = false,
       projection = Vector((ColRefExpr(0, "c0", DataType.IntType), "c0"), (ColRefExpr(1, "c1", DataType.StringType), "c1")),
       where = None,
-      orderBy = Vector((ColRefExpr(0, "c0", DataType.IntType), true), (ColRefExpr(1, "c1", DataType.StringType), true)),
+      orderBy = Vector(OrderKey(ColRefExpr(0, "c0", DataType.IntType), true), OrderKey(ColRefExpr(1, "c1", DataType.StringType), true)),
       limit = Some(3L))
     val qc = QueryGen.QueryCase(DataGen.Dataset(schema, rows), q)
     assertTrue(s"expected a rendered LIMIT, got ${qc.sql}", qc.sql.contains(" LIMIT 3"))
@@ -363,7 +418,7 @@ class ModeDifferentialFuzzTest {
     val q = ProjectQuery(
       distinct = false,
       projection = Vector((c(0, intLong): Expr, "c0"), (c(1, intLong): Expr, "c1")),
-      where = None, orderBy = Vector((c(0, intLong), true)))
+      where = None, orderBy = Vector(OrderKey(c(0, intLong), true)))
     assertAgrees(QueryCase(DataGen.Dataset(intLong, rows), q))
   }
 
@@ -399,7 +454,7 @@ class ModeDifferentialFuzzTest {
       groupKeys = Vector(c(0, schema)),
       aggregates = Vector((Sum(c(1, schema)), "a0"), (Avg(c(1, schema)), "a1")),
       where = None, having = Some(HavingSpec(HavingCountStar, ">", "0")),
-      groupByOrdinals = false, orderBy = Vector((c(0, schema), true)))
+      groupByOrdinals = false, orderBy = Vector(OrderKey(c(0, schema), true)))
     assertAgrees(QueryCase(DataGen.Dataset(schema, rows), q))
   }
 

@@ -83,7 +83,17 @@ object QueryGen {
     /** Output columns the result is ordered by (empty if no ORDER BY); used by
       * the oracle's sortedness sub-check. Always projected, so present in the
       * output schema by name. */
-    def orderBy: Vector[(ColRefExpr, Boolean)]
+    def orderBy: Vector[OrderKey]
+  }
+
+  /** One ORDER BY key. `nullsFirst` is an explicit `NULLS FIRST` /
+    * `NULLS LAST`; `None` writes no clause and gets the engine's default, NULL
+    * as the smallest value (first under ASC, last under DESC). */
+  final case class OrderKey(col: ColRefExpr, asc: Boolean, nullsFirst: Option[Boolean] = None) {
+    def placesNullsFirst: Boolean = nullsFirst.getOrElse(asc)
+    def render: String =
+      s"${col.name} ${if (asc) "ASC" else "DESC"}" +
+        nullsFirst.map(first => if (first) " NULLS FIRST" else " NULLS LAST").getOrElse("")
   }
 
   /** `SELECT [DISTINCT] <items> FROM view [WHERE p] [ORDER BY <cols>] [LIMIT n]
@@ -92,7 +102,7 @@ object QueryGen {
       distinct: Boolean,
       projection: Vector[(Expr, String)],
       where: Option[Expr],
-      orderBy: Vector[(ColRefExpr, Boolean)],
+      orderBy: Vector[OrderKey],
       limit: Option[Long] = None,
       offset: Option[Long] = None) extends GenQuery {
 
@@ -102,7 +112,7 @@ object QueryGen {
       * result multiset. */
     private def totallyOrdered: Boolean =
       projection.forall(_._1.isInstanceOf[ColRefExpr]) &&
-        projection.map(_._2).toSet == orderBy.map(_._1.name).toSet
+        projection.map(_._2).toSet == orderBy.map(_.col.name).toSet
 
     def render(view: String): String = {
       val sel = projection.iterator.map { case (e, name) =>
@@ -125,7 +135,7 @@ object QueryGen {
       where: Option[Expr],
       having: Option[HavingSpec],
       groupByOrdinals: Boolean,
-      orderBy: Vector[(ColRefExpr, Boolean)],
+      orderBy: Vector[OrderKey],
       limit: Option[Long] = None,
       offset: Option[Long] = None) extends GenQuery {
 
@@ -133,7 +143,7 @@ object QueryGen {
       * output row — so the order is total and top-`n` selects the same groups
       * under every layout. */
     private def totallyOrdered: Boolean =
-      groupKeys.nonEmpty && orderBy.map(_._1.index).toSet == groupKeys.map(_.index).toSet
+      groupKeys.nonEmpty && orderBy.map(_.col.index).toSet == groupKeys.map(_.index).toSet
 
     def render(view: String): String = {
       val groupSel = groupKeys.map(_.name)
@@ -220,10 +230,10 @@ object QueryGen {
       else Vector((colRef(schema, 0): Expr, schema.fields(0).name))
 
     val where = if (rng.bool(0.6)) Some(genPredicate(rng, schema, rng.between(2, 4))) else None
-    val orderBy = orderCols.map(i => (colRef(schema, i), rng.bool()))
+    val orderBy = orderCols.map(i => OrderKey(colRef(schema, i), rng.bool()))
     val (limit, offset) = withOffset(rng, topN, if (topN) Some(genLimit(rng)) else None)
 
-    ProjectQuery(distinct, projection, where, orderBy, limit, offset)
+    ProjectQuery(distinct, projection, where, withNullPlacement(rng, orderBy), limit, offset)
   }
 
   /** A LIMIT row count spanning the interesting cutoffs: none at all, one row,
@@ -243,6 +253,16 @@ object QueryGen {
       case 1 => (limit, Some(genOffset(rng)))
       case _ => (None, Some(genOffset(rng)))
     }
+
+  /** Give some ORDER BY keys an explicit `NULLS FIRST` / `NULLS LAST`. Called
+    * after every other draw for the query, and draws nothing when there is no
+    * ORDER BY, so every other query is the draw sequence it always was. Shared
+    * with [[MetaQueryGen]]. */
+  private[fuzz] def genNullPlacement(rng: Rng): Option[Boolean] =
+    rng.weighted[Option[Boolean]]((2, None), (1, Some(true)), (1, Some(false)))
+
+  private def withNullPlacement(rng: Rng, keys: Vector[OrderKey]): Vector[OrderKey] =
+    keys.map(k => k.copy(nullsFirst = genNullPlacement(rng)))
 
   /** An OFFSET spanning the cutoffs [[genLimit]] does: zero (a no-op), one row, a
     * handful (a cut mid-batch and mid-partition), and past the end of the data
@@ -271,13 +291,14 @@ object QueryGen {
     // `AggregateQuery.totallyOrdered`); the ordinary shape orders by a subset.
     val topN = groupKeys.nonEmpty && rng.bool(0.2)
     val orderBy =
-      if (topN) groupKeys.map(cr => (cr, rng.bool()))
+      if (topN) groupKeys.map(cr => OrderKey(cr, rng.bool()))
       else if (groupKeys.nonEmpty && rng.bool(0.4))
-        distinctSubset(rng, groupKeys, rng.between(1, math.min(2, groupKeys.length))).map(cr => (cr, rng.bool()))
+        distinctSubset(rng, groupKeys, rng.between(1, math.min(2, groupKeys.length))).map(cr => OrderKey(cr, rng.bool()))
       else Vector.empty
     val (limit, offset) = withOffset(rng, topN, if (topN) Some(genLimit(rng)) else None)
 
-    AggregateQuery(groupKeys, aggregates, where, having, groupByOrdinals, orderBy, limit, offset)
+    AggregateQuery(groupKeys, aggregates, where, having, groupByOrdinals,
+      withNullPlacement(rng, orderBy), limit, offset)
   }
 
   private def genAggSpec(rng: Rng, schema: Schema, numeric: Vector[Int], integral: Vector[Int]): AggSpec = {
@@ -544,9 +565,8 @@ object SqlRender {
     case LikeExpr(c, p, neg) => s"${expr(c)} ${if (neg) "NOT " else ""}LIKE ${expr(p)}"
   }
 
-  def orderByClause(keys: Vector[(ColRefExpr, Boolean)]): String =
-    if (keys.isEmpty) ""
-    else " ORDER BY " + keys.map { case (c, asc) => s"${c.name} ${if (asc) "ASC" else "DESC"}" }.mkString(", ")
+  def orderByClause(keys: Vector[QueryGen.OrderKey]): String =
+    if (keys.isEmpty) "" else " ORDER BY " + keys.map(_.render).mkString(", ")
 
   private def binOp(op: String): String = op match {
     case "==" => "="

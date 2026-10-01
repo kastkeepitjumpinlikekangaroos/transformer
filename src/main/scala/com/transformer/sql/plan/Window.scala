@@ -88,7 +88,7 @@ object WindowFrame {
   */
 final case class WindowSpec(
     partitionKeys: Seq[Expr],
-    orderKeys: Seq[(Expr, Boolean)],
+    orderKeys: Seq[SortKey],
     frame: WindowFrame
 )
 

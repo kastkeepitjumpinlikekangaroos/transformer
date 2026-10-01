@@ -28,7 +28,7 @@ class SortExecTest {
   private def runSort(
       partitions: Vector[Vector[Array[Any]]],
       schema: Schema,
-      keys: Seq[(Expr, Boolean)]): Vector[Array[Any]] = {
+      keys: Seq[SortKey]): Vector[Array[Any]] = {
     val plan = new InMemoryPartitionedPlan(schema, partitions)
     val sort = SortExec(plan, keys)
     drainRows(sort.execute(0), schema)
@@ -57,7 +57,7 @@ class SortExecTest {
       label: String,
       rows: Vector[Array[Any]],
       schema: Schema,
-      keys: Seq[(Expr, Boolean)]): Unit = {
+      keys: Seq[SortKey]): Unit = {
     if (rows.length < 2) return
     val cmp = mirrorOfSortExecComparator(schema, keys)
     var i = 1
@@ -78,11 +78,12 @@ class SortExecTest {
     assertEquals(s"$label: row multiset", expectedMs, actualMs)
   }
 
-  /** Same null + Ops.cmp semantics as `SortExec.rowOrdering` — kept local to
-    * the test so we're asserting against a known oracle, not the code under
-    * test. */
+  /** Same null placement + Ops.cmp semantics as `SortExec.rowOrdering` (a
+    * NULL goes where the key's `nullsFirst` says, whatever the direction) —
+    * written out here rather than calling `SortKey.compare`, so we're asserting
+    * against a known oracle, not the code under test. */
   private def mirrorOfSortExecComparator(
-      schema: Schema, keys: Seq[(Expr, Boolean)]): java.util.Comparator[Array[Any]] = {
+      schema: Schema, keys: Seq[SortKey]): java.util.Comparator[Array[Any]] = {
     val sortKeys = keys.toArray
     new java.util.Comparator[Array[Any]] {
       def compare(a: Array[Any], b: Array[Any]): Int = {
@@ -90,14 +91,14 @@ class SortExecTest {
         val bb = rowBatch(schema, b)
         var i = 0
         while (i < sortKeys.length) {
-          val (expr, asc) = sortKeys(i)
-          val va = expr.eval(ba, 0)
-          val vb = expr.eval(bb, 0)
+          val key = sortKeys(i)
+          val va = key.expr.eval(ba, 0)
+          val vb = key.expr.eval(bb, 0)
           val c = (va, vb) match {
             case (null, null) => 0
-            case (null, _) => if (asc) -1 else 1
-            case (_, null) => if (asc) 1 else -1
-            case _ => if (asc) Ops.cmp(va, vb) else Ops.cmp(vb, va)
+            case (null, _) => if (key.nullsFirst) -1 else 1
+            case (_, null) => if (key.nullsFirst) 1 else -1
+            case _ => if (key.asc) Ops.cmp(va, vb) else Ops.cmp(vb, va)
           }
           if (c != 0) return c
           i += 1
@@ -127,7 +128,7 @@ class SortExecTest {
       Vector(row(1, 0), row(4, 0), row(7, 0)),
       Vector(row(2, 1), row(5, 1), row(8, 1)),
       Vector(row(3, 2), row(6, 2), row(9, 2)))
-    val keys = Seq((k, true))
+    val keys = Seq(SortKey(k, true))
     val out = runSort(parts, schema2, keys)
     assertEquals(9, out.length)
     assertEquals((1 to 9).toVector, out.map(_(0).asInstanceOf[Int]))
@@ -141,7 +142,7 @@ class SortExecTest {
       Vector(row(1, 10), row(2, 30), row(3, 50)),
       Vector(row(1, 20), row(2, 40), row(3, 10)),
       Vector(row(2, 20), row(2, 10), row(3, 20)))
-    val keys = Seq((k, true), (p, false))
+    val keys = Seq(SortKey(k, true), SortKey(p, false))
     val out = runSort(parts, schema2, keys)
     assertSortedByKeys("multi-key asc/desc", out, schema2, keys)
     assertPermutationOf("multi-key asc/desc", parts, out)
@@ -153,7 +154,7 @@ class SortExecTest {
     val parts = Vector(
       Vector(row(null, 0), row(1, 0), row(3, 0)),
       Vector(row(2, 1), row(null, 1), row(4, 1)))
-    val keys = Seq((k, true))
+    val keys = Seq(SortKey(k, true))
     val out = runSort(parts, schema2, keys)
     assertEquals(6, out.length)
     assertNull(out(0)(0))
@@ -166,7 +167,7 @@ class SortExecTest {
     val parts = Vector(
       Vector(row(null, 0), row(3, 0), row(1, 0)),
       Vector(row(4, 1), row(2, 1), row(null, 1)))
-    val keys = Seq((k, false))
+    val keys = Seq(SortKey(k, false))
     val out = runSort(parts, schema2, keys)
     assertEquals(6, out.length)
     assertEquals(Vector(4, 3, 2, 1), out.take(4).map(_(0).asInstanceOf[Int]))
@@ -175,13 +176,52 @@ class SortExecTest {
     assertSortedByKeys("nulls last desc", out, schema2, keys)
   }
 
+  @Test def explicitNullPlacementOverridesDirection(): Unit = {
+    // ASC NULLS LAST and DESC NULLS FIRST: the two placements the default
+    // (NULL as the smallest value) never produces.
+    val parts = Vector(
+      Vector(row(null, 0), row(1, 0), row(3, 0)),
+      Vector(row(2, 1), row(null, 1), row(4, 1)))
+    val ascLast = Seq(SortKey(k, asc = true, nullsFirst = false))
+    val out1 = runSort(parts, schema2, ascLast)
+    assertEquals(Vector(1, 2, 3, 4), out1.take(4).map(_(0).asInstanceOf[Int]))
+    assertNull(out1(4)(0))
+    assertNull(out1(5)(0))
+    assertSortedByKeys("asc nulls last", out1, schema2, ascLast)
+    val descFirst = Seq(SortKey(k, asc = false, nullsFirst = true))
+    val out2 = runSort(parts, schema2, descFirst)
+    assertNull(out2(0)(0))
+    assertNull(out2(1)(0))
+    assertEquals(Vector(4, 3, 2, 1), out2.drop(2).map(_(0).asInstanceOf[Int]))
+    assertSortedByKeys("desc nulls first", out2, schema2, descFirst)
+  }
+
+  @Test def nullPlacementSurvivesTheHeapMerge(): Unit = {
+    // Above SmallNThreshold the sorted partials merge through the heap, a
+    // separate path from the small-N Arrays.sort; placement must hold on both
+    // keys there too, including within ties of the first key.
+    val rnd = new Random(0xBADC0DE)
+    def maybeNull(v: Int): Any = if (rnd.nextInt(8) == 0) null else v
+    val parts = Vector.tabulate(6) { _ =>
+      Vector.fill(1000)(row(maybeNull(rnd.nextInt(50)), maybeNull(rnd.nextInt(5))))
+    }
+    val keys = Seq(SortKey(k, asc = true, nullsFirst = false), SortKey(p, asc = false, nullsFirst = true))
+    val out = runSort(parts, schema2, keys)
+    assertEquals(6000, out.length)
+    assertSortedByKeys("heap merge, explicit placement", out, schema2, keys)
+    assertPermutationOf("heap merge, explicit placement", parts, out)
+    val firstNull = out.indexWhere(_(0) == null)
+    assertTrue("expected NULL keys in the data", firstNull > 0)
+    assertTrue("NULLS LAST: every NULL k after every non-NULL k", out.drop(firstNull).forall(_(0) == null))
+  }
+
   @Test def emptyPartitionsMixedWithFullPartitions(): Unit = {
     val parts = Vector(
       Vector.empty[Array[Any]],
       Vector(row(2, 1), row(4, 1)),
       Vector.empty[Array[Any]],
       Vector(row(1, 3), row(3, 3), row(5, 3)))
-    val keys = Seq((k, true))
+    val keys = Seq(SortKey(k, true))
     val out = runSort(parts, schema2, keys)
     assertEquals(Vector(1, 2, 3, 4, 5), out.map(_(0).asInstanceOf[Int]))
     assertSortedByKeys("empty + full", out, schema2, keys)
@@ -189,14 +229,14 @@ class SortExecTest {
 
   @Test def allPartitionsEmpty(): Unit = {
     val parts = Vector.fill(4)(Vector.empty[Array[Any]])
-    val out = runSort(parts, schema2, Seq((k, true)))
+    val out = runSort(parts, schema2, Seq(SortKey(k, true)))
     assertTrue(out.isEmpty)
   }
 
   @Test def singlePartitionInputStillSorted(): Unit = {
     // Single non-empty partial — exercises the `nonEmpty == 1` shortcut.
     val parts = Vector(Vector(row(5, 0), row(2, 0), row(9, 0), row(1, 0)))
-    val keys = Seq((k, true))
+    val keys = Seq(SortKey(k, true))
     val out = runSort(parts, schema2, keys)
     assertEquals(Vector(1, 2, 5, 9), out.map(_(0).asInstanceOf[Int]))
     assertSortedByKeys("single partition", out, schema2, keys)
@@ -209,7 +249,7 @@ class SortExecTest {
       Vector.tabulate(40)(i => row(99 - i, 0)),
       Vector.tabulate(40)(i => row(150 - i * 2, 1)),
       Vector.tabulate(40)(i => row(i, 2)))
-    val keys = Seq((k, true))
+    val keys = Seq(SortKey(k, true))
     val out = runSort(parts, schema2, keys)
     assertEquals(120, out.length)
     assertSortedByKeys("small-N fast path", out, schema2, keys)
@@ -223,7 +263,7 @@ class SortExecTest {
     val parts = Vector.tabulate(12) { _ =>
       Vector.fill(600)(row(rnd.nextInt(1_000_000), rnd.nextInt(10)))
     }
-    val keys = Seq((k, true))
+    val keys = Seq(SortKey(k, true))
     val out = runSort(parts, schema2, keys)
     assertEquals(7200, out.length)
     assertSortedByKeys("large random", out, schema2, keys)
@@ -243,7 +283,7 @@ class SortExecTest {
       Vector.tabulate(half)(i => row(i * 2, 0)),
       Vector.tabulate(total - half)(i => row(i * 2 + 1, 1)))
     val plan = new InMemoryPartitionedPlan(schema2, parts)
-    val it = SortExec(plan, Seq((k, true))).execute(0)
+    val it = SortExec(plan, Seq(SortKey(k, true))).execute(0)
     val sizes = mutable.ArrayBuffer.empty[Int]
     while (it.hasNext) sizes += it.next().numRows
     assertEquals(Vector(cap, tail), sizes.toVector)
@@ -255,7 +295,7 @@ class SortExecTest {
   @Test def monotonicitySmoke(): Unit = {
     val parts = Vector.tabulate(4)(p =>
       Vector.tabulate(1024)(i => row(i * 4 + p, p)))
-    val keys = Seq((k, true))
+    val keys = Seq(SortKey(k, true))
     val out = runSort(parts, schema2, keys)
     assertEquals(4096, out.length)
     assertEquals((0 until 4096).toVector, out.map(_(0).asInstanceOf[Int]))

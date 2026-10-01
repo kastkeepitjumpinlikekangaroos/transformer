@@ -2070,12 +2070,51 @@ class SqlEngineTest {
     // Bound as COUNT(*), so it counted the NULL: 5, not 4.
     assertRejected("SELECT COUNT(ALL a) AS c FROM tn", clauseCatalog(), "COUNT(ALL x)")
 
-  @Test def nullOrderingRejected(): Unit = {
-    // NULLS LAST was dropped and NULL sorted first.
-    val cat = clauseCatalog()
-    assertRejected("SELECT a FROM tn ORDER BY a NULLS LAST", cat, "NULLS FIRST / NULLS LAST")
-    assertRejected("SELECT a, ROW_NUMBER() OVER (ORDER BY a NULLS LAST) AS n FROM tn", cat,
-      "NULLS FIRST / NULLS LAST")
+  @Test def nullsFirstAndLastPlaceNullsInOrderBy(): Unit = {
+    val cat = clauseCatalog() // tn.a is 1, 2, 2, 3, NULL
+    // Without a NULLS clause the placement is unchanged: NULL sorts as the
+    // smallest value, first under ASC and last under DESC.
+    assertEquals(Seq(null, 1, 2, 2, 3), column("SELECT a FROM tn ORDER BY a", cat, "a"))
+    assertEquals(Seq(3, 2, 2, 1, null), column("SELECT a FROM tn ORDER BY a DESC", cat, "a"))
+    // An explicit clause wins in either direction. NULLS LAST used to be
+    // dropped, leaving the NULL first.
+    assertEquals(Seq(1, 2, 2, 3, null), column("SELECT a FROM tn ORDER BY a NULLS LAST", cat, "a"))
+    assertEquals(Seq(1, 2, 2, 3, null), column("SELECT a FROM tn ORDER BY a ASC NULLS LAST", cat, "a"))
+    assertEquals(Seq(null, 1, 2, 2, 3), column("SELECT a FROM tn ORDER BY a ASC NULLS FIRST", cat, "a"))
+    assertEquals(Seq(null, 3, 2, 2, 1), column("SELECT a FROM tn ORDER BY a DESC NULLS FIRST", cat, "a"))
+    assertEquals(Seq(3, 2, 2, 1, null), column("SELECT a FROM tn ORDER BY a DESC NULLS LAST", cat, "a"))
+    // Every sort site: above DISTINCT, above a UNION, past a GROUP BY, and an
+    // ordinal key.
+    assertEquals(Seq(1, 2, 3, null), column("SELECT DISTINCT a FROM tn ORDER BY a NULLS LAST", cat, "a"))
+    assertEquals(Seq(1, 2, 2, 2, 3, 3, null),
+      column("SELECT a FROM tn UNION ALL SELECT a FROM s ORDER BY a NULLS LAST", cat, "a"))
+    assertEquals(Seq(1, 2, 3, null), column("SELECT a, COUNT(*) AS n FROM tn GROUP BY a ORDER BY a NULLS LAST", cat, "a"))
+    assertEquals(Seq(1, 2, 2, 3, null), column("SELECT a FROM tn ORDER BY 1 NULLS LAST", cat, "a"))
+    // The page moves with the NULL.
+    assertEquals(Seq(3, null), column("SELECT a FROM tn ORDER BY a NULLS LAST LIMIT 2 OFFSET 3", cat, "a"))
+  }
+
+  @Test def nullPlacementIsPerKey(): Unit = {
+    val p = tmpCsv("p.csv", "g,a\nx,1\nx,\ny,2\n,3\ny,\n")
+    val cat = catalogWith("p" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    // g NULLS LAST puts the NULL group at the end; within each g, a DESC NULLS
+    // FIRST puts that group's NULL a first.
+    val rows = collectAllRows(SqlEngine.execute("SELECT g, a FROM p ORDER BY g NULLS LAST, a DESC NULLS FIRST", cat))
+    assertEquals(Seq("x", "x", "y", "y", null), rows.map(_("g")))
+    assertEquals(Seq(null, 1, null, 2, 3), rows.map(_("a")))
+  }
+
+  @Test def nullPlacementInsideOver(): Unit = {
+    val cat = clauseCatalog() // tn: id 5 is the row whose a is NULL
+    def byId(sql: String, col: String): Map[Any, Any] =
+      collectAllRows(SqlEngine.execute(sql, cat)).map(r => r("id") -> r(col)).toMap
+    // Default: the NULL sorts first under ASC, so it is row 1.
+    assertEquals(1L, byId("SELECT id, ROW_NUMBER() OVER (ORDER BY a) AS n FROM tn", "n")(5))
+    // NULLS LAST makes it row 5. The clause used to be dropped here too.
+    assertEquals(5L, byId("SELECT id, ROW_NUMBER() OVER (ORDER BY a NULLS LAST) AS n FROM tn", "n")(5))
+    // RANK under DESC NULLS FIRST: NULL 1, then 3 at 2, the two 2s at 3, and 1 at 5.
+    val ranks = byId("SELECT id, RANK() OVER (ORDER BY a DESC NULLS FIRST) AS r FROM tn", "r")
+    assertEquals(Map[Any, Any](5 -> 1L, 4 -> 2L, 2 -> 3L, 3 -> 3L, 1 -> 5L), ranks)
   }
 
   @Test def topAndFetchFirstRejected(): Unit = {

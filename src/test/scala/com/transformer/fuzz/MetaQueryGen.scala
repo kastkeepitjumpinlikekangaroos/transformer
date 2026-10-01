@@ -306,7 +306,8 @@ object MetaQueryGen {
       setOp: Option[(MetaQuery, Boolean)] = None,
       ctes: Vector[CteDef] = Vector.empty,
       limit: Option[Long] = None,
-      offset: Option[Long] = None) {
+      offset: Option[Long] = None,
+      nullsFirst: Option[Boolean] = None) {
     def outputSchema: Vector[(String, DataType)] = core.outputSchema
     def tlpCandidates: Vector[(String, DataType)] = core.tlpCandidates
     def whereSql: String = where.map(w => s" WHERE ${SqlRender.expr(w)}").getOrElse("")
@@ -342,7 +343,8 @@ object MetaQueryGen {
       * among tied rows keeps the same multiset only when tied rows are identical. */
     def topNSql: String = totalOrderKeys match {
       case Some(keys) if limit.isDefined || offset.isDefined =>
-        s" ORDER BY ${keys.mkString(", ")}" +
+        val placement = nullsFirst.map(first => if (first) " NULLS FIRST" else " NULLS LAST").getOrElse("")
+        s" ORDER BY ${keys.map(_ + placement).mkString(", ")}" +
           limit.map(n => s" LIMIT $n").getOrElse("") + offset.map(m => s" OFFSET $m").getOrElse("")
       case _ => ""
     }
@@ -355,6 +357,9 @@ object MetaQueryGen {
 
     /** Whether this query actually renders an `OFFSET`. */
     def hasOffset: Boolean = topNSql.contains(" OFFSET ")
+
+    /** Whether this query actually renders an explicit `NULLS FIRST` / `NULLS LAST`. */
+    def hasNullPlacement: Boolean = topNSql.contains(" NULLS ")
 
     /** The `WITH` definitions without the `WITH` keyword (empty when no CTEs). */
     def cteClause: String = if (ctes.isEmpty) "" else ctes.map(_.render).mkString(", ")
@@ -549,7 +554,8 @@ object MetaQueryGen {
       else if (rng.bool(0.5)) genAggCore(rng, scope)
       else genProjectCore(rng, scope)
     val (limit, offset) = QueryGen.withOffset(rng, topN, if (topN) Some(genLimit(rng)) else None)
-    MetaQuery(from, where, core, limit = limit, offset = offset)
+    val nullsFirst = if (topN) QueryGen.genNullPlacement(rng) else None
+    MetaQuery(from, where, core, limit = limit, offset = offset, nullsFirst = nullsFirst)
   }
 
   /** A `LIMIT` row count spanning the interesting cutoffs: none at all, one row, a

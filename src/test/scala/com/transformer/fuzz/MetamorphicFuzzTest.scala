@@ -171,7 +171,7 @@ class MetamorphicFuzzTest {
     * is asserted present over a fixed block of seeds. Prints the tally for the PR. */
   @Test def generatorCoversShapes(): Unit = {
     val n = 2000
-    var joins, unions, ctes, windows, invariantWindows, aggregates, tlpWindowKeys, topNs, offsets, boolMinMax = 0
+    var joins, unions, ctes, windows, invariantWindows, aggregates, tlpWindowKeys, topNs, offsets, placements, boolMinMax = 0
     var seed = 0
     while (seed < n) {
       val mc = MetaQueryGen.generate(new Rng(seed.toLong))
@@ -183,6 +183,7 @@ class MetamorphicFuzzTest {
       if (mc.query.core.isInstanceOf[AggCore]) aggregates += 1
       if (mc.query.hasTopN) topNs += 1
       if (mc.query.hasOffset) offsets += 1
+      if (mc.query.hasNullPlacement) placements += 1
       if (hasBooleanMinMax(mc.query)) boolMinMax += 1
       // A window output column actually chosen as the TLP partition key.
       if (mc.query.core.hasWindow && mc.tlp.isDefined &&
@@ -191,7 +192,7 @@ class MetamorphicFuzzTest {
     }
     println(f"[metamorphic] shape coverage over $n seeds: joins=$joins unions=$unions ctes=$ctes " +
       f"windows=$windows invariantWindows=$invariantWindows aggregates=$aggregates " +
-      f"tlpOnWindowCol=$tlpWindowKeys topN=$topNs offset=$offsets boolMinMax=$boolMinMax")
+      f"tlpOnWindowCol=$tlpWindowKeys topN=$topNs offset=$offsets nullPlacement=$placements boolMinMax=$boolMinMax")
     assertTrue(s"joins=$joins", joins > 100)
     assertTrue(s"unions=$unions", unions > 50)
     assertTrue(s"ctes=$ctes", ctes > 100)
@@ -210,6 +211,9 @@ class MetamorphicFuzzTest {
     // OFFSET rides on the top-n shape (~40% of it), so this separates "rare"
     // from "gone"; offsetIsGeneratedAndObservable checks it actually drops rows.
     assertTrue(s"offset=$offsets", offsets > 40)
+    // An explicit NULLS FIRST / NULLS LAST rides on the same shape (~half of it);
+    // nullPlacementIsGeneratedAndObservable checks it changes answers.
+    assertTrue(s"nullPlacement=$placements", placements > 40)
     // MIN/MAX over a Boolean column: the accumulator-slot shape that returned NULL
     // under spill until the engine was fixed. It was kept OUT of the generator
     // while the bug stood, so an assertion that it is back is what stops the
@@ -675,6 +679,52 @@ class MetamorphicFuzzTest {
     println(s"[metamorphic] OFFSET over $n seeds: rendered=$offsets, skip strictly inside the result=$observable")
     assertTrue(s"offset=$offsets", offsets > 40)
     assertTrue(s"observable=$observable of $offsets", observable > 20)
+  }
+
+  /** The NULLS FIRST / NULLS LAST guard's value half: a placement only tests
+    * anything when moving the NULLs changes which rows a LIMIT / OFFSET keeps.
+    * So run each placed query again with the opposite placement and count the
+    * ones whose answer differs. */
+  @Test def nullPlacementIsGeneratedAndObservable(): Unit = {
+    val n = 2000
+    var placed, observable = 0
+    var seed = 0
+    while (seed < n) {
+      val mc = MetaQueryGen.generate(new Rng(seed.toLong))
+      if (mc.query.hasNullPlacement) {
+        placed += 1
+        val flipped = mc.query.copy(nullsFirst = mc.query.nullsFirst.map(!_))
+        val differs = Try {
+          val cat = mc.env.catalog()
+          val a = RelEngine.execute(cat, mc.query.renderBody, ExecutionOptions.Default)
+          val b = RelEngine.execute(mc.env.catalog(), flipped.renderBody, ExecutionOptions.Default)
+          RowOracle.multisetEquals(a.schema, RelEngine.collectRows(a), RelEngine.collectRows(b)).isDefined
+        }.getOrElse(false)
+        if (differs) observable += 1
+      }
+      seed += 1
+    }
+    println(s"[metamorphic] NULLS FIRST/LAST over $n seeds: rendered=$placed, flipping it changes the answer=$observable")
+    assertTrue(s"placed=$placed", placed > 40)
+    assertTrue(s"observable=$observable of $placed", observable > 5)
+  }
+
+  /** NULLS LAST / NULLS FIRST on a top-n whose cutoff falls among NULL keys:
+    * the kept rows move with the placement, and TLP and mode agreement must
+    * hold for both. */
+  @Test def regressionTopNNullPlacement(): Unit = {
+    val r = rel("r0", intInt, IndexedSeq(
+      Array[Any](null, 10), Array[Any](1, 10), Array[Any](null, 20), Array[Any](2, 20), Array[Any](3, 30)))
+    val env = RelEnv(Vector(r))
+    val from = FromClause(FromLeaf("r0", "t0", Vector(sc("t0", intInt, 0), sc("t0", intInt, 1))), Vector.empty)
+    val core = ProjectCore(Vector((sc("t0", intInt, 0).ref, "o0"), (sc("t0", intInt, 1).ref, "o1")), distinct = false)
+    Seq(Some(true), Some(false)).foreach { placement =>
+      val q = MetaQuery(from, None, core, limit = Some(2L), nullsFirst = placement)
+      assertTrue(s"expected an explicit placement, got ${q.renderBody}", q.hasNullPlacement)
+      val mc = MetaCase(env, q, Some(TlpCmpLit("o1", ">", "<=", "10")))
+      assertTlpHeld(mc)
+      assertEquals(RelEngine.Held, MetaModeDifferential.check(mc))
+    }
   }
 
   /** A generated `limit` renders only while the projection stays totally ordered:

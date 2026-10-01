@@ -257,7 +257,7 @@ final case class WindowExec(
     val specs: Array[WindowSpec] = windows.iterator.map(_.spec).toArray.distinct
     val nSpecs = specs.length
     val specPartKeyExprs: Array[Array[Expr]] = specs.map(_.partitionKeys.toArray)
-    val specOrderKeyExprs: Array[Array[Expr]] = specs.map(_.orderKeys.iterator.map(_._1).toArray)
+    val specOrderKeyExprs: Array[Array[Expr]] = specs.map(_.orderKeys.iterator.map(_.expr).toArray)
 
     val partKeysByRow: Array[mutable.ArrayBuffer[Array[Any]]] =
       Array.tabulate(nSpecs)(_ => mutable.ArrayBuffer.empty[Array[Any]])
@@ -386,8 +386,8 @@ final case class WindowExec(
   private def sortPartition(
       part: mutable.ArrayBuffer[Int],
       orderKeysByRow: Array[Array[Any]],
-      orderKeys: Seq[(Expr, Boolean)]): Unit = {
-    val orderArr: Array[(Expr, Boolean)] = orderKeys.toArray
+      orderKeys: Seq[SortKey]): Unit = {
+    val orderArr: Array[SortKey] = orderKeys.toArray
     val nKeys = orderArr.length
     val ord = new java.util.Comparator[Integer] {
       def compare(a: Integer, b: Integer): Int = {
@@ -395,15 +395,7 @@ final case class WindowExec(
         val kb = orderKeysByRow(b)
         var k = 0
         while (k < nKeys) {
-          val asc = orderArr(k)._2
-          val va = ka(k)
-          val vb = kb(k)
-          val c = (va, vb) match {
-            case (null, null) => 0
-            case (null, _) => if (asc) -1 else 1
-            case (_, null) => if (asc) 1 else -1
-            case _ => if (asc) Ops.cmp(va, vb) else Ops.cmp(vb, va)
-          }
+          val c = orderArr(k).compare(ka(k), kb(k))
           if (c != 0) return c
           k += 1
         }

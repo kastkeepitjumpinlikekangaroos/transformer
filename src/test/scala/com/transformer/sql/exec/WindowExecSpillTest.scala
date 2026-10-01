@@ -131,7 +131,7 @@ class WindowExecSpillTest {
     val plan = kvPlan(N = 2000, K = 7, seed = 42L)
     val k = ColRefExpr(0, "k", DataType.IntType)
     val v = ColRefExpr(1, "v", DataType.LongType)
-    val spec = WindowSpec(Seq(k), Seq((v, true)), WindowFrame.defaultFor(hasOrderBy = true))
+    val spec = WindowSpec(Seq(k), Seq(SortKey(v, true)), WindowFrame.defaultFor(hasOrderBy = true))
     val win = WindowDef(spec, WindowFnRowNumber(), "rn")
     val expected = drainRows(
       WindowExec(plan, Seq(win)).execute(0), Schema(plan.outputSchema.fields :+ Field("rn", DataType.LongType)))
@@ -191,7 +191,7 @@ class WindowExecSpillTest {
     val plan = kvPlan(N = 1000, K = 5, seed = 7L)
     val k = ColRefExpr(0, "k", DataType.IntType)
     val v = ColRefExpr(1, "v", DataType.LongType)
-    val spec = WindowSpec(Seq(k), Seq((v, true)), WindowFrame.defaultFor(hasOrderBy = true))
+    val spec = WindowSpec(Seq(k), Seq(SortKey(v, true)), WindowFrame.defaultFor(hasOrderBy = true))
     val win = WindowDef(spec,
       WindowFnLag(v, offset = 1, default = Some(LitExpr(-1L, DataType.LongType))),
       "lagv")
@@ -247,7 +247,7 @@ class WindowExecSpillTest {
     val plan = new InMemoryPlan(schema, Vector(Vector.empty))
     val k = ColRefExpr(0, "k", DataType.IntType)
     val v = ColRefExpr(1, "v", DataType.LongType)
-    val spec = WindowSpec(Seq(k), Seq((v, true)), WindowFrame.defaultFor(hasOrderBy = true))
+    val spec = WindowSpec(Seq(k), Seq(SortKey(v, true)), WindowFrame.defaultFor(hasOrderBy = true))
     val win = WindowDef(spec, WindowFnRowNumber(), "rn")
     val outSchema = Schema(schema.fields :+ Field("rn", DataType.LongType))
     val rows = drainRows(WindowExec(plan, Seq(win), spillyOpts()).execute(0), outSchema)
@@ -259,7 +259,7 @@ class WindowExecSpillTest {
   @Test def emptyPartitionByDisablesSpillSilently(): Unit = {
     val plan = kvPlan(N = 100, K = 5, seed = 13L)
     val v = ColRefExpr(1, "v", DataType.LongType)
-    val spec = WindowSpec(Seq.empty, Seq((v, true)), WindowFrame.defaultFor(hasOrderBy = true))
+    val spec = WindowSpec(Seq.empty, Seq(SortKey(v, true)), WindowFrame.defaultFor(hasOrderBy = true))
     val win = WindowDef(spec, WindowFnRowNumber(), "rn")
     val outSchema = Schema(plan.outputSchema.fields :+ Field("rn", DataType.LongType))
     val expected = drainRows(WindowExec(plan, Seq(win)).execute(0), outSchema)
@@ -273,7 +273,7 @@ class WindowExecSpillTest {
     val plan = kvPlan(N = 5000, K = 7, seed = 99L)
     val k = ColRefExpr(0, "k", DataType.IntType)
     val v = ColRefExpr(1, "v", DataType.LongType)
-    val spec = WindowSpec(Seq(k), Seq((v, true)), WindowFrame.defaultFor(hasOrderBy = true))
+    val spec = WindowSpec(Seq(k), Seq(SortKey(v, true)), WindowFrame.defaultFor(hasOrderBy = true))
     val win = WindowDef(spec, WindowFnRowNumber(), "rn")
     val node = new MetricsNode(0, "WindowExec", 0, WindowExec.IdxCounterNames)
     val w = WindowExec(plan, Seq(win), spillyOpts(), node)
@@ -308,7 +308,7 @@ class WindowExecSpillTest {
     // PARTITION BY the first column, ORDER BY the second; ROW_NUMBER.
     val partKey = ColRefExpr(0, "k", DataType.IntType)
     val orderKey = ColRefExpr(1, "k", DataType.IntType)
-    val spec = WindowSpec(Seq(partKey), Seq((orderKey, true)), WindowFrame.defaultFor(hasOrderBy = true))
+    val spec = WindowSpec(Seq(partKey), Seq(SortKey(orderKey, true)), WindowFrame.defaultFor(hasOrderBy = true))
     val win = WindowDef(spec, WindowFnRowNumber(), "rn")
     val outSchema = Schema(schema.fields :+ Field("rn", DataType.LongType))
 
@@ -370,14 +370,20 @@ class WindowExecSpillTest {
     * denseRank)`. Every row carries `k = 1` (one partition, and a non-empty
     * PARTITION BY so the spill path is eligible) and `id` = its index in
     * `ds`, which is how each row's rank is identified without depending on
-    * emit order. */
-  private def ranksById(ds: Seq[Double], asc: Boolean, opts: ExecutionOptions): Map[Int, (Long, Long)] = {
+    * emit order. A `null` in `ds` is a NULL key; `nullsFirst` is an explicit
+    * NULLS FIRST / NULLS LAST on the ORDER BY. */
+  private def ranksById(
+      ds: Seq[Any],
+      asc: Boolean,
+      opts: ExecutionOptions,
+      nullsFirst: Option[Boolean] = None): Map[Int, (Long, Long)] = {
     val rows = ds.iterator.zipWithIndex.map { case (d, i) =>
-      Array[Any](java.lang.Integer.valueOf(1), java.lang.Double.valueOf(d), java.lang.Integer.valueOf(i))
+      Array[Any](java.lang.Integer.valueOf(1), d, java.lang.Integer.valueOf(i))
     }.toVector
     val k = ColRefExpr(0, "k", DataType.IntType)
     val d = ColRefExpr(1, "d", DataType.DoubleType)
-    val spec = WindowSpec(Seq(k), Seq((d, asc)), WindowFrame.defaultFor(hasOrderBy = true))
+    val key = nullsFirst.fold(SortKey(d, asc))(first => SortKey(d, asc, first))
+    val spec = WindowSpec(Seq(k), Seq(key), WindowFrame.defaultFor(hasOrderBy = true))
     val wins = Seq(
       WindowDef(spec, WindowFnRank(), "rk"),
       WindowDef(spec, WindowFnDenseRank(), "dr"))
@@ -393,9 +399,14 @@ class WindowExecSpillTest {
   }
 
   /** The same ranks on the heap path and the spill path. */
-  private def assertRanks(label: String, expected: Map[Int, (Long, Long)], ds: Seq[Double], asc: Boolean): Unit = {
-    assertEquals(s"$label (heap)", expected, ranksById(ds, asc, ExecutionOptions.Default))
-    assertEquals(s"$label (spill)", expected, ranksById(ds, asc, spillyOpts()))
+  private def assertRanks(
+      label: String,
+      expected: Map[Int, (Long, Long)],
+      ds: Seq[Any],
+      asc: Boolean,
+      nullsFirst: Option[Boolean] = None): Unit = {
+    assertEquals(s"$label (heap)", expected, ranksById(ds, asc, ExecutionOptions.Default, nullsFirst))
+    assertEquals(s"$label (spill)", expected, ranksById(ds, asc, spillyOpts(), nullsFirst))
   }
 
   /** A partition whose ORDER BY key is NaN on every row is one peer group, so
@@ -415,6 +426,22 @@ class WindowExecSpillTest {
     // DESC: NaN, NaN, 2.0, 1.0 -> rank 1, 1, 3, 4 / dense 1, 1, 2, 3
     assertRanks("NaN first, tied", Map(1 -> (1L, 1L), 2 -> (1L, 1L), 3 -> (3L, 2L), 0 -> (4L, 3L)),
       ds, asc = false)
+  }
+
+  /** NULLs are one peer group placed where the key says, on both paths. The
+    * default puts them first under ASC; NULLS LAST moves them below every
+    * value, and DESC NULLS FIRST keeps them on top while reversing the rest. */
+  @Test def nullOrderKeysRankWhereThePlacementPutsThem(): Unit = {
+    val ds = Seq[Any](2.0, null, 1.0, null)
+    // ASC (default, NULLs first): NULL, NULL, 1.0, 2.0
+    assertRanks("ASC, NULLs first by default",
+      Map(1 -> (1L, 1L), 3 -> (1L, 1L), 2 -> (3L, 2L), 0 -> (4L, 3L)), ds, asc = true)
+    // ASC NULLS LAST: 1.0, 2.0, NULL, NULL
+    assertRanks("ASC NULLS LAST",
+      Map(2 -> (1L, 1L), 0 -> (2L, 2L), 1 -> (3L, 3L), 3 -> (3L, 3L)), ds, asc = true, nullsFirst = Some(false))
+    // DESC NULLS FIRST: NULL, NULL, 2.0, 1.0
+    assertRanks("DESC NULLS FIRST",
+      Map(1 -> (1L, 1L), 3 -> (1L, 1L), 0 -> (3L, 2L), 2 -> (4L, 3L)), ds, asc = false, nullsFirst = Some(true))
   }
 
   /** `-0.0` sorts strictly below `0.0`, so the two rows are not peers and rank

@@ -159,7 +159,7 @@ class SpillStressTest {
     // The keys (k = i % G = i) are already a permutation of 0..N-1 but
     // distributed across partitions in non-sorted order — exactly what
     // the K-way merge has to consume.
-    val sort = SortExec(plan, Seq((ColRefExpr(0, "k", DataType.IntType), true)), spillyOpts())
+    val sort = SortExec(plan, Seq(SortKey(ColRefExpr(0, "k", DataType.IntType), true)), spillyOpts())
     val out = sort.execute(0)
     var last = Int.MinValue
     var count = 0
@@ -215,7 +215,7 @@ class SpillStressTest {
     val plan = new SyntheticPlan(N, G, parts = 4)
     val k = ColRefExpr(0, "k", DataType.IntType)
     val v = ColRefExpr(1, "v", DataType.LongType)
-    val spec = WindowSpec(Seq(k), Seq((v, true)), WindowFrame.defaultFor(hasOrderBy = true))
+    val spec = WindowSpec(Seq(k), Seq(SortKey(v, true)), WindowFrame.defaultFor(hasOrderBy = true))
     val win = WindowDef(spec, WindowFnRowNumber(), "rn")
     val w = WindowExec(plan, Seq(win), spillyOpts())
     val out = (0 until w.numPartitions).iterator.flatMap(w.execute)

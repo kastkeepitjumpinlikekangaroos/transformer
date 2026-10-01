@@ -39,7 +39,7 @@ import scala.collection.mutable
   */
 final case class SortExec(
     child: PhysicalPlan,
-    keys: Seq[(Expr, Boolean)],
+    keys: Seq[SortKey],
     opts: ExecutionOptions = ExecutionOptions.Default,
     metricsNode: MetricsNode = null
 ) extends PhysicalPlan {
@@ -318,15 +318,8 @@ final case class SortExec(
         val rowB = RowView(child.outputSchema, b)
         var i = 0
         while (i < sortKeys.length) {
-          val (expr, asc) = sortKeys(i)
-          val va = expr.eval(rowA, 0)
-          val vb = expr.eval(rowB, 0)
-          val c = (va, vb) match {
-            case (null, null) => 0
-            case (null, _) => if (asc) -1 else 1
-            case (_, null) => if (asc) 1 else -1
-            case _ => if (asc) Ops.cmp(va, vb) else Ops.cmp(vb, va)
-          }
+          val key = sortKeys(i)
+          val c = key.compare(key.expr.eval(rowA, 0), key.expr.eval(rowB, 0))
           if (c != 0) return c
           i += 1
         }

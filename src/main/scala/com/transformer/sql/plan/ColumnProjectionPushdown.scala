@@ -103,9 +103,9 @@ object ColumnProjectionPushdown {
         identityRemap(gks.length + aggs.length))
 
     case LogicalSort(child, keys) =>
-      val childNeeded = keys.iterator.flatMap { case (e, _) => colRefNames(e) }.toSet ++ neededByParent
+      val childNeeded = keys.iterator.flatMap(k => colRefNames(k.expr)).toSet ++ neededByParent
       val (newChild, remap) = rewrite(child, childNeeded)
-      val newKeys = keys.map { case (e, asc) => (rewriteExpr(e, remap), asc) }
+      val newKeys = keys.map(k => k.copy(expr = rewriteExpr(k.expr, remap)))
       (LogicalSort(newChild, newKeys), remap)
 
     case LogicalLimit(child, n) =>
@@ -382,7 +382,7 @@ object ColumnProjectionPushdown {
         checkExpr(cond, combined, "Join.condition")
       case LogicalSort(child, keys) =>
         visit(child)
-        keys.foreach { case (e, _) => checkExpr(e, child.outputSchema, "Sort.key") }
+        keys.foreach(k => checkExpr(k.expr, child.outputSchema, "Sort.key"))
       case LogicalLimit(child, _) => visit(child)
       case LogicalOffset(child, _) => visit(child)
       case LogicalDistinct(child) => visit(child)

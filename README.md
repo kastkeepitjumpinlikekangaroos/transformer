@@ -561,9 +561,15 @@ FROM <table> [<alias>]
 [ {INNER|LEFT|RIGHT|FULL} JOIN <table> [<alias>] ON <predicate> ]*
 [ WHERE <predicate> ]
 [ GROUP BY <exprs> [ HAVING <predicate> ] ]
-[ ORDER BY <exprs> [ASC|DESC] ]
+[ ORDER BY <expr> [ASC|DESC] [NULLS FIRST|NULLS LAST] [, ...] ]
 [ LIMIT <n> ] [ OFFSET <m> [ROWS] ]
 ```
+
+A NULL sorts as the smallest value unless the key says otherwise: first under
+`ASC`, last under `DESC`. That is Spark's, MySQL's and SQLite's default and the
+reverse of Postgres's, so SQL ported from Postgres that relies on where NULLs
+land should spell out `NULLS FIRST` or `NULLS LAST`, which take effect per key
+in `ORDER BY` and in a window's `OVER (ORDER BY ...)` alike.
 
 `OFFSET m` skips the first `m` rows of the whole result — after `DISTINCT` and
 `ORDER BY`, before `LIMIT` — so `ORDER BY a LIMIT 10 OFFSET 20` is the third page
@@ -589,8 +595,7 @@ an `IllegalArgumentException` naming it, for example `QUALIFY is not supported;
 compute the window function in a WITH clause and filter on it in the outer
 WHERE`. Rejected, among others: `JOIN ... USING`, `NATURAL`, `SEMI` and `APPLY`
 joins, a bare `OUTER JOIN` and Oracle's `(+)`; `FETCH FIRST`, `TOP n`, and
-`ORDER BY` / `LIMIT` / `OFFSET` after a parenthesized query; `NULLS FIRST` /
-`NULLS LAST`; `QUALIFY`,
+`ORDER BY` / `LIMIT` / `OFFSET` after a parenthesized query; `QUALIFY`,
 `DISTINCT ON`, `GROUPING SETS` and `WITH ROLLUP`; `FILTER (WHERE ...)`,
 `WITHIN GROUP`, `IGNORE NULLS` and named `WINDOW`s; `DISTINCT` inside any
 aggregate but `COUNT`, and `COUNT(ALL x)`; `ILIKE`, `RLIKE` / `REGEXP`,
@@ -609,9 +614,11 @@ are also available as window aggregates with `OVER (...)`. Variance and stddev
 use Welford + Chan's parallel merge for numerical stability; `*_SAMP` returns
 NULL when fewer than two non-NULL inputs are present.
 
-**Window functions:** `<fn>() OVER ([PARTITION BY <exprs>] [ORDER BY <exprs>]
+**Window functions:** `<fn>() OVER ([PARTITION BY <exprs>] [ORDER BY <keys>]
 [<frame>])` — `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`/`LEAD` (with the SQL
-`offset` and `default` arguments), and the aggregate forms above. Frames are
+`offset` and `default` arguments), and the aggregate forms above. The `ORDER BY`
+keys take `ASC`/`DESC` and `NULLS FIRST`/`NULLS LAST` exactly as the outer
+`ORDER BY` does. Frames are
 `ROWS BETWEEN ... AND ...`; `RANGE` is accepted and executed as `ROWS`, which
 differs only when the `ORDER BY` has ties. `RANK` and `DENSE_RANK` tie exactly
 the rows the `ORDER BY` ties, on the same total order described below — so

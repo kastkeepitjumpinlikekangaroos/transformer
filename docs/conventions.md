@@ -93,8 +93,11 @@ specific traps.
 - **Anything that ORDERS values compares through the one total order,
   wherever it lives.** Boxed: `Ops.cmp`. Primitive `double` slot:
   `java.lang.Double.compare`, which is the same order without the boxing. The
-  rule is not confined to `evalVec` — `SortExec.rowOrdering`,
-  `Funcs.pickByOrdering` and `MinMaxState`'s accumulator are all ordering sites,
+  rule is not confined to `evalVec` — `SortKey.compare` (the one comparison
+  `SortExec.rowOrdering` and `WindowExec`'s partition sort both call, which is
+  also where NULL placement lives — never re-implement a null-aware comparison
+  at a new sort site), `Funcs.pickByOrdering` and `MinMaxState`'s accumulator
+  are all ordering sites,
   and `MinMaxState`'s was the one that reached for the raw `<` because its slot
   was a primitive. Every comparison against `NaN` is false in both directions,
   so a raw `<` silently makes the answer depend on the order values arrive in.

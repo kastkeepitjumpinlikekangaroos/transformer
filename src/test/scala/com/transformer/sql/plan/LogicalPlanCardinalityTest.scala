@@ -200,7 +200,7 @@ class LogicalPlanCardinalityTest {
 
   @Test def sortPassesThrough(): Unit = {
     assertEquals(Some(100L),
-      LogicalPlanCardinality.estimate(LogicalSort(scan(100L), Seq((col(0, "a"), true)))))
+      LogicalPlanCardinality.estimate(LogicalSort(scan(100L), Seq(SortKey(col(0, "a"), true)))))
   }
 
   @Test def windowPassesThrough(): Unit = {

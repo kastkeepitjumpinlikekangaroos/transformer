@@ -344,7 +344,7 @@ object LogicalBuilder {
     val afterSort: LogicalPlan = (orderByList, hasDistinct) match {
       case (Some(list), false) =>
         val keys = list.map { obe =>
-          (exprBinder(resolveOrderOrdinal(obe.getExpression, expandedItems)), obe.isAsc)
+          sortKey(exprBinder(resolveOrderOrdinal(obe.getExpression, expandedItems)), obe)
         }
         LogicalSort(preProject, keys)
       case _ => preProject
@@ -879,7 +879,7 @@ object LogicalBuilder {
     val partitionKeys: Seq[Expr] = partitionExprs.map(binder)
 
     val orderEls = Option(ae.getOrderByElements).map(_.asScala.toSeq).getOrElse(Nil)
-    val orderKeys: Seq[(Expr, Boolean)] = orderEls.map(obe => (binder(obe.getExpression), obe.isAsc))
+    val orderKeys: Seq[SortKey] = orderEls.map(obe => sortKey(binder(obe.getExpression), obe))
 
     val frame = bindFrame(Option(ae.getWindowElement), orderEls.nonEmpty)
     val fnName = ae.getName.toUpperCase
@@ -1033,7 +1033,7 @@ object LogicalBuilder {
   /** Bind one ORDER BY key where the sort's scope IS its output schema, 1:1 by
     * position — above a `DISTINCT` or above a `UNION`. An ordinal indexes that
     * schema directly; anything else binds against it as a single source. */
-  private def bindOrderKey(obe: OrderByElement, schema: Schema): (Expr, Boolean) = {
+  private def bindOrderKey(obe: OrderByElement, schema: Schema): SortKey = {
     val key = selectListOrdinal("ORDER BY", obe.getExpression, schema.length) match {
       case Some(i) =>
         val f = schema.fields(i)
@@ -1042,7 +1042,16 @@ object LogicalBuilder {
         val sources: Sources = Seq((None, schema))
         bindExpr(obe.getExpression, sources)
     }
-    (key, obe.isAsc)
+    sortKey(key, obe)
+  }
+
+  /** The bound key with the element's direction and NULL placement: an
+    * explicit NULLS FIRST / NULLS LAST wins, and without one a NULL sorts as
+    * the smallest value (first under ASC, last under DESC). */
+  private def sortKey(expr: Expr, obe: OrderByElement): SortKey = obe.getNullOrdering match {
+    case OrderByElement.NullOrdering.NULLS_FIRST => SortKey(expr, obe.isAsc, nullsFirst = true)
+    case OrderByElement.NullOrdering.NULLS_LAST => SortKey(expr, obe.isAsc, nullsFirst = false)
+    case _ => SortKey(expr, obe.isAsc)
   }
 
   private def canonicalSql(e: Expression): String = e.toString.toLowerCase

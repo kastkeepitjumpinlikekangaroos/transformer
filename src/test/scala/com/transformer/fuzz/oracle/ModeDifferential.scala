@@ -1,7 +1,7 @@
 package com.transformer.fuzz.oracle
 
 import com.transformer.core._
-import com.transformer.fuzz.QueryGen.QueryCase
+import com.transformer.fuzz.QueryGen.{OrderKey, QueryCase}
 import com.transformer.fuzz.{DataGen, QueryGen, RowOracle}
 import com.transformer.sql.exec.SqlEngine
 import com.transformer.sql.plan.{ColRefExpr, LogicalBuilder, Ops}
@@ -145,21 +145,39 @@ object ModeDifferential {
     buf.toVector
   }
 
-  /** Assert the output is sorted by the primary ORDER BY key. Checks only the
-    * non-NULL values of the primary key for monotonicity, which is robust to the
-    * engine's NULL-clustering policy (NULLs land together at one end, so ignoring
-    * them leaves the non-NULL run monotonic) and to ties on the primary key (the
-    * unstable merge may reorder tied rows, but the key values stay monotonic). */
+  /** Assert the output is sorted by the primary ORDER BY key: its NULLs sit
+    * together at the end the key places them (an explicit `NULLS FIRST` /
+    * `NULLS LAST`, or the default — first under ASC, last under DESC), and its
+    * non-NULL values are monotonic in the key's direction. Ties on the primary
+    * key may be reordered by the unstable merge, but neither property can
+    * change. */
   private def assertSorted(
       schema: Schema,
       rows: Seq[Array[Any]],
-      orderBy: Vector[(ColRefExpr, Boolean)],
+      orderBy: Vector[OrderKey],
       label: String,
       sql: String): Unit = {
     if (orderBy.isEmpty) return
-    val (key, asc) = orderBy.head
+    val primary = orderBy.head
+    val key = primary.col
+    val asc = primary.asc
     val idx = schema.indexOf(key.name)
     if (idx < 0) return // key not projected into the output — nothing to check
+    val isNull = rows.map(_(idx) == null)
+    // NULLS FIRST: no NULL after the first non-NULL. NULLS LAST: no NULL
+    // before the last non-NULL.
+    val misplaced =
+      if (primary.placesNullsFirst) {
+        val firstNonNull = isNull.indexOf(false)
+        firstNonNull >= 0 && isNull.drop(firstNonNull).contains(true)
+      } else {
+        val lastNonNull = isNull.lastIndexOf(false)
+        lastNonNull >= 0 && isNull.take(lastNonNull).contains(true)
+      }
+    if (misplaced)
+      throw new AssertionError(
+        s"[mode-differential] $label output does not place NULLs ${if (primary.placesNullsFirst) "first" else "last"} " +
+          s"for ${key.name}: nulls at ${isNull.zipWithIndex.collect { case (true, i) => i }.mkString(",")} of ${rows.length}\n  sql = $sql")
     var prev: Any = null
     var havePrev = false
     var i = 0

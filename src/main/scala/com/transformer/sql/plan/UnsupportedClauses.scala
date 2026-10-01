@@ -482,8 +482,6 @@ object UnsupportedClauses {
     classOf[Join] -> JoinAudit,
     classOf[OrderByElement] -> audit(
       Seq(
-        rejects("getNullOrdering")("NULLS FIRST / NULLS LAST",
-          example = "SELECT a FROM t ORDER BY a NULLS LAST"),
         rejects("isMysqlWithRollup")("ORDER BY ... WITH ROLLUP",
           example = "SELECT a FROM t ORDER BY a WITH ROLLUP")),
       Seq("isAscDescPresent" -> "whether ASC / DESC was written; isAsc carries the direction")),

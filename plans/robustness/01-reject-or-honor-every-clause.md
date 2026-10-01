@@ -277,6 +277,29 @@ result, since an OFFSET of 0 or past the end tests nothing. The first
 distribution put too much weight on large skips for these small datasets (7 of
 36 observable in mode-differential); weighting it toward 1 and 2 gave 18 of 48.
 
+**NULLS FIRST / NULLS LAST.** Sort keys were `(Expr, Boolean)` pairs with the
+NULL placement a fixed consequence of the direction, written out twice — in
+`SortExec.rowOrdering` and again in `WindowExec.sortPartition`. They are now a
+`SortKey(expr, asc, nullsFirst)` whose `compare` is the one null-aware comparison
+both sites call, so the twin is gone rather than updated in step. The two-argument
+`SortKey(expr, asc)` keeps the old default (`nullsFirst = asc`: NULL is the
+smallest value), and the binder only departs from it for an explicit clause, so
+no existing query changes — the "stop and ask" condition never arose. The binder
+reads `getNullOrdering` at all four sites (below a Project, above a DISTINCT,
+above a UNION, inside OVER). Mutation check: reverting `compare` to the
+direction-only placement fails six targets.
+
+Fuzzer reach: `QueryGen`'s ORDER BY keys became an `OrderKey` with an optional
+placement (drawn last, so no earlier draw moved), `MetaQueryGen`'s top-n ORDER BY
+carries one placement for all its keys, and `ModeDifferential`'s sortedness check
+now asserts where the primary key's NULLs land — the default included, which is
+new coverage for every ordered query the corpus already had. Observability is
+thin by nature (placement is visible only when a result holds NULL and non-NULL
+keys, or, for the metamorphic top-n, only when moving the NULLs changes what the
+LIMIT keeps), so the guards' bounds separate "rare" from "gone": 18 of 125 placed
+primary keys show it in mode-differential, and flipping the placement changes 14
+of 152 metamorphic answers.
+
 ## Launch prompt
 
 ```

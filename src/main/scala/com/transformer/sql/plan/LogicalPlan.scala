@@ -70,7 +70,31 @@ final case class LogicalJoin(
     copy(left = newChildren(0), right = newChildren(1))
 }
 
-final case class LogicalSort(child: LogicalPlan, keys: Seq[(Expr, Boolean)]) extends LogicalPlan {
+/** One ORDER BY key: the expression, its direction, and where NULLs go.
+  *
+  * Without an explicit `NULLS FIRST` / `NULLS LAST`, a NULL sorts as the
+  * smallest value — first under ASC, last under DESC — which is what the
+  * two-argument `SortKey(expr, asc)` builds. [[compare]] is the one comparison
+  * every sort site uses (`SortExec`'s row ordering and `WindowExec`'s partition
+  * sort), so the two cannot drift apart. */
+final case class SortKey(expr: Expr, asc: Boolean, nullsFirst: Boolean) {
+
+  /** Order two values of this key. A NULL goes where `nullsFirst` says,
+    * whatever the direction; two NULLs tie; non-NULL values compare through
+    * `Ops.cmp`, the engine's one total order, reversed for DESC. */
+  def compare(a: Any, b: Any): Int =
+    if (a == null) { if (b == null) 0 else if (nullsFirst) -1 else 1 }
+    else if (b == null) { if (nullsFirst) 1 else -1 }
+    else if (asc) Ops.cmp(a, b)
+    else Ops.cmp(b, a)
+}
+
+object SortKey {
+  /** A key with the default NULL placement: first under ASC, last under DESC. */
+  def apply(expr: Expr, asc: Boolean): SortKey = SortKey(expr, asc, nullsFirst = asc)
+}
+
+final case class LogicalSort(child: LogicalPlan, keys: Seq[SortKey]) extends LogicalPlan {
   def outputSchema: Schema = child.outputSchema
   def children: Seq[LogicalPlan] = Seq(child)
   def withChildren(newChildren: Seq[LogicalPlan]): LogicalPlan = copy(child = newChildren.head)

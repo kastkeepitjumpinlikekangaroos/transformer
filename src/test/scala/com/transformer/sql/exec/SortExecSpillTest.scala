@@ -24,7 +24,7 @@ class SortExecSpillTest {
 
   private val schema = Schema(Vector(Field("k", DataType.IntType), Field("p", DataType.IntType)))
   private val k: Expr = ColRefExpr(0, "k", DataType.IntType)
-  private val keysAsc: Seq[(Expr, Boolean)] = Seq((k, true))
+  private val keysAsc: Seq[SortKey] = Seq(SortKey(k, true))
 
   private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
   private var tmpRoot: Path = _
@@ -192,6 +192,33 @@ class SortExecSpillTest {
   // ---- Regression: duplicate-named child schema under spill -----------------
   //
   // A child whose output schema has two columns sharing a name (`[k, k]`, as a
+  /** An explicit NULL placement survives the spill path: flushed runs come
+    * back through parquet and heap-merge with the in-memory tails, and a NULL
+    * key has to land where the key says in both. A unique second key makes the
+    * order total, so the spilled output must equal the heap output row for row. */
+  @Test def explicitNullPlacementUnderSpill(): Unit = {
+    val p: Expr = ColRefExpr(1, "p", DataType.IntType)
+    val rng = new Random(77L)
+    val rows = (0 until 4000).map { i =>
+      val kv: Any = if (rng.nextInt(10) == 0) null else java.lang.Integer.valueOf(rng.nextInt(500))
+      Array[Any](kv, java.lang.Integer.valueOf(i))
+    }.toVector
+    val parts = rows.grouped(1000).toVector
+    Seq(SortKey(k, asc = true, nullsFirst = false), SortKey(k, asc = false, nullsFirst = true)).foreach { key =>
+      def run(opts: ExecutionOptions): Vector[Vector[Any]] = {
+        val plan = new InMemoryPartitionedPlanForSpillTest(schema, parts)
+        drainRows(SortExec(plan, Seq(key, SortKey(p, true)), opts).execute(0)).map(_.toVector)
+      }
+      val heap = run(ExecutionOptions.Default)
+      val spilled = run(spillyOpts())
+      assertEquals(s"$key: spill must match the heap path row for row", heap, spilled)
+      val nullAt = spilled.indices.filter(i => spilled(i)(0) == null)
+      assertTrue(s"$key: expected NULL keys in the data", nullAt.nonEmpty)
+      val expectedAt = if (key.nullsFirst) nullAt.indices else (spilled.length - nullAt.length until spilled.length)
+      assertEquals(s"$key: NULLs at the wrong end", expectedAt, nullAt)
+    }
+  }
+
   // join output `[k, v, k, v]` would) used to write spill runs with duplicate
   // parquet column paths, which read back null and NPE'd in DiskRunCursor. The
   // runs now use positional names. See plans/bugfixes/01.
@@ -207,7 +234,7 @@ class SortExecSpillTest {
 
     def run(opts: ExecutionOptions): Vector[Array[Any]] = {
       val plan = new InMemoryPartitionedPlanForSpillTest(dupSchema, parts)
-      val sort = SortExec(plan, Seq((sortKey, true)), opts)
+      val sort = SortExec(plan, Seq(SortKey(sortKey, true)), opts)
       val it = sort.execute(0)
       val buf = mutable.ArrayBuffer.empty[Array[Any]]
       while (it.hasNext) {
