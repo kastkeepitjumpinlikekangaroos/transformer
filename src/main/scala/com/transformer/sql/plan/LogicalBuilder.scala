@@ -653,7 +653,14 @@ object LogicalBuilder {
     case lk: LikeExpression =>
       val s = b(lk.getLeftExpression); val p = b(lk.getRightExpression)
       // UnsupportedClauses has already rejected every keyword but LIKE and ILIKE.
-      val syntax = LikeSyntax(caseInsensitive = lk.getLikeKeyWord == LikeExpression.KeyWord.ILIKE)
+      val syntax = LikeSyntax(
+        caseInsensitive = lk.getLikeKeyWord == LikeExpression.KeyWord.ILIKE,
+        escape = Option(lk.getEscape) match {
+          case None => LikeSyntax.Default.escape
+          case Some(e: StringValue) if e.getValue.length <= 1 => e.getValue.headOption
+          case Some(other) =>
+            throw new IllegalArgumentException(s"ESCAPE must be a single-character string literal, got $other")
+        })
       LikeExpr(Analyzer.implicitCast(s, DataType.StringType), Analyzer.implicitCast(p, DataType.StringType),
         lk.isNot, syntax)
 

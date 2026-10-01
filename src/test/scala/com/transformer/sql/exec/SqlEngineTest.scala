@@ -2195,9 +2195,28 @@ class SqlEngineTest {
     assertEquals(Nil, column("SELECT id FROM ts WHERE s LIKE 'ab'", cat, "id"))
   }
 
-  @Test def likeEscapeRejected(): Unit =
-    // The escape character was ignored: no rows, not (4).
-    assertRejected("SELECT id FROM ts WHERE s LIKE 'A!_b' ESCAPE '!'", clauseCatalog(), "LIKE ... ESCAPE")
+  @Test def likeEscapeMakesTheNextCharacterLiteral(): Unit = {
+    val cat = clauseCatalog() // ts.s is 'Ab', NULL, 'xy', 'A_b'
+    // The plan's case: (4). The ignored escape gave no rows.
+    assertEquals(Seq(4), column("SELECT id FROM ts WHERE s LIKE 'A!_b' ESCAPE '!'", cat, "id"))
+    // Without ESCAPE the backslash escapes, as it always has; ESCAPE '' turns
+    // escaping off, so the backslash is an ordinary character.
+    assertEquals(Seq(4), column("SELECT id FROM ts WHERE s LIKE 'A\\_b'", cat, "id"))
+    assertEquals(Nil, column("SELECT id FROM ts WHERE s LIKE 'A\\_b' ESCAPE ''", cat, "id"))
+    // The escape escapes itself and %, and a trailing one stands for itself.
+    assertEquals(Seq(1), column("SELECT id FROM ts WHERE s || '!' LIKE 'Ab!!' ESCAPE '!'", cat, "id"))
+    assertEquals(Seq(3), column("SELECT id FROM ts WHERE s || '%' LIKE 'xy!%' ESCAPE '!'", cat, "id"))
+    assertEquals(Seq(1), column("SELECT id FROM ts WHERE s || '!' LIKE 'Ab!' ESCAPE '!'", cat, "id"))
+    // With ILIKE: a letter as the escape still escapes only itself, and the
+    // rest matches regardless of case.
+    assertEquals(Seq(4), column("SELECT id FROM ts WHERE s ILIKE 'aX_B' ESCAPE 'X'", cat, "id"))
+    // Only a one-character literal is an escape character.
+    Seq("SELECT id FROM ts WHERE s LIKE 'a' ESCAPE '!!'", "SELECT id FROM ts WHERE s LIKE 'a' ESCAPE s").foreach { sql =>
+      val ex = try { SqlEngine.execute(sql, cat); null } catch { case e: IllegalArgumentException => e }
+      assertNotNull(sql, ex)
+      assertTrue(s"$sql -> ${ex.getMessage}", ex.getMessage.contains("ESCAPE must be a single-character"))
+    }
+  }
 
   @Test def selectWithoutFromRejected(): Unit = {
     // Used to die with an internal NullPointerException.

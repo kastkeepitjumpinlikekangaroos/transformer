@@ -1223,6 +1223,23 @@ class ExprBatchTest {
     assertEquals(false, LikeExpr(s, LitExpr("foo%", DataType.StringType), negated = false).eval(one, 0))
   }
 
+  @Test def likeCustomEscapeOnBothPaths(): Unit = {
+    val bang = LikeSyntax(escape = Some('!'))
+    val s = ColRefExpr(0, "s", DataType.StringType)
+    val b = batch("s" -> stringCol(i => Seq("a_b", "axb", "a!b", "50%", "509")(i % 5), EveryOther))
+    assertParity(LikeExpr(s, LitExpr("a!_b", DataType.StringType), negated = false, bang), b)
+    assertParity(LikeExpr(s, LitExpr("50!%", DataType.StringType), negated = false, bang), b)
+    assertParity(LikeExpr(s, LitExpr("a!!b", DataType.StringType), negated = false, bang), b)
+    val withPattern = batch(
+      "s" -> stringCol(i => Seq("a_b", "axb")(i % 2), EveryOther),
+      "p" -> stringCol(_ => "a!_b", i => i % 7 == 0))
+    assertParity(LikeExpr(s, ColRefExpr(1, "p", DataType.StringType), negated = false, bang), withPattern)
+    val one = batch("s" -> stringCol(_ => "axb"))
+    assertEquals(false, LikeExpr(s, LitExpr("a!_b", DataType.StringType), negated = false, bang).eval(one, 0))
+    assertEquals(true, LikeExpr(s, LitExpr("a!_b", DataType.StringType), negated = false, LikeSyntax(escape = None))
+      .eval(batch("s" -> stringCol(_ => "a!xb")), 0))
+  }
+
   @Test def likeColumnPattern(): Unit = {
     val b = batch(
       "s" -> stringCol(i => s"item$i", EveryOther),

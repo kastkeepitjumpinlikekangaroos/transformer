@@ -394,7 +394,6 @@ object UnsupportedClauses {
 
   private val LikeAudit = audit(
     Seq(
-      rejects("getEscape")("LIKE ... ESCAPE", example = "SELECT a FROM t WHERE s LIKE 'a!_b' ESCAPE '!'"),
       // The binder reads the keyword for LIKE and ILIKE; the other spellings are
       // different operators it does not implement.
       rejectsWhen[LikeExpression]("getLikeKeyWord")("RLIKE / REGEXP",

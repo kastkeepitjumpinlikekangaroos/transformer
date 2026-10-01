@@ -492,8 +492,11 @@ object InListExpr {
 }
 
 /** How a LIKE pattern is read. `caseInsensitive` is ILIKE: letters match
-  * regardless of case (Unicode case folding, as `Pattern.UNICODE_CASE` does). */
-final case class LikeSyntax(caseInsensitive: Boolean = false)
+  * regardless of case (Unicode case folding, as `Pattern.UNICODE_CASE` does).
+  * `escape` is the character that makes the next one literal, so `\_` matches
+  * an underscore: a backslash unless the query says `ESCAPE 'c'`, and none at
+  * all for `ESCAPE ''`. */
+final case class LikeSyntax(caseInsensitive: Boolean = false, escape: Option[Char] = Some('\\'))
 
 object LikeSyntax {
   val Default: LikeSyntax = LikeSyntax()
@@ -579,14 +582,17 @@ object LikeExpr {
     var i = 0
     while (i < like.length) {
       val c = like.charAt(i)
-      c match {
-        case '%' => sb.append(".*")
-        case '_' => sb.append('.')
-        case '\\' if i + 1 < like.length =>
+      // The escape character comes first, so it works even when it is `%` or
+      // `_`. A trailing one has nothing to escape and stands for itself.
+      if (syntax.escape.contains(c)) {
+        if (i + 1 < like.length) {
           sb.append(java.util.regex.Pattern.quote(like.substring(i + 1, i + 2)))
           i += 1
-        case other =>
-          sb.append(java.util.regex.Pattern.quote(other.toString))
+        } else sb.append(java.util.regex.Pattern.quote(c.toString))
+      } else c match {
+        case '%' => sb.append(".*")
+        case '_' => sb.append('.')
+        case other => sb.append(java.util.regex.Pattern.quote(other.toString))
       }
       i += 1
     }

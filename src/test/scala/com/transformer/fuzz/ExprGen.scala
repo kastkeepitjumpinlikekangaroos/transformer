@@ -70,7 +70,7 @@ object ExprGen {
     "hello", "world", "x", "y", "a_c", "123", "45", "start-1-end", "FooBar")
   private val LikePatternPool = Seq(
     "%", "_", "a%", "%a", "%a%", "foo%", "%bar", "a_c", "%o%", "ab%",
-    "", "Foo%", "%BAR", "h_llo", "%pad%", "ba_")
+    "", "Foo%", "%BAR", "h_llo", "%pad%", "ba_", "a!_c", "!%a%", "ab!")
 
   /** Build one case from a single seed. Splits into independent sub-streams so a
     * change to expression generation does not perturb the batch bytes (and vice
@@ -435,7 +435,10 @@ object ExprGen {
       (1, () => LitExpr(null, DataType.StringType)), // NULL pattern -> all NULL
       (3, () => sub(DataType.StringType)) // column/computed pattern -> slow path
     )()
-    LikeExpr(child, pattern, r.bool(), LikeSyntax(caseInsensitive = r.bool(0.3)))
+    // `!` as the escape character makes the `!` patterns above mean what they
+    // say; under the default backslash they are ordinary characters.
+    LikeExpr(child, pattern, r.bool(),
+      LikeSyntax(caseInsensitive = r.bool(0.3), escape = r.weighted((6, Some('\\')), (3, Some('!')), (1, None))))
   }
 
   private def genBoolFunc(r: Rng, schema: Schema, depth: Int): Expr = {

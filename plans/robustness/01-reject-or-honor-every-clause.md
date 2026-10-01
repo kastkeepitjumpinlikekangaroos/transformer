@@ -340,6 +340,15 @@ fails `sql_engine_test`. RLIKE / REGEXP and SIMILAR TO become partial rejections
 since the binder reads the keyword for LIKE and ILIKE. Fuzzer reach: `ExprGen`
 makes some LIKE nodes ILIKE, under the eval / evalVec parity property.
 
+**LIKE ... ESCAPE.** `LikeSyntax.escape` replaces the hard-wired backslash in the
+pattern compiler: `Some('\\')` by default, as before, the named character for
+`ESCAPE 'c'`, and `None` for `ESCAPE ''`, which turns escaping off. The escape test
+runs before the wildcards, so `%` and `_` work as escape characters, and a trailing
+escape stands for itself, matching the old trailing-backslash behaviour. An ESCAPE
+that is not a one-character string literal is a clean error. Because ILIKE folds
+case in the compiled regex rather than by lower-casing, a letter used as the escape
+character still escapes only itself. `ExprGen` draws the escape character too.
+
 ## Launch prompt
 
 ```
