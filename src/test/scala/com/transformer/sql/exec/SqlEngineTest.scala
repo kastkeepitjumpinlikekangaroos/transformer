@@ -2015,6 +2015,26 @@ class SqlEngineTest {
     assertRejected("SELECT COUNT_IF(DISTINCT a > 1) FROM t", cat, "COUNT_IF(DISTINCT ...)")
   }
 
+  /** An aggregate ORDER BY names but the SELECT list does not is still
+    * computed. Aggregate collection used to read only SELECT and HAVING, so
+    * binding died with an internal NoSuchElementException looking up its slot. */
+  @Test def orderByAggregateMissingFromTheSelectList(): Unit = {
+    val cat = clauseCatalog() // tg: x -> 1, 2 and y -> 3, 4
+    assertEquals(Seq("y", "x"), column("SELECT g FROM tg GROUP BY g ORDER BY SUM(a) DESC", cat, "g"))
+    assertEquals(Seq("x", "y"), column("SELECT g FROM tg GROUP BY g ORDER BY MAX(a)", cat, "g"))
+    // The counts tie, so the second key decides.
+    assertEquals(Seq("y", "x"), column("SELECT g FROM tg GROUP BY g ORDER BY COUNT(*), g DESC", cat, "g"))
+    // Beside one the SELECT list does name.
+    assertEquals(Seq(3L, 7L),
+      column("SELECT g, SUM(a) AS s FROM tg GROUP BY g ORDER BY MIN(a) + SUM(a)", cat, "s"))
+    // Above a DISTINCT the ORDER BY must name the SELECT list, so this stays a
+    // bind error, now a clean one.
+    val ex = try { SqlEngine.execute("SELECT DISTINCT g FROM tg GROUP BY g ORDER BY SUM(a)", cat); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.contains("SUM"))
+  }
+
   @Test def distinctAggregatesPerGroupInHavingAndOrderBy(): Unit = {
     val p = tmpCsv("d.csv", "g,a\nx,1\nx,1\nx,2\ny,5\ny,5\nz,\n")
     val cat = catalogWith("d" -> CsvReader.fromPath(p.toString, CsvOptions()))
@@ -2025,7 +2045,7 @@ class SqlEngineTest {
     assertEquals(Seq(1.5, 5.0, null), rows.map(_("v")))
     assertEquals(Seq("y"), column("SELECT g FROM d GROUP BY g HAVING SUM(DISTINCT a) > 4", cat, "g"))
     assertEquals(Seq("y", "x"),
-      column("SELECT g, SUM(DISTINCT a) AS s FROM d GROUP BY g HAVING COUNT(a) > 0 ORDER BY SUM(DISTINCT a) DESC", cat, "g"))
+      column("SELECT g FROM d GROUP BY g HAVING COUNT(a) > 0 ORDER BY SUM(DISTINCT a) DESC", cat, "g"))
   }
 
   @Test def aggregateFilterRejected(): Unit = {

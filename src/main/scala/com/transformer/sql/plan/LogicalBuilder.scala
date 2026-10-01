@@ -403,7 +403,10 @@ object LogicalBuilder {
       (b, deriveAlias(e))
     }
 
-    // Collect every distinct aggregate referenced by SELECT or HAVING, assign synthetic names.
+    // Collect every distinct aggregate referenced by SELECT, HAVING or ORDER BY,
+    // assign synthetic names. ORDER BY may name one the SELECT list does not
+    // (`SELECT g ... GROUP BY g ORDER BY SUM(a)`), and the sort's rebind needs
+    // its slot.
     val aggMap = mutable.LinkedHashMap.empty[String, (AggExpr, String)]
     def collect(e: Expression): Unit = e match {
       case _: AnalyticExpression => ()  // window's inner aggregates are scoped to the window
@@ -417,6 +420,7 @@ object LogicalBuilder {
     }
     expandedItems.foreach { case (e, _) => collect(e) }
     Option(ps.getHaving).foreach(collect)
+    Option(ps.getOrderByElements).foreach(_.asScala.foreach(obe => collect(obe.getExpression)))
 
     val agg = LogicalAggregate(child, groupBound, aggMap.values.toSeq, None)
 

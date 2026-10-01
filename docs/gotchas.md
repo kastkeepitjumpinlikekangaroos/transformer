@@ -38,7 +38,11 @@ ship a fix or move something from "not done" to "done".
   output, not the source schema. `LogicalBuilder.bindExprWithAggs` takes an
   `aggResolver: Function => Option[Expr]` that returns a `ColRefExpr` into the
   aggregate output for known aggregates. The plain `bindExpr` passes
-  `_ => None` and fails on any agg. The same parameter pattern is used for
+  `_ => None` and fails on any agg. "Known" means collected first:
+  `buildAggregation` collects aggregates from the SELECT list, HAVING **and
+  ORDER BY**. ORDER BY was missing from that list, so an aggregate named only
+  there (`SELECT g ... GROUP BY g ORDER BY SUM(a)`) had no slot and binding died
+  with a `NoSuchElementException`. The same parameter pattern is used for
   window functions via `windowResolver: AnalyticExpression => Option[Expr]`.
 - **`AnalyticExpression` is its own JSqlParser node, NOT a `Function`.** So
   `SUM(x) OVER (...)` won't match `case f: Function` in `containsAggregate`
