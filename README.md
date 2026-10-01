@@ -17,7 +17,7 @@ single-node parallelism, not distributed execution.
 - Local CSV read/write (folder or glob, schema inference)
 - Local Parquet read/write (snappy, all primitive types)
 - Full SQL: SELECT, WHERE, JOIN (INNER/LEFT/RIGHT/FULL), GROUP BY, HAVING,
-  ORDER BY, LIMIT, DISTINCT, UNION/UNION ALL, CTEs (`WITH`), CASE, CAST, scalar functions
+  ORDER BY, LIMIT/OFFSET, DISTINCT, UNION/UNION ALL, CTEs (`WITH`), CASE, CAST, scalar functions
 - DBT-style data-quality validations
 - Jinja-style temporal templating in SQL and output paths
 - Per-task path-template partitioning (one partition per run keyed off the
@@ -562,8 +562,15 @@ FROM <table> [<alias>]
 [ WHERE <predicate> ]
 [ GROUP BY <exprs> [ HAVING <predicate> ] ]
 [ ORDER BY <exprs> [ASC|DESC] ]
-[ LIMIT <n> ]
+[ LIMIT <n> ] [ OFFSET <m> [ROWS] ]
 ```
+
+`OFFSET m` skips the first `m` rows of the whole result — after `DISTINCT` and
+`ORDER BY`, before `LIMIT` — so `ORDER BY a LIMIT 10 OFFSET 20` is the third page
+of ten. MySQL's `LIMIT m, n` spelling means the same as `LIMIT n OFFSET m`.
+Written after the last arm of a `UNION`, both clauses apply to the whole union,
+as they do in Postgres. Without an `ORDER BY` that fixes the order, which rows a
+`LIMIT` or `OFFSET` keeps is unspecified, as in any SQL engine.
 
 `GROUP BY` and `ORDER BY` also accept a **positional ordinal** — a bare integer
 naming a SELECT-list position, as in BigQuery / Postgres / MySQL. `ORDER BY 2
@@ -581,8 +588,9 @@ to vanish without an error — `JOIN ... USING` ran as a cartesian product,
 an `IllegalArgumentException` naming it, for example `QUALIFY is not supported;
 compute the window function in a WITH clause and filter on it in the outer
 WHERE`. Rejected, among others: `JOIN ... USING`, `NATURAL`, `SEMI` and `APPLY`
-joins, a bare `OUTER JOIN` and Oracle's `(+)`; `OFFSET`, `FETCH FIRST`, `TOP n`
-and `LIMIT offset, count`; `NULLS FIRST` / `NULLS LAST`; `QUALIFY`,
+joins, a bare `OUTER JOIN` and Oracle's `(+)`; `FETCH FIRST`, `TOP n`, and
+`ORDER BY` / `LIMIT` / `OFFSET` after a parenthesized query; `NULLS FIRST` /
+`NULLS LAST`; `QUALIFY`,
 `DISTINCT ON`, `GROUPING SETS` and `WITH ROLLUP`; `FILTER (WHERE ...)`,
 `WITHIN GROUP`, `IGNORE NULLS` and named `WINDOW`s; `DISTINCT` inside any
 aggregate but `COUNT`, and `COUNT(ALL x)`; `ILIKE`, `RLIKE` / `REGEXP`,

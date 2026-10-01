@@ -372,8 +372,8 @@ the reject rate near zero and the property sound:
   merging.
 
 Exclude anything non-deterministic (`RAND()`, the clock functions) or
-mode-unstable (`LIMIT` — top-`n` with ties returns a different row subset
-depending on merge order). If a new shape needs a comparison tolerance, add it to
+mode-unstable (`LIMIT` and `OFFSET` without a total order — a cutoff among tied
+rows keeps a different row subset depending on merge order). If a new shape needs a comparison tolerance, add it to
 `RowOracle.multisetEquals` (today only `Double` columns are tolerant).
 
 **To add a mode to `ModeDifferential`**: add an entry to the `modes` sequence — a

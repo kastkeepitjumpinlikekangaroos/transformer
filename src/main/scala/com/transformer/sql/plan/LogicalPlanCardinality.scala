@@ -92,6 +92,9 @@ object LogicalPlanCardinality {
         case None    => Some(n)
       }
 
+    case LogicalOffset(child, n) =>
+      estimate(child).map(c => math.max(0L, c - n))
+
     case LogicalDistinct(child) =>
       estimate(child).map(n => math.max(1L, n / 2))
 

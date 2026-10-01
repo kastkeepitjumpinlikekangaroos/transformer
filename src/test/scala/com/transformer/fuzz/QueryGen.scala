@@ -13,11 +13,13 @@ import com.transformer.sql.plan._
   *
   * Two query shapes are produced:
   *   - '''projection''' — `SELECT [DISTINCT] <items> FROM t [WHERE p]
-  *     [ORDER BY <cols>] [LIMIT n]`, exercising `ProjectExec` / `FilterExec` /
-  *     `DistinctExec` / `SortExec` / `LocalLimitExec` + `GlobalLimitExec`;
+  *     [ORDER BY <cols>] [LIMIT n] [OFFSET m]`, exercising `ProjectExec` /
+  *     `FilterExec` / `DistinctExec` / `SortExec` / `LocalLimitExec` +
+  *     `GlobalLimitExec` / `OffsetExec`;
   *   - '''aggregation''' — `SELECT <group cols>, <aggs> FROM t [WHERE p]
-  *     [GROUP BY ...] [HAVING h] [ORDER BY <group cols>] [LIMIT n]` (or a global
-  *     aggregate with no GROUP BY → one row), exercising `HashAggregateExec`.
+  *     [GROUP BY ...] [HAVING h] [ORDER BY <group cols>] [LIMIT n] [OFFSET m]`
+  *     (or a global aggregate with no GROUP BY → one row), exercising
+  *     `HashAggregateExec`.
   *
   * The expression generators ([[genValue]] / [[genPredicate]]) are written for
   * this property rather than reusing the bound-`Expr` shapes from [[ExprGen]],
@@ -41,13 +43,13 @@ import com.transformer.sql.plan._
   *
   * Excluded so the result multiset stays mode-invariant: `RAND()` and the clock
   * functions (`CURRENT_DATE`/`CURRENT_TIMESTAMP`) — they make modes legitimately
-  * disagree. `LIMIT` IS generated, but only over a '''total''' ORDER BY (every
-  * output column an order key), where rows tied at the cutoff are identical rows
-  * and top-`n` therefore yields a layout-independent multiset; a bare `LIMIT`
-  * would return a different SUBSET of the tied rows per partition/merge order.
-  * The soundness condition is checked in `render`, so a shrink that drops an
-  * order key or a projection item drops the `LIMIT` with it rather than
-  * manufacturing a false counterexample.
+  * disagree. `LIMIT` and `OFFSET` ARE generated, but only over a '''total'''
+  * ORDER BY (every output column an order key), where rows tied at a cutoff are
+  * identical rows and the kept slice is therefore a layout-independent multiset;
+  * a bare `LIMIT` or `OFFSET` would keep a different SUBSET of the tied rows per
+  * partition/merge order. The soundness condition is checked in `render`, so a
+  * shrink that drops an order key or a projection item drops the `LIMIT` and
+  * `OFFSET` with it rather than manufacturing a false counterexample.
   */
 object QueryGen {
 
@@ -84,13 +86,15 @@ object QueryGen {
     def orderBy: Vector[(ColRefExpr, Boolean)]
   }
 
-  /** `SELECT [DISTINCT] <items> FROM view [WHERE p] [ORDER BY <cols>] [LIMIT n]`. */
+  /** `SELECT [DISTINCT] <items> FROM view [WHERE p] [ORDER BY <cols>] [LIMIT n]
+    * [OFFSET m]`. */
   final case class ProjectQuery(
       distinct: Boolean,
       projection: Vector[(Expr, String)],
       where: Option[Expr],
       orderBy: Vector[(ColRefExpr, Boolean)],
-      limit: Option[Long] = None) extends GenQuery {
+      limit: Option[Long] = None,
+      offset: Option[Long] = None) extends GenQuery {
 
     /** ORDER BY is a TOTAL order over the output: every projected item is a bare
       * column and every one of them is an order key. Two rows that tie on such a
@@ -100,8 +104,6 @@ object QueryGen {
       projection.forall(_._1.isInstanceOf[ColRefExpr]) &&
         projection.map(_._2).toSet == orderBy.map(_._1.name).toSet
 
-    private def effectiveLimit: Option[Long] = if (totallyOrdered) limit else None
-
     def render(view: String): String = {
       val sel = projection.iterator.map { case (e, name) =>
         val rendered = SqlRender.expr(e)
@@ -110,8 +112,7 @@ object QueryGen {
       val d = if (distinct) "DISTINCT " else ""
       val w = where.map(p => s" WHERE ${SqlRender.expr(p)}").getOrElse("")
       val o = SqlRender.orderByClause(orderBy)
-      val l = effectiveLimit.map(n => s" LIMIT $n").getOrElse("")
-      s"SELECT $d$sel FROM $view$w$o$l"
+      s"SELECT $d$sel FROM $view$w$o${limitAndOffset(totallyOrdered, limit, offset)}"
     }
   }
 
@@ -125,15 +126,14 @@ object QueryGen {
       having: Option[HavingSpec],
       groupByOrdinals: Boolean,
       orderBy: Vector[(ColRefExpr, Boolean)],
-      limit: Option[Long] = None) extends GenQuery {
+      limit: Option[Long] = None,
+      offset: Option[Long] = None) extends GenQuery {
 
     /** ORDER BY covers every GROUP BY key, and the keys uniquely identify an
       * output row — so the order is total and top-`n` selects the same groups
       * under every layout. */
     private def totallyOrdered: Boolean =
       groupKeys.nonEmpty && orderBy.map(_._1.index).toSet == groupKeys.map(_.index).toSet
-
-    private def effectiveLimit: Option[Long] = if (totallyOrdered) limit else None
 
     def render(view: String): String = {
       val groupSel = groupKeys.map(_.name)
@@ -146,10 +146,15 @@ object QueryGen {
         else s" GROUP BY ${groupKeys.map(_.name).mkString(", ")}"
       val h = having.map(hs => s" HAVING ${hs.render}").getOrElse("")
       val o = SqlRender.orderByClause(orderBy)
-      val l = effectiveLimit.map(n => s" LIMIT $n").getOrElse("")
-      s"SELECT $sel FROM $view$w$g$h$o$l"
+      s"SELECT $sel FROM $view$w$g$h$o${limitAndOffset(totallyOrdered, limit, offset)}"
     }
   }
+
+  /** ` LIMIT n OFFSET m`, either part optional — rendered only over a total
+    * order, the soundness condition both clauses share. */
+  private def limitAndOffset(totallyOrdered: Boolean, limit: Option[Long], offset: Option[Long]): String =
+    if (!totallyOrdered) ""
+    else limit.map(n => s" LIMIT $n").getOrElse("") + offset.map(m => s" OFFSET $m").getOrElse("")
 
   /** An aggregate to render into SELECT. */
   sealed trait AggSpec { def render: String }
@@ -216,9 +221,9 @@ object QueryGen {
 
     val where = if (rng.bool(0.6)) Some(genPredicate(rng, schema, rng.between(2, 4))) else None
     val orderBy = orderCols.map(i => (colRef(schema, i), rng.bool()))
-    val limit = if (topN) Some(genLimit(rng)) else None
+    val (limit, offset) = withOffset(rng, topN, if (topN) Some(genLimit(rng)) else None)
 
-    ProjectQuery(distinct, projection, where, orderBy, limit)
+    ProjectQuery(distinct, projection, where, orderBy, limit, offset)
   }
 
   /** A LIMIT row count spanning the interesting cutoffs: none at all, one row,
@@ -226,6 +231,25 @@ object QueryGen {
     * data (the limit never binds). */
   private def genLimit(rng: Rng): Long = rng.weighted(
     (1, 0L), (3, 1L), (4, 2L), (4, 5L), (2, 17L), (2, 1000L))
+
+  /** Give a top-n shape an OFFSET some of the time — beside its LIMIT, or in
+    * place of it. Called after every other draw for the query and only for a
+    * top-n shape, so every other query is the draw sequence it always was.
+    * Shared with [[MetaQueryGen]]. */
+  private[fuzz] def withOffset(rng: Rng, topN: Boolean, limit: Option[Long]): (Option[Long], Option[Long]) =
+    if (!topN) (limit, None)
+    else rng.weighted((5, 0), (4, 1), (1, 2)) match {
+      case 0 => (limit, None)
+      case 1 => (limit, Some(genOffset(rng)))
+      case _ => (None, Some(genOffset(rng)))
+    }
+
+  /** An OFFSET spanning the cutoffs [[genLimit]] does: zero (a no-op), one row, a
+    * handful (a cut mid-batch and mid-partition), and past the end of the data
+    * (nothing left). Weighted to the small skips, because generated results are
+    * small and a skip only tests anything when it lands inside one. */
+  private def genOffset(rng: Rng): Long = rng.weighted(
+    (1, 0L), (5, 1L), (4, 2L), (2, 5L), (1, 17L), (1, 1000L))
 
   private def genAggregateQuery(rng: Rng, schema: Schema): AggregateQuery = {
     val n = schema.length
@@ -251,9 +275,9 @@ object QueryGen {
       else if (groupKeys.nonEmpty && rng.bool(0.4))
         distinctSubset(rng, groupKeys, rng.between(1, math.min(2, groupKeys.length))).map(cr => (cr, rng.bool()))
       else Vector.empty
-    val limit = if (topN) Some(genLimit(rng)) else None
+    val (limit, offset) = withOffset(rng, topN, if (topN) Some(genLimit(rng)) else None)
 
-    AggregateQuery(groupKeys, aggregates, where, having, groupByOrdinals, orderBy, limit)
+    AggregateQuery(groupKeys, aggregates, where, having, groupByOrdinals, orderBy, limit, offset)
   }
 
   private def genAggSpec(rng: Rng, schema: Schema, numeric: Vector[Int], integral: Vector[Int]): AggSpec = {

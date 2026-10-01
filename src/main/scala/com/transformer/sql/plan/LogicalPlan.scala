@@ -82,6 +82,14 @@ final case class LogicalLimit(child: LogicalPlan, n: Long) extends LogicalPlan {
   def withChildren(newChildren: Seq[LogicalPlan]): LogicalPlan = copy(child = newChildren.head)
 }
 
+/** SQL's OFFSET: drops the first `n` rows of the whole input. A LIMIT from the
+  * same query sits above it, so it counts from the first row this keeps. */
+final case class LogicalOffset(child: LogicalPlan, n: Long) extends LogicalPlan {
+  def outputSchema: Schema = child.outputSchema
+  def children: Seq[LogicalPlan] = Seq(child)
+  def withChildren(newChildren: Seq[LogicalPlan]): LogicalPlan = copy(child = newChildren.head)
+}
+
 final case class LogicalDistinct(child: LogicalPlan) extends LogicalPlan {
   def outputSchema: Schema = child.outputSchema
   def children: Seq[LogicalPlan] = Seq(child)

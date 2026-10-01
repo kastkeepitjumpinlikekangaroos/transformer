@@ -116,6 +116,14 @@ class LogicalPlanCardinalityTest {
     assertEquals(Some(42L), LogicalPlanCardinality.estimate(LogicalLimit(scanUnknown(), 42L)))
   }
 
+  @Test def offsetSubtractsFromChildAndBottomsOutAtZero(): Unit = {
+    assertEquals(Some(70L), LogicalPlanCardinality.estimate(LogicalOffset(scan(100L), 30L)))
+    assertEquals(Some(0L), LogicalPlanCardinality.estimate(LogicalOffset(scan(100L), 500L)))
+    assertEquals(None, LogicalPlanCardinality.estimate(LogicalOffset(scanUnknown(), 30L)))
+    // LIMIT over OFFSET, the shape the binder builds for LIMIT n OFFSET m.
+    assertEquals(Some(10L), LogicalPlanCardinality.estimate(LogicalLimit(LogicalOffset(scan(100L), 30L), 10L)))
+  }
+
   @Test def distinctShrinksRoughly(): Unit = {
     val est = LogicalPlanCardinality.estimate(LogicalDistinct(scan(100L))).get
     assertTrue(s"distinct must shrink: $est < 100", est < 100L)

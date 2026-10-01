@@ -18,7 +18,7 @@ import net.sf.jsqlparser.schema.{Column, Table}
 import net.sf.jsqlparser.statement.Statement
 import net.sf.jsqlparser.statement.create.table.ColDataType
 import net.sf.jsqlparser.statement.select.{
-  AllColumns, AllTableColumns, Distinct, GroupByElement, Join, Limit, OrderByElement,
+  AllColumns, AllTableColumns, Distinct, GroupByElement, Join, Limit, Offset, OrderByElement,
   ParenthesedSelect, PlainSelect, SelectItem, SetOperationList, UnionOp, WithItem
 }
 
@@ -142,8 +142,6 @@ object UnsupportedClauses {
   // ---------------------------------------------------------------------------
 
   // Clauses every SELECT shape inherits from `Select`.
-  private val OffsetClause = rejects("getOffset")("OFFSET",
-    example = "SELECT a FROM t ORDER BY a LIMIT 2 OFFSET 1")
   private val FetchClause = rejects("getFetch")("FETCH FIRST / FETCH NEXT",
     advice = "write LIMIT n", example = "SELECT a FROM t FETCH FIRST 2 ROWS ONLY")
   private val LimitByClause = rejects("getLimitBy")("LIMIT n BY",
@@ -160,7 +158,7 @@ object UnsupportedClauses {
     advice = "write ORDER BY", example = "SELECT a FROM t ORDER SIBLINGS BY a")
 
   private val SelectTail: Seq[Rejection] = Seq(
-    OffsetClause, FetchClause, LimitByClause, LockingClause, ForClause, IsolationClause, SiblingsClause)
+    FetchClause, LimitByClause, LockingClause, ForClause, IsolationClause, SiblingsClause)
 
   // Accessors on `Select` that return the node itself, or cast it.
   private val SelectCasts: Seq[(String, String)] = Seq(
@@ -169,10 +167,10 @@ object UnsupportedClauses {
     "getSetOperationList" -> "a cast of this node, or of the query inside the parentheses",
     "getValues" -> "a cast of this node, or of the query inside the parentheses")
 
-  // ORDER BY / LIMIT written after a parenthesized query. The binder reads
-  // them on a PlainSelect and a SetOperationList, never on the parentheses.
-  private val ParenthesizedTail = rejects("getOrderByElements", "getLimit")(
-    "ORDER BY / LIMIT after a parenthesized query",
+  // ORDER BY / LIMIT / OFFSET written after a parenthesized query. The binder
+  // reads them on a PlainSelect and a SetOperationList, never on the parentheses.
+  private val ParenthesizedTail = rejects("getOrderByElements", "getLimit", "getOffset")(
+    "ORDER BY / LIMIT / OFFSET after a parenthesized query",
     advice = "move it inside the parentheses",
     example = "(SELECT a FROM t) ORDER BY a LIMIT 1")
   private val ParenthesizedPivot = rejects("getPivot", "getUnPivot")("PIVOT / UNPIVOT")
@@ -490,11 +488,11 @@ object UnsupportedClauses {
           example = "SELECT a FROM t ORDER BY a WITH ROLLUP")),
       Seq("isAscDescPresent" -> "whether ASC / DESC was written; isAsc carries the direction")),
     classOf[Limit] -> audit(Seq(
-      rejects("getOffset")("LIMIT offset, count", example = "SELECT a FROM t LIMIT 1, 2"),
       rejects("isLimitAll")("LIMIT ALL", advice = "leave the LIMIT out", example = "SELECT a FROM t LIMIT ALL"),
       rejects("isLimitNull")("LIMIT NULL", advice = "leave the LIMIT out", example = "SELECT a FROM t LIMIT NULL"),
       // Reached only through Select.getLimitBy, which is rejected above it.
       rejects("getByExpressions")("LIMIT n BY"))),
+    classOf[Offset] -> audit(Nil, Seq("getOffsetParam" -> "the noise word ROW / ROWS after the count")),
     classOf[Distinct] -> audit(
       Seq(rejects("getOnSelectItems")("DISTINCT ON (...)", example = "SELECT DISTINCT ON (a) a, b FROM t")),
       Seq("isUseUnique" -> "SELECT UNIQUE is a spelling of SELECT DISTINCT")),

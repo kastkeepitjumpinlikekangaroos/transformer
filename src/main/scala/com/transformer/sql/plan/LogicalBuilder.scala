@@ -130,14 +130,18 @@ object LogicalBuilder {
   }
 
   /** Fold a `SetOperationList` into a left-associative chain of
-    * [[LogicalUnion]]s, then apply any outer ORDER BY / LIMIT.
+    * [[LogicalUnion]]s, then apply any outer ORDER BY / OFFSET / LIMIT.
     *
-    * JSqlParser attaches a bare trailing `ORDER BY` / `LIMIT` to the *last
-    * arm* rather than the `SetOperationList`, but in standard SQL (Postgres /
-    * BigQuery / Snowflake) those clauses apply to the union as a whole. We
-    * hoist them up — unless the user disambiguated by wrapping the last arm
-    * in parens (then it's a `ParenthesedSelect`, our `case ps: PlainSelect`
-    * doesn't match, and the limit stays per-arm).
+    * JSqlParser attaches a trailing `ORDER BY` / `LIMIT` / `OFFSET` to the
+    * `SetOperationList` when the tail starts with `ORDER BY`, and otherwise to
+    * the *last arm* (`... UNION ALL SELECT a FROM u LIMIT 2 OFFSET 1`), and it
+    * can split one tail across both (`OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY`
+    * leaves the OFFSET on the arm). In standard SQL (Postgres / BigQuery /
+    * Snowflake) every one of those clauses applies to the union as a whole, so
+    * we hoist each one the list does not already carry — unless the user
+    * disambiguated by wrapping the last arm in parens (then it's a
+    * `ParenthesedSelect`, our `case ps: PlainSelect` doesn't match, and the
+    * clause stays inside the arm).
     *
     * Each [[UnionOp]] contributes its own `ALL` flag; the planner wraps
     * non-ALL unions with a [[LogicalDistinct]] downstream. INTERSECT /
@@ -155,16 +159,19 @@ object LogicalBuilder {
     // Detect-and-strip the hoistable trailing clauses on the last bare arm.
     // We mutate the AST in place; nothing downstream holds an earlier snapshot.
     val lastArm = selects.last
-    val (hoistedOrderBy, hoistedLimit) = lastArm match {
+    val (hoistedOrderBy, hoistedLimit, hoistedOffset) = lastArm match {
       case ps: PlainSelect =>
         val ob = Option(ps.getOrderByElements).filter(!_.isEmpty)
           .filter(_ => Option(sol.getOrderByElements).forall(_.isEmpty))
         val li = Option(ps.getLimit)
           .filter(_ => Option(sol.getLimit).isEmpty)
+        val off = Option(ps.getOffset)
+          .filter(_ => Option(sol.getOffset).isEmpty)
         if (ob.isDefined) ps.setOrderByElements(null)
         if (li.isDefined) ps.setLimit(null)
-        (ob, li)
-      case _ => (None, None)
+        if (off.isDefined) ps.setOffset(null)
+        (ob, li, off)
+      case _ => (None, None, None)
     }
 
     val first = buildAnySelect(selects.head, catalog, cteScope, None)
@@ -196,13 +203,33 @@ object LogicalBuilder {
       case None => union
     }
 
-    val limit = Option(sol.getLimit).orElse(hoistedLimit)
+    applyOffsetAndLimit(afterSort,
+      Option(sol.getLimit).orElse(hoistedLimit), Option(sol.getOffset).orElse(hoistedOffset))
+  }
+
+  /** OFFSET, then LIMIT, in the order SQL applies them: skip `offset` rows of
+    * the whole result, then keep `limit` of what is left. MySQL's
+    * `LIMIT offset, count` carries its offset inside the Limit; the standard
+    * `OFFSET n [ROWS]` arrives as a clause of its own. */
+  private def applyOffsetAndLimit(plan: LogicalPlan, limit: Option[Limit], offset: Option[Offset]): LogicalPlan = {
+    val limitOffset = limit.flatMap(l => Option(l.getOffset))
+    if (limitOffset.isDefined && offset.isDefined)
+      throw new IllegalArgumentException("OFFSET given twice: as LIMIT offset, count and as OFFSET")
+    val skip = offset.map(o => integerLiteral("OFFSET", o.getOffset))
+      .orElse(limitOffset.map(integerLiteral("OFFSET", _)))
+    val afterOffset = skip.filter(_ > 0).fold(plan)(LogicalOffset(plan, _))
     limit.flatMap(l => Option(l.getRowCount)) match {
-      case Some(rc: LongValue) => LogicalLimit(afterSort, rc.getValue)
-      case Some(other) =>
-        throw new IllegalArgumentException(s"LIMIT must be an integer literal, got ${other.getClass.getSimpleName}")
-      case None => afterSort
+      case Some(rowCount) => LogicalLimit(afterOffset, integerLiteral("LIMIT", rowCount))
+      case None => afterOffset
     }
+  }
+
+  /** A row count: JSqlParser parses a negative one as a SignedExpression, so a
+    * LongValue is never negative. */
+  private def integerLiteral(clause: String, e: Expression): Long = e match {
+    case lv: LongValue => lv.getValue
+    case other =>
+      throw new IllegalArgumentException(s"$clause must be an integer literal, got ${other.getClass.getSimpleName}")
   }
 
   // ---------------------------------------------------------------------------
@@ -342,12 +369,7 @@ object LogicalBuilder {
       case _ => afterDistinct
     }
 
-    Option(ps.getLimit).flatMap(l => Option(l.getRowCount)) match {
-      case Some(rc: LongValue) => LogicalLimit(afterDistinctSort, rc.getValue)
-      case Some(other) =>
-        throw new IllegalArgumentException(s"LIMIT must be an integer literal, got ${other.getClass.getSimpleName}")
-      case None => afterDistinctSort
-    }
+    applyOffsetAndLimit(afterDistinctSort, Option(ps.getLimit), Option(ps.getOffset))
   }
 
   // ---------------------------------------------------------------------------

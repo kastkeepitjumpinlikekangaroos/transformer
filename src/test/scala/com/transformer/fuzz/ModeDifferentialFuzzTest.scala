@@ -2,12 +2,13 @@ package com.transformer.fuzz
 
 import com.transformer.core._
 import com.transformer.fuzz.QueryGen._
-import com.transformer.fuzz.oracle.ModeDifferential
+import com.transformer.fuzz.oracle.{ModeDifferential, RelEngine}
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
 
 import java.nio.file.{Files, Path}
+import scala.util.Try
 
 /** Property-based mode-differential gate over single-table SQL — the generated
   * generalization of the hand-written `*SpillTest` parity checks.
@@ -119,6 +120,7 @@ class ModeDifferentialFuzzTest {
   @Test def generatedCorpusCoversTheInterestingShapes(): Unit = {
     val n = 500
     var withLimit = 0
+    var withOffset = 0
     var withBoolMinMax = 0
     var noNullCols = 0
     var someNullCols = 0
@@ -128,6 +130,7 @@ class ModeDifferentialFuzzTest {
     while (seed < n) {
       val qc = QueryGen.generate(new Rng(seed.toLong))
       if (qc.sql.contains(" LIMIT ")) withLimit += 1
+      if (qc.sql.contains(" OFFSET ")) withOffset += 1
       if (hasBooleanMinMax(qc.query)) withBoolMinMax += 1
       val ds = qc.dataset
       if (ds.numRows > 0) {
@@ -141,10 +144,13 @@ class ModeDifferentialFuzzTest {
       }
       seed += 1
     }
-    println(f"[mode-differential] over $n seeds: LIMIT in $withLimit; MIN/MAX over a " +
+    println(f"[mode-differential] over $n seeds: LIMIT in $withLimit; OFFSET in $withOffset; MIN/MAX over a " +
       f"Boolean column in $withBoolMinMax; columns " +
       f"no-null=$noNullCols some-null=$someNullCols all-null=$allNullCols of $totalCols")
     assertTrue(s"no LIMIT query generated over $n seeds", withLimit >= n / 20)
+    // OFFSET rides on the top-n shape, so the bound separates "rare" from
+    // "gone"; offsetIsGeneratedAndObservable checks that it actually drops rows.
+    assertTrue(s"no OFFSET query generated over $n seeds", withOffset >= n / 50)
     // This fuzzer found `MIN`/`MAX` over a Boolean column returning NULL under
     // spill, and the shape was then GATED OUT of the generator until the engine was
     // fixed. Asserting it is back is what keeps that exclusion from returning
@@ -234,6 +240,55 @@ class ModeDifferentialFuzzTest {
     * observable, because they are the same row. The condition this pins is the one
     * that makes `LIMIT` generatable at all: drop an order key and the top-n becomes
     * a layout-dependent SUBSET instead. */
+  /** The OFFSET guard's value half: an OFFSET of 0, or one past the end of the
+    * result, keeps everything or nothing, and a skip that lands mid-result is the
+    * only place the clause can be wrong (a per-partition skip, a batch trimmed on
+    * the wrong side). Runs each OFFSET query without its tail and counts the ones
+    * whose skip falls strictly inside the result. */
+  @Test def offsetIsGeneratedAndObservable(): Unit = {
+    val n = 500
+    var offsets, observable = 0
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val (untrimmed, skip) = qc.query match {
+        case p: ProjectQuery if p.offset.isDefined => (p.copy(limit = None, offset = None), p.offset)
+        case a: AggregateQuery if a.offset.isDefined => (a.copy(limit = None, offset = None), a.offset)
+        case other => (other, None)
+      }
+      if (qc.sql.contains(" OFFSET ")) {
+        offsets += 1
+        val cat = new Catalog
+        cat.register(QueryGen.ViewName, qc.dataset.singlePartition())
+        val rows = Try(RelEngine.runRows(cat, untrimmed.render(QueryGen.ViewName), ExecutionOptions.Default).size)
+          .getOrElse(-1)
+        if (skip.exists(m => m > 0 && m < rows)) observable += 1
+      }
+      seed += 1
+    }
+    println(s"[mode-differential] OFFSET over $n seeds: rendered=$offsets, skip strictly inside the result=$observable")
+    assertTrue(s"offset=$offsets", offsets >= n / 50)
+    assertTrue(s"observable=$observable of $offsets", observable >= n / 50)
+  }
+
+  /** OFFSET over the same total order, cutting between IDENTICAL rows — with a
+    * LIMIT after it and on its own. Every layout must keep the same multiset. */
+  @Test def regressionTopNOffsetOverTotalOrder(): Unit = {
+    val schema = Schema(Vector(Field("c0", DataType.IntType), Field("c1", DataType.StringType)))
+    val rows = IndexedSeq[Array[Any]](
+      Array[Any](1, "a"), Array[Any](1, "a"), Array[Any](1, "b"),
+      Array[Any](2, "a"), Array[Any](null, "a"), Array[Any](3, null))
+    val cols = Vector((ColRefExpr(0, "c0", DataType.IntType), "c0"), (ColRefExpr(1, "c1", DataType.StringType), "c1"))
+    val order = Vector((ColRefExpr(0, "c0", DataType.IntType), true), (ColRefExpr(1, "c1", DataType.StringType), true))
+    Seq((Some(2L), Some(1L), " LIMIT 2 OFFSET 1"), (None, Some(2L), " OFFSET 2")).foreach { case (limit, offset, tail) =>
+      val q = QueryGen.ProjectQuery(distinct = false, projection = cols.map { case (c, n) => (c: Expr, n) },
+        where = None, orderBy = order, limit = limit, offset = offset)
+      val qc = QueryGen.QueryCase(DataGen.Dataset(schema, rows), q)
+      assertTrue(s"expected a rendered$tail, got ${qc.sql}", qc.sql.endsWith(tail))
+      ModeDifferential.check(qc)
+    }
+  }
+
   @Test def regressionTopNLimitOverTotalOrder(): Unit = {
     val schema = Schema(Vector(Field("c0", DataType.IntType), Field("c1", DataType.StringType)))
     val rows = IndexedSeq[Array[Any]](

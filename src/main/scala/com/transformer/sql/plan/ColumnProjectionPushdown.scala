@@ -112,6 +112,10 @@ object ColumnProjectionPushdown {
       val (newChild, remap) = rewrite(child, neededByParent)
       (LogicalLimit(newChild, n), remap)
 
+    case LogicalOffset(child, n) =>
+      val (newChild, remap) = rewrite(child, neededByParent)
+      (LogicalOffset(newChild, n), remap)
+
     case LogicalDistinct(child) =>
       val (newChild, remap) = rewrite(child, neededByParent)
       (LogicalDistinct(newChild), remap)
@@ -380,6 +384,7 @@ object ColumnProjectionPushdown {
         visit(child)
         keys.foreach { case (e, _) => checkExpr(e, child.outputSchema, "Sort.key") }
       case LogicalLimit(child, _) => visit(child)
+      case LogicalOffset(child, _) => visit(child)
       case LogicalDistinct(child) => visit(child)
       case LogicalUnion(l, r, _) => visit(l); visit(r)
       case LogicalWindow(child, _) => visit(child)

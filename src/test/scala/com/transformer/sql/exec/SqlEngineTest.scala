@@ -2006,14 +2006,64 @@ class SqlEngineTest {
     assertRejected("SELECT COUNT(*) FILTER (WHERE a > 1) AS c FROM tn", cat, "FILTER (WHERE ...)")
   }
 
-  @Test def offsetRejected(): Unit = {
+  private def column(sql: String, cat: Catalog, name: String): Seq[Any] =
+    collectAllRows(SqlEngine.execute(sql, cat)).map(_(name))
+
+  @Test def offsetSkipsRowsAfterTheSort(): Unit = {
     val cat = clauseCatalog()
-    // The wrong page, (1)(2) instead of (2)(2).
-    assertRejected("SELECT a FROM t ORDER BY a LIMIT 2 OFFSET 1", cat, "OFFSET")
-    // Four rows instead of three.
-    assertRejected("SELECT a FROM t OFFSET 1", cat, "OFFSET")
-    // MySQL's LIMIT offset, count: the offset was dropped too.
-    assertRejected("SELECT a FROM t ORDER BY a LIMIT 1, 2", cat, "LIMIT offset, count")
+    // The plan's page: (2)(2). Dropping the clause gave (1)(2).
+    assertEquals(Seq(2, 2), column("SELECT a FROM t ORDER BY a LIMIT 2 OFFSET 1", cat, "a"))
+    // Without a LIMIT, everything after the skipped rows (dropping it gave all four).
+    assertEquals(Seq(2, 2, 3), column("SELECT a FROM t ORDER BY a OFFSET 1", cat, "a"))
+    // The standard OFFSET n ROWS spelling, and MySQL's LIMIT offset, count.
+    assertEquals(Seq(2, 3), column("SELECT a FROM t ORDER BY a OFFSET 2 ROWS", cat, "a"))
+    assertEquals(Seq(2, 2), column("SELECT a FROM t ORDER BY a LIMIT 1, 2", cat, "a"))
+    // Past the end, and zero.
+    assertEquals(Nil, column("SELECT a FROM t ORDER BY a OFFSET 10", cat, "a"))
+    assertEquals(Seq(1, 2, 2, 3), column("SELECT a FROM t ORDER BY a OFFSET 0", cat, "a"))
+    // OFFSET counts output rows: after DISTINCT, and after GROUP BY.
+    assertEquals(Seq(2, 3), column("SELECT DISTINCT a FROM t ORDER BY a OFFSET 1", cat, "a"))
+    assertEquals(Seq(3), column("SELECT a, COUNT(*) AS n FROM t GROUP BY a ORDER BY a LIMIT 5 OFFSET 2", cat, "a"))
+    // Inside a CTE body.
+    assertEquals(Seq(3), column("WITH c AS (SELECT a FROM t ORDER BY a OFFSET 3) SELECT a FROM c", cat, "a"))
+  }
+
+  /** OFFSET drops n rows of the whole result. A per-partition skip — the
+    * limit's push-down shape — would drop n rows from every partition. */
+  @Test def offsetIsGlobalAcrossPartitionsAndBatches(): Unit = {
+    val schema = Schema(Vector(Field("v", DataType.IntType)))
+    def batch(values: Seq[Int]): ColumnarBatch = {
+      val b = new ColumnarBatch(schema, values.length)
+      values.zipWithIndex.foreach { case (v, i) => b.column(0).setBoxed(i, java.lang.Integer.valueOf(v)) }
+      b.setNumRows(values.length)
+      b
+    }
+    // 4 partitions x 3 batches x 5 rows: v = 1..60, dealt round-robin so no
+    // partition holds a contiguous run.
+    val values = (1 to 60).toVector
+    val partitions = (0 until 4).map { p =>
+      values.filter(v => (v - 1) % 4 == p).grouped(5).map(batch).toIndexedSeq
+    }
+    val cat = catalogWith("m" -> new MaterializedView(schema, partitions))
+    // Unordered: 53 rows, whichever they are. A per-partition skip would leave 32.
+    assertEquals(53, column("SELECT v FROM m OFFSET 7", cat, "v").size)
+    // Ordered: the skip starts mid-batch of the merged stream.
+    assertEquals(Seq(8, 9, 10, 11, 12), column("SELECT v FROM m ORDER BY v LIMIT 5 OFFSET 7", cat, "v"))
+    assertEquals((53 to 60).toList, column("SELECT v FROM m ORDER BY v OFFSET 52", cat, "v"))
+  }
+
+  @Test def offsetAppliesToAWholeUnion(): Unit = {
+    val cat = clauseCatalog()
+    // t UNION ALL s is 1,2,2,3,2,3. With no ORDER BY, JSqlParser parks the tail
+    // on the last arm; it still belongs to the union.
+    assertEquals(2, column("SELECT a FROM t UNION ALL SELECT a FROM s OFFSET 4", cat, "a").size)
+    assertEquals(1, column("SELECT a FROM t UNION ALL SELECT a FROM s LIMIT 2 OFFSET 5", cat, "a").size)
+    assertEquals(Seq(2, 2), column("SELECT a FROM t UNION ALL SELECT a FROM s ORDER BY a LIMIT 2 OFFSET 1", cat, "a"))
+    // Inside parentheses the OFFSET is the arm's own: s sorted is 2,3, so (3).
+    assertEquals(Seq(1, 2, 2, 3, 3),
+      column("SELECT a FROM t UNION ALL (SELECT a FROM s ORDER BY a OFFSET 1) ORDER BY a", cat, "a"))
+    // After a parenthesized query it is still rejected, like ORDER BY and LIMIT there.
+    assertRejected("(SELECT a FROM t) OFFSET 1", cat, "after a parenthesized query")
   }
 
   @Test def countAllRejected(): Unit =

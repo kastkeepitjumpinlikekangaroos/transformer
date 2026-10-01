@@ -245,6 +245,7 @@ object Shrinker {
   private def shrinkProject(p: ProjectQuery): Iterator[GenQuery] = {
     val orderNames = p.orderBy.map(_._1.name).toSet
     val dropLimit = if (p.limit.isDefined) Iterator[GenQuery](p.copy(limit = None)) else Iterator.empty
+    val dropOffset = if (p.offset.isDefined) Iterator[GenQuery](p.copy(offset = None)) else Iterator.empty
     val dropDistinct = if (p.distinct) Iterator[GenQuery](p.copy(distinct = false)) else Iterator.empty
     val dropWhere = if (p.where.isDefined) Iterator[GenQuery](p.copy(where = None)) else Iterator.empty
     val dropOrder = if (p.orderBy.nonEmpty) Iterator[GenQuery](p.copy(orderBy = Vector.empty)) else Iterator.empty
@@ -264,7 +265,7 @@ object Shrinker {
     val simplifyWhere: Iterator[GenQuery] =
       p.where.iterator.flatMap(w => expr(w).map(sw => p.copy(where = Some(sw))))
 
-    dropLimit ++ dropDistinct ++ dropWhere ++ dropOrder ++ dropItem ++ simplifyItem ++ simplifyWhere
+    dropLimit ++ dropOffset ++ dropDistinct ++ dropWhere ++ dropOrder ++ dropItem ++ simplifyItem ++ simplifyWhere
   }
 
   private def shrinkAggregate(a: AggregateQuery): Iterator[GenQuery] = {
@@ -273,6 +274,7 @@ object Shrinker {
     val pinned = orderIdx ++ havingIdx // group keys these clauses still reference
 
     val dropLimit = if (a.limit.isDefined) Iterator[GenQuery](a.copy(limit = None)) else Iterator.empty
+    val dropOffset = if (a.offset.isDefined) Iterator[GenQuery](a.copy(offset = None)) else Iterator.empty
     val dropWhere = if (a.where.isDefined) Iterator[GenQuery](a.copy(where = None)) else Iterator.empty
     val dropHaving = if (a.having.isDefined) Iterator[GenQuery](a.copy(having = None)) else Iterator.empty
     val dropOrder = if (a.orderBy.nonEmpty) Iterator[GenQuery](a.copy(orderBy = Vector.empty)) else Iterator.empty
@@ -295,7 +297,7 @@ object Shrinker {
     val simplifyWhere: Iterator[GenQuery] =
       a.where.iterator.flatMap(w => expr(w).map(sw => a.copy(where = Some(sw))))
 
-    dropLimit ++ dropWhere ++ dropHaving ++ dropOrder ++ dropAgg ++ dropKey ++ simplifyArg ++ simplifyWhere
+    dropLimit ++ dropOffset ++ dropWhere ++ dropHaving ++ dropOrder ++ dropAgg ++ dropKey ++ simplifyArg ++ simplifyWhere
   }
 
   /** Simplify an aggregate's argument expression(s). Bare-column args yield
@@ -398,6 +400,7 @@ object Shrinker {
 
   private def shrinkMetaQuery(q: MetaQuery): Iterator[MetaQuery] = {
     val dropLimit: Iterator[MetaQuery] = if (q.limit.isDefined) Iterator(q.copy(limit = None)) else Iterator.empty
+    val dropOffset: Iterator[MetaQuery] = if (q.offset.isDefined) Iterator(q.copy(offset = None)) else Iterator.empty
     val unwrapUnion: Iterator[MetaQuery] = q.setOp.iterator.map(_ => q.copy(setOp = None))
     val dropWhere: Iterator[MetaQuery] = if (q.where.isDefined) Iterator(q.copy(where = None)) else Iterator.empty
     val dropCte: Iterator[MetaQuery] = q.ctes.indices.iterator.map(i => q.copy(ctes = q.ctes.patch(i, Nil, 1)))
@@ -410,7 +413,7 @@ object Shrinker {
       val j = q.from.joins(i)
       expr(j.on).map(so => q.copy(from = q.from.copy(joins = q.from.joins.updated(i, j.copy(on = so)))))
     }
-    dropLimit ++ unwrapUnion ++ dropWhere ++ dropJoin ++ dropCte ++ shrinkCoreQ ++ simplifyWhere ++ simplifyOn
+    dropLimit ++ dropOffset ++ unwrapUnion ++ dropWhere ++ dropJoin ++ dropCte ++ shrinkCoreQ ++ simplifyWhere ++ simplifyOn
   }
 
   private def shrinkCore(core: QueryCore): Iterator[QueryCore] = core match {

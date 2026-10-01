@@ -101,6 +101,7 @@ object PhysicalPlanner {
     case p: ProjectExec           => Seq(p.child)
     case l: LocalLimitExec        => Seq(l.child)
     case g: GlobalLimitExec       => Seq(g.child)
+    case o: OffsetExec            => Seq(o.child)
     case a: HashAggregateExec     => Seq(a.child)
     case j: HashJoinExec          => Seq(j.left, j.right)
     case s: SortExec              => Seq(s.child)
@@ -157,6 +158,7 @@ object PhysicalPlanner {
       val p = planInner(child, opts)
       if (p.numPartitions <= 1) LocalLimitExec(p, n)
       else GlobalLimitExec(LocalLimitExec(p, n), n)
+    case LogicalOffset(child, n) => OffsetExec(planInner(child, opts), n)
     case LogicalJoin(l, r, cond, kind) =>
       val left = planInner(l, opts)
       val right = planInner(r, opts)
@@ -476,6 +478,9 @@ object PhysicalPlanner {
     case GlobalLimitExec(child, n) =>
       val (wc, cn) = walkAndWrap(child, idCounter)
       (GlobalLimitExec(wc, n), Vector(cn))
+    case OffsetExec(child, n) =>
+      val (wc, cn) = walkAndWrap(child, idCounter)
+      (OffsetExec(wc, n), Vector(cn))
     case HashAggregateExec(child, gks, aggs, opts, _) =>
       val (wc, cn) = walkAndWrap(child, idCounter)
       (HashAggregateExec(wc, gks, aggs, opts, node), Vector(cn))

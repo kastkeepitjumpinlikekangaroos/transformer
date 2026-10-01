@@ -246,6 +246,37 @@ plan's own data (each case comments the wrong answer it used to give), plus the
 worst of the new finds; all 12 new test methods fail against the parent binder.
 `unsupported_clauses_test` is new. `bazel test //...` green; jaffle_shop 15/15.
 
+### Half 2 — honour what is cheap
+
+One clause per commit, each replacing its half-1 rejection test with one that
+asserts the answer.
+
+**OFFSET.** A new `LogicalOffset` node sits below `LogicalLimit` —
+`LIMIT n OFFSET m` binds as `LogicalLimit(LogicalOffset(child, m), n)` — so every
+existing match on `LogicalLimit` stays valid. It plans to `OffsetExec`, which
+concatenates its child's partitions and skips globally: the per-partition shape
+of the limit push-down would drop `m` rows from every partition, which
+`offsetIsGlobalAcrossPartitionsAndBatches` pins (53 rows, not 32). Both spellings
+bind, `OFFSET m [ROWS]` and MySQL's `LIMIT m, n`. A UNION's OFFSET is hoisted off
+the last arm like its LIMIT, because JSqlParser parks the tail on the arm when it
+has no ORDER BY, and splits `OFFSET ... FETCH` across the arm and the list. After
+a parenthesized query OFFSET stays rejected, alongside ORDER BY and LIMIT there.
+One subtlety of the reflection test shaped the binder: it credits a getter call
+made through a supertype to every subclass, so reading `getOffset` through a
+`Select` reference would have blessed `ParenthesedSelect` too while leaving it
+unread. The binder reads it through `PlainSelect` and `SetOperationList`
+references, and the parenthesized rejection stands.
+
+The plan's fuzzer reach: `QueryGen` and `MetaQueryGen` emit OFFSET on their
+top-n shapes — beside the LIMIT or alone, under the same total-order soundness
+condition, drawn after every other draw so non-top-n seeds are unchanged (every
+other shape tally is bit-identical). The coverage guards count it and, per the
+house rule, check the value half too: `offsetIsGeneratedAndObservable` runs each
+OFFSET query without its tail and requires skips that land strictly inside the
+result, since an OFFSET of 0 or past the end tests nothing. The first
+distribution put too much weight on large skips for these small datasets (7 of
+36 observable in mode-differential); weighting it toward 1 and 2 gave 18 of 48.
+
 ## Launch prompt
 
 ```

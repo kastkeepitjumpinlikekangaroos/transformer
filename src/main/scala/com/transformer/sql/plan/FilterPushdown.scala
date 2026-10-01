@@ -55,6 +55,7 @@ object FilterPushdown {
       LogicalAggregate(rewrite(child), gks, aggs, having)
     case LogicalSort(child, keys) => LogicalSort(rewrite(child), keys)
     case LogicalLimit(child, n) => LogicalLimit(rewrite(child), n)
+    case LogicalOffset(child, n) => LogicalOffset(rewrite(child), n)
     case LogicalDistinct(child) => LogicalDistinct(rewrite(child))
     case LogicalUnion(l, r, all) => LogicalUnion(rewrite(l), rewrite(r), all)
     case LogicalJoin(l, r, cond, kind) =>

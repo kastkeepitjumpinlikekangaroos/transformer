@@ -32,11 +32,11 @@ import com.transformer.sql.plan._
   *     grouping parens). So a query that binds also runs, in every mode.
   *
   * Excluded so the output multiset is well-defined for the metamorphic relations:
-  * `RAND()` and the clock functions, which are mode-dependent. `LIMIT` IS
-  * generated, but only in the '''top-n''' shape — a bare, type-reliable,
-  * non-float projection ordered by every one of its columns (see
-  * [[MetaQuery.totalOrderKeys]]). Rows tied at the cutoff are then identical rows,
-  * so the top-`n` multiset is the same under every layout, every build-side swap,
+  * `RAND()` and the clock functions, which are mode-dependent. `LIMIT` and
+  * `OFFSET` ARE generated, but only in the '''top-n''' shape — a bare,
+  * type-reliable, non-float projection ordered by every one of its columns (see
+  * [[MetaQuery.totalOrderKeys]]). Rows tied at a cutoff are then identical rows,
+  * so the kept multiset is the same under every layout, every build-side swap,
   * and in each of TLP's four separate executions. The relations share a narrow
   * join-key domain so equi-joins actually match — wide-random keys would make
   * every outer join all-unmatched and hide the null-extension bugs the oracles
@@ -305,7 +305,8 @@ object MetaQueryGen {
       core: QueryCore,
       setOp: Option[(MetaQuery, Boolean)] = None,
       ctes: Vector[CteDef] = Vector.empty,
-      limit: Option[Long] = None) {
+      limit: Option[Long] = None,
+      offset: Option[Long] = None) {
     def outputSchema: Vector[(String, DataType)] = core.outputSchema
     def tlpCandidates: Vector[(String, DataType)] = core.tlpCandidates
     def whereSql: String = where.map(w => s" WHERE ${SqlRender.expr(w)}").getOrElse("")
@@ -335,18 +336,25 @@ object MetaQueryGen {
       case _ => None
     }
 
-    /** ` ORDER BY <every output column's source> LIMIT n` — empty unless a `LIMIT`
-      * was generated AND [[totalOrderKeys]] still holds. */
-    def topNSql: String = (limit, totalOrderKeys) match {
-      case (Some(n), Some(keys)) => s" ORDER BY ${keys.mkString(", ")} LIMIT $n"
+    /** ` ORDER BY <every output column's source> [LIMIT n] [OFFSET m]` — empty
+      * unless a `LIMIT` or `OFFSET` was generated AND [[totalOrderKeys]] still
+      * holds. The two clauses share that soundness condition: a cutoff that falls
+      * among tied rows keeps the same multiset only when tied rows are identical. */
+    def topNSql: String = totalOrderKeys match {
+      case Some(keys) if limit.isDefined || offset.isDefined =>
+        s" ORDER BY ${keys.mkString(", ")}" +
+          limit.map(n => s" LIMIT $n").getOrElse("") + offset.map(m => s" OFFSET $m").getOrElse("")
       case _ => ""
     }
 
-    /** Whether this query actually renders a `LIMIT`. The shape-coverage guard
-      * reads this rather than `limit.isDefined`: a generated limit that fails the
-      * soundness condition renders nothing, and counting the field would
-      * overstate the coverage. */
+    /** Whether this query actually renders a `LIMIT` or `OFFSET`. The
+      * shape-coverage guard reads this rather than `limit.isDefined`: a generated
+      * limit that fails the soundness condition renders nothing, and counting the
+      * field would overstate the coverage. */
     def hasTopN: Boolean = topNSql.nonEmpty
+
+    /** Whether this query actually renders an `OFFSET`. */
+    def hasOffset: Boolean = topNSql.contains(" OFFSET ")
 
     /** The `WITH` definitions without the `WITH` keyword (empty when no CTEs). */
     def cteClause: String = if (ctes.isEmpty) "" else ctes.map(_.render).mkString(", ")
@@ -540,7 +548,8 @@ object MetaQueryGen {
       if (topN) genTopNCore(rng, scope)
       else if (rng.bool(0.5)) genAggCore(rng, scope)
       else genProjectCore(rng, scope)
-    MetaQuery(from, where, core, limit = if (topN) Some(genLimit(rng)) else None)
+    val (limit, offset) = QueryGen.withOffset(rng, topN, if (topN) Some(genLimit(rng)) else None)
+    MetaQuery(from, where, core, limit = limit, offset = offset)
   }
 
   /** A `LIMIT` row count spanning the interesting cutoffs: none at all, one row, a

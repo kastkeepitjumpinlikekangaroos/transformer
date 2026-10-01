@@ -8,6 +8,7 @@ import org.junit.Assert._
 import org.junit.{After, Before, Test}
 
 import java.nio.file.{Files, Path}
+import scala.util.Try
 
 /** Property-based metamorphic gate over multi-relation SQL — the phase that finds
   * SEMANTIC bugs (wrong answers every execution mode agrees on, which
@@ -170,7 +171,7 @@ class MetamorphicFuzzTest {
     * is asserted present over a fixed block of seeds. Prints the tally for the PR. */
   @Test def generatorCoversShapes(): Unit = {
     val n = 2000
-    var joins, unions, ctes, windows, invariantWindows, aggregates, tlpWindowKeys, topNs, boolMinMax = 0
+    var joins, unions, ctes, windows, invariantWindows, aggregates, tlpWindowKeys, topNs, offsets, boolMinMax = 0
     var seed = 0
     while (seed < n) {
       val mc = MetaQueryGen.generate(new Rng(seed.toLong))
@@ -181,6 +182,7 @@ class MetamorphicFuzzTest {
       if (mc.query.hasInvariantWindow && mc.query.isLayoutInvariant) invariantWindows += 1
       if (mc.query.core.isInstanceOf[AggCore]) aggregates += 1
       if (mc.query.hasTopN) topNs += 1
+      if (mc.query.hasOffset) offsets += 1
       if (hasBooleanMinMax(mc.query)) boolMinMax += 1
       // A window output column actually chosen as the TLP partition key.
       if (mc.query.core.hasWindow && mc.tlp.isDefined &&
@@ -189,7 +191,7 @@ class MetamorphicFuzzTest {
     }
     println(f"[metamorphic] shape coverage over $n seeds: joins=$joins unions=$unions ctes=$ctes " +
       f"windows=$windows invariantWindows=$invariantWindows aggregates=$aggregates " +
-      f"tlpOnWindowCol=$tlpWindowKeys topN=$topNs boolMinMax=$boolMinMax")
+      f"tlpOnWindowCol=$tlpWindowKeys topN=$topNs offset=$offsets boolMinMax=$boolMinMax")
     assertTrue(s"joins=$joins", joins > 100)
     assertTrue(s"unions=$unions", unions > 50)
     assertTrue(s"ctes=$ctes", ctes > 100)
@@ -205,6 +207,9 @@ class MetamorphicFuzzTest {
     // A generated `limit` renders nothing unless the projection is still totally
     // ordered, so this counts queries that actually carry a LIMIT.
     assertTrue(s"topN=$topNs", topNs > 100)
+    // OFFSET rides on the top-n shape (~40% of it), so this separates "rare"
+    // from "gone"; offsetIsGeneratedAndObservable checks it actually drops rows.
+    assertTrue(s"offset=$offsets", offsets > 40)
     // MIN/MAX over a Boolean column: the accumulator-slot shape that returned NULL
     // under spill until the engine was fixed. It was kept OUT of the generator
     // while the bug stood, so an assertion that it is back is what stops the
@@ -627,6 +632,49 @@ class MetamorphicFuzzTest {
     val mc = MetaCase(env, q, Some(TlpCmpLit("o1", ">", "<=", "10")))
     assertTlpHeld(mc)
     assertEquals(RelEngine.Held, MetaModeDifferential.check(mc))
+  }
+
+  /** An OFFSET cutoff among IDENTICAL rows, with and without a LIMIT after it:
+    * whichever tied row the skip consumes, the kept multiset is the same, so TLP
+    * and mode agreement (tiny batches, many partitions, spill) must both hold. */
+  @Test def regressionTopNOffsetAcrossTiedRows(): Unit = {
+    val r = rel("r0", intInt, IndexedSeq(
+      Array[Any](1, 10), Array[Any](1, 10), Array[Any](2, 20), Array[Any](3, 30), Array[Any](null, 40)))
+    val env = RelEnv(Vector(r))
+    val from = FromClause(FromLeaf("r0", "t0", Vector(sc("t0", intInt, 0), sc("t0", intInt, 1))), Vector.empty)
+    val core = ProjectCore(Vector((sc("t0", intInt, 0).ref, "o0"), (sc("t0", intInt, 1).ref, "o1")), distinct = false)
+    Seq(MetaQuery(from, None, core, limit = Some(2L), offset = Some(1L)),
+        MetaQuery(from, None, core, offset = Some(2L))).foreach { q =>
+      assertTrue(s"expected a rendered OFFSET, got ${q.renderBody}", q.hasOffset)
+      val mc = MetaCase(env, q, Some(TlpCmpLit("o1", ">", "<=", "10")))
+      assertTlpHeld(mc)
+      assertEquals(RelEngine.Held, MetaModeDifferential.check(mc))
+    }
+  }
+
+  /** The OFFSET guard's value half. Generating the clause is not testing it: an
+    * OFFSET of 0, or one past the end of the result, keeps everything or nothing,
+    * and a cutoff mid-result is the only place it can be wrong. So over the
+    * campaign's first block of seeds, run each OFFSET query without its tail and
+    * count the ones whose skip lands strictly inside the result. */
+  @Test def offsetIsGeneratedAndObservable(): Unit = {
+    val n = 2000
+    var offsets, observable = 0
+    var seed = 0
+    while (seed < n) {
+      val mc = MetaQueryGen.generate(new Rng(seed.toLong))
+      if (mc.query.hasOffset) {
+        offsets += 1
+        val untrimmed = mc.query.copy(limit = None, offset = None).renderBody
+        val rows = Try(RelEngine.runRows(mc.env.catalog(), untrimmed, ExecutionOptions.Default).size).getOrElse(-1)
+        val skip = mc.query.offset.get
+        if (skip > 0 && skip < rows) observable += 1
+      }
+      seed += 1
+    }
+    println(s"[metamorphic] OFFSET over $n seeds: rendered=$offsets, skip strictly inside the result=$observable")
+    assertTrue(s"offset=$offsets", offsets > 40)
+    assertTrue(s"observable=$observable of $offsets", observable > 20)
   }
 
   /** A generated `limit` renders only while the projection stays totally ordered:

@@ -140,7 +140,39 @@ final case class GlobalLimitExec(child: PhysicalPlan, n: Long) extends PhysicalP
   }
 }
 
+/** OFFSET: collapses all partitions into one stream, in partition order, and
+  * drops its first `n` rows. It has to be global — dropping `n` rows from each
+  * partition would drop `n` per partition — so unlike a limit it has no
+  * per-partition half to push down. */
+final case class OffsetExec(child: PhysicalPlan, n: Long) extends PhysicalPlan {
+  def outputSchema: Schema = child.outputSchema
+  def numPartitions: Int = 1
+  def execute(partition: Int): Iterator[ColumnarBatch] = {
+    require(partition == 0)
+    LimitExec.skip((0 until child.numPartitions).iterator.flatMap(child.execute), n)
+  }
+}
+
 private[exec] object LimitExec {
+  /** Drop the first `n` rows, then pass everything else through: whole batches
+    * are skipped, and the batch that crosses the boundary keeps only its tail. */
+  def skip(it: Iterator[ColumnarBatch], n: Long): Iterator[ColumnarBatch] = {
+    var remaining = n
+    it.flatMap { b =>
+      if (remaining == 0) Iterator.single(b)
+      else if (b.numRows <= remaining) {
+        remaining -= b.numRows
+        Iterator.empty
+      } else {
+        val mask = new Array[Boolean](b.numRows)
+        var i = remaining.toInt
+        while (i < b.numRows) { mask(i) = true; i += 1 }
+        remaining = 0
+        Iterator.single(b.select(mask))
+      }
+    }
+  }
+
   /** Pass batches through until `n` rows have been emitted, trimming the batch
     * that crosses the boundary. Shared by [[LocalLimitExec]] (per-partition
     * cap) and [[GlobalLimitExec]] (single-stream cap). */
