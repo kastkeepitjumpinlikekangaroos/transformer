@@ -320,6 +320,13 @@ Found along the way, outside this plan's table: an aggregate named only in ORDER
 BY (`SELECT g FROM t GROUP BY g ORDER BY SUM(a)`) was never collected, and
 binding died with an internal `NoSuchElementException`. Fixed in its own commit.
 
+**COUNT(ALL x).** The plan read this as `ALL` being ignored; the binder in fact
+misread `Function.isAllColumns` — JSqlParser's flag for the `ALL` quantifier — as
+the star, binding `COUNT(ALL a)` as `COUNT(*)`. `ALL` is the default quantifier,
+so the fix is to stop reading the flag: the star is found only as an
+`AllColumns` parameter, in `bindAgg` and in `bindAnalytic` alike, and the audit
+moves `isAllColumns` from two partial rejections to inert.
+
 ## Launch prompt
 
 ```

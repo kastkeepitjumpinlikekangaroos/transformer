@@ -2116,9 +2116,17 @@ class SqlEngineTest {
     assertRejected("(SELECT a FROM t) OFFSET 1", cat, "after a parenthesized query")
   }
 
-  @Test def countAllRejected(): Unit =
-    // Bound as COUNT(*), so it counted the NULL: 5, not 4.
-    assertRejected("SELECT COUNT(ALL a) AS c FROM tn", clauseCatalog(), "COUNT(ALL x)")
+  @Test def countAllCountsNonNullValues(): Unit = {
+    val cat = clauseCatalog() // tn.a is 1, 2, 2, 3, NULL
+    // ALL is the default quantifier: COUNT(ALL a) is COUNT(a), 4. It used to
+    // bind as COUNT(*) and count the NULL too.
+    assertEquals(Seq(4L), column("SELECT COUNT(ALL a) AS c FROM tn", cat, "c"))
+    assertEquals(Seq(5L), column("SELECT COUNT(*) AS c FROM tn", cat, "c"))
+    assertEquals(Seq(8L), column("SELECT SUM(ALL a) AS s FROM tn", cat, "s"))
+    // The same under OVER.
+    assertEquals(Seq.fill(5)(4L), column("SELECT COUNT(ALL a) OVER () AS c FROM tn", cat, "c"))
+    assertEquals(Seq.fill(5)(5L), column("SELECT COUNT(*) OVER () AS c FROM tn", cat, "c"))
+  }
 
   @Test def nullsFirstAndLastPlaceNullsInOrderBy(): Unit = {
     val cat = clauseCatalog() // tn.a is 1, 2, 2, 3, NULL

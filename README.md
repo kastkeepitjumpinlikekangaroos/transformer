@@ -598,7 +598,7 @@ joins, a bare `OUTER JOIN` and Oracle's `(+)`; `FETCH FIRST`, `TOP n`, and
 `ORDER BY` / `LIMIT` / `OFFSET` after a parenthesized query; `QUALIFY`,
 `DISTINCT ON`, `GROUPING SETS` and `WITH ROLLUP`; `FILTER (WHERE ...)`,
 `WITHIN GROUP`, `IGNORE NULLS` and named `WINDOW`s; `DISTINCT` inside
-`STDDEV`, `VARIANCE`, `COUNT_IF`, `COVAR` or `CORR`, and `COUNT(ALL x)`; `ILIKE`, `RLIKE` / `REGEXP`,
+`STDDEV`, `VARIANCE`, `COUNT_IF`, `COVAR` or `CORR`; `ILIKE`, `RLIKE` / `REGEXP`,
 `SIMILAR TO`, `LIKE ... ESCAPE` and `x NOTNULL`; `TRY_CAST`, array types and
 subscripts; `* EXCEPT` / `* REPLACE`; `PIVOT`, `TABLESAMPLE`, `CONNECT BY` and
 schema-qualified table names; `SELECT ... INTO`, `FOR UPDATE`, and vendor

@@ -309,13 +309,6 @@ object UnsupportedClauses {
         partial = true,
         describe = f => s"${upper(f.getName)}(DISTINCT ...)"
       )(f => f.isDistinct && !DistinctAggregates(upper(f.getName))),
-      // JSqlParser sets isAllColumns for the ALL quantifier, not for `*` (which
-      // arrives as an AllColumns parameter). The binder takes it to mean `*`.
-      rejectsWhen[Function]("isAllColumns")("COUNT(ALL x)",
-        advice = "write COUNT(x)",
-        example = "SELECT COUNT(ALL a) FROM t",
-        partial = true
-      )(f => f.isAllColumns && "COUNT".equalsIgnoreCase(f.getName)),
       rejectsWhen[Function]("isUnique")("UNIQUE inside a function call",
         advice = "write DISTINCT",
         example = "SELECT COUNT(UNIQUE a) FROM t",
@@ -345,6 +338,8 @@ object UnsupportedClauses {
     ),
     Seq(
       "getMultipartName" -> "the parts behind getName, which the binder reads",
+      "isAllColumns" -> ("the ALL quantifier of COUNT(ALL x), which is the default; the star of " +
+        "COUNT(*) is an AllColumns parameter, not this flag"),
       "isEscaped" -> "the JDBC escape {fn ...} around an ordinary call",
       "isIgnoreNullsOutside" -> "where IGNORE / RESPECT NULLS was written; the keyword itself is checked above"))
 
@@ -366,13 +361,6 @@ object UnsupportedClauses {
         partial = true,
         describe = ae => s"${upper(ae.getName)}(DISTINCT ...) OVER (...)"
       )(ae => ae.isDistinct && !"COUNT".equalsIgnoreCase(ae.getName)),
-      // Same ALL-quantifier reading as Function.isAllColumns: COUNT(*) OVER
-      // carries its star in getExpression and leaves isAllColumns false.
-      rejectsWhen[AnalyticExpression]("isAllColumns")("COUNT(ALL x) OVER (...)",
-        advice = "write COUNT(x)",
-        example = "SELECT COUNT(ALL a) OVER () FROM t",
-        partial = true
-      )(ae => ae.isAllColumns && "COUNT".equalsIgnoreCase(ae.getName)),
       rejectsWhen[AnalyticExpression]("getExpression")("An argument to ROW_NUMBER / RANK / DENSE_RANK",
         example = "SELECT ROW_NUMBER(a) OVER (ORDER BY a) FROM t",
         partial = true,
@@ -399,6 +387,8 @@ object UnsupportedClauses {
     ),
     Seq(
       "getWindowDefinition" -> "holds the PARTITION BY, ORDER BY and frame the binder reads through their own getters",
+      "isAllColumns" -> ("the ALL quantifier of COUNT(ALL x) OVER (...), which is the default; the star of " +
+        "COUNT(*) OVER is an AllColumns argument, not this flag"),
       "isIgnoreNullsOutside" -> "where IGNORE / RESPECT NULLS was written; the keyword itself is checked above",
       "isPartitionByBrackets" -> "whether the PARTITION BY list was parenthesized"))
 

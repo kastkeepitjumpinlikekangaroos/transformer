@@ -19,10 +19,10 @@ ship a fix or move something from "not done" to "done".
   parameter list, not an empty parameter list — and `Function.isAllColumns` is
   not the star.** JSqlParser sets `isAllColumns` for the `ALL` quantifier:
   `COUNT(ALL a)` arrives with `isAllColumns = true` and `a` in its parameters,
-  while `COUNT(*)` leaves it false. `bindAgg` still takes it for the star, which
-  made `COUNT(ALL a)` count NULLs, so `UnsupportedClauses` rejects `COUNT(ALL x)`
-  until the binder reads the flag for what it is. `SUM(ALL a)` and the other
-  aggregates ignore it, which is correct: `ALL` is the default.
+  while `COUNT(*)` leaves it false. `ALL` is the default quantifier, so the binder
+  never reads the flag (`UnsupportedClauses` lists it as inert) and finds the
+  star only as an `AllColumns` parameter. It used to read the flag as the star,
+  which made `COUNT(ALL a)` count NULLs.
 - **JSqlParser parses `(a - b)` as a `ParenthesedExpressionList`, not a
   parenthesized binary expression.** There is no parenthesis node in the 5.0 AST
   at all: the deprecated `Parenthesis` class still ships but nothing in the jar
@@ -51,9 +51,9 @@ ship a fix or move something from "not done" to "done".
   outer-scope aggregate collection.
 - **`COUNT(*) OVER ()` parses with `getExpression` returning an
   `AllColumns`, and `isAllColumns` false.** As on `Function` (above),
-  `AnalyticExpression.isAllColumns` is the `ALL` quantifier, so the star is
-  `getExpression instanceof AllColumns` alone. `LogicalBuilder.bindAnalytic`
-  still checks both, which is why `COUNT(ALL x) OVER (...)` is rejected too.
+  `AnalyticExpression.isAllColumns` is the `ALL` quantifier, so
+  `LogicalBuilder.bindAnalytic` finds the star as `getExpression instanceof
+  AllColumns` alone and never reads the flag.
 - **JSqlParser attaches a UNION's trailing `ORDER BY` / `LIMIT` / `OFFSET`
   inconsistently.** When the tail starts with `ORDER BY` it lands on the
   `SetOperationList`; without one, `LIMIT` and `OFFSET` land on the last arm's

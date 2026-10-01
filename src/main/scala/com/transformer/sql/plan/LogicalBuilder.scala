@@ -768,8 +768,10 @@ object LogicalBuilder {
       .map(_.asInstanceOf[ExpressionList[_]].asScala.asInstanceOf[Iterable[Expression]].toSeq)
       .getOrElse(Nil)
     val distinct = f.isDistinct
-    val isStarArg = f.isAllColumns ||
-      (params.size == 1 && params.head.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns])
+    // The star in COUNT(*) is an AllColumns parameter. `f.isAllColumns` is
+    // something else: the ALL quantifier of COUNT(ALL x), which is the default
+    // and changes nothing, so it is never read.
+    val isStarArg = params.size == 1 && params.head.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns]
     upper match {
       case "COUNT" if isStarArg || params.isEmpty => AggExprCountStar()
       case "COUNT" if params.size == 1 =>
@@ -893,7 +895,9 @@ object LogicalBuilder {
     val fnName = ae.getName.toUpperCase
 
     val argExpr: Option[Expression] = Option(ae.getExpression).filterNot(_.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns])
-    val isStarArg: Boolean = ae.isAllColumns ||
+    // As for aggregates, the star is an AllColumns argument; `ae.isAllColumns`
+    // is the ALL quantifier and is never read.
+    val isStarArg: Boolean =
       Option(ae.getExpression).exists(_.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns])
 
     val fn: WindowFn = fnName match {
