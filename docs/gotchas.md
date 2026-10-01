@@ -743,6 +743,60 @@ ship a fix or move something from "not done" to "done".
   a grouped query spills. `fuzz/metamorphic_fuzz_test`'s `agg-decomposition`
   relation is the general guard.
 
+## Known wrong answers, open (found 2026-09-10, not yet fixed)
+
+Three clusters of confirmed defects from an audit of the surfaces the fuzzers
+cannot reach. Each was executed against `SqlEngine` at commit `d4bb409`, not
+inferred. Plans, evidence and repro SQL are in
+[`plans/robustness/`](../plans/robustness/README.md); this list exists so a
+reader of the docs does not have to find the plans first.
+
+- **A SQL clause `LogicalBuilder` does not read is silently dropped, not
+  rejected.** Eighteen confirmed, and five give badly wrong answers:
+  `JOIN ... USING (c)` and `NATURAL JOIN` drop the join condition and become a
+  **cartesian product**; `LEFT SEMI JOIN` becomes a left outer join;
+  `SUM(DISTINCT x)` ignores `DISTINCT`; `agg FILTER (WHERE p)` drops the
+  predicate *and* stops the aggregate collapsing. Also silently ignored:
+  `OFFSET`, `FETCH FIRST`, `TOP n`, `NULLS FIRST`/`NULLS LAST`, `COUNT(ALL x)`
+  (binds as `COUNT(*)`, so it counts NULLs), `QUALIFY`, `DISTINCT ON`, `ILIKE`
+  (runs case-sensitively), `LIKE ... ESCAPE`, `IGNORE NULLS`, `WITH ROLLUP`,
+  named `WINDOW` definitions and `SELECT ... INTO`. Stay inside the documented
+  grammar in the README; do not assume a clause works because it parses.
+  See [plan 01](../plans/robustness/01-reject-or-honor-every-clause.md).
+- **`Ops.eq` / `Ops.cmp` are wrong for `BinaryType` and lossy for
+  `DecimalType`.** A byte array is neither a `Number` nor `Comparable`, so `eq`
+  falls through to reference equality and `cmp` to `toString` on the identity
+  hash: `=` says two equal-content arrays differ, and `ORDER BY` / `MIN` / `MAX`
+  over a binary column are arbitrary and vary run to run. `java.math.BigDecimal`
+  *is* a `Number`, so both helpers go through `doubleValue` and lose every digit
+  past double's 53-bit mantissa - `MIN`/`MAX` over decimals that collide as
+  doubles moves with row order, partition fan-out and spill flush order. Worse,
+  the hash path disagrees with the comparison path in both directions:
+  `HashKeys` compares byte arrays structurally (so `GROUP BY` collapses rows that
+  `=` calls different) and decimals with scale-sensitive `BigDecimal.equals` (so
+  `GROUP BY` separates `1.0` from `1.00`, which `=` calls equal). This is the
+  same single-total-order rule as the three float bugs above, in the types that
+  work never covered. See
+  [plan 02](../plans/robustness/02-total-order-for-decimal-and-binary.md).
+- **The parquet reader ignores the timestamp unit and has no `DECIMAL`
+  mapping.** `TimestampLogicalTypeAnnotation.getUnit()` is never read and the
+  raw `INT64` goes straight into a micros-based `TimestampVector`, so an
+  externally-written `MILLIS` file reads 1000x too small and `NANOS` 1000x too
+  large. `ParquetWriter` emits `MICROS`, which is why `parquet_roundtrip_test`
+  passes: **a self-consistent round-trip cannot catch a wrong interpretation of
+  an external format.** Separately, no `DecimalLogicalTypeAnnotation` case
+  exists, so a parquet decimal falls through to its physical type - `IntType` or
+  `LongType` holding the unscaled value (`123.45` reads as `12345`), or
+  `BinaryType` holding raw two's-complement bytes. `ParquetWriter` cannot write
+  `DecimalType` at all. See
+  [plan 03](../plans/robustness/03-parquet-external-format-fidelity.md).
+
+All three hid for the same reason, and it is the lesson to carry: the fuzz
+generators render SQL from their own typed AST (so the corpus is exactly the
+supported grammar), `DataGen.ColumnTypes` and `ExprGen.GenTypes` list six of the
+engine's ten `DataType`s, and every file-format fixture is written by our own
+writer. Plans 04-07 in that directory close those three holes.
+
 ## What's intentionally NOT done
 
 - **Spill-to-disk** is implemented for `SortExec`, `HashAggregateExec`,
