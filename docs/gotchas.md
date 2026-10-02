@@ -44,6 +44,15 @@ ship a fix or move something from "not done" to "done".
   there (`SELECT g ... GROUP BY g ORDER BY SUM(a)`) had no slot and binding died
   with a `NoSuchElementException`. The same parameter pattern is used for
   window functions via `windowResolver: AnalyticExpression => Option[Expr]`.
+- **A `HAVING` decides the path, not just the filter.** `buildSelect`
+  takes the aggregate path when there is a `GROUP BY`, an aggregate in the
+  SELECT list, **or a `HAVING`**, and only that path reads `getHaving`. The third
+  term was missing, so `SELECT 1 AS x FROM t HAVING COUNT(*) > 10` took the plain
+  path and returned every row with the HAVING silently dropped — a getter read in
+  one context and ignored in another, which the reflection test cannot see (see
+  the plans/robustness/01 entry below). With no `GROUP BY` the aggregate has no
+  keys, so it is one group even over an empty input, and a column outside an
+  aggregate fails to resolve.
 - **`AnalyticExpression` is its own JSqlParser node, NOT a `Function`.** So
   `SUM(x) OVER (...)` won't match `case f: Function` in `containsAggregate`
   / `childExpressions`. Both helpers explicitly short-circuit on

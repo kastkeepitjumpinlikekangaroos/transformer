@@ -560,7 +560,7 @@ SELECT [DISTINCT] <projections>
 [ FROM <table> [<alias>]
   [ {INNER|LEFT|RIGHT|FULL} JOIN <table> [<alias>] ON <predicate> ]* ]
 [ WHERE <predicate> ]
-[ GROUP BY <exprs> [ HAVING <predicate> ] ]
+[ GROUP BY <exprs> ] [ HAVING <predicate> ]
 [ ORDER BY <expr> [ASC|DESC] [NULLS FIRST|NULLS LAST] [, ...] ]
 [ LIMIT <n> ] [ OFFSET <m> [ROWS] ]
 ```
@@ -582,6 +582,11 @@ Without a `FROM`, a `SELECT` reads a single row that has no columns, so its
 expressions are evaluated once: `SELECT 1 + 1 AS two` returns one row,
 `SELECT COUNT(*) AS n` returns 1, and `WHERE`, `LIMIT` and `UNION` apply as they
 do anywhere else. No column name resolves there, and `SELECT *` is an error.
+
+A `HAVING` with no `GROUP BY` makes the query an aggregate over a single group,
+as in standard SQL: `SELECT 'non-empty' AS s FROM t HAVING COUNT(*) > 0` returns
+one row or none. A column outside an aggregate is an error there, not the row
+filter MySQL makes of it.
 
 `GROUP BY` and `ORDER BY` also accept a **positional ordinal** — a bare integer
 naming a SELECT-list position, as in BigQuery / Postgres / MySQL. `ORDER BY 2

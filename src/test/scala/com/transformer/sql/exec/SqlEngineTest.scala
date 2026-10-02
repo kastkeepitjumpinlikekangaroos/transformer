@@ -2035,6 +2035,31 @@ class SqlEngineTest {
     assertTrue(ex.getMessage, ex.getMessage.contains("SUM"))
   }
 
+  /** A HAVING with no GROUP BY groups the whole input into one group, as in
+    * standard SQL. Only the aggregate path read HAVING, so unless the SELECT
+    * list held an aggregate it was dropped: every query below returned its
+    * input rows unfiltered. */
+  @Test def havingWithoutGroupByAggregatesOneGroup(): Unit = {
+    val cat = clauseCatalog() // t.a is 1, 2, 2, 3
+    // Four rows of 1 each, where the single group's count fails or passes.
+    assertEquals(Nil, column("SELECT 1 AS x FROM t HAVING COUNT(*) > 10", cat, "x"))
+    assertEquals(Seq(1), column("SELECT 1 AS x FROM t HAVING COUNT(*) > 1", cat, "x"))
+    assertEquals(Seq(8), column("SELECT 8 AS x FROM t HAVING SUM(a) = 8", cat, "x"))
+    // The one group exists over an empty input too.
+    assertEquals(Seq("empty"), column("SELECT 'empty' AS s FROM t WHERE a > 9 HAVING COUNT(*) = 0", cat, "s"))
+    // And over the one row of a FROM-less SELECT.
+    assertEquals(Nil, column("SELECT 1 AS x HAVING 1 = 0", cat, "x"))
+    // With an aggregate in the SELECT list it already worked; unchanged.
+    assertEquals(Nil, column("SELECT COUNT(*) AS c FROM t HAVING COUNT(*) > 10", cat, "c"))
+    assertEquals(Seq(4L), column("SELECT COUNT(*) AS c FROM t HAVING COUNT(*) > 1", cat, "c"))
+    // A column outside an aggregate has no single value in the group, so this
+    // is an error rather than the filter MySQL makes of it. It returned (1)(2)(2)(3).
+    val ex = try { SqlEngine.execute("SELECT a FROM t HAVING a > 1", cat); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.contains("Unknown column 'a'"))
+  }
+
   @Test def distinctAggregatesPerGroupInHavingAndOrderBy(): Unit = {
     val p = tmpCsv("d.csv", "g,a\nx,1\nx,1\nx,2\ny,5\ny,5\nz,\n")
     val cat = catalogWith("d" -> CsvReader.fromPath(p.toString, CsvOptions()))

@@ -319,6 +319,13 @@ small datasets (a group must repeat a value), so that guard reads 2000 seeds:
 Found along the way, outside this plan's table: an aggregate named only in ORDER
 BY (`SELECT g FROM t GROUP BY g ORDER BY SUM(a)`) was never collected, and
 binding died with an internal `NoSuchElementException`. Fixed in its own commit.
+So was a second one, found while probing the FROM-less SELECT below: a HAVING
+with no GROUP BY was dropped unless the SELECT list held an aggregate.
+`SELECT 1 AS x FROM t HAVING COUNT(*) > 10` returned every row of `t`, because
+only the aggregate path reads `getHaving` and nothing about a HAVING chose that
+path. It is the class this plan is about, in the blind spot the reflection test
+admits to: a getter read in one context and ignored in another. A HAVING now
+makes the query an aggregate over one group, as standard SQL says.
 
 **COUNT(ALL x).** The plan read this as `ALL` being ignored; the binder in fact
 misread `Function.isAllColumns` — JSqlParser's flag for the `ALL` quantifier — as

@@ -284,7 +284,10 @@ object LogicalBuilder {
 
     val hasGroupBy = Option(ps.getGroupBy).exists(g => Option(g.getGroupByExpressionList).exists(!_.isEmpty))
     val itemsContainAgg = expandedItems.exists { case (e, _) => containsAggregate(e) }
-    val isAggregation = hasGroupBy || itemsContainAgg
+    // A HAVING makes the query an aggregate too, over one group when there is
+    // no GROUP BY. Only the aggregate path reads it, so without this term
+    // `SELECT 1 AS x FROM t HAVING COUNT(*) > 10` returned every row.
+    val isAggregation = hasGroupBy || itemsContainAgg || ps.getHaving != null
 
     // Stage 1: aggregation. `binderFactory` produces a binder parameterized by a
     // window resolver — we call it twice: once with the empty resolver (for
