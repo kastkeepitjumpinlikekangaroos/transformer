@@ -194,6 +194,21 @@ object UnsupportedClausesTest {
     "(SELECT a FROM t) UNION ALL (SELECT a FROM u ORDER BY a LIMIT 1)",
     "(SELECT a FROM t ORDER BY a LIMIT 1)",
     "SELECT a FROM t ORDER BY (a), b ASC",
+    // What plan 01's second half honours, so a narrowed partial rejection
+    // cannot quietly widen back over it.
+    "SELECT a FROM t ORDER BY a LIMIT 2 OFFSET 1",
+    "SELECT a FROM t OFFSET 1 ROWS",
+    "SELECT a FROM t LIMIT 1, 2",
+    "SELECT a FROM t UNION ALL SELECT a FROM u LIMIT 2 OFFSET 1",
+    "SELECT a FROM t ORDER BY a NULLS LAST, b DESC NULLS FIRST",
+    "SELECT ROW_NUMBER() OVER (ORDER BY a DESC NULLS LAST) FROM t",
+    "SELECT SUM(DISTINCT a), AVG(DISTINCT a), MIN(DISTINCT a), MAX(DISTINCT b), COUNT(ALL a) FROM t",
+    "SELECT COUNT(ALL a) OVER (), COUNT(DISTINCT a) OVER () FROM t",
+    "SELECT a FROM t WHERE s ILIKE 'x%' AND s NOT ILIKE 'y' AND s LIKE 'a!_%' ESCAPE '!' " +
+      "AND s ILIKE 'b' ESCAPE ''",
+    "SELECT 1 AS x",
+    "SELECT COUNT(*) WHERE 1 = 1",
+    "SELECT 1 FROM t HAVING COUNT(*) > 1",
     "SELECT TOP 2 a FROM t ORDER BY a",
     "SELECT DISTINCT TOP (2) a FROM t",
     "SELECT a FROM t ORDER BY a OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY",
