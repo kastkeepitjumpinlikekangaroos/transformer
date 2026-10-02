@@ -2,6 +2,10 @@ package com.transformer.sql.plan
 
 import com.transformer.core._
 
+import java.time.{Instant, LocalDate, LocalDateTime, OffsetDateTime, ZoneOffset}
+import java.time.chrono.IsoChronology
+import java.time.format.{DateTimeFormatter, DateTimeFormatterBuilder, DateTimeParseException, ResolverStyle}
+import java.time.temporal.{ChronoField, ChronoUnit}
 import java.util
 
 /** Binary operator evaluation, plus NULL-safe equality and ordering helpers. */
@@ -101,7 +105,10 @@ object Ops {
   }
 }
 
-/** Type-promoting casts at value level. Only invoked for non-null values. */
+/** Type-promoting casts at value level. Only invoked for non-null values. A
+  * DATE comes back as a `LocalDate` and a TIMESTAMP as an `Instant`, the values
+  * a `DateVector` and a `TimestampVector` box to, so the row path and the
+  * vector path agree. */
 object Casts {
   def cast(v: Any, from: DataType, to: DataType): Any = {
     if (v == null) return null
@@ -143,13 +150,51 @@ object Casts {
         }
       case DataType.DateType =>
         v match {
-          case d: java.time.LocalDate => d.toEpochDay.toInt
-          case s: String => java.time.LocalDate.parse(s).toEpochDay.toInt
-          case n: Number => n.intValue
+          case d: LocalDate => d
+          // A timestamp's date in UTC, like every time in the engine.
+          case i: Instant => LocalDate.ofInstant(i, ZoneOffset.UTC)
+          case s: String => LocalDate.ofInstant(parseInstant(s, "date"), ZoneOffset.UTC)
+          case n: Number => LocalDate.ofEpochDay(n.longValue)
           case _ => throw new IllegalArgumentException(s"Cannot cast $v to date")
+        }
+      case DataType.TimestampType =>
+        v match {
+          case i: Instant => i
+          case d: LocalDate => d.atStartOfDay(ZoneOffset.UTC).toInstant
+          case s: String => parseInstant(s, "timestamp")
+          case _ => throw new IllegalArgumentException(s"Cannot cast $v to timestamp")
         }
       case other => throw new IllegalArgumentException(s"CAST to $other not implemented")
     }
+  }
+
+  /** The text a CAST to DATE or TIMESTAMP reads: an ISO date, then optionally a
+    * time and then optionally `Z` or an offset. */
+  private val TemporalText: DateTimeFormatter = new DateTimeFormatterBuilder()
+    .append(DateTimeFormatter.ISO_LOCAL_DATE)
+    .optionalStart()
+    .appendLiteral('T')
+    .append(DateTimeFormatter.ISO_LOCAL_TIME)
+    .optionalStart().appendOffset("+HH:mm", "Z").optionalEnd()
+    .optionalEnd()
+    .toFormatter()
+    .withChronology(IsoChronology.INSTANCE)
+    .withResolverStyle(ResolverStyle.STRICT)
+
+  /** A date alone is its midnight, and a time with no zone is UTC. The result
+    * is truncated to the microseconds a `TimestampVector` holds. */
+  private def parseInstant(s: String, target: String): Instant = {
+    val t = s.trim
+    // SQL writes a space between the date and the time, ISO a T.
+    val iso = if (t.length > 10 && t.charAt(10) == ' ') t.substring(0, 10) + "T" + t.substring(11) else t
+    val parsed =
+      try TemporalText.parse(iso)
+      catch { case _: DateTimeParseException => throw new IllegalArgumentException(s"Cannot cast '$s' to $target") }
+    val instant =
+      if (parsed.isSupported(ChronoField.OFFSET_SECONDS)) OffsetDateTime.from(parsed).toInstant
+      else if (parsed.isSupported(ChronoField.HOUR_OF_DAY)) LocalDateTime.from(parsed).toInstant(ZoneOffset.UTC)
+      else LocalDate.from(parsed).atStartOfDay(ZoneOffset.UTC).toInstant
+    instant.truncatedTo(ChronoUnit.MICROS)
   }
 }
 

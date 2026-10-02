@@ -635,7 +635,9 @@ object LogicalBuilder {
     case s: StringValue => LitExpr(s.getValue, DataType.StringType)
     case _: NullValue => LitExpr(null, DataType.NullType)
     case d: DateValue => LitExpr(d.getValue.toLocalDate, DataType.DateType)
-    case t: TimestampValue => LitExpr(t.getValue.toLocalDateTime, DataType.TimestampType)
+    // `{ts '...'}` holds its text as a wall-clock time, which is UTC here.
+    case t: TimestampValue =>
+      LitExpr(t.getValue.toLocalDateTime.toInstant(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS), DataType.TimestampType)
     case _: TimeValue => throw new IllegalArgumentException("TIME literal not supported")
     // UnsupportedClauses has already rejected every keyword but the two clock ones.
     case tk: TimeKeyExpression => clockLiteral(UnsupportedClauses.clockKeyword(tk.getStringValue))

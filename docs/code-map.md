@@ -51,7 +51,7 @@ navigation hint, not a comprehensive directory listing.
 - `sql/plan/Expr.scala` (~650 LOC) — `Expr` ADT plus `eval` and `evalVec`
   per subtype. `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` each carry
   an `evalVec` override; the rest of the hot subtypes delegate to `VecOps`.
-- `sql/plan/Ops.scala` (~745 LOC) — `Ops` (row-at-a-time binary ops, `eq`,
+- `sql/plan/Ops.scala` (~790 LOC) — `Ops` (row-at-a-time binary ops, `eq`,
   `cmp`), `Casts`, and `VecOps` (one specialized loop per (op, output type)
   pair, which is most of the length). The floating-point comparison contract
   both `Expr` paths follow lives on `VecOps.numericCompare`; see

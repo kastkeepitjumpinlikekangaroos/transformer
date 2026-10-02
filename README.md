@@ -681,6 +681,17 @@ and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
 `DOUBLE`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`, `DATE`,
 `TIMESTAMP`.
 
+Text casts to `DATE` or `TIMESTAMP` from an ISO date, optionally followed by a
+time (after `T` or a space) and then `Z` or an offset such as `+02:00`. A time
+with no zone is UTC and a date alone is midnight, so `'2026-01-01 05:30:21'`,
+`'2026-01-01T05:30:21Z'` and `'2026-01-01 07:30:21+02:00'` are one instant.
+`DATE '2026-01-01'` and `TIMESTAMP '2026-01-01 05:30:21'` are literals of the two
+types. A `TIMESTAMP` casts to `DATE` as its date in UTC, and a `DATE` compared
+with a `TIMESTAMP` stands for its midnight. **Compare a timestamp with a
+`TIMESTAMP '...'` literal, not a bare string**: a bare string compares as text
+against the stored form `2026-01-01T05:30:21Z`, so `ts < '2026-01-01 06:00:00'`
+is wrong within the day (see [docs/gotchas.md](docs/gotchas.md)).
+
 **CTEs (`WITH`):** supported, non-recursive. `WITH a AS (...), b AS (SELECT ...
 FROM a) SELECT ... FROM b` — later CTEs may reference earlier ones, a CTE can
 carry an explicit column-alias list (`WITH c(x, y) AS (...)`), and a CTE name

@@ -65,11 +65,11 @@ were found by hand at `2f837fc` and are **not fixed**; each wants a regression i
   number parser unguarded.
 - **Raw parse exceptions mid-drain from CAST.** `SELECT CAST(s AS INT) FROM t`
   over a non-numeric `s` fails while the result drains, with
-  `java.lang.NumberFormatException: For input string: "x"`, and
-  `CAST(s AS DATE)` over a string that is not a date with
-  `java.time.format.DateTimeParseException`. Both depend on the data, so neither
-  can be a bind-time rejection; the defect is the internal exception class, and a
-  message that names neither the cast nor the column.
+  `java.lang.NumberFormatException: For input string: "x"`; `BIGINT`, `FLOAT`
+  and `DOUBLE` behave the same. It depends on the data, so it cannot be a
+  bind-time rejection; the defect is the internal exception class, and a message
+  that names neither the cast nor the column. (CAST to DATE and TIMESTAMP have
+  since said `Cannot cast 'x' to date`, the shape the others want.)
 - **The `_agg0` slot name leaks from the ungrouped-column error.**
   `SELECT a, COUNT(*) AS c FROM t` (a column outside the aggregate, no GROUP BY)
   reports `Unknown column 'a'. Available: [_agg0]`, and so does

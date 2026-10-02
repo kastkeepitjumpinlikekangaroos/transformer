@@ -59,6 +59,9 @@ object Analyzer {
     else if (DataType.isNumeric(lt) && DataType.isNumeric(rt)) {
       val target = DataType.widerNumeric(lt, rt)
       (implicitCast(l, target), implicitCast(r, target), target)
+    } else if (Set(lt, rt) == Set[DataType](DataType.DateType, DataType.TimestampType)) {
+      // A date meets a timestamp as its midnight in UTC, as in standard SQL.
+      (implicitCast(l, DataType.TimestampType), implicitCast(r, DataType.TimestampType), DataType.TimestampType)
     } else if (lt == DataType.NullType) (implicitCast(l, rt), r, rt)
     else if (rt == DataType.NullType) (l, implicitCast(r, lt), lt)
     else if (lt == DataType.StringType || rt == DataType.StringType) {

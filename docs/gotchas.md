@@ -79,6 +79,16 @@ ship a fix or move something from "not done" to "done".
   `NullPointerException` from it. The binder reads `getExpression` (a missing
   count means one) and the audit lists `getRowCount` as inert, so the rejection
   walk never calls it either.
+- **A DATE boxes to `LocalDate` and a TIMESTAMP to `Instant`, on both
+  evaluation paths.** That is what `DateVector.getBoxed` and
+  `TimestampVector.getBoxed` return, so every row-path value of those types must
+  be the same class, or `Ops.eq` calls it unequal to a column's value and
+  `Ops.cmp` throws. `Casts.cast` returned an epoch-day `Int` for DATE, which the
+  vector path absorbed (`setBoxed` takes an `Int`) and `ExprBatchTest`'s
+  `normalize` hid; `{ts '...'}` bound to a `LocalDateTime`, which
+  `TimestampVector.setBoxed` rejects. Both box canonically now, and
+  `castToDateAndTimestampBoxLikeTheVector` compares the classes, not just the
+  normalized values.
 - **The clock keywords are a `TimeKeyExpression`, spelled as written.**
   `current_date`, `CURRENT_DATE()` and DB2's `CURRENT DATE` arrive as three
   different strings, and `CURRENT_DATE ()`, with a space, arrives as a
@@ -894,6 +904,21 @@ fuzz generators render SQL from their own typed AST (so the corpus is exactly th
 supported grammar), `DataGen.ColumnTypes` and `ExprGen.GenTypes` list six of the
 engine's ten `DataType`s, and every file-format fixture is written by our own
 writer. Plans 04-07 in that directory close those three holes.
+
+Found later, on 2026-10-02, while teaching CAST to read TIMESTAMP:
+
+- **A TIMESTAMP compared with a bare string compares as text.**
+  `Analyzer.promotePair` coerces the other side of a comparison with a string
+  to a string, and a timestamp's text is `2026-01-01T05:30:21Z`. Against SQL's
+  `'2026-01-01 06:00:00'` the `T` meets a space at index 10 and decides the
+  order, so `ts < '2026-01-01 06:00:00'` misses a row at `05:30:21`, `ts > ...`
+  returns it, and a same-day `BETWEEN` is empty, since `BETWEEN` promotes the
+  same way. An IN list is right: it casts its items to the column's type. So is
+  a `TIMESTAMP '...'` literal. Not fixed, because the standard rule (cast the
+  string to a timestamp) changes the result of queries that run today, and a
+  string column compared with a timestamp column would start failing on rows
+  that do not parse; it waits for a decision. Dates are safe in practice: an
+  ISO date's text sorts as the date does.
 
 ## What's intentionally NOT done
 

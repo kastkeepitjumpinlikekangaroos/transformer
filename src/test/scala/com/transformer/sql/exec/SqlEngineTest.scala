@@ -2369,6 +2369,53 @@ class SqlEngineTest {
     assertRejected("SELECT CURRENT_TIME AS t FROM tt", cat, "CURRENT_TIME")
   }
 
+  /** README listed TIMESTAMP among the CAST types, but CAST to TIMESTAMP threw
+    * "not implemented", and so did every `TIMESTAMP '...'` literal, which
+    * JSqlParser parses as that cast. */
+  @Test def castToTimestampAndTimestampLiterals(): Unit = {
+    val cat = new Catalog
+    cat.register("tt", CsvReader.fromPath(tmpCsv("tt.csv",
+      "d,ts\n2026-01-01,2026-01-01T05:30:21Z\n2999-01-01,2999-01-01T00:00:00Z\n").toString, CsvOptions()))
+    def one(sql: String): Any = collectAllRows(SqlEngine.execute(sql, cat)).head("v")
+    val at = java.time.Instant.parse("2026-01-01T05:30:21Z")
+    // SQL's space before the time, ISO's T, a Z or an offset; no zone is UTC.
+    assertEquals(at, one("SELECT TIMESTAMP '2026-01-01 05:30:21' AS v"))
+    assertEquals(at, one("SELECT CAST('2026-01-01T05:30:21Z' AS TIMESTAMP) AS v"))
+    assertEquals(at, one("SELECT CAST('2026-01-01T05:30:21' AS TIMESTAMP) AS v"))
+    assertEquals(at, one("SELECT CAST('2026-01-01 07:30:21+02:00' AS TIMESTAMP) AS v"))
+    assertEquals(at, one("SELECT {ts '2026-01-01 05:30:21'} AS v"))
+    // A date alone is its midnight; a fraction keeps the microseconds a
+    // TimestampVector holds.
+    assertEquals(java.time.Instant.parse("2026-01-01T00:00:00Z"), one("SELECT CAST('2026-01-01' AS TIMESTAMP) AS v"))
+    assertEquals(java.time.Instant.parse("2026-01-01T05:30:21.123456Z"),
+      one("SELECT TIMESTAMP '2026-01-01 05:30:21.123456789' AS v"))
+    // Between the two types: a timestamp's date in UTC, and a date's midnight.
+    assertEquals(Seq(java.time.LocalDate.parse("2026-01-01"), java.time.LocalDate.parse("2999-01-01")),
+      column("SELECT CAST(ts AS DATE) AS v FROM tt ORDER BY ts", cat, "v"))
+    assertEquals(Seq(java.time.Instant.parse("2026-01-01T00:00:00Z"), java.time.Instant.parse("2999-01-01T00:00:00Z")),
+      column("SELECT CAST(d AS TIMESTAMP) AS v FROM tt ORDER BY d", cat, "v"))
+    assertEquals(java.time.LocalDate.parse("2026-01-01"), one("SELECT CAST('2026-01-01 23:59:59' AS DATE) AS v"))
+    assertEquals(true, one("SELECT CAST(CURRENT_TIMESTAMP AS DATE) = CURRENT_DATE AS v"))
+    // A typed literal compares as a timestamp, within the day too, and so do
+    // the strings of an IN list, which casts them to the column's type.
+    assertEquals(Seq(at), column("SELECT ts FROM tt WHERE ts < TIMESTAMP '2026-01-01 06:00:00'", cat, "ts"))
+    assertEquals(Seq(at), column("SELECT ts FROM tt WHERE ts IN ('2026-01-01 05:30:21', '2026-06-01')", cat, "ts"))
+    // A date against a timestamp is its midnight. These threw
+    // ClassCastException, and `=` was false for every pair.
+    assertEquals(Seq(java.time.LocalDate.parse("2026-01-01")),
+      column("SELECT d FROM tt WHERE d < CURRENT_TIMESTAMP", cat, "d"))
+    assertEquals(Seq(java.time.LocalDate.parse("2026-01-01")),
+      column("SELECT d FROM tt WHERE d = TIMESTAMP '2026-01-01 00:00:00'", cat, "d"))
+    // A date IN a list of strings casts the strings to dates.
+    assertEquals(Seq(java.time.LocalDate.parse("2026-01-01")),
+      column("SELECT d FROM tt WHERE d IN ('2026-01-01', '2026-06-01')", cat, "d"))
+    // Text that is no timestamp is a clean error naming the value.
+    val ex = try { collectAllRows(SqlEngine.execute("SELECT CAST('noon' AS TIMESTAMP) AS v", cat)); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.contains("Cannot cast 'noon' to timestamp"))
+  }
+
   @Test def groupingSetsRejectedWithoutLeakingAnInternalName(): Unit = {
     // Used to fail binding with "Unknown column 'g'. Available: [_agg0]".
     val cat = clauseCatalog()
