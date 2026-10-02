@@ -556,13 +556,13 @@ The engine supports the standard SQL-92 SELECT shape:
 
 ```
 [ WITH <name> [(<col>, ...)] AS (<select>) [, ...] ]
-SELECT [DISTINCT] <projections>
+SELECT [DISTINCT] [TOP <n>] <projections>
 [ FROM <table> [<alias>]
   [ {INNER|LEFT|RIGHT|FULL} JOIN <table> [<alias>] ON <predicate> ]* ]
 [ WHERE <predicate> ]
 [ GROUP BY <exprs> ] [ HAVING <predicate> ]
 [ ORDER BY <expr> [ASC|DESC] [NULLS FIRST|NULLS LAST] [, ...] ]
-[ LIMIT <n> ] [ OFFSET <m> [ROWS] ]
+[ LIMIT <n> ] [ OFFSET <m> [ROWS] ] [ FETCH {FIRST|NEXT} [<n>] {ROW|ROWS} ONLY ]
 ```
 
 A NULL sorts as the smallest value unless the key says otherwise: first under
@@ -577,6 +577,14 @@ of ten. MySQL's `LIMIT m, n` spelling means the same as `LIMIT n OFFSET m`.
 Written after the last arm of a `UNION`, both clauses apply to the whole union,
 as they do in Postgres. Without an `ORDER BY` that fixes the order, which rows a
 `LIMIT` or `OFFSET` keeps is unspecified, as in any SQL engine.
+
+The row count has two more spellings, both common in SQL ported from other
+warehouses: the standard `FETCH FIRST n ROWS ONLY` (also `FETCH NEXT`, `ROW`, and
+`FETCH FIRST ROW ONLY` for one row), which pairs with `OFFSET m ROWS`, and T-SQL's
+`SELECT TOP n` (or `TOP (n)`). Each means `LIMIT n`, and a query may use one of
+the three. `TOP` cannot be combined with `OFFSET`, as in T-SQL, and the
+`WITH TIES` and `PERCENT` forms of both are rejected. After a `UNION`, `FETCH`
+limits the whole union like `LIMIT`; a `TOP` belongs to the arm it is written in.
 
 Without a `FROM`, a `SELECT` reads a single row that has no columns, so its
 expressions are evaluated once: `SELECT 1 + 1 AS two` returns one row,
@@ -604,8 +612,8 @@ to vanish without an error — `JOIN ... USING` ran as a cartesian product,
 an `IllegalArgumentException` naming it, for example `QUALIFY is not supported;
 compute the window function in a WITH clause and filter on it in the outer
 WHERE`. Rejected, among others: `JOIN ... USING`, `NATURAL`, `SEMI` and `APPLY`
-joins, a bare `OUTER JOIN` and Oracle's `(+)`; `FETCH FIRST`, `TOP n`, and
-`ORDER BY` / `LIMIT` / `OFFSET` after a parenthesized query; `QUALIFY`,
+joins, a bare `OUTER JOIN` and Oracle's `(+)`; `TOP n PERCENT`, `WITH TIES`, and
+`ORDER BY` / `LIMIT` / `OFFSET` / `FETCH` after a parenthesized query; `QUALIFY`,
 `DISTINCT ON`, `GROUPING SETS` and `WITH ROLLUP`; `FILTER (WHERE ...)`,
 `WITHIN GROUP`, `IGNORE NULLS` and named `WINDOW`s; `DISTINCT` inside
 `STDDEV`, `VARIANCE`, `COUNT_IF`, `COVAR` or `CORR`; `RLIKE` / `REGEXP`, `SIMILAR TO` and

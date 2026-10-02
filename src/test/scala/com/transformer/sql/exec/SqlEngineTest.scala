@@ -2200,11 +2200,54 @@ class SqlEngineTest {
     assertEquals(Map[Any, Any](5 -> 1L, 4 -> 2L, 2 -> 3L, 3 -> 3L, 1 -> 5L), ranks)
   }
 
-  @Test def topAndFetchFirstRejected(): Unit = {
-    // Both returned all four rows.
-    val cat = clauseCatalog()
-    assertRejected("SELECT TOP 2 a FROM t", cat, "TOP n")
-    assertRejected("SELECT a FROM t FETCH FIRST 2 ROWS ONLY", cat, "FETCH FIRST")
+  @Test def fetchFirstAndTopAreSpellingsOfLimit(): Unit = {
+    val cat = clauseCatalog() // t4.a is 1..4, t.a is 1, 2, 2, 3, s.a is 2, 3
+    // The plan's cases: both returned all four rows.
+    assertEquals(Seq(1, 2), column("SELECT TOP 2 a FROM t4 ORDER BY a", cat, "a"))
+    assertEquals(Seq(1, 2), column("SELECT a FROM t4 ORDER BY a FETCH FIRST 2 ROWS ONLY", cat, "a"))
+    // The other spellings: TOP (n); NEXT, ROW, and a count left out, which is one.
+    assertEquals(Seq(4, 3), column("SELECT TOP (2) a FROM t4 ORDER BY a DESC", cat, "a"))
+    assertEquals(Seq(1), column("SELECT a FROM t4 ORDER BY a FETCH NEXT 1 ROW ONLY", cat, "a"))
+    assertEquals(Seq(1), column("SELECT a FROM t4 ORDER BY a FETCH FIRST ROW ONLY", cat, "a"))
+    assertEquals(Nil, column("SELECT TOP 0 a FROM t4", cat, "a"))
+    // The standard page: OFFSET, then FETCH.
+    assertEquals(Seq(2, 3), column("SELECT a FROM t4 ORDER BY a OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY", cat, "a"))
+    // Like LIMIT, both count after DISTINCT.
+    assertEquals(Seq(1, 2), column("SELECT DISTINCT TOP 2 a FROM t ORDER BY a", cat, "a"))
+    assertEquals(Seq(3, 2), column("SELECT DISTINCT a FROM t ORDER BY a DESC FETCH FIRST 2 ROWS ONLY", cat, "a"))
+    // After a UNION, FETCH limits the whole union; JSqlParser parks it on the
+    // list and an OFFSET without ORDER BY on the last arm, and both apply to
+    // the union: 6 rows, skip 5, keep 1. (Read per arm: s skips to nothing,
+    // and the union keeps 2.)
+    assertEquals(Seq(1, 2, 2),
+      column("SELECT a FROM t4 UNION ALL SELECT a FROM s ORDER BY a FETCH FIRST 3 ROWS ONLY", cat, "a"))
+    assertEquals(1,
+      column("SELECT a FROM t4 UNION ALL SELECT a FROM s OFFSET 5 ROWS FETCH NEXT 2 ROWS ONLY", cat, "a").size)
+    // TOP belongs to its own arm, even the last one, and to a CTE body.
+    assertEquals(Seq(3, 4), column(
+      "(SELECT TOP 1 a FROM t4 ORDER BY a DESC) UNION ALL (SELECT TOP 1 a FROM s ORDER BY a DESC) ORDER BY a",
+      cat, "a"))
+    assertEquals(5, column("SELECT a FROM t4 UNION ALL SELECT TOP 1 a FROM s", cat, "a").size)
+    assertEquals(Seq(4), column("WITH c AS (SELECT TOP 1 a FROM t4 ORDER BY a DESC) SELECT a FROM c", cat, "a"))
+    // The modifiers neither spelling of LIMIT can express.
+    assertRejected("SELECT TOP 50 PERCENT a FROM t", cat, "TOP n PERCENT")
+    assertRejected("SELECT TOP 2 WITH TIES a FROM t ORDER BY a", cat, "TOP n WITH TIES")
+    assertRejected("SELECT a FROM t ORDER BY a FETCH FIRST 2 ROWS WITH TIES", cat, "FETCH ... WITH TIES")
+    assertRejected("SELECT a FROM t FETCH FIRST 50 PERCENT ROWS ONLY", cat, "FETCH ... PERCENT")
+    assertRejected("(SELECT a FROM t) FETCH FIRST 1 ROWS ONLY", cat, "after a parenthesized query")
+    // Two counts, or TOP with a skip, are an error rather than a guess.
+    def bindError(sql: String): String =
+      try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    assertTrue(bindError("SELECT TOP 2 a FROM t LIMIT 1").contains("LIMIT and TOP both limit the rows"))
+    assertTrue(bindError("SELECT a FROM t LIMIT 3 FETCH FIRST 2 ROWS ONLY")
+      .contains("LIMIT and FETCH FIRST both limit the rows"))
+    assertTrue(bindError("SELECT a FROM t4 UNION ALL SELECT a FROM s LIMIT 3 FETCH FIRST 2 ROWS ONLY")
+      .contains("LIMIT and FETCH FIRST both limit the rows"))
+    assertTrue(bindError("SELECT TOP 2 a FROM t ORDER BY a OFFSET 1 ROWS").contains("TOP n with OFFSET is not supported"))
+    // The count must be an integer literal, as LIMIT's must.
+    assertTrue(bindError("SELECT TOP (1 + 1) a FROM t").contains("TOP must be an integer literal"))
+    assertTrue(bindError("SELECT a FROM t FETCH FIRST -1 ROWS ONLY").contains("FETCH FIRST must be an integer literal"))
   }
 
   @Test def ilikeMatchesRegardlessOfCase(): Unit = {

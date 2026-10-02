@@ -7,15 +7,15 @@ navigation hint, not a comprehensive directory listing.
 
 ## File-size hot spots
 
-- `sql/plan/LogicalBuilder.scala` (~1110 LOC) — largest file in `sql/plan`.
+- `sql/plan/LogicalBuilder.scala` (~1135 LOC) — largest file in `sql/plan`.
   Pattern matches every JSqlParser expression node, dispatches SELECT shapes,
   and (for
   outermost-scope `WITH` CTEs) emits placeholder `PendingCteView` scans +
   collects `CteDef`s into a `BuiltQuery`, which `sql/exec/CteResolver.scala`
   later inlines or materializes (see [architecture §6b](architecture.md#6b-cte-resolution-inline-vs-materialize)).
   If you're adding a syntax feature, this is probably where it lands.
-- `sql/plan/UnsupportedClauses.scala` (~675 LOC) — the rejection pass that runs
-  before binding, and its audit: for each of the ~55 JSqlParser classes the
+- `sql/plan/UnsupportedClauses.scala` (~685 LOC) — the rejection pass that runs
+  before binding, and its audit: for each of the ~60 JSqlParser classes the
   binder reaches, every getter the binder does not read, as a rejection (clause,
   advice, example SQL) or inert (with the reason). Most of the length is that
   table. Teaching `LogicalBuilder` a clause means deleting its entry here;

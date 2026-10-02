@@ -289,7 +289,11 @@ does not implement, keyed by the AST getter that carries it. To implement one:
    getter it reads. It learns what the binder reads from the compiled
    `LogicalBuilder` class files, so there is no list to update by hand — but if
    binding moves into another object, add that object to the test's
-   `BinderClassPrefixes`.
+   `BinderClassPrefixes`. A call counts for the class it is made through and
+   every subclass of it, so read a getter `Select` declares (`getOffset`,
+   `getFetch`) through a `PlainSelect` or `SetOperationList` reference. Called
+   through `Select`, it would count as read on `ParenthesedSelect` too, where
+   the clause stays rejected, and the test fails on the contradiction.
 3. Replace the clause's rejection regression in `SqlEngineTest` with one that
    asserts the answer, and move the clause in `README.md` from the "rejected,
    not ignored" list into the supported grammar.

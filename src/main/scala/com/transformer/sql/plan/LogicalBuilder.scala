@@ -203,25 +203,42 @@ object LogicalBuilder {
       case None => union
     }
 
+    // FETCH needs no hoist: JSqlParser always parks it on the list itself.
     applyOffsetAndLimit(afterSort,
-      Option(sol.getLimit).orElse(hoistedLimit), Option(sol.getOffset).orElse(hoistedOffset))
+      Option(sol.getLimit).orElse(hoistedLimit), Option(sol.getOffset).orElse(hoistedOffset),
+      Option(sol.getFetch), top = None)
   }
 
-  /** OFFSET, then LIMIT, in the order SQL applies them: skip `offset` rows of
-    * the whole result, then keep `limit` of what is left. MySQL's
+  /** OFFSET, then the row count, in the order SQL applies them: skip `offset`
+    * rows of the whole result, then keep `count` of what is left. MySQL's
     * `LIMIT offset, count` carries its offset inside the Limit; the standard
-    * `OFFSET n [ROWS]` arrives as a clause of its own. */
-  private def applyOffsetAndLimit(plan: LogicalPlan, limit: Option[Limit], offset: Option[Offset]): LogicalPlan = {
+    * `OFFSET n [ROWS]` arrives as a clause of its own. The count has three
+    * spellings, of which a query may use one: `LIMIT n`, the standard
+    * `FETCH FIRST n ROWS ONLY`, and T-SQL's `TOP n`. */
+  private def applyOffsetAndLimit(
+      plan: LogicalPlan,
+      limit: Option[Limit],
+      offset: Option[Offset],
+      fetch: Option[Fetch],
+      top: Option[Top]): LogicalPlan = {
     val limitOffset = limit.flatMap(l => Option(l.getOffset))
     if (limitOffset.isDefined && offset.isDefined)
       throw new IllegalArgumentException("OFFSET given twice: as LIMIT offset, count and as OFFSET")
     val skip = offset.map(o => integerLiteral("OFFSET", o.getOffset))
       .orElse(limitOffset.map(integerLiteral("OFFSET", _)))
+    // T-SQL refuses this pair too: nothing says whether TOP counts before or
+    // after the skip.
+    if (top.isDefined && skip.isDefined)
+      throw new IllegalArgumentException("TOP n with OFFSET is not supported; write LIMIT n OFFSET m")
+    val counts: Seq[(String, Long)] =
+      limit.flatMap(l => Option(l.getRowCount)).map(c => "LIMIT" -> integerLiteral("LIMIT", c)).toSeq ++
+        // `FETCH FIRST ROW ONLY` leaves the count out, and it means one.
+        fetch.map(f => "FETCH FIRST" -> Option(f.getExpression).fold(1L)(integerLiteral("FETCH FIRST", _))) ++
+        top.map(t => "TOP" -> integerLiteral("TOP", t.getExpression))
+    if (counts.size > 1)
+      throw new IllegalArgumentException(s"${counts.map(_._1).mkString(" and ")} both limit the rows; write one")
     val afterOffset = skip.filter(_ > 0).fold(plan)(LogicalOffset(plan, _))
-    limit.flatMap(l => Option(l.getRowCount)) match {
-      case Some(rowCount) => LogicalLimit(afterOffset, integerLiteral("LIMIT", rowCount))
-      case None => afterOffset
-    }
+    counts.headOption.fold(afterOffset) { case (_, n) => LogicalLimit(afterOffset, n) }
   }
 
   /** A row count: JSqlParser parses a negative one as a SignedExpression, so a
@@ -376,7 +393,8 @@ object LogicalBuilder {
       case _ => afterDistinct
     }
 
-    applyOffsetAndLimit(afterDistinctSort, Option(ps.getLimit), Option(ps.getOffset))
+    applyOffsetAndLimit(afterDistinctSort, Option(ps.getLimit), Option(ps.getOffset),
+      Option(ps.getFetch), Option(ps.getTop))
   }
 
   // ---------------------------------------------------------------------------

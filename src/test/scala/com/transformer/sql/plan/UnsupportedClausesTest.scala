@@ -193,7 +193,13 @@ object UnsupportedClausesTest {
     "SELECT a FROM t UNION ALL SELECT a FROM u ORDER BY 1 LIMIT 3",
     "(SELECT a FROM t) UNION ALL (SELECT a FROM u ORDER BY a LIMIT 1)",
     "(SELECT a FROM t ORDER BY a LIMIT 1)",
-    "SELECT a FROM t ORDER BY (a), b ASC"
+    "SELECT a FROM t ORDER BY (a), b ASC",
+    "SELECT TOP 2 a FROM t ORDER BY a",
+    "SELECT DISTINCT TOP (2) a FROM t",
+    "SELECT a FROM t ORDER BY a OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY",
+    "SELECT a FROM t FETCH FIRST ROW ONLY",
+    "SELECT a FROM t UNION ALL SELECT a FROM u FETCH FIRST 2 ROWS ONLY",
+    "WITH c AS (SELECT a FROM t FETCH FIRST 1 ROWS ONLY) SELECT a FROM c"
   )
 
   private lazy val allRejections: Seq[UnsupportedClauses.Rejection] = {

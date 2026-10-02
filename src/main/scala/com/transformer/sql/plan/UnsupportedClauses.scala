@@ -18,8 +18,8 @@ import net.sf.jsqlparser.schema.{Column, Table}
 import net.sf.jsqlparser.statement.Statement
 import net.sf.jsqlparser.statement.create.table.ColDataType
 import net.sf.jsqlparser.statement.select.{
-  AllColumns, AllTableColumns, Distinct, GroupByElement, Join, Limit, Offset, OrderByElement,
-  ParenthesedSelect, PlainSelect, SelectItem, SetOperationList, UnionOp, WithItem
+  AllColumns, AllTableColumns, Distinct, Fetch, GroupByElement, Join, Limit, Offset, OrderByElement,
+  ParenthesedSelect, PlainSelect, SelectItem, SetOperationList, Top, UnionOp, WithItem
 }
 
 import java.lang.reflect.{Field => JField, InvocationTargetException, Method, Modifier}
@@ -142,8 +142,6 @@ object UnsupportedClauses {
   // ---------------------------------------------------------------------------
 
   // Clauses every SELECT shape inherits from `Select`.
-  private val FetchClause = rejects("getFetch")("FETCH FIRST / FETCH NEXT",
-    advice = "write LIMIT n", example = "SELECT a FROM t FETCH FIRST 2 ROWS ONLY")
   private val LimitByClause = rejects("getLimitBy")("LIMIT n BY",
     example = "SELECT a FROM t LIMIT 1 BY a")
   private val LockingClause =
@@ -158,7 +156,7 @@ object UnsupportedClauses {
     advice = "write ORDER BY", example = "SELECT a FROM t ORDER SIBLINGS BY a")
 
   private val SelectTail: Seq[Rejection] = Seq(
-    FetchClause, LimitByClause, LockingClause, ForClause, IsolationClause, SiblingsClause)
+    LimitByClause, LockingClause, ForClause, IsolationClause, SiblingsClause)
 
   // Accessors on `Select` that return the node itself, or cast it.
   private val SelectCasts: Seq[(String, String)] = Seq(
@@ -167,10 +165,11 @@ object UnsupportedClauses {
     "getSetOperationList" -> "a cast of this node, or of the query inside the parentheses",
     "getValues" -> "a cast of this node, or of the query inside the parentheses")
 
-  // ORDER BY / LIMIT / OFFSET written after a parenthesized query. The binder
-  // reads them on a PlainSelect and a SetOperationList, never on the parentheses.
-  private val ParenthesizedTail = rejects("getOrderByElements", "getLimit", "getOffset")(
-    "ORDER BY / LIMIT / OFFSET after a parenthesized query",
+  // ORDER BY / LIMIT / OFFSET / FETCH written after a parenthesized query. The
+  // binder reads them on a PlainSelect and a SetOperationList, never on the
+  // parentheses.
+  private val ParenthesizedTail = rejects("getOrderByElements", "getLimit", "getOffset", "getFetch")(
+    "ORDER BY / LIMIT / OFFSET / FETCH after a parenthesized query",
     advice = "move it inside the parentheses",
     example = "(SELECT a FROM t) ORDER BY a LIMIT 1")
   private val ParenthesizedPivot = rejects("getPivot", "getUnPivot")("PIVOT / UNPIVOT")
@@ -204,6 +203,12 @@ object UnsupportedClauses {
     "getExpressions" -> "returns this list",
     "isUsingBrackets" -> "whether the list was parenthesized")
 
+  /** The words of a FETCH clause other than the noise words ROW / ROWS / ONLY:
+    * `WITH TIES` and `PERCENT`. */
+  private def fetchModifiers(f: Fetch): Seq[String] =
+    Option(f.getFetchParameters).map(_.asScala.toSeq).getOrElse(Nil)
+      .filterNot(p => Set("ROW", "ROWS", "ONLY")(p.toUpperCase))
+
   private val RankingFunctions = Set("ROW_NUMBER", "RANK", "DENSE_RANK")
   private val DistinctAggregates = Set("COUNT", "SUM", "AVG", "MIN", "MAX")
   private val OffsetFunctions = Set("LAG", "LEAD")
@@ -214,7 +219,6 @@ object UnsupportedClauses {
 
   private val PlainSelectAudit = audit(
     Seq(
-      rejects("getTop")("TOP n", advice = "write LIMIT n", example = "SELECT TOP 2 a FROM t"),
       rejects("getSkip", "getFirst")("SKIP n / FIRST n", advice = "write LIMIT n",
         example = "SELECT FIRST 2 a FROM t"),
       rejects("getQualify")("QUALIFY",
@@ -481,6 +485,21 @@ object UnsupportedClauses {
       // Reached only through Select.getLimitBy, which is rejected above it.
       rejects("getByExpressions")("LIMIT n BY"))),
     classOf[Offset] -> audit(Nil, Seq("getOffsetParam" -> "the noise word ROW / ROWS after the count")),
+    classOf[Fetch] -> audit(
+      Seq(
+        rejectsWhen[Fetch]("getFetchParameters")("FETCH ... WITH TIES / PERCENT",
+          example = "SELECT a FROM t ORDER BY a FETCH FIRST 2 ROWS WITH TIES",
+          describe = f => fetchModifiers(f).mkString("FETCH ... ", " ", ""))(f => fetchModifiers(f).nonEmpty)),
+      Seq(
+        "getRowCount" -> "getExpression as a long; it throws unless the count is an integer literal",
+        "getFetchJdbcParameter" -> "getExpression when that is a ? parameter, which the binder rejects as not an integer literal",
+        "getFetchParam" -> "getFetchParameters joined into one string",
+        "isFetchParamFirst" -> "FETCH FIRST and FETCH NEXT are synonyms")),
+    classOf[Top] -> audit(Seq(
+      rejects("isPercentage")("TOP n PERCENT", example = "SELECT TOP 50 PERCENT a FROM t"),
+      rejects("isWithTies")("TOP n WITH TIES",
+        advice = "compute RANK() OVER (ORDER BY ...) in a WITH clause and keep rank <= n in the outer WHERE",
+        example = "SELECT TOP 2 WITH TIES a FROM t ORDER BY a"))),
     classOf[Distinct] -> audit(
       Seq(rejects("getOnSelectItems")("DISTINCT ON (...)", example = "SELECT DISTINCT ON (a) a, b FROM t")),
       Seq("isUseUnique" -> "SELECT UNIQUE is a spelling of SELECT DISTINCT")),

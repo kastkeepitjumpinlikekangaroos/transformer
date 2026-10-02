@@ -27,16 +27,26 @@ at the time of the audit: `bazel test //...` 46/46 green.
 
 ## Priority and dependency table
 
-| # | Plan | What | Effort | Risk | Depends on |
-|---|------|------|--------|------|------------|
-| [01](01-reject-or-honor-every-clause.md) | Reject or honor every clause the parser accepts | 18 silently-dropped clauses, incl. `USING`/`NATURAL` JOIN silently becoming a **cartesian product** | 2-3 days | medium | — |
-| [02](02-total-order-for-decimal-and-binary.md) | One total order for `Decimal` and `Binary` | `Ops.eq`/`Ops.cmp`; the repo's own bug class, in the types the float work never reached | 2-3 days | medium | — |
-| [03](03-parquet-external-format-fidelity.md) | Parquet timestamp units and `DECIMAL` | silent 1000x timestamp error; decimals read as unscaled ints or raw bytes | 1-2 days | low-med | — |
-| [04](04-widen-fuzz-corpus-to-every-type.md) | Widen the fuzz corpus to all ten types | the guard that keeps 02 and 03 fixed | 2-3 days | low | 02 (else red) |
-| [05](05-frontend-robustness-fuzzer.md) | Frontend robustness fuzzer | "nothing silently dropped" + "errors are user-facing" as properties | 3-5 days | low | 01 (shares its clause table) |
-| [06](06-io-roundtrip-and-external-fixtures.md) | I/O round-trip properties + external parquet fixtures | the helper 03 needs, plus CSV state-machine fuzzing | 3-4 days | low | — (03 wants its fixture helper) |
-| [07](07-hydration-oracle-on-the-dag-corpus.md) | Hydration oracle on the existing DAG corpus | the read side of the records the DAG fuzzer already writes | 2 days | low | — |
-| [08](08-unconsumed-input-failure-is-swallowed.md) | An unconsumed input's load failure is swallowed | carried over, needs a product decision first | half a day | low | — |
+| # | Plan | What | Status | Effort | Risk | Depends on |
+|---|------|------|--------|--------|------|------------|
+| [01](01-reject-or-honor-every-clause.md) | Reject or honor every clause the parser accepts | 18 silently-dropped clauses, incl. `USING`/`NATURAL` JOIN silently becoming a **cartesian product** | **done** 2026-10-01 | 2-3 days | medium | — |
+| [02](02-total-order-for-decimal-and-binary.md) | One total order for `Decimal` and `Binary` | `Ops.eq`/`Ops.cmp`; the repo's own bug class, in the types the float work never reached | open | 2-3 days | medium | — |
+| [03](03-parquet-external-format-fidelity.md) | Parquet timestamp units and `DECIMAL` | silent 1000x timestamp error; decimals read as unscaled ints or raw bytes | open | 1-2 days | low-med | — |
+| [04](04-widen-fuzz-corpus-to-every-type.md) | Widen the fuzz corpus to all ten types | the guard that keeps 02 and 03 fixed | open | 2-3 days | low | 02 (else red) |
+| [05](05-frontend-robustness-fuzzer.md) | Frontend robustness fuzzer | "nothing silently dropped" + "errors are user-facing" as properties | open | 3-5 days | low | 01 (shares its clause table) |
+| [06](06-io-roundtrip-and-external-fixtures.md) | I/O round-trip properties + external parquet fixtures | the helper 03 needs, plus CSV state-machine fuzzing | open | 3-4 days | low | — (03 wants its fixture helper) |
+| [07](07-hydration-oracle-on-the-dag-corpus.md) | Hydration oracle on the existing DAG corpus | the read side of the records the DAG fuzzer already writes | open | 2 days | low | — |
+| [08](08-unconsumed-input-failure-is-swallowed.md) | An unconsumed input's load failure is swallowed | carried over, needs a product decision first | open | half a day | low | — |
+
+**Done:** plan 01. Eighteen was an undercount: classifying every getter of every
+AST class the binder reaches turned up 93 rejections. Every clause the binder
+does not read now fails at bind time naming itself, and the eight cheap ones the
+plan listed are honoured instead (OFFSET, NULLS FIRST / LAST, DISTINCT inside
+SUM / AVG / MIN / MAX, COUNT(ALL x), ILIKE, LIKE ... ESCAPE, a SELECT with no
+FROM, FETCH FIRST and TOP). `sql/plan:unsupported_clauses_test`
+derives what the binder reads from its bytecode and keeps the audit honest across
+JSqlParser upgrades. Two more silent drops turned up along the way, fixed in their
+own commits: an aggregate named only in ORDER BY, and a HAVING with no GROUP BY.
 
 **Suggested order.** [01](01-reject-or-honor-every-clause.md) first — it has the
 worst single defect in the set (a dropped join condition is a cartesian product,

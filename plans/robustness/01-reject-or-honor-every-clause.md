@@ -1,9 +1,9 @@
 # Plan 01: the binder silently drops every clause it does not read
 
-> Status: **half 1 done** 2026-10-01 (every unread clause rejected, plus the
-> reflection test); half 2 in progress · Effort: 2-3 days · Risk: medium (it
-> changes what the engine accepts — queries that "worked" will start erroring,
-> which is the point)
+> Status: **done** 2026-10-01 (half 1: every unread clause rejected, plus the
+> reflection test; half 2: all eight cheap clauses honoured) · Effort: 2-3 days
+> · Risk: medium (it changes what the engine accepts — queries that "worked"
+> will start erroring, which is the point)
 >
 > The table below was right at `d4bb409` and re-verified at `e743778` before
 > any change: every "got" reproduces. One row's SQL has a typo — the semi-join
@@ -369,6 +369,21 @@ Sharing one view across queries leans on the aliasing contract in
 `docs/architecture.md`: no operator writes to a batch it did not allocate. It
 works as a top-level query, a UNION arm and a CTE body; a derived table or a
 scalar subquery is unsupported with or without a FROM.
+
+**FETCH FIRST / TOP.** Both bind to the same `LogicalLimit` as `LIMIT n`, in
+`applyOffsetAndLimit`, which now takes all three counts and allows one. Two
+counts are a bind error rather than a guess at which wins, and so is `TOP` with
+`OFFSET`, which T-SQL refuses too. `FETCH FIRST ROW ONLY` leaves the count out,
+and it means one. The standard `OFFSET m ROWS FETCH NEXT n ROWS ONLY` page needed
+nothing new. After a UNION, FETCH needs no hoist, since JSqlParser always parks it
+on the list; `TOP` belongs to the arm it is written in, the last one included.
+The audit gains `Fetch` and `Top`: `WITH TIES` and `PERCENT` are rejected on both,
+FETCH after a parenthesized query joins that tail's rejection, and three `Fetch`
+getters are inert because they are derived views of the two the binder reads.
+One of them, `getRowCount`, unboxes the count and throws a `NullPointerException`
+whenever the count is not an integer literal, so it must never be called; being
+inert, the walk never does. No fuzzer reach: these are spellings, which is plan
+05's equivalent-spellings property, now listed there.
 
 ## Launch prompt
 

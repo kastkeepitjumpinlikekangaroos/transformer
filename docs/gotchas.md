@@ -63,14 +63,22 @@ ship a fix or move something from "not done" to "done".
   `AnalyticExpression.isAllColumns` is the `ALL` quantifier, so
   `LogicalBuilder.bindAnalytic` finds the star as `getExpression instanceof
   AllColumns` alone and never reads the flag.
-- **JSqlParser attaches a UNION's trailing `ORDER BY` / `LIMIT` / `OFFSET`
-  inconsistently.** When the tail starts with `ORDER BY` it lands on the
+- **JSqlParser attaches a UNION's trailing `ORDER BY` / `LIMIT` / `OFFSET` /
+  `FETCH` inconsistently.** When the tail starts with `ORDER BY` it lands on the
   `SetOperationList`; without one, `LIMIT` and `OFFSET` land on the last arm's
-  `PlainSelect`; and `OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY` splits — the OFFSET on
-  the arm, the FETCH on the list. In standard SQL every one of them applies to the
-  whole union, so `LogicalBuilder.buildSetOperationList` hoists each clause off a
-  bare last arm unless the list already carries it. A parenthesized last arm
-  keeps its own (it parses as a `ParenthesedSelect`, which the hoist skips).
+  `PlainSelect`; `FETCH` always lands on the list, so `OFFSET 1 ROWS FETCH NEXT 2
+  ROWS ONLY` splits — the OFFSET on the arm, the FETCH on the list. In standard SQL
+  every one of them applies to the whole union, so
+  `LogicalBuilder.buildSetOperationList` hoists ORDER BY, LIMIT and OFFSET off a
+  bare last arm unless the list already carries them. A parenthesized last arm
+  keeps its own (it parses as a `ParenthesedSelect`, which the hoist skips), and
+  so does a `TOP n`, which is part of its arm's SELECT and limits that arm alone.
+- **`Fetch.getRowCount` throws unless the count is an integer literal.** It
+  unboxes the `LongValue` behind `getExpression`, so `FETCH FIRST ROW ONLY` (no
+  count), `FETCH FIRST ? ROWS ONLY` and `FETCH FIRST -1 ROWS ONLY` all throw a
+  `NullPointerException` from it. The binder reads `getExpression` (a missing
+  count means one) and the audit lists `getRowCount` as inert, so the rejection
+  walk never calls it either.
 - **Parquet `MessageType` constructor takes `java.util.List[Type]`, but a
   `Vector[PrimitiveType].asJava` gives `java.util.List[PrimitiveType]`.**
   Scala won't unify because of Java type invariance. `ParquetSchema.toMessageType`

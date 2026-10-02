@@ -41,9 +41,11 @@ already expected to handle**. Concretely, nothing asserts any of:
    what made runner bug 03 cascade every downstream task to `Skipped`.
 4. **Equivalent spellings agree.** `a BETWEEN x AND y` vs `a >= x AND a <= y`;
    `NOT (a = b)` vs `a <> b`; `a IN (1)` vs `a = 1`; parenthesized vs bare
-   (`followups/02`'s class); `t JOIN s ON p` vs `t, s WHERE p`. These are
-   metamorphic relations over *syntax*, which is a different axis from the five
-   existing relations (all of which vary execution or algebra, never spelling).
+   (`followups/02`'s class); `t JOIN s ON p` vs `t, s WHERE p`; and the row-count
+   spellings plan 01 taught the binder, `LIMIT n` vs `FETCH FIRST n ROWS ONLY` vs
+   `TOP n`, which no generator emits yet. These are metamorphic relations over
+   *syntax*, which is a different axis from the five existing relations (all of
+   which vary execution or algebra, never spelling).
 
 ## Proposed fix
 
