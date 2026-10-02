@@ -47,6 +47,52 @@ already expected to handle**. Concretely, nothing asserts any of:
    *syntax*, which is a different axis from the five existing relations (all of
    which vary execution or algebra, never spelling).
 
+### What plan 01 left for this plan
+
+Plan 01 landed on 2026-10-01, so property 1 holds for every clause its audit
+knows. The table this plan's unsupported-clause mode needs exists now:
+`UnsupportedClauses.audits` in `src/main`, where every rejection names its clause
+and all but four carry an `example` SQL string that reaches it (plan 01 says why
+those four have none).
+
+Probing around the audit turned up failures that property 2 should catch. They
+were found by hand at `2f837fc` and are **not fixed**; each wants a regression in
+`SqlEngineTest` when it is:
+
+- **A raw `NumberFormatException` at bind time.** `SELECT 99999999999999999999
+  AS big FROM t` fails with `java.lang.NumberFormatException: For input string:
+  "99999999999999999999"`: an integer literal too large for a `long` reaches the
+  number parser unguarded.
+- **Raw parse exceptions mid-drain from CAST.** `SELECT CAST(s AS INT) FROM t`
+  over a non-numeric `s` fails while the result drains, with
+  `java.lang.NumberFormatException: For input string: "x"`, and
+  `CAST(s AS DATE)` over a string that is not a date with
+  `java.time.format.DateTimeParseException`. Both depend on the data, so neither
+  can be a bind-time rejection; the defect is the internal exception class, and a
+  message that names neither the cast nor the column.
+- **The `_agg0` slot name leaks from the ungrouped-column error.**
+  `SELECT a, COUNT(*) AS c FROM t` (a column outside the aggregate, no GROUP BY)
+  reports `Unknown column 'a'. Available: [_agg0]`, and so does
+  `SELECT COUNT(*) AS c FROM t HAVING a > 1`. Plan 01 removed the same leak from
+  `GROUPING SETS` by rejecting it by name; the ordinary path still has it, and
+  it should say that `a` must be grouped or aggregated.
+- **`ROLLUP` and `CUBE` read as unknown functions.** `SELECT a, SUM(a) FROM t
+  GROUP BY ROLLUP(a)` reports `Unknown function 'ROLLUP(int)'`, and `CUBE(a)`
+  reports `Unknown function 'CUBE(int)'`. JSqlParser parses both as function
+  calls inside a plain GROUP BY, so the binder looks them up as scalar functions.
+  The message should name the unsupported grouping construct, as the `GROUPING
+  SETS` rejection does. Implementing them is a decision for the user, not a fix.
+
+Two clauses plan 01 honoured without widening a generator to reach them, so the
+existing fuzzers are blind to both:
+
+- `MetaQueryGen` draws a NULL placement for its top-level ORDER BY, but
+  `genWindowItem` renders the ORDER BY inside `OVER (...)` with `ASC` / `DESC`
+  only, so `NULLS FIRST` / `NULLS LAST` inside a window is covered by
+  `SqlEngineTest` alone.
+- No generator emits `FETCH FIRST n ROWS ONLY` or `TOP n`; they are the property
+  4 spellings above.
+
 ## Proposed fix
 
 Three properties, sharing one new generator, following the existing harness
@@ -56,11 +102,11 @@ shape (`Rng` / `Props.forAll` / `Shrinker`, no new dependency):
 catalog. Three modes, so each property gets the corpus it needs:
 
 - *unsupported-clause mode* — takes a supported query and splices in one clause
-  from a table of constructs the engine does not implement (the eighteen from
-  plan 01 plus the vendor getters listed there). The table is the generator's
-  payload, and it should be the **same table** plan 01's rejection pass is built
-  from, read from `src/main` so the two cannot drift. Any new entry in that table
-  becomes fuzz coverage automatically.
+  from a table of constructs the engine does not implement. The table is the
+  generator's payload, and it should be the **same table** plan 01's rejection
+  pass is built from, `UnsupportedClauses.audits`, read from `src/main` so the
+  two cannot drift. Any new entry in that table becomes fuzz coverage
+  automatically.
 - *equivalent-spelling mode* — emits a pair of strings that must mean the same
   thing, for property 4.
 - *mutation mode* — takes a generated-valid query and applies one textual
@@ -102,9 +148,10 @@ the distinction observable.
 
 Either order works, and they argue for different things:
 
-- **Plan 01 first** (recommended) — the rejection pass gives `SqlTextGen` a table
-  to read, `NoSilentDrop` starts green, and the fuzzer's job is to keep it that
-  way and to find the clauses the manual audit missed.
+- **Plan 01 first** (recommended, and what happened: plan 01 landed 2026-10-01)
+  — the rejection pass gives `SqlTextGen` a table to read, `NoSilentDrop` starts
+  green, and the fuzzer's job is to keep it that way and to find the clauses the
+  manual audit missed.
 - **This plan first** — the properties start red with a list of findings, which is
   good evidence but leaves the suite red, and this repo's convention
   (`plans/bugfixes/README.md`) is to remove a gate as proof a fix landed rather
