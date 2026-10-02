@@ -658,6 +658,15 @@ temporal — `CURRENT_DATE`, `CURRENT_TIMESTAMP`. NULL propagates through every
 math function; `GREATEST`/`LEAST` skip NULLs and return NULL only when every
 argument is NULL.
 
+`CURRENT_DATE` and `CURRENT_TIMESTAMP` take every spelling other engines accept
+(`current_date`, `CURRENT_DATE()`, DB2's `CURRENT DATE`). Both read the wall
+clock once per query, in UTC, so every row of a result sees the same instant and
+`CURRENT_DATE` is that instant's date. They are not the job's execution time: a
+re-run reads the clock afresh, so SQL that should follow the execution time uses
+the [templating variables](#temporal-templating) instead, as in
+`DATE '{{ iso_date }}'`. There is no `CURRENT_TIME`, because there is no TIME
+type.
+
 **Operators:** `+ - * / %`, `=  <>  <  <=  >  >=`, `AND OR NOT`, `||` (concat),
 `LIKE` and its case-insensitive form `ILIKE`, `IS NULL` / `IS NOT NULL`,
 `IN (...)`, `BETWEEN`, `CASE WHEN`, `CAST(expr AS type)`. In a `LIKE` / `ILIKE`

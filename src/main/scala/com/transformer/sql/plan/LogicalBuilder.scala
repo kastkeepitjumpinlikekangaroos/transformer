@@ -6,8 +6,8 @@ import com.transformer.sql.parse.SqlParser
 import net.sf.jsqlparser.expression.{
   AllValue, AnalyticExpression, CaseExpression, CastExpression, DateValue, DoubleValue,
   Expression, Function, LongValue, NotExpression, NullValue,
-  SignedExpression, StringValue, TimestampValue, TimeValue, TrimFunction, WhenClause,
-  WindowElement, WindowOffset
+  SignedExpression, StringValue, TimeKeyExpression, TimestampValue, TimeValue, TrimFunction,
+  WhenClause, WindowElement, WindowOffset
 }
 import net.sf.jsqlparser.expression.operators.arithmetic.{
   Addition, Concat, Division, Modulo, Multiplication, Subtraction
@@ -21,8 +21,11 @@ import net.sf.jsqlparser.expression.operators.relational.{
 import net.sf.jsqlparser.schema.Column
 import net.sf.jsqlparser.statement.select._
 
+import java.time.{Instant, LocalDate, ZoneOffset}
+import java.time.temporal.ChronoUnit
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
+import scala.util.DynamicVariable
 
 /** A top-level CTE definition collected during build: its name, the unique
   * [[PendingCteView]] every reference scan points at, and the bound body plan.
@@ -52,15 +55,24 @@ object LogicalBuilder {
   private final case class PendingCte(name: String, pending: PendingCteView) extends CteScopeEntry
   private final case class InlineCte(plan: LogicalPlan) extends CteScopeEntry
 
+  /** The instant CURRENT_DATE and CURRENT_TIMESTAMP read while [[build]] binds
+    * a statement. There is one per statement, as SQL specifies, so every row,
+    * every partition and every reference to a CTE sees the same value. */
+  private val statementStart = new DynamicVariable[Instant](null)
+
   def build(sql: String, catalog: Catalog): BuiltQuery = {
     val select = SqlParser.parseSelect(sql)
     // Everything below reads the AST through the getters it knows about, so a
     // clause carried by any other getter would vanish without an error. The
     // pass rejects those first; see UnsupportedClauses.
     UnsupportedClauses.reject(select)
-    val collector = mutable.ArrayBuffer.empty[CteDef]
-    val main = buildAnySelect(select, catalog, Map.empty, Some(collector))
-    BuiltQuery(main, collector.toSeq)
+    // A TimestampVector holds microseconds, so a clock literal truncated to
+    // them equals a stored copy of itself on the row path too.
+    statementStart.withValue(Instant.now().truncatedTo(ChronoUnit.MICROS)) {
+      val collector = mutable.ArrayBuffer.empty[CteDef]
+      val main = buildAnySelect(select, catalog, Map.empty, Some(collector))
+      BuiltQuery(main, collector.toSeq)
+    }
   }
 
   /** Dispatch over the SELECT subtype: a single `PlainSelect`, a UNION /
@@ -625,6 +637,8 @@ object LogicalBuilder {
     case d: DateValue => LitExpr(d.getValue.toLocalDate, DataType.DateType)
     case t: TimestampValue => LitExpr(t.getValue.toLocalDateTime, DataType.TimestampType)
     case _: TimeValue => throw new IllegalArgumentException("TIME literal not supported")
+    // UnsupportedClauses has already rejected every keyword but the two clock ones.
+    case tk: TimeKeyExpression => clockLiteral(UnsupportedClauses.clockKeyword(tk.getStringValue))
     case se: SignedExpression =>
       val sign = se.getSign
       val inner = b(se.getExpression)
@@ -795,6 +809,15 @@ object LogicalBuilder {
     (items.map(Analyzer.implicitCast(_, common)), common)
   }
 
+  /** CURRENT_DATE or CURRENT_TIMESTAMP: the statement's start, in UTC like
+    * every time in the engine. */
+  private def clockLiteral(keyword: String): Expr = {
+    val now = statementStart.value
+    if (now == null) throw new IllegalStateException(s"$keyword was bound outside LogicalBuilder.build")
+    if (keyword == "CURRENT_DATE") LitExpr(LocalDate.ofInstant(now, ZoneOffset.UTC), DataType.DateType)
+    else LitExpr(now, DataType.TimestampType)
+  }
+
   private def bindScalarFunctionWithAggs(f: Function, sources: Sources,
                                           aggResolver: Function => Option[Expr],
                                           windowResolver: AnalyticExpression => Option[Expr]): Expr = {
@@ -802,9 +825,13 @@ object LogicalBuilder {
       .map(_.asInstanceOf[ExpressionList[_]].asScala.asInstanceOf[Iterable[Expression]].toSeq.map(bindExprWithAggs(_, sources, aggResolver, windowResolver)))
       .getOrElse(Nil)
     val argTypes = args.map(_.dataType)
-    val rt = Funcs.returnType(f.getName, argTypes)
-      .getOrElse(throw new IllegalArgumentException(s"Unknown function '${f.getName}(${argTypes.mkString(",")})'"))
-    FuncExpr(f.getName.toUpperCase, args, rt)
+    // `CURRENT_DATE ()`, with a space, parses as a call rather than the keyword.
+    if (args.isEmpty && UnsupportedClauses.ClockKeywords(f.getName.toUpperCase)) clockLiteral(f.getName.toUpperCase)
+    else {
+      val rt = Funcs.returnType(f.getName, argTypes)
+        .getOrElse(throw new IllegalArgumentException(s"Unknown function '${f.getName}(${argTypes.mkString(",")})'"))
+      FuncExpr(f.getName.toUpperCase, args, rt)
+    }
   }
 
   private def bindAgg(f: Function, sources: Sources): AggExpr = {

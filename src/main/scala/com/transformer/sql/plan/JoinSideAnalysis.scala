@@ -14,8 +14,8 @@ package com.transformer.sql.plan
   *   - [[JoinSide.RightOnly]] — every column reference is on the right side.
   *   - [[JoinSide.Both]] — at least one reference per side; the expression
   *     can't move into either child intact.
-  *   - [[JoinSide.Neither]] — no column references at all (constants, pure
-  *     functions like `current_timestamp()`).
+  *   - [[JoinSide.Neither]] — no column references at all (constants,
+  *     including the literal `CURRENT_TIMESTAMP` binds to).
   *
   * Used by [[com.transformer.sql.exec.PhysicalPlanner]] (to extract equality
   * conjuncts as join keys) and [[FilterPushdown]] (to decide which side of a

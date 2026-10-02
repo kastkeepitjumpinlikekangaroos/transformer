@@ -181,7 +181,13 @@ object ParquetFilterTranslator {
     dt match {
       case DataType.IntType | DataType.DateType =>
         val col = FilterApi.intColumn(name)
-        val lit = java.lang.Integer.valueOf(value.asInstanceOf[Number].intValue)
+        // A DATE is INT32 days since the epoch in every parquet file, and a
+        // date literal (CURRENT_DATE, `{d '...'}`) arrives as a LocalDate.
+        val lit = java.lang.Integer.valueOf(value match {
+          case d: java.time.LocalDate => d.toEpochDay.toInt
+          case n: Number => n.intValue
+          case _ => return None
+        })
         op match {
           case "=" => Some(FilterApi.eq(col, lit))
           case "!=" | "<>" => Some(FilterApi.notEq(col, lit))
@@ -193,7 +199,14 @@ object ParquetFilterTranslator {
         }
       case DataType.LongType | DataType.TimestampType =>
         val col = FilterApi.longColumn(name)
-        val lit = java.lang.Long.valueOf(value.asInstanceOf[Number].longValue)
+        // A timestamp literal (CURRENT_TIMESTAMP) arrives as an Instant, and it
+        // is not pushed: a parquet TIMESTAMP's unit varies by file, and a legacy
+        // INT96 one is no INT64 at all, so a skip decided in microseconds could
+        // be wrong. The residual filter decides those rows.
+        val lit = java.lang.Long.valueOf(value match {
+          case n: Number => n.longValue
+          case _ => return None
+        })
         op match {
           case "=" => Some(FilterApi.eq(col, lit))
           case "!=" | "<>" => Some(FilterApi.notEq(col, lit))

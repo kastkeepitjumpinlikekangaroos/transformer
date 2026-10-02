@@ -2313,6 +2313,62 @@ class SqlEngineTest {
     assertTrue(tableStar.getMessage, tableStar.getMessage.contains("Unknown table in 't.*'"))
   }
 
+  /** README listed CURRENT_DATE and CURRENT_TIMESTAMP, but JSqlParser parses
+    * the keywords as a TimeKeyExpression the binder did not handle, so both
+    * failed as an unsupported expression. They read one instant per statement,
+    * in UTC. */
+  @Test def currentDateAndTimestampReadOneInstantPerStatement(): Unit = {
+    val schema = Schema(Vector(Field("v", DataType.IntType)))
+    def batch(values: Seq[Int]): ColumnarBatch = {
+      val b = new ColumnarBatch(schema, values.length)
+      values.zipWithIndex.foreach { case (v, i) => b.column(0).setBoxed(i, java.lang.Integer.valueOf(v)) }
+      b.setNumRows(values.length)
+      b
+    }
+    // 4 partitions x 50 batches x 100 rows: reading the clock per row, or per
+    // batch, would stamp them with many different values.
+    val partitions = (0 until 4).map(p => (0 until 50).map(b => batch((0 until 100).map(i => p * 5000 + b * 100 + i))))
+    val cat = catalogWith("m" -> new MaterializedView(schema, partitions))
+    cat.register("tt", CsvReader.fromPath(tmpCsv("tt.csv",
+      "d,ts\n2026-01-01,2026-01-01T05:30:21Z\n2999-01-01,2999-01-01T00:00:00Z\n").toString, CsvOptions()))
+
+    val before = java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+    val q = SqlEngine.execute("SELECT v, CURRENT_DATE AS d, CURRENT_TIMESTAMP AS ts FROM m", cat)
+    assertEquals(Vector(DataType.IntType, DataType.DateType, DataType.TimestampType), q.schema.fields.map(_.dataType))
+    val rows = collectAllRows(q)
+    val after = java.time.Instant.now()
+    assertEquals(20000, rows.size)
+    val stamps = rows.map(_("ts")).distinct
+    assertEquals(1, stamps.size)
+    val ts = stamps.head.asInstanceOf[java.time.Instant]
+    assertTrue(s"$ts is not between $before and $after", !ts.isBefore(before) && !ts.isAfter(after))
+    // CURRENT_DATE is the same instant's date in UTC.
+    assertEquals(Seq(java.time.LocalDate.ofInstant(ts, java.time.ZoneOffset.UTC)), rows.map(_("d")).distinct)
+
+    // Every spelling JSqlParser has for the two keywords reads the same
+    // instant, including `CURRENT_DATE ()`, which it parses as a call.
+    val spelled = collectAllRows(SqlEngine.execute(
+      "SELECT current_date AS a, CURRENT_DATE() AS b, CURRENT DATE AS c, CURRENT_DATE () AS e, " +
+        "current_timestamp AS x, CURRENT_TIMESTAMP() AS y, CURRENT TIMESTAMP AS z, CURRENT_TIMESTAMP () AS w",
+      cat)).head
+    assertEquals(1, Seq(spelled("a"), spelled("b"), spelled("c"), spelled("e")).distinct.size)
+    assertEquals(1, Seq(spelled("x"), spelled("y"), spelled("z"), spelled("w")).distinct.size)
+    assertEquals(java.time.LocalDate.ofInstant(spelled("x").asInstanceOf[java.time.Instant], java.time.ZoneOffset.UTC),
+      spelled("a"))
+    // So does an inlined CTE body.
+    assertEquals(Seq(true), column(
+      "WITH c AS (SELECT CURRENT_TIMESTAMP AS ts) SELECT ts = CURRENT_TIMESTAMP AS same FROM c", cat, "same"))
+
+    // Against stored dates and timestamps of the same type.
+    assertEquals(Seq(java.time.LocalDate.parse("2026-01-01")), column("SELECT d FROM tt WHERE d < CURRENT_DATE", cat, "d"))
+    assertEquals(Seq(java.time.Instant.parse("2999-01-01T00:00:00Z")),
+      column("SELECT ts FROM tt WHERE ts > CURRENT_TIMESTAMP", cat, "ts"))
+    val text = collectAllRows(SqlEngine.execute("SELECT CURRENT_DATE AS d, CAST(CURRENT_DATE AS STRING) AS s", cat)).head
+    assertEquals(text("d").toString, text("s"))
+    // There is no TIME type for CURRENT_TIME to return.
+    assertRejected("SELECT CURRENT_TIME AS t FROM tt", cat, "CURRENT_TIME")
+  }
+
   @Test def groupingSetsRejectedWithoutLeakingAnInternalName(): Unit = {
     // Used to fail binding with "Unknown column 'g'. Available: [_agg0]".
     val cat = clauseCatalog()

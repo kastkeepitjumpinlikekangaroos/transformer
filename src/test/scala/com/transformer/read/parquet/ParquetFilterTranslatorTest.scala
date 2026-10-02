@@ -263,6 +263,42 @@ class ParquetFilterTranslatorTest {
     assertEquals("brute-force and pushed row sets must match", bruteRows, pushedRows)
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // Temporal literals. CURRENT_DATE and `{d '...'}` bind to a LocalDate,
+  // CURRENT_TIMESTAMP to an Instant; the translator cast both to Number.
+  // ─────────────────────────────────────────────────────────────────────
+
+  @Test def translatesDateLiteralAsEpochDays(): Unit = {
+    val day = java.time.LocalDate.of(2026, 1, 1)
+    def lessThan(v: Any) = ParquetFilterTranslator.translate(
+      BinOpExpr("<", col("d", DataType.DateType), lit(v, DataType.DateType), DataType.BooleanType))
+    val asDate = lessThan(day)
+    assertTrue(asDate.isDefined)
+    assertEquals(lessThan(day.toEpochDay.toInt).toString, asDate.toString)
+  }
+
+  @Test def doesNotTranslateTimestampLiteral(): Unit = {
+    // A parquet TIMESTAMP's unit varies by file and INT96 is no INT64, so a
+    // skip decided in microseconds could be wrong; the residual filter decides.
+    val now = java.time.Instant.parse("2026-01-01T00:00:00Z")
+    assertEquals(None, ParquetFilterTranslator.translate(
+      BinOpExpr(">", col("ts", DataType.TimestampType), lit(now, DataType.TimestampType), DataType.BooleanType)))
+    assertEquals(None, ParquetFilterTranslator.translate(
+      InListExpr(col("ts", DataType.TimestampType), Seq(lit(now, DataType.TimestampType)), negated = false)))
+  }
+
+  @Test def dateLiteralPushdownMatchesBruteForce(): Unit = {
+    val schema = Schema(Field("d", DataType.DateType))
+    val dir = Files.createTempDirectory("pq-pushdown-dates-")
+    // Three files, three disjoint months, so a date bound skips whole files.
+    for ((name, month) <- Seq("jan" -> 1, "mar" -> 3, "may" -> 5))
+      TParquetWriter.writeAll(dir.resolve(s"$name.parquet"), schema,
+        Iterator(makeBatch(schema, (1 to 28).map(day => Seq[Any](java.time.LocalDate.of(2026, month, day))))))
+    val cutoff = java.time.LocalDate.of(2026, 2, 1)
+    val pred = BinOpExpr("<", col("d", DataType.DateType), lit(cutoff, DataType.DateType), DataType.BooleanType)
+    assertPushdownAgreesWithBruteForce(dir, pred, row => row("d").asInstanceOf[java.time.LocalDate].isBefore(cutoff))
+  }
+
   @Test def isNullPushdownMatchesBruteForce(): Unit = {
     val dir = buildFixture()
     // c IS NULL: drops the low.parquet group (numNulls=0), keeps the other two.

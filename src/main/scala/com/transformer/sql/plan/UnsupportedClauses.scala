@@ -3,7 +3,8 @@ package com.transformer.sql.plan
 import net.sf.jsqlparser.expression.{
   Alias, AllValue, AnalyticExpression, AnalyticType, CaseExpression, CastExpression, DateValue,
   DoubleValue, Function, LongValue, NotExpression, NullValue, SignedExpression, StringValue,
-  TimeValue, TimestampValue, TrimFunction, WhenClause, WindowElement, WindowOffset, WindowRange
+  TimeKeyExpression, TimeValue, TimestampValue, TrimFunction, WhenClause, WindowElement,
+  WindowOffset, WindowRange
 }
 import net.sf.jsqlparser.expression.operators.arithmetic.{
   Addition, Concat, Division, Modulo, Multiplication, Subtraction
@@ -202,6 +203,14 @@ object UnsupportedClauses {
   private val ListShape: Seq[(String, String)] = Seq(
     "getExpressions" -> "returns this list",
     "isUsingBrackets" -> "whether the list was parenthesized")
+
+  /** A clock keyword under one name: JSqlParser keeps it as written, so
+    * `current_date`, `CURRENT_DATE()` and DB2's `CURRENT DATE` all arrive as
+    * different strings. */
+  private[plan] def clockKeyword(written: String): String =
+    written.toUpperCase.stripSuffix("()").trim.replaceAll("\\s+", "_")
+
+  private[plan] val ClockKeywords = Set("CURRENT_DATE", "CURRENT_TIMESTAMP")
 
   /** The words of a FETCH clause other than the noise words ROW / ROWS / ONLY:
     * `WITH TIES` and `PERCENT`. */
@@ -579,6 +588,12 @@ object UnsupportedClauses {
     classOf[DateValue] -> audit(Nil),
     classOf[TimestampValue] -> audit(Nil, Seq("getRawValue" -> "the literal as written")),
     classOf[TimeValue] -> audit(Nil, Seq("getValue" -> "the binder rejects TIME literals outright")),
+    classOf[TimeKeyExpression] -> audit(Seq(
+      rejectsWhen[TimeKeyExpression]("getStringValue")("CURRENT_TIME",
+        advice = "the engine has no TIME type; CURRENT_TIMESTAMP carries the time of day",
+        example = "SELECT CURRENT_TIME FROM t", partial = true,
+        describe = tk => clockKeyword(tk.getStringValue))(
+        tk => !ClockKeywords(clockKeyword(tk.getStringValue))))),
     classOf[AllValue] -> audit(Nil),
     classOf[ExpressionList[_]] -> audit(Nil, ListShape),
     classOf[ParenthesedExpressionList[_]] -> audit(Nil, ListShape)

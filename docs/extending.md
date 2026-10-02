@@ -24,6 +24,11 @@ relevant module lives, and that you'll follow the workflow in
 6. Update [`README.md`'s "SQL features"](../README.md#sql-features) so users
    can see the new function in the supported list.
 
+A function whose value must hold still for a whole query, as the clock keywords'
+must, does not belong in `Funcs`, which evaluates per row. Bind it to a literal
+instead, the way `LogicalBuilder.clockLiteral` binds `CURRENT_DATE` and
+`CURRENT_TIMESTAMP` to the instant `build` captured for the statement.
+
 ## Add an aggregate function
 
 1. New `AggExpr*` case class in `sql/plan/Expr.scala`. Set `resultType`.

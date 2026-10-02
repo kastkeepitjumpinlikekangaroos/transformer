@@ -209,6 +209,7 @@ object UnsupportedClausesTest {
     "SELECT 1 AS x",
     "SELECT COUNT(*) WHERE 1 = 1",
     "SELECT 1 FROM t HAVING COUNT(*) > 1",
+    "SELECT CURRENT_DATE, current_timestamp, CURRENT_DATE(), CURRENT TIMESTAMP FROM t",
     "SELECT TOP 2 a FROM t ORDER BY a",
     "SELECT DISTINCT TOP (2) a FROM t",
     "SELECT a FROM t ORDER BY a OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY",

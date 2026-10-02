@@ -36,8 +36,6 @@ object Funcs {
     case "PI" | "E" if argTypes.isEmpty => Some(DataType.DoubleType)
     case "RAND" | "RANDOM" if argTypes.isEmpty || argTypes.size == 1 => Some(DataType.DoubleType)
     case "GREATEST" | "LEAST" if argTypes.nonEmpty => Some(widestNonNull(argTypes))
-    case "CURRENT_DATE" if argTypes.isEmpty => Some(DataType.DateType)
-    case "CURRENT_TIMESTAMP" if argTypes.isEmpty => Some(DataType.TimestampType)
     case _ => None
   }
 
@@ -183,11 +181,6 @@ object Funcs {
         pickByOrdering(args, argTypes, resultType, greatest = true)
       case "LEAST" =>
         pickByOrdering(args, argTypes, resultType, greatest = false)
-      case "CURRENT_DATE" =>
-        java.time.LocalDate.now(java.time.ZoneOffset.UTC).toEpochDay.toInt
-      case "CURRENT_TIMESTAMP" =>
-        val now = java.time.Instant.now()
-        now.getEpochSecond * 1000000L + now.getNano / 1000L
       case other => throw new IllegalArgumentException(s"Unsupported function '$other'")
     }
 

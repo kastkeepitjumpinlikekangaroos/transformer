@@ -1045,9 +1045,10 @@ bodies can't mention it — then:
   (via a tiny `PhysicalPlanView` `CatalogView` adapter over the physical plan),
   then replace every reference with a shared `LogicalScan` over that one
   `MaterializedView`. The body runs once; each site replays in-memory. Because
-  the same MV object is shared, a non-deterministic body (`RAND()`,
-  `CURRENT_TIMESTAMP`) yields identical rows to every reference — an
-  optimization fence inlining doesn't provide.
+  the same MV object is shared, a non-deterministic body (`RAND()`) yields
+  identical rows to every reference — an optimization fence inlining doesn't
+  provide. (The clock keywords need no fence: each binds to one literal per
+  statement.)
 - **&le; 1 reference → inline.** Substitute the body subtree at the (single or
   zero) site, structurally identical to today's plan; a zero-reference CTE is
   never executed.

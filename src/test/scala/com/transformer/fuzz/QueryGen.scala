@@ -42,8 +42,8 @@ import com.transformer.sql.plan._
   *     query that binds also runs, in every mode.
   *
   * Excluded so the result multiset stays mode-invariant: `RAND()` and the clock
-  * functions (`CURRENT_DATE`/`CURRENT_TIMESTAMP`) — they make modes legitimately
-  * disagree. `LIMIT` and `OFFSET` ARE generated, but only over a '''total'''
+  * functions (`CURRENT_DATE`/`CURRENT_TIMESTAMP`) — each execution of a query
+  * reads the clock afresh, so two modes legitimately disagree. `LIMIT` and `OFFSET` ARE generated, but only over a '''total'''
   * ORDER BY (every output column an order key), where rows tied at a cutoff are
   * identical rows and the kept slice is therefore a layout-independent multiset;
   * a bare `LIMIT` or `OFFSET` would keep a different SUBSET of the tied rows per
