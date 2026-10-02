@@ -685,8 +685,9 @@ object LogicalBuilder {
         case el: ExpressionList[_] => el.asScala.asInstanceOf[Iterable[Expression]].toSeq
         case other => throw new IllegalArgumentException(s"IN subqueries not supported (got ${other.getClass.getSimpleName})")
       }
-      val (boundItems, common) = harmonize(items.map(b), left.dataType)
-      val leftCast = Analyzer.implicitCast(left, common)
+      val operands = Analyzer.unifyTemporal(left +: items.map(b))
+      val (boundItems, common) = harmonize(operands.tail, operands.head.dataType)
+      val leftCast = Analyzer.implicitCast(operands.head, common)
       InListExpr(leftCast, boundItems, in.isNot)
 
     case bw: Between =>
@@ -744,7 +745,14 @@ object LogicalBuilder {
     case ce: CastExpression =>
       val inner = b(ce.getLeftExpression)
       val target = parseTypeName(ce.getColDataType.getDataType)
-      CastExpr(inner, target)
+      Analyzer.checkCast(inner.dataType, target)
+      inner match {
+        // `DATE '...'` and `TIMESTAMP '...'` are literals, so they are read now:
+        // a bad one fails before the query runs, like any other bad literal.
+        case LitExpr(_: String, DataType.StringType) if Analyzer.isTemporal(target) =>
+          Analyzer.asTemporal(inner, target)
+        case _ => CastExpr(inner, target)
+      }
 
     case tf: TrimFunction =>
       // JSqlParser gives TRIM a node of its own so it can carry the extended
@@ -782,9 +790,12 @@ object LogicalBuilder {
   private def binopGeneric(op: String, l: Expression, r: Expression, sources: Sources,
                            aggResolver: Function => Option[Expr],
                            windowResolver: AnalyticExpression => Option[Expr]): Expr = {
-    val (le, re, t) = Analyzer.promotePair(
-      bindExprWithAggs(l, sources, aggResolver, windowResolver),
-      bindExprWithAggs(r, sources, aggResolver, windowResolver))
+    val operands = Seq(l, r).map(bindExprWithAggs(_, sources, aggResolver, windowResolver))
+    // There is no interval type, so no arithmetic on a date or a time means anything.
+    operands.find(e => Analyzer.isTemporal(e.dataType)).foreach { e =>
+      throw new IllegalArgumentException(s"Arithmetic on ${Analyzer.typeName(e.dataType)} is not supported")
+    }
+    val (le, re, t) = Analyzer.promotePair(operands(0), operands(1))
     BinOpExpr(op, le, re, t)
   }
   private def cmpOpGeneric(op: String, l: Expression, r: Expression, sources: Sources,

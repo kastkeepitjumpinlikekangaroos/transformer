@@ -153,23 +153,22 @@ object Casts {
           case d: LocalDate => d
           // A timestamp's date in UTC, like every time in the engine.
           case i: Instant => LocalDate.ofInstant(i, ZoneOffset.UTC)
-          case s: String => LocalDate.ofInstant(parseInstant(s, "date"), ZoneOffset.UTC)
-          case n: Number => LocalDate.ofEpochDay(n.longValue)
+          case s: String => parseDate(s)
           case _ => throw new IllegalArgumentException(s"Cannot cast $v to date")
         }
       case DataType.TimestampType =>
         v match {
           case i: Instant => i
           case d: LocalDate => d.atStartOfDay(ZoneOffset.UTC).toInstant
-          case s: String => parseInstant(s, "timestamp")
+          case s: String => parseInstant(s)
           case _ => throw new IllegalArgumentException(s"Cannot cast $v to timestamp")
         }
       case other => throw new IllegalArgumentException(s"CAST to $other not implemented")
     }
   }
 
-  /** The text a CAST to DATE or TIMESTAMP reads: an ISO date, then optionally a
-    * time and then optionally `Z` or an offset. */
+  /** The text a CAST to TIMESTAMP reads: an ISO date, then optionally a time
+    * and then optionally `Z` or an offset. */
   private val TemporalText: DateTimeFormatter = new DateTimeFormatterBuilder()
     .append(DateTimeFormatter.ISO_LOCAL_DATE)
     .optionalStart()
@@ -183,19 +182,31 @@ object Casts {
 
   /** A date alone is its midnight, and a time with no zone is UTC. The result
     * is truncated to the microseconds a `TimestampVector` holds. */
-  private def parseInstant(s: String, target: String): Instant = {
-    val t = s.trim
+  private def parseInstant(s: String): Instant = {
     // SQL writes a space between the date and the time, ISO a T.
-    val iso = if (t.length > 10 && t.charAt(10) == ' ') t.substring(0, 10) + "T" + t.substring(11) else t
+    val iso = if (s.length > 10 && s.charAt(10) == ' ') s.substring(0, 10) + "T" + s.substring(11) else s
     val parsed =
       try TemporalText.parse(iso)
-      catch { case _: DateTimeParseException => throw new IllegalArgumentException(s"Cannot cast '$s' to $target") }
+      catch { case _: DateTimeParseException => throw new IllegalArgumentException(s"Cannot cast '$s' to timestamp") }
     val instant =
       if (parsed.isSupported(ChronoField.OFFSET_SECONDS)) OffsetDateTime.from(parsed).toInstant
       else if (parsed.isSupported(ChronoField.HOUR_OF_DAY)) LocalDateTime.from(parsed).toInstant(ZoneOffset.UTC)
       else LocalDate.from(parsed).atStartOfDay(ZoneOffset.UTC).toInstant
     instant.truncatedTo(ChronoUnit.MICROS)
   }
+
+  /** An ISO date and nothing else. Which date a time of day falls on depends
+    * on its zone, so a timestamp's text goes through TIMESTAMP, where that is
+    * decided, rather than being cut short here. */
+  private def parseDate(s: String): LocalDate =
+    try LocalDate.parse(s)
+    catch {
+      case _: DateTimeParseException =>
+        val advice =
+          try { parseInstant(s); "; cast it to TIMESTAMP first, then to DATE for its date in UTC" }
+          catch { case _: IllegalArgumentException => "" }
+        throw new IllegalArgumentException(s"Cannot cast '$s' to date$advice")
+    }
 }
 
 /** Column-at-a-time variants of [[Ops]]. Each helper allocates one output

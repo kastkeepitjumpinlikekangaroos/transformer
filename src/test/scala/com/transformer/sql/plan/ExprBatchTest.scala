@@ -307,16 +307,18 @@ class ExprBatchTest {
     assertParity(CastExpr(ColRefExpr(0, "x", DataType.BooleanType), DataType.IntType), b)
   }
 
-  /** CAST to DATE and TIMESTAMP, from SQL-style text with every seventh row
-    * NULL, and between the two types. `normalize` maps a date to its epoch day,
-    * so the strict check that follows matters: an epoch-day Int from `eval`
-    * passed parity here while comparing unequal to a date column's LocalDate
-    * on the row path. */
+  /** CAST to DATE and TIMESTAMP from text with every seventh row NULL, and
+    * between the two types. `normalize` maps a date to its epoch day, so the
+    * strict check that follows matters: an epoch-day Int from `eval` passed
+    * parity here while comparing unequal to a date column's LocalDate on the
+    * row path. */
   @Test def castToDateAndTimestampBoxLikeTheVector(): Unit = {
-    val b = batch("s" -> stringCol(i => f"2026-01-${i % 28 + 1}%02d 05:30:${i % 60}%02d", _ % 7 == 0))
-    val ts = CastExpr(ColRefExpr(0, "s", DataType.StringType), DataType.TimestampType)
-    for (cast <- Seq(ts, CastExpr(ColRefExpr(0, "s", DataType.StringType), DataType.DateType),
-                     CastExpr(ts, DataType.DateType), CastExpr(CastExpr(ts, DataType.DateType), DataType.TimestampType))) {
+    val b = batch(
+      "day" -> stringCol(i => f"2026-01-${i % 28 + 1}%02d", _ % 7 == 0),
+      "at" -> stringCol(i => f"2026-01-${i % 28 + 1}%02d 05:30:${i % 60}%02d", _ % 7 == 0))
+    val ts = CastExpr(ColRefExpr(1, "at", DataType.StringType), DataType.TimestampType)
+    val date = CastExpr(ColRefExpr(0, "day", DataType.StringType), DataType.DateType)
+    for (cast <- Seq(ts, date, CastExpr(ts, DataType.DateType), CastExpr(date, DataType.TimestampType))) {
       assertParity(cast, b)
       val vec = cast.evalVec(b)
       (0 until b.numRows).filterNot(vec.isNull).foreach(i => assertEquals(s"$cast at row $i", vec.getBoxed(i), cast.eval(b, i)))

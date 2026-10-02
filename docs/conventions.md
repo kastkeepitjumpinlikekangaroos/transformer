@@ -50,6 +50,14 @@ specific traps.
   naming the clause rather than binding the part you understand —
   `TrimFunction`'s extended forms and `COUNT(ALL x)` are the cautionary cases.
   See [extending.md](extending.md#honor-a-clause-the-binder-rejects).
+- **Prefer a bind-time error to another engine's permissive coercion.** When
+  SQL could mean more than one thing, or means something only by an engine's
+  implicit conversion (text comparison of a timestamp, a date promoted to a
+  midnight, an integer read as an epoch), make it an error that names the CAST
+  or typed literal to write, rather than copying whichever engine is most
+  lenient. A literal whose reading is unambiguous is read at bind time, so a bad
+  one fails before the query runs. `Analyzer.promotePair` and
+  `Analyzer.checkCast` hold the temporal rules; follow them when adding a type.
 - **Selectivity / cardinality constants live as named `private[plan] val`s**
   in `LogicalPlanCardinality.scala` (`SelectivityEq`, `SelectivityRange`,
   `SelectivityIsNull`, …). New shapes added to `filterSelectivity` should

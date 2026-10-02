@@ -89,6 +89,22 @@ ship a fix or move something from "not done" to "done".
   `TimestampVector.setBoxed` rejects. Both box canonically now, and
   `castToDateAndTimestampBoxLikeTheVector` compares the classes, not just the
   normalized values.
+- **A DATE or TIMESTAMP meets another type only as a string literal.**
+  `Analyzer.promotePair` (comparisons, `BETWEEN`, a `CASE` switch) and
+  `Analyzer.unifyTemporal` (IN lists) read a string literal beside one as that
+  type at bind time, through `Casts`, and reject every other pairing with a
+  message naming the CAST to write. The rule it replaced coerced the other side
+  of any comparison with a string to text, so `2026-01-01T05:30:21Z` met
+  `'2026-01-01 06:00:00'` character by character, the `T` met a space at index
+  10, and a same-day `ts < '...'` missed its rows. Promoting a DATE beside a
+  TIMESTAMP to its midnight, as some engines do, would make `d = ts` match only
+  midnight, which is why that pairing needs a CAST too. The same strictness runs
+  through `CAST`: a string literal cast to DATE or TIMESTAMP is folded at bind
+  time, `Analyzer.checkCast` refuses numbers and booleans in either direction,
+  and a DATE reads only an ISO date. Arithmetic on either type is a bind error,
+  since there is no interval type. When a new type meets these rules, extend
+  them; do not loosen them (see the strictness entry in
+  [conventions.md](conventions.md)).
 - **The clock keywords are a `TimeKeyExpression`, spelled as written.**
   `current_date`, `CURRENT_DATE()` and DB2's `CURRENT DATE` arrive as three
   different strings, and `CURRENT_DATE ()`, with a space, arrives as a
@@ -182,7 +198,8 @@ ship a fix or move something from "not done" to "done".
   as an `Instant` (`CURRENT_TIMESTAMP`), and a parquet TIMESTAMP's unit varies
   by file while a legacy INT96 one is no INT64 at all, so a skip decided in
   microseconds could over-prune. A date literal arrives as a `LocalDate`
-  (`CURRENT_DATE`, `{d '...'}`) and is pushed as INT32 epoch days, which every
+  (`CURRENT_DATE`, `DATE '...'`, `{d '...'}`, or a string literal compared with a
+  date, all read at bind time) and is pushed as INT32 epoch days, which every
   parquet DATE is. The `FilterExec` always stays above the
   scan to catch per-row precision — stats can prove a row group doesn't
   match but can't prove it does. Don't add a "predicate is fully pushed,
@@ -904,21 +921,6 @@ fuzz generators render SQL from their own typed AST (so the corpus is exactly th
 supported grammar), `DataGen.ColumnTypes` and `ExprGen.GenTypes` list six of the
 engine's ten `DataType`s, and every file-format fixture is written by our own
 writer. Plans 04-07 in that directory close those three holes.
-
-Found later, on 2026-10-02, while teaching CAST to read TIMESTAMP:
-
-- **A TIMESTAMP compared with a bare string compares as text.**
-  `Analyzer.promotePair` coerces the other side of a comparison with a string
-  to a string, and a timestamp's text is `2026-01-01T05:30:21Z`. Against SQL's
-  `'2026-01-01 06:00:00'` the `T` meets a space at index 10 and decides the
-  order, so `ts < '2026-01-01 06:00:00'` misses a row at `05:30:21`, `ts > ...`
-  returns it, and a same-day `BETWEEN` is empty, since `BETWEEN` promotes the
-  same way. An IN list is right: it casts its items to the column's type. So is
-  a `TIMESTAMP '...'` literal. Not fixed, because the standard rule (cast the
-  string to a timestamp) changes the result of queries that run today, and a
-  string column compared with a timestamp column would start failing on rows
-  that do not parse; it waits for a decision. Dates are safe in practice: an
-  ISO date's text sorts as the date does.
 
 ## What's intentionally NOT done
 

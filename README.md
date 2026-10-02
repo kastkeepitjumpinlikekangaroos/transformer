@@ -681,16 +681,28 @@ and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
 `DOUBLE`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`, `DATE`,
 `TIMESTAMP`.
 
-Text casts to `DATE` or `TIMESTAMP` from an ISO date, optionally followed by a
-time (after `T` or a space) and then `Z` or an offset such as `+02:00`. A time
-with no zone is UTC and a date alone is midnight, so `'2026-01-01 05:30:21'`,
-`'2026-01-01T05:30:21Z'` and `'2026-01-01 07:30:21+02:00'` are one instant.
-`DATE '2026-01-01'` and `TIMESTAMP '2026-01-01 05:30:21'` are literals of the two
-types. A `TIMESTAMP` casts to `DATE` as its date in UTC, and a `DATE` compared
-with a `TIMESTAMP` stands for its midnight. **Compare a timestamp with a
-`TIMESTAMP '...'` literal, not a bare string**: a bare string compares as text
-against the stored form `2026-01-01T05:30:21Z`, so `ts < '2026-01-01 06:00:00'`
-is wrong within the day (see [docs/gotchas.md](docs/gotchas.md)).
+Text casts to `TIMESTAMP` from an ISO date, optionally followed by a time (after
+`T` or a space) and then `Z` or an offset such as `+02:00`. A time with no zone
+is UTC and a date alone is midnight, so `'2026-01-01 05:30:21'`,
+`'2026-01-01T05:30:21Z'` and `'2026-01-01 07:30:21+02:00'` are one instant. Text
+casts to `DATE` from an ISO date (`2026-01-01`) and nothing else: which date a
+time of day falls on depends on its zone, so `CAST(CAST(x AS TIMESTAMP) AS DATE)`
+spells that out. A `TIMESTAMP` casts to `DATE` as its date in UTC, and a `DATE`
+to `TIMESTAMP` as its midnight. `DATE '2026-01-01'` and
+`TIMESTAMP '2026-01-01 05:30:21'` are literals, read when the query is bound, so a
+malformed one fails before anything runs. A number or a boolean does not cast to
+or from either type: an epoch in days, seconds or milliseconds would be a guess.
+
+**A date or a timestamp compares only with its own type.** A string literal
+beside one is read as that type, so `ts < '2026-01-01 06:00:00'`,
+`d IN ('2026-01-01', '2026-02-01')` and `CASE d WHEN '2026-01-01' ...` compare
+dates and instants, and a literal that is no valid date or timestamp is an error.
+Every other pairing is an error that names the CAST to write: a string column
+(CAST it, or CAST the date to `STRING` to compare text), a number, or the other
+temporal type (`CAST(d AS TIMESTAMP) < ts` compares at the date's midnight,
+`d = CAST(ts AS DATE)` by the timestamp's date in UTC). Engines that compare such
+pairs as text, or promote a date quietly, answer questions nobody asked; this one
+prefers an error to a guess. There is no arithmetic on either type.
 
 **CTEs (`WITH`):** supported, non-recursive. `WITH a AS (...), b AS (SELECT ...
 FROM a) SELECT ... FROM b` — later CTEs may reference earlier ones, a CTE can

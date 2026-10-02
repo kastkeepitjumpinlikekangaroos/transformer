@@ -2394,26 +2394,81 @@ class SqlEngineTest {
       column("SELECT CAST(ts AS DATE) AS v FROM tt ORDER BY ts", cat, "v"))
     assertEquals(Seq(java.time.Instant.parse("2026-01-01T00:00:00Z"), java.time.Instant.parse("2999-01-01T00:00:00Z")),
       column("SELECT CAST(d AS TIMESTAMP) AS v FROM tt ORDER BY d", cat, "v"))
-    assertEquals(java.time.LocalDate.parse("2026-01-01"), one("SELECT CAST('2026-01-01 23:59:59' AS DATE) AS v"))
+    assertEquals(java.time.LocalDate.parse("2026-01-01"),
+      one("SELECT CAST(CAST('2026-01-01 23:59:59' AS TIMESTAMP) AS DATE) AS v"))
     assertEquals(true, one("SELECT CAST(CURRENT_TIMESTAMP AS DATE) = CURRENT_DATE AS v"))
-    // A typed literal compares as a timestamp, within the day too, and so do
-    // the strings of an IN list, which casts them to the column's type.
+    // A typed literal compares as a timestamp, within the day too.
     assertEquals(Seq(at), column("SELECT ts FROM tt WHERE ts < TIMESTAMP '2026-01-01 06:00:00'", cat, "ts"))
-    assertEquals(Seq(at), column("SELECT ts FROM tt WHERE ts IN ('2026-01-01 05:30:21', '2026-06-01')", cat, "ts"))
-    // A date against a timestamp is its midnight. These threw
-    // ClassCastException, and `=` was false for every pair.
+    // Mixing the two types takes a CAST that says which meaning is wanted.
     assertEquals(Seq(java.time.LocalDate.parse("2026-01-01")),
-      column("SELECT d FROM tt WHERE d < CURRENT_TIMESTAMP", cat, "d"))
+      column("SELECT d FROM tt WHERE CAST(d AS TIMESTAMP) < CURRENT_TIMESTAMP", cat, "d"))
     assertEquals(Seq(java.time.LocalDate.parse("2026-01-01")),
-      column("SELECT d FROM tt WHERE d = TIMESTAMP '2026-01-01 00:00:00'", cat, "d"))
-    // A date IN a list of strings casts the strings to dates.
+      column("SELECT d FROM tt WHERE CAST(d AS TIMESTAMP) = TIMESTAMP '2026-01-01 00:00:00'", cat, "d"))
+    // A typed literal is read when the query is bound, so a bad one fails
+    // before anything runs, naming the text.
+    def bindError(sql: String): String =
+      try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    assertTrue(bindError("SELECT TIMESTAMP 'noon' AS v").contains("Cannot cast 'noon' to timestamp"))
+    assertTrue(bindError("SELECT ts FROM tt WHERE 1 = 0 AND ts < CAST('noon' AS TIMESTAMP)")
+      .contains("Cannot cast 'noon' to timestamp"))
+    // DATE reads an ISO date and nothing more: where a time of day falls
+    // depends on its zone, so that goes through TIMESTAMP.
+    assertTrue(bindError("SELECT DATE '2026-1-5' AS v").contains("Cannot cast '2026-1-5' to date"))
+    assertTrue(bindError("SELECT CAST('2026-01-01 23:59:59' AS DATE) AS v")
+      .contains("cast it to TIMESTAMP first, then to DATE"))
+  }
+
+  /** A DATE or TIMESTAMP meets another type only as a string literal, read as
+    * that type when the query is bound; anything else is an error naming the
+    * CAST to write. A string beside a timestamp used to compare as text, so the
+    * `T` of `2026-01-01T05:30:21Z` met the space of a SQL-style literal and
+    * decided the order. */
+  @Test def temporalComparisonsAreTypedOrRejected(): Unit = {
+    val cat = new Catalog
+    cat.register("tt", CsvReader.fromPath(tmpCsv("tt.csv",
+      "d,ts,s\n2026-01-01,2026-01-01T05:30:21Z,first day\n2999-01-01,2999-01-01T00:00:00Z,last day\n").toString,
+      CsvOptions()))
+    val early = java.time.Instant.parse("2026-01-01T05:30:21Z")
+    val late = java.time.Instant.parse("2999-01-01T00:00:00Z")
+    // Within the day. These found no row, the late one, and no row.
+    assertEquals(Seq(early), column("SELECT ts FROM tt WHERE ts < '2026-01-01 06:00:00'", cat, "ts"))
+    assertEquals(Seq(late), column("SELECT ts FROM tt WHERE ts > '2026-01-01 06:00:00'", cat, "ts"))
+    assertEquals(Seq(early),
+      column("SELECT ts FROM tt WHERE ts BETWEEN '2026-01-01 00:00:00' AND '2026-01-01 06:00:00'", cat, "ts"))
+    // A date alone is midnight beside a timestamp, as in a CAST.
+    assertEquals(Seq(early), column("SELECT ts FROM tt WHERE ts < '2026-01-02'", cat, "ts"))
+    // Every place a pair of operands is unified: a CASE switch and an IN list.
+    assertEquals(Seq("first", "other"),
+      column("SELECT CASE d WHEN '2026-01-01' THEN 'first' ELSE 'other' END AS c FROM tt ORDER BY d", cat, "c"))
+    assertEquals(Seq(early), column("SELECT ts FROM tt WHERE ts IN ('2026-01-01 05:30:21', '2026-06-01')", cat, "ts"))
     assertEquals(Seq(java.time.LocalDate.parse("2026-01-01")),
       column("SELECT d FROM tt WHERE d IN ('2026-01-01', '2026-06-01')", cat, "d"))
-    // Text that is no timestamp is a clean error naming the value.
-    val ex = try { collectAllRows(SqlEngine.execute("SELECT CAST('noon' AS TIMESTAMP) AS v", cat)); null }
-      catch { case e: IllegalArgumentException => e }
-    assertNotNull(ex)
-    assertTrue(ex.getMessage, ex.getMessage.contains("Cannot cast 'noon' to timestamp"))
+    assertEquals(Seq(java.time.LocalDate.parse("2026-01-01")), column("SELECT d FROM tt WHERE d = '2026-01-01'", cat, "d"))
+
+    def bindError(sql: String): String =
+      try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    // A literal that is not one is an error at bind time, rows or no rows.
+    // These matched nothing, or compared as text.
+    assertTrue(bindError("SELECT ts FROM tt WHERE ts < 'noon'").contains("Cannot cast 'noon' to timestamp"))
+    assertTrue(bindError("SELECT d FROM tt WHERE 1 = 0 AND d = '2026-1-5'").contains("Cannot cast '2026-1-5' to date"))
+    assertTrue(bindError("SELECT d FROM tt WHERE d = '2026-01-01 00:00:00'").contains("Cannot cast '2026-01-01 00:00:00' to date"))
+    // A string that is not a literal needs a CAST to say which comparison it means.
+    for (sql <- Seq("SELECT d FROM tt WHERE d = s", "SELECT d FROM tt WHERE s < d", "SELECT d FROM tt WHERE d IN (s)"))
+      assertTrue(sql, bindError(sql).contains("Cannot compare DATE with STRING; only a string literal"))
+    // So does a DATE beside a TIMESTAMP: a midnight, or a date in UTC.
+    for (sql <- Seq("SELECT d FROM tt WHERE d = ts", "SELECT d FROM tt WHERE d < CURRENT_TIMESTAMP",
+                    "SELECT d FROM tt WHERE d IN (TIMESTAMP '2026-01-01 00:00:00')",
+                    "SELECT ts FROM tt WHERE ts BETWEEN DATE '2026-01-01' AND DATE '2026-01-02'"))
+      assertTrue(sql, bindError(sql).contains("CAST one side: a DATE as a TIMESTAMP is its midnight"))
+    // And a number is neither, in a comparison or a CAST.
+    assertTrue(bindError("SELECT d FROM tt WHERE d = 20260101").contains("Cannot compare DATE with INT"))
+    assertTrue(bindError("SELECT CAST(1 AS DATE) AS v").contains("Cannot cast INT to DATE"))
+    assertTrue(bindError("SELECT CAST(ts AS BIGINT) AS v FROM tt").contains("Cannot cast TIMESTAMP to LONG"))
+    // There is no interval type for arithmetic to produce.
+    assertTrue(bindError("SELECT d + 1 AS v FROM tt").contains("Arithmetic on DATE is not supported"))
+    assertTrue(bindError("SELECT ts - ts AS v FROM tt").contains("Arithmetic on TIMESTAMP is not supported"))
   }
 
   @Test def groupingSetsRejectedWithoutLeakingAnInternalName(): Unit = {
