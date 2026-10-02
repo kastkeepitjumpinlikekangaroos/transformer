@@ -1,6 +1,6 @@
 package com.transformer.sql.plan
 
-import com.transformer.core.{Catalog, DataType, Field, Schema}
+import com.transformer.core.{Catalog, ColumnarBatch, DataType, Field, MaterializedView, Schema}
 import com.transformer.sql.parse.SqlParser
 
 import net.sf.jsqlparser.expression.{
@@ -264,6 +264,10 @@ object LogicalBuilder {
             case None =>
               throw new IllegalArgumentException(s"Unknown table in '$tableName.*'")
           }
+        case _: net.sf.jsqlparser.statement.select.AllColumns if ps.getFromItem == null =>
+          // There is nothing to expand, and quietly dropping the star would
+          // turn `SELECT *, 1 AS x` into `SELECT 1 AS x`.
+          throw new IllegalArgumentException("SELECT * needs a FROM clause")
         case _: net.sf.jsqlparser.statement.select.AllColumns =>
           sources.flatMap { case (alias, schema) =>
             schema.fields.map { f =>
@@ -481,10 +485,20 @@ object LogicalBuilder {
   // FROM + JOINs
   // ---------------------------------------------------------------------------
 
+  /** What a SELECT with no FROM reads: one row and no columns, so the SELECT
+    * list is evaluated once and no column name resolves. Operators never write
+    * to their input batches, so one view serves every query. */
+  private lazy val NoFromRow: MaterializedView = {
+    val schema = Schema(Vector.empty)
+    val row = new ColumnarBatch(schema, 1)
+    row.setNumRows(1)
+    new MaterializedView(schema, IndexedSeq(IndexedSeq(row)))
+  }
+
   private def buildFromAndJoins(ps: PlainSelect, catalog: Catalog, cteScope: Map[String, CteScopeEntry]): (LogicalPlan, Sources) = {
-    if (ps.getFromItem == null)
-      throw new IllegalArgumentException("SELECT without FROM is not supported")
-    val (root, rootSources) = fromItem(ps.getFromItem, catalog, cteScope)
+    val (root, rootSources) =
+      if (ps.getFromItem == null) (LogicalScan("(no FROM)", NoFromRow, None), Nil: Sources)
+      else fromItem(ps.getFromItem, catalog, cteScope)
     val joins = Option(ps.getJoins).map(_.asScala.toSeq).getOrElse(Nil)
 
     var plan = root

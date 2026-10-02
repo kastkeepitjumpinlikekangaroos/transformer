@@ -849,6 +849,11 @@ If you write a new operator that needs to OWN an output column (e.g. to
 mutate it after construction), copy via `ColumnVector.copyTo` instead of
 relying on the alias.
 
+The same rule lets every `SELECT` with no `FROM` scan one shared view,
+`LogicalBuilder.NoFromRow`: a single batch of one row and no columns, read by
+concurrent queries at once. An operator that wrote to its input batch — even
+just its row count — would corrupt every later FROM-less query.
+
 **Floating-point comparison contract.** A vectorized helper may not reach for
 the raw primitive operator just because the operands are `double`. Equality
 (`= <>`) is primitive `==` / `!=` and ordering (`< <= > >=`) is

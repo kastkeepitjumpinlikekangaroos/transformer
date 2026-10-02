@@ -557,8 +557,8 @@ The engine supports the standard SQL-92 SELECT shape:
 ```
 [ WITH <name> [(<col>, ...)] AS (<select>) [, ...] ]
 SELECT [DISTINCT] <projections>
-FROM <table> [<alias>]
-[ {INNER|LEFT|RIGHT|FULL} JOIN <table> [<alias>] ON <predicate> ]*
+[ FROM <table> [<alias>]
+  [ {INNER|LEFT|RIGHT|FULL} JOIN <table> [<alias>] ON <predicate> ]* ]
 [ WHERE <predicate> ]
 [ GROUP BY <exprs> [ HAVING <predicate> ] ]
 [ ORDER BY <expr> [ASC|DESC] [NULLS FIRST|NULLS LAST] [, ...] ]
@@ -577,6 +577,11 @@ of ten. MySQL's `LIMIT m, n` spelling means the same as `LIMIT n OFFSET m`.
 Written after the last arm of a `UNION`, both clauses apply to the whole union,
 as they do in Postgres. Without an `ORDER BY` that fixes the order, which rows a
 `LIMIT` or `OFFSET` keeps is unspecified, as in any SQL engine.
+
+Without a `FROM`, a `SELECT` reads a single row that has no columns, so its
+expressions are evaluated once: `SELECT 1 + 1 AS two` returns one row,
+`SELECT COUNT(*) AS n` returns 1, and `WHERE`, `LIMIT` and `UNION` apply as they
+do anywhere else. No column name resolves there, and `SELECT *` is an error.
 
 `GROUP BY` and `ORDER BY` also accept a **positional ordinal** — a bare integer
 naming a SELECT-list position, as in BigQuery / Postgres / MySQL. `ORDER BY 2
@@ -602,8 +607,7 @@ joins, a bare `OUTER JOIN` and Oracle's `(+)`; `FETCH FIRST`, `TOP n`, and
 `x NOTNULL`; `TRY_CAST`, array types and
 subscripts; `* EXCEPT` / `* REPLACE`; `PIVOT`, `TABLESAMPLE`, `CONNECT BY` and
 schema-qualified table names; `SELECT ... INTO`, `FOR UPDATE`, and vendor
-hints. A `SELECT` with no `FROM` is rejected too. The complete list, with the
-reason for each, is
+hints. The complete list, with the reason for each, is
 [`UnsupportedClauses.scala`](src/main/scala/com/transformer/sql/plan/UnsupportedClauses.scala).
 
 **Aggregates:** `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `COUNT_IF(pred)`,

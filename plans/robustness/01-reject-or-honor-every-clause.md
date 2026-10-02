@@ -349,6 +349,20 @@ that is not a one-character string literal is a clean error. Because ILIKE folds
 case in the compiled regex rather than by lower-casing, a letter used as the escape
 character still escapes only itself. `ExprGen` draws the escape character too.
 
+**SELECT with no FROM.** Half 1 turned the NPE into a rejection; it is a one-row
+virtual scan now. With no FROM item, `buildFromAndJoins` scans `NoFromRow`, one
+shared `MaterializedView` holding a single batch of one row and no columns, so
+the SELECT list is evaluated once and no column name resolves: `SELECT a` fails
+as an unknown column, and a star, which has nothing to expand, is a clean error
+even beside other items, since dropping it would turn `SELECT *, 1 AS x` into
+`SELECT 1 AS x`. Nothing downstream needed teaching. A literal evaluates against the
+batch's row count, the projection push-down already short-circuits a scan with
+no columns, and `COUNT(*)` takes the metadata fast path with an exact count of 1.
+Sharing one view across queries leans on the aliasing contract in
+`docs/architecture.md`: no operator writes to a batch it did not allocate. It
+works as a top-level query, a UNION arm and a CTE body; a derived table or a
+scalar subquery is unsupported with or without a FROM.
+
 ## Launch prompt
 
 ```

@@ -2218,14 +2218,31 @@ class SqlEngineTest {
     }
   }
 
-  @Test def selectWithoutFromRejected(): Unit = {
+  @Test def selectWithoutFromReadsOneRow(): Unit = {
     // Used to die with an internal NullPointerException.
-    val p = tmpCsv("a.csv", "a\n1\n")
-    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
-    val ex = try { SqlEngine.execute("SELECT 1 AS x", cat); null }
-      catch { case e: IllegalArgumentException => e }
-    assertNotNull(ex)
-    assertTrue(ex.getMessage, ex.getMessage.contains("SELECT without FROM"))
+    val cat = new Catalog
+    assertEquals(Seq(Map("x" -> 1, "s" -> "a", "y" -> 5)),
+      collectAllRows(SqlEngine.execute("SELECT 1 AS x, 'a' AS s, 2 + 3 AS y", cat)))
+    // One row: an aggregate sees it once, and a false WHERE removes it.
+    assertEquals(Seq(1L), column("SELECT COUNT(*) AS c", cat, "c"))
+    assertEquals(Seq(2L), column("SELECT SUM(2) AS s", cat, "s"))
+    assertEquals(Nil, column("SELECT 1 AS x WHERE 1 = 0", cat, "x"))
+    assertEquals(Nil, column("SELECT 1 AS x OFFSET 1", cat, "x"))
+    // As union arms and as a CTE body.
+    assertEquals(Seq(1, 2), column("SELECT 2 AS x UNION ALL SELECT 1 ORDER BY x", cat, "x"))
+    assertEquals(Seq(3), column("WITH c AS (SELECT 3 AS v) SELECT v FROM c", cat, "v"))
+    // No column name resolves, and a star has nothing to expand.
+    val unknown = try { SqlEngine.execute("SELECT a", cat); null } catch { case e: IllegalArgumentException => e }
+    assertNotNull(unknown)
+    assertTrue(unknown.getMessage, unknown.getMessage.contains("Unknown column"))
+    for (sql <- Seq("SELECT *", "SELECT *, 1 AS x")) {
+      val star = try { SqlEngine.execute(sql, cat); null } catch { case e: IllegalArgumentException => e }
+      assertNotNull(sql, star)
+      assertTrue(star.getMessage, star.getMessage.contains("SELECT * needs a FROM clause"))
+    }
+    val tableStar = try { SqlEngine.execute("SELECT t.*", cat); null } catch { case e: IllegalArgumentException => e }
+    assertNotNull(tableStar)
+    assertTrue(tableStar.getMessage, tableStar.getMessage.contains("Unknown table in 't.*'"))
   }
 
   @Test def groupingSetsRejectedWithoutLeakingAnInternalName(): Unit = {

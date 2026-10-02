@@ -34,6 +34,8 @@ already expected to handle**. Concretely, nothing asserts any of:
    `NullPointerException: Cannot invoke "Object.getClass()" because "<local6>" is null`,
    and `GROUP BY GROUPING SETS ((g),())` reports
    `Unknown column 'g'. Available: [_agg0]`, leaking an aggregate slot name.
+   (Plan 01 fixed both: the first reads one row now, the second is rejected by
+   name.)
 3. **Rejection is total.** Anything the binder does not fully support fails at
    *bind* time, not mid-drain inside a worker. A mid-drain failure in a job is
    what made runner bug 03 cascade every downstream task to `Skipped`.

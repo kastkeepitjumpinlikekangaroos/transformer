@@ -700,8 +700,8 @@ ship a fix or move something from "not done" to "done".
   the getters the binder reads, so it inspects exactly the nodes binding would
   and in every position they occur — `NULLS LAST` inside `OVER (...)` meets the
   same entry as in the outer `ORDER BY`. A `SELECT` with no `FROM` (an internal
-  `NullPointerException` before) is a plain rejection now, and `GROUPING SETS`
-  no longer leaks the `_agg0` slot name into its error.
+  `NullPointerException` before) reads one row with no columns now, and
+  `GROUPING SETS` no longer leaks the `_agg0` slot name into its error.
 
   **The guard is `sql/plan:unsupported_clauses_test`, and it is mechanical.** It
   reads which getters the binder calls out of `LogicalBuilder`'s compiled class
