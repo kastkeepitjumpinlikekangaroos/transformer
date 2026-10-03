@@ -61,7 +61,8 @@ final class ParquetReader private (
     projectedNames: Option[Set[String]],
     parquetSchema_ : Schema,
     partitions: IndexedSeq[ParquetReader.PartitionMeta],
-    pushdownFilter: Option[FilterPredicate]
+    pushdownFilter: Option[FilterPredicate],
+    comparableColumns: Set[String]
 ) extends CatalogView {
   require(files.nonEmpty, "ParquetReader requires at least one file")
 
@@ -127,7 +128,7 @@ final class ParquetReader private (
     val available = parquetSchema_.fieldNames.toSet
     val keep = names.iterator.filter(available.contains).toSet
     if (keep.isEmpty || keep.size == parquetSchema_.length) None
-    else Some(new ParquetReader(files, batchSize, Some(keep), parquetSchema_, partitions, pushdownFilter))
+    else Some(new ParquetReader(files, batchSize, Some(keep), parquetSchema_, partitions, pushdownFilter, comparableColumns))
   }
 
   /** Translate `predicate` into a parquet `FilterPredicate` and attach it to a
@@ -135,10 +136,16 @@ final class ParquetReader private (
     * (e.g. a computed expression like `a - b > 0`). The caller keeps the
     * original [[Expr]] in its [[com.transformer.sql.exec.FilterExec]] above
     * the scan; the filter here only enables row-group skipping in the
-    * iterator. */
+    * iterator.
+    *
+    * A comparison is pushed only on a column that every file stores as the
+    * engine's own values (`ParquetColumns.Decoding.storesEngineValue`), since
+    * parquet-mr judges it against the statistics of the stored values: an
+    * unsigned `INT32` read as a `BIGINT`, or a `FLOAT16` read as a `FLOAT`,
+    * is bounded by statistics of other bits. */
   def withPushdownFilter(predicate: Expr): Option[CatalogView] = {
-    ParquetFilterTranslator.translate(predicate).map { fp =>
-      new ParquetReader(files, batchSize, projectedNames, parquetSchema_, partitions, Some(fp))
+    ParquetFilterTranslator.translate(predicate, comparableColumns.contains).map { fp =>
+      new ParquetReader(files, batchSize, projectedNames, parquetSchema_, partitions, Some(fp), comparableColumns)
     }
   }
 }
@@ -219,9 +226,18 @@ object ParquetReader {
     val files = PathGlob.expand(pathOrGlob).toIndexedSeq
     if (files.isEmpty)
       throw new IllegalArgumentException(s"No Parquet files matched '$pathOrGlob'")
-    val (schema, parts) = readFooters(files, math.max(1L, targetBytesPerPartition))
-    new ParquetReader(files, batchSize, projectedNames = None, schema, parts, pushdownFilter = None)
+    val footers = readFooters(files, math.max(1L, targetBytesPerPartition))
+    new ParquetReader(files, batchSize, projectedNames = None, footers.schema, footers.partitions,
+      pushdownFilter = None, footers.comparableColumns)
   }
+
+  /** What [[readFooters]] learns from every file of a view: its schema, its
+    * partitions, and the names of the columns every file stores as the
+    * engine's own values. */
+  private final case class Footers(
+      schema: Schema,
+      partitions: IndexedSeq[PartitionMeta],
+      comparableColumns: Set[String])
 
   /** Open every file in parallel, decode the footer once, and chunk row groups
     * into partitions. Reused by `withProjectedColumns` so a pruned variant
@@ -234,7 +250,7 @@ object ParquetReader {
   private def readFooters(
       files: IndexedSeq[Path],
       targetBytesPerPartition: Long
-  ): (Schema, IndexedSeq[PartitionMeta]) = {
+  ): Footers = {
     val conf = defaultConf
     val tasks: Seq[Callable[(MessageType, IndexedSeq[PartitionMeta])]] = files.map { f =>
       new Callable[(MessageType, IndexedSeq[PartitionMeta])] {
@@ -252,9 +268,11 @@ object ParquetReader {
     val results = Scheduler.submitAndAwaitAll(tasks)
     val footers = files.map(_.toString).zip(results.map(_._1))
     val schema = ParquetColumns.viewSchema(footers)
-    footers.foreach { case (label, mt) => ParquetColumns.resolve(schema, mt, label) }
-    val allPartitions = results.flatMap(_._2).toIndexedSeq
-    (schema, allPartitions)
+    val decodings = footers.map { case (label, mt) => ParquetColumns.resolve(schema, mt, label).decodings }
+    val comparable = schema.fields.indices.collect {
+      case i if decodings.forall(_(i).storesEngineValue) => schema.fields(i).name
+    }.toSet
+    Footers(schema, results.flatMap(_._2).toIndexedSeq, comparable)
   }
 
   /** Greedily pack contiguous row groups into partitions whose summed
@@ -501,6 +519,14 @@ final class ParquetPartitionIterator(
           else v.set(r, cr.getInteger)
           cr.consume(); r += 1
         }
+      case ParquetColumns.Decoding.UnsignedInts =>
+        val v = vec.asInstanceOf[LongVector]
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else v.set(r, java.lang.Integer.toUnsignedLong(cr.getInteger))
+          cr.consume(); r += 1
+        }
       case ParquetColumns.Decoding.Dates =>
         val v = vec.asInstanceOf[DateVector]
         var r = 0
@@ -515,6 +541,19 @@ final class ParquetPartitionIterator(
         while (r < rowCount) {
           if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
           else v.set(r, cr.getLong)
+          cr.consume(); r += 1
+        }
+      case ParquetColumns.Decoding.UnsignedLongs =>
+        val v = vec.asInstanceOf[DecimalVector]
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else {
+            val bits = cr.getLong
+            v.set(r,
+              if (bits >= 0L) java.math.BigDecimal.valueOf(bits)
+              else new java.math.BigDecimal(java.math.BigInteger.valueOf(bits).add(ParquetPartitionIterator.TwoTo64)))
+          }
           cr.consume(); r += 1
         }
       case ParquetColumns.Decoding.Timestamps(unit) =>
@@ -563,6 +602,14 @@ final class ParquetPartitionIterator(
         while (r < rowCount) {
           if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
           else v.set(r, cr.getFloat)
+          cr.consume(); r += 1
+        }
+      case ParquetColumns.Decoding.HalfFloats =>
+        val v = vec.asInstanceOf[FloatVector]
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else v.set(r, java.lang.Float.float16ToFloat(cr.getBinary.get2BytesLittleEndian))
           cr.consume(); r += 1
         }
       case ParquetColumns.Decoding.Doubles =>
@@ -654,14 +701,17 @@ object ParquetPartitionIterator {
     override def end(): Unit = ()
   }
 
-  // Parquet's INT96 timestamp encoding: 8 bytes nanos-of-day (little-endian)
-  // followed by 4 bytes julian day. Convert to micros since epoch the same
-  // way Spark / Hive / DuckDB do.
+  // Added to a negative INT64's value, its value read as unsigned.
+  private[parquet] val TwoTo64: java.math.BigInteger = java.math.BigInteger.ONE.shiftLeft(64)
+
   // The TIMESTAMP(MILLIS) values that have a microsecond value: times 1000,
   // anything past these overflows a long.
   private[parquet] val MaxMillis: Long = Long.MaxValue / 1000L
   private[parquet] val MinMillis: Long = Long.MinValue / 1000L
 
+  // Parquet's INT96 timestamp encoding: 8 bytes nanos-of-day (little-endian)
+  // followed by 4 bytes julian day. Convert to micros since epoch the same
+  // way Spark / Hive / DuckDB do.
   private val JulianEpochOffsetDays: Long = 2440588L  // 1970-01-01 in julian-day
   private val MicrosPerDay: Long = 86400000000L
   private val NanosPerMicro: Long = 1000L

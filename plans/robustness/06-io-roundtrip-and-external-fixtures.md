@@ -70,6 +70,18 @@ round-trips keep changing the data, and it tells you exactly which inference ste
 are lossy. Whatever the property reveals gets written into the README's CSV
 section as documented behaviour rather than quietly fixed.
 
+> **Landed with [plan 03](03-parquet-external-format-fidelity.md) on
+> 2026-10-03:** the helper is `read/parquet:external_parquet`
+> (`ExternalParquet.write` from parquet's own schema text, `read` back through
+> parquet-mr's reader and stringifiers, `footerSchema`), testonly and usable
+> from any test package. `parquet_external_format_test` uses it for every
+> timestamp unit, every decimal layout, the unsigned, text, binary, FLOAT16,
+> TIME, INTERVAL and REPEATED annotations, projection, and a glob's column
+> matching. What remains of this section is the property that drives it
+> (generated schemas, values and row-group sizes; multiple row groups with a
+> straddling null; a single-row group; an empty file) and the partition-axis
+> property below.
+
 **3. External parquet fixtures.** A test helper that writes parquet with
 parquet-mr directly from a `MessageType` the helper constructs, so a test can
 produce a file transformer's own writer cannot: each timestamp unit, each decimal
@@ -130,10 +142,8 @@ end-to-end.
 Use max effort. Honor CLAUDE.md: bazel test //... green, jaffle_shop 15/15, docs
 in the same commit.
 
-Build the external parquet fixture helper FIRST — plans/robustness/03 needs it and
-it is the piece that makes this plan more than a restatement of existing tests.
-Confirm it can produce a MILLIS-timestamp file and a FIXED_LEN_BYTE_ARRAY decimal
-file that ParquetWriter cannot.
+The external parquet fixture helper already exists (read/parquet:external_parquet,
+landed with plans/robustness/03); build the generated parquet property on it.
 
 Then the CSV text property, then inference round-trip last (it is the one most
 likely to turn into a documentation task rather than a fix).

@@ -48,6 +48,16 @@ scala_library(
         "@maven//:org_apache_parquet_parquet_common",
         "@maven//:org_apache_parquet_parquet_hadoop",
     ],
+    # A schema here is parquet-mr's MessageType, so every user needs it.
+    exports = ["@maven//:org_apache_parquet_parquet_column"],
+    # parquet-mr's reader reaches Hadoop's mapreduce classes (FileInputFormat)
+    # at run time; read/parquet carries them too, but this library must work
+    # in a test that never touches our reader.
+    runtime_deps = [
+        "@maven//:commons_collections_commons_collections",
+        "@maven//:org_apache_hadoop_hadoop_mapreduce_client_core",
+        "@maven//:org_slf4j_slf4j_nop",
+    ],
 )
 
 scala_junit_test(
@@ -59,6 +69,8 @@ scala_junit_test(
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/sql/exec",
+        # sql/plan supplies the Expr handed to ParquetReader.withPushdownFilter.
+        "//src/main/scala/com/transformer/sql/plan",
         "//src/main/scala/com/transformer/write/parquet",
         "@maven//:org_apache_parquet_parquet_column",
         "@maven//:junit_junit",

@@ -588,6 +588,16 @@ Both directions skip the `Group`/`SimpleGroup` row-object model that
   or `INT64` (`IntDecimals`, `LongDecimals`), or as big-endian two's
   complement in a `BINARY` or `FIXED_LEN_BYTE_ARRAY` (`ByteDecimals`). Two
   files can store one `DECIMAL(p,s)` column in different layouts.
+- `ParquetColumns.decoding` lists every pairing of physical type and
+  annotation it reads, and nothing falls through to the physical type: an
+  unsigned `INT32` widens to `BIGINT` (`UnsignedInts`) and an unsigned
+  `INT64` to `DECIMAL(20,0)` (`UnsignedLongs`), `FLOAT16` to `FLOAT`
+  (`HalfFloats`), `JSON` and `ENUM` read as text, `BSON` and `UUID` as bytes,
+  and `TIME`, `INTERVAL`, a `REPEATED` column or a nested group fail, naming
+  the column. Each `Decoding` also says whether it `storesEngineValue`: true
+  for a plain copy, false where the decode changes the stored bits. Only a
+  column stored as its engine values in every file takes a pushed
+  comparison (see 3d).
 - Write: a custom `BatchWriteSupport` drives parquet-mr's `RecordConsumer`
   directly from the `ColumnarBatch` vectors. Each batch row maps to one
   `writer.write()` call (parquet-mr needs that 1:1 mapping so its
@@ -643,9 +653,13 @@ Unsupported (left as residual): computed expressions (`a - b > 0`),
 two-column predicates (`a > b`), `LIKE`, `IN` containing a NULL literal
 (SQL three-valued-logic semantics make stats-level skipping unsafe in that
 case — the translator bails), `IN (…)` with non-literal items, decimal
-columns, and comparisons on a timestamp column (its statistics are in the unit
-its file stores, which varies by file; `IS NULL` on one still pushes). The
-translator drops unsupported conjuncts from the AND-chain
+columns, comparisons on a timestamp column (its statistics are in the unit
+its file stores, which varies by file; `IS NULL` on one still pushes), and
+comparisons on any column some file stores as other bits than the engine
+reads it as: `readFooters` collects the columns every file stores as engine
+values (`Decoding.storesEngineValue`), and `withPushdownFilter` passes them to
+`translate` as `comparable`. The translator drops unsupported conjuncts from
+the AND-chain
 rather than refusing to push the whole predicate; the residual `FilterExec`
 covers them.
 

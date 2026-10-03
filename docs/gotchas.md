@@ -250,6 +250,28 @@ ship a fix or move something from "not done" to "done".
   layouts as `DECIMAL(p,s)`, and `ParquetWriter` writes the spec's layout by
   precision. A decimal that spills reads back at its column's declared scale,
   like a GROUP BY key.
+- **Every parquet annotation is decided; none falls through to its physical
+  type.** The reader used to map a few annotations and read everything else
+  as its physical type, so the annotation that says what the bits mean was
+  dropped: an unsigned `INT32` or `INT64` read as signed, so its upper half
+  came back negative; `JSON` text read as `BINARY`; a `TIME` as a bare `INT`
+  or `BIGINT`; `FLOAT16` and `INTERVAL` as raw bytes; and a `REPEATED` column
+  (a list per row) as one value per row, misaligning its rows.
+  `ParquetColumns.decoding` now lists every pairing it reads and fails,
+  naming the column, on anything else. An unsigned `INT32` widens to `BIGINT`
+  and an unsigned `INT64` to `DECIMAL(20,0)`, Spark's mapping, since both hold
+  every value exactly; `JSON` and `ENUM` read as `STRING`; `FLOAT16` widens to
+  `FLOAT` (`Float.float16ToFloat`, exact). `BSON` and `UUID` stay `BINARY` by
+  decision: a BSON document is binary, not text, so reading it as UTF-8 would
+  mangle it. `TIME`, `INTERVAL` and `REPEATED` columns have no engine type and
+  make the file unreadable, even to a query that does not name them, because
+  the view's schema is the file's. Where a decode changes the stored value
+  (`Decoding.storesEngineValue` is false), the column's row-group statistics
+  bound the stored bits rather than the engine's values, so
+  `ParquetFilterTranslator` pushes no comparison on it. Without that rule the
+  widened columns would push a `Long` bound against `INT32` statistics, and
+  stay correct only because parquet-mr throws a `ClassCastException`
+  comparing the two, which the iterator's stats check swallows.
 - **Predicate pushdown into parquet is best-effort partial.** The translator
   in `ParquetFilterTranslator` handles `c <op> lit` and its swapped form,
   `c IS NULL` / `c IS NOT NULL`, `c IN (lit, lit, …)` / `c NOT IN (…)` over
@@ -265,7 +287,11 @@ ship a fix or move something from "not done" to "done".
   count): a parquet TIMESTAMP's statistics are in the unit its file stores,
   which varies by file, and a legacy INT96 is no INT64 at all, so a skip
   decided in microseconds could over-prune. `ts IS NULL` still pushes, since
-  null counts have no unit. A date literal arrives as a `LocalDate`
+  null counts have no unit. For the same reason no comparison pushes on a
+  column some file stores as other bits than the engine reads it as (an
+  unsigned `INT32` read as `BIGINT`, a `FLOAT16` read as `FLOAT`):
+  `ParquetReader` passes the translator the columns every file stores as
+  their engine values. A date literal arrives as a `LocalDate`
   (`CURRENT_DATE`, `DATE '...'`, `{d '...'}`, or a string literal compared with a
   date, all read at bind time) and is pushed as INT32 epoch days, which every
   parquet DATE is. A string literal beside a number is read as that number at
@@ -1002,28 +1028,18 @@ ship a fix or move something from "not done" to "done".
   a grouped query spills. `fuzz/metamorphic_fuzz_test`'s `agg-decomposition`
   relation is the general guard.
 
-## Known wrong answers, open (found 2026-09-10, not yet fixed)
+## Known wrong answers from the 2026-09-10 audit (all fixed)
 
-One cluster remains of the confirmed defects from an audit of the surfaces the
-fuzzers cannot reach, executed against `SqlEngine` at commit `d4bb409`, not
-inferred. Plans, evidence and repro SQL are in
-[`plans/robustness/`](../plans/robustness/README.md); this list exists so a
-reader of the docs does not have to find the plans first. The audit's other
-clusters are fixed: SQL clauses the binder silently dropped (see "A clause the
-binder does not read used to vanish" above), byte-array and decimal comparison
-(see "Byte arrays, decimals and BIGINTs past 2^53 used to compare wrongly"
-above), and the parquet reader's timestamp units and decimals (see "A
-self-consistent round-trip cannot catch a wrong reading of an external format"
-above).
-
-- **Parquet annotations the reader has no case for collapse into their
-  physical type.** An unsigned integer (`INTEGER(32,false)` on `INT32`,
-  `INTEGER(64,false)` on `INT64`) reads as a signed `INT` or `BIGINT`, so a
-  value past the signed range comes back negative; `JSON` text reads as
-  `BINARY`; a `TIME` reads as a bare `INT` or `BIGINT`; `FLOAT16` and
-  `INTERVAL` as raw bytes; and a `REPEATED` column, which holds a list per
-  row, as one value per row, so its rows misalign. See
-  [plan 03](../plans/robustness/03-parquet-external-format-fidelity.md).
+An audit of the surfaces the fuzzers cannot reach, executed against
+`SqlEngine` at commit `d4bb409` rather than inferred, found three clusters of
+wrong answers. All three are fixed, each described above: SQL clauses the
+binder silently dropped (see "A clause the binder does not read used to
+vanish"), byte-array and decimal comparison (see "Byte arrays, decimals and
+BIGINTs past 2^53 used to compare wrongly"), and the parquet reader's
+timestamp units, decimals and other annotations (see "A self-consistent
+round-trip cannot catch a wrong reading of an external format" and "Every
+parquet annotation is decided"). Plans, evidence and repro SQL are in
+[`plans/robustness/`](../plans/robustness/README.md).
 
 All three clusters hid for the same reason, and it is the lesson to carry: the
 fuzz generators render SQL from their own typed AST (so the corpus is exactly the

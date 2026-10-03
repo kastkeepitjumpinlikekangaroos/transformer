@@ -1,8 +1,8 @@
 # Plan 03: the parquet reader ignores timestamp units and cannot see DECIMAL
 
-> Status: **not started** · Effort: 1-2 days · Risk: low-medium (it changes how
-> existing files are read, which is the fix, but any cached/derived output from a
-> MILLIS-timestamp source is wrong today and will change)
+> Status: **done** 2026-10-03 (see [Outcome](#outcome)) · Effort: 1-2 days ·
+> Risk: low-medium (it changes how existing files are read, which is the fix, but
+> any cached/derived output from a MILLIS-timestamp source was wrong and changes)
 
 ## How this was found
 
@@ -183,3 +183,87 @@ Stop and ask before: widening DataType.TimestampType to carry a unit (the engine
 treats micros as its single internal representation and that should stay true),
 or picking a rounding rule for NANOS -> micros other than truncation.
 ```
+
+## Outcome
+
+Landed 2026-10-03 as four commits on `robustness-02-total-order`. The fixtures
+came first, written with parquet-mr's example writer by a new testonly helper,
+`read/parquet:external_parquet`, and run against `8f22ea0` before any reader
+change: 29 of 32 failed, each for the reason expected, and the three that
+passed were the paths already right (a `MICROS` timestamp, a whole-file
+`INT96` scan, narrow signed integers). `2024-03-15T12:34:56.789Z` stored as
+`MILLIS` read as `1970-01-20T19:08:26.096789Z`, and as `NANOS` as the year
+56173; every decimal layout read as `INT`, `BIGINT` or raw bytes.
+
+1. `e77e69b` **Read each file's columns by name, as that file stores them.**
+   The plan's "per-column conversion resolved once per file" turned out to be
+   the fix for a defect the plan did not list. A projected scan asked
+   parquet-mr for its columns with a schema rebuilt from the *writer's*
+   mapping, and parquet-mr decodes a chunk as whatever the request says: any
+   query reading some of a file's columns decoded an `INT96` timestamp as
+   `INT64` (thousands of years off) and threw on any `FIXED_LEN_BYTE_ARRAY`
+   column. A whole-file scan decoded by position, so a glob whose files ordered
+   two same-typed columns differently swapped their values silently. Same
+   class, same cause: a fixture written by our writer stores exactly what our
+   mapping says. `ParquetColumns` now owns the read mapping, resolves the
+   view's columns in each file by name from that file's footer, and the view
+   validates every file against the first when it opens.
+2. `626d19a` **Timestamp units.** As planned, via `Decoding.Timestamps(unit)`.
+   `MILLIS` multiplies behind a range check (an out-of-range value fails the
+   read by name rather than wrapping). `NANOS` truncates with `Math.floorDiv`:
+   "truncating" here means what it means on every other path into the engine
+   (`Instant.truncatedTo` for CAST and literals, `getNano / 1000` for CSV) and
+   in the `INT96` decoder, dropping the digits past the microsecond, which
+   before 1970 is the earlier one; a plain `/ 1000` would put a pre-1970
+   instant a microsecond later than the same instant read from `INT96` or a
+   literal. `isAdjustedToUTC` is documented as not consulted: a local
+   timestamp reads as the UTC instant with its wall-clock reading. Beyond the
+   plan, `ParquetFilterTranslator` stopped pushing any comparison on a
+   timestamp column (it would have pushed a count of microseconds against
+   statistics in the file's unit).
+3. `c766c51` **DECIMAL, read and written.** All four layouts read as
+   `DECIMAL(p,s)`; the writer uses the spec's layout by precision, which also
+   makes `DECIMAL` columns spillable for the first time (sort, aggregate key,
+   DISTINCT, grace-hash join and window all threw). Where the plan was silent:
+   a column does not enforce its declared scale, so the writer writes a value
+   at the declared scale when that is exact and otherwise fails, naming it,
+   rather than rounding. Decimal `SUM` meets that rule: it keeps its input's
+   type while computing in `DOUBLE`, so writing or spilling one fails loudly
+   (`0.30000000000000004`, or `19.98` in a `DECIMAL(3,2)`). Recorded beside the
+   decimal arithmetic gap in `docs/gotchas.md`, with `CAST(... AS DOUBLE)` as
+   the way out.
+4. **Every other annotation decided.** As the plan proposed for `JSON` and
+   `ENUM` (`STRING`), `UUID` (`BINARY`) and `TIME` (rejected); unsigned
+   integers widen, Spark's mapping (`INTEGER(32,false)` to `BIGINT`,
+   `INTEGER(64,false)` to `DECIMAL(20,0)`), since both hold every value and a
+   whole file is not unreadable for one unsigned column. **Where this plan was
+   wrong:** it grouped `BSON` with the text annotations, but a BSON document is
+   binary, and reading it as UTF-8 would mangle it, so it stays `BINARY`.
+   Annotations it did not list: `FLOAT16` (new in parquet-mr 1.14) widens to
+   `FLOAT` exactly; `INTERVAL` is rejected; a top-level `REPEATED` primitive,
+   which used to read as a nullable scalar and misalign its rows, is rejected.
+   Because two of the widenings change the stored bits, each `Decoding` now
+   says whether it `storesEngineValue`, and a comparison is pushed only on
+   columns stored as engine values in every file; before, the only thing
+   between a `Long` bound and an `INT32` statistic would have been a
+   `ClassCastException` the stats check swallows.
+
+**Real data.** The polymarket dataset (Polars and pyarrow writers) carries no
+`MILLIS`, `NANOS` or decimal column, so the unit and decimal defects never
+touched it, but `ml_features.trade_count` is `INTEGER(32,false)` (Polars
+writes counts as `UInt32`) and now reads as `BIGINT`. Run before (`8f22ea0`)
+and after, polymarket's 17 tasks give the same row counts, the same expected
+validation pattern, and the same contents (every value of every output table
+rendered by parquet-mr's own stringifiers and digested); the only difference
+anywhere is that `stg_features.trade_count` is written as `INT64`. Wall time
+did not move (57.8 s after, 62.7 s before, both with a warm page cache).
+
+**Verification.** `bazel test //...` 48/48 and jaffle-shop 15/15 at each of the
+four commits, and polymarket green before and after as above. `parquet_external_format_test` (34 tests) holds the reader and
+writer against parquet-mr; `sql_engine_test` spills a `DECIMAL` through all
+five spilling operators.
+
+**Still open.** Decimal pushdown, now a real gap
+([`plans/perf/06`](../perf/06-expand-parquet-pushdown.md)); exact decimal `SUM`
+and arithmetic; no engine type for `TIME` or `INTERVAL`. Plan 06's property
+that drives the helper with generated schemas is still to build.

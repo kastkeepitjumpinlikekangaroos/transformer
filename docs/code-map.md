@@ -65,6 +65,12 @@ navigation hint, not a comprehensive directory listing.
   string ops, ABS/FLOOR/CEIL/ROUND/TRUNC, IF, NULLIF, SUBSTRING).
 - `gui/ResultsTabPane.scala` (~630 LOC) — partition picker + background
   output loader + run-log rendering.
+- `read/parquet/ParquetReader.scala` (~735 LOC) — `ParquetReader` (the footer
+  pass that packs row groups into partitions and checks every file of a glob
+  against the first), and `ParquetPartitionIterator`, most of whose length is
+  `decodeColumn`: one tight loop per `ParquetColumns.Decoding`. Reading a new
+  kind of parquet column is a `Decoding` case in `ParquetColumns.scala` plus
+  its loop here.
 - `core/ColumnarBatch.scala` (~390 LOC) — defines ten `ColumnVector`
   subclasses. Adding a new `DataType` requires a new vector + companion case
   in `ColumnVector.allocate`.

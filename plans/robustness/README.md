@@ -31,7 +31,7 @@ at the time of the audit: `bazel test //...` 46/46 green.
 |---|------|------|--------|--------|------|------------|
 | [01](01-reject-or-honor-every-clause.md) | Reject or honor every clause the parser accepts | 18 silently-dropped clauses, incl. `USING`/`NATURAL` JOIN silently becoming a **cartesian product** | **done** 2026-10-01 | 2-3 days | medium | — |
 | [02](02-total-order-for-decimal-and-binary.md) | One total order for `Decimal` and `Binary` | `Ops.eq`/`Ops.cmp`; the repo's own bug class, in the types the float work never reached | **done** 2026-10-03 | 2-3 days | medium | — |
-| [03](03-parquet-external-format-fidelity.md) | Parquet timestamp units and `DECIMAL` | silent 1000x timestamp error; decimals read as unscaled ints or raw bytes | open | 1-2 days | low-med | — |
+| [03](03-parquet-external-format-fidelity.md) | Parquet timestamp units and `DECIMAL` | silent 1000x timestamp error; decimals read as unscaled ints or raw bytes | **done** 2026-10-03 | 1-2 days | low-med | — |
 | [04](04-widen-fuzz-corpus-to-every-type.md) | Widen the fuzz corpus to all ten types | the guard that keeps 02 and 03 fixed | open | 2-3 days | low | 02 (else red) |
 | [05](05-frontend-robustness-fuzzer.md) | Frontend robustness fuzzer | "nothing silently dropped" + "errors are user-facing" as properties | open | 3-5 days | low | 01 (shares its clause table) |
 | [06](06-io-roundtrip-and-external-fixtures.md) | I/O round-trip properties + external parquet fixtures | the helper 03 needs, plus CSV state-machine fuzzing | open | 3-4 days | low | — (03 wants its fixture helper) |
@@ -55,6 +55,16 @@ DISTINCT and joins agree with `=`; a decimal key reads back at its declared
 scale. Beyond the plan: numbers now widen to a decimal (the CAST was missing),
 two BIGINTs past 2^53 compare as longs, and a BINARY is never read as text.
 Details in the plan's Outcome section.
+
+**Done:** plan 03. Every fixture is now written by parquet-mr itself
+(`read/parquet:external_parquet`), and run against the old reader first: 29 of
+32 failed. Timestamps read in their file's unit, decimals in all four layouts
+(and write, so a `DECIMAL` column spills), and every other annotation is
+decided rather than read as its physical type. The fixtures also caught a
+defect the plan did not list: a projected scan rebuilt the file's schema from
+the writer's mapping, so it decoded `INT96` as `INT64` and threw on any
+`FIXED_LEN_BYTE_ARRAY`, and a glob whose files ordered columns differently
+swapped their values. Details in the plan's Outcome section.
 
 **Suggested order.** [01](01-reject-or-honor-every-clause.md) first — it has the
 worst single defect in the set (a dropped join condition is a cartesian product,

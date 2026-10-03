@@ -481,4 +481,126 @@ class ParquetExternalFormatTest {
     val tooWide = failure(write("12345678.00"))
     assertTrue(tooWide, tooWide.contains("12345678.00") && tooWide.contains("'price'") && tooWide.contains("decimal(9,2)"))
   }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Every other annotation, decided rather than fallen through.
+  // ─────────────────────────────────────────────────────────────────────
+
+  @Test def unsignedInt32WidensToLong(): Unit = {
+    val file = writeFixture("message m { optional int32 n (INTEGER(32,false)); }",
+      Seq(Seq(0), Seq(Int.MaxValue), Seq(-1), Seq(Int.MinValue), Seq(null)))
+    val view = read(file)
+    assertEquals(DataType.LongType, typeOf(view, "n"))
+    assertEquals(Seq(0L, 2147483647L, 4294967295L, 2147483648L, null), column(view, "n"))
+  }
+
+  @Test def unsignedInt64WidensToADecimal(): Unit = {
+    val file = writeFixture("message m { optional int64 n (INTEGER(64,false)); }",
+      Seq(Seq(0L), Seq(Long.MaxValue), Seq(-1L), Seq(Long.MinValue), Seq(null)))
+    val view = read(file)
+    assertEquals(DataType.DecimalType(20, 0), typeOf(view, "n"))
+    assertEquals(Seq("0", "9223372036854775807", "18446744073709551615", "9223372036854775808").map(dec) :+ null,
+      column(view, "n"))
+  }
+
+  @Test def narrowIntegersReadAsInt(): Unit = {
+    val file = writeFixture(
+      """message m {
+        |  required int32 u8 (INTEGER(8,false));
+        |  required int32 u16 (INTEGER(16,false));
+        |  required int32 i8 (INTEGER(8,true));
+        |  required int32 i16 (INTEGER(16,true));
+        |  required int32 i32 (INTEGER(32,true));
+        |  required int64 i64 (INTEGER(64,true));
+        |}""".stripMargin,
+      Seq(Seq[Any](255, 65535, -128, -32768, Int.MinValue, Long.MinValue)))
+    val view = read(file)
+    assertEquals(Seq(DataType.IntType, DataType.IntType, DataType.IntType, DataType.IntType, DataType.IntType, DataType.LongType),
+      view.schema.fields.map(_.dataType))
+    assertEquals(Seq(Seq[Any](255, 65535, -128, -32768, Int.MinValue, Long.MinValue)), rows(view))
+  }
+
+  @Test def textAnnotationsReadAsStringsAndBinaryOnesAsBytes(): Unit = {
+    val uuid = bytes(0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66, 0x14, 0x17, 0x40, 0x00)
+    val bson = bytes(0x05, 0x00, 0x00, 0x00, 0x00)  // the empty BSON document
+    val file = writeFixture(
+      """message m {
+        |  optional binary j (JSON);
+        |  optional binary e (ENUM);
+        |  optional binary s (STRING);
+        |  optional binary b (BSON);
+        |  optional fixed_len_byte_array(16) u (UUID);
+        |}""".stripMargin,
+      Seq(Seq("""{"a": 1}""", "RED", "text", bson, uuid)))
+    val view = read(file)
+    assertEquals(Seq(DataType.StringType, DataType.StringType, DataType.StringType, DataType.BinaryType, DataType.BinaryType),
+      view.schema.fields.map(_.dataType))
+    assertEquals(Seq(Seq("""{"a": 1}""", "RED", "text", bson.toSeq, uuid.toSeq)), rows(view))
+  }
+
+  @Test def float16WidensToFloat(): Unit = {
+    // IEEE half precision, little-endian as parquet stores it.
+    val file = writeFixture("message m { optional fixed_len_byte_array(2) h (FLOAT16); }", Seq(
+      Seq(bytes(0x00, 0x3E)),  // 1.5
+      Seq(bytes(0x00, 0xC0)),  // -2.0
+      Seq(bytes(0xFF, 0x7B)),  // 65504, the largest finite half
+      Seq(bytes(0x01, 0x00)),  // 2^-24, the smallest subnormal
+      Seq(bytes(0x00, 0x80)),  // -0.0
+      Seq(bytes(0x00, 0x7C)),  // +Infinity
+      Seq(bytes(0x00, 0x7E)),  // NaN
+      Seq(null)))
+    val view = read(file)
+    assertEquals(DataType.FloatType, typeOf(view, "h"))
+    val got = column(view, "h")
+    assertEquals(Seq(1.5f, -2.0f, 65504f, java.lang.Math.scalb(1f, -24), -0.0f, Float.PositiveInfinity).map(Float.box),
+      got.take(6))
+    assertEquals(java.lang.Float.floatToIntBits(-0.0f), java.lang.Float.floatToIntBits(got(4).asInstanceOf[Float]))
+    assertTrue(got(6).asInstanceOf[Float].isNaN)
+    assertNull(got(7))
+  }
+
+  @Test def columnsWithNoEngineTypeFailNamingTheColumn(): Unit = {
+    for ((schema, column, kind) <- Seq(
+        ("message m { required int32 id; optional int32 t (TIME(MILLIS,true)); }", "t", "TIME"),
+        ("message m { required int32 id; optional int64 t (TIME(MICROS,true)); }", "t", "TIME"),
+        ("message m { required int32 id; optional int64 t (TIME(NANOS,false)); }", "t", "TIME"),
+        ("message m { required int32 id; optional fixed_len_byte_array(12) span (INTERVAL); }", "span", "INTERVAL"))) {
+      val file = newDir().resolve("unreadable.parquet")
+      ExternalParquet.write(file, ExternalParquet.schema(schema), Seq.empty)
+      val msg = failure(read(file))
+      assertTrue(s"$schema: $msg", msg.contains(s"'$column'") && msg.contains(kind))
+    }
+  }
+
+  @Test def aRepeatedColumnFailsNamingIt(): Unit = {
+    // A repeated primitive is a list per row, which a column cannot hold.
+    val file = writeFixture("message m { required int32 id; repeated int32 xs; }", Seq(Seq(1, 7)))
+    val msg = failure(read(file))
+    assertTrue(msg, msg.contains("'xs'") && msg.toLowerCase.contains("repeated"))
+  }
+
+  /** A comparison is pushed to row-group statistics only on a column whose
+    * stored values are the engine's. An unsigned INT32 reads as a BIGINT and a
+    * FLOAT16 as a FLOAT, and their statistics bound other bits, so a bound on
+    * either stays in the residual filter; IS NULL, which reads only null
+    * counts, still pushes. */
+  @Test def comparisonsArePushedOnlyWhereTheStoredValueIsTheEngineValue(): Unit = {
+    import com.transformer.sql.plan._
+    val file = writeFixture(
+      """message m {
+        |  optional int32 u (INTEGER(32,false));
+        |  optional fixed_len_byte_array(2) h (FLOAT16);
+        |  optional int64 n;
+        |}""".stripMargin,
+      Seq(Seq(-1, bytes(0x00, 0x3E), 5L), Seq(7, null, 9L)))
+    val view = ParquetReader.fromPath(file.toString)
+    def gt(name: String, dt: DataType, v: Any) =
+      BinOpExpr(">", ColRefExpr(view.schema.indexOf(name), name, dt), LitExpr(v, dt), DataType.BooleanType)
+    assertEquals(None, view.withPushdownFilter(gt("u", DataType.LongType, java.lang.Long.valueOf(10L))))
+    assertEquals(None, view.withPushdownFilter(gt("h", DataType.FloatType, java.lang.Float.valueOf(1.0f))))
+    assertTrue(view.withPushdownFilter(gt("n", DataType.LongType, java.lang.Long.valueOf(10L))).isDefined)
+    assertTrue(view.withPushdownFilter(IsNullExpr(ColRefExpr(0, "u", DataType.LongType), negated = false)).isDefined)
+    // Through the planner, the residual filter answers on the engine values.
+    assertEquals(Seq(Seq(4294967295L, 1.5f)), query("SELECT u, h FROM t WHERE u > 10 AND h > 1.0", "t" -> view))
+  }
 }

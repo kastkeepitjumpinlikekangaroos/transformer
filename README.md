@@ -529,9 +529,30 @@ InputFilePath("data.csv",
   (a `TIMESTAMP` as `INT96` in one file and as `INT64` in the next). A file
   that lacks one of the first file's columns, or reads one as another type,
   fails the read when the view is opened, naming the file and the column.
-- A parquet `DECIMAL(p,s)` reads as `DECIMAL(p,s)` in any of the four layouts
-  a writer may choose: `INT32`, `INT64`, `FIXED_LEN_BYTE_ARRAY` or `BINARY`
-  (big-endian two's complement).
+- Types read. A column reads as its physical type and its annotation say,
+  decided per file:
+
+  | parquet column | reads as |
+  |---|---|
+  | `BOOLEAN` | `BOOLEAN` |
+  | `INT32`, alone or `INTEGER(8, 16 or 32, signed)` or `INTEGER(8 or 16, unsigned)` | `INT` |
+  | `INT32 INTEGER(32, unsigned)` | `BIGINT`, so its upper half does not read negative |
+  | `INT32 DATE` | `DATE` |
+  | `INT64`, alone or `INTEGER(64, signed)` | `BIGINT` |
+  | `INT64 INTEGER(64, unsigned)` | `DECIMAL(20,0)`, which holds every value |
+  | `INT64 TIMESTAMP` (`MILLIS`, `MICROS` or `NANOS`), and `INT96` | `TIMESTAMP` (below) |
+  | `FLOAT`, `DOUBLE` | `FLOAT`, `DOUBLE` |
+  | `FIXED_LEN_BYTE_ARRAY(2) FLOAT16` | `FLOAT`, exactly |
+  | `DECIMAL(p,s)` as `INT32`, `INT64`, `FIXED_LEN_BYTE_ARRAY` or `BINARY` | `DECIMAL(p,s)` |
+  | `BINARY STRING`, `ENUM` or `JSON` | `STRING` |
+  | `BINARY`, alone or `BSON`; `FIXED_LEN_BYTE_ARRAY`, alone or `UUID` | `BINARY` |
+  | `TIME`, `INTERVAL`, a `REPEATED` column (a list per row), a nested group | none: the file cannot be read |
+
+  The last row fails when the view is opened, naming the column, even for a
+  query that never mentions it: the view's schema is the file's, and the
+  engine has no type to give it. No annotation falls through to its physical
+  type, which would read a `DECIMAL` as its unscaled integer or an unsigned
+  integer as a negative one.
 - A parquet `TIMESTAMP` reads as the instant it stores, whatever its unit:
   `MILLIS`, `MICROS` and `NANOS` alike, and the legacy 12-byte `INT96` too. A
   `TIMESTAMP` holds microseconds, so a `NANOS` value is truncated to its
@@ -551,8 +572,10 @@ InputFilePath("data.csv",
   the scan for per-row precision (stats can prove non-matching, never
   matching). Unsupported conjuncts (computed expressions, two-column
   predicates, `LIKE`, `IN` with a NULL literal in the list, decimal columns,
-  and comparisons on a timestamp column, whose statistics are in whatever unit
-  its file stores) drop through as residual filtering.
+  comparisons on a timestamp column, whose statistics are in whatever unit
+  its file stores, and comparisons on a column whose stored values are not
+  the ones it reads as, such as an unsigned `INT32` or a `FLOAT16`) drop
+  through as residual filtering. `IS NULL` pushes on any column but a decimal.
 - Write: vectorized — custom `WriteSupport[BatchRowRef]` drives parquet-mr's
   `RecordConsumer` straight from `ColumnarBatch` vectors. No `SimpleGroup` per
   row, no `Integer`/`Long` boxing per cell. Compression defaults to `snappy`

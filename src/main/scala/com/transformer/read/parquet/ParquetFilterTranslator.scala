@@ -46,15 +46,21 @@ import org.apache.parquet.io.api.Binary
   *   - `IN (…)` with non-literal items
   *   - comparisons on a timestamp column (`IS NULL` still pushes): its
   *     statistics are in whatever unit its file stores
+  *   - comparisons on any column the caller does not call `comparable`: its
+  *     statistics bound stored bits that are not the engine's values
   *   - decimal columns
   *
   * Returns None when nothing could be pushed.
   */
 object ParquetFilterTranslator {
 
-  def translate(predicate: Expr): Option[FilterPredicate] = {
+  /** `comparable(c)` says whether column `c`'s row-group statistics bound
+    * the engine's own values, so that a comparison on it may be pushed (a
+    * `ParquetReader` knows from each file's footer). `IS NULL` needs no such
+    * promise: a null count means the same however the values are stored. */
+  def translate(predicate: Expr, comparable: String => Boolean = _ => true): Option[FilterPredicate] = {
     val conjuncts = splitAnd(predicate)
-    val translated = conjuncts.flatMap(translateOne)
+    val translated = conjuncts.flatMap(translateOne(_, comparable))
     if (translated.isEmpty) None
     else Some(translated.reduceLeft((a, b) => FilterApi.and(a, b)))
   }
@@ -64,9 +70,9 @@ object ParquetFilterTranslator {
     case other => Seq(other)
   }
 
-  private def translateOne(e: Expr): Option[FilterPredicate] = e match {
+  private def translateOne(e: Expr, comparable: String => Boolean): Option[FilterPredicate] = e match {
     case BinOpExpr("AND", l, r, _) =>
-      (translateOne(l), translateOne(r)) match {
+      (translateOne(l, comparable), translateOne(r, comparable)) match {
         case (Some(a), Some(b)) => Some(FilterApi.and(a, b))
         case (Some(a), None)    => Some(a)
         case (None, Some(b))    => Some(b)
@@ -78,19 +84,19 @@ object ParquetFilterTranslator {
       // would be missing from the scan output). And/and-only chains have no
       // such constraint because the residual FilterExec re-checks per row.
       for {
-        a <- translateOne(l)
-        b <- translateOne(r)
+        a <- translateOne(l, comparable)
+        b <- translateOne(r, comparable)
       } yield FilterApi.or(a, b)
-    case UnaryOpExpr("NOT", c, _) => translateOne(c).map(FilterApi.not)
-    case BinOpExpr(op, ColRefExpr(_, name, dt), LitExpr(v, _), _) =>
+    case UnaryOpExpr("NOT", c, _) => translateOne(c, comparable).map(FilterApi.not)
+    case BinOpExpr(op, ColRefExpr(_, name, dt), LitExpr(v, _), _) if comparable(name) =>
       compareToLiteral(name, dt, op, v)
-    case BinOpExpr(op, LitExpr(v, _), ColRefExpr(_, name, dt), _) =>
+    case BinOpExpr(op, LitExpr(v, _), ColRefExpr(_, name, dt), _) if comparable(name) =>
       // Swap the comparator so it reads "column OP literal" — e.g. `5 > x`
       // becomes `x < 5`.
       compareToLiteral(name, dt, swap(op), v)
     case IsNullExpr(ColRefExpr(_, name, dt), negated) =>
       nullPredicate(name, dt, negated)
-    case InListExpr(ColRefExpr(_, name, dt), items, negated) =>
+    case InListExpr(ColRefExpr(_, name, dt), items, negated) if comparable(name) =>
       translateInList(name, dt, items, negated)
     case _ => None
   }

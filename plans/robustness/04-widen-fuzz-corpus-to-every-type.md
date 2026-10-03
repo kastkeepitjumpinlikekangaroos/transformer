@@ -13,6 +13,20 @@
 > is what the engine means by equal. A BINARY is never
 > read as text (CAST, LIKE, `||` and the string functions refuse one at bind
 > time), so `ExprGen` and `QueryGen` must not build those shapes over one.
+>
+> Plan 03 landed 2026-10-03, so a DECIMAL column now spills, and two of its
+> rules reach this plan. A spilled decimal reads back at its column's declared
+> scale, so the spill mode can spell a value differently from the in-memory
+> run (`1.50` for `1.5`): another reason for `compareTo` in `RowOracle`. And
+> the parquet writer refuses, rather than rounds, a decimal it cannot store
+> exactly at the declared scale and precision, so a generated value past
+> either fails the spill mode where the in-memory mode succeeds: generate
+> decimals within the declared precision and exactly representable at the
+> declared scale, or keep such values on purpose and expect the error. A
+> decimal `SUM` is one (it keeps its input's type while computing in DOUBLE),
+> which matters wherever a later operator spills one. Timestamp values that
+> would differ under a unit mis-read (step 1) now matter only to the reader's
+> own tests, which `parquet_external_format_test` covers.
 
 ## How this was found
 
