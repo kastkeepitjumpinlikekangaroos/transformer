@@ -2949,4 +2949,53 @@ class SqlEngineTest {
       else System.setProperty(Spill.SpillDirProperty, prevProp)
     }
   }
+
+  /** Every spilling operator writes its working set to parquet and reads it
+    * back, so a DECIMAL column could not spill at all while the parquet writer
+    * had no decimal mapping. Sort, aggregate (a decimal GROUP BY key), DISTINCT,
+    * grace-hash join (a decimal join key) and window (a decimal PARTITION BY)
+    * each run here with spill forced and must match the run without it. */
+  @Test def decimalColumnsSpillEndToEnd(): Unit = {
+    val schema = Schema(Vector(
+      Field("k", DataType.IntType), Field("d", DataType.DecimalType(10, 2)), Field("v", DataType.LongType)))
+    def part(from: Int, until: Int): ColumnarBatch = {
+      val b = new ColumnarBatch(schema, until - from)
+      (from until until).zipWithIndex.foreach { case (i, r) =>
+        b.column(0).setBoxed(r, java.lang.Integer.valueOf(i))
+        // 97 distinct values either side of zero, with a NULL every 50th row.
+        if (i % 50 == 0) b.column(1).setNull(r)
+        else b.column(1).setBoxed(r, java.math.BigDecimal.valueOf((i % 97 - 48).toLong * 1000003L, 2))
+        b.column(2).setBoxed(r, java.lang.Long.valueOf(i.toLong * 7L))
+      }
+      b.setNumRows(until - from)
+      b
+    }
+    def catalog(): Catalog = catalogWith("t" -> new MaterializedView(schema,
+      IndexedSeq(IndexedSeq(part(0, 600)), IndexedSeq(part(600, 1200)))))
+    def run(sql: String, opts: ExecutionOptions): Seq[String] = {
+      val q = SqlEngine.execute(sql, catalog(), opts)
+      collectAllRows(q).map(row => q.schema.fieldNames.map(n => String.valueOf(row(n))).mkString("|"))
+    }
+    val queries = Seq(
+      "SELECT k, d FROM t ORDER BY d, k" -> true,
+      "SELECT d, COUNT(*) AS n, SUM(v) AS s FROM t GROUP BY d" -> false,
+      "SELECT DISTINCT d FROM t" -> false,
+      "SELECT a.k, b.k AS k2, a.d FROM t a JOIN t b ON a.d = b.d" -> false,
+      "SELECT k, d, ROW_NUMBER() OVER (PARTITION BY d ORDER BY k) AS rn FROM t" -> false)
+    val prevProp = System.getProperty(Spill.SpillDirProperty)
+    val tmp = Files.createTempDirectory("sqlengine-decimal-spill-")
+    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
+    try {
+      for ((sql, ordered) <- queries) {
+        val expected = run(sql, ExecutionOptions.Default)
+        val actual = run(sql, ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L)))
+        assertTrue(s"expected a non-empty result: $sql", expected.nonEmpty)
+        if (ordered) assertEquals(sql, expected, actual)
+        else assertEquals(sql, expected.sorted, actual.sorted)
+      }
+    } finally {
+      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
+      else System.setProperty(Spill.SpillDirProperty, prevProp)
+    }
+  }
 }

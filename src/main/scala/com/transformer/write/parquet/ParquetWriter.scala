@@ -309,6 +309,13 @@ private final class BatchWriteSupport(schema: Schema, messageType: MessageType)
   private val ncols = schema.length
   private val fieldNames: Array[String] = Array.tabulate(ncols)(i => schema.fields(i).name)
   private val dataTypes: Array[DataType] = Array.tabulate(ncols)(i => schema.fields(i).dataType)
+  // The FIXED_LEN_BYTE_ARRAY length of each DECIMAL too wide for an INT64
+  // (ParquetSchema decides the layout), and 0 for every other column.
+  private val decimalLengths: Array[Int] = dataTypes.map {
+    case d: DataType.DecimalType if d.precision > ParquetSchema.MaxLongDecimalDigits =>
+      ParquetSchema.decimalBytes(d.precision)
+    case _ => 0
+  }
 
   override def init(configuration: Configuration): WriteSupport.WriteContext = {
     val md = new java.util.HashMap[String, String]()
@@ -339,6 +346,11 @@ private final class BatchWriteSupport(schema: Schema, messageType: MessageType)
           case DataType.BinaryType    => rc.addBinary(Binary.fromConstantByteArray(v.asInstanceOf[BinaryVector].get(r)))
           case DataType.DateType      => rc.addInteger(v.asInstanceOf[DateVector].get(r))
           case DataType.TimestampType => rc.addLong(v.asInstanceOf[TimestampVector].get(r))
+          case d: DataType.DecimalType =>
+            val unscaled = unscaledAtScale(v.asInstanceOf[DecimalVector].get(r), d, name)
+            if (d.precision <= ParquetSchema.MaxIntDecimalDigits) rc.addInteger(unscaled.intValue)
+            else if (d.precision <= ParquetSchema.MaxLongDecimalDigits) rc.addLong(unscaled.longValue)
+            else rc.addBinary(Binary.fromConstantByteArray(signExtended(unscaled, decimalLengths(c))))
           case other => throw new UnsupportedOperationException(s"Writing $other to Parquet not supported")
         }
         rc.endField(name, c)
@@ -346,6 +358,36 @@ private final class BatchWriteSupport(schema: Schema, messageType: MessageType)
       c += 1
     }
     rc.endMessage()
+  }
+
+  /** `v`'s unscaled value at the column's declared scale. A column does not
+    * hold every value at its declared scale, and parquet stores one scale per
+    * column, so a value is written there when it can be exactly (1.5 as 1.50)
+    * and otherwise fails the write: rounding would store a number other than
+    * the one the query produced, and a value with more digits than the
+    * precision would be no DECIMAL of that type for any reader. */
+  private def unscaledAtScale(v: java.math.BigDecimal, d: DataType.DecimalType, column: String): java.math.BigInteger = {
+    val atScale =
+      try v.setScale(d.scale)
+      catch {
+        case _: ArithmeticException => throw new ArithmeticException(
+          s"Cannot write ${v.toPlainString} to parquet column '$column', a $d, without rounding it")
+      }
+    if (atScale.precision > d.precision) throw new ArithmeticException(
+      s"Cannot write ${v.toPlainString} to parquet column '$column': a $d holds ${d.precision} digits")
+    atScale.unscaledValue
+  }
+
+  /** `unscaled` as `length` big-endian two's-complement bytes. */
+  private def signExtended(unscaled: java.math.BigInteger, length: Int): Array[Byte] = {
+    val minimal = unscaled.toByteArray
+    if (minimal.length == length) minimal
+    else {
+      val out = new Array[Byte](length)
+      if (unscaled.signum < 0) java.util.Arrays.fill(out, 0, length - minimal.length, (-1).toByte)
+      System.arraycopy(minimal, 0, out, length - minimal.length, minimal.length)
+      out
+    }
   }
 }
 

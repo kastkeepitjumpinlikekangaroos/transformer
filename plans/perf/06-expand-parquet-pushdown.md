@@ -4,9 +4,17 @@
 > `ParquetFilterTranslator` translates `IS NULL` / `IS NOT NULL`
 > (`nullPredicate`), `IN` over literals (`translateInList`), and `BETWEEN`
 > via the AND-lowering the analyzer already performs. Phase 4 (decimal)
-> is deliberately not done: `DecimalType` returns `None` at
-> `ParquetFilterTranslator.scala:133` and `:258`, matching this plan's own
-> "skip unless profiling shows need".
+> is deliberately not done: `DecimalType` returns `None` in
+> `ParquetFilterTranslator.nullPredicate` and `compareToLiteral`, matching
+> this plan's own "skip unless profiling shows need".
+> **Update (robustness plan 03):** until then the reader could not produce a
+> decimal column at all, so those `None` branches were unreachable. Parquet
+> decimals now read as `DecimalType`, so the gap is real: every filter on a
+> decimal column is decided by the residual `FilterExec`. Any decimal
+> pushdown has to be built per file, since one glob's files can store the
+> same `DECIMAL(p,s)` as `INT32`, `INT64`, `FIXED_LEN_BYTE_ARRAY` or `BINARY`
+> (see `ParquetColumns.Decoding`), while the translator builds one predicate
+> for the whole view.
 > · Tier: 3 · Effort: 2-3 days · Risk: low
 
 ## Goal

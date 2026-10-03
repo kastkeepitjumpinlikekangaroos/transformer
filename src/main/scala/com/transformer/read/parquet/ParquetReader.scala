@@ -9,6 +9,7 @@ import org.apache.hadoop.fs.{Path => HPath}
 import org.apache.parquet.column.ColumnDescriptor
 import org.apache.parquet.column.impl.ColumnReadStoreImpl
 import org.apache.parquet.column.page.PageReadStore
+import org.apache.parquet.io.ParquetDecodingException
 import org.apache.parquet.io.api.{Converter, GroupConverter, PrimitiveConverter}
 import org.apache.parquet.filter2.predicate.FilterPredicate
 import org.apache.parquet.filter2.statisticslevel.StatisticsFilter
@@ -605,6 +606,37 @@ final class ParquetPartitionIterator(
         while (r < rowCount) {
           if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
           else v.set(r, cr.getBinary.getBytes)
+          cr.consume(); r += 1
+        }
+      case ParquetColumns.Decoding.IntDecimals(_, scale) =>
+        val v = vec.asInstanceOf[DecimalVector]
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else v.set(r, java.math.BigDecimal.valueOf(cr.getInteger.toLong, scale))
+          cr.consume(); r += 1
+        }
+      case ParquetColumns.Decoding.LongDecimals(_, scale) =>
+        val v = vec.asInstanceOf[DecimalVector]
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else v.set(r, java.math.BigDecimal.valueOf(cr.getLong, scale))
+          cr.consume(); r += 1
+        }
+      case ParquetColumns.Decoding.ByteDecimals(_, scale) =>
+        val v = vec.asInstanceOf[DecimalVector]
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else {
+            // BigInteger reads big-endian two's complement and copies what
+            // it keeps, so the page's own bytes can be handed over.
+            val unscaled = cr.getBinary.getBytesUnsafe
+            if (unscaled.length == 0) throw new ParquetDecodingException(
+              s"Parquet file '$fileLabel' column '${schema.fields(col).name}' holds a DECIMAL with no bytes")
+            v.set(r, new java.math.BigDecimal(new java.math.BigInteger(unscaled), scale))
+          }
           cr.consume(); r += 1
         }
     }

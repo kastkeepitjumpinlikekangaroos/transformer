@@ -2,20 +2,25 @@ package com.transformer.read.parquet
 
 import com.transformer.core._
 import com.transformer.sql.exec.SqlEngine
+import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
 import org.junit.Assert._
 import org.junit.Test
 
+import java.math.{BigDecimal => JBigDecimal, BigInteger}
 import java.nio.file.{Files, Path}
 import java.time.{Instant, LocalDateTime, ZoneOffset}
 import java.time.temporal.ChronoUnit
 
-/** Our reader against files parquet-mr wrote.
+/** Our reader against files parquet-mr wrote, and our writer against
+  * parquet-mr's reading of what it wrote.
   *
   * Every fixture here comes from [[ExternalParquet]], never from transformer's
   * own `ParquetWriter`: a writer and reader that share an assumption agree with
-  * each other however wrong the assumption is, so only a file some other tool
-  * wrote can test it. Expected values are written out by hand or computed with
-  * `java.time`, never with code under test.
+  * each other however wrong the assumption is, which is how a `MILLIS`
+  * timestamp read 1000x too small and a decimal read as its unscaled integer
+  * while `parquet_roundtrip_test` passed. Expected values are written out by
+  * hand or computed with `java.time` and `java.math`, never with code under
+  * test.
   */
 class ParquetExternalFormatTest {
 
@@ -289,5 +294,191 @@ class ParquetExternalFormatTest {
       ExternalParquet.schema("message m { required int64 a; }"), Seq(Seq(2L)))
     val msg = failure(rows(ParquetReader.fromPath(dir.toString)))
     assertTrue(msg, msg.contains("b.parquet") && msg.contains("'a'") && msg.contains("long") && msg.contains("int"))
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // DECIMAL: all four physical layouts, read at their declared scale.
+  // ─────────────────────────────────────────────────────────────────────
+
+  private def dec(s: String): JBigDecimal = new JBigDecimal(s)
+
+  /** The unscaled value as `length` big-endian two's-complement bytes. */
+  private def fixed(unscaled: BigInteger, length: Int): Array[Byte] = {
+    val minimal = unscaled.toByteArray
+    require(minimal.length <= length, s"$unscaled needs ${minimal.length} bytes")
+    val pad: Byte = if (unscaled.signum < 0) -1 else 0
+    Array.fill[Byte](length - minimal.length)(pad) ++ minimal
+  }
+
+  private def unscaled(d: JBigDecimal): BigInteger = d.unscaledValue
+
+  @Test def decimalStoredAsInt32(): Unit = {
+    val values = Seq("123.45", "-123.45", "0.00", "9999999.99", "-9999999.99", "0.01", "-0.01").map(dec)
+    val file = writeFixture("message m { optional int32 price (DECIMAL(9,2)); }",
+      values.map(v => Seq(unscaled(v).intValueExact)) :+ Seq(null))
+    val view = read(file)
+    assertEquals(DataType.DecimalType(9, 2), typeOf(view, "price"))
+    assertEquals(values :+ null, column(view, "price"))
+  }
+
+  @Test def decimalStoredAsInt64(): Unit = {
+    val values = Seq("123456789012.3456", "-0.0001", "99999999999999.9999", "-99999999999999.9999", "0.0000").map(dec)
+    val file = writeFixture("message m { optional int64 amount (DECIMAL(18,4)); }",
+      values.map(v => Seq(unscaled(v).longValueExact)) :+ Seq(null))
+    val view = read(file)
+    assertEquals(DataType.DecimalType(18, 4), typeOf(view, "amount"))
+    assertEquals(values :+ null, column(view, "amount"))
+  }
+
+  @Test def decimalStoredAsFixedLengthBytes(): Unit = {
+    val values = Seq(
+      "1234567890123456789012345678.0123456789",
+      "-9999999999999999999999999999.9999999999",
+      "9999999999999999999999999999.9999999999",
+      "-1.0000000000",
+      "0E-10").map(dec)
+    val file = writeFixture("message m { optional fixed_len_byte_array(16) big (DECIMAL(38,10)); }",
+      values.map(v => Seq(fixed(unscaled(v), 16))) :+ Seq(null))
+    val view = read(file)
+    assertEquals(DataType.DecimalType(38, 10), typeOf(view, "big"))
+    assertEquals(values :+ null, column(view, "big"))
+  }
+
+  /** Sign extension, spelled out byte by byte rather than computed. */
+  @Test def decimalFixedLengthBytesAreSignExtended(): Unit = {
+    val file = writeFixture("message m { required fixed_len_byte_array(4) price (DECIMAL(9,2)); }", Seq(
+      Seq(bytes(0xFF, 0xFF, 0xFF, 0x9C)),  // -100
+      Seq(bytes(0x00, 0x00, 0x00, 0x80)),  // 128: a set top bit in the last byte is not a sign
+      Seq(bytes(0xFF, 0xFF, 0xFF, 0x80)),  // -128
+      Seq(bytes(0x80, 0x00, 0x00, 0x00)),  // Int.MinValue, past DECIMAL(9,2) but stored
+      Seq(bytes(0x05, 0xF5, 0xE0, 0xFF))   // 99999999
+    ))
+    assertEquals(Seq("-1.00", "1.28", "-1.28", "-21474836.48", "999999.99").map(dec), column(read(file), "price"))
+  }
+
+  @Test def decimalStoredAsBinary(): Unit = {
+    val file = writeFixture("message m { optional binary big (DECIMAL(38,10)); }", Seq(
+      Seq(bytes(0xFF)),                    // -1: one byte, all sign
+      Seq(bytes(0x00, 0x80)),              // 128 needs a leading zero byte
+      Seq(bytes(0x80)),                    // -128
+      Seq(bytes(0xFF, 0xFF, 0xFF, 0x9C)),  // -100 with redundant sign bytes
+      Seq(fixed(unscaled(dec("-9999999999999999999999999999.9999999999")), 16)),
+      Seq(unscaled(dec("1234567890123456789012345678.0123456789")).toByteArray),
+      Seq(null)))
+    val view = read(file)
+    assertEquals(DataType.DecimalType(38, 10), typeOf(view, "big"))
+    assertEquals(Seq("-1E-10", "1.28E-8", "-1.28E-8", "-1.00E-8",
+      "-9999999999999999999999999999.9999999999", "1234567890123456789012345678.0123456789").map(dec) :+ null,
+      column(view, "big"))
+  }
+
+  @Test def anEmptyBinaryDecimalFailsTheRead(): Unit = {
+    // Two's complement needs at least one byte; an empty value is no number.
+    val file = writeFixture("message m { optional binary big (DECIMAL(38,10)); }", Seq(Seq(bytes(1)), Seq(bytes())))
+    val msg = failure(rows(read(file)))
+    assertTrue(msg, msg.contains("'big'") && msg.contains("DECIMAL"))
+  }
+
+  @Test def aProjectedScanReadsADecimalColumn(): Unit = {
+    val values = Seq("1.25", "-3.50").map(dec)
+    val file = writeFixture(
+      "message m { required int32 id; optional fixed_len_byte_array(5) price (DECIMAL(10,2)); }",
+      values.zipWithIndex.map { case (v, n) => Seq(n, fixed(unscaled(v), 5)) })
+    assertEquals(values.map(Seq(_)), rows(read(file).withProjectedColumns(Seq("price")).get))
+    assertEquals(Seq(Seq(dec("1.25"))), query("SELECT price FROM t WHERE price > 0", "t" -> read(file)))
+  }
+
+  /** Parquet decimals of every layout, through the engine and out of our
+    * writer, back to parquet-mr: the only shape that proves both halves. */
+  @Test def decimalsSurviveAnExternalReadWriteCycle(): Unit = {
+    val small = Seq("123.45", "-0.01", "0.00").map(dec)
+    val medium = Seq("123456789012.3456", "-0.0001", "0.0000").map(dec)
+    val large = Seq("1234567890123456789012345678.0123456789", "-1.0000000000", "0E-10").map(dec)
+    val source = writeFixture(
+      """message m {
+        |  optional int32 small (DECIMAL(9,2));
+        |  optional int64 medium (DECIMAL(18,4));
+        |  optional fixed_len_byte_array(16) fixed (DECIMAL(38,10));
+        |  optional binary bytes (DECIMAL(38,10));
+        |}""".stripMargin,
+      (0 until 3).map(i => Seq(
+        unscaled(small(i)).intValueExact, unscaled(medium(i)).longValueExact,
+        fixed(unscaled(large(i)), 16), unscaled(large(i)).toByteArray)) :+ Seq(null, null, null, null))
+    val view = read(source)
+    val target = newDir().resolve("out.parquet")
+    TParquetWriter.writeAll(target, view.schema, (0 until view.numPartitions).iterator.flatMap(view.readPartition))
+    val expected = (0 until 3).map(i => Seq(small(i), medium(i), large(i), large(i))) :+ Seq(null, null, null, null)
+    val back = ExternalParquet.read(target).map(_.map(s => if (s == null) null else dec(s)))
+    assertEquals(expected, back)
+    // parquet-mr's stringifier renders a decimal at its declared scale, so
+    // equal BigDecimals here also means the written scale is the read one.
+    assertEquals(Seq("123.45", "123456789012.3456", "1234567890123456789012345678.0123456789",
+      "1234567890123456789012345678.0123456789"), ExternalParquet.read(target).head)
+  }
+
+  @Test def ourDecimalLayoutsAreTheOnesTheSpecRecommends(): Unit = {
+    val schema = Schema(
+      Field("p9", DataType.DecimalType(9, 2)),
+      Field("p10", DataType.DecimalType(10, 2)),
+      Field("p18", DataType.DecimalType(18, 4)),
+      Field("p19", DataType.DecimalType(19, 0)),
+      Field("p38", DataType.DecimalType(38, 10)),
+      Field("p40", DataType.DecimalType(40, 5)))
+    val target = newDir().resolve("layouts.parquet")
+    TParquetWriter.writeAll(target, schema, Iterator.empty)
+    val footer = ExternalParquet.footerSchema(target).getFields
+    def layout(i: Int): String = footer.get(i).toString
+    assertEquals("optional int32 p9 (DECIMAL(9,2))", layout(0))
+    assertEquals("optional int64 p10 (DECIMAL(10,2))", layout(1))
+    assertEquals("optional int64 p18 (DECIMAL(18,4))", layout(2))
+    assertEquals("optional fixed_len_byte_array(9) p19 (DECIMAL(19,0))", layout(3))
+    assertEquals("optional fixed_len_byte_array(16) p38 (DECIMAL(38,10))", layout(4))
+    assertEquals("optional fixed_len_byte_array(17) p40 (DECIMAL(40,5))", layout(5))
+  }
+
+  @Test def ourDecimalWriterRoundTripsEveryLayout(): Unit = {
+    val schema = Schema(
+      Field("p1", DataType.DecimalType(1, 0)),
+      Field("p9", DataType.DecimalType(9, 2)),
+      Field("p18", DataType.DecimalType(18, 4)),
+      Field("p20", DataType.DecimalType(20, 0)),
+      Field("p38", DataType.DecimalType(38, 10)))
+    val values = Seq(
+      Seq("9", "9999999.99", "99999999999999.9999", "99999999999999999999", "9999999999999999999999999999.9999999999"),
+      Seq("-9", "-9999999.99", "-99999999999999.9999", "-99999999999999999999", "-9999999999999999999999999999.9999999999"),
+      Seq("0", "0.01", "-0.0001", "1", "-1E-10")).map(_.map(dec))
+    val batch = new ColumnarBatch(schema, values.length + 1)
+    values.zipWithIndex.foreach { case (row, r) => row.zipWithIndex.foreach { case (v, c) => batch.column(c).setBoxed(r, v) } }
+    (0 until schema.length).foreach(c => batch.column(c).setNull(values.length))
+    batch.setNumRows(values.length + 1)
+    val target = newDir().resolve("roundtrip.parquet")
+    TParquetWriter.writeAll(target, schema, Iterator(batch))
+    // Read back at each column's declared scale.
+    val expected = values.map(_.zip(Seq(0, 2, 4, 0, 10)).map { case (v, s) => v.setScale(s) }) :+ Seq.fill(5)(null)
+    assertEquals(expected, rows(read(target)))
+    assertEquals(expected, ExternalParquet.read(target).map(_.map(s => if (s == null) null else dec(s))))
+  }
+
+  /** A column does not enforce its declared scale on what it holds, so the
+    * writer meets values at other scales. One it can write at the declared
+    * scale exactly is written there; one it would have to round, or one with
+    * more digits than the precision holds, fails the write rather than storing
+    * a different number. */
+  @Test def ourDecimalWriterWritesAValueAtTheDeclaredScaleOrFails(): Unit = {
+    val schema = Schema(Field("price", DataType.DecimalType(9, 2)))
+    def write(v: String): Path = {
+      val batch = new ColumnarBatch(schema, 1)
+      batch.column(0).setBoxed(0, dec(v))
+      batch.setNumRows(1)
+      val target = newDir().resolve("scale.parquet")
+      TParquetWriter.writeAll(target, schema, Iterator(batch))
+      target
+    }
+    assertEquals(Seq(Seq(dec("1.50"))), rows(read(write("1.5"))))
+    assertEquals(Seq(Seq(dec("2.00"))), rows(read(write("2.000000"))))
+    val rounding = failure(write("1.555"))
+    assertTrue(rounding, rounding.contains("1.555") && rounding.contains("'price'") && rounding.contains("decimal(9,2)"))
+    val tooWide = failure(write("12345678.00"))
+    assertTrue(tooWide, tooWide.contains("12345678.00") && tooWide.contains("'price'") && tooWide.contains("decimal(9,2)"))
   }
 }

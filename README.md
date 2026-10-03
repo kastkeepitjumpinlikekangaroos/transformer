@@ -529,6 +529,20 @@ InputFilePath("data.csv",
   (a `TIMESTAMP` as `INT96` in one file and as `INT64` in the next). A file
   that lacks one of the first file's columns, or reads one as another type,
   fails the read when the view is opened, naming the file and the column.
+- A parquet `DECIMAL(p,s)` reads as `DECIMAL(p,s)` in any of the four layouts
+  a writer may choose: `INT32`, `INT64`, `FIXED_LEN_BYTE_ARRAY` or `BINARY`
+  (big-endian two's complement).
+- A parquet `TIMESTAMP` reads as the instant it stores, whatever its unit:
+  `MILLIS`, `MICROS` and `NANOS` alike, and the legacy 12-byte `INT96` too. A
+  `TIMESTAMP` holds microseconds, so a `NANOS` value is truncated to its
+  microsecond, as on every other path into the engine: a `TIMESTAMP` literal
+  with nine fractional digits truncates the same way, and before 1970 that is
+  the earlier microsecond (`1969-12-31 23:59:59.999998500` reads as
+  `...59.999998`). A `MILLIS` value with no microsecond value (more than about
+  292,000 years from 1970) fails the read, naming the column. A timestamp
+  marked local (`isAdjustedToUTC = false`) reads as the UTC instant with the
+  same wall-clock reading, since the engine has one timestamp type, an instant
+  in UTC; one written back out is marked UTC.
 - Read predicate pushdown: `WHERE c <op> lit`, `c IS NULL` / `c IS NOT NULL`,
   `c IN (lit, lit, …)` / `c NOT IN (…)`, `c BETWEEN lo AND hi`, and
   `NOT`/`AND`/`OR` over those forms are translated to parquet-mr's `FilterApi`
@@ -545,20 +559,17 @@ InputFilePath("data.csv",
   (see the options table above); override per-table via `output.json`'s
   `options.compression` — `uncompressed` is the right opt-in for pure
   narrow-numeric tables where dictionary encoding alone is enough.
-- All transformer primitive types map: `Int`, `Long`, `Float`, `Double`,
-  `Boolean`, `String` (UTF-8 logical type), `Binary`, `Date` (INT32 days),
-  `Timestamp` (INT64 micros).
-- A parquet `TIMESTAMP` reads as the instant it stores, whatever its unit:
-  `MILLIS`, `MICROS` and `NANOS` alike, and the legacy 12-byte `INT96` too. A
-  `TIMESTAMP` holds microseconds, so a `NANOS` value is truncated to its
-  microsecond, as on every other path into the engine: a `TIMESTAMP` literal
-  with nine fractional digits truncates the same way, and before 1970 that is
-  the earlier microsecond (`1969-12-31 23:59:59.999998500` reads as
-  `...59.999998`). A `MILLIS` value with no microsecond value (more than about
-  292,000 years from 1970) fails the read, naming the column. A timestamp
-  marked local (`isAdjustedToUTC = false`) reads as the UTC instant with the
-  same wall-clock reading, since the engine has one timestamp type, an instant
-  in UTC; one written back out is marked UTC.
+- Written: `Int` (`INT32`), `Long` (`INT64`), `Float`, `Double`, `Boolean`,
+  `String` (`BINARY (STRING)`), `Binary`, `Date` (`INT32 (DATE)`, days),
+  `Timestamp` (`INT64 TIMESTAMP(MICROS, true)`) and `DECIMAL(p,s)` in the
+  layout the format spec recommends: `INT32` up to 9 digits, `INT64` up to 18,
+  and beyond that the narrowest `FIXED_LEN_BYTE_ARRAY` that holds every value
+  of `p` digits (16 bytes for `DECIMAL(38,s)`). Parquet stores one scale per
+  column, and a column does not hold every value at its declared scale, so a
+  decimal is written at the declared scale when it can be exactly (`1.5` in a
+  `DECIMAL(10,2)` as `1.50`); one that would need rounding, or has more digits
+  than `p`, fails the write, naming the value and the column, rather than
+  storing a different number.
 
 Parquet is a first-class format — `job/` depends on the parquet read/write
 modules directly, so any user of the `DataJob` API gets parquet support out
@@ -699,8 +710,8 @@ and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
 
 **Types in CAST:** `INT`, `INTEGER`, `BIGINT`, `LONG`, `FLOAT`, `REAL`,
 `DOUBLE`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`, `DATE`,
-`TIMESTAMP`. A `DECIMAL` column comes from a declared schema and a `BINARY`
-one from a schema or a parquet file; neither type is a CAST target. A number
+`TIMESTAMP`. A `DECIMAL` or `BINARY` column comes from a declared schema or a
+parquet file; neither type is a CAST target. A number
 widens to a `DECIMAL` where the two meet, and a `BINARY` casts to nothing.
 
 Text casts to a number as Java parses one, which is also what CSV inference
@@ -794,7 +805,8 @@ precision, and its scale is only how it is written: `1.0 = 1.00` is TRUE, and
 keys all treat the two as one value. A column does not hold every value at its
 declared scale (CSV text keeps the scale it was written with), so a grouping
 key reads back at the column's declared scale, `1.000` in a `DECIMAL(10,3)`,
-whichever spelling arrived first, and so do `MIN` and `MAX`. `BINARY` values
+whichever spelling arrived first, and so do `MIN` and `MAX`, and any value
+written to parquet and read back, a spilled one included. `BINARY` values
 are equal when their bytes are, and order byte by byte as unsigned values, so a
 byte `0x7f` sorts before `0x80` and a prefix sorts before the longer array.
 `ORDER BY`, `MIN`/`MAX`, `GREATEST`/`LEAST` and `RANK` peers all follow these
@@ -952,9 +964,12 @@ JDK 21 or newer (tested through JDK 25).
   over a `DECIMAL` column, and the math functions (`ABS`, `ROUND`, ...), compute
   in `DOUBLE` and lose every digit past its precision; `SUM` hands the rounded
   value back as a `DECIMAL`. Arithmetic on a `DECIMAL` (`+ - * / %` and unary
-  minus) fails with an `IllegalStateException` while the query runs. A spill
-  that writes a `DECIMAL` column (a sorted, joined or windowed row, or a
-  `GROUP BY` key) fails too: the parquet writer has no decimal mapping.
+  minus) fails with an `IllegalStateException` while the query runs. Because
+  `SUM` keeps its input's type, its result often holds digits that type does
+  not: over `0.10` and `0.20` in a `DECIMAL(3,2)` it is `0.30000000000000004`,
+  and over `9.99` and `9.99` it is `19.98`, past three digits. Writing such a
+  value to parquet fails, naming it, and so does spilling one;
+  `CAST(SUM(d) AS DOUBLE)` writes it as the `DOUBLE` it was computed in.
 
 ## Performance instrumentation
 

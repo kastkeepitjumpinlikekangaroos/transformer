@@ -240,6 +240,16 @@ ship a fix or move something from "not done" to "done".
   engine drops sub-microsecond digits (`Instant.truncatedTo` for CAST and
   literals, `getNano / 1000` for CSV and `TimestampVector.setBoxed`), and
   with the `INT96` decoder.
+
+  Decimals had no mapping at all. A parquet `DECIMAL` fell through to its
+  physical type, so `123.45` stored as `INT32` read as the `INT` `12345`, and
+  one stored as `FIXED_LEN_BYTE_ARRAY` or `BINARY` as raw two's-complement
+  bytes; and `ParquetWriter` could not write a `DecimalType`, so no operator
+  could spill a `DECIMAL` column (sort, aggregate key, DISTINCT, grace-hash
+  join and window spill all threw). `ParquetColumns` now reads all four
+  layouts as `DECIMAL(p,s)`, and `ParquetWriter` writes the spec's layout by
+  precision. A decimal that spills reads back at its column's declared scale,
+  like a GROUP BY key.
 - **Predicate pushdown into parquet is best-effort partial.** The translator
   in `ParquetFilterTranslator` handles `c <op> lit` and its swapped form,
   `c IS NULL` / `c IS NOT NULL`, `c IN (lit, lit, …)` / `c NOT IN (…)` over
@@ -998,19 +1008,21 @@ One cluster remains of the confirmed defects from an audit of the surfaces the
 fuzzers cannot reach, executed against `SqlEngine` at commit `d4bb409`, not
 inferred. Plans, evidence and repro SQL are in
 [`plans/robustness/`](../plans/robustness/README.md); this list exists so a
-reader of the docs does not have to find the plans first. The audit's other two
+reader of the docs does not have to find the plans first. The audit's other
 clusters are fixed: SQL clauses the binder silently dropped (see "A clause the
-binder does not read used to vanish" above) and byte-array and decimal
-comparison (see "Byte arrays, decimals and BIGINTs past 2^53 used to compare
-wrongly" above).
+binder does not read used to vanish" above), byte-array and decimal comparison
+(see "Byte arrays, decimals and BIGINTs past 2^53 used to compare wrongly"
+above), and the parquet reader's timestamp units and decimals (see "A
+self-consistent round-trip cannot catch a wrong reading of an external format"
+above).
 
-- **The parquet reader has no `DECIMAL` mapping.** No
-  `DecimalLogicalTypeAnnotation` case exists, so a parquet decimal falls
-  through to its physical type - `IntType` or `LongType` holding the unscaled
-  value (`123.45` reads as `12345`), or `BinaryType` holding raw
-  two's-complement bytes. `ParquetWriter` cannot write `DecimalType` at all,
-  so neither can spill: an operator that spills a `DECIMAL` column fails with
-  `UnsupportedOperationException`. See
+- **Parquet annotations the reader has no case for collapse into their
+  physical type.** An unsigned integer (`INTEGER(32,false)` on `INT32`,
+  `INTEGER(64,false)` on `INT64`) reads as a signed `INT` or `BIGINT`, so a
+  value past the signed range comes back negative; `JSON` text reads as
+  `BINARY`; a `TIME` reads as a bare `INT` or `BIGINT`; `FLOAT16` and
+  `INTERVAL` as raw bytes; and a `REPEATED` column, which holds a list per
+  row, as one value per row, so its rows misalign. See
   [plan 03](../plans/robustness/03-parquet-external-format-fidelity.md).
 
 All three clusters hid for the same reason, and it is the lesson to carry: the
@@ -1051,7 +1063,13 @@ writer. Plans 04-07 in that directory close those three holes.
   feature; `Analyzer.checkArithmetic` passes a `DECIMAL` because it is a
   number. Exact decimal arithmetic is a feature, out of scope of
   [plan 02](../plans/robustness/02-total-order-for-decimal-and-binary.md), which
-  made comparison exact.
+  made comparison exact. It also reaches parquet: `AggExprSum.resultType` is
+  its input's `DECIMAL(p,s)`, so a sum holds digits that type does not
+  (`0.30000000000000004`, or `19.98` in a `DECIMAL(3,2)`), and `ParquetWriter`
+  refuses a value it cannot store at the declared scale and precision rather
+  than round it, so writing or spilling a decimal `SUM` fails, naming the
+  value. An exact `SUM` would want Spark's typing too: `DECIMAL(min(38,
+  p + 10), s)`.
 - **No whole-stage codegen**, no Janino, no LLVM. The closest analogue is
   `Expr.evalVec` (see [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec))
   — one call per Expr per batch, primitive-array inner loops, no codegen step.

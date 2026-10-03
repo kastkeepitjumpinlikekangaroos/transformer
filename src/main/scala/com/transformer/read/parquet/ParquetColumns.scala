@@ -46,6 +46,14 @@ private[parquet] object ParquetColumns {
     /** UTF-8 text. */
     case object Strings extends Decoding(DataType.StringType)
     case object Bytes extends Decoding(DataType.BinaryType)
+    /** A DECIMAL's unscaled value as an INT32. */
+    final case class IntDecimals(precision: Int, scale: Int) extends Decoding(DataType.DecimalType(precision, scale))
+    /** A DECIMAL's unscaled value as an INT64. */
+    final case class LongDecimals(precision: Int, scale: Int) extends Decoding(DataType.DecimalType(precision, scale))
+    /** A DECIMAL's unscaled value as big-endian two's-complement bytes, in a
+      * BINARY of any length or a FIXED_LEN_BYTE_ARRAY sign-extended to its
+      * length. */
+    final case class ByteDecimals(precision: Int, scale: Int) extends Decoding(DataType.DecimalType(precision, scale))
   }
 
   /** The decoding for column `t`, or an error naming it when the engine has
@@ -56,6 +64,13 @@ private[parquet] object ParquetColumns {
     val pt = t.asPrimitiveType
     (pt.getPrimitiveTypeName, pt.getLogicalTypeAnnotation) match {
       case (PrimitiveTypeName.BOOLEAN, _) => Decoding.Booleans
+      case (PrimitiveTypeName.INT32, d: LogicalTypeAnnotation.DecimalLogicalTypeAnnotation) =>
+        Decoding.IntDecimals(d.getPrecision, d.getScale)
+      case (PrimitiveTypeName.INT64, d: LogicalTypeAnnotation.DecimalLogicalTypeAnnotation) =>
+        Decoding.LongDecimals(d.getPrecision, d.getScale)
+      case (PrimitiveTypeName.BINARY | PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY,
+            d: LogicalTypeAnnotation.DecimalLogicalTypeAnnotation) =>
+        Decoding.ByteDecimals(d.getPrecision, d.getScale)
       case (PrimitiveTypeName.INT32, _: LogicalTypeAnnotation.DateLogicalTypeAnnotation) => Decoding.Dates
       case (PrimitiveTypeName.INT32, _) => Decoding.Ints
       case (PrimitiveTypeName.INT64, ts: LogicalTypeAnnotation.TimestampLogicalTypeAnnotation) =>

@@ -583,13 +583,21 @@ Both directions skip the `Group`/`SimpleGroup` row-object model that
   multiplied into the microseconds a `TimestampVector` holds (after a range
   check, so an overflow fails the read rather than wrapping), `MICROS` copied,
   and `NANOS` truncated with `Math.floorDiv`. One glob can mix units, so the
-  unit is read per file like everything else.
+  unit is read per file like everything else. A `DECIMAL`'s carries its
+  precision and scale, one case per layout: the unscaled value as an `INT32`
+  or `INT64` (`IntDecimals`, `LongDecimals`), or as big-endian two's
+  complement in a `BINARY` or `FIXED_LEN_BYTE_ARRAY` (`ByteDecimals`). Two
+  files can store one `DECIMAL(p,s)` column in different layouts.
 - Write: a custom `BatchWriteSupport` drives parquet-mr's `RecordConsumer`
   directly from the `ColumnarBatch` vectors. Each batch row maps to one
   `writer.write()` call (parquet-mr needs that 1:1 mapping so its
   `recordCount`-driven row-group flush bookkeeping stays correct) but the
   per-row dispatch is via a reusable `BatchRowRef` — no `SimpleGroup` per
-  row, no `Integer`/`Long` boxing per cell.
+  row, no `Integer`/`Long` boxing per cell. `ParquetSchema.toMessageType`
+  picks each column's layout; a `DECIMAL(p,s)` is the spec's (`INT32` to 9
+  digits, `INT64` to 18, else the narrowest `FIXED_LEN_BYTE_ARRAY`, its length
+  from `ParquetSchema.decimalBytes`), written at the declared scale or not at
+  all: a value that would need rounding, or has more than `p` digits, throws.
 
 `ColumnarBatch.DefaultCapacity` is 8192 rows. Larger batches amortize
 per-batch dispatch (hasNext checks, allocations, writer flush boundaries) at
