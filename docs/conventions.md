@@ -97,7 +97,9 @@ specific traps.
   the other way around. On floating-point operands, `NaN` / `-0.0` parity
   too: equality is primitive `==` and ordering is
   `java.lang.Double.compare`, in both paths, so a vectorized helper may not
-  reach for the raw `<` just because the operands are `double`. The
+  reach for the raw `<` just because the operands are `double`. Two integers
+  compare as longs and a decimal exactly, in both paths, so neither may be
+  read through `readDouble`. The
   property-based `ExprParityFuzzTest` is the generative net over that gate;
   keep `ExprGen` in sync when you add an `Expr` node (see
   [extending.md](extending.md#add-a-property--generator)).
@@ -129,6 +131,22 @@ specific traps.
   order — `cmp(a, b) == 0`, never `eq(a, b)`. The two differ on exactly `NaN`
   (tied, not equal) and `-0.0` / `0.0` (equal, not tied), so the bug hides until
   the corpus carries those values. See [gotchas.md](gotchas.md).
+
+  **Anything that HASHES, GROUPS or DE-DUPLICATES values agrees with `Ops.eq`**,
+  and that is the fourth time the family has bitten: GROUP BY collapsed byte
+  arrays `=` called different and split `1.0` from `1.00`, which `=` called
+  equal. The JDK's own equality is not SQL's for three types the engine carries: a
+  byte array's `equals` and `hashCode` are its identity, a `BigDecimal`'s
+  include its scale, and a `double` cannot hold every `long` past 2^53. So
+  compare and hash a byte array by content (`Arrays.equals`, `Arrays.hashCode`,
+  `Arrays.compareUnsigned`), a decimal by value (`compareTo`; turn it into a key
+  with `KeyCodec.decimalKey`, and route it with `HashPartitioner.decimalHash`),
+  and two integers as longs, never through `doubleValue`. Every hash site has to
+  answer the same question as `=`, including the ones that only route rows: a
+  shard (`HashPartitioner.hashCell`) or a spill bucket
+  (`HashJoinExec.columnHashCode`) that separates two equal keys loses the match
+  as surely as a hash map would. The one deliberate exception is floats, which
+  keys group by bit pattern ([architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers)).
 - **Spill-capable operators thread `ExecutionOptions` through their
   constructor.** `SortExec`, `HashAggregateExec`, and `DistinctExec`
   follow the pattern: an `opts: ExecutionOptions` field, an `spillEnabled`

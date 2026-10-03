@@ -379,8 +379,10 @@ final case class InListExpr(child: Expr, items: Seq[Expr], negated: Boolean) ext
     if (allLits) {
       // Hoist literal values out of the per-row loop; choose a HashSet keyed
       // by the comparator-relevant form so the inner loop is a single
-      // `.contains` call. Cross-numeric equality goes through doubleValue
-      // (matches Ops.eq); strings/booleans/dates compare structurally.
+      // `.contains` call, comparing as `Ops.eq` does: integers key on their
+      // longValue, any other pair of numbers with a FLOAT or DOUBLE in it on
+      // its doubleValue. A decimal on either side of the IN compares exactly,
+      // so it takes the scan below, as do booleans, dates and byte arrays.
       //
       // The numeric set keys on a value canonicalized by `InListExpr.setKey`,
       // because boxing imports `java.lang.Double.equals` — bit-pattern
@@ -395,8 +397,22 @@ final case class InListExpr(child: Expr, items: Seq[Expr], negated: Boolean) ext
       var i = 0
       while (i < nItems) { if (lits(i) == null) sawNullItem = true; i += 1 }
 
+      val integralSet: java.util.HashSet[java.lang.Long] =
+        if (DataType.isIntegral(child.dataType) &&
+            items.forall(i => i.dataType == DataType.NullType || DataType.isIntegral(i.dataType))) {
+          val s = new java.util.HashSet[java.lang.Long]()
+          var k = 0
+          while (k < nItems) {
+            val v = lits(k)
+            if (v != null) s.add(java.lang.Long.valueOf(v.asInstanceOf[Number].longValue))
+            k += 1
+          }
+          s
+        } else null
+
       val numericSet: java.util.HashSet[java.lang.Double] =
-        if (DataType.isNumeric(child.dataType)) {
+        if (integralSet == null && VecOps.comparesAsDouble(child.dataType) &&
+            items.forall(i => i.dataType == DataType.NullType || VecOps.comparesAsDouble(i.dataType))) {
           val s = new java.util.HashSet[java.lang.Double]()
           var k = 0
           while (k < nItems) {
@@ -425,7 +441,9 @@ final case class InListExpr(child: Expr, items: Seq[Expr], negated: Boolean) ext
         else {
           val v = cv.getBoxed(r)
           var found = false
-          if (numericSet != null) {
+          if (integralSet != null) {
+            found = integralSet.contains(java.lang.Long.valueOf(v.asInstanceOf[Number].longValue))
+          } else if (numericSet != null) {
             val d = v.asInstanceOf[Number].doubleValue
             // A NaN probe matches no item — `Ops.eq(NaN, x)` is false for every
             // x, NaN included — so skip the set rather than probe it, since
@@ -438,7 +456,7 @@ final case class InListExpr(child: Expr, items: Seq[Expr], negated: Boolean) ext
           } else if (stringSet != null) {
             found = stringSet.contains(v.toString)
           } else {
-            // Boolean / Date / Timestamp / other — linear scan with Ops.eq.
+            // Decimal / Boolean / Date / Timestamp / Binary — linear scan with Ops.eq.
             var k = 0
             while (k < nItems && !found) {
               val item = lits(k)

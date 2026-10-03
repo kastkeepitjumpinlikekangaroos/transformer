@@ -746,7 +746,7 @@ object AggState {
   def init(agg: AggExpr): AggState = agg match {
     case _: AggExprCountStar => new CountStarState()
     case AggExprCount(_, false) => new CountState()
-    case AggExprCount(_, true) => new CountDistinctState()
+    case AggExprCount(child, true) => new CountDistinctState(child.dataType)
     case d: AggExprDistinct => new DistinctState(d.inner)
     case s: AggExprSum => SumState.init(s)
     case _: AggExprAvg => new AvgState()
@@ -802,11 +802,33 @@ final class CountState extends AggState {
   override private[exec] def readSelf(in: DataInput): Unit = { c = in.readLong() }
 }
 
-final class CountDistinctState extends AggState {
+/** The element a DISTINCT set holds for a value of type `t`: one whose
+  * `equals` and `hashCode` agree with GROUP BY's [[KeyCodec]]. A byte array
+  * compares by content inside a [[BytesKey]], and a decimal is its
+  * [[KeyCodec.decimalKey]]; every other boxed value already agrees. */
+private[exec] object DistinctElement {
+  def of(v: Any, t: DataType): Any = v match {
+    case a: Array[Byte] => new BytesKey(a)
+    case d: java.math.BigDecimal =>
+      t match {
+        case DataType.DecimalType(_, scale) => KeyCodec.decimalKey(d, scale)
+        case _ => d.stripTrailingZeros
+      }
+    case other => other
+  }
+
+  /** The value an element stands for. */
+  def value(e: Any): Any = e match {
+    case k: BytesKey => k.bytes
+    case other => other
+  }
+}
+
+final class CountDistinctState(t: DataType) extends AggState {
   private val set = new util.HashSet[Any]()
   def updateAt(argVecs: Array[ColumnVector], r: Int): Unit = {
     val vec = argVecs(0)
-    if (!vec.isNull(r)) set.add(vec.getBoxed(r))
+    if (!vec.isNull(r)) set.add(DistinctElement.of(vec.getBoxed(r), t))
   }
   def merge(o: AggState): Unit = set.addAll(o.asInstanceOf[CountDistinctState].set)
   def finish(): Any = set.size.toLong
@@ -820,14 +842,15 @@ final class CountDistinctState extends AggState {
   * `CountDistinctState` it holds every distinct value in heap and has no spill
   * encoding, so an aggregate carrying one runs on the in-memory path. */
 final class DistinctState(inner: AggExpr) extends AggState {
+  private val t: DataType = inner.args.head.dataType
   private val set = new util.HashSet[Any]()
   def updateAt(argVecs: Array[ColumnVector], r: Int): Unit = {
     val vec = argVecs(0)
-    if (!vec.isNull(r)) set.add(vec.getBoxed(r))
+    if (!vec.isNull(r)) set.add(DistinctElement.of(vec.getBoxed(r), t))
   }
   def merge(o: AggState): Unit = set.addAll(o.asInstanceOf[DistinctState].set)
   def finish(): Any = {
-    val values: Array[AnyRef] = set.toArray
+    val values: Array[AnyRef] = set.toArray.map(e => DistinctElement.value(e).asInstanceOf[AnyRef])
     java.util.Arrays.sort(values, (a: AnyRef, b: AnyRef) => Ops.cmp(a, b))
     val n = values.length
     val batch = new ColumnarBatch(Schema(Vector(Field("v", inner.args.head.dataType))), math.max(1, n))
@@ -1279,6 +1302,14 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
       case DataType.FloatType => java.lang.Float.valueOf(doubleCur.toFloat)
       case DataType.DoubleType => java.lang.Double.valueOf(doubleCur)
       case DataType.BooleanType => java.lang.Boolean.valueOf(longCur != 0L)
+      // Equal decimals tie in `Ops.cmp` whatever their scale, so the slot
+      // holds whichever spelling arrived first. Spell the answer the way a
+      // GROUP BY key of the column reads back, so it does not depend on that.
+      case DataType.DecimalType(_, scale) =>
+        currentBoxed match {
+          case d: java.math.BigDecimal => KeyCodec.decimalKey(d, scale)
+          case other => other
+        }
       case _ => currentBoxed
     }
 

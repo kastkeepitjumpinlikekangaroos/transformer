@@ -1,6 +1,6 @@
 package com.transformer.sql.exec
 
-import com.transformer.core.{BooleanVector, ColumnVector, ColumnarBatch, DataType, DoubleVector, Field, IntVector, LongVector, Schema, StringVector}
+import com.transformer.core.{BinaryVector, BooleanVector, ColumnVector, ColumnarBatch, DataType, DecimalVector, DoubleVector, Field, IntVector, LongVector, Schema, StringVector}
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.Test
@@ -214,6 +214,45 @@ class AggStateSerdeTest {
     updateAll(partB, Array(second.column(0)), second.numRows)
     restoredA.merge(partB)
     assertEquals(java.lang.Boolean.TRUE, restoredA.finish())
+  }
+
+  /** A byte array and a decimal ride the boxed slot, the one whose spill
+    * encoding `MinMaxState` writes per type. The extremum is the true one on
+    * both sides of the round-trip: the byte array by unsigned content (80 is
+    * the largest), the decimal by value past double's mantissa, at the
+    * column's declared scale. */
+  @Test def minMaxRoundtripBinaryType(): Unit = {
+    val values = Seq(Array[Byte](2, 2), Array[Byte](0x80.toByte), null, Array[Byte](1, 1),
+      Array[Byte](0x7f), Array[Byte](1, 1, 0), Array[Byte](3), Array[Byte](0x7f, 0x7f))
+    val b = new ColumnarBatch(Schema(Field("b", DataType.BinaryType)), values.length)
+    val v = b.column(0).asInstanceOf[BinaryVector]
+    values.zipWithIndex.foreach { case (x, i) => if (x == null) v.setNull(i) else v.set(i, x) }
+    b.setNumRows(values.length)
+    val cases = Seq(
+      AggExprMin(colRef(0, DataType.BinaryType)) -> Array[Byte](1, 1),
+      AggExprMax(colRef(0, DataType.BinaryType)) -> Array[Byte](0x80.toByte))
+    for ((agg, expected) <- cases) {
+      val live = AggState.init(agg)
+      updateAll(live, Array(b.column(0)), b.numRows)
+      val restored = AggStateSerde.deserializeBytes(agg, AggStateSerde.serializeBytes(live))
+      assertArrayEquals(s"$agg live", expected, live.finish().asInstanceOf[Array[Byte]])
+      assertArrayEquals(s"$agg restored", expected, restored.finish().asInstanceOf[Array[Byte]])
+    }
+  }
+
+  @Test def minMaxRoundtripDecimalType(): Unit = {
+    val dt = DataType.DecimalType(38, 2)
+    val values = Seq("10000000000000000002", "10000000000000000003.5", null, "10000000000000000001.25")
+    val b = new ColumnarBatch(Schema(Field("d", dt)), values.length)
+    val v = b.column(0).asInstanceOf[DecimalVector]
+    values.zipWithIndex.foreach { case (x, i) =>
+      if (x == null) v.setNull(i) else v.set(i, new java.math.BigDecimal(x))
+    }
+    b.setNumRows(values.length)
+    val (_, restoredMin) = roundtrip(AggExprMin(colRef(0, dt)), b)
+    assertEquals(new java.math.BigDecimal("10000000000000000001.25"), restoredMin.finish())
+    val (_, restoredMax) = roundtrip(AggExprMax(colRef(0, dt)), b)
+    assertEquals(new java.math.BigDecimal("10000000000000000003.50"), restoredMax.finish())
   }
 
   @Test def minMaxNoInputSerializesAsHasValueFalse(): Unit = {

@@ -47,9 +47,15 @@ object Analyzer {
     }
   }
 
-  /** Insert an implicit cast if `from != to` and the cast is safe. */
+  /** Insert an implicit cast if `from != to` and the cast is safe. A BINARY
+    * casts to nothing else, so a byte array in a WHERE, or beside text in a
+    * CASE, is an error rather than its identity read as a string. */
   def implicitCast(e: Expr, to: DataType): Expr =
-    if (e.dataType == to) e else CastExpr(e, to)
+    if (e.dataType == to) e
+    else {
+      checkBinaryCast(e.dataType, to)
+      CastExpr(e, to)
+    }
 
   /** Promote `(l, r)` to a common type for arithmetic and comparison: the
     * two-operand case of [[unify]]. */
@@ -138,12 +144,26 @@ object Analyzer {
   /** Refuse a CAST whose answer would be a guess. A number or a boolean has no
     * date or time in it (days? seconds? milliseconds since when?), and a date
     * or time is no number; text and the other temporal type are the ways in
-    * and out. */
+    * and out. A byte array is none of these and casts to nothing else. */
   def checkCast(from: DataType, to: DataType): Unit = {
     def meetsTemporal(t: DataType) = isTemporal(t) || t == DataType.StringType || t == DataType.NullType
     if ((isTemporal(to) && !meetsTemporal(from)) || (isTemporal(from) && !meetsTemporal(to)))
       throw new IllegalArgumentException(s"Cannot cast ${typeName(from)} to ${typeName(to)}")
+    checkBinaryCast(from, to)
   }
+
+  /** A byte array is not text, a number or a truth value. Every cast from one
+    * read the array's identity as text, `[B@1a96d94c`, a different string on
+    * every run, and then parsed that if it could. */
+  private def checkBinaryCast(from: DataType, to: DataType): Unit =
+    if (from == DataType.BinaryType && to != DataType.BinaryType)
+      throw new IllegalArgumentException(s"Cannot cast BINARY to ${typeName(to)}")
+
+  /** `what`, which reads its operands as text (LIKE, `||`, a string
+    * function), refuses a BINARY for the reason [[checkBinaryCast]] does. */
+  def checkText(t: DataType, what: String): Unit =
+    if (t == DataType.BinaryType)
+      throw new IllegalArgumentException(s"$what on BINARY is not supported; a byte array is not text")
 
   private def typeName(t: DataType): String = t.name.toUpperCase
 }

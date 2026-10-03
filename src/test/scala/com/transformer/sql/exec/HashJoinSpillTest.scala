@@ -251,6 +251,34 @@ class HashJoinSpillTest {
     assertEquals(multiset(expected), multiset(actual))
   }
 
+  /** Grace hash routes both sides to buckets by a per-cell hash, and for a
+    * byte array that was its identity `hashCode`: equal keys from the two
+    * sides landed in different buckets, so the spilled join lost matches the
+    * in-memory join found. Byte arrays are compared as hex text here, since
+    * spill reads every row back as a fresh array. */
+  @Test def innerJoinBinaryKeyParity(): Unit = {
+    val leftSchema = Schema(Vector(Field("k", DataType.BinaryType), Field("lv", DataType.LongType)))
+    val rightSchema = Schema(Vector(Field("k", DataType.BinaryType), Field("rv", DataType.LongType)))
+    val rng = new Random(23L)
+    def key(i: Int): Array[Byte] = Array[Byte](i.toByte, (i * 7).toByte)
+    val lefts = (0 until 300).map(i =>
+      Array[Any](key(rng.nextInt(25)), java.lang.Long.valueOf(i.toLong))).toVector
+    val rights = (0 until 100).map(i =>
+      Array[Any](key(rng.nextInt(25)), java.lang.Long.valueOf(i.toLong))).toVector
+    val l = new InMemoryPlan(leftSchema, Vector(lefts))
+    val r = new InMemoryPlan(rightSchema, Vector(rights))
+    val lk = ColRefExpr(0, "k", DataType.BinaryType)
+    val rk = ColRefExpr(0, "k", DataType.BinaryType)
+    def hexRows(rows: Vector[Vector[Any]]): Vector[Vector[Any]] = rows.map(_.map {
+      case a: Array[Byte] => a.map(b => f"${b & 0xff}%02x").mkString
+      case other => other
+    })
+    val expected = hexRows(runJoin(l, r, Seq(lk), Seq(rk), JoinKind.Inner, ExecutionOptions.Default))
+    val actual = hexRows(runJoin(l, r, Seq(lk), Seq(rk), JoinKind.Inner, spillyOpts()))
+    assertTrue("expected matches", expected.nonEmpty)
+    assertEquals(multiset(expected), multiset(actual))
+  }
+
   // ---- Edge cases ----------------------------------------------------------
 
   @Test def emptyLeftSideUnderSpill(): Unit = {

@@ -3,6 +3,16 @@
 > Status: **not started** · Effort: 2-3 days · Risk: low (test-only), but it will
 > surface failures — do not start it until [plan 02](02-total-order-for-decimal-and-binary.md)
 > has landed or you are prepared to park what it finds
+>
+> Plan 02 landed 2026-10-03, and it made the decision step 5 below defers to:
+> **decimal equality is by value** (`compareTo`; `1.0 = 1.00`), byte arrays by
+> content, and two integers as longs. A decimal GROUP BY / DISTINCT key and a
+> decimal MIN / MAX read back at the column's declared scale, but rows that tie
+> under `compareTo` can still differ in spelling (a LIMIT cutoff between `1.0`
+> and `1.00`), so `RowOracle` should compare decimals with `compareTo`, which
+> is what the engine means by equal. A BINARY is never
+> read as text (CAST, LIKE, `||` and the string functions refuse one at bind
+> time), so `ExprGen` and `QueryGen` must not build those shapes over one.
 
 ## How this was found
 

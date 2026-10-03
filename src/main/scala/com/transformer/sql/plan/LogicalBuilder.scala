@@ -663,6 +663,7 @@ object LogicalBuilder {
     case a: Modulo => binopGeneric("%", a.getLeftExpression, a.getRightExpression, sources, aggResolver, windowResolver)
     case a: Concat =>
       val l = b(a.getLeftExpression); val r = b(a.getRightExpression)
+      Seq(l, r).foreach(e => Analyzer.checkText(e.dataType, "||"))
       BinOpExpr("||", l, r, DataType.StringType)
 
     case a: AndExpression =>
@@ -710,6 +711,7 @@ object LogicalBuilder {
           case Some(other) =>
             throw new IllegalArgumentException(s"ESCAPE must be a single-character string literal, got $other")
         })
+      Seq(s, p).foreach(e => Analyzer.checkText(e.dataType, if (syntax.caseInsensitive) "ILIKE" else "LIKE"))
       LikeExpr(Analyzer.implicitCast(s, DataType.StringType), Analyzer.implicitCast(p, DataType.StringType),
         lk.isNot, syntax)
 
@@ -763,7 +765,9 @@ object LogicalBuilder {
           tf.getFromExpression != null || tf.getExpression == null)
         throw new IllegalArgumentException(
           s"Only the single-argument TRIM(x) is supported, got: $tf")
-      FuncExpr("TRIM", Seq(b(tf.getExpression)), DataType.StringType)
+      val trimmed = b(tf.getExpression)
+      Analyzer.checkText(trimmed.dataType, "TRIM")
+      FuncExpr("TRIM", Seq(trimmed), DataType.StringType)
 
     case f: Function =>
       aggResolver(f) match {
@@ -825,6 +829,7 @@ object LogicalBuilder {
     else {
       val rt = Funcs.returnType(f.getName, argTypes)
         .getOrElse(throw new IllegalArgumentException(s"Unknown function '${f.getName}(${argTypes.mkString(",")})'"))
+      if (Funcs.takesText(f.getName)) argTypes.foreach(Analyzer.checkText(_, f.getName.toUpperCase))
       FuncExpr(f.getName.toUpperCase, args, rt)
     }
   }

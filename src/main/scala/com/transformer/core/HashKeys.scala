@@ -16,7 +16,12 @@ package com.transformer.core
   *     NullType) → [[ObjectArrayCodec]] copies the boxed values into a fresh
   *     `Array[AnyRef]` wrapped in an [[ObjectArrayKey]] (cached hashCode,
   *     per-element `equals`/`hashCode` with `Array[Byte]` special-cased for
-  *     structural equality).
+  *     structural equality). A decimal is stored as its
+  *     [[KeyCodec.decimalKey]], so every spelling of one value is one key.
+  *
+  * Either way two keys are equal exactly when SQL `=` (`Ops.eq`) calls every
+  * pair of their values equal, except that NULL meets NULL and a float key
+  * compares by bit pattern, as GROUP BY needs.
   *
   * Two operator-facing entry points:
   *
@@ -129,6 +134,42 @@ object KeyCodec {
     case DataType.DateType | DataType.TimestampType => true
     case _ => false
   }
+
+  /** The value a decimal key stands for, spelled one way. `=` compares
+    * decimals by value, so 1.0, 1.00 and 1 are one key, but `BigDecimal.equals`
+    * and `hashCode` include the scale and would make them three. Every spelling
+    * of a value maps to one: the value at `scale`, the declared scale of its
+    * column, when it can be written there exactly, and otherwise the value
+    * without trailing zeros. A column does not enforce its declared scale on
+    * what it holds, so both cases arise. The first is also how a GROUP BY or
+    * DISTINCT key reads back, which keeps the output from depending on which
+    * spelling arrived first. A value already at `scale` comes back as is, so a
+    * column that holds its declared scale pays nothing. */
+  def decimalKey(v: java.math.BigDecimal, scale: Int): java.math.BigDecimal =
+    if (v.scale == scale) v
+    else if (v.scale < scale) v.setScale(scale)
+    else {
+      val stripped = v.stripTrailingZeros
+      if (stripped.scale <= scale) stripped.setScale(scale) else stripped
+    }
+
+  /** The declared scale of each key column that holds decimals, and
+    * [[NotDecimal]] for every other column. */
+  private[core] def decimalScales(columnTypes: Array[DataType]): Array[Int] =
+    columnTypes.map {
+      case DataType.DecimalType(_, scale) => scale
+      case _ => NotDecimal
+    }
+
+  private[core] val NotDecimal: Int = Int.MinValue
+
+  /** `v` as the key value [[decimalScales]] calls for at `scale`. */
+  private[core] def keyValue(v: AnyRef, scale: Int): AnyRef =
+    if (scale == NotDecimal || v == null) v
+    else v match {
+      case d: java.math.BigDecimal => decimalKey(d, scale)
+      case other => other
+    }
 
   /** Read column `col` at `row` as a primitive long. Callers must check
     * `col.isNull(row)` first — this is a NULL-unsafe primitive read. */
@@ -711,12 +752,15 @@ final class LongHashMap[V >: Null <: AnyRef](initialCapacity: Int = 16, loadFact
 
 /** Boxed-values codec for keys that include at least one variable-width
   * column (String, Binary, Decimal, NullType). Each encode copies the row's
-  * key values into a fresh `Array[AnyRef]` wrapped in an [[ObjectArrayKey]]. */
+  * key values into a fresh `Array[AnyRef]` wrapped in an [[ObjectArrayKey]],
+  * a decimal as its [[KeyCodec.decimalKey]]. */
 final class ObjectArrayCodec private[core] (
     private val columnIndices: Array[Int],
     private val columnTypes: Array[DataType]) extends KeyCodec {
 
   val numKeys: Int = columnTypes.length
+
+  private val decimalScales: Array[Int] = KeyCodec.decimalScales(columnTypes)
 
   def encodeFromBatch(batch: ColumnarBatch, row: Int): AnyRef = {
     val arr = new Array[AnyRef](numKeys)
@@ -725,7 +769,7 @@ final class ObjectArrayCodec private[core] (
       val col = batch.column(columnIndices(i))
       arr(i) =
         if (col.isNull(row)) null
-        else col.getBoxed(row).asInstanceOf[AnyRef]
+        else KeyCodec.keyValue(col.getBoxed(row).asInstanceOf[AnyRef], decimalScales(i))
       i += 1
     }
     new ObjectArrayKey(arr)
@@ -737,7 +781,7 @@ final class ObjectArrayCodec private[core] (
     while (i < numKeys) {
       val col = batch.column(columnIndices(i))
       if (col.isNull(row)) return null
-      arr(i) = col.getBoxed(row).asInstanceOf[AnyRef]
+      arr(i) = KeyCodec.keyValue(col.getBoxed(row).asInstanceOf[AnyRef], decimalScales(i))
       i += 1
     }
     new ObjectArrayKey(arr)
@@ -747,7 +791,7 @@ final class ObjectArrayCodec private[core] (
     val arr = new Array[AnyRef](numKeys)
     var i = 0
     while (i < numKeys) {
-      arr(i) = values(i).asInstanceOf[AnyRef]
+      arr(i) = KeyCodec.keyValue(values(i).asInstanceOf[AnyRef], decimalScales(i))
       i += 1
     }
     new ObjectArrayKey(arr)
@@ -774,7 +818,7 @@ final class ObjectArrayCodec private[core] (
       val col = batch.column(columnIndices(i))
       arr(i) =
         if (col.isNull(row)) null
-        else col.getBoxed(row).asInstanceOf[AnyRef]
+        else KeyCodec.keyValue(col.getBoxed(row).asInstanceOf[AnyRef], decimalScales(i))
       i += 1
     }
     s.recomputeHash()
@@ -871,22 +915,24 @@ final class SingleObjectKeyCodec private[core] (
 
   val numKeys: Int = 1
 
+  private val decimalScale: Int = KeyCodec.decimalScales(Array(columnType))(0)
+
   def encodeFromBatch(batch: ColumnarBatch, row: Int): AnyRef = {
     val col = batch.column(columnIndex)
-    val v: AnyRef = if (col.isNull(row)) null else col.getBoxed(row).asInstanceOf[AnyRef]
+    val v: AnyRef =
+      if (col.isNull(row)) null
+      else KeyCodec.keyValue(col.getBoxed(row).asInstanceOf[AnyRef], decimalScale)
     new SingleObjectKey(v)
   }
 
   def encodeFromBatchSkipIfAnyNull(batch: ColumnarBatch, row: Int): AnyRef = {
     val col = batch.column(columnIndex)
     if (col.isNull(row)) return null
-    new SingleObjectKey(col.getBoxed(row).asInstanceOf[AnyRef])
+    new SingleObjectKey(KeyCodec.keyValue(col.getBoxed(row).asInstanceOf[AnyRef], decimalScale))
   }
 
-  def encodeBoxed(values: Array[Any]): AnyRef = {
-    val v = values(0)
-    new SingleObjectKey(if (v == null) null else v.asInstanceOf[AnyRef])
-  }
+  def encodeBoxed(values: Array[Any]): AnyRef =
+    new SingleObjectKey(KeyCodec.keyValue(values(0).asInstanceOf[AnyRef], decimalScale))
 
   def decode(key: AnyRef, out: ColumnarBatch, baseCol: Int, outRow: Int): Unit = {
     val v = key.asInstanceOf[SingleObjectKey].value
@@ -899,7 +945,9 @@ final class SingleObjectKeyCodec private[core] (
   def encodeIntoScratch(scratch: AnyRef, batch: ColumnarBatch, row: Int): Unit = {
     val s = scratch.asInstanceOf[SingleObjectKeyScratch]
     val col = batch.column(columnIndex)
-    s.writableSet(if (col.isNull(row)) null else col.getBoxed(row).asInstanceOf[AnyRef])
+    s.writableSet(
+      if (col.isNull(row)) null
+      else KeyCodec.keyValue(col.getBoxed(row).asInstanceOf[AnyRef], decimalScale))
     s.recomputeHash()
   }
 

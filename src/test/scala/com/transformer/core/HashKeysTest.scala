@@ -318,6 +318,55 @@ class HashKeysTest {
     assertTrue(od.isNull(1))
   }
 
+  /** A decimal key is its value, not its spelling: every scale of one value
+    * encodes to one key, through the single-column codec and the multi-column
+    * one, by the batch, boxed and scratch paths alike. The key decodes at the
+    * column's declared scale when the value has one there, and otherwise
+    * without its trailing zeros. `BigDecimal.equals` compares the scale too,
+    * which made GROUP BY split 1.0 from 1.00 while `=` called them equal. */
+  @Test def decimalKeysAreValuesNotSpellings(): Unit = {
+    val dt = DataType.DecimalType(10, 3)
+    val schema = Schema(Field("d", dt), Field("s", DataType.StringType))
+    val codecs = Seq(
+      KeyCodec.forColumns(Array(0), Array[DataType](dt)),
+      KeyCodec.forColumns(Array(0, 1), Array[DataType](dt, DataType.StringType)))
+    assertTrue(codecs(0).isInstanceOf[SingleObjectKeyCodec])
+    assertTrue(codecs(1).isInstanceOf[ObjectArrayCodec])
+    val classes = Seq(
+      Seq("1", "1.0", "1.00", "1.000", "1.0000", "1E+0") -> "1.000",
+      Seq("2.5", "2.50", "25E-1") -> "2.500",
+      Seq("0", "0.0", "0E+3", "-0.000") -> "0.000",
+      Seq("1.0005", "1.00050", "1.000500") -> "1.0005",
+      Seq("-12345678901234567890.1", "-12345678901234567890.10") -> "-12345678901234567890.100")
+    for (codec <- codecs) {
+      val n = codec.numKeys
+      def keyOf(spelling: String): (AnyRef, AnyRef, AnyRef) = {
+        val b = new ColumnarBatch(schema, 1)
+        b.column(0).asInstanceOf[DecimalVector].set(0, new java.math.BigDecimal(spelling))
+        b.column(1).asInstanceOf[StringVector].set(0, "x")
+        b.setNumRows(1)
+        val scratch = codec.newScratch()
+        codec.encodeIntoScratch(scratch, b, 0)
+        (codec.encodeFromBatch(b, 0),
+          codec.encodeBoxed(Array[Any](new java.math.BigDecimal(spelling), "x").take(n)),
+          codec.ownFromScratch(scratch))
+      }
+      val representatives = classes.map { case (spellings, decoded) =>
+        val keys = spellings.flatMap { sp => val (a, b, c) = keyOf(sp); Seq(a, b, c) }
+        keys.foreach { k =>
+          assertEquals(s"$codec ${spellings.head}", keys.head, k)
+          assertEquals(s"$codec ${spellings.head} hash", keys.head.hashCode, k.hashCode)
+        }
+        val out = new ColumnarBatch(schema, 1); out.setNumRows(1)
+        codec.decode(keys.head, out, 0, 0)
+        assertEquals(s"$codec decodes ${spellings.head}", new java.math.BigDecimal(decoded),
+          out.column(0).asInstanceOf[DecimalVector].get(0))
+        keys.head
+      }
+      assertEquals(s"$codec keeps distinct values apart", classes.length, representatives.distinct.length)
+    }
+  }
+
   @Test def objectArraySkipIfAnyNullReturnsJavaNull(): Unit = {
     val schema = Schema(Field("s", DataType.StringType), Field("l", DataType.LongType))
     val codec = KeyCodec.forColumns(Array(0, 1), Array(DataType.StringType, DataType.LongType))

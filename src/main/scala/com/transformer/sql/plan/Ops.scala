@@ -28,22 +28,65 @@ object Ops {
     case other => throw new IllegalStateException(s"Unknown binary op '$other'")
   }
 
-  // ---- Equality (type-coercing within numerics; exact for strings/booleans) ----
+  // ---- Equality and the one total order ----
+  //
+  // Numbers compare by value, exactly where the types allow it. Two integers
+  // compare as longs, and a decimal against any number as decimals: its scale
+  // is how it is written, not part of the value, so 1.0 = 1.00. Every other
+  // pair of numbers has a FLOAT or DOUBLE in it and compares as doubles, where
+  // `eq` is IEEE `==` (NaN equals nothing, -0.0 equals 0.0) and `cmp` is
+  // `java.lang.Double.compare` (NaN above everything, -0.0 below 0.0). A byte
+  // array compares by content, ordered byte by byte as unsigned values, so a
+  // prefix sorts first and 0x80 sorts above 0x7f. GROUP BY, DISTINCT and join
+  // keys (`KeyCodec`) agree with `eq` on all of these but floats, which they
+  // key by bit pattern.
+
   def eq(a: Any, b: Any): Boolean = (a, b) match {
+    case (x: java.math.BigDecimal, y: java.lang.Number) => decimalCompare(x, y) == 0
+    case (x: java.lang.Number, y: java.math.BigDecimal) => decimalCompare(y, x) == 0
+    case (x: java.lang.Number, y: java.lang.Number) if isIntegral(x) && isIntegral(y) =>
+      x.longValue == y.longValue
     case (x: java.lang.Number, y: java.lang.Number) =>
       x.doubleValue == y.doubleValue
     case (x: String, y: String) => x == y
     case (x: java.lang.Boolean, y: java.lang.Boolean) => x.booleanValue == y.booleanValue
+    case (x: Array[Byte], y: Array[Byte]) => util.Arrays.equals(x, y)
     case (x, y) => x == y
   }
 
   def cmp(a: Any, b: Any): Int = (a, b) match {
+    case (x: java.math.BigDecimal, y: java.lang.Number) => decimalCompare(x, y)
+    case (x: java.lang.Number, y: java.math.BigDecimal) => -decimalCompare(y, x)
+    case (x: java.lang.Number, y: java.lang.Number) if isIntegral(x) && isIntegral(y) =>
+      java.lang.Long.compare(x.longValue, y.longValue)
     case (x: java.lang.Number, y: java.lang.Number) =>
       java.lang.Double.compare(x.doubleValue, y.doubleValue)
     case (x: String, y: String) => x.compareTo(y)
     case (x: java.lang.Boolean, y: java.lang.Boolean) => x.compareTo(y)
+    case (x: Array[Byte], y: Array[Byte]) => util.Arrays.compareUnsigned(x, y)
     case (x: java.lang.Comparable[Any] @unchecked, y) => x.compareTo(y)
     case (x, y) => x.toString.compareTo(y.toString)
+  }
+
+  /** The boxes of INT and BIGINT, whose values a long holds exactly; past
+    * 2^53 a double does not, and 2^53 + 1 would equal 2^53. */
+  private def isIntegral(n: java.lang.Number): Boolean =
+    n.isInstanceOf[java.lang.Long] || n.isInstanceOf[java.lang.Integer]
+
+  /** Order a decimal against any number, by value. The analyzer widens a
+    * number that meets a decimal through a CAST, so this sees a mixed pair only
+    * where operands are not unified, such as NULLIF's two, or in a tree built
+    * without the analyzer. The other side is read the way that CAST reads it
+    * ([[Casts.toDecimal]]); NaN and the infinities have no decimal and take
+    * their places in the total order instead. */
+  private def decimalCompare(x: java.math.BigDecimal, y: java.lang.Number): Int = y match {
+    case d: java.math.BigDecimal => x.compareTo(d)
+    case _: java.lang.Double | _: java.lang.Float =>
+      val d = y.doubleValue
+      if (java.lang.Double.isNaN(d) || d == Double.PositiveInfinity) -1
+      else if (d == Double.NegativeInfinity) 1
+      else x.compareTo(Casts.toDecimal(y))
+    case _ => x.compareTo(Casts.toDecimal(y))
   }
 
   private sealed trait Arith
@@ -163,8 +206,36 @@ object Casts {
           case s: String => parseInstant(s)
           case _ => throw new IllegalArgumentException(s"Cannot cast $v to timestamp")
         }
+      // The analyzer widens a number that meets a decimal to that decimal. The
+      // value is kept exactly, at its own scale: a column's declared scale is
+      // not enforced on what it holds, and rounding to it would change which
+      // rows a comparison matches.
+      case t: DataType.DecimalType =>
+        v match {
+          case d: java.math.BigDecimal => d
+          case n: Number if isFinite(n) => toDecimal(n)
+          case s: String => parseNumber(s, to)(new java.math.BigDecimal(_))
+          case _ => throw new IllegalArgumentException(s"Cannot cast $v to $t")
+        }
       case other => throw new IllegalArgumentException(s"CAST to $other not implemented")
     }
+  }
+
+  /** A number as the decimal it is: an integer exactly, and a FLOAT or DOUBLE
+    * as the decimal it prints as, the shortest one that reads back as it, so
+    * 0.1 is 0.1 rather than the binary fraction nearest it. NaN and the
+    * infinities have no decimal; callers rule them out first. */
+  def toDecimal(n: Number): java.math.BigDecimal = n match {
+    case d: java.math.BigDecimal => d
+    case d: java.lang.Double => java.math.BigDecimal.valueOf(d.doubleValue)
+    case f: java.lang.Float => new java.math.BigDecimal(java.lang.Float.toString(f.floatValue))
+    case i: java.math.BigInteger => new java.math.BigDecimal(i)
+    case _ => java.math.BigDecimal.valueOf(n.longValue)
+  }
+
+  private def isFinite(n: Number): Boolean = n match {
+    case _: java.lang.Double | _: java.lang.Float => java.lang.Double.isFinite(n.doubleValue)
+    case _ => true
   }
 
   /** A number in the JDK's syntax, the text CSV inference reads as one. */
@@ -255,8 +326,8 @@ object VecOps {
     val cap = math.max(1, n)
     val values = new Array[Boolean](cap)
     val nulls = new util.BitSet(cap)
-    val bothNumeric = isNumeric(lt) && isNumeric(rt)
-    if (bothNumeric) numericCompare(op, l, r, values, nulls, n)
+    if (DataType.isIntegral(lt) && DataType.isIntegral(rt)) integralCompare(op, l, r, values, nulls, n)
+    else if (comparesAsDouble(lt) && comparesAsDouble(rt)) numericCompare(op, l, r, values, nulls, n)
     else genericCompare(op, l, r, values, nulls, n)
     new BooleanVector(values, nulls, cap)
   }
@@ -484,7 +555,14 @@ object VecOps {
 
   // ---- helpers ----
 
-  private def isNumeric(t: DataType): Boolean = t match {
+  /** The types a pair of which [[Ops]] compares as primitives: two integers
+    * (INT, BIGINT) as longs, which [[integralCompare]] reads with `readLong`,
+    * and any other pair of these, which has a FLOAT or DOUBLE in it, as
+    * doubles, which [[numericCompare]] reads with `readDouble`. A decimal is a
+    * number but not one of these: `Ops` compares it exactly, and through
+    * `readDouble` two decimals past double's precision would compare equal.
+    * Any pair with a decimal in it takes the generic path, which asks `Ops`. */
+  private[plan] def comparesAsDouble(t: DataType): Boolean = t match {
     case DataType.IntType | DataType.LongType | DataType.FloatType | DataType.DoubleType => true
     case _ => false
   }
@@ -700,8 +778,66 @@ object VecOps {
     new FloatVector(values, nulls, cap)
   }
 
-  /** Numeric comparison via double promotion — matches [[Ops.cmp]]'s
-    * cross-numeric semantics.
+  /** Comparison of two integers, read as longs — [[Ops]] compares two INT or
+    * BIGINT values the same way. A double holds every long only up to 2^53,
+    * so [[numericCompare]] would find 2^53 and 2^53 + 1 equal. Longs have no
+    * NaN and no signed zero, so the primitive operators are the total order. */
+  private def integralCompare(
+      op: String,
+      l: ColumnVector,
+      r: ColumnVector,
+      values: Array[Boolean],
+      nulls: util.BitSet,
+      n: Int): Unit = {
+    op match {
+      case "=" | "==" =>
+        var i = 0
+        while (i < n) {
+          if (l.isNull(i) || r.isNull(i)) nulls.set(i)
+          else values(i) = readLong(l, i) == readLong(r, i)
+          i += 1
+        }
+      case "<>" | "!=" =>
+        var i = 0
+        while (i < n) {
+          if (l.isNull(i) || r.isNull(i)) nulls.set(i)
+          else values(i) = readLong(l, i) != readLong(r, i)
+          i += 1
+        }
+      case "<" =>
+        var i = 0
+        while (i < n) {
+          if (l.isNull(i) || r.isNull(i)) nulls.set(i)
+          else values(i) = readLong(l, i) < readLong(r, i)
+          i += 1
+        }
+      case "<=" =>
+        var i = 0
+        while (i < n) {
+          if (l.isNull(i) || r.isNull(i)) nulls.set(i)
+          else values(i) = readLong(l, i) <= readLong(r, i)
+          i += 1
+        }
+      case ">" =>
+        var i = 0
+        while (i < n) {
+          if (l.isNull(i) || r.isNull(i)) nulls.set(i)
+          else values(i) = readLong(l, i) > readLong(r, i)
+          i += 1
+        }
+      case ">=" =>
+        var i = 0
+        while (i < n) {
+          if (l.isNull(i) || r.isNull(i)) nulls.set(i)
+          else values(i) = readLong(l, i) >= readLong(r, i)
+          i += 1
+        }
+      case other => throw new IllegalStateException(s"Unknown integral compare op '$other'")
+    }
+  }
+
+  /** Numeric comparison via double promotion, for a pair with a FLOAT or
+    * DOUBLE in it — matches [[Ops.cmp]]'s cross-numeric semantics.
     *
     * The two operator families use deliberately different primitives, because
     * [[Ops]] does:
@@ -720,8 +856,9 @@ object VecOps {
     *     no boxing.
     *
     * `Float` has no branch of its own: `readDouble` widens `FloatVector` (and
-    * `LongVector` / `IntVector`) to `double` exactly as `Number.doubleValue`
-    * does on the row side, so one implementation covers every numeric type.
+    * `LongVector` / `IntVector`, beside a float) to `double` exactly as
+    * `Number.doubleValue` does on the row side, so one implementation covers
+    * every such pair.
     */
   private def numericCompare(
       op: String,
@@ -778,8 +915,9 @@ object VecOps {
   }
 
   /** Generic comparison — falls back through [[Ops.cmp]] / [[Ops.eq]] for
-    * strings, booleans, dates, etc. Per-row but one dispatch level shallower
-    * than the original `Expr.eval` tree (no BinOpExpr wrapper). */
+    * strings, booleans, dates, decimals, byte arrays, etc. Per-row but one
+    * dispatch level shallower than the original `Expr.eval` tree (no BinOpExpr
+    * wrapper). */
   private def genericCompare(
       op: String,
       l: ColumnVector,

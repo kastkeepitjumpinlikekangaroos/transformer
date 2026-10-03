@@ -2619,6 +2619,292 @@ class SqlEngineTest {
     cases.foreach { case (sql, clause) => assertRejected(sql, cat, clause) }
   }
 
+  // ---------------------------------------------------------------------------
+  // BINARY compares by content and DECIMAL by value
+  //
+  // `Ops.eq` / `Ops.cmp` dispatched on the boxed value's class. A byte array is
+  // neither a Number nor Comparable, so `=` was reference equality and ORDER BY
+  // compared identity-hash strings. A BigDecimal is a Number, so both went
+  // through `doubleValue` and lost every digit past double's 53-bit mantissa.
+  // The hash side disagreed with both, in opposite directions: GROUP BY
+  // collapsed byte arrays `=` called different, and split 1.0 from 1.00, which
+  // `=` called equal. The comment on each assertion records the old answer.
+  // ---------------------------------------------------------------------------
+
+  private def bytes(xs: Int*): Array[Byte] = xs.map(_.toByte).toArray
+  private def dec(s: String): java.math.BigDecimal = new java.math.BigDecimal(s)
+
+  /** A byte array as hex text, so a cell that holds one compares by content. */
+  private def hex(v: Any): Any = v match {
+    case a: Array[Byte] => a.map(b => f"${b & 0xff}%02x").mkString
+    case other => other
+  }
+
+  /** An in-memory view with one inner Seq of rows per partition. */
+  private def memView(schema: Schema, partitions: Seq[Seq[Array[Any]]]): MaterializedView =
+    new MaterializedView(schema, partitions.map { rows =>
+      val b = new ColumnarBatch(schema, math.max(1, rows.length))
+      rows.zipWithIndex.foreach { case (row, r) =>
+        row.zipWithIndex.foreach { case (v, c) =>
+          if (v == null) b.column(c).setNull(r) else b.column(c).setBoxed(r, v)
+        }
+      }
+      b.setNumRows(rows.length)
+      IndexedSeq(b)
+    }.toIndexedSeq)
+
+  /** `tb` holds equal bytes in `b` and `b2` as distinct arrays, so reference
+    * equality and identity-hash order both show. `tu` holds bytes whose signed
+    * and unsigned orders differ, the empty array, and a prefix of a longer
+    * array; `tp` four values one per partition, so MIN and MAX meet them in
+    * merge; `tg` two columns for GREATEST and LEAST. */
+  private def binaryCatalog(): Catalog = {
+    val c = new Catalog
+    val tb = Schema(Vector(Field("id", DataType.IntType), Field("b", DataType.BinaryType),
+      Field("b2", DataType.BinaryType)))
+    c.register("tb", memView(tb, Seq(Seq(
+      Array[Any](1, bytes(3, 3), bytes(3, 3)),
+      Array[Any](2, bytes(1, 1), bytes(1, 1)),
+      Array[Any](3, bytes(2, 2), bytes(2, 2)),
+      Array[Any](4, bytes(1, 1), bytes(1, 1))))))
+    val tu = Schema(Vector(Field("id", DataType.IntType), Field("b", DataType.BinaryType)))
+    c.register("tu", memView(tu, Seq(Seq(
+      Array[Any](1, bytes(0xff)), Array[Any](2, bytes(0x7f)), Array[Any](3, bytes(0x80)),
+      Array[Any](4, bytes()), Array[Any](5, bytes(0x00)), Array[Any](6, bytes(0x7f, 0x00))))))
+    c.register("tp", memView(tu,
+      Seq(bytes(2, 2), bytes(3, 3), bytes(1, 1), bytes(0x80)).zipWithIndex.map { case (v, i) =>
+        Seq(Array[Any](i, v))
+      }))
+    c.register("tg", memView(tb, Seq(Seq(
+      Array[Any](1, bytes(0x80), bytes(0x7f)), Array[Any](2, bytes(0x00), bytes(0xff))))))
+    c
+  }
+
+  @Test def binaryEqualityComparesContent(): Unit = {
+    val cat = binaryCatalog()
+    def ids(sql: String): Seq[Any] = column(sql, cat, "id")
+    // Each of these found no row, or every row.
+    assertEquals(Seq(1, 2, 3, 4), ids("SELECT id FROM tb WHERE b = b2 ORDER BY id"))
+    assertEquals(Seq(), ids("SELECT id FROM tb WHERE b <> b2"))
+    assertEquals(Seq(1, 2, 3, 4), ids("SELECT id FROM tb WHERE b IN (b2) ORDER BY id"))
+    assertEquals(Seq(1, 2, 3, 4), ids("SELECT id FROM tb WHERE b BETWEEN b2 AND b2 ORDER BY id"))
+    // NULLIF returned b on every row.
+    assertEquals(Seq(null, null, null, null), column("SELECT NULLIF(b, b2) AS v FROM tb", cat, "v"))
+    // The same join matched six pairs as a hash key and none as a residual
+    // predicate.
+    def count(sql: String): Any = column(sql, cat, "n").head
+    assertEquals(6L, count("SELECT COUNT(*) AS n FROM tb x JOIN tb y ON x.b = y.b2"))
+    assertEquals(6L, count("SELECT COUNT(*) AS n FROM tb x JOIN tb y ON x.b <= y.b2 AND x.b >= y.b2"))
+  }
+
+  @Test def binaryOrdersByUnsignedBytes(): Unit = {
+    val cat = binaryCatalog()
+    def hexes(sql: String, name: String): Seq[Any] = column(sql, cat, name).map(hex)
+    // Identity-hash order: 03 03 first one run, 02 02 the next.
+    assertEquals(Seq("0101", "0101", "0202", "0303"), hexes("SELECT b FROM tb ORDER BY b", "b"))
+    assertEquals(Seq("0303", "0202", "0101", "0101"), hexes("SELECT b FROM tb ORDER BY b DESC", "b"))
+    // A byte is unsigned, so 80 follows 7f; a prefix sorts before the longer
+    // array, and nothing sorts before the empty one.
+    assertEquals(Seq("", "00", "7f", "7f00", "80", "ff"), hexes("SELECT b FROM tu ORDER BY b", "b"))
+    // MIN and MAX followed row order, and partition order where each value
+    // arrived through merge: (01 01, 01 01), (80, 7f) and (03 03, 02 02).
+    def extrema(table: String): (Any, Any) = {
+      val row = collectAllRows(SqlEngine.execute(s"SELECT MIN(b) AS lo, MAX(b) AS hi FROM $table", cat)).head
+      (hex(row("lo")), hex(row("hi")))
+    }
+    assertEquals(("0101", "0303"), extrema("tb"))
+    assertEquals(("", "ff"), extrema("tu"))
+    assertEquals(("0101", "80"), extrema("tp"))
+    assertEquals(Seq("80", "ff"), hexes("SELECT GREATEST(b, b2) AS v FROM tg ORDER BY id", "v"))
+    assertEquals(Seq("7f", "00"), hexes("SELECT LEAST(b, b2) AS v FROM tg ORDER BY id", "v"))
+    // The rows RANK ties are the ones the sort ties: (1,1) (2,3) (3,2) (4,4).
+    val ranks = collectAllRows(SqlEngine.execute("SELECT id, RANK() OVER (ORDER BY b) AS r FROM tb", cat))
+      .map(r => r("id") -> r("r")).toMap
+    assertEquals(Map(2 -> 1L, 4 -> 1L, 3 -> 3L, 1 -> 4L), ranks)
+  }
+
+  /** `td` holds two decimals one apart, past double's 53-bit mantissa, and
+    * `tk` three such values ascending (`tkr` descending), in one partition and
+    * one per partition (`tkp`, `tkpr`). `ts` holds one value at four scales
+    * and 2.50 in a DECIMAL(10,3) column, `ts2` 1.00 and 2.5, and `ti` a
+    * DECIMAL beside an INT and a DOUBLE. */
+  private def decimalCatalog(): Catalog = {
+    val c = new Catalog
+    val big = DataType.DecimalType(38, 0)
+    c.register("td", memView(Schema(Vector(Field("a", big), Field("b", big))),
+      Seq(Seq(Array[Any](dec("10000000000000000001"), dec("10000000000000000002"))))))
+    val ks = Seq("10000000000000000001", "10000000000000000002", "10000000000000000003").map(dec)
+    val k = Schema(Vector(Field("k", big)))
+    c.register("tk", memView(k, Seq(ks.map(v => Array[Any](v)))))
+    c.register("tkr", memView(k, Seq(ks.reverse.map(v => Array[Any](v)))))
+    c.register("tkp", memView(k, ks.map(v => Seq(Array[Any](v)))))
+    c.register("tkpr", memView(k, ks.reverse.map(v => Seq(Array[Any](v)))))
+    val scaled = DataType.DecimalType(10, 3)
+    val ts = Schema(Vector(Field("id", DataType.IntType), Field("k", scaled)))
+    c.register("ts", memView(ts, Seq(Seq(
+      Array[Any](1, dec("1.0")), Array[Any](2, dec("1.00")), Array[Any](3, dec("1.000")),
+      Array[Any](4, dec("1")), Array[Any](5, dec("2.50"))))))
+    c.register("ts2", memView(ts, Seq(Seq(Array[Any](10, dec("1.00")), Array[Any](11, dec("2.5"))))))
+    val ti = Schema(Vector(Field("id", DataType.IntType), Field("k", scaled),
+      Field("i", DataType.IntType), Field("d", DataType.DoubleType)))
+    c.register("ti", memView(ti, Seq(Seq(
+      Array[Any](1, dec("1.00"), 1, 1.0), Array[Any](2, dec("2.50"), 3, 2.5),
+      Array[Any](3, dec("0.10"), 0, 0.1)))))
+    c.register("tnan", memView(ti, Seq(Seq(Array[Any](1, dec("1.00"), 1, Double.NaN)))))
+    c
+  }
+
+  /** Decimals equal by value, whatever their scale. */
+  private def assertSameDecimals(label: String, expected: Seq[String], actual: Seq[Any]): Unit = {
+    assertEquals(label, expected.length, actual.length)
+    expected.zip(actual).foreach { case (e, a) =>
+      assertTrue(s"$label: expected $e, got $a", dec(e).compareTo(a.asInstanceOf[java.math.BigDecimal]) == 0)
+    }
+  }
+
+  @Test def decimalComparesByValueAtFullPrecision(): Unit = {
+    val cat = decimalCatalog()
+    // A match, and no match: both sides were 1.0E19 as doubles.
+    assertEquals(Seq(), column("SELECT a FROM td WHERE a = b", cat, "a"))
+    assertEquals(Seq(dec("10000000000000000001")), column("SELECT a FROM td WHERE a < b", cat, "a"))
+    assertEquals(Seq(dec("10000000000000000001")), column("SELECT a FROM td WHERE a IN (b, a)", cat, "a"))
+    assertEquals(Seq(), column("SELECT a FROM td WHERE a IN (b)", cat, "a"))
+    assertEquals(Seq(dec("10000000000000000001")), column("SELECT NULLIF(a, b) AS v FROM td", cat, "v"))
+    assertEquals(Seq(dec("10000000000000000002")), column("SELECT GREATEST(a, b) AS v FROM td", cat, "v"))
+    // (001, 001) ascending and (003, 003) descending, in one partition and
+    // across three: the first value seen won every comparison.
+    for (t <- Seq("tk", "tkr", "tkp", "tkpr")) {
+      val row = collectAllRows(SqlEngine.execute(s"SELECT MIN(k) AS lo, MAX(k) AS hi FROM $t", cat)).head
+      assertEquals(t, (dec("10000000000000000001"), dec("10000000000000000003")), (row("lo"), row("hi")))
+    }
+    // Every row tied: input order, and one rank for all three.
+    assertEquals(Seq("10000000000000000001", "10000000000000000002", "10000000000000000003").map(dec),
+      column("SELECT k FROM tkr ORDER BY k", cat, "k"))
+    assertEquals(Seq(1L, 2L, 3L), column("SELECT RANK() OVER (ORDER BY k) AS r FROM tkr ORDER BY k", cat, "r"))
+    // Scale is not part of the value: 1.0, 1.00, 1.000 and 1 are peers.
+    assertEquals(Seq(1L, 1L, 1L, 1L, 5L), column("SELECT RANK() OVER (ORDER BY k) AS r FROM ts ORDER BY id", cat, "r"))
+  }
+
+  /** Numbers meet a DECIMAL by widening to it, as they meet any wider number:
+    * an integer exactly, and a FLOAT or DOUBLE as the decimal it prints as.
+    * Each of these threw "CAST to decimal(10,3) not implemented" mid-drain. */
+  @Test def decimalMeetsOtherNumbersByWidening(): Unit = {
+    val cat = decimalCatalog()
+    def ids(sql: String): Seq[Any] = column(sql, cat, "id")
+    assertEquals(Seq(1), ids("SELECT id FROM ti WHERE k = 1"))
+    assertEquals(Seq(1), ids("SELECT id FROM ti WHERE k = i"))
+    assertEquals(Seq(2), ids("SELECT id FROM ti WHERE k = 2.5"))
+    assertEquals(Seq(3), ids("SELECT id FROM ti WHERE k = 0.1"))
+    assertEquals(Seq(1, 2, 3), ids("SELECT id FROM ti WHERE k = d ORDER BY id"))
+    assertEquals(Seq(1, 2), ids("SELECT id FROM ti WHERE k IN (1, 2.5) ORDER BY id"))
+    assertEquals(Seq(1, 2), ids("SELECT id FROM ti WHERE k BETWEEN 0 AND i ORDER BY id"))
+    assertEquals(Seq(2), ids("SELECT id FROM ti WHERE CASE k WHEN 2.5 THEN TRUE ELSE FALSE END"))
+    assertSameDecimals("GREATEST", Seq("1", "3", "0.1"),
+      column("SELECT GREATEST(k, i) AS v FROM ti ORDER BY id", cat, "v"))
+    // A BIGINT widens exactly, where a double would have rounded.
+    assertEquals(Seq(dec("10000000000000000001")),
+      column("SELECT a FROM td WHERE a > 9223372036854775807", cat, "a"))
+
+    // NaN has no decimal value: an error naming it, not a guess at an order.
+    val drained = try { collectAllRows(SqlEngine.execute("SELECT id FROM tnan WHERE k = d", cat)); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull("a NaN met a decimal without an error", drained)
+    assertTrue(drained.getMessage, drained.getMessage.contains("Cannot cast NaN to decimal(10,3)"))
+  }
+
+  /** GROUP BY, DISTINCT, UNION, COUNT(DISTINCT), PARTITION BY and an equi-join
+    * key decide equality the way `=` does. A decimal key comes back at its
+    * column's declared scale, and so do MIN and MAX, so neither depends on
+    * which row arrived first. */
+  @Test def groupingAgreesWithEqualityForBinaryAndDecimal(): Unit = {
+    val cat = decimalCatalog()
+    // Five groups, one per scale.
+    val groups = collectAllRows(SqlEngine.execute("SELECT k, COUNT(*) AS n FROM ts GROUP BY k ORDER BY k", cat))
+    assertEquals(Seq((dec("1.000"), 4L), (dec("2.500"), 1L)), groups.map(r => (r("k"), r("n"))))
+    // 5, five rows, and six rows.
+    assertEquals(Seq(2L), column("SELECT COUNT(DISTINCT k) AS n FROM ts", cat, "n"))
+    assertEquals(Seq(dec("1.000"), dec("2.500")), column("SELECT DISTINCT k FROM ts ORDER BY k", cat, "k"))
+    assertEquals(Seq(dec("1.000"), dec("2.500")),
+      column("SELECT k FROM ts UNION SELECT k FROM ts2", cat, "k")
+        .sortWith((a, b) => a.asInstanceOf[java.math.BigDecimal].compareTo(b.asInstanceOf[java.math.BigDecimal]) < 0))
+    // Each row's window partition held only that row.
+    assertEquals(Seq(4L, 4L, 4L, 4L, 1L),
+      column("SELECT id, COUNT(*) OVER (PARTITION BY k) AS n FROM ts ORDER BY id", cat, "n"))
+    // The hash key matched 1.00 alone, and the residual predicate every row.
+    assertEquals(Seq(1, 2, 3, 4, 5), column("SELECT x.id FROM ts x JOIN ts2 y ON x.k = y.k ORDER BY x.id", cat, "id"))
+    assertEquals(Seq(1, 2, 3, 4, 5),
+      column("SELECT x.id FROM ts x JOIN ts2 y ON x.k <= y.k AND x.k >= y.k ORDER BY x.id", cat, "id"))
+    val minMax = collectAllRows(SqlEngine.execute("SELECT MIN(k) AS lo, MAX(k) AS hi FROM ts", cat)).head
+    assertEquals((dec("1.000"), dec("2.500")), (minMax("lo"), minMax("hi")))
+    assertEquals(Seq(dec("1.000")), column("SELECT MIN(DISTINCT k) AS v FROM ts", cat, "v"))
+
+    val bcat = binaryCatalog()
+    // COUNT(DISTINCT) counted array objects: 4.
+    assertEquals(Seq(3L), column("SELECT COUNT(DISTINCT b) AS n FROM tb", bcat, "n"))
+    val bgroups = collectAllRows(SqlEngine.execute("SELECT b, COUNT(*) AS n FROM tb GROUP BY b", bcat))
+    assertEquals(Map("0101" -> 2L, "0202" -> 1L, "0303" -> 1L), bgroups.map(r => hex(r("b")) -> r("n")).toMap)
+    assertEquals(Seq("0101", "0202", "0303"), column("SELECT DISTINCT b FROM tb ORDER BY b", bcat, "b").map(hex))
+    assertEquals(Seq(2L, 2L), column("SELECT id, COUNT(*) OVER (PARTITION BY b) AS n FROM tb WHERE id IN (2, 4)", bcat, "n"))
+  }
+
+  /** Two BIGINTs compare as longs. They compared as doubles, which cannot
+    * tell 2^53 from 2^53 + 1, so `=` matched them while GROUP BY and a hash
+    * join (which key exactly) kept them apart. */
+  @Test def bigintComparesExactlyPastDoublePrecision(): Unit = {
+    val cat = new Catalog
+    val schema = Schema(Vector(Field("id", DataType.IntType), Field("a", DataType.LongType),
+      Field("b", DataType.LongType)))
+    cat.register("tl", memView(schema, Seq(Seq(
+      Array[Any](1, 9007199254740993L, 9007199254740992L),
+      Array[Any](2, 9007199254740992L, 9007199254740993L),
+      Array[Any](3, 9007199254740995L, 9007199254740994L)))))
+    def ids(sql: String): Seq[Any] = column(sql, cat, "id")
+    // (1)(2), no row, and (1)(2).
+    assertEquals(Seq(), ids("SELECT id FROM tl WHERE a = b"))
+    assertEquals(Seq(2), ids("SELECT id FROM tl WHERE a < b"))
+    assertEquals(Seq(2), ids("SELECT id FROM tl WHERE a = 9007199254740992"))
+    assertEquals(Seq(2), ids("SELECT id FROM tl WHERE a IN (9007199254740992, 7)"))
+    assertEquals(Seq(2), ids("SELECT id FROM tl WHERE a BETWEEN 9007199254740991 AND 9007199254740992"))
+    assertEquals(Seq(9007199254740993L, 9007199254740992L, 9007199254740995L),
+      column("SELECT NULLIF(a, b) AS v FROM tl ORDER BY id", cat, "v"))
+    assertEquals(Seq(9007199254740993L, 9007199254740993L, 9007199254740995L),
+      column("SELECT GREATEST(a, b) AS v FROM tl ORDER BY id", cat, "v"))
+    // Scan order, and ranks 1, 1, 3.
+    assertEquals(Seq(9007199254740992L, 9007199254740993L, 9007199254740995L),
+      column("SELECT a FROM tl ORDER BY a", cat, "a"))
+    assertEquals(Seq(2L, 1L, 3L), column("SELECT id, RANK() OVER (ORDER BY a) AS r FROM tl ORDER BY id", cat, "r"))
+    // The hash join and the residual predicate agree: two pairs, where the
+    // residual predicate found four.
+    def pairs(sql: String): Set[(Any, Any)] =
+      collectAllRows(SqlEngine.execute(sql, cat)).map(r => (r("x"), r("y"))).toSet
+    assertEquals(Set((1, 2), (2, 1)), pairs("SELECT x.id AS x, y.id AS y FROM tl x JOIN tl y ON x.a = y.b"))
+    assertEquals(Set((1, 2), (2, 1)),
+      pairs("SELECT x.id AS x, y.id AS y FROM tl x JOIN tl y ON x.a <= y.b AND x.a >= y.b"))
+  }
+
+  /** A byte array is not text. Each of these read the array's identity hash,
+    * `[B@1a96d94c`, a different string on every run; each is now an error
+    * before anything runs. */
+  @Test def binaryIsNotReadAsText(): Unit = {
+    val cat = binaryCatalog()
+    def bindError(sql: String): String =
+      try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    for (sql <- Seq("SELECT CAST(b AS STRING) AS v FROM tb", "SELECT CAST(b AS INT) AS v FROM tb",
+                    "SELECT CASE WHEN id = 1 THEN 'x' ELSE b END AS v FROM tb"))
+      assertTrue(sql, bindError(sql).contains("Cannot cast BINARY to"))
+    // These filtered every row out as false, and counted nothing.
+    for (sql <- Seq("SELECT id FROM tb WHERE b", "SELECT COUNT_IF(b) AS n FROM tb"))
+      assertTrue(sql, bindError(sql).contains("Cannot cast BINARY to BOOLEAN"))
+    assertTrue(bindError("SELECT id FROM tb WHERE b LIKE '%B@%'").contains("LIKE on BINARY is not supported"))
+    assertTrue(bindError("SELECT id FROM tb WHERE 'x' LIKE b").contains("LIKE on BINARY is not supported"))
+    assertTrue(bindError("SELECT b || 'x' AS v FROM tb").contains("|| on BINARY is not supported"))
+    assertTrue(bindError("SELECT 'x' || b AS v FROM tb").contains("|| on BINARY is not supported"))
+    // LENGTH was 11, the length of the hash text, whatever the bytes.
+    for (fn <- Seq("LENGTH(b)", "UPPER(b)", "LOWER(b)", "TRIM(b)", "SUBSTRING(b, 1, 2)", "CONCAT('x', b)"))
+      assertTrue(fn, bindError(s"SELECT $fn AS v FROM tb").contains("on BINARY is not supported"))
+  }
+
   /** plans/bugfixes/01 end-to-end repro. `a JOIN b JOIN b` builds an inner
     * result with a duplicate-named schema `[k, v, k, v]`; routing that through
     * the outer join's grace-hash spill used to NPE reading the spilled bucket

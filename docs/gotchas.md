@@ -112,7 +112,15 @@ ship a fix or move something from "not done" to "done".
   either temporal type, and a DATE reads only an ISO date.
   `Analyzer.checkArithmetic` makes arithmetic on anything but a number a bind
   error, unary minus included, where it used to throw `IllegalStateException`
-  mid-drain. When a new type meets these rules, extend them; do not loosen them
+  mid-drain. A `DECIMAL` is the widest number, so the rest widen to it through
+  `Casts`: an integer exactly, a `FLOAT` or `DOUBLE` as the decimal it prints as
+  (`Casts.toDecimal`; `0.1` is `0.1`, not the binary fraction nearest it), and
+  `NaN` or an infinity is an error naming it. That cast used to be missing, so
+  `price = 1` threw `CAST to decimal(10,3) not implemented` mid-drain. A
+  `BINARY` casts to nothing else, explicitly or implicitly (`checkCast`, and
+  `implicitCast` beneath a WHERE, LIKE or CASE), and `Analyzer.checkText` keeps
+  `||` and the string functions off one: each read the array's identity hash as
+  text. When a new type meets these rules, extend them; do not loosen them
   (see the strictness entry in [conventions.md](conventions.md)).
 - **The clock keywords are a `TimeKeyExpression`, spelled as written.**
   `current_date`, `CURRENT_DATE()` and DB2's `CURRENT DATE` arrive as three
@@ -623,6 +631,61 @@ ship a fix or move something from "not done" to "done".
   ORDER BY key on ~0.5%, and one carrying a `NaN` on ~0.06%. See
   [plan 06](../plans/followups/06-window-rank-peer-total-order.md).
 
+- **Byte arrays, decimals and BIGINTs past 2^53 used to compare wrongly, and
+  hashing disagreed with `=` — fixed.** `Ops.eq` / `Ops.cmp` dispatched on the
+  boxed value's class. A byte array is neither a `Number` nor `Comparable`, so
+  `=` was reference equality (two equal-content arrays were unequal) and
+  `ORDER BY` compared `toString` of the identity hash, an order that changed
+  run to run. A `BigDecimal` and a `Long` are both `Number`s, so both went
+  through `doubleValue` and lost every digit past double's 53-bit mantissa:
+  `10000000000000000001 = 10000000000000000002` and `9007199254740993 =
+  9007199254740992` were TRUE, `<` between them FALSE, and `MIN`/`MAX` over
+  decimals that collide as doubles kept whichever arrived first, so the answer
+  moved with row order, partition fan-out and spill flush order (the bug-06
+  shape). The hash side disagreed with the comparison side in both directions:
+  `HashKeys` compared byte arrays by content but decimals with
+  `BigDecimal.equals`, which includes the scale, so `GROUP BY` collapsed rows
+  `=` called different and split `1.0` from `1.00`, which `=` called equal.
+  An equi-join written as a join key and the same join written as a residual
+  predicate gave different answers, for all three types. Behind the codec were
+  three more sites with the same defect: `CountDistinctState` and
+  `DistinctState` kept a raw `HashSet` (identity for arrays, scale for
+  decimals), `HashPartitioner.hashCell` routed `1.0` and `1.00` to different
+  shards, and `HashJoinExec.columnHashCode`, which routes grace-hash join and
+  window spill buckets, hashed a byte array by identity, so two equal keys
+  landed in different buckets and never met.
+
+  Now every comparison is by value. `Ops` compares two integers as longs, a
+  decimal against any number with `compareTo` (exact, scale-blind) and byte
+  arrays with `Arrays.equals` / `Arrays.compareUnsigned`; pairs with a `FLOAT`
+  or `DOUBLE` in them are untouched, NaN rules included. The vectorized twin
+  moves with it: `VecOps.compare` sends two integers to `integralCompare`
+  (`readLong`) and any pair with a decimal to the generic path, and
+  `InListExpr`'s hoisted literal set keys integers on `longValue` and leaves a
+  decimal to the `Ops.eq` scan (its old `Double` set held `10000000000000000002`
+  for `10000000000000000001`). Every hash agrees: the codecs store a decimal as
+  `KeyCodec.decimalKey` (the value at its column's declared scale when it can be
+  written there exactly, else without trailing zeros, so every spelling of a
+  value is one key), the DISTINCT sets hold `DistinctElement`s (a byte array in
+  a `BytesKey`), and both routing hashes hash a byte array's content and a
+  decimal's nearest double (`HashPartitioner.decimalHash`, which is
+  scale-free, needs no declared scale, and costs only balance on decimals a
+  double cannot tell apart). A decimal key reads back at the declared scale,
+  and `MinMaxState.finish` spells a decimal extremum the same way, so neither
+  depends on which spelling arrived first; a plain projection still shows the
+  stored spelling, since the column's declared scale is not enforced on what
+  it holds. The fourth instance of one family (after the three float bugs
+  above), widened from "an ordering site" to "an equality, hash or dedup site
+  that does not agree with `=`"; see [conventions.md](conventions.md). Found
+  by a hand audit of the four `DataType`s the fuzz corpora never draw
+  ([plan 02](../plans/robustness/02-total-order-for-decimal-and-binary.md));
+  BIGINT turned up while checking the codec's equality claim against `Ops.eq`.
+  Deterministic regressions in `sql_engine_test`, `hash_aggregate_spill_test`
+  (row order, partition split, spill), `agg_state_serde_test`,
+  `exchange_exec_test`, `hash_join_spill_test`, `window_exec_spill_test`,
+  `hash_keys_test` and `expr_batch_test`; the fuzz corpora still do not draw
+  decimal or binary columns ([plan 04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)).
+
 - **Mode-differential comparison is a multiset with a floating-point tolerance.**
   The `mode_differential_fuzz_test` (and the metamorphic `MetaModeDifferential`)
   assert one `(data, query)` gives the same result across spill on/off, metrics
@@ -890,29 +953,16 @@ ship a fix or move something from "not done" to "done".
 
 ## Known wrong answers, open (found 2026-09-10, not yet fixed)
 
-Two clusters of confirmed defects from an audit of the surfaces the fuzzers
-cannot reach. Each was executed against `SqlEngine` at commit `d4bb409`, not
+One cluster remains of the confirmed defects from an audit of the surfaces the
+fuzzers cannot reach, executed against `SqlEngine` at commit `d4bb409`, not
 inferred. Plans, evidence and repro SQL are in
 [`plans/robustness/`](../plans/robustness/README.md); this list exists so a
-reader of the docs does not have to find the plans first. The audit's third
-cluster, SQL clauses the binder silently dropped, is fixed: see "A clause the
-binder does not read used to vanish" above.
+reader of the docs does not have to find the plans first. The audit's other two
+clusters are fixed: SQL clauses the binder silently dropped (see "A clause the
+binder does not read used to vanish" above) and byte-array and decimal
+comparison (see "Byte arrays, decimals and BIGINTs past 2^53 used to compare
+wrongly" above).
 
-- **`Ops.eq` / `Ops.cmp` are wrong for `BinaryType` and lossy for
-  `DecimalType`.** A byte array is neither a `Number` nor `Comparable`, so `eq`
-  falls through to reference equality and `cmp` to `toString` on the identity
-  hash: `=` says two equal-content arrays differ, and `ORDER BY` / `MIN` / `MAX`
-  over a binary column are arbitrary and vary run to run. `java.math.BigDecimal`
-  *is* a `Number`, so both helpers go through `doubleValue` and lose every digit
-  past double's 53-bit mantissa - `MIN`/`MAX` over decimals that collide as
-  doubles moves with row order, partition fan-out and spill flush order. Worse,
-  the hash path disagrees with the comparison path in both directions:
-  `HashKeys` compares byte arrays structurally (so `GROUP BY` collapses rows that
-  `=` calls different) and decimals with scale-sensitive `BigDecimal.equals` (so
-  `GROUP BY` separates `1.0` from `1.00`, which `=` calls equal). This is the
-  same single-total-order rule as the three float bugs above, in the types that
-  work never covered. See
-  [plan 02](../plans/robustness/02-total-order-for-decimal-and-binary.md).
 - **The parquet reader ignores the timestamp unit and has no `DECIMAL`
   mapping.** `TimestampLogicalTypeAnnotation.getUnit()` is never read and the
   raw `INT64` goes straight into a micros-based `TimestampVector`, so an
@@ -923,7 +973,8 @@ binder does not read used to vanish" above.
   exists, so a parquet decimal falls through to its physical type - `IntType` or
   `LongType` holding the unscaled value (`123.45` reads as `12345`), or
   `BinaryType` holding raw two's-complement bytes. `ParquetWriter` cannot write
-  `DecimalType` at all. See
+  `DecimalType` at all, so neither can spill: an operator that spills a
+  `DECIMAL` column fails with `UnsupportedOperationException`. See
   [plan 03](../plans/robustness/03-parquet-external-format-fidelity.md).
 
 All three clusters hid for the same reason, and it is the lesson to carry: the
@@ -954,6 +1005,17 @@ writer. Plans 04-07 in that directory close those three holes.
   - Grace hash and window spill both use a fixed bucket count of 16
     (no recursive bucketing). Hot keys whose bucket exceeds heap will
     still OOM at probe/process time; that's a v1.1 issue.
+- **`DECIMAL` has exact comparison but no exact arithmetic.** `SUM` and `AVG`
+  over a `DECIMAL`, and the math functions, compute in `DOUBLE` (`SumState.init`
+  picks `DoubleSumState` for anything but an integer), so `SUM` over two
+  `10000000000000000001`s comes back as `20000000000000000000`, in a `DECIMAL`
+  column. Arithmetic (`+ - * / %`, and unary minus) on a `DECIMAL` throws
+  `IllegalStateException` from `Ops.arith` / `VecOps.arith` / `UnaryOpExpr`
+  while the query runs, an internal exception class for what is a missing
+  feature; `Analyzer.checkArithmetic` passes a `DECIMAL` because it is a
+  number. Exact decimal arithmetic is a feature, out of scope of
+  [plan 02](../plans/robustness/02-total-order-for-decimal-and-binary.md), which
+  made comparison exact.
 - **No whole-stage codegen**, no Janino, no LLVM. The closest analogue is
   `Expr.evalVec` (see [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec))
   — one call per Expr per batch, primitive-array inner loops, no codegen step.

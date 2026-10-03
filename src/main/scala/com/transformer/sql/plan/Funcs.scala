@@ -39,6 +39,13 @@ object Funcs {
     case _ => None
   }
 
+  /** The functions that take their arguments as text, which a BINARY is not
+    * ([[Analyzer.checkText]]). */
+  def takesText(name: String): Boolean = name.toUpperCase match {
+    case "LENGTH" | "LEN" | "UPPER" | "LOWER" | "TRIM" | "SUBSTRING" | "CONCAT" => true
+    case _ => false
+  }
+
   private def widestNonNull(types: Seq[DataType]): DataType = {
     val nonNull = types.filterNot(_ == DataType.NullType)
     if (nonNull.isEmpty) DataType.NullType

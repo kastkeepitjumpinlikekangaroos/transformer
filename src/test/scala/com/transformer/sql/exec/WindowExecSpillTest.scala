@@ -238,6 +238,26 @@ class WindowExecSpillTest {
     assertEquals(Some(150L), nullSum)
   }
 
+  /** Window spill routes rows to buckets by a per-cell hash of the PARTITION
+    * BY key, and for a byte array that was its identity `hashCode`: one
+    * partition's rows were scattered across buckets and each piece was
+    * windowed alone, so its rows saw a smaller count. */
+  @Test def binaryPartitionKeysStayTogetherUnderSpill(): Unit = {
+    val schema = Schema(Vector(Field("k", DataType.BinaryType), Field("v", DataType.LongType)))
+    val rows = (0 until 200).map(i =>
+      Array[Any](Array[Byte]((i % 5).toByte, 9), java.lang.Long.valueOf(i.toLong))).toVector
+    val plan = new InMemoryPlan(schema, Vector(rows))
+    val k = ColRefExpr(0, "k", DataType.BinaryType)
+    val spec = WindowSpec(Seq(k), Seq.empty, WindowFrame.defaultFor(hasOrderBy = false))
+    val win = WindowDef(spec, WindowFnAgg(AggExprCountStar()), "n")
+    val outSchema = Schema(schema.fields :+ Field("n", DataType.LongType))
+    for (opts <- Seq(ExecutionOptions.Default, spillyOpts())) {
+      val out = drainRows(WindowExec(plan, Seq(win), opts).execute(0), outSchema)
+      assertEquals(s"rows under $opts", 200, out.length)
+      out.foreach(r => assertEquals(s"partition size under $opts", 40L, r(2)))
+    }
+  }
+
   // ---- Empty input + opted-in spill ---------------------------------------
 
   @Test def emptyInputProducesEmptyOutputUnderSpill(): Unit = {

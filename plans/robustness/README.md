@@ -30,7 +30,7 @@ at the time of the audit: `bazel test //...` 46/46 green.
 | # | Plan | What | Status | Effort | Risk | Depends on |
 |---|------|------|--------|--------|------|------------|
 | [01](01-reject-or-honor-every-clause.md) | Reject or honor every clause the parser accepts | 18 silently-dropped clauses, incl. `USING`/`NATURAL` JOIN silently becoming a **cartesian product** | **done** 2026-10-01 | 2-3 days | medium | — |
-| [02](02-total-order-for-decimal-and-binary.md) | One total order for `Decimal` and `Binary` | `Ops.eq`/`Ops.cmp`; the repo's own bug class, in the types the float work never reached | open | 2-3 days | medium | — |
+| [02](02-total-order-for-decimal-and-binary.md) | One total order for `Decimal` and `Binary` | `Ops.eq`/`Ops.cmp`; the repo's own bug class, in the types the float work never reached | **done** 2026-10-03 | 2-3 days | medium | — |
 | [03](03-parquet-external-format-fidelity.md) | Parquet timestamp units and `DECIMAL` | silent 1000x timestamp error; decimals read as unscaled ints or raw bytes | open | 1-2 days | low-med | — |
 | [04](04-widen-fuzz-corpus-to-every-type.md) | Widen the fuzz corpus to all ten types | the guard that keeps 02 and 03 fixed | open | 2-3 days | low | 02 (else red) |
 | [05](05-frontend-robustness-fuzzer.md) | Frontend robustness fuzzer | "nothing silently dropped" + "errors are user-facing" as properties | open | 3-5 days | low | 01 (shares its clause table) |
@@ -47,6 +47,14 @@ FROM, FETCH FIRST and TOP). `sql/plan:unsupported_clauses_test`
 derives what the binder reads from its bytecode and keeps the audit honest across
 JSqlParser upgrades. Two more silent drops turned up along the way, fixed in their
 own commits: an aggregate named only in ORDER BY, and a HAVING with no GROUP BY.
+
+**Done:** plan 02. Decimals compare by value and byte arrays by unsigned
+content in `Ops`, its vectorized twin and every hash or dedup site (the codecs,
+the DISTINCT aggregates' sets, shard routing and spill buckets), so GROUP BY,
+DISTINCT and joins agree with `=`; a decimal key reads back at its declared
+scale. Beyond the plan: numbers now widen to a decimal (the CAST was missing),
+two BIGINTs past 2^53 compare as longs, and a BINARY is never read as text.
+Details in the plan's Outcome section.
 
 **Suggested order.** [01](01-reject-or-honor-every-clause.md) first — it has the
 worst single defect in the set (a dropped join condition is a cartesian product,
@@ -95,8 +103,10 @@ intentionally NOT done" unless noted.
 - **`CAST(x AS TIMESTAMP)` is not implemented** (`CAST … AS DATE` is) and
   **decimal arithmetic throws**. Both surface as exceptions rather than wrong
   answers; the decimal one throws an `IllegalStateException`, which is the wrong
-  class for a missing feature — fold that into
-  [02](02-total-order-for-decimal-and-binary.md)'s docs pass.
+  class for a missing feature. `CAST(x AS TIMESTAMP)` landed on 2026-10-02
+  (`5e25f20`); the decimal gap, with `SUM` over a decimal computing in `DOUBLE`,
+  is recorded in `docs/gotchas.md` §"What's intentionally NOT done" by
+  [02](02-total-order-for-decimal-and-binary.md).
 - **`LENGTH` and `SUBSTRING` count UTF-16 code units**, so a string of one
   astral character plus `ab` has `LENGTH` 4 rather than 3, and `SUBSTRING(s, 1, 1)`
   returns half a surrogate pair. Deliberate-by-default (it is what Java does);

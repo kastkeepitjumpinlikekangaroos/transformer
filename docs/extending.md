@@ -51,6 +51,10 @@ instead, the way `LogicalBuilder.clockLiteral` binds `CURRENT_DATE` and
    `DataGen` and `MetaQueryGen.payloadDomain` draw `NaN` / `-0.0` / `±Infinity`
    into float columns, and a new ordering state wants a coverage guard asserting
    they reach it.
+   **If it de-duplicates its input**, key the set the way GROUP BY keys a
+   value: `DistinctElement.of(v, type)` wraps a byte array to compare by content
+   and spells a decimal as its `KeyCodec.decimalKey`, where a raw `HashSet`
+   would compare arrays by identity and decimals by scale.
 5. Wire it in `AggState.init` (`AggregateExec.scala`) and
    `LogicalBuilder.bindAgg` (`sql/plan/LogicalBuilder.scala`). A one-argument
    aggregate gets `DISTINCT` by wrapping it in `AggExprDistinct` in `bindAgg`
@@ -325,6 +329,13 @@ eval into a reusable `Array[Any]` and call `encodeBoxed`. The codec exposes
 `HashAggregateExec`'s emit path), and `encodeFromBatchSkipIfAnyNull` for
 join-probe NULL short-circuiting. See
 [architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers).
+A hash outside a codec — a route to a shard or a spill bucket, a `java.util`
+set of values — has to call the same values equal the codec does: a byte array
+by content (`Arrays.hashCode`, never the array's own `hashCode`), a decimal by
+value (`HashPartitioner.decimalHash` for a route, `KeyCodec.decimalKey` for a
+stored value, never `BigDecimal.hashCode`, which includes the scale).
+`HashPartitioner.hashCell` and `HashJoinExec.columnHashCode` are the routing
+models, `DistinctElement` the set one.
 
 ## Add a property / generator
 

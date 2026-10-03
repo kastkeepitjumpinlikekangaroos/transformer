@@ -679,7 +679,9 @@ and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
 
 **Types in CAST:** `INT`, `INTEGER`, `BIGINT`, `LONG`, `FLOAT`, `REAL`,
 `DOUBLE`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`, `DATE`,
-`TIMESTAMP`.
+`TIMESTAMP`. A `DECIMAL` column comes from a declared schema and a `BINARY`
+one from a schema or a parquet file; neither type is a CAST target. A number
+widens to a `DECIMAL` where the two meet, and a `BINARY` casts to nothing.
 
 Text casts to a number as Java parses one, which is also what CSV inference
 reads: `'10'`, `'-2.5'` and `'1e3'` are numbers, and an `INT` or `BIGINT` reads
@@ -702,11 +704,16 @@ seconds or milliseconds would be a guess.
 
 **Values of different types meet only as numbers, or through a string
 literal.** Wherever values meet — a comparison, `BETWEEN`, an `IN` list, a
-`CASE` switch, arithmetic — numbers widen to the widest among them. A string
+`CASE` switch, arithmetic — numbers widen to the widest among them. A `DECIMAL`
+is the widest: an integer meets one exactly, and a `FLOAT` or `DOUBLE` as the
+decimal it prints as, so `price = 0.1` finds a `0.10`; `NaN` and the infinities
+have no decimal value, and one meeting a `DECIMAL` is an error. A string
 literal beside another type is read as that type when the query is bound, so
 `i < '10'` compares numbers, `b = 'TRUE'` booleans and
 `ts < '2026-01-01 06:00:00'` instants, and a literal that is no such value
 (`i = '9.5'` for an `INT`, `d = '2026-1-5'`) is an error before anything runs.
+A `DECIMAL` reads no string literal (write the number), and a `BINARY` meets
+only another `BINARY`.
 Every other mix is an error, which names the CAST that would say what is meant:
 beside a string column, CAST the column, or the other side to `STRING` to compare
 text; a boolean beside a number takes `CAST(b AS INT)` for 1 and 0; and the two
@@ -717,6 +724,12 @@ pairs as text, or promote a value quietly, answer questions nobody asked — as
 text, `9 < '10'` is false. This one prefers an error to a guess. Arithmetic is on
 numbers only: `x + '1'` adds one, and `s + 1` over a string column is an error,
 as is any arithmetic on a boolean, a date or a timestamp. `||` joins text.
+
+**A `BINARY` value is not text.** It casts to nothing else, and `LIKE`, `||`
+and the string functions (`LENGTH`, `UPPER`, `LOWER`, `TRIM`, `SUBSTRING`,
+`CONCAT`) refuse one before the query runs, as does a `WHERE` or a `CASE`
+result that would read one as a boolean or a string. Each of these used to read
+the array's identity, text like `[B@1a96d94c` that changed on every run.
 
 **CTEs (`WITH`):** supported, non-recursive. `WITH a AS (...), b AS (SELECT ...
 FROM a) SELECT ... FROM b` — later CTEs may reference earlier ones, a CTE can
@@ -752,6 +765,20 @@ separates them). Those answers do not depend on row order, partition count or
 whether the operator spilled. Both evaluation paths (row-at-a-time and
 vectorized) agree on all of this; see [docs/gotchas.md](docs/gotchas.md) for why
 the two operator families differ.
+
+**Integers, decimals and byte arrays compare exactly.** Two integers compare as
+64-bit integers, so `9007199254740993 = 9007199254740992` is FALSE, though a
+`DOUBLE` cannot tell the two apart. A `DECIMAL` compares by value at full
+precision, and its scale is only how it is written: `1.0 = 1.00` is TRUE, and
+`GROUP BY`, `DISTINCT`, `UNION`, `COUNT(DISTINCT …)`, `PARTITION BY` and join
+keys all treat the two as one value. A column does not hold every value at its
+declared scale (CSV text keeps the scale it was written with), so a grouping
+key reads back at the column's declared scale, `1.000` in a `DECIMAL(10,3)`,
+whichever spelling arrived first, and so do `MIN` and `MAX`. `BINARY` values
+are equal when their bytes are, and order byte by byte as unsigned values, so a
+byte `0x7f` sorts before `0x80` and a prefix sorts before the longer array.
+`ORDER BY`, `MIN`/`MAX`, `GREATEST`/`LEAST` and `RANK` peers all follow these
+orders, whatever the row order, partition count or spill.
 
 **Join planning:** for hash joins the planner picks the build side based on
 estimated row counts. INNER joins build the smaller side when the size ratio
@@ -900,6 +927,13 @@ JDK 21 or newer (tested through JDK 25).
 - **Schema is inferred from the first file** in a glob; mixed schemas across
   files in the same view are not validated. Explicit schemas via the
   `inferSchema = false` route avoid this.
+- **`DECIMAL` compares exactly, but has no exact arithmetic.** `SUM` and `AVG`
+  over a `DECIMAL` column, and the math functions (`ABS`, `ROUND`, ...), compute
+  in `DOUBLE` and lose every digit past its precision; `SUM` hands the rounded
+  value back as a `DECIMAL`. Arithmetic on a `DECIMAL` (`+ - * / %` and unary
+  minus) fails with an `IllegalStateException` while the query runs. A spill
+  that writes a `DECIMAL` column (a sorted, joined or windowed row, or a
+  `GROUP BY` key) fails too: the parquet writer has no decimal mapping.
 
 ## Performance instrumentation
 

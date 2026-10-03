@@ -129,6 +129,53 @@ class ExchangeExecTest {
     assertKeyCollocated("string", shards, _(0))
   }
 
+  // ---- Binary and decimal keys ---------------------------------------------
+  //
+  // Equality decides co-location, so a key that `=` calls equal must hash
+  // equally: a byte array by its bytes, a decimal by its value whatever its
+  // scale. `BigDecimal.hashCode` includes the scale, which sent 1.0 and 1.00
+  // to different shards, and a sharded GROUP BY counted them as two groups.
+
+  @Test def binaryKeysCoLocateByContent(): Unit = {
+    val schema = Schema(Vector(Field("k", DataType.BinaryType), Field("v", DataType.IntType)))
+    val keys = Vector(Array[Byte](1, 1), Array[Byte](2), Array[Byte](0x80.toByte), Array[Byte]())
+    val parts = Vector.tabulate(3) { p =>
+      Vector.tabulate(40)(i => row(keys((i + p) % keys.length).clone(), i))
+    }
+    val shards = runExchange(parts, schema, Seq(ColRefExpr(0, "k", DataType.BinaryType)), numShards = 8)
+    assertEquals(parts.map(_.length).sum, shards.map(_.length).sum)
+    assertKeyCollocated("binary", shards, r => r(0).asInstanceOf[Array[Byte]].toSeq)
+  }
+
+  @Test def decimalKeysCoLocateAcrossScales(): Unit = {
+    val dt = DataType.DecimalType(20, 4)
+    val schema = Schema(Vector(Field("k", dt), Field("v", DataType.IntType)))
+    val spellings = Vector("1", "1.0", "1.00", "1.000", "1.0000", "2.5", "2.50", "2.5000",
+      "10000000000000000001", "10000000000000000001.0").map(new java.math.BigDecimal(_))
+    val parts = Vector.tabulate(3) { p =>
+      Vector.tabulate(spellings.length)(i => row(spellings((i + p) % spellings.length), i))
+    }
+    val shards = runExchange(parts, schema, Seq(ColRefExpr(0, "k", dt)), numShards = 8)
+    assertPermutationOf("decimal", parts, shards.flatten)
+    assertKeyCollocated("decimal", shards, r => r(0).asInstanceOf[java.math.BigDecimal].stripTrailingZeros)
+  }
+
+  /** Grace hash join and window spill route rows to buckets with their own
+    * per-cell hash. A byte array went through its identity `hashCode`, so two
+    * equal keys landed in different buckets and never met. */
+  @Test def spillBucketHashAgreesWithEquality(): Unit = {
+    def cellHash(dt: DataType, v: Any): Int = {
+      val c = ColumnVector.allocate(dt, 1)
+      c.setBoxed(0, v)
+      HashJoinExec.columnHashCode(c, 0)
+    }
+    assertEquals(cellHash(DataType.BinaryType, Array[Byte](1, 2, 3)), cellHash(DataType.BinaryType, Array[Byte](1, 2, 3)))
+    val dt = DataType.DecimalType(10, 3)
+    val one = cellHash(dt, new java.math.BigDecimal("1"))
+    for (s <- Seq("1.0", "1.00", "1.000"))
+      assertEquals(s, one, cellHash(dt, new java.math.BigDecimal(s)))
+  }
+
   // ---- NULL routing ---------------------------------------------------------
 
   @Test def nullKeysRouteToLastShardUnderNullsToLast(): Unit = {

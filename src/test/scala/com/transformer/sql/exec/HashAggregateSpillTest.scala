@@ -541,6 +541,114 @@ class HashAggregateSpillTest {
       assertEquals(s"$label MAX(f)", java.lang.Float.valueOf(0.0f), row(3))
     }
   }
+
+  // ---- Regression: MIN/MAX over decimals and byte arrays -------------------
+  //
+  // `MinMaxState` keeps a reference-typed extremum in its boxed slot and
+  // advances it through `Ops.cmp`, which compared a BigDecimal through
+  // `doubleValue` and a byte array through `toString` of its identity hash.
+  // Decimals one apart past double's mantissa (one of them also spelled at a
+  // second scale) all compared equal, so the first one seen won both MIN and
+  // MAX; byte arrays came out in an arbitrary order that changed run to run.
+  // Like the NaN regressions above, each fan-out
+  // reaches a different site: grouped rows `updateAt`, a global aggregate
+  // `updateBatchAt`, one row per partition `merge`, and spill the serde plus
+  // `merge` in flush order. The byte arrays include 80, which a signed
+  // comparison would put below 01 01.
+
+  private val DecMix: Vector[java.math.BigDecimal] = Vector(
+    "10000000000000000002", "10000000000000000003", "10000000000000000001", "10000000000000000002.0")
+    .map(new java.math.BigDecimal(_))
+
+  private val BinMix: Vector[Array[Byte]] = Vector(
+    Array[Byte](2, 2), Array[Byte](3, 3), Array[Byte](1, 1), Array[Byte](0x80.toByte))
+
+  private val refMixSchema: Schema = Schema(Vector(
+    Field("k", DataType.IntType),
+    Field("d", DataType.DecimalType(38, 1)),
+    Field("b", DataType.BinaryType)))
+
+  /** Row `i` of the mix: the decimal and the byte array at the same index. The
+    * byte array is a fresh copy, so no two rows share an array object. */
+  private def refMixRow(k: Int, i: Int): Array[Any] = Array[Any](
+    java.lang.Integer.valueOf(k), DecMix(i), BinMix(i).clone())
+
+  /** MIN(d), MAX(d), MIN(b), MAX(b) over `parts`, grouped by `k` when
+    * `grouped`, global otherwise. */
+  private def runRefMinMax(
+      parts: Vector[Vector[Array[Any]]],
+      grouped: Boolean,
+      opts: ExecutionOptions,
+      node: MetricsNode = null): Vector[Vector[Any]] = {
+    val plan = new InMemoryPartitionedPlanForAggSpill(refMixSchema, parts)
+    val k = ColRefExpr(0, "k", DataType.IntType)
+    val d = ColRefExpr(1, "d", DataType.DecimalType(38, 1))
+    val b = ColRefExpr(2, "b", DataType.BinaryType)
+    val agg = HashAggregateExec(
+      plan,
+      if (grouped) Seq((k, "k")) else Seq.empty,
+      Seq((AggExprMin(d), "mind"), (AggExprMax(d), "maxd"),
+        (AggExprMin(b), "minb"), (AggExprMax(b), "maxb")),
+      opts, node)
+    val out = (0 until agg.numPartitions).iterator.flatMap(agg.execute)
+    drainRows(out, agg.outputSchema)
+  }
+
+  /** The MIN/MAX cells of one result row. The decimals come back at the
+    * column's declared scale, so `equals` checks the representation too. */
+  private def assertRefMixExtrema(label: String, row: Vector[Any], offset: Int): Unit = {
+    assertEquals(s"$label MIN(d)", new java.math.BigDecimal("10000000000000000001.0"), row(offset))
+    assertEquals(s"$label MAX(d)", new java.math.BigDecimal("10000000000000000003.0"), row(offset + 1))
+    assertArrayEquals(s"$label MIN(b)", Array[Byte](1, 1), row(offset + 2).asInstanceOf[Array[Byte]])
+    assertArrayEquals(s"$label MAX(b)", Array[Byte](0x80.toByte), row(offset + 3).asInstanceOf[Array[Byte]])
+  }
+
+  @Test def minMaxOverDecimalAndBinaryIsRowOrderIndependent(): Unit = {
+    // One group per rotation of the same four rows, so every group holds the
+    // same multiset in a different order (`updateAt`); then the whole mix
+    // forward and reversed as a global aggregate (`updateBatchAt`).
+    val rows = DecMix.indices.flatMap { g =>
+      DecMix.indices.map(i => refMixRow(g, (g + i) % DecMix.length))
+    }.toVector
+    val grouped = runRefMinMax(Vector(rows), grouped = true, ExecutionOptions.Default)
+    assertEquals(DecMix.length, grouped.length)
+    grouped.foreach(r => assertRefMixExtrema(s"group ${r(0)}", r, 1))
+    val forward = DecMix.indices.map(refMixRow(0, _)).toVector
+    assertRefMixExtrema("forward",
+      runRefMinMax(Vector(forward), grouped = false, ExecutionOptions.Default).head, 0)
+    assertRefMixExtrema("reversed",
+      runRefMinMax(Vector(forward.reverse), grouped = false, ExecutionOptions.Default).head, 0)
+  }
+
+  @Test def minMaxOverDecimalAndBinaryIsPartitionSplitIndependent(): Unit = {
+    // One row per partition, so every value arrives through `merge`.
+    val perms = Vector(
+      Vector(0, 1, 2, 3), Vector(3, 2, 1, 0), Vector(1, 3, 0, 2), Vector(2, 0, 3, 1))
+    perms.foreach { perm =>
+      val parts = perm.map(i => Vector(refMixRow(0, i)))
+      val out = runRefMinMax(parts, grouped = false, ExecutionOptions.Default)
+      assertEquals(1, out.length)
+      assertRefMixExtrema(s"partitions ${perm.mkString(",")}", out.head, 0)
+    }
+  }
+
+  @Test def minMaxOverDecimalAndBinaryUnderSpillMatchesHeap(): Unit = {
+    // Spill writes each partial state through `MinMaxState.writeBoxed` and
+    // folds it back through `merge` in flush order.
+    val rng = new Random(20261003L)
+    val parts = (0 until 3).map { _ =>
+      (0 until 3000).map(i => refMixRow(rng.nextInt(15), i % DecMix.length)).toVector
+    }.toVector
+    val expected = runRefMinMax(parts, grouped = true, ExecutionOptions.Default)
+    val node = new MetricsNode(0, "HashAggregateExec", 0, HashAggregateExec.IdxCounterNames)
+    val actual = runRefMinMax(parts, grouped = true, spillyOpts(), node)
+    assertEquals(15, expected.length)
+    assertEquals(15, actual.length)
+    expected.foreach(r => assertRefMixExtrema(s"heap group ${r(0)}", r, 1))
+    actual.foreach(r => assertRefMixExtrema(s"spill group ${r(0)}", r, 1))
+    assertTrue(s"spillEvents must be > 0, got ${node.snapshot().counter("spillEvents")}",
+      node.snapshot().counter("spillEvents") > 0L)
+  }
 }
 
 private final class InMemoryPartitionedPlanForAggSpill(

@@ -24,7 +24,7 @@ navigation hint, not a comprehensive directory listing.
 - `gui/JobSession.scala` (~795 LOC) — mutable FX-thread state for the GUI;
   also tracks per-input UI state (Pending/Loading/Loaded/Failed) now that
   inputs flow through the unified scheduler.
-- `sql/exec/AggregateExec.scala` (~1765 LOC) — biggest file. Every `AggState` subclass
+- `sql/exec/AggregateExec.scala` (~1825 LOC) — biggest file. Every `AggState` subclass
   plus the codec / LongHashMap GROUP BY paths. Primitive states
   (`CountStarState`, `CountState`, `CountIfState`, `LongSumState`,
   `DoubleSumState`, `AvgState`, `MinMaxState`) override `updateBatch` to
@@ -48,13 +48,16 @@ navigation hint, not a comprehensive directory listing.
   DAG scheduler (`runUnifiedDag`), writeOutput, validation re-read, per-status
   `_run.json` writes + per-failure `_validation-<slug>.csv` sample writes +
   per-job `job.json` write + consistency checks.
-- `sql/plan/Expr.scala` (~650 LOC) — `Expr` ADT plus `eval` and `evalVec`
+- `sql/plan/Expr.scala` (~705 LOC) — `Expr` ADT plus `eval` and `evalVec`
   per subtype. `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` each carry
   an `evalVec` override; the rest of the hot subtypes delegate to `VecOps`.
-- `sql/plan/Ops.scala` (~815 LOC) — `Ops` (row-at-a-time binary ops, `eq`,
-  `cmp`), `Casts`, and `VecOps` (one specialized loop per (op, output type)
-  pair, which is most of the length). The floating-point comparison contract
-  both `Expr` paths follow lives on `VecOps.numericCompare`; see
+- `sql/plan/Ops.scala` (~955 LOC) — `Ops` (row-at-a-time binary ops, and
+  `eq` / `cmp`, the engine's one equality and total order), `Casts`, and
+  `VecOps` (one specialized loop per (op, output type) pair, which is most of
+  the length). The comparison contract both `Expr` paths follow — integers as
+  longs (`integralCompare`), a pair with a float in it as doubles
+  (`numericCompare`, whose doc holds the `NaN` / `-0.0` rules), anything else
+  through `Ops` (`genericCompare`) — is chosen in `VecOps.compare`; see
   [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec).
 - `sql/plan/Funcs.scala` (~550 LOC) — scalar function registry. `Funcs.apply`
   is the row-form dispatcher; `Funcs.applyVec` + the `VecFuncs` object
@@ -67,7 +70,7 @@ navigation hint, not a comprehensive directory listing.
   in `ColumnVector.allocate`.
 - `gui/DagCanvas.scala` (~380 LOC) — Canvas drawing + pan/zoom/click; renders
   per-input load state alongside per-task status.
-- `sql/exec/JoinExec.scala` (~1030 LOC) — equi-join build + probe paths
+- `sql/exec/JoinExec.scala` (~1040 LOC) — equi-join build + probe paths
   with build/probe role mirroring, the LongHashMap fast path, and
   per-batch `evalVec` key extraction for computed join keys on both
   sides. `probeBatchInto` is the one per-row probe body shared by the
@@ -84,10 +87,12 @@ navigation hint, not a comprehensive directory listing.
   bucket through the same in-memory pipeline — every row sharing a
   partition key collocates in one bucket so LAG/LEAD/frame correctness
   is preserved.
-- `core/HashKeys.scala` (~910 LOC) — `KeyCodec` (`PackedBytesCodec`,
-  `ObjectArrayCodec`, `EmptyKeyCodec`) + `BytesKey` / `ObjectArrayKey`
-  wrappers + `LongHashMap[V]` (open-addressing primitive-long-keyed map for
-  the single-Long fast path in HashAggregate / HashJoin). Used by every
+- `core/HashKeys.scala` (~955 LOC) — `KeyCodec` (`PackedBytesCodec`,
+  `ObjectArrayCodec`, `SingleObjectKeyCodec`, `EmptyKeyCodec`, and
+  `decimalKey`, the one spelling a decimal key is stored in) + `BytesKey` /
+  `ObjectArrayKey` / `SingleObjectKey` wrappers + `LongHashMap[V]`
+  (open-addressing primitive-long-keyed map for the single-Long fast path in
+  HashAggregate / HashJoin). Used by every
   pipeline-breaking operator that keys into a HashMap (HashAggregate /
   HashJoin / Distinct / WindowExec partition keys). See
   [architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers).

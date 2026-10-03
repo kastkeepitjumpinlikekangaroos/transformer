@@ -1,8 +1,9 @@
 # Plan 02: `Ops.eq` / `Ops.cmp` are wrong for `BinaryType` and lossy for `DecimalType`
 
-> Status: **not started** · Effort: 2-3 days · Risk: medium (user-visible
+> Status: **done** 2026-10-03 · Effort: 2-3 days · Risk: medium (user-visible
 > semantics for two types, and `Ops` is the engine's single comparison choke
-> point — every operator is downstream of it)
+> point — every operator is downstream of it). What landed, and where it
+> departed from this plan, is in [Outcome](#outcome) at the end.
 
 ## How this was found
 
@@ -209,3 +210,61 @@ numbers (it is pinned by the NaN work in plans/followups/03, 05 and 06), or
 changing what a decimal GROUP BY key hashes to if it turns out to cost more
 than normalizing scale at the codec.
 ```
+
+## Outcome
+
+Landed 2026-10-03 as one commit. The measured table was re-run first with a
+throwaway probe against `584995f`: all eight rows reproduced as written, and
+every regression below was confirmed red before the fix.
+
+**As planned.** `Ops.eq` / `Ops.cmp` compare a decimal against any number
+with `compareTo` (exact, scale-blind) and byte arrays with `Arrays.equals` /
+`Arrays.compareUnsigned`; the float/double path is untouched. The object
+codecs store a decimal as `KeyCodec.decimalKey`, normalizing at the codec as
+the plan preferred: the value at its column's declared scale when it can be
+written there exactly, else without trailing zeros. That costs nothing for a
+column that holds its declared scale, so the stop-and-ask about changing what
+a decimal key hashes to never triggered. Decimal `SUM` and arithmetic stayed
+out of scope and are recorded in `docs/gotchas.md` and the README.
+
+**Where this plan was wrong.** Point 5's premise did not hold: `VecOps.compare`
+already sent decimals to the generic path through a private `isNumeric` that
+excludes them. The lossy vectorized twin was `InListExpr`'s hoisted literal set
+of doubles, which now leaves a decimal to the `Ops.eq` scan.
+
+**What the probe found beyond the plan**, all fixed in the same commit:
+
+- Three more hash and dedup sites with the same disagreement: `COUNT(DISTINCT)`
+  and `AGG(DISTINCT)` kept a raw `HashSet` (`COUNT(DISTINCT b)` counted array
+  objects: 4, not 3), `HashPartitioner.hashCell` routed `1.0` and `1.00` to
+  different shards, and `HashJoinExec.columnHashCode` hashed a byte array by
+  identity, so grace-hash join and window spill split equal keys across
+  buckets. Now `DistinctElement`, `HashPartitioner.decimalHash`, and content /
+  value hashing in `columnHashCode`.
+- `Analyzer.unify` (which postdates this plan) widens a number meeting a
+  decimal through a CAST that `Casts` did not implement, so `price = 1` threw
+  `CAST to decimal(10,3) not implemented` mid-drain. `Casts` now widens an
+  integer exactly and a FLOAT / DOUBLE as the decimal it prints as; NaN and the
+  infinities are an error.
+- MIN/MAX and a decimal GROUP BY key read back at the declared scale, so the
+  output does not depend on which spelling of a value arrived first.
+- **BIGINT past 2^53**, found while checking the codec's equality claim
+  against `Ops.eq`: two longs compared through `doubleValue`, so
+  `9007199254740993 = 9007199254740992` was TRUE. It is the Number branch this
+  plan said not to touch, so the user was asked, and chose to fix it here: two
+  integers compare as longs in `Ops`, `VecOps.integralCompare` and the IN set.
+- **A BINARY read as text** (`CAST(b AS STRING)`, LIKE, `||`, the string
+  functions) produced its identity hash, `[B@1a96d94c`. At the user's choice it
+  is now a bind-time error everywhere a byte array would be read as text, or
+  cast to anything else.
+
+**Verification.** `bazel test //...` 47/47 and jaffle-shop 15/15. Before
+landing, the sharded-mode, metamorphic, mode-differential and expr-parity
+campaigns ran 20000 seeds each, as disjoint blocks over three JVMs, all
+green; they run on the six corpus types, so they guard the BIGINT change and
+the untouched float path rather than decimals and byte arrays.
+
+**Still open.** The fuzz corpora draw none of the four types
+([plan 04](04-widen-fuzz-corpus-to-every-type.md)), so these fixes are guarded
+by deterministic regressions only. Spilling a `DECIMAL` column fails because
+`ParquetWriter` has no decimal mapping ([plan 03](03-parquet-external-format-fidelity.md)).

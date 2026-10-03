@@ -84,7 +84,8 @@ object HashPartitioner {
     * `doubleToLongBits` so the bit pattern (not the IEEE value) drives the
     * hash; this matches [[PackedBytesCodec]]'s byte layout so a row's
     * partitioner-shard membership is consistent with the codec's bucket
-    * computation downstream. */
+    * computation downstream. A byte array hashes its content and a decimal
+    * its value ([[decimalHash]]), the equality the codec keys them by. */
   def hashCell(col: ColumnVector, row: Int): Int = col match {
     case v: IntVector       => fmix32(v.values(row))
     case v: LongVector      => fmix64ToInt(v.values(row))
@@ -95,9 +96,20 @@ object HashPartitioner {
     case v: TimestampVector => fmix64ToInt(v.values(row))
     case v: StringVector    => v.values(row).hashCode
     case v: BinaryVector    => java.util.Arrays.hashCode(v.values(row))
-    case v: DecimalVector   => v.values(row).hashCode
+    case v: DecimalVector   => decimalHash(v.values(row))
     case _                  => col.getBoxed(row).hashCode
   }
+
+  /** A decimal's value as a hash, whatever its scale. `BigDecimal.hashCode`
+    * includes the scale, so 1.0 and 1.00 would route apart while `=` and the
+    * codec call them one key; and the two sides of a join, or of a UNION, can
+    * declare different scales, so normalizing to a declared scale would not
+    * do. The nearest double is a function of the value alone and costs no
+    * allocation. Decimals too close for a double to tell apart share a route,
+    * which costs balance, never correctness: the codec behind every route
+    * tells them apart. Also routes grace-hash join and window spill buckets,
+    * through [[HashJoinExec.columnHashCode]]. */
+  def decimalHash(v: java.math.BigDecimal): Int = fmix64ToInt(java.lang.Double.doubleToLongBits(v.doubleValue))
 
   /** Murmur3 32-bit finalizer. Spreads bits so the resulting modulo
     * distribution is even even when the input is a contiguous range of small

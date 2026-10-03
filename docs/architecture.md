@@ -149,7 +149,9 @@ dominated CPU once group cardinality climbed into the millions.
   a fresh `Array[AnyRef]` wrapped in an `ObjectArrayKey` (cached hashCode,
   element-wise `equals` with `Array[Byte]` special-cased for structural
   equality). Still one allocation per row + two on insert, but the `Seq`
-  wrapper overhead and dynamic-dispatch walk are gone.
+  wrapper overhead and dynamic-dispatch walk are gone. A single
+  variable-width key column takes `SingleObjectKeyCodec`, the same thing
+  without the array.
 
 **Scratch-key lookup path.** Operators that probe a `HashMap` per row
 (`HashAggregateExec`, `DistinctExec`) hold a reusable scratch wrapper —
@@ -191,6 +193,23 @@ an equality predicate — SQL groups `NULL` with `NULL` on the same reasoning �
 but the split is ours, not Postgres's: Postgres has no split here because its
 `float8` `=` already treats `NaN` as equal to itself and `-0.0` as distinct from
 `0.0`. See the `NaN` / `-0.0` note in [gotchas.md](gotchas.md).
+
+**A decimal or byte-array key.** For these two types a key agrees with `Ops.eq`
+exactly. A byte array is compared and hashed by content (a raw array's own
+`equals` and `hashCode` are its identity). A decimal is equal by value, but
+`BigDecimal.equals` and `hashCode` include the scale, and a column does not
+hold every value at its declared scale (CSV text keeps the scale it was written
+with), so the object codecs store a decimal as `KeyCodec.decimalKey`: the value
+at the column's declared scale when it can be written there exactly, and
+otherwise without its trailing zeros. Every spelling of a value is then one key,
+the key decodes at the declared scale whichever spelling arrived first, and a
+column that does hold its declared scale pays nothing (`decimalKey` returns the
+value itself). The DISTINCT aggregates' sets hold the same representative,
+through `DistinctElement`, with a byte array inside a `BytesKey`. A shard or a
+spill bucket cannot use the declared scale, since the two sides of a join or a
+`UNION` may declare different ones, so `HashPartitioner.decimalHash` routes a
+decimal by its nearest double, which depends on the value alone; decimals a
+double cannot tell apart share a route, which costs balance, never correctness.
 
 `WindowExec` applies both rules at once, deliberately: `PARTITION BY` is an
 identity and goes through a `KeyCodec` like every other breaker's key, while the
@@ -259,8 +278,10 @@ override with the `transformer.scheduler.shard_count` system property or
 
 Routing uses a pinned Murmur3-style cell mix in `HashPartitioner.hashRow`.
 The function dispatches on the key vector's concrete subtype so primitive
-cells stay unboxed; reference cells (String/Binary/Decimal) go through
-`hashCode` / `Arrays.hashCode`. Cross-column combination is a 31-style
+cells stay unboxed; a String goes through `hashCode`, a byte array through
+`Arrays.hashCode` and a decimal through `decimalHash` (its value, whatever its
+scale), so a route agrees with the key equality each shard's codec applies.
+Cross-column combination is a 31-style
 accumulator wrapped in Murmur3's 32-bit finalizer (`fmix32`) — the
 finalizer spreads bits enough that the `% numShards` step distributes
 contiguous small-integer keys evenly instead of clustering them into one
@@ -763,14 +784,21 @@ query is bound (numbers widen, a string literal is read as the type beside it,
 any other mix is a bind error), so a bound comparison never asks `Ops` to order
 a number against a string.
 
-`Ops.cmp` is the canonical NULL-free comparator (numbers compared as `Double`
-through `Double.compare`'s total order, strings lexicographic, booleans natural)
-and decides every ORDERING question: `ORDER BY`, `< <= > >=`, and any tie test
-that has to agree with a sort. `Ops.eq` is the canonical NULL-free EQUALITY and
-decides `=`, `IN` and `NULLIF`; it follows IEEE. The two are **not**
-interchangeable — `cmp(a, b) == 0` and `eq(a, b)` disagree on `NaN` (tied, not
-equal) and on `-0.0` / `0.0` (equal, not tied), which is what made
+`Ops.cmp` is the canonical NULL-free comparator and decides every ORDERING
+question: `ORDER BY`, `< <= > >=`, and any tie test that has to agree with a
+sort. Numbers compare by value, exactly where the types allow: two integers as
+longs, a decimal against any number with `BigDecimal.compareTo` (scale-blind,
+full precision), and any other pair, which has a FLOAT or DOUBLE in it, through
+`Double.compare`'s total order. Strings compare lexicographically, booleans
+naturally, and byte arrays byte by byte as unsigned values. `Ops.eq` is the
+canonical NULL-free EQUALITY and decides `=`, `IN` and `NULLIF`; it is the same
+as `cmp(a, b) == 0` except on floats, where it follows IEEE. So the two are
+**not** interchangeable — `cmp(a, b) == 0` and `eq(a, b)` disagree on `NaN`
+(tied, not equal) and on `-0.0` / `0.0` (equal, not tied), which is what made
 `WindowExec.sameKey` wrong when it asked `eq` whether two sorted rows tied.
+Both dispatch on the boxed value's class, so a new boxed type needs a case of
+its own: the fallback compares `toString`, which for a byte array was its
+identity hash.
 
 ### 5a. Vectorized expression evaluation (`evalVec`)
 
@@ -810,11 +838,12 @@ of the box. Hot nodes override for primitive-array speed:
   would skip do extra work, acceptable because every `Expr` is side-effect-
   free. Short-circuits once every row is claimed by an earlier branch.
 - `InListExpr.evalVec` — when items are all literals, pre-builds a typed
-  HashSet (`Double` for numerics keyed via `Number.doubleValue` to match
-  `Ops.eq`'s cross-numeric semantics; `String` for string columns; linear
-  scan for booleans/dates). Non-literal items go through one column-eval
-  per item per batch + a per-row linear scan. NULL items are tracked for
-  SQL 3VL.
+  HashSet keyed the way `Ops.eq` compares (`Long` for integers via
+  `longValue`; `Double` via `doubleValue` for other numbers when a FLOAT or
+  DOUBLE is involved; `String` for string columns; a linear `Ops.eq` scan
+  for decimals, booleans, dates and byte arrays). Non-literal items go through
+  one column-eval per item per batch + a per-row linear scan. NULL items are
+  tracked for SQL 3VL.
 - `LikeExpr.evalVec` — literal-pattern fast path compiles the regex once
   outside the row loop and re-uses a single `Matcher` via `.reset(input)`
   per row. Column-pattern path still goes through the global pattern cache
@@ -857,6 +886,14 @@ The same rule lets every `SELECT` with no `FROM` scan one shared view,
 `LogicalBuilder.NoFromRow`: a single batch of one row and no columns, read by
 concurrent queries at once. An operator that wrote to its input batch — even
 just its row count — would corrupt every later FROM-less query.
+
+**Numeric comparison contract.** `VecOps.compare` picks its loop from the two
+operand types the way `Ops` picks a branch from the two values: two integers
+go to `integralCompare` (`readLong`, since a double cannot hold every long past
+2^53), a pair with a FLOAT or DOUBLE in it to `numericCompare` (`readDouble`),
+and anything else, a decimal included, to `genericCompare`, which asks `Ops`.
+Reading a decimal through `readDouble` would make two decimals past double's
+precision equal on this path and unequal on the row path.
 
 **Floating-point comparison contract.** A vectorized helper may not reach for
 the raw primitive operator just because the operands are `double`. Equality

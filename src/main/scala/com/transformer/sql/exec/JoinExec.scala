@@ -973,8 +973,11 @@ object HashJoinExec {
   }
 
   /** Per-column hashCode that avoids per-row boxing on the primitive
-    * vectors. Reference vectors fall back to the boxed `hashCode` via
-    * `getBoxed`. */
+    * vectors. Grace-hash join and window spill route rows to buckets with it,
+    * so two keys the codec calls equal must hash equally: a byte array by its
+    * content (its own `hashCode` is its identity) and a decimal by its value
+    * ([[HashPartitioner.decimalHash]]). Other reference vectors fall back to
+    * the boxed `hashCode` via `getBoxed`. */
   private[exec] def columnHashCode(col: ColumnVector, row: Int): Int = col match {
     case lv: LongVector =>
       val v = lv.values(row); (v ^ (v >>> 32)).toInt
@@ -987,6 +990,12 @@ object HashJoinExec {
     case tv: TimestampVector =>
       val v = tv.values(row); (v ^ (v >>> 32)).toInt
     case dv: DateVector => dv.values(row)
+    case bv: BinaryVector =>
+      val v = bv.values(row)
+      if (v == null) 0 else java.util.Arrays.hashCode(v)
+    case dv: DecimalVector =>
+      val v = dv.values(row)
+      if (v == null) 0 else HashPartitioner.decimalHash(v)
     case other =>
       val boxed = other.getBoxed(row)
       if (boxed == null) 0 else boxed.hashCode

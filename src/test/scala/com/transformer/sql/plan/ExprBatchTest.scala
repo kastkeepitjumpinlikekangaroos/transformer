@@ -86,6 +86,20 @@ class ExprBatchTest {
     new StringVector(arr, N)
   }
 
+  private def decCol(dt: DataType.DecimalType, values: Int => String, nullAt: Int => Boolean = _ => false): DecimalVector = {
+    val arr = new Array[java.math.BigDecimal](N)
+    var i = 0
+    while (i < N) { if (!nullAt(i)) arr(i) = new java.math.BigDecimal(values(i)); i += 1 }
+    new DecimalVector(arr, dt.precision, dt.scale, N)
+  }
+
+  private def binCol(values: Int => Array[Byte], nullAt: Int => Boolean = _ => false): BinaryVector = {
+    val arr = new Array[Array[Byte]](N)
+    var i = 0
+    while (i < N) { if (!nullAt(i)) arr(i) = values(i); i += 1 }
+    new BinaryVector(arr, N)
+  }
+
   /** Build a batch from a list of (fieldName, column) pairs in order. */
   private def batch(cols: (String, ColumnVector)*): ColumnarBatch = {
     val schema = Schema(cols.iterator.map { case (n, c) => Field(n, c.dataType) }.toVector)
@@ -668,6 +682,185 @@ class ExprBatchTest {
         ColRefExpr(1, "r", DataType.LongType),
         DataType.BooleanType),
       b)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Decimal and binary comparisons
+  //
+  // Both paths reach `Ops`: `VecOps.compare` sends any pair that is not two of
+  // INT / BIGINT / FLOAT / DOUBLE to the generic loop over `Ops.eq` / `Ops.cmp`.
+  // These pin the answers as well as the parity, since a row path and a vector
+  // path can agree on a wrong one: both went through `doubleValue` for a
+  // decimal, and compared identity-hash text for a byte array.
+  // ---------------------------------------------------------------------------
+
+  /** Decimals one apart past double's mantissa, and one value at four scales. */
+  private val SpecialDecimals: Seq[String] = Seq(
+    "10000000000000000001", "10000000000000000002", "1.0", "1.00", "1", "1.000", "-2.5", "0.10")
+
+  private val Ops6: Seq[String] = Seq("=", "<>", "<", "<=", ">", ">=")
+
+  private def expectedCompare(op: String, c: Int): Boolean = op match {
+    case "=" => c == 0
+    case "<>" => c != 0
+    case "<" => c < 0
+    case "<=" => c <= 0
+    case ">" => c > 0
+    case ">=" => c >= 0
+  }
+
+  /** `op` over every row of `b`, on both paths, against `truth` per row. */
+  private def assertCompares(op: String, l: Expr, r: Expr, b: ColumnarBatch, truth: Int => Any): Unit = {
+    val e = BinOpExpr(op, l, r, DataType.BooleanType)
+    assertParity(e, b)
+    val vec = e.evalVec(b)
+    var i = 0
+    while (i < N) {
+      val got = if (vec.isNull(i)) null else vec.getBoxed(i)
+      assertEquals(s"$op at row $i", truth(i), got)
+      i += 1
+    }
+  }
+
+  @Test def binOpCompareDecimalByValue(): Unit = {
+    val dt = DataType.DecimalType(38, 3)
+    val b = batch(
+      "a" -> decCol(dt, i => SpecialDecimals(i % 8), i => i % 13 == 0),
+      "b" -> decCol(dt, i => SpecialDecimals((i / 8) % 8)))
+    val a = ColRefExpr(0, "a", dt)
+    val c = ColRefExpr(1, "b", dt)
+    for (op <- Ops6)
+      assertCompares(op, a, c, b, i =>
+        if (i % 13 == 0) null
+        else expectedCompare(op, new java.math.BigDecimal(SpecialDecimals(i % 8))
+          .compareTo(new java.math.BigDecimal(SpecialDecimals((i / 8) % 8)))))
+  }
+
+  @Test def binOpCompareDecimalAgainstOtherNumbers(): Unit = {
+    // No CAST between them, as a generated tree can have: `Ops` promotes the
+    // other side to a decimal, an integer exactly and a double as the decimal
+    // it prints as. NaN orders above every decimal and equals none.
+    val dt = DataType.DecimalType(38, 3)
+    val longs = Seq(1L, -3L, 10000000000000000L, 0L)
+    val doubles = Seq(1.0, 0.1, Double.NaN, Double.NegativeInfinity, Double.PositiveInfinity, -2.5, 1e19, -0.0)
+    val b = batch(
+      "a" -> decCol(dt, i => SpecialDecimals(i % 8)),
+      "l" -> longCol(i => longs(i % 4)),
+      "d" -> doubleCol(i => doubles((i / 8) % 8)))
+    val a = ColRefExpr(0, "a", dt)
+    def decOf(i: Int) = new java.math.BigDecimal(SpecialDecimals(i % 8))
+    for (op <- Ops6) {
+      assertCompares(op, a, ColRefExpr(1, "l", DataType.LongType), b, i =>
+        expectedCompare(op, decOf(i).compareTo(java.math.BigDecimal.valueOf(longs(i % 4)))))
+      assertCompares(op, a, ColRefExpr(2, "d", DataType.DoubleType), b, i => {
+        val d = doubles((i / 8) % 8)
+        val c =
+          if (d.isNaN || d == Double.PositiveInfinity) -1
+          else if (d == Double.NegativeInfinity) 1
+          else decOf(i).compareTo(java.math.BigDecimal.valueOf(d))
+        if (d.isNaN && op == "<>") true
+        else if (d.isNaN && op != "<" && op != "<=") false
+        else expectedCompare(op, c)
+      })
+    }
+  }
+
+  @Test def binOpCompareBinaryByUnsignedContent(): Unit = {
+    val values: Seq[Array[Byte]] = Seq(
+      Array[Byte](), Array[Byte](0), Array[Byte](0x7f), Array[Byte](0x7f, 0),
+      Array[Byte](0x80.toByte), Array[Byte](0xff.toByte), Array[Byte](1, 1), Array[Byte](1, 1))
+    val b = batch(
+      "a" -> binCol(i => values(i % 8).clone(), i => i % 11 == 0),
+      "b" -> binCol(i => values((i / 8) % 8).clone()))
+    val a = ColRefExpr(0, "a", DataType.BinaryType)
+    val c = ColRefExpr(1, "b", DataType.BinaryType)
+    for (op <- Ops6)
+      assertCompares(op, a, c, b, i =>
+        if (i % 11 == 0) null
+        else expectedCompare(op, java.util.Arrays.compareUnsigned(values(i % 8), values((i / 8) % 8))))
+  }
+
+  @Test def inListDecimalLiteralsCompareByValue(): Unit = {
+    // An all-literal list over a numeric column hoists its items into a set of
+    // doubles, where 10000000000000000002 is 10000000000000000001. A decimal
+    // takes the path that asks `Ops.eq`, on either side of the IN.
+    val dt = DataType.DecimalType(38, 3)
+    val b = batch(
+      "a" -> decCol(dt, i => SpecialDecimals(i % 8), i => i % 13 == 0),
+      "l" -> longCol(i => i % 3 - 1))
+    val a = ColRefExpr(0, "a", dt)
+    val lists = Seq(Seq("10000000000000000002"), Seq("1.0000", "-2.5"), Seq("0.1", "10000000000000000001"))
+    for (items <- lists; negated <- Seq(false, true)) {
+      val e = InListExpr(a, items.map(s => LitExpr(new java.math.BigDecimal(s), dt)), negated)
+      assertParity(e, b)
+      val vec = e.evalVec(b)
+      var i = 0
+      while (i < N) {
+        val expected: Any =
+          if (i % 13 == 0) null
+          else items.exists(s => new java.math.BigDecimal(s).compareTo(new java.math.BigDecimal(SpecialDecimals(i % 8))) == 0) != negated
+        assertEquals(s"$items at row $i", expected, if (vec.isNull(i)) null else vec.getBoxed(i))
+        i += 1
+      }
+    }
+    // A BIGINT probe against decimal items, which only a generated tree builds.
+    val e = InListExpr(ColRefExpr(1, "l", DataType.LongType),
+      Seq(LitExpr(new java.math.BigDecimal("1.0000000000000000001"), dt), LitExpr(new java.math.BigDecimal("0.00"), dt)),
+      negated = false)
+    assertParity(e, b)
+    var i = 0
+    while (i < N) {
+      assertEquals(s"BIGINT IN decimals at row $i", i % 3 - 1 == 0, e.evalVec(b).getBoxed(i))
+      i += 1
+    }
+  }
+
+  /** Two integers compare as longs on both paths. As doubles, 2^53 and 2^53 + 1
+    * are one value, so `=` matched them, `<` did not order them, and an IN
+    * list's hoisted set of doubles held one for the other. */
+  @Test def binOpCompareIntegersPastDoublePrecision(): Unit = {
+    val big = Seq(9007199254740992L, 9007199254740993L, 9007199254740994L, -9007199254740993L,
+      Long.MaxValue, Long.MaxValue - 1, 0L, Long.MinValue)
+    val b = batch(
+      "a" -> longCol(i => big(i % 8), i => i % 13 == 0),
+      "b" -> longCol(i => big((i / 8) % 8)),
+      "i" -> intCol(i => if (i % 2 == 0) Int.MaxValue else 0))
+    val a = ColRefExpr(0, "a", DataType.LongType)
+    val c = ColRefExpr(1, "b", DataType.LongType)
+    for (op <- Ops6) {
+      assertCompares(op, a, c, b, i =>
+        if (i % 13 == 0) null else expectedCompare(op, java.lang.Long.compare(big(i % 8), big((i / 8) % 8))))
+      // An INT beside a BIGINT, which only a generated tree leaves uncast.
+      assertCompares(op, ColRefExpr(2, "i", DataType.IntType), c, b, i =>
+        expectedCompare(op, java.lang.Long.compare(if (i % 2 == 0) Int.MaxValue.toLong else 0L, big((i / 8) % 8))))
+    }
+    for (negated <- Seq(false, true)) {
+      val e = InListExpr(a, Seq(LitExpr(9007199254740993L, DataType.LongType), LitExpr(Long.MaxValue, DataType.LongType)),
+        negated)
+      assertParity(e, b)
+      val vec = e.evalVec(b)
+      var i = 0
+      while (i < N) {
+        val expected: Any =
+          if (i % 13 == 0) null else (big(i % 8) == 9007199254740993L || big(i % 8) == Long.MaxValue) != negated
+        assertEquals(s"IN at row $i", expected, if (vec.isNull(i)) null else vec.getBoxed(i))
+        i += 1
+      }
+    }
+  }
+
+  @Test def inListBinaryComparesContent(): Unit = {
+    val b = batch("a" -> binCol(i => Array[Byte]((i % 4).toByte), i => i % 9 == 0))
+    val a = ColRefExpr(0, "a", DataType.BinaryType)
+    val e = InListExpr(a, Seq(LitExpr(Array[Byte](1), DataType.BinaryType), LitExpr(Array[Byte](3), DataType.BinaryType)),
+      negated = false)
+    assertParity(e, b)
+    var i = 0
+    while (i < N) {
+      val expected: Any = if (i % 9 == 0) null else i % 4 == 1 || i % 4 == 3
+      assertEquals(s"row $i", expected, { val v = e.evalVec(b); if (v.isNull(i)) null else v.getBoxed(i) })
+      i += 1
+    }
   }
 
   // ===========================================================================
