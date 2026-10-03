@@ -578,6 +578,12 @@ Both directions skip the `Group`/`SimpleGroup` row-object model that
   column in different ways; `ParquetReader.readFooters` checks every file
   against the first file's schema up front, so a file that lacks a column or
   reads one as another type fails when the view opens.
+- A `Decoding` carries whatever its loop needs from the file. A `TIMESTAMP`'s
+  carries its unit (`Decoding.Timestamps(unit)`): `MILLIS` values are
+  multiplied into the microseconds a `TimestampVector` holds (after a range
+  check, so an overflow fails the read rather than wrapping), `MICROS` copied,
+  and `NANOS` truncated with `Math.floorDiv`. One glob can mix units, so the
+  unit is read per file like everything else.
 - Write: a custom `BatchWriteSupport` drives parquet-mr's `RecordConsumer`
   directly from the `ColumnarBatch` vectors. Each batch row maps to one
   `writer.write()` call (parquet-mr needs that 1:1 mapping so its
@@ -629,7 +635,9 @@ Unsupported (left as residual): computed expressions (`a - b > 0`),
 two-column predicates (`a > b`), `LIKE`, `IN` containing a NULL literal
 (SQL three-valued-logic semantics make stats-level skipping unsafe in that
 case — the translator bails), `IN (…)` with non-literal items, decimal
-columns. The translator drops unsupported conjuncts from the AND-chain
+columns, and comparisons on a timestamp column (its statistics are in the unit
+its file stores, which varies by file; `IS NULL` on one still pushes). The
+translator drops unsupported conjuncts from the AND-chain
 rather than refusing to push the whole predicate; the residual `FilterExec`
 covers them.
 

@@ -7,6 +7,7 @@ import org.junit.Test
 
 import java.nio.file.{Files, Path}
 import java.time.{Instant, LocalDateTime, ZoneOffset}
+import java.time.temporal.ChronoUnit
 
 /** Our reader against files parquet-mr wrote.
   *
@@ -85,10 +86,10 @@ class ParquetExternalFormatTest {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // TIMESTAMP: INT96, the legacy encoding, read as the instant it stores.
+  // TIMESTAMP: every unit, and INT96, read as the instant they store.
   // ─────────────────────────────────────────────────────────────────────
 
-  /** Whole milliseconds, so every timestamp encoding holds each one exactly. */
+  /** Whole milliseconds, so every encoding below holds each one exactly. */
   private val instants: Seq[Instant] = Seq(
     "2024-03-15T12:34:56.789Z",
     "1970-01-01T00:00:00Z",
@@ -96,6 +97,10 @@ class ParquetExternalFormatTest {
     "1900-01-01T00:00:00.001Z",
     "2262-01-01T00:00:00Z"
   ).map(Instant.parse)
+
+  private def epochMillis(i: Instant): Long = i.toEpochMilli
+  private def epochMicros(i: Instant): Long = ChronoUnit.MICROS.between(Instant.EPOCH, i)
+  private def epochNanos(i: Instant): Long = ChronoUnit.NANOS.between(Instant.EPOCH, i)
 
   /** The 12 bytes Hive, Impala and old Spark write for an instant: nanoseconds
     * of the day as a little-endian long, then the Julian day number as a
@@ -109,11 +114,120 @@ class ParquetExternalFormatTest {
     b.array()
   }
 
+  private val everyEncoding =
+    """message m {
+      |  optional int64 millis (TIMESTAMP(MILLIS,true));
+      |  optional int64 micros (TIMESTAMP(MICROS,true));
+      |  optional int64 nanos (TIMESTAMP(NANOS,true));
+      |  optional int96 legacy;
+      |}""".stripMargin
+
+  private def everyEncodingRow(i: Instant): Seq[Any] =
+    Seq(epochMillis(i), epochMicros(i), epochNanos(i), int96(i))
+
+  @Test def millisTimestampsReadAsTheirInstants(): Unit = {
+    val file = writeFixture(
+      "message m { optional int64 ts (TIMESTAMP(MILLIS,true)); }",
+      instants.map(i => Seq(epochMillis(i))) :+ Seq(null))
+    val view = read(file)
+    assertEquals(DataType.TimestampType, typeOf(view, "ts"))
+    assertEquals(instants :+ null, column(view, "ts"))
+  }
+
+  @Test def microsTimestampsReadAsTheirInstants(): Unit = {
+    val file = writeFixture(
+      "message m { optional int64 ts (TIMESTAMP(MICROS,true)); }",
+      instants.map(i => Seq(epochMicros(i))) :+ Seq(null))
+    assertEquals(instants :+ null, column(read(file), "ts"))
+  }
+
+  @Test def nanosTimestampsReadAsTheirInstants(): Unit = {
+    val file = writeFixture(
+      "message m { optional int64 ts (TIMESTAMP(NANOS,true)); }",
+      instants.map(i => Seq(epochNanos(i))) :+ Seq(null))
+    assertEquals(instants :+ null, column(read(file), "ts"))
+  }
+
   @Test def int96TimestampsReadAsTheirInstants(): Unit = {
     val file = writeFixture("message m { optional int96 ts; }", instants.map(i => Seq(int96(i))) :+ Seq(null))
     val view = read(file)
     assertEquals(DataType.TimestampType, typeOf(view, "ts"))
     assertEquals(instants :+ null, column(view, "ts"))
+  }
+
+  @Test def everyTimestampEncodingReadsTheSameInstant(): Unit = {
+    val file = writeFixture(everyEncoding, instants.map(everyEncodingRow))
+    rows(read(file)).zip(instants).foreach { case (row, i) =>
+      assertEquals(s"millis, micros, nanos and INT96 of $i", Seq(i, i, i, i), row)
+    }
+  }
+
+  /** A TIMESTAMP holds microseconds, so a NANOS value loses its last three
+    * digits the way every other path into the engine loses them: the instant
+    * is truncated to its microsecond (`Instant.truncatedTo`), which before 1970
+    * is the earlier microsecond. So a NANOS value, the same instant in INT96,
+    * and a timestamp literal with nine fractional digits all read alike. */
+  @Test def nanosTimestampsTruncateToTheMicrosecond(): Unit = {
+    val precise = Seq("2024-03-15T12:34:56.789123456Z", "1969-12-31T23:59:59.999998500Z", "1969-12-31T23:59:59.999999999Z")
+      .map(Instant.parse)
+    val file = writeFixture(
+      "message m { optional int64 nanos (TIMESTAMP(NANOS,true)); optional int96 legacy; }",
+      precise.map(i => Seq(epochNanos(i), int96(i))))
+    val expected = precise.map(_.truncatedTo(ChronoUnit.MICROS))
+    assertEquals(Instant.parse("1969-12-31T23:59:59.999998Z"), expected(1))
+    val view = read(file)
+    assertEquals(expected.map(i => Seq(i, i)), rows(view))
+    // A literal takes the same nine digits the same way.
+    assertEquals(Seq(Seq(true)), query(
+      "SELECT nanos = TIMESTAMP '1969-12-31 23:59:59.999998500' AS same FROM t WHERE legacy < TIMESTAMP '1970-01-01 00:00:00' AND nanos < TIMESTAMP '1969-12-31 23:59:59.999999'",
+      "t" -> view))
+  }
+
+  @Test def aMillisTimestampBeyondTheMicrosecondRangeFailsTheRead(): Unit = {
+    // Long.MaxValue microseconds is in the year 294247; this many
+    // milliseconds is a thousand times later and has no microsecond value.
+    val file = writeFixture("message m { optional int64 ts (TIMESTAMP(MILLIS,true)); }",
+      Seq(Seq(1L), Seq(Long.MaxValue / 1000L + 1L)))
+    val msg = failure(rows(read(file)))
+    assertTrue(msg, msg.contains("'ts'") && msg.contains("MILLIS"))
+  }
+
+  /** `isAdjustedToUTC = false` marks a local date-time with no zone. The engine
+    * has one timestamp type, an instant in UTC, so the stored reading is taken
+    * as UTC unchanged: the wall clock survives and no zone is applied. */
+  @Test def aLocalTimestampReadsItsWallClockAsUtc(): Unit = {
+    val wallClock = LocalDateTime.parse("2024-03-15T12:34:56.789")
+    val asUtc = wallClock.toInstant(ZoneOffset.UTC)
+    val file = writeFixture(
+      "message m { optional int64 millis (TIMESTAMP(MILLIS,false)); optional int64 micros (TIMESTAMP(MICROS,false)); }",
+      Seq(Seq(epochMillis(asUtc), epochMicros(asUtc))))
+    assertEquals(Seq(Seq(asUtc, asUtc)), rows(read(file)))
+  }
+
+  @Test def aGlobMixingTimestampUnitsReadsEachFileInItsOwnUnit(): Unit = {
+    val dir = newDir()
+    for ((unit, encode) <- Seq[(String, Instant => Long)](
+        "MILLIS" -> epochMillis, "MICROS" -> epochMicros, "NANOS" -> epochNanos))
+      ExternalParquet.write(dir.resolve(s"$unit.parquet"),
+        ExternalParquet.schema(s"message m { optional int64 ts (TIMESTAMP($unit,true)); }"),
+        instants.map(i => Seq(encode(i))))
+    val view = ParquetReader.fromPath(dir.toString)
+    assertEquals(3, view.numPartitions)
+    assertEquals((instants ++ instants ++ instants).sorted, column(view, "ts").map(_.asInstanceOf[Instant]).sorted)
+  }
+
+  /** Through the planner: projection, a residual filter on each unit, and an
+    * `IS NOT NULL`, the one timestamp predicate pushed to row-group
+    * statistics (comparisons are not: statistics are in the file's unit). */
+  @Test def aTimestampFilterOverAMillisFileFindsItsRows(): Unit = {
+    val file = writeFixture(everyEncoding, instants.map(everyEncodingRow) :+ Seq(epochMillis(instants.head), null, null, null))
+    val view = read(file)
+    val found = query(
+      "SELECT millis, nanos, legacy FROM t WHERE millis >= TIMESTAMP '1970-01-01 00:00:00' " +
+        "AND nanos < TIMESTAMP '2100-01-01 00:00:00' AND legacy IS NOT NULL",
+      "t" -> view)
+    val want = instants.filter(i => !i.isBefore(Instant.EPOCH) && i.isBefore(Instant.parse("2100-01-01T00:00:00Z")))
+    assertEquals(want.map(i => Seq(i, i, i)), found)
   }
 
   // ─────────────────────────────────────────────────────────────────────

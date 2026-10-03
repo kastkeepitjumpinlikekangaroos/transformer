@@ -30,8 +30,15 @@ private[parquet] object ParquetColumns {
     /** INT32 days since the epoch. */
     case object Dates extends Decoding(DataType.DateType)
     case object Longs extends Decoding(DataType.LongType)
-    /** INT64 microseconds since the epoch. */
-    case object Timestamps extends Decoding(DataType.TimestampType)
+    /** INT64 counting `unit`s since the epoch, read as the microseconds a
+      * TIMESTAMP holds: a MILLIS value times 1000, a MICROS one as is, and a
+      * NANOS one truncated to its microsecond, which before 1970 is the
+      * earlier one (`Math.floorDiv`), as `Instant.truncatedTo` truncates on
+      * every other path into the engine. Whether the file marks the value
+      * as UTC (`isAdjustedToUTC`) is not consulted: the engine has one
+      * timestamp type, a UTC instant, so a local date-time reads as the UTC
+      * instant with the same wall-clock reading. */
+    final case class Timestamps(unit: LogicalTypeAnnotation.TimeUnit) extends Decoding(DataType.TimestampType)
     /** The legacy 12-byte timestamp Hive, Impala and old Spark write. */
     case object Int96Timestamps extends Decoding(DataType.TimestampType)
     case object Floats extends Decoding(DataType.FloatType)
@@ -51,7 +58,8 @@ private[parquet] object ParquetColumns {
       case (PrimitiveTypeName.BOOLEAN, _) => Decoding.Booleans
       case (PrimitiveTypeName.INT32, _: LogicalTypeAnnotation.DateLogicalTypeAnnotation) => Decoding.Dates
       case (PrimitiveTypeName.INT32, _) => Decoding.Ints
-      case (PrimitiveTypeName.INT64, _: LogicalTypeAnnotation.TimestampLogicalTypeAnnotation) => Decoding.Timestamps
+      case (PrimitiveTypeName.INT64, ts: LogicalTypeAnnotation.TimestampLogicalTypeAnnotation) =>
+        Decoding.Timestamps(ts.getUnit)
       case (PrimitiveTypeName.INT64, _) => Decoding.Longs
       case (PrimitiveTypeName.INT96, _) => Decoding.Int96Timestamps
       case (PrimitiveTypeName.FLOAT, _) => Decoding.Floats

@@ -223,6 +223,23 @@ ship a fix or move something from "not done" to "done".
   request from the file's own column types, matched to the view's by name,
   and `parquet_external_format_test` pins each case against files parquet-mr
   wrote.
+- **A self-consistent round-trip cannot catch a wrong reading of an external
+  format.** The parquet reader never read a `TIMESTAMP`'s unit: every `INT64`
+  timestamp went straight into a `TimestampVector`, which holds microseconds,
+  so a `MILLIS` file (Spark writes one under
+  `spark.sql.parquet.outputTimestampType=TIMESTAMP_MILLIS`) read 1000x too
+  small, `2024-03-15` landing in January 1970, and a `NANOS` file (recent
+  pyarrow) 1000x too large. `parquet_roundtrip_test` passed throughout, because `ParquetWriter`
+  writes `MICROS`: a writer and reader that share an assumption agree with
+  each other however wrong it is. So a reader of a format someone else
+  writes needs fixtures someone else wrote; `read/parquet:external_parquet`
+  writes them with parquet-mr itself. The unit now travels with the column
+  (`ParquetColumns.Decoding.Timestamps`, decided per file, since one glob can
+  mix units). `NANOS` truncates with `Math.floorDiv`, not `/`: the two differ
+  before 1970, and only `floorDiv` agrees with how every other path into the
+  engine drops sub-microsecond digits (`Instant.truncatedTo` for CAST and
+  literals, `getNano / 1000` for CSV and `TimestampVector.setBoxed`), and
+  with the `INT96` decoder.
 - **Predicate pushdown into parquet is best-effort partial.** The translator
   in `ParquetFilterTranslator` handles `c <op> lit` and its swapped form,
   `c IS NULL` / `c IS NOT NULL`, `c IN (lit, lit, …)` / `c NOT IN (…)` over
@@ -233,10 +250,12 @@ ship a fix or move something from "not done" to "done".
   current translator can't safely approximate; let the residual FilterExec
   handle it. Computed expressions (`a - b > 0`), two-column predicates
   (`a > b`), `LIKE`, decimal columns, and `IN` with non-literal items are
-  also dropped from the AND-chain, and so is a timestamp literal: it arrives
-  as an `Instant` (`CURRENT_TIMESTAMP`), and a parquet TIMESTAMP's unit varies
-  by file while a legacy INT96 one is no INT64 at all, so a skip decided in
-  microseconds could over-prune. A date literal arrives as a `LocalDate`
+  also dropped from the AND-chain, and so is any comparison on a timestamp
+  column, whatever the literal (an `Instant` from `CURRENT_TIMESTAMP` or a
+  count): a parquet TIMESTAMP's statistics are in the unit its file stores,
+  which varies by file, and a legacy INT96 is no INT64 at all, so a skip
+  decided in microseconds could over-prune. `ts IS NULL` still pushes, since
+  null counts have no unit. A date literal arrives as a `LocalDate`
   (`CURRENT_DATE`, `DATE '...'`, `{d '...'}`, or a string literal compared with a
   date, all read at bind time) and is pushed as INT32 epoch days, which every
   parquet DATE is. A string literal beside a number is read as that number at
@@ -985,18 +1004,13 @@ binder does not read used to vanish" above) and byte-array and decimal
 comparison (see "Byte arrays, decimals and BIGINTs past 2^53 used to compare
 wrongly" above).
 
-- **The parquet reader ignores the timestamp unit and has no `DECIMAL`
-  mapping.** `TimestampLogicalTypeAnnotation.getUnit()` is never read and the
-  raw `INT64` goes straight into a micros-based `TimestampVector`, so an
-  externally-written `MILLIS` file reads 1000x too small and `NANOS` 1000x too
-  large. `ParquetWriter` emits `MICROS`, which is why `parquet_roundtrip_test`
-  passes: **a self-consistent round-trip cannot catch a wrong interpretation of
-  an external format.** Separately, no `DecimalLogicalTypeAnnotation` case
-  exists, so a parquet decimal falls through to its physical type - `IntType` or
-  `LongType` holding the unscaled value (`123.45` reads as `12345`), or
-  `BinaryType` holding raw two's-complement bytes. `ParquetWriter` cannot write
-  `DecimalType` at all, so neither can spill: an operator that spills a
-  `DECIMAL` column fails with `UnsupportedOperationException`. See
+- **The parquet reader has no `DECIMAL` mapping.** No
+  `DecimalLogicalTypeAnnotation` case exists, so a parquet decimal falls
+  through to its physical type - `IntType` or `LongType` holding the unscaled
+  value (`123.45` reads as `12345`), or `BinaryType` holding raw
+  two's-complement bytes. `ParquetWriter` cannot write `DecimalType` at all,
+  so neither can spill: an operator that spills a `DECIMAL` column fails with
+  `UnsupportedOperationException`. See
   [plan 03](../plans/robustness/03-parquet-external-format-fidelity.md).
 
 All three clusters hid for the same reason, and it is the lesson to carry: the

@@ -536,8 +536,9 @@ InputFilePath("data.csv",
   to match are skipped entirely. The original `FilterExec` still runs above
   the scan for per-row precision (stats can prove non-matching, never
   matching). Unsupported conjuncts (computed expressions, two-column
-  predicates, `LIKE`, `IN` with a NULL literal in the list, decimal columns)
-  drop through as residual filtering.
+  predicates, `LIKE`, `IN` with a NULL literal in the list, decimal columns,
+  and comparisons on a timestamp column, whose statistics are in whatever unit
+  its file stores) drop through as residual filtering.
 - Write: vectorized — custom `WriteSupport[BatchRowRef]` drives parquet-mr's
   `RecordConsumer` straight from `ColumnarBatch` vectors. No `SimpleGroup` per
   row, no `Integer`/`Long` boxing per cell. Compression defaults to `snappy`
@@ -547,6 +548,17 @@ InputFilePath("data.csv",
 - All transformer primitive types map: `Int`, `Long`, `Float`, `Double`,
   `Boolean`, `String` (UTF-8 logical type), `Binary`, `Date` (INT32 days),
   `Timestamp` (INT64 micros).
+- A parquet `TIMESTAMP` reads as the instant it stores, whatever its unit:
+  `MILLIS`, `MICROS` and `NANOS` alike, and the legacy 12-byte `INT96` too. A
+  `TIMESTAMP` holds microseconds, so a `NANOS` value is truncated to its
+  microsecond, as on every other path into the engine: a `TIMESTAMP` literal
+  with nine fractional digits truncates the same way, and before 1970 that is
+  the earlier microsecond (`1969-12-31 23:59:59.999998500` reads as
+  `...59.999998`). A `MILLIS` value with no microsecond value (more than about
+  292,000 years from 1970) fails the read, naming the column. A timestamp
+  marked local (`isAdjustedToUTC = false`) reads as the UTC instant with the
+  same wall-clock reading, since the engine has one timestamp type, an instant
+  in UTC; one written back out is marked UTC.
 
 Parquet is a first-class format — `job/` depends on the parquet read/write
 modules directly, so any user of the `DataJob` API gets parquet support out

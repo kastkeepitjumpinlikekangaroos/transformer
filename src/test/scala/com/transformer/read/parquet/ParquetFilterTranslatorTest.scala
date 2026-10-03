@@ -277,14 +277,18 @@ class ParquetFilterTranslatorTest {
     assertEquals(lessThan(day.toEpochDay.toInt).toString, asDate.toString)
   }
 
-  @Test def doesNotTranslateTimestampLiteral(): Unit = {
-    // A parquet TIMESTAMP's unit varies by file and INT96 is no INT64, so a
-    // skip decided in microseconds could be wrong; the residual filter decides.
+  @Test def doesNotTranslateTimestampComparisons(): Unit = {
+    // A parquet TIMESTAMP's statistics are in the unit its file stores, which
+    // varies by file (and INT96 is no INT64), so a skip decided in
+    // microseconds could be wrong; the residual filter decides. That holds
+    // for a count of microseconds as much as for an Instant.
     val now = java.time.Instant.parse("2026-01-01T00:00:00Z")
-    assertEquals(None, ParquetFilterTranslator.translate(
-      BinOpExpr(">", col("ts", DataType.TimestampType), lit(now, DataType.TimestampType), DataType.BooleanType)))
-    assertEquals(None, ParquetFilterTranslator.translate(
-      InListExpr(col("ts", DataType.TimestampType), Seq(lit(now, DataType.TimestampType)), negated = false)))
+    for (v <- Seq[Any](now, java.lang.Long.valueOf(1767225600000000L))) {
+      assertEquals(None, ParquetFilterTranslator.translate(
+        BinOpExpr(">", col("ts", DataType.TimestampType), lit(v, DataType.TimestampType), DataType.BooleanType)))
+      assertEquals(None, ParquetFilterTranslator.translate(
+        InListExpr(col("ts", DataType.TimestampType), Seq(lit(v, DataType.TimestampType)), negated = false)))
+    }
   }
 
   @Test def dateLiteralPushdownMatchesBruteForce(): Unit = {

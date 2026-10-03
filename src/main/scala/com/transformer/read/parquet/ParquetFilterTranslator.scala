@@ -44,6 +44,8 @@ import org.apache.parquet.io.api.Binary
   *     can't safely approximate (see [[translateInList]] for the bailout
   *     and the test that pins the behaviour).
   *   - `IN (…)` with non-literal items
+  *   - comparisons on a timestamp column (`IS NULL` still pushes): its
+  *     statistics are in whatever unit its file stores
   *   - decimal columns
   *
   * Returns None when nothing could be pushed.
@@ -198,12 +200,8 @@ object ParquetFilterTranslator {
           case ">=" => Some(FilterApi.gtEq(col, lit))
           case _ => None
         }
-      case DataType.LongType | DataType.TimestampType =>
+      case DataType.LongType =>
         val col = FilterApi.longColumn(name)
-        // A timestamp literal (CURRENT_TIMESTAMP, `TIMESTAMP '...'`) arrives as
-        // an Instant, and it is not pushed: a parquet TIMESTAMP's unit varies by file, and a legacy
-        // INT96 one is no INT64 at all, so a skip decided in microseconds could
-        // be wrong. The residual filter decides those rows.
         val lit = java.lang.Long.valueOf(value match {
           case n: Number => n.longValue
           case _ => return None
@@ -269,6 +267,12 @@ object ParquetFilterTranslator {
           case "!=" | "<>" => Some(FilterApi.notEq(col, lit))
           case _ => None
         }
+      // A TIMESTAMP compares with nothing here, whatever the literal. Its
+      // statistics are in the unit its file stores (MILLIS, MICROS or NANOS,
+      // or a legacy INT96 that is no INT64 at all), which varies by file, so
+      // a bound in the engine's microseconds would misjudge every file not
+      // stored in MICROS. The residual filter decides those rows.
+      case DataType.TimestampType => None
       case _: DataType.DecimalType => None
       case DataType.NullType => None
     }

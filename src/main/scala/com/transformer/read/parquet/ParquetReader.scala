@@ -15,6 +15,7 @@ import org.apache.parquet.filter2.statisticslevel.StatisticsFilter
 import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.hadoop.metadata.{BlockMetaData, ColumnChunkMetaData}
 import org.apache.parquet.hadoop.util.HadoopInputFile
+import org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit
 import org.apache.parquet.schema.MessageType
 
 import java.nio.file.Path
@@ -334,8 +335,9 @@ final class ParquetPartitionIterator(
   // Open once: same handle drives schema lookup, the column request,
   // skipNextRowGroup seeks, and the eventual readNextRowGroup loop.
   private val reader: ParquetFileReader = ParquetFileReader.open(hif)
+  private val fileLabel: String = hif.getPath.toUri.getPath
   private val columns: ParquetColumns.FileColumns =
-    try ParquetColumns.resolve(schema, reader.getFooter.getFileMetaData.getSchema, hif.getPath.toUri.getPath)
+    try ParquetColumns.resolve(schema, reader.getFooter.getFileMetaData.getSchema, fileLabel)
     catch { case e: Throwable => reader.close(); throw e }
   // `setRequestedSchema` must come before any read/skip — it tells parquet-mr
   // which column chunks to actually fetch. The skip loop then advances the
@@ -514,13 +516,35 @@ final class ParquetPartitionIterator(
           else v.set(r, cr.getLong)
           cr.consume(); r += 1
         }
-      case ParquetColumns.Decoding.Timestamps =>
+      case ParquetColumns.Decoding.Timestamps(unit) =>
         val v = vec.asInstanceOf[TimestampVector]
         var r = 0
-        while (r < rowCount) {
-          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
-          else v.set(r, cr.getLong)
-          cr.consume(); r += 1
+        unit match {
+          case TimeUnit.MICROS =>
+            while (r < rowCount) {
+              if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+              else v.set(r, cr.getLong)
+              cr.consume(); r += 1
+            }
+          case TimeUnit.MILLIS =>
+            while (r < rowCount) {
+              if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+              else {
+                val millis = cr.getLong
+                if (millis > ParquetPartitionIterator.MaxMillis || millis < ParquetPartitionIterator.MinMillis)
+                  throw new ArithmeticException(
+                    s"Parquet file '$fileLabel' column '${schema.fields(col).name}' holds TIMESTAMP(MILLIS) " +
+                      s"$millis, which is past the range of a timestamp in microseconds")
+                v.set(r, millis * 1000L)
+              }
+              cr.consume(); r += 1
+            }
+          case TimeUnit.NANOS =>
+            while (r < rowCount) {
+              if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+              else v.set(r, Math.floorDiv(cr.getLong, 1000L))
+              cr.consume(); r += 1
+            }
         }
       case ParquetColumns.Decoding.Int96Timestamps =>
         // parquet-mr surfaces the 12 bytes as a Binary; `int96ToMicros`
@@ -601,6 +625,11 @@ object ParquetPartitionIterator {
   // Parquet's INT96 timestamp encoding: 8 bytes nanos-of-day (little-endian)
   // followed by 4 bytes julian day. Convert to micros since epoch the same
   // way Spark / Hive / DuckDB do.
+  // The TIMESTAMP(MILLIS) values that have a microsecond value: times 1000,
+  // anything past these overflows a long.
+  private[parquet] val MaxMillis: Long = Long.MaxValue / 1000L
+  private[parquet] val MinMillis: Long = Long.MinValue / 1000L
+
   private val JulianEpochOffsetDays: Long = 2440588L  // 1970-01-01 in julian-day
   private val MicrosPerDay: Long = 86400000000L
   private val NanosPerMicro: Long = 1000L
