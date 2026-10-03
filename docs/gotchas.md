@@ -138,9 +138,12 @@ ship a fix or move something from "not done" to "done".
   `Vector[PrimitiveType].asJava` gives `java.util.List[PrimitiveType]`.**
   Scala won't unify because of Java type invariance. `ParquetSchema.toMessageType`
   maps `_.asInstanceOf[Type]` first.
-- **No circular module deps.** `read/parquet` depends on `write/parquet` for
-  the shared `ParquetSchema` converter; `job/` depends on both. Neither
-  parquet module depends on `job/`, so the cycle stays open.
+- **No circular module deps.** `read/parquet` and `write/parquet` do not
+  depend on each other, and `job/` depends on both. Each holds its own half of
+  the type mapping on purpose: `ParquetSchema` is what transformer writes, and
+  `ParquetColumns` reads whatever the file says, which for a file another tool
+  wrote is often something `ParquetSchema` would never produce (see "A
+  parquet scan reads each file's columns as that file stores them" below).
 - **CSV writer's `needsQuotingChars` must be initialized before the header is
   written.** Class-body order matters; put it above the `if (options.header)`
   block.
@@ -197,10 +200,29 @@ ship a fix or move something from "not done" to "done".
   uses `ColumnReadStoreImpl` to expose one `ColumnReader` per column per row
   group and copies values straight into `ColumnarBatch` primitive vectors —
   no `Group`/`SimpleGroup` allocations, no `Integer`/`Long` boxing per cell.
-  If you add a new `DataType`, extend `decodeColumn`'s outer match on
-  `PrimitiveTypeName` (and `BatchWriteSupport.write` on the encode side);
-  forgetting either side leaves a `MatchError` at runtime, not a compile
-  failure.
+  To read a new kind of column, add a `ParquetColumns.Decoding` case, the
+  annotation that selects it in `ParquetColumns.decoding`, and its loop in
+  `decodeColumn`; to write a new `DataType`, extend `ParquetSchema.toMessageType`
+  and `BatchWriteSupport.write`. The decode match is over a sealed type, so a
+  missing loop is a compiler warning; a missing write case is a runtime
+  `UnsupportedOperationException`.
+- **A parquet scan reads each file's columns as that file stores them.**
+  `ParquetPartitionIterator` asks parquet-mr for the view's columns with
+  `setRequestedSchema`, and parquet-mr decodes each column chunk as whatever
+  type the request names, not as the file stores it. The request used to be
+  rebuilt from the view's engine types with the writer's mapping
+  (`ParquetSchema.toMessageType`), so a projected scan — any query that reads
+  some of a file's columns — decoded an `INT96` timestamp as `INT64` (dates
+  thousands of years off) and threw on any `FIXED_LEN_BYTE_ARRAY` column it
+  requested as `BINARY`, while scans of the whole file, which skipped the
+  request, were fine. And with no request at all, a whole-file scan decoded
+  columns by position, so a glob whose second file put two `INT32` columns in
+  the other order swapped their values silently. Every file written by
+  transformer's own writer hid both: they store exactly what the mapping
+  says, in the first file's order. `ParquetColumns.resolve` now builds the
+  request from the file's own column types, matched to the view's by name,
+  and `parquet_external_format_test` pins each case against files parquet-mr
+  wrote.
 - **Predicate pushdown into parquet is best-effort partial.** The translator
   in `ParquetFilterTranslator` handles `c <op> lit` and its swapped form,
   `c IS NULL` / `c IS NOT NULL`, `c IN (lit, lit, …)` / `c NOT IN (…)` over
@@ -298,7 +320,7 @@ ship a fix or move something from "not done" to "done".
   result stays correct, just with one extra column per name-collision.
   Pruning is still skipped under unions and window operators (their output
   positions interact with sibling schemas / synthetic `_winN` columns).
-  Parquet pushes the projection via `parquet.read.schema`; CSV (and any
+  Parquet pushes the projection via `setRequestedSchema`; CSV (and any
   other view leaving the default `None`) is a no-op. The shaved decode
   cost is 5–20× on wide schemas with one big unused column — the snapshots
   dataset's `data` blob is the canonical case. When the consumer references

@@ -2,54 +2,20 @@ package com.transformer.write.parquet
 
 import com.transformer.core._
 
-import org.apache.parquet.schema.{LogicalTypeAnnotation, MessageType, PrimitiveType, Type, Types => PTypes}
+import org.apache.parquet.schema.{LogicalTypeAnnotation, MessageType, Type, Types => PTypes}
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 
 import scala.jdk.CollectionConverters._
 
-/** Schema conversion between Parquet's [[MessageType]] and our [[Schema]].
+/** The parquet schema transformer writes for a [[Schema]].
   *
-  * v1 only handles flat (non-nested) schemas. Nested groups/lists/maps raise.
+  * Reading goes the other way through `read/parquet`'s `ParquetColumns`, which
+  * takes each file's types from that file rather than from this mapping: files
+  * written by other tools store the same engine types in other ways.
   */
 object ParquetSchema {
 
-  /** Parquet → Transformer. */
-  def toSchema(mt: MessageType): Schema = {
-    val fields = mt.getFields.asScala.map(field).toVector
-    Schema(fields)
-  }
-
-  private def field(t: Type): Field = {
-    if (!t.isPrimitive) throw new UnsupportedOperationException(
-      s"Nested Parquet types not supported in v1 (field='${t.getName}', kind='${t.toString}')"
-    )
-    val pt = t.asPrimitiveType()
-    val nullable = t.isRepetition(Type.Repetition.OPTIONAL) || t.isRepetition(Type.Repetition.REPEATED)
-    Field(t.getName, primitiveToDataType(pt), nullable)
-  }
-
-  private def primitiveToDataType(pt: PrimitiveType): DataType = {
-    val name = pt.getPrimitiveTypeName
-    val logical = pt.getLogicalTypeAnnotation
-    (name, logical) match {
-      case (PrimitiveTypeName.BOOLEAN, _) => DataType.BooleanType
-      case (PrimitiveTypeName.INT32, _: LogicalTypeAnnotation.DateLogicalTypeAnnotation) => DataType.DateType
-      case (PrimitiveTypeName.INT32, _) => DataType.IntType
-      case (PrimitiveTypeName.INT64, _: LogicalTypeAnnotation.TimestampLogicalTypeAnnotation) => DataType.TimestampType
-      case (PrimitiveTypeName.INT64, _) => DataType.LongType
-      case (PrimitiveTypeName.FLOAT, _) => DataType.FloatType
-      case (PrimitiveTypeName.DOUBLE, _) => DataType.DoubleType
-      case (PrimitiveTypeName.BINARY, _: LogicalTypeAnnotation.StringLogicalTypeAnnotation) => DataType.StringType
-      case (PrimitiveTypeName.BINARY, _: LogicalTypeAnnotation.EnumLogicalTypeAnnotation) => DataType.StringType
-      case (PrimitiveTypeName.BINARY, null) => DataType.BinaryType
-      case (PrimitiveTypeName.BINARY, _) => DataType.BinaryType
-      case (PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY, _) => DataType.BinaryType
-      case (PrimitiveTypeName.INT96, _) => DataType.TimestampType
-      case _ => throw new UnsupportedOperationException(s"Unsupported Parquet type: $name / $logical")
-    }
-  }
-
-  /** Transformer → Parquet. */
+  /** The parquet schema of a file written from `schema`. */
   def toMessageType(schema: Schema, rootName: String = "row"): MessageType = {
     val ptypes = schema.fields.map { f =>
       val rep = if (f.nullable) Type.Repetition.OPTIONAL else Type.Repetition.REQUIRED

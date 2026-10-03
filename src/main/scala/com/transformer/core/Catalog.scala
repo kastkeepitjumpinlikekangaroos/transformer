@@ -30,7 +30,7 @@ trait CatalogView {
     *
     * Used by the SQL planner's column-pruning pass: scans under analytical
     * queries skip the wide JSON-blob columns the query never references.
-    * Parquet implements it via `parquet.read.schema`; row-oriented views
+    * Parquet implements it with `setRequestedSchema`; row-oriented views
     * (CSV today) leave the default None.
     *
     * `names` must be a subset of this view's [[schema.fieldNames]]. Order in

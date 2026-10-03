@@ -521,6 +521,14 @@ InputFilePath("data.csv",
   straight into `ColumnarBatch` primitive vectors. No `Group`/`SimpleGroup`
   objects allocated per row. Row groups are packed into ~256MB partitions so a
   multi-GB single file still saturates worker threads.
+- A glob of parquet files is one view whose schema is the first file's. Every
+  other file's columns are found **by name** and decoded as that file declares
+  them, so the files may order their columns differently, add columns of their
+  own (which the view does not see), allow NULLs the first does not (the view
+  then allows them), or store a column another way that reads as the same type
+  (a `TIMESTAMP` as `INT96` in one file and as `INT64` in the next). A file
+  that lacks one of the first file's columns, or reads one as another type,
+  fails the read when the view is opened, naming the file and the column.
 - Read predicate pushdown: `WHERE c <op> lit`, `c IS NULL` / `c IS NOT NULL`,
   `c IN (lit, lit, …)` / `c NOT IN (…)`, `c BETWEEN lo AND hi`, and
   `NOT`/`AND`/`OR` over those forms are translated to parquet-mr's `FilterApi`
@@ -924,9 +932,10 @@ JDK 21 or newer (tested through JDK 25).
   peers the way the standard requires. `COVAR_SAMP`/`COVAR_POP`/`CORR` are
   `GROUP BY` only.
 - **Cloud paths recognized but unimplemented**: see v1.1 above.
-- **Schema is inferred from the first file** in a glob; mixed schemas across
+- **A CSV glob's schema is inferred from its first file**; mixed schemas across
   files in the same view are not validated. Explicit schemas via the
-  `inferSchema = false` route avoid this.
+  `inferSchema = false` route avoid this. A parquet glob checks every file
+  against the first when it is opened (see [Parquet](#parquet)).
 - **`DECIMAL` compares exactly, but has no exact arithmetic.** `SUM` and `AVG`
   over a `DECIMAL` column, and the math functions (`ABS`, `ROUND`, ...), compute
   in `DOUBLE` and lose every digit past its precision; `SUM` hands the rounded

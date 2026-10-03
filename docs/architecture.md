@@ -40,9 +40,9 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 | `core/` | Shared types crossed by every module. Zero deps. | `DataType.scala`, `Schema.scala`, `ColumnarBatch.scala`, `Row.scala`, `Catalog.scala`, `Scheduler.scala` (the shared `ForkJoinPool` every parallel call site funnels through), `SqlExecutor.scala` (`SqlExecutorRegistry`) |
 | `temporal/` | Date/time template variables. No deps. | `TemporalVariables.scala`, `TemplateRenderer.scala` |
 | `read/csv/` | CSV input. Stdlib only. | `CsvOptions.scala`, `CsvRowParser.scala` (state machine), `CsvSchemaInferer.scala`, `PathGlob.scala`, `CsvReader.scala` |
-| `read/parquet/` | Parquet input. Depends on `parquet-hadoop` + minimal Hadoop. | `ParquetReader.scala` |
+| `read/parquet/` | Parquet input. Depends on `parquet-hadoop` + minimal Hadoop. | `ParquetReader.scala`, `ParquetColumns.scala` (the type each parquet column reads as and how its values decode, decided per file from that file's footer; matches a view's columns to each file's by name), `ParquetFilterTranslator.scala` |
 | `write/csv/` | CSV output. Stdlib only. | `CsvWriter.scala` |
-| `write/parquet/` | Parquet output + shared `ParquetSchema` converter. | `ParquetSchema.scala`, `ParquetWriter.scala` |
+| `write/parquet/` | Parquet output. | `ParquetSchema.scala` (the parquet schema transformer writes for a `Schema`), `ParquetWriter.scala` |
 | `sql/parse/` | JSqlParser façade. | `SqlParser.scala` |
 | `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `PendingCteView.scala` (placeholder for an unresolved CTE reference), `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo), `UnsupportedClauses.scala` (the rejection pass that runs before binding, and its audit of every JSqlParser getter the binder does not read — see §10) |
 | `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala`, `SortExec.scala`, `DistinctExec.scala`, `UnionExec.scala`, `WindowExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala`, `CteResolver.scala` (inline-vs-materialize CTE pass + `PhysicalPlanView`), `SqlEngine.scala` |
@@ -566,6 +566,18 @@ Both directions skip the `Group`/`SimpleGroup` row-object model that
   (2.7B rows × ~12 columns) this is the dominant speedup over the old
   `RecordReader[Group]` path — billions of `SimpleGroup` allocations + cell-
   level `Integer`/`Long` boxing were the bottleneck.
+- Which loop a column gets is decided per file. `ParquetColumns.resolve`
+  finds the view's columns in the file by name and gives each a `Decoding`
+  from that file's own physical type and annotation, and the iterator asks
+  parquet-mr for exactly those columns (`setRequestedSchema`) as the file
+  types them. The request has to come from the file: parquet-mr decodes a
+  column chunk as whatever type the request names, so a request rebuilt from
+  the view's engine types (what `ParquetSchema` would write) decodes an
+  `INT96` chunk as `INT64` and a `FIXED_LEN_BYTE_ARRAY` one as `BINARY`. The
+  same lookup lets a glob's files order their columns differently and store a
+  column in different ways; `ParquetReader.readFooters` checks every file
+  against the first file's schema up front, so a file that lacks a column or
+  reads one as another type fails when the view opens.
 - Write: a custom `BatchWriteSupport` drives parquet-mr's `RecordConsumer`
   directly from the `ColumnarBatch` vectors. Each batch row maps to one
   `writer.write()` call (parquet-mr needs that 1:1 mapping so its

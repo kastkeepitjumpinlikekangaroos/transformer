@@ -3,7 +3,6 @@ package com.transformer.read.parquet
 import com.transformer.core._
 import com.transformer.read.csv.PathGlob
 import com.transformer.sql.plan.Expr
-import com.transformer.write.parquet.ParquetSchema
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{Path => HPath}
@@ -16,13 +15,11 @@ import org.apache.parquet.filter2.statisticslevel.StatisticsFilter
 import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.hadoop.metadata.{BlockMetaData, ColumnChunkMetaData}
 import org.apache.parquet.hadoop.util.HadoopInputFile
-import org.apache.parquet.schema.{MessageType, PrimitiveType, Type}
-import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
+import org.apache.parquet.schema.MessageType
 
 import java.nio.file.Path
 import java.util.concurrent.Callable
 import scala.collection.mutable
-import scala.jdk.CollectionConverters._
 
 /** Reads a folder/glob of Parquet files as a single named view.
   *
@@ -79,7 +76,7 @@ final class ParquetReader private (
 
   def readPartition(p: Int): Iterator[ColumnarBatch] = {
     val m = partitions(p)
-    new ParquetPartitionIterator(m.hif, schema, batchSize, projectedNames.isDefined,
+    new ParquetPartitionIterator(m.hif, schema, batchSize,
       m.startRowGroup, m.endRowGroup, pushdownFilter, null)
   }
 
@@ -96,7 +93,7 @@ final class ParquetReader private (
     // The check fires once per partition; the per-row-group skip counting
     // happens inside ParquetPartitionIterator's loadNextGroup.
     if (pushdownFilter.isDefined) recorder.addPredicatePushedDown(1L)
-    new ParquetPartitionIterator(m.hif, schema, batchSize, projectedNames.isDefined,
+    new ParquetPartitionIterator(m.hif, schema, batchSize,
       m.startRowGroup, m.endRowGroup, pushdownFilter, recorder)
   }
 
@@ -227,28 +224,33 @@ object ParquetReader {
   /** Open every file in parallel, decode the footer once, and chunk row groups
     * into partitions. Reused by `withProjectedColumns` so a pruned variant
     * doesn't re-open the world.
+    *
+    * The view's schema is the first file's. Every file is checked against it
+    * here, so a glob whose files disagree fails when it is opened, naming the
+    * file, rather than partway through a scan.
     */
   private def readFooters(
       files: IndexedSeq[Path],
       targetBytesPerPartition: Long
   ): (Schema, IndexedSeq[PartitionMeta]) = {
     val conf = defaultConf
-    val tasks: Seq[Callable[(Schema, IndexedSeq[PartitionMeta])]] = files.map { f =>
-      new Callable[(Schema, IndexedSeq[PartitionMeta])] {
-        def call(): (Schema, IndexedSeq[PartitionMeta]) = {
+    val tasks: Seq[Callable[(MessageType, IndexedSeq[PartitionMeta])]] = files.map { f =>
+      new Callable[(MessageType, IndexedSeq[PartitionMeta])] {
+        def call(): (MessageType, IndexedSeq[PartitionMeta]) = {
           val hif = HadoopInputFile.fromPath(new HPath(f.toUri), conf)
           val reader = ParquetFileReader.open(hif)
           try {
-            val schema = ParquetSchema.toSchema(reader.getFooter.getFileMetaData.getSchema)
             val blocks = reader.getRowGroups
             val parts = packRowGroups(hif, blocks, targetBytesPerPartition)
-            (schema, parts)
+            (reader.getFooter.getFileMetaData.getSchema, parts)
           } finally reader.close()
         }
       }
     }
     val results = Scheduler.submitAndAwaitAll(tasks)
-    val schema = results.head._1
+    val footers = files.map(_.toString).zip(results.map(_._1))
+    val schema = ParquetColumns.viewSchema(footers)
+    footers.foreach { case (label, mt) => ParquetColumns.resolve(schema, mt, label) }
     val allPartitions = results.flatMap(_._2).toIndexedSeq
     (schema, allPartitions)
   }
@@ -308,10 +310,12 @@ object ParquetReader {
   * of those objects are the dominant cost on a 2.7B-row scan and the entire
   * reason this rewrite exists.
   *
-  * If `projected = true`, `schema` is a strict subset of the file's column set.
-  * We push the projection down via `setRequestedSchema` so parquet-mr skips
-  * the unselected column chunks entirely (intersection resolves by name; types
-  * come from the file).
+  * `schema` is the view's (all of the first file's columns, or the projected
+  * subset). Its columns are found in this file by name and decoded as this
+  * file declares them, and only those column chunks are fetched: the request
+  * goes to parquet-mr through `setRequestedSchema`, built from this file's own
+  * column types, since parquet-mr decodes a chunk as whatever type the request
+  * names.
   *
   * If `pushdownFilter` is set, each candidate row group's column statistics
   * are checked against the filter before opening it; groups proven not to
@@ -321,33 +325,25 @@ final class ParquetPartitionIterator(
     hif: org.apache.parquet.hadoop.util.HadoopInputFile,
     schema: Schema,
     batchSize: Int,
-    projected: Boolean = false,
     startRowGroup: Int = 0,
     endRowGroup: Int = Int.MaxValue,
     pushdownFilter: Option[FilterPredicate] = None,
     metricsRecorder: ParquetReader.MetricsRecorder = null
 ) extends Iterator[ColumnarBatch] {
 
-  // Open once: same handle drives schema lookup, projection pushdown,
+  // Open once: same handle drives schema lookup, the column request,
   // skipNextRowGroup seeks, and the eventual readNextRowGroup loop.
   private val reader: ParquetFileReader = ParquetFileReader.open(hif)
-  private val effectiveMessageType: MessageType = {
-    val fileSchema = reader.getFooter.getFileMetaData.getSchema
-    if (projected) {
-      // The projected schema we already filtered out of the file schema. Pass
-      // it straight to parquet-mr — `setRequestedSchema` intersects by name
-      // against the file schema internally, so we don't need to do that work
-      // ourselves.
-      ParquetSchema.toMessageType(schema)
-    } else fileSchema
-  }
+  private val columns: ParquetColumns.FileColumns =
+    try ParquetColumns.resolve(schema, reader.getFooter.getFileMetaData.getSchema, hif.getPath.toUri.getPath)
+    catch { case e: Throwable => reader.close(); throw e }
   // `setRequestedSchema` must come before any read/skip — it tells parquet-mr
   // which column chunks to actually fetch. The skip loop then advances the
   // row-group cursor without reading data (O(1) metadata advance per call) so
   // we can land on `startRowGroup` without paying the full read cost the old
   // `HParquetReader` approach incurred.
   locally {
-    if (projected) reader.setRequestedSchema(effectiveMessageType)
+    reader.setRequestedSchema(columns.requested)
     var i = 0
     while (i < startRowGroup) { reader.skipNextRowGroup(); i += 1 }
   }
@@ -357,16 +353,15 @@ final class ParquetPartitionIterator(
   // it by absolute row-group position without touching column data.
   private val allBlocks: java.util.List[BlockMetaData] = reader.getRowGroups
 
-  // Column descriptors of the effective (possibly projected) schema, indexed
-  // in the same order as the output ColumnarBatch's vectors.
+  // Column descriptors of the requested columns, indexed in the same order as
+  // the output ColumnarBatch's vectors.
   private val columnDescriptors: Array[ColumnDescriptor] = {
-    val mc = effectiveMessageType.getColumns
+    val mc = columns.requested.getColumns
     Array.tabulate(mc.size)(i => mc.get(i))
   }
   private val maxDefinitionLevels: Array[Int] =
     columnDescriptors.map(_.getMaxDefinitionLevel)
-  private val primitiveTypeNames: Array[PrimitiveTypeName] =
-    columnDescriptors.map(_.getPrimitiveType.getPrimitiveTypeName)
+  private val decodings: Array[ParquetColumns.Decoding] = columns.decodings
   // Per-column String intern cache. parquet-mr decoders return a fresh
   // `Binary` per row and converting that to a `String` via `toStringUsingUTF8`
   // allocates a brand-new `String` on every call. In ETL workloads it's
@@ -429,7 +424,7 @@ final class ParquetPartitionIterator(
         val crs = new ColumnReadStoreImpl(
           pages,
           ParquetPartitionIterator.NoopGroupConverter,
-          effectiveMessageType,
+          columns.requested,
           reader.getFileMetaData.getCreatedBy
         )
         columnReaders = columnDescriptors.map(crs.getColumnReader)
@@ -477,17 +472,17 @@ final class ParquetPartitionIterator(
 
   /** Drain `rowCount` values from `columnReaders(col)` into `batch.column(col)`.
     *
-    * The hot inner loop is dispatched once per column (not per row) on the
-    * primitive type, then specialized to the matching primitive vector. Each
-    * row is one definition-level check + one typed copy — no boxing, no
-    * `Group` allocation.
+    * The hot inner loop is dispatched once per column (not per row) on how
+    * this file stores the column, then specialized to the matching primitive
+    * vector. Each row is one definition-level check + one typed copy — no
+    * boxing, no `Group` allocation.
     */
   private def decodeColumn(batch: ColumnarBatch, col: Int, rowCount: Int): Unit = {
     val cr = columnReaders(col)
     val maxDef = maxDefinitionLevels(col)
     val vec = batch.column(col)
-    primitiveTypeNames(col) match {
-      case PrimitiveTypeName.BOOLEAN =>
+    decodings(col) match {
+      case ParquetColumns.Decoding.Booleans =>
         val v = vec.asInstanceOf[BooleanVector]
         var r = 0
         while (r < rowCount) {
@@ -495,50 +490,41 @@ final class ParquetPartitionIterator(
           else v.set(r, cr.getBoolean)
           cr.consume(); r += 1
         }
-      case PrimitiveTypeName.INT32 =>
-        schema.fields(col).dataType match {
-          case DataType.DateType =>
-            val v = vec.asInstanceOf[DateVector]
-            var r = 0
-            while (r < rowCount) {
-              if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
-              else v.set(r, cr.getInteger)
-              cr.consume(); r += 1
-            }
-          case _ =>
-            val v = vec.asInstanceOf[IntVector]
-            var r = 0
-            while (r < rowCount) {
-              if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
-              else v.set(r, cr.getInteger)
-              cr.consume(); r += 1
-            }
+      case ParquetColumns.Decoding.Ints =>
+        val v = vec.asInstanceOf[IntVector]
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else v.set(r, cr.getInteger)
+          cr.consume(); r += 1
         }
-      case PrimitiveTypeName.INT64 =>
-        schema.fields(col).dataType match {
-          case DataType.TimestampType =>
-            val v = vec.asInstanceOf[TimestampVector]
-            var r = 0
-            while (r < rowCount) {
-              if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
-              else v.set(r, cr.getLong)
-              cr.consume(); r += 1
-            }
-          case _ =>
-            val v = vec.asInstanceOf[LongVector]
-            var r = 0
-            while (r < rowCount) {
-              if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
-              else v.set(r, cr.getLong)
-              cr.consume(); r += 1
-            }
+      case ParquetColumns.Decoding.Dates =>
+        val v = vec.asInstanceOf[DateVector]
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else v.set(r, cr.getInteger)
+          cr.consume(); r += 1
         }
-      case PrimitiveTypeName.INT96 =>
-        // INT96 is a legacy 12-byte timestamp encoding. We expose it as
-        // TimestampType but parquet-mr surfaces it as Binary. Defer to the
-        // Binary→Long conversion handled by the row-converter path elsewhere
-        // by reading the raw bytes and reinterpreting as a long
-        // (julian-day + nanos-of-day → micros-since-epoch).
+      case ParquetColumns.Decoding.Longs =>
+        val v = vec.asInstanceOf[LongVector]
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else v.set(r, cr.getLong)
+          cr.consume(); r += 1
+        }
+      case ParquetColumns.Decoding.Timestamps =>
+        val v = vec.asInstanceOf[TimestampVector]
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else v.set(r, cr.getLong)
+          cr.consume(); r += 1
+        }
+      case ParquetColumns.Decoding.Int96Timestamps =>
+        // parquet-mr surfaces the 12 bytes as a Binary; `int96ToMicros`
+        // reads the Julian day and nanoseconds of the day out of them.
         val v = vec.asInstanceOf[TimestampVector]
         var r = 0
         while (r < rowCount) {
@@ -546,7 +532,7 @@ final class ParquetPartitionIterator(
           else v.set(r, ParquetPartitionIterator.int96ToMicros(cr.getBinary.getBytes))
           cr.consume(); r += 1
         }
-      case PrimitiveTypeName.FLOAT =>
+      case ParquetColumns.Decoding.Floats =>
         val v = vec.asInstanceOf[FloatVector]
         var r = 0
         while (r < rowCount) {
@@ -554,7 +540,7 @@ final class ParquetPartitionIterator(
           else v.set(r, cr.getFloat)
           cr.consume(); r += 1
         }
-      case PrimitiveTypeName.DOUBLE =>
+      case ParquetColumns.Decoding.Doubles =>
         val v = vec.asInstanceOf[DoubleVector]
         var r = 0
         while (r < rowCount) {
@@ -562,43 +548,40 @@ final class ParquetPartitionIterator(
           else v.set(r, cr.getDouble)
           cr.consume(); r += 1
         }
-      case PrimitiveTypeName.BINARY | PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY =>
-        schema.fields(col).dataType match {
-          case DataType.StringType =>
-            val v = vec.asInstanceOf[StringVector]
-            // Lazily build the row-group-scoped intern cache. After the first
-            // ~K distinct values are seen the cache hits dominate and we save
-            // a `String` allocation per row. For columns with very high
-            // distinct cardinality (a UUID per row, say) the cache stays
-            // ineffective but the overhead is one HashMap lookup per row —
-            // negligible next to the avoided allocation on the common case.
-            var cache = stringInternCache(col)
-            if (cache == null) {
-              cache = new java.util.HashMap[org.apache.parquet.io.api.Binary, String]()
-              stringInternCache(col) = cache
+      case ParquetColumns.Decoding.Strings =>
+        val v = vec.asInstanceOf[StringVector]
+        // Lazily build the row-group-scoped intern cache. After the first
+        // ~K distinct values are seen the cache hits dominate and we save
+        // a `String` allocation per row. For columns with very high
+        // distinct cardinality (a UUID per row, say) the cache stays
+        // ineffective but the overhead is one HashMap lookup per row —
+        // negligible next to the avoided allocation on the common case.
+        var cache = stringInternCache(col)
+        if (cache == null) {
+          cache = new java.util.HashMap[org.apache.parquet.io.api.Binary, String]()
+          stringInternCache(col) = cache
+        }
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else {
+            val bin = cr.getBinary
+            var s = cache.get(bin)
+            if (s == null) {
+              s = bin.toStringUsingUTF8
+              cache.put(bin, s)
             }
-            var r = 0
-            while (r < rowCount) {
-              if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
-              else {
-                val bin = cr.getBinary
-                var s = cache.get(bin)
-                if (s == null) {
-                  s = bin.toStringUsingUTF8
-                  cache.put(bin, s)
-                }
-                v.set(r, s)
-              }
-              cr.consume(); r += 1
-            }
-          case _ =>
-            val v = vec.asInstanceOf[BinaryVector]
-            var r = 0
-            while (r < rowCount) {
-              if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
-              else v.set(r, cr.getBinary.getBytes)
-              cr.consume(); r += 1
-            }
+            v.set(r, s)
+          }
+          cr.consume(); r += 1
+        }
+      case ParquetColumns.Decoding.Bytes =>
+        val v = vec.asInstanceOf[BinaryVector]
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else v.set(r, cr.getBinary.getBytes)
+          cr.consume(); r += 1
         }
     }
   }

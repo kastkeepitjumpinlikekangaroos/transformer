@@ -113,6 +113,13 @@ pushdown reaches every referenced column.
    to recognize the extension.
 5. Update [`README.md`'s "Supported file formats"](../README.md#supported-file-formats)
    and the module map in [`docs/architecture.md`](architecture.md#module-map).
+6. Test the reader against files **some other tool wrote**, not only against
+   your own writer's output. A writer and reader that share an assumption
+   agree with each other however wrong it is: the parquet reader read every
+   `MILLIS` timestamp 1000x too small, and no test noticed, because every
+   fixture came from `ParquetWriter`, which writes `MICROS`. For parquet,
+   `read/parquet:external_parquet` writes any schema with parquet-mr itself
+   (see [testing.md](testing.md#test-inventory)); give a new format the same.
 
 ## Add a config field to the directory loader
 

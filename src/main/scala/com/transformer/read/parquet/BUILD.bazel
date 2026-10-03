@@ -10,7 +10,6 @@ scala_library(
         # sql/plan supplies Expr — needed by ParquetFilterTranslator to lower a
         # bound transformer predicate into parquet-mr's FilterApi.
         "//src/main/scala/com/transformer/sql/plan",
-        "//src/main/scala/com/transformer/write/parquet",
         "@maven//:commons_collections_commons_collections",
         "@maven//:org_apache_hadoop_hadoop_common",
         "@maven//:org_apache_hadoop_hadoop_mapreduce_client_core",

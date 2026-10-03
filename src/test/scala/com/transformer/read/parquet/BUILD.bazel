@@ -1,4 +1,4 @@
-load("@rules_scala//scala:scala.bzl", "scala_junit_test")
+load("@rules_scala//scala:scala.bzl", "scala_junit_test", "scala_library")
 
 scala_junit_test(
     name = "parquet_roundtrip_test",
@@ -28,6 +28,38 @@ scala_junit_test(
         # parquet-column exports FilterPredicate; the translator's public
         # return type leaks it to callers, so strict-deps wants it here even
         # though the test itself never names it.
+        "@maven//:org_apache_parquet_parquet_column",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Parquet written and read by parquet-mr's own example object model, never by
+# transformer's writer or reader, so a test can hold either one against an
+# implementation that is not ours. testonly, and public so other test packages
+# can build external fixtures too.
+scala_library(
+    name = "external_parquet",
+    testonly = True,
+    srcs = ["ExternalParquet.scala"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@maven//:org_apache_hadoop_hadoop_common",
+        "@maven//:org_apache_parquet_parquet_column",
+        "@maven//:org_apache_parquet_parquet_common",
+        "@maven//:org_apache_parquet_parquet_hadoop",
+    ],
+)
+
+scala_junit_test(
+    name = "parquet_external_format_test",
+    srcs = ["ParquetExternalFormatTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":external_parquet",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/write/parquet",
         "@maven//:org_apache_parquet_parquet_column",
         "@maven//:junit_junit",
     ],
