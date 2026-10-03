@@ -271,7 +271,10 @@ to a group key by canonical text), `deriveAlias` (names the output column), and
 position). Grouping parentheses needed all five; see
 [gotchas.md](gotchas.md). If the node wraps a function the runtime doesn't
 fully implement, reject the unsupported forms explicitly rather than binding
-the operand you *can* reach — `TrimFunction` is the cautionary case there.
+the operand you *can* reach — `TrimFunction` is the cautionary case there. If
+the node compares or combines values, type its operands with `Analyzer.unify`
+instead of casting them by hand: IN lists once had a rule of their own that cast
+every item to the left side's type, and `i IN (9.5)` matched a 9.
 A test enforces one more edit: the node's class needs an audit in
 `UnsupportedClauses`, which `sql/plan:unsupported_clauses_test` asks for by name
 as soon as `LogicalBuilder` matches on the class (see the next section).

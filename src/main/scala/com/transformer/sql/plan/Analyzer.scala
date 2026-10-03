@@ -51,55 +51,88 @@ object Analyzer {
   def implicitCast(e: Expr, to: DataType): Expr =
     if (e.dataType == to) e else CastExpr(e, to)
 
-  /** Promote `(l, r)` to a common type for arithmetic and comparison.
-    *
-    * A DATE or TIMESTAMP meets another type only as a string literal, which
-    * [[asTemporal]] reads as that type now, at bind time. Anything else beside
-    * one is an error that names the CAST to write: comparing it as text, at a
-    * midnight, or as a date in UTC are all choices, and the engine makes none
-    * of them for the user. */
+  /** Promote `(l, r)` to a common type for arithmetic and comparison: the
+    * two-operand case of [[unify]]. */
   def promotePair(l: Expr, r: Expr): (Expr, Expr, DataType) = {
-    val lt = l.dataType
-    val rt = r.dataType
-    if (lt == rt) (l, r, lt)
-    else if (DataType.isNumeric(lt) && DataType.isNumeric(rt)) {
-      val target = DataType.widerNumeric(lt, rt)
-      (implicitCast(l, target), implicitCast(r, target), target)
-    } else if (lt == DataType.NullType) (implicitCast(l, rt), r, rt)
-    else if (rt == DataType.NullType) (l, implicitCast(r, lt), lt)
-    else if (isTemporal(lt)) (l, asTemporal(r, lt), lt)
-    else if (isTemporal(rt)) (asTemporal(l, rt), r, rt)
-    else if (lt == DataType.StringType || rt == DataType.StringType) {
-      // String comparison: coerce non-strings to string.
-      (implicitCast(l, DataType.StringType), implicitCast(r, DataType.StringType), DataType.StringType)
-    } else (l, r, lt)
+    val (operands, t) = unify(Seq(l, r))
+    (operands(0), operands(1), t)
   }
 
-  def isTemporal(t: DataType): Boolean = t == DataType.DateType || t == DataType.TimestampType
-
-  /** `e` as the operand beside one of type `temporal`: a string literal read as
-    * that type, so a bad one fails before the query runs, or an error. */
-  def asTemporal(e: Expr, temporal: DataType): Expr = e match {
-    case LitExpr(s: String, DataType.StringType) => LitExpr(Casts.cast(s, DataType.StringType, temporal), temporal)
-    case _ =>
-      val (t, o) = (typeName(temporal), typeName(e.dataType))
-      val advice =
-        if (isTemporal(e.dataType)) "; CAST one side: a DATE as a TIMESTAMP is its midnight, a TIMESTAMP as a DATE its date in UTC"
-        else if (e.dataType == DataType.StringType)
-          s"; only a string literal is read as a $t, so CAST the expression to $t, or the $t to STRING to compare text"
-        else ""
-      throw new IllegalArgumentException(s"Cannot compare $t with $o$advice")
+  /** One type for operands that meet: the two sides of a comparison or of
+    * arithmetic, the three of a BETWEEN, or an IN list's left side and items.
+    *
+    * Numbers widen to the widest among them, and NULL takes any type. A string
+    * literal beside an operand of another type is read as that type now, at
+    * bind time, so `i < '10'` compares numbers, `ts < '2026-01-01 06:00:00'`
+    * compares instants, and a literal that is no such value fails before the
+    * query runs. Every other mix is an error, naming the CAST that would say
+    * what is meant: comparing a number or a date as text, a date at its
+    * midnight, or a boolean as 1 or 0 are all choices, and the engine makes
+    * none of them for the user. */
+  def unify(operands: Seq[Expr]): (Seq[Expr], DataType) = {
+    val typed = operands.filterNot(e => e.dataType == DataType.NullType || isStringLiteral(e))
+    val common =
+      if (typed.nonEmpty) typed.map(_.dataType).reduce(commonType)
+      else if (operands.exists(isStringLiteral)) DataType.StringType
+      else DataType.NullType
+    val unified = operands.map {
+      case LitExpr(s: String, DataType.StringType) if common != DataType.StringType =>
+        if (readsText(common)) readLiteral(s, common) else throw cannotCompare(common, DataType.StringType)
+      case e => implicitCast(e, common)
+    }
+    (unified, common)
   }
 
-  /** The operands of an IN list, when one of them is a DATE or TIMESTAMP:
-    * every other one must be of that type, NULL, or a string literal read as
-    * that type, as in [[promotePair]]. */
-  def unifyTemporal(operands: Seq[Expr]): Seq[Expr] =
-    operands.find(e => isTemporal(e.dataType)) match {
-      case None => operands
-      case Some(anchor) =>
-        val t = anchor.dataType
-        operands.map(e => if (e.dataType == t || e.dataType == DataType.NullType) e else asTemporal(e, t))
+  def isStringLiteral(e: Expr): Boolean = e match {
+    case LitExpr(_: String, DataType.StringType) => true
+    case _ => false
+  }
+
+  /** `s` read as `t` now, through the CAST text takes to `t`, so text that is
+    * no such value fails before the query runs. */
+  def readLiteral(s: String, t: DataType): LitExpr = LitExpr(Casts.cast(s, DataType.StringType, t), t)
+
+  /** The type operands of types `a` and `b` meet as, or the error saying why
+    * there is none. A string literal is never one of them: [[unify]] reads it
+    * as the type the others meet as. */
+  private def commonType(a: DataType, b: DataType): DataType =
+    if (a == b) a
+    else if (DataType.isNumeric(a) && DataType.isNumeric(b)) DataType.widerNumeric(a, b)
+    else throw cannotCompare(a, b)
+
+  /** The types a CAST reads from text. */
+  private def readsText(t: DataType): Boolean = t match {
+    case DataType.IntType | DataType.LongType | DataType.FloatType | DataType.DoubleType |
+         DataType.BooleanType | DataType.DateType | DataType.TimestampType => true
+    case _ => false
+  }
+
+  private def cannotCompare(a: DataType, b: DataType): IllegalArgumentException = {
+    // A string is named second, after the type a literal would be read as.
+    val (x, y) = if (a == DataType.StringType) (b, a) else (a, b)
+    val pair = Set(x, y)
+    val advice =
+      if (y == DataType.StringType && readsText(x)) {
+        val t = typeName(x)
+        val article = if ("AEIOU".indexOf(t.head) >= 0) "an" else "a"
+        s"; only a string literal is read as $article $t, so CAST the expression to $t, or the $t to STRING to compare text"
+      } else if (pair.forall(isTemporal))
+        "; CAST one side: a DATE as a TIMESTAMP is its midnight, a TIMESTAMP as a DATE its date in UTC"
+      else if (pair.contains(DataType.BooleanType) && pair.exists(DataType.isNumeric))
+        "; CAST the BOOLEAN to INT for 1 and 0, or compare it with TRUE or FALSE"
+      else ""
+    new IllegalArgumentException(s"Cannot compare ${typeName(x)} with ${typeName(y)}$advice")
+  }
+
+  private def isTemporal(t: DataType): Boolean = t == DataType.DateType || t == DataType.TimestampType
+
+  /** Arithmetic is on numbers (and NULL). There is no interval type for a date
+    * or a time to produce, and text or a boolean taken as a number would be a
+    * guess. */
+  def checkArithmetic(t: DataType): Unit =
+    if (!(DataType.isNumeric(t) || t == DataType.NullType)) {
+      val advice = if (t == DataType.StringType) "; CAST it to a number, or use || to join text" else ""
+      throw new IllegalArgumentException(s"Arithmetic on ${typeName(t)} is not supported$advice")
     }
 
   /** Refuse a CAST whose answer would be a guess. A number or a boolean has no
@@ -112,5 +145,5 @@ object Analyzer {
       throw new IllegalArgumentException(s"Cannot cast ${typeName(from)} to ${typeName(to)}")
   }
 
-  def typeName(t: DataType): String = t.name.toUpperCase
+  private def typeName(t: DataType): String = t.name.toUpperCase
 }

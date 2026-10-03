@@ -117,34 +117,34 @@ object Casts {
       case DataType.StringType => v.toString
       case DataType.IntType =>
         v match {
-          case s: String => s.toInt
+          case s: String => parseNumber(s, to)(_.toInt)
           case n: Number => n.intValue
           case b: Boolean => if (b) 1 else 0
           case _ => v.toString.toInt
         }
       case DataType.LongType =>
         v match {
-          case s: String => s.toLong
+          case s: String => parseNumber(s, to)(_.toLong)
           case n: Number => n.longValue
           case b: Boolean => if (b) 1L else 0L
           case _ => v.toString.toLong
         }
       case DataType.FloatType =>
         v match {
-          case s: String => s.toFloat
+          case s: String => parseNumber(s, to)(_.toFloat)
           case n: Number => n.floatValue
           case _ => v.toString.toFloat
         }
       case DataType.DoubleType =>
         v match {
-          case s: String => s.toDouble
+          case s: String => parseNumber(s, to)(_.toDouble)
           case n: Number => n.doubleValue
           case _ => v.toString.toDouble
         }
       case DataType.BooleanType =>
         v match {
           case b: Boolean => b
-          case s: String => java.lang.Boolean.parseBoolean(s)
+          case s: String => parseBoolean(s)
           case n: Number => n.doubleValue != 0.0
           case _ => v.toString.equalsIgnoreCase("true")
         }
@@ -166,6 +166,18 @@ object Casts {
       case other => throw new IllegalArgumentException(s"CAST to $other not implemented")
     }
   }
+
+  /** A number in the JDK's syntax, the text CSV inference reads as one. */
+  private def parseNumber[T](s: String, to: DataType)(parse: String => T): T =
+    try parse(s)
+    catch { case _: NumberFormatException => throw new IllegalArgumentException(s"Cannot cast '$s' to $to") }
+
+  /** `true` or `false` in any case, the text CSV inference reads as a
+    * BOOLEAN. Any other text is an error rather than false. */
+  private def parseBoolean(s: String): Boolean =
+    if (s.equalsIgnoreCase("true")) true
+    else if (s.equalsIgnoreCase("false")) false
+    else throw new IllegalArgumentException(s"Cannot cast '$s' to boolean")
 
   /** The text a CAST to TIMESTAMP reads: an ISO date, then optionally a time
     * and then optionally `Z` or an offset. */

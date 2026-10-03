@@ -56,8 +56,8 @@ and all but four carry an `example` SQL string that reaches it (plan 01 says why
 those four have none).
 
 Probing around the audit turned up failures that property 2 should catch. They
-were found by hand at `2f837fc` and are **not fixed**; each wants a regression in
-`SqlEngineTest` when it is:
+were found by hand at `2f837fc`, and all but the CAST one are **not fixed**; each
+wants a regression in `SqlEngineTest` when it is:
 
 - **A raw `NumberFormatException` at bind time.** `SELECT 99999999999999999999
   AS big FROM t` fails with `java.lang.NumberFormatException: For input string:
@@ -69,7 +69,13 @@ were found by hand at `2f837fc` and are **not fixed**; each wants a regression i
   and `DOUBLE` behave the same. It depends on the data, so it cannot be a
   bind-time rejection; the defect is the internal exception class, and a message
   that names neither the cast nor the column. (CAST to DATE and TIMESTAMP have
-  since said `Cannot cast 'x' to date`, the shape the others want.)
+  since said `Cannot cast 'x' to date`, the shape the others want.) **Fixed
+  2026-10-03**, with the rule that reads a string literal beside a number as
+  that number: every numeric CAST now fails with `IllegalArgumentException:
+  Cannot cast 'x' to int` (or `long`, `float`, `double`), a CAST to BOOLEAN reads
+  only `true` and `false` where it read any other text as false, and a string
+  literal under a CAST is read at bind time.
+  `SqlEngineTest.castReadsNumbersAndBooleansStrictly` is the regression.
 - **The `_agg0` slot name leaks from the ungrouped-column error.**
   `SELECT a, COUNT(*) AS c FROM t` (a column outside the aggregate, no GROUP BY)
   reports `Unknown column 'a'. Available: [_agg0]`, and so does

@@ -18,8 +18,8 @@ import com.transformer.sql.plan._
   *     "every row agrees" (the precedent `ExprBatchTest` is likewise total).
   *     Concretely it avoids the engine's only partial shapes: `RAND()` (no
   *     parity meaning — excluded entirely), casts that parse (`String ->`
-  *     numeric/date, `Boolean ->` float/double), and `ROUND`/`SUBSTRING` with
-  *     NULL numeric arguments (NPE).
+  *     numeric/boolean/date, `Boolean ->` float/double), and `ROUND`/`SUBSTRING`
+  *     with NULL numeric arguments (NPE).
   *
   * Float and double leaves draw `NaN`, `±Infinity` and `-0.0` at a low rate
   * ([[SpecialFloatProb]]), and those operands reach ordering comparisons and
@@ -459,7 +459,7 @@ object ExprGen {
     case DataType.IntType | DataType.LongType => Numerics :+ DataType.BooleanType
     case DataType.FloatType | DataType.DoubleType => Numerics
     case DataType.StringType => GenTypes
-    case DataType.BooleanType => Numerics ++ Seq(DataType.StringType, DataType.BooleanType)
+    case DataType.BooleanType => Numerics :+ DataType.BooleanType
     case other => Seq(other)
   }
 }

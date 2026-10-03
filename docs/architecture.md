@@ -757,7 +757,11 @@ else v.asInstanceOf[Boolean | Long | Double | String | …]
 
 Three-valued boolean logic is handled inside `BinOpExpr` for `AND`/`OR`.
 Arithmetic and comparison are NULL-propagating via the `lv == null || rv == null
-=> null` short-circuit at the top of the generic branch.
+=> null` short-circuit at the top of the generic branch. Their operands arrive
+with one type: `Analyzer.unify` types every set of operands that meet when the
+query is bound (numbers widen, a string literal is read as the type beside it,
+any other mix is a bind error), so a bound comparison never asks `Ops` to order
+a number against a string.
 
 `Ops.cmp` is the canonical NULL-free comparator (numbers compared as `Double`
 through `Double.compare`'s total order, strings lexicographic, booleans natural)

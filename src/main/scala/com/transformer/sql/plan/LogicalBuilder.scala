@@ -645,7 +645,9 @@ object LogicalBuilder {
       val sign = se.getSign
       val inner = b(se.getExpression)
       sign match {
-        case '-' => UnaryOpExpr("-", inner, inner.dataType)
+        case '-' =>
+          Analyzer.checkArithmetic(inner.dataType)
+          UnaryOpExpr("-", inner, inner.dataType)
         case '+' => inner
         case other => throw new IllegalArgumentException(s"Unknown signed operator '$other'")
       }
@@ -685,20 +687,15 @@ object LogicalBuilder {
         case el: ExpressionList[_] => el.asScala.asInstanceOf[Iterable[Expression]].toSeq
         case other => throw new IllegalArgumentException(s"IN subqueries not supported (got ${other.getClass.getSimpleName})")
       }
-      val operands = Analyzer.unifyTemporal(left +: items.map(b))
-      val (boundItems, common) = harmonize(operands.tail, operands.head.dataType)
-      val leftCast = Analyzer.implicitCast(operands.head, common)
-      InListExpr(leftCast, boundItems, in.isNot)
+      val (operands, _) = Analyzer.unify(left +: items.map(b))
+      InListExpr(operands.head, operands.tail, in.isNot)
 
     case bw: Between =>
-      val target = b(bw.getLeftExpression)
-      val lo = b(bw.getBetweenExpressionStart)
-      val hi = b(bw.getBetweenExpressionEnd)
-      val (tL, loL, _) = promoteTriple(target, lo)
-      val (tR, hiR, t2) = promoteTriple(tL, hi)
+      val (operands, _) = Analyzer.unify(
+        Seq(bw.getLeftExpression, bw.getBetweenExpressionStart, bw.getBetweenExpressionEnd).map(b))
       val expr: Expr = BinOpExpr("AND",
-        BinOpExpr(">=", tR, Analyzer.implicitCast(loL, t2), DataType.BooleanType),
-        BinOpExpr("<=", tR, Analyzer.implicitCast(hiR, t2), DataType.BooleanType),
+        BinOpExpr(">=", operands(0), operands(1), DataType.BooleanType),
+        BinOpExpr("<=", operands(0), operands(2), DataType.BooleanType),
         DataType.BooleanType)
       if (bw.isNot) UnaryOpExpr("NOT", expr, DataType.BooleanType) else expr
 
@@ -747,10 +744,9 @@ object LogicalBuilder {
       val target = parseTypeName(ce.getColDataType.getDataType)
       Analyzer.checkCast(inner.dataType, target)
       inner match {
-        // `DATE '...'` and `TIMESTAMP '...'` are literals, so they are read now:
-        // a bad one fails before the query runs, like any other bad literal.
-        case LitExpr(_: String, DataType.StringType) if Analyzer.isTemporal(target) =>
-          Analyzer.asTemporal(inner, target)
+        // A string literal is read now, so bad text fails before the query
+        // runs. `DATE '...'` and `TIMESTAMP '...'` literals are this cast.
+        case LitExpr(s: String, DataType.StringType) => Analyzer.readLiteral(s, target)
         case _ => CastExpr(inner, target)
       }
 
@@ -791,11 +787,12 @@ object LogicalBuilder {
                            aggResolver: Function => Option[Expr],
                            windowResolver: AnalyticExpression => Option[Expr]): Expr = {
     val operands = Seq(l, r).map(bindExprWithAggs(_, sources, aggResolver, windowResolver))
-    // There is no interval type, so no arithmetic on a date or a time means anything.
-    operands.find(e => Analyzer.isTemporal(e.dataType)).foreach { e =>
-      throw new IllegalArgumentException(s"Arithmetic on ${Analyzer.typeName(e.dataType)} is not supported")
-    }
+    // A string literal is checked once promotePair has read it as the number
+    // beside it: `x + '1'` adds 1, and `'1' + '2'`, with no number to read the
+    // literals as, is arithmetic on text.
+    operands.filterNot(Analyzer.isStringLiteral).foreach(e => Analyzer.checkArithmetic(e.dataType))
     val (le, re, t) = Analyzer.promotePair(operands(0), operands(1))
+    Analyzer.checkArithmetic(t)
     BinOpExpr(op, le, re, t)
   }
   private def cmpOpGeneric(op: String, l: Expression, r: Expression, sources: Sources,
@@ -805,21 +802,6 @@ object LogicalBuilder {
       bindExprWithAggs(l, sources, aggResolver, windowResolver),
       bindExprWithAggs(r, sources, aggResolver, windowResolver))
     BinOpExpr(op, le, re, DataType.BooleanType)
-  }
-
-  private def promoteTriple(a: Expr, b: Expr): (Expr, Expr, DataType) = {
-    val (la, lb, t) = Analyzer.promotePair(a, b)
-    (la, lb, t)
-  }
-
-  private def harmonize(items: Seq[Expr], leftType: DataType): (Seq[Expr], DataType) = {
-    val allTypes = leftType +: items.map(_.dataType)
-    val common =
-      if (allTypes.forall(t => t == DataType.NullType || DataType.isNumeric(t)))
-        allTypes.filter(_ != DataType.NullType).headOption.getOrElse(DataType.NullType)
-      else
-        allTypes.find(_ != DataType.NullType).getOrElse(DataType.StringType)
-    (items.map(Analyzer.implicitCast(_, common)), common)
   }
 
   /** CURRENT_DATE or CURRENT_TIMESTAMP: the statement's start, in UTC like

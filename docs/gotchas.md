@@ -89,22 +89,31 @@ ship a fix or move something from "not done" to "done".
   `TimestampVector.setBoxed` rejects. Both box canonically now, and
   `castToDateAndTimestampBoxLikeTheVector` compares the classes, not just the
   normalized values.
-- **A DATE or TIMESTAMP meets another type only as a string literal.**
-  `Analyzer.promotePair` (comparisons, `BETWEEN`, a `CASE` switch) and
-  `Analyzer.unifyTemporal` (IN lists) read a string literal beside one as that
-  type at bind time, through `Casts`, and reject every other pairing with a
-  message naming the CAST to write. The rule it replaced coerced the other side
-  of any comparison with a string to text, so `2026-01-01T05:30:21Z` met
-  `'2026-01-01 06:00:00'` character by character, the `T` met a space at index
-  10, and a same-day `ts < '...'` missed its rows. Promoting a DATE beside a
-  TIMESTAMP to its midnight, as some engines do, would make `d = ts` match only
-  midnight, which is why that pairing needs a CAST too. The same strictness runs
-  through `CAST`: a string literal cast to DATE or TIMESTAMP is folded at bind
-  time, `Analyzer.checkCast` refuses numbers and booleans in either direction,
-  and a DATE reads only an ISO date. Arithmetic on either type is a bind error,
-  since there is no interval type. When a new type meets these rules, extend
-  them; do not loosen them (see the strictness entry in
-  [conventions.md](conventions.md)).
+- **Values of different types meet only as numbers, or through a string
+  literal.** `Analyzer.unify` types every set of operands that meet: a
+  comparison, arithmetic and a `CASE` switch (through `promotePair`, its
+  two-operand case), a `BETWEEN`'s three, and an IN list. Numbers widen to the
+  widest among them, a string literal beside another type is read as that type
+  at bind time through `Casts`, and every other mix is an error, naming the CAST
+  to write where one would say what is meant. The rule it replaced coerced the
+  other side of any comparison with a string to text, so `9 < '10'` was false
+  (`'9'` sorts after `'1'`), `1.0 = '1'` was false, and `2026-01-01T05:30:21Z`
+  met `'2026-01-01 06:00:00'` character by character, its `T` meeting a space at
+  index 10. IN lists had a rule of their own that cast every item to the left
+  side's type, so `i IN (9.5)` matched a 9, and so did `i IN (4294967305)`, by
+  overflow. Promoting a DATE beside a TIMESTAMP to its midnight, as some engines
+  do, would make `d = ts` match only midnight, and a boolean beside a number
+  would have to mean 1 and 0, which is why those pairs need a CAST too. The same
+  strictness runs through `CAST`: a string literal under one is folded at bind
+  time, text that is no number fails as `Cannot cast 'x' to int` rather than
+  Java's `NumberFormatException`, BOOLEAN reads only `true` and `false` (Java's
+  `parseBoolean` read every other text as false, and `WHERE NOT s` returned
+  every row), `Analyzer.checkCast` refuses numbers and booleans to or from
+  either temporal type, and a DATE reads only an ISO date.
+  `Analyzer.checkArithmetic` makes arithmetic on anything but a number a bind
+  error, unary minus included, where it used to throw `IllegalStateException`
+  mid-drain. When a new type meets these rules, extend them; do not loosen them
+  (see the strictness entry in [conventions.md](conventions.md)).
 - **The clock keywords are a `TimeKeyExpression`, spelled as written.**
   `current_date`, `CURRENT_DATE()` and DB2's `CURRENT DATE` arrive as three
   different strings, and `CURRENT_DATE ()`, with a space, arrives as a
@@ -200,12 +209,13 @@ ship a fix or move something from "not done" to "done".
   microseconds could over-prune. A date literal arrives as a `LocalDate`
   (`CURRENT_DATE`, `DATE '...'`, `{d '...'}`, or a string literal compared with a
   date, all read at bind time) and is pushed as INT32 epoch days, which every
-  parquet DATE is. The `FilterExec` always stays above the
-  scan to catch per-row precision — stats can prove a row group doesn't
-  match but can't prove it does. Don't add a "predicate is fully pushed,
-  skip the FilterExec" optimization without proving the translator handles
-  every conjunct shape; missing one means rows that don't match the SQL
-  filter sneak through.
+  parquet DATE is. A string literal beside a number is read as that number at
+  bind time too, so `i = '9'` pushes exactly as `i = 9` does. The `FilterExec`
+  always stays above the scan to catch per-row precision — stats can prove a
+  row group doesn't match but can't prove it does. Don't add a "predicate is
+  fully pushed, skip the FilterExec" optimization without proving the
+  translator handles every conjunct shape; missing one means rows that don't
+  match the SQL filter sneak through.
 - **The planner may swap join build sides relative to how the SQL is
   written.** `PhysicalPlanner` consults `LogicalPlanCardinality.estimate`
   and the join kind to pick which side ends up as the build side of the

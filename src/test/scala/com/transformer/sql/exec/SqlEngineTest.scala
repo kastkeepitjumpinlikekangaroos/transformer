@@ -2469,6 +2469,105 @@ class SqlEngineTest {
     // There is no interval type for arithmetic to produce.
     assertTrue(bindError("SELECT d + 1 AS v FROM tt").contains("Arithmetic on DATE is not supported"))
     assertTrue(bindError("SELECT ts - ts AS v FROM tt").contains("Arithmetic on TIMESTAMP is not supported"))
+    assertTrue(bindError("SELECT -d AS v FROM tt").contains("Arithmetic on DATE is not supported"))
+  }
+
+  /** The rule a date follows holds for every type: a string literal beside a
+    * number or a boolean is read as that type when the query is bound, and a
+    * string expression beside one is an error naming the CAST to write. Both
+    * used to compare as text, so `9` met `'10'` as `'9'` and sorted after it. */
+  @Test def numberAndBooleanComparisonsAreTypedOrRejected(): Unit = {
+    val cat = new Catalog
+    cat.register("tn", CsvReader.fromPath(tmpCsv("tn.csv",
+      "i,l,d,b,s\n9,9000000000,1.0,true,9\n10,10000000000,2.5,false,x10\n").toString, CsvOptions()))
+    def col(sql: String): Seq[Any] = column(sql, cat, "v")
+    // Each of these found no row as text.
+    assertEquals(Seq(9), col("SELECT i AS v FROM tn WHERE i < '10'"))
+    assertEquals(Seq(9), col("SELECT i AS v FROM tn WHERE '10' > i"))
+    assertEquals(Seq(9000000000L), col("SELECT l AS v FROM tn WHERE l < '10000000000'"))
+    assertEquals(Seq(1.0), col("SELECT d AS v FROM tn WHERE d = '1'"))
+    assertEquals(Seq(true), col("SELECT b AS v FROM tn WHERE b = 'TRUE'"))
+    assertEquals(Seq(false), col("SELECT b AS v FROM tn GROUP BY b HAVING SUM(i) > '9'"))
+    // These found the 10 alone, both rows, and no 'one'.
+    assertEquals(Seq(9, 10), col("SELECT i AS v FROM tn WHERE i BETWEEN '1' AND '10' ORDER BY i"))
+    assertEquals(Seq(true), col("SELECT b AS v FROM tn WHERE b <> 'False'"))
+    assertEquals(Seq("one", "other"),
+      col("SELECT CASE d WHEN '1' THEN 'one' ELSE 'other' END AS v FROM tn ORDER BY d"))
+    // An IN list takes the widest type among its operands. It cast its items
+    // to the left side's type instead, so 9.5 and 2^32 + 9 both matched 9.
+    assertEquals(Seq(), col("SELECT i AS v FROM tn WHERE i IN (9.5)"))
+    assertEquals(Seq(), col("SELECT i AS v FROM tn WHERE i IN (4294967305)"))
+    assertEquals(Seq(10), col("SELECT i AS v FROM tn WHERE i IN (9.5, '10')"))
+    // Arithmetic reads the literal the same way; this failed mid-drain.
+    assertEquals(Seq(10, 11), col("SELECT i + '1' AS v FROM tn ORDER BY i"))
+    // The CAST the errors below name compares text on purpose.
+    assertEquals(Seq(9), col("SELECT i AS v FROM tn WHERE CAST(i AS STRING) = s"))
+
+    def bindError(sql: String): String =
+      try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    // A literal that is no such value fails at bind time, rows or no rows, and
+    // an INT reads an integer only.
+    assertTrue(bindError("SELECT i FROM tn WHERE i < 'ten'").contains("Cannot cast 'ten' to int"))
+    assertTrue(bindError("SELECT i FROM tn WHERE 1 = 0 AND d = 'x'").contains("Cannot cast 'x' to double"))
+    assertTrue(bindError("SELECT i FROM tn WHERE i = '9.5'").contains("Cannot cast '9.5' to int"))
+    assertTrue(bindError("SELECT i FROM tn WHERE i IN ('9', 'ten')").contains("Cannot cast 'ten' to int"))
+    assertTrue(bindError("SELECT b FROM tn WHERE b = 'yes'").contains("Cannot cast 'yes' to boolean"))
+    // A string column needs a CAST to say whether numbers or text are meant,
+    // in every place operands meet.
+    for (sql <- Seq("SELECT s FROM tn WHERE s = 9", "SELECT s FROM tn WHERE 9 < s",
+                    "SELECT s FROM tn WHERE s IN (9, 10)", "SELECT i FROM tn WHERE i IN (s)",
+                    "SELECT s FROM tn WHERE s BETWEEN 1 AND 10",
+                    "SELECT CASE s WHEN 9 THEN 'nine' END AS c FROM tn",
+                    "SELECT x.i FROM tn x JOIN tn y ON x.i = y.s"))
+      assertTrue(sql, bindError(sql).contains("Cannot compare INT with STRING; only a string literal is read as an INT"))
+    assertTrue(bindError("SELECT b FROM tn WHERE b = s")
+      .contains("Cannot compare BOOLEAN with STRING; only a string literal is read as a BOOLEAN"))
+    // A boolean is no number, until a CAST says it is 1 or 0. These found no row.
+    assertTrue(bindError("SELECT b FROM tn WHERE b = 1")
+      .contains("Cannot compare BOOLEAN with INT; CAST the BOOLEAN to INT for 1 and 0"))
+    assertTrue(bindError("SELECT i FROM tn WHERE i IN (TRUE)")
+      .contains("Cannot compare INT with BOOLEAN; CAST the BOOLEAN to INT for 1 and 0"))
+    assertEquals(Seq(true), col("SELECT b AS v FROM tn WHERE CAST(b AS INT) = 1"))
+    // Arithmetic is on numbers; each of these failed mid-drain.
+    for (sql <- Seq("SELECT s + 1 AS v FROM tn", "SELECT '1' + '2' AS v", "SELECT -s AS v FROM tn"))
+      assertTrue(sql, bindError(sql).contains("Arithmetic on STRING is not supported; CAST it to a number"))
+    for (sql <- Seq("SELECT b + 1 AS v FROM tn", "SELECT -b AS v FROM tn"))
+      assertTrue(sql, bindError(sql).contains("Arithmetic on BOOLEAN is not supported"))
+  }
+
+  /** CAST reads text as a number or a boolean the way a comparison reads a
+    * literal: a string literal when the query is bound, and a string column
+    * with a clean error naming the text, where it threw NumberFormatException
+    * mid-drain and read any text but `true` as false. */
+  @Test def castReadsNumbersAndBooleansStrictly(): Unit = {
+    val cat = new Catalog
+    cat.register("tn", CsvReader.fromPath(tmpCsv("tn.csv", "s\n9\nx10\n").toString, CsvOptions()))
+    def one(sql: String): Any = collectAllRows(SqlEngine.execute(sql, cat)).head("v")
+    assertEquals(9, one("SELECT CAST('9' AS INT) AS v"))
+    assertEquals(true, one("SELECT CAST('TRUE' AS BOOLEAN) AS v"))
+    assertEquals(false, one("SELECT CAST('false' AS BOOLEAN) AS v"))
+
+    def bindError(sql: String): String =
+      try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    assertTrue(bindError("SELECT s FROM tn WHERE 1 = 0 AND CAST('ten' AS INT) > 0").contains("Cannot cast 'ten' to int"))
+    assertTrue(bindError("SELECT CAST('yes' AS BOOLEAN) AS v").contains("Cannot cast 'yes' to boolean"))
+
+    // Text in a column is read as it arrives, so its error comes while the
+    // result drains, as an IllegalArgumentException naming the text.
+    def drainError(sql: String): IllegalArgumentException =
+      try { collectAllRows(SqlEngine.execute(sql, cat)); fail(s"$sql drained"); null }
+      catch { case e: IllegalArgumentException => e }
+    for ((sql, text) <- Seq(
+           "SELECT CAST(s AS INT) AS v FROM tn" -> "Cannot cast 'x10' to int",
+           "SELECT CAST(s AS BIGINT) AS v FROM tn" -> "Cannot cast 'x10' to long",
+           "SELECT CAST(s AS DOUBLE) AS v FROM tn" -> "Cannot cast 'x10' to double",
+           "SELECT CAST(s AS BOOLEAN) AS v FROM tn" -> "Cannot cast '9' to boolean")) {
+      val e = drainError(sql)
+      assertEquals(sql, classOf[IllegalArgumentException], e.getClass)
+      assertTrue(sql, e.getMessage.contains(text))
+    }
   }
 
   @Test def groupingSetsRejectedWithoutLeakingAnInternalName(): Unit = {

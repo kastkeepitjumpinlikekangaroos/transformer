@@ -681,6 +681,12 @@ and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
 `DOUBLE`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`, `DATE`,
 `TIMESTAMP`.
 
+Text casts to a number as Java parses one, which is also what CSV inference
+reads: `'10'`, `'-2.5'` and `'1e3'` are numbers, and an `INT` or `BIGINT` reads
+an integer only. Text casts to `BOOLEAN` from `true` or `false`, in any case.
+Other text is an error that names it, such as `Cannot cast 'x10' to int`, and no
+text quietly becomes `false`.
+
 Text casts to `TIMESTAMP` from an ISO date, optionally followed by a time (after
 `T` or a space) and then `Z` or an offset such as `+02:00`. A time with no zone
 is UTC and a date alone is midnight, so `'2026-01-01 05:30:21'`,
@@ -689,20 +695,28 @@ casts to `DATE` from an ISO date (`2026-01-01`) and nothing else: which date a
 time of day falls on depends on its zone, so `CAST(CAST(x AS TIMESTAMP) AS DATE)`
 spells that out. A `TIMESTAMP` casts to `DATE` as its date in UTC, and a `DATE`
 to `TIMESTAMP` as its midnight. `DATE '2026-01-01'` and
-`TIMESTAMP '2026-01-01 05:30:21'` are literals, read when the query is bound, so a
-malformed one fails before anything runs. A number or a boolean does not cast to
-or from either type: an epoch in days, seconds or milliseconds would be a guess.
+`TIMESTAMP '2026-01-01 05:30:21'` are literals, read when the query is bound like
+any string literal under a CAST, so a malformed one fails before anything runs. A
+number or a boolean does not cast to or from either type: an epoch in days,
+seconds or milliseconds would be a guess.
 
-**A date or a timestamp compares only with its own type.** A string literal
-beside one is read as that type, so `ts < '2026-01-01 06:00:00'`,
-`d IN ('2026-01-01', '2026-02-01')` and `CASE d WHEN '2026-01-01' ...` compare
-dates and instants, and a literal that is no valid date or timestamp is an error.
-Every other pairing is an error that names the CAST to write: a string column
-(CAST it, or CAST the date to `STRING` to compare text), a number, or the other
-temporal type (`CAST(d AS TIMESTAMP) < ts` compares at the date's midnight,
-`d = CAST(ts AS DATE)` by the timestamp's date in UTC). Engines that compare such
-pairs as text, or promote a date quietly, answer questions nobody asked; this one
-prefers an error to a guess. There is no arithmetic on either type.
+**Values of different types meet only as numbers, or through a string
+literal.** Wherever values meet — a comparison, `BETWEEN`, an `IN` list, a
+`CASE` switch, arithmetic — numbers widen to the widest among them. A string
+literal beside another type is read as that type when the query is bound, so
+`i < '10'` compares numbers, `b = 'TRUE'` booleans and
+`ts < '2026-01-01 06:00:00'` instants, and a literal that is no such value
+(`i = '9.5'` for an `INT`, `d = '2026-1-5'`) is an error before anything runs.
+Every other mix is an error, which names the CAST that would say what is meant:
+beside a string column, CAST the column, or the other side to `STRING` to compare
+text; a boolean beside a number takes `CAST(b AS INT)` for 1 and 0; and the two
+temporal types take a CAST either way (`CAST(d AS TIMESTAMP) < ts` compares at
+the date's midnight, `d = CAST(ts AS DATE)` by the timestamp's date in UTC). A
+number and a date do not meet at all. Engines that compare such
+pairs as text, or promote a value quietly, answer questions nobody asked — as
+text, `9 < '10'` is false. This one prefers an error to a guess. Arithmetic is on
+numbers only: `x + '1'` adds one, and `s + 1` over a string column is an error,
+as is any arithmetic on a boolean, a date or a timestamp. `||` joins text.
 
 **CTEs (`WITH`):** supported, non-recursive. `WITH a AS (...), b AS (SELECT ...
 FROM a) SELECT ... FROM b` — later CTEs may reference earlier ones, a CTE can
