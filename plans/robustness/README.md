@@ -76,7 +76,10 @@ corpora found two `src/main` defects, both fixed first: `ABS` of a decimal
 computed in DOUBLE (and `MAX(ABS(k))` returned NULL), and a NULL-typed column,
 the only NULL a DECIMAL or BINARY has, failed every spill. The metamorphic,
 sharded and mode-differential campaigns are green at 20000 seeds each. Details
-in the plan's Outcome section.
+in the plan's Outcome section. Its loose ends (quarter-step decimals, no
+decimal arithmetic, a lowered guard bound) were closed on 2026-10-04 once the
+engine computed decimals exactly; that work found
+[09](09-branch-result-types.md). See the plan's Follow-up.
 
 **Suggested order.** [01](01-reject-or-honor-every-clause.md) first — it has the
 worst single defect in the set (a dropped join condition is a cartesian product,

@@ -266,8 +266,56 @@ in 17 seconds.
   every row, in a `DoubleVector` under the argument's type. Each should be a
   bind error naming the type; recorded with plan 05's other user-facing-error
   findings.
-- **Decimal `SUM`, arithmetic and unary minus** stay the gaps plan 02 recorded
-  (`SUM` adds in DOUBLE and keeps the decimal type; `+ - * / %` and `-x` throw
-  `IllegalStateException`). The corpora steer clear of them as described above,
-  so no property watches them; implementing them is a feature, and the day it
-  lands the SQL corpora should draw non-dyadic decimals and decimal arithmetic.
+- **Decimal `SUM`, arithmetic and unary minus** stayed the gaps plan 02
+  recorded (`SUM` added in DOUBLE and kept the decimal type; `+ - * / %` and
+  `-x` threw `IllegalStateException`), so the corpora steered clear of them.
+  Closed on 2026-10-04; see [Follow-up](#follow-up-2026-10-04).
+
+## Follow-up, 2026-10-04
+
+The three things this plan left loose, each closed with its guard:
+
+- **The SQL corpora's decimals were quarter steps**, because `SUM` added in
+  DOUBLE. The engine now adds a decimal exactly (`8eccd9b`: `SUM` of a
+  `DECIMAL(p,s)` is a `DECIMAL(38,s)` and `AVG` a `DECIMAL(p+4,s+4)`, both
+  from a `BigDecimal` sum fitted once), so `DataGen.DecimalPools` swapped
+  their dyadic fractions for values a DOUBLE adds wrong (`0.1`, `0.2`,
+  `33.33`), keeping each pool's size and the places of its two-scales and
+  one-double groups, so those guards kept their counts (a first layout that
+  moved them dropped the one-double counts by half). `ValueTag`'s new
+  "decimals a double adds wrong" is asserted at `SUM`/`AVG` in both SQL
+  corpora, and the aggregate-decomposition relation sums decimal columns,
+  driving `DecimalSumState`'s merge and spill (`102037c`).
+- **Decimal arithmetic was not generated**, because it threw. It is
+  implemented with the user's choices (`8eccd9b`: Spark's and SQL Server's
+  result types, overflow an error, a DOUBLE column beside a DECIMAL a bind
+  error) and generated in every corpus (`102037c`): `ExprGen` builds it as the
+  binder does, only where the declared type holds every answer, so it stays
+  total; `QueryGen` and `MetaQueryGen` anchor it on a DECIMAL column and give
+  it the parentheses its shape needs. Widening it found, each fixed or
+  recorded first: arithmetic on NULL alone threw on the vector path
+  (`bc960f2`); a constant such as `1 + 0.05` beside a DECIMAL was a bind error
+  (`d6c88d0`); `CASE`, `COALESCE`, `IF` and `UNION` take their first branch's
+  type, so a wider decimal branch is stored under a narrower declared type and
+  fails a spill (pre-existing, recorded as [plan 09](09-branch-result-types.md)
+  and gated by name, `inBranch`); `ABS(1.0)` beside a DECIMAL is a DOUBLE,
+  which is why the SQL generators anchor; and JSqlParser rejects some
+  statements with three stacked grouping parentheses after a `LIKE`, which a
+  20000-seed probe of the bind-reject path found and the 500-seed guards did
+  not.
+- **The Boolean MIN/MAX bound was lowered** from 10 to 6. `generatorCoversShapes`
+  now reads 4000 seeds and every bound in it doubled, so each keeps its
+  strength: Boolean MIN/MAX is 38 against 12 (`9d1257c`).
+
+Every existing guard was re-measured against the old corpus. The type guards
+are back at their plan-04 counts. The IEEE guards lost a few counts each to the
+draws decimal arithmetic now takes (most: a `-0.0` reaching an IN list, 18 to
+15 against a bound of 8, and a rank window's `-0.0` order key, 27 to 23
+against 9), and the closest to its bound, a float ordering comparison, sits
+1.76x above it, where it sat 1.82x above before; none was moved. Bind rejects were 0 over
+40000 seeds of each SQL generator. Campaigns on the final corpus: metamorphic,
+sharded-mode and mode-differential at 20000 seeds each, as 8 disjoint
+2500-seed blocks per target over 3 JVMs at `-Xmx1200m` with bazel shut down,
+all 24 blocks green (metamorphic about 15 minutes a block, sharded about 17,
+mode-differential about 3.3; 99 minutes of wall time); expr-parity green at
+200000 seeds.
