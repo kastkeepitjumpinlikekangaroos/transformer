@@ -347,11 +347,15 @@ object QueryGen {
     if (rng.bool(0.7)) colRef(schema, rng.oneOf(numeric))
     else genValue(rng, schema, schema.fields(rng.oneOf(numeric)).dataType, rng.between(1, 2))
 
+  /** A HAVING over `COUNT(*)` or over a group key compared with a literal.
+    * A BINARY key has no literal to compare with (SQL cannot write one), so it
+    * is never the key. */
   private def genHaving(rng: Rng, groupKeys: Vector[ColRefExpr]): HavingSpec = {
-    if (groupKeys.isEmpty || rng.bool(0.5))
+    val comparable = groupKeys.filter(_.dataType != DataType.BinaryType)
+    if (comparable.isEmpty || rng.bool(0.5))
       HavingSpec(HavingCountStar, rng.oneOf(Seq(">", ">=", "<", "<=", "=", "<>")), rng.between(0, 3).toString)
     else {
-      val key = rng.oneOf(groupKeys)
+      val key = rng.oneOf(comparable)
       val cmp = key.dataType match {
         case DataType.BooleanType | DataType.StringType => rng.oneOf(Seq("=", "<>"))
         case _ => rng.oneOf(Seq(">", ">=", "<", "<=", "=", "<>"))
@@ -373,16 +377,19 @@ object QueryGen {
   private def genValue(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     if (depth <= 0 || rng.bool(leafProb(depth))) genLeafValue(rng, schema, target)
     else if (target == DataType.StringType) genStringExpr(rng, schema, depth)
-    else genNumericExpr(rng, schema, target, depth)
+    else if (Numerics.contains(target)) genNumericExpr(rng, schema, target, depth)
+    else genOtherExpr(rng, schema, target, depth)
   }
 
+  /** A column, a literal or a NULL of `target`. A BINARY has no literal (SQL
+    * cannot write a byte array), so it is a column or a NULL. */
   private def genLeafValue(rng: Rng, schema: Schema, target: DataType): Expr = {
     val cols = schema.fields.zipWithIndex.filter(_._1.dataType == target)
+    def column: Expr = { val (f, idx) = rng.oneOf(cols); ColRefExpr(idx, f.name, target) }
     if (rng.bool(NullLitProb)) LitExpr(null, target)
-    else if (cols.nonEmpty && rng.bool(ColRefProb)) {
-      val (f, idx) = rng.oneOf(cols)
-      ColRefExpr(idx, f.name, target)
-    } else LitExpr(genLitValue(rng, target), target)
+    else if (cols.nonEmpty && rng.bool(ColRefProb)) column
+    else if (target == DataType.BinaryType) if (cols.nonEmpty) column else LitExpr(null, target)
+    else LitExpr(genLitValue(rng, target), target)
   }
 
   private def genNumericExpr(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
@@ -436,6 +443,27 @@ object QueryGen {
   private def substringArgs(rng: Rng, s: Expr): Seq[Expr] = {
     val start = LitExpr(rng.between(-1, 6), DataType.IntType)
     if (rng.bool(0.5)) Seq(s, start, LitExpr(rng.between(0, 6), DataType.IntType)) else Seq(s, start)
+  }
+
+  /** A DECIMAL, DATE, TIMESTAMP or BINARY value: the conditional forms every
+    * type has, `ABS` of a DECIMAL, and a CAST between DATE and TIMESTAMP. No
+    * arithmetic: the engine does none on the last three, and a DECIMAL's is a
+    * recorded gap that throws (`docs/gotchas.md`). No CAST into a DECIMAL or a
+    * BINARY either, since the binder reads no type name for one. */
+  private def genOtherExpr(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
+    def sub(t: DataType): Expr = genValue(rng, schema, t, depth - 1)
+    val base: Seq[(Int, () => Expr)] = Seq(
+      2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(target)), target)),
+      2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(target), sub(target)), target)),
+      1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
+      1 -> (() => genCase(rng, schema, target, depth)))
+    val extra: Seq[(Int, () => Expr)] = target match {
+      case _: DataType.DecimalType => Seq(1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
+      case DataType.DateType => Seq(1 -> (() => CastExpr(sub(DataType.TimestampType), target)))
+      case DataType.TimestampType => Seq(1 -> (() => CastExpr(sub(DataType.DateType), target)))
+      case _ => Seq.empty
+    }
+    rng.weighted(base ++ extra: _*)()
   }
 
   private def genCase(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
@@ -513,8 +541,17 @@ object QueryGen {
     case DataType.DoubleType => rng.oneOf(DoublePool): Any
     case DataType.BooleanType => rng.bool(): Any
     case DataType.StringType => rng.oneOf(StringPool): Any
+    case DataType.DateType => rng.oneOf(ExprGen.DatePool): Any
+    case DataType.TimestampType => rng.oneOf(ExprGen.TimestampPool): Any
+    case d: DataType.DecimalType => rng.oneOf(decimalLiterals(d)): Any
     case other => throw new IllegalArgumentException(s"genLitValue: unsupported $other")
   }
+
+  /** The decimals a literal of `dt` is drawn from: the column pool's
+    * non-negative values that SQL can write (see `SqlRender.writesExactly`),
+    * which drops `1.000000000000000001`, a number that reads back as `1.0`. */
+  private def decimalLiterals(dt: DataType.DecimalType): IndexedSeq[java.math.BigDecimal] =
+    DataGen.DecimalPools(dt).filter(v => v.signum >= 0 && SqlRender.writesExactly(v))
 
   /** A small in-domain literal of `dt`, rendered to SQL — used for HAVING
     * right-hand sides. */
@@ -523,6 +560,8 @@ object QueryGen {
     case DataType.FloatType | DataType.DoubleType => rng.oneOf(Seq("0.0", "0.5", "1.0", "2.0"))
     case DataType.BooleanType => rng.oneOf(Seq("TRUE", "FALSE"))
     case DataType.StringType => rng.oneOf(Seq("'a'", "'b'", "''", "'abc'"))
+    case DataType.DateType | DataType.TimestampType | _: DataType.DecimalType =>
+      SqlRender.expr(LitExpr(genLitValue(rng, dt), dt))
     case other => throw new IllegalArgumentException(s"litSqlOfType: unsupported $other")
   }
 
@@ -597,11 +636,17 @@ object SqlRender {
     case DataType.DoubleType => "DOUBLE"
     case DataType.StringType => "STRING"
     case DataType.BooleanType => "BOOLEAN"
+    case DataType.DateType => "DATE"
+    case DataType.TimestampType => "TIMESTAMP"
     case other => throw new IllegalArgumentException(s"SqlRender: no SQL type name for $other")
   }
 
+  /** A typed NULL, `CAST(NULL AS t)`. The binder reads no type name for a
+    * DECIMAL or a BINARY, so their NULL is the untyped one, which takes the type
+    * of what it meets (the other side of a comparison, COALESCE's or CASE's
+    * other values) and is NULL-typed where it meets nothing. */
   private def nullLit(dt: DataType): String = dt match {
-    case DataType.NullType => "NULL"
+    case DataType.NullType | DataType.BinaryType | _: DataType.DecimalType => "NULL"
     case other => s"CAST(NULL AS ${sqlType(other)})"
   }
 
@@ -614,8 +659,30 @@ object SqlRender {
     case DataType.FloatType | DataType.DoubleType => doubleLit(v.asInstanceOf[Number].doubleValue)
     case DataType.BooleanType => if (v.asInstanceOf[Boolean]) "TRUE" else "FALSE"
     case DataType.StringType => "'" + v.toString.replace("'", "''") + "'"
+    case DataType.DateType => s"DATE '$v'"
+    case DataType.TimestampType => s"TIMESTAMP '${TimestampText.format(v.asInstanceOf[java.time.Instant])}'"
+    case _: DataType.DecimalType =>
+      val d = v.asInstanceOf[java.math.BigDecimal]
+      require(writesExactly(d), s"SqlRender: no literal reads back as the decimal ${d.toPlainString}")
+      d.toPlainString
+    // BINARY: SQL has no literal for a byte array, and the generators never
+    // build one; its NULL renders through `nullLit`.
     case other => throw new IllegalArgumentException(s"SqlRender: cannot render literal of $other")
   }
+
+  /** A TIMESTAMP literal's text, in UTC as every time in the engine is, to the
+    * microsecond a `TimestampVector` holds. */
+  private val TimestampText: java.time.format.DateTimeFormatter =
+    java.time.format.DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSSSSS").withZone(java.time.ZoneOffset.UTC)
+
+  /** Whether `d` can be written as a literal. SQL has no DECIMAL literal: a
+    * number with a point reads as a DOUBLE, which the analyzer widens to the
+    * decimal it meets as the decimal it prints as, so only a value that a
+    * double holds exactly survives the trip (`1.000000000000000001` comes back
+    * `1.0`). Spelling is not kept either (`1.00` comes back `1.0`), but that is
+    * the same value. */
+  def writesExactly(d: java.math.BigDecimal): Boolean =
+    java.math.BigDecimal.valueOf(d.doubleValue).compareTo(d) == 0
 
   /** A decimal literal that re-parses to a compatible `double`. Generator doubles
     * are finite and bounded, so `toString` is clean; the BigDecimal fallback

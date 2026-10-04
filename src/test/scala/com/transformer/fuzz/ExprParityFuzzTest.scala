@@ -128,12 +128,11 @@ class ExprParityFuzzTest {
   // Each bound sits about 3x below, so it separates a corpus that stopped
   // producing the shape or the value from one that merely drifted.
 
+  import DataGen.ValueTag._
   import ExprParityFuzzTest.{TypeTally, typeTally}
 
   private def typeMessage(t: TypeTally): String =
-    s"over ${t.seeds} seeds: compared=${t.compared} inList=${t.inList} bytesOfOneContent=${t.bytesOfOneContent} " +
-      s"bytesOneHighBitApart=${t.bytesOneHighBitApart} decimalAtTwoScales=${t.decimalAtTwoScales} " +
-      s"decimalsOfOneDouble=${t.decimalsOfOneDouble} instantsUnderAMillisecondApart=${t.instantsUnderAMillisecondApart}"
+    s"over ${t.seeds} seeds: compared=${t.compared} inList=${t.inList} values=${t.values}"
 
   @Test def datesReachComparisonsAndInLists(): Unit = {
     val t = typeTally
@@ -147,23 +146,23 @@ class ExprParityFuzzTest {
     assertTrue(s"a TIMESTAMP never reaches a comparison, ${typeMessage(t)}", t.compared("timestamp") > 80)
     assertTrue(s"a TIMESTAMP never reaches an IN list, ${typeMessage(t)}", t.inList("timestamp") > 40)
     assertTrue(s"two instants under a millisecond apart never meet, ${typeMessage(t)}",
-      t.instantsUnderAMillisecondApart > 35)
+      t.values(InstantsUnderAMillisecondApart) > 35)
   }
 
   @Test def binaryReachesComparisonsWithEqualContentAndHighBitPairs(): Unit = {
     val t = typeTally
     assertTrue(s"a BINARY never reaches a comparison, ${typeMessage(t)}", t.compared("binary") > 80)
     assertTrue(s"a BINARY never reaches an IN list, ${typeMessage(t)}", t.inList("binary") > 40)
-    assertTrue(s"two byte arrays of one content never meet, ${typeMessage(t)}", t.bytesOfOneContent > 25)
-    assertTrue(s"two byte arrays one high bit apart never meet, ${typeMessage(t)}", t.bytesOneHighBitApart > 15)
+    assertTrue(s"two byte arrays of one content never meet, ${typeMessage(t)}", t.values(BytesOfOneContent) > 25)
+    assertTrue(s"two byte arrays one high bit apart never meet, ${typeMessage(t)}", t.values(BytesOneHighBitApart) > 15)
   }
 
   @Test def decimalsReachComparisonsAtTwoScalesAndOfOneDouble(): Unit = {
     val t = typeTally
     assertTrue(s"a DECIMAL never reaches a comparison, ${typeMessage(t)}", t.compared("decimal") > 80)
     assertTrue(s"a DECIMAL never reaches an IN list, ${typeMessage(t)}", t.inList("decimal") > 40)
-    assertTrue(s"one decimal at two scales never meets itself, ${typeMessage(t)}", t.decimalAtTwoScales > 9)
-    assertTrue(s"two decimals of one double never meet, ${typeMessage(t)}", t.decimalsOfOneDouble > 8)
+    assertTrue(s"one decimal at two scales never meets itself, ${typeMessage(t)}", t.values(DecimalAtTwoScales) > 9)
+    assertTrue(s"two decimals of one double never meet, ${typeMessage(t)}", t.values(DecimalsOfOneDouble) > 8)
   }
 
   /** The generator's own type invariant holds across a block of seeds:
@@ -242,30 +241,22 @@ object ExprParityFuzzTest {
       seeds: Int,
       compared: Map[String, Int],
       inList: Map[String, Int],
-      bytesOfOneContent: Int,
-      bytesOneHighBitApart: Int,
-      decimalAtTwoScales: Int,
-      decimalsOfOneDouble: Int,
-      instantsUnderAMillisecondApart: Int)
+      values: Map[DataGen.ValueTag, Int])
 
   /** The tally over the first 20000 seeds, computed once for the four guards. */
   lazy val typeTally: TypeTally = {
     val n = 20000
     val compared, inList = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
-    var oneContent, highBit, twoScales, oneDouble, subMilli = 0
+    val values = scala.collection.mutable.Map.empty[DataGen.ValueTag, Int].withDefaultValue(0)
     var seed = 0
     while (seed < n) {
       val c = ExprGen.typeCoverage(ExprGen.generate(new Rng(seed.toLong)))
       c.compared.foreach(k => compared(k) += 1)
       c.inList.foreach(k => inList(k) += 1)
-      if (c.bytesOfOneContent) oneContent += 1
-      if (c.bytesOneHighBitApart) highBit += 1
-      if (c.decimalAtTwoScales) twoScales += 1
-      if (c.decimalsOfOneDouble) oneDouble += 1
-      if (c.instantsUnderAMillisecondApart) subMilli += 1
+      c.values.foreach(v => values(v) += 1)
       seed += 1
     }
     TypeTally(n, compared.toMap.withDefaultValue(0), inList.toMap.withDefaultValue(0),
-      oneContent, highBit, twoScales, oneDouble, subMilli)
+      values.toMap.withDefaultValue(0))
   }
 }

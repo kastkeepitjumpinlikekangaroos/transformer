@@ -179,18 +179,21 @@ class ModeDifferentialFuzzTest {
     * `NaN`, an infinity or a `-0.0` — the input on which `MinMaxState` used to
     * return a different extremum depending on row order, partition fan-out and
     * spill flush order. Both halves have to hold: `QueryGen` has to build the
-    * aggregate over a float column (~7% of seeds — the shape half, which was
+    * aggregate over a float column (~4% of seeds — the shape half, which was
     * always there), and `DataGen` has to put a special value in that column's
-    * domain AND have a row draw it (~1% — the value half, which was missing for
-    * as long as the bug lived). The layout-differential property here is exactly
-    * the one that would have caught the bug; it ran the whole time over a corpus
-    * that could not produce the input.
+    * domain AND have a row draw it (~0.35-0.55% — the value half, which was
+    * missing for as long as the bug lived). The layout-differential property
+    * here is exactly the one that would have caught the bug; it ran the whole
+    * time over a corpus that could not produce the input.
     *
-    * 2000 seeds rather than the 500 the shape guard above uses: the joint rate is
-    * ~1%, so a smaller block would not separate "rare" from "gone". Generation
-    * only — no query runs here. */
+    * 10000 seeds rather than the 500 the shape guard above uses: the joint rate
+    * is under 1%, and fell when columns widened from six types to ten (two of
+    * ten are floats, not two of six), so 2000 seeds left the infinity count at
+    * 3, too few to tell "rare" from "gone". Generation only — no query runs
+    * here. Measured over these 10000 seeds: the shape 421, NaN 55, -0.0 52, an
+    * infinity 35; each bound sits ~3x below. */
   @Test def generatorReachesMinMaxOverIeeeSpecialValues(): Unit = {
-    val n = 2000
+    val n = 10000
     var shape, nan, negZero, infinite = 0
     var seed = 0
     while (seed < n) {
@@ -209,12 +212,83 @@ class ModeDifferentialFuzzTest {
     }
     println(s"[mode-differential] over $n seeds: MIN/MAX over a float column in $shape " +
       s"(carrying NaN=$nan, -0.0=$negZero, an infinity=$infinite)")
-    assertTrue(s"no MIN/MAX over a float column generated (shape=$shape)", shape > 40)
+    assertTrue(s"no MIN/MAX over a float column generated (shape=$shape)", shape > 140)
     // Each bound sits ~3x below the measured rate, so it separates a corpus that
     // stopped producing the value from one that merely drifted.
-    assertTrue(s"MIN/MAX never sees a NaN (nan=$nan)", nan > 5)
-    assertTrue(s"MIN/MAX never sees a -0.0 (negZero=$negZero)", negZero > 5)
-    assertTrue(s"MIN/MAX never sees an infinity (infinite=$infinite)", infinite > 5)
+    assertTrue(s"MIN/MAX never sees a NaN (nan=$nan)", nan > 18)
+    assertTrue(s"MIN/MAX never sees a -0.0 (negZero=$negZero)", negZero > 17)
+    assertTrue(s"MIN/MAX never sees an infinity (infinite=$infinite)", infinite > 11)
+  }
+
+  // ---- DATE, TIMESTAMP, BINARY and DECIMAL coverage ----------------------
+  //
+  // One guard per type, each asserting both halves at the sites layouts and
+  // spill change most: the type reaches an ORDER BY key, a GROUP BY key and a
+  // MIN/MAX argument (and, for DECIMAL, a SUM or AVG), and the column at each
+  // site carries the values a comparison of the type gets wrong. `DataGen` drew
+  // none of the four until plan 04. The four read one shared tally of the
+  // generated corpus; no query runs.
+  //
+  // 10000 seeds, because the thinnest chain (MIN/MAX over a decimal column
+  // holding two values of one double, which only DECIMAL(38,18) has) is 23 of
+  // them; generation only, well under a second. Measured over these seeds, the
+  // shapes: ORDER BY date 694, timestamp 706, binary 682, decimal 677; GROUP BY
+  // 612, 655, 639, 658; MIN/MAX 247, 269, 249, 228; SUM/AVG decimal 375. The
+  // values, at ORDER BY / GROUP BY / MIN/MAX: instants under a millisecond
+  // apart 406 / 373 / 145; bytes of one content 440 / 433 / 164; bytes one high
+  // bit apart 240 / 227 / 81; a decimal at two scales 279 / 275 / 101 (145 at
+  // SUM/AVG); decimals of one double 101 / 101 / 23 (46 at SUM/AVG). Each bound
+  // sits about 3x below its count.
+
+  import DataGen.ValueTag._
+  import ModeDifferentialFuzzTest.{SiteTally, siteTally}
+
+  private def siteMessage(t: SiteTally): String =
+    s"over ${t.seeds} seeds: shapes=${t.shapes.toSeq.sortBy(_._1.toString).mkString(", ")}; " +
+      s"values=${t.values.toSeq.sortBy(_._1.toString).mkString(", ")}"
+
+  /** The shape floor for every new type at each site. */
+  private val SiteShapeFloor = Seq("ORDER BY" -> 220, "GROUP BY" -> 200, "MIN/MAX" -> 75)
+
+  private def assertShapes(t: SiteTally, kind: String): Unit =
+    for ((site, floor) <- SiteShapeFloor)
+      assertTrue(s"a $kind rarely reaches $site, ${siteMessage(t)}", t.shapes((site, kind)) > floor)
+
+  private def assertValues(t: SiteTally, kind: String, tag: DataGen.ValueTag, floors: Seq[Int]): Unit =
+    for (((site, _), floor) <- SiteShapeFloor.zip(floors))
+      assertTrue(s"a $site $kind rarely holds $tag, ${siteMessage(t)}", t.values((site, tag)) > floor)
+
+  @Test def datesReachOrderByGroupByAndMinMax(): Unit = {
+    val t = siteTally
+    println(s"[mode-differential] type coverage ${siteMessage(t)}")
+    assertShapes(t, "date")
+  }
+
+  @Test def timestampsReachOrderByGroupByAndMinMaxUnderAMillisecondApart(): Unit = {
+    val t = siteTally
+    assertShapes(t, "timestamp")
+    assertValues(t, "timestamp", InstantsUnderAMillisecondApart, Seq(135, 120, 48))
+  }
+
+  @Test def binaryReachesOrderByGroupByAndMinMaxWithEqualContentAndHighBitPairs(): Unit = {
+    val t = siteTally
+    assertShapes(t, "binary")
+    assertValues(t, "binary", BytesOfOneContent, Seq(145, 145, 54))
+    assertValues(t, "binary", BytesOneHighBitApart, Seq(80, 75, 27))
+  }
+
+  @Test def decimalsReachOrderByGroupByMinMaxAndSumAtTwoScalesAndOfOneDouble(): Unit = {
+    val t = siteTally
+    assertShapes(t, "decimal")
+    assertValues(t, "decimal", DecimalAtTwoScales, Seq(90, 90, 33))
+    assertValues(t, "decimal", DecimalsOfOneDouble, Seq(33, 33, 7))
+    // A decimal SUM adds in DOUBLE, so it is the aggregate the pool's dyadic
+    // values exist for (see `DataGen.DecimalPools`).
+    assertTrue(s"a DECIMAL rarely reaches SUM/AVG, ${siteMessage(t)}", t.shapes(("SUM/AVG", "decimal")) > 125)
+    assertTrue(s"a SUM/AVG DECIMAL rarely holds a decimal at two scales, ${siteMessage(t)}",
+      t.values(("SUM/AVG", DecimalAtTwoScales)) > 48)
+    assertTrue(s"a SUM/AVG DECIMAL rarely holds decimals of one double, ${siteMessage(t)}",
+      t.values(("SUM/AVG", DecimalsOfOneDouble)) > 15)
   }
 
   /** Indices of the columns `q` takes `MIN`/`MAX` over, restricted to
@@ -518,5 +592,53 @@ class ModeDifferentialFuzzTest {
       where = None, having = Some(HavingSpec(HavingCountStar, ">", "0")),
       groupByOrdinals = false, orderBy = Vector(OrderKey(c(0, schema), true)))
     assertAgrees(QueryCase(DataGen.Dataset(schema, rows), q))
+  }
+}
+
+object ModeDifferentialFuzzTest {
+
+  /** Over a seed block, how many seeds put a column of each kind at each site
+    * (`shapes`, keyed by site and `ExprGen.kind`), and how many of those put a
+    * column carrying each `DataGen.ValueTag` there (`values`, keyed by site and
+    * tag). */
+  final case class SiteTally(
+      seeds: Int,
+      shapes: Map[(String, String), Int],
+      values: Map[(String, DataGen.ValueTag), Int])
+
+  /** The columns `q` places at each site: ORDER BY keys, GROUP BY keys, the
+    * arguments of MIN / MAX, and of SUM / AVG. */
+  private def sites(q: QueryGen.GenQuery): Seq[(String, Int)] = {
+    val orderBy = q.orderBy.map(k => ("ORDER BY", k.col.index))
+    val rest = q match {
+      case a: QueryGen.AggregateQuery =>
+        a.groupKeys.map(k => ("GROUP BY", k.index)) ++ a.aggregates.collect {
+          case (QueryGen.Min(c: ColRefExpr), _) => ("MIN/MAX", c.index)
+          case (QueryGen.Max(c: ColRefExpr), _) => ("MIN/MAX", c.index)
+          case (QueryGen.Sum(c: ColRefExpr, _), _) => ("SUM/AVG", c.index)
+          case (QueryGen.Avg(c: ColRefExpr, _), _) => ("SUM/AVG", c.index)
+        }
+      case _ => Seq.empty
+    }
+    orderBy ++ rest
+  }
+
+  lazy val siteTally: SiteTally = {
+    val n = 10000
+    val shapes = scala.collection.mutable.Map.empty[(String, String), Int].withDefaultValue(0)
+    val values = scala.collection.mutable.Map.empty[(String, DataGen.ValueTag), Int].withDefaultValue(0)
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val fields = qc.dataset.schema.fields
+      val here = sites(qc.query).distinct
+      here.map { case (site, c) => (site, ExprGen.kind(fields(c).dataType)) }.distinct
+        .foreach(k => shapes(k) += 1)
+      here.flatMap { case (site, c) =>
+        DataGen.valueTags(qc.dataset.rows.map(_(c))).map(tag => (site, tag))
+      }.distinct.foreach(k => values(k) += 1)
+      seed += 1
+    }
+    SiteTally(n, shapes.toMap.withDefaultValue(0), values.toMap.withDefaultValue(0))
   }
 }

@@ -779,8 +779,9 @@ ship a fix or move something from "not done" to "done".
   Deterministic regressions in `sql_engine_test`, `hash_aggregate_spill_test`
   (row order, partition split, spill), `agg_state_serde_test`,
   `exchange_exec_test`, `hash_join_spill_test`, `window_exec_spill_test`,
-  `hash_keys_test` and `expr_batch_test`. The expression corpus (`ExprGen`)
-  draws decimal and binary columns and literals; the SQL corpora do not yet
+  `hash_keys_test` and `expr_batch_test`. The expression corpus (`ExprGen`) and
+  the mode-differential corpus (`DataGen` / `QueryGen`) draw decimal and binary
+  columns; the metamorphic corpus does not yet
   ([plan 04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)).
 
 - **`ABS` of a `DECIMAL` used to compute in `DOUBLE` — fixed.** `Funcs.apply`
@@ -840,7 +841,12 @@ ship a fix or move something from "not done" to "done".
     `1.00` keeps either. A DATE and a TIMESTAMP compare as the `LocalDate` and
     `Instant` both paths box, with no conversion from an epoch count, because
     `Ops.eq` calls an epoch-day `Int` unequal to the date it counts. All three are
-    pinned by `fuzz/row_oracle_test`.
+    pinned by `fuzz/row_oracle_test`. A decimal `SUM` compares exactly too,
+    though it adds in DOUBLE (a gap recorded below): the corpora's decimal pools
+    hold only values whose doubles are small multiples of a quarter, so the sum
+    is exact in any order and does not move with the layout. That keeps the
+    gap out of these properties, which compare modes with one another and could
+    not tell a rounded sum from a right one anyway.
 
 - **The metamorphic TLP oracle partitions the query OUTPUT, never decomposes an
   aggregate.** `Tlp` checks `Q ≡ (Q WHERE p) ⊎ (Q WHERE NOT p) ⊎ (Q WHERE p IS

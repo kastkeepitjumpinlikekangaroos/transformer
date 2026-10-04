@@ -218,40 +218,20 @@ object ExprGen {
     *
     * `compared` and `inList` name the [[kind]]s that reach a comparison (both
     * operands of the kind) and an `IN` (the child of the kind) — the shape half.
-    * The rest is the value half: on some row, a comparison or an `IN` meets two
-    * distinct byte arrays with one content, two byte arrays that differ only in
-    * a high bit, one decimal value at two scales, two decimal values that are
-    * one double, or two instants less than a millisecond apart. Each is the
-    * input on which a comparison that took a shortcut (identity, signed bytes,
+    * `values` is the value half: the `DataGen.ValueTag`s of the pairs a
+    * comparison or an `IN` meets on some row, each the input on which a
+    * comparison that took a shortcut (identity, signed bytes,
     * `BigDecimal.equals`, `doubleValue`, milliseconds) answers wrong. */
-  final case class TypeCoverage(
-      compared: Set[String],
-      inList: Set[String],
-      bytesOfOneContent: Boolean,
-      bytesOneHighBitApart: Boolean,
-      decimalAtTwoScales: Boolean,
-      decimalsOfOneDouble: Boolean,
-      instantsUnderAMillisecondApart: Boolean)
+  final case class TypeCoverage(compared: Set[String], inList: Set[String], values: Set[DataGen.ValueTag])
 
   /** The kinds [[typeCoverage]] reports on. */
   private[fuzz] val ReportedKinds: Set[String] = Set("date", "timestamp", "binary", "decimal")
 
   def typeCoverage(c: ExprCase): TypeCoverage = {
     val compared, inList = scala.collection.mutable.Set.empty[String]
-    var oneContent, highBit, twoScales, oneDouble, subMilli = false
+    val values = scala.collection.mutable.Set.empty[DataGen.ValueTag]
 
-    def meet(a: Any, b: Any): Unit = (a, b) match {
-      case (x: Array[Byte], y: Array[Byte]) =>
-        if ((x ne y) && java.util.Arrays.equals(x, y)) oneContent = true
-        if (differOnlyInAHighBit(x, y)) highBit = true
-      case (x: java.math.BigDecimal, y: java.math.BigDecimal) =>
-        if (x.compareTo(y) == 0 && x.scale != y.scale) twoScales = true
-        if (x.compareTo(y) != 0 && x.doubleValue == y.doubleValue) oneDouble = true
-      case (x: java.time.Instant, y: java.time.Instant) =>
-        val apart = math.abs(java.time.Duration.between(x, y).toNanos)
-        if (apart > 0 && apart < 1000000L) subMilli = true
-      case _ => ()
-    }
+    def meet(a: Any, b: Any): Unit = values ++= DataGen.pairTags(a, b)
 
     // Evaluate `left` against each of `rights` on every row, as the comparison
     // or the IN does.
@@ -282,14 +262,8 @@ object ExprGen {
     }
 
     walk(c.expr)
-    TypeCoverage(compared.toSet, inList.toSet, oneContent, highBit, twoScales, oneDouble, subMilli)
+    TypeCoverage(compared.toSet, inList.toSet, values.toSet)
   }
-
-  /** Two byte arrays of one length that differ in exactly one byte, and there
-    * only in its high bit: the pair a signed comparison orders the other way. */
-  private[fuzz] def differOnlyInAHighBit(x: Array[Byte], y: Array[Byte]): Boolean =
-    x.length == y.length && x.indices.count(i => x(i) != y(i)) == 1 &&
-      x.indices.forall(i => x(i) == y(i) || ((x(i) ^ y(i)) & 0xff) == 0x80)
 
   // ---- batch generation ---------------------------------------------------
 

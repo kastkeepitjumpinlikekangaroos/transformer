@@ -26,9 +26,13 @@ import com.transformer.core._
   * Null density is tunable per column (none / sprinkled / ~half / all), so a
   * GROUP BY key column can be entirely NULL (one collapsed group) or mixed.
   *
-  * Column types are Int/Long/Float/Double/Boolean/String, six of [[ExprGen]]'s
-  * ten, so every column can be referenced by a generated predicate or aggregate
-  * argument.
+  * Columns take all ten of the engine's value types, [[ExprGen]]'s `GenTypes`.
+  * DATE, TIMESTAMP and BINARY columns draw slices of `ExprGen`'s pools, so the
+  * pairs those pools put side by side (two byte arrays of one content, two one
+  * high bit apart, instants under a millisecond apart) collide here as keys.
+  * Every BINARY cell is its own array, as in any vector the engine reads, so
+  * equal content never shares an object. A DECIMAL column draws from
+  * [[DecimalPools]], which keeps to values a `SUM` can add: see there.
   */
 object DataGen {
 
@@ -79,16 +83,14 @@ object DataGen {
     }
 
     private def renderRow(row: Array[Any]): String =
-      row.iterator.map(v => if (v == null) "NULL" else v.toString).mkString("(", ",", ")")
+      row.iterator.map(RowOracle.show).mkString("(", ",", ")")
   }
 
   // ---- schema + data ------------------------------------------------------
 
-  /** The column types: the six of [[ExprGen]]'s `GenTypes` that `QueryGen`
-    * builds queries over. */
-  val ColumnTypes: Seq[DataType] = Seq(
-    DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType,
-    DataType.BooleanType, DataType.StringType)
+  /** Every column type: [[ExprGen]]'s `GenTypes`, so any shape one generator
+    * builds over a type the other can as well. Draw with `ExprGen.pick`. */
+  val ColumnTypes: Seq[DataType] = ExprGen.GenTypes
 
   /** Build one dataset from a single seed. Splits into independent sub-streams so
     * a change to one part of generation does not perturb the rest for a seed. */
@@ -101,7 +103,7 @@ object DataGen {
     val rows = IndexedSeq.tabulate(numRows) { _ =>
       Array.tabulate[Any](schema.length) { c =>
         val spec = specs(c)
-        if (dataRng.bool(spec.nullProb)) null else dataRng.oneOf(spec.domain)
+        if (dataRng.bool(spec.nullProb)) null else fresh(dataRng.oneOf(spec.domain))
       }
     }
     Dataset(schema, rows)
@@ -109,7 +111,16 @@ object DataGen {
 
   def genSchema(rng: Rng): Schema = {
     val numCols = rng.between(1, 4)
-    Schema((0 until numCols).map(i => Field(s"c$i", rng.oneOf(ColumnTypes))).toVector)
+    Schema((0 until numCols).map(i => Field(s"c$i", ExprGen.pick(rng, ColumnTypes))).toVector)
+  }
+
+  /** A cell's own copy of a drawn value: a byte array is cloned, so two cells
+    * of one content are two objects and a comparison by identity cannot pass
+    * for one by content. Every other value is immutable and shared. Shared with
+    * `MetaQueryGen`, which builds its relations from its own pools. */
+  private[fuzz] def fresh(v: Any): Any = v match {
+    case a: Array[Byte] => a.clone()
+    case other => other
   }
 
   /** Row count, weighted small for a fast default run, but covering the 0-row and
@@ -194,9 +205,39 @@ object DataGen {
         IndexedSeq[Any](false)))
     case DataType.StringType =>
       pickSubset(rng, StringPool)
+    case DataType.DateType => pickSubset(rng, ExprGen.DatePool.toIndexedSeq)
+    case DataType.TimestampType => pickSubset(rng, ExprGen.TimestampPool.toIndexedSeq)
+    case DataType.BinaryType => pickSubset(rng, ExprGen.BinaryPool.toIndexedSeq)
+    case d: DataType.DecimalType => pickSubset(rng, DecimalPools(d))
     case other =>
       throw new IllegalArgumentException(s"DataGen.genDomain: unsupported $other")
   }
+
+  /** A decimal column's candidate values, for each of `ExprGen.DecimalTypes`.
+    * Each holds one value at several scales (`1`, `1.0`, `1.00`), which `=`
+    * calls equal, side by side so a slice usually takes two of them, and a
+    * negative; the widest also holds `1.000000000000000001` and `...002`, which
+    * are different values and the same double as `1`.
+    *
+    * Every value fits its declared precision and scale, and as a double every
+    * one is a small multiple of a quarter (`1.000000000000000001` is `1.0`).
+    * That is for `SUM`, which keeps a decimal's type but adds in DOUBLE (a gap
+    * `docs/gotchas.md` records): over these values the double sum is exact in
+    * any order, so a SUM agrees across layouts to the last digit and the
+    * result fits the declared scale, which a spill writes it at and refuses to
+    * round to. A value off either would fail a spill the in-memory run passes,
+    * or move a SUM with the order rows arrive in, which is the gap itself and
+    * not the properties' business. The pools in `ExprGen` add nothing up, so
+    * they run to the edge of their precision instead. */
+  private[fuzz] val DecimalPools: Map[DataType, IndexedSeq[java.math.BigDecimal]] = Map[DataType, Seq[String]](
+    DataType.DecimalType(9, 2) ->
+      Seq("-2.50", "-0.25", "0", "0.00", "1", "1.0", "1.00", "1.25", "2.5", "100.75"),
+    DataType.DecimalType(18, 4) ->
+      Seq("-2.5", "-0.25", "0", "0.0000", "1", "1.0", "1.0000", "1.25", "2.5", "100.75"),
+    DataType.DecimalType(38, 18) ->
+      Seq("-2.5", "0", "1", "1.0", "1.000000000000000000", "1.000000000000000001", "1.000000000000000002",
+        "1.25", "2.5")
+  ).map { case (t, xs) => t -> xs.map(new java.math.BigDecimal(_)).toIndexedSeq }
 
   /** `base` plus a prefix of [[SpecialDoubles]], on [[SpecialValueProb]] of the
     * columns it is asked about. A prefix rather than a random subset so `NaN` —
@@ -221,6 +262,83 @@ object DataGen {
     val start = rng.between(0, pool.length - size)
     pool.slice(start, start + size).map(_.asInstanceOf[Any])
   }
+
+  // ---- the values that matter ---------------------------------------------
+
+  /** A pair of values a comparison of their type is easy to get wrong on: the
+    * value half every type coverage guard asserts beside the shape half, since
+    * a guard that saw only the shape would pass over a corpus that cannot break
+    * it. */
+  sealed abstract class ValueTag(val description: String) {
+    override def toString: String = description
+  }
+
+  object ValueTag {
+    /** Two distinct byte arrays of one content: equal to `=`, unequal by
+      * identity. */
+    case object BytesOfOneContent extends ValueTag("bytes of one content")
+    /** Two byte arrays that differ only in one byte's high bit: they order one
+      * way unsigned and the other way signed. */
+    case object BytesOneHighBitApart extends ValueTag("bytes one high bit apart")
+    /** One decimal value at two scales: equal to `=`, unequal to
+      * `BigDecimal.equals`. */
+    case object DecimalAtTwoScales extends ValueTag("a decimal at two scales")
+    /** Two decimal values that are one double: unequal to `=`, equal through
+      * `doubleValue`. */
+    case object DecimalsOfOneDouble extends ValueTag("decimals of one double")
+    /** Two instants under a millisecond apart: unequal to `=`, equal in
+      * milliseconds. */
+    case object InstantsUnderAMillisecondApart extends ValueTag("instants under a millisecond apart")
+
+    /** The tags a value of `kind` (`ExprGen.kind`) can carry. */
+    def of(kind: String): Seq[ValueTag] = kind match {
+      case "binary" => Seq(BytesOfOneContent, BytesOneHighBitApart)
+      case "decimal" => Seq(DecimalAtTwoScales, DecimalsOfOneDouble)
+      case "timestamp" => Seq(InstantsUnderAMillisecondApart)
+      case _ => Seq.empty
+    }
+  }
+
+  /** The tags any two of `cells` carry, NULLs ignored. Linear in the cells, not
+    * pairwise, so a guard can read every column of a corpus. */
+  def valueTags(cells: Iterable[Any]): Set[ValueTag] = {
+    import ValueTag._
+    val values = cells.iterator.filter(_ != null).toVector
+    val tags = Set.newBuilder[ValueTag]
+
+    val arrays = values.collect { case a: Array[Byte] => a }
+    if (arrays.nonEmpty) {
+      val byContent = arrays.groupBy(new RowOracle.Bytes(_))
+      if (byContent.values.exists(g => g.exists(_ ne g.head))) tags += BytesOfOneContent
+      val contents = byContent.keySet
+      val oneHighBitApart = contents.exists { k =>
+        k.bytes.indices.exists { i =>
+          val flipped = k.bytes.clone()
+          flipped(i) = (flipped(i) ^ 0x80).toByte
+          contents(new RowOracle.Bytes(flipped))
+        }
+      }
+      if (oneHighBitApart) tags += BytesOneHighBitApart
+    }
+
+    val decimals = values.collect { case d: java.math.BigDecimal => d }
+    if (decimals.nonEmpty) {
+      if (decimals.groupBy(_.stripTrailingZeros).values.exists(_.map(_.scale).distinct.size > 1))
+        tags += DecimalAtTwoScales
+      if (decimals.groupBy(_.doubleValue).values.exists(_.map(_.stripTrailingZeros).distinct.size > 1))
+        tags += DecimalsOfOneDouble
+    }
+
+    val micros = values.collect { case i: java.time.Instant => i.getEpochSecond * 1000000L + i.getNano / 1000L }
+      .distinct.sorted
+    if (micros.iterator.zip(micros.iterator.drop(1)).exists { case (x, y) => y - x < 1000L })
+      tags += InstantsUnderAMillisecondApart
+
+    tags.result()
+  }
+
+  /** The tags two values carry, as [[valueTags]] reads them. */
+  def pairTags(a: Any, b: Any): Set[ValueTag] = valueTags(Seq(a, b))
 
   // ---- layout helpers -----------------------------------------------------
 

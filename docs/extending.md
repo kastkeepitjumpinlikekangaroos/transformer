@@ -396,6 +396,17 @@ values its comparison is easy to get wrong on, and `typeCoverage` plus a guard i
 `ExprParityFuzzTest` must assert both that the type reaches a comparison and an
 `IN`, and that those values meet there.
 
+**To give `DataGen` and `QueryGen` a new `DataType`**: `DataGen.ColumnTypes` is
+`ExprGen.GenTypes`, so the type arrives with it; give it a `genDomain` case
+(a narrow slice, so keys collide, of values that cannot fail a spill the
+in-memory run passes) and a `fresh` case if its values are mutable. `QueryGen`
+then reaches it at every site that takes any column, so teach `SqlRender` its
+literal, its NULL (`CAST(NULL AS t)`, or the untyped `NULL` when the binder reads
+no type name for it), and `genLitValue` / `litSqlOfType`; where SQL cannot write
+a literal of it, keep it out of the sites that need one, as a BINARY is kept out
+of HAVING. Name its breaking pairs as a `DataGen.ValueTag` so the site guards in
+`ModeDifferentialFuzzTest` can assert them, not only the shape.
+
 **To add a SQL shape to `QueryGen`** (the mode-differential fuzzer's query
 generator): add it to the structured `GenQuery` (a new `AggSpec` for an
 aggregate, a new producer in `genValue` / `genPredicate` for a scalar shape, or a
