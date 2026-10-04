@@ -354,6 +354,25 @@ ship a fix or move something from "not done" to "done".
   each operator's `*SpillTest`, the end-to-end repro in `SqlEngineTest`, and the
   metamorphic + sharded fuzzers, which now run the spill mode on join queries
   (`MetaModeDifferential` no longer skips `hasAnyJoin`).
+
+  **A NULL-typed column has no parquet type either, and used to fail every
+  spill — fixed.** An untyped `NULL` is NULL-typed, and so is an aggregate over
+  one (`SUM(NULL)`, `MIN(NULL)`), and `ParquetSchema` has no mapping for the
+  type, so a sort over `SUM(NULL)`, a `GROUP BY` or `DISTINCT` with a NULL key,
+  and a grace-hash join or `UNION` carrying a NULL column all threw `Writing null
+  to Parquet not supported in v1` under spill while the same query ran without
+  it. Every spill schema now goes through `Spill.storedType`, which stores a
+  NULL-typed column as a BOOLEAN with no values: the writer skips a NULL cell
+  whatever the column's type, and every read path rebuilds rows cell by cell into
+  the operator's own schema. `positionalSchema` applies it, so a new write site
+  that wraps its schema as above is covered. The six-type fuzz corpora never
+  wrote an untyped `NULL` (each typed NULL was a `CAST`), so the defect was
+  unreachable to them; it is the only NULL a DECIMAL or a BINARY has, since the
+  binder reads no CAST target for either, and widening the mode-differential
+  corpus to every type
+  ([plan 04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)) found it
+  at seed 1796. Pinned by `SqlEngineTest.nullTypedColumnsSpillEndToEnd` (every
+  spilling operator, with and without spill) and `SpillTest`.
 - **`SELECT COUNT(*) FROM <view>` short-circuits to footer metadata** when
   the view's `CatalogView.exactRowCount` is defined (parquet + in-memory).
   The planner emits `CountStarMetadataExec` directly; no scan happens. The

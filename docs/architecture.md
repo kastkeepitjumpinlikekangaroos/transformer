@@ -401,6 +401,11 @@ renames the group-key columns to `_k0`, `_k1`, ... ahead of the `_agg*`
 state columns. This is spill-only — real output files (the non-spill
 `ParquetWriter` callers) keep their real column names. See
 [plans/bugfixes/01](../plans/bugfixes/01-spill-duplicate-column-names.md).
+Both also store each column at `Spill.storedType` of its type: the type
+itself, except a NULL-typed column (an untyped `NULL`, or an aggregate over
+one), which parquet has no type for. It holds nothing but NULLs, so it is
+stored as a BOOLEAN with no values, and the index-addressed readers put the
+NULLs back into the operator's own NULL-typed column.
 
 Limitations: DISTINCT aggregates (`COUNT`, `SUM` and `AVG(DISTINCT …)`)
 silently disable spill on the whole operator because the underlying

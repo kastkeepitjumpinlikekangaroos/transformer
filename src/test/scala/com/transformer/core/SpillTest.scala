@@ -55,6 +55,18 @@ class SpillTest {
     opDir.close()
   }
 
+  /** A spill file names columns by position and stores each at its own type,
+    * but a NULL-typed column, which parquet has no type for, as an all-null
+    * BOOLEAN. */
+  @Test def positionalSchemaStoresANullColumnAsBoolean(): Unit = {
+    val schema = Schema(Field("k", DataType.IntType), Field("x", DataType.NullType),
+      Field("d", DataType.DecimalType(9, 2)))
+    assertEquals(
+      Schema(Field("_c0", DataType.IntType), Field("_c1", DataType.BooleanType),
+        Field("_c2", DataType.DecimalType(9, 2))),
+      Spill.positionalSchema(schema))
+  }
+
   @Test def estimateBytesScalesWithRows(): Unit = {
     val schema = Schema(Field("x", DataType.LongType), Field("s", DataType.StringType))
     val small = new ColumnarBatch(schema, 4)

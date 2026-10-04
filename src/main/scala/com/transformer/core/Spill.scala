@@ -132,11 +132,21 @@ object Spill {
     * positional names sidesteps that entirely.
     *
     * Spill-only: do not route real output files (the non-spill `ParquetWriter`
-    * callers) through here — those must keep their real column names. */
+    * callers) through here — those must keep their real column names. Types go
+    * through [[storedType]]. */
   def positionalSchema(schema: Schema): Schema =
     Schema(schema.fields.iterator.zipWithIndex.map {
-      case (f, i) => Field(s"_c$i", f.dataType)
+      case (f, i) => Field(s"_c$i", storedType(f.dataType))
     }.toVector)
+
+  /** The type a spill file stores a column of `t` as: `t`, except for a
+    * NULL-typed column (an untyped `NULL`, or an aggregate over one), which has
+    * no parquet type. It holds nothing but NULLs, so it is stored as a BOOLEAN
+    * column with no values in it: the writer skips a NULL cell whatever the
+    * column's type, and every spill reader rebuilds rows cell by cell into the
+    * operator's own schema, where a NULL read back is all the column held. */
+  def storedType(t: DataType): DataType =
+    if (t == DataType.NullType) DataType.BooleanType else t
 
   /** Sweep stale `${rootDir}/transformer-spill-*` directories from prior
     * JVM runs. Bounded by listing the immediate children of `parent`; does

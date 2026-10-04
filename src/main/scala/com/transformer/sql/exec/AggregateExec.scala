@@ -1595,10 +1595,11 @@ private[exec] object AggSpiller {
     * by-name column model reads the second one back as null (see
     * [[com.transformer.core.Spill.positionalSchema]]). The fold path addresses
     * key columns by index `[0, nKeys)` and state columns by `nKeys + a`, so the
-    * names are never read back. */
+    * names are never read back. A key's type goes through
+    * [[com.transformer.core.Spill.storedType]], as every spill file's does. */
   def spillSchema(groupKeySchema: Schema, numAggs: Int): Schema = {
     val keyFields = Vector.tabulate(groupKeySchema.length)(i =>
-      Field(s"_k$i", groupKeySchema.fields(i).dataType))
+      Field(s"_k$i", Spill.storedType(groupKeySchema.fields(i).dataType)))
     val stateFields = Vector.tabulate(numAggs)(i => Field(s"_agg$i", DataType.BinaryType))
     Schema(keyFields ++ stateFields)
   }

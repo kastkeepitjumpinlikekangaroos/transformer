@@ -3021,4 +3021,56 @@ class SqlEngineTest {
       else System.setProperty(Spill.SpillDirProperty, prevProp)
     }
   }
+
+  /** A NULL-typed column spills like any other. It is the type of an untyped
+    * `NULL` and of an aggregate over one, and it has no parquet type, so every
+    * spilling operator threw `Writing null to Parquet not supported` on one
+    * while the same query ran without spill: a sort over `SUM(NULL)`, a
+    * `GROUP BY` and a `DISTINCT` with a NULL key, a grace-hash join or a UNION
+    * carrying a NULL column. The plan 04 corpus found it at seed 1796 of
+    * `mode_differential_fuzz_campaign`: an untyped NULL is the only NULL a
+    * DECIMAL or a BINARY has, since the binder reads no CAST target for either.
+    * Each query runs with spill forced and must match the run without it. */
+  @Test def nullTypedColumnsSpillEndToEnd(): Unit = {
+    val schema = Schema(Vector(Field("k", DataType.IntType), Field("g", DataType.IntType)))
+    def part(from: Int, until: Int): ColumnarBatch = {
+      val b = new ColumnarBatch(schema, until - from)
+      (from until until).zipWithIndex.foreach { case (i, r) =>
+        b.column(0).setBoxed(r, java.lang.Integer.valueOf(i))
+        b.column(1).setBoxed(r, java.lang.Integer.valueOf(i % 7))
+      }
+      b.setNumRows(until - from)
+      b
+    }
+    def catalog(): Catalog = catalogWith("t" -> new MaterializedView(schema,
+      IndexedSeq(IndexedSeq(part(0, 600)), IndexedSeq(part(600, 1200)))))
+    def run(sql: String, opts: ExecutionOptions): Seq[String] = {
+      val q = SqlEngine.execute(sql, catalog(), opts)
+      collectAllRows(q).map(row => q.schema.fieldNames.map(n => String.valueOf(row(n))).mkString("|"))
+    }
+    val queries = Seq(
+      "SELECT k, NULL AS x FROM t ORDER BY k" -> true,
+      "SELECT g, SUM(NULL) AS s, MIN(NULL) AS m FROM t GROUP BY g ORDER BY g" -> true,
+      "SELECT g, NULL AS x, COUNT(*) AS n FROM t GROUP BY g, NULL" -> false,
+      "SELECT DISTINCT g, NULL AS x FROM t" -> false,
+      "WITH a AS (SELECT k, NULL AS x FROM t) SELECT a.k, a.x, b.g FROM a JOIN t b ON a.k = b.k" -> false,
+      "WITH a AS (SELECT k, NULL AS x FROM t WHERE g = 0) SELECT b.k, a.x FROM t b LEFT JOIN a ON a.k = b.k" -> false,
+      "SELECT g, NULL AS x FROM t UNION SELECT g, NULL AS x FROM t" -> false,
+      "SELECT k, NULL AS x, COUNT(*) OVER (PARTITION BY g) AS n FROM t" -> false)
+    val prevProp = System.getProperty(Spill.SpillDirProperty)
+    val tmp = Files.createTempDirectory("sqlengine-null-spill-")
+    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
+    try {
+      for ((sql, ordered) <- queries) {
+        val expected = run(sql, ExecutionOptions.Default)
+        val actual = run(sql, ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L)))
+        assertTrue(s"expected a non-empty result: $sql", expected.nonEmpty)
+        if (ordered) assertEquals(sql, expected, actual)
+        else assertEquals(sql, expected.sorted, actual.sorted)
+      }
+    } finally {
+      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
+      else System.setProperty(Spill.SpillDirProperty, prevProp)
+    }
+  }
 }
