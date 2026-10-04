@@ -222,72 +222,86 @@ class ModeDifferentialFuzzTest {
 
   // ---- DATE, TIMESTAMP, BINARY and DECIMAL coverage ----------------------
   //
-  // One guard per type, each asserting both halves at the sites layouts and
-  // spill change most: the type reaches an ORDER BY key, a GROUP BY key and a
-  // MIN/MAX argument (and, for DECIMAL, a SUM or AVG), and the column at each
-  // site carries the values a comparison of the type gets wrong. `DataGen` drew
-  // none of the four until plan 04. The four read one shared tally of the
-  // generated corpus; no query runs.
+  // One guard per type, each asserting both halves: the type reaches a
+  // comparison and an IN list, an ORDER BY key, a GROUP BY key and a MIN/MAX
+  // argument (and, for DECIMAL, a SUM or AVG), and the column it reads there
+  // carries the values a comparison of the type gets wrong. The corpus drew none
+  // of the four until plan 04. The guards read two shared tallies of the
+  // generated corpus, one by predicate and one by site; no query runs.
   //
   // 10000 seeds, because the thinnest chain (MIN/MAX over a decimal column
   // holding two values of one double, which only DECIMAL(38,18) has) is 23 of
-  // them; generation only, well under a second. Measured over these seeds, the
-  // shapes: ORDER BY date 694, timestamp 706, binary 682, decimal 677; GROUP BY
-  // 612, 655, 639, 658; MIN/MAX 247, 269, 249, 228; SUM/AVG decimal 375. The
-  // values, at ORDER BY / GROUP BY / MIN/MAX: instants under a millisecond
-  // apart 406 / 373 / 145; bytes of one content 440 / 433 / 164; bytes one high
-  // bit apart 240 / 227 / 81; a decimal at two scales 279 / 275 / 101 (145 at
-  // SUM/AVG); decimals of one double 101 / 101 / 23 (46 at SUM/AVG). Each bound
-  // sits about 3x below its count.
+  // them; generation only, well under a second. Measured over these seeds:
+  //
+  //                         date  timestamp  binary  decimal
+  //   comparison             508        534     425      531
+  //   IN                     266        272     297      252
+  //   ORDER BY               694        706     682      677
+  //   GROUP BY               612        655     639      658
+  //   MIN/MAX                247        269     249      228   (SUM/AVG decimal 375)
+  //
+  // and the columns there holding each value pair, at comparison / IN /
+  // ORDER BY / GROUP BY / MIN/MAX: instants under a millisecond apart 271 /
+  // 164 / 406 / 373 / 145; bytes of one content 276 / 202 / 440 / 433 / 164;
+  // bytes one high bit apart 150 / 106 / 240 / 227 / 81; a decimal at two
+  // scales 204 / 112 / 279 / 275 / 101 (145 at SUM/AVG); decimals of one
+  // double 56 / 32 / 101 / 101 / 23 (46 at SUM/AVG). Each bound sits about 3x
+  // below its count.
 
   import DataGen.ValueTag._
-  import ModeDifferentialFuzzTest.{SiteTally, siteTally}
+  import ModeDifferentialFuzzTest.{SiteTally, predicateTally, siteTally}
 
-  private def siteMessage(t: SiteTally): String =
+  private def tallyMessage(t: SiteTally): String =
     s"over ${t.seeds} seeds: shapes=${t.shapes.toSeq.sortBy(_._1.toString).mkString(", ")}; " +
       s"values=${t.values.toSeq.sortBy(_._1.toString).mkString(", ")}"
 
-  /** The shape floor for every new type at each site. */
+  /** The shape floor at each site, for every one of the four types. */
+  private val PredicateShapeFloor = Seq("comparison" -> 140, "IN" -> 80)
   private val SiteShapeFloor = Seq("ORDER BY" -> 220, "GROUP BY" -> 200, "MIN/MAX" -> 75)
 
-  private def assertShapes(t: SiteTally, kind: String): Unit =
+  private def assertShapes(kind: String): Unit = {
+    for ((site, floor) <- PredicateShapeFloor)
+      assertTrue(s"a $kind rarely reaches $site, ${tallyMessage(predicateTally)}",
+        predicateTally.shapes((site, kind)) > floor)
     for ((site, floor) <- SiteShapeFloor)
-      assertTrue(s"a $kind rarely reaches $site, ${siteMessage(t)}", t.shapes((site, kind)) > floor)
-
-  private def assertValues(t: SiteTally, kind: String, tag: DataGen.ValueTag, floors: Seq[Int]): Unit =
-    for (((site, _), floor) <- SiteShapeFloor.zip(floors))
-      assertTrue(s"a $site $kind rarely holds $tag, ${siteMessage(t)}", t.values((site, tag)) > floor)
-
-  @Test def datesReachOrderByGroupByAndMinMax(): Unit = {
-    val t = siteTally
-    println(s"[mode-differential] type coverage ${siteMessage(t)}")
-    assertShapes(t, "date")
+      assertTrue(s"a $kind rarely reaches $site, ${tallyMessage(siteTally)}", siteTally.shapes((site, kind)) > floor)
   }
 
-  @Test def timestampsReachOrderByGroupByAndMinMaxUnderAMillisecondApart(): Unit = {
-    val t = siteTally
-    assertShapes(t, "timestamp")
-    assertValues(t, "timestamp", InstantsUnderAMillisecondApart, Seq(135, 120, 48))
+  /** `floors` are for comparison, IN, ORDER BY, GROUP BY and MIN/MAX, in turn. */
+  private def assertValues(kind: String, tag: DataGen.ValueTag, floors: Seq[Int]): Unit = {
+    val sites = (PredicateShapeFloor.map(p => (p._1, predicateTally)) ++ SiteShapeFloor.map(p => (p._1, siteTally)))
+    for (((site, t), floor) <- sites.zip(floors))
+      assertTrue(s"a $kind at $site rarely holds $tag, ${tallyMessage(t)}", t.values((site, tag)) > floor)
   }
 
-  @Test def binaryReachesOrderByGroupByAndMinMaxWithEqualContentAndHighBitPairs(): Unit = {
-    val t = siteTally
-    assertShapes(t, "binary")
-    assertValues(t, "binary", BytesOfOneContent, Seq(145, 145, 54))
-    assertValues(t, "binary", BytesOneHighBitApart, Seq(80, 75, 27))
+  @Test def datesReachComparisonsOrderByGroupByAndMinMax(): Unit = {
+    println(s"[mode-differential] predicate coverage ${tallyMessage(predicateTally)}")
+    println(s"[mode-differential] site coverage ${tallyMessage(siteTally)}")
+    assertShapes("date")
   }
 
-  @Test def decimalsReachOrderByGroupByMinMaxAndSumAtTwoScalesAndOfOneDouble(): Unit = {
-    val t = siteTally
-    assertShapes(t, "decimal")
-    assertValues(t, "decimal", DecimalAtTwoScales, Seq(90, 90, 33))
-    assertValues(t, "decimal", DecimalsOfOneDouble, Seq(33, 33, 7))
+  @Test def timestampsReachComparisonsOrderByGroupByAndMinMaxUnderAMillisecondApart(): Unit = {
+    assertShapes("timestamp")
+    assertValues("timestamp", InstantsUnderAMillisecondApart, Seq(90, 54, 135, 120, 48))
+  }
+
+  @Test def binaryReachesComparisonsOrderByGroupByAndMinMaxWithEqualContentAndHighBitPairs(): Unit = {
+    assertShapes("binary")
+    assertValues("binary", BytesOfOneContent, Seq(92, 67, 145, 145, 54))
+    assertValues("binary", BytesOneHighBitApart, Seq(50, 35, 80, 75, 27))
+  }
+
+  @Test def decimalsReachComparisonsOrderByGroupByMinMaxAndSumAtTwoScalesAndOfOneDouble(): Unit = {
+    assertShapes("decimal")
+    assertValues("decimal", DecimalAtTwoScales, Seq(68, 37, 90, 90, 33))
+    assertValues("decimal", DecimalsOfOneDouble, Seq(18, 10, 33, 33, 7))
     // A decimal SUM adds in DOUBLE, so it is the aggregate the pool's dyadic
     // values exist for (see `DataGen.DecimalPools`).
-    assertTrue(s"a DECIMAL rarely reaches SUM/AVG, ${siteMessage(t)}", t.shapes(("SUM/AVG", "decimal")) > 125)
-    assertTrue(s"a SUM/AVG DECIMAL rarely holds a decimal at two scales, ${siteMessage(t)}",
+    val t = siteTally
+    assertTrue(s"a DECIMAL rarely reaches SUM/AVG, ${tallyMessage(t)}", t.shapes(("SUM/AVG", "decimal")) > 125)
+    assertTrue(s"a SUM/AVG DECIMAL rarely holds a decimal at two scales, ${tallyMessage(t)}",
       t.values(("SUM/AVG", DecimalAtTwoScales)) > 48)
-    assertTrue(s"a SUM/AVG DECIMAL rarely holds decimals of one double, ${siteMessage(t)}",
+    assertTrue(s"a SUM/AVG DECIMAL rarely holds decimals of one double, ${tallyMessage(t)}",
       t.values(("SUM/AVG", DecimalsOfOneDouble)) > 15)
   }
 
@@ -621,6 +635,57 @@ object ModeDifferentialFuzzTest {
       case _ => Seq.empty
     }
     orderBy ++ rest
+  }
+
+  /** Every comparison and IN in `q` over one of the four types, with the
+    * columns of that type it reads: the comparison or IN, its kind, and the
+    * column indices. */
+  private def predicates(q: QueryGen.GenQuery): Seq[(String, String, Seq[Int])] = {
+    val roots: Seq[Expr] = q match {
+      case p: QueryGen.ProjectQuery => p.projection.map(_._1) ++ p.where.toSeq
+      case a: QueryGen.AggregateQuery => a.where.toSeq ++ a.aggregates.flatMap {
+        case (QueryGen.CountIf(e), _) => Seq(e)
+        case (QueryGen.Count(e, _), _) => Seq(e)
+        case (QueryGen.Sum(e, _), _) => Seq(e)
+        case (QueryGen.Avg(e, _), _) => Seq(e)
+        case _ => Seq.empty
+      }
+    }
+    def columns(e: Expr, kind: String): Seq[Int] = e match {
+      case c: ColRefExpr if ExprGen.kind(c.dataType) == kind => Seq(c.index)
+      case other => Shrinker.childrenOf(other).flatMap(columns(_, kind))
+    }
+    def walk(e: Expr): Seq[(String, String, Seq[Int])] = {
+      val here = e match {
+        case BinOpExpr(op, l, r, _) if Seq("=", "<>", "<", "<=", ">", ">=").contains(op) &&
+          ExprGen.ReportedKinds(ExprGen.kind(l.dataType)) =>
+          val k = ExprGen.kind(l.dataType)
+          Seq(("comparison", k, columns(l, k) ++ columns(r, k)))
+        case InListExpr(child, items, _) if ExprGen.ReportedKinds(ExprGen.kind(child.dataType)) =>
+          val k = ExprGen.kind(child.dataType)
+          Seq(("IN", k, (child +: items).flatMap(columns(_, k))))
+        case _ => Seq.empty
+      }
+      here ++ Shrinker.childrenOf(e).flatMap(walk)
+    }
+    roots.flatMap(walk)
+  }
+
+  lazy val predicateTally: SiteTally = {
+    val n = 10000
+    val shapes = scala.collection.mutable.Map.empty[(String, String), Int].withDefaultValue(0)
+    val values = scala.collection.mutable.Map.empty[(String, DataGen.ValueTag), Int].withDefaultValue(0)
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val found = predicates(qc.query)
+      found.map { case (site, kind, _) => (site, kind) }.distinct.foreach(k => shapes(k) += 1)
+      found.flatMap { case (site, _, cols) =>
+        cols.distinct.flatMap(c => DataGen.valueTags(qc.dataset.rows.map(_(c))).map(tag => (site, tag)))
+      }.distinct.foreach(k => values(k) += 1)
+      seed += 1
+    }
+    SiteTally(n, shapes.toMap.withDefaultValue(0), values.toMap.withDefaultValue(0))
   }
 
   lazy val siteTally: SiteTally = {

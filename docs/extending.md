@@ -404,7 +404,11 @@ then reaches it at every site that takes any column, so teach `SqlRender` its
 literal, its NULL (`CAST(NULL AS t)`, or the untyped `NULL` when the binder reads
 no type name for it), and `genLitValue` / `litSqlOfType`; where SQL cannot write
 a literal of it, keep it out of the sites that need one, as a BINARY is kept out
-of HAVING. Name its breaking pairs as a `DataGen.ValueTag` so the site guards in
+of HAVING. Give `genAtom` a comparison for it (against what the binder allows
+it to meet, built from expressions whose type is exactly that: `QueryGen`'s
+target type is only a hint, so `c + 0` asked for as an INT can be a FLOAT) and
+`genInList` items, and `genValue` a branch so a projected item can be one. Name
+its breaking pairs as a `DataGen.ValueTag` so the per-type guards in
 `ModeDifferentialFuzzTest` can assert them, not only the shape.
 
 **To add a SQL shape to `QueryGen`** (the mode-differential fuzzer's query

@@ -58,7 +58,12 @@ object QueryGen {
 
   private val Numerics: Seq[DataType] =
     Seq(DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType)
-  private val ValueTypes: Seq[DataType] = Numerics :+ DataType.StringType
+  /** The types a projected value or an `IS NULL` operand takes: every type
+    * but BOOLEAN, which is a predicate here. Draw with `ExprGen.pick`. */
+  private val ValueTypes: Seq[DataType] = ExprGen.GenTypes.filterNot(_ == DataType.BooleanType)
+  /** The value types a node may read as text: all but BINARY, which the binder
+    * refuses to CAST to a string or CONCAT. */
+  private val TextTypes: Seq[DataType] = ValueTypes.filterNot(_ == DataType.BinaryType)
   private val ArithOps = Seq("+", "-", "*", "/", "%")
   private val RelOps = Seq("<", "<=", ">", ">=", "=", "<>")
 
@@ -225,7 +230,7 @@ object QueryGen {
     val computed: Vector[(Expr, String)] =
       if (topN) Vector.empty
       else (0 until rng.between(0, 3)).iterator.map { i =>
-        (genValue(rng, schema, rng.oneOf(ValueTypes), rng.between(2, 4)), s"p$i")
+        (genValue(rng, schema, ExprGen.pick(rng, ValueTypes), rng.between(2, 4)), s"p$i")
       }.toVector
 
     val bareItems: Vector[(Expr, String)] = bareCols.map(i => colRef(schema, i)).map(cr => (cr: Expr, cr.name))
@@ -428,13 +433,13 @@ object QueryGen {
       3 -> (() => BinOpExpr("||", sub(DataType.StringType), sub(DataType.StringType), DataType.StringType)),
       // UPPER/LOWER only: TRIM parses to a TrimFunction node the binder rejects.
       3 -> (() => FuncExpr(rng.oneOf(Seq("UPPER", "LOWER")), Seq(sub(DataType.StringType)), DataType.StringType)),
-      3 -> (() => FuncExpr("CONCAT", Seq.fill(rng.between(1, 3))(sub(rng.oneOf(ValueTypes))), DataType.StringType)),
+      3 -> (() => FuncExpr("CONCAT", Seq.fill(rng.between(1, 3))(sub(ExprGen.pick(rng, TextTypes))), DataType.StringType)),
       2 -> (() => FuncExpr("SUBSTRING", substringArgs(rng, sub(DataType.StringType)), DataType.StringType)),
       2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
       2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
       1 -> (() => FuncExpr("NULLIF", Seq(sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
       1 -> (() => genCase(rng, schema, DataType.StringType, depth)),
-      1 -> (() => CastExpr(sub(rng.oneOf(ValueTypes)), DataType.StringType)))
+      1 -> (() => CastExpr(sub(ExprGen.pick(rng, TextTypes)), DataType.StringType)))
     rng.weighted(producers: _*)()
   }
 
@@ -500,28 +505,77 @@ object QueryGen {
   private def genAtom(rng: Rng, schema: Schema, depth: Int): Expr = {
     def sub(t: DataType): Expr = genValue(rng, schema, t, math.max(0, depth - 1))
     val n = schema.length
-    val boolCols = (0 until n).filter(i => schema.fields(i).dataType == DataType.BooleanType).toVector
-    val inCols = (0 until n).filter { i =>
-      val t = schema.fields(i).dataType
-      t == DataType.IntType || t == DataType.LongType || t == DataType.StringType
-    }.toVector
+    def colsWhere(p: DataType => Boolean): Vector[Int] =
+      (0 until n).filter(i => p(schema.fields(i).dataType)).toVector
+    val boolCols = colsWhere(_ == DataType.BooleanType)
+    val inCols = colsWhere(t => t != DataType.BooleanType && !(t == DataType.FloatType || t == DataType.DoubleType))
+    val temporalCols = colsWhere(t => t == DataType.DateType || t == DataType.TimestampType)
+    val decimalCols = colsWhere(_.isInstanceOf[DataType.DecimalType])
+    val binaryCols = colsWhere(_ == DataType.BinaryType)
 
     val options = scala.collection.mutable.ArrayBuffer.empty[(Int, () => Expr)]
     options += ((4, () => BinOpExpr(rng.oneOf(RelOps), sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics)), DataType.BooleanType)))
     options += ((3, () => BinOpExpr(rng.oneOf(RelOps), sub(DataType.StringType), sub(DataType.StringType), DataType.BooleanType)))
-    options += ((2, () => IsNullExpr(sub(rng.oneOf(ValueTypes)), rng.bool())))
+    options += ((2, () => IsNullExpr(sub(ExprGen.pick(rng, ValueTypes)), rng.bool())))
     options += ((2, () => LikeExpr(sub(DataType.StringType), LitExpr(rng.oneOf(LikePatternPool), DataType.StringType), rng.bool())))
     if (inCols.nonEmpty) options += ((2, () => genInList(rng, schema, rng.oneOf(inCols))))
     if (boolCols.nonEmpty) options += ((2, () => colRef(schema, rng.oneOf(boolCols))))
+    // The four types the corpus once lacked, each where a column of it is in
+    // scope, so a comparison of one has data behind it.
+    if (temporalCols.nonEmpty) options += ((3, () => {
+      val t = schema.fields(rng.oneOf(temporalCols)).dataType
+      BinOpExpr(rng.oneOf(RelOps), sub(t), temporalOperand(rng, schema, t, depth), DataType.BooleanType)
+    }))
+    if (decimalCols.nonEmpty) options += ((3, () => {
+      val t = schema.fields(rng.oneOf(decimalCols)).dataType
+      BinOpExpr(rng.oneOf(RelOps), sub(t), decimalOperand(rng, schema, t, depth), DataType.BooleanType)
+    }))
+    if (binaryCols.nonEmpty) options += ((2, () =>
+      BinOpExpr(rng.oneOf(RelOps), sub(DataType.BinaryType), sub(DataType.BinaryType), DataType.BooleanType)))
     options += ((1, () => LitExpr(rng.bool(), DataType.BooleanType)))
     rng.weighted(options.toSeq: _*)()
   }
 
+  /** The other side of a comparison with a DATE or TIMESTAMP: an expression of
+    * the same type, or a literal written as a quoted ISO string, which the
+    * binder reads as the type it meets. The string is the form a user writes
+    * (`d = '2024-02-29'`), and the binder's own path for it. */
+  private def temporalOperand(rng: Rng, schema: Schema, t: DataType, depth: Int): Expr =
+    if (rng.bool(0.3)) LitExpr(SqlRender.temporalText(genLitValue(rng, t)), DataType.StringType)
+    else genValue(rng, schema, t, math.max(0, depth - 1))
+
+  /** The other side of a comparison with a DECIMAL of type `t`: a decimal
+    * expression, of its own declared type or another one in scope, or an
+    * integer column or literal, which the analyzer widens to it exactly. Never
+    * anything that can be a FLOAT or a DOUBLE: the widening CAST refuses `NaN`
+    * and the infinities, which float columns hold, so the query would fail
+    * mid-drain, by the engine's design (see `Casts`). That rules out an
+    * integer EXPRESSION too, since the target type is only a hint here and
+    * `c + 0` over a FLOAT column is a FLOAT; a leaf is exactly its type. A
+    * decimal's own literals are double literals, but finite ones. */
+  private def decimalOperand(rng: Rng, schema: Schema, t: DataType, depth: Int): Expr = {
+    val decimals = (t +: schema.fields.map(_.dataType).filter(_.isInstanceOf[DataType.DecimalType])).distinct
+    rng.weighted(
+      (3, () => genValue(rng, schema, rng.oneOf(decimals), math.max(0, depth - 1))),
+      (1, () => genLeafValue(rng, schema, rng.oneOf(Seq(DataType.IntType, DataType.LongType)))))()
+  }
+
+  /** `col [NOT] IN (...)`: literal items, a NULL now and then, and for a
+    * BINARY, which has no literal, the BINARY columns in scope. A DATE or
+    * TIMESTAMP item is now and then a quoted ISO string. */
   private def genInList(rng: Rng, schema: Schema, colIdx: Int): Expr = {
     val col = colRef(schema, colIdx)
+    val binaryCols = (0 until schema.length).filter(i => schema.fields(i).dataType == DataType.BinaryType).toVector
     val nItems = rng.between(1, 4)
-    val items = (0 until nItems).map(_ =>
-      if (rng.bool(0.15)) LitExpr(null, col.dataType) else LitExpr(genLitValue(rng, col.dataType), col.dataType))
+    val items = (0 until nItems).map { _ =>
+      if (rng.bool(0.15)) LitExpr(null, col.dataType)
+      else col.dataType match {
+        case DataType.BinaryType => colRef(schema, rng.oneOf(binaryCols))
+        case t @ (DataType.DateType | DataType.TimestampType) if rng.bool(0.3) =>
+          LitExpr(SqlRender.temporalText(genLitValue(rng, t)), DataType.StringType)
+        case t => LitExpr(genLitValue(rng, t), t)
+      }
+    }
     InListExpr(col, items.toSeq, rng.bool())
   }
 
@@ -660,7 +714,7 @@ object SqlRender {
     case DataType.BooleanType => if (v.asInstanceOf[Boolean]) "TRUE" else "FALSE"
     case DataType.StringType => "'" + v.toString.replace("'", "''") + "'"
     case DataType.DateType => s"DATE '$v'"
-    case DataType.TimestampType => s"TIMESTAMP '${TimestampText.format(v.asInstanceOf[java.time.Instant])}'"
+    case DataType.TimestampType => s"TIMESTAMP '${temporalText(v)}'"
     case _: DataType.DecimalType =>
       val d = v.asInstanceOf[java.math.BigDecimal]
       require(writesExactly(d), s"SqlRender: no literal reads back as the decimal ${d.toPlainString}")
@@ -674,6 +728,13 @@ object SqlRender {
     * microsecond a `TimestampVector` holds. */
   private val TimestampText: java.time.format.DateTimeFormatter =
     java.time.format.DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSSSSS").withZone(java.time.ZoneOffset.UTC)
+
+  /** A DATE or TIMESTAMP value as the text of its literal: `2024-02-29`, or
+    * `2024-03-10 07:00:00.000001`. */
+  def temporalText(v: Any): String = v match {
+    case i: java.time.Instant => TimestampText.format(i)
+    case other => other.toString
+  }
 
   /** Whether `d` can be written as a literal. SQL has no DECIMAL literal: a
     * number with a point reads as a DOUBLE, which the analyzer widens to the
