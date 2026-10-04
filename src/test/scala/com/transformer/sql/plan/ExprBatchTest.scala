@@ -899,6 +899,24 @@ class ExprBatchTest {
     }
   }
 
+  /** Arithmetic and negation on NULL alone, the type the binder gives
+    * `NULL + NULL`: NULL on every row, on both paths. The vector path threw
+    * `IllegalStateException: Arithmetic on null not supported` (and `Unary -
+    * on null`) while the row path answered NULL. A DECIMAL's NULL is the
+    * untyped one, so decimal arithmetic in a query reaches this. */
+  @Test def arithOnNullAloneIsNull(): Unit = {
+    val b = batch("x" -> intCol(i => i))
+    val nul = LitExpr(null, DataType.NullType)
+    for (op <- Seq("+", "-", "*", "/", "%")) {
+      val e = BinOpExpr(op, nul, nul, DataType.NullType)
+      assertParity(e, b)
+      assertTrue(s"$op over NULLs", (0 until N).forall(e.evalVec(b).isNull))
+    }
+    val neg = UnaryOpExpr("-", nul, DataType.NullType)
+    assertParity(neg, b)
+    assertTrue("negated NULL", (0 until N).forall(neg.evalVec(b).isNull))
+  }
+
   @Test def unaryMinusDecimal(): Unit = {
     val dt = DataType.DecimalType(38, 3)
     val b = batch("x" -> decCol(dt, i => SpecialDecimals(i % 8), i => i % 13 == 0))

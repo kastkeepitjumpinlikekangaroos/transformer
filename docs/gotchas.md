@@ -838,6 +838,16 @@ ship a fix or move something from "not done" to "done".
   `decimalSumAndAvgAreExact`, `decimalArithmeticIsExactAndTyped`,
   `decimalOverflowIsAnError` and `decimalResultsSpill`.
 
+- **Arithmetic on NULL alone used to throw — fixed.** `NULL + NULL` binds with
+  the NULL type, and `VecOps.arith` and `VecOps.negate`, which a projection, a
+  WHERE and an aggregate's argument run on, had no case for it: `Arithmetic on
+  null not supported` and `Unary - on null`, internal `IllegalStateException`s,
+  where the row path answered NULL. Both now return an all-NULL vector. A
+  `DECIMAL` has no typed NULL (the binder reads no CAST target for one), so
+  decimal arithmetic in a query reaches `NULL * NULL` as soon as both sides are
+  NULL. Pinned by `ExprBatchTest.arithOnNullAloneIsNull` and
+  `SqlEngineTest.arithmeticOnNullAloneIsNull`.
+
 - **Mode-differential comparison is a multiset with a floating-point tolerance.**
   The `mode_differential_fuzz_test` (and the metamorphic `MetaModeDifferential`)
   assert one `(data, query)` gives the same result across spill on/off, metrics

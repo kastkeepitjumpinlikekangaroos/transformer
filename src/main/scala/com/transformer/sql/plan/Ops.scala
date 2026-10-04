@@ -427,6 +427,9 @@ object VecOps {
       case DataType.DoubleType => doubleArith(op, l, r, n, cap)
       case DataType.FloatType => floatArith(op, l, r, n, cap)
       case d: DataType.DecimalType => decimalArith(op, l, r, d, n, cap)
+      // Arithmetic on NULL alone (`NULL + NULL`, which a DECIMAL's untyped
+      // NULL reaches) is NULL on every row, as `eval` answers it.
+      case DataType.NullType => new NullVectorImpl(cap)
       case other => throw new IllegalStateException(s"Arithmetic on $other not supported")
     }
   }
@@ -600,6 +603,7 @@ object VecOps {
           i += 1
         }
         new DecimalVector(values, d.precision, d.scale, cap)
+      case DataType.NullType => new NullVectorImpl(cap)
       case other => throw new IllegalStateException(s"Unary - on $other")
     }
   }

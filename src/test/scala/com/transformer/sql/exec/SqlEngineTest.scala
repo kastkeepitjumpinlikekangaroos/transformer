@@ -2985,6 +2985,19 @@ class SqlEngineTest {
       overflow("SELECT SUM(b) AS v FROM tb"))
   }
 
+  /** Arithmetic on NULL alone is NULL. A projection or a WHERE, which run on
+    * the vector path, threw `IllegalStateException: Arithmetic on null not
+    * supported` (and `Unary - on null`), and so did an aggregate over one. A
+    * DECIMAL has no typed NULL, so `d * NULL` is typed by `d` but `NULL * NULL`
+    * beside a decimal reached this. */
+  @Test def arithmeticOnNullAloneIsNull(): Unit = {
+    val cat = decimalArithCatalog()
+    assertEquals(Seq(null, null, null), column("SELECT id, NULL + NULL AS v FROM ta ORDER BY id", cat, "v"))
+    assertEquals(Seq(null, null, null), column("SELECT id, - NULL AS v FROM ta ORDER BY id", cat, "v"))
+    assertEquals(Seq(1, 2, 3), column("SELECT id FROM ta WHERE NULL / NULL IS NULL ORDER BY id", cat, "id"))
+    assertEquals(Seq(null), column("SELECT SUM(NULL % NULL) AS v FROM ta", cat, "v"))
+  }
+
   /** A decimal SUM, AVG and arithmetic result fits its declared type, so it
     * writes to parquet as it is: spilling a sort over one, and an aggregate
     * whose partial sums spill, give the run without spill's answer. A sum kept
