@@ -60,6 +60,19 @@ specific traps.
   `Analyzer.unify` holds the rule for values that meet, and
   `Analyzer.checkCast` and `Casts` the rules for CAST; follow them when adding a
   type.
+- **A failure the user caused is an `IllegalArgumentException` in SQL's words,
+  raised at bind time unless a value causes it.** Never an internal exception
+  class (`UnsupportedOperationException`, `IllegalStateException`, a
+  `ClassCastException` from a type the binder let through), never a JSqlParser
+  class name or a node's `toString` in the message (it can throw, and it names
+  the parser's classes), never an internal slot name such as `_agg0`. A failure
+  that waits for the rows is right only when a value causes it — a string a CAST
+  cannot read, a decimal that overflows its type; anything the binder could know
+  is refused before the first row, so a job task fails at its start and not
+  part-way through. `oracle/CleanRejection` (`fuzz/frontend_fuzz_test`) holds
+  every failure to this; its known defects are where the engine does not yet
+  ([plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md),
+  [11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md)).
 - **Selectivity / cardinality constants live as named `private[plan] val`s**
   in `LogicalPlanCardinality.scala` (`SelectivityEq`, `SelectivityRange`,
   `SelectivityIsNull`, …). New shapes added to `filterSelectivity` should

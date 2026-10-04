@@ -142,6 +142,7 @@ discovery rule).
 | `fuzz/dag_scheduler_fuzz_test` | Property-based gate over the **job-level DAG scheduler** (`DataJob.runUnifiedDag`) — the layer above SQL execution. `JobDagGen` builds a whole `DataJob`: 1–3 CSV inputs (some pointed at a path matching no file, so their load fails) and up to ten `SQLTask`s whose FROM clauses reference only inputs and EARLIER tasks (acyclic by construction), each rigged to succeed, to fail in the worker (it selects a column that does not exist, so the statement still parses and `TaskDag` still recovers the same edges), or to fail a validation. Task bodies are row-monotone `UNION ALL`s of unfiltered scans, so the injected outcome is exact. Per-task writer format, spill and metrics knobs are drawn too, so concurrent tasks hit the CSV and parquet writers, the shared spill directory and the metrics snapshot at once, and a share of tasks acquire a dependency through a VALIDATION's FROM rather than the main SQL (a separate edge source in `TaskDag.build`). `oracle/DagSchedule` then decides the run against what the DAG alone implies, with no reference implementation: per-task status (a task with any unhealthy upstream is `Skipped` and nothing else — transitively), results complete and in declared order, dependency ordering by timestamp (`enqueuedAt >= upstream.finishedAt` on every edge), `enqueuedAt <= startedAt <= finishedAt` with a `Skipped` task doing no work at all, skip reasons that name a real upstream, `JobResult.succeeded` iff every task succeeded with no consistency warning, a `_run.json` on disk whose status matches the in-memory result for every terminal status, and **liveness** — the job runs on a watchdog thread and a run that stops making progress fails with a thread dump instead of hanging. Coverage guards assert every terminal status is reached, that DAGs get deep enough for a transitive skip, that validation-induced edges occur, and that independent tasks really do overlap in wall-clock time. Found two real runner defects — the memory-only-feeder run-time failure and the
 manifest that could not reach a Failed or Skipped task's `_run.json` (see
 [gotchas.md](gotchas.md)). Campaigns: `dag_scheduler_fuzz_campaign`, `sharded_dag_scheduler_fuzz_campaign` (sharding gates on, so task bodies build exchanges while the scheduler fans out tasks) and `starved_dag_scheduler_fuzz_campaign` (the same, with `scheduler.parallelism=2` — up to ten tasks each fanning nested work onto a two-thread pool, the pool-starvation shape) |
+| `fuzz/frontend_fuzz_test` | Property-based gate over the SQL **frontend**: what the engine does with text it is not already expected to handle, where every other SQL fuzzer renders its own typed AST and so can only write the supported grammar. `SqlTextGen` writes text over `t(a, b, s)` / `u(a, b)`, the catalog `UnsupportedClauses`' examples are written against. **`CleanRejection`** (mutated queries from every generator, the clause table spliced everywhere, typing queries over all ten column types, casts of text through every pooled operator): a text binds and runs, or fails with an `IllegalArgumentException` naming what the user wrote, or fails while running on a value (a cast, a decimal overflow, a `NaN` widened to a decimal); never an internal exception class, an internal marker in the message (a slot name, a JVM local, a qualified or CamelCase class name, an identity hash, an invariant's text), or a rejection that waited for the data. Thirteen known defects are recognized from what was thrown and the bound plan, each with its plan in `plans/robustness/` (09-11, 13, 14) and a repro `everyKnownDefectStillReproduces` runs, so a fix fails the suite until its entry goes; the corpus guard asserts the mix of outcomes and that every mutation gets past the parser. **`NoSilentDrop`**: every entry of `UnsupportedClauses.audits` with an example, in each of eight contexts and, for an expression-level entry, its fragment at every one of 15 value, 12 predicate or 4 star positions (4848 cases, enumerated, not sampled) is refused at bind time, and the guard requires each to fire its own rejection nearly everywhere a supported query binds (`everySpliceSiteIsAValidHost`); 55 honoured clauses at their positions (OFFSET, LIMIT, FETCH FIRST, TOP, NULL placement, DISTINCT aggregates, ILIKE, ESCAPE, HAVING, joins, frames) keep their meaning in six contexts, with a guard that each is observable (the query with it and without it differ) on a share of seeds; ten constructs beyond the table's reach (a statement after `;`, a repeated tail clause, a CTE named twice, a JOIN with no ON) must be refused, recorded as known while they bind. **`SyntaxEquivalence`**: 51 shapes of two or more spellings agree on column types and rows (BETWEEN, negation, IN, parentheses, five join spellings, the row-count spellings, NULL placement as a sort key, every inert spelling of the audit), each observable against a query that drops its subject; five of them are known disagreements (plans 09, 12, 13). Plus the oracles' sensitivity checks (each reports a drop or a disagreement it is shown) and a lexer that renders every text back exactly. Campaign: `frontend_fuzz_campaign` |
 | `sql/plan/logical_plan_cardinality_test` | `LogicalPlanCardinality.estimate` for every plan node: scan / project / filter selectivity (per shape: `=` / range / `IS NULL` / `LIKE` / `NOT` inversion / default), AND multiplies / OR widens, limit caps both ways, distinct shrinks, aggregate without group keys collapses to 1, aggregate with group keys stays bounded by input, joins per kind (Inner=max / Left=left / Right=right / Full=sum) + None propagates when either side unknown, union sums and propagates unknown, sort / window pass through, `filterSelectivity` constants pinned to named `private[plan] val`s; `LogicalOffset` subtracts from its child's estimate, bottoms out at zero, propagates `None`, and composes under a `LogicalLimit` |
 | `sql/plan/filter_pushdown_test` | `FilterPushdown` over every join kind: inner pushes left-only / right-only conjuncts into the matching child and re-indexes right-side ColRefs; inner with cross-side or mixed conjuncts splits correctly; stacked Filter(Filter(Join)) flattens before pushing; LEFT outer pushes left-only conjuncts and refuses right-only (including the `r.x IS NULL` anti-join shape); RIGHT outer is symmetric; FULL outer never pushes; cascaded inner joins push all the way to the relevant leaf scan with the right per-side shifts; filter above an aggregate is not pushed across; idempotent when re-run |
 | `sql/plan/column_projection_pushdown_test` | Join pruning: parent + join-key columns survive on each side, columns referenced by neither are dropped; `SELECT *` leaves the join unchanged; self-join keeps colliding names on both sides (correctness over optimality); cross-side filter above a join still allows both sides to prune to the union of (parent + filter + join-key) refs; the plan-time `verify` rejects an out-of-range `ColRefExpr` with a targeted `IllegalStateException` |
@@ -186,8 +187,8 @@ either half alone can pass over a corpus that tests nothing. The recipe for writ
 [extending.md](extending.md#add-a-metamorphic-relation). It is a `testonly`
 `scala_library` named `fuzz` plus the
 `expr_parity_fuzz_test`, `mode_differential_fuzz_test`, `metamorphic_fuzz_test`,
-`sharded_mode_fuzz_test` and `dag_scheduler_fuzz_test` targets, and
-`row_oracle_test` for the comparator they share. The pieces:
+`sharded_mode_fuzz_test`, `dag_scheduler_fuzz_test` and `frontend_fuzz_test`
+targets, and `row_oracle_test` for the comparator they share. The pieces:
 
 - `Rng` — seeded, splittable random source over `java.util.SplittableRandom`.
   The top-level seed is the repro key; iteration `i` uses seed `base + i`.
@@ -215,7 +216,10 @@ either half alone can pass over a corpus that tests nothing. The recipe for writ
 - `ExprGen` — generates a random `ColumnarBatch` + a typed `Expr`, **type-correct
   and total by construction** (asserts its own `dataType` invariant; excludes
   `RAND()`, casts that can throw — text into a number or a date, a FLOAT or
-  DOUBLE into a DECIMAL — and NULL `ROUND`/`SUBSTRING` scale args). Columns and
+  DOUBLE into a DECIMAL — and NULL `ROUND`/`SUBSTRING` scale args, which throw
+  a `NullPointerException` where SQL answers NULL: an engine defect,
+  [plans/robustness/11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md),
+  so the exclusion goes with its fix). Columns and
   expressions take all ten of the engine's value types (`GenTypes`, DECIMAL at
   `DECIMAL(9,2)`, `(18,4)` and `(38,18)`, one per parquet layout, drawn as one
   type with `pick`). A type takes part in what the engine gives it: a DATE or
@@ -413,6 +417,52 @@ either half alone can pass over a corpus that tests nothing. The recipe for writ
   `job.json` manifest agreeing with the run and reaching every task's record,
   and termination. A hung run fails with a thread dump — the pool-starvation
   detector.
+- `SqlTextGen` — the frontend generator: SQL TEXT, where every generator
+  above renders a typed AST and so can only write the grammar it knows. Its
+  catalog is `t(a, b, s)` and `u(a, b)`, the one `UnsupportedClauses`' examples
+  are written against, with small narrow-pool data that makes a clause change an
+  answer (values repeat, NULLs sit beside values, strings differ only in case or
+  hold `_` and its `!`-escaped spelling, rows of `t` miss `u`), plus fixed
+  `ReferenceTables` for deterministic checks. Four modes: the clause table
+  (`AllClauseCases`: every entry of `UnsupportedClauses.audits` with an example,
+  read from `src/main` so the corpus cannot drift from the rejection pass, in
+  every `Context` a query can sit in, and an expression-level entry's fragment —
+  cut from its example by `fragmentOf` — at every `Position` an expression can
+  sit in); honoured clauses (`HonouredTemplates`, each with its clause-free
+  twin); equivalent spellings (`SpellingShapes`, each with a degenerate query
+  that drops its subject); and mutation, which applies one of ten mutations
+  (drop a token, duplicate a clause, swap a keyword, truncate, unbalance a
+  parenthesis, a unicode identifier, a 10k-character literal, inject a token, a
+  boundary literal, deep nesting) to a query from `QueryGen`, `MetaQueryGen`, the
+  other modes, a typing query (a function, aggregate, CAST, UNION, branch list
+  or join condition over a column of any type, which `QueryGen` never writes) or
+  a cast of text through each pooled operator. `Lexer` cuts text into tokens
+  that render back exactly, for the mutations and `Shrinker.textCase`; it is not
+  a parser, and nothing here depends on one.
+- `oracle/CleanRejection.check` — the clean-rejection property: a text binds and
+  runs to the last row, or fails at bind time with an `IllegalArgumentException`
+  whose message names something the SQL says, or fails while running on a value
+  (`DataErrors`). Anything else — an internal exception class, an internal
+  marker in the message, a run-time failure that is not about a value — is a
+  finding. Known defects (`CleanRejection.Defect`) are recognized from the
+  throwable and, for a run-time failure, the bound plan (`BoundPlan`), never from
+  the generator's intent; a wrapper or a class name in a message is excused only
+  that far and the rest is still checked. Every entry names its plan and carries
+  a repro.
+- `oracle/NoSilentDrop` — a clause the parser accepts is refused or changes the
+  outcome. `checkEntry`: a clause-table splice must be refused at bind time,
+  which reads no data, so the table is enumerated rather than sampled.
+  `checkHonoured`: an honoured clause keeps its meaning in a context (the
+  context answers the query's own top-level answer, through its effect on rows:
+  the same, each twice, or the count), and a context that answers the clause-free
+  query's answer is reported as dropping it; `observable` records whether the
+  clause changed the answer at top level, which the guard requires on a share of
+  seeds. `checkBeyond`: text the clause table cannot list must be refused.
+- `oracle/SyntaxEquivalence.check` — two spellings agree on column types and
+  rows (`RowOracle.multisetEquals`); refusing one spelling and running the
+  other is a disagreement. A case is observable when its answer differs from
+  the shape's degenerate query, or, for a shape of spelling alone, holds two
+  distinct rows. Known disagreements (`KnownDefects`) carry plans and repros.
 
 The default `bazel test //...` runs each property over a **small fixed-seed
 batch**, so it is deterministic and fast (the `*_fuzz_test` targets; the
@@ -485,6 +535,17 @@ two-thread pool, is the nested-submission shape this pool has wedged on before.
 Every engine await is a work-helping `ForkJoinTask.get()`, so it must still
 terminate; if it ever does not, the failure carries a thread dump rather than
 hanging the run.
+
+The frontend property has one campaign, `frontend_fuzz_campaign`, which scales
+the clean-rejection, honoured-clause and spelling properties together (the
+clause table is enumerated whatever the budget). A 60000-seed block of all three
+takes about seven minutes beside two others; a case that nests 2500 deep or
+leaves four parentheses open costs seconds of JSqlParser backtracking, which is
+plan 14's defect and in the corpus on purpose. 180000 seeds of each property
+were green on 2026-10-04 once every finding had its entry. A failure the campaign finds is distilled into its plan and a
+`CleanRejection.Defect` (or a `SyntaxEquivalence` known disagreement) with a
+repro; its `SqlEngineTest` regression lands with the fix, since a regression
+that asserts the right answer cannot land before it.
 
 Add a new generator /
 property by following the recipe in

@@ -1339,13 +1339,26 @@ silently ignored, and the binder cannot start honouring a clause the pass still
 rejects. See [extending.md](extending.md#honor-a-clause-the-binder-rejects) for
 the workflow and [gotchas.md](gotchas.md) for what the test cannot see.
 
+The generative net over the pass is `fuzz/frontend_fuzz_test`'s NoSilentDrop
+property: it splices every entry into every context a query can sit in and every
+position an expression can, requires each refused, and checks that each clause
+the binder honours keeps its meaning in every context, which is where a getter
+read in one place and dropped in another shows. Two things lie outside what the
+pass can see, both open: text that never becomes a getter's value (a statement
+after `;`, the first of a repeated `ORDER BY` or `LIMIT`, which JSqlParser
+overwrites; [plans/robustness/12](../plans/robustness/12-text-the-binder-never-sees.md)),
+and a getter the binder reads whose value is not what SQL means
+(`StringValue.getValue` keeps a doubled quote doubled;
+[plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md)).
+
 ## Property-based testing
 
 Alongside the example-based unit tests, `src/test/scala/com/transformer/fuzz/`
 holds a hand-rolled property-based harness (no new dependency — PBT by hand, like
 the engine itself). Each property generates random-but-valid inputs, checks an
 invariant over many seeds, and shrinks any counterexample to a minimal repro.
-Six oracle families, in increasing semantic reach:
+Six oracle families over generated queries, in increasing semantic reach, and a
+seventh over generated text:
 
 - **Expression parity** (`oracle/ExprParity`) — a generated type-correct `Expr`
   over a random `ColumnarBatch` must evaluate identically through the scalar
@@ -1376,6 +1389,15 @@ Six oracle families, in increasing semantic reach:
   results. Run in heap and under spill, it drives the partial/final merge and the
   `AggState` spill serde that a global aggregate (one accumulator, never flushed)
   never reaches.
+- **Frontend robustness** (`oracle/CleanRejection`, `oracle/NoSilentDrop`,
+  `oracle/SyntaxEquivalence`, over `SqlTextGen`) — every generator above renders
+  its own typed AST, so its corpus is the supported grammar. This one writes
+  text: mutated queries, the `UnsupportedClauses` table spliced everywhere,
+  honoured clauses beside their clause-free twins, and pairs of equivalent
+  spellings. A text must run or fail cleanly (an `IllegalArgumentException`
+  naming what the user wrote, never an internal exception or marker); a clause
+  must be refused or keep its meaning in every context; two spellings must
+  agree. Known defects are recorded in the oracles with their plans and repros.
 
 Every generator draws all ten of the engine's value types, and every oracle
 compares with the engine's own equality rather than the JVM's (`RowOracle`): a

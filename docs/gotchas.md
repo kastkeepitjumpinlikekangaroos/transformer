@@ -349,7 +349,12 @@ ship a fix or move something from "not done" to "done".
   redundant-but-cheap equality conjunct (`ON 1 = 1` won't help — it has
   no side info) or restructure the predicate so the planner can extract
   one. There's deliberately no per-task escape hatch — the threshold is
-  the contract.
+  the contract. Two open defects: the guard bounds the smaller side only, so a
+  chain of non-equi joins multiplies past it (`t x JOIN t y ON x.c JOIN t z ON
+  x.c` over 300 rows is 27 million rows;
+  [plans/robustness/14](../plans/robustness/14-pathological-nesting.md)), and
+  its refusal is an `UnsupportedOperationException` where every other rejection
+  is an `IllegalArgumentException` (plan 10).
 - **Spill files use positional column names, never the logical schema's.**
   Every spill-capable breaker (`HashJoinExec`, `HashAggregateExec`, `SortExec`,
   `DistinctExec`, `WindowExec`) writes its working set to temp parquet and reads
@@ -1013,6 +1018,33 @@ ship a fix or move something from "not done" to "done".
   every sort site they would give a total order in exactly those excluded shapes,
   so teaching it to emit them is an open widening opportunity, not a constraint.
 
+- **Generator-rendered SQL covers only the supported grammar; the frontend
+  needs a text corpus.** `QueryGen` and `MetaQueryGen` build a typed AST and
+  render it, so they can never write a clause the engine does not implement, a
+  second spelling of one it does, or a query that does not parse — and every
+  oracle over them asks whether the answer is right, never how a query fails.
+  Three hand-found frontend bug families (`ORDER BY <ordinal>`, grouping
+  parentheses, plan 01's eighteen dropped clauses) hid there. `SqlTextGen`
+  writes text: the clause table spliced into every context and position,
+  honoured clauses with their clause-free twins, equivalent spellings, and
+  mutations of every generator's output. Widening an AST generator cannot
+  replace it, since anything an AST can say is already grammar the generator
+  knows; when you add a construct to the engine, add its spellings and
+  positions to `SqlTextGen` as well as to the AST generators.
+
+- **A hot implicit exception has no message, and a pooled one is a copy.**
+  HotSpot throws a `ClassCastException`, `NullPointerException` or
+  `ArithmeticException` that one site throws often as a preallocated instance
+  with no message and no stack (`-XX:+OmitStackTraceInFastThrow`, on by default),
+  so an oracle that recognizes a failure by such a message misses it after
+  warm-up. And `ForkJoinTask.get` rethrows a task's exception as a copy made on
+  the waiting thread (the same class, the original as its cause, the original's
+  `toString` as the message, or no message when the class has no cause
+  constructor) inside an `ExecutionException`; a nested fan-out adds a
+  `RuntimeException` around a task's checked exception. `oracle/CleanRejection`
+  unwraps all three and recognizes by class and bound plan. A `StackOverflowError`
+  is not `NonFatal`: catch it explicitly where a deep expression can raise it.
+
 - **A clause the binder does not read used to vanish — every one is now
   rejected, and a test keeps it that way.** `LogicalBuilder` binds the
   JSqlParser AST by calling the getters it knows about, so a clause carried by
@@ -1058,7 +1090,15 @@ ship a fix or move something from "not done" to "done".
   dropped in `SUM`; an argument is read for `LAG` and was ignored for
   `ROW_NUMBER`. Those are *partial* rejections, found by reading the binder. When
   you teach the binder to read a getter for one function or one position, check
-  what it does in the others.
+  what it does in the others. `fuzz/frontend_fuzz_test` is the generative net
+  over that blind spot: its NoSilentDrop property splices every entry into every
+  context and position and requires it refused, and checks that every clause
+  plan 01 honoured keeps its meaning in every context. It also found what no
+  getter carries at all (see "Generator-rendered SQL covers only the supported
+  grammar" below), and that one inert reason is backwards:
+  `StringValue.getNotExcapedValue`, listed as "the literal before quote
+  unescaping", is the unescaped value, and the binder reads the escaped one
+  ([plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md)).
 
   Three JSqlParser traps the audit stepped on: `Table.getDBLinkName` returns the
   table's own name when there is no `@link` and `getDatabase` is a non-null empty
@@ -1066,7 +1106,12 @@ ship a fix or move something from "not done" to "done".
   presence for either; `Function.getAttributeName` throws on every call without
   an attribute; and `TRY_CAST` / `SAFE_CAST` differ from `CAST` only in
   `CastExpression.keyword`, a public field with no getter, which is why the test
-  audits public fields as well as getters.
+  audits public fields as well as getters. A fourth, found by the frontend
+  fuzzer: `CastExpression.toString` throws for a ROW-type CAST, so the binder's
+  catch-all, which renders the node it refuses, throws a
+  `NullPointerException` when one sits under a node the pass does not audit
+  (`CAST(a AS ROW(x INT)) IS FALSE`;
+  [plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md)).
 
 - **`ORDER BY <ordinal>` used to parse and then silently not sort — fixed.**
   `ORDER BY 2 DESC` returned scan order, because the ordinal bound as an integer
@@ -1175,7 +1220,44 @@ All three clusters hid for the same reason, and it is the lesson to carry: the
 fuzz generators render SQL from their own typed AST (so the corpus is exactly the
 supported grammar), `DataGen.ColumnTypes` and `ExprGen.GenTypes` listed six of
 the engine's ten `DataType`s, and every file-format fixture was written by our
-own writer. Plans 04-07 in that directory close those three holes.
+own writer. Plans 04-07 in that directory close those three holes; plan 05's
+frontend fuzzer closed the first, and found the defects in the next section.
+
+## Open defects the frontend fuzzer found (2026-10-04)
+
+`fuzz/frontend_fuzz_test` writes SQL text rather than rendering an AST, which is
+the only way a corpus reaches the frontend's failure paths (see "Generator-
+rendered SQL covers only the supported grammar"). Its campaigns and the probing
+around them found five families, each recorded in a plan and named in the
+fuzzer (a `CleanRejection.Defect`, a `SyntaxEquivalence` known disagreement, or
+a `knownPlan` in `SqlTextGen.BeyondTheTable`) with a repro that fails the suite
+once the defect is gone:
+
+- **An `Error` in a job's task hangs the job**, and a ~2000-operator expression
+  overflows the binder's stack, so one machine-generated query can do it; three
+  unclosed parentheses make a parse error take seconds and four time out
+  ([plans/robustness/14](../plans/robustness/14-pathological-nesting.md)). The
+  most severe: no error, no end.
+- **Text the binder never sees**: a statement after `;`, a repeated `ORDER BY` /
+  `LIMIT` / `OFFSET` / `FETCH` (the last wins), a CTE name defined twice, a JOIN
+  with no `ON` ([plans/robustness/12](../plans/robustness/12-text-the-binder-never-sees.md)).
+- **Literals read as written**: `'it''s'` keeps both quotes, a double-quoted
+  identifier keeps its quotes, an integer literal past BIGINT is a raw
+  `NumberFormatException`, `1e400` is silently `Infinity`
+  ([plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md)).
+- **Functions and conditions bind over types they cannot take** and fail while
+  running, or, for `ABS` of a DATE or a string, answer NULL; a NULL `ROUND`
+  scale throws; a non-boolean `ON` or `IF` condition binds
+  ([plans/robustness/11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md)).
+- **Messages name internals**: every parse error starts with JSqlParser's class,
+  the binder's catch-alls name the AST class, and a failure inside a pooled
+  operator reaches the caller (and a job's `_run.json`) wrapped in
+  `ExecutionException`, sometimes with no message at all
+  ([plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md)).
+
+Plan 09's mixed branch types surface here too: `COALESCE(timestamp_col, DATE
+'...')` fails with `Cannot set TimestampVector from java.time.LocalDate`, and
+`CASE ... THEN ts ELSE d END` turns a date into midnight.
 
 ## What's intentionally NOT done
 
@@ -1213,7 +1295,9 @@ own writer. Plans 04-07 in that directory close those three holes.
   per-row callbacks, aggregate state updates over `RowBuf`) still uses boxed
   `eval(batch, row)` because those are 1-row paths where vectorization gives
   nothing back.
-- **No multi-statement SQL.** `SqlParser.parseSelect` only accepts a SELECT.
+- **No multi-statement SQL.** `SqlParser.parseSelect` only accepts a SELECT, and
+  only the first: today a statement after `;` is silently ignored, an open
+  defect ([plans/robustness/12](../plans/robustness/12-text-the-binder-never-sees.md)).
 - **CTEs (`WITH`) are supported and non-recursive; multiply-referenced ones are
   materialized.** `LogicalBuilder` emits a placeholder `PendingCteView` scan per
   outermost-scope CTE and `CteResolver` (a pass between build and optimize)

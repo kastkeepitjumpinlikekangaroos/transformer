@@ -328,6 +328,22 @@ does not implement, keyed by the AST getter that carries it. To implement one:
 3. Replace the clause's rejection regression in `SqlEngineTest` with one that
    asserts the answer, and move the clause in `README.md` from the "rejected,
    not ignored" list into the supported grammar.
+4. Add the clause to `SqlTextGen.HonouredTemplates`, once per position it can
+   sit in, each with its clause-free twin. `oracle/NoSilentDrop` then checks it
+   keeps its meaning in every context a query can sit in (a CTE body, a
+   materialized CTE, a UNION arm, a counted CTE), which is where a clause read in
+   one place and dropped in another shows; the guard requires the generated data
+   to make it change the answer on a share of seeds, so pick positions where it
+   can. Deleting the entry from `UnsupportedClauses` removes it from the
+   frontend fuzzer's clause splices by itself.
+
+A new entry in `UnsupportedClauses` becomes frontend-fuzz coverage with no change
+to the fuzzer: its example is spliced into every context, and an entry on an
+expression class has its fragment spliced into every position. That needs the
+example written in one of the two shapes `SqlTextGen.fragmentOf` cuts — `SELECT
+<one item> FROM t` or `SELECT <items> FROM t [, u] WHERE <predicate>` — and
+`FrontendFuzzTest.noSilentDropRefusesEveryEntryEverywhere` fails, saying so,
+when an expression-level example is in neither.
 
 When `unsupported_clauses_test` fails after a JSqlParser upgrade, the message
 names the new getter (or subclass). Decide whether it can change what a query
@@ -522,6 +538,21 @@ and `generatorCoversScheduleShapes` (a tally plus an assertion that it is
 reached). The measure in `shrinkerTerminatesAndReduces` must count the new field
 too, or the shrinker will appear to stall on it.
 
+**To record a frontend finding** — a failure `oracle/CleanRejection` or
+`oracle/SyntaxEquivalence` reports, or text the parser drops — write its plan in
+`plans/robustness/` first, then name it where the property will recognize it:
+a `CleanRejection.Defect` with a recognizer that reads the throwable and, for a
+run-time failure, the bound plan (`BoundPlan`), never the generator's intent; a
+`SyntaxEquivalence.Known` for a shape; or a `knownPlan` on an entry of
+`SqlTextGen.BeyondTheTable`. Each carries a repro over
+`SqlTextGen.ReferenceTables`, and the matching `FrontendFuzzTest` check fails
+when the repro stops showing the defect, so the entry is removed with the fix,
+the same contract as removing a generator gate. Excuse no more than the defect:
+a wrapper is unwrapped and a class name in a message replaced, and the rest of
+the failure is still checked. Do not match on a `ClassCastException`'s or
+`NullPointerException`'s message: HotSpot throws a hot implicit exception
+preallocated, with none.
+
 ## Add a metamorphic relation
 
 The metamorphic fuzzers (`metamorphic_fuzz_test`, and its sharded re-run
@@ -575,6 +606,17 @@ are the five live relations. See
    Set the bound to separate "rare" from "gone", not to pin the current number:
    the corpus is a fixed seed block, so counts are stable, but a bound sitting one
    or two seeds under the observed rate turns any generator tweak into a failure.
+
+**A relation over syntax** rather than execution — two spellings of one query
+that must agree — is a shape in `SqlTextGen.SpellingShapes`, not a new oracle:
+list the spellings (two or more; a case draws two), with `{x}` / `{y}` / `{n}` /
+`{m}` / `{p}` for the parameters `spellingParams` draws, and a degenerate query
+that drops what the pair is about (the filter, the limit, the NULL placement),
+or `None` for a shape of spelling alone. `oracle/SyntaxEquivalence` compares the
+two on column types and rows, and `syntaxEquivalenceIsNotVacuous` requires every
+shape to be observable against its degenerate query on a share of seeds. A shape
+that disagrees today is a defect: record it in `SyntaxEquivalence.KnownDefects`
+with its plan and a repro, never by leaving the shape out.
 
 **Three rules keep generated SQL sound and bindable** — hold them in any new
 relation or generator extension:

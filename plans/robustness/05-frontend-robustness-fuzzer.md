@@ -1,7 +1,10 @@
 # Plan 05: nothing fuzzes the SQL frontend, because every generator writes SQL the engine already supports
 
-> Status: **not started** · Effort: 3-5 days · Risk: low (test-only), but it is
-> the plan most likely to produce a long list of findings
+> Status: **done** 2026-10-04 (`fuzz/frontend_fuzz_test`, campaign
+> `frontend_fuzz_campaign`; findings in plans [10](10-error-messages-name-internals.md)
+> to [14](14-pathological-nesting.md)) · Effort: 3-5 days · Risk: low
+> (test-only), but it is the plan most likely to produce a long list of findings
+> — see [What landed](#what-landed)
 
 ## How this was found
 
@@ -191,6 +194,129 @@ inventory, the campaign line), `docs/extending.md` (the "add a metamorphic
 relation" recipe gains the syntax-level axis), `docs/gotchas.md` (the blind spot
 itself: generator-rendered SQL can only ever cover the supported grammar, which is
 why the frontend needs a text-level corpus).
+
+## What landed
+
+`src/test/scala/com/transformer/fuzz/`: `SqlTextGen` (the generator),
+`oracle/CleanRejection`, `oracle/NoSilentDrop` and `oracle/SyntaxEquivalence`,
+`FrontendFuzzTest`, and text shrinkers in `Shrinker`; `frontend_fuzz_test` in the
+default run (about 30 s) and the `fuzz`-tagged `frontend_fuzz_campaign`. No
+`src/main` change, and no SQL-parsing dependency: `SqlTextGen.Lexer` cuts text
+into tokens that render back exactly and knows nothing of the grammar, and the
+fuzz library reads `UnsupportedClauses.audits` without JSqlParser on its
+compile classpath.
+
+### CleanRejection first
+
+It ran first, as the launch prompt asked, and found the most: thirteen defects,
+recorded as `CleanRejection.Defect`. Two things shaped it.
+
+- **The corpus had to offer types.** The first 20000-seed survey reached the
+  run-time path once: mutated `QueryGen` text either breaks the parser or stays
+  type-correct, so nothing offered the binder a type it cannot run. Two more
+  bases fixed that, typing queries (a function, aggregate, CAST, UNION, branch
+  list or join condition over a column of any of the ten types) and casts of
+  text through every pooled operator; they found plan 11's families and most of
+  plan 09's run-time manifestations.
+- **A known defect is excused in the oracle, never gated out of the generator.**
+  A clean-rejection finding is a failure shape (every parse error carries the
+  parser's class), and a generator gate around it would remove the shape from
+  the corpus wholesale. Each `Defect` is recognized from the throwable and, for
+  a run-time failure, the bound plan (`BoundPlan`), so it is excused only where
+  it is the cause; a wrapper is unwrapped and a class name replaced, and the rest
+  is still checked. Each names its plan and carries a repro, and
+  `everyKnownDefectStillReproduces` fails when one stops reproducing, so an entry
+  goes with its fix, the gate-removal contract by other means.
+
+The mutations are the plan's seven plus three: inject a token (how a `;` and the
+trailing statement reach the corpus), a boundary literal, and deep nesting (how
+the stack overflow does). Mutations draw their base from `QueryGen`,
+`MetaQueryGen`, the other three modes and the two bases above, so they land near
+every construct the corpus knows.
+
+### NoSilentDrop, in three halves
+
+- **The clause table** (`AllClauseCases`): every entry with an example, read from
+  `src/main`, in eight contexts (top level, a CTE body, a second CTE, a nested
+  WITH, a materialized CTE, both arms of a parenthesized UNION, a counted CTE, a
+  bare UNION), and for the entries on expression classes the fragment cut from
+  the example at every position (15 for a value, 12 for a predicate, 4 for a
+  star): 4848 cases. Each must be refused at bind time. **This half does not
+  compare answers, a departure from the plan's wording**: an entry is a clause
+  the engine does not implement, so there is no answer of its to observe, and the
+  rejection pass reads no data; a spliced query that binds has its clause in the
+  AST unread whatever it then returns. What can make this half vacuous is a
+  splice that never reaches its entry, so its guard asserts each example fires
+  its own rejection in nearly every context and each fragment at nearly every
+  position where a supported query binds (`everySpliceSiteIsAValidHost`). The
+  table is finite, so it is enumerated rather than sampled. All 84 entries with
+  examples are refused everywhere; 49 cases are refused by the parser instead
+  (JSqlParser will not parse an `IGNORE NULLS` or `KEEP` call in a CTE whose
+  outer query is `SELECT COUNT(*)`, nor a tail clause before a bare UNION).
+- **Honoured clauses** (`HonouredTemplates`, 55 positions of the clauses plan 01
+  taught the binder and the core ones every context must keep), each in six
+  contexts: the context must answer the query's own answer through its effect on
+  rows, and one that answers the clause-free query's answer is reported as
+  dropping it. **This is where observability lives**, as the plan's soundness
+  note (`OFFSET 0`, `NULLS LAST` on a NULL-free column) describes: plan 01 took
+  those clauses out of the table by honouring them. `observable` records whether
+  the query with the clause and without it differ at top level, and the guard
+  requires it on a share of every clause's cases; the thinnest, DISTINCT inside
+  an aggregate in HAVING or ORDER BY, needed coarser groups before a group
+  repeated a value often enough.
+- **Text beyond the table** (`BeyondTheTable`): what JSqlParser drops before any
+  getter (a statement after `;`, a repeated tail clause, a CTE named twice, a
+  JOIN with no ON, two string literals side by side). Each must be refused; all
+  ten bind today, recorded against plans 12 and 13.
+
+### SyntaxEquivalence
+
+51 shapes: the plan's (BETWEEN, negation, IN, parentheses redundant and needed,
+a join written five ways, `LIMIT` / `FETCH FIRST` / `TOP`), every spelling the
+audit calls inert (`UNIQUE`, `!=`, `&&`, `!`, `ISNULL`, `::`, a typed literal,
+`{fn ...}`, `LIKE BINARY`, `N'...'`, `OFFSET 1 ROW`, `FETCH NEXT`, `UNION
+DISTINCT`, `LEFT OUTER`), NULL placement written as a sort key (the window
+`NULLS FIRST` / `NULLS LAST` this plan listed as unreached), the default `ALL`
+quantifier against plan 01's `COUNT(*)` misreading, and the conditional
+functions as CASE. Column types are compared as well as rows. Each shape's
+degenerate query drops its subject, and the guard requires every shape
+observable against it on a share of seeds. Five shapes disagree today and are
+recorded: `IF` and `COALESCE` against CASE over numbers (plan 09), a quoted
+identifier and a quote inside a literal (plan 13), and `NOT NOT` (plan 12).
+
+### Findings
+
+| plan | what | severity |
+|---|---|---|
+| [14](14-pathological-nesting.md) | a task whose SQL overflows the binder's stack **hangs its job forever**; 2000-operator chains overflow; unclosed parentheses take seconds and time out; the nested-loop guard bounds one side | the hang is the worst finding of the plan |
+| [12](12-text-the-binder-never-sees.md) | a statement after `;`, a repeated ORDER BY / LIMIT / OFFSET / FETCH, a CTE named twice, a JOIN with no ON, `NOT NOT` | silent wrong answers |
+| [13](13-literals-are-read-as-written.md) | `'it''s'` keeps both quotes (and the audit's inert reason for `getNotExcapedValue` is backwards), quoted identifiers keep their quotes, number literals out of range, `'a' 'b'` | silent wrong answers |
+| [11](11-functions-bind-over-arguments-they-cannot-take.md) | aggregates and math functions over any type, a NULL scale, a non-boolean ON or IF condition, `ABS` of a date answering NULL | rejection is not total |
+| [10](10-error-messages-name-internals.md) | parse errors and rejections name JSqlParser classes, pooled failures arrive wrapped (sometimes with no message), the `_agg0` leak, a rejection whose rendering throws | messages |
+| [09](09-branch-result-types.md) | its mixed branch types, seen at run time: `COALESCE(timestamp, date)` fails with `Cannot set TimestampVector from java.time.LocalDate`, `CASE ... THEN ts ELSE d END` makes a date midnight | already planned |
+
+Of the plan's own list, the CAST item was fixed before this landed, and the
+other four (the big literal, the `_agg0` leak, `ROLLUP` / `CUBE` as unknown
+functions, functions over non-numbers) are now in plans 13, 10 and 11; `ROLLUP`
+and `CUBE` still read as unknown functions, a clean rejection with the wrong
+words, recorded in plan 10's scope. No regression lands in `SqlEngineTest` yet:
+each would assert the right answer, which needs the fix; each plan names the
+regression its fix adds, and the fuzzer's repros are the executable record
+meanwhile.
+
+### Campaigns
+
+The default run in `bazel test //...`: 2000 clean-rejection seeds and a further
+1500 in its guard's own block, 1000 honoured and 1000 spelling seeds, the clause
+table enumerated, and the guards over fixed blocks, about 30 s, of which eight
+are the parse-timeout repro waiting out JSqlParser's timeout. Campaigns ran as 50000- and 60000-seed blocks in three JVMs at
+`-Xmx1200m`, from a snapshot of the launcher. The early ones found the defects
+above one or two at a time (the `IF` condition, the ROW CAST under `IS FALSE`,
+the mixed `COALESCE` of a timestamp and a date), each becoming an entry and a
+plan item; one ran a JVM out of memory on a duplicated non-equi join over 300
+rows, which is plan 14's nested-loop item, after which typing queries draw at
+most 16 rows. The last, 180000 seeds of each property (seeds 1000000 to
+1179999), was green, about seven minutes a 60000-seed block.
 
 ## Launch prompt
 

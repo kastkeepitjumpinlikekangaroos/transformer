@@ -455,6 +455,37 @@ object Shrinker {
       dropHaving ++ dropAgg ++ dropKey
   }
 
+  // ---- SQL text shrinkers (frontend properties) ---------------------------
+
+  /** Strictly-smaller candidates for a SQL text and its tables: drop one
+    * significant token of the text, last first, then halve or drop rows of one
+    * table. Nothing here knows the grammar, so most candidates do not parse;
+    * the clean-rejection property is about how a text fails, so one that fails
+    * the same unclean way is still a counterexample, and the loop settles on
+    * the fewest tokens that do. */
+  def textCase(tc: SqlTextGen.TextCase): Iterator[SqlTextGen.TextCase] = {
+    val tokens = SqlTextGen.Lexer.lex(tc.sql)
+    val dropToken: Iterator[SqlTextGen.TextCase] = tokens.indices.reverseIterator
+      .filterNot(i => tokens(i).isSpace)
+      .map(i => tc.copy(sql = SqlTextGen.Lexer.render(tokens.patch(i, Nil, 1)).trim))
+    dropToken ++ tables(tc.tables).map(t => tc.copy(tables = t))
+  }
+
+  /** The tables with one of them halved or one row shorter. */
+  def tables(t: SqlTextGen.Tables): Iterator[SqlTextGen.Tables] = t.tables.indices.iterator.flatMap { i =>
+    val (name, d) = t.tables(i)
+    shrinkRows(d.rows).map(rows => SqlTextGen.Tables(t.tables.updated(i, name -> DataGen.Dataset(d.schema, rows))))
+  }
+
+  /** A spelling pair shrinks its tables only: its text is the shape under
+    * test, and a smaller text would be a different pair. */
+  def spellingCase(sc: SqlTextGen.SpellingCase): Iterator[SqlTextGen.SpellingCase] =
+    tables(sc.tables).map(t => sc.copy(tables = t))
+
+  /** An honoured clause shrinks its tables only, as a spelling pair does. */
+  def honouredCase(hc: SqlTextGen.HonouredCase): Iterator[SqlTextGen.HonouredCase] =
+    tables(hc.tables).map(t => hc.copy(tables = t))
+
   // ---- JobCase shrinker (DAG scheduler) -----------------------------------
 
   /** Strictly-smaller candidates for a generated job DAG. Every move reduces a

@@ -676,6 +676,14 @@ subscripts; `* EXCEPT` / `* REPLACE`; `PIVOT`, `TABLESAMPLE`, `CONNECT BY` and
 schema-qualified table names; `SELECT ... INTO`, `FOR UPDATE`, and vendor
 hints. The complete list, with the reason for each, is
 [`UnsupportedClauses.scala`](src/main/scala/com/transformer/sql/plan/UnsupportedClauses.scala).
+A few readings of the text still lose part of it before the binder sees it, each
+an open defect: a statement after `;` is ignored, a repeated `ORDER BY`,
+`LIMIT`, `OFFSET` or `FETCH` keeps its last, a CTE name defined twice keeps its
+second, and a `JOIN` with no `ON` runs as a cross join
+([plans/robustness/12](plans/robustness/12-text-the-binder-never-sees.md)); a
+doubled quote inside a string literal stays doubled, so `'it''s'` is five
+characters long, and a double-quoted identifier keeps its quotes
+([plans/robustness/13](plans/robustness/13-literals-are-read-as-written.md)).
 
 **Aggregates:** `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `COUNT_IF(pred)`,
 `SUM`, `AVG`, `MIN`, `MAX` (each of these four also as `SUM(DISTINCT col)` and so
@@ -1018,6 +1026,22 @@ JDK 21 or newer (tested through JDK 25).
   such a result to parquet fails, naming the value. Numbers are cast the other
   way: `CASE WHEN p THEN 1 ELSE 2.5 END` is the `INT` 2. Recorded as
   [plans/robustness/09](plans/robustness/09-branch-result-types.md).
+- **Some functions and conditions bind over a type they cannot take** and fail
+  while running instead of at bind time: `SUM` or `AVG` over text or dates, the
+  math functions over text, `SUBSTRING` with a text position, a NULL `ROUND`
+  scale, a join's `ON` or `IF`'s condition that is not a predicate. `ABS` of a
+  `DATE` or a string answers NULL. Recorded as
+  [plans/robustness/11](plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md).
+- **Very deep or unbalanced SQL.** An expression about 2000 operators deep
+  overflows the binder's stack, and inside a job that **hangs the job**; three
+  unclosed parentheses make a parse error take seconds, and four run the parser
+  into its timeout. Recorded as
+  [plans/robustness/14](plans/robustness/14-pathological-nesting.md).
+- **Error messages can name the engine's internals**: a parse error begins with
+  the parser's exception class, some rejections name a parser class, and a
+  failure while a pooled operator runs arrives wrapped, which is the message a
+  job records. Recorded as
+  [plans/robustness/10](plans/robustness/10-error-messages-name-internals.md).
 - **`DECIMAL` math functions and statistics compute in `DOUBLE`.** Comparison,
   arithmetic, `ABS`, `SUM` and `AVG` keep a `DECIMAL` exact, but `ROUND`,
   `FLOOR`, `CEIL`, `TRUNC`, `SQRT`, `POWER` and the other math functions, and

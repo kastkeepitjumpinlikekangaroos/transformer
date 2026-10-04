@@ -1,7 +1,8 @@
 # Robustness plans — what the fuzzers cannot reach
 
 Eight plans from an audit on 2026-09-10, run from the opposite direction to the
-fuzz harness. The five existing fuzzers generate inputs the engine is *expected*
+fuzz harness, and six that came after: 09 from widening the SQL corpora to
+decimal arithmetic, and 10 to 14 from plan 05's frontend fuzzer. The five existing fuzzers generate inputs the engine is *expected*
 to handle and ask whether the answer is right. This audit asked what the
 generators **structurally cannot produce**, and then checked those surfaces by
 hand.
@@ -33,11 +34,16 @@ at the time of the audit: `bazel test //...` 46/46 green.
 | [02](02-total-order-for-decimal-and-binary.md) | One total order for `Decimal` and `Binary` | `Ops.eq`/`Ops.cmp`; the repo's own bug class, in the types the float work never reached | **done** 2026-10-03 | 2-3 days | medium | — |
 | [03](03-parquet-external-format-fidelity.md) | Parquet timestamp units and `DECIMAL` | silent 1000x timestamp error; decimals read as unscaled ints or raw bytes | **done** 2026-10-03 | 1-2 days | low-med | — |
 | [04](04-widen-fuzz-corpus-to-every-type.md) | Widen the fuzz corpus to all ten types | the guard that keeps 02 and 03 fixed | **done** 2026-10-03 | 2-3 days | low | 02 (else red) |
-| [05](05-frontend-robustness-fuzzer.md) | Frontend robustness fuzzer | "nothing silently dropped" + "errors are user-facing" as properties | open | 3-5 days | low | 01 (shares its clause table) |
+| [05](05-frontend-robustness-fuzzer.md) | Frontend robustness fuzzer | "nothing silently dropped" + "errors are user-facing" as properties | **done** 2026-10-04 | 3-5 days | low | 01 (shares its clause table) |
 | [06](06-io-roundtrip-and-external-fixtures.md) | I/O round-trip properties + external parquet fixtures | the helper 03 needs, plus CSV state-machine fuzzing | open | 3-4 days | low | — (03 wants its fixture helper) |
 | [07](07-hydration-oracle-on-the-dag-corpus.md) | Hydration oracle on the existing DAG corpus | the read side of the records the DAG fuzzer already writes | open | 2 days | low | — |
 | [08](08-unconsumed-input-failure-is-swallowed.md) | An unconsumed input's load failure is swallowed | carried over, needs a product decision first | open | half a day | low | — |
 | [09](09-branch-result-types.md) | `CASE`, `COALESCE`, `IF`, `GREATEST` and `UNION` take their first branch's type | a wider decimal in a later branch is kept under a narrower declared type, so writing or spilling it fails; `THEN 1 ELSE 2.5` is 2 | open, gated in the SQL corpora | 1-2 days | medium | needs a decision for the numeric half |
+| [10](10-error-messages-name-internals.md) | A failing query's message names the engine's internals | every parse error names JSqlParser's class; pooled failures arrive wrapped in `ExecutionException` (sometimes with no message), which is what a job records | open, recorded in `CleanRejection` | 1 day | low | a decision on where to unwrap |
+| [11](11-functions-bind-over-arguments-they-cannot-take.md) | Functions and conditions bind over arguments they cannot take | `SUM` over a string, the math functions over a date, a NULL `ROUND` scale, a non-boolean `ON` fail mid-run; `ABS` of a date is NULL | open, recorded in `CleanRejection` | 1-2 days | medium | decisions on the lenient coercions |
+| [12](12-text-the-binder-never-sees.md) | Text the parser accepts and the binder never sees | a statement after `;` is ignored; a repeated `ORDER BY` / `LIMIT` keeps its last; a CTE named twice; a JOIN with no ON is a cross join | open, recorded in `NoSilentDrop` | 1 day | medium | a decision on a bare JOIN |
+| [13](13-literals-are-read-as-written.md) | Literals and quoted identifiers are read as written | `'it''s'` is five characters; `"a"` names no column; `99999999999999999999` is a raw `NumberFormatException`; `1e400` is `Infinity` | open, recorded in the fuzzer | 1 day | medium | decisions on quoted case and big literals |
+| [14](14-pathological-nesting.md) | Deep and unbalanced SQL | a task whose SQL overflows the binder's stack **hangs its job forever**; unclosed parentheses run the parser into its timeout | open, recorded in `CleanRejection` | 1-2 days | low (the hang) | — |
 
 **Done:** plan 01. Eighteen was an undercount: classifying every getter of every
 AST class the binder reaches turned up 93 rejections. Every clause the binder
@@ -80,6 +86,22 @@ in the plan's Outcome section. Its loose ends (quarter-step decimals, no
 decimal arithmetic, a lowered guard bound) were closed on 2026-10-04 once the
 engine computed decimals exactly; that work found
 [09](09-branch-result-types.md). See the plan's Follow-up.
+
+**Done:** plan 05. `fuzz/frontend_fuzz_test` writes SQL text, which no other
+corpus does: mutated queries, the `UnsupportedClauses` table spliced into every
+context and position (read from `src/main`, so it cannot drift from the
+rejection pass), honoured clauses beside their clause-free twins, and pairs of
+equivalent spellings. Its three properties found five families of defects, now
+plans 10 to 14, each recorded in the fuzzer with a repro that fails the suite
+once the defect is gone. Plan 14's is the most severe: one deep expression in a
+task hangs the whole job, silently. Details in the plan's What landed section.
+
+**Next, in order:** [14](14-pathological-nesting.md)'s job hang (a `finally`
+and a `catch`), then [12](12-text-the-binder-never-sees.md) and
+[13](13-literals-are-read-as-written.md), whose items return wrong answers with
+no error, then [11](11-functions-bind-over-arguments-they-cannot-take.md) and
+[10](10-error-messages-name-internals.md). Plans 10, 12 and 13 each need a
+decision from the user first.
 
 **Suggested order.** [01](01-reject-or-honor-every-clause.md) first — it has the
 worst single defect in the set (a dropped join condition is a cartesian product,

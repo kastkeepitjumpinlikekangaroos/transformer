@@ -1,12 +1,12 @@
 load("@rules_scala//scala:scala.bzl", "scala_junit_test", "scala_library")
 
 # Shared property-based testing harness (Rng, Props, Shrinker, RowOracle) plus
-# the generators (ExprGen, DataGen, QueryGen, MetaQueryGen, JobDagGen) and the
-# oracles. testonly so it never leaks into a production target. Throws plain
-# AssertionError on failure, so it needs no JUnit dependency — only the code it
-# generates over: the SQL exec module (the mode-differential oracle drives whole
-# queries through SqlEngine.execute) and the job module (the DAG-scheduler oracle
-# builds and runs whole DataJobs).
+# the generators (ExprGen, DataGen, QueryGen, MetaQueryGen, SqlTextGen,
+# JobDagGen) and the oracles. testonly so it never leaks into a production
+# target. Throws plain AssertionError on failure, so it needs no JUnit
+# dependency — only the code it generates over: the SQL exec module (the
+# mode-differential oracle drives whole queries through SqlEngine.execute) and
+# the job module (the DAG-scheduler oracle builds and runs whole DataJobs).
 scala_library(
     name = "fuzz",
     testonly = True,
@@ -142,6 +142,24 @@ scala_junit_test(
     ],
 )
 
+# Frontend fuzzer: SQL TEXT the engine is not already expected to handle --
+# mutated queries, every entry of the UnsupportedClauses table spliced into
+# every context and position, honoured clauses with their clause-free twins,
+# and pairs of equivalent spellings. Checks how text fails (clean rejection),
+# that no clause the parser accepts is silently dropped, and that equivalent
+# spellings agree. Default budget part of `bazel test //...`.
+scala_junit_test(
+    name = "frontend_fuzz_test",
+    srcs = ["FrontendFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 # Long-campaign variants. Tagged `fuzz` so the default `bazel test //...`
 # (--test_tag_filters=-perf,-fuzz) skips them; run on demand with a large budget,
 # e.g.:
@@ -212,6 +230,19 @@ scala_junit_test(
         # drifting with availableProcessors.
         "-Dtransformer.scheduler.shard_count=4",
     ],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "frontend_fuzz_campaign",
+    srcs = ["FrontendFuzzTest.scala"],
+    suffixes = ["Test"],
     tags = ["fuzz"],
     deps = [
         ":fuzz",

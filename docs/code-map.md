@@ -147,13 +147,16 @@ navigation hint, not a comprehensive directory listing.
 - `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` (~1220 LOC)
   — the parity gate for every `Expr.evalVec` override. New overrides extend
   this first; see [testing.md](testing.md) for the coverage matrix.
-- `src/test/scala/com/transformer/fuzz/` (~7700 LOC) — the hand-rolled
+- `src/test/scala/com/transformer/fuzz/` (~10400 LOC) — the hand-rolled
   property-based testing harness (`Rng`, `Props`, `Shrinker`, `RowOracle`), the
   generators (`ExprGen`, `DataGen`, `QueryGen`, `MetaQueryGen` for SQL,
-  `JobDagGen` for whole jobs), and the oracles under `oracle/` (`ExprParity`,
-  `ModeDifferential`, `MetaModeDifferential`, `Tlp`, `NoRec`,
-  `JoinCommutativity`, `AggDecomposition`, and `DagSchedule` for the job-level
-  DAG scheduler). See
+  `SqlTextGen` for SQL text, `JobDagGen` for whole jobs), and the oracles under
+  `oracle/` (`ExprParity`, `ModeDifferential`, `MetaModeDifferential`, `Tlp`,
+  `NoRec`, `JoinCommutativity`, `AggDecomposition`; `CleanRejection`,
+  `NoSilentDrop` and `SyntaxEquivalence` for the frontend; and `DagSchedule` for
+  the job-level DAG scheduler). `SqlTextGen.scala` (~1150 LOC) is the largest:
+  most of it is data, the honoured-clause templates, the spelling shapes and the
+  mutation vocabulary. See
   [testing.md §Property-based testing](testing.md#property-based-testing-fuzz)
   and the recipes in [extending.md](extending.md#add-a-property--generator).
 
