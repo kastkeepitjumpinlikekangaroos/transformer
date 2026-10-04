@@ -18,8 +18,23 @@ import com.transformer.sql.plan._
   *     "every row agrees" (the precedent `ExprBatchTest` is likewise total).
   *     Concretely it avoids the engine's only partial shapes: `RAND()` (no
   *     parity meaning — excluded entirely), casts that parse (`String ->`
-  *     numeric/boolean/date, `Boolean ->` float/double), and `ROUND`/`SUBSTRING`
-  *     with NULL numeric arguments (NPE).
+  *     numeric/boolean/date/timestamp, `Boolean ->` float/double), a cast from
+  *     FLOAT or DOUBLE to DECIMAL (`NaN` and the infinities have no decimal, and
+  *     the cast refuses them), and `ROUND`/`SUBSTRING` with NULL numeric
+  *     arguments (NPE).
+  *
+  * Columns and expressions take every one of the engine's ten value types
+  * ([[GenTypes]]). A type takes part in what the engine gives it and nothing
+  * else, so a tree the generator builds is one the engine has an answer for:
+  * a DATE or TIMESTAMP is compared only with its own type (the binder refuses
+  * any other pairing), a BINARY is never read as text (the binder refuses a
+  * CAST from one, `||` and the string functions), and there is no arithmetic
+  * on a DECIMAL, a DATE, a TIMESTAMP or a BINARY. The engine has none for the
+  * last three; a DECIMAL's is a gap `docs/gotchas.md` records, which throws
+  * rather than answering, so generating it would test nothing but the throw.
+  * Every other shape takes all four: comparisons and `IN` (a DECIMAL against
+  * every number, FLOAT and DOUBLE included), `IS NULL`, `COALESCE` / `IF` /
+  * `NULLIF` / `CASE`, the CASTs that never throw, and `ABS` of a DECIMAL.
   *
   * Float and double leaves draw `NaN`, `±Infinity` and `-0.0` at a low rate
   * ([[SpecialFloatProb]]), and those operands reach ordering comparisons and
@@ -46,17 +61,62 @@ object ExprGen {
         while (r < batch.numRows) { if (batch.column(i).isNull(r)) nulls += 1; r += 1 }
         s"${f.name}:${f.dataType}(nulls=$nulls)"
       }.mkString("[", ", ", "]")
-      s"ExprCase(numRows=${batch.numRows}, cap=${batch.capacity}, schema=$cols, expr=$expr)"
+      s"ExprCase(numRows=${batch.numRows}, cap=${batch.capacity}, schema=$cols, expr=${render(expr)})"
     }
   }
 
+  /** `e` as its case-class `toString` spells it, except that a byte-array
+    * literal shows its bytes rather than its identity. */
+  private def render(e: Expr): String = e match {
+    case LitExpr(v, dt) => s"LitExpr(${RowOracle.show(v)},$dt)"
+    case ColRefExpr(_, _, _) => e.toString
+    case CastExpr(c, t) => s"CastExpr(${render(c)},$t)"
+    case UnaryOpExpr(op, c, dt) => s"UnaryOpExpr($op,${render(c)},$dt)"
+    case BinOpExpr(op, l, r, dt) => s"BinOpExpr($op,${render(l)},${render(r)},$dt)"
+    case FuncExpr(name, args, dt) => s"FuncExpr($name,${args.map(render).mkString("List(", ", ", ")")},$dt)"
+    case CaseExpr(branches, elseExpr, dt) =>
+      val bs = branches.map { case (w, t) => s"(${render(w)},${render(t)})" }.mkString("List(", ", ", ")")
+      s"CaseExpr($bs,${elseExpr.map(render)},$dt)"
+    case IsNullExpr(c, neg) => s"IsNullExpr(${render(c)},$neg)"
+    case InListExpr(c, items, neg) => s"InListExpr(${render(c)},${items.map(render).mkString("List(", ", ", ")")},$neg)"
+    case LikeExpr(c, p, neg, syntax) => s"LikeExpr(${render(c)},${render(p)},$neg,$syntax)"
+  }
+
   // ---- type sets used throughout ----
-  private val GenTypes: Seq[DataType] =
+
+  /** The declared types a DECIMAL takes: one per parquet layout a decimal is
+    * written in (an INT32 up to 9 digits, an INT64 up to 18, a fixed-length
+    * byte array beyond), so a decimal that spills goes through each. */
+  private[fuzz] val DecimalTypes: Seq[DataType] =
+    Seq(DataType.DecimalType(9, 2), DataType.DecimalType(18, 4), DataType.DecimalType(38, 18))
+
+  /** Every type a column or an expression can have: the engine's ten value
+    * types, DECIMAL at each of [[DecimalTypes]]. Draw from it with [[pick]],
+    * which weighs DECIMAL as one type rather than three. */
+  private[fuzz] val GenTypes: Seq[DataType] =
     Seq(DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType,
-        DataType.BooleanType, DataType.StringType)
-  private val Numerics: Seq[DataType] =
+        DataType.BooleanType, DataType.StringType, DataType.DateType, DataType.TimestampType,
+        DataType.BinaryType) ++ DecimalTypes
+  /** The types arithmetic takes. */
+  private val Arithmetic: Seq[DataType] =
     Seq(DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType)
+  /** The types compared as numbers: the arithmetic ones and every decimal. */
+  private val Numerics: Seq[DataType] = Arithmetic ++ DecimalTypes
   private val Floatings: Seq[DataType] = Seq(DataType.FloatType, DataType.DoubleType)
+  private val Temporals: Seq[DataType] = Seq(DataType.DateType, DataType.TimestampType)
+  /** Every type but BINARY: the types a node may read as text. */
+  private val TextTypes: Seq[DataType] = GenTypes.filterNot(_ == DataType.BinaryType)
+
+  /** One of `types`, each DECIMAL weighed a third of any other type, so the
+    * three declared decimal types together are drawn as often as one type. */
+  private[fuzz] def pick(r: Rng, types: Seq[DataType]): DataType =
+    r.weighted(types.map(t => (if (isDecimal(t)) 1 else DecimalTypes.length, t)): _*)
+
+  private def isDecimal(t: DataType): Boolean = t.isInstanceOf[DataType.DecimalType]
+
+  /** What a coverage tally counts a type as: any DECIMAL as `decimal`, every
+    * other type by its name. */
+  private[fuzz] def kind(t: DataType): String = if (isDecimal(t)) "decimal" else t.name
 
   private val ArithOps = Seq("+", "-", "*", "/", "%")
   private val EqOps = Seq("=", "==", "<>", "!=")
@@ -80,7 +140,7 @@ object ExprGen {
     val dataRng = rng.split()
     val exprRng = rng.split()
     val (schema, batch) = genBatch(structRng, dataRng)
-    val target = exprRng.oneOf(GenTypes)
+    val target = pick(exprRng, GenTypes)
     val depth = exprRng.between(1, 4)
     val expr = genTyped(exprRng, schema, target, depth)
     require(
@@ -152,6 +212,85 @@ object ExprGen {
     SpecialValueCoverage(ordShape, ordNan, ordNegZero, inShape, inNan, inNegZero)
   }
 
+  /** Which of DATE, TIMESTAMP, BINARY and DECIMAL a generated case compares,
+    * and whether the values a comparison of each gets wrong actually meet in
+    * one. Reported without running `evalVec`, like [[specialValueCoverage]].
+    *
+    * `compared` and `inList` name the [[kind]]s that reach a comparison (both
+    * operands of the kind) and an `IN` (the child of the kind) — the shape half.
+    * The rest is the value half: on some row, a comparison or an `IN` meets two
+    * distinct byte arrays with one content, two byte arrays that differ only in
+    * a high bit, one decimal value at two scales, two decimal values that are
+    * one double, or two instants less than a millisecond apart. Each is the
+    * input on which a comparison that took a shortcut (identity, signed bytes,
+    * `BigDecimal.equals`, `doubleValue`, milliseconds) answers wrong. */
+  final case class TypeCoverage(
+      compared: Set[String],
+      inList: Set[String],
+      bytesOfOneContent: Boolean,
+      bytesOneHighBitApart: Boolean,
+      decimalAtTwoScales: Boolean,
+      decimalsOfOneDouble: Boolean,
+      instantsUnderAMillisecondApart: Boolean)
+
+  /** The kinds [[typeCoverage]] reports on. */
+  private[fuzz] val ReportedKinds: Set[String] = Set("date", "timestamp", "binary", "decimal")
+
+  def typeCoverage(c: ExprCase): TypeCoverage = {
+    val compared, inList = scala.collection.mutable.Set.empty[String]
+    var oneContent, highBit, twoScales, oneDouble, subMilli = false
+
+    def meet(a: Any, b: Any): Unit = (a, b) match {
+      case (x: Array[Byte], y: Array[Byte]) =>
+        if ((x ne y) && java.util.Arrays.equals(x, y)) oneContent = true
+        if (differOnlyInAHighBit(x, y)) highBit = true
+      case (x: java.math.BigDecimal, y: java.math.BigDecimal) =>
+        if (x.compareTo(y) == 0 && x.scale != y.scale) twoScales = true
+        if (x.compareTo(y) != 0 && x.doubleValue == y.doubleValue) oneDouble = true
+      case (x: java.time.Instant, y: java.time.Instant) =>
+        val apart = math.abs(java.time.Duration.between(x, y).toNanos)
+        if (apart > 0 && apart < 1000000L) subMilli = true
+      case _ => ()
+    }
+
+    // Evaluate `left` against each of `rights` on every row, as the comparison
+    // or the IN does.
+    def meetOnEveryRow(left: Expr, rights: Seq[Expr]): Unit = {
+      var r = 0
+      while (r < c.batch.numRows) {
+        val lv = left.eval(c.batch, r)
+        if (lv != null) rights.foreach { e =>
+          val rv = e.eval(c.batch, r)
+          if (rv != null) meet(lv, rv)
+        }
+        r += 1
+      }
+    }
+
+    def walk(e: Expr): Unit = {
+      e match {
+        case BinOpExpr(op, l, r, _) if (EqOps ++ OrdOps).contains(op) &&
+          kind(l.dataType) == kind(r.dataType) && ReportedKinds(kind(l.dataType)) =>
+          compared += kind(l.dataType)
+          meetOnEveryRow(l, Seq(r))
+        case InListExpr(child, items, _) if ReportedKinds(kind(child.dataType)) =>
+          inList += kind(child.dataType)
+          meetOnEveryRow(child, items)
+        case _ => ()
+      }
+      Shrinker.childrenOf(e).foreach(walk)
+    }
+
+    walk(c.expr)
+    TypeCoverage(compared.toSet, inList.toSet, oneContent, highBit, twoScales, oneDouble, subMilli)
+  }
+
+  /** Two byte arrays of one length that differ in exactly one byte, and there
+    * only in its high bit: the pair a signed comparison orders the other way. */
+  private[fuzz] def differOnlyInAHighBit(x: Array[Byte], y: Array[Byte]): Boolean =
+    x.length == y.length && x.indices.count(i => x(i) != y(i)) == 1 &&
+      x.indices.forall(i => x(i) == y(i) || ((x(i) ^ y(i)) & 0xff) == 0x80)
+
   // ---- batch generation ---------------------------------------------------
 
   private def genBatch(structRng: Rng, dataRng: Rng): (Schema, ColumnarBatch) = {
@@ -169,7 +308,7 @@ object ExprGen {
       case 3 => structRng.between(200, 1000)
       case _ => ColumnarBatch.DefaultCapacity
     }
-    val fields = (0 until numCols).map(i => Field(s"c$i", structRng.oneOf(GenTypes))).toVector
+    val fields = (0 until numCols).map(i => Field(s"c$i", pick(structRng, GenTypes))).toVector
     val schema = Schema(fields)
     val cols = fields.iterator.map(f => genColumn(structRng, dataRng, f.dataType, numRows)).toArray
     (schema, ColumnarBatch.fromColumns(schema, cols, numRows))
@@ -229,8 +368,63 @@ object ExprGen {
       if (r.bool(SpecialFloatProb)) r.oneOf(SpecialDoubles) else genDouble(r)
     case DataType.BooleanType => r.bool()
     case DataType.StringType => r.oneOf(StringPool)
+    case DataType.DateType => r.oneOf(DatePool)
+    case DataType.TimestampType => r.oneOf(TimestampPool)
+    // A fresh array per draw: two cells with one content are two objects, as
+    // they are in every vector the engine reads, so a comparison by identity
+    // cannot pass for one by content.
+    case DataType.BinaryType => r.oneOf(BinaryPool).clone()
+    case d: DataType.DecimalType => r.oneOf(DecimalPools(d))
     case other => throw new IllegalArgumentException(s"genValue: unsupported $other")
   }
+
+  /** Dates around the US daylight-saving changes of 2024 and the leap day
+    * before them, either side of the epoch. Every time in the engine is UTC, so
+    * a path that reached for the system zone would move a value across one of
+    * these. */
+  private[fuzz] val DatePool: Seq[java.time.LocalDate] = Seq(
+    "1969-12-31", "1970-01-01", "2024-02-28", "2024-02-29", "2024-03-01",
+    "2024-03-09", "2024-03-10", "2024-03-11", "2024-11-03").map(java.time.LocalDate.parse)
+
+  /** Instants either side of the epoch and around the 2024 spring-forward
+    * instant, a microsecond and less than a millisecond apart: a path that kept
+    * milliseconds would merge them. Whole microseconds only, which is all a
+    * `TimestampVector` holds and what every TIMESTAMP literal and CAST
+    * truncates to. */
+  private[fuzz] val TimestampPool: Seq[java.time.Instant] = Seq(
+    "1969-12-31T23:59:59.999999Z", "1970-01-01T00:00:00Z", "1970-01-01T00:00:00.000001Z",
+    "2024-02-29T12:00:00Z", "2024-03-10T06:59:59.999999Z", "2024-03-10T07:00:00Z",
+    "2024-03-10T07:00:00.000001Z", "2024-03-10T07:00:00.000999Z", "2024-03-10T07:00:00.001Z"
+  ).map(java.time.Instant.parse)
+
+  /** Byte strings ordered so neighbours are the pairs a byte-array comparison
+    * gets wrong: two empty arrays and two `01 02`s with one content (the
+    * identity-equality bug), `01` against `81` and `01 02` against `01 82`, which
+    * differ only in a high bit and so order oppositely signed and unsigned, and
+    * `01 02` as a prefix of `01 02 00`. Each draw is cloned, so even the pairs
+    * listed once meet as distinct objects. */
+  private[fuzz] val BinaryPool: Seq[Array[Byte]] = Seq(
+    Array[Int](), Array[Int](), Array(0x00), Array(0x01), Array(0x81), Array(0x7f), Array(0x80),
+    Array(0x01, 0x02), Array(0x01, 0x02), Array(0x01, 0x82), Array(0x01, 0x02, 0x00)
+  ).map(_.map(_.toByte))
+
+  /** Decimals for each of [[DecimalTypes]], every one within its declared
+    * precision and scale. Each pool holds one value at several scales (`1`,
+    * `1.0`, `1.00`), which `=` calls equal, and a negative; the two wider ones
+    * also hold pairs that are different values but one double, the inputs on
+    * which a comparison through `doubleValue` answers wrong. Nothing here sums
+    * or spills, so these run to the edge of their precision. */
+  private[fuzz] val DecimalPools: Map[DataType, Seq[java.math.BigDecimal]] = Map[DataType, Seq[String]](
+    DataType.DecimalType(9, 2) ->
+      Seq("0", "0.00", "1", "1.0", "1.00", "-2.50", "0.25", "1234567.89", "-1234567.89", "9999999.99"),
+    DataType.DecimalType(18, 4) ->
+      Seq("0", "1", "1.0", "1.0000", "-2.5", "-0.0001", "12345678901234.5678", "12345678901234.5679",
+        "99999999999999.9999"),
+    DataType.DecimalType(38, 18) ->
+      Seq("0", "1", "1.0", "1.000000000000000000", "1.000000000000000001", "1.000000000000000002", "-2.5",
+        "9007199254740992", "9007199254740993", "12345678901234567890.123456789012345678",
+        "12345678901234567890.123456789012345679")
+  ).map { case (t, xs) => t -> xs.map(new java.math.BigDecimal(_)) }
 
   private val FloatPool = Seq(
     0.0, 1.0, -1.0, 0.5, -0.5, 0.25, -0.25, 2.5, -2.5, 3.14159, -3.14159,
@@ -266,6 +460,10 @@ object ExprGen {
     case DataType.DoubleType => 99999.0
     case DataType.BooleanType => true
     case DataType.StringType => "GARBAGE"
+    case DataType.DateType => java.time.LocalDate.of(9999, 12, 31)
+    case DataType.TimestampType => java.time.Instant.parse("9999-12-31T23:59:59.999999Z")
+    case DataType.BinaryType => Array[Byte](0xee.toByte, 0xee.toByte)
+    case _: DataType.DecimalType => new java.math.BigDecimal("-99.99")
     case other => throw new IllegalArgumentException(s"sentinel: unsupported $other")
   }
 
@@ -281,8 +479,8 @@ object ExprGen {
     else target match {
       case DataType.BooleanType => genBoolean(r, schema, depth)
       case DataType.StringType => genString(r, schema, depth)
-      case t if DataType.isNumeric(t) => genNumeric(r, schema, t, depth)
-      case other => genLeaf(r, schema, other)
+      case t if Arithmetic.contains(t) => genNumeric(r, schema, t, depth)
+      case t => genOther(r, schema, t, depth)
     }
   }
 
@@ -305,7 +503,7 @@ object ExprGen {
       // for: three-valued results, cross-numeric promotion, and the one
       // operator family whose semantics depend on the operand type.
       8 -> (() => genComparison(r, schema, depth)),
-      2 -> (() => IsNullExpr(sub(r.oneOf(GenTypes)), r.bool())),
+      2 -> (() => IsNullExpr(sub(pick(r, GenTypes)), r.bool())),
       3 -> (() => genInList(r, schema, depth)),
       2 -> (() => genLike(r, schema, depth)),
       1 -> (() => genCaseExpr(r, schema, DataType.BooleanType, depth)),
@@ -324,28 +522,41 @@ object ExprGen {
     // answer differently from IEEE), and drawing operand types uniformly leaves
     // that shape too rare for the property to reach it often.
     // strCmp / boolEq: string ordering + equality, boolean equality.
+    // temporal / binary: a DATE or TIMESTAMP against its own type, a BINARY
+    // against a BINARY — the only pairings the binder allows them.
+    // decimal: two decimals, of one declared type or two. Numerics include every
+    // decimal too, so a DECIMAL also meets every other number through numEq /
+    // numOrd / floatOrd, but two independent draws pair two decimals too rarely
+    // for one value at two scales to meet itself.
     r.weighted(
-      (4, 0), (4, 1), (4, 2), (3, 3), (2, 4)) match {
+      (4, 0), (4, 1), (4, 2), (3, 3), (2, 4), (3, 5), (2, 6), (2, 7)) match {
       case 0 =>
-        BinOpExpr(r.oneOf(EqOps), sub(r.oneOf(Numerics)), sub(r.oneOf(Numerics)), DataType.BooleanType)
+        BinOpExpr(r.oneOf(EqOps), sub(pick(r, Numerics)), sub(pick(r, Numerics)), DataType.BooleanType)
       case 1 =>
-        BinOpExpr(r.oneOf(OrdOps), sub(r.oneOf(Numerics)), sub(r.oneOf(Numerics)), DataType.BooleanType)
+        BinOpExpr(r.oneOf(OrdOps), sub(pick(r, Numerics)), sub(pick(r, Numerics)), DataType.BooleanType)
       case 2 =>
         val (lt, rt) =
-          if (r.bool()) (r.oneOf(Floatings), r.oneOf(Numerics))
-          else (r.oneOf(Numerics), r.oneOf(Floatings))
+          if (r.bool()) (r.oneOf(Floatings), pick(r, Numerics))
+          else (pick(r, Numerics), r.oneOf(Floatings))
         BinOpExpr(r.oneOf(OrdOps), sub(lt), sub(rt), DataType.BooleanType)
       case 3 =>
         BinOpExpr(r.oneOf(EqOps ++ OrdOps), sub(DataType.StringType), sub(DataType.StringType), DataType.BooleanType)
-      case _ =>
+      case 4 =>
         BinOpExpr(r.oneOf(EqOps), sub(DataType.BooleanType), sub(DataType.BooleanType), DataType.BooleanType)
+      case 5 =>
+        val t = r.oneOf(Temporals)
+        BinOpExpr(r.oneOf(EqOps ++ OrdOps), sub(t), sub(t), DataType.BooleanType)
+      case 6 =>
+        BinOpExpr(r.oneOf(EqOps ++ OrdOps), sub(DataType.BinaryType), sub(DataType.BinaryType), DataType.BooleanType)
+      case _ =>
+        BinOpExpr(r.oneOf(EqOps ++ OrdOps), sub(r.oneOf(DecimalTypes)), sub(r.oneOf(DecimalTypes)), DataType.BooleanType)
     }
   }
 
   private def genNumeric(r: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
     val base: Seq[(Int, () => Expr)] = Seq(
-      5 -> (() => BinOpExpr(r.oneOf(ArithOps), sub(r.oneOf(Numerics)), sub(r.oneOf(Numerics)), target)),
+      5 -> (() => BinOpExpr(r.oneOf(ArithOps), sub(r.oneOf(Arithmetic)), sub(r.oneOf(Arithmetic)), target)),
       2 -> (() => UnaryOpExpr("-", sub(target), target)),
       1 -> (() => UnaryOpExpr("+", sub(target), target)),
       2 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
@@ -359,13 +570,13 @@ object ExprGen {
         Seq(2 -> (() => FuncExpr("LENGTH", Seq(sub(DataType.StringType)), DataType.IntType)))
       case DataType.DoubleType =>
         Seq(
-          1 -> (() => FuncExpr(r.oneOf(Seq("FLOOR", "CEIL", "CEILING")), Seq(sub(r.oneOf(Numerics))), DataType.DoubleType)),
-          1 -> (() => FuncExpr("ROUND", roundlikeArgs(r, sub(r.oneOf(Numerics))), DataType.DoubleType)),
-          1 -> (() => FuncExpr(r.oneOf(Seq("TRUNC", "TRUNCATE")), roundlikeArgs(r, sub(r.oneOf(Numerics))), DataType.DoubleType)),
+          1 -> (() => FuncExpr(r.oneOf(Seq("FLOOR", "CEIL", "CEILING")), Seq(sub(pick(r, Numerics))), DataType.DoubleType)),
+          1 -> (() => FuncExpr("ROUND", roundlikeArgs(r, sub(pick(r, Numerics))), DataType.DoubleType)),
+          1 -> (() => FuncExpr(r.oneOf(Seq("TRUNC", "TRUNCATE")), roundlikeArgs(r, sub(pick(r, Numerics))), DataType.DoubleType)),
           // SQRT/LN/EXP are not in Funcs.applyVec — they exercise the default
           // evalVec row loop (which routes through eval, so it cannot diverge,
           // but it proves the fallback path stays correct).
-          1 -> (() => FuncExpr(r.oneOf(Seq("SQRT", "LN", "EXP")), Seq(sub(r.oneOf(Numerics))), DataType.DoubleType)))
+          1 -> (() => FuncExpr(r.oneOf(Seq("SQRT", "LN", "EXP")), Seq(sub(pick(r, Numerics))), DataType.DoubleType)))
       case _ => Seq.empty
     }
     r.weighted(base ++ extra: _*)()
@@ -379,10 +590,10 @@ object ExprGen {
   private def genString(r: Rng, schema: Schema, depth: Int): Expr = {
     def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
     val producers: Seq[(Int, () => Expr)] = Seq(
-      4 -> (() => BinOpExpr("||", sub(r.oneOf(GenTypes)), sub(r.oneOf(GenTypes)), DataType.StringType)),
-      2 -> (() => CastExpr(sub(r.oneOf(GenTypes)), DataType.StringType)),
+      4 -> (() => BinOpExpr("||", sub(pick(r, TextTypes)), sub(pick(r, TextTypes)), DataType.StringType)),
+      2 -> (() => CastExpr(sub(pick(r, TextTypes)), DataType.StringType)),
       3 -> (() => FuncExpr(r.oneOf(Seq("UPPER", "LOWER", "TRIM")), Seq(sub(DataType.StringType)), DataType.StringType)),
-      3 -> (() => FuncExpr("CONCAT", Seq.fill(r.between(1, 3))(sub(r.oneOf(GenTypes))), DataType.StringType)),
+      3 -> (() => FuncExpr("CONCAT", Seq.fill(r.between(1, 3))(sub(pick(r, TextTypes))), DataType.StringType)),
       2 -> (() => FuncExpr("SUBSTRING", substringArgs(r, sub(DataType.StringType)), DataType.StringType)),
       2 -> (() => FuncExpr("COALESCE", Seq.fill(r.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
       2 -> (() => FuncExpr("IF", Seq(sub(DataType.BooleanType), sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
@@ -410,7 +621,7 @@ object ExprGen {
     * all-literal case through the hoisted numeric `HashSet`, which is the shape
     * that used to key on `Double.equals` and disagree with `eval`'s `Ops.eq`. */
   private def genInList(r: Rng, schema: Schema, depth: Int): Expr = {
-    val childType = r.oneOf(GenTypes)
+    val childType = pick(r, GenTypes)
     val child = genTyped(r, schema, childType, depth - 1)
     val nItems = r.between(1, 4)
     val items = (0 until nItems).map(_ => genInListItem(r, schema, childType, depth))
@@ -421,8 +632,8 @@ object ExprGen {
     val k = r.between(0, 9)
     if (k < 5) LitExpr(genValue(r, childType), childType) // literal, fast path
     else if (k < 6) LitExpr(null, childType) // NULL item -> 3VL
-    else if (k < 8 && DataType.isNumeric(childType)) { // cross-numeric literal
-      val other = r.oneOf(Numerics.filter(_ != childType))
+    else if (k < 8 && Numerics.contains(childType)) { // cross-numeric literal
+      val other = pick(r, Numerics.filter(_ != childType))
       LitExpr(genValue(r, other), other)
     } else genTyped(r, schema, childType, depth - 1) // subtree -> general path
   }
@@ -451,15 +662,43 @@ object ExprGen {
   }
 
   private def genCastTo(r: Rng, schema: Schema, target: DataType, depth: Int): Expr =
-    CastExpr(genTyped(r, schema, r.oneOf(totalCastSources(target)), depth - 1), target)
+    CastExpr(genTyped(r, schema, pick(r, totalCastSources(target)), depth - 1), target)
 
   /** Source types that cast to `target` without ever throwing (see the totality
-    * note on the object). */
+    * note on the object). An integer is a decimal exactly and a decimal is one
+    * at any declared scale, but a FLOAT or DOUBLE is not a total source for a
+    * DECIMAL: `NaN` and the infinities have none. A DATE and a TIMESTAMP cast to
+    * each other (midnight UTC, the date in UTC); text into either can fail to
+    * parse. A BINARY casts to nothing else and nothing else to it. */
   private def totalCastSources(target: DataType): Seq[DataType] = target match {
     case DataType.IntType | DataType.LongType => Numerics :+ DataType.BooleanType
     case DataType.FloatType | DataType.DoubleType => Numerics
-    case DataType.StringType => GenTypes
+    case DataType.StringType => TextTypes
     case DataType.BooleanType => Numerics :+ DataType.BooleanType
+    case _: DataType.DecimalType => Seq(DataType.IntType, DataType.LongType) ++ DecimalTypes
+    case DataType.DateType | DataType.TimestampType => Temporals
     case other => Seq(other)
+  }
+
+  /** A DECIMAL, DATE, TIMESTAMP or BINARY expression: the conditional forms
+    * every type has, and a CAST in from the types that cast to `target` without
+    * throwing. A DECIMAL also takes unary `+` and `ABS`; it takes no arithmetic
+    * and no negation (see the object comment). */
+  private def genOther(r: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
+    def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
+    val base: Seq[(Int, () => Expr)] = Seq(
+      2 -> (() => FuncExpr("COALESCE", Seq.fill(r.between(1, 3))(sub(target)), target)),
+      2 -> (() => FuncExpr("IF", Seq(sub(DataType.BooleanType), sub(target), sub(target)), target)),
+      1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
+      1 -> (() => genCaseExpr(r, schema, target, depth)))
+    val extra: Seq[(Int, () => Expr)] = target match {
+      case _: DataType.DecimalType => Seq(
+        1 -> (() => genCastTo(r, schema, target, depth)),
+        1 -> (() => UnaryOpExpr("+", sub(target), target)),
+        1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
+      case DataType.DateType | DataType.TimestampType => Seq(1 -> (() => genCastTo(r, schema, target, depth)))
+      case _ => Seq.empty
+    }
+    r.weighted(base ++ extra: _*)()
   }
 }

@@ -26,10 +26,9 @@ import com.transformer.core._
   * Null density is tunable per column (none / sprinkled / ~half / all), so a
   * GROUP BY key column can be entirely NULL (one collapsed group) or mixed.
   *
-  * Column types are exactly [[ExprGen]]'s set — Int/Long/Float/Double/Boolean/
-  * String — so every column can be referenced by a generated predicate or
-  * aggregate argument. Date/Timestamp/Decimal are intentionally out of scope for
-  * this property (see docs/extending.md).
+  * Column types are Int/Long/Float/Double/Boolean/String, six of [[ExprGen]]'s
+  * ten, so every column can be referenced by a generated predicate or aggregate
+  * argument.
   */
 object DataGen {
 
@@ -85,8 +84,8 @@ object DataGen {
 
   // ---- schema + data ------------------------------------------------------
 
-  /** All supported column types — identical to [[ExprGen]]'s `GenTypes` so any
-    * column can appear inside a generated expression. */
+  /** The column types: the six of [[ExprGen]]'s `GenTypes` that `QueryGen`
+    * builds queries over. */
   val ColumnTypes: Seq[DataType] = Seq(
     DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType,
     DataType.BooleanType, DataType.StringType)

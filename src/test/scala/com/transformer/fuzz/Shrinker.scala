@@ -144,7 +144,9 @@ object Shrinker {
     case _ => false
   }
 
-  /** The simplest non-null literal of a type — the collapse target. */
+  /** The simplest non-null literal of a type — the collapse target. A BINARY
+    * collapses to NULL instead: SQL has no literal for a byte array, so a
+    * shrunk query could not be written with one. */
   private def simplestLit(dt: DataType): LitExpr = dt match {
     case DataType.IntType => LitExpr(0, dt)
     case DataType.LongType => LitExpr(0L, dt)
@@ -152,6 +154,9 @@ object Shrinker {
     case DataType.DoubleType => LitExpr(0.0, dt)
     case DataType.BooleanType => LitExpr(false, dt)
     case DataType.StringType => LitExpr("", dt)
+    case DataType.DateType => LitExpr(java.time.LocalDate.EPOCH, dt)
+    case DataType.TimestampType => LitExpr(java.time.Instant.EPOCH, dt)
+    case _: DataType.DecimalType => LitExpr(java.math.BigDecimal.ZERO, dt)
     case _ => LitExpr(null, dt)
   }
 

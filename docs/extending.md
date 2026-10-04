@@ -385,6 +385,17 @@ engine — the parity fuzzer then guards its `evalVec` override automatically):
    `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` — that suite is
    the per-override gate; the fuzzer is the generative net over it.
 
+**To give `ExprGen` a new `DataType`**: add it to `GenTypes` (draw from that list
+with `pick`, not `oneOf`, so a type with several declared variants such as
+DECIMAL is drawn as one type), give it `genValue` and `sentinel` cases, and route
+it in `genTyped`. Let it reach every producer the engine answers for over it and
+none it does not — the binder's rules, not convenience, decide (see the object
+comment for the four that arrived together: a DATE meets only a DATE, a BINARY is
+never text, nothing does arithmetic on a DECIMAL). Its value pool should hold the
+values its comparison is easy to get wrong on, and `typeCoverage` plus a guard in
+`ExprParityFuzzTest` must assert both that the type reaches a comparison and an
+`IN`, and that those values meet there.
+
 **To add a SQL shape to `QueryGen`** (the mode-differential fuzzer's query
 generator): add it to the structured `GenQuery` (a new `AggSpec` for an
 aggregate, a new producer in `genValue` / `genPredicate` for a scalar shape, or a

@@ -760,8 +760,9 @@ ship a fix or move something from "not done" to "done".
   Deterministic regressions in `sql_engine_test`, `hash_aggregate_spill_test`
   (row order, partition split, spill), `agg_state_serde_test`,
   `exchange_exec_test`, `hash_join_spill_test`, `window_exec_spill_test`,
-  `hash_keys_test` and `expr_batch_test`; the fuzz corpora still do not draw
-  decimal or binary columns ([plan 04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)).
+  `hash_keys_test` and `expr_batch_test`. The expression corpus (`ExprGen`)
+  draws decimal and binary columns and literals; the SQL corpora do not yet
+  ([plan 04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)).
 
 - **`ABS` of a `DECIMAL` used to compute in `DOUBLE` — fixed.** `Funcs.apply`
   took a decimal's `doubleValue` like any other number's, and `VecFuncs.abs`
@@ -1071,9 +1072,9 @@ parquet annotation is decided"). Plans, evidence and repro SQL are in
 
 All three clusters hid for the same reason, and it is the lesson to carry: the
 fuzz generators render SQL from their own typed AST (so the corpus is exactly the
-supported grammar), `DataGen.ColumnTypes` and `ExprGen.GenTypes` list six of the
-engine's ten `DataType`s, and every file-format fixture is written by our own
-writer. Plans 04-07 in that directory close those three holes.
+supported grammar), `DataGen.ColumnTypes` and `ExprGen.GenTypes` listed six of
+the engine's ten `DataType`s, and every file-format fixture was written by our
+own writer. Plans 04-07 in that directory close those three holes.
 
 ## What's intentionally NOT done
 
