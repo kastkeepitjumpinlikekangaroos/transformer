@@ -147,6 +147,17 @@ specific traps.
   (`HashJoinExec.columnHashCode`) that separates two equal keys loses the match
   as surely as a hash map would. The one deliberate exception is floats, which
   keys group by bit pattern ([architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers)).
+- **A decimal result is computed exactly and fitted to its declared type,
+  once.** An operation or aggregate that produces a `DECIMAL` declares its type
+  through `Decimals` (`resultType`, `sumType`, `avgType`, or a rule of the same
+  shape), computes in `BigDecimal`, which does not round, and fits the answer
+  with `Decimals.fit` (rounded half up to the scale, an `ArithmeticException`
+  past the precision) as late as it can: an aggregate accumulates exactly and
+  fits in `finish`, so its answer cannot move with row order, merge order or
+  spill. Two mistakes this rules out, both made before: computing through
+  `doubleValue` while declaring a `DECIMAL` (`SUM` and `ABS` did), and storing a
+  value its declared type does not hold, which the parquet writer refuses rather
+  than rounds, so the query fails only when it spills.
 - **Spill-capable operators thread `ExecutionOptions` through their
   constructor.** `SortExec`, `HashAggregateExec`, and `DistinctExec`
   follow the pattern: an `opts: ExecutionOptions` field, an `spillEnabled`

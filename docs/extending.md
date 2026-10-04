@@ -24,6 +24,14 @@ relevant module lives, and that you'll follow the workflow in
 6. Update [`README.md`'s "SQL features"](../README.md#sql-features) so users
    can see the new function in the supported list.
 
+A function that returns a `DECIMAL` computes in `BigDecimal` and fits its answer
+to the type it declares with `Decimals.fit`, the way `ABS` keeps a decimal exact
+(see the decimal entry in [conventions.md](conventions.md)); one that reads a
+decimal's `doubleValue` declares a `DOUBLE`, as `ROUND` and `SQRT` do. A function
+that is an operator by another name binds as the operator, the way
+`LogicalBuilder` binds `MOD(a, b)` as `a % b` through `Analyzer.arithmetic`, so
+the two cannot be typed differently.
+
 A function whose value must hold still for a whole query, as the clock keywords'
 must, does not belong in `Funcs`, which evaluates per row. Bind it to a literal
 instead, the way `LogicalBuilder.clockLiteral` binds `CURRENT_DATE` and
@@ -55,6 +63,10 @@ instead, the way `LogicalBuilder.clockLiteral` binds `CURRENT_DATE` and
    value: `DistinctElement.of(v, type)` wraps a byte array to compare by content
    and spells a decimal as its `KeyCodec.decimalKey`, where a raw `HashSet`
    would compare arrays by identity and decimals by scale.
+   **If it returns a `DECIMAL`**, follow `DecimalSumState`: declare the type
+   through `Decimals` in `resultType`, accumulate `BigDecimal`s, merge them
+   exactly, and fit the answer with `Decimals.fit` in `finish`, so it cannot
+   depend on row order, merge order or spill.
 5. Wire it in `AggState.init` (`AggregateExec.scala`) and
    `LogicalBuilder.bindAgg` (`sql/plan/LogicalBuilder.scala`). A one-argument
    aggregate gets `DISTINCT` by wrapping it in `AggExprDistinct` in `bindAgg`

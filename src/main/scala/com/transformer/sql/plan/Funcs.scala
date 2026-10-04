@@ -22,7 +22,6 @@ object Funcs {
     case "ROUND" if argTypes.size >= 1 => Some(DataType.DoubleType)
     case "FLOOR" | "CEIL" | "CEILING" if argTypes.size == 1 => Some(DataType.DoubleType)
     case "TRUNC" | "TRUNCATE" if argTypes.size == 1 || argTypes.size == 2 => Some(DataType.DoubleType)
-    case "MOD" if argTypes.size == 2 => Some(DataType.widerNumeric(argTypes(0), argTypes(1)))
     case "POW" | "POWER" if argTypes.size == 2 => Some(DataType.DoubleType)
     case "SQRT" | "CBRT" | "EXP" if argTypes.size == 1 => Some(DataType.DoubleType)
     case "LN" if argTypes.size == 1 => Some(DataType.DoubleType)
@@ -129,9 +128,6 @@ object Funcs {
           val truncated = math.signum(v) * math.floor(math.abs(v) * factor) / factor
           if (truncated == 0.0) 0.0 else truncated
         }
-      case "MOD" =>
-        if (args(0) == null || args(1) == null) null
-        else Ops.apply("%", args(0), args(1), argTypes(0), argTypes(1), resultType)
       case "POW" | "POWER" =>
         if (args(0) == null || args(1) == null) null
         else math.pow(args(0).asInstanceOf[Number].doubleValue, args(1).asInstanceOf[Number].doubleValue)

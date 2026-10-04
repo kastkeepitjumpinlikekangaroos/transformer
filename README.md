@@ -684,7 +684,11 @@ on, which aggregates each distinct non-NULL value once),
 `COVAR_SAMP`/`COVAR_POP`, `CORR`. Univariate variance/stddev (and `COUNT_IF`)
 are also available as window aggregates with `OVER (...)`. Variance and stddev
 use Welford + Chan's parallel merge for numerical stability; `*_SAMP` returns
-NULL when fewer than two non-NULL inputs are present.
+NULL when fewer than two non-NULL inputs are present. `SUM` is a `BIGINT` over
+integers, a `DOUBLE` over floats, and over a `DECIMAL(p,s)` an exact
+`DECIMAL(38,s)`. `AVG` is a `DOUBLE`, but over a `DECIMAL(p,s)` an exact
+`DECIMAL(p+4,s+4)` (past 38 digits it gives way on scale, as arithmetic does),
+rounded half up. A decimal sum too long for 38 digits is an error.
 
 **Window functions:** `<fn>() OVER ([PARTITION BY <exprs>] [ORDER BY <keys>]
 [<frame>])` — `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`/`LEAD` (with the SQL
@@ -710,7 +714,7 @@ numeric — `ABS`, `ROUND`, `FLOOR`, `CEIL`/`CEILING`, `TRUNC`/`TRUNCATE`,
 constants — `PI()`, `E()`; non-deterministic — `RAND()` / `RAND(seed)`;
 temporal — `CURRENT_DATE`, `CURRENT_TIMESTAMP`. NULL propagates through every
 math function; `GREATEST`/`LEAST` skip NULLs and return NULL only when every
-argument is NULL.
+argument is NULL. `MOD(a, b)` is `a % b`, typed the same way.
 
 `CURRENT_DATE` and `CURRENT_TIMESTAMP` take every spelling other engines accept
 (`current_date`, `CURRENT_DATE()`, DB2's `CURRENT DATE`). Both read the wall
@@ -761,7 +765,8 @@ literal.** Wherever values meet — a comparison, `BETWEEN`, an `IN` list, a
 `CASE` switch, arithmetic — numbers widen to the widest among them. A `DECIMAL`
 is the widest: an integer meets one exactly, and a `FLOAT` or `DOUBLE` as the
 decimal it prints as, so `price = 0.1` finds a `0.10`; `NaN` and the infinities
-have no decimal value, and one meeting a `DECIMAL` is an error. A string
+have no decimal value, and one meeting a `DECIMAL` is an error. (Arithmetic on
+a `DECIMAL` reads its other side its own way, below.) A string
 literal beside another type is read as that type when the query is bound, so
 `i < '10'` compares numbers, `b = 'TRUE'` booleans and
 `ts < '2026-01-01 06:00:00'` instants, and a literal that is no such value
@@ -778,6 +783,26 @@ pairs as text, or promote a value quietly, answer questions nobody asked — as
 text, `9 < '10'` is false. This one prefers an error to a guess. Arithmetic is on
 numbers only: `x + '1'` adds one, and `s + 1` over a string column is an error,
 as is any arithmetic on a boolean, a date or a timestamp. `||` joins text.
+
+**`DECIMAL` arithmetic is exact, and declares a type that holds its
+result.** `+ - * / %` (and `MOD`) on a `DECIMAL` type their result as Spark
+and SQL Server do. For a `DECIMAL(p1,s1)` and a `DECIMAL(p2,s2)`, `+` and `-`
+keep the larger scale and add an integer digit for the carry, `*` is a
+`DECIMAL(p1+p2+1, s1+s2)`, `/` takes the scale `max(6, s1+p2+1)`, and `%` the
+larger scale and the narrower integer part; unary minus keeps its operand's
+type. Beside a `DECIMAL`, an `INT` counts as the `DECIMAL(10,0)` its every
+value fits, a `BIGINT` as a `DECIMAL(19,0)`, and a number written in the query
+as the decimal of just its digits, so `price * 1.1` is exact (`1.1` is a
+`DECIMAL(2,1)`). Past 38 digits a type gives way on its scale, down to six
+digits, and keeps its integer part. A result is rounded half up to its type's
+scale, and one whose integer part is too long for the type is an error naming
+it (`Decimal overflow: ... does not fit decimal(38,0)`), never a rounded or a
+NULL answer; division or `%` by zero is NULL, as for integers. A `FLOAT` or
+`DOUBLE` column has no scale for a decimal result to keep, so arithmetic
+between one and a `DECIMAL` is an error before the query runs: CAST the
+`DECIMAL` to `DOUBLE` to compute in `DOUBLE`. `SUM` and `AVG` over a `DECIMAL`
+are exact too (see Aggregates), so a decimal result never depends on row
+order, partitions or spill, and parquet writes it as it is.
 
 **A `BINARY` value is not text.** It casts to nothing else, and `LIKE`, `||`
 and the string functions (`LENGTH`, `UPPER`, `LOWER`, `TRIM`, `SUBSTRING`,
@@ -983,17 +1008,11 @@ JDK 21 or newer (tested through JDK 25).
   files in the same view are not validated. Explicit schemas via the
   `inferSchema = false` route avoid this. A parquet glob checks every file
   against the first when it is opened (see [Parquet](#parquet)).
-- **`DECIMAL` compares exactly, but has no exact arithmetic.** `SUM` and `AVG`
-  over a `DECIMAL` column, and the math functions that return a `DOUBLE`
-  (`ROUND`, `FLOOR`, `SQRT`, ...), compute in `DOUBLE` and lose every digit
-  past its precision; `SUM` hands the rounded value back as a `DECIMAL`. `ABS`
-  is exact: the decimal without its sign, at its own scale. Arithmetic on a `DECIMAL` (`+ - * / %` and unary
-  minus) fails with an `IllegalStateException` while the query runs. Because
-  `SUM` keeps its input's type, its result often holds digits that type does
-  not: over `0.10` and `0.20` in a `DECIMAL(3,2)` it is `0.30000000000000004`,
-  and over `9.99` and `9.99` it is `19.98`, past three digits. Writing such a
-  value to parquet fails, naming it, and so does spilling one;
-  `CAST(SUM(d) AS DOUBLE)` writes it as the `DOUBLE` it was computed in.
+- **`DECIMAL` math functions and statistics compute in `DOUBLE`.** Comparison,
+  arithmetic, `ABS`, `SUM` and `AVG` keep a `DECIMAL` exact, but `ROUND`,
+  `FLOOR`, `CEIL`, `TRUNC`, `SQRT`, `POWER` and the other math functions, and
+  `STDDEV` / `VARIANCE`, read a decimal as a `DOUBLE` and return one. There is
+  no `CAST` to a `DECIMAL`, so a query cannot choose a decimal result's type.
 
 ## Performance instrumentation
 

@@ -132,6 +132,53 @@ object Analyzer {
 
   private def isTemporal(t: DataType): Boolean = t == DataType.DateType || t == DataType.TimestampType
 
+  /** `l op r` for an arithmetic `op`, typed: both sides widen to the type
+    * they meet as ([[unify]]), or, where one is a DECIMAL, the result is
+    * declared as [[decimalArithmetic]] says. */
+  def arithmetic(op: String, l: Expr, r: Expr): BinOpExpr = {
+    // A string literal is checked once unify has read it as the number beside
+    // it: `x + '1'` adds 1, and `'1' + '2'`, with no number to read the
+    // literals as, is arithmetic on text.
+    Seq(l, r).filterNot(isStringLiteral).foreach(e => checkArithmetic(e.dataType))
+    val (le, re, t) = promotePair(l, r)
+    checkArithmetic(t)
+    t match {
+      case _: DataType.DecimalType => decimalArithmetic(op, l, r)
+      case _ => BinOpExpr(op, le, re, t)
+    }
+  }
+
+  /** Arithmetic with a DECIMAL on one side. Each side is read as a DECIMAL of
+    * its own: a number written in the query as the decimal it is
+    * ([[Decimals.literal]]), an INT or a BIGINT as the DECIMAL its every value
+    * fits, and NULL as the other side's type. The result is declared as
+    * [[Decimals.resultType]] says, which depends on both sides' digits, so an
+    * INT is not read as the other side's DECIMAL(5,2), which would leave its
+    * value no room. A FLOAT or DOUBLE that is not written in the query is an
+    * error: it has no scale, and any DECIMAL it were read as would be a guess
+    * at how many digits of it the result should keep. */
+  private def decimalArithmetic(op: String, l: Expr, r: Expr): BinOpExpr = {
+    val decimal = Seq(l, r).map(_.dataType).collectFirst { case d: DataType.DecimalType => d }.get
+    def asDecimal(e: Expr): Expr = e match {
+      case _ if e.dataType.isInstanceOf[DataType.DecimalType] => e
+      case _ if e.dataType == DataType.NullType => LitExpr(null, decimal)
+      case LitExpr(n: Number, _) => Decimals.literal(n)
+      // `-1.5` binds as a minus over the literal 1.5.
+      case UnaryOpExpr("-", LitExpr(n: Number, _), _) =>
+        val lit = Decimals.literal(n)
+        lit.copy(value = lit.value.asInstanceOf[java.math.BigDecimal].negate)
+      case _ if DataType.isIntegral(e.dataType) => CastExpr(e, Decimals.ofIntegral(e.dataType))
+      case _ =>
+        val t = typeName(e.dataType)
+        throw new IllegalArgumentException(
+          s"Arithmetic on ${typeName(decimal)} and $t is not supported: a $t has no scale for a DECIMAL " +
+            s"result to keep; CAST the DECIMAL to $t to compute in $t")
+    }
+    val (le, re) = (asDecimal(l), asDecimal(r))
+    def declared(e: Expr): DataType.DecimalType = e.dataType.asInstanceOf[DataType.DecimalType]
+    BinOpExpr(op, le, re, Decimals.resultType(op, declared(le), declared(re)))
+  }
+
   /** Arithmetic is on numbers (and NULL). There is no interval type for a date
     * or a time to produce, and text or a boolean taken as a number would be a
     * guess. */

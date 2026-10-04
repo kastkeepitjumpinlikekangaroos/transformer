@@ -24,7 +24,7 @@ navigation hint, not a comprehensive directory listing.
 - `gui/JobSession.scala` (~795 LOC) — mutable FX-thread state for the GUI;
   also tracks per-input UI state (Pending/Loading/Loaded/Failed) now that
   inputs flow through the unified scheduler.
-- `sql/exec/AggregateExec.scala` (~1825 LOC) — biggest file. Every `AggState` subclass
+- `sql/exec/AggregateExec.scala` (~1900 LOC) — biggest file. Every `AggState` subclass
   plus the codec / LongHashMap GROUP BY paths. Primitive states
   (`CountStarState`, `CountState`, `CountIfState`, `LongSumState`,
   `DoubleSumState`, `AvgState`, `MinMaxState`) override `updateBatch` to
@@ -48,16 +48,18 @@ navigation hint, not a comprehensive directory listing.
   DAG scheduler (`runUnifiedDag`), writeOutput, validation re-read, per-status
   `_run.json` writes + per-failure `_validation-<slug>.csv` sample writes +
   per-job `job.json` write + consistency checks.
-- `sql/plan/Expr.scala` (~705 LOC) — `Expr` ADT plus `eval` and `evalVec`
+- `sql/plan/Expr.scala` (~715 LOC) — `Expr` ADT plus `eval` and `evalVec`
   per subtype. `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` each carry
   an `evalVec` override; the rest of the hot subtypes delegate to `VecOps`.
-- `sql/plan/Ops.scala` (~955 LOC) — `Ops` (row-at-a-time binary ops, and
-  `eq` / `cmp`, the engine's one equality and total order), `Casts`, and
-  `VecOps` (one specialized loop per (op, output type) pair, which is most of
-  the length). The comparison contract both `Expr` paths follow — integers as
-  longs (`integralCompare`), a pair with a float in it as doubles
-  (`numericCompare`, whose doc holds the `NaN` / `-0.0` rules), anything else
-  through `Ops` (`genericCompare`) — is chosen in `VecOps.compare`; see
+- `sql/plan/Ops.scala` (~1090 LOC) — `Ops` (row-at-a-time binary ops, and
+  `eq` / `cmp`, the engine's one equality and total order), `Casts`,
+  `Decimals` (the declared type of each decimal result, and the one function
+  both paths compute it with), and `VecOps` (one specialized loop per (op,
+  output type) pair, which is most of the length). The comparison contract
+  both `Expr` paths follow — integers as longs (`integralCompare`), a pair
+  with a float in it as doubles (`numericCompare`, whose doc holds the `NaN` /
+  `-0.0` rules), anything else through `Ops` (`genericCompare`) — is chosen in
+  `VecOps.compare`; see
   [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec).
 - `sql/plan/Funcs.scala` (~550 LOC) — scalar function registry. `Funcs.apply`
   is the row-form dispatcher; `Funcs.applyVec` + the `VecFuncs` object

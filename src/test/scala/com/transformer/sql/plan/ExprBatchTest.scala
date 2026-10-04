@@ -815,6 +815,104 @@ class ExprBatchTest {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Decimal arithmetic
+  //
+  // Both paths call `Decimals.arith`, so they cannot disagree with each other;
+  // these pin the values, scale included (`assertParity` compares decimals
+  // with `equals`), since two paths sharing one function agree on a wrong
+  // answer as readily as on a right one. The result type is the binder's
+  // (`Decimals.resultType`), and holds every exact answer here but a quotient,
+  // which rounds half up.
+  // ---------------------------------------------------------------------------
+
+  @Test def binOpArithDecimal(): Unit = {
+    val lt = DataType.DecimalType(5, 2)
+    val rt = DataType.DecimalType(10, 4)
+    val ls = Seq("1.25", "-2.50", "0.00", "999.99", "0.01", "-0.07", "3", "100")
+    val rs = Seq("0.0001", "3.0000", "0", "-7.5", "0.3333", "2", "-0.0050", "1")
+    val b = batch(
+      "a" -> decCol(lt, i => ls(i % 8), i => i % 13 == 0),
+      "c" -> decCol(rt, i => rs((i / 8) % 8)))
+    val expectedTypes = Map(
+      "+" -> DataType.DecimalType(11, 4), "-" -> DataType.DecimalType(11, 4), "*" -> DataType.DecimalType(16, 6),
+      "/" -> DataType.DecimalType(20, 13), "%" -> DataType.DecimalType(7, 4))
+    for ((op, t) <- expectedTypes) {
+      assertEquals(s"type of $op", t, Decimals.resultType(op, lt, rt))
+      val e = BinOpExpr(op, ColRefExpr(0, "a", lt), ColRefExpr(1, "c", rt), t)
+      assertParity(e, b)
+      val vec = e.evalVec(b)
+      var i = 0
+      while (i < N) {
+        val l = new java.math.BigDecimal(ls(i % 8))
+        val r = new java.math.BigDecimal(rs((i / 8) % 8))
+        // `setScale` with no rounding mode throws unless the type holds the
+        // exact answer.
+        val expected =
+          if (i % 13 == 0) null
+          else op match {
+            case "+" => l.add(r).setScale(t.scale)
+            case "-" => l.subtract(r).setScale(t.scale)
+            case "*" => l.multiply(r).setScale(t.scale)
+            case "/" => if (r.signum == 0) null else l.divide(r, t.scale, java.math.RoundingMode.HALF_UP)
+            case "%" => if (r.signum == 0) null else l.remainder(r).setScale(t.scale)
+          }
+        assertEquals(s"$op at row $i", expected, if (vec.isNull(i)) null else vec.getBoxed(i))
+        i += 1
+      }
+    }
+  }
+
+  /** Past 38 digits a result's scale gives way: DECIMAL(38,18) times itself
+    * needs 77 digits and keeps its integer part and six fractional digits, so
+    * a product rounds, half up and away from zero. */
+  @Test def binOpArithDecimalRoundsWhereItsTypeGivesWay(): Unit = {
+    val dt = DataType.DecimalType(38, 18)
+    val t = Decimals.resultType("*", dt, dt)
+    assertEquals(DataType.DecimalType(38, 6), t)
+    val values = Seq("0.0000005", "-0.0000005", "0.000000499999999999", "1.000000000000000001")
+    val rounded = Seq("0.000001", "-0.000001", "0.000000", "1.000000")
+    val b = batch("a" -> decCol(dt, i => values(i % 4)), "one" -> decCol(dt, _ => "1.000000000000000000"))
+    val e = BinOpExpr("*", ColRefExpr(0, "a", dt), ColRefExpr(1, "one", dt), t)
+    assertParity(e, b)
+    var i = 0
+    while (i < N) {
+      assertEquals(s"row $i", new java.math.BigDecimal(rounded(i % 4)), e.eval(b, i))
+      i += 1
+    }
+  }
+
+  /** An integer part too long for the result type is an error on both paths,
+    * never a rounded or wrapped value. */
+  @Test def binOpArithDecimalOverflowIsAnError(): Unit = {
+    val dt = DataType.DecimalType(38, 0)
+    val one = DataType.DecimalType(1, 0)
+    val t = Decimals.resultType("+", dt, one)
+    assertEquals(DataType.DecimalType(38, 0), t)
+    val b = batch("a" -> decCol(dt, _ => "99999999999999999999999999999999999999"))
+    val e = BinOpExpr("+", ColRefExpr(0, "a", dt), LitExpr(java.math.BigDecimal.ONE, one), t)
+    for ((path, run) <- Seq[(String, () => Any)]("eval" -> (() => e.eval(b, 0)), "evalVec" -> (() => e.evalVec(b)))) {
+      val error = try { run(); null } catch { case x: ArithmeticException => x }
+      assertNotNull(s"$path overflowed silently", error)
+      assertEquals(path, "Decimal overflow: 100000000000000000000000000000000000000 does not fit decimal(38,0)",
+        error.getMessage)
+    }
+  }
+
+  @Test def unaryMinusDecimal(): Unit = {
+    val dt = DataType.DecimalType(38, 3)
+    val b = batch("x" -> decCol(dt, i => SpecialDecimals(i % 8), i => i % 13 == 0))
+    val e = UnaryOpExpr("-", ColRefExpr(0, "x", dt), dt)
+    assertParity(e, b)
+    val vec = e.evalVec(b)
+    var i = 0
+    while (i < N) {
+      val expected = if (i % 13 == 0) null else new java.math.BigDecimal(SpecialDecimals(i % 8)).negate
+      assertEquals(s"row $i", expected, if (vec.isNull(i)) null else vec.getBoxed(i))
+      i += 1
+    }
+  }
+
   /** Two integers compare as longs on both paths. As doubles, 2^53 and 2^53 + 1
     * are one value, so `=` matched them, `<` did not order them, and an IN
     * list's hoisted set of doubles held one for the other. */

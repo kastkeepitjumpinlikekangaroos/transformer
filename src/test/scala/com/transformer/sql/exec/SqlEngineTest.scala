@@ -2870,6 +2870,146 @@ class SqlEngineTest {
     assertEquals(Seq(1, 2, 3), column("SELECT id FROM tn WHERE ABS(k) > 1 ORDER BY id", cat, "id"))
   }
 
+  /** `tm` holds DECIMAL(3,2) values whose doubles do not add up exactly (0.10
+    * and 0.20), and whose sum outgrows three digits (9.99 twice), in two
+    * partitions, so partial sums merge; `big` holds two decimals one past
+    * double's 53 bits, and `ta` a DECIMAL(5,2) and a DECIMAL(10,4) beside an
+    * INT, a BIGINT and a DOUBLE. */
+  private def decimalArithCatalog(): Catalog = {
+    val c = new Catalog
+    val tm = Schema(Vector(Field("id", DataType.IntType), Field("g", DataType.IntType),
+      Field("k", DataType.DecimalType(3, 2)), Field("b", DataType.DecimalType(38, 0))))
+    c.register("tm", memView(tm, Seq(
+      Seq(Array[Any](1, 1, dec("0.10"), dec("10000000000000000001")), Array[Any](2, 1, dec("0.20"), null),
+        Array[Any](3, 2, dec("9.99"), dec("10000000000000000001"))),
+      Seq(Array[Any](4, 2, dec("9.99"), dec("1")), Array[Any](5, 3, null, null)))))
+    val ta = Schema(Vector(Field("id", DataType.IntType), Field("a", DataType.DecimalType(5, 2)),
+      Field("c", DataType.DecimalType(10, 4)), Field("i", DataType.IntType), Field("l", DataType.LongType),
+      Field("d", DataType.DoubleType)))
+    c.register("ta", memView(ta, Seq(Seq(
+      Array[Any](1, dec("1.25"), dec("0.0001"), 3, 10000000000L, 0.5),
+      Array[Any](2, dec("-2.50"), dec("3.0000"), 0, null, 1.5),
+      Array[Any](3, null, dec("0.3333"), 7, 1L, null)))))
+    c
+  }
+
+  /** The declared type of `sql`'s only column, and its values in order. */
+  private def typedColumn(sql: String, cat: Catalog): (DataType, Seq[Any]) = {
+    val q = SqlEngine.execute(sql, cat)
+    val t = q.schema.fields.last.dataType
+    (t, collectAllRows(q).map(_(q.schema.fields.last.name)))
+  }
+
+  /** SUM over a DECIMAL adds exactly and is a DECIMAL(38,s); AVG divides the
+    * exact sum and is a DECIMAL with four more fractional digits. SUM added in
+    * DOUBLE and kept its input's DECIMAL(p,s): 0.30000000000000004 for 0.10 +
+    * 0.20, 19.98 in a DECIMAL(3,2) that parquet would not write, and
+    * 20000000000000000000 for two 10000000000000000001s. AVG was a DOUBLE. */
+  @Test def decimalSumAndAvgAreExact(): Unit = {
+    val cat = decimalArithCatalog()
+    assertEquals((DataType.DecimalType(38, 2), Seq(dec("0.30"), dec("19.98"), null)),
+      typedColumn("SELECT g, SUM(k) AS s FROM tm GROUP BY g ORDER BY g", cat))
+    assertEquals((DataType.DecimalType(7, 6), Seq(dec("0.150000"), dec("9.990000"), null)),
+      typedColumn("SELECT g, AVG(k) AS v FROM tm GROUP BY g ORDER BY g", cat))
+    assertEquals((DataType.DecimalType(38, 0), Seq(dec("20000000000000000003"))),
+      typedColumn("SELECT SUM(b) AS s FROM tm", cat))
+    // 20000000000000000003 / 3, rounded half up at a DECIMAL(38,4)'s scale.
+    assertEquals((DataType.DecimalType(38, 4), Seq(dec("6666666666666666667.6667"))),
+      typedColumn("SELECT AVG(b) AS v FROM tm", cat))
+    assertEquals((DataType.DecimalType(38, 2), Seq(dec("10.29"))),
+      typedColumn("SELECT SUM(DISTINCT k) AS s FROM tm", cat))
+    // The window forms take the same states.
+    assertEquals((DataType.DecimalType(38, 2), Seq(dec("0.10"), dec("0.30"), dec("10.29"), dec("20.28"), dec("20.28"))),
+      typedColumn("SELECT id, SUM(k) OVER (ORDER BY id) AS s FROM tm ORDER BY id", cat))
+    assertEquals((DataType.DecimalType(7, 6), Seq(dec("0.150000"), dec("0.150000"), dec("9.990000"), dec("9.990000"), null)),
+      typedColumn("SELECT id, AVG(k) OVER (PARTITION BY g) AS v FROM tm ORDER BY id", cat))
+  }
+
+  /** Arithmetic on a DECIMAL threw `IllegalStateException: Arithmetic on
+    * decimal(5,2) not supported` mid-drain. Each side is read as a DECIMAL of
+    * its own (an INT as DECIMAL(10,0), a BIGINT as DECIMAL(19,0), a number in
+    * the query as the digits it has) and the result is declared as Spark and
+    * SQL Server declare it, so every exact answer fits, and a quotient rounds
+    * half up. */
+  @Test def decimalArithmeticIsExactAndTyped(): Unit = {
+    val cat = decimalArithCatalog()
+    def typed(expr: String): (DataType, Seq[Any]) = typedColumn(s"SELECT id, $expr AS v FROM ta ORDER BY id", cat)
+    def d(p: Int, s: Int): DataType = DataType.DecimalType(p, s)
+    assertEquals((d(11, 4), Seq(dec("1.2501"), dec("0.5000"), null)), typed("a + c"))
+    assertEquals((d(11, 4), Seq(dec("1.2499"), dec("-5.5000"), null)), typed("a - c"))
+    assertEquals((d(16, 6), Seq(dec("0.000125"), dec("-7.500000"), null)), typed("a * c"))
+    assertEquals((d(20, 13), Seq(dec("12500.0000000000000"), dec("-0.8333333333333"), null)), typed("a / c"))
+    assertEquals((d(7, 4), Seq(dec("0.0000"), dec("-2.5000"), null)), typed("a % c"))
+    assertEquals((d(13, 2), Seq(dec("4.25"), dec("-2.50"), null)), typed("a + i"))
+    assertEquals((d(25, 2), Seq(dec("12500000000.00"), null, null)), typed("a * l"))
+    assertEquals((d(7, 2), Seq(dec("2.50"), dec("-5.00"), null)), typed("a * 2"))
+    assertEquals((d(8, 3), Seq(dec("1.875"), dec("-3.750"), null)), typed("a * 1.5"))
+    assertEquals((d(8, 3), Seq(dec("-1.875"), dec("3.750"), null)), typed("-1.5 * a"))
+    assertEquals((d(9, 6), Seq(dec("0.416667"), dec("-0.833333"), null)), typed("a / 3"))
+    assertEquals((d(5, 2), Seq(dec("-1.25"), dec("2.50"), null)), typed("-a"))
+    assertEquals((d(6, 2), Seq(null, null, null)), typed("a + NULL"))
+    // Division and remainder by zero are NULL, as for integers.
+    assertEquals((d(9, 6), Seq(null, null, null)), typed("a / 0"))
+    assertEquals((d(5, 2), Seq(dec("1.25"), null, null)), typed("a % i"))
+    // MOD is %, typed the same way.
+    assertEquals((d(3, 2), Seq(dec("0.25"), dec("-0.50"), null)), typed("MOD(a, 1)"))
+    assertEquals((DataType.IntType, Seq(1, 0, 1)), typed("MOD(i, 2)"))
+    // An expression over the result runs on the row path too: a sort key.
+    assertEquals(Seq(2, 1), column("SELECT id FROM ta WHERE a IS NOT NULL ORDER BY a * c", cat, "id"))
+    // A DOUBLE that is not written in the query has no scale for the result
+    // to keep. A DOUBLE computation is a CAST away.
+    def bindError(sql: String): String =
+      try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    for (sql <- Seq("SELECT a + d AS v FROM ta", "SELECT d * a AS v FROM ta", "SELECT a + CAST(1.5 AS DOUBLE) AS v FROM ta"))
+      assertEquals(sql, "Arithmetic on DECIMAL(5,2) and DOUBLE is not supported: a DOUBLE has no scale for a " +
+        "DECIMAL result to keep; CAST the DECIMAL to DOUBLE to compute in DOUBLE", bindError(sql))
+    assertEquals((DataType.DoubleType, Seq(1.75, -1.0, null)), typed("CAST(a AS DOUBLE) + d"))
+  }
+
+  /** A result whose integer part is too long for its type is an error naming
+    * the value, never a rounded or a wrapped one. `b + 1` and `SUM(b)` over a
+    * DECIMAL(38,0) are DECIMAL(38,0)s, since 38 digits is all a DECIMAL
+    * holds. */
+  @Test def decimalOverflowIsAnError(): Unit = {
+    val cat = new Catalog
+    val nines = dec("99999999999999999999999999999999999999")
+    cat.register("tb", memView(Schema(Vector(Field("b", DataType.DecimalType(38, 0)))),
+      Seq(Seq(Array[Any](nines), Array[Any](nines)))))
+    def overflow(sql: String): String =
+      try { collectAllRows(SqlEngine.execute(sql, cat)); fail(s"$sql overflowed silently"); "" }
+      catch { case e: ArithmeticException => e.getMessage }
+    assertEquals("Decimal overflow: 100000000000000000000000000000000000000 does not fit decimal(38,0)",
+      overflow("SELECT b + 1 AS v FROM tb"))
+    assertEquals("Decimal overflow: 199999999999999999999999999999999999998 does not fit decimal(38,0)",
+      overflow("SELECT SUM(b) AS v FROM tb"))
+  }
+
+  /** A decimal SUM, AVG and arithmetic result fits its declared type, so it
+    * writes to parquet as it is: spilling a sort over one, and an aggregate
+    * whose partial sums spill, give the run without spill's answer. A sum kept
+    * its input's DECIMAL(3,2) and 19.98 failed the spill's write. */
+  @Test def decimalResultsSpill(): Unit = {
+    val cat = decimalArithCatalog()
+    val queries = Seq(
+      "SELECT g, SUM(k) AS s, AVG(k) AS v FROM tm GROUP BY g ORDER BY 2",
+      "SELECT id, a * c AS p, a / 3 AS q FROM ta ORDER BY 2, 1")
+    val prevProp = System.getProperty(Spill.SpillDirProperty)
+    val tmp = Files.createTempDirectory("sqlengine-decimal-arith-spill-")
+    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
+    try {
+      for (sql <- queries) {
+        def run(opts: ExecutionOptions): Seq[Map[String, Any]] = collectAllRows(SqlEngine.execute(sql, cat, opts))
+        val expected = run(ExecutionOptions.Default)
+        assertTrue(s"expected a non-empty result: $sql", expected.nonEmpty)
+        assertEquals(sql, expected, run(ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))))
+      }
+    } finally {
+      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
+      else System.setProperty(Spill.SpillDirProperty, prevProp)
+    }
+  }
+
   /** Two BIGINTs compare as longs. They compared as doubles, which cannot
     * tell 2^53 from 2^53 + 1, so `=` matched them while GROUP BY and a hash
     * join (which key exactly) kept them apart. */

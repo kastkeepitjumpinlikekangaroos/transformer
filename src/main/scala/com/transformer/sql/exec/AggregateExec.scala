@@ -749,7 +749,10 @@ object AggState {
     case AggExprCount(child, true) => new CountDistinctState(child.dataType)
     case d: AggExprDistinct => new DistinctState(d.inner)
     case s: AggExprSum => SumState.init(s)
-    case _: AggExprAvg => new AvgState()
+    case a: AggExprAvg => a.resultType match {
+      case d: DataType.DecimalType => new DecimalAvgState(d)
+      case _ => new AvgState()
+    }
     case m: AggExprMin => new MinMaxState(min = true, m.resultType)
     case m: AggExprMax => new MinMaxState(min = false, m.resultType)
     case _: AggExprCountIf => new CountIfState()
@@ -895,8 +898,9 @@ final class CountIfState extends AggState {
 
 sealed trait SumState extends AggState
 object SumState {
-  def init(agg: AggExprSum): SumState = agg.child.dataType match {
-    case DataType.IntType | DataType.LongType => new LongSumState()
+  def init(agg: AggExprSum): SumState = agg.resultType match {
+    case DataType.LongType => new LongSumState()
+    case d: DataType.DecimalType => new DecimalSumState(d)
     case _ => new DoubleSumState()
   }
 }
@@ -1016,6 +1020,75 @@ final class DoubleSumState extends SumState {
   }
   override private[exec] def readSelf(in: DataInput): Unit = {
     sawAny = in.readBoolean(); sum = in.readDouble()
+  }
+}
+
+/** `SUM` of a DECIMAL, exact: partial sums add as `BigDecimal`s, which do
+  * not round, so the answer is the same in whatever order rows arrive and
+  * partials merge, spilled or not. It is fitted to `resultType` once, at the
+  * end. */
+final class DecimalSumState(resultType: DataType.DecimalType) extends SumState {
+  /** NULL until a value arrives. */
+  private var sum: java.math.BigDecimal = null
+
+  private def add(v: Any): Unit = {
+    val d = Casts.toDecimal(v.asInstanceOf[Number])
+    sum = if (sum == null) d else sum.add(d)
+  }
+  def updateAt(argVecs: Array[ColumnVector], r: Int): Unit = {
+    val vec = argVecs(0)
+    if (!vec.isNull(r)) add(vec.getBoxed(r))
+  }
+  override def updateBatchAt(argVecs: Array[ColumnVector], n: Int): Unit = {
+    val vec = argVecs(0)
+    var r = 0
+    while (r < n) { if (!vec.isNull(r)) add(vec.getBoxed(r)); r += 1 }
+  }
+  def merge(o: AggState): Unit = {
+    val that = o.asInstanceOf[DecimalSumState]
+    if (that.sum != null) add(that.sum)
+  }
+  def finish(): Any = if (sum == null) null else Decimals.fit(sum, resultType)
+
+  override private[exec] def writeSelf(out: DataOutput): Unit = AggStateSerde.writeDecimal(out, sum)
+  override private[exec] def readSelf(in: DataInput): Unit = { sum = AggStateSerde.readDecimal(in) }
+}
+
+/** `AVG` of a DECIMAL: the exact sum and the count, divided once at the end
+  * and rounded half up to `resultType`'s scale, so like [[DecimalSumState]]
+  * the answer does not depend on row order, merge order or spill. */
+final class DecimalAvgState(resultType: DataType.DecimalType) extends AggState {
+  private var sum: java.math.BigDecimal = java.math.BigDecimal.ZERO
+  private var count: Long = 0L
+
+  private def add(v: Any): Unit = {
+    sum = sum.add(Casts.toDecimal(v.asInstanceOf[Number]))
+    count += 1
+  }
+  def updateAt(argVecs: Array[ColumnVector], r: Int): Unit = {
+    val vec = argVecs(0)
+    if (!vec.isNull(r)) add(vec.getBoxed(r))
+  }
+  override def updateBatchAt(argVecs: Array[ColumnVector], n: Int): Unit = {
+    val vec = argVecs(0)
+    var r = 0
+    while (r < n) { if (!vec.isNull(r)) add(vec.getBoxed(r)); r += 1 }
+  }
+  def merge(o: AggState): Unit = {
+    val that = o.asInstanceOf[DecimalAvgState]
+    sum = sum.add(that.sum)
+    count += that.count
+  }
+  def finish(): Any =
+    if (count == 0L) null
+    else Decimals.fit(
+      sum.divide(java.math.BigDecimal.valueOf(count), resultType.scale, java.math.RoundingMode.HALF_UP), resultType)
+
+  override private[exec] def writeSelf(out: DataOutput): Unit = {
+    out.writeLong(count); AggStateSerde.writeDecimal(out, sum)
+  }
+  override private[exec] def readSelf(in: DataInput): Unit = {
+    count = in.readLong(); sum = AggStateSerde.readDecimal(in)
   }
 }
 

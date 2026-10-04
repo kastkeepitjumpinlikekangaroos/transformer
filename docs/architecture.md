@@ -831,6 +831,26 @@ query is bound (numbers widen, a string literal is read as the type beside it,
 any other mix is a bind error), so a bound comparison never asks `Ops` to order
 a number against a string.
 
+Arithmetic with a `DECIMAL` on either side is typed by `Analyzer.arithmetic`
+instead, because the result's type depends on both sides' digits (`Decimals`,
+in `Ops.scala`). Each side becomes a `DECIMAL` of its own: an `INT` the
+`DECIMAL(10,0)` its every value fits, a `BIGINT` a `DECIMAL(19,0)`, a number
+written in the query the `DECIMAL` of just its digits (`Decimals.literal`, so
+`2.5` is a `DECIMAL(2,1)`), and `NULL` the other side's type. A `FLOAT` or
+`DOUBLE` that is not written in the query is a bind error: it has no scale for
+the result to keep. `Decimals.resultType` then declares the result as Spark and
+SQL Server do (`*` takes `p1 + p2 + 1` digits at scale `s1 + s2`, `/` the scale
+`max(6, s1 + p2 + 1)`, past 38 digits the scale gives way, down to 6), and
+`Decimals.arith`, which both `Ops.apply` and `VecOps.arith` call, computes the
+exact answer and fits it to that type (`Decimals.fit`: rounded half up to the
+scale, an `ArithmeticException` when the integer part is too long). So a
+decimal result always fits its declared type and parquet writes it as it is.
+`MOD(a, b)` binds as `a % b`. `SUM` and `AVG` over a `DECIMAL` are exact the
+same way: `DecimalSumState` and `DecimalAvgState` add `BigDecimal`s, which do
+not round, so the answer does not depend on the order rows, partials or spills
+arrive in, and fit it to `DECIMAL(38,s)` and to `DECIMAL(p+4,s+4)` once, in
+`finish`.
+
 `Ops.cmp` is the canonical NULL-free comparator and decides every ORDERING
 question: `ORDER BY`, `< <= > >=`, and any tie test that has to agree with a
 sort. Numbers compare by value, exactly where the types allow: two integers as
@@ -1026,7 +1046,8 @@ typed vector for the whole batch instead of N recursive `Expr.eval` calls.
   `CountState`, `CountIfState`, `LongSumState`, `DoubleSumState`,
   `AvgState`, `MinMaxState`, `MomentState`, `CovarState`, `CorrState`)
   override with a pattern match on the argument vector's concrete subtype
-  for typed reads.
+  for typed reads. A decimal argument is boxed in its vector, so
+  `DecimalSumState` and `DecimalAvgState` read `getBoxed`.
 - **`updateBatchAt(argVecs, n)`** — whole-batch variant used by the
   no-GROUP-BY fast path. The column-type pattern match is hoisted outside
   the row loop so a `SUM(spread)` over a `DoubleVector` ends up as a tight

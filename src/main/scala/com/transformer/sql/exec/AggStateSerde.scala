@@ -45,7 +45,9 @@ object AggStateSerde {
 
   /** Construct the right state subtype for `agg` and populate from `in`.
     * `agg` carries the runtime info needed to pick the recipient state:
-    *   - `AggExprSum(_)` chooses Long vs Double sum based on child type.
+    *   - `AggExprSum(_)` and `AggExprAvg(_)` choose their state (Long,
+    *     Double or Decimal sum; Double or Decimal average) from the result
+    *     type, and a decimal one carries the type it fits its answer to.
     *   - `AggExprMin`/`AggExprMax` carries `resultType`, which determines
     *     which `MinMaxState` slot is canonical.
     *   - `AggExprStddev`/`AggExprVariance` carries `sample` / `stddev`
@@ -57,6 +59,25 @@ object AggStateSerde {
     state.readSelf(in)
     state
   }
+
+  /** A decimal accumulator, NULL or not: its unscaled value's bytes and its
+    * scale, so it reads back exactly, at the scale it had. */
+  private[exec] def writeDecimal(out: DataOutput, v: java.math.BigDecimal): Unit = {
+    out.writeBoolean(v != null)
+    if (v != null) {
+      val unscaled = v.unscaledValue.toByteArray
+      out.writeInt(unscaled.length); out.write(unscaled)
+      out.writeInt(v.scale)
+    }
+  }
+
+  private[exec] def readDecimal(in: DataInput): java.math.BigDecimal =
+    if (!in.readBoolean()) null
+    else {
+      val unscaled = new Array[Byte](in.readInt()); in.readFully(unscaled)
+      val scale = in.readInt()
+      new java.math.BigDecimal(new java.math.BigInteger(unscaled), scale)
+    }
 
   /** Convenience: serialize to a fresh byte array. */
   def serializeBytes(state: AggState): Array[Byte] = {

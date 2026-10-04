@@ -155,6 +155,51 @@ class AggStateSerdeTest {
     assertEquals(4.0, restored.finish().asInstanceOf[Double], 1e-12)
   }
 
+  /** A 1-column DecimalVector batch. */
+  private def decimalBatch(dt: DataType.DecimalType, vals: Seq[String]): ColumnarBatch = {
+    val b = new ColumnarBatch(Schema(Field("d", dt)), math.max(1, vals.size))
+    val v = b.column(0).asInstanceOf[DecimalVector]
+    vals.zipWithIndex.foreach { case (x, i) => if (x == null) v.setNull(i) else v.set(i, new java.math.BigDecimal(x)) }
+    b.setNumRows(vals.size)
+    b
+  }
+
+  /** A decimal SUM and AVG keep their running sum exactly, as a `BigDecimal`,
+    * and must restore it exactly: past double's mantissa, at every scale the
+    * values had, and NULL when nothing arrived. The answers are fitted to the
+    * result types, DECIMAL(38,2) for the sum and DECIMAL(7,6) for the average. */
+  @Test def decimalSumAndAvgRoundtrip(): Unit = {
+    val dt = DataType.DecimalType(3, 2)
+    val values = Seq("0.10", null, "0.2", "9.99", "-0.01")
+    val sum = AggExprSum(colRef(0, dt))
+    val (_, restoredSum) = roundtrip(sum, decimalBatch(dt, values))
+    assertEquals(new java.math.BigDecimal("10.28"), restoredSum.finish())
+    val avg = AggExprAvg(colRef(0, dt))
+    val (_, restoredAvg) = roundtrip(avg, decimalBatch(dt, values))
+    assertEquals(new java.math.BigDecimal("2.570000"), restoredAvg.finish())
+
+    val wide = DataType.DecimalType(38, 0)
+    val (_, restoredWide) = roundtrip(AggExprSum(colRef(0, wide)),
+      decimalBatch(wide, Seq("10000000000000000001", "10000000000000000001", "1")))
+    assertEquals(new java.math.BigDecimal("20000000000000000003"), restoredWide.finish())
+
+    for (agg <- Seq(sum, avg)) {
+      val (_, restoredNull) = roundtrip(agg, decimalBatch(dt, Seq(null, null)))
+      assertNull(s"$agg over NULLs", restoredNull.finish())
+    }
+
+    // A restored partial merged with a live one.
+    val partA = AggState.init(avg)
+    val first = decimalBatch(dt, Seq("0.01", "0.02"))
+    updateAll(partA, Array(first.column(0)), first.numRows)
+    val restoredA = AggStateSerde.deserializeBytes(avg, AggStateSerde.serializeBytes(partA))
+    val partB = AggState.init(avg)
+    val second = decimalBatch(dt, Seq("0.04"))
+    updateAll(partB, Array(second.column(0)), second.numRows)
+    restoredA.merge(partB)
+    assertEquals(new java.math.BigDecimal("0.023333"), restoredA.finish())
+  }
+
   @Test def minMaxRoundtripLongType(): Unit = {
     val aggMin = AggExprMin(colRef(0, DataType.LongType))
     val (_, restoredMin) = roundtrip(aggMin, longBatch(Seq(Some(7L), Some(3L), Some(9L))))

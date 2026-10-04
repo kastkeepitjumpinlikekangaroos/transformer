@@ -89,15 +89,16 @@ object Ops {
     case _ => x.compareTo(Casts.toDecimal(y))
   }
 
-  private sealed trait Arith
-  private object Plus extends Arith
-  private object Minus extends Arith
-  private object Times extends Arith
-  private object Div extends Arith
-  private object Mod extends Arith
+  private sealed abstract class Arith(val symbol: String)
+  private object Plus extends Arith("+")
+  private object Minus extends Arith("-")
+  private object Times extends Arith("*")
+  private object Div extends Arith("/")
+  private object Mod extends Arith("%")
 
   private def arith(lv: Any, rv: Any, out: DataType, op: Arith): Any = {
     out match {
+      case d: DataType.DecimalType => Decimals.arith(op.symbol, lv, rv, d)
       case DataType.IntType =>
         val l = lv.asInstanceOf[Number].intValue
         val r = rv.asInstanceOf[Number].intValue
@@ -233,7 +234,7 @@ object Casts {
     case _ => java.math.BigDecimal.valueOf(n.longValue)
   }
 
-  private def isFinite(n: Number): Boolean = n match {
+  private[plan] def isFinite(n: Number): Boolean = n match {
     case _: java.lang.Double | _: java.lang.Float => java.lang.Double.isFinite(n.doubleValue)
     case _ => true
   }
@@ -292,6 +293,114 @@ object Casts {
     }
 }
 
+/** DECIMAL arithmetic: the type each operation's result is declared as, and
+  * its value. The types are Spark's and SQL Server's. For a DECIMAL(p1,s1)
+  * `l` and a DECIMAL(p2,s2) `r`:
+  *
+  *   - `l + r` and `l - r` keep the larger scale and add an integer digit to
+  *     the wider integer part, for the carry;
+  *   - `l * r` adds the scales, and takes p1 + p2 + 1 digits;
+  *   - `l / r` takes the scale max(6, s1 + p2 + 1), and the integer digits of
+  *     `l` plus the scale of `r` (dividing by 0.01 multiplies by 100);
+  *   - `l % r` keeps the larger scale and the narrower integer part, since a
+  *     remainder is smaller than both operands.
+  *
+  * Each type holds its result exactly, but for a quotient, which need not end
+  * (1 / 3). Past [[MaxPrecision]] digits the scale gives way, down to 6
+  * digits, and the integer part keeps its own, as many as it needs; that
+  * is where a sum or a product can round too, or overflow. A value is rounded
+  * half up to its type's scale, and one whose integer part is too long for
+  * the type is an error, so every result fits the type it is declared as and
+  * parquet can write it. */
+object Decimals {
+
+  /** The most digits a DECIMAL result is declared with. */
+  val MaxPrecision: Int = 38
+
+  /** The fewest fractional digits a result keeps when its type gives way to
+    * [[MaxPrecision]]. */
+  private val MinAdjustedScale: Int = 6
+
+  /** The DECIMAL every value of an integer type fits: INT's ten digits and
+    * BIGINT's nineteen. */
+  def ofIntegral(t: DataType): DataType.DecimalType = t match {
+    case DataType.IntType => DataType.DecimalType(10, 0)
+    case DataType.LongType => DataType.DecimalType(19, 0)
+    case other => throw new IllegalArgumentException(s"$other is not an integer type")
+  }
+
+  /** A number written in a query, as the decimal it prints as
+    * ([[Casts.toDecimal]]), declared with just the digits it has: `2.5` is a
+    * DECIMAL(2,1) and `100` a DECIMAL(3,0). */
+  def literal(n: Number): LitExpr = {
+    if (!Casts.isFinite(n)) throw new IllegalArgumentException(s"$n has no decimal value")
+    val d = Casts.toDecimal(n)
+    val v = if (d.scale < 0) d.setScale(0) else d
+    val t = DataType.DecimalType(math.max(v.precision, v.scale), v.scale)
+    if (t.precision > MaxPrecision)
+      throw new IllegalArgumentException(s"${v.toPlainString} has more digits than a DECIMAL holds ($MaxPrecision)")
+    LitExpr(v, t)
+  }
+
+  /** The type `l op r` is declared as, for an arithmetic `op`. */
+  def resultType(op: String, l: DataType.DecimalType, r: DataType.DecimalType): DataType.DecimalType = {
+    val (p1, s1, p2, s2) = (l.precision, l.scale, r.precision, r.scale)
+    op match {
+      case "+" | "-" =>
+        val s = math.max(s1, s2)
+        bounded(math.max(p1 - s1, p2 - s2) + s + 1, s)
+      case "*" => bounded(p1 + p2 + 1, s1 + s2)
+      case "/" =>
+        val s = math.max(MinAdjustedScale, s1 + p2 + 1)
+        bounded(p1 - s1 + s2 + s, s)
+      case "%" =>
+        val s = math.max(s1, s2)
+        bounded(math.min(p1 - s1, p2 - s2) + s, s)
+      case other => throw new IllegalArgumentException(s"Unknown arithmetic operator '$other'")
+    }
+  }
+
+  /** The type of `SUM` over a DECIMAL: every digit a DECIMAL holds, at the
+    * input's scale (the input's own digits, should it have more). */
+  def sumType(t: DataType.DecimalType): DataType.DecimalType =
+    DataType.DecimalType(math.max(MaxPrecision, t.precision), t.scale)
+
+  /** The type of `AVG` over a DECIMAL: four more fractional digits than the
+    * input, given way like a quotient's past [[MaxPrecision]]. */
+  def avgType(t: DataType.DecimalType): DataType.DecimalType = bounded(t.precision + 4, t.scale + 4)
+
+  /** DECIMAL(p,s), or past [[MaxPrecision]] digits the type that keeps all
+    * p - s integer digits and gives way on the scale, to no fewer than
+    * min(s, 6) fractional digits. */
+  private def bounded(p: Int, s: Int): DataType.DecimalType =
+    if (p <= MaxPrecision) DataType.DecimalType(p, s)
+    else DataType.DecimalType(MaxPrecision, math.max(MaxPrecision - (p - s), math.min(s, MinAdjustedScale)))
+
+  /** `l op r` as a value of `t`, the type [[resultType]] gives the operation.
+    * NULL for a division or a remainder by zero, as for integers. */
+  def arith(op: String, lv: Any, rv: Any, t: DataType.DecimalType): java.math.BigDecimal = {
+    val l = Casts.toDecimal(lv.asInstanceOf[Number])
+    val r = Casts.toDecimal(rv.asInstanceOf[Number])
+    op match {
+      case "+" => fit(l.add(r), t)
+      case "-" => fit(l.subtract(r), t)
+      case "*" => fit(l.multiply(r), t)
+      case "/" => if (r.signum == 0) null else fit(l.divide(r, t.scale, java.math.RoundingMode.HALF_UP), t)
+      case "%" => if (r.signum == 0) null else fit(l.remainder(r), t)
+      case other => throw new IllegalArgumentException(s"Unknown arithmetic operator '$other'")
+    }
+  }
+
+  /** `v` as a value of `t`: rounded half up to its scale, and an error when
+    * its integer part has more digits than `t` holds. */
+  def fit(v: java.math.BigDecimal, t: DataType.DecimalType): java.math.BigDecimal = {
+    val atScale = v.setScale(t.scale, java.math.RoundingMode.HALF_UP)
+    if (atScale.precision > t.precision)
+      throw new ArithmeticException(s"Decimal overflow: ${v.toPlainString} does not fit $t")
+    atScale
+  }
+}
+
 /** Column-at-a-time variants of [[Ops]]. Each helper allocates one output
   * vector and runs a single tight loop that reads from primitive arrays —
   * the JIT eliminates boxing once it has profiled the call site, and the
@@ -317,6 +426,7 @@ object VecOps {
       case DataType.IntType => intArith(op, l, r, n, cap)
       case DataType.DoubleType => doubleArith(op, l, r, n, cap)
       case DataType.FloatType => floatArith(op, l, r, n, cap)
+      case d: DataType.DecimalType => decimalArith(op, l, r, d, n, cap)
       case other => throw new IllegalStateException(s"Arithmetic on $other not supported")
     }
   }
@@ -482,6 +592,14 @@ object VecOps {
         var i = 0
         while (i < n) { if (!cv.isNull(i)) values(i) = -cv.values(i); i += 1 }
         new DoubleVector(values, nulls, cap)
+      case d: DataType.DecimalType =>
+        val values = new Array[java.math.BigDecimal](cap)
+        var i = 0
+        while (i < n) {
+          if (!c.isNull(i)) values(i) = c.getBoxed(i).asInstanceOf[java.math.BigDecimal].negate
+          i += 1
+        }
+        new DecimalVector(values, d.precision, d.scale, cap)
       case other => throw new IllegalStateException(s"Unary - on $other")
     }
   }
@@ -776,6 +894,24 @@ object VecOps {
       case other => throw new IllegalStateException(s"Unknown float arith op '$other'")
     }
     new FloatVector(values, nulls, cap)
+  }
+
+  /** Decimal arithmetic, one row at a time through [[Decimals.arith]], the
+    * function the row path calls, so the two paths cannot round differently. */
+  private def decimalArith(
+      op: String,
+      l: ColumnVector,
+      r: ColumnVector,
+      t: DataType.DecimalType,
+      n: Int,
+      cap: Int): DecimalVector = {
+    val values = new Array[java.math.BigDecimal](cap)
+    var i = 0
+    while (i < n) {
+      if (!l.isNull(i) && !r.isNull(i)) values(i) = Decimals.arith(op, l.getBoxed(i), r.getBoxed(i), t)
+      i += 1
+    }
+    new DecimalVector(values, t.precision, t.scale, cap)
   }
 
   /** Comparison of two integers, read as longs — [[Ops]] compares two INT or

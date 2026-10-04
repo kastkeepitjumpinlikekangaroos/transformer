@@ -116,7 +116,13 @@ ship a fix or move something from "not done" to "done".
   `Casts`: an integer exactly, a `FLOAT` or `DOUBLE` as the decimal it prints as
   (`Casts.toDecimal`; `0.1` is `0.1`, not the binary fraction nearest it), and
   `NaN` or an infinity is an error naming it. That cast used to be missing, so
-  `price = 1` threw `CAST to decimal(10,3) not implemented` mid-drain. A
+  `price = 1` threw `CAST to decimal(10,3) not implemented` mid-drain.
+  Arithmetic is the one place a `DECIMAL` meets the rest differently
+  (`Analyzer.arithmetic`): its result's type is built from both sides' digits,
+  so an integer is read as the `DECIMAL` its every value fits rather than as the
+  other side's, and a `FLOAT` or `DOUBLE` that is not written in the query is a
+  bind error, since no `DECIMAL` it could be read as says how much of it the
+  result keeps (a number written in the query is the decimal of its digits). A
   `BINARY` casts to nothing else, explicitly or implicitly (`checkCast`, and
   `implicitCast` beneath a WHERE, LIKE or CASE), and `Analyzer.checkText` keeps
   `||` and the string functions off one: each read the array's identity hash as
@@ -794,13 +800,43 @@ ship a fix or move something from "not done" to "done".
   its accumulator slot from the declared type and the vector picks which slot
   it fills, so `MAX(ABS(k))` filled the double slot, finished from the empty
   decimal one, and answered NULL. `ABS` of a decimal is now `BigDecimal.abs` on
-  both paths, at the value's own scale. It is `SUM`'s defect (a function that
+  both paths, at the value's own scale. It was `SUM`'s defect (a function that
   keeps its input's type while computing in another) in a function small
-  enough to fix; `SUM` itself stays a recorded gap, below. Found when
+  enough to fix first; `SUM` is fixed too, in the next entry. Found when
   [plan 04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md) widened
   the expression corpus to every type: `expr_parity_fuzz_test` reached it at
   seed 98, as an `evalVec` vector of the wrong type. Pinned by
   `ExprBatchTest.funcAbsDecimal` and `SqlEngineTest.absOfADecimalIsExact`.
+
+- **`DECIMAL` arithmetic used to throw, and `SUM` / `AVG` over one to compute
+  in `DOUBLE` — fixed.** `+ - * / %` and unary minus on a `DECIMAL` threw
+  `IllegalStateException: Arithmetic on decimal(5,2) not supported` from
+  `Ops.arith` / `VecOps.arith` / `UnaryOpExpr` while the query ran, an internal
+  exception class for a missing feature. `SumState.init` picked
+  `DoubleSumState` for anything but an integer, so `SUM` over two
+  `10000000000000000001`s came back `20000000000000000000`, and since
+  `AggExprSum.resultType` kept its input's `DECIMAL(p,s)` the sum also held
+  digits that type does not (`0.30000000000000004`, or `19.98` in a
+  `DECIMAL(3,2)`), which `ParquetWriter` refuses rather than rounds, so writing
+  or spilling a decimal `SUM` failed. `AVG` was a `DOUBLE`. Now each result has
+  a declared type that holds it (`Decimals`, Spark's and SQL Server's rules,
+  see [architecture §5](architecture.md#5-expression-evaluation)), the value is
+  computed exactly and fitted to that type (rounded half up; an integer part
+  too long for it is an `ArithmeticException` naming the value, never a NULL or
+  a wrapped number), `SUM` of a `DECIMAL(p,s)` is a `DECIMAL(38,s)` and `AVG` a
+  `DECIMAL(p+4,s+4)`. Both aggregates add `BigDecimal`s, so the answer no
+  longer moves with row order, partition count or spill, which is what let the
+  fuzz corpora draw decimals a `DOUBLE` cannot add. Two choices worth knowing:
+  a `FLOAT` or `DOUBLE` column beside a `DECIMAL` in arithmetic is a bind error
+  (CAST the `DECIMAL` to `DOUBLE`), where comparisons widen it; and division
+  or remainder by zero is NULL, as for integers. `AVG` keeps its four extra
+  digits by giving way on scale past 38 digits rather than overflowing, where
+  Spark's `DECIMAL(min(38,p+4), min(38,s+4))` would overflow an average of
+  `DECIMAL(38,18)` values with 17 or more integer digits. Pinned by
+  `ExprBatchTest.binOpArithDecimal*` and `unaryMinusDecimal`,
+  `AggStateSerdeTest.decimalSumAndAvgRoundtrip`, and `SqlEngineTest`'s
+  `decimalSumAndAvgAreExact`, `decimalArithmeticIsExactAndTyped`,
+  `decimalOverflowIsAnError` and `decimalResultsSpill`.
 
 - **Mode-differential comparison is a multiset with a floating-point tolerance.**
   The `mode_differential_fuzz_test` (and the metamorphic `MetaModeDifferential`)
@@ -842,13 +878,10 @@ ship a fix or move something from "not done" to "done".
     `1.00` keeps either. A DATE and a TIMESTAMP compare as the `LocalDate` and
     `Instant` both paths box, with no conversion from an epoch count, because
     `Ops.eq` calls an epoch-day `Int` unequal to the date it counts. All three are
-    pinned by `fuzz/row_oracle_test`. A decimal `SUM` compares exactly too,
-    though it adds in DOUBLE (a gap recorded below): the SQL corpora's decimal
-    pools (`DataGen.DecimalPools`) hold only values whose doubles are small
-    multiples of a quarter, so the sum is exact in any order and does not move
-    with the layout. That keeps the
-    gap out of these properties, which compare modes with one another and could
-    not tell a rounded sum from a right one anyway.
+    pinned by `fuzz/row_oracle_test`. A decimal `SUM`, `AVG` or arithmetic
+    result compares exactly too: each is computed exactly and fitted to its
+    declared type, so none moves with the layout, as a `DOUBLE` sum of the same
+    values would, and the comparison needs no tolerance.
 
 - **The metamorphic TLP oracle partitions the query OUTPUT, never decomposes an
   aggregate.** `Tlp` checks `Q ≡ (Q WHERE p) ⊎ (Q WHERE NOT p) ⊎ (Q WHERE p IS
@@ -1125,24 +1158,13 @@ own writer. Plans 04-07 in that directory close those three holes.
   - Grace hash and window spill both use a fixed bucket count of 16
     (no recursive bucketing). Hot keys whose bucket exceeds heap will
     still OOM at probe/process time; that's a v1.1 issue.
-- **`DECIMAL` has exact comparison but no exact arithmetic.** `SUM` and `AVG`
-  over a `DECIMAL`, and the math functions that return a `DOUBLE`, compute in
-  `DOUBLE` (`SumState.init` picks `DoubleSumState` for anything but an
-  integer), so `SUM` over two
-  `10000000000000000001`s comes back as `20000000000000000000`, in a `DECIMAL`
-  column. Arithmetic (`+ - * / %`, and unary minus) on a `DECIMAL` throws
-  `IllegalStateException` from `Ops.arith` / `VecOps.arith` / `UnaryOpExpr`
-  while the query runs, an internal exception class for what is a missing
-  feature; `Analyzer.checkArithmetic` passes a `DECIMAL` because it is a
-  number. Exact decimal arithmetic is a feature, out of scope of
-  [plan 02](../plans/robustness/02-total-order-for-decimal-and-binary.md), which
-  made comparison exact. It also reaches parquet: `AggExprSum.resultType` is
-  its input's `DECIMAL(p,s)`, so a sum holds digits that type does not
-  (`0.30000000000000004`, or `19.98` in a `DECIMAL(3,2)`), and `ParquetWriter`
-  refuses a value it cannot store at the declared scale and precision rather
-  than round it, so writing or spilling a decimal `SUM` fails, naming the
-  value. An exact `SUM` would want Spark's typing too: `DECIMAL(min(38,
-  p + 10), s)`.
+- **A `DECIMAL` is exact in arithmetic, `SUM` and `AVG`, but not in the math
+  functions or the statistics.** `ROUND`, `FLOOR`, `CEIL`, `TRUNC`, `SQRT`,
+  `POWER` and the rest, and `STDDEV` / `VARIANCE`, take a decimal's
+  `doubleValue` and return a `DOUBLE`, so their type says what they kept. There
+  is no `CAST` to a `DECIMAL` either (`parseTypeName` reads no `DECIMAL(p,s)`),
+  so a query cannot choose a decimal result's type; `Decimals.resultType`
+  chooses it.
 - **No whole-stage codegen**, no Janino, no LLVM. The closest analogue is
   `Expr.evalVec` (see [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec))
   — one call per Expr per batch, primitive-array inner loops, no codegen step.

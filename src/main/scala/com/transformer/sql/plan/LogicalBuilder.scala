@@ -789,16 +789,10 @@ object LogicalBuilder {
 
   private def binopGeneric(op: String, l: Expression, r: Expression, sources: Sources,
                            aggResolver: Function => Option[Expr],
-                           windowResolver: AnalyticExpression => Option[Expr]): Expr = {
-    val operands = Seq(l, r).map(bindExprWithAggs(_, sources, aggResolver, windowResolver))
-    // A string literal is checked once promotePair has read it as the number
-    // beside it: `x + '1'` adds 1, and `'1' + '2'`, with no number to read the
-    // literals as, is arithmetic on text.
-    operands.filterNot(Analyzer.isStringLiteral).foreach(e => Analyzer.checkArithmetic(e.dataType))
-    val (le, re, t) = Analyzer.promotePair(operands(0), operands(1))
-    Analyzer.checkArithmetic(t)
-    BinOpExpr(op, le, re, t)
-  }
+                           windowResolver: AnalyticExpression => Option[Expr]): Expr =
+    Analyzer.arithmetic(op,
+      bindExprWithAggs(l, sources, aggResolver, windowResolver),
+      bindExprWithAggs(r, sources, aggResolver, windowResolver))
   private def cmpOpGeneric(op: String, l: Expression, r: Expression, sources: Sources,
                            aggResolver: Function => Option[Expr],
                            windowResolver: AnalyticExpression => Option[Expr]): Expr = {
@@ -826,6 +820,8 @@ object LogicalBuilder {
     val argTypes = args.map(_.dataType)
     // `CURRENT_DATE ()`, with a space, parses as a call rather than the keyword.
     if (args.isEmpty && UnsupportedClauses.ClockKeywords(f.getName.toUpperCase)) clockLiteral(f.getName.toUpperCase)
+    // MOD(a, b) is a % b, typed and computed as that is.
+    else if (f.getName.equalsIgnoreCase("MOD") && args.size == 2) Analyzer.arithmetic("%", args(0), args(1))
     else {
       val rt = Funcs.returnType(f.getName, argTypes)
         .getOrElse(throw new IllegalArgumentException(s"Unknown function '${f.getName}(${argTypes.mkString(",")})'"))

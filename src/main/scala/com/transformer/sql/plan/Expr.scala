@@ -125,6 +125,7 @@ final case class UnaryOpExpr(op: String, child: Expr, dataType: DataType) extend
           case DataType.LongType => -(v.asInstanceOf[Number].longValue)
           case DataType.FloatType => -(v.asInstanceOf[Number].floatValue)
           case DataType.DoubleType => -(v.asInstanceOf[Number].doubleValue)
+          case _: DataType.DecimalType => v.asInstanceOf[java.math.BigDecimal].negate
           case _ => throw new IllegalStateException(s"Unary - on $dataType")
         }
       case "+" => v
@@ -645,17 +646,25 @@ final case class AggExprCount(child: Expr, distinct: Boolean) extends AggExpr {
   val name = "COUNT"; val args: Seq[Expr] = Seq(child)
   val resultType: DataType = DataType.LongType
 }
+/** `SUM`: a BIGINT over integers, a DOUBLE over floats, and over a
+  * DECIMAL(p,s) a DECIMAL(38,s), added exactly ([[Decimals.sumType]]). */
 final case class AggExprSum(child: Expr) extends AggExpr {
   val name = "SUM"; val args: Seq[Expr] = Seq(child); val distinct = false
   val resultType: DataType = child.dataType match {
     case DataType.IntType | DataType.LongType => DataType.LongType
     case DataType.FloatType | DataType.DoubleType => DataType.DoubleType
+    case d: DataType.DecimalType => Decimals.sumType(d)
     case other => other
   }
 }
+/** `AVG`: a DOUBLE, but over a DECIMAL(p,s) a DECIMAL with four more
+  * fractional digits ([[Decimals.avgType]]), from the exact sum. */
 final case class AggExprAvg(child: Expr) extends AggExpr {
   val name = "AVG"; val args: Seq[Expr] = Seq(child); val distinct = false
-  val resultType: DataType = DataType.DoubleType
+  val resultType: DataType = child.dataType match {
+    case d: DataType.DecimalType => Decimals.avgType(d)
+    case _ => DataType.DoubleType
+  }
 }
 final case class AggExprMin(child: Expr) extends AggExpr {
   val name = "MIN"; val args: Seq[Expr] = Seq(child); val distinct = false
