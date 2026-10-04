@@ -1079,6 +1079,25 @@ class ExprBatchTest {
       b)
   }
 
+  /** ABS of a decimal is the decimal without its sign, at its own scale, on
+    * both paths. Both computed in DOUBLE, and the vector path returned a
+    * DoubleVector under the DECIMAL type: the parity fuzzer's first finding over
+    * a decimal column. */
+  @Test def funcAbsDecimal(): Unit = {
+    val dt = DataType.DecimalType(38, 3)
+    val b = batch("x" -> decCol(dt, i => SpecialDecimals(i % 8), i => i % 13 == 0))
+    val e = FuncExpr("ABS", Seq(ColRefExpr(0, "x", dt)), dt)
+    assertParity(e, b)
+    val vec = e.evalVec(b)
+    var i = 0
+    while (i < N) {
+      val expected = if (i % 13 == 0) null else new java.math.BigDecimal(SpecialDecimals(i % 8)).abs
+      assertEquals(s"evalVec at row $i", expected, if (vec.isNull(i)) null else vec.getBoxed(i))
+      assertEquals(s"eval at row $i", expected, e.eval(b, i))
+      i += 1
+    }
+  }
+
   @Test def funcFloorCeil(): Unit = {
     val b = batch("x" -> doubleCol(i => (i - 16) * 0.37, EveryOther))
     assertParity(

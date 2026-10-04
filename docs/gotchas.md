@@ -763,6 +763,23 @@ ship a fix or move something from "not done" to "done".
   `hash_keys_test` and `expr_batch_test`; the fuzz corpora still do not draw
   decimal or binary columns ([plan 04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)).
 
+- **`ABS` of a `DECIMAL` used to compute in `DOUBLE` — fixed.** `Funcs.apply`
+  took a decimal's `doubleValue` like any other number's, and `VecFuncs.abs`
+  wrote the result into a `DoubleVector` whatever the declared type, so
+  `ABS(k)` over a `DECIMAL(38,18)` lost every digit past double's precision
+  (`1.000000000000000001` came back `1.0`) and read back as a `Double` in a
+  `DECIMAL` column. The vector's class was the worse half: `MIN` / `MAX` picks
+  its accumulator slot from the declared type and the vector picks which slot
+  it fills, so `MAX(ABS(k))` filled the double slot, finished from the empty
+  decimal one, and answered NULL. `ABS` of a decimal is now `BigDecimal.abs` on
+  both paths, at the value's own scale. It is `SUM`'s defect (a function that
+  keeps its input's type while computing in another) in a function small
+  enough to fix; `SUM` itself stays a recorded gap, below. Found when
+  [plan 04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md) widened
+  the expression corpus to every type: `expr_parity_fuzz_test` reached it at
+  seed 98, as an `evalVec` vector of the wrong type. Pinned by
+  `ExprBatchTest.funcAbsDecimal` and `SqlEngineTest.absOfADecimalIsExact`.
+
 - **Mode-differential comparison is a multiset with a floating-point tolerance.**
   The `mode_differential_fuzz_test` (and the metamorphic `MetaModeDifferential`)
   assert one `(data, query)` gives the same result across spill on/off, metrics
@@ -1081,8 +1098,9 @@ writer. Plans 04-07 in that directory close those three holes.
     (no recursive bucketing). Hot keys whose bucket exceeds heap will
     still OOM at probe/process time; that's a v1.1 issue.
 - **`DECIMAL` has exact comparison but no exact arithmetic.** `SUM` and `AVG`
-  over a `DECIMAL`, and the math functions, compute in `DOUBLE` (`SumState.init`
-  picks `DoubleSumState` for anything but an integer), so `SUM` over two
+  over a `DECIMAL`, and the math functions that return a `DOUBLE`, compute in
+  `DOUBLE` (`SumState.init` picks `DoubleSumState` for anything but an
+  integer), so `SUM` over two
   `10000000000000000001`s comes back as `20000000000000000000`, in a `DECIMAL`
   column. Arithmetic (`+ - * / %`, and unary minus) on a `DECIMAL` throws
   `IllegalStateException` from `Ops.arith` / `VecOps.arith` / `UnaryOpExpr`

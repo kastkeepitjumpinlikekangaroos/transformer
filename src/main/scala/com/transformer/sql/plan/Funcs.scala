@@ -92,6 +92,8 @@ object Funcs {
         if (Ops.eq(args(0), args(1))) null else args(0)
       case "ABS" =>
         args.head match {
+          // A decimal's absolute value is exact, at the value's own scale.
+          case d: java.math.BigDecimal => d.abs
           case n: java.lang.Number => resultType match {
             case DataType.IntType => math.abs(n.intValue)
             case DataType.LongType => math.abs(n.longValue)
@@ -389,6 +391,15 @@ object VecFuncs {
     val cap = math.max(1, n)
     val argVec = arg.evalVec(batch)
     resultType match {
+      case _: DataType.DecimalType =>
+        val out = ColumnVector.allocate(resultType, cap)
+        var i = 0
+        while (i < n) {
+          if (argVec.isNull(i)) out.setNull(i)
+          else out.setBoxed(i, argVec.getBoxed(i).asInstanceOf[java.math.BigDecimal].abs)
+          i += 1
+        }
+        out
       case DataType.IntType =>
         val values = new Array[Int](cap)
         val nulls = new util.BitSet(cap)

@@ -984,9 +984,10 @@ JDK 21 or newer (tested through JDK 25).
   `inferSchema = false` route avoid this. A parquet glob checks every file
   against the first when it is opened (see [Parquet](#parquet)).
 - **`DECIMAL` compares exactly, but has no exact arithmetic.** `SUM` and `AVG`
-  over a `DECIMAL` column, and the math functions (`ABS`, `ROUND`, ...), compute
-  in `DOUBLE` and lose every digit past its precision; `SUM` hands the rounded
-  value back as a `DECIMAL`. Arithmetic on a `DECIMAL` (`+ - * / %` and unary
+  over a `DECIMAL` column, and the math functions that return a `DOUBLE`
+  (`ROUND`, `FLOOR`, `SQRT`, ...), compute in `DOUBLE` and lose every digit
+  past its precision; `SUM` hands the rounded value back as a `DECIMAL`. `ABS`
+  is exact: the decimal without its sign, at its own scale. Arithmetic on a `DECIMAL` (`+ - * / %` and unary
   minus) fails with an `IllegalStateException` while the query runs. Because
   `SUM` keeps its input's type, its result often holds digits that type does
   not: over `0.10` and `0.20` in a `DECIMAL(3,2)` it is `0.30000000000000004`,

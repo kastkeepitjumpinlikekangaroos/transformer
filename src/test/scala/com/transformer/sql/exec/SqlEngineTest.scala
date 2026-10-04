@@ -2847,6 +2847,29 @@ class SqlEngineTest {
     assertEquals(Seq(2L, 2L), column("SELECT id, COUNT(*) OVER (PARTITION BY b) AS n FROM tb WHERE id IN (2, 4)", bcat, "n"))
   }
 
+  /** ABS of a decimal is the decimal without its sign, exactly and at the
+    * value's own scale. It computed in DOUBLE: each value lost the digits past
+    * double's precision and read back as a Double under a DECIMAL type, and MAX
+    * over it came back NULL, because MIN / MAX picks its accumulator slot from
+    * the type and the vector filled the other one. The plan 04 corpus found it
+    * (seed 98 of `expr_parity_fuzz_test`). */
+  @Test def absOfADecimalIsExact(): Unit = {
+    val cat = new Catalog
+    val schema = Schema(Vector(Field("id", DataType.IntType), Field("k", DataType.DecimalType(38, 18))))
+    cat.register("tn", memView(schema, Seq(Seq(
+      Array[Any](1, dec("-12345678901234567890.123456789012345678")), Array[Any](2, dec("-2.50")),
+      Array[Any](3, dec("1.000000000000000001")), Array[Any](4, null)))))
+    // 1.2345678901234567E19, 2.5, 1.0 and NULL, as Doubles.
+    assertEquals(Seq(dec("12345678901234567890.123456789012345678"), dec("2.50"), dec("1.000000000000000001"), null),
+      column("SELECT ABS(k) AS v FROM tn ORDER BY id", cat, "v"))
+    // NULL and NULL.
+    val extrema = collectAllRows(SqlEngine.execute("SELECT MIN(ABS(k)) AS lo, MAX(ABS(k)) AS hi FROM tn", cat)).head
+    assertSameDecimals("MIN / MAX of ABS", Seq("1.000000000000000001", "12345678901234567890.123456789012345678"),
+      Seq(extrema("lo"), extrema("hi")))
+    // Missed 3: its ABS was 1.0, which is not more than 1.
+    assertEquals(Seq(1, 2, 3), column("SELECT id FROM tn WHERE ABS(k) > 1 ORDER BY id", cat, "id"))
+  }
+
   /** Two BIGINTs compare as longs. They compared as doubles, which cannot
     * tell 2^53 from 2^53 + 1, so `=` matched them while GROUP BY and a hash
     * join (which key exactly) kept them apart. */
