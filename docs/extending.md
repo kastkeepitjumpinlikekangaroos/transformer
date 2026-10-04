@@ -385,31 +385,60 @@ engine — the parity fuzzer then guards its `evalVec` override automatically):
    `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` — that suite is
    the per-override gate; the fuzzer is the generative net over it.
 
-**To give `ExprGen` a new `DataType`**: add it to `GenTypes` (draw from that list
-with `pick`, not `oneOf`, so a type with several declared variants such as
-DECIMAL is drawn as one type), give it `genValue` and `sentinel` cases, and route
-it in `genTyped`. Let it reach every producer the engine answers for over it and
-none it does not — the binder's rules, not convenience, decide (see the object
-comment for the four that arrived together: a DATE meets only a DATE, a BINARY is
-never text, nothing does arithmetic on a DECIMAL). Its value pool should hold the
-values its comparison is easy to get wrong on, and `typeCoverage` plus a guard in
-`ExprParityFuzzTest` must assert both that the type reaches a comparison and an
-`IN`, and that those values meet there.
+**To add a new `DataType` to the fuzz corpora** — do this whenever the engine
+gains a type, and in this order. The four generators draw from separate pools,
+so widening one is not widening the others; a type that reaches three of them
+leaves the fourth's oracles blind to it, and that is how four of the ten types
+went unfuzzed until plan 04.
 
-**To give `DataGen` and `QueryGen` a new `DataType`**: `DataGen.ColumnTypes` is
-`ExprGen.GenTypes`, so the type arrives with it; give it a `genDomain` case
-(a narrow slice, so keys collide, of values that cannot fail a spill the
-in-memory run passes) and a `fresh` case if its values are mutable. `QueryGen`
-then reaches it at every site that takes any column, so teach `SqlRender` its
-literal, its NULL (`CAST(NULL AS t)`, or the untyped `NULL` when the binder reads
-no type name for it), and `genLitValue` / `litSqlOfType`; where SQL cannot write
-a literal of it, keep it out of the sites that need one, as a BINARY is kept out
-of HAVING. Give `genAtom` a comparison for it (against what the binder allows
-it to meet, built from expressions whose type is exactly that: `QueryGen`'s
-target type is only a hint, so `c + 0` asked for as an INT can be a FLOAT) and
-`genInList` items, and `genValue` a branch so a projected item can be one. Name
-its breaking pairs as a `DataGen.ValueTag` so the per-type guards in
-`ModeDifferentialFuzzTest` can assert them, not only the shape.
+1. **`RowOracle` first.** The oracle compares with the engine's `=`, which for
+   a byte array (content) and a decimal (value, not scale) is not the JVM's
+   `equals`, and a comparator that gets a type wrong makes every property over
+   it vacuous or falsely red with no way to tell which. Give `normalize` the
+   type's equality and `hashCode`, and add a pool for it to `row_oracle_test`'s
+   `agreesWithOpsEqOnEveryNonFloatType`, which holds the oracle to `Ops.eq`.
+2. **`ExprGen`.** Add it to `GenTypes` (draw from that list with `pick`, not
+   `oneOf`, so a type with several declared variants such as DECIMAL is drawn
+   as one type), give it `genValue` and `sentinel` cases, and route it in
+   `genTyped`. Let it reach every producer the engine answers for over it and
+   none it does not — the binder's rules, not convenience, decide (see the
+   object comment for the four that arrived together: a DATE meets only a
+   DATE, a BINARY is never text, nothing does arithmetic on a DECIMAL). Its
+   pool should hold the values its comparison is easy to get wrong on.
+3. **`DataGen` and `QueryGen`.** `DataGen.ColumnTypes` is `ExprGen.GenTypes`,
+   so the type arrives with it; give it a `genDomain` case (a narrow slice, so
+   keys collide, of values that cannot fail a spill the in-memory run passes)
+   and a `fresh` case if its values are mutable. `QueryGen` then reaches it at
+   every site that takes any column, so teach `SqlRender` its literal, its NULL
+   (`CAST(NULL AS t)`, or the untyped `NULL` when the binder reads no type name
+   for it), and `genLitValue` / `litSqlOfType`; where SQL cannot write a
+   literal of it, keep it out of the sites that need one, as a BINARY is kept
+   out of HAVING. Give `genAtom` a comparison for it (against what the binder
+   allows it to meet, built from expressions whose type is exactly that:
+   `QueryGen`'s target type is only a hint, so `c + 0` asked for as an INT can
+   be a FLOAT), `genInList` items, and a `genValue` branch so a projected item
+   can be one.
+4. **`MetaQueryGen`.** Add it to `PayloadTypes` (which is `GenTypes`) and, if
+   it can key a join, to `KeyTypes`, with a `payloadDomain` /
+   `sharedKeyDomain` case and a `genLit` case; give `genAtom` its comparison,
+   and decide whether TLP may partition on it (`isPartitionable`: a comparison
+   of two non-NULL values of it must be TRUE or FALSE) and with what
+   (`hasLiteral`).
+5. **The guards assert the values, not just the shape.** Name the type's
+   breaking pairs as a `DataGen.ValueTag` (`valueTags` reads them off a
+   column, `pairTags` off two values) and extend the per-type guards in
+   `ExprParityFuzzTest`, `ModeDifferentialFuzzTest` and `MetamorphicFuzzTest`:
+   each asserts the type reaches every site its corpus has (a comparison, an
+   `IN`, an ORDER BY and GROUP BY key, `MIN`/`MAX`, a join key, a TLP key) AND
+   that the column there holds those pairs, with the measured counts in the
+   comment. Then re-measure every other guard, since the new type took draws
+   from the old ones.
+6. **Campaign before landing.** A widened corpus finds what the narrow one
+   could not reach — plan 04's found `ABS` of a decimal computing in DOUBLE and
+   a NULL-typed column failing every spill — so run the metamorphic, sharded
+   and mode-differential campaigns at `FUZZ_SEEDS=20000` and treat each
+   finding the plan-02 way: a deterministic regression, the engine fix, and
+   then the guard. Never gate the shape back out of the generator to get green.
 
 **To add a SQL shape to `QueryGen`** (the mode-differential fuzzer's query
 generator): add it to the structured `GenQuery` (a new `AggSpec` for an
@@ -435,12 +464,8 @@ Exclude anything non-deterministic (`RAND()`, the clock functions) or
 mode-unstable (`LIMIT` and `OFFSET` without a total order — a cutoff among tied
 rows keeps a different row subset depending on merge order). If a new shape needs a comparison tolerance, add it to
 `RowOracle.multisetEquals` (today only `Double` columns are tolerant). A new
-column type needs its equality in `RowOracle.normalize` first: the oracle
-compares with the engine's `=`, which for a byte array (content) and a decimal
-(value, not scale) is not the JVM's `equals`, and a comparator that gets it
-wrong makes every property over the type vacuous or falsely red. Add a pool for
-the type to `row_oracle_test`'s `agreesWithOpsEqOnEveryNonFloatType`, which
-holds the oracle to `Ops.eq`.
+column type needs its equality there first; see the recipe for a new
+`DataType` above.
 
 **To add a mode to `ModeDifferential`**: add an entry to the `modes` sequence — a
 `(label, MaterializedView, ExecutionOptions)` triple. Layout modes come from
@@ -521,9 +546,13 @@ are the five live relations. See
    Then size the seed block from the MEASURED rate, not from what the guard
    beside it uses. A corpus-reading guard costs nothing per seed, and the chain
    it asserts can be very thin: `rankWindowsReachIeeeSpecialOrderKeys` needs a
-   rank window AND a float ORDER BY key AND a `NaN` in it, which is 0.06% of
-   seeds — over the 2000 its siblings read, the count is 1 and no bound
-   distinguishes rare from gone, so it reads 20000.
+   rank window AND a float ORDER BY key AND a `NaN` in it, which is 0.04% of
+   seeds — over the 2000 its siblings read, the count is about 1 and no bound
+   distinguishes rare from gone, so it reads 100000. A corpus that widens moves
+   these rates too: when the column types went from six to ten, a float column
+   lost draws, and that guard, which had read 20000, sat one seed over its
+   bound. Re-measure every guard over the widened corpus, not only the new
+   ones.
 
    Set the bound to separate "rare" from "gone", not to pin the current number:
    the corpus is a fixed seed block, so counts are stable, but a bound sitting one

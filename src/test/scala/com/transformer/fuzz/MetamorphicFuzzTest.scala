@@ -10,6 +10,8 @@ import org.junit.{After, Before, Test}
 import java.nio.file.{Files, Path}
 import scala.util.Try
 
+import MetamorphicFuzzTest.{allWindows, columnCells}
+
 /** Property-based metamorphic gate over multi-relation SQL — the phase that finds
   * SEMANTIC bugs (wrong answers every execution mode agrees on, which
   * mode-differential is blind to).
@@ -217,10 +219,11 @@ class MetamorphicFuzzTest {
     // MIN/MAX over a Boolean column: the accumulator-slot shape that returned NULL
     // under spill until the engine was fixed. It was kept OUT of the generator
     // while the bug stood, so an assertion that it is back is what stops the
-    // exclusion from silently returning. Narrow shape (~1.4% of seeds — the column
-    // must be Boolean AND draw a MIN/MAX), so the bound separates "rare" from
-    // "gone"; `aggDecompositionCoversEveryColumnType` is the dense guard on it.
-    assertTrue(s"boolMinMax=$boolMinMax", boolMinMax > 10)
+    // exclusion from silently returning. Narrow shape (~0.9% of seeds — the column
+    // must be Boolean AND draw a MIN/MAX; it was ~1.4% while relations drew six
+    // column types rather than ten), so the bound separates "rare" from "gone";
+    // `aggDecompositionCoversEveryColumnType` is the dense guard on it.
+    assertTrue(s"boolMinMax=$boolMinMax", boolMinMax > 6)
   }
 
   /** Whether any arm of `q` takes `MIN`/`MAX` over a `Boolean` column — as an
@@ -276,7 +279,7 @@ class MetamorphicFuzzTest {
     * right thing over inputs that could not break it. This guard is what stops
     * that pool narrowing back. */
   @Test def aggDecompositionReachesIeeeSpecialValues(): Unit = {
-    val n = 2000
+    val n = 10000
     var nan, negZero, infinite = 0
     var seed = 0
     while (seed < n) {
@@ -289,11 +292,14 @@ class MetamorphicFuzzTest {
     }
     println(s"[metamorphic] agg-decomposition IEEE coverage over $n seeds: " +
       s"NaN=$nan -0.0=$negZero infinity=$infinite")
-    // Bounds ~3x below the measured rates: they separate a pool that stopped
-    // producing the value from one that merely drifted, and do not pin a rate.
-    assertTrue(s"agg-decomposition never aggregates a NaN (nan=$nan)", nan > 25)
-    assertTrue(s"agg-decomposition never aggregates a -0.0 (negZero=$negZero)", negZero > 15)
-    assertTrue(s"agg-decomposition never aggregates an infinity (infinite=$infinite)", infinite > 12)
+    // Bounds ~3x below the measured rates (252 / 185 / 139 over these 10000
+    // seeds): they separate a pool that stopped producing the value from one
+    // that merely drifted, and do not pin a rate. The block was 2000 seeds
+    // until relations drew ten column types rather than six, which left two
+    // float types of ten and these counts under twice their bounds.
+    assertTrue(s"agg-decomposition never aggregates a NaN (nan=$nan)", nan > 80)
+    assertTrue(s"agg-decomposition never aggregates a -0.0 (negZero=$negZero)", negZero > 60)
+    assertTrue(s"agg-decomposition never aggregates an infinity (infinite=$infinite)", infinite > 45)
   }
 
   /** `RANK` / `DENSE_RANK` peer coverage. The peer test those two apply to their
@@ -304,17 +310,19 @@ class MetamorphicFuzzTest {
     * actually carry a `NaN`. The join-commutativity relation caught it at seed
     * 16502, once the payload pool started drawing specials.
     *
-    * The seed block is the CAMPAIGN's 20000 rather than the 2000 its sibling
-    * guards use, because this is the thinnest chain in either corpus: a rank
-    * window lands on ~2% of seeds, a float ORDER BY key on ~0.5%, and one
-    * carrying a `NaN` on ~0.06% — at 2000 seeds the count is 1 and cannot tell
-    * rare from gone. Generation only (no query runs), so 20000 seeds costs well
-    * under a second.
+    * The seed block is 100000, five campaigns' worth, rather than the 2000 its
+    * sibling guards use, because this is the thinnest chain in either corpus: a
+    * rank window lands on ~2% of seeds, a float ORDER BY key on ~0.3%, and one
+    * carrying a `NaN` on ~0.04%. It was the campaign's 20000 until the corpus
+    * widened from six column types to ten, which left a float column fewer
+    * draws to win and the `-0.0` count at 3 over those seeds, one above its
+    * bound. Generation only (no query runs), so 100000 seeds costs about a
+    * second and a half.
     *
     * Also asserts every ordered window fills in `orderCols`, since a shape that
     * left it empty would silently drop out of this tally. */
   @Test def rankWindowsReachIeeeSpecialOrderKeys(): Unit = {
-    val n = 20000
+    val n = 100000
     var ranks, floatKeys, nan, negZero, orderedWindows, missingOrderCols = 0
     var seed = 0
     while (seed < n) {
@@ -341,13 +349,13 @@ class MetamorphicFuzzTest {
       s"(orderedWindows=$orderedWindows)")
     assertEquals("an ordered window carries no orderCols, so it is invisible to this tally",
       0, missingOrderCols)
-    // Bounds ~3x below the measured rates (428 / 108 / 12 / 8 over these 20000
-    // seeds): they separate a corpus that stopped producing the shape or the
-    // value from one that merely drifted, and do not pin a rate.
-    assertTrue(s"generator never ranks over any ORDER BY (ranks=$ranks)", ranks > 140)
-    assertTrue(s"a rank window never orders by a float column (floatKeys=$floatKeys)", floatKeys > 35)
-    assertTrue(s"a rank window's float order key never carries a NaN (nan=$nan)", nan > 3)
-    assertTrue(s"a rank window's float order key never carries a -0.0 (negZero=$negZero)", negZero > 2)
+    // Bounds ~3x below the measured rates (2045 / 301 / 38 / 27 over these
+    // 100000 seeds): they separate a corpus that stopped producing the shape or
+    // the value from one that merely drifted, and do not pin a rate.
+    assertTrue(s"generator never ranks over any ORDER BY (ranks=$ranks)", ranks > 680)
+    assertTrue(s"a rank window never orders by a float column (floatKeys=$floatKeys)", floatKeys > 100)
+    assertTrue(s"a rank window's float order key never carries a NaN (nan=$nan)", nan > 12)
+    assertTrue(s"a rank window's float order key never carries a -0.0 (negZero=$negZero)", negZero > 9)
   }
 
   private def isRank(w: WinItem): Boolean =
@@ -356,36 +364,86 @@ class MetamorphicFuzzTest {
   private def isFloat(dt: DataType): Boolean =
     dt == DataType.FloatType || dt == DataType.DoubleType
 
-  /** Every window in any arm of `q` (this body, a UNION arm, a CTE body), paired
-    * with the FROM clause its `orderCols` resolve against. */
-  private def allWindows(q: MetaQuery): Vector[(FromClause, WinItem)] = {
-    val here: Vector[(FromClause, WinItem)] = q.core match {
-      case p: ProjectCore => p.windows.map(w => (q.from, w))
-      case _: AggCore => Vector.empty
-    }
-    here ++ q.setOp.toVector.flatMap { case (rhs, _) => allWindows(rhs) } ++
-      q.ctes.flatMap(c => allWindows(c.body))
-  }
-
-  /** The values `c` takes in the base relation its alias resolves to. Empty when
-    * the alias names a CTE, whose rows are computed rather than stored — that
-    * under-counts coverage rather than over-counting it. */
-  private def columnCells(env: RelEnv, from: FromClause, c: ScopeCol): IndexedSeq[Any] = {
-    val leaf = (from.root +: from.joins.map(_.leaf)).find(_.alias == c.alias)
-    val rel = leaf.flatMap(l => env.relations.find(_.name == l.relName))
-    rel match {
-      case None => IndexedSeq.empty
-      case Some(r) =>
-        val i = r.schema.fields.indexWhere(_.name == c.col)
-        if (i < 0) IndexedSeq.empty else r.dataset.rows.map(_(i))
-    }
-  }
-
   private def anyCell(cells: IndexedSeq[Any], p: Double => Boolean): Boolean =
     cells.exists {
       case x: java.lang.Number => p(x.doubleValue)
       case _ => false
     }
+
+  // ---- DATE, TIMESTAMP, BINARY and DECIMAL coverage ----------------------
+  //
+  // One guard per type, each asserting both halves over the metamorphic corpus:
+  // the type is a join key, reaches a comparison, an ORDER BY (a window's or a
+  // top-n's), a GROUP BY key, the aggregate-decomposition relation's MIN/MAX
+  // and a TLP partition key, and the base-relation column it reads at each
+  // (all but TLP, which partitions computed output) holds the values a
+  // comparison of the type gets wrong. `MetaQueryGen` drew none of the four
+  // until plan 04. The guards read one shared tally of the generated corpus.
+  //
+  // Over the campaign's 20000 seeds, generation only (about a second):
+  //
+  //                  date  timestamp  binary  decimal
+  //   join key       1742       1748    1791     1753
+  //   comparison     2621       2668    2358     2811
+  //   ORDER BY       2201       2345    2282     2299
+  //   GROUP BY        940        879     932      906
+  //   MIN/MAX        4537       4603    4530     4562
+  //   TLP key        2370       2453     508     2625   (a BINARY only against
+  //                                                       another BINARY column)
+  //
+  // and the columns holding each value pair, at join key / comparison / ORDER
+  // BY / GROUP BY / MIN/MAX: instants under a millisecond apart 1374 / 1428 /
+  // 1122 / 380 / 2088; bytes of one content 1648 / 1522 / 1316 / 470 / 2456;
+  // bytes one high bit apart 639 / 589 / 477 / 180 / 895; a decimal at two
+  // scales 840 / 865 / 639 / 237 / 1146; decimals of one double 212 / 222 /
+  // 197 / 46 / 336. Each bound sits about 3x below its count.
+
+  import DataGen.ValueTag._
+  import MetamorphicFuzzTest.{Tally, typeTally}
+
+  private def tallyMessage(t: Tally): String =
+    s"over ${t.seeds} seeds: shapes=${t.shapes.toSeq.sortBy(_._1.toString).mkString(", ")}; " +
+      s"values=${t.values.toSeq.sortBy(_._1.toString).mkString(", ")}"
+
+  /** The shape floor at each site but the TLP key, for every one of the four
+    * types. */
+  private val ShapeFloor =
+    Seq("join key" -> 580, "comparison" -> 780, "ORDER BY" -> 730, "GROUP BY" -> 290, "MIN/MAX" -> 1500)
+
+  private def assertShapes(kind: String): Unit = {
+    for ((site, floor) <- ShapeFloor)
+      assertTrue(s"a $kind rarely reaches $site, ${tallyMessage(typeTally)}", typeTally.shapes((site, kind)) > floor)
+    val tlpFloor = if (kind == "binary") 160 else 790
+    assertTrue(s"a $kind rarely reaches TLP key, ${tallyMessage(typeTally)}", typeTally.shapes(("TLP key", kind)) > tlpFloor)
+  }
+
+  /** `floors` are for the join key, comparison, ORDER BY, GROUP BY and MIN/MAX,
+    * in turn. */
+  private def assertValues(kind: String, tag: DataGen.ValueTag, floors: Seq[Int]): Unit =
+    for (((site, _), floor) <- ShapeFloor.zip(floors))
+      assertTrue(s"a $kind at $site rarely holds $tag, ${tallyMessage(typeTally)}", typeTally.values((site, tag)) > floor)
+
+  @Test def datesReachJoinsComparisonsOrderByGroupByMinMaxAndTlp(): Unit = {
+    println(s"[metamorphic] type coverage ${tallyMessage(typeTally)}")
+    assertShapes("date")
+  }
+
+  @Test def timestampsReachEverySiteUnderAMillisecondApart(): Unit = {
+    assertShapes("timestamp")
+    assertValues("timestamp", InstantsUnderAMillisecondApart, Seq(450, 470, 370, 125, 690))
+  }
+
+  @Test def binaryReachesEverySiteWithEqualContentAndHighBitPairs(): Unit = {
+    assertShapes("binary")
+    assertValues("binary", BytesOfOneContent, Seq(540, 500, 430, 155, 810))
+    assertValues("binary", BytesOneHighBitApart, Seq(210, 195, 155, 60, 295))
+  }
+
+  @Test def decimalsReachEverySiteAtTwoScalesAndOfOneDouble(): Unit = {
+    assertShapes("decimal")
+    assertValues("decimal", DecimalAtTwoScales, Seq(280, 285, 210, 79, 380))
+    assertValues("decimal", DecimalsOfOneDouble, Seq(70, 74, 65, 15, 110))
+  }
 
   /** The join-commutativity relation must actually RUN, not skip, on a healthy
     * share of seeds. It has nothing to check for a join-free query and skips a
@@ -758,5 +816,141 @@ class MetamorphicFuzzTest {
     val core = ProjectCore(Vector((sc("t0", intInt, 1).ref, "o0"), (sc("t1", intInt, 1).ref, "o1")), distinct = false)
     val mc = MetaCase(env, MetaQuery(from, None, core), None)
     assertEquals(RelEngine.Held, MetaModeDifferential.check(mc))
+  }
+}
+
+object MetamorphicFuzzTest {
+
+  /** Every window in any arm of `q` (this body, a UNION arm, a CTE body), paired
+    * with the FROM clause its `orderCols` resolve against. */
+  private def allWindows(q: MetaQuery): Vector[(FromClause, WinItem)] = {
+    val here: Vector[(FromClause, WinItem)] = q.core match {
+      case p: ProjectCore => p.windows.map(w => (q.from, w))
+      case _: AggCore => Vector.empty
+    }
+    here ++ q.setOp.toVector.flatMap { case (rhs, _) => allWindows(rhs) } ++
+      q.ctes.flatMap(c => allWindows(c.body))
+  }
+
+  /** The values `c` takes in the base relation its alias resolves to. Empty when
+    * the alias names a CTE, whose rows are computed rather than stored — that
+    * under-counts coverage rather than over-counting it. */
+  private def columnCells(env: RelEnv, from: FromClause, c: ScopeCol): IndexedSeq[Any] = {
+    val leaf = (from.root +: from.joins.map(_.leaf)).find(_.alias == c.alias)
+    val rel = leaf.flatMap(l => env.relations.find(_.name == l.relName))
+    rel match {
+      case None => IndexedSeq.empty
+      case Some(r) =>
+        val i = r.schema.fields.indexWhere(_.name == c.col)
+        if (i < 0) IndexedSeq.empty else r.dataset.rows.map(_(i))
+    }
+  }
+
+  /** How many seeds of a block reach each site with a column of each kind
+    * (`shapes`, keyed by site and `ExprGen.kind`), and with a column holding
+    * each value pair there (`values`, keyed by site and tag). */
+  final case class Tally(seeds: Int, shapes: Map[(String, String), Int], values: Map[(String, DataGen.ValueTag), Int])
+
+  /** A column reference's scope column: `ColRefExpr.name` carries the alias. */
+  private def scopeCol(c: ColRefExpr): Option[ScopeCol] = c.name.split('.') match {
+    case Array(alias, col) => Some(ScopeCol(alias, col, c.dataType))
+    case _ => None
+  }
+
+  /** The sites one case reaches with each of the four types, and the cells of
+    * the base-relation columns it reads there. */
+  private def sites(mc: MetaCase): Seq[(String, String, IndexedSeq[Any])] = {
+    val reported = ExprGen.ReportedKinds
+    val out = Vector.newBuilder[(String, String, IndexedSeq[Any])]
+    def refs(e: Expr, kind: String): Seq[ColRefExpr] = e match {
+      case c: ColRefExpr if ExprGen.kind(c.dataType) == kind => Seq(c)
+      case other => Shrinker.childrenOf(other).flatMap(refs(_, kind))
+    }
+    def cellsOf(from: FromClause, cs: Seq[ColRefExpr]): IndexedSeq[Any] =
+      cs.flatMap(scopeCol).flatMap(columnCells(mc.env, from, _)).toIndexedSeq
+
+    // The join key: every relation keys on the env's one key type.
+    val r0 = mc.env.relations.head
+    val keyKind = ExprGen.kind(r0.schema.fields(r0.keyCols.head).dataType)
+    if (mc.query.hasAnyJoin && reported(keyKind))
+      out += (("join key", keyKind, mc.env.relations.flatMap(r => r.keyCols.flatMap(i => r.dataset.rows.map(_(i))))))
+
+    def arm(q: MetaQuery): Unit = {
+      val exprs: Seq[Expr] = q.where.toSeq ++ q.from.joins.map(_.on) ++ (q.core match {
+        case p: ProjectCore => p.items.map(_._1)
+        case a: AggCore => a.groupKeys.map(_._1) ++ a.having.toSeq
+      })
+      def comparisons(e: Expr): Unit = {
+        e match {
+          case BinOpExpr(op, l, r, _) if Seq("=", "<>", "<", "<=", ">", ">=").contains(op) &&
+            reported(ExprGen.kind(l.dataType)) =>
+            val k = ExprGen.kind(l.dataType)
+            out += (("comparison", k, cellsOf(q.from, refs(l, k) ++ refs(r, k))))
+          case _ => ()
+        }
+        Shrinker.childrenOf(e).foreach(comparisons)
+      }
+      exprs.foreach(comparisons)
+      q.core match {
+        case a: AggCore =>
+          a.groupKeys.foreach { case (e, _) =>
+            val k = ExprGen.kind(e.dataType)
+            if (reported(k)) out += (("GROUP BY", k, cellsOf(q.from, refs(e, k))))
+          }
+        case _ => ()
+      }
+      // A top-n's ORDER BY: every projected column, by its source.
+      q.totalOrderKeys.foreach { _ =>
+        q.core match {
+          case p: ProjectCore => p.items.foreach {
+            case (c: ColRefExpr, _) if reported(ExprGen.kind(c.dataType)) =>
+              out += (("ORDER BY", ExprGen.kind(c.dataType), cellsOf(q.from, Seq(c))))
+            case _ => ()
+          }
+          case _ => ()
+        }
+      }
+      q.setOp.foreach { case (rhs, _) => arm(rhs) }
+      q.ctes.foreach(c => arm(c.body))
+    }
+    arm(mc.query)
+
+    // A window's ORDER BY.
+    allWindows(mc.query).foreach { case (from, w) =>
+      w.orderCols.filter(c => reported(ExprGen.kind(c.dataType))).foreach { c =>
+        out += (("ORDER BY", ExprGen.kind(c.dataType), columnCells(mc.env, from, c)))
+      }
+    }
+
+    // MIN/MAX through the aggregate-decomposition relation, over its columns.
+    AggDecomposition.aggregatedColumns(mc).foreach { case (dt, cells) =>
+      if (reported(ExprGen.kind(dt))) out += (("MIN/MAX", ExprGen.kind(dt), cells))
+    }
+
+    // The TLP partition key, an output column.
+    mc.tlp.foreach { p =>
+      val text = Seq(p.truePred, p.falsePred).mkString(" ")
+      mc.query.tlpCandidates.foreach { case (name, dt) =>
+        if (reported(ExprGen.kind(dt)) && text.split("[^A-Za-z0-9_]").contains(name))
+          out += (("TLP key", ExprGen.kind(dt), IndexedSeq.empty))
+      }
+    }
+    out.result()
+  }
+
+  /** The tally over the first 20000 seeds, computed once for the four guards. */
+  lazy val typeTally: Tally = {
+    val n = 20000
+    val shapes = scala.collection.mutable.Map.empty[(String, String), Int].withDefaultValue(0)
+    val values = scala.collection.mutable.Map.empty[(String, DataGen.ValueTag), Int].withDefaultValue(0)
+    var seed = 0
+    while (seed < n) {
+      val found = sites(MetaQueryGen.generate(new Rng(seed.toLong)))
+      found.map { case (site, kind, _) => (site, kind) }.distinct.foreach(k => shapes(k) += 1)
+      found.flatMap { case (site, _, cells) => DataGen.valueTags(cells).map(tag => (site, tag)) }
+        .distinct.foreach(k => values(k) += 1)
+      seed += 1
+    }
+    Tally(n, shapes.toMap.withDefaultValue(0), values.toMap.withDefaultValue(0))
   }
 }

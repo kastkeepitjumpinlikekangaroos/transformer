@@ -25,7 +25,10 @@ import com.transformer.sql.plan._
   *   - '''Type-correct by construction.''' Equi-join keys are drawn same-typed;
   *     arithmetic operands are numeric, `||` operands string, comparisons
   *     same-category — the same discipline [[QueryGen]] uses so a precedence-only
-  *     reparse stays type-correct.
+  *     reparse stays type-correct. Every one of the ten types is a column type
+  *     (and all but FLOAT, DOUBLE and BOOLEAN a join-key type); a DATE,
+  *     TIMESTAMP or BINARY meets only its own type, a DECIMAL meets decimals and
+  *     integer columns or literals, and none of the four does arithmetic.
   *
   *   - '''Total + paren-free.''' Nothing here builds a tree that throws for
   *     in-range input or that needs a grouping paren (the SQL frontend rejects
@@ -437,7 +440,7 @@ object MetaQueryGen {
 
   /** Generate a single relation + a predicate over it, for the NoREC relation. */
   def generateNoRec(rng: Rng): NoRecCase = {
-    val keyType = rng.oneOf(KeyTypes)
+    val keyType = ExprGen.pick(rng, KeyTypes)
     val keyDomain = sharedKeyDomain(rng.split(), keyType)
     val rel = genRelation(rng.split(), "r0", keyType, keyDomain)
     val scope = rel.schema.fields.map(f => ScopeCol("t", f.name, f.dataType)).toVector
@@ -447,17 +450,23 @@ object MetaQueryGen {
 
   // ---- relation environment generation -----------------------------------
 
-  private val KeyTypes: Seq[DataType] = Seq(DataType.IntType, DataType.LongType, DataType.StringType)
-  /** Payload (non-key) column types. `private[fuzz]` so the coverage guards can
-    * assert every one of them still reaches the oracles. */
-  private[fuzz] val PayloadTypes: Seq[DataType] = Seq(
-    DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType,
-    DataType.BooleanType, DataType.StringType)
+  /** Join-key column types: every type but FLOAT, DOUBLE and BOOLEAN. A DATE
+    * or TIMESTAMP key takes the `LongHashMap` fast path INT and BIGINT take; a
+    * BINARY or DECIMAL key takes the object codecs, the grace-hash spill buckets
+    * and shard routing, each of which once split keys `=` calls equal (plan
+    * 02). Draw with `ExprGen.pick`. `private[fuzz]` for the coverage guards. */
+  private[fuzz] val KeyTypes: Seq[DataType] =
+    Seq(DataType.IntType, DataType.LongType, DataType.StringType, DataType.DateType, DataType.TimestampType,
+      DataType.BinaryType) ++ ExprGen.DecimalTypes
+  /** Payload (non-key) column types: all ten, `ExprGen.GenTypes`. Draw with
+    * `ExprGen.pick`. `private[fuzz]` so the coverage guards can assert every
+    * one of them still reaches the oracles. */
+  private[fuzz] val PayloadTypes: Seq[DataType] = ExprGen.GenTypes
   private val StringPool: IndexedSeq[String] = IndexedSeq("a", "b", "c", "d", "")
   private val DoublePool: IndexedSeq[Double] = IndexedSeq(0.0, 0.5, 1.0, 2.0, -1.0, 10.0)
 
   private def genEnv(rng: Rng): RelEnv = {
-    val keyType = rng.oneOf(KeyTypes)
+    val keyType = ExprGen.pick(rng, KeyTypes)
     val keyDomain = sharedKeyDomain(rng, keyType)
     val n = rng.between(2, 3)
     val relations = (0 until n).map(i => genRelation(rng.split(), s"r$i", keyType, keyDomain)).toVector
@@ -472,14 +481,34 @@ object MetaQueryGen {
       val w = rng.between(2, 4); val base = rng.oneOf(Seq(0L, 1L)); (0 until w).map(i => (base + i): Any)
     case DataType.StringType =>
       val w = rng.between(2, 4); StringPool.take(w).map(_.asInstanceOf[Any])
-    case other => throw new IllegalArgumentException(s"unsupported key type $other")
+    case other => slice(rng, poolOf(other))
+  }
+
+  /** The pool a DATE, TIMESTAMP, BINARY or DECIMAL column takes its values from:
+    * `ExprGen`'s pools for the first three, whose neighbours are the pairs a
+    * comparison of the type gets wrong, and `DataGen.DecimalPools` for a
+    * DECIMAL, whose values a `SUM` adds exactly (see there). */
+  private def poolOf(dt: DataType): IndexedSeq[Any] = dt match {
+    case DataType.DateType => ExprGen.DatePool.toIndexedSeq
+    case DataType.TimestampType => ExprGen.TimestampPool.toIndexedSeq
+    case DataType.BinaryType => ExprGen.BinaryPool.toIndexedSeq
+    case d: DataType.DecimalType => DataGen.DecimalPools(d)
+    case other => throw new IllegalArgumentException(s"no pool for $other")
+  }
+
+  /** 2-4 neighbouring values of `pool`, so keys collide and the neighbours
+    * meet. */
+  private def slice(rng: Rng, pool: IndexedSeq[Any]): IndexedSeq[Any] = {
+    val w = rng.between(2, 4)
+    val start = rng.between(0, pool.length - w)
+    pool.slice(start, start + w)
   }
 
   private def genRelation(rng: Rng, name: String, keyType: DataType, keyDomain: IndexedSeq[Any]): Relation = {
     val nKeys = rng.between(1, 2)
     val nPayload = rng.between(1, 3)
     val keyFields = (0 until nKeys).map(i => Field(s"c$i", keyType))
-    val payloadFields = (0 until nPayload).map(i => Field(s"c${nKeys + i}", rng.oneOf(PayloadTypes)))
+    val payloadFields = (0 until nPayload).map(i => Field(s"c${nKeys + i}", ExprGen.pick(rng, PayloadTypes)))
     val schema = Schema((keyFields ++ payloadFields).toVector)
     val keyCols = (0 until nKeys).toVector
 
@@ -498,7 +527,7 @@ object MetaQueryGen {
     val rows = IndexedSeq.tabulate(numRows) { _ =>
       Array.tabulate[Any](schema.length) { c =>
         val (nullProb, domain) = specs(c)
-        if (rng.bool(nullProb)) null else rng.oneOf(domain)
+        if (rng.bool(nullProb)) null else DataGen.fresh(rng.oneOf(domain))
       }
     }
     Relation(name, DataGen.Dataset(schema, rows), keyCols)
@@ -509,7 +538,7 @@ object MetaQueryGen {
   /** A payload column's candidate non-null values. Float/Double columns can also
     * carry `NaN` / `-0.0` / an infinity, through `DataGen.withSpecialDoubles` —
     * the pool and the rate live there, so this corpus and the mode-differential
-    * one widen together. PAYLOAD columns only: `KeyTypes` is Int/Long/String, so
+    * one widen together. PAYLOAD columns only: `KeyTypes` has no float type, so
     * a join or GROUP BY key never draws one. What a `NaN` KEY does is a separate
     * question from what `MIN`/`MAX` does with a `NaN` VALUE (see
     * `docs/architecture.md` §2a for the answer). */
@@ -524,7 +553,7 @@ object MetaQueryGen {
         rng, DoublePool.take(rng.between(2, 4)).map(_.asInstanceOf[Any]), identity)
     case DataType.BooleanType => IndexedSeq[Any](true, false)
     case DataType.StringType => StringPool.take(rng.between(2, 4)).map(_.asInstanceOf[Any])
-    case other => throw new IllegalArgumentException(s"unsupported payload type $other")
+    case other => slice(rng, poolOf(other))
   }
 
   // ---- query generation ---------------------------------------------------
@@ -682,7 +711,7 @@ object MetaQueryGen {
     val bareItems: Vector[(Expr, String)] = bare.zipWithIndex.map { case (sc, i) => (sc.ref, s"o$i") }
     val computed: Vector[(Expr, String)] =
       if (rng.bool(0.4)) {
-        val t = rng.oneOf(Seq(DataType.IntType, DataType.LongType, DataType.StringType, DataType.DoubleType))
+        val t = ExprGen.pick(rng, ComputedTypes)
         Vector((genValue(rng, scope, t, 2), s"o${bareItems.length}"))
       } else Vector.empty
     val items = bareItems ++ computed
@@ -752,8 +781,11 @@ object MetaQueryGen {
     s"ROWS BETWEEN ${rng.oneOf(Seq("UNBOUNDED PRECEDING", "1 PRECEDING", "0 PRECEDING"))} " +
       s"AND ${rng.oneOf(Seq("CURRENT ROW", "1 FOLLOWING", "UNBOUNDED FOLLOWING"))}"
 
+  /** A window SUM's type, as `AggExprSum.resultType` decides it: a DECIMAL
+    * keeps its type (adding in DOUBLE, a recorded gap). */
   private def sumType(dt: DataType): DataType = dt match {
     case DataType.IntType | DataType.LongType => DataType.LongType
+    case d: DataType.DecimalType => d
     case _ => DataType.DoubleType
   }
 
@@ -806,14 +838,31 @@ object MetaQueryGen {
 
   private val Numerics: Seq[DataType] =
     Seq(DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType)
+  /** The types an `IS NULL` operand takes: every type but BOOLEAN. */
+  private val ValueTypes: Seq[DataType] = ExprGen.GenTypes.filterNot(_ == DataType.BooleanType)
+  /** The types a computed projection item takes: INT, BIGINT, STRING and
+    * DOUBLE, whose arithmetic and `||` it was built for, and the four that take
+    * only the conditional forms here. */
+  private val ComputedTypes: Seq[DataType] =
+    Seq(DataType.IntType, DataType.LongType, DataType.StringType, DataType.DoubleType, DataType.DateType,
+      DataType.TimestampType, DataType.BinaryType) ++ ExprGen.DecimalTypes
   private val ArithOps = Seq("+", "-", "*", "/", "%")
   private val RelOps = Seq("<", "<=", ">", ">=", "=", "<>")
 
   private def leafProb(depth: Int): Double = if (depth <= 1) 0.6 else 0.35
 
-  /** A non-boolean value expression of `target` over `scope`. */
+  /** A non-boolean value expression of `target` over `scope`. A DATE,
+    * TIMESTAMP, BINARY or DECIMAL takes only `COALESCE` (and a DECIMAL `ABS`):
+    * no arithmetic, which the engine has none of for the first three and which
+    * throws for a DECIMAL, a recorded gap. */
   private def genValue(rng: Rng, scope: Vector[ScopeCol], target: DataType, depth: Int): Expr = {
     if (depth <= 0 || rng.bool(leafProb(depth))) genLeafValue(rng, scope, target)
+    else if (!Numerics.contains(target) && target != DataType.StringType) {
+      val coalesce = () => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(genValue(rng, scope, target, depth - 1)), target)
+      if (target.isInstanceOf[DataType.DecimalType] && rng.bool(0.3))
+        FuncExpr("ABS", Seq(genValue(rng, scope, target, depth - 1)), target)
+      else coalesce()
+    }
     else if (target == DataType.StringType)
       BinOpExpr("||", genValue(rng, scope, DataType.StringType, depth - 1),
         genValue(rng, scope, DataType.StringType, depth - 1), DataType.StringType)
@@ -824,10 +873,12 @@ object MetaQueryGen {
       (1, () => FuncExpr("ABS", Seq(genValue(rng, scope, target, depth - 1)), target)))()
   }
 
+  /** A column, a NULL or a literal of `target`. A BINARY has no literal (SQL
+    * cannot write a byte array), so it is a column or a NULL. */
   private def genLeafValue(rng: Rng, scope: Vector[ScopeCol], target: DataType): Expr = {
     val cols = scope.filter(_.dataType == target)
     if (cols.nonEmpty && rng.bool(0.8)) rng.oneOf(cols).ref
-    else if (rng.bool(0.15)) LitExpr(null, target)
+    else if (rng.bool(0.15) || target == DataType.BinaryType) LitExpr(null, target)
     else LitExpr(genLit(rng, target), target)
   }
 
@@ -851,11 +902,32 @@ object MetaQueryGen {
     def sub(t: DataType): Expr = genValue(rng, scope, t, math.max(0, depth - 1))
     val boolCols = scope.filter(_.dataType == DataType.BooleanType)
     val strCols = scope.filter(_.dataType == DataType.StringType)
+    val temporalCols = scope.filter(c => c.dataType == DataType.DateType || c.dataType == DataType.TimestampType)
+    val decimalCols = scope.filter(_.dataType.isInstanceOf[DataType.DecimalType])
+    val binaryCols = scope.filter(_.dataType == DataType.BinaryType)
     val options = scala.collection.mutable.ArrayBuffer.empty[(Int, () => Expr)]
     options += ((4, () => BinOpExpr(rng.oneOf(RelOps), sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics)), DataType.BooleanType)))
     if (strCols.nonEmpty)
       options += ((2, () => BinOpExpr(rng.oneOf(RelOps), sub(DataType.StringType), sub(DataType.StringType), DataType.BooleanType)))
-    options += ((2, () => IsNullExpr(sub(rng.oneOf(Numerics :+ DataType.StringType)), rng.bool())))
+    // A DATE or TIMESTAMP against its own type, a BINARY against a BINARY, and a
+    // DECIMAL against a decimal expression or an integer leaf: never anything
+    // that can be a FLOAT or DOUBLE, whose NaN the widening CAST refuses, which
+    // rules out an integer expression too, since a target type here is a hint
+    // and `c + 0` over a FLOAT column is a FLOAT.
+    if (temporalCols.nonEmpty) options += ((2, () => {
+      val t = rng.oneOf(temporalCols).dataType
+      BinOpExpr(rng.oneOf(RelOps), sub(t), sub(t), DataType.BooleanType)
+    }))
+    if (decimalCols.nonEmpty) options += ((2, () => {
+      val t = rng.oneOf(decimalCols).dataType
+      val other =
+        if (rng.bool(0.75)) sub(rng.oneOf(decimalCols).dataType)
+        else genLeafValue(rng, scope, rng.oneOf(Seq(DataType.IntType, DataType.LongType)))
+      BinOpExpr(rng.oneOf(RelOps), sub(t), other, DataType.BooleanType)
+    }))
+    if (binaryCols.nonEmpty)
+      options += ((1, () => BinOpExpr(rng.oneOf(RelOps), sub(DataType.BinaryType), sub(DataType.BinaryType), DataType.BooleanType)))
+    options += ((2, () => IsNullExpr(sub(ExprGen.pick(rng, ValueTypes)), rng.bool())))
     if (strCols.nonEmpty)
       options += ((1, () => LikeExpr(rng.oneOf(strCols).ref, LitExpr(rng.oneOf(Seq("%", "a%", "%a%", "_")), DataType.StringType), rng.bool())))
     if (boolCols.nonEmpty) options += ((2, () => rng.oneOf(boolCols).ref))
@@ -870,20 +942,31 @@ object MetaQueryGen {
     case DataType.DoubleType => rng.oneOf(DoublePool): Any
     case DataType.BooleanType => rng.bool(): Any
     case DataType.StringType => rng.oneOf(StringPool): Any
+    case DataType.DateType => rng.oneOf(ExprGen.DatePool): Any
+    case DataType.TimestampType => rng.oneOf(ExprGen.TimestampPool): Any
+    // Non-negative, and only what a literal can spell: see
+    // `SqlRender.writesExactly`.
+    case d: DataType.DecimalType =>
+      rng.oneOf(DataGen.DecimalPools(d).filter(v => v.signum >= 0 && SqlRender.writesExactly(v))): Any
     case other => throw new IllegalArgumentException(s"genLit: unsupported $other")
   }
 
   // ---- TLP partition-predicate selection ---------------------------------
 
-  /** Non-float, comparison-clean output types eligible as TLP partition keys. */
+  /** Non-float, comparison-clean output types eligible as TLP partition keys:
+    * a comparison of two non-NULL values of one of these is TRUE or FALSE,
+    * never UNKNOWN, so the three partitions cover every row. */
   private def isPartitionable(dt: DataType): Boolean = dt match {
     case DataType.IntType | DataType.LongType | DataType.StringType | DataType.BooleanType => true
+    case DataType.DateType | DataType.TimestampType | DataType.BinaryType | _: DataType.DecimalType => true
     case _ => false
   }
-  private def isOrdered(dt: DataType): Boolean = dt match {
-    case DataType.IntType | DataType.LongType | DataType.StringType => true
-    case _ => false
-  }
+  /** The partitionable types TLP compares with `<`, `=` and the rest: all but
+    * BOOLEAN, which partitions as a predicate of its own. */
+  private def isOrdered(dt: DataType): Boolean = isPartitionable(dt) && dt != DataType.BooleanType
+  /** The ordered types with a literal: all but BINARY, which SQL cannot write,
+    * so a BINARY output column partitions against another BINARY column. */
+  private def hasLiteral(dt: DataType): Boolean = isOrdered(dt) && dt != DataType.BinaryType
 
   /** Choose a TLP partition predicate over the query's type-reliable, non-float
     * output columns ([[QueryCore.tlpCandidates]]), or `None` when there are none. */
@@ -893,12 +976,15 @@ object MetaQueryGen {
     val orderedCols = cand.filter { case (_, t) => isOrdered(t) }
     val choices = scala.collection.mutable.ArrayBuffer.empty[(Int, () => TlpPred)]
     if (boolCols.nonEmpty) choices += ((2, () => TlpBool(rng.oneOf(boolCols))))
-    if (orderedCols.nonEmpty) {
+    val literalCols = orderedCols.filter { case (_, t) => hasLiteral(t) }
+    if (literalCols.nonEmpty) {
       choices += ((2, () => {
-        val (n, t) = rng.oneOf(orderedCols)
+        val (n, t) = rng.oneOf(literalCols)
         val (op, neg) = rng.oneOf(cmpPairs)
         TlpCmpLit(n, op, neg, SqlRender.expr(LitExpr(genLit(rng, t), t)))
       }))
+    }
+    if (orderedCols.nonEmpty) {
       // Two same-typed ordered columns -> column/column comparison.
       val byType = orderedCols.groupBy(_._2).values.filter(_.length >= 2).toSeq
       if (byType.nonEmpty) choices += ((2, () => {

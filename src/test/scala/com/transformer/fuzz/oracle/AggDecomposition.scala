@@ -102,6 +102,15 @@ object AggDecomposition {
     else Some(aggColumns(rel).map(i => rel.schema.fields(i).dataType).toSet)
   }
 
+  /** The columns [[check]] would aggregate for `mc`, each as its type and its
+    * cells, without running a query; empty when it has nothing to check. The
+    * type coverage guards read the values in them. */
+  private[fuzz] def aggregatedColumns(mc: MetaCase): Seq[(DataType, IndexedSeq[Any])] = {
+    val rel = mc.env.relations.head
+    if (rel.keyCols.isEmpty || decompositions(rel).isEmpty) Seq.empty
+    else aggColumns(rel).map(i => (rel.schema.fields(i).dataType, rel.dataset.rows.map(_(i))))
+  }
+
   /** Whether the columns [[check]] aggregates carry IEEE special values on some
     * row. `MinMaxState.merge` — the site row-order-only coverage never reaches —
     * is what the grouped side of this relation drives, so the relation is only

@@ -1352,6 +1352,14 @@ Six oracle families, in increasing semantic reach:
   `AggState` spill serde that a global aggregate (one accumulator, never flushed)
   never reaches.
 
+Every generator draws all ten of the engine's value types, and every oracle
+compares with the engine's own equality rather than the JVM's (`RowOracle`): a
+byte array by content, a decimal by value whatever its scale. Each property
+carries a coverage guard per type asserting that the type reaches the sites the
+property exercises and that the values its comparison gets wrong are present
+there; the recipe for a new type is in
+[extending.md](extending.md#add-a-property--generator).
+
 The default `bazel test //...` runs each over a small fixed-seed batch; the
 `*_fuzz_campaign` targets scale to long runs. Full mechanics, the generators, and
 recipes for adding a property or a metamorphic relation are in

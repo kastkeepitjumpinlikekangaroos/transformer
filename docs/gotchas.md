@@ -724,7 +724,7 @@ ship a fix or move something from "not done" to "done".
   in `window_exec_spill_test` and by
   `MetamorphicFuzzTest.rankWindowsReachIeeeSpecialOrderKeys`, which measures the
   thinnest chain in the corpus: a rank window lands on ~2% of seeds, a float
-  ORDER BY key on ~0.5%, and one carrying a `NaN` on ~0.06%. See
+  ORDER BY key on ~0.3%, and one carrying a `NaN` on ~0.04%. See
   [plan 06](../plans/followups/06-window-rank-peer-total-order.md).
 
 - **Byte arrays, decimals and BIGINTs past 2^53 used to compare wrongly, and
@@ -779,10 +779,11 @@ ship a fix or move something from "not done" to "done".
   Deterministic regressions in `sql_engine_test`, `hash_aggregate_spill_test`
   (row order, partition split, spill), `agg_state_serde_test`,
   `exchange_exec_test`, `hash_join_spill_test`, `window_exec_spill_test`,
-  `hash_keys_test` and `expr_batch_test`. The expression corpus (`ExprGen`) and
-  the mode-differential corpus (`DataGen` / `QueryGen`) draw decimal and binary
-  columns; the metamorphic corpus does not yet
-  ([plan 04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)).
+  `hash_keys_test` and `expr_batch_test`, and every fuzz corpus now draws
+  decimal and binary columns, as join keys too
+  ([plan 04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)), with a
+  guard per type asserting the pairs above (equal content, one value at two
+  scales, two values of one double) reach every site.
 
 - **`ABS` of a `DECIMAL` used to compute in `DOUBLE` — fixed.** `Funcs.apply`
   took a decimal's `doubleValue` like any other number's, and `VecFuncs.abs`
