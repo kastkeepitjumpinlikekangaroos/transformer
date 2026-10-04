@@ -519,35 +519,4 @@ class ModeDifferentialFuzzTest {
       groupByOrdinals = false, orderBy = Vector(OrderKey(c(0, schema), true)))
     assertAgrees(QueryCase(DataGen.Dataset(schema, rows), q))
   }
-
-  // ---- comparator unit checks (guard RowOracle.multisetEquals) -------------
-
-  @Test def multisetEqualsIgnoresRowOrder(): Unit = {
-    val s = intLong
-    val a = Vector(Array[Any](1, 10L), Array[Any](2, 20L))
-    val b = Vector(Array[Any](2, 20L), Array[Any](1, 10L))
-    assertEquals(None, RowOracle.multisetEquals(s, a, b))
-  }
-
-  @Test def multisetEqualsTolerantOnDoubleExactElsewhere(): Unit = {
-    val s = Schema(Vector(Field("k", DataType.IntType), Field("v", DataType.DoubleType)))
-    val a = Vector(Array[Any](1, 1.0), Array[Any](2, 2.0))
-    val withinTol = Vector(Array[Any](1, 1.0 + 1e-12), Array[Any](2, 2.0 - 1e-12))
-    assertEquals(None, RowOracle.multisetEquals(s, a, withinTol))
-    // A gross divergence on the Double column must still be caught.
-    val outsideTol = Vector(Array[Any](1, 1.0), Array[Any](2, 2.5))
-    assertTrue(RowOracle.multisetEquals(s, a, outsideTol).isDefined)
-    // A wrong exact (group) key is caught regardless of the Double tolerance.
-    val wrongKey = Vector(Array[Any](1, 1.0), Array[Any](3, 2.0))
-    assertTrue(RowOracle.multisetEquals(s, a, wrongKey).isDefined)
-  }
-
-  @Test def multisetEqualsCatchesCountAndNullDifferences(): Unit = {
-    val s = intLong
-    val a = Vector(Array[Any](1, 10L), Array[Any](1, 10L))
-    val fewer = Vector(Array[Any](1, 10L))
-    assertTrue(RowOracle.multisetEquals(s, a, fewer).isDefined)
-    val nullVsValue = Vector(Array[Any](null, 10L), Array[Any](1, 10L))
-    assertTrue(RowOracle.multisetEquals(s, a, nullVsValue).isDefined)
-  }
 }

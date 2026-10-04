@@ -408,7 +408,13 @@ the reject rate near zero and the property sound:
 Exclude anything non-deterministic (`RAND()`, the clock functions) or
 mode-unstable (`LIMIT` and `OFFSET` without a total order — a cutoff among tied
 rows keeps a different row subset depending on merge order). If a new shape needs a comparison tolerance, add it to
-`RowOracle.multisetEquals` (today only `Double` columns are tolerant).
+`RowOracle.multisetEquals` (today only `Double` columns are tolerant). A new
+column type needs its equality in `RowOracle.normalize` first: the oracle
+compares with the engine's `=`, which for a byte array (content) and a decimal
+(value, not scale) is not the JVM's `equals`, and a comparator that gets it
+wrong makes every property over the type vacuous or falsely red. Add a pool for
+the type to `row_oracle_test`'s `agreesWithOpsEqOnEveryNonFloatType`, which
+holds the oracle to `Ops.eq`.
 
 **To add a mode to `ModeDifferential`**: add an entry to the `modes` sequence — a
 `(label, MaterializedView, ExecutionOptions)` triple. Layout modes come from

@@ -23,6 +23,20 @@ scala_library(
     ],
 )
 
+# RowOracle on its own: the equality every property compares with, per type,
+# held to the engine's `Ops.eq`. No generation and no engine runs.
+scala_junit_test(
+    name = "row_oracle_test",
+    srcs = ["RowOracleTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 # eval-vs-evalVec parity fuzzer. Default budget (Props.DefaultSeeds) — part of
 # the normal `bazel test //...` run.
 scala_junit_test(

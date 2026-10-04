@@ -21,12 +21,45 @@ import scala.collection.mutable
   * both sides; non-overridden funcs route `evalVec` through `eval`), so any
   * value difference is a real divergence, never a rounding artifact. A
   * tolerance would mask exactly the bugs this fuzzer exists to find.
+  *
+  * Exact means the engine's own equality, which is not the JVM's for two
+  * types:
+  *
+  *   - '''A byte array''' is equal to another with the same content. Scala's
+  *     `==` on two arrays is reference equality and their `hashCode` is their
+  *     identity, so comparing BINARY cells with either would call every pair
+  *     of cells different (each cell holds its own array): falsely red. SQL
+  *     `=` compares content ([[com.transformer.sql.plan.Ops.eq]]), and so does
+  *     this oracle.
+  *   - '''A decimal''' is equal to another of the same VALUE, whatever its
+  *     scale: `1.0` equals `1.00`, because that is what `=` means in the
+  *     engine (`Ops.eq` compares with `compareTo`, and every GROUP BY,
+  *     DISTINCT and join key agrees with it). The scale is how a value is
+  *     spelled, and the engine does not keep one spelling: a GROUP BY or
+  *     DISTINCT key and `MIN`/`MAX` read back at the column's declared scale,
+  *     a spilled value reads back at the declared scale too while the
+  *     in-memory run keeps the spelling it arrived with (`1.50` for `1.5`), and
+  *     a `LIMIT` cutoff between two tied rows `1.0` and `1.00` keeps either.
+  *     `BigDecimal.equals` would report each of those as a divergence. The
+  *     comparison is still exact in value: there is no double in it, so
+  *     `1.000000000000000001` and `1.000000000000000002`, which are the same
+  *     double, are different.
+  *
+  * A DATE and a TIMESTAMP compare as the `LocalDate` and `Instant` the engine
+  * boxes them to on both paths ([[com.transformer.sql.plan.Casts]],
+  * `DateVector`, `TimestampVector`), with no conversion: an epoch-day `Int` from
+  * one path is not equal to a `LocalDate` from the other, because `Ops.eq`
+  * calls them unequal too. Mapping both to epoch days once let `ExprBatchTest`
+  * pass an `eval` that returned the `Int`.
   */
 object RowOracle {
 
   /** Coerce a boxed value to the shape implied by `dt`, so cross-boxing between
-    * the row and vector paths (Float vs Double, Int vs Long, LocalDate vs
-    * epoch-day) does not register as a mismatch. NULL passes through. */
+    * the row and vector paths (Float vs Double, Int vs Long) does not register as
+    * a mismatch, and give a byte array and a decimal the `equals` / `hashCode`
+    * of the engine's `=` (see the object comment). NULL passes through. A value
+    * of the wrong class for `dt` passes through unchanged, so it compares unequal
+    * to every value of the right one. */
   def normalize(v: Any, dt: DataType): Any = {
     if (v == null) return null
     dt match {
@@ -40,21 +73,37 @@ object RowOracle {
           case b: java.lang.Boolean => b.booleanValue
           case _ => v
         }
-      case DataType.DateType =>
+      case DataType.BinaryType =>
         v match {
-          case d: java.time.LocalDate => d.toEpochDay.toInt
-          case n: Number => n.intValue
+          case a: Array[Byte] => new Bytes(a)
           case _ => v
         }
-      case DataType.TimestampType =>
+      // One spelling per value: stripping trailing zeros maps 1.0, 1.00 and 1
+      // to the same BigDecimal, so `equals` and `hashCode` agree with
+      // `compareTo` and a multiset key groups the spellings together.
+      case _: DataType.DecimalType =>
         v match {
-          case i: java.time.Instant => i.getEpochSecond * 1000000L + i.getNano / 1000L
-          case n: Number => n.longValue
+          case d: java.math.BigDecimal => d.stripTrailingZeros
           case _ => v
         }
       case _ => v
     }
   }
+
+  /** A byte array with the content equality SQL `=` gives a BINARY, and a
+    * readable rendering for failure messages. */
+  final class Bytes(val bytes: Array[Byte]) {
+    override def equals(other: Any): Boolean = other match {
+      case b: Bytes => java.util.Arrays.equals(bytes, b.bytes)
+      case _ => false
+    }
+    override def hashCode: Int = java.util.Arrays.hashCode(bytes)
+    override def toString: String = hex(bytes)
+  }
+
+  /** `X'01ff'`, the SQL spelling of a byte string. */
+  def hex(bytes: Array[Byte]): String =
+    bytes.iterator.map(b => f"${b & 0xff}%02x").mkString("X'", "", "'")
 
   /** NULL-aware exact equality of two boxed values once both are normalized to
     * `dt`. Both NULL is equal; one NULL is not.
@@ -62,7 +111,9 @@ object RowOracle {
     * Float/Double use `compare`, not `==`: when both paths produce `NaN` they
     * AGREE, but Scala's `==` on boxed doubles is primitive `NaN == NaN` (false).
     * `compare` treats `NaN == NaN` as equal while still distinguishing `-0.0`
-    * from `0.0`, so a genuine bit-level divergence is still caught. */
+    * from `0.0`, so a genuine bit-level divergence is still caught. That is the
+    * one place this equality departs from `Ops.eq` on purpose. A decimal
+    * compares with `compareTo` and a byte array by content, as `Ops.eq` does. */
   def scalarEquals(a: Any, b: Any, dt: DataType): Boolean = {
     val na = normalize(a, dt)
     val nb = normalize(b, dt)
@@ -70,13 +121,27 @@ object RowOracle {
     (na, nb) match {
       case (x: java.lang.Double, y: java.lang.Double) => java.lang.Double.compare(x, y) == 0
       case (x: java.lang.Float, y: java.lang.Float) => java.lang.Float.compare(x, y) == 0
+      case (x: java.math.BigDecimal, y: java.math.BigDecimal) => x.compareTo(y) == 0
       case _ => na == nb
     }
   }
 
+  /** A boxed value as a failure message shows it: a byte array in hex and a
+    * decimal in plain digits with its scale, rather than `[B@1b6d3586` and
+    * `1E+2`. */
+  def show(v: Any): String = v match {
+    case null => "NULL"
+    case a: Array[Byte] => hex(a)
+    case d: java.math.BigDecimal => d.toPlainString
+    case other => other.toString
+  }
+
   /** Render a boxed value with its runtime class for failure messages. */
-  def describe(v: Any): String =
-    if (v == null) "null" else s"$v (${v.getClass.getName})"
+  def describe(v: Any): String = v match {
+    case null => "null"
+    case _: Array[Byte] => s"${show(v)} (byte[])"
+    case _ => s"${show(v)} (${v.getClass.getName})"
+  }
 
   // ---- whole-row multiset comparison (mode-differential oracle) -----------
   //
@@ -104,11 +169,14 @@ object RowOracle {
   //     not match. Both float kinds therefore go through the tolerant comparator,
   //     which is `NaN`-aware (and on which a bit-identical `Float` still compares
   //     equal — the tolerance is never actually exercised for it). Every other
-  //     column is bit-identical and compares exactly: integer `SUM` accumulates in
-  //     `Long`, `COUNT` is exact, `MIN`/`MAX` are order-independent reductions, and
-  //     projected/group-key values are copied straight from the (identical) input.
-  //     The exact columns carry the discriminating identity, so a tolerance on the
-  //     floating-point columns cannot mask a wrong group or a dropped row.
+  //     column compares exactly, under the engine's equality (`normalize`): integer
+  //     `SUM` accumulates in `Long`, `COUNT` is exact, `MIN`/`MAX` are
+  //     order-independent reductions, and projected/group-key values are copied
+  //     straight from the (identical) input. A decimal column is exact in value but
+  //     not in spelling, which spill and the GROUP BY read-back legitimately change
+  //     (see the object comment). The exact columns carry the discriminating
+  //     identity, so a tolerance on the floating-point columns cannot mask a wrong
+  //     group or a dropped row.
   //
   //     One thing the tolerance DOES hide, now that `DataGen` draws IEEE specials:
   //     `+0.0` and `-0.0` compare equal here, so a `MIN`/`MAX` that picked the
@@ -169,8 +237,9 @@ object RowOracle {
     }
 
     // Identity of a row for grouping: its exact (non-Double) cells, normalized so
-    // Int-vs-Long / Float boxing differences never split a group, with NULL mapped
-    // to a sentinel.
+    // Int-vs-Long / Float boxing differences never split a group and a byte array
+    // or a decimal hashes by the engine's equality, with NULL mapped to a
+    // sentinel.
     def exactKey(row: Array[Any]): Vector[Any] = {
       val b = Vector.newBuilder[Any]
       var c = 0

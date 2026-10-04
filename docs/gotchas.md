@@ -793,6 +793,17 @@ ship a fix or move something from "not done" to "done".
     (`COUNT`, `SUM` or `AVG(DISTINCT …)`) silently disables spill (it is not
     spillable), so the spill-on run takes the in-memory path — parity still holds,
     and the fuzzer does not special-case it.
+  - **"Exactly" is the engine's `=`, not the JVM's.** A byte array is compared
+    and hashed by content: Scala's `==` on two arrays is reference equality and
+    their `hashCode` is their identity, so every pair of BINARY cells would read
+    as different. A decimal is compared by value whatever its scale, the
+    `compareTo` that `Ops.eq` uses, because the engine does not keep a value's
+    spelling: a spilled decimal reads back at its column's declared scale while
+    the in-memory run keeps `1.5`, and a `LIMIT` cutoff between tied `1.0` and
+    `1.00` keeps either. A DATE and a TIMESTAMP compare as the `LocalDate` and
+    `Instant` both paths box, with no conversion from an epoch count, because
+    `Ops.eq` calls an epoch-day `Int` unequal to the date it counts. All three are
+    pinned by `fuzz/row_oracle_test`.
 
 - **The metamorphic TLP oracle partitions the query OUTPUT, never decomposes an
   aggregate.** `Tlp` checks `Q ≡ (Q WHERE p) ⊎ (Q WHERE NOT p) ⊎ (Q WHERE p IS
