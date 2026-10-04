@@ -122,7 +122,10 @@ ship a fix or move something from "not done" to "done".
   so an integer is read as the `DECIMAL` its every value fits rather than as the
   other side's, and a `FLOAT` or `DOUBLE` that is not written in the query is a
   bind error, since no `DECIMAL` it could be read as says how much of it the
-  result keeps (a number written in the query is the decimal of its digits). A
+  result keeps (a number written in the query is the decimal of its digits, and
+  arithmetic on numbers alone is computed in `DECIMAL` there, rebound from the
+  parse tree by `LogicalBuilder.decimalConstant`, since a bound `1 + 0.05` is a
+  `DOUBLE` whose implicit CASTs look like a written one). A
   `BINARY` casts to nothing else, explicitly or implicitly (`checkCast`, and
   `implicitCast` beneath a WHERE, LIKE or CASE), and `Analyzer.checkText` keeps
   `||` and the string functions off one: each read the array's identity hash as

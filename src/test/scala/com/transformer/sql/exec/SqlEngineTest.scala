@@ -2954,6 +2954,13 @@ class SqlEngineTest {
     // MOD is %, typed the same way.
     assertEquals((d(3, 2), Seq(dec("0.25"), dec("-0.50"), null)), typed("MOD(a, 1)"))
     assertEquals((DataType.IntType, Seq(1, 0, 1)), typed("MOD(i, 2)"))
+    // A constant beside a DECIMAL is computed in DECIMAL: alone, `1 + 0.05`
+    // and `1.5 * 2.5` are DOUBLEs. Integer arithmetic in one keeps an
+    // integer's answer, so `10 / 4` is 2 here as it is anywhere.
+    assertEquals((d(10, 4), Seq(dec("1.3125"), dec("-2.6250"), null)), typed("a * (1 + 0.05)"))
+    assertEquals((d(6, 2), Seq(dec("5.00"), dec("1.25"), null)), typed("a + 1.5 * 2.5"))
+    assertEquals((d(16, 2), Seq(dec("2.50"), dec("-5.00"), null)), typed("a * (10 / 4)"))
+    assertEquals((d(18, 3), Seq(dec("3.125"), dec("-6.250"), null)), typed("a * (10 / 4 + 0.5)"))
     // An expression over the result runs on the row path too: a sort key.
     assertEquals(Seq(2, 1), column("SELECT id FROM ta WHERE a IS NOT NULL ORDER BY a * c", cat, "id"))
     // A DOUBLE that is not written in the query has no scale for the result
@@ -2961,7 +2968,8 @@ class SqlEngineTest {
     def bindError(sql: String): String =
       try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
       catch { case e: IllegalArgumentException => e.getMessage }
-    for (sql <- Seq("SELECT a + d AS v FROM ta", "SELECT d * a AS v FROM ta", "SELECT a + CAST(1.5 AS DOUBLE) AS v FROM ta"))
+    for (sql <- Seq("SELECT a + d AS v FROM ta", "SELECT d * a AS v FROM ta", "SELECT a + CAST(1.5 AS DOUBLE) AS v FROM ta",
+                    "SELECT a * (i + 0.5) AS v FROM ta"))
       assertEquals(sql, "Arithmetic on DECIMAL(5,2) and DOUBLE is not supported: a DOUBLE has no scale for a " +
         "DECIMAL result to keep; CAST the DECIMAL to DOUBLE to compute in DOUBLE", bindError(sql))
     assertEquals((DataType.DoubleType, Seq(1.75, -1.0, null)), typed("CAST(a AS DOUBLE) + d"))

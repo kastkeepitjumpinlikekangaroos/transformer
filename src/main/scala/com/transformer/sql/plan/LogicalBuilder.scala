@@ -789,10 +789,61 @@ object LogicalBuilder {
 
   private def binopGeneric(op: String, l: Expression, r: Expression, sources: Sources,
                            aggResolver: Function => Option[Expr],
-                           windowResolver: AnalyticExpression => Option[Expr]): Expr =
-    Analyzer.arithmetic(op,
-      bindExprWithAggs(l, sources, aggResolver, windowResolver),
-      bindExprWithAggs(r, sources, aggResolver, windowResolver))
+                           windowResolver: AnalyticExpression => Option[Expr]): Expr = {
+    val le = bindExprWithAggs(l, sources, aggResolver, windowResolver)
+    val re = bindExprWithAggs(r, sources, aggResolver, windowResolver)
+    def beside(other: Expr, side: Expression, bound: Expr): Expr =
+      if (other.dataType.isInstanceOf[DataType.DecimalType]) decimalConstant(side).getOrElse(bound) else bound
+    Analyzer.arithmetic(op, beside(re, l, le), beside(le, r, re))
+  }
+
+  /** `e` as decimal arithmetic when it is a constant, numbers written in the
+    * query and `+ - * / %` and negation on them alone. Bound on its own
+    * `1 + 0.05` is a DOUBLE, which arithmetic refuses beside a DECIMAL; beside
+    * one it is computed in DECIMAL, so `price * (1 + 0.05)` is as exact as
+    * `price * 1.05`. Each number is the decimal of its digits
+    * (`Decimals.literal`) and each step is typed as `Decimals.resultType`
+    * says. A constant keeps the value it has on its own: arithmetic on
+    * integers alone is an integer's, as `10 / 4` is 2 anywhere. A CAST is no
+    * constant, since `CAST(1 AS DOUBLE)` asks for a DOUBLE. */
+  private def decimalConstant(e: Expression): Option[Expr] = {
+    def step(op: String, l: Expression, r: Expression): Option[Expr] =
+      for (x <- decimalConstant(l); y <- decimalConstant(r)) yield {
+        def declared(c: Expr) = c.dataType.asInstanceOf[DataType.DecimalType]
+        BinOpExpr(op, x, y, Decimals.resultType(op, declared(x), declared(y)))
+      }
+    e match {
+      case Grouped(inner) => decimalConstant(inner)
+      case l: LongValue => Some(Decimals.literal(java.lang.Long.valueOf(l.getValue)))
+      case d: DoubleValue => Some(Decimals.literal(java.lang.Double.valueOf(d.getValue)))
+      case s: SignedExpression if s.getSign == '+' => decimalConstant(s.getExpression)
+      case s: SignedExpression if s.getSign == '-' =>
+        decimalConstant(s.getExpression).map(c => UnaryOpExpr("-", c, c.dataType))
+      case _ if integerConstant(e) =>
+        val integer = bindExpr(e, Seq.empty)
+        Some(CastExpr(integer, Decimals.ofIntegral(integer.dataType)))
+      case a: Addition => step("+", a.getLeftExpression, a.getRightExpression)
+      case a: Subtraction => step("-", a.getLeftExpression, a.getRightExpression)
+      case a: Multiplication => step("*", a.getLeftExpression, a.getRightExpression)
+      case a: Division => step("/", a.getLeftExpression, a.getRightExpression)
+      case a: Modulo => step("%", a.getLeftExpression, a.getRightExpression)
+      case _ => None
+    }
+  }
+
+  /** Whether `e` is a constant of integers alone, which [[decimalConstant]]
+    * leaves to integer arithmetic. */
+  private def integerConstant(e: Expression): Boolean = e match {
+    case Grouped(inner) => integerConstant(inner)
+    case _: LongValue => true
+    case s: SignedExpression => integerConstant(s.getExpression)
+    case a: Addition => integerConstant(a.getLeftExpression) && integerConstant(a.getRightExpression)
+    case a: Subtraction => integerConstant(a.getLeftExpression) && integerConstant(a.getRightExpression)
+    case a: Multiplication => integerConstant(a.getLeftExpression) && integerConstant(a.getRightExpression)
+    case a: Division => integerConstant(a.getLeftExpression) && integerConstant(a.getRightExpression)
+    case a: Modulo => integerConstant(a.getLeftExpression) && integerConstant(a.getRightExpression)
+    case _ => false
+  }
   private def cmpOpGeneric(op: String, l: Expression, r: Expression, sources: Sources,
                            aggResolver: Function => Option[Expr],
                            windowResolver: AnalyticExpression => Option[Expr]): Expr = {

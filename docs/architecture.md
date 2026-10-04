@@ -836,9 +836,13 @@ instead, because the result's type depends on both sides' digits (`Decimals`,
 in `Ops.scala`). Each side becomes a `DECIMAL` of its own: an `INT` the
 `DECIMAL(10,0)` its every value fits, a `BIGINT` a `DECIMAL(19,0)`, a number
 written in the query the `DECIMAL` of just its digits (`Decimals.literal`, so
-`2.5` is a `DECIMAL(2,1)`), and `NULL` the other side's type. A `FLOAT` or
-`DOUBLE` that is not written in the query is a bind error: it has no scale for
-the result to keep. `Decimals.resultType` then declares the result as Spark and
+`2.5` is a `DECIMAL(2,1)`), and `NULL` the other side's type. Arithmetic on
+numbers alone (`1 + 0.05`) binds as a `DOUBLE`, so `LogicalBuilder.decimalConstant`
+rebinds such a constant from its parse tree when it meets a `DECIMAL`: decimal
+steps over the decimals of its numbers, but integer arithmetic within it bound
+as it is anywhere, so a constant has the value it has on its own (`10 / 4` is
+2). Any other `FLOAT` or `DOUBLE` is a bind error: it has no scale for the
+result to keep. `Decimals.resultType` then declares the result as Spark and
 SQL Server do (`*` takes `p1 + p2 + 1` digits at scale `s1 + s2`, `/` the scale
 `max(6, s1 + p2 + 1)`, past 38 digits the scale gives way, down to 6), and
 `Decimals.arith`, which both `Ops.apply` and `VecOps.arith` call, computes the

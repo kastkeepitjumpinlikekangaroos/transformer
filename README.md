@@ -793,7 +793,10 @@ larger scale and the narrower integer part; unary minus keeps its operand's
 type. Beside a `DECIMAL`, an `INT` counts as the `DECIMAL(10,0)` its every
 value fits, a `BIGINT` as a `DECIMAL(19,0)`, and a number written in the query
 as the decimal of just its digits, so `price * 1.1` is exact (`1.1` is a
-`DECIMAL(2,1)`). Past 38 digits a type gives way on its scale, down to six
+`DECIMAL(2,1)`). So is arithmetic on such numbers alone: `price * (1 + 0.05)`
+computes `1 + 0.05` in `DECIMAL`, though on its own it is a `DOUBLE`, while
+arithmetic on integers alone keeps an integer's answer (`10 / 4` is 2 there as
+anywhere). Past 38 digits a type gives way on its scale, down to six
 digits, and keeps its integer part. A result is rounded half up to its type's
 scale, and one whose integer part is too long for the type is an error naming
 it (`Decimal overflow: ... does not fit decimal(38,0)`), never a rounded or a
