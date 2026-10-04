@@ -843,9 +843,10 @@ ship a fix or move something from "not done" to "done".
     `Instant` both paths box, with no conversion from an epoch count, because
     `Ops.eq` calls an epoch-day `Int` unequal to the date it counts. All three are
     pinned by `fuzz/row_oracle_test`. A decimal `SUM` compares exactly too,
-    though it adds in DOUBLE (a gap recorded below): the corpora's decimal pools
-    hold only values whose doubles are small multiples of a quarter, so the sum
-    is exact in any order and does not move with the layout. That keeps the
+    though it adds in DOUBLE (a gap recorded below): the SQL corpora's decimal
+    pools (`DataGen.DecimalPools`) hold only values whose doubles are small
+    multiples of a quarter, so the sum is exact in any order and does not move
+    with the layout. That keeps the
     gap out of these properties, which compare modes with one another and could
     not tell a rounded sum from a right one anyway.
 

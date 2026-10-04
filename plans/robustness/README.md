@@ -32,7 +32,7 @@ at the time of the audit: `bazel test //...` 46/46 green.
 | [01](01-reject-or-honor-every-clause.md) | Reject or honor every clause the parser accepts | 18 silently-dropped clauses, incl. `USING`/`NATURAL` JOIN silently becoming a **cartesian product** | **done** 2026-10-01 | 2-3 days | medium | — |
 | [02](02-total-order-for-decimal-and-binary.md) | One total order for `Decimal` and `Binary` | `Ops.eq`/`Ops.cmp`; the repo's own bug class, in the types the float work never reached | **done** 2026-10-03 | 2-3 days | medium | — |
 | [03](03-parquet-external-format-fidelity.md) | Parquet timestamp units and `DECIMAL` | silent 1000x timestamp error; decimals read as unscaled ints or raw bytes | **done** 2026-10-03 | 1-2 days | low-med | — |
-| [04](04-widen-fuzz-corpus-to-every-type.md) | Widen the fuzz corpus to all ten types | the guard that keeps 02 and 03 fixed | open | 2-3 days | low | 02 (else red) |
+| [04](04-widen-fuzz-corpus-to-every-type.md) | Widen the fuzz corpus to all ten types | the guard that keeps 02 and 03 fixed | **done** 2026-10-03 | 2-3 days | low | 02 (else red) |
 | [05](05-frontend-robustness-fuzzer.md) | Frontend robustness fuzzer | "nothing silently dropped" + "errors are user-facing" as properties | open | 3-5 days | low | 01 (shares its clause table) |
 | [06](06-io-roundtrip-and-external-fixtures.md) | I/O round-trip properties + external parquet fixtures | the helper 03 needs, plus CSV state-machine fuzzing | open | 3-4 days | low | — (03 wants its fixture helper) |
 | [07](07-hydration-oracle-on-the-dag-corpus.md) | Hydration oracle on the existing DAG corpus | the read side of the records the DAG fuzzer already writes | open | 2 days | low | — |
@@ -65,6 +65,17 @@ defect the plan did not list: a projected scan rebuilt the file's schema from
 the writer's mapping, so it decoded `INT96` as `INT64` and threw on any
 `FIXED_LEN_BYTE_ARRAY`, and a glob whose files ordered columns differently
 swapped their values. Details in the plan's Outcome section.
+
+**Done:** plan 04. Every fuzz corpus draws all ten types (DECIMAL at three
+declared types, one per parquet layout), every oracle compares with the
+engine's own equality (`RowOracle`: content for a byte array, value for a
+decimal), and one coverage guard per type and per property asserts each type
+reaches its sites with the values its comparison gets wrong. The widened
+corpora found two `src/main` defects, both fixed first: `ABS` of a decimal
+computed in DOUBLE (and `MAX(ABS(k))` returned NULL), and a NULL-typed column,
+the only NULL a DECIMAL or BINARY has, failed every spill. The metamorphic,
+sharded and mode-differential campaigns are green at 20000 seeds each. Details
+in the plan's Outcome section.
 
 **Suggested order.** [01](01-reject-or-honor-every-clause.md) first — it has the
 worst single defect in the set (a dropped join condition is a cartesian product,
@@ -127,8 +138,8 @@ intentionally NOT done" unless noted.
 - **Date and Timestamp are fine.** Worth recording as a negative result: both are
   inferred from plain CSV and both came through the audit correct for `=`, `>`,
   `BETWEEN`, `IN`, `ORDER BY`, `GROUP BY` and `MIN`/`MAX`, including string-literal
-  coercion. They still have zero fuzz coverage, which [04](04-widen-fuzz-corpus-to-every-type.md)
-  fixes.
+  coercion. They had zero fuzz coverage until [04](04-widen-fuzz-corpus-to-every-type.md),
+  which made both join keys, sort keys and group keys in every corpus.
 
 ## Shared context
 

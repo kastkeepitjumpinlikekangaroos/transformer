@@ -89,6 +89,14 @@ wants a regression in `SqlEngineTest` when it is:
   The message should name the unsupported grouping construct, as the `GROUPING
   SETS` rejection does. Implementing them is a decision for the user, not a fix.
 
+Plan 04 probed one more family at `dbf42b1`, which the corpora cannot reach
+because they only aggregate numbers: **an aggregate or a math function binds
+over a non-number.** `SUM` or `AVG` over a DATE, TIMESTAMP, BINARY or STRING
+binds and then fails while the result drains with a raw
+`ClassCastException`, and so does `ROUND` over a STRING; `ABS` over a DATE or
+STRING binds and answers NULL for every row, holding a `DoubleVector` under the
+argument's type. Each should be a bind error naming the type.
+
 Two clauses plan 01 honoured without widening a generator to reach them, so the
 existing fuzzers are blind to both:
 
