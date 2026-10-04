@@ -224,29 +224,32 @@ class ModeDifferentialFuzzTest {
   //
   // One guard per type, each asserting both halves: the type reaches a
   // comparison and an IN list, an ORDER BY key, a GROUP BY key and a MIN/MAX
-  // argument (and, for DECIMAL, a SUM or AVG), and the column it reads there
-  // carries the values a comparison of the type gets wrong. The corpus drew none
-  // of the four until plan 04. The guards read two shared tallies of the
-  // generated corpus, one by predicate and one by site; no query runs.
+  // argument (and, for DECIMAL, a SUM or AVG and arithmetic), and the column
+  // it reads there carries the values a comparison of the type gets wrong.
+  // The corpus drew none of the four until plan 04. The guards read two shared
+  // tallies of the generated corpus, one by predicate and one by site; no
+  // query runs.
   //
   // 10000 seeds, because the thinnest chain (MIN/MAX over a decimal column
   // holding two values of one double, which only DECIMAL(38,18) has) is 23 of
   // them; generation only, well under a second. Measured over these seeds:
   //
   //                         date  timestamp  binary  decimal
-  //   comparison             508        534     425      531
-  //   IN                     266        272     297      252
-  //   ORDER BY               694        706     682      677
+  //   comparison             497        533     421      692
+  //   IN                     250        278     296      208
+  //   ORDER BY               716        726     672      683
   //   GROUP BY               612        655     639      658
-  //   MIN/MAX                247        269     249      228   (SUM/AVG decimal 375)
+  //   MIN/MAX                241        274     247      223   (SUM/AVG decimal 369,
+  //                                                             arithmetic 492)
   //
   // and the columns there holding each value pair, at comparison / IN /
-  // ORDER BY / GROUP BY / MIN/MAX: instants under a millisecond apart 271 /
-  // 164 / 406 / 373 / 145; bytes of one content 276 / 202 / 440 / 433 / 164;
-  // bytes one high bit apart 150 / 106 / 240 / 227 / 81; a decimal at two
-  // scales 204 / 112 / 279 / 275 / 101 (145 at SUM/AVG); decimals of one
-  // double 56 / 32 / 101 / 101 / 23 (46 at SUM/AVG). Each bound sits about 3x
-  // below its count.
+  // ORDER BY / GROUP BY / MIN/MAX: instants under a millisecond apart 269 /
+  // 170 / 421 / 373 / 148; bytes of one content 275 / 195 / 432 / 433 / 166;
+  // bytes one high bit apart 156 / 102 / 224 / 227 / 82; a decimal at two
+  // scales 281 / 93 / 290 / 275 / 97 (148 at SUM/AVG, 206 in arithmetic);
+  // decimals of one double 89 / 30 / 99 / 101 / 23 (49, 63); decimals a
+  // double adds wrong 114 at SUM/AVG and 140 in arithmetic. Each bound sits
+  // about 3x below its count.
 
   import DataGen.ValueTag._
   import ModeDifferentialFuzzTest.{SiteTally, predicateTally, siteTally}
@@ -295,14 +298,29 @@ class ModeDifferentialFuzzTest {
     assertShapes("decimal")
     assertValues("decimal", DecimalAtTwoScales, Seq(68, 37, 90, 90, 33))
     assertValues("decimal", DecimalsOfOneDouble, Seq(18, 10, 33, 33, 7))
-    // A decimal SUM adds in DOUBLE, so it is the aggregate the pool's dyadic
-    // values exist for (see `DataGen.DecimalPools`).
+    // A decimal SUM and AVG add exactly, which only values a DOUBLE adds wrong
+    // can tell from adding in DOUBLE, as SUM once did.
     val t = siteTally
     assertTrue(s"a DECIMAL rarely reaches SUM/AVG, ${tallyMessage(t)}", t.shapes(("SUM/AVG", "decimal")) > 125)
     assertTrue(s"a SUM/AVG DECIMAL rarely holds a decimal at two scales, ${tallyMessage(t)}",
       t.values(("SUM/AVG", DecimalAtTwoScales)) > 48)
     assertTrue(s"a SUM/AVG DECIMAL rarely holds decimals of one double, ${tallyMessage(t)}",
       t.values(("SUM/AVG", DecimalsOfOneDouble)) > 15)
+    assertTrue(s"a SUM/AVG DECIMAL rarely holds decimals a double adds wrong, ${tallyMessage(t)}",
+      t.values(("SUM/AVG", DecimalsADoubleAddsWrong)) > 37)
+  }
+
+  /** Decimal arithmetic, both halves: it reaches a projection or a filter, and
+    * the decimal columns it reads hold values a DOUBLE adds wrong and one value
+    * at two scales, the inputs on which arithmetic through `doubleValue`, or a
+    * result spelled at the wrong scale, would show. */
+  @Test def decimalArithmeticReachesDecimalsADoubleAddsWrong(): Unit = {
+    val t = predicateTally
+    assertTrue(s"decimal arithmetic is rarely generated, ${tallyMessage(t)}", t.shapes(("arithmetic", "decimal")) > 160)
+    assertTrue(s"decimal arithmetic rarely reads decimals a double adds wrong, ${tallyMessage(t)}",
+      t.values(("arithmetic", DecimalsADoubleAddsWrong)) > 45)
+    assertTrue(s"decimal arithmetic rarely reads a decimal at two scales, ${tallyMessage(t)}",
+      t.values(("arithmetic", DecimalAtTwoScales)) > 68)
   }
 
   /** Indices of the columns `q` takes `MIN`/`MAX` over, restricted to
@@ -637,9 +655,9 @@ object ModeDifferentialFuzzTest {
     orderBy ++ rest
   }
 
-  /** Every comparison and IN in `q` over one of the four types, with the
-    * columns of that type it reads: the comparison or IN, its kind, and the
-    * column indices. */
+  /** Every comparison and IN in `q` over one of the four types, and every
+    * arithmetic over a DECIMAL, with the columns of that type it reads: the
+    * site (comparison, IN or arithmetic), its kind, and the column indices. */
   private def predicates(q: QueryGen.GenQuery): Seq[(String, String, Seq[Int])] = {
     val roots: Seq[Expr] = q match {
       case p: QueryGen.ProjectQuery => p.projection.map(_._1) ++ p.where.toSeq
@@ -664,6 +682,8 @@ object ModeDifferentialFuzzTest {
         case InListExpr(child, items, _) if ExprGen.ReportedKinds(ExprGen.kind(child.dataType)) =>
           val k = ExprGen.kind(child.dataType)
           Seq(("IN", k, (child +: items).flatMap(columns(_, k))))
+        case BinOpExpr(op, l, r, t) if Seq("+", "-", "*", "/", "%").contains(op) && ExprGen.kind(t) == "decimal" =>
+          Seq(("arithmetic", "decimal", columns(l, "decimal") ++ columns(r, "decimal")))
         case _ => Seq.empty
       }
       here ++ Shrinker.childrenOf(e).flatMap(walk)

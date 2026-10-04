@@ -37,6 +37,7 @@ at the time of the audit: `bazel test //...` 46/46 green.
 | [06](06-io-roundtrip-and-external-fixtures.md) | I/O round-trip properties + external parquet fixtures | the helper 03 needs, plus CSV state-machine fuzzing | open | 3-4 days | low | — (03 wants its fixture helper) |
 | [07](07-hydration-oracle-on-the-dag-corpus.md) | Hydration oracle on the existing DAG corpus | the read side of the records the DAG fuzzer already writes | open | 2 days | low | — |
 | [08](08-unconsumed-input-failure-is-swallowed.md) | An unconsumed input's load failure is swallowed | carried over, needs a product decision first | open | half a day | low | — |
+| [09](09-branch-result-types.md) | `CASE`, `COALESCE`, `IF`, `GREATEST` and `UNION` take their first branch's type | a wider decimal in a later branch is kept under a narrower declared type, so writing or spilling it fails; `THEN 1 ELSE 2.5` is 2 | open, gated in the SQL corpora | 1-2 days | medium | needs a decision for the numeric half |
 
 **Done:** plan 01. Eighteen was an undercount: classifying every getter of every
 AST class the binder reaches turned up 93 rejections. Every clause the binder
@@ -121,13 +122,12 @@ intentionally NOT done" unless noted.
 - **No subqueries** (scalar, `IN`, `EXISTS`, derived tables in `FROM`) and **no
   `EXCEPT`/`INTERSECT`** — all five reject cleanly with a specific message, which
   is the correct behaviour for an unimplemented feature.
-- **`CAST(x AS TIMESTAMP)` is not implemented** (`CAST … AS DATE` is) and
-  **decimal arithmetic throws**. Both surface as exceptions rather than wrong
-  answers; the decimal one throws an `IllegalStateException`, which is the wrong
-  class for a missing feature. `CAST(x AS TIMESTAMP)` landed on 2026-10-02
-  (`5e25f20`); the decimal gap, with `SUM` over a decimal computing in `DOUBLE`,
-  is recorded in `docs/gotchas.md` §"What's intentionally NOT done" by
-  [02](02-total-order-for-decimal-and-binary.md).
+- **`CAST(x AS TIMESTAMP)` was not implemented** (`CAST … AS DATE` was) and
+  **decimal arithmetic threw**. Both surfaced as exceptions rather than wrong
+  answers. `CAST(x AS TIMESTAMP)` landed on 2026-10-02 (`5e25f20`), and decimal
+  arithmetic, an exact decimal `SUM` and a decimal `AVG` on 2026-10-04
+  (`8eccd9b`), after which the SQL corpora draw both (see plan 04's
+  Outcome).
 - **`LENGTH` and `SUBSTRING` count UTF-16 code units**, so a string of one
   astral character plus `ab` has `LENGTH` 4 rather than 3, and `SUBSTRING(s, 1, 1)`
   returns half a surrogate pair. Deliberate-by-default (it is what Java does);

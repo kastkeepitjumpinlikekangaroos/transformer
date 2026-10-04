@@ -25,15 +25,15 @@ import com.transformer.sql.plan._
   * this property rather than reusing the bound-`Expr` shapes from [[ExprGen]],
   * for two reasons:
   *
-  *   - '''No grouping parentheses.''' The SQL frontend rejects every grouping
-  *     paren — `(a + b)` parses to a single-element `ParenthesedExpressionList`
-  *     that the binder does not accept — so expressions must render paren-free
-  *     and rely on operator precedence. The generators only build trees that
-  *     stay type-correct under a precedence-only reparse: arithmetic operands are
-  *     numeric, `||` operands are string, comparisons are numeric-vs-numeric or
-  *     string-vs-string (never boolean), and `NOT` wraps a single atom — so the
-  *     reparsed grouping may differ but the result type never does. (Every mode
-  *     runs the identical text, so a regrouped reparse is harmless.)
+  *   - '''Paren-free, but for decimal arithmetic.''' Expressions render without
+  *     grouping parentheses and rely on operator precedence, so the generators
+  *     only build trees that stay type-correct under a precedence-only reparse:
+  *     arithmetic operands are numeric, `||` operands are string, comparisons
+  *     are numeric-vs-numeric or string-vs-string (never boolean), and `NOT`
+  *     wraps a single atom — so the reparsed grouping may differ but the result
+  *     type never does. (Every mode runs the identical text, so a regrouped
+  *     reparse is harmless.) Decimal arithmetic is the exception, rendered
+  *     with the parentheses its shape needs (see [[SqlRender]]).
   *
   *   - '''Total by construction.''' Like [[ExprGen]], nothing here can throw for
   *     in-range input: casts are numeric->numeric or anything->string (never the
@@ -378,12 +378,21 @@ object QueryGen {
   /** A value (non-boolean) expression of `target`. `target` is a hint: a
     * precedence-only reparse may widen e.g. an int sum to long, but it stays the
     * same value CATEGORY (numeric vs string), which is all the surrounding
-    * context relies on. */
-  private def genValue(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
+    * context relies on.
+    *
+    * `inBranch` marks a value inside a branch of COALESCE, IF or CASE. Those
+    * take their FIRST branch's type and keep the other branches' values as they
+    * are, so a branch with decimal arithmetic, whose type is its own
+    * (`Decimals.resultType`), can leave a value its declared DECIMAL does not
+    * hold (`1.5625` in a DECIMAL(9,2)), which the parquet writer refuses when
+    * the result spills: a recorded engine defect
+    * (`plans/robustness/09-branch-result-types.md`). A DECIMAL in a branch is
+    * built without arithmetic until that is fixed. */
+  private def genValue(rng: Rng, schema: Schema, target: DataType, depth: Int, inBranch: Boolean = false): Expr = {
     if (depth <= 0 || rng.bool(leafProb(depth))) genLeafValue(rng, schema, target)
     else if (target == DataType.StringType) genStringExpr(rng, schema, depth)
     else if (Numerics.contains(target)) genNumericExpr(rng, schema, target, depth)
-    else genOtherExpr(rng, schema, target, depth)
+    else genOtherExpr(rng, schema, target, depth, inBranch)
   }
 
   /** A column, a literal or a NULL of `target`. A BINARY has no literal (SQL
@@ -451,18 +460,24 @@ object QueryGen {
   }
 
   /** A DECIMAL, DATE, TIMESTAMP or BINARY value: the conditional forms every
-    * type has, `ABS` of a DECIMAL, and a CAST between DATE and TIMESTAMP. No
-    * arithmetic: the engine does none on the last three, and a DECIMAL's is a
-    * recorded gap that throws (`docs/gotchas.md`). No CAST into a DECIMAL or a
-    * BINARY either, since the binder reads no type name for one. */
-  private def genOtherExpr(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
-    def sub(t: DataType): Expr = genValue(rng, schema, t, depth - 1)
+    * type has, arithmetic and `ABS` of a DECIMAL, and a CAST between DATE and
+    * TIMESTAMP. The engine has no arithmetic on the last three, and no CAST
+    * into a DECIMAL or a BINARY, since the binder reads no type name for one.
+    * `inBranch` is [[genValue]]'s; the branches of COALESCE, IF and CASE are
+    * built in one, NULLIF's second argument, which is only compared, is not. */
+  private def genOtherExpr(rng: Rng, schema: Schema, target: DataType, depth: Int, inBranch: Boolean): Expr = {
+    def sub(t: DataType): Expr = genValue(rng, schema, t, depth - 1, inBranch)
+    def branch(t: DataType): Expr = genValue(rng, schema, t, depth - 1, inBranch = true)
     val base: Seq[(Int, () => Expr)] = Seq(
-      2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(target)), target)),
-      2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(target), sub(target)), target)),
-      1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
+      2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(branch(target)), target)),
+      2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), branch(target), branch(target)), target)),
+      1 -> (() => FuncExpr("NULLIF", Seq(sub(target), genValue(rng, schema, target, depth - 1)), target)),
       1 -> (() => genCase(rng, schema, target, depth)))
+    val decimalCols = (0 until schema.length).filter(i => schema.fields(i).dataType.isInstanceOf[DataType.DecimalType])
     val extra: Seq[(Int, () => Expr)] = target match {
+      case _: DataType.DecimalType if !inBranch && decimalCols.nonEmpty => Seq(
+        4 -> (() => genDecimalArith(rng, schema, target, decimalCols, depth)),
+        1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
       case _: DataType.DecimalType => Seq(1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
       case DataType.DateType => Seq(1 -> (() => CastExpr(sub(DataType.TimestampType), target)))
       case DataType.TimestampType => Seq(1 -> (() => CastExpr(sub(DataType.DateType), target)))
@@ -471,8 +486,39 @@ object QueryGen {
     rng.weighted(base ++ extra: _*)()
   }
 
+  /** `(l op r)` over decimals, for the binder to type (`Analyzer.arithmetic`).
+    * One side is an anchor, a DECIMAL column or arithmetic over one, which SQL
+    * types as a DECIMAL whatever it meets; the other is an anchor, a number,
+    * an integer leaf or a NULL, each of which a DECIMAL beside it reads as one.
+    * Other decimal values are not sides: SQL reads a number as a DOUBLE until
+    * it meets a DECIMAL, so `ABS(1.0)` or `COALESCE(1.0, NULL)` is a DOUBLE,
+    * which the binder refuses beside a DECIMAL as it refuses a FLOAT or DOUBLE
+    * column, and an integer-typed expression here can be a FLOAT (`c + 0` over
+    * a FLOAT column). `SqlRender` gives decimal arithmetic the parentheses its
+    * shape needs, so a reparse cannot group an integer column with a number
+    * either. The values are `DataGen.DecimalPools`', all small, so no answer
+    * overflows. */
+  private def genDecimalArith(
+      rng: Rng, schema: Schema, target: DataType, decimalCols: Seq[Int], depth: Int): Expr = {
+    def anchor(d: Int): Expr =
+      if (d <= 1 || rng.bool(0.6)) colRef(schema, rng.oneOf(decimalCols)) else node(d - 1)
+    def other(d: Int): Expr = rng.weighted(
+      (3, () => anchor(d)),
+      (2, () => {
+        val t = schema.fields(rng.oneOf(decimalCols)).dataType.asInstanceOf[DataType.DecimalType]
+        LitExpr(rng.oneOf(decimalLiterals(t)), t): Expr
+      }),
+      (2, () => genLeafValue(rng, schema, rng.oneOf(Seq(DataType.IntType, DataType.LongType)))),
+      (1, () => LitExpr(null, target)))()
+    def node(d: Int): Expr = {
+      val (l, r) = if (rng.bool()) (anchor(d), other(d)) else (other(d), anchor(d))
+      BinOpExpr(rng.oneOf(ArithOps), l, r, target)
+    }
+    node(depth)
+  }
+
   private def genCase(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
-    def subV: Expr = genValue(rng, schema, target, depth - 1)
+    def subV: Expr = genValue(rng, schema, target, depth - 1, inBranch = true)
     val nBranches = rng.between(1, 3)
     val branches = (0 until nBranches).map(_ => (genPredicate(rng, schema, depth - 1), subV))
     val elseE = if (rng.bool(0.6)) Some(subV) else None
@@ -529,6 +575,13 @@ object QueryGen {
     if (decimalCols.nonEmpty) options += ((3, () => {
       val t = schema.fields(rng.oneOf(decimalCols)).dataType
       BinOpExpr(rng.oneOf(RelOps), sub(t), decimalOperand(rng, schema, t, depth), DataType.BooleanType)
+    }))
+    // Decimal arithmetic, compared, so it reaches a filter as well as a
+    // projection.
+    if (decimalCols.nonEmpty) options += ((2, () => {
+      val t = schema.fields(rng.oneOf(decimalCols)).dataType
+      val arith = genDecimalArith(rng, schema, t, decimalCols, math.max(1, depth))
+      BinOpExpr(rng.oneOf(RelOps), arith, decimalOperand(rng, schema, t, depth), DataType.BooleanType)
     }))
     if (binaryCols.nonEmpty) options += ((2, () =>
       BinOpExpr(rng.oneOf(RelOps), sub(DataType.BinaryType), sub(DataType.BinaryType), DataType.BooleanType)))
@@ -603,9 +656,12 @@ object QueryGen {
 
   /** The decimals a literal of `dt` is drawn from: the column pool's
     * non-negative values that SQL can write (see `SqlRender.writesExactly`),
-    * which drops `1.000000000000000001`, a number that reads back as `1.0`. */
-  private def decimalLiterals(dt: DataType.DecimalType): IndexedSeq[java.math.BigDecimal] =
-    DataGen.DecimalPools(dt).filter(v => v.signum >= 0 && SqlRender.writesExactly(v))
+    * which drops `1.000000000000000001`, a number that reads back as `1.0`.
+    * A DECIMAL no column is declared as, an aggregate's or arithmetic's, draws
+    * from every pool. Shared with `MetaQueryGen`. */
+  private[fuzz] def decimalLiterals(dt: DataType.DecimalType): IndexedSeq[java.math.BigDecimal] =
+    DataGen.DecimalPools.getOrElse(dt, DataGen.DecimalPools.values.flatten.toIndexedSeq)
+      .filter(v => v.signum >= 0 && SqlRender.writesExactly(v))
 
   /** A small in-domain literal of `dt`, rendered to SQL — used for HAVING
     * right-hand sides. */
@@ -641,14 +697,19 @@ object QueryGen {
 }
 
 /** Renders a bound [[Expr]] (and ORDER BY clauses) to SQL text the engine's
-  * parser accepts. Renders '''paren-free''': the SQL frontend rejects every
-  * grouping parenthesis (it parses `(x)` as a `ParenthesedExpressionList` the
-  * binder does not handle), so binary/unary operators emit no surrounding
-  * parens and rely on operator precedence. [[QueryGen]] only builds trees that
-  * stay type-correct under a precedence-only reparse, so a regrouped reparse is
-  * a different-but-valid expression — harmless because every mode runs the same
-  * text. Function-call, IN-list, CAST and CASE syntax is unaffected (those
-  * parentheses are not grouping parens). */
+  * parser accepts. Renders '''paren-free''': binary/unary operators emit no
+  * surrounding parens and rely on operator precedence. [[QueryGen]] only builds
+  * trees that stay type-correct under a precedence-only reparse, so a
+  * regrouped reparse is a different-but-valid expression — harmless because
+  * every mode runs the same text. Function-call, IN-list, CAST and CASE syntax
+  * is unaffected (those parentheses are not grouping parens).
+  *
+  * Decimal arithmetic is the exception: it renders with the grouping
+  * parentheses its shape needs, so the text reparses to exactly the generated
+  * tree. Its type depends on what each side is (`Analyzer.arithmetic`), and a
+  * regrouped reparse could join an integer column with a number, a DOUBLE,
+  * which the binder refuses beside a DECIMAL. Only the parentheses precedence
+  * needs, since JSqlParser rejects some statements with three stacked ones. */
 object SqlRender {
 
   def expr(e: Expr): String = e match {
@@ -660,6 +721,8 @@ object SqlRender {
     case UnaryOpExpr("-", c, _) => s"- ${expr(c)}"
     case UnaryOpExpr("+", c, _) => s"+ ${expr(c)}"
     case UnaryOpExpr(op, _, _) => throw new IllegalArgumentException(s"SqlRender: unknown unary op '$op'")
+    case BinOpExpr(op, l, r, _: DataType.DecimalType) if ArithmeticOps(op) =>
+      s"${decimalSide(l, op, left = true)} ${binOp(op)} ${decimalSide(r, op, left = false)}"
     case BinOpExpr(op, l, r, _) => s"${expr(l)} ${binOp(op)} ${expr(r)}"
     case FuncExpr(name, args, _) => s"$name(${args.map(expr).mkString(", ")})"
     case CaseExpr(branches, elseE, _) =>
@@ -673,6 +736,20 @@ object SqlRender {
     case LikeExpr(c, p, neg, syntax) =>
       s"${expr(c)} ${if (neg) "NOT " else ""}${if (syntax.caseInsensitive) "ILIKE" else "LIKE"} ${expr(p)}"
   }
+
+  private val ArithmeticOps: Set[String] = Set("+", "-", "*", "/", "%")
+
+  /** A side of decimal arithmetic under `parentOp`, in parentheses when it is
+    * decimal arithmetic that precedence would otherwise regroup: one that
+    * binds more loosely, or as tightly on the right (`a - (b - c)`). */
+  private def decimalSide(side: Expr, parentOp: String, left: Boolean): String = side match {
+    case BinOpExpr(op, _, _, _: DataType.DecimalType) if ArithmeticOps(op) &&
+        (precedence(op) < precedence(parentOp) || (!left && precedence(op) == precedence(parentOp))) =>
+      s"(${expr(side)})"
+    case _ => expr(side)
+  }
+
+  private def precedence(op: String): Int = if (op == "+" || op == "-") 1 else 2
 
   def orderByClause(keys: Vector[QueryGen.OrderKey]): String =
     if (keys.isEmpty) "" else " ORDER BY " + keys.map(_.render).mkString(", ")

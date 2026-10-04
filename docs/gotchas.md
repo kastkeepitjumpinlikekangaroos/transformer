@@ -131,6 +131,18 @@ ship a fix or move something from "not done" to "done".
   `||` and the string functions off one: each read the array's identity hash as
   text. When a new type meets these rules, extend them; do not loosen them
   (see the strictness entry in [conventions.md](conventions.md)).
+- **The value branches of `CASE`, `COALESCE`, `IF`, `GREATEST` / `LEAST` and
+  the arms of a `UNION` do not go through `Analyzer.unify` — open.** Each takes
+  its first branch's type (`CASE` its first non-NULL `THEN`, the functions
+  `Funcs.widestNonNull`, whose `widerNumeric` picks the first of two decimals,
+  a `UNION` its first arm's) and casts the rest to it. A cast between decimals
+  keeps the value, so a later branch with more digits is held under a type that
+  cannot hold it, and the parquet writer refuses it when the result is written
+  or spills; `THEN 1 ELSE 2.5` truncates to the `INT` 2, and a `UNION` of an
+  `INT` arm and a `STRING` arm declares `INT` and carries strings. Decimal
+  arithmetic made two decimal types meet in one branch list, so the SQL corpora
+  gate it out of branches by name until this is fixed
+  ([plans/robustness/09](../plans/robustness/09-branch-result-types.md)).
 - **The clock keywords are a `TimeKeyExpression`, spelled as written.**
   `current_date`, `CURRENT_DATE()` and DB2's `CURRENT DATE` arrive as three
   different strings, and `CURRENT_DATE ()`, with a space, arrives as a
@@ -894,7 +906,18 @@ ship a fix or move something from "not done" to "done".
     pinned by `fuzz/row_oracle_test`. A decimal `SUM`, `AVG` or arithmetic
     result compares exactly too: each is computed exactly and fitted to its
     declared type, so none moves with the layout, as a `DOUBLE` sum of the same
-    values would, and the comparison needs no tolerance.
+    values would, and the comparison needs no tolerance. The SQL corpora's
+    decimal pools (`DataGen.DecimalPools`) hold values a `DOUBLE` adds wrong
+    (`0.1` and `0.2`), so an answer computed through `doubleValue` would show.
+    One decimal shape is gated out, by name: arithmetic as a branch of
+    `COALESCE`, `IF` or `CASE` (`QueryGen.genValue`'s and
+    `MetaQueryGen.genValue`'s `inBranch`). Those take their first branch's
+    type and keep the other branches' values as they are, so a branch with a
+    wider decimal (`1.5625` under a `DECIMAL(9,2)`) is a value its column's type
+    does not hold, which the parquet writer refuses when the result spills. That
+    is an engine defect, recorded in
+    [plans/robustness/09](../plans/robustness/09-branch-result-types.md);
+    removing the gate is the proof it is fixed.
 
 - **The metamorphic TLP oracle partitions the query OUTPUT, never decomposes an
   aggregate.** `Tlp` checks `Q ≡ (Q WHERE p) ⊎ (Q WHERE NOT p) ⊎ (Q WHERE p IS
@@ -965,9 +988,14 @@ ship a fix or move something from "not done" to "done".
   supported". `LTRIM`/`RTRIM` parse as ordinary `Function`s and are simply
   unknown functions.
 
-  `QueryGen` / `MetaQueryGen` still render paren-free — that is now an unused
-  widening opportunity rather than a constraint (see
-  [testing.md](testing.md#property-based-testing-fuzz)).
+  `QueryGen` / `MetaQueryGen` still render paren-free but for decimal
+  arithmetic — that is now an unused widening opportunity rather than a
+  constraint (see [testing.md](testing.md#property-based-testing-fuzz)).
+  Decimal arithmetic takes the parentheses its shape needs and no more,
+  because JSqlParser rejects some statements with three stacked: `SELECT
+  IF(c0 LIKE '%', 1, 2) AS p0, ABS((((c1 - c1) * c1) % 1.0)) AS p1 FROM t`
+  fails to parse, while either select item alone, or the same item with one
+  pair fewer, parses (`SqlRender.decimalSide`).
 
 - **A named `ORDER BY` key binds against the scope at that point in the plan, not
   against the SELECT list.** `ORDER BY` resolves its columns where the sort sits:

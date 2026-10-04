@@ -377,26 +377,31 @@ class MetamorphicFuzzTest {
   // top-n's), a GROUP BY key, the aggregate-decomposition relation's MIN/MAX
   // and a TLP partition key, and the base-relation column it reads at each
   // (all but TLP, which partitions computed output) holds the values a
-  // comparison of the type gets wrong. `MetaQueryGen` drew none of the four
-  // until plan 04. The guards read one shared tally of the generated corpus.
+  // comparison of the type gets wrong. A DECIMAL also reaches arithmetic, a
+  // SUM or AVG, and the decomposition's SUM, over values a DOUBLE adds wrong.
+  // `MetaQueryGen` drew none of the four until plan 04. The guards read one
+  // shared tally of the generated corpus.
   //
   // Over the campaign's 20000 seeds, generation only (about a second):
   //
   //                  date  timestamp  binary  decimal
-  //   join key       1742       1748    1791     1753
-  //   comparison     2621       2668    2358     2811
-  //   ORDER BY       2201       2345    2282     2299
-  //   GROUP BY        940        879     932      906
+  //   join key       1735       1750    1795     1745
+  //   comparison     2579       2660    2353     3399
+  //   ORDER BY       2248       2347    2302     2324
+  //   GROUP BY        890        867     913      933
   //   MIN/MAX        4537       4603    4530     4562
-  //   TLP key        2370       2453     508     2625   (a BINARY only against
+  //   TLP key        2371       2428     501     2775   (a BINARY only against
   //                                                       another BINARY column)
   //
   // and the columns holding each value pair, at join key / comparison / ORDER
-  // BY / GROUP BY / MIN/MAX: instants under a millisecond apart 1374 / 1428 /
-  // 1122 / 380 / 2088; bytes of one content 1648 / 1522 / 1316 / 470 / 2456;
-  // bytes one high bit apart 639 / 589 / 477 / 180 / 895; a decimal at two
-  // scales 840 / 865 / 639 / 237 / 1146; decimals of one double 212 / 222 /
-  // 197 / 46 / 336. Each bound sits about 3x below its count.
+  // BY / GROUP BY / MIN/MAX: instants under a millisecond apart 1372 / 1428 /
+  // 1115 / 367 / 2088; bytes of one content 1652 / 1525 / 1343 / 458 / 2456;
+  // bytes one high bit apart 638 / 583 / 488 / 178 / 895; a decimal at two
+  // scales 847 / 1082 / 621 / 251 / 1146; decimals of one double 211 / 293 /
+  // 191 / 61 / 336. Decimal arithmetic on 1341 seeds, SUM or AVG of a decimal
+  // on 732 and the decomposition's decimal SUM on 4562, reading decimals a
+  // double adds wrong on 260, 110 and 879. Each bound sits about 3x below its
+  // count.
 
   import DataGen.ValueTag._
   import MetamorphicFuzzTest.{Tally, typeTally}
@@ -443,6 +448,20 @@ class MetamorphicFuzzTest {
     assertShapes("decimal")
     assertValues("decimal", DecimalAtTwoScales, Seq(280, 285, 210, 79, 380))
     assertValues("decimal", DecimalsOfOneDouble, Seq(70, 74, 65, 15, 110))
+  }
+
+  /** Where a decimal is added up: arithmetic, a SUM or AVG, and the
+    * aggregate-decomposition relation's SUM, which drives `DecimalSumState`'s
+    * merge and spill against the one-shot answer. Each over columns holding
+    * values a DOUBLE adds wrong, without which an answer computed through
+    * `doubleValue` would pass as exact. */
+  @Test def decimalsAreAddedUpOverValuesADoubleAddsWrong(): Unit = {
+    for ((site, shapeFloor, valueFloor) <- Seq(("arithmetic", 440, 85), ("SUM/AVG", 240, 36), ("decomposed SUM", 1500, 290))) {
+      assertTrue(s"a DECIMAL rarely reaches $site, ${tallyMessage(typeTally)}",
+        typeTally.shapes((site, "decimal")) > shapeFloor)
+      assertTrue(s"a DECIMAL at $site rarely holds decimals a double adds wrong, ${tallyMessage(typeTally)}",
+        typeTally.values((site, DecimalsADoubleAddsWrong)) > valueFloor)
+    }
   }
 
   /** The join-commutativity relation must actually RUN, not skip, on a healthy
@@ -886,6 +905,8 @@ object MetamorphicFuzzTest {
             reported(ExprGen.kind(l.dataType)) =>
             val k = ExprGen.kind(l.dataType)
             out += (("comparison", k, cellsOf(q.from, refs(l, k) ++ refs(r, k))))
+          case BinOpExpr(op, l, r, t) if Seq("+", "-", "*", "/", "%").contains(op) && ExprGen.kind(t) == "decimal" =>
+            out += (("arithmetic", "decimal", cellsOf(q.from, refs(l, "decimal") ++ refs(r, "decimal"))))
           case _ => ()
         }
         Shrinker.childrenOf(e).foreach(comparisons)
@@ -896,6 +917,13 @@ object MetamorphicFuzzTest {
           a.groupKeys.foreach { case (e, _) =>
             val k = ExprGen.kind(e.dataType)
             if (reported(k)) out += (("GROUP BY", k, cellsOf(q.from, refs(e, k))))
+          }
+          a.aggs.foreach {
+            case (QueryGen.Sum(c: ColRefExpr, _), _) if ExprGen.kind(c.dataType) == "decimal" =>
+              out += (("SUM/AVG", "decimal", cellsOf(q.from, Seq(c))))
+            case (QueryGen.Avg(c: ColRefExpr, _), _) if ExprGen.kind(c.dataType) == "decimal" =>
+              out += (("SUM/AVG", "decimal", cellsOf(q.from, Seq(c))))
+            case _ => ()
           }
         case _ => ()
       }
@@ -922,9 +950,11 @@ object MetamorphicFuzzTest {
       }
     }
 
-    // MIN/MAX through the aggregate-decomposition relation, over its columns.
+    // MIN/MAX through the aggregate-decomposition relation, over its columns,
+    // and SUM over the decimal ones.
     AggDecomposition.aggregatedColumns(mc).foreach { case (dt, cells) =>
       if (reported(ExprGen.kind(dt))) out += (("MIN/MAX", ExprGen.kind(dt), cells))
+      if (ExprGen.kind(dt) == "decimal") out += (("decomposed SUM", "decimal", cells))
     }
 
     // The TLP partition key, an output column.

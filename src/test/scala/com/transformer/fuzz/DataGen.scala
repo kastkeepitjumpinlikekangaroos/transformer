@@ -32,7 +32,7 @@ import com.transformer.core._
   * high bit apart, instants under a millisecond apart) collide here as keys.
   * Every BINARY cell is its own array, as in any vector the engine reads, so
   * equal content never shares an object. A DECIMAL column draws from
-  * [[DecimalPools]], which keeps to values a `SUM` can add: see there.
+  * [[DecimalPools]], whose values a DOUBLE cannot add: see there.
   */
 object DataGen {
 
@@ -219,24 +219,21 @@ object DataGen {
     * negative; the widest also holds `1.000000000000000001` and `...002`, which
     * are different values and the same double as `1`.
     *
-    * Every value fits its declared precision and scale, and as a double every
-    * one is a small multiple of a quarter (`1.000000000000000001` is `1.0`).
-    * That is for `SUM`, which keeps a decimal's type but adds in DOUBLE (a gap
-    * `docs/gotchas.md` records): over these values the double sum is exact in
-    * any order, so a SUM agrees across layouts to the last digit and the
-    * result fits the declared scale, which a spill writes it at and refuses to
-    * round to. A value off either would fail a spill the in-memory run passes,
-    * or move a SUM with the order rows arrive in, which is the gap itself and
-    * not the properties' business. The pools in `ExprGen` add nothing up, so
-    * they run to the edge of their precision instead. */
+    * Most of them are values a DOUBLE holds only nearly (`0.1`, `0.2`,
+    * `33.33`), side by side too, so a `SUM`, an `AVG` or an arithmetic answer
+    * computed in DOUBLE would be off in its last digits, and would move with
+    * the order rows arrive in, which is what the layout properties compare.
+    * Every value fits its declared precision and scale, and none is large, so
+    * no generated arithmetic overflows its declared type. The pools in
+    * `ExprGen` run to the edge of their precision instead. */
   private[fuzz] val DecimalPools: Map[DataType, IndexedSeq[java.math.BigDecimal]] = Map[DataType, Seq[String]](
     DataType.DecimalType(9, 2) ->
-      Seq("-2.50", "-0.25", "0", "0.00", "1", "1.0", "1.00", "1.25", "2.5", "100.75"),
+      Seq("-2.50", "-0.07", "0", "0.00", "1", "1.0", "1.00", "0.10", "0.20", "33.33"),
     DataType.DecimalType(18, 4) ->
-      Seq("-2.5", "-0.25", "0", "0.0000", "1", "1.0", "1.0000", "1.25", "2.5", "100.75"),
+      Seq("-2.5", "-0.0001", "0", "0.0000", "1", "1.0", "1.0000", "0.1", "0.2", "0.3333"),
     DataType.DecimalType(38, 18) ->
       Seq("-2.5", "0", "1", "1.0", "1.000000000000000000", "1.000000000000000001", "1.000000000000000002",
-        "1.25", "2.5")
+        "0.1", "0.2")
   ).map { case (t, xs) => t -> xs.map(new java.math.BigDecimal(_)).toIndexedSeq }
 
   /** `base` plus a prefix of [[SpecialDoubles]], on [[SpecialValueProb]] of the
@@ -286,6 +283,10 @@ object DataGen {
     /** Two decimal values that are one double: unequal to `=`, equal through
       * `doubleValue`. */
     case object DecimalsOfOneDouble extends ValueTag("decimals of one double")
+    /** Two decimals whose sum in DOUBLE is not their sum (`0.1` and `0.2`):
+      * what a `SUM`, an `AVG` or arithmetic computed through `doubleValue`
+      * gets wrong. */
+    case object DecimalsADoubleAddsWrong extends ValueTag("decimals a double adds wrong")
     /** Two instants under a millisecond apart: unequal to `=`, equal in
       * milliseconds. */
     case object InstantsUnderAMillisecondApart extends ValueTag("instants under a millisecond apart")
@@ -293,7 +294,7 @@ object DataGen {
     /** The tags a value of `kind` (`ExprGen.kind`) can carry. */
     def of(kind: String): Seq[ValueTag] = kind match {
       case "binary" => Seq(BytesOfOneContent, BytesOneHighBitApart)
-      case "decimal" => Seq(DecimalAtTwoScales, DecimalsOfOneDouble)
+      case "decimal" => Seq(DecimalAtTwoScales, DecimalsOfOneDouble, DecimalsADoubleAddsWrong)
       case "timestamp" => Seq(InstantsUnderAMillisecondApart)
       case _ => Seq.empty
     }
@@ -327,6 +328,10 @@ object DataGen {
         tags += DecimalAtTwoScales
       if (decimals.groupBy(_.doubleValue).values.exists(_.map(_.stripTrailingZeros).distinct.size > 1))
         tags += DecimalsOfOneDouble
+      val distinct = decimals.map(_.stripTrailingZeros).distinct
+      if (distinct.exists(a => distinct.exists(b =>
+          java.math.BigDecimal.valueOf(a.doubleValue + b.doubleValue).compareTo(a.add(b)) != 0)))
+        tags += DecimalsADoubleAddsWrong
     }
 
     val micros = values.collect { case i: java.time.Instant => i.getEpochSecond * 1000000L + i.getNano / 1000L }

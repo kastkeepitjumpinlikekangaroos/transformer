@@ -27,12 +27,14 @@ import com.transformer.sql.plan._
   *     same-category — the same discipline [[QueryGen]] uses so a precedence-only
   *     reparse stays type-correct. Every one of the ten types is a column type
   *     (and all but FLOAT, DOUBLE and BOOLEAN a join-key type); a DATE,
-  *     TIMESTAMP or BINARY meets only its own type, a DECIMAL meets decimals and
-  *     integer columns or literals, and none of the four does arithmetic.
+  *     TIMESTAMP or BINARY meets only its own type and does no arithmetic, and
+  *     a DECIMAL meets decimals and integer columns or literals, in a
+  *     comparison or in arithmetic.
   *
   *   - '''Total + paren-free.''' Nothing here builds a tree that throws for
-  *     in-range input or that needs a grouping paren (the SQL frontend rejects
-  *     grouping parens). So a query that binds also runs, in every mode.
+  *     in-range input, and expressions render without grouping parens but for
+  *     decimal arithmetic, which takes the ones its shape needs (`SqlRender`).
+  *     So a query that binds also runs, in every mode.
   *
   * Excluded so the output multiset is well-defined for the metamorphic relations:
   * `RAND()` and the clock functions, which are mode-dependent. `LIMIT` and
@@ -246,12 +248,9 @@ object MetaQueryGen {
   /** The result type of an aggregate spec (the engine's `AggExpr.resultType`). */
   private def aggType(spec: QueryGen.AggSpec): DataType = spec match {
     case QueryGen.CountStar | _: QueryGen.Count | _: QueryGen.CountIf => DataType.LongType
-    case QueryGen.Sum(arg, _) => arg.dataType match {
-      case DataType.IntType | DataType.LongType => DataType.LongType
-      case DataType.FloatType | DataType.DoubleType => DataType.DoubleType
-      case other => other
-    }
-    case _: QueryGen.Avg | _: QueryGen.Stat | _: QueryGen.Bivar => DataType.DoubleType
+    case QueryGen.Sum(arg, _) => AggExprSum(arg).resultType
+    case QueryGen.Avg(arg, _) => AggExprAvg(arg).resultType
+    case _: QueryGen.Stat | _: QueryGen.Bivar => DataType.DoubleType
     case QueryGen.Min(arg) => arg.dataType
     case QueryGen.Max(arg) => arg.dataType
   }
@@ -757,7 +756,7 @@ object MetaQueryGen {
         WinItem(s"SUM(${c.qualified}) ${over(orderBy)}", name, sumType(c.dataType),
           tieSensitive = true, orderCols) }))
       choices += ((1, () => { val c = rng.oneOf(numeric)
-        WinItem(s"AVG(${c.qualified}) ${over(orderBy)}", name, DataType.DoubleType,
+        WinItem(s"AVG(${c.qualified}) ${over(orderBy)}", name, avgType(c.dataType),
           tieSensitive = true, orderCols) }))
       choices += ((1, () => { val c = rng.oneOf(numeric)
         WinItem(s"SUM(${c.qualified}) OVER (${Seq(partBy, orderBy, frame(rng)).filter(_.nonEmpty).mkString(" ")})",
@@ -766,7 +765,7 @@ object MetaQueryGen {
       choices += ((2, () => { val c = rng.oneOf(numeric)
         WinItem(s"SUM(${c.qualified}) ${over("")}", name, sumType(c.dataType), tieSensitive = false) }))
       choices += ((1, () => { val c = rng.oneOf(numeric)
-        WinItem(s"AVG(${c.qualified}) ${over("")}", name, DataType.DoubleType, tieSensitive = false) }))
+        WinItem(s"AVG(${c.qualified}) ${over("")}", name, avgType(c.dataType), tieSensitive = false) }))
     }
     choices += ((1, () => { val c = rng.oneOf(scope)
       WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType,
@@ -781,13 +780,10 @@ object MetaQueryGen {
     s"ROWS BETWEEN ${rng.oneOf(Seq("UNBOUNDED PRECEDING", "1 PRECEDING", "0 PRECEDING"))} " +
       s"AND ${rng.oneOf(Seq("CURRENT ROW", "1 FOLLOWING", "UNBOUNDED FOLLOWING"))}"
 
-  /** A window SUM's type, as `AggExprSum.resultType` decides it: a DECIMAL
-    * keeps its type (adding in DOUBLE, a recorded gap). */
-  private def sumType(dt: DataType): DataType = dt match {
-    case DataType.IntType | DataType.LongType => DataType.LongType
-    case d: DataType.DecimalType => d
-    case _ => DataType.DoubleType
-  }
+  /** A window SUM's and AVG's types over a column of `dt`, as the engine's
+    * `AggExprSum` and `AggExprAvg` decide them. */
+  private def sumType(dt: DataType): DataType = AggExprSum(ColRefExpr(0, "", dt)).resultType
+  private def avgType(dt: DataType): DataType = AggExprAvg(ColRefExpr(0, "", dt)).resultType
 
   private def genAggCore(rng: Rng, scope: Vector[ScopeCol]): AggCore = {
     // Group keys: bare non-float scope columns (float group keys are legal but a
@@ -852,16 +848,26 @@ object MetaQueryGen {
   private def leafProb(depth: Int): Double = if (depth <= 1) 0.6 else 0.35
 
   /** A non-boolean value expression of `target` over `scope`. A DATE,
-    * TIMESTAMP, BINARY or DECIMAL takes only `COALESCE` (and a DECIMAL `ABS`):
-    * no arithmetic, which the engine has none of for the first three and which
-    * throws for a DECIMAL, a recorded gap. */
-  private def genValue(rng: Rng, scope: Vector[ScopeCol], target: DataType, depth: Int): Expr = {
+    * TIMESTAMP or BINARY takes only `COALESCE`, which the engine has no
+    * arithmetic for, and a DECIMAL `COALESCE`, `ABS` and arithmetic
+    * ([[genDecimalArith]]). `inBranch` is `QueryGen.genValue`'s: a COALESCE
+    * takes its first branch's type, so a DECIMAL in a branch is built without
+    * arithmetic (`plans/robustness/09-branch-result-types.md`). */
+  private def genValue(rng: Rng, scope: Vector[ScopeCol], target: DataType, depth: Int,
+                       inBranch: Boolean = false): Expr = {
     if (depth <= 0 || rng.bool(leafProb(depth))) genLeafValue(rng, scope, target)
     else if (!Numerics.contains(target) && target != DataType.StringType) {
-      val coalesce = () => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(genValue(rng, scope, target, depth - 1)), target)
-      if (target.isInstanceOf[DataType.DecimalType] && rng.bool(0.3))
-        FuncExpr("ABS", Seq(genValue(rng, scope, target, depth - 1)), target)
-      else coalesce()
+      def coalesce(): Expr =
+        FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(genValue(rng, scope, target, depth - 1, inBranch = true)), target)
+      target match {
+        case _: DataType.DecimalType =>
+          val decimalCols = scope.filter(_.dataType.isInstanceOf[DataType.DecimalType])
+          val abs = (3, () => FuncExpr("ABS", Seq(genValue(rng, scope, target, depth - 1, inBranch)), target))
+          val arith = (4, () => genDecimalArith(rng, scope, target, decimalCols, depth))
+          val options = Seq((5, () => coalesce()), abs) ++ (if (inBranch || decimalCols.isEmpty) Nil else Seq(arith))
+          rng.weighted[() => Expr](options: _*)()
+        case _ => coalesce()
+      }
     }
     else if (target == DataType.StringType)
       BinOpExpr("||", genValue(rng, scope, DataType.StringType, depth - 1),
@@ -871,6 +877,30 @@ object MetaQueryGen {
         genValue(rng, scope, rng.oneOf(Numerics), depth - 1), target)),
       (2, () => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(genValue(rng, scope, target, depth - 1)), target)),
       (1, () => FuncExpr("ABS", Seq(genValue(rng, scope, target, depth - 1)), target)))()
+  }
+
+  /** `(l op r)` over decimals, as `QueryGen.genDecimalArith` builds it: one
+    * side an anchor, a DECIMAL column in scope or arithmetic over one, which
+    * SQL types as a DECIMAL whatever it meets, and the other an anchor, a
+    * number, an integer leaf or a NULL. Never a FLOAT or DOUBLE, or a decimal
+    * value SQL would type as one (`ABS(1.0)`), which the binder refuses beside
+    * a DECIMAL. */
+  private def genDecimalArith(
+      rng: Rng, scope: Vector[ScopeCol], target: DataType, decimalCols: Vector[ScopeCol], depth: Int): Expr = {
+    def anchor(d: Int): Expr = if (d <= 1 || rng.bool(0.6)) rng.oneOf(decimalCols).ref else node(d - 1)
+    def other(d: Int): Expr = rng.weighted(
+      (3, () => anchor(d)),
+      (2, () => {
+        val t = rng.oneOf(decimalCols).dataType
+        LitExpr(genLit(rng, t), t): Expr
+      }),
+      (2, () => genLeafValue(rng, scope, rng.oneOf(Seq(DataType.IntType, DataType.LongType)))),
+      (1, () => LitExpr(null, target)))()
+    def node(d: Int): Expr = {
+      val (l, r) = if (rng.bool()) (anchor(d), other(d)) else (other(d), anchor(d))
+      BinOpExpr(rng.oneOf(ArithOps), l, r, target)
+    }
+    node(depth)
   }
 
   /** A column, a NULL or a literal of `target`. A BINARY has no literal (SQL
@@ -925,6 +955,13 @@ object MetaQueryGen {
         else genLeafValue(rng, scope, rng.oneOf(Seq(DataType.IntType, DataType.LongType)))
       BinOpExpr(rng.oneOf(RelOps), sub(t), other, DataType.BooleanType)
     }))
+    // Decimal arithmetic, compared, so it reaches a filter and a join
+    // condition as well as a projection.
+    if (decimalCols.nonEmpty) options += ((2, () => {
+      val t = rng.oneOf(decimalCols).dataType
+      val arith = genDecimalArith(rng, scope, t, decimalCols, math.max(1, depth))
+      BinOpExpr(rng.oneOf(RelOps), arith, sub(rng.oneOf(decimalCols).dataType), DataType.BooleanType)
+    }))
     if (binaryCols.nonEmpty)
       options += ((1, () => BinOpExpr(rng.oneOf(RelOps), sub(DataType.BinaryType), sub(DataType.BinaryType), DataType.BooleanType)))
     options += ((2, () => IsNullExpr(sub(ExprGen.pick(rng, ValueTypes)), rng.bool())))
@@ -944,10 +981,7 @@ object MetaQueryGen {
     case DataType.StringType => rng.oneOf(StringPool): Any
     case DataType.DateType => rng.oneOf(ExprGen.DatePool): Any
     case DataType.TimestampType => rng.oneOf(ExprGen.TimestampPool): Any
-    // Non-negative, and only what a literal can spell: see
-    // `SqlRender.writesExactly`.
-    case d: DataType.DecimalType =>
-      rng.oneOf(DataGen.DecimalPools(d).filter(v => v.signum >= 0 && SqlRender.writesExactly(v))): Any
+    case d: DataType.DecimalType => rng.oneOf(QueryGen.decimalLiterals(d)): Any
     case other => throw new IllegalArgumentException(s"genLit: unsupported $other")
   }
 

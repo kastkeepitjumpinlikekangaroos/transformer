@@ -29,12 +29,13 @@ import com.transformer.sql.plan._
   * a DATE or TIMESTAMP is compared only with its own type (the binder refuses
   * any other pairing), a BINARY is never read as text (the binder refuses a
   * CAST from one, `||` and the string functions), and there is no arithmetic
-  * on a DECIMAL, a DATE, a TIMESTAMP or a BINARY. The engine has none for the
-  * last three; a DECIMAL's is a gap `docs/gotchas.md` records, which throws
-  * rather than answering, so generating it would test nothing but the throw.
-  * Every other shape takes all four: comparisons and `IN` (a DECIMAL against
-  * every number, FLOAT and DOUBLE included), `IS NULL`, `COALESCE` / `IF` /
-  * `NULLIF` / `CASE`, the CASTs that never throw, and `ABS` of a DECIMAL.
+  * on a DATE, a TIMESTAMP or a BINARY, which the engine has none of. Decimal
+  * arithmetic is built the way the binder builds it ([[genDecimalArith]]),
+  * over sides whose answers its declared type always holds, so it never
+  * overflows. Every other shape takes all four: comparisons and `IN` (a
+  * DECIMAL against every number, FLOAT and DOUBLE included), `IS NULL`,
+  * `COALESCE` / `IF` / `NULLIF` / `CASE`, the CASTs that never throw, and
+  * `ABS` and negation of a DECIMAL.
   *
   * Float and double leaves draw `NaN`, `±Infinity` and `-0.0` at a low rate
   * ([[SpecialFloatProb]]), and those operands reach ordering comparisons and
@@ -656,8 +657,7 @@ object ExprGen {
 
   /** A DECIMAL, DATE, TIMESTAMP or BINARY expression: the conditional forms
     * every type has, and a CAST in from the types that cast to `target` without
-    * throwing. A DECIMAL also takes unary `+` and `ABS`; it takes no arithmetic
-    * and no negation (see the object comment). */
+    * throwing. A DECIMAL also takes arithmetic, unary `+` and `-`, and `ABS`. */
   private def genOther(r: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
     val base: Seq[(Int, () => Expr)] = Seq(
@@ -667,12 +667,128 @@ object ExprGen {
       1 -> (() => genCaseExpr(r, schema, target, depth)))
     val extra: Seq[(Int, () => Expr)] = target match {
       case _: DataType.DecimalType => Seq(
+        4 -> (() => genDecimalArith(r, schema, target)),
         1 -> (() => genCastTo(r, schema, target, depth)),
-        1 -> (() => UnaryOpExpr("+", sub(target), target)),
+        1 -> (() => UnaryOpExpr(r.oneOf(Seq("+", "-")), sub(target), target)),
         1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
       case DataType.DateType | DataType.TimestampType => Seq(1 -> (() => genCastTo(r, schema, target, depth)))
       case _ => Seq.empty
     }
     r.weighted(base ++ extra: _*)()
+  }
+
+  // ---- decimal arithmetic -------------------------------------------------
+
+  /** `l op r` over decimals, built as the binder builds it
+    * (`Analyzer.arithmetic`): each side a DECIMAL, an INT or BIGINT under a
+    * CAST to the DECIMAL its every value fits, or a number written as the
+    * DECIMAL of its digits (`Decimals.literal`), and the node declared as
+    * `Decimals.resultType` says. Under a CAST to `target` when that is another
+    * DECIMAL, as a COALESCE or a comparison beside a `target` would cast it.
+    *
+    * The sides are leaves, whose values fit the types they are declared as,
+    * and an operator is drawn over them only where its type keeps every
+    * integer digit its answer can need ([[holdsEveryAnswer]]), so no answer
+    * overflows and the generator stays total. The pairs that fail it are the
+    * widest products and quotients, whose types give way on integer digits
+    * past 38 digits; their overflow is pinned by `ExprBatchTest`. */
+  private def genDecimalArith(r: Rng, schema: Schema, target: DataType): Expr = {
+    val (l, lt) = decimalSide(r, schema)
+    val (rr, rt) = decimalSide(r, schema)
+    // "%" always holds every answer, so there is an operator to draw.
+    val op = r.oneOf(ArithOps.filter(holdsEveryAnswer(_, lt, rt)))
+    val t = Decimals.resultType(op, lt, rt)
+    val node = BinOpExpr(op, l, rr, t)
+    if (t == target) node else CastExpr(node, target)
+  }
+
+  /** One side of decimal arithmetic, and the DECIMAL it is declared as. */
+  private def decimalSide(r: Rng, schema: Schema): (Expr, DataType.DecimalType) = {
+    def written(n: Number): (Expr, DataType.DecimalType) = {
+      val lit = Decimals.literal(n)
+      (lit, lit.dataType.asInstanceOf[DataType.DecimalType])
+    }
+    r.weighted(
+      (4, () => {
+        val t = r.oneOf(DecimalTypes)
+        (genLeaf(r, schema, t), t.asInstanceOf[DataType.DecimalType])
+      }),
+      (2, () => {
+        val it = r.oneOf(Seq(DataType.IntType, DataType.LongType))
+        genLeaf(r, schema, it) match {
+          case LitExpr(n: Number, _) => written(n)
+          case leaf => (CastExpr(leaf, Decimals.ofIntegral(it)), Decimals.ofIntegral(it))
+        }
+      }),
+      (1, () => written(r.oneOf(DecimalLiteralNumbers)))
+    )()
+  }
+
+  /** Numbers a query writes beside a DECIMAL, read as the decimals of their
+    * digits: a `0.1` no double holds, a divisor that leaves a remainder or a
+    * quotient that does not end (`3`, `7`), and zero. */
+  private val DecimalLiteralNumbers: Seq[Number] = Seq[Number](
+    0, 1, 3, 7, 100, -2, 0.1, 0.5, 1.25, -0.03, 1000000.0)
+
+  /** Whether `l op r`'s declared type keeps every integer digit its answer can
+    * need, for sides whose values fit their types: true of each of Spark's
+    * types until it passes 38 digits, where `Decimals.resultType` gives way on
+    * scale down to six digits and then on integer digits. */
+  private def holdsEveryAnswer(op: String, l: DataType.DecimalType, r: DataType.DecimalType): Boolean = {
+    val (i1, i2) = (l.precision - l.scale, r.precision - r.scale)
+    val needed = op match {
+      case "+" | "-" => math.max(i1, i2) + 1
+      case "*" => i1 + i2 + 1
+      case "/" => i1 + r.scale
+      case _ => math.min(i1, i2)
+    }
+    val t = Decimals.resultType(op, l, r)
+    t.precision - t.scale >= needed
+  }
+
+  /** Which arithmetic a generated case applies to DECIMALs (`ops`: `+ - * / %`
+    * and `negate`), and whether its answers did the two things decimal
+    * arithmetic does besides adding up: round to the declared scale (a
+    * quotient that does not end, or a type that gave way past 38 digits), and
+    * meet a zero divisor (NULL). Read off every row, like [[typeCoverage]]. */
+  final case class DecimalArithCoverage(ops: Set[String], rounded: Boolean, byZero: Boolean)
+
+  def decimalArithCoverage(c: ExprCase): DecimalArithCoverage = {
+    val ops = scala.collection.mutable.Set.empty[String]
+    var rounded, byZero = false
+
+    def walk(e: Expr): Unit = {
+      e match {
+        case BinOpExpr(op, l, r, t: DataType.DecimalType) if ArithOps.contains(op) =>
+          ops += op
+          var row = 0
+          while (row < c.batch.numRows) {
+            (l.eval(c.batch, row), r.eval(c.batch, row)) match {
+              case (a: Number, b: Number) =>
+                val (x, y) = (Casts.toDecimal(a), Casts.toDecimal(b))
+                if ((op == "/" || op == "%") && y.signum == 0) byZero = true
+                else {
+                  val exact = op match {
+                    case "+" => Some(x.add(y))
+                    case "-" => Some(x.subtract(y))
+                    case "*" => Some(x.multiply(y))
+                    case "%" => Some(x.remainder(y))
+                    case _ => scala.util.Try(x.divide(y)).toOption // None: it does not end
+                  }
+                  if (exact.forall(v => v.compareTo(v.setScale(t.scale, java.math.RoundingMode.HALF_UP)) != 0))
+                    rounded = true
+                }
+              case _ => ()
+            }
+            row += 1
+          }
+        case UnaryOpExpr("-", _, _: DataType.DecimalType) => ops += "negate"
+        case _ => ()
+      }
+      Shrinker.childrenOf(e).foreach(walk)
+    }
+
+    walk(c.expr)
+    DecimalArithCoverage(ops.toSet, rounded, byZero)
   }
 }

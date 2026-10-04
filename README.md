@@ -1011,6 +1011,13 @@ JDK 21 or newer (tested through JDK 25).
   files in the same view are not validated. Explicit schemas via the
   `inferSchema = false` route avoid this. A parquet glob checks every file
   against the first when it is opened (see [Parquet](#parquet)).
+- **`CASE`, `COALESCE`, `IF`, `GREATEST` / `LEAST` and `UNION` take their first
+  branch's type.** A later branch is cast to it, and a `DECIMAL` keeps its value
+  when cast, so `COALESCE(price, price * rate)` over two decimal columns is
+  declared as `price`'s type while holding the product's extra digits; writing
+  such a result to parquet fails, naming the value. Numbers are cast the other
+  way: `CASE WHEN p THEN 1 ELSE 2.5 END` is the `INT` 2. Recorded as
+  [plans/robustness/09](plans/robustness/09-branch-result-types.md).
 - **`DECIMAL` math functions and statistics compute in `DOUBLE`.** Comparison,
   arithmetic, `ABS`, `SUM` and `AVG` keep a `DECIMAL` exact, but `ROUND`,
   `FLOOR`, `CEIL`, `TRUNC`, `SQRT`, `POWER` and the other math functions, and

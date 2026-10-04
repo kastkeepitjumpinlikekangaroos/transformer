@@ -178,11 +178,10 @@ object RowOracle {
   //     identity, so a tolerance on the floating-point columns cannot mask a wrong
   //     group or a dropped row.
   //
-  //     A decimal `SUM` is exact too, though it adds in `double` (it keeps its
-  //     input's type, a gap `docs/gotchas.md` records): `DataGen.DecimalPools`
-  //     holds only values whose doubles are small multiples of a quarter, whose
-  //     sums are exact in any order, so the column agrees across layouts to the
-  //     last digit.
+  //     A decimal `SUM`, `AVG` or arithmetic result is exact too: the engine
+  //     computes each in `BigDecimal` and fits it to its declared type, so the
+  //     column agrees across layouts to the last digit, over values like `0.1`
+  //     whose `double` sums would not (`DataGen.DecimalPools`).
   //
   //     One thing the tolerance DOES hide, now that `DataGen` draws IEEE specials:
   //     `+0.0` and `-0.0` compare equal here, so a `MIN`/`MAX` that picked the

@@ -415,8 +415,10 @@ went unfuzzed until plan 04.
    `genTyped`. Let it reach every producer the engine answers for over it and
    none it does not — the binder's rules, not convenience, decide (see the
    object comment for the four that arrived together: a DATE meets only a
-   DATE, a BINARY is never text, nothing does arithmetic on a DECIMAL). Its
-   pool should hold the values its comparison is easy to get wrong on.
+   DATE, a BINARY is never text, a DECIMAL's arithmetic is built as the binder
+   builds it and only where its type holds every answer). Its pool should hold
+   the values its comparison is easy to get wrong on, and for a number the
+   values a DOUBLE computes wrong.
 3. **`DataGen` and `QueryGen`.** `DataGen.ColumnTypes` is `ExprGen.GenTypes`,
    so the type arrives with it; give it a `genDomain` case (a narrow slice, so
    keys collide, of values that cannot fail a spill the in-memory run passes)
@@ -469,8 +471,12 @@ the reject rate near zero and the property sound:
   trees that stay type-correct under a precedence-only reparse: arithmetic
   operands numeric, `||` operands string, comparisons same-category (never a
   boolean operand), and `NOT` only over a boolean leaf (the frontend binds `NOT`
-  tighter than comparison). Confirm with the `bindRejectRateIsLow` guard before
-  merging.
+  tighter than comparison). Decimal arithmetic is the exception: its type
+  depends on what each side is, so `SqlRender.decimalSide` gives it the
+  parentheses precedence needs (only those: JSqlParser rejects some statements
+  with three stacked). Confirm with the `bindRejectRateIsLow` guard before
+  merging, and over a large block when the change is to a type rule: 500 seeds
+  missed a reject that 20000 found.
 
 Exclude anything non-deterministic (`RAND()`, the clock functions) or
 mode-unstable (`LIMIT` and `OFFSET` without a total order — a cutoff among tied
@@ -577,8 +583,9 @@ relation or generator extension:
   qualifier inside `ColRefExpr.name` (e.g. `"t0.c0"`), and the generator only
   references columns in scope for the clause it builds (a join ON sees both
   sides; a `UNION` arm sees only its own FROM). Stay paren-free — `SqlRender`
-  emits none, so every generated tree must stay type-correct under a
-  precedence-only reparse (see [gotchas.md](gotchas.md)).
+  emits none but for decimal arithmetic, so every other generated tree must
+  stay type-correct under a precedence-only reparse (see
+  [gotchas.md](gotchas.md)).
 - **TLP partition keys must be type-reliable.** `QueryCore.tlpCandidates`
   restricts the partition column to non-float output columns whose runtime type
   survives a precedence-only reparse. A computed `Int`-labelled column can reparse

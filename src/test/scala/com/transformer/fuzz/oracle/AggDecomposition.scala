@@ -3,6 +3,7 @@ package com.transformer.fuzz.oracle
 import com.transformer.core.{DataType, ExecutionOptions}
 import com.transformer.fuzz.MetaQueryGen.{MetaCase, Relation}
 import com.transformer.fuzz.RowOracle
+import com.transformer.sql.plan.{AggExprSum, ColRefExpr}
 
 /** Aggregate decomposition: aggregating a relation in one shot must equal
   * grouping it by an arbitrary key and re-aggregating the per-group results.
@@ -32,9 +33,12 @@ import com.transformer.fuzz.RowOracle
   *
   * Aggregates chosen for exactness: `MIN`/`MAX` over every column type,
   * `COUNT(*)` and `COUNT(v)` (re-aggregated with `SUM`, normalizing the
-  * empty-relation `SUM` NULL to 0), and `SUM` over INTEGRAL columns only —
-  * a float `SUM` legitimately differs in the last bits when the addition
-  * regroups, and this relation reports exact equality.
+  * empty-relation `SUM` NULL to 0), and `SUM` over INTEGRAL and DECIMAL
+  * columns only — a float `SUM` legitimately differs in the last bits when the
+  * addition regroups, and this relation reports exact equality. A decimal
+  * `SUM` adds exactly, so its grouped side drives `DecimalSumState`'s merge
+  * and spill serde against the one-shot answer, over values a DOUBLE would
+  * add wrong.
   */
 object AggDecomposition {
 
@@ -161,11 +165,15 @@ object AggDecomposition {
         pair(s"MAX($c)", s"MAX($c)", "MAX(m)", dt))
       val counts = Seq(
         pair(s"COUNT($c)", s"COUNT($c)", "SUM(m)", DataType.LongType, nullIsZero = true))
-      // SUM only over integral columns: a float SUM re-associates when the rows
-      // are grouped, so the two sides differ in the last bits by design.
-      val sums =
-        if (DataType.isIntegral(dt)) Seq(pair(s"SUM($c)", s"SUM($c)", "SUM(m)", DataType.LongType))
-        else Seq.empty
+      // SUM only over integral and decimal columns, which add exactly: a float
+      // SUM re-associates when the rows are grouped, so the two sides differ in
+      // the last bits by design.
+      val sums = dt match {
+        case DataType.IntType | DataType.LongType | _: DataType.DecimalType =>
+          val sumType = AggExprSum(ColRefExpr(i, c, dt)).resultType
+          Seq(pair(s"SUM($c)", s"SUM($c)", "SUM(m)", sumType))
+        case _ => Seq.empty
+      }
       minMax ++ counts ++ sums
     }
     countPairs ++ perColumn

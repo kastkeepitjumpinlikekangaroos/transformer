@@ -96,7 +96,7 @@ class ExprParityFuzzTest {
     // which left a float operand fewer draws to win.
     assertTrue(s"no float/double ordering comparison generated (shape=$ordShape)", ordShape > 100)
     assertTrue(s"no float/double IN list generated (shape=$inShape)", inShape > 30)
-    // The value half, ~0.7% and ~0.45% of seeds. Rarer than the shapes because the
+    // The value half, ~0.65% and ~0.4% of seeds. Rarer than the shapes because the
     // operand also has to CARRY the value: a literal gets one draw, and a
     // subtree above a column washes -0.0 out (though not NaN, which
     // propagates). This half is the one that would silently go to zero if the
@@ -121,10 +121,10 @@ class ExprParityFuzzTest {
   // guard above reads: the value half is a thin chain (a comparison of the type
   // AND the pair on one row), and at 4000 seeds the high-bit and one-double
   // counts were 5, too few to tell rare from gone. Generation only, about a
-  // second. Measured over these 20000 seeds: compared date 255, timestamp 248,
-  // binary 323, decimal 352; IN date 140, timestamp 167, binary 140, decimal
-  // 135; bytes of one content 84, one high bit apart 47; one decimal at two
-  // scales 29, two of one double 25; instants under a millisecond apart 113.
+  // second. Measured over these 20000 seeds: compared date 253, timestamp 228,
+  // binary 303, decimal 346; IN date 124, timestamp 164, binary 133, decimal
+  // 134; bytes of one content 76, one high bit apart 46; one decimal at two
+  // scales 26, two of one double 20; instants under a millisecond apart 104.
   // Each bound sits about 3x below, so it separates a corpus that stopped
   // producing the shape or the value from one that merely drifted.
 
@@ -163,6 +163,35 @@ class ExprParityFuzzTest {
     assertTrue(s"a DECIMAL never reaches an IN list, ${typeMessage(t)}", t.inList("decimal") > 40)
     assertTrue(s"one decimal at two scales never meets itself, ${typeMessage(t)}", t.values(DecimalAtTwoScales) > 9)
     assertTrue(s"two decimals of one double never meet, ${typeMessage(t)}", t.values(DecimalsOfOneDouble) > 8)
+  }
+
+  /** Decimal arithmetic, both halves: each operator and negation over DECIMALs
+    * reaches the corpus (the shape), and answers that had to round to their
+    * declared scale and divisors of zero reach it too (the value), since a
+    * corpus of exact answers over nonzero divisors would leave
+    * `Decimals.arith`'s rounding and its NULL untested on the vector path.
+    * Measured over these 20000 seeds: `+` 294, `-` 264, `*` 228, `/` 254, `%`
+    * 273, negation 159; an answer that rounded 185, a zero divisor 58. Each
+    * bound sits about 3x below the smallest count it covers. */
+  @Test def decimalArithmeticRoundsAndMeetsZeroDivisors(): Unit = {
+    val n = 20000
+    val ops = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    var rounded, byZero = 0
+    var seed = 0
+    while (seed < n) {
+      val cov = ExprGen.decimalArithCoverage(ExprGen.generate(new Rng(seed.toLong)))
+      cov.ops.foreach(op => ops(op) += 1)
+      if (cov.rounded) rounded += 1
+      if (cov.byZero) byZero += 1
+      seed += 1
+    }
+    val report = s"over $n seeds: ops=${ops.toSeq.sorted.mkString(", ")} rounded=$rounded byZero=$byZero"
+    println(s"[expr-parity] decimal arithmetic $report")
+    for (op <- Seq("+", "-", "*", "/", "%"))
+      assertTrue(s"a DECIMAL $op is rarely generated, $report", ops(op) > 75)
+    assertTrue(s"a DECIMAL is rarely negated, $report", ops("negate") > 50)
+    assertTrue(s"a decimal answer rarely rounds, $report", rounded > 60)
+    assertTrue(s"a decimal divisor is rarely zero, $report", byZero > 19)
   }
 
   /** The generator's own type invariant holds across a block of seeds:
