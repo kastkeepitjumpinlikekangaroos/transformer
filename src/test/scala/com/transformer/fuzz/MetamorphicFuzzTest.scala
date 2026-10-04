@@ -170,9 +170,11 @@ class MetamorphicFuzzTest {
   /** Coverage guard + report: the generator must actually reach every SQL shape
     * the metamorphic relations target. A shape silently dropping to zero (a
     * generation regression) would make the campaign pass vacuously, so each shape
-    * is asserted present over a fixed block of seeds. Prints the tally for the PR. */
+    * is asserted present over a fixed block of seeds. Prints the tally for the PR.
+    * The block is 4000 seeds so the narrowest shape, MIN/MAX over a Boolean
+    * column, is counted in dozens; generation only, well under a second. */
   @Test def generatorCoversShapes(): Unit = {
-    val n = 2000
+    val n = 4000
     var joins, unions, ctes, windows, invariantWindows, aggregates, tlpWindowKeys, topNs, offsets, placements, boolMinMax = 0
     var seed = 0
     while (seed < n) {
@@ -195,35 +197,36 @@ class MetamorphicFuzzTest {
     println(f"[metamorphic] shape coverage over $n seeds: joins=$joins unions=$unions ctes=$ctes " +
       f"windows=$windows invariantWindows=$invariantWindows aggregates=$aggregates " +
       f"tlpOnWindowCol=$tlpWindowKeys topN=$topNs offset=$offsets nullPlacement=$placements boolMinMax=$boolMinMax")
-    assertTrue(s"joins=$joins", joins > 100)
-    assertTrue(s"unions=$unions", unions > 50)
-    assertTrue(s"ctes=$ctes", ctes > 100)
-    assertTrue(s"windows=$windows", windows > 50)
+    assertTrue(s"joins=$joins", joins > 200)
+    assertTrue(s"unions=$unions", unions > 100)
+    assertTrue(s"ctes=$ctes", ctes > 200)
+    assertTrue(s"windows=$windows", windows > 100)
     // Windows whose value cannot differ between rows tied on the ORDER BY
     // (RANK/DENSE_RANK, a no-ORDER-BY aggregate window). These are the ONLY
     // window queries the mode-agreement and join-commutativity oracles accept,
     // so WindowExec's cross-layout / spill / sharded coverage is exactly this
     // count. A generator drift back to all-tie-sensitive windows would restore
     // the old blind spot silently.
-    assertTrue(s"invariantWindows=$invariantWindows", invariantWindows > 50)
-    assertTrue(s"aggregates=$aggregates", aggregates > 100)
+    assertTrue(s"invariantWindows=$invariantWindows", invariantWindows > 100)
+    assertTrue(s"aggregates=$aggregates", aggregates > 200)
     // A generated `limit` renders nothing unless the projection is still totally
     // ordered, so this counts queries that actually carry a LIMIT.
-    assertTrue(s"topN=$topNs", topNs > 100)
+    assertTrue(s"topN=$topNs", topNs > 200)
     // OFFSET rides on the top-n shape (~40% of it), so this separates "rare"
     // from "gone"; offsetIsGeneratedAndObservable checks it actually drops rows.
-    assertTrue(s"offset=$offsets", offsets > 40)
+    assertTrue(s"offset=$offsets", offsets > 80)
     // An explicit NULLS FIRST / NULLS LAST rides on the same shape (~half of it);
     // nullPlacementIsGeneratedAndObservable checks it changes answers.
-    assertTrue(s"nullPlacement=$placements", placements > 40)
+    assertTrue(s"nullPlacement=$placements", placements > 80)
     // MIN/MAX over a Boolean column: the accumulator-slot shape that returned NULL
     // under spill until the engine was fixed. It was kept OUT of the generator
     // while the bug stood, so an assertion that it is back is what stops the
-    // exclusion from silently returning. Narrow shape (~0.9% of seeds — the column
-    // must be Boolean AND draw a MIN/MAX; it was ~1.4% while relations drew six
-    // column types rather than ten), so the bound separates "rare" from "gone";
-    // `aggDecompositionCoversEveryColumnType` is the dense guard on it.
-    assertTrue(s"boolMinMax=$boolMinMax", boolMinMax > 6)
+    // exclusion from silently returning. Narrow shape (~0.95% of seeds, 38 of
+    // this block — the column must be Boolean AND draw a MIN/MAX, and Boolean
+    // is one payload type of ten), so the bound sits about 3x below to separate
+    // "rare" from "gone"; `aggDecompositionCoversEveryColumnType` is the dense
+    // guard on it.
+    assertTrue(s"boolMinMax=$boolMinMax", boolMinMax > 12)
   }
 
   /** Whether any arm of `q` takes `MIN`/`MAX` over a `Boolean` column — as an
