@@ -76,10 +76,11 @@ final case class DataJob(
           return JobResult(succeeded = false, tasks = Nil, error = Some(e.getMessage))
       }
 
-    val results = runUnifiedDag(dag, executor, catalog, vars, listener)
+    val (results, inputFailures) = runUnifiedDag(dag, executor, catalog, vars, listener)
     val runFinished = Instant.now()
 
-    val warnings = runConsistencyChecks(results.toSeq)
+    val warnings = inputWarnings(dag, inputFailures) ++ runConsistencyChecks(results.toSeq)
+    // The tasks alone decide the verdict: a warning never fails a run.
     val succeeded = results.forall(_.succeeded)
     writeJobRecord(results.toSeq, vars, runStarted, runFinished, succeeded, None, warnings)
 
@@ -97,7 +98,9 @@ final case class DataJob(
     *   1. Initial state: `pendingTaskDeps(i)` + `pendingInputDeps(i)` count what's
     *      still outstanding.
     *   2. When an input load completes (success OR failure), every SQL task that
-    *      referenced it sees its `pendingInputDeps` decremented.
+    *      referenced it sees its `pendingInputDeps` decremented. A failure is
+    *      also kept for the run's warnings, whether or not any task referenced
+    *      the input.
     *   3. When a task completes, every dependent's `pendingTaskDeps` decrements.
     *   4. A task with both counts at 0 fires `onTaskEnqueued`, captures
     *      `enqueuedAt`, and submits to the pool. The worker stamps `startedAt`
@@ -110,6 +113,9 @@ final case class DataJob(
     * events onto a [[LinkedBlockingQueue]] which the scheduler drains in order.
     * That gives us serialized state updates without locks while keeping the work
     * itself fully parallel on the shared pool.
+    *
+    * Returns a result per task, in declared order, and per input, in declared
+    * order, why its load failed (None for an input that loaded).
     */
   private def runUnifiedDag(
       dag: TaskDag,
@@ -117,7 +123,7 @@ final case class DataJob(
       catalog: Catalog,
       vars: TemporalVariables,
       listener: TaskProgressListener
-  ): Array[TaskResult] = {
+  ): (Array[TaskResult], IndexedSeq[Option[String]]) = {
     val nTasks = dag.nodes.size
     val taskResults = Array.ofDim[TaskResult](nTasks)
 
@@ -150,23 +156,25 @@ final case class DataJob(
 
     // ---- Event queue --------------------------------------------------------
     sealed trait Event
-    final case class InputCompleted(name: String, success: Boolean, error: Option[String]) extends Event
+    // `cause` is why the load failed, None when it loaded.
+    final case class InputCompleted(index: Int, cause: Option[String]) extends Event
     final case class TaskCompleted(index: Int, result: TaskResult) extends Event
 
     val events = new LinkedBlockingQueue[Event]()
 
     // ---- Input loading ------------------------------------------------------
     val nInputs = inputs.size
+    // Why each input failed to load, by input index.
+    val inputFailures = Array.fill[Option[String]](nInputs)(None)
 
     // Submit one Callable per input. The input load resolves the path, optionally
     // materializes for cache=true, registers the view in the catalog, and posts
     // an `InputCompleted` event onto the scheduler queue.
     inputs.iterator.zipWithIndex.foreach { case (in, i) =>
-      val key = in.viewName.toLowerCase
       Scheduler.submit(new Callable[Unit] {
         def call(): Unit = {
           try listener.onInputStart(i, in.viewName) catch { case _: Throwable => () }
-          val (success, error) =
+          val cause: Option[String] =
             try {
               val rendered = in.copy(path = TemplateRenderer.render(in.path, vars))
               val raw = InputResolver.resolve(rendered)
@@ -174,15 +182,13 @@ final case class DataJob(
                 if (in.cache) MaterializedView.materializeInParallel(raw)
                 else raw
               catalog.register(in.viewName, view)
-              (true, None)
+              None
             } catch {
-              case NonFatal(e) =>
-                val hint = oomHint(e)
-                (false, Some(s"failed to load input '${in.viewName}': ${e.getMessage}$hint"))
+              case NonFatal(e) => Some(Option(e.getMessage).getOrElse(e.toString) + oomHint(e))
             }
-          try listener.onInputFinish(i, in.viewName, success, error)
+          try listener.onInputFinish(i, in.viewName, cause.isEmpty, cause.map(inputLoadFailure(in.viewName, _)))
           catch { case _: Throwable => () }
-          events.put(InputCompleted(key, success, error))
+          events.put(InputCompleted(i, cause))
         }
       })
     }
@@ -227,12 +233,16 @@ final case class DataJob(
       }
     }
 
-    def handleInputCompletion(name: String, success: Boolean, error: Option[String]): Unit = {
-      inputDependents.getOrElse(name, Vector.empty).foreach { i =>
+    def handleInputCompletion(index: Int, cause: Option[String]): Unit = {
+      // Kept before the fan-out, which reaches only the tasks that read the
+      // input: an input no task reads has nothing else to carry its failure.
+      inputFailures(index) = cause
+      val name = inputs(index).viewName
+      inputDependents.getOrElse(name.toLowerCase, Vector.empty).foreach { i =>
         pendingInputDeps(i) -= 1
-        if (!success && !upstreamFailed(i)) {
+        if (cause.isDefined && !upstreamFailed(i)) {
           upstreamFailed(i) = true
-          upstreamFailReason(i) = error.orElse(Some(s"upstream input '$name' failed"))
+          upstreamFailReason(i) = cause.map(inputLoadFailure(name, _))
         }
         maybeSubmit(i)
       }
@@ -264,9 +274,9 @@ final case class DataJob(
     var remainingTasks = nTasks - taskResults.count(_ != null)
     while (remainingInputs > 0 || remainingTasks > 0) {
       events.take() match {
-        case InputCompleted(name, success, error) =>
+        case InputCompleted(index, cause) =>
           remainingInputs -= 1
-          handleInputCompletion(name, success, error)
+          handleInputCompletion(index, cause)
         case TaskCompleted(idx, result) =>
           taskResults(idx) = result
           remainingTasks -= 1
@@ -277,7 +287,7 @@ final case class DataJob(
       remainingTasks = nTasks - taskResults.count(_ != null)
     }
 
-    taskResults
+    (taskResults, inputFailures.toIndexedSeq)
   }
 
   private def describeUpstreamFailure(result: TaskResult): String = result.status match {
@@ -809,6 +819,28 @@ final case class DataJob(
         perfManifest = perfManifest
       ))
     } catch { case NonFatal(_) => () }
+  }
+
+  /** How a failed input load reads in the run's records: the reason a task
+    * that reads the input is skipped with, and the input's warning. */
+  private def inputLoadFailure(viewName: String, cause: String): String =
+    s"failed to load input '$viewName': $cause"
+
+  /** One warning per input that failed to load, in declared order, whether or
+    * not a task reads it. A failed input fails the run only through the tasks
+    * it skips, and a skipped task names just the first failed upstream it met,
+    * so the warnings are the one place every failed input is named, and the
+    * only place one that no task reads shows at all. Such an input fails
+    * nothing, and its warning says no task reads it. */
+  private def inputWarnings(dag: TaskDag, failures: IndexedSeq[Option[String]]): Seq[String] = {
+    val read = dag.nodes.iterator.flatMap(_.inputDeps).toSet
+    inputs.indices.flatMap { i =>
+      failures(i).map { cause =>
+        val name = inputs(i).viewName
+        if (read.contains(name.toLowerCase)) inputLoadFailure(name, cause)
+        else s"failed to load input '$name', which no task reads: $cause"
+      }
+    }
   }
 
   /** Compare each task's in-memory [[TaskResult]] to the on-disk state and

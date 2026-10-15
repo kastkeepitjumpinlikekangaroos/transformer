@@ -48,10 +48,11 @@ navigation hint, not a comprehensive directory listing.
 - `core/ExecutionOptions.scala` (~120 LOC) — per-query knobs threaded from
   `DataJob.runOneTask` to spill-capable operators. `fromOutputOptions`
   parses the `output.json` `options` map with tolerance for typos.
-- `job/DataJob.scala` (~890 LOC) — runner orchestration: unified input + task
+- `job/DataJob.scala` (~920 LOC) — runner orchestration: unified input + task
   DAG scheduler (`runUnifiedDag`), writeOutput, validation re-read, per-status
   `_run.json` writes + per-failure `_validation-<slug>.csv` sample writes +
-  per-job `job.json` write + consistency checks.
+  per-job `job.json` write + the run's warnings (inputs that failed to load,
+  consistency checks).
 - `sql/plan/Expr.scala` (~715 LOC) — `Expr` ADT plus `eval` and `evalVec`
   per subtype. `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` each carry
   an `evalVec` override; the rest of the hot subtypes delegate to `VecOps`.

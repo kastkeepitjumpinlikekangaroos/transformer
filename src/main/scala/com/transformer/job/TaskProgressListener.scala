@@ -39,8 +39,9 @@ trait TaskProgressListener {
   def onInputStart(inputIndex: Int, viewName: String): Unit = ()
 
   /** Fired when input `inputIndex` finishes — succeeded or failed.
-    * `succeeded = false` means the catalog never received this view and every
-    * SQL task that referenced it will be marked Skipped. */
+    * `succeeded = false` means the catalog never received this view, every
+    * SQL task that referenced it will be marked Skipped, and the run's
+    * [[JobResult.warnings]] will name it. */
   def onInputFinish(inputIndex: Int, viewName: String, succeeded: Boolean, errorMessage: Option[String]): Unit = ()
 }
 

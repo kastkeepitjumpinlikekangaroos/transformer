@@ -1264,6 +1264,64 @@ class DataJobTest {
       taskStarts.iterator().asScala.toSet.contains(Integer.valueOf(0)))
   }
 
+  /** An input no task reads still loads, and its failure reaches no task: the
+    * run succeeds, and its one warning, which job.json keeps, is the only trace
+    * of the failure. */
+  @Test def unreadInputThatFailsToLoadWarnsAndTheRunSucceeds(): Unit = {
+    val inDir = tmpDir("dj-unread-in-")
+    writeCsv(inDir, "events.csv", "id\n1\n")
+    val outDir = tmpDir("dj-unread-out-")
+    val jobFile = outDir.resolve("job.json")
+    val missing = inDir.resolve("stopped_using.csv").toString
+    val job = DataJob(
+      inputs = Seq(
+        InputFilePath(inDir.resolve("events.csv").toString, viewName = "events"),
+        InputFilePath(missing, viewName = "stale")),
+      sql = Seq(SQLTask(name = Some("t"),
+        sqlString = Some("SELECT id FROM events"),
+        outputFile = Some(OutputFilePath(outDir.resolve("t").toString)))),
+      jobRunOutput = Some(OutputFilePath(jobFile.toString)))
+    val result = job.run()
+    assertTrue(s"an input no task reads must not fail the run: ${result.tasks}", result.succeeded)
+    assertEquals(Seq(TaskStatus.Succeeded), result.tasks.map(_.status))
+    assertEquals(result.warnings.toString, 1, result.warnings.size)
+    val warning = result.warnings.head
+    assertTrue(warning, warning.startsWith("failed to load input 'stale', which no task reads: "))
+    assertTrue(s"the warning should carry why the load failed: $warning", warning.contains(missing))
+    val rec = JobRunRecord.read(jobFile).getOrElse(
+      fail(s"job.json expected at $jobFile").asInstanceOf[JobRunRecord])
+    assertTrue(rec.succeeded)
+    assertEquals(result.warnings, rec.warnings)
+  }
+
+  /** A task reading two inputs that fail to load is skipped naming the first
+    * failure it met. The warnings name both, in declared order, so the other
+    * failure is recorded too; and the run fails through the skipped task. */
+  @Test def everyInputThatFailsToLoadIsAWarningThoughATaskReadsIt(): Unit = {
+    val outDir = tmpDir("dj-failed-inputs-out-")
+    val jobFile = outDir.resolve("job.json")
+    val job = DataJob(
+      inputs = Seq(
+        InputFilePath("/nonexistent/no_such_dir/a.csv", viewName = "ghost_a"),
+        InputFilePath("/nonexistent/no_such_dir/b.csv", viewName = "ghost_b")),
+      sql = Seq(SQLTask(name = Some("uses_both"),
+        sqlString = Some("SELECT x FROM ghost_a UNION ALL SELECT x FROM ghost_b"),
+        outputFile = Some(OutputFilePath(outDir.resolve("t").toString)))),
+      jobRunOutput = Some(OutputFilePath(jobFile.toString)))
+    val result = job.run()
+    assertFalse("a skipped task fails the run", result.succeeded)
+    val reason = result.tasks.head.status match {
+      case TaskStatus.Skipped(r) => r
+      case other => fail(s"expected Skipped, got $other").asInstanceOf[String]
+    }
+    assertEquals(result.warnings.toString, 2, result.warnings.size)
+    assertTrue(result.warnings(0), result.warnings(0).startsWith("failed to load input 'ghost_a': "))
+    assertTrue(result.warnings(1), result.warnings(1).startsWith("failed to load input 'ghost_b': "))
+    assertTrue(s"the skip reason '$reason' should read as its input's warning: ${result.warnings}",
+      result.warnings.contains(reason))
+    assertEquals(result.warnings, JobRunRecord.read(jobFile).map(_.warnings).getOrElse(Nil))
+  }
+
   @Test def enqueuedAtPrecedesStartedAtUnderTaskContention(): Unit = {
     // Set up several independent tasks. With more leaf tasks than scheduler
     // workers, at least one task will report enqueuedAt < startedAt.

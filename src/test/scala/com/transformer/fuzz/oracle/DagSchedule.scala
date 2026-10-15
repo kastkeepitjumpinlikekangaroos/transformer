@@ -31,19 +31,24 @@ import java.util.concurrent.atomic.AtomicReference
   *      and a `Skipped` task did no work at all (all three coincide, zero rows,
   *      no output path).
   *   4. '''Attributable skips''' — a skip reason names a real upstream.
-  *   5. '''Job verdict''' — `JobResult.succeeded` iff every task succeeded, with
-  *      no consistency warning (the manifest and the disk agree).
+  *   5. '''Job verdict''' — `JobResult.succeeded` iff every task succeeded,
+  *      whatever the warnings say; and the warnings are exactly one per input
+  *      that failed to load, in declared order, naming it and saying whether a
+  *      task reads it, and nothing else (no consistency drift: the manifest and
+  *      the disk agree). An input no task reads is what tells the two halves
+  *      apart: its failure fails nothing, and its warning is all it leaves.
   *   6. '''Durable record''' — a task with an output directory leaves a
   *      `_run.json` in the directory its templated path renders to for this
   *      run, whose status matches the in-memory result. That file is what the
   *      GUI and the next run read, so a task that reports one status in memory
   *      and another (or none) on disk is a real defect even though the run
   *      itself looks fine.
-  *   7. '''Job manifest''' — the `job.json` the run writes lists every task in
-  *      order with the same status, and points at the `_run.json` of every task
-  *      that has an output directory. That manifest is the entry point the GUI
-  *      and the next run load, so an entry that disagrees with the run, or a
-  *      `runFile` that is not this run's record, loses detail that is on disk.
+  *   7. '''Job manifest''' — the `job.json` the run writes carries the run's
+  *      verdict and warnings, lists every task in order with the same status,
+  *      and points at the `_run.json` of every task that has an output
+  *      directory. That manifest is the entry point the GUI and the next run
+  *      load, so an entry that disagrees with the run, or a `runFile` that is
+  *      not this run's record, loses detail that is on disk.
   *   8. '''Liveness''' — the run terminates. The job executes on a watchdog
   *      thread; a job still running past [[TimeoutMillis]] fails the property
   *      with a full thread dump, which is how a `Scheduler.pool` starvation
@@ -133,10 +138,28 @@ object DagSchedule {
     val allOk = tasks.forall(_.succeeded)
     assert(result.succeeded == allOk,
       s"[dag-schedule] JobResult.succeeded=${result.succeeded} but tasks-all-succeeded=$allOk\n" +
-        s"  case = $jc\n${statusTable(jc, tasks)}")
-    assert(result.warnings.isEmpty,
-      s"[dag-schedule] run reported consistency warnings (manifest disagrees with disk): " +
-        s"${result.warnings.mkString("; ")}\n  case = $jc")
+        s"  case = $jc\n${statusTable(jc, tasks)}\n  warnings = ${result.warnings.map(shown).mkString("; ")}")
+    checkWarnings(jc, result)
+  }
+
+  /** What each warning a run reports must begin with, in order: one per input
+    * that failed to load, in declared order, saying whether a task reads it.
+    * The rest of a warning is why the load failed, in the file reader's words.
+    * A generated run leaves the manifest and the disk agreeing, so it reports
+    * no other warning. */
+  def expectedWarnings(jc: JobCase): Vector[String] =
+    jc.inputs.indices.filter(jc.inputs(_).broken).map { i =>
+      val view = jc.inputs(i).view
+      if (jc.tasks.exists(_.inputSrcs.contains(i))) s"failed to load input '$view': "
+      else s"failed to load input '$view', which no task reads: "
+    }.toVector
+
+  private def checkWarnings(jc: JobCase, result: JobResult): Unit = {
+    val expected = expectedWarnings(jc)
+    val got = result.warnings.toVector
+    assert(got.length == expected.length && got.zip(expected).forall { case (w, start) => w.startsWith(start) },
+      s"[dag-schedule] warnings ${got.map(shown).mkString("[", "; ", "]")}, expected one per input that " +
+        s"failed to load, beginning ${expected.mkString("[", "; ", "]")}\n  case = $jc")
   }
 
   /** A task configured with an output directory must leave a `_run.json` there
@@ -259,6 +282,9 @@ object DagSchedule {
       s"[dag-schedule] manifest lists ${rec.tasks.length} tasks, job has ${jc.tasks.length}\n  case = $jc")
     assert(rec.succeeded == result.succeeded,
       s"[dag-schedule] manifest says succeeded=${rec.succeeded}, run said ${result.succeeded}\n  case = $jc")
+    assert(rec.warnings == result.warnings,
+      s"[dag-schedule] manifest warnings ${rec.warnings.map(shown)}, run said ${result.warnings.map(shown)}\n" +
+        s"  case = $jc")
     jc.tasks.foreach { t =>
       val entry = rec.tasks(t.index)
       val inMemory = kind(tasks(t.index).status)

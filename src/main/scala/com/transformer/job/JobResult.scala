@@ -64,11 +64,16 @@ final case class TaskResult(
 
 /** Final outcome of a [[DataJob.run]] call.
   *
-  * `warnings` carries non-fatal consistency findings — disk state that
-  * disagrees with the manifest (e.g. a declared part file that's missing, a
-  * `runFile` reference that no longer exists). They don't fail the run on
-  * their own; the GUI's run-log panel surfaces them so the user notices
-  * drift before acting on the data.
+  * `succeeded` is true iff every task succeeded, whatever `warnings` holds: a
+  * warning never fails a run on its own.
+  *
+  * `warnings` carries what the user should know before acting on the data,
+  * in order: each input that failed to load, in declared order, whether or not
+  * a task reads it (one that no task reads fails nothing, and its warning is the
+  * only trace of the failure), then disk state that disagrees with the manifest
+  * (e.g. a declared part file that's missing, a `runFile` reference that no
+  * longer exists). `job.json` keeps them, and the GUI's run-log panel shows
+  * them.
   */
 final case class JobResult(
     succeeded: Boolean,

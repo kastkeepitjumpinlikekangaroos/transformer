@@ -618,7 +618,7 @@ final class ResultsTabPane(
 
   private def appendJobWarnings(sb: StringBuilder, warnings: Seq[String]): Unit = {
     if (warnings.nonEmpty) {
-      sb.append(s"\n${warnings.size} consistency warning(s):\n")
+      sb.append(s"\n${warnings.size} warning(s):\n")
       warnings.foreach(w => sb.append(s"  [warn] $w\n"))
     }
   }

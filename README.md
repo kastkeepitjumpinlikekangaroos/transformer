@@ -161,7 +161,8 @@ needs on disk, at the cost of keeping it in memory (the same trade a cached
 input or a multiply-referenced CTE makes).
 
 `DataJob.run()` returns a `JobResult` describing per-task status, row counts,
-durations, and any consistency warnings. If a validation fails the
+durations, and any warnings (see [Per-job `job.json`](#per-job-jobjson));
+`succeeded` is true iff every task succeeded. If a validation fails the
 corresponding task is marked `ValidationFailed`, its output is persisted
 regardless (for debugging), and a sample of failing rows is written to
 `_validation-<name>.csv` next to that task's `_run.json` — see [Run
@@ -411,10 +412,25 @@ failed — everything the task's record holds but the failing rows themselves.
 Loading this one file is the GUI's entry point for hydrating the whole job;
 per-task records are loaded lazily as the user drills into each task. A
 `job.json` written before entries carried the timestamps and failed
-validations still reads, without them. Consistency
-checks (declared part file missing, referenced `runFile` not on disk,
-etc.) land in the manifest's `warnings` array and surface in the GUI's
-run-log panel.
+validations still reads, without them.
+
+The manifest's `warnings` array (the same list as `JobResult.warnings`, shown
+in the GUI's run-log panel) holds what to look at before trusting the run's
+data:
+
+- **Every input that failed to load**, in declared order. A task that reads
+  such an input is `Skipped` naming it, but a task skipped by two failed
+  inputs names only the first, so the warnings are the one place every
+  failure is listed. An input **no task reads** still loads on every run, and
+  its failure skips nothing; its warning (`failed to load input 'x', which no
+  task reads: ...`) is the only trace of it, so a typo in the path of an input
+  you stopped using does not go unnoticed.
+- **Consistency checks**: a declared part file missing, a referenced
+  `runFile` not on disk, etc.
+
+A warning never fails a run on its own: `succeeded` is true iff every task
+succeeded, so a run whose only problem is an unread input that failed to load
+is green, with a warning.
 
 Reruns at the same `outputDir` overwrite the manifest in place. To keep
 run-by-run history, template `outputDir` itself

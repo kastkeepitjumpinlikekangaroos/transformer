@@ -14,10 +14,11 @@ import scala.util.control.NonFatal
   * each task's output directory are independently versioned by the task's
   * templated output path, so partitioned history is preserved per task.
   *
-  * The [[warnings]] field surfaces consistency-check findings: a task's
-  * `runFile` is missing from disk, a task claims data files that aren't
-  * there, etc. Surfaced in the GUI's run-log panel so the user notices
-  * drift between the manifest and the filesystem.
+  * The [[warnings]] field holds the run's [[JobResult.warnings]]: each input
+  * that failed to load, including one no task reads, then consistency-check
+  * findings (a task's `runFile` is missing from disk, a task claims data files
+  * that aren't there, etc.). Surfaced in the GUI's run-log panel. None of them
+  * fails the run: [[succeeded]] is the tasks' verdict alone.
   *
   * The [[perfManifest]] field lists the per-task `_perf.json` paths emitted
   * by this run when metrics were enabled. `None` when metrics were disabled

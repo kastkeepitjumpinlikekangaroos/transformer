@@ -1281,6 +1281,24 @@ ship a fix or move something from "not done" to "done".
   Found by the `Hydration` oracle's corruption mode; regressions in
   `gui/job_session_test`.
 
+- **Every input that fails to load is a warning, even one no task reads.**
+  The scheduler fans an input's load failure out to the tasks that read it,
+  which it skips, and to nothing else. An input no task reads (left declared
+  after its last reader went, or a typo in an input nothing uses yet) has no
+  one to fan out to, so its failure used to vanish: the run said `succeeded`,
+  with no warning and nothing in `job.json`, though `onInputFinish` had seen
+  the failure. The user decided
+  ([plans/robustness/08](../plans/robustness/08-unconsumed-input-failure-is-swallowed.md))
+  that every input that fails to load is a warning in `JobResult.warnings` and
+  `job.json`, in declared order, whether or not a task reads it (a task
+  skipped by two failed inputs names only the first in its reason, so the
+  warnings are the one place both appear), and that a warning never fails a
+  run: an unread input's failure leaves the run green, and its warning says no
+  task reads it. Found by the DAG-scheduler fuzzer, whose generator then gave
+  every input a reader, since an unread one's failure was invisible to its
+  oracle; `DagSchedule` now holds the warnings to one per failed input.
+  Regressions in `job/data_job_test`.
+
 - **A task with no `outputFile` can feed downstream views and validations.**
   It could not until recently: `DataJob.materializeIfNeeded` threw
   `UnsupportedOperationException("v1 requires an outputFile ...")` whenever a
