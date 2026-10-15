@@ -1296,8 +1296,8 @@ ship a fix or move something from "not done" to "done".
   run: an unread input's failure leaves the run green, and its warning says no
   task reads it. Found by the DAG-scheduler fuzzer, whose generator then gave
   every input a reader, since an unread one's failure was invisible to its
-  oracle; `DagSchedule` now holds the warnings to one per failed input.
-  Regressions in `job/data_job_test`.
+  oracle; it now also declares an input no task reads, and `DagSchedule` holds
+  the warnings to one per failed input. Regressions in `job/data_job_test`.
 
 - **A task with no `outputFile` can feed downstream views and validations.**
   It could not until recently: `DataJob.materializeIfNeeded` threw

@@ -34,7 +34,8 @@ import java.time.{Duration, Instant}
   *     the same table references and builds the same edges) and dies inside the
   *     worker, which is exactly the path the scheduler's skip propagation reacts
   *     to. A broken input points at a path matching no file, so its load fails
-  *     the same way.
+  *     the same way. A share of cases also declare an input no task reads,
+  *     broken or not, whose failure must fail nothing and show as a warning.
   *
   * Per-task writer/spill/metrics knobs are drawn too, so concurrently running
   * tasks exercise the parquet and CSV writers, the shared spill directory, and
@@ -434,7 +435,11 @@ object JobDagGen {
     }
 
     override def toString: String = {
-      val ins = inputs.map(i => s"${i.view}(rows=${i.rows}${if (i.broken) ",BROKEN" else ""})").mkString(", ")
+      val read = tasks.iterator.flatMap(_.inputSrcs).toSet
+      val ins = inputs.indices.map { k =>
+        val i = inputs(k)
+        s"${i.view}(rows=${i.rows}${if (i.broken) ",BROKEN" else ""}${if (read(k)) "" else ",unread"})"
+      }.mkString(", ")
       val ts = tasks.map { t =>
         val srcs = (t.inputSrcs.map(i => inputs(i).view) ++ t.taskSrcs.map(j => s"t$j")).mkString("+")
         val out = t.output.map { o =>
@@ -495,14 +500,23 @@ object JobDagGen {
         validationTaskSrc = if (i > 0 && rng.bool(0.25)) Some(rng.nextInt(i)) else None)
       i += 1
     }
-    // Every input must have a consumer: an input nothing reads still loads (and
-    // may still fail) but reaches no task, which would leave its `broken` draw
-    // invisible to the oracle.
+    // Every input drawn so far gets a reader, so a broken one shows in some
+    // task's expected status. The input no task reads is drawn on its own, last.
     val dag = attachOrphanInputs(rng, inputs, tasks.toVector)
     val (layout, partitioned) = drawLayout(rng.split(), dag)
     val corruption = drawCorruption(rng.split(), partitioned)
-    JobCase(inputs, drawStrings(rng.split(), partitioned), layout, Some(corruption))
+    val named = drawStrings(rng.split(), partitioned)
+    JobCase(inputs ++ drawUnreadInput(rng.split(), nInputs), named, layout, Some(corruption))
   }
+
+  /** A quarter of the cases declare one more input that no task reads, the
+    * way a user leaves one declared after they stop using it, and half of
+    * those point it at a path matching no file. It still loads, and its
+    * failure reaches no task: the run's verdict ignores it, and only the run's
+    * warning records it. */
+  private def drawUnreadInput(rng: Rng, index: Int): Option[GenInput] =
+    if (!rng.bool(0.25)) None
+    else Some(GenInput(index, rows = rng.between(1, 4), broken = rng.bool(0.5)))
 
   /** Half the cases carry [[AdversarialStrings]]: half their tasks are named
     * from the pool, nearly all their `Fails` tasks throw a string from it, and
@@ -566,7 +580,8 @@ object JobDagGen {
   }
 
   /** Give every input at least one reading task, so a broken input always shows
-    * up in some task's expected status. */
+    * up in some task's expected status. The input [[drawUnreadInput]] adds is
+    * declared after this runs, so no task reads it. */
   private def attachOrphanInputs(rng: Rng, inputs: Vector[GenInput], tasks: Vector[GenTask]): Vector[GenTask] = {
     val consumed = tasks.iterator.flatMap(_.inputSrcs).toSet
     var out = tasks

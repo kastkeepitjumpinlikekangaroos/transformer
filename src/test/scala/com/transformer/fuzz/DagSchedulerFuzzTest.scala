@@ -106,7 +106,8 @@ class DagSchedulerFuzzTest {
       failed += statuses.count(_ == "Failed")
       validationFailed += statuses.count(_ == "ValidationFailed")
       skipped += statuses.count(_ == "Skipped")
-      if (jc.inputs.exists(_.broken)) brokenInputs += 1
+      // A broken input some task reads, so it skips that task.
+      if (jc.tasks.exists(_.inputSrcs.exists(jc.inputs(_).broken))) brokenInputs += 1
       if (jc.tasks.exists(_.taskDeps.exists(j => jc.tasks(j).taskDeps.nonEmpty))) deepDags += 1
       // A dependency acquired through a validation's FROM rather than the main
       // SQL's — a distinct edge source in `TaskDag.build`.
@@ -141,6 +142,38 @@ class DagSchedulerFuzzTest {
     assertTrue(s"deepDagCases=$deepDags", deepDags > 0)
     assertTrue(s"validationEdgeCases=$validationEdges", validationEdges > 0)
     assertTrue(s"no run overlapped two tasks in wall-clock time ($sampled sampled)", overlapped > 0)
+  }
+
+  /** Coverage guard for input failures. The run's warnings name every input
+    * that failed to load, and its verdict ignores an input no task reads, so
+    * the corpus must reach: inputs no task reads, broken and healthy; a case
+    * where every task succeeds beside such a broken input, the only shape in
+    * which a warning meets a succeeded run; and a task reading two broken
+    * inputs, whose skip reason names one of them and whose warnings name both. */
+  @Test def generatorCoversInputFailures(): Unit = {
+    val n = Props.seedCountOr(2000)
+    var unreadHealthy, unreadBroken, succeededWithWarning, twoBrokenReads = 0
+    var i = 0
+    while (i < n) {
+      val jc = JobDagGen.generate(new Rng(Props.baseSeed + i))
+      val read = jc.tasks.iterator.flatMap(_.inputSrcs).toSet
+      jc.inputs.indices.filterNot(read).foreach { k =>
+        if (jc.inputs(k).broken) unreadBroken += 1 else unreadHealthy += 1
+      }
+      if (DagSchedule.expectedStatuses(jc).forall(_ == "Succeeded") && DagSchedule.expectedWarnings(jc).nonEmpty)
+        succeededWithWarning += 1
+      if (jc.tasks.exists(_.inputSrcs.count(jc.inputs(_).broken) >= 2)) twoBrokenReads += 1
+      i += 1
+    }
+    println(s"[dag-schedule] input failures over $n seeds: unreadHealthy=$unreadHealthy " +
+      s"unreadBroken=$unreadBroken succeededWithWarning=$succeededWithWarning twoBrokenReads=$twoBrokenReads")
+    // Bounds near a third of the rates measured over the default 2000 seeds:
+    // about 260 unread inputs of each kind, 130 succeeded cases with a warning,
+    // and 27 tasks reading two broken inputs.
+    assertTrue(s"unreadHealthy=$unreadHealthy over $n", unreadHealthy > n / 24)
+    assertTrue(s"unreadBroken=$unreadBroken over $n", unreadBroken > n / 24)
+    assertTrue(s"succeededWithWarning=$succeededWithWarning over $n", succeededWithWarning > n / 45)
+    assertTrue(s"twoBrokenReads=$twoBrokenReads over $n", twoBrokenReads > n / 220)
   }
 
   /** Reopens generated cases from the base seed — those `take` accepts — until

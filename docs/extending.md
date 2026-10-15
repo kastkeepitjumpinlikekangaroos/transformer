@@ -556,10 +556,15 @@ all three:
   tests nothing about propagation.
 
 Then teach three places about it together: `DagSchedule.expectedStatuses` (if it
-affects status), `Shrinker.jobCase` (a strictly-reducing move that removes it),
-and `generatorCoversScheduleShapes` (a tally plus an assertion that it is
-reached). The measure in `shrinkerTerminatesAndReduces` must count the new field
-too, or the shrinker will appear to stall on it.
+affects status) or `DagSchedule.expectedWarnings` (if it affects the run's
+warnings, as an input no task reads does), `Shrinker.jobCase` (a
+strictly-reducing move that removes it), and `generatorCoversScheduleShapes` (a
+tally plus an assertion that it is reached; a shape too rare for that guard's
+60 seeds gets a guard of its own over more, as `generatorCoversInputFailures`
+does). The measure in `shrinkerTerminatesAndReduces` must count the new field
+too, or the shrinker will appear to stall on it. A draw that is not part of
+the DAG comes from its own `rng.split()` after the existing ones, so every
+existing seed keeps the case it had.
 
 **To record a frontend finding** — a failure `oracle/CleanRejection` or
 `oracle/SyntaxEquivalence` reports, or text the parser drops — write its plan in

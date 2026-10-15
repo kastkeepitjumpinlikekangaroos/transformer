@@ -498,13 +498,19 @@ object Shrinker {
     * task keeps the remaining indices (and hence every `t<j>` reference) valid,
     * which is why only the tail is peeled; edges are then removed one at a time,
     * so a scheduling bug converges to the smallest DAG that still shows it.
-    * Dropping an input is unsafe (the surviving tasks reference it by name), so
-    * an input is healed rather than removed. */
+    * Dropping an input a task reads is unsafe (the surviving tasks reference it
+    * by name, and every input after it by position), so such an input is
+    * healed rather than removed; the last input, when no task reads it, is
+    * dropped. */
   def jobCase(jc: JobDagGen.JobCase): Iterator[JobDagGen.JobCase] = {
     // A task the tail depends on cannot be dropped, so peel only from the end.
     val dropLastTask: Iterator[JobDagGen.JobCase] =
       if (jc.tasks.length <= 1) Iterator.empty
       else Iterator(jc.copy(tasks = jc.tasks.init))
+
+    val dropUnreadInput: Iterator[JobDagGen.JobCase] =
+      if (jc.inputs.length <= 1 || jc.tasks.exists(_.inputSrcs.contains(jc.inputs.length - 1))) Iterator.empty
+      else Iterator(jc.copy(inputs = jc.inputs.init))
 
     // One run, then no templated run directory, then no templated partitions:
     // a hydration failure that survives these is not about the layout.
@@ -577,7 +583,7 @@ object Shrinker {
         jc.copy(inputs = jc.inputs.updated(i, jc.inputs(i).copy(rows = jc.inputs(i).rows - 1)))
       }
 
-    dropLastTask ++ dropEdge ++ dropValidationEdge ++ healInput ++ healTask ++ dropOutput ++
+    dropLastTask ++ dropUnreadInput ++ dropEdge ++ dropValidationEdge ++ healInput ++ healTask ++ dropOutput ++
       dropValidation ++ shrinkRowCount ++ dropSecondRun ++ dropRunDir ++ dropPartition ++ plainStrings ++
       dropCorruption
   }
