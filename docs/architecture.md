@@ -745,11 +745,16 @@ That round trip is a checked contract, not just a written format. The
 run in a `JobSession` — the job written as a job directory, opened the way the
 GUI opens one — and holds each task the session rebuilds from its record to
 the `TaskResult` the run returned, field for field, along with the session's
-`job.json`, its run picker and each task's partition picker. A task with no
-record behind it (a memory-only task, which `job.json` lists with no `runFile`)
-is rebuilt from the manifest's compact entry, which cannot carry its timestamps
-or which validations failed; what the GUI should show for such a task is open
-in [plans/robustness/15](../plans/robustness/15-what-a-reopened-run-shows-without-its-record.md).
+`job.json`, its run picker and each task's partition picker. Then it damages
+the tree one way — a record deleted, cut short or followed by garbage, the
+manifest deleted or pointing nowhere, two records swapped — and the reopened
+session must be degraded but sane: loaded, nothing thrown, every task what its
+surviving source carries or `Pending`. A task with no readable record behind its
+manifest entry (a memory-only task, which `job.json` lists with no `runFile`, or
+a damaged one) is rebuilt from that compact entry, which cannot carry its
+timestamps, which validations failed or its output, and a record that names
+another task is trusted; what the GUI should show in those cases is open in
+[plans/robustness/15](../plans/robustness/15-what-a-reopened-run-shows-without-its-record.md).
 
 #### Per-task record (`_run.json`)
 

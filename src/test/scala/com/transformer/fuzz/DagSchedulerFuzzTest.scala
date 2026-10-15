@@ -23,7 +23,10 @@ import java.nio.file.{Files, Path}
   * Then it reopens the finished runs the way the GUI does, in a `JobSession`
   * on the same job as a directory, and holds what the session rebuilds to what
   * the runs returned ([[Hydration]]): the read side of the records the
-  * scheduler property checks are written.
+  * scheduler property checks are written. Last it damages the tree — a record
+  * deleted, cut short or followed by garbage, `job.json` deleted or pointing
+  * nowhere, two records swapped — and reopens it again, where the session must
+  * be degraded but sane.
   *
   * Liveness is the reason this target exists in the same repo as the sharded
   * exchange work. Every task body fans its own nested work onto the shared
@@ -220,10 +223,51 @@ class DagSchedulerFuzzTest {
     assertTrue(s"no session opened at an earlier time: ${seen.openings.toMap}", seen.openings("earlier") > 0)
   }
 
+  /** Coverage guard for the corruption mode: every corruption is drawn (the
+    * first half counts the generated cases), and over a sample of real runs
+    * every one is applied and reopened, the sessions over the damaged trees
+    * reach every source a degraded session can use — a record found on disk
+    * once `job.json` is gone, the entry with no readable record behind it, and
+    * a task nothing on disk names — and every [[Hydration.Degraded]] entry is
+    * observed, not just reproduced by hand. */
+  @Test def generatorCoversCorruptions(): Unit = {
+    val n = Props.seedCountOr(2000)
+    val drawn = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    var i = 0
+    while (i < n) {
+      val jc = JobDagGen.generate(new Rng(Props.baseSeed + i))
+      if (jc.corruptionApplies) drawn(jc.corruption.get.name) += 1
+      i += 1
+    }
+    val seen = new Hydration.Report
+    var seed = Props.baseSeed
+    while (seed < Props.baseSeed + 60) {
+      val jc = JobDagGen.generate(new Rng(seed))
+      seen.add(DagSchedule.run(jc)((runs, root) => Hydration.check(jc, runs, root)))
+      seed += 1
+    }
+    println(s"[hydration] corruptions drawn over $n seeds: ${drawn.toMap}")
+    println(s"[hydration] over 60 corrupted runs: applied=${seen.corruptions.toMap} sources=${seen.sources.toMap} " +
+      s"degraded=${seen.degraded.map { case (d, c) => d.name -> c }.toMap}")
+    JobDagGen.Corruption.Names.foreach { name =>
+      assertTrue(s"'$name' drawn ${drawn(name)} times over $n", drawn(name) > n / 12)
+      assertTrue(s"'$name' never applied and reopened: ${seen.corruptions.toMap}", seen.corruptions(name) > 0)
+    }
+    assertTrue(s"no session found a record on disk without job.json: ${seen.sources.toMap}",
+      seen.sources.keys.exists(_._1 == "discovered"))
+    assertTrue(s"no session rebuilt a record-backed task from job.json's entry: ${seen.sources.toMap}",
+      seen.degraded(Hydration.Degraded.SummaryLosesOutputPath) > 0)
+    assertTrue(s"no task was left unknown: ${seen.sources.toMap}", seen.sources(("unknown", "Pending")) > 0)
+    Hydration.Degraded.All.foreach { d =>
+      assertTrue(s"'${d.name}' never observed: ${seen.degraded.map { case (k, c) => k.name -> c }.toMap}",
+        seen.degraded(d) > 0)
+    }
+  }
+
   /** Each [[Hydration.Degraded]] entry records what a reopened run shows today
-    * for a task with no record behind it. When one stops reproducing, the
-    * session changed what it shows: update the plan and the oracle, and remove
-    * the entry. */
+    * for a task rebuilt from less than its own record. When one stops
+    * reproducing, the session changed what it shows: update the plan and the
+    * oracle, and remove the entry. */
   @Test def everyDegradedHydrationStillReproduces(): Unit =
     Hydration.Degraded.All.foreach { d =>
       assertTrue(s"'${d.name}' no longer reproduces: a session no longer shows ${d.shows}. " +
@@ -246,7 +290,8 @@ class DagSchedulerFuzzTest {
         jc.tasks.count(_.outcome != JobDagGen.Ok) + jc.inputs.count(_.broken) +
         jc.tasks.count(_.output.isDefined) + jc.tasks.count(_.passingValidation) +
         jc.tasks.count(_.validationTaskSrc.isDefined) + jc.inputs.map(_.rows).sum +
-        jc.layout.runs + jc.layout.runDir.size + jc.tasks.count(_.output.exists(_.partitionBy.isDefined))
+        jc.layout.runs + jc.layout.runDir.size + jc.tasks.count(_.output.exists(_.partitionBy.isDefined)) +
+        jc.corruption.size
     var i = 0
     while (i < 40) {
       val jc = JobDagGen.generate(new Rng(i.toLong))

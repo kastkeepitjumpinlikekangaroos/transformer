@@ -1339,17 +1339,24 @@ frontend fuzzer closed the first, and found the defects in the next section.
 ## What a reopened run shows for a task without its record (open)
 
 `JobSession` rebuilds a task from its `_run.json` when it has one, and from
-`job.json`'s compact entry when it does not: a task with no output directory
-(which `job.json` lists with no `runFile`), or one whose record is missing or
-unreadable. The entry carries the status, the reason and the rows, and not the
-timestamps or which validations failed, so such a task reopens with every
-timestamp at the epoch (its duration reads 0 ms) and, if its validations
-failed, as `ValidationFailed` with no failure listed (every validation card
-reads PASSED beside a VALIDATION FAILED status). Nothing marks the task as
-rebuilt from less than its record. What it should show instead is a product
-decision, open in
+`job.json`'s compact entry when the entry's `runFile` leads to no readable
+record: a task with no output directory (the entry has no `runFile`), or a
+record that is missing, cut short, followed by garbage, or pointed at wrongly.
+The entry carries the status, the reason and the rows, and not the timestamps,
+which validations failed, or the output, so such a task reopens with every
+timestamp at the epoch (its duration reads 0 ms), with no output in the details
+panel, and, if its validations failed, as `ValidationFailed` with no failure
+listed — every validation card reads PASSED beside a VALIDATION FAILED status.
+The session only looks for a task's record on disk when `job.json` does not name
+the task, so a `runFile` that resolves nowhere wins over the task's own record
+sitting at its configured path. A record that names another task is trusted: two
+records swapped show each task as the other. With no readable `job.json` at all,
+each task reopens from its newest record, and one with none stays `Pending`
+(grey, which the legend reads as "never run"). Nothing marks any of this to the
+user. What a reopened run should show in each case is a product decision, open
+in
 [plans/robustness/15](../plans/robustness/15-what-a-reopened-run-shows-without-its-record.md);
-the `Hydration` oracle in `fuzz/dag_scheduler_fuzz_test` records both as
+the `Hydration` oracle in `fuzz/dag_scheduler_fuzz_test` records each as
 `Hydration.Degraded` with a repro until it is made.
 
 ## Open defects the frontend fuzzer found (2026-10-04)

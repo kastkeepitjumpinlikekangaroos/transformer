@@ -491,8 +491,9 @@ object Shrinker {
 
   /** Strictly-smaller candidates for a generated job DAG. Every move reduces a
     * well-founded measure — task count, edge count, injected-failure count,
-    * per-task output config, or the run layout (runs, a templated run directory,
-    * templated partitions) — so the greedy loop terminates. Dropping the LAST
+    * per-task output config, the run layout (runs, a templated run directory,
+    * templated partitions), or the corruption — so the greedy loop terminates.
+    * Dropping the LAST
     * task keeps the remaining indices (and hence every `t<j>` reference) valid,
     * which is why only the tail is peeled; edges are then removed one at a time,
     * so a scheduling bug converges to the smallest DAG that still shows it.
@@ -519,6 +520,10 @@ object Shrinker {
         val t = jc.tasks(i)
         jc.copy(tasks = jc.tasks.updated(i, t.copy(output = t.output.map(_.copy(partitionBy = None)))))
       }
+
+    // Last: a failure that survives an intact tree is not about the corruption.
+    val dropCorruption: Iterator[JobDagGen.JobCase] =
+      if (jc.corruption.isEmpty) Iterator.empty else Iterator(jc.copy(corruption = None))
 
     val dropValidationEdge: Iterator[JobDagGen.JobCase] =
       jc.tasks.indices.iterator.filter(jc.tasks(_).validationTaskSrc.isDefined).map { i =>
@@ -562,7 +567,7 @@ object Shrinker {
       }
 
     dropLastTask ++ dropEdge ++ dropValidationEdge ++ healInput ++ healTask ++ dropOutput ++
-      dropValidation ++ shrinkRowCount ++ dropSecondRun ++ dropRunDir ++ dropPartition
+      dropValidation ++ shrinkRowCount ++ dropSecondRun ++ dropRunDir ++ dropPartition ++ dropCorruption
   }
 
   // ---- ParquetCase shrinker (external-format differential) -----------------

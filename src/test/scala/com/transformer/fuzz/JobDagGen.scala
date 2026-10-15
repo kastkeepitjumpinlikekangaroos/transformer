@@ -1,9 +1,9 @@
 package com.transformer.fuzz
 
-import com.transformer.job.{DataJob, InputFilePath, JobFiles, OutputFilePath, SQLTask, Validation}
+import com.transformer.job.{DataJob, InputFilePath, JobFiles, JobRunRecord, OutputFilePath, SQLTask, TaskRunRecord, Validation}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, Path, StandardOpenOption}
 import java.time.{Duration, Instant}
 
 /** Generator of a random `DataJob` — inputs plus a DAG of [[SQLTask]]s — for the
@@ -47,8 +47,10 @@ import java.time.{Duration, Instant}
   * time. That is the on-disk shape the GUI reads a finished run back from —
   * several runs side by side, a task's partitions across them — and
   * [[JobCase.writeDirectoryJob]] writes the same job as the directory the GUI
-  * opens. Those draws come after the DAG's, from their own stream, so a seed's
-  * DAG is the one it always was.
+  * opens. A case then names one [[Corruption]] of the finished tree, which the
+  * hydration property applies once it has checked the tree intact. Those draws
+  * come after the DAG's, each from its own stream, so a seed's DAG is the one it
+  * always was.
   */
 object JobDagGen {
 
@@ -155,9 +157,43 @@ object JobDagGen {
   val SecondRunOffsets: Vector[Duration] =
     Vector(Duration.ofHours(1), Duration.ofDays(1), Duration.ofDays(-1))
 
+  /** One mutation of a finished case's output tree — what a crash, a bad copy or
+    * a hand edit leaves behind. It touches the latest run's files only, and a
+    * task it names has an output directory. */
+  sealed abstract class Corruption(val name: String)
+  object Corruption {
+    /** The task's `_run.json` is gone. */
+    final case class DeleteRecord(task: Int) extends Corruption("delete a record")
+    /** The task's `_run.json` stops `keep` of the way through its bytes, inside
+      * its object. */
+    final case class TruncateRecord(task: Int, keep: Double) extends Corruption("truncate a record")
+    /** Text follows the object in the task's `_run.json`. */
+    final case class GarbageAfterRecord(task: Int, garbage: String) extends Corruption("garbage after a record")
+    /** The run's `job.json` is gone, as if the job died after its tasks. */
+    case object DeleteManifest extends Corruption("delete job.json")
+    /** `job.json` points the task's `runFile` at a path that does not exist. */
+    final case class DanglingRunFile(task: Int) extends Corruption("dangling runFile")
+    /** Two tasks' `_run.json` files trade places. */
+    final case class SwapRecords(a: Int, b: Int) extends Corruption("swap two records")
+
+    val Names: Vector[String] = Vector(
+      "delete a record", "truncate a record", "garbage after a record", "delete job.json",
+      "dangling runFile", "swap two records")
+
+    /** What follows a record's object: none of it whitespace, which JSON would
+      * read past. One is a second object, one is NUL characters. */
+    val Garbage: Vector[String] = Vector(
+      "x", "}", "{\"taskName\": \"other\"}", Seq(0, 0).map(_.toChar).mkString, ",\n]")
+  }
+
   /** A whole generated job. Rendered to a runnable [[DataJob]] by [[build]],
-    * which needs a scratch directory for the input CSVs and task outputs. */
-  final case class JobCase(inputs: Vector[GenInput], tasks: Vector[GenTask], layout: RunLayout) {
+    * which needs a scratch directory for the input CSVs and task outputs.
+    * `corruption` is applied to the finished tree by [[corrupt]]. */
+  final case class JobCase(
+      inputs: Vector[GenInput],
+      tasks: Vector[GenTask],
+      layout: RunLayout,
+      corruption: Option[Corruption] = None) {
 
     /** The directory every run writes under, templated if the layout is — what
       * `DirectoryJobLoader` calls `outputDir`. */
@@ -179,6 +215,64 @@ object JobDagGen {
     /** A templated path as the run at `executionTime` renders it. */
     def render(path: String, executionTime: Instant): String =
       TemplateRenderer.render(path, TemporalVariables(executionTime))
+
+    /** The `_run.json` the run at `executionTime` writes for task `t`. */
+    def recordFile(root: Path, t: Int, executionTime: Instant): Path =
+      Path.of(render(outputPath(root, tasks(t)).get, executionTime)).resolve(TaskRunRecord.FileName)
+
+    /** The `job.json` the run at `executionTime` writes. */
+    def manifestFile(root: Path, executionTime: Instant): Path =
+      Path.of(render(manifestPath(root), executionTime))
+
+    /** Where [[Corruption.DanglingRunFile]] points task `t`'s `runFile`: under a
+      * directory nothing writes. */
+    def danglingRunFile(root: Path, t: Int): String =
+      root.resolve("nowhere").resolve(tasks(t).view).resolve(TaskRunRecord.FileName).toString
+
+    /** Whether [[corruption]] still names tasks with an output directory — a
+      * shrink can drop the task or its output. */
+    def corruptionApplies: Boolean = {
+      def recorded(t: Int): Boolean = tasks.isDefinedAt(t) && tasks(t).output.isDefined
+      corruption.exists {
+        case Corruption.DeleteRecord(t) => recorded(t)
+        case Corruption.TruncateRecord(t, _) => recorded(t)
+        case Corruption.GarbageAfterRecord(t, _) => recorded(t)
+        case Corruption.DeleteManifest => true
+        case Corruption.DanglingRunFile(t) => recorded(t)
+        case Corruption.SwapRecords(a, b) => recorded(a) && recorded(b)
+      }
+    }
+
+    /** Apply [[corruption]] to the files the run at `executionTime` (the latest)
+      * wrote under `root`. */
+    def corrupt(root: Path, executionTime: Instant): Unit =
+      if (corruptionApplies) corruption.get match {
+        case Corruption.DeleteRecord(t) =>
+          Files.delete(recordFile(root, t, executionTime))
+        case Corruption.TruncateRecord(t, keep) =>
+          val file = recordFile(root, t, executionTime)
+          val bytes = Files.readAllBytes(file)
+          // A record ends "}\n", so a cut before its last two bytes leaves the
+          // object open.
+          val cut = math.max(1, math.min(bytes.length - 2, (bytes.length * keep).toInt))
+          Files.write(file, java.util.Arrays.copyOf(bytes, cut))
+        case Corruption.GarbageAfterRecord(t, garbage) =>
+          Files.writeString(recordFile(root, t, executionTime), garbage, StandardOpenOption.APPEND)
+        case Corruption.DeleteManifest =>
+          Files.delete(manifestFile(root, executionTime))
+        case Corruption.DanglingRunFile(t) =>
+          val file = manifestFile(root, executionTime)
+          val rec = JobRunRecord.read(file).get
+          val entry = rec.tasks(t).copy(runFile = Some(danglingRunFile(root, t)))
+          JobRunRecord.write(file, rec.copy(tasks = rec.tasks.updated(t, entry)))
+        case Corruption.SwapRecords(a, b) =>
+          val fa = recordFile(root, a, executionTime)
+          val fb = recordFile(root, b, executionTime)
+          val parked = fa.resolveSibling("_run.json.swap")
+          Files.move(fa, parked)
+          Files.move(fb, fa)
+          Files.move(parked, fb)
+      }
 
     private def inputFile(root: Path, in: GenInput): Path = root.resolve("in").resolve(s"${in.view}.csv")
 
@@ -270,7 +364,8 @@ object JobDagGen {
         s"${t.view}<-$srcs(${t.outcome}$out$vdep)"
       }.mkString(", ")
       val dir = layout.runDir.map(d => s"runs/$d").getOrElse("out")
-      s"JobCase(inputs=[$ins], tasks=[$ts], dir=$dir, runs=[${layout.executionTimes.mkString(", ")}])"
+      val corrupt = corruption.map(c => s", corruption=$c").getOrElse("")
+      s"JobCase(inputs=[$ins], tasks=[$ts], dir=$dir, runs=[${layout.executionTimes.mkString(", ")}]$corrupt)"
     }
   }
 
@@ -320,7 +415,29 @@ object JobDagGen {
     // invisible to the oracle.
     val dag = attachOrphanInputs(rng, inputs, tasks.toVector)
     val (layout, partitioned) = drawLayout(rng.split(), dag)
-    JobCase(inputs, partitioned, layout)
+    JobCase(inputs, partitioned, layout, Some(drawCorruption(rng.split(), partitioned)))
+  }
+
+  /** One corruption the case's tree can take: uniform over the kinds that apply,
+    * which without a task that has an output directory is only losing
+    * `job.json`. */
+  private def drawCorruption(rng: Rng, tasks: Vector[GenTask]): Corruption = {
+    val recorded = tasks.filter(_.output.isDefined).map(_.index)
+    if (recorded.isEmpty) Corruption.DeleteManifest
+    else {
+      val t = rng.oneOf(recorded)
+      val kinds = Vector[() => Corruption](
+        () => Corruption.DeleteRecord(t),
+        () => Corruption.TruncateRecord(t, rng.nextDouble()),
+        () => Corruption.GarbageAfterRecord(t, rng.oneOf(Corruption.Garbage)),
+        () => Corruption.DeleteManifest,
+        () => Corruption.DanglingRunFile(t)) ++
+        (if (recorded.length >= 2) Vector(() => {
+          val other = rng.oneOf(recorded.filterNot(_ == t))
+          Corruption.SwapRecords(math.min(t, other), math.max(t, other))
+        }) else Vector.empty)
+      rng.oneOf(kinds)()
+    }
   }
 
   /** Where the case's runs land and when they run, and which task outputs
