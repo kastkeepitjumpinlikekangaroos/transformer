@@ -1,8 +1,9 @@
 package com.transformer.fuzz
 
-import com.transformer.core.{DataType, Schema}
+import com.transformer.core.{ColumnarBatch, DataType, Schema}
 import com.transformer.fuzz.MetaQueryGen.{AggCore, MetaCase, MetaQuery, NoRecCase, ProjectCore, QueryCore, RelEnv}
 import com.transformer.fuzz.QueryGen._
+import com.transformer.read.parquet.{ExternalParquet, ParquetReader}
 import com.transformer.sql.plan._
 
 /** Hand-rolled, integrated-style shrinking: given a failing value, produce an
@@ -545,5 +546,195 @@ object Shrinker {
 
     dropLastTask ++ dropEdge ++ dropValidationEdge ++ healInput ++ healTask ++ dropOutput ++
       dropValidation ++ shrinkRowCount
+  }
+
+  // ---- ParquetCase shrinker (external-format differential) -----------------
+
+  /** Strictly-smaller parquet cases: fewer files, columns, row groups and
+    * rows, then the plainer layout and read. A case is never left without a
+    * file or a view column, and a projection or predicate that names a dropped
+    * column goes with it. */
+  def parquetCase(c: ParquetGen.ParquetCase): Iterator[ParquetGen.ParquetCase] = {
+    import ParquetGen._
+    val files = c.files
+    def withFiles(fs: Vector[PqFile]): ParquetCase = c.copy(files = fs)
+    def updatedFile(i: Int)(f: PqFile => PqFile): ParquetCase = withFiles(files.updated(i, f(files(i))))
+    def updatedGroups(i: Int, gs: Vector[RowGroup]): ParquetCase = updatedFile(i)(_.copy(groups = gs))
+
+    val dropFile = if (files.length <= 1) Iterator.empty else files.indices.iterator.map { i =>
+      withFiles(files.patch(i, Nil, 1))
+    }
+
+    val dropViewColumn =
+      if (c.viewColumns.length <= 1) Iterator.empty
+      else c.viewColumns.iterator.map { name =>
+        val fs = files.map { f =>
+          val at = f.columns.indexWhere(_.name == name)
+          f.copy(columns = f.columns.patch(at, Nil, 1),
+            groups = f.groups.map(g => g.copy(rows = g.rows.map(_.patch(at, Nil, 1)))))
+        }
+        val remaining = c.viewColumns.filterNot(_ == name)
+        val projection = c.read.projection.map(_.filterNot(_ == name))
+          .filter(p => p.nonEmpty && p.length < remaining.length)
+        val pushdown = c.read.pushdown.filterNot(p => columnsOf(p).contains(name))
+        ParquetCase(fs, c.read.copy(projection = projection, pushdown = pushdown))
+      }
+
+    val dropExtraColumn = files.indices.iterator.flatMap { i =>
+      val f = files(i)
+      f.columns.indices.iterator.filter(k => i > 0 && !c.viewColumns.contains(f.columns(k).name)).map { k =>
+        updatedFile(i)(_.copy(columns = f.columns.patch(k, Nil, 1),
+          groups = f.groups.map(g => g.copy(rows = g.rows.map(_.patch(k, Nil, 1))))))
+      }
+    }
+
+    val dropGroup = files.indices.iterator.flatMap { i =>
+      files(i).groups.indices.iterator.map(k => updatedGroups(i, files(i).groups.patch(k, Nil, 1)))
+    }
+
+    val halveGroup = files.indices.iterator.flatMap { i =>
+      val gs = files(i).groups
+      gs.indices.iterator.filter(gs(_).rows.length > 1).flatMap { k =>
+        val rows = gs(k).rows
+        val (front, back) = rows.splitAt(rows.length / 2)
+        Iterator(front, back).map(half => updatedGroups(i, gs.updated(k, gs(k).copy(rows = half))))
+      }
+    }
+
+    val dropRow = files.indices.iterator.flatMap { i =>
+      val gs = files(i).groups
+      gs.indices.iterator.filter(k => gs(k).rows.length > 1 && gs(k).rows.length <= 8).flatMap { k =>
+        gs(k).rows.indices.iterator.map(r => updatedGroups(i, gs.updated(k, gs(k).copy(rows = gs(k).rows.patch(r, Nil, 1)))))
+      }
+    }
+
+    val plainLayout = files.indices.iterator.flatMap { i =>
+      val gs = files(i).groups
+      gs.indices.iterator.filter(gs(_).layout != ExternalParquet.Layout()).map { k =>
+        updatedGroups(i, gs.updated(k, gs(k).copy(layout = ExternalParquet.Layout())))
+      }
+    }
+
+    val r = c.read
+    val plainRead = Iterator(
+      if (r.pushdown.isDefined) Some(r.copy(pushdown = None)) else None,
+      if (r.projection.isDefined) Some(r.copy(projection = None)) else None,
+      if (r.batchSize != ColumnarBatch.DefaultCapacity) Some(r.copy(batchSize = ColumnarBatch.DefaultCapacity)) else None,
+      if (r.targetBytes != ParquetReader.DefaultTargetBytesPerPartition)
+        Some(r.copy(targetBytes = ParquetReader.DefaultTargetBytesPerPartition)) else None,
+      if (r.reversed) Some(r.copy(reversed = false)) else None
+    ).flatten.map(rs => c.copy(read = rs))
+
+    val simplerPredicate = r.pushdown.iterator.flatMap {
+      case Pred.Not(p) => Iterator(p)
+      case Pred.And(a, b) => Iterator(a, b)
+      case Pred.Or(a, b) => Iterator(a, b)
+      case _ => Iterator.empty
+    }.map(p => c.copy(read = r.copy(pushdown = Some(p))))
+
+    val size = parquetSize(c)
+    (dropFile ++ dropViewColumn ++ dropExtraColumn ++ dropGroup ++ halveGroup ++ dropRow ++ simplerPredicate ++
+      plainRead ++ plainLayout).filter(parquetSize(_) < size)
+  }
+
+  /** The strict-decrease measure: files, then columns, then row groups, then
+    * rows, then each choice that differs from the plainest. */
+  private[fuzz] def parquetSize(c: ParquetGen.ParquetCase): Long = {
+    import ParquetGen._
+    def predSize(p: Pred): Int = p match {
+      case Pred.Not(q) => 1 + predSize(q)
+      case Pred.And(a, b) => 1 + predSize(a) + predSize(b)
+      case Pred.Or(a, b) => 1 + predSize(a) + predSize(b)
+      case _ => 1
+    }
+    val r = c.read
+    val choices = c.files.iterator.flatMap(_.groups).count(_.layout != ExternalParquet.Layout()) +
+      r.pushdown.fold(0)(predSize) + r.projection.fold(0)(_ => 1) +
+      (if (r.batchSize != ColumnarBatch.DefaultCapacity) 1 else 0) +
+      (if (r.targetBytes != ParquetReader.DefaultTargetBytesPerPartition) 1 else 0) + (if (r.reversed) 1 else 0)
+    c.files.length * 1000000000000L + c.files.map(_.columns.length).sum * 1000000000L +
+      c.files.map(_.groups.length).sum * 1000000L + c.files.map(_.numRows).sum * 100L + choices
+  }
+
+  // ---- CSV shrinkers (round trip, text, inference) -------------------------
+
+  /** Fewer rows, then fewer columns, then fewer part files, then the default
+    * option bag. */
+  def csvDataCase(c: CsvTextGen.DataCase): Iterator[CsvTextGen.DataCase] = {
+    val dropRows = Iterator(c.rows.take(c.rows.length / 2), c.rows.drop(c.rows.length / 2)).filter(_.length < c.rows.length) ++
+      c.rows.indices.iterator.filter(_ => c.rows.length <= 8).map(i => c.rows.patch(i, Nil, 1))
+    val dropColumn = if (c.schema.length <= 1) Iterator.empty else c.schema.fields.indices.iterator.map { i =>
+      c.copy(schema = Schema(c.schema.fields.patch(i, Nil, 1)), rows = c.rows.map(_.patch(i, Nil, 1)))
+    }
+    val fewerParts = if (c.partitions > 1) Iterator(c.copy(partitions = 1)) else Iterator.empty
+    val plainer = plainerFormats(c.format).map(f => c.copy(format = f))
+    dropRows.map(rs => c.copy(rows = rs, partitions = if (rs.isEmpty) c.partitions else math.max(1, c.partitions))) ++
+      dropColumn ++ fewerParts ++ plainer
+  }
+
+  /** Fewer lines, columns and oddities, then the default option bag. */
+  def csvTextCase(c: CsvTextGen.TextCase): Iterator[CsvTextGen.TextCase] = {
+    import CsvTextGen._
+    // A malformation names a row by its index, so lines go only from the end
+    // past it.
+    val malformedAt = c.malformed.collect {
+      case Malformed.ExtraField(at) => at
+      case Malformed.MissingField(at) => at
+      case Malformed.InvalidBytes(at) => at
+    }
+    val keepAtLeast = malformedAt.fold(0)(_ + 1)
+    val dropLines = Iterator(c.lines.length / 2, c.lines.length - 1).filter(n => n >= keepAtLeast && n < c.lines.length)
+      .map(n => c.copy(lines = c.lines.take(n)))
+    // From the front only where no malformation counts lines.
+    val dropFront = if (c.malformed.isDefined || c.lines.isEmpty) Iterator.empty
+      else Iterator(c.lines.length / 2, 1).distinct.filter(_ > 0).map(n => c.copy(lines = c.lines.drop(n)))
+    // A plain value: "a" needs no quoting, and quoting it is allowed.
+    val plainValues = c.lines.indices.iterator.flatMap { i =>
+      c.lines(i) match {
+        case r: Row if r.fields.exists(t => t.value != "a" || t.trailing.nonEmpty) =>
+          Iterator(c.copy(lines = c.lines.updated(i, r.copy(fields = r.fields.map(_.copy(value = "a", trailing = ""))))))
+        case _ => Iterator.empty
+      }
+    }
+    val dropColumn = if (c.width <= 1 || c.malformed.isDefined) Iterator.empty else (0 until c.width).iterator.map { i =>
+      c.copy(width = c.width - 1,
+        header = c.header.map(h => h.copy(fields = h.fields.patch(i, Nil, 1))),
+        lines = c.lines.map {
+          case r: Row => r.copy(fields = r.fields.patch(i, Nil, 1))
+          case b => b
+        })
+    }
+    val plainer = Iterator(
+      if (c.malformed.isDefined) Some(c.copy(malformed = None)) else None,
+      if (c.bom) Some(c.copy(bom = false)) else None,
+      if (c.leadingBlanks > 0) Some(c.copy(leadingBlanks = 0)) else None
+    ).flatten
+    dropLines ++ dropFront ++ dropColumn ++ plainer ++ plainValues
+  }
+
+  def csvInferenceCase(c: CsvTextGen.InferenceCase): Iterator[CsvTextGen.InferenceCase] = {
+    val dropRows = Iterator(c.rows.take(c.rows.length / 2), c.rows.drop(c.rows.length / 2))
+      .filter(rs => rs.nonEmpty && rs.length < c.rows.length) ++
+      c.rows.indices.iterator.filter(_ => c.rows.length > 1 && c.rows.length <= 8).map(i => c.rows.patch(i, Nil, 1))
+    val dropColumn = if (c.schema.length <= 1) Iterator.empty else c.schema.fields.indices.iterator.map { i =>
+      c.copy(schema = Schema(c.schema.fields.patch(i, Nil, 1)), rows = c.rows.map(_.patch(i, Nil, 1)))
+    }
+    val simpler = Iterator(
+      if (c.files > 1) Some(c.copy(files = 1)) else None,
+      if (c.sampleRows != 1000) Some(c.copy(sampleRows = 1000)) else None
+    ).flatten
+    dropRows.map(rs => c.copy(rows = rs)) ++ dropColumn ++ simpler ++
+      plainerFormats(c.format).map(f => c.copy(format = f.copy(header = true)))
+  }
+
+  /** The option bag one choice nearer the default. */
+  private def plainerFormats(f: CsvTextGen.Format): Iterator[CsvTextGen.Format] = {
+    val d = CsvTextGen.DefaultFormat
+    Iterator(
+      if (f.charset != d.charset) Some(f.copy(charset = d.charset)) else None,
+      if (f.lineEnding != d.lineEnding) Some(f.copy(lineEnding = d.lineEnding)) else None,
+      if (f.nullValue != d.nullValue) Some(f.copy(nullValue = d.nullValue)) else None,
+      if (f.escape != f.quote) Some(f.copy(escape = f.quote)) else None
+    ).flatten.filter(g => g.delimiter != g.quote && g.delimiter != g.escape)
   }
 }

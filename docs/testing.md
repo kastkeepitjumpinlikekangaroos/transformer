@@ -143,6 +143,8 @@ discovery rule).
 manifest that could not reach a Failed or Skipped task's `_run.json` (see
 [gotchas.md](gotchas.md)). Campaigns: `dag_scheduler_fuzz_campaign`, `sharded_dag_scheduler_fuzz_campaign` (sharding gates on, so task bodies build exchanges while the scheduler fans out tasks) and `starved_dag_scheduler_fuzz_campaign` (the same, with `scheduler.parallelism=2` — up to ten tasks each fanning nested work onto a two-thread pool, the pool-starvation shape) |
 | `fuzz/frontend_fuzz_test` | Property-based gate over the SQL **frontend**: what the engine does with text it is not already expected to handle, where every other SQL fuzzer renders its own typed AST and so can only write the supported grammar. `SqlTextGen` writes text over `t(a, b, s)` / `u(a, b)`, the catalog `UnsupportedClauses`' examples are written against. **`CleanRejection`** (mutated queries from every generator, the clause table spliced everywhere, typing queries over all ten column types, casts of text through every pooled operator): a text binds and runs, or fails with an `IllegalArgumentException` naming what the user wrote, or fails while running on a value (a cast, a decimal overflow, a `NaN` widened to a decimal); never an internal exception class, an internal marker in the message (a slot name, a JVM local, a qualified or CamelCase class name, an identity hash, an invariant's text), or a rejection that waited for the data. Thirteen known defects are recognized from what was thrown and the bound plan, each with its plan in `plans/robustness/` (09-11, 13, 14) and a repro `everyKnownDefectStillReproduces` runs, so a fix fails the suite until its entry goes; the corpus guard asserts the mix of outcomes and that every mutation gets past the parser. **`NoSilentDrop`**: every entry of `UnsupportedClauses.audits` with an example, in each of eight contexts and, for an expression-level entry, its fragment at every one of 15 value, 12 predicate or 4 star positions (4848 cases, enumerated, not sampled) is refused at bind time, and the guard requires each to fire its own rejection nearly everywhere a supported query binds (`everySpliceSiteIsAValidHost`); 55 honoured clauses at their positions (OFFSET, LIMIT, FETCH FIRST, TOP, NULL placement, DISTINCT aggregates, ILIKE, ESCAPE, HAVING, joins, frames) keep their meaning in six contexts, with a guard that each is observable (the query with it and without it differ) on a share of seeds; ten constructs beyond the table's reach (a statement after `;`, a repeated tail clause, a CTE named twice, a JOIN with no ON) must be refused, recorded as known while they bind. **`SyntaxEquivalence`**: 51 shapes of two or more spellings agree on column types and rows (BETWEEN, negation, IN, parentheses, five join spellings, the row-count spellings, NULL placement as a sort key, every inert spelling of the audit), each observable against a query that drops its subject; five of them are known disagreements (plans 09, 12, 13). Plus the oracles' sensitivity checks (each reports a drop or a disagreement it is shown) and a lexer that renders every text back exactly. Campaign: `frontend_fuzz_campaign` |
+| `fuzz/parquet_fuzz_test` | Property-based gate over the parquet reader against files it did not write (plan 06). `ParquetGen` writes a glob of one to three files with parquet-mr (`read/parquet:external_parquet`), never our writer: each column of the view has an engine type and each file stores it in one of the layouts parquet allows for it (33 in all: every timestamp unit and `INT96`, every decimal layout, plain, narrow and unsigned integers, `FLOAT16`, the text and byte annotations), so one glob can store a column several ways; a later file may reorder the columns, carry one the first lacks, or allow NULLs the first does not. Values are drawn as stored bits from pools that put each type's edges side by side; row groups are cut exactly (one row, several, an empty file, NULLs either side of a boundary) and each laid out its own way (dictionary, dictionary overflow, pages of one row, v1 or v2 pages, byte-stream-split floats, every codec the classpath carries: SNAPPY, GZIP, ZSTD, LZ4_RAW); the view is read at every batch size and partition target, through a projection and a pushed-down predicate. `oracle/ParquetDifferential` checks, in order: parquet-mr reads each file as the generator says (its row groups, and every value as parquet-mr's own stringifier prints it, against `ParquetGen.Kind.rendered`, which reads the stored bits by the spec with `java.time` and `java.math`); the view's schema; every row in order, each cell `RowOracle.identical` to `Kind.expected`, or the read fails naming the column for a MILLIS value past a long of microseconds; `exactRowCount`; partitions as whole runs of row groups (one per group at a one-byte target, one per file at the default), read in reverse too; a projection, through partitions past the first group; and pushdown soundness, the rows the predicate keeps from the pushed scan against the whole one. Found two wrong answers, both fixed (see `parquet_external_format_test`): a string range pushed against statistics in UTF-8 order (seed 1203) and a negative bound on an unsigned 8- or 16-bit column (seeds 9494 and 18048). Guards: every layout, the row-group, glob, page, encoding and codec shapes, the values each type is misread on, the shapes of both pushdown defects (`generatorReachesEveryLayoutShapeAndValue`, 4000 generated seeds, bounds 3-60x below the counts over 20000), real reads that project past the first group, push, skip groups and fail as the format requires (`readsReachLaterGroupsSkippedGroupsAndFailures`), and the oracle reporting a misread value (`theOracleReportsAMisreadValue`). Campaign: `parquet_fuzz_campaign` |
+| `fuzz/csv_fuzz_test` | Property-based gate over the CSV reader and writer (plan 06), which every other fuzzer reaches only through in-memory views. `CsvTextGen` draws a `Format` (an option bag as a job passes one: delimiter, quote and escape past ASCII and apart, a null string that is empty or a word, every line ending, UTF-8, UTF-16 and ISO-8859-1) and three kinds of case. **Data** (`oracle/CsvRoundTrip.checkData`): every type, with strings that hold the delimiter, quote, escape (and end in it), a line break, the null string's own text, a leading byte-order mark, characters past the charset and half a surrogate pair, and the other types' edges, written by `CsvWriter.writePartitioned` across 0 to 4 part files and read back with `CsvOptions.forWrittenFile`: each value comes back `RowOracle.identical` (a decimal at its declared scale), or the write fails naming the row and column. **Text** (`checkText`): CSV text written here from fields whose values and quoting the case records (doubled and escaped quotes, escaped escapes, quoted line breaks, text after a closing quote, a quote inside a bare field, blank lines in one-column and wider files and before a header, a byte-order mark, mixed line endings, a last line with no break, fields past 8192 characters), read through `CsvRowParser` (records, blank flags and start lines) and through `CsvReader` with a schema of strings; a malformed case (an unclosed quote, an extra or missing field, bytes that are no text) must fail naming the file and the line, computed from the rendered text. **Inference** (`oracle/InferenceRoundTrip`): columns of every type and of text that looks like another type (12 categories, the Java-only number spellings among them), across 1 to 3 files with a sample of 1000 rows or of 1 to 5: the first read's types must be the join `InferenceRoundTrip.classify` and `join` compute over the sample, every value what its text says under that type, and a value past the sample that does not fit a failed read naming its file, column, text and type; the second and third reads must then agree. The run prints which written types come back as which (the table in the README). Found before it landed, each now a regression: a one-column table's NULL rows lost, empty strings read as NULL, BINARY unreadable, the escape not escaped, a delimiter past ASCII throwing, and a CSV output of no partitions writing no file (seed 32). Guards over 4000 generated seeds for data and text, and over 200 real inference cases, with bounds about 3x below their counts over 20000; plus the oracles' own checks (a re-read without the writer's escape must change a value; the inference grammar is the agreed one). Campaign: `csv_fuzz_campaign` |
 | `sql/plan/logical_plan_cardinality_test` | `LogicalPlanCardinality.estimate` for every plan node: scan / project / filter selectivity (per shape: `=` / range / `IS NULL` / `LIKE` / `NOT` inversion / default), AND multiplies / OR widens, limit caps both ways, distinct shrinks, aggregate without group keys collapses to 1, aggregate with group keys stays bounded by input, joins per kind (Inner=max / Left=left / Right=right / Full=sum) + None propagates when either side unknown, union sums and propagates unknown, sort / window pass through, `filterSelectivity` constants pinned to named `private[plan] val`s; `LogicalOffset` subtracts from its child's estimate, bottoms out at zero, propagates `None`, and composes under a `LogicalLimit` |
 | `sql/plan/filter_pushdown_test` | `FilterPushdown` over every join kind: inner pushes left-only / right-only conjuncts into the matching child and re-indexes right-side ColRefs; inner with cross-side or mixed conjuncts splits correctly; stacked Filter(Filter(Join)) flattens before pushing; LEFT outer pushes left-only conjuncts and refuses right-only (including the `r.x IS NULL` anti-join shape); RIGHT outer is symmetric; FULL outer never pushes; cascaded inner joins push all the way to the relevant leaf scan with the right per-side shifts; filter above an aggregate is not pushed across; idempotent when re-run |
 | `sql/plan/column_projection_pushdown_test` | Join pruning: parent + join-key columns survive on each side, columns referenced by neither are dropped; `SELECT *` leaves the join unchanged; self-join keeps colliding names on both sides (correctness over optimality); cross-side filter above a join still allows both sides to prune to the union of (parent + filter + join-key) refs; the plan-time `verify` rejects an out-of-range `ColRefExpr` with a targeted `IllegalStateException` |
@@ -187,8 +189,9 @@ either half alone can pass over a corpus that tests nothing. The recipe for writ
 [extending.md](extending.md#add-a-metamorphic-relation). It is a `testonly`
 `scala_library` named `fuzz` plus the
 `expr_parity_fuzz_test`, `mode_differential_fuzz_test`, `metamorphic_fuzz_test`,
-`sharded_mode_fuzz_test`, `dag_scheduler_fuzz_test` and `frontend_fuzz_test`
-targets, and `row_oracle_test` for the comparator they share. The pieces:
+`sharded_mode_fuzz_test`, `dag_scheduler_fuzz_test`, `frontend_fuzz_test`,
+`parquet_fuzz_test` and `csv_fuzz_test` targets, and `row_oracle_test` for the
+comparator they share. The pieces:
 
 - `Rng` — seeded, splittable random source over `java.util.SplittableRandom`.
   The top-level seed is the repro key; iteration `i` uses seed `base + i`.
@@ -212,7 +215,10 @@ targets, and `row_oracle_test` for the comparator they share. The pieces:
   legitimately respell `1.5` as `1.50`), and a DATE or TIMESTAMP as the
   `LocalDate` / `Instant` both paths box, with no conversion from an epoch
   count. `row_oracle_test` pins each and holds `scalarEquals` to `Ops.eq` on
-  every non-float type.
+  every non-float type. `identical` is the stricter equality the file-format
+  oracles use, since a file read back must give each value as it was written:
+  a decimal by value and scale, a float by `compare`, bytes by content, and a
+  box of the same class.
 - `ExprGen` — generates a random `ColumnarBatch` + a typed `Expr`, **type-correct
   and total by construction** (asserts its own `dataType` invariant; excludes
   `RAND()`, casts that can throw — text into a number or a date, a FLOAT or
@@ -463,6 +469,36 @@ targets, and `row_oracle_test` for the comparator they share. The pieces:
   other is a disagreement. A case is observable when its answer differs from
   the shape's degenerate query, or, for a shape of spelling alone, holds two
   distinct rows. Known disagreements (`KnownDefects`) carry plans and repros.
+- `ParquetGen` — parquet files written by parquet-mr, for the external-format
+  differential. A `Kind` is one way a file stores a column: its footer type, the
+  stored values it draws, `expected` (the engine value those bits are, by the
+  spec, computed with `java.time` and `java.math`: a NANOS value floored to its
+  microsecond, a Julian day through `JulianFields`, a half-precision float from
+  its sign, exponent and mantissa bits) and `rendered` (how parquet-mr's
+  stringifier prints the same value, so a reading of the spec this file and the
+  reader shared would still disagree with parquet-mr). A `ParquetCase` is the
+  files (columns, row groups and each group's `Layout`) and a `ReadSpec` (batch
+  size, partition target, projection, pushdown `Pred`, partitions read in
+  reverse). Predicates are bound the way the planner binds a same-type
+  comparison, the only kind it leaves unwrapped for pushdown: a mixed-type
+  comparison reaches the scan under a CAST, which nothing pushes.
+- `oracle/ParquetDifferential.check` — the parquet property (see the test
+  inventory). Writes the case to a scratch directory, checks parquet-mr's
+  reading against `rendered` and then the reader's against `expected`, and
+  returns a `Report` (rows, groups, partitions, whether it failed as required,
+  projected past the first group, pushed, skipped rows) for the guards.
+- `CsvTextGen` — the CSV generators: a `Format` (the option bag), a `DataCase`
+  (a schema, rows of adversarial values and a part-file count), a `TextCase`
+  (lines of `TextField`s whose quoting is recorded, rendered by `layout`, which
+  also says where each line, an unclosed quote and an invalid byte begin, so
+  the oracle computes line numbers from the text, not from the parser) and an
+  `InferenceCase` (typed columns and `Lookalikes`, text of 12 categories that
+  looks like another type).
+- `oracle/CsvRoundTrip.checkData` / `checkText` — the CSV data and text
+  properties (see the test inventory); `oracle/InferenceRoundTrip.check` — the
+  inference property, with its own restatement of the grammar (`denote`, what
+  a text reads as in a column of a type; `classify` and `join`, what inference
+  infers), so it does not take the reader's word for the rules it checks.
 
 The default `bazel test //...` runs each property over a **small fixed-seed
 batch**, so it is deterministic and fast (the `*_fuzz_test` targets; the
@@ -546,6 +582,17 @@ were green on 2026-10-04 once every finding had its entry. A failure the campaig
 `CleanRejection.Defect` (or a `SyntaxEquivalence` known disagreement) with a
 repro; its `SqlEngineTest` regression lands with the fix, since a regression
 that asserts the right answer cannot land before it.
+
+The file-format properties have one campaign each. `parquet_fuzz_campaign`
+writes and reads real files for every case: a 10000-seed block of the property
+alone takes about fifteen minutes beside two others, and 30000 seeds were green
+on 2026-10-14 once both pushdown fixes landed (the blocks before them found the
+second). `csv_fuzz_campaign` is cheaper, about 2.7 minutes for a 20000-seed
+block of all three properties, and was green at 60000 seeds of each. Run either
+from a snapshot of its launcher with `TESTBRIDGE_TEST_ONLY` set to the property
+(`com.transformer.fuzz.ParquetFuzzTest#fuzzExternalParquet`, or
+`com.transformer.fuzz.CsvFuzzTest#fuzz.*`), or the guards read the campaign's
+seed budget too.
 
 Add a new generator /
 property by following the recipe in

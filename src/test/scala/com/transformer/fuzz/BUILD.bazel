@@ -2,11 +2,13 @@ load("@rules_scala//scala:scala.bzl", "scala_junit_test", "scala_library")
 
 # Shared property-based testing harness (Rng, Props, Shrinker, RowOracle) plus
 # the generators (ExprGen, DataGen, QueryGen, MetaQueryGen, SqlTextGen,
-# JobDagGen) and the oracles. testonly so it never leaks into a production
-# target. Throws plain AssertionError on failure, so it needs no JUnit
-# dependency — only the code it generates over: the SQL exec module (the
-# mode-differential oracle drives whole queries through SqlEngine.execute) and
-# the job module (the DAG-scheduler oracle builds and runs whole DataJobs).
+# JobDagGen, ParquetGen) and the oracles. testonly so it never leaks into a
+# production target. Throws plain AssertionError on failure, so it needs no
+# JUnit dependency — only the code it generates over: the SQL exec module (the
+# mode-differential oracle drives whole queries through SqlEngine.execute), the
+# job module (the DAG-scheduler oracle builds and runs whole DataJobs), and the
+# parquet reader, held against files parquet-mr writes through the testonly
+# external_parquet helper.
 scala_library(
     name = "fuzz",
     testonly = True,
@@ -18,8 +20,12 @@ scala_library(
     deps = [
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/read/csv",
+        "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/sql/plan",
+        "//src/test/scala/com/transformer/read/parquet:external_parquet",
+        "//src/main/scala/com/transformer/write/csv",
     ],
 )
 
@@ -160,6 +166,41 @@ scala_junit_test(
     ],
 )
 
+# External-format differential: parquet files parquet-mr writes (every layout
+# of every type, globs that store a column several ways, row groups cut
+# anywhere, every page and codec choice) read by ParquetReader and held to what
+# the format says they hold, and to parquet-mr's own reading. Default budget
+# part of `bazel test //...`.
+scala_junit_test(
+    name = "parquet_fuzz_test",
+    srcs = ["ParquetFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/test/scala/com/transformer/read/parquet:external_parquet",
+        "@maven//:junit_junit",
+    ],
+)
+
+# CSV round trips: data CsvWriter writes under any option bag, read back as a job
+# re-reads a task's output; CSV text with its fields known, read through the
+# parser and the reader; and inference, held to the narrowest type its sample
+# reads as and to a fixed point after one pass. Default budget part of
+# `bazel test //...`.
+scala_junit_test(
+    name = "csv_fuzz_test",
+    srcs = ["CsvFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/csv",
+        "//src/main/scala/com/transformer/write/csv",
+        "@maven//:junit_junit",
+    ],
+)
+
 # Long-campaign variants. Tagged `fuzz` so the default `bazel test //...`
 # (--test_tag_filters=-perf,-fuzz) skips them; run on demand with a large budget,
 # e.g.:
@@ -248,6 +289,33 @@ scala_junit_test(
         ":fuzz",
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "parquet_fuzz_campaign",
+    srcs = ["ParquetFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/test/scala/com/transformer/read/parquet:external_parquet",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "csv_fuzz_campaign",
+    srcs = ["CsvFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/csv",
+        "//src/main/scala/com/transformer/write/csv",
         "@maven//:junit_junit",
     ],
 )

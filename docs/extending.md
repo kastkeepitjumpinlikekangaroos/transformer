@@ -132,6 +132,25 @@ pushdown reaches every referenced column.
    fixture came from `ParquetWriter`, which writes `MICROS`. For parquet,
    `read/parquet:external_parquet` writes any schema with parquet-mr itself
    (see [testing.md](testing.md#test-inventory)); give a new format the same.
+7. Give it two properties, with coverage guards, the way plan 06 gave CSV and
+   parquet theirs (`fuzz/csv_fuzz_test`, `fuzz/parquet_fuzz_test`):
+   - a **round trip**: generated data of every type, edge values included,
+     written by your writer and read back by your reader with the writer's
+     schema (the way `DataJob.materializeIfNeeded` re-reads a task's output),
+     must come back `RowOracle.identical`; this is what found a CSV NULL row
+     vanishing and a BINARY that could not be read back;
+   - a **differential against something that is not your code**: an external
+     writer (parquet-mr for parquet) or text the generator writes itself (for
+     CSV), read by your reader and held to what the format says the bytes
+     mean. A round trip alone cannot catch a misreading the writer and reader
+     share. Where an external reader exists too, check that it reads the
+     generated files as the generator says (`ParquetGen.Kind.rendered`
+     against parquet-mr's stringifier), so the generator's reading of the spec
+     is not trusted either.
+   If the reader pushes predicates down, add pushdown soundness to the
+   differential: the rows a predicate keeps must not change when the reader
+   skips parts of the file by their statistics. Two parquet defects were in
+   the order the statistics are kept in.
 
 ## Add a config field to the directory loader
 

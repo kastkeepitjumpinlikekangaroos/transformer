@@ -262,6 +262,13 @@ ship a fix or move something from "not done" to "done".
   literals, `getNano / 1000` for CSV and `TimestampVector.setBoxed`), and
   with the `INT96` decoder.
 
+  Plan 06 made the same rule a property in both directions. `fuzz/parquet_fuzz_test`
+  writes every file with parquet-mr and, before consulting our reader, asks
+  parquet-mr to read each one back: a generator's reading of the spec that our
+  reader shared would agree with the reader and still disagree with parquet-mr's
+  stringifier. `fuzz/csv_fuzz_test` writes CSV text itself, from fields it knows,
+  rather than taking the text from `CsvWriter`.
+
   Decimals had no mapping at all. A parquet `DECIMAL` fell through to its
   physical type, so `123.45` stored as `INT32` read as the `INT` `12345`, and
   one stored as `FIXED_LEN_BYTE_ARRAY` or `BINARY` as raw two's-complement
@@ -1244,6 +1251,41 @@ ship a fix or move something from "not done" to "done".
   as a STRING, and fails a declared DOUBLE column). CSV moved to plain decimals
   in plan 06 at the user's choice; CAST was not asked about and still uses
   `java.lang.Double.parseDouble`.
+
+## Wrong answers the I/O properties found (2026-10-14, all fixed)
+
+Plan 06 put the file formats under property-based tests (`fuzz/parquet_fuzz_test`,
+`fuzz/csv_fuzz_test`), and what they and the probing around them found is fixed
+and pinned by named regressions (see [testing.md](testing.md#test-inventory)):
+
+- **Parquet pushdown dropped rows** the predicate kept: a string range against
+  a literal past U+D800, and a negative bound on an unsigned 8- or 16-bit column
+  (see "A parquet file orders its statistics in its own way" above).
+- **A NULL in a one-column CSV table vanished**, written as a blank line the
+  reader skipped, in a job's re-read for its downstream tasks too.
+- **An empty string read back as NULL**, and so did a string equal to a custom
+  null string: both wrote as the bare null string. NULL is now only the
+  unquoted null string, and the writer quotes a value that equals it.
+- **A BINARY column could not be read back** from the Base64 the writer writes.
+- **The writer did not escape a separate escape character**, so `a\b` came back
+  `ab` and a quoted value ending in the escape ran into the next field.
+- **A delimiter or quote past ASCII crashed the writer**
+  (`ArrayIndexOutOfBoundsException` from a 128-entry quoting table).
+- **A job re-read its CSV output without the `escape` option**, and **a CSV
+  output of no partitions wrote no file**, so the task feeding a downstream one
+  failed with `No CSV files matched`.
+- **Malformed CSV read silently**: an unclosed quote took the rest of the file
+  into one field, a long row lost its extra fields and a short one was padded
+  with NULLs. Each now fails naming the file and line.
+- **Characters were replaced silently**: the writer printed `?` for one its
+  charset lacks, and the reader U+FFFD for bytes that are no text. Both fail.
+- **A byte-order mark began the first column's name.**
+- **CSV inference typed `1.5` and `true` as a BOOLEAN** and read 1.5 as false:
+  its ladder widened past types that cannot read each other's values. And a
+  later value that did not fit (past the 1000-row sample, or in a later file)
+  threw a bare `NumberFormatException`, or in a BOOLEAN column read as false.
+- **A declared DECIMAL kept CSV text's own scale**, so a column held values
+  wider than its type, which a parquet write then refused.
 
 ## Known wrong answers from the 2026-09-10 audit (all fixed)
 

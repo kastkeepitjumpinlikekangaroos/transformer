@@ -126,6 +126,22 @@ object RowOracle {
     }
   }
 
+  /** Identity of two values as a reader must reproduce them: a decimal by
+    * value AND scale, a float or double by `compare` (`NaN` is `NaN` whatever
+    * its payload, `-0.0` is not `0.0`), bytes by content, and every other
+    * value by `equals` in a box of the same class (an `Int` is no `Long`).
+    * Stricter than [[scalarEquals]], which forgives a decimal's scale and a
+    * box's class: a file read back must give each value as it was. */
+  def identical(want: Any, got: Any): Boolean = (want, got) match {
+    case (null, null) => true
+    case (null, _) | (_, null) => false
+    case (a: Float, b: Float) => java.lang.Float.compare(a, b) == 0
+    case (a: Double, b: Double) => java.lang.Double.compare(a, b) == 0
+    case (a: Array[Byte], b: Array[Byte]) => java.util.Arrays.equals(a, b)
+    case (a: java.math.BigDecimal, b: java.math.BigDecimal) => a == b
+    case (a, b) => a.getClass == b.getClass && a == b
+  }
+
   /** A boxed value as a failure message shows it: a byte array in hex and a
     * decimal in plain digits with its scale, rather than `[B@1b6d3586` and
     * `1E+2`. */
