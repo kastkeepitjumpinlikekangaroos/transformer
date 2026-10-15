@@ -1260,6 +1260,27 @@ ship a fix or move something from "not done" to "done".
   `Hydration` oracle's adversarial validation names; regressions in
   `job/data_job_test`.
 
+- **A reopened task without its own record shows what survives, and says
+  what does not.** `JobSession` used to rebuild a task whose `_run.json` was
+  missing or unreadable — or that had none, a memory-only task — from
+  `job.json`'s compact entry, which held no timestamps and no failed validation
+  names: every timestamp came back at the epoch (a 0 ms duration) and a
+  `ValidationFailed` task listed no failure, so every validation card read
+  PASSED beside a VALIDATION FAILED status. It trusted a record that named
+  another task (two swapped records showed each task as the other), preferred
+  the entry to the task's own record when the pointer led nowhere, and said
+  nothing in any of these cases. The user decided what it should do
+  ([plans/robustness/15](../plans/robustness/15-what-a-reopened-run-shows-without-its-record.md)):
+  `job.json`'s entries now carry the three timestamps and each failed
+  validation's name and row count, so an entry rebuilds everything but the
+  failing rows; only a record that names a task is that task's; a pointer that
+  fails falls back to the task's own record of the same run; and the run log
+  names every record that could not be used, and a run directory with no
+  readable `job.json`. A `job.json` from before carries neither field, and a
+  task rebuilt from it shows its duration and failed validations as unknown.
+  Found by the `Hydration` oracle's corruption mode; regressions in
+  `gui/job_session_test`.
+
 - **A task with no `outputFile` can feed downstream views and validations.**
   It could not until recently: `DataJob.materializeIfNeeded` threw
   `UnsupportedOperationException("v1 requires an outputFile ...")` whenever a
@@ -1363,29 +1384,6 @@ supported grammar), `DataGen.ColumnTypes` and `ExprGen.GenTypes` listed six of
 the engine's ten `DataType`s, and every file-format fixture was written by our
 own writer. Plans 04-07 in that directory close those three holes; plan 05's
 frontend fuzzer closed the first, and found the defects in the next section.
-
-## What a reopened run shows for a task without its record (open)
-
-`JobSession` rebuilds a task from its `_run.json` when it has one, and from
-`job.json`'s compact entry when the entry's `runFile` leads to no readable
-record: a task with no output directory (the entry has no `runFile`), or a
-record that is missing, cut short, followed by garbage, or pointed at wrongly.
-The entry carries the status, the reason and the rows, and not the timestamps,
-which validations failed, or the output, so such a task reopens with every
-timestamp at the epoch (its duration reads 0 ms), with no output in the details
-panel, and, if its validations failed, as `ValidationFailed` with no failure
-listed — every validation card reads PASSED beside a VALIDATION FAILED status.
-The session only looks for a task's record on disk when `job.json` does not name
-the task, so a `runFile` that resolves nowhere wins over the task's own record
-sitting at its configured path. A record that names another task is trusted: two
-records swapped show each task as the other. With no readable `job.json` at all,
-each task reopens from its newest record, and one with none stays `Pending`
-(grey, which the legend reads as "never run"). Nothing marks any of this to the
-user. What a reopened run should show in each case is a product decision, open
-in
-[plans/robustness/15](../plans/robustness/15-what-a-reopened-run-shows-without-its-record.md);
-the `Hydration` oracle in `fuzz/dag_scheduler_fuzz_test` records each as
-`Hydration.Degraded` with a repro until it is made.
 
 ## Open defects the frontend fuzzer found (2026-10-04)
 

@@ -3,10 +3,9 @@ package com.transformer.fuzz.oracle
 import com.transformer.fuzz.JobDagGen.{Corruption, JobCase}
 import com.transformer.fuzz.oracle.DagSchedule.Run
 import com.transformer.gui.{JobSession, RunState, UiTaskState}
-import com.transformer.job.{DirectoryJobLoader, JobFiles, JobTaskSummary, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus}
-import com.transformer.temporal.TemporalVariables
+import com.transformer.job.{FailedValidation, JobTaskSummary, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus}
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Path, Paths}
 import java.time.Instant
 import scala.collection.mutable
 
@@ -33,108 +32,42 @@ import scala.collection.mutable
   *   1. '''Which run.''' The runs on disk are the run directories beside the
   *      execution time's own that hold a readable `job.json`, newest first; the
   *      session shows the picked one, else its own, else the newest.
-  *   2. '''Where each task comes from''' ([[Source]]). A task the shown run's
-  *      `job.json` names is rebuilt from the record its `runFile` points at, or
-  *      from the manifest's compact entry when there is no readable record
-  *      there. A task it does not name falls back to the newest readable record
-  *      under the task's templated path, and a task with neither is unknown.
-  *   3. '''What each source carries.''' A task rebuilt from a record is the
-  *      `TaskResult` the run that wrote the record returned, field for field:
-  *      status with its reason or its failed validations and their sample rows,
-  *      rows, the three timestamps, and an output path only where the run wrote
-  *      output. A task rebuilt from the entry carries the entry's fields; the
-  *      ones it cannot carry are recorded as [[Degraded]]. An unknown task is
-  *      `Pending`.
-  *   4. '''History.''' Each task's partition picker lists every directory its
-  *      path rendered to across the runs that holds a readable record, newest
-  *      first, each read as the record its writer wrote.
+  *   2. '''Which records are a task's.''' Only a record that names the task:
+  *      the task's partition picker lists every directory its path rendered to
+  *      across the runs that holds a readable record naming it, newest first.
+  *   3. '''Where each task comes from''' ([[Source]]). A task the shown run's
+  *      `job.json` names is rebuilt from the record its `runFile` points at, if
+  *      that record is readable and names it; else from its own record of the
+  *      same run, if its picker lists one; else from the `job.json` entry. A
+  *      task the manifest does not name falls back to its newest record, and a
+  *      task with neither is unknown.
+  *   4. '''What each source carries.''' A task rebuilt from a record is the
+  *      `TaskResult` its run returned, field for field — status with its reason
+  *      or its failed validations and their sample rows, rows, the three
+  *      timestamps, and an output path only where the run wrote output. One
+  *      rebuilt from the entry is the same but for its failed validations'
+  *      sample rows, which only the record held, and its output path, which it
+  *      keeps where that directory still exists; if a record was expected, the
+  *      session says why it was not used (`JobSession.summaryReasonFor`). An
+  *      unknown task is `Pending`.
   *   5. '''The job.''' The session's `job.json` is the shown run's: its verdict,
-  *      warnings, execution time, and one entry per task with that task's
-  *      status, reason, rows and `runFile`.
+  *      warnings, execution time, and one entry per task with its status,
+  *      reason, rows, `runFile`, timestamps and failed validations. Its
+  *      warnings name each task rebuilt from its entry for want of its record,
+  *      and the execution time's own run directory when it exists without a
+  *      readable `job.json` and no other run was picked.
   *
   * Then the case's [[Corruption]] is applied to the latest run's files and the
-  * sessions are opened again over the damaged tree. The same rules decide what
-  * they must show, from a model of the damage ([[corrupted]]): a degraded but
-  * sane session — nothing thrown, the job loaded, every task accounted for, and
-  * each task either what its source carries or a [[Degraded]] entry. A task that
-  * shows another task's record is one ([[Degraded.RecordOfAnotherTaskTrusted]]).
+  * sessions are opened again over the damaged tree; the same rules decide what
+  * they must show, from a model of the damage ([[corrupted]]).
+  *
+  * A directory job names a task after its directory, so a session cannot match
+  * a task the case gave an adversarial name to: its records never name a task
+  * the session opened. Those names are held through `job.json`, which the
+  * session reads whole, and through `TaskRunRecord.read`, one of the entry
+  * points hydration is built from ([[checkRecordsRead]]).
   */
 object Hydration {
-
-  // ---- degraded hydration --------------------------------------------------
-
-  /** What a session shows today for a task rebuilt from less than its own
-    * record: job.json's compact entry alone, or a record that is another
-    * task's. Recorded, not fixed — what a reopened run should show then is a
-    * product decision, open in [[Plan]]. Each entry has a repro (`reproduces`),
-    * and `DagSchedulerFuzzTest` fails once one stops reproducing, so the record
-    * cannot outlive the decision. */
-  sealed abstract class Degraded(val name: String, val shows: String)
-  object Degraded {
-    case object SummaryLosesValidationDetail extends Degraded(
-      "a ValidationFailed task rebuilt from the summary names no failed validation",
-      "ValidationFailed(Nil): every validation card reads PASSED beside a VALIDATION FAILED status")
-    case object SummaryLosesTimestamps extends Degraded(
-      "a task rebuilt from the summary has every timestamp at the epoch",
-      "startedAt = finishedAt = enqueuedAt = 1970-01-01: its duration reads 0 ms")
-    case object SummaryLosesOutputPath extends Degraded(
-      "a task rebuilt from the summary shows no output",
-      "no output path for the details panel (\"Will write to\" for a task that wrote output), and " +
-        "a TaskResult whose outputPath is its runFile's directory whatever its status")
-    case object RecordOfAnotherTaskTrusted extends Degraded(
-      "a task whose runFile holds another task's record is rebuilt as that task",
-      "the other task's name, status, reason, rows and timestamps, and that record in its partition picker")
-
-    val All: Vector[Degraded] =
-      Vector(SummaryLosesValidationDetail, SummaryLosesTimestamps, SummaryLosesOutputPath, RecordOfAnotherTaskTrusted)
-
-    /** Whether a session still shows `d`, on a directory job of two tables
-      * reopened after its run: `checked` fails its validation and `broken`
-      * fails outright. For the summary entries `checked`'s `_run.json` is
-      * deleted; for the last, the two records trade places. */
-    def reproduces(d: Degraded): Boolean = {
-      val root = Files.createTempDirectory("hydration-repro-")
-      try {
-        val jobDir = root.resolve("job")
-        Files.createDirectories(jobDir.resolve("data"))
-        Files.writeString(jobDir.resolve("data").resolve("x.csv"), "k,v\n1,10\n")
-        JobFiles.addInput(jobDir, "x", "data/x.csv", None, cache = true, Map.empty)
-        JobFiles.addTable(jobDir, "checked", "SELECT k, v FROM x", None, None, None)
-        JobFiles.addValidation(jobDir, "checked", "always", "SELECT k FROM checked")
-        JobFiles.addTable(jobDir, "broken", "SELECT k, nope AS v FROM x", None, None, None)
-        val time = Instant.parse("2026-01-01T05:30:21Z")
-        val result = DirectoryJobLoader.load(jobDir, TemporalVariables(time)).run()
-        val out = jobDir.resolve("output")
-        def record(table: String): Path = out.resolve(table).resolve(TaskRunRecord.FileName)
-        d match {
-          case RecordOfAnotherTaskTrusted =>
-            val parked = record("checked").resolveSibling("parked")
-            Files.move(record("checked"), parked)
-            Files.move(record("broken"), record("checked"))
-            Files.move(parked, record("broken"))
-          case _ => Files.delete(record("checked"))
-        }
-        val s = new JobSession()
-        s.setExecutionTime(time)
-        s.openJobDir(jobDir)
-        val checked = s.dag.get.nodes.indexWhere(_.task.displayName == "checked")
-        s.taskStates(checked) match {
-          case UiTaskState.Done(r) => d match {
-            case SummaryLosesValidationDetail => r.status == TaskStatus.ValidationFailed(Nil)
-            case SummaryLosesTimestamps =>
-              r.startedAt == Instant.EPOCH && r.finishedAt == Instant.EPOCH && r.enqueuedAt == Instant.EPOCH
-            case SummaryLosesOutputPath =>
-              s.outputPathFor(checked).isEmpty && result.tasks.find(_.taskName == "checked").exists(_.outputPath.isDefined)
-            case RecordOfAnotherTaskTrusted => r.taskName == "broken"
-          }
-          case _ => false
-        }
-      } finally deleteRecursively(root)
-    }
-  }
-
-  /** The plan that holds the decision [[Degraded]] waits on. */
-  val Plan: String = "plans/robustness/15-what-a-reopened-run-shows-without-its-record.md"
 
   // ---- what the runs left on disk -------------------------------------------
 
@@ -143,17 +76,25 @@ object Hydration {
 
   /** What the runs left on disk, decided from the case and the runs: every
     * directory holding a readable task record and which run's task wrote it,
-    * every run directory holding a readable `job.json` and which run wrote it,
-    * each `runFile` a corruption repointed (by run directory and task), for
-    * each task every directory its path rendered to, and whose directory each
-    * one is — the run's task that wrote its validation samples, which stay put
-    * when a record is moved. */
+    * the directories whose record is there but unreadable, every run directory
+    * holding a readable `job.json` and which run wrote it, each `runFile` a
+    * corruption repointed (by run directory and task), for each task every
+    * directory its path rendered to, every run directory a run wrote into, and
+    * whose directory each task directory is — the run's task that wrote its
+    * validation samples, which stay put when a record is moved. */
   final case class Disk(
       records: Map[Path, Writer],
+      unreadable: Set[Path],
       manifests: Map[Path, Int],
       dangling: Map[(Path, Int), String],
       taskDirs: Vector[Vector[Path]],
-      owners: Map[Path, Writer])
+      runDirs: Set[Path],
+      owners: Map[Path, Writer]) {
+
+    /** Whether `dir` is a directory a task's path rendered to, so one on disk;
+      * a `runFile` a corruption repointed names one that is not. */
+    def holds(dir: Path): Boolean = taskDirs.exists(_.contains(dir))
+  }
 
   def disk(jc: JobCase, runs: Vector[Run], root: Path): Disk = {
     val records = mutable.LinkedHashMap.empty[Path, Writer]
@@ -163,7 +104,7 @@ object Hydration {
       jc.tasks.foreach { t =>
         jc.outputPath(root, t).foreach(p => records(Paths.get(jc.render(p, time))) = Writer(r, t.index))
       }
-      manifests(Paths.get(jc.render(jc.manifestPath(root), time)).getParent) = r
+      manifests(jc.manifestFile(root, time).getParent) = r
     }
     val taskDirs = jc.tasks.map { t =>
       jc.outputPath(root, t) match {
@@ -171,13 +112,13 @@ object Hydration {
         case None => Vector.empty
       }
     }
-    Disk(records.toMap, manifests.toMap, Map.empty, taskDirs, records.toMap)
+    Disk(records.toMap, Set.empty, manifests.toMap, Map.empty, taskDirs, manifests.keySet.toSet, records.toMap)
   }
 
-  /** `d` after `jc.corrupt` damaged the latest run's files: a record deleted,
-    * cut short or followed by garbage is no longer readable, a deleted
-    * `job.json` no longer lists its run, a repointed `runFile` names a path
-    * nothing wrote, and swapped records trade writers. */
+  /** `d` after `jc.corrupt` damaged the latest run's files: a deleted record
+    * is gone, one cut short or followed by garbage is there but unreadable, a
+    * deleted `job.json` no longer lists its run, a repointed `runFile` names a
+    * path nothing wrote, and swapped records trade writers. */
   def corrupted(jc: JobCase, runs: Vector[Run], root: Path, d: Disk): Disk =
     if (!jc.corruptionApplies) d
     else {
@@ -186,8 +127,8 @@ object Hydration {
       val runDir = jc.manifestFile(root, time).getParent
       jc.corruption.get match {
         case Corruption.DeleteRecord(t) => d.copy(records = d.records - dir(t))
-        case Corruption.TruncateRecord(t, _) => d.copy(records = d.records - dir(t))
-        case Corruption.GarbageAfterRecord(t, _) => d.copy(records = d.records - dir(t))
+        case Corruption.TruncateRecord(t, _) => d.copy(records = d.records - dir(t), unreadable = d.unreadable + dir(t))
+        case Corruption.GarbageAfterRecord(t, _) => d.copy(records = d.records - dir(t), unreadable = d.unreadable + dir(t))
         case Corruption.DeleteManifest => d.copy(manifests = d.manifests - runDir)
         case Corruption.DanglingRunFile(t) => d.copy(dangling = d.dangling + ((runDir, t) -> jc.danglingRunFile(root, t)))
         case Corruption.SwapRecords(a, b) =>
@@ -197,54 +138,85 @@ object Hydration {
 
   // ---- what a session must show ---------------------------------------------
 
+  /** Why a task the manifest names is not rebuilt from the record its
+    * `runFile` points at; `word` is how the session's reason says it. */
+  sealed abstract class Problem(val word: String)
+  /** Nothing is there. */
+  case object Missing extends Problem("missing")
+  /** Something is there that does not read as a record. */
+  case object Unreadable extends Problem("unreadable")
+  /** The record there names another task. */
+  case object AnotherTasks extends Problem("names task")
+
   /** Where a session finds what it shows for one task. */
   sealed trait Source
-  /** The record in `dir`, which `writer` wrote: through the shown run's
-    * `job.json`, or found on disk when that names no such task. */
-  final case class FromRecord(dir: Path, writer: Writer, viaManifest: Boolean) extends Source
-  /** The shown run's `job.json` entry `task`, with no readable record behind it;
-    * `runFile` is the pointer the entry holds. */
-  final case class FromSummary(run: Int, task: Int, runFile: Option[String]) extends Source
+  /** The record in `dir`, which `writer` wrote, reached `how`: the record the
+    * shown run's `job.json` points at, the task's own record of that run when
+    * the pointer led nowhere usable, or its newest record when `job.json` does
+    * not name it. */
+  final case class FromRecord(dir: Path, writer: Writer, how: String) extends Source
+  /** The shown run's `job.json` entry `task`; `problem` says what became of the
+    * record its `runFile` points at, when it has one. */
+  final case class FromSummary(run: Int, task: Int, runFile: Option[String], problem: Option[Problem]) extends Source
   /** Nothing on disk the session can read for the task. */
   case object Unknown extends Source
 
   /** What a session at `time`, with `picked` chosen in the run picker, must
-    * show: the runs on disk newest first, the one it shows, each task's source,
-    * and each task's partitions newest first. */
+    * show: the runs on disk newest first, the one it shows, each task's source
+    * and partitions newest first, and whether it warns that its own run
+    * directory has no readable `job.json`. */
   final case class View(
       available: Vector[Path],
       shown: Option[Path],
       sources: Vector[Source],
-      history: Vector[Vector[(Path, Writer)]])
+      history: Vector[Vector[(Path, Writer)]],
+      jobJsonWarning: Boolean)
 
   def view(jc: JobCase, runs: Vector[Run], root: Path, d: Disk, time: Instant, picked: Option[Path]): View = {
     val ownDir = jc.manifestFile(root, time).getParent
     val available = d.manifests.toVector.filter(_._1.getParent == ownDir.getParent).sortBy(-_._2).map(_._1)
-    val shown = picked.filter(available.contains)
+    val pickedShown = picked.filter(available.contains)
+    val shown = pickedShown
       .orElse(Some(ownDir).filter(available.contains))
       .orElse(available.headOption)
+    // A record is a task's only if it names the task; the session's tasks are
+    // named after their views.
+    def names(w: Writer, i: Int): Boolean = jc.tasks(w.task).displayName == jc.tasks(i).view
     val history = jc.tasks.indices.map { i =>
-      d.taskDirs(i).filter(d.records.contains).map(dir => dir -> d.records(dir)).sortBy(-_._2.run)
+      d.taskDirs(i).filter(d.records.contains).map(dir => dir -> d.records(dir))
+        .filter { case (_, w) => names(w, i) }.sortBy(-_._2.run)
     }.toVector
     val sources = jc.tasks.indices.map { i =>
       val named: Option[Source] = shown.flatMap { dir =>
         val r = d.manifests(dir)
         val entries = runs(r).result.tasks
         entries.indices.find(k => entries(k).taskName == jc.tasks(i).view).map { k =>
-          runFile(jc, root, d, runs, dir, k) match {
-            case Some(rf) =>
-              val recDir = Paths.get(rf).getParent
-              d.records.get(recDir).map(w => FromRecord(recDir, w, viaManifest = true): Source)
-                .getOrElse(FromSummary(r, k, Some(rf)))
-            case None => FromSummary(r, k, None)
+          val rf = runFile(jc, root, d, runs, dir, k)
+          val pointed: Either[Option[Problem], Source] = rf match {
+            case None => Left(None)
+            case Some(f) =>
+              val recDir = Paths.get(f).getParent
+              d.records.get(recDir) match {
+                case Some(w) if names(w, i) => Right(FromRecord(recDir, w, "record"))
+                case Some(_) => Left(Some(AnotherTasks))
+                case None => Left(Some(if (d.unreadable.contains(recDir)) Unreadable else Missing))
+              }
+          }
+          pointed match {
+            case Right(src) => src
+            case Left(problem) =>
+              history(i).find(_._2.run == r)
+                .map { case (hdir, w) => FromRecord(hdir, w, "own record"): Source }
+                .getOrElse(FromSummary(r, k, rf, problem))
           }
         }
       }
       named
-        .orElse(history(i).headOption.map { case (dir, w) => FromRecord(dir, w, viaManifest = false) })
+        .orElse(history(i).headOption.map { case (dir, w) => FromRecord(dir, w, "discovered") })
         .getOrElse(Unknown)
     }.toVector
-    View(available, shown, sources, history)
+    val jobJsonWarning = pickedShown.isEmpty && !shown.contains(ownDir) && d.runDirs.contains(ownDir)
+    View(available, shown, sources, history, jobJsonWarning)
   }
 
   /** The `runFile` the `job.json` in `runDir` holds for task `k`: the record of
@@ -260,11 +232,16 @@ object Hydration {
 
   /** What the checks saw, for the coverage guards. */
   final class Report {
-    /** Tasks compared, by where the session found them and the status of the
-      * run that wrote what it showed. */
+    /** Tasks compared, by how the session reached them (a record — through
+      * `job.json`, as the task's own record after the pointer failed, or found
+      * on disk — job.json's entry, or nothing) and the status of the run that
+      * wrote what it showed. */
     val sources: mutable.Map[(String, String), Int] = mutable.Map.empty.withDefaultValue(0)
-    /** Degraded fields seen, by entry. */
-    val degraded: mutable.Map[Degraded, Int] = mutable.Map.empty.withDefaultValue(0)
+    /** Tasks rebuilt from their `job.json` entry for want of their record, by
+      * what became of the record. */
+    val problems: mutable.Map[String, Int] = mutable.Map.empty.withDefaultValue(0)
+    /** Sessions that warned their own run directory has no readable job.json. */
+    var jobJsonWarnings: Int = 0
     /** Sessions compared, by how they were opened. */
     val openings: mutable.Map[String, Int] = mutable.Map.empty.withDefaultValue(0)
     /** Corrupted trees reopened, by corruption. */
@@ -280,7 +257,8 @@ object Hydration {
 
     def add(other: Report): Unit = {
       other.sources.foreach { case (k, v) => sources(k) += v }
-      other.degraded.foreach { case (k, v) => degraded(k) += v }
+      other.problems.foreach { case (k, v) => problems(k) += v }
+      jobJsonWarnings += other.jobJsonWarnings
       other.openings.foreach { case (k, v) => openings(k) += v }
       other.corruptions.foreach { case (k, v) => corruptions(k) += v }
       other.strings.foreach { case (k, v) => strings(k) += v }
@@ -291,11 +269,12 @@ object Hydration {
 
   /** Opens `jc`'s finished `runs` (written under `root`) in sessions and asserts
     * each shows what the runs returned; then applies the case's corruption and
-    * asserts the sessions over the damaged tree are degraded but sane. */
+    * asserts the same of the sessions over the damaged tree. */
   def check(jc: JobCase, runs: Vector[Run], root: Path): Report = {
     val report = new Report
     val jobDir = jc.writeDirectoryJob(root)
     val intact = disk(jc, runs, root)
+    checkRecordsRead(jc, runs, intact, report)
     reopen(jc, runs, root, jobDir, intact, "", report)
     if (jc.corruptionApplies) {
       jc.corrupt(root, runs.last.executionTime)
@@ -304,6 +283,40 @@ object Hydration {
     }
     report
   }
+
+  /** Every record on disk read back through `TaskRunRecord.read`, held to the
+    * result of the run that wrote it: its task's name, status and reason, and
+    * its failed validations with their sample rows. The session reaches every
+    * record a task of its directory job owns; this reaches the ones it cannot,
+    * those of a task with an adversarial name. */
+  private def checkRecordsRead(jc: JobCase, runs: Vector[Run], d: Disk, report: Report): Unit =
+    d.records.foreach { case (dir, w) =>
+      val run = runs(w.run).result.tasks(w.task)
+      val rec = TaskRunRecord.read(dir).getOrElse(throw new AssertionError(
+        s"[hydration] the record ${jc.tasks(w.task).view} wrote in $dir does not read back\n  case = $jc"))
+      val failures = rec.validations.filterNot(_.passed).map { v =>
+        (v.name, v.failedRowCount, v.sampleFile.flatMap(TaskRunRecord.readValidationSample(dir, _)).getOrElse(""))
+      }
+      val ranWith = run.status match {
+        case TaskStatus.ValidationFailed(fs) => fs.map(f => (f.validationName, f.rowCount, f.sampleRowsCsv))
+        case _ => Nil
+      }
+      val agrees = rec.taskName == run.taskName && rec.status == runStatus(run.status) &&
+        rec.errorMessage == reason(run.status) && (run.status match {
+          case _: TaskStatus.ValidationFailed => failures == ranWith
+          case _ => true
+        })
+      assert(agrees, s"[hydration] the record ${jc.tasks(w.task).view} wrote in $dir reads back as " +
+        s"${DagSchedule.shown(rec.toString)}, the run said ${DagSchedule.shown(run.toString)}\n  case = $jc")
+      val t = jc.tasks(w.task)
+      t.name.foreach(a => report.strings(("task name through a record", a.label)) += 1)
+      run.status match {
+        case _: TaskStatus.Failed => t.failure.foreach(a => report.strings(("failure through a record", a.label)) += 1)
+        case _: TaskStatus.ValidationFailed =>
+          t.checks.foreach(a => report.strings(("validation name through a record", a.label)) += 1)
+        case _ => ()
+      }
+    }
 
   /** The three ways a session opens the job, each compared with what `d`
     * implies. */
@@ -368,28 +381,37 @@ object Hydration {
     jc.tasks.indices.foreach { i =>
       checkHistory(runs, s, v, i, ctx, report)
       v.sources(i) match {
-        case FromRecord(dir, w, viaManifest) =>
-          checkFromRecord(runs, s, i, dir, w, d.owners(dir), ctx, report)
-          val writer = jc.tasks(w.task)
-          writer.name.foreach(a => report.strings(("task name through a record", a.label)) += 1)
-          runs(w.run).result.tasks(w.task).status match {
-            case _: TaskStatus.Failed =>
-              writer.failure.foreach(a => report.strings(("failure through a record", a.label)) += 1)
-            case _: TaskStatus.ValidationFailed =>
-              writer.checks.foreach(a => report.strings(("validation name through a record", a.label)) += 1)
-            case _ => ()
-          }
-          report.sources((if (viaManifest) "record" else "discovered", kind(runs(w.run).result.tasks(w.task).status))) += 1
-        case FromSummary(r, k, rf) =>
-          checkFromSummary(runs, s, i, r, k, rf, ctx, report)
+        case FromRecord(dir, w, how) =>
+          checkFromRecord(runs, s, i, dir, w, d.owners(dir), ctx)
+          report.sources((how, kind(runs(w.run).result.tasks(w.task).status))) += 1
+        case FromSummary(r, k, rf, problem) =>
+          checkFromSummary(runs, s, d, i, r, k, rf, problem, ctx)
           report.sources(("summary", kind(runs(r).result.tasks(k).status))) += 1
+          problem.foreach(p => report.problems(p.word) += 1)
         case Unknown =>
           assert(s.taskStates(i) == UiTaskState.Pending,
             s"[hydration] task ${jc.tasks(i).view}: nothing on disk names it, yet the session shows " +
               s"${s.taskStates(i)}$ctx")
+          assert(s.summaryReasonFor(i).isEmpty,
+            s"[hydration] task ${jc.tasks(i).view} is unknown, yet the session gives ${s.summaryReasonFor(i)}$ctx")
           report.sources(("unknown", "Pending")) += 1
       }
     }
+
+    // One warning per task rebuilt from its entry for want of its record, and
+    // one for the run directory's job.json.
+    val (perTask, jobLevel) = s.hydrationWarnings.partition(_.startsWith("task '"))
+    val expectedPerTask = v.sources.count {
+      case FromSummary(_, _, _, Some(_)) => true
+      case _ => false
+    }
+    assert(perTask.length == expectedPerTask,
+      s"[hydration] ${perTask.length} task warnings for $expectedPerTask tasks rebuilt for want of their record: " +
+        s"${perTask.map(DagSchedule.shown)}$ctx")
+    assert(jobLevel.length == (if (v.jobJsonWarning) 1 else 0),
+      s"[hydration] job.json warnings ${jobLevel.map(DagSchedule.shown)}, expected " +
+        s"${if (v.jobJsonWarning) "one" else "none"}$ctx")
+    if (v.jobJsonWarning) report.jobJsonWarnings += 1
   }
 
   /** The shown run's `job.json`, as the session read it. */
@@ -405,24 +427,31 @@ object Hydration {
       s"[hydration] job.json execution time ${rec.executionTime}, run ran at ${run.executionTime}$ctx")
     val expected = res.tasks.indices.map { k =>
       val t = res.tasks(k)
+      val failed = t.status match {
+        case TaskStatus.ValidationFailed(fs) => fs.map(f => FailedValidation(f.validationName, f.rowCount))
+        case _ => Nil
+      }
       JobTaskSummary(
         taskName = t.taskName,
         status = runStatus(t.status),
         runFile = runFile(jc, root, d, runs, runDir, k),
         rowsProduced = t.rowsProduced,
-        failedValidationCount = t.status match {
-          case TaskStatus.ValidationFailed(fs) => fs.size
-          case _ => 0
-        },
-        errorMessage = reason(t.status))
+        failedValidationCount = failed.size,
+        errorMessage = reason(t.status),
+        startedAt = Some(t.startedAt),
+        finishedAt = Some(t.finishedAt),
+        enqueuedAt = Some(t.enqueuedAt),
+        failedValidations = failed)
     }.toVector
     rec.tasks.toVector.zipAll(expected, null, null).zipWithIndex.foreach { case ((got, want), k) =>
-      assert(got == want, s"[hydration] job.json entry $k reads back as $got, expected $want$ctx")
+      assert(got == want, s"[hydration] job.json entry $k reads back as ${DagSchedule.shown(String.valueOf(got))}, " +
+        s"expected ${DagSchedule.shown(String.valueOf(want))}$ctx")
     }
   }
 
-  /** A task's partition picker: every directory its path rendered to that holds
-    * a readable record, newest first, each read as the record its writer wrote. */
+  /** A task's partition picker: every directory its path rendered to holding a
+    * readable record that names it, newest first, each read as its writer wrote
+    * it. */
   private def checkHistory(runs: Vector[Run], s: JobSession, v: View, i: Int, ctx: String, report: Report): Unit = {
     val got = s.historicalRunsFor(i)
     val want = v.history(i)
@@ -433,37 +462,24 @@ object Hydration {
       assert(rec.taskName == run.taskName && rec.status == runStatus(run.status),
         s"[hydration] task t$i's partition $dir reads as ${rec.taskName}/${rec.status}, written as " +
           s"${run.taskName}/${kind(run.status)}$ctx")
-      if (w.task != i) report.degraded(Degraded.RecordOfAnotherTaskTrusted) += 1
     }
     if (want.length >= 2) report.multiPartitionTasks += 1
   }
 
   /** A task rebuilt from a record is the result the record's run returned:
     * every field, with an output path — the record's directory — only where
-    * that run wrote output. A record another task wrote is one of the
-    * [[Degraded]] entries; the session must still read it faithfully, and reads
-    * each failed validation's sample rows from the directory it found the record
-    * in, where only the directory's own task left samples. */
+    * that run wrote output. The record names the task, so it is the one its
+    * directory's task wrote, beside its own sample rows. */
   private def checkFromRecord(
-      runs: Vector[Run], s: JobSession, i: Int, dir: Path, w: Writer, owner: Writer,
-      ctx: String, report: Report): Unit = {
+      runs: Vector[Run], s: JobSession, i: Int, dir: Path, w: Writer, owner: Writer, ctx: String): Unit = {
+    assert(w.task == i && owner == w,
+      s"[hydration] the oracle chose a record t${w.task} wrote in t${owner.task}'s directory for task t$i$ctx")
     val written = runs(w.run).result.tasks(w.task)
-    val status = (written.status, runs(owner.run).result.tasks(owner.task).status) match {
-      case (TaskStatus.ValidationFailed(fs), ownStatus) if w != owner =>
-        val own = ownStatus match {
-          case TaskStatus.ValidationFailed(os) => os
-          case _ => Nil
-        }
-        TaskStatus.ValidationFailed(fs.map(f =>
-          f.copy(sampleRowsCsv = own.find(_.validationName == f.validationName).map(_.sampleRowsCsv).getOrElse(""))))
-      case (st, _) => st
-    }
-    val expected = written.copy(
-      status = status,
-      outputPath = if (wroteOutput(written.status)) Some(dir.toString) else None)
+    val expected = written.copy(outputPath = if (wroteOutput(written.status)) Some(dir.toString) else None)
     val got = done(s, i, ctx)
     assert(got == expected,
-      s"[hydration] task t$i, rebuilt from the record in $dir:\n    got      $got\n    run said $expected$ctx")
+      s"[hydration] task t$i, rebuilt from the record in $dir:\n    got      ${DagSchedule.shown(got.toString)}\n" +
+        s"    run said ${DagSchedule.shown(expected.toString)}$ctx")
     assert(s.outputPathFor(i) == expected.outputPath,
       s"[hydration] task t$i shows output ${s.outputPathFor(i)}, the run reported ${expected.outputPath}$ctx")
     val rec = s.taskRecordFor(i).getOrElse(throw new AssertionError(
@@ -471,43 +487,38 @@ object Hydration {
     assert(rec.taskName == written.taskName && rec.status == runStatus(written.status) &&
       rec.rowsProduced == written.rowsProduced && rec.enqueuedAt.contains(written.enqueuedAt),
       s"[hydration] task t$i's record reads back as $rec, the run said $written$ctx")
-    if (w.task != i) report.degraded(Degraded.RecordOfAnotherTaskTrusted) += 1
+    assert(s.summaryReasonFor(i).isEmpty,
+      s"[hydration] task t$i was rebuilt from its record, yet the session gives ${s.summaryReasonFor(i)}$ctx")
   }
 
-  /** A task rebuilt from the summary carries the summary's fields: its name,
-    * status and reason, and rows. The fields the summary does not carry are
-    * [[Degraded]], counted in `report`. */
+  /** A task rebuilt from its `job.json` entry is the result its run returned
+    * but for its failed validations' sample rows, which only its record held,
+    * and its output path, kept where the `runFile`'s directory still exists.
+    * The session says why it did not use the record, if one was expected. */
   private def checkFromSummary(
-      runs: Vector[Run], s: JobSession, i: Int, r: Int, k: Int, runFile: Option[String],
-      ctx: String, report: Report): Unit = {
+      runs: Vector[Run], s: JobSession, d: Disk, i: Int, r: Int, k: Int, runFile: Option[String],
+      problem: Option[Problem], ctx: String): Unit = {
     val run = runs(r).result.tasks(k)
+    val status = run.status match {
+      case TaskStatus.ValidationFailed(fs) => TaskStatus.ValidationFailed(fs.map(_.copy(sampleRowsCsv = "")))
+      case other => other
+    }
+    val dir = runFile.map(rf => Paths.get(rf).getParent).filter(d.holds)
+    val expected = run.copy(
+      status = status,
+      outputPath = if (wroteOutput(run.status)) dir.map(_.toString) else None)
     val got = done(s, i, ctx)
-    def mismatch(field: String): String =
-      s"[hydration] task t$i, rebuilt from job.json's entry, has the wrong $field:\n    got      $got\n" +
-        s"    run said $run$ctx"
-    assert(got.taskName == run.taskName, mismatch("name"))
-    assert(kind(got.status) == kind(run.status), mismatch("status"))
-    assert(reason(got.status) == reason(run.status), mismatch("reason"))
-    assert(got.rowsProduced == run.rowsProduced, mismatch("row count"))
-    (run.status, got.status) match {
-      case (TaskStatus.ValidationFailed(fs), TaskStatus.ValidationFailed(gs)) if gs != fs =>
-        assert(gs.isEmpty, mismatch("validation failures"))
-        report.degraded(Degraded.SummaryLosesValidationDetail) += 1
-      case _ => ()
-    }
-    val stamps = (got.startedAt, got.finishedAt, got.enqueuedAt)
-    if (stamps != ((run.startedAt, run.finishedAt, run.enqueuedAt))) {
-      assert(stamps == ((Instant.EPOCH, Instant.EPOCH, Instant.EPOCH)), mismatch("timestamps"))
-      report.degraded(Degraded.SummaryLosesTimestamps) += 1
-    }
-    if (got.outputPath != run.outputPath || s.outputPathFor(i) != run.outputPath) {
-      val runFileDir = runFile.map(rf => Paths.get(rf).getParent.toString)
-      assert(got.outputPath == runFileDir && s.outputPathFor(i).isEmpty,
-        mismatch(s"output path (the details panel shows ${s.outputPathFor(i)})"))
-      report.degraded(Degraded.SummaryLosesOutputPath) += 1
-    }
+    assert(got == expected,
+      s"[hydration] task t$i, rebuilt from job.json's entry:\n    got      ${DagSchedule.shown(got.toString)}\n" +
+        s"    expected ${DagSchedule.shown(expected.toString)}$ctx")
+    assert(s.outputPathFor(i) == expected.outputPath,
+      s"[hydration] task t$i shows output ${s.outputPathFor(i)}, expected ${expected.outputPath}$ctx")
     assert(s.taskRecordFor(i).isEmpty,
       s"[hydration] task t$i was rebuilt from job.json's entry yet holds record ${s.taskRecordFor(i)}$ctx")
+    val because = s.summaryReasonFor(i)
+    assert(because.isDefined == problem.isDefined && problem.forall(p => because.exists(_.contains(p.word))),
+      s"[hydration] task t$i was rebuilt from its entry because its record is ${problem.map(_.word)}, yet the " +
+        s"session gives ${because.map(DagSchedule.shown)}$ctx")
   }
 
   private def done(s: JobSession, i: Int, ctx: String): TaskResult = s.taskStates(i) match {
@@ -536,16 +547,6 @@ object Hydration {
     case _: TaskStatus.Failed => TaskRunStatus.Failed
     case _: TaskStatus.Skipped => TaskRunStatus.Skipped
     case TaskStatus.Pending => TaskRunStatus.Failed
-  }
-
-  private def deleteRecursively(p: Path): Unit = {
-    if (p == null || !Files.exists(p)) return
-    if (Files.isDirectory(p)) {
-      val st = Files.list(p)
-      try { val it = st.iterator(); while (it.hasNext) deleteRecursively(it.next()) }
-      finally st.close()
-    }
-    try Files.deleteIfExists(p) catch { case _: java.io.IOException => () }
   }
 
   private def assert(cond: Boolean, msg: => String): Unit =

@@ -26,7 +26,8 @@ import java.nio.file.{Files, Path}
   * scheduler property checks are written. Last it damages the tree — a record
   * deleted, cut short or followed by garbage, `job.json` deleted or pointing
   * nowhere, two records swapped — and reopens it again, where the session must
-  * be degraded but sane.
+  * show exactly what survived, rebuild the rest from `job.json`, and say what it
+  * could not read.
   *
   * Liveness is the reason this target exists in the same repo as the sharded
   * exchange work. Every task body fans its own nested work onto the shared
@@ -164,10 +165,11 @@ class DagSchedulerFuzzTest {
     (seen, ran)
   }
 
-  /** A task of each status rebuilt from its own record, by either route: the
-    * record `job.json` points at, or the one discovery finds. */
+  /** Tasks of a status rebuilt from their own record, by any route: the record
+    * `job.json` points at, the task's own record after the pointer failed, or
+    * the one discovery finds. */
   private def fromRecord(seen: Hydration.Report, status: String): Int =
-    seen.sources(("record", status)) + seen.sources(("discovered", status))
+    seen.sources(("record", status)) + seen.sources(("own record", status)) + seen.sources(("discovered", status))
 
   private val Statuses: Seq[String] = Seq("Succeeded", "Failed", "ValidationFailed", "Skipped")
 
@@ -221,7 +223,7 @@ class DagSchedulerFuzzTest {
       s"backfillCases=$backfill")
     println(s"[hydration] over $sampled sampled runs: sources=${seen.sources.toMap} " +
       s"openings=${seen.openings.toMap} multiPartitionTasks=${seen.multiPartitionTasks} " +
-      s"multiRunSessions=${seen.multiRunSessions} degraded=${seen.degraded.map { case (d, c) => d.name -> c }.toMap}")
+      s"multiRunSessions=${seen.multiRunSessions} problems=${seen.problems.toMap}")
     // Bounds sit near a third of the rates measured over the default 2000
     // seeds (the message prints the counts), so a collapse fails and a drift
     // of a few percent does not.
@@ -248,11 +250,12 @@ class DagSchedulerFuzzTest {
 
   /** Coverage guard for the corruption mode: every corruption is drawn (the
     * first half counts the generated cases), and over real runs every one is
-    * applied and reopened, the sessions over the damaged trees
-    * reach every source a degraded session can use — a record found on disk
-    * once `job.json` is gone, the entry with no readable record behind it, and
-    * a task nothing on disk names — and every [[Hydration.Degraded]] entry is
-    * observed, not just reproduced by hand. */
+    * applied and reopened, and the sessions over the damaged trees reach every
+    * rule the property decides: a task rebuilt from its `job.json` entry because
+    * its record is missing, unreadable, or another task's; a task's own record
+    * found after its `runFile` led nowhere; a record found on disk once
+    * `job.json` is gone, with the warning that says so; and a task nothing on
+    * disk names. */
   @Test def generatorCoversCorruptions(): Unit = {
     val n = Props.seedCountOr(2000)
     val drawn = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
@@ -262,26 +265,29 @@ class DagSchedulerFuzzTest {
       if (jc.corruptionApplies) drawn(jc.corruption.get.name) += 1
       i += 1
     }
+    val problems = Seq("missing", "unreadable", "names task")
     val (seen, ran) = sessionsUntil(600, _ => true) { r =>
-      JobDagGen.Corruption.Names.forall(r.corruptions(_) > 0) && r.sources.keys.exists(_._1 == "discovered") &&
-        r.sources(("unknown", "Pending")) > 0 && Hydration.Degraded.All.forall(r.degraded(_) > 0)
+      JobDagGen.Corruption.Names.forall(r.corruptions(_) > 0) && problems.forall(r.problems(_) > 0) &&
+        r.sources.keys.exists(_._1 == "own record") && r.sources.keys.exists(_._1 == "discovered") &&
+        r.jobJsonWarnings > 0 && r.sources(("unknown", "Pending")) > 0
     }
     println(s"[hydration] corruptions drawn over $n seeds: ${drawn.toMap}")
     println(s"[hydration] over $ran corrupted runs: applied=${seen.corruptions.toMap} sources=${seen.sources.toMap} " +
-      s"degraded=${seen.degraded.map { case (d, c) => d.name -> c }.toMap}")
+      s"rebuilt from job.json because the record is=${seen.problems.toMap} jobJsonWarnings=${seen.jobJsonWarnings}")
     JobDagGen.Corruption.Names.foreach { name =>
       assertTrue(s"'$name' drawn ${drawn(name)} times over $n", drawn(name) > n / 12)
       assertTrue(s"'$name' never applied and reopened: ${seen.corruptions.toMap}", seen.corruptions(name) > 0)
     }
+    problems.foreach { p =>
+      assertTrue(s"no task was rebuilt from job.json because its record is '$p': ${seen.problems.toMap}",
+        seen.problems(p) > 0)
+    }
+    assertTrue(s"no task fell back to its own record after its runFile led nowhere: ${seen.sources.toMap}",
+      seen.sources.keys.exists(_._1 == "own record"))
     assertTrue(s"no session found a record on disk without job.json: ${seen.sources.toMap}",
       seen.sources.keys.exists(_._1 == "discovered"))
-    assertTrue(s"no session rebuilt a record-backed task from job.json's entry: ${seen.sources.toMap}",
-      seen.degraded(Hydration.Degraded.SummaryLosesOutputPath) > 0)
+    assertTrue(s"no session warned of a missing job.json: ${seen.jobJsonWarnings}", seen.jobJsonWarnings > 0)
     assertTrue(s"no task was left unknown: ${seen.sources.toMap}", seen.sources(("unknown", "Pending")) > 0)
-    Hydration.Degraded.All.foreach { d =>
-      assertTrue(s"'${d.name}' never observed: ${seen.degraded.map { case (k, c) => k.name -> c }.toMap}",
-        seen.degraded(d) > 0)
-    }
   }
 
   /** Coverage guard for the adversarial strings. Over the generated cases,
@@ -340,16 +346,6 @@ class DagSchedulerFuzzTest {
       assertTrue(s"no string read back as a $path: ${seen.strings.toMap}", seen.strings.keys.exists(_._1 == path))
     }
   }
-
-  /** Each [[Hydration.Degraded]] entry records what a reopened run shows today
-    * for a task rebuilt from less than its own record. When one stops
-    * reproducing, the session changed what it shows: update the plan and the
-    * oracle, and remove the entry. */
-  @Test def everyDegradedHydrationStillReproduces(): Unit =
-    Hydration.Degraded.All.foreach { d =>
-      assertTrue(s"'${d.name}' no longer reproduces: a session no longer shows ${d.shows}. " +
-        s"Record what it shows now in ${Hydration.Plan} and remove the entry.", Hydration.Degraded.reproduces(d))
-    }
 
   /** The seed is the repro key: the same seed must rebuild the same job. */
   @Test def sameSeedReproduces(): Unit = {

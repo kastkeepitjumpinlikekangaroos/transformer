@@ -1,7 +1,7 @@
 package com.transformer.gui
 
 import com.transformer.core.{Catalog, CatalogView}
-import com.transformer.job.{DataJob, DirectoryJobLoader, InputFilePath, InputResolver, JobOutputLayout, JobResult, JobRunRecord, TaskDag, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus, ValidationFailure}
+import com.transformer.job.{DataJob, DirectoryJobLoader, InputFilePath, InputResolver, JobOutputLayout, JobResult, JobRunRecord, JobTaskSummary, SQLTask, TaskDag, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus, ValidationFailure}
 import com.transformer.read.csv.{CsvOptions, CsvReader}
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
@@ -101,6 +101,11 @@ final class JobSession {
   // pulls from a user-selected historical run. Reset on jobDir / executionTime
   // changes (the default-resolved path may have moved).
   private var _selectedRunDir: Option[Path] = None
+  // Per task, why the last hydration rebuilt it from job.json's entry rather
+  // than its own `_run.json`, when it did and a record was expected.
+  private var _summaryReasons: Vector[Option[String]] = Vector.empty
+  // What the last hydration could not read, for the run log.
+  private var _hydrationWarnings: Vector[String] = Vector.empty
 
   private val listeners = mutable.ArrayBuffer.empty[() => Unit]
 
@@ -174,6 +179,20 @@ final class JobSession {
     * the default (most-recent) run. Mutated via [[selectRun]]; the run
     * picker UI reads this to highlight the active row. */
   def selectedRunDir: Option[Path] = _selectedRunDir
+
+  /** Why this task was rebuilt from `job.json`'s entry rather than its own
+    * `_run.json` when the job directory was opened — the record is missing,
+    * unreadable, or names another task. None for a task rebuilt from its record,
+    * one with no output directory (the entry is all it ever has), and one not
+    * rebuilt at all. A task rebuilt from its entry has no sample rows for its
+    * failed validations. */
+  def summaryReasonFor(taskIndex: Int): Option[String] = _summaryReasons.lift(taskIndex).flatten
+
+  /** What opening the job directory could not read, one line each for the run
+    * log: a `job.json` that is missing or unreadable beside records of the run,
+    * and each task rebuilt from its `job.json` entry because its record was not
+    * usable. */
+  def hydrationWarnings: Vector[String] = _hydrationWarnings
 
   /** The job-wide output directory the runner will actually use, with any
     * `{{ today }}`-style template variables already resolved against
@@ -281,6 +300,8 @@ final class JobSession {
         _jobRecord = None
         _availableRuns = Vector.empty
         _selectedRunDir = None
+        _summaryReasons = Vector.empty
+        _hydrationWarnings = Vector.empty
         _runState = RunState.Idle
       case Some(dir) =>
         try {
@@ -320,6 +341,8 @@ final class JobSession {
             _jobRecord = None
             _availableRuns = Vector.empty
             _selectedRunDir = None
+            _summaryReasons = Vector.empty
+            _hydrationWarnings = Vector.empty
             _runState = RunState.LoadFailed(Option(e.getMessage).getOrElse(e.toString))
         }
     }
@@ -327,44 +350,48 @@ final class JobSession {
   }
 
   /** Load whatever past-run state exists on disk so the canvas isn't an empty
-    * sea of grey on first open. Multi-pass:
+    * sea of grey on first open, showing each task as its run reported it.
     *
-    *   1. Try the configured `jobRunOutput` (default
-    *      `<outputDir>/job.json`). If present, it lists every task's
-    *      `_run.json` path — load each and reconstruct the full
-    *      [[TaskStatus]] (including `ValidationFailed(failures)` with
-    *      sample CSVs loaded from sibling `_validation-<slug>.csv` files).
+    *   1. Walk each task's templated output pattern via
+    *      [[TaskRunRecord.discover]] for the per-task partition picker: every
+    *      record under the pattern that names the task, newest first. A task
+    *      with 2+ partitions on disk surfaces a dropdown so the user can browse
+    *      prior execution-time slices.
     *
-    *   2. Independently walk each task's templated output pattern via
-    *      [[TaskRunRecord.discover]] to populate the per-task partition
-    *      picker. A task with 2+ partitions on disk surfaces a dropdown so
-    *      the user can browse prior execution-time slices.
-    *
-    *   3. Detect the *job-level* multi-run layout by walking the parent of
+    *   2. Detect the *job-level* multi-run layout by walking the parent of
     *      the rendered `jobRunOutput` path for sibling run subdirs (each
     *      containing its own `job.json`). When the user has templated
     *      `outputDir` to vary by run, this populates [[availableRuns]] —
-    *      surfaced in the GUI's run picker.
+    *      surfaced in the GUI's run picker. The run shown is the picked one,
+    *      else the execution time's own, else the newest.
     *
-    * Tasks not present in the job manifest (e.g. a task was added since the
-    * last run) fall back to "most recent partition on disk", same as a fresh
-    * load. Tasks present in the manifest but no longer in the DAG are
-    * silently ignored. */
+    *   3. Rebuild each task the shown run's `job.json` names from the
+    *      `_run.json` its `runFile` points at, if that record names the task.
+    *      If it does not — missing, unreadable, or another task's — use the
+    *      task's own record of the same run if step 1 found one, and else the
+    *      `job.json` entry, which holds everything but the failed validations'
+    *      sample rows. A task rebuilt from its entry for want of its record gets
+    *      a [[summaryReasonFor]] and a line in [[hydrationWarnings]].
+    *
+    *   4. A task the manifest does not name (added since the last run, or no
+    *      `job.json` at all) falls back to its newest record on disk. A
+    *      `job.json` missing or unreadable in a run directory that exists is a
+    *      line in [[hydrationWarnings]].
+    *
+    * Tasks present in the manifest but no longer in the DAG are silently
+    * ignored. */
   private def hydrateRunRecords(dag: TaskDag, job: DataJob): Unit = {
     val states = Array.fill[UiTaskState](dag.nodes.size)(UiTaskState.Pending)
     val outputs = Array.fill[Option[String]](dag.nodes.size)(None)
     val records = Array.fill[Option[TaskRunRecord]](dag.nodes.size)(None)
     val historicals = Array.fill[Seq[(Path, TaskRunRecord)]](dag.nodes.size)(Nil)
+    val reasons = Array.fill[Option[String]](dag.nodes.size)(None)
 
     // 1. Walk each task's templated output pattern for the historical picker.
     //    Done first so the picker is populated even if job.json is missing.
     var i = 0
     while (i < dag.nodes.size) {
-      val node = dag.nodes(i)
-      node.task.outputFile.foreach { ofp =>
-        val runs = try TaskRunRecord.discover(ofp.path) catch { case NonFatal(_) => Nil }
-        historicals(i) = runs
-      }
+      historicals(i) = ownRecords(dag.nodes(i).task)
       i += 1
     }
 
@@ -400,8 +427,8 @@ final class JobSession {
     // Resolve which run is being displayed. Selection survives execution-time
     // changes so a user inspecting a historical run isn't snapped back to
     // "current."
-    val activeRunDir: Option[Path] = _selectedRunDir
-      .filter(d => _availableRuns.exists(_._1 == d))
+    val pickedRunDir: Option[Path] = _selectedRunDir.filter(d => _availableRuns.exists(_._1 == d))
+    val activeRunDir: Option[Path] = pickedRunDir
       .orElse(defaultRunDir.filter(d => _availableRuns.exists(_._1 == d)))
       .orElse(_availableRuns.headOption.map(_._1))
 
@@ -416,53 +443,105 @@ final class JobSession {
     val nameToIndex: Map[String, Int] =
       dag.nodes.iterator.zipWithIndex.map { case (n, idx) => n.task.displayName -> idx }.toMap
 
-    // 3a. Apply manifest entries where we have one.
+    def fromRecord(idx: Int, dir: Path, rec: TaskRunRecord): Unit = {
+      val result = taskResultFromRecord(rec, dir)
+      records(idx) = Some(rec)
+      outputs(idx) = result.outputPath
+      states(idx) = UiTaskState.Done(result)
+    }
+
+    // 3. Apply manifest entries where we have one.
     jobRecord.foreach { rec =>
       rec.tasks.foreach { summary =>
         nameToIndex.get(summary.taskName).foreach { idx =>
-          summary.runFile.flatMap(runFile => loadTaskRunRecord(runFile)) match {
-            case Some((dir, taskRec)) =>
-              val result = taskResultFromRecord(taskRec, dir)
-              records(idx) = Some(taskRec)
+          // Left(Some(problem)) when the pointer leads to no usable record;
+          // Left(None) when the task has no record to point at.
+          val pointed: Either[Option[String], (Path, TaskRunRecord)] = summary.runFile match {
+            case Some(runFile) => pointedRecord(runFile, summary.taskName).left.map(Some(_))
+            case None          => Left(None)
+          }
+          pointed.toOption
+            .orElse(historicals(idx).find { case (_, r) => r.executionTime == rec.executionTime }) match {
+            case Some((dir, taskRec)) => fromRecord(idx, dir, taskRec)
+            case None =>
+              val result = taskResultFromSummary(summary)
               outputs(idx) = result.outputPath
               states(idx) = UiTaskState.Done(result)
-            case None =>
-              // No per-task file on disk — surface what the manifest knows.
-              states(idx) = UiTaskState.Done(taskResultFromSummary(summary))
+              reasons(idx) = pointed.left.toOption.flatten
           }
         }
       }
     }
 
-    // 3b. For DAG tasks not covered by the manifest (added since last run, or
-    //     no job.json at all), fall back to "most recent partition on disk".
+    // 4. For DAG tasks not covered by the manifest (added since last run, or
+    //    no job.json at all), fall back to "most recent partition on disk".
     var j = 0
     while (j < dag.nodes.size) {
-      if (states(j) == UiTaskState.Pending) {
-        historicals(j).headOption.foreach { case (path, rec) =>
-          val result = taskResultFromRecord(rec, path)
-          records(j) = Some(rec)
-          outputs(j) = result.outputPath
-          states(j) = UiTaskState.Done(result)
-        }
-      }
+      if (states(j) == UiTaskState.Pending)
+        historicals(j).headOption.foreach { case (path, rec) => fromRecord(j, path, rec) }
       j += 1
+    }
+
+    val warnings = Vector.newBuilder[String]
+    // The execution time's own run directory exists without a readable
+    // job.json — the run died before writing it, or it was damaged since —
+    // and the user did not pick another run to look at.
+    for {
+      path <- defaultJobRunPath
+      dir <- defaultRunDir
+      if pickedRunDir.isEmpty && !activeRunDir.contains(dir) && Files.isDirectory(dir)
+    } {
+      val problem = if (Files.isRegularFile(path)) s"job.json at $path is unreadable" else s"no job.json at $path"
+      warnings += (activeRunDir match {
+        case Some(other) => s"$problem; showing the run in $other instead"
+        case None =>
+          s"$problem; each task is restored from its own _run.json, and the run's verdict and warnings are unknown"
+      })
+    }
+    dag.nodes.indices.foreach { k =>
+      reasons(k).foreach { reason =>
+        warnings += s"task '${dag.nodes(k).task.displayName}': $reason; shown from job.json, which holds no sample rows"
+      }
     }
 
     _taskStates = states.toVector
     _outputPaths = outputs.toVector
     _taskRecords = records.toVector
     _historicalRuns = historicals.toVector
+    _summaryReasons = reasons.toVector
+    _hydrationWarnings = warnings.result()
   }
 
-  /** Read a per-task `_run.json` given the file path stored in the manifest.
-    * Returns the containing directory and parsed record on success. */
-  private def loadTaskRunRecord(runFile: String): Option[(Path, TaskRunRecord)] = try {
-    val p = Paths.get(runFile)
-    val dir = p.getParent
-    if (dir == null) None
-    else TaskRunRecord.read(dir).map(rec => dir -> rec)
-  } catch { case NonFatal(_) => None }
+  /** Every record on disk under `task`'s templated output path that names the
+    * task, newest first: a record another task wrote is not this task's run. */
+  private def ownRecords(task: SQLTask): Seq[(Path, TaskRunRecord)] =
+    task.outputFile.map { ofp =>
+      val runs = try TaskRunRecord.discover(ofp.path) catch { case NonFatal(_) => Nil }
+      runs.filter(_._2.taskName == task.displayName)
+    }.getOrElse(Nil)
+
+  /** The `_run.json` a `job.json` entry's `runFile` points at, when it is
+    * readable and names the task; otherwise what is wrong with it. */
+  private def pointedRecord(runFile: String, taskName: String): Either[String, (Path, TaskRunRecord)] =
+    try {
+      val file = Paths.get(runFile)
+      val dir = file.getParent
+      if (dir == null || !Files.isRegularFile(file)) Left(s"its _run.json at $runFile is missing")
+      else TaskRunRecord.read(dir) match {
+        case None                                => Left(s"its _run.json at $runFile is unreadable")
+        case Some(rec) if rec.taskName != taskName => Left(s"the _run.json at $runFile names task '${rec.taskName}'")
+        case Some(rec)                           => Right(dir -> rec)
+      }
+    } catch {
+      case NonFatal(e) => Left(s"its _run.json at $runFile cannot be read: ${Option(e.getMessage).getOrElse(e.toString)}")
+    }
+
+  /** The statuses after which the runner reports an output path: the task
+    * wrote its output, whatever its validations then said. */
+  private def wroteOutput(status: TaskRunStatus): Boolean = status match {
+    case TaskRunStatus.Succeeded | TaskRunStatus.ValidationFailed => true
+    case TaskRunStatus.Failed | TaskRunStatus.Skipped            => false
+  }
 
   /** Rehydrate a full in-memory [[TaskResult]] from an on-disk [[TaskRunRecord]],
     * as the run reported it. For [[TaskRunStatus.ValidationFailed]] this also
@@ -490,39 +569,48 @@ final class JobSession {
       case TaskRunStatus.Skipped =>
         TaskStatus.Skipped(rec.errorMessage.getOrElse("(no reason recorded)"))
     }
-    val wroteOutput = rec.status match {
-      case TaskRunStatus.Succeeded | TaskRunStatus.ValidationFailed => true
-      case TaskRunStatus.Failed | TaskRunStatus.Skipped            => false
-    }
     TaskResult(
       taskName = rec.taskName,
       status = status,
       rowsProduced = rec.rowsProduced,
-      outputPath = if (wroteOutput) Some(dir.toString) else None,
+      outputPath = if (wroteOutput(rec.status)) Some(dir.toString) else None,
       startedAt = rec.startedAt,
       finishedAt = rec.finishedAt,
       enqueuedAt = rec.enqueuedAt.getOrElse(Instant.EPOCH)
     )
   }
 
-  /** Build a coarse [[TaskResult]] from a manifest entry alone — used when
-    * the per-task record file referenced by the manifest is missing on disk
-    * (a flagged inconsistency that still shouldn't crash hydration). */
-  private def taskResultFromSummary(s: com.transformer.job.JobTaskSummary): TaskResult = {
+  /** Rebuild a [[TaskResult]] from a `job.json` entry alone, for a task whose
+    * record is missing, unreadable or another task's, or that has none. The
+    * entry holds the status, reason, rows, timestamps, and each failed
+    * validation's name and row count; not its sample rows, which come back
+    * empty. The output path follows the record rule — the `runFile`'s
+    * directory when the status wrote output — where that directory still
+    * exists. An entry from before entries carried timestamps and failed
+    * validations gives the epoch (unknown) and `ValidationFailed(Nil)` (which
+    * ones unknown). */
+  private def taskResultFromSummary(s: JobTaskSummary): TaskResult = {
     val status: TaskStatus = s.status match {
-      case TaskRunStatus.Succeeded        => TaskStatus.Succeeded
-      case TaskRunStatus.ValidationFailed => TaskStatus.ValidationFailed(Nil)
-      case TaskRunStatus.Failed           => TaskStatus.Failed(s.errorMessage.getOrElse("(no error message)"))
-      case TaskRunStatus.Skipped          => TaskStatus.Skipped(s.errorMessage.getOrElse("(no reason)"))
+      case TaskRunStatus.Succeeded => TaskStatus.Succeeded
+      case TaskRunStatus.ValidationFailed =>
+        TaskStatus.ValidationFailed(s.failedValidations.map(v => ValidationFailure(v.name, v.failedRowCount, "")))
+      case TaskRunStatus.Failed  => TaskStatus.Failed(s.errorMessage.getOrElse("(no error message)"))
+      case TaskRunStatus.Skipped => TaskStatus.Skipped(s.errorMessage.getOrElse("(no reason)"))
     }
-    val now = Instant.EPOCH
+    val outputDir =
+      if (!wroteOutput(s.status)) None
+      else s.runFile.flatMap { rf =>
+        try Option(Paths.get(rf).getParent).filter(Files.isDirectory(_)).map(_.toString)
+        catch { case NonFatal(_) => None }
+      }
     TaskResult(
       taskName = s.taskName,
       status = status,
       rowsProduced = s.rowsProduced,
-      outputPath = s.runFile.flatMap(rf => Option(Paths.get(rf).getParent).map(_.toString)),
-      startedAt = now,
-      finishedAt = now
+      outputPath = outputDir,
+      startedAt = s.startedAt.getOrElse(Instant.EPOCH),
+      finishedAt = s.finishedAt.getOrElse(Instant.EPOCH),
+      enqueuedAt = s.enqueuedAt.getOrElse(Instant.EPOCH)
     )
   }
 
@@ -575,10 +663,8 @@ final class JobSession {
       // visible in the picker dropdown.
       _dag.foreach { dag =>
         dag.nodes.lift(taskIndex).foreach { node =>
-          node.task.outputFile.foreach { ofp =>
-            val runs = try TaskRunRecord.discover(ofp.path) catch { case NonFatal(_) => Nil }
-            _historicalRuns = _historicalRuns.updated(taskIndex, runs)
-          }
+          if (node.task.outputFile.isDefined)
+            _historicalRuns = _historicalRuns.updated(taskIndex, ownRecords(node.task))
         }
       }
       notifyListeners()
@@ -591,6 +677,9 @@ final class JobSession {
     _inputStates = _inputStates.map(_ => UiInputState.Pending)
     _outputPaths = _outputPaths.map(_ => None)
     _taskRecords = _taskRecords.map(_ => None)
+    // What the last reopen could not read describes a run this one replaces.
+    _summaryReasons = _summaryReasons.map(_ => None)
+    _hydrationWarnings = Vector.empty
     // Keep historicalRuns intact — they're still on disk and useful in the
     // picker. They get refreshed after the run completes via markTaskFinished.
     notifyListeners()

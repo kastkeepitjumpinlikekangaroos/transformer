@@ -476,7 +476,15 @@ final class ResultsTabPane(
     val cardChildren = new java.util.ArrayList[javafx.scene.Node]()
     cardChildren.add(cardHeader)
     cardChildren.add(sqlView)
-    failureSample.foreach { sample =>
+    failureSample.filter(_.isEmpty).foreach { _ =>
+      // A failed validation's rows live beside the task's _run.json; restored
+      // from job.json, the task has none.
+      val note = new Label("Failing rows not recorded: this task was restored from job.json, which holds no sample rows.")
+      note.setStyle("-fx-text-fill: #c5cad8; -fx-font-size: 11px; -fx-font-style: italic;")
+      note.setWrapText(true)
+      cardChildren.add(note)
+    }
+    failureSample.filter(_.nonEmpty).foreach { sample =>
       val sampleLabel = new Label("Failing rows (first 10):")
       sampleLabel.setStyle("-fx-text-fill: #f8a3a3; -fx-font-size: 11px; -fx-font-weight: bold;")
       val sampleArea = new TextArea(sample)
@@ -544,6 +552,10 @@ final class ResultsTabPane(
               case Some(f) =>
                 val plural = if (f.rowCount == 1) "" else "s"
                 (s"FAILED • ${f.rowCount} row$plural", fail, Some(f.sampleRowsCsv))
+              // A task restored from a job.json that predates failed validation
+              // names: it failed some, which ones is not recorded.
+              case None if fs.isEmpty =>
+                ("UNKNOWN (restored from job.json)", neutral, None)
               case None =>
                 ("PASSED", pass, None)
             }
@@ -573,6 +585,10 @@ final class ResultsTabPane(
           sb.append("(no run yet)\n")
         }
         appendJobWarnings(sb, session.jobRecord.map(_.warnings).getOrElse(Nil))
+        if (session.hydrationWarnings.nonEmpty) {
+          sb.append(s"\n${session.hydrationWarnings.size} record(s) could not be read back:\n")
+          session.hydrationWarnings.foreach(w => sb.append(s"  [warn] $w\n"))
+        }
       case RunState.Running => sb.append("Running…\n")
       case RunState.LoadFailed(err) => sb.append(s"Load failed:\n$err\n")
       case RunState.Done(result) =>
@@ -610,7 +626,7 @@ final class ResultsTabPane(
   private def describeStatus(status: TaskStatus): String = status match {
     case TaskStatus.Succeeded => "succeeded"
     case TaskStatus.Failed(_) => "failed"
-    case TaskStatus.ValidationFailed(fs) => s"validation failed (${fs.size})"
+    case TaskStatus.ValidationFailed(fs) => if (fs.isEmpty) "validation failed" else s"validation failed (${fs.size})"
     case TaskStatus.Skipped(_) => "skipped"
     case TaskStatus.Pending => "pending"
   }

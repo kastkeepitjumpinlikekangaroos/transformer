@@ -21,10 +21,11 @@ navigation hint, not a comprehensive directory listing.
   table. Teaching `LogicalBuilder` a clause means deleting its entry here;
   `sql/plan:unsupported_clauses_test` enforces it (see
   [architecture §10](architecture.md#10-nothing-the-parser-accepts-is-silently-dropped)).
-- `gui/JobSession.scala` (~810 LOC) — mutable FX-thread state for the GUI;
+- `gui/JobSession.scala` (~900 LOC) — mutable FX-thread state for the GUI;
   also tracks per-input UI state (Pending/Loading/Loaded/Failed) now that
   inputs flow through the unified scheduler. `hydrateRunRecords` is the part
-  that rebuilds a finished run from `job.json` and the `_run.json` records; the
+  that rebuilds a finished run from `job.json` and the `_run.json` records —
+  which record is a task's, what to fall back to, and what to warn about; the
   `Hydration` oracle in `fuzz/dag_scheduler_fuzz_test` checks it on every
   generated run. Builds without JavaFX as `gui:session`.
 - `sql/exec/AggregateExec.scala` (~1900 LOC) — biggest file. Every `AggState` subclass
@@ -47,7 +48,7 @@ navigation hint, not a comprehensive directory listing.
 - `core/ExecutionOptions.scala` (~120 LOC) — per-query knobs threaded from
   `DataJob.runOneTask` to spill-capable operators. `fromOutputOptions`
   parses the `output.json` `options` map with tolerance for typos.
-- `job/DataJob.scala` (~875 LOC) — runner orchestration: unified input + task
+- `job/DataJob.scala` (~890 LOC) — runner orchestration: unified input + task
   DAG scheduler (`runUnifiedDag`), writeOutput, validation re-read, per-status
   `_run.json` writes + per-failure `_validation-<slug>.csv` sample writes +
   per-job `job.json` write + consistency checks.

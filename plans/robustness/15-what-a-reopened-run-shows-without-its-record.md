@@ -1,8 +1,8 @@
 # Plan 15: what a reopened run shows for a task without its record
 
-> Status: **needs a decision** · Effort: half a day to a day once decided ·
-> Risk: low · Found by [plan 07](07-hydration-oracle-on-the-dag-corpus.md)'s
-> hydration oracle; recorded in it as `Hydration.Degraded`
+> Status: **done** 2026-10-15 · decided by the user, implemented the same day ·
+> Found by [plan 07](07-hydration-oracle-on-the-dag-corpus.md)'s hydration
+> oracle, which recorded it as `Hydration.Degraded` until the decision landed
 
 ## How this was found
 
@@ -106,3 +106,37 @@ change — removing an entry is the proof the decision landed.
 "never run"), `docs/architecture.md` (§4, the manifest's entry), `docs/gotchas.md`
 (move this from open to done), `docs/testing.md` (the hydration oracle's summary
 rule).
+
+## Outcome
+
+The user chose the recommendation on all four questions (2026-10-15):
+
+1. **Carry more, mark the rest.** `JobTaskSummary` gains `startedAt`,
+   `finishedAt`, `enqueuedAt` and `failedValidations` (name and row count),
+   which `writeJobRecord` fills from each `TaskResult`, so an entry rebuilds the
+   task's result but for its failing rows; the output path follows the record
+   rule where the `runFile`'s directory still exists. A `job.json` written
+   before reads with the fields as None and empty, and a task rebuilt from it
+   shows its duration and its failed validations as unknown (the epoch, and
+   `ValidationFailed(Nil)`), which the panels now render as such instead of
+   0 ms and PASSED. A validation card whose failing rows were not recorded says
+   so.
+2. **Reject a record that names another task**, as for a missing one. The same
+   rule now decides which records are a task's in discovery: the partition
+   picker and the fallback for a task `job.json` does not name list only
+   records that name the task.
+3. **Use the task's own record when the pointer fails**, if it is the same run's
+   (its name and execution time agree with the entry), found under the task's
+   output path; otherwise rebuild from the entry.
+4. **Warn when `job.json` is missing or unreadable** in a run directory that
+   exists, unless the user picked another run; and name each record that could
+   not be used. `JobSession.hydrationWarnings` holds the lines and the run log
+   shows them; `JobSession.summaryReasonFor` gives a task's reason, which the
+   details panel shows as its provenance.
+
+The oracle encodes the rules exactly and the `Degraded` entries are gone, the
+proof the decision landed; their repros became the regressions in
+`gui/job_session_test`. Breaking each rule in `JobSession` in turn (trusting a
+mismatched record, dropping the fallback, dropping either warning, rebuilding
+without timestamps) fails the property within the first ten seeds.
+

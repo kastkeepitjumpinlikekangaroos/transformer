@@ -776,7 +776,14 @@ final case class DataJob(
           runFile = runFile,
           rowsProduced = r.rowsProduced,
           failedValidationCount = failedValidationCount,
-          errorMessage = errMsg
+          errorMessage = errMsg,
+          startedAt = Some(r.startedAt),
+          finishedAt = Some(r.finishedAt),
+          enqueuedAt = Some(r.enqueuedAt),
+          failedValidations = r.status match {
+            case TaskStatus.ValidationFailed(fs) => fs.map(f => FailedValidation(f.validationName, f.rowCount))
+            case _                               => Nil
+          }
         )
       }.toSeq
       // perfManifest collects every `_perf.json` actually written under the

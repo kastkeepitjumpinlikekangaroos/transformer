@@ -748,13 +748,20 @@ the `TaskResult` the run returned, field for field, along with the session's
 `job.json`, its run picker and each task's partition picker. Then it damages
 the tree one way — a record deleted, cut short or followed by garbage, the
 manifest deleted or pointing nowhere, two records swapped — and the reopened
-session must be degraded but sane: loaded, nothing thrown, every task what its
-surviving source carries or `Pending`. A task with no readable record behind its
-manifest entry (a memory-only task, which `job.json` lists with no `runFile`, or
-a damaged one) is rebuilt from that compact entry, which cannot carry its
-timestamps, which validations failed or its output, and a record that names
-another task is trusted; what the GUI should show in those cases is open in
-[plans/robustness/15](../plans/robustness/15-what-a-reopened-run-shows-without-its-record.md).
+session must show exactly what survived and say what did not.
+
+The rules it holds `JobSession` to, decided in
+[plans/robustness/15](../plans/robustness/15-what-a-reopened-run-shows-without-its-record.md):
+only a record that names a task is that task's — in its partition picker and as
+its source. A task `job.json` names is rebuilt from the record its `runFile`
+points at; if that is missing, unreadable or another task's, from the task's
+own record of the same run (same name and execution time) found under its
+output path; and else from its `job.json` entry, which carries everything but
+the failed validations' sample rows. Each task rebuilt from its entry for want
+of its record gets `JobSession.summaryReasonFor` and a line in
+`hydrationWarnings`, which the run log shows, and so does a run directory that
+exists without a readable `job.json`. A task with no output directory has only
+its entry, by design, and gets no warning.
 
 #### Per-task record (`_run.json`)
 
@@ -818,8 +825,10 @@ overwrite prior state.
 `jobRunOutput` (defaulted by `DirectoryJobLoader` to
 `<outputDir>/job.json` — co-located with the per-task data so an output
 directory is a self-contained snapshot of one run). The manifest lists
-every task with status, row count, error message, and a `runFile` pointer
-to the per-task record file. It's the GUI's single entry point on reload
+every task with status, row count, error message, its three timestamps, the
+name and row count of each validation it failed, and a `runFile` pointer to
+the per-task record file — so an entry rebuilds the task's `TaskResult` but
+for the failing rows, which only the record directory holds. It's the GUI's single entry point on reload
 — load one file, follow the pointers, hydrate the whole job.
 
 The manifest also carries a `warnings` array populated by

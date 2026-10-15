@@ -363,12 +363,12 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     states(i) match {
       case UiTaskState.Done(result) if result.status == TaskStatus.Succeeded =>
         statChips.getChildren.add(metricChip(f"${result.rowsProduced}%,d rows"))
-        statChips.getChildren.add(metricChip(s"${result.durationMillis} ms"))
+        statChips.getChildren.add(metricChip(durationText(result)))
         if (result.queueWaitMillis > 0L)
           statChips.getChildren.add(metricChip(s"${result.queueWaitMillis} ms queued"))
         validationsCountChip(i).foreach(statChips.getChildren.add)
       case UiTaskState.Done(result) =>
-        statChips.getChildren.add(metricChip(s"${result.durationMillis} ms"))
+        statChips.getChildren.add(metricChip(durationText(result)))
         if (result.queueWaitMillis > 0L)
           statChips.getChildren.add(metricChip(s"${result.queueWaitMillis} ms queued"))
         validationsCountChip(i).foreach(statChips.getChildren.add)
@@ -380,6 +380,12 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
         validationsCountChip(i).foreach(statChips.getChildren.add)
     }
   }
+
+  /** A task's duration, or that it is unknown: a task restored from a
+    * `job.json` written before entries carried timestamps has them at the
+    * epoch. */
+  private def durationText(result: com.transformer.job.TaskResult): String =
+    if (result.startedAt == java.time.Instant.EPOCH) "duration unknown" else s"${result.durationMillis} ms"
 
   private def validationsCountChip(i: Int): Option[Label] = {
     val n = session.dag.flatMap(_.nodes.lift(i)).map(_.task.validations.size).getOrElse(0)
@@ -484,7 +490,10 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
         outputPathLabel.setTooltip(null)
     }
     outputHeader.setText(verb)
-    outputMetaLabel.setText(formatRecordMeta(session.taskRecordFor(i)))
+    outputMetaLabel.setText(session.summaryReasonFor(i) match {
+      case Some(reason) => s"Restored from job.json: $reason."
+      case None         => formatRecordMeta(session.taskRecordFor(i))
+    })
     val total = session.historicalRunsFor(i).size
     historyHintLabel.setText(
       if (total >= 2) s"$total historical run${if (total == 1) "" else "s"} on disk — double-click the node to browse them in the Output tab."
@@ -526,9 +535,16 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
         result.status match {
           case TaskStatus.Failed(reason) =>
             setErrorText(s"Error:\n$reason")
+          case TaskStatus.ValidationFailed(fs) if fs.isEmpty =>
+            setErrorText("Validation failures: which ones is not recorded (restored from job.json).")
           case TaskStatus.ValidationFailed(fs) =>
             val body = fs.iterator
-              .map(f => s"• ${f.validationName} — ${f.rowCount} failing row(s)\n${indent(f.sampleRowsCsv, "    ")}")
+              .map { f =>
+                val sample =
+                  if (f.sampleRowsCsv.isEmpty) "    (sample rows not recorded: restored from job.json)"
+                  else indent(f.sampleRowsCsv, "    ")
+                s"• ${f.validationName} — ${f.rowCount} failing row(s)\n$sample"
+              }
               .mkString("\n\n")
             setErrorText(s"Validation failures:\n$body")
           case TaskStatus.Skipped(reason) =>
@@ -575,8 +591,9 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
         case TaskStatus.Succeeded => ("passed", ChipPalette.Success)
         case TaskStatus.ValidationFailed(fs) =>
           fs.find(_.validationName == v.name) match {
-            case Some(f) => (s"failed (${f.rowCount} row${if (f.rowCount == 1) "" else "s"})", ChipPalette.Failed)
-            case None    => ("passed", ChipPalette.Success)
+            case Some(f)            => (s"failed (${f.rowCount} row${if (f.rowCount == 1) "" else "s"})", ChipPalette.Failed)
+            case None if fs.isEmpty => ("unknown", ChipPalette.Neutral)
+            case None               => ("passed", ChipPalette.Success)
           }
         case TaskStatus.Failed(_)  => ("not run", ChipPalette.Neutral)
         case TaskStatus.Skipped(_) => ("not run", ChipPalette.Neutral)

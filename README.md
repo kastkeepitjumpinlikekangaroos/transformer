@@ -405,9 +405,13 @@ execution time + status.
 `<outputDir>/job.json` — co-located with the data so an output directory
 is a self-contained snapshot of one run) is a single file written at the
 end of every run, listing every task with a pointer to its per-task
-`_run.json` plus a short summary (status, rows, error). Loading this one
-file is the GUI's entry point for hydrating the whole job; per-task
-records are loaded lazily as the user drills into each task. Consistency
+`_run.json` plus a summary: status, rows, error, its `startedAt` /
+`finishedAt` / `enqueuedAt`, and the name and row count of each validation it
+failed — everything the task's record holds but the failing rows themselves.
+Loading this one file is the GUI's entry point for hydrating the whole job;
+per-task records are loaded lazily as the user drills into each task. A
+`job.json` written before entries carried the timestamps and failed
+validations still reads, without them. Consistency
 checks (declared part file missing, referenced `runFile` not on disk,
 etc.) land in the manifest's `warnings` array and surface in the GUI's
 run-log panel.
@@ -471,7 +475,23 @@ exists and follows each task's `runFile` pointer to its per-task
 detail with sample rows) without re-running anything. The picker dropdown
 above the output-data table is populated by `TaskRunRecord.discover` over
 each task's templated output path, so you can flip between historical
-partitions inline.
+partitions inline. Only a record that names the task counts as its run.
+
+When a task's record is not usable, the GUI says so rather than guessing:
+
+- **Missing or unreadable, or naming another task** (two records swapped, a
+  file copied in): it uses the task's own record of the same run if one sits
+  under the task's output path, and otherwise rebuilds the task from its
+  `job.json` entry — every field but the failing rows of its validations,
+  which a validation card then says were not recorded. The run log names each
+  record it could not use.
+- **No readable `job.json`** in a run directory that exists (the job died
+  before writing it, or it was damaged): every task reopens from its own
+  record, a task with none stays grey, and the run log says the run's verdict
+  and warnings are unknown.
+- **A `job.json` from before entries carried timestamps and failed
+  validations**: a task rebuilt from it shows its duration and which of its
+  validations failed as unknown, not as 0 ms and PASSED.
 
 `DataJob.run(executor, listener)` fires `TaskProgressListener.onTaskStart` /
 `onTaskFinish` from runner worker threads; the GUI's Run button installs a

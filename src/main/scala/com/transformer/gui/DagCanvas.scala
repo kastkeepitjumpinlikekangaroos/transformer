@@ -244,9 +244,12 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
     case UiTaskState.Queued  => (Color.web("#3e4a78"), Color.web("#6e80c5"), "queued…")
     case UiTaskState.Running => (Color.web("#2b4f7a"), Color.web("#4a90e2"), "running…")
     case UiTaskState.Done(result) =>
-      val durLine = if (result.queueWaitMillis > 0L)
-        f"${result.durationMillis} ms (+${result.queueWaitMillis} ms queued)"
-      else s"${result.durationMillis} ms"
+      // A task restored from a job.json that predates entry timestamps has
+      // them at the epoch: its duration is unknown, not 0 ms.
+      val durLine =
+        if (result.startedAt == java.time.Instant.EPOCH) "duration unknown"
+        else if (result.queueWaitMillis > 0L) f"${result.durationMillis} ms (+${result.queueWaitMillis} ms queued)"
+        else s"${result.durationMillis} ms"
       result.status match {
         case TaskStatus.Succeeded =>
           (Color.web("#244c2f"), Color.web("#4caf50"),
@@ -255,8 +258,9 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
           (Color.web("#5a2828"), Color.web("#e57373"),
             s"failed • $durLine")
         case TaskStatus.ValidationFailed(fs) =>
+          val count = if (fs.isEmpty) "" else s" (${fs.size})"
           (Color.web("#5a4322"), Color.web("#ffa726"),
-            s"validation failed (${fs.size}) • $durLine")
+            s"validation failed$count • $durLine")
         case TaskStatus.Skipped(_) =>
           (Color.web("#34384a"), Color.web("#7a8095"), "skipped")
         case TaskStatus.Pending =>

@@ -39,16 +39,29 @@ final case class JobRunRecord(
 
 /** Compact per-task entry in [[JobRunRecord.tasks]]. `runFile` is `Some(path)`
   * when the task has an `outputFile` (the full [[TaskRunRecord]] lives in
-  * that directory); otherwise the summary embeds the minimal display fields
-  * (status, rowsProduced, error message) and `runFile` is None. */
+  * that directory); otherwise it is None.
+  *
+  * The entry holds everything about the task but the sample rows of its
+  * failed validations, which live beside its `_run.json`: so a task whose
+  * record is missing, or that has none, reopens from the entry alone. The
+  * timestamps and `failedValidations` are absent from a `job.json` written
+  * before entries carried them, which reads with them as None and empty. */
 final case class JobTaskSummary(
     taskName: String,
     status: TaskRunStatus,
     runFile: Option[String],
     rowsProduced: Long,
     failedValidationCount: Int,
-    errorMessage: Option[String]
+    errorMessage: Option[String],
+    startedAt: Option[Instant] = None,
+    finishedAt: Option[Instant] = None,
+    enqueuedAt: Option[Instant] = None,
+    failedValidations: Seq[FailedValidation] = Nil
 )
+
+/** A validation a task failed, as `job.json` records it: its name and the rows
+  * it returned. */
+final case class FailedValidation(name: String, failedRowCount: Long)
 
 object JobRunRecord {
 
@@ -91,7 +104,21 @@ object JobRunRecord {
               rowsProduced = o.get("rowsProduced").map(_.stringValue.toLong).getOrElse(0L),
               failedValidationCount =
                 o.get("failedValidationCount").map(_.stringValue.toInt).getOrElse(0),
-              errorMessage = o.optString("errorMessage", tctx)
+              errorMessage = o.optString("errorMessage", tctx),
+              startedAt = o.optString("startedAt", tctx).map(Instant.parse),
+              finishedAt = o.optString("finishedAt", tctx).map(Instant.parse),
+              enqueuedAt = o.optString("enqueuedAt", tctx).map(Instant.parse),
+              failedValidations = o.get("failedValidations") match {
+                case Some(JsonArray(vs)) =>
+                  vs.iterator.zipWithIndex.map { case (v, j) =>
+                    val vctx = s"$tctx: failedValidations[$j]"
+                    val vo = v.asObject(vctx)
+                    FailedValidation(
+                      name = vo.requiredString("name", vctx),
+                      failedRowCount = vo.get("failedRowCount").map(_.stringValue.toLong).getOrElse(0L))
+                  }.toVector
+                case _ => Vector.empty
+              }
             )
           }.toVector
         case _ => Vector.empty
@@ -152,6 +179,22 @@ object JobRunRecord {
           case Some(msg) => sb.append("\"errorMessage\": \"").append(Json.escape(msg)).append("\"")
           case None      => sb.append("\"errorMessage\": null")
         }
+        def instant(key: String, at: Option[Instant]): Unit = at.foreach { i =>
+          sb.append(", \"").append(key).append("\": \"").append(Json.escape(i.toString)).append('"')
+        }
+        instant("startedAt", t.startedAt)
+        instant("finishedAt", t.finishedAt)
+        instant("enqueuedAt", t.enqueuedAt)
+        sb.append(", \"failedValidations\": [")
+        var v = 0
+        while (v < t.failedValidations.size) {
+          val fv = t.failedValidations(v)
+          if (v > 0) sb.append(", ")
+          sb.append("{\"name\": \"").append(Json.escape(fv.name)).append("\", ")
+          sb.append("\"failedRowCount\": ").append(fv.failedRowCount).append('}')
+          v += 1
+        }
+        sb.append(']')
         sb.append('}')
         if (i < r.tasks.size - 1) sb.append(',')
         sb.append('\n')
