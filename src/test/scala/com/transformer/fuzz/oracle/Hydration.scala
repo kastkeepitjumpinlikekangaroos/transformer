@@ -269,6 +269,10 @@ object Hydration {
     val openings: mutable.Map[String, Int] = mutable.Map.empty.withDefaultValue(0)
     /** Corrupted trees reopened, by corruption. */
     val corruptions: mutable.Map[String, Int] = mutable.Map.empty.withDefaultValue(0)
+    /** Adversarial strings read back as written, by the path they took (a task
+      * name through `job.json` or a record, a failure's message through either,
+      * a failed validation's name through a record) and the string's label. */
+    val strings: mutable.Map[(String, String), Int] = mutable.Map.empty.withDefaultValue(0)
     /** Tasks whose partition picker listed two or more runs. */
     var multiPartitionTasks: Int = 0
     /** Sessions whose run picker listed two or more runs. */
@@ -279,6 +283,7 @@ object Hydration {
       other.degraded.foreach { case (k, v) => degraded(k) += v }
       other.openings.foreach { case (k, v) => openings(k) += v }
       other.corruptions.foreach { case (k, v) => corruptions(k) += v }
+      other.strings.foreach { case (k, v) => strings(k) += v }
       multiPartitionTasks += other.multiPartitionTasks
       multiRunSessions += other.multiRunSessions
     }
@@ -350,6 +355,14 @@ object Hydration {
         assert(s.jobRecord.isEmpty, s"[hydration] no job.json is readable, yet the session shows one$ctx")
       case Some(dir) =>
         checkJobRecord(jc, runs, root, d, dir, s, ctx)
+        val shownRun = runs(d.manifests(dir)).result
+        jc.tasks.foreach { t =>
+          t.name.foreach(a => report.strings(("task name through job.json", a.label)) += 1)
+          (t.failure, shownRun.tasks(t.index).status) match {
+            case (Some(a), _: TaskStatus.Failed) => report.strings(("failure through job.json", a.label)) += 1
+            case _ => ()
+          }
+        }
     }
 
     jc.tasks.indices.foreach { i =>
@@ -357,6 +370,15 @@ object Hydration {
       v.sources(i) match {
         case FromRecord(dir, w, viaManifest) =>
           checkFromRecord(runs, s, i, dir, w, d.owners(dir), ctx, report)
+          val writer = jc.tasks(w.task)
+          writer.name.foreach(a => report.strings(("task name through a record", a.label)) += 1)
+          runs(w.run).result.tasks(w.task).status match {
+            case _: TaskStatus.Failed =>
+              writer.failure.foreach(a => report.strings(("failure through a record", a.label)) += 1)
+            case _: TaskStatus.ValidationFailed =>
+              writer.checks.foreach(a => report.strings(("validation name through a record", a.label)) += 1)
+            case _ => ()
+          }
           report.sources((if (viaManifest) "record" else "discovered", kind(runs(w.run).result.tasks(w.task).status))) += 1
         case FromSummary(r, k, rf) =>
           checkFromSummary(runs, s, i, r, k, rf, ctx, report)

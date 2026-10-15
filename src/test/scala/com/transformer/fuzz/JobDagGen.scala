@@ -1,5 +1,6 @@
 package com.transformer.fuzz
 
+import com.transformer.core.{Catalog, ExecutedQuery, ExecutionOptions, SqlExecutor}
 import com.transformer.job.{DataJob, InputFilePath, JobFiles, JobRunRecord, OutputFilePath, SQLTask, TaskRunRecord, Validation}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
@@ -48,9 +49,11 @@ import java.time.{Duration, Instant}
   * several runs side by side, a task's partitions across them — and
   * [[JobCase.writeDirectoryJob]] writes the same job as the directory the GUI
   * opens. A case then names one [[Corruption]] of the finished tree, which the
-  * hydration property applies once it has checked the tree intact. Those draws
-  * come after the DAG's, each from its own stream, so a seed's DAG is the one it
-  * always was.
+  * hydration property applies once it has checked the tree intact. And a share
+  * of cases draw [[AdversarialStrings]] for what the records carry as text: task
+  * names, the message a failing task throws (injected through [[JobCase.executor]]),
+  * and the names of failing validations. Those draws come after the DAG's, each
+  * from its own stream, so a seed's DAG is the one it always was.
   */
 object JobDagGen {
 
@@ -87,12 +90,58 @@ object JobDagGen {
       outcome: Outcome,
       output: Option[TaskOutput],
       passingValidation: Boolean,
-      validationTaskSrc: Option[Int]) {
+      validationTaskSrc: Option[Int],
+      name: Option[Adversarial] = None,
+      failure: Option[Adversarial] = None,
+      checks: Vector[Adversarial] = Vector.empty) {
     def view: String = s"t$index"
+    /** What the run calls the task (`SQLTask.name`): its view, or an
+      * adversarial name with the view embedded at its middle, so the name is
+      * unique and both its ends stay as drawn. */
+    def displayName: String = name.fold(view)(a => embed(a.text, view))
     def sources: Int = inputSrcs.length + taskSrcs.length
     /** Every upstream TASK this node waits on — FROM sources plus the task a
       * validation reads. This, not `taskSrcs`, is the DAG edge set. */
     def taskDeps: Vector[Int] = (taskSrcs ++ validationTaskSrc).distinct
+  }
+
+  /** A string the run records must carry as text and read back unchanged,
+    * labelled for the coverage guard. */
+  final case class Adversarial(label: String, text: String) {
+    override def toString: String = label
+  }
+
+  /** What a record's JSON writer and `Json.parse` must agree on: each character
+    * JSON escapes, the control characters it writes as hex escapes, text past
+    * the Basic Multilingual Plane and halves of it, invisible characters, text
+    * shaped like the JSON around it or like a template, nothing, and a long
+    * multi-line stack trace — the message a real failure carries. Non-ASCII
+    * text is built from code points. */
+  val AdversarialStrings: Vector[Adversarial] = {
+    def cps(points: Int*): String = points.map(p => new String(Character.toChars(p))).mkString
+    val trace = "java.lang.IllegalStateException: task body failed\n" +
+      (1 to 2000).map(i => s"\tat com.example.pipeline.Stage$i.run(Stage$i.scala:$i)\n").mkString
+    Vector(
+      Adversarial("quotes", "\"quoted\" and 'single' \""),
+      Adversarial("backslashes", "\\C:\\temp\\new\\"),
+      Adversarial("newlines", "first\nsecond\r\nthird\r"),
+      Adversarial("tabs", "\tcolumn\tcolumn\t"),
+      Adversarial("control characters",
+        (0 until 32).filterNot(c => c == 9 || c == 10 || c == 13).map(_.toChar).mkString + 127.toChar),
+      Adversarial("astral", "emoji " + cps(0x1F600) + " script " + cps(0x1D4B3)),
+      Adversarial("lone surrogates", "half " + 0xD800.toChar + " of " + 0xDC00.toChar + " a pair"),
+      Adversarial("invisible", cps(0xFEFF, 0x200B, 0x2028, 0x2029)),
+      Adversarial("json", "\"}, {\"taskName\": \"x\", \"status\": \"Succeeded\"} ,["),
+      Adversarial("template", "{{ today }} and {{ no_such_variable }}"),
+      Adversarial("empty", ""),
+      Adversarial("long", trace))
+  }
+
+  /** `text` with `marker` inserted at its middle code point, so a surrogate pair
+    * is never split and both of `text`'s ends stay where they were. */
+  def embed(text: String, marker: String): String = {
+    val mid = text.offsetByCodePoints(0, text.codePointCount(0, text.length) / 2)
+    text.substring(0, mid) + "#" + marker + "#" + text.substring(mid)
   }
 
   /** A task's output directory config: format plus the execution knobs that ride
@@ -317,20 +366,33 @@ object JobDagGen {
           format = t.output.filter(_.parquet).map(_.format),
           partitionBy = t.output.flatMap(_.partitionBy),
           maxPartitions = None)
-        validations(t).foreach(v => JobFiles.addValidation(dir, t.view, v.name, v.sql))
+        // A validation is a file named for it, which JobFiles writes only for an
+        // identifier; the directory job calls an adversarial one by its place.
+        validations(t).zipWithIndex.foreach { case (v, k) =>
+          val name = if (JobFiles.validateViewName(v.name).isRight) v.name else s"check_$k"
+          JobFiles.addValidation(dir, t.view, name, v.sql)
+        }
       }
       dir
     }
 
-    /** A task's validations, in the order the task declares them. */
+    /** A task's validations, in the order the task declares them. A
+      * `ValidationFails` task's failing ones are named by its `checks`, or
+      * `always_fails` when it has none; a second one selects another column, so
+      * its sample rows differ from the first's. */
     def validations(t: GenTask): Vector[GenValidation] =
       (if (t.passingValidation)
          Vector(GenValidation("no_negative_k", s"SELECT k FROM ${t.view} WHERE k < -1000000"))
        else Vector.empty) ++
         t.validationTaskSrc.map(j =>
           GenValidation("upstream_no_negative_k", s"SELECT k FROM t$j WHERE k < -1000000")) ++
-        (if (t.outcome == ValidationFails) Vector(GenValidation("always_fails", s"SELECT k FROM ${t.view}"))
-         else Vector.empty)
+        (if (t.outcome != ValidationFails) Vector.empty
+         else {
+           val names = if (t.checks.isEmpty) Vector("always_fails") else t.checks.map(_.text)
+           names.zip(Vector("k", "k, v")).map { case (name, cols) =>
+             GenValidation(name, s"SELECT $cols FROM ${t.view}")
+           }
+         })
 
     private def sqlTask(t: GenTask, root: Path): SQLTask =
       SQLTask(
@@ -340,17 +402,35 @@ object JobDagGen {
         },
         validations = validations(t).map(v => Validation(v.name, sqlString = Some(v.sql))),
         viewName = Some(t.view),
-        name = Some(t.view))
+        name = Some(t.displayName))
 
     /** `UNION ALL` over every source. A `Fails` task poisons its first arm with a
       * column that does not exist — the statement still parses, so the DAG keeps
-      * the same edges and the failure lands in the worker. */
+      * the same edges and the failure lands in the worker. A task with an
+      * injected failure names its own column, so [[executor]] knows its SQL. */
     def mainSql(t: GenTask): String = {
       val srcs = t.inputSrcs.map(i => inputs(i).view) ++ t.taskSrcs.map(j => s"t$j")
+      val poison = if (t.failure.isDefined) s"failure_${t.view}" else "no_such_column"
       srcs.iterator.zipWithIndex.map { case (s, arm) =>
-        if (t.outcome == Fails && arm == 0) s"SELECT k, no_such_column AS v FROM $s"
+        if (t.outcome == Fails && arm == 0) s"SELECT k, $poison AS v FROM $s"
         else s"SELECT k, v FROM $s"
       }.mkString(" UNION ALL ")
+    }
+
+    /** The executor a run uses: `engine`, except that a `Fails` task with an
+      * injected failure throws it before reaching the engine, so the message the
+      * run records is exactly the drawn text. */
+    def executor(engine: SqlExecutor): SqlExecutor = {
+      val injected: Map[String, String] =
+        tasks.filter(t => t.outcome == Fails && t.failure.isDefined).map(t => mainSql(t) -> t.failure.get.text).toMap
+      if (injected.isEmpty) engine
+      else new SqlExecutor {
+        def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery =
+          injected.get(sql) match {
+            case Some(message) => throw new IllegalStateException(message)
+            case None => engine.execute(sql, catalog, opts)
+          }
+      }
     }
 
     override def toString: String = {
@@ -361,7 +441,12 @@ object JobDagGen {
           s",${o.format}${if (o.spill) ",spill" else ""}${o.partitionBy.map(p => s",part=$p").getOrElse("")}"
         }.getOrElse(",mem")
         val vdep = t.validationTaskSrc.map(j => s",valOn=t$j").getOrElse("")
-        s"${t.view}<-$srcs(${t.outcome}$out$vdep)"
+        val strings = Seq(
+          t.name.map(a => s"name=$a"),
+          t.failure.map(a => s"failure=$a"),
+          Some(t.checks).filter(_.nonEmpty).map(cs => s"checks=${cs.mkString("+")}")).flatten
+        val adv = if (strings.isEmpty) "" else strings.mkString(",", ",", "")
+        s"${t.view}<-$srcs(${t.outcome}$out$vdep$adv)"
       }.mkString(", ")
       val dir = layout.runDir.map(d => s"runs/$d").getOrElse("out")
       val corrupt = corruption.map(c => s", corruption=$c").getOrElse("")
@@ -415,8 +500,31 @@ object JobDagGen {
     // invisible to the oracle.
     val dag = attachOrphanInputs(rng, inputs, tasks.toVector)
     val (layout, partitioned) = drawLayout(rng.split(), dag)
-    JobCase(inputs, partitioned, layout, Some(drawCorruption(rng.split(), partitioned)))
+    val corruption = drawCorruption(rng.split(), partitioned)
+    JobCase(inputs, drawStrings(rng.split(), partitioned), layout, Some(corruption))
   }
+
+  /** Half the cases carry [[AdversarialStrings]]: half their tasks are named
+    * from the pool, nearly all their `Fails` tasks throw a string from it, and
+    * half their `ValidationFails` tasks name their failing validations from it.
+    * A second failing validation is either another string from the pool or the
+    * first's name with a `!` after it — names that differ only in punctuation,
+    * which reduce to one sample file name. */
+  private def drawStrings(rng: Rng, tasks: Vector[GenTask]): Vector[GenTask] =
+    if (!rng.bool(0.5)) tasks
+    else tasks.map { t =>
+      val named = if (rng.bool(0.5)) t.copy(name = Some(rng.oneOf(AdversarialStrings))) else t
+      t.outcome match {
+        case Fails if rng.bool(0.9) => named.copy(failure = Some(rng.oneOf(AdversarialStrings)))
+        case ValidationFails if rng.bool(0.5) =>
+          val first = rng.oneOf(AdversarialStrings)
+          val second =
+            if (rng.bool(0.5)) Adversarial(first.label, first.text + "!")
+            else rng.oneOf(AdversarialStrings.filterNot(_ == first))
+          named.copy(checks = if (rng.bool(0.5)) Vector(first, second) else Vector(first))
+        case _ => named
+      }
+    }
 
   /** One corruption the case's tree can take: uniform over the kinds that apply,
     * which without a task that has an output directory is only losing

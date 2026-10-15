@@ -1,7 +1,9 @@
 package com.transformer.fuzz.oracle
 
+import com.transformer.core.SqlExecutorRegistry
 import com.transformer.fuzz.JobDagGen.{Fails, JobCase, Ok, ValidationFails}
-import com.transformer.job.{JobResult, JobRunRecord, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus}
+import com.transformer.job.{JobResult, JobRunRecord, TaskProgressListener, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus}
+import com.transformer.sql.exec.SqlEngine
 
 import java.nio.file.{Files, Path}
 import java.time.Instant
@@ -86,10 +88,12 @@ object DagSchedule {
     * reported as a failure with a thread dump instead of hanging the JVM. */
   private def runWithWatchdog(jc: JobCase, root: Path, time: Instant): JobResult = {
     val job = jc.build(root, time)
+    SqlEngine.init()
+    val executor = jc.executor(SqlExecutorRegistry.get)
     val out = new AtomicReference[JobResult](null)
     val err = new AtomicReference[Throwable](null)
     val t = new Thread(() => {
-      try out.set(job.run())
+      try out.set(job.run(executor, TaskProgressListener.NoOp))
       catch { case e: Throwable => err.set(e) }
     }, "fuzz-dag-runner")
     t.setDaemon(true)
@@ -111,14 +115,15 @@ object DagSchedule {
     val expected = expectedStatuses(jc)
     jc.tasks.indices.foreach { i =>
       val got = tasks(i)
-      assert(got.taskName == jc.tasks(i).view,
-        s"[dag-schedule] result $i is '${got.taskName}', expected '${jc.tasks(i).view}' — " +
+      assert(got.taskName == jc.tasks(i).displayName,
+        s"[dag-schedule] result $i is '${shown(got.taskName)}', expected '${shown(jc.tasks(i).displayName)}' — " +
           s"results are not in declared order\n  case = $jc")
       assert(kind(got.status) == expected(i),
         s"[dag-schedule] task ${jc.tasks(i).view}: expected ${expected(i)}, got ${describe(got.status)}\n" +
           s"  sql = ${jc.mainSql(jc.tasks(i))}\n  case = $jc\n${statusTable(jc, tasks)}")
     }
 
+    checkInjectedFailures(jc, tasks)
     checkTimestamps(jc, tasks)
     checkOrdering(jc, tasks)
     checkSkipReasons(jc, tasks)
@@ -152,11 +157,32 @@ object DagSchedule {
           assert(onDisk == kind(r.status),
             s"[dag-schedule] task ${t.view}: in-memory status ${kind(r.status)} but _run.json says " +
               s"$onDisk\n  case = $jc")
-          assert(rec.taskName == t.view,
-            s"[dag-schedule] _run.json in $dir names task '${rec.taskName}', expected '${t.view}'\n" +
+          assert(rec.taskName == t.displayName,
+            s"[dag-schedule] _run.json in $dir names task '${shown(rec.taskName)}', expected " +
+              s"'${shown(t.displayName)}'\n" +
               s"  case = $jc")
       }
     }
+
+  /** A task rigged to throw a drawn string fails with exactly that string as
+    * its reason: the runner records an exception's message as it is. */
+  private def checkInjectedFailures(jc: JobCase, tasks: Vector[TaskResult]): Unit =
+    jc.tasks.foreach { t =>
+      (t.failure, tasks(t.index).status) match {
+        case (Some(f), TaskStatus.Failed(reason)) =>
+          assert(reason == f.text,
+            s"[dag-schedule] task ${t.view} threw the injected '$f' failure, but the run recorded " +
+              s"'${shown(reason)}'\n  case = $jc")
+        case _ => ()
+      }
+    }
+
+  /** A string for a failure message: control characters spelled out, and a
+    * long one cut short with its length. */
+  def shown(s: String): String = {
+    val visible = s.flatMap(c => if (c < 0x20 || c == 0x7f) f"<${c.toInt}%02x>" else c.toString)
+    if (visible.length <= 120) visible else visible.take(120) + s"...(${s.length} chars)"
+  }
 
   /** The status every task must end in, from the DAG alone. */
   def expectedStatuses(jc: JobCase): Vector[String] = {
@@ -211,10 +237,10 @@ object DagSchedule {
     jc.tasks.foreach { t =>
       tasks(t.index).status match {
         case TaskStatus.Skipped(reason) =>
-          val names = t.taskDeps.map(j => jc.tasks(j).view) ++ t.inputSrcs.map(j => jc.inputs(j).view)
+          val names = t.taskDeps.map(j => jc.tasks(j).displayName) ++ t.inputSrcs.map(j => jc.inputs(j).view)
           assert(names.exists(reason.contains),
-            s"[dag-schedule] task ${t.view} skipped with reason '$reason', which names none of its " +
-              s"upstreams ${names.mkString("[", ", ", "]")}\n  case = $jc")
+            s"[dag-schedule] task ${t.view} skipped with reason '${shown(reason)}', which names none of its " +
+              s"upstreams ${names.map(shown).mkString("[", ", ", "]")}\n  case = $jc")
         case _ => ()
       }
     }
@@ -236,8 +262,9 @@ object DagSchedule {
     jc.tasks.foreach { t =>
       val entry = rec.tasks(t.index)
       val inMemory = kind(tasks(t.index).status)
-      assert(entry.taskName == t.view,
-        s"[dag-schedule] manifest entry ${t.index} names '${entry.taskName}', expected '${t.view}'\n" +
+      assert(entry.taskName == t.displayName,
+        s"[dag-schedule] manifest entry ${t.index} names '${shown(entry.taskName)}', expected " +
+          s"'${shown(t.displayName)}'\n" +
           s"  case = $jc")
       assert(runStatusName(entry.status) == inMemory,
         s"[dag-schedule] task ${t.view}: manifest says ${runStatusName(entry.status)}, run said " +

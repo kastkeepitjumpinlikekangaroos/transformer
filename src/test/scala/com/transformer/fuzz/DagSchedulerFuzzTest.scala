@@ -264,6 +264,68 @@ class DagSchedulerFuzzTest {
     }
   }
 
+  /** Coverage guard for the adversarial strings. Over the generated cases,
+    * every string in `JobDagGen.AdversarialStrings` is drawn as a task's name,
+    * as the message of a task that will fail (not one an upstream skips), and as
+    * the name of a validation that will fail; and two failing validations of one
+    * task draw names whose sample files would share a name. Over a sample of
+    * real runs, every path a string takes back is taken — a task name through
+    * `job.json` and through a record, a failure's message through both, a
+    * validation's name through a record — and every string comes back by at
+    * least one. */
+  @Test def generatorCoversAdversarialStrings(): Unit = {
+    val n = Props.seedCountOr(2000)
+    val drawn = scala.collection.mutable.Map.empty[(String, String), Int].withDefaultValue(0)
+    var sharedSampleNames, adversarialCases = 0
+    var i = 0
+    while (i < n) {
+      val jc = JobDagGen.generate(new Rng(Props.baseSeed + i))
+      val statuses = DagSchedule.expectedStatuses(jc)
+      if (jc.tasks.exists(t => t.name.isDefined || t.failure.isDefined || t.checks.nonEmpty)) adversarialCases += 1
+      jc.tasks.foreach { t =>
+        t.name.foreach(a => drawn(("name", a.label)) += 1)
+        if (statuses(t.index) == "Failed") t.failure.foreach(a => drawn(("failure", a.label)) += 1)
+        if (statuses(t.index) == "ValidationFailed") {
+          t.checks.foreach(a => drawn(("validation name", a.label)) += 1)
+          if (t.checks.length == 2 && t.checks.map(c =>
+            com.transformer.job.TaskRunRecord.validationSampleFileName(c.text)).distinct.length == 1) sharedSampleNames += 1
+        }
+      }
+      i += 1
+    }
+    val seen = new Hydration.Report
+    var seed = Props.baseSeed
+    var sampled = 0
+    while (sampled < 80 && seed < Props.baseSeed + 1000) {
+      val jc = JobDagGen.generate(new Rng(seed))
+      if (jc.tasks.exists(t => t.name.isDefined || t.failure.isDefined || t.checks.nonEmpty)) {
+        sampled += 1
+        seen.add(DagSchedule.run(jc)((runs, root) => Hydration.check(jc, runs, root)))
+      }
+      seed += 1
+    }
+    val consumers = Seq("name", "failure", "validation name")
+    println(s"[hydration] adversarial strings over $n seeds ($adversarialCases cases): " +
+      consumers.map(c => s"$c=${JobDagGen.AdversarialStrings.map(a => a.label -> drawn((c, a.label))).toMap}").mkString(" ") +
+      s" sharedSampleNames=$sharedSampleNames")
+    println(s"[hydration] adversarial strings read back over $sampled runs: ${seen.strings.toMap}")
+    // Bounds near a third of the rates measured over the default 2000 seeds:
+    // about 230 names, 20 messages and 15 validation names per string, and 33
+    // pairs of validation names that share a sample file name.
+    val bound = Map("name" -> n / 25, "failure" -> n / 400, "validation name" -> n / 400)
+    JobDagGen.AdversarialStrings.foreach { a =>
+      consumers.foreach { c =>
+        assertTrue(s"'${a.label}' drawn as a $c ${drawn((c, a.label))} times over $n", drawn((c, a.label)) > bound(c))
+      }
+      assertTrue(s"'${a.label}' never read back: ${seen.strings.toMap}", seen.strings.keys.exists(_._2 == a.label))
+    }
+    assertTrue(s"sharedSampleNames=$sharedSampleNames over $n", sharedSampleNames > n / 200)
+    Seq("task name through job.json", "task name through a record", "failure through job.json",
+      "failure through a record", "validation name through a record").foreach { path =>
+      assertTrue(s"no string read back as a $path: ${seen.strings.toMap}", seen.strings.keys.exists(_._1 == path))
+    }
+  }
+
   /** Each [[Hydration.Degraded]] entry records what a reopened run shows today
     * for a task rebuilt from less than its own record. When one stops
     * reproducing, the session changed what it shows: update the plan and the
@@ -291,7 +353,7 @@ class DagSchedulerFuzzTest {
         jc.tasks.count(_.output.isDefined) + jc.tasks.count(_.passingValidation) +
         jc.tasks.count(_.validationTaskSrc.isDefined) + jc.inputs.map(_.rows).sum +
         jc.layout.runs + jc.layout.runDir.size + jc.tasks.count(_.output.exists(_.partitionBy.isDefined)) +
-        jc.corruption.size
+        jc.corruption.size + jc.tasks.map(t => t.name.size + t.failure.size + t.checks.length).sum
     var i = 0
     while (i < 40) {
       val jc = JobDagGen.generate(new Rng(i.toLong))
