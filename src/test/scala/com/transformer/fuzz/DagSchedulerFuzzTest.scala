@@ -142,6 +142,35 @@ class DagSchedulerFuzzTest {
     assertTrue(s"no run overlapped two tasks in wall-clock time ($sampled sampled)", overlapped > 0)
   }
 
+  /** Reopens generated cases from the base seed — those `take` accepts — until
+    * `enough` holds of what their sessions showed, or `cap` seeds have passed.
+    * A rare shape is sought rather than hoped for in a fixed sample, which can
+    * miss it at another base seed; a shape the corpus no longer produces still
+    * fails the guard at the cap. Returns what the sessions showed and how many
+    * cases ran. */
+  private def sessionsUntil(cap: Int, take: JobCase => Boolean)(
+      enough: Hydration.Report => Boolean): (Hydration.Report, Int) = {
+    val seen = new Hydration.Report
+    var seed = Props.baseSeed
+    var ran = 0
+    while (!enough(seen) && seed < Props.baseSeed + cap) {
+      val jc = JobDagGen.generate(new Rng(seed))
+      if (take(jc)) {
+        ran += 1
+        seen.add(DagSchedule.run(jc)((runs, root) => Hydration.check(jc, runs, root)))
+      }
+      seed += 1
+    }
+    (seen, ran)
+  }
+
+  /** A task of each status rebuilt from its own record, by either route: the
+    * record `job.json` points at, or the one discovery finds. */
+  private def fromRecord(seen: Hydration.Report, status: String): Int =
+    seen.sources(("record", status)) + seen.sources(("discovered", status))
+
+  private val Statuses: Seq[String] = Seq("Succeeded", "Failed", "ValidationFailed", "Skipped")
+
   /** Coverage guard for the hydration property. Hydration is only checked where
     * the corpus puts it: a session rebuilds a task from its record only when the
     * task has an output directory, from job.json's entry only when it does not,
@@ -179,18 +208,12 @@ class DagSchedulerFuzzTest {
       if (times.length >= 2 && times(1).isBefore(times(0))) backfill += 1
       i += 1
     }
-    // Real runs: the sources each session used. A sample of two-run cases, so
-    // the pickers have something to list.
-    val seen = new Hydration.Report
-    var seed = Props.baseSeed
-    var sampled = 0
-    while (sampled < 16 && seed < Props.baseSeed + 400) {
-      val jc = JobDagGen.generate(new Rng(seed))
-      if (jc.layout.runs >= 2) {
-        sampled += 1
-        seen.add(DagSchedule.run(jc)((runs, root) => Hydration.check(jc, runs, root)))
-      }
-      seed += 1
+    // Real runs, until the sessions have shown every source the property
+    // compares: a task of each status from its record, one from job.json's
+    // entry, two partitions, two runs, and all three ways of opening.
+    val (seen, sampled) = sessionsUntil(600, _ => true) { r =>
+      Statuses.forall(fromRecord(r, _) > 0) && r.sources(("summary", "ValidationFailed")) > 0 &&
+        r.multiPartitionTasks > 0 && r.multiRunSessions > 0 && r.openings("picked") > 0 && r.openings("earlier") > 0
     }
     println(s"[hydration] over $n seeds: recordBacked=${recordBacked.toMap} memoryOnly=${memoryOnly.toMap} " +
       s"templatedRunDirCases=$templatedRunDir partitionedTasks=$partitioned partitionDepths=${depths.toMap} " +
@@ -212,8 +235,8 @@ class DagSchedulerFuzzTest {
     assertTrue(s"multiRunCases=$multiRun over $n", multiRun > n / 20)
     assertTrue(s"rewrittenTasks=$rewritten over $n", rewritten > n / 8)
     assertTrue(s"backfillCases=$backfill over $n", backfill > n / 25)
-    Seq("Succeeded", "Failed", "ValidationFailed", "Skipped").foreach { st =>
-      assertTrue(s"sessions rebuilt no $st task from its record: ${seen.sources.toMap}", seen.sources(("record", st)) > 0)
+    Statuses.foreach { st =>
+      assertTrue(s"sessions rebuilt no $st task from its record: ${seen.sources.toMap}", fromRecord(seen, st) > 0)
     }
     assertTrue(s"sessions rebuilt no ValidationFailed task from job.json's entry: ${seen.sources.toMap}",
       seen.sources(("summary", "ValidationFailed")) > 0)
@@ -224,8 +247,8 @@ class DagSchedulerFuzzTest {
   }
 
   /** Coverage guard for the corruption mode: every corruption is drawn (the
-    * first half counts the generated cases), and over a sample of real runs
-    * every one is applied and reopened, the sessions over the damaged trees
+    * first half counts the generated cases), and over real runs every one is
+    * applied and reopened, the sessions over the damaged trees
     * reach every source a degraded session can use — a record found on disk
     * once `job.json` is gone, the entry with no readable record behind it, and
     * a task nothing on disk names — and every [[Hydration.Degraded]] entry is
@@ -239,15 +262,12 @@ class DagSchedulerFuzzTest {
       if (jc.corruptionApplies) drawn(jc.corruption.get.name) += 1
       i += 1
     }
-    val seen = new Hydration.Report
-    var seed = Props.baseSeed
-    while (seed < Props.baseSeed + 60) {
-      val jc = JobDagGen.generate(new Rng(seed))
-      seen.add(DagSchedule.run(jc)((runs, root) => Hydration.check(jc, runs, root)))
-      seed += 1
+    val (seen, ran) = sessionsUntil(600, _ => true) { r =>
+      JobDagGen.Corruption.Names.forall(r.corruptions(_) > 0) && r.sources.keys.exists(_._1 == "discovered") &&
+        r.sources(("unknown", "Pending")) > 0 && Hydration.Degraded.All.forall(r.degraded(_) > 0)
     }
     println(s"[hydration] corruptions drawn over $n seeds: ${drawn.toMap}")
-    println(s"[hydration] over 60 corrupted runs: applied=${seen.corruptions.toMap} sources=${seen.sources.toMap} " +
+    println(s"[hydration] over $ran corrupted runs: applied=${seen.corruptions.toMap} sources=${seen.sources.toMap} " +
       s"degraded=${seen.degraded.map { case (d, c) => d.name -> c }.toMap}")
     JobDagGen.Corruption.Names.foreach { name =>
       assertTrue(s"'$name' drawn ${drawn(name)} times over $n", drawn(name) > n / 12)
@@ -268,8 +288,8 @@ class DagSchedulerFuzzTest {
     * every string in `JobDagGen.AdversarialStrings` is drawn as a task's name,
     * as the message of a task that will fail (not one an upstream skips), and as
     * the name of a validation that will fail; and two failing validations of one
-    * task draw names whose sample files would share a name. Over a sample of
-    * real runs, every path a string takes back is taken — a task name through
+    * task draw names whose sample files would share a name. Over real runs,
+    * every path a string takes back is taken — a task name through
     * `job.json` and through a record, a failure's message through both, a
     * validation's name through a record — and every string comes back by at
     * least one. */
@@ -293,17 +313,13 @@ class DagSchedulerFuzzTest {
       }
       i += 1
     }
-    val seen = new Hydration.Report
-    var seed = Props.baseSeed
-    var sampled = 0
-    while (sampled < 80 && seed < Props.baseSeed + 1000) {
-      val jc = JobDagGen.generate(new Rng(seed))
-      if (jc.tasks.exists(t => t.name.isDefined || t.failure.isDefined || t.checks.nonEmpty)) {
-        sampled += 1
-        seen.add(DagSchedule.run(jc)((runs, root) => Hydration.check(jc, runs, root)))
+    val paths = Seq("task name through job.json", "task name through a record", "failure through job.json",
+      "failure through a record", "validation name through a record")
+    val (seen, sampled) =
+      sessionsUntil(1500, jc => jc.tasks.exists(t => t.name.isDefined || t.failure.isDefined || t.checks.nonEmpty)) { r =>
+        JobDagGen.AdversarialStrings.forall(a => r.strings.keys.exists(_._2 == a.label)) &&
+          paths.forall(path => r.strings.keys.exists(_._1 == path))
       }
-      seed += 1
-    }
     val consumers = Seq("name", "failure", "validation name")
     println(s"[hydration] adversarial strings over $n seeds ($adversarialCases cases): " +
       consumers.map(c => s"$c=${JobDagGen.AdversarialStrings.map(a => a.label -> drawn((c, a.label))).toMap}").mkString(" ") +
@@ -320,8 +336,7 @@ class DagSchedulerFuzzTest {
       assertTrue(s"'${a.label}' never read back: ${seen.strings.toMap}", seen.strings.keys.exists(_._2 == a.label))
     }
     assertTrue(s"sharedSampleNames=$sharedSampleNames over $n", sharedSampleNames > n / 200)
-    Seq("task name through job.json", "task name through a record", "failure through job.json",
-      "failure through a record", "validation name through a record").foreach { path =>
+    paths.foreach { path =>
       assertTrue(s"no string read back as a $path: ${seen.strings.toMap}", seen.strings.keys.exists(_._1 == path))
     }
   }
