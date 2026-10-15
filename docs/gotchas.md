@@ -286,13 +286,36 @@ ship a fix or move something from "not done" to "done".
   decision: a BSON document is binary, not text, so reading it as UTF-8 would
   mangle it. `TIME`, `INTERVAL` and `REPEATED` columns have no engine type and
   make the file unreadable, even to a query that does not name them, because
-  the view's schema is the file's. Where a decode changes the stored value
-  (`Decoding.storesEngineValue` is false), the column's row-group statistics
-  bound the stored bits rather than the engine's values, so
-  `ParquetFilterTranslator` pushes no comparison on it. Without that rule the
+  the view's schema is the file's. Where a decode changes the stored value,
+  the column's row-group statistics bound the stored bits rather than the
+  engine's values, so `ParquetFilterTranslator` pushes no comparison on it
+  (`Decoding.pushesComparisons` is false; see the next item for the other way
+  it can be false). Without that rule the
   widened columns would push a `Long` bound against `INT32` statistics, and
   stay correct only because parquet-mr throws a `ClassCastException`
   comparing the two, which the iterator's stats check swallows.
+- **A parquet file orders its statistics in its own way, which is not always
+  the engine's.** parquet-mr judges a pushed comparison against a column's
+  minimum and maximum in the column's order, and two orders differed from the
+  engine's (both found by `fuzz/parquet_fuzz_test`, both wrong answers):
+  - A string column is ordered by its UTF-8 bytes, which is code point order,
+    and the engine orders strings by UTF-16 code unit (`String.compareTo`). They
+    disagree only where a character from U+E000 to U+FFFF meets one past
+    U+FFFF, which UTF-16 stores as a surrogate pair below U+E000: an emoji sorts
+    below U+FFFD for the engine and above it in the file, so `s < '\uFFFD'`
+    skipped the row group holding the emoji. A range now pushes only against a
+    literal with every character below U+D800, which decides each comparison
+    at a character on which both orders agree (`ParquetFilterTranslator.ordersAlike`);
+    equality and IN push on any literal, since a group holding the literal has
+    it between its bounds in either order.
+  - An unsigned 8- or 16-bit integer reads as the `INT` it is, but its file
+    orders it unsigned, so parquet-mr reads a negative bound as a huge one, and
+    `u8 > '-1'` skipped every group (the binder reads the quoted `'-1'` as the
+    INT -1; a bare `-1` is a negation, which is not pushed). Its decoding
+    (`UnsignedNarrowInts`) pushes no comparison.
+  Floats were probed too and are right: a group holding `NaN` is kept for
+  `d > x`, as the engine's total order (`NaN` above everything) needs, and a
+  group holding one signed zero is kept for a bound at the other.
 - **Predicate pushdown into parquet is best-effort partial.** The translator
   in `ParquetFilterTranslator` handles `c <op> lit` and its swapped form,
   `c IS NULL` / `c IS NOT NULL`, `c IN (lit, lit, …)` / `c NOT IN (…)` over

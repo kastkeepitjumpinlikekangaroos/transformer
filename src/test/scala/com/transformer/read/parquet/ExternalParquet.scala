@@ -2,16 +2,21 @@ package com.transformer.read.parquet
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{Path => HPath}
+import org.apache.parquet.column.ParquetProperties
+import org.apache.parquet.column.ParquetProperties.WriterVersion
 import org.apache.parquet.example.data.Group
 import org.apache.parquet.example.data.simple.SimpleGroupFactory
-import org.apache.parquet.hadoop.{ParquetReader => MrReader}
+import org.apache.parquet.hadoop.{ParquetFileWriter, ParquetReader => MrReader}
 import org.apache.parquet.hadoop.example.{ExampleParquetWriter, GroupReadSupport}
+import org.apache.parquet.hadoop.metadata.CompressionCodecName
+import org.apache.parquet.hadoop.util.{HadoopInputFile, HadoopOutputFile}
 import org.apache.parquet.io.api.Binary
 import org.apache.parquet.schema.{MessageType, MessageTypeParser}
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 
-import java.nio.file.Path
+import java.nio.file.{Files, Path}
 import scala.collection.mutable
+import scala.jdk.CollectionConverters._
 
 /** Parquet files written and read by parquet-mr's own example object model,
   * never by transformer's `ParquetWriter` or `ParquetReader`.
@@ -29,17 +34,69 @@ object ExternalParquet {
     * `message m { optional int64 ts (TIMESTAMP(MILLIS,true)); }`. */
   def schema(text: String): MessageType = MessageTypeParser.parseMessageType(text)
 
+  /** How parquet-mr lays out what it writes: the choices other writers make
+    * differently, each of which changes the bytes a reader meets and none of
+    * which changes what they mean. The defaults are parquet-mr's own.
+    *
+    *   - `dictionary` encodes a column chunk as a dictionary page plus indices,
+    *     falling back to plain pages for the rest of the chunk once the
+    *     dictionary passes `dictionaryPageSize` bytes, so a small size gives a
+    *     chunk of both kinds.
+    *   - `pageSize` (bytes) and `pageRowLimit` (rows) end a data page, so a
+    *     small value of either splits a row group's values across many pages.
+    *   - `writerVersion` `PARQUET_2_0` writes data pages v2, and plain values
+    *     in the delta encodings rather than PLAIN.
+    *   - `byteStreamSplit` stores FLOAT and DOUBLE values byte-plane by
+    *     byte-plane.
+    *   - `codec` compresses each page. */
+  final case class Layout(
+      dictionary: Boolean = ParquetProperties.DEFAULT_IS_DICTIONARY_ENABLED,
+      dictionaryPageSize: Int = ParquetProperties.DEFAULT_DICTIONARY_PAGE_SIZE,
+      pageSize: Int = ParquetProperties.DEFAULT_PAGE_SIZE,
+      pageRowLimit: Int = ParquetProperties.DEFAULT_PAGE_ROW_COUNT_LIMIT,
+      writerVersion: WriterVersion = WriterVersion.PARQUET_1_0,
+      byteStreamSplit: Boolean = ParquetProperties.DEFAULT_IS_BYTE_STREAM_SPLIT_ENABLED,
+      codec: CompressionCodecName = CompressionCodecName.UNCOMPRESSED) {
+
+    /** Only what differs from parquet-mr's defaults, so a failure message
+      * shows the choices that were made. */
+    override def toString: String = {
+      val d = Layout()
+      Seq(
+        if (dictionary != d.dictionary) Some(s"dictionary=$dictionary") else None,
+        if (dictionaryPageSize != d.dictionaryPageSize) Some(s"dictionaryPageSize=$dictionaryPageSize") else None,
+        if (pageSize != d.pageSize) Some(s"pageSize=$pageSize") else None,
+        if (pageRowLimit != d.pageRowLimit) Some(s"pageRowLimit=$pageRowLimit") else None,
+        if (writerVersion != d.writerVersion) Some(s"$writerVersion") else None,
+        if (byteStreamSplit != d.byteStreamSplit) Some("byteStreamSplit") else None,
+        if (codec != d.codec) Some(s"$codec") else None
+      ).flatten.mkString("Layout(", ", ", ")")
+    }
+  }
+
   /** Write `rows` to a new file at `path`. Each row has one cell per field, in
     * schema order, holding the value parquet stores rather than the value it
     * stands for: an `Int` for INT32, a `Long` for INT64, a `Float`, `Double` or
     * `Boolean`, and an `Array[Byte]` for INT96, FIXED_LEN_BYTE_ARRAY and BINARY
     * (a `String` for BINARY is its UTF-8 bytes). A `null` leaves an OPTIONAL
-    * field unset. */
-  def write(path: Path, schema: MessageType, rows: Seq[Seq[Any]]): Unit = {
+    * field unset. parquet-mr decides where row groups end, which for a small
+    * file is after the last row. */
+  def write(path: Path, schema: MessageType, rows: Seq[Seq[Any]], layout: Layout = Layout()): Unit = {
     val factory = new SimpleGroupFactory(schema)
     val writer = ExampleParquetWriter.builder(new HPath(path.toUri))
       .withConf(conf)
       .withType(schema)
+      .withDictionaryEncoding(layout.dictionary)
+      .withDictionaryPageSize(layout.dictionaryPageSize)
+      .withPageSize(layout.pageSize)
+      .withPageRowCountLimit(layout.pageRowLimit)
+      // A page ends only where parquet-mr checks its size, every 100 rows
+      // by default, so a small `pageSize` needs a check after every row.
+      .withMinRowCountForPageSizeCheck(if (layout.pageSize < ParquetProperties.DEFAULT_PAGE_SIZE) 1
+        else ParquetProperties.DEFAULT_MINIMUM_RECORD_COUNT_FOR_CHECK)
+      .withWriterVersion(layout.writerVersion)
+      .withByteStreamSplitEncoding(layout.byteStreamSplit)
+      .withCompressionCodec(layout.codec)
       .build()
     try {
       rows.foreach { row =>
@@ -61,6 +118,40 @@ object ExternalParquet {
         writer.write(g)
       }
     } finally writer.close()
+  }
+
+  /** Write a file at `path` whose row groups are exactly `groups`, in order:
+    * each one's rows (as [[write]] takes them) laid out its own way. No group
+    * may be empty, and no groups at all is a file with a schema and no rows.
+    *
+    * Each group is written as a file of its own, which a group this small
+    * fills in one row group, and the files are joined by parquet-mr's
+    * `appendFile`, which copies their column chunks and statistics as they
+    * are and writes a footer listing them all: what `parquet-tools merge`
+    * does. A real writer chooses where groups end by bytes buffered, and this
+    * chooses by row, so a test can put a boundary anywhere. */
+  def writeRowGroups(path: Path, schema: MessageType, groups: Seq[(Seq[Seq[Any]], Layout)]): Unit = {
+    require(groups.forall(_._1.nonEmpty), "a row group holds at least one row")
+    val parts = Files.createTempDirectory("external-parquet-groups-")
+    try {
+      val writer = new ParquetFileWriter(
+        HadoopOutputFile.fromPath(new HPath(path.toUri), conf), schema, ParquetFileWriter.Mode.CREATE,
+        // The groups are already cut; this bounds only padding, of which
+        // there is none.
+        org.apache.parquet.hadoop.ParquetWriter.DEFAULT_BLOCK_SIZE.toLong, 0)
+      writer.start()
+      groups.zipWithIndex.foreach { case ((rows, layout), i) =>
+        val part = parts.resolve(s"group-$i.parquet")
+        write(part, schema, rows, layout)
+        val blocks = footer(part).getBlocks.size
+        require(blocks == 1, s"group $i was written as $blocks row groups, not one")
+        writer.appendFile(HadoopInputFile.fromPath(new HPath(part.toUri), conf))
+      }
+      writer.end(java.util.Collections.emptyMap[String, String]())
+    } finally {
+      Files.list(parts).iterator.asScala.foreach(Files.deleteIfExists)
+      Files.deleteIfExists(parts)
+    }
   }
 
   /** Every row of `path`, each cell as parquet-mr renders the stored value for
@@ -97,13 +188,19 @@ object ExternalParquet {
   }
 
   /** The footer schema of `path`, as parquet-mr reads it. */
-  def footerSchema(path: Path): MessageType = {
-    val r = org.apache.parquet.hadoop.ParquetFileReader.open(
-      org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(new HPath(path.toUri), conf))
-    try r.getFooter.getFileMetaData.getSchema finally r.close()
+  def footerSchema(path: Path): MessageType = footer(path).getFileMetaData.getSchema
+
+  /** The number of rows in each row group of `path`, in file order. */
+  def rowGroupSizes(path: Path): Seq[Long] = footer(path).getBlocks.asScala.map(_.getRowCount).toSeq
+
+  private def footer(path: Path): org.apache.parquet.hadoop.metadata.ParquetMetadata = {
+    val r = org.apache.parquet.hadoop.ParquetFileReader.open(HadoopInputFile.fromPath(new HPath(path.toUri), conf))
+    try r.getFooter finally r.close()
   }
 
-  private def conf: Configuration = {
+  /** One Hadoop configuration for every call: building one reads Hadoop's
+    * default resources, which costs more than writing a small file. */
+  private lazy val conf: Configuration = {
     val c = new Configuration()
     c.set("fs.defaultFS", "file:///")
     // No `.crc` sidecars next to the fixtures.

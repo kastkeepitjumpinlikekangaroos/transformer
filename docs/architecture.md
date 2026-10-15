@@ -599,10 +599,12 @@ Both directions skip the `Group`/`SimpleGroup` row-object model that
   `INT64` to `DECIMAL(20,0)` (`UnsignedLongs`), `FLOAT16` to `FLOAT`
   (`HalfFloats`), `JSON` and `ENUM` read as text, `BSON` and `UUID` as bytes,
   and `TIME`, `INTERVAL`, a `REPEATED` column or a nested group fail, naming
-  the column. Each `Decoding` also says whether it `storesEngineValue`: true
-  for a plain copy, false where the decode changes the stored bits. Only a
-  column stored as its engine values in every file takes a pushed
-  comparison (see 3d).
+  the column. Each `Decoding` also says whether it `pushesComparisons`: true
+  for a plain copy in the engine's order, false where the decode changes the
+  stored bits or where the file orders them otherwise (an unsigned 8- or 16-bit
+  integer, `UnsignedNarrowInts`, reads as an `INT` but is ordered unsigned).
+  Only a column that pushes comparisons in every file takes a pushed one
+  (see 3d).
 - Write: a custom `BatchWriteSupport` drives parquet-mr's `RecordConsumer`
   directly from the `ColumnarBatch` vectors. Each batch row maps to one
   `writer.write()` call (parquet-mr needs that 1:1 mapping so its
@@ -661,12 +663,16 @@ case — the translator bails), `IN (…)` with non-literal items, decimal
 columns, comparisons on a timestamp column (its statistics are in the unit
 its file stores, which varies by file; `IS NULL` on one still pushes), and
 comparisons on any column some file stores as other bits than the engine
-reads it as: `readFooters` collects the columns every file stores as engine
-values (`Decoding.storesEngineValue`), and `withPushdownFilter` passes them to
-`translate` as `comparable`. The translator drops unsupported conjuncts from
-the AND-chain
-rather than refusing to push the whole predicate; the residual `FilterExec`
-covers them.
+reads it as, or orders otherwise: `readFooters` collects the columns on which
+every file's statistics judge a comparison as the engine would
+(`Decoding.pushesComparisons`), and `withPushdownFilter` passes them to
+`translate` as `comparable`. A string column pushes `=`, `<>` and `IN` on any
+literal but a range only against one with every character below U+D800, since
+its statistics are in UTF-8 (code point) order and the engine compares UTF-16
+code units, and the two orders differ only where a character from U+E000 to
+U+FFFF meets a surrogate pair (`ordersAlike`). The translator drops unsupported
+conjuncts from the AND-chain rather than refusing to push the whole predicate;
+the residual `FilterExec` covers them.
 
 ### 3e. Skip materialize re-read when no downstream consumes
 

@@ -28,18 +28,24 @@ import scala.jdk.CollectionConverters._
 private[parquet] object ParquetColumns {
 
   /** How one column's stored values become engine values. `dataType` is the
-    * type the column reads as. `storesEngineValue` says whether each stored
-    * value already is the engine value, so that the column's row-group
-    * statistics bound engine values and a comparison can be pushed to them:
-    * true when the decode is a plain copy, false when the stored bits mean
-    * something else (another time unit, an unscaled integer, an unsigned one,
-    * a half-precision float). */
-  sealed abstract class Decoding(val dataType: DataType, val storesEngineValue: Boolean)
+    * type the column reads as. `pushesComparisons` says whether parquet-mr,
+    * judging a comparison against the column's row-group statistics, judges
+    * it as the engine would against the values: true when each stored value
+    * is the engine value and the file orders the column as the engine does.
+    * It is false when the stored bits mean something else (another time unit,
+    * an unscaled integer, an unsigned 32- or 64-bit integer, a half-precision
+    * float), and false for an unsigned 8- or 16-bit integer, whose values are
+    * the engine's but which the file orders unsigned, so that a negative bound
+    * sorts above every value. */
+  sealed abstract class Decoding(val dataType: DataType, val pushesComparisons: Boolean)
 
   object Decoding {
     case object Booleans extends Decoding(DataType.BooleanType, true)
-    /** INT32, signed, or unsigned in 8 or 16 bits, whose values all fit. */
+    /** INT32, unannotated or a signed integer of 8, 16 or 32 bits. */
     case object Ints extends Decoding(DataType.IntType, true)
+    /** INT32 with INTEGER(8 or 16, false): every value fits an INT and is
+      * read as one, but the file's statistics are in unsigned order. */
+    case object UnsignedNarrowInts extends Decoding(DataType.IntType, false)
     /** INT32 with INTEGER(32, false): an unsigned int, whose top half reads
       * negative as an INT, so it reads as the BIGINT that holds it. */
     case object UnsignedInts extends Decoding(DataType.LongType, false)
@@ -95,7 +101,8 @@ private[parquet] object ParquetColumns {
       case (PrimitiveTypeName.BOOLEAN, null) => Decoding.Booleans
 
       case (PrimitiveTypeName.INT32, null) => Decoding.Ints
-      case (PrimitiveTypeName.INT32, i: IntLogicalTypeAnnotation) if i.getBitWidth < 32 => Decoding.Ints
+      case (PrimitiveTypeName.INT32, i: IntLogicalTypeAnnotation) if i.getBitWidth < 32 =>
+        if (i.isSigned) Decoding.Ints else Decoding.UnsignedNarrowInts
       case (PrimitiveTypeName.INT32, i: IntLogicalTypeAnnotation) if i.getBitWidth == 32 =>
         if (i.isSigned) Decoding.Ints else Decoding.UnsignedInts
       case (PrimitiveTypeName.INT32, _: DateLogicalTypeAnnotation) => Decoding.Dates

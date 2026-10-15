@@ -579,6 +579,61 @@ class ParquetExternalFormatTest {
     assertTrue(msg, msg.contains("'xs'") && msg.toLowerCase.contains("repeated"))
   }
 
+  /** A string column's statistics are in UTF-8 byte order, which is code point
+    * order, and the engine orders strings by UTF-16 code unit. The two disagree
+    * where a character from U+E000 to U+FFFF meets one past U+FFFF, stored as
+    * a surrogate pair below U+E000: the emoji orders below U+FFFD for the
+    * engine and above it in the file. A range pushed on such a literal skipped
+    * the group holding the emoji, so the query lost it; found by
+    * `fuzz/parquet_fuzz_test` at seed 1203. */
+  @Test def aStringRangeIsJudgedInTheEnginesOrderNotTheFilesOrder(): Unit = {
+    val emoji = "\ud83d\ude00"
+    val path = newDir().resolve("strings.parquet")
+    ExternalParquet.writeRowGroups(path, ExternalParquet.schema("message m { optional binary s (STRING); }"),
+      Seq((Seq(Seq(emoji)), ExternalParquet.Layout()), (Seq(Seq("\ufffd")), ExternalParquet.Layout()),
+        (Seq(Seq("\ue000")), ExternalParquet.Layout()), (Seq(Seq("abc")), ExternalParquet.Layout())))
+    def find(where: String): Seq[String] =
+      query(s"SELECT s FROM t WHERE $where", "t" -> ParquetReader.fromPath(path.toString, 8192, 1L))
+        .map(_.head.asInstanceOf[String])
+    // The engine's order: abc < emoji < U+E000 < U+FFFD.
+    assertEquals(Seq(emoji, "\ue000", "abc"), find("s < '\ufffd'"))
+    assertEquals(Seq("\ufffd", "\ue000"), find(s"s > '$emoji'"))
+    assertEquals(Seq(emoji, "\ufffd", "\ue000"), find(s"s >= '$emoji'"))
+    // A literal below the surrogates orders both ways alike, so it still
+    // pushes, and equality pushes whatever the literal.
+    val view = ParquetReader.fromPath(path.toString, 8192, 1L)
+    import com.transformer.sql.plan._
+    def cmp(op: String, lit: String): Expr =
+      BinOpExpr(op, ColRefExpr(0, "s", DataType.StringType), LitExpr(lit, DataType.StringType), DataType.BooleanType)
+    assertEquals(None, view.withPushdownFilter(cmp("<", "\ufffd")))
+    assertEquals(None, view.withPushdownFilter(cmp(">", emoji)))
+    assertTrue(view.withPushdownFilter(cmp("<", "abd")).isDefined)
+    assertTrue(view.withPushdownFilter(cmp("=", emoji)).isDefined)
+    assertEquals(Seq("abc"), find("s < 'abd'"))
+    assertEquals(Seq(emoji), find(s"s = '$emoji'"))
+  }
+
+  /** An unsigned 8- or 16-bit integer reads as the INT it is, but its file
+    * orders it unsigned, and parquet-mr judges a pushed bound in that order, so
+    * a negative bound sorted above every value: `u8 > '-1'` (a literal the
+    * binder reads as the INT -1) skipped the whole file where the engine keeps
+    * every row. A bare `-1` is a negation, which is not pushed. Found by
+    * `fuzz/parquet_fuzz_campaign` at seeds 9494 and 18048. */
+  @Test def anUnsignedNarrowIntegerIsComparedSigned(): Unit = {
+    val file = writeFixture(
+      "message m { optional int32 u8 (INTEGER(8,false)); optional int32 u16 (INTEGER(16,false)); }",
+      Seq(Seq(255, 2618), Seq(0, 65535), Seq(null, null)))
+    val view = ParquetReader.fromPath(file.toString)
+    val all = Seq(Seq(255, 2618), Seq(0, 65535))
+    assertEquals(all, query("SELECT u8, u16 FROM t WHERE u8 > '-1' AND u16 >= CAST('-32768' AS INT)", "t" -> view))
+    assertEquals(all, query("SELECT u8, u16 FROM t WHERE u8 BETWEEN '-5' AND '300'", "t" -> view))
+    assertEquals(all, query("SELECT u8, u16 FROM t WHERE u8 > -1", "t" -> view))
+    import com.transformer.sql.plan._
+    val gt = BinOpExpr(">", ColRefExpr(0, "u8", DataType.IntType), LitExpr(Int.box(-1), DataType.IntType), DataType.BooleanType)
+    assertEquals(None, view.withPushdownFilter(gt))
+    assertTrue(view.withPushdownFilter(IsNullExpr(ColRefExpr(0, "u8", DataType.IntType), negated = false)).isDefined)
+  }
+
   /** A comparison is pushed to row-group statistics only on a column whose
     * stored values are the engine's. An unsigned INT32 reads as a BIGINT and a
     * FLOAT16 as a FLOAT, and their statistics bound other bits, so a bound on

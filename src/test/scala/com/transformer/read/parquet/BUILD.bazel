@@ -48,8 +48,12 @@ scala_library(
         "@maven//:org_apache_parquet_parquet_common",
         "@maven//:org_apache_parquet_parquet_hadoop",
     ],
-    # A schema here is parquet-mr's MessageType, so every user needs it.
-    exports = ["@maven//:org_apache_parquet_parquet_column"],
+    # A schema here is parquet-mr's MessageType, and a Layout names its
+    # WriterVersion and CompressionCodecName, so every user needs them.
+    exports = [
+        "@maven//:org_apache_parquet_parquet_column",
+        "@maven//:org_apache_parquet_parquet_common",
+    ],
     # parquet-mr's reader reaches Hadoop's mapreduce classes (FileInputFormat)
     # at run time; read/parquet carries them too, but this library must work
     # in a test that never touches our reader.

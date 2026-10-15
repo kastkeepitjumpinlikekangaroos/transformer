@@ -573,9 +573,15 @@ InputFilePath("data.csv",
   matching). Unsupported conjuncts (computed expressions, two-column
   predicates, `LIKE`, `IN` with a NULL literal in the list, decimal columns,
   comparisons on a timestamp column, whose statistics are in whatever unit
-  its file stores, and comparisons on a column whose stored values are not
-  the ones it reads as, such as an unsigned `INT32` or a `FLOAT16`) drop
-  through as residual filtering. `IS NULL` pushes on any column but a decimal.
+  its file stores, comparisons on a column whose stored values are not
+  the ones it reads as, such as an unsigned `INT32` or a `FLOAT16`, or that
+  its file orders otherwise, an unsigned 8- or 16-bit integer, whose unsigned
+  order puts a negative bound above every value, and a range on a string
+  column against a literal with a character at or past U+D800, since a file
+  orders strings by their UTF-8 bytes and the engine by UTF-16 code unit, and
+  the two disagree where a character from U+E000 to U+FFFF meets one past
+  U+FFFF) drop through as residual filtering. `IS NULL` pushes on any column
+  but a decimal.
 - Write: vectorized — custom `WriteSupport[BatchRowRef]` drives parquet-mr's
   `RecordConsumer` straight from `ColumnarBatch` vectors. No `SimpleGroup` per
   row, no `Integer`/`Long` boxing per cell. Compression defaults to `snappy`

@@ -291,6 +291,24 @@ class ParquetFilterTranslatorTest {
     }
   }
 
+  @Test def translatesAStringRangeOnlyWhereBothOrdersAgree(): Unit = {
+    // Statistics order strings by code point, the engine by UTF-16 code unit;
+    // they agree on every comparison against a literal below the surrogates
+    // (`parquet_external_format_test` has the query that lost a row).
+    def range(op: String, v: String) = ParquetFilterTranslator.translate(
+      BinOpExpr(op, col("s", DataType.StringType), lit(v, DataType.StringType), DataType.BooleanType))
+    for (op <- Seq("<", "<=", ">", ">=")) {
+      assertTrue(op, range(op, "abc \u00e9\u65e5\ud7ff").isDefined)
+      assertEquals(op, None, range(op, "\ufffd"))
+      assertEquals(op, None, range(op, "a\ue000"))
+      assertEquals(op, None, range(op, "\ud83d\ude00"))
+    }
+    assertTrue(range("=", "\ud83d\ude00").isDefined)
+    assertTrue(range("<>", "\ufffd").isDefined)
+    assertTrue(ParquetFilterTranslator.translate(InListExpr(col("s", DataType.StringType),
+      Seq(lit("\ufffd", DataType.StringType), lit("\ud83d\ude00", DataType.StringType)), negated = false)).isDefined)
+  }
+
   @Test def dateLiteralPushdownMatchesBruteForce(): Unit = {
     val schema = Schema(Field("d", DataType.DateType))
     val dir = Files.createTempDirectory("pq-pushdown-dates-")

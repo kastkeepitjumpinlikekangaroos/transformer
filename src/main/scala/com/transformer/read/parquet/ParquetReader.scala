@@ -139,10 +139,12 @@ final class ParquetReader private (
     * iterator.
     *
     * A comparison is pushed only on a column that every file stores as the
-    * engine's own values (`ParquetColumns.Decoding.storesEngineValue`), since
-    * parquet-mr judges it against the statistics of the stored values: an
-    * unsigned `INT32` read as a `BIGINT`, or a `FLOAT16` read as a `FLOAT`,
-    * is bounded by statistics of other bits. */
+    * engine's own values, in the engine's order
+    * (`ParquetColumns.Decoding.pushesComparisons`), since parquet-mr judges it
+    * against the statistics of the stored values, in the file's order: an
+    * unsigned `INT32` read as a `BIGINT`, or a `FLOAT16` read as a `FLOAT`, is
+    * bounded by statistics of other bits, and an unsigned 8-bit integer is
+    * ordered as unsigned, which puts a negative bound above every value. */
   def withPushdownFilter(predicate: Expr): Option[CatalogView] = {
     ParquetFilterTranslator.translate(predicate, comparableColumns.contains).map { fp =>
       new ParquetReader(files, batchSize, projectedNames, parquetSchema_, partitions, Some(fp), comparableColumns)
@@ -232,8 +234,8 @@ object ParquetReader {
   }
 
   /** What [[readFooters]] learns from every file of a view: its schema, its
-    * partitions, and the names of the columns every file stores as the
-    * engine's own values. */
+    * partitions, and the names of the columns on which every file's
+    * statistics can judge a comparison (`Decoding.pushesComparisons`). */
   private final case class Footers(
       schema: Schema,
       partitions: IndexedSeq[PartitionMeta],
@@ -270,7 +272,7 @@ object ParquetReader {
     val schema = ParquetColumns.viewSchema(footers)
     val decodings = footers.map { case (label, mt) => ParquetColumns.resolve(schema, mt, label).decodings }
     val comparable = schema.fields.indices.collect {
-      case i if decodings.forall(_(i).storesEngineValue) => schema.fields(i).name
+      case i if decodings.forall(_(i).pushesComparisons) => schema.fields(i).name
     }.toSet
     Footers(schema, results.flatMap(_._2).toIndexedSeq, comparable)
   }
@@ -511,7 +513,7 @@ final class ParquetPartitionIterator(
           else v.set(r, cr.getBoolean)
           cr.consume(); r += 1
         }
-      case ParquetColumns.Decoding.Ints =>
+      case ParquetColumns.Decoding.Ints | ParquetColumns.Decoding.UnsignedNarrowInts =>
         val v = vec.asInstanceOf[IntVector]
         var r = 0
         while (r < rowCount) {

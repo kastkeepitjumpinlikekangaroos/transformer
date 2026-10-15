@@ -48,6 +48,10 @@ import org.apache.parquet.io.api.Binary
   *     statistics are in whatever unit its file stores
   *   - comparisons on any column the caller does not call `comparable`: its
   *     statistics bound stored bits that are not the engine's values
+  *   - a range (`<`, `<=`, `>`, `>=`) on a string column against a literal
+  *     with a character at or past U+D800: parquet orders strings by code
+  *     point and the engine by UTF-16 code unit, which disagree there (see
+  *     [[ordersAlike]])
   *   - decimal columns
   *
   * Returns None when nothing could be pushed.
@@ -254,11 +258,13 @@ object ParquetFilterTranslator {
           case _ => None
         }
       case DataType.StringType =>
+        val text = value.asInstanceOf[String]
         val col = FilterApi.binaryColumn(name)
-        val lit = Binary.fromString(value.asInstanceOf[String])
+        val lit = Binary.fromString(text)
         op match {
           case "=" => Some(FilterApi.eq(col, lit))
           case "!=" | "<>" => Some(FilterApi.notEq(col, lit))
+          case "<" | "<=" | ">" | ">=" if !ordersAlike(text) => None
           case "<" => Some(FilterApi.lt(col, lit))
           case "<=" => Some(FilterApi.ltEq(col, lit))
           case ">" => Some(FilterApi.gt(col, lit))
@@ -283,6 +289,19 @@ object ParquetFilterTranslator {
       case DataType.NullType => None
     }
   }
+
+  /** Whether every string orders against `literal` the same way in the
+    * engine as in a parquet file's statistics. Parquet orders strings by their
+    * UTF-8 bytes, which is code point order, and the engine by UTF-16 code
+    * unit (`String.compareTo`). The two disagree only where a character from
+    * U+E000 to U+FFFF meets one past U+FFFF, which UTF-16 stores as a
+    * surrogate pair below U+E000: an emoji sorts below U+FFFD for the engine
+    * and above it in the file. A literal with every character below the
+    * surrogates decides each comparison at a character on which both orders
+    * agree, so a range against it can be judged by the statistics. Equality
+    * needs no such promise: a group holding the literal has it between its
+    * minimum and maximum in either order. */
+  private def ordersAlike(literal: String): Boolean = literal.forall(_ < Character.MIN_SURROGATE)
 
   private def swap(op: String): String = op match {
     case "<" => ">"
