@@ -18,6 +18,12 @@ specific traps.
 - **`ColumnarBatch` is `final`** — don't subclass it. Use the factory
   `RowView.apply(schema, values)` or the mutable `RowBuf` for 1-row batches.
 - **No emojis** in code or docs unless explicitly requested.
+- **Source files are plain text.** Spell a control character in code (`0.toChar`,
+  or an escape inside a string literal), never as the raw character:
+  `job/Json.scala` once held a raw NUL in a char literal, which made git, `file`
+  and editing tools treat the whole file as binary. Build test text past ASCII
+  from code points (`new String(Character.toChars(0x1F600))`) for the same
+  reason.
 - **No `*/` inside Scaladoc** — the Scala lexer closes the comment at the first
   `*/`. Glob examples like `data/*.csv` inside a `/** */` block are a footgun;
   use `'*'.csv` or move the example to plain prose. We hit this twice.
