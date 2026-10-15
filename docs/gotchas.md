@@ -1203,6 +1203,22 @@ ship a fix or move something from "not done" to "done".
   so it is present for every terminal status. Found by
   `fuzz/dag_scheduler_fuzz_test`.
 
+- **A reopened task is the `TaskResult` its run returned, field for field.**
+  `JobSession.taskResultFromRecord` rebuilds each task from its `_run.json`
+  when a job directory is opened, and it used to get two fields wrong for every
+  reopened run. It dropped the record's `enqueuedAt`, so the task came back
+  enqueued at the epoch and `queueWaitMillis` was the start time in epoch
+  milliseconds: the DAG canvas and the details panel showed every task of a
+  reopened run "queued" for fifty-six years. And it gave a `Failed` or
+  `Skipped` task its record's directory as `outputPath`, which the run reports
+  as `None` (nothing was written), so the details panel said "Wrote to" a
+  directory holding only the record, where the live run had said "Will write
+  to". The output path now follows the record's status, as the runner sets it.
+  A record from before records carried `enqueuedAt` still reopens at the epoch,
+  and `TaskResult.queueWaitMillis` now reads the epoch as unknown (0), which its
+  scaladoc already promised. Found by the `Hydration` oracle in
+  `fuzz/dag_scheduler_fuzz_test`; regressions in `gui/job_session_test`.
+
 - **A task with no `outputFile` can feed downstream views and validations.**
   It could not until recently: `DataJob.materializeIfNeeded` threw
   `UnsupportedOperationException("v1 requires an outputFile ...")` whenever a

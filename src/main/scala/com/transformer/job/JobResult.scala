@@ -50,12 +50,15 @@ final case class TaskResult(
   def durationMillis: Long = finishedAt.toEpochMilli - startedAt.toEpochMilli
   /** Time spent waiting in the scheduler queue before a worker picked the task
     * up. 0 when `enqueuedAt == startedAt` (ran immediately on enqueue) or when
-    * the field wasn't populated by an older code path.
+    * the field wasn't populated by an older code path — `enqueuedAt` at the
+    * epoch is unknown, not a wait since 1970.
     */
-  def queueWaitMillis: Long = {
-    val w = startedAt.toEpochMilli - enqueuedAt.toEpochMilli
-    if (w < 0L) 0L else w
-  }
+  def queueWaitMillis: Long =
+    if (enqueuedAt == Instant.EPOCH) 0L
+    else {
+      val w = startedAt.toEpochMilli - enqueuedAt.toEpochMilli
+      if (w < 0L) 0L else w
+    }
   def succeeded: Boolean = status == TaskStatus.Succeeded
 }
 

@@ -42,6 +42,7 @@ scala_junit_test(
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/gui",
         "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/temporal",
         "@maven//:junit_junit",
     ],
 )

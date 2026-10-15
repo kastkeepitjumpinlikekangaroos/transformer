@@ -727,7 +727,9 @@ The flow yields three timestamps per task that the GUI surfaces:
 (returned). `queueWaitMillis = startedAt - enqueuedAt` distinguishes "task ran
 fast but waited in the pool" from "task ran fast and started immediately" —
 historically the GUI reported only `finishedAt - startedAt`, which is why a
-2.5-second task on a saturated pool felt like 30 seconds of wall time.
+2.5-second task on a saturated pool felt like 30 seconds of wall time. An
+`enqueuedAt` at the epoch is unknown (a record written before records carried
+it), and its queue wait is 0.
 
 ### 4. Run records and historical-run discovery
 

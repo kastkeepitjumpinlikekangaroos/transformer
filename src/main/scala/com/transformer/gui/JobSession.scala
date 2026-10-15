@@ -422,9 +422,10 @@ final class JobSession {
         nameToIndex.get(summary.taskName).foreach { idx =>
           summary.runFile.flatMap(runFile => loadTaskRunRecord(runFile)) match {
             case Some((dir, taskRec)) =>
+              val result = taskResultFromRecord(taskRec, dir)
               records(idx) = Some(taskRec)
-              outputs(idx) = Some(dir.toString)
-              states(idx) = UiTaskState.Done(taskResultFromRecord(taskRec, dir))
+              outputs(idx) = result.outputPath
+              states(idx) = UiTaskState.Done(result)
             case None =>
               // No per-task file on disk — surface what the manifest knows.
               states(idx) = UiTaskState.Done(taskResultFromSummary(summary))
@@ -439,9 +440,10 @@ final class JobSession {
     while (j < dag.nodes.size) {
       if (states(j) == UiTaskState.Pending) {
         historicals(j).headOption.foreach { case (path, rec) =>
+          val result = taskResultFromRecord(rec, path)
           records(j) = Some(rec)
-          outputs(j) = Some(path.toString)
-          states(j) = UiTaskState.Done(taskResultFromRecord(rec, path))
+          outputs(j) = result.outputPath
+          states(j) = UiTaskState.Done(result)
         }
       }
       j += 1
@@ -462,10 +464,16 @@ final class JobSession {
     else TaskRunRecord.read(dir).map(rec => dir -> rec)
   } catch { case NonFatal(_) => None }
 
-  /** Rehydrate a full in-memory [[TaskResult]] from an on-disk [[TaskRunRecord]].
-    * For [[TaskRunStatus.ValidationFailed]] this also reads each per-validation
-    * `_validation-<slug>.csv` sample file from `dir` so the validation cards
-    * can render the original failure detail. */
+  /** Rehydrate a full in-memory [[TaskResult]] from an on-disk [[TaskRunRecord]],
+    * as the run reported it. For [[TaskRunStatus.ValidationFailed]] this also
+    * reads each per-validation `_validation-<slug>.csv` sample file from `dir`
+    * so the validation cards can render the original failure detail.
+    *
+    * `dir` is the task's output only when the run wrote output there: a Failed
+    * or Skipped task's directory holds nothing but its record, and the run
+    * reported no output path for it. A record written before records carried an
+    * enqueue time gets the epoch, which [[TaskResult.queueWaitMillis]] reads as
+    * unknown. */
   private def taskResultFromRecord(rec: TaskRunRecord, dir: Path): TaskResult = {
     val status: TaskStatus = rec.status match {
       case TaskRunStatus.Succeeded => TaskStatus.Succeeded
@@ -482,13 +490,18 @@ final class JobSession {
       case TaskRunStatus.Skipped =>
         TaskStatus.Skipped(rec.errorMessage.getOrElse("(no reason recorded)"))
     }
+    val wroteOutput = rec.status match {
+      case TaskRunStatus.Succeeded | TaskRunStatus.ValidationFailed => true
+      case TaskRunStatus.Failed | TaskRunStatus.Skipped            => false
+    }
     TaskResult(
       taskName = rec.taskName,
       status = status,
       rowsProduced = rec.rowsProduced,
-      outputPath = Some(dir.toString),
+      outputPath = if (wroteOutput) Some(dir.toString) else None,
       startedAt = rec.startedAt,
-      finishedAt = rec.finishedAt
+      finishedAt = rec.finishedAt,
+      enqueuedAt = rec.enqueuedAt.getOrElse(Instant.EPOCH)
     )
   }
 
