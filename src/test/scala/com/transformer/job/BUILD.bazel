@@ -9,6 +9,8 @@ scala_junit_test(
         "//src/main/scala/com/transformer/job",
         "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/temporal",
+        # A parquet input with no row groups, written by our own writer.
+        "//src/main/scala/com/transformer/write/parquet",
         "@maven//:junit_junit",
     ],
 )

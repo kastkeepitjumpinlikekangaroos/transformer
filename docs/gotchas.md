@@ -165,9 +165,9 @@ ship a fix or move something from "not done" to "done".
   `ParquetColumns` reads whatever the file says, which for a file another tool
   wrote is often something `ParquetSchema` would never produce (see "A
   parquet scan reads each file's columns as that file stores them" below).
-- **CSV writer's `needsQuotingChars` must be initialized before the header is
-  written.** Class-body order matters; put it above the `if (options.header)`
-  block.
+- **`CsvWriter`'s encoders must be initialized before the header is written.**
+  Class-body order matters: `checker` and `out` sit above the
+  `if (options.header)` block, whose `formatField` calls use both.
 - **Output paths are directories, not files.** Anything Spark/Hive-y you might
   expect (`output/foo.csv`) is now a directory of `part-NNNNN.csv` files; older
   examples that wrote a single named file have been renamed. Path-based format
@@ -1225,6 +1225,25 @@ ship a fix or move something from "not done" to "done".
   only one a global aggregate never exercises, so the mismatch is invisible until
   a grouped query spills. `fuzz/metamorphic_fuzz_test`'s `agg-decomposition`
   relation is the general guard.
+
+- **A CSV decoder reads ahead of the parser.** A `BufferedReader` over a
+  decoder fills 8192 characters at a time, so bytes that are no text in the
+  charset fail the read while the parser is still several lines before them.
+  The parser therefore names only the file (`CsvRowParser.InvalidText`), and
+  `CsvReader` finds the line by decoding the file again, chunk by chunk,
+  counting line breaks up to the bytes that failed.
+- **A one-column CSV file writes a NULL as a blank line.** With the default
+  null string a NULL is an empty field, and a row of one empty field is a blank
+  line, so a reader that skips blank lines loses the row. Blank lines are rows
+  in a one-column file and skipped in a wider one (where no written row is
+  blank), and a column name that is empty is quoted, so a header is never a
+  blank line. Whether a line is blank is the parser's to say (`blank`), whether
+  it is a row the reader's, which knows how many columns the file has.
+- **SQL's CAST reads numbers with Java's grammar and CSV with a plain one.**
+  `CAST('1d' AS DOUBLE)` is 1.0, while a CSV field `1d` is no DOUBLE (it infers
+  as a STRING, and fails a declared DOUBLE column). CSV moved to plain decimals
+  in plan 06 at the user's choice; CAST was not asked about and still uses
+  `java.lang.Double.parseDouble`.
 
 ## Known wrong answers from the 2026-09-10 audit (all fixed)
 

@@ -485,24 +485,84 @@ preview works for both formats.
 
 ### CSV
 
-- Read: hand-rolled state-machine parser. RFC 4180 doubled-quote escape,
-  separate escape character, embedded delimiters, embedded newlines, CR/LF
-  line endings.
-- Write: atomic temp-file + rename, header from `Schema`.
-- Schema inference: samples first 1000 rows of the first file.
-  Type priority `Int → Long → Double → Boolean → Date → Timestamp → String`.
+- Read: a hand-rolled state-machine parser. RFC 4180 doubled-quote escape, or
+  a separate escape character (which escapes itself too), delimiters and line
+  breaks inside quotes, `\n`, `\r\n` and lone `\r` line endings, and any
+  character as the delimiter, quote or escape. A UTF-8 byte-order mark before
+  the first row is dropped.
+- **NULL is the null string written unquoted** (the PostgreSQL rule). A quoted
+  field is always a value, so `""` is the empty string and `"NULL"` is the text
+  `NULL` even when `nullValue` is `NULL`. The writer writes a NULL as the null
+  string, unquoted, and quotes any value whose text is the null string, so an
+  empty string is written `""` and reads back as itself. Only a `STRING` and a
+  `BINARY` have an empty value: in a column of any other type an empty field is
+  NULL, quoted or not.
+- **A blank line is a row in a one-column file**, whose one field is empty
+  (NULL by default): that is how the writer writes a NULL there. In a wider
+  file, and before a header, blank lines are skipped.
+- **Malformed text fails the read**, naming the file and the line: a quote that
+  is never closed, a row with more or fewer fields than the file has columns
+  (its header, the schema, or its first row), and bytes that are no text in the
+  `charset`. Text after a closing quote joins the field (`"a"b` is `ab`), and a
+  quote inside an unquoted field is a character of it.
+- **Every field is read strictly as its column's type**, declared or inferred,
+  and one that does not read as it fails the read, naming the file, line,
+  column and text (for an inferred column, also where its type came from):
+
+  | type | text it reads |
+  |---|---|
+  | `INT`, `BIGINT` | an optional sign and ASCII digits (`007` is 7, `+5` is 5) |
+  | `FLOAT`, `DOUBLE` | a plain decimal (`1.5`, `.5`, `5.`, `-1e-5`), or `NaN`, `Infinity` and `-Infinity`, which the writer writes; not Java's wider grammar (`1d`, `0x1p3`, ` 1`, non-ASCII digits) |
+  | `DECIMAL(p,s)` (declared, or `DECIMAL(38,0)` inferred) | a plain decimal that holds exactly at scale `s` in `p` digits, read at that scale (`1.5` as `1.50`, and `5.` in a `DECIMAL(38,0)` as 5); one that would round or has more digits fails |
+  | `BOOLEAN` | `true` or `false`, in any case; no other word reads as `false` |
+  | `DATE` | ISO `yyyy-MM-dd`, a year past 9999 or before 1 with a sign |
+  | `TIMESTAMP` | an ISO instant (`Z` or an offset), an ISO date-time with no zone (UTC), or a date alone (midnight UTC), kept to the microsecond toward the past |
+  | `BINARY` (declared) | Base64, which the writer writes |
+  | `STRING` | the text |
+
+- **Schema inference** samples the first 1000 rows of the first file, and each
+  column takes the narrowest type every sampled field reads as: numbers widen
+  from `INT` to `BIGINT` to `DECIMAL(38,0)` (an integer past `BIGINT`, kept
+  exact) to `DOUBLE` (past 38 digits, or beside a fraction); a `DATE` widens to a
+  `TIMESTAMP`, its dates read as midnight UTC; and any other mix, such as `1.5`
+  with `true` or `1` with a date, is a `STRING`. A column with nothing but NULL
+  and empty fields in its sample is a `STRING`. Only the sample is read, so a
+  value past it, or in a later file of the glob, that does not read as its
+  column's type fails the read by name.
+- **What a round trip through inference keeps.** Write a table and read it back
+  with its types inferred: `STRING`, `INT`, `BIGINT` (an `INT` when every value
+  fits one), `DOUBLE`, `BOOLEAN`, `DATE` and `TIMESTAMP` come back as they were;
+  a `FLOAT` comes back a `DOUBLE` with the same digits (`0.1` for `0.1f`); a
+  `DECIMAL` comes back a `DOUBLE` (`1.50` as `1.5`, and digits past a double's
+  lost), except integers past `BIGINT`, which come back `DECIMAL(38,0)`; a
+  `BINARY` comes back as its Base64 text; text that looks like another type is
+  read as that type (`007` as 7, `TRUE` as true); and a column that is all NULL
+  in the sample comes back a `STRING`. A second round trip changes nothing more:
+  inference reaches its fixed point in one pass (`fuzz/csv_fuzz_test`). A job
+  that reads back a task's CSV output, for the tasks after it, uses the
+  writer's options and schema rather than inference, so every value comes back
+  as it was.
+- Write: atomic temp-file + rename, header from `Schema`. A value is quoted when
+  it holds the delimiter, the quote or a line break, when it is the null string,
+  or when it starts with a byte-order mark; inside quotes the quote is doubled,
+  or escaped with `escape`, which is then escaped too. Every type is written as
+  text the reader reads back (a `BINARY` in Base64, a `DECIMAL` in plain
+  digits). A character the `charset` cannot encode, or half of a surrogate pair,
+  fails the write, naming the row and column, where it used to be written as
+  `?`. A write with no partitions writes one header-only part file.
 
 Options (passed via `InputFilePath.options` / `OutputFilePath.options`):
 
 | Key | Default | Notes |
 |---|---|---|
 | `header` | `true` | First line contains column names |
-| `delimiter` | `,` | Pass `\t` for TSV |
-| `quote` | `"` | |
-| `escape` | `"` | RFC 4180 doubled-quote escape when equal to `quote` |
-| `nullValue` | `""` | Empty string = null |
+| `delimiter` | `,` | Any character but a line break; pass `\t` for TSV |
+| `quote` | `"` | Not the delimiter |
+| `escape` | `"` | RFC 4180 doubled-quote escape when equal to `quote`; otherwise escapes the quote and itself inside quotes. Not the delimiter |
+| `nullValue` | `""` | The null string: an unquoted field equal to it is NULL. It cannot hold the delimiter or a line break, or start with the quote |
+| `lineEnding` (output) | `\n` | `\n`, `\r\n` or `\r` |
 | `inferSchema` | `true` | If false, `columns` is required (input) |
-| `charset` | `UTF-8` | |
+| `charset` | `UTF-8` | Bytes it cannot decode, or characters it cannot encode, fail the read or write |
 | `compression` (output, parquet only) | `snappy` | `uncompressed` / `snappy` / `gzip` — `none` is an alias for `uncompressed`. Set `uncompressed` on tables whose schema is narrow-numeric (timestamps + prices etc.) where dictionary encoding alone is enough — they pay snappy CPU for negligible disk-size savings. |
 
 When `inferSchema = false`, pass an explicit schema:
@@ -755,9 +815,9 @@ and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
 parquet file; neither type is a CAST target. A number
 widens to a `DECIMAL` where the two meet, and a `BINARY` casts to nothing.
 
-Text casts to a number as Java parses one, which is also what CSV inference
-reads: `'10'`, `'-2.5'` and `'1e3'` are numbers, and an `INT` or `BIGINT` reads
-an integer only. Text casts to `BOOLEAN` from `true` or `false`, in any case.
+Text casts to a number as Java parses one: `'10'`, `'-2.5'` and `'1e3'` are
+numbers, and an `INT` or `BIGINT` reads an integer only. (CSV reads a stricter
+grammar, plain decimals only; see [CSV](#csv).) Text casts to `BOOLEAN` from `true` or `false`, in any case.
 Other text is an error that names it, such as `Cannot cast 'x10' to int`, and no
 text quietly becomes `false`.
 
@@ -868,7 +928,8 @@ the two operator families differ.
 precision, and its scale is only how it is written: `1.0 = 1.00` is TRUE, and
 `GROUP BY`, `DISTINCT`, `UNION`, `COUNT(DISTINCT …)`, `PARTITION BY` and join
 keys all treat the two as one value. A column does not hold every value at its
-declared scale (CSV text keeps the scale it was written with), so a grouping
+declared scale (a `CASE` or `COALESCE` branch can keep its own, see
+[Limitations](#limitations)), so a grouping
 key reads back at the column's declared scale, `1.000` in a `DECIMAL(10,3)`,
 whichever spelling arrived first, and so do `MIN` and `MAX`, and any value
 written to parquet and read back, a spilled one included. `BINARY` values
@@ -1021,10 +1082,11 @@ JDK 21 or newer (tested through JDK 25).
   peers the way the standard requires. `COVAR_SAMP`/`COVAR_POP`/`CORR` are
   `GROUP BY` only.
 - **Cloud paths recognized but unimplemented**: see v1.1 above.
-- **A CSV glob's schema is inferred from its first file**; mixed schemas across
-  files in the same view are not validated. Explicit schemas via the
-  `inferSchema = false` route avoid this. A parquet glob checks every file
-  against the first when it is opened (see [Parquet](#parquet)).
+- **A CSV glob's schema is inferred from its first file's first 1000 rows.** A
+  later value that does not read as its column's type fails the read, naming
+  the file, line, column and value; an explicit schema (`inferSchema = false`
+  with `columns`) reads every file as declared. A parquet glob checks every
+  file against the first when it is opened (see [Parquet](#parquet)).
 - **`CASE`, `COALESCE`, `IF`, `GREATEST` / `LEAST` and `UNION` take their first
   branch's type.** A later branch is cast to it, and a `DECIMAL` keeps its value
   when cast, so `COALESCE(price, price * rate)` over two decimal columns is

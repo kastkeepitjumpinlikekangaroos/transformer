@@ -6,5 +6,8 @@ scala_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/main/scala/com/transformer/core",
+        # CsvValues: the text of each type's values, which the reader parses
+        # back, and the separator rules both sides share.
+        "//src/main/scala/com/transformer/read/csv",
     ],
 )

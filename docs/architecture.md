@@ -39,9 +39,9 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 |---|---|---|
 | `core/` | Shared types crossed by every module. Zero deps. | `DataType.scala`, `Schema.scala`, `ColumnarBatch.scala`, `Row.scala`, `Catalog.scala`, `Scheduler.scala` (the shared `ForkJoinPool` every parallel call site funnels through), `SqlExecutor.scala` (`SqlExecutorRegistry`) |
 | `temporal/` | Date/time template variables. No deps. | `TemporalVariables.scala`, `TemplateRenderer.scala` |
-| `read/csv/` | CSV input. Stdlib only. | `CsvOptions.scala`, `CsvRowParser.scala` (state machine), `CsvSchemaInferer.scala`, `PathGlob.scala`, `CsvReader.scala` |
+| `read/csv/` | CSV input. Stdlib only. | `CsvOptions.scala` (also `forWrittenFile`, the options a job reads back its own CSV output with, and `checkSeparators`, which the writer shares), `CsvRowParser.scala` (state machine: an unquoted null string is NULL, a blank line is flagged rather than skipped, an unclosed quote fails), `CsvValues.scala` (the text of each type's values: what the writer prints, what the reader parses strictly, and what inference recognizes and joins), `CsvSchemaInferer.scala`, `PathGlob.scala`, `CsvReader.scala` (row width, blank lines as rows in a one-column file, typed parse errors naming file, line and column) |
 | `read/parquet/` | Parquet input. Depends on `parquet-hadoop` + minimal Hadoop. | `ParquetReader.scala`, `ParquetColumns.scala` (the type each parquet column reads as and how its values decode, decided per file from that file's footer; matches a view's columns to each file's by name), `ParquetFilterTranslator.scala` |
-| `write/csv/` | CSV output. Stdlib only. | `CsvWriter.scala` |
+| `write/csv/` | CSV output. Stdlib only; uses `read/csv`'s `CsvValues`, so the writer and reader share one text per type. | `CsvWriter.scala` |
 | `write/parquet/` | Parquet output. | `ParquetSchema.scala` (the parquet schema transformer writes for a `Schema`), `ParquetWriter.scala` |
 | `sql/parse/` | JSqlParser façade. | `SqlParser.scala` |
 | `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `PendingCteView.scala` (placeholder for an unresolved CTE reference), `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo), `UnsupportedClauses.scala` (the rejection pass that runs before binding, and its audit of every JSqlParser getter the binder does not read — see §10) |
@@ -198,8 +198,9 @@ but the split is ours, not Postgres's: Postgres has no split here because its
 exactly. A byte array is compared and hashed by content (a raw array's own
 `equals` and `hashCode` are its identity). A decimal is equal by value, but
 `BigDecimal.equals` and `hashCode` include the scale, and a column does not
-hold every value at its declared scale (CSV text keeps the scale it was written
-with), so the object codecs store a decimal as `KeyCodec.decimalKey`: the value
+hold every value at its declared scale (a `CASE` or `COALESCE` branch can keep
+its own, plans/robustness/09), so the object codecs store a decimal as
+`KeyCodec.decimalKey`: the value
 at the column's declared scale when it can be written there exactly, and
 otherwise without its trailing zeros. Every spelling of a value is then one key,
 the key decodes at the declared scale whichever spelling arrived first, and a
@@ -685,7 +686,12 @@ tail latency for no benefit.
 
 When a task DOES have a consumer, how its view gets published depends on
 whether it wrote anything. A task with an `outputFile` re-reads its own output
-directory, so the published view stays backed by disk. A task without one has
+directory, so the published view stays backed by disk; a CSV output is read
+back with `CsvOptions.forWrittenFile`, the writer's own option bag and the
+query's schema, never by inference, so every value comes back as it was
+written (`fuzz/csv_fuzz_test` holds the pair to that). A CSV output of no
+partitions still writes one header-only part file, so there is a file to
+re-read. A task without one has
 nothing to re-read, so `MaterializedView.fromQuery` drains the finished
 `ExecutedQuery` — one pool task per output partition, preserving the partition
 layout and keeping `rowsProduced` accurate — and publishes that. The result then

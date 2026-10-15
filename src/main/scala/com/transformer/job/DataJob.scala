@@ -674,19 +674,8 @@ final case class DataJob(
       case Some((ofp, dir)) =>
         ofp.detectedFormat match {
           case "csv" =>
-            val opts = CsvWriteOptions.fromMap(ofp.options)
             com.transformer.read.csv.CsvReader.fromPath(
-              dir,
-              com.transformer.read.csv.CsvOptions(
-                inferSchema = false,
-                columns = Some(schema.fields),
-                header = opts.header,
-                delimiter = opts.delimiter,
-                quote = opts.quote,
-                nullValue = opts.nullValue,
-                charset = opts.charset
-              )
-            )
+              dir, com.transformer.read.csv.CsvOptions.forWrittenFile(ofp.options, schema))
           case "parquet" =>
             ParquetReader.fromPath(dir)
           case other =>

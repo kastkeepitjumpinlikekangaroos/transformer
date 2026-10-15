@@ -234,6 +234,62 @@ class DataJobTest {
     assertEquals("s\n150\n", readOutputDir(out))
   }
 
+  /** A downstream task reads an upstream CSV output back from disk, with the
+    * options it was written with. The re-read left out `escape`, so a value
+    * the writer had escaped read back as something else; and a NULL in a
+    * one-column output, written as a blank line, was skipped, so the
+    * downstream task saw fewer rows than the upstream produced. */
+  @Test def aDownstreamTaskReadsAnUpstreamCsvOutputAsItWasWritten(): Unit = {
+    val inDir = tmpDir("dj-reread-")
+    writeCsv(inDir, "a.csv", "id,s\n1,plain\n2,\"has \\\"quote\\\" and \\\\, comma\"\n3,\n")
+    val mid = tmpDir("dj-reread-mid-").resolve("mid")
+    val one = tmpDir("dj-reread-one-").resolve("one")
+    val counts = tmpDir("dj-reread-counts-").resolve("counts")
+    val length = tmpDir("dj-reread-length-").resolve("length")
+    val escaped = Map("escape" -> "\\")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t", options = escaped)),
+      sql = Seq(
+        SQLTask(sqlString = Some("SELECT id, s FROM t"),
+          outputFile = Some(OutputFilePath(mid.toString, options = escaped)), viewName = Some("mid")),
+        SQLTask(sqlString = Some("SELECT CASE WHEN id = 2 THEN NULL ELSE id END AS x FROM mid"),
+          outputFile = Some(OutputFilePath(one.toString)), viewName = Some("one")),
+        SQLTask(sqlString = Some("SELECT COUNT(*) AS n, COUNT(x) AS present FROM one"),
+          outputFile = Some(OutputFilePath(counts.toString))),
+        SQLTask(sqlString = Some("SELECT LENGTH(s) AS len FROM mid WHERE id = 2"),
+          outputFile = Some(OutputFilePath(length.toString)))
+      )
+    )
+    val result = job.run()
+    assertTrue(result.error.getOrElse(result.toString), result.succeeded)
+    // All three rows of `one` survive, one of them NULL.
+    assertEquals("n,present\n3,2\n", readOutputDir(counts))
+    // The escaped value reads back whole: `has "quote" and \, comma`.
+    assertEquals("len\n24\n", readOutputDir(length))
+  }
+
+  /** A query over a parquet file with no row groups has no partitions, so a
+    * CSV output of it wrote no part file at all, and the downstream task's
+    * re-read failed with `No CSV files matched`. A header-only part file
+    * stands in, as the parquet writer's empty placeholder does. Found by
+    * `fuzz/csv_fuzz_test` at seed 32. */
+  @Test def aCsvOutputOfNoPartitionsFeedsItsDownstreamTask(): Unit = {
+    val inDir = tmpDir("dj-empty-pq-")
+    val schema = com.transformer.core.Schema(com.transformer.core.Field("x", com.transformer.core.DataType.IntType))
+    com.transformer.write.parquet.ParquetWriter.writeAll(inDir.resolve("empty.parquet"), schema, Iterator.empty)
+    val mid = tmpDir("dj-empty-mid-").resolve("mid")
+    val out = tmpDir("dj-empty-out-").resolve("out")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.parquet", viewName = "t")),
+      sql = Seq(
+        SQLTask(sqlString = Some("SELECT x FROM t"), outputFile = Some(OutputFilePath(mid.toString)), viewName = Some("mid")),
+        SQLTask(sqlString = Some("SELECT COUNT(*) AS n FROM mid"), outputFile = Some(OutputFilePath(out.toString)))))
+    val result = job.run()
+    assertTrue(result.error.getOrElse(result.toString), result.succeeded)
+    assertEquals("x\n", readOutputDir(mid))
+    assertEquals("n\n0\n", readOutputDir(out))
+  }
+
   @Test def diamondDagAllTasksSucceedAndOrderRespected(): Unit = {
     val inDir = tmpDir("dj-diam-")
     writeCsv(inDir, "events.csv", "id,x\n1,1\n2,2\n3,3\n")

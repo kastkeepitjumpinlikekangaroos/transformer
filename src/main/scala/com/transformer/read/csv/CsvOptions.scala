@@ -1,6 +1,6 @@
 package com.transformer.read.csv
 
-import com.transformer.core.{ColumnarBatch, Field}
+import com.transformer.core.{ColumnarBatch, Field, Schema}
 
 import java.nio.charset.{Charset, StandardCharsets}
 
@@ -22,7 +22,9 @@ final case class CsvOptions(
     columns: Option[Seq[Field]] = None,
     inferenceSampleRows: Int = 1000,
     batchSize: Int = ColumnarBatch.DefaultCapacity
-)
+) {
+  CsvOptions.checkSeparators(delimiter, quote, escape, nullValue)
+}
 
 object CsvOptions {
   /** Parse a flat string-keyed option bag as supplied through `InputFilePath.options`. */
@@ -52,5 +54,34 @@ object CsvOptions {
       charset = raw.get("charset").map(Charset.forName).getOrElse(StandardCharsets.UTF_8),
       columns = None
     )
+  }
+
+  /** How to read back a file `CsvWriter` wrote from `schema` under the option
+    * bag `raw`, the one its `CsvWriteOptions.fromMap` read: every option the
+    * writer honours, under the same keys, and the writer's schema rather
+    * than one inferred from the text, so each value reads back as the value
+    * it was. */
+  def forWrittenFile(raw: Map[String, String], schema: Schema): CsvOptions =
+    fromMap(raw).copy(inferSchema = false, columns = Some(schema.fields))
+
+  /** The separators a CSV file can be read and written with: a delimiter,
+    * quote and escape that are not line breaks and that a field can tell
+    * apart, and a null string that a written NULL can stand as unquoted
+    * without being split, quoted or ended. */
+  def checkSeparators(delimiter: Char, quote: Char, escape: Char, nullValue: String): Unit = {
+    def show(c: Char): String = c match {
+      case '\t' => "a tab"
+      case '\n' | '\r' => "a line break"
+      case other => s"'$other'"
+    }
+    for ((name, c) <- Seq("delimiter" -> delimiter, "quote" -> quote, "escape" -> escape))
+      if (c == '\n' || c == '\r') throw new IllegalArgumentException(s"CSV option '$name' cannot be a line break")
+    if (delimiter == quote) throw new IllegalArgumentException(
+      s"CSV options 'delimiter' and 'quote' are both ${show(delimiter)}")
+    if (delimiter == escape) throw new IllegalArgumentException(
+      s"CSV options 'delimiter' and 'escape' are both ${show(delimiter)}")
+    if (nullValue.exists(c => c == delimiter || c == '\n' || c == '\r') || nullValue.headOption.contains(quote))
+      throw new IllegalArgumentException(
+        s"CSV option 'nullValue' ('$nullValue') cannot hold the delimiter or a line break, or start with the quote")
   }
 }

@@ -23,7 +23,15 @@ specific traps.
   use `'*'.csv` or move the example to plain prose. We hit this twice.
 - **Don't pre-declare `private val`s used by class-body initializers below
   them.** Scala initializes vals in source order. Put lookup tables above the
-  code that reads them (see `CsvWriter`'s `needsQuotingChars` issue we fixed).
+  code that reads them (`CsvWriter` writes its header in its class body, so
+  its encoders are declared above that block).
+- **A file format's text for each type lives in one place, for both
+  directions.** `read/csv/CsvValues` holds what the CSV writer prints for a
+  value of each type, what the reader parses (strictly, and the same for a
+  declared column as for an inferred one), and what inference recognizes, so a
+  value the writer prints is one the reader reads back; the writer depends on
+  `read/csv` for it. A type a format gains gets its print, its parse and its
+  inference there together, and `fuzz/csv_fuzz_test` checks they compose.
 - **Prefer dependencies on direct uses.** rules_scala uses strict-deps; if you
   call into a type that lives in `core`, you must list `//src/main/scala/com/transformer/core`
   even when an indirect dep already brings it in. The error message is "Symbol
