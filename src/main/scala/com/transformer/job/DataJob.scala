@@ -505,12 +505,16 @@ final case class DataJob(
       val dir = Paths.get(renderedPath)
       val files = TaskRunRecord.listPartFiles(dir)
       val failureByName = failures.iterator.map(f => f.validationName -> f).toMap
+      // Each failed validation's sample gets its own file, even where two names
+      // reduce to the same one.
+      val taken = mutable.Set.empty[String]
       val validations = node.task.validations.map { v =>
         failureByName.get(v.name) match {
           case Some(f) =>
             val sampleName =
-              try Some(TaskRunRecord.writeValidationSample(dir, v.name, f.sampleRowsCsv))
+              try Some(TaskRunRecord.writeValidationSample(dir, v.name, f.sampleRowsCsv, taken.toSet))
               catch { case NonFatal(_) => None }
+            sampleName.foreach(taken += _)
             ValidationRecord(
               name = v.name,
               passed = false,

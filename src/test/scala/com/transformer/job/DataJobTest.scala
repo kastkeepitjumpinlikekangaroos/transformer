@@ -232,6 +232,54 @@ class DataJobTest {
     assertEquals(Some(Seq(name)), JobRunRecord.read(outRoot.resolve("job.json")).map(_.tasks.map(_.taskName)))
   }
 
+  /** Runs one task whose validations all fail and returns what the run said
+    * each failure's sample rows were, beside what its `_run.json` reads back. */
+  private def samplesOfFailingValidations(validations: Seq[Validation]): Seq[(String, String, Option[String])] = {
+    val inDir = tmpDir("dj-samples-")
+    writeCsv(inDir, "a.csv", "id,value\n1,x\n2,y\n")
+    val outDir = tmpDir("dj-samples-out-").resolve("out")
+    val result = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT * FROM t"),
+        outputFile = Some(OutputFilePath(outDir.toString)),
+        viewName = Some("result"),
+        validations = validations))
+    ).run()
+    val failures = result.tasks.head.status match {
+      case TaskStatus.ValidationFailed(fs) => fs
+      case other => fail(s"Expected ValidationFailed, got $other").asInstanceOf[Nothing]
+    }
+    val rec = TaskRunRecord.read(outDir).getOrElse(fail("expected _run.json").asInstanceOf[TaskRunRecord])
+    failures.map { f =>
+      val v = rec.validations.find(_.name == f.validationName).get
+      (f.validationName, f.sampleRowsCsv, v.sampleFile.flatMap(TaskRunRecord.readValidationSample(outDir, _)))
+    }
+  }
+
+  /** A validation's sample file is named from its name, and a long name made
+    * a file name past what the file system takes (255 bytes): the sample was
+    * never written, and the record said the failure had none. Found by the
+    * hydration oracle in `fuzz/dag_scheduler_fuzz_test`, whose validation names
+    * include a long stack trace. */
+  @Test def aValidationWithALongNameKeepsItsSampleRows(): Unit = {
+    val name = "the value column holds only the expected letters " * 8
+    samplesOfFailingValidations(Seq(Validation(name, sqlString = Some("SELECT * FROM result"))))
+      .foreach { case (n, ranWith, readBack) => assertEquals(s"sample of '$n'", Some(ranWith), readBack) }
+  }
+
+  /** Two validations whose names reduce to the same file name each keep their
+    * own sample rows: the second sample overwrote the first, so the first
+    * failure read back with the second's rows. */
+  @Test def validationsWhoseNamesReduceAlikeKeepTheirOwnSampleRows(): Unit = {
+    val samples = samplesOfFailingValidations(Seq(
+      Validation("id is set", sqlString = Some("SELECT id FROM result")),
+      Validation("id.is.set", sqlString = Some("SELECT id, value FROM result")),
+      Validation("", sqlString = Some("SELECT value FROM result"))))
+    assertEquals(3, samples.size)
+    samples.foreach { case (n, ranWith, readBack) => assertEquals(s"sample of '$n'", Some(ranWith), readBack) }
+  }
+
   @Test def downstreamTaskSeesUpstreamView(): Unit = {
     val inDir = tmpDir("dj-chain-")
     writeCsv(inDir, "a.csv", "x\n1\n2\n3\n4\n5\n")

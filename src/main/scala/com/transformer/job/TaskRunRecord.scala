@@ -232,24 +232,34 @@ object TaskRunRecord {
     } finally stream.close()
   }
 
+  /** The most characters of a validation's name a sample file name keeps, so
+    * the name stays inside the 255 bytes a file system takes whatever the
+    * validation is called. */
+  private val MaxSampleSlug: Int = 100
+
   /** Build the sibling-file name for a validation failure sample. Lowercases
     * the validation name, replaces non-`[a-z0-9_-]` runs with `_`, trims
-    * leading/trailing underscores. Falls back to `validation` for empty
-    * results. */
-  def validationSampleFileName(validationName: String): String = {
+    * leading/trailing underscores, and keeps the first [[MaxSampleSlug]]
+    * characters. Falls back to `validation` for empty results. Names reduce
+    * alike (`a b`, `a.b`), so a name in `taken` — another failed validation's
+    * of the same task — gets `-2`, `-3`, ... until it is free. */
+  def validationSampleFileName(validationName: String, taken: Set[String] = Set.empty): String = {
     val slug = validationName
-      .toLowerCase
+      .toLowerCase(java.util.Locale.ROOT)
       .replaceAll("[^a-z0-9_-]+", "_")
       .replaceAll("^_+|_+$", "")
-    s"$ValidationSamplePrefix${if (slug.isEmpty) "validation" else slug}.csv"
+      .take(MaxSampleSlug)
+      .replaceAll("_+$", "")
+    val base = s"$ValidationSamplePrefix${if (slug.isEmpty) "validation" else slug}"
+    Iterator.from(1).map(n => if (n == 1) s"$base.csv" else s"$base-$n.csv").find(!taken.contains(_)).get
   }
 
-  /** Write `csv` to `<dir>/_validation-<slug>.csv` atomically. Returns the
-    * bare file name so the caller can record it in
+  /** Write `csv` to `<dir>/_validation-<slug>.csv` atomically, under a name not
+    * in `taken`. Returns the bare file name so the caller can record it in
     * [[ValidationRecord.sampleFile]]. */
-  def writeValidationSample(dir: Path, validationName: String, csv: String): String = {
+  def writeValidationSample(dir: Path, validationName: String, csv: String, taken: Set[String] = Set.empty): String = {
     if (!Files.isDirectory(dir)) Files.createDirectories(dir)
-    val name = validationSampleFileName(validationName)
+    val name = validationSampleFileName(validationName, taken)
     val target = dir.resolve(name)
     val tmp = dir.resolve(name + ".tmp")
     Files.writeString(tmp, csv)

@@ -786,8 +786,10 @@ rename). The shape:
 For failed validations, the runner writes the sample CSV (up to 10 rows
 returned by the validation SQL) to a sibling
 `_validation-<slugified-name>.csv` file and links it via `sampleFile`. The
-GUI loads samples lazily — only when the user inspects a specific task's
-validation card.
+slug keeps the name's first 100 characters, and a failed validation whose name
+reduces to a file name another of the task's already took gets `-2` (then
+`-3`, ...), so every failure keeps its own rows. The GUI loads samples lazily
+— only when the user inspects a specific task's validation card.
 
 The `_` prefix means `PathGlob.expand` skips both the record and the
 sample files when the directory is re-read as data.

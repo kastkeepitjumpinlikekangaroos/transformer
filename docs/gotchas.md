@@ -1247,6 +1247,19 @@ ship a fix or move something from "not done" to "done".
   names; regressions in `job/json_test`, `job/data_job_test` and
   `core/metrics/metrics_collector_test`.
 
+- **A failed validation's sample rows have a file of their own.** The runner
+  names a sample `_validation-<slug>.csv` after the validation, and two
+  validations whose names reduce to one slug (`a b` and `a.b`, or any two made
+  of punctuation, which fall back to `validation`) wrote the same file: the
+  second sample overwrote the first, so the first failure reopened with the
+  second's rows. And a long name made a file name past the 255 bytes a file
+  system takes, so the sample was never written and the record said there was
+  none. The slug now keeps its first 100 characters, and one already taken by
+  another failed validation of the task gets `-2`, `-3`, ... (the record's
+  `sampleFile` names the file, so readers are unaffected). Found by the
+  `Hydration` oracle's adversarial validation names; regressions in
+  `job/data_job_test`.
+
 - **A task with no `outputFile` can feed downstream views and validations.**
   It could not until recently: `DataJob.materializeIfNeeded` threw
   `UnsupportedOperationException("v1 requires an outputFile ...")` whenever a
