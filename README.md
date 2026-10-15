@@ -462,7 +462,7 @@ Node colors:
 
 | Color | Meaning |
 |---|---|
-| Grey | Pending — never run, no `_run.json` on disk |
+| Grey | Pending — not run yet, or nothing on disk records its run (no `_run.json` naming it, no `job.json` entry) |
 | Blue | Running |
 | Green | Succeeded (either freshly this session, or hydrated from `_run.json`) |
 | Red | Failed (error message + timing reloaded from disk) |

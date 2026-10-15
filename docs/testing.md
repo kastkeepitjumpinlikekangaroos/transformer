@@ -619,7 +619,11 @@ Every engine await is a work-helping `ForkJoinTask.get()`, so it must still
 terminate; if it ever does not, the failure carries a thread dump rather than
 hanging the run. All three run the hydration oracle on every case too: reopening
 a run reads a few small files, so it adds little to the run each case already
-performs (2000 seeds of the property take about a minute in one JVM).
+performs (2000 seeds of the property take about a minute in one JVM). A
+5000-seed block of the whole class, guards included, takes about four minutes
+beside two others for any of the three variants, so 20000 seeds of all three is
+twelve blocks and about twenty minutes at three JVMs; all three were green there
+on 2026-10-15.
 
 The frontend property has one campaign, `frontend_fuzz_campaign`, which scales
 the clean-rejection, honoured-clause and spelling properties together (the

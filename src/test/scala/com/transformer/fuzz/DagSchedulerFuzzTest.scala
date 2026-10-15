@@ -175,13 +175,13 @@ class DagSchedulerFuzzTest {
 
   /** Coverage guard for the hydration property. Hydration is only checked where
     * the corpus puts it: a session rebuilds a task from its record only when the
-    * task has an output directory, from job.json's entry only when it does not,
-    * and only a status the run reached; partition pickers list two runs only
-    * when a templated path renders twice; the run picker lists two only when a
+    * task has an output directory, and from job.json's entry when it has none
+    * (or, once the tree is damaged, when its record is unusable), and only a
+    * status the run reached; partition pickers list two runs only when a
+    * templated path renders twice; the run picker lists two only when a
     * templated run directory does. The first half counts what the generated
-    * cases imply (cheap, many seeds); the second runs a sample and counts what
-    * the sessions actually showed, by source and status, and how they were
-    * opened. */
+    * cases imply (cheap, many seeds); the second reopens cases until the
+    * sessions have shown every source and status and been opened every way. */
   @Test def generatorCoversHydrationShapes(): Unit = {
     val n = Props.seedCountOr(2000)
     val root = Path.of("/scratch")

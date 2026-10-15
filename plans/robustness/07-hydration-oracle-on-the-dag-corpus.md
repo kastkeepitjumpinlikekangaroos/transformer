@@ -1,7 +1,8 @@
 # Plan 07: the run records are written under fuzz and read only by hand
 
-> Status: **not started** · Effort: 2 days · Risk: low (test-only) ·
-> **Best value-per-day in this directory** — the corpus already exists
+> Status: **done** 2026-10-15 (see [Outcome](#outcome)) · Effort: 2 days ·
+> Risk: low (test-only), though what it found changed `JobSession`, the record
+> writers and `job.json`'s entries
 
 ## How this was found
 
@@ -147,3 +148,105 @@ Stop and ask before: changing what a degraded hydration should report to the use
 — "what succeeded means when a record is missing" is a product decision, the same
 kind as the one parked in plans/robustness/08.
 ```
+
+## Outcome
+
+Landed 2026-10-15, in the order the launch prompt asked for: the oracle over
+the existing corpus, then the corruption mode, then the adversarial strings.
+Each found defects, each fixed ahead of the commit that found it with a named
+regression, and the one the plan reserved for the user became
+[plan 15](15-what-a-reopened-run-shows-without-its-record.md), decided and
+landed the same day.
+
+**`JobSession` is the entry point, and it builds without JavaFX.** The check
+the prompt asked for first: `new JobSession()` and `openJobDir` touch no toolkit
+class (a probe hydrated a real run in a plain JUnit JVM). But the class lived in
+the `gui` Bazel target, whose deps carry the JavaFX jars, and a fuzz target may
+take no JavaFX dependency. `JobSession` and `DagLayout` now build as
+`gui:session`, with no JavaFX, which `gui` exports; the fuzz library, the
+session test and the layout test depend on it alone. `JobSession` opens a job
+*directory*, so `JobCase.writeDirectoryJob` writes each generated job as one,
+through `JobFiles`, whose tables `DirectoryJobLoader` gives the run's own output
+paths and manifest.
+
+**The oracle over the existing corpus** (`oracle/Hydration`). `JobDagGen` gained
+a `RunLayout` — a templated run directory, a templated partition one to three
+segments deep per task output, and a second run an hour later, a day later or a
+day earlier — drawn after the DAG from its own stream, so a seed's DAG is the
+one it always was. Sessions open at the latest run's execution time, through
+the run picker at every other run, and fresh at each earlier time; `view`
+decides from the case and the runs alone which run each shows and where each
+task must come from, and every task is held to the `TaskResult` its run
+returned. Its first runs found three defects in the read side:
+
+- **A reopened task's `enqueuedAt` was dropped**, so every task of a reopened
+  run showed as queued for fifty-six years on the DAG canvas and the details
+  panel (`TaskResult.queueWaitMillis` now also reads the epoch as unknown, as
+  its scaladoc promised).
+- **A reopened Failed or Skipped task claimed its record's directory as its
+  output**, so the details panel said "Wrote to" a directory holding only the
+  record.
+- **Newest-first orders were cut to the millisecond** in
+  `JobOutputLayout.detect` and `TaskRunRecord.discover`: two runs inside one
+  millisecond (a small job run twice) listed in the directory's hash order,
+  and the session's fallback took an older partition as the newest. Seed 1259
+  of the first 2000-seed sweep.
+
+**The corruption mode.** Each case names one `JobDagGen.Corruption` of the
+latest run's files — a `_run.json` deleted, cut short inside its object, or
+followed by garbage; `job.json` deleted, or pointing a `runFile` nowhere; two
+records swapped — applied after the intact check, and the sessions reopen the
+damaged tree. Nothing threw and every task was accounted for, but what the
+session showed in place of a missing record (a 0 ms duration, every validation
+card PASSED beside a VALIDATION FAILED status, the other task's record trusted
+after a swap, nothing said) was the product decision the prompt reserved. It
+was recorded as `Hydration.Degraded` with repros until the user decided plan
+15; the oracle now encodes the decided rules exactly, and breaking any one in
+`JobSession` fails the property within ten seeds.
+
+**The adversarial strings.** Half the cases draw task names, injected failure
+messages (`JobCase.executor` throws the drawn text) and failing validations'
+names from a pool of quotes, backslashes, newlines, tabs, every control
+character, astral text and halves of a surrogate pair, invisible characters,
+JSON- and template-shaped text, the empty string and a 100KB stack trace. It
+found two defects in the write side:
+
+- **Half a surrogate pair failed the write of every record holding it** —
+  `_run.json`, `job.json` and `_perf.json` — silently, since a record write
+  never fails a run: the writers put it in raw, and UTF-8 cannot encode it.
+  The escape had five copies; it is now one per JSON reader (`Json.escape`,
+  `JsonMini.escape`), writing such a character as a hex escape.
+- **A failed validation's sample file name could collide or run past 255
+  bytes**, so one failure reopened with another's rows, or with none. The slug
+  is capped and a taken name gets `-2`, `-3`, ...
+
+A directory job names a task after its directory, so an adversarial task name
+cannot reach a session's task; those names are held through `job.json`, which
+the session reads whole, and through `TaskRunRecord.read`.
+
+**Guards.** One per step, as the prompt asked: the corpus reaches record-backed
+and memory-only tasks of every status, every partition depth, two-partition
+tasks, two-run layouts, rewrites and backfills; every corruption is drawn and
+every decided rule reached; every adversarial string is drawn in every role and
+read back by every path. The campaigns showed a fixed-size sample of real runs
+can miss a rare shape at another base seed (no rebuilt `Failed` task at bases
+5000 and 15000, with the property green), so the guards now reopen cases until
+they have seen what they assert, up to a cap.
+
+**Incidental.** `job/Json.scala` held a raw NUL character in a char literal, so
+git and the editing tools took it for binary; `docs/conventions.md` now asks for
+control characters to be spelled, not written.
+
+**Verification.** `bazel test //...` green (52 targets), jaffle-shop 15/15, and
+the real jaffle run reopened through `JobSession` exactly (15 tasks from their
+records, real durations, queue waits of 0 or 1 ms; before the first fix, any
+reopened task's queue wait was its start time in epoch milliseconds, about
+1.79e12). The GUI app starts and opens the jaffle job; looking at it is for a
+person. Campaigns on the final code, from snapshots of the launchers:
+`dag_scheduler_fuzz_campaign`, `sharded_dag_scheduler_fuzz_campaign` and
+`starved_dag_scheduler_fuzz_campaign` green at 20000 seeds each, as four
+5000-seed blocks of the whole class (property and guards), about four minutes
+a block beside two others. The round before the guards sought their shapes
+found that flake and nothing else: the property was green at every seed of all
+three.
+

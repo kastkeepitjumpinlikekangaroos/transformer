@@ -36,7 +36,7 @@ at the time of the audit: `bazel test //...` 46/46 green.
 | [04](04-widen-fuzz-corpus-to-every-type.md) | Widen the fuzz corpus to all ten types | the guard that keeps 02 and 03 fixed | **done** 2026-10-03 | 2-3 days | low | 02 (else red) |
 | [05](05-frontend-robustness-fuzzer.md) | Frontend robustness fuzzer | "nothing silently dropped" + "errors are user-facing" as properties | **done** 2026-10-04 | 3-5 days | low | 01 (shares its clause table) |
 | [06](06-io-roundtrip-and-external-fixtures.md) | I/O round-trip properties + external parquet fixtures | the helper 03 needs, plus CSV state-machine fuzzing | **done** 2026-10-14 | 3-4 days | low | — (03 wants its fixture helper) |
-| [07](07-hydration-oracle-on-the-dag-corpus.md) | Hydration oracle on the existing DAG corpus | the read side of the records the DAG fuzzer already writes | open | 2 days | low | — |
+| [07](07-hydration-oracle-on-the-dag-corpus.md) | Hydration oracle on the existing DAG corpus | the read side of the records the DAG fuzzer already writes | **done** 2026-10-15 | 2 days | low | — |
 | [08](08-unconsumed-input-failure-is-swallowed.md) | An unconsumed input's load failure is swallowed | carried over, needs a product decision first | open | half a day | low | — |
 | [09](09-branch-result-types.md) | `CASE`, `COALESCE`, `IF`, `GREATEST` and `UNION` take their first branch's type | a wider decimal in a later branch is kept under a narrower declared type, so writing or spilling it fails; `THEN 1 ELSE 2.5` is 2 | open, gated in the SQL corpora | 1-2 days | medium | needs a decision for the numeric half |
 | [10](10-error-messages-name-internals.md) | A failing query's message names the engine's internals | every parse error names JSqlParser's class; pooled failures arrive wrapped in `ExecutionException` (sometimes with no message), which is what a job records | open, recorded in `CleanRejection` | 1 day | low | a decision on where to unwrap |
@@ -108,6 +108,18 @@ NULL rows lost in one-column files, empty strings read as NULL, BINARY
 unreadable, malformed text read silently, inference typing `1.5` and `true` as
 a BOOLEAN. All fixed; the CSV semantics were the user's decisions. Details in
 the plan's Outcome section.
+
+**Done:** plan 07. `fuzz/dag_scheduler_fuzz_test` reopens every generated run
+in a `JobSession`, as the GUI opens a job directory, and holds what it rebuilds
+to what the runs returned; then damages the tree and reopens it; and half the
+cases carry adversarial task names, failure messages and validation names.
+`JobSession` and `DagLayout` build without JavaFX as `gui:session`, so a fuzz
+target reaches them with no toolkit dependency. Five defects, all fixed: a
+reopened task's enqueue time dropped, a Failed or Skipped task's phantom output,
+newest-first orders cut to the millisecond, half a surrogate pair failing every
+record write, and colliding validation sample files. What a reopened run shows
+without a task's record was the user's decision, [15](15-what-a-reopened-run-shows-without-its-record.md),
+landed the same day. Details in the plan's Outcome section.
 
 **Next, in order:** [14](14-pathological-nesting.md)'s job hang (a `finally`
 and a `catch`), then [12](12-text-the-binder-never-sees.md) and
