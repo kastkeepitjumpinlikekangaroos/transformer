@@ -1,7 +1,8 @@
 # Plan 08: an input that fails to load and feeds nothing is swallowed
 
-> Status: **not started** · Effort: half a day · Risk: low · Carried over from
-> the DAG-fuzzer session as a reported-not-fixed observation
+> Status: **done** 2026-10-15 (see [Outcome](#outcome)) · Effort: half a day ·
+> Risk: low · Carried over from the DAG-fuzzer session as a reported-not-fixed
+> observation
 
 ## How this was found
 
@@ -105,3 +106,56 @@ current rule is "succeeded iff every task succeeded with no consistency warning"
 and JobDagGen already generates unloadable inputs, so the campaigns go red
 otherwise. Run all three DAG campaigns before landing.
 ```
+
+## Outcome
+
+The user chose option 1 on 2026-10-15 and, asked which failed inputs it should
+name, every one:
+
+- **Every input that fails to load is a warning**, in declared order, whether
+  or not a task reads it, not only the unread inputs this plan was about. A
+  read input's failure was already visible through its dependents' `Skipped`
+  reasons, but a skip reason names only the first failed upstream its task
+  met, so a task reading two broken inputs left the second recorded nowhere.
+  The warnings are now the one place every failed input is listed. A read
+  input's warning is the text its dependents are skipped with,
+  `failed to load input 'x': <cause>`; an unread one's says why the run did not
+  fail on it, `failed to load input 'x', which no task reads: <cause>`.
+- **A warning never fails a run.** `succeeded` is the tasks' verdict alone, and
+  the scaladoc of `JobResult` and `JobRunRecord` now says so.
+
+The engine change is small. `handleInputCompletion` keeps each input's failure
+by index before the fan-out, which an unread input never reaches;
+`runUnifiedDag` returns them beside the task results; `DataJob.inputWarnings`
+words them, ahead of `runConsistencyChecks`' findings. `job.json` already wrote
+`JobResult.warnings`, and the GUI's run log already showed them, live and on a
+reopened run; its header said "consistency warning(s)" and now says
+"warning(s)". An input whose exception has no message is now reported by the
+exception's name rather than as `null`.
+
+**The plan's premise about the generator was half right.** `JobDagGen` did
+point inputs at missing files, but `attachOrphanInputs` gave every input a
+reader (its comment said an unread input's failure would be invisible to the
+oracle), so the campaigns never drew the shape this plan is about; only the
+shrinker could orphan an input. Warning on every failed input would have
+turned the old verdict clause ("no consistency warning") red on every
+broken-input case, as the plan predicted; warning on unread inputs only would
+have left it green, testing nothing. So the generator now also declares, in a
+quarter of cases, one more input that no task reads, broken half the time,
+drawn last from its own stream so every existing seed keeps its case, and the
+shrinker can drop it. `oracle/DagSchedule`'s verdict is now: `succeeded` iff
+every task succeeded, whatever the warnings say, and the warnings are exactly
+one per input that failed to load, in declared order, each beginning as the
+engine words it for a read or an unread input, and no other; `job.json` carries
+the same list. A new guard, `generatorCoversInputFailures`, asserts the corpus
+reaches unread inputs both broken and healthy, a case whose tasks all succeed
+beside a broken one (the one shape where a warning meets a succeeded run), and
+a task reading two broken inputs.
+
+Breaking each rule in `DataJob` in turn fails the property within the first
+fifty seeds, each with a minimized counterexample naming the broken rule: the
+old behaviour (an unread input's failure swallowed), warnings for unread
+inputs only, the unread warning without its clause, a warning failing the run,
+`job.json` without the warnings, and the warnings in reverse order.
+Regressions in `job/data_job_test`. `bazel test //...` 52/52, jaffle-shop
+15/15, and the three DAG campaigns green at 20000 seeds each.

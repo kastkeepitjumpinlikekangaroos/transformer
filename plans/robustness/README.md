@@ -37,7 +37,7 @@ at the time of the audit: `bazel test //...` 46/46 green.
 | [05](05-frontend-robustness-fuzzer.md) | Frontend robustness fuzzer | "nothing silently dropped" + "errors are user-facing" as properties | **done** 2026-10-04 | 3-5 days | low | 01 (shares its clause table) |
 | [06](06-io-roundtrip-and-external-fixtures.md) | I/O round-trip properties + external parquet fixtures | the helper 03 needs, plus CSV state-machine fuzzing | **done** 2026-10-14 | 3-4 days | low | — (03 wants its fixture helper) |
 | [07](07-hydration-oracle-on-the-dag-corpus.md) | Hydration oracle on the existing DAG corpus | the read side of the records the DAG fuzzer already writes | **done** 2026-10-15 | 2 days | low | — |
-| [08](08-unconsumed-input-failure-is-swallowed.md) | An unconsumed input's load failure is swallowed | carried over, needs a product decision first | open | half a day | low | — |
+| [08](08-unconsumed-input-failure-is-swallowed.md) | An unconsumed input's load failure is swallowed | the run said `succeeded` and nothing recorded the failure; every failed input is now a warning, and a warning never fails a run | **done** 2026-10-15 | half a day | low | — |
 | [09](09-branch-result-types.md) | `CASE`, `COALESCE`, `IF`, `GREATEST` and `UNION` take their first branch's type | a wider decimal in a later branch is kept under a narrower declared type, so writing or spilling it fails; `THEN 1 ELSE 2.5` is 2 | open, gated in the SQL corpora | 1-2 days | medium | needs a decision for the numeric half |
 | [10](10-error-messages-name-internals.md) | A failing query's message names the engine's internals | every parse error names JSqlParser's class; pooled failures arrive wrapped in `ExecutionException` (sometimes with no message), which is what a job records | open, recorded in `CleanRejection` | 1 day | low | a decision on where to unwrap |
 | [11](11-functions-bind-over-arguments-they-cannot-take.md) | Functions and conditions bind over arguments they cannot take | `SUM` over a string, the math functions over a date, a NULL `ROUND` scale, a non-boolean `ON` fail mid-run; `ABS` of a date is NULL | open, recorded in `CleanRejection` | 1-2 days | medium | decisions on the lenient coercions |
@@ -120,6 +120,16 @@ newest-first orders cut to the millisecond, half a surrogate pair failing every
 record write, and colliding validation sample files. What a reopened run shows
 without a task's record was the user's decision, [15](15-what-a-reopened-run-shows-without-its-record.md),
 landed the same day. Details in the plan's Outcome section.
+
+**Done:** plan 08. An input that failed to load and that no task read used to
+vanish: the run said `succeeded`, with no warning and nothing in `job.json`.
+The user chose to warn and still succeed, for every input that fails to load,
+read or not, since a skipped task names only the first failure it met. The
+warnings list every failed input in declared order, an unread one's saying no
+task reads it, and a warning never fails a run. The DAG fuzzer's generator
+had given every input a reader, so it never drew the shape; it now declares an
+input no task reads, and `DagSchedule` holds the warnings to one per failed
+input. Details in the plan's Outcome section.
 
 **Next, in order:** [14](14-pathological-nesting.md)'s job hang (a `finally`
 and a `catch`), then [12](12-text-the-binder-never-sees.md) and
