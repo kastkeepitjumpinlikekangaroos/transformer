@@ -287,26 +287,26 @@ object TaskRunRecord {
     val sb = new java.lang.StringBuilder()
     sb.append("{\n")
     sb.append("  \"schemaVersion\": ").append(r.schemaVersion).append(",\n")
-    sb.append("  \"taskName\": \"").append(escape(r.taskName)).append("\",\n")
-    sb.append("  \"status\": \"").append(escape(TaskRunStatus.toJson(r.status))).append("\",\n")
+    sb.append("  \"taskName\": \"").append(Json.escape(r.taskName)).append("\",\n")
+    sb.append("  \"status\": \"").append(Json.escape(TaskRunStatus.toJson(r.status))).append("\",\n")
     r.errorMessage match {
-      case Some(msg) => sb.append("  \"errorMessage\": \"").append(escape(msg)).append("\",\n")
+      case Some(msg) => sb.append("  \"errorMessage\": \"").append(Json.escape(msg)).append("\",\n")
       case None      => sb.append("  \"errorMessage\": null,\n")
     }
-    sb.append("  \"executionTime\": \"").append(escape(r.executionTime.toString)).append("\",\n")
+    sb.append("  \"executionTime\": \"").append(Json.escape(r.executionTime.toString)).append("\",\n")
     r.enqueuedAt.foreach { ea =>
-      sb.append("  \"enqueuedAt\": \"").append(escape(ea.toString)).append("\",\n")
+      sb.append("  \"enqueuedAt\": \"").append(Json.escape(ea.toString)).append("\",\n")
     }
-    sb.append("  \"startedAt\": \"").append(escape(r.startedAt.toString)).append("\",\n")
-    sb.append("  \"finishedAt\": \"").append(escape(r.finishedAt.toString)).append("\",\n")
-    sb.append("  \"writtenAt\": \"").append(escape(r.writtenAt.toString)).append("\",\n")
+    sb.append("  \"startedAt\": \"").append(Json.escape(r.startedAt.toString)).append("\",\n")
+    sb.append("  \"finishedAt\": \"").append(Json.escape(r.finishedAt.toString)).append("\",\n")
+    sb.append("  \"writtenAt\": \"").append(Json.escape(r.writtenAt.toString)).append("\",\n")
     sb.append("  \"rowsProduced\": ").append(r.rowsProduced).append(",\n")
-    sb.append("  \"format\": \"").append(escape(r.format)).append("\",\n")
+    sb.append("  \"format\": \"").append(Json.escape(r.format)).append("\",\n")
     sb.append("  \"outputFiles\": [")
     var i = 0
     while (i < r.outputFiles.size) {
       if (i > 0) sb.append(", ")
-      sb.append('"').append(escape(r.outputFiles(i))).append('"')
+      sb.append('"').append(Json.escape(r.outputFiles(i))).append('"')
       i += 1
     }
     sb.append("],\n")
@@ -317,11 +317,11 @@ object TaskRunRecord {
       while (j < r.validations.size) {
         val v = r.validations(j)
         sb.append("    {")
-        sb.append("\"name\": \"").append(escape(v.name)).append("\", ")
+        sb.append("\"name\": \"").append(Json.escape(v.name)).append("\", ")
         sb.append("\"passed\": ").append(v.passed).append(", ")
         sb.append("\"failedRowCount\": ").append(v.failedRowCount).append(", ")
         v.sampleFile match {
-          case Some(f) => sb.append("\"sampleFile\": \"").append(escape(f)).append("\"")
+          case Some(f) => sb.append("\"sampleFile\": \"").append(Json.escape(f)).append("\"")
           case None    => sb.append("\"sampleFile\": null")
         }
         sb.append('}')
@@ -333,25 +333,6 @@ object TaskRunRecord {
     }
     sb.append("]\n")
     sb.append("}\n")
-    sb.toString
-  }
-
-  private def escape(s: String): String = {
-    val sb = new java.lang.StringBuilder(s.length + 8)
-    var i = 0
-    while (i < s.length) {
-      val c = s.charAt(i)
-      c match {
-        case '"'           => sb.append("\\\"")
-        case '\\'          => sb.append("\\\\")
-        case '\n'          => sb.append("\\n")
-        case '\r'          => sb.append("\\r")
-        case '\t'          => sb.append("\\t")
-        case c if c < 0x20 => sb.append(f"\\u${c.toInt}%04x")
-        case c             => sb.append(c)
-      }
-      i += 1
-    }
     sb.toString
   }
 }

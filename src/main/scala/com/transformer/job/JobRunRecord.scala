@@ -127,12 +127,12 @@ object JobRunRecord {
     sb.append("  \"schemaVersion\": ").append(r.schemaVersion).append(",\n")
     sb.append("  \"succeeded\": ").append(r.succeeded).append(",\n")
     r.errorMessage match {
-      case Some(msg) => sb.append("  \"errorMessage\": \"").append(escape(msg)).append("\",\n")
+      case Some(msg) => sb.append("  \"errorMessage\": \"").append(Json.escape(msg)).append("\",\n")
       case None      => sb.append("  \"errorMessage\": null,\n")
     }
-    sb.append("  \"executionTime\": \"").append(escape(r.executionTime.toString)).append("\",\n")
-    sb.append("  \"startedAt\": \"").append(escape(r.startedAt.toString)).append("\",\n")
-    sb.append("  \"finishedAt\": \"").append(escape(r.finishedAt.toString)).append("\",\n")
+    sb.append("  \"executionTime\": \"").append(Json.escape(r.executionTime.toString)).append("\",\n")
+    sb.append("  \"startedAt\": \"").append(Json.escape(r.startedAt.toString)).append("\",\n")
+    sb.append("  \"finishedAt\": \"").append(Json.escape(r.finishedAt.toString)).append("\",\n")
     sb.append("  \"tasks\": [")
     if (r.tasks.nonEmpty) {
       sb.append('\n')
@@ -140,16 +140,16 @@ object JobRunRecord {
       while (i < r.tasks.size) {
         val t = r.tasks(i)
         sb.append("    {")
-        sb.append("\"taskName\": \"").append(escape(t.taskName)).append("\", ")
-        sb.append("\"status\": \"").append(escape(TaskRunStatus.toJson(t.status))).append("\", ")
+        sb.append("\"taskName\": \"").append(Json.escape(t.taskName)).append("\", ")
+        sb.append("\"status\": \"").append(Json.escape(TaskRunStatus.toJson(t.status))).append("\", ")
         t.runFile match {
-          case Some(f) => sb.append("\"runFile\": \"").append(escape(f)).append("\", ")
+          case Some(f) => sb.append("\"runFile\": \"").append(Json.escape(f)).append("\", ")
           case None    => sb.append("\"runFile\": null, ")
         }
         sb.append("\"rowsProduced\": ").append(t.rowsProduced).append(", ")
         sb.append("\"failedValidationCount\": ").append(t.failedValidationCount).append(", ")
         t.errorMessage match {
-          case Some(msg) => sb.append("\"errorMessage\": \"").append(escape(msg)).append("\"")
+          case Some(msg) => sb.append("\"errorMessage\": \"").append(Json.escape(msg)).append("\"")
           case None      => sb.append("\"errorMessage\": null")
         }
         sb.append('}')
@@ -165,7 +165,7 @@ object JobRunRecord {
       sb.append('\n')
       var j = 0
       while (j < r.warnings.size) {
-        sb.append("    \"").append(escape(r.warnings(j))).append('"')
+        sb.append("    \"").append(Json.escape(r.warnings(j))).append('"')
         if (j < r.warnings.size - 1) sb.append(',')
         sb.append('\n')
         j += 1
@@ -181,7 +181,7 @@ object JobRunRecord {
           var k = 0
           val arr = paths.toIndexedSeq
           while (k < arr.size) {
-            sb.append("    \"").append(escape(arr(k))).append('"')
+            sb.append("    \"").append(Json.escape(arr(k))).append('"')
             if (k < arr.size - 1) sb.append(',')
             sb.append('\n')
             k += 1
@@ -192,25 +192,6 @@ object JobRunRecord {
       case None => ()
     }
     sb.append('\n').append("}\n")
-    sb.toString
-  }
-
-  private def escape(s: String): String = {
-    val sb = new java.lang.StringBuilder(s.length + 8)
-    var i = 0
-    while (i < s.length) {
-      val c = s.charAt(i)
-      c match {
-        case '"'           => sb.append("\\\"")
-        case '\\'          => sb.append("\\\\")
-        case '\n'          => sb.append("\\n")
-        case '\r'          => sb.append("\\r")
-        case '\t'          => sb.append("\\t")
-        case c if c < 0x20 => sb.append(f"\\u${c.toInt}%04x")
-        case c             => sb.append(c)
-      }
-      i += 1
-    }
     sb.toString
   }
 }

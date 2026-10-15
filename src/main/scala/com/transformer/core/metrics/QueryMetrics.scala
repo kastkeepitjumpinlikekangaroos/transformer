@@ -86,7 +86,7 @@ object QueryMetrics {
     val pad2 = spaces(indent + 2)
     sb.append("{\n")
     sb.append(pad2).append("\"id\": ").append(op.id).append(",\n")
-    sb.append(pad2).append("\"name\": \"").append(escape(op.name)).append("\",\n")
+    sb.append(pad2).append("\"name\": \"").append(JsonMini.escape(op.name)).append("\",\n")
     sb.append(pad2).append("\"partition\": ").append(op.partition).append(",\n")
     sb.append(pad2).append("\"rowsIn\": ").append(op.rowsIn).append(",\n")
     sb.append(pad2).append("\"rowsOut\": ").append(op.rowsOut).append(",\n")
@@ -99,7 +99,7 @@ object QueryMetrics {
       var i = 0
       while (i < op.counters.length) {
         sb.append(spaces(indent + 4))
-        sb.append('"').append(escape(op.counterNames(i))).append("\": ").append(op.counters(i))
+        sb.append('"').append(JsonMini.escape(op.counterNames(i))).append("\": ").append(op.counters(i))
         if (i < op.counters.length - 1) sb.append(',')
         sb.append('\n')
         i += 1
@@ -128,25 +128,6 @@ object QueryMetrics {
     val sb = new java.lang.StringBuilder(n)
     var i = 0
     while (i < n) { sb.append(' '); i += 1 }
-    sb.toString
-  }
-
-  private[metrics] def escape(s: String): String = {
-    val sb = new java.lang.StringBuilder(s.length + 8)
-    var i = 0
-    while (i < s.length) {
-      val c = s.charAt(i)
-      c match {
-        case '"'           => sb.append("\\\"")
-        case '\\'          => sb.append("\\\\")
-        case '\n'          => sb.append("\\n")
-        case '\r'          => sb.append("\\r")
-        case '\t'          => sb.append("\\t")
-        case c if c < 0x20 => sb.append(f"\\u${c.toInt}%04x")
-        case c             => sb.append(c)
-      }
-      i += 1
-    }
     sb.toString
   }
 }

@@ -194,4 +194,37 @@ private[metrics] object JsonMini {
       JNum(java.lang.Double.parseDouble(s))
     }
   }
+
+  /** The text between the quotes of a JSON string holding `s`, which [[parse]]
+    * reads back as `s`, by the same rule as `com.transformer.job.Json.escape`:
+    * quote, backslash, newline, carriage return and tab escaped by name, every
+    * other control character and every surrogate not in a pair as a hex
+    * escape, the rest as itself. Half a surrogate pair is a character UTF-8
+    * cannot encode, so written raw it fails the write of the whole file. Every
+    * string a `_perf.json` holds goes through here. */
+  def escape(s: String): String = {
+    val sb = new java.lang.StringBuilder(s.length + 8)
+    var i = 0
+    while (i < s.length) {
+      val c = s.charAt(i)
+      c match {
+        case '"'           => sb.append("\\\"")
+        case '\\'          => sb.append("\\\\")
+        case '\n'          => sb.append("\\n")
+        case '\r'          => sb.append("\\r")
+        case '\t'          => sb.append("\\t")
+        case c if c < 0x20 => hex(sb, c)
+        case c if Character.isHighSurrogate(c) && i + 1 < s.length && Character.isLowSurrogate(s.charAt(i + 1)) =>
+          sb.append(c).append(s.charAt(i + 1))
+          i += 1
+        case c if Character.isSurrogate(c) => hex(sb, c)
+        case c             => sb.append(c)
+      }
+      i += 1
+    }
+    sb.toString
+  }
+
+  private def hex(sb: java.lang.StringBuilder, c: Char): Unit =
+    sb.append('\\').append('u').append(f"${c.toInt}%04x")
 }

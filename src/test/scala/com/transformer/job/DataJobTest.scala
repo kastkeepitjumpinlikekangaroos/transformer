@@ -210,6 +210,28 @@ class DataJobTest {
     assertTrue(s"sample should contain failing row, got: $sample", sample.contains("bad"))
   }
 
+  /** A task named with half a surrogate pair still writes its records. The JSON
+    * writers put the character raw, which UTF-8 cannot encode, so `_run.json`
+    * and `job.json` were never written — silently, since a record write never
+    * fails a run. Found by the hydration oracle's adversarial task names. */
+  @Test def aTaskNamedWithHalfASurrogatePairStillWritesItsRecords(): Unit = {
+    val name = "half " + 0xD800.toChar + " of a pair"
+    val inDir = tmpDir("dj-surrogate-")
+    writeCsv(inDir, "a.csv", "id\n1\n")
+    val outRoot = tmpDir("dj-surrogate-out-")
+    val result = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT * FROM t"),
+        outputFile = Some(OutputFilePath(outRoot.resolve("out").toString)),
+        name = Some(name))),
+      jobRunOutput = Some(OutputFilePath(outRoot.resolve("job.json").toString))
+    ).run()
+    assertTrue(result.succeeded)
+    assertEquals(Some(name), TaskRunRecord.read(outRoot.resolve("out")).map(_.taskName))
+    assertEquals(Some(Seq(name)), JobRunRecord.read(outRoot.resolve("job.json")).map(_.tasks.map(_.taskName)))
+  }
+
   @Test def downstreamTaskSeesUpstreamView(): Unit = {
     val inDir = tmpDir("dj-chain-")
     writeCsv(inDir, "a.csv", "x\n1\n2\n3\n4\n5\n")

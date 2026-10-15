@@ -1232,6 +1232,21 @@ ship a fix or move something from "not done" to "done".
   `Instant`s themselves, which carry microseconds; regressions in
   `job/job_output_layout_test` and `job/data_job_test`.
 
+- **A run record holds any string, half a surrogate pair included.** Every
+  record is hand-written JSON, and the writers escaped the quote, the backslash
+  and the control characters and put everything else in raw. Half a surrogate
+  pair (what `SUBSTRING` leaves of a character past the Basic Multilingual
+  Plane, and a task name or failure message can carry) is a character UTF-8
+  cannot encode, so `Files.writeString` threw — and since a record write never
+  fails a run, the task's `_run.json`, the job's `job.json` and the task's
+  `_perf.json` were silently never written. The five copies of the escape (the
+  two records and `JobFiles`' config writer in `job`, the perf record and its
+  operator tree in `core/metrics`) are now one per JSON reader, `Json.escape`
+  and `JsonMini.escape`, which write such a character as a `\u` hex escape that
+  both readers decode back. Found by the `Hydration` oracle's adversarial task
+  names; regressions in `job/json_test`, `job/data_job_test` and
+  `core/metrics/metrics_collector_test`.
+
 - **A task with no `outputFile` can feed downstream views and validations.**
   It could not until recently: `DataJob.materializeIfNeeded` threw
   `UnsupportedOperationException("v1 requires an outputFile ...")` whenever a

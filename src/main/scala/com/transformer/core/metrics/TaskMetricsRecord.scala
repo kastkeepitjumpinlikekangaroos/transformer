@@ -107,11 +107,11 @@ object TaskMetricsRecord {
     val sb = new java.lang.StringBuilder()
     sb.append("{\n")
     sb.append("  \"schemaVersion\": ").append(r.schemaVersion).append(",\n")
-    sb.append("  \"taskName\": \"").append(escape(r.taskName)).append("\",\n")
-    sb.append("  \"executionTime\": \"").append(escape(r.executionTime.toString)).append("\",\n")
-    sb.append("  \"enqueuedAt\": \"").append(escape(r.enqueuedAt.toString)).append("\",\n")
-    sb.append("  \"startedAt\": \"").append(escape(r.startedAt.toString)).append("\",\n")
-    sb.append("  \"finishedAt\": \"").append(escape(r.finishedAt.toString)).append("\",\n")
+    sb.append("  \"taskName\": \"").append(JsonMini.escape(r.taskName)).append("\",\n")
+    sb.append("  \"executionTime\": \"").append(JsonMini.escape(r.executionTime.toString)).append("\",\n")
+    sb.append("  \"enqueuedAt\": \"").append(JsonMini.escape(r.enqueuedAt.toString)).append("\",\n")
+    sb.append("  \"startedAt\": \"").append(JsonMini.escape(r.startedAt.toString)).append("\",\n")
+    sb.append("  \"finishedAt\": \"").append(JsonMini.escape(r.finishedAt.toString)).append("\",\n")
     sb.append("  \"cpuNanos\": ").append(r.cpuNanos).append(",\n")
     sb.append("  \"allocBytes\": ").append(r.allocBytes).append(",\n")
     sb.append("  \"gcDeltaCount\": ").append(r.gcDeltaCount).append(",\n")
@@ -203,24 +203,5 @@ object TaskMetricsRecord {
       counterNames = names,
       children = children
     )
-  }
-
-  private def escape(s: String): String = {
-    val sb = new java.lang.StringBuilder(s.length + 8)
-    var i = 0
-    while (i < s.length) {
-      val c = s.charAt(i)
-      c match {
-        case '"'           => sb.append("\\\"")
-        case '\\'          => sb.append("\\\\")
-        case '\n'          => sb.append("\\n")
-        case '\r'          => sb.append("\\r")
-        case '\t'          => sb.append("\\t")
-        case c if c < 0x20 => sb.append(f"\\u${c.toInt}%04x")
-        case c             => sb.append(c)
-      }
-      i += 1
-    }
-    sb.toString
   }
 }

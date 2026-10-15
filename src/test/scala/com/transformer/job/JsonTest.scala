@@ -22,6 +22,29 @@ class JsonTest {
     assertEquals(JsonString("A"), Json.parse(""""A""""))
   }
 
+  /** `Json.escape` writes any string as JSON text a UTF-8 file holds, which
+    * `parse` reads back unchanged: every escape, every control character, a
+    * surrogate pair as itself, and half of one — or a pair in the wrong order —
+    * as `\\u` escapes. Written raw, half a pair is a character UTF-8 cannot
+    * encode, so a record holding one was never written. */
+  @Test def escapedTextIsUtf8AndParsesBackUnchanged(): Unit = {
+    val high = 0xD800.toChar.toString
+    val low = 0xDC00.toChar.toString
+    val strings = Seq(
+      "", "plain", "\"quoted\" \\ /", "a\nb\r\nc\td",
+      (0 until 32).map(_.toChar).mkString + 127.toChar,
+      new String(Character.toChars(0x1F600)),
+      "half " + high + " of " + low + " a pair",
+      low + high,
+      high)
+    strings.foreach { s =>
+      val text = "\"" + Json.escape(s) + "\""
+      assertTrue(s"escaped text UTF-8 cannot encode: ${text.map(_.toInt)}",
+        java.nio.charset.StandardCharsets.UTF_8.newEncoder().canEncode(text))
+      assertEquals(JsonString(s), Json.parse(text))
+    }
+  }
+
   @Test def parsesEmptyContainers(): Unit = {
     assertEquals(JsonObject(Map.empty), Json.parse("{}"))
     assertEquals(JsonArray(Vector.empty), Json.parse("[]"))

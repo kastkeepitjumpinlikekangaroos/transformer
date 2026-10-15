@@ -214,6 +214,25 @@ class MetricsCollectorTest {
     assertEquals(100L, read.cpuNanos)
   }
 
+  /** A task named with half a surrogate pair still gets its `_perf.json`. The
+    * writer put the character raw, which UTF-8 cannot encode, so the write
+    * threw and the runner, which never lets a perf record fail a task, wrote
+    * none. */
+  @Test def taskMetricsRecordRoundTripsHalfASurrogatePair(): Unit = {
+    val name = "half " + 0xD800.toChar + " of a pair"
+    val t = Instant.parse("2026-05-20T00:00:00Z")
+    val rec = TaskMetricsRecord(
+      schemaVersion = TaskMetricsRecord.SchemaVersion,
+      taskName = name,
+      executionTime = t, enqueuedAt = t, startedAt = t, finishedAt = t,
+      query = None,
+      cpuNanos = 1L, allocBytes = 2L,
+      gcDeltaCount = 0L, gcDeltaNanos = 0L)
+    val dir = java.nio.file.Files.createTempDirectory("metrics-surrogate-")
+    TaskMetricsRecord.write(dir, rec)
+    assertEquals(Some(name), TaskMetricsRecord.read(dir).map(_.taskName))
+  }
+
   @Test def taskMetricsRecordMissingFileReturnsNone(): Unit = {
     val dir = java.nio.file.Files.createTempDirectory("metrics-missing-")
     assertEquals(None, TaskMetricsRecord.read(dir))

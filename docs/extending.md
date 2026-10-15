@@ -158,7 +158,8 @@ pushdown reaches every referenced column.
 `DataJob` API. It walks `<jobDir>/inputs/<viewName>/*.json` and
 `<jobDir>/tables/<viewName>/{main.sql,validations/*.sql,output.json}` and emits
 regular `InputFilePath` / `SQLTask` values — there's no separate runtime. The
-JSON parser itself is in `job/Json.scala` (stdlib only — no Jackson, no circe).
+JSON parser itself is in `job/Json.scala` (stdlib only — no Jackson, no circe),
+beside `Json.escape`, which every JSON file the module writes goes through.
 
 To accept a new field in an input JSON config:
 1. Add the field to `InputFilePath` (if it isn't there already).

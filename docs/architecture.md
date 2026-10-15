@@ -800,7 +800,11 @@ is depth-bounded so a pattern with a leading wildcard doesn't accidentally
 scan the whole disk.
 
 Record-write failures are swallowed by the runner — a missing record must
-never poison an otherwise-successful run. The exception is rerun cleanup:
+never poison an otherwise-successful run. So a record must be writable
+whatever it holds: every string in `_run.json` and `job.json` goes through
+`Json.escape` (and in `_perf.json` through `JsonMini.escape`), which writes half
+a surrogate pair — a character UTF-8 cannot encode — as a `\u` escape
+rather than failing the write. The exception is rerun cleanup:
 before writing data, `writeOutput` calls `TaskRunRecord.clearIfMarked(dir)`
 which wipes every top-level regular file in a directory that already
 contains a `_run.json`, so reruns at the same templated path completely

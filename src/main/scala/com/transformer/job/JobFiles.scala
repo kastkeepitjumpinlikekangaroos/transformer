@@ -384,23 +384,5 @@ ${parts.mkString(",\n")}
     if (n < 1)
       throw new IllegalArgumentException(s"maxPartitions must be >= 1; got $n")
 
-  private def jsonString(s: String): String = {
-    val sb = new java.lang.StringBuilder(s.length + 2)
-    sb.append('"')
-    var i = 0
-    while (i < s.length) {
-      s.charAt(i) match {
-        case '"'           => sb.append("\\\"")
-        case '\\'          => sb.append("\\\\")
-        case '\n'          => sb.append("\\n")
-        case '\r'          => sb.append("\\r")
-        case '\t'          => sb.append("\\t")
-        case c if c < 0x20 => sb.append(f"\\u${c.toInt}%04x")
-        case c             => sb.append(c)
-      }
-      i += 1
-    }
-    sb.append('"')
-    sb.toString
-  }
+  private def jsonString(s: String): String = "\"" + Json.escape(s) + "\""
 }
