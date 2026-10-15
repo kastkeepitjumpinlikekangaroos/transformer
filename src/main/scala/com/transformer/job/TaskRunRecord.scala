@@ -186,7 +186,9 @@ object TaskRunRecord {
       }
     } finally stream.close()
 
-    results.sortBy(-_._2.writtenAt.toEpochMilli).toVector
+    // The whole instant, not its milliseconds: two partitions can be written
+    // inside one millisecond, and a tie would fall back to the walk's order.
+    results.sortWith((a, b) => a._2.writtenAt.isAfter(b._2.writtenAt)).toVector
   }
 
   /** If `dir` contains a `_run.json`, delete every regular file at the top

@@ -1219,6 +1219,19 @@ ship a fix or move something from "not done" to "done".
   scaladoc already promised. Found by the `Hydration` oracle in
   `fuzz/dag_scheduler_fuzz_test`; regressions in `gui/job_session_test`.
 
+- **"Newest first" compares whole instants.** `JobOutputLayout.detect` orders
+  a multi-run directory by each `job.json`'s `finishedAt`, and
+  `TaskRunRecord.discover` orders a task's partitions by each record's
+  `writtenAt`. Both sorted on `toEpochMilli`, so two runs or two partitions
+  inside one millisecond tied, and the tie fell to the directory listing's
+  order — on APFS a hash order, not the name. The GUI's run picker then listed
+  an older run first, and a task the manifest did not cover reopened from an
+  older partition than the newest (`JobSession` takes the head of `discover`).
+  A small job run twice in a row finishes both runs inside one millisecond,
+  which is how the `Hydration` oracle found it. Both sorts now compare the
+  `Instant`s themselves, which carry microseconds; regressions in
+  `job/job_output_layout_test` and `job/data_job_test`.
+
 - **A task with no `outputFile` can feed downstream views and validations.**
   It could not until recently: `DataJob.materializeIfNeeded` threw
   `UnsupportedOperationException("v1 requires an outputFile ...")` whenever a

@@ -61,8 +61,10 @@ object JobOutputLayout {
           }
         }
       } finally stream.close()
+      // The whole instant, not its milliseconds: two runs can finish inside one
+      // millisecond, and a tie would fall back to the directory's listing order.
       if (runs.isEmpty) Empty
-      else MultiRun(runs.sortBy(-_._2.finishedAt.toEpochMilli).toVector)
+      else MultiRun(runs.sortWith((a, b) => a._2.finishedAt.isAfter(b._2.finishedAt)).toVector)
     }
   }
 }

@@ -762,6 +762,21 @@ class DataJobTest {
     assertEquals(Instant.parse("2026-01-01T12:00:00Z"), found(2)._2.writtenAt)
   }
 
+  /** Partitions written inside one millisecond still list newest first, so the
+    * GUI's fallback to "the most recent partition" picks the one written last.
+    * The sort reads the whole `writtenAt`, not its milliseconds. */
+  @Test def taskRunRecordDiscoverOrdersPartitionsInsideOneMillisecond(): Unit = {
+    val base = tmpDir("dj-disc-fast-")
+    val written = Vector(100, 300, 500, 700, 900).map(us => Instant.parse("2026-01-01T12:00:00Z").plusNanos(us * 1000L))
+    written.zipWithIndex.foreach { case (w, i) =>
+      val p = base.resolve(s"day=2026010${i + 1}"); Files.createDirectories(p)
+      writeRecord(p, executionTime = Instant.parse("2026-01-01T00:00:00Z"), writtenAt = w,
+        rowsProduced = i.toLong, format = "csv", outputFiles = Seq("part-00000.csv"))
+    }
+    val found = TaskRunRecord.discover(s"${base.toString}/day={{today}}")
+    assertEquals(written.reverse, found.map(_._2.writtenAt).toVector)
+  }
+
   @Test def taskRunRecordDiscoverWithoutTemplateMatchesExactPath(): Unit = {
     val base = tmpDir("dj-disc-exact-")
     val p = base.resolve("out"); Files.createDirectories(p)

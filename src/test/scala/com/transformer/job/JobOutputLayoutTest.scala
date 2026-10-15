@@ -77,6 +77,22 @@ class JobOutputLayoutTest {
     }
   }
 
+  /** Runs that finish inside one millisecond still list newest first: the sort
+    * reads the whole `finishedAt`, not its milliseconds, so ties are not left to
+    * the directory listing's order. A small job run twice in a row does finish
+    * both runs inside one millisecond — that is how the hydration oracle in
+    * `fuzz/dag_scheduler_fuzz_test` found it. */
+  @Test def detectMultiRunOrdersRunsInsideOneMillisecond(): Unit = {
+    val parent = root.resolve("fast")
+    Files.createDirectories(parent)
+    val finished = Vector(100, 300, 500, 700, 900).map(us => Instant.parse("2026-01-01T12:00:00Z").plusNanos(us * 1000L))
+    finished.zipWithIndex.foreach { case (t, i) => writeJobRecord(parent.resolve(s"run-$i"), t) }
+    JobOutputLayout.detect(parent) match {
+      case JobOutputLayout.MultiRun(runs) => assertEquals(finished.reverse, runs.map(_._2.finishedAt).toVector)
+      case other => fail(s"expected MultiRun, got $other")
+    }
+  }
+
   @Test def detectEmptyWhenNoJobJsonAnywhere(): Unit = {
     val dir = root.resolve("empty-data")
     Files.createDirectories(dir)
