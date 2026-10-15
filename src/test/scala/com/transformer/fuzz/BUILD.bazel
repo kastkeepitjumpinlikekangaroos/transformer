@@ -6,9 +6,10 @@ load("@rules_scala//scala:scala.bzl", "scala_junit_test", "scala_library")
 # production target. Throws plain AssertionError on failure, so it needs no
 # JUnit dependency — only the code it generates over: the SQL exec module (the
 # mode-differential oracle drives whole queries through SqlEngine.execute), the
-# job module (the DAG-scheduler oracle builds and runs whole DataJobs), and the
-# parquet reader, held against files parquet-mr writes through the testonly
-# external_parquet helper.
+# job module (the DAG-scheduler oracle builds and runs whole DataJobs), the
+# GUI's session state (the hydration oracle reopens those runs in a JobSession;
+# `gui:session` carries no JavaFX), and the parquet reader, held against files
+# parquet-mr writes through the testonly external_parquet helper.
 scala_library(
     name = "fuzz",
     testonly = True,
@@ -19,11 +20,13 @@ scala_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/gui:session",
         "//src/main/scala/com/transformer/job",
         "//src/main/scala/com/transformer/read/csv",
         "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/sql/plan",
+        "//src/main/scala/com/transformer/temporal",
         "//src/test/scala/com/transformer/read/parquet:external_parquet",
         "//src/main/scala/com/transformer/write/csv",
     ],
@@ -134,7 +137,9 @@ scala_junit_test(
 # fail) must schedule to the statuses, orderings and timestamps the DAG alone
 # implies, and must terminate. Covers `DataJob.runUnifiedDag` — readiness
 # counting, skip propagation, and pool liveness when many tasks each fan nested
-# work onto the same shared Scheduler pool. Default budget is small (every case
+# work onto the same shared Scheduler pool. Then the finished runs are reopened
+# in a JobSession, as the GUI opens a job directory, and must come back as the
+# runs reported them (oracle/Hydration). Default budget is small (every case
 # runs a whole job with real file I/O), part of `bazel test //...`.
 scala_junit_test(
     name = "dag_scheduler_fuzz_test",

@@ -479,7 +479,10 @@ listener that marshals back to the FX thread via `Platform.runLater`.
 
 The GUI module is `//src/main/scala/com/transformer/gui`; the launcher is
 `//examples/gui_app`. The launcher bundles parquet read+write so the GUI's
-preview works for both formats.
+preview works for both formats. The session state behind every panel
+(`JobSession`, which opens a job directory and rebuilds its last run, and
+`DagLayout`) builds on its own as `//src/main/scala/com/transformer/gui:session`,
+with no JavaFX, so it can be tested without a display.
 
 ## Supported file formats
 

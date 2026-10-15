@@ -1336,6 +1336,22 @@ the engine's ten `DataType`s, and every file-format fixture was written by our
 own writer. Plans 04-07 in that directory close those three holes; plan 05's
 frontend fuzzer closed the first, and found the defects in the next section.
 
+## What a reopened run shows for a task without its record (open)
+
+`JobSession` rebuilds a task from its `_run.json` when it has one, and from
+`job.json`'s compact entry when it does not: a task with no output directory
+(which `job.json` lists with no `runFile`), or one whose record is missing or
+unreadable. The entry carries the status, the reason and the rows, and not the
+timestamps or which validations failed, so such a task reopens with every
+timestamp at the epoch (its duration reads 0 ms) and, if its validations
+failed, as `ValidationFailed` with no failure listed (every validation card
+reads PASSED beside a VALIDATION FAILED status). Nothing marks the task as
+rebuilt from less than its record. What it should show instead is a product
+decision, open in
+[plans/robustness/15](../plans/robustness/15-what-a-reopened-run-shows-without-its-record.md);
+the `Hydration` oracle in `fuzz/dag_scheduler_fuzz_test` records both as
+`Hydration.Degraded` with a repro until it is made.
+
 ## Open defects the frontend fuzzer found (2026-10-04)
 
 `fuzz/frontend_fuzz_test` writes SQL text rather than rendering an AST, which is

@@ -230,9 +230,12 @@ modules `job/` uses. Pattern recap:
    DAG node; we render the whole graph in `DagCanvas.render()` and call it
    imperatively whenever state changes. No AnimationTimer — DAG visualizers
    don't need 60fps.
-4. **Layout is pure code.** `DagLayout` has no JavaFX dep so it's trivially
-   testable. World coords are zoom=1 pixels; screen coords are `world * zoom
-   + pan`.
+4. **Layout and session state are pure code.** `DagLayout` and `JobSession`
+   have no JavaFX dep and build as `gui:session`, so they are testable without
+   the toolkit — `gui/job_session_test`, `gui/dag_layout_test` and the fuzz
+   harness's `Hydration` oracle depend on that target alone. Session state you
+   add must keep it that way. World coords are zoom=1 pixels; screen coords are
+   `world * zoom + pan`.
 
 To add a new panel: write a JavaFX `Region` subclass that takes `JobSession`
 in its ctor, registers a listener, and reads accessors. Wire it into

@@ -36,6 +36,13 @@ specific traps.
   call into a type that lives in `core`, you must list `//src/main/scala/com/transformer/core`
   even when an indirect dep already brings it in. The error message is "Symbol
   'term com.transformer.core' is missing from the classpath."
+- **The GUI's session state builds without JavaFX.** `JobSession` and
+  `DagLayout` are their own target, `//src/main/scala/com/transformer/gui:session`,
+  with no JavaFX dependency; `gui` exports it, so a panel sees it as before. Keep
+  every `javafx.*` import out of both files: the session tests and the fuzz
+  harness depend on `gui:session` precisely so they run without the toolkit, and
+  a fuzz target never takes a JavaFX dependency. State a panel needs from a
+  toolkit type stays in the panel.
 - **Never use Calcite, DuckDB, or any other embedded SQL engine.** JSqlParser
   is the only SQL dep, and only as an AST source. The whole point of the
   project is that the planner + executor are hand-built — see the opening

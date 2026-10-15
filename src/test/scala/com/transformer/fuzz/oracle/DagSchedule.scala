@@ -1,10 +1,10 @@
 package com.transformer.fuzz.oracle
 
-import com.transformer.fuzz.JobDagGen
 import com.transformer.fuzz.JobDagGen.{Fails, JobCase, Ok, ValidationFails}
 import com.transformer.job.{JobResult, JobRunRecord, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus}
 
 import java.nio.file.{Files, Path}
+import java.time.Instant
 import java.util.concurrent.atomic.AtomicReference
 
 /** Scheduler oracle: run a generated job and decide it against what the DAG
@@ -32,19 +32,24 @@ import java.util.concurrent.atomic.AtomicReference
   *   5. '''Job verdict''' — `JobResult.succeeded` iff every task succeeded, with
   *      no consistency warning (the manifest and the disk agree).
   *   6. '''Durable record''' — a task with an output directory leaves a
-  *      `_run.json` whose status matches the in-memory result. That file is what
-  *      the GUI and the next run read, so a task that reports one status in
-  *      memory and another (or none) on disk is a real defect even though the
-  *      run itself looks fine.
+  *      `_run.json` in the directory its templated path renders to for this
+  *      run, whose status matches the in-memory result. That file is what the
+  *      GUI and the next run read, so a task that reports one status in memory
+  *      and another (or none) on disk is a real defect even though the run
+  *      itself looks fine.
   *   7. '''Job manifest''' — the `job.json` the run writes lists every task in
   *      order with the same status, and points at the `_run.json` of every task
   *      that has an output directory. That manifest is the entry point the GUI
   *      and the next run load, so an entry that disagrees with the run, or a
-  *      `runFile` that does not resolve, loses detail that is on disk.
+  *      `runFile` that is not this run's record, loses detail that is on disk.
   *   8. '''Liveness''' — the run terminates. The job executes on a watchdog
   *      thread; a job still running past [[TimeoutMillis]] fails the property
   *      with a full thread dump, which is how a `Scheduler.pool` starvation
   *      deadlock surfaces here rather than hanging CI silently.
+  *
+  * A case that runs twice (`JobDagGen.RunLayout`) is decided run by run: the
+  * second run answers to the same invariants, over directories the first run
+  * may already have written.
   */
 object DagSchedule {
 
@@ -53,22 +58,34 @@ object DagSchedule {
     * this is a liveness bug, not slowness. */
   val TimeoutMillis: Long = 120000L
 
-  /** Runs `jc` and asserts every invariant above. Returns the run's task results
-    * so callers can tally coverage (how many tasks actually ran, overlapped,
-    * were skipped). */
-  def check(jc: JobCase): JobResult = {
+  /** One run of a generated job: the execution time it ran at, and what it
+    * returned. */
+  final case class Run(executionTime: Instant, result: JobResult)
+
+  /** Runs each of `jc`'s runs, in order, in one fresh scratch directory and
+    * asserts every invariant above after each; then hands the runs and the
+    * directory they wrote to `after`, and deletes the directory. */
+  def run[A](jc: JobCase)(after: (Vector[Run], Path) => A): A = {
     val root = Files.createTempDirectory("fuzz-dag-")
     try {
-      val result = runWithWatchdog(jc, root)
-      verify(jc, result, root)
-      result
+      val runs = jc.layout.executionTimes.map { time =>
+        val result = runWithWatchdog(jc, root, time)
+        verify(jc, result, root, time)
+        Run(time, result)
+      }
+      after(runs, root)
     } finally deleteRecursively(root)
   }
 
+  /** Runs `jc` and asserts every invariant above. Returns the runs so callers
+    * can tally coverage (how many tasks actually ran, overlapped, were
+    * skipped). */
+  def check(jc: JobCase): Vector[Run] = run(jc)((runs, _) => runs)
+
   /** Run the job on its own thread so a scheduler that never terminates is
     * reported as a failure with a thread dump instead of hanging the JVM. */
-  private def runWithWatchdog(jc: JobCase, root: Path): JobResult = {
-    val job = jc.build(root)
+  private def runWithWatchdog(jc: JobCase, root: Path, time: Instant): JobResult = {
+    val job = jc.build(root, time)
     val out = new AtomicReference[JobResult](null)
     val err = new AtomicReference[Throwable](null)
     val t = new Thread(() => {
@@ -85,7 +102,7 @@ object DagSchedule {
     out.get
   }
 
-  private def verify(jc: JobCase, result: JobResult, root: Path): Unit = {
+  private def verify(jc: JobCase, result: JobResult, root: Path, time: Instant): Unit = {
     val tasks = result.tasks.toVector
     assert(result.error.isEmpty, s"[dag-schedule] job reported a load error: ${result.error.get}\n  case = $jc")
     assert(tasks.length == jc.tasks.length,
@@ -105,8 +122,8 @@ object DagSchedule {
     checkTimestamps(jc, tasks)
     checkOrdering(jc, tasks)
     checkSkipReasons(jc, tasks)
-    checkRunRecords(jc, tasks, root)
-    checkJobManifest(jc, tasks, result, root)
+    checkRunRecords(jc, tasks, root, time)
+    checkJobManifest(jc, tasks, result, root, time)
 
     val allOk = tasks.forall(_.succeeded)
     assert(result.succeeded == allOk,
@@ -121,9 +138,9 @@ object DagSchedule {
     * whose status matches what the run reported in memory — for every terminal
     * status, `Skipped` included (the runner stamps a skipped record so the next
     * run and the GUI can tell "not attempted" from "never configured"). */
-  private def checkRunRecords(jc: JobCase, tasks: Vector[TaskResult], root: Path): Unit =
+  private def checkRunRecords(jc: JobCase, tasks: Vector[TaskResult], root: Path, time: Instant): Unit =
     jc.tasks.filter(_.output.isDefined).foreach { t =>
-      val dir = root.resolve(t.view)
+      val dir = Path.of(jc.render(jc.outputPath(root, t).get, time))
       val r = tasks(t.index)
       TaskRunRecord.read(dir) match {
         case None =>
@@ -208,8 +225,8 @@ object DagSchedule {
     * runner stamps a record for EVERY terminal status, `Failed` and `Skipped`
     * included, so the manifest must reach all of them. */
   private def checkJobManifest(
-      jc: JobCase, tasks: Vector[TaskResult], result: JobResult, root: Path): Unit = {
-    val file = root.resolve(JobDagGen.ManifestFile)
+      jc: JobCase, tasks: Vector[TaskResult], result: JobResult, root: Path, time: Instant): Unit = {
+    val file = Path.of(jc.render(jc.manifestPath(root), time))
     val rec: JobRunRecord = JobRunRecord.read(file).getOrElse(
       throw new AssertionError(s"[dag-schedule] no readable job manifest at $file\n  case = $jc"))
     assert(rec.tasks.length == jc.tasks.length,
@@ -232,6 +249,9 @@ object DagSchedule {
             s"job.json\n  case = $jc"))
         assert(Files.isRegularFile(Path.of(rf)),
           s"[dag-schedule] task ${t.view}: manifest runFile '$rf' does not exist\n  case = $jc")
+        val own = Path.of(jc.render(jc.outputPath(root, t).get, time)).resolve(TaskRunRecord.FileName)
+        assert(Path.of(rf) == own,
+          s"[dag-schedule] task ${t.view}: manifest runFile '$rf' is not this run's record $own\n  case = $jc")
       } else assert(entry.runFile.isEmpty,
         s"[dag-schedule] task ${t.view} has no outputFile but the manifest points at " +
           s"'${entry.runFile.get}'\n  case = $jc")

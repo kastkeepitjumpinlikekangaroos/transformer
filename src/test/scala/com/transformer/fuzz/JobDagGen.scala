@@ -1,11 +1,14 @@
 package com.transformer.fuzz
 
-import com.transformer.job.{DataJob, InputFilePath, OutputFilePath, SQLTask, Validation}
+import com.transformer.job.{DataJob, InputFilePath, JobFiles, OutputFilePath, SQLTask, Validation}
+import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
 import java.nio.file.{Files, Path}
+import java.time.{Duration, Instant}
 
 /** Generator of a random `DataJob` — inputs plus a DAG of [[SQLTask]]s — for the
-  * scheduler property ([[com.transformer.fuzz.oracle.DagSchedule]]).
+  * scheduler property ([[com.transformer.fuzz.oracle.DagSchedule]]) and the
+  * hydration property ([[com.transformer.fuzz.oracle.Hydration]]).
   *
   * Where the other generators fuzz what the SQL engine *computes*, this one
   * fuzzes what `DataJob.runUnifiedDag` *orchestrates*: readiness counting across
@@ -37,14 +40,17 @@ import java.nio.file.{Files, Path}
   * the metrics snapshot path at the same time, and a share of tasks acquire a
   * dependency through a VALIDATION's FROM rather than the main SQL — a separate
   * edge source in `TaskDag.build` with the same readiness and skip semantics.
+  *
+  * A case also says where its runs land and how often it runs ([[RunLayout]]):
+  * the job may write under a templated directory, a task's output may append a
+  * templated partition, and the job may run a second time at another execution
+  * time. That is the on-disk shape the GUI reads a finished run back from —
+  * several runs side by side, a task's partitions across them — and
+  * [[JobCase.writeDirectoryJob]] writes the same job as the directory the GUI
+  * opens. Those draws come after the DAG's, from their own stream, so a seed's
+  * DAG is the one it always was.
   */
 object JobDagGen {
-
-  /** Where every generated job writes its aggregate `job.json` manifest,
-    * relative to the case's scratch root. The oracle reads it back: the manifest
-    * is what the GUI and the next run load to reconstruct a finished run, so it
-    * has to agree with the in-memory result for every task. */
-  val ManifestFile: String = "job.json"
 
   /** What a generated task is rigged to do when the scheduler gets to it. */
   sealed trait Outcome
@@ -88,8 +94,14 @@ object JobDagGen {
   }
 
   /** A task's output directory config: format plus the execution knobs that ride
-    * in `OutputFilePath.options`. A task with no [[TaskOutput]] is memory-only. */
-  final case class TaskOutput(parquet: Boolean, spill: Boolean, metrics: Boolean) {
+    * in `OutputFilePath.options`, and an optional templated partition appended
+    * to the task's directory, as `DirectoryJobLoader`'s `partitionBy` appends
+    * it. A task with no [[TaskOutput]] is memory-only. */
+  final case class TaskOutput(
+      parquet: Boolean,
+      spill: Boolean,
+      metrics: Boolean,
+      partitionBy: Option[String] = None) {
     def format: String = if (parquet) "parquet" else "csv"
     def options: Map[String, String] = Map(
       "spill" -> spill.toString,
@@ -97,48 +109,144 @@ object JobDagGen {
       (if (spill) Map("spill_threshold_bytes" -> "1") else Map.empty)
   }
 
+  /** One validation of a task: a query that must return no rows. */
+  final case class GenValidation(name: String, sql: String)
+
+  /** Where a case's runs write, and when they run.
+    *
+    * `runDir`, when set, is a templated directory under the case's `runs/`
+    * folder that each run renders to its own subdirectory, holding that run's
+    * `job.json` and task outputs — the multi-run layout `JobOutputLayout`
+    * classifies. Without it every run writes to the same `out/` directory, and a
+    * later run rewrites the earlier run's manifest.
+    *
+    * `executionTimes` holds one instant per run, in the order the runs happen.
+    * A second run lands in the same partitions as the first when its templates
+    * render the same, in new ones otherwise; it may also be a backfill, run
+    * second with the older execution time, so the newest partition on disk is
+    * not the latest execution time. */
+  final case class RunLayout(runDir: Option[String], executionTimes: Vector[Instant]) {
+    def runs: Int = executionTimes.length
+  }
+
+  /** The templated directories a run can write under — one path segment, the
+    * way a user templates `outputDir` (`/data/runs/{{ today }}`). */
+  val RunDirTemplates: Vector[String] =
+    Vector("{{ iso_date }}", "{{ today }}-{{ current_hour_pad }}", "run-{{ epoch_seconds }}")
+
+  /** The templated partitions a task output can append, one to three segments
+    * deep, so `TaskRunRecord.discover` walks each depth. */
+  val PartitionTemplates: Vector[String] = Vector(
+    "day={{ today }}",
+    "dt={{ iso_date }}/hour={{ current_hour_pad }}",
+    "{{ year }}/{{ current_month_pad }}/{{ current_day_pad }}")
+
+  /** First-run execution times: an ordinary morning, an hour before a year
+    * turns (so an hour later every date segment changes), and the day before a
+    * leap day. */
+  val BaseExecutionTimes: Vector[Instant] = Vector(
+    Instant.parse("2026-01-01T05:30:21Z"),
+    Instant.parse("2025-12-31T23:30:00Z"),
+    Instant.parse("2024-02-28T12:00:00Z"))
+
+  /** How far a second run's execution time sits from the first's: an hour (a
+    * day-templated path is rewritten in place, an hour-templated one is not), a
+    * day, and a day back — the backfill. */
+  val SecondRunOffsets: Vector[Duration] =
+    Vector(Duration.ofHours(1), Duration.ofDays(1), Duration.ofDays(-1))
+
   /** A whole generated job. Rendered to a runnable [[DataJob]] by [[build]],
     * which needs a scratch directory for the input CSVs and task outputs. */
-  final case class JobCase(inputs: Vector[GenInput], tasks: Vector[GenTask]) {
+  final case class JobCase(inputs: Vector[GenInput], tasks: Vector[GenTask], layout: RunLayout) {
 
-    /** Materialize the input CSVs under `root` and return the runnable job. */
-    def build(root: Path): DataJob = {
-      val inDir = root.resolve("in")
-      Files.createDirectories(inDir)
+    /** The directory every run writes under, templated if the layout is — what
+      * `DirectoryJobLoader` calls `outputDir`. */
+    def outputDir(root: Path): String = layout.runDir match {
+      case None => root.resolve("out").toString
+      case Some(template) => root.resolve("runs").toString + "/" + template
+    }
+
+    /** Where each run writes its `job.json`, templated as [[outputDir]] is. */
+    def manifestPath(root: Path): String = outputDir(root) + "/job.json"
+
+    /** A task's output directory, templated: `<outputDir>/<view>`, then its
+      * partition — the path `DirectoryJobLoader` builds for the same table. */
+    def outputPath(root: Path, t: GenTask): Option[String] = t.output.map { o =>
+      val base = outputDir(root) + "/" + t.view
+      o.partitionBy.fold(base)(p => base + "/" + p)
+    }
+
+    /** A templated path as the run at `executionTime` renders it. */
+    def render(path: String, executionTime: Instant): String =
+      TemplateRenderer.render(path, TemporalVariables(executionTime))
+
+    private def inputFile(root: Path, in: GenInput): Path = root.resolve("in").resolve(s"${in.view}.csv")
+
+    private def inputPath(root: Path, in: GenInput): String =
+      if (in.broken) root.resolve("in").resolve(s"${in.view}-missing.csv").toString
+      else inputFile(root, in).toString
+
+    /** Materialize the input CSVs under `root` and return the job as the run at
+      * `executionTime` sees it. */
+    def build(root: Path, executionTime: Instant): DataJob = {
+      Files.createDirectories(root.resolve("in"))
       val jobInputs = inputs.map { in =>
-        val file = inDir.resolve(s"${in.view}.csv")
         val sb = new java.lang.StringBuilder("k,v\n")
         var r = 0
         while (r < in.rows) { sb.append(r).append(',').append(r * 10).append('\n'); r += 1 }
-        Files.writeString(file, sb.toString)
-        val path = if (in.broken) inDir.resolve(s"${in.view}-missing.csv").toString else file.toString
-        InputFilePath(path, viewName = in.view, cache = in.index % 2 == 0)
+        Files.writeString(inputFile(root, in), sb.toString)
+        InputFilePath(inputPath(root, in), viewName = in.view, cache = in.index % 2 == 0)
       }
       DataJob(
         inputs = jobInputs,
         sql = tasks.map(t => sqlTask(t, root)),
-        jobRunOutput = Some(OutputFilePath(root.resolve(ManifestFile).toString)))
+        temporalVariables = Some(TemporalVariables(executionTime)),
+        jobRunOutput = Some(OutputFilePath(manifestPath(root))))
     }
 
-    private def sqlTask(t: GenTask, root: Path): SQLTask = {
-      val validations =
-        (if (t.passingValidation)
-           Seq(Validation("no-negative-k", sqlString = Some(s"SELECT k FROM ${t.view} WHERE k < -1000000")))
-         else Nil) ++
-          t.validationTaskSrc.map(j =>
-            Validation("upstream-no-negative-k", sqlString = Some(s"SELECT k FROM t$j WHERE k < -1000000"))) ++
-          (if (t.outcome == ValidationFails)
-             Seq(Validation("always-fails", sqlString = Some(s"SELECT k FROM ${t.view}")))
-           else Nil)
+    /** The same job as a job directory, written through `JobFiles` (the GUI's
+      * own authoring path) to `root/job`: one input config per input, and per
+      * task its `main.sql`, its validations and an `output.json` with its format
+      * and partition. Opened with [[outputDir]] as the output directory, it is
+      * the job the runs ran: `DirectoryJobLoader` gives every table the output
+      * path [[outputPath]] gives the task, and the manifest the path
+      * [[manifestPath]] gives. A memory-only task gets a directory nothing is
+      * ever written to, since a table always has one. */
+    def writeDirectoryJob(root: Path): Path = {
+      val dir = root.resolve("job")
+      inputs.foreach { in =>
+        JobFiles.addInput(dir, in.view, inputPath(root, in), format = None,
+          cache = in.index % 2 == 0, options = Map.empty)
+      }
+      tasks.foreach { t =>
+        JobFiles.addTable(dir, t.view, mainSql(t),
+          format = t.output.filter(_.parquet).map(_.format),
+          partitionBy = t.output.flatMap(_.partitionBy),
+          maxPartitions = None)
+        validations(t).foreach(v => JobFiles.addValidation(dir, t.view, v.name, v.sql))
+      }
+      dir
+    }
+
+    /** A task's validations, in the order the task declares them. */
+    def validations(t: GenTask): Vector[GenValidation] =
+      (if (t.passingValidation)
+         Vector(GenValidation("no_negative_k", s"SELECT k FROM ${t.view} WHERE k < -1000000"))
+       else Vector.empty) ++
+        t.validationTaskSrc.map(j =>
+          GenValidation("upstream_no_negative_k", s"SELECT k FROM t$j WHERE k < -1000000")) ++
+        (if (t.outcome == ValidationFails) Vector(GenValidation("always_fails", s"SELECT k FROM ${t.view}"))
+         else Vector.empty)
+
+    private def sqlTask(t: GenTask, root: Path): SQLTask =
       SQLTask(
         sqlString = Some(mainSql(t)),
         outputFile = t.output.map { o =>
-          OutputFilePath(root.resolve(t.view).toString, options = o.options, format = Some(o.format))
+          OutputFilePath(outputPath(root, t).get, options = o.options, format = Some(o.format))
         },
-        validations = validations,
+        validations = validations(t).map(v => Validation(v.name, sqlString = Some(v.sql))),
         viewName = Some(t.view),
         name = Some(t.view))
-    }
 
     /** `UNION ALL` over every source. A `Fails` task poisons its first arm with a
       * column that does not exist — the statement still parses, so the DAG keeps
@@ -155,11 +263,14 @@ object JobDagGen {
       val ins = inputs.map(i => s"${i.view}(rows=${i.rows}${if (i.broken) ",BROKEN" else ""})").mkString(", ")
       val ts = tasks.map { t =>
         val srcs = (t.inputSrcs.map(i => inputs(i).view) ++ t.taskSrcs.map(j => s"t$j")).mkString("+")
-        val out = t.output.map(o => s",${o.format}${if (o.spill) ",spill" else ""}").getOrElse(",mem")
+        val out = t.output.map { o =>
+          s",${o.format}${if (o.spill) ",spill" else ""}${o.partitionBy.map(p => s",part=$p").getOrElse("")}"
+        }.getOrElse(",mem")
         val vdep = t.validationTaskSrc.map(j => s",valOn=t$j").getOrElse("")
         s"${t.view}<-$srcs(${t.outcome}$out$vdep)"
       }.mkString(", ")
-      s"JobCase(inputs=[$ins], tasks=[$ts])"
+      val dir = layout.runDir.map(d => s"runs/$d").getOrElse("out")
+      s"JobCase(inputs=[$ins], tasks=[$ts], dir=$dir, runs=[${layout.executionTimes.mkString(", ")}])"
     }
   }
 
@@ -207,8 +318,26 @@ object JobDagGen {
     // Every input must have a consumer: an input nothing reads still loads (and
     // may still fail) but reaches no task, which would leave its `broken` draw
     // invisible to the oracle.
-    val result = tasks.toVector
-    JobCase(inputs, attachOrphanInputs(rng, inputs, result))
+    val dag = attachOrphanInputs(rng, inputs, tasks.toVector)
+    val (layout, partitioned) = drawLayout(rng.split(), dag)
+    JobCase(inputs, partitioned, layout)
+  }
+
+  /** Where the case's runs land and when they run, and which task outputs
+    * append a templated partition. */
+  private def drawLayout(rng: Rng, tasks: Vector[GenTask]): (RunLayout, Vector[GenTask]) = {
+    val runDir = if (rng.bool(0.4)) Some(rng.oneOf(RunDirTemplates)) else None
+    val first = rng.oneOf(BaseExecutionTimes)
+    val times =
+      if (rng.bool(0.35)) Vector(first, first.plus(rng.oneOf(SecondRunOffsets)))
+      else Vector(first)
+    val partitioned = tasks.map { t =>
+      t.output match {
+        case Some(o) if rng.bool(0.35) => t.copy(output = Some(o.copy(partitionBy = Some(rng.oneOf(PartitionTemplates)))))
+        case _ => t
+      }
+    }
+    (RunLayout(runDir, times), partitioned)
   }
 
   /** Give every input at least one reading task, so a broken input always shows

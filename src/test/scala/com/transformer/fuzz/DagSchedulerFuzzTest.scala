@@ -2,7 +2,7 @@ package com.transformer.fuzz
 
 import com.transformer.core.Spill
 import com.transformer.fuzz.JobDagGen.JobCase
-import com.transformer.fuzz.oracle.DagSchedule
+import com.transformer.fuzz.oracle.{DagSchedule, Hydration}
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
 
@@ -19,6 +19,11 @@ import java.nio.file.{Files, Path}
   * implementation to disagree with (see [[DagSchedule]] for the list):
   * per-task status, dependency ordering by timestamp, terminal-state
   * completeness, skip attribution, the job verdict, and liveness.
+  *
+  * Then it reopens the finished runs the way the GUI does, in a `JobSession`
+  * on the same job as a directory, and holds what the session rebuilds to what
+  * the runs returned ([[Hydration]]): the read side of the records the
+  * scheduler property checks are written.
   *
   * Liveness is the reason this target exists in the same repo as the sharded
   * exchange work. Every task body fans its own nested work onto the shared
@@ -73,7 +78,7 @@ class DagSchedulerFuzzTest {
       gen = JobDagGen.generate,
       shrink = Shrinker.jobCase,
       count = Props.seedCountOr(DefaultDagSeeds)
-    ) { jc => DagSchedule.check(jc); () }
+    ) { jc => DagSchedule.run(jc)((runs, root) => Hydration.check(jc, runs, root)); () }
 
   // ---- corpus health --------------------------------------------------------
 
@@ -115,7 +120,7 @@ class DagSchedulerFuzzTest {
       val jc = JobDagGen.generate(new Rng(seed))
       if (jc.tasks.length >= 4 && DagSchedule.expectedStatuses(jc).forall(_ == "Succeeded")) {
         sampled += 1
-        if (DagSchedule.hasOverlap(DagSchedule.check(jc).tasks)) overlapped += 1
+        if (DagSchedule.check(jc).exists(run => DagSchedule.hasOverlap(run.result.tasks))) overlapped += 1
       }
       seed += 1
     }
@@ -134,6 +139,97 @@ class DagSchedulerFuzzTest {
     assertTrue(s"no run overlapped two tasks in wall-clock time ($sampled sampled)", overlapped > 0)
   }
 
+  /** Coverage guard for the hydration property. Hydration is only checked where
+    * the corpus puts it: a session rebuilds a task from its record only when the
+    * task has an output directory, from job.json's entry only when it does not,
+    * and only a status the run reached; partition pickers list two runs only
+    * when a templated path renders twice; the run picker lists two only when a
+    * templated run directory does. The first half counts what the generated
+    * cases imply (cheap, many seeds); the second runs a sample and counts what
+    * the sessions actually showed, by source and status, and how they were
+    * opened. */
+  @Test def generatorCoversHydrationShapes(): Unit = {
+    val n = Props.seedCountOr(2000)
+    val root = Path.of("/scratch")
+    val recordBacked, memoryOnly = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    var templatedRunDir, partitioned, multiPartition, multiRun, rewritten, backfill = 0
+    val depths = scala.collection.mutable.Map.empty[Int, Int].withDefaultValue(0)
+    var i = 0
+    while (i < n) {
+      val jc = JobDagGen.generate(new Rng(Props.baseSeed + i))
+      val statuses = DagSchedule.expectedStatuses(jc)
+      val times = jc.layout.executionTimes
+      jc.tasks.foreach { t =>
+        if (t.output.isDefined) recordBacked(statuses(t.index)) += 1 else memoryOnly(statuses(t.index)) += 1
+        t.output.flatMap(_.partitionBy).foreach { p =>
+          partitioned += 1
+          depths(p.count(_ == '/') + 1) += 1
+        }
+        jc.outputPath(root, t).foreach { p =>
+          val dirs = times.map(jc.render(p, _)).distinct.length
+          if (dirs >= 2) multiPartition += 1
+          if (times.length >= 2 && dirs == 1) rewritten += 1
+        }
+      }
+      if (jc.layout.runDir.isDefined) templatedRunDir += 1
+      if (times.map(jc.render(jc.manifestPath(root), _)).distinct.length >= 2) multiRun += 1
+      if (times.length >= 2 && times(1).isBefore(times(0))) backfill += 1
+      i += 1
+    }
+    // Real runs: the sources each session used. A sample of two-run cases, so
+    // the pickers have something to list.
+    val seen = new Hydration.Report
+    var seed = Props.baseSeed
+    var sampled = 0
+    while (sampled < 16 && seed < Props.baseSeed + 400) {
+      val jc = JobDagGen.generate(new Rng(seed))
+      if (jc.layout.runs >= 2) {
+        sampled += 1
+        seen.add(DagSchedule.run(jc)((runs, root) => Hydration.check(jc, runs, root)))
+      }
+      seed += 1
+    }
+    println(s"[hydration] over $n seeds: recordBacked=${recordBacked.toMap} memoryOnly=${memoryOnly.toMap} " +
+      s"templatedRunDirCases=$templatedRunDir partitionedTasks=$partitioned partitionDepths=${depths.toMap} " +
+      s"multiPartitionTasks=$multiPartition multiRunCases=$multiRun rewrittenTasks=$rewritten " +
+      s"backfillCases=$backfill")
+    println(s"[hydration] over $sampled sampled runs: sources=${seen.sources.toMap} " +
+      s"openings=${seen.openings.toMap} multiPartitionTasks=${seen.multiPartitionTasks} " +
+      s"multiRunSessions=${seen.multiRunSessions} degraded=${seen.degraded.map { case (d, c) => d.name -> c }.toMap}")
+    // Bounds sit near a third of the rates measured over the default 2000
+    // seeds (the message prints the counts), so a collapse fails and a drift
+    // of a few percent does not.
+    Seq("Succeeded", "Failed", "ValidationFailed", "Skipped").foreach { st =>
+      assertTrue(s"record-backed $st tasks=${recordBacked(st)} over $n", recordBacked(st) > n / 25)
+      assertTrue(s"memory-only $st tasks=${memoryOnly(st)} over $n", memoryOnly(st) > n / 25)
+    }
+    assertTrue(s"templatedRunDirCases=$templatedRunDir over $n", templatedRunDir > n / 8)
+    Seq(1, 2, 3).foreach(dpt => assertTrue(s"partitions $dpt deep=${depths(dpt)} over $n", depths(dpt) > n / 8))
+    assertTrue(s"multiPartitionTasks=$multiPartition over $n", multiPartition > n / 4)
+    assertTrue(s"multiRunCases=$multiRun over $n", multiRun > n / 20)
+    assertTrue(s"rewrittenTasks=$rewritten over $n", rewritten > n / 8)
+    assertTrue(s"backfillCases=$backfill over $n", backfill > n / 25)
+    Seq("Succeeded", "Failed", "ValidationFailed", "Skipped").foreach { st =>
+      assertTrue(s"sessions rebuilt no $st task from its record: ${seen.sources.toMap}", seen.sources(("record", st)) > 0)
+    }
+    assertTrue(s"sessions rebuilt no ValidationFailed task from job.json's entry: ${seen.sources.toMap}",
+      seen.sources(("summary", "ValidationFailed")) > 0)
+    assertTrue(s"no session listed two partitions: ${seen.multiPartitionTasks}", seen.multiPartitionTasks > 0)
+    assertTrue(s"no session listed two runs: ${seen.multiRunSessions}", seen.multiRunSessions > 0)
+    assertTrue(s"no run was picked: ${seen.openings.toMap}", seen.openings("picked") > 0)
+    assertTrue(s"no session opened at an earlier time: ${seen.openings.toMap}", seen.openings("earlier") > 0)
+  }
+
+  /** Each [[Hydration.Degraded]] entry records what a reopened run shows today
+    * for a task with no record behind it. When one stops reproducing, the
+    * session changed what it shows: update the plan and the oracle, and remove
+    * the entry. */
+  @Test def everyDegradedHydrationStillReproduces(): Unit =
+    Hydration.Degraded.All.foreach { d =>
+      assertTrue(s"'${d.name}' no longer reproduces: a session no longer shows ${d.shows}. " +
+        s"Record what it shows now in ${Hydration.Plan} and remove the entry.", Hydration.Degraded.reproduces(d))
+    }
+
   /** The seed is the repro key: the same seed must rebuild the same job. */
   @Test def sameSeedReproduces(): Unit = {
     val a = JobDagGen.generate(new Rng(4242L))
@@ -142,13 +238,15 @@ class DagSchedulerFuzzTest {
   }
 
   /** The shrinker must terminate and strictly reduce, or `Props.minimize` loops
-    * until its step cap. Measure = tasks + edges + injected failures. */
+    * until its step cap. Measure = tasks + edges + injected failures + output
+    * config + the run layout. */
   @Test def shrinkerTerminatesAndReduces(): Unit = {
     def measure(jc: JobCase): Int =
       jc.tasks.length + jc.tasks.map(_.sources).sum +
         jc.tasks.count(_.outcome != JobDagGen.Ok) + jc.inputs.count(_.broken) +
         jc.tasks.count(_.output.isDefined) + jc.tasks.count(_.passingValidation) +
-        jc.tasks.count(_.validationTaskSrc.isDefined) + jc.inputs.map(_.rows).sum
+        jc.tasks.count(_.validationTaskSrc.isDefined) + jc.inputs.map(_.rows).sum +
+        jc.layout.runs + jc.layout.runDir.size + jc.tasks.count(_.output.exists(_.partitionBy.isDefined))
     var i = 0
     while (i < 40) {
       val jc = JobDagGen.generate(new Rng(i.toLong))

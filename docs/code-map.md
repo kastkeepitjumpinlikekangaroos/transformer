@@ -21,9 +21,12 @@ navigation hint, not a comprehensive directory listing.
   table. Teaching `LogicalBuilder` a clause means deleting its entry here;
   `sql/plan:unsupported_clauses_test` enforces it (see
   [architecture §10](architecture.md#10-nothing-the-parser-accepts-is-silently-dropped)).
-- `gui/JobSession.scala` (~795 LOC) — mutable FX-thread state for the GUI;
+- `gui/JobSession.scala` (~810 LOC) — mutable FX-thread state for the GUI;
   also tracks per-input UI state (Pending/Loading/Loaded/Failed) now that
-  inputs flow through the unified scheduler.
+  inputs flow through the unified scheduler. `hydrateRunRecords` is the part
+  that rebuilds a finished run from `job.json` and the `_run.json` records; the
+  `Hydration` oracle in `fuzz/dag_scheduler_fuzz_test` checks it on every
+  generated run. Builds without JavaFX as `gui:session`.
 - `sql/exec/AggregateExec.scala` (~1900 LOC) — biggest file. Every `AggState` subclass
   plus the codec / LongHashMap GROUP BY paths. Primitive states
   (`CountStarState`, `CountState`, `CountIfState`, `LongSumState`,

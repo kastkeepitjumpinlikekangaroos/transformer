@@ -490,8 +490,9 @@ object Shrinker {
   // ---- JobCase shrinker (DAG scheduler) -----------------------------------
 
   /** Strictly-smaller candidates for a generated job DAG. Every move reduces a
-    * well-founded measure — task count, edge count, injected-failure count, or
-    * per-task output config — so the greedy loop terminates. Dropping the LAST
+    * well-founded measure — task count, edge count, injected-failure count,
+    * per-task output config, or the run layout (runs, a templated run directory,
+    * templated partitions) — so the greedy loop terminates. Dropping the LAST
     * task keeps the remaining indices (and hence every `t<j>` reference) valid,
     * which is why only the tail is peeled; edges are then removed one at a time,
     * so a scheduling bug converges to the smallest DAG that still shows it.
@@ -501,7 +502,23 @@ object Shrinker {
     // A task the tail depends on cannot be dropped, so peel only from the end.
     val dropLastTask: Iterator[JobDagGen.JobCase] =
       if (jc.tasks.length <= 1) Iterator.empty
-      else Iterator(JobDagGen.JobCase(jc.inputs, jc.tasks.init))
+      else Iterator(jc.copy(tasks = jc.tasks.init))
+
+    // One run, then no templated run directory, then no templated partitions:
+    // a hydration failure that survives these is not about the layout.
+    val dropSecondRun: Iterator[JobDagGen.JobCase] =
+      if (jc.layout.runs <= 1) Iterator.empty
+      else Iterator(jc.copy(layout = jc.layout.copy(executionTimes = jc.layout.executionTimes.take(1))))
+
+    val dropRunDir: Iterator[JobDagGen.JobCase] =
+      if (jc.layout.runDir.isEmpty) Iterator.empty
+      else Iterator(jc.copy(layout = jc.layout.copy(runDir = None)))
+
+    val dropPartition: Iterator[JobDagGen.JobCase] =
+      jc.tasks.indices.iterator.filter(jc.tasks(_).output.exists(_.partitionBy.isDefined)).map { i =>
+        val t = jc.tasks(i)
+        jc.copy(tasks = jc.tasks.updated(i, t.copy(output = t.output.map(_.copy(partitionBy = None)))))
+      }
 
     val dropValidationEdge: Iterator[JobDagGen.JobCase] =
       jc.tasks.indices.iterator.filter(jc.tasks(_).validationTaskSrc.isDefined).map { i =>
@@ -545,7 +562,7 @@ object Shrinker {
       }
 
     dropLastTask ++ dropEdge ++ dropValidationEdge ++ healInput ++ healTask ++ dropOutput ++
-      dropValidation ++ shrinkRowCount
+      dropValidation ++ shrinkRowCount ++ dropSecondRun ++ dropRunDir ++ dropPartition
   }
 
   // ---- ParquetCase shrinker (external-format differential) -----------------
