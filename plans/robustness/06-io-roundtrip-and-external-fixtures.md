@@ -1,6 +1,8 @@
 # Plan 06: the file-format layer has no property coverage and no external oracle
 
-> Status: **not started** · Effort: 3-4 days · Risk: low (test-only)
+> Status: **done** 2026-10-14 (see [Outcome](#outcome)) · Effort: 3-4 days ·
+> Risk: low (test-only), though what it found changed the CSV reader, writer and
+> inference, and two parquet pushdown rules
 
 ## How this was found
 
@@ -155,3 +157,130 @@ Stop and ask before: changing CSV inference behaviour. Anything
 InferenceRoundTrip reveals gets documented first and discussed before it gets
 "fixed" — the ladder's normalizations may well be deliberate.
 ```
+
+## Outcome
+
+Landed 2026-10-14, in the order the launch prompt asked for: the parquet
+property, then the CSV text property, then inference. Each found defects, and
+each defect was fixed ahead of the property that found it, with a named
+regression that comments the old answer.
+
+**The parquet property** (`fuzz/parquet_fuzz_test`, campaign
+`parquet_fuzz_campaign`). `ExternalParquet` gained a `Layout` (dictionary or
+plain, a dictionary small enough to overflow into plain pages, page size and
+row limit, data pages v1 or v2, byte-stream-split floats, every codec the
+classpath carries, ZSTD and LZ4_RAW included) and `writeRowGroups`, which cuts
+row groups exactly by writing each alone and joining them with parquet-mr's
+`appendFile`. `ParquetGen` draws a glob of one to three files whose columns
+each have an engine type stored in one of 33 layouts, values drawn as stored
+bits from each type's edges, and a way to read them (batch size, partition
+target, projection, pushdown). `oracle/ParquetDifferential` first asks
+parquet-mr to read every file as the generator says, by its own stringifier,
+then holds our reader to the generator's spec reading: schema, every row in
+order, `exactRowCount`, partitions as whole runs of row groups (the partition
+axis this plan asked for), a projection past the first group, and pushdown
+soundness, which the plan did not ask for and which found both defects:
+
+- **A string range pushed against statistics in UTF-8 order** (seed 1203): the
+  file orders strings by code point and the engine by UTF-16 code unit, so
+  `s < '\uFFFD'` skipped the group holding an emoji the engine orders below
+  it. A range now pushes only against a literal below U+D800, where both
+  orders agree; equality and IN on any literal.
+- **A negative bound on an unsigned 8- or 16-bit column** (seeds 9494 and
+  18048, in a campaign): those read as `INT` but their file orders them
+  unsigned, so `u8 > '-1'` skipped every group. They push no comparison now
+  (`Decoding.pushesComparisons`, renamed from `storesEngineValue`, which no
+  longer said what it decides).
+
+NaN and signed zeros were probed too: parquet-mr's statistics handle both the
+way the engine's total order needs.
+
+**The CSV properties** (`fuzz/csv_fuzz_test`, campaign `csv_fuzz_campaign`).
+`CsvTextGen` draws an option bag of the kind a job passes (any delimiter,
+quote and escape, past ASCII too, a null string that is empty or a word, every
+line ending, UTF-8, UTF-16 and ISO-8859-1) and three kinds of case, for three
+oracles: `CsvRoundTrip.checkData` (data written by `CsvWriter`, read back the
+way a job re-reads a task's output), `CsvRoundTrip.checkText` (text written
+here from fields it records, through the parser and the reader, malformed
+text included) and `InferenceRoundTrip`. A probe of the CSV layer before any
+of them ran found most of what they then confirmed, and the user decided the
+semantics (recorded in the README's CSV section):
+
+1. NULL is the null string written unquoted (the PostgreSQL rule); a quoted
+   field is a value, and the writer quotes a value equal to the null string.
+   An empty string used to read back as NULL.
+2. A blank line is a row in a one-column file. A NULL there writes as a blank
+   line, which the reader skipped: three rows written, two read back, in a
+   job's re-read too.
+3. Malformed text fails, naming the file and line: an unclosed quote (which
+   took the rest of the file into one field), a row with extra or missing
+   fields (dropped or padded before).
+4. Charsets fail loudly: the writer printed `?` for a character its charset
+   lacks, the reader U+FFFD for bytes that are no text.
+5. Inference joins types properly: `INT`, `BIGINT`, `DOUBLE` widen, a `DATE`
+   widens to a `TIMESTAMP`, any other mix is a `STRING`. The old ladder typed
+   `1.5` and `true` as a `BOOLEAN` and read 1.5 as false.
+6. Past the sample, values parse strictly and fail by name; a `BOOLEAN` reads
+   only `true` and `false` (it read `yes` as false).
+7. Numbers are plain decimals, not Java's grammar (`1d`, `0x1p3`, ` 1`).
+8. An integer past `BIGINT` infers `DECIMAL(38,0)` (it was a `DOUBLE` that lost
+   digits).
+
+Fixed without asking, as plain bugs: a `BINARY` column could not be read back
+from the Base64 the writer writes; the writer did not escape a separate escape
+character; a delimiter past ASCII crashed the writer; a UTF-8 byte-order mark
+began the first column's name; a job re-read its CSV output without the
+`escape` option; a declared `DECIMAL` kept CSV text's own scale; a value that
+did not parse threw a bare `NumberFormatException`; and, found by the data
+property (seed 32), a CSV output of no partitions wrote no file, so a task over
+an empty parquet input failed the moment a downstream task re-read it. The
+text of each type now lives in `read/csv/CsvValues`, for the writer, the reader
+and inference alike.
+
+Decided along the way, and worth a look: a `BINARY` has an empty value like a
+`STRING` (the empty byte string reads back as itself, not NULL); an empty
+column name is quoted, so a header is never a blank line; an inferred
+`DECIMAL(38,0)` column reads any plain decimal its scale holds exactly (`5.` as
+5), as a declared one does; and the line named for bytes that are no text comes
+from decoding the file again, because the parser's reader decodes thousands of
+characters ahead of it.
+
+**Where this plan was wrong, or silent.**
+
+- *Inference's fixed point is too weak a claim on its own.* The old ladder read
+  `1.5` as the `BOOLEAN` false and then reached a fixed point at once, so "the
+  second and third reads agree" passes over it. `InferenceRoundTrip` also holds
+  the first read to the agreed rules, restated with a grammar of its own: each
+  type is the join over the sample, each value is what its text says, and a
+  value past the sample that does not fit fails by name. The fixed point is
+  then checked as the plan asked, and the property prints which written types
+  come back as which, the table the README's CSV section documents.
+- *The external fixture helper* existed (plan 03) and needed only exact row
+  groups and layouts; the parquet property is the generated half the plan
+  described, plus parquet-mr reading every file back, so the generator's own
+  reading of the spec is checked against parquet-mr as well as our reader.
+- *A generator's model of text is easy to get wrong.* The text property's first
+  failures were all in its own model: a lone `\r` before an empty line ending in
+  `\n` makes one `\r\n`, a byte-order mark has no Latin-1 bytes, a field with
+  the delimiter `x` in it splits. Each oracle has a check that it reports what
+  it is shown, and none was weakened to pass.
+
+**Verification.** `bazel test //...` green (53 targets with the throwaway probe,
+52 without it), jaffle-shop 15/15, and the scala and directory examples
+succeed. Campaigns on the final code, run from snapshots of the launchers:
+`parquet_fuzz_campaign` 30000 seeds green after both pushdown fixes (each
+10000-seed block about fifteen minutes beside two others),
+`csv_fuzz_campaign` 60000 seeds of each property green (about 2.7 minutes for a
+20000-seed block of all three).
+
+**Still open, left as follow-ups:**
+- SQL's `CAST` still reads numbers with Java's grammar, so `CAST('1d' AS
+  DOUBLE)` is 1.0 where a CSV field `1d` is no number.
+- The parquet writer writes half a surrogate pair as `?` (`Binary.fromString`
+  replaces it), where the CSV writer now fails.
+- CSV inference reads `2024-01-01 12:00:00` (SQL's space form, which `CAST`
+  takes) as a `STRING`.
+- `inferenceSampleRows` and an explicit schema are programmatic only; a
+  directory job's option bag cannot set either, so a value past the sample
+  that does not fit can only be fixed in the data.
+

@@ -35,7 +35,7 @@ at the time of the audit: `bazel test //...` 46/46 green.
 | [03](03-parquet-external-format-fidelity.md) | Parquet timestamp units and `DECIMAL` | silent 1000x timestamp error; decimals read as unscaled ints or raw bytes | **done** 2026-10-03 | 1-2 days | low-med | — |
 | [04](04-widen-fuzz-corpus-to-every-type.md) | Widen the fuzz corpus to all ten types | the guard that keeps 02 and 03 fixed | **done** 2026-10-03 | 2-3 days | low | 02 (else red) |
 | [05](05-frontend-robustness-fuzzer.md) | Frontend robustness fuzzer | "nothing silently dropped" + "errors are user-facing" as properties | **done** 2026-10-04 | 3-5 days | low | 01 (shares its clause table) |
-| [06](06-io-roundtrip-and-external-fixtures.md) | I/O round-trip properties + external parquet fixtures | the helper 03 needs, plus CSV state-machine fuzzing | open | 3-4 days | low | — (03 wants its fixture helper) |
+| [06](06-io-roundtrip-and-external-fixtures.md) | I/O round-trip properties + external parquet fixtures | the helper 03 needs, plus CSV state-machine fuzzing | **done** 2026-10-14 | 3-4 days | low | — (03 wants its fixture helper) |
 | [07](07-hydration-oracle-on-the-dag-corpus.md) | Hydration oracle on the existing DAG corpus | the read side of the records the DAG fuzzer already writes | open | 2 days | low | — |
 | [08](08-unconsumed-input-failure-is-swallowed.md) | An unconsumed input's load failure is swallowed | carried over, needs a product decision first | open | half a day | low | — |
 | [09](09-branch-result-types.md) | `CASE`, `COALESCE`, `IF`, `GREATEST` and `UNION` take their first branch's type | a wider decimal in a later branch is kept under a narrower declared type, so writing or spilling it fails; `THEN 1 ELSE 2.5` is 2 | open, gated in the SQL corpora | 1-2 days | medium | needs a decision for the numeric half |
@@ -95,6 +95,18 @@ equivalent spellings. Its three properties found five families of defects, now
 plans 10 to 14, each recorded in the fuzzer with a repro that fails the suite
 once the defect is gone. Plan 14's is the most severe: one deep expression in a
 task hangs the whole job, silently. Details in the plan's What landed section.
+
+**Done:** plan 06. The file formats have properties of their own:
+`fuzz/parquet_fuzz_test` writes globs with parquet-mr in every layout parquet
+allows and holds our reader to the format and parquet-mr to the same reading;
+`fuzz/csv_fuzz_test` round-trips data through the CSV writer and reader, parses
+text it wrote itself, and holds inference to its rules and to a fixed point.
+They found two parquet pushdown rules that dropped rows (a string range, an
+unsigned narrow integer) and, with a probe beside them, a dozen CSV defects:
+NULL rows lost in one-column files, empty strings read as NULL, BINARY
+unreadable, malformed text read silently, inference typing `1.5` and `true` as
+a BOOLEAN. All fixed; the CSV semantics were the user's decisions. Details in
+the plan's Outcome section.
 
 **Next, in order:** [14](14-pathological-nesting.md)'s job hang (a `finally`
 and a `catch`), then [12](12-text-the-binder-never-sees.md) and
