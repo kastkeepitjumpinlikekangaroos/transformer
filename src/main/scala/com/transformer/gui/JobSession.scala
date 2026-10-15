@@ -83,9 +83,9 @@ final class JobSession {
   // Per-task records loaded from disk on job-dir open. Populates UI state with
   // the previous run's results so the GUI is non-empty before the user presses Run.
   private var _taskRecords: Vector[Option[TaskRunRecord]] = Vector.empty
-  // All historical runs discovered under each task's templated output path.
-  // Sorted newest-first by writtenAt. Used by the GUI to render a partition
-  // picker when a task has 2+ persisted runs.
+  // Every run of each task discovered under its templated output path: the
+  // records there that name the task. Sorted newest-first by writtenAt. Used
+  // by the GUI to render a partition picker when a task has 2+ persisted runs.
   private var _historicalRuns: Vector[Seq[(Path, TaskRunRecord)]] = Vector.empty
   // Job-level manifest from disk (<outputDir>/job.json by default). Loaded
   // alongside per-task records on open so the run-log can surface warnings
@@ -152,7 +152,8 @@ final class JobSession {
     */
   def taskRecordFor(taskIndex: Int): Option[TaskRunRecord] = _taskRecords.lift(taskIndex).flatten
 
-  /** All historical runs discovered under this task's templated output path,
+  /** Every run of this task discovered under its templated output path — the
+    * records there that name the task; one another task wrote is not its run —
     * newest-first. Surfaces a partition picker in the UI when 2+ runs exist.
     *
     * Each entry is `(partitionPath, record)` — the path is the on-disk output
