@@ -805,7 +805,8 @@ rounded half up. A decimal sum too long for 38 digits is an error.
 
 **Window functions:** `<fn>() OVER ([PARTITION BY <exprs>] [ORDER BY <keys>]
 [<frame>])` — `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`/`LEAD` (with the SQL
-`offset` and `default` arguments), and the aggregate forms above. The `ORDER BY`
+`offset` and `default` arguments; the default meets the value it stands in for
+as a `CASE`'s values do, below), and the aggregate forms above. The `ORDER BY`
 keys take `ASC`/`DESC` and `NULLS FIRST`/`NULLS LAST` exactly as the outer
 `ORDER BY` does. Frames are
 `ROWS BETWEEN ... AND ...`; `RANGE` is accepted and executed as `ROWS`, which
@@ -896,6 +897,27 @@ pairs as text, or promote a value quietly, answer questions nobody asked — as
 text, `9 < '10'` is false. This one prefers an error to a guess. Arithmetic is on
 numbers only: `x + '1'` adds one, and `s + 1` over a string column is an error,
 as is any arithmetic on a boolean, a date or a timestamp. `||` joins text.
+`NULLIF(a, b)` compares its two as `=` does and returns `a` as it is, so
+`NULLIF(i, '0')` reads the `'0'` as an `INT`.
+
+**Values that become one result take a type that holds each of them.** The
+`THEN` and `ELSE` values of a `CASE`, the arguments of `COALESCE`, `GREATEST`
+and `LEAST`, `IF`'s two values, `LAG`'s or `LEAD`'s value and default, and each
+column of a `UNION`'s arms meet by the rule above, whatever order they come in:
+`CASE WHEN p THEN 1 ELSE 2.5 END` is the `DOUBLE` 2.5, `COALESCE(i, '0')` reads
+the `'0'` as an `INT`, and `COALESCE(s, 1)` over a string column, a `DATE`
+beside a `TIMESTAMP`, a `BOOLEAN` beside a number and a `UNION` of an `INT` arm
+and a `STRING` arm are errors naming the CAST. A `DECIMAL` is held exactly: two
+meet as the `DECIMAL` with the longer integer part and the larger scale, so
+`COALESCE(price, price * rate)` over a `DECIMAL(9,2)` and a `DECIMAL(18,4)` is
+a `DECIMAL(28,6)`; an `INT` or `BIGINT` counts as the `DECIMAL(10,0)` or
+`DECIMAL(19,0)` its every value fits; and a number written in the query as the
+decimal it is, so `COALESCE(price, 0)` keeps `price`'s type. A `FLOAT` or
+`DOUBLE` that is not written in the query beside a `DECIMAL` is an error, as in
+arithmetic: CAST the `DECIMAL` to `DOUBLE` for a `DOUBLE` result. Past 38
+digits the type gives way on its scale as arithmetic's does, so a value is
+rounded half up to it, and one whose integer part is too long is an error. Every
+value then fits its column's type, and parquet writes it as it is.
 
 **`DECIMAL` arithmetic is exact, and declares a type that holds its
 result.** `+ - * / %` (and `MOD`) on a `DECIMAL` type their result as Spark
@@ -966,9 +988,8 @@ the two operator families differ.
 `DOUBLE` cannot tell the two apart. A `DECIMAL` compares by value at full
 precision, and its scale is only how it is written: `1.0 = 1.00` is TRUE, and
 `GROUP BY`, `DISTINCT`, `UNION`, `COUNT(DISTINCT …)`, `PARTITION BY` and join
-keys all treat the two as one value. A column does not hold every value at its
-declared scale (a `CASE` or `COALESCE` branch can keep its own, see
-[Limitations](#limitations)), so a grouping
+keys all treat the two as one value. A column built in memory need not hold
+every value at its declared scale, so a grouping
 key reads back at the column's declared scale, `1.000` in a `DECIMAL(10,3)`,
 whichever spelling arrived first, and so do `MIN` and `MAX`, and any value
 written to parquet and read back, a spilled one included. `BINARY` values
@@ -1126,13 +1147,6 @@ JDK 21 or newer (tested through JDK 25).
   the file, line, column and value; an explicit schema (`inferSchema = false`
   with `columns`) reads every file as declared. A parquet glob checks every
   file against the first when it is opened (see [Parquet](#parquet)).
-- **`CASE`, `COALESCE`, `IF`, `GREATEST` / `LEAST` and `UNION` take their first
-  branch's type.** A later branch is cast to it, and a `DECIMAL` keeps its value
-  when cast, so `COALESCE(price, price * rate)` over two decimal columns is
-  declared as `price`'s type while holding the product's extra digits; writing
-  such a result to parquet fails, naming the value. Numbers are cast the other
-  way: `CASE WHEN p THEN 1 ELSE 2.5 END` is the `INT` 2. Recorded as
-  [plans/robustness/09](plans/robustness/09-branch-result-types.md).
 - **Some functions and conditions bind over a type they cannot take** and fail
   while running instead of at bind time: `SUM` or `AVG` over text or dates, the
   math functions over text, `SUBSTRING` with a text position, a NULL `ROUND`

@@ -849,22 +849,21 @@ object MetaQueryGen {
 
   /** A non-boolean value expression of `target` over `scope`. A DATE,
     * TIMESTAMP or BINARY takes only `COALESCE`, which the engine has no
-    * arithmetic for, and a DECIMAL `COALESCE`, `ABS` and arithmetic
-    * ([[genDecimalArith]]). `inBranch` is `QueryGen.genValue`'s: a COALESCE
-    * takes its first branch's type, so a DECIMAL in a branch is built without
-    * arithmetic (`plans/robustness/09-branch-result-types.md`). */
-  private def genValue(rng: Rng, scope: Vector[ScopeCol], target: DataType, depth: Int,
-                       inBranch: Boolean = false): Expr = {
+    * arithmetic for, and a DECIMAL `COALESCE`, `ABS`, arithmetic
+    * ([[genDecimalArith]]) and arithmetic beside a leaf in a conditional
+    * ([[genDecimalBranches]]). */
+  private def genValue(rng: Rng, scope: Vector[ScopeCol], target: DataType, depth: Int): Expr = {
     if (depth <= 0 || rng.bool(leafProb(depth))) genLeafValue(rng, scope, target)
     else if (!Numerics.contains(target) && target != DataType.StringType) {
       def coalesce(): Expr =
-        FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(genValue(rng, scope, target, depth - 1, inBranch = true)), target)
+        FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(genValue(rng, scope, target, depth - 1)), target)
       target match {
         case _: DataType.DecimalType =>
           val decimalCols = scope.filter(_.dataType.isInstanceOf[DataType.DecimalType])
-          val abs = (3, () => FuncExpr("ABS", Seq(genValue(rng, scope, target, depth - 1, inBranch)), target))
+          val abs = (3, () => FuncExpr("ABS", Seq(genValue(rng, scope, target, depth - 1)), target))
           val arith = (4, () => genDecimalArith(rng, scope, target, decimalCols, depth))
-          val options = Seq((5, () => coalesce()), abs) ++ (if (inBranch || decimalCols.isEmpty) Nil else Seq(arith))
+          val branches = (3, () => genDecimalBranches(rng, scope, target, decimalCols, depth))
+          val options = Seq((5, () => coalesce()), abs) ++ (if (decimalCols.isEmpty) Nil else Seq(arith, branches))
           rng.weighted[() => Expr](options: _*)()
         case _ => coalesce()
       }
@@ -879,6 +878,32 @@ object MetaQueryGen {
       (1, () => FuncExpr("ABS", Seq(genValue(rng, scope, target, depth - 1)), target)))()
   }
 
+  /** A COALESCE, IF or CASE with a decimal product or quotient as one value
+    * and a leaf as the other, as `QueryGen.genDecimalBranches` draws it: two
+    * DECIMALs of different types, the shape that once took the first value's
+    * type and kept the arithmetic's extra digits, which a spill could not
+    * write (`plans/robustness/09-branch-result-types.md`). */
+  private def genDecimalBranches(
+      rng: Rng, scope: Vector[ScopeCol], target: DataType, decimalCols: Vector[ScopeCol], depth: Int): Expr = {
+    val leaf =
+      if (rng.bool(0.7)) decimalCols.minBy(_.dataType.asInstanceOf[DataType.DecimalType].scale).ref
+      else genLeafValue(rng, scope, target)
+    val leafFirst = rng.bool(0.75)
+    val (arith, cond) =
+      if (rng.bool(0.5)) {
+        val c = rng.oneOf(decimalCols).ref
+        (BinOpExpr(rng.oneOf(Seq("*", "/")), c, rng.oneOf(QueryGen.UnevenNumbers), target),
+          IsNullExpr(c, negated = !leafFirst))
+      } else
+        (genDecimalArith(rng, scope, target, decimalCols, depth - 1, topOps = Seq("*", "/")),
+          genPredicate(rng, scope, depth - 1))
+    val (a, b) = if (leafFirst) (leaf, arith) else (arith, leaf)
+    rng.weighted[() => Expr](
+      (1, () => FuncExpr("COALESCE", Seq(a, b), target)),
+      (2, () => FuncExpr("IF", Seq(cond, a, b), target)),
+      (2, () => CaseExpr(Seq((cond, a)), Some(b), target)))()
+  }
+
   /** `(l op r)` over decimals, as `QueryGen.genDecimalArith` builds it: one
     * side an anchor, a DECIMAL column in scope or arithmetic over one, which
     * SQL types as a DECIMAL whatever it meets, and the other an anchor, a
@@ -886,7 +911,8 @@ object MetaQueryGen {
     * value SQL would type as one (`ABS(1.0)`), which the binder refuses beside
     * a DECIMAL. */
   private def genDecimalArith(
-      rng: Rng, scope: Vector[ScopeCol], target: DataType, decimalCols: Vector[ScopeCol], depth: Int): Expr = {
+      rng: Rng, scope: Vector[ScopeCol], target: DataType, decimalCols: Vector[ScopeCol], depth: Int,
+      topOps: Seq[String] = ArithOps): Expr = {
     def anchor(d: Int): Expr = if (d <= 1 || rng.bool(0.6)) rng.oneOf(decimalCols).ref else node(d - 1)
     def other(d: Int): Expr = rng.weighted(
       (3, () => anchor(d)),
@@ -896,11 +922,11 @@ object MetaQueryGen {
       }),
       (2, () => genLeafValue(rng, scope, rng.oneOf(Seq(DataType.IntType, DataType.LongType)))),
       (1, () => LitExpr(null, target)))()
-    def node(d: Int): Expr = {
+    def node(d: Int, ops: Seq[String] = ArithOps): Expr = {
       val (l, r) = if (rng.bool()) (anchor(d), other(d)) else (other(d), anchor(d))
-      BinOpExpr(rng.oneOf(ArithOps), l, r, target)
+      BinOpExpr(rng.oneOf(ops), l, r, target)
     }
-    node(depth)
+    node(depth, topOps)
   }
 
   /** A column, a NULL or a literal of `target`. A BINARY has no literal (SQL

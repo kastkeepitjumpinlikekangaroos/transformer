@@ -360,6 +360,39 @@ class DataJobTest {
     assertEquals("n\n0\n", readOutputDir(out))
   }
 
+  /** A COALESCE of two DECIMAL types writes to parquet as the type that
+    * holds both, and a downstream task reads it back so. It was declared as
+    * its first value's type, DECIMAL(9,2), holding the product's eight
+    * fractional digits, so the writer refused `6.25050001` and the task
+    * failed (plans/robustness/09). */
+  @Test def aCoalesceOfTwoDecimalTypesWritesToParquet(): Unit = {
+    import com.transformer.core.{ColumnarBatch, DataType, Field, Schema}
+    val inDir = tmpDir("dj-dec-in-")
+    val schema = Schema(Vector(Field("id", DataType.IntType), Field("k", DataType.DecimalType(9, 2)),
+      Field("w", DataType.DecimalType(18, 4))))
+    val rows = Seq(Array[Any](1, "1.25", "0.1234"), Array[Any](2, null, "2.5001"), Array[Any](3, "0.10", null))
+    val batch = new ColumnarBatch(schema, rows.length)
+    rows.zipWithIndex.foreach { case (row, r) =>
+      batch.column(0).setBoxed(r, row(0))
+      row.drop(1).zipWithIndex.foreach { case (v, c) =>
+        if (v == null) batch.column(c + 1).setNull(r) else batch.column(c + 1).setBoxed(r, new java.math.BigDecimal(v.toString))
+      }
+    }
+    batch.setNumRows(rows.length)
+    com.transformer.write.parquet.ParquetWriter.writeAll(inDir.resolve("t.parquet"), schema, Iterator(batch))
+    val mid = tmpDir("dj-dec-mid-").resolve("mid")
+    val out = tmpDir("dj-dec-out-").resolve("out")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.parquet", viewName = "t")),
+      sql = Seq(
+        SQLTask(sqlString = Some("SELECT id, COALESCE(k, w * w) AS v FROM t"),
+          outputFile = Some(OutputFilePath(mid.toString, format = Some("parquet"))), viewName = Some("mid")),
+        SQLTask(sqlString = Some("SELECT id, v FROM mid ORDER BY id"), outputFile = Some(OutputFilePath(out.toString)))))
+    val result = job.run()
+    assertTrue(result.error.getOrElse(result.toString), result.succeeded)
+    assertEquals("id,v\n1,1.25000000\n2,6.25050001\n3,0.10000000\n", readOutputDir(out))
+  }
+
   @Test def diamondDagAllTasksSucceedAndOrderRespected(): Unit = {
     val inDir = tmpDir("dj-diam-")
     writeCsv(inDir, "events.csv", "id,x\n1,1\n2,2\n3,3\n")

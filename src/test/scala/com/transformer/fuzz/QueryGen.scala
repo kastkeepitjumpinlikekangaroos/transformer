@@ -347,10 +347,17 @@ object QueryGen {
   }
 
   /** A SUM/AVG argument: usually a bare numeric column, sometimes a shallow
-    * numeric expression (still well-conditioned given the narrow domains). */
+    * numeric expression (still well-conditioned given the narrow domains), of
+    * which over a DECIMAL half are a conditional of two decimal types
+    * ([[genDecimalBranches]]), so a partial sum a spill writes holds them. */
   private def numericArg(rng: Rng, schema: Schema, numeric: Vector[Int]): Expr =
     if (rng.bool(0.7)) colRef(schema, rng.oneOf(numeric))
-    else genValue(rng, schema, schema.fields(rng.oneOf(numeric)).dataType, rng.between(1, 2))
+    else schema.fields(rng.oneOf(numeric)).dataType match {
+      case t: DataType.DecimalType if rng.bool(0.5) =>
+        val decimalCols = (0 until schema.length).filter(i => schema.fields(i).dataType.isInstanceOf[DataType.DecimalType])
+        genDecimalBranches(rng, schema, t, decimalCols, 2)
+      case t => genValue(rng, schema, t, rng.between(1, 2))
+    }
 
   /** A HAVING over `COUNT(*)` or over a group key compared with a literal.
     * A BINARY key has no literal to compare with (SQL cannot write one), so it
@@ -378,21 +385,12 @@ object QueryGen {
   /** A value (non-boolean) expression of `target`. `target` is a hint: a
     * precedence-only reparse may widen e.g. an int sum to long, but it stays the
     * same value CATEGORY (numeric vs string), which is all the surrounding
-    * context relies on.
-    *
-    * `inBranch` marks a value inside a branch of COALESCE, IF or CASE. Those
-    * take their FIRST branch's type and keep the other branches' values as they
-    * are, so a branch with decimal arithmetic, whose type is its own
-    * (`Decimals.resultType`), can leave a value its declared DECIMAL does not
-    * hold (`1.5625` in a DECIMAL(9,2)), which the parquet writer refuses when
-    * the result spills: a recorded engine defect
-    * (`plans/robustness/09-branch-result-types.md`). A DECIMAL in a branch is
-    * built without arithmetic until that is fixed. */
-  private def genValue(rng: Rng, schema: Schema, target: DataType, depth: Int, inBranch: Boolean = false): Expr = {
+    * context relies on. */
+  private def genValue(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     if (depth <= 0 || rng.bool(leafProb(depth))) genLeafValue(rng, schema, target)
     else if (target == DataType.StringType) genStringExpr(rng, schema, depth)
     else if (Numerics.contains(target)) genNumericExpr(rng, schema, target, depth)
-    else genOtherExpr(rng, schema, target, depth, inBranch)
+    else genOtherExpr(rng, schema, target, depth)
   }
 
   /** A column, a literal or a NULL of `target`. A BINARY has no literal (SQL
@@ -462,21 +460,19 @@ object QueryGen {
   /** A DECIMAL, DATE, TIMESTAMP or BINARY value: the conditional forms every
     * type has, arithmetic and `ABS` of a DECIMAL, and a CAST between DATE and
     * TIMESTAMP. The engine has no arithmetic on the last three, and no CAST
-    * into a DECIMAL or a BINARY, since the binder reads no type name for one.
-    * `inBranch` is [[genValue]]'s; the branches of COALESCE, IF and CASE are
-    * built in one, NULLIF's second argument, which is only compared, is not. */
-  private def genOtherExpr(rng: Rng, schema: Schema, target: DataType, depth: Int, inBranch: Boolean): Expr = {
-    def sub(t: DataType): Expr = genValue(rng, schema, t, depth - 1, inBranch)
-    def branch(t: DataType): Expr = genValue(rng, schema, t, depth - 1, inBranch = true)
+    * into a DECIMAL or a BINARY, since the binder reads no type name for one. */
+  private def genOtherExpr(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
+    def sub(t: DataType): Expr = genValue(rng, schema, t, depth - 1)
     val base: Seq[(Int, () => Expr)] = Seq(
-      2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(branch(target)), target)),
-      2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), branch(target), branch(target)), target)),
-      1 -> (() => FuncExpr("NULLIF", Seq(sub(target), genValue(rng, schema, target, depth - 1)), target)),
+      2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(target)), target)),
+      2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(target), sub(target)), target)),
+      1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
       1 -> (() => genCase(rng, schema, target, depth)))
     val decimalCols = (0 until schema.length).filter(i => schema.fields(i).dataType.isInstanceOf[DataType.DecimalType])
     val extra: Seq[(Int, () => Expr)] = target match {
-      case _: DataType.DecimalType if !inBranch && decimalCols.nonEmpty => Seq(
+      case _: DataType.DecimalType if decimalCols.nonEmpty => Seq(
         4 -> (() => genDecimalArith(rng, schema, target, decimalCols, depth)),
+        5 -> (() => genDecimalBranches(rng, schema, target, decimalCols, depth)),
         1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
       case _: DataType.DecimalType => Seq(1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
       case DataType.DateType => Seq(1 -> (() => CastExpr(sub(DataType.TimestampType), target)))
@@ -499,7 +495,8 @@ object QueryGen {
     * either. The values are `DataGen.DecimalPools`', all small, so no answer
     * overflows. */
   private def genDecimalArith(
-      rng: Rng, schema: Schema, target: DataType, decimalCols: Seq[Int], depth: Int): Expr = {
+      rng: Rng, schema: Schema, target: DataType, decimalCols: Seq[Int], depth: Int,
+      topOps: Seq[String] = ArithOps): Expr = {
     def anchor(d: Int): Expr =
       if (d <= 1 || rng.bool(0.6)) colRef(schema, rng.oneOf(decimalCols)) else node(d - 1)
     def other(d: Int): Expr = rng.weighted(
@@ -510,15 +507,59 @@ object QueryGen {
       }),
       (2, () => genLeafValue(rng, schema, rng.oneOf(Seq(DataType.IntType, DataType.LongType)))),
       (1, () => LitExpr(null, target)))()
-    def node(d: Int): Expr = {
+    def node(d: Int, ops: Seq[String] = ArithOps): Expr = {
       val (l, r) = if (rng.bool()) (anchor(d), other(d)) else (other(d), anchor(d))
-      BinOpExpr(rng.oneOf(ArithOps), l, r, target)
+      BinOpExpr(rng.oneOf(ops), l, r, target)
     }
-    node(depth)
+    node(depth, topOps)
+  }
+
+  /** A COALESCE, IF or CASE with a decimal product or quotient as one value
+    * and, usually first, a leaf: mostly the decimal column with the fewest
+    * fractional digits, else a leaf of `target`. The two are DECIMALs of
+    * different types, which the list's type holds both of, and the product's
+    * or quotient's answers mostly have more fractional digits than the leaf's
+    * type keeps: the shape that once took the first value's type and kept
+    * the answer as it was, which a spill could not write
+    * (`plans/robustness/09-branch-result-types.md`). Conditionals over values
+    * drawn independently meet it on a few seeds in a thousand, and mostly
+    * answer with the leaf, so it is drawn on purpose: half the time the
+    * arithmetic is a column by a number whose digits do not cancel (a column
+    * often holds one value at several scales, and `c / c` is 1), under a
+    * condition that takes it wherever that column has a value. */
+  private def genDecimalBranches(
+      rng: Rng, schema: Schema, target: DataType, decimalCols: Seq[Int], depth: Int): Expr = {
+    def scale(i: Int): Int = schema.fields(i).dataType.asInstanceOf[DataType.DecimalType].scale
+    val leaf =
+      if (rng.bool(0.7)) colRef(schema, decimalCols.minBy(scale))
+      else genLeafValue(rng, schema, target)
+    val leafFirst = rng.bool(0.75)
+    val (arith, cond) =
+      if (rng.bool(0.5)) {
+        val c = colRef(schema, rng.oneOf(decimalCols))
+        (BinOpExpr(rng.oneOf(Seq("*", "/")), c, rng.oneOf(UnevenNumbers), target), IsNullExpr(c, negated = !leafFirst))
+      } else
+        (genDecimalArith(rng, schema, target, decimalCols, depth - 1, topOps = Seq("*", "/")),
+          genPredicate(rng, schema, depth - 1))
+    val (a, b) = if (leafFirst) (leaf, arith) else (arith, leaf)
+    // A COALESCE reaches its arithmetic only where the leaf is NULL, which
+    // over the leaf's own column makes the answer NULL too.
+    rng.weighted[() => Expr](
+      (1, () => FuncExpr("COALESCE", Seq(a, b), target)),
+      (2, () => FuncExpr("IF", Seq(cond, a, b), target)),
+      (2, () => CaseExpr(Seq((cond, a)), Some(b), target)))()
+  }
+
+  /** Numbers a decimal is multiplied or divided by in [[genDecimalBranches]],
+    * as the DECIMALs of their digits: each leaves a remainder of a quotient,
+    * or fractional digits in a product, for the pools' every non-zero value. */
+  private[fuzz] val UnevenNumbers: Seq[LitExpr] = Seq("0.3333", "0.07", "3", "7").map { s =>
+    val d = new java.math.BigDecimal(s)
+    LitExpr(d, DataType.DecimalType(math.max(d.precision, d.scale), d.scale))
   }
 
   private def genCase(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
-    def subV: Expr = genValue(rng, schema, target, depth - 1, inBranch = true)
+    def subV: Expr = genValue(rng, schema, target, depth - 1)
     val nBranches = rng.between(1, 3)
     val branches = (0 until nBranches).map(_ => (genPredicate(rng, schema, depth - 1), subV))
     val elseE = if (rng.bool(0.6)) Some(subV) else None

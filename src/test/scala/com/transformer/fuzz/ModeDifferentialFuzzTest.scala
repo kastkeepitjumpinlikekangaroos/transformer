@@ -220,6 +220,41 @@ class ModeDifferentialFuzzTest {
     assertTrue(s"MIN/MAX never sees an infinity (infinite=$infinite)", infinite > 11)
   }
 
+  /** The shape the generator kept out of a branch until plans/robustness/09
+    * landed, and the value that broke it: decimal arithmetic as a value of a
+    * CASE, COALESCE or IF beside a value of another DECIMAL type, and a row on
+    * which the list answers with more fractional digits than its first
+    * value's type keeps. The binder used to declare such a list as its first
+    * value's type and keep the answer as it was, which a spill then refused
+    * to write. Both halves are read off what the binder builds: the shape
+    * from the values under each list's CASTs, the value by evaluating the
+    * list over the dataset's rows. */
+  @Test def decimalArithmeticReachesBranches(): Unit = {
+    val n = 6000
+    var shape, value = 0
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val view = qc.dataset.singlePartition()
+      val catalog = new Catalog
+      catalog.register(QueryGen.ViewName, view)
+      Try(LogicalBuilder.build(qc.sql, catalog)).toOption.foreach { built =>
+        val lists = oracle.BoundPlan.exprs(built.main).flatMap(e => oracle.BoundPlan.decimalArithmeticBeside(e).map((e, _))).toSeq
+        if (lists.nonEmpty) shape += 1
+        val batches = (0 until view.numPartitions).flatMap(view.readPartition(_).toSeq)
+        if (lists.exists { case (e, first) => batches.exists(oracle.BoundPlan.outgrows(e, first, _)) }) value += 1
+      }
+      seed += 1
+    }
+    println(s"[mode-differential] over $n seeds: decimal arithmetic beside another DECIMAL in a branch list " +
+      s"in $shape, with more fractional digits than the first value's type in $value")
+    // Measured over these seeds: the shape 103, the value 17. Each bound sits
+    // ~3x below; 6000 seeds rather than 4000 keep the value's bound off the
+    // handful where a drift would cross it.
+    assertTrue(s"decimal arithmetic rarely meets another DECIMAL in a branch list (shape=$shape)", shape > 34)
+    assertTrue(s"its answers rarely outgrow the first value's scale (value=$value)", value > 5)
+  }
+
   // ---- DATE, TIMESTAMP, BINARY and DECIMAL coverage ----------------------
   //
   // One guard per type, each asserting both halves: the type reaches a
@@ -231,24 +266,24 @@ class ModeDifferentialFuzzTest {
   // query runs.
   //
   // 10000 seeds, because the thinnest chain (MIN/MAX over a decimal column
-  // holding two values of one double, which only DECIMAL(38,18) has) is 23 of
+  // holding two values of one double, which only DECIMAL(38,18) has) is 25 of
   // them; generation only, well under a second. Measured over these seeds:
   //
   //                         date  timestamp  binary  decimal
-  //   comparison             497        533     421      692
-  //   IN                     250        278     296      208
-  //   ORDER BY               716        726     672      683
+  //   comparison             495        536     421      685
+  //   IN                     250        281     293      207
+  //   ORDER BY               713        730     675      696
   //   GROUP BY               612        655     639      658
-  //   MIN/MAX                241        274     247      223   (SUM/AVG decimal 369,
-  //                                                             arithmetic 492)
+  //   MIN/MAX                243        276     244      225   (SUM/AVG decimal 363,
+  //                                                             arithmetic 584)
   //
   // and the columns there holding each value pair, at comparison / IN /
-  // ORDER BY / GROUP BY / MIN/MAX: instants under a millisecond apart 269 /
-  // 170 / 421 / 373 / 148; bytes of one content 275 / 195 / 432 / 433 / 166;
-  // bytes one high bit apart 156 / 102 / 224 / 227 / 82; a decimal at two
-  // scales 281 / 93 / 290 / 275 / 97 (148 at SUM/AVG, 206 in arithmetic);
-  // decimals of one double 89 / 30 / 99 / 101 / 23 (49, 63); decimals a
-  // double adds wrong 114 at SUM/AVG and 140 in arithmetic. Each bound sits
+  // ORDER BY / GROUP BY / MIN/MAX: instants under a millisecond apart 272 /
+  // 174 / 425 / 373 / 150; bytes of one content 276 / 194 / 437 / 433 / 165;
+  // bytes one high bit apart 155 / 100 / 229 / 227 / 82; a decimal at two
+  // scales 279 / 90 / 293 / 275 / 96 (148 at SUM/AVG, 244 in arithmetic);
+  // decimals of one double 87 / 31 / 101 / 101 / 25 (44, 74); decimals a
+  // double adds wrong 109 at SUM/AVG and 165 in arithmetic. Each bound sits
   // about 3x below its count.
 
   import DataGen.ValueTag._

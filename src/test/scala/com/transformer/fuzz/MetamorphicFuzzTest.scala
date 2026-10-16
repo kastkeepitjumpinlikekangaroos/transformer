@@ -388,22 +388,22 @@ class MetamorphicFuzzTest {
   // Over the campaign's 20000 seeds, generation only (about a second):
   //
   //                  date  timestamp  binary  decimal
-  //   join key       1735       1750    1795     1745
-  //   comparison     2579       2660    2353     3399
-  //   ORDER BY       2248       2347    2302     2324
-  //   GROUP BY        890        867     913      933
+  //   join key       1734       1751    1796     1742
+  //   comparison     2579       2664    2355     3399
+  //   ORDER BY       2247       2350    2300     2331
+  //   GROUP BY        891        868     914      939
   //   MIN/MAX        4537       4603    4530     4562
-  //   TLP key        2371       2428     501     2775   (a BINARY only against
+  //   TLP key        2371       2430     503     2780   (a BINARY only against
   //                                                       another BINARY column)
   //
   // and the columns holding each value pair, at join key / comparison / ORDER
-  // BY / GROUP BY / MIN/MAX: instants under a millisecond apart 1372 / 1428 /
-  // 1115 / 367 / 2088; bytes of one content 1652 / 1525 / 1343 / 458 / 2456;
-  // bytes one high bit apart 638 / 583 / 488 / 178 / 895; a decimal at two
-  // scales 847 / 1082 / 621 / 251 / 1146; decimals of one double 211 / 293 /
-  // 191 / 61 / 336. Decimal arithmetic on 1341 seeds, SUM or AVG of a decimal
-  // on 732 and the decomposition's decimal SUM on 4562, reading decimals a
-  // double adds wrong on 260, 110 and 879. Each bound sits about 3x below its
+  // BY / GROUP BY / MIN/MAX: instants under a millisecond apart 1372 / 1430 /
+  // 1117 / 367 / 2088; bytes of one content 1653 / 1528 / 1343 / 458 / 2456;
+  // bytes one high bit apart 639 / 584 / 489 / 176 / 895; a decimal at two
+  // scales 845 / 1088 / 632 / 251 / 1146; decimals of one double 211 / 293 /
+  // 197 / 62 / 336. Decimal arithmetic on 1409 seeds, SUM or AVG of a decimal
+  // on 746 and the decomposition's decimal SUM on 4562, reading decimals a
+  // double adds wrong on 268, 118 and 879. Each bound sits about 3x below its
   // count.
 
   import DataGen.ValueTag._

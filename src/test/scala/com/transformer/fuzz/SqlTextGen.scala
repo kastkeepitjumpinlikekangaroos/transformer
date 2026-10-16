@@ -734,6 +734,11 @@ object SqlTextGen {
       "SELECT CASE WHEN a > {x} THEN 'p' ELSE 'q' END AS v FROM t"), Some("SELECT 'q' AS v FROM t")),
     Spelling("COALESCE", Vector("SELECT COALESCE(a, b) AS v FROM t",
       "SELECT CASE WHEN a IS NOT NULL THEN a ELSE b END AS v FROM t"), Some("SELECT a AS v FROM t")),
+    // An INT and a DOUBLE branch: both spellings are the DOUBLE.
+    Spelling("IF numeric branches", Vector("SELECT IF(a > {x}, 1, 2.5) AS v FROM t",
+      "SELECT CASE WHEN a > {x} THEN 1 ELSE 2.5 END AS v FROM t"), Some("SELECT 2.5 AS v FROM t")),
+    Spelling("COALESCE numeric branches", Vector("SELECT COALESCE(a, 2.5) AS v FROM t",
+      "SELECT CASE WHEN a IS NOT NULL THEN a ELSE 2.5 END AS v FROM t"), Some("SELECT CAST(a AS DOUBLE) AS v FROM t")),
     Spelling("NULLIF", Vector("SELECT NULLIF(a, {x}) AS v FROM t",
       "SELECT CASE WHEN a = {x} THEN NULL ELSE a END AS v FROM t"), Some("SELECT a AS v FROM t")),
     Spelling("ILIKE", Vector(where("s ILIKE {p}"), where("LOWER(s) LIKE LOWER({p})"), where("UPPER(s) LIKE UPPER({p})")),
@@ -750,10 +755,6 @@ object SqlTextGen {
       "WITH q AS (SELECT a, b FROM t) SELECT * FROM q WHERE a > {x}"), Some("SELECT a, b FROM t")),
     // Shapes whose spellings disagree today, each a known defect of
     // oracle/SyntaxEquivalence with the plan that records it.
-    Spelling("IF numeric branches", Vector("SELECT IF(a > {x}, 1, 2.5) AS v FROM t",
-      "SELECT CASE WHEN a > {x} THEN 1 ELSE 2.5 END AS v FROM t"), Some("SELECT 1 AS v FROM t")),
-    Spelling("COALESCE numeric branches", Vector("SELECT COALESCE(a, 2.5) AS v FROM t",
-      "SELECT CASE WHEN a IS NOT NULL THEN a ELSE 2.5 END AS v FROM t"), Some("SELECT a AS v FROM t")),
     Spelling("quoted identifier", Vector("SELECT a, b FROM t", "SELECT \"a\", \"b\" FROM t"), None),
     Spelling("a quote inside a literal", Vector("SELECT LENGTH('it''s') AS n FROM t", "SELECT 4 AS n FROM t"), None),
     Spelling("NOT NOT", Vector(where("NOT NOT a = {x}"), where("a = {x}"), where("NOT (NOT (a = {x}))")),

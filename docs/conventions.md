@@ -78,9 +78,10 @@ specific traps.
   make it an error that names the CAST or typed literal to write, rather than
   copying whichever engine is most lenient. A literal whose reading is
   unambiguous is read at bind time, so a bad one fails before the query runs.
-  `Analyzer.unify` holds the rule for values that meet, and
-  `Analyzer.checkCast` and `Casts` the rules for CAST; follow them when adding a
-  type.
+  `Analyzer.unify` holds the rule for values that meet, `Analyzer.branches`
+  the same rule for values that become one result (whose type must hold each
+  of them), and `Analyzer.checkCast` and `Casts` the rules for CAST; follow
+  them when adding a type, or a construct whose answer is one of its values.
 - **A failure the user caused is an `IllegalArgumentException` in SQL's words,
   raised at bind time unless a value causes it.** Never an internal exception
   class (`UnsupportedOperationException`, `IllegalStateException`, a

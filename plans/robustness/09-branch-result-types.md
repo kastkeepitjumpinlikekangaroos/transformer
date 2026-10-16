@@ -1,8 +1,9 @@
 # Plan 09: CASE, COALESCE, IF, GREATEST and UNION take their first branch's type
 
-> Status: **open** · Effort: 1-2 days · Risk: medium (it changes the declared
-> type, and for `CASE` and `UNION` the values, of queries that run today, so the
-> numeric half needs the user's decision first; see [Decisions](#decisions)).
+> Status: **done** 2026-10-16 (see [Outcome](#outcome)) · Effort: 1-2 days ·
+> Risk: medium (it changes the declared type, and for `CASE` and `UNION` the
+> values, of queries that run today, so the numeric half needed the user's
+> decision first; see [Decisions](#decisions)).
 
 ## How this was found
 
@@ -92,3 +93,95 @@ Ask the user before landing the numeric half:
 `README.md` (the "values of different types meet" paragraph), `docs/gotchas.md`
 (the typing entry, and the gate in the mode-differential entry),
 `docs/testing.md` (`QueryGen`'s gate).
+
+## Outcome
+
+The user's decisions, 2026-10-16, each the recommended option:
+
+- **One strict rule.** Values that become one result meet as a comparison's
+  operands do: numbers widen (`THEN 1 ELSE 2.5` is the `DOUBLE` 2.5), a string
+  literal is read as the others' type at bind time, and every other mix is a
+  bind error naming the CAST: text with a number (`COALESCE(s, 1)`,
+  `THEN 'yes' ELSE 0`), a `DATE` with a `TIMESTAMP`, a `BOOLEAN` with a number,
+  a `UNION` of an `INT` arm and a `STRING` arm.
+- **A `DECIMAL` beside a `FLOAT` or `DOUBLE` that is not written in the query
+  is a bind error**, as in arithmetic, naming the CAST of the `DECIMAL` to
+  `DOUBLE`. A number written in the query, or a constant of them, is the
+  decimal it is, so `COALESCE(price, 0)` keeps `price`'s type.
+- **Two more constructs fixed in the same change**, both found while reading
+  for this plan: `LAG` and `LEAD` kept their default uncast (`LAG(i, 1, 2.5)`
+  was the `INT` 2, a decimal default with more digits sat under the column's
+  type, a default that was no date failed mid-run), and `NULLIF` compared its
+  operands un-unified (`NULLIF(i, '2')` and `NULLIF(d, '2026-01-01')` never
+  matched). The default now meets its value as a branch does; `NULLIF`'s two
+  meet as a comparison's and the answer is the first as it is.
+
+What landed. `Analyzer.branches` is the rule, sharing `meet` with `unify`; for
+a `DECIMAL` the type must hold each value, since the values are kept: two meet
+as `Decimals.holding` (the longer integer part at the larger scale, given way
+past 38 digits as `Decimals.resultType` does), an integer as the `DECIMAL` its
+every value fits. `LogicalBuilder.bindBranches` binds the values of a `CASE`,
+`COALESCE`, `IF`, `GREATEST`, `LEAST` and a `LAG`/`LEAD` default, rebinding a
+constant beside a `DECIMAL` through `decimalConstant`, and
+`LogicalBuilder.unifyArms` types each column across a `UNION`'s arms, retyping
+an arm's SELECT list in place (so a literal there is read as the type it
+meets) or wrapping any other arm in a casting projection. `Funcs.returnType`
+reads the unified type instead of `widestNonNull`.
+
+Two decimal pieces the plan did not name were needed for "every branch value
+then fits the declared type" to hold. A CAST between two `DECIMAL`s now makes a
+value of the target (`Decimals.fit`: rounded half up, an error past its
+digits): it kept the value as it was, which is how the first-branch type held
+`1.5625` in a `DECIMAL(9,2)`. That would have rounded comparisons between two
+decimal types, which cast the second to the first's type, so a comparison of
+two decimals now reads both as `Decimals.wider`, the holding type with no bound
+on its digits, which never rounds. And an integer cast to a `DECIMAL` is put at
+the target's scale (`2` in a `DECIMAL(12,2)` is `2.00`), as every other value of
+the column is. The binder now casts the arguments of `COALESCE` and `IF` too,
+which it never did: `IF(p, TRUE, 0)` and `COALESCE(d, ts)` failed mid-drain
+setting the first type's vector, as a `UNION`'s other arms' values rode
+uncast under its first arm's types.
+
+Regressions, each failing at the base commit (checked in a worktree there with
+the new tests copied in): the plan's table, the strict rejections, a `UNION`'s
+column types across arms, `LAG`/`LEAD` defaults, `NULLIF`, past 38 digits
+(rounding, an overflow, and exact comparisons) and a spill of each result shape
+in `sql_engine_test`; the CAST between decimals on both paths in
+`expr_batch_test`; and a job writing `COALESCE(k, w * w)` to parquet in
+`data_job_test`, which failed at the base with this plan's message,
+`Cannot write 6.25050001 to parquet column 'v', a decimal(9,2), without
+rounding it`.
+
+The fuzzers. The `inBranch` gate is gone from `QueryGen.genValue` and
+`MetaQueryGen.genValue`, but removing it alone re-enabled a shape the corpora
+barely drew: decimal arithmetic beside another `DECIMAL` type in a branch list
+on about 4 seeds in 1000, answering with more fractional digits than its first
+value's type on about 1, and almost never where a spill writes the value. A
+`COALESCE(c, c * x)` cannot answer with the product at all, since it reaches it
+only where `c`, and so the product, is NULL. Both generators now draw the shape
+on purpose (`genDecimalBranches`, also as a `SUM`/`AVG` argument in
+`QueryGen`): a product or a quotient beside the narrowest decimal column, half
+the time a column by a number whose digits do not cancel under a condition
+that takes it wherever the column has a value. A new guard,
+`decimalArithmeticReachesBranches`, asserts the shape (103 of 6000 seeds) and
+the value (17), read off the bound plan and by evaluating it. Run against the
+base commit, the mode-differential property fails within its first 1300 seeds,
+at seed 14621: `SELECT DISTINCT CASE WHEN FALSE THEN c1 ELSE c1 / 0.3333 END`,
+whose spill could not write the quotient. The frontend fuzzer's
+`MixedBranchTypes` known defect and the two numeric-branch known
+disagreements of `SyntaxEquivalence` are deleted, their spellings now
+ordinary equivalences. `ExprGen` built `CAST(decimal AS narrower DECIMAL)` as
+if it could never throw; it now draws only sources whose integer part the
+target holds, and sides of decimal arithmetic for the target an answer is cast
+to, which halved how often an answer rounds, so its guard reads 40000 seeds.
+
+Bind rejections of the SQL corpora's own queries: 0.11% of the
+mode-differential corpus and 0.02% of the metamorphic one over 20000 seeds,
+every one the decided refusal of a `DECIMAL` beside a construct of numbers
+alone (`COALESCE(k, ABS(0.2))`), which the generators do not avoid.
+
+`bazel test //...` 52/52, jaffle-shop 15/15, and green at 20000 seeds each:
+the mode-differential, metamorphic and sharded-mode campaigns the plan asked
+for, and the frontend campaign, whose oracles lost their plan-09 records; the
+expression-parity campaign at 200000.
+

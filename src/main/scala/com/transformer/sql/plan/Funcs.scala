@@ -15,8 +15,8 @@ object Funcs {
     case "UPPER" | "LOWER" | "TRIM" if argTypes.size == 1 => Some(DataType.StringType)
     case "SUBSTRING" if argTypes.size == 2 || argTypes.size == 3 => Some(DataType.StringType)
     case "CONCAT" => Some(DataType.StringType)
-    case "COALESCE" if argTypes.nonEmpty => Some(widestNonNull(argTypes))
-    case "IF" if argTypes.size == 3 => Some(widestNonNull(argTypes.drop(1)))
+    case "COALESCE" if argTypes.nonEmpty => Some(oneType(argTypes))
+    case "IF" if argTypes.size == 3 => Some(oneType(argTypes.drop(1)))
     case "NULLIF" if argTypes.size == 2 => Some(argTypes.head)
     case "ABS" if argTypes.size == 1 => Some(argTypes.head)
     case "ROUND" if argTypes.size >= 1 => Some(DataType.DoubleType)
@@ -34,7 +34,7 @@ object Funcs {
     case "SIGN" if argTypes.size == 1 => Some(DataType.IntType)
     case "PI" | "E" if argTypes.isEmpty => Some(DataType.DoubleType)
     case "RAND" | "RANDOM" if argTypes.isEmpty || argTypes.size == 1 => Some(DataType.DoubleType)
-    case "GREATEST" | "LEAST" if argTypes.nonEmpty => Some(widestNonNull(argTypes))
+    case "GREATEST" | "LEAST" if argTypes.nonEmpty => Some(oneType(argTypes))
     case _ => None
   }
 
@@ -45,12 +45,10 @@ object Funcs {
     case _ => false
   }
 
-  private def widestNonNull(types: Seq[DataType]): DataType = {
-    val nonNull = types.filterNot(_ == DataType.NullType)
-    if (nonNull.isEmpty) DataType.NullType
-    else if (nonNull.forall(DataType.isNumeric)) nonNull.reduce(DataType.widerNumeric)
-    else nonNull.head
-  }
+  /** The type of arguments the binder has given one type: theirs, or NULL
+    * when every one is an untyped NULL. */
+  private def oneType(types: Seq[DataType]): DataType =
+    types.find(_ != DataType.NullType).getOrElse(DataType.NullType)
 
   /** Per-thread RNG so RAND() is safe under parallel execution. Seeded RAND(x) returns
     * a deterministic value (not a per-row stream) — sufficient for tests and tagging. */

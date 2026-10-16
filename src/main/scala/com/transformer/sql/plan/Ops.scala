@@ -75,8 +75,8 @@ object Ops {
 
   /** Order a decimal against any number, by value. The analyzer widens a
     * number that meets a decimal through a CAST, so this sees a mixed pair only
-    * where operands are not unified, such as NULLIF's two, or in a tree built
-    * without the analyzer. The other side is read the way that CAST reads it
+    * where an operand keeps its own type, as NULLIF's first does, or in a tree
+    * built without the analyzer. The other side is read the way that CAST reads it
     * ([[Casts.toDecimal]]); NaN and the infinities have no decimal and take
     * their places in the total order instead. */
   private def decimalCompare(x: java.math.BigDecimal, y: java.lang.Number): Int = y match {
@@ -207,13 +207,19 @@ object Casts {
           case s: String => parseInstant(s)
           case _ => throw new IllegalArgumentException(s"Cannot cast $v to timestamp")
         }
-      // The analyzer widens a number that meets a decimal to that decimal. The
-      // value is kept exactly, at its own scale: a column's declared scale is
-      // not enforced on what it holds, and rounding to it would change which
-      // rows a comparison matches.
+      // A decimal cast to another DECIMAL becomes a value of it, rounded half
+      // up to its scale and an error past its digits (`Decimals.fit`). The
+      // analyzer casts one decimal to another to give values that become one
+      // result a type that holds them, so that rounds only past 38 digits,
+      // and to compare two as the type that holds both, which never rounds.
+      // Any other number is read exactly, as the decimal it is, an integer at
+      // the target's scale: the analyzer casts one to a DECIMAL to compare it
+      // with one, where rounding it would change which rows match, or to a
+      // DECIMAL every value of its type fits.
       case t: DataType.DecimalType =>
         v match {
-          case d: java.math.BigDecimal => d
+          case d: java.math.BigDecimal => Decimals.fit(d, t)
+          case n @ (_: java.lang.Integer | _: java.lang.Long) => toDecimal(n.asInstanceOf[Number]).setScale(t.scale)
           case n: Number if isFinite(n) => toDecimal(n)
           case s: String => parseNumber(s, to)(new java.math.BigDecimal(_))
           case _ => throw new IllegalArgumentException(s"Cannot cast $v to $t")
@@ -358,6 +364,26 @@ object Decimals {
         bounded(math.min(p1 - s1, p2 - s2) + s, s)
       case other => throw new IllegalArgumentException(s"Unknown arithmetic operator '$other'")
     }
+  }
+
+  /** The DECIMAL that holds every value of each of `types` as it is: the
+    * longest of their integer parts and the largest of their scales (Spark's
+    * `widerDecimalType`). It can have more than [[MaxPrecision]] digits, which
+    * no result is declared with; two decimals a comparison meets are read as
+    * it, so neither is rounded. */
+  def wider(types: Seq[DataType.DecimalType]): DataType.DecimalType = {
+    val s = types.map(_.scale).max
+    DataType.DecimalType(types.map(t => t.precision - t.scale).max + s, s)
+  }
+
+  /** The type values of each of `types` are declared as when they become one
+    * result, a CASE's or a UNION column's: [[wider]], given way past
+    * [[MaxPrecision]] digits as an arithmetic result's is. Past it a value
+    * with more fractional digits than the type keeps is rounded, and one
+    * with more integer digits is an error, as [[fit]] has it. */
+  def holding(types: Seq[DataType.DecimalType]): DataType.DecimalType = {
+    val w = wider(types)
+    bounded(w.precision, w.scale)
   }
 
   /** The type of `SUM` over a DECIMAL: every digit a DECIMAL holds, at the

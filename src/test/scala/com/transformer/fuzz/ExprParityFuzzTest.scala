@@ -170,11 +170,13 @@ class ExprParityFuzzTest {
     * declared scale and divisors of zero reach it too (the value), since a
     * corpus of exact answers over nonzero divisors would leave
     * `Decimals.arith`'s rounding and its NULL untested on the vector path.
-    * Measured over these 20000 seeds: `+` 294, `-` 264, `*` 228, `/` 254, `%`
-    * 273, negation 159; an answer that rounded 185, a zero divisor 58. Each
-    * bound sits about 3x below the smallest count it covers. */
+    * 40000 seeds, since sides drawn for a narrower DECIMAL an answer is cast
+    * to (which rounds it, and fails past its integer digits) made rounding
+    * rarer. Measured over these seeds: `+` 517, `-` 537, `*` 554, `/` 513,
+    * `%` 544, negation 328; an answer that rounded 179, a zero divisor 133.
+    * Each bound sits about 3x below the smallest count it covers. */
   @Test def decimalArithmeticRoundsAndMeetsZeroDivisors(): Unit = {
-    val n = 20000
+    val n = 40000
     val ops = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
     var rounded, byZero = 0
     var seed = 0
@@ -188,10 +190,10 @@ class ExprParityFuzzTest {
     val report = s"over $n seeds: ops=${ops.toSeq.sorted.mkString(", ")} rounded=$rounded byZero=$byZero"
     println(s"[expr-parity] decimal arithmetic $report")
     for (op <- Seq("+", "-", "*", "/", "%"))
-      assertTrue(s"a DECIMAL $op is rarely generated, $report", ops(op) > 75)
-    assertTrue(s"a DECIMAL is rarely negated, $report", ops("negate") > 50)
-    assertTrue(s"a decimal answer rarely rounds, $report", rounded > 60)
-    assertTrue(s"a decimal divisor is rarely zero, $report", byZero > 19)
+      assertTrue(s"a DECIMAL $op is rarely generated, $report", ops(op) > 170)
+    assertTrue(s"a DECIMAL is rarely negated, $report", ops("negate") > 105)
+    assertTrue(s"a decimal answer rarely rounds, $report", rounded > 59)
+    assertTrue(s"a decimal divisor is rarely zero, $report", byZero > 44)
   }
 
   /** The generator's own type invariant holds across a block of seeds:

@@ -1,6 +1,6 @@
 package com.transformer.fuzz.oracle
 
-import com.transformer.core.{Catalog, DataType, ExecutionOptions}
+import com.transformer.core.{Catalog, ColumnarBatch, DataType, ExecutionOptions}
 import com.transformer.fuzz.SqlTextGen
 import com.transformer.sql.exec.SqlEngine
 import com.transformer.sql.plan._
@@ -69,7 +69,6 @@ object CleanRejection {
   val ArgumentTypesPlan: String = Plans + "11-functions-bind-over-arguments-they-cannot-take.md"
   val LiteralsPlan: String = Plans + "13-literals-are-read-as-written.md"
   val PathologicalInputPlan: String = Plans + "14-pathological-nesting.md"
-  val BranchTypesPlan: String = Plans + "09-branch-result-types.md"
 
   /** A defect this property found, the plan that records it, and SQL that
     * shows it over [[SqlTextGen.ReferenceTables]]. */
@@ -123,10 +122,6 @@ object CleanRejection {
       * `NullPointerException` while it runs. */
     case object NullFunctionArgument extends Defect("a NULL scale, position or length is a NullPointerException",
       ArgumentTypesPlan, "SELECT ROUND(a, NULL) AS v FROM t")
-    /** `SELECT a FROM t UNION SELECT s FROM t`: arms of different types bind,
-      * and comparing their values fails while it runs. */
-    case object MixedBranchTypes extends Defect("values of different types meet in one column", BranchTypesPlan,
-      "SELECT a FROM t UNION SELECT s FROM t")
     /** A 2000-term `+` or `OR` chain overflows the binder's stack, 1000
       * nested calls or 3000 nested parentheses the parser's. */
     case object DeepNesting extends Defect("a deep expression overflows the stack", PathologicalInputPlan,
@@ -139,7 +134,7 @@ object CleanRejection {
 
     val All: Vector[Defect] = Vector(ParserClassInParseError, ParserClassInRejection, PoolWrappedFailure,
       AggSlotInUnknownColumn, NumberLiteralOutOfRange, BooleanCastToNumber, FunctionOverWrongType,
-      ConditionNotBoolean, RenderingThrows, NullFunctionArgument, MixedBranchTypes, DeepNesting, ParseTimeout)
+      ConditionNotBoolean, RenderingThrows, NullFunctionArgument, DeepNesting, ParseTimeout)
   }
 
   // ---------------------------------------------------------------------------
@@ -342,9 +337,6 @@ object CleanRejection {
         Some(Defect.RenderingThrows -> String.valueOf(root.getMessage))
       case _: ClassCastException if anyExpr(isFunctionOverWrongType) || anyAgg(isAggOverWrongType) =>
         Some(Defect.FunctionOverWrongType -> String.valueOf(root.getMessage))
-      case _: ClassCastException | _: NumberFormatException | _: java.time.format.DateTimeParseException |
-          _: IllegalArgumentException if anyExpr(isMixedBranches) || plans.exists(BoundPlan.hasMixedUnion) =>
-        Some(Defect.MixedBranchTypes -> s"${root.getClass.getSimpleName}: ${root.getMessage}")
       case _: NullPointerException if anyExpr(hasNullableSecondaryArgument) =>
         Some(Defect.NullFunctionArgument -> String.valueOf(root.getMessage))
       case _ => None
@@ -385,29 +377,6 @@ object CleanRejection {
   private def isBooleanCastToFloat(e: Expr): Boolean = e match {
     case CastExpr(child, DataType.FloatType | DataType.DoubleType) => child.dataType == DataType.BooleanType
     case _ => false
-  }
-
-  /** A branch list whose values are of more than one kind: a CASE, COALESCE,
-    * IF, NULLIF, GREATEST or LEAST mixing a number with text, a date with a
-    * timestamp, or either with a boolean. A function's arguments arrive as
-    * they are; a CASE's branches arrive under the cast the binder puts on each
-    * to its result type, so a branch's kind is what is under that cast. */
-  private def isMixedBranches(e: Expr): Boolean = {
-    def kinds(types: Seq[DataType]): Set[String] = types.filterNot(_ == DataType.NullType).map(BoundPlan.kind).toSet
-    e match {
-      case CaseExpr(branches, elseE, resultType) =>
-        val values = (branches.map(_._2) ++ elseE).map {
-          case CastExpr(child, `resultType`) => child.dataType
-          case other => other.dataType
-        }
-        kinds(values).size > 1
-      case FuncExpr(name, args, _) => name.toUpperCase match {
-        case "COALESCE" | "GREATEST" | "LEAST" | "NULLIF" => kinds(args.map(_.dataType)).size > 1
-        case "IF" => kinds(args.drop(1).map(_.dataType)).size > 1
-        case _ => false
-      }
-      case _ => false
-    }
   }
 
   private def hasNullableSecondaryArgument(e: Expr): Boolean = e match {
@@ -457,7 +426,7 @@ object CleanRejection {
 }
 
 /** Walks a bound [[LogicalPlan]]: every expression in it, every aggregate,
-  * and the union arms whose column types differ. */
+  * and the decimal values of a branch list. */
 object BoundPlan {
 
   def nodes(p: LogicalPlan): Iterator[LogicalPlan] = Iterator(p) ++ p.children.iterator.flatMap(nodes)
@@ -470,15 +439,45 @@ object BoundPlan {
     case _ => Iterator.empty
   }
 
-  /** A UNION whose arms disagree on a column's type. The union takes its
-    * first arm's types and keeps the other arm's values as they are, so an
-    * INT column can hold a decimal or a string, and comparing them fails. */
-  def hasMixedUnion(p: LogicalPlan): Boolean = nodes(p).exists {
-    case LogicalUnion(l, r, _) =>
-      l.outputSchema.fields.zip(r.outputSchema.fields).exists { case (a, b) =>
-        a.dataType != DataType.NullType && b.dataType != DataType.NullType && a.dataType != b.dataType
+  /** For a CASE, COALESCE or IF of DECIMAL type with a value that is
+    * arithmetic of a DECIMAL type other than its first DECIMAL value's, that
+    * first type, each value read under the CAST the binder puts on it: the
+    * shape that once took the first value's type and kept the arithmetic's
+    * answer as it was (plans/robustness/09). */
+  def decimalArithmeticBeside(e: Expr): Option[DataType.DecimalType] = {
+    val values = e match {
+      case CaseExpr(branches, elseExpr, _: DataType.DecimalType) => branches.map(_._2) ++ elseExpr
+      case FuncExpr("COALESCE", args, _: DataType.DecimalType) => args
+      case FuncExpr("IF", args, _: DataType.DecimalType) => args.drop(1)
+      case _ => Nil
+    }
+    val written = values.map {
+      case CastExpr(v, t) if t == e.dataType => v
+      case v => v
+    }
+    written.map(_.dataType).collectFirst { case d: DataType.DecimalType => d }.filter { first =>
+      written.exists {
+        case BinOpExpr(op, _, _, t: DataType.DecimalType) => Set("+", "-", "*", "/", "%")(op) && t != first
+        case _ => false
       }
-    case _ => false
+    }
+  }
+
+  /** Whether `e` answers on some row of `batch` with more fractional digits
+    * than `first` keeps. Only over columns `batch` has, so an expression that
+    * reads another schema (an aggregate's output, a join's) is not
+    * evaluated. */
+  def outgrows(e: Expr, first: DataType.DecimalType, batch: ColumnarBatch): Boolean = {
+    val fields = batch.schema.fields
+    subtree(e).forall {
+      case c: ColRefExpr => c.index < fields.length && fields(c.index).dataType == c.dataType
+      case _ => true
+    } && (0 until batch.numRows).exists { row =>
+      scala.util.Try(e.eval(batch, row)).toOption.exists {
+        case d: java.math.BigDecimal => d.stripTrailingZeros.scale > first.scale
+        case _ => false
+      }
+    }
   }
 
   /** A join whose ON condition is not a BOOLEAN. */
@@ -486,11 +485,6 @@ object BoundPlan {
     case j: LogicalJoin => j.condition.dataType != DataType.BooleanType
     case _ => false
   }
-
-  /** The kind of value a type holds: the numbers widen to one another, and
-    * every other type, a DATE and a TIMESTAMP included, is a kind of its own,
-    * as `Analyzer.unify` has it. */
-  def kind(t: DataType): String = if (DataType.isNumeric(t)) "number" else t.name
 
   private def ownExprs(p: LogicalPlan): Iterator[Expr] = p match {
     case LogicalProject(_, projections) => projections.iterator.map(_._1)

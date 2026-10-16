@@ -3031,6 +3031,200 @@ class SqlEngineTest {
     }
   }
 
+  // ---- Values that become one result ----------------------------------------
+
+  /** `t` is plans/robustness/09's table, plus a column of each other type a
+    * branch can mix with; `t38` holds decimals whose types need more than 38
+    * digits to hold both. */
+  private def branchCatalog(): Catalog = {
+    val c = new Catalog
+    val t = Schema(Vector(Field("id", DataType.IntType), Field("k", DataType.DecimalType(9, 2)),
+      Field("w", DataType.DecimalType(18, 4)), Field("i", DataType.IntType), Field("d", DataType.DoubleType),
+      Field("s", DataType.StringType), Field("dt", DataType.DateType), Field("ts", DataType.TimestampType)))
+    def day(s: String) = java.time.LocalDate.parse(s)
+    def at(s: String) = java.time.Instant.parse(s)
+    c.register("t", memView(t, Seq(Seq(
+      Array[Any](1, dec("1.25"), dec("0.1234"), 1, 1.5, "a", day("2026-01-01"), at("2026-01-01T05:00:00Z")),
+      Array[Any](2, null, dec("2.5000"), 2, 2.5, "b", day("2026-01-02"), null),
+      Array[Any](3, dec("0.10"), null, 3, null, null, null, null)))))
+    val t38 = Schema(Vector(Field("id", DataType.IntType), Field("a", DataType.DecimalType(38, 0)),
+      Field("b", DataType.DecimalType(38, 10))))
+    c.register("t38", memView(t38, Seq(Seq(
+      Array[Any](1, dec("1"), dec("1.0000000001")), Array[Any](2, null, dec("2.0000005")),
+      Array[Any](3, dec("99999999999999999999999999999999"), null)))))
+    c.register("t38big", memView(t38, Seq(Seq(Array[Any](1, dec("100000000000000000000000000000000"), null)))))
+    c
+  }
+
+  private def bindRejection(sql: String, cat: Catalog): String =
+    try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
+    catch { case e: IllegalArgumentException => e.getMessage }
+
+  /** The values of a CASE, COALESCE, IF, GREATEST or LEAST, and a UNION's
+    * columns, take the type that holds every one of them. Each took its first
+    * value's type (plans/robustness/09): a decimal with more digits was kept
+    * under it as it was, so `COALESCE(k, w * w)` was a DECIMAL(9,2) holding
+    * 6.25000000, which parquet refused, `IF` was typed by its argument order,
+    * and `THEN 1 ELSE 2.5` was the INT 2. */
+  @Test def valuesThatBecomeOneResultTakeATypeThatHoldsEach(): Unit = {
+    val cat = branchCatalog()
+    def typed(expr: String): (DataType, Seq[Any]) = typedColumn(s"SELECT id, $expr AS v FROM t ORDER BY id", cat)
+    def d(p: Int, s: Int): DataType = DataType.DecimalType(p, s)
+    assertEquals((d(28, 6), Seq(dec("0.154250"), null, dec("0.100000"))), typed("CASE WHEN id = 3 THEN k ELSE k * w END"))
+    assertEquals((d(37, 8), Seq(dec("1.25000000"), dec("6.25000000"), dec("0.10000000"))), typed("COALESCE(k, w * w)"))
+    assertEquals((d(28, 6), Seq(dec("1.250000"), null, null)), typed("IF(id = 1, k, k * w)"))
+    assertEquals((d(28, 6), Seq(dec("0.154250"), null, dec("0.100000"))), typed("IF(id = 1, k * w, k)"))
+    assertEquals((d(22, 4), Seq(dec("12.3400"), dec("250.0000"), dec("0.1000"))), typed("GREATEST(k, w * 100)"))
+    assertEquals((d(18, 4), Seq(dec("0.1234"), dec("2.5000"), dec("0.1000"))), typed("LEAST(k, w)"))
+    assertEquals((d(19, 4), Seq(dec("1.2500"), null, dec("0.1000"), dec("1.5625"), null, dec("0.0100"))),
+      typedColumn("SELECT id, k AS v FROM t UNION ALL SELECT id + 10, k * k FROM t ORDER BY id", cat))
+    assertEquals((DataType.DoubleType, Seq(1.0, 2.5, 2.5)), typed("CASE WHEN id = 1 THEN 1 ELSE 2.5 END"))
+    assertEquals((DataType.DoubleType, Seq(1.0, 2.0, 3.0)), typed("COALESCE(i, d)"))
+    // An INT or BIGINT is the DECIMAL its every value fits, and a number
+    // written in the query, or a constant of them, the decimal it is, as in
+    // arithmetic: `COALESCE(k, 0)` keeps `k`'s type.
+    assertEquals((d(12, 2), Seq(dec("1.25"), dec("2.00"), dec("0.10"))), typed("COALESCE(k, i)"))
+    assertEquals((d(9, 2), Seq(dec("1.25"), dec("0.00"), dec("0.10"))), typed("COALESCE(k, 0)"))
+    assertEquals((d(10, 3), Seq(dec("1.250"), dec("-0.125"), dec("0.100"))), typed("COALESCE(k, -0.125)"))
+    assertEquals((d(9, 2), Seq(dec("1.25"), dec("1.05"), dec("0.10"))), typed("COALESCE(k, 1 + 0.05)"))
+    // A string literal is read as the type the others meet as.
+    assertEquals((DataType.IntType, Seq(1, 7, 7)), typed("CASE WHEN id = 1 THEN i ELSE '7' END"))
+    assertEquals((DataType.DateType, Seq("2026-01-01", "2026-01-02", "2026-03-01").map(java.time.LocalDate.parse)),
+      typed("COALESCE(dt, '2026-03-01')"))
+  }
+
+  /** Values of kinds that do not meet as one type are a bind error naming
+    * the CAST, as two such operands of a comparison are. Each took the first
+    * value's type: text turned a number into text, `IF(p, TRUE, 0)` and
+    * `COALESCE(dt, ts)` failed while running, and a UNION of an INT arm and a
+    * STRING arm declared an INT column that held strings. A DECIMAL beside a
+    * DOUBLE that is not written in the query is an error, as in arithmetic. */
+  @Test def valuesOfKindsThatDoNotMeetAreABindError(): Unit = {
+    val cat = branchCatalog()
+    def rejected(sql: String): String = bindRejection(sql, cat)
+    val text = "only a string literal is read as an INT, so CAST the STRING to INT, or the INT to STRING"
+    assertEquals(s"CASE cannot mix INT and STRING; $text",
+      rejected("SELECT CASE WHEN id = 1 THEN s ELSE i END AS v FROM t"))
+    assertEquals(s"COALESCE cannot mix INT and STRING; $text", rejected("SELECT COALESCE(s, 1) AS v FROM t"))
+    assertEquals(s"UNION column 1 (v) cannot mix INT and STRING; $text",
+      rejected("SELECT i AS v FROM t UNION ALL SELECT s AS v FROM t"))
+    assertEquals("Cannot cast 'yes' to int", rejected("SELECT CASE WHEN id = 1 THEN 'yes' ELSE 0 END AS v FROM t"))
+    assertEquals("Cannot cast 'x' to int", rejected("SELECT i AS v FROM t UNION ALL SELECT 'x' AS v FROM t"))
+    assertEquals("IF cannot mix BOOLEAN and INT; CAST the BOOLEAN to INT for 1 and 0",
+      rejected("SELECT IF(id = 1, TRUE, 0) AS v FROM t"))
+    val temporal = "CAST one: a DATE as a TIMESTAMP is its midnight, a TIMESTAMP as a DATE its date in UTC"
+    assertEquals(s"COALESCE cannot mix DATE and TIMESTAMP; $temporal", rejected("SELECT COALESCE(dt, ts) AS v FROM t"))
+    assertEquals(s"GREATEST cannot mix DATE and TIMESTAMP; $temporal", rejected("SELECT GREATEST(dt, ts) AS v FROM t"))
+    val double = "a DOUBLE has no scale for a DECIMAL result to keep; CAST the DECIMAL to DOUBLE to return a DOUBLE"
+    assertEquals(s"COALESCE cannot mix DECIMAL(9,2) and DOUBLE: $double", rejected("SELECT COALESCE(k, d) AS v FROM t"))
+    assertEquals(s"CASE cannot mix DECIMAL(9,2) and DOUBLE: $double",
+      rejected("SELECT CASE WHEN id = 1 THEN d ELSE k END AS v FROM t"))
+    assertEquals((DataType.DoubleType, Seq(1.25, 2.5, 0.1)),
+      typedColumn("SELECT id, COALESCE(CAST(k AS DOUBLE), d) AS v FROM t ORDER BY id", cat))
+  }
+
+  /** Each column of a UNION takes one type across its arms, whatever each arm
+    * ends in. The union took its first arm's types and the other arms' values
+    * as they were, so an INT column held doubles, and a UNION's dedup kept 1
+    * and 1.0 apart. */
+  @Test def aUnionColumnTakesOneTypeAcrossItsArms(): Unit = {
+    val cat = branchCatalog()
+    assertEquals((DataType.DoubleType, Seq(1.0, 1.5, 2.0, 2.5, 3.0, null)),
+      typedColumn("SELECT i AS v FROM t UNION ALL SELECT d AS v FROM t ORDER BY v NULLS LAST", cat))
+    assertEquals((DataType.DoubleType, Seq(1.0, 2.0, 3.0)),
+      typedColumn("SELECT i AS v FROM t UNION SELECT 1.0 AS v FROM t ORDER BY v", cat))
+    assertEquals((DataType.DoubleType, Seq(1.0, 1.0, 2.5)),
+      typedColumn("SELECT i AS v FROM t WHERE id = 1 UNION ALL SELECT CAST(i AS BIGINT) FROM t WHERE id = 1 " +
+        "UNION ALL SELECT 2.5 FROM t WHERE id = 1 ORDER BY v", cat))
+    assertEquals((DataType.IntType, Seq(null, 1)),
+      typedColumn("SELECT NULL AS v FROM t WHERE id = 1 UNION ALL SELECT 1 FROM t WHERE id = 1 ORDER BY v", cat))
+    // An arm that ends in DISTINCT is cast after it.
+    assertEquals((DataType.DecimalType(18, 4), Seq(dec("0.1000"), dec("0.1234"), dec("1.2500"), dec("2.5000"))),
+      typedColumn("SELECT k AS v FROM t WHERE k IS NOT NULL UNION ALL SELECT DISTINCT w FROM t WHERE w IS NOT NULL " +
+        "ORDER BY v", cat))
+    assertEquals((DataType.DateType, Seq("2026-01-01", "2026-03-01").map(java.time.LocalDate.parse)),
+      typedColumn("SELECT dt AS v FROM t WHERE id = 1 UNION ALL SELECT '2026-03-01' FROM t WHERE id = 1 ORDER BY v", cat))
+  }
+
+  /** LAG's and LEAD's default meets the value it stands in for. It was kept
+    * as it was, so `LAG(i, 1, 2.5)` gave the INT 2, a decimal default with
+    * more digits sat under the column's type, and a default that was no date
+    * failed while running. */
+  @Test def lagAndLeadDefaultsMeetTheirValue(): Unit = {
+    val cat = branchCatalog()
+    def typed(fn: String): (DataType, Seq[Any]) = typedColumn(s"SELECT id, $fn OVER (ORDER BY id) AS v FROM t ORDER BY id", cat)
+    assertEquals((DataType.DoubleType, Seq(2.5, 1.0, 2.0)), typed("LAG(i, 1, 2.5)"))
+    assertEquals((DataType.DecimalType(10, 3), Seq(null, dec("0.100"), dec("0.125"))), typed("LEAD(k, 1, 0.125)"))
+    assertEquals((DataType.DateType, Seq("2025-12-31", "2026-01-01", "2026-01-02").map(java.time.LocalDate.parse)),
+      typed("LAG(dt, 1, '2025-12-31')"))
+    assertEquals("Cannot cast 'x' to date", bindRejection("SELECT LEAD(dt, 1, 'x') OVER (ORDER BY id) AS v FROM t", cat))
+    assertEquals("LAG cannot mix INT and STRING; only a string literal is read as an INT, so CAST the STRING to INT, " +
+      "or the INT to STRING", bindRejection("SELECT LAG(s, 1, 0) OVER (ORDER BY id) AS v FROM t", cat))
+  }
+
+  /** NULLIF compares its two operands as `=` does and answers with the first
+    * as it is. A string literal was compared as text, so `NULLIF(i, '2')` and
+    * `NULLIF(dt, '2026-01-01')` never matched. */
+  @Test def nullifComparesItsOperandsAsEqualsDoes(): Unit = {
+    val cat = branchCatalog()
+    def typed(expr: String): (DataType, Seq[Any]) = typedColumn(s"SELECT id, $expr AS v FROM t ORDER BY id", cat)
+    assertEquals((DataType.IntType, Seq(1, null, 3)), typed("NULLIF(i, '2')"))
+    assertEquals((DataType.DateType, Seq(null, java.time.LocalDate.parse("2026-01-02"), null)),
+      typed("NULLIF(dt, '2026-01-01')"))
+    assertEquals((DataType.IntType, Seq(null, 2, 3)), typed("NULLIF(i, 1.0)"))
+    assertEquals((DataType.IntType, Seq(2, null, 2)), typed("NULLIF('2', i)"))
+    assertEquals((DataType.DecimalType(9, 2), Seq(null, null, dec("0.10"))), typed("NULLIF(k, w * 10 + 0.016)"))
+    assertEquals("Cannot compare INT with STRING; only a string literal is read as an INT, so CAST the expression " +
+      "to INT, or the INT to STRING to compare text", bindRejection("SELECT NULLIF(i, s) AS v FROM t", cat))
+  }
+
+  /** Past 38 digits the type that holds two decimals gives way on scale as
+    * an arithmetic result's does, so a value is rounded half up to it, and
+    * one with more integer digits than it keeps is an error. A comparison of
+    * the two reads both exactly, however many digits that takes. */
+  @Test def decimalsPastThirtyEightDigitsRoundOrFail(): Unit = {
+    val cat = branchCatalog()
+    assertEquals((DataType.DecimalType(38, 6),
+      Seq(dec("1.000000"), dec("2.000001"), dec("99999999999999999999999999999999.000000"))),
+      typedColumn("SELECT id, COALESCE(b, a) AS v FROM t38 ORDER BY id", cat))
+    val overflow = try { collectAllRows(SqlEngine.execute("SELECT COALESCE(b, a) AS v FROM t38big", cat)); "" }
+      catch { case e: ArithmeticException => e.getMessage }
+    assertEquals("Decimal overflow: 100000000000000000000000000000000 does not fit decimal(38,6)", overflow)
+    // 1 and 1.0000000001 differ, though no DECIMAL(38,s) holds both.
+    assertEquals(Seq(), column("SELECT id FROM t38 WHERE a = b", cat, "id"))
+    assertEquals(Seq(1), column("SELECT id FROM t38 WHERE a < b", cat, "id"))
+    assertEquals(Seq(), column("SELECT id FROM t38 WHERE b IN (a, 7)", cat, "id"))
+  }
+
+  /** A result of these types spills: each query runs with spill forced and
+    * matches the run without it. A sort over a UNION of `k` and `k * k`
+    * failed with `Cannot write 1.5625 to parquet column '_c0', a
+    * decimal(9,2), without rounding it`, and so did a DISTINCT or a partial
+    * sum over a CASE, COALESCE or IF of two decimal types. */
+  @Test def branchResultsSpill(): Unit = {
+    val cat = branchCatalog()
+    val queries = Seq(
+      "WITH u AS (SELECT k AS v FROM t UNION ALL SELECT k * k AS v FROM t) SELECT v FROM u ORDER BY v",
+      "SELECT DISTINCT id, COALESCE(k, w * w) AS v FROM t",
+      "SELECT i, SUM(IF(id = 1, k, k * w)) AS s, MAX(CASE WHEN id = 3 THEN k ELSE k * w END) AS m FROM t GROUP BY i",
+      "SELECT id, LAG(k, 1, 0.125) OVER (PARTITION BY i ORDER BY id) AS v FROM t")
+    val prevProp = System.getProperty(Spill.SpillDirProperty)
+    val tmp = Files.createTempDirectory("sqlengine-branch-spill-")
+    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
+    try {
+      for (sql <- queries) {
+        def run(opts: ExecutionOptions): Seq[String] =
+          collectAllRows(SqlEngine.execute(sql, cat, opts)).map(_.toSeq.sortBy(_._1).mkString(",")).sorted
+        val expected = run(ExecutionOptions.Default)
+        assertTrue(s"expected a non-empty result: $sql", expected.nonEmpty)
+        assertEquals(sql, expected, run(ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))))
+      }
+    } finally {
+      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
+      else System.setProperty(Spill.SpillDirProperty, prevProp)
+    }
+  }
+
   /** Two BIGINTs compare as longs. They compared as doubles, which cannot
     * tell 2^53 from 2^53 + 1, so `=` matched them while GROUP BY and a hash
     * join (which key exactly) kept them apart. */
@@ -3074,9 +3268,10 @@ class SqlEngineTest {
     def bindError(sql: String): String =
       try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
       catch { case e: IllegalArgumentException => e.getMessage }
-    for (sql <- Seq("SELECT CAST(b AS STRING) AS v FROM tb", "SELECT CAST(b AS INT) AS v FROM tb",
-                    "SELECT CASE WHEN id = 1 THEN 'x' ELSE b END AS v FROM tb"))
+    for (sql <- Seq("SELECT CAST(b AS STRING) AS v FROM tb", "SELECT CAST(b AS INT) AS v FROM tb"))
       assertTrue(sql, bindError(sql).contains("Cannot cast BINARY to"))
+    assertTrue(bindError("SELECT CASE WHEN id = 1 THEN 'x' ELSE b END AS v FROM tb")
+      .contains("CASE cannot mix BINARY and STRING"))
     // These filtered every row out as false, and counted nothing.
     for (sql <- Seq("SELECT id FROM tb WHERE b", "SELECT COUNT_IF(b) AS n FROM tb"))
       assertTrue(sql, bindError(sql).contains("Cannot cast BINARY to BOOLEAN"))

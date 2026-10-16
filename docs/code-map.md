@@ -7,7 +7,7 @@ navigation hint, not a comprehensive directory listing.
 
 ## File-size hot spots
 
-- `sql/plan/LogicalBuilder.scala` (~1155 LOC) — largest file in `sql/plan`.
+- `sql/plan/LogicalBuilder.scala` (~1265 LOC) — largest file in `sql/plan`.
   Pattern matches every JSqlParser expression node, dispatches SELECT shapes,
   and (for
   outermost-scope `WITH` CTEs) emits placeholder `PendingCteView` scans +
@@ -56,10 +56,11 @@ navigation hint, not a comprehensive directory listing.
 - `sql/plan/Expr.scala` (~715 LOC) — `Expr` ADT plus `eval` and `evalVec`
   per subtype. `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` each carry
   an `evalVec` override; the rest of the hot subtypes delegate to `VecOps`.
-- `sql/plan/Ops.scala` (~1090 LOC) — `Ops` (row-at-a-time binary ops, and
+- `sql/plan/Ops.scala` (~1120 LOC) — `Ops` (row-at-a-time binary ops, and
   `eq` / `cmp`, the engine's one equality and total order), `Casts`,
-  `Decimals` (the declared type of each decimal result, and the one function
-  both paths compute it with), and `VecOps` (one specialized loop per (op,
+  `Decimals` (the declared type of each decimal result, the type that holds
+  two decimals, and the one function both paths compute and fit a value
+  with), and `VecOps` (one specialized loop per (op,
   output type) pair, which is most of the length). The comparison contract
   both `Expr` paths follow — integers as longs (`integralCompare`), a pair
   with a float in it as doubles (`numericCompare`, whose doc holds the `NaN` /

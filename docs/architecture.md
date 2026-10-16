@@ -197,10 +197,9 @@ but the split is ours, not Postgres's: Postgres has no split here because its
 **A decimal or byte-array key.** For these two types a key agrees with `Ops.eq`
 exactly. A byte array is compared and hashed by content (a raw array's own
 `equals` and `hashCode` are its identity). A decimal is equal by value, but
-`BigDecimal.equals` and `hashCode` include the scale, and a column does not
-hold every value at its declared scale (a `CASE` or `COALESCE` branch can keep
-its own, plans/robustness/09), so the object codecs store a decimal as
-`KeyCodec.decimalKey`: the value
+`BigDecimal.equals` and `hashCode` include the scale, and a column built in
+memory need not hold every value at its declared scale, so the object codecs
+store a decimal as `KeyCodec.decimalKey`: the value
 at the column's declared scale when it can be written there exactly, and
 otherwise without its trailing zeros. Every spelling of a value is then one key,
 the key decodes at the declared scale whichever spelling arrived first, and a
@@ -885,7 +884,18 @@ Arithmetic and comparison are NULL-propagating via the `lv == null || rv == null
 with one type: `Analyzer.unify` types every set of operands that meet when the
 query is bound (numbers widen, a string literal is read as the type beside it,
 any other mix is a bind error), so a bound comparison never asks `Ops` to order
-a number against a string.
+a number against a string. Values that become one result — a `CASE`'s `THEN`s
+and `ELSE`, the arguments of `COALESCE`, `GREATEST` and `LEAST`, `IF`'s two,
+`LAG`'s or `LEAD`'s value and default, a column across a `UNION`'s arms
+(`LogicalBuilder.unifyArms`) — meet through `Analyzer.branches`, the same rule
+with one difference: they are kept, so their type must hold each of them. Two
+decimals meet there as `Decimals.holding`, the longer integer part at the
+larger scale, given way past 38 digits as an arithmetic result's is, and a
+`FLOAT` or `DOUBLE` beside a `DECIMAL` is the error it is in arithmetic. A
+`CAST` between two `DECIMAL`s produces a value of the target
+(`Decimals.fit`), so a comparison of two decimals reads both as
+`Decimals.wider`, which holds both with no bound on its digits and so never
+rounds; any other number is read exactly, as a comparison needs.
 
 Arithmetic with a `DECIMAL` on either side is typed by `Analyzer.arithmetic`
 instead, because the result's type depends on both sides' digits (`Decimals`,

@@ -44,14 +44,6 @@ object SyntaxEquivalence {
   private val Plans = "plans/robustness/"
 
   val KnownDefects: Vector[Known] = Vector(
-    Known("IF numeric branches",
-      "IF takes the wider of its branches' types and CASE its first's, so IF(p, 1, 2.5) is 2.5 where CASE is 2",
-      Plans + "09-branch-result-types.md",
-      ("SELECT IF(a > 1, 1, 2.5) AS v FROM t", "SELECT CASE WHEN a > 1 THEN 1 ELSE 2.5 END AS v FROM t")),
-    Known("COALESCE numeric branches",
-      "COALESCE takes the wider of its arguments' types and CASE its first branch's",
-      Plans + "09-branch-result-types.md",
-      ("SELECT COALESCE(a, 2.5) AS v FROM t", "SELECT CASE WHEN a IS NOT NULL THEN a ELSE 2.5 END AS v FROM t")),
     Known("quoted identifier",
       "a double-quoted identifier keeps its quotes, so \"a\" names no column",
       Plans + "13-literals-are-read-as-written.md",

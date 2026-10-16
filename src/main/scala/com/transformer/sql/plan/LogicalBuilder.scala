@@ -156,9 +156,10 @@ object LogicalBuilder {
     * clause stays inside the arm).
     *
     * Each [[UnionOp]] contributes its own `ALL` flag; the planner wraps
-    * non-ALL unions with a [[LogicalDistinct]] downstream. INTERSECT /
-    * EXCEPT / MINUS aren't implemented in v1 — reject with a clear message
-    * instead of producing a wrong plan.
+    * non-ALL unions with a [[LogicalDistinct]] downstream. Each column takes
+    * one type across every arm ([[unifyArms]]). INTERSECT / EXCEPT / MINUS
+    * aren't implemented in v1 — reject with a clear message instead of
+    * producing a wrong plan.
     */
   private def buildSetOperationList(sol: SetOperationList, catalog: Catalog, cteScope: Map[String, CteScopeEntry]): LogicalPlan = {
     val selects = sol.getSelects.asScala.toVector
@@ -186,23 +187,23 @@ object LogicalBuilder {
       case _ => (None, None, None)
     }
 
-    val first = buildAnySelect(selects.head, catalog, cteScope, None)
-    val union = ops.iterator.zipWithIndex.foldLeft(first) { case (acc, (op, i)) =>
-      op match {
-        case u: UnionOp =>
-          val rhs = buildAnySelect(selects(i + 1), catalog, cteScope, None)
-          if (acc.outputSchema.length != rhs.outputSchema.length) {
-            throw new IllegalArgumentException(
-              s"UNION arms have different column counts: " +
-                s"${acc.outputSchema.length} vs ${rhs.outputSchema.length}")
-          }
-          // JSqlParser sets `all=true` only for explicit UNION ALL; bare UNION
-          // (and the rarely-used UNION DISTINCT) both dedup.
-          LogicalUnion(acc, rhs, all = u.isAll)
-        case other =>
-          throw new IllegalArgumentException(
-            s"Unsupported set operation: ${other.getClass.getSimpleName} (only UNION / UNION ALL are supported)")
-      }
+    val unions: Seq[UnionOp] = ops.map {
+      case u: UnionOp => u
+      case other =>
+        throw new IllegalArgumentException(
+          s"Unsupported set operation: ${other.getClass.getSimpleName} (only UNION / UNION ALL are supported)")
+    }
+    val arms = selects.map(buildAnySelect(_, catalog, cteScope, None))
+    arms.tail.foreach { arm =>
+      if (arm.outputSchema.length != arms.head.outputSchema.length)
+        throw new IllegalArgumentException(
+          s"UNION arms have different column counts: ${arms.head.outputSchema.length} vs ${arm.outputSchema.length}")
+    }
+    val typed = unifyArms(arms)
+    // JSqlParser sets `all=true` only for explicit UNION ALL; bare UNION (and
+    // the rarely-used UNION DISTINCT) both dedup.
+    val union = unions.zipWithIndex.foldLeft(typed.head) { case (acc, (u, i)) =>
+      LogicalUnion(acc, typed(i + 1), all = u.isAll)
     }
 
     // ORDER BY / LIMIT bind against the union's output (column names come from
@@ -219,6 +220,33 @@ object LogicalBuilder {
     applyOffsetAndLimit(afterSort,
       Option(sol.getLimit).orElse(hoistedLimit), Option(sol.getOffset).orElse(hoistedOffset),
       Option(sol.getFetch), top = None)
+  }
+
+  /** The arms of a UNION with each column under the one type its values have
+    * in every arm ([[Analyzer.branches]]), so the union holds what its schema,
+    * the first arm's, declares. An arm that ends in its SELECT list has that
+    * list retyped, so a string literal or a number written there is read as
+    * the type it meets, as in a CASE; any other arm is wrapped in a projection
+    * that casts its output. An arm whose columns keep their types is kept as
+    * it is. */
+  private def unifyArms(arms: Seq[LogicalPlan]): Seq[LogicalPlan] = {
+    val offered: Seq[Seq[Expr]] = arms.map {
+      case LogicalProject(_, projections) => projections.map(_._1)
+      case arm => arm.outputSchema.fields.zipWithIndex.map { case (f, i) => ColRefExpr(i, f.name, f.dataType) }
+    }
+    val names = arms.head.outputSchema.fieldNames
+    val columns: Seq[Seq[Expr]] = names.indices.map { c =>
+      Analyzer.branches(s"UNION column ${c + 1} (${names(c)})", offered.map(_(c)))._1
+    }
+    arms.indices.map { a =>
+      val retyped = columns.map(_(a))
+      arms(a) match {
+        case arm if retyped == offered(a) => arm
+        case LogicalProject(child, projections) =>
+          LogicalProject(child, projections.map(_._2).zip(retyped).map { case (n, e) => (e, n) })
+        case arm => LogicalProject(arm, arm.outputSchema.fieldNames.zip(retyped).map { case (n, e) => (e, n) })
+      }
+    }
   }
 
   /** OFFSET, then the row count, in the order SQL applies them: skip `offset`
@@ -720,9 +748,9 @@ object LogicalBuilder {
 
     case c: CaseExpression =>
       val switch = Option(c.getSwitchExpression).map(b)
-      val branches: Seq[(Expr, Expr)] = c.getWhenClauses.asScala.toSeq.map { wc =>
-        val whenExpr = wc.asInstanceOf[WhenClause]
-        val cond = switch match {
+      val whens = c.getWhenClauses.asScala.toSeq.map(_.asInstanceOf[WhenClause])
+      val conds: Seq[Expr] = whens.map { whenExpr =>
+        switch match {
           case None =>
             Analyzer.implicitCast(b(whenExpr.getWhenExpression), DataType.BooleanType)
           case Some(s) =>
@@ -730,16 +758,10 @@ object LogicalBuilder {
             val (sl, wr, _) = Analyzer.promotePair(s, whenBound)
             BinOpExpr("=", sl, wr, DataType.BooleanType)
         }
-        (cond, b(whenExpr.getThenExpression))
       }
-      val elseE = Option(c.getElseExpression).map(b)
-      val resultType = {
-        val types = branches.map(_._2.dataType) ++ elseE.map(_.dataType)
-        types.filterNot(_ == DataType.NullType).headOption.getOrElse(DataType.NullType)
-      }
-      val unifiedBranches = branches.map { case (cond, v) => (cond, Analyzer.implicitCast(v, resultType)) }
-      val unifiedElse = elseE.map(Analyzer.implicitCast(_, resultType))
-      CaseExpr(unifiedBranches, unifiedElse, resultType)
+      val elseE = Option(c.getElseExpression)
+      val (values, resultType) = bindBranches("CASE", whens.map(_.getThenExpression) ++ elseE, b)
+      CaseExpr(conds.zip(values), elseE.map(_ => values.last), resultType)
 
     case ce: CastExpression =>
       val inner = b(ce.getLeftExpression)
@@ -795,6 +817,19 @@ object LogicalBuilder {
     def beside(other: Expr, side: Expression, bound: Expr): Expr =
       if (other.dataType.isInstanceOf[DataType.DecimalType]) decimalConstant(side).getOrElse(bound) else bound
     Analyzer.arithmetic(op, beside(re, l, le), beside(le, r, re))
+  }
+
+  /** `values`, bound by `bind`, under the one type of a result they all
+    * become ([[Analyzer.branches]]). Beside a DECIMAL a constant is decimal
+    * arithmetic, as it is beside one in arithmetic ([[decimalConstant]]), so
+    * `COALESCE(price, 1 + 0.05)` is a DECIMAL as `price + (1 + 0.05)` is. */
+  private def bindBranches(what: String, values: Seq[Expression], bind: Expression => Expr): (Seq[Expr], DataType) = {
+    val bound = values.map(bind)
+    val beside =
+      if (bound.exists(_.dataType.isInstanceOf[DataType.DecimalType]))
+        values.zip(bound).map { case (v, e) => decimalConstant(v).getOrElse(e) }
+      else bound
+    Analyzer.branches(what, beside)
   }
 
   /** `e` as decimal arithmetic when it is a constant, numbers written in the
@@ -865,19 +900,34 @@ object LogicalBuilder {
   private def bindScalarFunctionWithAggs(f: Function, sources: Sources,
                                           aggResolver: Function => Option[Expr],
                                           windowResolver: AnalyticExpression => Option[Expr]): Expr = {
-    val args: Seq[Expr] = Option(f.getParameters)
-      .map(_.asInstanceOf[ExpressionList[_]].asScala.asInstanceOf[Iterable[Expression]].toSeq.map(bindExprWithAggs(_, sources, aggResolver, windowResolver)))
+    def bind(x: Expression): Expr = bindExprWithAggs(x, sources, aggResolver, windowResolver)
+    val name = f.getName.toUpperCase
+    val params: Seq[Expression] = Option(f.getParameters)
+      .map(_.asInstanceOf[ExpressionList[_]].asScala.asInstanceOf[Iterable[Expression]].toSeq)
       .getOrElse(Nil)
+    val args: Seq[Expr] = name match {
+      // Each returns one of its arguments, so they meet as a CASE's values
+      // do. IF's first argument is its condition.
+      case "COALESCE" | "GREATEST" | "LEAST" if params.nonEmpty => bindBranches(name, params, bind)._1
+      case "IF" if params.size == 3 => bind(params.head) +: bindBranches(name, params.tail, bind)._1
+      // NULLIF compares its two and returns the first as it is, but for a
+      // string literal, which is read as the type it meets.
+      case "NULLIF" if params.size == 2 =>
+        val (first, second) = (bind(params(0)), bind(params(1)))
+        val (compared, _) = Analyzer.unify(Seq(first, second))
+        Seq(if (Analyzer.isStringLiteral(first)) compared(0) else first, compared(1))
+      case _ => params.map(bind)
+    }
     val argTypes = args.map(_.dataType)
     // `CURRENT_DATE ()`, with a space, parses as a call rather than the keyword.
-    if (args.isEmpty && UnsupportedClauses.ClockKeywords(f.getName.toUpperCase)) clockLiteral(f.getName.toUpperCase)
+    if (args.isEmpty && UnsupportedClauses.ClockKeywords(name)) clockLiteral(name)
     // MOD(a, b) is a % b, typed and computed as that is.
-    else if (f.getName.equalsIgnoreCase("MOD") && args.size == 2) Analyzer.arithmetic("%", args(0), args(1))
+    else if (name == "MOD" && args.size == 2) Analyzer.arithmetic("%", args(0), args(1))
     else {
-      val rt = Funcs.returnType(f.getName, argTypes)
+      val rt = Funcs.returnType(name, argTypes)
         .getOrElse(throw new IllegalArgumentException(s"Unknown function '${f.getName}(${argTypes.mkString(",")})'"))
-      if (Funcs.takesText(f.getName)) argTypes.foreach(Analyzer.checkText(_, f.getName.toUpperCase))
-      FuncExpr(f.getName.toUpperCase, args, rt)
+      if (Funcs.takesText(name)) argTypes.foreach(Analyzer.checkText(_, name))
+      FuncExpr(name, args, rt)
     }
   }
 
@@ -1019,21 +1069,29 @@ object LogicalBuilder {
     val isStarArg: Boolean =
       Option(ae.getExpression).exists(_.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns])
 
+    // LAG's and LEAD's value and default are one result, as a CASE's values
+    // are: the default is what a row with no row that far away gets.
+    def valueAndDefault(): (Expr, Option[Expr]) = {
+      val arg = argExpr.getOrElse(throw new IllegalArgumentException(s"$fnName requires an argument"))
+      Option(ae.getDefaultValue) match {
+        case Some(default) =>
+          val (values, _) = bindBranches(fnName, Seq(arg, default), binder)
+          (values(0), Some(values(1)))
+        case None => (binder(arg), None)
+      }
+    }
+
     val fn: WindowFn = fnName match {
       case "ROW_NUMBER" => WindowFnRowNumber()
       case "RANK" => WindowFnRank()
       case "DENSE_RANK" => WindowFnDenseRank()
       case "LAG" =>
-        val arg = argExpr.map(binder).getOrElse(
-          throw new IllegalArgumentException("LAG requires an argument"))
+        val (arg, default) = valueAndDefault()
         val offset = Option(ae.getOffset).map(extractNonNegativeInt("LAG offset")).getOrElse(1)
-        val default = Option(ae.getDefaultValue).map(binder)
         WindowFnLag(arg, offset, default)
       case "LEAD" =>
-        val arg = argExpr.map(binder).getOrElse(
-          throw new IllegalArgumentException("LEAD requires an argument"))
+        val (arg, default) = valueAndDefault()
         val offset = Option(ae.getOffset).map(extractNonNegativeInt("LEAD offset")).getOrElse(1)
-        val default = Option(ae.getDefaultValue).map(binder)
         WindowFnLead(arg, offset, default)
       case "COUNT" =>
         if (isStarArg || argExpr.isEmpty) WindowFnAgg(AggExprCountStar())

@@ -30,7 +30,12 @@ to the type it declares with `Decimals.fit`, the way `ABS` keeps a decimal exact
 decimal's `doubleValue` declares a `DOUBLE`, as `ROUND` and `SQRT` do. A function
 that is an operator by another name binds as the operator, the way
 `LogicalBuilder` binds `MOD(a, b)` as `a % b` through `Analyzer.arithmetic`, so
-the two cannot be typed differently.
+the two cannot be typed differently. A function that answers with one of its
+arguments, as `COALESCE`, `IF`, `GREATEST` and `LEAST` do, gives those
+arguments one type in `bindScalarFunctionWithAggs` through
+`LogicalBuilder.bindBranches` (`Analyzer.branches`), and `Funcs.returnType` then
+reads that type; one that compares two arguments, as `NULLIF` does, types them
+with `Analyzer.unify`.
 
 A function whose value must hold still for a whole query, as the clock keywords'
 must, does not belong in `Funcs`, which evaluates per row. Bind it to a literal
@@ -320,7 +325,9 @@ fully implement, reject the unsupported forms explicitly rather than binding
 the operand you *can* reach — `TrimFunction` is the cautionary case there. If
 the node compares or combines values, type its operands with `Analyzer.unify`
 instead of casting them by hand: IN lists once had a rule of their own that cast
-every item to the left side's type, and `i IN (9.5)` matched a 9.
+every item to the left side's type, and `i IN (9.5)` matched a 9. If its answer
+is one of several values, type them with `Analyzer.branches`: `CASE` once took
+its first value's type, so `THEN 1 ELSE 2.5` was 2.
 A test enforces one more edit: the node's class needs an audit in
 `UnsupportedClauses`, which `sql/plan:unsupported_clauses_test` asks for by name
 as soon as `LogicalBuilder` matches on the class (see the next section).

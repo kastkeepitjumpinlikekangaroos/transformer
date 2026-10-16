@@ -339,6 +339,36 @@ class ExprBatchTest {
     }
   }
 
+  /** A decimal cast to another DECIMAL is a value of it on both paths:
+    * rounded half up to its scale, every row at that scale, and an error past
+    * its integer digits. It kept the value as it was, which the parquet
+    * writer refused under a narrower type (plans/robustness/09). An integer
+    * cast to a DECIMAL is read exactly, at the target's scale, whatever its
+    * digits, as a comparison reads one. */
+  @Test def castBetweenDecimalsFitsTheTarget(): Unit = {
+    val from = DataType.DecimalType(18, 4)
+    val values = Seq("1.2345", "-1.2355", "0.0050", "12.5", "99.9949")
+    val b = batch("x" -> decCol(from, i => values(i % values.length), _ % 7 == 0))
+    val narrower = CastExpr(ColRefExpr(0, "x", from), DataType.DecimalType(4, 2))
+    assertParity(narrower, b)
+    val vec = narrower.evalVec(b)
+    val expected = Seq("1.23", "-1.24", "0.01", "12.50", "99.99")
+    (0 until b.numRows).filterNot(vec.isNull).foreach { i =>
+      assertEquals(s"row $i", new java.math.BigDecimal(expected(i % values.length)), vec.getBoxed(i))
+      assertEquals(s"row $i", vec.getBoxed(i), narrower.eval(b, i))
+    }
+    val tooNarrow = CastExpr(ColRefExpr(0, "x", from), DataType.DecimalType(3, 2))
+    for (overflow <- Seq(() => tooNarrow.evalVec(b), () => tooNarrow.eval(b, 3))) {
+      val e = try { overflow(); null } catch { case e: ArithmeticException => e }
+      assertNotNull(e)
+      assertEquals("Decimal overflow: 12.5 does not fit decimal(3,2)", e.getMessage)
+    }
+    val ints = batch("i" -> intCol(i => i * 1000, EveryOther))
+    val read = CastExpr(ColRefExpr(0, "i", DataType.IntType), DataType.DecimalType(3, 2))
+    assertParity(read, ints)
+    assertEquals(new java.math.BigDecimal("5000.00"), read.eval(ints, 5))
+  }
+
   @Test def castSameTypeIdentity(): Unit = {
     val b = batch("x" -> intCol(i => i, EveryOther))
     assertParity(CastExpr(ColRefExpr(0, "x", DataType.IntType), DataType.IntType), b)

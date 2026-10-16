@@ -640,20 +640,30 @@ object ExprGen {
     CastExpr(genTyped(r, schema, pick(r, totalCastSources(target)), depth - 1), target)
 
   /** Source types that cast to `target` without ever throwing (see the totality
-    * note on the object). An integer is a decimal exactly and a decimal is one
-    * at any declared scale, but a FLOAT or DOUBLE is not a total source for a
-    * DECIMAL: `NaN` and the infinities have none. A DATE and a TIMESTAMP cast to
-    * each other (midnight UTC, the date in UTC); text into either can fail to
-    * parse. A BINARY casts to nothing else and nothing else to it. */
+    * note on the object). Into a DECIMAL, the integers and the decimals whose
+    * integer part it holds: a decimal is rounded to the target's scale and is
+    * an error past its integer digits, and an integer, which is read as it
+    * is, would leave a DECIMAL-typed value that a later CAST could not fit. A
+    * FLOAT or DOUBLE is not a total source for a DECIMAL either: `NaN` and the
+    * infinities have none. A DATE and a TIMESTAMP cast to each other (midnight
+    * UTC, the date in UTC); text into either can fail to parse. A BINARY casts
+    * to nothing else and nothing else to it. */
   private def totalCastSources(target: DataType): Seq[DataType] = target match {
     case DataType.IntType | DataType.LongType => Numerics :+ DataType.BooleanType
     case DataType.FloatType | DataType.DoubleType => Numerics
     case DataType.StringType => TextTypes
     case DataType.BooleanType => Numerics :+ DataType.BooleanType
-    case _: DataType.DecimalType => Seq(DataType.IntType, DataType.LongType) ++ DecimalTypes
+    case d: DataType.DecimalType =>
+      def asDecimal(t: DataType) = t match {
+        case dt: DataType.DecimalType => dt
+        case it => Decimals.ofIntegral(it)
+      }
+      (Seq(DataType.IntType, DataType.LongType) ++ DecimalTypes).filter(t => integerDigits(asDecimal(t)) <= integerDigits(d))
     case DataType.DateType | DataType.TimestampType => Temporals
     case other => Seq(other)
   }
+
+  private def integerDigits(t: DataType.DecimalType): Int = t.precision - t.scale
 
   /** A DECIMAL, DATE, TIMESTAMP or BINARY expression: the conditional forms
     * every type has, and a CAST in from the types that cast to `target` without
@@ -684,30 +694,34 @@ object ExprGen {
     * CAST to the DECIMAL its every value fits, or a number written as the
     * DECIMAL of its digits (`Decimals.literal`), and the node declared as
     * `Decimals.resultType` says. Under a CAST to `target` when that is another
-    * DECIMAL, as a COALESCE or a comparison beside a `target` would cast it.
+    * DECIMAL, which rounds the answer to `target`'s scale, as a CASE or a UNION
+    * whose type gave way past 38 digits does.
     *
     * The sides are leaves, whose values fit the types they are declared as,
-    * and an operator is drawn over them only where its type keeps every
-    * integer digit its answer can need ([[holdsEveryAnswer]]), so no answer
-    * overflows and the generator stays total. The pairs that fail it are the
-    * widest products and quotients, whose types give way on integer digits
-    * past 38 digits; their overflow is pinned by `ExprBatchTest`. */
+    * and they are drawn for the operator, so that its type keeps every integer
+    * digit its answer can need ([[holdsEveryAnswer]]), and so does `target`
+    * when the answer is cast to it: no answer overflows and the generator
+    * stays total. The pairs that fail it are the widest products and
+    * quotients, whose types give way on integer digits past 38 digits; their
+    * overflow is pinned by `ExprBatchTest`. Sides that do not fit are drawn
+    * again, and after a few tries they are two small numbers, which fit every
+    * operator and every one of [[DecimalTypes]]. */
   private def genDecimalArith(r: Rng, schema: Schema, target: DataType): Expr = {
-    val (l, lt) = decimalSide(r, schema)
-    val (rr, rt) = decimalSide(r, schema)
-    // "%" always holds every answer, so there is an operator to draw.
-    val op = r.oneOf(ArithOps.filter(holdsEveryAnswer(_, lt, rt)))
+    val d = target.asInstanceOf[DataType.DecimalType]
+    val op = r.oneOf(ArithOps)
+    def fits(lt: DataType.DecimalType, rt: DataType.DecimalType): Boolean =
+      holdsEveryAnswer(op, lt, rt) &&
+        (Decimals.resultType(op, lt, rt) == d || integerDigitsNeeded(op, lt, rt) <= integerDigits(d))
+    val ((l, lt), (rr, rt)) = Iterator.continually((decimalSide(r, schema), decimalSide(r, schema))).take(4)
+      .find { case ((_, a), (_, b)) => fits(a, b) }
+      .getOrElse((writtenSide(r.oneOf(SmallNumbers)), writtenSide(r.oneOf(SmallNumbers))))
     val t = Decimals.resultType(op, lt, rt)
     val node = BinOpExpr(op, l, rr, t)
     if (t == target) node else CastExpr(node, target)
   }
 
   /** One side of decimal arithmetic, and the DECIMAL it is declared as. */
-  private def decimalSide(r: Rng, schema: Schema): (Expr, DataType.DecimalType) = {
-    def written(n: Number): (Expr, DataType.DecimalType) = {
-      val lit = Decimals.literal(n)
-      (lit, lit.dataType.asInstanceOf[DataType.DecimalType])
-    }
+  private def decimalSide(r: Rng, schema: Schema): (Expr, DataType.DecimalType) =
     r.weighted(
       (4, () => {
         val t = r.oneOf(DecimalTypes)
@@ -716,12 +730,17 @@ object ExprGen {
       (2, () => {
         val it = r.oneOf(Seq(DataType.IntType, DataType.LongType))
         genLeaf(r, schema, it) match {
-          case LitExpr(n: Number, _) => written(n)
+          case LitExpr(n: Number, _) => writtenSide(n)
           case leaf => (CastExpr(leaf, Decimals.ofIntegral(it)), Decimals.ofIntegral(it))
         }
       }),
-      (1, () => written(r.oneOf(DecimalLiteralNumbers)))
+      (1, () => writtenSide(r.oneOf(DecimalLiteralNumbers)))
     )()
+
+  /** A number written in the query, as the DECIMAL of its digits. */
+  private def writtenSide(n: Number): (Expr, DataType.DecimalType) = {
+    val lit = Decimals.literal(n)
+    (lit, lit.dataType.asInstanceOf[DataType.DecimalType])
   }
 
   /** Numbers a query writes beside a DECIMAL, read as the decimals of their
@@ -730,20 +749,28 @@ object ExprGen {
   private val DecimalLiteralNumbers: Seq[Number] = Seq[Number](
     0, 1, 3, 7, 100, -2, 0.1, 0.5, 1.25, -0.03, 1000000.0)
 
+  /** The [[DecimalLiteralNumbers]] of three integer digits or fewer: any two,
+    * under any operator, need at most seven integer digits, which every one
+    * of [[DecimalTypes]] holds. */
+  private val SmallNumbers: Seq[Number] = DecimalLiteralNumbers.filter(n => math.abs(n.doubleValue) < 1000)
+
   /** Whether `l op r`'s declared type keeps every integer digit its answer can
     * need, for sides whose values fit their types: true of each of Spark's
     * types until it passes 38 digits, where `Decimals.resultType` gives way on
     * scale down to six digits and then on integer digits. */
-  private def holdsEveryAnswer(op: String, l: DataType.DecimalType, r: DataType.DecimalType): Boolean = {
-    val (i1, i2) = (l.precision - l.scale, r.precision - r.scale)
-    val needed = op match {
+  private def holdsEveryAnswer(op: String, l: DataType.DecimalType, r: DataType.DecimalType): Boolean =
+    integerDigits(Decimals.resultType(op, l, r)) >= integerDigitsNeeded(op, l, r)
+
+  /** The integer digits `l op r` can need, for sides whose values fit their
+    * types. */
+  private def integerDigitsNeeded(op: String, l: DataType.DecimalType, r: DataType.DecimalType): Int = {
+    val (i1, i2) = (integerDigits(l), integerDigits(r))
+    op match {
       case "+" | "-" => math.max(i1, i2) + 1
       case "*" => i1 + i2 + 1
       case "/" => i1 + r.scale
       case _ => math.min(i1, i2)
     }
-    val t = Decimals.resultType(op, l, r)
-    t.precision - t.scale >= needed
   }
 
   /** Which arithmetic a generated case applies to DECIMALs (`ops`: `+ - * / %`

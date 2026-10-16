@@ -92,7 +92,7 @@ ship a fix or move something from "not done" to "done".
 - **Values of different types meet only as numbers, or through a string
   literal.** `Analyzer.unify` types every set of operands that meet: a
   comparison, arithmetic and a `CASE` switch (through `promotePair`, its
-  two-operand case), a `BETWEEN`'s three, and an IN list. Numbers widen to the
+  two-operand case), a `BETWEEN`'s three, an IN list and NULLIF's two. Numbers widen to the
   widest among them, a string literal beside another type is read as that type
   at bind time through `Casts`, and every other mix is an error, naming the CAST
   to write where one would say what is meant. The rule it replaced coerced the
@@ -126,23 +126,42 @@ ship a fix or move something from "not done" to "done".
   arithmetic on numbers alone is computed in `DECIMAL` there, rebound from the
   parse tree by `LogicalBuilder.decimalConstant`, since a bound `1 + 0.05` is a
   `DOUBLE` whose implicit CASTs look like a written one). A
-  `BINARY` casts to nothing else, explicitly or implicitly (`checkCast`, and
-  `implicitCast` beneath a WHERE, LIKE or CASE), and `Analyzer.checkText` keeps
+  `BINARY` casts to nothing else, explicitly or implicitly (`checkCast`,
+  `implicitCast` beneath a WHERE or a LIKE, and `branches` beside any other
+  type), and `Analyzer.checkText` keeps
   `||` and the string functions off one: each read the array's identity hash as
   text. When a new type meets these rules, extend them; do not loosen them
   (see the strictness entry in [conventions.md](conventions.md)).
-- **The value branches of `CASE`, `COALESCE`, `IF`, `GREATEST` / `LEAST` and
-  the arms of a `UNION` do not go through `Analyzer.unify` — open.** Each takes
-  its first branch's type (`CASE` its first non-NULL `THEN`, the functions
-  `Funcs.widestNonNull`, whose `widerNumeric` picks the first of two decimals,
-  a `UNION` its first arm's) and casts the rest to it. A cast between decimals
-  keeps the value, so a later branch with more digits is held under a type that
-  cannot hold it, and the parquet writer refuses it when the result is written
-  or spills; `THEN 1 ELSE 2.5` truncates to the `INT` 2, and a `UNION` of an
-  `INT` arm and a `STRING` arm declares `INT` and carries strings. Decimal
-  arithmetic made two decimal types meet in one branch list, so the SQL corpora
-  gate it out of branches by name until this is fixed
-  ([plans/robustness/09](../plans/robustness/09-branch-result-types.md)).
+- **Values that become one result meet through `Analyzer.branches`.** The
+  `THEN` and `ELSE` values of a `CASE`, the arguments of `COALESCE`, `GREATEST`
+  and `LEAST`, `IF`'s two values, `LAG`'s or `LEAD`'s value and default, and
+  each column across a `UNION`'s arms (`LogicalBuilder.unifyArms`) meet by
+  `unify`'s rule, through the same `meet`, but for a `DECIMAL`. A comparison
+  only reads its operands; these values are kept, under the type found, so it
+  must hold each of them. Two decimals meet as `Decimals.holding`, the longer
+  integer part and the larger scale (Spark's `widerDecimalType`), given way
+  past 38 digits as `Decimals.resultType` does; an integer as the `DECIMAL` its
+  every value fits; a number written in the query as the decimal it is
+  (`writtenDecimal`, with a constant rebound through `decimalConstant` by
+  `LogicalBuilder.bindBranches`); and a `FLOAT` or `DOUBLE` that is not written
+  in the query is a bind error, as in arithmetic. Each used to take its first
+  value's type (plans/robustness/09): a cast between decimals kept the value,
+  so a later branch with more digits sat under a type that could not hold it
+  and the parquet writer refused it when the result was written or spilled;
+  `THEN 1 ELSE 2.5` was the `INT` 2; `COALESCE` and `IF` cast nothing, so
+  `IF(p, TRUE, 0)` and `COALESCE(d, ts)` failed mid-drain setting the first
+  type's vector; and a `UNION` declared its first arm's types over the other
+  arms' values as they were. A CAST between two DECIMALs is now a value of the
+  target (`Decimals.fit`: rounded half up, an error past its digits), so a
+  comparison of two decimals reads both as `Decimals.wider`, the holding type
+  with no bound on its digits: a comparison's operands are never stored, and a
+  bounded type would round one of them. Any other number cast to a `DECIMAL` is
+  still read exactly (an integer at the target's scale), since a comparison
+  reads an `INT` beside a `DECIMAL(5,2)` as it is. A `UNION` arm that ends in
+  its SELECT list is retyped in place, so a literal there is read as the type it
+  meets; any other arm is wrapped in a casting projection. NULLIF compares
+  through `unify` and returns its first operand as it is, the one place the
+  binder leaves `Ops.decimalCompare` a mixed pair.
 - **The clock keywords are a `TimeKeyExpression`, spelled as written.**
   `current_date`, `CURRENT_DATE()` and DB2's `CURRENT DATE` arrive as three
   different strings, and `CURRENT_DATE ()`, with a space, arrives as a
@@ -944,15 +963,18 @@ ship a fix or move something from "not done" to "done".
     values would, and the comparison needs no tolerance. The SQL corpora's
     decimal pools (`DataGen.DecimalPools`) hold values a `DOUBLE` adds wrong
     (`0.1` and `0.2`), so an answer computed through `doubleValue` would show.
-    One decimal shape is gated out, by name: arithmetic as a branch of
-    `COALESCE`, `IF` or `CASE` (`QueryGen.genValue`'s and
-    `MetaQueryGen.genValue`'s `inBranch`). Those take their first branch's
-    type and keep the other branches' values as they are, so a branch with a
-    wider decimal (`1.5625` under a `DECIMAL(9,2)`) is a value its column's type
-    does not hold, which the parquet writer refuses when the result spills. That
-    is an engine defect, recorded in
-    [plans/robustness/09](../plans/robustness/09-branch-result-types.md);
-    removing the gate is the proof it is fixed.
+    Decimal arithmetic reaches the values of `COALESCE`, `IF` and `CASE` too,
+    beside a value of another `DECIMAL` type, the shape that took its first
+    value's type and kept a wider decimal there unrounded until
+    [plans/robustness/09](../plans/robustness/09-branch-result-types.md),
+    which a spill could not write. Drawn independently, the two meet on a few
+    seeds in a thousand and mostly answer with the first, so the generators
+    draw it on purpose (`genDecimalBranches`): a product or a quotient beside
+    the narrowest decimal column, half the time a column by a number whose
+    digits do not cancel under a condition that takes it wherever the column
+    has a value. A `COALESCE(c, c * x)` alone would never answer with the
+    product: it reaches it only where `c` is NULL. Run against the plan's base
+    commit, the mode-differential property fails within its first 1300 seeds.
 
 - **The metamorphic TLP oracle partitions the query OUTPUT, never decomposes an
   aggregate.** `Tlp` checks `Q ≡ (Q WHERE p) ⊎ (Q WHERE NOT p) ⊎ (Q WHERE p IS
