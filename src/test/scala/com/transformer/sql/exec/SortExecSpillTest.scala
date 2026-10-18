@@ -155,13 +155,6 @@ class SortExecSpillTest {
       runSort(parts, opts)
       fail("expected spill_max_runs guard to trip")
     } catch {
-      case e: java.util.concurrent.ExecutionException =>
-        // Scheduler wraps the underlying exception; either form is acceptable
-        // as long as the message names the limit.
-        val cause = e.getCause
-        assertNotNull(cause)
-        val msg = cause.getMessage
-        assertTrue(s"expected mention of spill_max_runs in: $msg", msg.contains("spill_max_runs"))
       case e: RuntimeException =>
         assertTrue(s"expected mention of spill_max_runs in: ${e.getMessage}",
           e.getMessage.contains("spill_max_runs"))

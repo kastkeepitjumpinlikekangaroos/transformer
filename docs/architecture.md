@@ -300,8 +300,8 @@ first before any consumer task exists. Each exchange's build reads all
 child partitions in parallel through `Scheduler.submitAndAwaitAll`, routes
 every row, and scatters into K size-exact output batches; consumers then
 only ever take the published fast path — `execute(s)` is an array read.
-A materialization failure re-throws (wrapped) out of the pass at
-`SqlEngine.execute` time — never retried. The memory cost is roughly what
+A materialization failure is thrown out of the pass at `SqlEngine.execute`
+time as itself — never retried. The memory cost is roughly what
 `HashAggregate.partialAggregate` already paid; no new spill semantics are
 introduced.
 
@@ -470,8 +470,11 @@ blocks JVM exit). The 2× factor matters because the work is a mix of CPU-bound
 (decode, filter, aggregate, encode) and I/O-bound (parquet/CSV reads + writes);
 a worker blocked on disk I/O can't steal CPU-bound work, so strict `cores`
 sizing leaves the box idle whenever the heavy task is in its I/O phase. Each
-call site submits Callables via `Scheduler.submit(c).get()` or the convenience
-`Scheduler.submitAndAwaitAll`. Nested submission is safe because a worker
+call site submits Callables via `Scheduler.submit(c).await()` or the convenience
+`Scheduler.submitAndAwaitAll`; a task that fails makes its waiter throw the
+task's own exception (a fatal error stays wrapped in an `ExecutionException`),
+where `ForkJoinTask.get` would throw a wrapper whose message is the chain of
+class names. Nested submission is safe because a worker
 awaiting its children with `ForkJoinTask.get`/`.join` work-*helps* — it steals
 and runs the awaited tasks on its own stack, so an arbitrarily deep breaker tree
 materialises without starving the pool. Do NOT "harden" this with
@@ -1389,6 +1392,15 @@ stops at any class without an audit (the binder rejects those by name). A
 clause found this way raises `UnsupportedClauseException`, an
 `IllegalArgumentException` that names the clause and carries the entry.
 
+The names the binder refuses by come from the same file:
+`UnsupportedClauses.refusal` says what SQL calls a construct the binder has no
+case for (`EXISTS`, `IS DISTINCT FROM`, a subquery, a parenthesized join,
+`EXCEPT`), keyed by the class JSqlParser parses it as, with advice where there
+is any, so a message never names one of JSqlParser's classes or renders a node
+with its `toString`, which throws for some. The table lives outside
+`LogicalBuilder` so that matching on those classes does not count, in the test
+below, as the binder reaching them.
+
 Some getters the binder honours for some uses and drops for others —
 `Function.isDistinct` is honoured for `COUNT`, `SUM`, `AVG`, `MIN` and `MAX`
 and not for `STDDEV` or `CORR`. Those carry a *partial* rejection that tests
@@ -1399,9 +1411,11 @@ derives what the binder reads from `LogicalBuilder`'s compiled class files —
 their constant pools name every JSqlParser class the binder matches on and every
 member it calls — and fails unless every public getter and field of every
 audited class is read, rejected or inert exactly once, every class the binder
-reaches (and every JSqlParser subclass of one) is audited, and every rejection's
-example reaches that rejection. A JSqlParser upgrade cannot add a getter that is
-silently ignored, and the binder cannot start honouring a clause the pass still
+reaches (and every JSqlParser subclass of one) is audited, every rejection's
+example reaches that rejection, and every expression, FROM item and set
+operation without an audit has a name in `refusal`'s table. A JSqlParser
+upgrade cannot add a getter that is silently ignored, nor a construct refused
+without a name, and the binder cannot start honouring a clause the pass still
 rejects. See [extending.md](extending.md#honor-a-clause-the-binder-rejects) for
 the workflow and [gotchas.md](gotchas.md) for what the test cannot see.
 

@@ -48,8 +48,13 @@ ts TIMESTAMP, bin BINARY, dec DECIMAL(9,2))`.
    argument do not. `SELECT t.a FROM t JOIN u ON t.a` dies in
    `HashJoinExec.passesExtra` with `ClassCastException: class java.lang.Integer
    cannot be cast to class java.lang.Boolean`, and `SELECT IF(s, 'y', 'n') FROM
-   t` in `VecFuncs.iff` with `StringVector cannot be cast to BooleanVector`.
-   (`ConditionNotBoolean`)
+   t` in `VecFuncs.iff` with `StringVector cannot be cast to BooleanVector`. A
+   NULL condition dies there too, `IF(NULL, 1, 2)` with `NullVectorImpl cannot
+   be cast to BooleanVector`, though SQL's answer (and the row path's) is 2:
+   [plan 10](10-error-messages-name-internals.md)'s campaign found it at seed
+   54624, once plan 09's typing let that seed's `IF(NULL, DATE '2024-03-10',
+   '2024-03-10')` bind; the cast to BOOLEAN either option of the decision below
+   makes covers it. (`ConditionNotBoolean`)
 6. **The lenient text coercions**, named to the user on 2026-10-03 as follow-ups
    of the typing work and not fuzzed: `UPPER`, `LOWER`, `TRIM` and `LENGTH` over a
    number read its text (`LENGTH(a)` is 1); `s LIKE a` and `a LIKE 'x'` compare as

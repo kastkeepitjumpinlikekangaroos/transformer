@@ -2,6 +2,9 @@ package com.transformer.sql.plan
 
 import com.transformer.core.Catalog
 import com.transformer.sql.parse.SqlParser
+import net.sf.jsqlparser.expression.Expression
+import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList
+import net.sf.jsqlparser.statement.select.{AllColumns, AllTableColumns, FromItem, ParenthesedSelect, SetOperation}
 import org.junit.Assert._
 import org.junit.Test
 
@@ -135,6 +138,26 @@ class UnsupportedClausesTest {
         .map(e => s"`$sql` -> ${e.getClass.getSimpleName}: ${e.getMessage}")
     }
     assertTrue(report("Supported SQL must pass the rejection pass", problems), problems.isEmpty)
+  }
+
+  /** Every node the binder refuses by name has a name in SQL's words
+    * (`UnsupportedClauses.refusal`): each JSqlParser expression, FROM item and
+    * set operation the audit does not cover, at which the walk stops and the
+    * binder refuses, and the audited classes the binder refuses where it meets
+    * them (a query where a value goes, a row value, a star as an argument).
+    * The binder named the class instead, and rendered the node with a
+    * `toString` that throws for some (plans/robustness/10). The CNF classes
+    * under `util` are left out: they are built by a utility, never parsed. */
+  @Test def everyConstructTheBinderRefusesHasAName(): Unit = {
+    val refusedByName = jsqlParserClasses.filter(isConcreteNode).filter { c =>
+      (classOf[Expression].isAssignableFrom(c) || classOf[FromItem].isAssignableFrom(c) ||
+        classOf[SetOperation].isAssignableFrom(c)) &&
+        !UnsupportedClauses.audits.contains(c) && !c.getName.startsWith("net.sf.jsqlparser.util.")
+    } ++ Seq(classOf[ParenthesedSelect], classOf[ParenthesedExpressionList[_]], classOf[AllColumns],
+      classOf[AllTableColumns])
+    val unnamed = refusedByName.filter(c => UnsupportedClauses.constructOf(c).isEmpty).map(_.getName).distinct.sorted
+    assertTrue(report("The binder refuses these JSqlParser classes by name, but UnsupportedClauses has no name for " +
+      "them in SQL's words; add each to UnsupportedClauses.Constructs", unnamed), unnamed.isEmpty)
   }
 
   /** The rejection names the clause the user wrote, never an internal slot

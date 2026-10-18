@@ -159,9 +159,6 @@ class DistinctExecSpillTest {
       runDistinct(schema, parts, opts)
       fail("expected spill_max_runs guard to trip")
     } catch {
-      case e: java.util.concurrent.ExecutionException =>
-        val msg = e.getCause.getMessage
-        assertTrue(s"message: $msg", msg.contains("spill_max_runs"))
       case e: RuntimeException =>
         assertTrue(s"message: ${e.getMessage}", e.getMessage.contains("spill_max_runs"))
     }

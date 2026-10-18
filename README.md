@@ -391,6 +391,10 @@ shared worker pool had a free thread. `startedAt - enqueuedAt` is the
 queue-wait time the GUI surfaces alongside the run duration, so you can tell
 "this task ran fast but waited 3s for a worker" from "this task ran for 3s".
 
+A failed task's `errorMessage` is its failure's own message, such as
+`Cannot cast 'x' to int` for a value a CAST cannot read while the query runs,
+or the bind error that names what the query got wrong.
+
 The underscore prefix means CSV/Parquet readers skip both the record and the
 validation samples when re-reading the directory as data.
 `TaskRunRecord.discover(templatedPattern)` glob-walks the filesystem and
@@ -753,7 +757,11 @@ do anywhere else. No column name resolves there, and `SELECT *` is an error.
 A `HAVING` with no `GROUP BY` makes the query an aggregate over a single group,
 as in standard SQL: `SELECT 'non-empty' AS s FROM t HAVING COUNT(*) > 0` returns
 one row or none. A column outside an aggregate is an error there, not the row
-filter MySQL makes of it.
+filter MySQL makes of it. In any aggregate query the error says the rule,
+`Column 'a' must appear in GROUP BY or inside an aggregate`; a `GROUP BY` key
+may be written either way, so `SELECT t.a, COUNT(*) FROM t GROUP BY a` reads the
+key. A window function in a grouped query reads the groups' aggregates:
+`SUM(COUNT(*)) OVER ()` adds up the groups' counts.
 
 `GROUP BY` and `ORDER BY` also accept a **positional ordinal** — a bare integer
 naming a SELECT-list position, as in BigQuery / Postgres / MySQL. `ORDER BY 2
@@ -773,13 +781,19 @@ compute the window function in a WITH clause and filter on it in the outer
 WHERE`. Rejected, among others: `JOIN ... USING`, `NATURAL`, `SEMI` and `APPLY`
 joins, a bare `OUTER JOIN` and Oracle's `(+)`; `TOP n PERCENT`, `WITH TIES`, and
 `ORDER BY` / `LIMIT` / `OFFSET` / `FETCH` after a parenthesized query; `QUALIFY`,
-`DISTINCT ON`, `GROUPING SETS` and `WITH ROLLUP`; `FILTER (WHERE ...)`,
+`DISTINCT ON`, `GROUPING SETS`, `WITH ROLLUP`, and `ROLLUP (...)` or `CUBE (...)` in
+`GROUP BY`; `FILTER (WHERE ...)`,
 `WITHIN GROUP`, `IGNORE NULLS` and named `WINDOW`s; `DISTINCT` inside
 `STDDEV`, `VARIANCE`, `COUNT_IF`, `COVAR` or `CORR`; `RLIKE` / `REGEXP`, `SIMILAR TO` and
 `x NOTNULL`; `TRY_CAST`, array types and
 subscripts; `* EXCEPT` / `* REPLACE`; `PIVOT`, `TABLESAMPLE`, `CONNECT BY` and
 schema-qualified table names; `SELECT ... INTO`, `FOR UPDATE`, and vendor
-hints. The complete list, with the reason for each, is
+hints. A construct the engine does not implement at all is refused by its SQL
+name too, with what to write instead where there is something:
+`EXISTS is not supported; name the subquery in a WITH clause and JOIN it`, and
+the same for a subquery, `IS DISTINCT FROM`, `IS TRUE`, `INTERVAL`, a query
+parameter, an array, `EXCEPT` and `INTERSECT`, a `VALUES` list and the rest.
+The complete list, with the reason for each, is
 [`UnsupportedClauses.scala`](src/main/scala/com/transformer/sql/plan/UnsupportedClauses.scala).
 A few readings of the text still lose part of it before the binder sees it, each
 an open defect: a statement after `;` is ignored, a repeated `ORDER BY`,
@@ -853,7 +867,8 @@ and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
 `DOUBLE`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`, `DATE`,
 `TIMESTAMP`. A `DECIMAL` or `BINARY` column comes from a declared schema or a
 parquet file; neither type is a CAST target. A number
-widens to a `DECIMAL` where the two meet, and a `BINARY` casts to nothing.
+widens to a `DECIMAL` where the two meet, and a `BINARY` casts to nothing. A
+`BOOLEAN` casts to any number as 1 for true and 0 for false.
 
 Text casts to a number as Java parses one: `'10'`, `'-2.5'` and `'1e3'` are
 numbers, and an `INT` or `BIGINT` reads an integer only. (CSV reads a stricter
@@ -1158,11 +1173,6 @@ JDK 21 or newer (tested through JDK 25).
   unclosed parentheses make a parse error take seconds, and four run the parser
   into its timeout. Recorded as
   [plans/robustness/14](plans/robustness/14-pathological-nesting.md).
-- **Error messages can name the engine's internals**: a parse error begins with
-  the parser's exception class, some rejections name a parser class, and a
-  failure while a pooled operator runs arrives wrapped, which is the message a
-  job records. Recorded as
-  [plans/robustness/10](plans/robustness/10-error-messages-name-internals.md).
 - **`DECIMAL` math functions and statistics compute in `DOUBLE`.** Comparison,
   arithmetic, `ABS`, `SUM` and `AVG` keep a `DECIMAL` exact, but `ROUND`,
   `FLOOR`, `CEIL`, `TRUNC`, `SQRT`, `POWER` and the other math functions, and

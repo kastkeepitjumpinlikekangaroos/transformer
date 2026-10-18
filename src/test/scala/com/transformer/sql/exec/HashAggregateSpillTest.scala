@@ -214,10 +214,6 @@ class HashAggregateSpillTest {
       runLongKey(parts, opts)
       fail("expected spill_max_runs guard to trip")
     } catch {
-      case e: java.util.concurrent.ExecutionException =>
-        val cause = e.getCause
-        assertNotNull(cause)
-        assertTrue(s"message: ${cause.getMessage}", cause.getMessage.contains("spill_max_runs"))
       case e: RuntimeException =>
         assertTrue(s"message: ${e.getMessage}", e.getMessage.contains("spill_max_runs"))
     }

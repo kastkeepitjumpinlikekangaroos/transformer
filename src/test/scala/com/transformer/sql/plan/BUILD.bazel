@@ -50,7 +50,8 @@ scala_junit_test(
 # Every public getter / field of every audited class must be read, rejected or
 # inert exactly once; every class the binder reaches (and every subclass of an
 # audited class) must be audited; every rejection's example must reach that
-# rejection; and supported SQL must pass untouched.
+# rejection; supported SQL must pass untouched; and every construct the binder
+# refuses by name must have a name in SQL's words.
 scala_junit_test(
     name = "unsupported_clauses_test",
     srcs = ["UnsupportedClausesTest.scala"],

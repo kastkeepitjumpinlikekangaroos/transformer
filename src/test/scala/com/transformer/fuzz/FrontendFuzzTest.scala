@@ -90,9 +90,8 @@ class FrontendFuzzTest {
       }
       outcomes(label) = outcomes.getOrElse(label, 0) + 1
       outcome match {
-        case f: Failed => f.defects.foreach(d => defects(d) = defects.getOrElse(d, 0) + 1)
         case k: KnownFailure => defects(k.defect) = defects.getOrElse(k.defect, 0) + 1
-        case Ran => ()
+        case _ => ()
       }
       if (tc.origin.startsWith("mutation/")) {
         val kind = tc.detail.takeWhile(_ != ':')
@@ -136,8 +135,7 @@ class FrontendFuzzTest {
       val outcome = CleanRejection.check(d.repro, () => SqlTextGen.ReferenceTables.catalog())
       val shows = outcome match {
         case KnownFailure(k, _) => k == d
-        case f: Failed => f.defects.contains(d)
-        case Ran => false
+        case _ => false
       }
       assertTrue(s"known defect '$d' no longer shows on `${SqlTextGen.clip(d.repro)}` (got $outcome): if " +
         s"${d.plan} landed, delete the entry from CleanRejection.Defect and close the plan", shows)
@@ -181,25 +179,19 @@ class FrontendFuzzTest {
     unclean("SELECT a FROM t", Phase.Bind, new IllegalArgumentException("Unexpected state 42"), "names nothing")
     // A user's own word is not a leak: a CamelCase alias the SQL wrote.
     clean("SELECT MyAlias FROM t", Phase.Bind, new IllegalArgumentException("Unknown column 'MyAlias'"))
-    // The known defects are recognized, and only as far as they reach.
-    classify("SELECT a, COUNT(*) FROM t", Phase.Bind,
-      new IllegalArgumentException("Unknown column 'a'. Available: [_agg0]")) match {
-      case Right(KnownFailure(Defect.AggSlotInUnknownColumn, _)) => ()
-      case other => fail(s"expected the aggregate-slot defect, got $other")
-    }
-    classify(sql, Phase.Bind, new IllegalArgumentException(
-      "SQL parse error: net.sf.jsqlparser.parser.ParseException: Encountered unexpected token: \"x\" at line 1, column 8.")) match {
-      case Right(f: Failed) => assertEquals(Vector(Defect.ParserClassInParseError), f.defects)
-      case other => fail(s"expected a parse error with its class name excused, got $other")
-    }
+    // What plans/robustness/10 fixed is a finding again if it returns: a parse
+    // error naming the parser's class, a refusal naming a JSqlParser class,
+    // aggregate slots in a message, a run-time failure wrapped by the pool.
+    clean(sql, Phase.Bind, new IllegalArgumentException(
+      "SQL parse error: Encountered unexpected token: \"x\" at line 1, column 8."))
     unclean(sql, Phase.Bind, new IllegalArgumentException(
-      "SQL parse error: net.sf.jsqlparser.parser.ParseException: x at com.transformer.Foo"), "qualified class name")
-    val wrapped = new java.util.concurrent.ExecutionException(new IllegalArgumentException("Cannot cast 'x' to int"))
-    classify(sql, Phase.Run, wrapped) match {
-      case Right(f: Failed) => assertEquals(Vector(Defect.PoolWrappedFailure), f.defects)
-      case other => fail(s"expected a wrapped data error, got $other")
-    }
-    unclean(sql, Phase.Run, new java.util.concurrent.ExecutionException(new ClassCastException("x")),
+      "SQL parse error: net.sf.jsqlparser.parser.ParseException: Encountered unexpected token: \"x\""),
+      "qualified class name")
+    unclean(sql, Phase.Bind, new IllegalArgumentException("Unsupported FROM item: ParenthesedSelect"), "class name")
+    unclean("SELECT a, COUNT(*) FROM t", Phase.Bind,
+      new IllegalArgumentException("Unknown column 'a'. Available: [_agg0]"), "slot name")
+    unclean(sql, Phase.Run,
+      new java.util.concurrent.ExecutionException(new IllegalArgumentException("Cannot cast 'x' to int")),
       "internal exception class")
   }
 

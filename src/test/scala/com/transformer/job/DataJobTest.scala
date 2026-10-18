@@ -838,6 +838,30 @@ class DataJobTest {
       Nil, r.outputFiles.toList)
   }
 
+  /** A task that fails while it runs records the failure's own message, in
+    * its result and in `_run.json`. A failure inside a pooled operator, the
+    * SUM's fan-out here, recorded the pool's wrapper instead:
+    * `java.lang.IllegalArgumentException: java.lang.IllegalArgumentException:
+    * Cannot cast 'x' to int` (plans/robustness/10). */
+  @Test def taskFailingWhileItRunsRecordsItsOwnMessage(): Unit = {
+    val inDir = tmpDir("dj-run-fail-")
+    writeCsv(inDir, "events.csv", "id,s\n1,x\n2,7\n")
+    val outDir = tmpDir("dj-run-fail-out-").resolve("sums")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT SUM(CAST(s AS INT)) AS total FROM events"),
+        outputFile = Some(OutputFilePath(outDir.toString))
+      ))
+    )
+    val result = job.run()
+    assertEquals(Seq(TaskStatus.Failed("Cannot cast 'x' to int")), result.tasks.map(_.status))
+    val r = TaskRunRecord.read(outDir).getOrElse(
+      fail(s"_run.json expected on failure: $outDir").asInstanceOf[TaskRunRecord])
+    assertEquals(TaskRunStatus.Failed, r.status)
+    assertEquals(Some("Cannot cast 'x' to int"), r.errorMessage)
+  }
+
   @Test def taskRunRecordDiscoverFindsMultiplePartitionsSortedNewestFirst(): Unit = {
     val base = tmpDir("dj-disc-")
     val p1 = base.resolve("day=20260101"); Files.createDirectories(p1)

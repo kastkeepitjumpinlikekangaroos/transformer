@@ -389,11 +389,11 @@ class SqlEngineTest {
     val p = tmpCsv("a.csv", "a,b,c,d\n1,2,1,2\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
     // A multi-element list is a row-value constructor, not a grouping paren.
-    // It stays on the catch-all rather than binding to its first element.
+    // It is refused by name rather than bound as its first element.
     val ex = try { SqlEngine.execute("SELECT a FROM t WHERE (a, b) = (c, d)", cat); null }
       catch { case e: IllegalArgumentException => e }
     assertNotNull(ex)
-    assertTrue(ex.getMessage, ex.getMessage.contains("ParenthesedExpressionList"))
+    assertEquals("A row value (a, b, ...) is not supported", ex.getMessage)
   }
 
   // --- TRIM -----------------------------------------------------------------
@@ -2057,7 +2057,7 @@ class SqlEngineTest {
     val ex = try { SqlEngine.execute("SELECT a FROM t HAVING a > 1", cat); null }
       catch { case e: IllegalArgumentException => e }
     assertNotNull(ex)
-    assertTrue(ex.getMessage, ex.getMessage.contains("Unknown column 'a'"))
+    assertEquals("Column 'a' must appear in GROUP BY or inside an aggregate", ex.getMessage)
   }
 
   @Test def distinctAggregatesPerGroupInHavingAndOrderBy(): Unit = {
@@ -2246,8 +2246,9 @@ class SqlEngineTest {
       .contains("LIMIT and FETCH FIRST both limit the rows"))
     assertTrue(bindError("SELECT TOP 2 a FROM t ORDER BY a OFFSET 1 ROWS").contains("TOP n with OFFSET is not supported"))
     // The count must be an integer literal, as LIMIT's must.
-    assertTrue(bindError("SELECT TOP (1 + 1) a FROM t").contains("TOP must be an integer literal"))
-    assertTrue(bindError("SELECT a FROM t FETCH FIRST -1 ROWS ONLY").contains("FETCH FIRST must be an integer literal"))
+    assertEquals("TOP must be a non-negative integer literal", bindError("SELECT TOP (1 + 1) a FROM t"))
+    assertEquals("FETCH FIRST must be a non-negative integer literal",
+      bindError("SELECT a FROM t FETCH FIRST -1 ROWS ONLY"))
   }
 
   @Test def ilikeMatchesRegardlessOfCase(): Unit = {
@@ -3428,5 +3429,230 @@ class SqlEngineTest {
       if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
       else System.setProperty(Spill.SpillDirProperty, prevProp)
     }
+  }
+
+  // ---- Failures say what the user wrote -------------------------------------
+  // plans/robustness/10. Each message below named one of the engine's classes,
+  // rendered a node through JSqlParser, or arrived wrapped by the pool; the
+  // comment on each test records what it said.
+
+  /** `t` is the frontend fuzzer's reference table, over two partitions, with
+    * text no CAST to INT reads; `u` is a second table; `d` holds decimals
+    * whose product does not fit DECIMAL(38,6), two in each of two
+    * partitions, so an aggregate fans out over them and a sort compares two
+    * inside each of its pooled tasks; `flags` holds booleans. */
+  private def messageCatalog(): Catalog = {
+    val c = new Catalog
+    val t = Schema(Vector(Field("a", DataType.IntType), Field("b", DataType.IntType), Field("s", DataType.StringType)))
+    c.register("t", memView(t, Seq(
+      Seq(Array[Any](1, 10, "x"), Array[Any](2, 20, "7")),
+      Seq(Array[Any](2, null, null), Array[Any](3, 40, "7")))))
+    val u = Schema(Vector(Field("a", DataType.IntType), Field("b", DataType.IntType)))
+    c.register("u", memView(u, Seq(Seq(Array[Any](1, 100), Array[Any](2, 200)))))
+    val d = Schema(Vector(Field("b", DataType.DecimalType(38, 18))))
+    val big = dec("99999999999999999999.000000000000000000")
+    c.register("d", memView(d, Seq(Seq(Array[Any](big), Array[Any](big)), Seq(Array[Any](big), Array[Any](big)))))
+    val flags = Schema(Vector(Field("id", DataType.IntType), Field("f", DataType.BooleanType)))
+    c.register("flags", memView(flags, Seq(Seq(Array[Any](1, true), Array[Any](2, false), Array[Any](3, null)))))
+    c
+  }
+
+  /** What running `sql` to its last row throws. */
+  private def thrownBy(sql: String, cat: Catalog): Exception =
+    try { collectAllRows(SqlEngine.execute(sql, cat)); throw new AssertionError(s"$sql ran") }
+    catch { case e: Exception => e }
+
+  /** A parse error says what the parser said, and where, and nothing of the
+    * parser's classes: each began `SQL parse error:
+    * net.sf.jsqlparser.parser.ParseException: `, a lexical one
+    * `...TokenMgrException: `. */
+  @Test def aParseErrorSaysWhatTheParserSaid(): Unit = {
+    val cat = messageCatalog()
+    val unexpected = bindRejection("SELECT a FROM t WHERE a = 1 #", cat)
+    assertTrue(unexpected, unexpected.startsWith("SQL parse error: Encountered unexpected token: \"#\""))
+    assertTrue(unexpected, unexpected.contains("at line 1, column 29."))
+    assertFalse(unexpected, unexpected.contains("jsqlparser"))
+    assertEquals("SQL parse error: Lexical error at line 1, column 29.  Encountered: <EOF> after prefix \"`x\"",
+      bindRejection("SELECT a FROM t WHERE a = `x", cat))
+    // It ended `(got Insert)`.
+    assertEquals("Only SELECT statements are supported", bindRejection("INSERT INTO t VALUES (1, 2, 'x')", cat))
+  }
+
+  /** A construct the binder does not implement is refused by what SQL calls
+    * it. Each message named the class JSqlParser parses it as: `Unsupported
+    * expression: ExistsExpression: EXISTS (SELECT 1 FROM u)`, `Unsupported
+    * FROM item: ParenthesedSelect`, `Unsupported set operation: ExceptOp (only
+    * UNION / UNION ALL are supported)`, `IN subqueries not supported (got
+    * ParenthesedSelect)`, `Unsupported SELECT shape: Values`, `LIMIT must be
+    * an integer literal, got SignedExpression`. */
+  @Test def aConstructTheBinderDoesNotImplementIsRefusedByName(): Unit = {
+    val cat = messageCatalog()
+    val joinIt = "name the subquery in a WITH clause and JOIN it"
+    val selectFromIt = "name it in a WITH clause and select from it, or JOIN it"
+    val unionOnly = "only UNION and UNION ALL are supported"
+    val asSelects = "write each row as a SELECT and combine them with UNION ALL"
+    val refusals = Seq(
+      "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u)" -> s"EXISTS is not supported; $joinIt",
+      "SELECT a FROM t WHERE a = ANY (SELECT a FROM u)" -> s"ANY (subquery) is not supported; $joinIt",
+      "SELECT a FROM t WHERE a IN (SELECT a FROM u)" -> s"IN with a subquery is not supported; $joinIt",
+      "SELECT (SELECT 1) AS x FROM t" -> s"A subquery is not supported; $selectFromIt",
+      "SELECT a FROM t WHERE a IN b" -> "IN takes a list of values in parentheses",
+      "SELECT a FROM t WHERE a IS DISTINCT FROM b" -> "IS DISTINCT FROM is not supported; compare with = and IS NULL",
+      "SELECT a FROM t WHERE a IS NOT DISTINCT FROM b" ->
+        "IS NOT DISTINCT FROM is not supported; compare with = and IS NULL",
+      "SELECT id FROM flags WHERE f IS TRUE" -> "IS TRUE is not supported",
+      "SELECT id FROM flags WHERE f IS NOT FALSE" -> "IS NOT FALSE is not supported",
+      "SELECT INTERVAL '1' DAY AS x FROM t" -> "INTERVAL is not supported",
+      "SELECT a FROM t WHERE a = ?" -> "A query parameter is not supported; write the value in the query",
+      "SELECT a FROM t WHERE a = :x" -> "A query parameter is not supported; write the value in the query",
+      "SELECT ARRAY[1, 2] AS x FROM t" -> "An array is not supported",
+      "SELECT X'0A' AS x FROM t" -> "A hexadecimal literal is not supported",
+      "SELECT a FROM t WHERE (a, b) = (b, a)" -> "A row value (a, b, ...) is not supported",
+      "SELECT a DIV b AS x FROM t" -> "The DIV operator is not supported",
+      "SELECT ~a AS x FROM t" -> "The ~ operator is not supported",
+      "SELECT a FROM t WHERE s ~ 'x'" ->
+        "The ~ operator is not supported; the engine has no regular-expression matching",
+      "SELECT ABS(*) AS x FROM t" -> "A star (*) is not supported; only COUNT(*) and the SELECT list take one",
+      "SELECT * FROM (SELECT a FROM t) x" -> s"A subquery in FROM is not supported; $selectFromIt",
+      "SELECT t.a FROM (t JOIN u ON t.a = u.a)" ->
+        "A parenthesized join in FROM is not supported; write the joins without the parentheses",
+      "SELECT a FROM (t) x" ->
+        "A parenthesized table in FROM is not supported; write the table without the parentheses",
+      "SELECT * FROM (VALUES (1)) v" -> s"VALUES in FROM is not supported; $asSelects",
+      "SELECT * FROM t, LATERAL (SELECT 1) x" -> "LATERAL in FROM is not supported",
+      "VALUES (1)" -> s"VALUES is not supported; $asSelects",
+      "TABLE t" -> "A TABLE statement is not supported; write SELECT * FROM the table",
+      "SELECT a FROM t EXCEPT SELECT a FROM u" -> s"EXCEPT is not supported; $unionOnly",
+      "SELECT a FROM t INTERSECT SELECT a FROM u" -> s"INTERSECT is not supported; $unionOnly",
+      "SELECT a FROM t MINUS SELECT a FROM u" -> s"MINUS is not supported; $unionOnly",
+      "SELECT a FROM t LIMIT -1" -> "LIMIT must be a non-negative integer literal",
+      "SELECT a FROM t LIMIT a" -> "LIMIT must be a non-negative integer literal",
+      "SELECT a FROM t OFFSET 1.5" -> "OFFSET must be a non-negative integer literal",
+      "SELECT a FROM t FETCH FIRST a ROWS ONLY" -> "FETCH FIRST must be a non-negative integer literal")
+    refusals.foreach { case (sql, message) => assertEquals(sql, message, bindRejection(sql, cat)) }
+  }
+
+  /** A refused node is never rendered with JSqlParser's `toString`, which
+    * throws for a ROW-type CAST. Under `IS FALSE`, which the rejection pass
+    * does not audit, such a CAST was rendered by the binder's refusal, and
+    * by the text it matches GROUP BY keys, aggregates and windows with, so
+    * each query below threw a `NullPointerException` naming `ColDataType`. */
+  @Test def aRefusedNodeIsNotRenderedThroughTheParser(): Unit = {
+    val cat = messageCatalog()
+    val row = "CAST(a AS ROW(x INT))"
+    Seq(
+      s"SELECT a FROM t WHERE $row IS FALSE" -> "IS FALSE",
+      s"SELECT $row IS FALSE FROM t" -> "IS FALSE",
+      s"SELECT a, COUNT(*) AS c FROM t GROUP BY a HAVING $row IS FALSE" -> "IS FALSE",
+      s"SELECT COUNT(*) AS c FROM t GROUP BY $row IS TRUE" -> "IS TRUE",
+      s"SELECT a FROM t ORDER BY $row IS TRUE" -> "IS TRUE",
+      s"SELECT a, COUNT(*) AS c FROM t GROUP BY a ORDER BY $row IS TRUE" -> "IS TRUE",
+      s"SELECT SUM($row IS TRUE) OVER () FROM t" -> "IS TRUE"
+    ).foreach { case (sql, construct) => assertEquals(sql, s"$construct is not supported", bindRejection(sql, cat)) }
+  }
+
+  /** A failure inside an operator that fans out over the pool reaches the
+    * caller as itself. It arrived as the pool's `ExecutionException`, whose
+    * message was the chain of class names (`java.lang.IllegalArgumentException:
+    * java.lang.IllegalArgumentException: Cannot cast 'x' to int`), and an
+    * exception whose class has no constructor taking a cause arrived as a
+    * copy with no message at all: the decimal overflow below was
+    * `ExecutionException: java.lang.ArithmeticException`. */
+  @Test def aFailureInAPooledOperatorReachesTheCallerAsItself(): Unit = {
+    val cat = messageCatalog()
+    for (sql <- Seq(
+        "SELECT SUM(CAST(s AS INT)) AS v FROM t",
+        "SELECT DISTINCT CAST(s AS INT) AS v FROM t",
+        "SELECT a FROM t ORDER BY CAST(s AS INT)",
+        "SELECT t.a FROM t JOIN u ON CAST(t.s AS INT) = u.a")) {
+      thrownBy(sql, cat) match {
+        case e: IllegalArgumentException => assertEquals(sql, "Cannot cast 'x' to int", e.getMessage)
+        case other => throw new AssertionError(s"$sql threw $other", other)
+      }
+    }
+    val overflow = "Decimal overflow: 9999999999999999999800000000000000000001.000000000000000000000000000000000000 " +
+      "does not fit decimal(38,6)"
+    for (sql <- Seq("SELECT SUM(b * b) AS v FROM d", "SELECT b FROM d ORDER BY b * b")) {
+      thrownBy(sql, cat) match {
+        case e: ArithmeticException => assertEquals(sql, overflow, e.getMessage)
+        case other => throw new AssertionError(s"$sql threw $other", other)
+      }
+    }
+  }
+
+  /** A column outside GROUP BY and every aggregate is refused by the rule it
+    * breaks. The message listed the aggregate's output, slot names and all
+    * (`Unknown column 'a'. Available: [_agg0]`, or `Available: []` with no
+    * aggregate in the SELECT list). A GROUP BY key written another way is
+    * that key: `SELECT t.a ... GROUP BY a` was `Unknown column 't.a'.
+    * Available: [a, _agg0]`. */
+  @Test def anUngroupedColumnIsRefusedByTheRule(): Unit = {
+    val cat = messageCatalog()
+    def rule(column: String) = s"Column '$column' must appear in GROUP BY or inside an aggregate"
+    assertEquals(rule("a"), bindRejection("SELECT a, COUNT(*) AS c FROM t", cat))
+    assertEquals(rule("a"), bindRejection("SELECT COUNT(*) AS c FROM t HAVING a > 1", cat))
+    assertEquals(rule("a"), bindRejection("SELECT a FROM t WHERE a = 1 HAVING a = 1", cat))
+    assertEquals(rule("b"), bindRejection("SELECT a, b FROM t GROUP BY a", cat))
+    assertEquals(rule("b"), bindRejection("SELECT a, COUNT(*) AS c FROM t GROUP BY a ORDER BY b", cat))
+    assertEquals(rule("b"), bindRejection("SELECT a, RANK() OVER (ORDER BY b) AS r FROM t GROUP BY a", cat))
+    assertEquals(rule("u.a"), bindRejection("SELECT u.a, COUNT(*) AS c FROM t JOIN u ON t.a = u.a GROUP BY t.a", cat))
+    // A column the input does not have is unknown among the input's columns.
+    assertEquals("Unknown column 'x'. Available: [t.a, t.b, t.s]",
+      bindRejection("SELECT x, COUNT(*) AS c FROM t GROUP BY a", cat))
+    def rows(sql: String): Seq[Seq[Any]] = {
+      val q = SqlEngine.execute(sql, cat)
+      collectAllRows(q).map(r => q.schema.fieldNames.map(r))
+    }
+    assertEquals(Seq(Seq(1, 1L), Seq(2, 2L), Seq(3, 1L)),
+      rows("SELECT t.a, COUNT(*) AS c FROM t GROUP BY a ORDER BY t.a"))
+    assertEquals(Seq(Seq(null, 1L), Seq("7", 2L), Seq("X", 1L)),
+      rows("SELECT UPPER(t.s) AS us, COUNT(*) AS c FROM t GROUP BY s ORDER BY 1"))
+  }
+
+  /** A window function in a grouped query reads the groups' aggregates.
+    * `SUM(COUNT(*)) OVER ()` threw `NoSuchElementException: key not found:
+    * count(*)` unless the SELECT list held `COUNT(*)` too, and so did an
+    * aggregate in a window's ORDER BY: the aggregates were collected from
+    * everything but the window. */
+  @Test def aWindowInAGroupedQueryReadsTheGroupsAggregates(): Unit = {
+    val cat = messageCatalog() // t.a is 1, 2, 2, 3
+    def rows(sql: String): Seq[Seq[Any]] = {
+      val q = SqlEngine.execute(sql, cat)
+      collectAllRows(q).map(r => q.schema.fieldNames.map(r))
+    }
+    assertEquals(Seq(Seq(1, 4L), Seq(2, 4L), Seq(3, 4L)),
+      rows("SELECT a, SUM(COUNT(*)) OVER () AS w FROM t GROUP BY a ORDER BY a"))
+    assertEquals(Seq(Seq(1, 2L), Seq(2, 1L), Seq(3, 2L)),
+      rows("SELECT a, RANK() OVER (ORDER BY COUNT(*) DESC) AS r FROM t GROUP BY a ORDER BY a"))
+  }
+
+  /** CAST of a BOOLEAN to FLOAT or DOUBLE is 1 or 0, as CAST to INT already
+    * was. It threw `NumberFormatException: For input string: "true"` on its
+    * first row. */
+  @Test def aBooleanCastsToANumberAsOneOrZero(): Unit = {
+    val cat = messageCatalog()
+    assertEquals((DataType.DoubleType, Seq(1.0, 0.0, null)),
+      typedColumn("SELECT id, CAST(f AS DOUBLE) AS v FROM flags ORDER BY id", cat))
+    assertEquals((DataType.FloatType, Seq(1.0f, 0.0f, null)),
+      typedColumn("SELECT id, CAST(f AS FLOAT) AS v FROM flags ORDER BY id", cat))
+    assertEquals((DataType.IntType, Seq(1, 0, null)),
+      typedColumn("SELECT id, CAST(f AS INT) AS v FROM flags ORDER BY id", cat))
+    assertEquals(Seq(1.0), column("SELECT CAST(TRUE AS DOUBLE) AS v FROM flags WHERE id = 1", cat, "v"))
+    assertEquals(Seq(0.0f), column("SELECT CAST(FALSE AS FLOAT) AS v FROM flags WHERE id = 1", cat, "v"))
+  }
+
+  /** ROLLUP and CUBE in GROUP BY are refused as the groupings they are, with
+    * the advice GROUPING SETS gives. JSqlParser parses both as calls, and the
+    * message was `Unknown function 'ROLLUP(int)'`. Outside GROUP BY a call to
+    * ROLLUP is still an unknown function. */
+  @Test def rollupAndCubeAreRefusedAsGroupings(): Unit = {
+    val cat = messageCatalog()
+    val rollup =
+      "GROUP BY ROLLUP (...) is not supported; GROUP BY each level separately and combine the results with UNION ALL"
+    assertEquals(rollup, bindRejection("SELECT a, COUNT(*) AS c FROM t GROUP BY ROLLUP(a)", cat))
+    assertEquals(rollup, bindRejection("SELECT a, b, COUNT(*) AS c FROM t GROUP BY a, ROLLUP(b)", cat))
+    assertEquals("GROUP BY CUBE (...) is not supported; GROUP BY each combination separately and combine the " +
+      "results with UNION ALL", bindRejection("SELECT a, b, COUNT(*) AS c FROM t GROUP BY CUBE(a, b)", cat))
+    assertEquals("Unknown function 'ROLLUP(int)'", bindRejection("SELECT ROLLUP(a) AS r FROM t", cat))
   }
 }

@@ -3,8 +3,11 @@ package com.transformer.core
 import org.junit.Assert._
 import org.junit.Test
 
-import java.util.concurrent.{Callable, ConcurrentLinkedQueue, CountDownLatch, TimeUnit, TimeoutException}
+import java.util.concurrent.{
+  Callable, ConcurrentLinkedQueue, CountDownLatch, ExecutionException, TimeUnit, TimeoutException
+}
 import java.util.concurrent.atomic.AtomicBoolean
+import scala.util.control.NonFatal
 
 /** Mechanism guard for the liveness assumption nested execution rests on:
   * [[Scheduler.submitAndAwaitAll]] awaits its sub-tasks with
@@ -26,6 +29,8 @@ import java.util.concurrent.atomic.AtomicBoolean
   * exchange gate that non-descendant inlining can close a real deadlock cycle
   * at K>1 sharding — see docs/gotchas.md ("Sharded execution at K>1") and
   * plans/bugfixes/02e.
+  *
+  * It also pins how a task's failure reaches the thread that waits for it.
   *
   * Runs in its own JVM with `-Dtransformer.scheduler.parallelism=2`
   * ([[Scheduler.parallelism]] is a class-load `val`): 2 threads is the
@@ -52,6 +57,43 @@ class SchedulerTest {
       else Scheduler.submitAndAwaitAll(
         (0 until Fan).map(_ => new Callable[Int] { def call(): Int = spawn(depth - 1) })).sum
     assertEquals("every leaf of the nested fan-out reached", 1024, spawn(Depth))
+  }
+
+  /** A task that throws makes its waiter throw the task's own exception, from
+    * a thread outside the pool and from a pool worker waiting on a nested
+    * fan-out. `ForkJoinTask.get` alone throws an `ExecutionException` around
+    * a copy made on the waiting thread, with the original's `toString` as its
+    * message, or none for a class with no constructor taking a cause, which
+    * is what a failing query reported (plans/robustness/10). */
+  @Test(timeout = 30000) def aFailedTaskRethrowsItsOwnException(): Unit = {
+    def failing(t: Throwable): Callable[Int] = new Callable[Int] { def call(): Int = throw t }
+    def thrownBy(work: => Any): Throwable = try { work; null } catch { case t: Throwable => t }
+    val cast = new IllegalArgumentException("Cannot cast 'x' to int")
+    val overflow = new ArithmeticException("Decimal overflow")
+    val io = new java.io.IOException("disk full")
+    assertSame(cast, thrownBy(Scheduler.submitAndAwaitAll(Seq(failing(cast)))))
+    assertSame(overflow, thrownBy(Scheduler.submit(failing(overflow)).await()))
+    assertSame(io, thrownBy(Scheduler.submitAndAwaitAll(Seq(failing(io)))))
+    val nested = new Callable[Int] {
+      def call(): Int = Scheduler.submitAndAwaitAll(Seq(failing(overflow))).head
+    }
+    assertSame(overflow, thrownBy(Scheduler.submitAndAwaitAll(Seq(nested))))
+    assertEquals("Decimal overflow", overflow.getMessage)
+    // Where the waiter waited rides along, as a suppressed exception.
+    assertTrue(cast.getSuppressed.nonEmpty)
+  }
+
+  /** A fatal error stays wrapped in an `ExecutionException` whose cause is
+    * the task's own error, so a caller that catches only non-fatal failures,
+    * as a job's task runner does, still catches it. */
+  @Test(timeout = 30000) def aFatalErrorStaysWrapped(): Unit = {
+    val error = new OutOfMemoryError("synthetic")
+    val thrown =
+      try { Scheduler.submitAndAwaitAll(Seq(new Callable[Int] { def call(): Int = throw error })); null }
+      catch { case t: Throwable => t }
+    assertTrue(s"$thrown", thrown.isInstanceOf[ExecutionException])
+    assertSame(error, thrown.getCause)
+    assertTrue(NonFatal(thrown))
   }
 
   @Test(timeout = 60000) def nestedFanOutWedgesWithoutWorkHelping(): Unit = {

@@ -1,8 +1,7 @@
 # Plan 10: a failing query's message names the engine's internals, not the user's SQL
 
-> Status: **open** · Effort: 1 day · Risk: low (messages and exception classes
-> only; no query that runs today changes), but one decision first: where a
-> pooled failure is unwrapped (see [Decisions](#decisions))
+> Status: **done** 2026-10-17 (see [Outcome](#outcome)) · Effort: 1 day · Risk:
+> low (messages and exception classes; no query that ran changes its answer)
 
 ## How this was found
 
@@ -130,3 +129,124 @@ is the proof the fix landed, and the test fails until it is removed. Measured at
 `docs/gotchas.md` (the error-message entry), `docs/testing.md` (the defects
 `CleanRejection` no longer excuses), `README.md` if the job record's error text
 is described there.
+
+## Outcome
+
+The user's decisions, 2026-10-17, each the recommended option:
+
+- **The scheduler rethrows.** A pool task that fails makes the thread waiting
+  for it throw the task's own exception, the waiting thread's stack added to it
+  as a suppressed exception. One refinement the plan did not foresee was in the
+  question: a fatal error (an `OutOfMemoryError`, a `StackOverflowError`) stays
+  wrapped in an `ExecutionException`, because `DataJob`'s task runner catches
+  only `NonFatal` failures, and an unwrapped fatal error would escape it and
+  hang the job, plan 14's first item, where wrapped it is recorded as a failed
+  task.
+- **`CAST(boolean AS DOUBLE)` and `AS FLOAT` are 1.0 and 0.0**, as
+  `CAST(boolean AS INT)` already gave 1 and 0.
+
+What landed:
+
+- **Parse errors.** `SqlParser` reads the innermost message in the parser's
+  exception chain. JSqlParser parses on a thread of its own and gives its
+  exception the message of what that thread threw, which is the parser's
+  exception's `toString`; the innermost message has no class in it. A parse
+  error now reads `SQL parse error: Encountered unexpected token: "#" ... at
+  line 1, column 29.`, and `Only SELECT statements are supported` names no
+  statement class.
+- **Refusals by name.** `UnsupportedClauses.refusal` names a construct the
+  binder has no case for by what SQL calls it, with advice where there is
+  something to write instead, from a table keyed by the class JSqlParser parses
+  it as (`Constructs`, about sixty entries): `EXISTS is not supported; name the
+  subquery in a WITH clause and JOIN it`, `A parenthesized join in FROM is not
+  supported; write the joins without the parentheses`, `EXCEPT is not
+  supported; only UNION and UNION ALL are supported`, an operator the binder
+  does not implement as it is written (`The DIV operator is not supported`). It
+  covers every expression, FROM item and set operation the audit does not, and
+  the audited classes the binder refuses where it meets them: a query where a
+  value goes, a row value, a star as an argument, a parenthesized FROM item
+  (named by what it holds). The binder's catch-alls for expressions, FROM
+  items, SELECT shapes and set operations all go through it, and IN with a
+  subquery, a non-literal row count, a frame bound, ESCAPE, TRIM and a LAG
+  offset say their rule without rendering the node.
+  `UnsupportedClausesTest.everyConstructTheBinderRefusesHasAName` requires an
+  entry for every such class, so a JSqlParser upgrade cannot bring one in
+  nameless. The table lives in `UnsupportedClauses` rather than
+  `LogicalBuilder` because the bytecode audit counts every class
+  `LogicalBuilder` matches on as one the binder reaches.
+- **Nothing is rendered through JSqlParser.** No message renders a node, and
+  `canonicalSql` (the text that matches a SELECT item, a HAVING or an ORDER BY
+  key to its GROUP BY key, aggregate or window, and names an unaliased column)
+  matches only the node itself when `toString` throws, so binding goes on to
+  refuse the node by name: `CAST(a AS ROW(x INT)) IS FALSE` is `IS FALSE is
+  not supported` in WHERE, the SELECT list, HAVING, GROUP BY, ORDER BY and a
+  window.
+- **Pooled failures.** `Scheduler.submit` returns a `Submitted`, whose `await`
+  rethrows what the callable threw (`Scheduler.rethrowable`); every wait on the
+  pool goes through it: `submitAndAwaitAll`, the CSV and parquet writers,
+  `MaterializedView.materializeManyInParallel`, and `ExchangeExec`'s latched
+  failure, which every caller now gets as itself rather than behind
+  `ExchangeExec materialization failed`. The wait is the same
+  `ForkJoinTask.get()`, so work-helping is unchanged.
+- **The ungrouped column.** In an aggregate query a column the output does not
+  hold by name resolves against the input: a GROUP BY key written another way
+  is that key, another column of the input is `Column 'b' must appear in GROUP
+  BY or inside an aggregate`, and a column the input does not have is unknown
+  among the input's columns.
+- **`ROLLUP (...)` and `CUBE (...)`** in GROUP BY are refused as groupings,
+  with GROUPING SETS' kind of advice (each level, or each combination,
+  combined with UNION ALL). Outside GROUP BY a call to either is still an
+  unknown function.
+- **The nested-loop guard** throws `IllegalArgumentException`.
+
+Found on the way and fixed in the same change:
+
+- **A window in a grouped query lost the groups' aggregates.** `SELECT a,
+  SUM(COUNT(*)) OVER () FROM t GROUP BY a` threw `NoSuchElementException: key
+  not found: count(*)`, an internal class with an internal invariant's text,
+  and so did an aggregate in a window's ORDER BY, unless the SELECT list held
+  the same aggregate: `buildAggregation` collected aggregates from everything
+  but window functions. It now collects them from a window's inputs too. No
+  corpus drew an aggregate inside a window.
+- **A GROUP BY key written another way was an unknown column**: `SELECT t.a,
+  COUNT(*) FROM t GROUP BY a` failed with `Unknown column 't.a'. Available: [a,
+  _agg0]`. The rule's message would have been false for it, so the key now
+  binds.
+- **The writers unwrapped a fatal error to a raw copy** (`e.getCause` of the
+  pool's wrapper), which escaped the task runner's `NonFatal` catch: plan 14's
+  hang, reachable through a partition writer. On `Submitted.await` a fatal
+  error reaches the runner wrapped, and the task fails.
+
+Regressions, each failing at the base commit (checked in a worktree there with
+the new tests copied in): in `sql_engine_test`, the parse errors, 33 refusals by
+name, the ROW cast under `IS FALSE` in six positions, a CAST failure inside an
+aggregate, a DISTINCT, a sort and a join and a decimal overflow inside an
+aggregate and a sort's pooled tasks (two rows a partition, so the sort compares
+inside its tasks; with one, the overflow happened in the final merge on the
+calling thread and was never wrapped), the ungrouped column and the key written
+another way, the window over a grouped query, the boolean CAST on both paths,
+and ROLLUP / CUBE; the guard's class in `join_swap_test`; and a task failing
+inside the SUM's fan-out recording `Cannot cast 'x' to int` in `data_job_test`,
+where it recorded `java.lang.IllegalArgumentException: Cannot cast 'x' to int`.
+`scheduler_test` pins the new contract (own exception from outside the pool and
+two fan-outs deep, a checked exception, the waiter's stack suppressed, a fatal
+error wrapped) and `unsupported_clauses_test` the table's completeness.
+
+The fuzzer. The six defects are gone from `CleanRejection.Defect`, and with
+them everything that excused a defect carried by an otherwise clean failure:
+the pool unwrapping, the parse-error prefix and the class names cut from the
+binder's messages, `Failed.defects`. `cleanRejectionClassifiesFailures` now
+calls each of the old shapes a finding.
+
+The campaigns. `frontend_fuzz_campaign` ran 100000 seeds of each property in three
+blocks, about three and a half minutes each beside two others. One block met
+seed 54624, a mutated query holding `IF(NULL, DATE '2024-03-10', '2024-03-10')`,
+which dies on the vector path with `ClassCastException: NullVectorImpl cannot
+be cast to BooleanVector` because IF's condition is never cast to BOOLEAN
+(`IF(NULL, 1, 2)` does the same). That is plan 11's `ConditionNotBoolean`, whose
+recognizer had left a NULL condition out; plan 09's typing is what let the
+seed's text bind. It is recorded in plan 11, the recognizer covers a NULL
+condition, and the block was green on a second run.
+`starved_dag_scheduler_fuzz_campaign`, the pool-starvation hunter, was green at
+20000 seeds; it ran because every wait on the pool now goes through
+`Submitted.await`.

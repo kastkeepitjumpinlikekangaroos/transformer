@@ -44,8 +44,9 @@ scala_junit_test(
 # Nested sharded materialization stays live only because ForkJoinTask.get()
 # work-helps; this suite proves a depth-5/fan-4 fan-out completes on a 2-thread
 # pool via Scheduler.submitAndAwaitAll but wedges when the same shape awaits
-# through a non-helping CountDownLatch. Needs its own JVM because
-# Scheduler.parallelism is a val read at class load.
+# through a non-helping CountDownLatch. Also pins how a task's failure reaches
+# its waiter: as the task's own exception, a fatal error wrapped. Needs its own
+# JVM because Scheduler.parallelism is a val read at class load.
 scala_junit_test(
     name = "scheduler_test",
     srcs = ["SchedulerTest.scala"],

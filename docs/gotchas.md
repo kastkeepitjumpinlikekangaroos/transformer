@@ -33,7 +33,8 @@ ship a fix or move something from "not done" to "done".
   one rule, and every walk matches on it — see "grouping parentheses" below for
   the five sites and what happens if you add a sixth walk without it. A list of
   two or more elements is a row-value constructor (`(a, b) = (c, d)`), which the
-  binder does not support and rejects by node name.
+  binder does not support and refuses as one (`A row value (a, b, ...) is not
+  supported`).
 - **Aggregate inside HAVING / ORDER BY** must be rebound against the aggregate
   output, not the source schema. `LogicalBuilder.bindExprWithAggs` takes an
   `aggResolver: Function => Option[Expr]` that returns a `ColRefExpr` into the
@@ -388,9 +389,10 @@ ship a fix or move something from "not done" to "done".
 - **Non-equi joins are refused over large known inputs.** When a join's
   ON clause has no equality conjunct, `HashJoinExec` runs as a
   degenerate hash (one bucket = whole build side) — correct nested-loop
-  semantics but O(N*M). `PhysicalPlanner.enforceNestedLoopGuard` throws
-  `UnsupportedOperationException("non-equi join over >5000 rows
-  requires equality keys (left=…, right=…)")` when both sides expose a
+  semantics but O(N*M). `PhysicalPlanner.enforceNestedLoopGuard` throws the
+  `IllegalArgumentException` every refusal is (`A join without an equality
+  between its two sides in ON is refused when both sides hold more than 5000
+  rows (left=…, right=…); add one to the ON condition`) when both sides expose a
   `CatalogView.exactRowCount` and the smaller of the two exceeds 5000
   rows. CSV-rooted joins (no exactRowCount) keep working because the
   guard refuses to refuse without evidence. If you hit this on a
@@ -398,12 +400,10 @@ ship a fix or move something from "not done" to "done".
   redundant-but-cheap equality conjunct (`ON 1 = 1` won't help — it has
   no side info) or restructure the predicate so the planner can extract
   one. There's deliberately no per-task escape hatch — the threshold is
-  the contract. Two open defects: the guard bounds the smaller side only, so a
+  the contract. One open defect: the guard bounds the smaller side only, so a
   chain of non-equi joins multiplies past it (`t x JOIN t y ON x.c JOIN t z ON
   x.c` over 300 rows is 27 million rows;
-  [plans/robustness/14](../plans/robustness/14-pathological-nesting.md)), and
-  its refusal is an `UnsupportedOperationException` where every other rejection
-  is an `IllegalArgumentException` (plan 10).
+  [plans/robustness/14](../plans/robustness/14-pathological-nesting.md)).
 - **Spill files use positional column names, never the logical schema's.**
   Every spill-capable breaker (`HashJoinExec`, `HashAggregateExec`, `SortExec`,
   `DistinctExec`, `WindowExec`) writes its working set to temp parquet and reads
@@ -552,9 +552,9 @@ ship a fix or move something from "not done" to "done".
     call" convention. It is now a CAS claim + published `CountDownLatch`: exactly
     one winner runs `materialize()` with no monitor held, losers park on a plain
     **uncompensated** `ready.await()` and wake together on `countDown`, and a
-    materialization failure latches and re-throws (wrapped) to every caller,
-    never retried. The loser-wait is deliberately NOT `managedBlock` — that was
-    02b's regression.
+    materialization failure latches and is thrown to every caller as itself
+    (`Scheduler.rethrowable`), never retried. The loser-wait is deliberately NOT
+    `managedBlock` — that was 02b's regression.
   - **Nested blocking on a bounded pool — rescued by work-helping, for
     TREES.** `Scheduler.submitAndAwaitAll` waits via `ForkJoinTask.get()`. From a
     pool worker `.get()` does not merely park — it work-*helps*, stealing and
@@ -1084,18 +1084,28 @@ ship a fix or move something from "not done" to "done".
   knows; when you add a construct to the engine, add its spellings and
   positions to `SqlTextGen` as well as to the AST generators.
 
-- **A hot implicit exception has no message, and a pooled one is a copy.**
-  HotSpot throws a `ClassCastException`, `NullPointerException` or
+- **A hot implicit exception has no message, and `ForkJoinTask.get` throws a
+  copy.** HotSpot throws a `ClassCastException`, `NullPointerException` or
   `ArithmeticException` that one site throws often as a preallocated instance
   with no message and no stack (`-XX:+OmitStackTraceInFastThrow`, on by default),
   so an oracle that recognizes a failure by such a message misses it after
-  warm-up. And `ForkJoinTask.get` rethrows a task's exception as a copy made on
-  the waiting thread (the same class, the original as its cause, the original's
-  `toString` as the message, or no message when the class has no cause
-  constructor) inside an `ExecutionException`; a nested fan-out adds a
-  `RuntimeException` around a task's checked exception. `oracle/CleanRejection`
-  unwraps all three and recognizes by class and bound plan. A `StackOverflowError`
-  is not `NonFatal`: catch it explicitly where a deep expression can raise it.
+  warm-up; `oracle/CleanRejection` recognizes by class and bound plan. And
+  `ForkJoinTask.get` rethrows a task's exception as a copy made on the waiting
+  thread (the same class, the original as its cause, the original's `toString`
+  as the message, or no message when the class has no cause constructor) inside
+  an `ExecutionException`, and a nested fan-out adds a `RuntimeException` around
+  a task's checked exception. That chain of class names was what a failing
+  query reported and what a job recorded in `_run.json` (`ExecutionException:
+  java.lang.ArithmeticException` for a decimal overflow under a sort) until
+  `Scheduler.Submitted.await`, which `submitAndAwaitAll` uses too, began
+  rethrowing the task's own exception, with the waiting thread's stack as a
+  suppressed one ([plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md)).
+  Wait for pool work through those, never through `ForkJoinTask.get` directly;
+  `CleanRejection` calls a wrapped failure a finding. A fatal error stays
+  wrapped in an `ExecutionException` there, so a caller that catches only
+  `NonFatal`, as `DataJob`'s task runner does, still catches it. A
+  `StackOverflowError` is not `NonFatal`: catch it explicitly where a deep
+  expression can raise it.
 
 - **A clause the binder does not read used to vanish — every one is now
   rejected, and a test keeps it that way.** `LogicalBuilder` binds the
@@ -1159,11 +1169,17 @@ ship a fix or move something from "not done" to "done".
   an attribute; and `TRY_CAST` / `SAFE_CAST` differ from `CAST` only in
   `CastExpression.keyword`, a public field with no getter, which is why the test
   audits public fields as well as getters. A fourth, found by the frontend
-  fuzzer: `CastExpression.toString` throws for a ROW-type CAST, so the binder's
-  catch-all, which renders the node it refuses, throws a
-  `NullPointerException` when one sits under a node the pass does not audit
-  (`CAST(a AS ROW(x INT)) IS FALSE`;
-  [plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md)).
+  fuzzer: `CastExpression.toString` throws for a ROW-type CAST, and the binder's
+  catch-all rendered the node it refused, so a ROW cast under a node the pass
+  does not audit (`CAST(a AS ROW(x INT)) IS FALSE`) was a
+  `NullPointerException`; the same `toString` keys the text that matches a
+  HAVING or a SELECT item to its GROUP BY key. The binder now refuses a
+  construct by the name `UnsupportedClauses.refusal` gives it (`IS FALSE is not
+  supported`), never by its class or its `toString`, and that matching text
+  falls back to matching only the node itself when `toString` throws
+  ([plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md)).
+  `sql/plan:unsupported_clauses_test` requires a name for every JSqlParser
+  expression, FROM item and set operation the audit does not cover.
 
 - **`ORDER BY <ordinal>` used to parse and then silently not sort — fixed.**
   `ORDER BY 2 DESC` returned scan order, because the ordinal bound as an integer
@@ -1433,7 +1449,9 @@ rendered SQL covers only the supported grammar"). Its campaigns and the probing
 around them found five families, each recorded in a plan and named in the
 fuzzer (a `CleanRejection.Defect`, a `SyntaxEquivalence` known disagreement, or
 a `knownPlan` in `SqlTextGen.BeyondTheTable`) with a repro that fails the suite
-once the defect is gone:
+once the defect is gone. Messages that named the engine's internals are fixed
+([plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md));
+four families are open:
 
 - **An `Error` in a job's task hangs the job**, and a ~2000-operator expression
   overflows the binder's stack, so one machine-generated query can do it; three
@@ -1451,15 +1469,6 @@ once the defect is gone:
   running, or, for `ABS` of a DATE or a string, answer NULL; a NULL `ROUND`
   scale throws; a non-boolean `ON` or `IF` condition binds
   ([plans/robustness/11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md)).
-- **Messages name internals**: every parse error starts with JSqlParser's class,
-  the binder's catch-alls name the AST class, and a failure inside a pooled
-  operator reaches the caller (and a job's `_run.json`) wrapped in
-  `ExecutionException`, sometimes with no message at all
-  ([plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md)).
-
-Plan 09's mixed branch types surface here too: `COALESCE(timestamp_col, DATE
-'...')` fails with `Cannot set TimestampVector from java.time.LocalDate`, and
-`CASE ... THEN ts ELSE d END` turns a date into midnight.
 
 ## What's intentionally NOT done
 

@@ -335,9 +335,9 @@ object PhysicalPlanner {
     val rEst = LogicalPlanCardinality.estimate(r)
     (lEst, rEst) match {
       case (Some(lc), Some(rc)) if math.min(lc, rc) > NestedLoopMaxRows =>
-        throw new UnsupportedOperationException(
-          s"non-equi join over >$NestedLoopMaxRows rows requires equality keys " +
-          s"(left=$lc, right=$rc rows)")
+        throw new IllegalArgumentException(
+          s"A join without an equality between its two sides in ON is refused when both sides hold more than " +
+            s"$NestedLoopMaxRows rows (left=$lc, right=$rc); add one to the ON condition")
       case _ => ()
     }
   }

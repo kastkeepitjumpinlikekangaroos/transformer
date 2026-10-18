@@ -147,7 +147,8 @@ class ExchangeDeadlockStressTest {
         def call(): Long = countRows(e1.execute(s))
       }
     }
-    val futures = drivers.map(Scheduler.submit)
+    // Straight onto the pool: the deadline below needs ForkJoinTask's timed get.
+    val futures = drivers.map(d => Scheduler.pool.submit(d))
     var total = 0L
     futures.zipWithIndex.foreach { case (f, s) =>
       try total += f.get(iterDeadline, TimeUnit.MILLISECONDS)

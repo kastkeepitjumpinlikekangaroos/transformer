@@ -26,6 +26,7 @@ import java.time.temporal.ChronoUnit
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 import scala.util.DynamicVariable
+import scala.util.control.NonFatal
 
 /** A top-level CTE definition collected during build: its name, the unique
   * [[PendingCteView]] every reference scan points at, and the bound body plan.
@@ -136,8 +137,7 @@ object LogicalBuilder {
       case ps: PlainSelect => buildSelect(ps, catalog, cteScope)
       case sol: SetOperationList => buildSetOperationList(sol, catalog, cteScope)
       case wrap: ParenthesedSelect => buildAnySelect(wrap.getSelect, catalog, cteScope, None)
-      case other =>
-        throw new IllegalArgumentException(s"Unsupported SELECT shape: ${other.getClass.getSimpleName}")
+      case other => throw new IllegalArgumentException(UnsupportedClauses.refusal(other))
     }
   }
 
@@ -189,9 +189,7 @@ object LogicalBuilder {
 
     val unions: Seq[UnionOp] = ops.map {
       case u: UnionOp => u
-      case other =>
-        throw new IllegalArgumentException(
-          s"Unsupported set operation: ${other.getClass.getSimpleName} (only UNION / UNION ALL are supported)")
+      case other => throw new IllegalArgumentException(UnsupportedClauses.refusal(other))
     }
     val arms = selects.map(buildAnySelect(_, catalog, cteScope, None))
     arms.tail.foreach { arm =>
@@ -285,8 +283,7 @@ object LogicalBuilder {
     * LongValue is never negative. */
   private def integerLiteral(clause: String, e: Expression): Long = e match {
     case lv: LongValue => lv.getValue
-    case other =>
-      throw new IllegalArgumentException(s"$clause must be an integer literal, got ${other.getClass.getSimpleName}")
+    case _ => throw new IllegalArgumentException(s"$clause must be a non-negative integer literal")
   }
 
   // ---------------------------------------------------------------------------
@@ -462,6 +459,7 @@ object LogicalBuilder {
       .flatMap(g => Option(g.getGroupByExpressionList))
       .map(_.asScala.toSeq)
       .getOrElse(Nil)
+    rawGroupExprs.foreach(refuseGroupingFunction)
     val groupExprs: Seq[Expression] = rawGroupExprs.map(resolveGroupOrdinal(_, expandedItems))
     val groupBound: Seq[(Expr, String)] = groupExprs.map { e =>
       val b = bindExpr(e, sources)
@@ -471,10 +469,11 @@ object LogicalBuilder {
     // Collect every distinct aggregate referenced by SELECT, HAVING or ORDER BY,
     // assign synthetic names. ORDER BY may name one the SELECT list does not
     // (`SELECT g ... GROUP BY g ORDER BY SUM(a)`), and the sort's rebind needs
-    // its slot.
+    // its slot; so may a window function (`SUM(COUNT(*)) OVER ()`, which sums
+    // the groups' counts), whose own function is no group aggregate.
     val aggMap = mutable.LinkedHashMap.empty[String, (AggExpr, String)]
     def collect(e: Expression): Unit = e match {
-      case _: AnalyticExpression => ()  // window's inner aggregates are scoped to the window
+      case ae: AnalyticExpression => windowInputs(ae).foreach(collect)
       case f: Function if isAggFn(f.getName) =>
         val key = canonicalSql(f)
         if (!aggMap.contains(key)) {
@@ -497,14 +496,29 @@ object LogicalBuilder {
     }
     val aggOutFieldNames: IndexedSeq[String] = agg.outputSchema.fieldNames
 
-    val aggResolver: Function => Option[Expr] = { f =>
-      if (isAggFn(f.getName)) {
-        val key = canonicalSql(f)
-        aggMap.get(key).map { case (_, name) =>
+    /** A column the aggregate's output does not hold by that name: the GROUP
+      * BY key it is, written another way (`t.a` for a key written `a`), or an
+      * error. A column of the input that is no key is the error that says the
+      * rule, and one the input does not have is its unknown column. */
+    def groupedColumn(c: Column): Expr = {
+      val qualifier = Option(c.getTable).map(_.getName)
+      val name = c.getColumnName
+      val input = Analyzer.resolveColumn(qualifier, name, sources)
+      groupBound.indexWhere(_._1 == input) match {
+        case -1 => throw new IllegalArgumentException(
+          s"Column '${qualifier.fold("")(_ + ".")}$name' must appear in GROUP BY or inside an aggregate")
+        case i => ColRefExpr(i, aggOutFieldNames(i), agg.outputSchema.fields(i).dataType)
+      }
+    }
+
+    val aggResolver: Expression => Option[Expr] = {
+      case f: Function if isAggFn(f.getName) =>
+        aggMap.get(canonicalSql(f)).map { case (_, name) =>
           val i = aggOutFieldNames.indexOf(name)
           ColRefExpr(i, name, agg.outputSchema.fields(i).dataType): Expr
         }
-      } else None
+      case c: Column => Some(groupedColumn(c))
+      case _ => None
     }
 
     val factory: BinderFactory = { windowResolver =>
@@ -514,7 +528,7 @@ object LogicalBuilder {
         case Grouped(inner) => rebind(inner)
         case ae: AnalyticExpression =>
           windowResolver(ae).getOrElse(throw new IllegalArgumentException(
-            s"Window function in non-window position: $ae"))
+            s"Window function '${ae.getName}' used in non-window position"))
         case f: Function if isAggFn(f.getName) =>
           val key = canonicalSql(f)
           val (_, name) = aggMap(key)
@@ -540,6 +554,20 @@ object LogicalBuilder {
     }
 
     (afterHaving, factory)
+  }
+
+  /** `ROLLUP(...)` and `CUBE(...)` as GROUP BY items, which JSqlParser parses
+    * as calls, so binding would report an unknown function. Each is a grouping
+    * the engine does not implement, refused as GROUPING SETS and WITH ROLLUP
+    * are. */
+  private def refuseGroupingFunction(e: Expression): Unit = e match {
+    case Grouped(inner) => refuseGroupingFunction(inner)
+    case f: Function if f.getName.equalsIgnoreCase("ROLLUP") => throw new IllegalArgumentException(
+      "GROUP BY ROLLUP (...) is not supported; GROUP BY each level separately and combine the results with UNION ALL")
+    case f: Function if f.getName.equalsIgnoreCase("CUBE") => throw new IllegalArgumentException(
+      "GROUP BY CUBE (...) is not supported; GROUP BY each combination separately and combine the results with " +
+        "UNION ALL")
+    case _ => ()
   }
 
   // ---------------------------------------------------------------------------
@@ -603,8 +631,7 @@ object LogicalBuilder {
           val view = catalog(name)
           (LogicalScan(name, view, alias), Seq((alias, view.schema)))
       }
-    case other =>
-      throw new IllegalArgumentException(s"Unsupported FROM item: ${other.getClass.getSimpleName}")
+    case other => throw new IllegalArgumentException(UnsupportedClauses.refusal(other, " in FROM"))
   }
 
   // ---------------------------------------------------------------------------
@@ -620,7 +647,7 @@ object LogicalBuilder {
     *
     * Two or more elements is a row-value constructor (`(a, b) = (c, d)`), which
     * this binder does not support: it deliberately does not match here, so it
-    * reaches the caller's catch-all and is rejected by node name.
+    * reaches the caller's catch-all and is refused as a row value.
     */
   private object Grouped {
     def unapply(e: Expression): Option[Expression] = e match {
@@ -633,16 +660,18 @@ object LogicalBuilder {
   def bindExpr(e: Expression, sources: Sources): Expr =
     bindExprWithAggs(e, sources, _ => None, _ => None)
 
-  /** Variant used inside aggregation: `aggResolver` returns a ColRef into the
-    * aggregate output when called with an aggregate Function — letting expressions
-    * like `COUNT(*) > 1` (in HAVING / ORDER BY) bind cleanly. `windowResolver`
-    * plays the same role for [[AnalyticExpression]]s after [[LogicalWindow]]
-    * has appended their output columns to the schema.
+  /** Variant used inside aggregation, where `sources` is the aggregate's
+    * output: `aggResolver` returns a ColRef into it when called with an
+    * aggregate Function — letting expressions like `COUNT(*) > 1` (in HAVING /
+    * ORDER BY) bind cleanly — and decides a column the output does not hold by
+    * that name. `windowResolver` plays the same role for
+    * [[AnalyticExpression]]s after [[LogicalWindow]] has appended their output
+    * columns to the schema.
     */
   def bindExprWithAggs(
       e: Expression,
       sources: Sources,
-      aggResolver: Function => Option[Expr],
+      aggResolver: Expression => Option[Expr],
       windowResolver: AnalyticExpression => Option[Expr] = _ => None): Expr = {
     def b(x: Expression): Expr = bindExprWithAggs(x, sources, aggResolver, windowResolver)
     e match {
@@ -650,11 +679,13 @@ object LogicalBuilder {
     case c: Column =>
       val q = Option(c.getTable).map(_.getName)
       val raw = c.getColumnName
-      if (q.isEmpty && (raw.equalsIgnoreCase("TRUE") || raw.equalsIgnoreCase("FALSE"))) {
-        val matches = sources.exists { case (_, schema) => schema.indexOf(raw) >= 0 }
-        if (!matches) LitExpr(raw.equalsIgnoreCase("TRUE"), DataType.BooleanType)
-        else Analyzer.resolveColumn(q, raw, sources)
-      } else Analyzer.resolveColumn(q, raw, sources)
+      Analyzer.findColumn(q, raw, sources).getOrElse {
+        // JSqlParser parses TRUE and FALSE as names; they are the literals
+        // unless a column has the name.
+        if (q.isEmpty && (raw.equalsIgnoreCase("TRUE") || raw.equalsIgnoreCase("FALSE")))
+          LitExpr(raw.equalsIgnoreCase("TRUE"), DataType.BooleanType)
+        else aggResolver(c).getOrElse(throw Analyzer.unknownColumn(q, raw, sources))
+      }
     case l: LongValue =>
       val v = l.getValue
       if (v >= Int.MinValue && v <= Int.MaxValue) LitExpr(v.toInt, DataType.IntType)
@@ -677,7 +708,7 @@ object LogicalBuilder {
           Analyzer.checkArithmetic(inner.dataType)
           UnaryOpExpr("-", inner, inner.dataType)
         case '+' => inner
-        case other => throw new IllegalArgumentException(s"Unknown signed operator '$other'")
+        case other => throw new IllegalArgumentException(s"The $other operator is not supported")
       }
     case n: NotExpression =>
       UnaryOpExpr("NOT", Analyzer.implicitCast(b(n.getExpression), DataType.BooleanType), DataType.BooleanType)
@@ -714,7 +745,9 @@ object LogicalBuilder {
       val left = b(in.getLeftExpression)
       val items: Seq[Expression] = in.getRightExpression match {
         case el: ExpressionList[_] => el.asScala.asInstanceOf[Iterable[Expression]].toSeq
-        case other => throw new IllegalArgumentException(s"IN subqueries not supported (got ${other.getClass.getSimpleName})")
+        case _: Select => throw new IllegalArgumentException(
+          "IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it")
+        case _ => throw new IllegalArgumentException("IN takes a list of values in parentheses")
       }
       val (operands, _) = Analyzer.unify(left +: items.map(b))
       InListExpr(operands.head, operands.tail, in.isNot)
@@ -736,8 +769,7 @@ object LogicalBuilder {
         escape = Option(lk.getEscape) match {
           case None => LikeSyntax.Default.escape
           case Some(e: StringValue) if e.getValue.length <= 1 => e.getValue.headOption
-          case Some(other) =>
-            throw new IllegalArgumentException(s"ESCAPE must be a single-character string literal, got $other")
+          case Some(_) => throw new IllegalArgumentException("ESCAPE must be a single-character string literal")
         })
       Seq(s, p).foreach(e => Analyzer.checkText(e.dataType, if (syntax.caseInsensitive) "ILIKE" else "LIKE"))
       LikeExpr(Analyzer.implicitCast(s, DataType.StringType), Analyzer.implicitCast(p, DataType.StringType),
@@ -785,8 +817,7 @@ object LogicalBuilder {
       // the extended forms instead of answering the wrong question quietly.
       if (tf.getTrimSpecification != null || tf.isUsingFromKeyword ||
           tf.getFromExpression != null || tf.getExpression == null)
-        throw new IllegalArgumentException(
-          s"Only the single-argument TRIM(x) is supported, got: $tf")
+        throw new IllegalArgumentException("Only the single-argument TRIM(x) is supported")
       val trimmed = b(tf.getExpression)
       Analyzer.checkText(trimmed.dataType, "TRIM")
       FuncExpr("TRIM", Seq(trimmed), DataType.StringType)
@@ -804,13 +835,12 @@ object LogicalBuilder {
       windowResolver(ae).getOrElse(throw new IllegalArgumentException(
         s"Window function '${ae.getName}' used in non-window position"))
 
-    case other =>
-      throw new IllegalArgumentException(s"Unsupported expression: ${other.getClass.getSimpleName}: $other")
+    case other => throw new IllegalArgumentException(UnsupportedClauses.refusal(other))
     }
   }
 
   private def binopGeneric(op: String, l: Expression, r: Expression, sources: Sources,
-                           aggResolver: Function => Option[Expr],
+                           aggResolver: Expression => Option[Expr],
                            windowResolver: AnalyticExpression => Option[Expr]): Expr = {
     val le = bindExprWithAggs(l, sources, aggResolver, windowResolver)
     val re = bindExprWithAggs(r, sources, aggResolver, windowResolver)
@@ -880,7 +910,7 @@ object LogicalBuilder {
     case _ => false
   }
   private def cmpOpGeneric(op: String, l: Expression, r: Expression, sources: Sources,
-                           aggResolver: Function => Option[Expr],
+                           aggResolver: Expression => Option[Expr],
                            windowResolver: AnalyticExpression => Option[Expr]): Expr = {
     val (le, re, _) = Analyzer.promotePair(
       bindExprWithAggs(l, sources, aggResolver, windowResolver),
@@ -898,7 +928,7 @@ object LogicalBuilder {
   }
 
   private def bindScalarFunctionWithAggs(f: Function, sources: Sources,
-                                          aggResolver: Function => Option[Expr],
+                                          aggResolver: Expression => Option[Expr],
                                           windowResolver: AnalyticExpression => Option[Expr]): Expr = {
     def bind(x: Expression): Expr = bindExprWithAggs(x, sources, aggResolver, windowResolver)
     val name = f.getName.toUpperCase
@@ -1047,6 +1077,14 @@ object LogicalBuilder {
   // Window functions
   // ---------------------------------------------------------------------------
 
+  /** The expressions a window function reads: its arguments, its PARTITION BY
+    * keys and its ORDER BY keys. */
+  private def windowInputs(ae: AnalyticExpression): Seq[Expression] =
+    Option(ae.getExpression).filterNot(_.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns]).toSeq ++
+      Option(ae.getOffset).toSeq ++ Option(ae.getDefaultValue).toSeq ++
+      Option(ae.getPartitionExpressionList).map(_.asScala.asInstanceOf[Iterable[Expression]].toSeq).getOrElse(Nil) ++
+      Option(ae.getOrderByElements).map(_.asScala.toSeq.map(_.getExpression)).getOrElse(Nil)
+
   /** Convert a JSqlParser [[AnalyticExpression]] into a bound [[WindowDef]].
     * The window's internal expressions (partition keys, order keys, function
     * arg) bind via `binder` against the post-aggregation (or raw-source) schema.
@@ -1163,12 +1201,13 @@ object LogicalBuilder {
         case Some(e) => FrameBound.Following(extractNonNegativeInt("FOLLOWING offset")(e).toLong)
       }
     case WindowOffset.Type.EXPR =>
-      throw new IllegalArgumentException(s"Unsupported frame bound: ${wo}")
+      throw new IllegalArgumentException("A window frame bound must be UNBOUNDED PRECEDING, n PRECEDING, " +
+        "CURRENT ROW, n FOLLOWING or UNBOUNDED FOLLOWING")
   }
 
   private def extractNonNegativeInt(label: String)(e: Expression): Int = e match {
     case lv: LongValue if lv.getValue >= 0 && lv.getValue <= Int.MaxValue => lv.getValue.toInt
-    case _ => throw new IllegalArgumentException(s"$label must be a non-negative integer literal, got: $e")
+    case _ => throw new IllegalArgumentException(s"$label must be a non-negative integer literal")
   }
 
   /** A bare integer literal in `GROUP BY` / `ORDER BY` is a 1-based reference
@@ -1243,12 +1282,20 @@ object LogicalBuilder {
     case _ => SortKey(expr, obe.isAsc)
   }
 
-  private def canonicalSql(e: Expression): String = e.toString.toLowerCase
+  /** The text two expressions share when they are the same expression, which
+    * matches a SELECT item, a HAVING or an ORDER BY key to a GROUP BY key, an
+    * aggregate or a window. JSqlParser's `toString` throws for a few nodes
+    * the binder refuses (a ROW-type CAST under a node the rejection pass does
+    * not audit); such a node matches only itself, so binding goes on to refuse
+    * it by name. */
+  private def canonicalSql(e: Expression): String =
+    try e.toString.toLowerCase
+    catch { case NonFatal(_) => s"#${System.identityHashCode(e)}" }
 
   private def deriveAlias(e: Expression): String = e match {
     case Grouped(inner) => deriveAlias(inner)
     case c: Column => c.getColumnName
-    case _ => e.toString.toLowerCase
+    case _ => canonicalSql(e)
   }
 
   private def parseTypeName(s: String): DataType = s.toUpperCase match {

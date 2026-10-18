@@ -7,18 +7,20 @@ navigation hint, not a comprehensive directory listing.
 
 ## File-size hot spots
 
-- `sql/plan/LogicalBuilder.scala` (~1265 LOC) — largest file in `sql/plan`.
+- `sql/plan/LogicalBuilder.scala` (~1310 LOC) — largest file in `sql/plan`.
   Pattern matches every JSqlParser expression node, dispatches SELECT shapes,
   and (for
   outermost-scope `WITH` CTEs) emits placeholder `PendingCteView` scans +
   collects `CteDef`s into a `BuiltQuery`, which `sql/exec/CteResolver.scala`
   later inlines or materializes (see [architecture §6b](architecture.md#6b-cte-resolution-inline-vs-materialize)).
   If you're adding a syntax feature, this is probably where it lands.
-- `sql/plan/UnsupportedClauses.scala` (~700 LOC) — the rejection pass that runs
+- `sql/plan/UnsupportedClauses.scala` (~840 LOC) — the rejection pass that runs
   before binding, and its audit: for each of the ~60 JSqlParser classes the
   binder reaches, every getter the binder does not read, as a rejection (clause,
   advice, example SQL) or inert (with the reason). Most of the length is that
-  table. Teaching `LogicalBuilder` a clause means deleting its entry here;
+  table, and the second table, `Constructs`: what SQL calls each construct the
+  binder refuses by name, which `refusal` turns into its message. Teaching
+  `LogicalBuilder` a clause means deleting its entry here;
   `sql/plan:unsupported_clauses_test` enforces it (see
   [architecture §10](architecture.md#10-nothing-the-parser-accepts-is-silently-dropped)).
 - `gui/JobSession.scala` (~900 LOC) — mutable FX-thread state for the GUI;
@@ -110,10 +112,11 @@ navigation hint, not a comprehensive directory listing.
   pipeline-breaking operator that keys into a HashMap (HashAggregate /
   HashJoin / Distinct / WindowExec partition keys). See
   [architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers).
-- `core/Scheduler.scala` (~100 LOC) — the shared `ForkJoinPool` every parallel
+- `core/Scheduler.scala` (~160 LOC) — the shared `ForkJoinPool` every parallel
   call site funnels through. Daemon threads, default size `2 × availableProcessors`
   (override via `transformer.scheduler.parallelism` system property or
-  `TRANSFORMER_SCHEDULER_PARALLELISM` env var).
+  `TRANSFORMER_SCHEDULER_PARALLELISM` env var). `Submitted.await` rethrows a
+  failed task's own exception on the waiting thread.
 - `core/metrics/` — in-tree instrumentation framework. `MetricsCollector.scala`
   (global default + ThreadMXBean helpers + GC sample), `MeteredIterator.scala`
   (the `final class` wrapper applied to operator iterators at planner time),

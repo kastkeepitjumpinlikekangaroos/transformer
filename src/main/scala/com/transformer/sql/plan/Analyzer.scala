@@ -9,7 +9,15 @@ object Analyzer {
   def resolveColumn(
       qualifier: Option[String],
       name: String,
-      sources: Seq[(Option[String], Schema)]): ColRefExpr = {
+      sources: Seq[(Option[String], Schema)]): ColRefExpr =
+    findColumn(qualifier, name, sources).getOrElse(throw unknownColumn(qualifier, name, sources))
+
+  /** The column `(qualifier, name)` names among `sources`, if one does; an
+    * error when several do. */
+  def findColumn(
+      qualifier: Option[String],
+      name: String,
+      sources: Seq[(Option[String], Schema)]): Option[ColRefExpr] = {
     val nameLower = name.toLowerCase
     val qLower = qualifier.map(_.toLowerCase)
 
@@ -31,20 +39,25 @@ object Analyzer {
       offset += schema.length
     }
     matches match {
-      case Nil =>
-        val qstr = qualifier.map(q => s"$q.").getOrElse("")
-        val available = sources.flatMap { case (a, s) =>
-          s.fieldNames.map(n => a.map(_ + "." + n).getOrElse(n))
-        }.mkString(", ")
-        throw new IllegalArgumentException(
-          s"Unknown column '$qstr$name'. Available: [$available]"
-        )
-      case one :: Nil => one
+      case Nil => None
+      case one :: Nil => Some(one)
       case multi =>
         throw new IllegalArgumentException(
           s"Ambiguous column reference '$name' matches ${multi.size} columns"
         )
     }
+  }
+
+  /** The error for a column none of `sources` has, listing the ones they do. */
+  def unknownColumn(
+      qualifier: Option[String],
+      name: String,
+      sources: Seq[(Option[String], Schema)]): IllegalArgumentException = {
+    val qstr = qualifier.map(q => s"$q.").getOrElse("")
+    val available = sources.flatMap { case (a, s) =>
+      s.fieldNames.map(n => a.map(_ + "." + n).getOrElse(n))
+    }.mkString(", ")
+    new IllegalArgumentException(s"Unknown column '$qstr$name'. Available: [$available]")
   }
 
   /** Insert an implicit cast if `from != to` and the cast is safe. A BINARY

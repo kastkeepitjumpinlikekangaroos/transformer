@@ -39,7 +39,7 @@ at the time of the audit: `bazel test //...` 46/46 green.
 | [07](07-hydration-oracle-on-the-dag-corpus.md) | Hydration oracle on the existing DAG corpus | the read side of the records the DAG fuzzer already writes | **done** 2026-10-15 | 2 days | low | — |
 | [08](08-unconsumed-input-failure-is-swallowed.md) | An unconsumed input's load failure is swallowed | the run said `succeeded` and nothing recorded the failure; every failed input is now a warning, and a warning never fails a run | **done** 2026-10-15 | half a day | low | — |
 | [09](09-branch-result-types.md) | `CASE`, `COALESCE`, `IF`, `GREATEST` and `UNION` take their first branch's type | a wider decimal in a later branch was kept under a narrower declared type, so writing or spilling it failed; `THEN 1 ELSE 2.5` was 2; values that become one result now take a type that holds each | **done** 2026-10-16 | 1-2 days | medium | — |
-| [10](10-error-messages-name-internals.md) | A failing query's message names the engine's internals | every parse error names JSqlParser's class; pooled failures arrive wrapped in `ExecutionException` (sometimes with no message), which is what a job records | open, recorded in `CleanRejection` | 1 day | low | a decision on where to unwrap |
+| [10](10-error-messages-name-internals.md) | A failing query's message names the engine's internals | every parse error named JSqlParser's class, and the binder's refusals the AST class; pooled failures arrived wrapped in `ExecutionException` (sometimes with no message), which is what a job recorded; refusals now say what SQL calls the construct, and a pooled failure arrives as itself | **done** 2026-10-17 | 1 day | low | — |
 | [11](11-functions-bind-over-arguments-they-cannot-take.md) | Functions and conditions bind over arguments they cannot take | `SUM` over a string, the math functions over a date, a NULL `ROUND` scale, a non-boolean `ON` fail mid-run; `ABS` of a date is NULL | open, recorded in `CleanRejection` | 1-2 days | medium | decisions on the lenient coercions |
 | [12](12-text-the-binder-never-sees.md) | Text the parser accepts and the binder never sees | a statement after `;` is ignored; a repeated `ORDER BY` / `LIMIT` keeps its last; a CTE named twice; a JOIN with no ON is a cross join | open, recorded in `NoSilentDrop` | 1 day | medium | a decision on a bare JOIN |
 | [13](13-literals-are-read-as-written.md) | Literals and quoted identifiers are read as written | `'it''s'` is five characters; `"a"` names no column; `99999999999999999999` is a raw `NumberFormatException`; `1e400` is `Infinity` | open, recorded in the fuzzer | 1 day | medium | decisions on quoted case and big literals |
@@ -144,12 +144,24 @@ SQL generators now draw it on purpose, and run against the base commit the
 mode-differential property fails within 1300 seeds. Details in the plan's
 Outcome section.
 
+**Done:** plan 10. A parse error says what the parser said, without its class;
+a construct the binder has no case for is refused by what SQL calls it, from a
+table in `UnsupportedClauses` that a test keeps complete, and no message renders
+a node through JSqlParser's `toString`, which threw for a ROW-type CAST; a
+failure on the pool reaches the caller, and a job's `_run.json`, as the task's
+own exception, a fatal error still wrapped so the job runner records it. An
+ungrouped column's error says the rule, `ROLLUP` and `CUBE` are refused as
+groupings, `CAST(boolean AS DOUBLE)` is 1 or 0, and the nested-loop guard throws
+the `IllegalArgumentException` every refusal is. Two defects turned up on the
+way and were fixed with it: a window over a grouped query lost the groups'
+aggregates (`NoSuchElementException`), and a GROUP BY key written another way
+was an unknown column. Details in the plan's Outcome section.
+
 **Next, in order:** [14](14-pathological-nesting.md)'s job hang (a `finally`
 and a `catch`), then [12](12-text-the-binder-never-sees.md) and
 [13](13-literals-are-read-as-written.md), whose items return wrong answers with
-no error, then [11](11-functions-bind-over-arguments-they-cannot-take.md) and
-[10](10-error-messages-name-internals.md). Plans 10, 12 and 13 each need a
-decision from the user first.
+no error, then [11](11-functions-bind-over-arguments-they-cannot-take.md).
+Plans 12 and 13 each need a decision from the user first.
 
 **Suggested order.** [01](01-reject-or-honor-every-clause.md) first — it has the
 worst single defect in the set (a dropped join condition is a cartesian product,

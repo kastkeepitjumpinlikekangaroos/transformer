@@ -412,7 +412,9 @@ class JoinSwapTest {
   }
 
   /** When both sides are known to exceed [[PhysicalPlanner.NestedLoopMaxRows]],
-    * the planner refuses rather than silently planning an O(N*M) join. */
+    * the planner refuses rather than silently planning an O(N*M) join, with
+    * the IllegalArgumentException every other refusal is (it was an
+    * UnsupportedOperationException, plans/robustness/10). */
   @Test def nonEquiJoinHugeSidesRefused(): Unit = {
     val l = view(LeftSchema, SmallLeftRows, Some(1_000_000L))
     val r = view(RightSchema, SmallRightRows, Some(1_000_000L))
@@ -420,10 +422,10 @@ class JoinSwapTest {
     val ex = try {
       SqlEngine.execute("SELECT l.lk FROM l JOIN r ON l.lv < r.rv", cat)
       null
-    } catch { case e: UnsupportedOperationException => e }
-    assertNotNull("expected UnsupportedOperationException on large non-equi join", ex)
-    assertTrue(ex.getMessage, ex.getMessage.toLowerCase.contains("non-equi join"))
-    assertTrue(ex.getMessage, ex.getMessage.contains("equality keys"))
+    } catch { case e: IllegalArgumentException => e }
+    assertNotNull("expected IllegalArgumentException on large non-equi join", ex)
+    assertEquals("A join without an equality between its two sides in ON is refused when both sides hold more " +
+      "than 5000 rows (left=1000000, right=1000000); add one to the ON condition", ex.getMessage)
   }
 
   /** Estimate unknown on either side → the planner can't size the join, so

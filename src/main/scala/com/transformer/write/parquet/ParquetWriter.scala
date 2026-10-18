@@ -215,7 +215,7 @@ object ParquetWriter {
     // keep the slots occupied by submitting the next task as soon as the
     // oldest finishes — that bounds heap (and other concurrent SQL tasks aren't
     // blocked by writer threads sitting in semaphore-wait holding FJP workers).
-    val futures = new Array[java.util.concurrent.ForkJoinTask[Long]](n)
+    val futures = new Array[Scheduler.Submitted[Long]](n)
     var submitted = 0
     var collected = 0
     var total = 0L
@@ -225,13 +225,8 @@ object ParquetWriter {
       submitted += 1
     }
     while (collected < n) {
-      try total += futures(collected).get()
-      catch {
-        case e: java.util.concurrent.ExecutionException =>
-          if (firstError == null) firstError = e.getCause
-        case t: Throwable =>
-          if (firstError == null) firstError = t
-      }
+      try total += futures(collected).await()
+      catch { case t: Throwable => if (firstError == null) firstError = t }
       collected += 1
       if (submitted < n && firstError == null) {
         futures(submitted) = Scheduler.submit(writerTask(submitted))

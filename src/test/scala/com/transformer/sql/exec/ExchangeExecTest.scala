@@ -330,9 +330,9 @@ class ExchangeExecTest {
 
   @Test(timeout = 20000) def materializationFailurePropagatesToEveryConcurrentCaller(): Unit = {
     // A throwing child fails the single materialize(). The winner AND every
-    // latch-waiting loser must observe the wrapped failure with the original
-    // cause preserved somewhere in the chain, and the failed materialization
-    // is never retried: the failing partition executes exactly once.
+    // latch-waiting loser must observe the child's own exception, its message
+    // intact rather than behind a wrapper, and the failed materialization is
+    // never retried: the failing partition executes exactly once.
     val marker = "synthetic exchange child failure"
     val child = new ThrowingPlan(intSchema, nParts = 3, failPartition = 1, marker)
     val K = 4
@@ -358,26 +358,17 @@ class ExchangeExecTest {
 
     assertTrue(s"callers unexpectedly succeeded: $unexpected", unexpected.isEmpty)
     assertEquals("every caller observed the failure", N, observed.size)
-    observed.forEach { t =>
-      assertTrue(s"wrong exception shape: $t", t.isInstanceOf[RuntimeException]
-        && t.getMessage == "ExchangeExec materialization failed")
-      var cause = t.getCause
-      var found = false
-      while (cause != null && !found) {
-        if (marker == cause.getMessage) found = true
-        cause = cause.getCause
-      }
-      assertTrue(s"original cause lost from chain: $t", found)
-    }
+    val failure = observed.peek()
+    assertEquals(marker, failure.getMessage)
+    observed.forEach(t => assertSame("every caller observes the child's own failure", failure, t))
     assertEquals("failing partition executed exactly once (no retry)",
       1, child.failCalls.get)
-    // A caller arriving after the failure gets the same wrapped failure.
+    // A caller arriving after the failure gets the same failure.
     try {
       ex.execute(0)
       fail("expected materialization failure to persist")
     } catch {
-      case t: RuntimeException =>
-        assertEquals("ExchangeExec materialization failed", t.getMessage)
+      case t: RuntimeException => assertSame(failure, t)
     }
   }
 

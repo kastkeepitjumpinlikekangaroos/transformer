@@ -5,7 +5,6 @@ import com.transformer.fuzz.SqlTextGen
 import com.transformer.sql.exec.SqlEngine
 import com.transformer.sql.plan._
 
-import java.util.concurrent.{CompletionException, ExecutionException}
 import scala.util.control.NonFatal
 import scala.util.matching.Regex
 
@@ -33,16 +32,13 @@ import scala.util.matching.Regex
   * the mutation corpus.
   *
   * '''Known defects.''' The defects this property has found are listed in
-  * [[Defect]], each with the plan that records it. A failure that IS one is
-  * counted as it ([[KnownFailure]]) rather than reported; a failure that
-  * merely carries one on the way — a wrapper around it, a class name in its
-  * message — is unwrapped or excused just that far and checked for everything
-  * else. Both are recognized from what was thrown and, for a run-time failure,
-  * from the bound plan, never from the generator's intent, so a defect is
-  * excused only where it is the cause. Removing an entry is the proof its fix
-  * landed; each entry carries a repro, and
-  * `FrontendFuzzTest.everyKnownDefectStillReproduces` fails when one stops
-  * showing on it, so an entry cannot outlive its fix.
+  * [[Defect]], each with the plan that records it. A failure that is one is
+  * counted as it ([[KnownFailure]]) rather than reported. It is recognized
+  * from what was thrown and, for a run-time failure, from the bound plan,
+  * never from the generator's intent, so a defect is excused only where it is
+  * the cause. Removing an entry is the proof its fix landed; each entry
+  * carries a repro, and `FrontendFuzzTest.everyKnownDefectStillReproduces`
+  * fails when one stops showing on it, so an entry cannot outlive its fix.
   */
 object CleanRejection {
 
@@ -59,13 +55,12 @@ object CleanRejection {
   /** It bound and ran to the last row. */
   case object Ran extends Outcome
   /** It failed cleanly. `kind` is `parse`, `unsupported clause`, `bind` or
-    * `data`; `defects` are the known defects it carried on the way. */
-  final case class Failed(phase: Phase, kind: String, message: String, defects: Vector[Defect]) extends Outcome
+    * `data`. */
+  final case class Failed(phase: Phase, kind: String, message: String) extends Outcome
   /** Its failure is a known defect. */
   final case class KnownFailure(defect: Defect, detail: String) extends Outcome
 
   private val Plans = "plans/robustness/"
-  val MessagesPlan: String = Plans + "10-error-messages-name-internals.md"
   val ArgumentTypesPlan: String = Plans + "11-functions-bind-over-arguments-they-cannot-take.md"
   val LiteralsPlan: String = Plans + "13-literals-are-read-as-written.md"
   val PathologicalInputPlan: String = Plans + "14-pathological-nesting.md"
@@ -76,31 +71,12 @@ object CleanRejection {
     override def toString: String = name
   }
   object Defect {
-    /** Every parse error: `SQL parse error: net.sf.jsqlparser.parser.ParseException: Encountered ...`. */
-    case object ParserClassInParseError extends Defect("a parse error names the parser's exception class", MessagesPlan,
-      "SELECT FROM t")
-    /** `Unsupported expression: ExistsExpression: EXISTS (...)`, `Unsupported
-      * FROM item: ParenthesedSelect`, `LIMIT must be an integer literal, got
-      * SignedExpression`, and the rest of the binder's messages that name the
-      * JSqlParser class they met. */
-    case object ParserClassInRejection extends Defect("a rejection names a JSqlParser class", MessagesPlan,
-      "SELECT * FROM (SELECT a FROM t) x")
-    /** A run-time failure inside a pooled operator arrives as an
-      * `ExecutionException` whose message is the chain of class names. */
-    case object PoolWrappedFailure extends Defect("a run-time failure arrives wrapped in ExecutionException", MessagesPlan,
-      "SELECT SUM(CAST(s AS INT)) AS v FROM t")
-    /** `SELECT a, COUNT(*) FROM t`: `Unknown column 'a'. Available: [_agg0]`. */
-    case object AggSlotInUnknownColumn extends Defect("an ungrouped column's error lists aggregate slots", MessagesPlan,
-      "SELECT a, COUNT(*) AS c FROM t")
     /** `SELECT 99999999999999999999 FROM t` is a raw `NumberFormatException`
       * at bind time; `1e400` silently becomes `Infinity`, which fails while
       * running beside a DECIMAL (`Cannot cast Infinity to decimal(9,2)`, or a
       * `NumberFormatException` with no message). */
     case object NumberLiteralOutOfRange extends Defect("a number literal outside its type's range", LiteralsPlan,
       "SELECT 99999999999999999999 AS big FROM t")
-    /** `CAST(TRUE AS DOUBLE)`: a raw `NumberFormatException` while it runs. */
-    case object BooleanCastToNumber extends Defect("CAST of a BOOLEAN to FLOAT or DOUBLE is a NumberFormatException",
-      MessagesPlan, "SELECT CAST(TRUE AS DOUBLE) AS v FROM t")
     /** `SUM(s)`, `ROUND(d)`, `SUBSTRING(s, 'x')`: the scalar functions check
       * their arity only and the numeric aggregates nothing, so each binds over
       * any type and fails while it runs. */
@@ -109,15 +85,10 @@ object CleanRejection {
     /** `t JOIN u ON t.a`, `IF(s, 'y', 'n')`: a join's ON condition or IF's
       * condition that is not a predicate binds as it is, where WHERE, CASE
       * WHEN and every AND operand get a cast to BOOLEAN, and it dies on its
-      * first row with a `ClassCastException`. */
+      * first row with a `ClassCastException`. A NULL condition is no BOOLEAN
+      * either: `IF(NULL, 1, 2)` dies on the vector path (seed 54624). */
     case object ConditionNotBoolean extends Defect("a condition that is not a predicate binds",
       ArgumentTypesPlan, "SELECT t.a FROM t JOIN u ON t.a")
-    /** `WHERE CAST(a AS ROW(x INT)) IS FALSE`: a node the rejection pass does
-      * not audit is refused by the binder's catch-all, whose message renders
-      * the node with JSqlParser's `toString`, and that throws a
-      * `NullPointerException` for a ROW-type CAST inside it. */
-    case object RenderingThrows extends Defect("rendering a refused expression throws inside JSqlParser",
-      MessagesPlan, "SELECT a FROM t WHERE CAST(a AS ROW(x INT)) IS FALSE")
     /** `ROUND(a, NULL)`, `SUBSTRING(s, b)` over a NULL `b`: a
       * `NullPointerException` while it runs. */
     case object NullFunctionArgument extends Defect("a NULL scale, position or length is a NullPointerException",
@@ -132,9 +103,8 @@ object CleanRejection {
     case object ParseTimeout extends Defect("unclosed parentheses run the parser into its timeout",
       PathologicalInputPlan, "SELECT ((((a +")
 
-    val All: Vector[Defect] = Vector(ParserClassInParseError, ParserClassInRejection, PoolWrappedFailure,
-      AggSlotInUnknownColumn, NumberLiteralOutOfRange, BooleanCastToNumber, FunctionOverWrongType,
-      ConditionNotBoolean, RenderingThrows, NullFunctionArgument, DeepNesting, ParseTimeout)
+    val All: Vector[Defect] = Vector(NumberLiteralOutOfRange, FunctionOverWrongType, ConditionNotBoolean,
+      NullFunctionArgument, DeepNesting, ParseTimeout)
   }
 
   // ---------------------------------------------------------------------------
@@ -177,28 +147,22 @@ object CleanRejection {
       throw err
     }
 
-    val defects = Vector.newBuilder[Defect]
-    val e = unwrapPool(thrown)
-    if (e ne thrown) defects += Defect.PoolWrappedFailure
-
-    val cleanClass = e match {
+    val cleanClass = thrown match {
       case _: IllegalArgumentException => true
       case _: ArithmeticException => phase == Phase.Run
       case _ => false
     }
-    if (!cleanClass) violation(s"an internal exception class reached the caller: ${e.getClass.getName}")
+    if (!cleanClass) violation(s"an internal exception class reached the caller: ${thrown.getClass.getName}")
 
-    val raw = e.getMessage
-    if (raw == null || raw.trim.isEmpty || raw == "null") violation("the failure carries no message")
-    val (message, excused) = normalize(raw)
-    defects ++= excused
+    val message = thrown.getMessage
+    if (message == null || message.trim.isEmpty || message == "null") violation("the failure carries no message")
     leaks(sql, message).headOption.foreach(l => violation(s"the message carries $l"))
 
-    val kind = e match {
+    val kind = thrown match {
       case u: UnsupportedClauseException =>
         if (!u.getMessage.contains("is not supported")) violation("an unsupported clause's message does not say so")
         "unsupported clause"
-      case _ if raw.startsWith("SQL parse error:") => "parse"
+      case _ if message.startsWith("SQL parse error:") => "parse"
       case _ if phase == Phase.Run =>
         if (!DataErrors.exists(_.findFirstIn(message).isDefined))
           violation("a failure while running that is not about a value: a rejection that waited for the data")
@@ -207,7 +171,7 @@ object CleanRejection {
         if (!namesTheSql(sql, message)) violation("the message names nothing the SQL says")
         "bind"
     }
-    Failed(phase, kind, message, defects.result())
+    Failed(phase, kind, message)
   }
 
   // ---------------------------------------------------------------------------
@@ -264,37 +228,8 @@ object CleanRejection {
     words.exists(w => w.length >= 2 && (sqlWords(w) || SqlVocabulary(w)))
   }
 
-  /** JSqlParser's exception class, which the parse-error wrapper keeps at the
-    * front of every message. */
-  private val ParseErrorPrefix: Regex = """^SQL parse error: (?:[a-z][\w$]*\.)+[A-Z][\w$]*: """.r
-
-  /** The binder's messages that name the AST class they met; group 2 is the
-    * class. */
-  private val ClassNamingRejections: Vector[Regex] = Vector(
-    """^(Unsupported expression: )([A-Z]\w*)(: )""".r,
-    """^(Unsupported FROM item: )([A-Z]\w*)$""".r,
-    """^(Unsupported SELECT shape: )([A-Z]\w*)$""".r,
-    """^(Unsupported set operation: )([A-Z]\w*)( \()""".r,
-    """^(IN subqueries not supported \(got )([A-Z]\w*)(\))""".r,
-    """^((?:LIMIT|OFFSET|TOP|FETCH FIRST) must be an integer literal, got )([A-Z]\w*)$""".r,
-    """^(Only SELECT statements are supported \(got )([A-Z]\w*)(\))""".r)
-
-  /** `message` with the known defects in it excused: the parser's class name
-    * cut from the front of a parse error, a JSqlParser class name in one of
-    * the binder's messages replaced by `<class>`. */
-  def normalize(message: String): (String, Vector[Defect]) =
-    ParseErrorPrefix.findPrefixMatchOf(message) match {
-      case Some(m) => ("SQL parse error: " + message.substring(m.end), Vector(Defect.ParserClassInParseError))
-      case None =>
-        ClassNamingRejections.iterator.flatMap(_.findFirstMatchIn(message)).nextOption() match {
-          case Some(m) =>
-            (message.substring(0, m.start(2)) + "<class>" + message.substring(m.end(2)), Vector(Defect.ParserClassInRejection))
-          case None => (message, Vector.empty)
-        }
-    }
-
   // ---------------------------------------------------------------------------
-  // Known defects that end the check
+  // Known defects
   // ---------------------------------------------------------------------------
 
   private def recognize(sql: String, thrown: Throwable, built: Option[BuiltQuery]): Option[(Defect, String)] = {
@@ -303,8 +238,6 @@ object CleanRejection {
     val message = Option(thrown.getMessage).getOrElse("")
     if (all.exists(_.isInstanceOf[StackOverflowError]) || all.exists(c => String.valueOf(c.getMessage).contains("java.lang.StackOverflowError")))
       return Some(Defect.DeepNesting -> chain(thrown))
-    if (thrown.isInstanceOf[IllegalArgumentException] && AggSlotList.findFirstIn(message).isDefined)
-      return Some(Defect.AggSlotInUnknownColumn -> message)
     if (thrown.isInstanceOf[IllegalArgumentException] && all.exists(_.isInstanceOf[java.util.concurrent.TimeoutException]))
       return Some(Defect.ParseTimeout -> message)
     val plans = built.toVector.flatMap(b => b.main +: b.ctes.map(_.body))
@@ -317,8 +250,6 @@ object CleanRejection {
     numberInput match {
       case Some(digits) if digits.nonEmpty && digits.forall(_.isDigit) && digits.length >= 19 && sql.contains(digits) =>
         return Some(Defect.NumberLiteralOutOfRange -> s"${digits.take(30)}${if (digits.length > 30) "..." else ""}")
-      case Some("true" | "false") if anyExpr(isBooleanCastToFloat) =>
-        return Some(Defect.BooleanCastToNumber -> numberInput.get)
       case _ => ()
     }
     val infiniteLiteral = SqlTextGen.Lexer.lex(sql).exists(t =>
@@ -331,10 +262,6 @@ object CleanRejection {
       // preallocated, with none.
       case _: ClassCastException if plans.exists(BoundPlan.hasNonBooleanJoinCondition) || anyExpr(isIfOverNonBoolean) =>
         Some(Defect.ConditionNotBoolean -> String.valueOf(root.getMessage))
-      case _: NullPointerException if root.getStackTrace.exists(f =>
-          f.getClassName.startsWith("net.sf.jsqlparser.") && f.getMethodName == "toString") ||
-          String.valueOf(root.getMessage).contains("net.sf.jsqlparser.") =>
-        Some(Defect.RenderingThrows -> String.valueOf(root.getMessage))
       case _: ClassCastException if anyExpr(isFunctionOverWrongType) || anyAgg(isAggOverWrongType) =>
         Some(Defect.FunctionOverWrongType -> String.valueOf(root.getMessage))
       case _: NullPointerException if anyExpr(hasNullableSecondaryArgument) =>
@@ -343,7 +270,6 @@ object CleanRejection {
     }
   }
 
-  private val AggSlotList: Regex = """^Unknown column '[^']*'\. Available: \[[^\]]*\b_agg\d+\b""".r
   private val NumberInput: Regex = """For input string: "([^"]*)"""".r
 
   private val NumericFunctions: Set[String] = Set("ABS", "ROUND", "FLOOR", "CEIL", "CEILING", "TRUNC", "TRUNCATE",
@@ -369,13 +295,7 @@ object CleanRejection {
   }
 
   private def isIfOverNonBoolean(e: Expr): Boolean = e match {
-    case FuncExpr(name, cond +: _, _) if name.equalsIgnoreCase("IF") =>
-      cond.dataType != DataType.BooleanType && cond.dataType != DataType.NullType
-    case _ => false
-  }
-
-  private def isBooleanCastToFloat(e: Expr): Boolean = e match {
-    case CastExpr(child, DataType.FloatType | DataType.DoubleType) => child.dataType == DataType.BooleanType
+    case FuncExpr(name, cond +: _, _) if name.equalsIgnoreCase("IF") => cond.dataType != DataType.BooleanType
     case _ => false
   }
 
@@ -391,27 +311,6 @@ object CleanRejection {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
-
-  /** The failure inside the wrappers a pooled operator adds: the
-    * `ExecutionException` of `ForkJoinTask.get`; the copy of the task's
-    * exception `ForkJoinTask` makes to carry the waiting thread's stack (the
-    * same class, the original as its cause, and as its message the
-    * original's `toString`, or none when the class has no constructor taking
-    * a cause); and the `RuntimeException` it wraps a task's checked exception
-    * in, which is how a nested fan-out's `ExecutionException` travels up
-    * through its parent's task. */
-  def unwrapPool(t: Throwable): Throwable = {
-    var e = t
-    var unwrapping = true
-    while (unwrapping) {
-      val c = e.getCause
-      val copy = c != null && e.getClass == c.getClass && (e.getMessage == null || e.getMessage == c.toString)
-      val wrap = c != null && e.getClass == classOf[RuntimeException] && e.getMessage == c.toString
-      if (c != null && (e.isInstanceOf[ExecutionException] || e.isInstanceOf[CompletionException] || copy || wrap)) e = c
-      else unwrapping = false
-    }
-    e
-  }
 
   /** `t` and its causes, outermost first. */
   def causes(t: Throwable): Vector[Throwable] = {

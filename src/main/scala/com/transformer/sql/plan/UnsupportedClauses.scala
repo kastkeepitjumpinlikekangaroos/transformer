@@ -1,26 +1,36 @@
 package com.transformer.sql.plan
 
 import net.sf.jsqlparser.expression.{
-  Alias, AllValue, AnalyticExpression, AnalyticType, CaseExpression, CastExpression, DateValue,
-  DoubleValue, Function, LongValue, NotExpression, NullValue, SignedExpression, StringValue,
-  TimeKeyExpression, TimeValue, TimestampValue, TrimFunction, WhenClause, WindowElement,
-  WindowOffset, WindowRange
+  Alias, AllValue, AnalyticExpression, AnalyticType, AnyComparisonExpression, ArrayConstructor,
+  ArrayExpression, BinaryExpression, CaseExpression, CastExpression, CollateExpression,
+  ConnectByRootOperator, DateTimeLiteralExpression, DateValue, DoubleValue, ExtractExpression,
+  Function, HexValue, IntervalExpression, JdbcNamedParameter, JdbcParameter, JsonAggregateFunction,
+  JsonExpression, JsonFunction, KeepExpression, LambdaExpression, LongValue, MySQLGroupConcat,
+  NextValExpression, NotExpression, NullValue, NumericBind, OracleHierarchicalExpression, OracleHint,
+  OracleNamedFunctionParameter, OverlapsCondition, RangeExpression, RowConstructor, RowGetExpression,
+  SignedExpression, StringValue, StructType, TimeKeyExpression, TimeValue, TimestampValue,
+  TimezoneExpression, TranscodingFunction, TrimFunction, UserVariable, VariableAssignment, WhenClause,
+  WindowElement, WindowOffset, WindowRange, XMLSerializeExpr
 }
 import net.sf.jsqlparser.expression.operators.arithmetic.{
   Addition, Concat, Division, Modulo, Multiplication, Subtraction
 }
 import net.sf.jsqlparser.expression.operators.conditional.{AndExpression, OrExpression}
 import net.sf.jsqlparser.expression.operators.relational.{
-  Between, EqualsTo, ExpressionList, GreaterThan, GreaterThanEquals, InExpression,
-  IsNullExpression, LikeExpression, MinorThan, MinorThanEquals, NotEqualsTo,
-  ParenthesedExpressionList
+  Between, EqualsTo, ExcludesExpression, ExistsExpression, ExpressionList, FullTextSearch,
+  GreaterThan, GreaterThanEquals, InExpression, IncludesExpression, IsBooleanExpression,
+  IsDistinctExpression, IsNullExpression, LikeExpression, MemberOfExpression, MinorThan,
+  MinorThanEquals, NamedExpressionList, NotEqualsTo, ParenthesedExpressionList, RegExpMatchOperator,
+  TSQLLeftJoin, TSQLRightJoin
 }
 import net.sf.jsqlparser.schema.{Column, Table}
 import net.sf.jsqlparser.statement.Statement
 import net.sf.jsqlparser.statement.create.table.ColDataType
 import net.sf.jsqlparser.statement.select.{
-  AllColumns, AllTableColumns, Distinct, Fetch, GroupByElement, Join, Limit, Offset, OrderByElement,
-  ParenthesedSelect, PlainSelect, SelectItem, SetOperationList, Top, UnionOp, WithItem
+  AllColumns, AllTableColumns, Distinct, ExceptOp, Fetch, GroupByElement, IntersectOp, Join,
+  LateralSubSelect, Limit, MinusOp, Offset, OrderByElement, ParenthesedFromItem, ParenthesedSelect,
+  PlainSelect, Select, SelectItem, SetOperationList, TableFunction, TableStatement, Top, UnionOp,
+  Values, WithItem
 }
 
 import java.lang.reflect.{Field => JField, InvocationTargetException, Method, Modifier}
@@ -60,7 +70,8 @@ final class UnsupportedClauseException(val rejection: UnsupportedClauses.Rejecti
   * [[reject]] walks the statement reflectively and descends only through the
   * getters the binder reads, so it inspects exactly the nodes binding would
   * visit, in every position they can appear in. A node whose class has no
-  * audit stops the walk: the binder rejects those by name.
+  * audit stops the walk: the binder rejects those by name, the name
+  * [[refusal]] gives.
   */
 object UnsupportedClauses {
 
@@ -613,6 +624,131 @@ object UnsupportedClauses {
       "ROW(...) is only ever an element of a list, where the binder rejects it by name",
     "net.sf.jsqlparser.expression.operators.relational.NamedExpressionList" ->
       "only Function.getNamedParameters holds one, and that getter is rejected")
+
+  // ---------------------------------------------------------------------------
+  // Constructs the binder refuses by name
+  // ---------------------------------------------------------------------------
+
+  /** The binder's refusal of `node`, a node it has no case for where it met
+    * it: an expression it does not implement (the walk above stops at one,
+    * since its class has no audit), a query where a value goes, a FROM item
+    * that is not a table, a set operation that is not a UNION. It says what
+    * SQL calls the construct, placed by `where` (`" in FROM"`), and what to
+    * write instead where there is something. It never names the class
+    * JSqlParser parses the construct as, and never renders the node with its
+    * `toString`, which names those classes for some nodes and throws for
+    * others (a ROW-type CAST's does). */
+  def refusal(node: AnyRef, where: String = ""): String = {
+    val (what, advice) = construct(node)
+    if (advice.isEmpty) s"$what$where is not supported" else s"$what$where is not supported; $advice"
+  }
+
+  /** What SQL calls `node`, and the advice its refusal gives. */
+  private def construct(node: AnyRef): (String, String) =
+    constructOf(node.getClass).fold(("This construct", ""))(_(node))
+
+  /** The entry [[refusal]] reads for a node of class `cls`: the class's own,
+    * or its nearest superclass's. */
+  private[plan] def constructOf(cls: Class[_]): Option[AnyRef => (String, String)] =
+    Iterator.iterate[Class[_]](cls)(_.getSuperclass).takeWhile(_ != null).flatMap(Constructs.get).nextOption()
+
+  private def named(cls: Class[_], what: String, advice: String = ""): (Class[_], AnyRef => (String, String)) =
+    cls -> (_ => (what, advice))
+
+  private def namedBy[N <: AnyRef](cls: Class[N], advice: String = "")(
+      what: N => String): (Class[_], AnyRef => (String, String)) =
+    cls -> (node => (what(cls.cast(node)), advice))
+
+  private val SubqueryAdvice = "name the subquery in a WITH clause and JOIN it"
+  private val UnionOnly = "only UNION and UNION ALL are supported"
+  private val NoParameters = "write the value in the query"
+
+  /** What SQL calls each construct the binder refuses by name, by the class
+    * JSqlParser parses it as, and the advice its refusal gives.
+    * `UnsupportedClausesTest` requires an entry, on the class or a superclass,
+    * for every JSqlParser expression, FROM item and set operation the audit
+    * does not cover. */
+  private val Constructs: Map[Class[_], AnyRef => (String, String)] = Map(
+    // A query where a value, a list of values or a table goes.
+    named(classOf[Select], "A subquery", "name it in a WITH clause and select from it, or JOIN it"),
+    named(classOf[LateralSubSelect], "LATERAL"),
+    named(classOf[Values], "VALUES", "write each row as a SELECT and combine them with UNION ALL"),
+    named(classOf[TableStatement], "A TABLE statement", "write SELECT * FROM the table"),
+    namedBy(classOf[ExistsExpression], SubqueryAdvice)(e => if (e.isNot) "NOT EXISTS" else "EXISTS"),
+    namedBy(classOf[AnyComparisonExpression], SubqueryAdvice)(e => s"${e.getAnyType} (subquery)"),
+
+    // FROM items other than a table, and set operations other than UNION.
+    classOf[ParenthesedFromItem] -> { node =>
+      val p = node.asInstanceOf[ParenthesedFromItem]
+      if (p.getJoins != null && !p.getJoins.isEmpty) ("A parenthesized join", "write the joins without the parentheses")
+      else p.getFromItem match {
+        case _: Table => ("A parenthesized table", "write the table without the parentheses")
+        case inner => construct(inner)
+      }
+    },
+    named(classOf[TableFunction], "A table function"),
+    named(classOf[ExceptOp], "EXCEPT", UnionOnly),
+    named(classOf[IntersectOp], "INTERSECT", UnionOnly),
+    named(classOf[MinusOp], "MINUS", UnionOnly),
+
+    // Operators. An operator the binder does not implement is named as it
+    // is written.
+    namedBy(classOf[BinaryExpression])(b => s"The ${b.getStringExpression.trim} operator"),
+    namedBy(classOf[IsDistinctExpression], "compare with = and IS NULL")(_.getStringExpression.trim),
+    namedBy(classOf[IsBooleanExpression])(b =>
+      s"IS ${if (b.isNot) "NOT " else ""}${if (b.isTrue) "TRUE" else "FALSE"}"),
+    namedBy(classOf[RegExpMatchOperator], "the engine has no regular-expression matching")(r =>
+      s"The ${r.getStringExpression.trim} operator"),
+    named(classOf[TSQLLeftJoin], "The *= outer-join operator", "write LEFT JOIN with ON"),
+    named(classOf[TSQLRightJoin], "The =* outer-join operator", "write RIGHT JOIN with ON"),
+    named(classOf[OverlapsCondition], "OVERLAPS"),
+    named(classOf[MemberOfExpression], "MEMBER OF"),
+    named(classOf[IncludesExpression], "INCLUDES"),
+    named(classOf[ExcludesExpression], "EXCLUDES"),
+    named(classOf[FullTextSearch], "MATCH ... AGAINST"),
+    named(classOf[CollateExpression], "COLLATE"),
+    named(classOf[TimezoneExpression], "AT TIME ZONE"),
+    named(classOf[ConnectByRootOperator], "CONNECT_BY_ROOT"),
+    named(classOf[JsonExpression], "A JSON operator such as -> or ->>"),
+
+    // Literals, parameters and values of types the engine does not have.
+    named(classOf[HexValue], "A hexadecimal literal"),
+    named(classOf[IntervalExpression], "INTERVAL"),
+    named(classOf[DateTimeLiteralExpression], "A date or time literal of this kind",
+      "write DATE '...' or TIMESTAMP '...'"),
+    named(classOf[JdbcParameter], "A query parameter", NoParameters),
+    named(classOf[JdbcNamedParameter], "A query parameter", NoParameters),
+    named(classOf[NumericBind], "A query parameter", NoParameters),
+    named(classOf[UserVariable], "A user variable (@name)"),
+    named(classOf[VariableAssignment], "A variable assignment"),
+    named(classOf[ArrayConstructor], "An array"),
+    named(classOf[ArrayExpression], "An array subscript"),
+    named(classOf[RangeExpression], "An array slice"),
+    named(classOf[StructType], "A STRUCT"),
+    named(classOf[RowGetExpression], "A field of a row value"),
+    named(classOf[ExpressionList[_]], "A list of values"),
+    namedBy(classOf[ParenthesedExpressionList[_]])(l =>
+      if (l.isEmpty) "An empty pair of parentheses" else "A row value (a, b, ...)"),
+    named(classOf[RowConstructor[_]], "A row value ROW(...)"),
+    named(classOf[NamedExpressionList[_]], "A list of named arguments"),
+    named(classOf[AllColumns], "A star (*)", "only COUNT(*) and the SELECT list take one"),
+
+    // Functions and clauses with a syntax of their own.
+    named(classOf[ExtractExpression], "EXTRACT"),
+    named(classOf[TranscodingFunction], "CONVERT ... USING"),
+    named(classOf[MySQLGroupConcat], "GROUP_CONCAT"),
+    named(classOf[JsonFunction], "A JSON function"),
+    named(classOf[JsonAggregateFunction], "A JSON aggregate"),
+    named(classOf[XMLSerializeExpr], "XMLSERIALIZE"),
+    named(classOf[NextValExpression], "NEXT VALUE FOR"),
+    named(classOf[KeepExpression], "KEEP (DENSE_RANK FIRST / LAST ...)"),
+    named(classOf[Function.HavingClause], "HAVING MIN / MAX inside a function call"),
+    named(classOf[LambdaExpression], "A lambda expression"),
+    named(classOf[OracleNamedFunctionParameter], "A named argument (name => value)",
+      "write the arguments in order, separated by commas"),
+    named(classOf[OracleHierarchicalExpression], "START WITH / CONNECT BY"),
+    named(classOf[OracleHint], "An optimizer hint /*+ ... */")
+  )
 
   // ---------------------------------------------------------------------------
   // Reflection

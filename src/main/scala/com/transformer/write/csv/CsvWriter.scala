@@ -247,13 +247,8 @@ object CsvWriter {
     var total = 0L
     var firstError: Throwable = null
     futures.foreach { f =>
-      try total += f.get()
-      catch {
-        case e: java.util.concurrent.ExecutionException =>
-          if (firstError == null) firstError = e.getCause
-        case t: Throwable =>
-          if (firstError == null) firstError = t
-      }
+      try total += f.await()
+      catch { case t: Throwable => if (firstError == null) firstError = t }
     }
     if (firstError != null) {
       abortAll(writers)

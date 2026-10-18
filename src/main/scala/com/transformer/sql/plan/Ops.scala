@@ -177,12 +177,14 @@ object Casts {
         v match {
           case s: String => parseNumber(s, to)(_.toFloat)
           case n: Number => n.floatValue
+          case b: Boolean => if (b) 1.0f else 0.0f
           case _ => v.toString.toFloat
         }
       case DataType.DoubleType =>
         v match {
           case s: String => parseNumber(s, to)(_.toDouble)
           case n: Number => n.doubleValue
+          case b: Boolean => if (b) 1.0 else 0.0
           case _ => v.toString.toDouble
         }
       case DataType.BooleanType =>

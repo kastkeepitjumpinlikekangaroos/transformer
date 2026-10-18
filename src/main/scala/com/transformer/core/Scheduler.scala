@@ -1,6 +1,8 @@
 package com.transformer.core
 
-import java.util.concurrent.{Callable, ForkJoinPool, ForkJoinTask, ForkJoinWorkerThread}
+import java.util.concurrent.{Callable, ExecutionException, ForkJoinPool, ForkJoinTask, ForkJoinWorkerThread}
+import java.util.concurrent.atomic.AtomicReference
+import scala.util.control.NonFatal
 
 /** Shared work-stealing scheduler used everywhere this library needs parallel
   * execution: DAG-level task scheduling, per-operator partition fan-out, parallel
@@ -82,29 +84,77 @@ object Scheduler {
     /*asyncMode =*/ false
   )
 
-  /** Submit a `Callable` on the shared pool; the returned `ForkJoinTask`
-    * cooperates with worker threads' join/get so nested submission won't
+  /** Submit a `Callable` on the shared pool. [[Submitted.await]] waits for it,
+    * and from a pool worker that wait work-helps, so nested submission won't
     * deadlock.
     */
-  def submit[T](c: Callable[T]): ForkJoinTask[T] = pool.submit(c)
+  def submit[T](c: Callable[T]): Submitted[T] = {
+    val failure = new AtomicReference[Throwable]
+    val task = pool.submit(new Callable[T] {
+      def call(): T =
+        try c.call()
+        catch { case t: Throwable => failure.set(t); throw t }
+    })
+    new Submitted(task, failure)
+  }
 
   /** Submit every task and block until all have completed; results returned in
     * submission order. Convenience for the common "fan out N partitions, wait
     * for them all" pattern in pipeline-breaking operators.
     *
-    * A task failure surfaces as the `ExecutionException` thrown by
-    * `ForkJoinTask.get` — NOT unwrapped — with the task's throwable in its
-    * cause chain. Caller is responsible for cleanup ordering; everything else
-    * is best-effort draining.
-    *
-    * The await is deliberately a plain `.get()`: from a pool worker it
-    * work-helps, which is what keeps nested fan-outs live on this bounded
-    * pool. Do not swap it for a latch or `ForkJoinPool.managedBlock` —
-    * `//src/test/scala/com/transformer/core:scheduler_test` fails if the
-    * helping mechanism goes away.
+    * The first task in submission order that failed throws its own exception
+    * here, as [[Submitted.await]] does, and the tasks after it are not waited
+    * for. Caller is responsible for cleanup ordering; everything else is
+    * best-effort draining.
     */
   def submitAndAwaitAll[T](tasks: Seq[Callable[T]]): IndexedSeq[T] = {
-    val ftasks = tasks.iterator.map(pool.submit(_)).toIndexedSeq
-    ftasks.map(_.get())
+    val submitted = tasks.iterator.map(submit(_)).toIndexedSeq
+    submitted.map(_.await())
   }
+
+  /** A callable running on [[pool]], and what it threw if it failed. */
+  final class Submitted[T] private[Scheduler] (task: ForkJoinTask[T], failure: AtomicReference[Throwable]) {
+
+    /** Block until the callable has returned and give its result, or throw
+      * what it threw, as [[rethrowable]] says. `ForkJoinTask.get` alone
+      * throws an `ExecutionException` around a copy of the callable's
+      * exception made on the waiting thread: the same class, with the
+      * original's `toString` as its message, so a caller would read
+      * `java.lang.IllegalArgumentException: java.lang.IllegalArgumentException:
+      * Cannot cast 'x' to int`, or no message at all when the class has no
+      * constructor that takes a cause, as `ArithmeticException` has not.
+      *
+      * The wait is deliberately a plain `get()`: from a pool worker it
+      * work-helps, which is what keeps nested fan-outs live on this bounded
+      * pool. Do not swap it for a latch or `ForkJoinPool.managedBlock` —
+      * `//src/test/scala/com/transformer/core:scheduler_test` fails if the
+      * helping mechanism goes away.
+      */
+    def await(): T =
+      try task.get()
+      catch {
+        case e: ExecutionException => throw Option(failure.get).fold[Throwable](e)(rethrowable)
+      }
+  }
+
+  /** What a thread that waited for work done on another thread throws when
+    * that work threw `failure`: `failure` itself, which names what went
+    * wrong, with the waiting thread's stack added to it as a suppressed
+    * exception. A fatal error (one `NonFatal` does not match, such as an
+    * `OutOfMemoryError` or a `StackOverflowError`) is wrapped in an
+    * `ExecutionException` instead, so that a caller which catches only
+    * non-fatal failures, as `DataJob`'s task runner does, still catches it
+    * rather than dying with it.
+    */
+  def rethrowable(failure: Throwable): Throwable = failure match {
+    case NonFatal(t) =>
+      t.addSuppressed(new WaitedFor)
+      t
+    case fatal => new ExecutionException(fatal)
+  }
+
+  /** Added to an exception rethrown on the thread that waited for the work
+    * that threw it; its stack is where that thread waited. */
+  private final class WaitedFor
+    extends RuntimeException(s"waited for on thread ${Thread.currentThread.getName}")
 }

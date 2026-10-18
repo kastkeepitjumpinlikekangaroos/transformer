@@ -330,7 +330,14 @@ is one of several values, type them with `Analyzer.branches`: `CASE` once took
 its first value's type, so `THEN 1 ELSE 2.5` was 2.
 A test enforces one more edit: the node's class needs an audit in
 `UnsupportedClauses`, which `sql/plan:unsupported_clauses_test` asks for by name
-as soon as `LogicalBuilder` matches on the class (see the next section).
+as soon as `LogicalBuilder` matches on the class (see the next section). Then
+delete the class's entry from `UnsupportedClauses.Constructs`, the name the
+binder refused the node by, unless the binder still refuses it in some position
+(a `ParenthesedSelect` is a query at the top and a refused subquery in a value).
+A node the binder refuses keeps its entry, and a new JSqlParser class the binder
+cannot bind needs one: the test fails until every expression, FROM item and set
+operation without an audit has a name in SQL's words there, so its refusal never
+names the class or renders the node.
 
 ## Honor a clause the binder rejects
 
@@ -583,8 +590,8 @@ run-time failure, the bound plan (`BoundPlan`), never the generator's intent; a
 `SqlTextGen.ReferenceTables`, and the matching `FrontendFuzzTest` check fails
 when the repro stops showing the defect, so the entry is removed with the fix,
 the same contract as removing a generator gate. Excuse no more than the defect:
-a wrapper is unwrapped and a class name in a message replaced, and the rest of
-the failure is still checked. Do not match on a `ClassCastException`'s or
+recognize it only where it is the cause, so a failure that merely resembles it
+is still checked in full. Do not match on a `ClassCastException`'s or
 `NullPointerException`'s message: HotSpot throws a hot implicit exception
 preallocated, with none.
 

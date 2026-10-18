@@ -91,10 +91,16 @@ specific traps.
   that waits for the rows is right only when a value causes it — a string a CAST
   cannot read, a decimal that overflows its type; anything the binder could know
   is refused before the first row, so a job task fails at its start and not
-  part-way through. `oracle/CleanRejection` (`fuzz/frontend_fuzz_test`) holds
-  every failure to this; its known defects are where the engine does not yet
-  ([plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md),
-  [11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md)).
+  part-way through. Refuse a construct the binder has no case for with
+  `UnsupportedClauses.refusal`, which names it in SQL's words, and let a failure
+  on the pool reach the caller as itself: wait for pool work with
+  `Scheduler.Submitted.await` or `submitAndAwaitAll`, never `ForkJoinTask.get`,
+  whose `ExecutionException` carries a chain of class names for a message.
+  `oracle/CleanRejection` (`fuzz/frontend_fuzz_test`) holds every failure to
+  this; its known defects are where the engine does not yet
+  ([plans/robustness/11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md),
+  [13](../plans/robustness/13-literals-are-read-as-written.md),
+  [14](../plans/robustness/14-pathological-nesting.md)).
 - **Selectivity / cardinality constants live as named `private[plan] val`s**
   in `LogicalPlanCardinality.scala` (`SelectivityEq`, `SelectivityRange`,
   `SelectivityIsNull`, …). New shapes added to `filterSelectivity` should

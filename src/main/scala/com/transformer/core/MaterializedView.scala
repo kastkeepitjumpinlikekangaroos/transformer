@@ -84,7 +84,7 @@ object MaterializedView {
     * Returns one [[MaterializedView]] per input in the original order.
     */
   def materializeManyInParallel(views: Seq[CatalogView]): IndexedSeq[MaterializedView] = {
-    val perViewFutures: IndexedSeq[(Schema, IndexedSeq[java.util.concurrent.ForkJoinTask[IndexedSeq[ColumnarBatch]]])] =
+    val perViewFutures: IndexedSeq[(Schema, IndexedSeq[Scheduler.Submitted[IndexedSeq[ColumnarBatch]]])] =
       views.toIndexedSeq.map { view =>
         val n = view.numPartitions
         val fs = (0 until n).map { p =>
@@ -95,7 +95,7 @@ object MaterializedView {
         (view.schema, fs)
       }
     perViewFutures.map { case (schema, fs) =>
-      new MaterializedView(schema, fs.map(_.get()))
+      new MaterializedView(schema, fs.map(_.await()))
     }
   }
 

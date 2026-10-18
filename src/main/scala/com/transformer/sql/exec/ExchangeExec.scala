@@ -150,9 +150,9 @@ final case class ExchangeExec(
     * The tree-shaped work-helping that everything else relies on is guarded
     * by `//src/test/scala/com/transformer/core:scheduler_test`.
     *
-    * A `materialize()` failure is captured once in `matFailure` and re-thrown
-    * (wrapped) to the winner and every waiter; `claimed` stays set, so a
-    * failed materialization is never retried. */
+    * A `materialize()` failure is captured once in `matFailure` and thrown
+    * to the winner and every waiter as itself (`Scheduler.rethrowable`);
+    * `claimed` stays set, so a failed materialization is never retried. */
   private def ensureMaterialized(): Array[Array[ColumnarBatch]] = {
     val s = shards
     if (s != null) return s
@@ -181,8 +181,7 @@ final case class ExchangeExec(
     } else {
       ready.await()
     }
-    if (matFailure != null)
-      throw new RuntimeException("ExchangeExec materialization failed", matFailure)
+    if (matFailure != null) throw Scheduler.rethrowable(matFailure)
     shards
   }
 
