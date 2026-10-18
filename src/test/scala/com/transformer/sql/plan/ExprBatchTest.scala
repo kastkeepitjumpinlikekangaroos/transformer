@@ -1286,6 +1286,109 @@ class ExprBatchTest {
       b)
   }
 
+  /** A NULL scale is NULL on both paths, a column's on its NULL rows and a
+    * NULL literal's on every row. Both threw a NullPointerException. */
+  @Test def funcRoundWithNullScalePropagates(): Unit = {
+    val b = batch("x" -> doubleCol(i => i * 1.2345), "scale" -> intCol(i => i % 4 - 1, EveryOther))
+    val x = ColRefExpr(0, "x", DataType.DoubleType)
+    val byColumn = FuncExpr("ROUND", Seq(x, ColRefExpr(1, "scale", DataType.IntType)), DataType.DoubleType)
+    assertParity(byColumn, b)
+    assertNull(byColumn.eval(b, 0))
+    assertTrue(byColumn.evalVec(b).isNull(0))
+    val byLiteral = FuncExpr("ROUND", Seq(x, LitExpr(null, DataType.NullType)), DataType.DoubleType)
+    assertParity(byLiteral, b)
+    assertNull(byLiteral.eval(b, 1))
+  }
+
+  /** A NULL position or length is NULL on both paths; each threw a
+    * NullPointerException. */
+  @Test def funcSubstringWithNullPositionOrLengthPropagates(): Unit = {
+    val b = batch(
+      "s" -> stringCol(i => s"abcdef$i"),
+      "pos" -> intCol(i => i % 5 - 1, EveryOther),
+      "len" -> longCol(i => (i % 4).toLong, i => i % 3 == 0))
+    val s = ColRefExpr(0, "s", DataType.StringType)
+    val pos = ColRefExpr(1, "pos", DataType.IntType)
+    val len = ColRefExpr(2, "len", DataType.LongType)
+    assertParity(FuncExpr("SUBSTRING", Seq(s, pos), DataType.StringType), b)
+    assertParity(FuncExpr("SUBSTRING", Seq(s, pos, len), DataType.StringType), b)
+    assertParity(FuncExpr("SUBSTRING", Seq(s, LitExpr(null, DataType.NullType)), DataType.StringType), b)
+  }
+
+  /** A position or a length past an INT is read as the BIGINT it is, on both
+    * paths, against a reference computed in BigInt. Each was cut to an INT:
+    * 3000000000 wrapped to a negative position, which answered the whole
+    * string, and 4294967297 to a length of 1. */
+  @Test def funcSubstringReadsAPositionOrLengthAsABigint(): Unit = {
+    val values = Seq(3000000000L, Long.MaxValue, Long.MinValue, -1L, 0L, 1L, 2L, 4294967297L)
+    val b = batch(
+      "s" -> stringCol(_ => "abc"),
+      "pos" -> longCol(i => values(i % 8)),
+      "len" -> longCol(i => values((i / 8) % 8)))
+    val e = FuncExpr("SUBSTRING",
+      Seq(ColRefExpr(0, "s", DataType.StringType), ColRefExpr(1, "pos", DataType.LongType),
+        ColRefExpr(2, "len", DataType.LongType)),
+      DataType.StringType)
+    assertParity(e, b)
+    def reference(pos: Long, len: Long): String = {
+      val start = (BigInt(pos) - 1).max(0)
+      val end = (start + BigInt(len)).min(3)
+      if (start >= 3 || end <= start) "" else "abc".substring(start.toInt, end.toInt)
+    }
+    val vec = e.evalVec(b)
+    var i = 0
+    while (i < N) {
+      assertEquals(s"row $i", reference(values(i % 8), values((i / 8) % 8)), vec.getBoxed(i))
+      i += 1
+    }
+  }
+
+  /** ROUND and TRUNC at the edges of a double, pinned on both paths. ROUND
+    * multiplied its value out into a long, which clamps past 2^63
+    * (`ROUND(1e10, 10)` was 922337203.6854776, an infinity 9.2e18), and read
+    * NaN as 0; a scale past a double's range made ROUND 0 and TRUNC NaN, and
+    * one too negative made both NaN. The ordinary rows are as they were. */
+  @Test def funcRoundAndTruncAtTheEdges(): Unit = {
+    // (x, scale, ROUND, TRUNC)
+    val cases: Seq[(Double, Long, Double, Double)] = Seq(
+      (1.0e10, 10L, 1.0e10, 1.0e10),
+      (123456789012.0, 8L, 123456789012.0, 123456789012.0),
+      (1.0e300, 10L, 1.0e300, 1.0e300),
+      (5.0, 400L, 5.0, 5.0),
+      (1.5, 400L, 1.5, 1.5),
+      (2.567, Long.MaxValue, 2.567, 2.567),
+      (5.0, -400L, 0.0, 0.0),
+      (-5.0, -400L, 0.0, 0.0),
+      (2.567, Long.MinValue, 0.0, 0.0),
+      (Double.PositiveInfinity, 0L, Double.PositiveInfinity, Double.PositiveInfinity),
+      (Double.NegativeInfinity, 2L, Double.NegativeInfinity, Double.NegativeInfinity),
+      (Double.NaN, 2L, Double.NaN, Double.NaN),
+      (2.5, 0L, 3.0, 2.0),
+      (-2.5, 0L, -2.0, -2.0),
+      (2.567, 2L, 2.57, 2.56),
+      (-2.567, 2L, -2.57, -2.56))
+    val b = batch(
+      "x" -> doubleCol(i => cases(i % cases.size)._1),
+      "scale" -> longCol(i => cases(i % cases.size)._2))
+    val args = Seq(ColRefExpr(0, "x", DataType.DoubleType), ColRefExpr(1, "scale", DataType.LongType))
+    for ((name, expected) <- Seq[(String, ((Double, Long, Double, Double)) => Double)](
+        "ROUND" -> (_._3), "TRUNC" -> (_._4))) {
+      val e = FuncExpr(name, args, DataType.DoubleType)
+      val vec = e.evalVec(b)
+      var i = 0
+      while (i < N) {
+        val c = cases(i % cases.size)
+        // Double.compare, so NaN is NaN and -0.0 is not 0.0.
+        def check(path: String, actual: Any): Unit = assertEquals(
+          s"$path $name(${c._1}, ${c._2}) = $actual", 0,
+          java.lang.Double.compare(expected(c), actual.asInstanceOf[Double]))
+        check("eval", e.eval(b, i))
+        check("evalVec", vec.getBoxed(i))
+        i += 1
+      }
+    }
+  }
+
   @Test def funcIfBranch(): Unit = {
     val b = batch(
       "cond" -> boolCol(i => i % 3 == 0, i => i % 7 == 0),

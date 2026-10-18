@@ -37,9 +37,9 @@ import com.transformer.sql.plan._
   *
   *   - '''Total by construction.''' Like [[ExprGen]], nothing here can throw for
   *     in-range input: casts are numeric->numeric or anything->string (never the
-  *     string->numeric parse that can throw), `ROUND`/`SUBSTRING` scales are
-  *     non-null integer literals, and integer divide-by-zero returns NULL. So a
-  *     query that binds also runs, in every mode.
+  *     string->numeric parse that can throw), and integer divide-by-zero returns
+  *     NULL, as a NULL `ROUND` scale or `SUBSTRING` position does. So a query
+  *     that binds also runs, in every mode.
   *
   * Excluded so the result multiset stays mode-invariant: `RAND()` and the clock
   * functions (`CURRENT_DATE`/`CURRENT_TIMESTAMP`) — each execution of a query
@@ -61,8 +61,8 @@ object QueryGen {
   /** The types a projected value or an `IS NULL` operand takes: every type
     * but BOOLEAN, which is a predicate here. Draw with `ExprGen.pick`. */
   private val ValueTypes: Seq[DataType] = ExprGen.GenTypes.filterNot(_ == DataType.BooleanType)
-  /** The value types a node may read as text: all but BINARY, which the binder
-    * refuses to CAST to a string or CONCAT. */
+  /** The value types a CAST to STRING reads: all but BINARY, which casts to
+    * nothing else. */
   private val TextTypes: Seq[DataType] = ValueTypes.filterNot(_ == DataType.BinaryType)
   private val ArithOps = Seq("+", "-", "*", "/", "%")
   private val RelOps = Seq("<", "<=", ">", ">=", "=", "<>")
@@ -422,26 +422,37 @@ object QueryGen {
       case DataType.DoubleType =>
         Seq(
           1 -> (() => FuncExpr(rng.oneOf(Seq("FLOOR", "CEIL")), Seq(sub(rng.oneOf(Numerics))), DataType.DoubleType)),
-          1 -> (() => FuncExpr("ROUND", roundArgs(rng, sub(rng.oneOf(Numerics))), DataType.DoubleType)))
+          1 -> (() => FuncExpr("ROUND", roundArgs(rng, schema, sub(rng.oneOf(Numerics))), DataType.DoubleType)))
       case _ => Seq.empty
     }
     rng.weighted(base ++ extra: _*)()
   }
 
-  /** ROUND args: value plus optional NON-NULL integer-literal scale. */
-  private def roundArgs(rng: Rng, value: Expr): Seq[Expr] =
-    if (rng.bool(0.5)) Seq(value, LitExpr(rng.between(-1, 3), DataType.IntType)) else Seq(value)
+  /** ROUND args: the value, and half the time a scale. */
+  private def roundArgs(rng: Rng, schema: Schema, value: Expr): Seq[Expr] =
+    if (rng.bool(0.5)) Seq(value, integerArg(rng, schema, rng.between(-1, 3))) else Seq(value)
+
+  /** A scale, a position or a length: mostly `small`, else a NULL, which makes
+    * the answer NULL, or an INT or BIGINT column or literal, which can hold
+    * NULL or lie past any string's end. A leaf, since a computed value's type
+    * is a hint here and the argument takes an integer only. */
+  private def integerArg(rng: Rng, schema: Schema, small: Int): Expr =
+    rng.weighted[() => Expr](
+      (6, () => LitExpr(small, DataType.IntType)),
+      (2, () => LitExpr(null, DataType.IntType)),
+      (2, () => genLeafValue(rng, schema, rng.oneOf(Seq(DataType.IntType, DataType.LongType)))))()
 
   private def genStringExpr(rng: Rng, schema: Schema, depth: Int): Expr = {
     def sub(t: DataType): Expr = genValue(rng, schema, t, depth - 1)
     val producers: Seq[(Int, () => Expr)] = Seq(
-      // `||` operands kept string so a precedence reparse can never juxtapose a
-      // string with an arithmetic `+` (which would bind to a throwing string add).
+      // `||` and CONCAT join text only, so their operands are strings, which
+      // also keeps a precedence reparse from meeting a string with an
+      // arithmetic `+`. Other types reach them through a CAST to STRING.
       3 -> (() => BinOpExpr("||", sub(DataType.StringType), sub(DataType.StringType), DataType.StringType)),
       // UPPER/LOWER only: TRIM parses to a TrimFunction node the binder rejects.
       3 -> (() => FuncExpr(rng.oneOf(Seq("UPPER", "LOWER")), Seq(sub(DataType.StringType)), DataType.StringType)),
-      3 -> (() => FuncExpr("CONCAT", Seq.fill(rng.between(1, 3))(sub(ExprGen.pick(rng, TextTypes))), DataType.StringType)),
-      2 -> (() => FuncExpr("SUBSTRING", substringArgs(rng, sub(DataType.StringType)), DataType.StringType)),
+      3 -> (() => FuncExpr("CONCAT", Seq.fill(rng.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
+      2 -> (() => FuncExpr("SUBSTRING", substringArgs(rng, schema, sub(DataType.StringType)), DataType.StringType)),
       2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
       2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
       1 -> (() => FuncExpr("NULLIF", Seq(sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
@@ -450,11 +461,10 @@ object QueryGen {
     rng.weighted(producers: _*)()
   }
 
-  /** SUBSTRING args: string, NON-NULL integer-literal start, optional NON-NULL
-    * integer-literal length. */
-  private def substringArgs(rng: Rng, s: Expr): Seq[Expr] = {
-    val start = LitExpr(rng.between(-1, 6), DataType.IntType)
-    if (rng.bool(0.5)) Seq(s, start, LitExpr(rng.between(0, 6), DataType.IntType)) else Seq(s, start)
+  /** SUBSTRING args: the string, a position, and half the time a length. */
+  private def substringArgs(rng: Rng, schema: Schema, s: Expr): Seq[Expr] = {
+    val start = integerArg(rng, schema, rng.between(-1, 6))
+    if (rng.bool(0.5)) Seq(s, start, integerArg(rng, schema, rng.between(0, 6))) else Seq(s, start)
   }
 
   /** A DECIMAL, DATE, TIMESTAMP or BINARY value: the conditional forms every

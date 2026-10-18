@@ -886,7 +886,7 @@ object SqlTextGen {
   // ---- typing queries -------------------------------------------------------
 
   private val TypingFunctions1: Vector[String] = Vector("UPPER", "LOWER", "TRIM", "LENGTH", "ABS", "ROUND", "FLOOR",
-    "CEIL", "SQRT", "EXP", "LN", "SIN", "SIGN", "DEGREES", "CONCAT")
+    "CEIL", "SQRT", "EXP", "LN", "SIN", "SIGN", "DEGREES", "CONCAT", "RAND")
   private val TypingFunctions2: Vector[String] = Vector("ROUND", "TRUNC", "POWER", "ATAN2", "LOG", "SUBSTRING",
     "COALESCE", "NULLIF", "GREATEST", "LEAST", "CONCAT")
   private val TypingAggregates: Vector[String] = Vector("SUM", "AVG", "MIN", "MAX", "COUNT", "STDDEV", "VARIANCE",
@@ -895,15 +895,15 @@ object SqlTextGen {
     "TIMESTAMP")
   private val TypingLiterals: Vector[String] = Vector("1", "2.5", "'x'", "NULL", "TRUE", "DATE '2024-02-29'", "-1")
 
-  /** A function, an aggregate, a CAST, a UNION, a branch list or a join
-    * condition over columns of any of the ten types (a [[DataGen]] table),
-    * whether or not it takes that type, over at most 16 rows. [[QueryGen]] is
-    * type-correct by construction, so without
-    * these the corpus would never offer the binder a type it cannot run, and
-    * "rejection is total" would go untested: the binder must refuse at bind
-    * time what fails at run time. A string column's values (`"a"`, `"x"`)
-    * also make a CAST of it fail on the data, which is the clean run-time
-    * failure the property allows. */
+  /** A function, an aggregate, a CAST, a UNION, a branch list, a condition
+    * in each place one sits, or an operator that reads text, over columns of
+    * any of the ten types (a [[DataGen]] table), whether or not it takes that
+    * type, over at most 16 rows. [[QueryGen]] is type-correct by
+    * construction, so without these the corpus would never offer the binder
+    * a type it cannot run, and "rejection is total" would go untested: the
+    * binder must refuse at bind time what fails at run time. A string
+    * column's values (`"a"`, `"x"`) also make a CAST of it fail on the data,
+    * which is the clean run-time failure the property allows. */
   private def genTyping(rng: Rng): (Tables, String, String) = {
     // At most 16 rows: a duplicated join over a table of hundreds nests loops
     // past the heap (plans/robustness/14), which is not this corpus's subject.
@@ -912,7 +912,7 @@ object SqlTextGen {
     val cols = ds.schema.fields.map(_.name)
     def col: String = rng.oneOf(cols)
     def arg: String = if (rng.bool(0.6)) col else rng.oneOf(TypingLiterals)
-    val sql = rng.between(0, 7) match {
+    val sql = rng.between(0, 9) match {
       case 0 => s"SELECT ${rng.oneOf(TypingFunctions1)}($col) AS v FROM t"
       case 1 => s"SELECT ${rng.oneOf(TypingFunctions2)}($col, $arg) AS v FROM t"
       case 2 =>
@@ -923,7 +923,15 @@ object SqlTextGen {
       case 4 => s"SELECT $col AS v FROM t UNION ${if (rng.bool()) "ALL " else ""}SELECT $col FROM t"
       case 5 => s"SELECT CASE WHEN $col IS NULL THEN $arg ELSE $col END AS v FROM t"
       case 6 => s"SELECT x.$col AS v FROM t x JOIN t y ON ${if (rng.bool()) s"x.$col" else s"x.$col = y.$col AND y.$col"}"
-      case _ => s"SELECT $col AS v FROM t ORDER BY ${rng.oneOf(TypingFunctions1)}($col)"
+      case 7 => s"SELECT $col AS v FROM t ORDER BY ${rng.oneOf(TypingFunctions1)}($col)"
+      case 8 =>
+        val c = col
+        rng.oneOf(Vector(s"SELECT $c AS v FROM t WHERE $c", s"SELECT IF($c, 1, 0) AS v FROM t",
+          s"SELECT CASE WHEN $c THEN 1 END AS v FROM t", s"SELECT NOT $c AS v FROM t",
+          s"SELECT $c OR FALSE AS v FROM t", s"SELECT COUNT(*) AS v FROM t HAVING MAX($c)"))
+      case _ =>
+        val c = col
+        rng.oneOf(Vector(s"SELECT $c || 'x' AS v FROM t", s"SELECT $c LIKE 'x%' AS v FROM t"))
     }
     (Tables(Vector(QueryGen.ViewName -> ds)), "typing", sql)
   }

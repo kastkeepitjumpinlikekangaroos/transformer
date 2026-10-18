@@ -61,8 +61,8 @@ object Analyzer {
   }
 
   /** Insert an implicit cast if `from != to` and the cast is safe. A BINARY
-    * casts to nothing else, so a byte array in a WHERE is an error rather than
-    * its identity read as a string. */
+    * casts to nothing else, so a byte array beside another type is an error
+    * rather than its identity read as a string. */
   def implicitCast(e: Expr, to: DataType): Expr =
     if (e.dataType == to) e
     else {
@@ -302,11 +302,74 @@ object Analyzer {
     if (from == DataType.BinaryType && to != DataType.BinaryType)
       throw new IllegalArgumentException(s"Cannot cast BINARY to ${typeName(to)}")
 
+  /** `e` as the condition of `what` (WHERE, HAVING, ON, CASE WHEN, IF,
+    * COUNT_IF, AND, OR or NOT), which is a BOOLEAN; NULL is the unknown truth
+    * value. Any other value would have to be read as a truth value, a number
+    * as TRUE when it is not 0, text as `'true'` or `'false'`, a date as
+    * nothing at all, so it is an error naming the comparison or the CAST
+    * that says which truth is meant. */
+  def condition(e: Expr, what: String): Expr = e.dataType match {
+    case DataType.BooleanType => e
+    case DataType.NullType => implicitCast(e, DataType.BooleanType)
+    case t =>
+      val advice =
+        if (isStringLiteral(e)) "write TRUE or FALSE"
+        else if (DataType.isNumeric(t)) "compare it with a value, or CAST it to BOOLEAN for TRUE where it is not 0"
+        else if (t == DataType.StringType) "compare it with a value, or CAST it to BOOLEAN to read 'true' and 'false'"
+        else "compare it with a value"
+      throw new IllegalArgumentException(s"$what takes a BOOLEAN, not ${typeName(t)}; $advice")
+  }
+
+  /** Refuse an argument of the function `fn` that is not the kind its
+    * [[Funcs.Param]] says. */
+  def checkArgument(fn: String, param: Funcs.Param, e: Expr): Unit = param match {
+    case Funcs.Param.AnyValue => ()
+    case Funcs.Param.Number => checkNumber(e.dataType, fn)
+    case Funcs.Param.Integer(role) => checkInteger(e.dataType, s"$fn's $role")
+    case Funcs.Param.Text => checkText(e.dataType, fn)
+  }
+
+  /** `what` (a math function, or an aggregate that adds its values up)
+    * computes on numbers. Text goes through a CAST first, which says the
+    * number type it is read as; a boolean is 1 or 0 only through a CAST that
+    * says so; a date and a byte array are no number at all. */
+  def checkNumber(t: DataType, what: String): Unit =
+    if (!(DataType.isNumeric(t) || t == DataType.NullType)) {
+      val why = t match {
+        case DataType.BooleanType => "CAST it to INT for 1 and 0"
+        case DataType.DateType => "a date is not a number"
+        case DataType.TimestampType => "a timestamp is not a number"
+        case DataType.BinaryType => "a byte array is not a number"
+        case _ => "CAST it to a number"
+      }
+      throw new IllegalArgumentException(s"$what on ${typeName(t)} is not supported; $why")
+    }
+
+  /** `what` (a scale, a position, a length or a seed) counts, so it is an
+    * INT or a BIGINT: a scale of 1.5 would have to mean 1 or 2. */
+  def checkInteger(t: DataType, what: String): Unit =
+    if (!(DataType.isIntegral(t) || t == DataType.NullType)) {
+      val advice = if (meetsNumbers(t)) "; CAST it to INT" else ""
+      throw new IllegalArgumentException(s"$what must be an integer, not ${typeName(t)}$advice")
+    }
+
+  /** The types a CAST takes to a number. */
+  private def meetsNumbers(t: DataType): Boolean =
+    DataType.isNumeric(t) || t == DataType.StringType || t == DataType.BooleanType
+
   /** `what`, which reads its operands as text (LIKE, `||`, a string
-    * function), refuses a BINARY for the reason [[checkBinaryCast]] does. */
-  def checkText(t: DataType, what: String): Unit =
-    if (t == DataType.BinaryType)
+    * function), takes a STRING. Any other value's text is a choice the engine
+    * would make for the user, how a DOUBLE prints (`1.0E10`) or where a
+    * TIMESTAMP puts its zone, so it is a CAST to STRING, where the choice is
+    * written down. A BINARY is no text at all and casts to nothing, for the
+    * reason [[checkBinaryCast]] gives. */
+  def checkText(t: DataType, what: String): Unit = t match {
+    case DataType.StringType | DataType.NullType => ()
+    case DataType.BinaryType =>
       throw new IllegalArgumentException(s"$what on BINARY is not supported; a byte array is not text")
+    case _ =>
+      throw new IllegalArgumentException(s"$what on ${typeName(t)} is not supported; CAST it to STRING")
+  }
 
   private def typeName(t: DataType): String = t.name.toUpperCase
 }

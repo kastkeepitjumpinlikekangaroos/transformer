@@ -127,12 +127,12 @@ ship a fix or move something from "not done" to "done".
   arithmetic on numbers alone is computed in `DECIMAL` there, rebound from the
   parse tree by `LogicalBuilder.decimalConstant`, since a bound `1 + 0.05` is a
   `DOUBLE` whose implicit CASTs look like a written one). A
-  `BINARY` casts to nothing else, explicitly or implicitly (`checkCast`,
-  `implicitCast` beneath a WHERE or a LIKE, and `branches` beside any other
-  type), and `Analyzer.checkText` keeps
-  `||` and the string functions off one: each read the array's identity hash as
-  text. When a new type meets these rules, extend them; do not loosen them
-  (see the strictness entry in [conventions.md](conventions.md)).
+  `BINARY` casts to nothing else, explicitly or implicitly (`checkCast`, and
+  `implicitCast` and `branches` beside any other type), so `Analyzer.checkText`
+  keeps it off `||`, `LIKE` and the string functions and `Analyzer.condition`
+  out of a condition, as they keep off every type but their own: each read the
+  array's identity hash as text. When a new type meets these rules, extend them;
+  do not loosen them (see the strictness entry in [conventions.md](conventions.md)).
 - **Values that become one result meet through `Analyzer.branches`.** The
   `THEN` and `ELSE` values of a `CASE`, the arguments of `COALESCE`, `GREATEST`
   and `LEAST`, `IF`'s two values, `LAG`'s or `LEAD`'s value and default, and
@@ -163,6 +163,39 @@ ship a fix or move something from "not done" to "done".
   meets; any other arm is wrapped in a casting projection. NULLIF compares
   through `unify` and returns its first operand as it is, the one place the
   binder leaves `Ops.decimalCompare` a mixed pair.
+- **A condition is a BOOLEAN, and an argument is the kind its function
+  declares.** Every place a truth value is read (WHERE, HAVING, ON, CASE WHEN,
+  IF's first argument, COUNT_IF as an aggregate and as a window, each side of
+  AND, OR and NOT) binds it through `Analyzer.condition`: a BOOLEAN as it is,
+  NULL cast to one, and anything else a bind error naming the comparison or the
+  `CAST(x AS BOOLEAN)` to write. Most of those sites used to take
+  `implicitCast(_, BooleanType)`, so a number was TRUE where it was not 0 (NaN
+  included), text was parsed on every row, and a DATE or TIMESTAMP went through
+  `Casts`' fallback, its text compared with `"true"`, so `WHERE d` kept no rows;
+  a join's single ON condition and IF's condition took no cast at all and died
+  on their first row with a `ClassCastException` (`IF(NULL, 1, 2)` too, on the
+  vector path, where `VecFuncs.iff` casts its condition's vector). A function
+  declares what each argument must be beside its arity, in `Funcs.signature`
+  (`Param.Number`, `Param.Integer` for a scale, a position, a length or a seed,
+  `Param.Text`, and `Param.AnyValue` for the flow functions, whose arguments
+  `branches` and `unify` type), and `LogicalBuilder` checks each argument
+  against it through `Analyzer.checkArgument`; the aggregates that add their
+  values up check theirs in `bindAgg` and `bindAnalytic`. `Funcs.signature`
+  replaced a `returnType` that matched on the argument count alone, so `SUM(s)`
+  and the math functions over a date bound and threw `ClassCastException`
+  inside the worker, `ABS` of a date fell through to `case _ => null` and
+  answered NULL on every row, `ROUND(x, 1.5)` cut its scale with `intValue`,
+  `SUBSTRING(s, 3000000000)` wrapped its position to a negative INT and answered
+  the whole string, and `ROUND(x, 1, 2)` ignored its third argument. A NULL
+  scale, position, length or seed answers NULL on both paths, where `ROUND`'s,
+  `SUBSTRING`'s and `RAND`'s threw `NullPointerException`. `ROUND` and `TRUNC`
+  are `Funcs.round` and `Funcs.trunc` on both paths, over `Funcs.atScale`,
+  which returns NaN, an infinity, or a value
+  whose digits at the scale reach 2^52 as they are, and 0 where 10^scale
+  underflows, because `math.round` of the scaled value clamps to a long past
+  2^63 (`ROUND(1e10, 10)` was 922337203.6854776) and reads NaN as 0, and
+  `math.pow(10, scale)` overflowed to an infinity or underflowed to 0 for a
+  scale of 400 or -400.
 - **The clock keywords are a `TimeKeyExpression`, spelled as written.**
   `current_date`, `CURRENT_DATE()` and DB2's `CURRENT DATE` arrive as three
   different strings, and `CURRENT_DATE ()`, with a space, arrives as a
@@ -1449,9 +1482,11 @@ rendered SQL covers only the supported grammar"). Its campaigns and the probing
 around them found five families, each recorded in a plan and named in the
 fuzzer (a `CleanRejection.Defect`, a `SyntaxEquivalence` known disagreement, or
 a `knownPlan` in `SqlTextGen.BeyondTheTable`) with a repro that fails the suite
-once the defect is gone. Messages that named the engine's internals are fixed
-([plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md));
-four families are open:
+once the defect is gone. Messages that named the engine's internals
+([plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md))
+and functions and conditions that bound over types they cannot take
+([plans/robustness/11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md),
+see "A condition is a BOOLEAN" above) are fixed; three families are open:
 
 - **An `Error` in a job's task hangs the job**, and a ~2000-operator expression
   overflows the binder's stack, so one machine-generated query can do it; three
@@ -1465,10 +1500,6 @@ four families are open:
   identifier keeps its quotes, an integer literal past BIGINT is a raw
   `NumberFormatException`, `1e400` is silently `Infinity`
   ([plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md)).
-- **Functions and conditions bind over types they cannot take** and fail while
-  running, or, for `ABS` of a DATE or a string, answer NULL; a NULL `ROUND`
-  scale throws; a non-boolean `ON` or `IF` condition binds
-  ([plans/robustness/11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md)).
 
 ## What's intentionally NOT done
 

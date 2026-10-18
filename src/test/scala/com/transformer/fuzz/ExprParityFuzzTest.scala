@@ -196,6 +196,36 @@ class ExprParityFuzzTest {
     assertTrue(s"a decimal divisor is rarely zero, $report", byZero > 44)
   }
 
+  /** Coverage guard: a `ROUND` or `TRUNC` scale and a `SUBSTRING` position or
+    * length reach both paths NULL, on a row where the value they apply to is
+    * not, and past an edge: 16 places or more either way, or past an INT's
+    * range. NULL ones were kept out of the generator while they threw a
+    * `NullPointerException` (plans/robustness/11), and a corpus that only ever
+    * gave small literals could not tell the two paths' NULL handling, or
+    * their edges, apart. Prints the tally.
+    *
+    * Measured: the shape on 772 of the 20000 seeds, a NULL beside a value on
+    * 202 and an edge on 38, the edge rare because it takes an integer subtree
+    * that evaluates large on a row whose value is not NULL. The block is the
+    * campaign's, since 4000 seeds held five edges; bounds sit ~3x below. */
+  @Test def integerArgumentsReachNullAndTheEdges(): Unit = {
+    val n = 20000
+    var shape, nullArg, edge = 0
+    var seed = 0
+    while (seed < n) {
+      val cov = ExprGen.integerArgCoverage(ExprGen.generate(new Rng(seed.toLong)))
+      if (cov.shape) shape += 1
+      if (cov.nullArg) nullArg += 1
+      if (cov.edge) edge += 1
+      seed += 1
+    }
+    val report = s"over $n seeds: shape=$shape null=$nullArg edge=$edge"
+    println(s"[expr-parity] scale, position and length $report")
+    assertTrue(s"a scale, position or length is rarely generated, $report", shape > 250)
+    assertTrue(s"a NULL scale, position or length rarely meets a value, $report", nullArg > 65)
+    assertTrue(s"a scale, position or length rarely passes an edge, $report", edge > 12)
+  }
+
   /** The generator's own type invariant holds across a block of seeds:
     * `generate` asserts `expr.dataType == target` internally, so a violation
     * would throw here. */

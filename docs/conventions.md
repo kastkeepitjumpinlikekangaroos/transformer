@@ -82,6 +82,10 @@ specific traps.
   the same rule for values that become one result (whose type must hold each
   of them), and `Analyzer.checkCast` and `Casts` the rules for CAST; follow
   them when adding a type, or a construct whose answer is one of its values.
+  A construct that reads a truth value takes a BOOLEAN through
+  `Analyzer.condition`, never an implicit cast to one, and a function declares
+  what each of its arguments must be beside its arity (`Funcs.signature`), so
+  nothing is read as the type a function wanted.
 - **A failure the user caused is an `IllegalArgumentException` in SQL's words,
   raised at bind time unless a value causes it.** Never an internal exception
   class (`UnsupportedOperationException`, `IllegalStateException`, a
@@ -98,8 +102,7 @@ specific traps.
   whose `ExecutionException` carries a chain of class names for a message.
   `oracle/CleanRejection` (`fuzz/frontend_fuzz_test`) holds every failure to
   this; its known defects are where the engine does not yet
-  ([plans/robustness/11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md),
-  [13](../plans/robustness/13-literals-are-read-as-written.md),
+  ([plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md),
   [14](../plans/robustness/14-pathological-nesting.md)).
 - **Selectivity / cardinality constants live as named `private[plan] val`s**
   in `LogicalPlanCardinality.scala` (`SelectivityEq`, `SelectivityRange`,

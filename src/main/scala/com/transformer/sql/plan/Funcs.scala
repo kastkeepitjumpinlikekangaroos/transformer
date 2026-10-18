@@ -7,42 +7,62 @@ import java.util
 /** Scalar function registry. */
 object Funcs {
 
-  /** Return type for `fn(argTypes)`, or `None` if the function is unknown.
-    * The analyzer uses this for type-checking; the executor uses [[apply]] at runtime.
-    */
-  def returnType(name: String, argTypes: Seq[DataType]): Option[DataType] = name.toUpperCase match {
-    case "LENGTH" | "LEN" if argTypes.size == 1 => Some(DataType.IntType)
-    case "UPPER" | "LOWER" | "TRIM" if argTypes.size == 1 => Some(DataType.StringType)
-    case "SUBSTRING" if argTypes.size == 2 || argTypes.size == 3 => Some(DataType.StringType)
-    case "CONCAT" => Some(DataType.StringType)
-    case "COALESCE" if argTypes.nonEmpty => Some(oneType(argTypes))
-    case "IF" if argTypes.size == 3 => Some(oneType(argTypes.drop(1)))
-    case "NULLIF" if argTypes.size == 2 => Some(argTypes.head)
-    case "ABS" if argTypes.size == 1 => Some(argTypes.head)
-    case "ROUND" if argTypes.size >= 1 => Some(DataType.DoubleType)
-    case "FLOOR" | "CEIL" | "CEILING" if argTypes.size == 1 => Some(DataType.DoubleType)
-    case "TRUNC" | "TRUNCATE" if argTypes.size == 1 || argTypes.size == 2 => Some(DataType.DoubleType)
-    case "POW" | "POWER" if argTypes.size == 2 => Some(DataType.DoubleType)
-    case "SQRT" | "CBRT" | "EXP" if argTypes.size == 1 => Some(DataType.DoubleType)
-    case "LN" if argTypes.size == 1 => Some(DataType.DoubleType)
-    case "LOG" if argTypes.size == 1 || argTypes.size == 2 => Some(DataType.DoubleType)
-    case "LOG10" | "LOG2" if argTypes.size == 1 => Some(DataType.DoubleType)
-    case "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" if argTypes.size == 1 => Some(DataType.DoubleType)
-    case "SINH" | "COSH" | "TANH" if argTypes.size == 1 => Some(DataType.DoubleType)
-    case "ATAN2" if argTypes.size == 2 => Some(DataType.DoubleType)
-    case "DEGREES" | "RADIANS" if argTypes.size == 1 => Some(DataType.DoubleType)
-    case "SIGN" if argTypes.size == 1 => Some(DataType.IntType)
-    case "PI" | "E" if argTypes.isEmpty => Some(DataType.DoubleType)
-    case "RAND" | "RANDOM" if argTypes.isEmpty || argTypes.size == 1 => Some(DataType.DoubleType)
-    case "GREATEST" | "LEAST" if argTypes.nonEmpty => Some(oneType(argTypes))
-    case _ => None
+  /** What an argument of a function must be. NULL is every kind. */
+  sealed trait Param
+  object Param {
+    /** Any value. The flow functions take these: their arguments meet as a
+      * CASE's values do, or are compared as NULLIF's are, before the call is
+      * typed, and IF's first is a condition (`Analyzer.condition`). */
+    case object AnyValue extends Param
+    /** A number: an INT, a BIGINT, a FLOAT, a DOUBLE or a DECIMAL. */
+    case object Number extends Param
+    /** An INT or a BIGINT that counts something, which `role` names: a scale,
+      * a position, a length or a seed. */
+    final case class Integer(role: String) extends Param
+    /** A STRING. */
+    case object Text extends Param
   }
 
-  /** The functions that take their arguments as text, which a BINARY is not
-    * ([[Analyzer.checkText]]). */
-  def takesText(name: String): Boolean = name.toUpperCase match {
-    case "LENGTH" | "LEN" | "UPPER" | "LOWER" | "TRIM" | "SUBSTRING" | "CONCAT" => true
-    case _ => false
+  /** A function's signature over the arguments it is called with: what each
+    * of them must be, and the type it returns. */
+  final case class Signature(params: Seq[Param], returnType: DataType)
+
+  /** The signature of `name` over arguments of `argTypes`, or `None` if no
+    * function of that name takes that many arguments. The analyzer checks
+    * each argument against its [[Param]] (`Analyzer.checkArgument`) and types
+    * the call by it; the executor uses [[apply]] at runtime. */
+  def signature(name: String, argTypes: Seq[DataType]): Option[Signature] = {
+    import Param._
+    val n = argTypes.size
+    def each(param: Param, returns: DataType) = Some(Signature(Seq.fill(n)(param), returns))
+    name.toUpperCase match {
+      case "LENGTH" | "LEN" if n == 1 => each(Text, DataType.IntType)
+      case "UPPER" | "LOWER" | "TRIM" if n == 1 => each(Text, DataType.StringType)
+      case "SUBSTRING" if n == 2 || n == 3 =>
+        Some(Signature(Seq(Text, Integer("position"), Integer("length")).take(n), DataType.StringType))
+      case "CONCAT" => each(Text, DataType.StringType)
+      case "COALESCE" if n > 0 => each(AnyValue, oneType(argTypes))
+      case "IF" if n == 3 => each(AnyValue, oneType(argTypes.drop(1)))
+      case "NULLIF" if n == 2 => each(AnyValue, argTypes.head)
+      case "ABS" if n == 1 => each(Number, argTypes.head)
+      case "ROUND" | "TRUNC" | "TRUNCATE" if n == 1 || n == 2 =>
+        Some(Signature(Seq(Number, Integer("scale")).take(n), DataType.DoubleType))
+      case "FLOOR" | "CEIL" | "CEILING" if n == 1 => each(Number, DataType.DoubleType)
+      case "POW" | "POWER" if n == 2 => each(Number, DataType.DoubleType)
+      case "SQRT" | "CBRT" | "EXP" if n == 1 => each(Number, DataType.DoubleType)
+      case "LN" if n == 1 => each(Number, DataType.DoubleType)
+      case "LOG" if n == 1 || n == 2 => each(Number, DataType.DoubleType)
+      case "LOG10" | "LOG2" if n == 1 => each(Number, DataType.DoubleType)
+      case "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" if n == 1 => each(Number, DataType.DoubleType)
+      case "SINH" | "COSH" | "TANH" if n == 1 => each(Number, DataType.DoubleType)
+      case "ATAN2" if n == 2 => each(Number, DataType.DoubleType)
+      case "DEGREES" | "RADIANS" if n == 1 => each(Number, DataType.DoubleType)
+      case "SIGN" if n == 1 => each(Number, DataType.IntType)
+      case "PI" | "E" if n == 0 => Some(Signature(Nil, DataType.DoubleType))
+      case "RAND" | "RANDOM" if n == 0 || n == 1 => each(Integer("seed"), DataType.DoubleType)
+      case "GREATEST" | "LEAST" if n > 0 => each(AnyValue, oneType(argTypes))
+      case _ => None
+    }
   }
 
   /** The type of arguments the binder has given one type: theirs, or NULL
@@ -68,16 +88,9 @@ object Funcs {
       case "TRIM" =>
         if (args.head == null) null else args.head.toString.trim
       case "SUBSTRING" =>
-        val s = args.head
-        if (s == null) null
-        else {
-          val str = s.toString
-          val start = math.max(0, args(1).asInstanceOf[Number].intValue - 1)
-          val end =
-            if (args.size == 3) math.min(str.length, start + args(2).asInstanceOf[Number].intValue)
-            else str.length
-          if (start >= str.length) "" else str.substring(start, math.max(start, end))
-        }
+        if (args.exists(_ == null)) null
+        else substring(args.head.toString, args(1).asInstanceOf[Number].longValue,
+          if (args.size == 3) args(2).asInstanceOf[Number].longValue else Long.MaxValue)
       case "CONCAT" =>
         if (args.exists(_ == null)) null else args.map(_.toString).mkString
       case "COALESCE" =>
@@ -89,6 +102,7 @@ object Funcs {
         if (Ops.eq(args(0), args(1))) null else args(0)
       case "ABS" =>
         args.head match {
+          case null => null
           // A decimal's absolute value is exact, at the value's own scale.
           case d: java.math.BigDecimal => d.abs
           case n: java.lang.Number => resultType match {
@@ -100,32 +114,19 @@ object Funcs {
             case DataType.FloatType => math.abs(n.doubleValue).toFloat
             case _ => math.abs(n.doubleValue)
           }
-          case _ => null
         }
       case "ROUND" =>
-        if (args.head == null) null
-        else {
-          val v = args.head.asInstanceOf[Number].doubleValue
-          val scale = if (args.size >= 2) args(1).asInstanceOf[Number].intValue else 0
-          val factor = math.pow(10, scale)
-          math.round(v * factor) / factor
-        }
+        if (args.exists(_ == null)) null
+        else round(args.head.asInstanceOf[Number].doubleValue,
+          if (args.size == 2) args(1).asInstanceOf[Number].longValue else 0L)
       case "FLOOR" =>
         if (args.head == null) null else math.floor(args.head.asInstanceOf[Number].doubleValue)
       case "CEIL" | "CEILING" =>
         if (args.head == null) null else math.ceil(args.head.asInstanceOf[Number].doubleValue)
       case "TRUNC" | "TRUNCATE" =>
-        if (args.head == null) null
-        else {
-          val v = args.head.asInstanceOf[Number].doubleValue
-          val scale = if (args.size >= 2) {
-            if (args(1) == null) return null
-            args(1).asInstanceOf[Number].intValue
-          } else 0
-          val factor = math.pow(10, scale)
-          val truncated = math.signum(v) * math.floor(math.abs(v) * factor) / factor
-          if (truncated == 0.0) 0.0 else truncated
-        }
+        if (args.exists(_ == null)) null
+        else trunc(args.head.asInstanceOf[Number].doubleValue,
+          if (args.size == 2) args(1).asInstanceOf[Number].longValue else 0L)
       case "POW" | "POWER" =>
         if (args(0) == null || args(1) == null) null
         else math.pow(args(0).asInstanceOf[Number].doubleValue, args(1).asInstanceOf[Number].doubleValue)
@@ -176,10 +177,8 @@ object Funcs {
       case "E"  => math.E
       case "RAND" | "RANDOM" =>
         if (args.isEmpty) threadRng.get().nextDouble()
-        else {
-          val seed = args.head.asInstanceOf[Number].longValue
-          new java.util.Random(seed).nextDouble()
-        }
+        else if (args.head == null) null
+        else new java.util.Random(args.head.asInstanceOf[Number].longValue).nextDouble()
       case "GREATEST" =>
         pickByOrdering(args, argTypes, resultType, greatest = true)
       case "LEAST" =>
@@ -203,6 +202,48 @@ object Funcs {
       i += 1
     }
     best
+  }
+
+  /** SUBSTRING's answer: `length` characters of `s` from the 1-based
+    * `position`, or as many as there are. A position before the first
+    * character counts from the first; one past the last, or a length below
+    * 1, gives the empty string. Read as a BIGINT, a position past an INT's
+    * range is past the end rather than wrapped round to before the start. */
+  private[plan] def substring(s: String, position: Long, length: Long): String = {
+    val start = if (position < 1) 0L else position - 1
+    if (start >= s.length || length <= 0) ""
+    else s.substring(start.toInt, if (length < s.length - start) (start + length).toInt else s.length)
+  }
+
+  /** ROUND's answer: `v` rounded half up (toward positive infinity, so -2.5
+    * is -2) to `scale` decimal places, or to tens, hundreds, ... for a
+    * negative scale ([[atScale]]). */
+  private[plan] def round(v: Double, scale: Long): Double =
+    atScale(v, scale, x => math.round(x).toDouble)
+
+  /** TRUNC's answer: `v` cut toward zero at `scale` decimal places
+    * ([[atScale]]), a negative zero read as 0. */
+  private[plan] def trunc(v: Double, scale: Long): Double = {
+    val t = atScale(v, scale, x => math.signum(x) * math.floor(math.abs(x)))
+    if (t == 0.0) 0.0 else t
+  }
+
+  /** From 2^52 up every double is a whole number. */
+  private val WholeDoubles: Double = 4503599627370496.0
+
+  /** `v` at `scale` decimal places: `whole` of `v * 10^scale`, scaled back.
+    * NaN and the infinities are their own answer. Where `v * 10^scale`
+    * reaches 2^52, `v` is already whole at that scale, since a double that
+    * large has no fraction left; multiplying it out would only lose digits,
+    * and past 2^63 the long ROUND rounds through clamps. Where 10^scale is
+    * too small for a double, every finite value is 0 at that scale. */
+  private def atScale(v: Double, scale: Long, whole: Double => Double): Double = {
+    val factor = math.pow(10, scale.toDouble)
+    val scaled = v * factor
+    if (java.lang.Double.isNaN(v) || java.lang.Double.isInfinite(v)) v
+    else if (factor == 0.0) 0.0
+    else if (!(math.abs(scaled) < WholeDoubles)) v
+    else whole(scaled) / factor
   }
 
   /** Vectorized counterpart to [[apply]]. Returns `Some(vec)` for the function
@@ -352,8 +393,8 @@ object VecFuncs {
     new StringVector(values, cap)
   }
 
-  /** SUBSTRING(s, start[, len]). Mirrors [[Funcs.apply]]'s semantics: 1-based
-    * start, clamps to string length, returns empty for out-of-range start. */
+  /** SUBSTRING(s, position[, length]), by [[Funcs.substring]]. NULL in any
+    * argument is NULL. */
   def substring(args: Seq[Expr], batch: ColumnarBatch): StringVector = {
     val n = batch.numRows
     val cap = math.max(1, n)
@@ -363,23 +404,16 @@ object VecFuncs {
     val values = new Array[String](cap)
     var i = 0
     while (i < n) {
-      if (sVec.isNull(i)) values(i) = null
-      else {
-        val str = sVec.getBoxed(i).toString
-        val start = math.max(0, startVec.getBoxed(i).asInstanceOf[Number].intValue - 1)
-        val end =
-          if (lenVec != null) math.min(str.length, start + lenVec.getBoxed(i).asInstanceOf[Number].intValue)
-          else str.length
-        values(i) = if (start >= str.length) "" else str.substring(start, math.max(start, end))
-      }
+      if (sVec.isNull(i) || startVec.isNull(i) || (lenVec != null && lenVec.isNull(i))) values(i) = null
+      else values(i) = Funcs.substring(sVec.getBoxed(i).toString, startVec.getBoxed(i).asInstanceOf[Number].longValue,
+        if (lenVec != null) lenVec.getBoxed(i).asInstanceOf[Number].longValue else Long.MaxValue)
       i += 1
     }
     new StringVector(values, cap)
   }
 
-  /** ABS — preserves input numeric type (matches eval: `resultType` mirrors
-    * argument type). Non-numeric args yield NULL, same as eval's
-    * `case _ => null` fallback. */
+  /** ABS — preserves its argument's numeric type (matches eval: `resultType`
+    * is the argument's type). */
   def abs(arg: Expr, resultType: DataType, batch: ColumnarBatch): ColumnVector = {
     val n = batch.numRows
     val cap = math.max(1, n)
@@ -400,10 +434,7 @@ object VecFuncs {
         var i = 0
         while (i < n) {
           if (argVec.isNull(i)) nulls.set(i)
-          else argVec.getBoxed(i) match {
-            case num: java.lang.Number => values(i) = math.abs(num.intValue)
-            case _ => nulls.set(i)
-          }
+          else values(i) = math.abs(argVec.getBoxed(i).asInstanceOf[Number].intValue)
           i += 1
         }
         new IntVector(values, nulls, cap)
@@ -413,10 +444,7 @@ object VecFuncs {
         var i = 0
         while (i < n) {
           if (argVec.isNull(i)) nulls.set(i)
-          else argVec.getBoxed(i) match {
-            case num: java.lang.Number => values(i) = math.abs(num.longValue)
-            case _ => nulls.set(i)
-          }
+          else values(i) = math.abs(argVec.getBoxed(i).asInstanceOf[Number].longValue)
           i += 1
         }
         new LongVector(values, nulls, cap)
@@ -426,10 +454,7 @@ object VecFuncs {
         var i = 0
         while (i < n) {
           if (argVec.isNull(i)) nulls.set(i)
-          else argVec.getBoxed(i) match {
-            case num: java.lang.Number => values(i) = math.abs(num.doubleValue).toFloat
-            case _ => nulls.set(i)
-          }
+          else values(i) = math.abs(argVec.getBoxed(i).asInstanceOf[Number].doubleValue).toFloat
           i += 1
         }
         new FloatVector(values, nulls, cap)
@@ -439,10 +464,7 @@ object VecFuncs {
         var i = 0
         while (i < n) {
           if (argVec.isNull(i)) nulls.set(i)
-          else argVec.getBoxed(i) match {
-            case num: java.lang.Number => values(i) = math.abs(num.doubleValue)
-            case _ => nulls.set(i)
-          }
+          else values(i) = math.abs(argVec.getBoxed(i).asInstanceOf[Number].doubleValue)
           i += 1
         }
         new DoubleVector(values, nulls, cap)
@@ -467,49 +489,24 @@ object VecFuncs {
     new DoubleVector(values, nulls, cap)
   }
 
-  def round(args: Seq[Expr], batch: ColumnarBatch): DoubleVector = {
-    val n = batch.numRows
-    val cap = math.max(1, n)
-    val xVec = args(0).evalVec(batch)
-    val scaleVec: ColumnVector = if (args.size >= 2) args(1).evalVec(batch) else null
-    val values = new Array[Double](cap)
-    val nulls = new util.BitSet(cap)
-    var i = 0
-    while (i < n) {
-      if (xVec.isNull(i)) nulls.set(i)
-      else {
-        val v = xVec.getBoxed(i).asInstanceOf[Number].doubleValue
-        // Match eval: ROUND with a null scale arg NPEs (no explicit null
-        // check on args(1)); using getBoxed → null → asInstanceOf[Number]
-        // succeeds → .intValue NPEs, same failure.
-        val scale = if (scaleVec != null) scaleVec.getBoxed(i).asInstanceOf[Number].intValue else 0
-        val factor = math.pow(10, scale)
-        values(i) = math.round(v * factor) / factor
-      }
-      i += 1
-    }
-    new DoubleVector(values, nulls, cap)
-  }
+  /** ROUND(x[, scale]), by [[Funcs.round]]. NULL in either argument is NULL. */
+  def round(args: Seq[Expr], batch: ColumnarBatch): DoubleVector = atEachScale(args, batch, Funcs.round)
 
-  /** TRUNC matches eval semantics: NULL scale arg → NULL result (eval has an
-    * explicit `if (args(1) == null) return null` for this; ROUND does not). */
-  def trunc(args: Seq[Expr], batch: ColumnarBatch): DoubleVector = {
+  /** TRUNC(x[, scale]), by [[Funcs.trunc]]. NULL in either argument is NULL. */
+  def trunc(args: Seq[Expr], batch: ColumnarBatch): DoubleVector = atEachScale(args, batch, Funcs.trunc)
+
+  private def atEachScale(args: Seq[Expr], batch: ColumnarBatch, f: (Double, Long) => Double): DoubleVector = {
     val n = batch.numRows
     val cap = math.max(1, n)
     val xVec = args(0).evalVec(batch)
-    val scaleVec: ColumnVector = if (args.size >= 2) args(1).evalVec(batch) else null
+    val scaleVec: ColumnVector = if (args.size == 2) args(1).evalVec(batch) else null
     val values = new Array[Double](cap)
     val nulls = new util.BitSet(cap)
     var i = 0
     while (i < n) {
       if (xVec.isNull(i) || (scaleVec != null && scaleVec.isNull(i))) nulls.set(i)
-      else {
-        val v = xVec.getBoxed(i).asInstanceOf[Number].doubleValue
-        val scale = if (scaleVec != null) scaleVec.getBoxed(i).asInstanceOf[Number].intValue else 0
-        val factor = math.pow(10, scale)
-        val truncated = math.signum(v) * math.floor(math.abs(v) * factor) / factor
-        values(i) = if (truncated == 0.0) 0.0 else truncated
-      }
+      else values(i) = f(xVec.getBoxed(i).asInstanceOf[Number].doubleValue,
+        if (scaleVec != null) scaleVec.getBoxed(i).asInstanceOf[Number].longValue else 0L)
       i += 1
     }
     new DoubleVector(values, nulls, cap)

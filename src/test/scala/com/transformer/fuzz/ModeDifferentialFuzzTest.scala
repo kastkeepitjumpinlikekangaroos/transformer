@@ -255,6 +255,50 @@ class ModeDifferentialFuzzTest {
     assertTrue(s"its answers rarely outgrow the first value's scale (value=$value)", value > 5)
   }
 
+  /** A `ROUND` scale or a `SUBSTRING` position or length that is NULL on a
+    * row whose value is not, which the generator kept out while a NULL one
+    * threw a `NullPointerException` (plans/robustness/11). Read off what the
+    * binder builds: the shape from the calls that have one, the value by
+    * evaluating them over the dataset's rows. */
+  @Test def nullScalesAndPositionsReachTheirFunctions(): Unit = {
+    val n = 6000
+    var shape, value = 0
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val view = qc.dataset.singlePartition()
+      val catalog = new Catalog
+      catalog.register(QueryGen.ViewName, view)
+      Try(LogicalBuilder.build(qc.sql, catalog)).toOption.foreach { built =>
+        val calls = oracle.BoundPlan.exprs(built.main).collect {
+          case f @ FuncExpr("ROUND" | "SUBSTRING", _ +: _ +: _, _) => f
+        }.toSeq
+        if (calls.nonEmpty) shape += 1
+        val batches = (0 until view.numPartitions).flatMap(view.readPartition(_).toSeq)
+        if (calls.exists(f => batches.exists(nullBeside(f, _)))) value += 1
+      }
+      seed += 1
+    }
+    println(s"[mode-differential] over $n seeds: a ROUND scale or SUBSTRING position or length in $shape, " +
+      s"NULL beside a value in $value")
+    // Measured over these seeds: the shape 373, the value 108; bounds ~3x below.
+    assertTrue(s"a scale, position or length is rarely generated (shape=$shape)", shape > 120)
+    assertTrue(s"a NULL one rarely meets a value (value=$value)", value > 35)
+  }
+
+  /** Whether `f`'s first argument is a value and another is NULL on some row
+    * of `batch`. Only over columns `batch` has, so a call that reads another
+    * schema (an aggregate's output) is not evaluated. */
+  private def nullBeside(f: FuncExpr, batch: ColumnarBatch): Boolean = {
+    val fields = batch.schema.fields
+    oracle.BoundPlan.subtree(f).forall {
+      case c: ColRefExpr => c.index < fields.length && fields(c.index).dataType == c.dataType
+      case _ => true
+    } && (0 until batch.numRows).exists { row =>
+      f.args.head.eval(batch, row) != null && f.args.tail.exists(_.eval(batch, row) == null)
+    }
+  }
+
   // ---- DATE, TIMESTAMP, BINARY and DECIMAL coverage ----------------------
   //
   // One guard per type, each asserting both halves: the type reaches a

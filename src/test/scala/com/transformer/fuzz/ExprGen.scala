@@ -18,18 +18,20 @@ import com.transformer.sql.plan._
   *     "every row agrees" (the precedent `ExprBatchTest` is likewise total).
   *     Concretely it avoids the engine's only partial shapes: `RAND()` (no
   *     parity meaning — excluded entirely), casts that parse (`String ->`
-  *     numeric/boolean/date/timestamp, `Boolean ->` float/double), a cast from
-  *     FLOAT or DOUBLE to DECIMAL (`NaN` and the infinities have no decimal, and
-  *     the cast refuses them), and `ROUND`/`SUBSTRING` with NULL numeric
-  *     arguments (NPE).
+  *     numeric/boolean/date/timestamp, `Boolean ->` float/double), and a cast
+  *     from FLOAT or DOUBLE to DECIMAL (`NaN` and the infinities have no
+  *     decimal, and the cast refuses them). A `ROUND` or `TRUNC` scale and a
+  *     `SUBSTRING` position or length are any INT or BIGINT, NULL included,
+  *     since NULL there answers NULL.
   *
   * Columns and expressions take every one of the engine's ten value types
   * ([[GenTypes]]). A type takes part in what the engine gives it and nothing
   * else, so a tree the generator builds is one the engine has an answer for:
   * a DATE or TIMESTAMP is compared only with its own type (the binder refuses
-  * any other pairing), a BINARY is never read as text (the binder refuses a
-  * CAST from one, `||` and the string functions), and there is no arithmetic
-  * on a DATE, a TIMESTAMP or a BINARY, which the engine has none of. Decimal
+  * any other pairing), only a STRING is read as text (`||`, `CONCAT` and the
+  * string functions refuse any other type, which reaches them through a CAST
+  * to STRING, from every type but BINARY), and there is no arithmetic on a
+  * DATE, a TIMESTAMP or a BINARY, which the engine has none of. Decimal
   * arithmetic is built the way the binder builds it ([[genDecimalArith]]),
   * over sides whose answers its declared type always holds, so it never
   * overflows. Every other shape takes all four: comparisons and `IN` (a
@@ -105,7 +107,7 @@ object ExprGen {
   private val Numerics: Seq[DataType] = Arithmetic ++ DecimalTypes
   private val Floatings: Seq[DataType] = Seq(DataType.FloatType, DataType.DoubleType)
   private val Temporals: Seq[DataType] = Seq(DataType.DateType, DataType.TimestampType)
-  /** Every type but BINARY: the types a node may read as text. */
+  /** Every type but BINARY: the types a CAST to STRING reads. */
   private val TextTypes: Seq[DataType] = GenTypes.filterNot(_ == DataType.BinaryType)
 
   /** One of `types`, each DECIMAL weighed a third of any other type, so the
@@ -546,8 +548,8 @@ object ExprGen {
       case DataType.DoubleType =>
         Seq(
           1 -> (() => FuncExpr(r.oneOf(Seq("FLOOR", "CEIL", "CEILING")), Seq(sub(pick(r, Numerics))), DataType.DoubleType)),
-          1 -> (() => FuncExpr("ROUND", roundlikeArgs(r, sub(pick(r, Numerics))), DataType.DoubleType)),
-          1 -> (() => FuncExpr(r.oneOf(Seq("TRUNC", "TRUNCATE")), roundlikeArgs(r, sub(pick(r, Numerics))), DataType.DoubleType)),
+          1 -> (() => FuncExpr("ROUND", roundlikeArgs(r, sub(pick(r, Numerics)), sub), DataType.DoubleType)),
+          1 -> (() => FuncExpr(r.oneOf(Seq("TRUNC", "TRUNCATE")), roundlikeArgs(r, sub(pick(r, Numerics)), sub), DataType.DoubleType)),
           // SQRT/LN/EXP are not in Funcs.applyVec — they exercise the default
           // evalVec row loop (which routes through eval, so it cannot diverge,
           // but it proves the fallback path stays correct).
@@ -557,19 +559,27 @@ object ExprGen {
     r.weighted(base ++ extra: _*)()
   }
 
-  /** ROUND/TRUNC args: the value, plus an optional NON-NULL integer-literal
-    * scale (a NULL scale NPEs in ROUND — kept out to preserve totality). */
-  private def roundlikeArgs(r: Rng, value: Expr): Seq[Expr] =
-    if (r.bool(0.6)) Seq(value, LitExpr(r.between(-2, 4), DataType.IntType)) else Seq(value)
+  /** ROUND/TRUNC args: the value, and most of the time a scale. */
+  private def roundlikeArgs(r: Rng, value: Expr, sub: DataType => Expr): Seq[Expr] =
+    if (r.bool(0.6)) Seq(value, integerArg(r, r.between(-2, 4), sub)) else Seq(value)
+
+  /** A scale, a position or a length: mostly `small`, else a NULL, which
+    * answers NULL, or an INT or BIGINT subtree, which can be NULL on some rows
+    * and lie past any string's end or any double's digits. */
+  private def integerArg(r: Rng, small: Int, sub: DataType => Expr): Expr =
+    r.weighted[() => Expr](
+      (6, () => LitExpr(small, DataType.IntType)),
+      (2, () => LitExpr(null, DataType.IntType)),
+      (2, () => sub(r.oneOf(Seq(DataType.IntType, DataType.LongType)))))()
 
   private def genString(r: Rng, schema: Schema, depth: Int): Expr = {
     def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
     val producers: Seq[(Int, () => Expr)] = Seq(
-      4 -> (() => BinOpExpr("||", sub(pick(r, TextTypes)), sub(pick(r, TextTypes)), DataType.StringType)),
+      4 -> (() => BinOpExpr("||", sub(DataType.StringType), sub(DataType.StringType), DataType.StringType)),
       2 -> (() => CastExpr(sub(pick(r, TextTypes)), DataType.StringType)),
       3 -> (() => FuncExpr(r.oneOf(Seq("UPPER", "LOWER", "TRIM")), Seq(sub(DataType.StringType)), DataType.StringType)),
-      3 -> (() => FuncExpr("CONCAT", Seq.fill(r.between(1, 3))(sub(pick(r, TextTypes))), DataType.StringType)),
-      2 -> (() => FuncExpr("SUBSTRING", substringArgs(r, sub(DataType.StringType)), DataType.StringType)),
+      3 -> (() => FuncExpr("CONCAT", Seq.fill(r.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
+      2 -> (() => FuncExpr("SUBSTRING", substringArgs(r, sub(DataType.StringType), sub), DataType.StringType)),
       2 -> (() => FuncExpr("COALESCE", Seq.fill(r.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
       2 -> (() => FuncExpr("IF", Seq(sub(DataType.BooleanType), sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
       1 -> (() => FuncExpr("NULLIF", Seq(sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
@@ -577,11 +587,10 @@ object ExprGen {
     r.weighted(producers: _*)()
   }
 
-  /** SUBSTRING args: the string, a NON-NULL integer-literal start, and an
-    * optional NON-NULL integer-literal length (NULL start/length NPEs). */
-  private def substringArgs(r: Rng, s: Expr): Seq[Expr] = {
-    val start = LitExpr(r.between(-2, 8), DataType.IntType)
-    if (r.bool(0.5)) Seq(s, start, LitExpr(r.between(0, 8), DataType.IntType)) else Seq(s, start)
+  /** SUBSTRING args: the string, a position, and half the time a length. */
+  private def substringArgs(r: Rng, s: Expr, sub: DataType => Expr): Seq[Expr] = {
+    val start = integerArg(r, r.between(-2, 8), sub)
+    if (r.bool(0.5)) Seq(s, start, integerArg(r, r.between(0, 8), sub)) else Seq(s, start)
   }
 
   private def genCaseExpr(r: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
@@ -817,5 +826,44 @@ object ExprGen {
 
     walk(c.expr)
     DecimalArithCoverage(ops.toSet, rounded, byZero)
+  }
+
+  /** What a case's `ROUND`, `TRUNC` and `SUBSTRING` calls give their scale,
+    * position or length: whether one has one (the shape), whether on some row
+    * it is NULL while the value it applies to is not, and whether on some row
+    * it is past an edge: a scale of 16 places or more either way, where a
+    * double's digits or 10^scale's range run out, or a position or length past
+    * an INT's range. */
+  final case class IntegerArgCoverage(shape: Boolean, nullArg: Boolean, edge: Boolean)
+
+  def integerArgCoverage(c: ExprCase): IntegerArgCoverage = {
+    var shape, nullArg, edge = false
+
+    def walk(e: Expr): Unit = {
+      e match {
+        case FuncExpr(name, value +: integers, _) if integers.nonEmpty &&
+            Set("ROUND", "TRUNC", "TRUNCATE", "SUBSTRING")(name) =>
+          shape = true
+          var row = 0
+          while (row < c.batch.numRows) {
+            if (value.eval(c.batch, row) != null) integers.foreach { arg =>
+              arg.eval(c.batch, row) match {
+                case null => nullArg = true
+                case n: Number =>
+                  val k = n.longValue
+                  if (name == "SUBSTRING") { if (k > Int.MaxValue || k < Int.MinValue) edge = true }
+                  else if (k >= 16 || k <= -16) edge = true
+                case _ => ()
+              }
+            }
+            row += 1
+          }
+        case _ => ()
+      }
+      Shrinker.childrenOf(e).foreach(walk)
+    }
+
+    walk(c.expr)
+    IntegerArgCoverage(shape, nullArg, edge)
   }
 }

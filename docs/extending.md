@@ -7,9 +7,16 @@ relevant module lives, and that you'll follow the workflow in
 
 ## Add a scalar SQL function
 
-1. Add it to `Funcs.returnType` in `sql/plan/Funcs.scala` so the analyzer
-   knows the return type.
-2. Add an `apply` case in the same file with the runtime semantics.
+1. Add it to `Funcs.signature` in `sql/plan/Funcs.scala`: the arities it
+   takes, what each argument must be (`Param.Number`, `Param.Integer` for a
+   count such as a scale or a position, `Param.Text`, or `Param.AnyValue` for
+   one it returns), and the type it returns. The binder checks every argument
+   against its `Param` (`Analyzer.checkArgument`), so the function never meets
+   a value it cannot take while running; a kind none of these say is a new
+   `Param` and a new check in `checkArgument`, not an argument left unchecked.
+2. Add an `apply` case in the same file with the runtime semantics. A NULL
+   argument answers NULL, a scale or a position included, unless the function
+   is a flow function that says otherwise.
 3. **For hot functions, also add a `Funcs.applyVec` case and a `VecFuncs`
    helper.** The vectorized path eliminates per-row Expr dispatch in
    `ProjectExec` / `FilterExec` and per-row key eval in
@@ -33,9 +40,10 @@ that is an operator by another name binds as the operator, the way
 the two cannot be typed differently. A function that answers with one of its
 arguments, as `COALESCE`, `IF`, `GREATEST` and `LEAST` do, gives those
 arguments one type in `bindScalarFunctionWithAggs` through
-`LogicalBuilder.bindBranches` (`Analyzer.branches`), and `Funcs.returnType` then
+`LogicalBuilder.bindBranches` (`Analyzer.branches`), and `Funcs.signature` then
 reads that type; one that compares two arguments, as `NULLIF` does, types them
-with `Analyzer.unify`.
+with `Analyzer.unify`; and one that reads a truth value, as `IF`'s first
+argument is, binds it through `Analyzer.condition`, as every condition is.
 
 A function whose value must hold still for a whole query, as the clock keywords'
 must, does not belong in `Funcs`, which evaluates per row. Bind it to a literal
@@ -73,7 +81,10 @@ instead, the way `LogicalBuilder.clockLiteral` binds `CURRENT_DATE` and
    exactly, and fit the answer with `Decimals.fit` in `finish`, so it cannot
    depend on row order, merge order or spill.
 5. Wire it in `AggState.init` (`AggregateExec.scala`) and
-   `LogicalBuilder.bindAgg` (`sql/plan/LogicalBuilder.scala`). A one-argument
+   `LogicalBuilder.bindAgg` (`sql/plan/LogicalBuilder.scala`), checking its
+   argument there as `SUM`'s is (`numberArg` for one it adds up,
+   `Analyzer.condition` for a truth value, as `COUNT_IF`'s), and the same in
+   `bindAnalytic` if it is a window function by name. A one-argument
    aggregate gets `DISTINCT` by wrapping it in `AggExprDistinct` in `bindAgg`
    (`DistinctState` replays the distinct values into the aggregate's own state)
    and adding its name to `UnsupportedClauses.DistinctAggregates`; until then

@@ -61,7 +61,6 @@ object CleanRejection {
   final case class KnownFailure(defect: Defect, detail: String) extends Outcome
 
   private val Plans = "plans/robustness/"
-  val ArgumentTypesPlan: String = Plans + "11-functions-bind-over-arguments-they-cannot-take.md"
   val LiteralsPlan: String = Plans + "13-literals-are-read-as-written.md"
   val PathologicalInputPlan: String = Plans + "14-pathological-nesting.md"
 
@@ -77,22 +76,6 @@ object CleanRejection {
       * `NumberFormatException` with no message). */
     case object NumberLiteralOutOfRange extends Defect("a number literal outside its type's range", LiteralsPlan,
       "SELECT 99999999999999999999 AS big FROM t")
-    /** `SUM(s)`, `ROUND(d)`, `SUBSTRING(s, 'x')`: the scalar functions check
-      * their arity only and the numeric aggregates nothing, so each binds over
-      * any type and fails while it runs. */
-    case object FunctionOverWrongType extends Defect("a function binds over an argument type it cannot take",
-      ArgumentTypesPlan, "SELECT SUM(s) AS v FROM t")
-    /** `t JOIN u ON t.a`, `IF(s, 'y', 'n')`: a join's ON condition or IF's
-      * condition that is not a predicate binds as it is, where WHERE, CASE
-      * WHEN and every AND operand get a cast to BOOLEAN, and it dies on its
-      * first row with a `ClassCastException`. A NULL condition is no BOOLEAN
-      * either: `IF(NULL, 1, 2)` dies on the vector path (seed 54624). */
-    case object ConditionNotBoolean extends Defect("a condition that is not a predicate binds",
-      ArgumentTypesPlan, "SELECT t.a FROM t JOIN u ON t.a")
-    /** `ROUND(a, NULL)`, `SUBSTRING(s, b)` over a NULL `b`: a
-      * `NullPointerException` while it runs. */
-    case object NullFunctionArgument extends Defect("a NULL scale, position or length is a NullPointerException",
-      ArgumentTypesPlan, "SELECT ROUND(a, NULL) AS v FROM t")
     /** A 2000-term `+` or `OR` chain overflows the binder's stack, 1000
       * nested calls or 3000 nested parentheses the parser's. */
     case object DeepNesting extends Defect("a deep expression overflows the stack", PathologicalInputPlan,
@@ -103,8 +86,7 @@ object CleanRejection {
     case object ParseTimeout extends Defect("unclosed parentheses run the parser into its timeout",
       PathologicalInputPlan, "SELECT ((((a +")
 
-    val All: Vector[Defect] = Vector(NumberLiteralOutOfRange, FunctionOverWrongType, ConditionNotBoolean,
-      NullFunctionArgument, DeepNesting, ParseTimeout)
+    val All: Vector[Defect] = Vector(NumberLiteralOutOfRange, DeepNesting, ParseTimeout)
   }
 
   // ---------------------------------------------------------------------------
@@ -240,9 +222,6 @@ object CleanRejection {
       return Some(Defect.DeepNesting -> chain(thrown))
     if (thrown.isInstanceOf[IllegalArgumentException] && all.exists(_.isInstanceOf[java.util.concurrent.TimeoutException]))
       return Some(Defect.ParseTimeout -> message)
-    val plans = built.toVector.flatMap(b => b.main +: b.ctes.map(_.body))
-    def anyExpr(p: Expr => Boolean): Boolean = plans.exists(plan => BoundPlan.exprs(plan).exists(p))
-    def anyAgg(p: AggExpr => Boolean): Boolean = plans.exists(plan => BoundPlan.aggs(plan).exists(p))
     val numberInput = root match {
       case nfe: NumberFormatException => NumberInput.findFirstMatchIn(String.valueOf(nfe.getMessage)).map(_.group(1))
       case _ => None
@@ -257,56 +236,10 @@ object CleanRejection {
     if (built.isDefined && infiniteLiteral && (root.isInstanceOf[NumberFormatException] ||
         all.exists(c => String.valueOf(c.getMessage).contains("Infinity"))))
       return Some(Defect.NumberLiteralOutOfRange -> s"${root.getClass.getSimpleName}: ${root.getMessage}")
-    root match {
-      // Not by the message: HotSpot throws a hot implicit ClassCastException
-      // preallocated, with none.
-      case _: ClassCastException if plans.exists(BoundPlan.hasNonBooleanJoinCondition) || anyExpr(isIfOverNonBoolean) =>
-        Some(Defect.ConditionNotBoolean -> String.valueOf(root.getMessage))
-      case _: ClassCastException if anyExpr(isFunctionOverWrongType) || anyAgg(isAggOverWrongType) =>
-        Some(Defect.FunctionOverWrongType -> String.valueOf(root.getMessage))
-      case _: NullPointerException if anyExpr(hasNullableSecondaryArgument) =>
-        Some(Defect.NullFunctionArgument -> String.valueOf(root.getMessage))
-      case _ => None
-    }
+    None
   }
 
   private val NumberInput: Regex = """For input string: "([^"]*)"""".r
-
-  private val NumericFunctions: Set[String] = Set("ABS", "ROUND", "FLOOR", "CEIL", "CEILING", "TRUNC", "TRUNCATE",
-    "POW", "POWER", "SQRT", "CBRT", "EXP", "LN", "LOG", "LOG10", "LOG2", "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN",
-    "ATAN2", "SINH", "COSH", "TANH", "DEGREES", "RADIANS", "SIGN")
-  /** The functions whose arguments after the first are a scale, a position
-    * or a length, read as numbers on every row. */
-  private val SecondaryNumberArgs: Set[String] = Set("ROUND", "TRUNC", "TRUNCATE", "SUBSTRING", "LOG", "POW", "POWER", "ATAN2")
-
-  private def numericOrNull(t: DataType): Boolean = DataType.isNumeric(t) || t == DataType.NullType
-
-  private def isFunctionOverWrongType(e: Expr): Boolean = e match {
-    case FuncExpr(name, args, _) if NumericFunctions(name.toUpperCase) => args.exists(a => !numericOrNull(a.dataType))
-    case FuncExpr(name, args, _) if name.equalsIgnoreCase("SUBSTRING") => args.drop(1).exists(a => !numericOrNull(a.dataType))
-    case _ => false
-  }
-
-  private def isAggOverWrongType(a: AggExpr): Boolean = a match {
-    case AggExprDistinct(inner) => isAggOverWrongType(inner)
-    case _: AggExprSum | _: AggExprAvg | _: AggExprStddev | _: AggExprVariance | _: AggExprCovar | _: AggExprCorr =>
-      a.args.exists(x => !numericOrNull(x.dataType))
-    case _ => false
-  }
-
-  private def isIfOverNonBoolean(e: Expr): Boolean = e match {
-    case FuncExpr(name, cond +: _, _) if name.equalsIgnoreCase("IF") => cond.dataType != DataType.BooleanType
-    case _ => false
-  }
-
-  private def hasNullableSecondaryArgument(e: Expr): Boolean = e match {
-    case FuncExpr(name, args, _) if SecondaryNumberArgs(name.toUpperCase) =>
-      args.drop(1).exists {
-        case LitExpr(v, _) => v == null
-        case _ => true
-      }
-    case _ => false
-  }
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -324,19 +257,13 @@ object CleanRejection {
   def chain(t: Throwable): String = causes(t).map(_.getClass.getName).mkString(" <- ")
 }
 
-/** Walks a bound [[LogicalPlan]]: every expression in it, every aggregate,
-  * and the decimal values of a branch list. */
+/** Walks a bound [[LogicalPlan]]: every expression in it, and the decimal
+  * values of a branch list. */
 object BoundPlan {
 
   def nodes(p: LogicalPlan): Iterator[LogicalPlan] = Iterator(p) ++ p.children.iterator.flatMap(nodes)
 
   def exprs(p: LogicalPlan): Iterator[Expr] = nodes(p).flatMap(ownExprs).flatMap(subtree)
-
-  def aggs(p: LogicalPlan): Iterator[AggExpr] = nodes(p).flatMap {
-    case a: LogicalAggregate => a.aggregates.iterator.map(_._1)
-    case w: LogicalWindow => w.windows.iterator.collect { case WindowDef(_, WindowFnAgg(agg), _) => agg }
-    case _ => Iterator.empty
-  }
 
   /** For a CASE, COALESCE or IF of DECIMAL type with a value that is
     * arithmetic of a DECIMAL type other than its first DECIMAL value's, that
@@ -377,12 +304,6 @@ object BoundPlan {
         case _ => false
       }
     }
-  }
-
-  /** A join whose ON condition is not a BOOLEAN. */
-  def hasNonBooleanJoinCondition(p: LogicalPlan): Boolean = nodes(p).exists {
-    case j: LogicalJoin => j.condition.dataType != DataType.BooleanType
-    case _ => false
   }
 
   private def ownExprs(p: LogicalPlan): Iterator[Expr] = p match {

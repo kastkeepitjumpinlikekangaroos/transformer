@@ -811,7 +811,9 @@ on, which aggregates each distinct non-NULL value once),
 `COVAR_SAMP`/`COVAR_POP`, `CORR`. Univariate variance/stddev (and `COUNT_IF`)
 are also available as window aggregates with `OVER (...)`. Variance and stddev
 use Welford + Chan's parallel merge for numerical stability; `*_SAMP` returns
-NULL when fewer than two non-NULL inputs are present. `SUM` is a `BIGINT` over
+NULL when fewer than two non-NULL inputs are present. `SUM`, `AVG` and the
+statistics take a number, and `MIN`, `MAX` and `COUNT` any type (see the
+argument types below). `SUM` is a `BIGINT` over
 integers, a `DOUBLE` over floats, and over a `DECIMAL(p,s)` an exact
 `DECIMAL(38,s)`. `AVG` is a `DOUBLE`, but over a `DECIMAL(p,s)` an exact
 `DECIMAL(p+4,s+4)` (past 38 digits it gives way on scale, as arithmetic does),
@@ -840,9 +842,19 @@ numeric — `ABS`, `ROUND`, `FLOOR`, `CEIL`/`CEILING`, `TRUNC`/`TRUNCATE`,
 `LOG(base, x)`, `LOG10`, `LOG2`; trig — `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`,
 `ATAN`, `ATAN2(y, x)`, `SINH`, `COSH`, `TANH`, `DEGREES`, `RADIANS`;
 constants — `PI()`, `E()`; non-deterministic — `RAND()` / `RAND(seed)`;
-temporal — `CURRENT_DATE`, `CURRENT_TIMESTAMP`. NULL propagates through every
-math function; `GREATEST`/`LEAST` skip NULLs and return NULL only when every
-argument is NULL. `MOD(a, b)` is `a % b`, typed the same way.
+temporal — `CURRENT_DATE`, `CURRENT_TIMESTAMP`. The string functions take a
+`STRING`, the numeric and math functions a number, and `ROUND`'s and `TRUNC`'s
+scale, `SUBSTRING`'s position and length and `RAND`'s seed an `INT` or a
+`BIGINT` (see the argument types below). NULL propagates through
+every function but the flow ones, a NULL scale, position, length or seed
+included; `GREATEST`/`LEAST` skip NULLs and return NULL only when every
+argument is NULL. `MOD(a, b)` is `a % b`, typed the same way. `ROUND` rounds
+half up, toward positive infinity (`ROUND(2.5)` is 3, `ROUND(-2.5)` is -2), and
+`TRUNC` toward zero, both in `DOUBLE`; a value already whole at the scale (one
+whose digits there reach 2^52, as `ROUND(1e10, 10)`'s do) comes back as it is,
+a scale too negative for a `DOUBLE` gives 0, and `NaN` and the infinities are
+their own answer. A `SUBSTRING` position before the first character counts from
+the first, and one past the last gives the empty string.
 
 `CURRENT_DATE` and `CURRENT_TIMESTAMP` take every spelling other engines accept
 (`current_date`, `CURRENT_DATE()`, DB2's `CURRENT DATE`). Both read the wall
@@ -853,8 +865,9 @@ the [templating variables](#temporal-templating) instead, as in
 `DATE '{{ iso_date }}'`. There is no `CURRENT_TIME`, because there is no TIME
 type.
 
-**Operators:** `+ - * / %`, `=  <>  <  <=  >  >=`, `AND OR NOT`, `||` (concat),
-`LIKE` and its case-insensitive form `ILIKE`, `IS NULL` / `IS NOT NULL`,
+**Operators:** `+ - * / %`, `=  <>  <  <=  >  >=`, `AND OR NOT`, `||` (joins
+two strings), `LIKE` and its case-insensitive form `ILIKE` (on strings),
+`IS NULL` / `IS NOT NULL`,
 `IN (...)`, `BETWEEN`, `CASE WHEN`, `CAST(expr AS type)`. In a `LIKE` / `ILIKE`
 pattern `\` makes the next `%` or `_` literal; `ESCAPE 'c'` names another
 character, and `ESCAPE ''` turns escaping off. Grouping parentheses work anywhere an expression does —
@@ -915,6 +928,27 @@ as is any arithmetic on a boolean, a date or a timestamp. `||` joins text.
 `NULLIF(a, b)` compares its two as `=` does and returns `a` as it is, so
 `NULLIF(i, '0')` reads the `'0'` as an `INT`.
 
+**Every condition is a BOOLEAN, and every function takes the types it computes
+on.** A condition (`WHERE`, `HAVING`, `ON`, `CASE WHEN`, `IF`'s first
+argument, `COUNT_IF`, and each side of `AND`, `OR` and `NOT`) is a `BOOLEAN`,
+or NULL, the unknown truth value. Anything else is an error before the query
+runs, naming the comparison or the `CAST(x AS BOOLEAN)` to write: `WHERE i`
+over an `INT` is `WHERE i <> 0`, and `WHERE 'true'` is `WHERE TRUE`. The math
+functions, and the aggregates that add their values up (`SUM`, `AVG`,
+`STDDEV`, `VARIANCE`, `COVAR_SAMP` / `COVAR_POP` and `CORR`, with `DISTINCT` and
+as windows too), take a number: text takes a CAST to the number type meant, a
+boolean `CAST(b AS INT)` for 1 and 0, and a date, a timestamp or a byte array is
+no number. `ROUND`'s and `TRUNC`'s scale, `SUBSTRING`'s position and length and
+`RAND`'s seed count something, so each is an `INT` or a `BIGINT`, and
+`ROUND(x, 1.5)` is an error rather than one place or two. Only a `STRING` is
+text: `LIKE` and `ILIKE`, `||`, `CONCAT` and the string functions refuse any
+other type, and `CAST(x AS STRING)` turns one into text where the query says
+so (`'id-' || CAST(id AS STRING)`), since how a `DOUBLE` prints (`1.0E10`) or
+where a `TIMESTAMP` puts its zone is a choice. Each of these used to read its
+argument as the type it wanted, or fail part-way through the rows: `WHERE i`
+was TRUE where `i` was not 0, `WHERE d` kept no rows, `LENGTH(12)` was 2, `ABS`
+of a date was NULL, and `SUM(s)` over text failed on its first row.
+
 **Values that become one result take a type that holds each of them.** The
 `THEN` and `ELSE` values of a `CASE`, the arguments of `COALESCE`, `GREATEST`
 and `LEAST`, `IF`'s two values, `LAG`'s or `LEAD`'s value and default, and each
@@ -957,11 +991,12 @@ between one and a `DECIMAL` is an error before the query runs: CAST the
 are exact too (see Aggregates), so a decimal result never depends on row
 order, partitions or spill, and parquet writes it as it is.
 
-**A `BINARY` value is not text.** It casts to nothing else, and `LIKE`, `||`
-and the string functions (`LENGTH`, `UPPER`, `LOWER`, `TRIM`, `SUBSTRING`,
-`CONCAT`) refuse one before the query runs, as does a `WHERE` or a `CASE`
-result that would read one as a boolean or a string. Each of these used to read
-the array's identity, text like `[B@1a96d94c` that changed on every run.
+**A `BINARY` value is not text.** It casts to nothing else, so no CAST makes
+one text for `LIKE`, `||` and the string functions (`LENGTH`, `UPPER`, `LOWER`,
+`TRIM`, `SUBSTRING`, `CONCAT`), or a truth value for a condition, and a `CASE`
+result that would read one as a string is an error before the query runs. Each
+of these used to read the array's identity, text like `[B@1a96d94c` that changed
+on every run.
 
 **CTEs (`WITH`):** supported, non-recursive. `WITH a AS (...), b AS (SELECT ...
 FROM a) SELECT ... FROM b` — later CTEs may reference earlier ones, a CTE can
@@ -1162,12 +1197,6 @@ JDK 21 or newer (tested through JDK 25).
   the file, line, column and value; an explicit schema (`inferSchema = false`
   with `columns`) reads every file as declared. A parquet glob checks every
   file against the first when it is opened (see [Parquet](#parquet)).
-- **Some functions and conditions bind over a type they cannot take** and fail
-  while running instead of at bind time: `SUM` or `AVG` over text or dates, the
-  math functions over text, `SUBSTRING` with a text position, a NULL `ROUND`
-  scale, a join's `ON` or `IF`'s condition that is not a predicate. `ABS` of a
-  `DATE` or a string answers NULL. Recorded as
-  [plans/robustness/11](plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md).
 - **Very deep or unbalanced SQL.** An expression about 2000 operators deep
   overflows the binder's stack, and inside a job that **hangs the job**; three
   unclosed parentheses make a parse error take seconds, and four run the parser

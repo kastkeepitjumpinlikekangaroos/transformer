@@ -7,7 +7,7 @@ navigation hint, not a comprehensive directory listing.
 
 ## File-size hot spots
 
-- `sql/plan/LogicalBuilder.scala` (~1310 LOC) — largest file in `sql/plan`.
+- `sql/plan/LogicalBuilder.scala` (~1290 LOC) — largest file in `sql/plan`.
   Pattern matches every JSqlParser expression node, dispatches SELECT shapes,
   and (for
   outermost-scope `WITH` CTEs) emits placeholder `PendingCteView` scans +
@@ -69,10 +69,12 @@ navigation hint, not a comprehensive directory listing.
   `-0.0` rules), anything else through `Ops` (`genericCompare`) — is chosen in
   `VecOps.compare`; see
   [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec).
-- `sql/plan/Funcs.scala` (~550 LOC) — scalar function registry. `Funcs.apply`
-  is the row-form dispatcher; `Funcs.applyVec` + the `VecFuncs` object
-  carry the vectorized implementations for the hot subset (COALESCE,
-  string ops, ABS/FLOOR/CEIL/ROUND/TRUNC, IF, NULLIF, SUBSTRING).
+- `sql/plan/Funcs.scala` (~550 LOC) — scalar function registry.
+  `Funcs.signature` declares each function's arities, argument kinds and
+  return type; `Funcs.apply` is the row-form dispatcher; `Funcs.applyVec` +
+  the `VecFuncs` object carry the vectorized implementations for the hot
+  subset (COALESCE, string ops, ABS/FLOOR/CEIL/ROUND/TRUNC, IF, NULLIF,
+  SUBSTRING), sharing `substring`, `round` and `trunc` with the row form.
 - `gui/ResultsTabPane.scala` (~630 LOC) — partition picker + background
   output loader + run-log rendering.
 - `read/parquet/ParquetReader.scala` (~735 LOC) — `ParquetReader` (the footer

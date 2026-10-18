@@ -142,6 +142,24 @@ class FrontendFuzzTest {
     }
   }
 
+  /** What plans/robustness/11 fixed comes out clean, where each was a known
+    * defect: a function, an aggregate or a condition over a type it cannot
+    * take is refused by the binder in words the oracle accepts, and a NULL
+    * scale, position or condition runs. */
+  @Test def argumentsOfTheWrongTypeAreRefusedCleanly(): Unit = {
+    val catalog = () => SqlTextGen.ReferenceTables.catalog()
+    for (sql <- Seq("SELECT SUM(s) AS v FROM t", "SELECT ABS(s) AS v FROM t", "SELECT SUBSTRING(s, 'x') AS v FROM t",
+        "SELECT t.a FROM t JOIN u ON t.a", "SELECT IF(s, 'y', 'n') AS v FROM t", "SELECT a FROM t WHERE a",
+        "SELECT LENGTH(a) AS v FROM t", "SELECT a FROM t WHERE a LIKE '1%'", "SELECT a || 'x' AS v FROM t"))
+      CleanRejection.check(sql, catalog) match {
+        case Failed(Phase.Bind, "bind", _) => ()
+        case other => fail(s"`$sql` came out $other")
+      }
+    for (sql <- Seq("SELECT ROUND(a, NULL) AS v FROM t", "SELECT SUBSTRING(s, b) AS v FROM t",
+        "SELECT IF(NULL, 1, 2) AS v FROM t", "SELECT RAND(NULL) AS v FROM t"))
+      assertEquals(sql, Ran, CleanRejection.check(sql, catalog))
+  }
+
   /** The oracle on throwables made to order, so a classification that went
     * too loose (calling an internal exception clean) or too strict (calling a
     * clean rejection a leak) is caught without a generator in the way. */

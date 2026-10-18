@@ -3275,7 +3275,7 @@ class SqlEngineTest {
       .contains("CASE cannot mix BINARY and STRING"))
     // These filtered every row out as false, and counted nothing.
     for (sql <- Seq("SELECT id FROM tb WHERE b", "SELECT COUNT_IF(b) AS n FROM tb"))
-      assertTrue(sql, bindError(sql).contains("Cannot cast BINARY to BOOLEAN"))
+      assertTrue(sql, bindError(sql).contains("takes a BOOLEAN, not BINARY"))
     assertTrue(bindError("SELECT id FROM tb WHERE b LIKE '%B@%'").contains("LIKE on BINARY is not supported"))
     assertTrue(bindError("SELECT id FROM tb WHERE 'x' LIKE b").contains("LIKE on BINARY is not supported"))
     assertTrue(bindError("SELECT b || 'x' AS v FROM tb").contains("|| on BINARY is not supported"))
@@ -3654,5 +3654,244 @@ class SqlEngineTest {
     assertEquals("GROUP BY CUBE (...) is not supported; GROUP BY each combination separately and combine the " +
       "results with UNION ALL", bindRejection("SELECT a, b, COUNT(*) AS c FROM t GROUP BY CUBE(a, b)", cat))
     assertEquals("Unknown function 'ROLLUP(int)'", bindRejection("SELECT ROLLUP(a) AS r FROM t", cat))
+  }
+
+  // ---------------------------------------------------------------------------
+  // Arguments a function or a condition cannot take (plans/robustness/11)
+  //
+  // Each of these bound over any type, and then failed part-way through the
+  // rows or answered wrong. The comment on each test records what it did.
+  // ---------------------------------------------------------------------------
+
+  /** `t` holds every kind of value the checks tell apart, its first row a
+    * value of each and its second NULL throughout; `u` is a table to join. */
+  private def argumentCatalog(): Catalog = {
+    val c = new Catalog
+    val t = Schema(Vector(Field("id", DataType.IntType), Field("i", DataType.IntType), Field("n", DataType.LongType),
+      Field("x", DataType.DoubleType), Field("s", DataType.StringType), Field("f", DataType.BooleanType),
+      Field("d", DataType.DateType), Field("ts", DataType.TimestampType), Field("b", DataType.BinaryType),
+      Field("k", DataType.DecimalType(9, 2))))
+    c.register("t", memView(t, Seq(Seq(
+      Array[Any](1, 2, 3000000000L, 2.567, "abc", true, java.time.LocalDate.parse("2024-01-01"),
+        java.time.Instant.parse("2024-01-01T05:00:00Z"), bytes(1), dec("1.25")),
+      Array[Any](2, null, null, null, null, null, null, null, null, null)))))
+    val u = Schema(Vector(Field("id", DataType.IntType), Field("i", DataType.IntType)))
+    c.register("u", memView(u, Seq(Seq(Array[Any](1, 10), Array[Any](2, 20)))))
+    c
+  }
+
+  /** SUM, AVG and the statistics add their values up, so each takes a
+    * number, as an aggregate, with DISTINCT and as a window. Over text, a
+    * boolean, a date, a timestamp or a byte array each threw a
+    * `ClassCastException` on its first row. */
+  @Test def anAggregateThatAddsUpTakesANumber(): Unit = {
+    val cat = argumentCatalog()
+    val text = "CAST it to a number"
+    Seq(
+      "SELECT SUM(s) AS v FROM t" -> s"SUM on STRING is not supported; $text",
+      "SELECT AVG(ts) AS v FROM t" -> "AVG on TIMESTAMP is not supported; a timestamp is not a number",
+      "SELECT SUM(b) AS v FROM t" -> "SUM on BINARY is not supported; a byte array is not a number",
+      "SELECT SUM(f) AS v FROM t" -> "SUM on BOOLEAN is not supported; CAST it to INT for 1 and 0",
+      "SELECT AVG(d) AS v FROM t" -> "AVG on DATE is not supported; a date is not a number",
+      "SELECT SUM(DISTINCT s) AS v FROM t" -> s"SUM on STRING is not supported; $text",
+      "SELECT AVG(DISTINCT d) AS v FROM t" -> "AVG on DATE is not supported; a date is not a number",
+      "SELECT STDDEV(s) AS v FROM t" -> s"STDDEV on STRING is not supported; $text",
+      "SELECT VAR_POP(d) AS v FROM t" -> "VAR_POP on DATE is not supported; a date is not a number",
+      "SELECT COVAR_SAMP(i, s) AS v FROM t" -> s"COVAR_SAMP on STRING is not supported; $text",
+      "SELECT CORR(ts, i) AS v FROM t" -> "CORR on TIMESTAMP is not supported; a timestamp is not a number",
+      "SELECT id, SUM(s) OVER () AS v FROM t" -> s"SUM on STRING is not supported; $text",
+      "SELECT id, AVG(d) OVER (PARTITION BY id) AS v FROM t" -> "AVG on DATE is not supported; a date is not a number",
+      "SELECT id, STDDEV_POP(f) OVER () AS v FROM t" -> "STDDEV_POP on BOOLEAN is not supported; CAST it to INT for 1 and 0"
+    ).foreach { case (sql, message) => assertEquals(sql, message, bindRejection(sql, cat)) }
+    // A number of every kind adds up, and NULL is no value to add.
+    val q = SqlEngine.execute("SELECT SUM(i) AS a, SUM(n) AS b, SUM(x) AS c, SUM(k) AS e, SUM(NULL) AS z FROM t", cat)
+    assertEquals(Seq(Map("a" -> 2L, "b" -> 3000000000L, "c" -> 2.567, "e" -> dec("1.25"), "z" -> null)), collectAllRows(q))
+    assertEquals(Seq(2.0, 2.0), column("SELECT AVG(i) OVER () AS v FROM t", cat, "v"))
+  }
+
+  /** The math functions compute on a number. Over text or a date each threw a
+    * `ClassCastException` on its first row, and `ABS`, which keeps its
+    * argument's type, answered NULL on every row of a date, a string or a
+    * boolean. */
+  @Test def aMathFunctionTakesANumber(): Unit = {
+    val cat = argumentCatalog()
+    val text = "CAST it to a number"
+    val date = "a date is not a number"
+    Seq(
+      "ABS(d)" -> s"ABS on DATE is not supported; $date",
+      "ABS(s)" -> s"ABS on STRING is not supported; $text",
+      "ABS(f)" -> "ABS on BOOLEAN is not supported; CAST it to INT for 1 and 0",
+      "ABS(b)" -> "ABS on BINARY is not supported; a byte array is not a number",
+      "ROUND(s)" -> s"ROUND on STRING is not supported; $text",
+      "ROUND(ts, 1)" -> "ROUND on TIMESTAMP is not supported; a timestamp is not a number",
+      "FLOOR(d)" -> s"FLOOR on DATE is not supported; $date",
+      "CEIL(s)" -> s"CEIL on STRING is not supported; $text",
+      "TRUNC(s)" -> s"TRUNC on STRING is not supported; $text",
+      "SQRT('4')" -> s"SQRT on STRING is not supported; $text",
+      "EXP(d)" -> s"EXP on DATE is not supported; $date",
+      "LN(f)" -> "LN on BOOLEAN is not supported; CAST it to INT for 1 and 0",
+      "LOG(i, s)" -> s"LOG on STRING is not supported; $text",
+      "POWER(s, 2)" -> s"POWER on STRING is not supported; $text",
+      "ATAN2(i, d)" -> s"ATAN2 on DATE is not supported; $date",
+      "SIN(s)" -> s"SIN on STRING is not supported; $text",
+      "SIGN(s)" -> s"SIGN on STRING is not supported; $text",
+      "DEGREES(d)" -> s"DEGREES on DATE is not supported; $date"
+    ).foreach { case (call, message) => assertEquals(call, message, bindRejection(s"SELECT $call AS v FROM t", cat)) }
+    // A number of every kind: a DECIMAL keeps its type under ABS and is read
+    // as a DOUBLE by the rest.
+    assertEquals((DataType.DecimalType(9, 2), Seq(dec("1.25"), null)), typedColumn("SELECT ABS(-k) AS v FROM t", cat))
+    assertEquals(Seq(2.0, null), column("SELECT SQRT(i * 2) AS v FROM t", cat, "v"))
+    assertEquals(Seq(1.0, null), column("SELECT FLOOR(k) AS v FROM t", cat, "v"))
+  }
+
+  /** A scale, a position, a length or a seed counts, so it is an INT or a
+    * BIGINT. A text one threw a `ClassCastException` on the first row, and
+    * one with a fraction was cut short without a word: `ROUND(x, 1.5)`
+    * rounded to one place. `ROUND` took any number of arguments and ignored
+    * all but two. */
+  @Test def aScalePositionLengthOrSeedIsAnInteger(): Unit = {
+    val cat = argumentCatalog()
+    Seq(
+      "ROUND(x, 1.5)" -> "ROUND's scale must be an integer, not DOUBLE; CAST it to INT",
+      "TRUNC(x, k)" -> "TRUNC's scale must be an integer, not DECIMAL(9,2); CAST it to INT",
+      "SUBSTRING(s, 'x')" -> "SUBSTRING's position must be an integer, not STRING; CAST it to INT",
+      "SUBSTRING(s, 1.9)" -> "SUBSTRING's position must be an integer, not DOUBLE; CAST it to INT",
+      "SUBSTRING(s, 1, d)" -> "SUBSTRING's length must be an integer, not DATE",
+      "RAND(s)" -> "RAND's seed must be an integer, not STRING; CAST it to INT",
+      "RAND(2.5)" -> "RAND's seed must be an integer, not DOUBLE; CAST it to INT",
+      "ROUND(x, 1, 2)" -> "Unknown function 'ROUND(double,int,int)'"
+    ).foreach { case (call, message) => assertEquals(call, message, bindRejection(s"SELECT $call AS v FROM t", cat)) }
+    // An INT or a BIGINT, written or a column.
+    assertEquals(Seq(2.57, null), column("SELECT ROUND(x, i) AS v FROM t", cat, "v"))
+    assertEquals(Seq(2.6, null), column("SELECT ROUND(x, CAST(1 AS BIGINT)) AS v FROM t", cat, "v"))
+    assertEquals(Seq("bc", null), column("SELECT SUBSTRING(s, i) AS v FROM t", cat, "v"))
+  }
+
+  /** A NULL scale, position, length or seed is NULL, as a NULL value is: what
+    * SQL answers, and what TRUNC already did. `ROUND`'s and `SUBSTRING`'s
+    * threw a `NullPointerException`, a NULL written in the query on every row
+    * and a NULL in a column on the rows it was NULL, and so did `RAND`'s. */
+  @Test def aNullScalePositionLengthOrSeedIsNull(): Unit = {
+    val cat = argumentCatalog()
+    def v(call: String): Seq[Any] = column(s"SELECT $call AS v FROM t ORDER BY id", cat, "v")
+    assertEquals(Seq(null, null), v("ROUND(x, NULL)"))
+    assertEquals(Seq(1.25, null), v("ROUND(1.25, i)"))
+    assertEquals(Seq(null, null), v("TRUNC(x, NULL)"))
+    assertEquals(Seq(null, null), v("SUBSTRING('abc', NULL)"))
+    assertEquals(Seq("bc", null), v("SUBSTRING('abc', i)"))
+    assertEquals(Seq("ab", null), v("SUBSTRING('abc', 1, i)"))
+    assertEquals(Seq(null, null), v("RAND(NULL)"))
+    val seeded = v("RAND(i)")
+    assertEquals(new java.util.Random(2).nextDouble(), seeded.head)
+    assertNull(seeded(1))
+    // As sort keys too, where a NULL sorts first.
+    assertEquals(Seq(2, 1), column("SELECT id FROM t ORDER BY ROUND(x, NULL), SUBSTRING(s, i), id", cat, "id"))
+  }
+
+  /** A position or a length past an INT's range is the BIGINT it is. It was
+    * cut to an INT, which wrapped 3000000000 round to a negative position, so
+    * `SUBSTRING` answered the whole string, and 4294967297 to a length of 1. */
+  @Test def aPositionOrLengthPastAnIntIsTheBigintItIs(): Unit = {
+    val cat = argumentCatalog()
+    def v(call: String): Seq[Any] = column(s"SELECT $call AS v FROM t ORDER BY id", cat, "v")
+    assertEquals(Seq("", null), v("SUBSTRING(s, 3000000000)"))
+    assertEquals(Seq("", null), v("SUBSTRING(s, n)"))
+    assertEquals(Seq("abc", null), v("SUBSTRING(s, 1, 4294967297)"))
+    assertEquals(Seq("bc", null), v("SUBSTRING(s, 2, n)"))
+  }
+
+  /** Every condition is a BOOLEAN, or NULL. A join's ON and IF's condition
+    * that was not one threw a `ClassCastException` on the first row; every
+    * other condition read its value as one, a number as TRUE where it was not
+    * 0, text as `'true'` or `'false'` (and failed on other text while
+    * running), a date or a timestamp as FALSE, so `WHERE d` kept no rows. */
+  @Test def everyConditionIsABoolean(): Unit = {
+    val cat = argumentCatalog()
+    val number = "compare it with a value, or CAST it to BOOLEAN for TRUE where it is not 0"
+    val value = "compare it with a value"
+    Seq(
+      "SELECT id FROM t WHERE i" -> s"WHERE takes a BOOLEAN, not INT; $number",
+      "SELECT id FROM t WHERE d" -> s"WHERE takes a BOOLEAN, not DATE; $value",
+      "SELECT id FROM t WHERE s" ->
+        s"WHERE takes a BOOLEAN, not STRING; $value, or CAST it to BOOLEAN to read 'true' and 'false'",
+      "SELECT id FROM t WHERE 'true'" -> "WHERE takes a BOOLEAN, not STRING; write TRUE or FALSE",
+      "SELECT id FROM t WHERE b" -> s"WHERE takes a BOOLEAN, not BINARY; $value",
+      "SELECT i, COUNT(*) AS c FROM t GROUP BY i HAVING COUNT(*)" -> s"HAVING takes a BOOLEAN, not LONG; $number",
+      "SELECT t.id FROM t JOIN u ON t.i" -> s"ON takes a BOOLEAN, not INT; $number",
+      "SELECT t.id FROM t JOIN u ON t.id = u.id AND t.ts" -> s"AND takes a BOOLEAN, not TIMESTAMP; $value",
+      "SELECT IF(s, 1, 0) AS v FROM t" ->
+        s"IF takes a BOOLEAN, not STRING; $value, or CAST it to BOOLEAN to read 'true' and 'false'",
+      "SELECT CASE WHEN x THEN 1 END AS v FROM t" -> s"CASE WHEN takes a BOOLEAN, not DOUBLE; $number",
+      "SELECT COUNT_IF(i) AS v FROM t" -> s"COUNT_IF takes a BOOLEAN, not INT; $number",
+      "SELECT id, COUNT_IF(k) OVER () AS v FROM t" -> s"COUNT_IF takes a BOOLEAN, not DECIMAL(9,2); $number",
+      "SELECT id FROM t WHERE NOT i" -> s"NOT takes a BOOLEAN, not INT; $number",
+      "SELECT id FROM t WHERE f OR n" -> s"OR takes a BOOLEAN, not LONG; $number"
+    ).foreach { case (sql, message) => assertEquals(sql, message, bindRejection(sql, cat)) }
+    // NULL is the unknown truth value wherever a condition sits. IF's threw a
+    // ClassCastException on the vector path.
+    assertEquals(Seq(2, 2), column("SELECT IF(NULL, 1, 2) AS v FROM t", cat, "v"))
+    assertEquals(Nil, column("SELECT id FROM t WHERE NULL", cat, "id"))
+    assertEquals(Nil, column("SELECT t.id FROM t JOIN u ON NULL", cat, "id"))
+    assertEquals(Seq(2, 2), column("SELECT CASE WHEN NULL THEN 1 ELSE 2 END AS v FROM t", cat, "v"))
+    assertEquals(Seq(0L), column("SELECT COUNT_IF(NULL) AS v FROM t", cat, "v"))
+    // A BOOLEAN, and the comparison or CAST a refusal names.
+    assertEquals(Seq(1), column("SELECT id FROM t WHERE f", cat, "id"))
+    assertEquals(Seq(1), column("SELECT id FROM t WHERE CAST(i AS BOOLEAN)", cat, "id"))
+    assertEquals(Seq(1), column("SELECT t.id FROM t JOIN u ON t.id = u.id AND t.f", cat, "id"))
+    assertEquals(Seq("y", "n"), column("SELECT IF(i <> 0, 'y', 'n') AS v FROM t ORDER BY id", cat, "v"))
+  }
+
+  /** Only text is read as text. `LIKE`, `||`, `CONCAT` and the string
+    * functions read any other value as the text Java prints for it:
+    * `LENGTH(i)` counted digits, `i LIKE '2%'` matched 2 and 20, and a DOUBLE
+    * was read as `1.0E10`. A CAST to STRING says so. */
+  @Test def onlyTextIsReadAsText(): Unit = {
+    val cat = argumentCatalog()
+    val cast = "is not supported; CAST it to STRING"
+    Seq(
+      "SELECT LENGTH(i) AS v FROM t" -> s"LENGTH on INT $cast",
+      "SELECT UPPER(d) AS v FROM t" -> s"UPPER on DATE $cast",
+      "SELECT LOWER(f) AS v FROM t" -> s"LOWER on BOOLEAN $cast",
+      "SELECT TRIM(x) AS v FROM t" -> s"TRIM on DOUBLE $cast",
+      "SELECT SUBSTRING(k, 1) AS v FROM t" -> s"SUBSTRING on DECIMAL(9,2) $cast",
+      "SELECT CONCAT('id-', id) AS v FROM t" -> s"CONCAT on INT $cast",
+      "SELECT 'id-' || id AS v FROM t" -> s"|| on INT $cast",
+      "SELECT ts || 'x' AS v FROM t" -> s"|| on TIMESTAMP $cast",
+      "SELECT id FROM t WHERE i LIKE '2%'" -> s"LIKE on INT $cast",
+      "SELECT id FROM t WHERE s LIKE i" -> s"LIKE on INT $cast",
+      "SELECT id FROM t WHERE d ILIKE '2024%'" -> s"ILIKE on DATE $cast"
+    ).foreach { case (sql, message) => assertEquals(sql, message, bindRejection(sql, cat)) }
+    // Through the CAST each names; NULL takes any type.
+    assertEquals(Seq("id-1", "id-2"), column("SELECT 'id-' || CAST(id AS STRING) AS v FROM t ORDER BY id", cat, "v"))
+    assertEquals(Seq(1, null), column("SELECT LENGTH(CAST(i AS STRING)) AS v FROM t ORDER BY id", cat, "v"))
+    assertEquals(Seq(1), column("SELECT id FROM t WHERE CAST(i AS STRING) LIKE '2%'", cat, "id"))
+    assertEquals(Seq(null, null), column("SELECT NULL || s AS v FROM t", cat, "v"))
+    assertEquals(Seq(null, null), column("SELECT UPPER(NULL) AS v FROM t", cat, "v"))
+  }
+
+  /** `ROUND` and `TRUNC` answer at the edges of a double. `ROUND` multiplied
+    * its value out into a long, which clamps past 2^63, so `ROUND(1e10, 10)`
+    * was 922337203.6854776 and an infinity 9.2e18, and it read NaN as 0; a
+    * scale past a double's range made `ROUND` 0 and `TRUNC` NaN, and one too
+    * negative made both NaN. Ordinary rounding is as it was. */
+  @Test def roundAndTruncAnswerAtTheEdges(): Unit = {
+    val cat = argumentCatalog()
+    def v(call: String): Double = column(s"SELECT $call AS v FROM t WHERE id = 1", cat, "v").head.asInstanceOf[Double]
+    assertEquals(1.0e10, v("ROUND(10000000000.0, 10)"), 0.0)
+    assertEquals(123456789012.0, v("ROUND(123456789012.0, 8)"), 0.0)
+    assertEquals(5.0, v("ROUND(5, 400)"), 0.0)
+    assertEquals(0.0, v("ROUND(5, -400)"), 0.0)
+    assertEquals(Double.PositiveInfinity, v("ROUND(CAST('Infinity' AS DOUBLE))"), 0.0)
+    assertTrue(v("ROUND(CAST('NaN' AS DOUBLE), 2)").isNaN)
+    assertEquals(1.5, v("TRUNC(1.5, 400)"), 0.0)
+    assertEquals(0.0, v("TRUNC(5, -400)"), 0.0)
+    assertEquals(2.567, v("TRUNC(x, n)"), 0.0)
+    assertEquals(Double.NegativeInfinity, v("TRUNC(CAST('-Infinity' AS DOUBLE), 2)"), 0.0)
+    // Half up, toward positive infinity, for ROUND; toward zero for TRUNC.
+    assertEquals(3.0, v("ROUND(2.5)"), 0.0)
+    assertEquals(-2.0, v("ROUND(-2.5)"), 0.0)
+    assertEquals(2.57, v("ROUND(x, 2)"), 0.0)
+    assertEquals(2.56, v("TRUNC(x, 2)"), 0.0)
+    assertEquals(-2.56, v("TRUNC(-x, 2)"), 0.0)
   }
 }

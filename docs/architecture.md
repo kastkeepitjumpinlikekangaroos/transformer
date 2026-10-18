@@ -900,6 +900,20 @@ larger scale, given way past 38 digits as an arithmetic result's is, and a
 `Decimals.wider`, which holds both with no bound on its digits and so never
 rounds; any other number is read exactly, as a comparison needs.
 
+Conditions and function arguments are typed at bind time too, so evaluation
+can cast to the kind it expects. Every condition (WHERE, HAVING, ON, CASE WHEN,
+IF's first argument, COUNT_IF, each side of AND, OR and NOT) is bound through
+`Analyzer.condition`: a `BOOLEAN` as it is, NULL cast to one, anything else a
+bind error; so `CaseExpr`, the AND / OR chains, the join operators and
+`VecFuncs.iff` only ever read a `BooleanVector` or a boxed `Boolean`.
+`Funcs.signature` declares what each argument of a scalar function must be
+(a number, an `INT` or `BIGINT` that counts, a `STRING`, or any value for the
+flow functions, whose arguments `branches` or `unify` has typed), and
+`LogicalBuilder` checks every argument against it through
+`Analyzer.checkArgument`; the aggregates that add their values up check theirs
+in `bindAgg` and `bindAnalytic`. `Funcs.apply` and `VecFuncs` read an argument
+as the `Number` or `String` it was declared, and answer NULL for a NULL one.
+
 Arithmetic with a `DECIMAL` on either side is typed by `Analyzer.arithmetic`
 instead, because the result's type depends on both sides' digits (`Decimals`,
 in `Ops.scala`). Each side becomes a `DECIMAL` of its own: an `INT` the

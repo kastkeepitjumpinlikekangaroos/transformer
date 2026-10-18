@@ -1,8 +1,8 @@
 # Plan 11: functions and conditions bind over arguments they cannot take
 
-> Status: **open** · Effort: 1-2 days · Risk: medium (queries that fail while
-> running today would fail at bind time instead; the lenient text coercions in
-> [Decisions](#decisions) change queries that run today)
+> Status: **done** 2026-10-18 (see [Outcome](#outcome)) · Effort: 1-2 days ·
+> Risk: medium (queries that failed while running fail at bind time instead;
+> the strict side of both [Decisions](#decisions) changes queries that ran)
 
 ## How this was found
 
@@ -98,3 +98,101 @@ ts TIMESTAMP, bin BINARY, dec DECIMAL(9,2))`.
 
 `README.md` (the function list and its argument types), `docs/gotchas.md`,
 `docs/testing.md` (the generator exclusions removed).
+
+## Outcome
+
+The user's decisions, 2026-10-18, each the recommended option:
+
+- **Every condition is a BOOLEAN.** WHERE, HAVING, ON, CASE WHEN, IF's first
+  argument, COUNT_IF and each side of AND, OR and NOT take a BOOLEAN, or NULL,
+  and anything else is a bind error naming the comparison or the
+  `CAST(x AS BOOLEAN)` to write. Chosen over casting ON and IF as WHERE did,
+  knowing it changes queries that run today: `WHERE i` over an INT,
+  `WHERE 'true'`, `CASE WHEN i`, `NOT i`, `HAVING COUNT(*)` and `COUNT_IF(i)`
+  are errors. No example job used any of them.
+- **All three lenient text coercions are refused.** `UPPER`, `LOWER`, `TRIM`,
+  `LENGTH` and `SUBSTRING`, `LIKE` and `ILIKE`, and `||` and `CONCAT` take a
+  STRING, or NULL, and name `CAST(x AS STRING)` for anything else. Keeping `||`
+  and `CONCAT` lenient, as Postgres does, was offered and declined.
+- **ROUND's and TRUNC's edges**, found while probing the plan's cases, are
+  fixed in the same change (below).
+
+What landed:
+
+- **Conditions.** `Analyzer.condition` binds every condition: a BOOLEAN as it
+  is, NULL cast to one, anything else refused (`WHERE takes a BOOLEAN, not
+  INT; compare it with a value, or CAST it to BOOLEAN for TRUE where it is not
+  0`; for a string literal, `write TRUE or FALSE`). A join's ON condition was
+  cast only when JSqlParser gave it as several expressions, so a single one
+  reached `HashJoinExec.passesExtra` as it was, and IF's was never cast, so
+  `VecFuncs.iff` cast a NULL's or a string's vector to a `BooleanVector`. The
+  implicit cast every other condition took read a DATE or TIMESTAMP through
+  `Casts`' fallback, its text compared with `"true"`, so `WHERE d` kept no
+  rows: a wrong answer the plan did not list.
+- **Argument kinds.** `Funcs.signature` replaces `returnType` and `takesText`:
+  each case gives the arities, a `Param` per argument (`Number`,
+  `Integer(role)`, `Text`, `AnyValue` for the flow functions) and the return
+  type, and `bindScalarFunctionWithAggs` checks every argument through
+  `Analyzer.checkArgument`, in the voice the plan asked for: `SQRT on STRING
+  is not supported; CAST it to a number`, `AVG on DATE is not supported; a date
+  is not a number`, `ROUND's scale must be an integer, not DOUBLE; CAST it to
+  INT`, `LENGTH on INT is not supported; CAST it to STRING`. `ROUND(x, 1.5)`
+  used to cut its scale with `intValue`, `RAND(1.5)` its seed, and `ROUND` took
+  any number of arguments and ignored all but two; each is an error now. The
+  aggregates that add their values up (`SUM`, `AVG`, `STDDEV`, `VARIANCE`,
+  `COVAR_*`, `CORR`, with DISTINCT and as windows) check their arguments in
+  `bindAgg` and `bindAnalytic` (`numberArg`).
+- **NULL arguments.** A NULL scale, position, length or seed answers NULL on
+  both paths, written in the query or in a column; `RAND(NULL)` had thrown the
+  same `NullPointerException` as `ROUND`'s. `ABS` lost its `case _ => null`,
+  through which `ABS` of a date was NULL.
+- **BIGINT positions.** `Funcs.substring`, shared by both paths, reads a
+  position and a length as longs: `SUBSTRING(s, 3000000000)` had wrapped to a
+  negative INT and answered the whole string, and `SUBSTRING(s, 1, 4294967297)`
+  to a length of 1.
+- **ROUND and TRUNC at a double's edges.** Both paths compute them as
+  `Funcs.round` and `Funcs.trunc`, over `Funcs.atScale`.
+  `math.round` of the scaled value clamped to a long past 2^63, so
+  `ROUND(1e10, 10)` was 922337203.6854776 and `ROUND` of an infinity 9.2e18,
+  and it read NaN as 0; `math.pow(10, scale)` overflowed to an infinity at a
+  scale of 400, which made `ROUND` 0 and `TRUNC` NaN, and underflowed to 0 at
+  -400, which made both NaN. A value whose digits at the scale reach 2^52 now
+  comes back as it is, a scale too negative gives 0, and NaN and the
+  infinities are their own answer. Ordinary rounding is as it was: half up,
+  toward positive infinity, so `ROUND(-2.5)` is -2.
+
+Regressions, each failing at the base commit (checked in a worktree at
+`3f1567e` with the new tests copied in): in `sql_engine_test`, one per item
+(`anAggregateThatAddsUpTakesANumber`, `aMathFunctionTakesANumber`,
+`aScalePositionLengthOrSeedIsAnInteger`, `aNullScalePositionLengthOrSeedIsNull`,
+`aPositionOrLengthPastAnIntIsTheBigintItIs`, `everyConditionIsABoolean`,
+`onlyTextIsReadAsText`, `roundAndTruncAnswerAtTheEdges`) and
+`binaryIsNotReadAsText`'s new message; in `expr_batch_test`, both paths pinned
+on a NULL scale, position and length, on BIGINT positions against a reference
+computed in BigInt, and at the edges; and `frontend_fuzz_test`'s
+`argumentsOfTheWrongTypeAreRefusedCleanly`. At the base commit
+`fuzzCleanRejection` also failed on its default budget, at seed 27 (`STDDEV`
+over a string column), once the defects were gone from the oracle. No existing
+test leaned on a coercion this removes, and no example job's SQL did.
+
+The fuzzer. `FunctionOverWrongType`, `NullFunctionArgument` and
+`ConditionNotBoolean` are gone from `CleanRejection.Defect`, with their
+recognizers and `BoundPlan.hasNonBooleanJoinCondition`. `SqlTextGen`'s typing
+queries now put a column of any type in each place a condition sits and under
+`||` and `LIKE`, and offer `RAND`. The NULL-scale exclusions are gone from
+`QueryGen` and `ExprGen`: a scale, position or length is a small literal, a NULL
+or an INT or BIGINT (a leaf in `QueryGen`, whose computed types are hints; any
+subtree in `ExprGen`), and `||` and `CONCAT` join strings, which other types
+reach through a CAST. A guard in each holds the re-enabled shape and its value:
+`integerArgumentsReachNullAndTheEdges` (a NULL beside a value on 202 of 20000
+seeds, past an edge on 38) and `nullScalesAndPositionsReachTheirFunctions` (a
+NULL beside a value on 108 of 6000). A 20000-seed probe of both SQL generators'
+bind rejections found only plan 09's DECIMAL-beside-DOUBLE refusals (21 for
+`QueryGen`, 8 of 40000 probes for `MetaQueryGen`), none of this change's.
+
+The campaigns, with bazel shut down and three JVMs at a time, all green:
+`frontend_fuzz_campaign`'s three properties at 20000 seeds in two blocks of
+10000 (84 and 70 seconds), `expr_parity_fuzz_campaign` at 100000 seeds (10
+seconds), and `mode_differential_fuzz_campaign` at 20000 seeds in eight blocks
+of 2500 (177 to 245 seconds each). `bazel test //...` is green, and the
+jaffle-shop job ran its 15 tasks to Succeeded with every validation passing.

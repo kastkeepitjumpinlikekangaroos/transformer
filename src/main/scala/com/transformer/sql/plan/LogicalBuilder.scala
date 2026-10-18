@@ -295,7 +295,7 @@ object LogicalBuilder {
 
     // WHERE
     val afterWhere: LogicalPlan = Option(ps.getWhere) match {
-      case Some(w) => LogicalFilter(from, Analyzer.implicitCast(bindExpr(w, sources), DataType.BooleanType))
+      case Some(w) => LogicalFilter(from, Analyzer.condition(bindExpr(w, sources), "WHERE"))
       case None => from
     }
 
@@ -549,7 +549,7 @@ object LogicalBuilder {
     val havingBinder = factory(_ => None)
     val afterHaving: LogicalPlan = Option(ps.getHaving) match {
       case Some(h) =>
-        LogicalFilter(agg, Analyzer.implicitCast(havingBinder(h), DataType.BooleanType))
+        LogicalFilter(agg, Analyzer.condition(havingBinder(h), "HAVING"))
       case None => agg
     }
 
@@ -598,11 +598,8 @@ object LogicalBuilder {
       val onExprs = Option(j.getOnExpressions).map(_.asScala.toSeq).getOrElse(Nil)
       val condition: Expr =
         if (onExprs.isEmpty) LitExpr(true, DataType.BooleanType)
-        else {
-          val bound = onExprs.map(e => bindExpr(e, combinedSources))
-          bound.reduce[Expr] { (a, b) => BinOpExpr("AND", Analyzer.implicitCast(a, DataType.BooleanType),
-            Analyzer.implicitCast(b, DataType.BooleanType), DataType.BooleanType) }
-        }
+        else onExprs.map(e => Analyzer.condition(bindExpr(e, combinedSources), "ON"))
+          .reduce[Expr](BinOpExpr("AND", _, _, DataType.BooleanType))
       val kind: JoinKind =
         if (j.isFull) JoinKind.Full
         else if (j.isLeft) JoinKind.Left
@@ -711,7 +708,7 @@ object LogicalBuilder {
         case other => throw new IllegalArgumentException(s"The $other operator is not supported")
       }
     case n: NotExpression =>
-      UnaryOpExpr("NOT", Analyzer.implicitCast(b(n.getExpression), DataType.BooleanType), DataType.BooleanType)
+      UnaryOpExpr("NOT", Analyzer.condition(b(n.getExpression), "NOT"), DataType.BooleanType)
 
     case _: AllValue => throw new IllegalArgumentException("ALL is not supported in this position")
 
@@ -726,12 +723,12 @@ object LogicalBuilder {
       BinOpExpr("||", l, r, DataType.StringType)
 
     case a: AndExpression =>
-      val l = Analyzer.implicitCast(b(a.getLeftExpression), DataType.BooleanType)
-      val r = Analyzer.implicitCast(b(a.getRightExpression), DataType.BooleanType)
+      val l = Analyzer.condition(b(a.getLeftExpression), "AND")
+      val r = Analyzer.condition(b(a.getRightExpression), "AND")
       BinOpExpr("AND", l, r, DataType.BooleanType)
     case a: OrExpression =>
-      val l = Analyzer.implicitCast(b(a.getLeftExpression), DataType.BooleanType)
-      val r = Analyzer.implicitCast(b(a.getRightExpression), DataType.BooleanType)
+      val l = Analyzer.condition(b(a.getLeftExpression), "OR")
+      val r = Analyzer.condition(b(a.getRightExpression), "OR")
       BinOpExpr("OR", l, r, DataType.BooleanType)
 
     case x: EqualsTo => cmpOpGeneric("=", x.getLeftExpression, x.getRightExpression, sources, aggResolver, windowResolver)
@@ -784,7 +781,7 @@ object LogicalBuilder {
       val conds: Seq[Expr] = whens.map { whenExpr =>
         switch match {
           case None =>
-            Analyzer.implicitCast(b(whenExpr.getWhenExpression), DataType.BooleanType)
+            Analyzer.condition(b(whenExpr.getWhenExpression), "CASE WHEN")
           case Some(s) =>
             val whenBound = b(whenExpr.getWhenExpression)
             val (sl, wr, _) = Analyzer.promotePair(s, whenBound)
@@ -939,7 +936,8 @@ object LogicalBuilder {
       // Each returns one of its arguments, so they meet as a CASE's values
       // do. IF's first argument is its condition.
       case "COALESCE" | "GREATEST" | "LEAST" if params.nonEmpty => bindBranches(name, params, bind)._1
-      case "IF" if params.size == 3 => bind(params.head) +: bindBranches(name, params.tail, bind)._1
+      case "IF" if params.size == 3 =>
+        Analyzer.condition(bind(params.head), "IF") +: bindBranches(name, params.tail, bind)._1
       // NULLIF compares its two and returns the first as it is, but for a
       // string literal, which is read as the type it meets.
       case "NULLIF" if params.size == 2 =>
@@ -954,10 +952,10 @@ object LogicalBuilder {
     // MOD(a, b) is a % b, typed and computed as that is.
     else if (name == "MOD" && args.size == 2) Analyzer.arithmetic("%", args(0), args(1))
     else {
-      val rt = Funcs.returnType(name, argTypes)
+      val signature = Funcs.signature(name, argTypes)
         .getOrElse(throw new IllegalArgumentException(s"Unknown function '${f.getName}(${argTypes.mkString(",")})'"))
-      if (Funcs.takesText(name)) argTypes.foreach(Analyzer.checkText(_, name))
-      FuncExpr(name, args, rt)
+      signature.params.zip(args).foreach { case (param, arg) => Analyzer.checkArgument(name, param, arg) }
+      FuncExpr(name, args, signature.returnType)
     }
   }
 
@@ -971,38 +969,34 @@ object LogicalBuilder {
     // something else: the ALL quantifier of COUNT(ALL x), which is the default
     // and changes nothing, so it is never read.
     val isStarArg = params.size == 1 && params.head.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns]
+    def arg(i: Int): Expr = bindExpr(params(i), sources)
+    // SUM, AVG and the statistics add their values up.
+    def number(i: Int): Expr = numberArg(upper, arg(i))
     upper match {
       case "COUNT" if isStarArg || params.isEmpty => AggExprCountStar()
-      case "COUNT" if params.size == 1 =>
-        AggExprCount(bindExpr(params.head, sources), distinct)
-      case "SUM" if params.size == 1 =>
-        distinctIf(distinct, AggExprSum(bindExpr(params.head, sources)))
-      case "AVG" if params.size == 1 =>
-        distinctIf(distinct, AggExprAvg(bindExpr(params.head, sources)))
+      case "COUNT" if params.size == 1 => AggExprCount(arg(0), distinct)
+      case "SUM" if params.size == 1 => distinctIf(distinct, AggExprSum(number(0)))
+      case "AVG" if params.size == 1 => distinctIf(distinct, AggExprAvg(number(0)))
       // DISTINCT cannot change an extreme, so MIN / MAX ignore it.
-      case "MIN" if params.size == 1 =>
-        AggExprMin(bindExpr(params.head, sources))
-      case "MAX" if params.size == 1 =>
-        AggExprMax(bindExpr(params.head, sources))
-      case "COUNT_IF" if params.size == 1 =>
-        AggExprCountIf(Analyzer.implicitCast(bindExpr(params.head, sources), DataType.BooleanType))
-      case "STDDEV" | "STDDEV_SAMP" | "STDEV" if params.size == 1 =>
-        AggExprStddev(bindExpr(params.head, sources), sample = true)
-      case "STDDEV_POP" | "STDEVP" if params.size == 1 =>
-        AggExprStddev(bindExpr(params.head, sources), sample = false)
-      case "VARIANCE" | "VAR_SAMP" | "VAR" if params.size == 1 =>
-        AggExprVariance(bindExpr(params.head, sources), sample = true)
-      case "VAR_POP" | "VARP" if params.size == 1 =>
-        AggExprVariance(bindExpr(params.head, sources), sample = false)
-      case "COVAR_SAMP" if params.size == 2 =>
-        AggExprCovar(bindExpr(params(0), sources), bindExpr(params(1), sources), sample = true)
-      case "COVAR_POP" if params.size == 2 =>
-        AggExprCovar(bindExpr(params(0), sources), bindExpr(params(1), sources), sample = false)
-      case "CORR" if params.size == 2 =>
-        AggExprCorr(bindExpr(params(0), sources), bindExpr(params(1), sources))
+      case "MIN" if params.size == 1 => AggExprMin(arg(0))
+      case "MAX" if params.size == 1 => AggExprMax(arg(0))
+      case "COUNT_IF" if params.size == 1 => AggExprCountIf(Analyzer.condition(arg(0), "COUNT_IF"))
+      case "STDDEV" | "STDDEV_SAMP" | "STDEV" if params.size == 1 => AggExprStddev(number(0), sample = true)
+      case "STDDEV_POP" | "STDEVP" if params.size == 1 => AggExprStddev(number(0), sample = false)
+      case "VARIANCE" | "VAR_SAMP" | "VAR" if params.size == 1 => AggExprVariance(number(0), sample = true)
+      case "VAR_POP" | "VARP" if params.size == 1 => AggExprVariance(number(0), sample = false)
+      case "COVAR_SAMP" if params.size == 2 => AggExprCovar(number(0), number(1), sample = true)
+      case "COVAR_POP" if params.size == 2 => AggExprCovar(number(0), number(1), sample = false)
+      case "CORR" if params.size == 2 => AggExprCorr(number(0), number(1))
       case _ =>
         throw new IllegalArgumentException(s"Unsupported aggregate: ${f.getName}(${params.size} args)")
     }
+  }
+
+  /** `e`, the argument of the aggregate `fn`, which must be a number. */
+  private def numberArg(fn: String, e: Expr): Expr = {
+    Analyzer.checkNumber(e.dataType, fn)
+    e
   }
 
   private def distinctIf(distinct: Boolean, agg: AggExpr): AggExpr =
@@ -1106,6 +1100,10 @@ object LogicalBuilder {
     // is the ALL quantifier and is never read.
     val isStarArg: Boolean =
       Option(ae.getExpression).exists(_.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns])
+    def argument(): Expr =
+      binder(argExpr.getOrElse(throw new IllegalArgumentException(s"$fnName requires an argument")))
+    // SUM, AVG and the statistics add their values up.
+    def number(): Expr = numberArg(fnName, argument())
 
     // LAG's and LEAD's value and default are one result, as a CASE's values
     // are: the default is what a row with no row that far away gets.
@@ -1134,34 +1132,15 @@ object LogicalBuilder {
       case "COUNT" =>
         if (isStarArg || argExpr.isEmpty) WindowFnAgg(AggExprCountStar())
         else WindowFnAgg(AggExprCount(binder(argExpr.get), distinct = ae.isDistinct))
-      case "SUM" =>
-        WindowFnAgg(AggExprSum(binder(argExpr.getOrElse(
-          throw new IllegalArgumentException("SUM requires an argument")))))
-      case "AVG" =>
-        WindowFnAgg(AggExprAvg(binder(argExpr.getOrElse(
-          throw new IllegalArgumentException("AVG requires an argument")))))
-      case "MIN" =>
-        WindowFnAgg(AggExprMin(binder(argExpr.getOrElse(
-          throw new IllegalArgumentException("MIN requires an argument")))))
-      case "MAX" =>
-        WindowFnAgg(AggExprMax(binder(argExpr.getOrElse(
-          throw new IllegalArgumentException("MAX requires an argument")))))
-      case "COUNT_IF" =>
-        val bound = binder(argExpr.getOrElse(
-          throw new IllegalArgumentException("COUNT_IF requires an argument")))
-        WindowFnAgg(AggExprCountIf(Analyzer.implicitCast(bound, DataType.BooleanType)))
-      case "STDDEV" | "STDDEV_SAMP" | "STDEV" =>
-        WindowFnAgg(AggExprStddev(binder(argExpr.getOrElse(
-          throw new IllegalArgumentException(s"$fnName requires an argument"))), sample = true))
-      case "STDDEV_POP" | "STDEVP" =>
-        WindowFnAgg(AggExprStddev(binder(argExpr.getOrElse(
-          throw new IllegalArgumentException(s"$fnName requires an argument"))), sample = false))
-      case "VARIANCE" | "VAR_SAMP" | "VAR" =>
-        WindowFnAgg(AggExprVariance(binder(argExpr.getOrElse(
-          throw new IllegalArgumentException(s"$fnName requires an argument"))), sample = true))
-      case "VAR_POP" | "VARP" =>
-        WindowFnAgg(AggExprVariance(binder(argExpr.getOrElse(
-          throw new IllegalArgumentException(s"$fnName requires an argument"))), sample = false))
+      case "SUM" => WindowFnAgg(AggExprSum(number()))
+      case "AVG" => WindowFnAgg(AggExprAvg(number()))
+      case "MIN" => WindowFnAgg(AggExprMin(argument()))
+      case "MAX" => WindowFnAgg(AggExprMax(argument()))
+      case "COUNT_IF" => WindowFnAgg(AggExprCountIf(Analyzer.condition(argument(), "COUNT_IF")))
+      case "STDDEV" | "STDDEV_SAMP" | "STDEV" => WindowFnAgg(AggExprStddev(number(), sample = true))
+      case "STDDEV_POP" | "STDEVP" => WindowFnAgg(AggExprStddev(number(), sample = false))
+      case "VARIANCE" | "VAR_SAMP" | "VAR" => WindowFnAgg(AggExprVariance(number(), sample = true))
+      case "VAR_POP" | "VARP" => WindowFnAgg(AggExprVariance(number(), sample = false))
       case other =>
         throw new IllegalArgumentException(s"Unsupported window function: $other")
     }
