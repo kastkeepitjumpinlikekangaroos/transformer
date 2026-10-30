@@ -1,20 +1,33 @@
 package com.transformer.sql.parse
 
 import net.sf.jsqlparser.JSQLParserException
-import net.sf.jsqlparser.parser.CCJSqlParserUtil
+import net.sf.jsqlparser.parser.{CCJSqlParserConstants, CCJSqlParserUtil, Token}
 import net.sf.jsqlparser.statement.Statement
 import net.sf.jsqlparser.statement.select.Select
 
+import scala.util.control.NonFatal
+
 object SqlParser {
 
+  /** Parse one statement, refusing text the statement JSqlParser returns
+    * would leave out: a second statement after `;`
+    * ([[refuseTextAfterTheStatement]]), and a repeated `ORDER BY`, `LIMIT`,
+    * `OFFSET` or `FETCH` ([[refuseLostTailClauses]]). */
   def parse(sql: String): Statement = {
     val s = sql.trim
     if (s.isEmpty) throw new IllegalArgumentException("Empty SQL statement")
-    try CCJSqlParserUtil.parse(s)
-    catch {
-      case e: JSQLParserException =>
-        throw new IllegalArgumentException(s"SQL parse error: ${parserMessage(e)}", e)
+    val statement =
+      try CCJSqlParserUtil.parse(s)
+      catch {
+        case e: JSQLParserException =>
+          throw new IllegalArgumentException(s"SQL parse error: ${parserMessage(e)}", e)
+      }
+    refuseTextAfterTheStatement(s)
+    statement match {
+      case select: Select => refuseLostTailClauses(s, select)
+      case _ => ()
     }
+    statement
   }
 
   /** What the parser said went wrong (`Encountered unexpected token: "FROM"
@@ -41,5 +54,62 @@ object SqlParser {
   def parseSelect(sql: String): Select = parse(sql) match {
     case sel: Select => sel
     case _ => throw new IllegalArgumentException("Only SELECT statements are supported")
+  }
+
+  /** The refusal of a clause a query's tail carries twice. A query takes one
+    * of each, wherever JSqlParser puts the second. */
+  def writtenTwice(clause: String): IllegalArgumentException =
+    new IllegalArgumentException(s"$clause is written twice for one query; keep one")
+
+  /** JSqlParser parses one statement and stops at the `;` after it, so
+    * anything written after that would never run: a second query, or `DROP
+    * TABLE t`. A trailing `;` is fine, and so are more of them and a comment.
+    * The parser has read the text up to that `;`, so lexing can fail only
+    * past it, on text that is no statement either. */
+  private def refuseTextAfterTheStatement(sql: String): Unit = {
+    val afterTheStatement = tokens(sql).dropWhile(_.kind != CCJSqlParserConstants.ST_SEMICOLON)
+    val more = try afterTheStatement.exists(_.kind != CCJSqlParserConstants.ST_SEMICOLON)
+    catch { case NonFatal(_) => true }
+    if (more) throw new IllegalArgumentException("Only one statement is supported; remove the text after ';'")
+  }
+
+  /** The keyword each clause of a query's tail starts with, and its name. */
+  private val TailClauses: Seq[(Int, String)] = Seq(
+    CCJSqlParserConstants.K_ORDER -> "ORDER BY",
+    CCJSqlParserConstants.K_LIMIT -> "LIMIT",
+    CCJSqlParserConstants.K_OFFSET -> "OFFSET",
+    CCJSqlParserConstants.K_FETCH -> "FETCH")
+
+  /** JSqlParser parses a query's ORDER BY, LIMIT, OFFSET and FETCH in more
+    * than one production (the query's own, and the one around it), and when a
+    * clause is written twice the second sets the same field again: the query
+    * keeps the last and nothing records the first, so `ORDER BY a DESC ORDER
+    * BY a ASC LIMIT 1` returned the smallest `a`. The statement then renders
+    * with fewer of that clause's keyword than the text has, which is how the
+    * loss shows. The two are lexed alike, so a column named `limit` or
+    * `offset` counts in both. A statement that does not render holds a node
+    * the binder refuses by name (a CAST to a ROW type), so the check leaves
+    * it to that refusal. The other place a second clause goes, the last arm
+    * of a UNION, the binder checks. */
+  private def refuseLostTailClauses(sql: String, select: Select): Unit = {
+    val kept = try Some(keywordCounts(select.toString)) catch { case NonFatal(_) => None }
+    kept.foreach { k =>
+      val written = keywordCounts(sql)
+      TailClauses.foreach { case (kind, clause) =>
+        if (written.getOrElse(kind, 0) > k.getOrElse(kind, 0)) throw writtenTwice(clause)
+      }
+    }
+  }
+
+  private def keywordCounts(text: String): Map[Int, Int] =
+    tokens(text).map(_.kind).toSeq.groupBy(identity).map { case (kind, all) => kind -> all.size }
+
+  /** `text` as the parser's tokens, comments left out. A parser of its own
+    * lexes it, so each token is read under the parser's feature configuration,
+    * which the lexer consults for a string holding `\'`; a bare token manager
+    * has none. */
+  private def tokens(text: String): Iterator[Token] = {
+    val parser = CCJSqlParserUtil.newParser(text)
+    Iterator.continually(parser.getNextToken()).takeWhile(_.kind != CCJSqlParserConstants.EOF)
   }
 }

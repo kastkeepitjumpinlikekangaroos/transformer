@@ -41,7 +41,7 @@ at the time of the audit: `bazel test //...` 46/46 green.
 | [09](09-branch-result-types.md) | `CASE`, `COALESCE`, `IF`, `GREATEST` and `UNION` take their first branch's type | a wider decimal in a later branch was kept under a narrower declared type, so writing or spilling it failed; `THEN 1 ELSE 2.5` was 2; values that become one result now take a type that holds each | **done** 2026-10-16 | 1-2 days | medium | — |
 | [10](10-error-messages-name-internals.md) | A failing query's message names the engine's internals | every parse error named JSqlParser's class, and the binder's refusals the AST class; pooled failures arrived wrapped in `ExecutionException` (sometimes with no message), which is what a job recorded; refusals now say what SQL calls the construct, and a pooled failure arrives as itself | **done** 2026-10-17 | 1 day | low | — |
 | [11](11-functions-bind-over-arguments-they-cannot-take.md) | Functions and conditions bind over arguments they cannot take | `SUM` over a string, the math functions over a date, a NULL `ROUND` scale, a non-boolean `ON` failed mid-run; `ABS` of a date was NULL and `WHERE d` kept no rows; every condition is now a BOOLEAN, every argument the kind its function declares, and only a STRING is text | **done** 2026-10-18 | 1-2 days | medium | — |
-| [12](12-text-the-binder-never-sees.md) | Text the parser accepts and the binder never sees | a statement after `;` is ignored; a repeated `ORDER BY` / `LIMIT` keeps its last; a CTE named twice; a JOIN with no ON is a cross join | open, recorded in `NoSilentDrop` | 1 day | medium | a decision on a bare JOIN |
+| [12](12-text-the-binder-never-sees.md) | Text the parser accepts and the binder never sees | a statement after `;` was ignored; a repeated `ORDER BY` / `LIMIT` kept its last, or split with a UNION's last arm; a CTE named twice kept its second; a JOIN with no ON was a cross join; `NOT NOT f IS NULL` kept the wrong rows; each is refused now | **done** 2026-10-18 | 1 day | medium | — |
 | [13](13-literals-are-read-as-written.md) | Literals and quoted identifiers are read as written | `'it''s'` is five characters; `"a"` names no column; `99999999999999999999` is a raw `NumberFormatException`; `1e400` is `Infinity` | open, recorded in the fuzzer | 1 day | medium | decisions on quoted case and big literals |
 | [14](14-pathological-nesting.md) | Deep and unbalanced SQL | a task whose SQL overflows the binder's stack **hangs its job forever**; unclosed parentheses run the parser into its timeout | open, recorded in `CleanRejection` | 1-2 days | low (the hang) | — |
 | [15](15-what-a-reopened-run-shows-without-its-record.md) | What a reopened run shows for a task without its record | `job.json`'s entry carried no timestamps, failed validation names or output, so such a task reopened with a 0 ms duration and every validation card PASSED; a record naming another task was trusted; nothing told the user | **done** 2026-10-15 | half a day | low | — |
@@ -171,10 +171,24 @@ argument, and `ROUND` and `TRUNC` answered wrongly at a double's edges
 (`ROUND(1e10, 10)` was 922337203.68). The NULL-scale exclusions left `QueryGen`
 and `ExprGen`, each with a coverage guard. Details in the plan's Outcome section.
 
+**Done:** plan 12. Text the parser accepts and leaves out of the AST is
+refused where it shows: `SqlParser` refuses a statement after `;` and a
+repeated `ORDER BY`, `LIMIT`, `OFFSET` or `FETCH`, which the statement rendered
+back holds one fewer of (a scan for the keywords would have refused a column
+named `limit`); the binder refuses a LIMIT or OFFSET split between a UNION's
+last arm and the union, a WITH naming one query twice, and a NOT hung on an
+operator's left side. The user chose to refuse a JOIN with no ON, and with it
+the ONs JSqlParser accepts where SQL takes none (after CROSS JOIN or a comma)
+and a second ON on one join, which had been ANDed. The NOT item was broader
+than recorded: over a BOOLEAN, `NOT NOT f IS NULL` kept the non-NULL rows, and a
+lone NOT as a one-argument call's argument (`COUNT_IF(NOT f > TRUE)`) was read
+the same way. `BeyondTheTable` grew from ten constructs to 24, each refused
+cleanly in every context but plan 13's. Details in the plan's Outcome section.
+
 **Next, in order:** [14](14-pathological-nesting.md)'s job hang (a `finally`
-and a `catch`), then [12](12-text-the-binder-never-sees.md) and
-[13](13-literals-are-read-as-written.md), whose items return wrong answers with
-no error. Plans 12 and 13 each need a decision from the user first.
+and a `catch`), then [13](13-literals-are-read-as-written.md), whose items
+return wrong answers with no error and which needs a decision from the user
+first.
 
 **Suggested order.** [01](01-reject-or-honor-every-clause.md) first — it has the
 worst single defect in the set (a dropped join condition is a cartesian product,

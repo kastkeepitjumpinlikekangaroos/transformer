@@ -159,6 +159,18 @@ class TaskDagTest {
     assertEquals(0, dag.dependents.size)
   }
 
+  /** A task's SQL is one statement. The parser stopped at the first `;`, so
+    * the DAG was built from that statement alone: a second one's tables were
+    * neither a dependency nor checked, and the task ran the first only. */
+  @Test def aSecondStatementFailsTheDag(): Unit = {
+    val a = task("SELECT * FROM events; SELECT * FROM users", viewName = "result")
+    val msg = assertIae { TaskDag.build(Seq(a), Set("events"), vars) }
+    assertEquals("Only one statement is supported; remove the text after ';'", msg)
+    // A trailing `;` ends the one statement.
+    val dag = TaskDag.build(Seq(task("SELECT * FROM events;", viewName = "result")), Set("events"), vars)
+    assertEquals(Set.empty[Int], dag.nodes(0).deps)
+  }
+
   @Test def templateRenderedBeforeExtraction(): Unit = {
     val a = task("SELECT * FROM events_{{ today }}", viewName = "result")
     val dag = TaskDag.build(Seq(a), Set("events_20260101"), vars)

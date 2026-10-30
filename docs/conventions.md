@@ -71,6 +71,15 @@ specific traps.
   naming the clause rather than binding the part you understand —
   `TrimFunction`'s extended forms and `COUNT(ALL x)` are the cautionary cases.
   See [extending.md](extending.md#honor-a-clause-the-binder-rejects).
+- **Text JSqlParser accepts and leaves out of the AST is refused where it
+  shows.** The audit sees getters, not text the parser never turns into one: a
+  second statement, the first of a repeated clause, a NOT hung on the wrong
+  operand. Refuse such a shape in `SqlParser` when only the text shows it, or
+  in the binder when the AST carries a shape no faithful parse produces, and
+  add it to `SqlTextGen.BeyondTheTable`, which requires the refusal in every
+  context. To find text the AST lacks, compare the text with what the
+  statement renders back rather than scanning the text for keywords:
+  JSqlParser takes `limit`, `offset` and `order` as column names.
 - **Prefer a bind-time error to another engine's permissive coercion.** When
   SQL could mean more than one thing, or means something only by an engine's
   implicit conversion (a number or a timestamp compared as text, a date

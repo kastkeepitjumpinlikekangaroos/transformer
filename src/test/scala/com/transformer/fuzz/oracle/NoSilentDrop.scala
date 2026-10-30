@@ -79,12 +79,17 @@ object NoSilentDrop {
   final case class KnownDrop(plan: String) extends BeyondVerdict
 
   /** A construct the clause table cannot list ([[SqlTextGen.Beyond]]) must be
-    * refused at bind time; one that binds is a drop, known when its plan
+    * refused at bind time, as cleanly as any rejection ([[CleanRejection]]
+    * throws when it is not); one that binds is a drop, known when its plan
     * records it. */
   def checkBeyond(b: SqlTextGen.Beyond, context: Context): BeyondVerdict = {
     val sql = context.wrap(b.sql)
     try LogicalBuilder.build(sql, SqlTextGen.ReferenceTables.catalog())
-    catch { case e: Throwable if CleanRejection.catchable(e) => return Refused }
+    catch {
+      case e: Throwable if CleanRejection.catchable(e) =>
+        CleanRejection.classify(sql, CleanRejection.Phase.Bind, e, None)
+        return Refused
+    }
     b.knownPlan match {
       case Some(plan) => KnownDrop(plan)
       case None => throw new AssertionError(

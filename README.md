@@ -721,12 +721,25 @@ The engine supports the standard SQL-92 SELECT shape:
 [ WITH <name> [(<col>, ...)] AS (<select>) [, ...] ]
 SELECT [DISTINCT] [TOP <n>] <projections>
 [ FROM <table> [<alias>]
-  [ {INNER|LEFT|RIGHT|FULL} JOIN <table> [<alias>] ON <predicate> ]* ]
+  [ [INNER|LEFT|RIGHT|FULL] JOIN <table> [<alias>] ON <predicate>
+  | CROSS JOIN <table> [<alias>] | , <table> [<alias>] ]* ]
 [ WHERE <predicate> ]
 [ GROUP BY <exprs> ] [ HAVING <predicate> ]
 [ ORDER BY <expr> [ASC|DESC] [NULLS FIRST|NULLS LAST] [, ...] ]
 [ LIMIT <n> ] [ OFFSET <m> [ROWS] ] [ FETCH {FIRST|NEXT} [<n>] {ROW|ROWS} ONLY ]
 ```
+
+A query is one statement. A trailing `;` is fine, and anything written after it
+is an error (`Only one statement is supported; remove the text after ';'`)
+rather than text that never runs. Each clause comes once: a second `ORDER BY`,
+`LIMIT`, `OFFSET` or `FETCH` for one query is an error, after the last arm of a
+`UNION` too, as is a `WITH` that defines one name twice (a `WITH` inside a CTE
+body may reuse an outer name, which it shadows there). Every join takes the
+condition its kind takes: `JOIN`, `INNER`, `LEFT`, `RIGHT` and `FULL JOIN` one
+`ON`, and `CROSS JOIN` and a table after a comma none. So `t JOIN u` with no `ON`
+is an error, where MySQL and Spark read it as a cross join: write `CROSS JOIN`
+to pair every row. So are an `ON` after `CROSS JOIN` or a comma, and a second
+`ON` on one join, whose condition belongs in the first, joined with `AND`.
 
 A NULL sorts as the smallest value unless the key says otherwise: first under
 `ASC`, last under `DESC`. That is Spark's, MySQL's and SQLite's default and the
@@ -795,11 +808,10 @@ the same for a subquery, `IS DISTINCT FROM`, `IS TRUE`, `INTERVAL`, a query
 parameter, an array, `EXCEPT` and `INTERSECT`, a `VALUES` list and the rest.
 The complete list, with the reason for each, is
 [`UnsupportedClauses.scala`](src/main/scala/com/transformer/sql/plan/UnsupportedClauses.scala).
-A few readings of the text still lose part of it before the binder sees it, each
-an open defect: a statement after `;` is ignored, a repeated `ORDER BY`,
-`LIMIT`, `OFFSET` or `FETCH` keeps its last, a CTE name defined twice keeps its
-second, and a `JOIN` with no `ON` runs as a cross join
-([plans/robustness/12](plans/robustness/12-text-the-binder-never-sees.md)); a
+Text the parser accepts and then leaves out of what the binder sees is refused
+too: a statement after `;`, a clause written twice, a join's missing or extra
+`ON`, a CTE name defined twice (all above), and a `NOT` the parser hangs on the
+left side of an operator (below). Two readings of a literal are open defects: a
 doubled quote inside a string literal stays doubled, so `'it''s'` is five
 characters long, and a double-quoted identifier keeps its quotes
 ([plans/robustness/13](plans/robustness/13-literals-are-read-as-written.md)).
@@ -868,7 +880,12 @@ type.
 **Operators:** `+ - * / %`, `=  <>  <  <=  >  >=`, `AND OR NOT`, `||` (joins
 two strings), `LIKE` and its case-insensitive form `ILIKE` (on strings),
 `IS NULL` / `IS NOT NULL`,
-`IN (...)`, `BETWEEN`, `CASE WHEN`, `CAST(expr AS type)`. In a `LIKE` / `ILIKE`
+`IN (...)`, `BETWEEN`, `CASE WHEN`, `CAST(expr AS type)`. `NOT` negates the
+whole comparison after it, so `NOT a = 1` is `NOT (a = 1)`. Where the parser
+would hang it on the comparison's left side alone instead (the second `NOT` of
+`NOT NOT a = 1`, and the `NOT` in the argument of a call that takes one, such as
+`COUNT_IF(NOT a = 1)`), the query is an error asking for `NOT (...)` around
+what the `NOT` negates. In a `LIKE` / `ILIKE`
 pattern `\` makes the next `%` or `_` literal; `ESCAPE 'c'` names another
 character, and `ESCAPE ''` turns escaping off. Grouping parentheses work anywhere an expression does —
 `SELECT (a + b) * c`, `WHERE (x = y)`, `ON (a = b)`, `HAVING (COUNT(*) > 1)` —

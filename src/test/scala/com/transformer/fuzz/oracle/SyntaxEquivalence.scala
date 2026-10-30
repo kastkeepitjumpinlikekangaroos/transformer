@@ -51,11 +51,7 @@ object SyntaxEquivalence {
     Known("a quote inside a literal",
       "a string literal keeps both quotes of a doubled one, so 'it''s' is five characters",
       Plans + "13-literals-are-read-as-written.md",
-      ("SELECT LENGTH('it''s') AS n FROM t", "SELECT 4 AS n FROM t")),
-    Known("NOT NOT",
-      "JSqlParser reads NOT NOT a = x as a comparison of NOT a with x, which then fails to bind",
-      Plans + "12-text-the-binder-never-sees.md",
-      ("SELECT a, b, s FROM t WHERE NOT NOT a = 1", "SELECT a, b, s FROM t WHERE a = 1")))
+      ("SELECT LENGTH('it''s') AS n FROM t", "SELECT 4 AS n FROM t")))
 
   def known(shape: String): Option[Known] = KnownDefects.find(_.shape == shape)
 

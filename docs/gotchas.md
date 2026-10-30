@@ -71,9 +71,42 @@ ship a fix or move something from "not done" to "done".
   ROWS ONLY` splits — the OFFSET on the arm, the FETCH on the list. In standard SQL
   every one of them applies to the whole union, so
   `LogicalBuilder.buildSetOperationList` hoists ORDER BY, LIMIT and OFFSET off a
-  bare last arm unless the list already carries them. A parenthesized last arm
+  bare last arm. A clause the arm and the list both carry was written twice
+  after the last arm (`... SELECT a FROM u LIMIT 1 LIMIT 2` gives the arm
+  `LIMIT 1` and the list `LIMIT 2`), and is refused. A parenthesized last arm
   keeps its own (it parses as a `ParenthesedSelect`, which the hoist skips), and
   so does a `TOP n`, which is part of its arm's SELECT and limits that arm alone.
+- **JSqlParser drops text and leaves no trace of it in the AST**, so the parser
+  façade and the binder look for each way it does (plans/robustness/12):
+  - `CCJSqlParserUtil.parse` parses one statement and stops at the `;` after
+    it, so `SELECT a FROM t; DROP TABLE t` parsed as its first half.
+    `SqlParser.parse` lexes the text with the parser's own token manager and
+    refuses anything after that `;` but more of them and comments. Lex through
+    `CCJSqlParserUtil.newParser(text).getNextToken()`, not a bare
+    `CCJSqlParserTokenManager`: the token manager reads the parser's feature
+    configuration for a string holding `\'`, which a bare one does not have.
+  - A query's ORDER BY, LIMIT, OFFSET and FETCH are parsed by more than one
+    production (`PlainSelect`, `SetOperationList`, and the `Select` around
+    either), and a clause written twice sets the same field twice, so the AST
+    keeps the last. `SqlParser.refuseLostTailClauses` counts each clause's
+    keyword token in the text and in the statement rendered back with
+    `toString`, and refuses the clause the rendering has fewer of. A token scan
+    of the text alone cannot do it: JSqlParser takes `limit`, `offset` and
+    `order` as column names, which appear in both counts. After a bare UNION
+    arm the second LIMIT or OFFSET is split onto the arm instead (above).
+  - Any number of ONs on any join: `t JOIN u` has none (it ran as a cross
+    join), `t CROSS JOIN u ON c` and `t, u ON c` have one (each ran as an
+    inner join), `t JOIN u ON c1 ON c2` has two (they were ANDed), and the
+    standard's nested `t JOIN u JOIN v ON c1 ON c2` arrives as a join with none
+    and one with two. `LogicalBuilder.joinConditions` refuses each.
+  - A `NOT` hung on an operator's left side: `NOT NOT a = 1` parses as
+    `NOT ((NOT a) = 1)`, and a lone `NOT a = 1` does too as the argument of a
+    call that takes one (`COUNT_IF`, `MAX`, `UPPER`, a window function's), but
+    not in a call with two or in any clause. Parentheses always reach the AST,
+    so a `NotExpression` that is an operator's left operand was written without
+    them, and `LogicalBuilder.leftSide` refuses it. Three NOTs in a row do not
+    parse at all.
+  - A WITH that defines a name twice kept the second in the scope map.
 - **`Fetch.getRowCount` throws unless the count is an integer literal.** It
   unboxes the `LongValue` behind `getExpression`, so `FETCH FIRST ROW ONLY` (no
   count), `FETCH FIRST ? ROWS ONLY` and `FETCH FIRST -1 ROWS ONLY` all throw a
@@ -1483,19 +1516,19 @@ around them found five families, each recorded in a plan and named in the
 fuzzer (a `CleanRejection.Defect`, a `SyntaxEquivalence` known disagreement, or
 a `knownPlan` in `SqlTextGen.BeyondTheTable`) with a repro that fails the suite
 once the defect is gone. Messages that named the engine's internals
-([plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md))
-and functions and conditions that bound over types they cannot take
+([plans/robustness/10](../plans/robustness/10-error-messages-name-internals.md)),
+functions and conditions that bound over types they cannot take
 ([plans/robustness/11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md),
-see "A condition is a BOOLEAN" above) are fixed; three families are open:
+see "A condition is a BOOLEAN" above), and text the parser accepted and the
+binder never saw
+([plans/robustness/12](../plans/robustness/12-text-the-binder-never-sees.md),
+see "JSqlParser drops text" above) are fixed; two families are open:
 
 - **An `Error` in a job's task hangs the job**, and a ~2000-operator expression
   overflows the binder's stack, so one machine-generated query can do it; three
   unclosed parentheses make a parse error take seconds and four time out
   ([plans/robustness/14](../plans/robustness/14-pathological-nesting.md)). The
   most severe: no error, no end.
-- **Text the binder never sees**: a statement after `;`, a repeated `ORDER BY` /
-  `LIMIT` / `OFFSET` / `FETCH` (the last wins), a CTE name defined twice, a JOIN
-  with no `ON` ([plans/robustness/12](../plans/robustness/12-text-the-binder-never-sees.md)).
 - **Literals read as written**: `'it''s'` keeps both quotes, a double-quoted
   identifier keeps its quotes, an integer literal past BIGINT is a raw
   `NumberFormatException`, `1e400` is silently `Infinity`
@@ -1537,9 +1570,10 @@ see "A condition is a BOOLEAN" above) are fixed; three families are open:
   per-row callbacks, aggregate state updates over `RowBuf`) still uses boxed
   `eval(batch, row)` because those are 1-row paths where vectorization gives
   nothing back.
-- **No multi-statement SQL.** `SqlParser.parseSelect` only accepts a SELECT, and
-  only the first: today a statement after `;` is silently ignored, an open
-  defect ([plans/robustness/12](../plans/robustness/12-text-the-binder-never-sees.md)).
+- **No multi-statement SQL.** `SqlParser.parse` takes one statement: a trailing
+  `;` is fine, and anything after it is refused (`Only one statement is
+  supported; remove the text after ';'`), in a task's SQL when the job builds
+  its DAG. `SqlParser.parseSelect` then requires that statement to be a SELECT.
 - **CTEs (`WITH`) are supported and non-recursive; multiply-referenced ones are
   materialized.** `LogicalBuilder` emits a placeholder `PendingCteView` scan per
   outermost-scope CTE and `CteResolver` (a pass between build and optimize)

@@ -3894,4 +3894,156 @@ class SqlEngineTest {
     assertEquals(2.56, v("TRUNC(x, 2)"), 0.0)
     assertEquals(-2.56, v("TRUNC(-x, 2)"), 0.0)
   }
+
+  // ---------------------------------------------------------------------------
+  // Text the parser accepts and the binder never sees (plans/robustness/12)
+  //
+  // Each of these bound with part of what the query says missing from the AST
+  // the binder walks, and answered a question the text does not ask. The
+  // comment on each test records what it did.
+  // ---------------------------------------------------------------------------
+
+  /** `t` holds five rows and `u` two, which match two of `t`'s; `flags` a
+    * TRUE, a FALSE and a NULL; `pages` has columns named like two clauses. */
+  private def textCatalog(): Catalog = {
+    val c = new Catalog
+    val t = Schema(Vector(Field("a", DataType.IntType), Field("b", DataType.IntType), Field("s", DataType.StringType)))
+    c.register("t", memView(t, Seq(Seq(Array[Any](1, 10, "x"), Array[Any](2, 20, "y"), Array[Any](3, 30, "z"),
+      Array[Any](4, 40, "w"), Array[Any](5, 50, "v")))))
+    val u = Schema(Vector(Field("a", DataType.IntType), Field("b", DataType.IntType)))
+    c.register("u", memView(u, Seq(Seq(Array[Any](1, 100), Array[Any](2, 200)))))
+    val flags = Schema(Vector(Field("id", DataType.IntType), Field("f", DataType.BooleanType)))
+    c.register("flags", memView(flags, Seq(Seq(Array[Any](1, true), Array[Any](2, false), Array[Any](3, null)))))
+    val pages = Schema(Vector(Field("limit", DataType.IntType), Field("offset", DataType.IntType)))
+    c.register("pages", memView(pages, Seq(Seq(Array[Any](10, 0), Array[Any](10, 10), Array[Any](10, 20)))))
+    c
+  }
+
+  /** One statement runs. The parser stopped at the first `;` and nothing
+    * read the rest: `SELECT a FROM t; SELECT b FROM t` returned `t.a`, and
+    * `; DROP TABLE t` and `; garbage` ran too. */
+  @Test def onlyOneStatementRuns(): Unit = {
+    val cat = textCatalog()
+    Seq("SELECT a FROM t; SELECT b FROM t", "SELECT a FROM t; garbage", "SELECT a FROM t; DROP TABLE t",
+      "SELECT a FROM t;; SELECT b FROM t", "SELECT a FROM t; 'unclosed").foreach { sql =>
+      assertEquals(sql, "Only one statement is supported; remove the text after ';'", bindRejection(sql, cat))
+    }
+    // A trailing `;`, more of them, a comment after one, and a `;` inside a
+    // comment or a string are one statement.
+    Seq("SELECT a FROM t ORDER BY a;", "SELECT a FROM t ORDER BY a ;; ", "SELECT a FROM t ORDER BY a; -- the end",
+      "SELECT a FROM t /* ; */ ORDER BY a", "SELECT a FROM t ORDER BY a -- ; SELECT b FROM t"
+    ).foreach(sql => assertEquals(sql, Seq(1, 2, 3, 4, 5), column(sql, cat, "a")))
+    assertEquals(Seq("x;y"), column("SELECT 'x;y' AS v FROM t WHERE a = 1", cat, "v"))
+  }
+
+  /** A query's ORDER BY, LIMIT, OFFSET and FETCH each come once. Of two, the
+    * parser kept the last: `ORDER BY a DESC ORDER BY a ASC LIMIT 1` returned
+    * the smallest `a`, `LIMIT 1 LIMIT 2` two rows, `OFFSET 1 OFFSET 2`
+    * skipped two. After the last arm of a UNION it gave the first LIMIT or
+    * OFFSET to the arm, so `LIMIT 1 LIMIT 2` there kept one row of `u`. */
+  @Test def aTailClauseComesOnce(): Unit = {
+    val cat = textCatalog()
+    def twice(clause: String) = s"$clause is written twice for one query; keep one"
+    Seq(
+      "SELECT a FROM t ORDER BY a DESC ORDER BY a ASC LIMIT 1" -> twice("ORDER BY"),
+      "SELECT a FROM t ORDER BY a LIMIT 1 LIMIT 2" -> twice("LIMIT"),
+      "SELECT a FROM t ORDER BY a LIMIT 1 OFFSET 2 LIMIT 3" -> twice("LIMIT"),
+      "SELECT a FROM t ORDER BY a OFFSET 1 OFFSET 2" -> twice("OFFSET"),
+      "SELECT a FROM t ORDER BY a FETCH FIRST 1 ROWS ONLY FETCH FIRST 3 ROWS ONLY" -> twice("FETCH"),
+      "WITH q AS (SELECT a FROM t ORDER BY a LIMIT 1 LIMIT 2) SELECT * FROM q" -> twice("LIMIT"),
+      "SELECT a FROM t UNION ALL SELECT a FROM u ORDER BY a DESC ORDER BY a ASC" -> twice("ORDER BY"),
+      "SELECT a FROM t UNION ALL SELECT a FROM u LIMIT 1 LIMIT 2" -> twice("LIMIT"),
+      "SELECT a FROM t UNION ALL SELECT a FROM u OFFSET 1 OFFSET 2" -> twice("OFFSET"),
+      "(SELECT a FROM t UNION ALL SELECT a FROM u LIMIT 1 LIMIT 2)" -> twice("LIMIT")
+    ).foreach { case (sql, message) => assertEquals(sql, message, bindRejection(sql, cat)) }
+    // Each once, and columns named like the clauses, which count in neither.
+    assertEquals(Seq(2, 3), column("SELECT a FROM t ORDER BY a LIMIT 2 OFFSET 1", cat, "a"))
+    assertEquals(Seq(10, 20), column("SELECT offset FROM pages ORDER BY offset LIMIT 2 OFFSET 1", cat, "offset"))
+    assertEquals(Seq(10), column("SELECT limit FROM pages WHERE offset = 0 LIMIT 1", cat, "limit"))
+    // The parser puts this OFFSET on the last arm and the FETCH on the union:
+    // one of each, both the union's.
+    assertEquals(Seq(2, 1), column(
+      "SELECT a FROM t UNION ALL SELECT a FROM u ORDER BY 1 DESC OFFSET 4 ROWS FETCH NEXT 2 ROWS ONLY", cat, "a"))
+  }
+
+  /** One WITH defines a name once. The second definition replaced the first:
+    * `WITH q AS (SELECT a FROM t), q AS (SELECT b AS a FROM u) SELECT * FROM
+    * q` returned `u.b`. A WITH inside a CTE body may reuse an outer name, as
+    * standard SQL allows, and shadows it there. */
+  @Test def aWithDefinesANameOnce(): Unit = {
+    val cat = textCatalog()
+    Seq(
+      "WITH q AS (SELECT a FROM t), q AS (SELECT b AS a FROM u) SELECT * FROM q" -> "q",
+      "WITH q AS (SELECT a FROM t), Q AS (SELECT b AS a FROM u) SELECT * FROM q" -> "Q",
+      "WITH r AS (WITH q AS (SELECT a FROM t), q AS (SELECT a FROM u) SELECT a FROM q) SELECT a FROM r" -> "q"
+    ).foreach { case (sql, name) =>
+      assertEquals(sql, s"WITH defines '$name' twice; give each query its own name", bindRejection(sql, cat))
+    }
+    val shadowing = "WITH q AS (SELECT a FROM t), r AS (WITH q AS (SELECT b AS a FROM u) SELECT a FROM q) "
+    assertEquals(Seq(100, 200), column(shadowing + "SELECT a FROM r ORDER BY a", cat, "a"))
+    assertEquals(Seq(1, 2, 3, 4, 5), column(shadowing + "SELECT a FROM q ORDER BY a", cat, "a"))
+  }
+
+  /** A join takes the condition its kind takes: one ON for JOIN, INNER,
+    * LEFT, RIGHT and FULL JOIN, none for CROSS JOIN and a table after a
+    * comma. `t JOIN u` and `t LEFT JOIN u` each returned all ten pairs, a
+    * CROSS JOIN or a comma with an ON ran as an inner join on it, and a
+    * second ON was ANDed with the first. */
+  @Test def aJoinTakesTheConditionItsKindTakes(): Unit = {
+    val cat = textCatalog()
+    val cross = "write CROSS JOIN to pair every row"
+    val on = "write JOIN ... ON to join on a condition"
+    Seq(
+      "SELECT t.a FROM t JOIN u" -> s"JOIN needs an ON condition; $cross",
+      "SELECT t.a FROM t INNER JOIN u" -> s"INNER JOIN needs an ON condition; $cross",
+      "SELECT t.a FROM t JOIN u ON t.a = u.a JOIN u v" -> s"JOIN needs an ON condition; $cross",
+      "SELECT t.a FROM t LEFT JOIN u" -> "LEFT JOIN needs an ON condition",
+      "SELECT t.a FROM t LEFT OUTER JOIN u" -> "LEFT JOIN needs an ON condition",
+      "SELECT t.a FROM t RIGHT JOIN u" -> "RIGHT JOIN needs an ON condition",
+      "SELECT t.a FROM t FULL OUTER JOIN u" -> "FULL JOIN needs an ON condition",
+      "SELECT t.a FROM t CROSS JOIN u ON t.a = u.a" -> s"CROSS JOIN takes no ON; $on",
+      "SELECT t.a FROM t, u ON t.a = u.a" -> s"A table after a comma takes no ON; $on",
+      "SELECT t.a FROM t JOIN u ON t.a = u.a ON t.b = u.b" -> "JOIN takes one ON; combine the conditions with AND",
+      "SELECT t.a FROM t LEFT JOIN u ON t.a = u.a ON u.b > 100" ->
+        "LEFT JOIN takes one ON; combine the conditions with AND",
+      "SELECT t.a FROM t JOIN u JOIN u v ON u.a = v.a ON t.a = u.a" ->
+        "A nested join (JOIN ... JOIN ... ON ... ON ...) is not supported; give each JOIN its own ON"
+    ).foreach { case (sql, message) => assertEquals(sql, message, bindRejection(sql, cat)) }
+    // Every pair in either spelling, and each join that takes a condition with one.
+    assertEquals(Seq(10L), column("SELECT COUNT(*) AS n FROM t CROSS JOIN u", cat, "n"))
+    assertEquals(Seq(10L), column("SELECT COUNT(*) AS n FROM t, u", cat, "n"))
+    assertEquals(Seq(1, 2), column("SELECT t.a FROM t JOIN u ON t.a = u.a ORDER BY t.a", cat, "a"))
+    assertEquals(Seq(1, 2), column("SELECT t.a FROM t, u WHERE t.a = u.a ORDER BY t.a", cat, "a"))
+    assertEquals(Seq(5L), column("SELECT COUNT(*) AS n FROM t LEFT JOIN u ON t.a = u.a AND u.b > 100", cat, "n"))
+  }
+
+  /** A NOT negates what follows it as SQL reads it, or is refused. The parser
+    * hung the second NOT of `NOT NOT f IS NULL` on `f` alone, so the query
+    * kept the rows where `f` is not NULL, and the only NOT of `NOT f > TRUE`
+    * as a one-argument call's argument too, so `COUNT_IF` counted none of the
+    * two rows it holds for. Over a number each failed with `NOT takes a
+    * BOOLEAN, not INT`, about a NOT on `a` alone that the query never wrote. */
+  @Test def aNotNegatesWhatFollowsIt(): Unit = {
+    val cat = textCatalog()
+    Seq("SELECT id FROM flags WHERE NOT NOT f IS NULL", "SELECT COUNT_IF(NOT f > TRUE) AS n FROM flags",
+      "SELECT a FROM t WHERE NOT NOT a = 1", "SELECT MAX(NOT a = 1) AS m FROM t",
+      "SELECT a FROM t WHERE NOT NOT a + 1 = 2", "SELECT a FROM t WHERE NOT NOT s LIKE 'x'",
+      "SELECT a FROM t WHERE NOT NOT a IN (1, 2)", "SELECT a FROM t WHERE NOT NOT a BETWEEN 1 AND 2",
+      "SELECT a FROM t WHERE NOT NOT s || 'x' = 'xx'"
+    ).foreach { sql =>
+      assertEquals(sql, "NOT before the left side of an operator is not supported here; write NOT (...) around " +
+        "what it negates", bindRejection(sql, cat))
+    }
+    // In parentheses a NOT negates what they hold; written before a
+    // comparison anywhere else it negates the whole of it; before AND it
+    // binds more tightly.
+    assertEquals(Seq(3), column("SELECT id FROM flags WHERE NOT NOT (f IS NULL)", cat, "id"))
+    assertEquals(Seq(3), column("SELECT id FROM flags WHERE NOT (NOT f IS NULL)", cat, "id"))
+    assertEquals(Seq(2L), column("SELECT COUNT_IF(NOT (f > TRUE)) AS n FROM flags", cat, "n"))
+    assertEquals(Seq(1, 2), column("SELECT id FROM flags WHERE NOT f IS NULL ORDER BY id", cat, "id"))
+    assertEquals(Seq(false, true, null), column("SELECT NOT f = TRUE AS g FROM flags ORDER BY id", cat, "g"))
+    assertEquals(Seq(1, 1, 0), column("SELECT IF(NOT f IS NULL, 1, 0) AS g FROM flags ORDER BY id", cat, "g"))
+    assertEquals(Seq(1), column("SELECT id FROM flags WHERE NOT NOT f", cat, "id"))
+    assertEquals(Seq(2), column("SELECT id FROM flags WHERE NOT f AND id > 1", cat, "id"))
+  }
 }

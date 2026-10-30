@@ -426,30 +426,50 @@ object SqlTextGen {
     whole ++ spliced
   }
 
-  /** Text the parser accepts that never reaches an AST getter, so the clause
-    * table cannot list it: JSqlParser stops at the first statement, keeps the
-    * last of a repeated tail clause, and takes a JOIN with no condition. Each
-    * must be refused, as a table entry must; `knownPlan` names the plan
-    * recording one that binds today. A `wrappable` one is also checked in
-    * every context, as a table entry's example is. */
+  /** Text the parser accepts and the AST does not carry as written, so the
+    * clause table cannot list it: JSqlParser stops at the first statement,
+    * keeps the last of a repeated tail clause or splits it with a UNION's last
+    * arm, keeps the second of two CTEs of one name, takes any number of ONs
+    * on any join, and hangs a NOT on the left side of an operator. Each must
+    * be refused, as a table entry must; `knownPlan` names the plan recording
+    * one that binds today. A `wrappable` one is also checked in every
+    * context, as a table entry's example is. */
   final case class Beyond(name: String, sql: String, wrappable: Boolean, knownPlan: Option[String])
 
-  private val TextBeyondPlan = "plans/robustness/12-text-the-binder-never-sees.md"
   private val LiteralsPlan = "plans/robustness/13-literals-are-read-as-written.md"
 
   val BeyondTheTable: Vector[Beyond] = Vector(
-    Beyond("a second statement after ;", "SELECT a FROM t; SELECT b FROM t", wrappable = false, Some(TextBeyondPlan)),
-    Beyond("text after ; that is no statement", "SELECT a FROM t; garbage", wrappable = false, Some(TextBeyondPlan)),
-    Beyond("ORDER BY twice", "SELECT a FROM t ORDER BY a DESC ORDER BY a ASC LIMIT 1", wrappable = true,
-      Some(TextBeyondPlan)),
-    Beyond("LIMIT twice", "SELECT a FROM t ORDER BY a LIMIT 1 LIMIT 2", wrappable = true, Some(TextBeyondPlan)),
-    Beyond("OFFSET twice", "SELECT a FROM t ORDER BY a OFFSET 1 OFFSET 2", wrappable = true, Some(TextBeyondPlan)),
+    Beyond("a second statement after ;", "SELECT a FROM t; SELECT b FROM t", wrappable = false, None),
+    Beyond("text after ; that is no statement", "SELECT a FROM t; garbage", wrappable = false, None),
+    Beyond("a statement after ; that changes data", "SELECT a FROM t; DROP TABLE t", wrappable = false, None),
+    Beyond("ORDER BY twice", "SELECT a FROM t ORDER BY a DESC ORDER BY a ASC LIMIT 1", wrappable = true, None),
+    Beyond("LIMIT twice", "SELECT a FROM t ORDER BY a LIMIT 1 LIMIT 2", wrappable = true, None),
+    Beyond("LIMIT on both sides of OFFSET", "SELECT a FROM t ORDER BY a LIMIT 1 OFFSET 2 LIMIT 3", wrappable = true,
+      None),
+    Beyond("OFFSET twice", "SELECT a FROM t ORDER BY a OFFSET 1 OFFSET 2", wrappable = true, None),
     Beyond("FETCH FIRST twice", "SELECT a FROM t ORDER BY a FETCH FIRST 1 ROWS ONLY FETCH FIRST 3 ROWS ONLY",
-      wrappable = true, Some(TextBeyondPlan)),
+      wrappable = true, None),
+    Beyond("ORDER BY twice after a UNION", "SELECT a FROM t UNION ALL SELECT a FROM u ORDER BY a DESC ORDER BY a ASC",
+      wrappable = true, None),
+    Beyond("LIMIT twice after a UNION", "SELECT a FROM t UNION ALL SELECT a FROM u LIMIT 1 LIMIT 2", wrappable = true,
+      None),
+    Beyond("OFFSET twice after a UNION", "SELECT a FROM t UNION ALL SELECT a FROM u OFFSET 1 OFFSET 2",
+      wrappable = true, None),
     Beyond("a CTE name defined twice", "WITH q AS (SELECT a FROM t), q AS (SELECT b AS a FROM u) SELECT * FROM q",
-      wrappable = false, Some(TextBeyondPlan)),
-    Beyond("JOIN with no condition", "SELECT t.a FROM t JOIN u", wrappable = true, Some(TextBeyondPlan)),
-    Beyond("LEFT JOIN with no condition", "SELECT t.a FROM t LEFT JOIN u", wrappable = true, Some(TextBeyondPlan)),
+      wrappable = false, None),
+    Beyond("a CTE name defined twice in two cases",
+      "WITH q AS (SELECT a FROM t), Q AS (SELECT b AS a FROM u) SELECT * FROM q", wrappable = false, None),
+    Beyond("JOIN with no condition", "SELECT t.a FROM t JOIN u", wrappable = true, None),
+    Beyond("INNER JOIN with no condition", "SELECT t.a FROM t INNER JOIN u", wrappable = true, None),
+    Beyond("LEFT JOIN with no condition", "SELECT t.a FROM t LEFT JOIN u", wrappable = true, None),
+    Beyond("FULL JOIN with no condition", "SELECT t.a FROM t FULL JOIN u", wrappable = true, None),
+    Beyond("CROSS JOIN with a condition", "SELECT t.a FROM t CROSS JOIN u ON t.a = u.a", wrappable = true, None),
+    Beyond("a comma join with a condition", "SELECT t.a FROM t, u ON t.a = u.a", wrappable = true, None),
+    Beyond("two ONs on one join", "SELECT t.a FROM t JOIN u ON t.a = u.a ON t.b = u.b", wrappable = true, None),
+    Beyond("a nested join", "SELECT t.a FROM t JOIN u JOIN u v ON u.a = v.a ON t.a = u.a", wrappable = true, None),
+    Beyond("NOT NOT before IS NULL", "SELECT a FROM t WHERE NOT NOT TRUE IS NULL", wrappable = true, None),
+    Beyond("NOT before a comparison in a one-argument call", "SELECT COUNT_IF(NOT FALSE > TRUE) AS n FROM t",
+      wrappable = true, None),
     Beyond("string literals side by side", "SELECT 'a' 'b' FROM t", wrappable = true, Some(LiteralsPlan)))
 
   // ===========================================================================
@@ -753,12 +773,13 @@ object SqlTextGen {
     Spelling("CTE inlined", Vector("SELECT a, b FROM t WHERE a > {x}",
       "WITH q AS (SELECT a, b FROM t WHERE a > {x}) SELECT * FROM q",
       "WITH q AS (SELECT a, b FROM t) SELECT * FROM q WHERE a > {x}"), Some("SELECT a, b FROM t")),
+    // `NOT NOT a = {x}` without the parentheses is refused (BeyondTheTable).
+    Spelling("NOT NOT", Vector(where("a = {x}"), where("NOT (NOT (a = {x}))"), where("NOT NOT (a = {x})"),
+      where("NOT (NOT a = {x})")), Some(TAll)),
     // Shapes whose spellings disagree today, each a known defect of
     // oracle/SyntaxEquivalence with the plan that records it.
     Spelling("quoted identifier", Vector("SELECT a, b FROM t", "SELECT \"a\", \"b\" FROM t"), None),
-    Spelling("a quote inside a literal", Vector("SELECT LENGTH('it''s') AS n FROM t", "SELECT 4 AS n FROM t"), None),
-    Spelling("NOT NOT", Vector(where("NOT NOT a = {x}"), where("a = {x}"), where("NOT (NOT (a = {x}))")),
-      Some(TAll)))
+    Spelling("a quote inside a literal", Vector("SELECT LENGTH('it''s') AS n FROM t", "SELECT 4 AS n FROM t"), None))
 
   def genSpellingCase(rng: Rng): SpellingCase = {
     val tables = genTables(rng.split())

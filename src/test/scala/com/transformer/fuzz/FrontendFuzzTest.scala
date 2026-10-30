@@ -278,10 +278,10 @@ class FrontendFuzzTest {
   }
 
   /** The constructs beyond the table ([[SqlTextGen.BeyondTheTable]]): each
-    * refused in every context it can sit in, or, while its plan records it
-    * binding, still binding at top level, so a fix fails here until the plan
-    * reference is removed and the construct joins the ones that must be
-    * refused. */
+    * refused cleanly in every context it can sit in, or, while its plan
+    * records it binding, still binding at top level, so a fix fails here until
+    * the plan reference is removed and the construct joins the ones that must
+    * be refused. */
   @Test def noSilentDropRefusesWhatTheTableCannotList(): Unit = {
     val problems = mutable.ArrayBuffer.empty[String]
     SqlTextGen.BeyondTheTable.foreach { b =>

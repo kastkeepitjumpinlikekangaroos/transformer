@@ -84,7 +84,9 @@ object LogicalBuilder {
     * built in order so later CTEs can reference earlier ones in the same
     * WITH clause. The resolved scope is threaded into `fromItem` so that any
     * reference to a CTE name in FROM / JOIN is satisfied by the pre-built
-    * plan rather than a catalog lookup.
+    * plan rather than a catalog lookup. One WITH defines a name once, as
+    * standard SQL requires (a second definition used to replace the first);
+    * a WITH inside a CTE body may reuse an outer name, which it shadows there.
     *
     * `collector` distinguishes the outermost WITH clause (where defs become
     * materialization candidates — `Some(buf)`, each emitting a [[PendingCteView]]
@@ -99,6 +101,11 @@ object LogicalBuilder {
       outerCteScope: Map[String, CteScopeEntry],
       collector: Option[mutable.ArrayBuffer[CteDef]]): LogicalPlan = {
     val withItems = Option(sel.getWithItemsList).map(_.asScala.toSeq).getOrElse(Nil)
+    withItems.map(_.getAlias.getName).foldLeft(Set.empty[String]) { (defined, name) =>
+      if (defined(name.toLowerCase))
+        throw new IllegalArgumentException(s"WITH defines '$name' twice; give each query its own name")
+      defined + name.toLowerCase
+    }
     val cteScope: Map[String, CteScopeEntry] = withItems.foldLeft(outerCteScope) { (scope, item) =>
       if (item.isRecursive)
         throw new IllegalArgumentException("Recursive CTEs (WITH RECURSIVE) are not supported")
@@ -150,10 +157,12 @@ object LogicalBuilder {
     * can split one tail across both (`OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY`
     * leaves the OFFSET on the arm). In standard SQL (Postgres / BigQuery /
     * Snowflake) every one of those clauses applies to the union as a whole, so
-    * we hoist each one the list does not already carry — unless the user
-    * disambiguated by wrapping the last arm in parens (then it's a
-    * `ParenthesedSelect`, our `case ps: PlainSelect` doesn't match, and the
-    * clause stays inside the arm).
+    * we hoist each one — unless the user disambiguated by wrapping the last
+    * arm in parens (then it's a `ParenthesedSelect`, our `case ps:
+    * PlainSelect` doesn't match, and the clause stays inside the arm). A
+    * clause both carry was written twice after the last arm, which JSqlParser
+    * splits between them (`... SELECT a FROM u LIMIT 1 LIMIT 2` gives the arm
+    * `LIMIT 1`), and is refused.
     *
     * Each [[UnionOp]] contributes its own `ALL` flag; the planner wraps
     * non-ALL unions with a [[LogicalDistinct]] downstream. Each column takes
@@ -174,12 +183,14 @@ object LogicalBuilder {
     val lastArm = selects.last
     val (hoistedOrderBy, hoistedLimit, hoistedOffset) = lastArm match {
       case ps: PlainSelect =>
-        val ob = Option(ps.getOrderByElements).filter(!_.isEmpty)
-          .filter(_ => Option(sol.getOrderByElements).forall(_.isEmpty))
-        val li = Option(ps.getLimit)
-          .filter(_ => Option(sol.getLimit).isEmpty)
-        val off = Option(ps.getOffset)
-          .filter(_ => Option(sol.getOffset).isEmpty)
+        def hoist[C](clause: String, onArm: Option[C], onList: Option[C]): Option[C] = {
+          if (onArm.isDefined && onList.isDefined) throw SqlParser.writtenTwice(clause)
+          onArm
+        }
+        val ob = hoist("ORDER BY", Option(ps.getOrderByElements).filter(!_.isEmpty),
+          Option(sol.getOrderByElements).filter(!_.isEmpty))
+        val li = hoist("LIMIT", Option(ps.getLimit), Option(sol.getLimit))
+        val off = hoist("OFFSET", Option(ps.getOffset), Option(sol.getOffset))
         if (ob.isDefined) ps.setOrderByElements(null)
         if (li.isDefined) ps.setLimit(null)
         if (off.isDefined) ps.setOffset(null)
@@ -592,24 +603,60 @@ object LogicalBuilder {
 
     var plan = root
     var srcs = rootSources
-    joins.foreach { j =>
+    val conditions = joinConditions(joins)
+    joins.zip(conditions).foreach { case (j, on) =>
       val (rightPlan, rightSources) = fromItem(j.getRightItem, catalog, cteScope)
       val combinedSources = srcs ++ rightSources
-      val onExprs = Option(j.getOnExpressions).map(_.asScala.toSeq).getOrElse(Nil)
-      val condition: Expr =
-        if (onExprs.isEmpty) LitExpr(true, DataType.BooleanType)
-        else onExprs.map(e => Analyzer.condition(bindExpr(e, combinedSources), "ON"))
-          .reduce[Expr](BinOpExpr("AND", _, _, DataType.BooleanType))
+      // A CROSS JOIN and a table after a comma pair every row.
+      val condition: Expr = on.fold[Expr](LitExpr(true, DataType.BooleanType))(e =>
+        Analyzer.condition(bindExpr(e, combinedSources), "ON"))
       val kind: JoinKind =
         if (j.isFull) JoinKind.Full
         else if (j.isLeft) JoinKind.Left
         else if (j.isRight) JoinKind.Right
-        else if (j.isInner || j.isSimple || j.isCross) JoinKind.Inner
         else JoinKind.Inner
       plan = LogicalJoin(plan, rightPlan, condition, kind)
       srcs = combinedSources
     }
     (plan, srcs)
+  }
+
+  /** Each join's ON, which SQL gives it exactly as many of as its kind takes:
+    * one for JOIN, INNER, LEFT, RIGHT and FULL JOIN, none for CROSS JOIN and a
+    * table after a comma. JSqlParser takes any number on any of them. A JOIN
+    * with none ran as a cross join (and a LEFT JOIN with none has no meaning
+    * at all), a CROSS JOIN or a comma with one ran as an inner join on it, and
+    * a join's second ON was ANDed with its first. The standard's nested join,
+    * `t JOIN u JOIN v ON c1 ON c2`, arrives as a join with no ON followed by
+    * one with both, and is refused as itself. USING and NATURAL are refused
+    * before binding. */
+  private def joinConditions(joins: Seq[Join]): Seq[Option[Expression]] = {
+    val ons = joins.map(j => Option(j.getOnExpressions).map(_.asScala.toSeq).getOrElse(Nil))
+    def pairsEveryRow(j: Join) = j.isCross || j.isSimple
+    val nested = joins.indices.exists(i =>
+      ons(i).isEmpty && !pairsEveryRow(joins(i)) && ons.drop(i + 1).exists(_.size > 1))
+    if (nested) throw new IllegalArgumentException(
+      "A nested join (JOIN ... JOIN ... ON ... ON ...) is not supported; give each JOIN its own ON")
+    joins.zip(ons).map { case (j, on) =>
+      if (pairsEveryRow(j)) {
+        if (on.nonEmpty) throw new IllegalArgumentException(
+          s"${if (j.isCross) "CROSS JOIN" else "A table after a comma"} takes no ON; write JOIN ... ON to join on " +
+            "a condition")
+        None
+      } else {
+        val kind =
+          if (j.isFull) "FULL JOIN" else if (j.isLeft) "LEFT JOIN" else if (j.isRight) "RIGHT JOIN"
+          else if (j.isInner) "INNER JOIN" else "JOIN"
+        on match {
+          case Seq(condition) => Some(condition)
+          case Seq() if j.isFull || j.isLeft || j.isRight => throw new IllegalArgumentException(
+            s"$kind needs an ON condition")
+          case Seq() => throw new IllegalArgumentException(
+            s"$kind needs an ON condition; write CROSS JOIN to pair every row")
+          case _ => throw new IllegalArgumentException(s"$kind takes one ON; combine the conditions with AND")
+        }
+      }
+    }
   }
 
   private def fromItem(item: FromItem, catalog: Catalog, cteScope: Map[String, CteScopeEntry]): (LogicalPlan, Sources) = item match {
@@ -652,6 +699,22 @@ object LogicalBuilder {
         Some(pel.get(0).asInstanceOf[Expression])
       case _ => None
     }
+  }
+
+  /** `left`, the left side of a comparison, arithmetic, `||`, LIKE, IS NULL,
+    * IN or BETWEEN, unless it is a NOT. SQL's NOT negates the whole of one
+    * (`NOT a = 1` is `NOT (a = 1)`), but JSqlParser hangs the second NOT of
+    * `NOT NOT a = 1`, and the only NOT of `COUNT_IF(NOT a = 1)` (the argument
+    * of any call with one), on the left side instead: `NOT ((NOT a) = 1)`.
+    * Parentheses always reach the AST, so a NOT that is an operator's left
+    * side was written without them, and binding it answers another question:
+    * `NOT NOT flag IS NULL` kept the rows where `flag` is not NULL. AND and
+    * OR bind more loosely than NOT, so `NOT a AND b` is `(NOT a) AND b`, as
+    * written, and neither comes here. */
+  private def leftSide(left: Expression): Expression = left match {
+    case _: NotExpression => throw new IllegalArgumentException(
+      "NOT before the left side of an operator is not supported here; write NOT (...) around what it negates")
+    case _ => left
   }
 
   def bindExpr(e: Expression, sources: Sources): Expr =
@@ -718,7 +781,7 @@ object LogicalBuilder {
     case a: Division => binopGeneric("/", a.getLeftExpression, a.getRightExpression, sources, aggResolver, windowResolver)
     case a: Modulo => binopGeneric("%", a.getLeftExpression, a.getRightExpression, sources, aggResolver, windowResolver)
     case a: Concat =>
-      val l = b(a.getLeftExpression); val r = b(a.getRightExpression)
+      val l = b(leftSide(a.getLeftExpression)); val r = b(a.getRightExpression)
       Seq(l, r).foreach(e => Analyzer.checkText(e.dataType, "||"))
       BinOpExpr("||", l, r, DataType.StringType)
 
@@ -739,7 +802,7 @@ object LogicalBuilder {
     case x: MinorThanEquals => cmpOpGeneric("<=", x.getLeftExpression, x.getRightExpression, sources, aggResolver, windowResolver)
 
     case in: InExpression =>
-      val left = b(in.getLeftExpression)
+      val left = b(leftSide(in.getLeftExpression))
       val items: Seq[Expression] = in.getRightExpression match {
         case el: ExpressionList[_] => el.asScala.asInstanceOf[Iterable[Expression]].toSeq
         case _: Select => throw new IllegalArgumentException(
@@ -751,7 +814,7 @@ object LogicalBuilder {
 
     case bw: Between =>
       val (operands, _) = Analyzer.unify(
-        Seq(bw.getLeftExpression, bw.getBetweenExpressionStart, bw.getBetweenExpressionEnd).map(b))
+        Seq(leftSide(bw.getLeftExpression), bw.getBetweenExpressionStart, bw.getBetweenExpressionEnd).map(b))
       val expr: Expr = BinOpExpr("AND",
         BinOpExpr(">=", operands(0), operands(1), DataType.BooleanType),
         BinOpExpr("<=", operands(0), operands(2), DataType.BooleanType),
@@ -759,7 +822,7 @@ object LogicalBuilder {
       if (bw.isNot) UnaryOpExpr("NOT", expr, DataType.BooleanType) else expr
 
     case lk: LikeExpression =>
-      val s = b(lk.getLeftExpression); val p = b(lk.getRightExpression)
+      val s = b(leftSide(lk.getLeftExpression)); val p = b(lk.getRightExpression)
       // UnsupportedClauses has already rejected every keyword but LIKE and ILIKE.
       val syntax = LikeSyntax(
         caseInsensitive = lk.getLikeKeyWord == LikeExpression.KeyWord.ILIKE,
@@ -773,7 +836,7 @@ object LogicalBuilder {
         lk.isNot, syntax)
 
     case isn: IsNullExpression =>
-      IsNullExpr(b(isn.getLeftExpression), negated = isn.isNot)
+      IsNullExpr(b(leftSide(isn.getLeftExpression)), negated = isn.isNot)
 
     case c: CaseExpression =>
       val switch = Option(c.getSwitchExpression).map(b)
@@ -839,7 +902,7 @@ object LogicalBuilder {
   private def binopGeneric(op: String, l: Expression, r: Expression, sources: Sources,
                            aggResolver: Expression => Option[Expr],
                            windowResolver: AnalyticExpression => Option[Expr]): Expr = {
-    val le = bindExprWithAggs(l, sources, aggResolver, windowResolver)
+    val le = bindExprWithAggs(leftSide(l), sources, aggResolver, windowResolver)
     val re = bindExprWithAggs(r, sources, aggResolver, windowResolver)
     def beside(other: Expr, side: Expression, bound: Expr): Expr =
       if (other.dataType.isInstanceOf[DataType.DecimalType]) decimalConstant(side).getOrElse(bound) else bound
@@ -910,7 +973,7 @@ object LogicalBuilder {
                            aggResolver: Expression => Option[Expr],
                            windowResolver: AnalyticExpression => Option[Expr]): Expr = {
     val (le, re, _) = Analyzer.promotePair(
-      bindExprWithAggs(l, sources, aggResolver, windowResolver),
+      bindExprWithAggs(leftSide(l), sources, aggResolver, windowResolver),
       bindExprWithAggs(r, sources, aggResolver, windowResolver))
     BinOpExpr(op, le, re, DataType.BooleanType)
   }
