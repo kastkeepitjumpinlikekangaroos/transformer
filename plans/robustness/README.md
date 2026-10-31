@@ -1,8 +1,9 @@
 # Robustness plans — what the fuzzers cannot reach
 
 Eight plans from an audit on 2026-09-10, run from the opposite direction to the
-fuzz harness, and six that came after: 09 from widening the SQL corpora to
-decimal arithmetic, and 10 to 14 from plan 05's frontend fuzzer. The five existing fuzzers generate inputs the engine is *expected*
+fuzz harness, six that came after: 09 from widening the SQL corpora to
+decimal arithmetic, and 10 to 14 from plan 05's frontend fuzzer, and 16 to 29
+from a second audit on 2026-10-31 (see [The second audit](#the-second-audit-2026-10-31)). The five existing fuzzers generate inputs the engine is *expected*
 to handle and ask whether the answer is right. This audit asked what the
 generators **structurally cannot produce**, and then checked those surfaces by
 hand.
@@ -213,7 +214,7 @@ left-deep, undoing the regrouping, and a UNION of 2000 arms took fifteen
 seconds and 5000 overflowed; both now build balanced trees. Details in the
 plan's Outcome section.
 
-Every plan in this directory is done.
+Plans 01 to 15 are done; 16 to 29, from the second audit, are below.
 
 **Suggested order.** [01](01-reject-or-honor-every-clause.md) first — it has the
 worst single defect in the set (a dropped join condition is a cartesian product,
@@ -231,6 +232,54 @@ Plans 01 and 05 both touch the unsupported-clause table; 02 and 04 both touch
 helper. Those three pairs should be branched in sequence, not off `main` in
 parallel. 07 and 08 are independent of everything.
 
+## The second audit (2026-10-31)
+
+Every plan above was done, every fuzz campaign green, and the question was again
+what the harness cannot see. The answer this time was not a surface the
+generators cannot reach but a kind of defect no relation they check can detect:
+**a deterministic wrong answer**. Mode differential, TLP, NoREC, join
+commutativity and aggregate decomposition compare the engine with itself; a
+result that is wrong the same way in every mode, layout and spelling passes all
+of them. Integer overflow wraps alike everywhere; RANGE-as-ROWS gives the same
+wrong running total under every layout once the sort is fixed; `ORDER BY b`
+resolves `b` the same way in every relation the corpus builds.
+
+The audit ran ~250 probe queries and a dozen directory jobs through
+`SqlEngine.execute` and `DataJob.run` at `b2c83fc`, printing results (the probe
+target was deleted; each plan carries its SQL and the measured answer). It found
+fourteen defects, nine of them silent wrong answers. The user decided the eight
+semantic questions on 2026-10-31, the recommended option each time.
+
+| # | Plan | What | Status | Risk |
+|---|------|------|--------|------|
+| [16](16-locale-dependent-names.md) | Names and case folding depend on the JVM locale | under tr-TR, `min()`, view names and `CAST(x AS int)` fail; `UPPER` differs | planned | low |
+| [17](17-case-evaluates-every-branch.md) | CASE, IF and COALESCE evaluate every branch | a guarded CAST or overflow fails on rows the guard excludes; `eval` and `evalVec` disagree | planned | medium |
+| [18](18-integer-overflow-wraps.md) | Integer arithmetic, SUM and narrowing CASTs wrap | `2147483647 + 1` is negative, `SUM` of BIGINTs goes negative, `CAST(NaN AS INT)` is 0 | planned | medium |
+| [19](19-rounding-through-double.md) | ROUND, TRUNC, FLOOR and CEIL compute in DOUBLE | `ROUND(1.005, 2)` on a DECIMAL is 1.0; `FLOOR` of a BIGINT past 2^53 changes it | planned | medium |
+| [20](20-range-frames-run-as-rows.md) | RANGE frames, and the default frame, run as ROWS | tied rows get different running totals, in arbitrary order; RANGE offsets count rows | planned | medium |
+| [21](21-two-float-equalities.md) | Floats have two equalities | a hash join matches NaN to NaN and misses -0.0 = 0.0, which the same predicate as a filter does not | planned | medium |
+| [22](22-order-by-sees-input-columns.md) | ORDER BY resolves names against input columns | `SELECT -b AS b ... ORDER BY b` sorts by the input; `ORDER BY n` on `COUNT(*) AS n` is refused | planned | medium |
+| [23](23-clauses-that-cannot-change-the-answer.md) | Constant sort, group and partition keys | `ORDER BY 'b'` sorts nothing; a pattern ending in its escape is FALSE | planned | low |
+| [24](24-cast-reads-javas-number-grammar.md) | CAST reads Java's number grammar | `' 5'`, `'5d'`, hex, Arabic-Indic digits cast; `'1e400'` is Infinity | planned | low |
+| [25](25-dates-past-the-storable-range.md) | Dates and timestamps past the storable range wrap | `CAST('+999999999-12-31' AS DATE)` is `+466210-05-14` | planned | low |
+| [26](26-duplicate-column-names.md) | Outputs and CSV headers repeat column names | the defect fails the task downstream, naming neither | planned | low |
+| [27](27-config-keys-are-not-checked.md) | Job configs ignore unknown keys and unreadable values | a job with `delimeter`, `partiton_by`, `spill: yes` succeeded | planned | medium |
+| [28](28-malformed-templates-pass-through.md) | A malformed `{{ }}` stays in the text | `'{{ today - 1d }}'` filtered every row out, silently | planned | low |
+| [29](29-stale-files-join-an-output.md) | Files the run did not write join a task's output | a stray part file doubled a downstream task's rows | planned | low |
+
+**Order.** 16 first (small and independent). 17 before 18 and 19, which add
+run-time errors a CASE must be able to guard. 20 to 22 are independent of each
+other but all touch the SQL docs. 23 to 26 are small frontend and I/O
+refusals; 27 to 29 are the job runner. Each lands as its own commit with its
+tests and docs.
+
+**The testing lesson.** Each plan that fixes a deterministic wrong answer adds a
+property that tests meaning rather than self-agreement: a brute-force window
+reference (20), exact integer arithmetic checked in `BigInt` (18), `JOIN ON p`
+against `CROSS JOIN WHERE p` and GROUP BY keys pairwise distinct under `=` (21),
+guarded-error shapes in the expression corpus (17), CAST against CSV's reading
+(24), and a test target under a Turkish locale (16).
+
 ## Known outstanding, deliberately NOT planned here
 
 The audit also re-confirmed the inventory of things that are **already known and
@@ -239,12 +288,12 @@ became a plan; they are listed so the set above is not mistaken for the whole
 picture. All are in [`docs/gotchas.md`](../../docs/gotchas.md) §"What's
 intentionally NOT done" unless noted.
 
-- **`RANGE` window frames execute with `ROWS` semantics.** Confirmed wrong with
+- **`RANGE` window frames execute with `ROWS` semantics** (now [20](20-range-frames-run-as-rows.md)). Confirmed wrong with
   ties: `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` over a tied `ORDER BY`
   gives `10, 30` where RANGE requires `30, 30`. Documented in README and gotchas.
   The only documented *wrong answer* in the engine — promote it to a plan if a
   workload needs RANGE.
-- **Numeric overflow wraps silently.** `SUM` over two `Long.MaxValue` rows returns
+- **Numeric overflow wraps silently** (now [18](18-integer-overflow-wraps.md)). `SUM` over two `Long.MaxValue` rows returns
   `-2`; `int * int` wraps. Matches Spark's non-ANSI default, but is undocumented
   and untested — worth one line in the README and a regression either way.
 - **Spill caveats**: `COUNT(DISTINCT …)` silently falls back to the in-memory
