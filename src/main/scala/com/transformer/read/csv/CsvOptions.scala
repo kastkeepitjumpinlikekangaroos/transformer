@@ -3,6 +3,7 @@ package com.transformer.read.csv
 import com.transformer.core.{ColumnarBatch, Field, Schema}
 
 import java.nio.charset.{Charset, StandardCharsets}
+import java.util.Locale
 
 /** Configuration for [[CsvReader]].
   *
@@ -30,7 +31,7 @@ object CsvOptions {
   /** Parse a flat string-keyed option bag as supplied through `InputFilePath.options`. */
   def fromMap(raw: Map[String, String]): CsvOptions = {
     def bool(key: String, default: Boolean): Boolean =
-      raw.get(key).map(_.trim.toLowerCase) match {
+      raw.get(key).map(_.trim.toLowerCase(Locale.ROOT)) match {
         case None | Some("") => default
         case Some("true") | Some("1") | Some("yes") => true
         case Some("false") | Some("0") | Some("no") => false

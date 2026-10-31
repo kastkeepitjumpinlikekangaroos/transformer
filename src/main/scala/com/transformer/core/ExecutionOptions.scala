@@ -1,5 +1,7 @@
 package com.transformer.core
 
+import java.util.Locale
+
 /** Per-query knobs the planner and spill-capable operators read at construction
   * time. Plumbed from `DataJob.runOneTask` through `SqlExecutor.execute` into
   * `PhysicalPlanner.plan` and finally to the breakers that opt into spill.
@@ -110,7 +112,7 @@ object ExecutionOptions {
   }
 
   private def parseBool(s: String): Boolean = {
-    val t = s.trim.toLowerCase
+    val t = s.trim.toLowerCase(Locale.ROOT)
     t == "true" || t == "1"
   }
 

@@ -1557,6 +1557,22 @@ ship a fix or move something from "not done" to "done".
   as a STRING, and fails a declared DOUBLE column). CSV moved to plain decimals
   in plan 06 at the user's choice; CAST was not asked about and still uses
   `java.lang.Double.parseDouble`.
+- **Names, functions and `UPPER` / `LOWER` used to depend on the JVM's locale
+  — fixed.** Every name the engine matches without regard to case went through
+  `String.toLowerCase()` or `toUpperCase()`, which read the default locale; under
+  a Turkish or Azerbaijani one, `I` lowers to a dotless i and `i` uppers to a
+  dotted I. So on such a machine `SELECT id FROM items` failed (`View 'items' is
+  not registered`: the catalog had stored `Items` under a dotless i), as did `min(...)`, `sin(...)`, `CAST(x
+  AS int)`, a template's `{{ ISO_DATE }}`, a task reading `Indexed` as `indexed`
+  and parquet's `"compression": "gzip"`, while `UPPER` and `LOWER` answered
+  differently. And `"part-%05d"`-style formats print a locale's own digits, so a
+  locale with non-ASCII numerals named part files and `{{ current_month_pad }}`
+  in them. Every such call now names `Locale.ROOT`, and
+  `job/locale_independence_test` runs under tr-TR (six of its tests failed at
+  the code before) and scans every module's compiled classes for the
+  default-locale forms, so a new one fails the suite. The JavaFX GUI's display
+  code is not on a job's path and is not scanned. See
+  [plans/robustness/16](../plans/robustness/16-locale-dependent-names.md).
 
 ## Wrong answers the I/O properties found (2026-10-14, all fixed)
 

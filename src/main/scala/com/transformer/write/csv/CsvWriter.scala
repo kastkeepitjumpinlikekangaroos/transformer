@@ -6,6 +6,7 @@ import com.transformer.read.csv.{CsvOptions, CsvValues}
 import java.io.{BufferedWriter, OutputStreamWriter}
 import java.nio.charset.{Charset, CharsetEncoder, CodingErrorAction, StandardCharsets}
 import java.nio.file.{Files, Path, Paths, StandardCopyOption}
+import java.util.Locale
 import java.util.concurrent.Callable
 
 final case class CsvWriteOptions(
@@ -25,7 +26,7 @@ final case class CsvWriteOptions(
 object CsvWriteOptions {
   def fromMap(raw: Map[String, String]): CsvWriteOptions = {
     def bool(key: String, default: Boolean): Boolean =
-      raw.get(key).map(_.trim.toLowerCase) match {
+      raw.get(key).map(_.trim.toLowerCase(Locale.ROOT)) match {
         case None => default
         case Some("true") | Some("1") | Some("yes") => true
         case Some("false") | Some("0") | Some("no") => false
@@ -82,7 +83,7 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
     * must not touch. None for UTF-8, UTF-16, UTF-32 and GB18030, where only
     * half of a surrogate pair fails, which [[formatField]] looks for itself. */
   private val checker: Option[CharsetEncoder] = {
-    val name = options.charset.name.toUpperCase
+    val name = options.charset.name.toUpperCase(Locale.ROOT)
     if (name.startsWith("UTF-") || name == "GB18030") None else Some(reportingEncoder())
   }
 
@@ -157,7 +158,7 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
       if (c == options.delimiter || c == options.quote || c == '\n' || c == '\r') quoted = true
       else if (Character.isSurrogate(c)) {
         if (Character.isHighSurrogate(c) && i + 1 < n && Character.isLowSurrogate(s.charAt(i + 1))) i += 1
-        else unwritable(row, column, f"half of a surrogate pair (U+${c.toInt}%04X), which is no character")
+        else unwritable(row, column, "half of a surrogate pair (U+%04X), which is no character".formatLocal(Locale.ROOT, c.toInt))
       }
       i += 1
     }
@@ -165,7 +166,7 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
       val enc = checker.get
       val bad = s.codePoints.toArray.find(cp => !enc.canEncode(new String(Character.toChars(cp)))).getOrElse(0)
       unwritable(row, column,
-        f"'${new String(Character.toChars(bad))}' (U+$bad%04X), which ${options.charset.name} cannot encode")
+        "'%s' (U+%04X), which %s cannot encode".formatLocal(Locale.ROOT, new String(Character.toChars(bad)), bad, options.charset.name))
     }
     if (!quoted) return s
     val sb = new java.lang.StringBuilder(s.length + 2)
@@ -234,7 +235,7 @@ object CsvWriter {
     val tasks: Seq[Callable[Long]] = (0 until n).map { i =>
       new Callable[Long] {
         def call(): Long = {
-          val target = targetDir.resolve(f"part-$i%05d.csv")
+          val target = targetDir.resolve("part-%05d.csv".formatLocal(Locale.ROOT, i))
           val w = new CsvWriter(target, schema, options)
           writers(i) = w
           val it = partitions(i)

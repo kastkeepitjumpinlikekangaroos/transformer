@@ -1,5 +1,7 @@
 package com.transformer.core
 
+import java.util.Locale
+
 final case class Field(name: String, dataType: DataType, nullable: Boolean = true)
 
 final case class Schema(fields: Vector[Field]) {
@@ -7,8 +9,8 @@ final case class Schema(fields: Vector[Field]) {
   def fieldNames: Vector[String] = fields.map(_.name)
 
   def indexOf(name: String): Int = {
-    val lower = name.toLowerCase
-    fields.indexWhere(_.name.toLowerCase == lower)
+    val lower = name.toLowerCase(Locale.ROOT)
+    fields.indexWhere(_.name.toLowerCase(Locale.ROOT) == lower)
   }
 
   def fieldOpt(name: String): Option[Field] = {

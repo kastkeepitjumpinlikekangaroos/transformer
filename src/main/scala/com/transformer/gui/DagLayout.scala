@@ -2,6 +2,8 @@ package com.transformer.gui
 
 import com.transformer.job.{InputFilePath, TaskDag}
 
+import java.util.Locale
+
 /** Whether a [[NodeBox]] represents an input view or a SQLTask. */
 sealed trait NodeKind
 object NodeKind {
@@ -95,7 +97,7 @@ object DagLayout {
     val taskCount = dag.nodes.size
     val inputCount = inputs.size
     val inputNameToIdx: Map[String, Int] =
-      inputs.iterator.zipWithIndex.map { case (in, i) => in.viewName.toLowerCase -> i }.toMap
+      inputs.iterator.zipWithIndex.map { case (in, i) => in.viewName.toLowerCase(Locale.ROOT) -> i }.toMap
 
     if (taskCount == 0 && inputCount == 0) {
       return new DagLayout(IndexedSeq.empty, IndexedSeq.empty, inputNameToIdx, 0.0, 0.0)

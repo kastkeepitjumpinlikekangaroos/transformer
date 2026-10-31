@@ -1,5 +1,7 @@
 package com.transformer.job
 
+import java.util.Locale
+
 /** Description of one input source.
   *
   * `path` may be a literal file, a directory, or a glob. Cloud paths (`gs://`, `s3://`)
@@ -15,8 +17,8 @@ final case class InputFilePath(
     cache: Boolean = true,
     format: Option[String] = None
 ) {
-  def detectedFormat: String = format.map(_.toLowerCase).getOrElse {
-    val lower = path.toLowerCase
+  def detectedFormat: String = format.map(_.toLowerCase(Locale.ROOT)).getOrElse {
+    val lower = path.toLowerCase(Locale.ROOT)
     if (lower.endsWith(".parquet")) "parquet"
     else if (lower.endsWith(".csv")) "csv"
     else if (lower.contains(".parquet")) "parquet"  // matches globs like *.parquet

@@ -8,6 +8,7 @@ import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
 import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
+import java.util.Locale
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
@@ -784,7 +785,7 @@ final class JobSession {
       try {
         val view = InputResolver.resolve(in.copy(path = rendered))
         cat.register(in.viewName, view)
-        seen += in.viewName.toLowerCase
+        seen += in.viewName.toLowerCase(Locale.ROOT)
         views += InteractiveViewSpec(
           name = in.viewName,
           kind = ViewKind.Input,
@@ -803,11 +804,11 @@ final class JobSession {
         val taskOutputPath: Option[String] = _outputPaths.lift(node.index).flatten
           .orElse(_historicalRuns.lift(node.index).flatMap(_.headOption).map(_._1.toString))
         (viewNameOpt, taskOutputPath) match {
-          case (Some(name), Some(path)) if !seen.contains(name.toLowerCase) =>
+          case (Some(name), Some(path)) if !seen.contains(name.toLowerCase(Locale.ROOT)) =>
             try {
               val view = JobSession.readOutputAsView(path)
               cat.replace(name, view)
-              seen += name.toLowerCase
+              seen += name.toLowerCase(Locale.ROOT)
               views += InteractiveViewSpec(
                 name = name,
                 kind = ViewKind.Task,
@@ -857,12 +858,12 @@ object JobSession {
   private[gui] def readOutputAsView(path: String): CatalogView = {
     val p = try Paths.get(path) catch { case NonFatal(_) => null }
     val recordFormat: Option[String] =
-      if (p != null && Files.isDirectory(p)) TaskRunRecord.read(p).map(_.format.toLowerCase)
+      if (p != null && Files.isDirectory(p)) TaskRunRecord.read(p).map(_.format.toLowerCase(Locale.ROOT))
       else None
     val isParquet = recordFormat match {
       case Some(f) => f == "parquet"
       case None =>
-        val lower = path.toLowerCase
+        val lower = path.toLowerCase(Locale.ROOT)
         lower.endsWith(".parquet") || lower.contains(".parquet")
     }
     if (isParquet) ParquetReader.fromPath(path)

@@ -787,7 +787,10 @@ half up, toward positive infinity (`ROUND(2.5)` is 3, `ROUND(-2.5)` is -2), and
 whose digits there reach 2^52, as `ROUND(1e10, 10)`'s do) comes back as it is,
 a scale too negative for a `DOUBLE` gives 0, and `NaN` and the infinities are
 their own answer. A `SUBSTRING` position before the first character counts from
-the first, and one past the last gives the empty string.
+the first, and one past the last gives the empty string. `UPPER` and `LOWER` map
+case by Unicode's own rules, the same on every machine: the JVM's locale, under
+which a Turkish one would make `UPPER('i')` a dotted capital, plays no part, and
+neither does it in matching a name without regard to case.
 
 `CURRENT_DATE` and `CURRENT_TIMESTAMP` take every spelling other engines accept
 (`current_date`, `CURRENT_DATE()`, DB2's `CURRENT DATE`). Both read the wall

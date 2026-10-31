@@ -1,5 +1,7 @@
 package com.transformer.core.metrics
 
+import java.util.Locale
+
 /** Tiny stdlib-only JSON reader used by [[TaskMetricsRecord]] to round-trip
   * the hand-rolled `_perf.json` output for tests and developer tooling.
   *
@@ -226,5 +228,5 @@ private[metrics] object JsonMini {
   }
 
   private def hex(sb: java.lang.StringBuilder, c: Char): Unit =
-    sb.append('\\').append('u').append(f"${c.toInt}%04x")
+    sb.append('\\').append('u').append("%04x".formatLocal(Locale.ROOT, c.toInt))
 }

@@ -1,6 +1,7 @@
 package com.transformer.core.metrics
 
 import java.lang.management.{GarbageCollectorMXBean, ManagementFactory, ThreadMXBean}
+import java.util.Locale
 
 import scala.jdk.CollectionConverters._
 
@@ -118,7 +119,7 @@ object MetricsCollector {
     * `ExecutionOptions` parse semantics for `options.spill` / `options.metrics`
     * so the local config and global env/sysprop default behave identically. */
   private[metrics] def parseBool(s: String): Boolean = {
-    val t = s.trim.toLowerCase
+    val t = s.trim.toLowerCase(Locale.ROOT)
     t == "true" || t == "1"
   }
 }

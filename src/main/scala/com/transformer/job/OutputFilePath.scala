@@ -1,5 +1,7 @@
 package com.transformer.job
 
+import java.util.Locale
+
 /** Description of one output target.
   *
   * `path` is always interpreted as a *directory* — the job writes one or more
@@ -29,8 +31,8 @@ final case class OutputFilePath(
       s"OutputFilePath.maxPartitions must be >= 1 if set; got ${maxPartitions.get}"
     )
 
-  def detectedFormat: String = format.map(_.toLowerCase).getOrElse {
-    val lower = path.toLowerCase
+  def detectedFormat: String = format.map(_.toLowerCase(Locale.ROOT)).getOrElse {
+    val lower = path.toLowerCase(Locale.ROOT)
     if (lower.endsWith(".parquet")) "parquet"
     else if (lower.endsWith(".csv")) "csv"
     else if (lower.contains(".parquet")) "parquet"

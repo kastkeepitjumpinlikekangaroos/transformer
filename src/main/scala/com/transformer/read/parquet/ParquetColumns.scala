@@ -6,6 +6,8 @@ import org.apache.parquet.schema.{LogicalTypeAnnotation, MessageType, Type}
 import org.apache.parquet.schema.LogicalTypeAnnotation._
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 
+import java.util.Locale
+
 import scala.jdk.CollectionConverters._
 
 /** How a parquet file's columns are read: the engine type each one reads as,
@@ -130,7 +132,7 @@ private[parquet] object ParquetColumns {
 
       // TIME, INTERVAL, and anything a later format version adds.
       case (name, annotation) => throw new UnsupportedOperationException(
-        s"Parquet column '${t.getName}' is ${name.toString.toLowerCase} $annotation, which has no transformer type")
+        s"Parquet column '${t.getName}' is ${name.toString.toLowerCase(Locale.ROOT)} $annotation, which has no transformer type")
     }
   }
 

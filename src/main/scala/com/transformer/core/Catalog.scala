@@ -1,5 +1,6 @@
 package com.transformer.core
 
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import scala.jdk.CollectionConverters._
 
@@ -46,19 +47,19 @@ final class Catalog {
   private val views = new ConcurrentHashMap[String, CatalogView]()
 
   def register(name: String, view: CatalogView): Unit = {
-    val key = name.toLowerCase
+    val key = name.toLowerCase(Locale.ROOT)
     if (views.putIfAbsent(key, view) != null) {
       throw new IllegalStateException(s"View '$name' is already registered")
     }
   }
 
   def replace(name: String, view: CatalogView): Unit = {
-    views.put(name.toLowerCase, view)
+    views.put(name.toLowerCase(Locale.ROOT), view)
   }
 
-  def remove(name: String): Unit = { views.remove(name.toLowerCase); () }
+  def remove(name: String): Unit = { views.remove(name.toLowerCase(Locale.ROOT)); () }
 
-  def get(name: String): Option[CatalogView] = Option(views.get(name.toLowerCase))
+  def get(name: String): Option[CatalogView] = Option(views.get(name.toLowerCase(Locale.ROOT)))
 
   def apply(name: String): CatalogView =
     get(name).getOrElse(throw new IllegalArgumentException(

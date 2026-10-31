@@ -3,6 +3,7 @@ package com.transformer.temporal
 import java.time.{Duration, ZonedDateTime}
 import java.time.format.DateTimeFormatter
 import java.time.temporal.{IsoFields, WeekFields}
+import java.util.Locale
 import scala.util.matching.Regex
 
 /** Jinja-style template renderer for SQL strings and output file paths.
@@ -34,11 +35,11 @@ object TemplateRenderer {
       format(shift(ref, preOffset + userOffset))
   }
 
-  private val yyyyMMdd: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd")
-  private val yyyy_MM_dd: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
-  private val isoDateTime: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss")
-  private val isoTimestamp: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
-  private val yyyyMM: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMM")
+  private val yyyyMMdd: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd", Locale.ROOT)
+  private val yyyy_MM_dd: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.ROOT)
+  private val isoDateTime: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss", Locale.ROOT)
+  private val isoTimestamp: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.ROOT)
+  private val yyyyMM: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMM", Locale.ROOT)
 
   private val plusDays: (ZonedDateTime, Long) => ZonedDateTime = (z, n) => z.plusDays(n)
   private val plusMonths: (ZonedDateTime, Long) => ZonedDateTime = (z, n) => z.plusMonths(n)
@@ -75,12 +76,12 @@ object TemplateRenderer {
     "year_month" -> Var(plusMonths, _.format(yyyyMM)),
 
     // -------- Calendar components (zero-padded to 2) --------
-    "current_month_pad" -> Var(plusMonths, z => f"${z.getMonthValue}%02d"),
-    "current_day_pad" -> Var(plusDays, z => f"${z.getDayOfMonth}%02d"),
-    "current_hour_pad" -> Var(plusHours, z => f"${z.getHour}%02d"),
-    "current_minute_pad" -> Var(plusMinutes, z => f"${z.getMinute}%02d"),
-    "current_second_pad" -> Var(plusSeconds, z => f"${z.getSecond}%02d"),
-    "current_week_pad" -> Var(plusWeeks, z => f"${z.get(WeekFields.ISO.weekOfWeekBasedYear)}%02d"),
+    "current_month_pad" -> Var(plusMonths, z => "%02d".formatLocal(Locale.ROOT, z.getMonthValue)),
+    "current_day_pad" -> Var(plusDays, z => "%02d".formatLocal(Locale.ROOT, z.getDayOfMonth)),
+    "current_hour_pad" -> Var(plusHours, z => "%02d".formatLocal(Locale.ROOT, z.getHour)),
+    "current_minute_pad" -> Var(plusMinutes, z => "%02d".formatLocal(Locale.ROOT, z.getMinute)),
+    "current_second_pad" -> Var(plusSeconds, z => "%02d".formatLocal(Locale.ROOT, z.getSecond)),
+    "current_week_pad" -> Var(plusWeeks, z => "%02d".formatLocal(Locale.ROOT, z.get(WeekFields.ISO.weekOfWeekBasedYear))),
 
     // -------- Short aliases --------
     "year" -> Var(plusYears, _.getYear.toString),
@@ -104,7 +105,7 @@ object TemplateRenderer {
 
   def render(template: String, ref: ZonedDateTime): String = {
     Pattern.replaceAllIn(template, m => {
-      val name = m.group(1).toLowerCase
+      val name = m.group(1).toLowerCase(Locale.ROOT)
       val signStr = Option(m.group(2))
       val numStr = Option(m.group(3))
       val v = vars.getOrElse(

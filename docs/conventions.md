@@ -24,6 +24,16 @@ specific traps.
   and editing tools treat the whole file as binary. Build test text past ASCII
   from code points (`new String(Character.toChars(0x1F600))`) for the same
   reason.
+- **Case folding and formatting name `Locale.ROOT`.** `toLowerCase` and
+  `toUpperCase` with no argument, `String.format`, an `f"..."` interpolator and
+  `DateTimeFormatter.ofPattern(pattern)` read the JVM's default locale, under
+  which a Turkish machine folds `I` to a dotless i (so `min`, a view called
+  `Items` and `CAST(x AS int)` stop matching) and some locales print digits that
+  are not ASCII (a part file named in Thai numerals). Every such call in a module
+  a job runs names `Locale.ROOT`: `name.toLowerCase(Locale.ROOT)`,
+  `"part-%05d.csv".formatLocal(Locale.ROOT, i)`.
+  `job:locale_independence_test` runs under tr-TR and fails on any compiled call
+  of the default-locale forms.
 - **No `*/` inside Scaladoc** — the Scala lexer closes the comment at the first
   `*/`. Glob examples like `data/*.csv` inside a `/** */` block are a footgun;
   use `'*'.csv` or move the example to plain prose. We hit this twice.

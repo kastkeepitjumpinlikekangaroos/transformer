@@ -9,6 +9,7 @@ import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
 
 import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
+import java.util.Locale
 import java.util.concurrent.{Callable, LinkedBlockingQueue}
 import java.util.concurrent.atomic.AtomicReference
 import scala.collection.mutable
@@ -55,7 +56,7 @@ final case class DataJob(
     */
   def buildDag(): TaskDag = {
     val vars = temporalVariables.getOrElse(TemporalVariables())
-    val inputViewNames = inputs.iterator.map(_.viewName.toLowerCase).toSet
+    val inputViewNames = inputs.iterator.map(_.viewName.toLowerCase(Locale.ROOT)).toSet
     TaskDag.build(sql, inputViewNames, vars)
   }
 
@@ -70,7 +71,7 @@ final case class DataJob(
     val runStarted = Instant.now()
     val catalog = new Catalog
 
-    val inputViewNames = inputs.iterator.map(_.viewName.toLowerCase).toSet
+    val inputViewNames = inputs.iterator.map(_.viewName.toLowerCase(Locale.ROOT)).toSet
     val dag =
       try TaskDag.build(sql, inputViewNames, vars)
       catch {
@@ -281,7 +282,7 @@ final case class DataJob(
       // input: an input no task reads has nothing else to carry its failure.
       inputFailures(index) = cause
       val name = inputs(index).viewName
-      inputDependents.getOrElse(name.toLowerCase, Vector.empty).foreach { i =>
+      inputDependents.getOrElse(name.toLowerCase(Locale.ROOT), Vector.empty).foreach { i =>
         pendingInputDeps(i) -= 1
         if (cause.isDefined && !upstreamFailed(i)) {
           upstreamFailed(i) = true
@@ -920,7 +921,7 @@ final case class DataJob(
     inputs.indices.flatMap { i =>
       failures(i).map { cause =>
         val name = inputs(i).viewName
-        if (read.contains(name.toLowerCase)) inputLoadFailure(name, cause)
+        if (read.contains(name.toLowerCase(Locale.ROOT))) inputLoadFailure(name, cause)
         else s"failed to load input '$name', which no task reads: $cause"
       }
     }
@@ -1002,7 +1003,7 @@ object DataJob {
     val sys = Option(System.getProperty(ForceSpillPropertyName)).map(_.trim).filter(_.nonEmpty)
     val env = Option(System.getenv(ForceSpillEnvVarName)).map(_.trim).filter(_.nonEmpty)
     sys.orElse(env).exists { s =>
-      val t = s.toLowerCase
+      val t = s.toLowerCase(Locale.ROOT)
       t == "true" || t == "1"
     }
   }

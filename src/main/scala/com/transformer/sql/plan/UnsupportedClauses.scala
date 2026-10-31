@@ -34,6 +34,7 @@ import net.sf.jsqlparser.statement.select.{
 }
 
 import java.lang.reflect.{Field => JField, InvocationTargetException, Method, Modifier}
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import scala.jdk.CollectionConverters._
 
@@ -147,7 +148,7 @@ object UnsupportedClauses {
     case _                          => true
   }
 
-  private def upper(name: String): String = if (name == null) "" else name.toUpperCase
+  private def upper(name: String): String = if (name == null) "" else name.toUpperCase(Locale.ROOT)
 
   // ---------------------------------------------------------------------------
   // Entries shared by several classes
@@ -206,7 +207,7 @@ object UnsupportedClauses {
       "* EXCEPT (...) / * EXCLUDE (...)",
       advice = "list the columns you want",
       example = "SELECT * EXCEPT (a) FROM t",
-      describe = c => s"* ${Option(c.getExceptKeyword).map(_.toUpperCase).getOrElse("EXCEPT")} (...)"
+      describe = c => s"* ${Option(c.getExceptKeyword).map(_.toUpperCase(Locale.ROOT)).getOrElse("EXCEPT")} (...)"
     )(c => isPresent(c.getExceptColumns) || isPresent(c.getExceptKeyword)),
     rejects("getReplaceExpressions")("* REPLACE (...)",
       advice = "list the columns you want", example = "SELECT * REPLACE (a + 1 AS a) FROM t"))
@@ -219,7 +220,7 @@ object UnsupportedClauses {
     * `current_date`, `CURRENT_DATE()` and DB2's `CURRENT DATE` all arrive as
     * different strings. */
   private[plan] def clockKeyword(written: String): String =
-    written.toUpperCase.stripSuffix("()").trim.replaceAll("\\s+", "_")
+    written.toUpperCase(Locale.ROOT).stripSuffix("()").trim.replaceAll("\\s+", "_")
 
   private[plan] val ClockKeywords = Set("CURRENT_DATE", "CURRENT_TIMESTAMP")
 
@@ -227,7 +228,7 @@ object UnsupportedClauses {
     * `WITH TIES` and `PERCENT`. */
   private def fetchModifiers(f: Fetch): Seq[String] =
     Option(f.getFetchParameters).map(_.asScala.toSeq).getOrElse(Nil)
-      .filterNot(p => Set("ROW", "ROWS", "ONLY")(p.toUpperCase))
+      .filterNot(p => Set("ROW", "ROWS", "ONLY")(p.toUpperCase(Locale.ROOT)))
 
   private val RankingFunctions = Set("ROW_NUMBER", "RANK", "DENSE_RANK")
   private val DistinctAggregates = Set("COUNT", "SUM", "AVG", "MIN", "MAX")

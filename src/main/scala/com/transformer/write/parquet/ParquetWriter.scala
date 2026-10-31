@@ -12,6 +12,7 @@ import org.apache.parquet.io.api.{Binary, RecordConsumer}
 import org.apache.parquet.schema.MessageType
 
 import java.nio.file.{Files, Path, StandardCopyOption}
+import java.util.Locale
 import java.util.concurrent.Callable
 
 /** Writes a stream of [[ColumnarBatch]]es to a single Parquet file.
@@ -63,7 +64,7 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
   // per-table via `output.json` -> `options.compression`. Accepts `SNAPPY`,
   // `GZIP`, `UNCOMPRESSED` / `NONE` (the legacy alias is kept for symmetry
   // with Spark's option strings).
-  private val codec: CompressionCodecName = options.get("compression").map(_.toUpperCase) match {
+  private val codec: CompressionCodecName = options.get("compression").map(_.toUpperCase(Locale.ROOT)) match {
     case Some("SNAPPY") | None => CompressionCodecName.SNAPPY
     case Some("UNCOMPRESSED") | Some("NONE") => CompressionCodecName.UNCOMPRESSED
     case Some("GZIP") => CompressionCodecName.GZIP
@@ -203,7 +204,7 @@ object ParquetWriter {
         // batch (or end-of-stream), so the work is the same — we just skip
         // the file IO when nothing survived.
         if (!it.hasNext) return 0L
-        val target = targetDir.resolve(f"part-$i%05d.parquet")
+        val target = targetDir.resolve("part-%05d.parquet".formatLocal(Locale.ROOT, i))
         val w = new ParquetWriter(target, schema, options)
         writers(i) = w
         while (it.hasNext) w.write(it.next())

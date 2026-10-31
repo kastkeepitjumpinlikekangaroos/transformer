@@ -1,5 +1,7 @@
 package com.transformer.job
 
+import java.util.Locale
+
 /** Tiny stdlib-only JSON parser used by [[DirectoryJobLoader]].
   *
   * Supports the standard JSON grammar — objects, arrays, strings (with `\uXXXX`
@@ -136,7 +138,7 @@ object Json {
   }
 
   private def hex(sb: java.lang.StringBuilder, c: Char): Unit =
-    sb.append('\\').append('u').append(f"${c.toInt}%04x")
+    sb.append('\\').append('u').append("%04x".formatLocal(Locale.ROOT, c.toInt))
 }
 
 private final class JsonParser(input: String) {

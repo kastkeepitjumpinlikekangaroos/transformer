@@ -252,7 +252,7 @@ semantic questions on 2026-10-31, the recommended option each time.
 
 | # | Plan | What | Status | Risk |
 |---|------|------|--------|------|
-| [16](16-locale-dependent-names.md) | Names and case folding depend on the JVM locale | under tr-TR, `min()`, view names and `CAST(x AS int)` fail; `UPPER` differs | planned | low |
+| [16](16-locale-dependent-names.md) | Names and case folding depend on the JVM locale | under tr-TR, `min()`, view names and `CAST(x AS int)` fail; `UPPER` differs | **done** 2026-10-31 | low |
 | [17](17-case-evaluates-every-branch.md) | CASE, IF and COALESCE evaluate every branch | a guarded CAST or overflow fails on rows the guard excludes; `eval` and `evalVec` disagree | planned | medium |
 | [18](18-integer-overflow-wraps.md) | Integer arithmetic, SUM and narrowing CASTs wrap | `2147483647 + 1` is negative, `SUM` of BIGINTs goes negative, `CAST(NaN AS INT)` is 0 | planned | medium |
 | [19](19-rounding-through-double.md) | ROUND, TRUNC, FLOOR and CEIL compute in DOUBLE | `ROUND(1.005, 2)` on a DECIMAL is 1.0; `FLOOR` of a BIGINT past 2^53 changes it | planned | medium |

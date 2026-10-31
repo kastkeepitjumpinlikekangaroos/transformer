@@ -103,9 +103,9 @@ object LogicalBuilder {
       collector: Option[mutable.ArrayBuffer[CteDef]]): LogicalPlan = {
     val withItems = Option(sel.getWithItemsList).map(_.asScala.toSeq).getOrElse(Nil)
     withItems.map(item => unquoted(item.getAlias.getName)).foldLeft(Set.empty[String]) { (defined, name) =>
-      if (defined(name.toLowerCase))
+      if (defined(name.toLowerCase(Locale.ROOT)))
         throw new IllegalArgumentException(s"WITH defines '$name' twice; give each query its own name")
-      defined + name.toLowerCase
+      defined + name.toLowerCase(Locale.ROOT)
     }
     val cteScope: Map[String, CteScopeEntry] = withItems.foldLeft(outerCteScope) { (scope, item) =>
       if (item.isRecursive)
@@ -132,10 +132,10 @@ object LogicalBuilder {
           // Outermost scope: emit a placeholder the resolver resolves later.
           val pending = new PendingCteView(cteName, ctePlan.outputSchema)
           buf += CteDef(cteName, pending, ctePlan)
-          scope + (cteName.toLowerCase -> PendingCte(cteName, pending))
+          scope + (cteName.toLowerCase(Locale.ROOT) -> PendingCte(cteName, pending))
         case None =>
           // Nested scope: inline directly, as before.
-          scope + (cteName.toLowerCase -> InlineCte(ctePlan))
+          scope + (cteName.toLowerCase(Locale.ROOT) -> InlineCte(ctePlan))
       }
     }
 
@@ -694,7 +694,7 @@ object LogicalBuilder {
     case t: net.sf.jsqlparser.schema.Table =>
       val name = unquoted(t.getName)
       val alias = Option(t.getAlias).map(aliasName).orElse(Some(name))
-      cteScope.get(name.toLowerCase) match {
+      cteScope.get(name.toLowerCase(Locale.ROOT)) match {
         case Some(PendingCte(cteName, pending)) =>
           // Placeholder scan; the resolver swaps it for the inlined body or a
           // scan over the materialized result. Alias handling is identical to a
@@ -1092,7 +1092,7 @@ object LogicalBuilder {
                                           aggResolver: Expression => Option[Expr],
                                           windowResolver: AnalyticExpression => Option[Expr]): Expr = {
     def bind(x: Expression): Expr = bindExprWithAggs(x, sources, aggResolver, windowResolver)
-    val name = f.getName.toUpperCase
+    val name = f.getName.toUpperCase(Locale.ROOT)
     val params: Seq[Expression] = Option(f.getParameters)
       .map(_.asInstanceOf[ExpressionList[_]].asScala.asInstanceOf[Iterable[Expression]].toSeq)
       .getOrElse(Nil)
@@ -1125,7 +1125,7 @@ object LogicalBuilder {
   }
 
   private def bindAgg(f: Function, sources: Sources): AggExpr = {
-    val upper = f.getName.toUpperCase
+    val upper = f.getName.toUpperCase(Locale.ROOT)
     val params: Seq[Expression] = Option(f.getParameters)
       .map(_.asInstanceOf[ExpressionList[_]].asScala.asInstanceOf[Iterable[Expression]].toSeq)
       .getOrElse(Nil)
@@ -1177,7 +1177,7 @@ object LogicalBuilder {
     "VARIANCE", "VAR_SAMP", "VAR_POP", "VAR", "VARP",
     "COVAR_SAMP", "COVAR_POP", "CORR"
   )
-  private def isAggFn(name: String): Boolean = AggFns.contains(name.toUpperCase)
+  private def isAggFn(name: String): Boolean = AggFns.contains(name.toUpperCase(Locale.ROOT))
 
   private def containsAggregate(e: Expression): Boolean = e match {
     case _: AnalyticExpression => false  // window aggregates are not group aggregates
@@ -1258,7 +1258,7 @@ object LogicalBuilder {
     val orderKeys: Seq[SortKey] = orderEls.map(obe => sortKey(binder(obe.getExpression), obe))
 
     val frame = bindFrame(Option(ae.getWindowElement), orderEls.nonEmpty)
-    val fnName = ae.getName.toUpperCase
+    val fnName = ae.getName.toUpperCase(Locale.ROOT)
 
     val argExpr: Option[Expression] = Option(ae.getExpression).filterNot(_.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns])
     // As for aggregates, the star is an AllColumns argument; `ae.isAllColumns`
@@ -1512,7 +1512,7 @@ object LogicalBuilder {
   private def columnNamed(table: Option[String], name: String): Expression =
     new Column((table.toSeq :+ name).map(SqlParser.quote).asJava)
 
-  private def parseTypeName(s: String): DataType = s.toUpperCase match {
+  private def parseTypeName(s: String): DataType = s.toUpperCase(Locale.ROOT) match {
     case "INT" | "INTEGER" => DataType.IntType
     case "BIGINT" | "LONG" => DataType.LongType
     case "FLOAT" | "REAL" => DataType.FloatType

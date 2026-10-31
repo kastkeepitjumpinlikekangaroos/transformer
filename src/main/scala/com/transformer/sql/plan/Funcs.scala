@@ -3,6 +3,7 @@ package com.transformer.sql.plan
 import com.transformer.core._
 
 import java.util
+import java.util.Locale
 
 /** Scalar function registry. */
 object Funcs {
@@ -35,7 +36,7 @@ object Funcs {
     import Param._
     val n = argTypes.size
     def each(param: Param, returns: DataType) = Some(Signature(Seq.fill(n)(param), returns))
-    name.toUpperCase match {
+    name.toUpperCase(Locale.ROOT) match {
       case "LENGTH" | "LEN" if n == 1 => each(Text, DataType.IntType)
       case "UPPER" | "LOWER" | "TRIM" if n == 1 => each(Text, DataType.StringType)
       case "SUBSTRING" if n == 2 || n == 3 =>
@@ -77,14 +78,14 @@ object Funcs {
   }
 
   def apply(name: String, args: Seq[Any], resultType: DataType, argTypes: Seq[DataType]): Any =
-    name.toUpperCase match {
+    name.toUpperCase(Locale.ROOT) match {
       case "LENGTH" | "LEN" =>
         val v = args.head
         if (v == null) null else v.toString.length
       case "UPPER" =>
-        if (args.head == null) null else args.head.toString.toUpperCase
+        if (args.head == null) null else args.head.toString.toUpperCase(Locale.ROOT)
       case "LOWER" =>
-        if (args.head == null) null else args.head.toString.toLowerCase
+        if (args.head == null) null else args.head.toString.toLowerCase(Locale.ROOT)
       case "TRIM" =>
         if (args.head == null) null else args.head.toString.trim
       case "SUBSTRING" =>
@@ -260,7 +261,7 @@ object Funcs {
       resultType: DataType,
       batch: ColumnarBatch): Option[ColumnVector] = {
     val a = args
-    name.toUpperCase match {
+    name.toUpperCase(Locale.ROOT) match {
       case "COALESCE" if a.nonEmpty                   => Some(VecFuncs.coalesce(a, resultType, batch))
       case "LENGTH" | "LEN" if a.size == 1            => Some(VecFuncs.length(a.head, batch))
       case "UPPER" if a.size == 1                     => Some(VecFuncs.upperLower(a.head, batch, lower = false))
@@ -342,7 +343,7 @@ object VecFuncs {
       if (argVec.isNull(i)) values(i) = null
       else {
         val s = argVec.getBoxed(i).toString
-        values(i) = if (lower) s.toLowerCase else s.toUpperCase
+        values(i) = if (lower) s.toLowerCase(Locale.ROOT) else s.toUpperCase(Locale.ROOT)
       }
       i += 1
     }

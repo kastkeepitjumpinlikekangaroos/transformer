@@ -2,6 +2,8 @@ package com.transformer.sql.plan
 
 import com.transformer.core.{DataType, Schema}
 
+import java.util.Locale
+
 /** Helpers for the analyzer: name resolution, implicit casting, type widening. */
 object Analyzer {
 
@@ -18,16 +20,16 @@ object Analyzer {
       qualifier: Option[String],
       name: String,
       sources: Seq[(Option[String], Schema)]): Option[ColRefExpr] = {
-    val nameLower = name.toLowerCase
-    val qLower = qualifier.map(_.toLowerCase)
+    val nameLower = name.toLowerCase(Locale.ROOT)
+    val qLower = qualifier.map(_.toLowerCase(Locale.ROOT))
 
     // Index columns in source order, tracking offset within concatenated schema.
     var offset = 0
     var matches: List[ColRefExpr] = Nil
     sources.foreach { case (alias, schema) =>
-      val aliasLower = alias.map(_.toLowerCase)
+      val aliasLower = alias.map(_.toLowerCase(Locale.ROOT))
       schema.fields.zipWithIndex.foreach { case (f, i) =>
-        val fNameLower = f.name.toLowerCase
+        val fNameLower = f.name.toLowerCase(Locale.ROOT)
         val nameMatches = fNameLower == nameLower
         val qualMatches = qLower.isEmpty ||
           aliasLower.contains(qLower.get) ||
@@ -371,5 +373,5 @@ object Analyzer {
       throw new IllegalArgumentException(s"$what on ${typeName(t)} is not supported; CAST it to STRING")
   }
 
-  private def typeName(t: DataType): String = t.name.toUpperCase
+  private def typeName(t: DataType): String = t.name.toUpperCase(Locale.ROOT)
 }

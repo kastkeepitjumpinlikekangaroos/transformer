@@ -6,6 +6,8 @@ import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 import net.sf.jsqlparser.statement.select.{ParenthesedSelect, Select, SetOperationList}
 import net.sf.jsqlparser.util.TablesNamesFinder
 
+import java.util.Locale
+
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
@@ -71,7 +73,7 @@ object TaskDag {
     while (idx < tasks.size) {
       val t = tasks(idx)
       t.viewName.foreach { vn =>
-        val key = vn.toLowerCase
+        val key = vn.toLowerCase(Locale.ROOT)
         if (inputViewNames.contains(key)) {
           throw new IllegalArgumentException(
             s"Task '${t.displayName}' viewName '$vn' collides with an input view of the same name"
@@ -105,7 +107,7 @@ object TaskDag {
         case _ => Set.empty[String]
       }
       new TablesNamesFinder().getTableList(stmt).asScala.iterator
-        .map(name => SqlParser.unquote(name).toLowerCase).filterNot(ctes).toSet
+        .map(name => SqlParser.unquote(name).toLowerCase(Locale.ROOT)).filterNot(ctes).toSet
     }
 
     val mainRefs: IndexedSeq[Set[String]] = tasks.indices.map(i => extract(renderedMains(i)))
@@ -113,7 +115,7 @@ object TaskDag {
       tasks.indices.map(i => renderedValidations(i).iterator.flatMap(extract).toSet)
 
     tasks.indices.foreach { i =>
-      val selfView = tasks(i).viewName.map(_.toLowerCase)
+      val selfView = tasks(i).viewName.map(_.toLowerCase(Locale.ROOT))
       // Self-reference in main SQL is impossible: the task can't read its own output
       // before it has been written. (Self-reference in a validation IS expected — the
       // validation queries the just-materialized view by name.)
@@ -206,7 +208,7 @@ object TaskDag {
     * a table, which the job then refused as an unknown view. */
   private def cteNames(select: Select): Set[String] = {
     val own = Option(select.getWithItemsList).map(_.asScala.toSeq).getOrElse(Nil)
-      .flatMap(item => cteNames(item.getSelect) + SqlParser.unquote(item.getAlias.getName).toLowerCase)
+      .flatMap(item => cteNames(item.getSelect) + SqlParser.unquote(item.getAlias.getName).toLowerCase(Locale.ROOT))
     val inner = select match {
       case s: SetOperationList => s.getSelects.asScala.flatMap(cteNames)
       case p: ParenthesedSelect => cteNames(p.getSelect)

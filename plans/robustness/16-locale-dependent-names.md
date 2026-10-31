@@ -1,6 +1,6 @@
 # Plan 16: names, functions and case folding depend on the JVM's locale
 
-> Status: planned · found by the 2026-10-31 audit · Effort: half a day ·
+> Status: **done** 2026-10-31 · found by the 2026-10-31 audit · Effort: half a day ·
 > Risk: low (a mechanical change, one test target under a Turkish locale)
 
 ## How this was found
@@ -49,3 +49,26 @@ the same test fails on any new locale-less conversion in `src/main`.
 
 README (`UPPER` / `LOWER` are locale-independent), gotchas (the pitfall),
 testing.md (the new target), conventions.md (the rule).
+
+## Outcome
+
+Done as planned. 59 case conversions and 18 formats in 22 files of the
+modules a job runs (core,
+sql, read, write, job, temporal, cli, and the GUI's `JobSession` and
+`DagLayout`) name `Locale.ROOT`, and the `f"..."` formats that build part file
+names, template values, JSON escapes, CSV error messages and the CLI's task
+lines are `formatLocal(Locale.ROOT, ...)`; the template's date patterns are
+`ofPattern(p, Locale.ROOT)`.
+
+`job/locale_independence_test` runs under tr-TR. Against the code before, six of
+its seven tests failed: `UPPER('istanbul')` and `LOWER('Iowa')`, the
+`{{ ISO_DATE }}` variable, the directory job (its task reading `Indexed` as
+`indexed` failed the DAG), the view lookup, part file names under a Thai-numeral
+format locale, and the scan, which named `Catalog`'s `toLowerCase()` first.
+The scan reads every module jar's constant pools for `String.toLowerCase()`,
+`toUpperCase()`, `String.format`, `formatted`, `StringOps.format` (what `f"..."`
+compiles to), `DateTimeFormatter.ofPattern(p)` and `NumberFormat.getInstance()`.
+
+Not changed: the JavaFX GUI's display code (pill labels, the SQL highlighter's
+keyword match, the OS-name check), which no job runs; another session was
+rewriting those files at the time.

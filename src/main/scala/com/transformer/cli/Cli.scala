@@ -9,6 +9,7 @@ import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
 import java.time.format.DateTimeParseException
 import java.time.temporal.ChronoUnit
+import java.util.Locale
 import scala.util.control.NonFatal
 
 /** The `transformer` command line, minus the GUI. `TransformerMain` hands
@@ -148,7 +149,8 @@ object Cli {
   }
 
   private def describe(t: TaskResult): String = {
-    val head = f"  ${statusName(t.status)}%-16s ${t.taskName}%-28s rows=${t.rowsProduced}%-10d ${t.durationMillis}%6d ms"
+    val head = "  %-16s %-28s rows=%-10d %6d ms".formatLocal(Locale.ROOT,
+      statusName(t.status), t.taskName, t.rowsProduced, t.durationMillis)
     t.status match {
       case TaskStatus.Failed(reason) => s"$head\n    $reason"
       case TaskStatus.Skipped(reason) => s"$head\n    $reason"
