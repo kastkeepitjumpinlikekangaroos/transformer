@@ -1311,6 +1311,55 @@ class DataJobTest {
     assertEquals("do not delete me", Files.readString(foreign))
   }
 
+  /** The tasks after one read exactly the part files its run wrote, and a
+    * directory holding part files no record names is refused before
+    * anything is written. With `part-00007.csv` (one row, 999) left in `q`'s
+    * directory and no `_run.json`, `q` wrote `part-00000.csv` and `r` read
+    * two rows (plans/robustness/29). A file that is no part file is neither
+    * read nor deleted, and a parquet output of no rows reads back as none. */
+  @Test def onlyThePartFilesARunWroteAreItsOutput(): Unit = {
+    val inDir = tmpDir("dj-stray-in-")
+    writeCsv(inDir, "t.csv", "a\n1\n")
+    def job(out: Path, format: String = "csv", where: String = ""): DataJob = DataJob(
+      inputs = Seq(InputFilePath(inDir.resolve("t.csv").toString, viewName = "t")),
+      sql = Seq(
+        SQLTask(name = Some("q"), viewName = Some("q"), sqlString = Some(s"SELECT a FROM t$where"),
+          outputFile = Some(OutputFilePath(out.resolve("q").toString, format = Some(format)))),
+        SQLTask(name = Some("r"), viewName = Some("r"), sqlString = Some("SELECT COUNT(*) AS n FROM q"),
+          outputFile = Some(OutputFilePath(out.resolve("r").toString)))))
+    def count(out: Path): String = readOutputDir(out.resolve("r")).trim
+
+    // A stray part file and no record: q fails naming it, before writing.
+    val stray = tmpDir("dj-stray-out-")
+    Files.createDirectories(stray.resolve("q"))
+    Files.writeString(stray.resolve("q/part-00007.csv"), "a\n999\n")
+    val byName = job(stray).run().tasks.map(t => t.taskName -> t.status).toMap
+    byName("q") match {
+      case TaskStatus.Failed(msg) =>
+        assertTrue(msg, msg.contains("already holds part-00007.csv, which no run record names"))
+      case other => fail(s"expected q to fail, got $other")
+    }
+    assertTrue(byName("r").toString, byName("r").isInstanceOf[TaskStatus.Skipped])
+    // Untouched, and not marked as this job's, so no later run deletes it.
+    assertEquals(Seq("part-00007.csv"), Files.list(stray.resolve("q")).iterator().asScala.map(_.getFileName.toString).toSeq)
+
+    // A file that is no part file is not read, and survives a re-run.
+    val notes = tmpDir("dj-notes-out-")
+    Files.createDirectories(notes.resolve("q"))
+    Files.writeString(notes.resolve("q/README.md"), "a\n5\n6\n")
+    assertTrue(job(notes).run().succeeded)
+    assertEquals("n\n1", count(notes))
+    assertTrue(job(notes).run().succeeded)
+    assertEquals("n\n1", count(notes))
+    assertEquals("a\n5\n6\n", Files.readString(notes.resolve("q/README.md")))
+
+    // A parquet output of no rows reads back as none.
+    val empty = tmpDir("dj-empty-out-")
+    val result = job(empty, format = "parquet", where = " WHERE a > 1").run()
+    assertTrue(result.tasks.map(t => s"${t.taskName}=${t.status}").mkString(", "), result.succeeded)
+    assertEquals("n\n0", count(empty))
+  }
+
   @Test def clearIfMarkedDeletesTopLevelFilesAndRecord(): Unit = {
     val dir = tmpDir("dj-cim-")
     Files.writeString(dir.resolve("part-00000.csv"), "a\n1\n")
@@ -1319,10 +1368,17 @@ class DataJobTest {
       executionTime = Instant.now(), writtenAt = Instant.now(),
       rowsProduced = 2, format = "csv",
       outputFiles = Seq("part-00000.csv", "part-00001.csv"))
+    Files.writeString(dir.resolve("_validation-check.csv"), "a\n")
+    Files.writeString(dir.resolve(".part-00000.csv.crc"), "x")
+    Files.writeString(dir.resolve("README.md"), "keep")
     assertTrue(TaskRunRecord.clearIfMarked(dir))
     assertFalse(Files.exists(dir.resolve("part-00000.csv")))
     assertFalse(Files.exists(dir.resolve("part-00001.csv")))
     assertFalse(Files.exists(dir.resolve(TaskRunRecord.FileName)))
+    assertFalse(Files.exists(dir.resolve("_validation-check.csv")))
+    assertFalse(Files.exists(dir.resolve(".part-00000.csv.crc")))
+    // A file a run does not write is not the run's to delete.
+    assertEquals("keep", Files.readString(dir.resolve("README.md")))
     assertTrue("the directory itself should still exist", Files.isDirectory(dir))
   }
 

@@ -840,9 +840,16 @@ whatever it holds: every string in `_run.json` and `job.json` goes through
 a surrogate pair — a character UTF-8 cannot encode — as a `\u` escape
 rather than failing the write. The exception is rerun cleanup:
 before writing data, `writeOutput` calls `TaskRunRecord.clearIfMarked(dir)`
-which wipes every top-level regular file in a directory that already
-contains a `_run.json`, so reruns at the same templated path completely
-overwrite prior state.
+which deletes the top-level files a run writes (`part-*`, `_*`, `.*`) in a
+directory that already contains a `_run.json`, so reruns at the same templated
+path completely overwrite prior state, and leaves any other file alone. A
+directory with part files and no `_run.json` (`unrecordedPartFiles`) is
+refused before anything is written, and gets no Failed or Skipped record,
+which would make those files the job's to delete next time. So after a write
+the directory's part files are this run's, and `materializeIfNeeded` gives
+downstream tasks and validations a reader of exactly those files
+(`CsvReader` over the list, `ParquetReader.fromFiles`), never a directory
+listing (plans/robustness/29).
 
 #### Per-job manifest (`job.json`)
 

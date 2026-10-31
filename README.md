@@ -395,7 +395,15 @@ stops the run instead: no task starts after it, each that had not started is
 `job.json`) says the same.
 
 The underscore prefix means CSV/Parquet readers skip both the record and the
-validation samples when re-reading the directory as data.
+validation samples when reading the directory as data. The tasks after a task,
+and its validations, read exactly the part files its run wrote, by name, so
+another file in the directory (a README) is never read as data. A run clears a
+directory its earlier run recorded, deleting the files a run writes there
+(`part-*`, `_*`, `.*`) and leaving any other file alone. A directory holding
+`part-*` files that no `_run.json` names, left by a run killed between clearing
+and recording, another job writing there or a copy, fails the task before it
+writes, naming the files: delete them or write elsewhere. Such a directory is
+not marked as the job's either, so no later run deletes those files.
 `TaskRunRecord.discover(templatedPattern)` glob-walks the filesystem and
 returns every directory matching the pattern that contains a `_run.json`,
 sorted newest-first. This is what powers the GUI's partition picker — open

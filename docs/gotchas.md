@@ -327,6 +327,10 @@ ship a fix or move something from "not done" to "done".
   directory path (e.g. `output/totals`) needs `format = Some("parquet")` or
   the default (CSV) wins. `DirectoryJobLoader` sets `format` explicitly to keep
   the per-table dir name clean (`output/<view>/...` rather than `output/<view>.csv/...`).
+  The tasks after a task read exactly the part files its run wrote, by name,
+  and a directory holding part files no `_run.json` names is refused before
+  a write: such files used to join the output, so a stray `part-00007.csv`
+  added its row to a downstream count (plans/robustness/29).
 - **Hadoop-common pre-3.4.3 breaks on JDK 24+.** `UserGroupInformation.getCurrentUser()`
   in 3.3.x/3.4.0/.1/.2 calls `Subject.getSubject(AccessControlContext)`, which
   throws `UnsupportedOperationException` once JEP 486 (Security Manager
@@ -337,8 +341,10 @@ ship a fix or move something from "not done" to "done".
   to pin Hadoop lower than 3.4.3, hold the runtime to JDK 23.
 - **Hadoop's `LocalFileSystem` writes hidden `.crc` sidecars** alongside any
   Parquet temp file; the atomic rename leaves them stranded inside the output
-  directory. `PathGlob.expand` skips dotfiles and `_`-prefixed files so re-reads
-  ignore those (and macOS `.DS_Store`, and the `_run.json` records + per-task
+  directory. A task's own re-read names its part files and never sees them;
+  `PathGlob.expand`, which an input reading such a directory goes through,
+  skips dotfiles and `_`-prefixed files so those reads ignore them too (and
+  macOS `.DS_Store`, and the `_run.json` records + per-task
   `_validation-<slug>.csv` failure samples we stamp per task — see
   [architecture.md §4](architecture.md#4-run-records-and-historical-run-discovery)).
 - **JavaFX 21+ ships classes only in platform-classifier jars.** The bare

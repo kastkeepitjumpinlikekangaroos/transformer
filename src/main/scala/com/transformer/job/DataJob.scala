@@ -417,13 +417,14 @@ final case class DataJob(
             "names being read regardless of case; give each its own name with AS")
       }
 
+      var writtenFiles: Seq[String] = Nil
       val writtenOutput: Option[(OutputFilePath, String)] = task.outputFile.map { ofp =>
         if (ofp.isCloud) throw new UnsupportedOperationException(
           s"Cloud output paths not yet implemented (v1.1). Got: '${ofp.path}'"
         )
         val rendered = TemplateRenderer.render(ofp.path, vars)
         renderedOutputForRecord = Some((ofp, rendered))
-        writeOutput(ofp, rendered, q)
+        writtenFiles = writeOutput(ofp, rendered, q)
         (ofp, rendered)
       }
 
@@ -436,7 +437,7 @@ final case class DataJob(
       val needsCatalogView = hasDownstreamConsumers || task.validations.nonEmpty
       if (needsCatalogView) {
         val name = task.viewName.getOrElse(s"__task_${node.index}")
-        val materialized = materializeIfNeeded(q, writtenOutput)
+        val materialized = materializeIfNeeded(q, writtenOutput, writtenFiles)
         catalog.replace(name, materialized)
         val failures = runValidations(node, executor, catalog, opts)
         val outputPath = writtenOutput.map(_._2)
@@ -662,6 +663,9 @@ final case class DataJob(
     try {
       val rendered = TemplateRenderer.render(ofp.path, vars)
       val dir = Paths.get(rendered)
+      // A record would make part files no run wrote this job's, and the next
+      // run would delete them; job.json records the failure instead.
+      if (TaskRunRecord.unrecordedPartFiles(dir).nonEmpty) return
       TaskRunRecord.clearIfMarked(dir)
       TaskRunRecord.write(dir, TaskRunRecord(
         schemaVersion = TaskRunRecord.SchemaVersion,
@@ -694,6 +698,7 @@ final case class DataJob(
     try {
       val rendered = TemplateRenderer.render(ofp.path, vars)
       val dir = Paths.get(rendered)
+      if (TaskRunRecord.unrecordedPartFiles(dir).nonEmpty) return
       TaskRunRecord.clearIfMarked(dir)
       TaskRunRecord.write(dir, TaskRunRecord(
         schemaVersion = TaskRunRecord.SchemaVersion,
@@ -715,25 +720,37 @@ final case class DataJob(
     } catch { case NonFatal(_) => () }
   }
 
-  /** Drains `q` into a directory of part files at `renderedPath`. Parts are
-    * coalesced down to [[OutputFilePath.maxPartitions]] if that's set and the
-    * source produced more partitions than the cap.
+  /** Drains `q` into a directory of part files at `renderedPath`, and returns
+    * the names of the part files it wrote. Parts are coalesced down to
+    * [[OutputFilePath.maxPartitions]] if that's set and the source produced
+    * more partitions than the cap.
+    *
+    * A directory a run recorded is cleared first. One holding part files that
+    * no record names is refused before anything is written: they would join
+    * the output for every reader of the directory, and the tasks after this
+    * one read them too, where a stray `part-00007.csv` added its row to a
+    * downstream count (plans/robustness/29). So the part files in the
+    * directory after the write are exactly the ones this run wrote.
     */
   private def writeOutput(
-      ofp: OutputFilePath, renderedPath: String, q: ExecutedQuery): Unit = {
+      ofp: OutputFilePath, renderedPath: String, q: ExecutedQuery): Seq[String] = {
     val parts = coalescedPartitions(q, ofp.maxPartitions)
     val dir = Paths.get(renderedPath)
-    TaskRunRecord.clearIfMarked(dir)
+    if (!TaskRunRecord.clearIfMarked(dir)) {
+      val stray = TaskRunRecord.unrecordedPartFiles(dir)
+      if (stray.nonEmpty) throw new IllegalArgumentException(
+        s"Output directory '$dir' already holds ${stray.mkString(", ")}, which no run record names, so a reader " +
+          "of the directory would read them as part of this output; delete them or write to another directory")
+    }
     ofp.detectedFormat match {
       case "csv" =>
         CsvWriter.writePartitioned(dir, q.schema, parts, CsvWriteOptions.fromMap(ofp.options))
-        ()
       case "parquet" =>
         TParquetWriter.writePartitioned(dir, q.schema, parts, ofp.options)
-        ()
       case other =>
         throw new IllegalArgumentException(s"Unsupported output format '$other' for '$renderedPath'")
     }
+    TaskRunRecord.listPartFiles(dir)
   }
 
   /** Map the executor's `numPartitions` source partitions to at most
@@ -776,16 +793,24 @@ final case class DataJob(
     * only done when something actually needs the view: a downstream task or
     * this task's own validations.
     */
-  private def materializeIfNeeded(q: ExecutedQuery, writtenOutput: Option[(OutputFilePath, String)]): CatalogView = {
+  /** The view the tasks after this one and its validations read: the part
+    * files `writtenFiles` this run wrote, by name, never a listing of the
+    * directory, so a file that is no part of the output (a README) is not
+    * read. A parquet output of no partitions writes no file at all, and is
+    * the empty view of its schema. */
+  private def materializeIfNeeded(
+      q: ExecutedQuery, writtenOutput: Option[(OutputFilePath, String)], writtenFiles: Seq[String]): CatalogView = {
     val schema = q.schema
     writtenOutput match {
       case Some((ofp, dir)) =>
+        val files = writtenFiles.map(f => Paths.get(dir).resolve(f)).toIndexedSeq
         ofp.detectedFormat match {
+          case _ if files.isEmpty => new MaterializedView(schema, IndexedSeq.empty)
           case "csv" =>
-            com.transformer.read.csv.CsvReader.fromPath(
-              dir, com.transformer.read.csv.CsvOptions.forWrittenFile(ofp.options, schema))
+            new com.transformer.read.csv.CsvReader(files,
+              com.transformer.read.csv.CsvOptions.forWrittenFile(ofp.options, schema))
           case "parquet" =>
-            ParquetReader.fromPath(dir)
+            ParquetReader.fromFiles(files)
           case other =>
             throw new IllegalArgumentException(s"Cannot re-read output of unknown format '$other': $dir")
         }

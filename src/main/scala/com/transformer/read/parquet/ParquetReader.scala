@@ -228,6 +228,17 @@ object ParquetReader {
     val files = PathGlob.expand(pathOrGlob).toIndexedSeq
     if (files.isEmpty)
       throw new IllegalArgumentException(s"No Parquet files matched '$pathOrGlob'")
+    fromFiles(files, batchSize, targetBytesPerPartition)
+  }
+
+  /** A view of exactly `files`, as a task's output is read back: the part
+    * files its run wrote, by name, never what else its directory holds. */
+  def fromFiles(
+      files: IndexedSeq[Path],
+      batchSize: Int = ColumnarBatch.DefaultCapacity,
+      targetBytesPerPartition: Long = DefaultTargetBytesPerPartition
+  ): ParquetReader = {
+    require(files.nonEmpty, "ParquetReader requires at least one file")
     val footers = readFooters(files, math.max(1L, targetBytesPerPartition))
     new ParquetReader(files, batchSize, projectedNames = None, footers.schema, footers.partitions,
       pushdownFilter = None, footers.comparableColumns)

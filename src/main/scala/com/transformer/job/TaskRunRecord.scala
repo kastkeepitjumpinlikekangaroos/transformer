@@ -191,29 +191,42 @@ object TaskRunRecord {
     results.sortWith((a, b) => a._2.writtenAt.isAfter(b._2.writtenAt)).toVector
   }
 
-  /** If `dir` contains a `_run.json`, delete every regular file at the top
-    * level of `dir` (the record, validation samples, part files) and return
+  /** If `dir` contains a `_run.json`, delete the files a run writes at the
+    * top level of `dir` (the record, part files, validation samples, metrics
+    * and the writers' hidden sidecars, each `part-*`, `_*` or `.*`) and return
     * true. The record file is deleted first so an interrupted clear leaves a
-    * directory that no longer claims a coherent run.
+    * directory that no longer claims a coherent run. Any other file, a README
+    * someone put there, is left alone, as no reader of the output reads it
+    * (plans/robustness/29).
     *
     * Subdirectories are deliberately left alone — our output layout is flat,
     * so a nested directory is not "ours" to wipe.
     */
   def clearIfMarked(dir: Path): Boolean = {
-    if (!Files.isDirectory(dir)) return false
-    val markerPath = dir.resolve(FileName)
-    if (!Files.isRegularFile(markerPath)) return false
-    Files.deleteIfExists(markerPath)
+    if (!isMarked(dir)) return false
+    Files.deleteIfExists(dir.resolve(FileName))
     val stream = Files.list(dir)
     try {
       val it = stream.iterator()
       while (it.hasNext) {
         val p = it.next()
-        if (Files.isRegularFile(p)) Files.deleteIfExists(p)
+        val n = p.getFileName.toString
+        if (Files.isRegularFile(p) && (n.startsWith("part-") || n.startsWith("_") || n.startsWith(".")))
+          Files.deleteIfExists(p)
       }
     } finally stream.close()
     true
   }
+
+  /** Whether `dir` holds a run's record, which makes its part files a run's. */
+  def isMarked(dir: Path): Boolean = Files.isRegularFile(dir.resolve(FileName))
+
+  /** The part files in `dir` that no record names as a run's: what a run that
+    * stopped between clearing the directory and writing its record left,
+    * another job writing there, or a person copying files in. A reader of the
+    * directory, Spark or DuckDB, would read them as part of the output. */
+  def unrecordedPartFiles(dir: Path): Seq[String] =
+    if (isMarked(dir)) Nil else listPartFiles(dir)
 
   /** Enumerate bare `part-*` file names in `dir`. */
   def listPartFiles(dir: Path): Seq[String] = {
