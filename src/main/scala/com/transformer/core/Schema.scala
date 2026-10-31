@@ -34,4 +34,19 @@ final case class Schema(fields: Vector[Field]) {
 object Schema {
   val empty: Schema = Schema(Vector.empty)
   def apply(fields: Field*): Schema = Schema(fields.toVector)
+
+  /** The 0-based positions of the first name more than one of `names` has,
+    * compared as a query compares names, regardless of case; None when each
+    * name is its own. A table whose columns repeat a name cannot be read by
+    * that name, here or in another engine, without a guess. */
+  def repeatedName(names: Seq[String]): Option[Seq[Int]] = {
+    val positions = names.indices.groupBy(i => names(i).toLowerCase(Locale.ROOT))
+    names.indices.iterator.map(i => positions(names(i).toLowerCase(Locale.ROOT))).find(_.size > 1)
+  }
+
+  /** `positions` of `names` for a message: `1 (a), 2 (a) and 3 (A)`. */
+  def describePositions(names: Seq[String], positions: Seq[Int]): String = {
+    val shown = positions.map(i => s"${i + 1} (${names(i)})")
+    if (shown.size == 1) shown.head else shown.init.mkString(", ") + " and " + shown.last
+  }
 }

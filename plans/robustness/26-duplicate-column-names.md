@@ -1,6 +1,6 @@
 # Plan 26: a task's output and a CSV header may repeat a column name
 
-> Status: planned · found by the 2026-10-31 audit · Effort: half a day ·
+> Status: **done** 2026-10-31 · found by the 2026-10-31 audit · Effort: half a day ·
 > Risk: low (the downstream task already failed, later and elsewhere)
 
 ## Problem
@@ -34,3 +34,17 @@ column (Spark renames, DuckDB renames; this engine refuses rather than guess).
 ## Docs
 
 README (pipeline outputs, CSV), testing.md.
+
+## Outcome
+
+Done as planned. `Schema.repeatedName` finds the first name more than one
+column has, compared regardless of case. `DataJob.runOneTask` fails a task
+whose result has one before writing, naming the task and the columns (`1 (a),
+2 (a) and 3 (A)`), and `CsvReader.checkHeader` fails an inferred CSV input's
+load on a repeated or an empty header name, naming the file and the columns;
+the load failure reaches the run's warnings and skips the tasks that read the
+input, as plan 08 has it. A header under declared columns names nothing and is
+not checked, and a query that is no task's result may still repeat names.
+
+`aResultOrAHeaderThatRepeatsAColumnNameFails` and
+`aHeaderThatRepeatsOrLeavesOutANameFails` failed against the code before.

@@ -82,6 +82,7 @@ final class CsvReader(val files: IndexedSeq[Path], val options: CsvOptions) exte
         }
       }
       if (width == 0) throw new IllegalArgumentException(s"CSV file ${files.head} is empty")
+      headerRow.foreach(CsvReader.checkHeader(_, files.head))
       val names = headerRow.map(_.toVector).getOrElse((0 until width).map(i => s"_c$i").toVector)
       CsvSchemaInferer.infer(names, sample)
     } finally parser.close()
@@ -159,6 +160,24 @@ object CsvReader {
   /** A header's names: a name the parser read as NULL is the text it is. */
   private[csv] def headerNames(row: Array[String], options: CsvOptions): Array[String] =
     row.map(n => if (n == null) options.nullValue else n)
+
+  /** A header's names are the columns' names, so each must be one, and its
+    * own: a query cannot read a column with no name, nor tell apart two with
+    * one name, which it reads regardless of case. Spark and DuckDB rename
+    * them; this reader refuses rather than guess (plans/robustness/26). */
+  private[csv] def checkHeader(names: Array[String], file: Path): Unit = {
+    names.indexWhere(_.isEmpty) match {
+      case -1 => ()
+      case i => throw new IllegalArgumentException(
+        s"CSV file '$file' has a column with no name in its header, column ${i + 1}; name it")
+    }
+    Schema.repeatedName(names.toSeq).foreach { positions =>
+      throw new IllegalArgumentException(
+        s"CSV file '$file' names more than one column '${names(positions.head)}' in its header, columns " +
+          s"${Schema.describePositions(names.toSeq, positions)}, names being read regardless of case; " +
+          "give each its own name")
+    }
+  }
 
   private[csv] def checkWidth(row: Array[String], width: Int, file: Path, line: Long, against: String): Unit =
     if (row.length != width) throw new IllegalArgumentException(

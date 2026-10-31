@@ -338,6 +338,25 @@ class CsvReaderTest {
     }
   }
 
+  /** A header names the columns, so each name must be one and its own,
+    * compared regardless of case as a query compares them. `a,a,,B,b` loaded
+    * as columns `a`, `a`, `` , `B` and `b`, and a query failed on `a`
+    * (plans/robustness/26). Without a header, or with declared columns, the
+    * header's text names nothing and is not checked. */
+  @Test def aHeaderThatRepeatsOrLeavesOutANameFails(): Unit = {
+    for ((header, expected) <- Seq(
+           "a,a,,B,b" -> "has a column with no name in its header, column 3; name it",
+           "a,b,A" -> "names more than one column 'a' in its header, columns 1 (a) and 3 (A), names being read regardless of case",
+           "x,y,X,Y" -> "names more than one column 'x' in its header, columns 1 (x) and 3 (X)")) {
+      val file = tmpCsv("h.csv", s"$header\n" + header.split(",", -1).indices.map(_.toString).mkString(",") + "\n")
+      val msg = failure(CsvReader.fromPath(file.toString, CsvOptions()))
+      assertTrue(msg, msg.startsWith(s"CSV file '$file' $expected"))
+    }
+    val declared = tmpCsv("d.csv", "a,a\n1,2\n")
+    assertEquals(Seq(Seq(1, 2)), rows(CsvReader.fromPath(declared.toString,
+      explicit("x" -> DataType.IntType, "y" -> DataType.IntType).copy(header = true))))
+  }
+
   /** An integer past BIGINT used to infer DOUBLE and lose its digits
     * (1.0E20). It is a DECIMAL(38,0) now, exact, up to 38 digits. */
   @Test def anIntegerPastBigintInfersAnExactDecimal(): Unit = {

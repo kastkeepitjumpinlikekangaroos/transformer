@@ -406,6 +406,16 @@ final case class DataJob(
     val gc0 = if (opts.metricsEnabled) MetricsCollector.gcSample() else com.transformer.core.metrics.GcSample.Zero
     try {
       val q = executor.execute(node.renderedMainSql, catalog, opts)
+      // A task's result is a table other tasks, validations and engines read
+      // by name, so it may not repeat one: a downstream task failed on it,
+      // naming neither this task nor the columns (plans/robustness/26).
+      Schema.repeatedName(q.schema.fieldNames).foreach { positions =>
+        val names = q.schema.fieldNames
+        throw new IllegalArgumentException(
+          s"Task '$taskName' returns more than one column named '${names(positions.head)}', columns " +
+            s"${Schema.describePositions(names, positions)}, which a query reading it could not tell apart, " +
+            "names being read regardless of case; give each its own name with AS")
+      }
 
       val writtenOutput: Option[(OutputFilePath, String)] = task.outputFile.map { ofp =>
         if (ofp.isCloud) throw new UnsupportedOperationException(

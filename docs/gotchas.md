@@ -1573,6 +1573,17 @@ ship a fix or move something from "not done" to "done".
   blank), and a column name that is empty is quoted, so a header is never a
   blank line. Whether a line is blank is the parser's to say (`blank`), whether
   it is a row the reader's, which knows how many columns the file has.
+- **A task's output and a CSV header used to repeat a column name — fixed.**
+  Names match regardless of case, so `a` and `A` are one name, yet a task
+  returning `SELECT a, a, b AS A` Succeeded and wrote three columns named a,
+  and the task reading it failed with `Ambiguous column reference 'a' matches 3
+  columns`, naming neither the task nor its columns; a CSV header `a,a,,B,b`
+  loaded too. `Schema.repeatedName` finds such a name, and `DataJob` fails a
+  task whose result has one before it writes, while `CsvReader.checkHeader`
+  fails an inferred input's load on a repeated or empty header name; Spark and
+  DuckDB rename them, this engine refuses rather than guess
+  (plans/robustness/26). A query that is no task's result, a CTE included, may
+  repeat names as SQL allows, and a reference to one is the ambiguity error.
 - **A date or a timestamp past its column's range used to wrap — fixed.** A
   DATE is stored as an INT of days and a TIMESTAMP as a BIGINT of
   microseconds, but text is read into a `LocalDate` or an `Instant`, which

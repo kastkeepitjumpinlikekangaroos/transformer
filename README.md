@@ -82,6 +82,12 @@ FROM stg_orders o
 LEFT JOIN order_items_summary s ON o.order_id = s.order_id
 ```
 
+A table's result is what other tables, validations and other engines read by
+column name, so its columns must each have their own name, compared regardless
+of case: `SELECT a, a, b AS A FROM t` as a table's `main.sql` fails that table
+before it writes anything, naming the columns, and asks for an `AS`. (A query
+inside it, such as a CTE, may repeat a name as SQL allows.)
+
 You never declare run order. transformer builds a DAG from each table's
 references and runs independent branches in parallel. Directories are listed
 alphabetically, but that order is only a declared index. Numeric prefixes
@@ -503,7 +509,7 @@ Options (passed via `InputFilePath.options` / `OutputFilePath.options`):
 
 | Key | Default | Notes |
 |---|---|---|
-| `header` | `true` | First line contains column names |
+| `header` | `true` | First line contains column names; with an inferred schema each must be a name of its own, so a repeated name (regardless of case) or an empty one fails the load, naming the file and the column |
 | `delimiter` | `,` | Any character but a line break; pass `\t` for TSV |
 | `quote` | `"` | Not the delimiter |
 | `escape` | `"` | RFC 4180 doubled-quote escape when equal to `quote`; otherwise escapes the quote and itself inside quotes. Not the delimiter |

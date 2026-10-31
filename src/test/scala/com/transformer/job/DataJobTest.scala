@@ -461,6 +461,56 @@ class DataJobTest {
       Files.isDirectory(outDir.resolve("indep")))
   }
 
+  /** A task whose result repeats a column name, regardless of case, fails
+    * before it writes anything, naming itself and the columns. It Succeeded
+    * and wrote three columns named a, and the task reading it failed on `a`,
+    * naming neither (plans/robustness/26). A CSV input whose header repeats a
+    * name or leaves one empty fails its load the same way, naming the file. */
+  @Test def aResultOrAHeaderThatRepeatsAColumnNameFails(): Unit = {
+    val inDir = tmpDir("dj-dup-")
+    writeCsv(inDir, "t.csv", "a,b\n1,2\n")
+    val outDir = tmpDir("dj-dup-out-")
+    def files(dir: Path): Seq[String] = Files.list(dir).iterator().asScala.map(_.getFileName.toString).toSeq.sorted
+    for (format <- Seq("csv", "parquet")) {
+      val job = DataJob(
+        inputs = Seq(InputFilePath(inDir.resolve("t.csv").toString, viewName = "t")),
+        sql = Seq(
+          SQLTask(name = Some("q"), viewName = Some("q"), sqlString = Some("SELECT a, a, b AS A FROM t"),
+            outputFile = Some(OutputFilePath(outDir.resolve(s"q-$format").toString, format = Some(format)))),
+          SQLTask(name = Some("r"), sqlString = Some("SELECT * FROM q"),
+            outputFile = Some(OutputFilePath(outDir.resolve(s"r-$format").toString)))))
+      val byName = job.run().tasks.map(t => t.taskName -> t.status).toMap
+      byName("q") match {
+        case TaskStatus.Failed(msg) => assertEquals("Task 'q' returns more than one column named 'a', columns 1 (a), " +
+          "2 (a) and 3 (A), which a query reading it could not tell apart, names being read regardless of case; " +
+          "give each its own name with AS", msg)
+        case other => fail(s"expected q to fail, got $other")
+      }
+      assertTrue(byName("r").toString, byName("r").isInstanceOf[TaskStatus.Skipped])
+      assertEquals(Seq("_run.json"), files(outDir.resolve(s"q-$format")))
+    }
+    // A SELECT that is no task's result may repeat a name, as SQL allows.
+    val inner = DataJob(
+      inputs = Seq(InputFilePath(inDir.resolve("t.csv").toString, viewName = "t")),
+      sql = Seq(SQLTask(name = Some("w"), sqlString = Some("WITH c AS (SELECT a, a AS x FROM t) SELECT x FROM c"),
+        outputFile = Some(OutputFilePath(outDir.resolve("w").toString)))))
+    assertTrue(inner.run().succeeded)
+
+    for ((header, expected) <- Seq(
+           "a,A,b" -> "names more than one column 'a' in its header, columns 1 (a) and 2 (A)",
+           "a,,b" -> "has a column with no name in its header, column 2; name it")) {
+      val dir = tmpDir("dj-header-")
+      val file = writeCsv(dir, "h.csv", s"$header\n1,2,3\n")
+      val job = DataJob(
+        inputs = Seq(InputFilePath(file.toString, viewName = "h")),
+        sql = Seq(SQLTask(name = Some("reads"), sqlString = Some("SELECT * FROM h"),
+          outputFile = Some(OutputFilePath(outDir.resolve("h").toString)))))
+      val result = job.run()
+      assertFalse(result.succeeded)
+      assertTrue(result.warnings.toString, result.warnings.exists(w => w.contains(s"CSV file '$file' $expected")))
+    }
+  }
+
   @Test def validationFailurePropagatesAsSkippedDownstream(): Unit = {
     val inDir = tmpDir("dj-vfail-")
     writeCsv(inDir, "t.csv", "id,value\n1,ok\n2,bad\n")
