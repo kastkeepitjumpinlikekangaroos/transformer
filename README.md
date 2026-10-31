@@ -647,6 +647,22 @@ is an error, where MySQL and Spark read it as a cross join: write `CROSS JOIN`
 to pair every row. So are an `ON` after `CROSS JOIN` or a comma, and a second
 `ON` on one join, whose condition belongs in the first, joined with `AND`.
 
+A name in `ORDER BY` is an output column first, as SQL has it: the output column
+of that name when the SELECT list has one, an input column otherwise. So
+`SELECT -b AS b FROM t ORDER BY b` sorts by `-b`, `SELECT s, COUNT(*) AS n FROM t
+GROUP BY s ORDER BY n` by the count, `SELECT a + b AS total FROM t ORDER BY total`
+by the sum and `SELECT s FROM t ORDER BY b` by the input column `b`. Two output
+columns with the name make `ORDER BY` of it an error, unless they are one column
+(`SELECT a, t.a`). Inside an expression a name is an input column, or the output
+column of a name no input column has (`ORDER BY total * 2`); a name that is both,
+an input column and the alias of something else, as in `SELECT -b AS b FROM t
+ORDER BY b + 0`, is refused as ambiguous, since Postgres reads the input column
+there and Spark the output: write `t.b` for the one, `-b` for the other. A
+qualified name, and a name inside an aggregate's arguments or a window, is always
+the input's. Past a `DISTINCT` or a `UNION`, `ORDER BY` sees only the output
+columns. A key that names an output column sorts by the values the query
+returns, so `SELECT RAND() AS r FROM t ORDER BY r` comes back sorted.
+
 A NULL sorts as the smallest value unless the key says otherwise: first under
 `ASC`, last under `DESC`. That is Spark's, MySQL's and SQLite's default and the
 reverse of Postgres's, so SQL ported from Postgres that relies on where NULLs
@@ -684,10 +700,8 @@ key. A window function in a grouped query reads the groups' aggregates:
 
 `GROUP BY` and `ORDER BY` also accept a **positional ordinal** — a bare integer
 naming a SELECT-list position, as in BigQuery / Postgres / MySQL. `ORDER BY 2
-DESC` sorts by the second output column, and unlike the named form it reaches an
-aliased expression (`SELECT a + b AS s FROM t ORDER BY 1` works; `ORDER BY s`
-does not — see [docs/gotchas.md](docs/gotchas.md) on ORDER BY scope). Only a bare
-integer counts: `ORDER BY +1` is a constant, not a position. A `GROUP BY` ordinal
+DESC` sorts by the second output column, as `ORDER BY` of its name does. Only a
+bare integer counts: `ORDER BY +1` is a constant, not a position. A `GROUP BY` ordinal
 may not point at an aggregate; an `ORDER BY` ordinal may. An out-of-range
 position is an error.
 

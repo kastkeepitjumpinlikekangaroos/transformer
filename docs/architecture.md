@@ -1190,9 +1190,11 @@ per-row in isolation because it depends on the whole partition. `LogicalBuilder`
 handles this with a two-stage rewrite:
 
 1. **Pre-window stage.** Aggregation (if any) is built first, producing a
-   plan + a `BinderFactory: (AnalyticExpression => Option[Expr]) => Expression
-   => Expr`. The factory is called with an empty resolver to get a binder used
-   to bind the partition keys, order keys, and function arg of each `OVER (...)`.
+   plan + a `BinderFactory: (AnalyticExpression => Option[Expr], Column =>
+   Option[Expr]) => Expression => Expr`, its second resolver the output columns
+   an `ORDER BY` name may read (below). The factory is called with empty
+   resolvers to get a binder used to bind the partition keys, order keys, and
+   function arg of each `OVER (...)`.
 2. **Collect windows.** Walk SELECT items + ORDER BY. Every distinct
    `AnalyticExpression` (deduped by canonical SQL) becomes a `WindowDef` with
    a synthetic output column name (`_win0`, `_win1`, …). The walk recurses
@@ -1209,6 +1211,19 @@ handles this with a two-stage rewrite:
    resolver; the resulting binder substitutes each `AnalyticExpression` with
    a `ColRefExpr` into the window-output position. SELECT projections and
    ORDER BY then bind cleanly.
+
+**ORDER BY scope.** Without a `DISTINCT`, `ORDER BY` sees the output columns and
+the input's. `LogicalBuilder.OrderScope` gives each key as an output position (an
+ordinal, or a bare name some output column has, so `SELECT -b AS b ... ORDER BY b`
+sorts by `-b`) or an expression over the input, in which a name no input column
+has reads the output column (the factory's second resolver) and a name both could
+read, an input column and the alias of something else, is refused before
+binding. `sortOverProjection` then sorts over the projection: the projection
+computes each expression key beside the output columns as `_orderN`, the sort
+reads positions, and a second projection drops the `_orderN` columns, so a key
+naming an output column sorts by exactly the values returned (`RAND()`'s
+included) and no SELECT item is computed twice. Past a `DISTINCT` or a `UNION`
+the sort binds against the output schema alone (`bindOrderKey`).
 
 `WindowExec` is a pipeline breaker that materializes the rows in scope and
 groups `WindowDef`s by `WindowSpec` so that partitioning + sorting happens

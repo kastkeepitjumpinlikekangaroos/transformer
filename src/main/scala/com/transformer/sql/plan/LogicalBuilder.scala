@@ -386,17 +386,20 @@ object LogicalBuilder {
     val isAggregation = hasGroupBy || itemsContainAgg || ps.getHaving != null
 
     // Stage 1: aggregation. `binderFactory` produces a binder parameterized by a
-    // window resolver — we call it twice: once with the empty resolver (for
-    // window-spec collection) and once with the populated one (for the final
-    // projections / ORDER BY).
+    // window resolver and an output-column resolver — we call it with the empty
+    // ones (for window-spec collection), with the window resolver (for the
+    // final projections) and with both (for ORDER BY).
     val (preWindow, binderFactory): (LogicalPlan, BinderFactory) =
       if (isAggregation) buildAggregation(afterWhere, sources, ps, expandedItems)
       else {
-        val factory: BinderFactory = wr => e => bindExprWithAggs(e, sources, _ => None, wr)
+        val factory: BinderFactory = (wr, outputs) => e => bindExprWithAggs(e, sources, {
+          case c: Column => outputs(c)
+          case _ => None
+        }, wr)
         (afterWhere, factory)
       }
 
-    val preWindowBinder: Expression => Expr = binderFactory(_ => None)
+    val preWindowBinder: Expression => Expr = binderFactory(_ => None, _ => None)
 
     // Stage 2: collect every distinct `OVER (...)` referenced by SELECT items
     // or ORDER BY. The window-function call's internal expressions (partition
@@ -416,8 +419,8 @@ object LogicalBuilder {
     expandedItems.foreach { case (e, _) => collectWindows(e) }
     Option(ps.getOrderByElements).foreach(_.asScala.foreach(obe => collectWindows(obe.getExpression)))
 
-    val (preProject, exprBinder): (LogicalPlan, Expression => Expr) =
-      if (windowDefs.isEmpty) (preWindow, preWindowBinder)
+    val (preProject, windowResolver): (LogicalPlan, AnalyticExpression => Option[Expr]) =
+      if (windowDefs.isEmpty) (preWindow, _ => None)
       else {
         val baseLen = preWindow.outputSchema.length
         val keyToWindow: Map[String, (Int, WindowDef)] = windowDefs.zipWithIndex.map {
@@ -427,53 +430,194 @@ object LogicalBuilder {
           keyToWindow.get(canonicalSql(ae)).map { case (i, wd) =>
             ColRefExpr(i, wd.outputName, wd.fn.resultType)
           }
-        (LogicalWindow(preWindow, windowDefs.values.toSeq), binderFactory(windowResolver))
+        (LogicalWindow(preWindow, windowDefs.values.toSeq), windowResolver)
       }
+    val exprBinder: Expression => Expr = binderFactory(windowResolver, _ => None)
 
     val projections: Seq[(Expr, String)] = expandedItems.map { case (e, name) =>
       (exprBinder(e), name)
     }
+    val projected: LogicalPlan = LogicalProject(preProject, projections)
 
     val hasDistinct: Boolean = ps.getDistinct != null
     val orderByList: Option[Seq[OrderByElement]] =
       Option(ps.getOrderByElements).map(_.asScala.toSeq).filter(_.nonEmpty)
 
-    // ORDER BY placement: when there's no DISTINCT we keep the historical
-    // shape (Sort below Project) so unprojected ORDER BY columns can still
-    // resolve via the pre-project sources. An ordinal is expanded to the
-    // SELECT-list expression it names first, then bound through `exprBinder` —
-    // the same binder the projection uses, so it lands on the aggregate or
-    // window output column when the query has one.
     val afterSort: LogicalPlan = (orderByList, hasDistinct) match {
+      // Without DISTINCT a key is an output column or an expression over the
+      // input ([[OrderScope]]), and the sort runs over the projection.
       case (Some(list), false) =>
-        val keys = list.map { obe =>
-          sortKey(exprBinder(resolveOrderOrdinal(obe.getExpression, expandedItems)), obe)
-        }
-        LogicalSort(preProject, keys)
-      case _ => preProject
-    }
-
-    val projected: LogicalPlan = LogicalProject(afterSort, projections)
-
-    val afterDistinct: LogicalPlan =
-      if (hasDistinct) LogicalDistinct(projected) else projected
-
-    // With DISTINCT we hoist Sort above Distinct so per-shard dedup can't
-    // scramble the user's requested order, and bind the keys against the
-    // post-project schema (SQL's restriction that ORDER BY of a DISTINCT must
-    // reference projected columns makes this binding well-defined). That scope
-    // is the SELECT list 1:1 by position, so an ordinal points straight at a
-    // field rather than re-binding through a source expression.
-    val afterDistinctSort: LogicalPlan = (orderByList, hasDistinct) match {
+        val scope = new OrderScope(expandedItems, projections, sources)
+        sortOverProjection(preProject, projections, list,
+          scope.key(_, binderFactory(windowResolver, scope.outputColumn)))
+      // With DISTINCT we hoist Sort above Distinct so per-shard dedup can't
+      // scramble the user's requested order, and bind the keys against the
+      // post-project schema (SQL's restriction that ORDER BY of a DISTINCT must
+      // reference projected columns makes this binding well-defined). That scope
+      // is the SELECT list 1:1 by position, so an ordinal points straight at a
+      // field rather than re-binding through a source expression.
       case (Some(list), true) =>
         val projSchema = Schema(
           projections.iterator.map { case (e, n) => Field(n, e.dataType) }.toVector)
-        LogicalSort(afterDistinct, list.map(bindOrderKey(_, projSchema)))
-      case _ => afterDistinct
+        LogicalSort(LogicalDistinct(projected), list.map(bindOrderKey(_, projSchema)))
+      case (None, distinct) => if (distinct) LogicalDistinct(projected) else projected
     }
 
-    applyOffsetAndLimit(afterDistinctSort, Option(ps.getLimit), Option(ps.getOffset),
+    applyOffsetAndLimit(afterSort, Option(ps.getLimit), Option(ps.getOffset),
       Option(ps.getFetch), Option(ps.getTop))
+  }
+
+  /** The sort of a SELECT without DISTINCT, over its projection: `key` gives
+    * each ORDER BY key as an output position (Left) or an expression over the
+    * projection's input (Right). The projection computes each expression
+    * beside the output columns, under the name `_orderN`, the sort reads them
+    * there, and a projection above the sort drops them again. So a key that
+    * names an output column sorts by the values the query returns, `RAND()`'s
+    * among them, rather than by the expression computed a second time. */
+  private def sortOverProjection(
+      preProject: LogicalPlan,
+      projections: Seq[(Expr, String)],
+      list: Seq[OrderByElement],
+      key: Expression => Either[Int, Expr]): LogicalPlan = {
+    val keys = list.map(obe => key(obe.getExpression))
+    val computed = keys.collect { case Right(e) => e }
+    val extended = projections ++ computed.zipWithIndex.map { case (e, j) => (e, s"_order$j") }
+    def column(i: Int): ColRefExpr = ColRefExpr(i, extended(i)._2, extended(i)._1.dataType)
+    val computedAt = Iterator.from(projections.size)
+    val sortKeys = list.zip(keys).map {
+      case (obe, Left(i)) => sortKey(column(i), obe)
+      case (obe, Right(_)) => sortKey(column(computedAt.next()), obe)
+    }
+    val sorted = LogicalSort(LogicalProject(preProject, extended), sortKeys)
+    if (computed.isEmpty) sorted
+    else LogicalProject(sorted, projections.indices.map(i => (column(i), projections(i)._2)))
+  }
+
+  /** How ORDER BY reads a name in a SELECT without DISTINCT, where both the
+    * output columns and the input's are in scope.
+    *
+    *   - A bare name (in grouping parentheses or not) is the output column of
+    *     that name when the SELECT list has one, as SQL has it: `SELECT -b AS
+    *     b ... ORDER BY b` sorts by `-b`, and `SELECT s, COUNT(*) AS n ...
+    *     ORDER BY n` by the count. Two output columns of the name are an error
+    *     unless they are one column of the scope. A name no output column has
+    *     is an input column.
+    *   - Inside an expression a name is an input column, or the output column
+    *     of a name the input does not have (`ORDER BY total * 2`). A name that
+    *     is both, an output column that is not the input column of its name
+    *     (`SELECT -b AS b ... ORDER BY b + 0`), is refused: Postgres reads
+    *     the input column there, Spark the output, and the two orders differ.
+    *   - A position (`ORDER BY 2`) is the output column there.
+    *
+    * Names inside an aggregate's arguments or a window are the input's, as
+    * everywhere. Until this the sort bound every name against the input, so
+    * the first query sorted by `b` and the second refused `n`. */
+  private final class OrderScope(
+      expandedItems: Seq[(Expression, String)],
+      projections: Seq[(Expr, String)],
+      sources: Sources) {
+
+    /** The output positions named `name`. */
+    private def named(name: String): Seq[Int] = {
+      val lower = name.toLowerCase(Locale.ROOT)
+      expandedItems.indices.filter(i => expandedItems(i)._2.toLowerCase(Locale.ROOT) == lower)
+    }
+
+    /** The input column an unqualified `name` reads: None when the input has
+      * none, `Some(None)` when it has several. */
+    private def inputColumn(name: String): Option[Option[ColRefExpr]] =
+      try Analyzer.findColumn(None, name, sources).map(Some(_))
+      catch { case _: IllegalArgumentException => Some(None) }
+
+    /** Whether output column `i` is the input column `name` reads. */
+    private def isInputColumn(i: Int, name: String): Boolean = {
+      def strip(e: Expression): Expression = e match {
+        case Grouped(inner) => strip(inner)
+        case other => other
+      }
+      (strip(expandedItems(i)._1), inputColumn(name)) match {
+        case (c: Column, Some(Some(input))) =>
+          val q = Option(c.getTable).map(t => unquoted(t.getName))
+          scala.util.Try(Analyzer.findColumn(q, unquoted(c.getColumnName), sources)).toOption.flatten.contains(input)
+        case _ => false
+      }
+    }
+
+    private def positions(outputs: Seq[Int]): String = {
+      val shown = outputs.map(i => (i + 1).toString)
+      shown.init.mkString(", ") + " and " + shown.last
+    }
+
+    /** The one output column `outputs` stand for: the only one, or several
+      * that are one column of the scope (`SELECT a, t.a`). An error naming
+      * them otherwise. */
+    private def oneOutput(written: Expression, name: String, outputs: Seq[Int]): Int = {
+      val exprs = outputs.map(projections(_)._1)
+      if (outputs.size == 1 || (exprs.distinct.size == 1 && exprs.head.isInstanceOf[ColRefExpr])) outputs.head
+      else throw new IllegalArgumentException(
+        s"ORDER BY $written is ambiguous: output columns ${positions(outputs)} are each named $name; " +
+          "order by the position of the one you mean")
+    }
+
+    /** `name` written with the table of the input column it reads, when one
+      * column does and its source has a name. */
+    private def qualified(name: String): Option[String] = inputColumn(name).flatten.flatMap { col =>
+      val starts = sources.scanLeft(0)(_ + _._2.length)
+      sources.indices.find(s => col.index >= starts(s) && col.index < starts(s + 1))
+        .flatMap(s => sources(s)._1).map(table => s"$table.${col.name}")
+    }
+
+    /** The output column an unqualified name inside an ORDER BY expression
+      * reads, for the binder: one the input does not have. [[key]] has
+      * refused every name that could read either, and every name several
+      * output columns have, before binding asks. */
+    def outputColumn(c: Column): Option[Expr] =
+      if (c.getTable != null) None
+      else {
+        val name = unquoted(c.getColumnName)
+        named(name).headOption.filter(_ => inputColumn(name).isEmpty).map(projections(_)._1)
+      }
+
+    /** The names `e` reads outside any aggregate's arguments and any window,
+      * which are read in the input. */
+    private def namesRead(e: Expression): Seq[Column] = e match {
+      case c: Column => if (c.getTable == null) Seq(c) else Nil
+      case f: Function if isAggFn(f.getName) => Nil
+      case other => childExpressions(other).flatMap(namesRead)
+    }
+
+    /** The output position `e` names (Left) or the expression it is, bound
+      * by `bind` (Right). */
+    def key(e: Expression, bind: Expression => Expr): Either[Int, Expr] = {
+      def bare(x: Expression): Option[Column] = x match {
+        case Grouped(inner) => bare(inner)
+        case c: Column if c.getTable == null => Some(c)
+        case _ => None
+      }
+      selectListOrdinal("ORDER BY", e, expandedItems.size) match {
+        case Some(i) => Left(i)
+        case None => bare(e).map(c => unquoted(c.getColumnName)).filter(named(_).nonEmpty) match {
+          case Some(name) => Left(oneOutput(e, name, named(name)))
+          case None =>
+            namesRead(e).foreach { c =>
+              val name = unquoted(c.getColumnName)
+              val outputs = named(name)
+              if (outputs.nonEmpty) {
+                if (inputColumn(name).isDefined) {
+                  outputs.find(!isInputColumn(_, name)).foreach { other =>
+                    val item = expandedItems(other)._1
+                    throw new IllegalArgumentException(
+                      s"ORDER BY $e is ambiguous: $name is an input column and also output column ${other + 1}, " +
+                        s"$item; write the input column with its table${qualified(name).fold("")(q => s" ($q)")}, " +
+                        s"or $item, in place of $name")
+                  }
+                } else oneOutput(e, name, outputs)
+              }
+            }
+            Right(bind(e))
+        }
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -481,10 +625,12 @@ object LogicalBuilder {
   // ---------------------------------------------------------------------------
 
   /** A "binder factory": given an `AnalyticExpression => Option[Expr]` window
-    * resolver, returns a function that binds JSqlParser expressions to bound
-    * [[Expr]] trees over the post-aggregation (or pre-aggregation) schema.
+    * resolver and a `Column => Option[Expr]` resolver for the output columns
+    * a name may read ([[OrderScope.outputColumn]]), returns a function that
+    * binds JSqlParser expressions to bound [[Expr]] trees over the
+    * post-aggregation (or pre-aggregation) schema.
     */
-  private type BinderFactory = (AnalyticExpression => Option[Expr]) => (Expression => Expr)
+  private type BinderFactory = (AnalyticExpression => Option[Expr], Column => Option[Expr]) => (Expression => Expr)
 
   /** Build aggregation pieces but do not place the final projection. Returns the
     * pre-projection plan (with HAVING applied) and a rebinder factory used for
@@ -563,7 +709,13 @@ object LogicalBuilder {
       case _ => None
     }
 
-    val factory: BinderFactory = { windowResolver =>
+    val factory: BinderFactory = { (windowResolver, outputs) =>
+      // A name the aggregate's output does not hold may be an output column
+      // ORDER BY reads before it is a GROUP BY key written another way.
+      val resolver: Expression => Option[Expr] = {
+        case c: Column => outputs(c).orElse(aggResolver(c))
+        case other => aggResolver(other)
+      }
       def rebind(e: Expression): Expr = e match {
         // Strip grouping parens before the group-key lookup below, so
         // `SELECT (a + b) ... GROUP BY a + b` still matches its key by text.
@@ -582,13 +734,13 @@ object LogicalBuilder {
             case Some(i) =>
               ColRefExpr(i, aggOutFieldNames(i), agg.outputSchema.fields(i).dataType)
             case None =>
-              bindExprWithAggs(e, aggOutSources, aggResolver, windowResolver)
+              bindExprWithAggs(e, aggOutSources, resolver, windowResolver)
           }
       }
       rebind
     }
 
-    val havingBinder = factory(_ => None)
+    val havingBinder = factory(_ => None, _ => None)
     val afterHaving: LogicalPlan = Option(ps.getHaving) match {
       case Some(h) =>
         LogicalFilter(agg, Analyzer.condition(havingBinder(h), "HAVING"))
@@ -1438,19 +1590,6 @@ object LogicalBuilder {
           throw new IllegalArgumentException(
             s"GROUP BY position ${i + 1} cannot refer to aggregate expression in select list")
         expr
-      case None => e
-    }
-
-  /** Resolve `ORDER BY N` to the SELECT-list expression it names, for the site
-    * that binds sort keys against the pre-projection scope. Unlike GROUP BY, a
-    * position may point at an aggregate — `SELECT a, SUM(b) ... ORDER BY 2` is
-    * standard SQL, and re-binding through the projection's own binder maps that
-    * aggregate to its output column. */
-  private def resolveOrderOrdinal(
-      e: Expression,
-      expandedItems: Seq[(Expression, String)]): Expression =
-    selectListOrdinal("ORDER BY", e, expandedItems.size) match {
-      case Some(i) => expandedItems(i)._1
       case None => e
     }
 

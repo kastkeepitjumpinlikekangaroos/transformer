@@ -1204,21 +1204,27 @@ ship a fix or move something from "not done" to "done".
   fails to parse, while either select item alone, or the same item with one
   pair fewer, parses (`SqlRender.decimalSide`).
 
-- **A named `ORDER BY` key binds against the scope at that point in the plan, not
-  against the SELECT list.** `ORDER BY` resolves its columns where the sort sits:
-  over a plain projection or join that is the FROM scope, so
-  `SELECT t0.c0 AS o0 FROM r0 AS t0 ORDER BY o0` fails with
-  `Unknown column 'o0'. Available: [t0.c0, t0.c1]` and `ORDER BY t0.c0` is what
-  binds. Past a `GROUP BY` the scope is the aggregate output (`ORDER BY c0`), and
-  past a `DISTINCT` it is the projection — so there the alias binds and the source
-  name no longer does. An **ordinal is the exception**: `ORDER BY 1` names a
-  SELECT-list position and is resolved before binding at all three sort sites, so
-  it reaches an aliased expression the name form cannot. These rules are why
-  `MetaQueryGen.totalOrderKeys` orders a top-n query by its SOURCE columns and
-  emits no `LIMIT` for a `DISTINCT`, windowed, aggregate, or `UNION` shape. That
-  generator was written against the name form only; now that ordinals bind at
-  every sort site they would give a total order in exactly those excluded shapes,
-  so teaching it to emit them is an open widening opportunity, not a constraint.
+- **`ORDER BY` used to read every name in the input — fixed.** Without a
+  `DISTINCT` the sort sat below the projection and bound its keys there, so a
+  name was the input column of that name even where an output column had it:
+  `SELECT -b AS b FROM t ORDER BY b` sorted by the input `b`, `SELECT b AS a FROM
+  t ORDER BY a` by the input `a`, `SELECT a, b AS a FROM t ORDER BY a`, which SQL
+  calls ambiguous, by the input `a`, and an alias the input lacks (`ORDER BY n`
+  for `COUNT(*) AS n`, `ORDER BY total` for `a + b AS total`) was an unknown
+  column or an ungrouped one. Only an ordinal reached the output, by binding the
+  item's expression a second time below the projection, so `SELECT RAND() AS r
+  ... ORDER BY 1` sorted by another draw. `LogicalBuilder.OrderScope` reads a
+  bare name as the output column first, refuses two output columns of the name
+  unless they are one column, and refuses, inside an expression, a name that is
+  an input column and the alias of something else, which Postgres and Spark read
+  differently; `sortOverProjection` sorts over the projection, which computes a
+  key that is no output column beside the output columns, and drops it above the
+  sort, so a key that names an output column sorts by the values returned. Past
+  a `DISTINCT` or a `UNION` the scope is the output alone, as it was.
+  `MetaQueryGen.totalOrderKeys` still orders a top-n query by its source
+  columns, which mean the same, and emits no `LIMIT` for a `DISTINCT`, windowed,
+  aggregate or `UNION` shape; ordering those by output names or positions would
+  give them a total order too, an open widening opportunity (plans/robustness/22).
 
 - **Generator-rendered SQL covers only the supported grammar; the frontend
   needs a text corpus.** `QueryGen` and `MetaQueryGen` build a typed AST and
@@ -1339,8 +1345,8 @@ ship a fix or move something from "not done" to "done".
   literal (a constant sort key, which the comparator can never use to separate
   two rows) rather than as the second output column. `GROUP BY <ordinal>` always
   resolved positionally; ORDER BY never got the equivalent treatment at any of
-  its three binding sites — below a `Project`, above a `Distinct`, and above a
-  `Union`. All three now resolve through `LogicalBuilder.selectListOrdinal`, and
+  its three binding sites — the plain sort (then below a `Project`), above a
+  `Distinct`, and above a `Union`. All three now resolve through `LogicalBuilder.selectListOrdinal`, and
   an out-of-range position is a hard error (`ORDER BY position 5 is not in select
   list (size 2)`) instead of a no-op. Two shape rules the resolver inherits from
   `GROUP BY`, and one that differs: only a **bare** integer literal is an

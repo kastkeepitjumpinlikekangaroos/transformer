@@ -326,10 +326,11 @@ smaller, job — but it takes two edits, not one.** Add the case to
 `LogicalBuilder.bindExprWithAggs`, and add the node's operands to
 `LogicalBuilder.childExpressions`. The second is easy to miss because its
 catch-all is `case _ => Nil`, which fails silently: `childExpressions` drives
-`containsAggregate`, the aggregate `collect`, and `collectWindows`, so a node
-missing from it hides any aggregate or window function nested inside it and the
-query dies with "Aggregate 'SUM' used in non-aggregating position" — an error
-that points at the wrong thing entirely. Three more walks care about node shape
+`containsAggregate`, the aggregate `collect`, `collectWindows` and the names
+`OrderScope` checks in an `ORDER BY` expression, so a node missing from it hides
+any aggregate or window function nested inside it and the query dies with
+"Aggregate 'SUM' used in non-aggregating position" — an error that points at the
+wrong thing entirely — and hides an ambiguous name under it from the check. Three more walks care about node shape
 and may need the case too: `buildAggregation`'s `rebind` (matches a projection
 to a group key by canonical text), `deriveAlias` (names the output column), and
 `selectListOrdinal` (decides what counts as an `ORDER BY` / `GROUP BY`

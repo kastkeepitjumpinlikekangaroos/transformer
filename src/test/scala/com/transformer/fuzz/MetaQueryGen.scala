@@ -324,13 +324,14 @@ object MetaQueryGen {
       * at a `LIMIT` cutoff are identical rows and top-`n` yields one fixed multiset.
       * `None` (and so no `LIMIT`) for every other shape.
       *
-      * Ordering by the SOURCE column, not the output alias, is what the engine
-      * binds: `ORDER BY` resolves against the scope at that point in the plan, so
-      * `ORDER BY o0` over `SELECT t0.c0 AS o0` fails with "Unknown column 'o0'".
-      * That is also why `DISTINCT` is excluded — past the dedup the scope is the
-      * projection, and the source name no longer resolves — along with windows and
-      * aggregates (no source column to name) and a `UNION` (the clause would bind
-      * to the whole set operation, not to this arm).
+      * The keys are the SOURCE columns, qualified (`t0.c0`), which an `ORDER BY`
+      * without `DISTINCT` reads in the input whatever the output names are; the
+      * output alias (`ORDER BY o0`) would mean the same here. `DISTINCT` is
+      * excluded because past the dedup the scope is the projection, where the
+      * source name no longer resolves, along with windows and aggregates (no
+      * source column to name) and a `UNION` (the clause would bind to the whole
+      * set operation, not to this arm); ordering those by output names or
+      * positions would give them a total order too.
       *
       * Deriving the keys instead of storing them keeps every shrink sound: drop a
       * projection item and the order shrinks with it, still total; make the list

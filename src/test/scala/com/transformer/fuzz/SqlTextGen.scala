@@ -431,10 +431,10 @@ object SqlTextGen {
     * keeps the last of a repeated tail clause or splits it with a UNION's last
     * arm, keeps the second of two CTEs of one name, takes any number of ONs
     * on any join, hangs a NOT on the left side of an operator, and takes a
-    * string literal for an alias. Each must be refused, as a table entry
-    * must; `knownPlan` names the plan recording one that binds today. A
-    * `wrappable` one is also checked in every context, as a table entry's
-    * example is. */
+    * string literal for an alias; and an ORDER BY name the binder could read
+    * two ways. Each must be refused, as a table entry must; `knownPlan` names
+    * the plan recording one that binds today. A `wrappable` one is also
+    * checked in every context, as a table entry's example is. */
   final case class Beyond(name: String, sql: String, wrappable: Boolean, knownPlan: Option[String])
 
   val BeyondTheTable: Vector[Beyond] = Vector(
@@ -442,6 +442,9 @@ object SqlTextGen {
     Beyond("text after ; that is no statement", "SELECT a FROM t; garbage", wrappable = false, None),
     Beyond("a statement after ; that changes data", "SELECT a FROM t; DROP TABLE t", wrappable = false, None),
     Beyond("ORDER BY twice", "SELECT a FROM t ORDER BY a DESC ORDER BY a ASC LIMIT 1", wrappable = true, None),
+    Beyond("ORDER BY a name two output columns have", "SELECT a, b AS a FROM t ORDER BY a", wrappable = true, None),
+    Beyond("ORDER BY an input column an alias shadows, in an expression", "SELECT -a AS a FROM t ORDER BY a + 0",
+      wrappable = true, None),
     Beyond("LIMIT twice", "SELECT a FROM t ORDER BY a LIMIT 1 LIMIT 2", wrappable = true, None),
     Beyond("LIMIT on both sides of OFFSET", "SELECT a FROM t ORDER BY a LIMIT 1 OFFSET 2 LIMIT 3", wrappable = true,
       None),
@@ -700,6 +703,20 @@ object SqlTextGen {
       "SELECT a, COUNT(*) AS n FROM t GROUP BY (a)"), None),
     Spelling("parenthesized ORDER BY", Vector(s"$TAll $TOrder LIMIT {n}", s"$TAll ORDER BY (a), (b), (s) LIMIT {n}"),
       Some(TAll)),
+    // A name in ORDER BY is the output column of that name first, an alias
+    // that shadows an input column included; the query that drops what they
+    // are about sorts by the input column instead.
+    Spelling("ORDER BY an output name", Vector(
+      "SELECT -a AS a, b, s FROM t ORDER BY a, b, s LIMIT {n}",
+      "SELECT -a AS a, b, s FROM t ORDER BY 1, 2, 3 LIMIT {n}",
+      "SELECT -a AS a, b, s FROM t ORDER BY -t.a, t.b, (s) LIMIT {n}"),
+      Some("SELECT -a AS a, b, s FROM t ORDER BY t.a, b, s LIMIT {n}")),
+    Spelling("ORDER BY an aggregate's name", Vector(
+      "SELECT s, COUNT(*) AS c FROM t GROUP BY s ORDER BY c, s LIMIT {n}",
+      "SELECT s, COUNT(*) AS c FROM t GROUP BY s ORDER BY 2, 1 LIMIT {n}",
+      "SELECT s, COUNT(*) AS c FROM t GROUP BY s ORDER BY COUNT(*), s LIMIT {n}",
+      "SELECT s, COUNT(*) AS c FROM t GROUP BY s ORDER BY c + 0, (s) LIMIT {n}"),
+      Some("SELECT s, COUNT(*) AS c FROM t GROUP BY s ORDER BY s LIMIT {n}")),
     Spelling("inner join", Vector(
       "SELECT t.a, t.b, u.b AS ub FROM t JOIN u ON t.a = u.a",
       "SELECT t.a, t.b, u.b AS ub FROM t, u WHERE t.a = u.a",

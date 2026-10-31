@@ -1,6 +1,6 @@
 # Plan 22: ORDER BY resolves a name against the input columns first
 
-> Status: planned · found by the 2026-10-31 audit · decided by the user:
+> Status: **done** 2026-10-31 · found by the 2026-10-31 audit · decided by the user:
 > output names first, conflicts refused · Effort: 1 day · Risk: medium (changes
 > the order of queries whose alias shadows an input column)
 
@@ -53,3 +53,27 @@ DISTINCT and UNION. `SyntaxEquivalence` gains `ORDER BY <alias>` and `ORDER BY
 
 README (ORDER BY), gotchas ("A named ORDER BY key binds against the scope at
 that point in the plan" is rewritten), testing.md.
+
+## Outcome
+
+Done as planned, with one change of shape. `LogicalBuilder.OrderScope` gives
+each key of a SELECT without DISTINCT as an output position (an ordinal, or a
+bare name, in parentheses or not, that an output column has) or an expression
+over the input. Inside an expression, a name no input column has reads the
+output column through a second resolver the binder factory now takes. A name
+that both could read, and two output columns of one name that are not one
+column of the scope, are refused before binding, naming the columns. The sort
+now runs over the projection (`sortOverProjection`): the projection computes
+each expression key beside the output columns, the sort reads positions, and a
+second projection drops the extra columns. Rebinding an ordinal's item below
+the projection, as before, computed it twice, so `SELECT RAND() AS r ... ORDER
+BY 1` sorted by another draw; now a key that names an output column sorts by
+the values the query returns. A SELECT item is computed on every row before a
+LIMIT, as SQL's order of evaluation has it, where it used to run only on the
+rows the sort let through.
+
+`anOrderByNameReadsTheOutputColumnFirst` covers the table above and the
+refusals; against the code before it failed on its first query. The frontend
+fuzzer's `BeyondTheTable` holds both refusals in every context, and
+`SyntaxEquivalence` an output name, its position and its expression as one
+spelling, plain and over an aggregate.

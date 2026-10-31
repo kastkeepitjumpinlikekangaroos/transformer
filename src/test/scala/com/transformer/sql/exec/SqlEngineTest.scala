@@ -244,18 +244,13 @@ class SqlEngineTest {
     assertEquals(Seq(3, 1, 2), collectAllRows(q).map(_("id")))
   }
 
-  @Test def orderByOrdinalReachesAliasThatNameLookupCannot(): Unit = {
+  @Test def orderByOrdinalAndNameBothReachAnAlias(): Unit = {
     val p = tmpCsv("a.csv", "a,b\n1,5\n4,4\n2,1\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
-    // Without DISTINCT the sort sits below the projection, so a SELECT alias is
-    // not in scope by name (see docs/gotchas.md). An ordinal is: it expands to
-    // the select item's expression before binding, which is how you sort by a
-    // computed column here.
-    val named = try { SqlEngine.execute("SELECT a + b AS s FROM t ORDER BY s", cat); null }
-      catch { case e: IllegalArgumentException => e }
-    assertNotNull(named)
-    assertTrue(named.getMessage, named.getMessage.contains("Unknown column"))
-
+    // A position and the alias both name the output column, which the sort
+    // reads above the projection.
+    val named = SqlEngine.execute("SELECT a + b AS s FROM t ORDER BY s DESC", cat)
+    assertEquals(Seq(8, 6, 3), collectAllRows(named).map(_("s")))
     val q = SqlEngine.execute("SELECT a + b AS s FROM t ORDER BY 1 DESC", cat)
     assertEquals(Seq(8, 6, 3), collectAllRows(q).map(_("s")))
   }
@@ -263,8 +258,8 @@ class SqlEngineTest {
   @Test def orderByOrdinalOverWindowInsideArithmetic(): Unit = {
     val p = tmpCsv("a.csv", "id,val\n1,10\n2,40\n3,15\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
-    // The ordinal expands to `val - LAG(val) OVER (...)`, which rebinds through
-    // the same window resolver the projection uses.
+    // The ordinal names the output column `val - LAG(val) OVER (...)`, which
+    // the projection computes before the sort reads it.
     val q = SqlEngine.execute(
       "SELECT id, val - LAG(val, 1, 0) OVER (ORDER BY id) AS delta FROM t ORDER BY 2 DESC", cat)
     val rows = collectAllRows(q)
@@ -4594,5 +4589,83 @@ class SqlEngineTest {
     assertEquals(Seq("1|4", "2|4", "3|2", "4|2", "5|1", "6|1", "7|4", "8|4"),
       collectAllRows(SqlEngine.execute("SELECT v, COUNT(*) OVER (PARTITION BY k) AS n FROM fl", c))
         .map(r => s"${r("v")}|${r("n")}").sorted)
+  }
+
+  /** ORDER BY reads a bare name as the output column of that name first, and
+    * refuses a name it could read two ways. It read every name in the input,
+    * so `ORDER BY b` over `SELECT -b AS b` sorted by the input `b`, and the
+    * aliases of an aggregate or an expression were unknown columns
+    * (plans/robustness/22). */
+  @Test def anOrderByNameReadsTheOutputColumnFirst(): Unit = {
+    val p = tmpCsv("t.csv", "a,b,s\n1,30,p\n2,20,q\n3,10,r\n3,5,r\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    def rows(sql: String): Seq[Seq[Any]] = {
+      val q = SqlEngine.execute(sql, cat)
+      val out = Seq.newBuilder[Seq[Any]]
+      q.batches.foreach { b =>
+        (0 until b.numRows).foreach { r =>
+          out += (0 until b.schema.length).map(i => if (b.column(i).isNull(r)) null else b.column(i).getBoxed(r))
+        }
+      }
+      out.result()
+    }
+    def bindError(sql: String): String =
+      try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+
+    // An alias that shadows an input column: the output's values, where these
+    // sorted by the input's.
+    assertEquals(Seq(-30, -20, -10, -5), rows("SELECT -b AS b FROM t ORDER BY b").map(_.head))
+    assertEquals(Seq(-30, -20, -10, -5), rows("SELECT -b AS b FROM t ORDER BY (b)").map(_.head))
+    assertEquals(Seq(5, 10, 20, 30), rows("SELECT b AS a FROM t ORDER BY a").map(_.head))
+    assertEquals(Seq(Seq(3, 5), Seq(3, 10), Seq(2, 20), Seq(1, 30)), rows("SELECT a AS b, b AS a FROM t ORDER BY a"))
+    // Aliases the input does not have, where each was an unknown column or an
+    // ungrouped one: a count, a sum, an expression, a window.
+    assertEquals(Seq(Seq("r", 2L), Seq("p", 1L), Seq("q", 1L)),
+      rows("SELECT s, COUNT(*) AS n FROM t GROUP BY s ORDER BY n DESC, s"))
+    assertEquals(Seq(Seq("r", 15L), Seq("q", 20L), Seq("p", 30L)),
+      rows("SELECT s, SUM(b) AS a FROM t GROUP BY s ORDER BY a"))
+    assertEquals(Seq(8, 13, 22, 31), rows("SELECT a + b AS total FROM t ORDER BY total").map(_.head))
+    assertEquals(Seq("p", "q", "r", "r"),
+      rows("SELECT s, ROW_NUMBER() OVER (ORDER BY b) AS rn FROM t ORDER BY rn DESC").map(_.head))
+    // Inside an expression, an alias the input does not have.
+    assertEquals(Seq(31, 22, 13, 8), rows("SELECT a + b AS total FROM t ORDER BY total * -1").map(_.head))
+    assertEquals(Seq("r", "p", "q"), rows("SELECT s, COUNT(*) AS n FROM t GROUP BY s ORDER BY -n, s").map(_.head))
+    // A position, and a name, sort by the values returned, RAND()'s among
+    // them: each sorted by a second draw.
+    val many = tmpCsv("many.csv", "x\n" + (1 to 300).mkString("\n") + "\n")
+    val manyCat = catalogWith("m" -> CsvReader.fromPath(many.toString, CsvOptions()))
+    Seq("SELECT RAND() AS r FROM m ORDER BY r", "SELECT RAND() AS r FROM m ORDER BY 1").foreach { sql =>
+      val drawn = collectAllRows(SqlEngine.execute(sql, manyCat)).map(_("r").asInstanceOf[Double])
+      assertEquals(sql, drawn.sorted, drawn)
+    }
+    // A qualified name is the input column; so is a name inside an aggregate,
+    // and a name whose output column is that input column.
+    assertEquals(Seq(-5, -10, -20, -30), rows("SELECT -b AS b FROM t ORDER BY t.b").map(_.head))
+    assertEquals(Seq("r", "q", "p"), rows("SELECT s, SUM(b) AS b FROM t GROUP BY s ORDER BY MAX(b)").map(_.head))
+    assertEquals(Seq(30, 20, 10, 5), rows("SELECT b FROM t ORDER BY b * -1").map(_.head))
+    assertEquals(Seq(30, 20, 10, 5), rows("SELECT t.b AS b FROM t ORDER BY -b").map(_.head))
+    assertEquals(Seq("r", "r", "q", "p"), rows("SELECT s FROM t ORDER BY b").map(_.head))
+    assertEquals(Seq("p", "q"), rows("SELECT s FROM t ORDER BY b DESC LIMIT 2").map(_.head))
+    // Two output columns that are one column of the scope are one key.
+    assertEquals(Seq(3, 3, 2, 1), rows("SELECT a, t.a FROM t ORDER BY a DESC").map(_.head))
+
+    // Two output columns of the name, where this sorted by the input's.
+    assertEquals("ORDER BY a is ambiguous: output columns 1 and 2 are each named a; order by the position of " +
+      "the one you mean", bindError("SELECT a, b AS a FROM t ORDER BY a"))
+    assertTrue(bindError("SELECT a + 1 AS x, b AS x FROM t ORDER BY x * 2").startsWith("ORDER BY x * 2 is ambiguous"))
+    // A name that is an input column and an alias of something else, inside
+    // an expression: Postgres reads the input, Spark the output.
+    assertEquals("ORDER BY b + 0 is ambiguous: b is an input column and also output column 1, -b; write the " +
+      "input column with its table (t.b), or -b, in place of b", bindError("SELECT -b AS b FROM t ORDER BY b + 0"))
+    assertTrue(bindError("SELECT s, SUM(b) AS b FROM t GROUP BY s ORDER BY b + 0")
+      .startsWith("ORDER BY b + 0 is ambiguous: b is an input column and also output column 2, SUM(b)"))
+    // A name neither has is unknown, as before.
+    assertTrue(bindError("SELECT a AS x FROM t ORDER BY y").contains("Unknown column"))
+
+    // Past a DISTINCT and a UNION only the output is in scope, as before.
+    assertEquals(Seq(-30, -20, -10, -5), rows("SELECT DISTINCT -b AS b FROM t ORDER BY b").map(_.head))
+    assertEquals(Seq(1, 2, 3, 3, 5, 10, 20, 30),
+      rows("SELECT b AS x FROM t UNION ALL SELECT a FROM t ORDER BY x").map(_.head))
   }
 }
