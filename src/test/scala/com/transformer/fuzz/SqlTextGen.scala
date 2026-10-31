@@ -431,10 +431,13 @@ object SqlTextGen {
     * keeps the last of a repeated tail clause or splits it with a UNION's last
     * arm, keeps the second of two CTEs of one name, takes any number of ONs
     * on any join, hangs a NOT on the left side of an operator, and takes a
-    * string literal for an alias; and an ORDER BY name the binder could read
-    * two ways. Each must be refused, as a table entry must; `knownPlan` names
-    * the plan recording one that binds today. A `wrappable` one is also
-    * checked in every context, as a table entry's example is. */
+    * string literal for an alias; an ORDER BY name the binder could read
+    * two ways; and text that cannot change the answer: a sort, group or
+    * partition key that reads no column, a LIKE pattern that ends in its
+    * escape and a negative SUBSTRING length. Each must be refused, as a table
+    * entry must; `knownPlan` names the plan recording one that binds today. A
+    * `wrappable` one is also checked in every context, as a table entry's
+    * example is. */
   final case class Beyond(name: String, sql: String, wrappable: Boolean, knownPlan: Option[String])
 
   val BeyondTheTable: Vector[Beyond] = Vector(
@@ -445,6 +448,18 @@ object SqlTextGen {
     Beyond("ORDER BY a name two output columns have", "SELECT a, b AS a FROM t ORDER BY a", wrappable = true, None),
     Beyond("ORDER BY an input column an alias shadows, in an expression", "SELECT -a AS a FROM t ORDER BY a + 0",
       wrappable = true, None),
+    Beyond("ORDER BY a string literal", "SELECT a, b FROM t ORDER BY 'b'", wrappable = true, None),
+    Beyond("ORDER BY a signed number", "SELECT a FROM t ORDER BY -1", wrappable = true, None),
+    Beyond("ORDER BY arithmetic on constants", "SELECT a FROM t ORDER BY 1 + 0", wrappable = true, None),
+    Beyond("ORDER BY NULL after a DISTINCT", "SELECT DISTINCT a FROM t ORDER BY NULL", wrappable = true, None),
+    Beyond("GROUP BY a constant", "SELECT COUNT(*) AS n FROM t GROUP BY 1.5", wrappable = true, None),
+    Beyond("GROUP BY the clock", "SELECT COUNT(*) AS n FROM t GROUP BY CURRENT_DATE", wrappable = true, None),
+    Beyond("PARTITION BY a constant", "SELECT ROW_NUMBER() OVER (PARTITION BY 'a' ORDER BY a) AS r FROM t",
+      wrappable = true, None),
+    Beyond("a window ORDER BY a constant", "SELECT RANK() OVER (ORDER BY TRUE) AS r FROM t", wrappable = true, None),
+    Beyond("a LIKE pattern ending in its escape", "SELECT a FROM t WHERE s LIKE 'a!' ESCAPE '!'", wrappable = true,
+      None),
+    Beyond("a negative SUBSTRING length", "SELECT SUBSTRING(s, 1, -1) AS v FROM t", wrappable = true, None),
     Beyond("LIMIT twice", "SELECT a FROM t ORDER BY a LIMIT 1 LIMIT 2", wrappable = true, None),
     Beyond("LIMIT on both sides of OFFSET", "SELECT a FROM t ORDER BY a LIMIT 1 OFFSET 2 LIMIT 3", wrappable = true,
       None),

@@ -1505,6 +1505,14 @@ digits, and every name through `SqlParser.unquote`, the one rule `TaskDag`
 reads a job's table references by too; `oracle/SyntaxEquivalence` holds
 spellings that differ only in quoting to one answer.
 
+Plan 01's rule, that text which parses must change the outcome or fail, holds
+for values too ([plans/robustness/23](../plans/robustness/23-clauses-that-cannot-change-the-answer.md)).
+A sort, group or partition key that reads no column (`ORDER BY 'b'`, `GROUP BY
+1.5`; `LogicalBuilder.isConstant`) orders, groups or partitions nothing and is
+refused at every key site (`refuseConstantKey`), and so are a LIKE pattern that
+ends in its escape character and a negative SUBSTRING length, at bind time when
+`constantValue` can compute them and on the row otherwise.
+
 ## Property-based testing
 
 Alongside the example-based unit tests, `src/test/scala/com/transformer/fuzz/`

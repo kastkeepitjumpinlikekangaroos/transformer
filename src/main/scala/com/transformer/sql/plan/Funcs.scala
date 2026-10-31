@@ -202,15 +202,20 @@ object Funcs {
 
   /** SUBSTRING's answer: `length` characters of `s` from the 1-based
     * `position`, or as many as there are. A position before the first
-    * character counts from the first; one past the last, or a length below
-    * 1, gives the empty string. Read as a BIGINT, a position past an INT's
+    * character counts from the first; one past the last, or a length of 0,
+    * gives the empty string, and a negative length is an error, as in
+    * Postgres: it took nothing. Read as a BIGINT, a position past an INT's
     * range is past the end rather than wrapped round to before the start. */
   private[plan] def substring(s: String, position: Long, length: Long): String = {
+    if (length < 0) throw negativeLength(length)
     val start = if (position < 1) 0L else position - 1
     if (start >= s.length || length <= 0) ""
     else s.substring(start.toInt, if (length < s.length - start) (start + length).toInt else s.length)
   }
 
+
+  private[plan] def negativeLength(length: Long): IllegalArgumentException =
+    new IllegalArgumentException(s"SUBSTRING's length $length is negative")
 
   /** Vectorized counterpart to [[apply]]. Returns `Some(vec)` for the function
     * names with a fast path, `None` otherwise — the caller falls back to the

@@ -1204,6 +1204,22 @@ ship a fix or move something from "not done" to "done".
   fails to parse, while either select item alone, or the same item with one
   pair fewer, parses (`SqlRender.decimalSide`).
 
+- **Keys and values that could not change the answer used to run — fixed.** A
+  sort, group or partition key that reads no column orders, groups or
+  partitions nothing, and the binder took one: `ORDER BY 'b'` (what a query
+  that meant the column `"b"` says, a MySQL habit) and `ORDER BY +1`, `NULL`,
+  `1.5` or `1 + 0` kept the rows' order, `GROUP BY 1.5` or `CURRENT_DATE` made
+  one group, and `PARTITION BY 'a'` one partition. `LogicalBuilder.isConstant`
+  (no column, no `RAND()`; `RAND(seed)` is one value) decides, and
+  `refuseConstantKey` refuses one at every key site, naming it and the
+  spellings of a column and a position; a position, and a name of an output
+  column, read a column whatever it holds. Beside them, a LIKE pattern that
+  ends in its escape character escaped nothing and matched the character
+  itself (`'a!' ESCAPE '!'`), and `SUBSTRING(s, 2, -1)` was the empty string:
+  each is now an error, as in Postgres, at bind time when it is a constant
+  (`constantValue` computes one there) and on the row otherwise
+  (plans/robustness/23).
+
 - **`ORDER BY` used to read every name in the input — fixed.** Without a
   `DISTINCT` the sort sat below the projection and bound its keys there, so a
   name was the input column of that name even where an output column had it:
@@ -1350,8 +1366,8 @@ ship a fix or move something from "not done" to "done".
   an out-of-range position is a hard error (`ORDER BY position 5 is not in select
   list (size 2)`) instead of a no-op. Two shape rules the resolver inherits from
   `GROUP BY`, and one that differs: only a **bare** integer literal is an
-  ordinal, so `ORDER BY +1` (a JSqlParser `SignedExpression`) stays a constant
-  sort key; an ORDER BY position **may** point at an aggregate
+  ordinal, so `ORDER BY +1` (a JSqlParser `SignedExpression`) is no position but
+  a constant, which plans/robustness/23 refuses; an ORDER BY position **may** point at an aggregate
   (`SELECT a, SUM(b) ... ORDER BY 2` is standard SQL) where a GROUP BY position
   may not; and parens used to be clause-dependent, because JSqlParser drops them
   in `GROUP BY (1)` (a bare `LongValue`, so it *does* resolve positionally,

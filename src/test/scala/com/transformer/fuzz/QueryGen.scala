@@ -461,10 +461,18 @@ object QueryGen {
     rng.weighted(producers: _*)()
   }
 
-  /** SUBSTRING args: the string, a position, and half the time a length. */
+  /** SUBSTRING args: the string, a position, and half the time a length. A
+    * negative length is an error (plans/robustness/23), and every layout
+    * must answer, so a length read from a column is its `ABS`. */
   private def substringArgs(rng: Rng, schema: Schema, s: Expr): Seq[Expr] = {
     val start = integerArg(rng, schema, rng.between(-1, 6))
-    if (rng.bool(0.5)) Seq(s, start, integerArg(rng, schema, rng.between(0, 6))) else Seq(s, start)
+    if (rng.bool(0.5)) {
+      val length = integerArg(rng, schema, rng.between(0, 6)) match {
+        case l: LitExpr => l
+        case other => FuncExpr("ABS", Seq(other), other.dataType)
+      }
+      Seq(s, start, length)
+    } else Seq(s, start)
   }
 
   /** A DECIMAL, DATE, TIMESTAMP or BINARY value: the conditional forms every

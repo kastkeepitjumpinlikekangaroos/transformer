@@ -666,12 +666,14 @@ object LikeExpr {
     while (i < like.length) {
       val c = like.charAt(i)
       // The escape character comes first, so it works even when it is `%` or
-      // `_`. A trailing one has nothing to escape and stands for itself.
+      // `_`. A trailing one has nothing to escape, which Postgres refuses: it
+      // stood for itself, so `'a\'` matched what `'a\\'` does.
       if (syntax.escape.contains(c)) {
-        if (i + 1 < like.length) {
-          sb.append(java.util.regex.Pattern.quote(like.substring(i + 1, i + 2)))
-          i += 1
-        } else sb.append(java.util.regex.Pattern.quote(c.toString))
+        if (i + 1 == like.length) throw new IllegalArgumentException(
+          s"The LIKE pattern '${like.replace("'", "''")}' ends in its escape character, $c, which escapes " +
+            s"nothing; write $c$c to match one")
+        sb.append(java.util.regex.Pattern.quote(like.substring(i + 1, i + 2)))
+        i += 1
       } else c match {
         case '%' => sb.append(".*")
         case '_' => sb.append('.')

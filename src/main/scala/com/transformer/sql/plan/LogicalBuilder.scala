@@ -614,7 +614,9 @@ object LogicalBuilder {
                 } else oneOutput(e, name, outputs)
               }
             }
-            Right(bind(e))
+            val bound = bind(e)
+            refuseConstantKey("ORDER BY", e, bound, position = true)
+            Right(bound)
         }
       }
     }
@@ -649,8 +651,11 @@ object LogicalBuilder {
       .getOrElse(Nil)
     rawGroupExprs.foreach(refuseGroupingFunction)
     val groupExprs: Seq[Expression] = rawGroupExprs.map(resolveGroupOrdinal(_, expandedItems))
-    val groupBound: Seq[(Expr, String)] = groupExprs.map { e =>
+    val groupBound: Seq[(Expr, String)] = rawGroupExprs.zip(groupExprs).map { case (written, e) =>
       val b = bindExpr(e, sources)
+      // A position names an output column, whatever that holds.
+      if (selectListOrdinal("GROUP BY", written, expandedItems.size).isEmpty)
+        refuseConstantKey("GROUP BY", written, b, position = true)
       (b, deriveAlias(e))
     }
 
@@ -768,15 +773,17 @@ object LogicalBuilder {
   // FROM + JOINs
   // ---------------------------------------------------------------------------
 
+  /** One row and no columns, which a constant is computed over. */
+  private lazy val EmptyRow: ColumnarBatch = {
+    val row = new ColumnarBatch(Schema(Vector.empty), 1)
+    row.setNumRows(1)
+    row
+  }
+
   /** What a SELECT with no FROM reads: one row and no columns, so the SELECT
     * list is evaluated once and no column name resolves. Operators never write
     * to their input batches, so one view serves every query. */
-  private lazy val NoFromRow: MaterializedView = {
-    val schema = Schema(Vector.empty)
-    val row = new ColumnarBatch(schema, 1)
-    row.setNumRows(1)
-    new MaterializedView(schema, IndexedSeq(IndexedSeq(row)))
-  }
+  private lazy val NoFromRow: MaterializedView = new MaterializedView(EmptyRow.schema, IndexedSeq(IndexedSeq(EmptyRow)))
 
   private def buildFromAndJoins(ps: PlainSelect, catalog: Catalog, cteScope: Map[String, CteScopeEntry]): (LogicalPlan, Sources) = {
     val (root, rootSources) =
@@ -1016,8 +1023,15 @@ object LogicalBuilder {
           case Some(_) => throw new IllegalArgumentException("ESCAPE must be a single-character string literal")
         })
       Seq(s, p).foreach(e => Analyzer.checkText(e.dataType, if (syntax.caseInsensitive) "ILIKE" else "LIKE"))
-      LikeExpr(Analyzer.implicitCast(s, DataType.StringType), Analyzer.implicitCast(p, DataType.StringType),
+      val like = LikeExpr(Analyzer.implicitCast(s, DataType.StringType), Analyzer.implicitCast(p, DataType.StringType),
         lk.isNot, syntax)
+      // A constant pattern is read now, so one that ends in its escape
+      // character is an error before any row is read.
+      constantValue(like.pattern).foreach {
+        case pattern: String => LikeExpr.toRegex(pattern, syntax)
+        case _ => ()
+      }
+      like
 
     case isn: IsNullExpression =>
       IsNullExpr(b(leftSide(isn.getLeftExpression)), negated = isn.isNot)
@@ -1272,6 +1286,10 @@ object LogicalBuilder {
       val signature = Funcs.signature(name, args)
         .getOrElse(throw new IllegalArgumentException(s"Unknown function '${f.getName}(${argTypes.mkString(",")})'"))
       signature.params.zip(args).foreach { case (param, arg) => Analyzer.checkArgument(name, param, arg) }
+      if (name == "SUBSTRING" && args.size == 3) constantValue(args(2)).foreach {
+        case n: Number if n.longValue < 0 => throw Funcs.negativeLength(n.longValue)
+        case _ => ()
+      }
       FuncExpr(name, args, signature.returnType)
     }
   }
@@ -1404,10 +1422,18 @@ object LogicalBuilder {
   private def bindAnalytic(ae: AnalyticExpression, binder: Expression => Expr): WindowDef = {
     val partitionExprs: Seq[Expression] = Option(ae.getPartitionExpressionList)
       .map(_.asScala.asInstanceOf[Iterable[Expression]].toSeq).getOrElse(Nil)
-    val partitionKeys: Seq[Expr] = partitionExprs.map(binder)
+    val partitionKeys: Seq[Expr] = partitionExprs.map { e =>
+      val key = binder(e)
+      refuseConstantKey("PARTITION BY", e, key, position = false)
+      key
+    }
 
     val orderEls = Option(ae.getOrderByElements).map(_.asScala.toSeq).getOrElse(Nil)
-    val orderKeys: Seq[SortKey] = orderEls.map(obe => sortKey(binder(obe.getExpression), obe))
+    val orderKeys: Seq[SortKey] = orderEls.map { obe =>
+      val key = binder(obe.getExpression)
+      refuseConstantKey("ORDER BY", obe.getExpression, key, position = false)
+      sortKey(key, obe)
+    }
 
     val frame = bindFrame(Option(ae.getWindowElement), orderKeys)
     val fnName = ae.getName.toUpperCase(Locale.ROOT)
@@ -1603,10 +1629,63 @@ object LogicalBuilder {
         ColRefExpr(i, f.name, f.dataType)
       case None =>
         val sources: Sources = Seq((None, schema))
-        bindExpr(obe.getExpression, sources)
+        val bound = bindExpr(obe.getExpression, sources)
+        refuseConstantKey("ORDER BY", obe.getExpression, bound, position = true)
+        bound
     }
     sortKey(key, obe)
   }
+
+  /** Refuse a sort, group or partition key that holds one value before any
+    * row is read ([[isConstant]]): it cannot order, group or partition
+    * anything, and `ORDER BY 'b'` is what a query that meant the column `"b"`
+    * says (MySQL's habit; Postgres refuses it too). Where a position is a key,
+    * the advice names that spelling as well. */
+  private def refuseConstantKey(clause: String, written: Expression, bound: Expr, position: Boolean): Unit =
+    if (isConstant(bound)) {
+      val verb = clause match {
+        case "GROUP BY" => "groups"
+        case "PARTITION BY" => "partitions"
+        case _ => "orders"
+      }
+      def strip(e: Expression): Expression = e match {
+        case Grouped(inner) => strip(inner)
+        case other => other
+      }
+      val name = strip(written) match {
+        case s: StringValue => s"${SqlParser.quote(s.getNotExcapedValue)} in quotes"
+        case _ => "in double quotes if it needs them"
+      }
+      throw new IllegalArgumentException(
+        s"$clause $written reads no column, so it $verb nothing; a column is written as its name ($name)" +
+          (if (position) s", and a position as a bare number ($clause 2)" else ""))
+    }
+
+  /** Whether `e` holds one value before any row is read: it reads no column
+    * and no `RAND()`, whose value differs by row. A literal, a CAST of one,
+    * arithmetic on constants and a clock keyword, which binds to one
+    * literal, are constant; so is `RAND(seed)`, one value for one seed. */
+  private def isConstant(e: Expr): Boolean = e match {
+    case _: ColRefExpr => false
+    case _: LitExpr => true
+    case FuncExpr("RAND" | "RANDOM", Seq(), _) => false
+    case FuncExpr(_, args, _) => args.forall(isConstant)
+    case CastExpr(c, _) => isConstant(c)
+    case UnaryOpExpr(_, c, _) => isConstant(c)
+    case BinOpExpr(_, l, r, _) => isConstant(l) && isConstant(r)
+    case CaseExpr(branches, elseExpr, _) =>
+      branches.forall { case (w, t) => isConstant(w) && isConstant(t) } && elseExpr.forall(isConstant)
+    case IsNullExpr(c, _) => isConstant(c)
+    case InListExpr(c, items, _) => isConstant(c) && items.forall(isConstant)
+    case LikeExpr(c, pattern, _, _) => isConstant(c) && isConstant(pattern)
+  }
+
+  /** The value of a constant `e` ([[isConstant]]), computed now. None when
+    * `e` reads a row, or when computing it fails, which then fails on the
+    * first row, as it did. */
+  private def constantValue(e: Expr): Option[Any] =
+    if (!isConstant(e)) None
+    else try Some(e.eval(EmptyRow, 0)) catch { case NonFatal(_) => None }
 
   /** The bound key with the element's direction and NULL placement: an
     * explicit NULLS FIRST / NULLS LAST wins, and without one a NULL sorts as

@@ -96,15 +96,20 @@ object ExprParity {
 
   /** A tree the generator built fails only where its own values do: an INT
     * or BIGINT result past its type, or a CAST of NaN or an infinity to an
-    * integer, each an `ArithmeticException` (plans/robustness/18), which
-    * [[check]] holds the two paths to agree on. Nothing else may throw. The
+    * integer, each an `ArithmeticException` (plans/robustness/18), and a
+    * negative SUBSTRING length (plans/robustness/23), which [[check]] holds
+    * the two paths to agree on. Nothing else may throw. The
     * generator's other partial shapes are CASTs of a guard column under a
     * conditional that keeps them off the rows they fail on, so any other throw
     * means a conditional evaluated an operand where its answer did not need
     * it — which [[check]] cannot see when both paths do so (`IF` and
     * `COALESCE` once read every argument on both). */
   def checkTotal(expr: Expr, batch: ColumnarBatch): Unit = {
-    def owned(t: Throwable): Boolean = t.isInstanceOf[ArithmeticException]
+    def owned(t: Throwable): Boolean = t match {
+      case _: ArithmeticException => true
+      case e: IllegalArgumentException => String.valueOf(e.getMessage).startsWith("SUBSTRING's length ")
+      case _ => false
+    }
     try expr.evalVec(batch)
     catch {
       case NonFatal(t) if owned(t) => ()

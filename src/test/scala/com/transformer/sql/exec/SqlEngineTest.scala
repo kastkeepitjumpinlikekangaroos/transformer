@@ -237,11 +237,14 @@ class SqlEngineTest {
   @Test def orderBySignedLiteralIsNotAnOrdinal(): Unit = {
     val p = tmpCsv("a.csv", "id,score\n3,10\n1,90\n2,30\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
-    // Only a BARE integer literal is an ordinal; `+1` parses as a
-    // SignedExpression and stays a constant sort key, matching GROUP BY and
-    // BigQuery/Postgres/MySQL. Out-of-range bounds don't apply to it either.
-    val q = SqlEngine.execute("SELECT id, score FROM t ORDER BY +9", cat)
-    assertEquals(Seq(3, 1, 2), collectAllRows(q).map(_("id")))
+    // Only a BARE integer literal is an ordinal; `+9` parses as a
+    // SignedExpression, matching GROUP BY and BigQuery/Postgres/MySQL, so it
+    // is no out-of-range position. It is a constant, which orders nothing,
+    // and is refused as one (plans/robustness/23).
+    val ex = try { SqlEngine.execute("SELECT id, score FROM t ORDER BY +9", cat); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull(ex)
+    assertTrue(ex.getMessage, ex.getMessage.startsWith("ORDER BY +9 reads no column"))
   }
 
   @Test def orderByOrdinalAndNameBothReachAnAlias(): Unit = {
@@ -2267,10 +2270,10 @@ class SqlEngineTest {
     // escaping off, so the backslash is an ordinary character.
     assertEquals(Seq(4), column("SELECT id FROM ts WHERE s LIKE 'A\\_b'", cat, "id"))
     assertEquals(Nil, column("SELECT id FROM ts WHERE s LIKE 'A\\_b' ESCAPE ''", cat, "id"))
-    // The escape escapes itself and %, and a trailing one stands for itself.
+    // The escape escapes itself and %; a trailing one, which escapes nothing,
+    // is an error (aDanglingEscapeOrANegativeLengthIsAnError).
     assertEquals(Seq(1), column("SELECT id FROM ts WHERE s || '!' LIKE 'Ab!!' ESCAPE '!'", cat, "id"))
     assertEquals(Seq(3), column("SELECT id FROM ts WHERE s || '%' LIKE 'xy!%' ESCAPE '!'", cat, "id"))
-    assertEquals(Seq(1), column("SELECT id FROM ts WHERE s || '!' LIKE 'Ab!' ESCAPE '!'", cat, "id"))
     // With ILIKE: a letter as the escape still escapes only itself, and the
     // rest matches regardless of case.
     assertEquals(Seq(4), column("SELECT id FROM ts WHERE s ILIKE 'aX_B' ESCAPE 'X'", cat, "id"))
@@ -3403,7 +3406,10 @@ class SqlEngineTest {
     val queries = Seq(
       "SELECT k, NULL AS x FROM t ORDER BY k" -> true,
       "SELECT g, SUM(NULL) AS s, MIN(NULL) AS m FROM t GROUP BY g ORDER BY g" -> true,
-      "SELECT g, NULL AS x, COUNT(*) AS n FROM t GROUP BY g, NULL" -> false,
+      // A NULL-typed key that reads a column: `GROUP BY NULL` reads none, and
+      // is refused (plans/robustness/23).
+      "SELECT g, CASE WHEN g = g THEN NULL END AS x, COUNT(*) AS n FROM t GROUP BY g, CASE WHEN g = g THEN NULL END" ->
+        false,
       "SELECT DISTINCT g, NULL AS x FROM t" -> false,
       "WITH a AS (SELECT k, NULL AS x FROM t) SELECT a.k, a.x, b.g FROM a JOIN t b ON a.k = b.k" -> false,
       "WITH a AS (SELECT k, NULL AS x FROM t WHERE g = 0) SELECT b.k, a.x FROM t b LEFT JOIN a ON a.k = b.k" -> false,
@@ -4667,5 +4673,79 @@ class SqlEngineTest {
     assertEquals(Seq(-30, -20, -10, -5), rows("SELECT DISTINCT -b AS b FROM t ORDER BY b").map(_.head))
     assertEquals(Seq(1, 2, 3, 3, 5, 10, 20, 30),
       rows("SELECT b AS x FROM t UNION ALL SELECT a FROM t ORDER BY x").map(_.head))
+  }
+
+  /** A sort, group or partition key that reads no column cannot order, group
+    * or partition anything, and `ORDER BY 'b'` is what a query that meant the
+    * column "b" says. Each is refused, naming the key, where the sort kept the
+    * rows' order and the grouping made one group (plans/robustness/23). */
+  @Test def aKeyThatReadsNoColumnIsRefused(): Unit = {
+    val p = tmpCsv("t.csv", "a,b\n2,x\n1,y\n3,z\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    def bindError(sql: String): String =
+      try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    Seq("'b'", "+1", "-1", "1.5", "NULL", "TRUE", "1 + 0", "CAST('1' AS INT)", "CURRENT_DATE", "RAND(7)").foreach { k =>
+      def refused(sql: String, clause: String): Unit = {
+        val m = bindError(sql)
+        assertTrue(s"$sql -> $m", m.startsWith(s"$clause $k reads no column"))
+      }
+      refused(s"SELECT a, b FROM t ORDER BY $k", "ORDER BY")
+      refused(s"SELECT a, b FROM t ORDER BY a, $k", "ORDER BY")
+      refused(s"SELECT DISTINCT a FROM t ORDER BY $k", "ORDER BY")
+      refused(s"SELECT a FROM t UNION ALL SELECT a FROM t ORDER BY $k", "ORDER BY")
+      refused(s"SELECT b, COUNT(*) AS n FROM t GROUP BY b ORDER BY $k", "ORDER BY")
+      refused(s"SELECT COUNT(*) AS n FROM t GROUP BY $k", "GROUP BY")
+      refused(s"SELECT a, ROW_NUMBER() OVER (PARTITION BY $k ORDER BY a) AS r FROM t", "PARTITION BY")
+      refused(s"SELECT a, ROW_NUMBER() OVER (ORDER BY $k) AS r FROM t", "ORDER BY")
+    }
+    // The advice: a quoted name is in double quotes, and a position is bare.
+    assertEquals("ORDER BY 'b' reads no column, so it orders nothing; a column is written as its name (\"b\" in " +
+      "quotes), and a position as a bare number (ORDER BY 2)", bindError("SELECT a, b FROM t ORDER BY 'b'"))
+    assertEquals("PARTITION BY 'a' reads no column, so it partitions nothing; a column is written as its name " +
+      "(\"a\" in quotes)", bindError("SELECT ROW_NUMBER() OVER (PARTITION BY 'a') AS r FROM t"))
+
+    // Keys that read something still sort, group and partition: a position,
+    // a quoted name, RAND(), an aggregate, a window, and a name whose output
+    // column is a constant.
+    assertEquals(Seq(3, 2, 1), column("SELECT a, b FROM t ORDER BY 1 DESC", cat, "a"))
+    assertEquals(Seq("z", "y", "x"), column("SELECT a, b FROM t ORDER BY \"b\" DESC", cat, "b"))
+    assertEquals(3, column("SELECT a FROM t ORDER BY RAND()", cat, "a").size)
+    assertEquals(Seq(1L, 1L, 1L), column("SELECT COUNT(*) AS n FROM t GROUP BY 'x' || b", cat, "n"))
+    assertEquals(Seq(1L, 1L, 1L), column("SELECT b, COUNT(*) AS n FROM t GROUP BY b ORDER BY COUNT(*)", cat, "n"))
+    assertEquals(Seq(1L, 2L, 3L),
+      column("SELECT a, ROW_NUMBER() OVER (ORDER BY a) AS r FROM t ORDER BY ROW_NUMBER() OVER (ORDER BY a)", cat, "r"))
+    assertEquals(Set(1, 2, 3), column("SELECT a, 1 AS one FROM t ORDER BY one", cat, "a").toSet)
+    assertEquals(Seq(1L, 1L, 1L), column("SELECT 'x' AS label, COUNT(*) AS n FROM t GROUP BY 1, b", cat, "n"))
+  }
+
+  /** A LIKE pattern that ends in its escape character escapes nothing, and a
+    * negative SUBSTRING length takes nothing: each is an error, at bind time
+    * when it is written as a constant and on the row otherwise, where the
+    * pattern matched its escape character literally and the length gave ''
+    * (plans/robustness/23). */
+  @Test def aDanglingEscapeOrANegativeLengthIsAnError(): Unit = {
+    val cat = clauseCatalog() // ts.s is 'Ab', NULL, 'xy', 'A_b'
+    def bindError(sql: String): String =
+      try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    def runError(sql: String): String = {
+      val q = SqlEngine.execute(sql, cat)
+      try { collectAllRows(q); fail(s"$sql ran"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    }
+    assertEquals("The LIKE pattern 'Ab!' ends in its escape character, !, which escapes nothing; write !! to match one",
+      bindError("SELECT id FROM ts WHERE s LIKE 'Ab!' ESCAPE '!'"))
+    assertTrue(bindError("SELECT id FROM ts WHERE s ILIKE 'a_' ESCAPE '_'").startsWith("The LIKE pattern 'a_' ends in"))
+    assertTrue(runError("SELECT id FROM ts WHERE s LIKE s || '!' ESCAPE '!'")
+      .startsWith("The LIKE pattern 'Ab!' ends in its escape character"))
+    // An escaped escape is no dangling one, and no escape at all is none.
+    assertEquals(Seq(1), column("SELECT id FROM ts WHERE s || '!' LIKE 'Ab!!' ESCAPE '!'", cat, "id"))
+    assertEquals(Seq(1), column("SELECT id FROM ts WHERE s || '!' LIKE 'Ab!' ESCAPE ''", cat, "id"))
+    assertEquals(Seq(4), column("SELECT id FROM ts WHERE s LIKE 'A__b' ESCAPE '_'", cat, "id"))
+
+    assertEquals("SUBSTRING's length -1 is negative", bindError("SELECT SUBSTRING(s, 2, -1) AS v FROM ts"))
+    assertEquals("SUBSTRING's length -1 is negative", runError("SELECT SUBSTRING(s, 2, id - 2) AS v FROM ts"))
+    assertEquals(Seq("", null, "", ""), column("SELECT SUBSTRING(s, 2, 0) AS v FROM ts ORDER BY id", cat, "v"))
   }
 }

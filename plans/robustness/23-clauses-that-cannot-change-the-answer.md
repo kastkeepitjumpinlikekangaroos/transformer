@@ -1,6 +1,6 @@
 # Plan 23: sort, group and partition keys that cannot change the answer, and patterns with a dangling escape
 
-> Status: planned · found by the 2026-10-31 audit · Effort: half a day ·
+> Status: **done** 2026-10-31 · found by the 2026-10-31 audit · Effort: half a day ·
 > Risk: low (new refusals of text that does nothing)
 
 ## How this was found
@@ -43,3 +43,25 @@ binder must refuse) gains the constant-key shapes in every context.
 ## Docs
 
 README (ORDER BY / GROUP BY, LIKE, SUBSTRING), gotchas, testing.md.
+
+## Outcome
+
+Done as planned. `LogicalBuilder.isConstant` decides what reads no column (no
+column reference and no `RAND()`; `RAND(seed)` is one value for one seed), and
+`refuseConstantKey` refuses such a key at every site: ORDER BY without and with
+DISTINCT, after a UNION, GROUP BY, and a window's PARTITION BY and ORDER BY,
+naming the key, a column's spelling and, where positions are keys, a
+position's. An ordinal, and a name of an output column, read a column whatever
+it holds, so they still sort and group. `LikeExpr.toRegex` refuses a pattern
+that ends in its escape character and `Funcs.substring` a negative length;
+`constantValue` computes a constant pattern or length when the query binds,
+so written as one either is a bind error, and computed it fails on the row.
+
+`aKeyThatReadsNoColumnIsRefused` and `aDanglingEscapeOrANegativeLengthIsAnError`
+failed against the code before on their first query. The frontend fuzzer's
+`BeyondTheTable` refuses each shape in every context, and its clean-rejection
+oracle takes the two run-time errors as being about a value. Two generators
+had to follow: `QueryGen` takes the `ABS` of a SUBSTRING length it reads from a
+column, whose values reach -2, and `ExprParity.checkTotal` lets a tree fail on
+its own negative length. `nullTypedColumnsSpillEndToEnd` groups by a NULL-typed
+key that reads a column, where it grouped by `NULL`.

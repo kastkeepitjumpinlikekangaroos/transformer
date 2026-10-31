@@ -1318,13 +1318,15 @@ class ExprBatchTest {
   /** A position or a length past an INT is read as the BIGINT it is, on both
     * paths, against a reference computed in BigInt. Each was cut to an INT:
     * 3000000000 wrapped to a negative position, which answered the whole
-    * string, and 4294967297 to a length of 1. */
+    * string, and 4294967297 to a length of 1. A negative length is an error
+    * on both paths (plans/robustness/23), so the lengths are 0 or more. */
   @Test def funcSubstringReadsAPositionOrLengthAsABigint(): Unit = {
-    val values = Seq(3000000000L, Long.MaxValue, Long.MinValue, -1L, 0L, 1L, 2L, 4294967297L)
+    val positions = Seq(3000000000L, Long.MaxValue, Long.MinValue, -1L, 0L, 1L, 2L, 4294967297L)
+    val lengths = Seq(3000000000L, Long.MaxValue, 0L, 1L, 2L, 3L, 4L, 4294967297L)
     val b = batch(
       "s" -> stringCol(_ => "abc"),
-      "pos" -> longCol(i => values(i % 8)),
-      "len" -> longCol(i => values((i / 8) % 8)))
+      "pos" -> longCol(i => positions(i % 8)),
+      "len" -> longCol(i => lengths((i / 8) % 8)))
     val e = FuncExpr("SUBSTRING",
       Seq(ColRefExpr(0, "s", DataType.StringType), ColRefExpr(1, "pos", DataType.LongType),
         ColRefExpr(2, "len", DataType.LongType)),
@@ -1338,9 +1340,17 @@ class ExprBatchTest {
     val vec = e.evalVec(b)
     var i = 0
     while (i < N) {
-      assertEquals(s"row $i", reference(values(i % 8), values((i / 8) % 8)), vec.getBoxed(i))
+      assertEquals(s"row $i", reference(positions(i % 8), lengths((i / 8) % 8)), vec.getBoxed(i))
       i += 1
     }
+    val negative = batch(
+      "s" -> stringCol(_ => "abc"),
+      "pos" -> longCol(_ => 1L),
+      "len" -> longCol(i => if (i == 5) Long.MinValue else 1L))
+    val onVec = try { e.evalVec(negative); null } catch { case x: IllegalArgumentException => x.getMessage }
+    val onRow = try { e.eval(negative, 5); null } catch { case x: IllegalArgumentException => x.getMessage }
+    assertEquals("SUBSTRING's length -9223372036854775808 is negative", onVec)
+    assertEquals(onVec, onRow)
   }
 
   /** ROUND and TRUNC at the edges of a double, pinned on both paths. ROUND

@@ -705,6 +705,14 @@ bare integer counts: `ORDER BY +1` is a constant, not a position. A `GROUP BY` o
 may not point at an aggregate; an `ORDER BY` ordinal may. An out-of-range
 position is an error.
 
+A key that reads no column orders, groups and partitions nothing, so `ORDER BY`,
+`GROUP BY` and a window's `PARTITION BY` and `ORDER BY` refuse one: a literal
+(`ORDER BY 'b'`, which is what a query that meant the column `"b"` says, or
+`ORDER BY +1`, `NULL`, `TRUE`), a `CAST` of one, arithmetic on constants
+(`ORDER BY 1 + 0`), a clock keyword and `RAND(seed)`. `RAND()`, which differs by
+row, sorts, and so does an output column, whatever it holds: a position and a
+name are keys that read a column.
+
 **SQL outside this grammar is rejected, not ignored.** The parser accepts far
 more SQL than the engine implements, and a clause the binder does not read used
 to vanish without an error — `JOIN ... USING` ran as a cartesian product,
@@ -831,7 +839,8 @@ it prints as, so `ROUND(1.005, 2)` is 1.01 whatever the binary fraction
 nearest 1.005 would give, and `NaN` and the infinities are their own answer.
 Each of these used to compute in `DOUBLE`: `ROUND` of a `DECIMAL` 1.005 was 1.0,
 and `FLOOR` of a `BIGINT` past 2^53 lost its last digit. A `SUBSTRING` position before the first character counts from
-the first, and one past the last gives the empty string. `UPPER` and `LOWER` map
+the first, and one past the last, or a length of 0, gives the empty string; a
+negative length is an error, at bind time when it is written as a constant. `UPPER` and `LOWER` map
 case by Unicode's own rules, the same on every machine: the JVM's locale, under
 which a Turkish one would make `UPPER('i')` a dotted capital, plays no part, and
 neither does it in matching a name without regard to case.
@@ -862,7 +871,9 @@ expression that would fail on other rows: `CASE WHEN s <> 'n/a' THEN CAST(s AS
 INT) END` never casts `'n/a'`. (Write the guard as a `CASE`: the optimizer may
 move one condition of a `WHERE` ahead of another.) In a `LIKE` / `ILIKE`
 pattern `\` makes the next `%` or `_` literal; `ESCAPE 'c'` names another
-character, and `ESCAPE ''` turns escaping off. Grouping parentheses work anywhere an expression does —
+character, and `ESCAPE ''` turns escaping off. A pattern that ends in its escape
+character escapes nothing and is an error, at bind time when the pattern is a
+constant: write the character twice to match one. Grouping parentheses work anywhere an expression does —
 `SELECT (a + b) * c`, `WHERE (x = y)`, `ON (a = b)`, `HAVING (COUNT(*) > 1)` —
 and are transparent to column naming (`SELECT (a)` yields a column named `a`)
 and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
