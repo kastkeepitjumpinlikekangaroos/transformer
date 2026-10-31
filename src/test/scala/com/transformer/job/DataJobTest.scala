@@ -663,6 +663,131 @@ class DataJobTest {
     assertEquals("s\n20\n", readOutputDir(outDir.resolve("summed")))
   }
 
+  /** The engine, except that a statement `throwing` names throws what it
+    * gives, and one `slow` names waits `ms` first. */
+  private def throwingExecutor(throwing: Map[String, () => Throwable], slow: Set[String] = Set.empty,
+                               ms: Long = 0L): SqlExecutor = {
+    com.transformer.sql.exec.SqlEngine.init()
+    val real = SqlExecutorRegistry.get
+    new SqlExecutor {
+      override def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
+        throwing.get(sql).foreach(t => throw t())
+        if (slow(sql)) Thread.sleep(ms)
+        real.execute(sql, catalog, opts)
+      }
+    }
+  }
+
+  private def statusName(s: TaskStatus): String = s match {
+    case TaskStatus.Succeeded => "Succeeded"
+    case TaskStatus.Failed(_) => "Failed"
+    case TaskStatus.Skipped(_) => "Skipped"
+    case other => other.toString
+  }
+
+  /** An `Error` in a task fails that task, and the run goes on. The task's
+    * worker posted its completion only after `runOneTask` returned, whose
+    * catch took `NonFatal` throwables alone, so a `StackOverflowError` (a
+    * 2500-term expression overflowed the binder's) or a `LinkageError` ended
+    * the worker without one, and `job.run()` waited for ever with nothing
+    * logged (plans/robustness/14). */
+  @Test(timeout = 60000) def anErrorInATaskFailsItAndTheRunGoesOn(): Unit = {
+    val inDir = tmpDir("dj-error-")
+    writeCsv(inDir, "events.csv", "id,x\n1,10\n2,20\n")
+    for ((error, says) <- Seq[(() => Throwable, String)](
+        (() => new StackOverflowError(), "the query nests too deeply for the thread's stack (java.lang.StackOverflowError)"),
+        (() => new NoClassDefFoundError("a class the task needs"), "a class the task needs"))) {
+      val outDir = tmpDir("dj-error-out-")
+      val deep = "SELECT id FROM events"
+      val job = DataJob(
+        inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+        sql = Seq(
+          SQLTask(name = Some("deep"), viewName = Some("deep"), sqlString = Some(deep),
+            outputFile = Some(OutputFilePath(outDir.resolve("deep").toString))),
+          SQLTask(name = Some("downstream"), sqlString = Some("SELECT * FROM deep"),
+            outputFile = Some(OutputFilePath(outDir.resolve("down").toString))),
+          SQLTask(name = Some("indep"), sqlString = Some("SELECT x FROM events"),
+            outputFile = Some(OutputFilePath(outDir.resolve("indep").toString)))),
+        jobRunOutput = Some(OutputFilePath(outDir.resolve("job.json").toString)))
+      val result = job.run(throwingExecutor(Map(deep -> error)), TaskProgressListener.NoOp)
+      assertFalse(result.succeeded)
+      assertEquals("an error in a task does not stop the run", None, result.error)
+      assertEquals(Seq("Failed", "Skipped", "Succeeded"), result.tasks.map(t => statusName(t.status)))
+      assertEquals(TaskStatus.Failed(says), result.tasks.head.status)
+      assertEquals(TaskStatus.Skipped("upstream failed: deep"), result.tasks(1).status)
+      val rec = JobRunRecord.read(outDir.resolve("job.json")).getOrElse(fail("no job.json").asInstanceOf[JobRunRecord])
+      assertEquals(Seq(TaskRunStatus.Failed, TaskRunStatus.Skipped, TaskRunStatus.Succeeded), rec.tasks.map(_.status))
+    }
+  }
+
+  /** A task whose SQL nests past the limit fails, refused by its binder, and
+    * the job goes on: its dependents are Skipped and the rest run. A
+    * 2500-term expression overflowed the binder's stack, an `Error`, which
+    * left the run waiting for ever (plans/robustness/14). */
+  @Test(timeout = 60000) def aTaskNestedPastTheLimitFailsAlone(): Unit = {
+    val inDir = tmpDir("dj-deep-")
+    writeCsv(inDir, "events.csv", "id,x\n1,10\n2,20\n")
+    val outDir = tmpDir("dj-deep-out-")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(
+        SQLTask(name = Some("deep"), viewName = Some("deep"),
+          sqlString = Some("SELECT x" + " + x" * 2499 + " AS v FROM events"),
+          outputFile = Some(OutputFilePath(outDir.resolve("deep").toString))),
+        SQLTask(name = Some("downstream"), sqlString = Some("SELECT * FROM deep"),
+          outputFile = Some(OutputFilePath(outDir.resolve("down").toString))),
+        SQLTask(name = Some("indep"), sqlString = Some("SELECT x FROM events"),
+          outputFile = Some(OutputFilePath(outDir.resolve("indep").toString)))))
+    val result = job.run()
+    assertEquals(None, result.error)
+    assertEquals(Seq("Failed", "Skipped", "Succeeded"), result.tasks.map(t => statusName(t.status)))
+    assertEquals(TaskStatus.Failed("The query nests 2502 levels deep; the limit is 256. Group a long chain of + or " +
+      "|| in parentheses, or compute part of the expression in a WITH clause"), result.tasks.head.status)
+  }
+
+  /** A task that runs out of memory stops the run: no task starts after it,
+    * each that has not started is Skipped saying why, the tasks running
+    * finish, and the run reports the error, in its result and in `job.json`.
+    * A failure of the JVM itself can leave shared state half-written, so the
+    * run goes no further. It waited for ever, as for any `Error`. */
+  @Test(timeout = 60000) def runningOutOfMemoryStopsTheRun(): Unit = {
+    val inDir = tmpDir("dj-oom-")
+    writeCsv(inDir, "events.csv", "id,x\n1,10\n2,20\n")
+    val outDir = tmpDir("dj-oom-out-")
+    val hungry = "SELECT id FROM events"
+    val slow = "SELECT x FROM events"
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "events")),
+      sql = Seq(
+        SQLTask(name = Some("hungry"), viewName = Some("hungry"), sqlString = Some(hungry),
+          outputFile = Some(OutputFilePath(outDir.resolve("hungry").toString))),
+        SQLTask(name = Some("slow"), viewName = Some("slow"), sqlString = Some(slow),
+          outputFile = Some(OutputFilePath(outDir.resolve("slow").toString))),
+        SQLTask(name = Some("after"), sqlString = Some("SELECT * FROM slow"),
+          outputFile = Some(OutputFilePath(outDir.resolve("after").toString))),
+        SQLTask(name = Some("downstream"), sqlString = Some("SELECT * FROM hungry"),
+          outputFile = Some(OutputFilePath(outDir.resolve("down").toString)))),
+      jobRunOutput = Some(OutputFilePath(outDir.resolve("job.json").toString)))
+    val result = job.run(throwingExecutor(Map(hungry -> (() => new OutOfMemoryError("Java heap space"))),
+      slow = Set(slow), ms = 500L), TaskProgressListener.NoOp)
+    val outOfMemory = "out of memory (java.lang.OutOfMemoryError: Java heap space); give the JVM more heap with " +
+      "-Xmx, or let the task spill to disk (\"spill\": \"true\" in its output options)"
+    val stop = s"the job stopped after task 'hungry' failed: $outOfMemory"
+    assertFalse(result.succeeded)
+    assertEquals(Some(stop), result.error)
+    val byName = result.tasks.map(t => t.taskName -> t.status).toMap
+    assertEquals(TaskStatus.Failed(outOfMemory), byName("hungry"))
+    assertEquals(TaskStatus.Skipped("upstream failed: hungry"), byName("downstream"))
+    // `slow` was running or still queued when `hungry` failed, by how the
+    // pool took them; `after` became ready only after the stop. Either way a
+    // task that had not started says the run stopped.
+    assertEquals("Skipped", statusName(byName("after")))
+    assertTrue(result.tasks.map(_.status).toString, result.tasks.exists(_.status == TaskStatus.Skipped(s"not run: $stop")))
+    val rec = JobRunRecord.read(outDir.resolve("job.json")).getOrElse(fail("no job.json").asInstanceOf[JobRunRecord])
+    assertFalse(rec.succeeded)
+    assertEquals(Some(stop), rec.errorMessage)
+  }
+
   private def sleepyExecutor(ms: Long): SqlExecutor = {
     com.transformer.sql.exec.SqlEngine.init()
     val real = SqlExecutorRegistry.get

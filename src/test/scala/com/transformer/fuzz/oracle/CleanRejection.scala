@@ -59,26 +59,19 @@ object CleanRejection {
   /** Its failure is a known defect. */
   final case class KnownFailure(defect: Defect, detail: String) extends Outcome
 
-  private val Plans = "plans/robustness/"
-  val PathologicalInputPlan: String = Plans + "14-pathological-nesting.md"
-
   /** A defect this property found, the plan that records it, and SQL that
-    * shows it over [[SqlTextGen.ReferenceTables]]. */
+    * shows it over [[SqlTextGen.ReferenceTables]]. `recognize` says whether a
+    * throwable is the defect, from what was thrown alone, and what to tally it
+    * by. */
   sealed abstract class Defect(val name: String, val plan: String, val repro: String) {
+    def recognize(thrown: Throwable): Option[String]
     override def toString: String = name
   }
   object Defect {
-    /** A 2000-term `+` or `OR` chain overflows the binder's stack, 1000
-      * nested calls or 3000 nested parentheses the parser's. */
-    case object DeepNesting extends Defect("a deep expression overflows the stack", PathologicalInputPlan,
-      "SELECT 0" + " + 0" * 2500 + " AS v FROM t")
-    /** Four unclosed parentheses (`SELECT ((((a +`) send JSqlParser into
-      * backtracking until its six-second timeout, and the error then names
-      * nothing: `SQL parse error: Time out occurred.` */
-    case object ParseTimeout extends Defect("unclosed parentheses run the parser into its timeout",
-      PathologicalInputPlan, "SELECT ((((a +")
-
-    val All: Vector[Defect] = Vector(DeepNesting, ParseTimeout)
+    /** None today. The last were plans/robustness/13's literal out of its
+      * type's range, and plans/robustness/14's deep expression overflowing the
+      * stack and unclosed parentheses running the parser into its timeout. */
+    val All: Vector[Defect] = Vector.empty
   }
 
   // ---------------------------------------------------------------------------
@@ -205,15 +198,8 @@ object CleanRejection {
   // Known defects
   // ---------------------------------------------------------------------------
 
-  private def recognize(thrown: Throwable): Option[(Defect, String)] = {
-    val all = causes(thrown)
-    val message = Option(thrown.getMessage).getOrElse("")
-    if (all.exists(_.isInstanceOf[StackOverflowError]) || all.exists(c => String.valueOf(c.getMessage).contains("java.lang.StackOverflowError")))
-      return Some(Defect.DeepNesting -> chain(thrown))
-    if (thrown.isInstanceOf[IllegalArgumentException] && all.exists(_.isInstanceOf[java.util.concurrent.TimeoutException]))
-      return Some(Defect.ParseTimeout -> message)
-    None
-  }
+  private def recognize(thrown: Throwable): Option[(Defect, String)] =
+    Defect.All.iterator.flatMap(d => d.recognize(thrown).map(d -> _)).nextOption()
 
   // ---------------------------------------------------------------------------
   // Helpers

@@ -211,9 +211,20 @@ object LogicalBuilder {
     }
     val typed = unifyArms(arms, selects)
     // JSqlParser sets `all=true` only for explicit UNION ALL; bare UNION (and
-    // the rarely-used UNION DISTINCT) both dedup.
-    val union = unions.zipWithIndex.foldLeft(typed.head) { case (acc, (u, i)) =>
-      LogicalUnion(acc, typed(i + 1), all = u.isAll)
+    // the rarely-used UNION DISTINCT) both dedup. Each run of one kind binds as
+    // a balanced tree of it: bound left-deep, a UNION nested as deep as it had
+    // arms, which overflowed the optimizer's stack past a few thousand and
+    // took fifteen seconds at two thousand. Within a run the operation is
+    // associative, and the arms keep their order, so the tree answers as the
+    // chain does; a run's first operand is everything before it.
+    var union = typed.head
+    var run = 0
+    while (run < unions.size) {
+      val all = unions(run).isAll
+      var end = run
+      while (end < unions.size && unions(end).isAll == all) end += 1
+      union = balancedUnion(union +: typed.slice(run + 1, end + 1), all)
+      run = end
     }
 
     // ORDER BY / LIMIT bind against the union's output (column names come from
@@ -231,6 +242,14 @@ object LogicalBuilder {
       Option(sol.getLimit).orElse(hoistedLimit), Option(sol.getOffset).orElse(hoistedOffset),
       Option(sol.getFetch), top = None)
   }
+
+  /** `plans` under one kind of UNION, as a balanced tree. */
+  private def balancedUnion(plans: Seq[LogicalPlan], all: Boolean): LogicalPlan =
+    if (plans.size == 1) plans.head
+    else {
+      val (left, right) = plans.splitAt(plans.size / 2)
+      LogicalUnion(balancedUnion(left, all), balancedUnion(right, all), all)
+    }
 
   /** The arms of a UNION with each column under the one type its values have
     * in every arm ([[Analyzer.branches]]), so the union holds what its schema,

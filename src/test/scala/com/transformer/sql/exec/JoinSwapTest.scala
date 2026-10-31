@@ -428,6 +428,35 @@ class JoinSwapTest {
       "than 5000 rows (left=1000000, right=1000000); add one to the ON condition", ex.getMessage)
   }
 
+  /** A join with no equality in ON over the output of another such join is
+    * refused when the two would pair more than 25 million rows. The guard
+    * bounded each side alone, and a join's estimate is its larger side, so a
+    * chain of them multiplied past it: three tables of 300 rows paired 27
+    * million and ran the fuzz campaign's 1.2 GB heap out
+    * (plans/robustness/14). One small side against a large one still runs,
+    * as a range join of buckets against a fact table does. */
+  @Test def aChainOfJoinsWithoutAnEqualityIsBounded(): Unit = {
+    val l = view(LeftSchema, SmallLeftRows, Some(300L))
+    val r = view(RightSchema, SmallRightRows, Some(300L))
+    val cat = catalogWith("l" -> l, "r" -> r)
+    val ex = try {
+      SqlEngine.execute("SELECT x.lk FROM l x JOIN r y ON x.lv < y.rv JOIN l z ON x.lv < z.lv", cat)
+      null
+    } catch { case e: IllegalArgumentException => e }
+    assertNotNull("expected the chain refused", ex)
+    assertEquals("A join without an equality between its two sides in ON is refused over the output of another " +
+      "such join when the two would pair more than 25000000 rows (left=90000, right=300); add an equality to one " +
+      "of the ON conditions", ex.getMessage)
+    // One such join alone, and a chain with an equality somewhere, run.
+    assertEquals(25, collectAllRows(SqlEngine.execute("SELECT x.lk FROM l x JOIN r y ON x.lv < y.rv", cat)).size)
+    val bucketed = catalogWith("buckets" -> view(LeftSchema, SmallLeftRows, Some(100L)),
+      "facts" -> view(RightSchema, SmallRightRows, Some(1_000_000L)))
+    assertEquals(25, collectAllRows(SqlEngine.execute(
+      "SELECT b.lk FROM buckets b JOIN facts f ON f.rv >= b.lv", bucketed)).size)
+    collectAllRows(SqlEngine.execute(
+      "SELECT x.lk FROM l x JOIN r y ON x.lk = y.rk JOIN l z ON x.lv < z.lv", cat))
+  }
+
   /** Estimate unknown on either side → the planner can't size the join, so
     * it falls back to the permissive path (matches CSV inputs without
     * `exactRowCount`). */

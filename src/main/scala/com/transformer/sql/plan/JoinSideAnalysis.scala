@@ -1,5 +1,7 @@
 package com.transformer.sql.plan
 
+import com.transformer.core.DataType
+
 /** Classifies a join-level expression by which side(s) of the join's combined
   * output schema it references.
   *
@@ -90,5 +92,22 @@ object JoinSideAnalysis {
       InListExpr(shiftToRight(c, leftWidth), items.map(shiftToRight(_, leftWidth)), neg)
     case l: LikeExpr =>
       l.copy(child = shiftToRight(l.child, leftWidth), pattern = shiftToRight(l.pattern, leftWidth))
+  }
+
+  /** The conjunction of `conjuncts`, as a balanced tree of ANDs. A pass that
+    * splits a predicate into its conjuncts and joins what it keeps uses this,
+    * not a left fold: the parser regroups a long AND chain into a balanced
+    * tree so that every walk over the plan stays shallow (see
+    * `SqlParser.MaxNesting`), and folding the conjuncts back left-deep would
+    * nest them a level each again. */
+  def conjunction(conjuncts: Seq[Expr]): Expr = {
+    require(conjuncts.nonEmpty, "a conjunction of nothing")
+    def join(from: Int, until: Int): Expr =
+      if (until - from == 1) conjuncts(from)
+      else {
+        val mid = (from + until) >>> 1
+        BinOpExpr("AND", join(from, mid), join(mid, until), DataType.BooleanType)
+      }
+    join(0, conjuncts.size)
   }
 }

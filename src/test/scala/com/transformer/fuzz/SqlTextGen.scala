@@ -931,8 +931,9 @@ object SqlTextGen {
     * column's values (`"a"`, `"x"`) also make a CAST of it fail on the data,
     * which is the clean run-time failure the property allows. */
   private def genTyping(rng: Rng): (Tables, String, String) = {
-    // At most 16 rows: a duplicated join over a table of hundreds nests loops
-    // past the heap (plans/robustness/14), which is not this corpus's subject.
+    // At most 16 rows: a join duplicated without an equality pairs each row
+    // with each, and a chain of them over tables of hundreds pairs millions,
+    // short of the planner's refusal; that is not this corpus's subject.
     val drawn = DataGen.generate(rng.split())
     val ds = drawn.copy(rows = drawn.rows.take(16))
     val cols = ds.schema.fields.map(_.name)
@@ -1078,8 +1079,9 @@ object SqlTextGen {
         // expression, while nested where a name stands (a table, an alias) or
         // inside a call's arguments the text buys seconds of JSqlParser
         // backtracking and tests nothing past it. Parentheses stay shallow for
-        // the same reason; a chain and nested calls go deep enough to overflow
-        // the binder's stack and the parser's.
+        // the same reason; a chain and nested calls go past the nesting limit
+        // (`SqlParser.MaxNesting`), which refuses them, where they used to
+        // overflow the binder's stack and the parser's.
         val depth = Lexer.depths(tokens)
         val topNumbers = sig.filter(i => tokens(i).kind == Kind.Number && depth(i) == 0)
         (if (topNumbers.isEmpty) None else Some(rng.oneOf(topNumbers))).map { i =>

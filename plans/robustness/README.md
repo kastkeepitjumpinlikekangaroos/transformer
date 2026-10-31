@@ -43,7 +43,7 @@ at the time of the audit: `bazel test //...` 46/46 green.
 | [11](11-functions-bind-over-arguments-they-cannot-take.md) | Functions and conditions bind over arguments they cannot take | `SUM` over a string, the math functions over a date, a NULL `ROUND` scale, a non-boolean `ON` failed mid-run; `ABS` of a date was NULL and `WHERE d` kept no rows; every condition is now a BOOLEAN, every argument the kind its function declares, and only a STRING is text | **done** 2026-10-18 | 1-2 days | medium | — |
 | [12](12-text-the-binder-never-sees.md) | Text the parser accepts and the binder never sees | a statement after `;` was ignored; a repeated `ORDER BY` / `LIMIT` kept its last, or split with a UNION's last arm; a CTE named twice kept its second; a JOIN with no ON was a cross join; `NOT NOT f IS NULL` kept the wrong rows; each is refused now | **done** 2026-10-18 | 1 day | medium | — |
 | [13](13-literals-are-read-as-written.md) | Literals and quoted identifiers are read as written | `'it''s'` was five characters; `"a"` named no column; `99999999999999999999` was a raw `NumberFormatException`; `1e400` was `Infinity`; a number beside a DECIMAL went through a DOUBLE; a string literal served as an alias; each literal and name now means what SQL writes | **done** 2026-10-30 | 1 day | medium | — |
-| [14](14-pathological-nesting.md) | Deep and unbalanced SQL | a task whose SQL overflows the binder's stack **hangs its job forever**; unclosed parentheses run the parser into its timeout | open, recorded in `CleanRejection` | 1-2 days | low (the hang) | — |
+| [14](14-pathological-nesting.md) | Deep and unbalanced SQL | a task whose SQL overflowed the binder's stack **hung its job forever**; unclosed parentheses ran the parser into its timeout; a chain of joins without an equality multiplied past the guard; no `Error` leaves a run waiting now, a query nests at most 256 levels, the same everywhere, and unbalanced text fails at once | **done** 2026-10-30 | 1-2 days | low (the hang) | — |
 | [15](15-what-a-reopened-run-shows-without-its-record.md) | What a reopened run shows for a task without its record | `job.json`'s entry carried no timestamps, failed validation names or output, so such a task reopened with a 0 ms duration and every validation card PASSED; a record naming another task was trusted; nothing told the user | **done** 2026-10-15 | half a day | low | — |
 
 **Done:** plan 01. Eighteen was an undercount: classifying every getter of every
@@ -198,9 +198,22 @@ the text it matches by (a silent wrong answer), and a job refused a CTE
 spelled other than its references, which JSqlParser's `TablesNamesFinder`
 named as tables. Details in the plan's Outcome section.
 
-**Next:** [14](14-pathological-nesting.md)'s job hang (a `finally` and a
-`catch`), then its depth limit, which the user decided: 256 levels, with AND
-and OR chains regrouped so they bind at any length.
+**Done:** plan 14. No `Error` leaves a job waiting: each worker posts its
+completion in a `finally` and turns whatever it caught into its task's or
+input's failure, and a task that runs out of memory stops the run, saying so.
+A query nests at most 256 levels, the same on every machine (the user's
+choice, over catching the overflow), with AND and OR chains regrouped into
+balanced trees so a query builder's list of conditions binds at any length;
+JSqlParser's own overflow is the same refusal, and parentheses that do not
+balance fail at once, naming the one at fault, where they ran the parser into
+its time limit. The nested-loop guard also bounds a chain of joins without an
+equality (the user kept the old rule beside it, so a small range join against
+a large table still runs). Found on the way: two passes folded AND chains back
+left-deep, undoing the regrouping, and a UNION of 2000 arms took fifteen
+seconds and 5000 overflowed; both now build balanced trees. Details in the
+plan's Outcome section.
+
+Every plan in this directory is done.
 
 **Suggested order.** [01](01-reject-or-honor-every-clause.md) first — it has the
 worst single defect in the set (a dropped join condition is a cartesian product,

@@ -1,33 +1,72 @@
 package com.transformer.sql.parse
 
 import net.sf.jsqlparser.JSQLParserException
+import net.sf.jsqlparser.expression.{BinaryExpression, Expression}
+import net.sf.jsqlparser.expression.operators.conditional.{AndExpression, OrExpression}
 import net.sf.jsqlparser.parser.{CCJSqlParserConstants, CCJSqlParserUtil, Token}
 import net.sf.jsqlparser.statement.Statement
 import net.sf.jsqlparser.statement.select.Select
 
+import java.lang.reflect.{Method, Modifier}
+import java.util.concurrent.{ConcurrentHashMap, TimeoutException}
+import scala.collection.mutable
 import scala.util.control.NonFatal
 
+/** The refusal of SQL that nests deeper than [[SqlParser.MaxNesting]]. */
+final class NestingLimitException(message: String) extends IllegalArgumentException(message)
+
 object SqlParser {
+
+  /** How deep a statement may nest, in the levels of the tree JSqlParser
+    * parses it into: an operator, a call and its arguments, a CASE and its
+    * WHEN, a pair of parentheses, a SELECT and its items each take one. Every
+    * walk the engine makes over that tree, and over the plan it binds,
+    * recurses once a level or so, and the shallowest overflow measured was at
+    * about 600 levels on a 1 MB thread stack, Linux's default (macOS gives a
+    * thread 2 MB), before the JIT had compiled anything. Within 256 every
+    * walk keeps that margin on any machine, so a query either binds
+    * everywhere or is refused everywhere. */
+  val MaxNesting: Int = 256
 
   /** Parse one statement, refusing text the statement JSqlParser returns
     * would leave out: a second statement after `;`
     * ([[refuseTextAfterTheStatement]]), and a repeated `ORDER BY`, `LIMIT`,
-    * `OFFSET` or `FETCH` ([[refuseLostTailClauses]]). */
+    * `OFFSET` or `FETCH` ([[refuseLostTailClauses]]); and refusing a
+    * statement too deep to walk: parentheses that do not balance or nest past
+    * the limit, before JSqlParser sees them ([[refuseUnbalancedParentheses]]),
+    * and a tree deeper than [[MaxNesting]] once AND and OR chains are
+    * regrouped ([[regroupChains]], [[refuseDeepNesting]]), both of which walk
+    * the tree without recursing. A check that recurses through the tree runs
+    * once its depth is known to be within the limit. */
   def parse(sql: String): Statement = {
     val s = sql.trim
     if (s.isEmpty) throw new IllegalArgumentException("Empty SQL statement")
+    refuseUnbalancedParentheses(s)
     val statement =
       try CCJSqlParserUtil.parse(s)
-      catch {
-        case e: JSQLParserException =>
-          throw new IllegalArgumentException(s"SQL parse error: ${parserMessage(e)}", e)
-      }
+      catch { case e: JSQLParserException => throw parseFailure(e) }
     refuseTextAfterTheStatement(s)
+    regroupChains(statement)
+    refuseDeepNesting(statement)
     statement match {
       case select: Select => refuseLostTailClauses(s, select)
       case _ => ()
     }
     statement
+  }
+
+  /** The refusal for what JSqlParser threw. It recurses once a level, so text
+    * deep enough overflows its stack, and on some nesting (CASTs, IFs and
+    * calls in calls) it backtracks for long enough to time out: 25 nested
+    * CASTs do. */
+  private def parseFailure(e: JSQLParserException): IllegalArgumentException = {
+    val all = Iterator.iterate[Throwable](e)(_.getCause).takeWhile(_ != null).take(20).toSeq
+    if (all.exists(_.isInstanceOf[StackOverflowError]))
+      new NestingLimitException(s"The query nests too deeply to parse; the limit is $MaxNesting levels")
+    else if (all.exists(_.isInstanceOf[TimeoutException]))
+      new IllegalArgumentException("SQL parse error: the parser ran past its time limit, which deeply nested " +
+        "CASTs, calls and parentheses can make it do; write the expression with less nesting", e)
+    else new IllegalArgumentException(s"SQL parse error: ${parserMessage(e)}", e)
   }
 
   /** What the parser said went wrong (`Encountered unexpected token: "FROM"
@@ -119,6 +158,164 @@ object SqlParser {
         if (written.getOrElse(kind, 0) > k.getOrElse(kind, 0)) throw writtenTwice(clause)
       }
     }
+  }
+
+  /** Parentheses that do not balance, refused before JSqlParser sees them:
+    * it backtracks on each one left open, so `SELECT ((((a +` failed after its
+    * time limit, and `(((a +` took seven seconds. Parentheses nested past
+    * [[MaxNesting]] are refused here too, before the parser recurses through
+    * them. The text is lexed as the parser lexes it, so a parenthesis in a
+    * string, a quoted name or a comment is no parenthesis; text the lexer
+    * cannot read is left to the parser to report, and so is the text after
+    * the statement's `;` ([[refuseTextAfterTheStatement]]). */
+  private def refuseUnbalancedParentheses(sql: String): Unit = {
+    val open = new java.util.ArrayDeque[Token]()
+    val lexed = tokens(sql)
+    var unreadable = false
+    def next(): Option[Token] =
+      try { if (lexed.hasNext) Some(lexed.next()) else None }
+      catch { case NonFatal(_) => unreadable = true; None }
+    var t = next()
+    while (t.exists(_.kind != CCJSqlParserConstants.ST_SEMICOLON)) {
+      val token = t.get
+      if (token.image == "(") {
+        open.push(token)
+        if (open.size > MaxNesting) throw new NestingLimitException(
+          s"The query nests more than $MaxNesting parentheses deep (at line ${token.beginLine}, column " +
+            s"${token.beginColumn}); the limit is $MaxNesting levels")
+      } else if (token.image == ")") {
+        if (open.isEmpty) throw new IllegalArgumentException(
+          s"SQL parse error: the ')' at line ${token.beginLine}, column ${token.beginColumn} closes no '('")
+        open.pop()
+      }
+      t = next()
+    }
+    if (!open.isEmpty && !unreadable) throw new IllegalArgumentException(
+      s"SQL parse error: the '(' at line ${open.peek.beginLine}, column ${open.peek.beginColumn} is never closed")
+  }
+
+  /** Each chain of one AND or OR operator regrouped as a balanced tree of the
+    * same operator. JSqlParser builds `a OR b OR c` as `(a OR b) OR c`, one
+    * level a term, so a list of conditions a query builder writes (`id = 1 OR
+    * id = 2 OR ...`) nests as deep as it is long, and past a few hundred terms
+    * overflowed the binder's stack. AND and OR are associative, also over
+    * NULL, so the regrouped tree answers as the written one does, and the
+    * nodes are reused in their order, so it renders as the same text. Other
+    * operators keep their shape: `+` on doubles is not associative, nor is a
+    * DECIMAL sum's type. */
+  private def regroupChains(statement: Statement): Unit = {
+    val seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[AnyRef, java.lang.Boolean])
+    val todo = new java.util.ArrayDeque[AnyRef]()
+    todo.push(statement)
+    while (!todo.isEmpty) {
+      val node = todo.pop()
+      if (seen.add(node)) node match {
+        case head: BinaryExpression if head.isInstanceOf[AndExpression] || head.isInstanceOf[OrExpression] =>
+          val (links, operands) = chain(head)
+          links.foreach(seen.add)
+          if (operands.size > 2) balance(head, links, operands)
+          operands.foreach(todo.push)
+        case _ => Tree.children(node).foreach(todo.push)
+      }
+    }
+  }
+
+  /** The nodes of the chain of `head`'s operator below and including it, and
+    * its operands, left to right. */
+  private def chain(head: BinaryExpression): (Seq[BinaryExpression], Seq[Expression]) = {
+    val links = mutable.ArrayBuffer.empty[BinaryExpression]
+    val operands = mutable.ArrayBuffer.empty[Expression]
+    val todo = new java.util.ArrayDeque[Expression]()
+    todo.push(head)
+    while (!todo.isEmpty) todo.pop() match {
+      case link: BinaryExpression if link.getClass == head.getClass =>
+        links += link
+        todo.push(link.getRightExpression)
+        todo.push(link.getLeftExpression)
+      case operand => operands += operand
+    }
+    (links.toSeq, operands.toSeq)
+  }
+
+  /** `operands` under `links`, the n - 1 nodes of their chain, as a balanced
+    * tree rooted at `head`, which its parent holds. Recursion is as deep as the
+    * tree, a logarithm of the chain's length. */
+  private def balance(head: BinaryExpression, links: Seq[BinaryExpression], operands: Seq[Expression]): Unit = {
+    val spare = links.iterator.filter(_ ne head)
+    def subtree(from: Int, until: Int): Expression =
+      if (until - from == 1) operands(from) else join(spare.next(), from, until)
+    def join(link: BinaryExpression, from: Int, until: Int): BinaryExpression = {
+      val mid = (from + until) >>> 1
+      link.setLeftExpression(subtree(from, mid))
+      link.setRightExpression(subtree(mid, until))
+      link
+    }
+    join(head, 0, operands.size)
+  }
+
+  /** Refuse a statement whose tree nests deeper than [[MaxNesting]], walking
+    * it without recursion, so a statement of any depth is measured before any
+    * walk that does recurse reaches it: this parser's own rendering of it
+    * ([[refuseLostTailClauses]]), the rejection pass and the binder, and the
+    * job runner's search for the tables a task reads. */
+  private def refuseDeepNesting(statement: Statement): Unit = {
+    val seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[AnyRef, java.lang.Boolean])
+    val todo = new java.util.ArrayDeque[(AnyRef, Int)]()
+    todo.push((statement, 1))
+    var deepest = 0
+    while (!todo.isEmpty) {
+      val (node, depth) = todo.pop()
+      if (seen.add(node)) {
+        deepest = math.max(deepest, depth)
+        Tree.children(node).foreach(child => todo.push((child, depth + 1)))
+      }
+    }
+    if (deepest > MaxNesting) throw new NestingLimitException(
+      s"The query nests $deepest levels deep; the limit is $MaxNesting. Group a long chain of + or || in " +
+        "parentheses, or compute part of the expression in a WITH clause")
+  }
+
+  /** The nodes a parsed statement holds below one of its nodes: what its
+    * public getters return that JSqlParser parses SQL into, alone or in a
+    * collection, and the elements of a node that is itself a list. Read by
+    * reflection, so a node of any class is walked, as `toString` and
+    * `TablesNamesFinder` walk it, not only those the binder reads. */
+  private object Tree {
+    private val getters = new ConcurrentHashMap[Class[_], Array[Method]]()
+
+    def children(node: AnyRef): Seq[AnyRef] = {
+      val out = mutable.ArrayBuffer.empty[AnyRef]
+      def add(value: Any): Unit = value match {
+        case null => ()
+        case c: java.util.Collection[_] if !isNode(c) => c.forEach(e => if (isNode(e)) out += e.asInstanceOf[AnyRef])
+        case n: AnyRef if isNode(n) => out += n
+        case _ => ()
+      }
+      gettersOf(node.getClass).foreach { m =>
+        // A getter that casts its node to another shape throws on the wrong one.
+        try add(m.invoke(node)) catch { case _: ReflectiveOperationException | _: RuntimeException => () }
+      }
+      node match {
+        case list: java.util.Collection[_] => list.forEach(e => if (isNode(e)) out += e.asInstanceOf[AnyRef])
+        case _ => ()
+      }
+      out.toSeq
+    }
+
+    private def isNode(value: Any): Boolean =
+      value != null && value.getClass.getName.startsWith("net.sf.jsqlparser.") && !value.getClass.isEnum
+
+    /** Public no-argument getters a JSqlParser class declares that can return
+      * a node, except the parser's plumbing (`getASTNode`, `getParent`). */
+    private def gettersOf(cls: Class[_]): Array[Method] =
+      getters.computeIfAbsent(cls, c => c.getMethods.filter { m =>
+        val returns = m.getReturnType
+        m.getParameterCount == 0 && !Modifier.isStatic(m.getModifiers) &&
+          m.getDeclaringClass.getName.startsWith("net.sf.jsqlparser.") &&
+          m.getName.matches("(get|is)[A-Z].*") && m.getName != "getASTNode" && m.getName != "getParent" &&
+          (returns == classOf[Object] || classOf[java.util.Collection[_]].isAssignableFrom(returns) ||
+            (returns.getName.startsWith("net.sf.jsqlparser.") && !returns.isEnum))
+      })
   }
 
   private def keywordCounts(text: String): Map[Int, Int] =

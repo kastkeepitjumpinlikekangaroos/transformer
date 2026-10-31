@@ -1,10 +1,10 @@
 # Plan 14: deep and unbalanced SQL overflows the stack, stalls the parser, and can hang a job
 
-> Status: **open** · Effort: 1-2 days · Risk: low for the hang (a `catch` and a
-> `finally`), medium for the depth limit (a limit is a new refusal)
+> Status: **done** 2026-10-30 · decided by the user, both the recommendation ·
+> Effort: 1-2 days · Risk: low for the hang (a `catch` and a `finally`), medium
+> for the depth limit (a limit is a new refusal)
 >
-> **The first item hangs a job forever with no error.** It wants fixing before
-> the others.
+> **The first item hung a job forever with no error.** It was fixed first.
 
 ## How this was found
 
@@ -89,3 +89,88 @@ The fuzz campaign's out-of-memory failure found the last item. Measured at
 
 `docs/gotchas.md` (an `Error` in a task, the depth limit, the parse-time check),
 `README.md` (the limits a query must stay inside).
+
+## Outcome
+
+The user decided two questions (2026-10-30), the recommendation both times:
+
+1. **A fixed limit of 256 levels, with AND and OR chains regrouped.** A query
+   nests at most 256 levels of the tree JSqlParser parses it into, the same on
+   every machine; an AND or OR chain binds at any length, regrouped into a
+   balanced tree first. Measured before deciding, at `-Xss1m` (Linux's default
+   thread stack; macOS gives 2 MB) and cold: the shallowest overflow was about
+   600 levels, 300 nested CASEs or 300 levels of `a + (...)`, and warm JIT
+   frames moved it (a 5000-term OR chain once got past the binder).
+   Declined: counting every level of a chain (an OR list past 250 terms
+   refused), and no fixed limit (catch the overflow, which a machine's stack
+   and JIT decide).
+2. **The nested-loop guard keeps its rule and adds chains**: a join with no
+   equality is still refused when both sides exceed 5000 rows, and now also
+   over the output of another such join when the two would pair more than 25
+   million rows. Declined: bounding every product at 25 million, which would
+   refuse a range join of 100 buckets against a million rows that runs today.
+   (The user first asked why equality-free joins are supported at all: CROSS
+   JOIN and the comma join, which plan 12 made the way to pair every row; the
+   comma spelling of an equi-join, `FROM t, u WHERE t.a = u.a`, which plans as
+   an equality-free join under a filter; and range and interval joins.)
+
+What landed:
+
+- **No `Error` leaves a run waiting.** `DataJob`'s task and input workers
+  catch every `Throwable` and post their completion in a `finally`. A stack
+  overflow, a `LinkageError` or any other `Error` fails its task, with a
+  message saying what happened; the JVM's own failure, a
+  `VirtualMachineError` other than a stack overflow such as running out of
+  memory, stops the run: the failing worker sets a stop that the loop and
+  every worker read, so no task starts after it, each that had not started is
+  Skipped saying why, the running ones finish, and `JobResult.error` and
+  `job.json`'s `errorMessage` name it. An input that runs out of memory
+  loading stays a failed input, as plan 08 has every failure to load.
+- **The depth limit** lives in `SqlParser.parse`, so every caller has it:
+  after JSqlParser parses, `regroupChains` rebuilds each AND and OR chain as a
+  balanced tree of its own nodes (associative, NULLs included; the same text
+  when rendered), and `refuseDeepNesting` walks the tree without recursion,
+  through every getter of every node class by reflection as `toString` and
+  `TablesNamesFinder` walk it, and refuses past 256 with the depth it found.
+  JSqlParser's own stack overflow is the same refusal. `TaskDag` gives a task
+  too deep to read no tables, so the DAG builds and the task fails alone when
+  it runs.
+- **Parentheses** are checked before the parser sees them, lexed by the
+  parser's own token manager: one that is never closed or closes nothing is a
+  parse error naming its line and column, at once, and nesting past 256 is
+  refused before the parser recurses. A parse that still runs past
+  JSqlParser's time limit says so and why (25 nested CASTs do).
+- **The nested-loop guard** bounds a join with no equality by the product of
+  its sides (`rowsAtMost`), which its cardinality estimate understated.
+
+Found on the way and fixed with it:
+
+- **Two passes rebuilt AND chains left-deep.** `FilterPushdown` and the
+  planner's join residual split a predicate into conjuncts and folded them
+  back with `reduceLeft`, undoing the regrouping: a 5000-term WHERE then
+  overflowed `ColumnProjectionPushdown`. Both use
+  `JoinSideAnalysis.conjunction`, a balanced tree.
+- **A UNION of many arms** bound as a left-deep chain: 2000 arms took fifteen
+  seconds and 5000 overflowed `FilterPushdown`. Each run of UNION or UNION
+  ALL now binds as a balanced tree (`balancedUnion`), associative within the
+  run and with its arms in order: 5000 arms take half a second.
+
+The fuzzer's records are gone, the proof the fixes landed:
+`CleanRejection.Defect` is empty (its recognizers are data now, so the empty
+list leaves no dead code), the deep-nesting and unclosed-parenthesis repros
+come out clean (`FrontendFuzzTest.literalsAndDeepTextAreRefusedCleanly`), and
+`JobDagGen` throws every other injected failure as a `LinkageError`, which the
+DAG property's liveness watchdog would report as a hang against the old
+runner. The eleven regressions in `SqlEngineTest`, `JoinSwapTest`,
+`DataJobTest`, `TaskDagTest` and `FrontendFuzzTest` each fail at the commit
+before; the three job tests hang there until their 60-second timeout.
+
+Verified: `bazel test //...` 53/53; `frontend_fuzz_campaign` at 100002 seeds of
+each property (three blocks of 33334, 197 to 235 seconds each, faster than
+before since unbalanced text no longer waits on the parser); the three DAG
+scheduler campaigns at 5000 seeds each; the metamorphic, sharded and
+mode-differential campaigns at 2500 seeds each, since unions and conjunctions
+now bind as other trees; all green; jaffle-shop 15/15 with every validation
+passing. Against the old `DataJob` the DAG property hangs on its injected
+`LinkageError`s until bazel's 900-second timeout, with a thread dump.
+

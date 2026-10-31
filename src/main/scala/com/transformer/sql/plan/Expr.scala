@@ -187,7 +187,8 @@ final case class BinOpExpr(op: String, left: Expr, right: Expr, dataType: DataTy
     }
   }
 
-  /** Flatten a left-deep `BinOpExpr("AND", ...)` chain and fold all conjuncts
+  /** Flatten a `BinOpExpr("AND", ...)` tree, left-deep as a short chain binds
+    * or balanced as a long one is regrouped, and fold all conjuncts
     * into a single [[BooleanVector]] allocation. The first conjunct's result
     * vector is COPIED into a fresh owned vector before folding — `BooleanVector`s
     * returned by `Expr.evalVec` may alias storage in the input batch

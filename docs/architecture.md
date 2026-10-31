@@ -43,7 +43,7 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 | `read/parquet/` | Parquet input. Depends on `parquet-hadoop` + minimal Hadoop. | `ParquetReader.scala`, `ParquetColumns.scala` (the type each parquet column reads as and how its values decode, decided per file from that file's footer; matches a view's columns to each file's by name), `ParquetFilterTranslator.scala` |
 | `write/csv/` | CSV output. Stdlib only; uses `read/csv`'s `CsvValues`, so the writer and reader share one text per type. | `CsvWriter.scala` |
 | `write/parquet/` | Parquet output. | `ParquetSchema.scala` (the parquet schema transformer writes for a `Schema`), `ParquetWriter.scala` |
-| `sql/parse/` | JSqlParser façade: one statement, and none of its text lost on the way to the AST. | `SqlParser.scala` (refuses text after the statement's `;` and a repeated tail clause JSqlParser overwrites — see §10; `unquote` / `quote`, the one rule for the name a quoted identifier names) |
+| `sql/parse/` | JSqlParser façade: one statement, none of its text lost on the way to the AST, and no tree too deep to walk. | `SqlParser.scala` (refuses text after the statement's `;` and a repeated tail clause JSqlParser overwrites — see §10; refuses parentheses that do not balance and a tree deeper than `MaxNesting`, 256 levels, once AND / OR chains are regrouped balanced; `unquote` / `quote`, the one rule for the name a quoted identifier names) |
 | `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `PendingCteView.scala` (placeholder for an unresolved CTE reference), `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo), `UnsupportedClauses.scala` (the rejection pass that runs before binding, and its audit of every JSqlParser getter the binder does not read — see §10) |
 | `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala`, `SortExec.scala`, `DistinctExec.scala`, `UnionExec.scala`, `WindowExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala`, `CteResolver.scala` (inline-vs-materialize CTE pass + `PhysicalPlanView`), `SqlEngine.scala` |
 | `job/` | User-facing API + runner. Depends directly on `read/{csv,parquet}` and `write/{csv,parquet}` — parquet is a first-class format. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala`, `JobFiles.scala` (filesystem ops for the GUI's edit-validation flow — `writeValidationSql` / `deleteValidation`), `TaskDag.scala` (DAG analyzer/builder from SQL refs; `TaskDag` + `TaskDagNode` are public so the GUI can render without re-implementing), `TaskProgressListener.scala` (per-task callbacks fired from runner worker threads), `TaskRunRecord.scala` (`_run.json` write/read/discover for per-task run records — every status, with `_validation-<slug>.csv` failure samples), `JobRunRecord.scala` (`job.json` aggregate manifest pointing at every task's record + the run's warnings), `JobOutputLayout.scala` (classifies an output dir as `SingleRun`/`MultiRun`/`Empty` for the GUI's run picker), `DirectoryJobLoader.scala` (DBT-style directory loader; supports optional per-table `output.json` with `partitionBy`; threads default `<outputDir>/job.json` as `jobRunOutput` so the manifest lives alongside its data), `Json.scala` (stdlib JSON parser used by the loader + record readers) |
@@ -717,15 +717,28 @@ slowest input).
 
 `TaskDag.build` is still the gatekeeper: it parses each task's rendered SQL
 (main + every validation) with JSqlParser's `TablesNamesFinder` and builds
-adjacency based on task viewName references. Setup-time validation rejects
-unknown refs, duplicate viewNames, self-cycles, cycles, and duplicate
-post-render output paths before any task runs.
+adjacency based on task viewName references, read as the binder resolves
+names (unquoted, regardless of case, a CTE's name excluded however it is
+spelled). Setup-time validation rejects unknown refs, duplicate viewNames,
+self-cycles, cycles, and duplicate post-render output paths before any task
+runs. A statement nested past `SqlParser.MaxNesting` reads no tables there,
+so the DAG builds and the task fails when it runs, alone.
 
 The scheduler propagates failure through both axes. If an input load throws,
 every SQL task with that input in its `inputDeps` gets `upstreamFailed = true`
 and is marked `Skipped` the moment it would otherwise have become ready —
 which then propagates through the downstream task chain. Same path for SQL
 task failures (Failed / ValidationFailed) — independent siblings keep going.
+
+The loop waits for one event per input and per task, so each worker posts
+its event in a `finally`, whatever its work threw, and turns any `Throwable`
+into the input's or the task's failure: an `Error` that passed a worker by
+once left `job.run()` waiting for ever. One failure stops the run rather
+than its task: the JVM's own (a `VirtualMachineError` other than a stack
+overflow, such as running out of memory). The failing worker sets a stop
+the loop and the workers both read, so no task starts after it; each that
+had not started is `Skipped` saying why, the ones running finish, and the
+stop is `JobResult.error`.
 
 That fan-out reaches only the tasks that read the input, and a skip reason
 names only the first failed upstream its task met, so the scheduler also keeps
@@ -1331,7 +1344,11 @@ degenerate hash join — every probe row matches the single empty-key bucket
 holding every build row, which gives correct nested-loop semantics. To stop
 that from silently materializing an O(N*M) cartesian over millions of rows,
 `PhysicalPlanner.enforceNestedLoopGuard` refuses the plan when both
-estimates exist and `min(left, right) > 5000`. CSV-rooted joins (no
+estimates exist and `min(left, right) > 5000`, and when a side is itself
+such a join and the two would pair more than `NestedLoopMaxPairs` (25
+million) rows: `rowsAtMost` bounds a join with no equality by the product
+of its sides, which its cardinality estimate (the larger side) understates,
+so a chain of them was the case the first rule missed. CSV-rooted joins (no
 estimate) keep working — the guard is conservative.
 
 ### 9. Logical plan optimization

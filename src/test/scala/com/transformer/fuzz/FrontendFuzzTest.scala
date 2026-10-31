@@ -119,8 +119,8 @@ class FrontendFuzzTest {
       val (c, p) = byMutation.getOrElse(kind, (0, 0))
       assertTrue(s"mutation $kind generated $c times", c > n / 200)
       // An unbalanced query never parses: that mutation is there for the
-      // parser's error path, and for the unclosed parentheses that run it
-      // into its timeout.
+      // refusal of unbalanced parentheses, which used to run the parser into
+      // its timeout.
       if (kind != "unbalance-paren") assertTrue(s"mutation $kind got past the parser on $p of $c", p > c / 20)
     }
   }
@@ -158,6 +158,30 @@ class FrontendFuzzTest {
     for (sql <- Seq("SELECT ROUND(a, NULL) AS v FROM t", "SELECT SUBSTRING(s, b) AS v FROM t",
         "SELECT IF(NULL, 1, 2) AS v FROM t", "SELECT RAND(NULL) AS v FROM t"))
       assertEquals(sql, Ran, CleanRejection.check(sql, catalog))
+  }
+
+  /** What plans/robustness/13 and 14 fixed comes out clean, where each was a
+    * known defect: a number outside its type's range, an expression nested
+    * past the limit, nested calls and parentheses deeper than the parser can
+    * recurse, and unclosed parentheses, which ran the parser into its time
+    * limit and now fail at once. */
+  @Test def literalsAndDeepTextAreRefusedCleanly(): Unit = {
+    val catalog = () => SqlTextGen.ReferenceTables.catalog()
+    for (sql <- Seq("SELECT 1e400 AS v FROM t", "SELECT a FROM t LIMIT 99999999999999999999",
+        "SELECT 0" + " + 0" * 2500 + " AS v FROM t", "SELECT " + "ABS(" * 1000 + "a" + ")" * 1000 + " AS v FROM t",
+        "SELECT " + "(" * 3000 + "a" + ")" * 3000 + " AS v FROM t"))
+      CleanRejection.check(sql, catalog) match {
+        case Failed(Phase.Bind, "bind", _) => ()
+        case other => fail(s"`${SqlTextGen.clip(sql)}` came out $other")
+      }
+    assertEquals(Ran, CleanRejection.check("SELECT 99999999999999999999 AS big FROM t", catalog))
+    val start = System.nanoTime()
+    for (sql <- Seq("SELECT ((((a +", "SELECT a FROM t WHERE (((a =", "SELECT a FROM ((t"))
+      CleanRejection.check(sql, catalog) match {
+        case Failed(Phase.Bind, "parse", _) => ()
+        case other => fail(s"`$sql` came out $other")
+      }
+    assertTrue(s"took ${(System.nanoTime() - start) / 1000000} ms", System.nanoTime() - start < 2000000000L)
   }
 
   /** The oracle on throwables made to order, so a classification that went

@@ -155,6 +155,17 @@ specific traps.
   join-level expressions (`sideOf`, `shiftToRight`) live in
   `JoinSideAnalysis.scala` so the planner and any new pass can reuse them
   without duplicating the recursive Expr traversal.
+- **A walk over the parsed tree or the bound plan stays within
+  `SqlParser.MaxNesting`'s margin, and a rewrite rebuilds a long list
+  balanced.** Every walk recurses about a level at a time, and the limit (256
+  levels) is half the depth the shallowest walk overflowed at on a 1 MB
+  thread stack, before the JIT. A walk that recurses several frames a level,
+  or a big frame, eats that margin: measure it at `-Xss1m`. A pass that
+  splits a predicate into its conjuncts and joins what it keeps uses
+  `JoinSideAnalysis.conjunction`, a balanced tree, never a left fold, which
+  turns a regrouped 5000-term WHERE back into a 5000-level chain; the same
+  for any list a rewrite turns into nested binary nodes (`balancedUnion`
+  does it for a UNION's arms). See [gotchas.md](gotchas.md).
 - **Pipeline-breaking operators that key into a HashMap go through
   `core/HashKeys.scala`'s `KeyCodec`, not raw `Seq[Any]`.** That's the
   shared abstraction `HashAggregateExec`, `HashJoinExec`, `DistinctExec`,
@@ -268,6 +279,13 @@ specific traps.
   that deadlocks K>1 sharded plans (see gotchas.md). See
   [architecture.md §3](architecture.md#3-parallel-execution) and
   [gotchas.md](gotchas.md).
+- **A worker posts what its scheduler waits for in a `finally`, and turns
+  every `Throwable` into its work's failure.** `DataJob.runUnifiedDag` waits
+  for one event per input and per task; a worker that catches `NonFatal`
+  alone lets an `Error` (a stack overflow, a `LinkageError`, running out of
+  memory) end it without one, and the run waits for ever. Whether a failure
+  stops the run is a separate decision (`stopsTheJob`: the JVM's own failures
+  but a stack overflow), made where the failure is caught.
 - **Never let a pool task wait on a lazily-shared breaker result — publish it
   first.** Engine plans pre-materialize every `ExchangeExec` bottom-up via
   `PhysicalPlanner.preMaterializeExchanges` before consumers exist (both

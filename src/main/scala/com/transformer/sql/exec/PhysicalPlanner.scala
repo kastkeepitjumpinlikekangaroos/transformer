@@ -294,6 +294,13 @@ object PhysicalPlanner {
     * planning an O(N*M) join over millions of rows. */
   private val NestedLoopMaxRows: Long = 5000L
 
+  /** Refuse a join with no equality conjuncts over the output of another such
+    * join when the two sides would pair more rows than this: as many as two
+    * sides of [[NestedLoopMaxRows]] do. A chain of such joins multiplies,
+    * which bounding each side alone does not see: three tables of 300 rows
+    * pair 27 million. */
+  private val NestedLoopMaxPairs: Long = NestedLoopMaxRows * NestedLoopMaxRows
+
   /** Decide which side of a join to build into the hash table.
     *
     * Returns `true` when the right side should be built (the historic shape).
@@ -340,7 +347,39 @@ object PhysicalPlanner {
             s"$NestedLoopMaxRows rows (left=$lc, right=$rc); add one to the ON condition")
       case _ => ()
     }
+    // A side that is itself such a join holds up to the product of its own
+    // sides, where its estimate says the larger. One small side and one
+    // large (100 buckets against a million rows) still runs.
+    (rowsAtMost(l), rowsAtMost(r)) match {
+      case (Some((lb, lPaired)), Some((rb, rPaired))) if (lPaired || rPaired) && times(lb, rb) > NestedLoopMaxPairs =>
+        throw new IllegalArgumentException(
+          s"A join without an equality between its two sides in ON is refused over the output of another such " +
+            s"join when the two would pair more than $NestedLoopMaxPairs rows (left=$lb, right=$rb); add an " +
+            "equality to one of the ON conditions")
+      case _ => ()
+    }
   }
+
+  /** At most how many rows `p` produces, for [[enforceNestedLoopGuard]], and
+    * whether that is the product of a join with no equality between its sides,
+    * which pairs every row of one side with every row of the other that its
+    * condition keeps, so up to all of them. `None` where a size is unknown. */
+  private def rowsAtMost(p: LogicalPlan): Option[(Long, Boolean)] = p match {
+    case LogicalJoin(l, r, cond, _)
+        if splitEqualityKeys(cond, l.outputSchema.length, r.outputSchema.length)._1.isEmpty =>
+      for ((lc, _) <- rowsAtMost(l); (rc, _) <- rowsAtMost(r)) yield (times(lc, rc), true)
+    // Each keeps at most the rows it reads.
+    case LogicalProject(child, _) => rowsAtMost(child)
+    case LogicalFilter(child, _) => rowsAtMost(child)
+    case LogicalSort(child, _) => rowsAtMost(child)
+    case LogicalWindow(child, _) => rowsAtMost(child)
+    case LogicalDistinct(child) => rowsAtMost(child)
+    case LogicalOffset(child, _) => rowsAtMost(child)
+    case LogicalLimit(child, n) => rowsAtMost(child).map { case (c, paired) => if (n < c) (n, false) else (c, paired) }
+    case other => LogicalPlanCardinality.estimate(other).map((_, false))
+  }
+
+  private def times(a: Long, b: Long): Long = if (a != 0 && b > Long.MaxValue / a) Long.MaxValue else a * b
 
   /** Try to push a bound predicate into the underlying view. Today only
     * [[ParquetReader]] participates — its `withPushdownFilter` translates the
@@ -374,7 +413,7 @@ object PhysicalPlanner {
         }
       case other => rest += other
     }
-    val residual = rest.reduceLeftOption[Expr] { (a, b) => BinOpExpr("AND", a, b, DataType.BooleanType) }
+    val residual = if (rest.isEmpty) None else Some(JoinSideAnalysis.conjunction(rest.toSeq))
     (leftKeys.toSeq, rightKeys.toSeq, residual)
   }
 

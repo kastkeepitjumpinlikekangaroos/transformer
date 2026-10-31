@@ -10,6 +10,7 @@ import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
 import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
 import java.util.concurrent.{Callable, LinkedBlockingQueue}
+import java.util.concurrent.atomic.AtomicReference
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
@@ -35,6 +36,7 @@ final case class DataJob(
     temporalVariables: Option[TemporalVariables] = None,
     jobRunOutput: Option[OutputFilePath] = None
 ) {
+  import DataJob.TaskRun
 
   def run(): JobResult = {
     // Touch the SQL engine to make sure it has self-registered.
@@ -76,18 +78,19 @@ final case class DataJob(
           return JobResult(succeeded = false, tasks = Nil, error = Some(e.getMessage))
       }
 
-    val (results, inputFailures) = runUnifiedDag(dag, executor, catalog, vars, listener)
+    val (results, inputFailures, stopped) = runUnifiedDag(dag, executor, catalog, vars, listener)
     val runFinished = Instant.now()
 
     val warnings = inputWarnings(dag, inputFailures) ++ runConsistencyChecks(results.toSeq)
-    // The tasks alone decide the verdict: a warning never fails a run.
+    // The tasks alone decide the verdict: a warning never fails a run. A run
+    // that stopped has a task that failed it.
     val succeeded = results.forall(_.succeeded)
-    writeJobRecord(results.toSeq, vars, runStarted, runFinished, succeeded, None, warnings)
+    writeJobRecord(results.toSeq, vars, runStarted, runFinished, succeeded, stopped, warnings)
 
     JobResult(
       succeeded = succeeded,
       tasks = results.toSeq,
-      error = None,
+      error = stopped,
       warnings = warnings
     )
   }
@@ -112,10 +115,19 @@ final case class DataJob(
     * The main scheduler thread is the calling thread; workers complete and push
     * events onto a [[LinkedBlockingQueue]] which the scheduler drains in order.
     * That gives us serialized state updates without locks while keeping the work
-    * itself fully parallel on the shared pool.
+    * itself fully parallel on the shared pool. The loop waits for one event per
+    * input and per task, so each worker posts its event whatever its work
+    * threw: an `Error` that passed it by used to leave the loop waiting for
+    * ever, with nothing logged.
     *
-    * Returns a result per task, in declared order, and per input, in declared
-    * order, why its load failed (None for an input that loaded).
+    * A task that fails as the JVM does ([[stopsTheJob]]: out of memory, not a
+    * stack overflow) stops the run: no task starts after it, each that has not
+    * started is Skipped saying why, and the run reports the error. The tasks
+    * already running finish.
+    *
+    * Returns a result per task, in declared order; per input, in declared
+    * order, why its load failed (None for an input that loaded); and why the
+    * run stopped, if it did.
     */
   private def runUnifiedDag(
       dag: TaskDag,
@@ -123,7 +135,7 @@ final case class DataJob(
       catalog: Catalog,
       vars: TemporalVariables,
       listener: TaskProgressListener
-  ): (Array[TaskResult], IndexedSeq[Option[String]]) = {
+  ): (Array[TaskResult], IndexedSeq[Option[String]], Option[String]) = {
     val nTasks = dag.nodes.size
     val taskResults = Array.ofDim[TaskResult](nTasks)
 
@@ -161,6 +173,10 @@ final case class DataJob(
     final case class TaskCompleted(index: Int, result: TaskResult) extends Event
 
     val events = new LinkedBlockingQueue[Event]()
+    // Why the run stopped, once a task's failure stopped it. The workers read
+    // it as well as the loop, so a task queued before the stop does not start
+    // after it.
+    val stopped = new AtomicReference[String]()
 
     // ---- Input loading ------------------------------------------------------
     val nInputs = inputs.size
@@ -169,26 +185,30 @@ final case class DataJob(
 
     // Submit one Callable per input. The input load resolves the path, optionally
     // materializes for cache=true, registers the view in the catalog, and posts
-    // an `InputCompleted` event onto the scheduler queue.
+    // an `InputCompleted` event onto the scheduler queue. Whatever the load
+    // throws is why it failed, running out of memory included (as caching a
+    // large input can), which [[oomHint]] explains.
     inputs.iterator.zipWithIndex.foreach { case (in, i) =>
       Scheduler.submit(new Callable[Unit] {
         def call(): Unit = {
-          try listener.onInputStart(i, in.viewName) catch { case _: Throwable => () }
-          val cause: Option[String] =
-            try {
-              val rendered = in.copy(path = TemplateRenderer.render(in.path, vars))
-              val raw = InputResolver.resolve(rendered)
-              val view: CatalogView =
-                if (in.cache) MaterializedView.materializeInParallel(raw)
-                else raw
-              catalog.register(in.viewName, view)
-              None
-            } catch {
-              case NonFatal(e) => Some(Option(e.getMessage).getOrElse(e.toString) + oomHint(e))
-            }
-          try listener.onInputFinish(i, in.viewName, cause.isEmpty, cause.map(inputLoadFailure(in.viewName, _)))
-          catch { case _: Throwable => () }
-          events.put(InputCompleted(i, cause))
+          var cause: Option[String] = Some(s"the load of input '${in.viewName}' ended without a result")
+          try {
+            try listener.onInputStart(i, in.viewName) catch { case _: Throwable => () }
+            cause =
+              try {
+                val rendered = in.copy(path = TemplateRenderer.render(in.path, vars))
+                val raw = InputResolver.resolve(rendered)
+                val view: CatalogView =
+                  if (in.cache) MaterializedView.materializeInParallel(raw)
+                  else raw
+                catalog.register(in.viewName, view)
+                None
+              } catch {
+                case e: Throwable => Some(Option(e.getMessage).getOrElse(e.toString) + oomHint(e))
+              }
+            try listener.onInputFinish(i, in.viewName, cause.isEmpty, cause.map(inputLoadFailure(in.viewName, _)))
+            catch { case _: Throwable => () }
+          } finally events.put(InputCompleted(i, cause))
         }
       })
     }
@@ -198,8 +218,9 @@ final case class DataJob(
       if (pendingTaskDeps(i) == 0 && pendingInputDeps(i) == 0 && taskResults(i) == null) {
         val node = dag.nodes(i)
         val enqueuedAt = Instant.now()
-        if (upstreamFailed(i)) {
-          val reason = upstreamFailReason(i).getOrElse("upstream failure")
+        if (upstreamFailed(i) || stopped.get != null) {
+          val reason = upstreamFailReason(i).orElse(Option(stopped.get).map(s => s"not run: $s"))
+            .getOrElse("upstream failure")
           writeSkippedRecord(node, reason, enqueuedAt, vars)
           val tr = TaskResult(
             node.task.displayName, TaskStatus.Skipped(reason), 0L, None,
@@ -222,11 +243,33 @@ final case class DataJob(
           val needsView = taskDependents(i).nonEmpty
           Scheduler.submit(new Callable[Unit] {
             def call(): Unit = {
-              try listener.onTaskStart(i, node.task.displayName)
-              catch { case _: Throwable => () }
-              val result = runOneTask(node, executor, catalog, vars, enqueuedAt, needsView)
-              try listener.onTaskFinish(i, result) catch { case _: Throwable => () }
-              events.put(TaskCompleted(i, result))
+              // runOneTask turns what its task throws into the task's result;
+              // this is for what its own failure handling throws, such as a
+              // second OutOfMemoryError while it writes the task's record.
+              val name = node.task.displayName
+              var result = failedResult(name, "the task ended without a result", enqueuedAt)
+              try {
+                Option(stopped.get) match {
+                  case Some(stop) =>
+                    val reason = s"not run: $stop"
+                    writeSkippedRecord(node, reason, enqueuedAt, vars)
+                    val now = Instant.now()
+                    result = TaskResult(name, TaskStatus.Skipped(reason), 0L, None, now, now, enqueuedAt)
+                  case None =>
+                    try listener.onTaskStart(i, name)
+                    catch { case _: Throwable => () }
+                    val run = runOneTask(node, executor, catalog, vars, enqueuedAt, needsView)
+                    run.stop.foreach(stopped.compareAndSet(null, _))
+                    result = run.result
+                }
+              } catch {
+                case e: Throwable =>
+                  result = failedResult(name, failureMessage(e), enqueuedAt)
+                  stopReason(name, e).foreach(stopped.compareAndSet(null, _))
+              } finally {
+                try listener.onTaskFinish(i, result) catch { case _: Throwable => () }
+                events.put(TaskCompleted(i, result))
+              }
             }
           })
         }
@@ -287,8 +330,46 @@ final case class DataJob(
       remainingTasks = nTasks - taskResults.count(_ != null)
     }
 
-    (taskResults, inputFailures.toIndexedSeq)
+    (taskResults, inputFailures.toIndexedSeq, Option(stopped.get))
   }
+
+  /** Whether `t`, thrown by a task, stops the run rather than failing the task
+    * alone: the JVM itself failed (out of memory, an internal error), here or
+    * in pool work the task waited on, which arrives wrapped. A stack overflow
+    * fails only its task: it unwinds the stack it overflowed and leaves the JVM
+    * as it was. */
+  private def stopsTheJob(t: Throwable): Boolean =
+    causesOf(t).exists(c => c.isInstanceOf[VirtualMachineError] && !c.isInstanceOf[StackOverflowError])
+
+  /** Why the run stops after task `taskName` threw `t`, when it does. */
+  private def stopReason(taskName: String, t: Throwable): Option[String] =
+    if (!stopsTheJob(t)) None
+    else Some(s"the job stopped after task '$taskName' failed: ${failureMessage(t)}")
+
+  /** What a task's failure says: its message, or for an `Error` whose message
+    * alone says little, what happened. */
+  private def failureMessage(t: Throwable): String = {
+    val all = causesOf(t)
+    all.collectFirst { case e: VirtualMachineError => e } match {
+      case Some(e: StackOverflowError) =>
+        s"the query nests too deeply for the thread's stack (${e.getClass.getName})"
+      case Some(e: OutOfMemoryError) =>
+        s"out of memory (${e.getClass.getName}: ${e.getMessage}); give the JVM more heap with -Xmx, or let the " +
+          "task spill to disk (\"spill\": \"true\" in its output options)"
+      case Some(e) => e.toString
+      case None => Option(t.getMessage).getOrElse(t.toString)
+    }
+  }
+
+  /** `t` and its causes, outermost first. */
+  private def causesOf(t: Throwable): Seq[Throwable] =
+    Iterator.iterate(t)(_.getCause).takeWhile(_ != null).take(20).toSeq
+
+  private def failedResult(taskName: String, message: String, enqueuedAt: Instant): TaskResult = {
+    val now = Instant.now()
+    TaskResult(taskName, TaskStatus.Failed(message), 0L, None, now, now, enqueuedAt)
+  }
+
 
   private def describeUpstreamFailure(result: TaskResult): String = result.status match {
     case TaskStatus.Failed(_)           => "failed"
@@ -304,7 +385,7 @@ final case class DataJob(
       vars: TemporalVariables,
       enqueuedAt: Instant,
       hasDownstreamConsumers: Boolean
-  ): TaskResult = {
+  ): TaskRun = {
     val task = node.task
     val started = Instant.now()
     val taskName = task.displayName
@@ -356,10 +437,8 @@ final case class DataJob(
         }
         maybeWritePerfRecord(opts, taskName, writtenOutput, q, vars, enqueuedAt, started, finished,
           cpu0, alloc0, gc0, tid)
-        if (failures.nonEmpty)
-          TaskResult(taskName, TaskStatus.ValidationFailed(failures), q.rowsProduced, outputPath, started, finished, enqueuedAt)
-        else
-          TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, outputPath, started, finished, enqueuedAt)
+        val status = if (failures.nonEmpty) TaskStatus.ValidationFailed(failures) else TaskStatus.Succeeded
+        TaskRun(TaskResult(taskName, status, q.rowsProduced, outputPath, started, finished, enqueuedAt), stop = None)
       } else {
         if (writtenOutput.isEmpty) {
           while (q.batches.hasNext) q.batches.next()
@@ -368,14 +447,18 @@ final case class DataJob(
         writeSucceededRecord(node, writtenOutput, q.rowsProduced, enqueuedAt, started, finished, vars)
         maybeWritePerfRecord(opts, taskName, writtenOutput, q, vars, enqueuedAt, started, finished,
           cpu0, alloc0, gc0, tid)
-        TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, writtenOutput.map(_._2), started, finished, enqueuedAt)
+        TaskRun(TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, writtenOutput.map(_._2), started, finished,
+          enqueuedAt), stop = None)
       }
     } catch {
-      case NonFatal(e) =>
+      // Whatever the task throws fails it: an Error too, which the event loop
+      // would otherwise wait for (see runUnifiedDag).
+      case e: Throwable =>
         val finished = Instant.now()
-        val msg = Option(e.getMessage).getOrElse(e.toString)
+        val msg = failureMessage(e)
         writeFailedRecord(node, msg, enqueuedAt, started, finished, vars)
-        TaskResult(taskName, TaskStatus.Failed(msg), 0L, None, started, finished, enqueuedAt)
+        TaskRun(TaskResult(taskName, TaskStatus.Failed(msg), 0L, None, started, finished, enqueuedAt),
+          stopReason(taskName, e))
     }
   }
 
@@ -895,6 +978,10 @@ final case class DataJob(
 }
 
 object DataJob {
+
+  /** A task's result, and why the run stops, when the task's failure stops
+    * it (`stopsTheJob`). */
+  private final case class TaskRun(result: TaskResult, stop: Option[String])
 
   /** Name of the sysprop the macro bench runner sets to force spill on every
     * task. See [[buildExecutionOptions]]'s scaladoc for the full contract.

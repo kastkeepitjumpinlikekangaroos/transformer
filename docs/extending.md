@@ -801,7 +801,11 @@ pass:
    `(plan, remap)` pattern that `ColumnProjectionPushdown` uses — the
    caller composes the child's remap with its own. For join-level
    helpers (`sideOf`, `shiftToRight`), pull from `JoinSideAnalysis.scala`
-   so you're not duplicating the recursive Expr traversal.
+   so you're not duplicating the recursive Expr traversal. To join
+   conjuncts back into one predicate use `JoinSideAnalysis.conjunction`, a
+   balanced tree: a left fold would rebuild a long AND chain the parser
+   regrouped, a level a conjunct, past the depth every walk is safe at (see
+   `SqlParser.MaxNesting` in [gotchas.md](gotchas.md)).
 3. **Validate at plan time.** If your pass can introduce an index/remap
    bug that wouldn't surface until execution, add a `verify` helper
    modeled on `ColumnProjectionPushdown.verify`: walk the rewritten tree

@@ -191,6 +191,18 @@ class TaskDagTest {
     assertTrue(unknown, unknown.startsWith("Task 'd' references unknown view 'p'."))
   }
 
+  /** A task whose SQL nests past the limit reads no tables here, so the DAG
+    * still builds and the rest of the job runs; its own run refuses it (see
+    * DataJobTest). Finding its tables recursed through the whole expression,
+    * which overflowed on one deep enough. */
+  @Test def aTaskTooDeepToReadBuildsTheDag(): Unit = {
+    val deep = task("SELECT k" + " + k" * 2999 + " AS v FROM events", viewName = "deep")
+    val after = task("SELECT * FROM deep", viewName = "after")
+    val dag = TaskDag.build(Seq(deep, after), Set("events"), vars)
+    assertEquals(Set.empty[String], dag.nodes(0).inputDeps)
+    assertEquals(Set(0), dag.nodes(1).deps)
+  }
+
   @Test def templateRenderedBeforeExtraction(): Unit = {
     val a = task("SELECT * FROM events_{{ today }}", viewName = "result")
     val dag = TaskDag.build(Seq(a), Set("events_20260101"), vars)

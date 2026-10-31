@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.sql.parse.SqlParser
+import com.transformer.sql.parse.{NestingLimitException, SqlParser}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
 import net.sf.jsqlparser.statement.select.{ParenthesedSelect, Select, SetOperationList}
@@ -93,8 +93,13 @@ object TaskDag {
       t.validations.map(v => TemplateRenderer.render(v.loadSql(), vars))
     )
 
+    // A statement too deep to read is refused when its task runs, which fails
+    // that task and skips its dependents; here it reads no tables, so the
+    // rest of the job still runs.
     def extract(sql: String): Set[String] = {
-      val stmt = SqlParser.parse(sql)
+      val stmt =
+        try SqlParser.parse(sql)
+        catch { case _: NestingLimitException => return Set.empty }
       val ctes = stmt match {
         case s: Select => cteNames(s)
         case _ => Set.empty[String]

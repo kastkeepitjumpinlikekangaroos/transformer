@@ -4254,4 +4254,108 @@ class SqlEngineTest {
     ).foreach { case (sql, message) => assertEquals(sql, message, bindRejection(sql, cat)) }
     assertEquals(Seq("ab"), column("SELECT 'a' || 'b' AS v FROM t WHERE a = 1", cat, "v"))
   }
+
+  // ---------------------------------------------------------------------------
+  // Deep and unbalanced SQL (plans/robustness/14)
+  //
+  // Each of these overflowed a stack or ran JSqlParser past its time limit,
+  // at a point that moved with the machine. The comment on each test records
+  // what it did.
+  // ---------------------------------------------------------------------------
+
+  /** A query nests at most 256 levels of the tree JSqlParser parses it into,
+    * the same on every machine. Past a few hundred, one walk over the tree
+    * overflowed its stack, at a depth that moved with the thread's stack size
+    * and with the JIT, and the StackOverflowError reached the caller as
+    * itself (in a job it left the run waiting for ever; see DataJobTest). */
+  @Test def aQueryNestsAtMostTheLimit(): Unit = {
+    val cat = textCatalog()
+    def chain(n: Int) = "SELECT a" + " + a" * (n - 1) + " AS v FROM t ORDER BY 1"
+    assertEquals(Seq(250, 500, 750, 1000, 1250), column(chain(250), cat, "v"))
+    def limit(depth: Int) = s"The query nests $depth levels deep; the limit is 256. Group a long chain of + or || in " +
+      "parentheses, or compute part of the expression in a WITH clause"
+    assertEquals(limit(302), bindRejection(chain(300), cat))
+    assertEquals(limit(2502), bindRejection(chain(2500), cat))
+    // Calls, CASEs and arithmetic in parentheses take a level each too.
+    Seq("SELECT " + "ABS(" * 200 + "a" + ")" * 200 + " AS v FROM t",
+      "SELECT " + "CASE WHEN a > 0 THEN " * 150 + "a" + " END" * 150 + " AS v FROM t",
+      "SELECT " + "a + (" * 150 + "a" + ")" * 150 + " AS v FROM t",
+      "SELECT a FROM t WHERE " + "NOT (" * 150 + "a = 1" + ")" * 150
+    ).foreach { sql =>
+      val refused = bindRejection(sql, cat)
+      assertTrue(refused, refused.startsWith("The query nests ") && refused.contains("the limit is 256"))
+    }
+    // The same chain grouped in parentheses nests a few levels a group.
+    val grouped = "SELECT " + Seq.fill(3)("(a" + " + a" * 99 + ")").mkString(" + ") + " AS v FROM t ORDER BY 1"
+    assertEquals(Seq(300, 600, 900, 1200, 1500), column(grouped, cat, "v"))
+  }
+
+  /** An AND or an OR chain binds at any length, regrouped as a balanced tree
+    * of the same operator, which answers as the chain does, NULLs included.
+    * A query builder's list of conditions, `a = 2 OR a = 4 OR ...`, nested a
+    * level a term, and past a few hundred overflowed the binder's stack. */
+  @Test def anAndOrAnOrChainBindsAtAnyLength(): Unit = {
+    val cat = textCatalog()
+    val ors = (1 to 5000).map(i => s"a = ${i * 2}").mkString(" OR ")
+    assertEquals(Seq(2, 4), column(s"SELECT a FROM t WHERE $ors ORDER BY a", cat, "a"))
+    val ands = (1 to 5000).map(i => s"a <> ${i * 2}").mkString(" AND ")
+    assertEquals(Seq(1, 3, 5), column(s"SELECT a FROM t WHERE $ands ORDER BY a", cat, "a"))
+    // NULL OR TRUE is TRUE and NULL AND FALSE is FALSE, however grouped.
+    def nulls(op: String) = Seq.fill(999)("NULL").mkString(s" $op ")
+    assertEquals(Seq(true, null, null), column(s"SELECT ${nulls("OR")} OR f AS v FROM flags ORDER BY id", cat, "v"))
+    assertEquals(Seq(null, false, null), column(s"SELECT ${nulls("AND")} AND f AS v FROM flags ORDER BY id", cat, "v"))
+    // A chain in the SELECT list matches the same chain as a GROUP BY key.
+    val m = (1 to 1000).map(i => s"a = $i").mkString(" OR ")
+    assertEquals(Seq(true), column(s"SELECT $m AS m, COUNT(*) AS n FROM t GROUP BY $m", cat, "m"))
+  }
+
+  /** Parentheses that do not balance are a parse error naming the one at
+    * fault, at once, and parentheses nested past the limit are refused before
+    * the parser recurses through them. JSqlParser backtracked on each one left
+    * open: `SELECT ((((a +` failed after its time limit with `Time out
+    * occurred.`, which named nothing, and `WHERE (((a =` took five seconds. */
+  @Test def unbalancedParenthesesAreRefusedAtOnce(): Unit = {
+    val cat = textCatalog()
+    val start = System.nanoTime()
+    assertEquals("SQL parse error: the '(' at line 1, column 11 is never closed", bindRejection("SELECT ((((a +", cat))
+    assertEquals("SQL parse error: the '(' at line 1, column 25 is never closed",
+      bindRejection("SELECT a FROM t WHERE (((a =", cat))
+    assertEquals("SQL parse error: the ')' at line 1, column 28 closes no '('",
+      bindRejection("SELECT a FROM t WHERE a = 1)", cat))
+    assertEquals("SQL parse error: the '(' at line 2, column 8 is never closed",
+      bindRejection("SELECT a\nFROM t (\nWHERE a = 1", cat))
+    assertTrue(s"took ${(System.nanoTime() - start) / 1000000} ms", System.nanoTime() - start < 2000000000L)
+    // A parenthesis in a string, a quoted name or a comment is none.
+    assertEquals(Seq("("), column("SELECT '(' AS p, a AS \"x(\" FROM t /* ( */ WHERE a = 1 -- )", cat, "p"))
+    assertEquals("The query nests more than 256 parentheses deep (at line 1, column 264); the limit is 256 levels",
+      bindRejection("SELECT " + "(" * 2500 + "a" + ")" * 2500 + " AS v FROM t", cat))
+  }
+
+  /** A parse that runs past JSqlParser's time limit says so, and why: 25
+    * nested CASTs send it backtracking for longer than it allows, and the
+    * error was `SQL parse error: Time out occurred.`. */
+  @Test def aParseThatTimesOutSaysWhy(): Unit = {
+    val cat = textCatalog()
+    assertEquals("SQL parse error: the parser ran past its time limit, which deeply nested CASTs, calls and " +
+      "parentheses can make it do; write the expression with less nesting",
+      bindRejection("SELECT " + "CAST(" * 25 + "a" + " AS INT)" * 25 + " AS v FROM t", cat))
+  }
+
+  /** A UNION of many arms binds as balanced trees, a tree for each run of
+    * UNION or UNION ALL, so it nests a few levels whatever its length, and
+    * answers as written: the arms in their order, and a run of one kind
+    * applying to everything before it. Bound left-deep, 2000 arms took fifteen
+    * seconds and 5000 overflowed the optimizer's stack. */
+  @Test def aUnionOfManyArmsAnswersAsWritten(): Unit = {
+    val cat = textCatalog()
+    val start = System.nanoTime()
+    val many = (1 to 5000).map(_ => "SELECT a FROM t").mkString(" UNION ALL ")
+    assertEquals(Seq(25000L), column(s"WITH q AS ($many) SELECT COUNT(*) AS n FROM q", cat, "n"))
+    assertTrue(s"took ${(System.nanoTime() - start) / 1000000} ms", System.nanoTime() - start < 10000000000L)
+    assertEquals((1 to 9).toSeq, column((1 to 9).map(i => s"SELECT $i AS x").mkString(" UNION ALL "), cat, "x"))
+    // ((t ALL t) UNION u) ALL u: the distinct values of t and u, then u's again.
+    assertEquals(Seq(1, 1, 2, 2, 3, 4, 5), column(
+      "WITH q AS (SELECT a FROM t UNION ALL SELECT a FROM t UNION SELECT a FROM u UNION ALL SELECT a FROM u) " +
+        "SELECT a FROM q ORDER BY a", cat, "a"))
+  }
 }

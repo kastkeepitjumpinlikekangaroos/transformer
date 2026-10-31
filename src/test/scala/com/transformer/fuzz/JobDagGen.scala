@@ -420,15 +420,21 @@ object JobDagGen {
 
     /** The executor a run uses: `engine`, except that a `Fails` task with an
       * injected failure throws it before reaching the engine, so the message the
-      * run records is exactly the drawn text. */
+      * run records is exactly the drawn text. Every other such task, by its
+      * place in the job, throws a `LinkageError` rather than an
+      * `IllegalStateException`: an `Error` the runner must turn into the task's
+      * failure as well, where it used to leave the run waiting for ever. */
     def executor(engine: SqlExecutor): SqlExecutor = {
-      val injected: Map[String, String] =
-        tasks.filter(t => t.outcome == Fails && t.failure.isDefined).map(t => mainSql(t) -> t.failure.get.text).toMap
+      val injected: Map[String, () => Throwable] =
+        tasks.zipWithIndex.collect { case (t, i) if t.outcome == Fails && t.failure.isDefined =>
+          val message = t.failure.get.text
+          mainSql(t) -> (() => if (i % 2 == 1) new LinkageError(message) else new IllegalStateException(message))
+        }.toMap
       if (injected.isEmpty) engine
       else new SqlExecutor {
         def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery =
           injected.get(sql) match {
-            case Some(message) => throw new IllegalStateException(message)
+            case Some(failure) => throw failure()
             case None => engine.execute(sql, catalog, opts)
           }
       }

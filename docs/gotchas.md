@@ -141,6 +141,38 @@ ship a fix or move something from "not done" to "done".
     to a GROUP BY key by that text, and lower-cased all of it, which made
     `s || 'a'` the key `s || 'A'`; `LogicalBuilder.canonicalText` lower-cases
     only what is no literal and unquotes the names.
+- **Every walk over a parsed statement recurses, so a query nests at most
+  `SqlParser.MaxNesting` (256) levels** (plans/robustness/14). JSqlParser's
+  parser, its `toString` (which `SqlParser` renders a statement with),
+  `TablesNamesFinder` (which `TaskDag` reads a task's tables with),
+  `UnsupportedClauses.reject`, the binder, the optimizer's passes and
+  expression evaluation all recurse a level of the tree at a time, and past a
+  few hundred levels one of them overflows its stack. Where it did moved with
+  the machine: a thread gets 1 MB of stack on Linux and 2 MB on macOS, the
+  JIT shrinks frames as it compiles, and the shallowest overflow measured
+  (`-Xss1m`, cold) was at about 600 levels, 300 nested CASEs or 300 levels of
+  `a + (...)`. So `SqlParser.parse` measures the tree first, iteratively, and
+  refuses one deeper than 256, which every walk clears on any machine. Two
+  long shapes are regrouped instead, since each is associative: an AND or OR
+  chain into a balanced tree of its operator (`SqlParser.regroupChains`,
+  before the depth is measured), and the arms of a UNION into a balanced tree
+  per run of one kind (`LogicalBuilder.balancedUnion`). A pass that splits a
+  predicate into its conjuncts and joins what it keeps must rebuild a balanced
+  tree too (`JoinSideAnalysis.conjunction`): `FilterPushdown` and the
+  planner's join residual folded them left-deep, which undid the regrouping
+  and overflowed `ColumnProjectionPushdown` on a 5000-term WHERE. A new walk
+  that recurses more per level than these, or a new rewrite that rebuilds a
+  long list left-deep, needs measuring at `-Xss1m`.
+- **JSqlParser backtracks, and some nesting costs it seconds.** Unclosed
+  parentheses did: `SELECT (((a +` took seven seconds to fail and `((((a +`
+  ran it past its time limit (`Time out occurred.`), so `SqlParser` checks the
+  text's parentheses before the parser sees them, lexing it with the parser's
+  own token manager so a parenthesis in a string, a quoted name or a comment
+  does not count. Balanced nesting can still be slow: 25 nested CASTs time
+  out, 10 nested IFs take three seconds, 200 nested SUBSTRINGs four. Nothing
+  outside the parser can make that faster; the timeout's message says what
+  causes it. The parser's thread also keeps working for a few seconds after
+  its time limit fails the parse.
 - **`Fetch.getRowCount` throws unless the count is an integer literal.** It
   unboxes the `LongValue` behind `getExpression`, so `FETCH FIRST ROW ONLY` (no
   count), `FETCH FIRST ? ROWS ONLY` and `FETCH FIRST -1 ROWS ONLY` all throw a
@@ -508,8 +540,14 @@ ship a fix or move something from "not done" to "done".
   between its two sides in ON is refused when both sides hold more than 5000
   rows (left=…, right=…); add one to the ON condition`) when both sides expose a
   `CatalogView.exactRowCount` and the smaller of the two exceeds 5000
-  rows. CSV-rooted joins (no exactRowCount) keep working because the
-  guard refuses to refuse without evidence. If you hit this on a
+  rows. It also refuses one over the output of another such join when the
+  two would pair more than 25 million rows, since a chain multiplies where
+  each side alone looks small (a join's cardinality estimate is its larger
+  side): three 300-row tables paired 27 million rows and ran a 1.2 GB heap
+  out (plans/robustness/14). A single small side against a large one, a
+  range join of buckets against a fact table, still runs. CSV-rooted joins
+  (no exactRowCount) keep working because the guard refuses to refuse
+  without evidence. If you hit this on a
   workload that genuinely needs the cartesian, either add a
   redundant-but-cheap equality conjunct (`ON 1 = 1` won't help — it has
   no side info) or restructure the predicate so the planner can extract
@@ -1344,6 +1382,23 @@ ship a fix or move something from "not done" to "done".
   (the `sameKey` entry above). Classifying a function as tie-insensitive is
   therefore a claim about the engine, not only about SQL.
 
+- **The job runner's event loop waits for an event per task and per input,
+  so every worker posts one whatever its work throws.** Each worker posted its
+  event only after its work returned, and caught `NonFatal` throwables alone,
+  so an `Error` (a `StackOverflowError` from a deep query, a `LinkageError`,
+  an `OutOfMemoryError` on the task's own thread) ended it without one:
+  `job.run()` waited in `LinkedBlockingQueue.take` for ever, with idle
+  workers and nothing logged (plans/robustness/14). Now a worker catches
+  every `Throwable` and posts in a `finally`. A stack overflow or any other
+  `Error` fails its task; a failure of the JVM itself, any
+  `VirtualMachineError` but a stack overflow, stops the run, since it can
+  leave shared state half-written: no task starts after it (a worker reads
+  the stop before it starts its task), each that had not started is
+  `Skipped` saying so, and `JobResult.error` and `job.json`'s `errorMessage`
+  name it. An input that runs out of memory loading is a failed input, as
+  any other failure to load is (its warning says to stream it with
+  `cache: false`). `oracle/DagSchedule`'s corpus throws a `LinkageError` from
+  half its injected failures, so the property holds the loop to this.
 - **`job.json`'s `runFile` follows the task's CONFIG, not its result.** The
   aggregate manifest indexes each task's full `_run.json`, and `JobSession`
   hydration follows that pointer to rebuild a finished run (timestamps, per-
@@ -1558,7 +1613,7 @@ the engine's ten `DataType`s, and every file-format fixture was written by our
 own writer. Plans 04-07 in that directory close those three holes; plan 05's
 frontend fuzzer closed the first, and found the defects in the next section.
 
-## Open defects the frontend fuzzer found (2026-10-04)
+## Defects the frontend fuzzer found (2026-10-04, all fixed)
 
 `fuzz/frontend_fuzz_test` writes SQL text rather than rendering an AST, which is
 the only way a corpus reaches the frontend's failure paths (see "Generator-
@@ -1577,13 +1632,16 @@ see "JSqlParser drops text" above), and literals and names read as JSqlParser
 keeps their text (`'it''s'` was five characters, `"a"` named no column, an
 integer past BIGINT was a raw `NumberFormatException`, `1e400` was `Infinity`;
 [plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md),
-see "JSqlParser keeps a literal's text" above) are fixed; one family is open:
-
-- **An `Error` in a job's task hangs the job**, and a ~2000-operator expression
-  overflows the binder's stack, so one machine-generated query can do it; three
-  unclosed parentheses make a parse error take seconds and four time out
-  ([plans/robustness/14](../plans/robustness/14-pathological-nesting.md)). The
-  most severe: no error, no end.
+see "JSqlParser keeps a literal's text" above), and deep or unbalanced SQL,
+whose worst case hung a job for ever with no error (a ~2500-term expression
+overflowed the binder's stack, and the job runner waited for the `Error`'s
+task; three unclosed parentheses made a parse error take seconds and four ran
+the parser into its time limit;
+[plans/robustness/14](../plans/robustness/14-pathological-nesting.md), see
+"Every walk over a parsed statement recurses" and "The job runner's event loop"
+above) are all fixed. `CleanRejection.Defect` and
+`SyntaxEquivalence.KnownDefects` are empty, and `BeyondTheTable` holds no
+`knownPlan`.
 
 ## What's intentionally NOT done
 

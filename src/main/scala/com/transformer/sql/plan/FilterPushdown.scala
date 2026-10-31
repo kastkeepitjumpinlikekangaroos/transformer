@@ -1,7 +1,5 @@
 package com.transformer.sql.plan
 
-import com.transformer.core.DataType
-
 /** Pushes filter conjuncts through joins so each conjunct sits as close to the
   * underlying scan as it can correctly run.
   *
@@ -111,6 +109,5 @@ object FilterPushdown {
     case other => Seq(other)
   }
 
-  private def andAll(es: Seq[Expr]): Expr =
-    es.reduceLeft[Expr] { (a, b) => BinOpExpr("AND", a, b, DataType.BooleanType) }
+  private def andAll(es: Seq[Expr]): Expr = JoinSideAnalysis.conjunction(es)
 }

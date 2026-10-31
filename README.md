@@ -370,7 +370,13 @@ queue-wait time the GUI surfaces alongside the run duration, so you can tell
 
 A failed task's `errorMessage` is its failure's own message, such as
 `Cannot cast 'x' to int` for a value a CAST cannot read while the query runs,
-or the bind error that names what the query got wrong.
+or the bind error that names what the query got wrong. Whatever a task throws
+fails it, a JVM `Error` too (a stack overflow reads `the query nests too deeply
+for the thread's stack`), and the run goes on. A task that runs out of memory
+stops the run instead: no task starts after it, each that had not started is
+`Skipped` with `not run: the job stopped after task 'x' failed: out of memory
+(...)`, and the run's error (`JobResult.error`, and `errorMessage` in
+`job.json`) says the same.
 
 The underscore prefix means CSV/Parquet readers skip both the record and the
 validation samples when re-reading the directory as data.
@@ -992,7 +998,12 @@ FULL outer keeps the default. Output schema and column order are always
 `left ++ right` regardless of which side ends up in the hash — `SELECT a.*,
 b.*` keeps its layout. Non-equi joins (no equality conjunct) work for tiny
 inputs but are refused when both sides expose a row count and the smaller
-side exceeds 5000 rows — at that scale you should add an equality key.
+side exceeds 5000 rows — at that scale you should add an equality key. So is
+one over the output of another such join when the two would pair more than
+25 million rows: a chain multiplies where each side alone looks small (three
+300-row tables pair 27 million). One small side against a large one, such as
+100 buckets against a million-row table on `amount BETWEEN lo AND hi`, still
+runs.
 
 ## Temporal templating
 
@@ -1289,11 +1300,20 @@ JDK 21 or newer (tested through JDK 25).
   the file, line, column and value; an explicit schema (`inferSchema = false`
   with `columns`) reads every file as declared. A parquet glob checks every
   file against the first when it is opened (see [Parquet](#parquet)).
-- **Very deep or unbalanced SQL.** An expression about 2000 operators deep
-  overflows the binder's stack, and inside a job that **hangs the job**; three
-  unclosed parentheses make a parse error take seconds, and four run the parser
-  into its timeout. Recorded as
-  [plans/robustness/14](plans/robustness/14-pathological-nesting.md).
+- **A query nests at most 256 levels deep.** An operator, a call, a CASE, a
+  pair of parentheses and a SELECT each take a level of the tree the parser
+  builds, so a chain of more than about 250 `+` or `||` terms, or a call or a
+  CASE nested more than about 120 deep, is an error naming its depth (`The query
+  nests 302 levels deep; the limit is 256. ...`): group the chain in
+  parentheses, or compute part of it in a `WITH` clause. The limit is the same
+  on every machine; past it some walk over the tree used to overflow its stack,
+  at a depth that moved with the thread's stack size (1 MB on Linux, 2 MB on
+  macOS) and with the JIT. An `AND` or `OR` chain (`id = 1 OR id = 2 OR ...`)
+  and a `UNION` of any number of arms bind at any length, each regrouped into a
+  balanced tree that answers as written. Parentheses that do not balance are a
+  parse error naming the line and column of the one at fault, at once. The
+  parser can still take seconds over some balanced nesting: 25 nested `CAST`s
+  run it past its time limit, a parse error that says so.
 - **`DECIMAL` math functions and statistics compute in `DOUBLE`.** Comparison,
   arithmetic, `ABS`, `SUM` and `AVG` keep a `DECIMAL` exact, but `ROUND`,
   `FLOOR`, `CEIL`, `TRUNC`, `SQRT`, `POWER` and the other math functions, and
