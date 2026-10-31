@@ -289,18 +289,19 @@ object Funcs {
 object VecFuncs {
 
   /** SQL `COALESCE(a, b, c, ...)` — first non-NULL arg per row, else NULL.
-    * Args are evaluated left-to-right and short-circuited at row level (we
-    * skip rows already filled). For analyzer-uniform `resultType`, all args
-    * already share a type, so a typed copy would be possible — using
-    * `setBoxed` keeps this simple and still avoids per-row `Expr.eval`. */
+    * Args are evaluated left to right, each needed only on the rows every
+    * earlier one left NULL ([[Operand]]), and none once every row is filled.
+    * For analyzer-uniform `resultType`, all args already share a type, so a
+    * typed copy would be possible — using `setBoxed` keeps this simple and
+    * still avoids per-row `Expr.eval`. */
   def coalesce(args: Seq[Expr], resultType: DataType, batch: ColumnarBatch): ColumnVector = {
     val n = batch.numRows
     val cap = math.max(1, n)
     val out = ColumnVector.allocate(resultType, cap)
     val filled = new util.BitSet(cap)
     val it = args.iterator
-    while (it.hasNext) {
-      val argVec = it.next().evalVec(batch)
+    while (it.hasNext && filled.cardinality < n) {
+      val argVec = Operand.evalVec(it.next(), batch, i => !filled.get(i))
       var i = 0
       while (i < n) {
         if (!filled.get(i) && !argVec.isNull(i)) {
@@ -513,18 +514,20 @@ object VecFuncs {
     new DoubleVector(values, nulls, cap)
   }
 
-  /** `IF(cond, a, b)`. Null/false cond → b. Both branches evaluated eagerly
-    * (vectorized; side-effect-free Expr makes this safe). */
+  /** `IF(cond, a, b)`. Null/false cond → b. `a` is needed only on the rows
+    * `cond` makes TRUE and `b` only on the rest ([[Operand]]), so `IF` guards
+    * as `CASE` does. */
   def iff(args: Seq[Expr], resultType: DataType, batch: ColumnarBatch): ColumnVector = {
     val n = batch.numRows
     val cap = math.max(1, n)
     val out = ColumnVector.allocate(resultType, cap)
     val condVec = args(0).evalVec(batch).asInstanceOf[BooleanVector]
-    val aVec = args(1).evalVec(batch)
-    val bVec = args(2).evalVec(batch)
+    val chosen: Int => Boolean = i => !condVec.isNull(i) && condVec.values(i)
+    val aVec = Operand.evalVec(args(1), batch, chosen)
+    val bVec = Operand.evalVec(args(2), batch, i => !chosen(i))
     var i = 0
     while (i < n) {
-      val takeA = !condVec.isNull(i) && condVec.values(i)
+      val takeA = chosen(i)
       val src = if (takeA) aVec else bVec
       if (src.isNull(i)) out.setNull(i)
       else out.setBoxed(i, src.getBoxed(i))

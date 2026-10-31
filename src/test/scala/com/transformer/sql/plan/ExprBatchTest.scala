@@ -1731,4 +1731,96 @@ class ExprBatchTest {
         negated = false),
       b)
   }
+
+  // ===========================================================================
+  // A conditional evaluates an operand only on the rows that need it
+  // (plans/robustness/17): a CAST that fails on a row the guard answers some
+  // other way must not fail the batch, on either path.
+  // ===========================================================================
+
+  /** `s` holds an integer's text on even rows (NULL on every tenth from the
+    * fourth) and text no INT reads on odd ones; `ok` is TRUE exactly where `s`
+    * reads, NULL on every sixth such row. */
+  private def guarded(): ColumnarBatch = batch(
+    "s" -> stringCol(i => if (i % 2 == 0) (i * 3).toString else s"x$i", i => i % 10 == 4),
+    "ok" -> boolCol(_ % 2 == 0, i => i % 12 == 0))
+  private val GS = ColRefExpr(0, "s", DataType.StringType)
+  private val GOk = ColRefExpr(1, "ok", DataType.BooleanType)
+  private val GCast = CastExpr(GS, DataType.IntType)
+  private def int(v: Int): LitExpr = LitExpr(v, DataType.IntType)
+  private val NotOk = UnaryOpExpr("NOT", GOk, DataType.BooleanType)
+
+  /** What the guarded CAST reads on row `i` where it reads: its integer, or NULL. */
+  private def castOf(i: Int): Any = if (i % 10 == 4) null else i * 3
+  /** `ok` on row `i`, and SQL's three-valued AND, OR and NOT over such values. */
+  private def okAt(i: Int): Any = if (i % 12 == 0) null else i % 2 == 0
+  private def and3(a: Any, b: => Any): Any =
+    if (a == false) false else { val r = b; if (r == false) false else if (a == null || r == null) null else true }
+  private def or3(a: Any, b: => Any): Any =
+    if (a == true) true else { val r = b; if (r == true) true else if (a == null || r == null) null else false }
+  private def not3(a: Any): Any = if (a == null) null else a != true
+  private def positiveAt(i: Int): Any = castOf(i) match { case null => null; case v => v.asInstanceOf[Int] > 0 }
+
+  private def assertGuarded(expr: Expr, expected: Int => Any): Unit = {
+    val b = guarded()
+    assertParity(expr, b)
+    val vec = expr.evalVec(b)
+    (0 until N).foreach { i =>
+      val got = if (vec.isNull(i)) null else vec.getBoxed(i)
+      assertEquals(s"row $i of $expr", expected(i), normalize(got, expr.dataType))
+    }
+  }
+
+  @Test def caseEvaluatesAThenOnlyOnTheRowsItsWhenClaims(): Unit = {
+    assertGuarded(CaseExpr(Seq(GOk -> GCast), Some(int(-1)), DataType.IntType),
+      i => if (okAt(i) == true) castOf(i) else -1)
+    // A later WHEN is evaluated only on the rows no earlier branch claimed.
+    val gt = BinOpExpr(">", GCast, int(30), DataType.BooleanType)
+    assertGuarded(CaseExpr(Seq(NotOk -> int(0), gt -> int(1)), Some(int(2)), DataType.IntType),
+      i => if (not3(okAt(i)) == true) 0 else if (castOf(i) != null && i * 3 > 30) 1 else 2)
+    // ELSE only on the rows no branch claimed.
+    assertGuarded(CaseExpr(Seq(NotOk -> int(0)), Some(GCast), DataType.IntType),
+      i => if (not3(okAt(i)) == true) 0 else castOf(i))
+  }
+
+  @Test def ifEvaluatesEachValueOnlyOnTheRowsItAnswers(): Unit = {
+    assertGuarded(FuncExpr("IF", Seq(GOk, GCast, int(-1)), DataType.IntType),
+      i => if (okAt(i) == true) castOf(i) else -1)
+    assertGuarded(FuncExpr("IF", Seq(NotOk, int(-1), GCast), DataType.IntType),
+      i => if (not3(okAt(i)) == true) -1 else castOf(i))
+  }
+
+  @Test def coalesceEvaluatesAnArgumentOnlyWhereTheEarlierOnesAreNull(): Unit = {
+    val nullWhereOk = FuncExpr("IF", Seq(GOk, LitExpr(null, DataType.IntType), int(7)), DataType.IntType)
+    assertGuarded(FuncExpr("COALESCE", Seq(nullWhereOk, GCast), DataType.IntType),
+      i => if (okAt(i) == true) castOf(i) else 7)
+    // Every row filled by the first argument: the second is never read.
+    assertGuarded(FuncExpr("COALESCE", Seq(int(1), GCast), DataType.IntType), _ => 1)
+  }
+
+  @Test def andAndOrEvaluateTheRightSideOnlyWhereTheLeftDoesNotDecide(): Unit = {
+    val positive = BinOpExpr(">", GCast, int(0), DataType.BooleanType)
+    assertGuarded(BinOpExpr("AND", GOk, positive, DataType.BooleanType), i => and3(okAt(i), positiveAt(i)))
+    assertGuarded(BinOpExpr("OR", NotOk, positive, DataType.BooleanType), i => or3(not3(okAt(i)), positiveAt(i)))
+    // A chain: each conjunct is needed only where the ones before it are not FALSE.
+    val chain = BinOpExpr("AND", BinOpExpr("AND", GOk, LitExpr(true, DataType.BooleanType), DataType.BooleanType),
+      positive, DataType.BooleanType)
+    assertGuarded(chain, i => and3(okAt(i), positiveAt(i)))
+  }
+
+  @Test def inEvaluatesAnItemOnlyWhereNoEarlierItemMatched(): Unit = {
+    // Rows `ok` does not make TRUE match the first item, so the CAST is never read there.
+    val probe = FuncExpr("IF", Seq(GOk, int(-5), int(2)), DataType.IntType)
+    assertGuarded(InListExpr(probe, Seq(int(2), GCast), negated = false),
+      i => if (okAt(i) != true) true else if (castOf(i) == null) null else false)
+  }
+
+  @Test def anOperandStillFailsOnARowThatNeedsIt(): Unit = {
+    val b = guarded()
+    val e = CaseExpr(Seq(LitExpr(true, DataType.BooleanType) -> GCast), None, DataType.IntType)
+    val byVec = assertThrows(scala.Predef.classOf[IllegalArgumentException], () => e.evalVec(b))
+    assertEquals("Cannot cast 'x1' to int", byVec.getMessage)
+    val byRow = assertThrows(scala.Predef.classOf[IllegalArgumentException], () => e.eval(b, 1))
+    assertEquals("Cannot cast 'x1' to int", byRow.getMessage)
+  }
 }

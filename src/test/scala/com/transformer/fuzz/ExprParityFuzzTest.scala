@@ -34,7 +34,28 @@ class ExprParityFuzzTest {
       shrink = c => Shrinker.expr(c.expr).map(e => new ExprGen.ExprCase(c.batch, e))
     ) { c =>
       ExprParity.check(c.expr, c.batch)
+      if (c.generated) ExprParity.checkTotal(c.expr, c.batch)
     }
+  }
+
+  /** Coverage guard for the guarded shapes: a CAST of a batch's guard text,
+    * under a conditional whose guard keeps it off the rows it fails on, must
+    * be drawn (the shape), and the batch must hold such a row (the value), or
+    * the property cannot tell a lazy conditional from an eager one. Each
+    * conditional's shape is its own producer, so the shape half is the sum. */
+  @Test def guardedConditionalsReachRowsTheyMustSkip(): Unit = {
+    val n = 4000
+    var shape, excluded = 0
+    var seed = 0
+    while (seed < n) {
+      val cov = ExprGen.guardCoverage(ExprGen.generate(new Rng(seed.toLong)))
+      if (cov.shape) shape += 1
+      if (cov.shape && cov.excludesAFailure) excluded += 1
+      seed += 1
+    }
+    println(f"[expr-parity] guarded conditionals over $n seeds: shape=$shape, with a row to skip=$excluded")
+    assertTrue(s"no guarded conditional generated (shape=$shape)", shape > 200)
+    assertTrue(s"guarded conditionals never meet a row they must skip (excluded=$excluded)", excluded > 150)
   }
 
   /** Same seed reproduces the exact tree and batch — the repro contract the

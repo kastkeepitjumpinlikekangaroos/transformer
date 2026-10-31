@@ -15,14 +15,20 @@ import com.transformer.sql.plan._
   *
   *   - '''Total by construction.''' The generator never builds a tree that can
   *     throw for in-range, type-correct input, so the property reduces to
-  *     "every row agrees" (the precedent `ExprBatchTest` is likewise total).
-  *     Concretely it avoids the engine's only partial shapes: `RAND()` (no
-  *     parity meaning — excluded entirely), casts that parse (`String ->`
-  *     numeric/boolean/date/timestamp, `Boolean ->` float/double), and a cast
-  *     from FLOAT or DOUBLE to DECIMAL (`NaN` and the infinities have no
-  *     decimal, and the cast refuses them). A `ROUND` or `TRUNC` scale and a
-  *     `SUBSTRING` position or length are any INT or BIGINT, NULL included,
-  *     since NULL there answers NULL.
+  *     "every row agrees, and neither path throws" (the precedent
+  *     `ExprBatchTest` is likewise total). Concretely it avoids the engine's
+  *     partial shapes: `RAND()` (no parity meaning — excluded entirely), casts
+  *     that parse (`String ->` numeric/boolean/date/timestamp, `Boolean ->`
+  *     float/double), and a cast from FLOAT or DOUBLE to DECIMAL (`NaN` and the
+  *     infinities have no decimal, and the cast refuses them), with one
+  *     exception that is the point of it: a CAST of a batch's guard column
+  *     ([[GuardPairProb]]) to INT, which fails on some of its rows, built only
+  *     under a `CASE`, `IF`, `COALESCE`, `AND`, `OR` or `IN` whose guard
+  *     excludes exactly those rows ([[genGuarded]]). Such a tree is total if
+  *     and only if each conditional evaluates an operand only on the rows that
+  *     need it, which the vector path did not (plans/robustness/17). A
+  *     `ROUND` or `TRUNC` scale and a `SUBSTRING` position or length are any
+  *     INT or BIGINT, NULL included, since NULL there answers NULL.
   *
   * Columns and expressions take every one of the engine's ten value types
   * ([[GenTypes]]). A type takes part in what the engine gives it and nothing
@@ -55,8 +61,11 @@ import com.transformer.sql.plan._
 object ExprGen {
 
   /** A generated batch + expression, with a compact description for failure
-    * messages. The seed reproduces both exactly. */
-  final class ExprCase(val batch: ColumnarBatch, val expr: Expr) {
+    * messages. The seed reproduces both exactly. `generated` says the
+    * generator built the tree, so it is total (see the object's note); a
+    * shrinker's candidate is not, since dropping a guard leaves its CAST
+    * bare. */
+  final class ExprCase(val batch: ColumnarBatch, val expr: Expr, val generated: Boolean = false) {
     override def toString: String = {
       val cols = batch.schema.fields.iterator.zipWithIndex.map { case (f, i) =>
         var nulls = 0
@@ -142,17 +151,31 @@ object ExprGen {
     val structRng = rng.split()
     val dataRng = rng.split()
     val exprRng = rng.split()
+    // Split after the other three, so a seed whose batch has no guard pair
+    // draws the tree it drew before guarded shapes existed.
+    val guardRng = rng.split()
     val (schema, batch) = genBatch(structRng, dataRng)
-    val target = pick(exprRng, GenTypes)
-    val depth = exprRng.between(1, 4)
-    val expr = genTyped(exprRng, schema, target, depth)
+    val (target, expr) =
+      if (schema.indexOf(GuardText) >= 0 && guardRng.bool(GuardedRootProb)) {
+        val t = guardRng.oneOf(Seq(DataType.IntType, DataType.BooleanType))
+        (t, genGuarded(guardRng, schema, t, guardRng.between(1, 3)))
+      } else {
+        val t = pick(exprRng, GenTypes)
+        (t, genTyped(exprRng, schema, t, exprRng.between(1, 4)))
+      }
     require(
       expr.dataType == target,
       s"ExprGen type invariant violated: produced ${expr.dataType} for target $target -> $expr")
-    new ExprCase(batch, expr)
+    new ExprCase(batch, expr, generated = true)
   }
 
   // ---- coverage reporting -------------------------------------------------
+
+  /** `e` on row `row`, or NULL where it fails. A tally evaluates a subtree
+    * outside the conditional around it, which for a guarded CAST
+    * ([[genGuarded]]) means on the rows its guard keeps it off. */
+  private def valueAt(e: Expr, batch: ColumnarBatch, row: Int): Any =
+    try e.eval(batch, row) catch { case scala.util.control.NonFatal(_) => null }
 
   /** Which IEEE special values a generated case actually feeds to the two
     * operations that once disagreed between `eval` and `evalVec`. Reported
@@ -185,7 +208,7 @@ object ExprGen {
     def anyRow(e: Expr)(p: Double => Boolean): Boolean = {
       var r = 0
       while (r < c.batch.numRows) {
-        e.eval(c.batch, r) match {
+        valueAt(e, c.batch, r) match {
           case n: java.lang.Number => if (p(n.doubleValue)) return true
           case _ => ()
         }
@@ -241,9 +264,9 @@ object ExprGen {
     def meetOnEveryRow(left: Expr, rights: Seq[Expr]): Unit = {
       var r = 0
       while (r < c.batch.numRows) {
-        val lv = left.eval(c.batch, r)
+        val lv = valueAt(left, c.batch, r)
         if (lv != null) rights.foreach { e =>
-          val rv = e.eval(c.batch, r)
+          val rv = valueAt(e, c.batch, r)
           if (rv != null) meet(lv, rv)
         }
         r += 1
@@ -286,9 +309,55 @@ object ExprGen {
       case _ => ColumnarBatch.DefaultCapacity
     }
     val fields = (0 until numCols).map(i => Field(s"c$i", pick(structRng, GenTypes))).toVector
-    val schema = Schema(fields)
     val cols = fields.iterator.map(f => genColumn(structRng, dataRng, f.dataType, numRows)).toArray
-    (schema, ColumnarBatch.fromColumns(schema, cols, numRows))
+    // Drawn after every other column, so a seed's other columns are what they
+    // were before the guard pair existed.
+    if (structRng.bool(GuardPairProb)) {
+      val (text, flag) = genGuardPair(dataRng, numRows)
+      val schema = Schema(fields ++ Vector(Field(GuardText, DataType.StringType), Field(GuardFlag, DataType.BooleanType)))
+      (schema, ColumnarBatch.fromColumns(schema, cols ++ Array[ColumnVector](text, flag), numRows))
+    } else {
+      val schema = Schema(fields)
+      (schema, ColumnarBatch.fromColumns(schema, cols, numRows))
+    }
+  }
+
+  /** How often a batch carries a guard pair: a STRING column whose text an INT
+    * reads on some rows and not on others, and a BOOLEAN column that is TRUE
+    * or NULL only on rows whose text reads (or is NULL), and FALSE on every
+    * row whose text does not. */
+  private val GuardPairProb = 0.3
+  /** How often a batch with a guard pair is given a guarded shape as its
+    * tree's root ([[genGuarded]]), whose operands are any other tree. */
+  private val GuardedRootProb = 0.6
+  private[fuzz] val GuardText = "g"
+  private[fuzz] val GuardFlag = "ok"
+  private val IntTexts = Seq("0", "7", "-12", "+3", "2147483647", "-2147483648")
+  private[fuzz] val NonIntTexts = Seq("x", "", "1.5", " 7", "12a", "2147483648", "1e3")
+
+  private def genGuardPair(r: Rng, numRows: Int): (StringVector, BooleanVector) = {
+    val cap = math.max(1, numRows)
+    val text = new StringVector(new Array[String](cap), cap)
+    val flag = new BooleanVector(new Array[Boolean](cap), new java.util.BitSet(cap), cap)
+    var i = 0
+    while (i < numRows) {
+      r.weighted((1, 0), (5, 1), (4, 2)) match {
+        case 0 => // NULL text, which a CAST reads as NULL whatever the flag says
+          text.setNull(i)
+          r.weighted((1, 0), (1, 1), (1, 2)) match {
+            case 0 => flag.setNull(i)
+            case k => flag.set(i, k == 1)
+          }
+        case 1 =>
+          text.set(i, r.oneOf(IntTexts))
+          if (r.bool(0.15)) flag.setNull(i) else flag.set(i, true)
+        case _ =>
+          text.set(i, r.oneOf(NonIntTexts))
+          flag.set(i, false)
+      }
+      i += 1
+    }
+    (text, flag)
   }
 
   private def genColumn(structRng: Rng, dataRng: Rng, dt: DataType, numRows: Int): ColumnVector = {
@@ -593,6 +662,60 @@ object ExprGen {
     if (r.bool(0.5)) Seq(s, start, integerArg(r, r.between(0, 8), sub)) else Seq(s, start)
   }
 
+  /** A CAST of the guard text to INT under a conditional that evaluates it
+    * only where the guard flag is TRUE or NULL, which are the rows it reads.
+    * Each shape stands for one conditional's laziness: a `CASE`'s `THEN`, a
+    * later `WHEN` and its `ELSE`, `IF`'s two values, a `COALESCE` argument
+    * after one that is not NULL, the right side of `AND` and `OR`, and an `IN`
+    * item after one that matched. */
+  private def genGuarded(r: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
+    def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
+    val text = ColRefExpr(schema.indexOf(GuardText), GuardText, DataType.StringType)
+    val ok = ColRefExpr(schema.indexOf(GuardFlag), GuardFlag, DataType.BooleanType)
+    val notOk = UnaryOpExpr("NOT", ok, DataType.BooleanType)
+    val cast = CastExpr(text, DataType.IntType)
+    def int(v: Int) = LitExpr(v, DataType.IntType)
+    def maybe(e: => Expr): Option[Expr] = if (r.bool()) Some(e) else None
+    if (target == DataType.IntType) r.weighted[() => Expr](
+      2 -> (() => CaseExpr(Seq(ok -> cast), maybe(sub(DataType.IntType)), DataType.IntType)),
+      1 -> (() => CaseExpr(Seq(notOk -> sub(DataType.IntType), sub(DataType.BooleanType) -> cast),
+        maybe(sub(DataType.IntType)), DataType.IntType)),
+      1 -> (() => CaseExpr(Seq(notOk -> sub(DataType.IntType)), Some(cast), DataType.IntType)),
+      2 -> (() => FuncExpr("IF", Seq(ok, cast, sub(DataType.IntType)), DataType.IntType)),
+      1 -> (() => FuncExpr("IF", Seq(notOk, sub(DataType.IntType), cast), DataType.IntType)),
+      2 -> (() => FuncExpr("COALESCE",
+        Seq(FuncExpr("IF", Seq(ok, LitExpr(null, DataType.IntType), int(r.between(-9, 9))), DataType.IntType), cast),
+        DataType.IntType))
+    )()
+    else {
+      def compared = BinOpExpr(r.oneOf(EqOps ++ OrdOps), cast, sub(DataType.IntType), DataType.BooleanType)
+      r.weighted[() => Expr](
+        2 -> (() => BinOpExpr("AND", ok, compared, DataType.BooleanType)),
+        2 -> (() => BinOpExpr("OR", notOk, compared, DataType.BooleanType)),
+        1 -> (() => InListExpr(FuncExpr("IF", Seq(ok, int(-1000001), int(2)), DataType.IntType),
+          Seq(int(2), cast), r.bool())),
+        1 -> (() => CaseExpr(Seq(ok -> compared), maybe(sub(DataType.BooleanType)), DataType.BooleanType))
+      )()
+    }
+  }
+
+  /** Whether a case casts its guard text (the shape), and whether its batch
+    * holds a row whose text no INT reads, which the guard must keep the CAST
+    * off (the value). Read without evaluating anything. */
+  final case class GuardCoverage(shape: Boolean, excludesAFailure: Boolean)
+
+  def guardCoverage(c: ExprCase): GuardCoverage = {
+    def casts(e: Expr): Boolean = e match {
+      case CastExpr(ColRefExpr(_, GuardText, DataType.StringType), DataType.IntType) => true
+      case other => Shrinker.childrenOf(other).exists(casts)
+    }
+    val ti = c.batch.schema.indexOf(GuardText)
+    val failing = ti >= 0 && (0 until c.batch.numRows).exists { i =>
+      !c.batch.column(ti).isNull(i) && NonIntTexts.contains(c.batch.column(ti).getBoxed(i))
+    }
+    GuardCoverage(casts(c.expr), failing)
+  }
+
   private def genCaseExpr(r: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
     val nBranches = r.between(1, 3)
@@ -799,7 +922,7 @@ object ExprGen {
           ops += op
           var row = 0
           while (row < c.batch.numRows) {
-            (l.eval(c.batch, row), r.eval(c.batch, row)) match {
+            (valueAt(l, c.batch, row), valueAt(r, c.batch, row)) match {
               case (a: Number, b: Number) =>
                 val (x, y) = (Casts.toDecimal(a), Casts.toDecimal(b))
                 if ((op == "/" || op == "%") && y.signum == 0) byZero = true
@@ -846,8 +969,8 @@ object ExprGen {
           shape = true
           var row = 0
           while (row < c.batch.numRows) {
-            if (value.eval(c.batch, row) != null) integers.foreach { arg =>
-              arg.eval(c.batch, row) match {
+            if (valueAt(value, c.batch, row) != null) integers.foreach { arg =>
+              valueAt(arg, c.batch, row) match {
                 case null => nullArg = true
                 case n: Number =>
                   val k = n.longValue

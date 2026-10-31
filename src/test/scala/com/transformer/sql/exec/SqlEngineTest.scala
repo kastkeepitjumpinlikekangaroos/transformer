@@ -4358,4 +4358,29 @@ class SqlEngineTest {
       "WITH q AS (SELECT a FROM t UNION ALL SELECT a FROM t UNION SELECT a FROM u UNION ALL SELECT a FROM u) " +
         "SELECT a FROM q ORDER BY a", cat, "a"))
   }
+
+  /** A CASE, an IF, a COALESCE, an IN and AND / OR evaluate an operand only on
+    * the rows that need it, so a CAST one of them guards never fails on a row
+    * the guard answers another way. The vector path evaluated every operand on
+    * every row, and `IF` and `COALESCE` did on the row path too, so each of
+    * these failed with `Cannot cast 'x' to int` (plans/robustness/17). */
+  @Test def aConditionalEvaluatesOnlyWhatItsAnswerNeeds(): Unit = {
+    val c = new Catalog
+    val schema = Schema(Vector(Field("id", DataType.IntType), Field("s", DataType.StringType)))
+    c.register("n", memView(schema, Seq(Seq(
+      Array[Any](1, "12"), Array[Any](2, "x"), Array[Any](3, "-4"), Array[Any](4, null)))))
+    def v(expr: String): Seq[Any] = column(s"SELECT id, $expr AS v FROM n ORDER BY id", c, "v")
+    assertEquals(Seq(12, 0, -4, 0), v("CASE WHEN s <> 'x' THEN CAST(s AS INT) ELSE 0 END"))
+    assertEquals(Seq(0, 0, 0, 0), v("CASE WHEN s = 'q' THEN CAST(s AS INT) ELSE 0 END"))
+    assertEquals(Seq(12, -1, -4, null), v("IF(s = 'x', -1, CAST(s AS INT))"))
+    assertEquals(Seq(1, 1, 1, 1), v("COALESCE(1, CAST(s AS INT))"))
+    assertEquals(Seq(true, false, false, null), v("s <> 'x' AND CAST(s AS INT) > 0"))
+    assertEquals(Seq(true, true, false, null), v("s = 'x' OR CAST(s AS INT) > 0"))
+    assertEquals(Seq(false, true, false, null), v("id IN (2, CAST(s AS INT))"))
+    assertEquals(Seq(1, 3), column("SELECT id FROM n WHERE s <> 'x' AND CAST(s AS INT) <> 0 ORDER BY id", c, "id"))
+    // A row the guard lets through still fails, naming its value.
+    val e = try { v("CASE WHEN s <> 'q' THEN CAST(s AS INT) END"); fail("the CAST of 'x' did not fail"); null }
+    catch { case e: IllegalArgumentException => e }
+    assertEquals("Cannot cast 'x' to int", e.getMessage)
+  }
 }

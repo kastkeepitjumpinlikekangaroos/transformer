@@ -2,6 +2,9 @@ package com.transformer.sql.plan
 
 import com.transformer.core._
 
+import java.util.Locale
+import scala.util.control.NonFatal
+
 /** Bound (analyzed) expression. ColumnRefs have been resolved to column indices
   * against a child plan's output schema; type-checking and implicit casts have run.
   *
@@ -39,6 +42,42 @@ sealed trait Expr {
     }
     out
   }
+}
+
+/** How a conditional evaluates an operand on only the rows that need it.
+  *
+  * `CASE`, `IF`, `COALESCE`, `AND`, `OR` and `IN` answer a row without reading
+  * every operand on it, and an operand can fail on a row whose answer does not
+  * need it: `CASE WHEN s = 'q' THEN CAST(s AS INT) END` must not fail on a row
+  * holding `'x'`, nor `x <> 0 AND 100 * x > y` on one an overflow would. The
+  * row path skips such an operand by evaluating it lazily. The vector path
+  * evaluates an operand over the whole batch, which is what makes it fast and
+  * what nearly every batch takes, and only when that fails does it go back to
+  * the rows that need the operand, one at a time, so that only a failure on
+  * one of those reaches the caller. */
+private[plan] object Operand {
+
+  /** `e` over `batch`, needed only on the rows `needed` accepts (an index in
+    * `[0, batch.numRows)`). A row not needed reads NULL when the whole-batch
+    * evaluation failed, and whatever `e` gave it otherwise, so a caller reads
+    * the result on needed rows only. */
+  def evalVec(e: Expr, batch: ColumnarBatch, needed: Int => Boolean): ColumnVector =
+    try e.evalVec(batch)
+    catch {
+      case NonFatal(_) =>
+        val n = batch.numRows
+        val out = ColumnVector.allocate(e.dataType, math.max(1, n))
+        var i = 0
+        while (i < n) {
+          if (!needed(i)) out.setNull(i)
+          else {
+            val v = e.eval(batch, i)
+            if (v == null) out.setNull(i) else out.setBoxed(i, v)
+          }
+          i += 1
+        }
+        out
+    }
 }
 
 /** Literal. `value` must be of the type implied by `dataType` (or `null`). */
@@ -195,31 +234,45 @@ final case class BinOpExpr(op: String, left: Expr, right: Expr, dataType: DataTy
     * (e.g. a `ColRefExpr` to a Boolean column), and mutating an aliased vector
     * would corrupt the shared column. Subsequent conjuncts are folded in
     * place via [[VecOps.andInto]] so the chain pays one allocation total
-    * instead of N intermediate vectors. */
+    * instead of N intermediate vectors.
+    *
+    * Left to right, as the row path reads them: a conjunct is needed only on
+    * the rows every earlier one left TRUE or NULL ([[Operand]]), and once no
+    * row is left the rest are not evaluated at all. */
   private def evalAndChain(batch: ColumnarBatch, n: Int): BooleanVector = {
     val conjuncts = collectAndConjuncts()
     val first = conjuncts.head.evalVec(batch).asInstanceOf[BooleanVector]
     val acc = copyBooleanVector(first, n)
+    val undecided: Int => Boolean = i => acc.nulls.get(i) || acc.values(i)
     var i = 1
-    while (i < conjuncts.length) {
-      val next = conjuncts(i).evalVec(batch).asInstanceOf[BooleanVector]
+    while (i < conjuncts.length && anyRow(n, undecided)) {
+      val next = Operand.evalVec(conjuncts(i), batch, undecided).asInstanceOf[BooleanVector]
       VecOps.andInto(acc, next, n)
       i += 1
     }
     acc
   }
 
+  /** As [[evalAndChain]], a disjunct needed only where every earlier one left
+    * FALSE or NULL. */
   private def evalOrChain(batch: ColumnarBatch, n: Int): BooleanVector = {
     val conjuncts = collectOrConjuncts()
     val first = conjuncts.head.evalVec(batch).asInstanceOf[BooleanVector]
     val acc = copyBooleanVector(first, n)
+    val undecided: Int => Boolean = i => acc.nulls.get(i) || !acc.values(i)
     var i = 1
-    while (i < conjuncts.length) {
-      val next = conjuncts(i).evalVec(batch).asInstanceOf[BooleanVector]
+    while (i < conjuncts.length && anyRow(n, undecided)) {
+      val next = Operand.evalVec(conjuncts(i), batch, undecided).asInstanceOf[BooleanVector]
       VecOps.orInto(acc, next, n)
       i += 1
     }
     acc
+  }
+
+  private def anyRow(n: Int, p: Int => Boolean): Boolean = {
+    var i = 0
+    while (i < n) { if (p(i)) return true; i += 1 }
+    false
   }
 
   private def collectAndConjuncts(): Array[Expr] = {
@@ -258,9 +311,24 @@ final case class BinOpExpr(op: String, left: Expr, right: Expr, dataType: DataTy
 }
 
 final case class FuncExpr(name: String, args: Seq[Expr], dataType: DataType) extends Expr {
-  def eval(batch: ColumnarBatch, row: Int): Any = {
-    val vals = args.map(_.eval(batch, row))
-    Funcs.apply(name, vals, dataType, args.map(_.dataType))
+  private lazy val upperName: String = name.toUpperCase(Locale.ROOT)
+
+  /** `IF` and `COALESCE` read an argument only when the answer needs it, as
+    * `CASE` does; every other function reads all of its arguments. */
+  def eval(batch: ColumnarBatch, row: Int): Any = upperName match {
+    case "IF" if args.size == 3 =>
+      val cond = args(0).eval(batch, row)
+      if (cond != null && cond.asInstanceOf[Boolean]) args(1).eval(batch, row) else args(2).eval(batch, row)
+    case "COALESCE" =>
+      val it = args.iterator
+      while (it.hasNext) {
+        val v = it.next().eval(batch, row)
+        if (v != null) return v
+      }
+      null
+    case _ =>
+      val vals = args.map(_.eval(batch, row))
+      Funcs.apply(name, vals, dataType, args.map(_.dataType))
   }
 
   /** Fast path for the hot subset of scalar functions (see [[Funcs.applyVec]]
@@ -283,43 +351,46 @@ final case class CaseExpr(branches: Seq[(Expr, Expr)], elseExpr: Option[Expr], d
     elseExpr.map(_.eval(batch, row)).orNull
   }
 
-  /** Vectorized CASE.
-    *
-    * Branches are evaluated eagerly (each predicate AND value across the
-    * whole batch), then we walk masks in order to fill unmatched rows. The
-    * row-form `eval` lazily evaluates only the first matching branch's
-    * value, so this path does extra work — acceptable because every `Expr`
-    * is side-effect-free today. The win is one Expr-tree dispatch per branch
-    * per batch instead of per row.
-    *
-    * Short-circuit: when every row has been claimed by an earlier branch,
-    * skip remaining branch evaluations entirely. */
+  /** Vectorized CASE: one Expr-tree dispatch per branch per batch instead of
+    * per row. Each `WHEN` is needed on the rows no earlier branch claimed,
+    * each `THEN` on the rows its `WHEN` claims, and `ELSE` on the rest, and
+    * [[Operand]] evaluates each so, which is what makes a `CASE` a guard: a
+    * value that would fail on a row another branch answers never fails the
+    * batch. Once every row is claimed, the remaining branches are not
+    * evaluated at all. */
   override def evalVec(batch: ColumnarBatch): ColumnVector = {
     val n = batch.numRows
     val cap = math.max(1, n)
     val out = ColumnVector.allocate(dataType, cap)
     val taken = new java.util.BitSet(cap)
+    val claimed = new java.util.BitSet(cap)
     var remaining = n
     val it = branches.iterator
     while (it.hasNext && remaining > 0) {
       val (cond, value) = it.next()
-      val condVec = cond.evalVec(batch).asInstanceOf[BooleanVector]
-      val valueVec = value.evalVec(batch)
+      val condVec = Operand.evalVec(cond, batch, i => !taken.get(i)).asInstanceOf[BooleanVector]
+      claimed.clear()
       var i = 0
       while (i < n) {
-        if (!taken.get(i) && !condVec.isNull(i) && condVec.values(i)) {
+        if (!taken.get(i) && !condVec.isNull(i) && condVec.values(i)) claimed.set(i)
+        i += 1
+      }
+      if (!claimed.isEmpty) {
+        val valueVec = Operand.evalVec(value, batch, claimed.get)
+        i = claimed.nextSetBit(0)
+        while (i >= 0 && i < n) {
           if (valueVec.isNull(i)) out.setNull(i)
           else out.setBoxed(i, valueVec.getBoxed(i))
           taken.set(i)
           remaining -= 1
+          i = claimed.nextSetBit(i + 1)
         }
-        i += 1
       }
     }
     if (remaining > 0) {
       elseExpr match {
         case Some(e) =>
-          val elseVec = e.evalVec(batch)
+          val elseVec = Operand.evalVec(e, batch, i => !taken.get(i))
           var i = 0
           while (i < n) {
             if (!taken.get(i)) {
@@ -473,28 +544,31 @@ final case class InListExpr(child: Expr, items: Seq[Expr], negated: Boolean) ext
         r += 1
       }
     } else {
-      // General path: evaluate each item once per batch into a vector, then
-      // per-row linear scan. Still saves one Expr-dispatch per row per item.
-      val itemVecs = items.iterator.map(_.evalVec(batch)).toArray
-      val nItems = itemVecs.length
+      // General path: evaluate each item once per batch into a vector. As the
+      // row path stops at the first item that matches, an item is needed only
+      // on the rows no earlier item matched ([[Operand]]), so one that would
+      // fail there does not fail the batch.
+      val found = new java.util.BitSet(cap)
+      val sawNull = new java.util.BitSet(cap)
+      val open: Int => Boolean = r => !cv.isNull(r) && !found.get(r)
+      val it = items.iterator
+      while (it.hasNext) {
+        val iv = Operand.evalVec(it.next(), batch, open)
+        var r = 0
+        while (r < n) {
+          if (open(r)) {
+            if (iv.isNull(r)) sawNull.set(r)
+            else if (Ops.eq(cv.getBoxed(r), iv.getBoxed(r))) found.set(r)
+          }
+          r += 1
+        }
+      }
       var r = 0
       while (r < n) {
         if (cv.isNull(r)) nulls.set(r)
-        else {
-          val v = cv.getBoxed(r)
-          var found = false
-          var sawNull = false
-          var k = 0
-          while (k < nItems && !found) {
-            val iv = itemVecs(k)
-            if (iv.isNull(r)) sawNull = true
-            else if (Ops.eq(v, iv.getBoxed(r))) found = true
-            k += 1
-          }
-          if (found) values(r) = !negated
-          else if (sawNull) nulls.set(r)
-          else values(r) = negated
-        }
+        else if (found.get(r)) values(r) = !negated
+        else if (sawNull.get(r)) nulls.set(r)
+        else values(r) = negated
         r += 1
       }
     }

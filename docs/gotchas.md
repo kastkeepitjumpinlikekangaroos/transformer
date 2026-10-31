@@ -1573,6 +1573,21 @@ ship a fix or move something from "not done" to "done".
   default-locale forms, so a new one fails the suite. The JavaFX GUI's display
   code is not on a job's path and is not scanned. See
   [plans/robustness/16](../plans/robustness/16-locale-dependent-names.md).
+- **A `CASE`, `IF` or `COALESCE` used to evaluate every branch on every row
+  — fixed.** `CaseExpr.evalVec` evaluated each branch's value over the whole
+  batch before choosing per row, on the grounds that every `Expr` is side-effect
+  free; but an expression can throw, so `CASE WHEN s = 'q' THEN CAST(s AS INT)
+  ELSE 0 END` failed with `Cannot cast 'x' to int` though no row is `'q'`, and
+  a decimal overflow on a row the `WHEN` excluded failed the query. `IF` and
+  `COALESCE` evaluated every argument on both paths, `AND`, `OR` and a
+  non-literal `IN` on the vector path. Each now evaluates an operand only where
+  the answer needs it (`Operand.evalVec`, architecture §5a). The expression
+  fuzzer missed it because its generator was total by construction, building no
+  subexpression that fails on some rows and not others; it now builds exactly
+  that, a CAST of a guard column under a conditional that keeps it off the rows
+  it fails on, and requires a tree it built never to throw. Against the code
+  before, it failed at seed 21. See
+  [plans/robustness/17](../plans/robustness/17-case-evaluates-every-branch.md).
 
 ## Wrong answers the I/O properties found (2026-10-14, all fixed)
 

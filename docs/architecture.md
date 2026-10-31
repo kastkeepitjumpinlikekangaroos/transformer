@@ -1003,10 +1003,20 @@ of the box. Hot nodes override for primitive-array speed:
   (`COALESCE`, `LENGTH`, `UPPER`/`LOWER`/`TRIM`, `CONCAT`, `SUBSTRING`,
   `ABS`, `FLOOR`/`CEIL[ING]`, `ROUND`, `TRUNC[ATE]`, `IF`, `NULLIF`); falls
   through to the default boxed loop for unknown / unsupported functions.
-- `CaseExpr.evalVec` — eagerly evaluates every branch's predicate + value
-  vector and walks masks in order. Trade-off: branches that the row path
-  would skip do extra work, acceptable because every `Expr` is side-effect-
-  free. Short-circuits once every row is claimed by an earlier branch.
+- `CaseExpr.evalVec` — one predicate and one value vector per branch, each
+  needed only on the rows that branch decides (below), walked in order; stops
+  once every row is claimed by an earlier branch.
+- **Conditionals evaluate an operand only where the answer needs it.**
+  `CASE`, `IF`, `COALESCE`, `IN` and `AND` / `OR` evaluate each operand
+  through `Operand.evalVec(e, batch, needed)`: over the whole batch, which is
+  the fast path nearly every batch takes, and only if that throws, row by row
+  on the rows `needed` accepts, so a `CAST` or an overflow a guard keeps off a
+  row never fails the batch. Every `Expr` is side-effect free, but an
+  expression can throw, and a throw is visible: the row path was lazy and the
+  vector path was not, so `CASE WHEN s = 'q' THEN CAST(s AS INT) END` failed
+  on a row holding `'x'` (plans/robustness/17). `IF` and `COALESCE` read
+  every argument on the row path too, before `FuncExpr.eval` became lazy for
+  them.
 - `InListExpr.evalVec` — when items are all literals, pre-builds a typed
   HashSet keyed the way `Ops.eq` compares (`Long` for integers via
   `longValue`; `Double` via `doubleValue` for other numbers when a FLOAT or

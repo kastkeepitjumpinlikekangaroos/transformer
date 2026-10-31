@@ -809,7 +809,14 @@ whole comparison after it, so `NOT a = 1` is `NOT (a = 1)`. Where the parser
 would hang it on the comparison's left side alone instead (the second `NOT` of
 `NOT NOT a = 1`, and the `NOT` in the argument of a call that takes one, such as
 `COUNT_IF(NOT a = 1)`), the query is an error asking for `NOT (...)` around
-what the `NOT` negates. In a `LIKE` / `ILIKE`
+what the `NOT` negates. A conditional evaluates only what its answer needs,
+on each row: a `CASE` reads the `THEN` of the branch it takes and no other,
+`IF` one of its two values, `COALESCE` its arguments up to the first that is
+not NULL, `IN` its items up to the first that matches, and `AND` and `OR` their
+right side only where the left does not decide. So a `CASE` guards an
+expression that would fail on other rows: `CASE WHEN s <> 'n/a' THEN CAST(s AS
+INT) END` never casts `'n/a'`. (Write the guard as a `CASE`: the optimizer may
+move one condition of a `WHERE` ahead of another.) In a `LIKE` / `ILIKE`
 pattern `\` makes the next `%` or `_` literal; `ESCAPE 'c'` names another
 character, and `ESCAPE ''` turns escaping off. Grouping parentheses work anywhere an expression does —
 `SELECT (a + b) * c`, `WHERE (x = y)`, `ON (a = b)`, `HAVING (COUNT(*) > 1)` —
