@@ -224,10 +224,8 @@ object KeyCodec {
     case DataType.LongType      => v.asInstanceOf[java.lang.Long].longValue
     case DataType.IntType       => v.asInstanceOf[java.lang.Integer].intValue.toLong
     case DataType.BooleanType   => if (v.asInstanceOf[java.lang.Boolean].booleanValue) 1L else 0L
-    case DataType.DateType      => v.asInstanceOf[java.time.LocalDate].toEpochDay
-    case DataType.TimestampType =>
-      val i = v.asInstanceOf[java.time.Instant]
-      i.getEpochSecond * 1000000L + i.getNano / 1000L
+    case DataType.DateType      => DateVector.epochDay(v.asInstanceOf[java.time.LocalDate]).toLong
+    case DataType.TimestampType => TimestampVector.epochMicros(v.asInstanceOf[java.time.Instant])
     case other => throw new IllegalStateException(s"boxedToLong: unsupported type $other")
   }
 }
@@ -508,13 +506,13 @@ final class PackedBytesCodec private[core] (
     case DataType.BooleanType   => bytes(off) = if (v.asInstanceOf[Boolean]) 1 else 0
     case DataType.DateType      =>
       v match {
-        case d: java.time.LocalDate => writeInt(bytes, off, d.toEpochDay.toInt)
+        case d: java.time.LocalDate => writeInt(bytes, off, DateVector.epochDay(d))
         case n: Number              => writeInt(bytes, off, n.intValue)
         case other                  => throw new IllegalStateException(s"Cannot pack date from ${other.getClass.getName}")
       }
     case DataType.TimestampType =>
       v match {
-        case i: java.time.Instant => writeLong(bytes, off, i.getEpochSecond * 1000000L + i.getNano / 1000L)
+        case i: java.time.Instant => writeLong(bytes, off, TimestampVector.epochMicros(i))
         case n: Number            => writeLong(bytes, off, n.longValue)
         case other                => throw new IllegalStateException(s"Cannot pack timestamp from ${other.getClass.getName}")
       }

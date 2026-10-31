@@ -314,6 +314,30 @@ class CsvReaderTest {
         explicit("v" -> DataType.DoubleType))).map(_.head))
   }
 
+  /** A date or a timestamp past what its column stores is no value of it
+    * (plans/robustness/25): text to inference, and a failure naming it in a
+    * declared column, while the first and last of each read back. The
+    * earliest microsecond failed: its product overflowed before its fraction
+    * brought it back. */
+  @Test def aDateOrTimestampPastItsRangeIsNoValueOfIt(): Unit = {
+    val lastDay = java.time.LocalDate.ofEpochDay(Int.MaxValue)
+    val firstMicro = java.time.Instant.EPOCH.plus(Long.MinValue, java.time.temporal.ChronoUnit.MICROS)
+    val lastMicro = java.time.Instant.EPOCH.plus(Long.MaxValue, java.time.temporal.ChronoUnit.MICROS)
+    def typeOf(v: String): DataType =
+      CsvReader.fromPath(tmpCsv("g.csv", s"v\n$v\n").toString, CsvOptions()).schema.fields(0).dataType
+    for (v <- Seq(lastDay.plusDays(1).toString, "+999999999-12-31", lastMicro.plusNanos(1000).toString))
+      assertEquals(v, DataType.StringType, typeOf(v))
+    assertEquals(Seq(lastDay), rows(CsvReader.fromPath(tmpCsv("d.csv", s"v\n$lastDay\n").toString,
+      explicit("v" -> DataType.DateType))).map(_.head))
+    assertEquals(Seq(firstMicro, lastMicro), rows(CsvReader.fromPath(tmpCsv("t.csv", s"v\n$firstMicro\n$lastMicro\n").toString,
+      explicit("v" -> DataType.TimestampType))).map(_.head))
+    for ((v, t) <- Seq(lastDay.plusDays(1).toString -> DataType.DateType,
+        lastMicro.plusNanos(1000).toString -> DataType.TimestampType)) {
+      val msg = failure(rows(CsvReader.fromPath(tmpCsv("h.csv", s"v\n$v\n").toString, explicit("v" -> t))))
+      assertTrue(msg, msg.contains(s"'$v'") && msg.contains(t.name))
+    }
+  }
+
   /** An integer past BIGINT used to infer DOUBLE and lose its digits
     * (1.0E20). It is a DECIMAL(38,0) now, exact, up to 38 digits. */
   @Test def anIntegerPastBigintInfersAnExactDecimal(): Unit = {

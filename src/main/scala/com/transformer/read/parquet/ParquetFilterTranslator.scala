@@ -209,7 +209,7 @@ object ParquetFilterTranslator {
         // date literal (CURRENT_DATE, `DATE '...'`, a string read as a date)
         // arrives as a LocalDate.
         val lit = java.lang.Integer.valueOf(value match {
-          case d: java.time.LocalDate => d.toEpochDay.toInt
+          case d: java.time.LocalDate => DateVector.epochDay(d)
           case n: Number => n.intValue
           case _ => return None
         })

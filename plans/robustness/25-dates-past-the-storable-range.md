@@ -1,6 +1,6 @@
 # Plan 25: dates and timestamps past the storable range wrap
 
-> Status: planned · found by the 2026-10-31 audit · Effort: half a day ·
+> Status: **done** 2026-10-31 · found by the 2026-10-31 audit · Effort: half a day ·
 > Risk: low
 
 ## Problem
@@ -31,3 +31,20 @@ of 1970 for DATE, about 292,000 for TIMESTAMP.
 ## Docs
 
 README (DATE / TIMESTAMP), testing.md.
+
+## Outcome
+
+Done as planned. `DateVector.epochDay` and `TimestampVector.epochMicros` are the
+one narrowing of each type, failing with the value named, and the vectors'
+boxed setters, the key codecs, CSV reading and parquet filter literals use
+them. `Casts` checks a cast's result (`storable`), since on the row path the
+value stays a `LocalDate` or an `Instant` and only a vector narrowed it, and
+that includes a DATE's midnight cast to TIMESTAMP, which a DATE past about
+292,000 years has none of. Parquet's INT96 decoding multiplies exactly; MILLIS
+already did. The CSV reader checked already, but its product overflowed on
+the earliest microsecond, which the shared conversion reads.
+
+`aDateOrTimestampPastItsRangeIsAnError`, `aDateOrTimestampPastItsRangeIsNoValueOfIt`
+and `anInt96TimestampBeyondTheMicrosecondRangeFailsTheRead` failed against the
+code before; `aVectorRefusesADateOrInstantPastItsRange` pins the conversions,
+and the frontend oracle takes the error as being about a value.

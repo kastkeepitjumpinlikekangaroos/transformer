@@ -595,7 +595,13 @@ final class ParquetPartitionIterator(
         var r = 0
         while (r < rowCount) {
           if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
-          else v.set(r, ParquetPartitionIterator.int96ToMicros(cr.getBinary.getBytes))
+          else v.set(r,
+            try ParquetPartitionIterator.int96ToMicros(cr.getBinary.getBytes)
+            catch {
+              case e: ArithmeticException => throw new ArithmeticException(
+                s"Parquet file '$fileLabel' column '${schema.fields(col).name}' holds an ${e.getMessage}, " +
+                  "which is past the range of a timestamp in microseconds")
+            })
           cr.consume(); r += 1
         }
       case ParquetColumns.Decoding.Floats =>
@@ -734,6 +740,12 @@ object ParquetPartitionIterator {
       ((b(9) & 0xff) << 8) |
       ((b(10) & 0xff) << 16) |
       ((b(11) & 0xff) << 24)
-    (julianDay.toLong - JulianEpochOffsetDays) * MicrosPerDay + nanos / NanosPerMicro
+    // A day this far from 1970 has no microsecond a long counts, which the
+    // product wrapped round to another instant (plans/robustness/25).
+    try Math.addExact(Math.multiplyExact(julianDay.toLong - JulianEpochOffsetDays, MicrosPerDay), nanos / NanosPerMicro)
+    catch {
+      case _: ArithmeticException =>
+        throw new ArithmeticException(s"INT96 timestamp of Julian day $julianDay and $nanos nanoseconds")
+    }
   }
 }

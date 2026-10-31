@@ -256,6 +256,13 @@ specific traps.
   aggregate that adds integers keeps the exact sum and checks it once, at the
   end, so whether it fails does not depend on row order or partitions
   (`LongSumState`'s 128-bit sum).
+- **A date or a timestamp enters a vector through `DateVector.epochDay` and
+  `TimestampVector.epochMicros`.** They give the INT of days or the BIGINT of
+  microseconds a value is stored as, and an error naming one past it; plain
+  `toEpochDay.toInt` and `getEpochSecond * 1000000L` wrap it round to another
+  date. A CAST checks its result the same way (`Casts.storable`), since on the
+  row path the value stays a `LocalDate` or an `Instant`, which reach further
+  than the column it lands in.
 - **A decimal result is computed exactly and fitted to its declared type,
   once.** An operation or aggregate that produces a `DECIMAL` declares its type
   through `Decimals` (`resultType`, `sumType`, `avgType`, or a rule of the same

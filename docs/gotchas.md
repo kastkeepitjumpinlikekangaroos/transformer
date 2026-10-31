@@ -1573,6 +1573,18 @@ ship a fix or move something from "not done" to "done".
   blank), and a column name that is empty is quoted, so a header is never a
   blank line. Whether a line is blank is the parser's to say (`blank`), whether
   it is a row the reader's, which knows how many columns the file has.
+- **A date or a timestamp past its column's range used to wrap — fixed.** A
+  DATE is stored as an INT of days and a TIMESTAMP as a BIGINT of
+  microseconds, but text is read into a `LocalDate` or an `Instant`, which
+  reach much further, and narrowed with `toEpochDay.toInt` and
+  `getEpochSecond * 1000000L`: `CAST('+999999999-12-31' AS DATE)` was
+  `+466210-05-14` in a vector and the date itself on the row path, and an
+  INT96 parquet day past the range another instant. Every narrowing now goes
+  through `DateVector.epochDay` / `TimestampVector.epochMicros`, which fail
+  naming the value, and a CAST checks its result (plans/robustness/25). The
+  CSV reader already checked, but its timestamp product overflowed before the
+  fraction brought the earliest microsecond back into range; the shared
+  conversion borrows the second.
 - **SQL's CAST used to read numbers with Java's grammar and CSV with a plain
   one — fixed.** CSV moved to plain decimals in plan 06; CAST kept
   `java.lang.Double.parseDouble` and its kin, so `CAST(' 5' AS DOUBLE)` and

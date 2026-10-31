@@ -197,6 +197,17 @@ class ParquetExternalFormatTest {
     assertTrue(msg, msg.contains("'ts'") && msg.contains("MILLIS"))
   }
 
+  /** An INT96 day this far from 1970 has no microsecond a long counts, and
+    * wrapped round to another instant (plans/robustness/25). It fails the
+    * read naming the column and the day, as a MILLIS value past it does. */
+  @Test def anInt96TimestampBeyondTheMicrosecondRangeFailsTheRead(): Unit = {
+    val far = java.nio.ByteBuffer.allocate(12).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+      .putLong(0L).putInt(Int.MaxValue).array()
+    val file = writeFixture("message m { optional int96 ts; }", Seq(Seq(int96(Instant.EPOCH)), Seq(far)))
+    val msg = failure(rows(read(file)))
+    assertTrue(msg, msg.contains("'ts'") && msg.contains("INT96") && msg.contains("Julian day 2147483647"))
+  }
+
   /** `isAdjustedToUTC = false` marks a local date-time with no zone. The engine
     * has one timestamp type, an instant in UTC, so the stored reading is taken
     * as UTC unchanged: the wall clock survives and no zone is applied. */

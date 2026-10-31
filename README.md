@@ -462,8 +462,8 @@ chosen `job.json` without re-running anything.
   | `FLOAT`, `DOUBLE` | a plain decimal (`1.5`, `.5`, `5.`, `-1e-5`) the type holds, or `NaN`, `Infinity` and `-Infinity`, which the writer writes; not Java's wider grammar (`1d`, `0x1p3`, ` 1`, non-ASCII digits), and not a number past the type's range or so small it would read as 0 (`1e400`, `1e-400`; `1e40` for a `FLOAT`). A `CAST` from text reads the same grammar |
   | `DECIMAL(p,s)` (declared, or `DECIMAL(38,0)` inferred) | a plain decimal that holds exactly at scale `s` in `p` digits, read at that scale (`1.5` as `1.50`, and `5.` in a `DECIMAL(38,0)` as 5); one that would round or has more digits fails |
   | `BOOLEAN` | `true` or `false`, in any case; no other word reads as `false` |
-  | `DATE` | ISO `yyyy-MM-dd`, a year past 9999 or before 1 with a sign |
-  | `TIMESTAMP` | an ISO instant (`Z` or an offset), an ISO date-time with no zone (UTC), or a date alone (midnight UTC), kept to the microsecond toward the past |
+  | `DATE` | ISO `yyyy-MM-dd`, a year past 9999 or before 1 with a sign, within a `DATE`'s range (about 5.8 million years either side of 1970) |
+  | `TIMESTAMP` | an ISO instant (`Z` or an offset), an ISO date-time with no zone (UTC), or a date alone (midnight UTC), kept to the microsecond toward the past, within a `TIMESTAMP`'s range (about 292,000 years either side of 1970) |
   | `BINARY` (declared) | Base64, which the writer writes |
   | `STRING` | the text |
 
@@ -910,7 +910,10 @@ is UTC and a date alone is midnight, so `'2026-01-01 05:30:21'`,
 casts to `DATE` from an ISO date (`2026-01-01`) and nothing else: which date a
 time of day falls on depends on its zone, so `CAST(CAST(x AS TIMESTAMP) AS DATE)`
 spells that out. A `TIMESTAMP` casts to `DATE` as its date in UTC, and a `DATE`
-to `TIMESTAMP` as its midnight. `DATE '2026-01-01'` and
+to `TIMESTAMP` as its midnight. A `DATE` holds about 5.8 million years either
+side of 1970 (an `INT` of days) and a `TIMESTAMP` about 292,000 (a `BIGINT` of
+microseconds); a value past either, from a CAST, a file or a `DATE` whose
+midnight no `TIMESTAMP` holds, is an error naming it. `DATE '2026-01-01'` and
 `TIMESTAMP '2026-01-01 05:30:21'` are literals, read when the query is bound like
 any string literal under a CAST, so a malformed one fails before anything runs. A
 number or a boolean does not cast to or from either type: an epoch in days,

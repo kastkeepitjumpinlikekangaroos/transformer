@@ -4784,4 +4784,41 @@ class SqlEngineTest {
     assertTrue(one("SELECT CAST('NaN' AS DOUBLE) AS v").asInstanceOf[Double].isNaN)
     assertEquals(Double.NegativeInfinity, one("SELECT CAST('-Infinity' AS DOUBLE) AS v"))
   }
+
+  /** A date or a timestamp past what its column stores is an error naming
+    * it. A DATE is an INT of days and a TIMESTAMP a BIGINT of microseconds,
+    * and `CAST('+999999999-12-31' AS DATE)` was `+466210-05-14`, wrapped
+    * round in the vector while the row path kept the date it read
+    * (plans/robustness/25). The first and last of each still cast. */
+  @Test def aDateOrTimestampPastItsRangeIsAnError(): Unit = {
+    val lastDay = java.time.LocalDate.ofEpochDay(Int.MaxValue)
+    val firstDay = java.time.LocalDate.ofEpochDay(Int.MinValue)
+    val firstMicro = java.time.Instant.EPOCH.plus(Long.MinValue, java.time.temporal.ChronoUnit.MICROS)
+    val lastMicro = java.time.Instant.EPOCH.plus(Long.MaxValue, java.time.temporal.ChronoUnit.MICROS)
+    val cat = new Catalog
+    cat.register("tt", CsvReader.fromPath(tmpCsv("tt.csv", s"s\n+999999999-12-31\n${lastDay.plusDays(1)}\n").toString,
+      CsvOptions()))
+    def failure(sql: String): String =
+      try { collectAllRows(SqlEngine.execute(sql, cat)); fail(s"$sql ran"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    def one(sql: String): Any = collectAllRows(SqlEngine.execute(sql, cat)).head("v")
+    assertEquals(lastDay, one(s"SELECT CAST('$lastDay' AS DATE) AS v"))
+    assertEquals(firstDay, one(s"SELECT CAST('$firstDay' AS DATE) AS v"))
+    assertEquals(firstMicro, one(s"SELECT CAST('$firstMicro' AS TIMESTAMP) AS v"))
+    assertEquals(lastMicro, one(s"SELECT CAST('$lastMicro' AS TIMESTAMP) AS v"))
+    assertEquals(s"${lastDay.plusDays(1)} is past the range of a DATE, about 5.8 million years either side of 1970",
+      failure(s"SELECT CAST('${lastDay.plusDays(1)}' AS DATE) AS v"))
+    assertTrue(failure("SELECT CAST('+999999999-12-31' AS DATE) AS v")
+      .startsWith("+999999999-12-31 is past the range of a DATE"))
+    assertTrue(failure(s"SELECT CAST('${lastMicro.plusNanos(1000)}' AS TIMESTAMP) AS v")
+      .startsWith(s"${lastMicro.plusNanos(1000)} is past the range of a TIMESTAMP"))
+    assertTrue(failure("SELECT CAST('+100000000-01-01' AS TIMESTAMP) AS v")
+      .startsWith("+100000000-01-01T00:00:00Z is past the range of a TIMESTAMP"))
+    // A DATE reaches millions of years further than a TIMESTAMP, so a date's
+    // midnight may be none.
+    assertTrue(failure("SELECT CAST(DATE '+300000-01-01' AS TIMESTAMP) AS v")
+      .startsWith("+300000-01-01T00:00:00Z is past the range of a TIMESTAMP"))
+    // Text in a column fails as it is read: the first row's.
+    assertTrue(failure("SELECT CAST(s AS DATE) AS v FROM tt").startsWith("+999999999-12-31 is past the range of a DATE"))
+  }
 }

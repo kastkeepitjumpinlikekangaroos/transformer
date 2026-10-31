@@ -173,14 +173,16 @@ object CleanRejection {
     * fit its type, each an error by design (plans/robustness/18), and a
     * computed LIKE pattern that ends in its escape character or a computed
     * negative SUBSTRING length, which written as constants are refused at
-    * bind time (plans/robustness/23). */
+    * bind time (plans/robustness/23), and a date or a timestamp past what its
+    * column stores (plans/robustness/25). */
   private val DataErrors: Vector[Regex] = Vector(
     """^Cannot cast (?:'.*'|NaN|-?Infinity) to [a-z]+(?:\(\d+,\d+\))?$""".r,
     """^Cannot cast (?:NaN|-?Infinity) to (?:INT|BIGINT): it has no integer value$""".r,
     """^Decimal overflow: \S+ does not fit decimal\(\d+,\d+\)$""".r,
     """^Integer overflow: .+ does not fit (?:INT|BIGINT)$""".r,
     """^The LIKE pattern '.*' ends in its escape character, .+, which escapes nothing; write .+ to match one$""".r,
-    """^SUBSTRING's length -\d+ is negative$""".r)
+    """^SUBSTRING's length -\d+ is negative$""".r,
+    """^\S+ is past the range of a (?:DATE|TIMESTAMP), about .+ either side of 1970$""".r)
 
   /** SQL's own vocabulary, which a message may name a construct by even when
     * the query does not spell it that way (`Only SELECT statements are

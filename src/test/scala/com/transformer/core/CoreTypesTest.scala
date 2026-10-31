@@ -119,6 +119,36 @@ class CoreTypesTest {
     assertEquals(instant, v.getBoxed(0))
   }
 
+  /** A date or an instant past what its vector stores is an error naming it,
+    * where `toEpochDay.toInt` and `getEpochSecond * 1000000L` wrapped it round
+    * to another (plans/robustness/25). The first and last of each fit, the
+    * earliest microsecond too, whose product overflows before its fraction
+    * brings it back. */
+  @Test def aVectorRefusesADateOrInstantPastItsRange(): Unit = {
+    val dates = new ColumnarBatch(Schema(Field("d", DataType.DateType)), 1).column(0)
+    val times = new ColumnarBatch(Schema(Field("ts", DataType.TimestampType)), 1).column(0)
+    val lastDay = java.time.LocalDate.ofEpochDay(Int.MaxValue)
+    val firstMicro = java.time.Instant.EPOCH.plus(Long.MinValue, java.time.temporal.ChronoUnit.MICROS)
+    val lastMicro = java.time.Instant.EPOCH.plus(Long.MaxValue, java.time.temporal.ChronoUnit.MICROS)
+    for (d <- Seq(lastDay, java.time.LocalDate.ofEpochDay(Int.MinValue))) {
+      dates.setBoxed(0, d)
+      assertEquals(d, dates.getBoxed(0))
+    }
+    for (i <- Seq(firstMicro, lastMicro)) {
+      times.setBoxed(0, i)
+      assertEquals(i, times.getBoxed(0))
+    }
+    assertEquals(Long.MinValue, TimestampVector.epochMicros(firstMicro))
+    def refused(body: => Unit): String =
+      try { body; fail("accepted"); "" } catch { case e: IllegalArgumentException => e.getMessage }
+    assertEquals(s"${lastDay.plusDays(1)} is past the range of a DATE, about 5.8 million years either side of 1970",
+      refused(dates.setBoxed(0, lastDay.plusDays(1))))
+    assertTrue(refused(dates.setBoxed(0, java.time.LocalDate.MAX)).startsWith("+999999999-12-31 is past the range of a DATE"))
+    assertEquals(s"${lastMicro.plusNanos(1000)} is past the range of a TIMESTAMP, about 292,000 years either side of 1970",
+      refused(times.setBoxed(0, lastMicro.plusNanos(1000))))
+    assertTrue(refused(times.setBoxed(0, firstMicro.minusNanos(1000))).contains("is past the range of a TIMESTAMP"))
+  }
+
   // --- MaterializedView -------------------------------------------------
 
   private def intBatch(schema: Schema, vals: Seq[Int]): ColumnarBatch = {

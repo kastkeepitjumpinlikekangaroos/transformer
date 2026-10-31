@@ -290,14 +290,16 @@ object Casts {
           case d: LocalDate => d
           // A timestamp's date in UTC, like every time in the engine.
           case i: Instant => LocalDate.ofInstant(i, ZoneOffset.UTC)
-          case s: String => parseDate(s)
+          case s: String => storable(parseDate(s))
           case _ => throw new IllegalArgumentException(s"Cannot cast $v to date")
         }
+      // A DATE reaches millions of years further than a TIMESTAMP, so a date's
+      // midnight may be no TIMESTAMP.
       case DataType.TimestampType =>
         v match {
           case i: Instant => i
-          case d: LocalDate => d.atStartOfDay(ZoneOffset.UTC).toInstant
-          case s: String => parseInstant(s)
+          case d: LocalDate => storable(d.atStartOfDay(ZoneOffset.UTC).toInstant)
+          case s: String => storable(parseInstant(s))
           case _ => throw new IllegalArgumentException(s"Cannot cast $v to timestamp")
         }
       // A decimal cast to another DECIMAL becomes a value of it, rounded half
@@ -344,6 +346,14 @@ object Casts {
   private def parseNumber[T](s: String, to: DataType)(parse: String => T): T =
     try parse(s)
     catch { case NumberText.NotANumber => throw new IllegalArgumentException(s"Cannot cast '$s' to $to") }
+
+  /** `d`, a date a DATE holds, or an error naming it: on the row path a cast's
+    * date stays a `LocalDate`, which reaches further than the column it lands
+    * in, so the row and the vector path answered differently past it. */
+  private def storable(d: LocalDate): LocalDate = { DateVector.epochDay(d); d }
+
+  /** `i`, an instant a TIMESTAMP holds, or an error naming it. */
+  private def storable(i: Instant): Instant = { TimestampVector.epochMicros(i); i }
 
   /** `true` or `false` in any case, the text CSV inference reads as a
     * BOOLEAN. Any other text is an error rather than false. */

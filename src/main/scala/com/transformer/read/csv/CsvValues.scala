@@ -66,13 +66,10 @@ object CsvValues {
     else if (s.equalsIgnoreCase("false")) false
     else throw new Unreadable("boolean")
 
-  /** Days since the epoch. */
+  /** Days since the epoch, for a date a DATE holds ([[DateVector.epochDay]]). */
   def date(s: String): Int =
-    try {
-      val days = LocalDate.parse(s).toEpochDay
-      if (days < Int.MinValue || days > Int.MaxValue) throw new Unreadable("date")
-      days.toInt
-    } catch { case _: DateTimeParseException => throw new Unreadable("date") }
+    try DateVector.epochDay(LocalDate.parse(s))
+    catch { case _: DateTimeParseException | _: IllegalArgumentException => throw new Unreadable("date") }
 
   /** Microseconds since the epoch. */
   def timestamp(s: String): Long = {
@@ -89,8 +86,8 @@ object CsvValues {
       }
     // The nanosecond of the second is never negative, so dividing it keeps the
     // earlier microsecond, before 1970 too.
-    try Math.addExact(Math.multiplyExact(instant.getEpochSecond, 1000000L), (instant.getNano / 1000).toLong)
-    catch { case _: ArithmeticException => throw new Unreadable("timestamp") }
+    try TimestampVector.epochMicros(instant)
+    catch { case _: IllegalArgumentException => throw new Unreadable("timestamp") }
   }
 
   /** `s` at `dt`'s scale, when it is a number that holds exactly at that

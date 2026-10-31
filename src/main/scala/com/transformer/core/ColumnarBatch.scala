@@ -323,15 +323,30 @@ final class DateVector(val values: Array[Int], val nulls: util.BitSet, val capac
     if (isNull(row)) null else java.time.LocalDate.ofEpochDay(values(row).toLong)
   def setBoxed(row: Int, value: Any): Unit = value match {
     case null => setNull(row)
-    case d: java.time.LocalDate => set(row, d.toEpochDay.toInt)
+    case d: java.time.LocalDate => set(row, DateVector.epochDay(d))
     case i: Int => set(row, i)
-    case s: String => set(row, java.time.LocalDate.parse(s).toEpochDay.toInt)
+    case s: String => set(row, DateVector.epochDay(java.time.LocalDate.parse(s)))
     case other => throw new IllegalArgumentException(s"Cannot set DateVector from ${other.getClass.getName}")
   }
   def copyTo(srcRow: Int, dst: ColumnVector, dstRow: Int): Unit = dst match {
     case d: DateVector =>
       if (isNull(srcRow)) d.setNull(dstRow) else d.set(dstRow, values(srcRow))
     case other => other.setBoxed(dstRow, getBoxed(srcRow))
+  }
+}
+
+object DateVector {
+
+  /** The day `d` is stored as, or an error naming it when it is past the
+    * days an INT counts, about 5.8 million years either side of 1970. Every
+    * date that enters the engine comes through here, from text, a CAST or a
+    * file: `toEpochDay.toInt` wrapped one past them round to another date
+    * (plans/robustness/25). */
+  def epochDay(d: java.time.LocalDate): Int = {
+    val day = d.toEpochDay
+    if (day < Int.MinValue || day > Int.MaxValue) throw new IllegalArgumentException(
+      s"$d is past the range of a DATE, about 5.8 million years either side of 1970")
+    day.toInt
   }
 }
 
@@ -347,18 +362,37 @@ final class TimestampVector(val values: Array[Long], val nulls: util.BitSet, val
     else java.time.Instant.ofEpochSecond(values(row) / 1000000L, (values(row) % 1000000L) * 1000L)
   def setBoxed(row: Int, value: Any): Unit = value match {
     case null => setNull(row)
-    case i: java.time.Instant => set(row, i.getEpochSecond * 1000000L + i.getNano / 1000L)
+    case i: java.time.Instant => set(row, TimestampVector.epochMicros(i))
     case l: Long => set(row, l)
-    case s: String => set(row, {
-      val i = java.time.Instant.parse(s)
-      i.getEpochSecond * 1000000L + i.getNano / 1000L
-    })
+    case s: String => set(row, TimestampVector.epochMicros(java.time.Instant.parse(s)))
     case other => throw new IllegalArgumentException(s"Cannot set TimestampVector from ${other.getClass.getName}")
   }
   def copyTo(srcRow: Int, dst: ColumnVector, dstRow: Int): Unit = dst match {
     case d: TimestampVector =>
       if (isNull(srcRow)) d.setNull(dstRow) else d.set(dstRow, values(srcRow))
     case other => other.setBoxed(dstRow, getBoxed(srcRow))
+  }
+}
+
+object TimestampVector {
+
+  /** The microsecond `i` is stored as, toward the past, or an error naming
+    * it when it is past the microseconds a BIGINT counts, about 292,000
+    * years either side of 1970. Every timestamp that enters the engine comes
+    * through here: `getEpochSecond * 1000000L` wrapped one past them round to
+    * another instant (plans/robustness/25). */
+  def epochMicros(i: java.time.Instant): Long = {
+    val seconds = i.getEpochSecond
+    val micros = i.getNano / 1000
+    try {
+      // Before 1970 a fraction's second is borrowed, so the product stays in
+      // range down to the earliest microsecond there is.
+      if (seconds < 0 && micros > 0) Math.addExact(Math.multiplyExact(seconds + 1, 1000000L), micros - 1000000L)
+      else Math.addExact(Math.multiplyExact(seconds, 1000000L), micros.toLong)
+    } catch {
+      case _: ArithmeticException => throw new IllegalArgumentException(
+        s"$i is past the range of a TIMESTAMP, about 292,000 years either side of 1970")
+    }
   }
 }
 
