@@ -4554,4 +4554,45 @@ class SqlEngineTest {
       "SELECT x, SUM(x) OVER (PARTITION BY g ORDER BY k, x ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS s FROM w ORDER BY 1",
       c, "s"))
   }
+
+  /** Floats have one equality, Postgres's and Spark's: NaN equals NaN and
+    * sorts above every number, and -0.0 equals 0.0, for `=`, `IN`, joins,
+    * GROUP BY, DISTINCT, COUNT(DISTINCT), PARTITION BY and RANK alike. `=`
+    * called NaN unequal to itself while the keys went by bit pattern, so a hash
+    * join on `fl.k = fr.k` matched NaN to NaN and missed -0.0 to 0.0, the
+    * opposite of the same predicate as a filter (plans/robustness/21). */
+  @Test def floatsHaveOneEquality(): Unit = {
+    val c = new Catalog
+    val oddNaN = java.lang.Double.longBitsToDouble(0x7ff8000000000001L)
+    c.register("fl", memView(Schema(Vector(Field("k", DataType.DoubleType), Field("v", DataType.IntType))), Seq(
+      Seq(Array[Any](Double.NaN, 1), Array[Any](Double.NaN, 2), Array[Any](-0.0, 3), Array[Any](0.0, 4)),
+      Seq(Array[Any](1.0, 5), Array[Any](null, 6), Array[Any](oddNaN, 7), Array[Any](-Double.NaN, 8)))))
+    c.register("fr", memView(Schema(Vector(Field("k", DataType.DoubleType), Field("w", DataType.IntType))), Seq(
+      Seq(Array[Any](Double.NaN, 10), Array[Any](0.0, 20)),
+      Seq(Array[Any](-0.0, 30), Array[Any](1.0, 40), Array[Any](null, 50)))))
+    def pairs(sql: String): Seq[String] =
+      collectAllRows(SqlEngine.execute(sql, c)).map(r => s"${r("v")}|${r("w")}").sorted
+    val expected = Seq("1|10", "2|10", "3|20", "3|30", "4|20", "4|30", "5|40", "7|10", "8|10")
+    assertEquals(expected, pairs("SELECT fl.v, fr.w FROM fl JOIN fr ON fl.k = fr.k"))
+    assertEquals(expected, pairs("SELECT fl.v, fr.w FROM fl, fr WHERE fl.k = fr.k"))
+    assertEquals(expected, pairs("SELECT fl.v, fr.w FROM fl JOIN fr ON fl.k <= fr.k AND fl.k >= fr.k"))
+    // One group per value: the NaNs, the zeros (read back as 0.0), 1.0, NULL.
+    assertEquals(Seq("0.0|2", "1.0|1", "NaN|4", "null|1"),
+      collectAllRows(SqlEngine.execute("SELECT k, COUNT(*) AS n FROM fl GROUP BY k", c))
+        .map(r => s"${r("k")}|${r("n")}").sorted)
+    assertEquals(Seq(3L), column("SELECT COUNT(DISTINCT k) AS n FROM fl", c, "n"))
+    assertEquals(4, column("SELECT k FROM fl UNION SELECT k FROM fr", c, "k").size)
+    assertEquals(Seq(true, true, false, true, true), collectAllRows(SqlEngine.execute(
+      "SELECT CAST('NaN' AS DOUBLE) = CAST('NaN' AS DOUBLE) AS a, -0.0 = 0.0 AS b, -0.0 < 0.0 AS c, " +
+        "CAST('NaN' AS DOUBLE) > CAST('Infinity' AS DOUBLE) AS d, CAST('NaN' AS DOUBLE) IN (1.0, CAST('NaN' AS DOUBLE)) AS e", c))
+      .flatMap(r => Seq(r("a"), r("b"), r("c"), r("d"), r("e"))))
+    assertEquals(Seq(3, 4), column("SELECT v FROM fl WHERE k IN (0.0) ORDER BY v", c, "v"))
+    // RANK: NULL first, the zeros one peer group, then 1.0, then the NaNs.
+    assertEquals(Seq("1|5", "2|5", "3|2", "4|2", "5|4", "6|1", "7|5", "8|5"),
+      collectAllRows(SqlEngine.execute("SELECT v, RANK() OVER (ORDER BY k) AS r FROM fl", c))
+        .map(r => s"${r("v")}|${r("r")}").sorted)
+    assertEquals(Seq("1|4", "2|4", "3|2", "4|2", "5|1", "6|1", "7|4", "8|4"),
+      collectAllRows(SqlEngine.execute("SELECT v, COUNT(*) OVER (PARTITION BY k) AS n FROM fl", c))
+        .map(r => s"${r("v")}|${r("n")}").sorted)
+  }
 }

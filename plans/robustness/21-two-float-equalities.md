@@ -1,6 +1,6 @@
 # Plan 21: floats have two equalities, and a hash join uses the other one
 
-> Status: planned · found by the 2026-10-31 audit · decided by the user:
+> Status: **done** 2026-10-31 · found by the 2026-10-31 audit · decided by the user:
 > Postgres's and Spark's, NaN = NaN and -0.0 = 0.0 everywhere · Effort: 1-2
 > days · Risk: medium (reverses plans/followups/03 and /06)
 
@@ -63,3 +63,25 @@ special-value guards stay; `ExprGen`'s value pools already carry the values.
 
 README (NaN and -0.0), gotchas (the followups/03 and /06 entries describe the
 new rule), conventions (the one-comparison rule), testing.md.
+
+## Outcome
+
+Done as planned. `Ops.floatCompare` is the one float comparison behind
+`Ops.eq`, `Ops.cmp` and `VecOps.numericCompare`; `KeyCodec.floatKeyBits` /
+`doubleKeyBits` / `floatKeyValue` give the key form (`-0.0` as `0.0`;
+`floatToIntBits` and `Double.equals` already treat every NaN as one), and the
+packed codec, the object codec, the DISTINCT sets, shard routing and the spill
+buckets all use it. `InListExpr`'s NaN-probe bypass is gone: NaN finds NaN.
+`MinMaxState` keeps `Double.compare`, finer only in ordering `-0.0` below the
+`0.0` it equals, so of two equal zeros its answer does not move with row
+order. Parquet pushdown stops pushing a float comparison with a zero or NaN
+literal (`ordersFloatsAlike`): a file may keep `-0.0` as a bound or leave NaN
+out of its statistics.
+
+`DataGen.generateKeyCase` and `oracle/KeyEquality` hold joins (hash, cross
+join plus filter, left), GROUP BY, DISTINCT, COUNT(DISTINCT), UNION, PARTITION
+BY and RANK to `Ops.eq` in every layout; at the code before it failed at seed
+1 (`GROUP BY` made a NaN group that `=` called equal to nothing). Its default
+budget is 40 seeds: each case runs eleven queries in seven layouts.
+`window_exec_spill_test`'s signed-zero test now asserts the two zeros share a
+rank, reversing plans/followups/06's half about them.

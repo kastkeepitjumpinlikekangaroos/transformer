@@ -80,17 +80,17 @@ object HashPartitioner {
   }
 
   /** Hash one cell. NULL is the caller's concern — this is only reached for
-    * non-null cells. Float/Double go through `floatToIntBits` /
-    * `doubleToLongBits` so the bit pattern (not the IEEE value) drives the
-    * hash; this matches [[PackedBytesCodec]]'s byte layout so a row's
-    * partitioner-shard membership is consistent with the codec's bucket
-    * computation downstream. A byte array hashes its content and a decimal
+    * non-null cells. Float/Double hash their key bits
+    * (`KeyCodec.floatKeyBits`, `-0.0` as `0.0`), [[PackedBytesCodec]]'s
+    * layout, so a row's partitioner-shard membership is consistent with the
+    * codec's bucket computation downstream and two values `=` calls equal go
+    * to one shard. A byte array hashes its content and a decimal
     * its value ([[decimalHash]]), the equality the codec keys them by. */
   def hashCell(col: ColumnVector, row: Int): Int = col match {
     case v: IntVector       => fmix32(v.values(row))
     case v: LongVector      => fmix64ToInt(v.values(row))
-    case v: FloatVector     => fmix32(java.lang.Float.floatToIntBits(v.values(row)))
-    case v: DoubleVector    => fmix64ToInt(java.lang.Double.doubleToLongBits(v.values(row)))
+    case v: FloatVector     => fmix32(KeyCodec.floatKeyBits(v.values(row)))
+    case v: DoubleVector    => fmix64ToInt(KeyCodec.doubleKeyBits(v.values(row)))
     case v: BooleanVector   => if (v.values(row)) 1231 else 1237
     case v: DateVector      => fmix32(v.values(row))
     case v: TimestampVector => fmix64ToInt(v.values(row))

@@ -983,9 +983,9 @@ object HashJoinExec {
       val v = lv.values(row); (v ^ (v >>> 32)).toInt
     case iv: IntVector => iv.values(row)
     case dv: DoubleVector =>
-      val v = java.lang.Double.doubleToLongBits(dv.values(row))
+      val v = KeyCodec.doubleKeyBits(dv.values(row))
       (v ^ (v >>> 32)).toInt
-    case fv: FloatVector => java.lang.Float.floatToIntBits(fv.values(row))
+    case fv: FloatVector => KeyCodec.floatKeyBits(fv.values(row))
     case bv: BooleanVector => if (bv.values(row)) 1231 else 1237
     case tv: TimestampVector =>
       val v = tv.values(row); (v ^ (v >>> 32)).toInt

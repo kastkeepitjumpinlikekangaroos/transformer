@@ -257,7 +257,7 @@ semantic questions on 2026-10-31, the recommended option each time.
 | [18](18-integer-overflow-wraps.md) | Integer arithmetic, SUM and narrowing CASTs wrap | `2147483647 + 1` is negative, `SUM` of BIGINTs goes negative, `CAST(NaN AS INT)` is 0 | **done** 2026-10-31 | medium |
 | [19](19-rounding-through-double.md) | ROUND, TRUNC, FLOOR and CEIL compute in DOUBLE | `ROUND(1.005, 2)` on a DECIMAL is 1.0; `FLOOR` of a BIGINT past 2^53 changes it | **done** 2026-10-31 | medium |
 | [20](20-range-frames-run-as-rows.md) | RANGE frames, and the default frame, run as ROWS | tied rows get different running totals, in arbitrary order; RANGE offsets count rows | **done** 2026-10-31 | medium |
-| [21](21-two-float-equalities.md) | Floats have two equalities | a hash join matches NaN to NaN and misses -0.0 = 0.0, which the same predicate as a filter does not | planned | medium |
+| [21](21-two-float-equalities.md) | Floats have two equalities | a hash join matches NaN to NaN and misses -0.0 = 0.0, which the same predicate as a filter does not | **done** 2026-10-31 | medium |
 | [22](22-order-by-sees-input-columns.md) | ORDER BY resolves names against input columns | `SELECT -b AS b ... ORDER BY b` sorts by the input; `ORDER BY n` on `COUNT(*) AS n` is refused | planned | medium |
 | [23](23-clauses-that-cannot-change-the-answer.md) | Constant sort, group and partition keys | `ORDER BY 'b'` sorts nothing; a pattern ending in its escape is FALSE | planned | low |
 | [24](24-cast-reads-javas-number-grammar.md) | CAST reads Java's number grammar | `' 5'`, `'5d'`, hex, Arabic-Indic digits cast; `'1e400'` is Infinity | planned | low |

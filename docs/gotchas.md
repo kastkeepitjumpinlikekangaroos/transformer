@@ -498,7 +498,9 @@ ship a fix or move something from "not done" to "done".
   logic on NULL-in-list interacts with row-group skipping in a way the
   current translator can't safely approximate; let the residual FilterExec
   handle it. Computed expressions (`a - b > 0`), two-column predicates
-  (`a > b`), `LIKE`, decimal columns, and `IN` with non-literal items are
+  (`a > b`), `LIKE`, decimal columns, `IN` with non-literal items and a float
+  comparison with a zero or `NaN` literal (a file orders `-0.0` below `0.0`,
+  which the engine calls equal, and may leave `NaN` out of its statistics) are
   also dropped from the AND-chain, and so is any comparison on a timestamp
   column, whatever the literal (an `Instant` from `CURRENT_TIMESTAMP` or a
   count): a parquet TIMESTAMP's statistics are in the unit its file stores,
@@ -857,16 +859,11 @@ ship a fix or move something from "not done" to "done".
     matches nothing still falls into the NULL-item branch, so
     `NaN IN (1.0, NULL)` is NULL, not FALSE.
 
-  So equality and ordering answer differently on the same operands by design —
-  `NaN = NaN` is FALSE while `NaN <= NaN` is TRUE — because ordering has a
-  total-order obligation equality does not. **This diverges from Postgres**,
-  whose `float8` treats `NaN` as equal to itself and `-0.0` as distinct from
-  `0.0` in *both* families. We match Postgres on ordering (it too sorts `NaN`
-  highest) and not on `=` / `IN`. The alternative — making `IN` follow
-  `Double.equals` — would have split `x IN (y)` from `x = y`, which is a
-  contradiction inside the engine rather than a difference from another one; an
-  internal contradiction is the worse of the two, so the engine's own `Ops.eq`
-  won.
+  That fix left equality and ordering answering differently on the same
+  operands by design (`NaN = NaN` FALSE while `NaN <= NaN` TRUE), and the keys a
+  third way. Since plans/robustness/21 all three follow `Ops.floatCompare`, as
+  Postgres and Spark do: `NaN` equals `NaN` and `-0.0` equals `0.0` (see
+  "Floats used to have three equalities" below).
 
   `ExprParityFuzzTest` used to hold out three things at once: float/double
   ordering, float/double `IN`, *and* every `NaN`/`Inf`/`-0.0` value (normalized
@@ -933,9 +930,10 @@ ship a fix or move something from "not done" to "done".
   `sameKey` now compares with `Ops.cmp(av, bv) == 0`, so the peer test IS the
   tie predicate of the sort that produced the order (the comparator's ASC/DESC
   flip negates the sign, which leaves `== 0` alone). Two nulls stay peers,
-  matching the comparator's `(null, null) => 0`. The `-0.0` half is a behaviour
-  change with no failing seed behind it: `-0.0` and `0.0` used to share a rank
-  and now rank 1 and 2, agreeing with the row order `ORDER BY` already produces.
+  matching the comparator's `(null, null) => 0`. The `-0.0` half of that fix
+  (`-0.0` and `0.0` ranked 1 and 2, as the sort then ordered them) was reversed
+  by plans/robustness/21: the sort now ties them, so they share a rank again,
+  as they share a GROUP BY group and `=`.
   Only `RANK` and `DENSE_RANK` call `sameKey`; `ROW_NUMBER`, `LAG`/`LEAD` and
   every frame bound are positional, and `PARTITION BY` goes through the key
   codecs (see [architecture.md](architecture.md) §2a) — so one operator
@@ -1620,6 +1618,23 @@ ship a fix or move something from "not done" to "done".
   works out each frame by SQL's definition in every layout; against the code
   before it failed at seed 2. See
   [plans/robustness/20](../plans/robustness/20-range-frames-run-as-rows.md).
+- **Floats used to have three equalities — fixed.** `=` followed IEEE (`NaN`
+  unequal to itself, `-0.0` equal to `0.0`), the sort and `RANK` followed
+  `Double.compare` (`NaN` tied with `NaN`, `-0.0` below `0.0`), and GROUP BY,
+  DISTINCT, PARTITION BY and join keys went by bit pattern (`NaN` with `NaN`,
+  `-0.0` apart from `0.0`). So `fl JOIN fr ON fl.k = fr.k` matched four `NaN`
+  pairs that `fl, fr WHERE fl.k = fr.k` rejected and missed two zero pairs it
+  kept: one predicate, two answers, by which join the planner chose. The user
+  chose Postgres's and Spark's rule: `Ops.floatCompare` (`NaN` equal to `NaN`
+  and highest, `-0.0` equal to `0.0`) behind `=`, `IN`, ordering and the peers,
+  and keys and hashes through `KeyCodec.floatKeyBits` / `floatKeyValue`.
+  Parquet pushdown no longer pushes a float comparison with a zero or `NaN`
+  literal, which a file's statistics order differently. No property saw it,
+  since every join relation compared a hash join with another;
+  `mode_differential_fuzz_test`'s key-equality property holds joins, groups,
+  DISTINCT, UNION, PARTITION BY and RANK to `=`, and failed at seed 1 at the
+  code before. See
+  [plans/robustness/21](../plans/robustness/21-two-float-equalities.md).
 
 ## Wrong answers the I/O properties found (2026-10-14, all fixed)
 

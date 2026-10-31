@@ -20,8 +20,9 @@ package com.transformer.core
   *     [[KeyCodec.decimalKey]], so every spelling of one value is one key.
   *
   * Either way two keys are equal exactly when SQL `=` (`Ops.eq`) calls every
-  * pair of their values equal, except that NULL meets NULL and a float key
-  * compares by bit pattern, as GROUP BY needs.
+  * pair of their values equal, except that NULL meets NULL, as GROUP BY needs.
+  * A float key is its bits with -0.0 read as 0.0 ([[KeyCodec.floatKeyBits]]),
+  * and every NaN has one bit pattern, as `=` calls every NaN equal.
   *
   * Two operator-facing entry points:
   *
@@ -126,9 +127,9 @@ object KeyCodec {
 
   /** True iff a value of `t` round-trips through a `Long` without loss — the
     * gate for [[LongHashMap]]'s single-column primitive-key fast path. Float
-    * / Double are deliberately excluded (NaN canonicalization + `-0.0` vs
-    * `+0.0` make the bit-level conversion subtly diverge from `Double.equals`;
-    * they use [[PackedBytesCodec]] instead). */
+    * / Double are deliberately excluded: their key is not their raw bits
+    * (`-0.0` keys as `0.0`, [[KeyCodec.floatKeyBits]]), so they go through
+    * [[PackedBytesCodec]], which applies that rule. */
   def isLongFittable(t: DataType): Boolean = t match {
     case DataType.IntType | DataType.LongType | DataType.BooleanType => true
     case DataType.DateType | DataType.TimestampType => true
@@ -163,13 +164,33 @@ object KeyCodec {
 
   private[core] val NotDecimal: Int = Int.MinValue
 
-  /** `v` as the key value [[decimalScales]] calls for at `scale`. */
+  /** `v` as the key value [[decimalScales]] calls for at `scale`, a float as
+    * [[floatKeyValue]]. */
   private[core] def keyValue(v: AnyRef, scale: Int): AnyRef =
-    if (scale == NotDecimal || v == null) v
+    if (v == null) v
+    else if (scale == NotDecimal) floatKeyValue(v)
     else v match {
       case d: java.math.BigDecimal => decimalKey(d, scale)
       case other => other
     }
+
+  /** A FLOAT key's bits: `-0.0` as `0.0`, which `=` calls equal to it, and
+    * every NaN as the one `floatToIntBits` gives, `=` calling every NaN equal.
+    * A GROUP BY or DISTINCT key reads back as these bits, so `-0.0`'s group
+    * is `0.0`'s. */
+  def floatKeyBits(f: Float): Int = java.lang.Float.floatToIntBits(if (f == 0.0f) 0.0f else f)
+
+  /** A DOUBLE key's bits, by the rule of [[floatKeyBits]]. */
+  def doubleKeyBits(d: Double): Long = java.lang.Double.doubleToLongBits(if (d == 0.0) 0.0 else d)
+
+  /** A boxed key value with `-0.0` read as `0.0`, so that `equals` and
+    * `hashCode`, which separate the two, agree with `=`. A boxed NaN already
+    * equals every other NaN. */
+  def floatKeyValue(v: AnyRef): AnyRef = v match {
+    case d: java.lang.Double => if (d.doubleValue == 0.0) java.lang.Double.valueOf(0.0) else d
+    case f: java.lang.Float => if (f.floatValue == 0.0f) java.lang.Float.valueOf(0.0f) else f
+    case other => other
+  }
 
   /** Read column `col` at `row` as a primitive long. Callers must check
     * `col.isNull(row)` first — this is a NULL-unsafe primitive read. */
@@ -467,9 +488,9 @@ final class PackedBytesCodec private[core] (
     case DataType.IntType       => writeInt(bytes, off, col.asInstanceOf[IntVector].values(row))
     case DataType.LongType      => writeLong(bytes, off, col.asInstanceOf[LongVector].values(row))
     case DataType.FloatType     =>
-      writeInt(bytes, off, java.lang.Float.floatToIntBits(col.asInstanceOf[FloatVector].values(row)))
+      writeInt(bytes, off, KeyCodec.floatKeyBits(col.asInstanceOf[FloatVector].values(row)))
     case DataType.DoubleType    =>
-      writeLong(bytes, off, java.lang.Double.doubleToLongBits(col.asInstanceOf[DoubleVector].values(row)))
+      writeLong(bytes, off, KeyCodec.doubleKeyBits(col.asInstanceOf[DoubleVector].values(row)))
     case DataType.BooleanType   => bytes(off) = if (col.asInstanceOf[BooleanVector].values(row)) 1 else 0
     case DataType.DateType      => writeInt(bytes, off, col.asInstanceOf[DateVector].values(row))
     case DataType.TimestampType => writeLong(bytes, off, col.asInstanceOf[TimestampVector].values(row))
@@ -481,9 +502,9 @@ final class PackedBytesCodec private[core] (
     case DataType.IntType       => writeInt(bytes, off, v.asInstanceOf[Number].intValue)
     case DataType.LongType      => writeLong(bytes, off, v.asInstanceOf[Number].longValue)
     case DataType.FloatType     =>
-      writeInt(bytes, off, java.lang.Float.floatToIntBits(v.asInstanceOf[Number].floatValue))
+      writeInt(bytes, off, KeyCodec.floatKeyBits(v.asInstanceOf[Number].floatValue))
     case DataType.DoubleType    =>
-      writeLong(bytes, off, java.lang.Double.doubleToLongBits(v.asInstanceOf[Number].doubleValue))
+      writeLong(bytes, off, KeyCodec.doubleKeyBits(v.asInstanceOf[Number].doubleValue))
     case DataType.BooleanType   => bytes(off) = if (v.asInstanceOf[Boolean]) 1 else 0
     case DataType.DateType      =>
       v match {

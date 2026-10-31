@@ -817,6 +817,7 @@ private[exec] object DistinctElement {
         case DataType.DecimalType(_, scale) => KeyCodec.decimalKey(d, scale)
         case _ => d.stripTrailingZeros
       }
+    case f @ (_: java.lang.Double | _: java.lang.Float) => KeyCodec.floatKeyValue(f.asInstanceOf[AnyRef])
     case other => other
   }
 
@@ -1194,14 +1195,14 @@ final class MinMaxState(min: Boolean, dt: DataType) extends AggState {
   // slot a given `dt` uses, or a spilled state restores as NULL.
   //
   // The Float/Double slot advances through `java.lang.Double.compare`, not raw
-  // IEEE `<` / `>`. That is the total order `Ops.cmp` gives the reference-typed
-  // branch below, and the one `ORDER BY` (`SortExec.rowOrdering`) and
-  // GREATEST/LEAST (`Funcs.pickByOrdering`) already use: NaN above every other
-  // value, -0.0 below 0.0. Raw IEEE compares false against NaN in both
-  // directions, which made the extremum depend on where the NaN landed — on row
-  // order, on partition fan-out, and on spill flush order, since `merge` had the
-  // same shape. `compare` takes primitive doubles, so unlike `Ops.cmp(a: Any,
-  // b: Any)` it keeps these loops allocation-free.
+  // IEEE `<` / `>`. It orders as `Ops.floatCompare` does, NaN above every other
+  // value, and more finely in one place: -0.0 below 0.0, which `Ops` calls
+  // equal. So of two equal zeros MIN keeps -0.0 and MAX 0.0 whatever order they
+  // arrive in, rather than whichever came first, and the answer, equal either
+  // way, does not move with row order, partitions or spill. Raw IEEE compares
+  // false against NaN in both directions, which made the extremum depend on
+  // where the NaN landed, `merge` included. `compare` takes primitive doubles,
+  // so unlike `Ops.cmp(a: Any, b: Any)` it keeps these loops allocation-free.
   private var hasValue: Boolean = false
   private var longCur: Long = 0L
   private var doubleCur: Double = 0.0

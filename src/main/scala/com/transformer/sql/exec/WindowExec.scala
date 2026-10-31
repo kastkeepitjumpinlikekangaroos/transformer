@@ -661,9 +661,8 @@ final case class WindowExec(
     * `DENSE_RANK` share a rank on? It must be the tie predicate of the sort
     * that produced the order, so it compares through `Ops.cmp` exactly as
     * [[sortPartition]] does (the ASC/DESC flip there negates the sign, which
-    * leaves `== 0` unchanged). IEEE equality would disagree with the sort on
-    * the values the engine's total order reconciles: it splits two tied `NaN`s
-    * and ties a strictly-ordered `-0.0` / `0.0` pair. Two nulls are peers,
+    * leaves `== 0` unchanged), and so two `NaN`s are peers and so are `-0.0`
+    * and `0.0`, as `=` calls them ([[Ops.floatCompare]]). Two nulls are peers,
     * matching the comparator's `(null, null) => 0`.
     *
     * `Ops.cmp` boxes, but this runs once per row per rank function over an

@@ -464,10 +464,11 @@ class WindowExecSpillTest {
       Map(1 -> (1L, 1L), 3 -> (1L, 1L), 0 -> (3L, 2L), 2 -> (4L, 3L)), ds, asc = false, nullsFirst = Some(true))
   }
 
-  /** `-0.0` sorts strictly below `0.0`, so the two rows are not peers and rank
-    * 1 and 2 — the rank agrees with the row order ORDER BY produces, where
-    * IEEE equality would have called them one peer group. */
-  @Test def signedZeroOrderKeysAreNotPeers(): Unit =
-    assertRanks("-0.0 ranks below 0.0", Map(1 -> (1L, 1L), 0 -> (2L, 2L)),
+  /** `-0.0` and `0.0` are equal (`Ops.floatCompare`), so the two rows are
+    * peers and share rank 1, on the heap and the spill path, as their GROUP BY
+    * group and their `=` agree (plans/robustness/21). They ranked 1 and 2
+    * while the sort ordered `-0.0` below `0.0`. */
+  @Test def signedZeroOrderKeysArePeers(): Unit =
+    assertRanks("-0.0 and 0.0 are peers", Map(1 -> (1L, 1L), 0 -> (1L, 1L)),
       Seq(0.0, -0.0), asc = true)
 }

@@ -53,6 +53,9 @@ import org.apache.parquet.io.api.Binary
   *     point and the engine by UTF-16 code unit, which disagree there (see
   *     [[ordersAlike]])
   *   - decimal columns
+  *   - a comparison of a float or double column with a zero or NaN literal:
+  *     parquet orders -0.0 below 0.0 where the engine calls them equal, and a
+  *     file's statistics may hold or leave out NaN (see [[ordersFloatsAlike]])
   *
   * Returns None when nothing could be pushed.
   */
@@ -188,6 +191,15 @@ object ParquetFilterTranslator {
     * columns, unsupported operators, null literals, etc.) so the caller can
     * drop the conjunct.
     */
+  /** Whether parquet judges a comparison with the float `lit` as the engine
+    * does. Parquet orders floats as `Double.compare` does, and its statistics
+    * may keep a -0.0 or a 0.0 as a bound, or leave NaN out, while the engine
+    * calls -0.0 and 0.0 equal and NaN equal to NaN (`Ops.floatCompare`): so
+    * `x = 0.0` could drop a row group whose values are all -0.0. Away from
+    * zero and NaN the two orders agree on which side of `lit` every value
+    * lies. */
+  private def ordersFloatsAlike(lit: Double): Boolean = lit != 0.0 && !lit.isNaN
+
   private def compareToLiteral(name: String, dt: DataType, op: String, value: Any): Option[FilterPredicate] = {
     if (value == null) return None
     dt match {
@@ -228,6 +240,7 @@ object ParquetFilterTranslator {
       case DataType.FloatType =>
         val col = FilterApi.floatColumn(name)
         val lit = java.lang.Float.valueOf(value.asInstanceOf[Number].floatValue)
+        if (!ordersFloatsAlike(lit.doubleValue)) return None
         op match {
           case "=" => Some(FilterApi.eq(col, lit))
           case "!=" | "<>" => Some(FilterApi.notEq(col, lit))
@@ -240,6 +253,7 @@ object ParquetFilterTranslator {
       case DataType.DoubleType =>
         val col = FilterApi.doubleColumn(name)
         val lit = java.lang.Double.valueOf(value.asInstanceOf[Number].doubleValue)
+        if (!ordersFloatsAlike(lit.doubleValue)) return None
         op match {
           case "=" => Some(FilterApi.eq(col, lit))
           case "!=" | "<>" => Some(FilterApi.notEq(col, lit))

@@ -102,6 +102,49 @@ object DataGen {
     Dataset(schema, rows)
   }
 
+  /** `l(id, k)` and `r(id, k)` for `oracle/KeyEquality`. */
+  final case class KeyCase(l: Dataset, r: Dataset) {
+    override def toString: String = s"KeyCase(\n  l = $l\n  r = $r)"
+  }
+
+  /** Two key types that meet in `=`, a join and a UNION: one float type, a
+    * float beside an integer, two decimals of different scales, a decimal
+    * beside an integer, two integers. */
+  private val KeyTypePairs: Seq[(DataType, DataType)] = Seq(
+    DataType.DoubleType -> DataType.DoubleType,
+    DataType.FloatType -> DataType.FloatType,
+    DataType.DoubleType -> DataType.IntType,
+    DataType.DecimalType(9, 2) -> DataType.DecimalType(18, 4),
+    DataType.DecimalType(9, 2) -> DataType.IntType,
+    DataType.LongType -> DataType.IntType)
+
+  /** Key values each type's equality has an edge at: NaN under three payloads
+    * (`Double.NaN`, one with a low bit set, and a negated one), both zeros,
+    * the infinities; one decimal at several scales; small integers that meet
+    * the decimals and the doubles. */
+  private def keyDomain(t: DataType): Seq[Any] = t match {
+    case DataType.DoubleType => Seq[Any](Double.NaN, java.lang.Double.longBitsToDouble(0x7ff8000000000001L), -Double.NaN,
+      -0.0, 0.0, 1.0, -1.0, 2.5, Double.PositiveInfinity, Double.NegativeInfinity)
+    case DataType.FloatType => Seq[Any](Float.NaN, -Float.NaN, -0.0f, 0.0f, 1.0f, 2.5f, Float.PositiveInfinity)
+    case DataType.DecimalType(_, scale) =>
+      Seq("0", "1", "1.0", "-1", "2.5", "0.25").map(v => new java.math.BigDecimal(v).setScale(math.min(scale, 2)): Any)
+    case DataType.IntType => Seq[Any](0, 1, -1, 2)
+    case DataType.LongType => Seq[Any](0L, 1L, -1L, 2L, 5000000000L)
+    case other => throw new IllegalArgumentException(s"no key domain for $other")
+  }
+
+  def generateKeyCase(rng: Rng): KeyCase = {
+    val (lt, rt) = rng.oneOf(KeyTypePairs)
+    def table(t: DataType): Dataset = {
+      val schema = Schema(Vector(Field("id", DataType.IntType), Field("k", t)))
+      val domain = keyDomain(t)
+      Dataset(schema, (0 until rng.between(0, 12)).map { i =>
+        Array[Any](i, if (rng.bool(0.12)) null else rng.oneOf(domain))
+      })
+    }
+    KeyCase(table(lt), table(rt))
+  }
+
   // ---- schema + data ------------------------------------------------------
 
   /** Every column type: [[ExprGen]]'s `GenTypes`, so any shape one generator

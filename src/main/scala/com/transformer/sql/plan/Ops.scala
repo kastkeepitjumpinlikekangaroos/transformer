@@ -33,13 +33,13 @@ object Ops {
   // Numbers compare by value, exactly where the types allow it. Two integers
   // compare as longs, and a decimal against any number as decimals: its scale
   // is how it is written, not part of the value, so 1.0 = 1.00. Every other
-  // pair of numbers has a FLOAT or DOUBLE in it and compares as doubles, where
-  // `eq` is IEEE `==` (NaN equals nothing, -0.0 equals 0.0) and `cmp` is
-  // `java.lang.Double.compare` (NaN above everything, -0.0 below 0.0). A byte
-  // array compares by content, ordered byte by byte as unsigned values, so a
-  // prefix sorts first and 0x80 sorts above 0x7f. GROUP BY, DISTINCT and join
-  // keys (`KeyCodec`) agree with `eq` on all of these but floats, which they
-  // key by bit pattern.
+  // pair of numbers has a FLOAT or DOUBLE in it and compares as doubles through
+  // [[floatCompare]], one order for `eq` and `cmp` alike: NaN equals NaN and
+  // sorts above every other number, and -0.0 equals 0.0. A byte array compares
+  // by content, ordered byte by byte as unsigned values, so a prefix sorts
+  // first and 0x80 sorts above 0x7f. GROUP BY, DISTINCT, PARTITION BY and join
+  // keys (`KeyCodec`) agree with `eq` on every one of these, so `ON a = b`
+  // matches the same rows whichever join runs it.
 
   def eq(a: Any, b: Any): Boolean = (a, b) match {
     case (x: java.math.BigDecimal, y: java.lang.Number) => decimalCompare(x, y) == 0
@@ -47,7 +47,7 @@ object Ops {
     case (x: java.lang.Number, y: java.lang.Number) if isIntegral(x) && isIntegral(y) =>
       x.longValue == y.longValue
     case (x: java.lang.Number, y: java.lang.Number) =>
-      x.doubleValue == y.doubleValue
+      floatCompare(x.doubleValue, y.doubleValue) == 0
     case (x: String, y: String) => x == y
     case (x: java.lang.Boolean, y: java.lang.Boolean) => x.booleanValue == y.booleanValue
     case (x: Array[Byte], y: Array[Byte]) => util.Arrays.equals(x, y)
@@ -60,13 +60,27 @@ object Ops {
     case (x: java.lang.Number, y: java.lang.Number) if isIntegral(x) && isIntegral(y) =>
       java.lang.Long.compare(x.longValue, y.longValue)
     case (x: java.lang.Number, y: java.lang.Number) =>
-      java.lang.Double.compare(x.doubleValue, y.doubleValue)
+      floatCompare(x.doubleValue, y.doubleValue)
     case (x: String, y: String) => x.compareTo(y)
     case (x: java.lang.Boolean, y: java.lang.Boolean) => x.compareTo(y)
     case (x: Array[Byte], y: Array[Byte]) => util.Arrays.compareUnsigned(x, y)
     case (x: java.lang.Comparable[Any] @unchecked, y) => x.compareTo(y)
     case (x, y) => x.toString.compareTo(y.toString)
   }
+
+  /** The engine's one comparison of two floats, as Postgres and Spark have it:
+    * NaN equals NaN and sorts above every other number, the infinities
+    * included, and -0.0 equals 0.0. `=`, `<`, `ORDER BY`, `IN`, `RANK`'s peers
+    * and every key all follow it, so no two operators disagree on two floats.
+    * (IEEE `==` makes NaN unequal to itself and `java.lang.Double.compare`
+    * puts -0.0 below 0.0, which is how the engine once had three float
+    * equalities.) */
+  def floatCompare(a: Double, b: Double): Int =
+    if (a < b) -1
+    else if (a > b) 1
+    else if (a == b) 0
+    else if (a.isNaN) { if (b.isNaN) 0 else 1 }
+    else -1
 
   /** The boxes of INT and BIGINT, whose values a long holds exactly; past
     * 2^53 a double does not, and 2^53 + 1 would equal 2^53. */
@@ -1090,21 +1104,12 @@ object VecOps {
   /** Numeric comparison via double promotion, for a pair with a FLOAT or
     * DOUBLE in it — matches [[Ops.cmp]]'s cross-numeric semantics.
     *
-    * The two operator families use deliberately different primitives, because
-    * [[Ops]] does:
-    *
-    *   - '''Equality''' (`=` `<>`) is primitive `==` / `!=`, matching
-    *     [[Ops.eq]]'s `x.doubleValue == y.doubleValue`. IEEE rules: `NaN`
-    *     equals nothing (itself included), `-0.0 == 0.0`.
-    *   - '''Ordering''' (`< <= > >=`) goes through `java.lang.Double.compare`,
-    *     matching [[Ops.cmp]]. That is a total order — `NaN` sorts above every
-    *     other value and equals itself, `-0.0` sorts below `0.0` — and it has
-    *     to be, since `Ops.cmp` also backs the sort comparators, where IEEE
-    *     comparison would violate the `Comparator` contract. Using the raw
-    *     `<` operator here instead would make the same `Expr` answer
-    *     differently depending on whether the caller reached `eval` or
-    *     `evalVec`. `Double.compare` takes primitive `double`s, so this costs
-    *     no boxing.
+    * Equality and ordering both go through [[Ops.floatCompare]], the order
+    * `Ops.eq` and `Ops.cmp` use, so the same `Expr` answers the same on either
+    * path: `NaN` equals itself and sorts above every other value, and `-0.0`
+    * equals `0.0`. It is a total preorder, which the sort comparators that
+    * share it need (IEEE `<` is not), and it takes primitive `double`s, so
+    * this costs no boxing.
     *
     * `Float` has no branch of its own: `readDouble` widens `FloatVector` (and
     * `LongVector` / `IntVector`, beside a float) to `double` exactly as
@@ -1123,42 +1128,42 @@ object VecOps {
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readDouble(l, i) == readDouble(r, i)
+          else values(i) = Ops.floatCompare(readDouble(l, i), readDouble(r, i)) == 0
           i += 1
         }
       case "<>" | "!=" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readDouble(l, i) != readDouble(r, i)
+          else values(i) = Ops.floatCompare(readDouble(l, i), readDouble(r, i)) != 0
           i += 1
         }
       case "<" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = java.lang.Double.compare(readDouble(l, i), readDouble(r, i)) < 0
+          else values(i) = Ops.floatCompare(readDouble(l, i), readDouble(r, i)) < 0
           i += 1
         }
       case "<=" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = java.lang.Double.compare(readDouble(l, i), readDouble(r, i)) <= 0
+          else values(i) = Ops.floatCompare(readDouble(l, i), readDouble(r, i)) <= 0
           i += 1
         }
       case ">" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = java.lang.Double.compare(readDouble(l, i), readDouble(r, i)) > 0
+          else values(i) = Ops.floatCompare(readDouble(l, i), readDouble(r, i)) > 0
           i += 1
         }
       case ">=" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = java.lang.Double.compare(readDouble(l, i), readDouble(r, i)) >= 0
+          else values(i) = Ops.floatCompare(readDouble(l, i), readDouble(r, i)) >= 0
           i += 1
         }
       case other => throw new IllegalStateException(s"Unknown numeric compare op '$other'")

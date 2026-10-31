@@ -192,9 +192,9 @@ specific traps.
   Every new override extends `ExprBatchTest` first with NULL-handling
   parity, divide-by-zero parity, and per-type result-shape parity — never
   the other way around. On floating-point operands, `NaN` / `-0.0` parity
-  too: equality is primitive `==` and ordering is
-  `java.lang.Double.compare`, in both paths, so a vectorized helper may not
-  reach for the raw `<` just because the operands are `double`. Two integers
+  too: equality and ordering both go through `Ops.floatCompare`, in both
+  paths, so a vectorized helper may not reach for the raw `<` or `==` just
+  because the operands are `double`. Two integers
   compare as longs and a decimal exactly, in both paths, so neither may be
   read through `readDouble`. The
   property-based `ExprParityFuzzTest` is the generative net over that gate;
@@ -207,7 +207,9 @@ specific traps.
   [architecture.md §5c](architecture.md#5c-vectorized-aggregate-state-updates-no-group-by-fast-path).
 - **Anything that ORDERS values compares through the one total order,
   wherever it lives.** Boxed: `Ops.cmp`. Primitive `double` slot:
-  `java.lang.Double.compare`, which is the same order without the boxing. The
+  `Ops.floatCompare`, the same order without the boxing (`MinMaxState` keeps
+  `java.lang.Double.compare`, finer only in ordering `-0.0` below the `0.0` it
+  equals, so that of two equal zeros its answer does not move with row order). The
   rule is not confined to `evalVec` — `SortKey.compare` (the one comparison
   `SortExec.rowOrdering` and `WindowExec`'s partition sort both call, which is
   also where NULL placement lives — never re-implement a null-aware comparison
@@ -225,9 +227,10 @@ specific traps.
   accumulator, and `WindowExec.sameKey`, the `RANK`/`DENSE_RANK` peer test, which
   asked `Ops.eq` whether two rows tied while the sort beside it asked `Ops.cmp`.
   Where a tie decides an answer, compare with the comparison that produced the
-  order — `cmp(a, b) == 0`, never `eq(a, b)`. The two differ on exactly `NaN`
-  (tied, not equal) and `-0.0` / `0.0` (equal, not tied), so the bug hides until
-  the corpus carries those values. See [gotchas.md](gotchas.md).
+  order, `cmp(a, b) == 0`. Since plans/robustness/21 `eq` is the same test (it
+  differed on `NaN` and `-0.0` / `0.0`, and the bug hid until the corpus
+  carried those values), but the sort's own comparison is the one that cannot
+  drift from it. See [gotchas.md](gotchas.md).
 
   **Anything that HASHES, GROUPS or DE-DUPLICATES values agrees with `Ops.eq`**,
   and that is the fourth time the family has bitten: GROUP BY collapsed byte
@@ -242,8 +245,10 @@ specific traps.
   answer the same question as `=`, including the ones that only route rows: a
   shard (`HashPartitioner.hashCell`) or a spill bucket
   (`HashJoinExec.columnHashCode`) that separates two equal keys loses the match
-  as surely as a hash map would. The one deliberate exception is floats, which
-  keys group by bit pattern ([architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers)).
+  as surely as a hash map would. A float keys and hashes as
+  `KeyCodec.floatKeyBits` / `floatKeyValue`, `-0.0` as `0.0`
+  ([architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers));
+  its raw bits and `Double.equals` separate two values `=` calls equal.
 - **Integer arithmetic goes through `Integers`.** An INT or BIGINT result
   past its type is an error naming the operation (`Integers` in `Ops.scala`),
   on the row path, in `VecOps`' loops, in `ABS` and in every CAST to an

@@ -587,8 +587,10 @@ InputFilePath("data.csv",
   column against a literal with a character at or past U+D800, since a file
   orders strings by their UTF-8 bytes and the engine by UTF-16 code unit, and
   the two disagree where a character from U+E000 to U+FFFF meets one past
-  U+FFFF) drop through as residual filtering. `IS NULL` pushes on any column
-  but a decimal.
+  U+FFFF, and a comparison of a `FLOAT` or `DOUBLE` column with zero or `NaN`,
+  since a file orders `-0.0` below the `0.0` the engine calls equal to it and
+  may leave `NaN` out of its statistics) drop through as residual filtering.
+  `IS NULL` pushes on any column but a decimal.
 - Write: vectorized — custom `WriteSupport[BatchRowRef]` drives parquet-mr's
   `RecordConsumer` straight from `ColumnarBatch` vectors. No `SimpleGroup` per
   row, no `Integer`/`Long` boxing per cell. Compression defaults to `snappy`
@@ -1010,22 +1012,22 @@ unused CTE is never executed. Materialization buffers the body in heap.
 through arithmetic and string ops; `IS NULL` / `IS NOT NULL` for explicit
 checks.
 
-**`NaN` and `-0.0`:** equality follows IEEE and ordering follows a total order,
-so on `FLOAT` / `DOUBLE` columns `NaN = NaN` is FALSE but `NaN <= NaN` is TRUE,
-and `-0.0 = 0.0` is TRUE but `-0.0 < 0.0` is also TRUE. `IN` follows equality, so
-`NaN IN (NaN)` is FALSE — matching `NaN = NaN` and therefore **differing from
-Postgres**, which treats `NaN` as equal to itself. Ordering matches Postgres:
-`NaN` sorts above every other value. Everything that orders follows that one
-total order — `ORDER BY`, `GREATEST`/`LEAST`, the `MIN`/`MAX` aggregates
-(including as window functions), and the ORDER BY peer groups `RANK` /
-`DENSE_RANK` share a rank on — so `MAX` over a column containing `NaN` is `NaN`,
-`MIN` over one is the smallest non-`NaN` value, `MIN` over `0.0` and `-0.0` is
-`-0.0`, and `DENSE_RANK()` over a partition whose order key is `NaN` on every row
-is `1` on every row (while `-0.0` and `0.0` rank 1 and 2, since the order
-separates them). Those answers do not depend on row order, partition count or
-whether the operator spilled. Both evaluation paths (row-at-a-time and
-vectorized) agree on all of this; see [docs/gotchas.md](docs/gotchas.md) for why
-the two operator families differ.
+**`NaN` and `-0.0`:** a `FLOAT` or `DOUBLE` has one equality and one order, as
+in Postgres and Spark: `NaN` equals `NaN` and sorts above every other number,
+the infinities included, and `-0.0` equals `0.0` and ties it. So `NaN = NaN`,
+`NaN IN (NaN)` and `-0.0 = 0.0` are TRUE and `-0.0 < 0.0` is FALSE, and every
+operator that matches, groups or orders values follows the same rule: a join
+on `a = b` pairs the rows `WHERE a = b` keeps, whichever join runs it, and
+`GROUP BY`, `DISTINCT`, `UNION`, `COUNT(DISTINCT …)` and `PARTITION BY` put all
+the `NaN`s in one group and both zeros in another (read back as `0.0`), and
+`RANK` / `DENSE_RANK` give them one rank. `MAX` over a column containing `NaN`
+is `NaN` and `MIN` over one the smallest other value; of two equal zeros `MIN`
+gives `-0.0` and `MAX` `0.0` whatever order they come in. None of this depends
+on row order, partitions or spill. It used to be three rules: `=` called `NaN`
+unequal to itself and the zeros equal, the keys went by bit pattern (`NaN`
+matched `NaN` in a hash join, the zeros did not match) and the sort ordered
+`-0.0` below `0.0`, so a hash join and the same predicate as a filter
+answered differently.
 
 **Integers, decimals and byte arrays compare exactly.** Two integers compare as
 64-bit integers, so `9007199254740993 = 9007199254740992` is FALSE, though a

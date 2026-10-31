@@ -78,6 +78,22 @@ class ParquetFilterTranslatorTest {
   // Translator-level: shape coverage.
   // ─────────────────────────────────────────────────────────────────────
 
+  /** A float comparison with a zero or NaN literal is not pushed: a file's
+    * statistics order -0.0 below 0.0 and may leave NaN out, where the engine
+    * calls the two zeros equal and NaN equal to NaN, so `x = 0.0` could drop a
+    * row group of -0.0s (plans/robustness/21). Away from zero it still pushes. */
+  @Test def doesNotTranslateAFloatComparisonWithAZeroOrNaN(): Unit = {
+    for (t <- Seq(DataType.DoubleType, DataType.FloatType); op <- Seq("=", "<>", "<", "<=", ">", ">=")) {
+      val zero = if (t == DataType.FloatType) java.lang.Float.valueOf(0.0f) else java.lang.Double.valueOf(0.0)
+      val negZero = if (t == DataType.FloatType) java.lang.Float.valueOf(-0.0f) else java.lang.Double.valueOf(-0.0)
+      val nan = if (t == DataType.FloatType) java.lang.Float.valueOf(Float.NaN) else java.lang.Double.valueOf(Double.NaN)
+      val one = if (t == DataType.FloatType) java.lang.Float.valueOf(1.5f) else java.lang.Double.valueOf(1.5)
+      for (v <- Seq[Any](zero, negZero, nan))
+        assertEquals(s"$t $op $v", None, ParquetFilterTranslator.translate(BinOpExpr(op, col("x", t), lit(v, t), DataType.BooleanType)))
+      assertTrue(s"$t $op 1.5", ParquetFilterTranslator.translate(BinOpExpr(op, col("x", t), lit(one, t), DataType.BooleanType)).isDefined)
+    }
+  }
+
   @Test def translatesIsNullOnIntColumn(): Unit = {
     val out = ParquetFilterTranslator.translate(
       IsNullExpr(col("x", DataType.IntType), negated = false))

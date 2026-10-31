@@ -2,7 +2,7 @@ package com.transformer.fuzz
 
 import com.transformer.core._
 import com.transformer.fuzz.QueryGen._
-import com.transformer.fuzz.oracle.{ExactIntegers, ModeDifferential, RelEngine, WindowFrames}
+import com.transformer.fuzz.oracle.{ExactIntegers, KeyEquality, ModeDifferential, RelEngine, WindowFrames}
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -130,6 +130,26 @@ class ModeDifferentialFuzzTest {
     }
     println(f"[window-frames] over $n seeds: RANGE or default frame with an ORDER BY=$range, differs from ROWS=$differs")
     assertTrue(s"RANGE frames rarely differ from ROWS (differs=$differs of range=$range)", differs > 300)
+  }
+
+  /** Every operator that matches, groups or ranks keys agrees with `=` over
+    * float, decimal and integer keys that carry NaN, both zeros, the
+    * infinities and one decimal at several scales, in every layout
+    * (`oracle/KeyEquality`): a hash join matched NaN to NaN and missed -0.0 to
+    * 0.0, which the same predicate as a filter did the other way round
+    * (plans/robustness/21). */
+  @Test def fuzzKeyEquality(): Unit = {
+    Props.forAll[DataGen.KeyCase](
+      name = "key-equality",
+      gen = DataGen.generateKeyCase,
+      shrink = c => c.l.rows.indices.reverseIterator.map(i => c.copy(l = c.l.copy(rows = c.l.rows.patch(i, Nil, 1)))) ++
+        c.r.rows.indices.reverseIterator.map(i => c.copy(r = c.r.copy(rows = c.r.rows.patch(i, Nil, 1)))),
+      // Eleven queries in each of seven layouts per case, so a smaller default
+      // budget than the other properties here; a campaign raises it.
+      count = Props.seedCountOr(40)
+    ) { c =>
+      KeyEquality.check(c)
+    }
   }
 
   @Test def fuzzModeDifferential(): Unit = {
