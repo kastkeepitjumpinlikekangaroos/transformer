@@ -185,14 +185,75 @@ class DirectoryJobLoaderTest {
   @Test def jsonScalarOptionsBecomeStringMap(): Unit = {
     val jobDir = tmpDir("djl-mapopts-")
     writeFile(jobDir.resolve("inputs/raw/cfg.json"),
-      """{"path":"data/foo.csv","options":{"header":false,"delimiter":";","batchSize":2048}}""")
+      """{"path":"data/foo.csv","options":{"header":false,"delimiter":";"}}""")
+    writeFile(jobDir.resolve("inputs/rows/cfg.json"),
+      """{"path":"data/foo.parquet","options":{"read_partition_size_bytes":2048}}""")
     Files.createDirectories(jobDir.resolve("tables"))
 
     val job = DirectoryJobLoader.load(jobDir, outputDir = Some(tmpDir("djl-mapopts-out-").toString))
-    val opts = job.inputs.head.options
-    assertEquals("false", opts("header"))
-    assertEquals(";", opts("delimiter"))
-    assertEquals("2048", opts("batchSize"))
+    val opts = job.inputs.map(i => i.viewName -> i.options).toMap
+    assertEquals("false", opts("raw")("header"))
+    assertEquals(";", opts("raw")("delimiter"))
+    assertEquals("2048", opts("rows")("read_partition_size_bytes"))
+  }
+
+  /** A config key, an option or a value the loader cannot read fails the
+    * load, naming the file, the key and what it takes. Each was ignored, or
+    * read as a default, so a job with a typo in every config file Succeeded
+    * having done something else (plans/robustness/27). */
+  @Test def aKeyOrValueTheLoaderCannotReadFailsTheLoad(): Unit = {
+    def failure(input: String, output: Option[String] = None): String = {
+      val jobDir = tmpDir("djl-strict-")
+      writeFile(jobDir.resolve("data/t.csv"), "a;b\n1;2\n")
+      writeFile(jobDir.resolve("inputs/t/config.json"), input)
+      writeFile(jobDir.resolve("tables/q/main.sql"), "SELECT * FROM t")
+      output.foreach(o => writeFile(jobDir.resolve("tables/q/output.json"), o))
+      try { DirectoryJobLoader.load(jobDir, outputDir = Some(tmpDir("djl-strict-out-").toString)); fail("loaded"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    }
+    val ok = """{"path": "data/t.csv"}"""
+    assertEquals("input 't' (config.json): unknown key 'formatt'; an input's config takes path, options, cache, format",
+      failure("""{"path": "data/t.csv", "formatt": "parquet"}"""))
+    assertEquals("input 't' (config.json): Unknown option 'delimeter' for a csv input, which reads inferSchema, " +
+      "header, delimiter, quote, escape, nullValue, charset",
+      failure("""{"path": "data/t.csv", "options": {"delimeter": ";"}}"""))
+    assertEquals("input 't' (config.json): Option 'header' must be true or false, not 'yes'",
+      failure("""{"path": "data/t.csv", "options": {"header": "yes"}}"""))
+    assertEquals("input 't' (config.json): Unsupported format 'tsv'; an input is csv or parquet",
+      failure("""{"path": "data/t.csv", "format": "tsv"}"""))
+    assertTrue(failure("""{"path": "data/t.csv", "path": "missing.csv"}""")
+      .contains("the key \"path\" is written twice in one object"))
+    assertEquals("table 'q' (output.json): unknown key 'partiton_by'; a table's output.json takes partitionBy, " +
+      "format, maxPartitions, options",
+      failure(ok, Some("""{"partiton_by": "day={{ today }}"}""")))
+    assertEquals("table 'q' (output.json): unknown key 'maxPartition'; a table's output.json takes partitionBy, " +
+      "format, maxPartitions, options",
+      failure(ok, Some("""{"maxPartition": 1}""")))
+    assertEquals("table 'q' (output.json): Option 'spill' must be true or false, not 'yes'",
+      failure(ok, Some("""{"options": {"spill": "yes"}}""")))
+    assertEquals("table 'q' (output.json): Option 'spill_threshold_bytes' must be a whole number, 1 or more, not '64MB'",
+      failure(ok, Some("""{"options": {"spill_threshold_bytes": "64MB"}}""")))
+    assertEquals("table 'q' (output.json): Unknown option 'compresion' for a parquet output, which reads " +
+      "compression, parquet_row_group_size, parquet_write_parallelism, spill, spill_threshold_bytes, " +
+      "spill_max_runs, metrics",
+      failure(ok, Some("""{"format": "parquet", "options": {"compresion": "gzip"}}""")))
+    assertEquals("table 'q' (output.json): Option 'compression' must be snappy, gzip, uncompressed or none, not 'lz4'",
+      failure(ok, Some("""{"format": "parquet", "options": {"compression": "lz4"}}""")))
+    assertEquals("table 'q' (output.json): Unknown option 'compression' for a csv output, which reads header, " +
+      "delimiter, quote, escape, nullValue, charset, lineEnding, spill, spill_threshold_bytes, spill_max_runs, metrics",
+      failure(ok, Some("""{"options": {"compression": "gzip"}}""")))
+    assertEquals("table 'q' (output.json): Unsupported format 'json'; an output is csv or parquet",
+      failure(ok, Some("""{"format": "json"}""")))
+    // What each config takes still loads.
+    val jobDir = tmpDir("djl-strict-ok-")
+    writeFile(jobDir.resolve("data/t.csv"), "a;b\n1;2\n")
+    writeFile(jobDir.resolve("inputs/t/config.json"),
+      """{"path": "data/t.csv", "format": "CSV", "cache": false, "options": {"delimiter": ";", "header": "TRUE", "charset": "UTF-8"}}""")
+    writeFile(jobDir.resolve("tables/q/main.sql"), "SELECT * FROM t")
+    writeFile(jobDir.resolve("tables/q/output.json"),
+      """{"format": "parquet", "partitionBy": "p", "maxPartitions": 2, "options": {"compression": "gzip", "spill": true, "spill_threshold_bytes": 1048576, "metrics": false}}""")
+    val job = DirectoryJobLoader.load(jobDir, outputDir = Some(tmpDir("djl-strict-ok-out-").toString))
+    assertEquals(Some(2), job.sql.head.outputFile.get.maxPartitions)
   }
 
   @Test def errorsWhenInputHasNoJsonConfig(): Unit = {

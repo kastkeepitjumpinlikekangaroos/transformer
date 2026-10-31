@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.CatalogView
+import com.transformer.core.{CatalogView, OptionValues}
 import com.transformer.read.csv.{CsvOptions, CsvReader}
 import com.transformer.read.parquet.ParquetReader
 
@@ -18,8 +18,9 @@ object InputResolver {
       case "csv" =>
         CsvReader.fromPath(input.path, CsvOptions.fromMap(input.options))
       case "parquet" =>
-        val target = input.options.get("read_partition_size_bytes")
-          .map(_.toLong).getOrElse(ParquetReader.DefaultTargetBytesPerPartition)
+        val target = input.options.get(InputFilePath.ParquetPartitionSizeKey)
+          .map(OptionValues.positiveLong(InputFilePath.ParquetPartitionSizeKey, _))
+          .getOrElse(ParquetReader.DefaultTargetBytesPerPartition)
         ParquetReader.fromPath(input.path,
           com.transformer.core.ColumnarBatch.DefaultCapacity, target)
       case other =>

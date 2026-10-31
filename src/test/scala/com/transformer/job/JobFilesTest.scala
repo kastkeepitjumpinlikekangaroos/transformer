@@ -114,6 +114,26 @@ class JobFilesTest {
     assertTrue(body, body.contains("\"delimiter\": \";\""))
   }
 
+  /** An option, a value or a format the loader would refuse is refused before
+    * the config is written, so the GUI's dialog keeps it, with the loader's
+    * message, rather than writing a job that no longer loads
+    * (plans/robustness/27). */
+  @Test def addInput_rejectsWhatTheLoaderWould(): Unit = {
+    val jobDir = tmpDir("jf-add-in-strict-")
+    def refused(body: => Any): String =
+      try { body; fail("written"); "" } catch { case e: IllegalArgumentException => e.getMessage }
+    assertTrue(refused(JobFiles.addInput(jobDir, "events", "data/x.csv", None, cache = true, Map("delimeter" -> ";")))
+      .startsWith("Unknown option 'delimeter' for a csv input"))
+    assertEquals("Option 'header' must be true or false, not 'yes'",
+      refused(JobFiles.addInput(jobDir, "events", "data/x.csv", None, cache = true, Map("header" -> "yes"))))
+    assertEquals("Unsupported format 'tsv'; an input is csv or parquet",
+      refused(JobFiles.addInput(jobDir, "events", "data/x.csv", Some("tsv"), cache = true, Map.empty)))
+    assertFalse(Files.exists(jobDir.resolve("inputs").resolve("events")))
+    assertEquals("Unsupported format 'json'; an output is csv or parquet",
+      refused(JobFiles.addTable(jobDir, "t", "SELECT 1 AS x", Some("json"), None, None)))
+    assertFalse(Files.exists(jobDir.resolve("tables").resolve("t")))
+  }
+
   @Test def addInput_rejectsDuplicate(): Unit = {
     val jobDir = tmpDir("jf-add-in-dup-")
     JobFiles.addInput(jobDir, "events", "data/x.csv", None, cache = true, Map.empty)
@@ -162,7 +182,7 @@ class JobFilesTest {
     JobFiles.addInput(jobDir, "events", "data/x.csv", None, cache = true, Map.empty)
     val newCfg = JobFiles.updateInputConfig(
       jobDir, "events", "data/y.csv",
-      format = Some("parquet"), cache = false, options = Map("k" -> "v")
+      format = Some("parquet"), cache = false, options = Map("read_partition_size_bytes" -> "1024")
     )
     val body = readString(newCfg)
     assertTrue(body, body.contains("\"path\": \"data/y.csv\""))
@@ -393,11 +413,12 @@ class JobFilesTest {
       path = """data\sub/"quoted".csv""",
       format = None,
       cache = true,
-      options = Map("delim\tkey" -> "val\nwith\\backslash")
+      options = Map("nullValue" -> "val\twith\\back\"slash")
     )
     val body = readString(jobDir.resolve("inputs/in_special/config.json"))
     // Roundtrip through the project's Json parser; it'll throw on any malformed input.
     val parsed = Json.parse(body).asObject("test").fields
     assertEquals("""data\sub/"quoted".csv""", parsed("path").stringValue)
+    assertEquals("val\twith\\back\"slash", parsed("options").asObject("test").fields("nullValue").stringValue)
   }
 }

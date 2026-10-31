@@ -111,8 +111,18 @@ Only `path` is required. The format is inferred from the extension, and the
 path can be a single file or a glob (`/data/events/*.parquet`). Relative paths
 resolve against the job directory, and absolute paths are used as-is. Template
 variables (`{{ today }}`, etc.) inside `path` are expanded at run time. The
-directory name is the view name. A `viewName` field in the JSON is ignored.
-Format options are in [Supported file formats](#supported-file-formats).
+directory name is the view name. Format options are in
+[Supported file formats](#supported-file-formats).
+
+**Every config file is read strictly.** A key the file does not take (an input's
+are `path`, `options`, `cache` and `format`; `output.json`'s are `partitionBy`,
+`format`, `maxPartitions` and `options`), a key written twice in one object, an
+option its format does not read, a value that is none of its option's (a boolean
+is `true` or `false`, in any case; a size a whole number of bytes, so `64MB` is
+no size) and a `format` other than `csv` or `parquet` each fail the job's load,
+naming the file, the key and what it takes. A misspelt key used to be skipped,
+so a job with `"formatt": "parquet"` or `"partiton_by": ...` ran having done
+something else, and `"spill": "yes"` ran without spill.
 
 ### Validations
 
@@ -516,7 +526,9 @@ Options (passed via `InputFilePath.options` / `OutputFilePath.options`):
 | `nullValue` | `""` | The null string: an unquoted field equal to it is NULL. It cannot hold the delimiter or a line break, or start with the quote |
 | `lineEnding` (output) | `\n` | `\n`, `\r\n` or `\r` |
 | `inferSchema` | `true` | If false, `columns` is required (input) |
+| `read_partition_size_bytes` (input, parquet only) | 256 MB | The bytes of row groups one partition reads, a whole number |
 | `charset` | `UTF-8` | Bytes it cannot decode, or characters it cannot encode, fail the read or write |
+| `parquet_row_group_size`, `parquet_write_parallelism` (output, parquet only) | 32 MB, by heap | The bytes of a row group, and how many part files are written at once, each a whole number |
 | `compression` (output, parquet only) | `snappy` | `uncompressed` / `snappy` / `gzip` — `none` is an alias for `uncompressed`. Set `uncompressed` on tables whose schema is narrow-numeric (timestamps + prices etc.) where dictionary encoding alone is enough — they pay snappy CPU for negligible disk-size savings. |
 
 When `inferSchema = false`, pass an explicit schema:

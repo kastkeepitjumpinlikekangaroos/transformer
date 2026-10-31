@@ -1,7 +1,5 @@
 package com.transformer.core
 
-import java.util.Locale
-
 /** Per-query knobs the planner and spill-capable operators read at construction
   * time. Plumbed from `DataJob.runOneTask` through `SqlExecutor.execute` into
   * `PhysicalPlanner.plan` and finally to the breakers that opt into spill.
@@ -47,24 +45,25 @@ object ExecutionOptions {
   val Default: ExecutionOptions = ExecutionOptions()
 
   /** Config key for the master spill switch (read from `output.json`'s
-    * `options` map). Accepts `"true"`/`"1"` (case-insensitive); anything else
-    * leaves spill disabled — typos should fall back to the safe default rather
-    * than fail the task at config parse time. */
+    * `options` map): `true` or `false` ([[OptionValues.bool]]). */
   val SpillKey: String = "spill"
 
-  /** Config key for the per-operator spill threshold in bytes. Unparseable
-    * values are silently ignored (operator computes its own default). */
+  /** Config key for the per-operator spill threshold, a whole number of
+    * bytes; without one each operator computes its own default. */
   val SpillThresholdKey: String = "spill_threshold_bytes"
 
-  /** Config key for `spillMaxRuns`. Unparseable values fall back to
+  /** Config key for `spillMaxRuns`, a whole number; without one,
     * [[DefaultSpillMaxRuns]]. */
   val SpillMaxRunsKey: String = "spill_max_runs"
 
   /** Config key for the master metrics switch (read from `output.json`'s
-    * `options` map). Accepts `"true"`/`"1"` (case-insensitive); anything else
-    * leaves metrics disabled — typos should fall back to the safe default
-    * rather than fail the task at config parse time. Mirrors [[SpillKey]]. */
+    * `options` map): `true` or `false`. Mirrors [[SpillKey]]. */
   val MetricsKey: String = "metrics"
+
+  /** The keys of an output's `options` map that this reads; the map also
+    * carries its writer's ([[com.transformer.job.OutputFilePath]] checks
+    * them all). */
+  val Keys: Seq[String] = Seq(SpillKey, SpillThresholdKey, SpillMaxRunsKey, MetricsKey)
 
   /** Sentinel returned by [[triState]] when a key was not present in the
     * options map at all. Distinguishes "user didn't say" (-> global default
@@ -72,53 +71,76 @@ object ExecutionOptions {
     * override). */
   val UnsetTri: Int = 0
 
-  /** Returned by [[triState]] when a key was present and parsed as
-    * `true`. */
+  /** Returned by [[triState]] when a key was present and read `true`. */
   val TrueTri: Int = 1
 
-  /** Returned by [[triState]] when a key was present but parsed as
-    * `false` (any non-true value, including typos like `"yes"`). */
+  /** Returned by [[triState]] when a key was present and read `false`. */
   val FalseTri: Int = -1
 
   /** Tri-state read of a boolean config key. Returns [[UnsetTri]] when the key
-    * is absent (caller's global default applies), [[TrueTri]] when the key is
-    * present and parses as truthy, [[FalseTri]] otherwise. Used by
-    * `DataJob.runOneTask` to decide whether a per-task `options.metrics`
-    * value should override the env/sysprop global default. */
+    * is absent (caller's global default applies), and [[TrueTri]] or
+    * [[FalseTri]] for its value. Used by `DataJob.runOneTask` to decide
+    * whether a per-task `options.metrics` value should override the
+    * env/sysprop global default. */
   def triState(opts: Map[String, String], key: String): Int = opts.get(key) match {
     case None    => UnsetTri
-    case Some(v) => if (parseBool(v)) TrueTri else FalseTri
+    case Some(v) => if (OptionValues.bool(key, v)) TrueTri else FalseTri
   }
 
   /** Parse `ExecutionOptions` from the flat `options` map carried on
-    * `OutputFilePath` (mirrors the existing `parquet_write_parallelism` /
-    * `compression` plumbing). Any key not recognised is ignored — the same
-    * map also carries writer-specific keys.
-    *
-    * Tolerant by design: invalid booleans become `false`; invalid longs/ints
-    * become `None` / default. The user has many ways to break their config,
-    * and `spill: "yes"` running without spill is a better failure mode than
-    * the task refusing to load at all. */
-  def fromOutputOptions(opts: Map[String, String]): ExecutionOptions = {
-    val enabled = opts.get(SpillKey).exists(parseBool)
-    val threshold = opts.get(SpillThresholdKey).flatMap(parseLong).filter(_ > 0L)
-    val maxRuns = opts.get(SpillMaxRunsKey).flatMap(parseInt).filter(_ > 0).getOrElse(DefaultSpillMaxRuns)
-    val metrics = opts.get(MetricsKey).exists(parseBool)
+    * `OutputFilePath`, reading only its own [[Keys]]: the same map carries
+    * the writer's. Each value is read strictly ([[OptionValues]]), and one
+    * that is no value of its key is an error naming it. It was tolerant by
+    * design, so `"spill": "yes"` ran without spill and `"64MB"` as a
+    * threshold was ignored, with nothing said (plans/robustness/27). */
+  def fromOutputOptions(opts: Map[String, String]): ExecutionOptions =
     ExecutionOptions(
-      spillEnabled = enabled,
-      spillThresholdBytes = threshold,
-      spillMaxRuns = maxRuns,
-      metricsEnabled = metrics)
+      spillEnabled = opts.get(SpillKey).exists(OptionValues.bool(SpillKey, _)),
+      spillThresholdBytes = opts.get(SpillThresholdKey).map(OptionValues.positiveLong(SpillThresholdKey, _)),
+      spillMaxRuns = opts.get(SpillMaxRunsKey).map(OptionValues.positiveInt(SpillMaxRunsKey, _))
+        .getOrElse(DefaultSpillMaxRuns),
+      metricsEnabled = opts.get(MetricsKey).exists(OptionValues.bool(MetricsKey, _)))
+}
+
+/** How a value in a config's `options` map is read, the same way for every
+  * key of every reader and writer: strictly, a value that is none of its
+  * key's being an error naming the key and the value. Each reader had its own
+  * tolerance, so `"yes"` was true to the CSV reader and false to `spill`, and
+  * a size with a unit was ignored (plans/robustness/27). */
+object OptionValues {
+
+  /** `true` or `false`, in any case. */
+  def bool(key: String, value: String): Boolean =
+    if (value.equalsIgnoreCase("true")) true
+    else if (value.equalsIgnoreCase("false")) false
+    else throw new IllegalArgumentException(s"Option '$key' must be true or false, not '$value'")
+
+  /** A whole number, 1 or more, in ASCII digits: a size in bytes has no unit. */
+  def positiveLong(key: String, value: String): Long = {
+    val n =
+      if (value.nonEmpty && value.forall(c => c >= '0' && c <= '9'))
+        try java.lang.Long.parseLong(value) catch { case _: NumberFormatException => 0L }
+      else 0L
+    if (n < 1) throw new IllegalArgumentException(s"Option '$key' must be a whole number, 1 or more, not '$value'")
+    n
   }
 
-  private def parseBool(s: String): Boolean = {
-    val t = s.trim.toLowerCase(Locale.ROOT)
-    t == "true" || t == "1"
+  def positiveInt(key: String, value: String): Int = {
+    val n = positiveLong(key, value)
+    if (n > Int.MaxValue) throw new IllegalArgumentException(
+      s"Option '$key' must be a whole number from 1 to ${Int.MaxValue}, not '$value'")
+    n.toInt
   }
 
-  private def parseLong(s: String): Option[Long] =
-    try Some(s.trim.toLong) catch { case _: NumberFormatException => None }
+  /** A character set this JVM has. */
+  def charset(key: String, value: String): java.nio.charset.Charset =
+    try java.nio.charset.Charset.forName(value)
+    catch {
+      case _: IllegalArgumentException => throw new IllegalArgumentException(
+        s"Option '$key' must name a character set, such as UTF-8, not '$value'")
+    }
 
-  private def parseInt(s: String): Option[Int] =
-    try Some(s.trim.toInt) catch { case _: NumberFormatException => None }
+  /** The keys of `options` that `accepted` does not hold, for a refusal. */
+  def unknown(options: Map[String, String], accepted: Seq[String]): Seq[String] =
+    options.keys.toSeq.filterNot(accepted.contains).sorted
 }

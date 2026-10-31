@@ -21,6 +21,25 @@ class CsvWriterTest {
     b
   }
 
+  /** Reader and writer options are read strictly, by one rule
+    * ([[OptionValues]]): a boolean is true or false in any case, where each
+    * also took yes, no, 1 and 0, and a charset this JVM has, where an unknown
+    * one threw the JDK's own exception (plans/robustness/27). */
+  @Test def csvOptionsAreReadStrictly(): Unit = {
+    def refused(body: => Any): String =
+      try { body; fail("read"); "" } catch { case e: IllegalArgumentException => e.getMessage }
+    for (v <- Seq("yes", "no", "1", "0", "")) {
+      assertEquals(s"Option 'header' must be true or false, not '$v'", refused(CsvOptions.fromMap(Map("header" -> v))))
+      assertEquals(s"Option 'header' must be true or false, not '$v'", refused(CsvWriteOptions.fromMap(Map("header" -> v))))
+    }
+    assertEquals("Option 'charset' must name a character set, such as UTF-8, not 'UTF-9'",
+      refused(CsvOptions.fromMap(Map("charset" -> "UTF-9"))))
+    assertEquals("Option 'charset' must name a character set, such as UTF-8, not 'UTF-9'",
+      refused(CsvWriteOptions.fromMap(Map("charset" -> "UTF-9"))))
+    assertFalse(CsvOptions.fromMap(Map("header" -> "FALSE", "inferSchema" -> "False")).header)
+    assertEquals(StandardCharsets.ISO_8859_1, CsvWriteOptions.fromMap(Map("charset" -> "ISO-8859-1")).charset)
+  }
+
   @Test def writesHeaderAndSimpleRows(): Unit = {
     val s = Schema(Field("id", DataType.IntType), Field("name", DataType.StringType))
     val batch = makeBatch(s, Seq(Seq(1, "alice"), Seq(2, "bob")))

@@ -24,15 +24,14 @@ final case class CsvWriteOptions(
 }
 
 object CsvWriteOptions {
+  /** The option keys a CSV output's writer reads ([[fromMap]]). */
+  val Keys: Seq[String] = Seq("header", "delimiter", "quote", "escape", "nullValue", "charset", "lineEnding")
+
+  /** The options [[Keys]] name in `raw`, each read strictly ([[OptionValues]]);
+    * the map carries the task's execution options too, whose keys the
+    * caller checks. */
   def fromMap(raw: Map[String, String]): CsvWriteOptions = {
-    def bool(key: String, default: Boolean): Boolean =
-      raw.get(key).map(_.trim.toLowerCase(Locale.ROOT)) match {
-        case None => default
-        case Some("true") | Some("1") | Some("yes") => true
-        case Some("false") | Some("0") | Some("no") => false
-        case Some(other) =>
-          throw new IllegalArgumentException(s"Invalid boolean for option '$key': '$other'")
-      }
+    def bool(key: String, default: Boolean): Boolean = raw.get(key).map(OptionValues.bool(key, _)).getOrElse(default)
     def chr(key: String, default: Char): Char = raw.get(key) match {
       case None => default
       case Some(s) if s.length == 1 => s.charAt(0)
@@ -46,7 +45,7 @@ object CsvWriteOptions {
       quote = chr("quote", default = '"'),
       escape = chr("escape", default = '"'),
       nullValue = raw.getOrElse("nullValue", ""),
-      charset = raw.get("charset").map(Charset.forName).getOrElse(StandardCharsets.UTF_8),
+      charset = raw.get("charset").map(OptionValues.charset("charset", _)).getOrElse(StandardCharsets.UTF_8),
       lineEnding = raw.getOrElse("lineEnding", "\n")
     )
   }

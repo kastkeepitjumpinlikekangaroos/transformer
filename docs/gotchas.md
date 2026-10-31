@@ -1573,6 +1573,22 @@ ship a fix or move something from "not done" to "done".
   blank), and a column name that is empty is quoted, so a header is never a
   blank line. Whether a line is blank is the parser's to say (`blank`), whether
   it is a row the reader's, which knows how many columns the file has.
+- **Job configs used to skip the keys they did not know — fixed.**
+  `DirectoryJobLoader` read the keys it knew, each options reader read its own
+  from one shared map, `ExecutionOptions` documented that "typos should fall
+  back to the safe default", and the JSON parser kept a repeated key's last
+  value. So a job with a typo in every config file Succeeded: `"formatt"` and
+  `"partiton_by"` were skipped, `"delimeter": ";"` read `a;b` as one column,
+  `"spill": "yes"` ran without spill and `"64MB"` as a threshold was ignored.
+  Now an unknown key, a repeated one, an option its format does not read
+  (`InputFilePath.optionKeys`, `OutputFilePath.optionKeys`), a value that is
+  none of its option's (`OptionValues`: `true` or `false`, a whole number of
+  1 or more, a charset the JVM has) and a format other than csv or parquet
+  fail the load, naming the file, the key and what it takes. The checks run
+  where an input or output is declared, so a job built in code, and the GUI
+  through `JobFiles`, refuse the same (plans/robustness/27). The global
+  metrics switch (`transformer.metrics.enabled` / `TRANSFORMER_METRICS_ENABLED`) is no config
+  file and keeps its own reading.
 - **A task's output and a CSV header used to repeat a column name — fixed.**
   Names match regardless of case, so `a` and `A` are one name, yet a task
   returning `SELECT a, a, b AS A` Succeeded and wrote three columns named a,

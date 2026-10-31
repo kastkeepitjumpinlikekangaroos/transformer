@@ -64,20 +64,14 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
   // per-table via `output.json` -> `options.compression`. Accepts `SNAPPY`,
   // `GZIP`, `UNCOMPRESSED` / `NONE` (the legacy alias is kept for symmetry
   // with Spark's option strings).
-  private val codec: CompressionCodecName = options.get("compression").map(_.toUpperCase(Locale.ROOT)) match {
-    case Some("SNAPPY") | None => CompressionCodecName.SNAPPY
-    case Some("UNCOMPRESSED") | Some("NONE") => CompressionCodecName.UNCOMPRESSED
-    case Some("GZIP") => CompressionCodecName.GZIP
-    case Some(other) => throw new IllegalArgumentException(s"Unsupported parquet compression: $other")
-  }
+  private val codec: CompressionCodecName = ParquetWriter.codecOf(options)
 
   // Row group size = peak heap held per writer (uncompressed buffer waiting to flush).
   // parquet-mr's 128MB default × N parallel partition writers blows past modest heaps
   // in writePartitioned. 32MB is a healthy compromise: still good IO patterns and
   // compression ratios, but bounded enough that 10 in-flight writers fit in <1GB.
   // Override via options("parquet_row_group_size") (bytes).
-  private val rowGroupSize: Long =
-    options.get("parquet_row_group_size").map(_.toLong).getOrElse(ParquetWriter.DefaultRowGroupSize)
+  private val rowGroupSize: Long = ParquetWriter.rowGroupSizeOf(options)
 
   private val writer: org.apache.parquet.hadoop.ParquetWriter[BatchRowRef] =
     new BatchParquetWriterBuilder(new HPath(tmp.toUri), schema, messageType)
@@ -123,6 +117,36 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
 }
 
 object ParquetWriter {
+
+  /** The option keys a parquet output's writer reads. */
+  val Keys: Seq[String] = Seq("compression", "parquet_row_group_size", "parquet_write_parallelism")
+
+  /** Read each option [[Keys]] names in `options`, failing on one that is no
+    * value of its key, as the writer would once a task had run; the map
+    * carries the task's execution options too, whose keys the caller checks. */
+  def checkOptions(options: Map[String, String]): Unit = {
+    codecOf(options); rowGroupSizeOf(options); writeParallelismOf(options); ()
+  }
+
+  /** `compression`: `snappy` (the default), `gzip`, or `uncompressed` and
+    * its alias `none`, in any case. */
+  private[parquet] def codecOf(options: Map[String, String]): CompressionCodecName =
+    options.get("compression").map(v => (v, v.toUpperCase(Locale.ROOT))) match {
+      case None | Some((_, "SNAPPY")) => CompressionCodecName.SNAPPY
+      case Some((_, "UNCOMPRESSED")) | Some((_, "NONE")) => CompressionCodecName.UNCOMPRESSED
+      case Some((_, "GZIP")) => CompressionCodecName.GZIP
+      case Some((v, _)) => throw new IllegalArgumentException(
+        s"Option 'compression' must be snappy, gzip, uncompressed or none, not '$v'")
+    }
+
+  /** `parquet_row_group_size`: a whole number of bytes. */
+  private[parquet] def rowGroupSizeOf(options: Map[String, String]): Long =
+    options.get("parquet_row_group_size").map(OptionValues.positiveLong("parquet_row_group_size", _))
+      .getOrElse(DefaultRowGroupSize)
+
+  /** `parquet_write_parallelism`: how many part files are written at once. */
+  private[parquet] def writeParallelismOf(options: Map[String, String]): Option[Int] =
+    options.get("parquet_write_parallelism").map(OptionValues.positiveInt("parquet_write_parallelism", _))
   /** Per-writer row-group buffer cap. parquet-mr defaults to 128MB which OOMs
     * when several writers run in parallel under a modest heap; 32MB keeps page
     * dictionaries effective while letting `writePartitioned` fan out safely.
@@ -186,7 +210,7 @@ object ParquetWriter {
     // pool of `cores` writers blows past a modest heap before any data flushes;
     // `defaultWriteParallelism` clamps to `min(cores, heap/256MB)`. Override via
     // options("parquet_write_parallelism") when the workload knows better.
-    val cap = options.get("parquet_write_parallelism").map(_.toInt).getOrElse(defaultWriteParallelism())
+    val cap = writeParallelismOf(options).getOrElse(defaultWriteParallelism())
     val parallelism = math.max(1, math.min(n, cap))
     val writers = new Array[ParquetWriter](n)
 

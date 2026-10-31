@@ -87,14 +87,15 @@ object DirectoryJobLoader {
       val viewName = dir.getFileName.toString
       val configPath = findSingleJson(dir, viewName)
       val ctx = s"input '$viewName' (${configPath.getFileName})"
-      val obj = Json.parse(Files.readString(configPath)).asObject(ctx)
-      InputFilePath(
+      val obj = parseConfig(configPath, ctx)
+      refuseUnknownKeys(obj, InputFilePath.ConfigKeys, "an input's config", ctx)
+      inContext(ctx)(InputFilePath(
         path = resolvePath(jobDir, obj.requiredString("path", ctx)),
         viewName = viewName,
         options = obj.optStringMap("options", ctx).getOrElse(Map.empty),
         cache = obj.optBool("cache", ctx).getOrElse(true),
         format = obj.optString("format", ctx)
-      )
+      ))
     }
   }
 
@@ -119,12 +120,12 @@ object DirectoryJobLoader {
         name = Some(viewName),
         viewName = Some(viewName),
         sqlFile = Some(mainSql.toString),
-        outputFile = Some(OutputFilePath(
+        outputFile = Some(inContext(s"table '$viewName' (output.json)")(OutputFilePath(
           outputPath,
           options = cfg.options,
           format = Some(cfg.format.getOrElse("csv")),
           maxPartitions = cfg.maxPartitions
-        )),
+        ))),
         validations = validations
       )
     }
@@ -155,13 +156,15 @@ object DirectoryJobLoader {
     *     For CSV see [[com.transformer.write.csv.CsvWriteOptions.fromMap]].
     *
     * Returns an empty [[OutputConfig]] if `output.json` is absent. Throws
-    * [[IllegalArgumentException]] if it exists but is malformed.
+    * [[IllegalArgumentException]] if it exists but is malformed or holds a
+    * key it does not take.
     */
   private def loadOutputConfig(tableDir: Path, viewName: String): OutputConfig = {
     val configPath = tableDir.resolve("output.json")
     if (!Files.isRegularFile(configPath)) return OutputConfig(None, None, None, Map.empty)
     val ctx = s"table '$viewName' (output.json)"
-    val obj = Json.parse(Files.readString(configPath)).asObject(ctx)
+    val obj = parseConfig(configPath, ctx)
+    refuseUnknownKeys(obj, OutputFilePath.ConfigKeys, "a table's output.json", ctx)
     val maxPartitions = obj.get("maxPartitions").map { v =>
       val n = try v.stringValue.toInt catch {
         case _: NumberFormatException =>
@@ -178,6 +181,26 @@ object DirectoryJobLoader {
       options = obj.optStringMap("options", ctx).getOrElse(Map.empty)
     )
   }
+
+  /** The JSON object in `configPath`, its parse error named with the file. */
+  private def parseConfig(configPath: Path, ctx: String): JsonObject =
+    inContext(ctx)(Json.parse(Files.readString(configPath))).asObject(ctx)
+
+  /** A key the config does not take, which the loader used to skip, so a
+    * misspelt one (`formatt`, `partiton_by`) changed nothing and said
+    * nothing (plans/robustness/27). */
+  private def refuseUnknownKeys(obj: JsonObject, accepted: Seq[String], what: String, ctx: String): Unit =
+    obj.fields.keys.toSeq.sorted.find(k => !accepted.contains(k)).foreach { key =>
+      throw new IllegalArgumentException(s"$ctx: unknown key '$key'; $what takes ${accepted.mkString(", ")}")
+    }
+
+  /** `body`, an error from it naming `ctx` too. */
+  private def inContext[A](ctx: String)(body: => A): A =
+    try body
+    catch {
+      case e: IllegalArgumentException if !String.valueOf(e.getMessage).startsWith(ctx) =>
+        throw new IllegalArgumentException(s"$ctx: ${e.getMessage}", e)
+    }
 
   private def loadValidations(validationsDir: Path): Seq[Validation] = {
     if (!Files.isDirectory(validationsDir)) return Nil

@@ -105,6 +105,20 @@ class JsonTest {
     assertTrue(ex.getMessage.contains("Unterminated string"))
   }
 
+  /** A key written twice in one object is an error naming it; the second
+    * value used to replace the first unsaid (plans/robustness/27). The same
+    * key in two objects is two keys. */
+  @Test def errorsOnAKeyWrittenTwice(): Unit = {
+    val ex = assertThrows(classOf[IllegalArgumentException],
+      () => Json.parse("""{"path": "t.csv", "path": "missing.csv"}"""))
+    assertEquals("JSON parse error at position 18: the key \"path\" is written twice in one object", ex.getMessage)
+    val nested = assertThrows(classOf[IllegalArgumentException],
+      () => Json.parse("""{"options": {"header": true, "header": false}}"""))
+    assertTrue(nested.getMessage, nested.getMessage.contains("the key \"header\" is written twice"))
+    assertEquals(JsonString("x"), Json.parse("""{"a": {"k": 1}, "b": {"k": "x"}}""").asObject("ctx")
+      .get("b").get.asObject("ctx").get("k").get)
+  }
+
   @Test def stringMapRejectsNestedObjects(): Unit = {
     val obj = Json.parse("""{"o": {"k": {"nested": 1}}}""").asObject("ctx")
     val ex = assertThrows(classOf[IllegalArgumentException],

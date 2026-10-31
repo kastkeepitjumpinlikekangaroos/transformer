@@ -1,6 +1,6 @@
 # Plan 27: job configs ignore keys they do not know and values they cannot read
 
-> Status: planned · found by the 2026-10-31 audit · decided by the user: an
+> Status: **done** 2026-10-31 · found by the 2026-10-31 audit · decided by the user: an
 > error when the job loads, naming the key · Effort: 1 day · Risk: medium
 > (configs that load today may not; reverses ExecutionOptions' tolerant rule)
 
@@ -50,3 +50,24 @@ strict loader on every generated job.
 ## Docs
 
 README (inputs, output.json options), gotchas, testing.md.
+
+## Outcome
+
+Done as planned. The JSON parser refuses a key written twice in one object,
+and `DirectoryJobLoader` a config key the file does not take
+(`InputFilePath.ConfigKeys`, `OutputFilePath.ConfigKeys`), naming the file,
+the key and the accepted ones. `InputFilePath` and `OutputFilePath` check, as
+they are constructed, that the format is csv or parquet, that each option is
+one the format reads (the reader's, or the writer's and the execution keys),
+and that each value reads, so a job built in code and the GUI's `JobFiles`
+writes refuse what the loader does, before anything is written. `OptionValues`
+is the one strict reading of a value: `true` or `false` in any case (CSV took
+yes, no, 1 and 0, and `spill` read anything else as false), a whole number of
+1 or more, and a charset the JVM has. `ExecutionOptions`, the CSV reader and
+writer and the parquet writer and reader all read through it.
+
+The global metrics switch, read from the environment and a system property by
+`MetricsCollector`, is no config file and keeps its own reading. Seven new
+tests in `json_test`, `directory_job_loader_test`, `job_files_test`,
+`csv_writer_test` and `execution_options_test` failed against the code
+before; the DAG fuzzer's generated jobs load under the strict loader.

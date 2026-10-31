@@ -1,5 +1,9 @@
 package com.transformer.job
 
+import com.transformer.core.ExecutionOptions
+import com.transformer.write.csv.CsvWriteOptions
+import com.transformer.write.parquet.ParquetWriter
+
 import java.util.Locale
 
 /** Description of one output target.
@@ -19,6 +23,12 @@ import java.util.Locale
   *     file behaviour).
   *
   * Cloud destinations (`gs://`, `s3://`) are recognized but unsupported in v1.
+  *
+  * `options` holds the writer's options and the task's execution options
+  * ([[ExecutionOptions.Keys]]). A format other than csv or parquet, an option
+  * neither reads and a value that is none of its option's are errors when
+  * the output is declared, where each used to be ignored or fall back to a
+  * default (plans/robustness/27).
   */
 final case class OutputFilePath(
     path: String,
@@ -30,6 +40,7 @@ final case class OutputFilePath(
     throw new IllegalArgumentException(
       s"OutputFilePath.maxPartitions must be >= 1 if set; got ${maxPartitions.get}"
     )
+  OutputFilePath.check(this)
 
   def detectedFormat: String = format.map(_.toLowerCase(Locale.ROOT)).getOrElse {
     val lower = path.toLowerCase(Locale.ROOT)
@@ -41,4 +52,24 @@ final case class OutputFilePath(
   }
 
   def isCloud: Boolean = path.startsWith("gs://") || path.startsWith("s3://")
+}
+
+object OutputFilePath {
+
+  /** The keys of a table's `output.json`. */
+  val ConfigKeys: Seq[String] = Seq("partitionBy", "format", "maxPartitions", "options")
+
+  /** The option keys an output of `format` reads: its writer's and the
+    * task's execution options. */
+  def optionKeys(format: String): Seq[String] =
+    (if (format == "parquet") ParquetWriter.Keys else CsvWriteOptions.Keys) ++ ExecutionOptions.Keys
+
+  private def check(out: OutputFilePath): Unit = {
+    InputFilePath.checkFormat(out.format, "output")
+    val format = out.detectedFormat
+    InputFilePath.refuseUnknown(out.options, optionKeys(format), s"a $format output")
+    if (format == "parquet") ParquetWriter.checkOptions(out.options) else CsvWriteOptions.fromMap(out.options)
+    ExecutionOptions.fromOutputOptions(out.options)
+    ()
+  }
 }

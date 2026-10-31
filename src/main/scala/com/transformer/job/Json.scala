@@ -170,7 +170,12 @@ private final class JsonParser(input: String) {
     while (!done) {
       skipWs()
       if (peek != '"') error("Object key must be a string")
+      val keyAt = pos
       val key = parseString()
+      // A key written twice in one object is a mistake whichever value was
+      // meant, and the second used to replace the first unsaid
+      // (plans/robustness/27).
+      if (fields.contains(key)) { pos = keyAt; error("the key \"" + Json.escape(key) + "\" is written twice in one object") }
       skipWs()
       expect(':')
       val v = parseValue()

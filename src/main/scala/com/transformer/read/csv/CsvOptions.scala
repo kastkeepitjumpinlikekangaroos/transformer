@@ -1,9 +1,8 @@
 package com.transformer.read.csv
 
-import com.transformer.core.{ColumnarBatch, Field, Schema}
+import com.transformer.core.{ColumnarBatch, Field, OptionValues, Schema}
 
 import java.nio.charset.{Charset, StandardCharsets}
-import java.util.Locale
 
 /** Configuration for [[CsvReader]].
   *
@@ -29,15 +28,14 @@ final case class CsvOptions(
 
 object CsvOptions {
   /** Parse a flat string-keyed option bag as supplied through `InputFilePath.options`. */
+  /** The option keys a CSV input reads ([[fromMap]]). */
+  val Keys: Seq[String] = Seq("inferSchema", "header", "delimiter", "quote", "escape", "nullValue", "charset")
+
+  /** The options [[Keys]] name in `raw`, each read strictly ([[OptionValues]]);
+    * a key it does not read is the caller's to refuse, since an output's map,
+    * read back by [[forWrittenFile]], carries its writer's keys too. */
   def fromMap(raw: Map[String, String]): CsvOptions = {
-    def bool(key: String, default: Boolean): Boolean =
-      raw.get(key).map(_.trim.toLowerCase(Locale.ROOT)) match {
-        case None | Some("") => default
-        case Some("true") | Some("1") | Some("yes") => true
-        case Some("false") | Some("0") | Some("no") => false
-        case Some(other) =>
-          throw new IllegalArgumentException(s"Invalid boolean for option '$key': '$other'")
-      }
+    def bool(key: String, default: Boolean): Boolean = raw.get(key).map(OptionValues.bool(key, _)).getOrElse(default)
     def chr(key: String, default: Char): Char = raw.get(key) match {
       case None => default
       case Some(s) if s.length == 1 => s.charAt(0)
@@ -52,7 +50,7 @@ object CsvOptions {
       quote = chr("quote", default = '"'),
       escape = chr("escape", default = '"'),
       nullValue = raw.getOrElse("nullValue", ""),
-      charset = raw.get("charset").map(Charset.forName).getOrElse(StandardCharsets.UTF_8),
+      charset = raw.get("charset").map(OptionValues.charset("charset", _)).getOrElse(StandardCharsets.UTF_8),
       columns = None
     )
   }

@@ -5,6 +5,10 @@ import org.junit.Test
 
 class ExecutionOptionsTest {
 
+  private def refused(opts: Map[String, String]): String =
+    try { ExecutionOptions.fromOutputOptions(opts); fail(s"$opts was read"); "" }
+    catch { case e: IllegalArgumentException => e.getMessage }
+
   @Test def defaultDisablesSpill(): Unit = {
     val d = ExecutionOptions.Default
     assertFalse(d.spillEnabled)
@@ -22,24 +26,19 @@ class ExecutionOptionsTest {
     assertTrue(opts.spillEnabled)
   }
 
-  @Test def spillOneEnablesSpill(): Unit = {
-    val opts = ExecutionOptions.fromOutputOptions(Map("spill" -> "1"))
-    assertTrue(opts.spillEnabled)
-  }
 
   @Test def spillIsCaseInsensitive(): Unit = {
     assertTrue(ExecutionOptions.fromOutputOptions(Map("spill" -> "TRUE")).spillEnabled)
     assertTrue(ExecutionOptions.fromOutputOptions(Map("spill" -> "True")).spillEnabled)
   }
 
-  @Test def spillTolerantOfTypo(): Unit = {
-    // Per plan edge case #11: any non-true/1 value silently disables spill
-    // rather than throwing — failure mode is "ran without spill" not
-    // "config refused to load".
-    assertFalse(ExecutionOptions.fromOutputOptions(Map("spill" -> "yes")).spillEnabled)
+  /** A value that is not true or false is an error naming the key. Any
+    * other value used to leave spill off, so `"spill": "yes"` ran without
+    * spill and said nothing (plans/robustness/27). */
+  @Test def spillIsTrueOrFalse(): Unit = {
     assertFalse(ExecutionOptions.fromOutputOptions(Map("spill" -> "false")).spillEnabled)
-    assertFalse(ExecutionOptions.fromOutputOptions(Map("spill" -> "0")).spillEnabled)
-    assertFalse(ExecutionOptions.fromOutputOptions(Map("spill" -> "")).spillEnabled)
+    for (v <- Seq("yes", "0", "1", "", " true"))
+      assertEquals(s"Option 'spill' must be true or false, not '$v'", refused(Map("spill" -> v)))
   }
 
   @Test def spillThresholdBytesParses(): Unit = {
@@ -49,18 +48,12 @@ class ExecutionOptionsTest {
     assertEquals(Some(1073741824L), opts.spillThresholdBytes)
   }
 
-  @Test def spillThresholdBytesIgnoresBadValues(): Unit = {
-    val opts = ExecutionOptions.fromOutputOptions(Map(
-      "spill" -> "true",
-      "spill_threshold_bytes" -> "not-a-number"))
-    assertEquals(None, opts.spillThresholdBytes)
-  }
-
-  @Test def spillThresholdBytesIgnoresZeroAndNegative(): Unit = {
-    assertEquals(None, ExecutionOptions.fromOutputOptions(Map(
-      "spill_threshold_bytes" -> "0")).spillThresholdBytes)
-    assertEquals(None, ExecutionOptions.fromOutputOptions(Map(
-      "spill_threshold_bytes" -> "-100")).spillThresholdBytes)
+  /** A size is a whole number of bytes, 1 or more; `64MB` and the rest were
+    * ignored, leaving the operator's own default. */
+  @Test def spillThresholdBytesIsAWholeNumber(): Unit = {
+    for (v <- Seq("not-a-number", "64MB", "0", "-100", "1.5", "99999999999999999999"))
+      assertEquals(s"Option 'spill_threshold_bytes' must be a whole number, 1 or more, not '$v'",
+        refused(Map("spill" -> "true", "spill_threshold_bytes" -> v)))
   }
 
   @Test def spillMaxRunsParses(): Unit = {
@@ -68,20 +61,17 @@ class ExecutionOptionsTest {
     assertEquals(50, opts.spillMaxRuns)
   }
 
-  @Test def spillMaxRunsDefaultsOnBadValue(): Unit = {
-    val opts = ExecutionOptions.fromOutputOptions(Map("spill_max_runs" -> "xxx"))
-    assertEquals(ExecutionOptions.DefaultSpillMaxRuns, opts.spillMaxRuns)
-  }
-
-  @Test def spillMaxRunsDefaultsOnZero(): Unit = {
-    val opts = ExecutionOptions.fromOutputOptions(Map("spill_max_runs" -> "0"))
-    assertEquals(ExecutionOptions.DefaultSpillMaxRuns, opts.spillMaxRuns)
+  @Test def spillMaxRunsIsAWholeNumber(): Unit = {
+    for (v <- Seq("xxx", "0", "-1"))
+      assertEquals(s"Option 'spill_max_runs' must be a whole number, 1 or more, not '$v'",
+        refused(Map("spill_max_runs" -> v)))
+    assertTrue(refused(Map("spill_max_runs" -> "3000000000")).contains("from 1 to 2147483647"))
   }
 
   @Test def unknownKeysAreIgnored(): Unit = {
     // OutputFilePath.options is shared with writer config — keys like
     // `compression`, `parquet_write_parallelism` ride along and must not
-    // affect spill parsing.
+    // affect spill parsing. OutputFilePath checks the keys.
     val opts = ExecutionOptions.fromOutputOptions(Map(
       "spill" -> "true",
       "compression" -> "SNAPPY",
@@ -102,23 +92,16 @@ class ExecutionOptionsTest {
     assertTrue(opts.metricsEnabled)
   }
 
-  @Test def metricsOneEnablesMetrics(): Unit = {
-    val opts = ExecutionOptions.fromOutputOptions(Map("metrics" -> "1"))
-    assertTrue(opts.metricsEnabled)
-  }
 
   @Test def metricsIsCaseInsensitive(): Unit = {
     assertTrue(ExecutionOptions.fromOutputOptions(Map("metrics" -> "TRUE")).metricsEnabled)
     assertTrue(ExecutionOptions.fromOutputOptions(Map("metrics" -> "True")).metricsEnabled)
   }
 
-  @Test def metricsTolerantOfTypo(): Unit = {
-    // Mirrors the spill parse semantics — typos silently disable metrics
-    // rather than throwing.
-    assertFalse(ExecutionOptions.fromOutputOptions(Map("metrics" -> "yes")).metricsEnabled)
+  @Test def metricsIsTrueOrFalse(): Unit = {
     assertFalse(ExecutionOptions.fromOutputOptions(Map("metrics" -> "false")).metricsEnabled)
-    assertFalse(ExecutionOptions.fromOutputOptions(Map("metrics" -> "0")).metricsEnabled)
-    assertFalse(ExecutionOptions.fromOutputOptions(Map("metrics" -> "")).metricsEnabled)
+    for (v <- Seq("yes", "0", "1", ""))
+      assertEquals(s"Option 'metrics' must be true or false, not '$v'", refused(Map("metrics" -> v)))
   }
 
   @Test def metricsComposesWithSpill(): Unit = {
@@ -140,12 +123,12 @@ class ExecutionOptionsTest {
     // Key present and truthy -> TrueTri.
     assertEquals(ExecutionOptions.TrueTri,
       ExecutionOptions.triState(Map(ExecutionOptions.MetricsKey -> "true"), ExecutionOptions.MetricsKey))
-    assertEquals(ExecutionOptions.TrueTri,
-      ExecutionOptions.triState(Map(ExecutionOptions.MetricsKey -> "1"), ExecutionOptions.MetricsKey))
-    // Key present but falsy (including typos) -> FalseTri.
+    // Key present and false -> FalseTri.
     assertEquals(ExecutionOptions.FalseTri,
       ExecutionOptions.triState(Map(ExecutionOptions.MetricsKey -> "false"), ExecutionOptions.MetricsKey))
-    assertEquals(ExecutionOptions.FalseTri,
-      ExecutionOptions.triState(Map(ExecutionOptions.MetricsKey -> "yes"), ExecutionOptions.MetricsKey))
+    // Anything else is an error, where a typo read as false.
+    for (v <- Seq("1", "yes"))
+      try { ExecutionOptions.triState(Map(ExecutionOptions.MetricsKey -> v), ExecutionOptions.MetricsKey); fail(v) }
+      catch { case e: IllegalArgumentException => assertTrue(e.getMessage, e.getMessage.contains("'metrics'")) }
   }
 }

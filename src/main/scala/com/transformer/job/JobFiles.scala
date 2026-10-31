@@ -106,6 +106,9 @@ object JobFiles {
   ): Path = {
     requireValidName(viewName)
     requireNonEmpty(path, "Input path")
+    // The loader refuses a format, an option or a value it cannot read, so
+    // they are refused here, before the config is written.
+    InputFilePath(path, viewName, options, cache, format)
     val viewDir = jobDir.resolve("inputs").resolve(viewName)
     if (Files.exists(viewDir))
       throw new IllegalArgumentException(s"Input '$viewName' already exists.")
@@ -128,6 +131,7 @@ object JobFiles {
       options: Map[String, String]
   ): Path = {
     requireNonEmpty(path, "Input path")
+    InputFilePath(path, viewName, options, cache, format)
     val viewDir = jobDir.resolve("inputs").resolve(viewName)
     if (!Files.isDirectory(viewDir))
       throw new IllegalArgumentException(s"Input '$viewName' does not exist.")
@@ -153,6 +157,7 @@ object JobFiles {
   ): Path = {
     requireValidName(viewName)
     maxPartitions.foreach(requirePositive)
+    InputFilePath.checkFormat(format.filter(_.nonEmpty), "output")
     val viewDir = jobDir.resolve("tables").resolve(viewName)
     if (Files.exists(viewDir))
       throw new IllegalArgumentException(s"Table '$viewName' already exists.")
@@ -175,6 +180,7 @@ object JobFiles {
       maxPartitions: Option[Int]
   ): Unit = {
     maxPartitions.foreach(requirePositive)
+    InputFilePath.checkFormat(format.filter(_.nonEmpty), "output")
     val viewDir = jobDir.resolve("tables").resolve(viewName)
     if (!Files.isDirectory(viewDir))
       throw new IllegalArgumentException(s"Table '$viewName' does not exist.")
