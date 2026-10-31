@@ -244,6 +244,13 @@ specific traps.
   (`HashJoinExec.columnHashCode`) that separates two equal keys loses the match
   as surely as a hash map would. The one deliberate exception is floats, which
   keys group by bit pattern ([architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers)).
+- **Integer arithmetic goes through `Integers`.** An INT or BIGINT result
+  past its type is an error naming the operation (`Integers` in `Ops.scala`),
+  on the row path, in `VecOps`' loops, in `ABS` and in every CAST to an
+  integer; plain `+`, `*` or `Number.intValue` wraps or saturates silently. An
+  aggregate that adds integers keeps the exact sum and checks it once, at the
+  end, so whether it fails does not depend on row order or partitions
+  (`LongSumState`'s 128-bit sum).
 - **A decimal result is computed exactly and fitted to its declared type,
   once.** An operation or aggregate that produces a `DECIMAL` declares its type
   through `Decimals` (`resultType`, `sumType`, `avgType`, or a rule of the same

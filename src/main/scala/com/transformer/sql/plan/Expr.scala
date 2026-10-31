@@ -160,8 +160,8 @@ final case class UnaryOpExpr(op: String, child: Expr, dataType: DataType) extend
       case "NOT" => !v.asInstanceOf[Boolean]
       case "-" =>
         dataType match {
-          case DataType.IntType => -(v.asInstanceOf[Number].intValue)
-          case DataType.LongType => -(v.asInstanceOf[Number].longValue)
+          case DataType.IntType => Integers.negate(v.asInstanceOf[Number].intValue)
+          case DataType.LongType => Integers.negate(v.asInstanceOf[Number].longValue)
           case DataType.FloatType => -(v.asInstanceOf[Number].floatValue)
           case DataType.DoubleType => -(v.asInstanceOf[Number].doubleValue)
           case _: DataType.DecimalType => v.asInstanceOf[java.math.BigDecimal].negate

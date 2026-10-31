@@ -98,6 +98,11 @@ object ModeDifferential {
     try { LogicalBuilder.build(qc.sql, catalogOf(qc.dataset.singlePartition())); None }
     catch { case e: IllegalArgumentException => Some(rejectReason(e)) }
 
+  /** The baseline and every comparison mode, for a property that holds each
+    * to an answer of its own rather than to the baseline. */
+  private[fuzz] def allModes(d: DataGen.Dataset): Seq[(String, MaterializedView, ExecutionOptions)] =
+    ("baseline", d.singlePartition(), ExecutionOptions.Default) +: modes(d)
+
   /** The comparison modes (baseline excluded): each is a (label, input layout,
     * options). One execution per entry; keep the count modest so the default
     * `bazel test //...` run stays fast. */

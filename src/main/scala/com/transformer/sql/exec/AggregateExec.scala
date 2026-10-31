@@ -904,17 +904,35 @@ object SumState {
     case _ => new DoubleSumState()
   }
 }
+/** `SUM` of INTs or BIGINTs, exact. The running sum is kept in 128 bits, the
+  * two's complement `hi`:`lo`, which no number of rows can overflow, so
+  * whether the answer fits its BIGINT is decided once, from the true sum, at
+  * [[finish]]: an error there is the SUM's, never a partial sum's that the row
+  * order, the partitions or a spill happened to reach first (`MAX + 1 - 1` in
+  * one order and `MAX - 1 + 1` in another). */
 final class LongSumState extends SumState {
-  private var sum: Long = 0L
+  private var lo: Long = 0L
+  private var hi: Long = 0L
   private var sawAny: Boolean = false
+
+  /** Add the 128-bit `aHi`:`aLo`: the low words as unsigned 64-bit numbers,
+    * their carry into the high words. */
+  private def add(aHi: Long, aLo: Long): Unit = {
+    val s = lo + aLo
+    hi += aHi + (if (java.lang.Long.compareUnsigned(s, lo) < 0) 1L else 0L)
+    lo = s
+  }
+  /** Add `v`, sign-extended to 128 bits. */
+  private def add(v: Long): Unit = add(v >> 63, v)
+
   def updateAt(argVecs: Array[ColumnVector], r: Int): Unit = argVecs(0) match {
     case lv: LongVector =>
-      if (!lv.isNull(r)) { sum += lv.values(r); sawAny = true }
+      if (!lv.isNull(r)) { add(lv.values(r)); sawAny = true }
     case iv: IntVector =>
-      if (!iv.isNull(r)) { sum += iv.values(r).toLong; sawAny = true }
+      if (!iv.isNull(r)) { add(iv.values(r).toLong); sawAny = true }
     case other =>
       if (!other.isNull(r)) {
-        sum += other.getBoxed(r).asInstanceOf[Number].longValue
+        add(other.getBoxed(r).asInstanceOf[Number].longValue)
         sawAny = true
       }
   }
@@ -922,20 +940,20 @@ final class LongSumState extends SumState {
     case lv: LongVector =>
       var r = 0
       while (r < n) {
-        if (!lv.isNull(r)) { sum += lv.values(r); sawAny = true }
+        if (!lv.isNull(r)) { add(lv.values(r)); sawAny = true }
         r += 1
       }
     case iv: IntVector =>
       var r = 0
       while (r < n) {
-        if (!iv.isNull(r)) { sum += iv.values(r).toLong; sawAny = true }
+        if (!iv.isNull(r)) { add(iv.values(r).toLong); sawAny = true }
         r += 1
       }
     case other =>
       var r = 0
       while (r < n) {
         if (!other.isNull(r)) {
-          sum += other.getBoxed(r).asInstanceOf[Number].longValue
+          add(other.getBoxed(r).asInstanceOf[Number].longValue)
           sawAny = true
         }
         r += 1
@@ -943,16 +961,20 @@ final class LongSumState extends SumState {
   }
   def merge(o: AggState): Unit = {
     val that = o.asInstanceOf[LongSumState]
-    sum += that.sum
+    add(that.hi, that.lo)
     sawAny = sawAny || that.sawAny
   }
-  def finish(): Any = if (sawAny) sum else null
+  def finish(): Any =
+    if (!sawAny) null
+    else if (hi == (lo >> 63)) lo
+    else Integers.sumFits(java.math.BigInteger.valueOf(hi).shiftLeft(64)
+      .add(new java.math.BigInteger(java.lang.Long.toUnsignedString(lo))))
 
   override private[exec] def writeSelf(out: DataOutput): Unit = {
-    out.writeBoolean(sawAny); out.writeLong(sum)
+    out.writeBoolean(sawAny); out.writeLong(lo); out.writeLong(hi)
   }
   override private[exec] def readSelf(in: DataInput): Unit = {
-    sawAny = in.readBoolean(); sum = in.readLong()
+    sawAny = in.readBoolean(); lo = in.readLong(); hi = in.readLong()
   }
 }
 final class DoubleSumState extends SumState {

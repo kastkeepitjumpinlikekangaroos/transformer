@@ -2,7 +2,7 @@ package com.transformer.fuzz
 
 import com.transformer.core._
 import com.transformer.fuzz.QueryGen._
-import com.transformer.fuzz.oracle.{ModeDifferential, RelEngine}
+import com.transformer.fuzz.oracle.{ExactIntegers, ModeDifferential, RelEngine}
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -65,6 +65,40 @@ class ModeDifferentialFuzzTest {
   }
 
   // ---- the property -------------------------------------------------------
+
+  /** `SUM` over BIGINT values at the edges an integer sum overflows past is
+    * the exact sum, or an error when that does not fit a BIGINT, the same in
+    * every layout (`oracle/ExactIntegers.checkSums`): the sum used to wrap
+    * round, alike in every mode, which the agreement property cannot see, and
+    * a SUM that checked its partial sums would fail in one layout and not in
+    * another. */
+  @Test def fuzzExactIntegerSums(): Unit = {
+    Props.forAll[DataGen.Dataset](
+      name = "exact-integer-sums",
+      gen = DataGen.generateSumData,
+      shrink = d => d.rows.indices.reverseIterator.map(i => d.copy(rows = d.rows.patch(i, Nil, 1))),
+      count = Props.seedCountOr(DefaultModeDiffSeeds)
+    ) { d =>
+      ExactIntegers.checkSums(d)
+    }
+  }
+
+  /** Coverage guard for [[fuzzExactIntegerSums]]: datasets with a sum that
+    * does not fit, and with one that fits only because a later value brings a
+    * running sum back inside the range (which a SUM that checked each partial
+    * sum would refuse in some layouts), must both be common. */
+  @Test def exactIntegerSumsReachBothSidesOfTheEdge(): Unit = {
+    val n = 4000
+    var overflows, comesBack = 0
+    (0 until n).foreach { seed =>
+      val cov = ExactIntegers.sumCoverage(DataGen.generateSumData(new Rng(seed.toLong)))
+      if (cov.overflows) overflows += 1
+      if (cov.fitsOnlyAtTheEnd) comesBack += 1
+    }
+    println(f"[exact-integer-sums] over $n seeds: a sum overflows=$overflows, a sum fits only at the end=$comesBack")
+    assertTrue(s"sums rarely overflow (overflows=$overflows)", overflows > 800)
+    assertTrue(s"sums rarely come back inside the range (comesBack=$comesBack)", comesBack > 400)
+  }
 
   @Test def fuzzModeDifferential(): Unit = {
     Props.forAll[QueryCase](

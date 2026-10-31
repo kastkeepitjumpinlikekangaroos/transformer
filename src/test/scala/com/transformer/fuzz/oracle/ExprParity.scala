@@ -94,19 +94,29 @@ object ExprParity {
       s"divergence for $expr: evalVec threw ${vecExClass.getName} but eval never throws (row path is total)")
   }
 
-  /** A tree the generator built is total: neither path may throw on any row.
-    * Its only partial shapes are CASTs of a guard column under a conditional
-    * that keeps them off the rows they fail on, so a throw means a
-    * conditional evaluated an operand where its answer did not need it — which
-    * [[check]] cannot see when both paths do so (`IF` and `COALESCE` once read
-    * every argument on both). */
+  /** A tree the generator built fails only where its own values do: an INT
+    * or BIGINT result past its type, or a CAST of NaN or an infinity to an
+    * integer, each an `ArithmeticException` (plans/robustness/18), which
+    * [[check]] holds the two paths to agree on. Nothing else may throw. The
+    * generator's other partial shapes are CASTs of a guard column under a
+    * conditional that keeps them off the rows they fail on, so any other throw
+    * means a conditional evaluated an operand where its answer did not need
+    * it — which [[check]] cannot see when both paths do so (`IF` and
+    * `COALESCE` once read every argument on both). */
   def checkTotal(expr: Expr, batch: ColumnarBatch): Unit = {
+    def owned(t: Throwable): Boolean = t.isInstanceOf[ArithmeticException]
     try expr.evalVec(batch)
-    catch { case NonFatal(t) => throw new AssertionError(s"evalVec threw on a total tree $expr: $t", t) }
+    catch {
+      case NonFatal(t) if owned(t) => ()
+      case NonFatal(t) => throw new AssertionError(s"evalVec threw on a total tree $expr: $t", t)
+    }
     var i = 0
     while (i < batch.numRows) {
       try expr.eval(batch, i)
-      catch { case NonFatal(t) => throw new AssertionError(s"eval threw at row $i of a total tree $expr: $t", t) }
+      catch {
+        case NonFatal(t) if owned(t) => ()
+        case NonFatal(t) => throw new AssertionError(s"eval threw at row $i of a total tree $expr: $t", t)
+      }
       i += 1
     }
   }

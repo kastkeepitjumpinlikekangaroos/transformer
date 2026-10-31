@@ -4383,4 +4383,56 @@ class SqlEngineTest {
     catch { case e: IllegalArgumentException => e }
     assertEquals("Cannot cast 'x' to int", e.getMessage)
   }
+
+  /** An INT or BIGINT result that does not fit its type is an error naming
+    * the operation and the type, as a DECIMAL's is; each wrapped round
+    * silently, and SUM went negative (plans/robustness/18). A CAST to an
+    * integer truncates a fraction toward zero, and one past the type, NaN or
+    * an infinity is an error rather than a saturated or zeroed value. */
+  @Test def anIntegerThatDoesNotFitItsTypeIsAnError(): Unit = {
+    val c = new Catalog
+    val schema = Schema(Vector(Field("i", DataType.IntType), Field("b", DataType.LongType),
+      Field("d", DataType.DoubleType), Field("dec", DataType.DecimalType(20, 0))))
+    c.register("n", memView(schema, Seq(Seq(
+      Array[Any](Int.MaxValue, Long.MaxValue, 1e20, new java.math.BigDecimal("99999999999999999999")),
+      Array[Any](Int.MinValue, 3000000000L, Double.NaN, new java.math.BigDecimal("-3000000000")),
+      Array[Any](100000, 2L, Double.PositiveInfinity, new java.math.BigDecimal("7"))))))
+    def failure(sql: String): String =
+      try { collectAllRows(SqlEngine.execute(sql, c)); fail(s"$sql gave an answer"); "" }
+      catch { case e: ArithmeticException => e.getMessage }
+    assertEquals("Integer overflow: 2147483647 + 1 does not fit INT", failure("SELECT 2147483647 + 1 AS x"))
+    assertEquals("Integer overflow: 2147483647 * 2 does not fit INT", failure("SELECT 2147483647 * 2 AS x"))
+    assertEquals("Integer overflow: 100000 * 100000 does not fit INT", failure("SELECT i * i AS x FROM n WHERE i = 100000"))
+    assertEquals("Integer overflow: -(-2147483648) does not fit INT", failure("SELECT -i AS x FROM n WHERE i < 0"))
+    assertEquals("Integer overflow: ABS(-2147483648) does not fit INT", failure("SELECT ABS(i) AS x FROM n WHERE i < 0"))
+    assertEquals("Integer overflow: -2147483648 / -1 does not fit INT", failure("SELECT i / -1 AS x FROM n WHERE i < 0"))
+    assertEquals("Integer overflow: 9223372036854775807 + 1 does not fit BIGINT",
+      failure("SELECT 9223372036854775807 + 1 AS x"))
+    assertEquals("Integer overflow: 9223372036854775807 + 9223372036854775807 does not fit BIGINT",
+      failure("SELECT b + b AS x FROM n WHERE b > 3000000000"))
+    // SUM: an error from the true sum, however the rows arrive.
+    assertEquals("Integer overflow: the SUM 9223372039854775809 does not fit BIGINT",
+      failure("SELECT SUM(b) AS s FROM n"))
+    assertEquals("Integer overflow: the SUM 9223372039854775809 does not fit BIGINT",
+      failure("SELECT SUM(b) OVER () AS s FROM n"))
+    // Narrowing CASTs.
+    assertEquals("Integer overflow: 3000000000 does not fit INT", failure("SELECT CAST(b AS INT) AS x FROM n WHERE b = 3000000000"))
+    assertEquals("Integer overflow: 1.0E20 does not fit INT", failure("SELECT CAST(d AS INT) AS x FROM n WHERE d > 0 AND d < 1e300"))
+    assertEquals("Cannot cast NaN to BIGINT: it has no integer value", failure("SELECT CAST(d AS BIGINT) AS x FROM n WHERE i < 0"))
+    assertEquals("Cannot cast Infinity to INT: it has no integer value", failure("SELECT CAST(d AS INT) AS x FROM n WHERE i = 100000"))
+    assertEquals("Integer overflow: 99999999999999999999 does not fit BIGINT", failure("SELECT CAST(dec AS BIGINT) AS x FROM n WHERE i > 100000"))
+    assertEquals("Integer overflow: -3000000000 does not fit INT", failure("SELECT CAST(dec AS INT) AS x FROM n WHERE i < 0"))
+    // What fits is exact, a fraction truncated toward zero.
+    assertEquals(Seq(2, -2, 2L, -2L, 7),
+      collectAllRows(SqlEngine.execute("SELECT CAST(2.7 AS INT) AS a, CAST(-2.7 AS INT) AS b, " +
+        "CAST(2.7 AS BIGINT) AS c, CAST(-2.7 AS BIGINT) AS d, CAST(dec AS INT) AS e FROM n WHERE i = 100000", c))
+        .flatMap(r => Seq(r("a"), r("b"), r("c"), r("d"), r("e"))))
+    assertEquals(Seq(-2147483648L, 2147483647L), column(
+      "SELECT CAST(i AS BIGINT) AS x FROM n WHERE i <> 100000 ORDER BY 1", c, "x"))
+    // A sum that passes the range on the way and comes back is the sum.
+    val back = new Catalog
+    back.register("t", memView(Schema(Vector(Field("x", DataType.LongType))),
+      Seq(Seq(Array[Any](Long.MaxValue), Array[Any](1L)), Seq(Array[Any](-5L)))))
+    assertEquals(Seq(Long.MaxValue - 4), column("SELECT SUM(x) AS s FROM t", back, "s"))
+  }
 }

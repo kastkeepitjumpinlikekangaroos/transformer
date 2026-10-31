@@ -1588,6 +1588,20 @@ ship a fix or move something from "not done" to "done".
   it fails on, and requires a tree it built never to throw. Against the code
   before, it failed at seed 21. See
   [plans/robustness/17](../plans/robustness/17-case-evaluates-every-branch.md).
+- **Integer arithmetic, `SUM` and narrowing CASTs used to wrap — fixed.**
+  `2147483647 + 1` was -2147483648, `ABS` and unary minus of the smallest INT
+  were negative, a `SUM` of large BIGINTs went negative, `CAST(3000000000 AS
+  INT)` was -1294967296, and a CAST of a DOUBLE saturated at the type's limit
+  with NaN read as 0: plain JVM arithmetic and `Number.intValue`. Each is now an
+  `ArithmeticException` naming the operation and the type (`Integers` in
+  `Ops.scala`), as a DECIMAL's overflow was. `SUM` keeps a 128-bit running sum
+  and checks the true sum once, at the end: checking each partial sum would make
+  `Long.MaxValue + 1 - 1` fail in one row order or partition layout and not in
+  another. No fuzz property could see the wrap, since every mode and both
+  evaluation paths wrapped alike; `ExactIntegers` now holds integer trees and
+  SUMs over edge values to the exact answer worked out in `BigInt`, and failed
+  at seed 0 at the code before. See
+  [plans/robustness/18](../plans/robustness/18-integer-overflow-wraps.md).
 
 ## Wrong answers the I/O properties found (2026-10-14, all fixed)
 

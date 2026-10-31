@@ -1823,4 +1823,72 @@ class ExprBatchTest {
     val byRow = assertThrows(scala.Predef.classOf[IllegalArgumentException], () => e.eval(b, 1))
     assertEquals("Cannot cast 'x1' to int", byRow.getMessage)
   }
+
+  // ===========================================================================
+  // INT and BIGINT arithmetic is exact on both paths (plans/robustness/18)
+  // ===========================================================================
+
+  private def overflowOnBothPaths(expr: Expr, b: ColumnarBatch, row: Int, message: String): Unit = {
+    val byRow = assertThrows(scala.Predef.classOf[ArithmeticException], () => expr.eval(b, row))
+    assertEquals(message, byRow.getMessage)
+    val byVec = assertThrows(scala.Predef.classOf[ArithmeticException], () => expr.evalVec(b))
+    assertEquals(message, byVec.getMessage)
+  }
+
+  @Test def integerArithmeticThatDoesNotFitIsAnErrorOnBothPaths(): Unit = {
+    val ints = batch("a" -> intCol(i => if (i == 5) Int.MaxValue else if (i == 6) Int.MinValue else i - 30),
+      "b" -> intCol(i => if (i == 6) -1 else 1 + i % 3))
+    val a = ColRefExpr(0, "a", DataType.IntType)
+    val b = ColRefExpr(1, "b", DataType.IntType)
+    def op(o: String) = BinOpExpr(o, a, b, DataType.IntType)
+    overflowOnBothPaths(op("+"), ints, 5, "Integer overflow: 2147483647 + 3 does not fit INT")
+    val below = batch("a" -> intCol(i => if (i == 4) Int.MinValue else i), "b" -> intCol(_ => 1))
+    overflowOnBothPaths(BinOpExpr("-", a, b, DataType.IntType), below, 4, "Integer overflow: -2147483648 - 1 does not fit INT")
+    overflowOnBothPaths(op("*"), ints, 5, "Integer overflow: 2147483647 * 3 does not fit INT")
+    overflowOnBothPaths(op("/"), ints, 6, "Integer overflow: -2147483648 / -1 does not fit INT")
+    overflowOnBothPaths(UnaryOpExpr("-", a, DataType.IntType), ints, 6, "Integer overflow: -(-2147483648) does not fit INT")
+    overflowOnBothPaths(FuncExpr("ABS", Seq(a), DataType.IntType), ints, 6, "Integer overflow: ABS(-2147483648) does not fit INT")
+    // A remainder never overflows: MIN % -1 is 0.
+    assertParity(op("%"), ints)
+
+    val longs = batch("a" -> longCol(i => if (i == 5) Long.MaxValue else if (i == 6) Long.MinValue else i - 30L),
+      "b" -> longCol(i => if (i == 6) -1L else 1L + i % 3))
+    val la = ColRefExpr(0, "a", DataType.LongType)
+    val lb = ColRefExpr(1, "b", DataType.LongType)
+    overflowOnBothPaths(BinOpExpr("+", la, lb, DataType.LongType), longs, 5,
+      "Integer overflow: 9223372036854775807 + 3 does not fit BIGINT")
+    overflowOnBothPaths(BinOpExpr("*", la, lb, DataType.LongType), longs, 5,
+      "Integer overflow: 9223372036854775807 * 3 does not fit BIGINT")
+    overflowOnBothPaths(BinOpExpr("/", la, lb, DataType.LongType), longs, 6,
+      "Integer overflow: -9223372036854775808 / -1 does not fit BIGINT")
+    overflowOnBothPaths(UnaryOpExpr("-", la, DataType.LongType), longs, 6,
+      "Integer overflow: -(-9223372036854775808) does not fit BIGINT")
+    overflowOnBothPaths(FuncExpr("ABS", Seq(la), DataType.LongType), longs, 6,
+      "Integer overflow: ABS(-9223372036854775808) does not fit BIGINT")
+    // Where nothing overflows, the two paths agree, as before.
+    val small = batch("a" -> intCol(i => i - 30), "b" -> intCol(i => i % 5 - 2))
+    Seq("+", "-", "*", "/", "%").foreach { o =>
+      assertParity(BinOpExpr(o, ColRefExpr(0, "a", DataType.IntType), ColRefExpr(1, "b", DataType.IntType), DataType.IntType), small)
+    }
+  }
+
+  @Test def aCastToAnIntegerTruncatesAndFailsPastTheType(): Unit = {
+    val ds = batch("d" -> doubleCol(i => Seq(2.7, -2.7, 2147483647.9, -2147483648.9, 0.0)(i % 5)))
+    assertParity(CastExpr(ColRefExpr(0, "d", DataType.DoubleType), DataType.IntType), ds)
+    assertEquals(Seq(2, -2, 2147483647, -2147483648, 0),
+      (0 until 5).map(CastExpr(ColRefExpr(0, "d", DataType.DoubleType), DataType.IntType).eval(ds, _)))
+    val bad = batch("d" -> doubleCol(i => Seq(Double.NaN, 2147483648.0, Double.NegativeInfinity, 1.0)(i % 4)))
+    overflowOnBothPaths(CastExpr(ColRefExpr(0, "d", DataType.DoubleType), DataType.IntType), bad, 0,
+      "Cannot cast NaN to INT: it has no integer value")
+    assertEquals("Integer overflow: 2.147483648E9 does not fit INT",
+      assertThrows(scala.Predef.classOf[ArithmeticException],
+        () => CastExpr(ColRefExpr(0, "d", DataType.DoubleType), DataType.IntType).eval(bad, 1)).getMessage)
+    val ls = batch("l" -> longCol(i => if (i == 3) 3000000000L else i.toLong))
+    overflowOnBothPaths(CastExpr(ColRefExpr(0, "l", DataType.LongType), DataType.IntType), ls, 3,
+      "Integer overflow: 3000000000 does not fit INT")
+    val decs = batch("m" -> decCol(DataType.DecimalType(20, 2), i => if (i == 2) "9223372036854775808.50" else "-2.99"))
+    overflowOnBothPaths(CastExpr(ColRefExpr(0, "m", DataType.DecimalType(20, 2)), DataType.LongType), decs, 2,
+      "Integer overflow: 9223372036854775808.50 does not fit BIGINT")
+    assertEquals(-2L, CastExpr(ColRefExpr(0, "m", DataType.DecimalType(20, 2)), DataType.LongType).eval(decs, 0))
+  }
 }

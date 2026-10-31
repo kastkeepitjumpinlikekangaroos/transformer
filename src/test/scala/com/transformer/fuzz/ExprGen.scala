@@ -169,6 +169,73 @@ object ExprGen {
     new ExprCase(batch, expr, generated = true)
   }
 
+  // ---- exact integer arithmetic ------------------------------------------
+
+  /** INTs and BIGINTs at the edges arithmetic overflows past: zero and one
+    * either way, the square roots a product overflows at, each type's limits
+    * and the values one step inside them. */
+  private[fuzz] val EdgeInts: Seq[Int] = Seq(0, 1, -1, 2, -2, 7, -7, 46340, -46340, 46341, -46341,
+    65536, -65536, 1073741824, -1073741824, Int.MaxValue, Int.MinValue, Int.MaxValue - 1, Int.MinValue + 1)
+  private[fuzz] val EdgeLongs: Seq[Long] = Seq(0L, 1L, -1L, 2L, -2L, 7L, -7L, 3037000499L, -3037000499L,
+    3037000500L, -3037000500L, 4294967296L, -4294967296L, Int.MaxValue + 1L, Int.MinValue - 1L,
+    4611686018427387904L, -4611686018427387904L, Long.MaxValue, Long.MinValue, Long.MaxValue - 1, Long.MinValue + 1)
+  /** DOUBLEs a CAST to an integer truncates, rounds past, or has no integer
+    * for. */
+  private val EdgeDoubles: Seq[Double] = Seq(0.0, -0.0, 2.5, -2.5, 2147483647.5, 2147483648.0, -2147483648.9,
+    -2147483649.0, 9.2233720368547748E18, 9.223372036854775807E18, -9.223372036854775808E18, 1e19,
+    Double.NaN, Double.PositiveInfinity, Double.NegativeInfinity)
+  private val EdgeDecimalType = DataType.DecimalType(38, 2)
+  private val EdgeDecimals: Seq[java.math.BigDecimal] = Seq("0", "2.50", "-2.50", "2147483647.99", "2147483648.00",
+    "-2147483648.50", "-2147483649.00", "9223372036854775807.99", "9223372036854775808.00",
+    "-9223372036854775808.99", "-9223372036854775809.00").map(new java.math.BigDecimal(_))
+
+  /** A batch of INT, BIGINT, DOUBLE and DECIMAL columns of [[EdgeInts]] and
+    * friends, and an INT or BIGINT tree over it as the binder builds one: each
+    * operator over operands of its own type, an INT widened by a CAST where a
+    * BIGINT is wanted, and narrowing CASTs from a BIGINT, a DOUBLE or a
+    * DECIMAL. For `oracle/ExactIntegers`, which works the answer out exactly. */
+  def generateIntegerArith(rng: Rng): ExprCase = {
+    val dataRng = rng.split()
+    val exprRng = rng.split()
+    val n = dataRng.between(1, 40)
+    val schema = Schema(Vector(Field("i", DataType.IntType), Field("l", DataType.LongType),
+      Field("d", DataType.DoubleType), Field("m", EdgeDecimalType)))
+    def column(dt: DataType, values: Seq[Any]): ColumnVector = {
+      val col = ColumnVector.allocate(dt, math.max(1, n))
+      (0 until n).foreach(r => if (dataRng.bool(0.1)) col.setNull(r) else col.setBoxed(r, dataRng.oneOf(values)))
+      col
+    }
+    val cols = Array[ColumnVector](column(DataType.IntType, EdgeInts), column(DataType.LongType, EdgeLongs),
+      column(DataType.DoubleType, EdgeDoubles), column(EdgeDecimalType, EdgeDecimals))
+    val batch = ColumnarBatch.fromColumns(schema, cols, n)
+    val target = exprRng.oneOf(Seq(DataType.IntType, DataType.LongType))
+    new ExprCase(batch, genInteger(exprRng, target, exprRng.between(1, 4)))
+  }
+
+  private def genInteger(r: Rng, target: DataType, depth: Int): Expr = {
+    def sub(t: DataType): Expr = genInteger(r, t, depth - 1)
+    def leaf(t: DataType): Expr = {
+      val (idx, name, pool) = t match {
+        case DataType.IntType => (0, "i", EdgeInts)
+        case DataType.LongType => (1, "l", EdgeLongs)
+        case DataType.DoubleType => (2, "d", EdgeDoubles)
+        case _ => (3, "m", EdgeDecimals)
+      }
+      if (r.bool(0.08)) LitExpr(null, t)
+      else if (r.bool(0.6)) ColRefExpr(idx, name, t)
+      else LitExpr(r.oneOf(pool), t)
+    }
+    val other = if (target == DataType.IntType) DataType.LongType else DataType.IntType
+    if (depth <= 0 || r.bool(0.25)) leaf(target)
+    else r.weighted[() => Expr](
+      6 -> (() => BinOpExpr(r.oneOf(ArithOps), sub(target), sub(target), target)),
+      1 -> (() => UnaryOpExpr("-", sub(target), target)),
+      1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
+      2 -> (() => CastExpr(sub(other), target)),
+      1 -> (() => CastExpr(leaf(r.oneOf(Seq(DataType.DoubleType, EdgeDecimalType))), target))
+    )()
+  }
+
   // ---- coverage reporting -------------------------------------------------
 
   /** `e` on row `row`, or NULL where it fails. A tally evaluates a subtree

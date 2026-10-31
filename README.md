@@ -750,7 +750,10 @@ argument types below). `SUM` is a `BIGINT` over
 integers, a `DOUBLE` over floats, and over a `DECIMAL(p,s)` an exact
 `DECIMAL(38,s)`. `AVG` is a `DOUBLE`, but over a `DECIMAL(p,s)` an exact
 `DECIMAL(p+4,s+4)` (past 38 digits it gives way on scale, as arithmetic does),
-rounded half up. A decimal sum too long for 38 digits is an error.
+rounded half up. A decimal sum too long for 38 digits is an error, and so is
+an integer sum past a `BIGINT`, decided from the true sum: a running total
+may pass the `BIGINT` range and come back, in whatever order the rows,
+partitions or a spill bring it.
 
 **Window functions:** `<fn>() OVER ([PARTITION BY <exprs>] [ORDER BY <keys>]
 [<frame>])` — `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`/`LEAD` (with the SQL
@@ -830,6 +833,11 @@ and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
 parquet file; neither type is a CAST target. A number
 widens to a `DECIMAL` where the two meet, and a `BINARY` casts to nothing. A
 `BOOLEAN` casts to any number as 1 for true and 0 for false.
+
+A number casts to an `INT` or `BIGINT` as its integer part, a fraction
+truncated toward zero (`CAST(2.7 AS INT)` is 2 and `CAST(-2.7 AS INT)` is -2,
+as in Spark), and one outside the type, or NaN or an infinity, which have no
+integer, is an error rather than the type's limit or 0.
 
 Text casts to a number as Java parses one: `'10'`, `'-2.5'` and `'1e3'` are
 numbers, and an `INT` or `BIGINT` reads an integer only. (CSV reads a stricter
@@ -942,6 +950,15 @@ between one and a `DECIMAL` is an error before the query runs: CAST the
 `DECIMAL` to `DOUBLE` to compute in `DOUBLE`. `SUM` and `AVG` over a `DECIMAL`
 are exact too (see Aggregates), so a decimal result never depends on row
 order, partitions or spill, and parquet writes it as it is.
+
+**`INT` and `BIGINT` arithmetic is exact, or an error.** `+ - * /`, unary
+minus and `ABS` on integers give the exact answer when their type holds it,
+and an error naming the operation when it does not (`Integer overflow:
+2147483647 + 1 does not fit INT`), where they used to wrap round silently, as
+Java's `int` does; `SUM` over integers is exact the same way (see Aggregates).
+An `INT` result that needs more room takes a `CAST(x AS BIGINT)` on an
+operand. Division by zero and `%` by zero are NULL, and a remainder never
+overflows.
 
 **A `BINARY` value is not text.** It casts to nothing else, so no CAST makes
 one text for `LIKE`, `||` and the string functions (`LENGTH`, `UPPER`, `LOWER`,

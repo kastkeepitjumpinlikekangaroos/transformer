@@ -103,20 +103,20 @@ object Ops {
         val l = lv.asInstanceOf[Number].intValue
         val r = rv.asInstanceOf[Number].intValue
         op match {
-          case Plus => l + r
-          case Minus => l - r
-          case Times => l * r
-          case Div => if (r == 0) null else l / r
+          case Plus => Integers.add(l, r)
+          case Minus => Integers.subtract(l, r)
+          case Times => Integers.multiply(l, r)
+          case Div => if (r == 0) null else Integers.divide(l, r)
           case Mod => if (r == 0) null else l % r
         }
       case DataType.LongType =>
         val l = lv.asInstanceOf[Number].longValue
         val r = rv.asInstanceOf[Number].longValue
         op match {
-          case Plus => l + r
-          case Minus => l - r
-          case Times => l * r
-          case Div => if (r == 0L) null else l / r
+          case Plus => Integers.add(l, r)
+          case Minus => Integers.subtract(l, r)
+          case Times => Integers.multiply(l, r)
+          case Div => if (r == 0L) null else Integers.divide(l, r)
           case Mod => if (r == 0L) null else l % r
         }
       case DataType.FloatType =>
@@ -149,6 +149,76 @@ object Ops {
   }
 }
 
+/** INT and BIGINT arithmetic, exact. A result its type cannot hold is an
+  * error naming the operation and the type (`Integer overflow: 2147483647 + 1
+  * does not fit INT`), as a DECIMAL's is ([[Decimals.fit]]), never a value
+  * wrapped round. Both evaluation paths, `ABS`, `SUM` and every CAST to an
+  * integer go through here. Division by zero is the caller's NULL; of the
+  * divisions, only the smallest value divided by -1 overflows, and no
+  * remainder does. */
+object Integers {
+  private def overflow(what: String, typeName: String): ArithmeticException =
+    new ArithmeticException(s"Integer overflow: $what does not fit $typeName")
+
+  def add(a: Int, b: Int): Int =
+    try Math.addExact(a, b) catch { case _: ArithmeticException => throw overflow(s"$a + $b", "INT") }
+  def subtract(a: Int, b: Int): Int =
+    try Math.subtractExact(a, b) catch { case _: ArithmeticException => throw overflow(s"$a - $b", "INT") }
+  def multiply(a: Int, b: Int): Int =
+    try Math.multiplyExact(a, b) catch { case _: ArithmeticException => throw overflow(s"$a * $b", "INT") }
+  def divide(a: Int, b: Int): Int =
+    if (a == Int.MinValue && b == -1) throw overflow(s"$a / $b", "INT") else a / b
+  def negate(a: Int): Int =
+    if (a == Int.MinValue) throw overflow(s"-($a)", "INT") else -a
+  def abs(a: Int): Int =
+    if (a == Int.MinValue) throw overflow(s"ABS($a)", "INT") else math.abs(a)
+
+  def add(a: Long, b: Long): Long =
+    try Math.addExact(a, b) catch { case _: ArithmeticException => throw overflow(s"$a + $b", "BIGINT") }
+  def subtract(a: Long, b: Long): Long =
+    try Math.subtractExact(a, b) catch { case _: ArithmeticException => throw overflow(s"$a - $b", "BIGINT") }
+  def multiply(a: Long, b: Long): Long =
+    try Math.multiplyExact(a, b) catch { case _: ArithmeticException => throw overflow(s"$a * $b", "BIGINT") }
+  def divide(a: Long, b: Long): Long =
+    if (a == Long.MinValue && b == -1L) throw overflow(s"$a / $b", "BIGINT") else a / b
+  def negate(a: Long): Long =
+    if (a == Long.MinValue) throw overflow(s"-($a)", "BIGINT") else -a
+  def abs(a: Long): Long =
+    if (a == Long.MinValue) throw overflow(s"ABS($a)", "BIGINT") else math.abs(a)
+
+  /** A SUM's exact value, which its BIGINT result must hold. */
+  def sumFits(sum: java.math.BigInteger): Long =
+    if (sum.bitLength < 64) sum.longValue
+    else throw overflow(s"the SUM ${sum}", "BIGINT")
+
+  /** `n` as an INT: a whole number its value, a fraction truncated toward
+    * zero, as Spark casts. A value outside INT, and NaN or an infinity, which
+    * have no integer, are errors. */
+  def toInt(n: Number): Int = {
+    val v = toLong(n, "INT")
+    if (v < Int.MinValue || v > Int.MaxValue) throw overflow(String.valueOf(n), "INT")
+    v.toInt
+  }
+
+  /** `n` as a BIGINT, by the rule of [[toInt]]. */
+  def toLong(n: Number): Long = toLong(n, "BIGINT")
+
+  private def toLong(n: Number, typeName: String): Long = n match {
+    case i: java.lang.Integer => i.longValue
+    case l: java.lang.Long => l.longValue
+    case d: java.math.BigDecimal =>
+      val whole = d.setScale(0, java.math.RoundingMode.DOWN).unscaledValue
+      if (whole.bitLength >= 64) throw overflow(d.toPlainString, typeName)
+      whole.longValue
+    case _ =>
+      val d = n.doubleValue
+      if (d.isNaN || d.isInfinite) throw new ArithmeticException(s"Cannot cast $d to $typeName: it has no integer value")
+      // Every double at or past 2^63 in magnitude, which is one, is out of range.
+      if (d >= 9.223372036854775807E18 || d < -9.223372036854775808E18) throw overflow(String.valueOf(d), typeName)
+      d.toLong
+  }
+}
+
 /** Type-promoting casts at value level. Only invoked for non-null values. A
   * DATE comes back as a `LocalDate` and a TIMESTAMP as an `Instant`, the values
   * a `DateVector` and a `TimestampVector` box to, so the row path and the
@@ -162,14 +232,14 @@ object Casts {
       case DataType.IntType =>
         v match {
           case s: String => parseNumber(s, to)(_.toInt)
-          case n: Number => n.intValue
+          case n: Number => Integers.toInt(n)
           case b: Boolean => if (b) 1 else 0
           case _ => v.toString.toInt
         }
       case DataType.LongType =>
         v match {
           case s: String => parseNumber(s, to)(_.toLong)
-          case n: Number => n.longValue
+          case n: Number => Integers.toLong(n)
           case b: Boolean => if (b) 1L else 0L
           case _ => v.toString.toLong
         }
@@ -606,14 +676,14 @@ object VecOps {
         val values = new Array[Int](cap)
         val nulls = new util.BitSet(cap); nulls.or(cv.nulls)
         var i = 0
-        while (i < n) { if (!cv.isNull(i)) values(i) = -cv.values(i); i += 1 }
+        while (i < n) { if (!cv.isNull(i)) values(i) = Integers.negate(cv.values(i)); i += 1 }
         new IntVector(values, nulls, cap)
       case DataType.LongType =>
         val cv = c.asInstanceOf[LongVector]
         val values = new Array[Long](cap)
         val nulls = new util.BitSet(cap); nulls.or(cv.nulls)
         var i = 0
-        while (i < n) { if (!cv.isNull(i)) values(i) = -cv.values(i); i += 1 }
+        while (i < n) { if (!cv.isNull(i)) values(i) = Integers.negate(cv.values(i)); i += 1 }
         new LongVector(values, nulls, cap)
       case DataType.FloatType =>
         val cv = c.asInstanceOf[FloatVector]
@@ -751,21 +821,21 @@ object VecOps {
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readLong(l, i) + readLong(r, i)
+          else values(i) = Integers.add(readLong(l, i), readLong(r, i))
           i += 1
         }
       case "-" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readLong(l, i) - readLong(r, i)
+          else values(i) = Integers.subtract(readLong(l, i), readLong(r, i))
           i += 1
         }
       case "*" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readLong(l, i) * readLong(r, i)
+          else values(i) = Integers.multiply(readLong(l, i), readLong(r, i))
           i += 1
         }
       case "/" =>
@@ -774,7 +844,7 @@ object VecOps {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
           else {
             val rv = readLong(r, i)
-            if (rv == 0L) nulls.set(i) else values(i) = readLong(l, i) / rv
+            if (rv == 0L) nulls.set(i) else values(i) = Integers.divide(readLong(l, i), rv)
           }
           i += 1
         }
@@ -801,21 +871,21 @@ object VecOps {
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readInt(l, i) + readInt(r, i)
+          else values(i) = Integers.add(readInt(l, i), readInt(r, i))
           i += 1
         }
       case "-" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readInt(l, i) - readInt(r, i)
+          else values(i) = Integers.subtract(readInt(l, i), readInt(r, i))
           i += 1
         }
       case "*" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readInt(l, i) * readInt(r, i)
+          else values(i) = Integers.multiply(readInt(l, i), readInt(r, i))
           i += 1
         }
       case "/" =>
@@ -824,7 +894,7 @@ object VecOps {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
           else {
             val rv = readInt(r, i)
-            if (rv == 0) nulls.set(i) else values(i) = readInt(l, i) / rv
+            if (rv == 0) nulls.set(i) else values(i) = Integers.divide(readInt(l, i), rv)
           }
           i += 1
         }

@@ -1,7 +1,7 @@
 package com.transformer.fuzz
 
 import com.transformer.core._
-import com.transformer.fuzz.oracle.ExprParity
+import com.transformer.fuzz.oracle.{ExactIntegers, ExprParity}
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.Test
@@ -36,6 +36,39 @@ class ExprParityFuzzTest {
       ExprParity.check(c.expr, c.batch)
       if (c.generated) ExprParity.checkTotal(c.expr, c.batch)
     }
+  }
+
+  /** INT and BIGINT arithmetic over edge values is its exact answer, or an
+    * error where that answer does not fit, on both paths
+    * (`oracle/ExactIntegers`). Every other property here compares the engine
+    * with itself, and integer arithmetic wrapped round on both paths alike. */
+  @Test def fuzzExactIntegerArithmetic(): Unit = {
+    Props.forAll[ExprGen.ExprCase](
+      name = "exact-integers",
+      gen = ExprGen.generateIntegerArith,
+      shrink = c => Shrinker.expr(c.expr).map(e => new ExprGen.ExprCase(c.batch, e))
+    ) { c =>
+      ExactIntegers.checkExpr(c.expr, c.batch)
+    }
+  }
+
+  /** Coverage guard for [[fuzzExactIntegerArithmetic]]: trees whose exact
+    * value overflows on some row, and trees whose value comes within half a
+    * type's range of its edge and fits, must both be common, or the property
+    * cannot tell an exact engine from a wrapping one or from one that refuses
+    * too much. */
+  @Test def exactIntegerArithmeticReachesBothSidesOfTheEdge(): Unit = {
+    val n = 4000
+    var overflows, nearTheEdge = 0
+    (0 until n).foreach { seed =>
+      val c = ExprGen.generateIntegerArith(new Rng(seed.toLong))
+      val cov = ExactIntegers.coverage(c.expr, c.batch)
+      if (cov.overflows) overflows += 1
+      if (cov.nearTheEdge) nearTheEdge += 1
+    }
+    println(f"[exact-integers] over $n seeds: a row overflows=$overflows, a row near the edge fits=$nearTheEdge")
+    assertTrue(s"integer trees rarely overflow (overflows=$overflows)", overflows > 800)
+    assertTrue(s"integer trees rarely come near the edge and fit (nearTheEdge=$nearTheEdge)", nearTheEdge > 800)
   }
 
   /** Coverage guard for the guarded shapes: a CAST of a batch's guard text,

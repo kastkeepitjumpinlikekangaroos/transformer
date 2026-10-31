@@ -1,6 +1,6 @@
 # Plan 18: integer arithmetic, SUM and narrowing CASTs wrap silently
 
-> Status: planned · found by the 2026-10-31 audit · decided by the user: an
+> Status: **done** 2026-10-31 · found by the 2026-10-31 audit · decided by the user: an
 > integer result that does not fit its type is an error naming the value ·
 > Effort: 1-2 days · Risk: medium (a new run-time error in the hottest loops) ·
 > Depends on [17](17-case-evaluates-every-branch.md)
@@ -67,3 +67,27 @@ reaches the mode-differential corpus (where both modes must fail alike).
 
 README (Integers, CAST), gotchas (removed from "known outstanding"),
 plans/robustness/README, testing.md.
+
+## Outcome
+
+Done as planned, with one decision the plan did not foresee: **`SUM` checks the
+true sum, not each partial sum.** A SUM built on `Math.addExact` would fail on
+`Long.MaxValue, 1, -1` in that order and succeed on `Long.MaxValue, -1, 1`,
+so whether a query fails would move with row order, partitioning and spill.
+`LongSumState` keeps a 128-bit two's-complement running sum (two longs) and
+decides once, at `finish`, whether it fits a BIGINT; its spill encoding carries
+both words. The messages: `Integer overflow: 2147483647 + 1 does not fit INT`,
+`... -(-2147483648) ...`, `... ABS(-2147483648) ...`, `Integer overflow: the SUM
+9223372039854775809 does not fit BIGINT`, `Integer overflow: 3000000000 does not
+fit INT`, and `Cannot cast NaN to INT: it has no integer value`, each an
+`ArithmeticException`.
+
+Two properties test meaning, through `oracle/ExactIntegers`: integer trees over
+edge values against a `BigInt` reference that overflows at any node (both
+paths), and SUM over edge values in every execution layout against exact sums.
+Against the code before, both failed at seed 0. `ExprGen`'s own trees now throw
+an `ArithmeticException` on 1.4% of seeds (its integer pools hold the limits),
+which `ExprParity.checkTotal` allows: a generated tree may fail only where its
+own values overflow. The mode-differential corpus keeps its small integer
+domains: an overflow there would be filtered out of one TLP partition and not
+another, so the relations would have to reason about errors.

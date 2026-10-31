@@ -107,8 +107,8 @@ object Funcs {
           // A decimal's absolute value is exact, at the value's own scale.
           case d: java.math.BigDecimal => d.abs
           case n: java.lang.Number => resultType match {
-            case DataType.IntType => math.abs(n.intValue)
-            case DataType.LongType => math.abs(n.longValue)
+            case DataType.IntType => Integers.abs(n.intValue)
+            case DataType.LongType => Integers.abs(n.longValue)
             // Narrow on a Float result so eval matches VecFuncs.abs (which
             // stores a narrowed Float); leaving it a Double would diverge once
             // the value feeds an enclosing operation.
@@ -436,7 +436,7 @@ object VecFuncs {
         var i = 0
         while (i < n) {
           if (argVec.isNull(i)) nulls.set(i)
-          else values(i) = math.abs(argVec.getBoxed(i).asInstanceOf[Number].intValue)
+          else values(i) = Integers.abs(argVec.getBoxed(i).asInstanceOf[Number].intValue)
           i += 1
         }
         new IntVector(values, nulls, cap)
@@ -446,7 +446,7 @@ object VecFuncs {
         var i = 0
         while (i < n) {
           if (argVec.isNull(i)) nulls.set(i)
-          else values(i) = math.abs(argVec.getBoxed(i).asInstanceOf[Number].longValue)
+          else values(i) = Integers.abs(argVec.getBoxed(i).asInstanceOf[Number].longValue)
           i += 1
         }
         new LongVector(values, nulls, cap)

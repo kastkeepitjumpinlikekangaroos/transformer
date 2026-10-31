@@ -86,6 +86,22 @@ object DataGen {
       row.iterator.map(RowOracle.show).mkString("(", ",", ")")
   }
 
+  /** `t(g INT, x BIGINT)` for `oracle/ExactIntegers.checkSums`: a few groups,
+    * NULL keys and values among them, and values at the edges a BIGINT sum
+    * overflows past ([[ExprGen.EdgeLongs]]), so some sums fit only because a
+    * later value brings them back and some do not fit at all. */
+  def generateSumData(rng: Rng): Dataset = {
+    val schema = Schema(Vector(Field("g", DataType.IntType), Field("x", DataType.LongType)))
+    val n = rng.between(0, 24)
+    val groups = rng.between(1, 3)
+    val rows = (0 until n).map { _ =>
+      val g: Any = if (rng.bool(0.1)) null else rng.between(0, groups - 1)
+      val x: Any = if (rng.bool(0.1)) null else rng.oneOf(ExprGen.EdgeLongs)
+      Array[Any](g, x)
+    }
+    Dataset(schema, rows)
+  }
+
   // ---- schema + data ------------------------------------------------------
 
   /** Every column type: [[ExprGen]]'s `GenTypes`, so any shape one generator
