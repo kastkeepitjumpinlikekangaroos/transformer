@@ -3,6 +3,7 @@ package com.transformer.job
 import com.transformer.sql.parse.SqlParser
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
+import net.sf.jsqlparser.statement.select.{ParenthesedSelect, Select, SetOperationList}
 import net.sf.jsqlparser.util.TablesNamesFinder
 
 import scala.collection.mutable
@@ -94,7 +95,12 @@ object TaskDag {
 
     def extract(sql: String): Set[String] = {
       val stmt = SqlParser.parse(sql)
-      new TablesNamesFinder().getTableList(stmt).asScala.iterator.map(_.toLowerCase).toSet
+      val ctes = stmt match {
+        case s: Select => cteNames(s)
+        case _ => Set.empty[String]
+      }
+      new TablesNamesFinder().getTableList(stmt).asScala.iterator
+        .map(name => SqlParser.unquote(name).toLowerCase).filterNot(ctes).toSet
     }
 
     val mainRefs: IndexedSeq[Set[String]] = tasks.indices.map(i => extract(renderedMains(i)))
@@ -186,6 +192,22 @@ object TaskDag {
     }.toVector
 
     TaskDag(nodes = nodes, dependents = dependentsAdj.map(_.toSet).toVector)
+  }
+
+  /** The names every WITH in `select` defines, nested ones included, as the
+    * binder resolves them: without quotes, in lower case. `TablesNamesFinder`
+    * leaves out of the tables only a reference spelled as its CTE's name is,
+    * so `WITH Q AS (...) SELECT * FROM q` and `WITH "q" AS ...` named `q` as
+    * a table, which the job then refused as an unknown view. */
+  private def cteNames(select: Select): Set[String] = {
+    val own = Option(select.getWithItemsList).map(_.asScala.toSeq).getOrElse(Nil)
+      .flatMap(item => cteNames(item.getSelect) + SqlParser.unquote(item.getAlias.getName).toLowerCase)
+    val inner = select match {
+      case s: SetOperationList => s.getSelects.asScala.flatMap(cteNames)
+      case p: ParenthesedSelect => cteNames(p.getSelect)
+      case _ => Nil
+    }
+    own.toSet ++ inner
   }
 
   private def findCycle(remaining: Set[Int], deps: IndexedSeq[Set[Int]]): Seq[Int] = {

@@ -42,7 +42,7 @@ at the time of the audit: `bazel test //...` 46/46 green.
 | [10](10-error-messages-name-internals.md) | A failing query's message names the engine's internals | every parse error named JSqlParser's class, and the binder's refusals the AST class; pooled failures arrived wrapped in `ExecutionException` (sometimes with no message), which is what a job recorded; refusals now say what SQL calls the construct, and a pooled failure arrives as itself | **done** 2026-10-17 | 1 day | low | — |
 | [11](11-functions-bind-over-arguments-they-cannot-take.md) | Functions and conditions bind over arguments they cannot take | `SUM` over a string, the math functions over a date, a NULL `ROUND` scale, a non-boolean `ON` failed mid-run; `ABS` of a date was NULL and `WHERE d` kept no rows; every condition is now a BOOLEAN, every argument the kind its function declares, and only a STRING is text | **done** 2026-10-18 | 1-2 days | medium | — |
 | [12](12-text-the-binder-never-sees.md) | Text the parser accepts and the binder never sees | a statement after `;` was ignored; a repeated `ORDER BY` / `LIMIT` kept its last, or split with a UNION's last arm; a CTE named twice kept its second; a JOIN with no ON was a cross join; `NOT NOT f IS NULL` kept the wrong rows; each is refused now | **done** 2026-10-18 | 1 day | medium | — |
-| [13](13-literals-are-read-as-written.md) | Literals and quoted identifiers are read as written | `'it''s'` is five characters; `"a"` names no column; `99999999999999999999` is a raw `NumberFormatException`; `1e400` is `Infinity` | open, recorded in the fuzzer | 1 day | medium | decisions on quoted case and big literals |
+| [13](13-literals-are-read-as-written.md) | Literals and quoted identifiers are read as written | `'it''s'` was five characters; `"a"` named no column; `99999999999999999999` was a raw `NumberFormatException`; `1e400` was `Infinity`; a number beside a DECIMAL went through a DOUBLE; a string literal served as an alias; each literal and name now means what SQL writes | **done** 2026-10-30 | 1 day | medium | — |
 | [14](14-pathological-nesting.md) | Deep and unbalanced SQL | a task whose SQL overflows the binder's stack **hangs its job forever**; unclosed parentheses run the parser into its timeout | open, recorded in `CleanRejection` | 1-2 days | low (the hang) | — |
 | [15](15-what-a-reopened-run-shows-without-its-record.md) | What a reopened run shows for a task without its record | `job.json`'s entry carried no timestamps, failed validation names or output, so such a task reopened with a 0 ms duration and every validation card PASSED; a record naming another task was trusted; nothing told the user | **done** 2026-10-15 | half a day | low | — |
 
@@ -185,10 +185,22 @@ lone NOT as a one-argument call's argument (`COUNT_IF(NOT f > TRUE)`) was read
 the same way. `BeyondTheTable` grew from ten constructs to 24, each refused
 cleanly in every context but plan 13's. Details in the plan's Outcome section.
 
-**Next, in order:** [14](14-pathological-nesting.md)'s job hang (a `finally`
-and a `catch`), then [13](13-literals-are-read-as-written.md), whose items
-return wrong answers with no error and which needs a decision from the user
-first.
+**Done:** plan 13. A string literal is its value, so `'it''s'` is `it's`; a
+name in double quotes or backquotes is the name between them, matched without
+regard to case as every name is (the user's choice); an integer past BIGINT is
+the DECIMAL of its digits and `-9223372036854775808` the smallest BIGINT; a
+number no DOUBLE holds is refused rather than Infinity or 0; a string literal
+where an alias goes is refused; and a number beside a DECIMAL keeps its
+written digits and scale, which the user chose knowing it changes the type of
+`price * 1.10`. Found on the way and fixed with it: a GROUP BY key matched a
+SELECT item that differed in a literal's case, since the binder lower-cased
+the text it matches by (a silent wrong answer), and a job refused a CTE
+spelled other than its references, which JSqlParser's `TablesNamesFinder`
+named as tables. Details in the plan's Outcome section.
+
+**Next:** [14](14-pathological-nesting.md)'s job hang (a `finally` and a
+`catch`), then its depth limit, which the user decided: 256 levels, with AND
+and OR chains regrouped so they bind at any length.
 
 **Suggested order.** [01](01-reject-or-honor-every-clause.md) first — it has the
 worst single defect in the set (a dropped join condition is a cartesian product,

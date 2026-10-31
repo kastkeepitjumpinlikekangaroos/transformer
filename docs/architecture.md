@@ -43,7 +43,7 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 | `read/parquet/` | Parquet input. Depends on `parquet-hadoop` + minimal Hadoop. | `ParquetReader.scala`, `ParquetColumns.scala` (the type each parquet column reads as and how its values decode, decided per file from that file's footer; matches a view's columns to each file's by name), `ParquetFilterTranslator.scala` |
 | `write/csv/` | CSV output. Stdlib only; uses `read/csv`'s `CsvValues`, so the writer and reader share one text per type. | `CsvWriter.scala` |
 | `write/parquet/` | Parquet output. | `ParquetSchema.scala` (the parquet schema transformer writes for a `Schema`), `ParquetWriter.scala` |
-| `sql/parse/` | JSqlParser façade: one statement, and none of its text lost on the way to the AST. | `SqlParser.scala` (refuses text after the statement's `;` and a repeated tail clause JSqlParser overwrites — see §10) |
+| `sql/parse/` | JSqlParser façade: one statement, and none of its text lost on the way to the AST. | `SqlParser.scala` (refuses text after the statement's `;` and a repeated tail clause JSqlParser overwrites — see §10; `unquote` / `quote`, the one rule for the name a quoted identifier names) |
 | `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `PendingCteView.scala` (placeholder for an unresolved CTE reference), `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo), `UnsupportedClauses.scala` (the rejection pass that runs before binding, and its audit of every JSqlParser getter the binder does not read — see §10) |
 | `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala`, `SortExec.scala`, `DistinctExec.scala`, `UnionExec.scala`, `WindowExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala`, `CteResolver.scala` (inline-vs-materialize CTE pass + `PhysicalPlanView`), `SqlEngine.scala` |
 | `job/` | User-facing API + runner. Depends directly on `read/{csv,parquet}` and `write/{csv,parquet}` — parquet is a first-class format. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala`, `JobFiles.scala` (filesystem ops for the GUI's edit-validation flow — `writeValidationSql` / `deleteValidation`), `TaskDag.scala` (DAG analyzer/builder from SQL refs; `TaskDag` + `TaskDagNode` are public so the GUI can render without re-implementing), `TaskProgressListener.scala` (per-task callbacks fired from runner worker threads), `TaskRunRecord.scala` (`_run.json` write/read/discover for per-task run records — every status, with `_validation-<slug>.csv` failure samples), `JobRunRecord.scala` (`job.json` aggregate manifest pointing at every task's record + the run's warnings), `JobOutputLayout.scala` (classifies an output dir as `SingleRun`/`MultiRun`/`Empty` for the GUI's run picker), `DirectoryJobLoader.scala` (DBT-style directory loader; supports optional per-table `output.json` with `partitionBy`; threads default `<outputDir>/job.json` as `jobRunOutput` so the manifest lives alongside its data), `Json.scala` (stdlib JSON parser used by the loader + record readers) |
@@ -1452,10 +1452,15 @@ the text); `LogicalBuilder` refuses the same clause on a UNION's bare last arm
 and on the union, a WITH that names one query twice, a join with an ON its kind
 does not take or without one it needs, and a NOT JSqlParser hangs on an
 operator's left side. `SqlTextGen.BeyondTheTable` holds each refusal to account
-in every context, as NoSilentDrop holds the table. The second is open: a getter
-the binder reads whose value is not what SQL means (`StringValue.getValue` keeps
-a doubled quote doubled;
-[plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md)).
+in every context, as NoSilentDrop holds the table. The second is a getter the
+binder reads whose value is not what SQL means: `StringValue.getValue` keeps a
+doubled quote doubled, every identifier getter keeps the quotes, and a number's
+`getValue` throws or rounds
+([plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md)).
+The binder reads a string literal's `getNotExcapedValue`, a number from its
+digits, and every name through `SqlParser.unquote`, the one rule `TaskDag`
+reads a job's table references by too; `oracle/SyntaxEquivalence` holds
+spellings that differ only in quoting to one answer.
 
 ## Property-based testing
 

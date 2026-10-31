@@ -34,9 +34,8 @@ import scala.util.matching.Regex
   * '''Known defects.''' The defects this property has found are listed in
   * [[Defect]], each with the plan that records it. A failure that is one is
   * counted as it ([[KnownFailure]]) rather than reported. It is recognized
-  * from what was thrown and, for a run-time failure, from the bound plan,
-  * never from the generator's intent, so a defect is excused only where it is
-  * the cause. Removing an entry is the proof its fix landed; each entry
+  * from what was thrown, never from the generator's intent, so a defect is
+  * excused only where it is the cause. Removing an entry is the proof its fix landed; each entry
   * carries a repro, and `FrontendFuzzTest.everyKnownDefectStillReproduces`
   * fails when one stops showing on it, so an entry cannot outlive its fix.
   */
@@ -61,7 +60,6 @@ object CleanRejection {
   final case class KnownFailure(defect: Defect, detail: String) extends Outcome
 
   private val Plans = "plans/robustness/"
-  val LiteralsPlan: String = Plans + "13-literals-are-read-as-written.md"
   val PathologicalInputPlan: String = Plans + "14-pathological-nesting.md"
 
   /** A defect this property found, the plan that records it, and SQL that
@@ -70,12 +68,6 @@ object CleanRejection {
     override def toString: String = name
   }
   object Defect {
-    /** `SELECT 99999999999999999999 FROM t` is a raw `NumberFormatException`
-      * at bind time; `1e400` silently becomes `Infinity`, which fails while
-      * running beside a DECIMAL (`Cannot cast Infinity to decimal(9,2)`, or a
-      * `NumberFormatException` with no message). */
-    case object NumberLiteralOutOfRange extends Defect("a number literal outside its type's range", LiteralsPlan,
-      "SELECT 99999999999999999999 AS big FROM t")
     /** A 2000-term `+` or `OR` chain overflows the binder's stack, 1000
       * nested calls or 3000 nested parentheses the parser's. */
     case object DeepNesting extends Defect("a deep expression overflows the stack", PathologicalInputPlan,
@@ -86,7 +78,7 @@ object CleanRejection {
     case object ParseTimeout extends Defect("unclosed parentheses run the parser into its timeout",
       PathologicalInputPlan, "SELECT ((((a +")
 
-    val All: Vector[Defect] = Vector(NumberLiteralOutOfRange, DeepNesting, ParseTimeout)
+    val All: Vector[Defect] = Vector(DeepNesting, ParseTimeout)
   }
 
   // ---------------------------------------------------------------------------
@@ -100,12 +92,12 @@ object CleanRejection {
       try Right(LogicalBuilder.build(sql, catalog()))
       catch { case e: Throwable if catchable(e) => Left(e) }
     bound match {
-      case Left(e) => classify(sql, Phase.Bind, e, None)
-      case Right(built) =>
+      case Left(e) => classify(sql, Phase.Bind, e)
+      case Right(_) =>
         try {
           RelEngine.collectRows(SqlEngine.execute(sql, catalog(), ExecutionOptions.Default))
           Ran
-        } catch { case e: Throwable if catchable(e) => classify(sql, Phase.Run, e, Some(built)) }
+        } catch { case e: Throwable if catchable(e) => classify(sql, Phase.Run, e) }
     }
   }
 
@@ -113,11 +105,10 @@ object CleanRejection {
     * over a deep expression throws and which unwinds cleanly. */
   def catchable(e: Throwable): Boolean = NonFatal(e) || e.isInstanceOf[StackOverflowError]
 
-  /** Classify what `sql` threw in `phase`; `built` is its bound plan when it
-    * bound. Separate from [[check]] so the classification can be tested on
-    * throwables made to order. */
-  def classify(sql: String, phase: Phase, thrown: Throwable, built: Option[BuiltQuery]): Outcome = {
-    recognize(sql, thrown, built) match {
+  /** Classify what `sql` threw in `phase`. Separate from [[check]] so the
+    * classification can be tested on throwables made to order. */
+  def classify(sql: String, phase: Phase, thrown: Throwable): Outcome = {
+    recognize(thrown) match {
       case Some((defect, detail)) => return KnownFailure(defect, detail)
       case None => ()
     }
@@ -214,32 +205,15 @@ object CleanRejection {
   // Known defects
   // ---------------------------------------------------------------------------
 
-  private def recognize(sql: String, thrown: Throwable, built: Option[BuiltQuery]): Option[(Defect, String)] = {
+  private def recognize(thrown: Throwable): Option[(Defect, String)] = {
     val all = causes(thrown)
-    val root = all.last
     val message = Option(thrown.getMessage).getOrElse("")
     if (all.exists(_.isInstanceOf[StackOverflowError]) || all.exists(c => String.valueOf(c.getMessage).contains("java.lang.StackOverflowError")))
       return Some(Defect.DeepNesting -> chain(thrown))
     if (thrown.isInstanceOf[IllegalArgumentException] && all.exists(_.isInstanceOf[java.util.concurrent.TimeoutException]))
       return Some(Defect.ParseTimeout -> message)
-    val numberInput = root match {
-      case nfe: NumberFormatException => NumberInput.findFirstMatchIn(String.valueOf(nfe.getMessage)).map(_.group(1))
-      case _ => None
-    }
-    numberInput match {
-      case Some(digits) if digits.nonEmpty && digits.forall(_.isDigit) && digits.length >= 19 && sql.contains(digits) =>
-        return Some(Defect.NumberLiteralOutOfRange -> s"${digits.take(30)}${if (digits.length > 30) "..." else ""}")
-      case _ => ()
-    }
-    val infiniteLiteral = SqlTextGen.Lexer.lex(sql).exists(t =>
-      t.kind == SqlTextGen.Lexer.Kind.Number && scala.util.Try(t.text.toDouble).toOption.exists(_.isInfinite))
-    if (built.isDefined && infiniteLiteral && (root.isInstanceOf[NumberFormatException] ||
-        all.exists(c => String.valueOf(c.getMessage).contains("Infinity"))))
-      return Some(Defect.NumberLiteralOutOfRange -> s"${root.getClass.getSimpleName}: ${root.getMessage}")
     None
   }
-
-  private val NumberInput: Regex = """For input string: "([^"]*)"""".r
 
   // ---------------------------------------------------------------------------
   // Helpers

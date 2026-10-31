@@ -4046,4 +4046,212 @@ class SqlEngineTest {
     assertEquals(Seq(1), column("SELECT id FROM flags WHERE NOT NOT f", cat, "id"))
     assertEquals(Seq(2), column("SELECT id FROM flags WHERE NOT f AND id > 1", cat, "id"))
   }
+
+  // ---------------------------------------------------------------------------
+  // Literals and names are read as written (plans/robustness/13)
+  //
+  // Each of these read a literal or a name as JSqlParser keeps its text, not
+  // as SQL reads it, and answered with that, or threw the JDK's own
+  // exception. The comment on each test records what it did.
+  // ---------------------------------------------------------------------------
+
+  /** `t` holds strings with quotes and a LIKE wildcard in them; `d` decimals
+    * two of which a number rounded to two places matches, beside the
+    * smallest BIGINT; `w` columns whose names only quotes can spell. */
+  private def literalCatalog(): Catalog = {
+    val c = new Catalog
+    val t = Schema(Vector(Field("a", DataType.IntType), Field("b", DataType.IntType), Field("s", DataType.StringType)))
+    c.register("t", memView(t, Seq(Seq(Array[Any](1, 10, "it's"), Array[Any](2, 20, "O'Brien"),
+      Array[Any](3, 30, "x%"), Array[Any](4, 40, "x'%")))))
+    val d = Schema(Vector(Field("id", DataType.IntType), Field("k", DataType.DecimalType(9, 2)),
+      Field("big", DataType.LongType)))
+    c.register("d", memView(d, Seq(Seq(Array[Any](1, dec("0.12"), Long.MinValue), Array[Any](2, dec("0.13"), 5L),
+      Array[Any](3, dec("1.50"), 7L)))))
+    val w = Schema(Vector(Field("x y", DataType.IntType), Field("Mixed", DataType.IntType),
+      Field("a + b", DataType.IntType), Field("a", DataType.IntType), Field("b", DataType.IntType),
+      Field("say \"hi\"", DataType.IntType)))
+    c.register("w", memView(w, Seq(Seq(Array[Any](7, 8, 100, 1, 2, 9), Array[Any](17, 18, 200, 3, 4, 19)))))
+    c
+  }
+
+  /** A string literal is its value: each doubled quote in it is one quote,
+    * SQL's only way to write one. The binder read the text between the
+    * quotes as written, so `LENGTH('it''s')` was 5, `s = 'O''Brien'` matched
+    * no `O'Brien`, and `ESCAPE ''''` was two characters, which it refused. */
+  @Test def aStringLiteralIsItsValue(): Unit = {
+    val cat = literalCatalog()
+    assertEquals(Seq(4, 4, 4, 4), column("SELECT LENGTH('it''s') AS n FROM t", cat, "n"))
+    assertEquals(Seq("it's"), column("SELECT s FROM t WHERE s = 'it''s'", cat, "s"))
+    assertEquals(Seq(2), column("SELECT a FROM t WHERE s = 'O''Brien'", cat, "a"))
+    assertEquals(Seq(2), column("SELECT a FROM t WHERE s = N'O''Brien'", cat, "a"))
+    assertEquals(Seq(1), column("SELECT a FROM t WHERE s LIKE 'it''%'", cat, "a"))
+    assertEquals(Seq("'"), column("SELECT '''' AS q FROM t WHERE a = 1", cat, "q"))
+    assertEquals(Seq(2), column("SELECT LENGTH('''''') AS n FROM t WHERE a = 1", cat, "n"))
+    // A quote as the escape: `''%` is a percent sign, so `x%` matches and
+    // `x'%` does not.
+    assertEquals(Seq(3), column("SELECT a FROM t WHERE s LIKE 'x''%' ESCAPE ''''", cat, "a"))
+    assertEquals("Cannot cast 'it's' to int", bindRejection("SELECT CAST('it''s' AS INT) AS v FROM t", cat))
+  }
+
+  /** A quoted name is the name inside its quotes, double quotes or
+    * backquotes, matched without regard to case as every name is. The binder
+    * kept the quotes: `SELECT "a" FROM t` was an unknown column `"a"`, and
+    * `AS "x y"` named its column `"x y"`, quotes included, which is the
+    * header a CSV output got. */
+  @Test def aQuotedNameIsTheNameInsideItsQuotes(): Unit = {
+    val cat = literalCatalog()
+    def names(sql: String): Seq[String] = SqlEngine.execute(sql, cat).schema.fieldNames
+    assertEquals(Seq(1, 2, 3, 4), column("SELECT \"a\" FROM t ORDER BY a", cat, "a"))
+    assertEquals(Seq(1, 2, 3, 4), column("SELECT `a` FROM `t` ORDER BY \"a\"", cat, "a"))
+    assertEquals(Seq(1, 2, 3, 4), column("SELECT \"t\".\"a\" FROM \"t\" ORDER BY t.a", cat, "a"))
+    // Case is no part of a name, in quotes or out of them.
+    assertEquals(Seq(1, 2, 3, 4), column("SELECT \"A\" FROM \"T\" ORDER BY 1", cat, "A"))
+    assertEquals(Seq(8, 18), column("SELECT \"mixed\" FROM w ORDER BY MIXED", cat, "mixed"))
+    // Aliases in quotes, of a table, a column and a query, and names only
+    // quotes can spell.
+    assertEquals(Seq(1, 2, 3, 4), column("SELECT x.a FROM t \"x\" ORDER BY \"x\".a", cat, "a"))
+    assertEquals(Seq("x y"), names("SELECT a AS \"x y\" FROM t"))
+    assertEquals(Seq("x y"), names("SELECT a AS `x y` FROM t"))
+    assertEquals(Seq(7, 17), column("SELECT \"x y\" FROM w ORDER BY \"x y\"", cat, "x y"))
+    assertEquals(Seq(100, 200), column("SELECT \"a + b\" AS v FROM w ORDER BY 1", cat, "v"))
+    assertEquals(Seq(9, 19), column("SELECT \"say \"\"hi\"\"\" AS v FROM w ORDER BY 1", cat, "v"))
+    assertEquals(Seq(1, 2, 3, 4), column("WITH \"q\" AS (SELECT a FROM t) SELECT * FROM q ORDER BY a", cat, "a"))
+    assertEquals(Seq(1, 2, 3, 4), column("WITH q(\"x\") AS (SELECT a FROM t) SELECT x FROM q ORDER BY x", cat, "x"))
+    assertEquals(Seq("a", "b", "s"), names("SELECT \"t\".* FROM t"))
+    // A star names each column as its source does, whatever the name holds.
+    assertEquals(Seq("x y", "Mixed", "a + b", "a", "b", "say \"hi\""), names("SELECT * FROM w"))
+    assertEquals(Seq(9, 19), column("SELECT * FROM w ORDER BY 1", cat, "say \"hi\""))
+    assertEquals("A name in quotes cannot be empty: \"\"", bindRejection("SELECT \"\" FROM t", cat))
+    // In quotes, TRUE is a name.
+    assertEquals("Unknown column 'true'. Available: [t.a, t.b, t.s]", bindRejection("SELECT \"true\" FROM t", cat))
+  }
+
+  /** The binder matches a SELECT item to a GROUP BY key by their text, which
+    * it reads as it reads the query: names regardless of quotes and case,
+    * string literals as written. It lower-cased the whole text, so `SELECT s
+    * || 'a' ... GROUP BY s || 'A'` read the item as the key and returned
+    * `it'sA`. A SELECT item with no alias is named by the same text, so
+    * `SELECT 'ABC'` named its column `'abc'`. */
+  @Test def anExpressionIsMatchedAsTheBinderReadsIt(): Unit = {
+    val cat = literalCatalog()
+    assertEquals("Column 's' must appear in GROUP BY or inside an aggregate",
+      bindRejection("SELECT s || 'a' AS v FROM t GROUP BY s || 'A'", cat))
+    assertEquals(Seq("O'BrienA", "it'sA", "x%A", "x'%A"),
+      column("SELECT s || 'A' AS v FROM t GROUP BY s || 'A' ORDER BY 1", cat, "v"))
+    assertEquals(Seq(11, 21, 31, 41), column("SELECT \"b\" + 1 AS v FROM t GROUP BY b + 1 ORDER BY 1", cat, "v"))
+    assertEquals(Seq(11, 21, 31, 41), column("SELECT B + 1 AS v FROM t GROUP BY \"b\" + 1 ORDER BY 1", cat, "v"))
+    assertEquals(Seq("IT'S", "O'BRIEN", "X%", "X'%"),
+      column("SELECT UPPER(\"S\") AS v FROM t GROUP BY upper(s) ORDER BY 1", cat, "v"))
+    assertEquals(Seq("'ABC'"), SqlEngine.execute("SELECT 'ABC' FROM t", cat).schema.fieldNames)
+    assertEquals(Seq("upper(s)"), SqlEngine.execute("SELECT UPPER(\"S\") FROM t", cat).schema.fieldNames)
+  }
+
+  /** An integer past BIGINT is the DECIMAL of its digits, as Postgres reads
+    * one, and `-9223372036854775808` is the smallest BIGINT. Each was the
+    * JDK's `NumberFormatException` while binding, and so was a LIMIT, an
+    * OFFSET, an ordinal or a LAG offset past BIGINT. */
+  @Test def anIntegerPastBigintIsTheDecimalOfItsDigits(): Unit = {
+    val cat = literalCatalog()
+    def one(expr: String): (DataType, Seq[Any]) = typedColumn(s"SELECT $expr AS v FROM t WHERE a = 1", cat)
+    assertEquals((DataType.DecimalType(20, 0), Seq(dec("99999999999999999999"))), one("99999999999999999999"))
+    assertEquals((DataType.DecimalType(20, 0), Seq(dec("-99999999999999999999"))), one("-99999999999999999999"))
+    assertEquals((DataType.DecimalType(21, 0), Seq(dec("100000000000000000000"))), one("a + 99999999999999999999"))
+    assertEquals((DataType.LongType, Seq(Long.MinValue)), one("-9223372036854775808"))
+    assertEquals((DataType.LongType, Seq(Long.MaxValue)), one("9223372036854775807"))
+    assertEquals(Seq(1), column("SELECT id FROM d WHERE big = -9223372036854775808", cat, "id"))
+    assertEquals(Seq.empty, column("SELECT a FROM t WHERE a = 9223372036854775808", cat, "a"))
+    // Thirty-nine digits is one more than a DECIMAL holds.
+    assertEquals("999999999999999999999999999999999999999 has more digits than a DECIMAL holds (38)",
+      bindRejection("SELECT 999999999999999999999999999999999999999 AS v FROM t", cat))
+    Seq(
+      "SELECT a FROM t LIMIT 99999999999999999999" ->
+        "LIMIT 99999999999999999999 is larger than the largest BIGINT, 9223372036854775807",
+      "SELECT a FROM t ORDER BY a OFFSET 9223372036854775808 ROWS" ->
+        "OFFSET 9223372036854775808 is larger than the largest BIGINT, 9223372036854775807",
+      "SELECT a FROM t ORDER BY 99999999999999999999" ->
+        "ORDER BY position 99999999999999999999 is not in select list (size 1)",
+      "SELECT a FROM t GROUP BY 99999999999999999999" ->
+        "GROUP BY position 99999999999999999999 is not in select list (size 1)",
+      "SELECT LAG(a, 99999999999999999999) OVER (ORDER BY a) AS v FROM t" ->
+        "LAG offset 99999999999999999999 is larger than the largest INT, 2147483647"
+    ).foreach { case (sql, message) => assertEquals(sql, message, bindRejection(sql, cat)) }
+  }
+
+  /** A number a DOUBLE cannot hold is refused. `1e400` was Infinity, and
+    * beside a DECIMAL failed while running (`Cannot cast Infinity to
+    * decimal(9,2)`); a non-zero number too small for a DOUBLE was 0. */
+  @Test def aNumberADoubleCannotHoldIsRefused(): Unit = {
+    val cat = literalCatalog()
+    val tooLarge = "The number 1e400 is too large for a DOUBLE, which holds at most 1.7976931348623157E308"
+    def tooSmall(shown: String) = s"The number $shown is too small for a DOUBLE, which would read it as 0"
+    Seq(
+      "SELECT 1e400 AS v FROM t" -> tooLarge,
+      "SELECT -1e400 AS v FROM t" -> tooLarge,
+      "SELECT k FROM d WHERE k > 1e400" -> tooLarge,
+      "SELECT COALESCE(k, 1e400) AS v FROM d" -> tooLarge,
+      "SELECT 1E-400 AS v FROM t" -> tooSmall("1E-400"),
+      "SELECT 2e-324 AS v FROM t" -> tooSmall("2e-324"),
+      ("SELECT 0." + "0" * 400 + "1 AS v FROM t") -> tooSmall("0." + "0" * 18 + "... (403 characters)")
+    ).foreach { case (sql, message) => assertEquals(sql.take(60), message, bindRejection(sql, cat)) }
+    assertEquals(Seq(4.9e-324), column("SELECT 4.9e-324 AS v FROM t WHERE a = 1", cat, "v"))
+    assertEquals(Seq(Double.MaxValue), column("SELECT 1.7976931348623157e308 AS v FROM t WHERE a = 1", cat, "v"))
+    assertEquals(Seq(0.0), column("SELECT 0.0e5 AS v FROM t WHERE a = 1", cat, "v"))
+  }
+
+  /** A number beside a DECIMAL is the decimal it is written as, its digits
+    * and its scale. It was read through a DOUBLE, which keeps about seventeen
+    * digits and the shortest scale that prints it: `k *
+    * 1.0000000000000000001` was `k * 1.0`, `k + 0.12345678901234567890` lost
+    * its last three digits, 1.10 was a DECIMAL(2,1), and `k =
+    * 0.120000000000000000001` held for a `k` of 0.12. */
+  @Test def aNumberBesideADecimalIsTheDecimalItIsWrittenAs(): Unit = {
+    val cat = literalCatalog()
+    def typed(expr: String): (DataType, Seq[Any]) = typedColumn(s"SELECT id, $expr AS v FROM d ORDER BY id", cat)
+    def d(p: Int, s: Int): DataType = DataType.DecimalType(p, s)
+    assertEquals((d(30, 21), Seq(dec("0.120000000000000000012"), dec("0.130000000000000000013"),
+      dec("1.500000000000000000150"))), typed("k * 1.0000000000000000001"))
+    assertEquals((d(28, 20), Seq(dec("0.24345678901234567890"), dec("0.25345678901234567890"),
+      dec("1.62345678901234567890"))), typed("k + 0.12345678901234567890"))
+    assertEquals((d(13, 4), Seq(dec("0.1320"), dec("0.1430"), dec("1.6500"))), typed("k * 1.10"))
+    assertEquals((d(27, 20), Seq(dec("0.12000000000000000000"), dec("0.13000000000000000000"),
+      dec("1.50000000000000000000"))), typed("COALESCE(k, 0.12345678901234567890)"))
+    // MOD is %, its constants read the same way: `1 - 0.95` was a DOUBLE.
+    assertEquals((d(4, 4), Seq(dec("0.0200"), dec("0.0300"), dec("0.0000"))), typed("k % 0.0500"))
+    assertEquals(typed("k % (1 - 0.95)"), typed("MOD(k, 1 - 0.95)"))
+    // A comparison compares the number written, all its digits.
+    val past = "0.120000000000000000001"
+    assertEquals(Seq.empty, column(s"SELECT id FROM d WHERE k = $past", cat, "id"))
+    assertEquals(Seq(2), column(s"SELECT id FROM d WHERE k BETWEEN $past AND 0.13 ORDER BY id", cat, "id"))
+    assertEquals(Seq(3), column(s"SELECT id FROM d WHERE k IN ($past, 1.5) ORDER BY id", cat, "id"))
+    assertEquals(Seq(3), column("SELECT id FROM d WHERE 1.50 = k", cat, "id"))
+    assertEquals(Seq(1), column("SELECT id FROM d WHERE k < 0.123", cat, "id"))
+    assertEquals(Seq("y", "y", "y"),
+      column(s"SELECT CASE k WHEN $past THEN 'x' ELSE 'y' END AS v FROM d ORDER BY id", cat, "v"))
+    assertEquals(Seq(dec("0.12"), dec("0.13"), dec("1.50")),
+      column(s"SELECT NULLIF(k, $past) AS v FROM d ORDER BY id", cat, "v"))
+    // A comparison keeps no value, so a number no DECIMAL holds is the DOUBLE
+    // it is, as it was; arithmetic's result would have to hold it.
+    assertEquals(Seq(1, 2, 3), column("SELECT id FROM d WHERE k < 1e300 ORDER BY id", cat, "id"))
+    assertEquals("1" + "0" * 19 + "... (301 characters) has more digits than a DECIMAL holds (38)",
+      bindRejection("SELECT k + 1e300 AS v FROM d", cat))
+    // A UNION column holds the number as written.
+    assertEquals(d(10, 3), typedColumn("SELECT k AS v FROM d UNION ALL SELECT 1.000 FROM d WHERE id = 1", cat)._1)
+  }
+
+  /** An alias is a name; a string literal in its place is refused. It named
+    * the column with its quotes, and `SELECT 'a' 'b'` read the second
+    * literal as an alias, returning `a` in a column named `'b'`. */
+  @Test def aStringIsNoAlias(): Unit = {
+    val cat = literalCatalog()
+    def advice(name: String, written: String) =
+      s"An alias is a name, not a string: write AS $name for $written, and join strings with ||"
+    Seq(
+      "SELECT 'a' 'b' FROM t" -> advice("\"b\"", "'b'"),
+      "SELECT a AS 'x y' FROM t" -> advice("\"x y\"", "'x y'"),
+      "SELECT a 'it''s' FROM t" -> advice("\"it's\"", "'it''s'"),
+      "SELECT x.a FROM t 'x'" -> advice("\"x\"", "'x'"),
+      "SELECT x.a FROM t AS 'x'" -> advice("\"x\"", "'x'")
+    ).foreach { case (sql, message) => assertEquals(sql, message, bindRejection(sql, cat)) }
+    assertEquals(Seq("ab"), column("SELECT 'a' || 'b' AS v FROM t WHERE a = 1", cat, "v"))
+  }
 }

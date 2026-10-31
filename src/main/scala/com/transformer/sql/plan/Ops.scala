@@ -345,10 +345,16 @@ object Decimals {
     val d = Casts.toDecimal(n)
     val v = if (d.scale < 0) d.setScale(0) else d
     val t = DataType.DecimalType(math.max(v.precision, v.scale), v.scale)
-    if (t.precision > MaxPrecision)
-      throw new IllegalArgumentException(s"${v.toPlainString} has more digits than a DECIMAL holds ($MaxPrecision)")
+    if (t.precision > MaxPrecision) throw new IllegalArgumentException(
+      s"${shownNumber(v.toPlainString)} has more digits than a DECIMAL holds ($MaxPrecision)")
     LitExpr(v, t)
   }
+
+  /** A number as a message shows it: as written, or for one past 40
+    * characters its start and its length, so a literal of ten thousand digits
+    * does not make a message of ten thousand characters. */
+  def shownNumber(text: String): String =
+    if (text.length <= 40) text else s"${text.take(20)}... (${text.length} characters)"
 
   /** The type `l op r` is declared as, for an arithmetic `op`. */
   def resultType(op: String, l: DataType.DecimalType, r: DataType.DecimalType): DataType.DecimalType = {

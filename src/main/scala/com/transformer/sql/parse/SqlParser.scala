@@ -61,6 +61,26 @@ object SqlParser {
   def writtenTwice(clause: String): IllegalArgumentException =
     new IllegalArgumentException(s"$clause is written twice for one query; keep one")
 
+  /** The name an identifier written as `written` names. JSqlParser keeps an
+    * identifier as written, quotes and all; in double quotes or backquotes
+    * the name is the text between them, each doubled quote one quote, so
+    * `"x y"` names `x y` and `"a""b"` names `a"b`. Quotes let a name hold a
+    * space, a symbol or a keyword; they do not make it case-sensitive, since
+    * the engine matches every name it resolves without regard to case. */
+  def unquote(written: String): String =
+    if (written.length >= 2 && IdentifierQuotes(written.head) && written.last == written.head) {
+      val q = written.head.toString
+      val name = written.substring(1, written.length - 1).replace(q + q, q)
+      if (name.isEmpty) throw new IllegalArgumentException(s"A name in quotes cannot be empty: $written")
+      name
+    } else written
+
+  /** `name` as an identifier [[unquote]] reads back as exactly `name`, whatever
+    * characters it holds. */
+  def quote(name: String): String = "\"" + name.replace("\"", "\"\"") + "\""
+
+  private val IdentifierQuotes: Set[Char] = Set('"', '`')
+
   /** JSqlParser parses one statement and stops at the `;` after it, so
     * anything written after that would never run: a second query, or `DROP
     * TABLE t`. A trailing `;` is fine, and so are more of them and a comment.

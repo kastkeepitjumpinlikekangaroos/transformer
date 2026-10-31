@@ -594,8 +594,10 @@ existing seed keeps the case it had.
 **To record a frontend finding** — a failure `oracle/CleanRejection` or
 `oracle/SyntaxEquivalence` reports, or text the parser drops — write its plan in
 `plans/robustness/` first, then name it where the property will recognize it:
-a `CleanRejection.Defect` with a recognizer that reads the throwable and, for a
-run-time failure, the bound plan (`BoundPlan`), never the generator's intent; a
+a `CleanRejection.Defect` with a recognizer that reads the throwable (a
+run-time failure that can only be told by its plan wants the bound plan passed
+to `CleanRejection.classify` again, which `BoundPlan` walks), never the
+generator's intent; a
 `SyntaxEquivalence.Known` for a shape; or a `knownPlan` on an entry of
 `SqlTextGen.BeyondTheTable`. Each carries a repro over
 `SqlTextGen.ReferenceTables`, and the matching `FrontendFuzzTest` check fails

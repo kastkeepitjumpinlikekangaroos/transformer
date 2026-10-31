@@ -107,6 +107,40 @@ ship a fix or move something from "not done" to "done".
     them, and `LogicalBuilder.leftSide` refuses it. Three NOTs in a row do not
     parse at all.
   - A WITH that defines a name twice kept the second in the scope map.
+- **JSqlParser keeps a literal's text and a name's quotes, not what they mean**
+  (plans/robustness/13), so the binder reads past each getter:
+  - `StringValue.getValue` is the text between the quotes as written, each
+    quote in it doubled (`it''s`); `getNotExcapedValue`, spelled so, is the
+    value (`it's`). The audit once listed the second as inert with the reason
+    the wrong way round, and `LENGTH('it''s')` was 5. A backslash is no escape
+    in JSqlParser's default lexer: `'it\'s'` is a lexical error.
+  - Every identifier getter keeps the quotes: `Column.getColumnName`,
+    `Table.getName` and `Alias.getName` return `"a"` and `` `a` `` as written,
+    and `Table.getNameParts` each part with its quotes. Every place the binder
+    matches a name reads it through `SqlParser.unquote`; a name it builds and
+    must read back exactly (a `*` expanded into its columns) goes through
+    `SqlParser.quote`. An `@` inside quotes is part of a name, not a database
+    link. `TablesNamesFinder`, which `TaskDag` reads a task's tables with,
+    keeps the quotes too, and leaves a CTE out of the tables only where the
+    reference is spelled exactly as the CTE (`WITH Q ... FROM q` and `WITH "q"
+    ... FROM q` named `q` a table, and the job failed as an unknown view), so
+    `TaskDag` unquotes what it returns and takes the CTE names out itself.
+  - An `Alias` can be a string literal: `SELECT 'a' 'b'` parses as `'a' AS
+    'b'`, and `FROM t AS 'x'` and `SELECT a AS 'x y'` parse too, `getName`
+    returning the quotes. The binder refuses each.
+  - `LongValue.getValue` is a `long`, and throws `NumberFormatException` past
+    BIGINT; `getBigIntegerValue` holds every literal. A minus is never part of
+    the literal, so `-9223372036854775808` arrives as a minus over
+    9223372036854775808, which no BIGINT holds: `LogicalBuilder.IntegerLiteral`
+    folds that one minus in.
+  - `DoubleValue.getValue` is the DOUBLE the digits round to: `1e400` is
+    `Infinity`, `1E-400` is 0, `1.0000000000000000001` is 1.0. Its `toString`
+    returns the digits as written, which is where `LogicalBuilder` reads a
+    number beside a DECIMAL from.
+  - `toString` renders a node as written. The binder matches a SELECT item
+    to a GROUP BY key by that text, and lower-cased all of it, which made
+    `s || 'a'` the key `s || 'A'`; `LogicalBuilder.canonicalText` lower-cases
+    only what is no literal and unquotes the names.
 - **`Fetch.getRowCount` throws unless the count is an integer literal.** It
   unboxes the `LongValue` behind `getExpression`, so `FETCH FIRST ROW ONLY` (no
   count), `FETCH FIRST ? ROWS ONLY` and `FETCH FIRST -1 ROWS ONLY` all throw a
@@ -1237,10 +1271,13 @@ ship a fix or move something from "not done" to "done".
   context and position and requires it refused, and checks that every clause
   plan 01 honoured keeps its meaning in every context. It also found what no
   getter carries at all (see "Generator-rendered SQL covers only the supported
-  grammar" below), and that one inert reason is backwards:
+  grammar" below), and that one inert reason was backwards:
   `StringValue.getNotExcapedValue`, listed as "the literal before quote
-  unescaping", is the unescaped value, and the binder reads the escaped one
-  ([plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md)).
+  unescaping", is the unescaped value, and the binder read the escaped one, so
+  `'it''s'` was five characters. It reads the value now
+  ([plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md);
+  see "JSqlParser keeps a literal's text" above). An inert reason is a claim
+  the test cannot check: read the getter before writing one.
 
   Three JSqlParser traps the audit stepped on: `Table.getDBLinkName` returns the
   table's own name when there is no `@link` and `getDatabase` is a non-null empty
@@ -1536,17 +1573,17 @@ functions and conditions that bound over types they cannot take
 see "A condition is a BOOLEAN" above), and text the parser accepted and the
 binder never saw
 ([plans/robustness/12](../plans/robustness/12-text-the-binder-never-sees.md),
-see "JSqlParser drops text" above) are fixed; two families are open:
+see "JSqlParser drops text" above), and literals and names read as JSqlParser
+keeps their text (`'it''s'` was five characters, `"a"` named no column, an
+integer past BIGINT was a raw `NumberFormatException`, `1e400` was `Infinity`;
+[plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md),
+see "JSqlParser keeps a literal's text" above) are fixed; one family is open:
 
 - **An `Error` in a job's task hangs the job**, and a ~2000-operator expression
   overflows the binder's stack, so one machine-generated query can do it; three
   unclosed parentheses make a parse error take seconds and four time out
   ([plans/robustness/14](../plans/robustness/14-pathological-nesting.md)). The
   most severe: no error, no end.
-- **Literals read as written**: `'it''s'` keeps both quotes, a double-quoted
-  identifier keeps its quotes, an integer literal past BIGINT is a raw
-  `NumberFormatException`, `1e400` is silently `Infinity`
-  ([plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md)).
 
 ## What's intentionally NOT done
 

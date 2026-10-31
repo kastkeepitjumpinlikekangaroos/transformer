@@ -1,6 +1,7 @@
 # Plan 13: literals and quoted identifiers are read as written, not as SQL reads them
 
-> Status: **open** · Effort: 1 day · Risk: medium (the quote escape changes the
+> Status: **done** 2026-10-30 · decided by the user, all four the
+> recommendation · Effort: 1 day · Risk: medium (the quote escape changes the
 > value of literals that run today; quoted identifiers need a decision)
 
 ## How this was found
@@ -81,3 +82,85 @@ the right value as inert, with a reason that is backwards. Measured at `4b6d882`
 ## Docs to update
 
 `README.md` (literals and identifiers in the SQL section), `docs/gotchas.md`.
+
+## Outcome
+
+The user chose the recommendation on each question (2026-10-30), the fourth
+one found while probing:
+
+1. **Quoted names are case-insensitive**, as every bare name is (Spark and
+   DuckDB read them so): `"a"`, `"A"` and `a` are one column, and quotes only
+   let a name hold a space, a symbol or a keyword.
+2. **An integer past BIGINT is the DECIMAL of its digits**, as Postgres reads
+   one and as CSV inference already typed such values; past 38 digits it is
+   refused, and `-9223372036854775808` is the smallest BIGINT.
+3. **A string literal where an alias goes is refused**: `'a' 'b'`, `AS 'x y'`
+   (which ran, naming the column with its quotes) and `FROM t AS 'x'`.
+4. **A number beside a DECIMAL keeps its written digits exactly**: it was read
+   through a DOUBLE, so `k * 1.0000000000000000001` was `k * 1.0`; now 2.50 is
+   a DECIMAL(3,2), as in standard SQL, Postgres and Spark. Chosen knowing
+   `price * 1.10` changes from DECIMAL(12,3) to DECIMAL(13,4).
+
+What landed:
+
+- **A string literal is its value.** The binder reads
+  `StringValue.getNotExcapedValue`, for a literal and an `ESCAPE`, and the
+  audit lists `getValue` as inert, "the literal as written, each quote in it
+  doubled".
+- **A name is what it names.** `SqlParser.unquote` is the one rule, applied
+  wherever the binder matches a name: a column and its qualifier, a table and
+  its alias, a column alias, a CTE and its column list, `t.*`. A `*` expanded
+  into its columns writes each name with `SqlParser.quote`, so a field whose
+  name holds quotes reads back as itself. An empty `""` is refused, a quoted
+  `"true"` is a name, not the literal, and an `@` inside quotes is part of a
+  table's name, not a database link. `TaskDag` reads a job's table references
+  through the same rule.
+- **Numbers.** `LongValue.getBigIntegerValue` replaces `getValue`, which the
+  audit now lists as inert (it throws past BIGINT); `LogicalBuilder`'s
+  `IntegerLiteral` folds the one minus that makes `-9223372036854775808` a
+  BIGINT. A LIMIT, OFFSET, FETCH or TOP past BIGINT, an ordinal out of range
+  and a LAG or LEAD offset or frame bound past INT are refused by name. A
+  DOUBLE literal that is infinite, or zero although its digits are not, is
+  refused; `Decimals.shownNumber` keeps a ten-thousand-digit literal out of
+  the message.
+- **A number beside a DECIMAL** is read from its digits
+  (`LogicalBuilder.besideDecimals`, over the DoubleValue's own text) in
+  arithmetic, `MOD`, a comparison, `BETWEEN`, `IN`, a CASE switch, `NULLIF`,
+  the values of a CASE, COALESCE, IF, GREATEST and LEAST, and each column of a
+  UNION's arms. A comparison already read a DOUBLE as the decimal it prints
+  as, so only a number with more digits than a DOUBLE keeps answered wrongly
+  there: `k = 0.120000000000000000001` held for 0.12.
+
+Found on the way and fixed with it:
+
+- **A GROUP BY key matched a SELECT item that differed in a literal's case**,
+  a silent wrong answer: the binder matched expressions by their text
+  lower-cased whole, so `SELECT s || 'a' ... GROUP BY s || 'A'` returned
+  `s || 'A'`. `LogicalBuilder.canonicalText` lower-cases only what is no
+  literal and reads each name unquoted, so the query is the ungrouped-column
+  error it should be, and `SELECT "b" + 1 ... GROUP BY b + 1` matches. The
+  same text names a SELECT item with no alias, so `SELECT 'ABC'` is a column
+  named `'ABC'` rather than `'abc'`.
+- **A job refused a CTE spelled other than its references.** `TaskDag`
+  extracts each task's tables with JSqlParser's `TablesNamesFinder`, which
+  keeps quotes and leaves out a CTE only where a reference is spelled exactly
+  as the CTE, so `WITH Q AS (...) SELECT * FROM q` failed the whole job with
+  "references unknown view 'q'" although the task binds. `TaskDag` takes out
+  the CTE names itself.
+- **`MOD(k, 1 - 0.95)` was a bind error** where `k % (1 - 0.95)` ran: `MOD`'s
+  arguments did not meet as `%`'s operands do.
+
+The fuzzer's records are gone, the proof the fixes landed:
+`SyntaxEquivalence.KnownDefects` is empty, `CleanRejection.Defect` has lost
+`NumberLiteralOutOfRange` (and its recognizer, with it, the bound plan it
+read), and `BeyondTheTable` requires string literals side by side refused in
+every context, beside two new entries for a string as a column and as a table
+alias. The quoted-identifier shape has seven spellings now (double quotes,
+backquotes, another case, quoted qualifiers, a quoted table alias, a quoted
+CTE and column alias), and the quote shape is observable, since its pair
+answered one constant row. The eight regressions in `SqlEngineTest` and
+`TaskDagTest` each fail at the commit before.
+
+Verified: `bazel test //...` 53/53; `frontend_fuzz_campaign` at 90000 seeds of
+each property (three blocks of 30000) and the three DAG scheduler campaigns at
+5000 seeds each, all green; jaffle-shop 15/15 with every validation passing.

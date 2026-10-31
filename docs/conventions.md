@@ -121,8 +121,21 @@ specific traps.
   whose `ExecutionException` carries a chain of class names for a message.
   `oracle/CleanRejection` (`fuzz/frontend_fuzz_test`) holds every failure to
   this; its known defects are where the engine does not yet
-  ([plans/robustness/13](../plans/robustness/13-literals-are-read-as-written.md),
-  [14](../plans/robustness/14-pathological-nesting.md)).
+  ([plans/robustness/14](../plans/robustness/14-pathological-nesting.md)).
+- **A literal is its value and a name is what it names, read from what was
+  written, never from a getter that lost part of it.** JSqlParser keeps both as
+  text: a string literal with each quote doubled (`StringValue.getValue`; the
+  value is `getNotExcapedValue`), an identifier with its quotes, an integer as a
+  `long` that throws past BIGINT (`LongValue.getValue`; `getBigIntegerValue`
+  holds every one), a number with a point as the DOUBLE it rounds to
+  (`DoubleValue.getValue`; the digits are its `toString`). Match every name the
+  binder resolves (a column, a table, an alias, a CTE, a job's table reference
+  in `TaskDag`) through `SqlParser.unquote`, build a name that must read back
+  exactly with `SqlParser.quote`, and read a number beside a DECIMAL as the
+  decimal it is written as, through `LogicalBuilder.besideDecimals`, wherever
+  values meet. A text the binder compares two expressions by
+  (`LogicalBuilder.canonicalSql`) folds only what SQL folds: names, never a
+  literal.
 - **Selectivity / cardinality constants live as named `private[plan] val`s**
   in `LogicalPlanCardinality.scala` (`SelectivityEq`, `SelectivityRange`,
   `SelectivityIsNull`, …). New shapes added to `filterSelectivity` should

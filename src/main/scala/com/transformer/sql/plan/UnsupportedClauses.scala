@@ -281,10 +281,12 @@ object UnsupportedClauses {
         example = "SELECT a FROM other.t"
       )(t => t.getNameParts != null && t.getNameParts.size > 1),
       // getDBLinkName returns the table's own name when there is no link, so
-      // presence is the '@' in the written name.
+      // presence is an '@' in the written name, outside quotes: "a@b" is a
+      // name.
       rejectsWhen[Table]("getDBLinkName")("A database link (t@link)",
         example = "SELECT a FROM t@remote"
-      )(t => t.getNameParts != null && t.getNameParts.asScala.exists(_.contains("@"))),
+      )(t => t.getNameParts != null &&
+        t.getNameParts.asScala.exists(p => p.contains("@") && !p.startsWith("\"") && !p.startsWith("`"))),
       rejects("getPivot")("PIVOT", example = "SELECT * FROM t PIVOT (SUM(a) FOR b IN (1, 2))"),
       rejects("getUnPivot")("UNPIVOT", example = "SELECT * FROM t UNPIVOT (v FOR k IN (a, b))"),
       rejects("getSampleClause")("TABLESAMPLE", example = "SELECT a FROM t TABLESAMPLE SYSTEM (10)"),
@@ -587,14 +589,14 @@ object UnsupportedClauses {
     classOf[AllTableColumns] -> audit(StarModifiers),
     classOf[LongValue] -> audit(Nil, Seq(
       "getStringValue" -> "the literal as written",
-      "getBigIntegerValue" -> "the same value as getValue")),
+      "getValue" -> "getBigIntegerValue as a long, which throws past BIGINT")),
     classOf[DoubleValue] -> audit(Nil),
     classOf[StringValue] -> audit(
       Seq(rejectsWhen[StringValue]("getPrefix")("A prefixed string literal such as E'...' or B'...'",
         example = "SELECT E'a' FROM t",
         describe = sv => s"${sv.getPrefix}'...'"
       )(sv => sv.getPrefix != null && !sv.getPrefix.equalsIgnoreCase("N"))),
-      Seq("getNotExcapedValue" -> "the literal before quote unescaping")),
+      Seq("getValue" -> "the literal as written, each quote in it doubled; getNotExcapedValue is its value")),
     classOf[NullValue] -> audit(Nil),
     classOf[DateValue] -> audit(Nil),
     classOf[TimestampValue] -> audit(Nil, Seq("getRawValue" -> "the literal as written")),

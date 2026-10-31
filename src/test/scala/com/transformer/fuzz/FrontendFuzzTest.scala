@@ -165,7 +165,7 @@ class FrontendFuzzTest {
     * clean rejection a leak) is caught without a generator in the way. */
   @Test def cleanRejectionClassifiesFailures(): Unit = {
     def classify(sql: String, phase: Phase, e: Throwable): Either[String, CleanRejection.Outcome] =
-      try Right(CleanRejection.classify(sql, phase, e, None))
+      try Right(CleanRejection.classify(sql, phase, e))
       catch { case a: AssertionError => Left(a.getMessage) }
     def clean(sql: String, phase: Phase, e: Throwable): Unit =
       classify(sql, phase, e).left.foreach(m => fail(s"expected clean, got: $m"))

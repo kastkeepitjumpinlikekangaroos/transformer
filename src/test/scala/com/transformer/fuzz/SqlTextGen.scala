@@ -430,13 +430,12 @@ object SqlTextGen {
     * clause table cannot list it: JSqlParser stops at the first statement,
     * keeps the last of a repeated tail clause or splits it with a UNION's last
     * arm, keeps the second of two CTEs of one name, takes any number of ONs
-    * on any join, and hangs a NOT on the left side of an operator. Each must
-    * be refused, as a table entry must; `knownPlan` names the plan recording
-    * one that binds today. A `wrappable` one is also checked in every
-    * context, as a table entry's example is. */
+    * on any join, hangs a NOT on the left side of an operator, and takes a
+    * string literal for an alias. Each must be refused, as a table entry
+    * must; `knownPlan` names the plan recording one that binds today. A
+    * `wrappable` one is also checked in every context, as a table entry's
+    * example is. */
   final case class Beyond(name: String, sql: String, wrappable: Boolean, knownPlan: Option[String])
-
-  private val LiteralsPlan = "plans/robustness/13-literals-are-read-as-written.md"
 
   val BeyondTheTable: Vector[Beyond] = Vector(
     Beyond("a second statement after ;", "SELECT a FROM t; SELECT b FROM t", wrappable = false, None),
@@ -470,7 +469,9 @@ object SqlTextGen {
     Beyond("NOT NOT before IS NULL", "SELECT a FROM t WHERE NOT NOT TRUE IS NULL", wrappable = true, None),
     Beyond("NOT before a comparison in a one-argument call", "SELECT COUNT_IF(NOT FALSE > TRUE) AS n FROM t",
       wrappable = true, None),
-    Beyond("string literals side by side", "SELECT 'a' 'b' FROM t", wrappable = true, Some(LiteralsPlan)))
+    Beyond("string literals side by side", "SELECT 'a' 'b' FROM t", wrappable = true, None),
+    Beyond("a string literal as a column alias", "SELECT a AS 'x' FROM t", wrappable = true, None),
+    Beyond("a string literal as a table alias", "SELECT x.a FROM t AS 'x'", wrappable = true, None))
 
   // ===========================================================================
   // Honoured clauses
@@ -776,10 +777,14 @@ object SqlTextGen {
     // `NOT NOT a = {x}` without the parentheses is refused (BeyondTheTable).
     Spelling("NOT NOT", Vector(where("a = {x}"), where("NOT (NOT (a = {x}))"), where("NOT NOT (a = {x})"),
       where("NOT (NOT a = {x})")), Some(TAll)),
-    // Shapes whose spellings disagree today, each a known defect of
-    // oracle/SyntaxEquivalence with the plan that records it.
-    Spelling("quoted identifier", Vector("SELECT a, b FROM t", "SELECT \"a\", \"b\" FROM t"), None),
-    Spelling("a quote inside a literal", Vector("SELECT LENGTH('it''s') AS n FROM t", "SELECT 4 AS n FROM t"), None))
+    // A name in quotes is the name inside them, whatever its case, and a
+    // doubled quote in a literal is one quote (plans/robustness/13).
+    Spelling("quoted identifier", Vector("SELECT a, b FROM t", "SELECT \"a\", \"b\" FROM t",
+      "SELECT \"A\", \"B\" FROM \"T\"", "SELECT `a`, `b` FROM `t`", "SELECT \"t\".\"a\", t.\"b\" FROM t",
+      "SELECT \"x\".a, x.\"b\" FROM t \"x\"", "WITH \"q\" AS (SELECT a AS \"x y\", b FROM t) SELECT \"x y\", b FROM q"),
+      None),
+    Spelling("a quote inside a literal", Vector("SELECT a + LENGTH('it''s') AS n FROM t", "SELECT a + 4 AS n FROM t",
+      "SELECT a + LENGTH('''') + 3 AS n FROM t"), Some("SELECT a + 5 AS n FROM t")))
 
   def genSpellingCase(rng: Rng): SpellingCase = {
     val tables = genTables(rng.split())

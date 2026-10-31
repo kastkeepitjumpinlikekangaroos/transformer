@@ -708,11 +708,28 @@ The complete list, with the reason for each, is
 [`UnsupportedClauses.scala`](src/main/scala/com/transformer/sql/plan/UnsupportedClauses.scala).
 Text the parser accepts and then leaves out of what the binder sees is refused
 too: a statement after `;`, a clause written twice, a join's missing or extra
-`ON`, a CTE name defined twice (all above), and a `NOT` the parser hangs on the
-left side of an operator (below). Two readings of a literal are open defects: a
-doubled quote inside a string literal stays doubled, so `'it''s'` is five
-characters long, and a double-quoted identifier keeps its quotes
-([plans/robustness/13](plans/robustness/13-literals-are-read-as-written.md)).
+`ON`, a CTE name defined twice (all above), a `NOT` the parser hangs on the
+left side of an operator, and a string literal where an alias goes (both
+below).
+
+**Literals and names mean what SQL writes.** A string literal is its value, so
+a doubled quote inside one is one quote: `'it''s'` is `it's`, SQL's only way to
+write a quote (a `\` escapes nothing). A name in double quotes or backquotes is
+the name between them, so `"order date"`, `"select"` or `` `x y` `` names what
+a bare word cannot, and `AS "Total"` names its column `Total`. Quotes do not
+make a name case-sensitive: every name, quoted or bare, matches regardless of
+case, as in Spark and DuckDB (standard SQL keeps a quoted name's case), so
+`"a"`, `"A"` and `a` are one column. An alias is a name, so a string literal
+where one goes is an error, `SELECT a AS 'x y'` and `FROM t AS 'x'` alike, as is
+`SELECT 'a' 'b'`, which the parser reads as a literal and its alias; join
+strings with `||`. A whole number is an `INT` if one holds it, else a `BIGINT`,
+else the `DECIMAL` of its digits, as Postgres reads it (`99999999999999999999`
+is a `DECIMAL(20,0)`), and past 38 digits an error; `-9223372036854775808` is
+the smallest `BIGINT`. A number written with a point or an exponent is a
+`DOUBLE`, and beside a `DECIMAL` the decimal it is written as (below); one a
+`DOUBLE` cannot hold is an error rather than `Infinity` or 0 (`1e400`,
+`1e-400`). A `LIMIT`, `OFFSET`, `FETCH`, `TOP` or ordinal past `BIGINT` is an
+error naming it.
 
 **Aggregates:** `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `COUNT_IF(pred)`,
 `SUM`, `AVG`, `MIN`, `MAX` (each of these four also as `SUM(DISTINCT col)` and so
@@ -820,9 +837,11 @@ seconds or milliseconds would be a guess.
 **Values of different types meet only as numbers, or through a string
 literal.** Wherever values meet — a comparison, `BETWEEN`, an `IN` list, a
 `CASE` switch, arithmetic — numbers widen to the widest among them. A `DECIMAL`
-is the widest: an integer meets one exactly, and a `FLOAT` or `DOUBLE` as the
-decimal it prints as, so `price = 0.1` finds a `0.10`; `NaN` and the infinities
-have no decimal value, and one meeting a `DECIMAL` is an error. (Arithmetic on
+is the widest: an integer meets one exactly, a number written in the query as
+the decimal it is written as, every digit of it (`price = 0.1` finds a `0.10`,
+and `price = 0.120000000000000000001` no `0.12`), and a `FLOAT` or `DOUBLE`
+column as the decimal each value prints as; `NaN` and the infinities have no
+decimal value, and one meeting a `DECIMAL` is an error. (Arithmetic on
 a `DECIMAL` reads its other side its own way, below.) A string
 literal beside another type is read as that type when the query is bound, so
 `i < '10'` compares numbers, `b = 'TRUE'` booleans and
@@ -876,7 +895,8 @@ meet as the `DECIMAL` with the longer integer part and the larger scale, so
 `COALESCE(price, price * rate)` over a `DECIMAL(9,2)` and a `DECIMAL(18,4)` is
 a `DECIMAL(28,6)`; an `INT` or `BIGINT` counts as the `DECIMAL(10,0)` or
 `DECIMAL(19,0)` its every value fits; and a number written in the query as the
-decimal it is, so `COALESCE(price, 0)` keeps `price`'s type. A `FLOAT` or
+decimal it is written as, so `COALESCE(price, 0)` keeps `price`'s type and
+`COALESCE(price, 0.125)` is a `DECIMAL(10,3)`. A `FLOAT` or
 `DOUBLE` that is not written in the query beside a `DECIMAL` is an error, as in
 arithmetic: CAST the `DECIMAL` to `DOUBLE` for a `DOUBLE` result. Past 38
 digits the type gives way on its scale as arithmetic's does, so a value is
@@ -891,8 +911,9 @@ keep the larger scale and add an integer digit for the carry, `*` is a
 larger scale and the narrower integer part; unary minus keeps its operand's
 type. Beside a `DECIMAL`, an `INT` counts as the `DECIMAL(10,0)` its every
 value fits, a `BIGINT` as a `DECIMAL(19,0)`, and a number written in the query
-as the decimal of just its digits, so `price * 1.1` is exact (`1.1` is a
-`DECIMAL(2,1)`). So is arithmetic on such numbers alone: `price * (1 + 0.05)`
+as the decimal of its digits as written, so `price * 1.1` is exact (`1.1` is a
+`DECIMAL(2,1)`, and `1.10` a `DECIMAL(3,2)`, as standard SQL types them). So is
+arithmetic on such numbers alone: `price * (1 + 0.05)`
 computes `1 + 0.05` in `DECIMAL`, though on its own it is a `DOUBLE`, while
 arithmetic on integers alone keeps an integer's answer (`10 / 4` is 2 there as
 anywhere). Past 38 digits a type gives way on its scale, down to six

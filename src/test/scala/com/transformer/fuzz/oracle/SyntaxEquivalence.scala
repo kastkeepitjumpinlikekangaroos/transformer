@@ -41,17 +41,9 @@ object SyntaxEquivalence {
     * `repro` is the pair over [[SqlTextGen.ReferenceTables]]. */
   final case class Known(shape: String, why: String, plan: String, repro: (String, String))
 
-  private val Plans = "plans/robustness/"
-
-  val KnownDefects: Vector[Known] = Vector(
-    Known("quoted identifier",
-      "a double-quoted identifier keeps its quotes, so \"a\" names no column",
-      Plans + "13-literals-are-read-as-written.md",
-      ("SELECT a, b FROM t", "SELECT \"a\", \"b\" FROM t")),
-    Known("a quote inside a literal",
-      "a string literal keeps both quotes of a doubled one, so 'it''s' is five characters",
-      Plans + "13-literals-are-read-as-written.md",
-      ("SELECT LENGTH('it''s') AS n FROM t", "SELECT 4 AS n FROM t")))
+  /** None today: the last two, a quoted identifier and a quote inside a
+    * literal, were fixed by plans/robustness/13. */
+  val KnownDefects: Vector[Known] = Vector.empty
 
   def known(shape: String): Option[Known] = KnownDefects.find(_.shape == shape)
 

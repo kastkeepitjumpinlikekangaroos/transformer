@@ -87,7 +87,7 @@ object NoSilentDrop {
     try LogicalBuilder.build(sql, SqlTextGen.ReferenceTables.catalog())
     catch {
       case e: Throwable if CleanRejection.catchable(e) =>
-        CleanRejection.classify(sql, CleanRejection.Phase.Bind, e, None)
+        CleanRejection.classify(sql, CleanRejection.Phase.Bind, e)
         return Refused
     }
     b.knownPlan match {

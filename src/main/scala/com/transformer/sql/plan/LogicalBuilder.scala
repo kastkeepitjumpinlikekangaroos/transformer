@@ -23,6 +23,7 @@ import net.sf.jsqlparser.statement.select._
 
 import java.time.{Instant, LocalDate, ZoneOffset}
 import java.time.temporal.ChronoUnit
+import java.util.Locale
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 import scala.util.DynamicVariable
@@ -101,7 +102,7 @@ object LogicalBuilder {
       outerCteScope: Map[String, CteScopeEntry],
       collector: Option[mutable.ArrayBuffer[CteDef]]): LogicalPlan = {
     val withItems = Option(sel.getWithItemsList).map(_.asScala.toSeq).getOrElse(Nil)
-    withItems.map(_.getAlias.getName).foldLeft(Set.empty[String]) { (defined, name) =>
+    withItems.map(item => unquoted(item.getAlias.getName)).foldLeft(Set.empty[String]) { (defined, name) =>
       if (defined(name.toLowerCase))
         throw new IllegalArgumentException(s"WITH defines '$name' twice; give each query its own name")
       defined + name.toLowerCase
@@ -109,7 +110,7 @@ object LogicalBuilder {
     val cteScope: Map[String, CteScopeEntry] = withItems.foldLeft(outerCteScope) { (scope, item) =>
       if (item.isRecursive)
         throw new IllegalArgumentException("Recursive CTEs (WITH RECURSIVE) are not supported")
-      val cteName = item.getAlias.getName
+      val cteName = unquoted(item.getAlias.getName)
       // A CTE body is always a nested scope: its own WITH (if any) inlines.
       val cteBody = buildAnySelect(item.getSelect, catalog, scope, None)
       // If the CTE has an explicit column alias list — WITH cte(a, b) AS (...) —
@@ -121,7 +122,7 @@ object LogicalBuilder {
             s"CTE '$cteName' declares ${colAliases.size} column alias(es) but its body " +
               s"produces ${cteBody.outputSchema.length} column(s)")
         val renames: Seq[(Expr, String)] = cteBody.outputSchema.fields.zipWithIndex.map { case (f, i) =>
-          val alias = colAliases(i).getExpression.asInstanceOf[Column].getColumnName
+          val alias = unquoted(colAliases(i).getExpression.asInstanceOf[Column].getColumnName)
           (ColRefExpr(i, f.name, f.dataType): Expr, alias)
         }
         LogicalProject(cteBody, renames)
@@ -208,7 +209,7 @@ object LogicalBuilder {
         throw new IllegalArgumentException(
           s"UNION arms have different column counts: ${arms.head.outputSchema.length} vs ${arm.outputSchema.length}")
     }
-    val typed = unifyArms(arms)
+    val typed = unifyArms(arms, selects)
     // JSqlParser sets `all=true` only for explicit UNION ALL; bare UNION (and
     // the rarely-used UNION DISTINCT) both dedup.
     val union = unions.zipWithIndex.foldLeft(typed.head) { case (acc, (u, i)) =>
@@ -235,17 +236,35 @@ object LogicalBuilder {
     * in every arm ([[Analyzer.branches]]), so the union holds what its schema,
     * the first arm's, declares. An arm that ends in its SELECT list has that
     * list retyped, so a string literal or a number written there is read as
-    * the type it meets, as in a CASE; any other arm is wrapped in a projection
-    * that casts its output. An arm whose columns keep their types is kept as
-    * it is. */
-  private def unifyArms(arms: Seq[LogicalPlan]): Seq[LogicalPlan] = {
+    * the type it meets, as in a CASE, and beside a DECIMAL a number is the
+    * decimal it is written as ([[decimalConstant]]); any other arm is wrapped
+    * in a projection that casts its output. An arm whose columns keep their
+    * types is kept as it is. `written` holds each arm as parsed. */
+  private def unifyArms(arms: Seq[LogicalPlan], written: Seq[Select]): Seq[LogicalPlan] = {
     val offered: Seq[Seq[Expr]] = arms.map {
       case LogicalProject(_, projections) => projections.map(_._1)
       case arm => arm.outputSchema.fields.zipWithIndex.map { case (f, i) => ColRefExpr(i, f.name, f.dataType) }
     }
+    // The SELECT list each arm that ends in one wrote, an item per column.
+    def plain(s: Select): Option[PlainSelect] = s match {
+      case ps: PlainSelect => Some(ps)
+      case p: ParenthesedSelect => plain(p.getSelect)
+      case _ => None
+    }
+    val items: Seq[Option[Seq[Expression]]] = arms.zip(written).map {
+      case (LogicalProject(_, projections), arm) =>
+        plain(arm).map(_.getSelectItems.asScala.toSeq.asInstanceOf[Seq[SelectItem[_ <: Expression]]]
+          .map(_.getExpression: Expression))
+          .filter(list => list.size == projections.size && !list.exists(_.isInstanceOf[AllColumns]))
+      case _ => None
+    }
     val names = arms.head.outputSchema.fieldNames
     val columns: Seq[Seq[Expr]] = names.indices.map { c =>
-      Analyzer.branches(s"UNION column ${c + 1} (${names(c)})", offered.map(_(c)))._1
+      val values = offered.map(_(c))
+      val beside =
+        if (!values.exists(_.dataType.isInstanceOf[DataType.DecimalType])) values
+        else values.zip(items).map { case (v, list) => list.flatMap(l => decimalConstant(l(c))).getOrElse(v) }
+      Analyzer.branches(s"UNION column ${c + 1} (${names(c)})", beside)._1
     }
     arms.indices.map { a =>
       val retyped = columns.map(_(a))
@@ -273,27 +292,30 @@ object LogicalBuilder {
     val limitOffset = limit.flatMap(l => Option(l.getOffset))
     if (limitOffset.isDefined && offset.isDefined)
       throw new IllegalArgumentException("OFFSET given twice: as LIMIT offset, count and as OFFSET")
-    val skip = offset.map(o => integerLiteral("OFFSET", o.getOffset))
-      .orElse(limitOffset.map(integerLiteral("OFFSET", _)))
+    val skip = offset.map(o => rowCount("OFFSET", o.getOffset))
+      .orElse(limitOffset.map(rowCount("OFFSET", _)))
     // T-SQL refuses this pair too: nothing says whether TOP counts before or
     // after the skip.
     if (top.isDefined && skip.isDefined)
       throw new IllegalArgumentException("TOP n with OFFSET is not supported; write LIMIT n OFFSET m")
     val counts: Seq[(String, Long)] =
-      limit.flatMap(l => Option(l.getRowCount)).map(c => "LIMIT" -> integerLiteral("LIMIT", c)).toSeq ++
+      limit.flatMap(l => Option(l.getRowCount)).map(c => "LIMIT" -> rowCount("LIMIT", c)).toSeq ++
         // `FETCH FIRST ROW ONLY` leaves the count out, and it means one.
-        fetch.map(f => "FETCH FIRST" -> Option(f.getExpression).fold(1L)(integerLiteral("FETCH FIRST", _))) ++
-        top.map(t => "TOP" -> integerLiteral("TOP", t.getExpression))
+        fetch.map(f => "FETCH FIRST" -> Option(f.getExpression).fold(1L)(rowCount("FETCH FIRST", _))) ++
+        top.map(t => "TOP" -> rowCount("TOP", t.getExpression))
     if (counts.size > 1)
       throw new IllegalArgumentException(s"${counts.map(_._1).mkString(" and ")} both limit the rows; write one")
     val afterOffset = skip.filter(_ > 0).fold(plan)(LogicalOffset(plan, _))
     counts.headOption.fold(afterOffset) { case (_, n) => LogicalLimit(afterOffset, n) }
   }
 
-  /** A row count: JSqlParser parses a negative one as a SignedExpression, so a
-    * LongValue is never negative. */
-  private def integerLiteral(clause: String, e: Expression): Long = e match {
-    case lv: LongValue => lv.getValue
+  /** A row count: a non-negative integer literal a BIGINT holds. JSqlParser
+    * parses a negative one as a minus over the number. */
+  private def rowCount(clause: String, e: Expression): Long = e match {
+    case IntegerLiteral(v) if v.signum >= 0 =>
+      if (v.bitLength < 64) v.longValue
+      else throw new IllegalArgumentException(
+        s"$clause ${Decimals.shownNumber(v.toString)} is larger than the largest BIGINT, ${Long.MaxValue}")
     case _ => throw new IllegalArgumentException(s"$clause must be a non-negative integer literal")
   }
 
@@ -319,13 +341,9 @@ object LogicalBuilder {
       expr match {
         // AllTableColumns is a subtype of AllColumns; match it first.
         case atc: net.sf.jsqlparser.statement.select.AllTableColumns =>
-          val tableName = atc.getTable.getName
+          val tableName = unquoted(atc.getTable.getName)
           sources.find(_._1.exists(_.equalsIgnoreCase(tableName))).map(_._2) match {
-            case Some(schema) =>
-              schema.fields.map { f =>
-                val col = new Column(new net.sf.jsqlparser.schema.Table(tableName), f.name)
-                (col.asInstanceOf[Expression], f.name)
-              }
+            case Some(schema) => schema.fields.map(f => (columnNamed(Some(tableName), f.name), f.name))
             case None =>
               throw new IllegalArgumentException(s"Unknown table in '$tableName.*'")
           }
@@ -334,15 +352,9 @@ object LogicalBuilder {
           // turn `SELECT *, 1 AS x` into `SELECT 1 AS x`.
           throw new IllegalArgumentException("SELECT * needs a FROM clause")
         case _: net.sf.jsqlparser.statement.select.AllColumns =>
-          sources.flatMap { case (alias, schema) =>
-            schema.fields.map { f =>
-              val col = new Column(f.name)
-              alias.foreach(a => col.setTable(new net.sf.jsqlparser.schema.Table(a)))
-              (col.asInstanceOf[Expression], f.name)
-            }
-          }
+          sources.flatMap { case (alias, schema) => schema.fields.map(f => (columnNamed(alias, f.name), f.name)) }
         case other =>
-          val alias = Option(si.getAlias).map(_.getName).getOrElse(deriveAlias(other))
+          val alias = Option(si.getAlias).map(aliasName).getOrElse(deriveAlias(other))
           Seq((other, alias))
       }
     }
@@ -512,8 +524,8 @@ object LogicalBuilder {
       * error. A column of the input that is no key is the error that says the
       * rule, and one the input does not have is its unknown column. */
     def groupedColumn(c: Column): Expr = {
-      val qualifier = Option(c.getTable).map(_.getName)
-      val name = c.getColumnName
+      val qualifier = Option(c.getTable).map(t => unquoted(t.getName))
+      val name = unquoted(c.getColumnName)
       val input = Analyzer.resolveColumn(qualifier, name, sources)
       groupBound.indexWhere(_._1 == input) match {
         case -1 => throw new IllegalArgumentException(
@@ -661,8 +673,8 @@ object LogicalBuilder {
 
   private def fromItem(item: FromItem, catalog: Catalog, cteScope: Map[String, CteScopeEntry]): (LogicalPlan, Sources) = item match {
     case t: net.sf.jsqlparser.schema.Table =>
-      val name = t.getName
-      val alias = Option(t.getAlias).map(_.getName).orElse(Some(name))
+      val name = unquoted(t.getName)
+      val alias = Option(t.getAlias).map(aliasName).orElse(Some(name))
       cteScope.get(name.toLowerCase) match {
         case Some(PendingCte(cteName, pending)) =>
           // Placeholder scan; the resolver swaps it for the inlined body or a
@@ -737,21 +749,21 @@ object LogicalBuilder {
     e match {
     case Grouped(inner) => b(inner)
     case c: Column =>
-      val q = Option(c.getTable).map(_.getName)
-      val raw = c.getColumnName
-      Analyzer.findColumn(q, raw, sources).getOrElse {
+      val q = Option(c.getTable).map(t => unquoted(t.getName))
+      val written = c.getColumnName
+      val name = unquoted(written)
+      Analyzer.findColumn(q, name, sources).getOrElse {
         // JSqlParser parses TRUE and FALSE as names; they are the literals
-        // unless a column has the name.
-        if (q.isEmpty && (raw.equalsIgnoreCase("TRUE") || raw.equalsIgnoreCase("FALSE")))
-          LitExpr(raw.equalsIgnoreCase("TRUE"), DataType.BooleanType)
-        else aggResolver(c).getOrElse(throw Analyzer.unknownColumn(q, raw, sources))
+        // unless a column has the name. In quotes they are only a name.
+        if (q.isEmpty && (written.equalsIgnoreCase("TRUE") || written.equalsIgnoreCase("FALSE")))
+          LitExpr(written.equalsIgnoreCase("TRUE"), DataType.BooleanType)
+        else aggResolver(c).getOrElse(throw Analyzer.unknownColumn(q, name, sources))
       }
-    case l: LongValue =>
-      val v = l.getValue
-      if (v >= Int.MinValue && v <= Int.MaxValue) LitExpr(v.toInt, DataType.IntType)
-      else LitExpr(v, DataType.LongType)
-    case d: DoubleValue => LitExpr(d.getValue, DataType.DoubleType)
-    case s: StringValue => LitExpr(s.getValue, DataType.StringType)
+    case IntegerLiteral(v) => integerLiteral(v)
+    case d: DoubleValue => doubleLiteral(d)
+    // The value, each doubled quote one: `getValue` is the text between the
+    // quotes as written, so 'it''s' was five characters.
+    case s: StringValue => LitExpr(s.getNotExcapedValue, DataType.StringType)
     case _: NullValue => LitExpr(null, DataType.NullType)
     case d: DateValue => LitExpr(d.getValue.toLocalDate, DataType.DateType)
     // `{ts '...'}` holds its text as a wall-clock time, which is UTC here.
@@ -802,19 +814,20 @@ object LogicalBuilder {
     case x: MinorThanEquals => cmpOpGeneric("<=", x.getLeftExpression, x.getRightExpression, sources, aggResolver, windowResolver)
 
     case in: InExpression =>
-      val left = b(leftSide(in.getLeftExpression))
+      val left = leftSide(in.getLeftExpression)
+      val leftBound = b(left)
       val items: Seq[Expression] = in.getRightExpression match {
         case el: ExpressionList[_] => el.asScala.asInstanceOf[Iterable[Expression]].toSeq
         case _: Select => throw new IllegalArgumentException(
           "IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it")
         case _ => throw new IllegalArgumentException("IN takes a list of values in parentheses")
       }
-      val (operands, _) = Analyzer.unify(left +: items.map(b))
+      val (operands, _) = Analyzer.unify(comparedBesideDecimals(left +: items, leftBound +: items.map(b)))
       InListExpr(operands.head, operands.tail, in.isNot)
 
     case bw: Between =>
-      val (operands, _) = Analyzer.unify(
-        Seq(leftSide(bw.getLeftExpression), bw.getBetweenExpressionStart, bw.getBetweenExpressionEnd).map(b))
+      val (operands, _) = Analyzer.unify(bindCompared(
+        Seq(leftSide(bw.getLeftExpression), bw.getBetweenExpressionStart, bw.getBetweenExpressionEnd), b))
       val expr: Expr = BinOpExpr("AND",
         BinOpExpr(">=", operands(0), operands(1), DataType.BooleanType),
         BinOpExpr("<=", operands(0), operands(2), DataType.BooleanType),
@@ -828,7 +841,7 @@ object LogicalBuilder {
         caseInsensitive = lk.getLikeKeyWord == LikeExpression.KeyWord.ILIKE,
         escape = Option(lk.getEscape) match {
           case None => LikeSyntax.Default.escape
-          case Some(e: StringValue) if e.getValue.length <= 1 => e.getValue.headOption
+          case Some(e: StringValue) if e.getNotExcapedValue.length <= 1 => e.getNotExcapedValue.headOption
           case Some(_) => throw new IllegalArgumentException("ESCAPE must be a single-character string literal")
         })
       Seq(s, p).foreach(e => Analyzer.checkText(e.dataType, if (syntax.caseInsensitive) "ILIKE" else "LIKE"))
@@ -839,15 +852,16 @@ object LogicalBuilder {
       IsNullExpr(b(leftSide(isn.getLeftExpression)), negated = isn.isNot)
 
     case c: CaseExpression =>
-      val switch = Option(c.getSwitchExpression).map(b)
+      val switch = Option(c.getSwitchExpression).map(s => (s, b(s)))
       val whens = c.getWhenClauses.asScala.toSeq.map(_.asInstanceOf[WhenClause])
       val conds: Seq[Expr] = whens.map { whenExpr =>
         switch match {
           case None =>
             Analyzer.condition(b(whenExpr.getWhenExpression), "CASE WHEN")
-          case Some(s) =>
-            val whenBound = b(whenExpr.getWhenExpression)
-            val (sl, wr, _) = Analyzer.promotePair(s, whenBound)
+          case Some((written, s)) =>
+            val when = whenExpr.getWhenExpression
+            val pair = comparedBesideDecimals(Seq(written, when), Seq(s, b(when)))
+            val (sl, wr, _) = Analyzer.promotePair(pair(0), pair(1))
             BinOpExpr("=", sl, wr, DataType.BooleanType)
         }
       }
@@ -902,35 +916,58 @@ object LogicalBuilder {
   private def binopGeneric(op: String, l: Expression, r: Expression, sources: Sources,
                            aggResolver: Expression => Option[Expr],
                            windowResolver: AnalyticExpression => Option[Expr]): Expr = {
-    val le = bindExprWithAggs(leftSide(l), sources, aggResolver, windowResolver)
-    val re = bindExprWithAggs(r, sources, aggResolver, windowResolver)
-    def beside(other: Expr, side: Expression, bound: Expr): Expr =
-      if (other.dataType.isInstanceOf[DataType.DecimalType]) decimalConstant(side).getOrElse(bound) else bound
-    Analyzer.arithmetic(op, beside(re, l, le), beside(le, r, re))
+    val operands = bindOperands(Seq(leftSide(l), r), bindExprWithAggs(_, sources, aggResolver, windowResolver))
+    Analyzer.arithmetic(op, operands(0), operands(1))
   }
 
   /** `values`, bound by `bind`, under the one type of a result they all
-    * become ([[Analyzer.branches]]). Beside a DECIMAL a constant is decimal
-    * arithmetic, as it is beside one in arithmetic ([[decimalConstant]]), so
-    * `COALESCE(price, 1 + 0.05)` is a DECIMAL as `price + (1 + 0.05)` is. */
-  private def bindBranches(what: String, values: Seq[Expression], bind: Expression => Expr): (Seq[Expr], DataType) = {
-    val bound = values.map(bind)
-    val beside =
-      if (bound.exists(_.dataType.isInstanceOf[DataType.DecimalType]))
-        values.zip(bound).map { case (v, e) => decimalConstant(v).getOrElse(e) }
-      else bound
-    Analyzer.branches(what, beside)
-  }
+    * become ([[Analyzer.branches]]), each constant beside a DECIMAL the
+    * decimal it is written as ([[bindOperands]]), so `COALESCE(price, 1 +
+    * 0.05)` is a DECIMAL as `price + (1 + 0.05)` is. */
+  private def bindBranches(what: String, values: Seq[Expression], bind: Expression => Expr): (Seq[Expr], DataType) =
+    Analyzer.branches(what, bindOperands(values, bind))
+
+  /** `values`, written as they are, bound by `bind` as the operands of
+    * arithmetic or the values of one result. See [[besideDecimals]]. */
+  private def bindOperands(values: Seq[Expression], bind: Expression => Expr): Seq[Expr] =
+    besideDecimals(values, values.map(bind), decimalConstant)
+
+  /** `values`, written as they are, bound by `bind` as operands a comparison
+    * reads: the two of a comparison, an IN list with its left side, a
+    * BETWEEN's three. A comparison keeps no value, so a number no DECIMAL
+    * holds (`price < 1e300`) stays the DOUBLE it is, which a DECIMAL compares
+    * as the decimal it prints as. */
+  private def bindCompared(values: Seq[Expression], bind: Expression => Expr): Seq[Expr] =
+    comparedBesideDecimals(values, values.map(bind))
+
+  private def comparedBesideDecimals(values: Seq[Expression], bound: Seq[Expr]): Seq[Expr] =
+    besideDecimals(values, bound, v =>
+      try decimalConstant(v)
+      catch { case _: IllegalArgumentException => None }) // more digits than a DECIMAL holds
+
+  /** `bound`, the operands `values` were bound as, with each constant the
+    * decimal it is written as when one of them is a DECIMAL (`constant`, which
+    * is [[decimalConstant]]). Bound alone a number is a DOUBLE, which keeps
+    * about seventeen digits and the shortest scale that prints it: `price *
+    * 1.0000000000000000001` was `price * 1.0`, `price = 0.120000000000000000001`
+    * held for a `price` of 0.12, and 1.10 was a DECIMAL(2,1). */
+  private def besideDecimals(
+      values: Seq[Expression],
+      bound: Seq[Expr],
+      constant: Expression => Option[Expr]): Seq[Expr] =
+    if (!bound.exists(_.dataType.isInstanceOf[DataType.DecimalType])) bound
+    else values.zip(bound).map { case (v, e) => constant(v).getOrElse(e) }
 
   /** `e` as decimal arithmetic when it is a constant, numbers written in the
     * query and `+ - * / %` and negation on them alone. Bound on its own
     * `1 + 0.05` is a DOUBLE, which arithmetic refuses beside a DECIMAL; beside
     * one it is computed in DECIMAL, so `price * (1 + 0.05)` is as exact as
-    * `price * 1.05`. Each number is the decimal of its digits
-    * (`Decimals.literal`) and each step is typed as `Decimals.resultType`
-    * says. A constant keeps the value it has on its own: arithmetic on
-    * integers alone is an integer's, as `10 / 4` is 2 anywhere. A CAST is no
-    * constant, since `CAST(1 AS DOUBLE)` asks for a DOUBLE. */
+    * `price * 1.05`. Each number is the decimal of its digits as written
+    * (`Decimals.literal`), so 2.50 is a DECIMAL(3,2) as in standard SQL, and
+    * each step is typed as `Decimals.resultType` says. A constant keeps the
+    * value it has on its own: arithmetic on integers alone is an integer's, as
+    * `10 / 4` is 2 anywhere. A CAST is no constant, since `CAST(1 AS DOUBLE)`
+    * asks for a DOUBLE. */
   private def decimalConstant(e: Expression): Option[Expr] = {
     def step(op: String, l: Expression, r: Expression): Option[Expr] =
       for (x <- decimalConstant(l); y <- decimalConstant(r)) yield {
@@ -939,8 +976,8 @@ object LogicalBuilder {
       }
     e match {
       case Grouped(inner) => decimalConstant(inner)
-      case l: LongValue => Some(Decimals.literal(java.lang.Long.valueOf(l.getValue)))
-      case d: DoubleValue => Some(Decimals.literal(java.lang.Double.valueOf(d.getValue)))
+      case l: LongValue => Some(Decimals.literal(l.getBigIntegerValue))
+      case d: DoubleValue => Some(Decimals.literal(writtenDigits(d)))
       case s: SignedExpression if s.getSign == '+' => decimalConstant(s.getExpression)
       case s: SignedExpression if s.getSign == '-' =>
         decimalConstant(s.getExpression).map(c => UnaryOpExpr("-", c, c.dataType))
@@ -956,11 +993,11 @@ object LogicalBuilder {
     }
   }
 
-  /** Whether `e` is a constant of integers alone, which [[decimalConstant]]
-    * leaves to integer arithmetic. */
+  /** Whether `e` is a constant of INT and BIGINT literals alone, which
+    * [[decimalConstant]] leaves to integer arithmetic. */
   private def integerConstant(e: Expression): Boolean = e match {
     case Grouped(inner) => integerConstant(inner)
-    case _: LongValue => true
+    case IntegerLiteral(v) => v.bitLength < 64
     case s: SignedExpression => integerConstant(s.getExpression)
     case a: Addition => integerConstant(a.getLeftExpression) && integerConstant(a.getRightExpression)
     case a: Subtraction => integerConstant(a.getLeftExpression) && integerConstant(a.getRightExpression)
@@ -969,14 +1006,59 @@ object LogicalBuilder {
     case a: Modulo => integerConstant(a.getLeftExpression) && integerConstant(a.getRightExpression)
     case _ => false
   }
+
   private def cmpOpGeneric(op: String, l: Expression, r: Expression, sources: Sources,
                            aggResolver: Expression => Option[Expr],
                            windowResolver: AnalyticExpression => Option[Expr]): Expr = {
-    val (le, re, _) = Analyzer.promotePair(
-      bindExprWithAggs(leftSide(l), sources, aggResolver, windowResolver),
-      bindExprWithAggs(r, sources, aggResolver, windowResolver))
+    val operands = bindCompared(Seq(leftSide(l), r), bindExprWithAggs(_, sources, aggResolver, windowResolver))
+    val (le, re, _) = Analyzer.promotePair(operands(0), operands(1))
     BinOpExpr(op, le, re, DataType.BooleanType)
   }
+
+  /** An integer literal's value. A minus written before the literal belongs
+    * to it only where the number alone is no BIGINT: `-9223372036854775808`,
+    * the smallest BIGINT, parses as a minus over 9223372036854775808, which on
+    * its own is a DECIMAL. Any other minus binds as the negation it is. */
+  private object IntegerLiteral {
+    private val SmallestBigintMagnitude = java.math.BigInteger.ONE.shiftLeft(63)
+
+    def unapply(e: Expression): Option[java.math.BigInteger] = e match {
+      case l: LongValue => Some(l.getBigIntegerValue)
+      case s: SignedExpression if s.getSign == '-' => s.getExpression match {
+        case l: LongValue if l.getBigIntegerValue == SmallestBigintMagnitude => Some(SmallestBigintMagnitude.negate)
+        case _ => None
+      }
+      case _ => None
+    }
+  }
+
+  /** An integer written in the query: an INT if one holds it, else a BIGINT,
+    * else the DECIMAL of its digits, as Postgres reads one (and as CSV
+    * inference types a column of them). Past 38 digits no DECIMAL holds it,
+    * and it is an error. */
+  private def integerLiteral(v: java.math.BigInteger): LitExpr =
+    if (v.bitLength < 32) LitExpr(v.intValue, DataType.IntType)
+    else if (v.bitLength < 64) LitExpr(v.longValue, DataType.LongType)
+    else Decimals.literal(new java.math.BigDecimal(v))
+
+  /** A number written with a point or an exponent: a DOUBLE, as long as one
+    * holds it. A number past a DOUBLE's range was Infinity, and a non-zero
+    * one too small for a DOUBLE was 0, both silently; each is refused, and
+    * no DECIMAL (38 digits) holds either. */
+  private def doubleLiteral(d: DoubleValue): LitExpr = {
+    val v = d.getValue
+    val shown = Decimals.shownNumber(d.toString)
+    if (v.isInfinite) throw new IllegalArgumentException(
+      s"The number $shown is too large for a DOUBLE, which holds at most ${Double.MaxValue}")
+    if (v == 0.0 && writtenDigits(d).signum != 0) throw new IllegalArgumentException(
+      s"The number $shown is too small for a DOUBLE, which would read it as 0")
+    LitExpr(v, DataType.DoubleType)
+  }
+
+  /** The digits of a number written with a point or an exponent, exactly.
+    * JSqlParser keeps them as the node's text, which its `toString` returns;
+    * `getValue` is the DOUBLE they round to. */
+  private def writtenDigits(d: DoubleValue): java.math.BigDecimal = new java.math.BigDecimal(d.toString)
 
   /** CURRENT_DATE or CURRENT_TIMESTAMP: the statement's start, in UTC like
     * every time in the engine. */
@@ -1005,14 +1087,15 @@ object LogicalBuilder {
       // string literal, which is read as the type it meets.
       case "NULLIF" if params.size == 2 =>
         val (first, second) = (bind(params(0)), bind(params(1)))
-        val (compared, _) = Analyzer.unify(Seq(first, second))
+        val (compared, _) = Analyzer.unify(comparedBesideDecimals(params, Seq(first, second)))
         Seq(if (Analyzer.isStringLiteral(first)) compared(0) else first, compared(1))
+      // MOD(a, b) is a % b, typed and computed as that is.
+      case "MOD" if params.size == 2 => bindOperands(params, bind)
       case _ => params.map(bind)
     }
     val argTypes = args.map(_.dataType)
     // `CURRENT_DATE ()`, with a space, parses as a call rather than the keyword.
     if (args.isEmpty && UnsupportedClauses.ClockKeywords(name)) clockLiteral(name)
-    // MOD(a, b) is a % b, typed and computed as that is.
     else if (name == "MOD" && args.size == 2) Analyzer.arithmetic("%", args(0), args(1))
     else {
       val signature = Funcs.signature(name, argTypes)
@@ -1248,7 +1331,10 @@ object LogicalBuilder {
   }
 
   private def extractNonNegativeInt(label: String)(e: Expression): Int = e match {
-    case lv: LongValue if lv.getValue >= 0 && lv.getValue <= Int.MaxValue => lv.getValue.toInt
+    case IntegerLiteral(v) if v.signum >= 0 =>
+      if (v.bitLength < 32) v.intValue
+      else throw new IllegalArgumentException(
+        s"$label ${Decimals.shownNumber(v.toString)} is larger than the largest INT, ${Int.MaxValue}")
     case _ => throw new IllegalArgumentException(s"$label must be a non-negative integer literal")
   }
 
@@ -1264,11 +1350,11 @@ object LogicalBuilder {
   private def selectListOrdinal(clause: String, e: Expression, size: Int): Option[Int] = e match {
     case Grouped(inner) => selectListOrdinal(clause, inner, size)
     case lv: LongValue =>
-      val v = lv.getValue
-      if (v < 1 || v > size)
+      val v = lv.getBigIntegerValue
+      if (v.signum < 1 || v.compareTo(java.math.BigInteger.valueOf(size.toLong)) > 0)
         throw new IllegalArgumentException(
-          s"$clause position $v is not in select list (size $size)")
-      Some((v - 1).toInt)
+          s"$clause position ${Decimals.shownNumber(v.toString)} is not in select list (size $size)")
+      Some(v.intValue - 1)
     case _ => None
   }
 
@@ -1326,19 +1412,86 @@ object LogicalBuilder {
 
   /** The text two expressions share when they are the same expression, which
     * matches a SELECT item, a HAVING or an ORDER BY key to a GROUP BY key, an
-    * aggregate or a window. JSqlParser's `toString` throws for a few nodes
+    * aggregate or a window, and names a SELECT item with no alias. It is the
+    * expression as JSqlParser renders it, read as the binder reads it
+    * ([[canonicalText]]). JSqlParser's `toString` throws for a few nodes
     * the binder refuses (a ROW-type CAST under a node the rejection pass does
     * not audit); such a node matches only itself, so binding goes on to refuse
     * it by name. */
   private def canonicalSql(e: Expression): String =
-    try e.toString.toLowerCase
+    try canonicalText(e.toString)
     catch { case NonFatal(_) => s"#${System.identityHashCode(e)}" }
+
+  /** `sql` with each name as the binder resolves it, regardless of case and
+    * without its quotes, and each string literal as written. Lower-casing the
+    * whole text made `GROUP BY s || 'A'` the key `SELECT s || 'a'` read, so
+    * the query returned `s || 'A'`; and `"a"` matched no `a`. A name in quotes
+    * that no bare word spells (`"x y"`, or `"true"`, which bare is the
+    * literal) keeps its quotes. */
+  private def canonicalText(sql: String): String = {
+    val out = new StringBuilder(sql.length)
+    var plain = 0 // where the text not yet copied starts
+    var i = 0
+    def copyPlain(until: Int): Unit = out ++= sql.substring(plain, until).toLowerCase(Locale.ROOT)
+    while (i < sql.length) {
+      val q = sql.charAt(i)
+      if (q == '\'' || q == '"' || q == '`') {
+        copyPlain(i)
+        // To just past the closing quote; a doubled quote is inside.
+        var end = i + 1
+        var closed = false
+        while (end < sql.length && !closed) {
+          if (sql.charAt(end) != q) end += 1
+          else if (end + 1 < sql.length && sql.charAt(end + 1) == q) end += 2
+          else { end += 1; closed = true }
+        }
+        val token = sql.substring(i, end)
+        if (q == '\'') out ++= token
+        else {
+          val name = SqlParser.unquote(token).toLowerCase(Locale.ROOT)
+          val bare = Character.isLetter(name.head) || name.head == '_'
+          out ++= (if (bare && name.forall(c => Character.isLetterOrDigit(c) || c == '_' || c == '$') &&
+              !LiteralWords(name)) name else SqlParser.quote(name))
+        }
+        i = end
+        plain = end
+      } else i += 1
+    }
+    copyPlain(sql.length)
+    out.toString
+  }
+
+  /** The words JSqlParser reads as literals when they are not quoted. */
+  private val LiteralWords = Set("true", "false", "null")
 
   private def deriveAlias(e: Expression): String = e match {
     case Grouped(inner) => deriveAlias(inner)
-    case c: Column => c.getColumnName
+    case c: Column => unquoted(c.getColumnName)
     case _ => canonicalSql(e)
   }
+
+  /** The name an identifier written as `written` names ([[SqlParser.unquote]]). */
+  private def unquoted(written: String): String = SqlParser.unquote(written)
+
+  /** The name an alias gives a column or a table. An alias is a name, and
+    * JSqlParser also takes a string literal in its place, which named the
+    * column with the quotes, and made two literals side by side (`SELECT 'a'
+    * 'b'`) a literal and its alias; a string there is refused. */
+  private def aliasName(alias: net.sf.jsqlparser.expression.Alias): String = {
+    val written = alias.getName
+    if (written.startsWith("'")) {
+      val text = written.substring(1, written.length - 1).replace("''", "'")
+      throw new IllegalArgumentException(
+        s"An alias is a name, not a string: write AS ${SqlParser.quote(text)} for $written, and join strings with ||")
+    }
+    unquoted(written)
+  }
+
+  /** A column the binder resolves to exactly the field `name` of the source
+    * `table`, whatever characters the name holds: each part is written in
+    * quotes, which binding reads off again. */
+  private def columnNamed(table: Option[String], name: String): Expression =
+    new Column((table.toSeq :+ name).map(SqlParser.quote).asJava)
 
   private def parseTypeName(s: String): DataType = s.toUpperCase match {
     case "INT" | "INTEGER" => DataType.IntType

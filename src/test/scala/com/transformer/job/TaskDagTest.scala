@@ -171,6 +171,26 @@ class TaskDagTest {
     assertEquals(Set.empty[Int], dag.nodes(0).deps)
   }
 
+  /** A task's references are the names the binder resolves: without their
+    * quotes, regardless of case, and none of them a CTE the SQL defines.
+    * `"events"` was a view named with its quotes, and a CTE written `Q` or
+    * `"q"` but read as `q` was a table, so each failed the DAG as an unknown
+    * view although the task binds. */
+  @Test def referencesAreTheNamesTheBinderResolves(): Unit = {
+    val a = task("SELECT * FROM \"Events\" JOIN `users` ON 1 = 1", viewName = "a")
+    val b = task("WITH Q AS (SELECT * FROM a) SELECT * FROM q", viewName = "b")
+    val c = task("WITH \"q\" AS (SELECT * FROM \"B\") SELECT * FROM q UNION ALL (WITH r AS (SELECT * FROM a) " +
+      "SELECT * FROM \"R\")", viewName = "c")
+    val dag = TaskDag.build(Seq(a, b, c), Set("events", "users"), vars)
+    assertEquals(Set("events", "users"), dag.nodes(0).inputDeps)
+    assertEquals(Set(0), dag.nodes(1).deps)
+    assertEquals(Set(0, 1), dag.nodes(2).deps)
+    // A name the SQL defines nowhere is still unknown.
+    val unknown = assertIae { TaskDag.build(Seq(task("WITH q AS (SELECT * FROM events) SELECT * FROM \"p\"",
+      viewName = "d")), Set("events"), vars) }
+    assertTrue(unknown, unknown.startsWith("Task 'd' references unknown view 'p'."))
+  }
+
   @Test def templateRenderedBeforeExtraction(): Unit = {
     val a = task("SELECT * FROM events_{{ today }}", viewName = "result")
     val dag = TaskDag.build(Seq(a), Set("events_20260101"), vars)
