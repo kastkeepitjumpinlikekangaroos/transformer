@@ -1,8 +1,10 @@
 package com.transformer.fuzz
 
-import com.transformer.core.{DataType, Field, Schema}
-import com.transformer.fuzz.CsvTextGen.{Blank, DataCase, InferenceCase, Malformed, Row, TextCase}
+import com.transformer.core.{ColumnVector, DataType, Field, Schema}
+import com.transformer.fuzz.CsvTextGen.{Blank, DataCase, InferenceCase, Malformed, NumberTextCase, Row, TextCase}
 import com.transformer.fuzz.oracle.{CsvRoundTrip, InferenceRoundTrip}
+import com.transformer.read.csv.CsvValues
+import com.transformer.sql.plan.Casts
 import org.junit.Assert._
 import org.junit.Test
 
@@ -11,7 +13,8 @@ import scala.collection.mutable
 /** Property-based gate over the CSV reader and writer, which every other
   * fuzzer reaches only through in-memory views.
   *
-  * Three properties ([[CsvRoundTrip]], [[InferenceRoundTrip]]):
+  * Four properties ([[CsvRoundTrip]], [[InferenceRoundTrip]], and the fourth
+  * here):
   *
   *   - '''data round trip''': what `CsvWriter` writes under any option bag,
   *     read back with `CsvOptions.forWrittenFile` (how a job re-reads a task's
@@ -23,7 +26,9 @@ import scala.collection.mutable
   *   - '''inference''': read with types inferred, each column takes the
   *     narrowest type its sample reads as, every value is what its text says,
   *     a later value that does not fit fails by name, and a second and third
-  *     pass agree.
+  *     pass agree;
+  *   - '''cast''': a CAST reads text as a number or a boolean exactly
+  *     where a column of that type does, as the same value.
   *
   * Found before it landed (each now pinned by `csv_row_parser_test`,
   * `csv_reader_test`, `csv_writer_test` or `data_job_test`): a NULL in a
@@ -51,6 +56,64 @@ class CsvFuzzTest {
   @Test def fuzzInferenceRoundTrip(): Unit =
     Props.forAll[InferenceCase]("csv-inference-round-trip", CsvTextGen.inferenceCase, Shrinker.csvInferenceCase,
       count = Props.seedCountOr(DefaultCsvSeeds)) { c => InferenceRoundTrip.check(c); () }
+
+  /** A CAST reads text as a number exactly where a CSV column of that type
+    * does, as the same value. A CAST read Java's grammar, so `5d`, ` 5`,
+    * `0x1p3`, digits of other scripts and `1e400` were numbers to it and not
+    * to CSV (plans/robustness/24); both read through `NumberText` now, and a
+    * reader of its own on either side fails here. Each case reads no file,
+    * so its budget is larger. */
+  @Test def fuzzCastReadsTextAsCsvDoes(): Unit =
+    Props.forAll[NumberTextCase]("cast-reads-as-csv", CsvTextGen.numberTextCase, _ => Iterator.empty,
+      count = Props.seedCountOr(DefaultCsvSeeds * 10)) { c =>
+      castAndCsv(c) match {
+        case (Right(a), Right(b)) =>
+          if (!RowOracle.identical(a, b))
+            throw new AssertionError(s"[cast-reads-as-csv] $c: CAST reads ${RowOracle.describe(a)}, CSV ${RowOracle.describe(b)}")
+        case (Left(_), Left(_)) => ()
+        case (cast, csv) =>
+          throw new AssertionError(s"[cast-reads-as-csv] $c: CAST gives $cast, CSV ${csv.fold(_ => "no value", RowOracle.describe)}")
+      }
+    }
+
+  /** What a CAST and a CSV column of the case's type read its text as. */
+  private def castAndCsv(c: NumberTextCase): (Either[String, Any], Either[String, Any]) = {
+    val cast =
+      try Right(Casts.cast(c.text, DataType.StringType, c.dataType))
+      catch { case e: IllegalArgumentException => Left(e.getMessage) }
+    val csv =
+      try {
+        val v = ColumnVector.allocate(c.dataType, 1)
+        CsvValues.parseInto(v, 0, c.text, c.dataType)
+        Right(v.getBoxed(0))
+      } catch { case _: CsvValues.Unreadable => Left("unreadable") }
+    (cast, csv)
+  }
+
+  /** The cast property needs text both read, text both refuse, and text
+    * Java's grammar reads that the engine's does not, or it holds of a
+    * corpus that cannot tell the two grammars apart. */
+  @Test def castCorpusReachesBothGrammars(): Unit = {
+    val n = 3000
+    var read, refused, javaOnly = 0
+    (0 until n).foreach { seed =>
+      val c = CsvTextGen.numberTextCase(new Rng(seed.toLong))
+      val engine = castAndCsv(c)._1.isRight
+      val java = scala.util.Try(c.dataType match {
+        case DataType.IntType => c.text.toInt
+        case DataType.LongType => c.text.toLong
+        case DataType.FloatType => c.text.toFloat
+        case DataType.DoubleType => c.text.toDouble
+        case _ => throw new NumberFormatException
+      }).isSuccess
+      if (engine) read += 1 else refused += 1
+      if (java && !engine) javaOnly += 1
+    }
+    println(s"[csv] cast corpus over $n seeds: read=$read refused=$refused read by Java's grammar only=$javaOnly")
+    assertTrue(s"read $read", read > n / 5)
+    assertTrue(s"refused $refused", refused > n / 5)
+    assertTrue(s"Java-only $javaOnly", javaOnly > n / 20)
+  }
 
   // ---- corpus health ---------------------------------------------------------
 

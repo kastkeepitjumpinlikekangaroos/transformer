@@ -4748,4 +4748,40 @@ class SqlEngineTest {
     assertEquals("SUBSTRING's length -1 is negative", runError("SELECT SUBSTRING(s, 2, id - 2) AS v FROM ts"))
     assertEquals(Seq("", null, "", ""), column("SELECT SUBSTRING(s, 2, 0) AS v FROM ts ORDER BY id", cat, "v"))
   }
+
+  /** Text casts to a number by the grammar CSV reads one by, and only to a
+    * value the type holds. CAST read Java's: `' 5'` and `'5d'` were 5.0,
+    * `'0x1p3'` 8.0, digits of any script an INT, `'1e400'` an infinity and
+    * `'1e-400'` 0 (plans/robustness/24). A string literal beside a number is
+    * read by the same rule, when the query is bound. */
+  @Test def castReadsANumberAsCsvDoes(): Unit = {
+    val cat = new Catalog
+    cat.register("tn", CsvReader.fromPath(tmpCsv("tn.csv", "d\n1.5\n").toString, CsvOptions()))
+    def bindError(sql: String): String =
+      try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    def one(sql: String): Any = collectAllRows(SqlEngine.execute(sql, cat)).head("v")
+    val arabic = s"${0x0661.toChar}${0x0662.toChar}"
+    for ((text, target, name) <- Seq(
+           (" 5", "DOUBLE", "double"), ("5 ", "DOUBLE", "double"), ("5d", "DOUBLE", "double"),
+           ("5f", "FLOAT", "float"), ("0x1p3", "DOUBLE", "double"), (arabic, "INT", "int"),
+           (arabic, "BIGINT", "long"), ("1e400", "DOUBLE", "double"), ("-1e400", "DOUBLE", "double"),
+           ("1e40", "FLOAT", "float"), ("1e-400", "DOUBLE", "double"), ("1e-50", "FLOAT", "float"),
+           ("+NaN", "DOUBLE", "double"), ("Infinity ", "DOUBLE", "double")))
+      assertEquals(s"Cannot cast '$text' to $name", bindError(s"SELECT CAST('$text' AS $target) AS v FROM tn"))
+    // A string literal beside a number is read as its type by the same rule.
+    assertEquals("Cannot cast ' 1e20' to double", bindError("SELECT d FROM tn WHERE d = ' 1e20'"))
+    // The grammar's numbers still cast, up to the edges each type holds.
+    assertEquals(7, one("SELECT CAST('007' AS INT) AS v"))
+    assertEquals(5L, one("SELECT CAST('+5' AS BIGINT) AS v"))
+    assertEquals(0.5, one("SELECT CAST('.5' AS DOUBLE) AS v"))
+    assertEquals(5.0, one("SELECT CAST('5.' AS DOUBLE) AS v"))
+    assertEquals(-1e-5, one("SELECT CAST('-1e-5' AS DOUBLE) AS v"))
+    assertEquals(Double.MaxValue, one("SELECT CAST('1.7976931348623157e308' AS DOUBLE) AS v"))
+    assertEquals(Double.MinPositiveValue, one("SELECT CAST('4.9e-324' AS DOUBLE) AS v"))
+    assertEquals(0.0, one("SELECT CAST('0e400' AS DOUBLE) AS v"))
+    assertEquals(1.0e38f, one("SELECT CAST('1e38' AS FLOAT) AS v"))
+    assertTrue(one("SELECT CAST('NaN' AS DOUBLE) AS v").asInstanceOf[Double].isNaN)
+    assertEquals(Double.NegativeInfinity, one("SELECT CAST('-Infinity' AS DOUBLE) AS v"))
+  }
 }

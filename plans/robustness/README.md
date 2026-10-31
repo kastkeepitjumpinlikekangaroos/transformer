@@ -260,7 +260,7 @@ semantic questions on 2026-10-31, the recommended option each time.
 | [21](21-two-float-equalities.md) | Floats have two equalities | a hash join matches NaN to NaN and misses -0.0 = 0.0, which the same predicate as a filter does not | **done** 2026-10-31 | medium |
 | [22](22-order-by-sees-input-columns.md) | ORDER BY resolves names against input columns | `SELECT -b AS b ... ORDER BY b` sorts by the input; `ORDER BY n` on `COUNT(*) AS n` is refused | **done** 2026-10-31 | medium |
 | [23](23-clauses-that-cannot-change-the-answer.md) | Constant sort, group and partition keys | `ORDER BY 'b'` sorts nothing; a pattern ending in its escape is FALSE | **done** 2026-10-31 | low |
-| [24](24-cast-reads-javas-number-grammar.md) | CAST reads Java's number grammar | `' 5'`, `'5d'`, hex, Arabic-Indic digits cast; `'1e400'` is Infinity | planned | low |
+| [24](24-cast-reads-javas-number-grammar.md) | CAST reads Java's number grammar | `' 5'`, `'5d'`, hex, Arabic-Indic digits cast; `'1e400'` is Infinity | **done** 2026-10-31 | low |
 | [25](25-dates-past-the-storable-range.md) | Dates and timestamps past the storable range wrap | `CAST('+999999999-12-31' AS DATE)` is `+466210-05-14` | planned | low |
 | [26](26-duplicate-column-names.md) | Outputs and CSV headers repeat column names | the defect fails the task downstream, naming neither | planned | low |
 | [27](27-config-keys-are-not-checked.md) | Job configs ignore unknown keys and unreadable values | a job with `delimeter`, `partiton_by`, `spill: yes` succeeded | planned | medium |

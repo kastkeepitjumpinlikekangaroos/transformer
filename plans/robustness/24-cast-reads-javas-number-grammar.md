@@ -1,6 +1,6 @@
 # Plan 24: CAST reads text with Java's number grammar
 
-> Status: planned · found by the 2026-10-31 audit · Effort: half a day ·
+> Status: **done** 2026-10-31 · found by the 2026-10-31 audit · Effort: half a day ·
 > Risk: low-medium (text that cast before may not) · Follows the user's CSV
 > decision (plain decimals only, 2026-10-14) and plan 13's literal rule
 
@@ -45,3 +45,21 @@ gains a property that `CAST(s AS T)` succeeds exactly when CSV reads `s` as a
 ## Docs
 
 README (CAST), gotchas (the Java-grammar entry), testing.md.
+
+## Outcome
+
+Done as planned. `core/NumberText` holds the grammar (an optional sign and
+ASCII digits; a plain decimal, or `NaN`, `Infinity` and `-Infinity`) and reads
+each type through it, refusing a float past its type's range or a nonzero one
+that would read as 0. `CsvValues` and `Casts.parseNumber` both call it, so the
+CSV reader now refuses `1e400` too, and inference reads a number no DOUBLE
+holds as text. Its errors are the ones each reader gave before: a CSV field
+names its file, line and column, and a CAST `Cannot cast '<text>' to <type>`.
+
+`castReadsANumberAsCsvDoes` covers the table above (a CAST of each text, and
+the literal beside a DOUBLE column), `aNumberTheTypeCannotHoldIsNoValueOfIt`
+the reader, and `csv_fuzz_test`'s `fuzzCastReadsTextAsCsvDoes` holds `Casts.cast`
+and `CsvValues.parseInto` to one answer over text that tells the grammars
+apart. Against the code before each failed, the property at seed 0 (`0x1p-5`
+a FLOAT to the CAST and nothing to CSV); the inference property's own grammar
+moved with the reader's, and failed at seed 18 against it.

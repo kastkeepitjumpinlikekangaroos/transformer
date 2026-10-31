@@ -133,6 +133,7 @@ object CsvTextGen {
       "1" + "0" * 40, "100000000000000000000000000000000000000.5"),
     "java-only number" -> Seq("1d", "1f", "0x1p3", " 1", "1 ", "1_000", 0x0661.toChar.toString + 0x0662.toChar,
       "+NaN", "nan", "inf", "1e", "."),
+    "number no double holds" -> Seq("1e400", "-1e400", "1e-400", "1" + "0" * 400),
     "boolean" -> Seq("true", "false", "TRUE", "False", "tRuE"),
     "boolean-ish" -> Seq("yes", "no", "t", "f", "on"),
     "date" -> Seq("2024-01-01", "2024-02-29", "1969-12-31", "+10000-01-01", "-0001-06-15", "0000-01-01"),
@@ -497,6 +498,48 @@ object CsvTextGen {
     })
     InferenceCase(schema, writable, format, files = shape.weighted((4, 1), (2, 2), (1, 3)),
       sampleRows = shape.weighted((4, 1000), (1, 1), (2, shape.between(2, 5))))
+  }
+
+  // ---- 4. number text read by a CAST and by a column ------------------------------
+
+  /** Text to read as a number or a boolean, and the type to read it as. */
+  final case class NumberTextCase(text: String, dataType: DataType) {
+    override def toString: String = s"NumberTextCase(${show(text)} as $dataType)"
+  }
+
+  private val NumberCategories: Set[String] =
+    Set("int", "long", "wide integer", "double", "java-only number", "number no double holds", "boolean", "boolean-ish")
+
+  private val NumberTypes: Seq[DataType] =
+    Seq(DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType, DataType.BooleanType)
+
+  def numberTextCase(rng: Rng): NumberTextCase = {
+    val text = rng.weighted[() => String](
+      (3, () => rng.oneOf(Lookalikes.filter(c => NumberCategories(c._1)).flatMap(_._2))),
+      (5, () => composedNumber(rng)))()
+    NumberTextCase(text, rng.oneOf(NumberTypes))
+  }
+
+  /** A number put together from the parts Java's grammar and the engine's
+    * read differently: a sign, digits of ASCII or of another script, a point,
+    * an exponent at either float's edges or past them, a type suffix, a
+    * hexadecimal float, and space around it. */
+  private def composedNumber(rng: Rng): String = {
+    val sb = new StringBuilder
+    if (rng.bool(0.3)) sb.append(rng.oneOf(Seq("+", "-")))
+    def digits(n: Int): String =
+      (0 until n).map(_ => if (rng.bool(0.05)) (0x0660 + rng.between(0, 9)).toChar else ('0' + rng.between(0, 9)).toChar)
+        .mkString
+    if (rng.bool(0.1)) sb.append("0x1p").append(rng.between(-5, 5))
+    else {
+      sb.append(digits(rng.between(0, 3)))
+      if (rng.bool(0.4)) sb.append('.').append(digits(rng.between(0, 3)))
+      if (rng.bool(0.5)) sb.append(rng.oneOf(Seq("e", "E"))).append(rng.oneOf(Seq("", "+", "-")))
+        .append(rng.oneOf(Seq("0", "5", "37", "38", "39", "44", "45", "46", "307", "308", "309", "323", "324", "400")))
+    }
+    if (rng.bool(0.1)) sb.append(rng.oneOf(Seq("d", "f", "D", "F", "L")))
+    val core = sb.toString
+    rng.weighted((8, core), (1, " " + core), (1, core + " "))
   }
 
   // ---- rendering for failure messages --------------------------------------------

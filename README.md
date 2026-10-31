@@ -459,7 +459,7 @@ chosen `job.json` without re-running anything.
   | type | text it reads |
   |---|---|
   | `INT`, `BIGINT` | an optional sign and ASCII digits (`007` is 7, `+5` is 5) |
-  | `FLOAT`, `DOUBLE` | a plain decimal (`1.5`, `.5`, `5.`, `-1e-5`), or `NaN`, `Infinity` and `-Infinity`, which the writer writes; not Java's wider grammar (`1d`, `0x1p3`, ` 1`, non-ASCII digits) |
+  | `FLOAT`, `DOUBLE` | a plain decimal (`1.5`, `.5`, `5.`, `-1e-5`) the type holds, or `NaN`, `Infinity` and `-Infinity`, which the writer writes; not Java's wider grammar (`1d`, `0x1p3`, ` 1`, non-ASCII digits), and not a number past the type's range or so small it would read as 0 (`1e400`, `1e-400`; `1e40` for a `FLOAT`). A `CAST` from text reads the same grammar |
   | `DECIMAL(p,s)` (declared, or `DECIMAL(38,0)` inferred) | a plain decimal that holds exactly at scale `s` in `p` digits, read at that scale (`1.5` as `1.50`, and `5.` in a `DECIMAL(38,0)` as 5); one that would round or has more digits fails |
   | `BOOLEAN` | `true` or `false`, in any case; no other word reads as `false` |
   | `DATE` | ISO `yyyy-MM-dd`, a year past 9999 or before 1 with a sign |
@@ -470,7 +470,8 @@ chosen `job.json` without re-running anything.
 - **Schema inference** samples the first 1000 rows of the first file, and each
   column takes the narrowest type every sampled field reads as: numbers widen
   from `INT` to `BIGINT` to `DECIMAL(38,0)` (an integer past `BIGINT`, kept
-  exact) to `DOUBLE` (past 38 digits, or beside a fraction); a `DATE` widens to a
+  exact) to `DOUBLE` (past 38 digits, or beside a fraction), and a number no
+  `DOUBLE` holds (`1e400`) is text; a `DATE` widens to a
   `TIMESTAMP`, its dates read as midnight UTC; and any other mix, such as `1.5`
   with `true` or `1` with a date, is a `STRING`. A column with nothing but NULL
   and empty fields in its sample is a `STRING`. Only the sample is read, so a
@@ -891,9 +892,14 @@ truncated toward zero (`CAST(2.7 AS INT)` is 2 and `CAST(-2.7 AS INT)` is -2,
 as in Spark), and one outside the type, or NaN or an infinity, which have no
 integer, is an error rather than the type's limit or 0.
 
-Text casts to a number as Java parses one: `'10'`, `'-2.5'` and `'1e3'` are
-numbers, and an `INT` or `BIGINT` reads an integer only. (CSV reads a stricter
-grammar, plain decimals only; see [CSV](#csv).) Text casts to `BOOLEAN` from `true` or `false`, in any case.
+Text casts to a number by the grammar CSV reads one by (see [CSV](#csv)): an
+optional sign and ASCII digits for an `INT` or `BIGINT` (`'007'`, `'+5'`), and a
+plain decimal (`'-2.5'`, `'.5'`, `'1e3'`) or `NaN`, `Infinity` and `-Infinity`
+for a `FLOAT` or `DOUBLE`, which the value must fit: `'1e400'` is no `DOUBLE`
+and `'1e-400'`, which would be 0, none either. Java's wider grammar is not used,
+so `' 5'`, `'5d'`, `'0x1p3'` and digits of other scripts are no numbers, and a
+string literal beside a number is read by the same rule. Text casts to
+`BOOLEAN` from `true` or `false`, in any case.
 Other text is an error that names it, such as `Cannot cast 'x10' to int`, and no
 text quietly becomes `false`.
 

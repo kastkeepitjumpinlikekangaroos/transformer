@@ -293,6 +293,27 @@ class CsvReaderTest {
       assertEquals(s"'$v'", t, typeOf(v))
   }
 
+  /** A number no DOUBLE or FLOAT holds read as one: `1e400` as an infinity
+    * and `1e-400` as 0, and an integer of 400 digits inferred a DOUBLE column
+    * holding an infinity. Each is no value of the type now, as it is to a
+    * CAST, which reads the same grammar (plans/robustness/24): text, to
+    * inference, and a failure naming it in a declared column. */
+  @Test def aNumberTheTypeCannotHoldIsNoValueOfIt(): Unit = {
+    def typeOf(v: String): DataType =
+      CsvReader.fromPath(tmpCsv("g.csv", s"v\n$v\n").toString, CsvOptions()).schema.fields(0).dataType
+    for (v <- Seq("1e400", "-1e400", "1e-400", "1" + "0" * 400))
+      assertEquals(s"'$v'", DataType.StringType, typeOf(v))
+    assertEquals(DataType.DoubleType, typeOf("1" + "0" * 40))
+    for ((v, t) <- Seq("1e400" -> DataType.DoubleType, "1e-400" -> DataType.DoubleType, "1e40" -> DataType.FloatType,
+        "1e-50" -> DataType.FloatType)) {
+      val msg = failure(rows(CsvReader.fromPath(tmpCsv("h.csv", s"v\n$v\n").toString, explicit("v" -> t))))
+      assertTrue(msg, msg.contains(s"'$v'") && msg.contains(t.name))
+    }
+    assertEquals(Seq(Double.MaxValue, Double.MinPositiveValue, 0.0),
+      rows(CsvReader.fromPath(tmpCsv("e.csv", "v\n1.7976931348623157e308\n4.9e-324\n0e400\n").toString,
+        explicit("v" -> DataType.DoubleType))).map(_.head))
+  }
+
   /** An integer past BIGINT used to infer DOUBLE and lose its digits
     * (1.0E20). It is a DECIMAL(38,0) now, exact, up to 38 digits. */
   @Test def anIntegerPastBigintInfersAnExactDecimal(): Unit = {

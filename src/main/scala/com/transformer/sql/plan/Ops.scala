@@ -252,28 +252,28 @@ object Casts {
       case DataType.StringType => v.toString
       case DataType.IntType =>
         v match {
-          case s: String => parseNumber(s, to)(_.toInt)
+          case s: String => parseNumber(s, to)(NumberText.int)
           case n: Number => Integers.toInt(n)
           case b: Boolean => if (b) 1 else 0
           case _ => v.toString.toInt
         }
       case DataType.LongType =>
         v match {
-          case s: String => parseNumber(s, to)(_.toLong)
+          case s: String => parseNumber(s, to)(NumberText.long)
           case n: Number => Integers.toLong(n)
           case b: Boolean => if (b) 1L else 0L
           case _ => v.toString.toLong
         }
       case DataType.FloatType =>
         v match {
-          case s: String => parseNumber(s, to)(_.toFloat)
+          case s: String => parseNumber(s, to)(NumberText.float)
           case n: Number => n.floatValue
           case b: Boolean => if (b) 1.0f else 0.0f
           case _ => v.toString.toFloat
         }
       case DataType.DoubleType =>
         v match {
-          case s: String => parseNumber(s, to)(_.toDouble)
+          case s: String => parseNumber(s, to)(NumberText.double)
           case n: Number => n.doubleValue
           case b: Boolean => if (b) 1.0 else 0.0
           case _ => v.toString.toDouble
@@ -314,7 +314,7 @@ object Casts {
           case d: java.math.BigDecimal => Decimals.fit(d, t)
           case n @ (_: java.lang.Integer | _: java.lang.Long) => toDecimal(n.asInstanceOf[Number]).setScale(t.scale)
           case n: Number if isFinite(n) => toDecimal(n)
-          case s: String => parseNumber(s, to)(new java.math.BigDecimal(_))
+          case s: String => parseNumber(s, to)(NumberText.decimal)
           case _ => throw new IllegalArgumentException(s"Cannot cast $v to $t")
         }
       case other => throw new IllegalArgumentException(s"CAST to $other not implemented")
@@ -338,10 +338,12 @@ object Casts {
     case _ => true
   }
 
-  /** A number in the JDK's syntax, the text CSV inference reads as one. */
+  /** A number in [[NumberText]]'s grammar, the one CSV reads, which the
+    * type can hold. It was the JDK's, which read `'5d'` and `'0x1p3'`, digits
+    * of any script, and `'1e400'` as an infinity. */
   private def parseNumber[T](s: String, to: DataType)(parse: String => T): T =
     try parse(s)
-    catch { case _: NumberFormatException => throw new IllegalArgumentException(s"Cannot cast '$s' to $to") }
+    catch { case NumberText.NotANumber => throw new IllegalArgumentException(s"Cannot cast '$s' to $to") }
 
   /** `true` or `false` in any case, the text CSV inference reads as a
     * BOOLEAN. Any other text is an error rather than false. */

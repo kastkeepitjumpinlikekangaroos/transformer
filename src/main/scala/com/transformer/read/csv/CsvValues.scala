@@ -13,12 +13,12 @@ import java.time.format.DateTimeParseException
   * The grammar is strict, and the same for an inferred column as for a
   * declared one:
   *
-  *   - INT and BIGINT: an optional sign and ASCII digits (`007` is 7).
-  *   - FLOAT and DOUBLE: a plain decimal number, optionally signed, with a
-  *     point, digits either side of it, and an exponent (`1.5`, `.5`, `5.`,
-  *     `-1e-5`), or `NaN`, `Infinity` and `-Infinity`, which the writer
-  *     prints. Java's own grammar is not used: it reads `1d`, `0x1p3`, ` 1`
-  *     and non-ASCII digits as numbers.
+  *   - INT, BIGINT, FLOAT and DOUBLE: [[NumberText]]'s grammar, which a CAST
+  *     reads too: an optional sign and ASCII digits for the integers; a plain
+  *     decimal number (`1.5`, `.5`, `5.`, `-1e-5`) or `NaN`, `Infinity` and
+  *     `-Infinity`, which the writer prints, for the floats, one the type
+  *     can hold. Java's own grammar is not used: it reads `1d`, `0x1p3`, ` 1`
+  *     and non-ASCII digits as numbers, and `1e400` as an infinity.
   *   - DECIMAL: a plain decimal number, read at the column's declared scale
   *     when it is one exactly, and refused when it would have to round or has
   *     more digits than the precision.
@@ -45,64 +45,21 @@ object CsvValues {
   /** The type an integer column whose values pass BIGINT infers as. */
   val WideIntegerType: DataType = DataType.DecimalType(MaxDecimalDigits, 0)
 
-  // ---- the grammar ----------------------------------------------------------
-
-  private def isDigit(c: Char): Boolean = c >= '0' && c <= '9'
-
-  /** An optional sign and one or more ASCII digits. */
-  private[csv] def isIntegerText(s: String): Boolean = {
-    val start = if (s.nonEmpty && (s.charAt(0) == '+' || s.charAt(0) == '-')) 1 else 0
-    start < s.length && (start until s.length).forall(i => isDigit(s.charAt(i)))
-  }
-
-  /** A plain decimal number: an optional sign, digits with an optional point
-    * (at least one digit either side of it), and an optional exponent. */
-  private[csv] def isDecimalText(s: String): Boolean = {
-    var i = 0
-    val n = s.length
-    if (i < n && (s.charAt(i) == '+' || s.charAt(i) == '-')) i += 1
-    var digits = 0
-    while (i < n && isDigit(s.charAt(i))) { i += 1; digits += 1 }
-    if (i < n && s.charAt(i) == '.') {
-      i += 1
-      while (i < n && isDigit(s.charAt(i))) { i += 1; digits += 1 }
-    }
-    if (digits == 0) return false
-    if (i < n && (s.charAt(i) == 'e' || s.charAt(i) == 'E')) {
-      i += 1
-      if (i < n && (s.charAt(i) == '+' || s.charAt(i) == '-')) i += 1
-      val exponentStart = i
-      while (i < n && isDigit(s.charAt(i))) i += 1
-      if (i == exponentStart) return false
-    }
-    i == n
-  }
-
-  /** The words a FLOAT or DOUBLE also takes: what the writer prints for the
-    * values that are no number. */
-  private def isSpecialDouble(s: String): Boolean = s == "NaN" || s == "Infinity" || s == "-Infinity"
-
   // ---- reading ----------------------------------------------------------------
 
   /** Whether `dt` has a value whose text is empty: the empty string and the
     * empty byte string. A field of any other type that is empty is NULL. */
   def hasEmptyValue(dt: DataType): Boolean = dt == DataType.StringType || dt == DataType.BinaryType
 
-  def int(s: String): Int = {
-    if (!isIntegerText(s)) throw new Unreadable("int")
-    try Integer.parseInt(s) catch { case _: NumberFormatException => throw new Unreadable("int") }
-  }
+  def int(s: String): Int = try NumberText.int(s) catch { case NumberText.NotANumber => throw new Unreadable("int") }
 
-  def long(s: String): Long = {
-    if (!isIntegerText(s)) throw new Unreadable("long")
-    try java.lang.Long.parseLong(s) catch { case _: NumberFormatException => throw new Unreadable("long") }
-  }
+  def long(s: String): Long = try NumberText.long(s) catch { case NumberText.NotANumber => throw new Unreadable("long") }
 
   def double(s: String): Double =
-    if (isDecimalText(s) || isSpecialDouble(s)) java.lang.Double.parseDouble(s) else throw new Unreadable("double")
+    try NumberText.double(s) catch { case NumberText.NotANumber => throw new Unreadable("double") }
 
   def float(s: String): Float =
-    if (isDecimalText(s) || isSpecialDouble(s)) java.lang.Float.parseFloat(s) else throw new Unreadable("float")
+    try NumberText.float(s) catch { case NumberText.NotANumber => throw new Unreadable("float") }
 
   def boolean(s: String): Boolean =
     if (s.equalsIgnoreCase("true")) true
@@ -139,10 +96,9 @@ object CsvValues {
   /** `s` at `dt`'s scale, when it is a number that holds exactly at that
     * scale and within that precision. */
   def decimal(s: String, dt: DataType.DecimalType): JBigDecimal = {
-    if (!isDecimalText(s)) throw new Unreadable(dt.name)
     val atScale =
-      try new JBigDecimal(s).setScale(dt.scale)
-      catch { case _: ArithmeticException => throw new Unreadable(dt.name) }
+      try NumberText.decimal(s).setScale(dt.scale)
+      catch { case NumberText.NotANumber | _: ArithmeticException => throw new Unreadable(dt.name) }
     if (atScale.precision > dt.precision) throw new Unreadable(dt.name)
     atScale
   }
@@ -191,24 +147,23 @@ object CsvValues {
 
   // ---- inference ----------------------------------------------------------------
 
-  /** The narrowest type a field's text reads as. */
+  /** The narrowest type a field's text reads as. A number no DOUBLE holds
+    * (`1e400`, or an integer of 400 digits) is text. */
   private[csv] def classify(s: String): DataType =
-    if (isIntegerText(s)) {
+    if (NumberText.isInteger(s)) {
       val digits = s.length - (if (s.charAt(0) == '+' || s.charAt(0) == '-') 1 else 0)
       // Leading zeros are no digits of the value.
-      if (digits <= 9 || fits(s, Integer.parseInt)) DataType.IntType
-      else if (digits <= 18 || fits(s, java.lang.Long.parseLong)) DataType.LongType
+      if (digits <= 9 || readsAs(s, int)) DataType.IntType
+      else if (digits <= 18 || readsAs(s, long)) DataType.LongType
       else if (new JBigDecimal(s).precision <= MaxDecimalDigits) WideIntegerType
-      else DataType.DoubleType
+      else if (readsAs(s, double)) DataType.DoubleType
+      else DataType.StringType
     }
-    else if (isDecimalText(s) || isSpecialDouble(s)) DataType.DoubleType
+    else if (readsAs(s, double)) DataType.DoubleType
     else if (s.equalsIgnoreCase("true") || s.equalsIgnoreCase("false")) DataType.BooleanType
     else if (readsAs(s, date)) DataType.DateType
     else if (readsAs(s, timestamp)) DataType.TimestampType
     else DataType.StringType
-
-  private def fits(s: String, parse: String => Any): Boolean =
-    try { parse(s); true } catch { case _: NumberFormatException => false }
 
   private def readsAs(s: String, parse: String => Any): Boolean =
     try { parse(s); true } catch { case _: Unreadable => false }

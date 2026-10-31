@@ -159,8 +159,16 @@ object InferenceRoundTrip {
       case d: DataType.DecimalType =>
         if (!DecimalText.matches(text)) Left(text)
         else Try(new java.math.BigDecimal(text).setScale(d.scale)).toOption.filter(_.precision <= d.precision).toRight(text)
+      // A number no DOUBLE holds, past its largest or so small it would be 0,
+      // is none of its values (plans/robustness/24).
       case DataType.DoubleType =>
-        if (DecimalText.matches(text) || SpecialDouble(text)) Right(text.toDouble) else Left(text)
+        if (SpecialDouble(text)) Right(text.toDouble)
+        else if (!DecimalText.matches(text)) Left(text)
+        else {
+          val d = text.toDouble
+          val zero = text.takeWhile(c => c != 'e' && c != 'E').forall(c => c == '0' || c == '.' || c == '+' || c == '-')
+          if (d.isInfinite || (d == 0.0 && !zero)) Left(text) else Right(d)
+        }
       case DataType.BooleanType =>
         if (text.equalsIgnoreCase("true")) Right(true) else if (text.equalsIgnoreCase("false")) Right(false) else Left(text)
       case DataType.DateType => Try(LocalDate.parse(text)).toOption.toRight(text)
@@ -174,14 +182,16 @@ object InferenceRoundTrip {
   private def integer(text: String): Option[BigInt] = if (IntegerText.matches(text)) Some(BigInt(text)) else None
 
   /** The narrowest type `text` reads as, for inference: integer text is an
-    * INT, a BIGINT or, past one, a DECIMAL(38,0); any other number a DOUBLE. */
+    * INT, a BIGINT or, past one, a DECIMAL(38,0); any other number a DOUBLE,
+    * if one holds it. */
   private[fuzz] def classify(text: String): DataType =
     if (IntegerText.matches(text)) {
       val i = BigInt(text)
       if (i.isValidInt) DataType.IntType
       else if (i.isValidLong) DataType.LongType
       else if (new java.math.BigDecimal(i.bigInteger).precision <= 38) WideInteger
-      else DataType.DoubleType
+      else if (denote(text, DataType.DoubleType).isRight) DataType.DoubleType
+      else DataType.StringType
     } else Seq(DataType.DoubleType, DataType.BooleanType, DataType.DateType, DataType.TimestampType)
       .find(t => denote(text, t).isRight).getOrElse(DataType.StringType)
 

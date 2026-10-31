@@ -1573,11 +1573,16 @@ ship a fix or move something from "not done" to "done".
   blank), and a column name that is empty is quoted, so a header is never a
   blank line. Whether a line is blank is the parser's to say (`blank`), whether
   it is a row the reader's, which knows how many columns the file has.
-- **SQL's CAST reads numbers with Java's grammar and CSV with a plain one.**
-  `CAST('1d' AS DOUBLE)` is 1.0, while a CSV field `1d` is no DOUBLE (it infers
-  as a STRING, and fails a declared DOUBLE column). CSV moved to plain decimals
-  in plan 06 at the user's choice; CAST was not asked about and still uses
-  `java.lang.Double.parseDouble`.
+- **SQL's CAST used to read numbers with Java's grammar and CSV with a plain
+  one — fixed.** CSV moved to plain decimals in plan 06; CAST kept
+  `java.lang.Double.parseDouble` and its kin, so `CAST(' 5' AS DOUBLE)` and
+  `CAST('5d' AS DOUBLE)` were 5.0, `'0x1p3'` was 8.0, Arabic-Indic digits an
+  `INT`, and a string literal beside a number read the same way. Neither
+  grammar checked a float's range: `'1e400'` was an infinity and `'1e-400'` 0,
+  in a CAST and in a CSV column alike. `core/NumberText` is now the one grammar
+  both read through, and a number the type cannot hold is none of its values
+  (plans/robustness/24); `csv_fuzz_test`'s cast property holds the two readers
+  to one answer, so a third grammar fails it.
 - **Names, functions and `UPPER` / `LOWER` used to depend on the JVM's locale
   — fixed.** Every name the engine matches without regard to case went through
   `String.toLowerCase()` or `toUpperCase()`, which read the default locale; under
