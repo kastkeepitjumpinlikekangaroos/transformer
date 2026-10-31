@@ -202,6 +202,11 @@ class FrontendFuzzTest {
     clean(sql, Phase.Bind, new IllegalArgumentException("Unknown column 'x'. Available: [t.a, t.b, t.s]"))
     clean(sql, Phase.Run, new IllegalArgumentException("Cannot cast 'x' to int"))
     clean(sql, Phase.Run, new ArithmeticException("Decimal overflow: 1234.5 does not fit decimal(5,2)"))
+    clean(sql, Phase.Run, new ArithmeticException("Integer overflow: 3 - -9223372036854775807 does not fit BIGINT"))
+    clean(sql, Phase.Run, new ArithmeticException("Integer overflow: ABS(-2147483648) does not fit INT"))
+    clean(sql, Phase.Run, new ArithmeticException("Cannot cast NaN to INT: it has no integer value"))
+    unclean(sql, Phase.Bind, new ArithmeticException("Integer overflow: 1 + 1 does not fit BIGINT"),
+      "internal exception class")
     unclean(sql, Phase.Bind, new NullPointerException("Cannot invoke \"Object.getClass()\" because \"<local6>\" is null"),
       "internal exception class")
     unclean(sql, Phase.Run, new ClassCastException("class java.lang.String cannot be cast to class java.lang.Number"),

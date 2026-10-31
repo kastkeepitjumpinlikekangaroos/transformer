@@ -168,12 +168,14 @@ object CleanRejection {
 
   /** The run-time failures that are about a value, and so belong at run time:
     * a CAST that cannot read its input (a string, or a float's `NaN` or
-    * infinity, which no DECIMAL holds and which a comparison with one widens
-    * to it), and a decimal answer with more integer digits than its type
-    * holds, which is an error by design. */
+    * infinity, which no DECIMAL, INT or BIGINT holds and which a comparison
+    * with a DECIMAL widens to it), and a decimal or integer answer that does
+    * not fit its type, each an error by design (plans/robustness/18). */
   private val DataErrors: Vector[Regex] = Vector(
     """^Cannot cast (?:'.*'|NaN|-?Infinity) to [a-z]+(?:\(\d+,\d+\))?$""".r,
-    """^Decimal overflow: \S+ does not fit decimal\(\d+,\d+\)$""".r)
+    """^Cannot cast (?:NaN|-?Infinity) to (?:INT|BIGINT): it has no integer value$""".r,
+    """^Decimal overflow: \S+ does not fit decimal\(\d+,\d+\)$""".r,
+    """^Integer overflow: .+ does not fit (?:INT|BIGINT)$""".r)
 
   /** SQL's own vocabulary, which a message may name a construct by even when
     * the query does not spell it that way (`Only SELECT statements are
