@@ -1573,6 +1573,17 @@ ship a fix or move something from "not done" to "done".
   blank), and a column name that is empty is quoted, so a header is never a
   blank line. Whether a line is blank is the parser's to say (`blank`), whether
   it is a row the reader's, which knows how many columns the file has.
+- **A malformed template expression used to stay in the text — fixed.**
+  `TemplateRenderer` substituted what its pattern matched and left every other
+  `{{ ... }}` as written, so a task filtering `WHERE CAST(day AS STRING) =
+  '{{ today - 1d }}'` Succeeded with 0 rows, comparing against the template's
+  own text, and an output path made a directory named `{{ today - 1d }}`; `{{
+  today 5 }}` was read as `+ 5` "defensively", and a huge offset threw
+  `NumberFormatException`. Now any `{{` left after substitution is an error
+  naming the expression and the grammar, and an offset past a BIGINT or one
+  that moves the time past what java.time represents is a clean error
+  (plans/robustness/28). A `}}` alone stays text: nested JSON in a string
+  literal ends that way, while `{{` never appears in JSON.
 - **Job configs used to skip the keys they did not know — fixed.**
   `DirectoryJobLoader` read the keys it knew, each options reader read its own
   from one shared map, `ExecutionOptions` documented that "typos should fall

@@ -124,6 +124,36 @@ class TemplateRendererTest {
     assertEquals("SELECT * FROM t WHERE day = '20260101' AND hour = 5", r(sql))
   }
 
+  /** A template expression the grammar does not read is an error naming it
+    * and the grammar. Each was left in the text, so a filter compared against
+    * the template's own text and a path made a directory of it, and `{{ today
+    * 5 }}` was read as `+ 5` (plans/robustness/28). A `}}` alone, as nested
+    * JSON in a string literal ends, is no template. */
+  @Test def anExpressionTheGrammarDoesNotReadIsAnError(): Unit = {
+    def refused(t: String): String =
+      try { r(t); fail(s"$t rendered"); "" } catch { case e: IllegalArgumentException => e.getMessage }
+    for ((t, fragment) <- Seq(
+           "'{{ today - 1d }}'" -> "{{ today - 1d }}",
+           "'{{ today * 2 }}'" -> "{{ today * 2 }}",
+           "'{{ today | ds }}'" -> "{{ today | ds }}",
+           "'{{}}'" -> "{{}}",
+           "'{{ today'" -> "{{ today'",
+           "{{ today 5 }}" -> "{{ today 5 }}",
+           "a {{ today }} b {{ today + }}" -> "{{ today + }}"))
+      assertEquals(s"The template expression '$fragment' is none the renderer reads; it reads {{ name }}, " +
+        "{{ name + N }} and {{ name - N }} with N a whole number", refused(t))
+    assertEquals("""SELECT '{"a":{"b":1}}' AS j""", r("""SELECT '{"a":{"b":1}}' AS j"""))
+    // An offset no BIGINT holds, or one that moves the time past what a date
+    // can be, is the same kind of error, where the first threw
+    // NumberFormatException.
+    assertEquals("The offset in '{{ today + 99999999999999999999 }}' is past what a BIGINT holds",
+      refused("{{ today + 99999999999999999999 }}"))
+    assertEquals("'{{ today + 999999999999 }}' moves the time past what a date can be",
+      refused("{{ today + 999999999999 }}"))
+    assertEquals("'{{ epoch_seconds - 9223372036854775807 }}' moves the time past what a date can be",
+      refused("{{ epoch_seconds - 9223372036854775807 }}"))
+  }
+
   @Test def yearMonthFormat(): Unit = {
     // year_month should give 6-digit yyyyMM
     assertEquals("202601", r("{{ year_month }}"))

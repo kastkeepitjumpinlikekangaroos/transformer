@@ -1148,7 +1148,16 @@ Compound offsets work the way you'd guess: `{{ yesterday - 1 }}` is
 `20251230` (today minus 2 days). Arithmetic on padded variants stays padded:
 `{{ current_hour_pad - 5 }}` is `00`.
 
-Unknown variables raise `IllegalArgumentException` listing all known names.
+Unknown variables raise `IllegalArgumentException` listing all known names. So
+does any other `{{` left in the text: an expression is `{{ name }}`,
+`{{ name + N }}` or `{{ name - N }}` with `N` a whole number, so
+`{{ today - 1d }}`, `{{ today * 2 }}`, `{{ today 5 }}`, `{{}}` and an unclosed
+`{{ today` fail the job before it runs, naming the expression, where each was
+left in the SQL or the path as written (a filter compared against the template's
+own text). Airflow renders its own `{{ }}` before a job reads the text, so one
+left is always a mistake. An offset past a `BIGINT`, or one that moves the time
+past what a date can be, is the same kind of error. A `}}` alone, as nested JSON
+in a string literal ends, is text.
 
 ## Examples
 

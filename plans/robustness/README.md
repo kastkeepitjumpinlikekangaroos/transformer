@@ -264,7 +264,7 @@ semantic questions on 2026-10-31, the recommended option each time.
 | [25](25-dates-past-the-storable-range.md) | Dates and timestamps past the storable range wrap | `CAST('+999999999-12-31' AS DATE)` is `+466210-05-14` | **done** 2026-10-31 | low |
 | [26](26-duplicate-column-names.md) | Outputs and CSV headers repeat column names | the defect fails the task downstream, naming neither | **done** 2026-10-31 | low |
 | [27](27-config-keys-are-not-checked.md) | Job configs ignore unknown keys and unreadable values | a job with `delimeter`, `partiton_by`, `spill: yes` succeeded | **done** 2026-10-31 | medium |
-| [28](28-malformed-templates-pass-through.md) | A malformed `{{ }}` stays in the text | `'{{ today - 1d }}'` filtered every row out, silently | planned | low |
+| [28](28-malformed-templates-pass-through.md) | A malformed `{{ }}` stays in the text | `'{{ today - 1d }}'` filtered every row out, silently | **done** 2026-10-31 | low |
 | [29](29-stale-files-join-an-output.md) | Files the run did not write join a task's output | a stray part file doubled a downstream task's rows | planned | low |
 
 **Order.** 16 first (small and independent). 17 before 18 and 19, which add

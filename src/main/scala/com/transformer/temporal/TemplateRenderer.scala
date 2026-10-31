@@ -24,7 +24,9 @@ import scala.util.matching.Regex
   */
 object TemplateRenderer {
 
-  private val Pattern: Regex = """\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*([+-])?\s*(\d+)?\s*\}\}""".r
+  /** The grammar: a name, and an offset written as `+ N` or `- N`, N a
+    * whole number. */
+  private val Pattern: Regex = """\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:([+-])\s*(\d+))?\s*\}\}""".r
 
   private final case class Var(
       shift: (ZonedDateTime, Long) => ZonedDateTime,
@@ -98,32 +100,56 @@ object TemplateRenderer {
 
   /** Substitute every `{{ … }}` expression in `template` against `vars.executionTime` (UTC).
     *
-    * @throws IllegalArgumentException if a template references an unknown variable.
+    * @throws IllegalArgumentException if a template references an unknown
+    *   variable, an offset is past a BIGINT or moves the time past what a date
+    *   can be, or a `{{` is left that starts no expression of the grammar.
+    *   Airflow renders its own `{{ }}` before a job reads the text, so one left
+    *   is always a mistake, which used to stay in the text: a filter compared
+    *   against the template, and a path made a directory of it
+    *   (plans/robustness/28). A `}}` alone, as a JSON object ends, is text.
     */
   def render(template: String, variables: TemporalVariables): String =
     render(template, variables.zonedExecutionTime)
 
   def render(template: String, ref: ZonedDateTime): String = {
-    Pattern.replaceAllIn(template, m => {
+    val rendered = Pattern.replaceAllIn(template, m => {
       val name = m.group(1).toLowerCase(Locale.ROOT)
-      val signStr = Option(m.group(2))
-      val numStr = Option(m.group(3))
       val v = vars.getOrElse(
         name,
         throw new IllegalArgumentException(
           s"Unknown template variable '{{ $name }}'. Known variables: [${vars.keys.toSeq.sorted.mkString(", ")}]"
         )
       )
-      val offset: Long = (signStr, numStr) match {
-        case (None, None) => 0L
-        case (Some("-"), Some(n)) => -n.toLong
-        case (Some(_), Some(n)) => n.toLong // regex only captures + or - here
-        case (None, Some(n)) => n.toLong    // tolerate "{{ today 5 }}" defensively → treat as +N
-        case (Some(_), None) =>
-          throw new IllegalArgumentException(s"Operator without number in template fragment '${m.matched}'")
+      val offset: Long = Option(m.group(3)) match {
+        case None => 0L
+        case Some(n) =>
+          val magnitude =
+            try java.lang.Long.parseLong(n)
+            catch {
+              case _: NumberFormatException =>
+                throw new IllegalArgumentException(s"The offset in '${m.matched}' is past what a BIGINT holds")
+            }
+          if (m.group(2) == "-") -magnitude else magnitude
       }
+      val value =
+        try v(ref, offset)
+        catch {
+          case _: java.time.DateTimeException | _: ArithmeticException =>
+            throw new IllegalArgumentException(s"'${m.matched}' moves the time past what a date can be")
+        }
       // Replacement is fed to Matcher#appendReplacement which interprets $ and \.
-      Regex.quoteReplacement(v(ref, offset))
+      Regex.quoteReplacement(value)
     })
+    // Each `{{` left starts an expression the grammar does not read: up to
+    // its `}}`, or the end of the text when it has none.
+    val open = rendered.indexOf("{{")
+    if (open >= 0) {
+      val close = rendered.indexOf("}}", open)
+      val fragment = if (close < 0) rendered.substring(open) else rendered.substring(open, close + 2)
+      throw new IllegalArgumentException(
+        s"The template expression '$fragment' is none the renderer reads; it reads {{ name }}, {{ name + N }} " +
+          "and {{ name - N }} with N a whole number")
+    }
+    rendered
   }
 }

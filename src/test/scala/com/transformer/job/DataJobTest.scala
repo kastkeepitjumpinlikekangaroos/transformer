@@ -561,6 +561,30 @@ class DataJobTest {
     assertTrue(result.error.get, result.error.get.toLowerCase.contains("self-cycle"))
   }
 
+  /** A template expression the renderer does not read fails the job before
+    * it runs, in a task's SQL and in an output path. The task Succeeded with 0
+    * rows, its filter comparing against the template's own text, and the path
+    * made a directory named `{{ today - 1d }}` (plans/robustness/28). */
+  @Test def aMalformedTemplateFailsTheJobBeforeItRuns(): Unit = {
+    val inDir = tmpDir("dj-template-")
+    writeCsv(inDir, "t.csv", "day\n20260101\n")
+    val outDir = tmpDir("dj-template-out-")
+    def jobError(sql: String, path: String): String = {
+      val result = DataJob(
+        inputs = Seq(InputFilePath(inDir.resolve("t.csv").toString, viewName = "t")),
+        sql = Seq(SQLTask(name = Some("q"), sqlString = Some(sql),
+          outputFile = Some(OutputFilePath(outDir.resolve(path).toString))))).run()
+      assertFalse(result.succeeded)
+      result.error.getOrElse(fail(s"no job error: $result").toString)
+    }
+    val grammar = "is none the renderer reads; it reads {{ name }}, {{ name + N }} and {{ name - N }} with N a whole number"
+    assertTrue(jobError("SELECT day FROM t WHERE CAST(day AS STRING) = '{{ today - 1d }}'", "q"),
+      jobError("SELECT day FROM t WHERE CAST(day AS STRING) = '{{ today - 1d }}'", "q")
+        .contains(s"The template expression '{{ today - 1d }}' $grammar"))
+    assertTrue(jobError("SELECT day FROM t", "q/{{ today - 1d }}").contains(s"'{{ today - 1d }}' $grammar"))
+    assertFalse(Files.exists(outDir.resolve("q/{{ today - 1d }}")))
+  }
+
   @Test def independentRootsRunConcurrently(): Unit = {
     assumeTrue("requires >=2 CPUs", Runtime.getRuntime.availableProcessors >= 2)
     val inDir = tmpDir("dj-par-")

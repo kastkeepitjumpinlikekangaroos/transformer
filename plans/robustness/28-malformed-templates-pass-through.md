@@ -1,6 +1,6 @@
 # Plan 28: a malformed template expression is left in the text
 
-> Status: planned · found by the 2026-10-31 audit · Effort: half a day ·
+> Status: **done** 2026-10-31 · found by the 2026-10-31 audit · Effort: half a day ·
 > Risk: low
 
 ## Problem
@@ -35,3 +35,18 @@ remaining pair is always a mistake.)
 ## Docs
 
 README (temporal templating), testing.md.
+
+## Outcome
+
+Done as planned, with one narrowing. The pattern takes an offset only as a
+sign and a number together, so `{{ today 5 }}` and `{{ today + }}` match
+nothing, and after substitution any `{{` left is an error naming the
+expression (up to its `}}`, or the end of the text) and the grammar. A `}}`
+alone is not refused, as the plan's "no `{{` or `}}` may remain" would: nested
+JSON in a SQL string literal ends in `}}`, and never holds a `{{`. An offset
+past a BIGINT and one that moves the time past what java.time represents are
+clean errors. SQL and output paths render when the job's DAG is built, so a
+malformed template fails the job before any task runs.
+
+`anExpressionTheGrammarDoesNotReadIsAnError` and
+`aMalformedTemplateFailsTheJobBeforeItRuns` failed against the code before.
