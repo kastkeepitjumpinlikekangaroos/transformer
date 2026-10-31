@@ -745,6 +745,105 @@ object QueryGen {
 
   private def distinctSubset[A](rng: Rng, xs: Vector[A], count: Int): Vector[A] =
     distinctIndices(rng, xs.length, count).map(xs)
+
+  // ---- window frames ------------------------------------------------------
+
+  /** One window aggregate over `t(id, g, k, x)` for `oracle/WindowFrames`,
+    * which works out each row's frame from SQL's definition. `id` is unique,
+    * `g` the partition, `k` the ORDER BY key (an INT, BIGINT, DOUBLE or
+    * DECIMAL with ties, NULLs and, for a DOUBLE, NaN and the infinities) and
+    * `x` the BIGINT the aggregate reads. A ROWS frame orders by `k` and then
+    * `id`, so its rows have one order; a RANGE frame orders by `k` alone,
+    * since its frames are sets of values that ties cannot change. */
+  final case class WindowFrameCase(
+      dataset: DataGen.Dataset,
+      fn: String,
+      partitioned: Boolean,
+      order: Option[WindowOrder],
+      frame: Option[GenFrame]) {
+    def sql: String = {
+      val partition = if (partitioned) "PARTITION BY g " else ""
+      val orderBy = order.map { o =>
+        val key = s"k ${if (o.asc) "ASC" else "DESC"}${o.nullsFirst.map(f => if (f) " NULLS FIRST" else " NULLS LAST").getOrElse("")}"
+        if (frame.exists(_.rows)) s"ORDER BY $key, id " else s"ORDER BY $key "
+      }.getOrElse("")
+      s"SELECT id, $fn OVER ($partition$orderBy${frame.map(_.sql).getOrElse("")}) AS w FROM $ViewName"
+    }
+    override def toString: String = s"WindowFrameCase(\n  sql = $sql\n  data = $dataset)"
+  }
+
+  /** The ORDER BY key's direction, and where its NULLs go when the query says
+    * (`None`: first under ASC, last under DESC). */
+  final case class WindowOrder(asc: Boolean, nullsFirst: Option[Boolean]) {
+    def nullsFirstNow: Boolean = nullsFirst.getOrElse(asc)
+  }
+
+  /** A frame clause: ROWS or RANGE, and its two bounds, `kind` each of
+    * `UNBOUNDED PRECEDING`, `PRECEDING`, `CURRENT ROW`, `FOLLOWING` and
+    * `UNBOUNDED FOLLOWING` with an offset for the two in between. `short`
+    * writes the start alone (`ROWS 2 PRECEDING`), whose end is CURRENT ROW. */
+  final case class GenFrame(rows: Boolean, start: GenBound, end: GenBound, short: Boolean) {
+    def sql: String = {
+      val kind = if (rows) "ROWS" else "RANGE"
+      if (short) s"$kind ${start.sql}" else s"$kind BETWEEN ${start.sql} AND ${end.sql}"
+    }
+  }
+  final case class GenBound(kind: Int, offset: java.math.BigDecimal) {
+    def sql: String = kind match {
+      case 0 => "UNBOUNDED PRECEDING"
+      case 1 => s"${offset.toPlainString} PRECEDING"
+      case 2 => "CURRENT ROW"
+      case 3 => s"${offset.toPlainString} FOLLOWING"
+      case _ => "UNBOUNDED FOLLOWING"
+    }
+  }
+
+  private val WindowKeyDomains: Seq[(DataType, Seq[Any])] = Seq(
+    DataType.IntType -> (-2 to 4).map(i => i: Any),
+    DataType.LongType -> (-2 to 4).map(i => i.toLong: Any),
+    DataType.DoubleType -> Seq[Any](-1.5, 0.0, 0.5, 1.0, 2.5, Double.NaN, Double.PositiveInfinity, Double.NegativeInfinity),
+    DataType.DecimalType(9, 2) -> Seq("-1.50", "0.00", "0.50", "1.00", "2.25").map(v => new java.math.BigDecimal(v): Any))
+
+  def generateWindowFrameCase(rng: Rng): WindowFrameCase = {
+    val dataRng = rng.split()
+    val qRng = rng.split()
+    val (keyType, domain) = qRng.oneOf(WindowKeyDomains)
+    val schema = Schema(Vector(Field("id", DataType.IntType), Field("g", DataType.IntType),
+      Field("k", keyType), Field("x", DataType.LongType)))
+    val n = dataRng.between(0, 20)
+    val rows = (0 until n).map { i =>
+      Array[Any](i,
+        if (dataRng.bool(0.1)) null else dataRng.between(0, 1),
+        if (dataRng.bool(0.12)) null else dataRng.oneOf(domain),
+        if (dataRng.bool(0.1)) null else dataRng.between(-3, 9).toLong)
+    }
+    val fn = qRng.oneOf(Seq("SUM(x)", "COUNT(x)", "COUNT(*)", "MIN(x)", "MAX(x)", "AVG(x)"))
+    val order =
+      if (qRng.bool(0.85)) Some(WindowOrder(qRng.bool(), qRng.weighted((2, None), (1, Some(true)), (1, Some(false)))))
+      else None
+    val frame: Option[GenFrame] = qRng.weighted[() => Option[GenFrame]](
+      (2, () => None),
+      (3, () => if (order.isEmpty) None else Some(genFrame(qRng, rows = true))),
+      (3, () => Some(genFrame(qRng, rows = false, offsets = order.isDefined)))
+    )()
+    WindowFrameCase(DataGen.Dataset(schema, rows), fn, qRng.bool(0.7), order, frame)
+  }
+
+  /** Two bounds SQL allows: a start that is not UNBOUNDED FOLLOWING, an end
+    * that is not UNBOUNDED PRECEDING, and a start no later in the order of
+    * kinds than its end. A RANGE offset needs an ORDER BY (`offsets`). */
+  private def genFrame(r: Rng, rows: Boolean, offsets: Boolean = true): GenFrame = {
+    def offset(): java.math.BigDecimal =
+      if (rows) java.math.BigDecimal.valueOf(r.between(0, 3).toLong)
+      else new java.math.BigDecimal(r.oneOf(Seq("0", "1", "2", "1.5")))
+    def bound(kinds: Seq[Int]): GenBound = GenBound(r.oneOf(kinds), offset())
+    val kinds = if (offsets) Seq(0, 1, 2, 3, 4) else Seq(0, 2, 4)
+    val start = bound(kinds.filter(_ != 4))
+    val end = bound(kinds.filter(k => k != 0 && k >= start.kind))
+    // The short form writes a start whose end is CURRENT ROW.
+    if (start.kind <= 2 && r.bool(0.2)) GenFrame(rows, start, GenBound(2, java.math.BigDecimal.ZERO), short = true)
+    else GenFrame(rows, start, end, short = false)
+  }
 }
 
 /** Renders a bound [[Expr]] (and ORDER BY clauses) to SQL text the engine's
@@ -884,4 +983,5 @@ object SqlRender {
     } else if (s.contains('.')) s
     else s + ".0"
   }
+
 }

@@ -1257,7 +1257,7 @@ object LogicalBuilder {
     val orderEls = Option(ae.getOrderByElements).map(_.asScala.toSeq).getOrElse(Nil)
     val orderKeys: Seq[SortKey] = orderEls.map(obe => sortKey(binder(obe.getExpression), obe))
 
-    val frame = bindFrame(Option(ae.getWindowElement), orderEls.nonEmpty)
+    val frame = bindFrame(Option(ae.getWindowElement), orderKeys)
     val fnName = ae.getName.toUpperCase(Locale.ROOT)
 
     val argExpr: Option[Expression] = Option(ae.getExpression).filterNot(_.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns])
@@ -1309,44 +1309,93 @@ object LogicalBuilder {
       case other =>
         throw new IllegalArgumentException(s"Unsupported window function: $other")
     }
+    // A ranking function and LAG / LEAD read no frame, so one written on them
+    // cannot change the answer.
+    if (ae.getWindowElement != null && !fn.respectsFrame)
+      throw new IllegalArgumentException(
+        s"$fnName takes no window frame; it reads the partition in its ORDER BY, so leave out the ROWS or RANGE clause")
 
     WindowDef(WindowSpec(partitionKeys, orderKeys, frame), fn, outputName = "")
   }
 
-  private def bindFrame(we: Option[WindowElement], hasOrderBy: Boolean): WindowFrame = we match {
-    case None => WindowFrame.defaultFor(hasOrderBy)
+  /** A window's frame, held to what SQL allows: a start that is not
+    * UNBOUNDED FOLLOWING, an end that is not UNBOUNDED PRECEDING, and a start
+    * that does not come after its end in the order UNBOUNDED PRECEDING, n
+    * PRECEDING, CURRENT ROW, n FOLLOWING, UNBOUNDED FOLLOWING (two offsets on
+    * one side may still make an empty frame, `2 PRECEDING AND 1 PRECEDING`).
+    * A RANGE offset measures the ORDER BY value, so it needs exactly one ORDER
+    * BY key, of a number, and is a number written in the query. Each refusal
+    * names the rule; these frames used to answer NULL on every row. */
+  private def bindFrame(we: Option[WindowElement], orderKeys: Seq[SortKey]): WindowFrame = we match {
+    case None => WindowFrame.defaultFor(orderKeys.nonEmpty)
     case Some(elem) =>
       val frameType: FrameType = elem.getType match {
         case WindowElement.Type.ROWS => FrameType.Rows
         case WindowElement.Type.RANGE => FrameType.Range
       }
+      def bound(wo: WindowOffset): FrameBound = bindFrameBound(wo, frameType, orderKeys)
       // Two shapes: BETWEEN ... AND ... → range; or single bound → offset.
       val (start, end): (FrameBound, FrameBound) =
         Option(elem.getRange) match {
-          case Some(range) =>
-            (bindFrameBound(range.getStart), bindFrameBound(range.getEnd))
+          case Some(range) => (bound(range.getStart), bound(range.getEnd))
           case None =>
-            val s = Option(elem.getOffset).map(bindFrameBound).getOrElse(FrameBound.UnboundedPreceding)
+            val s = Option(elem.getOffset).map(bound).getOrElse(FrameBound.UnboundedPreceding)
             (s, FrameBound.CurrentRow)
         }
+      if (start == FrameBound.UnboundedFollowing)
+        throw new IllegalArgumentException("A window frame cannot start at UNBOUNDED FOLLOWING, after every row")
+      if (end == FrameBound.UnboundedPreceding)
+        throw new IllegalArgumentException("A window frame cannot end at UNBOUNDED PRECEDING, before every row")
+      if (FrameBound.rank(start) > FrameBound.rank(end))
+        throw new IllegalArgumentException(
+          s"A window frame cannot start at ${describe(start)} and end at ${describe(end)}, which comes before it")
       WindowFrame(frameType, start, end)
   }
 
-  private def bindFrameBound(wo: WindowOffset): FrameBound = wo.getType match {
-    case WindowOffset.Type.CURRENT => FrameBound.CurrentRow
-    case WindowOffset.Type.PRECEDING =>
-      Option(wo.getExpression) match {
-        case None => FrameBound.UnboundedPreceding
-        case Some(e) => FrameBound.Preceding(extractNonNegativeInt("PRECEDING offset")(e).toLong)
-      }
-    case WindowOffset.Type.FOLLOWING =>
-      Option(wo.getExpression) match {
-        case None => FrameBound.UnboundedFollowing
-        case Some(e) => FrameBound.Following(extractNonNegativeInt("FOLLOWING offset")(e).toLong)
-      }
-    case WindowOffset.Type.EXPR =>
-      throw new IllegalArgumentException("A window frame bound must be UNBOUNDED PRECEDING, n PRECEDING, " +
-        "CURRENT ROW, n FOLLOWING or UNBOUNDED FOLLOWING")
+  private def describe(b: FrameBound): String = b match {
+    case FrameBound.UnboundedPreceding => "UNBOUNDED PRECEDING"
+    case FrameBound.UnboundedFollowing => "UNBOUNDED FOLLOWING"
+    case FrameBound.CurrentRow => "CURRENT ROW"
+    case FrameBound.Preceding(n) => s"$n PRECEDING"
+    case FrameBound.Following(n) => s"$n FOLLOWING"
+    case FrameBound.ValuePreceding(v) => s"${v.toPlainString} PRECEDING"
+    case FrameBound.ValueFollowing(v) => s"${v.toPlainString} FOLLOWING"
+  }
+
+  private def bindFrameBound(wo: WindowOffset, frameType: FrameType, orderKeys: Seq[SortKey]): FrameBound = {
+    def offset(side: String, e: Expression): FrameBound = frameType match {
+      case FrameType.Rows =>
+        val n = extractNonNegativeInt(s"$side offset")(e).toLong
+        if (side == "PRECEDING") FrameBound.Preceding(n) else FrameBound.Following(n)
+      case FrameType.Range =>
+        if (orderKeys.size != 1)
+          throw new IllegalArgumentException(
+            s"A RANGE frame with an offset ($side) needs exactly one ORDER BY key, the value it measures; " +
+              s"this window orders by ${orderKeys.size}")
+        val keyType = orderKeys.head.expr.dataType
+        if (!DataType.isNumeric(keyType))
+          throw new IllegalArgumentException(
+            s"A RANGE frame with an offset ($side) measures a number, and this window orders by a " +
+              s"${keyType.name.toUpperCase(Locale.ROOT)}; use a ROWS frame")
+        val v: java.math.BigDecimal = e match {
+          case IntegerLiteral(i) => new java.math.BigDecimal(i)
+          case d: DoubleValue => writtenDigits(d)
+          case _ => throw new IllegalArgumentException(s"A RANGE frame's $side offset must be a number written in the query")
+        }
+        if (v.signum < 0)
+          throw new IllegalArgumentException(s"A RANGE frame's $side offset must not be negative")
+        if (side == "PRECEDING") FrameBound.ValuePreceding(v) else FrameBound.ValueFollowing(v)
+    }
+    wo.getType match {
+      case WindowOffset.Type.CURRENT => FrameBound.CurrentRow
+      case WindowOffset.Type.PRECEDING =>
+        Option(wo.getExpression).map(offset("PRECEDING", _)).getOrElse(FrameBound.UnboundedPreceding)
+      case WindowOffset.Type.FOLLOWING =>
+        Option(wo.getExpression).map(offset("FOLLOWING", _)).getOrElse(FrameBound.UnboundedFollowing)
+      case WindowOffset.Type.EXPR =>
+        throw new IllegalArgumentException("A window frame bound must be UNBOUNDED PRECEDING, n PRECEDING, " +
+          "CURRENT ROW, n FOLLOWING or UNBOUNDED FOLLOWING")
+    }
   }
 
   private def extractNonNegativeInt(label: String)(e: Expression): Int = e match {

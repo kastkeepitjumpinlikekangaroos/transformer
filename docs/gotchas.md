@@ -1366,12 +1366,13 @@ ship a fix or move something from "not done" to "done".
   them, which left `WindowExec` — and the sharded window path, where the planner
   puts an `ExchangeExec` under it — checked by `Tlp` on a single fixed layout
   only. The distinction that matters is whether two rows TIED on the window's
-  `ORDER BY` can get different values: `ROW_NUMBER`, `LAG`/`LEAD` and every
-  running aggregate can (the engine treats `RANGE` frames as `ROWS`, so peers do
-  not share a running value), while `RANK`/`DENSE_RANK` cannot (peers share a
-  rank, and a rank depends only on the multiset of order-key values in the
-  partition) and neither can an aggregate window with no `ORDER BY` (its frame is
-  the whole partition). `WinItem.tieSensitive` carries the classification and
+  `ORDER BY` can get different values: `ROW_NUMBER`, `LAG`/`LEAD` and an
+  aggregate over a `ROWS` frame can, while `RANK`/`DENSE_RANK` cannot (peers share
+  a rank, and a rank depends only on the multiset of order-key values in the
+  partition), and neither can an aggregate window with no `ORDER BY` (its frame is
+  the whole partition) or one over a `RANGE` frame, the default with an `ORDER BY`
+  included, whose frame takes every peer (until plans/robustness/20 RANGE ran as
+  ROWS, and every running aggregate was tie-sensitive). `WinItem.tieSensitive` carries the classification and
   `MetaQuery.isLayoutInvariant` reads it, so the tie-insensitive shapes now flow
   through mode agreement and join commutativity. The `invariantWindows` coverage
   guard in `generatorCoversShapes` is what stops the blind spot returning.
@@ -1602,6 +1603,23 @@ ship a fix or move something from "not done" to "done".
   SUMs over edge values to the exact answer worked out in `BigInt`, and failed
   at seed 0 at the code before. See
   [plans/robustness/18](../plans/robustness/18-integer-overflow-wraps.md).
+- **RANGE frames, the default frame among them, used to run as ROWS —
+  fixed.** `WindowExec.frameBoundsFor` mapped every bound to a row offset
+  whatever the frame type, so `SUM(x) OVER (PARTITION BY g ORDER BY k)`, whose
+  default frame is RANGE UNBOUNDED PRECEDING to CURRENT ROW, gave rows tied on
+  `k` different running totals, in the order they happened to arrive, and
+  `RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING` took one row each side, not the
+  values within 1. The docs said RANGE "differs only when the ORDER BY has
+  ties", which was false for offsets. Frames that select nothing by the kinds
+  of their bounds answered NULL on every row, a frame on ROW_NUMBER was
+  ignored, and `CURRENT ROW AND 2147483647 FOLLOWING` overflowed `r + k`: the
+  first row's frame ran for minutes, every later one's was empty. Now RANGE
+  takes peers and measures values (`frameBounds`), ROWS bounds are clamped long
+  arithmetic, a running frame is aggregated in one pass, and the impossible
+  frames are refused. The window property in `mode_differential_fuzz_test`
+  works out each frame by SQL's definition in every layout; against the code
+  before it failed at seed 2. See
+  [plans/robustness/20](../plans/robustness/20-range-frames-run-as-rows.md).
 
 ## Wrong answers the I/O properties found (2026-10-14, all fixed)
 
@@ -1754,11 +1772,9 @@ above) are all fixed. `CleanRejection.Defect` and
   `FILTER (WHERE ...)`, `PIVOT`, `USING` joins and the rest are rejected with an
   error naming the clause, never ignored; `sql/plan/UnsupportedClauses.scala`
   lists every one with its reason.
-- **Window functions: ROWS frames only.** `RANGE BETWEEN` is parsed and accepted
-  but executed with ROWS semantics — for `RANGE BETWEEN UNBOUNDED PRECEDING AND
-  CURRENT ROW` this is correct unless the ORDER BY produces ties (where RANGE
-  would include all tying rows in the current "row group"). Document this if a
-  user depends on RANGE behaviour. Supported window functions: ROW_NUMBER, RANK,
+- **Window frames: ROWS and RANGE, no GROUPS or EXCLUDE.** A RANGE offset
+  needs one numeric ORDER BY key (a DATE would need an INTERVAL). Supported
+  window functions: ROW_NUMBER, RANK,
   DENSE_RANK, LAG, LEAD, plus aggregates SUM/AVG/MIN/MAX/COUNT(*)/COUNT(expr)/COUNT_IF(pred)
   and the univariate stats STDDEV/STDDEV_SAMP/STDDEV_POP/VARIANCE/VAR_SAMP/VAR_POP.
   No FIRST_VALUE/LAST_VALUE/NTH_VALUE/PERCENT_RANK/CUME_DIST/NTILE yet, and

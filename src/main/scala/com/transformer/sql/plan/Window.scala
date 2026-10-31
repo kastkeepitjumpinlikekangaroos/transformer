@@ -14,9 +14,9 @@ import com.transformer.core.DataType
 sealed trait WindowFn {
   def name: String
   def resultType: DataType
-  /** Window-frame-driven aggregates need to know the frame to compute their value;
-    * ranking functions and LAG/LEAD ignore the frame and use partition+order alone.
-    */
+  /** Whether the function reads a frame: an aggregate does; a ranking
+    * function and LAG / LEAD read the partition and its order alone, so the
+    * binder refuses a frame written on one. */
   def respectsFrame: Boolean
 }
 
@@ -52,31 +52,53 @@ final case class WindowFnAgg(agg: AggExpr) extends WindowFn {
   val respectsFrame: Boolean = true
 }
 
-/** Frame bounds. Offsets are non-negative row counts; CURRENT_ROW etc. carry
-  * no payload. RANGE frames are accepted by the parser but treated as ROWS by
-  * the executor (documented in CLAUDE.md).
+/** Frame bounds. A ROWS frame's offsets count rows; a RANGE frame's measure
+  * the ORDER BY value ([[ValuePreceding]], [[ValueFollowing]]), and its
+  * `CURRENT ROW` is the current row's peers, every row the ORDER BY ties with
+  * it.
   */
 sealed trait FrameBound
 object FrameBound {
   case object UnboundedPreceding extends FrameBound
   case object UnboundedFollowing extends FrameBound
   case object CurrentRow extends FrameBound
+  /** `n PRECEDING` in a ROWS frame: `n` rows before the current one. */
   final case class Preceding(n: Long) extends FrameBound
+  /** `n FOLLOWING` in a ROWS frame. */
   final case class Following(n: Long) extends FrameBound
+  /** `offset PRECEDING` in a RANGE frame: the rows whose ORDER BY value is
+    * within `offset` of the current row's, on the side before it. */
+  final case class ValuePreceding(offset: java.math.BigDecimal) extends FrameBound
+  /** `offset FOLLOWING` in a RANGE frame. */
+  final case class ValueFollowing(offset: java.math.BigDecimal) extends FrameBound
+
+  /** Where a bound kind sits among the five, which SQL requires a frame's
+    * start not to come after its end in. */
+  def rank(b: FrameBound): Int = b match {
+    case UnboundedPreceding => 0
+    case Preceding(_) | ValuePreceding(_) => 1
+    case CurrentRow => 2
+    case Following(_) | ValueFollowing(_) => 3
+    case UnboundedFollowing => 4
+  }
 }
 
 sealed trait FrameType
 object FrameType {
   case object Rows extends FrameType
-  /** RANGE is parsed but executed as ROWS — see CLAUDE.md "What's intentionally NOT done". */
   case object Range extends FrameType
 }
 
-final case class WindowFrame(frameType: FrameType, start: FrameBound, end: FrameBound)
+final case class WindowFrame(frameType: FrameType, start: FrameBound, end: FrameBound) {
+  /** Every row of the partition, whatever the current row. */
+  def isWholePartition: Boolean =
+    start == FrameBound.UnboundedPreceding && end == FrameBound.UnboundedFollowing
+}
 
 object WindowFrame {
-  /** SQL-standard default when ORDER BY is present: RANGE BETWEEN UNBOUNDED PRECEDING
-    * AND CURRENT ROW. Without an ORDER BY: the entire partition.
+  /** SQL-standard default when ORDER BY is present: RANGE BETWEEN UNBOUNDED
+    * PRECEDING AND CURRENT ROW, so a running total takes every row the ORDER BY
+    * ties with the current one. Without an ORDER BY: the entire partition.
     */
   def defaultFor(hasOrderBy: Boolean): WindowFrame =
     if (hasOrderBy) WindowFrame(FrameType.Range, FrameBound.UnboundedPreceding, FrameBound.CurrentRow)

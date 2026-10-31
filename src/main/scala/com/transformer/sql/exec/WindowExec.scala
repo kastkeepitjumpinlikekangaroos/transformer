@@ -455,7 +455,7 @@ final case class WindowExec(
           computeLagLead(part, rows, lead.child, lead.offset, lead.default, outCol, out, buf)
 
         case wa: WindowFnAgg =>
-          computeAggOverPartition(part, rows, spec, wa.agg, outCol, out, buf)
+          computeAggOverPartition(part, rows, orderKeysByRow, spec, wa.agg, outCol, out, buf)
       }
     }
   }
@@ -489,77 +489,172 @@ final case class WindowExec(
     }
   }
 
+  /** An aggregate over each row's frame. A frame over the whole partition is
+    * one aggregate for every row. A frame that starts at UNBOUNDED PRECEDING
+    * only grows as the current row moves on, so one state takes each row once
+    * and every row reads its `finish` (a running total in one pass); one that
+    * ends at UNBOUNDED FOLLOWING is the same from the other end. Any other
+    * frame aggregates its own rows. Each row's frame is [[frameBounds]]'s. */
   private def computeAggOverPartition(
       part: mutable.ArrayBuffer[Int],
       rows: mutable.ArrayBuffer[Array[Any]],
+      orderKeysByRow: Array[Array[Any]],
       spec: WindowSpec,
       agg: AggExpr,
       outCol: Int,
       out: Array[Array[Any]],
       buf: RowBuf): Unit = {
     val n = part.size
+    val frame = spec.frame
+    def take(state: AggState, k: Int): Unit = {
+      buf.set(rows(part(k)))
+      state.update(agg, buf.batch, 0)
+    }
 
-    // Fast path: frame is the entire partition — one aggregation value broadcast
-    // to every row in the partition. This also covers the no-ORDER-BY default.
-    if (isWholePartitionFrame(spec.frame)) {
+    if (frame.isWholePartition) {
       val state = AggState.init(agg)
       var r = 0
-      while (r < n) {
-        buf.set(rows(part(r)))
-        state.update(agg, buf.batch, 0)
-        r += 1
-      }
+      while (r < n) { take(state, r); r += 1 }
       val v = state.finish()
       r = 0
       while (r < n) { out(part(r))(outCol) = v; r += 1 }
       return
     }
 
-    // Per-row frame: compute the [lo, hi] inclusive row range, aggregate over it.
-    // Without an ORDER BY, the running-aggregate default still resolves to the
-    // entire partition above. With ORDER BY, "RANGE BETWEEN UNBOUNDED PRECEDING
-    // AND CURRENT ROW" (the SQL standard default) is approximated as ROWS — a
-    // simplification documented in CLAUDE.md.
-    var r = 0
-    while (r < n) {
-      val (lo, hi) = frameBoundsFor(r, n, spec.frame)
+    val (lo, hi) = frameBounds(part, orderKeysByRow, spec)
+    if (frame.start == FrameBound.UnboundedPreceding) {
       val state = AggState.init(agg)
-      var k = lo
-      while (k <= hi) {
-        if (k >= 0 && k < n) {
-          buf.set(rows(part(k)))
-          state.update(agg, buf.batch, 0)
-        }
-        k += 1
+      var taken = -1 // the last row the state holds
+      var r = 0
+      while (r < n) {
+        while (taken < hi(r)) { taken += 1; take(state, taken) }
+        out(part(r))(outCol) = state.finish()
+        r += 1
       }
-      out(part(r))(outCol) = state.finish()
-      r += 1
+    } else if (frame.end == FrameBound.UnboundedFollowing) {
+      val state = AggState.init(agg)
+      var taken = n // the first row the state holds
+      var r = n - 1
+      while (r >= 0) {
+        while (taken > lo(r)) { taken -= 1; take(state, taken) }
+        out(part(r))(outCol) = state.finish()
+        r -= 1
+      }
+    } else {
+      var r = 0
+      while (r < n) {
+        val state = AggState.init(agg)
+        var k = lo(r)
+        while (k <= hi(r)) { take(state, k); k += 1 }
+        out(part(r))(outCol) = state.finish()
+        r += 1
+      }
     }
   }
 
-  private def isWholePartitionFrame(f: WindowFrame): Boolean =
-    f.start == FrameBound.UnboundedPreceding && f.end == FrameBound.UnboundedFollowing
-
-  /** Translate frame bounds to inclusive [lo, hi] row indices within a partition
-    * of size `n`, given a current-row index `r`. Out-of-range indices are
-    * clamped by the caller's `k >= 0 && k < n` check.
-    */
-  private def frameBoundsFor(r: Int, n: Int, frame: WindowFrame): (Int, Int) = {
-    val lo: Int = frame.start match {
-      case FrameBound.UnboundedPreceding => 0
-      case FrameBound.CurrentRow => r
-      case FrameBound.Preceding(k) => r - k.toInt
-      case FrameBound.Following(k) => r + k.toInt
-      case FrameBound.UnboundedFollowing => n  // empty frame
+  /** Each row's frame as the inclusive positions [lo, hi] of the sorted
+    * partition `part`: lo in [0, n] and hi in [-1, n - 1], an empty frame
+    * where lo > hi.
+    *
+    * A ROWS bound counts rows, in long arithmetic clamped to the partition, so
+    * an offset as large as an INT allows neither overflows nor runs past it.
+    * A RANGE bound finds rows by the sort's own comparison: `CURRENT ROW` is
+    * the first or last of the current row's peers, which tie it on every
+    * ORDER BY key, and `k PRECEDING` / `k FOLLOWING` the first or last row
+    * whose single key lies within `k` of the current row's on that side of it
+    * in the sort ([[shifted]]). Comparing through [[SortKey.compare]] puts NULL
+    * and NaN where the sort did: a NULL current row's offset frame is its NULL
+    * peers, a NaN's its NaN peers, and rows of NULL keys at one end of the
+    * partition lie inside an UNBOUNDED side and outside every offset. Both
+    * are binary searches over the sorted keys, which the comparison is
+    * monotone across. */
+  private def frameBounds(
+      part: mutable.ArrayBuffer[Int],
+      orderKeysByRow: Array[Array[Any]],
+      spec: WindowSpec): (Array[Int], Array[Int]) = {
+    val n = part.size
+    val lo = new Array[Int](n)
+    val hi = new Array[Int](n)
+    val keys = spec.orderKeys.toArray
+    def keyOf(p: Int): Array[Any] = orderKeysByRow(part(p))
+    // Order a row's keys against a target, key by key, as the sort did.
+    def cmp(a: Array[Any], target: Array[Any]): Int = {
+      var k = 0
+      while (k < keys.length) {
+        val c = keys(k).compare(a(k), target(k))
+        if (c != 0) return c
+        k += 1
+      }
+      0
     }
-    val hi: Int = frame.end match {
-      case FrameBound.UnboundedPreceding => -1 // empty frame
+    def firstAtLeast(target: Array[Any]): Int = {
+      var (l, h) = (0, n) // the answer is in [l, h]
+      while (l < h) { val m = (l + h) >>> 1; if (cmp(keyOf(m), target) >= 0) h = m else l = m + 1 }
+      l
+    }
+    def lastAtMost(target: Array[Any]): Int = {
+      var (l, h) = (-1, n - 1) // the answer is in [l, h]
+      while (l < h) { val m = (l + h + 1) >>> 1; if (cmp(keyOf(m), target) <= 0) l = m else h = m - 1 }
+      l
+    }
+    def rowsBound(r: Int, b: FrameBound, isStart: Boolean): Int = b match {
+      case FrameBound.UnboundedPreceding => if (isStart) 0 else -1
+      case FrameBound.UnboundedFollowing => if (isStart) n else n - 1
       case FrameBound.CurrentRow => r
-      case FrameBound.Preceding(k) => r - k.toInt
-      case FrameBound.Following(k) => r + k.toInt
-      case FrameBound.UnboundedFollowing => n - 1
+      case FrameBound.Preceding(k) => clamp(r.toLong - k, isStart, n)
+      case FrameBound.Following(k) => clamp(r.toLong + k, isStart, n)
+      case other => throw new IllegalStateException(s"$other in a ROWS frame")
+    }
+    def rangeBound(r: Int, b: FrameBound, isStart: Boolean): Int = {
+      val target: Array[Any] = b match {
+        case FrameBound.UnboundedPreceding => return if (isStart) 0 else -1
+        case FrameBound.UnboundedFollowing => return if (isStart) n else n - 1
+        case FrameBound.CurrentRow => keyOf(r)
+        case FrameBound.ValuePreceding(k) => Array(shifted(keys(0), keyOf(r)(0), k, forward = false))
+        case FrameBound.ValueFollowing(k) => Array(shifted(keys(0), keyOf(r)(0), k, forward = true))
+        case other => throw new IllegalStateException(s"$other in a RANGE frame")
+      }
+      if (isStart) firstAtLeast(target) else lastAtMost(target)
+    }
+    val rangeFrame = spec.frame.frameType == FrameType.Range
+    var r = 0
+    while (r < n) {
+      if (rangeFrame) {
+        lo(r) = rangeBound(r, spec.frame.start, isStart = true)
+        hi(r) = rangeBound(r, spec.frame.end, isStart = false)
+      } else {
+        lo(r) = rowsBound(r, spec.frame.start, isStart = true)
+        hi(r) = rowsBound(r, spec.frame.end, isStart = false)
+      }
+      r += 1
     }
     (lo, hi)
+  }
+
+  /** A ROWS bound's position clamped to the partition: a start in [0, n], an
+    * end in [-1, n - 1]. */
+  private def clamp(p: Long, isStart: Boolean, n: Int): Int =
+    if (isStart) math.min(math.max(p, 0L), n.toLong).toInt
+    else math.min(math.max(p, -1L), n.toLong - 1).toInt
+
+  /** The ORDER BY value `k` away from `v` in the direction the sort moves
+    * (`forward`) or against it: `v + k` forward under ASC, `v - k` under DESC.
+    * An integer or a DECIMAL moves exactly, a FLOAT or DOUBLE as a double
+    * (NaN and the infinities do not move, so their frame is their peers). A
+    * NULL does not move either: its frame is its NULL peers. */
+  private def shifted(key: SortKey, v: Any, k: java.math.BigDecimal, forward: Boolean): Any = {
+    val up = forward == key.asc
+    v match {
+      case null => null
+      case d @ (_: java.lang.Double | _: java.lang.Float) =>
+        val x = d.asInstanceOf[Number].doubleValue
+        val step = k.doubleValue
+        java.lang.Double.valueOf(if (up) x + step else x - step)
+      case n: Number =>
+        val x = Casts.toDecimal(n)
+        if (up) x.add(k) else x.subtract(k)
+      case other => throw new IllegalStateException(s"a RANGE offset over $other")
+    }
   }
 
   /** Are two rows ORDER BY **peers** — the tie predicate `RANK` and

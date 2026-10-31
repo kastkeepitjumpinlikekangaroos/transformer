@@ -2,7 +2,7 @@ package com.transformer.fuzz
 
 import com.transformer.core._
 import com.transformer.fuzz.QueryGen._
-import com.transformer.fuzz.oracle.{ExactIntegers, ModeDifferential, RelEngine}
+import com.transformer.fuzz.oracle.{ExactIntegers, ModeDifferential, RelEngine, WindowFrames}
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -98,6 +98,38 @@ class ModeDifferentialFuzzTest {
     println(f"[exact-integer-sums] over $n seeds: a sum overflows=$overflows, a sum fits only at the end=$comesBack")
     assertTrue(s"sums rarely overflow (overflows=$overflows)", overflows > 800)
     assertTrue(s"sums rarely come back inside the range (comesBack=$comesBack)", comesBack > 400)
+  }
+
+  /** A window aggregate under a random ROWS or RANGE frame, or the default
+    * one, is the aggregate over the frame SQL defines, worked out by the
+    * harness as a set, in every layout (`oracle/WindowFrames`). RANGE frames
+    * ran as ROWS in every layout alike, which the agreement property cannot
+    * see (plans/robustness/20). */
+  @Test def fuzzWindowFrames(): Unit = {
+    Props.forAll[QueryGen.WindowFrameCase](
+      name = "window-frames",
+      gen = QueryGen.generateWindowFrameCase,
+      shrink = c => c.dataset.rows.indices.reverseIterator.map(i =>
+        c.copy(dataset = c.dataset.copy(rows = c.dataset.rows.patch(i, Nil, 1)))),
+      count = Props.seedCountOr(DefaultModeDiffSeeds)
+    ) { c =>
+      WindowFrames.check(c)
+    }
+  }
+
+  /** Coverage guard for [[fuzzWindowFrames]]: a RANGE frame, or the default
+    * one, whose frames by value differ from what its offsets would select by
+    * position must be common, or the property cannot tell RANGE from ROWS. */
+  @Test def windowFramesReachWhatRowsGetsWrong(): Unit = {
+    val n = 2000
+    var range, differs = 0
+    (0 until n).foreach { seed =>
+      val c = QueryGen.generateWindowFrameCase(new Rng(seed.toLong))
+      if (c.order.isDefined && !c.frame.exists(_.rows)) range += 1
+      if (WindowFrames.rangeDiffersFromRows(c)) differs += 1
+    }
+    println(f"[window-frames] over $n seeds: RANGE or default frame with an ORDER BY=$range, differs from ROWS=$differs")
+    assertTrue(s"RANGE frames rarely differ from ROWS (differs=$differs of range=$range)", differs > 300)
   }
 
   @Test def fuzzModeDifferential(): Unit = {

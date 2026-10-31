@@ -1225,11 +1225,19 @@ mode the planner has hash-partitioned by the shared PARTITION BY keys, so
 each shard processes its rows independently and `numPartitions = K`; in
 **collapsing** mode (no exchange — empty PARTITION BY, disagreeing specs,
 or sub-threshold input size) the operator reads every child partition and
-emits as a single output partition. Ranking functions and LAG/LEAD ignore
-the frame; aggregates with ORDER BY and no explicit frame use running
-aggregation; aggregates without ORDER BY cover the entire partition.
-`RANGE` frames execute as `ROWS` (documented in
-[gotchas.md](gotchas.md#whats-intentionally-not-done)).
+emits as a single output partition. Ranking functions and LAG/LEAD read no
+frame (the binder refuses one written on them). An aggregate reads each row's
+frame, `WindowExec.frameBounds`'s inclusive positions [lo, hi] in the sorted
+partition: a `ROWS` offset in long arithmetic clamped to the partition, and a
+`RANGE` bound by a binary search under the sort's own comparison
+(`SortKey.compare`), `CURRENT ROW` the first or last peer and `n PRECEDING` /
+`n FOLLOWING` the first or last row within `n` of the current row's value on
+that side, so NULL and NaN keys fall where the sort put them. A frame over the
+whole partition is one aggregate; one that starts at `UNBOUNDED PRECEDING`
+grows a single state as its end moves on (the default frame with an `ORDER BY`,
+a running total in one pass), one that ends at `UNBOUNDED FOLLOWING` the same
+from the other end, which needs `AggState.finish` to leave the state as it was
+(every state's does); any other frame aggregates its own rows.
 
 ### 6b. CTE resolution: inline vs materialize
 

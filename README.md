@@ -760,9 +760,26 @@ partitions or a spill bring it.
 `offset` and `default` arguments; the default meets the value it stands in for
 as a `CASE`'s values do, below), and the aggregate forms above. The `ORDER BY`
 keys take `ASC`/`DESC` and `NULLS FIRST`/`NULLS LAST` exactly as the outer
-`ORDER BY` does. Frames are
-`ROWS BETWEEN ... AND ...`; `RANGE` is accepted and executed as `ROWS`, which
-differs only when the `ORDER BY` has ties. `RANK` and `DENSE_RANK` tie exactly
+`ORDER BY` does. A frame is `ROWS` or `RANGE`, `BETWEEN <start> AND <end>` or a
+start alone (whose end is `CURRENT ROW`), each bound one of `UNBOUNDED
+PRECEDING`, `n PRECEDING`, `CURRENT ROW`, `n FOLLOWING` and `UNBOUNDED
+FOLLOWING`. A `ROWS` offset counts rows. A `RANGE` frame takes rows by their
+`ORDER BY` value: its `CURRENT ROW` is the current row and every row the
+`ORDER BY` ties with it, its peers, and `n PRECEDING` / `n FOLLOWING` the rows
+whose value lies within `n` of the current row's on that side (`n` a number,
+`1.5` too; the window needs exactly one `ORDER BY` key, a number). With an
+`ORDER BY` and no frame, the frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND
+CURRENT ROW`, as in standard SQL: a running total gives tied rows one total,
+`SUM(x) OVER (ORDER BY day)` the total through the end of each day. Without an
+`ORDER BY` the frame is the whole partition. A NULL `ORDER BY` value's offset
+frame is its NULL peers, and a NaN's its NaN peers. A frame that cannot hold a
+row by the kinds of its bounds (`1 FOLLOWING AND 1 PRECEDING`, a start of
+`UNBOUNDED FOLLOWING`, an end of `UNBOUNDED PRECEDING`) is an error, as in
+Postgres, and so is a frame on `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG` or
+`LEAD`, which read no frame; two offsets on one side may still select nothing
+(`2 PRECEDING AND 1 PRECEDING` at a partition's start). `RANGE` frames used to
+run as `ROWS`, so tied rows got different running totals, in whatever order
+they arrived. `RANK` and `DENSE_RANK` tie exactly
 the rows the `ORDER BY` ties, on the same total order described below — so
 `DENSE_RANK()` over a partition whose order key is equal on every row is `1`
 everywhere. No `FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`/`PERCENT_RANK`/
@@ -1322,11 +1339,11 @@ JDK 21 or newer (tested through JDK 25).
   operator (their state doesn't round-trip through a typed schema in v1).
 - **No subqueries** (scalar, IN/EXISTS, derived tables in FROM): use a `WITH`
   CTE, or chain `SQLTask`s via `viewName`.
-- **Window functions: `ROWS` frames only.** They are supported (see
-  [SQL features](#sql-features) for the list), but a `RANGE` frame is executed
-  as `ROWS`, so a running aggregate does not share one value across `ORDER BY`
-  peers the way the standard requires. `COVAR_SAMP`/`COVAR_POP`/`CORR` are
-  `GROUP BY` only.
+- **Window functions: no `GROUPS` frames or `EXCLUDE`**, which the parser does
+  not read, and no `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`, `PERCENT_RANK`,
+  `CUME_DIST` or `NTILE`; a `RANGE` offset needs a single numeric `ORDER BY`
+  key (a `DATE` would need an `INTERVAL`, which the engine has not).
+  `COVAR_SAMP`/`COVAR_POP`/`CORR` are `GROUP BY` only.
 - **Cloud paths recognized but unimplemented**: `gs://` and `s3://` paths are
   accepted by the config, and loading one raises a clear
   `UnsupportedOperationException`. See [Cloud](#cloud-gs--s3).

@@ -4483,4 +4483,75 @@ class SqlEngineTest {
     catch { case e: ArithmeticException => e }
     assertEquals("Integer overflow: 2147483650 does not fit INT", e.getMessage)
   }
+
+  /** `w(g, k, x)`: partition a has two ties on k, at 1 and at 3. */
+  private def windowCatalog(): Catalog = {
+    val c = new Catalog
+    val schema = Schema(Vector(Field("g", DataType.StringType), Field("k", DataType.IntType), Field("x", DataType.IntType)))
+    c.register("w", memView(schema, Seq(
+      Seq(Array[Any]("a", 1, 10), Array[Any]("a", 1, 20), Array[Any]("a", 2, 30)),
+      Seq(Array[Any]("a", 3, 40), Array[Any]("a", 3, 50), Array[Any]("b", 1, 1)))))
+    c
+  }
+
+  /** RANGE frames, the default frame with an ORDER BY among them, take every
+    * row the ORDER BY ties with the current one as its peer, and a RANGE
+    * offset measures the ORDER BY value. Both ran as ROWS, so tied rows got
+    * different running totals, in whatever order they arrived, and `RANGE 1
+    * PRECEDING` counted one row (plans/robustness/20). */
+  @Test def aRangeFrameTakesPeersAndMeasuresTheOrderByValue(): Unit = {
+    val c = windowCatalog()
+    def win(over: String, fn: String = "SUM(x)"): Seq[Any] =
+      column(s"SELECT x, $fn OVER (PARTITION BY g $over) AS s FROM w ORDER BY 1", c, "s")
+    // x: 1 (b), 10, 20, 30, 40, 50 (a).
+    assertEquals(Seq(1L, 30L, 30L, 60L, 150L, 150L), win("ORDER BY k"))
+    assertEquals(Seq(1L, 30L, 30L, 60L, 150L, 150L), win("ORDER BY k RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"))
+    assertEquals(Seq(1L, 2L, 2L, 3L, 5L, 5L), win("ORDER BY k", "COUNT(*)"))
+    assertEquals(Seq(1L, 60L, 60L, 150L, 120L, 120L), win("ORDER BY k RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING"))
+    assertEquals(Seq(1L, 150L, 150L, 120L, 90L, 90L), win("ORDER BY k RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING"))
+    assertEquals(Seq(1L, 60L, 60L, 120L, 90L, 90L), win("ORDER BY k RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING"))
+    // DESC: 1 PRECEDING is the next larger value.
+    assertEquals(Seq(1L, 60L, 60L, 120L, 90L, 90L), win("ORDER BY k DESC RANGE BETWEEN 1 PRECEDING AND CURRENT ROW"))
+    // An offset written with a point measures by it.
+    assertEquals(Seq(1L, 30L, 30L, 60L, 120L, 120L), win("ORDER BY k RANGE BETWEEN 1.5 PRECEDING AND CURRENT ROW"))
+    // ROWS still counts rows, ties broken by the next key.
+    assertEquals(Seq(1L, 10L, 30L, 60L, 100L, 150L), win("ORDER BY k, x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"))
+    assertEquals(Seq(1L, 10L, 30L, 50L, 70L, 90L), win("ORDER BY k, x ROWS 1 PRECEDING"))
+    // An offset as large as an INT allows neither overflows nor runs past the partition.
+    assertEquals(Seq(1L, 150L, 140L, 120L, 90L, 50L),
+      win("ORDER BY k, x ROWS BETWEEN CURRENT ROW AND 2147483647 FOLLOWING"))
+    assertEquals(Seq(1L, 150L, 150L, 150L, 150L, 150L),
+      win("ORDER BY k, x ROWS BETWEEN 2147483647 PRECEDING AND 2147483647 FOLLOWING"))
+    assertEquals(Seq(null, null, null, null, null, null),
+      win("ORDER BY k, x ROWS BETWEEN 2147483647 FOLLOWING AND UNBOUNDED FOLLOWING"))
+  }
+
+  /** A frame SQL does not allow, and one written on a function that reads no
+    * frame, are refused, naming the rule; the first answered NULL on every
+    * row and the second was ignored (plans/robustness/20). */
+  @Test def aFrameThatCannotSelectByItsKindOrOnAFunctionWithoutOneIsRefused(): Unit = {
+    val c = windowCatalog()
+    def refused(over: String, fn: String = "SUM(x)"): String =
+      bindRejection(s"SELECT $fn OVER (PARTITION BY g $over) AS s FROM w", c)
+    assertEquals("A window frame cannot start at 1 FOLLOWING and end at 1 PRECEDING, which comes before it",
+      refused("ORDER BY k ROWS BETWEEN 1 FOLLOWING AND 1 PRECEDING"))
+    assertEquals("A window frame cannot start at UNBOUNDED FOLLOWING, after every row",
+      refused("ORDER BY k ROWS BETWEEN UNBOUNDED FOLLOWING AND UNBOUNDED FOLLOWING"))
+    assertEquals("A window frame cannot end at UNBOUNDED PRECEDING, before every row",
+      refused("ORDER BY k ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED PRECEDING"))
+    assertEquals("A window frame cannot start at CURRENT ROW and end at 2 PRECEDING, which comes before it",
+      refused("ORDER BY k ROWS BETWEEN CURRENT ROW AND 2 PRECEDING"))
+    assertEquals("ROW_NUMBER takes no window frame; it reads the partition in its ORDER BY, so leave out the ROWS or RANGE clause",
+      refused("ORDER BY k ROWS BETWEEN 1 PRECEDING AND CURRENT ROW", "ROW_NUMBER()"))
+    assertEquals("LAG takes no window frame; it reads the partition in its ORDER BY, so leave out the ROWS or RANGE clause",
+      refused("ORDER BY k ROWS UNBOUNDED PRECEDING", "LAG(x)"))
+    assertEquals("A RANGE frame with an offset (PRECEDING) needs exactly one ORDER BY key, the value it measures; " +
+      "this window orders by 2", refused("ORDER BY k, x RANGE BETWEEN 1 PRECEDING AND CURRENT ROW"))
+    assertEquals("A RANGE frame with an offset (FOLLOWING) measures a number, and this window orders by a STRING; " +
+      "use a ROWS frame", refused("ORDER BY g RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING"))
+    // Two offsets on one side are legal, and empty where nothing is that far.
+    assertEquals(Seq(null, null, 10L, 30L, 50L, 70L), column(
+      "SELECT x, SUM(x) OVER (PARTITION BY g ORDER BY k, x ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS s FROM w ORDER BY 1",
+      c, "s"))
+  }
 }

@@ -1,6 +1,6 @@
 # Plan 20: RANGE frames, and the default frame, run as ROWS
 
-> Status: planned · found by the 2026-10-31 audit · decided by the user:
+> Status: **done** 2026-10-31 · found by the 2026-10-31 audit · decided by the user:
 > standard RANGE, with value offsets · Effort: 2 days · Risk: medium (changes
 > the answer of every running aggregate over a tied ORDER BY)
 
@@ -79,3 +79,25 @@ agreement and join commutativity; the coverage guard measures it.
 
 README (window functions), gotchas (the RANGE entry moves from "not done" to a
 fixed entry), architecture (window frames), testing.md.
+
+## Outcome
+
+Done as planned. `FrameBound` gained `ValuePreceding` / `ValueFollowing`
+(a BigDecimal offset, so `1.5 PRECEDING` measures exactly) beside the ROWS
+counts, and the binder refuses the frames SQL does not allow and a frame on
+a function that reads none. `WindowExec.frameBounds` gives each row's inclusive
+positions: ROWS bounds clamped in long arithmetic, RANGE bounds by binary
+search under `SortKey.compare`, the sort's own comparison, so a NULL key's
+offset frame is its NULL peers and a NaN's its NaN peers without a special
+case. A frame anchored at UNBOUNDED PRECEDING (or FOLLOWING) grows one
+aggregate state as the current row moves (every `AggState.finish` reads its
+state without changing it), so a running total is one pass, where it was
+O(n^2) per partition.
+
+`QueryGen.generateWindowFrameCase` and `oracle/WindowFrames` hold every frame
+kind to SQL's definition, computed as a set filter rather than by search, in
+every layout of `ModeDifferential.allModes`, spill included; against the code
+before it failed at seed 2 (`RANGE BETWEEN CURRENT ROW AND CURRENT ROW` summed
+one row, not its peers). `MetaQueryGen` now classifies a running aggregate
+over the default frame as tie-insensitive, so those windows flow through mode
+agreement and join commutativity, sharded too.

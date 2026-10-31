@@ -155,12 +155,16 @@ object MetaQueryGen {
     *
     *   - Tie-INsensitive: `RANK`/`DENSE_RANK` (peers share a rank, and the rank of
     *     a row depends only on the multiset of order-key values in its partition),
-    *     and any aggregate window with NO ORDER BY (the frame is the whole
-    *     partition, so the value depends only on the partition's row multiset).
-    *   - Tie-sensitive: `ROW_NUMBER`, `LAG`/`LEAD`, and every aggregate window WITH
-    *     an ORDER BY. The engine treats RANGE frames as ROWS (see
-    *     `plan/Window.scala`), so a running aggregate really does split peers, and
-    *     which peer comes first varies with the partition fan-out.
+    *     an aggregate window with NO ORDER BY (the frame is the whole partition,
+    *     so the value depends only on the partition's row multiset), and one with
+    *     an ORDER BY and the default frame, RANGE UNBOUNDED PRECEDING to CURRENT
+    *     ROW, whose frame takes every peer of the current row (the rows ordered
+    *     up to and including its value, a multiset no layout changes).
+    *   - Tie-sensitive: `ROW_NUMBER`, `LAG`/`LEAD`, and an aggregate window with a
+    *     ROWS frame, which counts rows, so which of two peers comes first decides
+    *     what each sees, and that varies with the partition fan-out. (Before
+    *     plans/robustness/20 RANGE frames ran as ROWS, and every running
+    *     aggregate was tie-sensitive.)
     *
     * `orderCols` are the window's ORDER BY columns, empty for the shapes with no
     * ORDER BY. They are carried for coverage accounting: the peer test a rank
@@ -752,12 +756,13 @@ object MetaQueryGen {
       DataType.LongType, tieSensitive = false, orderCols)))
     choices += ((3, () => WinItem(s"COUNT(*) ${over("")}", name, DataType.LongType, tieSensitive = false)))
     if (numeric.nonEmpty) {
+      // Running aggregates over the default RANGE frame: peers share a frame.
       choices += ((2, () => { val c = rng.oneOf(numeric)
         WinItem(s"SUM(${c.qualified}) ${over(orderBy)}", name, sumType(c.dataType),
-          tieSensitive = true, orderCols) }))
+          tieSensitive = false, orderCols) }))
       choices += ((1, () => { val c = rng.oneOf(numeric)
         WinItem(s"AVG(${c.qualified}) ${over(orderBy)}", name, avgType(c.dataType),
-          tieSensitive = true, orderCols) }))
+          tieSensitive = false, orderCols) }))
       choices += ((1, () => { val c = rng.oneOf(numeric)
         WinItem(s"SUM(${c.qualified}) OVER (${Seq(partBy, orderBy, frame(rng)).filter(_.nonEmpty).mkString(" ")})",
           name, sumType(c.dataType), tieSensitive = true, orderCols) }))
@@ -769,7 +774,7 @@ object MetaQueryGen {
     }
     choices += ((1, () => { val c = rng.oneOf(scope)
       WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType,
-        tieSensitive = true, orderCols) }))
+        tieSensitive = false, orderCols) }))
     choices += ((2, () => { val c = rng.oneOf(scope)
       WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over("")}", name, c.dataType, tieSensitive = false) }))
     rng.weighted(choices.toSeq: _*)()
