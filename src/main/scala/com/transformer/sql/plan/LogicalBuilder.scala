@@ -1117,7 +1117,7 @@ object LogicalBuilder {
     if (args.isEmpty && UnsupportedClauses.ClockKeywords(name)) clockLiteral(name)
     else if (name == "MOD" && args.size == 2) Analyzer.arithmetic("%", args(0), args(1))
     else {
-      val signature = Funcs.signature(name, argTypes)
+      val signature = Funcs.signature(name, args)
         .getOrElse(throw new IllegalArgumentException(s"Unknown function '${f.getName}(${argTypes.mkString(",")})'"))
       signature.params.zip(args).foreach { case (param, arg) => Analyzer.checkArgument(name, param, arg) }
       FuncExpr(name, args, signature.returnType)

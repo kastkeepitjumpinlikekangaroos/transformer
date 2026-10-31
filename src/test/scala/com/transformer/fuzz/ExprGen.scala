@@ -232,7 +232,11 @@ object ExprGen {
       1 -> (() => UnaryOpExpr("-", sub(target), target)),
       1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
       2 -> (() => CastExpr(sub(other), target)),
-      1 -> (() => CastExpr(leaf(r.oneOf(Seq(DataType.DoubleType, EdgeDecimalType))), target))
+      1 -> (() => CastExpr(leaf(r.oneOf(Seq(DataType.DoubleType, EdgeDecimalType))), target)),
+      // An integer keeps its type; a negative scale rounds it to tens,
+      // hundreds, ..., which can carry it past its type.
+      1 -> (() => FuncExpr(r.oneOf(Seq("ROUND", "TRUNC")), Seq(sub(target), LitExpr(r.between(-20, 2), DataType.IntType)), target)),
+      1 -> (() => FuncExpr(r.oneOf(Seq("FLOOR", "CEIL", "ROUND", "TRUNC")), Seq(sub(target)), target))
     )()
   }
 
@@ -680,12 +684,16 @@ object ExprGen {
       1 -> (() => genCastTo(r, schema, target, depth)))
     val extra: Seq[(Int, () => Expr)] = target match {
       case DataType.IntType =>
-        Seq(2 -> (() => FuncExpr("LENGTH", Seq(sub(DataType.StringType)), DataType.IntType)))
+        Seq(2 -> (() => FuncExpr("LENGTH", Seq(sub(DataType.StringType)), DataType.IntType)),
+          1 -> (() => genRounding(r, target, sub)))
+      case DataType.LongType => Seq(1 -> (() => genRounding(r, target, sub)))
       case DataType.DoubleType =>
         Seq(
-          1 -> (() => FuncExpr(r.oneOf(Seq("FLOOR", "CEIL", "CEILING")), Seq(sub(pick(r, Numerics))), DataType.DoubleType)),
-          1 -> (() => FuncExpr("ROUND", roundlikeArgs(r, sub(pick(r, Numerics)), sub), DataType.DoubleType)),
-          1 -> (() => FuncExpr(r.oneOf(Seq("TRUNC", "TRUNCATE")), roundlikeArgs(r, sub(pick(r, Numerics)), sub), DataType.DoubleType)),
+          // FLOOR, CEIL, ROUND and TRUNC of a FLOAT or DOUBLE are a DOUBLE; of
+          // an integer or a DECIMAL, their argument's type (genRounding).
+          1 -> (() => FuncExpr(r.oneOf(Seq("FLOOR", "CEIL", "CEILING")), Seq(sub(r.oneOf(Floatings))), DataType.DoubleType)),
+          1 -> (() => FuncExpr("ROUND", roundlikeArgs(r, sub(r.oneOf(Floatings)), sub), DataType.DoubleType)),
+          1 -> (() => FuncExpr(r.oneOf(Seq("TRUNC", "TRUNCATE")), roundlikeArgs(r, sub(r.oneOf(Floatings)), sub), DataType.DoubleType)),
           // SQRT/LN/EXP are not in Funcs.applyVec — they exercise the default
           // evalVec row loop (which routes through eval, so it cannot diverge,
           // but it proves the fallback path stays correct).
@@ -696,6 +704,18 @@ object ExprGen {
   }
 
   /** ROUND/TRUNC args: the value, and most of the time a scale. */
+  /** `FLOOR`, `CEIL`, `ROUND` or `TRUNC` of a `target`-typed value (an INT, a
+    * BIGINT or a DECIMAL), typed as the binder types it
+    * (`Funcs.signature`), under a CAST to `target` where that gives a DECIMAL
+    * another scale. */
+  private def genRounding(r: Rng, target: DataType, sub: DataType => Expr): Expr = {
+    val fn = r.oneOf(Seq("FLOOR", "CEIL", "CEILING", "ROUND", "TRUNC", "TRUNCATE"))
+    val value = sub(target)
+    val args = if (fn.startsWith("ROUND") || fn.startsWith("TRUNC")) roundlikeArgs(r, value, sub) else Seq(value)
+    val call = FuncExpr(fn, args, Funcs.signature(fn, args).get.returnType)
+    if (call.dataType == target) call else CastExpr(call, target)
+  }
+
   private def roundlikeArgs(r: Rng, value: Expr, sub: DataType => Expr): Seq[Expr] =
     if (r.bool(0.6)) Seq(value, integerArg(r, r.between(-2, 4), sub)) else Seq(value)
 
@@ -877,6 +897,7 @@ object ExprGen {
     val extra: Seq[(Int, () => Expr)] = target match {
       case _: DataType.DecimalType => Seq(
         4 -> (() => genDecimalArith(r, schema, target)),
+        1 -> (() => genRounding(r, target, sub)),
         1 -> (() => genCastTo(r, schema, target, depth)),
         1 -> (() => UnaryOpExpr(r.oneOf(Seq("+", "-")), sub(target), target)),
         1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))

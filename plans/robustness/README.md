@@ -255,7 +255,7 @@ semantic questions on 2026-10-31, the recommended option each time.
 | [16](16-locale-dependent-names.md) | Names and case folding depend on the JVM locale | under tr-TR, `min()`, view names and `CAST(x AS int)` fail; `UPPER` differs | **done** 2026-10-31 | low |
 | [17](17-case-evaluates-every-branch.md) | CASE, IF and COALESCE evaluate every branch | a guarded CAST or overflow fails on rows the guard excludes; `eval` and `evalVec` disagree | **done** 2026-10-31 | medium |
 | [18](18-integer-overflow-wraps.md) | Integer arithmetic, SUM and narrowing CASTs wrap | `2147483647 + 1` is negative, `SUM` of BIGINTs goes negative, `CAST(NaN AS INT)` is 0 | **done** 2026-10-31 | medium |
-| [19](19-rounding-through-double.md) | ROUND, TRUNC, FLOOR and CEIL compute in DOUBLE | `ROUND(1.005, 2)` on a DECIMAL is 1.0; `FLOOR` of a BIGINT past 2^53 changes it | planned | medium |
+| [19](19-rounding-through-double.md) | ROUND, TRUNC, FLOOR and CEIL compute in DOUBLE | `ROUND(1.005, 2)` on a DECIMAL is 1.0; `FLOOR` of a BIGINT past 2^53 changes it | **done** 2026-10-31 | medium |
 | [20](20-range-frames-run-as-rows.md) | RANGE frames, and the default frame, run as ROWS | tied rows get different running totals, in arbitrary order; RANGE offsets count rows | planned | medium |
 | [21](21-two-float-equalities.md) | Floats have two equalities | a hash join matches NaN to NaN and misses -0.0 = 0.0, which the same predicate as a filter does not | planned | medium |
 | [22](22-order-by-sees-input-columns.md) | ORDER BY resolves names against input columns | `SELECT -b AS b ... ORDER BY b` sorts by the input; `ORDER BY n` on `COUNT(*) AS n` is refused | planned | medium |

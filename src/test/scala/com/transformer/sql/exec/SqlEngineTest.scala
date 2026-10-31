@@ -3737,11 +3737,12 @@ class SqlEngineTest {
       "SIGN(s)" -> s"SIGN on STRING is not supported; $text",
       "DEGREES(d)" -> s"DEGREES on DATE is not supported; $date"
     ).foreach { case (call, message) => assertEquals(call, message, bindRejection(s"SELECT $call AS v FROM t", cat)) }
-    // A number of every kind: a DECIMAL keeps its type under ABS and is read
-    // as a DOUBLE by the rest.
+    // A number of every kind: a DECIMAL keeps its type under ABS, and is a
+    // DECIMAL rounded under FLOOR, CEIL, ROUND and TRUNC (plans/robustness/19);
+    // the rest read it as a DOUBLE.
     assertEquals((DataType.DecimalType(9, 2), Seq(dec("1.25"), null)), typedColumn("SELECT ABS(-k) AS v FROM t", cat))
     assertEquals(Seq(2.0, null), column("SELECT SQRT(i * 2) AS v FROM t", cat, "v"))
-    assertEquals(Seq(1.0, null), column("SELECT FLOOR(k) AS v FROM t", cat, "v"))
+    assertEquals((DataType.DecimalType(8, 0), Seq(dec("1"), null)), typedColumn("SELECT FLOOR(k) AS v FROM t", cat))
   }
 
   /** A scale, a position, a length or a seed counts, so it is an INT or a
@@ -3876,20 +3877,22 @@ class SqlEngineTest {
     * negative made both NaN. Ordinary rounding is as it was. */
   @Test def roundAndTruncAnswerAtTheEdges(): Unit = {
     val cat = argumentCatalog()
-    def v(call: String): Double = column(s"SELECT $call AS v FROM t WHERE id = 1", cat, "v").head.asInstanceOf[Double]
+    def any(call: String): Any = column(s"SELECT $call AS v FROM t WHERE id = 1", cat, "v").head
+    def v(call: String): Double = any(call).asInstanceOf[Double]
     assertEquals(1.0e10, v("ROUND(10000000000.0, 10)"), 0.0)
     assertEquals(123456789012.0, v("ROUND(123456789012.0, 8)"), 0.0)
-    assertEquals(5.0, v("ROUND(5, 400)"), 0.0)
-    assertEquals(0.0, v("ROUND(5, -400)"), 0.0)
+    // An INT keeps its type (plans/robustness/19).
+    assertEquals(5, any("ROUND(5, 400)"))
+    assertEquals(0, any("ROUND(5, -400)"))
     assertEquals(Double.PositiveInfinity, v("ROUND(CAST('Infinity' AS DOUBLE))"), 0.0)
     assertTrue(v("ROUND(CAST('NaN' AS DOUBLE), 2)").isNaN)
     assertEquals(1.5, v("TRUNC(1.5, 400)"), 0.0)
-    assertEquals(0.0, v("TRUNC(5, -400)"), 0.0)
+    assertEquals(0, any("TRUNC(5, -400)"))
     assertEquals(2.567, v("TRUNC(x, n)"), 0.0)
     assertEquals(Double.NegativeInfinity, v("TRUNC(CAST('-Infinity' AS DOUBLE), 2)"), 0.0)
-    // Half up, toward positive infinity, for ROUND; toward zero for TRUNC.
+    // Half away from zero for ROUND; toward zero for TRUNC.
     assertEquals(3.0, v("ROUND(2.5)"), 0.0)
-    assertEquals(-2.0, v("ROUND(-2.5)"), 0.0)
+    assertEquals(-3.0, v("ROUND(-2.5)"), 0.0)
     assertEquals(2.57, v("ROUND(x, 2)"), 0.0)
     assertEquals(2.56, v("TRUNC(x, 2)"), 0.0)
     assertEquals(-2.56, v("TRUNC(-x, 2)"), 0.0)
@@ -4434,5 +4437,50 @@ class SqlEngineTest {
     back.register("t", memView(Schema(Vector(Field("x", DataType.LongType))),
       Seq(Seq(Array[Any](Long.MaxValue), Array[Any](1L)), Seq(Array[Any](-5L)))))
     assertEquals(Seq(Long.MaxValue - 4), column("SELECT SUM(x) AS s FROM t", back, "s"))
+  }
+
+  /** ROUND, TRUNC, FLOOR and CEIL are exact: a DECIMAL stays a DECIMAL and an
+    * INT or BIGINT keeps its type, where each was computed in DOUBLE, so
+    * `ROUND(1.005, 2)` over a DECIMAL was 1.0 and FLOOR of a BIGINT past 2^53
+    * lost its last digit; ROUND rounds half away from zero for every type
+    * (plans/robustness/19). */
+  @Test def roundingIsExactAndKeepsItsType(): Unit = {
+    val c = new Catalog
+    val schema = Schema(Vector(Field("id", DataType.IntType), Field("p", DataType.DecimalType(10, 3)),
+      Field("big", DataType.DecimalType(38, 0)), Field("b", DataType.LongType), Field("i", DataType.IntType)))
+    c.register("d", memView(schema, Seq(Seq(
+      Array[Any](1, dec("1.005"), dec("90071992547409930"), 9007199254740993L, 15),
+      Array[Any](2, dec("-2.500"), dec("-90071992547409931"), -9007199254740993L, -15),
+      Array[Any](3, dec("2.675"), dec("1"), 1L, 2147483647)))))
+    def typed(expr: String): (DataType, Seq[Any]) =
+      typedColumn(s"SELECT id, $expr AS v FROM d WHERE id < 3 ORDER BY id", c)
+    assertEquals((DataType.DecimalType(10, 2), Seq(dec("1.01"), dec("-2.50"))), typed("ROUND(p, 2)"))
+    assertEquals((DataType.DecimalType(8, 0), Seq(dec("1"), dec("-3"))), typed("ROUND(p)"))
+    assertEquals((DataType.DecimalType(9, 2), Seq(dec("1.00"), dec("-2.50"))), typed("TRUNC(p, 2)"))
+    assertEquals((DataType.DecimalType(8, 0), Seq(dec("1"), dec("-3"))), typed("FLOOR(p)"))
+    assertEquals((DataType.DecimalType(8, 0), Seq(dec("2"), dec("-2"))), typed("CEIL(p)"))
+    assertEquals((DataType.DecimalType(10, 3), Seq(dec("1.005"), dec("-2.500"))), typed("ROUND(p, 5)"))
+    // A scale that is not written as a number keeps the DECIMAL's scale.
+    assertEquals((DataType.DecimalType(11, 3), Seq(dec("1.010"), dec("-2.500"))), typed("ROUND(p, 3 - id)"))
+    assertEquals((DataType.DecimalType(38, 0), Seq(dec("90071992547409930"), dec("-90071992547409931"))),
+      typed("FLOOR(big)"))
+    assertEquals((DataType.DecimalType(38, 0), Seq(dec("90071992547409900"), dec("-90071992547409900"))),
+      typed("ROUND(big, -2)"))
+    // An integer keeps its type and its every digit; a negative scale rounds it.
+    assertEquals((DataType.LongType, Seq(9007199254740993L, -9007199254740993L)), typed("ROUND(b)"))
+    assertEquals((DataType.LongType, Seq(9007199254740993L, -9007199254740993L)), typed("FLOOR(b)"))
+    assertEquals((DataType.LongType, Seq(9007199254741000L, -9007199254741000L)), typed("ROUND(b, -3)"))
+    assertEquals((DataType.LongType, Seq(9007199254740000L, -9007199254740000L)), typed("TRUNC(b, -3)"))
+    assertEquals((DataType.IntType, Seq(20, -20)), typed("ROUND(i, -1)"))
+    assertEquals((DataType.IntType, Seq(10, -10)), typed("TRUNC(i, -1)"))
+    assertEquals((DataType.IntType, Seq(15, -15)), typed("CEIL(i)"))
+    // Half away from zero, a DOUBLE as the decimal it prints as.
+    assertEquals(Seq(-3.0), column("SELECT ROUND(-2.5) AS v", c, "v"))
+    assertEquals(Seq(1.01), column("SELECT ROUND(1.005, 2) AS v", c, "v"))
+    assertEquals(Seq(-1.0), column("SELECT TRUNC(-1.995, 0) AS v", c, "v"))
+    // Past the type is the integer overflow error.
+    val e = try { column("SELECT ROUND(i, -1) AS v FROM d WHERE id = 3", c, "v"); fail("no overflow"); null }
+    catch { case e: ArithmeticException => e }
+    assertEquals("Integer overflow: 2147483650 does not fit INT", e.getMessage)
   }
 }

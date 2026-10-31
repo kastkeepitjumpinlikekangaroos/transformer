@@ -1363,10 +1363,19 @@ class ExprBatchTest {
       (Double.PositiveInfinity, 0L, Double.PositiveInfinity, Double.PositiveInfinity),
       (Double.NegativeInfinity, 2L, Double.NegativeInfinity, Double.NegativeInfinity),
       (Double.NaN, 2L, Double.NaN, Double.NaN),
+      // Half away from zero for ROUND, toward zero for TRUNC, each of the
+      // decimal a double prints as: 1.005 rounds to 1.01, though the binary
+      // fraction nearest it is 1.00499999999999989...
       (2.5, 0L, 3.0, 2.0),
-      (-2.5, 0L, -2.0, -2.0),
+      (-2.5, 0L, -3.0, -2.0),
       (2.567, 2L, 2.57, 2.56),
-      (-2.567, 2L, -2.57, -2.56))
+      (-2.567, 2L, -2.57, -2.56),
+      (1.005, 2L, 1.01, 1.0),
+      (-1.005, 2L, -1.01, -1.0),
+      (0.49999999999999994, 0L, 0.0, 0.0),
+      (-0.4, 0L, 0.0, 0.0),
+      (1234.5, -2L, 1200.0, 1200.0),
+      (1250.0, -2L, 1300.0, 1200.0))
     val b = batch(
       "x" -> doubleCol(i => cases(i % cases.size)._1),
       "scale" -> longCol(i => cases(i % cases.size)._2))

@@ -196,8 +196,15 @@ object Integers {
     * have no integer, are errors. */
   def toInt(n: Number): Int = {
     val v = toLong(n, "INT")
-    if (v < Int.MinValue || v > Int.MaxValue) throw overflow(String.valueOf(n), "INT")
+    if (v < Int.MinValue || v > Int.MaxValue) throw overflow(shown(n), "INT")
     v.toInt
+  }
+
+  /** How an overflow message writes `n`: a decimal in plain digits, as
+    * `2147483650` rather than `2.14748365E+9`. */
+  private def shown(n: Number): String = n match {
+    case d: java.math.BigDecimal => d.toPlainString
+    case other => String.valueOf(other)
   }
 
   /** `n` as a BIGINT, by the rule of [[toInt]]. */

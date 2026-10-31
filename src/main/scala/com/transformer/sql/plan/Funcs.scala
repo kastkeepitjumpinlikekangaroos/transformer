@@ -28,12 +28,15 @@ object Funcs {
     * of them must be, and the type it returns. */
   final case class Signature(params: Seq[Param], returnType: DataType)
 
-  /** The signature of `name` over arguments of `argTypes`, or `None` if no
-    * function of that name takes that many arguments. The analyzer checks
-    * each argument against its [[Param]] (`Analyzer.checkArgument`) and types
-    * the call by it; the executor uses [[apply]] at runtime. */
-  def signature(name: String, argTypes: Seq[DataType]): Option[Signature] = {
+  /** The signature of `name` over `args`, or `None` if no function of that
+    * name takes that many arguments. The analyzer checks each argument against
+    * its [[Param]] (`Analyzer.checkArgument`) and types the call by it; the
+    * executor uses [[apply]] at runtime. Most return types follow the
+    * argument types alone; a `ROUND` or `TRUNC` of a DECIMAL also reads a
+    * scale written as a number ([[Rounding.resultType]]). */
+  def signature(name: String, args: Seq[Expr]): Option[Signature] = {
     import Param._
+    val argTypes = args.map(_.dataType)
     val n = argTypes.size
     def each(param: Param, returns: DataType) = Some(Signature(Seq.fill(n)(param), returns))
     name.toUpperCase(Locale.ROOT) match {
@@ -47,8 +50,8 @@ object Funcs {
       case "NULLIF" if n == 2 => each(AnyValue, argTypes.head)
       case "ABS" if n == 1 => each(Number, argTypes.head)
       case "ROUND" | "TRUNC" | "TRUNCATE" if n == 1 || n == 2 =>
-        Some(Signature(Seq(Number, Integer("scale")).take(n), DataType.DoubleType))
-      case "FLOOR" | "CEIL" | "CEILING" if n == 1 => each(Number, DataType.DoubleType)
+        Some(Signature(Seq(Number, Integer("scale")).take(n), Rounding.resultType(name, args)))
+      case "FLOOR" | "CEIL" | "CEILING" if n == 1 => each(Number, Rounding.resultType(name, args))
       case "POW" | "POWER" if n == 2 => each(Number, DataType.DoubleType)
       case "SQRT" | "CBRT" | "EXP" if n == 1 => each(Number, DataType.DoubleType)
       case "LN" if n == 1 => each(Number, DataType.DoubleType)
@@ -116,18 +119,10 @@ object Funcs {
             case _ => math.abs(n.doubleValue)
           }
         }
-      case "ROUND" =>
+      case "ROUND" | "TRUNC" | "TRUNCATE" | "FLOOR" | "CEIL" | "CEILING" =>
         if (args.exists(_ == null)) null
-        else round(args.head.asInstanceOf[Number].doubleValue,
-          if (args.size == 2) args(1).asInstanceOf[Number].longValue else 0L)
-      case "FLOOR" =>
-        if (args.head == null) null else math.floor(args.head.asInstanceOf[Number].doubleValue)
-      case "CEIL" | "CEILING" =>
-        if (args.head == null) null else math.ceil(args.head.asInstanceOf[Number].doubleValue)
-      case "TRUNC" | "TRUNCATE" =>
-        if (args.exists(_ == null)) null
-        else trunc(args.head.asInstanceOf[Number].doubleValue,
-          if (args.size == 2) args(1).asInstanceOf[Number].longValue else 0L)
+        else Rounding(name, args.head.asInstanceOf[Number], if (args.size == 2) args(1).asInstanceOf[Number].longValue else 0L,
+          resultType)
       case "POW" | "POWER" =>
         if (args(0) == null || args(1) == null) null
         else math.pow(args(0).asInstanceOf[Number].doubleValue, args(1).asInstanceOf[Number].doubleValue)
@@ -216,36 +211,6 @@ object Funcs {
     else s.substring(start.toInt, if (length < s.length - start) (start + length).toInt else s.length)
   }
 
-  /** ROUND's answer: `v` rounded half up (toward positive infinity, so -2.5
-    * is -2) to `scale` decimal places, or to tens, hundreds, ... for a
-    * negative scale ([[atScale]]). */
-  private[plan] def round(v: Double, scale: Long): Double =
-    atScale(v, scale, x => math.round(x).toDouble)
-
-  /** TRUNC's answer: `v` cut toward zero at `scale` decimal places
-    * ([[atScale]]), a negative zero read as 0. */
-  private[plan] def trunc(v: Double, scale: Long): Double = {
-    val t = atScale(v, scale, x => math.signum(x) * math.floor(math.abs(x)))
-    if (t == 0.0) 0.0 else t
-  }
-
-  /** From 2^52 up every double is a whole number. */
-  private val WholeDoubles: Double = 4503599627370496.0
-
-  /** `v` at `scale` decimal places: `whole` of `v * 10^scale`, scaled back.
-    * NaN and the infinities are their own answer. Where `v * 10^scale`
-    * reaches 2^52, `v` is already whole at that scale, since a double that
-    * large has no fraction left; multiplying it out would only lose digits,
-    * and past 2^63 the long ROUND rounds through clamps. Where 10^scale is
-    * too small for a double, every finite value is 0 at that scale. */
-  private def atScale(v: Double, scale: Long, whole: Double => Double): Double = {
-    val factor = math.pow(10, scale.toDouble)
-    val scaled = v * factor
-    if (java.lang.Double.isNaN(v) || java.lang.Double.isInfinite(v)) v
-    else if (factor == 0.0) 0.0
-    else if (!(math.abs(scaled) < WholeDoubles)) v
-    else whole(scaled) / factor
-  }
 
   /** Vectorized counterpart to [[apply]]. Returns `Some(vec)` for the function
     * names with a fast path, `None` otherwise — the caller falls back to the
@@ -270,10 +235,9 @@ object Funcs {
       case "CONCAT"                                   => Some(VecFuncs.concat(a, batch))
       case "SUBSTRING" if a.size == 2 || a.size == 3  => Some(VecFuncs.substring(a, batch))
       case "ABS" if a.size == 1                       => Some(VecFuncs.abs(a.head, resultType, batch))
-      case "FLOOR" if a.size == 1                     => Some(VecFuncs.floorCeil(a.head, batch, ceil = false))
-      case "CEIL" | "CEILING" if a.size == 1          => Some(VecFuncs.floorCeil(a.head, batch, ceil = true))
-      case "ROUND" if a.size == 1 || a.size == 2      => Some(VecFuncs.round(a, batch))
-      case "TRUNC" | "TRUNCATE" if a.size == 1 || a.size == 2 => Some(VecFuncs.trunc(a, batch))
+      case "FLOOR" | "CEIL" | "CEILING" if a.size == 1 => Some(VecFuncs.rounding(name, a, resultType, batch))
+      case "ROUND" | "TRUNC" | "TRUNCATE" if a.size == 1 || a.size == 2 =>
+        Some(VecFuncs.rounding(name, a, resultType, batch))
       case "IF" if a.size == 3                        => Some(VecFuncs.iff(a, resultType, batch))
       case "NULLIF" if a.size == 2                    => Some(VecFuncs.nullIf(a, resultType, batch))
       case _ => None
@@ -473,45 +437,22 @@ object VecFuncs {
     }
   }
 
-  def floorCeil(arg: Expr, batch: ColumnarBatch, ceil: Boolean): DoubleVector = {
-    val n = batch.numRows
-    val cap = math.max(1, n)
-    val argVec = arg.evalVec(batch)
-    val values = new Array[Double](cap)
-    val nulls = new util.BitSet(cap)
-    var i = 0
-    while (i < n) {
-      if (argVec.isNull(i)) nulls.set(i)
-      else {
-        val v = argVec.getBoxed(i).asInstanceOf[Number].doubleValue
-        values(i) = if (ceil) math.ceil(v) else math.floor(v)
-      }
-      i += 1
-    }
-    new DoubleVector(values, nulls, cap)
-  }
-
-  /** ROUND(x[, scale]), by [[Funcs.round]]. NULL in either argument is NULL. */
-  def round(args: Seq[Expr], batch: ColumnarBatch): DoubleVector = atEachScale(args, batch, Funcs.round)
-
-  /** TRUNC(x[, scale]), by [[Funcs.trunc]]. NULL in either argument is NULL. */
-  def trunc(args: Seq[Expr], batch: ColumnarBatch): DoubleVector = atEachScale(args, batch, Funcs.trunc)
-
-  private def atEachScale(args: Seq[Expr], batch: ColumnarBatch, f: (Double, Long) => Double): DoubleVector = {
+  /** ROUND / TRUNC (x[, scale]), FLOOR and CEIL, by [[Rounding]], into a
+    * vector of `resultType`. NULL in either argument is NULL. */
+  def rounding(name: String, args: Seq[Expr], resultType: DataType, batch: ColumnarBatch): ColumnVector = {
     val n = batch.numRows
     val cap = math.max(1, n)
     val xVec = args(0).evalVec(batch)
     val scaleVec: ColumnVector = if (args.size == 2) args(1).evalVec(batch) else null
-    val values = new Array[Double](cap)
-    val nulls = new util.BitSet(cap)
+    val out = ColumnVector.allocate(resultType, cap)
     var i = 0
     while (i < n) {
-      if (xVec.isNull(i) || (scaleVec != null && scaleVec.isNull(i))) nulls.set(i)
-      else values(i) = f(xVec.getBoxed(i).asInstanceOf[Number].doubleValue,
-        if (scaleVec != null) scaleVec.getBoxed(i).asInstanceOf[Number].longValue else 0L)
+      if (xVec.isNull(i) || (scaleVec != null && scaleVec.isNull(i))) out.setNull(i)
+      else out.setBoxed(i, Rounding(name, xVec.getBoxed(i).asInstanceOf[Number],
+        if (scaleVec != null) scaleVec.getBoxed(i).asInstanceOf[Number].longValue else 0L, resultType))
       i += 1
     }
-    new DoubleVector(values, nulls, cap)
+    out
   }
 
   /** `IF(cond, a, b)`. Null/false cond → b. `a` is needed only on the rows
@@ -556,4 +497,84 @@ object VecFuncs {
     }
     out
   }
+}
+
+/** `ROUND`, `TRUNC`, `FLOOR` and `CEIL`, exact. Each rounds a number as the
+  * decimal it is, which for a FLOAT or a DOUBLE is the decimal it prints as
+  * ([[Casts.toDecimal]]), so `ROUND(1.005, 2)` is 1.01 whatever the binary
+  * fraction nearest 1.005 would round to; `ROUND` rounds half away from zero
+  * (`ROUND(-2.5)` is -3), `TRUNC` toward zero, `FLOOR` down and `CEIL` up.
+  * An INT or a BIGINT keeps its type, a negative scale rounding it to tens,
+  * hundreds, ... (an answer past the type is the integer overflow error); a
+  * DECIMAL stays a DECIMAL ([[resultType]]); a FLOAT or DOUBLE is a DOUBLE,
+  * NaN and the infinities their own answer. */
+private[plan] object Rounding {
+
+  /** The type of `name` over `args`: an INT, BIGINT or DECIMAL argument's own
+    * type for FLOOR and CEIL of a whole number, and for ROUND and TRUNC at a
+    * scale that keeps every digit; otherwise a DECIMAL(p,s) loses the digits
+    * past the scale, which is the scale written as a number (0 when there is
+    * none, and none below 0), and ROUND, FLOOR and CEIL keep one more integer
+    * digit for the carry (9.5 rounds to 10). A scale that is not a number
+    * written in the query keeps the DECIMAL's scale, rounding within it. A
+    * FLOAT, a DOUBLE and an untyped NULL are a DOUBLE. */
+  def resultType(name: String, args: Seq[Expr]): DataType = {
+    val fn = name.toUpperCase(Locale.ROOT)
+    args.head.dataType match {
+      case DataType.IntType | DataType.LongType => args.head.dataType
+      case d @ DataType.DecimalType(p, s) =>
+        val carry = if (fn == "TRUNC" || fn == "TRUNCATE") 0 else 1
+        val scale: Option[Long] =
+          if (args.size == 1) Some(0L)
+          else args(1) match {
+            case LitExpr(v: java.lang.Number, _) => Some(v.longValue)
+            case _ => None
+          }
+        scale match {
+          case Some(k) if k >= s => d
+          case Some(k) =>
+            val kept = math.max(0L, k).toInt
+            DataType.DecimalType(math.min(Decimals.MaxPrecision, math.max(1, p - s + carry + kept)), kept)
+          case None => DataType.DecimalType(math.min(Decimals.MaxPrecision, p + carry), s)
+        }
+      case _ => DataType.DoubleType
+    }
+  }
+
+  /** `x` rounded by `name` at `scale` places, as a value of `resultType`. */
+  def apply(name: String, x: java.lang.Number, scale: Long, resultType: DataType): Any = {
+    val mode = name.toUpperCase(Locale.ROOT) match {
+      case "ROUND" => java.math.RoundingMode.HALF_UP
+      case "TRUNC" | "TRUNCATE" => java.math.RoundingMode.DOWN
+      case "FLOOR" => java.math.RoundingMode.FLOOR
+      case _ => java.math.RoundingMode.CEILING
+    }
+    resultType match {
+      case DataType.DoubleType =>
+        val d = x.doubleValue
+        if (d.isNaN || d.isInfinite) d
+        // A double's whole part is exact, so FLOOR and CEIL need no decimal.
+        else if (mode == java.math.RoundingMode.FLOOR) math.floor(d)
+        else if (mode == java.math.RoundingMode.CEILING) math.ceil(d)
+        else at(Casts.toDecimal(x), scale, mode).doubleValue
+      case DataType.IntType => Integers.toInt(at(Casts.toDecimal(x), scale, mode))
+      case DataType.LongType => Integers.toLong(at(Casts.toDecimal(x), scale, mode))
+      case t: DataType.DecimalType =>
+        Decimals.fit(at(x.asInstanceOf[java.math.BigDecimal], scale, mode).setScale(t.scale, mode), t)
+      case other => throw new IllegalStateException(s"Rounding to $other")
+    }
+  }
+
+  /** `v` at `scale` places by `mode`. A scale at or past `v`'s own keeps it
+    * as it is, and one below its integer digits makes it 0 (or, by the carry,
+    * one unit of the place above them), so no scale costs more digits than `v`
+    * has: `setScale` to a scale written as a billion would build a billion
+    * digits. */
+  private def at(v: java.math.BigDecimal, scale: Long, mode: java.math.RoundingMode): java.math.BigDecimal =
+    if (scale >= v.scale) v
+    else {
+      val integerDigits = v.precision - v.scale
+      val k = math.max(scale, -(integerDigits.toLong + 1)).toInt
+      v.setScale(k, mode)
+    }
 }

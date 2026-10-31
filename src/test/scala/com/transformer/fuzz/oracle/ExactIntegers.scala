@@ -18,8 +18,8 @@ import scala.util.control.NonFatal
   * not, at any node, is an error (plans/robustness/18).
   *
   *   - [[checkExpr]]: an INT / BIGINT expression tree (`+ - * / %`, unary
-  *     minus, `ABS`, and CASTs to an integer from an integer, a DOUBLE or a
-  *     DECIMAL) over values at the edges where arithmetic overflows. Per row,
+  *     minus, `ABS`, `ROUND` / `TRUNC` / `FLOOR` / `CEIL`, and CASTs to an
+  *     integer from an integer, a DOUBLE or a DECIMAL) over values at the edges where arithmetic overflows. Per row,
   *     `eval` must give the exact value or throw where the reference
   *     overflows; `evalVec` must give every row's value, or throw when any row
   *     overflows.
@@ -90,6 +90,21 @@ object ExactIntegers {
       case Value(Some(x)) => fit(x.abs, t)
       case other => other
     }
+    // An integer rounded at a negative scale, by the rule each names; at no
+    // scale, or one of 0 or more, it is itself.
+    case FuncExpr(fn @ ("ROUND" | "TRUNC" | "FLOOR" | "CEIL"), args, t) =>
+      val scale = args.lift(1).collect { case LitExpr(k: java.lang.Number, _) => k.intValue }.getOrElse(0)
+      exact(args.head, b, row) match {
+        case Value(Some(x)) if scale < 0 =>
+          val mode = fn match {
+            case "ROUND" => java.math.RoundingMode.HALF_UP
+            case "TRUNC" => java.math.RoundingMode.DOWN
+            case "FLOOR" => java.math.RoundingMode.FLOOR
+            case _ => java.math.RoundingMode.CEILING
+          }
+          fit(BigInt(new java.math.BigDecimal(x.bigInteger).setScale(scale, mode).toBigIntegerExact), t)
+        case other => other
+      }
     case CastExpr(c, t) => c.dataType match {
       case DataType.IntType | DataType.LongType => exact(c, b, row) match {
         case Value(Some(x)) => fit(x, t)

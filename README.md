@@ -784,12 +784,20 @@ scale, `SUBSTRING`'s position and length and `RAND`'s seed an `INT` or a
 `BIGINT` (see the argument types below). NULL propagates through
 every function but the flow ones, a NULL scale, position, length or seed
 included; `GREATEST`/`LEAST` skip NULLs and return NULL only when every
-argument is NULL. `MOD(a, b)` is `a % b`, typed the same way. `ROUND` rounds
-half up, toward positive infinity (`ROUND(2.5)` is 3, `ROUND(-2.5)` is -2), and
-`TRUNC` toward zero, both in `DOUBLE`; a value already whole at the scale (one
-whose digits there reach 2^52, as `ROUND(1e10, 10)`'s do) comes back as it is,
-a scale too negative for a `DOUBLE` gives 0, and `NaN` and the infinities are
-their own answer. A `SUBSTRING` position before the first character counts from
+argument is NULL. `MOD(a, b)` is `a % b`, typed the same way. `ROUND`,
+`TRUNC`, `FLOOR` and `CEIL` are exact: `ROUND` rounds half away from zero
+(`ROUND(2.5)` is 3 and `ROUND(-2.5)` is -3), `TRUNC` toward zero, `FLOOR`
+down and `CEIL` up, each at `scale` places (0 by default), a negative scale
+rounding to tens, hundreds, ... An `INT` or `BIGINT` keeps its type and every
+digit (`ROUND(15, -1)` is the `INT` 20, and an answer past the type is the
+integer overflow error); a `DECIMAL(p,s)` stays a `DECIMAL`, with the scale the
+query writes (`ROUND(price, 2)` over a `DECIMAL(10,3)` is a `DECIMAL(10,2)`,
+one more integer digit kept for a carry, and a scale that is not written as a
+number keeps `s`); a `FLOAT` or `DOUBLE` is a `DOUBLE`, rounded as the decimal
+it prints as, so `ROUND(1.005, 2)` is 1.01 whatever the binary fraction
+nearest 1.005 would give, and `NaN` and the infinities are their own answer.
+Each of these used to compute in `DOUBLE`: `ROUND` of a `DECIMAL` 1.005 was 1.0,
+and `FLOOR` of a `BIGINT` past 2^53 lost its last digit. A `SUBSTRING` position before the first character counts from
 the first, and one past the last gives the empty string. `UPPER` and `LOWER` map
 case by Unicode's own rules, the same on every machine: the JVM's locale, under
 which a Turkish one would make `UPPER('i')` a dotted capital, plays no part, and

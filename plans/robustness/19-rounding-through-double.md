@@ -1,6 +1,6 @@
 # Plan 19: ROUND, TRUNC, FLOOR and CEIL compute in DOUBLE
 
-> Status: planned · found by the 2026-10-31 audit · decided by the user: exact
+> Status: **done** 2026-10-31 · found by the 2026-10-31 audit · decided by the user: exact
 > for DECIMAL and the integers, and ROUND rounds half away from zero for every
 > type · Effort: 1 day · Risk: medium (changes the type of these functions over
 > DECIMAL and the integers, and ROUND(-2.5)) · Depends on
@@ -59,3 +59,24 @@ a decimal ROUND / TRUNC / FLOOR / CEIL with `BigDecimal` computed by the oracle.
 
 README (numeric functions, decimals), gotchas ("a DECIMAL is exact ... but not
 in the math functions" narrows to SQRT, POWER, LN and the rest), testing.md.
+
+## Outcome
+
+Done, with one addition the plan left open: a FLOAT or DOUBLE rounds as the
+decimal it prints as (`Casts.toDecimal`, the rule a DOUBLE already meets a
+DECIMAL by), so `ROUND(1.005, 2)` is 1.01 as Spark gives, not 1.00, the answer
+for the binary fraction nearest 1.005. FLOOR and CEIL of a DOUBLE stay
+`Math.floor` / `ceil`, exact for any double. `Rounding` in `Funcs.scala` holds
+all four functions for every type, and `Funcs.signature` now takes the
+arguments, since a DECIMAL's result scale is the scale the query writes.
+Clamping keeps every scale cheap: one past a value's digits leaves it as it is,
+and one below its integer digits makes it 0 (or the carry above), so `ROUND(x,
+1000000000)` builds no billion-digit number. An overflow message writes a
+rounded decimal in plain digits (`2147483650`, not `2.14748365E+9`).
+
+The expression fuzzer builds these calls with the binder's types now (it had
+typed every one DOUBLE whatever its argument), and the exact-integer reference
+rounds integers at negative scales with `BigDecimal`, overflow included. The
+SQL regression failed at the code before (`decimal(10,2)` 1.01 expected, the
+DOUBLE 1.0 given). `ROUND(i) / 2` over an INT is now integer division, as it
+is in Spark, where it was a DOUBLE's.

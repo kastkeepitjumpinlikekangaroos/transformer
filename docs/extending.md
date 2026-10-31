@@ -10,7 +10,10 @@ relevant module lives, and that you'll follow the workflow in
 1. Add it to `Funcs.signature` in `sql/plan/Funcs.scala`: the arities it
    takes, what each argument must be (`Param.Number`, `Param.Integer` for a
    count such as a scale or a position, `Param.Text`, or `Param.AnyValue` for
-   one it returns), and the type it returns. The binder checks every argument
+   one it returns), and the type it returns, from the arguments' types or,
+   where a number written in the query decides it, from the arguments
+   themselves (a `DECIMAL`'s `ROUND` takes the scale it is given, `Rounding.
+   resultType`). The binder checks every argument
    against its `Param` (`Analyzer.checkArgument`), so the function never meets
    a value it cannot take while running; a kind none of these say is a new
    `Param` and a new check in `checkArgument`, not an argument left unchecked.

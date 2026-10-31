@@ -1710,8 +1710,11 @@ above) are all fixed. `CleanRejection.Defect` and
   - Grace hash and window spill both use a fixed bucket count of 16
     (no recursive bucketing). Hot keys whose bucket exceeds heap will
     still OOM at probe/process time; that's a v1.1 issue.
-- **A `DECIMAL` is exact in arithmetic, `SUM` and `AVG`, but not in the math
-  functions or the statistics.** `ROUND`, `FLOOR`, `CEIL`, `TRUNC`, `SQRT`,
+- **A `DECIMAL` is exact in arithmetic, `SUM`, `AVG`, `ABS` and rounding, but
+  not in the other math functions or the statistics.** `ROUND`, `TRUNC`,
+  `FLOOR` and `CEIL` are exact over a `DECIMAL` and an integer and keep the
+  type (`Rounding` in `Funcs.scala`, plans/robustness/19; they computed in
+  `DOUBLE`, so `ROUND` of a `DECIMAL` 1.005 to two places was 1.0). `SQRT`,
   `POWER` and the rest, and `STDDEV` / `VARIANCE`, take a decimal's
   `doubleValue` and return a `DOUBLE`, so their type says what they kept. There
   is no `CAST` to a `DECIMAL` either (`parseTypeName` reads no `DECIMAL(p,s)`),
