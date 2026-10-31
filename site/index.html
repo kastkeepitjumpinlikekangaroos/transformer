@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>transformer</title>
+  <meta name="description" content="SQL data pipelines in a single jar. A folder of SQL files, a built-in parallel engine, data-quality tests, and a CLI an agent can drive.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="logo" href="index.html">transformer<span>_</span></a>
+    <nav>
+      <a href="index.html" aria-current="page">Home</a>
+      <a href="setup.html">Setup</a>
+      <a href="https://github.com/kastkeepitjumpinlikekangaroos/transformer">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <div class="wrap hero">
+    <p class="eyebrow">SQL data pipelines</p>
+    <h1>Your whole data pipeline in <em>one jar</em> and one folder of SQL.</h1>
+    <p class="lede">
+      transformer runs DBT-style pipelines (staging, marts, data-quality tests)
+      on a single machine with its own parallel SQL engine. You don't need a
+      warehouse, a cluster, or a Python environment. Install Java and run one
+      jar against a folder of SQL files.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="setup.html">Get started</a>
+      <a class="btn" href="#performance">See the benchmark</a>
+    </div>
+<pre class="term"><span class="p">$ </span>java -jar transformer.jar run examples/jaffle_shop/job
+<span class="c">  ...</span>
+  Succeeded        orders                       rows=61948          248 ms
+  Succeeded        customer_orders_summary      rows=935             48 ms
+  Succeeded        customers                    rows=935             50 ms
+
+<span class="ok">Job SUCCEEDED (15 Succeeded)</span></pre>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <div class="grid-3">
+        <div class="card">
+          <div class="num">01 / one dependency</div>
+          <h3>Nothing to deploy but a jar</h3>
+          <p class="muted">
+            The SQL parser, planner, and executor ship inside transformer, so
+            there's no Spark, database, or warehouse behind it. Reading and
+            writing CSV and Parquet is built in. If a machine has Java 21, it
+            can run your pipeline: a laptop, a CI runner, an Airflow worker,
+            or a container.
+          </p>
+        </div>
+        <div class="card">
+          <div class="num">02 / fast iteration</div>
+          <h3>Edit, run, look, in seconds</h3>
+          <p class="muted">
+            A pipeline is plain files on disk. Change a <code>main.sql</code>,
+            rerun, and the 15-table jaffle-shop example finishes in about two
+            seconds. The desktop GUI draws the DAG, shows live task status,
+            previews every output, and has a SQL console for poking at
+            results.
+          </p>
+        </div>
+        <div class="card">
+          <div class="num">03 / agent first</div>
+          <h3>Built for coding agents</h3>
+          <p class="muted">
+            Every part of a project has a fixed place and a fixed shape, and the
+            CLI reports through exit codes and JSON run records. An agent such
+            as Claude Code can scaffold a pipeline, run it, read what failed,
+            and fix it without any UI or cloud console.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap grid-2">
+      <div>
+        <p class="eyebrow">How it works</p>
+        <h2>A pipeline is a folder</h2>
+        <p class="muted">
+          Each input is a directory with a small JSON config. Each table is a
+          directory with a <code>main.sql</code>. A data-quality test is a SQL
+          file in that table's <code>validations/</code> folder, and it passes
+          when it returns no rows.
+        </p>
+        <p class="muted">
+          transformer reads which tables each query references, builds the
+          dependency graph from that, and runs independent branches in
+          parallel. You never declare the order.
+        </p>
+        <ul class="ticks">
+          <li>Joins, aggregates, window functions, CTEs, <code>UNION</code>, <code>CASE</code>, and casts, with strict typing that refuses an ambiguous query instead of guessing</li>
+          <li>Reads and writes CSV and Parquet, using Parquet row-group pruning and parallel scans</li>
+          <li>Paths and SQL accept time variables like <code>{{ today }}</code>, so each scheduled run writes its own partition</li>
+          <li>Every run leaves a <code>job.json</code> and a per-task <code>_run.json</code> with status, row counts, timings, and samples of the rows that failed a validation</li>
+        </ul>
+      </div>
+      <div>
+<pre class="tree"><span class="d">jaffle_shop/job/</span>
+  <span class="d">inputs/</span>
+    <span class="d">raw_orders/</span>
+      <span class="f">config.json</span>        <span class="c">{"path": "data/raw_orders.csv"}</span>
+  <span class="d">tables/</span>
+    <span class="d">stg_orders/</span>
+      <span class="f">main.sql</span>
+    <span class="d">orders/</span>
+      <span class="f">main.sql</span>
+      <span class="f">output.json</span>        <span class="c">{"format": "parquet"}</span>
+      <span class="d">validations/</span>
+        <span class="f">order_id_unique.sql</span>
+        <span class="f">order_total_balances.sql</span></pre>
+        <p class="code-label">tables/orders/validations/order_total_balances.sql</p>
+<pre><span class="c">-- Passes when no rows come back.</span>
+<span class="k">SELECT</span> order_id, subtotal_cents, tax_paid_cents, order_total_cents
+<span class="k">FROM</span> orders
+<span class="k">WHERE</span> subtotal_cents + tax_paid_cents &lt;&gt; order_total_cents</pre>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap grid-2">
+      <div>
+        <p class="eyebrow">Agent first</p>
+        <h2>Hand the pipeline to your agent</h2>
+        <p class="muted">
+          Coding agents are good at editing structured text and running
+          commands, and transformer projects are only that. There's no
+          service to log into, no notebook state, and no hidden metadata. The
+          agent's whole loop happens on the local machine:
+        </p>
+        <ul class="ticks">
+          <li><strong>Scaffold.</strong> Make a directory per table and write the SQL. The layout is the same in every project, so an agent can copy it from one example.</li>
+          <li><strong>Run.</strong> <code>transformer run &lt;jobDir&gt;</code> exits 0 only when every task and validation passes.</li>
+          <li><strong>Diagnose.</strong> Each failed task prints its reason, and <code>job.json</code> names failing validations with row counts and points to a CSV of sample bad rows.</li>
+          <li><strong>Verify.</strong> Data-quality checks are SQL files the agent writes next to the table it's changing.</li>
+        </ul>
+      </div>
+      <div>
+        <p class="code-label">A prompt like this is enough</p>
+<pre>Add a weekly_revenue table to the jaffle shop job
+that sums order_total per location per week, with
+validations that location_id is never null and the
+totals match orders. Run it until everything passes.</pre>
+        <p class="code-label">What the agent reads back, e.g. &lt;output&gt;/orders/_run.json</p>
+<pre>{
+  "taskName": "orders",
+  "status": "ValidationFailed",
+  "rowsProduced": 61948,
+  "validations": [
+    { "name": "order_total_balances", "passed": false,
+      "failedRowCount": 7,
+      "sampleFile": "_validation-order_total_balances.csv" }
+  ]
+}</pre>
+      </div>
+    </div>
+  </section>
+
+  <section id="performance">
+    <div class="wrap">
+      <div class="section-intro">
+        <p class="eyebrow">Performance</p>
+        <h2>166 million rows in 90 seconds on one machine</h2>
+        <p class="muted">
+          The polymarket example is a 17-table pipeline over the
+          <a href="https://www.kaggle.com/datasets/marvingozo/polymarket-tick-level-orderbook-dataset">Polymarket tick-level orderbook dataset</a>
+          (39 GB of Parquet). It stages five sources, builds summaries and
+          marts, and runs 59 validations. The whole run, JVM startup included,
+          takes 90 seconds on an Apple M4 with 8 cores and 16 GB of RAM.
+        </p>
+      </div>
+
+      <div class="stats">
+        <div class="stat">
+          <div class="label">Rows staged</div>
+          <div class="value">166.6M</div>
+          <div class="sub">from 5 Parquet sources</div>
+        </div>
+        <div class="stat">
+          <div class="label">End-to-end wall time</div>
+          <div class="value">90 s</div>
+          <div class="sub">17 tables, 59 validations</div>
+        </div>
+        <div class="stat">
+          <div class="label">Aggregation rate</div>
+          <div class="value">9.9M/s</div>
+          <div class="sub">105M rows to 13.7K groups in 10.6 s</div>
+        </div>
+        <div class="stat">
+          <div class="label">Input on disk</div>
+          <div class="value">39 GB</div>
+          <div class="sub">pruned by row-group statistics</div>
+        </div>
+      </div>
+
+      <table class="chart">
+        <caption>Rows produced by each staging task
+          <span>Polymarket run, -Xmx12g. Staging tasks run in parallel; times overlap.</span>
+        </caption>
+        <thead>
+          <tr><th>Task</th><th></th><th class="n">Rows</th><th class="t">Time</th></tr>
+        </thead>
+        <tbody>
+          <tr title="stg_orderbook: 105,066,174 rows in 77.4 s">
+            <td class="task">stg_orderbook</td>
+            <td class="barcell"><div class="bar"><i style="width:100%"></i></div></td>
+            <td class="n">105.1M</td><td class="t">77.4 s</td>
+          </tr>
+          <tr title="stg_snapshots: 51,674,425 rows in 58.0 s">
+            <td class="task">stg_snapshots</td>
+            <td class="barcell"><div class="bar"><i style="width:49.2%"></i></div></td>
+            <td class="n">51.7M</td><td class="t">58.0 s</td>
+          </tr>
+          <tr title="stg_features: 5,587,547 rows in 24.5 s">
+            <td class="task">stg_features</td>
+            <td class="barcell"><div class="bar"><i style="width:5.3%"></i></div></td>
+            <td class="n">5.6M</td><td class="t">24.5 s</td>
+          </tr>
+          <tr title="stg_trades: 4,126,076 rows in 23.3 s">
+            <td class="task">stg_trades</td>
+            <td class="barcell"><div class="bar"><i style="width:3.9%"></i></div></td>
+            <td class="n">4.1M</td><td class="t">23.3 s</td>
+          </tr>
+          <tr title="stg_markets: 123,895 rows in 1.3 s">
+            <td class="task">stg_markets</td>
+            <td class="barcell"><div class="bar"><i style="width:0.12%"></i></div></td>
+            <td class="n">124K</td><td class="t">1.3 s</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="small">
+        Measured 2026-10-30 with the shipped <code>examples/polymarket</code> job
+        on JDK 21. The run ends with the expected two failed validations and
+        one skipped downstream table, which the example includes on purpose to
+        exercise the scheduler. Times depend on the machine. To reproduce,
+        follow the polymarket section of the README.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap grid-2">
+      <div>
+        <p class="eyebrow">Run it anywhere</p>
+        <h2>Same project, from the CLI, the GUI, or a scheduler</h2>
+        <p class="muted">
+          The same jar runs headless from the command line or opens the
+          desktop GUI. In Airflow, cron, or CI, a run is one shell command
+          with a nonzero exit code on failure. Pass the scheduler's logical
+          date as the execution time and every <code>{{ today }}</code> in your
+          SQL and paths resolves to that date, so reruns and backfills land in
+          the right partition.
+        </p>
+        <p><a class="btn primary" href="setup.html">Set up the example project</a></p>
+      </div>
+      <div>
+        <p class="code-label">Desktop GUI</p>
+<pre class="term"><span class="p">$ </span>java -jar transformer.jar gui examples/jaffle_shop/job</pre>
+        <p class="code-label">Airflow</p>
+<pre><span class="k">BashOperator</span>(
+    task_id=<span class="c">"jaffle_shop"</span>,
+    bash_command=(
+        <span class="c">"java -Xmx4g -jar /opt/transformer.jar run /opt/jobs/jaffle_shop "</span>
+        <span class="c">"--output /data/jaffle/day={{ ds_nodash }} "</span>
+        <span class="c">"--execution-time {{ ts }}"</span>
+    ),
+)</pre>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>transformer: a single-node SQL pipeline engine in Scala</span>
+    <a href="setup.html">Setup</a>
+    <a href="https://github.com/kastkeepitjumpinlikekangaroos/transformer">Source</a>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -280,7 +280,21 @@ ship a fix or move something from "not done" to "done".
   depending on them alone gives "not found: type Stage" at compile time. The
   `gui/` BUILD lists both the bare jars *and* the `mac-aarch64` classifier
   jars. Add other platforms (`win`, Linux) the same way when building
-  cross-platform binaries.
+  cross-platform binaries. The product jar (`//:transformer`) lists the
+  `mac-aarch64` and `win` classifiers, so `transformer gui` runs on Apple
+  Silicon macOS and Windows only. On Linux and Intel macOS the GUI fails to
+  start, but `transformer run` (which never touches JavaFX) works.
+- **`java -jar` ignores a `scala_binary`'s `jvm_flags`.** `//:transformer`
+  sets `-XX:MaxRAMPercentage=75.0`, but that only applies to the
+  `bazel-bin/transformer` wrapper script. Users running
+  `transformer_deploy.jar` get the JVM default heap (often 25% of RAM) unless
+  they pass `-Xmx`. README and `site/setup.html` say so.
+- **Airflow renders `{{ ... }}` in a `bash_command` before transformer sees
+  it.** An `--output` path holding transformer's `{{ today }}` arrives with
+  Airflow's value instead (or empty, since Airflow has no `today`). Use
+  Airflow's own `{{ ds_nodash }}` in the command line. Templates inside the
+  job directory (`config.json`, `main.sql`, `output.json`) are never seen by
+  Airflow, so they are unaffected.
 - **`TaskDag` / `TaskDagNode` are public** despite living next to runner
   internals — the GUI needs them to render structure without re-implementing
   the analyzer. Don't accidentally narrow visibility when refactoring.

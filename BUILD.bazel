@@ -1,2 +1,24 @@
 # Root build file for transformer project.
-# This file marks the root of the Bazel build.
+load("@rules_scala//scala:scala.bzl", "scala_binary")
+
+# The one jar a user needs: `bazel build //:transformer_deploy.jar`, then
+# `java -jar bazel-bin/transformer_deploy.jar run <jobDir>` (headless) or
+# `... gui [jobDir]` (desktop GUI). See README.md "Command line".
+scala_binary(
+    name = "transformer",
+    main_class = "com.transformer.cli.TransformerMain",
+    # Scale the heap to the machine, as the GUI launcher does. `java -jar
+    # transformer_deploy.jar` bypasses this; pass -Xmx explicitly there.
+    jvm_flags = ["-XX:MaxRAMPercentage=75.0"],
+    deps = [
+        "//src/main/scala/com/transformer/cli:main",
+        # JavaFX classes live in the platform classifier jars; ship mac and
+        # Windows so `gui` works on both, as //examples/gui_app does for mac.
+        "@maven//:org_openjfx_javafx_base_mac_aarch64",
+        "@maven//:org_openjfx_javafx_base_win",
+        "@maven//:org_openjfx_javafx_controls_mac_aarch64",
+        "@maven//:org_openjfx_javafx_controls_win",
+        "@maven//:org_openjfx_javafx_graphics_mac_aarch64",
+        "@maven//:org_openjfx_javafx_graphics_win",
+    ],
+)

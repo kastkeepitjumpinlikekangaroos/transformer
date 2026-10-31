@@ -63,6 +63,11 @@ bazel test  //...                     # run every junit target
 bazel test  //src/test/scala/com/transformer/sql/...   # just the SQL tests
 bazel build //src/main/scala/com/transformer/<module>:<name>   # one module
 
+# The product jar: `run <jobDir>` headless, `gui [jobDir]` desktop.
+bazel build //:transformer_deploy.jar
+java -Xmx2g -jar bazel-bin/transformer_deploy.jar run examples/jaffle_shop/job \
+    --output /tmp/transformer-jaffle-out --execution-time 2026-01-01T00:00:00Z
+
 # Build the example deploy jars.
 bazel build //examples/scala_app:example_job_deploy.jar
 java -jar bazel-bin/examples/scala_app/example_job_deploy.jar \
@@ -84,8 +89,8 @@ bazel build //examples/polymarket:polymarket_deploy.jar
 java -Xmx12g -jar bazel-bin/examples/polymarket/polymarket_deploy.jar \
     [examples/polymarket/job] [/tmp/transformer-polymarket-out] [executionTime]
 # 17-task pipeline over the Polymarket tick-level orderbook Kaggle dataset
-# (~140M parquet rows across 5 inputs). One branch is intentionally constructed
-# to ValidationFail and block its downstream — launcher exits 0 iff that exact
+# (~166M rows staged from 5 parquet inputs, ~90 s on an 8-core M4). Two branches
+# are expected to ValidationFail, one blocking its downstream — launcher exits 0 iff that exact
 # pattern holds. Needs `~/Downloads/archive/` dataset checkout.
 
 # Build + launch the JavaFX GUI. Prefer the wrapper script over the deploy_jar
@@ -158,6 +163,7 @@ manifest that could not reach a Failed or Skipped task's `_run.json` — and, re
 | `job/json_test` | The stdlib JSON parser in `job/Json.scala` — scalars, escapes, nested objects, arrays, type errors, trailing content, scalar→string coercion for the option map; **`Json.escape` writes any string as JSON text UTF-8 holds and `parse` reads back unchanged**: every control character, a surrogate pair as itself, and half of one or a reversed pair as `\u` escapes (written raw, half a pair failed the whole file's write) |
 | `job/directory_job_loader_test` | End-to-end `DirectoryJobLoader.load(...)`: basic run, relative vs absolute input paths, validations dir (success + failure), templated input paths + outputDir, alphabetical chaining, default outputDir, JSON scalar→option-map coercion, error cases (no/multiple `.json`, missing `main.sql`, missing jobDir), **per-table `output.json` `partitionBy` extends output path, absent leaves path unchanged, malformed throws**, **default `jobRunOutput` lands at `<outputDir>/job.json`** |
 | `job/job_output_layout_test` | `JobOutputLayout.detect`: SingleRun when `<dir>/job.json` is a direct child, MultiRun when `<dir>/<sub>/job.json` is present (sorted newest-first by `finishedAt`), Empty for dirs lacking either, skips subdirs without job.json, ignores malformed manifests, **runs finished inside one millisecond still list newest first** (the sort reads the whole `finishedAt`, so a tie is not left to the directory listing's order) |
+| `cli/cli_test` | The `transformer` command line without JavaFX. Parsing: no args / `help` / `-h` print help; `run` defaults `--output` to none and the execution time to now truncated to whole seconds; flags in any order; missing value, repeated flag, unknown option, a second job dir and a non-ISO instant are usage errors with their message; `gui` takes at most one dir; an unknown command is refused. Running: a passing job exits 0, prints `Job SUCCEEDED (1 Succeeded)` and writes `job.json` and `_run.json` under the templated `--output`; a failing validation exits 1 and names the validation and its row count; a missing job dir and an unloadable job (an input dir with no `.json`) exit 1 with the reason on stderr. |
 | `gui/sql_highlighter_test` | The pure-Scala SQL tokenizer in `gui/SqlHighlighter.scala` — null/empty input, case-insensitive keywords + functions, identifier classification, integer/decimal/scientific numerics, single-quoted strings with `''` escape + unterminated, line / block / unclosed-block comments, top-level `{{ template }}` tokens, template inside a string stays a string, punctuation tagging, full SELECT query round-trips losslessly, line splitting preserves content + handles block comments spanning lines, **window-function keywords (OVER/PARTITION/ROWS/UNBOUNDED/PRECEDING/CURRENT/ROW) and RANK as a function** |
 | `gui/result_persister_test` | Interactive-SQL persist path: one part file per source partition with `_run.json` record stamping status=Succeeded + the right row count + format + file list, `csvHeader=false` toggle, `maxPartitions=Some(1)` coalesces multiple partitions into a single part file, unknown format rejected |
 | `gui/dag_layout_test` | `DagLayout.compute` with no JavaFX on the classpath (`gui:session` alone): an empty DAG, tasks only (the layering the canvas always used), inputs laid out as layer zero beside the tasks that read them, input names matched case-insensitively, and the `TaskDagNode` input deps the layout reads, including those a validation's SQL adds |
@@ -175,7 +181,8 @@ so both tests (and `gui/dag_layout_test`) run without the toolkit's jars. The
 panels that render what the session holds (`SqlView`, `TaskDetailsPanel`,
 `ResultsTabPane`, `DagCanvas`, etc.) have no JUnit tests — they're thin UI over
 the session and the engine APIs. Smoke-test them by launching
-`bazel-bin/examples/gui_app/gui_app_deploy.jar` and pointing it at a job dir.
+`java -jar bazel-bin/transformer_deploy.jar gui <job-dir>` (or
+`bazel-bin/examples/gui_app/gui_app_deploy.jar`).
 
 ## Property-based testing (fuzz)
 

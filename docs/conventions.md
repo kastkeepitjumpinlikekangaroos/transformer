@@ -49,6 +49,16 @@ specific traps.
   harness depend on `gui:session` precisely so they run without the toolkit, and
   a fuzz target never takes a JavaFX dependency. State a panel needs from a
   toolkit type stays in the panel.
+- **The CLI's logic stays out of the entry point.** `cli/Cli.scala` (parsing,
+  the headless run, exit codes) has no JavaFX dependency, and `cli_test`
+  drives it with captured streams. `TransformerMain` only dispatches: `gui` to
+  `GuiApp`, everything else to `Cli`, then calls `System.exit`. A new
+  subcommand goes into `Cli.parse` and gets its own test, not a branch in
+  `main`.
+- **`site/` is user documentation.** Its commands, CLI output samples and
+  benchmark numbers make the same claims as README. Update both together, and
+  quote output and timings from a real run (with machine and date) rather than
+  writing them by hand.
 - **Never use Calcite, DuckDB, or any other embedded SQL engine.** JSqlParser
   is the only SQL dep, and only as an AST source. The whole point of the
   project is that the planner + executor are hand-built — see the opening

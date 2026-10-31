@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>transformer setup</title>
+  <meta name="description" content="Install Java 21, build the transformer jar, and run the jaffle-shop example pipeline from the CLI and the GUI.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="logo" href="index.html">transformer<span>_</span></a>
+    <nav>
+      <a href="index.html">Home</a>
+      <a href="setup.html" aria-current="page">Setup</a>
+      <a href="https://github.com/kastkeepitjumpinlikekangaroos/transformer">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <div class="wrap hero" style="padding-bottom:40px">
+    <p class="eyebrow">Setup</p>
+    <h1>From zero to a running pipeline</h1>
+    <p class="lede">
+      You'll install Java, build the jar, and run the jaffle-shop example: a
+      port of dbt Labs' reference project with 6 CSV sources, 15 tables, and
+      26 data-quality tests over about 150k rows. It takes about 10 minutes,
+      and most of that is the first build.
+    </p>
+  </div>
+
+  <section style="padding-top:24px">
+    <div class="wrap steps">
+
+      <div class="step">
+        <h3>Install Java 21</h3>
+        <p class="muted">
+          Java is the only thing transformer needs at runtime. It's built and
+          tested on <strong>Java 21 (LTS)</strong>. A JDK or a JRE will do.
+        </p>
+        <div class="scroll-x">
+        <table class="plain">
+          <thead><tr><th>Platform</th><th>Install</th></tr></thead>
+          <tbody>
+            <tr><td>macOS</td><td><code>brew install openjdk@21</code></td></tr>
+            <tr><td>Debian / Ubuntu</td><td><code>sudo apt install openjdk-21-jre-headless</code></td></tr>
+            <tr><td>Windows</td><td>Install Eclipse Temurin 21 from <a href="https://adoptium.net/temurin/releases/?version=21">adoptium.net</a></td></tr>
+          </tbody>
+        </table>
+        </div>
+<pre class="term"><span class="p">$ </span>java -version
+openjdk version "21.0.6" 2025-01-21 LTS</pre>
+        <div class="note">
+          <p>
+            The headless <code>run</code> command works on any OS with Java 21.
+            The desktop GUI bundles JavaFX for <strong>macOS on Apple
+            Silicon</strong> and <strong>Windows</strong>. On Linux, use the CLI.
+          </p>
+        </div>
+      </div>
+
+      <div class="step">
+        <h3>Build the jar</h3>
+        <p class="muted">
+          transformer builds with Bazel. Install
+          <a href="https://github.com/bazelbuild/bazelisk">Bazelisk</a>
+          (<code>brew install bazelisk</code> on macOS), which picks up the
+          Bazel version pinned in the repo. Bazel downloads its own JDK and
+          every library it needs.
+        </p>
+<pre class="term"><span class="p">$ </span>git clone https://github.com/kastkeepitjumpinlikekangaroos/transformer.git
+<span class="p">$ </span>cd transformer
+<span class="p">$ </span>bazel build //:transformer_deploy.jar
+<span class="p">$ </span>cp bazel-bin/transformer_deploy.jar transformer.jar</pre>
+        <p class="muted">
+          <code>transformer.jar</code> is self-contained: the SQL engine, the
+          CSV and Parquet readers and writers, and the GUI are all inside. Copy
+          it to any machine with Java 21 and it runs there.
+        </p>
+      </div>
+
+      <div class="step">
+        <h3>Run the jaffle-shop example</h3>
+        <p class="muted">
+          The example lives in <code>examples/jaffle_shop/job</code>. Run it
+          headless:
+        </p>
+<pre class="term"><span class="p">$ </span>java -Xmx2g -jar transformer.jar run examples/jaffle_shop/job \
+    --output /tmp/jaffle-out --execution-time 2026-01-01T00:00:00Z
+Job:            /path/to/transformer/examples/jaffle_shop/job
+Execution time: 2026-01-01T00:00:00Z
+Inputs:         6
+Tables:         15
+
+  Succeeded        stg_supplies                 rows=65            783 ms
+  Succeeded        stg_customers                rows=935           757 ms
+  Succeeded        stg_orders                   rows=61948         474 ms
+  Succeeded        stg_order_items              rows=90900         234 ms
+  Succeeded        order_items                  rows=90900         382 ms
+  Succeeded        orders                       rows=61948         248 ms
+<span class="c">  ...</span>
+  Succeeded        customers                    rows=935            50 ms
+
+<span class="ok">Job SUCCEEDED (15 Succeeded)</span></pre>
+        <p class="muted">
+          The whole run takes about two seconds. The command exits
+          <code>0</code> when every task and validation passes, <code>1</code>
+          when anything fails, and <code>2</code> when the arguments are wrong.
+          Leave out <code>--output</code> to write to
+          <code>&lt;jobDir&gt;/output</code>, and leave out
+          <code>--execution-time</code> to use the current time.
+        </p>
+        <p class="muted">Each table gets its own output directory, and the run's summary goes in <code>job.json</code>:</p>
+<pre class="tree"><span class="d">/tmp/jaffle-out/</span>
+  <span class="f">job.json</span>                 <span class="c">every task's status, rows, timings, failed validations</span>
+  <span class="d">customers/</span>
+    <span class="f">part-00000.parquet</span>
+    <span class="f">_run.json</span>              <span class="c">this task's full run record</span>
+  <span class="d">orders/</span>
+  <span class="d">stg_orders/</span>
+  <span class="c">...</span></pre>
+      </div>
+
+      <div class="step">
+        <h3>Open it in the GUI</h3>
+<pre class="term"><span class="p">$ </span>java -jar transformer.jar gui examples/jaffle_shop/job</pre>
+        <p class="muted">
+          The GUI draws the DAG of inputs and tables. Set the execution time
+          and output directory, then press <strong>Run</strong> (Cmd/Ctrl+R) to
+          watch each task go from queued to running to done. Double-click a
+          table to preview its rows, open its validations, or query any
+          output from the SQL console. Use the run picker to reopen a previous
+          run exactly as it finished.
+          <strong>File &rarr; New Project</strong> starts an empty project, and
+          the Add Input and Add Table menus create the directories for you.
+        </p>
+      </div>
+
+      <div class="step">
+        <h3>Read the project</h3>
+        <p class="muted">The project is ordinary files. An input is one JSON config, and relative paths resolve against the job directory:</p>
+        <p class="code-label">inputs/raw_orders/config.json</p>
+<pre>{ "path": "data/raw_orders.csv" }</pre>
+        <p class="muted">A table is one <code>SELECT</code>. The directory name is the table name that other queries refer to:</p>
+        <p class="code-label">tables/stg_orders/main.sql</p>
+<pre><span class="k">SELECT</span>
+  id          <span class="k">AS</span> order_id,
+  store_id    <span class="k">AS</span> location_id,
+  customer    <span class="k">AS</span> customer_id,
+  subtotal    <span class="k">AS</span> subtotal_cents,
+  tax_paid    <span class="k">AS</span> tax_paid_cents,
+  order_total <span class="k">AS</span> order_total_cents,
+  <span class="k">CAST</span>(order_total <span class="k">AS DOUBLE</span>) / 100 <span class="k">AS</span> order_total,
+  ordered_at
+<span class="k">FROM</span> raw_orders</pre>
+        <p class="muted">
+          Downstream tables just reference upstream ones. The <code>orders</code>
+          table joins <code>stg_orders</code> to <code>order_items_summary</code>,
+          and transformer waits for both before running it. An optional
+          <code>output.json</code> sets the format or a per-run partition:
+        </p>
+        <p class="code-label">tables/orders/output.json</p>
+<pre>{ "format": "parquet" }</pre>
+        <p class="code-label">tables/customers/validations/customer_type_accepted_values.sql</p>
+<pre><span class="c">-- A validation passes when it returns zero rows.</span>
+<span class="k">SELECT</span> customer_id, customer_type
+<span class="k">FROM</span> customers
+<span class="k">WHERE</span> customer_type <span class="k">NOT IN</span> (<span class="c">'new'</span>, <span class="c">'returning'</span>)</pre>
+        <p class="muted">
+          Time variables work in SQL and paths alike.
+          <code>'{{ today }}' AS exec_date</code> in <code>customers/main.sql</code>
+          becomes <code>'20260101'</code> for the run above.
+        </p>
+      </div>
+
+      <div class="step">
+        <h3>Break it on purpose</h3>
+        <p class="muted">
+          To see what a failure looks like, change
+          <code>'returning'</code> to <code>'repeat'</code> in
+          <code>tables/customers/main.sql</code> and run again:
+        </p>
+<pre class="term">  ValidationFailed customers                    rows=935            55 ms
+    validation 'customer_type_accepted_values' returned 929 row(s)
+
+Job FAILED (1 ValidationFailed, 14 Succeeded)</pre>
+        <p class="muted">
+          The table is still written, so you can inspect it. A sample of the
+          failing rows lands in
+          <code>customers/_validation-customer_type_accepted_values.csv</code>,
+          and any table downstream of a failed one is skipped. Revert the edit
+          and the job passes again.
+        </p>
+      </div>
+
+      <div class="step">
+        <h3>Start your own project</h3>
+        <p class="muted">
+          Copy <code>examples/jaffle_shop/job</code>, or use
+          <strong>File &rarr; New Project</strong> in the GUI. Then point your
+          inputs at your own CSV or Parquet files, either a single file or a
+          glob such as <code>/data/events/*.parquet</code>. If you work with a
+          coding agent, give it the job directory and the commands on this
+          page:
+        </p>
+<pre>This is a transformer project (examples/jaffle_shop/job is a reference).
+Inputs live in inputs/&lt;name&gt;/config.json, tables in tables/&lt;name&gt;/main.sql,
+tests in tables/&lt;name&gt;/validations/*.sql (pass = zero rows).
+Run with: java -jar transformer.jar run &lt;jobDir&gt; --output &lt;dir&gt;
+It exits 0 only when everything passes; failures are in &lt;dir&gt;/job.json.</pre>
+        <p class="muted">
+          The <a href="https://github.com/kastkeepitjumpinlikekangaroos/transformer#readme">README</a>
+          covers the full SQL surface, CSV and Parquet options, templating
+          variables, and run records.
+        </p>
+      </div>
+
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>transformer: a single-node SQL pipeline engine in Scala</span>
+    <a href="index.html">Home</a>
+    <a href="https://github.com/kastkeepitjumpinlikekangaroos/transformer">Source</a>
+  </div>
+</footer>
+
+</body>
+</html>

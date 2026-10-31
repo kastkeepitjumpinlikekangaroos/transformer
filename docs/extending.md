@@ -182,7 +182,7 @@ To accept a new field in an input JSON config:
 2. Read it via the `JsonObject` accessors (`requiredString`, `optString`,
    `optBool`, `optStringMap`) inside `loadInputs` in `DirectoryJobLoader.scala`.
 3. Test it in `DirectoryJobLoaderTest`.
-4. Update the schema in [`README.md`'s "Defining jobs from a directory"](../README.md#defining-jobs-from-a-directory).
+4. Update the schema in [`README.md`'s "Defining a pipeline"](../README.md#defining-a-pipeline).
 
 For per-table config there's an optional `tables/<viewName>/output.json`
 (`loadOutputConfig` reads it). Supported fields:

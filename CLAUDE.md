@@ -47,7 +47,10 @@ the same commit as the code. After a change, walk this list and revise where
 needed:
 
 - [`README.md`](README.md) — user-visible features, limitations, SQL surface,
-  file format support, templating variables.
+  file format support, templating variables, CLI commands.
+- [`site/`](site/) — the project website (`index.html`, `setup.html`). Same
+  audience as README: update its commands, sample output and benchmark
+  numbers when they change.
 - [`docs/architecture.md`](docs/architecture.md) — module map (new files),
   cross-cutting patterns (new operators, hooks, batching invariants).
 - [`docs/conventions.md`](docs/conventions.md) — new patterns established by
@@ -64,10 +67,12 @@ A change that adds a feature without updating user docs is not done.
 
 ## Where to look for what
 
-- [README.md](README.md) — user-facing intro. Status, quick start, programmatic
-  example, directory-loader layout, run markers, GUI overview, supported file
-  formats, SQL features, temporal templating, limitations. Start here for
+- [README.md](README.md) — user-facing intro. Quick start, pipeline layout,
+  the `transformer` CLI (`run` / `gui`) and scheduling, working with agents,
+  GUI, run records, supported file formats, SQL features, temporal
+  templating, examples, embedding in Scala, limitations. Start here for
   anything user-visible.
+- [site/](site/) — the static project website (home + setup pages).
 - [docs/README.md](docs/README.md) — index of contributor docs (the files
   below).
 - [docs/architecture.md](docs/architecture.md) — mental model, module map,

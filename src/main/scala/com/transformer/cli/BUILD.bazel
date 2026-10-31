@@ -1,0 +1,29 @@
+load("@rules_scala//scala:scala.bzl", "scala_library")
+
+# The `transformer` command line without the GUI: argument parsing and the
+# headless `run` command. No JavaFX, so a test drives it directly.
+scala_library(
+    name = "cli",
+    srcs = ["Cli.scala"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/temporal",
+    ],
+)
+
+# The entry point of the single deploy jar (//:transformer): dispatches `gui`
+# to JavaFX and every other command to :cli.
+scala_library(
+    name = "main",
+    srcs = ["TransformerMain.scala"],
+    visibility = ["//:__pkg__"],
+    deps = [
+        ":cli",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/gui",
+        "//src/main/scala/com/transformer/sql/exec",
+    ],
+)

@@ -1,195 +1,96 @@
 # transformer
 
-A Scala library for building standalone JVM ETL jobs. Read data from disparate
-sources into memory, run SQL transforms with a built-in parallel execution
-engine, write to disparate destinations. Inspired by Apache Spark's batch SQL
-model but with no Spark dependency — the SQL parser, logical planner, physical
-planner, and executor are all in this repo.
+**SQL data pipelines in a single jar.** A transformer project is a folder:
+one directory per input, one `main.sql` per table, and data-quality tests as
+SQL files next to the table they check. One jar runs it from the command line
+or opens it in a desktop GUI. You don't need a warehouse, a cluster, or a
+Python environment, only Java 21.
 
-Compiles to a self-contained deploy jar via Bazel + rules_scala. Memory and CPU
-are scaled by giving the JVM more hardware; the library is designed for
-single-node parallelism, not distributed execution.
+- **One dependency.** The SQL parser, logical and physical planner, and
+  parallel executor are all built into transformer. There's no Spark, Calcite,
+  DuckDB, or database behind it. It reads and writes CSV and Parquet. Any
+  machine with Java 21 can run a pipeline: a laptop, a CI runner, an Airflow
+  worker, or a container.
+- **Fast iteration.** Edit a `.sql` file and rerun. The 15-table jaffle-shop
+  example (about 150k rows, 26 data tests) finishes in about two seconds,
+  JVM startup included.
+- **Agent first.** Every project has the same fixed layout of plain files.
+  The CLI reports through exit codes, and every run writes JSON run records.
+  A coding agent such as Claude Code can scaffold a pipeline, run it, read
+  what failed, and fix it, all on the local machine.
+- **Fast on big data.** The polymarket example stages 166M rows from a 39 GB
+  Parquet dataset, then builds 17 tables and runs 59 validations in 90
+  seconds on one Apple M4 (8 cores, 16 GB). See
+  [Heavy-load example: polymarket](#heavy-load-example-polymarket).
 
-## Status
-
-**v1 (this release):**
-
-- Local CSV read/write (folder or glob, schema inference)
-- Local Parquet read/write (snappy, all primitive types)
-- Full SQL: SELECT, WHERE, JOIN (INNER/LEFT/RIGHT/FULL), GROUP BY, HAVING,
-  ORDER BY, LIMIT/OFFSET, DISTINCT, UNION/UNION ALL, CTEs (`WITH`), CASE, CAST, scalar functions
-- DBT-style data-quality validations
-- Jinja-style temporal templating in SQL and output paths
-- Per-task path-template partitioning (one partition per run keyed off the
-  job's execution time), with per-task `_run.json` records that capture
-  status, timings, validation results, and failure samples — plus a
-  per-job `job.json` manifest referencing all task records
-- Two ways to define a job: programmatic (`DataJob(...)`) or directory-driven
-  (`DirectoryJobLoader.load(dir)`)
-- A JavaFX GUI for browsing a job directory, editing execution time + output
-  dir, running the pipeline with live per-task status, and inspecting past
-  runs via a partition picker
-- Bazel-deployable example apps (programmatic, directory-driven, GUI launcher)
-
-**v1.1 (planned):** `gs://` and `s3://` paths. The `InputFilePath` /
-`OutputFilePath` API already accepts them; today they raise a clear
-`UnsupportedOperationException` with the cache directory already wired up.
-
-## Documentation
-
-This README is the user-facing intro. For deeper material — architecture,
-extension recipes, conventions, gotchas — see the [docs/](docs/) directory:
-
-- [docs/architecture.md](docs/architecture.md) — mental model, module map,
-  cross-cutting patterns.
-- [docs/conventions.md](docs/conventions.md) — Scala / Bazel / docs
-  conventions.
-- [docs/extending.md](docs/extending.md) — how to add SQL functions, file
-  formats, GUI panels, etc.
-- [docs/gotchas.md](docs/gotchas.md) — known pitfalls and what's intentionally
-  not done.
-- [docs/testing.md](docs/testing.md) — build/test commands and the test
-  inventory.
-- [docs/code-map.md](docs/code-map.md) — file-size hot spots and external
-  reference material.
-
-Future Claude sessions should also read [CLAUDE.md](CLAUDE.md), which links
-back here and into `docs/`.
+The project website lives in [`site/`](site/). Open `site/index.html` in a
+browser; it is static HTML with no build step.
 
 ## Quick start
 
+You need **Java 21** (JDK or JRE) to run transformer. To build the jar you
+also need [Bazelisk](https://github.com/bazelbuild/bazelisk), which fetches
+the pinned Bazel version and its own build JDK.
+
 ```bash
-# Build + test everything.
-bazel test //...
+# Build the single deploy jar.
+bazel build //:transformer_deploy.jar
+cp bazel-bin/transformer_deploy.jar transformer.jar
 
-# Programmatic example: read 2 CSVs, join, aggregate, validate, write.
-bazel build //examples/scala_app:example_job_deploy.jar
-java -jar bazel-bin/examples/scala_app/example_job_deploy.jar \
-    examples/scala_app/data/input \
-    /tmp/transformer-example-out
+# Run the jaffle-shop example headless. Exits 0 when every task and
+# validation passes.
+java -Xmx2g -jar transformer.jar run examples/jaffle_shop/job \
+    --output /tmp/jaffle-out --execution-time 2026-01-01T00:00:00Z
 
-# Directory-driven example (DBT-style): same shape, defined as a folder.
-# Optional 3rd arg = ISO instant for executionTime — re-run with different
-# values to produce multiple partitioned outputs for the GUI to browse.
-bazel build //examples/directory_app:directory_example_deploy.jar
-java -jar bazel-bin/examples/directory_app/directory_example_deploy.jar \
-    examples/directory_app/job \
-    /tmp/transformer-directory-out \
-    2026-01-01T05:30:21Z
-
-# JavaFX GUI: visualize the DAG, edit execution time + output dir, Run,
-# inspect persisted runs.
-bazel build //examples/gui_app:gui_app_deploy.jar
-java -jar bazel-bin/examples/gui_app/gui_app_deploy.jar \
-    examples/directory_app/job
-
-# Heavy-load example: a 17-task pipeline over the Polymarket tick-level
-# orderbook dataset. Reads ~85M parquet rows across 5 inputs (a 6-hour slice
-# of one orderbook day, 21 days of snapshots, full features/trades/markets),
-# writes 17 parquet outputs, runs 58 validations, and intentionally fails one
-# branch to exercise the "failed validation blocks downstream" scheduler path.
-# ~5 min on a fast Mac with -Xmx12g; needs the dataset at `~/Downloads/archive/`.
-bazel build //examples/polymarket:polymarket_deploy.jar
-java -Xmx12g -jar bazel-bin/examples/polymarket/polymarket_deploy.jar \
-    examples/polymarket/job \
-    /tmp/transformer-polymarket-out \
-    2026-03-26T00:00:00Z
+# Open the same project in the desktop GUI.
+java -jar transformer.jar gui examples/jaffle_shop/job
 ```
 
-The programmatic example reads two CSVs, joins them, aggregates spend per user
-tier with a templated output path (`day=20260101/`), runs a validation, and
-exits 0. The directory example is the same job re-expressed as a folder of
-JSON configs and SQL files — see
-[Defining jobs from a directory](#defining-jobs-from-a-directory). The GUI is
-a thin reader over either layout; see [GUI](#gui). The polymarket example is
-described in [Heavy-load example: polymarket](#heavy-load-example-polymarket).
+The run prints one line per task as it finishes and ends with
+`Job SUCCEEDED (15 Succeeded)`. `/tmp/jaffle-out/` then holds one directory
+per table (`part-*.parquet` plus a `_run.json` record) and a `job.json`
+summary of the whole run.
 
-## Example usage
+The website's [setup page](site/setup.html) walks through the same steps,
+then shows how to read the jaffle-shop project and how to break a
+validation on purpose.
 
-```scala
-import com.transformer.job._
-import com.transformer.temporal.TemporalVariables
-import java.time.Instant
+## Defining a pipeline
 
-val job = DataJob(
-  temporalVariables = Some(TemporalVariables(Instant.parse("2026-01-01T05:30:21Z"))),
-  inputs = Seq(
-    InputFilePath("data/events/*.csv", viewName = "events"),
-    InputFilePath("data/users.parquet", viewName = "users")
-  ),
-  sql = Seq(
-    SQLTask(
-      name      = Some("enrich"),
-      sqlString = Some(
-        """SELECT e.user_id, u.name, u.tier, e.event, e.amount
-          |FROM events e
-          |LEFT JOIN users u ON e.user_id = u.user_id
-          |""".stripMargin),
-      outputFile = Some(OutputFilePath("out/day={{ today }}/enriched.csv")),
-      viewName   = Some("enriched")
-    ),
-    SQLTask(
-      name      = Some("spend_by_tier"),
-      sqlString = Some(
-        """SELECT tier, COUNT(*) AS n, SUM(amount) AS total
-          |FROM enriched
-          |WHERE event = 'buy'
-          |GROUP BY tier
-          |ORDER BY tier
-          |""".stripMargin),
-      outputFile = Some(OutputFilePath("out/day={{ today }}/spend_by_tier.parquet")),
-      validations = Seq(
-        Validation(
-          name      = "no_null_tiers",
-          sqlString = Some("SELECT * FROM result WHERE tier IS NULL")
-        )
-      )
-    )
-  )
-)
-
-val result = job.run()
-if (!result.succeeded) sys.exit(1)
-```
-
-A task's `outputFile` is optional. Set it and the result is persisted, and any
-downstream task or validation reads it back from disk. Leave it out and the task
-is a **memory-only feeder**: it still registers its `viewName` for downstream
-tasks and validations, but the result is held in heap for the rest of the run
-instead of being written — useful for an intermediate step whose output nobody
-needs on disk, at the cost of keeping it in memory (the same trade a cached
-input or a multiply-referenced CTE makes).
-
-`DataJob.run()` returns a `JobResult` describing per-task status, row counts,
-durations, and any warnings (see [Per-job `job.json`](#per-job-jobjson));
-`succeeded` is true iff every task succeeded. If a validation fails the
-corresponding task is marked `ValidationFailed`, its output is persisted
-regardless (for debugging), and a sample of failing rows is written to
-`_validation-<name>.csv` next to that task's `_run.json` — see [Run
-records](#run-records-and-historical-runs) below.
-
-## Defining jobs from a directory
-
-For lighter-weight DBT-style projects you can express the whole job as a
-directory tree and skip the Scala builder. Point `DirectoryJobLoader` at a job
-directory and it returns the same `DataJob` you'd otherwise build by hand.
-
-### Expected layout
+A pipeline (a "job") is a directory:
 
 ```
 <jobDir>/
   inputs/
     <viewName>/
-      <any>.json                  # InputFilePath config (exactly one .json file)
+      config.json                 # where the input lives (exactly one .json file)
   tables/
     <viewName>/
       main.sql                    # required: the SELECT for this table
-      validations/                # optional
+      output.json                 # optional: format, partitioning, options
+      validations/                # optional data-quality tests
         <validationName>.sql
 ```
 
-Directory names become catalog view names. Each `inputs/<viewName>/` contains
-exactly one `.json` file whose fields match `InputFilePath`:
+Directory names become the view names that SQL refers to. A table's
+`main.sql` reads inputs and other tables by name:
+
+```sql
+-- tables/orders/main.sql
+SELECT o.order_id, o.customer_id, o.order_total, s.count_order_items
+FROM stg_orders o
+LEFT JOIN order_items_summary s ON o.order_id = s.order_id
+```
+
+You never declare run order. transformer builds a DAG from each table's
+references and runs independent branches in parallel. Directories are listed
+alphabetically, but that order is only a declared index. Numeric prefixes
+(`01_raw/`, `02_clean/`) are fine for readability.
+
+### Inputs
+
+Each `inputs/<viewName>/` holds exactly one `.json` file whose fields match
+`InputFilePath`:
 
 ```json
 {
@@ -200,145 +101,221 @@ exactly one `.json` file whose fields match `InputFilePath`:
 }
 ```
 
-The directory name is the view name — don't set `viewName` in the JSON (a
-`viewName` field there is silently ignored). Relative `path` values are
-resolved against the job directory; absolute paths and cloud URLs (`gs://`,
-`s3://`) are passed through unchanged. Template variables (`{{ today }}`,
-etc.) inside `path` are expanded at run time.
+Only `path` is required. The format is inferred from the extension, and the
+path can be a single file or a glob (`/data/events/*.parquet`). Relative paths
+resolve against the job directory, and absolute paths are used as-is. Template
+variables (`{{ today }}`, etc.) inside `path` are expanded at run time. The
+directory name is the view name. A `viewName` field in the JSON is ignored.
+Format options are in [Supported file formats](#supported-file-formats).
 
-Listing order is alphabetical for predictability, but it does NOT constrain
-run order — `DataJob` builds a DAG from each task's SQL and runs independent
-branches in parallel. The order only matters as a *declared index*. Use
-numeric prefixes (`01_raw/`, `02_clean/`) for human-readable grouping.
+### Validations
+
+A validation is a SQL file in the table's `validations/` directory, written
+DBT-style: it **passes when it returns zero rows**. It queries the table by
+name:
+
+```sql
+-- tables/customers/validations/customer_type_accepted_values.sql
+SELECT customer_id, customer_type
+FROM customers
+WHERE customer_type NOT IN ('new', 'returning')
+```
+
+When a validation returns rows, the table is marked `ValidationFailed`. Its
+output is still written so you can inspect it, a sample of the failing rows
+goes to `_validation-<name>.csv` next to the output, and every table
+downstream of it is `Skipped`.
 
 ### Per-table output config (optional)
 
-Each table can carry an optional `tables/<viewName>/output.json` for
-table-level output settings. Today the only supported field is `partitionBy`:
+`tables/<viewName>/output.json` holds table-level output settings:
 
 ```json
-{ "partitionBy": "day={{today}}" }
+{ "format": "parquet", "partitionBy": "day={{today}}" }
 ```
 
-When present, the task's output path becomes
-`<outputDir>/<viewName>/<partitionBy>` — so the example above lands at
-`<outputDir>/<viewName>/day=20260101/part-NNNNN.csv` for an execution time of
-Jan 1 2026. Running the same job at a different execution time produces a
-sibling `day=20260102/` partition; both stay on disk and the GUI's run picker
-sees them as historical runs of the same task.
+- `format`: `csv` (the default) or `parquet`.
+- `partitionBy`: a templated subdirectory. With it, the output goes to
+  `<outputDir>/<viewName>/<partitionBy>`, so the example above writes to
+  `<outputDir>/<viewName>/day=20260101/part-NNNNN.parquet` for an execution
+  time on Jan 1 2026. A run at another execution time writes a sibling
+  `day=20260102/`. Both stay on disk, and the GUI's run picker shows them as
+  historical runs of the table.
+- `options`: per-task engine options, such as spill-to-disk (see
+  [Limitations](#limitations)) and metrics (see
+  [Performance instrumentation](#performance-instrumentation)).
 
-### Loading and running
+## Command line
 
-```scala
-import com.transformer.job.DirectoryJobLoader
-import com.transformer.temporal.TemporalVariables
-import java.nio.file.Paths
-import java.time.Instant
+The `transformer` deploy jar (`bazel build //:transformer_deploy.jar`) is the
+whole product: the engine, the CSV and Parquet readers and writers, and the
+GUI.
 
-val job = DirectoryJobLoader.load(
-  jobDir            = Paths.get("examples/directory_app/job"),
-  outputDir         = Some("/tmp/transformer-directory-out/day={{ today }}"),
-  temporalVariables = Some(TemporalVariables(Instant.parse("2026-01-01T05:30:21Z")))
+```
+transformer run <jobDir> [--output <dir>] [--execution-time <instant>]
+transformer gui [jobDir]
+transformer help
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--output <dir>` | `<jobDir>/output` | Where every table's output and `job.json` go. Templated, e.g. `/data/out/day={{ today }}`. |
+| `--execution-time <instant>` | now | ISO-8601 instant that every `{{ ... }}` template resolves against, e.g. `2026-01-01T00:00:00Z` (an offset such as `+00:00` also works). |
+
+`run` exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | Every task succeeded and every validation passed. |
+| `1` | A task failed, failed a validation, or was skipped; or the job could not be loaded. |
+| `2` | Bad arguments. |
+
+`run` prints one line per task as it finishes (status, rows, duration, and
+the reason when it did not succeed), then any warnings, then a summary such
+as `Job FAILED (1 ValidationFailed, 14 Succeeded)`. For the machine-readable
+version, read `<output>/job.json` (see
+[Run records](#run-records-and-historical-runs)).
+
+`java -jar` uses the JVM's default heap, which is often too small for real
+workloads. Pass `-Xmx` (e.g. `-Xmx2g` for jaffle-shop, `-Xmx12g` for
+polymarket) or `-XX:MaxRAMPercentage=75.0`. The `bazel-bin/transformer` wrapper
+script that `bazel build //:transformer` produces sets the latter for you.
+
+### Scheduling (Airflow, cron, CI)
+
+A scheduled run is one shell command. Pass the scheduler's logical time as
+`--execution-time` so that `{{ today }}` in your SQL and paths names the
+run's date, and reruns and backfills write to the right partition:
+
+```python
+BashOperator(
+    task_id="jaffle_shop",
+    bash_command=(
+        "java -Xmx4g -jar /opt/transformer.jar run /opt/jobs/jaffle_shop "
+        "--output /data/jaffle/day={{ ds_nodash }} "
+        "--execution-time {{ ts }}"
+    ),
 )
-
-val result = job.run()
 ```
 
-`outputDir` is templated like any output path. Each table writes to
-`<outputDir>/<viewName>/part-NNNNN.csv` (the loader passes `format = Some("csv")`
-explicitly so the per-table directory stays clean) and is registered in the
-catalog so subsequent tables can reference it. If you don't pass `outputDir`
-the default is `<jobDir>/output/`. To partition a table's output per run, see
-[Per-table output config (optional)](#per-table-output-config-optional) below.
+Airflow renders `{{ ... }}` in `bash_command` itself, so this example uses
+Airflow's `ds_nodash` for the output path. transformer's own templates in
+`config.json`, `main.sql`, and `output.json` are untouched by Airflow.
 
-### Example app
+## Working with a coding agent
+
+transformer is designed so that an agent harness such as Claude Code can own
+a pipeline end to end:
+
+- **The layout is the documentation.** Inputs in `inputs/<name>/config.json`,
+  tables in `tables/<name>/main.sql`, tests in
+  `tables/<name>/validations/*.sql`. An agent can learn it from one example
+  (`examples/jaffle_shop/job`) and generate new tables without any API.
+- **Runs are local and fast.** `transformer run` needs no credentials, no
+  network, and no running service, and small jobs finish in seconds, so the
+  agent can afford to rerun after every edit.
+- **Results are machine-readable.** The exit code says pass or fail. Each
+  failed task prints its error or the validations it failed, `job.json` lists
+  every task's status, row count, and failed validations, and
+  `_validation-<name>.csv` holds sample offending rows.
+- **Tests are SQL.** The agent writes data-quality checks as zero-row queries
+  next to the table it's changing, then reruns until they pass.
+
+A short brief is enough to point an agent at a project:
+
+```
+This is a transformer project (examples/jaffle_shop/job is a reference).
+Inputs live in inputs/<name>/config.json, tables in tables/<name>/main.sql,
+tests in tables/<name>/validations/*.sql (pass = zero rows).
+Run with: java -jar transformer.jar run <jobDir> --output <dir>
+It exits 0 only when everything passes; failures are in <dir>/job.json.
+```
+
+Supported SQL is strict. A query that would need a guess, such as an implicit
+text coercion or a JOIN with no `ON`, is refused with an error that names the
+problem, rather than run with a silently different meaning. An agent gets a
+clear error to fix instead of wrong data. See [SQL features](#sql-features).
+
+## GUI
+
+A JavaFX visualizer / runner. Open a job directory, see its DAG, edit the
+execution time + output directory, press Run, watch task colors update live,
+double-click a node to inspect the persisted output rows.
 
 ```bash
-bazel build //examples/directory_app:directory_example_deploy.jar
-java -jar bazel-bin/examples/directory_app/directory_example_deploy.jar \
-    examples/directory_app/job \
-    /tmp/transformer-directory-out
+java -jar transformer.jar gui examples/jaffle_shop/job
+# The argument is optional; otherwise use File > Open Job Directory, or
+# File > New Project to start an empty job.
 ```
 
-The job reads two CSVs (events, users), produces an `enriched_events` table
-with `'{{ iso_timestamp }}' AS execution_time`, then a `spend_by_tier`
-aggregate with `'{{ today }}' AS execution_date` and a `no_null_tiers`
-validation. Output lands under
-`/tmp/transformer-directory-out/day=20260101/` (path templated from the
-execution time). The 3rd CLI arg lets you override the execution time:
+The GUI ships inside the `transformer` jar with JavaFX for macOS on Apple
+Silicon and Windows. On other platforms use `transformer run`.
 
-```bash
-java -jar bazel-bin/examples/directory_app/directory_example_deploy.jar \
-    examples/directory_app/job /tmp/transformer-directory-out \
-    2026-01-02T00:00:00Z
-# → outputs land under day=20260102/, alongside any prior day=20260101/ run
-```
+Layout:
 
-## Heavy-load example: polymarket
+- **Top** — menu bar (File: Open / Reload / Quit; View: Fit DAG) stacked
+  above a horizontal controls strip: open job dir, execution time (UTC date
+  + h/m/s spinners), output dir field, a small Run button (⌘R / Ctrl+R),
+  and run status. Hover the output-dir field for the effective rendered
+  path.
+- **Center top** — DAG canvas. Pan with right- or middle-mouse drag (or
+  Alt+left-drag), zoom with the scroll wheel. Click a node to select it;
+  double-click to load its output rows.
+- **Right** — selected task's source SQL, rendered (post-template) SQL,
+  status, error/validation summary, planned vs. actual output path, and any
+  `_run.json` provenance.
+- **Center bottom** — five tabs: task details, output data table (with a
+  partition picker above it when 2+ historical runs exist for the activated
+  task), Validations (per-validation cards with an Edit… button that pops
+  out the `AddValidationDialog.showEdit` editor and writes back to
+  `tables/<view>/validations/<name>.sql`), an ad-hoc SQL console, and a run
+  log.
 
-`examples/polymarket/` is a 17-task pipeline over the
-[Polymarket tick-level orderbook dataset](https://www.kaggle.com/datasets/marvingozo/polymarket-tick-level-orderbook-dataset)
-(Kaggle, ~40GB across 5 parquet sources). It exists to stretch the executor on
-a realistic high-volume workload while exercising every layer of the runner:
-streaming parquet input, multi-stage parquet output, parallel branches, and
-the `ValidationFailed → downstream Skipped` scheduler path.
+Node colors:
 
-**What it does:**
+| Color | Meaning |
+|---|---|
+| Grey | Pending — not run yet, or nothing on disk records its run (no `_run.json` naming it, no `job.json` entry) |
+| Blue | Running |
+| Green | Succeeded (either freshly this session, or hydrated from `_run.json`) |
+| Red | Failed (error message + timing reloaded from disk) |
+| Orange | Validation failed (per-validation pass/fail + sample CSV reloaded from disk) |
+| Light grey + dashed | Skipped (upstream failure) |
 
-- Reads 5 parquet inputs (1 daily orderbook ≈131M rows / ~900MB compressed,
-  21 daily snapshot files / 51M rows, the pre-built 1-minute feature parquet
-  / 5.6M rows, all 4.1M trade executions, the 124K-row market-metadata
-  parquet).
-- The shipped `stg_orderbook` filters the orderbook day to its first 6 hours
-  (≈27M rows) so the scan finishes in a few minutes. The orderbook file has
-  139 row groups, so the row-group-level partitioner splits it into ~4
-  partitions of ~256MB each — the scan now runs across multiple cores
-  concurrently instead of single-threaded. Remove the
-  `timestamp_received < …` clause in `tables/stg_orderbook/main.sql` to
-  process the full ≈131M-row day.
-- Produces 17 parquet outputs in a staging → intermediate → mart → final
-  layering. Every output is partitioned by `day={{ today }}`. Every task
-  (including the deliberately-failed and skipped ones) gets a `_run.json`
-  record, and the whole run is rolled up into `job.json` next to the output
-  dir — so the GUI's run picker can replay this run's exact statuses later.
-- Carries 58 validations across the 17 tables (2-5 per table), all in the
-  DBT-style "this query should return zero rows" shape. Failure samples for
-  the intentionally-failing validation land in
-  `<output>/mart_orderbook_quality_check/.../_validation-zzz_no_observable_snapshot_latency_intentional_failure.csv`.
-- **Two branches expected to ValidationFail on real-feed data:**
-  `mart_orderbook_quality_check` has a validation that asserts no market has
-  snapshot latency above zero — real data does, so the task is marked
-  `ValidationFailed` and its downstream `mart_quality_report` is `Skipped`.
-  `final_combined_report` carries a `category_not_null` validation that
-  surfaces the NULL `category_normalized` values propagated through
-  `mart_market_overview`'s LEFT JOIN against `int_markets_categorized` (any
-  orderbook row whose `condition_id` doesn't match a market row leaves a NULL
-  category in the rollup). The other three mart branches (overview,
-  high-activity, volatility) continue and feed `final_combined_report`. The
-  launcher exits 0 iff this exact pattern holds.
+When you open a job directory the GUI loads `<outputDir>/job.json` if it
+exists and follows each task's `runFile` pointer to its per-task
+`_run.json` — reconstructing the full status (including validation failure
+detail with sample rows) without re-running anything. The picker dropdown
+above the output-data table is populated by `TaskRunRecord.discover` over
+each task's templated output path, so you can flip between historical
+partitions inline. Only a record that names the task counts as its run.
 
-**Prerequisite:** unpack the Kaggle dataset into `~/Downloads/archive/` so the
-input paths in `job/inputs/raw_*/config.json` resolve. The launcher hardcodes
-`/Users/owenchristie/Downloads/archive/...` paths — edit the configs if your
-checkout lives elsewhere.
+When a task's record is not usable, the GUI says so rather than guessing:
 
-**Run:**
+- **Missing or unreadable, or naming another task** (two records swapped, a
+  file copied in): it uses the task's own record of the same run if one sits
+  under the task's output path, and otherwise rebuilds the task from its
+  `job.json` entry — every field but the failing rows of its validations,
+  which a validation card then says were not recorded. The run log names each
+  record it could not use.
+- **No readable `job.json`** in a run directory that exists (the job died
+  before writing it, or it was damaged): every task reopens from its own
+  record, a task with none stays grey, and the run log says the run's verdict
+  and warnings are unknown.
+- **A `job.json` from before entries carried timestamps and failed
+  validations**: a task rebuilt from it shows its duration and which of its
+  validations failed as unknown, not as 0 ms and PASSED.
 
-```bash
-bazel build //examples/polymarket:polymarket_deploy.jar
-java -Xmx12g -jar bazel-bin/examples/polymarket/polymarket_deploy.jar \
-    examples/polymarket/job /tmp/transformer-polymarket-out \
-    2026-03-26T00:00:00Z
-# Runs in ~5 min on a fast Mac. Output:
-# 14 Succeeded,
-# 2 ValidationFailed (mart_orderbook_quality_check, final_combined_report),
-# 1 Skipped (mart_quality_report), 0 Failed. Exit 0.
-```
+`DataJob.run(executor, listener)` fires `TaskProgressListener.onTaskStart` /
+`onTaskFinish` from runner worker threads; the GUI's Run button installs a
+listener that marshals back to the FX thread via `Platform.runLater`.
 
-`-Xmx12g` is the floor for the shipped 6-hour-orderbook-slice configuration;
-bump higher (and expect much longer runs) if you remove the time-window
-filter to process the full ≈131M-row day, or expand `raw_orderbook` to
-multiple daily files.
+The GUI module is `//src/main/scala/com/transformer/gui`. `transformer gui`
+launches it, and `//examples/gui_app` is a GUI-only launcher. The launcher bundles parquet read+write so the GUI's
+preview works for both formats. The session state behind every panel
+(`JobSession`, which opens a job directory and rebuilds its last run, and
+`DagLayout`) builds on its own as `//src/main/scala/com/transformer/gui:session`,
+with no JavaFX, so it can be tested without a display.
 
 ## Run records and historical runs
 
@@ -444,85 +421,6 @@ becomes a multi-run layout. When the GUI's controls panel finds 2+
 sibling runs at the parent of the rendered `jobRunOutput`, it surfaces a
 run picker — switching the picker rehydrates the entire UI from the
 chosen `job.json` without re-running anything.
-
-## GUI
-
-A JavaFX visualizer / runner. Open a job directory, see its DAG, edit the
-execution time + output directory, press Run, watch task colors update live,
-double-click a node to inspect the persisted output rows.
-
-```bash
-bazel build //examples/gui_app:gui_app_deploy.jar
-java -jar bazel-bin/examples/gui_app/gui_app_deploy.jar \
-    examples/directory_app/job
-# Optional first arg auto-opens that job; otherwise use File > Open Job Directory.
-```
-
-Layout:
-
-- **Top** — menu bar (File: Open / Reload / Quit; View: Fit DAG) stacked
-  above a horizontal controls strip: open job dir, execution time (UTC date
-  + h/m/s spinners), output dir field, a small Run button (⌘R / Ctrl+R),
-  and run status. Hover the output-dir field for the effective rendered
-  path.
-- **Center top** — DAG canvas. Pan with right- or middle-mouse drag (or
-  Alt+left-drag), zoom with the scroll wheel. Click a node to select it;
-  double-click to load its output rows.
-- **Right** — selected task's source SQL, rendered (post-template) SQL,
-  status, error/validation summary, planned vs. actual output path, and any
-  `_run.json` provenance.
-- **Center bottom** — five tabs: task details, output data table (with a
-  partition picker above it when 2+ historical runs exist for the activated
-  task), Validations (per-validation cards with an Edit… button that pops
-  out the `AddValidationDialog.showEdit` editor and writes back to
-  `tables/<view>/validations/<name>.sql`), an ad-hoc SQL console, and a run
-  log.
-
-Node colors:
-
-| Color | Meaning |
-|---|---|
-| Grey | Pending — not run yet, or nothing on disk records its run (no `_run.json` naming it, no `job.json` entry) |
-| Blue | Running |
-| Green | Succeeded (either freshly this session, or hydrated from `_run.json`) |
-| Red | Failed (error message + timing reloaded from disk) |
-| Orange | Validation failed (per-validation pass/fail + sample CSV reloaded from disk) |
-| Light grey + dashed | Skipped (upstream failure) |
-
-When you open a job directory the GUI loads `<outputDir>/job.json` if it
-exists and follows each task's `runFile` pointer to its per-task
-`_run.json` — reconstructing the full status (including validation failure
-detail with sample rows) without re-running anything. The picker dropdown
-above the output-data table is populated by `TaskRunRecord.discover` over
-each task's templated output path, so you can flip between historical
-partitions inline. Only a record that names the task counts as its run.
-
-When a task's record is not usable, the GUI says so rather than guessing:
-
-- **Missing or unreadable, or naming another task** (two records swapped, a
-  file copied in): it uses the task's own record of the same run if one sits
-  under the task's output path, and otherwise rebuilds the task from its
-  `job.json` entry — every field but the failing rows of its validations,
-  which a validation card then says were not recorded. The run log names each
-  record it could not use.
-- **No readable `job.json`** in a run directory that exists (the job died
-  before writing it, or it was damaged): every task reopens from its own
-  record, a task with none stays grey, and the run log says the run's verdict
-  and warnings are unknown.
-- **A `job.json` from before entries carried timestamps and failed
-  validations**: a task rebuilt from it shows its duration and which of its
-  validations failed as unknown, not as 0 ms and PASSED.
-
-`DataJob.run(executor, listener)` fires `TaskProgressListener.onTaskStart` /
-`onTaskFinish` from runner worker threads; the GUI's Run button installs a
-listener that marshals back to the FX thread via `Platform.runLater`.
-
-The GUI module is `//src/main/scala/com/transformer/gui`; the launcher is
-`//examples/gui_app`. The launcher bundles parquet read+write so the GUI's
-preview works for both formats. The session state behind every panel
-(`JobSession`, which opens a job directory and rebuilds its last run, and
-`DagLayout`) builds on its own as `//src/main/scala/com/transformer/gui:session`,
-with no JavaFX, so it can be tested without a display.
 
 ## Supported file formats
 
@@ -1114,40 +1012,194 @@ Compound offsets work the way you'd guess: `{{ yesterday - 1 }}` is
 
 Unknown variables raise `IllegalArgumentException` listing all known names.
 
-## Project layout
+## Examples
 
-```
-.
-├── MODULE.bazel               Bazel deps: rules_scala 7.0.0, scala 2.13.16,
-│                              jsqlparser 5.0, parquet-hadoop 1.14.3 (+ minimal
-│                              hadoop 3.4.3), openjfx 21.0.1 (gui only), junit
-├── .bazelrc                   JDK 21 build toolchain (runtime is JDK 21+)
-├── docs/                      Contributor documentation (architecture,
-│                              conventions, extending, gotchas, testing).
-├── examples/                  Bazel-deployable example apps (programmatic,
-│                              directory-driven, jaffle-shop, GUI launcher).
-├── tools/                     Stand-alone CLIs (e.g. `parquet_peek`).
-├── src/main/scala/com/transformer/
-│   ├── core/                  Shared types: DataType, Schema, ColumnarBatch,
-│   │                          Catalog, SqlExecutor boundary + registry.
-│   ├── temporal/              TemporalVariables, TemplateRenderer.
-│   ├── read/{csv,parquet}/    Format-specific readers.
-│   ├── sql/{parse,plan,exec}/ JSqlParser façade, logical plan + builder,
-│   │                          physical operators + planner + engine.
-│   ├── write/{csv,parquet}/   Format-specific writers + shared ParquetSchema.
-│   ├── job/                   User-facing API: InputFilePath, OutputFilePath,
-│   │                          SQLTask, DataJob runner, DirectoryJobLoader,
-│   │                          TaskDag, TaskRunRecord, JobRunRecord,
-│   │                          JobOutputLayout, Json parser.
-│   └── gui/                   JavaFX visualiser/runner.
-└── src/test/scala/com/transformer/...   (mirrors src/main/scala layout)
+Every example below is a job directory you can run with the `transformer`
+jar. Each also has its own launcher target, which the end-to-end checks
+use.
+
+| Example | What it shows |
+|---|---|
+| [`examples/jaffle_shop/job`](examples/jaffle_shop/job) | Port of dbt Labs' [jaffle-shop](https://github.com/dbt-labs/jaffle-shop): 6 CSV seeds, 15 tables, 26 DBT `data_tests` ported as validations, Parquet outputs. The reference project to copy. |
+| [`examples/directory_app/job`](examples/directory_app/job) | The smallest job: two CSVs, an enrich step, an aggregate with a templated `day={{ today }}` partition, and one validation. |
+| [`examples/polymarket/job`](examples/polymarket/job) | A 17-table pipeline over a 39 GB Parquet dataset. See below. |
+| [`examples/scala_app`](examples/scala_app) | The same shape as `directory_app`, built in Scala code (see [Embedding in Scala](#embedding-in-scala)). |
+
+```bash
+# Each launcher takes [jobDir] [outputDir] [executionTime].
+bazel build //examples/jaffle_shop:jaffle_shop_deploy.jar
+java -jar bazel-bin/examples/jaffle_shop/jaffle_shop_deploy.jar
+# Exits 0 with 15/15 Succeeded under ${java.io.tmpdir}/transformer-jaffle-out/.
+
+bazel build //examples/directory_app:directory_example_deploy.jar
+java -jar bazel-bin/examples/directory_app/directory_example_deploy.jar \
+    examples/directory_app/job /tmp/transformer-directory-out \
+    2026-01-02T00:00:00Z
+# Outputs land under day=20260102/, next to any earlier day=... run.
 ```
 
-For the full module-by-module breakdown — key files, responsibilities,
-cross-cutting patterns — see
-[docs/architecture.md](docs/architecture.md#module-map).
+## Heavy-load example: polymarket
 
-## Building your own job
+`examples/polymarket/` is a 17-table pipeline over the
+[Polymarket tick-level orderbook dataset](https://www.kaggle.com/datasets/marvingozo/polymarket-tick-level-orderbook-dataset)
+(Kaggle, 39 GB of Parquet across 5 sources). It exists to stretch the
+executor on a realistic high-volume workload while exercising every layer of
+the runner: streaming Parquet input with row-group pruning, multi-stage
+Parquet output, parallel branches, and the `ValidationFailed -> downstream
+Skipped` scheduler path.
+
+**What it does:**
+
+- Reads 5 Parquet inputs: all 21 daily orderbook files (35 GB), 21 daily
+  snapshot files, the 1-minute feature table, every trade execution, and the
+  market metadata.
+- `stg_orderbook` keeps orderbook rows received after 06:00 UTC on
+  2026-03-26. Parquet predicate pushdown compares that filter with each row
+  group's `timestamp_received` statistics, so the other 20 days are skipped
+  without reading their column data. Large files are split by row group and
+  scanned on several cores at once.
+- The staging tables produce 166.6M rows in total: 105.1M orderbook updates,
+  51.7M snapshots, 5.6M feature rows, 4.1M trades, and 124K markets. They
+  feed intermediate summaries (one aggregates the 105M orderbook rows into
+  13.7K market groups in 10.6 s), then marts and a final report. All 17
+  outputs are Parquet partitioned by `day={{ today }}`, with a `_run.json`
+  per task and a `job.json` for the run.
+- Carries 59 validations across the 17 tables, all in the "this query should
+  return zero rows" shape.
+- **Two branches are expected to fail validation on the real data.**
+  `mart_orderbook_quality_check` asserts that no market has snapshot latency
+  above zero. Real data does, so the task is `ValidationFailed` and its
+  downstream `mart_quality_report` is `Skipped`. `final_combined_report`
+  carries a `category_not_null` validation that catches the NULL
+  `category_normalized` values that `mart_market_overview`'s LEFT JOIN
+  against `int_markets_categorized` lets through. The other mart branches
+  succeed. The launcher exits 0 only if exactly this pattern holds.
+
+**Measured:** 90 s wall-clock end to end, JVM startup included, at
+`-Xmx12g` on an Apple M4 (8 cores, 16 GB RAM), JDK 21, 2026-10-30. The
+slowest tasks were `stg_orderbook` (105.1M rows, 77.4 s) and `stg_snapshots`
+(51.7M rows, 58.0 s), which run concurrently.
+
+**Prerequisite:** unpack the Kaggle dataset into `~/Downloads/archive/` so
+the input paths in `job/inputs/raw_*/config.json` resolve. The configs
+hardcode `/Users/owenchristie/Downloads/archive/...`. Edit them if your copy
+is somewhere else.
+
+**Run:**
+
+```bash
+bazel build //examples/polymarket:polymarket_deploy.jar
+java -Xmx12g -jar bazel-bin/examples/polymarket/polymarket_deploy.jar \
+    examples/polymarket/job /tmp/transformer-polymarket-out \
+    2026-03-26T00:00:00Z
+# 14 Succeeded,
+# 2 ValidationFailed (mart_orderbook_quality_check, final_combined_report),
+# 1 Skipped (mart_quality_report), 0 Failed. Exit 0.
+```
+
+Running the job with `transformer run` gives the same statuses, but exits 1
+because two validations fail. The example's launcher is what treats that
+pattern as success. `-Xmx12g` is the floor for the shipped configuration.
+Widen the `timestamp_received` window to process more days, and raise the
+heap with it.
+
+## Embedding in Scala
+
+Most projects never need this: the directory layout and the `transformer`
+jar cover a pipeline end to end. If you'd rather build a job in code, or
+embed the runner in a larger JVM application, the same engine is a Scala
+library. `DataJob` is what `DirectoryJobLoader` builds from a job directory.
+
+```scala
+import com.transformer.job._
+import com.transformer.temporal.TemporalVariables
+import java.time.Instant
+
+val job = DataJob(
+  temporalVariables = Some(TemporalVariables(Instant.parse("2026-01-01T05:30:21Z"))),
+  inputs = Seq(
+    InputFilePath("data/events/*.csv", viewName = "events"),
+    InputFilePath("data/users.parquet", viewName = "users")
+  ),
+  sql = Seq(
+    SQLTask(
+      name      = Some("enrich"),
+      sqlString = Some(
+        """SELECT e.user_id, u.name, u.tier, e.event, e.amount
+          |FROM events e
+          |LEFT JOIN users u ON e.user_id = u.user_id
+          |""".stripMargin),
+      outputFile = Some(OutputFilePath("out/day={{ today }}/enriched.csv")),
+      viewName   = Some("enriched")
+    ),
+    SQLTask(
+      name      = Some("spend_by_tier"),
+      sqlString = Some(
+        """SELECT tier, COUNT(*) AS n, SUM(amount) AS total
+          |FROM enriched
+          |WHERE event = 'buy'
+          |GROUP BY tier
+          |ORDER BY tier
+          |""".stripMargin),
+      outputFile = Some(OutputFilePath("out/day={{ today }}/spend_by_tier.parquet")),
+      validations = Seq(
+        Validation(
+          name      = "no_null_tiers",
+          sqlString = Some("SELECT * FROM result WHERE tier IS NULL")
+        )
+      )
+    )
+  )
+)
+
+val result = job.run()
+if (!result.succeeded) sys.exit(1)
+```
+
+A task's `outputFile` is optional. Set it and the result is persisted, and any
+downstream task or validation reads it back from disk. Leave it out and the task
+is a **memory-only feeder**: it still registers its `viewName` for downstream
+tasks and validations, but the result is held in heap for the rest of the run
+instead of being written — useful for an intermediate step whose output nobody
+needs on disk, at the cost of keeping it in memory (the same trade a cached
+input or a multiply-referenced CTE makes).
+
+`DataJob.run()` returns a `JobResult` describing per-task status, row counts,
+durations, and any warnings (see [Per-job `job.json`](#per-job-jobjson));
+`succeeded` is true iff every task succeeded. If a validation fails the
+corresponding task is marked `ValidationFailed`, its output is persisted
+regardless (for debugging), and a sample of failing rows is written to
+`_validation-<name>.csv` next to that task's `_run.json` — see [Run
+records](#run-records-and-historical-runs).
+
+
+### Loading a job directory from code
+
+`DirectoryJobLoader.load` returns the same `DataJob` the CLI runs.
+
+```scala
+import com.transformer.job.DirectoryJobLoader
+import com.transformer.temporal.TemporalVariables
+import java.nio.file.Paths
+import java.time.Instant
+
+val job = DirectoryJobLoader.load(
+  jobDir            = Paths.get("examples/directory_app/job"),
+  outputDir         = Some("/tmp/transformer-directory-out/day={{ today }}"),
+  temporalVariables = Some(TemporalVariables(Instant.parse("2026-01-01T05:30:21Z")))
+)
+
+val result = job.run()
+```
+
+`outputDir` is templated like any output path. Each table writes to
+`<outputDir>/<viewName>/part-NNNNN.csv` (the loader passes `format = Some("csv")`
+explicitly so the per-table directory stays clean) and is registered in the
+catalog so subsequent tables can reference it. If you don't pass `outputDir`
+the default is `<jobDir>/output/`. To partition a table's output per run, see
+[Per-table output config (optional)](#per-table-output-config-optional).
+
+### Building your own job binary
 
 Create a `scala_binary` target. Minimal `BUILD.bazel`:
 
@@ -1208,7 +1260,9 @@ JDK 21 or newer (tested through JDK 25).
   as `ROWS`, so a running aggregate does not share one value across `ORDER BY`
   peers the way the standard requires. `COVAR_SAMP`/`COVAR_POP`/`CORR` are
   `GROUP BY` only.
-- **Cloud paths recognized but unimplemented**: see v1.1 above.
+- **Cloud paths recognized but unimplemented**: `gs://` and `s3://` paths are
+  accepted by the config, and loading one raises a clear
+  `UnsupportedOperationException`. See [Cloud](#cloud-gs--s3).
 - **A CSV glob's schema is inferred from its first file's first 1000 rows.** A
   later value that does not read as its column's type fails the read, naming
   the file, line, column and value; an explicit schema (`inferSchema = false`
@@ -1232,7 +1286,7 @@ un-instrumented baseline. Three opt-in routes:
 
 ```bash
 # Global enable via env var (every task in this JVM gets metrics):
-TRANSFORMER_METRICS_ENABLED=1 java -jar bazel-bin/examples/jaffle_shop/jaffle_shop_deploy.jar
+TRANSFORMER_METRICS_ENABLED=1 java -jar transformer.jar run examples/jaffle_shop/job
 
 # Per-task enable via output.json (wins over the global default):
 # tables/<table>/output.json:
@@ -1253,15 +1307,76 @@ See [docs/benchmarking.md](docs/benchmarking.md) for the full counter inventory,
 the JMH microbench harness under `benchmarks/micro/`, the macro-bench runner
 under `benchmarks/macro/`, and the perf-tagged regression test.
 
-## Running tests
+## Development
+
+transformer is Scala 2.13 on JDK 21, built with Bazel (`rules_scala`).
 
 ```bash
-bazel test //...                                     # everything
-bazel test //src/test/scala/com/transformer/...      # same, different syntax
+bazel test //...                                     # every test
 bazel test //src/test/scala/com/transformer/sql/...  # just the SQL tests
+bazel build //:transformer_deploy.jar                # the product jar
 ```
 
-Each leaf test directory has its own `scala_junit_test` target.
+Each leaf test directory has its own `scala_junit_test` target. Before
+landing a change, also run the jaffle-shop example (see [Examples](#examples)).
+
+### Contributor documentation
+
+This README is the user-facing intro. For deeper material — architecture,
+extension recipes, conventions, gotchas — see the [docs/](docs/) directory:
+
+- [docs/architecture.md](docs/architecture.md) — mental model, module map,
+  cross-cutting patterns.
+- [docs/conventions.md](docs/conventions.md) — Scala / Bazel / docs
+  conventions.
+- [docs/extending.md](docs/extending.md) — how to add SQL functions, file
+  formats, GUI panels, etc.
+- [docs/gotchas.md](docs/gotchas.md) — known pitfalls and what's intentionally
+  not done.
+- [docs/testing.md](docs/testing.md) — build/test commands and the test
+  inventory.
+- [docs/code-map.md](docs/code-map.md) — file-size hot spots and external
+  reference material.
+
+Future Claude sessions should also read [CLAUDE.md](CLAUDE.md), which links
+back here and into `docs/`.
+
+### Project layout
+
+```
+.
+├── MODULE.bazel               Bazel deps: rules_scala 7.0.0, scala 2.13.16,
+│                              jsqlparser 5.0, parquet-hadoop 1.14.3 (+ minimal
+│                              hadoop 3.4.3), openjfx 21.0.1 (gui only), junit
+├── .bazelrc                   JDK 21 build toolchain (runtime is JDK 21+)
+├── BUILD.bazel                //:transformer, the single deploy jar (CLI + GUI).
+├── site/                      The project website (static HTML, no build).
+├── docs/                      Contributor documentation (architecture,
+│                              conventions, extending, gotchas, testing).
+├── examples/                  Bazel-deployable example apps (programmatic,
+│                              directory-driven, jaffle-shop, GUI launcher).
+├── tools/                     Stand-alone CLIs (e.g. `parquet_peek`).
+├── src/main/scala/com/transformer/
+│   ├── core/                  Shared types: DataType, Schema, ColumnarBatch,
+│   │                          Catalog, SqlExecutor boundary + registry.
+│   ├── temporal/              TemporalVariables, TemplateRenderer.
+│   ├── read/{csv,parquet}/    Format-specific readers.
+│   ├── sql/{parse,plan,exec}/ JSqlParser façade, logical plan + builder,
+│   │                          physical operators + planner + engine.
+│   ├── write/{csv,parquet}/   Format-specific writers + shared ParquetSchema.
+│   ├── job/                   User-facing API: InputFilePath, OutputFilePath,
+│   │                          SQLTask, DataJob runner, DirectoryJobLoader,
+│   │                          TaskDag, TaskRunRecord, JobRunRecord,
+│   │                          JobOutputLayout, Json parser.
+│   ├── gui/                   JavaFX visualiser/runner.
+│   └── cli/                   `transformer run|gui|help`: Cli (headless,
+│                              no JavaFX) + TransformerMain entry point.
+└── src/test/scala/com/transformer/...   (mirrors src/main/scala layout)
+```
+
+For the full module-by-module breakdown — key files, responsibilities,
+cross-cutting patterns — see
+[docs/architecture.md](docs/architecture.md#module-map).
 
 ## License
 
