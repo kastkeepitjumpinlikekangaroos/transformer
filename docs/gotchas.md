@@ -2089,7 +2089,8 @@ output, over every slt script and every query generator. Details are in
   and does not move a table that nothing connects to (`FROM a, b, c WHERE b.k
   = c.k` still pairs `a` with `b` first). Reordering changes which rows a
   condition is evaluated on, never the answer, so a condition that fails on a
-  row (a division by zero) may fail in one order and not in another.
+  row (an integer overflow, a CAST of text that is no number) may fail in one
+  order and not in another.
 - **Spill-to-disk** is implemented for `SortExec`, `HashAggregateExec`,
   `DistinctExec`, `HashJoinExec` (grace hash, equi-join only), and
   `WindowExec` (bucketed by PARTITION BY) but **disabled by default**.

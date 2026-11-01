@@ -1502,8 +1502,9 @@ keep their written order, an outer join is joined where it is written (the
 inner joins on either side of it are ordered on their own), and a run of joins
 whose conditions read `RAND()` keeps its order, since another order would draw
 it for other rows. The answer never depends on the order; which rows a
-condition is evaluated on does, so a condition that fails on some row (a
-division by zero) may fail in one order and not reach that row in another.
+condition is evaluated on does, so a condition that fails on some row (an
+integer overflow, or a CAST of text that is no number) may fail in one order
+and not reach that row in another.
 `EXPLAIN` shows the order chosen. In SQLite's test corpus, whose
 `select5.test` joins 4 to 64 tables written in three orders each, every one of
 its 732 queries now runs, in under six seconds; written order refused 521 of
