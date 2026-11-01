@@ -1,6 +1,6 @@
 package com.transformer.fuzz
 
-import com.transformer.core.Spill
+import com.transformer.core.{Scheduler, Spill}
 import com.transformer.fuzz.JobDagGen.JobCase
 import com.transformer.fuzz.oracle.{DagSchedule, Hydration}
 import org.junit.Assert._
@@ -141,7 +141,11 @@ class DagSchedulerFuzzTest {
     assertTrue(s"brokenInputCases=$brokenInputs", brokenInputs > 0)
     assertTrue(s"deepDagCases=$deepDags", deepDags > 0)
     assertTrue(s"validationEdgeCases=$validationEdges", validationEdges > 0)
-    assertTrue(s"no run overlapped two tasks in wall-clock time ($sampled sampled)", overlapped > 0)
+    // Two tasks overlap only where two threads run them; on one thread
+    // (`--config=serial`) a task overlaps another only when a wait of its
+    // happens to run the other, which nothing makes it do.
+    if (Scheduler.parallelism > 1)
+      assertTrue(s"no run overlapped two tasks in wall-clock time ($sampled sampled)", overlapped > 0)
   }
 
   /** Coverage guard for input failures. The run's warnings name every input

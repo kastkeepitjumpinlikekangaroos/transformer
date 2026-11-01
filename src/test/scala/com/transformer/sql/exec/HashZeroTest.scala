@@ -51,7 +51,11 @@ class HashZeroTest {
     })).toVector
   }
 
-  private def assertRows(sql: String, expected: Seq[Seq[Any]]): Unit = Seq(ExecutionOptions.Default, spill).foreach { o =>
+  /** Each query runs as is and with spill at a one-byte threshold, which
+    * writes a run a batch: at a batch capacity of 1 (`--config=batch1`) its
+    * 2000 rows would pass `spill_max_runs`, so there it runs as is alone. */
+  private def assertRows(sql: String, expected: Seq[Seq[Any]]): Unit =
+    (ExecutionOptions.Default +: (if (ColumnarBatch.DefaultCapacity >= 1024) Seq(spill) else Nil)).foreach { o =>
     assertEquals(s"$sql (spill ${o.spillEnabled})", expected.map(_.mkString("|")).sorted,
       rows(sql, o).map(_.mkString("|")).sorted)
   }

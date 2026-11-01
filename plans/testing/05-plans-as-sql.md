@@ -232,6 +232,14 @@ would have saved 0.1 ms more, so they stay SNAPPY. The suite took notice:
 19 s to 2 s each. Polymarket, whose cost is its data, is unchanged at 80 s.
 `bench/spill_file_cost_test` (perf-tagged) holds a file under 2 ms.
 
+The whole suite under each whole-suite configuration after W1-W8: `batch2`,
+`sharded`, `zone` and `hashzero` green; under `batch1` `hash_zero_test`'s
+spill half wrote a run per one-row batch past `spill_max_runs`, and under
+`serial` the DAG scheduler guard found no two tasks overlapping in time, which
+one thread gives only by chance (faster spill and output files left it fewer
+waits to run another task in). Both tests now run that part only where it
+holds; no answer changed in any configuration.
+
 ### How the printer is built (W2)
 
 - Binding decides some types from how a value is written: a number beside a

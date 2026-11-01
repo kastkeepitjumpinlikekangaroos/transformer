@@ -266,6 +266,11 @@ and two tests that did (all in
 [gotchas.md](gotchas.md#defects-the-sql-logic-tests-found-2026-11-01-all-fixed)).
 Under `hashzero` (plans/testing/05) no answer changed; the one test that
 failed asserted that hashes spread random keys over shards, and says so now.
+After that round every configuration ran green but for two tests asking what
+only the default gives: `hash_zero_test`'s spill half writes a run a batch,
+past `spill_max_runs` at a batch capacity of 1, and the DAG scheduler's guard
+that two tasks overlap in time needs two threads; each now runs its part
+where it holds.
 Each takes a few minutes, `batch1` the longest; `hashzero` about as long, its
 hash maps a scan per lookup (`spill_stress_test` takes three and a half).
 
