@@ -2,7 +2,7 @@ package com.transformer.fuzz.oracle
 
 import com.transformer.core._
 import com.transformer.fuzz.CsvTextGen
-import com.transformer.fuzz.CsvTextGen.InferenceCase
+import com.transformer.fuzz.CsvTextGen.{InferenceCase, Layout}
 import com.transformer.fuzz.RowOracle
 import com.transformer.read.csv.{CsvOptions, CsvReader}
 import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
@@ -13,7 +13,11 @@ import java.time.temporal.ChronoUnit
 import scala.util.Try
 
 /** The inference round trip: data written to CSV and read back with its types
-  * inferred, then written and inferred again, and again.
+  * inferred, then written and inferred again, and again. A glob's later files
+  * may write the columns in other orders, their headers' names in another
+  * case ([[CsvTextGen.Layout]]): the glob is read by each file's header's
+  * names, in the first file's order (plans/testing/04, finding 3), so every
+  * expectation below holds by name, whatever order a file writes.
   *
   * '''The first read''' is held to what inference promises, restated here with
   * a grammar of this file's own:
@@ -48,12 +52,18 @@ object InferenceRoundTrip {
     try {
       val options = CsvOptions.fromMap(c.format.options).copy(inferenceSampleRows = c.sampleRows)
       val written = dir.resolve("pass1")
-      write(written, c.schema, slices(c.rows, c.files), c.format)
+      val layouts = Layout(c.schema.fields.indices.toVector, upper = false) +: c.layouts
+      write(written, c.schema, slices(c.rows, c.files), c.format, layouts)
 
-      // The text of every field as written, read with no inference at all.
+      // The text of every field as written, read with no inference at all,
+      // which reads a file's fields by their position in it, each put back
+      // in the schema's order.
       val asText = CsvReader.fromPath(written.toString, CsvOptions.forWrittenFile(c.format.options,
         Schema(c.schema.fields.map(_.copy(dataType = DataType.StringType)))))
-      val textByFile = (0 until asText.numPartitions).map(p => CsvRoundTrip.rowsOf(single(asText, p)))
+      val textByFile = (0 until asText.numPartitions).map { p =>
+        val order = layouts(p).order
+        CsvRoundTrip.rowsOf(single(asText, p)).map(row => c.schema.fields.indices.map(i => row(order.indexOf(i))).toVector)
+      }
       val sample = textByFile.flatten.take(c.sampleRows)
       val types = c.schema.fields.indices.map { i =>
         sample.flatMap(row => Option(row(i).asInstanceOf[String]).filter(_.nonEmpty).map(classify)).reduceOption(join)
@@ -112,16 +122,26 @@ object InferenceRoundTrip {
     CsvReader.fromPath(to.toString, options)
   }
 
-  private def write(to: Path, schema: Schema, parts: IndexedSeq[Vector[Vector[Any]]], f: CsvTextGen.Format): Unit = {
-    val batches = parts.map { rows =>
-      val b = new ColumnarBatch(schema, math.max(1, rows.length))
+  /** Each part file, its columns in its layout's order under its header's
+    * names. */
+  private def write(to: Path, schema: Schema, parts: IndexedSeq[Vector[Vector[Any]]], f: CsvTextGen.Format,
+      layouts: IndexedSeq[Layout]): Unit = {
+    Files.createDirectories(to)
+    parts.indices.foreach { p =>
+      val Layout(order, upper) = layouts(p)
+      val fileSchema = Schema(order.map { i =>
+        val field = schema.fields(i)
+        if (upper) field.copy(name = field.name.toUpperCase(java.util.Locale.ROOT)) else field
+      })
+      val rows = parts(p).map(row => order.map(row))
+      val b = new ColumnarBatch(fileSchema, math.max(1, rows.length))
       rows.zipWithIndex.foreach { case (row, r) =>
         row.zipWithIndex.foreach { case (v, col) => if (v == null) b.column(col).setNull(r) else b.column(col).setBoxed(r, v) }
       }
       b.setNumRows(rows.length)
-      Iterator.single(b).filter(_.numRows > 0)
+      CsvWriter.writeAll(to.resolve("part-%05d.csv".formatLocal(java.util.Locale.ROOT, p)), fileSchema,
+        Iterator.single(b).filter(_.numRows > 0), CsvWriteOptions.fromMap(f.options))
     }
-    CsvWriter.writePartitioned(to, schema, batches, CsvWriteOptions.fromMap(f.options))
   }
 
   private def slices(rows: Vector[Vector[Any]], n: Int): IndexedSeq[Vector[Vector[Any]]] = {

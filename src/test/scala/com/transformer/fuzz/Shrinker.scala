@@ -764,10 +764,13 @@ object Shrinker {
       .filter(rs => rs.nonEmpty && rs.length < c.rows.length) ++
       c.rows.indices.iterator.filter(_ => c.rows.length > 1 && c.rows.length <= 8).map(i => c.rows.patch(i, Nil, 1))
     val dropColumn = if (c.schema.length <= 1) Iterator.empty else c.schema.fields.indices.iterator.map { i =>
-      c.copy(schema = Schema(c.schema.fields.patch(i, Nil, 1)), rows = c.rows.map(_.patch(i, Nil, 1)))
+      c.copy(schema = Schema(c.schema.fields.patch(i, Nil, 1)), rows = c.rows.map(_.patch(i, Nil, 1)),
+        layouts = c.layouts.map(l => l.copy(order = l.order.filter(_ != i).map(j => if (j > i) j - 1 else j))))
     }
+    val inOrder = c.layouts.map(_.copy(order = c.schema.fields.indices.toVector, upper = false))
     val simpler = Iterator(
-      if (c.files > 1) Some(c.copy(files = 1)) else None,
+      if (c.files > 1) Some(c.copy(files = 1, layouts = Vector.empty)) else None,
+      if (c.layouts != inOrder) Some(c.copy(layouts = inOrder)) else None,
       if (c.sampleRows != 1000) Some(c.copy(sampleRows = 1000)) else None
     ).flatten
     dropRows.map(rs => c.copy(rows = rs)) ++ dropColumn ++ simpler ++

@@ -264,6 +264,8 @@ class CsvFuzzTest {
       val c = CsvTextGen.inferenceCase(new Rng(Props.baseSeed + 300000 + i))
       val held = c.rows.flatten.collect { case s: String => s }.toSet
       CsvTextGen.Lookalikes.foreach { case (category, texts) => if (texts.exists(held)) counts(s"text: $category") += 1 }
+      if (c.layouts.exists(l => l.order != l.order.sorted)) counts("a later file in another column order") += 1
+      if (c.layouts.exists(_.upper)) counts("a later file's header in another case") += 1
       val r = InferenceRoundTrip.check(c)
       if (r.failedAsExpected) counts("a value past the sample that does not fit") += 1
       else counts("the whole fixed point") += 1
@@ -283,7 +285,8 @@ class CsvFuzzTest {
         "inferred int" -> n / 10, "inferred long" -> n / 50, "inferred decimal" -> n / 50, "inferred double" -> n / 10,
         "inferred boolean" -> n / 50, "inferred date" -> n / 50, "inferred timestamp" -> n / 50,
         "inferred string" -> n / 5,
-        "a value past the sample that does not fit" -> n / 100, "the whole fixed point" -> n / 2))
+        "a value past the sample that does not fit" -> n / 100, "the whole fixed point" -> n / 2,
+        "a later file in another column order" -> n / 20, "a later file's header in another case" -> n / 20))
   }
 
   // ---- the oracles themselves ----------------------------------------------------
@@ -335,7 +338,8 @@ class CsvFuzzTest {
       (if (c.bom) 1 else 0) + c.leadingBlanks + c.lines.collect { case r: Row => r }.flatMap(_.fields)
         .count(t => t.value != "a" || t.trailing.nonEmpty) * 10L
     def inferenceSize(c: InferenceCase): Long = c.rows.length * 100L + c.schema.length * 10000L + c.files +
-      (if (c.sampleRows != 1000) 1 else 0) + formatSize(c.format)
+      (if (c.sampleRows != 1000) 1 else 0) + formatSize(c.format) +
+      c.layouts.count(l => l.upper || l.order != l.order.sorted)
     (0 until 60).foreach { i =>
       val d = CsvTextGen.dataCase(new Rng(i))
       Shrinker.csvDataCase(d).take(60).foreach(s => assertTrue(s"$d -> $s", dataSize(s) < dataSize(d)))

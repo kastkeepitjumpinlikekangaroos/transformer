@@ -52,7 +52,7 @@ takes all of them but JSqlParser 5.3, which still refuses deep parentheses.
 | W4 | Join order by connectivity | **done** 2026-11-01 |
 | W5 | A pairing that streams | **done** 2026-11-01 |
 | W6 | Every hash zero (`--config=hashzero`) | **done** 2026-11-01 |
-| W7 | A CSV glob's files with their columns in other orders | |
+| W7 | A CSV glob's files with their columns in other orders | **done** 2026-11-01 |
 | W8 | A spill file's fixed cost | |
 | W9 | Ported Postgres regression tests | |
 
@@ -209,6 +209,12 @@ own, `hash_zero_test`, runs GROUP BY, DISTINCT, joins and windows over every
 key codec under it in the default suite; its first draft used no packed key,
 so a `BytesKey` that trusted equal hashes passed it, and it was widened until
 that sabotage failed it.
+
+W7: the inference round trip writes half of a glob's later files with their
+columns in another order and some with their header's names in upper case;
+the oracle reads each file's text back by position and puts it in the
+schema's order, so every expectation it had holds by name. No defect: plan
+04's fix holds. A reader taking later files by position again fails it.
 
 ### How the printer is built (W2)
 

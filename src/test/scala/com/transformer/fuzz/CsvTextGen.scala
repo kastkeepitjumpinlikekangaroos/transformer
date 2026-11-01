@@ -460,11 +460,23 @@ object CsvTextGen {
   /** Columns of every type, and STRING columns of text that looks like other
     * types, written across `files` and read back with a sample of
     * `sampleRows` rows. */
-  final case class InferenceCase(schema: Schema, rows: Vector[Vector[Any]], format: Format, files: Int, sampleRows: Int) {
+  /** How a file of a glob after the first writes the columns: in `order`
+    * (the schema's column at each position), its header's names in upper
+    * case when `upper`. A glob is read by each later file's header's names,
+    * regardless of case (plans/testing/04, finding 3). */
+  final case class Layout(order: Vector[Int], upper: Boolean) {
+    override def toString: String = s"${order.mkString("[", ",", "]")}${if (upper) " upper" else ""}"
+  }
+
+  /** `layouts` holds one per file after the first, which writes the schema's
+    * order. */
+  final case class InferenceCase(schema: Schema, rows: Vector[Vector[Any]], format: Format, files: Int, sampleRows: Int,
+      layouts: Vector[Layout] = Vector.empty) {
     override def toString: String = {
       val cols = schema.fields.map(c => s"${c.name}:${c.dataType}").mkString(", ")
       val preview = rows.take(6).map(_.map(showValue).mkString("(", ", ", ")")).mkString("; ")
-      s"InferenceCase(schema=[$cols], $format, files=$files, sampleRows=$sampleRows, rows=${rows.length}: " +
+      s"InferenceCase(schema=[$cols], $format, files=$files, sampleRows=$sampleRows, " +
+        s"layouts=${layouts.mkString("[", "; ", "]")}, rows=${rows.length}: " +
         s"[$preview${if (rows.length > 6) " ..." else ""}])"
     }
   }
@@ -496,8 +508,16 @@ object CsvTextGen {
       case s: String if !hasPairsOnly(s) || !format.charset.newEncoder().canEncode(s) => "plain"
       case v => v
     })
-    InferenceCase(schema, writable, format, files = shape.weighted((4, 1), (2, 2), (1, 3)),
-      sampleRows = shape.weighted((4, 1000), (1, 1), (2, shape.between(2, 5))))
+    val files = shape.weighted((4, 1), (2, 2), (1, 3))
+    // Half of a glob's later files write the columns in another order, and
+    // some name them in upper case.
+    val layouts = Vector.fill(files - 1) {
+      val order = if (shape.bool(0.5)) Vector.tabulate(width)(i => (shape.nextLong(), i)).sortBy(_._1).map(_._2)
+        else (0 until width).toVector
+      Layout(order, upper = shape.bool(0.3))
+    }
+    InferenceCase(schema, writable, format, files, sampleRows = shape.weighted((4, 1000), (1, 1), (2, shape.between(2, 5))),
+      layouts)
   }
 
   // ---- 4. number text read by a CAST and by a column ------------------------------
