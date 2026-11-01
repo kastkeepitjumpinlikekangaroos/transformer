@@ -3,20 +3,23 @@ package com.transformer.gui
 import atlantafx.base.theme.{Styles, Tweaks}
 import com.transformer.core.{Catalog, MaterializedView, SqlExecutorRegistry}
 
-import javafx.geometry.Pos
-import javafx.scene.control.{Button, Label, SplitPane, Tooltip}
+import javafx.geometry.{Insets, Orientation, Pos}
+import javafx.scene.control.{Button, Label, SplitPane, Tab, TabPane, Tooltip}
 import javafx.scene.input.{KeyCode, KeyCodeCombination, KeyCombination, KeyEvent}
 import javafx.scene.layout.{HBox, Priority, Region, VBox}
 import javafx.stage.Stage
 
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
 /** A SQL console: an editor with Run query and Persist results… above it,
-  * and the result's rows in a [[DataGrid]] beside it. ⌘⏎ (Ctrl+Enter)
-  * anywhere in it runs the query. The job's SQL console and the data viewer's
-  * query tabs are each one.
+  * and the result beside it, or below it when `orientation` is vertical: its
+  * rows in a [[DataGrid]] in one tab, Rows, and the same rows drawn as a
+  * chart ([[ChartPane]]) in another, Chart. ⌘⏎ (Ctrl+Enter) anywhere in it
+  * runs the query. The job's SQL console and the data viewer's query tabs are
+  * each one.
   *
   * The query runs on a worker thread against the catalog `prepare` gives.
   * `prepare` itself runs on the FX thread as the query starts, so it can read
@@ -29,11 +32,12 @@ import scala.util.control.NonFatal
 final class QueryConsole(
     owner: () => Stage,
     prepare: () => String => Catalog,
-    persistDir: () => Option[String]
+    persistDir: () => Option[String],
+    orientation: Orientation = Orientation.HORIZONTAL
 ) extends SplitPane {
 
   private lazy val shortcutHint: String =
-    if (System.getProperty("os.name", "").toLowerCase.contains("mac")) "⌘⏎" else "Ctrl+Enter"
+    if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac")) "⌘⏎" else "Ctrl+Enter"
 
   // ---- Editor --------------------------------------------------------------
   val editor = new SqlEditor()
@@ -61,18 +65,37 @@ final class QueryConsole(
 
   // ---- Results -------------------------------------------------------------
   private val results = new DataGrid()
-  results.getStyleClass.add(Styles.BORDERED)
+  results.getStyleClass.add(Tweaks.EDGE_TO_EDGE)
   results.setPlaceholderText(s"No result yet. Write a query and press Run query ($shortcutHint).")
+  private val chart = new ChartPane(owner)
 
-  // ---- Side by side: the editor (left) and the rows (right) ----------------
+  // Rows and Chart, a tab each; the chart is worked out while its tab shows.
+  private val rowsTab = new Tab("Rows", results)
+  rowsTab.setGraphic(Icons.table)
+  private val chartTab = new Tab("Chart", chart)
+  chartTab.setGraphic(Icons.barChart)
+  private val resultViews = new TabPane(rowsTab, chartTab)
+  resultViews.getStyleClass.add("result-views")
+  resultViews.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE)
+  resultViews.getSelectionModel.selectedItemProperty().addListener((_, _, tab) => chart.setActive(tab eq chartTab))
+
+  // ---- The editor (left, or top) and the result (right, or below) ----------
   private val editorColumn = new VBox(8, actionRow, editor)
-  editorColumn.setMinWidth(280)
-  editorColumn.setPrefWidth(460)
-  private val resultsColumn = new VBox(results)
-  VBox.setVgrow(results, Priority.ALWAYS)
+  private val resultsColumn = new VBox(resultViews)
+  VBox.setVgrow(resultViews, Priority.ALWAYS)
   getItems.addAll(editorColumn, resultsColumn)
   getStyleClass.add(Tweaks.EDGE_TO_EDGE)
-  setDividerPositions(0.4)
+  setOrientation(orientation)
+  if (orientation == Orientation.HORIZONTAL) {
+    editorColumn.setMinWidth(280)
+    editorColumn.setPrefWidth(460)
+    setDividerPositions(0.4)
+  } else {
+    editorColumn.setMinHeight(120)
+    resultsColumn.setMinHeight(80)
+    resultsColumn.setPadding(new Insets(8, 0, 0, 0))
+    setDividerPositions(0.36)
+  }
 
   // The shortcut is the console's, whichever control in it has focus.
   private val runCombo = new KeyCodeCombination(KeyCode.ENTER, KeyCombination.SHORTCUT_DOWN)
@@ -147,12 +170,14 @@ final class QueryConsole(
         p += 1
       }
       results.show(mv.schema, rows.toSeq)
+      chart.setResult(Some(mv))
       lastResult = Some(mv)
       persistButton.setDisable(false)
       val shown = if (total > rows.size) f" (showing the first ${rows.size}%,d)" else ""
       setStatus(f"$total%,d row(s) • $durationMs%,d ms$shown", error = false)
     case QueryConsole.Outcome.Failed(err) =>
       results.clear()
+      chart.setResult(None)
       lastResult = None
       persistButton.setDisable(true)
       setStatus("Query failed — see error popup.", error = true)

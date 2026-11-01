@@ -7,7 +7,7 @@ import java.nio.file.{Files, Path}
 
 /** The lineage across a folder: within a job what each table's SQL reads,
   * across jobs an input whose path is another job's table, and where the
-  * canvas draws it all. */
+  * canvas draws it, the whole folder or one table's lineage. */
 class LineageTest {
   import Fixtures._
 
@@ -113,5 +113,41 @@ class LineageTest {
       layout.hitTest(layout.nodeBoxes(table(l, "shop", "gold")).centerX, layout.nodeBoxes(table(l, "shop", "gold")).centerY))
     assertEquals(Some(Left(ds.indexOf("shop"))), layout.hitTest(box("shop").x + 4, box("shop").y + 4))
     assertTrue(layout.width >= box("report").right && layout.height >= box("shop").bottom)
+  }
+
+  /** One table's lineage draws only what it is made from and what is made
+    * from it, and a box only for the datasets those are in. */
+  @Test def aTablesLineageAlone(): Unit = {
+    val root = temp("lin-around-")
+    threeJobs(root, temp("lin-outside-"))
+    val l = Lineage.build(RunFolder.scan(root))
+    val ds = l.folder.datasets.map(_.name)
+
+    // The shop's gold table: the raw CSV and customers before it, nothing after.
+    val gold = table(l, "shop", "gold")
+    assertEquals(Set(input(l, "shop", "raw_customers"), table(l, "shop", "customers"), gold), l.around(gold))
+    val alone = LineageLayout.compute(l, Some(l.around(gold)))
+    assertEquals(l.around(gold), alone.nodeBoxes.keySet)
+    assertEquals(Set(ds.indexOf("shop")), alone.datasetBoxes.keySet)
+    assertTrue(alone.nodeBoxes(input(l, "shop", "raw_customers")).right < alone.nodeBoxes(table(l, "shop", "customers")).x)
+    assertTrue(alone.width < LineageLayout.compute(l).width)
+
+    // Marketing's segments: the shop before it and the report after, each
+    // box holding only the nodes in that lineage, in columns as before.
+    val segments = table(l, "marketing", "segments")
+    val across = LineageLayout.compute(l, Some(l.around(segments)))
+    assertEquals(Set("shop", "marketing", "report").map(ds.indexOf), across.datasetBoxes.keySet)
+    assertFalse(across.nodeBoxes.contains(table(l, "shop", "gold")))
+    val box = across.datasetBoxes
+    assertTrue(box(ds.indexOf("shop")).right < box(ds.indexOf("marketing")).x)
+    assertTrue(box(ds.indexOf("marketing")).right < box(ds.indexOf("report")).x)
+    across.nodeBoxes.foreach { case (n, b) =>
+      val d = box(n.dataset)
+      assertTrue(s"$n inside its dataset", b.x >= d.x && b.right <= d.right && b.y >= d.y && b.bottom <= d.bottom)
+    }
+
+    // A dataset's lineage: every node of it, and their lineages.
+    assertEquals(l.nodes.filter(_.dataset == ds.indexOf("report")).toSet ++
+      l.around(table(l, "report", "summary")), l.aroundDataset(ds.indexOf("report")))
   }
 }

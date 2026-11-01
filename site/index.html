@@ -66,7 +66,8 @@
             rerun, and the 15-table jaffle-shop example finishes in about two
             seconds. The desktop GUI draws the DAG, shows live task status,
             previews every output, and has a SQL console for poking at
-            results, in an editor that highlights SQL and takes vim's keys.
+            results, as rows or as a chart, in an editor that highlights SQL
+            and takes vim's keys.
           </p>
         </div>
         <div class="card">
@@ -265,10 +266,11 @@ totals match orders. Run it until everything passes.</pre>
         </p>
         <p class="muted">
           Then open the data viewer, a jar of its own, on the folder your jobs
-          write to. It shows every job's tables, draws their lineage within
-          each job and across jobs (one job's input read from another's
-          output), opens a sample of any table on a double-click, and runs SQL
-          over all of them in the same editor.
+          write to. It runs SQL over every job's tables in the same editor,
+          draws any result as a bar, line, area, scatter or pie chart you can
+          save as a PNG, and inspects any one of the tables with a click: its
+          rows, its columns, what its run recorded, and its lineage within its
+          job and across jobs (one job's input read from another's output).
         </p>
         <p><a class="btn primary" href="setup.html">Set up the example project</a></p>
       </div>

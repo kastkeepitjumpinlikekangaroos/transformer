@@ -35,13 +35,33 @@ scala_library(
     visibility = ["//visibility:public"],
 )
 
+# What a chart of a query's result draws, worked out with no JavaFX: what to
+# draw (ChartSpec: the type, the column along X, the columns up Y, how rows
+# sharing an X combine, a split into series), the series a result's rows make
+# (ChartData), and the ticks and labels along the axes (ChartScale). Its tests
+# drive it with rows and no toolkit; `components` draws it (ChartCanvas,
+# ChartPane).
+CHART = [
+    "ChartData.scala",
+    "ChartScale.scala",
+]
+
+scala_library(
+    name = "chart",
+    srcs = CHART,
+    visibility = ["//visibility:public"],
+    deps = ["//src/main/scala/com/transformer/core"],
+)
+
 # What every transformer GUI is built from, the job's and the data viewer's
 # (//src/main/scala/com/transformer/viewer): the theme and its stylesheet, the
 # SQL editor with its highlighting and vim keys, the SQL console, the grid that
-# shows rows, the canvas graphs are drawn on, icons and dialogs. One look and
-# one editor across both apps. `transformer.css` ships in the jar beside the
+# shows rows, the chart a result can be drawn as, the canvas graphs are drawn
+# on, icons and dialogs. One look and one editor across both apps. `transformer.css` ships in the jar beside the
 # classes, as com/transformer/gui/transformer.css.
 COMPONENTS = [
+    "ChartCanvas.scala",
+    "ChartPane.scala",
     "DataGrid.scala",
     "FxHelpers.scala",
     "GraphCanvas.scala",
@@ -79,6 +99,7 @@ scala_library(
     visibility = ["//visibility:public"],
     exports = [":vim"],
     deps = [
+        ":chart",
         ":vim",
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",
@@ -109,7 +130,7 @@ scala_library(
             "VimEngine.scala",
             "VimKey.scala",
             "VimText.scala",
-        ] + COMPONENTS,
+        ] + CHART + COMPONENTS,
     ),
     visibility = ["//visibility:public"],
     exports = [

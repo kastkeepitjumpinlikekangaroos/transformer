@@ -11,7 +11,8 @@ final case class Box(x: Double, y: Double, width: Double, height: Double) {
   def contains(px: Double, py: Double): Boolean = px >= x && px <= right && py >= y && py <= bottom
 }
 
-/** Where the lineage canvas draws each dataset and each node.
+/** Where the lineage canvas draws each dataset and each node: of the whole
+  * folder, or of the nodes in one table's lineage.
   *
   * A dataset is a box with a header. Inside it, its inputs stand in the first
   * column and its tables in columns after them, each table one column right
@@ -25,7 +26,7 @@ final case class Box(x: Double, y: Double, width: Double, height: Double) {
   * found in.
   */
 final class LineageLayout(
-    val datasetBoxes: IndexedSeq[Box],
+    val datasetBoxes: Map[Int, Box],
     val nodeBoxes: Map[NodeId, Box],
     val width: Double,
     val height: Double
@@ -33,7 +34,7 @@ final class LineageLayout(
   /** The node at a world point, else the dataset whose box holds it. */
   def hitTest(wx: Double, wy: Double): Option[Either[Int, NodeId]] =
     nodeBoxes.collectFirst { case (n, b) if b.contains(wx, wy) => Right(n) }
-      .orElse(datasetBoxes.indices.find(d => datasetBoxes(d).contains(wx, wy)).map(Left(_)))
+      .orElse(datasetBoxes.collectFirst { case (d, b) if b.contains(wx, wy) => Left(d) })
 }
 
 object LineageLayout {
@@ -53,23 +54,27 @@ object LineageLayout {
     * name. */
   val MinBoxWidth: Double = 260.0
 
-  def compute(lineage: Lineage): LineageLayout = {
-    val n = lineage.shownRuns.size
-    if (n == 0) return new LineageLayout(IndexedSeq.empty, Map.empty, 0.0, 0.0)
+  /** Lay out `only`'s nodes, and a box for each dataset they are in; every
+    * node and every dataset when `only` is None. */
+  def compute(lineage: Lineage, only: Option[Set[NodeId]] = None): LineageLayout = {
+    def drawn(node: NodeId): Boolean = only.forall(_.contains(node))
+    val datasets = lineage.shownRuns.indices.filter(d => only.forall(_.exists(_.dataset == d)))
+    if (datasets.isEmpty) return new LineageLayout(Map.empty, Map.empty, 0.0, 0.0)
+    val edges = lineage.edges.filter { case (a, b) => drawn(a) && drawn(b) }
 
     // Each dataset's nodes, column by column, and the size of its box.
-    val inner = (0 until n).map(d => innerColumns(lineage, d))
-    val boxSizes = inner.map { cols =>
+    val inner = datasets.map(d => d -> innerColumns(lineage, d, drawn)).toMap
+    val boxSizes = inner.map { case (d, cols) =>
       val tallest = cols.map(_.size).maxOption.getOrElse(0)
       val w = cols.size * NodeWidth + math.max(0, cols.size - 1) * ColumnGap + 2 * BoxPadding
       val h = HeaderHeight + tallest * NodeHeight + math.max(0, tallest - 1) * NodeGap + BoxPadding
-      (math.max(MinBoxWidth, w), math.max(HeaderHeight + BoxPadding, h))
+      d -> (math.max(MinBoxWidth, w), math.max(HeaderHeight + BoxPadding, h))
     }
 
     // Where each node stands in its box, from the box's top left: each column
     // centred on the box's tallest.
     val offsets = mutable.LinkedHashMap.empty[NodeId, (Double, Double)]
-    (0 until n).foreach { d =>
+    datasets.foreach { d =>
       val cols = inner(d)
       val tallest = cols.map(_.size).maxOption.getOrElse(0)
       val fullHeight = tallest * NodeHeight + math.max(0, tallest - 1) * NodeGap
@@ -83,52 +88,61 @@ object LineageLayout {
     }
 
     // Columns of boxes: one right of the furthest dataset a dataset reads.
-    val reads: Map[Int, Seq[Int]] = lineage.datasetEdges.groupBy(_._2).map { case (b, es) => b -> es.map(_._1) }
-    val column = longestPath(n, d => reads.getOrElse(d, Nil))
-    val columns = (0 to column.max).map(c => (0 until n).filter(column(_) == c))
-    val y = new Array[Double](n)
-    val x = new Array[Double](n)
+    // `datasets(i)` is box i.
+    val box = datasets.zipWithIndex.toMap
+    val reads: Map[Int, Seq[Int]] = edges.collect {
+      case (t: NodeId.Table, i: NodeId.Input) if t.dataset != i.dataset => (box(t.dataset), box(i.dataset))
+    }.distinct.groupBy(_._2).map { case (b, es) => b -> es.map(_._1) }
+    val column = longestPath(datasets.size, i => reads.getOrElse(i, Nil))
+    val columns = (0 to column.max).map(c => datasets.indices.filter(column(_) == c))
+    val y = new Array[Double](datasets.size)
+    val x = new Array[Double](datasets.size)
     // The top a box would take for its inputs to stand level with the tables
     // they read in the columns before it; None for one that reads none.
-    def wantedTop(d: Int): Option[Double] = barycenter(lineage.edges.collect {
-      case (t: NodeId.Table, i: NodeId.Input) if i.dataset == d && t.dataset != d && column(t.dataset) < column(d) =>
-        y(t.dataset) + offsets(t)._2 - offsets(i)._2
+    def wantedTop(i: Int): Option[Double] = barycenter(edges.collect {
+      case (t: NodeId.Table, in: NodeId.Input)
+          if in.dataset == datasets(i) && t.dataset != in.dataset && column(box(t.dataset)) < column(i) =>
+        y(box(t.dataset)) + offsets(t)._2 - offsets(in)._2
     })
     var left = Margin
     var bottom = 0.0
     columns.foreach { members =>
       // Stacked in the order of where they would stand, else by name, each
       // as near that place as the boxes above it allow.
-      val ordered = members.sortBy(d => (wantedTop(d).getOrElse(Double.MaxValue), d))
+      val ordered = members.sortBy(i => (wantedTop(i).getOrElse(Double.MaxValue), i))
       var top = Margin
-      ordered.foreach { d =>
-        x(d) = left
-        y(d) = math.max(top, wantedTop(d).getOrElse(top))
-        top = y(d) + boxSizes(d)._2 + BoxGap
+      ordered.foreach { i =>
+        x(i) = left
+        y(i) = math.max(top, wantedTop(i).getOrElse(top))
+        top = y(i) + boxSizes(datasets(i))._2 + BoxGap
       }
       bottom = math.max(bottom, top - BoxGap)
-      left += members.map(boxSizes(_)._1).maxOption.getOrElse(0.0) + BoxColumnGap
+      left += members.map(i => boxSizes(datasets(i))._1).maxOption.getOrElse(0.0) + BoxColumnGap
     }
-    val datasetBoxes = (0 until n).map(d => Box(x(d), y(d), boxSizes(d)._1, boxSizes(d)._2))
+    val datasetBoxes = datasets.indices.map { i =>
+      val (w, h) = boxSizes(datasets(i))
+      datasets(i) -> Box(x(i), y(i), w, h)
+    }.toMap
     val nodeBoxes = offsets.map { case (node, (dx, dy)) =>
-      node -> Box(x(node.dataset) + dx, y(node.dataset) + dy, NodeWidth, NodeHeight)
+      val b = datasetBoxes(node.dataset)
+      node -> Box(b.x + dx, b.y + dy, NodeWidth, NodeHeight)
     }
     val width = left - BoxColumnGap + Margin
     new LineageLayout(datasetBoxes, nodeBoxes.toMap, width, bottom + Margin)
   }
 
-  /** A dataset's nodes in columns: its inputs first, then its tables, each one
-    * column right of the furthest table it reads. */
-  private def innerColumns(lineage: Lineage, d: Int): IndexedSeq[IndexedSeq[NodeId]] = {
+  /** A dataset's drawn nodes in columns: its inputs first, then its tables,
+    * each one column right of the furthest table it reads. */
+  private def innerColumns(lineage: Lineage, d: Int, drawn: NodeId => Boolean): IndexedSeq[IndexedSeq[NodeId]] = {
     val run = lineage.shownRuns(d)
-    val inputs = run.inputs.map(i => NodeId.Input(d, i.name): NodeId).toIndexedSeq
-    val tables = run.tables.map(t => NodeId.Table(d, t.name): NodeId)
+    val inputs = run.inputs.map(i => NodeId.Input(d, i.name): NodeId).filter(drawn).toIndexedSeq
+    val tables = run.tables.map(t => NodeId.Table(d, t.name): NodeId).filter(drawn)
     val tableIndex = tables.zipWithIndex.toMap
     val readsTables: Int => Seq[Int] = i =>
       lineage.upstream(tables(i)).flatMap(tableIndex.get).filter(_ != i)
     val depth = longestPath(tables.size, readsTables)
     val tableColumns = (0 to depth.maxOption.getOrElse(-1)).map(c => tables.indices.filter(depth(_) == c))
-    val all = (if (inputs.nonEmpty) IndexedSeq(inputs.indices.map(inputs)) else IndexedSeq.empty) ++
+    val all = (if (inputs.nonEmpty) IndexedSeq(inputs) else IndexedSeq.empty) ++
       tableColumns.map(_.map(tables))
     // Order each column by where the nodes it reads stand in the columns
     // before it: one sweep, left to right.

@@ -1,8 +1,9 @@
 load("@rules_scala//scala:scala.bzl", "scala_library")
 
 # The data viewer's model: a folder of job outputs as datasets, the lineage
-# across them, where the canvas draws it, and the catalog queries run against.
-# No JavaFX, so its tests run without the toolkit, as gui:session's do.
+# across them, where the canvas draws it, the catalog queries run against, and
+# what an inspector tab shows and has shown. No JavaFX, so its tests run
+# without the toolkit, as gui:session's do.
 MODEL = [
     "Lineage.scala",
     "LineageLayout.scala",
@@ -21,10 +22,10 @@ scala_library(
     ],
 )
 
-# The data viewer: a standalone JavaFX app (//:transformer_viewer) to explore
-# every dataset in a folder of job outputs, their lineage, samples of their
-# tables, and SQL across them. Built from the same components as the job GUI
-# (//src/main/scala/com/transformer/gui:components).
+# The data viewer: a standalone JavaFX app (//:transformer_viewer) to query a
+# folder of job outputs in SQL and inspect each table: its rows, its columns,
+# what its run recorded about it, and its lineage. Built from the same
+# components as the job GUI (//src/main/scala/com/transformer/gui:components).
 scala_library(
     name = "viewer",
     srcs = glob(

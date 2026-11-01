@@ -1,8 +1,23 @@
 load("@rules_scala//scala:scala.bzl", "scala_junit_test")
 
-# The session, layout and vim tests depend on `gui:session` or `gui:vim` alone,
-# so they run with no JavaFX on the classpath; the highlighter and key-event
-# tests need the shared `gui:components`, and the rest the job GUI's `gui`.
+# The session, layout, vim and chart tests depend on `gui:session`, `gui:vim`
+# or `gui:chart` alone, so they run with no JavaFX on the classpath; the
+# highlighter and key-event tests need the shared `gui:components`, and the
+# rest the job GUI's `gui`.
+
+scala_junit_test(
+    name = "chart_test",
+    srcs = [
+        "ChartDataTest.scala",
+        "ChartScaleTest.scala",
+    ],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/gui:chart",
+        "@maven//:junit_junit",
+    ],
+)
 
 scala_junit_test(
     name = "vim_engine_test",

@@ -5,9 +5,11 @@ import com.transformer.gui.{Icons, Theme}
 import com.transformer.job.TaskRunStatus
 
 import javafx.geometry.{Insets, Pos}
-import javafx.scene.control.{ContextMenu, Label, MenuItem, SeparatorMenuItem, TextField, TreeCell, TreeItem, TreeView}
-import javafx.scene.input.{Clipboard, ClipboardContent, MouseButton, MouseEvent}
-import javafx.scene.layout.{HBox, Priority, Region, VBox}
+import javafx.scene.Node
+import javafx.scene.control.{Button, ContextMenu, Label, MenuItem, SeparatorMenuItem, TextField, TreeCell, TreeItem,
+  TreeView}
+import javafx.scene.input.{Clipboard, ClipboardContent, KeyCode, KeyEvent, MouseButton, MouseEvent}
+import javafx.scene.layout.{HBox, Priority, Region, StackPane, VBox}
 import javafx.scene.shape.Circle
 
 import java.util.Locale
@@ -24,16 +26,31 @@ object TreeEntry {
 
 /** The folder's datasets down the side of the window: each with its tables,
   * and under them the inputs it read from outside the folder, with a field
-  * that filters by name. Selecting an item selects it in the lineage and the
-  * details too; double-clicking a table or an input opens a sample of its
-  * rows, and its menu also queries it or copies its name or path. */
+  * that filters by name.
+  *
+  * Selecting an item, by a click or the arrow keys, opens it in the
+  * workspace's preview tab (`onOpen` with `keep` false); a double-click on a
+  * table or an input, or Enter on any item, opens it in a tab it keeps. Its menu also opens its lineage,
+  * queries it in a new tab, puts its name in the query being written, and
+  * copies its name or path. The item selected follows the session's
+  * selection, which is what the tab in front inspects. With nothing to list
+  * it says why, and offers to open a folder.
+  */
 final class DatasetTree(session: ViewerSession) extends VBox {
   import Theme.Palette
 
-  private var onActivate: NodeId => Unit = _ => ()
+  private var onOpen: (ViewerSelection, Boolean) => Unit = (_, _) => ()
+  private var onLineage: ViewerSelection => Unit = _ => ()
   private var onQuery: NodeId => Unit = _ => ()
-  def setOnActivate(f: NodeId => Unit): Unit = onActivate = f
+  private var onInsert: NodeId => Unit = _ => ()
+  private var onOpenFolder: () => Unit = () => ()
+  /** Open a selection: `keep` for a tab of its own, else in the preview tab. */
+  def setOnOpen(f: (ViewerSelection, Boolean) => Unit): Unit = onOpen = f
+  def setOnLineage(f: ViewerSelection => Unit): Unit = onLineage = f
   def setOnQuery(f: NodeId => Unit): Unit = onQuery = f
+  /** Put a table's name in the query being written. */
+  def setOnInsert(f: NodeId => Unit): Unit = onInsert = f
+  def setOnOpenFolder(f: () => Unit): Unit = onOpenFolder = f
 
   getStyleClass.addAll("panel", "dataset-tree")
 
@@ -49,28 +66,51 @@ final class DatasetTree(session: ViewerSession) extends VBox {
   tree.setShowRoot(false)
   tree.getStyleClass.addAll(Tweaks.EDGE_TO_EDGE, Styles.DENSE)
   tree.setCellFactory(_ => new EntryCell)
-  VBox.setVgrow(tree, Priority.ALWAYS)
-  getChildren.addAll(top, tree)
+
+  // What shows over the list when it is empty: why, and what to do.
+  private val emptyTitle = new Label()
+  emptyTitle.getStyleClass.add("empty-title")
+  emptyTitle.setWrapText(true)
+  private val emptyText = new Label()
+  emptyText.getStyleClass.add("hint")
+  emptyText.setWrapText(true)
+  private val openButton = new Button("Open Folder…", Icons.folder)
+  openButton.getStyleClass.add(Styles.SMALL)
+  openButton.setOnAction(_ => onOpenFolder())
+  private val empty = new VBox(8, emptyTitle, emptyText, openButton)
+  empty.getStyleClass.add("tree-empty")
+  empty.setPadding(new Insets(16, 14, 16, 14))
+  empty.setMaxHeight(Region.USE_PREF_SIZE)
+  StackPane.setAlignment(empty, Pos.TOP_LEFT)
+  private val listArea = new StackPane(tree, empty)
+  VBox.setVgrow(listArea, Priority.ALWAYS)
+  getChildren.addAll(top, listArea)
 
   private val items = mutable.Map.empty[TreeEntry, TreeItem[TreeEntry]]
   private var builtFrom: Option[Lineage] = None
   /** Set while the tree selects what the session already has selected. */
   private var syncing = false
 
-  tree.getSelectionModel.selectedItemProperty().addListener((_, _, item) => if (!syncing && item != null) {
-    item.getValue match {
-      case TreeEntry.OfDataset(d) => session.select(Some(ViewerSelection.OfDataset(d)))
-      case TreeEntry.OfNode(n) => session.select(Some(ViewerSelection.OfNode(n)))
-      case TreeEntry.Sources(d) => session.select(Some(ViewerSelection.OfDataset(d)))
-    }
+  tree.getSelectionModel.selectedItemProperty().addListener((_, _, item) =>
+    if (!syncing && item != null) onOpen(selectionOf(item.getValue), false))
+  tree.addEventHandler(KeyEvent.KEY_PRESSED, (e: KeyEvent) => if (e.getCode == KeyCode.ENTER) {
+    selected.foreach(onOpen(_, true))
+    e.consume()
   })
-  tree.addEventHandler(MouseEvent.MOUSE_CLICKED, (e: MouseEvent) =>
-    if (e.getButton == MouseButton.PRIMARY && e.getClickCount == 2) selectedNode.foreach(onActivate))
   tree.setContextMenu(contextMenu())
 
   filter.textProperty().addListener((_, _, _) => rebuild())
   session.addListener(() => refresh())
   refresh()
+
+  private def selectionOf(e: TreeEntry): ViewerSelection = e match {
+    case TreeEntry.OfDataset(d) => ViewerSelection.OfDataset(d)
+    case TreeEntry.OfNode(n) => ViewerSelection.OfNode(n)
+    case TreeEntry.Sources(d) => ViewerSelection.OfDataset(d)
+  }
+
+  private def selected: Option[ViewerSelection] =
+    Option(tree.getSelectionModel.getSelectedItem).map(i => selectionOf(i.getValue))
 
   private def selectedNode: Option[NodeId] =
     Option(tree.getSelectionModel.getSelectedItem).map(_.getValue).collect { case TreeEntry.OfNode(n) => n }
@@ -78,6 +118,26 @@ final class DatasetTree(session: ViewerSession) extends VBox {
   private def refresh(): Unit = {
     if (session.lineage ne builtFrom.orNull) rebuild()
     syncSelection()
+    showEmpty()
+  }
+
+  /** Say why the list is empty, while it is. */
+  private def showEmpty(): Unit = {
+    val (title, text) = (session.scanning, session.folder) match {
+      case (Some(dir), _) => ("Looking for job outputs…", dir.toString)
+      case (None, None) => ("No folder open", "Open a folder of job outputs: a directory holding the job.json each run writes, at any depth.")
+      case (None, Some(f)) if f.datasets.isEmpty =>
+        ("No job outputs here", (Seq(s"${f.root} holds no job.json, as `transformer run` writes one.") ++ f.warnings.take(4))
+          .mkString("\n\n"))
+      case (None, Some(_)) if tree.getRoot == null || tree.getRoot.getChildren.isEmpty =>
+        ("Nothing matches", s"No dataset, table or input is named like '${filter.getText.trim}'.")
+      case _ => ("", "")
+    }
+    emptyTitle.setText(title)
+    emptyText.setText(text)
+    openButton.setVisible(session.scanning.isEmpty && title != "Nothing matches")
+    openButton.setManaged(openButton.isVisible)
+    empty.setVisible(title.nonEmpty)
   }
 
   private def rebuild(): Unit = {
@@ -111,6 +171,7 @@ final class DatasetTree(session: ViewerSession) extends VBox {
     syncing = true
     try tree.setRoot(root) finally syncing = false
     syncSelection()
+    showEmpty()
   }
 
   private def entry(e: TreeEntry): TreeItem[TreeEntry] = {
@@ -140,20 +201,26 @@ final class DatasetTree(session: ViewerSession) extends VBox {
   }
 
   private def contextMenu(): ContextMenu = {
-    val sample = new MenuItem("Open sample")
-    sample.setOnAction(_ => selectedNode.foreach(onActivate))
-    val query = new MenuItem("Query in a new tab")
+    val keep = new MenuItem("Open in New Tab")
+    keep.setOnAction(_ => selected.foreach(onOpen(_, true)))
+    val lineage = new MenuItem("Show Lineage")
+    lineage.setOnAction(_ => selected.foreach(onLineage))
+    val query = new MenuItem("Query in New Tab")
     query.setOnAction(_ => selectedNode.foreach(onQuery))
-    val copyName = new MenuItem("Copy SQL name")
+    val insert = new MenuItem("Insert Name into Query")
+    insert.setOnAction(_ => selectedNode.foreach(onInsert))
+    val copyName = new MenuItem("Copy SQL Name")
     copyName.setOnAction(_ => selectedNode.flatMap(session.queryCatalog.sqlName).foreach(copy))
-    val copyPath = new MenuItem("Copy path")
+    val copyPath = new MenuItem("Copy Path")
     copyPath.setOnAction(_ => selectedPath.foreach(copy))
-    val menu = new ContextMenu(sample, query, new SeparatorMenuItem(), copyName, copyPath)
+    val menu = new ContextMenu(keep, lineage, new SeparatorMenuItem(), query, insert, new SeparatorMenuItem(),
+      copyName, copyPath)
     menu.setOnShowing(_ => {
-      val node = selectedNode
-      val queryable = node.flatMap(session.queryCatalog.sqlName).isDefined
-      sample.setDisable(!queryable)
+      val queryable = selectedNode.flatMap(session.queryCatalog.sqlName).isDefined
+      keep.setDisable(selected.isEmpty)
+      lineage.setDisable(selected.isEmpty)
       query.setDisable(!queryable)
+      insert.setDisable(!queryable)
       copyName.setDisable(!queryable)
       copyPath.setDisable(selectedPath.isEmpty)
     })
@@ -177,8 +244,25 @@ final class DatasetTree(session: ViewerSession) extends VBox {
     ()
   }
 
-  /** A row: a mark (a status dot, or an icon), the name, and a count. */
+  /** A row: a mark (a status dot, or an icon), the name, and a count. A
+    * click opens its item, as selecting it does, so clicking the item
+    * already selected brings it to the front again; a double-click on a
+    * table or an input keeps it in a tab of its own, while on a dataset it
+    * opens or closes the branch, as a tree does. A click on the arrow only
+    * opens or closes the branch. */
   private final class EntryCell extends TreeCell[TreeEntry] {
+    // As wide as the list, never wider: a long name ends in an ellipsis and
+    // the count beside it stays in view, with no sideways scrolling.
+    setPrefWidth(0)
+    addEventHandler(MouseEvent.MOUSE_CLICKED, (e: MouseEvent) =>
+      if (e.getButton == MouseButton.PRIMARY && !isEmpty && getItem != null && !onArrow(e.getTarget))
+        onOpen(selectionOf(getItem), e.getClickCount == 2 && getTreeItem != null && getTreeItem.isLeaf))
+
+    private def onArrow(target: AnyRef): Boolean = target match {
+      case n: Node => Option(getDisclosureNode).exists(d => Iterator.iterate(n)(_.getParent).takeWhile(_ != null).contains(d))
+      case _ => false
+    }
+
     override def updateItem(item: TreeEntry, empty: Boolean): Unit = {
       super.updateItem(item, empty)
       setText(null)

@@ -316,6 +316,21 @@ to `CsvWriter.writePartitioned` or `ParquetWriter.writePartitioned`, honouring
 extend the format switch in `ResultPersister` and the dropdown in
 `PersistDialog`.
 
+Every `QueryConsole` (the job GUI's SQL console, the viewer's query tabs) has
+a Chart tab beside its rows, a `ChartPane` over a `ChartCanvas` in
+`gui:components`, drawing what `gui:chart` works out:
+
+- **A new kind of chart**: a case of `ChartType`; in `ChartData.build`,
+  whether it combines rows per X (`combined`) or draws them as they are
+  (`scatter`), and whether it runs along an axis (`Builder.alongAxis`); in
+  `ChartCanvas`, a paint method beside `paintBars` and `paintLines`, a
+  `Hover` and its case in `hit` and `tip`, and a legend swatch in
+  `paintLegend`; an icon in `Icons` and its case in `ChartPane.icon`. Cover
+  what it draws in `gui/chart_test` and list it in README's Charts section.
+- **A new way to combine rows**: a case of `Aggregation` and of `Acc.value`
+  (an `Acc` merges, so what it needs from the rows must merge too: Other is
+  made by merging), and a case in `ChartDataTest.eachAggregationAsSqlHasIt`.
+
 ### Extend the data viewer
 
 The viewer reads only run records, so what it shows about a run is what
@@ -325,17 +340,24 @@ The viewer reads only run records, so what it shows about a run is what
 `JobRunRecord.read` / `TaskRunRecord.read` as absent for an older record, and
 check it in `DataJobTest` and, for `job.json`, the `Hydration` oracle (which
 builds every entry it expects, field for field). Then read it in
-`viewer:model` and show it in `DetailsPanel`.
+`viewer:model` and show it in `DetailsPanel` (an inspector's Details view) or
+in the inspector's header (`InspectorPane.renderHeader`).
 
 - **A new kind of lineage**: `Lineage.build` makes the nodes and edges. An
   edge into an input comes from `TableIndex.sourceOf`, which matches the
   input's recorded path against every table's directory; a new way for a path
   to name a table (a partition directory above a table, say) is a case there
   and a test in `viewer/LineageTest`.
-- **A new panel or tab**: a JavaFX node over `ViewerSession` (register a
-  listener, read accessors), wired in `ViewerApp.start`; `ViewerTabs` holds
-  the closable tabs. Selection goes through `ViewerSession.select`, so the
-  tree, the lineage and the details follow it.
+- **A new view of a table**: a case of `InspectorView` (in `viewer:model`,
+  with the subjects that have it in `InspectorView.of` and a case in
+  `InspectorHistoryTest.theViewsOfEachSubject`), and a case in
+  `InspectorPane.fill` that builds its node for one subject from the session
+  as it is. The pane is built when the view is first turned to and again on
+  a new subject or run, so it needs no listener of its own.
+- **A new kind of tab**: `ViewerTabs` holds every tab, and is the one
+  listener on `ViewerSession` for them. Selection goes through
+  `ViewerTabs.inspect`, which picks the tab and sets
+  `ViewerSession.select`, so the list follows the tab in front.
 - **Query names**: `QueryCatalog.apply` names each table and outside input
   (`<dataset>__<table>`); `catalogFor` registers what a query reads.
 

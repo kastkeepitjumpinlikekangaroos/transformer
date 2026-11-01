@@ -8,7 +8,9 @@ import org.junit.{After, Test}
 import java.nio.file.Path
 
 /** Queries in the viewer: each table is `<dataset>__<table>`, a query joins
-  * tables of different jobs, and a name the folder lacks says what it has. */
+  * tables of different jobs, and a name the folder lacks says what it has;
+  * and the session keeps its place as runs change and the folder is read
+  * again. */
 class QueryCatalogTest {
   import Fixtures._
 
@@ -73,6 +75,10 @@ class QueryCatalogTest {
     run(s"$root/broken", Nil, Seq("bad" -> "SELECT no_such_column FROM (SELECT 1 AS x) t"))
     val cat = session(root).queryCatalog
     assertEquals("broken__bad has no rows on disk: its task Failed in the run shown", error(cat, "SELECT * FROM broken__bad"))
+    // The inspector's Data says the same, though the table has no SQL name.
+    assertEquals(None, cat.sqlName(NodeId.Table(0, "bad")))
+    assertEquals(Some("broken__bad has no rows on disk: its task Failed in the run shown"),
+      cat.unreadable(NodeId.Table(0, "bad")))
   }
 
   /** Showing another run of a dataset reads that run's tables. */
@@ -89,5 +95,30 @@ class QueryCatalogTest {
     val older = s.queryCatalog.entry(NodeId.Table(0, "customers")).get.asInstanceOf[QueryEntry.Table]
     assertEquals("day=20260101", older.dir.getParent.getFileName.toString)
     assertEquals(Some(ViewerSelection.OfNode(NodeId.Table(0, "gold"))), s.selection)
+  }
+
+  /** Reading the folder again keeps the selection on the same table, though
+    * a dataset added before it moves its index; what is gone is dropped. */
+  @Test def readingTheFolderAgainKeepsTheSelection(): Unit = {
+    val root = temp("qc-reload-")
+    shop(s"$root/shop", rawCustomers(temp("qc-raw-")))
+    val s = session(root)
+    val before = s.folder.get
+    s.select(Some(ViewerSelection.OfNode(NodeId.Table(0, "gold"))))
+    marketing(s"$root/marketing", s"$root/shop/customers")
+    s.open(RunFolder.scan(root))
+    assertEquals(Vector("marketing", "shop"), s.datasets.map(_.name))
+    assertEquals(Some(ViewerSelection.OfNode(NodeId.Table(1, "gold"))), s.selection)
+    assertEquals(Some(ViewerSelection.OfDataset(1)), s.relocate(ViewerSelection.OfDataset(0), before))
+    assertEquals(Some(ViewerSelection.OfNode(NodeId.Input(1, "raw_customers"))),
+      s.relocate(ViewerSelection.OfNode(NodeId.Input(0, "raw_customers")), before))
+    assertEquals(None, s.relocate(ViewerSelection.OfNode(NodeId.Table(0, "no_such_table")), before))
+    assertTrue(s.queryCatalog.sqlName(NodeId.Table(1, "gold")).contains("shop__gold"))
+
+    // A folder without the dataset drops the selection.
+    val other = temp("qc-other-")
+    run(s"$other/finance", Nil, Seq("totals" -> "SELECT 1 AS one"))
+    s.open(RunFolder.scan(other))
+    assertEquals(None, s.selection)
   }
 }

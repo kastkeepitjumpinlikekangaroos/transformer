@@ -24,9 +24,9 @@ scala_binary(
 )
 
 # The data viewer, a jar of its own: `bazel build //:transformer_viewer_deploy.jar`,
-# then `java -jar bazel-bin/transformer_viewer_deploy.jar [folder]` explores
-# every job output in a folder: their lineage, samples of their tables, and SQL
-# across them. See README.md "Data viewer".
+# then `java -jar bazel-bin/transformer_viewer_deploy.jar [folder]` queries
+# every job output in a folder in SQL and inspects each table: its rows, its
+# columns, its run's record of it, and its lineage. See README.md "Data viewer".
 scala_binary(
     name = "transformer_viewer",
     main_class = "com.transformer.viewer.ViewerMain",

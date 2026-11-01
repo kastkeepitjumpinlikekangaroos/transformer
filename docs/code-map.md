@@ -103,10 +103,24 @@ navigation hint, not a comprehensive directory listing.
   pan/zoom, the dot grid, cards, edges, fitting text, and `GraphOverlay` (the
   zoom controls). `gui/DagCanvas.scala` (~270 LOC) draws the job's DAG on it
   (per-input load state beside per-task status, `DagOverlay`'s status counts),
-  and `viewer/LineageCanvas.scala` (~260 LOC) a folder's lineage.
-- `viewer/DetailsPanel.scala` (~480 LOC) — the data viewer's Details tab: a
-  table, an input, a dataset (with its run picker) or the folder, each built
-  afresh on a change of selection or of the run shown.
+  and `viewer/LineageCanvas.scala` (~450 LOC) a table's lineage, or the
+  whole folder's (cards that show their names alone, wrapped, when zoomed
+  out; `LineageOverlay`, the switch between the two and the counts).
+- `gui/ChartCanvas.scala` (~720 LOC) — a query's chart on a plain canvas:
+  the layout (legend, Y's ticks, X's labels flat or aslant and thinned), a
+  paint method per kind (bars, lines and areas, dots, the pie and its list),
+  the pointer's reading (`hit`, `tip`, `paintTip`) and `image`, the paint
+  again at a scale for a PNG. What it paints comes from `gui:chart`:
+  `gui/ChartData.scala` (~470 LOC: `ChartSpec` and `fit`, then `Builder`,
+  one pass into accumulators per X and series, then the series in order,
+  folded into Other) and `gui/ChartScale.scala` (~190 LOC: ticks and labels).
+  `gui/ChartPane.scala` (~350 LOC) is the Chart tab around it.
+- `viewer/InspectorPane.scala` (~550 LOC) — the data viewer's inspector tab:
+  its header (status, dataset and run, the SQL name, Query, a dataset's run
+  picker), its views built as each is first turned to, Back and Forward, and
+  the grid views (`SamplePane`, `ColumnsPane`, `TablesPane`). The Details view
+  is `viewer/DetailsPanel.scala` (~340 LOC); the tabs around them are
+  `viewer/ViewerTabs.scala` (~270 LOC: query tabs, the preview tab).
 - `sql/exec/JoinExec.scala` (~1040 LOC) — equi-join build + probe paths
   with build/probe role mirroring, the LongHashMap fast path, and
   per-batch `evalVec` key extraction for computed join keys on both

@@ -21,6 +21,27 @@ object Icons {
   def database: Node = icon("M3 4.5 C3 2.5 13 2.5 13 4.5 C13 6.5 3 6.5 3 4.5 V11.5 C3 13.5 13 13.5 13 11.5 V4.5")
   def table: Node = icon("M2.5 3.5 H13.5 V12.5 H2.5 Z M2.5 6.5 H13.5 M6.5 6.5 V12.5")
   def search: Node = icon("M7 2.5 A4.5 4.5 0 1 1 6.99 2.5 Z M10.3 10.3 L13.5 13.5")
+  /** A query: a prompt and a line to type on. */
+  def console: Node = icon("M3 4.5 L6.5 8 L3 11.5 M8.5 11.5 H13")
+  def back: Node = icon("M10 3.5 L5.5 8 L10 12.5")
+  def forward: Node = icon("M6 3.5 L10.5 8 L6 12.5")
+  /** Lineage: one node feeding two. */
+  def lineage: Node = icon("M2.5 8 H6.5 M6.5 8 C8.5 8 8.5 4.5 10.5 4.5 H13.5 M6.5 8 C8.5 8 8.5 11.5 10.5 11.5 H13.5")
+  def barChart: Node = icon("M2 13 H14 M3.25 13 V8.5 H5.75 V13 M6.75 13 V3.5 H9.25 V13 M10.25 13 V6.5 H12.75 V13")
+  def lineChart: Node = icon("M2.5 12 L6 7.5 L9 10 L13.5 4")
+  def areaChart: Node = icon("M2.5 12.5 V9.5 L6 6 L9 8.5 L13.5 4 V12.5 Z", solid = true)
+  /** Dots, each a circle drawn as two arcs. */
+  def scatterChart: Node = icon(
+    "M2.7 11 a1.3 1.3 0 1 0 2.6 0 a1.3 1.3 0 1 0 -2.6 0 Z " +
+    "M5.2 6.5 a1.3 1.3 0 1 0 2.6 0 a1.3 1.3 0 1 0 -2.6 0 Z " +
+    "M8.2 9 a1.3 1.3 0 1 0 2.6 0 a1.3 1.3 0 1 0 -2.6 0 Z " +
+    "M10.7 4.5 a1.3 1.3 0 1 0 2.6 0 a1.3 1.3 0 1 0 -2.6 0 Z " +
+    "M10.7 11.5 a1.3 1.3 0 1 0 2.6 0 a1.3 1.3 0 1 0 -2.6 0 Z",
+    solid = true)
+  /** A pie with a slice drawn out of it. */
+  def pieChart: Node = icon("M8 2.5 A5.5 5.5 0 1 0 13.5 8 H8 Z M9.5 6.5 V2 A4.5 4.5 0 0 1 14 6.5 Z")
+  /** Saving to a file: an arrow down onto a line. */
+  def download: Node = icon("M8 2.5 V10 M4.5 6.5 L8 10 L11.5 6.5 M3 13 H13")
 
   private def icon(path: String, solid: Boolean = false): Node = {
     val p = new SVGPath()

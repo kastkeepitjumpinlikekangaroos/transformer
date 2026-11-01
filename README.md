@@ -23,9 +23,10 @@ Python environment, only Java 21.
   seconds on one Apple M4 (8 cores, 16 GB). See
   [Heavy-load example: polymarket](#heavy-load-example-polymarket).
 
-A second jar, the [data viewer](#data-viewer), opens a folder of job outputs:
-every table the jobs wrote, the lineage across them, a sample of any table's
-rows, and SQL over all of them.
+A second jar, the [data viewer](#data-viewer), opens a folder of job outputs
+for SQL over every table the jobs wrote, with each result drawn as a chart if
+you like, and for inspecting any of those tables: its rows, its columns, what
+its run recorded about it, and its lineage across jobs.
 
 The project website lives in [`site/`](site/). Open `site/index.html` in a
 browser; it is static HTML with no build step.
@@ -296,8 +297,9 @@ Layout:
   status, its SQL, its failing rows, and an Edit… button that opens it in
   the validation editor, which writes back to
   `tables/<view>/validations/<name>.sql`), **SQL console** (ad-hoc SQL over the
-  inputs and the task outputs on disk; ⌘⏎ / Ctrl+Enter runs it and Persist
-  writes the result), and **Run log**.
+  inputs and the task outputs on disk; ⌘⏎ / Ctrl+Enter runs it, its result
+  shows as rows or as a [chart](#charts), and Persist writes it), and **Run
+  log**.
 
 Node colours:
 
@@ -409,9 +411,10 @@ vim engine, as `//src/main/scala/com/transformer/gui:vim`.
 ## Data viewer
 
 A second desktop app, a jar of its own, for what your jobs wrote: open a
-folder of job outputs and see every dataset in it, how its tables were made
-from each other within a job and across jobs, a sample of any table's rows,
-and SQL over all of them.
+folder of job outputs, query every table in it with SQL, chart what a query
+returns, and inspect any one of the tables: its rows, its columns, what its
+run recorded about it, and how it was made from other tables, within its job
+and across jobs.
 
 ```bash
 bazel build //:transformer_viewer_deploy.jar
@@ -434,30 +437,59 @@ down, so this folder holds three datasets:
 
 The runs of one job writing to a templated directory are one dataset, named
 without the part the template fills in: the two `marketing` runs show as
-`marketing`, at its newest run, with a run picker in its details. A folder that
+`marketing`, at its newest run, with a run picker in its header. A folder that
 is itself one run's directory shows as one dataset, named after the folder.
 
 Layout:
 
-- **Header** — the folder, Open (⌘O) and Reload (⌘R), and how many datasets
-  and tables it holds.
+- **Header** — the folder, Open (⌘O) and Reload (⌘R), New query (⌘T), and
+  how many datasets and tables the folder holds (and how many `job.json` files
+  it could not read).
 - **Datasets** (left) — each dataset, its tables (a dot in the colour of each
   table's status, and its rows), and the inputs it read from outside the
-  folder. The field above it filters by name (⌘F).
-- **Lineage** (centre) — each dataset a box with its name and run, its inputs
-  and tables as cards inside, drawn as the job GUI draws a DAG: inputs on the
-  left, each table right of what it reads. An edge in a box is a table reading
-  an input or another table; an edge between boxes, in the input colour, is a
-  job's input reading another job's table. Click a table to light its whole
-  lineage, everything it is made from and everything made from it, across
-  jobs, and dim the rest; double-click it for a sample of its rows.
-- **Tabs below** — **Details** (for a table: its status, rows, the name to
-  query it by, where it is, what it reads and what reads it, its columns, its
-  validations and error, and beside them the SQL that made it; for a dataset:
-  its run, the datasets it reads and that read it, its tables and warnings),
-  **Query** (SQL over every table; ⌘T opens another query tab), and a tab per
-  sample, the first 1,000 rows of a table. A table's menu in the list also
-  queries it in a new tab and copies its name or path.
+  folder. The field above it filters by name (⌘F). Click a table, an input or
+  a dataset (or move to it with the arrow keys) to inspect it; its menu also
+  queries it in a new tab, puts its name in the query you are writing, shows
+  its lineage, and copies its name or path.
+- **Workspace** (centre) — tabs of two kinds. A **query tab** is a SQL editor
+  above what its query returns, as rows or as a [chart](#charts) (⌘⏎ runs
+  it); the first one, when a folder opens, reads the folder's first table. An **inspector tab** shows one table,
+  input or dataset: a header with its status, its dataset and run, its rows,
+  the name to query it by (with Copy, and Query, which opens a query tab of
+  its first 100 rows), and a tab per view of it:
+  - **Data** — its first 1,000 rows.
+  - **Columns** — each column's name and type (⌘C copies the selected names,
+    comma-separated, for a select list).
+  - **Details** — its rows, timings and format, where it is, what it reads and
+    what reads it, its validations and error, and beside them the SQL that
+    made it. A name in it opens that table.
+  - **Lineage** — the graph of everything it is made from and everything made
+    from it, across jobs (below).
+  - A dataset has **Tables** (each table's status, rows and SQL name; a name
+    opens it), **Details** (its run, the datasets it reads and that read it,
+    its warnings) and **Lineage**.
+
+Opening a table shows it in the **preview** tab, its name in italics, which
+the next thing you open replaces, so clicking through tables in the list, or
+through the names in a table's details, leaves one tab behind and keeps the
+view you are on: click down the list on Columns to compare columns, or on
+Lineage to follow the graph. Double-click a table in the list (or press Enter
+on any item, or double-click the preview tab) to keep it in a tab of its own. Back (⌘[) and
+Forward (⌘]) go through what an inspector tab has shown, ⌘L turns it to its
+lineage, and ⌘W closes a tab.
+
+**Lineage.** A table's Lineage view draws what it is made from and what is
+made from it, across jobs: each dataset a box with its name and run, its
+inputs and tables as cards inside, drawn as the job GUI draws a DAG, inputs
+on the left and each table right of what it reads. An edge in a box is a
+table reading an input or another table; an edge between boxes, in the input
+colour, is a job's input reading another job's table. The graph opens fitted
+to the window, every upstream and downstream in view; zoomed out that far,
+each card shows just its name, set large enough to read, its status the
+colour of its edge. Scroll to zoom in for each card's rows, and Fit (⌘0) to
+see all of it again. Click a card to light its own lineage; double-click it to
+open it, in the Lineage view. **Whole folder** draws every dataset in the folder instead,
+with the table's lineage lit and the rest dimmed.
 
 Lineage comes from the run records. Each `job.json` lists the inputs its run
 read, with their paths rendered and made absolute, and what each table's main
@@ -473,7 +505,8 @@ that matches no table is data from outside the folder.
 `jaffle_shop__customers`: the engine's catalog is flat, so the dataset and the
 table make one name, a double underscore between them, and each part is made a
 name SQL reads without quotes (`day=20260101` becomes `day_20260101`). An input
-read from outside the folder is `<dataset>__<input>`. Details shows each name.
+read from outside the folder is `<dataset>__<input>`. An inspector's header
+shows each name.
 
 ```sql
 SELECT s.segment, COUNT(*) AS orders, SUM(o.order_total) AS revenue
@@ -488,17 +521,67 @@ with the name to write instead, and a table whose task failed in the run shown
 says it has no rows. Persist writes a result as part files, under
 `<folder>/interactive` unless you choose another directory.
 
-A run written before records carried lineage still opens: its tables show,
-sample and query, but its box says lineage was not recorded, and what its
-tables read is unknown until the job runs again.
+A run written before records carried lineage (before 2026-10-31) still
+opens: its tables show their rows and query, but nothing in it says what each
+table reads, so each stands alone in a lineage, and its Lineage and Details
+views say the lineage was not recorded. The job's next run records it.
 
 The viewer is built from the same components as the job GUI
 (`//src/main/scala/com/transformer/gui:components`): the theme, the SQL editor
 with its highlighting and vim keys (View > Vim Keybindings is one setting for
-both apps), the SQL console, the grid that shows rows and the canvas graphs are
-drawn on. The viewer is `//src/main/scala/com/transformer/viewer`, and its
-model (finding the datasets, the lineage, the layout and the query catalog)
-builds on its own as `viewer:model`, with no JavaFX.
+both apps), the SQL console and its chart, the grid that shows rows and the
+canvas graphs are drawn on. The viewer is
+`//src/main/scala/com/transformer/viewer`, and its model (finding the
+datasets, the lineage, the layout, the query catalog, and an inspector tab's
+views and history) builds on its own as `viewer:model`, with no JavaFX; so
+does what a chart draws from a result's rows, as
+`//src/main/scala/com/transformer/gui:chart`.
+
+### Charts
+
+A query's result shows twice, a tab each, in a data viewer query tab and in
+the job GUI's SQL console alike: **Rows**, its first 1,000 rows, and
+**Chart**, every row of it drawn as a **bar**, **line**, **area**,
+**scatter** or **pie** chart. The choices above the chart are the type, the
+column along **X**, the columns of numbers up **Y** with how the rows that
+share an X combine (Sum, Average, Min, Max or Count, as SQL's aggregates
+combine them, NULLs left out), and **Split by**, a column whose values each
+draw a series of their own. A result starts from a suggestion: X is its first
+date or timestamp, drawn as a line, else its first text column, drawn as
+bars, and Y the first number after X. Run the query again and the choices
+stay wherever its columns allow; a new X brings the type it suggests.
+
+```sql
+SELECT CAST(o.ordered_at AS DATE) AS day, l.location_name, SUM(o.order_total) AS revenue
+FROM jaffle_out__orders o JOIN jaffle_out__locations l ON o.location_id = l.location_id
+GROUP BY CAST(o.ordered_at AS DATE), l.location_name
+-- Chart: a line along day, Y revenue, split by location_name: a line per location.
+```
+
+- **Order.** Text along X keeps the order the query returns it in, so its
+  `ORDER BY` orders the bars; numbers and dates are sorted, and NULL comes
+  last. A line, an area or a scatter runs along a number, a date or a
+  timestamp as along an axis (times on calendar ticks, in UTC); a bar or a pie
+  takes a band or a slice per value of X, whatever its type.
+- **Combining.** Rows that share an X are combined over the whole result, not
+  just the rows the grid shows, and Y's title says how (`SUM(amount)`) when
+  any were. A scatter draws a dot per row, uncombined.
+- **Limits.** Up to eight series are drawn, a Y column or a split value each;
+  past eight, the seven largest are drawn and the rest combined as Other, in
+  grey, as a pie's slices past seven are. A bar chart draws at most 500 bands,
+  a line or an area 10,000 values of X and a scatter its first 10,000 rows.
+  The note under the chart counts the rows and says what was left out: rows
+  past those, rows whose X is NULL on an axis, values that are NaN or
+  infinite. A pie refuses values below 0.
+- **Reading it.** The pointer reads what is under it: a bar's band, every
+  series at the X nearest it on a line or an area, the nearest dot, a slice
+  and its share. The Rows tab has every value too.
+- **Room.** In the job GUI the console sits under the DAG; drag the divider
+  between them up for a taller chart. A chart less than 240px tall leaves its
+  axes untitled, since the choices above it name X and Y.
+
+**Save PNG…** writes the chart as it shows, at twice its size on screen, in
+the viewer's dark theme, named after what it draws (`revenue_by_month.png`).
 
 ## Run records and historical runs
 
@@ -1819,9 +1902,11 @@ back here and into `docs/`.
 │   ├── gui/                   JavaFX visualiser/runner, and the components
 │   │                          both GUIs share (gui:components): the theme,
 │   │                          the SQL editor and its vim engine, the SQL
-│   │                          console, the row grid, the graph canvas.
-│   ├── viewer/                The data viewer: a folder of job outputs, its
-│   │                          lineage, samples and SQL (viewer:model has no
+│   │                          console, the row grid, the chart of a result
+│   │                          (gui:chart has no JavaFX), the graph canvas.
+│   ├── viewer/                The data viewer: SQL over a folder of job
+│   │                          outputs, and each table's rows, columns,
+│   │                          record and lineage (viewer:model has no
 │   │                          JavaFX).
 │   └── cli/                   `transformer run|gui|help`: Cli (headless,
 │                              no JavaFX) + TransformerMain entry point.

@@ -67,18 +67,28 @@ specific traps.
   there states what Neovim (with its defaults and `shiftwidth=2 expandtab`)
   leaves from the same text and keys: check a new one against `nvim --clean`
   rather than memory of vim, which is how its cursor rules were settled.
+- **What a chart draws builds without JavaFX.** `ChartData` (what to draw and
+  the series a result's rows make) and `ChartScale` (ticks and labels) are
+  `//src/main/scala/com/transformer/gui:chart`, and `gui/chart_test` drives
+  them with batches. `ChartPane` and `ChartCanvas` lay out, paint and ask; a
+  rule about what a chart draws (how rows combine, the order of bands, what
+  folds into Other) goes into `ChartData`, with a test, not into the canvas.
 - **GUI colours and spacing live in `gui/transformer.css`, in the theme's
   looked-up colours.** A control takes style classes (AtlantaFX's `Styles` and
   `Tweaks` constants, or the GUI's own classes), never `setStyle` with literal
   colours; the canvas paints with `Theme.Palette`, which holds the same
-  colours. Every `Scene`, `Dialog` and `Alert` the GUI makes goes through
-  `Theme.style`: the theme reaches it as the user-agent stylesheet, the GUI's
-  own classes only through that call. The data viewer's classes are in the
+  colours. A chart's series take `ChartCanvas.SeriesColors`: eight hues in a
+  fixed order, checked as a set for colour-blind separation and for 3:1
+  against the background, and apart from the status colours. A ninth series
+  is never a ninth colour; it joins Other, in grey. Every `Scene`, `Dialog`
+  and `Alert` the GUI makes goes through `Theme.style`: the theme reaches it
+  as the user-agent stylesheet, the GUI's own classes only through that call. The data viewer's classes are in the
   same file, under their own heading.
 - **What both GUIs show alike is one component, in `gui:components`.** The job
   GUI and the data viewer share the theme, the SQL editor (its highlighting
-  and vim keys), the SQL console (`QueryConsole`), the grid rows show in
-  (`DataGrid`) and the canvas graphs are drawn on (`GraphCanvas`). A piece one
+  and vim keys), the SQL console (`QueryConsole`, with its chart,
+  `ChartPane`), the grid rows show in (`DataGrid`) and the canvas graphs are
+  drawn on (`GraphCanvas`). A piece one
   app needs from the other moves there, public, rather than being copied, and
   it takes what it needs from the app as arguments (a catalog builder, a
   default directory, the window's shortcuts), never an app's session. What

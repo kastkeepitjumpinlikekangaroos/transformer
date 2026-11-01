@@ -371,7 +371,10 @@ ship a fix or move something from "not done" to "done".
   the binder and in its audit.
 - **The viewer draws lineage only from records that carry it.** A `job.json`
   written before runs recorded `inputs`, `readsInputs` and `readsTasks` opens
-  with its tables and no edges, and its box says so. Before then `runFile` was
+  with its tables and no edges, so a table's Lineage view is the table alone;
+  the view, its Details and its box say the lineage was not recorded
+  (`LineageCanvas.notRecorded`), since a lone card reads as a table with no
+  upstreams. Before then `runFile` was
   as relative as the run's `--output`, so `RunFolder.locateRunFile` looks for a
   relative one under the run's directory and each directory above it. A
   folder moved since its runs keeps its records' old absolute paths: the
@@ -412,6 +415,19 @@ ship a fix or move something from "not done" to "done".
   validations" button beside the validation chips showed "Inspect v...". A
   button whose label must stay whole gets `setMinWidth(Region.USE_PREF_SIZE)`
   (as `ControlsPanel`'s do) and a row where nothing wide competes with it.
+- **A button's text loses its first underscore.** `Button`, `MenuButton`,
+  `CheckBox` and the other `ButtonBase` controls read `_` as the mark before a
+  mnemonic key and drop it, so a column named `count_lifetime_orders` showed
+  as `countlifetime_orders` in the chart's Y menu. Text that is data (a column
+  or table name) goes into such a control with `setMnemonicParsing(false)`; a
+  `Label`, a `ComboBox`'s cells and a canvas show it as it is.
+- **A snapshot of a canvas scaled up is blurred.** A `Canvas` is a bitmap the
+  size of its node, so `snapshot` with a scale transform enlarges the pixels.
+  `ChartCanvas.image` paints the chart again into a canvas twice the size,
+  under `gc.scale(2, 2)`, and snapshots that for Save PNG…. A canvas's
+  `GraphicsContext` also keeps what the last paint set (text alignment,
+  baseline, line width, caps), so each `ChartCanvas` paint sets them back
+  before it starts.
 - **`java -jar` ignores a `scala_binary`'s `jvm_flags`.** `//:transformer`
   sets `-XX:MaxRAMPercentage=75.0`, but that only applies to the
   `bazel-bin/transformer` wrapper script. Users running

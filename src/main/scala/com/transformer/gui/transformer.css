@@ -333,6 +333,18 @@
 .log-view { -fx-font-size: 12px; }
 .log-view .content { -fx-background-color: -color-bg-default; }
 
+/* A query's result, with charts: Rows and Chart, a tab each. */
+.result-views > .tab-header-area { -fx-padding: 0 2 0 2; }
+.result-views > .tab-header-area > .tab-header-background {
+    -fx-background-color: -color-bg-default;
+    -fx-border-color: -color-border-default;
+    -fx-border-width: 0 0 1 0;
+}
+.result-views > .tab-header-area .tab .tab-label { -fx-graphic-text-gap: 6; }
+.chart-pane { -fx-spacing: 8; -fx-padding: 10 2 4 2; }
+.chart-toolbar .chart-caption { -fx-text-fill: -color-fg-muted; -fx-font-size: 12px; }
+.chart-toolbar .toggle-button { -fx-padding: 5 9 5 9; }
+
 /* ------------------------------------------------------- the error dialog */
 
 .error-dialog { -fx-background-color: -color-bg-default; -fx-padding: 22; -fx-spacing: 12; }
@@ -357,5 +369,60 @@
 .dataset-tree .tree-group { -fx-text-fill: -color-fg-muted; -fx-font-style: italic; }
 .dataset-tree .tree-count { -fx-text-fill: -color-fg-subtle; -fx-font-size: 11px; }
 .dataset-tree .tree-cell:selected .tree-count { -fx-text-fill: -color-fg-muted; }
-.columns-grid { -fx-hgap: 18; -fx-vgap: 3; }
-.columns-grid .column-type-name { -fx-text-fill: -sql-type; -fx-font-size: 12px; }
+.tree-empty { -fx-spacing: 8; }
+.empty-title {
+    -fx-font-size: 14px;
+    -fx-font-weight: bold;
+    -fx-text-fill: -color-fg-emphasis;
+}
+
+/* The workspace: query tabs and inspector tabs. A preview tab's name is in
+   italics until it is kept. */
+.workspace-tabs > .tab-header-area { -fx-padding: 4 10 0 10; }
+.workspace-tabs > .tab-header-area > .tab-header-background {
+    -fx-background-color: -color-bg-subtle;
+    -fx-border-color: -color-border-default;
+    -fx-border-width: 0 0 1 0;
+}
+.workspace-tabs > .tab-header-area .tab { -fx-padding: 4 8 4 10; }
+.workspace-tabs > .tab-header-area .tab .tab-label { -fx-graphic-text-gap: 7; }
+.workspace-tabs > .tab-header-area .tab.preview-tab .tab-label { -fx-font-style: italic; }
+
+/* An inspector: its header, then a tab per view. */
+.inspector-header {
+    -fx-padding: 12 16 8 10;
+    -fx-background-color: -color-bg-default;
+}
+.inspector-title {
+    -fx-font-size: 18px;
+    -fx-font-weight: bold;
+    -fx-text-fill: -color-fg-emphasis;
+}
+.inspector-icon { -fx-padding: 0 2 0 4; }
+.inspector-icon .icon { -fx-stroke: -color-fg-default; }
+.inspector-crumbs { -fx-padding: 0 0 0 2; }
+.inspector-crumbs .crumb { -fx-text-fill: -color-fg-muted; -fx-font-size: 12px; }
+.inspector-crumbs .crumb-link { -fx-font-size: 12px; -fx-padding: 0; -fx-graphic-text-gap: 5; }
+.inspector-crumbs .crumb-link .icon { -fx-stroke: -color-accent-fg; }
+.sql-name { -fx-text-fill: -color-fg-muted; -fx-font-size: 12px; }
+.inspector-views > .tab-header-area { -fx-padding: 0 14 0 14; }
+.inspector-views > .tab-header-area > .tab-header-background {
+    -fx-background-color: -color-bg-default;
+    -fx-border-color: -color-border-default;
+    -fx-border-width: 0 0 1 0;
+}
+
+/* A run that did not record its lineage, said where its lineage would be. */
+.lineage-notice {
+    -fx-background-color: -color-warning-subtle;
+    -fx-background-radius: 8;
+    -fx-border-color: -color-warning-muted;
+    -fx-border-radius: 8;
+    -fx-padding: 10 14 10 14;
+    -fx-spacing: 4;
+}
+.lineage-notice .notice-title { -fx-text-fill: -color-warning-fg; -fx-font-size: 12px; -fx-font-weight: bold; }
+.notice-text { -fx-text-fill: -color-fg-default; -fx-font-size: 12px; }
+
+.columns-table .table-cell.column-type-name { -fx-text-fill: -sql-type; }
+.columns-table .table-cell.number-cell { -fx-alignment: center-right; -fx-text-fill: -color-fg-subtle; }

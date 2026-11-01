@@ -128,16 +128,7 @@ abstract class GraphCanvas extends Canvas(800, 600) {
 
   /** A title and lines under it, centred: what shows with nothing to draw. */
   protected def paintMessage(gc: GraphicsContext, w: Double, h: Double, title: String, titleColor: Color,
-      lines: Seq[String]): Unit = {
-    gc.setTextAlign(TextAlignment.CENTER)
-    gc.setFill(titleColor)
-    gc.setFont(Font.font("System", FontWeight.SEMI_BOLD, 15))
-    gc.fillText(title, w / 2.0, h / 2.0 - 8)
-    gc.setFill(Palette.TextMuted)
-    gc.setFont(Font.font("System", FontWeight.NORMAL, 12))
-    lines.iterator.zipWithIndex.foreach { case (line, i) => gc.fillText(line, w / 2.0, h / 2.0 + 16 + i * 17.0) }
-    gc.setTextAlign(TextAlignment.LEFT)
-  }
+      lines: Seq[String]): Unit = GraphCanvas.paintMessage(gc, w, h, title, titleColor, lines)
 
   /** An edge from the right side of one card, at `(x1, y1)`, to the left side
     * of another, at `(x2, y2)`, with an arrowhead. The curve leaves and
@@ -210,25 +201,9 @@ abstract class GraphCanvas extends Canvas(800, 600) {
     gc.closePath()
   }
 
-  /** `s`, its first line, cut with an ellipsis to fit `maxWidth` in `font`. */
-  protected def fit(s: String, font: Font, maxWidth: Double): String = {
-    val line = s.takeWhile(_ != '\n')
-    if (textWidth(line, font) <= maxWidth) return line
-    var lo = 0
-    var hi = line.length
-    while (lo < hi) {
-      val mid = (lo + hi + 1) / 2
-      if (textWidth(line.substring(0, mid) + "…", font) <= maxWidth) lo = mid else hi = mid - 1
-    }
-    line.substring(0, lo) + "…"
-  }
+  protected def fit(s: String, font: Font, maxWidth: Double): String = GraphCanvas.fit(s, font, maxWidth)
 
-  private val measure = new Text()
-  protected def textWidth(s: String, font: Font): Double = {
-    measure.setText(s)
-    measure.setFont(font)
-    measure.getLayoutBounds.getWidth
-  }
+  protected def textWidth(s: String, font: Font): Double = GraphCanvas.textWidth(s, font)
 
   // ==================== panning and zooming ====================
 
@@ -277,7 +252,11 @@ abstract class GraphCanvas extends Canvas(800, 600) {
   }
 }
 
+/** The fonts the canvases paint with, and how they set text: what a graph
+  * and a chart ([[ChartCanvas]]) both write. Call it on the FX thread. */
 object GraphCanvas {
+  import Theme.Palette
+
   val TitleFont: Font = Font.font("System", FontWeight.SEMI_BOLD, 13)
   val StatusFont: Font = Font.font("System", FontWeight.NORMAL, 11)
   val TagFont: Font = Font.font("System", FontWeight.BOLD, 9)
@@ -286,6 +265,40 @@ object GraphCanvas {
   private val MinZoom = 0.2
   private val MaxZoom = 3.0
   private val Ring: Color = Theme.Palette.Accent.deriveColor(0, 1, 1, 0.28)
+
+  /** A title and lines under it, centred on a `w` by `h` canvas. */
+  def paintMessage(gc: GraphicsContext, w: Double, h: Double, title: String, titleColor: Color,
+      lines: Seq[String]): Unit = {
+    gc.setTextAlign(TextAlignment.CENTER)
+    gc.setFill(titleColor)
+    gc.setFont(Font.font("System", FontWeight.SEMI_BOLD, 15))
+    gc.fillText(title, w / 2.0, h / 2.0 - 8)
+    gc.setFill(Palette.TextMuted)
+    gc.setFont(Font.font("System", FontWeight.NORMAL, 12))
+    lines.iterator.zipWithIndex.foreach { case (line, i) => gc.fillText(line, w / 2.0, h / 2.0 + 16 + i * 17.0) }
+    gc.setTextAlign(TextAlignment.LEFT)
+  }
+
+  /** `s`, its first line, cut with an ellipsis to fit `maxWidth` in `font`. */
+  def fit(s: String, font: Font, maxWidth: Double): String = {
+    val line = s.takeWhile(_ != '\n')
+    if (textWidth(line, font) <= maxWidth) return line
+    var lo = 0
+    var hi = line.length
+    while (lo < hi) {
+      val mid = (lo + hi + 1) / 2
+      if (textWidth(line.substring(0, mid) + "…", font) <= maxWidth) lo = mid else hi = mid - 1
+    }
+    line.substring(0, lo) + "…"
+  }
+
+  private val measure = new Text()
+
+  def textWidth(s: String, font: Font): Double = {
+    measure.setText(s)
+    measure.setFont(font)
+    measure.getLayoutBounds.getWidth
+  }
 }
 
 /** A [[GraphCanvas]] with what floats over it: zoom controls at the bottom

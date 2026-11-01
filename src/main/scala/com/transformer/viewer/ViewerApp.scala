@@ -4,7 +4,7 @@ import atlantafx.base.theme.Styles
 import com.transformer.gui.{FxHelpers, Icons, ShortcutsDialog, SqlEditor, Theme}
 
 import javafx.application.Application
-import javafx.geometry.{Orientation, Pos}
+import javafx.geometry.Pos
 import javafx.scene.Scene
 import javafx.scene.control.{Button, CheckMenuItem, Label, Menu, MenuBar, MenuItem, OverrunStyle, SeparatorMenuItem, SplitPane, Tooltip}
 import javafx.scene.input.{KeyCode, KeyCodeCombination, KeyCombination}
@@ -16,18 +16,21 @@ import java.nio.file.{Path, Paths}
 import java.util.prefs.Preferences
 import scala.util.control.NonFatal
 
-/** The data viewer: a window over a folder of job outputs.
+/** The data viewer: a window for querying a folder of job outputs and
+  * inspecting its tables.
   *
   * Layout:
-  *   * Top — the header: the folder, Open and Reload, and what it holds. The
-  *     menus (File, View, Help) are in the macOS menu bar, or above it.
+  *   * Top — the header: the folder, Open and Reload, New query, and what the
+  *     folder holds. The menus (File, View, Help) are in the macOS menu bar,
+  *     or above it.
   *   * Left — the [[DatasetTree]]: every dataset, its tables and the inputs
   *     it read from outside the folder.
-  *   * Centre — the [[LineageCanvas]] above the [[ViewerTabs]]: Details,
-  *     Query, and a tab per sample.
+  *   * Centre — the [[ViewerTabs]]: query tabs, each an editor above its
+  *     rows, and inspector tabs, each a table's (or an input's, or a
+  *     dataset's) rows, columns, details and lineage.
   *
-  * Selecting a table anywhere selects it everywhere; double-clicking one
-  * opens a sample of its rows. Reading the folder runs on a worker.
+  * Clicking a table in the list inspects it in the preview tab; its lineage
+  * is one of the inspector's views. Reading the folder runs on a worker.
   */
 final class ViewerApp extends Application {
 
@@ -37,28 +40,22 @@ final class ViewerApp extends Application {
 
     val session = new ViewerSession
     val tree = new DatasetTree(session)
-    val canvas = new LineageCanvas(session)
     val tabs = new ViewerTabs(session, () => stage)
-    val header = new ViewerHeader(session, () => chooseFolder(stage, session), () => reload(session))
+    val header = new ViewerHeader(session, () => chooseFolder(stage, session), () => reload(session),
+      () => tabs.newQueryTab())
 
-    tree.setOnActivate(tabs.openSample)
+    tree.setOnOpen((sel, keep) => tabs.inspect(sel, pin = keep))
+    tree.setOnLineage(sel => tabs.inspect(sel, view = Some(InspectorView.Lineage)))
     tree.setOnQuery(tabs.queryInNewTab)
-    canvas.setOnActivate(tabs.openSample)
-    // A node selected in the tree comes into view in the lineage.
-    session.addListener(() => session.selection.foreach {
-      case ViewerSelection.OfNode(n) => canvas.reveal(n)
-      case _ => ()
-    })
+    tree.setOnInsert(tabs.insertIntoQuery)
+    tree.setOnOpenFolder(() => chooseFolder(stage, session))
 
-    val centre = new SplitPane(new LineageOverlay(session, canvas), tabs)
-    centre.setOrientation(Orientation.VERTICAL)
-    centre.setDividerPositions(0.55)
-    val main = new SplitPane(tree, centre)
+    val main = new SplitPane(tree, tabs)
     main.setDividerPositions(0.2)
     SplitPane.setResizableWithParent(tree, false)
 
     val root = new BorderPane()
-    root.setTop(new VBox(menuBar(stage, session, canvas, tabs, tree), header))
+    root.setTop(new VBox(menuBar(stage, session, tabs, tree), header))
     root.setCenter(main)
 
     val scene = new Scene(root, 1440, 920)
@@ -75,8 +72,7 @@ final class ViewerApp extends Application {
     if (!args.isEmpty && args.get(0).trim.nonEmpty) open(session, Paths.get(args.get(0).trim))
   }
 
-  private def menuBar(stage: Stage, session: ViewerSession, canvas: LineageCanvas, tabs: ViewerTabs,
-      tree: DatasetTree): MenuBar = {
+  private def menuBar(stage: Stage, session: ViewerSession, tabs: ViewerTabs, tree: DatasetTree): MenuBar = {
     def shortcut(code: KeyCode, more: KeyCombination.Modifier*): KeyCodeCombination =
       new KeyCodeCombination(code, (KeyCombination.SHORTCUT_DOWN +: more): _*)
     def item(text: String, key: Option[KeyCodeCombination])(f: => Unit): MenuItem = {
@@ -95,6 +91,7 @@ final class ViewerApp extends Application {
       reloadItem,
       new SeparatorMenuItem(),
       item("New Query Tab", Some(shortcut(KeyCode.T)))(tabs.newQueryTab()),
+      item("Close Tab", Some(shortcut(KeyCode.W)))(tabs.closeCurrentTab()),
       new SeparatorMenuItem(),
       item("Quit", Some(shortcut(KeyCode.Q)))(stage.close()))
 
@@ -103,11 +100,17 @@ final class ViewerApp extends Application {
     val view = new Menu("View")
     view.getItems.addAll(
       item("Find a Table", Some(shortcut(KeyCode.F)))(tree.filter.requestFocus()),
-      item("Details", Some(shortcut(KeyCode.I)))(tabs.showDetails()),
       new SeparatorMenuItem(),
-      item("Fit Lineage to Window", Some(shortcut(KeyCode.DIGIT0))) { canvas.fitToWindow(); canvas.render() },
-      item("Zoom In", Some(shortcut(KeyCode.EQUALS)))(canvas.zoomIn()),
-      item("Zoom Out", Some(shortcut(KeyCode.MINUS)))(canvas.zoomOut()),
+      item("Back", Some(shortcut(KeyCode.OPEN_BRACKET)))(tabs.back()),
+      item("Forward", Some(shortcut(KeyCode.CLOSE_BRACKET)))(tabs.forward()),
+      item("Lineage", Some(shortcut(KeyCode.L)))(tabs.showLineage()),
+      new SeparatorMenuItem(),
+      item("Fit Lineage to Window", Some(shortcut(KeyCode.DIGIT0)))(tabs.lineageCanvas.foreach { c =>
+        c.fitToWindow()
+        c.render()
+      }),
+      item("Zoom In", Some(shortcut(KeyCode.EQUALS)))(tabs.lineageCanvas.foreach(_.zoomIn())),
+      item("Zoom Out", Some(shortcut(KeyCode.MINUS)))(tabs.lineageCanvas.foreach(_.zoomOut())),
       new SeparatorMenuItem(),
       vim)
 
@@ -118,12 +121,16 @@ final class ViewerApp extends Application {
         s"${Cmd}O" -> "Open a folder of job outputs",
         s"${Cmd}R" -> "Read the folder again",
         s"${Cmd}T" -> "A new query tab",
+        s"${Cmd}W" -> "Close the tab in front",
         s"${Cmd}F" -> "Find a table by name",
-        s"${Cmd}I" -> "Show the Details tab",
+        "Click, or the arrow keys" -> "In the list: inspect a table, an input or a dataset in the preview tab",
+        "Double-click, or Enter" -> "In the list: inspect a table or an input (Enter: any item) in a tab of its own",
+        s"$Cmd[ / $Cmd]" -> "In an inspector: back to what it showed before, and forward again",
+        s"${Cmd}L" -> "The lineage of what the tab in front inspects",
         s"${Cmd}0" -> "Fit the lineage to the window",
         s"$Cmd= / $Cmd-" -> "Zoom the lineage in / out",
-        "Double-click" -> "A table or input: open a sample of its rows",
-        s"${Cmd}C" -> "In a grid of rows: copy the selected rows",
+        "Double-click" -> "In a lineage: open that table, input or dataset",
+        s"${Cmd}C" -> "In a grid of rows: copy the selected rows; in Columns: their names",
         s"${Cmd}/" -> "This sheet"
       ))
     })
@@ -169,9 +176,11 @@ object ViewerApp {
     try prefs.put(FolderPreference, dir.toString) catch { case NonFatal(_) => () }
 }
 
-/** The header across the top: the folder that is open, Open and Reload, and a
-  * count of what it holds (or that it is being read). */
-final class ViewerHeader(session: ViewerSession, openFolder: () => Unit, reload: () => Unit) extends HBox {
+/** The header across the top: the folder that is open, Open and Reload, New
+  * query, and a count of what it holds (or that it is being read), with what
+  * could not be read. */
+final class ViewerHeader(session: ViewerSession, openFolder: () => Unit, reload: () => Unit,
+    newQuery: () => Unit) extends HBox {
 
   getStyleClass.add("app-header")
 
@@ -204,6 +213,12 @@ final class ViewerHeader(session: ViewerSession, openFolder: () => Unit, reload:
   private val openButton = iconButton(Icons.folder, "Open a folder of job outputs (⌘O)")(openFolder())
   private val reloadButton = iconButton(Icons.refresh, "Read the folder again (⌘R)")(reload())
 
+  private val newQueryButton = new Button("New query", Icons.console)
+  newQueryButton.getStyleClass.add(Styles.SMALL)
+  newQueryButton.setTooltip(new Tooltip("A new query tab (⌘T)"))
+  newQueryButton.setMinWidth(Region.USE_PREF_SIZE)
+  newQueryButton.setOnAction(_ => newQuery())
+
   private val dot = new Circle(4)
   dot.getStyleClass.add("dot")
   private val status = new Label("", dot)
@@ -216,7 +231,9 @@ final class ViewerHeader(session: ViewerSession, openFolder: () => Unit, reload:
   titleGroup.setAlignment(Pos.CENTER_LEFT)
   private val folderGroup = new HBox(10, folderText, openButton, reloadButton)
   folderGroup.setAlignment(Pos.CENTER_LEFT)
-  getChildren.addAll(titleGroup, folderGroup, spacer, status)
+  private val endGroup = new HBox(12, newQueryButton, status)
+  endGroup.setAlignment(Pos.CENTER_RIGHT)
+  getChildren.addAll(titleGroup, folderGroup, spacer, endGroup)
 
   session.addListener(() => refresh())
   refresh()
@@ -227,6 +244,7 @@ final class ViewerHeader(session: ViewerSession, openFolder: () => Unit, reload:
     folderPath.setText(root.map(_.toString).getOrElse(""))
     reloadButton.setDisable(session.folder.isEmpty)
     status.getStyleClass.setAll("label", "status-pill")
+    status.setTooltip(null)
     (session.scanning, session.lineage) match {
       case (Some(_), _) =>
         status.setText("Reading the folder…")
@@ -234,11 +252,18 @@ final class ViewerHeader(session: ViewerSession, openFolder: () => Unit, reload:
       case (None, Some(l)) =>
         val tables = l.shownRuns.map(_.tables.size).sum
         val failed = l.shownRuns.count(!_.record.succeeded)
-        status.setText(s"${l.shownRuns.size} datasets · $tables tables" + (if (failed > 0) s" · $failed failed" else ""))
-        status.getStyleClass.add(if (failed > 0) "danger" else if (l.shownRuns.isEmpty) "warning" else "success")
+        val unread = l.folder.warnings.size
+        def count(n: Int, noun: String): String = s"$n ${if (n == 1) noun else noun + "s"}"
+        status.setText(s"${count(l.shownRuns.size, "dataset")} · ${count(tables, "table")}" +
+          (if (failed > 0) s" · $failed failed" else "") +
+          (if (unread > 0) s" · $unread not read" else ""))
+        status.getStyleClass.add(
+          if (failed > 0) "danger" else if (l.shownRuns.isEmpty || unread > 0) "warning" else "success")
+        if (unread > 0) status.setTooltip(new Tooltip(l.folder.warnings.mkString("\n")))
       case (None, None) => status.setText("No folder open")
     }
     status.setVisible(root.isDefined)
+    status.setManaged(root.isDefined)
   }
 }
 

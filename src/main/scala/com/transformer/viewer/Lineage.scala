@@ -61,6 +61,13 @@ final class Lineage(
   /** Every node derived from `n`, across datasets: its descendants. */
   def descendants(n: NodeId): Set[NodeId] = closure(n, downstream)
 
+  /** `n`'s whole lineage: itself, what it derives from and what derives from
+    * it. */
+  def around(n: NodeId): Set[NodeId] = ancestors(n) ++ descendants(n) + n
+
+  /** The whole lineage of every node of `dataset`. */
+  def aroundDataset(dataset: Int): Set[NodeId] = nodes.filter(_.dataset == dataset).toSet.flatMap(around)
+
   private def closure(start: NodeId, next: NodeId => Seq[NodeId]): Set[NodeId] = {
     val seen = mutable.LinkedHashSet.empty[NodeId]
     val todo = mutable.Stack[NodeId](start)
