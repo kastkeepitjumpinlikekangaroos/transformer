@@ -1,7 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core.{CatalogView, ColumnarBatch, ExecutionOptions, MaterializedView, Schema}
-import com.transformer.sql.plan.{BuiltQuery, LogicalOptimizer, LogicalPlan, LogicalScan, PendingCteView}
+import com.transformer.sql.plan.{BuiltQuery, LogicalOptimizer, LogicalPlan, LogicalScan, PendingCteView, PlanValidator}
 
 /** Resolves the placeholder [[PendingCteView]] scans that
   * [[com.transformer.sql.plan.LogicalBuilder]] emits for outermost-scope CTEs,
@@ -28,10 +28,13 @@ object CteResolver {
     * the not-yet-processed bodies means a later CTE that references an earlier
     * one sees the earlier one's resolution (so a materialized `b` that reads
     * `a` reads `a`'s already-materialized view). The no-CTE path returns `main`
-    * unchanged (a true no-op for the common case). */
-  def resolve(built: BuiltQuery, opts: ExecutionOptions): LogicalPlan = {
-    if (built.ctes.isEmpty) return built.main
+    * unchanged (a true no-op for the common case); otherwise the result is
+    * checked by [[PlanValidator.afterPass]]. */
+  def resolve(built: BuiltQuery, opts: ExecutionOptions): LogicalPlan =
+    if (built.ctes.isEmpty) built.main
+    else PlanValidator.afterPass("CTE resolution", built.main, substituteAll(built, opts))
 
+  private def substituteAll(built: BuiltQuery, opts: ExecutionOptions): LogicalPlan = {
     val bodies = built.ctes.iterator.map(_.body).toArray
     var main = built.main
 

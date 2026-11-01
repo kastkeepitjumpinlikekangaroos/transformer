@@ -4,7 +4,7 @@ import com.transformer.core._
 import com.transformer.fuzz.DataGen
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.exec.{CteResolver, PhysicalPlanner, SqlEngine}
-import com.transformer.sql.plan.{ColumnProjectionPushdown, FilterPushdown, LogicalBuilder}
+import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer}
 import com.transformer.write.parquet.ParquetWriter
 
 import java.nio.file.{Files, Path}
@@ -85,8 +85,8 @@ object Modes {
       val built = LogicalBuilder.build(sql, catalog)
       val resolved = CteResolver.resolve(built, mode.options)
       val optimized = partial match {
-        case Optimizer.FilterPushdownOnly => FilterPushdown(resolved)
-        case Optimizer.ProjectionPushdownOnly => ColumnProjectionPushdown(resolved)
+        case Optimizer.FilterPushdownOnly => LogicalOptimizer.filterPushdown(resolved)
+        case Optimizer.ProjectionPushdownOnly => LogicalOptimizer.projectionPushdown(resolved)
         case _ => resolved
       }
       val physical = PhysicalPlanner.plan(optimized, mode.options)

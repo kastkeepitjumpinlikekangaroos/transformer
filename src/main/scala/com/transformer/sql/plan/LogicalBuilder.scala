@@ -78,7 +78,8 @@ object LogicalBuilder {
     statementStart.withValue(Instant.now().truncatedTo(ChronoUnit.MICROS)) {
       expandedSelects.withValue(new java.util.IdentityHashMap[PlainSelect, Seq[Expression]]()) {
         val collector = mutable.ArrayBuffer.empty[CteDef]
-        val main = buildAnySelect(select, catalog, Map.empty, Some(collector))
+        val main = PlanValidator.bound(buildAnySelect(select, catalog, Map.empty, Some(collector)))
+        collector.foreach(cte => PlanValidator.bound(cte.body))
         BuiltQuery(main, collector.toSeq)
       }
     }
@@ -717,7 +718,7 @@ object LogicalBuilder {
     Option(ps.getHaving).foreach(collect)
     Option(ps.getOrderByElements).foreach(_.asScala.foreach(obe => collect(obe.getExpression)))
 
-    val agg = LogicalAggregate(child, groupBound, aggMap.values.toSeq, None)
+    val agg = LogicalAggregate(child, groupBound, aggMap.values.toSeq)
 
     // A name binds through the resolver below, never by the output's names:
     // `_agg0` names no aggregate a query can write, and a name two inputs

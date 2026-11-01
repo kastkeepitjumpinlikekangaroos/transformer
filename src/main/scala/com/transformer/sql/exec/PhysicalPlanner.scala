@@ -125,10 +125,10 @@ object PhysicalPlanner {
     // Fast path: `SELECT COUNT(*) FROM <view>` with no WHERE, no GROUP BY, no HAVING.
     // The view can answer from metadata (parquet footer, in-memory row count) so
     // we skip the entire scan + per-row aggregation pipeline.
-    case LogicalAggregate(LogicalScan(_, view, _), Seq(), Seq((AggExprCountStar(), name)), None)
+    case LogicalAggregate(LogicalScan(_, view, _), Seq(), Seq((AggExprCountStar(), name)))
         if view.exactRowCount.isDefined =>
       CountStarMetadataExec(view.exactRowCount.get, name)
-    case LogicalAggregate(child, gks, aggs, _) =>
+    case LogicalAggregate(child, gks, aggs) =>
       val physChild = planInner(child, opts)
       if (gks.isEmpty || !shouldShardForSize(child) || gks.exists(k => Expr.readsRandom(k._1))) {
         // No GROUP BY, OR the estimated input is small enough that the
@@ -378,7 +378,7 @@ object PhysicalPlanner {
     case LogicalLimit(child, n) => provenRows(child).map(math.min(_, n))
     case LogicalOffset(child, n) => provenRows(child).map(c => math.max(0L, c - n))
     case LogicalUnion(l, r, true) => for (lc <- provenRows(l); rc <- provenRows(r)) yield lc + rc
-    case LogicalAggregate(_, Seq(), _, None) => Some(1L)
+    case LogicalAggregate(_, Seq(), _) => Some(1L)
     case LogicalJoin(l, r, LitExpr(true, _), JoinKind.Inner) =>
       for (lc <- provenRows(l); rc <- provenRows(r)) yield times(lc, rc)
     case _ => None

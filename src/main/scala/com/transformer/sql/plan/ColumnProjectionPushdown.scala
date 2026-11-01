@@ -28,16 +28,12 @@ import com.transformer.core.{DataType, Schema}
   */
 object ColumnProjectionPushdown {
 
-  /** Catch remap bugs at plan time rather than at run time. The verifier walks
-    * the rewritten tree and asserts every [[ColRefExpr]] line up with the
-    * relevant child schema by both index range and `dataType`. Cheap — runs
-    * once per query at plan time — so always on. */
-  private val VerifyRewrites: Boolean = true
-
+  /** The rewritten plan. [[LogicalOptimizer.projectionPushdown]] checks it
+    * with [[PlanValidator]], which catches a remap that leaves a column
+    * reference on the wrong column at plan time. */
   def apply(plan: LogicalPlan): LogicalPlan = {
     // The root's parent (the executor) consumes every output column.
     val (rewritten, _) = rewrite(plan, plan.outputSchema.fieldNames.toSet)
-    if (VerifyRewrites) verify(rewritten)
     rewritten
   }
 
@@ -89,18 +85,15 @@ object ColumnProjectionPushdown {
       // for the parent, so identity remap upward.
       (LogicalProject(newChild, newProjs), identityRemap(projections.length))
 
-    case LogicalAggregate(child, gks, aggs, having) =>
+    case LogicalAggregate(child, gks, aggs) =>
       val childNeeded =
         gks.iterator.flatMap { case (e, _) => colRefNames(e) }.toSet ++
-          aggs.iterator.flatMap { case (a, _) => aggColRefNames(a) }.toSet ++
-          having.iterator.flatMap(colRefNames).toSet
+          aggs.iterator.flatMap { case (a, _) => aggColRefNames(a) }.toSet
       val (newChild, remap) = rewrite(child, childNeeded)
       val newGks = gks.map { case (e, n) => (rewriteExpr(e, remap), n) }
       val newAggs = aggs.map { case (a, n) => (rewriteAgg(a, remap), n) }
-      val newHaving = having.map(rewriteExpr(_, remap))
       // Aggregate output = gks ++ aggs in that order — its own schema, not the child's.
-      (LogicalAggregate(newChild, newGks, newAggs, newHaving),
-        identityRemap(gks.length + aggs.length))
+      (LogicalAggregate(newChild, newGks, newAggs), identityRemap(gks.length + aggs.length))
 
     case LogicalSort(child, keys) =>
       val childNeeded = keys.iterator.flatMap(k => colRefNames(k.expr)).toSet ++ neededByParent
@@ -162,9 +155,7 @@ object ColumnProjectionPushdown {
       // indices it asked us to keep.
       val combinedRemap = combineRemaps(leftRemap, rightRemap, leftWidth, newLeftWidth)
 
-      val newJoin = LogicalJoin(newLeft, newRight, newCond, kind)
-      if (VerifyRewrites) verify(newJoin)
-      (newJoin, combinedRemap)
+      (LogicalJoin(newLeft, newRight, newCond, kind), combinedRemap)
 
     case w: LogicalWindow =>
       // Window's output is child + synthetic _winN columns; pruning the
@@ -342,76 +333,5 @@ object ColumnProjectionPushdown {
       b += ((oldLeftWidth + oldJ) -> (newLeftWidth + newJ))
     }
     b.result()
-  }
-
-  /** Plan-time correctness check: every [[ColRefExpr]] must point at a real
-    * column in the relevant child's schema, with matching `dataType`. Runs
-    * after the join rewrite (locally) and again at the top of [[apply]]
-    * (whole-tree) so an index/remap bug is caught at plan time with a
-    * targeted error rather than as an `ArrayIndexOutOfBoundsException` deep
-    * inside the executor. */
-  private def verify(plan: LogicalPlan): Unit = {
-    def checkExpr(e: Expr, schema: Schema, ctx: String): Unit = e match {
-      case ColRefExpr(i, n, dt) =>
-        if (i < 0 || i >= schema.length)
-          throw new IllegalStateException(
-            s"ColRefExpr index $i out of range [0, ${schema.length}) in $ctx " +
-              s"(col='$n', type=$dt; schema=${schema.fieldNames.mkString("[", ",", "]")})")
-        val f = schema.fields(i)
-        if (f.dataType != dt)
-          throw new IllegalStateException(
-            s"ColRefExpr dataType mismatch at index $i in $ctx: ColRef says $dt, " +
-              s"schema says ${f.dataType} (col='$n', schema name='${f.name}')")
-      case LitExpr(_, _) => ()
-      case CastExpr(c, _) => checkExpr(c, schema, ctx)
-      case UnaryOpExpr(_, c, _) => checkExpr(c, schema, ctx)
-      case BinOpExpr(_, l, r, _) => checkExpr(l, schema, ctx); checkExpr(r, schema, ctx)
-      case FuncExpr(_, args, _) => args.foreach(checkExpr(_, schema, ctx))
-      case CaseExpr(branches, elseE, _) =>
-        branches.foreach { case (a, b) => checkExpr(a, schema, ctx); checkExpr(b, schema, ctx) }
-        elseE.foreach(checkExpr(_, schema, ctx))
-      case IsNullExpr(c, _) => checkExpr(c, schema, ctx)
-      case InListExpr(c, items, _) =>
-        checkExpr(c, schema, ctx); items.foreach(checkExpr(_, schema, ctx))
-      case LikeExpr(s, p, _, _) => checkExpr(s, schema, ctx); checkExpr(p, schema, ctx)
-      case SwitchCaseExpr(operand, branches, elseE, _) =>
-        checkExpr(operand, schema, ctx)
-        branches.foreach { b => checkExpr(b.when, schema, ctx); checkExpr(b.value, schema, ctx) }
-        elseE.foreach(checkExpr(_, schema, ctx))
-      case BetweenExpr(c, low, high) =>
-        checkExpr(c, schema, ctx); checkExpr(low, schema, ctx); checkExpr(high, schema, ctx)
-    }
-
-    def checkAgg(a: AggExpr, schema: Schema, ctx: String): Unit =
-      a.args.foreach(checkExpr(_, schema, ctx))
-
-    def visit(p: LogicalPlan): Unit = p match {
-      case _: LogicalScan => ()
-      case LogicalProject(child, projs) =>
-        visit(child)
-        projs.foreach { case (e, n) => checkExpr(e, child.outputSchema, s"Project($n)") }
-      case LogicalFilter(child, pred) =>
-        visit(child)
-        checkExpr(pred, child.outputSchema, "Filter")
-      case LogicalAggregate(child, gks, aggs, having) =>
-        visit(child)
-        gks.foreach { case (e, _) => checkExpr(e, child.outputSchema, "Aggregate.groupKey") }
-        aggs.foreach { case (a, _) => checkAgg(a, child.outputSchema, "Aggregate.agg") }
-        having.foreach(checkExpr(_, child.outputSchema, "Aggregate.having"))
-      case LogicalJoin(l, r, cond, _) =>
-        visit(l); visit(r)
-        val combined = Schema(l.outputSchema.fields ++ r.outputSchema.fields)
-        checkExpr(cond, combined, "Join.condition")
-      case LogicalSort(child, keys) =>
-        visit(child)
-        keys.foreach(k => checkExpr(k.expr, child.outputSchema, "Sort.key"))
-      case LogicalLimit(child, _) => visit(child)
-      case LogicalOffset(child, _) => visit(child)
-      case LogicalDistinct(child) => visit(child)
-      case LogicalUnion(l, r, _) => visit(l); visit(r)
-      case LogicalWindow(child, _) => visit(child)
-    }
-
-    visit(plan)
   }
 }

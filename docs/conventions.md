@@ -218,12 +218,13 @@ specific traps.
   `JoinSwapRatio` / `NestedLoopMaxRows` thresholds.
 - **Logical-plan rewrites are explicit passes called in order, not a rule
   engine.** `LogicalOptimizer.optimize` calls each pass by name (`FilterPushdown`,
-  `ColumnProjectionPushdown`) in a fixed order — adding a new pass is one
-  more line. Don't introduce a generic optimizer-pass framework. A rewrite
-  that touches `ColRefExpr` indices must do its own remap on every
-  affected expression and validate the result (`ColumnProjectionPushdown.verify`
-  is the model: walk the rewritten tree, assert every `ColRefExpr` matches
-  the child schema by index range and `dataType`). Shared helpers around
+  `ColumnProjectionPushdown`) in a fixed order, each through a method of
+  `LogicalOptimizer` that hands its output to `PlanValidator.afterPass` —
+  adding a new pass is one more method and line. Don't introduce a generic
+  optimizer-pass framework. A rewrite that touches `ColRefExpr` indices must
+  do its own remap on every affected expression; the validator then checks
+  every `ColRefExpr` against its input's schema by index range and
+  `dataType`, and that the pass kept the plan's output. Shared helpers around
   join-level expressions (`sideOf`, `shiftToRight`) live in
   `JoinSideAnalysis.scala` so the planner and any new pass can reuse them
   without duplicating the recursive Expr traversal.

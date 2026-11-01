@@ -136,13 +136,13 @@ class LogicalPlanCardinalityTest {
 
   @Test def aggregateWithoutGroupKeysCollapsesToOne(): Unit = {
     val s = scan(1_000_000L)
-    val agg = LogicalAggregate(s, Seq.empty, Seq((AggExprCountStar(), "n")), None)
+    val agg = LogicalAggregate(s, Seq.empty, Seq((AggExprCountStar(), "n")))
     assertEquals(Some(1L), LogicalPlanCardinality.estimate(agg))
   }
 
   @Test def aggregateWithGroupKeysShrinksAndStaysBounded(): Unit = {
     val s = scan(1_000_000L)
-    val agg = LogicalAggregate(s, Seq((col(0, "a"), "a")), Seq((AggExprCountStar(), "n")), None)
+    val agg = LogicalAggregate(s, Seq((col(0, "a"), "a")), Seq((AggExprCountStar(), "n")))
     val est = LogicalPlanCardinality.estimate(agg).get
     assertTrue(s"groupby must not exceed input: $est <= 1_000_000", est <= 1_000_000L)
     assertTrue(s"groupby must shrink input: $est < 1_000_000", est < 1_000_000L)
@@ -151,7 +151,7 @@ class LogicalPlanCardinalityTest {
 
   @Test def aggregateBoundedByInput(): Unit = {
     val s = scan(50L)
-    val agg = LogicalAggregate(s, Seq((col(0, "a"), "a")), Seq((AggExprCountStar(), "n")), None)
+    val agg = LogicalAggregate(s, Seq((col(0, "a"), "a")), Seq((AggExprCountStar(), "n")))
     val est = LogicalPlanCardinality.estimate(agg).get
     assertTrue(s"groupby result $est must not exceed input 50", est <= 50L)
   }

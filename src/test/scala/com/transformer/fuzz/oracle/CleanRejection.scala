@@ -281,8 +281,7 @@ object BoundPlan {
   private def ownExprs(p: LogicalPlan): Iterator[Expr] = p match {
     case LogicalProject(_, projections) => projections.iterator.map(_._1)
     case LogicalFilter(_, predicate) => Iterator(predicate)
-    case LogicalAggregate(_, keys, aggregates, having) =>
-      keys.iterator.map(_._1) ++ aggregates.iterator.flatMap(_._1.args) ++ having.iterator
+    case LogicalAggregate(_, keys, aggregates) => keys.iterator.map(_._1) ++ aggregates.iterator.flatMap(_._1.args)
     case LogicalJoin(_, _, condition, _) => Iterator(condition)
     case LogicalSort(_, keys) => keys.iterator.map(_.expr)
     case LogicalWindow(_, windows) => windows.iterator.flatMap { w =>

@@ -98,7 +98,7 @@ object LogicalPlanCardinality {
     case LogicalDistinct(child) =>
       estimate(child).map(n => math.max(1L, n / 2))
 
-    case LogicalAggregate(child, gks, _, _) =>
+    case LogicalAggregate(child, gks, _) =>
       estimate(child).map { n =>
         if (gks.isEmpty) 1L
         else math.min(n, ndvHint(gks, n))

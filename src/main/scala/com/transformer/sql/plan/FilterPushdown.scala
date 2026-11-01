@@ -56,8 +56,7 @@ object FilterPushdown {
       }
 
     case LogicalProject(child, projs) => LogicalProject(rewrite(child), projs)
-    case LogicalAggregate(child, gks, aggs, having) =>
-      LogicalAggregate(rewrite(child), gks, aggs, having)
+    case LogicalAggregate(child, gks, aggs) => LogicalAggregate(rewrite(child), gks, aggs)
     case LogicalSort(child, keys) => LogicalSort(rewrite(child), keys)
     case LogicalLimit(child, n) => LogicalLimit(rewrite(child), n)
     case LogicalOffset(child, n) => LogicalOffset(rewrite(child), n)

@@ -43,12 +43,12 @@ final case class LogicalFilter(child: LogicalPlan, predicate: Expr) extends Logi
   def withChildren(newChildren: Seq[LogicalPlan]): LogicalPlan = copy(child = newChildren.head)
 }
 
-/** GROUP BY aggregation. Output: groupKeys then aggregate results, in that order. */
+/** GROUP BY aggregation. Output: groupKeys then aggregate results, in that
+  * order. A HAVING is a [[LogicalFilter]] above it, over that output. */
 final case class LogicalAggregate(
     child: LogicalPlan,
     groupKeys: Seq[(Expr, String)],
-    aggregates: Seq[(AggExpr, String)],
-    having: Option[Expr]
+    aggregates: Seq[(AggExpr, String)]
 ) extends LogicalPlan {
   def outputSchema: Schema = Schema(
     (groupKeys.map { case (e, n) => Field(n, e.dataType) } ++

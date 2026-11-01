@@ -933,24 +933,22 @@ pass:
    balanced tree: a left fold would rebuild a long AND chain the parser
    regrouped, a level a conjunct, past the depth every walk is safe at (see
    `SqlParser.MaxNesting` in [gotchas.md](gotchas.md)).
-3. **Validate at plan time.** If your pass can introduce an index/remap
-   bug that wouldn't surface until execution, add a `verify` helper
-   modeled on `ColumnProjectionPushdown.verify`: walk the rewritten tree
-   and assert every `ColRefExpr`'s `(index, dataType)` matches the
-   relevant child schema. Gate behind a `private val VerifyRewrites:
-   Boolean = true` if perf ever becomes a concern (cheap at plan time —
-   probably stays always-on).
-4. **Wire into `LogicalOptimizer.optimize`** by adding a line. Order
+3. **Wire into `LogicalOptimizer`** with a method that runs the pass and
+   hands its output to `PlanValidator.afterPass(name, before, after)`, and
+   a call in `optimize`. The validator checks every `ColRefExpr`'s
+   `(index, dataType)` against the relevant child schema, conditions,
+   operand types and union arms, and that the pass kept the plan's output,
+   so an index/remap bug fails at plan time naming your pass. Order
    matters; place your pass where its preconditions hold and document
    *why* it must run before/after existing passes in the optimize body.
    Don't introduce a generic rule engine — explicit calls keep the
    ordering inspectable.
-5. **Test the new pass directly.** Add `src/test/scala/com/transformer/sql/plan/<MyPass>Test.scala`
+4. **Test the new pass directly.** Add `src/test/scala/com/transformer/sql/plan/<MyPass>Test.scala`
    with a `scala_junit_test` entry — pattern-match on the rewritten plan
    shape so the test fails loudly when an index-remap regresses, and
    include at least one round-trip through `SqlEngineTest` to confirm
    end-to-end query correctness is unchanged.
-6. Update [`docs/architecture.md`'s "Logical plan optimization"](architecture.md#9-logical-plan-optimization)
+5. Update [`docs/architecture.md`'s "Logical plan optimization"](architecture.md#9-logical-plan-optimization)
    to describe the new pass and where it sits in the order.
 
 ## Add cloud support (v1.1 work)

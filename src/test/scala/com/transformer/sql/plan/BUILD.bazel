@@ -34,6 +34,17 @@ scala_junit_test(
 )
 
 scala_junit_test(
+    name = "plan_validator_test",
+    srcs = ["PlanValidatorTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
     name = "expr_batch_test",
     srcs = ["ExprBatchTest.scala"],
     suffixes = ["Test"],

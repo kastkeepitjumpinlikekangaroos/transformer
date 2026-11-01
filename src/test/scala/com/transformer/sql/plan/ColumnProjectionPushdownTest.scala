@@ -214,24 +214,6 @@ class ColumnProjectionPushdownTest {
   }
 
   // ---------------------------------------------------------------------------
-  // Verifier: confirm the verifier itself catches deliberate breakage.
-  // ---------------------------------------------------------------------------
-
-  @Test def verifierRejectsOutOfRangeColRef(): Unit = {
-    // Construct a plan whose Filter references an index beyond the child's
-    // schema. The verifier should reject it at apply() time.
-    val lSchema = Schema(Vector(Field("a", DataType.IntType)))
-    val l = LogicalScan("l", new ProjectableView(lSchema), Some("l"))
-    // Index 5 doesn't exist.
-    val bad = LogicalFilter(l, BinOpExpr("=", colInt(5, "missing"),
-      LitExpr(1, DataType.IntType), DataType.BooleanType))
-    val ex = try { ColumnProjectionPushdown(bad); null }
-      catch { case e: IllegalStateException => e }
-    assertNotNull("expected verifier to reject out-of-range ColRef", ex)
-    assertTrue(ex.getMessage, ex.getMessage.contains("out of range"))
-  }
-
-  // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
 

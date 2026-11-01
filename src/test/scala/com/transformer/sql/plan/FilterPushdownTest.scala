@@ -279,13 +279,12 @@ class FilterPushdownTest {
     val agg = LogicalAggregate(
       innerJoin,
       Seq((colInt(0, "id"), "id")),
-      Seq((AggExprCountStar(), "n")),
-      None)
+      Seq((AggExprCountStar(), "n")))
     val pred = bin(">", colInt(1, "n"), litInt(0))  // post-agg filter
     val plan = LogicalFilter(agg, pred)
     val out = FilterPushdown(plan)
     out match {
-      case LogicalFilter(LogicalAggregate(_: LogicalJoin, _, _, _), kept) =>
+      case LogicalFilter(LogicalAggregate(_: LogicalJoin, _, _), kept) =>
         assertEquals(pred, kept)
       case other => fail(s"expected Filter(Aggregate(Join)) unchanged, got $other")
     }
