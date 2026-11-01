@@ -2,10 +2,13 @@ package com.transformer.sql.plan
 
 import com.transformer.core.{Catalog, DataType}
 import com.transformer.sql.parse.SqlParser
-import net.sf.jsqlparser.parser.ParserKeywordsUtils
+import net.sf.jsqlparser.parser.{CCJSqlParserUtil, ParserKeywordsUtils}
+import net.sf.jsqlparser.schema.{Column, Table}
+import net.sf.jsqlparser.statement.select.PlainSelect
 
 import java.util.Locale
 import scala.collection.mutable
+import scala.util.control.NonFatal
 
 /** A plan printed as SQL that [[LogicalBuilder.build]] reads back to the same
   * plan: binding's inverse, as DuckDB prints a statement and parses it again
@@ -59,9 +62,10 @@ object PlanSql {
   def window(w: WindowDef, column: Int => String): String = windowCall(w, i => Fragment(column(i), Atomic))
 
   /** `name` as an identifier the parser reads back as `name`: bare when it is
-    * a plain word no keyword spells, in double quotes otherwise. */
+    * a plain word that reads back as itself wherever the printer writes a
+    * name, in double quotes otherwise. */
   def identifier(name: String): String =
-    if (PlainWord.pattern.matcher(name).matches() && !Reserved(name.toUpperCase(Locale.ROOT))) name
+    if (PlainWord.pattern.matcher(name).matches() && !Reserved(name.toUpperCase(Locale.ROOT)) && readsBack(name)) name
     else SqlParser.quote(name)
 
   private val PlainWord = "[A-Za-z_][A-Za-z0-9_]*".r
@@ -71,6 +75,42 @@ object PlanSql {
   private lazy val Reserved: Set[String] =
     ParserKeywordsUtils.ALL_RESERVED_KEYWORDS.iterator.map(_(0).toString.toUpperCase(Locale.ROOT)).toSet ++
       Set("TRUE", "FALSE", "NULL")
+
+  /** Whether the plain word `name` reads back as a name in every place the
+    * printer writes one: a CTE's, a table's, an alias, a qualifier and a
+    * column. A word no keyword list holds may still be read as something
+    * else in one of them: `FROM t CURRENT_TIMESTAMP` is a table aliased so,
+    * and `CURRENT_TIMESTAMP.c1` the clock. Each word is parsed once. */
+  private def readsBack(name: String): Boolean = {
+    val key = name.toLowerCase(Locale.ROOT)
+    val known = ReadsBack.get(key)
+    if (known != null) known.booleanValue
+    else {
+      val reads =
+        try CCJSqlParserUtil.parse(s"WITH $name AS (SELECT 1 AS $name) SELECT $name.$name AS $name FROM $name AS $name") match {
+          case ps: PlainSelect =>
+            def same(written: String) = written != null && written.equalsIgnoreCase(name)
+            val item = ps.getSelectItems.get(0)
+            val (column, table) = item.getExpression match {
+              case c: Column => (c.getColumnName, Option(c.getTable).map(_.getName).orNull)
+              case _ => (null, null)
+            }
+            val from = ps.getFromItem match {
+              case t: Table => same(t.getName) && t.getAlias != null && same(t.getAlias.getName)
+              case _ => false
+            }
+            val cte = Option(ps.getWithItemsList).exists(l => l.size == 1 && same(l.get(0).getAlias.getName))
+            same(column) && same(table) && item.getAlias != null && same(item.getAlias.getName) && from && cte
+          case _ => false
+        } catch { case NonFatal(_) => false }
+      if (ReadsBack.size >= ReadsBackLimit) ReadsBack.clear()
+      ReadsBack.put(key, reads)
+      reads
+    }
+  }
+
+  private val ReadsBack = new java.util.concurrent.ConcurrentHashMap[String, java.lang.Boolean]()
+  private val ReadsBackLimit = 4096
 
   // ---------------------------------------------------------------------------
   // Expressions

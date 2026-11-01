@@ -110,6 +110,9 @@ class PlanSqlTest {
     "SELECT a FROM t WHERE NOT (a = 1) AND NOT f AND NOT (NOT f)",
     "SELECT a FROM t WHERE dt < '2024-01-01' AND ts >= '2024-01-01 06:00:00'",
     "SELECT a + NULL AS x, m + NULL AS y, NULL = a AS z FROM t",
+    // A table aliased by a word no keyword list holds but the parser reads as
+    // the clock where it qualifies a column (found by the round-trip campaign).
+    "SELECT a, COUNT() AS n FROM t CURRENT_TIMESTAMP GROUP BY a",
     "SELECT CASE FLOOR(RAND() * 3) WHEN 0 THEN 'a' WHEN 1 THEN 'b' END IS NULL AS c, " +
       "RAND() BETWEEN 0.25 AND 0.75 AS bt FROM t WHERE RAND() >= 0"
   )

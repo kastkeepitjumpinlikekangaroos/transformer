@@ -26,6 +26,12 @@ ship a fix or move something from "not done" to "done".
   literal; a backslash anywhere else, at the end included (`'a\'`), is itself.
   `PlanSql` refuses to print a plan with such a value
   (`UnprintablePlanException`); no literal written to the binder can make one.
+- **A word no JSqlParser keyword list holds can still be read as one.**
+  `FROM t CURRENT_TIMESTAMP` aliases `t` so, but `CURRENT_TIMESTAMP.c1` is
+  the clock and a parse error; the reserved list (`ParserKeywordsUtils`) does
+  not have it. `PlanSql.identifier` writes a plain word bare only if a test
+  statement using it as a CTE, a table, an alias, a qualifier and a column
+  reads it back as each, once a word, and quotes it otherwise.
 - **SQL here writes no cast to DECIMAL or BINARY**, though the binder inserts
   both (an INT beside a DECIMAL, a NULL beside a BINARY). `PlanSql` prints
   such a cast as its operand, and the binder casts it again in the same place,
