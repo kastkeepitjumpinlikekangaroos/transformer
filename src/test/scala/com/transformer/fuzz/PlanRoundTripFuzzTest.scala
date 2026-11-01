@@ -160,11 +160,13 @@ object PlanRoundTripFuzzTest {
     }
   }
 
-  /** A query whose answer one run fixes: no RAND() and no row count, whose
-    * rows a sort's ties leave to the layout. */
+  /** A query whose answer one run fixes: no RAND(), no clock, which each
+    * statement reads at its own start (the printed query holds the first
+    * run's instant as a literal), and no row count, whose rows a sort's ties
+    * leave to the layout. */
   private def deterministic(sql: String): Boolean = {
     val upper = sql.toUpperCase(Locale.ROOT)
-    !Seq("RAND", "LIMIT", "OFFSET", "FETCH", "TOP ").exists(upper.contains)
+    !Seq("RAND", "CURRENT_", "LIMIT", "OFFSET", "FETCH", "TOP ").exists(upper.contains)
   }
 
   /** The rows `sql` returns, or the class of what it threw on the data. */

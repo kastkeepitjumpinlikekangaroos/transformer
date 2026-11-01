@@ -161,6 +161,7 @@ ports.
 | 2 | The binder kept an aggregate, and a window function, per spelling: `COUNT()` and `COUNT(*)`, `SUM(a)` and `SUM(t.a)` were two slots computed twice; the printer writes one spelling of each, so the printed query bound to one slot | `plan_roundtrip_fuzz_campaign`, seed 4799, a frontend mutation dropping the `*` of `COUNT(*)` | each is computed once, its spellings reading one slot by their text (W2) |
 | 3 | A cast of NULL to BINARY, which the binder inserts beside a BINARY, has no SQL to write it | the round-trip guard's tally of unprintable plans | printed as its operand, as a cast to DECIMAL is, and inserted again by the binder (W2) |
 | 4 | The printer wrote a table alias `CURRENT_TIMESTAMP` bare, since no keyword list of JSqlParser's holds it, and the parser reads `CURRENT_TIMESTAMP.c1` as the clock, so the printed query did not parse | `plan_roundtrip_fuzz_campaign`, seed 2000342, a frontend mutation inserting the word after a table | a plain word is written bare only if it reads back as itself in every place a name is printed, parsed once a word (after W8) |
+| 5 | The round-trip property compared the answers of a query reading the clock with its printed query's, which holds the first run's instant as a literal | the same campaign, seed 2018135 (`SELECT a, CURRENT_TIMESTAMP FROM t`) | the oracle's own: such a query's answers are not compared, only its plan (after W8) |
 
 W1 found no malformed plan: the whole suite, fuzzers included, and the
 jaffle-shop job run with the validator on every stage.
