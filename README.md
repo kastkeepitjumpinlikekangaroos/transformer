@@ -1180,12 +1180,16 @@ included; `GREATEST`/`LEAST` skip NULLs and return NULL only when every
 argument is NULL, and of two equal zeros `GREATEST` gives `0.0` and `LEAST`
 `-0.0` in either order, as `MAX` and `MIN` do. `SIGN` is -1, 0 or 1, and of
 `NaN`, which is none of them, an error. `MOD(a, b)` is `a % b`, typed the same way.
-A square root of less than zero is NULL, as are a logarithm of zero or less
-and one to a base of zero or less or of 1, as a division by zero is (no number
-answers them; they were `NaN`, and `-Infinity` at zero), and `NaN` stays
-`NaN`. `LOG(x)` with one argument is an error, as engines disagree on its base
-(e in MySQL and Spark, 10 in Postgres and SQLite): write `LN(x)` or
-`LOG10(x)`. `ROUND`,
+A math function of a number outside its domain is NULL, as a division by zero
+is, since no number answers it: a square root of less than zero, a logarithm
+of zero or less or to a base of zero or less or of 1, an `ASIN` or `ACOS` past
+-1 or 1, a `SIN`, `COS` or `TAN` of an infinity, zero to a negative power, and
+a negative number to a finite power that is not whole (they were `NaN`, or an
+infinity). `NaN` stays `NaN`, and otherwise `POWER` is C's `pow`, as in
+Postgres, DuckDB and SQLite: `POWER(1, y)` is 1 for every `y`, and so is
+`POWER(-1, y)` for an infinite `y`. `LOG(x)` with one argument is an error,
+as engines disagree on its base (e in MySQL and Spark, 10 in Postgres and
+SQLite): write `LN(x)` or `LOG10(x)`. `ROUND`,
 `TRUNC`, `FLOOR` and `CEIL` are exact: `ROUND` rounds half away from zero
 (`ROUND(2.5)` is 3 and `ROUND(-2.5)` is -3), `TRUNC` toward zero, `FLOOR`
 down and `CEIL` up, each at `scale` places (0 by default), a negative scale

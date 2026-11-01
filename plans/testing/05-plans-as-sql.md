@@ -278,6 +278,18 @@ queries are in the port now (window.sql:29, 87, 97, 144); the fifth, 108, is
 87's query with a named WINDOW, left out as the port leaves out every such
 duplicate. window.test takes 11 s where it took 3.5.
 
+The NULL rule of finding 3 then took in every math function Postgres refuses
+an argument of: `ASIN` and `ACOS` past -1 or 1, `SIN`, `COS` and `TAN` of an
+infinity, and `POWER` of zero to a negative power and of a negative number to
+a finite power that is not whole, each NaN or an infinity before. `POWER` is
+otherwise C's `pow`, as Postgres, DuckDB and SQLite answer it: 1 to any power,
+and -1 to an infinite one, is 1, where Java's `pow` gave NaN. numeric.sql's
+tests of special values gave twelve statements over finite numbers to the port
+(`sqrt(-1)`, `ln(0)`, `log(0, 10)`, five powers, `0 / 0`, ...): ten
+`skipif transformer`, the engine answering NULL where Postgres refuses, and two
+powers with Postgres's answers. The scripts hold 371 records, 43 of them
+`skipif transformer`.
+
 ### How the printer is built (W2)
 
 - Binding decides some types from how a value is written: a number beside a

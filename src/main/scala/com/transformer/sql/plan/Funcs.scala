@@ -123,23 +123,33 @@ object Funcs {
         if (args.exists(_ == null)) null
         else Rounding(name, args.head.asInstanceOf[Number], if (args.size == 2) args(1).asInstanceOf[Number].longValue else 0L,
           resultType)
+      // A power is NULL where no number is one, as a division by zero is: zero
+      // to a negative power, and a number below zero to a finite power that
+      // is not a whole number, whose answer is complex (Java's pow gave
+      // Infinity and NaN). Otherwise it is C's pow, as in Postgres, DuckDB and
+      // SQLite: 1 to any power is 1, NaN's too, and so is -1 to an infinite
+      // power, where Java gave NaN.
       case "POW" | "POWER" =>
         if (args(0) == null || args(1) == null) null
-        else math.pow(args(0).asInstanceOf[Number].doubleValue, args(1).asInstanceOf[Number].doubleValue)
-      // A square root of less than zero, or a logarithm of zero or less, has
-      // no value, so it is NULL, as a division by zero is; it was NaN, and
-      // -Infinity at zero. NaN stays NaN.
-      case "SQRT" =>
-        if (args.head == null) null
         else {
-          val x = args.head.asInstanceOf[Number].doubleValue
-          if (x < 0) null else math.sqrt(x)
+          val x = args(0).asInstanceOf[Number].doubleValue
+          val y = args(1).asInstanceOf[Number].doubleValue
+          if (x == 0 && y < 0) null
+          else if (x < 0 && math.floor(y) != y && !y.isInfinite && !y.isNaN) null
+          else if (x == 1 || (x == -1 && y.isInfinite)) 1.0
+          else math.pow(x, y)
         }
+      // A function of a number outside its domain has no value, so it is
+      // NULL, as a division by zero is: a square root of less than zero, a
+      // logarithm of zero or less, an arcsine or arccosine of a number past
+      // -1 or 1, a sine, cosine or tangent of an infinity. Each was NaN, and a
+      // logarithm of zero -Infinity. NaN stays NaN.
+      case "SQRT" => inDomain(args.head, _ >= 0)(math.sqrt)
       case "CBRT" =>
         if (args.head == null) null else math.cbrt(args.head.asInstanceOf[Number].doubleValue)
       case "EXP" =>
         if (args.head == null) null else math.exp(args.head.asInstanceOf[Number].doubleValue)
-      case "LN" => logarithm(args.head)(math.log)
+      case "LN" => inDomain(args.head, _ > 0)(math.log)
       // A base of zero or less has no logarithms, nor has 1, whose every power
       // is 1.
       case "LOG" =>
@@ -149,13 +159,13 @@ object Funcs {
           val x = args(1).asInstanceOf[Number].doubleValue
           if (base <= 0 || base == 1 || x <= 0) null else math.log(x) / math.log(base)
         }
-      case "LOG10" => logarithm(args.head)(math.log10)
-      case "LOG2" => logarithm(args.head)(x => math.log(x) / math.log(2.0))
-      case "SIN" => if (args.head == null) null else math.sin(args.head.asInstanceOf[Number].doubleValue)
-      case "COS" => if (args.head == null) null else math.cos(args.head.asInstanceOf[Number].doubleValue)
-      case "TAN" => if (args.head == null) null else math.tan(args.head.asInstanceOf[Number].doubleValue)
-      case "ASIN" => if (args.head == null) null else math.asin(args.head.asInstanceOf[Number].doubleValue)
-      case "ACOS" => if (args.head == null) null else math.acos(args.head.asInstanceOf[Number].doubleValue)
+      case "LOG10" => inDomain(args.head, _ > 0)(math.log10)
+      case "LOG2" => inDomain(args.head, _ > 0)(x => math.log(x) / math.log(2.0))
+      case "SIN" => inDomain(args.head, !_.isInfinite)(math.sin)
+      case "COS" => inDomain(args.head, !_.isInfinite)(math.cos)
+      case "TAN" => inDomain(args.head, !_.isInfinite)(math.tan)
+      case "ASIN" => inDomain(args.head, x => x >= -1 && x <= 1)(math.asin)
+      case "ACOS" => inDomain(args.head, x => x >= -1 && x <= 1)(math.acos)
       case "ATAN" => if (args.head == null) null else math.atan(args.head.asInstanceOf[Number].doubleValue)
       case "ATAN2" =>
         if (args(0) == null || args(1) == null) null
@@ -252,13 +262,13 @@ object Funcs {
     s.substring(from, until)
   }
 
-  /** `log` of the number `arg`, which is NULL when `arg` is, or is zero or
-    * less, where a logarithm has no value. */
-  private def logarithm(arg: Any)(log: Double => Double): Any =
+  /** `f` of the number `arg`: NULL when `arg` is, or lies outside the domain
+    * `within` says, and NaN of NaN, which is in every domain. */
+  private def inDomain(arg: Any, within: Double => Boolean)(f: Double => Double): Any =
     if (arg == null) null
     else {
       val x = arg.asInstanceOf[Number].doubleValue
-      if (x <= 0) null else log(x)
+      if (x.isNaN || within(x)) f(x) else null
     }
 
   private[plan] def negativeLength(length: Long): IllegalArgumentException =

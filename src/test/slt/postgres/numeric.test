@@ -10,8 +10,9 @@
 # The part of the file a DECIMAL of at most 38 digits can run: the checks of
 # addition, subtraction, multiplication and division against bc(1)'s answers
 # over num_data, the aggregates of num_data, conversion to integers, CEIL,
-# FLOOR and ROUND, the corner cases of division, and EXP, LN and LOG of
-# numbers written with a point. 485 of the file's 1,058 statements are here
+# FLOOR and ROUND, the corner cases of division, EXP, LN and LOG of numbers
+# written with a point, and the statements over finite numbers among the
+# tests of special values. 497 of the file's 1,058 statements are here
 # (390 of its single-row INSERTs as five INSERTs of their rows), and each
 # record names the line of numeric.sql it comes from. A statement is as
 # Postgres wrote it but where a rewrite cannot change what it means, which its
@@ -19,8 +20,9 @@
 # ('4.31') as the number, a ::numeric on a number past BIGINT left out (it is
 # a DECIMAL in the engine), a value an INSERT stores as Postgres stores it,
 # rounded to its column's ten places (in num_exp_mul and num_exp_div, and by
-# ROUND(..., 10) in the INSERTs into num_result), and log(x), Postgres's
-# base-10 logarithm, as log10(x). The engine has no unconstrained numeric and
+# ROUND(..., 10) in the INSERTs into num_result), log(x), Postgres's base-10
+# logarithm, as log10(x), and among the special values 'x'::numeric of a
+# finite number as the number x. The engine has no unconstrained numeric and
 # no numeric(210,10), so each such column is a DECIMAL whose record says
 # which.
 #
@@ -30,18 +32,19 @@
 # where Postgres's numeric keeps the scale each value has, and a number written
 # with a point is a DOUBLE in the engine. EXP, LN, LOG and the statistics,
 # DOUBLEs in the engine and numerics in Postgres, are compared as SQLite's R,
-# to three places. `skipif transformer` marks the 19 records the engine
-# answers otherwise by design, each with the reason: ten of them are LN and
-# LOG of zero or a negative number, and LOG to base 1, which Postgres refuses
-# and the engine answers with NULL, as it answers a division by zero.
+# to three places. `skipif transformer` marks the 29 records the engine
+# answers otherwise by design, each with the reason: twenty of them are a
+# division by zero, a square root or logarithm outside its domain, and a
+# power with no real answer, which Postgres refuses and the engine answers
+# with NULL.
 #
-# Left out (573 statements), by what they need:
+# Left out (561 statements), by what they need:
 #  101  to_char(), to_number() or lc_numeric
 #   61  numeric input syntax (strings with spaces, underscores, hex) or
 #       pg_input_is_valid()
 #   56  the SQRT, LN, LOG10 and POWER(10, LN(x)) checks: bc's answers to
 #       200 places, which the engine's DOUBLE functions do not reach
-#   52  numeric Infinity and NaN, which no DECIMAL holds, with div() and
+#   40  numeric Infinity and NaN, which no DECIMAL holds, with div() and
 #       numeric_inc()
 #   51  a cast to numeric, for which the engine has no CAST, or the ^ operator
 #   32  scale(), min_scale() or trim_scale()
@@ -622,6 +625,74 @@ SELECT t1.id1, t1.id2, t1.result, round(t2.expected, 80) as expected
     WHERE t1.id1 = t2.id1 AND t1.id2 = t2.id2
     AND t1.result != round(t2.expected, 80)
 ----
+
+# numeric.sql:662, from the tests of special values (numeric.sql:643-748),
+# whose statements over Infinity and NaN no DECIMAL holds; the twelve over
+# finite numbers are here, each 'x'::numeric written as the number x. An
+# integer divided by zero is NULL. Postgres: division by zero.
+skipif transformer # an integer divided by zero is NULL
+statement error
+SELECT 0 / 0
+
+# numeric.sql:666. Postgres: division by zero.
+skipif transformer # an integer's remainder by zero is NULL
+statement error
+SELECT 0 % 0
+
+# numeric.sql:695. Postgres: cannot take square root of a negative number.
+skipif transformer # a square root of less than zero is NULL, as a division by zero is
+statement error
+SELECT sqrt(-1)
+
+# numeric.sql:706. Postgres: cannot take logarithm of zero.
+skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+statement error
+SELECT ln(0)
+
+# numeric.sql:707. Postgres: cannot take logarithm of a negative number.
+skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+statement error
+SELECT ln(-1)
+
+# numeric.sql:716. Postgres: cannot take logarithm of zero.
+skipif transformer # a logarithm to a base of zero or less is NULL, as a division by zero is
+statement error
+SELECT log(0, 10)
+
+# numeric.sql:717. Postgres: cannot take logarithm of zero.
+skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+statement error
+SELECT log(10, 0)
+
+# numeric.sql:730. Postgres: zero raised to a negative power is undefined.
+skipif transformer # zero to a negative power is NULL, as a division by zero is
+statement error
+SELECT power(0, -1)
+
+# numeric.sql:733. POWER is a DOUBLE in the engine and a numeric in Postgres
+# (-8.0000000000000000), compared as SQLite's R, to three places.
+query R
+SELECT power(-2, 3)
+----
+-8.000
+
+# numeric.sql:734. Postgres: a negative number raised to a non-integer power
+# yields a complex result.
+skipif transformer # a negative number to a power that is not a whole number is NULL, as a division by zero is
+statement error
+SELECT power(-2, 3.3)
+
+# numeric.sql:735, compared as the record before (Postgres: -0.5000000000000000).
+query R
+SELECT power(-2, -1)
+----
+-0.500
+
+# numeric.sql:736. Postgres: a negative number raised to a non-integer power
+# yields a complex result.
+skipif transformer # a negative number to a power that is not a whole number is NULL, as a division by zero is
+statement error
+SELECT power(-2, -1.5)
 
 # numeric.sql:754: numeric AVG used to fail on some platforms. Postgres
 # prints -13430913.592242320700; the engine's AVG of a DECIMAL(18,10) is a

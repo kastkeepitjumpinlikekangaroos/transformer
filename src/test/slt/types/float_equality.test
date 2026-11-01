@@ -2,8 +2,8 @@
 # (plans/robustness/21): NaN equals NaN and sorts above every other value,
 # and -0.0 equals 0.0. Every operator that compares, groups, joins, ranks or
 # de-duplicates agrees with =. Division and % by zero are NULL, as for every
-# number type (plans/robustness/30), and so are a square root of less than
-# zero and a logarithm of zero or less (plans/testing/05).
+# number type (plans/robustness/30), and so is a math function of a number
+# outside its domain (plans/testing/05).
 
 statement ok
 CREATE TABLE f (id INT, d DOUBLE)
@@ -124,3 +124,29 @@ SELECT id, SQRT(d), LN(d) FROM f WHERE id <> 6
 4	-0.0	NULL
 5	Infinity	Infinity
 7	NULL	NULL
+
+# An arcsine or arccosine is of a number from -1 to 1, and an infinity has no
+# sine, cosine or tangent: each is NULL past them.
+query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE
+SELECT ASIN(2), ACOS(-1.5), ASIN(1), SIN(CAST('Infinity' AS DOUBLE)), COS(CAST('-Infinity' AS DOUBLE)), TAN(CAST('Infinity' AS DOUBLE))
+----
+NULL	NULL	1.5707963267948966	NULL	NULL	NULL
+
+# Zero to a negative power, and a number below zero to a finite power that is
+# not whole, are NULL. Otherwise POWER is C's pow: 1 to any power, and -1 to an
+# infinite one, is 1, where Java's pow gives NaN.
+query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE
+SELECT POWER(0, -1), POWER(-8, 0.5), POWER(-2, 3), POWER(-2, -1), POWER(1, CAST('NaN' AS DOUBLE)), POWER(-1, CAST('Infinity' AS DOUBLE)), POWER(-2, CAST('Infinity' AS DOUBLE))
+----
+NULL	NULL	-8.0	-0.5	1.0	1.0	Infinity
+
+query INT,DOUBLE,DOUBLE,DOUBLE rowsort
+SELECT id, POWER(d, -1), POWER(d, 0.5), ASIN(d) FROM f
+----
+1	NaN	NaN	NaN
+2	NaN	NaN	NaN
+3	NULL	0.0	0.0
+4	NULL	0.0	-0.0
+5	0.0	Infinity	NULL
+6	0.6666666666666666	1.224744871391589	NULL
+7	NULL	NULL	NULL

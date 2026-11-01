@@ -2108,6 +2108,12 @@ are in [plans/testing/05](../plans/testing/05-plans-as-sql.md).
   `-Infinity` at zero: `SQRT` of less than zero, `LN`, `LOG10` and `LOG2` of
   zero or less, and `LOG` to a base of zero or less or of 1, which Postgres
   refuses. Each is now NULL, as a division by zero is; `NaN` stays `NaN`.
+  After the round the rule took in every math function Postgres refuses an
+  argument of: `ASIN` and `ACOS` past -1 or 1, `SIN`, `COS` and `TAN` of an
+  infinity, and `POWER` of zero to a negative power and of a negative number
+  to a finite power that is not whole (Java's `NaN` or infinity). `POWER` is
+  otherwise C's `pow`: 1 to any power, and -1 to an infinite one, is 1, as
+  Postgres, DuckDB and SQLite answer, where Java's `pow` gave `NaN`.
 - **One-argument `LOG(x)` was the natural logarithm**, as in MySQL, Spark and
   SQL Server, where Postgres, SQLite and DuckDB read base 10. It is now
   refused, naming `LN(x)`, `LOG10(x)` and `LOG(base, x)`.

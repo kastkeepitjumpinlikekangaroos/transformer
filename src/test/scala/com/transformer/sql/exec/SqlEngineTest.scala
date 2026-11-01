@@ -1194,12 +1194,14 @@ class SqlEngineTest {
     assertEquals(math.E, rows(0)("e1").asInstanceOf[Double], 1e-12)
   }
 
-  /** A square root of less than zero is NULL, as are a logarithm of zero or
-    * less and one to a base of zero or less or of 1, as a division by zero is:
-    * no number answers them. They were Java's NaN, and -Infinity at zero. NaN
-    * stays NaN, -0.0 is zero, and an INT, a BIGINT, a DECIMAL and a DOUBLE
-    * agree. */
-  @Test def aSquareRootOrLogarithmOutsideItsDomainIsNull(): Unit = {
+  /** A function of a number outside its domain is NULL, as a division by
+    * zero is, since no number answers it: a square root of less than zero, a
+    * logarithm of zero or less or to a base of zero or less or of 1, an
+    * arcsine or arccosine past -1 or 1, a sine, cosine or tangent of an
+    * infinity, zero to a negative power, and a number below zero to a power
+    * that is not whole. Each was Java's NaN, or an infinity. NaN stays NaN,
+    * -0.0 is zero, and an INT, a BIGINT, a DECIMAL and a DOUBLE agree. */
+  @Test def aMathFunctionOutsideItsDomainIsNull(): Unit = {
     val c = new Catalog
     val schema = Schema(Vector(Field("id", DataType.IntType), Field("i", DataType.IntType),
       Field("b", DataType.LongType), Field("m", DataType.DecimalType(5, 2)), Field("d", DataType.DoubleType)))
@@ -1210,20 +1212,40 @@ class SqlEngineTest {
     // As text, so NaN equals NaN and -0.0 is told from 0.0.
     def v(expr: String): Seq[String] = column(s"SELECT $expr AS v FROM t ORDER BY id", c, "v").map(String.valueOf)
     for (x <- Seq("i", "b", "m", "d")) {
-      assertEquals(x, Seq("null", if (x == "d") "-0.0" else "0.0", "2.0"), v(s"SQRT($x)"))
+      val zero = if (x == "d") "-0.0" else "0.0"
+      assertEquals(x, Seq("null", zero, "2.0"), v(s"SQRT($x)"))
       assertEquals(x, Seq("null", "null", s"${math.log(4)}"), v(s"LN($x)"))
       assertEquals(x, Seq("null", "null", s"${math.log10(4)}"), v(s"LOG10($x)"))
       assertEquals(x, Seq("null", "null", "2.0"), v(s"LOG2($x)"))
       // As the value and as the base.
       assertEquals(x, Seq("null", "null", "2.0"), v(s"LOG(2, $x)"))
       assertEquals(x, Seq("null", "null", "0.5"), v(s"LOG($x, 2)"))
+      assertEquals(x, Seq("null", zero, "null"), v(s"ASIN($x)"))
+      assertEquals(x, Seq("null", s"${math.Pi / 2}", "null"), v(s"ACOS($x)"))
+      // A negative number to a whole power, or zero to a positive one, is a number.
+      assertEquals(x, Seq("-0.25", "null", "0.25"), v(s"POWER($x, -1)"))
+      assertEquals(x, Seq("null", "0.0", "2.0"), v(s"POWER($x, 0.5)"))
+      assertEquals(x, Seq("16.0", "0.0", "16.0"), v(s"POWER($x, 2)"))
+      assertEquals(x, Seq("0.0625", "1.0", "16.0"), v(s"POWER(2, $x)"))
     }
     // Every power of 1 is 1, so no logarithm has base 1.
     assertEquals(Seq.fill(3)("null"), v("LOG(1, ABS(d) + 1)"))
     assertEquals(Seq.fill(3)("null"), v("LOG(1.0, 5)"))
     assertEquals(Seq.fill(3)("null"), v("LN(CAST('-Infinity' AS DOUBLE))"))
     assertEquals(Seq.fill(3)("Infinity"), v("LN(CAST('Infinity' AS DOUBLE))"))
-    for (f <- Seq("SQRT(x)", "LN(x)", "LOG10(x)", "LOG2(x)", "LOG(2, x)", "LOG(x, 2)"))
+    for (f <- Seq("SIN", "COS", "TAN"); inf <- Seq("Infinity", "-Infinity"))
+      assertEquals(s"$f($inf)", Seq.fill(3)("null"), v(s"$f(CAST('$inf' AS DOUBLE))"))
+    // Past those, POWER is C's pow, as Postgres, DuckDB and SQLite answer: 1
+    // to any power is 1, and so is -1 to an infinite power (Java gave NaN).
+    assertEquals(Seq.fill(3)("1.0"), v("POWER(1, CAST('NaN' AS DOUBLE))"))
+    assertEquals(Seq.fill(3)("1.0"), v("POWER(1.0, CAST('Infinity' AS DOUBLE))"))
+    assertEquals(Seq.fill(3)("1.0"), v("POWER(-1, CAST('-Infinity' AS DOUBLE))"))
+    assertEquals(Seq.fill(3)("1.0"), v("POWER(CAST('NaN' AS DOUBLE), 0)"))
+    assertEquals(Seq.fill(3)("Infinity"), v("POWER(-2, CAST('Infinity' AS DOUBLE))"))
+    assertEquals(Seq.fill(3)("null"), v("POWER(0, CAST('-Infinity' AS DOUBLE))"))
+    assertEquals(Seq.fill(3)("null"), v("POWER(CAST('-Infinity' AS DOUBLE), 0.5)"))
+    for (f <- Seq("SQRT(x)", "LN(x)", "LOG10(x)", "LOG2(x)", "LOG(2, x)", "LOG(x, 2)", "ASIN(x)", "ACOS(x)", "SIN(x)",
+      "POWER(x, 2)", "POWER(2, x)"))
       assertEquals(f, Seq.fill(3)("NaN"), v(f.replace("x", "CAST('NaN' AS DOUBLE)")))
   }
 

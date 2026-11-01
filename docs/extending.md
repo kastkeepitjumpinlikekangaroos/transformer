@@ -21,8 +21,8 @@ relevant module lives, and that you'll follow the workflow in
    argument answers NULL, a scale or a position included, unless the function
    is a flow function that says otherwise. An argument outside the function's
    domain, which no number answers, answers NULL too, as a division by zero
-   does: `SQRT` of less than zero, a logarithm of zero or less
-   (`Funcs.logarithm`), never the `NaN` or `-Infinity` Java gives.
+   does: `SQRT` of less than zero, a logarithm of zero or less, `ASIN` past
+   -1 or 1 (`Funcs.inDomain`), never the `NaN` or the infinity Java gives.
 3. **For hot functions, also add a `Funcs.applyVec` case and a `VecFuncs`
    helper.** The vectorized path eliminates per-row Expr dispatch in
    `ProjectExec` / `FilterExec` and per-row key eval in
