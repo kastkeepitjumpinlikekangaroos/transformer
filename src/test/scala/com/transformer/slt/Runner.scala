@@ -6,6 +6,8 @@ import com.transformer.slt.Script._
 import com.transformer.sql.exec.NestedLoopGuardException
 import com.transformer.sql.plan.LogicalBuilder
 
+import java.nio.charset.StandardCharsets
+import java.nio.file.{Files, Path}
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
@@ -25,10 +27,12 @@ final class Runner(dialect: Dialect, modes: Seq[Mode] = Modes.Verification) {
 
   import Runner._
 
-  def run(file: String, text: String): FileResult = run(file, Script.parse(file, text))
+  /** Run the script at `path`, named `file` in what it reports. */
+  def run(file: String, path: Path): FileResult = run(file, Script.parse(file, read(path)), directory(path))
 
-  def run(file: String, records: Seq[Record]): FileResult = {
-    val db = new Database(dialect)
+  /** Run `records`, whose COPY statements name files in `dir`. */
+  def run(file: String, records: Seq[Record], dir: Path): FileResult = {
+    val db = new Database(dialect, dir)
     val views = new Modes.Views
     val labels = mutable.HashMap.empty[String, String]
     val results = Vector.newBuilder[RecordResult]
@@ -62,9 +66,10 @@ final class Runner(dialect: Dialect, modes: Seq[Mode] = Modes.Verification) {
     * writes must then be checked by hand, since it is only what the engine
     * says. A query the engine refuses or fails on keeps the block it had, and
     * is listed in the second value. */
-  def complete(file: String, text: String): (String, Seq[String]) = {
+  def complete(file: String, path: Path): (String, Seq[String]) = {
+    val text = read(path)
     val lines = text.split("\n", -1).toVector
-    val db = new Database(dialect)
+    val db = new Database(dialect, directory(path))
     val views = new Modes.Views
     val out = Vector.newBuilder[String]
     val problems = Vector.newBuilder[String]
@@ -240,6 +245,11 @@ final class Runner(dialect: Dialect, modes: Seq[Mode] = Modes.Verification) {
 }
 
 object Runner {
+
+  private def read(path: Path): String = new String(Files.readAllBytes(path), StandardCharsets.UTF_8)
+
+  /** The directory a script's COPY statements name their files in: its own. */
+  private def directory(path: Path): Path = path.toAbsolutePath.getParent
 
   sealed trait Outcome
   case object Passed extends Outcome

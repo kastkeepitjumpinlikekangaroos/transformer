@@ -7,7 +7,6 @@ import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
 import org.junit.runners.Parameterized.Parameters
 
-import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import scala.jdk.CollectionConverters._
 
@@ -29,7 +28,7 @@ class SltTest(name: String, path: Path) {
 
   @Test def scriptPasses(): Unit = {
     val dialect = if (name.startsWith("sqlite/")) Dialect.Sqlite else Dialect.Transformer
-    val result = new Runner(dialect).run(name, new String(Files.readAllBytes(path), StandardCharsets.UTF_8))
+    val result = new Runner(dialect).run(name, path)
     val problems = result.problems
     if (problems.nonEmpty || result.stoppedAt.isDefined) {
       val shown = problems.take(10).map { r =>

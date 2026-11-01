@@ -67,7 +67,7 @@ object Corpus {
           val runner = new Runner(dialect, Nil)
           args.drop(i + 1).foreach { f =>
             val path = resolve(f)
-            val (text, problems) = runner.complete(f, new String(Files.readAllBytes(path), StandardCharsets.UTF_8))
+            val (text, problems) = runner.complete(f, path)
             Files.write(path, text.getBytes(StandardCharsets.UTF_8))
             problems.foreach(p => System.out.println(p))
           }
@@ -95,7 +95,7 @@ object Corpus {
         def call(): CompactResult = {
           val t0 = System.nanoTime()
           val r =
-            try runner.run(f.toString, new String(Files.readAllBytes(f), StandardCharsets.UTF_8))
+            try runner.run(f.toString, f)
             catch { case e: Throwable => FileResult(f.toString, Vector.empty, Some("the runner failed: " + describe(e))) }
           val ms = (System.nanoTime() - t0) / 1000000
           val heap = if (!memory) "" else {

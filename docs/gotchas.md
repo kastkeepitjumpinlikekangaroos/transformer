@@ -50,6 +50,13 @@ ship a fix or move something from "not done" to "done".
   `SqlParser.MaxNesting` can print as text past it. `PlanRoundTrip` reports
   that as a verdict of its own (`TooDeep`), which the slt `reprinted` mode
   runs as written and the fuzz guard counts.
+- **The slt spill modes write a run a batch, with no limit.** At a one-byte
+  threshold every batch an operator holds is a run, and `Modes.Spill` lifts
+  `spill_max_runs` so tenk1's 10,000 rows fit (about 1,700 runs a partition in
+  two-row batches, 10,000 at `--config=batch1`). An aggregate and a window read
+  their runs one at a time, but `SortExec` merges every run at once, a file
+  open for each: a script that sorts thousands of rows in a spill mode holds
+  that many files open, past a 1,024-file `ulimit -n`.
 - **JSqlParser's `AllTableColumns` is a subtype of `AllColumns`.** Pattern-match
   `AllTableColumns` first or you'll never reach the `table.*` branch.
 - **JSqlParser's `SelectItem<? extends Expression>` generics confuse Scala

@@ -261,17 +261,22 @@ the recommended option for each, and they landed together:
 | 3 | `LN`, `LOG` and `LOG10` of zero or a negative number, `LOG` to base 1, `SQRT` of a negative | errors ("cannot take logarithm of zero", "division by zero") | NaN, -Infinity, or -0.0 for `SQRT(-0.0)` | NULL, as a division by zero is (`LOG2` too); NaN stays NaN and `SQRT(-0.0)` is -0.0 |
 | 4 | One-argument `LOG(x)` | base 10 (as SQLite and DuckDB) | the natural log (as Spark, MySQL and SQL Server) | refused, naming `LN(x)`, `LOG10(x)` and `LOG(base, x)` |
 
-With them the scripts hold 355 records: window.sql's `count() OVER ()` as a
+With them the scripts held 355 records: window.sql's `count() OVER ()` as a
 statement that must fail and its BIGINT-offset query with Postgres's answer,
 and numeric.sql's ten logarithms outside their domain as `skipif transformer`
 (the engine answers NULL where Postgres refuses), 33 such records in all.
 
 It also met a limit of the harness, not of the engine: the spill/3-partitions
 mode writes a run per two-row batch, so an aggregate over about 3,000 rows
-passes the operator's 1,000-run guard, and window.sql's five queries over all
-10,000 rows of tenk1 stayed out (tenk1 holds the 20 rows the other queries
-read). Since W8 a spill run costs half a millisecond, so that mode could raise
-its guard and take them.
+passed the operator's 1,000-run guard, and window.sql's queries over all
+10,000 rows of tenk1 stayed out (tenk1 held the 20 rows the other queries
+read). Since W8 a spill run costs half a millisecond, so after the round the
+slt spill modes set no limit on runs, the runner gained Postgres's `COPY t
+FROM 'file'`, and tenk1 holds its 10,000 rows, loaded from Postgres's own
+`data/tenk.data` (`postgres/data/`, vendored as it is). Four of the five
+queries are in the port now (window.sql:29, 87, 97, 144); the fifth, 108, is
+87's query with a named WINDOW, left out as the port leaves out every such
+duplicate. window.test takes 11 s where it took 3.5.
 
 ### How the printer is built (W2)
 

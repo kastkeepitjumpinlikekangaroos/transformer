@@ -2,9 +2,11 @@
 # sqlite/ holds files of SQLite's corpus (https://www.sqlite.org/sqllogictest,
 # free to copy as its COPYRIGHT says); postgres/ ports of PostgreSQL's
 # regression tests, with Postgres's answers, under the PostgreSQL License
-# (postgres/COPYRIGHT); every other script is this repo's own.
+# (postgres/COPYRIGHT); every other script is this repo's own. A `.data` file
+# is a table's rows, which a script loads with COPY: postgres/data/ holds
+# Postgres's own, as its regression suite loads them.
 filegroup(
     name = "scripts",
-    srcs = glob(["**/*.test"]),
+    srcs = glob(["**/*.test", "**/*.data"]),
     visibility = ["//visibility:public"],
 )

@@ -77,7 +77,12 @@ object Modes {
       !Lexer.explains(sql) && (layout != Layout.Permuted || !Lexer.selectsStar(sql))
   }
 
-  private val Spill = ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))
+  /** Spill at a one-byte threshold, so each batch an operator holds is a run
+    * of its own, and with no limit on the runs: `spill_max_runs` stops a
+    * workload whose runs never end, and a table here is a script's, the
+    * largest Postgres's tenk1, whose 10,000 rows in two-row batches write about
+    * 1,700 runs a partition in spill/3-partitions, past the default 1,000. */
+  private val Spill = ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L), spillMaxRuns = Int.MaxValue)
 
   val Baseline: Mode = Mode("baseline", Layout.Single, ExecutionOptions.Default, Optimizer.Full)
 

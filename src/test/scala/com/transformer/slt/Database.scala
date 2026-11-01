@@ -2,26 +2,30 @@ package com.transformer.slt
 
 import com.transformer.core._
 
+import java.nio.charset.StandardCharsets
+import java.nio.file.{Files, Path}
 import java.util.Locale
 import scala.collection.mutable
+import scala.jdk.CollectionConverters._
 
 /** The tables a script builds with `statement ok`, held as rows.
   *
   * The engine runs queries only; it has no DDL or DML. A script's
-  * `CREATE TABLE`, `INSERT`, `DELETE`, `UPDATE`, `CREATE VIEW` and `DROP` are
-  * carried out here, and a query reads the tables through a catalog built for
-  * whichever layout a verification mode asks for ([[Modes]]). An `INSERT`'s
-  * values are read here when they are literals; anything else in a `VALUES`
-  * list, an `INSERT ... SELECT`, a `DELETE`'s and an `UPDATE`'s condition, and
-  * a view's body are evaluated by the engine, so a defect there shows up as a
-  * setup failure, which the runner reports.
+  * `CREATE TABLE`, `INSERT`, `COPY`, `DELETE`, `UPDATE`, `CREATE VIEW` and
+  * `DROP` are carried out here, and a query reads the tables through a catalog
+  * built for whichever layout a verification mode asks for ([[Modes]]). An
+  * `INSERT`'s values are read here when they are literals; anything else in a
+  * `VALUES` list, an `INSERT ... SELECT`, a `DELETE`'s and an `UPDATE`'s
+  * condition, and a view's body are evaluated by the engine, so a defect there
+  * shows up as a setup failure, which the runner reports. A `COPY` reads a
+  * file in the script's directory, `dir`.
   *
   * Column types follow the [[Dialect]]: [[Dialect.Transformer]] reads a type
   * name as a CAST does, and [[Dialect.Sqlite]] reads SQLite's corpus as SQLite
   * stores it (`INTEGER` a 64-bit BIGINT, `FLOAT` and `REAL` a DOUBLE, `TEXT` and
   * `VARCHAR(n)` a STRING), with its runs of signs folded ([[Dialect.prepare]]).
   */
-final class Database(dialect: Dialect) {
+final class Database(dialect: Dialect, dir: Path) {
 
   import Database._
 
@@ -72,6 +76,7 @@ final class Database(dialect: Dialect) {
           case other => throw new Unsupported(s"DROP $other")
         }
       case "INSERT" => insert(text, t, query)
+      case "COPY" => copy(t)
       case "DELETE" => delete(text, t, query)
       case "UPDATE" => update(text, t, query)
       case "SELECT" | "WITH" | "VALUES" => query(text); ()
@@ -233,6 +238,44 @@ final class Database(dialect: Dialect) {
         convert(rows.head(0), schema.fields(0).dataType, to)
     }
   }
+
+  // ---- COPY ------------------------------------------------------------------
+
+  /** `COPY table FROM 'file'`, as Postgres's test_setup.sql fills tenk1 from
+    * data/tenk.data: the file, named relative to the script, holds a row a
+    * line in Postgres's text format, its values separated by tabs. */
+  private def copy(t: Vector[Token]): Unit = {
+    val file = (t.lift(2).map(_.upper), t.lift(3).flatMap(f => Lexer.literal(Vector(f)))) match {
+      case (Some("FROM"), Some(name: String)) if t.length == 4 => dir.resolve(name)
+      case _ => throw new Unsupported("COPY other than COPY table FROM 'file'")
+    }
+    val tb = writable(t(1).name)
+    val added = Files.readAllLines(file, StandardCharsets.UTF_8).asScala.toVector.map { line =>
+      val values = line.split("\t", -1)
+      if (values.length != tb.schema.length)
+        throw new IllegalArgumentException(s"a line of $file has ${values.length} values for ${tb.schema.length} columns")
+      Array.tabulate[Any](values.length)(c => copied(values(c), tb.schema.fields(c).dataType))
+    }
+    put(tb.copy(rows = tb.rows ++ added))
+  }
+
+  /** A value of a COPY file as one of type `to`: `\N` is NULL, a number is
+    * read as a literal of its digits is, `t` and `f` are TRUE and FALSE, and
+    * anything else is text, stored as a string literal is. Postgres's other
+    * backslash escapes are not read. */
+  private def copied(value: String, to: DataType): Any =
+    if (value == "\\N") null
+    else if (value.contains('\\')) throw new Unsupported(s"the backslash escape in COPY's value $value")
+    else if (to == DataType.BooleanType) value match {
+      case "t" => java.lang.Boolean.TRUE
+      case "f" => java.lang.Boolean.FALSE
+      case _ => throw new IllegalArgumentException(s"$value is no BOOLEAN")
+    }
+    else if (DataType.isNumeric(to)) Lexer.literal(Lexer.tokens(value)) match {
+      case Some(n: Lexer.NumberText) => convert(n, Lexer.literalType(n), to)
+      case _ => throw new IllegalArgumentException(s"$value is no number")
+    }
+    else convert(value, DataType.StringType, to)
 
   /** `v`, a value of type `from`, stored in a column of type `to`. */
   def convert(v: Any, from: DataType, to: DataType): Any =

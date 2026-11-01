@@ -537,7 +537,9 @@ edge values. Scripts live in `src/test/slt/<area>/<name>.test`; the format is in
 [testing.md](testing.md#sql-logic-tests).
 
 1. Write the setup as `statement ok` records (`CREATE TABLE`, `INSERT ...
-   VALUES`; the runner carries them out, the engine has no DDL) and each query
+   VALUES`, or `COPY t FROM 'file'` for a table too large to write out, the
+   file a `.data` file beside the script in Postgres's text format; the runner
+   carries them out, the engine has no DDL) and each query
    as a `query` record whose header names every column's exact type
    (`INT,DECIMAL(13,4)`) and a sort mode, `rowsort` unless the query's ORDER BY
    fixes the order, with an empty `----` block. A query that must fail is a

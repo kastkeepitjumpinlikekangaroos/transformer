@@ -312,13 +312,16 @@ hashing to <md5>`. `skipif` / `onlyif <engine>` before a record says which
 engines run it; this one is `transformer`. The engine has no DDL, so the runner
 carries out `CREATE TABLE`, `INSERT`, `UPDATE`, `DELETE`, `CREATE VIEW` and
 `DROP` itself and holds the tables as rows (`Database`), and every query reads
-them through a catalog built for its mode.
+them through a catalog built for its mode. `COPY t FROM 'file'` fills a table
+from a file beside the script in Postgres's text format (a row a line, tabs
+between its values, `\N` for NULL), as Postgres's suite loads its data files.
 
 **Every query runs under every verification mode** (`Modes.Verification`),
 DuckDB's query verification and Spark's configuration dimensions in one list,
 and each run must print what the baseline printed: one-row batches; four
 partitions; seven partitions with empty ones leading, between and trailing;
-spill at a one-byte threshold, alone and over three partitions; metrics; each
+spill at a one-byte threshold, alone and over three partitions, with no limit
+on an operator's runs (each batch writes one); metrics; each
 table written as three parquet files and read back through the reader's column
 pruning and pushdown; each table's columns reversed with a column of NULLs
 before each, DuckDB's `verification_projection`, so a column read by its
@@ -340,8 +343,9 @@ those, and `SLT_TRACE` to see where each error came from.
 **PostgreSQL's regression tests** (`src/test/slt/postgres/`, as Spark ported
 33 of them) are ported with Postgres's own answers, from its
 `src/test/regress/expected/*.out` at the commit each header names, under the
-PostgreSQL License (`postgres/COPYRIGHT`): `window.test` (93 of window.sql's
-400 statements), `numeric.test` (485 of numeric.sql's 1,058, the part a
+PostgreSQL License (`postgres/COPYRIGHT`): `window.test` (97 of window.sql's
+400 statements, over tenk1's 10,000 rows, loaded by `COPY` from Postgres's
+`postgres/data/tenk.data`), `numeric.test` (485 of numeric.sql's 1,058, the part a
 DECIMAL of 38 digits can run), and for NULL and three-valued logic `case.test`
 and `boolean.test`. A statement is as Postgres wrote it but where a rewrite
 cannot change what it means, which its record says (`x::type` as a CAST, a
