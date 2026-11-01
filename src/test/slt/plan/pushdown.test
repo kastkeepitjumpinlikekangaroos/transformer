@@ -1,0 +1,123 @@
+# Golden plans: what the optimizer makes of a query, as EXPLAIN shows it (the
+# optimized plan as a tree and as SQL). An EXPLAIN runs in the baseline alone,
+# and its logical sections read no JVM-wide setting, so these hold under every
+# whole-suite configuration. Each plan here was checked by hand.
+
+statement ok
+CREATE TABLE t (a INT, s STRING)
+
+statement ok
+CREATE TABLE u (a INT, x STRING)
+
+# A comma join's equality in WHERE becomes the join's condition, which the
+# physical planner hashes on; left above the join, it ran as a nested loop
+# (plans/robustness/30).
+query T nosort
+EXPLAIN SELECT t.a, u.x FROM t, u WHERE t.a = u.a
+----
+== Optimized Logical Plan ==
+Project: t.a, u.x
+  Join INNER: t.a = u.a
+    Scan t: a, s
+    Scan u: a, x
+== Optimized SQL ==
+SELECT t.a AS a, u.x AS x
+FROM t
+JOIN u ON t.a = u.a
+
+# A conjunct that reads one side of an inner join is pushed into that side.
+query T nosort
+EXPLAIN SELECT t.a, u.x FROM t JOIN u ON t.a = u.a WHERE t.s = 'k' AND u.x <> 'z' AND t.a > 1
+----
+== Optimized Logical Plan ==
+Project: t.a, u.x
+  Join INNER: t.a = u.a
+    Filter: t.s = 'k' AND t.a > 1
+      Scan t: a, s
+    Filter: u.x <> 'z'
+      Scan u: a, x
+== Optimized SQL ==
+WITH q1 AS (
+  SELECT t.a AS a, t.s AS s
+  FROM t
+  WHERE t.s = 'k' AND t.a > 1
+), q2 AS (
+  SELECT u.a AS a, u.x AS x
+  FROM u
+  WHERE u.x <> 'z'
+)
+SELECT q1.a AS a, q2.x AS x
+FROM q1
+JOIN q2 ON q1.a = q2.a
+
+# Under a LEFT JOIN a conjunct on the left side is pushed, one on the right
+# side stays above the join, where it reads the NULLs the join pads with.
+query T nosort
+EXPLAIN SELECT t.a, u.x FROM t LEFT JOIN u ON t.a = u.a WHERE t.s = 'k' AND u.x IS NULL
+----
+== Optimized Logical Plan ==
+Project: t.a, u.x
+  Filter: u.x IS NULL
+    Join LEFT: t.a = u.a
+      Filter: t.s = 'k'
+        Scan t: a, s
+      Scan u: a, x
+== Optimized SQL ==
+WITH q1 AS (
+  SELECT t.a AS a, t.s AS s
+  FROM t
+  WHERE t.s = 'k'
+)
+SELECT q1.a AS a, u.x AS x
+FROM q1
+LEFT JOIN u ON q1.a = u.a
+WHERE u.x IS NULL
+
+# Under a FULL JOIN nothing is pushed.
+query T nosort
+EXPLAIN SELECT t.a, u.x FROM t FULL JOIN u ON t.a = u.a WHERE t.s = 'k'
+----
+== Optimized Logical Plan ==
+Project: t.a, u.x
+  Filter: t.s = 'k'
+    Join FULL: t.a = u.a
+      Scan t: a, s
+      Scan u: a, x
+== Optimized SQL ==
+SELECT t.a AS a, u.x AS x
+FROM t
+FULL JOIN u ON t.a = u.a
+WHERE t.s = 'k'
+
+# A CROSS JOIN with a WHERE over both sides is an inner join on it.
+query T nosort
+EXPLAIN SELECT t.a, u.x FROM t CROSS JOIN u WHERE t.a = u.a + 1 AND t.s = u.x
+----
+== Optimized Logical Plan ==
+Project: t.a, u.x
+  Join INNER: t.a = u.a + 1 AND t.s = u.x
+    Scan t: a, s
+    Scan u: a, x
+== Optimized SQL ==
+SELECT t.a AS a, u.x AS x
+FROM t
+JOIN u ON t.a = u.a + 1 AND t.s = u.x
+
+# Nothing crosses an aggregate: a HAVING stays above it.
+query T nosort
+EXPLAIN SELECT s, COUNT(*) AS n FROM t WHERE a > 0 GROUP BY s HAVING COUNT(*) > 1 ORDER BY n DESC
+----
+== Optimized Logical Plan ==
+Sort: n DESC
+  Project: s, _agg0 AS n
+    Filter: _agg0 > CAST(1 AS BIGINT)
+      Aggregate: GROUP BY t.s; COUNT(*) AS _agg0
+        Filter: t.a > 0
+          Scan t: a, s
+== Optimized SQL ==
+SELECT t.s AS s, COUNT(*) AS n
+FROM t
+WHERE t.a > 0
+GROUP BY t.s
+HAVING COUNT(*) > CAST(1 AS BIGINT)
+ORDER BY 2 DESC

@@ -12,6 +12,20 @@ scala_junit_test(
     ],
 )
 
+# EXPLAIN: a query's plan as rows, the optimized plan as a tree and as SQL,
+# VERBOSE adding the bound plan and the physical operators, nothing run.
+scala_junit_test(
+    name = "explain_test",
+    srcs = ["ExplainTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/sql/exec",
+        "@maven//:junit_junit",
+    ],
+)
+
 # CTE materialization: a CTE referenced >= 2 times is executed once into a
 # shared in-memory result and replayed per reference (compute-once via a
 # counting view + the RAND() determinism fence); a CTE referenced <= 1 time is

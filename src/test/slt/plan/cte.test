@@ -1,0 +1,69 @@
+# Golden plans for CTEs: one read once is inlined where it is read; one read
+# twice is materialized before the query runs, so the plan scans it and shows
+# its own plan beside, and EXPLAIN runs neither.
+
+statement ok
+CREATE TABLE t (a INT, s STRING)
+
+query T nosort
+EXPLAIN WITH c AS (SELECT a FROM t WHERE a > 0) SELECT a FROM c WHERE a < 9
+----
+== Optimized Logical Plan ==
+Project: a
+  Filter: a < 9
+    Project: t.a
+      Filter: t.a > 0
+        Scan t: a, s
+== Optimized SQL ==
+WITH q1 AS (
+  SELECT t.a AS a
+  FROM t
+  WHERE t.a > 0
+)
+SELECT q1.a AS a
+FROM q1
+WHERE q1.a < 9
+
+query T nosort
+EXPLAIN WITH c AS (SELECT a FROM t WHERE a > 0) SELECT x.a FROM c x JOIN c y ON x.a = y.a
+----
+== Optimized Logical Plan ==
+Project: x.a
+  Join INNER: x.a = y.a
+    Scan CTE c AS x: a
+    Scan CTE c AS y: a
+CTE c:
+  Project: t.a
+    Filter: t.a > 0
+      Scan t: a, s
+== Optimized SQL ==
+WITH c AS (
+  SELECT t.a AS a
+  FROM t
+  WHERE t.a > 0
+)
+SELECT x.a AS a
+FROM c AS x
+JOIN c AS y ON x.a = y.a
+
+# A WITH inside a CTE's body is inlined there, and printed as a CTE of its own.
+query T nosort
+EXPLAIN WITH c AS (WITH d AS (SELECT a, s FROM t) SELECT s FROM d WHERE a = 1) SELECT * FROM c
+----
+== Optimized Logical Plan ==
+Project: s
+  Project: s
+    Filter: a = 1
+      Project: t.a, t.s
+        Scan t: a, s
+== Optimized SQL ==
+WITH q1 AS (
+  SELECT t.a AS a, t.s AS s
+  FROM t
+), q2 AS (
+  SELECT q1.s AS s
+  FROM q1
+  WHERE q1.a = 1
+)
+SELECT q2.s AS s
+FROM q2

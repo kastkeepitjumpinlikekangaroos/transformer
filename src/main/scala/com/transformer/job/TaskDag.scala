@@ -199,14 +199,17 @@ object TaskDag {
   }
 
   /** The views `sql` reads, named as the binder resolves them: without
-    * quotes, in lower case, leaving out the CTEs it defines. A qualified name
+    * quotes, in lower case, leaving out the CTEs it defines; an EXPLAIN's
+    * are its query's. A qualified name
     * stays whole (`other.t`). A statement too deep to read is refused when
     * it runs, which fails its task and skips its dependents; here it reads
     * no views, so the rest of the job still runs. Text that does not parse
     * throws, naming why. */
   def viewsRead(sql: String): Set[String] = {
+    // An EXPLAIN reads what its query does, without reading any rows of it.
+    val query = SqlParser.explained(sql).fold(sql)(_.query)
     val stmt =
-      try SqlParser.parse(sql)
+      try SqlParser.parse(query)
       catch { case _: NestingLimitException => return Set.empty }
     val ctes = stmt match {
       case s: Select => cteNames(s)

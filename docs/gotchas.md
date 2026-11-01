@@ -32,6 +32,13 @@ ship a fix or move something from "not done" to "done".
   since the operand's types are the same; a plan with a DECIMAL literal where no
   DECIMAL stands beside it, which the binder never makes, would print as a
   DOUBLE.
+- **`EXPLAIN` is read off the text before JSqlParser sees it.**
+  `SqlParser.explained` finds the `EXPLAIN` token and `VERBOSE` after it, and
+  the query is the text that follows, bound as any query is, so every check the
+  parser and binder make of a query holds for it too; JSqlParser's own
+  `ExplainStatement`, which would carry the query past `refuseLostTailClauses`
+  and the rejection pass, is never built. Anything that reads a task's SQL for
+  its views must unwrap an EXPLAIN first, as `TaskDag.viewsRead` does.
 - **A printed plan nests deeper than its query.** `PlanSql` writes the casts
   the binder inserted and parentheses around operands, so a query within
   `SqlParser.MaxNesting` can print as text past it. `PlanRoundTrip` reports

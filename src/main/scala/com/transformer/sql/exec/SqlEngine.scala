@@ -2,6 +2,7 @@ package com.transformer.sql.exec
 
 import com.transformer.core.{Catalog, ColumnarBatch, ExecutedQuery, ExecutionOptions, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.core.metrics.{MetricsNode, QueryMetrics}
+import com.transformer.sql.parse.SqlParser
 import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer}
 
 /** Wires the SQL stack into [[SqlExecutorRegistry]]. Calling `init()` is
@@ -14,10 +15,22 @@ object SqlEngine extends SqlExecutor {
   // Self-install on class load so simply linking against this module is enough.
   init()
 
-  def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
-    if (!opts.metricsEnabled) executeUnmeasured(sql, catalog, opts)
-    else executeMeasured(sql, catalog, opts)
-  }
+  /** Run `sql`: a query, or `EXPLAIN [VERBOSE]` and a query, which returns
+    * the query's plan without running it ([[Explain]]). */
+  def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery =
+    SqlParser.explained(sql) match {
+      case Some(e) => Explain.execute(e.query, catalog, opts, e.verbose)
+      case None =>
+        if (!opts.metricsEnabled) executeUnmeasured(sql, catalog, opts)
+        else executeMeasured(sql, catalog, opts)
+    }
+
+  /** The lines `EXPLAIN [VERBOSE] query` returns for the query `query`: its
+    * plan as the optimizer makes it, as a tree and as SQL, and with `verbose`
+    * the plan as bound and the physical operators too. Nothing runs. */
+  def explain(query: String, catalog: Catalog, opts: ExecutionOptions = ExecutionOptions.Default,
+      verbose: Boolean = false): Vector[String] =
+    Explain.lines(query, catalog, opts, verbose)
 
   /** Disabled-path: no `System.nanoTime` calls, no [[QueryMetrics]]
     * allocation. The only added cost vs running without metrics is the

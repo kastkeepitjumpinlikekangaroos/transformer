@@ -206,6 +206,11 @@ object Lexer {
     }
   }
 
+  /** Whether `sql` is an EXPLAIN, whose plan text differs by mode, so it
+    * runs in the baseline alone. */
+  def explains(sql: String): Boolean =
+    tokens(sql).find(_.kind == Token.Word).exists(_.upper == "EXPLAIN")
+
   /** A name in double quotes, which the engine reads as written. */
   def quote(name: String): String = "\"" + name.replace("\"", "\"\"") + "\""
 }

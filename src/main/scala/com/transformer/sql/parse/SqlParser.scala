@@ -162,6 +162,53 @@ object SqlParser {
     * than going through `Select#getPlainSelect`, which `ClassCastException`s
     * on set operations.
     */
+  /** An EXPLAIN statement: the query it explains, and whether it asks for
+    * VERBOSE. */
+  final case class Explained(query: String, verbose: Boolean)
+
+  /** `sql` as an EXPLAIN statement, or None for SQL that is not one. The
+    * query is the text after `EXPLAIN` and `VERBOSE`, which binds as any
+    * query does. The other options EXPLAIN takes elsewhere (ANALYZE, which runs
+    * the query, COSTS, BUFFERS, FORMAT, PLAN FOR) are refused. */
+  def explained(sql: String): Option[Explained] = {
+    val first =
+      try tokens(sql).take(3).toVector
+      catch { case NonFatal(_) => return None } // the query's own parse says why
+    if (!first.headOption.exists(_.kind == CCJSqlParserConstants.K_EXPLAIN)) return None
+    val verbose = first.lift(1).exists(_.kind == CCJSqlParserConstants.K_VERBOSE)
+    first.drop(if (verbose) 2 else 1).headOption.filter(t => ExplainOptions(t.kind)).foreach { t =>
+      throw new IllegalArgumentException(
+        s"EXPLAIN ${t.image.toUpperCase(java.util.Locale.ROOT)} is not supported: EXPLAIN shows a query's plan " +
+          "without running it, and EXPLAIN VERBOSE adds the plan as bound and the operators that run it")
+    }
+    val afterExplain = skipBlank(sql, 0) + "EXPLAIN".length
+    val at = if (verbose) skipBlank(sql, afterExplain) + "VERBOSE".length else afterExplain
+    Some(Explained(sql.substring(at), verbose))
+  }
+
+  private val ExplainOptions: Set[Int] = Set(CCJSqlParserConstants.K_ANALYZE, CCJSqlParserConstants.K_COSTS,
+    CCJSqlParserConstants.K_BUFFERS, CCJSqlParserConstants.K_FORMAT, CCJSqlParserConstants.K_PLAN)
+
+  /** Where the text from `from` on next holds something other than white
+    * space and comments. */
+  private def skipBlank(sql: String, from: Int): Int = {
+    var i = from
+    var moved = true
+    while (moved) {
+      moved = false
+      while (i < sql.length && sql.charAt(i).isWhitespace) { i += 1; moved = true }
+      if (sql.startsWith("--", i)) {
+        while (i < sql.length && sql.charAt(i) != '\n') i += 1
+        moved = true
+      } else if (sql.startsWith("/*", i)) {
+        val close = sql.indexOf("*/", i + 2)
+        i = if (close < 0) sql.length else close + 2
+        moved = true
+      }
+    }
+    i
+  }
+
   def parseSelect(sql: String): Select = parse(sql) match {
     case sel: Select => sel
     case _ => throw new IllegalArgumentException("Only SELECT statements are supported")

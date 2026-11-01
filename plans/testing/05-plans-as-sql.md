@@ -48,7 +48,7 @@ takes all of them but JSqlParser 5.3, which still refuses deep parentheses.
 |---|---|---|
 | W1 | Plan validation after every pass | **done** 2026-11-01 |
 | W2 | `PlanSql`: a plan printed as SQL the binder reads back to it; the round trip as an slt mode and a fuzz property | **done** 2026-11-01 |
-| W3 | `EXPLAIN` and golden plans | |
+| W3 | `EXPLAIN` and golden plans | **done** 2026-11-01 |
 | W4 | Join order by connectivity | |
 | W5 | A pairing that streams | |
 | W6 | Every hash zero (`--config=hashzero`) | |
@@ -167,6 +167,13 @@ jaffle-shop job run with the validator on every stage.
 W2: every slt script round-trips, this repo's and the SQLite slices (about
 1,900 of SQLite's queries), under the `reprinted` and `optimized-reprinted`
 modes; so do 5,000 seeds of each generator's property after finding 2.
+
+W3: `EXPLAIN` is read off the text (`SqlParser.explained`), so the query
+under it binds through every check a query does; golden plans under
+`src/test/slt/plan/` pin pushdown into joins and its outer-join barriers, the
+comma join's key, a CTE inlined or materialized, and EXPLAIN's own refusals.
+They also pin a limitation: a filter over an inlined CTE stays above the CTE's
+projection, since FilterPushdown moves filters through joins only.
 
 ### How the printer is built (W2)
 

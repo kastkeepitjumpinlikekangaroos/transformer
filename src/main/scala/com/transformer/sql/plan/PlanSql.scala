@@ -377,10 +377,12 @@ object PlanSql {
       val main = query(root, root.outputSchema.fieldNames)
       if (defined.isEmpty) main
       else {
-        val ctes = defined.zipWithIndex.flatMap { case (lines, i) =>
-          ((if (i == 0) "WITH " else ", ") + lines.head) +: lines.tail
+        // `WITH a AS (` ... `), b AS (` ... `)`, the main query after.
+        val ctes = defined.foldLeft(Vector.empty[String]) { (acc, lines) =>
+          if (acc.isEmpty) ("WITH " + lines.head) +: lines.tail
+          else (acc.init :+ s"${acc.last}, ${lines.head}") ++ lines.tail
         }
-        ctes.toVector ++ main
+        ctes ++ main
       }
     }
 

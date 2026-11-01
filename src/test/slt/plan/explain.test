@@ -1,0 +1,72 @@
+# EXPLAIN itself: the binder's own words for a query it refuses, a refusal of
+# the options EXPLAIN takes in other engines, and the plan of a query the
+# physical planner would refuse, which EXPLAIN shows since it plans no
+# physical operators.
+
+statement ok
+CREATE TABLE t (a INT, s STRING)
+
+statement error
+EXPLAIN SELECT nope FROM t
+----
+Unknown column 'nope'
+
+statement error
+EXPLAIN ANALYZE SELECT a FROM t
+----
+EXPLAIN ANALYZE is not supported
+
+statement error
+EXPLAIN FORMAT JSON SELECT a FROM t
+----
+EXPLAIN FORMAT is not supported
+
+query T nosort
+EXPLAIN SELECT a, -a AS n, CAST(a AS BIGINT) + 1 AS b, s || '!' AS e FROM t WHERE s LIKE 'a%' ORDER BY 2 DESC LIMIT 3
+----
+== Optimized Logical Plan ==
+Limit: 3
+  Sort: n DESC
+    Project: t.a, -t.a AS n, CAST(t.a AS BIGINT) + CAST(1 AS BIGINT) AS b, t.s || '!' AS e
+      Filter: t.s LIKE 'a%'
+        Scan t: a, s
+== Optimized SQL ==
+SELECT t.a AS a, -t.a AS n, CAST(t.a AS BIGINT) + CAST(1 AS BIGINT) AS b, t.s || '!' AS e
+FROM t
+WHERE t.s LIKE 'a%'
+ORDER BY 2 DESC
+LIMIT 3
+
+query T nosort
+EXPLAIN SELECT a, ROW_NUMBER() OVER (PARTITION BY s ORDER BY a) AS r FROM t
+----
+== Optimized Logical Plan ==
+Project: t.a, _win0 AS r
+  Window: ROW_NUMBER() OVER (PARTITION BY t.s ORDER BY t.a) AS _win0
+    Scan t: a, s
+== Optimized SQL ==
+SELECT t.a AS a, ROW_NUMBER() OVER (PARTITION BY t.s ORDER BY t.a) AS r
+FROM t
+
+query T nosort
+EXPLAIN SELECT a FROM t UNION ALL SELECT a FROM t UNION SELECT 1
+----
+== Optimized Logical Plan ==
+Union
+  Union ALL
+    Project: t.a
+      Scan t: a, s
+    Project: t.a
+      Scan t: a, s
+  Project: 1 AS "1"
+    Values: one row, no columns
+== Optimized SQL ==
+(
+  SELECT t.a AS a
+  FROM t
+  UNION ALL
+  SELECT t.a AS a
+  FROM t
+)
+UNION
+SELECT 1 AS "1"

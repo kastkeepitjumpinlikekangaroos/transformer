@@ -557,6 +557,16 @@ SQLite's corpus goes under `src/test/slt/sqlite/`, cut at a record boundary with
 a header naming its source; mark each record the engine answers otherwise by
 design with `skipif transformer # <why>` on the line before it.
 
+A **golden plan** pins the plan a query gets, where a planner change could
+keep its answer and lose what makes it fast (a join that stops hashing, a
+filter that stops reaching its scan): a `query T nosort` record of `EXPLAIN
+<query>` under `src/test/slt/plan/`, filled by `--complete` like any other and
+checked by hand against what the optimizer should do. It runs in the baseline
+alone, since each mode makes another plan, and plain `EXPLAIN`'s sections are
+logical, so the plan holds under every whole-suite configuration; `EXPLAIN
+VERBOSE`'s physical section depends on the sharding settings and is no golden
+plan.
+
 ## Add a property / generator
 
 The property-based testing harness lives in `src/test/scala/com/transformer/fuzz/`

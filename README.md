@@ -1495,6 +1495,43 @@ SQLite's test corpus, a join of 17 ten-row tables written in an unlucky order
 pairs ten million rows on its way to an answer of one row, and two wider ones
 run a 2 GB heap out.
 
+**EXPLAIN:** `EXPLAIN <query>` returns the query's plan, without running any
+of it, as one `STRING` column, `plan`, a row per line: the plan the optimizer
+makes, as a tree of operators and as SQL that binds back to it. Every column
+is qualified by its table, every cast the engine inserted is written in, and a
+filter the optimizer pushed under a join reads as a CTE of its own:
+
+```
+EXPLAIN SELECT t.a, u.x FROM t, u WHERE t.a = u.a AND u.x = 'two'
+
+== Optimized Logical Plan ==
+Project: t.a, u.x
+  Join INNER: t.a = u.a
+    Scan t: a, s
+    Filter: u.x = 'two'
+      Scan u: a, x
+== Optimized SQL ==
+WITH q1 AS (
+  SELECT u.a AS a, u.x AS x
+  FROM u
+  WHERE u.x = 'two'
+)
+SELECT t.a AS a, q1.x AS x
+FROM t
+JOIN q1 ON t.a = q1.a
+```
+
+A CTE the query reads twice or more, which runs once before the query, shows
+as a scan in the tree and its own plan after it. `EXPLAIN VERBOSE <query>` also
+shows the plan as bound, before the optimizer, as a tree and as SQL, and the
+physical operators that run it: which side of a join is hashed, a join with no
+equality that pairs rows in a nested loop, the exchanges that shard a
+pipeline, and the partitions each operator runs in, which depend on the
+tables' sizes and the sharding settings. `ANALYZE`, `FORMAT`, `COSTS` and `PLAN
+FOR` are refused, and a query the engine refuses is refused under `EXPLAIN` in
+its own words. An `EXPLAIN` runs wherever a query does: the GUI's query console,
+the data viewer, a task's SQL.
+
 ## Temporal templating
 
 `TemplateRenderer` substitutes `{{ ... }}` expressions in SQL strings and
@@ -1742,7 +1779,9 @@ PlanSql.print(LogicalOptimizer.optimize(built.main), catalog)
 A shape no SELECT holds, like the filter the optimizer pushed under the join
 above, is printed as a CTE the query reads. A plan that reads a view no catalog
 holds (a CTE's materialized rows) has no SQL form and throws
-`PlanSql.UnprintablePlanException`.
+`PlanSql.UnprintablePlanException`. `SqlEngine.explain(query, catalog)` returns
+the lines [`EXPLAIN`](#sql-features) does (`verbose = true` for `EXPLAIN
+VERBOSE`), and `PlanTree.lines(plan)` a plan's tree alone.
 
 ### Loading a job directory from code
 

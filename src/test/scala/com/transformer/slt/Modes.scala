@@ -70,8 +70,11 @@ object Modes {
 
   final case class Mode(name: String, layout: Layout, options: ExecutionOptions, optimizer: Optimizer,
       text: Text = Text.AsWritten) {
-    /** Whether `sql` runs in this mode. */
-    def runs(sql: String): Boolean = layout != Layout.Permuted || !Lexer.selectsStar(sql)
+    /** Whether `sql` runs in this mode: an EXPLAIN's text is the plan the
+      * baseline makes, and a query selecting `*` returns the columns in their
+      * stored order, which the permuted layout changes. */
+    def runs(sql: String): Boolean =
+      !Lexer.explains(sql) && (layout != Layout.Permuted || !Lexer.selectsStar(sql))
   }
 
   private val Spill = ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))
