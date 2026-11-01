@@ -15,15 +15,34 @@ class CsvReaderTest {
     p
   }
 
+  /** Partition 0 as one batch, however many batches the reader cut it into:
+    * the batch size is `ColumnarBatch.DefaultCapacity`, which the whole suite
+    * also runs at 1 and 2 rows (docs/testing.md). */
+  private def wholePartition(r: CsvReader): ColumnarBatch = {
+    val parts = r.readPartition(0).toVector
+    val n = parts.map(_.numRows).sum
+    val out = new ColumnarBatch(r.schema, math.max(1, n))
+    var row = 0
+    parts.foreach { b =>
+      var i = 0
+      while (i < b.numRows) {
+        var c = 0
+        while (c < r.schema.length) { b.column(c).copyTo(i, out.column(c), row); c += 1 }
+        row += 1
+        i += 1
+      }
+    }
+    out.setNumRows(n)
+    out
+  }
+
   @Test def inferSchemaIntAndString(): Unit = {
     val p = tmpCsv("data.csv", "id,name\n1,alice\n2,bob\n3,charlie\n")
     val r = CsvReader.fromPath(p.toString, CsvOptions())
     assertEquals(2, r.schema.length)
     assertEquals(DataType.IntType, r.schema.fields(0).dataType)
     assertEquals(DataType.StringType, r.schema.fields(1).dataType)
-    val batches = r.readPartition(0).toList
-    assertEquals(1, batches.size)
-    val b = batches.head
+    val b = wholePartition(r)
     assertEquals(3, b.numRows)
     assertEquals(1, b.column(0).asInstanceOf[IntVector].get(0))
     assertEquals("alice", b.column(1).asInstanceOf[StringVector].get(0))
@@ -52,7 +71,7 @@ class CsvReaderTest {
   @Test def nullValueHandling(): Unit = {
     val p = tmpCsv("nulls.csv", "id,name\n1,alice\n2,\n3,charlie\n")
     val r = CsvReader.fromPath(p.toString, CsvOptions())
-    val b = r.readPartition(0).next()
+    val b = wholePartition(r)
     assertFalse(b.column(1).isNull(0))
     assertTrue(b.column(1).isNull(1))
     assertFalse(b.column(1).isNull(2))
@@ -63,7 +82,7 @@ class CsvReaderTest {
     val schema = Seq(Field("id", DataType.IntType), Field("name", DataType.StringType))
     val opts = CsvOptions(inferSchema = false, header = false, columns = Some(schema))
     val r = CsvReader.fromPath(p.toString, opts)
-    val b = r.readPartition(0).next()
+    val b = wholePartition(r)
     assertEquals(2, b.numRows)
     assertEquals(1, b.column(0).asInstanceOf[IntVector].get(0))
     assertEquals("bob", b.column(1).asInstanceOf[StringVector].get(1))
@@ -72,7 +91,7 @@ class CsvReaderTest {
   @Test def quotedFieldsWithDelimiter(): Unit = {
     val p = tmpCsv("q.csv", "name,note\n\"smith, john\",hello\n\"doe, jane\",\"hi, there\"\n")
     val r = CsvReader.fromPath(p.toString, CsvOptions())
-    val b = r.readPartition(0).next()
+    val b = wholePartition(r)
     assertEquals("smith, john", b.column(0).asInstanceOf[StringVector].get(0))
     assertEquals("hi, there", b.column(1).asInstanceOf[StringVector].get(1))
   }
@@ -235,16 +254,70 @@ class CsvReaderTest {
     val msg = failure(rows(CsvReader.fromPath(tmpCsv("v.csv", "id,n\n1,2\n2,abc\n").toString,
       explicit("id" -> DataType.IntType, "n" -> DataType.IntType))))
     assertTrue(msg, msg.contains("v.csv") && msg.contains("line 3") && msg.contains("'n'") && msg.contains("'abc'") && msg.contains("int"))
-    // The type of a later file's column comes from the first file's sample.
+    // A value past the sample that does not read as its column's type fails
+    // naming where the type came from.
     val dir = Files.createTempDirectory("transformer-csv-glob-")
     Files.writeString(dir.resolve("a.csv"), "flag\ntrue\nfalse\n")
     Files.writeString(dir.resolve("b.csv"), "flag\nyes\nno\n")
-    val bool = failure(rows(CsvReader.fromPath(dir.toString, CsvOptions())))
+    val bool = failure(rows(CsvReader.fromPath(dir.toString, CsvOptions(inferenceSampleRows = 2))))
     assertTrue(bool, bool.contains("b.csv") && bool.contains("'yes'") && bool.contains("boolean") &&
-      bool.contains("inferred from the first 1000 rows") && bool.contains("a.csv"))
+      bool.contains("inferred from the first 2 rows of") && bool.contains("a.csv"))
     // Within the sample, inference reads every value as what it is.
     Files.writeString(dir.resolve("b.csv"), "flag\nTRUE\nFalse\n")
     assertEquals(Seq(true, false, true, false), rows(CsvReader.fromPath(dir.toString, CsvOptions())).map(_.head))
+  }
+
+  /** Inference sampled the first file alone, so a glob whose first file held
+    * a header and no rows (what a writer leaves for an output partition that
+    * held none, as a sharded GROUP BY writes) typed every column STRING, and a
+    * downstream SUM of a count was refused; and a two-row first file decided
+    * the type of every file after it. The sample is the first rows of the
+    * glob's files in order. */
+  @Test def inferenceSamplesTheGlobsFilesInOrder(): Unit = {
+    val dir = Files.createTempDirectory("transformer-csv-sample-")
+    Files.writeString(dir.resolve("part-00000.csv"), "tier,customers\n")
+    Files.writeString(dir.resolve("part-00001.csv"), "tier,customers\ngold,2\n")
+    Files.writeString(dir.resolve("part-00002.csv"), "tier,customers\nsilver,1\n")
+    val r = CsvReader.fromPath(dir.toString, CsvOptions())
+    assertEquals(Vector(DataType.StringType, DataType.IntType), r.schema.fields.map(_.dataType))
+    assertEquals(Seq(Seq("gold", 2), Seq("silver", 1)), rows(r))
+    // A later file's values join the sample's types while the sample lasts.
+    Files.writeString(dir.resolve("part-00002.csv"), "tier,customers\nsilver,1.5\n")
+    assertEquals(DataType.DoubleType, CsvReader.fromPath(dir.toString, CsvOptions()).schema.fields(1).dataType)
+    // A sample the first file fills reads nothing after it.
+    assertEquals(DataType.IntType,
+      CsvReader.fromPath(dir.toString, CsvOptions(inferenceSampleRows = 1)).schema.fields(1).dataType)
+    // No row anywhere: every column is a STRING, as for one empty file.
+    Files.writeString(dir.resolve("part-00001.csv"), "tier,customers\n")
+    Files.writeString(dir.resolve("part-00002.csv"), "tier,customers\n")
+    assertEquals(Vector(DataType.StringType, DataType.StringType),
+      CsvReader.fromPath(dir.toString, CsvOptions()).schema.fields.map(_.dataType))
+  }
+
+  /** A later file's header was skipped and its fields read in the first
+    * file's order, so a file that wrote the columns in another order read
+    * each value into the other column, silently where the two had one type.
+    * Each file is read by its own header's names, regardless of case. */
+  @Test def aLaterFileIsReadByItsHeadersNames(): Unit = {
+    val dir = Files.createTempDirectory("transformer-csv-names-")
+    Files.writeString(dir.resolve("a.csv"), "first,last,n\nAda,Lovelace,1\n")
+    Files.writeString(dir.resolve("b.csv"), "LAST,n,First\nHopper,2,Grace\n")
+    val r = CsvReader.fromPath(dir.toString, CsvOptions())
+    assertEquals(Vector("first", "last", "n"), r.schema.fieldNames)
+    assertEquals(Seq(Seq("Ada", "Lovelace", 1), Seq("Grace", "Hopper", 2)), rows(r))
+    // A file naming other columns fails, naming both headers.
+    Files.writeString(dir.resolve("b.csv"), "first,surname,n\nGrace,Hopper,2\n")
+    val other = failure(rows(CsvReader.fromPath(dir.toString, CsvOptions())))
+    assertTrue(other, other.contains("b.csv") && other.contains("[first, surname, n]") &&
+      other.contains("a.csv") && other.contains("[first, last, n]"))
+    // So does one with a column more or fewer.
+    Files.writeString(dir.resolve("b.csv"), "first,last\nGrace,Hopper\n")
+    assertTrue(failure(rows(CsvReader.fromPath(dir.toString, CsvOptions()))).contains("must name the same columns"))
+    // Declared columns name the columns themselves: each file's header is
+    // skipped, and its fields are read in the declared order.
+    Files.writeString(dir.resolve("b.csv"), "x,y,z\nGrace,Hopper,2\n")
+    assertEquals(Seq(Seq("Ada", "Lovelace", 1), Seq("Grace", "Hopper", 2)), rows(CsvReader.fromPath(dir.toString,
+      explicit("first" -> DataType.StringType, "last" -> DataType.StringType, "n" -> DataType.IntType))))
   }
 
   /** A declared DECIMAL kept the text's own scale and precision, so a column

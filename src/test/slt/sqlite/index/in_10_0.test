@@ -1,0 +1,1042 @@
+# From SQLite's sqllogictest corpus (https://www.sqlite.org/sqllogictest,
+# mirrored at https://github.com/gregrahn/sqllogictest): test/index/in/10/slt_good_0.test,
+# up to its 150th query this engine runs. Its COPYRIGHT lets it be copied
+# freely. `skipif transformer` marks a record the engine answers otherwise
+# by design, with the reason.
+
+hash-threshold 8
+
+statement ok
+CREATE TABLE tab0(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+INSERT INTO tab0 VALUES(0,69,63.27,'xdajd',60,95.79,'dhftn')
+
+statement ok
+INSERT INTO tab0 VALUES(1,99,92.15,'csbgd',24,70.0,'naxqw')
+
+statement ok
+INSERT INTO tab0 VALUES(2,67,80.50,'tsxbw',76,30.75,'mvmjx')
+
+statement ok
+INSERT INTO tab0 VALUES(3,58,68.31,'czlxp',30,22.91,'pmufg')
+
+statement ok
+INSERT INTO tab0 VALUES(4,84,11.23,'hnyud',62,10.85,'ylafp')
+
+statement ok
+INSERT INTO tab0 VALUES(5,48,86.25,'pgfdt',70,87.6,'dfcps')
+
+statement ok
+INSERT INTO tab0 VALUES(6,11,4.29,'inpln',40,88.79,'pcmps')
+
+statement ok
+INSERT INTO tab0 VALUES(7,49,27.82,'hrizk',6,99.67,'rtnyc')
+
+statement ok
+INSERT INTO tab0 VALUES(8,19,73.52,'owmje',13,78.32,'oxpmw')
+
+statement ok
+INSERT INTO tab0 VALUES(9,20,36.88,'vnbdv',81,58.0,'rwzxr')
+
+statement ok
+CREATE TABLE tab1(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab1_0 on tab1 (col0)
+
+statement ok
+CREATE INDEX idx_tab1_1 on tab1 (col1)
+
+statement ok
+CREATE INDEX idx_tab1_3 on tab1 (col3)
+
+statement ok
+CREATE INDEX idx_tab1_4 on tab1 (col4)
+
+statement ok
+INSERT INTO tab1 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab2(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab2_0 ON tab2 (col3)
+
+statement ok
+CREATE INDEX idx_tab2_3 ON tab2 (col4 DESC)
+
+statement ok
+INSERT INTO tab2 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab3(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_0 ON tab3 (col0 DESC)
+
+statement ok
+CREATE INDEX idx_tab3_1 ON tab3 (col1)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_5 ON tab3 (col3)
+
+statement ok
+INSERT INTO tab3 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab4(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab4_0 ON tab4 (col0 DESC)
+
+statement ok
+CREATE INDEX idx_tab4_5 ON tab4 (col1,col4,col3)
+
+statement ok
+INSERT INTO tab4 SELECT * FROM tab0
+
+query I rowsort label-0
+SELECT pk FROM tab0 WHERE col1 IN (1.29,40.85,73.9,98.93,14.64,43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab0 WHERE col1 IN (73.9,40.85,14.64,1.29,98.93,43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab0 WHERE (col1 = 1.29 OR col1 = 40.85 OR col1 = 73.9 OR col1 = 98.93 OR col1 = 14.64 OR col1 = 43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab1 WHERE col1 IN (1.29,40.85,73.9,98.93,14.64,43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab1 WHERE col1 IN (73.9,40.85,14.64,1.29,98.93,43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab1 WHERE (col1 = 1.29 OR col1 = 40.85 OR col1 = 73.9 OR col1 = 98.93 OR col1 = 14.64 OR col1 = 43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab2 WHERE col1 IN (1.29,40.85,73.9,98.93,14.64,43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab2 WHERE col1 IN (73.9,40.85,14.64,1.29,98.93,43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab2 WHERE (col1 = 1.29 OR col1 = 40.85 OR col1 = 73.9 OR col1 = 98.93 OR col1 = 14.64 OR col1 = 43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab3 WHERE col1 IN (1.29,40.85,73.9,98.93,14.64,43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab3 WHERE col1 IN (73.9,40.85,14.64,1.29,98.93,43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab3 WHERE (col1 = 1.29 OR col1 = 40.85 OR col1 = 73.9 OR col1 = 98.93 OR col1 = 14.64 OR col1 = 43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab4 WHERE col1 IN (1.29,40.85,73.9,98.93,14.64,43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab4 WHERE col1 IN (73.9,40.85,14.64,1.29,98.93,43.90)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab4 WHERE (col1 = 1.29 OR col1 = 40.85 OR col1 = 73.9 OR col1 = 98.93 OR col1 = 14.64 OR col1 = 43.90)
+----
+
+query I rowsort label-15
+SELECT pk FROM tab0 WHERE (col1 IN (14.57,5.62,84.22,6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab0 WHERE (col1 IN (5.62,14.57,84.22,6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab0 WHERE ((col1 = 14.57 OR col1 = 5.62 OR col1 = 84.22 OR col1 = 6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab1 WHERE (col1 IN (14.57,5.62,84.22,6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab1 WHERE (col1 IN (5.62,14.57,84.22,6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab1 WHERE ((col1 = 14.57 OR col1 = 5.62 OR col1 = 84.22 OR col1 = 6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab2 WHERE (col1 IN (14.57,5.62,84.22,6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab2 WHERE (col1 IN (5.62,14.57,84.22,6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab2 WHERE ((col1 = 14.57 OR col1 = 5.62 OR col1 = 84.22 OR col1 = 6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab3 WHERE (col1 IN (14.57,5.62,84.22,6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab3 WHERE (col1 IN (5.62,14.57,84.22,6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab3 WHERE ((col1 = 14.57 OR col1 = 5.62 OR col1 = 84.22 OR col1 = 6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab4 WHERE (col1 IN (14.57,5.62,84.22,6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab4 WHERE (col1 IN (5.62,14.57,84.22,6.34))
+----
+
+query I rowsort label-15
+SELECT pk FROM tab4 WHERE ((col1 = 14.57 OR col1 = 5.62 OR col1 = 84.22 OR col1 = 6.34))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab0 WHERE col3 IN (56,39) AND (((col0 IN (99,18,73))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab0 WHERE col3 IN (56,39) AND (((col0 IN (73,18,99))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab0 WHERE (col3 = 56 OR col3 = 39) AND ((((col0 = 99 OR col0 = 18 OR col0 = 73))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab1 WHERE col3 IN (56,39) AND (((col0 IN (99,18,73))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab1 WHERE col3 IN (56,39) AND (((col0 IN (73,18,99))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab1 WHERE (col3 = 56 OR col3 = 39) AND ((((col0 = 99 OR col0 = 18 OR col0 = 73))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab2 WHERE col3 IN (56,39) AND (((col0 IN (99,18,73))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab2 WHERE col3 IN (56,39) AND (((col0 IN (73,18,99))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab2 WHERE (col3 = 56 OR col3 = 39) AND ((((col0 = 99 OR col0 = 18 OR col0 = 73))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab3 WHERE col3 IN (56,39) AND (((col0 IN (99,18,73))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab3 WHERE col3 IN (56,39) AND (((col0 IN (73,18,99))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab3 WHERE (col3 = 56 OR col3 = 39) AND ((((col0 = 99 OR col0 = 18 OR col0 = 73))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab4 WHERE col3 IN (56,39) AND (((col0 IN (99,18,73))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab4 WHERE col3 IN (56,39) AND (((col0 IN (73,18,99))))
+----
+
+query I rowsort label-30
+SELECT pk FROM tab4 WHERE (col3 = 56 OR col3 = 39) AND ((((col0 = 99 OR col0 = 18 OR col0 = 73))))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab0 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab0 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND col3 IN (25,17) OR col0 >= 0 OR col0 >= 74 OR col3 IN (47,25) AND col3 > 18 OR col4 >= 61.28 OR (col1 IN (97.94,69.95,11.4)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND col3 IN (66,33,66,90,14,1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab0 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND (col0 IN (46,4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR (col0 IN (86,87,4,30) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab0 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab0 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND col3 IN (25,17) OR col0 >= 0 OR col0 >= 74 OR col3 IN (47,25) AND col3 > 18 OR col4 >= 61.28 OR (col1 IN (69.95,11.4,97.94)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND col3 IN (14,66,90,66,33,1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab0 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND (col0 IN (46,4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR (col0 IN (87,30,86,4) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab0 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab0 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND (col3 = 25 OR col3 = 17) OR col0 >= 0 OR col0 >= 74 OR (col3 = 47 OR col3 = 25) AND col3 > 18 OR col4 >= 61.28 OR ((col1 = 97.94 OR col1 = 69.95 OR col1 = 11.4)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND (col3 = 66 OR col3 = 33 OR col3 = 66 OR col3 = 90 OR col3 = 14 OR col3 = 1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab0 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND ((col0 = 46 OR col0 = 4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR ((col0 = 86 OR col0 = 87 OR col0 = 4 OR col0 = 30) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab1 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab1 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND col3 IN (25,17) OR col0 >= 0 OR col0 >= 74 OR col3 IN (47,25) AND col3 > 18 OR col4 >= 61.28 OR (col1 IN (97.94,69.95,11.4)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND col3 IN (66,33,66,90,14,1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab1 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND (col0 IN (46,4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR (col0 IN (86,87,4,30) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab1 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab1 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND col3 IN (25,17) OR col0 >= 0 OR col0 >= 74 OR col3 IN (47,25) AND col3 > 18 OR col4 >= 61.28 OR (col1 IN (69.95,11.4,97.94)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND col3 IN (14,66,90,66,33,1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab1 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND (col0 IN (46,4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR (col0 IN (87,30,86,4) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab1 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab1 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND (col3 = 25 OR col3 = 17) OR col0 >= 0 OR col0 >= 74 OR (col3 = 47 OR col3 = 25) AND col3 > 18 OR col4 >= 61.28 OR ((col1 = 97.94 OR col1 = 69.95 OR col1 = 11.4)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND (col3 = 66 OR col3 = 33 OR col3 = 66 OR col3 = 90 OR col3 = 14 OR col3 = 1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab1 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND ((col0 = 46 OR col0 = 4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR ((col0 = 86 OR col0 = 87 OR col0 = 4 OR col0 = 30) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab2 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab2 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND col3 IN (25,17) OR col0 >= 0 OR col0 >= 74 OR col3 IN (47,25) AND col3 > 18 OR col4 >= 61.28 OR (col1 IN (97.94,69.95,11.4)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND col3 IN (66,33,66,90,14,1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab2 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND (col0 IN (46,4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR (col0 IN (86,87,4,30) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab2 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab2 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND col3 IN (25,17) OR col0 >= 0 OR col0 >= 74 OR col3 IN (47,25) AND col3 > 18 OR col4 >= 61.28 OR (col1 IN (69.95,11.4,97.94)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND col3 IN (14,66,90,66,33,1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab2 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND (col0 IN (46,4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR (col0 IN (87,30,86,4) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab2 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab2 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND (col3 = 25 OR col3 = 17) OR col0 >= 0 OR col0 >= 74 OR (col3 = 47 OR col3 = 25) AND col3 > 18 OR col4 >= 61.28 OR ((col1 = 97.94 OR col1 = 69.95 OR col1 = 11.4)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND (col3 = 66 OR col3 = 33 OR col3 = 66 OR col3 = 90 OR col3 = 14 OR col3 = 1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab2 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND ((col0 = 46 OR col0 = 4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR ((col0 = 86 OR col0 = 87 OR col0 = 4 OR col0 = 30) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab3 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab3 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND col3 IN (25,17) OR col0 >= 0 OR col0 >= 74 OR col3 IN (47,25) AND col3 > 18 OR col4 >= 61.28 OR (col1 IN (97.94,69.95,11.4)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND col3 IN (66,33,66,90,14,1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab3 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND (col0 IN (46,4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR (col0 IN (86,87,4,30) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab3 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab3 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND col3 IN (25,17) OR col0 >= 0 OR col0 >= 74 OR col3 IN (47,25) AND col3 > 18 OR col4 >= 61.28 OR (col1 IN (69.95,11.4,97.94)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND col3 IN (14,66,90,66,33,1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab3 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND (col0 IN (46,4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR (col0 IN (87,30,86,4) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab3 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab3 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND (col3 = 25 OR col3 = 17) OR col0 >= 0 OR col0 >= 74 OR (col3 = 47 OR col3 = 25) AND col3 > 18 OR col4 >= 61.28 OR ((col1 = 97.94 OR col1 = 69.95 OR col1 = 11.4)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND (col3 = 66 OR col3 = 33 OR col3 = 66 OR col3 = 90 OR col3 = 14 OR col3 = 1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab3 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND ((col0 = 46 OR col0 = 4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR ((col0 = 86 OR col0 = 87 OR col0 = 4 OR col0 = 30) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab4 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab4 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND col3 IN (25,17) OR col0 >= 0 OR col0 >= 74 OR col3 IN (47,25) AND col3 > 18 OR col4 >= 61.28 OR (col1 IN (97.94,69.95,11.4)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND col3 IN (66,33,66,90,14,1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab4 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND (col0 IN (46,4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR (col0 IN (86,87,4,30) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab4 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab4 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND col3 IN (25,17) OR col0 >= 0 OR col0 >= 74 OR col3 IN (47,25) AND col3 > 18 OR col4 >= 61.28 OR (col1 IN (69.95,11.4,97.94)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND col3 IN (14,66,90,66,33,1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab4 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND (col0 IN (46,4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR (col0 IN (87,30,86,4) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+query I rowsort label-45
+SELECT pk FROM tab4 WHERE (col0 > 27 OR col1 <= 41.57 AND col0 <= 46 OR (col3 IS NULL) OR col3 > 87) AND ((col1 IN (SELECT col4 FROM tab4 WHERE (col0 < 85 OR ((col4 <= 45.40)) OR (((col4 >= 8.27 AND (col3 = 25 OR col3 = 17) OR col0 >= 0 OR col0 >= 74 OR (col3 = 47 OR col3 = 25) AND col3 > 18 OR col4 >= 61.28 OR ((col1 = 97.94 OR col1 = 69.95 OR col1 = 11.4)) OR col3 = 64) AND col3 > 49 AND col3 <= 20 OR (((((col0 > 93) AND (col3 = 66 OR col3 = 33 OR col3 = 66 OR col3 = 90 OR col3 = 14 OR col3 = 1)))))) AND ((col1 IS NULL)) AND col3 < 93) OR col0 = 81 AND (col3 >= 84) OR col0 < 61) OR col1 = 65.10 OR (col0 <= 50 OR col3 < 28)) AND (col3 BETWEEN 11 AND 39) AND ((col3 BETWEEN 26 AND 3) AND (((col4 IN (SELECT col1 FROM tab4 WHERE (((col0 < 80 OR col1 IS NULL) AND col4 > 82.55 OR (col0 > 58)))) AND ((col0 = 46 OR col0 = 4))) OR (col3 > 51) OR ((col0 > 88) OR col4 >= 99.61) OR ((col3 < 0)) AND col0 = 44 AND ((col0 = 7)) OR ((col4 > 64.58 OR (col3 >= 72 AND (((col3 <= 41 OR (col3 = 66 AND (col0 > 77 AND col3 > 79 AND (col3 >= 27))) OR ((col3 > 99))) OR ((col0 = 86 OR col0 = 87 OR col0 = 4 OR col0 = 30) AND col3 > 63) AND col3 <= 60 AND col4 <= 54.47 OR (col3 IS NULL) AND (col3 > 12) OR (((col0 > 86 AND col1 IS NULL)) AND ((col0 >= 50))) OR col3 >= 66))) OR (col3 < 7) AND (col0 <= 23))) AND col0 >= 17 AND col3 > 2 AND col3 IS NULL OR col0 > 43))) AND col3 BETWEEN 29 AND 63))
+----
+
+query I rowsort label-60
+SELECT pk FROM tab0 WHERE col4 > 12.48 OR (col1 IN (63.52,29.7,91.86,30.25,44.75,61.15) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab0 WHERE col4 > 12.48 OR (col1 IN (63.52,44.75,61.15,30.25,29.7,91.86) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab0 WHERE col4 > 12.48 OR ((col1 = 63.52 OR col1 = 29.7 OR col1 = 91.86 OR col1 = 30.25 OR col1 = 44.75 OR col1 = 61.15) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab1 WHERE col4 > 12.48 OR (col1 IN (63.52,29.7,91.86,30.25,44.75,61.15) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab1 WHERE col4 > 12.48 OR (col1 IN (63.52,44.75,61.15,30.25,29.7,91.86) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab1 WHERE col4 > 12.48 OR ((col1 = 63.52 OR col1 = 29.7 OR col1 = 91.86 OR col1 = 30.25 OR col1 = 44.75 OR col1 = 61.15) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab2 WHERE col4 > 12.48 OR (col1 IN (63.52,29.7,91.86,30.25,44.75,61.15) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab2 WHERE col4 > 12.48 OR (col1 IN (63.52,44.75,61.15,30.25,29.7,91.86) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab2 WHERE col4 > 12.48 OR ((col1 = 63.52 OR col1 = 29.7 OR col1 = 91.86 OR col1 = 30.25 OR col1 = 44.75 OR col1 = 61.15) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab3 WHERE col4 > 12.48 OR (col1 IN (63.52,29.7,91.86,30.25,44.75,61.15) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab3 WHERE col4 > 12.48 OR (col1 IN (63.52,44.75,61.15,30.25,29.7,91.86) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab3 WHERE col4 > 12.48 OR ((col1 = 63.52 OR col1 = 29.7 OR col1 = 91.86 OR col1 = 30.25 OR col1 = 44.75 OR col1 = 61.15) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab4 WHERE col4 > 12.48 OR (col1 IN (63.52,29.7,91.86,30.25,44.75,61.15) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab4 WHERE col4 > 12.48 OR (col1 IN (63.52,44.75,61.15,30.25,29.7,91.86) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-60
+SELECT pk FROM tab4 WHERE col4 > 12.48 OR ((col1 = 63.52 OR col1 = 29.7 OR col1 = 91.86 OR col1 = 30.25 OR col1 = 44.75 OR col1 = 61.15) OR col4 >= 40.21 OR (col4 < 97.92)) AND col3 > 64
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+query I rowsort label-75
+SELECT pk FROM tab0 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR col4 IN (63.22,85.90,4.3))) AND col0 IN (64,26,62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab0 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR col4 IN (4.3,63.22,85.90))) AND col0 IN (26,64,62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab0 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR (col4 = 63.22 OR col4 = 85.90 OR col4 = 4.3))) AND (col0 = 64 OR col0 = 26 OR col0 = 62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab1 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR col4 IN (63.22,85.90,4.3))) AND col0 IN (64,26,62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab1 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR col4 IN (4.3,63.22,85.90))) AND col0 IN (26,64,62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab1 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR (col4 = 63.22 OR col4 = 85.90 OR col4 = 4.3))) AND (col0 = 64 OR col0 = 26 OR col0 = 62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab2 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR col4 IN (63.22,85.90,4.3))) AND col0 IN (64,26,62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab2 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR col4 IN (4.3,63.22,85.90))) AND col0 IN (26,64,62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab2 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR (col4 = 63.22 OR col4 = 85.90 OR col4 = 4.3))) AND (col0 = 64 OR col0 = 26 OR col0 = 62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab3 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR col4 IN (63.22,85.90,4.3))) AND col0 IN (64,26,62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab3 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR col4 IN (4.3,63.22,85.90))) AND col0 IN (26,64,62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab3 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR (col4 = 63.22 OR col4 = 85.90 OR col4 = 4.3))) AND (col0 = 64 OR col0 = 26 OR col0 = 62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab4 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR col4 IN (63.22,85.90,4.3))) AND col0 IN (64,26,62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab4 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR col4 IN (4.3,63.22,85.90))) AND col0 IN (26,64,62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-75
+SELECT pk FROM tab4 WHERE col0 > 81 OR (((((col0 IS NULL) AND col0 < 5 AND ((col3 > 89) OR ((col1 > 74.83 OR col0 > 25) OR col0 > 20) OR (col3 > 87) OR ((col0 >= 92)) AND ((col3 <= 8)) AND col3 = 10 AND col3 IS NULL AND ((col4 IS NULL OR col3 > 3 AND col1 BETWEEN 25.90 AND 71.92 AND col0 <= 50 OR (col4 = 63.22 OR col4 = 85.90 OR col4 = 4.3))) AND (col0 = 64 OR col0 = 26 OR col0 = 62) OR col0 < 22) AND col3 >= 57))) OR col4 > 84.58 AND ((col1 = 92.35) OR col4 < 33.6 AND col3 < 80)) OR ((col0 > 63)) OR ((col1 = 34.33 OR col0 > 57))
+----
+0
+1
+2
+3
+4
+
+query I rowsort label-90
+SELECT pk FROM tab0 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR ((col0 IN (4,83,69,86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR col4 IN (0.81,7.12,33.10,75.49,61.0))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab0 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR ((col0 IN (69,4,83,86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR col4 IN (7.12,33.10,0.81,61.0,75.49))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab0 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR (((col0 = 4 OR col0 = 83 OR col0 = 69 OR col0 = 86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR (col4 = 0.81 OR col4 = 7.12 OR col4 = 33.10 OR col4 = 75.49 OR col4 = 61.0))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab1 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR ((col0 IN (4,83,69,86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR col4 IN (0.81,7.12,33.10,75.49,61.0))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab1 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR ((col0 IN (69,4,83,86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR col4 IN (7.12,33.10,0.81,61.0,75.49))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab1 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR (((col0 = 4 OR col0 = 83 OR col0 = 69 OR col0 = 86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR (col4 = 0.81 OR col4 = 7.12 OR col4 = 33.10 OR col4 = 75.49 OR col4 = 61.0))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab2 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR ((col0 IN (4,83,69,86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR col4 IN (0.81,7.12,33.10,75.49,61.0))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab2 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR ((col0 IN (69,4,83,86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR col4 IN (7.12,33.10,0.81,61.0,75.49))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab2 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR (((col0 = 4 OR col0 = 83 OR col0 = 69 OR col0 = 86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR (col4 = 0.81 OR col4 = 7.12 OR col4 = 33.10 OR col4 = 75.49 OR col4 = 61.0))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab3 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR ((col0 IN (4,83,69,86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR col4 IN (0.81,7.12,33.10,75.49,61.0))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab3 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR ((col0 IN (69,4,83,86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR col4 IN (7.12,33.10,0.81,61.0,75.49))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab3 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR (((col0 = 4 OR col0 = 83 OR col0 = 69 OR col0 = 86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR (col4 = 0.81 OR col4 = 7.12 OR col4 = 33.10 OR col4 = 75.49 OR col4 = 61.0))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab4 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR ((col0 IN (4,83,69,86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR col4 IN (0.81,7.12,33.10,75.49,61.0))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab4 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR ((col0 IN (69,4,83,86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR col4 IN (7.12,33.10,0.81,61.0,75.49))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-90
+SELECT pk FROM tab4 WHERE (col0 >= 20 AND (((col1 >= 13.65 OR (((col0 = 4 OR col0 = 83 OR col0 = 69 OR col0 = 86) OR col0 <= 11 AND (col1 BETWEEN 94.47 AND 6.51 OR col3 IS NULL) AND ((col3 >= 92) AND (col0 IS NULL) AND ((col1 > 82.88))) AND col1 < 33.24) AND col3 >= 3 AND col0 > 70 OR col3 < 81 AND col1 = 92.74 AND (((((col0 <= 7) OR ((col0 < 22)))))) AND col0 < 65 AND col0 > 13))) AND ((col0 < 98) AND col3 > 87 OR col0 > 39)) OR (col3 = 50) OR ((col0 < 19 OR (col4 > 8.52) OR ((col0 >= 25) AND col3 >= 87 OR ((col3 > 27 AND ((col3 > 37))) AND (((((col4 < 23.3) OR col1 > 32.26))) AND ((col4 <= 32.1)) AND col3 IS NULL OR col0 > 39 AND col3 > 37 AND (col3 = 57 OR (((col3 <= 50) AND (col0 < 16 OR (col4 = 0.81 OR col4 = 7.12 OR col4 = 33.10 OR col4 = 75.49 OR col4 = 61.0))))) OR col1 > 33.44 AND col0 > 80 AND col0 >= 54 AND (col0 < 86) AND col3 >= 30 OR col0 > 89 AND col4 < 91.87 AND ((col1 = 25.22)) OR (((col0 = 75))) OR col3 > 6 AND col3 > 33)) OR ((col3 < 35 AND (col3 < 88))) AND (col3 < 24))) AND (col3 >= 11 OR (((col3 <= 6))) AND col3 >= 51 AND (col4 < 84.64) OR ((((((col1 < 8.30))) AND col4 IS NULL))))) OR (col4 >= 37.64) AND col3 > 68)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-105
+SELECT pk FROM tab0 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR (((col1 IN (54.64,54.77,53.46,23.8,20.32) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND col0 IN (28,31,93,4,1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab0 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR (((col1 IN (20.32,23.8,53.46,54.77,54.64) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND col0 IN (4,31,93,28,1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab0 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR ((((col1 = 54.64 OR col1 = 54.77 OR col1 = 53.46 OR col1 = 23.8 OR col1 = 20.32) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND (col0 = 28 OR col0 = 31 OR col0 = 93 OR col0 = 4 OR col0 = 1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab1 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR (((col1 IN (54.64,54.77,53.46,23.8,20.32) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND col0 IN (28,31,93,4,1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab1 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR (((col1 IN (20.32,23.8,53.46,54.77,54.64) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND col0 IN (4,31,93,28,1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab1 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR ((((col1 = 54.64 OR col1 = 54.77 OR col1 = 53.46 OR col1 = 23.8 OR col1 = 20.32) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND (col0 = 28 OR col0 = 31 OR col0 = 93 OR col0 = 4 OR col0 = 1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab2 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR (((col1 IN (54.64,54.77,53.46,23.8,20.32) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND col0 IN (28,31,93,4,1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab2 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR (((col1 IN (20.32,23.8,53.46,54.77,54.64) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND col0 IN (4,31,93,28,1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab2 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR ((((col1 = 54.64 OR col1 = 54.77 OR col1 = 53.46 OR col1 = 23.8 OR col1 = 20.32) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND (col0 = 28 OR col0 = 31 OR col0 = 93 OR col0 = 4 OR col0 = 1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab3 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR (((col1 IN (54.64,54.77,53.46,23.8,20.32) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND col0 IN (28,31,93,4,1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab3 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR (((col1 IN (20.32,23.8,53.46,54.77,54.64) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND col0 IN (4,31,93,28,1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab3 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR ((((col1 = 54.64 OR col1 = 54.77 OR col1 = 53.46 OR col1 = 23.8 OR col1 = 20.32) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND (col0 = 28 OR col0 = 31 OR col0 = 93 OR col0 = 4 OR col0 = 1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab4 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR (((col1 IN (54.64,54.77,53.46,23.8,20.32) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND col0 IN (28,31,93,4,1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab4 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR (((col1 IN (20.32,23.8,53.46,54.77,54.64) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND col0 IN (4,31,93,28,1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-105
+SELECT pk FROM tab4 WHERE ((((col0 > 3) OR col1 BETWEEN 66.51 AND 46.93 AND col1 = 97.88 AND col0 <= 55 OR (col3 >= 76) AND (col3 < 74) OR col0 > 29 OR (col4 < 28.59) OR ((col0 < 27 OR col0 > 75 AND col0 > 99 AND ((col3 > 55)))) AND col4 > 27.77 OR col1 > 21.1)) AND ((col0 >= 88 AND col1 IS NULL AND col3 > 27 AND ((col3 BETWEEN 93 AND 3)) OR col3 >= 38) OR col0 = 46 OR col0 > 49 AND col4 >= 73.40 OR ((((col1 = 54.64 OR col1 = 54.77 OR col1 = 53.46 OR col1 = 23.8 OR col1 = 20.32) OR col3 >= 68 AND col0 >= 83 AND col3 IS NULL) OR (col4 < 57.68) AND col0 = 34 OR (col4 > 33.87) AND col0 = 31 AND col0 >= 55)) AND (col0 = 28 OR col0 = 31 OR col0 = 93 OR col0 = 4 OR col0 = 1) AND ((col0 >= 21 AND (col3 >= 59) AND (col4 IS NULL)))))
+----
+0
+2
+4
+5
+6
+9
+
+query I rowsort label-120
+SELECT pk FROM tab0 WHERE (((col0 IN (52,61,44,52) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND col3 IN (77,79,47) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab0 WHERE (((col0 IN (52,61,52,44) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND col3 IN (47,77,79) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab0 WHERE ((((col0 = 52 OR col0 = 61 OR col0 = 44 OR col0 = 52) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND (col3 = 77 OR col3 = 79 OR col3 = 47) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab1 WHERE (((col0 IN (52,61,44,52) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND col3 IN (77,79,47) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab1 WHERE (((col0 IN (52,61,52,44) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND col3 IN (47,77,79) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab1 WHERE ((((col0 = 52 OR col0 = 61 OR col0 = 44 OR col0 = 52) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND (col3 = 77 OR col3 = 79 OR col3 = 47) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab2 WHERE (((col0 IN (52,61,44,52) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND col3 IN (77,79,47) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab2 WHERE (((col0 IN (52,61,52,44) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND col3 IN (47,77,79) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab2 WHERE ((((col0 = 52 OR col0 = 61 OR col0 = 44 OR col0 = 52) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND (col3 = 77 OR col3 = 79 OR col3 = 47) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab3 WHERE (((col0 IN (52,61,44,52) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND col3 IN (77,79,47) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab3 WHERE (((col0 IN (52,61,52,44) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND col3 IN (47,77,79) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab3 WHERE ((((col0 = 52 OR col0 = 61 OR col0 = 44 OR col0 = 52) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND (col3 = 77 OR col3 = 79 OR col3 = 47) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab4 WHERE (((col0 IN (52,61,44,52) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND col3 IN (77,79,47) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab4 WHERE (((col0 IN (52,61,52,44) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND col3 IN (47,77,79) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-120
+SELECT pk FROM tab4 WHERE ((((col0 = 52 OR col0 = 61 OR col0 = 44 OR col0 = 52) AND ((col0 > 51)) AND col3 >= 55) AND (col0 >= 36) OR col0 > 19 OR col1 <= 76.97) OR col3 > 34 AND ((col1 >= 83.66)) OR (col3 < 43 AND col3 IS NULL OR col0 < 92) AND (((col3 IS NULL AND col3 < 57) AND col0 >= 51 AND col4 BETWEEN 75.64 AND 8.59 AND (((((((col1 > 37.29))) OR col0 > 52) AND col1 < 23.27 AND (col3 = 77 OR col3 = 79 OR col3 = 47) OR col1 < 22.47 AND (col1 < 63.39) OR (col3 < 18 OR col3 <= 58)) AND col0 > 27) OR col0 = 79 AND col3 <= 77 OR col4 < 42.20 AND ((col3 >= 33 OR ((col0 = 60)) OR ((col0 <= 31))))) OR col4 >= 85.62 AND col4 >= 76.10 OR col3 <= 1 AND col1 > 11.28 AND col3 >= 91 OR col0 <= 56 OR col0 > 79 AND col1 IS NULL AND (col0 < 69) OR col3 = 75 AND col3 < 39 OR col0 IS NULL AND col3 > 54 AND col0 > 7) AND (((col0 >= 17) OR col0 >= 97 OR col0 > 58 AND col0 = 60))) AND col0 < 98)
+----
+10 values hashing to e20b902b49a98b1a05ed62804c757f94
+
+query I rowsort label-135
+SELECT pk FROM tab0 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR col3 IN (69,44,29,56,36))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab0 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR col3 IN (69,56,29,36,44))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab0 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR (col3 = 69 OR col3 = 44 OR col3 = 29 OR col3 = 56 OR col3 = 36))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab1 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR col3 IN (69,44,29,56,36))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab1 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR col3 IN (69,56,29,36,44))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab1 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR (col3 = 69 OR col3 = 44 OR col3 = 29 OR col3 = 56 OR col3 = 36))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab2 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR col3 IN (69,44,29,56,36))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab2 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR col3 IN (69,56,29,36,44))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab2 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR (col3 = 69 OR col3 = 44 OR col3 = 29 OR col3 = 56 OR col3 = 36))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab3 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR col3 IN (69,44,29,56,36))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab3 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR col3 IN (69,56,29,36,44))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab3 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR (col3 = 69 OR col3 = 44 OR col3 = 29 OR col3 = 56 OR col3 = 36))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab4 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR col3 IN (69,44,29,56,36))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab4 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR col3 IN (69,56,29,36,44))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9
+
+query I rowsort label-135
+SELECT pk FROM tab4 WHERE (col1 < 51.0 AND col1 = 23.96) AND (col0 = 82) AND col0 >= 79 AND ((col3 < 82 OR (col4 > 96.2)) OR (col0 < 2 AND col0 > 58 AND col1 > 42.99 OR (col1 = 12.60)) AND (col3 > 30) AND ((col3 < 81 AND (col3 < 2 AND (col0 < 3) OR col0 IS NULL) OR ((col3 < 28)) AND col1 < 50.42 OR (col3 = 69 OR col3 = 44 OR col3 = 29 OR col3 = 56 OR col3 = 36))) AND ((((col4 = 59.0)))) AND col4 > 96.21) AND col1 > 13.52 OR col3 > 17
+----
+0
+1
+2
+3
+4
+5
+6
+9

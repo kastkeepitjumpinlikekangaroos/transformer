@@ -25,6 +25,11 @@ what it needs.
     == unfiltered) and optimizer-equivalence (NoREC-style) relations that
     need no oracle at all.
 
+  Expected answers written outside the engine came later, as data rather
+  than as an engine on the test classpath: [04](04-sql-logic-tests-and-whole-suite-configurations.md)'s
+  sqllogictest scripts, this repo's own and slices of SQLite's corpus,
+  whose answers five engines agreed on.
+
 These two strategies target precisely the engine's novel, highest-risk
 surfaces: three-valued NULL logic, the optimizer passes (FilterPushdown,
 column pruning, CTE materialization, the sharding/broadcast gates), and the
@@ -37,6 +42,7 @@ parallel exchange / spill machinery.
 | [01](01-expr-parity-fuzzer.md) | Expr parity fuzzer (`eval` vs `evalVec`) | ~1 day | low | — |
 | [02](02-data-gen-mode-differential.md) | DataGen + mode-differential over single-table SQL | 3-5 days | medium | 01 (shared harness) |
 | [03](03-query-gen-metamorphic.md) | Multi-relation query gen + metamorphic (TLP) + shrinking | 1-2 weeks | medium-high | 01, 02 |
+| [04](04-sql-logic-tests-and-whole-suite-configurations.md) | sqllogictest scripts under eleven verification modes, SQLite's corpus, the whole suite at batch capacity 1 / 2, sharded, serial, in another zone (**done** 2026-11-01) | 1 day | low | — |
 
 ## Recommended sequence
 

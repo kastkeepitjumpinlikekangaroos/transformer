@@ -599,10 +599,9 @@ object QueryGen {
 
   /** A boolean predicate. Paren-free-safe: AND/OR compose by precedence and
     * comparisons are same-category. `NOT` is applied ONLY to a boolean leaf —
-    * JSqlParser reads `NOT a >= b` as `(NOT a) >= b` in some places (the
-    * argument of a one-argument call, after a second NOT), which the binder
-    * refuses. A comparison is negated instead by flipping its relop; IS NULL /
-    * IN / LIKE carry their own negation. */
+    * JSqlParser reads `NOT NOT a >= b` as `NOT ((NOT a) >= b)`, which the
+    * binder refuses. A comparison is negated instead by flipping its relop;
+    * IS NULL / IN / LIKE carry their own negation. */
   private def genPredicate(rng: Rng, schema: Schema, depth: Int): Expr = {
     if (depth <= 0 || rng.bool(leafProb(depth))) genAtom(rng, schema, depth)
     else rng.weighted(

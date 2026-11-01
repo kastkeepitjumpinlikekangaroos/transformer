@@ -1,0 +1,147 @@
+# Three-valued logic: a comparison with NULL is NULL, AND / OR / NOT follow
+# SQL's truth tables, and WHERE keeps only the rows whose condition is TRUE.
+# Every result here is SQL's standard answer, the same in SQLite and Postgres.
+
+statement ok
+CREATE TABLE b (id INT, x BOOLEAN)
+
+statement ok
+INSERT INTO b VALUES (1, TRUE), (2, FALSE), (3, NULL)
+
+# AND, OR and NOT over every pair of TRUE, FALSE and NULL.
+query INT,INT,BOOLEAN,BOOLEAN rowsort
+SELECT l.id, r.id, l.x AND r.x, l.x OR r.x FROM b l CROSS JOIN b r
+----
+1	1	true	true
+1	2	false	true
+1	3	NULL	true
+2	1	false	true
+2	2	false	false
+2	3	false	NULL
+3	1	NULL	true
+3	2	false	NULL
+3	3	NULL	NULL
+
+query INT,BOOLEAN rowsort
+SELECT id, NOT x FROM b
+----
+1	false
+2	true
+3	NULL
+
+# WHERE keeps the TRUE rows: NOT NULL is NULL, so neither x nor NOT x keeps
+# row 3, and IS NULL is the only test that does.
+query INT rowsort
+SELECT id FROM b WHERE x
+----
+1
+
+query INT rowsort
+SELECT id FROM b WHERE NOT x
+----
+2
+
+query INT rowsort
+SELECT id FROM b WHERE x IS NULL
+----
+3
+
+# SQL's IS TRUE / IS FALSE tests are not supported: write x = TRUE, or
+# COALESCE(x, FALSE) for a test that is never NULL.
+statement error
+SELECT id, x IS TRUE FROM b
+----
+IS TRUE is not supported
+
+statement ok
+CREATE TABLE n (id INT, v INT)
+
+statement ok
+INSERT INTO n VALUES (1, 1), (2, 2), (3, NULL)
+
+# A comparison with NULL is NULL, on either side and for every operator.
+query INT,BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN rowsort
+SELECT id, v = 1, v <> 1, v < 2, NULL = v FROM n
+----
+1	true	false	true	NULL
+2	false	true	false	NULL
+3	NULL	NULL	NULL	NULL
+
+# IN with a NULL in the list: TRUE when a value matches, NULL otherwise
+# (never FALSE); NOT IN is the negation, so it keeps no row at all.
+query INT,BOOLEAN,BOOLEAN rowsort
+SELECT id, v IN (1, NULL), v NOT IN (1, NULL) FROM n
+----
+1	true	false
+2	NULL	NULL
+3	NULL	NULL
+
+query INT rowsort
+SELECT id FROM n WHERE v NOT IN (1, NULL)
+----
+
+# BETWEEN with a NULL bound is NULL unless the other bound already decides it.
+query INT,BOOLEAN,BOOLEAN rowsort
+SELECT id, v BETWEEN 1 AND NULL, v BETWEEN NULL AND 1 FROM n
+----
+1	NULL	NULL
+2	NULL	false
+3	NULL	NULL
+
+# COALESCE takes the first non-NULL argument; NULLIF is NULL when its
+# arguments are equal.
+query INT,INT,INT rowsort
+SELECT id, COALESCE(v, 0), NULLIF(v, 1) FROM n
+----
+1	1	NULL
+2	2	2
+3	0	NULL
+
+# A CASE condition that is NULL is not TRUE, so it falls through.
+query INT,STRING rowsort
+SELECT id, CASE WHEN v = 1 THEN 'one' WHEN v <> 1 THEN 'other' ELSE 'unknown' END FROM n
+----
+1	one
+2	other
+3	unknown
+
+# Aggregates skip NULLs; COUNT(*) counts rows.
+query BIGINT,BIGINT,BIGINT,INT,INT
+SELECT COUNT(*), COUNT(v), SUM(v), MIN(v), MAX(v) FROM n
+----
+3	2	3	1	2
+
+# Over no rows, COUNT is 0 and the others are NULL.
+query BIGINT,BIGINT,INT
+SELECT COUNT(*), SUM(v), MAX(v) FROM n WHERE v > 5
+----
+0	NULL	NULL
+
+# DISTINCT and GROUP BY put every NULL in one group.
+query INT rowsort
+SELECT DISTINCT v FROM n CROSS JOIN b
+----
+1
+2
+NULL
+
+query INT,BIGINT rowsort
+SELECT v, COUNT(*) FROM n CROSS JOIN b GROUP BY v
+----
+1	3
+2	3
+NULL	3
+
+# A join on NULL keys matches nothing; an outer join keeps the row.
+query INT,INT rowsort
+SELECT l.id, r.id FROM n l JOIN n r ON l.v = r.v
+----
+1	1
+2	2
+
+query INT,INT rowsort
+SELECT l.id, r.id FROM n l LEFT JOIN n r ON l.v = r.v
+----
+1	1
+2	2
+3	NULL

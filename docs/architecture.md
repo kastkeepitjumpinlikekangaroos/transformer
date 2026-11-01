@@ -39,7 +39,7 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 |---|---|---|
 | `core/` | Shared types crossed by every module. Zero deps. | `DataType.scala`, `Schema.scala`, `ColumnarBatch.scala`, `Row.scala`, `Catalog.scala`, `NumberText.scala` (the one grammar text becomes a number by, for a CSV field and a CAST alike), `Scheduler.scala` (the shared `ForkJoinPool` every parallel call site funnels through), `SqlExecutor.scala` (`SqlExecutorRegistry`) |
 | `temporal/` | Date/time template variables. No deps. | `TemporalVariables.scala`, `TemplateRenderer.scala` |
-| `read/csv/` | CSV input. Stdlib only. | `CsvOptions.scala` (also `forWrittenFile`, the options a job reads back its own CSV output with, and `checkSeparators`, which the writer shares), `CsvRowParser.scala` (state machine: an unquoted null string is NULL, a blank line is flagged rather than skipped, an unclosed quote fails), `CsvValues.scala` (the text of each type's values: what the writer prints, what the reader parses strictly, and what inference recognizes and joins), `CsvSchemaInferer.scala`, `PathGlob.scala`, `CsvReader.scala` (row width, blank lines as rows in a one-column file, typed parse errors naming file, line and column) |
+| `read/csv/` | CSV input. Stdlib only. | `CsvOptions.scala` (also `forWrittenFile`, the options a job reads back its own CSV output with, and `checkSeparators`, which the writer shares), `CsvRowParser.scala` (state machine: an unquoted null string is NULL, a blank line is flagged rather than skipped, an unclosed quote fails), `CsvValues.scala` (the text of each type's values: what the writer prints, what the reader parses strictly, and what inference recognizes and joins), `CsvSchemaInferer.scala`, `PathGlob.scala`, `CsvReader.scala` (inference over the first rows of the glob's files in order, each later file read by its header's names, row width, blank lines as rows in a one-column file, typed parse errors naming file, line and column) |
 | `read/parquet/` | Parquet input. Depends on `parquet-hadoop` + minimal Hadoop. | `ParquetReader.scala`, `ParquetColumns.scala` (the type each parquet column reads as and how its values decode, decided per file from that file's footer; matches a view's columns to each file's by name), `ParquetFilterTranslator.scala` |
 | `write/csv/` | CSV output. Stdlib only; uses `read/csv`'s `CsvValues`, so the writer and reader share one text per type. | `CsvWriter.scala` |
 | `write/parquet/` | Parquet output. | `ParquetSchema.scala` (the parquet schema transformer writes for a `Schema`), `ParquetWriter.scala` |
@@ -372,7 +372,10 @@ Per-operator format:
   + N `Binary` columns containing serialized `AggState`s (see
   `AggStateSerde`). At emit time every partition's spill files are
   folded back into the merged map. The codec map path and the
-  `LongHashMap` fast path each spill independently.
+  `LongHashMap` fast path each spill independently. An aggregate with no
+  GROUP BY keys never spills: it holds one group, so there is no map to
+  bound, and with no aggregates either (`GROUP BY ()`) its state has no
+  columns for a parquet file to hold.
 - `DistinctExec` writes one row per distinct key (the operator's output
   columns, positionally renamed — see below) and the union step folds
   spill files back into the final set.
@@ -634,9 +637,14 @@ Both directions skip the `Group`/`SimpleGroup` row-object model that
   from `ParquetSchema.decimalBytes`), written at the declared scale or not at
   all: a value that would need rounding, or has more than `p` digits, throws.
 
-`ColumnarBatch.DefaultCapacity` is 8192 rows. Larger batches amortize
-per-batch dispatch (hasNext checks, allocations, writer flush boundaries) at
-the cost of more in-flight memory; lower it if you have very wide schemas.
+`ColumnarBatch.DefaultCapacity` is 8192 rows: every reader and operator emits
+batches of at most that many. Larger batches amortize per-batch dispatch
+(hasNext checks, allocations, writer flush boundaries) at the cost of more
+in-flight memory; lower it if you have very wide schemas. It is read once per
+JVM from the `transformer.batch_capacity` system property (or the
+`TRANSFORMER_BATCH_CAPACITY` env var), which the test suite sets to 1 and 2
+(`--config=batch1`, `batch2`) so that every batch boundary inside an operator
+is crossed on a test's few rows ([testing.md](testing.md#whole-suite-configurations)).
 
 **Per-row-group String intern cache.** `ParquetPartitionIterator` holds a
 per-output-column `HashMap[Binary, String]` that's lazily allocated on the
@@ -1487,10 +1495,13 @@ holding every build row, which gives correct nested-loop semantics. To stop
 that from silently materializing an O(N*M) cartesian over millions of rows,
 `PhysicalPlanner.enforceNestedLoopGuard` refuses the plan when both sides'
 row counts are proven and `min(left, right) > 5000`, and when a side is itself
-such a join and the two would pair more than `NestedLoopMaxPairs` (25
-million) rows: `rowsAtMost` bounds a join with no equality by the product
-of its sides, which its cardinality estimate (the larger side) understates,
-so a chain of them was the case the first rule missed. A proven count
+such a join, or a join on an equality over one, and the two would pair more
+than `NestedLoopMaxPairs` (25 million) rows: `rowsAtMost` bounds a join with
+no equality by the product of its sides, which its cardinality estimate (the
+larger side) understates, so a chain of them was the case the first rule
+missed; it sizes a join on an equality by that estimate over its sides'
+bounds, not by the estimator's own recursion, which sizes a pairing below it
+as the pairing's larger side and so hid it (plans/testing/04). A proven count
 (`provenRows`) is a view's exact one, kept through the operators that keep
 every row (project, sort, window), cut by LIMIT and OFFSET, summed by UNION
 ALL, and multiplied by a CROSS JOIN; behind a filter, a grouping or a join
@@ -1698,3 +1709,26 @@ The default `bazel test //...` runs each over a small fixed-seed batch; the
 recipes for adding a property or a metamorphic relation are in
 [testing.md](testing.md#property-based-testing-fuzz) and
 [extending.md](extending.md#add-a-metamorphic-relation).
+
+## SQL logic tests and whole-suite configurations
+
+Every property above compares the engine with itself, so an answer that is
+wrong the same way in every mode passes them all. Two more nets, borrowed from
+DuckDB and Spark SQL, check answers against expectations written outside the
+engine and multiply each one across execution modes:
+
+- **sqllogictest scripts** (`src/test/slt/`, run by
+  `src/test/scala/com/transformer/slt/`): each query beside its expected
+  result, in SQLite's format, this repo's own scripts per area of semantics and
+  slices of SQLite's corpus, whose answers five engines agreed on. The runner
+  carries out the DDL itself (`Database`) and runs every query under eleven
+  verification modes (`Modes`: layouts, spill, metrics, parquet files read
+  back, columns stored in another order, the logical optimizer off or one
+  pass at a time), DuckDB's query verification. Each mode must print the baseline's result.
+- **Whole-suite configurations** (`.bazelrc` `--config=batch1`, `batch2`,
+  `sharded`, `serial`, `zone`): the whole suite under one JVM-wide setting
+  apiece, the batch capacity among them, as DuckDB runs its tests at a vector
+  size of 2. A test that depends on a default says so with `assumeTrue`.
+
+Formats, modes, the corpus and how to write a script are in
+[testing.md](testing.md#sql-logic-tests).

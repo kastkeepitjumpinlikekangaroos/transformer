@@ -1,6 +1,7 @@
 package com.transformer.core
 
 import org.junit.Assert._
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 import java.util.concurrent.{CountDownLatch, TimeUnit}
@@ -238,6 +239,7 @@ class CoreTypesTest {
   }
 
   @Test def materializeManyInParallelActuallyParallelizesAcrossViewsAndPartitions(): Unit = {
+    assumeTrue("requires a pool of 2 or more threads", Scheduler.parallelism >= 2)
     // 3 views, each with 2 partitions. Each partition read blocks until at
     // least N other partition reads are in flight. The shared Scheduler pool's
     // ForkJoinPool grows compensation threads when workers block on Future.get,

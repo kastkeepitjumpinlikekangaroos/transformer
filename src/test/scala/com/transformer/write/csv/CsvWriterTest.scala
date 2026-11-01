@@ -25,6 +25,27 @@ class CsvWriterTest {
     * ([[OptionValues]]): a boolean is true or false in any case, where each
     * also took yes, no, 1 and 0, and a charset this JVM has, where an unknown
     * one threw the JDK's own exception (plans/robustness/27). */
+  /** Partition 0 as one batch, however many batches the reader cut it into:
+    * the batch size is `ColumnarBatch.DefaultCapacity`, which the whole suite
+    * also runs at 1 and 2 rows (docs/testing.md). */
+  private def wholePartition(r: CsvReader): ColumnarBatch = {
+    val parts = r.readPartition(0).toVector
+    val n = parts.map(_.numRows).sum
+    val out = new ColumnarBatch(r.schema, math.max(1, n))
+    var row = 0
+    parts.foreach { b =>
+      var i = 0
+      while (i < b.numRows) {
+        var c = 0
+        while (c < r.schema.length) { b.column(c).copyTo(i, out.column(c), row); c += 1 }
+        row += 1
+        i += 1
+      }
+    }
+    out.setNumRows(n)
+    out
+  }
+
   @Test def csvOptionsAreReadStrictly(): Unit = {
     def refused(body: => Any): String =
       try { body; fail("read"); "" } catch { case e: IllegalArgumentException => e.getMessage }
@@ -93,7 +114,7 @@ class CsvWriterTest {
     assertEquals(DataType.IntType, r.schema.fields(0).dataType)
     assertEquals(DataType.DoubleType, r.schema.fields(1).dataType)
     assertEquals(DataType.StringType, r.schema.fields(2).dataType)
-    val out = r.readPartition(0).next()
+    val out = wholePartition(r)
     assertEquals(3, out.numRows)
     assertEquals(1, out.column(0).asInstanceOf[IntVector].get(0))
     assertEquals(9.5, out.column(1).asInstanceOf[DoubleVector].get(0), 1e-9)

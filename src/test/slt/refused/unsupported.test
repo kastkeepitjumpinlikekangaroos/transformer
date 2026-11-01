@@ -1,0 +1,60 @@
+# What the engine does not do is refused with a message saying so, never run
+# with a guessed meaning. Each record names text its message must contain.
+
+statement ok
+CREATE TABLE t (a INT, b INT)
+
+statement ok
+CREATE TABLE u (a INT, c INT)
+
+statement ok
+INSERT INTO t VALUES (1, 10), (2, 20)
+
+statement ok
+INSERT INTO u VALUES (1, 100), (3, 300)
+
+# Subqueries of every kind.
+statement error
+SELECT a FROM t WHERE a IN (SELECT a FROM u)
+
+statement error
+SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.a = t.a)
+
+statement error
+SELECT (SELECT MAX(c) FROM u) FROM t
+
+statement error
+SELECT x.a FROM (SELECT a FROM t) x
+
+# Set operations other than UNION.
+statement error
+SELECT a FROM t EXCEPT SELECT a FROM u
+
+statement error
+SELECT a FROM t INTERSECT SELECT a FROM u
+
+# A join takes the condition its kind takes.
+statement error
+SELECT * FROM t JOIN u
+
+statement error
+SELECT * FROM t CROSS JOIN u ON t.a = u.a
+
+statement error
+SELECT * FROM t NATURAL JOIN u
+
+# One statement per query.
+statement error
+SELECT a FROM t; SELECT a FROM u
+----
+Only one statement
+
+statement error
+SELECT a FROM t ORDER BY a ORDER BY b
+
+# A FROM names each table once.
+statement error
+SELECT * FROM t JOIN t ON t.a = t.a
+
+statement error
+SELECT t.a, u.a FROM t x JOIN u x ON x.a = x.a

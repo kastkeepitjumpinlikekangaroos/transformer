@@ -157,9 +157,10 @@ object LogicalPlanCardinality {
     * fan-out from key overlap, so use a side-aware upper bound: Inner takes
     * the larger side (a 1:1 join produces `max`, a fan-out produces more —
     * but for build-side selection we only need a coarse signal), Left/Right
-    * stay at their preserved-side size, Full is the sum.
+    * stay at their preserved-side size, Full is the sum. The planner's
+    * nested-loop guard sizes a join on an equality with it too.
     */
-  private def joinEstimate(l: Long, r: Long, kind: JoinKind): Long = kind match {
+  private[sql] def joinEstimate(l: Long, r: Long, kind: JoinKind): Long = kind match {
     case JoinKind.Inner => math.max(l, r)
     case JoinKind.Left  => l
     case JoinKind.Right => r

@@ -1,0 +1,51 @@
+load("@rules_scala//scala:scala.bzl", "scala_binary", "scala_junit_test", "scala_library")
+
+# The sqllogictest runner: SQLite's script format as DuckDB extends it, read
+# by Script, carried out by Database (the engine has no DDL, so CREATE TABLE
+# and INSERT build in-memory tables here) and Runner, which runs every query
+# under the baseline and each verification mode of Modes (layouts, spill,
+# metrics, parquet-backed tables, the logical optimizer off or one pass at a
+# time) and compares the printed results (Values). testonly; DataGen's layout
+# helpers come from the fuzz harness.
+scala_library(
+    name = "slt",
+    testonly = True,
+    srcs = glob(
+        ["*.scala"],
+        exclude = ["*Test.scala"],
+    ),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "//src/main/scala/com/transformer/write/parquet",
+        "//src/test/scala/com/transformer/fuzz",
+    ],
+)
+
+# Every script under src/test/slt, each a JUnit case, each query under every
+# verification mode. Four shards split the scripts between four JVMs. Part of
+# `bazel test //...`.
+scala_junit_test(
+    name = "slt_test",
+    srcs = ["SltTest.scala"],
+    suffixes = ["Test"],
+    shard_count = 4,
+    data = ["//src/test/slt:scripts"],
+    deps = [
+        ":slt",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Runs scripts given on the command line and reports every record that did
+# not pass; for audits over SQLite's corpus, not a gate.
+scala_binary(
+    name = "corpus",
+    testonly = True,
+    main_class = "com.transformer.slt.Corpus",
+    jvm_flags = ["-Xmx2g"],
+    deps = [":slt"],
+)

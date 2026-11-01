@@ -14,7 +14,7 @@ navigation hint, not a comprehensive directory listing.
   collects `CteDef`s into a `BuiltQuery`, which `sql/exec/CteResolver.scala`
   later inlines or materializes (see [architecture §6b](architecture.md#6b-cte-resolution-inline-vs-materialize)).
   If you're adding a syntax feature, this is probably where it lands.
-- `sql/plan/UnsupportedClauses.scala` (~840 LOC) — the rejection pass that runs
+- `sql/plan/UnsupportedClauses.scala` (~890 LOC) — the rejection pass that runs
   before binding, and its audit: for each of the ~60 JSqlParser classes the
   binder reaches, every getter the binder does not read, as a rejection (clause,
   advice, example SQL) or inert (with the reason). Most of the length is that
@@ -217,5 +217,5 @@ navigation hint, not a comprehensive directory listing.
   refresh UI pattern) match this repo's GUI module directly.
 - **JSqlParser docs:** search `net.sf.jsqlparser` on Maven Central / GitHub.
   The jar at
-  `/private/var/tmp/_bazel_owenchristie/.../jsqlparser-5.0.jar` can be `unzip
+  `/private/var/tmp/_bazel_owenchristie/.../jsqlparser-5.2.jar` can be `unzip
   -l`'d to inspect available classes — useful when guessing class names.

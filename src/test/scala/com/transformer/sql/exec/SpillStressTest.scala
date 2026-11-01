@@ -4,6 +4,7 @@ import com.transformer.core._
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
+import org.junit.Assume.assumeTrue
 
 import java.nio.file.{Files, Path}
 import scala.collection.mutable
@@ -48,6 +49,14 @@ class SpillStressTest {
 
   private def spillyOpts(): ExecutionOptions =
     ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))
+
+  /** A one-byte threshold spills once per input batch, so a test that spills
+    * thousands of rows that way writes a run per batch: past
+    * `spill_max_runs` and into thousands of files under the 1- and 2-row
+    * batch capacities the whole suite also runs at (docs/testing.md), where
+    * the spill fuzzers and `slt_test`'s spill mode cover spilling instead. */
+  private def assumeFullBatches(): Unit =
+    assumeTrue("needs batches of 1024 rows or more", ColumnarBatch.DefaultCapacity >= 1024)
 
   /** Synthetic plan: emits `N` rows split into `parts` partitions.
     * Row `i` is `(k = i % G, v = i)`. The analytical answer for
@@ -98,6 +107,7 @@ class SpillStressTest {
   // ---- HashAggregate stress ------------------------------------------------
 
   @Test def hashAggregateStressManySpillRounds(): Unit = {
+    assumeFullBatches()
     val N = 200_000
     val G = 47
     val plan = new SyntheticPlan(N, G, parts = 4)
@@ -118,6 +128,7 @@ class SpillStressTest {
   /** Total Σ over k=0..G-1 of SUM(v) for the group equals Σ i for
     * i ∈ [0, N), confirming no rows are dropped during spill. */
   @Test def hashAggregateStressRowConservation(): Unit = {
+    assumeFullBatches()
     val N = 100_000
     val G = 13
     val plan = new SyntheticPlan(N, G, parts = 3)
@@ -134,6 +145,7 @@ class SpillStressTest {
   /** When every group is unique (one row per group), spill is exercised on
     * the maximum-distinct-key shape. */
   @Test def hashAggregateStressUniqueKeys(): Unit = {
+    assumeFullBatches()
     val N = 50_000
     val G = N // one row per group
     val plan = new SyntheticPlan(N, G, parts = 4)
@@ -153,6 +165,7 @@ class SpillStressTest {
   // ---- Sort stress ---------------------------------------------------------
 
   @Test def sortStressManySpillRoundsRemainsSorted(): Unit = {
+    assumeFullBatches()
     val N = 200_000
     val G = N // unique keys; pure stress on sort merge
     val plan = new SyntheticPlan(N, G, parts = 4)
@@ -181,6 +194,7 @@ class SpillStressTest {
   // ---- Distinct stress -----------------------------------------------------
 
   @Test def distinctStressMillionDuplicatesCollapse(): Unit = {
+    assumeFullBatches()
     val N = 200_000
     val G = 100 // 100 distinct keys
     val plan = new SyntheticPlan(N, G, parts = 4)

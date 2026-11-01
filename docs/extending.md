@@ -517,6 +517,36 @@ several passes walk every kind of it, so a new node (as `SwitchCaseExpr` and
    `ExprGen.render`, `Shrinker`'s `childrenOf` and its rebuild, `QueryGen.expr`
    and `ColumnProjectionPushdownTest`'s index check.
 
+## Add a sqllogictest script
+
+For SQL whose answer is known: a semantics decision, a regression, a function's
+edge values. Scripts live in `src/test/slt/<area>/<name>.test`; the format is in
+[testing.md](testing.md#sql-logic-tests).
+
+1. Write the setup as `statement ok` records (`CREATE TABLE`, `INSERT ...
+   VALUES`; the runner carries them out, the engine has no DDL) and each query
+   as a `query` record whose header names every column's exact type
+   (`INT,DECIMAL(13,4)`) and a sort mode, `rowsort` unless the query's ORDER BY
+   fixes the order, with an empty `----` block. A query that must fail is a
+   `statement error` record with the words its message must contain after
+   `----`.
+2. Fill the blocks from the engine:
+   `bazel run //src/test/scala/com/transformer/slt:corpus -- --dialect transformer --complete src/test/slt/<area>/<name>.test`.
+   It writes each result, and lists every query that failed or whose types
+   differ from the header.
+3. Check every value by hand: the engine wrote them, so a wrong answer is
+   now in the script. Where SQLite shares the semantics, comparing with it is
+   a quick second opinion; where the repo decided otherwise, the decision in
+   `plans/robustness/` is the reference.
+4. `bazel test //src/test/scala/com/transformer/slt:slt_test` runs it under every
+   verification mode. A `nosort` query whose ORDER BY leaves ties diverges
+   across layouts: add a key that breaks them.
+
+The scripts are picked up by glob, so no BUILD change is needed. A slice of
+SQLite's corpus goes under `src/test/slt/sqlite/`, cut at a record boundary with
+a header naming its source; mark each record the engine answers otherwise by
+design with `skipif transformer # <why>` on the line before it.
+
 ## Add a property / generator
 
 The property-based testing harness lives in `src/test/scala/com/transformer/fuzz/`

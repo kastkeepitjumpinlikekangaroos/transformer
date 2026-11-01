@@ -5,6 +5,8 @@ import com.transformer.gui.SqlHighlighter.{Kind, Token}
 import org.junit.Assert._
 import org.junit.Test
 
+import java.util.Locale
+
 class SqlHighlighterTest {
 
   private def kinds(sql: String): Seq[Kind] =
@@ -165,7 +167,7 @@ class SqlHighlighterTest {
     // Reconstructing the original from token texts must be lossless.
     assertEquals(sql, toks.iterator.map(_.text).mkString)
     // Some sanity checks on key tokens.
-    val keywords = toks.filter(_.kind == Kind.Keyword).map(_.text.toUpperCase).toSet
+    val keywords = toks.filter(_.kind == Kind.Keyword).map(_.text.toUpperCase(Locale.ROOT)).toSet
     assertTrue(keywords.contains("SELECT"))
     assertTrue(keywords.contains("FROM"))
     assertTrue(keywords.contains("WHERE"))
@@ -173,7 +175,7 @@ class SqlHighlighterTest {
     assertTrue(keywords.contains("BY"))
     assertTrue(keywords.contains("ORDER"))
     assertTrue(keywords.contains("AS"))
-    val funcs = toks.filter(_.kind == Kind.Function).map(_.text.toUpperCase).toSet
+    val funcs = toks.filter(_.kind == Kind.Function).map(_.text.toUpperCase(Locale.ROOT)).toSet
     assertEquals(Set("COUNT", "SUM"), funcs)
     // The string literal should NOT be split by the embedded template.
     val strings = toks.filter(_.kind == Kind.StringLit).map(_.text)
@@ -183,8 +185,8 @@ class SqlHighlighterTest {
   @Test def windowFunctionKeywords(): Unit = {
     val sql = "SELECT RANK() OVER (PARTITION BY cat ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
     val toks = SqlHighlighter.tokenize(sql).filterNot(_.kind == Kind.Whitespace)
-    val funcs = toks.filter(_.kind == Kind.Function).map(_.text.toUpperCase).toSet
-    val keywords = toks.filter(_.kind == Kind.Keyword).map(_.text.toUpperCase).toSet
+    val funcs = toks.filter(_.kind == Kind.Function).map(_.text.toUpperCase(Locale.ROOT)).toSet
+    val keywords = toks.filter(_.kind == Kind.Keyword).map(_.text.toUpperCase(Locale.ROOT)).toSet
     assertTrue("RANK should be a function", funcs.contains("RANK"))
     assertTrue("OVER", keywords.contains("OVER"))
     assertTrue("PARTITION", keywords.contains("PARTITION"))

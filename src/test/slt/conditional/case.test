@@ -1,0 +1,63 @@
+# The values that become one result take a type that holds each of them
+# (plans/robustness/09), and a branch is evaluated only on the rows that take
+# it (plans/robustness/17).
+
+statement ok
+CREATE TABLE c (id INT, i INT, d DECIMAL(5,2), x DOUBLE)
+
+statement ok
+INSERT INTO c VALUES (1, 1, 1.25, 0.5), (2, 0, 2.50, 1.5), (3, NULL, NULL, NULL)
+
+query INT,DOUBLE rowsort
+SELECT id, CASE WHEN i = 1 THEN 1 ELSE 2.5 END FROM c
+----
+1	1.0
+2	2.5
+3	2.5
+
+query INT,DECIMAL(12,2) rowsort
+SELECT id, CASE WHEN i = 1 THEN d ELSE i END FROM c
+----
+1	1.25
+2	0.00
+3	NULL
+
+query INT,INT rowsort
+SELECT id, COALESCE(i, 7) FROM c
+----
+1	1
+2	0
+3	7
+
+# Each branch is evaluated only on the rows that take it: the ELSE would
+# overflow INT on row 1, which takes the THEN.
+query INT,INT rowsort
+SELECT id, CASE WHEN i = 1 THEN 2147483647 * i ELSE 2147483647 * (i + 1) END FROM c
+----
+1	2147483647
+2	2147483647
+3	NULL
+
+query INT,INT rowsort
+SELECT id, IF(i = 1, 100, 200) FROM c
+----
+1	100
+2	200
+3	200
+
+query INT,INT,INT rowsort
+SELECT id, GREATEST(i, 0), LEAST(i, 0) FROM c
+----
+1	1	0
+2	0	0
+3	0	0
+
+# A string and a number are no one type.
+statement error
+SELECT CASE WHEN i = 1 THEN 'one' ELSE 2 END FROM c
+----
+
+statement error
+SELECT COALESCE(d, x) FROM c
+----
+CAST

@@ -3,6 +3,7 @@ package com.transformer.read.parquet
 import com.transformer.core._
 import com.transformer.sql.exec.SqlEngine
 import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.junit.Assert._
 import org.junit.Test
 
@@ -10,6 +11,7 @@ import java.math.{BigDecimal => JBigDecimal, BigInteger}
 import java.nio.file.{Files, Path}
 import java.time.{Instant, LocalDateTime, ZoneOffset}
 import java.time.temporal.ChronoUnit
+import java.util.Locale
 
 /** Our reader against files parquet-mr wrote, and our writer against
   * parquet-mr's reading of what it wrote.
@@ -438,7 +440,14 @@ class ParquetExternalFormatTest {
     val target = newDir().resolve("layouts.parquet")
     TParquetWriter.writeAll(target, schema, Iterator.empty)
     val footer = ExternalParquet.footerSchema(target).getFields
-    def layout(i: Int): String = footer.get(i).toString
+    // Spelled from its parts: parquet-mr prints a type's name in the default
+    // locale, INT32 as ınt32 under a Turkish one.
+    def layout(i: Int): String = {
+      val t = footer.get(i).asPrimitiveType
+      val width = if (t.getPrimitiveTypeName == PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY) s"(${t.getTypeLength})" else ""
+      s"${t.getRepetition.name.toLowerCase(Locale.ROOT)} ${t.getPrimitiveTypeName.name.toLowerCase(Locale.ROOT)}$width " +
+        s"${t.getName} (${t.getLogicalTypeAnnotation})"
+    }
     assertEquals("optional int32 p9 (DECIMAL(9,2))", layout(0))
     assertEquals("optional int64 p10 (DECIMAL(10,2))", layout(1))
     assertEquals("optional int64 p18 (DECIMAL(18,4))", layout(2))

@@ -14,7 +14,7 @@ import org.fxmisc.flowless.VirtualizedScrollPane
 import org.fxmisc.richtext.{Caret, CodeArea}
 import org.fxmisc.richtext.model.{PlainTextChange, StyleSpansBuilder}
 
-import java.util.{Collection => JCollection, Collections}
+import java.util.{Collection => JCollection, Collections, Locale}
 import java.util.function.IntFunction
 import java.util.prefs.Preferences
 import scala.util.control.NonFatal
@@ -363,7 +363,7 @@ final class SqlEditor extends BorderPane {
 
 object SqlEditor {
 
-  private val IsMac: Boolean = System.getProperty("os.name", "").toLowerCase.contains("mac")
+  private val IsMac: Boolean = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac")
   private val VimPreference = "vimKeybindings"
 
   /** Whether every SQL editor reads keys as vim does. On unless turned off,
@@ -386,7 +386,9 @@ object SqlEditor {
 
   private lazy val blockCaretStyle: String = {
     val w = textWidth("M", Theme.codeFont)
-    f"-fx-stroke-width: $w%.2fpx; -fx-translate-x: ${w / 2}%.2fpx; -fx-stroke-line-cap: butt; -fx-stroke: rgba(139, 196, 255, 0.55);"
+    // CSS reads a decimal point, which a Turkish or German locale prints as a comma.
+    "-fx-stroke-width: %.2fpx; -fx-translate-x: %.2fpx; -fx-stroke-line-cap: butt; -fx-stroke: rgba(139, 196, 255, 0.55);"
+      .formatLocal(Locale.ROOT, w, w / 2)
   }
 
   private def textWidth(s: String, font: Font): Double = {

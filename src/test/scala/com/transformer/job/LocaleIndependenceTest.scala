@@ -15,6 +15,7 @@ import org.junit.Assert._
 import org.junit.Test
 
 import java.io.{ByteArrayInputStream, DataInputStream, File}
+import java.net.JarURLConnection
 import java.nio.file.{Files, Path}
 import java.time.Instant
 import java.util.Locale
@@ -27,9 +28,10 @@ import scala.jdk.CollectionConverters._
   * `"i".toUpperCase()` a dotted I: every name the engine folds to compare
   * (views, columns, functions, CAST types, template variables, option values)
   * would stop matching, and `UPPER` / `LOWER` would answer differently, if any
-  * of them read the default locale. The last test holds the rule for code not
-  * yet written: no compiled class of a module a job runs calls a
-  * default-locale conversion or format. */
+  * of them read the default locale. The last two tests hold the rule for code
+  * not yet written: no compiled class of a module a job runs calls a
+  * default-locale conversion or format, and none of the desktop GUI's or the
+  * data viewer's folds case in the default locale. */
 class LocaleIndependenceTest {
 
   @Test def runsUnderATurkishLocale(): Unit = {
@@ -149,16 +151,49 @@ class LocaleIndependenceTest {
     classOf[CsvReader], ParquetReader.getClass, classOf[CsvWriter], classOf[ParquetWriter],
     classOf[DataJob], TemplateRenderer.getClass, Cli.getClass, classOf[JobSession])
 
+  /** A class file of each module of the desktop GUI and the data viewer, which
+    * the test reads at run time only (BUILD's `runtime_deps`). */
+  private val DesktopClassFiles: Seq[String] = Seq(
+    "com/transformer/gui/VimKey.class", "com/transformer/gui/SqlHighlighter.class",
+    "com/transformer/gui/TaskDetailsPanel.class", "com/transformer/viewer/ViewerSession.class",
+    "com/transformer/viewer/ViewerApp.class")
+
   @Test def noModuleCallsADefaultLocaleConversionOrFormat(): Unit = {
     val jars = ModuleClasses.map(c => new File(c.getProtectionDomain.getCodeSource.getLocation.toURI)).distinct
-    val offences = for {
+    assertTrue(s"read ${jars.size} module jars, expected ${ModuleClasses.size}", jars.size == ModuleClasses.size)
+    val offences = calls(jars, DefaultLocaleCalls)
+    assertTrue(offences.mkString("\n"), offences.isEmpty)
+  }
+
+  /** The desktop modules fold the names, keywords and keys they match as a job
+    * does: under tr-TR the SQL highlighter read `PARTITION` as `partıtıon`, no
+    * keyword, and the task panel missed an input named with an I. Their
+    * display text may format a number in the user's locale. */
+  @Test def noDesktopModuleFoldsCaseInTheDefaultLocale(): Unit = {
+    val jars = DesktopClassFiles.map(locationOf).distinct
+    assertTrue(s"read ${jars.size} desktop jars, expected ${DesktopClassFiles.size}", jars.size == DesktopClassFiles.size)
+    val folds = DefaultLocaleCalls.filter { case ((_, name, _), _) => name == "toLowerCase" || name == "toUpperCase" }
+    val offences = calls(jars, folds)
+    assertTrue(offences.mkString("\n"), offences.isEmpty)
+  }
+
+  /** Each call of one of `banned` in the classes of `jars`, with its advice. */
+  private def calls(jars: Seq[File], banned: Map[(String, String, String), String]): Seq[String] =
+    (for {
       jar <- jars
       (className, bytes) <- classFiles(jar)
       ref <- memberRefs(bytes)
-      advice <- DefaultLocaleCalls.get(ref)
-    } yield s"$className calls ${ref._1}.${ref._2}${ref._3}; use $advice"
-    assertTrue(s"read ${jars.size} module jars, expected ${ModuleClasses.size}", jars.size == ModuleClasses.size)
-    assertTrue(offences.distinct.mkString("\n"), offences.isEmpty)
+      advice <- banned.get(ref)
+    } yield s"$className calls ${ref._1}.${ref._2}${ref._3}; use $advice").distinct
+
+  /** The jar, or the class directory, that holds `classFile`. */
+  private def locationOf(classFile: String): File = {
+    val url = Option(getClass.getClassLoader.getResource(classFile))
+      .getOrElse(throw new AssertionError(s"$classFile is not on the test's classpath"))
+    url.openConnection match {
+      case jar: JarURLConnection => new File(jar.getJarFileURL.toURI)
+      case _ => classFile.split('/').foldLeft(new File(url.toURI))((f, _) => f.getParentFile)
+    }
   }
 
   private def classFiles(location: File): Seq[(String, Array[Byte])] =

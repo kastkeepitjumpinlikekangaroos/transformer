@@ -1,5 +1,6 @@
 package com.transformer.gui
 
+import java.util.Locale
 import javafx.scene.input.{KeyCode, KeyEvent}
 
 /** How the SQL editor's vim mode reads a JavaFX key event.
@@ -88,7 +89,7 @@ private[gui] object VimKeyEvents {
   }
 
   private def ctrlKey(code: KeyCode): Option[VimKey] =
-    if (code.isLetterKey) Some(VimKey.Ctrl(code.getChar.toLowerCase.charAt(0)))
+    if (code.isLetterKey) Some(VimKey.Ctrl(code.getChar.toLowerCase(Locale.ROOT).charAt(0)))
     else if (code == KeyCode.OPEN_BRACKET) Some(VimKey.Ctrl('['))
     else None
 }

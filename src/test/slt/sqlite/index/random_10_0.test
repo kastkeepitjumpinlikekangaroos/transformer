@@ -1,0 +1,973 @@
+# From SQLite's sqllogictest corpus (https://www.sqlite.org/sqllogictest,
+# mirrored at https://github.com/gregrahn/sqllogictest): test/index/random/10/slt_good_0.test,
+# up to its 150th query this engine runs. Its COPYRIGHT lets it be copied
+# freely. `skipif transformer` marks a record the engine answers otherwise
+# by design, with the reason.
+
+hash-threshold 8
+
+statement ok
+CREATE TABLE tab0(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+INSERT INTO tab0 VALUES(0,698,169.42,'apdbu',431,316.15,'sqvis')
+
+statement ok
+INSERT INTO tab0 VALUES(1,538,676.36,'fuqeu',514,685.97,'bgwrq')
+
+statement ok
+INSERT INTO tab0 VALUES(2,90,205.26,'yrrzx',123,836.88,'kpuhc')
+
+statement ok
+INSERT INTO tab0 VALUES(3,620,864.8,'myrdv',877,820.98,'oxkuv')
+
+statement ok
+INSERT INTO tab0 VALUES(4,754,677.3,'iofrg',67,665.49,'bzqba')
+
+statement ok
+INSERT INTO tab0 VALUES(5,107,710.19,'lhfro',286,504.28,'kwwsg')
+
+statement ok
+INSERT INTO tab0 VALUES(6,904,193.16,'eozui',48,698.55,'ejyzs')
+
+statement ok
+INSERT INTO tab0 VALUES(7,606,650.64,'ovmce',417,962.43,'dvkbh')
+
+statement ok
+INSERT INTO tab0 VALUES(8,535,18.11,'ijika',630,489.63,'hpnyu')
+
+statement ok
+INSERT INTO tab0 VALUES(9,501,776.40,'cvygg',725,75.5,'etlyv')
+
+statement ok
+CREATE TABLE tab1(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab1_0 on tab1 (col0)
+
+statement ok
+CREATE INDEX idx_tab1_1 on tab1 (col1)
+
+statement ok
+CREATE INDEX idx_tab1_3 on tab1 (col3)
+
+statement ok
+CREATE INDEX idx_tab1_4 on tab1 (col4)
+
+statement ok
+INSERT INTO tab1 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab2(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab2_0 ON tab2 (col0,col1 DESC)
+
+statement ok
+CREATE INDEX idx_tab2_1 ON tab2 (col4 DESC,col1)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab2_2 ON tab2 (col1 DESC)
+
+statement ok
+INSERT INTO tab2 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab3(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab3_0 ON tab3 (col0 DESC,col1 DESC,col3)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_1 ON tab3 (col0,col4,col3 DESC)
+
+statement ok
+CREATE INDEX idx_tab3_2 ON tab3 (col3)
+
+statement ok
+INSERT INTO tab3 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab4(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab4_0 ON tab4 (col3)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab4_1 ON tab4 (col1 DESC)
+
+statement ok
+CREATE INDEX idx_tab4_3 ON tab4 (col0)
+
+statement ok
+INSERT INTO tab4 SELECT * FROM tab0
+
+query I rowsort label-0
+SELECT col4 FROM tab0 cor0 WHERE NOT NULL IS NULL
+----
+
+query I rowsort label-0
+SELECT col4 FROM tab1 cor0 WHERE NOT NULL IS NULL
+----
+
+query I rowsort label-0
+SELECT col4 FROM tab2 cor0 WHERE NOT NULL IS NULL
+----
+
+query I rowsort label-0
+SELECT col4 FROM tab3 cor0 WHERE NOT NULL IS NULL
+----
+
+query I rowsort label-0
+SELECT col4 FROM tab4 cor0 WHERE NOT NULL IS NULL
+----
+
+query I rowsort label-5
+SELECT DISTINCT - + 26 AS col2 FROM tab0 AS cor0 WHERE 95 < - col0
+----
+
+query I rowsort label-5
+SELECT DISTINCT - + 26 AS col2 FROM tab1 AS cor0 WHERE 95 < - col0
+----
+
+query I rowsort label-5
+SELECT DISTINCT - + 26 AS col2 FROM tab2 AS cor0 WHERE 95 < - col0
+----
+
+query I rowsort label-5
+SELECT DISTINCT - + 26 AS col2 FROM tab3 AS cor0 WHERE 95 < - col0
+----
+
+query I rowsort label-5
+SELECT DISTINCT - + 26 AS col2 FROM tab4 AS cor0 WHERE 95 < - col0
+----
+
+query IIIIIII rowsort label-10
+SELECT ALL * FROM tab0 AS cor0 WHERE NULL <= + col3
+----
+
+query IIIIIII rowsort label-10
+SELECT ALL * FROM tab1 AS cor0 WHERE NULL <= + col3
+----
+
+query IIIIIII rowsort label-10
+SELECT ALL * FROM tab2 AS cor0 WHERE NULL <= + col3
+----
+
+query IIIIIII rowsort label-10
+SELECT ALL * FROM tab3 AS cor0 WHERE NULL <= + col3
+----
+
+query IIIIIII rowsort label-10
+SELECT ALL * FROM tab4 AS cor0 WHERE NULL <= + col3
+----
+
+query IIIIIII rowsort label-15
+SELECT ALL * FROM tab0 WHERE + + 44 IS NULL
+----
+
+query IIIIIII rowsort label-15
+SELECT ALL * FROM tab1 WHERE + + 44 IS NULL
+----
+
+query IIIIIII rowsort label-15
+SELECT ALL * FROM tab2 WHERE + + 44 IS NULL
+----
+
+query IIIIIII rowsort label-15
+SELECT ALL * FROM tab3 WHERE + + 44 IS NULL
+----
+
+query IIIIIII rowsort label-15
+SELECT ALL * FROM tab4 WHERE + + 44 IS NULL
+----
+
+query I rowsort label-20
+SELECT ALL + col1 FROM tab0 WHERE ( NOT - col0 IS NOT NULL )
+----
+
+query I rowsort label-20
+SELECT ALL + col1 FROM tab1 WHERE ( NOT - col0 IS NOT NULL )
+----
+
+query I rowsort label-20
+SELECT ALL + col1 FROM tab2 WHERE ( NOT - col0 IS NOT NULL )
+----
+
+query I rowsort label-20
+SELECT ALL + col1 FROM tab3 WHERE ( NOT - col0 IS NOT NULL )
+----
+
+query I rowsort label-20
+SELECT ALL + col1 FROM tab4 WHERE ( NOT - col0 IS NOT NULL )
+----
+
+query I rowsort label-25
+SELECT col0 + + col0 AS col4 FROM tab0 AS cor0 WHERE NULL IS NULL
+----
+10 values hashing to 6893d60f1a6c9f04c16eec5aa62fd92e
+
+query I rowsort label-25
+SELECT col0 + + col0 AS col4 FROM tab1 AS cor0 WHERE NULL IS NULL
+----
+10 values hashing to 6893d60f1a6c9f04c16eec5aa62fd92e
+
+query I rowsort label-25
+SELECT col0 + + col0 AS col4 FROM tab2 AS cor0 WHERE NULL IS NULL
+----
+10 values hashing to 6893d60f1a6c9f04c16eec5aa62fd92e
+
+query I rowsort label-25
+SELECT col0 + + col0 AS col4 FROM tab3 AS cor0 WHERE NULL IS NULL
+----
+10 values hashing to 6893d60f1a6c9f04c16eec5aa62fd92e
+
+query I rowsort label-25
+SELECT col0 + + col0 AS col4 FROM tab4 AS cor0 WHERE NULL IS NULL
+----
+10 values hashing to 6893d60f1a6c9f04c16eec5aa62fd92e
+
+query I rowsort label-30
+SELECT col3 FROM tab0 AS cor0 WHERE NOT NULL BETWEEN NULL AND - col0
+----
+
+query I rowsort label-30
+SELECT col3 FROM tab1 AS cor0 WHERE NOT NULL BETWEEN NULL AND - col0
+----
+
+query I rowsort label-30
+SELECT col3 FROM tab2 AS cor0 WHERE NOT NULL BETWEEN NULL AND - col0
+----
+
+query I rowsort label-30
+SELECT col3 FROM tab3 AS cor0 WHERE NOT NULL BETWEEN NULL AND - col0
+----
+
+query I rowsort label-30
+SELECT col3 FROM tab4 AS cor0 WHERE NOT NULL BETWEEN NULL AND - col0
+----
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-35
+SELECT + col2 col2 FROM tab0 AS cor0 WHERE NOT - col3 IS NOT NULL OR col0 IS NULL
+----
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-35
+SELECT + col2 col2 FROM tab1 AS cor0 WHERE NOT - col3 IS NOT NULL OR col0 IS NULL
+----
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-35
+SELECT + col2 col2 FROM tab2 AS cor0 WHERE NOT - col3 IS NOT NULL OR col0 IS NULL
+----
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-35
+SELECT + col2 col2 FROM tab3 AS cor0 WHERE NOT - col3 IS NOT NULL OR col0 IS NULL
+----
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-35
+SELECT + col2 col2 FROM tab4 AS cor0 WHERE NOT - col3 IS NOT NULL OR col0 IS NULL
+----
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+query I rowsort label-40
+SELECT + col2 FROM tab0 AS cor0 WHERE col3 IS NOT NULL
+----
+10 values hashing to b833e3a3ba082b2c0028b4cd08f0834d
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+query I rowsort label-40
+SELECT + col2 FROM tab1 AS cor0 WHERE col3 IS NOT NULL
+----
+10 values hashing to b833e3a3ba082b2c0028b4cd08f0834d
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+query I rowsort label-40
+SELECT + col2 FROM tab2 AS cor0 WHERE col3 IS NOT NULL
+----
+10 values hashing to b833e3a3ba082b2c0028b4cd08f0834d
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+query I rowsort label-40
+SELECT + col2 FROM tab3 AS cor0 WHERE col3 IS NOT NULL
+----
+10 values hashing to b833e3a3ba082b2c0028b4cd08f0834d
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+query I rowsort label-40
+SELECT + col2 FROM tab4 AS cor0 WHERE col3 IS NOT NULL
+----
+10 values hashing to b833e3a3ba082b2c0028b4cd08f0834d
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-45
+SELECT MIN( col3 ) col0 FROM tab0 AS cor0 WHERE - 15 + - - col1 * - col1 > NULL
+----
+NULL
+
+skipif mysql # not compatible
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-45
+SELECT MIN ( col3 ) col0 FROM tab0 AS cor0 WHERE - 15 + - - col1 * - col1 > NULL
+----
+NULL
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-45
+SELECT MIN( col3 ) col0 FROM tab1 AS cor0 WHERE - 15 + - - col1 * - col1 > NULL
+----
+NULL
+
+skipif mysql # not compatible
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-45
+SELECT MIN ( col3 ) col0 FROM tab1 AS cor0 WHERE - 15 + - - col1 * - col1 > NULL
+----
+NULL
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-45
+SELECT MIN( col3 ) col0 FROM tab2 AS cor0 WHERE - 15 + - - col1 * - col1 > NULL
+----
+NULL
+
+skipif mysql # not compatible
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-45
+SELECT MIN ( col3 ) col0 FROM tab2 AS cor0 WHERE - 15 + - - col1 * - col1 > NULL
+----
+NULL
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-45
+SELECT MIN( col3 ) col0 FROM tab3 AS cor0 WHERE - 15 + - - col1 * - col1 > NULL
+----
+NULL
+
+skipif mysql # not compatible
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-45
+SELECT MIN ( col3 ) col0 FROM tab3 AS cor0 WHERE - 15 + - - col1 * - col1 > NULL
+----
+NULL
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-45
+SELECT MIN( col3 ) col0 FROM tab4 AS cor0 WHERE - 15 + - - col1 * - col1 > NULL
+----
+NULL
+
+skipif mysql # not compatible
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-45
+SELECT MIN ( col3 ) col0 FROM tab4 AS cor0 WHERE - 15 + - - col1 * - col1 > NULL
+----
+NULL
+
+query IIIIIII rowsort label-50
+SELECT ALL * FROM tab0 AS cor0 WHERE NOT + 71 IS NOT NULL
+----
+
+query IIIIIII rowsort label-50
+SELECT ALL * FROM tab1 AS cor0 WHERE NOT + 71 IS NOT NULL
+----
+
+query IIIIIII rowsort label-50
+SELECT ALL * FROM tab2 AS cor0 WHERE NOT + 71 IS NOT NULL
+----
+
+query IIIIIII rowsort label-50
+SELECT ALL * FROM tab3 AS cor0 WHERE NOT + 71 IS NOT NULL
+----
+
+query IIIIIII rowsort label-50
+SELECT ALL * FROM tab4 AS cor0 WHERE NOT + 71 IS NOT NULL
+----
+
+onlyif mysql # CAST syntax: SIGNED type: 
+query I rowsort label-55
+SELECT + + CAST( + - 4 AS SIGNED ) FROM tab0 cor0 WHERE NOT col1 NOT BETWEEN NULL AND - col3
+----
+
+skipif mysql # not compatible
+query I rowsort label-55
+SELECT + + CAST ( + - 4 AS INTEGER ) FROM tab0 cor0 WHERE NOT col1 NOT BETWEEN NULL AND - col3
+----
+
+onlyif mysql # CAST syntax: SIGNED type: 
+query I rowsort label-55
+SELECT + + CAST( + - 4 AS SIGNED ) FROM tab1 cor0 WHERE NOT col1 NOT BETWEEN NULL AND - col3
+----
+
+skipif mysql # not compatible
+query I rowsort label-55
+SELECT + + CAST ( + - 4 AS INTEGER ) FROM tab1 cor0 WHERE NOT col1 NOT BETWEEN NULL AND - col3
+----
+
+onlyif mysql # CAST syntax: SIGNED type: 
+query I rowsort label-55
+SELECT + + CAST( + - 4 AS SIGNED ) FROM tab2 cor0 WHERE NOT col1 NOT BETWEEN NULL AND - col3
+----
+
+skipif mysql # not compatible
+query I rowsort label-55
+SELECT + + CAST ( + - 4 AS INTEGER ) FROM tab2 cor0 WHERE NOT col1 NOT BETWEEN NULL AND - col3
+----
+
+onlyif mysql # CAST syntax: SIGNED type: 
+query I rowsort label-55
+SELECT + + CAST( + - 4 AS SIGNED ) FROM tab3 cor0 WHERE NOT col1 NOT BETWEEN NULL AND - col3
+----
+
+skipif mysql # not compatible
+query I rowsort label-55
+SELECT + + CAST ( + - 4 AS INTEGER ) FROM tab3 cor0 WHERE NOT col1 NOT BETWEEN NULL AND - col3
+----
+
+onlyif mysql # CAST syntax: SIGNED type: 
+query I rowsort label-55
+SELECT + + CAST( + - 4 AS SIGNED ) FROM tab4 cor0 WHERE NOT col1 NOT BETWEEN NULL AND - col3
+----
+
+skipif mysql # not compatible
+query I rowsort label-55
+SELECT + + CAST ( + - 4 AS INTEGER ) FROM tab4 cor0 WHERE NOT col1 NOT BETWEEN NULL AND - col3
+----
+
+query I rowsort label-60
+SELECT col4 / + 29 FROM tab0 WHERE - - col3 NOT BETWEEN - - 70 + - 92 AND NULL
+----
+
+query I rowsort label-60
+SELECT col4 / + 29 FROM tab1 WHERE - - col3 NOT BETWEEN - - 70 + - 92 AND NULL
+----
+
+query I rowsort label-60
+SELECT col4 / + 29 FROM tab2 WHERE - - col3 NOT BETWEEN - - 70 + - 92 AND NULL
+----
+
+query I rowsort label-60
+SELECT col4 / + 29 FROM tab3 WHERE - - col3 NOT BETWEEN - - 70 + - 92 AND NULL
+----
+
+query I rowsort label-60
+SELECT col4 / + 29 FROM tab4 WHERE - - col3 NOT BETWEEN - - 70 + - 92 AND NULL
+----
+
+query I rowsort label-65
+SELECT ALL - - 27 FROM tab0 WHERE NOT - - 65 + - + col0 + + 9 + + ( - 16 ) / + col0 * + + ( + 90 ) * + col4 * ( - + 38 ) IS NULL
+----
+10 values hashing to 1af4546e6f032fe34457466651148c79
+
+query I rowsort label-65
+SELECT ALL - - 27 FROM tab1 WHERE NOT - - 65 + - + col0 + + 9 + + ( - 16 ) / + col0 * + + ( + 90 ) * + col4 * ( - + 38 ) IS NULL
+----
+10 values hashing to 1af4546e6f032fe34457466651148c79
+
+query I rowsort label-65
+SELECT ALL - - 27 FROM tab2 WHERE NOT - - 65 + - + col0 + + 9 + + ( - 16 ) / + col0 * + + ( + 90 ) * + col4 * ( - + 38 ) IS NULL
+----
+10 values hashing to 1af4546e6f032fe34457466651148c79
+
+query I rowsort label-65
+SELECT ALL - - 27 FROM tab3 WHERE NOT - - 65 + - + col0 + + 9 + + ( - 16 ) / + col0 * + + ( + 90 ) * + col4 * ( - + 38 ) IS NULL
+----
+10 values hashing to 1af4546e6f032fe34457466651148c79
+
+query I rowsort label-65
+SELECT ALL - - 27 FROM tab4 WHERE NOT - - 65 + - + col0 + + 9 + + ( - 16 ) / + col0 * + + ( + 90 ) * + col4 * ( - + 38 ) IS NULL
+----
+10 values hashing to 1af4546e6f032fe34457466651148c79
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-70
+SELECT ALL + + ( - - COUNT( * ) ) FROM tab0 cor0 WHERE NULL <> col1
+----
+0
+
+skipif mysql # not compatible
+query I rowsort label-70
+SELECT ALL + + ( - - COUNT ( * ) ) FROM tab0 cor0 WHERE NULL <> col1
+----
+0
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-70
+SELECT ALL + + ( - - COUNT( * ) ) FROM tab1 cor0 WHERE NULL <> col1
+----
+0
+
+skipif mysql # not compatible
+query I rowsort label-70
+SELECT ALL + + ( - - COUNT ( * ) ) FROM tab1 cor0 WHERE NULL <> col1
+----
+0
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-70
+SELECT ALL + + ( - - COUNT( * ) ) FROM tab2 cor0 WHERE NULL <> col1
+----
+0
+
+skipif mysql # not compatible
+query I rowsort label-70
+SELECT ALL + + ( - - COUNT ( * ) ) FROM tab2 cor0 WHERE NULL <> col1
+----
+0
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-70
+SELECT ALL + + ( - - COUNT( * ) ) FROM tab3 cor0 WHERE NULL <> col1
+----
+0
+
+skipif mysql # not compatible
+query I rowsort label-70
+SELECT ALL + + ( - - COUNT ( * ) ) FROM tab3 cor0 WHERE NULL <> col1
+----
+0
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-70
+SELECT ALL + + ( - - COUNT( * ) ) FROM tab4 cor0 WHERE NULL <> col1
+----
+0
+
+skipif mysql # not compatible
+query I rowsort label-70
+SELECT ALL + + ( - - COUNT ( * ) ) FROM tab4 cor0 WHERE NULL <> col1
+----
+0
+
+query IIIIIII rowsort label-75
+SELECT * FROM tab0 AS cor0 WHERE NULL <> 29 + col0
+----
+
+query IIIIIII rowsort label-75
+SELECT * FROM tab1 AS cor0 WHERE NULL <> 29 + col0
+----
+
+query IIIIIII rowsort label-75
+SELECT * FROM tab2 AS cor0 WHERE NULL <> 29 + col0
+----
+
+query IIIIIII rowsort label-75
+SELECT * FROM tab3 AS cor0 WHERE NULL <> 29 + col0
+----
+
+query IIIIIII rowsort label-75
+SELECT * FROM tab4 AS cor0 WHERE NULL <> 29 + col0
+----
+
+query I rowsort label-80
+SELECT DISTINCT - col0 AS col3 FROM tab0 WHERE NULL IS NULL
+----
+10 values hashing to 6121ae1bb588973a3fa41a97f43d8c2a
+
+query I rowsort label-80
+SELECT DISTINCT - col0 AS col3 FROM tab1 WHERE NULL IS NULL
+----
+10 values hashing to 6121ae1bb588973a3fa41a97f43d8c2a
+
+query I rowsort label-80
+SELECT DISTINCT - col0 AS col3 FROM tab2 WHERE NULL IS NULL
+----
+10 values hashing to 6121ae1bb588973a3fa41a97f43d8c2a
+
+query I rowsort label-80
+SELECT DISTINCT - col0 AS col3 FROM tab3 WHERE NULL IS NULL
+----
+10 values hashing to 6121ae1bb588973a3fa41a97f43d8c2a
+
+query I rowsort label-80
+SELECT DISTINCT - col0 AS col3 FROM tab4 WHERE NULL IS NULL
+----
+10 values hashing to 6121ae1bb588973a3fa41a97f43d8c2a
+
+query IIIIIII rowsort label-85
+SELECT * FROM tab0 WHERE NOT - 78 BETWEEN NULL AND ( 25 )
+----
+
+query IIIIIII rowsort label-85
+SELECT * FROM tab1 WHERE NOT - 78 BETWEEN NULL AND ( 25 )
+----
+
+query IIIIIII rowsort label-85
+SELECT * FROM tab2 WHERE NOT - 78 BETWEEN NULL AND ( 25 )
+----
+
+query IIIIIII rowsort label-85
+SELECT * FROM tab3 WHERE NOT - 78 BETWEEN NULL AND ( 25 )
+----
+
+query IIIIIII rowsort label-85
+SELECT * FROM tab4 WHERE NOT - 78 BETWEEN NULL AND ( 25 )
+----
+
+query I rowsort label-90
+SELECT ALL - col0 * 8 AS col1 FROM tab0 WHERE 5 + + 48 IS NULL
+----
+
+query I rowsort label-90
+SELECT ALL - col0 * 8 AS col1 FROM tab1 WHERE 5 + + 48 IS NULL
+----
+
+query I rowsort label-90
+SELECT ALL - col0 * 8 AS col1 FROM tab2 WHERE 5 + + 48 IS NULL
+----
+
+query I rowsort label-90
+SELECT ALL - col0 * 8 AS col1 FROM tab3 WHERE 5 + + 48 IS NULL
+----
+
+query I rowsort label-90
+SELECT ALL - col0 * 8 AS col1 FROM tab4 WHERE 5 + + 48 IS NULL
+----
+
+query IIIIIII rowsort label-95
+SELECT * FROM tab0 cor0 WHERE NULL <> + col0
+----
+
+query IIIIIII rowsort label-95
+SELECT * FROM tab1 cor0 WHERE NULL <> + col0
+----
+
+query IIIIIII rowsort label-95
+SELECT * FROM tab2 cor0 WHERE NULL <> + col0
+----
+
+query IIIIIII rowsort label-95
+SELECT * FROM tab3 cor0 WHERE NULL <> + col0
+----
+
+query IIIIIII rowsort label-95
+SELECT * FROM tab4 cor0 WHERE NULL <> + col0
+----
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-100
+SELECT ALL - - COUNT( * ) FROM tab0 AS cor0 WHERE NOT ( NULL ) > + col3
+----
+0
+
+skipif mysql # not compatible
+query I rowsort label-100
+SELECT ALL - - COUNT ( * ) FROM tab0 AS cor0 WHERE NOT ( NULL ) > + col3
+----
+0
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-100
+SELECT ALL - - COUNT( * ) FROM tab1 AS cor0 WHERE NOT ( NULL ) > + col3
+----
+0
+
+skipif mysql # not compatible
+query I rowsort label-100
+SELECT ALL - - COUNT ( * ) FROM tab1 AS cor0 WHERE NOT ( NULL ) > + col3
+----
+0
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-100
+SELECT ALL - - COUNT( * ) FROM tab2 AS cor0 WHERE NOT ( NULL ) > + col3
+----
+0
+
+skipif mysql # not compatible
+query I rowsort label-100
+SELECT ALL - - COUNT ( * ) FROM tab2 AS cor0 WHERE NOT ( NULL ) > + col3
+----
+0
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-100
+SELECT ALL - - COUNT( * ) FROM tab3 AS cor0 WHERE NOT ( NULL ) > + col3
+----
+0
+
+skipif mysql # not compatible
+query I rowsort label-100
+SELECT ALL - - COUNT ( * ) FROM tab3 AS cor0 WHERE NOT ( NULL ) > + col3
+----
+0
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-100
+SELECT ALL - - COUNT( * ) FROM tab4 AS cor0 WHERE NOT ( NULL ) > + col3
+----
+0
+
+skipif mysql # not compatible
+query I rowsort label-100
+SELECT ALL - - COUNT ( * ) FROM tab4 AS cor0 WHERE NOT ( NULL ) > + col3
+----
+0
+
+query IIIIIII rowsort label-105
+SELECT * FROM tab0 WHERE NULL <= - col1
+----
+
+query IIIIIII rowsort label-105
+SELECT * FROM tab1 WHERE NULL <= - col1
+----
+
+query IIIIIII rowsort label-105
+SELECT * FROM tab2 WHERE NULL <= - col1
+----
+
+query IIIIIII rowsort label-105
+SELECT * FROM tab3 WHERE NULL <= - col1
+----
+
+query IIIIIII rowsort label-105
+SELECT * FROM tab4 WHERE NULL <= - col1
+----
+
+query I rowsort label-110
+SELECT DISTINCT col3 * - 56 * col3 - - - col0 AS col5 FROM tab0 WHERE NOT - col3 IS NOT NULL
+----
+
+query I rowsort label-110
+SELECT DISTINCT col3 * - 56 * col3 - - - col0 AS col5 FROM tab1 WHERE NOT - col3 IS NOT NULL
+----
+
+query I rowsort label-110
+SELECT DISTINCT col3 * - 56 * col3 - - - col0 AS col5 FROM tab2 WHERE NOT - col3 IS NOT NULL
+----
+
+query I rowsort label-110
+SELECT DISTINCT col3 * - 56 * col3 - - - col0 AS col5 FROM tab3 WHERE NOT - col3 IS NOT NULL
+----
+
+query I rowsort label-110
+SELECT DISTINCT col3 * - 56 * col3 - - - col0 AS col5 FROM tab4 WHERE NOT - col3 IS NOT NULL
+----
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+query I rowsort label-115
+SELECT + col5 AS col3 FROM tab0 WHERE NOT NULL NOT BETWEEN + col3 * - col1 + - col4 * + col0 * + col3 AND NULL
+----
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+query I rowsort label-115
+SELECT + col5 AS col3 FROM tab1 WHERE NOT NULL NOT BETWEEN + col3 * - col1 + - col4 * + col0 * + col3 AND NULL
+----
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+query I rowsort label-115
+SELECT + col5 AS col3 FROM tab2 WHERE NOT NULL NOT BETWEEN + col3 * - col1 + - col4 * + col0 * + col3 AND NULL
+----
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+query I rowsort label-115
+SELECT + col5 AS col3 FROM tab3 WHERE NOT NULL NOT BETWEEN + col3 * - col1 + - col4 * + col0 * + col3 AND NULL
+----
+
+skipif transformer # refused: Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+query I rowsort label-115
+SELECT + col5 AS col3 FROM tab4 WHERE NOT NULL NOT BETWEEN + col3 * - col1 + - col4 * + col0 * + col3 AND NULL
+----
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-120
+SELECT ALL - - COUNT( 7 ) AS col5 FROM tab0 AS cor0 WHERE + 35 <> ( 4 )
+----
+10
+
+skipif mysql # not compatible
+query I rowsort label-120
+SELECT ALL - - COUNT ( 7 ) AS col5 FROM tab0 AS cor0 WHERE + 35 <> ( 4 )
+----
+10
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-120
+SELECT ALL - - COUNT( 7 ) AS col5 FROM tab1 AS cor0 WHERE + 35 <> ( 4 )
+----
+10
+
+skipif mysql # not compatible
+query I rowsort label-120
+SELECT ALL - - COUNT ( 7 ) AS col5 FROM tab1 AS cor0 WHERE + 35 <> ( 4 )
+----
+10
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-120
+SELECT ALL - - COUNT( 7 ) AS col5 FROM tab2 AS cor0 WHERE + 35 <> ( 4 )
+----
+10
+
+skipif mysql # not compatible
+query I rowsort label-120
+SELECT ALL - - COUNT ( 7 ) AS col5 FROM tab2 AS cor0 WHERE + 35 <> ( 4 )
+----
+10
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-120
+SELECT ALL - - COUNT( 7 ) AS col5 FROM tab3 AS cor0 WHERE + 35 <> ( 4 )
+----
+10
+
+skipif mysql # not compatible
+query I rowsort label-120
+SELECT ALL - - COUNT ( 7 ) AS col5 FROM tab3 AS cor0 WHERE + 35 <> ( 4 )
+----
+10
+
+onlyif mysql # aggregate syntax: 
+query I rowsort label-120
+SELECT ALL - - COUNT( 7 ) AS col5 FROM tab4 AS cor0 WHERE + 35 <> ( 4 )
+----
+10
+
+skipif mysql # not compatible
+query I rowsort label-120
+SELECT ALL - - COUNT ( 7 ) AS col5 FROM tab4 AS cor0 WHERE + 35 <> ( 4 )
+----
+10
+
+onlyif mysql # CAST syntax: SIGNED type: 
+query IIIIIII rowsort label-125
+SELECT * FROM tab0 AS cor0 WHERE NULL NOT IN ( - CAST( NULL AS SIGNED ), + col4 + + - col0 * - - 27, col3, - + col1, - 52, + col0, + col4 )
+----
+
+skipif mysql # not compatible
+query IIIIIII rowsort label-125
+SELECT * FROM tab0 AS cor0 WHERE NULL NOT IN ( - CAST ( NULL AS INTEGER ), + col4 + + - col0 * - - 27, col3, - + col1, - 52, + col0, + col4 )
+----
+
+onlyif mysql # CAST syntax: SIGNED type: 
+query IIIIIII rowsort label-125
+SELECT * FROM tab1 AS cor0 WHERE NULL NOT IN ( - CAST( NULL AS SIGNED ), + col4 + + - col0 * - - 27, col3, - + col1, - 52, + col0, + col4 )
+----
+
+skipif mysql # not compatible
+query IIIIIII rowsort label-125
+SELECT * FROM tab1 AS cor0 WHERE NULL NOT IN ( - CAST ( NULL AS INTEGER ), + col4 + + - col0 * - - 27, col3, - + col1, - 52, + col0, + col4 )
+----
+
+onlyif mysql # CAST syntax: SIGNED type: 
+query IIIIIII rowsort label-125
+SELECT * FROM tab2 AS cor0 WHERE NULL NOT IN ( - CAST( NULL AS SIGNED ), + col4 + + - col0 * - - 27, col3, - + col1, - 52, + col0, + col4 )
+----
+
+skipif mysql # not compatible
+query IIIIIII rowsort label-125
+SELECT * FROM tab2 AS cor0 WHERE NULL NOT IN ( - CAST ( NULL AS INTEGER ), + col4 + + - col0 * - - 27, col3, - + col1, - 52, + col0, + col4 )
+----
+
+onlyif mysql # CAST syntax: SIGNED type: 
+query IIIIIII rowsort label-125
+SELECT * FROM tab3 AS cor0 WHERE NULL NOT IN ( - CAST( NULL AS SIGNED ), + col4 + + - col0 * - - 27, col3, - + col1, - 52, + col0, + col4 )
+----
+
+skipif mysql # not compatible
+query IIIIIII rowsort label-125
+SELECT * FROM tab3 AS cor0 WHERE NULL NOT IN ( - CAST ( NULL AS INTEGER ), + col4 + + - col0 * - - 27, col3, - + col1, - 52, + col0, + col4 )
+----
+
+onlyif mysql # CAST syntax: SIGNED type: 
+query IIIIIII rowsort label-125
+SELECT * FROM tab4 AS cor0 WHERE NULL NOT IN ( - CAST( NULL AS SIGNED ), + col4 + + - col0 * - - 27, col3, - + col1, - 52, + col0, + col4 )
+----
+
+skipif mysql # not compatible
+query IIIIIII rowsort label-125
+SELECT * FROM tab4 AS cor0 WHERE NULL NOT IN ( - CAST ( NULL AS INTEGER ), + col4 + + - col0 * - - 27, col3, - + col1, - 52, + col0, + col4 )
+----
+
+query I rowsort label-130
+SELECT DISTINCT col3 FROM tab0 AS cor0 WHERE ( NOT NULL <= NULL )
+----
+
+query I rowsort label-130
+SELECT DISTINCT col3 FROM tab1 AS cor0 WHERE ( NOT NULL <= NULL )
+----
+
+query I rowsort label-130
+SELECT DISTINCT col3 FROM tab2 AS cor0 WHERE ( NOT NULL <= NULL )
+----
+
+query I rowsort label-130
+SELECT DISTINCT col3 FROM tab3 AS cor0 WHERE ( NOT NULL <= NULL )
+----
+
+query I rowsort label-130
+SELECT DISTINCT col3 FROM tab4 AS cor0 WHERE ( NOT NULL <= NULL )
+----
+
+query IIIIIII rowsort label-135
+SELECT * FROM tab0 WHERE NULL NOT IN ( + col1, 93 )
+----
+
+query IIIIIII rowsort label-135
+SELECT * FROM tab1 WHERE NULL NOT IN ( + col1, 93 )
+----
+
+query IIIIIII rowsort label-135
+SELECT * FROM tab2 WHERE NULL NOT IN ( + col1, 93 )
+----
+
+query IIIIIII rowsort label-135
+SELECT * FROM tab3 WHERE NULL NOT IN ( + col1, 93 )
+----
+
+query IIIIIII rowsort label-135
+SELECT * FROM tab4 WHERE NULL NOT IN ( + col1, 93 )
+----
+
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-140
+SELECT DISTINCT + + col3 col3 FROM tab0 WHERE - col1 IS NULL
+----
+
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-140
+SELECT DISTINCT + + col3 col3 FROM tab1 WHERE - col1 IS NULL
+----
+
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-140
+SELECT DISTINCT + + col3 col3 FROM tab2 WHERE - col1 IS NULL
+----
+
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-140
+SELECT DISTINCT + + col3 col3 FROM tab3 WHERE - col1 IS NULL
+----
+
+skipif postgresql # PostgreSQL requires AS when renaming output columns
+query I rowsort label-140
+SELECT DISTINCT + + col3 col3 FROM tab4 WHERE - col1 IS NULL
+----
+
+query IIIIIII rowsort label-145
+SELECT * FROM tab0 WHERE - - 48 < NULL
+----
+
+query IIIIIII rowsort label-145
+SELECT * FROM tab1 WHERE - - 48 < NULL
+----
+
+query IIIIIII rowsort label-145
+SELECT * FROM tab2 WHERE - - 48 < NULL
+----
+
+query IIIIIII rowsort label-145
+SELECT * FROM tab3 WHERE - - 48 < NULL
+----
+
+query IIIIIII rowsort label-145
+SELECT * FROM tab4 WHERE - - 48 < NULL
+----

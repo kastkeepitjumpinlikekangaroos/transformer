@@ -74,8 +74,9 @@ scala_junit_test(
 # Runs under a Turkish locale, where "I".toLowerCase() is a dotless i: view,
 # column, function, CAST-type and template-variable names, UPPER / LOWER, ILIKE
 # and a directory job must behave as anywhere else; part file names and template
-# values keep ASCII digits under a locale that prints others; and no compiled
-# class of a module a job runs calls a default-locale conversion or format.
+# values keep ASCII digits under a locale that prints others; no compiled class
+# of a module a job runs calls a default-locale conversion or format; and none of
+# the desktop GUI's or the data viewer's folds case in the default locale.
 scala_junit_test(
     name = "locale_independence_test",
     srcs = ["LocaleIndependenceTest.scala"],
@@ -98,5 +99,10 @@ scala_junit_test(
         "//src/main/scala/com/transformer/write/csv",
         "//src/main/scala/com/transformer/write/parquet",
         "@maven//:junit_junit",
+    ],
+    # Scanned, not called: the desktop GUI's and the data viewer's jars.
+    runtime_deps = [
+        "//src/main/scala/com/transformer/gui",
+        "//src/main/scala/com/transformer/viewer",
     ],
 )

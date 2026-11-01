@@ -6,10 +6,20 @@ ship a fix or move something from "not done" to "done".
 
 ## Known gotchas
 
-- **JSqlParser 5.0 doesn't have a `BooleanValue` class.** TRUE/FALSE come
-  through as `Column` references. `LogicalBuilder.bindExprWithAggs` has a
-  special case for unqualified `Column("TRUE"|"FALSE")` when no actual
-  column of that name exists.
+- **JSqlParser 5.2 parses TRUE and FALSE as a `BooleanValue` in every
+  position**, where 5.0 parsed them as column names and the binder read a
+  column named `true` before the literal. Such a column is written in quotes,
+  `"true"`, and `t.true` is a parse error.
+- **No JSqlParser version parses two signs in a row**, `- -3` or `5 * - + 2`.
+  `SqlParser.parseFailure` refuses the text naming the run when writing each
+  run as one sign would parse; `5 - -3` (an operator, then one sign) parses
+  as it is.
+- **JSqlParser 5.2 cannot read three nested parentheses around a `BETWEEN`
+  bound**: `a BETWEEN ( ( ( 0 ) ) ) AND 2`, `a BETWEEN 0 AND ( ( ( 2 ) ) )` and
+  the `NOT BETWEEN` forms are `SQL parse error: Encountered unexpected token:
+  "(" "("`. Two parse, as do any number around the tested value, after `LIKE`
+  or beside `=`. SQLite's corpus writes the shape 13 times in 5.3 million
+  records; write fewer parentheses.
 - **JSqlParser's `AllTableColumns` is a subtype of `AllColumns`.** Pattern-match
   `AllTableColumns` first or you'll never reach the `table.*` branch.
 - **JSqlParser's `SelectItem<? extends Expression>` generics confuse Scala
@@ -24,7 +34,7 @@ ship a fix or move something from "not done" to "done".
   star only as an `AllColumns` parameter. It used to read the flag as the star,
   which made `COUNT(ALL a)` count NULLs.
 - **JSqlParser parses `(a - b)` as a `ParenthesedExpressionList`, not a
-  parenthesized binary expression.** There is no parenthesis node in the 5.0 AST
+  parenthesized binary expression.** There is no parenthesis node in the 5.2 AST
   at all: the deprecated `Parenthesis` class still ships but nothing in the jar
   constructs it, so `(expr)` reaches the binder as a one-element list and
   `(a, b)` as a two-element one. Anything in `LogicalBuilder` that walks the AST
@@ -100,9 +110,9 @@ ship a fix or move something from "not done" to "done".
     standard's nested `t JOIN u JOIN v ON c1 ON c2` arrives as a join with none
     and one with two. `LogicalBuilder.joinConditions` refuses each.
   - A `NOT` hung on an operator's left side: `NOT NOT a = 1` parses as
-    `NOT ((NOT a) = 1)`, and a lone `NOT a = 1` does too as the argument of a
-    call that takes one (`COUNT_IF`, `MAX`, `UPPER`, a window function's), but
-    not in a call with two or in any clause. Parentheses always reach the AST,
+    `NOT ((NOT a) = 1)`. JSqlParser 5.0 parsed a lone `NOT a = 1` so too as the
+    argument of a call that takes one (`COUNT_IF`, `MAX`, `UPPER`, a window
+    function's); 5.2 reads it as SQL does. Parentheses always reach the AST,
     so a `NotExpression` that is an operator's left operand was written without
     them, and `LogicalBuilder.leftSide` refuses it. Three NOTs in a row do not
     parse at all.
@@ -620,22 +630,24 @@ ship a fix or move something from "not done" to "done".
   between its two sides in ON is refused when both sides hold more than 5000
   rows (left=…, right=…); add one to the ON condition`) when both sides expose a
   `CatalogView.exactRowCount` and the smaller of the two exceeds 5000
-  rows. It also refuses one over the output of another such join when the
-  two would pair more than 25 million rows, since a chain multiplies where
-  each side alone looks small (a join's cardinality estimate is its larger
-  side): three 300-row tables paired 27 million rows and ran a 1.2 GB heap
-  out (plans/robustness/14). A single small side against a large one, a
-  range join of buckets against a fact table, still runs. CSV-rooted joins
+  rows. It also refuses one over the output of another such join, directly
+  or through joins on an equality, when the two would pair more than 25
+  million rows, since a chain multiplies where each side alone looks small
+  (a join's cardinality estimate is its larger side): three 300-row tables
+  paired 27 million rows and ran a 1.2 GB heap out (plans/robustness/14). A
+  join on an equality is sized by that estimate over its sides' bounds, so a
+  pairing below it still counts (plans/testing/04). A single small side
+  against a large one, a range join of buckets against a fact table, still
+  runs. CSV-rooted joins
   (no exactRowCount) keep working because the guard refuses to refuse
   without evidence. If you hit this on a
   workload that genuinely needs the cartesian, either add a
   redundant-but-cheap equality conjunct (`ON 1 = 1` won't help — it has
   no side info) or restructure the predicate so the planner can extract
   one. There's deliberately no per-task escape hatch — the threshold is
-  the contract. One open defect: the guard bounds the smaller side only, so a
-  chain of non-equi joins multiplies past it (`t x JOIN t y ON x.c JOIN t z ON
-  x.c` over 300 rows is 27 million rows;
-  [plans/robustness/14](../plans/robustness/14-pathological-nesting.md)).
+  the contract. Below the bound a pairing still costs memory: the
+  collapsing path holds every row it pairs until it has them all, so 25
+  million pairs of wide rows can fill a heap of a few GB.
 - **Spill files use positional column names, never the logical schema's.**
   Every spill-capable breaker (`HashJoinExec`, `HashAggregateExec`, `SortExec`,
   `DistinctExec`, `WindowExec`) writes its working set to temp parquet and reads
@@ -1726,8 +1738,10 @@ ship a fix or move something from "not done" to "done".
   in them. Every such call now names `Locale.ROOT`, and
   `job/locale_independence_test` runs under tr-TR (six of its tests failed at
   the code before) and scans every module's compiled classes for the
-  default-locale forms, so a new one fails the suite. The JavaFX GUI's display
-  code is not on a job's path and is not scanned. See
+  default-locale forms, so a new one fails the suite. The desktop GUI and the
+  data viewer are scanned for case folding only, since their display text may
+  format a number in the user's locale; they folded keywords and input names in
+  the default locale until plans/testing/04 (below). See
   [plans/robustness/16](../plans/robustness/16-locale-dependent-names.md).
 - **A `CASE`, `IF` or `COALESCE` used to evaluate every branch on every row
   — fixed.** `CaseExpr.evalVec` evaluated each branch's value over the whole
@@ -1927,6 +1941,78 @@ worth carrying:
   removed every entry of `java.io.tmpdir` starting `transformer` but its root,
   the jaffle example's output directory among them, and each JVM's exit
   deleted the shared root under any other JVM spilling into it.
+
+## Defects the SQL logic tests found (2026-11-01, all fixed)
+
+The sqllogictest runner (`slt/slt_test`, [testing.md](testing.md#sql-logic-tests))
+replays every query of a script under eleven verification modes, and the
+[whole-suite configurations](testing.md#whole-suite-configurations) rerun every
+test at a batch capacity of 1 and 2 rows, sharded, on one thread and in a
+hostile time zone and locale. SQLite's sqllogictest corpus, whose answers five
+engines agreed on, returned no wrong answer; the defects were in spill, CSV
+globs, the parser, the nested-loop guard and the desktop GUI. Details are in
+[plans/testing/04](../plans/testing/04-sql-logic-tests-and-whole-suite-configurations.md).
+
+- **An aggregate with no GROUP BY keys spilled.** Its partial aggregate checked
+  the spill threshold like a grouped one, so it wrote its one state to disk and
+  read it back, and with no aggregates either (`SELECT 1 FROM t GROUP BY ()`)
+  that state had no columns, which parquet cannot hold: every spill failed with
+  `Cannot write a schema with an empty group`. Such an aggregate never spills
+  now. Found by `slt_test`'s spill mode.
+- **CSV inference read the glob's first file alone.** A first file holding a
+  header and no rows, which is what a writer leaves for an output partition
+  that held none (a sharded GROUP BY of two groups across four shards writes
+  two), typed every column STRING, so the next job's `SUM(customers)` was
+  refused and an `ORDER BY` of the column would have sorted numbers as text; a
+  two-row first file decided every later file's types. The sample is the first
+  rows of the files in glob order (the user's choice). Found by the `sharded`
+  configuration, through the data viewer's three-job fixture.
+- **A later CSV file's header was dropped unchecked**, and its fields read in
+  the first file's order, so a file that wrote its columns in another order
+  read each value into the other column, silently when the two had one type.
+  Each file is read by its own header's names, as parquet globs are, and one
+  naming other columns fails (the user's choice).
+- **An empty IN list was accepted.** JSqlParser reads `x IN ()`, which standard
+  SQL and Postgres refuse, and it ran: `1 NOT IN ()` TRUE but `NULL NOT IN ()`
+  NULL, though a list of nothing holds neither. It is refused (the user's
+  choice). Found by SQLite's corpus, which allows the empty list.
+- **JSqlParser 5.0 could not parse four parentheses deep inside a call**
+  (`COALESCE((((a > 1))), FALSE)`), which generated SQL writes; 5.2 can (the
+  user's choice to upgrade). It also parses TRUE and FALSE as literals
+  everywhere, reads the NOT of a one-argument call's argument as SQL does
+  (`COUNT_IF(NOT f > TRUE)`, which 5.0 misread and the binder refused), and
+  adds clauses the rejection pass refuses (`PREFERRING`, `TABLESAMPLE` after a
+  query, `AS MATERIALIZED`, a CTE that changes a table, `ON OVERFLOW
+  TRUNCATE`, `TABLE` before an argument, `IS UNKNOWN`). Not 5.3: it parses
+  deep CAST and IF nesting a hundred times faster, but refuses seventeen
+  nested parentheses around a value, which 5.2 reads at any depth the
+  engine allows.
+- **No JSqlParser version parses two signs in a row** (`SELECT - -3`,
+  `20 / - - 96`), and it said `Encountered unexpected token: "SELECT"`. The
+  refusal now names the signs and says to write `-(-3)`. A sign after an
+  operator's, `5 - -3`, is one sign and was always read.
+- **The nested-loop guard's bound stopped at a join on an equality.** The
+  guard sized such a join with the cardinality estimator, which sizes a
+  pairing below it as the pairing's larger side, so `FROM a, b, c, d WHERE
+  a.k = c.k` over four 1000-row tables passed: `a` with `b` pairs a million
+  rows, the join with `c` keeps them, and `d` makes a billion. A join on an
+  equality is sized from its sides' bounds now. Found by SQLite's
+  `select5.test`, joins of 4 to 64 ten-row tables each written in three
+  orders: 308 of its 732 queries were let through to pair more than 25
+  million rows, up to 10^23, and the file never finished; 521 are refused
+  now, none of the rest pairs more than ten million, and the file runs in two
+  and a half minutes, though two joins of 21 and 25 tables still run a 2 GB
+  heap out at ten million wide pairs (the collapsing path holds them all).
+- **The desktop GUI folded case in the JVM's locale.** Under a Turkish one,
+  where `I` lowers to a dotless i, the SQL highlighter read `PARTITION` and
+  `INT` as `partıtıon` and `ınt`, no keyword and no type; the task panel and
+  the DAG matched an input's name against the job's lowered names in it, so an
+  input named with an I showed no task using it; vim's Ctrl-I arrived as
+  Ctrl-ı; and the block caret's CSS printed `1,50px`, which CSS cannot read.
+  Every case fold names `Locale.ROOT` and the CSS is formatted in it, and
+  `job/locale_independence_test` scans the GUI's and the viewer's jars for case
+  folding. Found by `--config=zone`, through the highlighter's test, with two
+  tests that folded or printed a parquet type name in the default locale.
 
 ## What's intentionally NOT done
 

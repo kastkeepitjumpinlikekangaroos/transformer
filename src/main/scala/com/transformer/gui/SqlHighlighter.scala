@@ -1,5 +1,7 @@
 package com.transformer.gui
 
+import java.util.Locale
+
 /** Pure-Scala SQL tokenizer for the GUI's syntax highlighter.
   *
   * Recognises SQL keywords, function calls, type names, string literals (with
@@ -134,7 +136,7 @@ object SqlHighlighter {
         val start = i
         while (i < len && isIdentPart(sql.charAt(i))) i += 1
         val text = sql.substring(start, i)
-        val lower = text.toLowerCase
+        val lower = text.toLowerCase(Locale.ROOT)
         val next = nextSignificant(sql, i)
         val castsTo = prevWord == "as" && parens.headOption.contains("cast")
         val kind =

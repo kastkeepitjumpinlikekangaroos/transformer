@@ -1,0 +1,123 @@
+# Every join kind over keys with NULLs and duplicates. An inner join keeps
+# the pairs whose condition is TRUE; an outer join also keeps each unmatched
+# row of its outer side, padded with NULLs; a NULL key matches nothing.
+
+statement ok
+CREATE TABLE l (id INT, k INT, lv STRING)
+
+statement ok
+CREATE TABLE r (id INT, k INT, rv STRING)
+
+statement ok
+INSERT INTO l VALUES (1, 1, 'a'), (2, 2, 'b'), (3, 2, 'c'), (4, NULL, 'd'), (5, 9, 'e')
+
+statement ok
+INSERT INTO r VALUES (10, 2, 'x'), (11, 2, 'y'), (12, 3, 'z'), (13, NULL, 'w')
+
+query INT,INT rowsort
+SELECT l.id, r.id FROM l JOIN r ON l.k = r.k
+----
+2	10
+2	11
+3	10
+3	11
+
+query INT,INT rowsort
+SELECT l.id, r.id FROM l LEFT JOIN r ON l.k = r.k
+----
+1	NULL
+2	10
+2	11
+3	10
+3	11
+4	NULL
+5	NULL
+
+query INT,INT rowsort
+SELECT l.id, r.id FROM l RIGHT JOIN r ON l.k = r.k
+----
+2	10
+2	11
+3	10
+3	11
+NULL	12
+NULL	13
+
+query INT,INT rowsort
+SELECT l.id, r.id FROM l FULL JOIN r ON l.k = r.k
+----
+1	NULL
+2	10
+2	11
+3	10
+3	11
+4	NULL
+5	NULL
+NULL	12
+NULL	13
+
+query BIGINT
+SELECT COUNT(*) FROM l CROSS JOIN r
+----
+20
+
+# A comma join with the equality in WHERE is the inner join.
+query INT,INT rowsort
+SELECT l.id, r.id FROM l, r WHERE l.k = r.k
+----
+2	10
+2	11
+3	10
+3	11
+
+# An ON condition of an outer join decides matches only; WHERE filters after.
+query INT,INT rowsort
+SELECT l.id, r.id FROM l LEFT JOIN r ON l.k = r.k AND r.rv = 'y'
+----
+1	NULL
+2	11
+3	11
+4	NULL
+5	NULL
+
+query INT,INT rowsort
+SELECT l.id, r.id FROM l LEFT JOIN r ON l.k = r.k WHERE r.rv = 'y'
+----
+2	11
+3	11
+
+# The anti-join shape: rows of l with no match in r.
+query INT rowsort
+SELECT l.id FROM l LEFT JOIN r ON l.k = r.k WHERE r.id IS NULL
+----
+1
+4
+5
+
+# A non-equality condition.
+query INT,INT rowsort
+SELECT l.id, r.id FROM l JOIN r ON l.k < r.k
+----
+1	10
+1	11
+1	12
+2	12
+3	12
+
+# A self-join and a three-way join.
+query INT,INT rowsort
+SELECT a.id, b.id FROM l a JOIN l b ON a.k = b.k AND a.id < b.id
+----
+2	3
+
+query INT,INT,INT rowsort
+SELECT a.id, r.id, b.id FROM l a JOIN r ON a.k = r.k JOIN l b ON r.k = b.k
+----
+2	10	2
+2	10	3
+2	11	2
+2	11	3
+3	10	2
+3	10	3
+3	11	2
+3	11	3

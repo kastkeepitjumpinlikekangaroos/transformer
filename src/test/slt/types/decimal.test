@@ -1,0 +1,105 @@
+# DECIMAL arithmetic is exact and takes Spark's and SQL Server's result types
+# (the user's choice, 2026-10-04): for DECIMAL(p1,s1) op DECIMAL(p2,s2),
+#   + and -  DECIMAL(max(s1,s2) + max(p1-s1, p2-s2) + 1, max(s1,s2))
+#   *        DECIMAL(p1 + p2 + 1, s1 + s2)
+#   /        DECIMAL(p1 - s1 + s2 + max(6, s1 + p2 + 1), max(6, s1 + p2 + 1))
+# with the precision capped at 38. A number written beside a DECIMAL keeps
+# its written digits (2.50 is DECIMAL(3,2), 3 is DECIMAL(1,0)); an INT column
+# is DECIMAL(10,0) and a BIGINT one DECIMAL(19,0). A result that does not fit
+# is an error. DECIMAL beside a DOUBLE column is refused: CAST one side.
+
+statement ok
+CREATE TABLE p (id INT, price DECIMAL(9,2), qty INT, rate DOUBLE)
+
+statement ok
+INSERT INTO p VALUES (1, 19.99, 3, 0.5), (2, 0.01, 7, 0.25), (3, NULL, 1, NULL), (4, 9999999.99, 2, 1.0)
+
+query INT,DECIMAL(9,2) rowsort
+SELECT id, price FROM p
+----
+1	19.99
+2	0.01
+3	NULL
+4	9999999.99
+
+query INT,DECIMAL(10,2),DECIMAL(10,2) rowsort
+SELECT id, price + price, price - price FROM p
+----
+1	39.98	0.00
+2	0.02	0.00
+3	NULL	NULL
+4	19999999.98	0.00
+
+query INT,DECIMAL(19,4) rowsort
+SELECT id, price * price FROM p
+----
+1	399.6001
+2	0.0001
+3	NULL
+4	99999999800000.0001
+
+query INT,DECIMAL(13,4) rowsort
+SELECT id, price * 1.10 FROM p
+----
+1	21.9890
+2	0.0110
+3	NULL
+4	10999999.9890
+
+query INT,DECIMAL(20,2) rowsort
+SELECT id, price * qty FROM p
+----
+1	59.97
+2	0.07
+3	NULL
+4	19999999.98
+
+query INT,DECIMAL(13,6) rowsort
+SELECT id, price / 3 FROM p
+----
+1	6.663333
+2	0.003333
+3	NULL
+4	3333333.330000
+
+# Division by zero is NULL, as for every number type.
+query DECIMAL(13,6)
+SELECT price / 0 FROM p WHERE id = 1
+----
+NULL
+
+# 0.1 + 0.2 is exactly 0.3 in DECIMAL, where a DOUBLE is not.
+query DECIMAL(12,2),DOUBLE
+SELECT price - price + 0.1 + 0.2, CAST(0.1 AS DOUBLE) + CAST(0.2 AS DOUBLE) FROM p WHERE id = 1
+----
+0.30	0.30000000000000004
+
+statement error
+SELECT price + rate FROM p
+----
+CAST
+
+# SUM of DECIMAL(p,s) is DECIMAL(38,s); AVG is DECIMAL(min(38, p+4), min(38, s+4)).
+query DECIMAL(38,2),DECIMAL(13,6)
+SELECT SUM(price), AVG(price) FROM p
+----
+10000019.99	3333339.996667
+
+query DECIMAL(9,2),DECIMAL(9,2)
+SELECT MIN(price), MAX(price) FROM p
+----
+0.01	9999999.99
+
+# A comparison is by value, whatever the scale.
+query INT rowsort
+SELECT id FROM p WHERE price = 19.990
+----
+1
+
+query INT
+SELECT id FROM p ORDER BY price DESC NULLS LAST, id
+----
+4
+1
+2
+3

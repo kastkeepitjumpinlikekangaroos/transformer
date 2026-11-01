@@ -10,6 +10,7 @@ import org.junit.Test
 
 import java.nio.file.Files
 import java.time.temporal.ChronoUnit
+import java.util.Locale
 import scala.collection.mutable
 
 /** Property-based gate over the parquet reader against files it did not
@@ -52,8 +53,8 @@ class ParquetFuzzTest {
     case Kind.Int32(bits, signed) => s"int32${bits.fold("")(b => s"($b,$signed)")}"
     case Kind.Int64(annotated) => if (annotated) "int64(64,true)" else "int64"
     case Kind.Timestamp(unit, utc) => s"timestamp($unit,$utc)"
-    case Kind.Text(logical) => logical.toLowerCase
-    case Kind.Bytes(logical, fixed) => logical.fold(if (fixed.isDefined) "fixed" else "binary")(_.toLowerCase)
+    case Kind.Text(logical) => logical.toLowerCase(Locale.ROOT)
+    case Kind.Bytes(logical, fixed) => logical.fold(if (fixed.isDefined) "fixed" else "binary")(_.toLowerCase(Locale.ROOT))
     case Kind.Decimal(_, _, layout, _) => s"decimal-$layout"
     case other => other.toString
   }

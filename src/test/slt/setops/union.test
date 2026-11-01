@@ -1,0 +1,65 @@
+# UNION ALL keeps every row; UNION removes duplicates, NULLs included. The
+# columns of the arms become one column of a type that holds each arm's
+# values (plans/robustness/09).
+
+statement ok
+CREATE TABLE a (x INT, s STRING)
+
+statement ok
+CREATE TABLE b (y BIGINT, t STRING)
+
+statement ok
+INSERT INTO a VALUES (1, 'p'), (2, NULL), (2, NULL)
+
+statement ok
+INSERT INTO b VALUES (2, NULL), (3, 'q')
+
+query BIGINT,STRING rowsort
+SELECT x, s FROM a UNION ALL SELECT y, t FROM b
+----
+1	p
+2	NULL
+2	NULL
+2	NULL
+3	q
+
+query BIGINT,STRING rowsort
+SELECT x, s FROM a UNION SELECT y, t FROM b
+----
+1	p
+2	NULL
+3	q
+
+# The output columns take the first arm's names.
+query BIGINT nosort
+SELECT x AS v FROM a UNION SELECT y FROM b ORDER BY v
+----
+1
+2
+3
+
+query DOUBLE rowsort
+SELECT x FROM a UNION ALL SELECT 2.5
+----
+1.0
+2.0
+2.0
+2.5
+
+statement error
+SELECT x FROM a UNION ALL SELECT s FROM a
+
+statement error
+SELECT x, s FROM a UNION ALL SELECT y FROM b
+
+# ORDER BY and LIMIT after the last arm apply to the whole union.
+query BIGINT nosort
+SELECT x FROM a UNION ALL SELECT y FROM b ORDER BY 1 DESC LIMIT 3
+----
+3
+2
+2
+
+# Before the last arm they need parentheses.
+statement error
+SELECT x FROM a LIMIT 1 UNION ALL SELECT y FROM b

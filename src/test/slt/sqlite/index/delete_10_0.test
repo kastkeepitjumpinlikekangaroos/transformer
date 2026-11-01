@@ -1,0 +1,1601 @@
+# From SQLite's sqllogictest corpus (https://www.sqlite.org/sqllogictest,
+# mirrored at https://github.com/gregrahn/sqllogictest): test/index/delete/10/slt_good_0.test,
+# up to its 150th query this engine runs. Its COPYRIGHT lets it be copied
+# freely. `skipif transformer` marks a record the engine answers otherwise
+# by design, with the reason.
+
+hash-threshold 8
+
+statement ok
+CREATE TABLE tab0(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+INSERT INTO tab0 VALUES(0,14,66.4,'edobg',96,20.98,'xjmma')
+
+statement ok
+INSERT INTO tab0 VALUES(1,81,20.3,'mursw',7,83.77,'xgykc')
+
+statement ok
+INSERT INTO tab0 VALUES(2,96,83.71,'kizzw',84,68.73,'jfxdr')
+
+statement ok
+INSERT INTO tab0 VALUES(3,58,46.61,'lnnip',9,22.75,'toxta')
+
+statement ok
+INSERT INTO tab0 VALUES(4,97,12.94,'eiwzz',25,6.27,'ybybk')
+
+statement ok
+INSERT INTO tab0 VALUES(5,34,6.22,'eoaqm',99,13.82,'msodf')
+
+statement ok
+INSERT INTO tab0 VALUES(6,47,89.92,'dlpef',82,74.69,'rfbaf')
+
+statement ok
+INSERT INTO tab0 VALUES(7,29,68.8,'fhaeg',77,76.56,'pqmel')
+
+statement ok
+INSERT INTO tab0 VALUES(8,54,13.90,'vfqlm',95,75.9,'kdxgo')
+
+statement ok
+INSERT INTO tab0 VALUES(9,38,67.42,'cmrxa',23,0.60,'kmkuu')
+
+statement ok
+CREATE TABLE tab1(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab1_0 on tab1 (col0)
+
+statement ok
+CREATE INDEX idx_tab1_1 on tab1 (col1)
+
+statement ok
+CREATE INDEX idx_tab1_3 on tab1 (col3)
+
+statement ok
+CREATE INDEX idx_tab1_4 on tab1 (col4)
+
+statement ok
+INSERT INTO tab1 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab2(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab2_0 ON tab2 (col3,col0,col4 DESC)
+
+statement ok
+CREATE INDEX idx_tab2_1 ON tab2 (col3,col1)
+
+statement ok
+CREATE INDEX idx_tab2_3 ON tab2 (col1 DESC,col4 DESC)
+
+statement ok
+CREATE INDEX idx_tab2_5 ON tab2 (col0 DESC)
+
+statement ok
+INSERT INTO tab2 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab3(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_0 ON tab3 (col1)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_1 ON tab3 (col4 DESC,col3 DESC,col0)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_2 ON tab3 (col3)
+
+statement ok
+INSERT INTO tab3 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab4(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab4_0 ON tab4 (col0 DESC)
+
+statement ok
+CREATE INDEX idx_tab4_1 ON tab4 (col4 DESC)
+
+statement ok
+CREATE INDEX idx_tab4_2 ON tab4 (col3 DESC)
+
+statement ok
+CREATE INDEX idx_tab4_5 ON tab4 (col1)
+
+statement ok
+INSERT INTO tab4 SELECT * FROM tab0
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE pk IS NULL
+----
+
+statement ok
+DELETE FROM tab0 WHERE col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6)
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab0 WHERE NOT (col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6))
+----
+
+statement ok
+DELETE FROM tab1 WHERE col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6)
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab1 WHERE NOT (col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6))
+----
+
+statement ok
+DELETE FROM tab2 WHERE col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6)
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab2 WHERE NOT (col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6))
+----
+
+statement ok
+DELETE FROM tab3 WHERE col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6)
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab3 WHERE NOT (col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6))
+----
+
+statement ok
+DELETE FROM tab4 WHERE col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6)
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6)
+----
+
+query I rowsort label-0
+SELECT pk FROM tab4 WHERE NOT (col3 >= 60 OR (col3 IS NULL AND (((((col3 = 66))) AND (col3 > 45))) OR col1 < 85.55 OR col0 IS NULL OR (col3 > 35)) OR col0 IN (10,68,82,67,6))
+----
+
+statement ok
+DROP TABLE tab0
+
+statement ok
+CREATE TABLE tab0(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+INSERT INTO tab0 VALUES(0,42,16.71,'lntzr',92,97.82,'bcezj')
+
+statement ok
+INSERT INTO tab0 VALUES(1,38,12.91,'xaehl',17,3.99,'byzxz')
+
+statement ok
+INSERT INTO tab0 VALUES(2,30,92.84,'xjjwh',27,8.15,'rpqxi')
+
+statement ok
+INSERT INTO tab0 VALUES(3,65,24.40,'zznok',22,11.24,'kxhuv')
+
+statement ok
+INSERT INTO tab0 VALUES(4,77,3.60,'khzpv',50,73.37,'ebrto')
+
+statement ok
+INSERT INTO tab0 VALUES(5,5,20.68,'stasd',18,76.92,'barqy')
+
+statement ok
+INSERT INTO tab0 VALUES(6,1,17.23,'mxgjx',2,91.72,'yjyye')
+
+statement ok
+INSERT INTO tab0 VALUES(7,47,56.31,'ttnqn',65,36.12,'bqlxe')
+
+statement ok
+INSERT INTO tab0 VALUES(8,63,79.59,'upepq',66,40.14,'ohhxv')
+
+statement ok
+INSERT INTO tab0 VALUES(9,22,69.49,'rjcgz',69,9.59,'iydfy')
+
+statement ok
+DROP TABLE tab1
+
+statement ok
+CREATE TABLE tab1(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab1_0 on tab1 (col0)
+
+statement ok
+CREATE INDEX idx_tab1_1 on tab1 (col1)
+
+statement ok
+CREATE INDEX idx_tab1_3 on tab1 (col3)
+
+statement ok
+CREATE INDEX idx_tab1_4 on tab1 (col4)
+
+statement ok
+INSERT INTO tab1 SELECT * FROM tab0
+
+statement ok
+DROP TABLE tab2
+
+statement ok
+CREATE TABLE tab2(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab2_0 ON tab2 (col0,col4 DESC)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab2_1 ON tab2 (col4,col0,col1 DESC)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab2_4 ON tab2 (col3)
+
+statement ok
+INSERT INTO tab2 SELECT * FROM tab0
+
+statement ok
+DROP TABLE tab3
+
+statement ok
+CREATE TABLE tab3(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab3_0 ON tab3 (col3)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_2 ON tab3 (col0 DESC)
+
+statement ok
+INSERT INTO tab3 SELECT * FROM tab0
+
+statement ok
+DROP TABLE tab4
+
+statement ok
+CREATE TABLE tab4(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab4_0 ON tab4 (col0,col1 DESC)
+
+statement ok
+CREATE INDEX idx_tab4_1 ON tab4 (col1)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab4_3 ON tab4 (col4,col0)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab4_4 ON tab4 (col0 DESC,col4)
+
+statement ok
+INSERT INTO tab4 SELECT * FROM tab0
+
+statement ok
+DELETE FROM tab0 WHERE (col0 > 68)
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE (col0 > 68)
+----
+
+query I rowsort label-15
+SELECT pk FROM tab0 WHERE NOT ((col0 > 68))
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+statement ok
+DELETE FROM tab1 WHERE (col0 > 68)
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE (col0 > 68)
+----
+
+query I rowsort label-15
+SELECT pk FROM tab1 WHERE NOT ((col0 > 68))
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+statement ok
+DELETE FROM tab2 WHERE (col0 > 68)
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE (col0 > 68)
+----
+
+query I rowsort label-15
+SELECT pk FROM tab2 WHERE NOT ((col0 > 68))
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+statement ok
+DELETE FROM tab3 WHERE (col0 > 68)
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE (col0 > 68)
+----
+
+query I rowsort label-15
+SELECT pk FROM tab3 WHERE NOT ((col0 > 68))
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+statement ok
+DELETE FROM tab4 WHERE (col0 > 68)
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE (col0 > 68)
+----
+
+query I rowsort label-15
+SELECT pk FROM tab4 WHERE NOT ((col0 > 68))
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+statement ok
+DELETE FROM tab0 WHERE col1 > 59.91 AND col3 = 11
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE col1 > 59.91 AND col3 = 11
+----
+
+query I rowsort label-30
+SELECT pk FROM tab0 WHERE NOT (col1 > 59.91 AND col3 = 11)
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+statement ok
+DELETE FROM tab1 WHERE col1 > 59.91 AND col3 = 11
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE col1 > 59.91 AND col3 = 11
+----
+
+query I rowsort label-30
+SELECT pk FROM tab1 WHERE NOT (col1 > 59.91 AND col3 = 11)
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+statement ok
+DELETE FROM tab2 WHERE col1 > 59.91 AND col3 = 11
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE col1 > 59.91 AND col3 = 11
+----
+
+query I rowsort label-30
+SELECT pk FROM tab2 WHERE NOT (col1 > 59.91 AND col3 = 11)
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+statement ok
+DELETE FROM tab3 WHERE col1 > 59.91 AND col3 = 11
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE col1 > 59.91 AND col3 = 11
+----
+
+query I rowsort label-30
+SELECT pk FROM tab3 WHERE NOT (col1 > 59.91 AND col3 = 11)
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+statement ok
+DELETE FROM tab4 WHERE col1 > 59.91 AND col3 = 11
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE col1 > 59.91 AND col3 = 11
+----
+
+query I rowsort label-30
+SELECT pk FROM tab4 WHERE NOT (col1 > 59.91 AND col3 = 11)
+----
+9 values hashing to 4290bd41ca7ca69dc280e33882d8e9de
+
+statement ok
+DELETE FROM tab0 WHERE col1 >= 72.63
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE col1 >= 72.63
+----
+
+query I rowsort label-45
+SELECT pk FROM tab0 WHERE NOT (col1 >= 72.63)
+----
+0
+1
+3
+5
+6
+7
+9
+
+statement ok
+DELETE FROM tab1 WHERE col1 >= 72.63
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE col1 >= 72.63
+----
+
+query I rowsort label-45
+SELECT pk FROM tab1 WHERE NOT (col1 >= 72.63)
+----
+0
+1
+3
+5
+6
+7
+9
+
+statement ok
+DELETE FROM tab2 WHERE col1 >= 72.63
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE col1 >= 72.63
+----
+
+query I rowsort label-45
+SELECT pk FROM tab2 WHERE NOT (col1 >= 72.63)
+----
+0
+1
+3
+5
+6
+7
+9
+
+statement ok
+DELETE FROM tab3 WHERE col1 >= 72.63
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE col1 >= 72.63
+----
+
+query I rowsort label-45
+SELECT pk FROM tab3 WHERE NOT (col1 >= 72.63)
+----
+0
+1
+3
+5
+6
+7
+9
+
+statement ok
+DELETE FROM tab4 WHERE col1 >= 72.63
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE col1 >= 72.63
+----
+
+query I rowsort label-45
+SELECT pk FROM tab4 WHERE NOT (col1 >= 72.63)
+----
+0
+1
+3
+5
+6
+7
+9
+
+statement ok
+DELETE FROM tab0 WHERE col4 > 33.56
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE col4 > 33.56
+----
+
+query I rowsort label-60
+SELECT pk FROM tab0 WHERE NOT (col4 > 33.56)
+----
+1
+3
+9
+
+statement ok
+DELETE FROM tab1 WHERE col4 > 33.56
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE col4 > 33.56
+----
+
+query I rowsort label-60
+SELECT pk FROM tab1 WHERE NOT (col4 > 33.56)
+----
+1
+3
+9
+
+statement ok
+DELETE FROM tab2 WHERE col4 > 33.56
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE col4 > 33.56
+----
+
+query I rowsort label-60
+SELECT pk FROM tab2 WHERE NOT (col4 > 33.56)
+----
+1
+3
+9
+
+statement ok
+DELETE FROM tab3 WHERE col4 > 33.56
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE col4 > 33.56
+----
+
+query I rowsort label-60
+SELECT pk FROM tab3 WHERE NOT (col4 > 33.56)
+----
+1
+3
+9
+
+statement ok
+DELETE FROM tab4 WHERE col4 > 33.56
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE col4 > 33.56
+----
+
+query I rowsort label-60
+SELECT pk FROM tab4 WHERE NOT (col4 > 33.56)
+----
+1
+3
+9
+
+statement ok
+DELETE FROM tab0 WHERE col0 < 4
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE col0 < 4
+----
+
+query I rowsort label-75
+SELECT pk FROM tab0 WHERE NOT (col0 < 4)
+----
+1
+3
+9
+
+statement ok
+DELETE FROM tab1 WHERE col0 < 4
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE col0 < 4
+----
+
+query I rowsort label-75
+SELECT pk FROM tab1 WHERE NOT (col0 < 4)
+----
+1
+3
+9
+
+statement ok
+DELETE FROM tab2 WHERE col0 < 4
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE col0 < 4
+----
+
+query I rowsort label-75
+SELECT pk FROM tab2 WHERE NOT (col0 < 4)
+----
+1
+3
+9
+
+statement ok
+DELETE FROM tab3 WHERE col0 < 4
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE col0 < 4
+----
+
+query I rowsort label-75
+SELECT pk FROM tab3 WHERE NOT (col0 < 4)
+----
+1
+3
+9
+
+statement ok
+DELETE FROM tab4 WHERE col0 < 4
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE col0 < 4
+----
+
+query I rowsort label-75
+SELECT pk FROM tab4 WHERE NOT (col0 < 4)
+----
+1
+3
+9
+
+statement ok
+DROP TABLE tab0
+
+statement ok
+CREATE TABLE tab0(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+INSERT INTO tab0 VALUES(0,61,8.16,'nsnfo',13,92.38,'plovs')
+
+statement ok
+INSERT INTO tab0 VALUES(1,51,75.67,'ouuaq',80,22.50,'phmcg')
+
+statement ok
+INSERT INTO tab0 VALUES(2,49,33.44,'howlz',45,61.66,'atntc')
+
+statement ok
+INSERT INTO tab0 VALUES(3,47,37.97,'viovu',48,21.62,'cniir')
+
+statement ok
+INSERT INTO tab0 VALUES(4,34,49.58,'sqwuf',31,5.54,'yqrjn')
+
+statement ok
+INSERT INTO tab0 VALUES(5,9,99.50,'uopja',53,62.2,'goxhh')
+
+statement ok
+INSERT INTO tab0 VALUES(6,93,50.3,'smehf',2,57.33,'sgtta')
+
+statement ok
+INSERT INTO tab0 VALUES(7,45,55.65,'opyxq',7,28.44,'zotqa')
+
+statement ok
+INSERT INTO tab0 VALUES(8,69,30.15,'mtcms',54,52.23,'zzaik')
+
+statement ok
+INSERT INTO tab0 VALUES(9,31,4.74,'kscdv',91,6.54,'rzvrq')
+
+statement ok
+DROP TABLE tab1
+
+statement ok
+CREATE TABLE tab1(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab1_0 on tab1 (col0)
+
+statement ok
+CREATE INDEX idx_tab1_1 on tab1 (col1)
+
+statement ok
+CREATE INDEX idx_tab1_3 on tab1 (col3)
+
+statement ok
+CREATE INDEX idx_tab1_4 on tab1 (col4)
+
+statement ok
+INSERT INTO tab1 SELECT * FROM tab0
+
+statement ok
+DROP TABLE tab2
+
+statement ok
+CREATE TABLE tab2(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab2_1 ON tab2 (col1)
+
+statement ok
+CREATE INDEX idx_tab2_4 ON tab2 (col3 DESC)
+
+statement ok
+CREATE INDEX idx_tab2_5 ON tab2 (col4 DESC)
+
+statement ok
+INSERT INTO tab2 SELECT * FROM tab0
+
+statement ok
+DROP TABLE tab3
+
+statement ok
+CREATE TABLE tab3(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab3_0 ON tab3 (col0 DESC,col3,col1 DESC)
+
+statement ok
+CREATE INDEX idx_tab3_2 ON tab3 (col3,col1)
+
+statement ok
+INSERT INTO tab3 SELECT * FROM tab0
+
+statement ok
+DROP TABLE tab4
+
+statement ok
+CREATE TABLE tab4(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab4_0 ON tab4 (col1,col0 DESC)
+
+statement ok
+CREATE INDEX idx_tab4_2 ON tab4 (col4 DESC)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab4_4 ON tab4 (col3)
+
+statement ok
+INSERT INTO tab4 SELECT * FROM tab0
+
+statement ok
+DELETE FROM tab0 WHERE ((col0 > 19))
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE ((col0 > 19))
+----
+
+query I rowsort label-90
+SELECT pk FROM tab0 WHERE NOT (((col0 > 19)))
+----
+5
+
+statement ok
+DELETE FROM tab1 WHERE ((col0 > 19))
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE ((col0 > 19))
+----
+
+query I rowsort label-90
+SELECT pk FROM tab1 WHERE NOT (((col0 > 19)))
+----
+5
+
+statement ok
+DELETE FROM tab2 WHERE ((col0 > 19))
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE ((col0 > 19))
+----
+
+query I rowsort label-90
+SELECT pk FROM tab2 WHERE NOT (((col0 > 19)))
+----
+5
+
+statement ok
+DELETE FROM tab3 WHERE ((col0 > 19))
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE ((col0 > 19))
+----
+
+query I rowsort label-90
+SELECT pk FROM tab3 WHERE NOT (((col0 > 19)))
+----
+5
+
+statement ok
+DELETE FROM tab4 WHERE ((col0 > 19))
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE ((col0 > 19))
+----
+
+query I rowsort label-90
+SELECT pk FROM tab4 WHERE NOT (((col0 > 19)))
+----
+5
+
+statement ok
+DELETE FROM tab0 WHERE col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7)
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7)
+----
+
+query I rowsort label-105
+SELECT pk FROM tab0 WHERE NOT (col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7))
+----
+
+statement ok
+DELETE FROM tab1 WHERE col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7)
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7)
+----
+
+query I rowsort label-105
+SELECT pk FROM tab1 WHERE NOT (col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7))
+----
+
+statement ok
+DELETE FROM tab2 WHERE col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7)
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7)
+----
+
+query I rowsort label-105
+SELECT pk FROM tab2 WHERE NOT (col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7))
+----
+
+statement ok
+DELETE FROM tab3 WHERE col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7)
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7)
+----
+
+query I rowsort label-105
+SELECT pk FROM tab3 WHERE NOT (col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7))
+----
+
+statement ok
+DELETE FROM tab4 WHERE col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7)
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7)
+----
+
+query I rowsort label-105
+SELECT pk FROM tab4 WHERE NOT (col1 > 62.26 OR col0 < 38 AND col3 >= 64 OR (col3 = 7))
+----
+
+statement ok
+DROP TABLE tab0
+
+statement ok
+CREATE TABLE tab0(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+INSERT INTO tab0 VALUES(0,30,0.70,'tupxi',40,32.5,'ahvbl')
+
+statement ok
+INSERT INTO tab0 VALUES(1,20,40.80,'ufpua',97,6.28,'klgat')
+
+statement ok
+INSERT INTO tab0 VALUES(2,37,25.24,'fqlyp',79,68.60,'yogms')
+
+statement ok
+INSERT INTO tab0 VALUES(3,97,23.48,'bttpp',65,93.23,'ihogp')
+
+statement ok
+INSERT INTO tab0 VALUES(4,35,49.68,'hpexe',34,58.43,'fljqm')
+
+statement ok
+INSERT INTO tab0 VALUES(5,66,68.33,'ucjyg',29,52.8,'hopzh')
+
+statement ok
+INSERT INTO tab0 VALUES(6,50,18.89,'qxfzs',19,86.35,'pryiv')
+
+statement ok
+INSERT INTO tab0 VALUES(7,53,16.38,'etyjm',58,10.29,'gvyyd')
+
+statement ok
+INSERT INTO tab0 VALUES(8,10,70.2,'bjhcp',51,22.46,'brgbj')
+
+statement ok
+INSERT INTO tab0 VALUES(9,89,98.89,'pwmgm',18,84.58,'ffomc')
+
+statement ok
+DROP TABLE tab1
+
+statement ok
+CREATE TABLE tab1(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab1_0 on tab1 (col0)
+
+statement ok
+CREATE INDEX idx_tab1_1 on tab1 (col1)
+
+statement ok
+CREATE INDEX idx_tab1_3 on tab1 (col3)
+
+statement ok
+CREATE INDEX idx_tab1_4 on tab1 (col4)
+
+statement ok
+INSERT INTO tab1 SELECT * FROM tab0
+
+statement ok
+DROP TABLE tab2
+
+statement ok
+CREATE TABLE tab2(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab2_0 ON tab2 (col1 DESC,col3)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab2_2 ON tab2 (col0,col3)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab2_5 ON tab2 (col3)
+
+statement ok
+INSERT INTO tab2 SELECT * FROM tab0
+
+statement ok
+DROP TABLE tab3
+
+statement ok
+CREATE TABLE tab3(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab3_0 ON tab3 (col3)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_1 ON tab3 (col4)
+
+statement ok
+INSERT INTO tab3 SELECT * FROM tab0
+
+statement ok
+DROP TABLE tab4
+
+statement ok
+CREATE TABLE tab4(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab4_0 ON tab4 (col3 DESC)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab4_3 ON tab4 (col1 DESC)
+
+statement ok
+INSERT INTO tab4 SELECT * FROM tab0
+
+statement ok
+DELETE FROM tab0 WHERE col4 >= 75.82
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE col4 >= 75.82
+----
+
+query I rowsort label-120
+SELECT pk FROM tab0 WHERE NOT (col4 >= 75.82)
+----
+0
+1
+2
+4
+5
+7
+8
+
+statement ok
+DELETE FROM tab1 WHERE col4 >= 75.82
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE col4 >= 75.82
+----
+
+query I rowsort label-120
+SELECT pk FROM tab1 WHERE NOT (col4 >= 75.82)
+----
+0
+1
+2
+4
+5
+7
+8
+
+statement ok
+DELETE FROM tab2 WHERE col4 >= 75.82
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE col4 >= 75.82
+----
+
+query I rowsort label-120
+SELECT pk FROM tab2 WHERE NOT (col4 >= 75.82)
+----
+0
+1
+2
+4
+5
+7
+8
+
+statement ok
+DELETE FROM tab3 WHERE col4 >= 75.82
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE col4 >= 75.82
+----
+
+query I rowsort label-120
+SELECT pk FROM tab3 WHERE NOT (col4 >= 75.82)
+----
+0
+1
+2
+4
+5
+7
+8
+
+statement ok
+DELETE FROM tab4 WHERE col4 >= 75.82
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE col4 >= 75.82
+----
+
+query I rowsort label-120
+SELECT pk FROM tab4 WHERE NOT (col4 >= 75.82)
+----
+0
+1
+2
+4
+5
+7
+8
+
+statement ok
+DELETE FROM tab0 WHERE col4 > 16.91
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE col4 > 16.91
+----
+
+query I rowsort label-135
+SELECT pk FROM tab0 WHERE NOT (col4 > 16.91)
+----
+1
+7
+
+statement ok
+DELETE FROM tab1 WHERE col4 > 16.91
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE col4 > 16.91
+----
+
+query I rowsort label-135
+SELECT pk FROM tab1 WHERE NOT (col4 > 16.91)
+----
+1
+7
+
+statement ok
+DELETE FROM tab2 WHERE col4 > 16.91
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE col4 > 16.91
+----
+
+query I rowsort label-135
+SELECT pk FROM tab2 WHERE NOT (col4 > 16.91)
+----
+1
+7
+
+statement ok
+DELETE FROM tab3 WHERE col4 > 16.91
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE col4 > 16.91
+----
+
+query I rowsort label-135
+SELECT pk FROM tab3 WHERE NOT (col4 > 16.91)
+----
+1
+7
+
+statement ok
+DELETE FROM tab4 WHERE col4 > 16.91
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE col4 > 16.91
+----
+
+query I rowsort label-135
+SELECT pk FROM tab4 WHERE NOT (col4 > 16.91)
+----
+1
+7
+
+statement ok
+DELETE FROM tab0 WHERE col1 > 65.29
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE col1 > 65.29
+----
+
+query I rowsort label-150
+SELECT pk FROM tab0 WHERE NOT (col1 > 65.29)
+----
+1
+7
+
+statement ok
+DELETE FROM tab1 WHERE col1 > 65.29
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE col1 > 65.29
+----
+
+query I rowsort label-150
+SELECT pk FROM tab1 WHERE NOT (col1 > 65.29)
+----
+1
+7
+
+statement ok
+DELETE FROM tab2 WHERE col1 > 65.29
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE col1 > 65.29
+----
+
+query I rowsort label-150
+SELECT pk FROM tab2 WHERE NOT (col1 > 65.29)
+----
+1
+7
+
+statement ok
+DELETE FROM tab3 WHERE col1 > 65.29
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE col1 > 65.29
+----
+
+query I rowsort label-150
+SELECT pk FROM tab3 WHERE NOT (col1 > 65.29)
+----
+1
+7
+
+statement ok
+DELETE FROM tab4 WHERE col1 > 65.29
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE col1 > 65.29
+----
+
+query I rowsort label-150
+SELECT pk FROM tab4 WHERE NOT (col1 > 65.29)
+----
+1
+7
+
+statement ok
+DELETE FROM tab0 WHERE col4 > 2.84 OR col3 IS NULL
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE col4 > 2.84 OR col3 IS NULL
+----
+
+query I rowsort label-165
+SELECT pk FROM tab0 WHERE NOT (col4 > 2.84 OR col3 IS NULL)
+----
+
+statement ok
+DELETE FROM tab1 WHERE col4 > 2.84 OR col3 IS NULL
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE col4 > 2.84 OR col3 IS NULL
+----
+
+query I rowsort label-165
+SELECT pk FROM tab1 WHERE NOT (col4 > 2.84 OR col3 IS NULL)
+----
+
+statement ok
+DELETE FROM tab2 WHERE col4 > 2.84 OR col3 IS NULL
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE col4 > 2.84 OR col3 IS NULL
+----
+
+query I rowsort label-165
+SELECT pk FROM tab2 WHERE NOT (col4 > 2.84 OR col3 IS NULL)
+----
+
+statement ok
+DELETE FROM tab3 WHERE col4 > 2.84 OR col3 IS NULL
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE col4 > 2.84 OR col3 IS NULL
+----
+
+query I rowsort label-165
+SELECT pk FROM tab3 WHERE NOT (col4 > 2.84 OR col3 IS NULL)
+----
+
+statement ok
+DELETE FROM tab4 WHERE col4 > 2.84 OR col3 IS NULL
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE col4 > 2.84 OR col3 IS NULL
+----
+
+query I rowsort label-165
+SELECT pk FROM tab4 WHERE NOT (col4 > 2.84 OR col3 IS NULL)
+----
+
+statement ok
+DROP TABLE tab0
+
+statement ok
+CREATE TABLE tab0(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+INSERT INTO tab0 VALUES(0,73,34.27,'tirra',78,91.66,'jthmo')
+
+statement ok
+INSERT INTO tab0 VALUES(1,72,77.47,'nlmtv',16,35.57,'aondh')
+
+statement ok
+INSERT INTO tab0 VALUES(2,41,13.38,'doxim',96,12.27,'lwqag')
+
+statement ok
+INSERT INTO tab0 VALUES(3,12,6.11,'ejhvk',73,20.85,'ieprg')
+
+statement ok
+INSERT INTO tab0 VALUES(4,4,68.38,'jvpbl',69,59.33,'ncnls')
+
+statement ok
+INSERT INTO tab0 VALUES(5,82,65.15,'sghzb',34,46.26,'fipdp')
+
+statement ok
+INSERT INTO tab0 VALUES(6,23,40.26,'roqkh',9,22.39,'cakps')
+
+statement ok
+INSERT INTO tab0 VALUES(7,74,16.1,'fdtmd',88,72.25,'npxls')
+
+statement ok
+INSERT INTO tab0 VALUES(8,13,12.81,'zhtkn',81,31.81,'lgrog')
+
+statement ok
+INSERT INTO tab0 VALUES(9,22,60.83,'lzyxj',77,99.7,'uqxwc')
+
+statement ok
+DROP TABLE tab1
+
+statement ok
+CREATE TABLE tab1(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab1_0 on tab1 (col0)
+
+statement ok
+CREATE INDEX idx_tab1_1 on tab1 (col1)
+
+statement ok
+CREATE INDEX idx_tab1_3 on tab1 (col3)
+
+statement ok
+CREATE INDEX idx_tab1_4 on tab1 (col4)
+
+statement ok
+INSERT INTO tab1 SELECT * FROM tab0
+
+statement ok
+DROP TABLE tab2
+
+statement ok
+CREATE TABLE tab2(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab2_0 ON tab2 (col0 DESC)
+
+statement ok
+CREATE INDEX idx_tab2_1 ON tab2 (col4)
+
+statement ok
+CREATE INDEX idx_tab2_3 ON tab2 (col3 DESC)
+
+statement ok
+INSERT INTO tab2 SELECT * FROM tab0
+
+statement ok
+DROP TABLE tab3
+
+statement ok
+CREATE TABLE tab3(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_0 ON tab3 (col4 DESC,col1 DESC,col0 DESC)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_1 ON tab3 (col3)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_2 ON tab3 (col0)
+
+statement ok
+INSERT INTO tab3 SELECT * FROM tab0
+
+statement ok
+DROP TABLE tab4
+
+statement ok
+CREATE TABLE tab4(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab4_0 ON tab4 (col3,col0 DESC)
+
+statement ok
+CREATE INDEX idx_tab4_1 ON tab4 (col1,col3 DESC)
+
+statement ok
+CREATE INDEX idx_tab4_2 ON tab4 (col1,col0,col3)
+
+statement ok
+CREATE INDEX idx_tab4_4 ON tab4 (col0)
+
+statement ok
+INSERT INTO tab4 SELECT * FROM tab0
+
+statement ok
+DELETE FROM tab0 WHERE (col4 > 66.51)
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE (col4 > 66.51)
+----
+
+query I rowsort label-180
+SELECT pk FROM tab0 WHERE NOT ((col4 > 66.51))
+----
+1
+2
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab1 WHERE (col4 > 66.51)
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE (col4 > 66.51)
+----
+
+query I rowsort label-180
+SELECT pk FROM tab1 WHERE NOT ((col4 > 66.51))
+----
+1
+2
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab2 WHERE (col4 > 66.51)
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE (col4 > 66.51)
+----
+
+query I rowsort label-180
+SELECT pk FROM tab2 WHERE NOT ((col4 > 66.51))
+----
+1
+2
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab3 WHERE (col4 > 66.51)
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE (col4 > 66.51)
+----
+
+query I rowsort label-180
+SELECT pk FROM tab3 WHERE NOT ((col4 > 66.51))
+----
+1
+2
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab4 WHERE (col4 > 66.51)
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE (col4 > 66.51)
+----
+
+query I rowsort label-180
+SELECT pk FROM tab4 WHERE NOT ((col4 > 66.51))
+----
+1
+2
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab0 WHERE (col1 <= 65.66) AND col4 > 53.73
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE (col1 <= 65.66) AND col4 > 53.73
+----
+
+query I rowsort label-195
+SELECT pk FROM tab0 WHERE NOT ((col1 <= 65.66) AND col4 > 53.73)
+----
+1
+2
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab1 WHERE (col1 <= 65.66) AND col4 > 53.73
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE (col1 <= 65.66) AND col4 > 53.73
+----
+
+query I rowsort label-195
+SELECT pk FROM tab1 WHERE NOT ((col1 <= 65.66) AND col4 > 53.73)
+----
+1
+2
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab2 WHERE (col1 <= 65.66) AND col4 > 53.73
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE (col1 <= 65.66) AND col4 > 53.73
+----
+
+query I rowsort label-195
+SELECT pk FROM tab2 WHERE NOT ((col1 <= 65.66) AND col4 > 53.73)
+----
+1
+2
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab3 WHERE (col1 <= 65.66) AND col4 > 53.73
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE (col1 <= 65.66) AND col4 > 53.73
+----
+
+query I rowsort label-195
+SELECT pk FROM tab3 WHERE NOT ((col1 <= 65.66) AND col4 > 53.73)
+----
+1
+2
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab4 WHERE (col1 <= 65.66) AND col4 > 53.73
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE (col1 <= 65.66) AND col4 > 53.73
+----
+
+query I rowsort label-195
+SELECT pk FROM tab4 WHERE NOT ((col1 <= 65.66) AND col4 > 53.73)
+----
+1
+2
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab0 WHERE col4 < 14.70
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE col4 < 14.70
+----
+
+query I rowsort label-210
+SELECT pk FROM tab0 WHERE NOT (col4 < 14.70)
+----
+1
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab1 WHERE col4 < 14.70
+
+query I rowsort label-empty
+SELECT pk FROM tab1 WHERE col4 < 14.70
+----
+
+query I rowsort label-210
+SELECT pk FROM tab1 WHERE NOT (col4 < 14.70)
+----
+1
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab2 WHERE col4 < 14.70
+
+query I rowsort label-empty
+SELECT pk FROM tab2 WHERE col4 < 14.70
+----
+
+query I rowsort label-210
+SELECT pk FROM tab2 WHERE NOT (col4 < 14.70)
+----
+1
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab3 WHERE col4 < 14.70
+
+query I rowsort label-empty
+SELECT pk FROM tab3 WHERE col4 < 14.70
+----
+
+query I rowsort label-210
+SELECT pk FROM tab3 WHERE NOT (col4 < 14.70)
+----
+1
+3
+4
+5
+6
+8
+
+statement ok
+DELETE FROM tab4 WHERE col4 < 14.70
+
+query I rowsort label-empty
+SELECT pk FROM tab4 WHERE col4 < 14.70
+----

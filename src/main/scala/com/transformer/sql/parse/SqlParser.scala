@@ -44,7 +44,7 @@ object SqlParser {
     refuseUnbalancedParentheses(s)
     val statement =
       try CCJSqlParserUtil.parse(s)
-      catch { case e: JSQLParserException => throw parseFailure(e) }
+      catch { case e: JSQLParserException => throw parseFailure(s, e) }
     refuseTextAfterTheStatement(s)
     regroupChains(statement)
     refuseDeepNesting(statement)
@@ -55,18 +55,90 @@ object SqlParser {
     statement
   }
 
-  /** The refusal for what JSqlParser threw. It recurses once a level, so text
-    * deep enough overflows its stack, and on some nesting (CASTs, IFs and
-    * calls in calls) it backtracks for long enough to time out: 25 nested
-    * CASTs do. */
-  private def parseFailure(e: JSQLParserException): IllegalArgumentException = {
+  /** The refusal for what JSqlParser threw on `sql`. It recurses once a
+    * level, so text deep enough overflows its stack, and on some nesting
+    * (CASTs, IFs and calls in calls) it backtracks for long enough to time
+    * out: 25 nested CASTs do. It cannot read two signs in a row as an
+    * operand's (`SELECT - -3`, `20 / - - 96`), and says so as an unexpected
+    * token somewhere else, often the SELECT; that refusal names the signs. */
+  private def parseFailure(sql: String, e: JSQLParserException): IllegalArgumentException = {
     val all = Iterator.iterate[Throwable](e)(_.getCause).takeWhile(_ != null).take(20).toSeq
     if (all.exists(_.isInstanceOf[StackOverflowError]))
       new NestingLimitException(s"The query nests too deeply to parse; the limit is $MaxNesting levels")
     else if (all.exists(_.isInstanceOf[TimeoutException]))
       new IllegalArgumentException("SQL parse error: the parser ran past its time limit, which deeply nested " +
         "CASTs, calls and parentheses can make it do; write the expression with less nesting", e)
-    else new IllegalArgumentException(s"SQL parse error: ${parserMessage(e)}", e)
+    else stackedSigns(sql).getOrElse(new IllegalArgumentException(s"SQL parse error: ${parserMessage(e)}", e))
+  }
+
+  /** The refusal of two signs in a row, when they are why `sql` does not
+    * parse: the first run of them, if the text with each run written as the
+    * one sign it amounts to parses. A run whose first sign is an operator's,
+    * `5 - -3`, parses as it is and never comes here. */
+  private def stackedSigns(sql: String): Option[IllegalArgumentException] = {
+    val runs = signRuns(sql)
+    if (runs.isEmpty) return None
+    val folded = new StringBuilder
+    var copied = 0
+    runs.foreach { case (from, until) =>
+      folded ++= sql.substring(copied, from)
+      folded += (if (sql.substring(from, until).count(_ == '-') % 2 == 1) '-' else '+')
+      copied = until
+    }
+    folded ++= sql.substring(copied)
+    val parses = try { CCJSqlParserUtil.parse(folded.result()); true } catch { case NonFatal(_) => false }
+    if (!parses) None
+    else {
+      val (from, until) = runs.head
+      val line = 1 + sql.substring(0, from).count(_ == '\n')
+      val column = from - sql.lastIndexOf('\n', from - 1)
+      Some(new IllegalArgumentException(
+        s"SQL parse error: two signs in a row, '${sql.substring(from, until).filterNot(_.isWhitespace).mkString(" ")}' " +
+          s"at line $line, column $column, cannot be parsed; put the second sign and what it applies to in " +
+          "parentheses, as in -(-3)"))
+    }
+  }
+
+  /** Where each run of two or more `+` / `-` signs is in `sql`, with only
+    * spaces between them, from its first sign to just past its last: outside
+    * string literals, quoted names and comments, which are read as the parser
+    * reads them (`--` starts a comment, so `--3` is no run). */
+  private def signRuns(sql: String): Seq[(Int, Int)] = {
+    val runs = mutable.ArrayBuffer.empty[(Int, Int)]
+    val n = sql.length
+    def skipQuoted(open: Int, close: Char): Int = {
+      var i = open + 1
+      while (i < n && !(sql(i) == close && !(i + 1 < n && sql(i + 1) == close && close != ']'))) {
+        if (sql(i) == close) i += 2 else i += 1
+      }
+      i + 1
+    }
+    var i = 0
+    while (i < n) {
+      val c = sql(i)
+      if (c == '\'' || c == '"' || c == '`') i = skipQuoted(i, c)
+      else if (c == '[') i = skipQuoted(i, ']')
+      else if (c == '-' && i + 1 < n && sql(i + 1) == '-') {
+        while (i < n && sql(i) != '\n') i += 1
+      } else if (c == '/' && i + 1 < n && sql(i + 1) == '*') {
+        val close = sql.indexOf("*/", i + 2)
+        i = if (close < 0) n else close + 2
+      } else if (c == '+' || c == '-') {
+        var j = i + 1
+        var last = i
+        var signs = 1
+        var k = j
+        while (k < n && (sql(k).isWhitespace || sql(k) == '+' || sql(k) == '-') &&
+            !(sql(k) == '-' && k + 1 < n && sql(k + 1) == '-')) {
+          if (sql(k) == '+' || sql(k) == '-') { signs += 1; last = k }
+          k += 1
+        }
+        if (signs >= 2) runs += ((i, last + 1))
+        j = last + 1
+        i = j
+      } else i += 1
+    }
+    runs.toSeq
   }
 
   /** What the parser said went wrong (`Encountered unexpected token: "FROM"

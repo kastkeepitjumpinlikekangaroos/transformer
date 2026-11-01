@@ -33,7 +33,11 @@ specific traps.
   a job runs names `Locale.ROOT`: `name.toLowerCase(Locale.ROOT)`,
   `"part-%05d.csv".formatLocal(Locale.ROOT, i)`.
   `job:locale_independence_test` runs under tr-TR and fails on any compiled call
-  of the default-locale forms.
+  of the default-locale forms. The desktop GUI and the data viewer fold names,
+  keywords and keys the same way, and the test scans their jars for
+  `toLowerCase()` and `toUpperCase()`; their display text may format a number in
+  the user's locale, but text something parses, such as CSS, names
+  `Locale.ROOT` too.
 - **No `*/` inside Scaladoc** — the Scala lexer closes the comment at the first
   `*/`. Glob examples like `data/*.csv` inside a `/** */` block are a footgun;
   use `'*'.csv` or move the example to plain prose. We hit this twice.
@@ -387,6 +391,24 @@ specific traps.
   Draining lazily-nested exchanges from pool tasks without the pass reproduces
   the 02e wedge (`sql/exec:exchange_deadlock_stress_test` with `STRESS_LAZY=1`
   demonstrates it on demand).
+
+- **A test that depends on a JVM-wide default says so.** The whole suite also
+  runs at a batch capacity of 1 and 2 rows, sharded, on one thread and in
+  another time zone and locale (`--config=batch1` and the rest,
+  [testing.md](testing.md#whole-suite-configurations)). A test that asserts
+  something only the default makes true (a batch of 8192 rows, a plan shape the
+  default gates choose, two threads at once) starts with `assumeTrue` and the
+  reason, or reads its expectation from the setting (`ColumnarBatch.DefaultCapacity`);
+  one that merely read the first batch of a scan reads them all.
+- **A semantics decision lands with a sqllogictest script.** Write the queries
+  it decides, with their expected results checked by hand, in
+  `src/test/slt/<area>/`, so every mode is held to them (`slt/slt_test`);
+  `--complete` fills a new script's results from the engine, for checking.
+- **Every file of a glob is read by its own column names.** A parquet file by
+  its footer's, a CSV file by its header's, matched to the first file's names
+  regardless of case; a file that names other columns is refused, naming both.
+  Reading by position read one column's values into another wherever two
+  files ordered them differently.
 
 ## Counter discipline
 

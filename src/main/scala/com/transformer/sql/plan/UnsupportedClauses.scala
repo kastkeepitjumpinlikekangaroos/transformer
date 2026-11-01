@@ -2,10 +2,11 @@ package com.transformer.sql.plan
 
 import net.sf.jsqlparser.expression.{
   Alias, AllValue, AnalyticExpression, AnalyticType, AnyComparisonExpression, ArrayConstructor,
-  ArrayExpression, BinaryExpression, CaseExpression, CastExpression, CollateExpression,
-  ConnectByRootOperator, DateTimeLiteralExpression, DateValue, DoubleValue, ExtractExpression,
-  Function, HexValue, IntervalExpression, JdbcNamedParameter, JdbcParameter, JsonAggregateFunction,
-  JsonExpression, JsonFunction, KeepExpression, LambdaExpression, LongValue, MySQLGroupConcat,
+  ArrayExpression, BinaryExpression, BooleanValue, CaseExpression, CastExpression, CollateExpression,
+  ConnectByPriorOperator, ConnectByRootOperator, DateTimeLiteralExpression, DateValue, DoubleValue,
+  ExtractExpression, Function, HexValue, HighExpression, IntervalExpression, Inverse,
+  JdbcNamedParameter, JdbcParameter, JsonAggregateFunction,
+  JsonExpression, JsonFunction, KeepExpression, LambdaExpression, LongValue, LowExpression, MySQLGroupConcat,
   NextValExpression, NotExpression, NullValue, NumericBind, OracleHierarchicalExpression, OracleHint,
   OracleNamedFunctionParameter, OverlapsCondition, RangeExpression, RowConstructor, RowGetExpression,
   SignedExpression, StringValue, StructType, TimeKeyExpression, TimeValue, TimestampValue,
@@ -19,7 +20,7 @@ import net.sf.jsqlparser.expression.operators.conditional.{AndExpression, OrExpr
 import net.sf.jsqlparser.expression.operators.relational.{
   Between, EqualsTo, ExcludesExpression, ExistsExpression, ExpressionList, FullTextSearch,
   GreaterThan, GreaterThanEquals, InExpression, IncludesExpression, IsBooleanExpression,
-  IsDistinctExpression, IsNullExpression, LikeExpression, MemberOfExpression, MinorThan,
+  IsDistinctExpression, IsNullExpression, IsUnknownExpression, LikeExpression, MemberOfExpression, MinorThan,
   MinorThanEquals, NamedExpressionList, NotEqualsTo, ParenthesedExpressionList, RegExpMatchOperator,
   TSQLLeftJoin, TSQLRightJoin
 }
@@ -27,7 +28,7 @@ import net.sf.jsqlparser.schema.{Column, Table}
 import net.sf.jsqlparser.statement.Statement
 import net.sf.jsqlparser.statement.create.table.ColDataType
 import net.sf.jsqlparser.statement.select.{
-  AllColumns, AllTableColumns, Distinct, ExceptOp, Fetch, GroupByElement, IntersectOp, Join,
+  AllColumns, AllTableColumns, Distinct, ExceptOp, Fetch, FunctionAllColumns, GroupByElement, IntersectOp, Join,
   LateralSubSelect, Limit, MinusOp, Offset, OrderByElement, ParenthesedFromItem, ParenthesedSelect,
   PlainSelect, Select, SelectItem, SetOperationList, TableFunction, TableStatement, Top, UnionOp,
   Values, WithItem
@@ -84,7 +85,7 @@ object UnsupportedClauses {
     *
     * `example` is SQL that reaches this entry, written against `t(a, b, s)` and
     * `u(a, b)`; `UnsupportedClausesTest` runs every one. `None` means no SELECT
-    * text JSqlParser 5.0 accepts reaches the getter in a position the walk
+    * text JSqlParser 5.2 accepts reaches the getter in a position the walk
     * visits, and the entry stands guard against a grammar change. */
   final class Rejection private[UnsupportedClauses] (
       val getters: Seq[String],
@@ -171,6 +172,11 @@ object UnsupportedClauses {
   private val SelectTail: Seq[Rejection] = Seq(
     LimitByClause, LockingClause, ForClause, IsolationClause, SiblingsClause)
 
+  // TABLESAMPLE after a query: JSqlParser reads it after a derived table in
+  // FROM, which the binder refuses whole; on the other shapes it stands guard.
+  private val QuerySample = rejects("getSampleClause")("TABLESAMPLE",
+    example = "SELECT a FROM (SELECT a FROM t) TABLESAMPLE SYSTEM (10)")
+
   // Accessors on `Select` that return the node itself, or cast it.
   private val SelectCasts: Seq[(String, String)] = Seq(
     "getSelectBody" -> "returns this node",
@@ -187,9 +193,11 @@ object UnsupportedClauses {
     example = "(SELECT a FROM t) ORDER BY a LIMIT 1")
   private val ParenthesizedPivot = rejects("getPivot", "getUnPivot")("PIVOT / UNPIVOT")
 
-  private val ParenthesizedInert: Seq[(String, String)] = SelectCasts ++ Seq(
+  private val QueryAlias: (String, String) =
     "getAlias" -> ("nothing can refer to an alias on a top-level query, a set-operation arm or a " +
-      "CTE body, and in FROM the binder rejects the derived table whole"))
+      "CTE body, and in FROM the binder rejects the derived table whole")
+
+  private val ParenthesizedInert: Seq[(String, String)] = SelectCasts :+ QueryAlias
 
   // Every comparison, and IN, can carry Oracle's outer-join and PRIOR markers.
   private val OracleOuterJoin = rejects("getOldOracleJoinSyntax")("The Oracle outer-join marker (+)",
@@ -254,7 +262,7 @@ object UnsupportedClauses {
         example = "SELECT a FROM t START WITH a = 1 CONNECT BY PRIOR a = b"),
       rejects("getLateralViews")("LATERAL VIEW",
         example = "SELECT a FROM t LATERAL VIEW explode(b) e AS c"),
-      // JSqlParser 5.0 never sets it: FOR XML PATH parses into getForClause.
+      // JSqlParser 5.2 never sets it: FOR XML PATH parses into getForClause.
       rejects("getForXmlPath")("FOR XML PATH"),
       rejects("getBigQuerySelectQualifier")("SELECT AS STRUCT / SELECT AS VALUE",
         example = "SELECT AS STRUCT a FROM t"),
@@ -270,9 +278,12 @@ object UnsupportedClauses {
         example = "SELECT SQL_CALC_FOUND_ROWS a FROM t"),
       rejects("getOptimizeFor")("OPTIMIZE FOR n ROWS", example = "SELECT a FROM t OPTIMIZE FOR 5 ROWS"),
       rejects("isUsingFinal")("FROM ... FINAL", example = "SELECT a FROM t FINAL"),
-      rejects("isUsingOnly")("FROM ONLY", example = "SELECT a FROM ONLY t")
-    ) ++ SelectTail,
-    SelectCasts :+ ("isUseBrackets" -> "always false in JSqlParser 5.0; a parenthesized query parses as ParenthesedSelect"))
+      rejects("isUsingOnly")("FROM ONLY", example = "SELECT a FROM ONLY t"),
+      rejects("getPreferringClause")("PREFERRING", example = "SELECT a FROM t PREFERRING HIGH a"),
+      ParenthesizedPivot
+    ) ++ SelectTail :+ QuerySample,
+    SelectCasts ++ Seq(QueryAlias,
+      "isUseBrackets" -> "always false in JSqlParser 5.2; a parenthesized query parses as ParenthesedSelect"))
 
   private val TableAudit = audit(
     Seq(
@@ -298,7 +309,12 @@ object UnsupportedClauses {
     Seq(
       "getNameParts" -> "the parts of the written name, which the two checks above read",
       "getNamePartDelimiters" -> "the separators between those parts",
-      "getFullyQualifiedName" -> "those parts joined"))
+      "getFullyQualifiedName" -> "those parts joined",
+      "getDatabaseName" -> "a part of getNameParts, which the checks above read",
+      "getUnquotedCatalogName" -> "a part of getNameParts, which the checks above read",
+      "getUnquotedDatabaseName" -> "a part of getNameParts, which the checks above read",
+      "getUnquotedSchemaName" -> "a part of getNameParts, which the checks above read",
+      "getUnquotedName" -> "getName without its quotes; the binder unquotes getName itself"))
 
   private val JoinAudit = audit(
     Seq(
@@ -361,7 +377,10 @@ object UnsupportedClauses {
         advice = "write the arguments separated by commas",
         example = "SELECT SUBSTRING(s FROM 1 FOR 2) FROM t",
         describe = f => s"${upper(f.getName)} with keyword arguments"
-      )(f => isPresent(f.getNamedParameters))
+      )(f => isPresent(f.getNamedParameters)),
+      rejects("getExtraKeyword")("TABLE before a function's argument", example = "SELECT ABS(TABLE a) FROM t"),
+      rejects("getOnOverflowTruncate")("ON OVERFLOW TRUNCATE",
+        example = "SELECT LISTAGG(s, ',' ON OVERFLOW TRUNCATE) FROM t")
     ),
     Seq(
       "getMultipartName" -> "the parts behind getName, which the binder reads",
@@ -410,7 +429,9 @@ object UnsupportedClauses {
       rejects("getHavingClause")("HAVING MIN / MAX inside a window function",
         example = "SELECT ANY_VALUE(a HAVING MAX b) OVER () FROM t"),
       rejects("getKeep")("KEEP (DENSE_RANK FIRST / LAST ...)",
-        example = "SELECT MAX(a) KEEP (DENSE_RANK FIRST ORDER BY b) OVER () FROM t")
+        example = "SELECT MAX(a) KEEP (DENSE_RANK FIRST ORDER BY b) OVER () FROM t"),
+      // JSqlParser reads it only in LISTAGG ... WITHIN GROUP, refused above.
+      rejects("getOnOverflowTruncate")("ON OVERFLOW TRUNCATE")
     ),
     Seq(
       "getWindowDefinition" -> "holds the PARTITION BY, ORDER BY and frame the binder reads through their own getters",
@@ -482,19 +503,35 @@ object UnsupportedClauses {
   val audits: Map[Class[_], Audit] = Map(
     // Statements
     classOf[PlainSelect] -> PlainSelectAudit,
-    classOf[SetOperationList] -> audit(SelectTail, SelectCasts),
+    classOf[SetOperationList] -> audit(SelectTail ++ Seq(ParenthesizedPivot, QuerySample), SelectCasts :+ QueryAlias),
     classOf[ParenthesedSelect] -> audit(
-      Seq(ParenthesizedTail, ParenthesizedPivot) ++ SelectTail, ParenthesizedInert),
-    // A CTE: `WITH c AS (...)`. Its own tail is unreachable from SQL text (a
-    // clause after the parentheses belongs to the enclosing query), but it
-    // inherits the getters, so they stay rejected.
-    classOf[WithItem] -> audit(Seq(ParenthesizedTail, ParenthesizedPivot) ++ SelectTail, SelectCasts),
+      Seq(ParenthesizedTail, ParenthesizedPivot) ++ SelectTail :+ QuerySample, ParenthesizedInert),
+    // A CTE: `WITH c AS (...)`, which holds the parenthesized query it names
+    // (getSelect, a ParenthesedSelect the walk visits in turn).
+    classOf[WithItem[_]] -> audit(
+      Seq(
+        rejects("isMaterialized")("WITH ... AS MATERIALIZED",
+          advice = "remove MATERIALIZED; a CTE read more than once is computed once",
+          example = "WITH c AS MATERIALIZED (SELECT a FROM t) SELECT a FROM c"),
+        // getInsert / getUpdate / getDelete cast the statement, and throw
+        // unless it is of their kind, so the test reads its class.
+        rejectsWhen[WithItem[_]]("getInsert", "getUpdate", "getDelete")("A CTE that changes a table",
+          example = "WITH c AS (INSERT INTO t VALUES (1) RETURNING a) SELECT a FROM c"
+        )(w => !w.getParenthesedStatement.isInstanceOf[ParenthesedSelect])),
+      Seq(
+        "getParenthesedStatement" -> "the query getSelect returns",
+        "getAliasName" -> "the name getAlias carries",
+        "getUnquotedAliasName" -> "the name getAlias carries")),
     classOf[UnionOp] -> audit(Nil, Seq("isDistinct" -> "UNION DISTINCT is UNION; the binder dedups every union that is not ALL")),
-    classOf[SelectItem[_]] -> audit(Nil),
+    classOf[SelectItem[_]] -> audit(Nil, Seq(
+      "getAliasName" -> "the name getAlias carries",
+      "getUnquotedAliasName" -> "the name getAlias carries, without its quotes")),
     classOf[Alias] -> audit(
       Seq(rejects("getAliasColumns")("A column list in an alias, AS x(c, ...)",
         advice = "alias each column in the SELECT list", example = "SELECT * FROM t AS x(c)")),
-      Seq("isUseAs" -> "whether AS was written")),
+      Seq(
+        "isUseAs" -> "whether AS was written",
+        "getUnquotedName" -> "getName without its quotes; the binder unquotes getName itself")),
     classOf[Table] -> TableAudit,
     classOf[Join] -> JoinAudit,
     classOf[OrderByElement] -> audit(
@@ -585,9 +622,18 @@ object UnsupportedClauses {
       Seq(
         "getFullyQualifiedName" -> "the table and column names joined",
         "getTableDelimiter" -> "the separator written between table and column",
-        "getCommentText" -> "a comment attached to the column")),
+        "getCommentText" -> "a comment attached to the column") ++
+        Seq("getCatalogName", "getSchemaName", "getTableName", "getUnquotedCatalogName", "getUnquotedSchemaName",
+          "getUnquotedTableName").map(_ -> "a part of the qualifier getTable holds, which the binder reads") ++
+        Seq("getUnquotedColumnName", "getUnquotedName").map(_ ->
+          "getColumnName without its quotes; the binder unquotes getColumnName itself")),
     classOf[AllColumns] -> audit(StarModifiers),
     classOf[AllTableColumns] -> audit(StarModifiers),
+    // `(f(...)).*`, a star over a function's result: a kind of AllColumns,
+    // which the binder would read as the SELECT list's star.
+    classOf[FunctionAllColumns] -> audit(
+      rejects("getFunction")("The columns of a function's result, (f(...)).*") +: StarModifiers),
+    classOf[BooleanValue] -> audit(Nil),
     classOf[LongValue] -> audit(Nil, Seq(
       "getStringValue" -> "the literal as written",
       "getValue" -> "getBigIntegerValue as a long, which throws past BIGINT")),
@@ -622,7 +668,7 @@ object UnsupportedClauses {
     "net.sf.jsqlparser.statement.select.TableFunction" ->
       "a function call in FROM; the binder accepts only tables there",
     "net.sf.jsqlparser.expression.Parenthesis" ->
-      "deprecated; nothing in JSqlParser 5.0 constructs it",
+      "deprecated; nothing in JSqlParser 5.2 constructs it",
     "net.sf.jsqlparser.expression.RowConstructor" ->
       "ROW(...) is only ever an element of a list, where the binder rejects it by name",
     "net.sf.jsqlparser.expression.operators.relational.NamedExpressionList" ->
@@ -700,6 +746,7 @@ object UnsupportedClauses {
     namedBy(classOf[IsDistinctExpression], "compare with = and IS NULL")(_.getStringExpression.trim),
     namedBy(classOf[IsBooleanExpression])(b =>
       s"IS ${if (b.isNot) "NOT " else ""}${if (b.isTrue) "TRUE" else "FALSE"}"),
+    namedBy(classOf[IsUnknownExpression], "write IS NULL")(e => if (e.isNot) "IS NOT UNKNOWN" else "IS UNKNOWN"),
     namedBy(classOf[RegExpMatchOperator], "the engine has no regular-expression matching")(r =>
       s"The ${r.getStringExpression.trim} operator"),
     named(classOf[TSQLLeftJoin], "The *= outer-join operator", "write LEFT JOIN with ON"),
@@ -712,6 +759,7 @@ object UnsupportedClauses {
     named(classOf[CollateExpression], "COLLATE"),
     named(classOf[TimezoneExpression], "AT TIME ZONE"),
     named(classOf[ConnectByRootOperator], "CONNECT_BY_ROOT"),
+    named(classOf[ConnectByPriorOperator], "PRIOR"),
     named(classOf[JsonExpression], "A JSON operator such as -> or ->>"),
 
     // Literals, parameters and values of types the engine does not have.
@@ -750,6 +798,11 @@ object UnsupportedClauses {
     named(classOf[OracleNamedFunctionParameter], "A named argument (name => value)",
       "write the arguments in order, separated by commas"),
     named(classOf[OracleHierarchicalExpression], "START WITH / CONNECT BY"),
+    // Exasol's preference queries: PREFERRING HIGH x / LOW x / INVERSE (...),
+    // reached only inside a PREFERRING clause, which is refused first.
+    named(classOf[HighExpression], "PREFERRING ... HIGH"),
+    named(classOf[LowExpression], "PREFERRING ... LOW"),
+    named(classOf[Inverse], "PREFERRING ... INVERSE"),
     named(classOf[OracleHint], "An optimizer hint /*+ ... */")
   )
 

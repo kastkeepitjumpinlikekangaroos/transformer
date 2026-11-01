@@ -5,6 +5,7 @@ import com.transformer.core.metrics.MetricsNode
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
+import org.junit.Assume.assumeTrue
 
 import java.nio.file.{Files, Path}
 import scala.collection.mutable
@@ -85,6 +86,14 @@ class SortExecSpillTest {
   private def spillyOpts(maxRuns: Int = ExecutionOptions.DefaultSpillMaxRuns): ExecutionOptions =
     ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L), spillMaxRuns = maxRuns)
 
+  /** A one-byte threshold spills once per input batch, so a test that spills
+    * thousands of rows that way writes a run per batch: past
+    * `spill_max_runs` and into thousands of files under the 1- and 2-row
+    * batch capacities the whole suite also runs at (docs/testing.md), where
+    * the spill fuzzers and `slt_test`'s spill mode cover spilling instead. */
+  private def assumeFullBatches(): Unit =
+    assumeTrue("needs batches of 1024 rows or more", ColumnarBatch.DefaultCapacity >= 1024)
+
   /** Generate `n` unique-keyed rows split across `parts` partitions. */
   private def uniqueKeyedRows(n: Int, parts: Int, seed: Long): Vector[Vector[Array[Any]]] = {
     val rng = new Random(seed)
@@ -100,6 +109,7 @@ class SortExecSpillTest {
   // ---- parity tests --------------------------------------------------------
 
   @Test def spillAndNonSpillProduceSameSortedOutput(): Unit = {
+    assumeFullBatches()
     val parts = uniqueKeyedRows(n = 5000, parts = 4, seed = 42L)
     val noSpill = runSort(parts, ExecutionOptions.Default)
     val withSpill = runSort(parts, spillyOpts())
@@ -117,6 +127,7 @@ class SortExecSpillTest {
   }
 
   @Test def manySpillRoundsStillSorted(): Unit = {
+    assumeFullBatches()
     // 100k rows × 1-byte threshold → spill every batch.
     val parts = uniqueKeyedRows(n = 100_000, parts = 4, seed = 7L)
     val rows = runSort(parts, spillyOpts())
@@ -166,6 +177,7 @@ class SortExecSpillTest {
   /** External-merge sort + metrics: the operator's MetricsNode must report
     * non-zero `runsWritten` / `bytesSpilled`. */
   @Test def externalSortAndMetricsComposeReportingNonZeroSpillCounters(): Unit = {
+    assumeFullBatches()
     val parts = uniqueKeyedRows(n = 5000, parts = 4, seed = 99L)
     val plan = new InMemoryPartitionedPlanForSpillTest(schema, parts)
     val node = new MetricsNode(0, "SortExec", 0, SortExec.IdxCounterNames)
@@ -190,6 +202,7 @@ class SortExecSpillTest {
     * key has to land where the key says in both. A unique second key makes the
     * order total, so the spilled output must equal the heap output row for row. */
   @Test def explicitNullPlacementUnderSpill(): Unit = {
+    assumeFullBatches()
     val p: Expr = ColRefExpr(1, "p", DataType.IntType)
     val rng = new Random(77L)
     val rows = (0 until 4000).map { i =>
@@ -216,6 +229,7 @@ class SortExecSpillTest {
   // parquet column paths, which read back null and NPE'd in DiskRunCursor. The
   // runs now use positional names. See plans/bugfixes/01.
   @Test def duplicateNamedChildSchemaUnderSpill(): Unit = {
+    assumeFullBatches()
     val dupSchema = Schema(Vector(Field("k", DataType.IntType), Field("k", DataType.IntType)))
     val rng = new Random(2026L)
     val keys = rng.shuffle((0 until 5000).toVector)

@@ -779,16 +779,26 @@ chosen `job.json` without re-running anything.
   | `BINARY` (declared) | Base64, which the writer writes |
   | `STRING` | the text |
 
-- **Schema inference** samples the first 1000 rows of the first file, and each
-  column takes the narrowest type every sampled field reads as: numbers widen
-  from `INT` to `BIGINT` to `DECIMAL(38,0)` (an integer past `BIGINT`, kept
+- **Schema inference** samples the first 1000 rows of the glob's files, in
+  order, and each column takes the narrowest type every sampled field reads
+  as: a file holding only a header, which a writer leaves for an output
+  partition that held no rows, contributes none, so the sample reads on into
+  the files after it (it read the first file alone, so such a file typed every
+  column of the glob `STRING`). Numbers widen from `INT` to `BIGINT` to `DECIMAL(38,0)` (an integer past `BIGINT`, kept
   exact) to `DOUBLE` (past 38 digits, or beside a fraction), and a number no
   `DOUBLE` holds (`1e400`) is text; a `DATE` widens to a
   `TIMESTAMP`, its dates read as midnight UTC; and any other mix, such as `1.5`
   with `true` or `1` with a date, is a `STRING`. A column with nothing but NULL
   and empty fields in its sample is a `STRING`. Only the sample is read, so a
-  value past it, or in a later file of the glob, that does not read as its
-  column's type fails the read by name.
+  value past it that does not read as its column's type fails the read by name.
+- **A glob's files are read by their headers' names.** With inferred types and
+  a header, the first file's header names the columns and every later file is
+  read by its own header, regardless of case, so a file that writes the
+  columns in another order reads each into its column; a file naming other
+  columns fails, naming both headers. (A later file's fields used to be read
+  in the first file's order, so two columns of one type swapped silently.)
+  Declared columns name the columns themselves: each file's header is then
+  skipped.
 - **What a round trip through inference keeps.** Write a table and read it back
   with its types inferred: `STRING`, `INT`, `BIGINT` (an `INT` when every value
   fits one), `DOUBLE`, `BOOLEAN`, `DATE` and `TIMESTAMP` come back as they were;
@@ -1208,11 +1218,15 @@ type.
 two strings), `LIKE` and its case-insensitive form `ILIKE` (on strings),
 `IS NULL` / `IS NOT NULL`,
 `IN (...)`, `BETWEEN`, `CASE WHEN`, `CAST(expr AS type)`. `NOT` negates the
-whole comparison after it, so `NOT a = 1` is `NOT (a = 1)`. Where the parser
-would hang it on the comparison's left side alone instead (the second `NOT` of
-`NOT NOT a = 1`, and the `NOT` in the argument of a call that takes one, such as
-`COUNT_IF(NOT a = 1)`), the query is an error asking for `NOT (...)` around
-what the `NOT` negates. A conditional evaluates only what its answer needs,
+whole comparison after it, so `NOT a = 1` is `NOT (a = 1)`, in a call's
+argument too (`COUNT_IF(NOT a = 1)`). Where the parser would hang it on the
+comparison's left side alone instead (the second `NOT` of `NOT NOT a = 1`), the
+query is an error asking for `NOT (...)` around what the `NOT` negates. An `IN`
+list holds at least one value, as in standard SQL: `x IN ()` is an error. Two
+signs in a row are an error too, `- -3` or `a * - + 2`, since the parser cannot
+read them: write `-(-3)`; a sign after an operator, `5 - -3`, is one sign.
+`TRUE` and `FALSE` are the boolean literals wherever they are written; a column
+named `true` is written in quotes, `"true"`. A conditional evaluates only what its answer needs,
 on each row: a `CASE` reads the `THEN` of the branch it takes and no other,
 `IF` one of its two values, `COALESCE` its arguments up to the first that is
 not NULL, `IN` its items up to the first that matches, and `AND` and `OR` their
@@ -1467,11 +1481,19 @@ in-memory table, through projections, sorts, windows, `LIMIT`, `OFFSET` and
 `UNION ALL`, and is not behind a filter, a grouping or a join condition, so
 two one-row filters over large tables join (they were refused on a guess of
 how many rows a filter keeps). So is
-one over the output of another such join when the two would pair more than
-25 million rows: a chain multiplies where each side alone looks small (three
-300-row tables pair 27 million). One small side against a large one, such as
-100 buckets against a million-row table on `amount BETWEEN lo AND hi`, still
-runs.
+one over the output of another such join, directly or through joins on an
+equality, when the two would pair more than 25 million rows: a chain
+multiplies where each side alone looks small (three 300-row tables pair 27
+million). One small side against a large one, such as 100 buckets against a
+million-row table on `amount BETWEEN lo AND hi`, still runs. Joins run in the
+order `FROM` writes them, with no reordering: in `FROM a, b, c WHERE a.x = c.x
+AND c.y = b.y` the first join, `a` with `b`, has no condition of its own and
+pairs every row, so write each table after one it joins to (`FROM a, c, b`).
+Below the guard's bound such a pairing still costs memory, since a join
+without an equality holds every row it pairs until it has them all: in
+SQLite's test corpus, a join of 17 ten-row tables written in an unlucky order
+pairs ten million rows on its way to an answer of one row, and two wider ones
+run a 2 GB heap out.
 
 ## Temporal templating
 
@@ -1782,10 +1804,10 @@ JDK 21 or newer (tested through JDK 25).
 - **Cloud paths recognized but unimplemented**: `gs://` and `s3://` paths are
   accepted by the config, and loading one raises a clear
   `UnsupportedOperationException`. See [Cloud](#cloud-gs--s3).
-- **A CSV glob's schema is inferred from its first file's first 1000 rows.** A
-  later value that does not read as its column's type fails the read, naming
-  the file, line, column and value; an explicit schema (`inferSchema = false`
-  with `columns`) reads every file as declared. A parquet glob checks every
+- **A CSV glob's schema is inferred from its first 1000 rows**, read across its
+  files in order. A later value that does not read as its column's type fails
+  the read, naming the file, line, column and value; an explicit schema
+  (`inferSchema = false` with `columns`) reads every file as declared. A parquet glob checks every
   file against the first when it is opened (see [Parquet](#parquet)).
 - **A query nests at most 256 levels deep.** An operator, a call, a CASE, a
   pair of parentheses and a SELECT each take a level of the tree the parser
@@ -1842,12 +1864,19 @@ transformer is Scala 2.13 on JDK 21, built with Bazel (`rules_scala`).
 ```bash
 bazel test //...                                     # every test
 bazel test //src/test/scala/com/transformer/sql/...  # just the SQL tests
+bazel test //... --config=batch1                     # every test, 1-row batches
 bazel build //:transformer_deploy.jar                # the product jar
 bazel build //:transformer_viewer_deploy.jar         # the data viewer
 ```
 
-Each leaf test directory has its own `scala_junit_test` target. Before
-landing a change, also run the jaffle-shop example (see [Examples](#examples)).
+Each leaf test directory has its own `scala_junit_test` target. SQL's
+semantics are also pinned as sqllogictest scripts under `src/test/slt/`
+(SQLite's format: each query beside its expected result), which
+`slt/slt_test` runs under eleven execution modes each, beside a slice of
+SQLite's own corpus. The suite reruns under `--config=batch1`, `batch2`,
+`sharded`, `serial` and `zone`, one JVM-wide setting each. Before landing a
+change, also run the jaffle-shop example (see [Examples](#examples)).
+[docs/testing.md](docs/testing.md) has the details.
 
 ### Contributor documentation
 
@@ -1875,7 +1904,7 @@ back here and into `docs/`.
 ```
 .
 ├── MODULE.bazel               Bazel deps: rules_scala 7.0.0, scala 2.13.16,
-│                              jsqlparser 5.0, parquet-hadoop 1.14.3 (+ minimal
+│                              jsqlparser 5.2, parquet-hadoop 1.14.3 (+ minimal
 │                              hadoop 3.4.3), openjfx 21.0.1, richtextfx
 │                              0.11.7 and atlantafx 2.0.1 (gui only), junit
 ├── .bazelrc                   JDK 21 build toolchain (runtime is JDK 21+)

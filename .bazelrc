@@ -13,3 +13,14 @@ build --tool_java_language_version=21
 #    small default-budget `*_fuzz_test` targets stay in the normal run; the
 #    campaigns are run on demand with a large `FUZZ_SEEDS` budget.
 test --test_tag_filters=-perf,-fuzz
+
+# The whole suite under one JVM-wide setting each, as DuckDB reruns its tests
+# at a vector size of 2, with forced parallelism and in other configurations.
+# Each sets JAVA_TOOL_OPTIONS for every test JVM (a target's own jvm_flags
+# still win). See docs/testing.md "Whole-suite configurations".
+#   bazel test //... --config=batch1
+test:batch1 --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.batch_capacity=1
+test:batch2 --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.batch_capacity=2
+test:sharded "--test_env=JAVA_TOOL_OPTIONS=-Dtransformer.scheduler.shard_min_size=1 -Dtransformer.scheduler.broadcast_threshold=1 -Dtransformer.scheduler.shard_count=4"
+test:serial --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.scheduler.parallelism=1
+test:zone "--test_env=JAVA_TOOL_OPTIONS=-Duser.timezone=America/St_Johns -Duser.language=tr -Duser.country=TR"

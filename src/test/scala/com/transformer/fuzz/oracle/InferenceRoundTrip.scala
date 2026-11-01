@@ -19,7 +19,7 @@ import scala.util.Try
   * a grammar of this file's own:
   *
   *   - each column's type is the narrowest every sampled field reads as (the
-  *     first `sampleRows` rows of the first file): numbers widen from INT to
+  *     first `sampleRows` rows of the files, in order): numbers widen from INT to
   *     BIGINT to DECIMAL(38,0) to DOUBLE, a DATE widens to a TIMESTAMP, and
   *     any other mix is a STRING;
   *   - every value read is what its text says under that type (`007` is 7,
@@ -54,7 +54,7 @@ object InferenceRoundTrip {
       val asText = CsvReader.fromPath(written.toString, CsvOptions.forWrittenFile(c.format.options,
         Schema(c.schema.fields.map(_.copy(dataType = DataType.StringType)))))
       val textByFile = (0 until asText.numPartitions).map(p => CsvRoundTrip.rowsOf(single(asText, p)))
-      val sample = textByFile.headOption.getOrElse(Vector.empty).take(c.sampleRows)
+      val sample = textByFile.flatten.take(c.sampleRows)
       val types = c.schema.fields.indices.map { i =>
         sample.flatMap(row => Option(row(i).asInstanceOf[String]).filter(_.nonEmpty).map(classify)).reduceOption(join)
           .getOrElse(DataType.StringType)

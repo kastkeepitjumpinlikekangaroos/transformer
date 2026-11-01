@@ -5,6 +5,7 @@ import com.transformer.job.{InputFilePath, JobFiles, TaskRunRecord, TaskRunStatu
 
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import javafx.geometry.{Insets, Pos}
 import javafx.scene.control.{Alert, Button, ButtonType, Label, ScrollPane, Toggle, ToggleButton, ToggleGroup, Tooltip}
 import javafx.scene.layout.{FlowPane, HBox, Priority, Region, VBox}
@@ -295,7 +296,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     nameLabel.setText(in.viewName)
     depsHeader.setText("USED BY")
     // Static "input" pill so the user can tell at a glance.
-    statusPill.setText(s"INPUT · ${in.detectedFormat.toUpperCase}")
+    statusPill.setText(s"INPUT · ${in.detectedFormat.toUpperCase(Locale.ROOT)}")
     setTone(statusPill, Tone.Input)
     statusPill.setVisible(true); statusPill.setManaged(true)
     statChips.getChildren.clear()
@@ -370,7 +371,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
           case TaskStatus.Pending              => ("pending", Tone.Neutral)
         }
     }
-    statusPill.setText(label.toUpperCase)
+    statusPill.setText(label.toUpperCase(Locale.ROOT))
     setTone(statusPill, tone)
     statusPill.setVisible(true); statusPill.setManaged(true)
   }
@@ -416,7 +417,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     val dag = session.dag.getOrElse(return)
     val inputs = session.inputs
     val inputNameToIdx = inputs.iterator.zipWithIndex.map { case (in, i) =>
-      in.viewName.toLowerCase -> i
+      in.viewName.toLowerCase(Locale.ROOT) -> i
     }.toMap
     if (node.deps.isEmpty && node.inputDeps.isEmpty) {
       depsBox.getChildren.add(noDepsLabel)
@@ -448,7 +449,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
       depsBox.getChildren.add(hintLabel("(unknown input)"))
       return
     }
-    val viewLower = inputs(i).viewName.toLowerCase
+    val viewLower = inputs(i).viewName.toLowerCase(Locale.ROOT)
     val users = dag.nodes.iterator.filter(_.inputDeps.contains(viewLower)).toSeq
     if (users.isEmpty) {
       depsBox.getChildren.add(hintLabel("(not used by any task)"))

@@ -587,6 +587,7 @@ class DataJobTest {
 
   @Test def independentRootsRunConcurrently(): Unit = {
     assumeTrue("requires >=2 CPUs", Runtime.getRuntime.availableProcessors >= 2)
+    assumeTrue("requires a pool of 2 or more threads", com.transformer.core.Scheduler.parallelism >= 2)
     val inDir = tmpDir("dj-par-")
     writeCsv(inDir, "a.csv", "x\n1\n")
     writeCsv(inDir, "b.csv", "x\n1\n")
@@ -916,6 +917,7 @@ class DataJobTest {
   /** A task with no outputFile (drain-and-discard) runs with default opts —
     * there is no `output.json` to read spill config from. */
   @Test def runOneTaskWithoutOutputFileUsesDefaultExecutionOptions(): Unit = {
+    assumeTrue("requires spill not forced on every task", !DataJob.forceSpillFromSysprop)
     val inDir = tmpDir("dj-opts-noout-")
     writeCsv(inDir, "a.csv", "x\n1\n")
     val seen = new java.util.concurrent.atomic.AtomicReference[ExecutionOptions](null)
@@ -1661,6 +1663,7 @@ class DataJobTest {
   }
 
   @Test def independentBranchesStartBeforeAllInputsAreLoaded(): Unit = {
+    assumeTrue("requires a pool of 2 or more threads", com.transformer.core.Scheduler.parallelism >= 2)
     // Two inputs with very different load latencies. The fast branch's task
     // must finish before the slow branch's input has finished loading — proving
     // the runner doesn't pre-load all inputs as a barrier.

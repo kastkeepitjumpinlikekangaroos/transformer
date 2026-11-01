@@ -10,86 +10,166 @@ import java.nio.file.{Files, Path}
   * (the unit of parallelism for the executor).
   *
   * Schema is determined once at construction time. If `options.inferSchema` is true,
-  * the first file's first `inferenceSampleRows` rows are sampled. Otherwise
-  * `options.columns` must be set.
+  * the first `inferenceSampleRows` rows of the files, in glob order, are sampled
+  * ([[CsvReader.infer]]). Otherwise `options.columns` must be set.
   *
-  * Every row must have as many fields as the file has columns (its header, or
-  * the schema, or its first row): a short or long row fails the read, naming
-  * the file and line. A blank line is a row only in a one-column file, where it
-  * is the row whose one field is empty, which is how the writer writes a NULL
-  * there; in a wider file it is skipped. Each field is parsed strictly as its
-  * column's type ([[CsvValues]]), and one that does not read as it fails the
-  * read, naming the file, line, column and text. A field is NULL when it is the
-  * null string unquoted, and, in a column of any type but STRING and BINARY
-  * (the two with an empty value), when it is empty, quoted or not.
+  * With an inferred schema and a header, the first file's header names the
+  * columns and every later file is read by its own header's names, so a file
+  * that writes the columns in another order reads into the right ones, and one
+  * that names other columns fails, naming both headers; with declared columns
+  * a header is skipped. Every row must have as many fields as the file has
+  * columns (its header, or the schema, or its first row): a short or long row
+  * fails the read, naming the file and line. A blank line is a row only in a
+  * one-column file, where it is the row whose one field is empty, which is how
+  * the writer writes a NULL there; in a wider file it is skipped. Each field is
+  * parsed strictly as its column's type ([[CsvValues]]), and one that does not
+  * read as it fails the read, naming the file, line, column and text. A field
+  * is NULL when it is the null string unquoted, and, in a column of any type but
+  * STRING and BINARY (the two with an empty value), when it is empty, quoted or
+  * not.
   */
 final class CsvReader(val files: IndexedSeq[Path], val options: CsvOptions) extends CatalogView {
 
   require(files.nonEmpty, "CsvReader requires at least one file")
 
-  val schema: Schema = {
-    if (options.inferSchema) inferSchemaFromFirstFile()
-    else {
+  /** What the files' text says when the types are inferred: the schema, the
+    * files its sample came from, and the header every later file is read by. */
+  private val inferred: Option[CsvReader.Inferred] =
+    if (options.inferSchema) Some(CsvReader.infer(files, options)) else None
+
+  val schema: Schema = inferred match {
+    case Some(i) => i.schema
+    case None =>
       options.columns match {
         case Some(cols) => Schema(cols.toVector)
         case None => throw new IllegalArgumentException(
           "CsvOptions.columns must be set when inferSchema = false"
         )
       }
-    }
   }
 
   /** Where the column types came from, for an error about a value that does
     * not read as one. */
-  private val typeOrigin: Option[String] =
-    if (options.inferSchema)
-      Some(s"its type was inferred from the first ${options.inferenceSampleRows} rows of '${files.head}'")
-    else None
+  private val typeOrigin: Option[String] = inferred.map { i =>
+    s"its type was inferred from the first ${options.inferenceSampleRows} rows of ${CsvReader.describe(i.sampled)}"
+  }
 
   def numPartitions: Int = files.length
 
   def readPartition(p: Int): Iterator[ColumnarBatch] = {
     require(p >= 0 && p < files.length, s"partition $p out of range [0,${files.length})")
-    new CsvPartitionIterator(files(p), schema, options, typeOrigin)
-  }
-
-  private def inferSchemaFromFirstFile(): Schema = CsvReader.naming(files.head, options) {
-    val parser = new CsvRowParser(CsvReader.open(files.head, options), options, files.head.toString)
-    try {
-      val headerRow: Option[Array[String]] =
-        if (options.header) CsvReader.nextNonBlank(parser).map(CsvReader.headerNames(_, options)) else None
-      val sample = scala.collection.mutable.ArrayBuffer.empty[Array[String]]
-      var width = headerRow.map(_.length).getOrElse(0)
-      // Without a header, the first row that is not a blank line says how many
-      // columns the file has; blank lines before it are rows if that is one.
-      val leadingBlanks = scala.collection.mutable.ArrayBuffer.empty[Array[String]]
-      var more = true
-      while (more && sample.length < options.inferenceSampleRows) {
-        parser.readRow() match {
-          case Some(r) =>
-            if (width == 0) {
-              if (parser.blank) leadingBlanks += r
-              else {
-                width = r.length
-                if (width == 1) sample ++= leadingBlanks.take(options.inferenceSampleRows)
-                if (sample.length < options.inferenceSampleRows) sample += r
-              }
-            } else if (!(parser.blank && width > 1)) {
-              CsvReader.checkWidth(r, width, files.head, parser.line, if (headerRow.isDefined) "its header" else "its first row")
-              sample += r
-            }
-          case None => more = false
-        }
-      }
-      if (width == 0) throw new IllegalArgumentException(s"CSV file ${files.head} is empty")
-      headerRow.foreach(CsvReader.checkHeader(_, files.head))
-      val names = headerRow.map(_.toVector).getOrElse((0 until width).map(i => s"_c$i").toVector)
-      CsvSchemaInferer.infer(names, sample)
-    } finally parser.close()
+    val header = if (p == 0) None else inferred.flatMap(_.header).map(_ -> files.head)
+    new CsvPartitionIterator(files(p), schema, options, typeOrigin, header)
   }
 }
 
 object CsvReader {
+
+  /** The schema inference read off a glob's text, the files its sample came
+    * from, and the first file's header names (with a header). */
+  private[csv] final case class Inferred(schema: Schema, header: Option[Vector[String]], sampled: Vector[Path])
+
+  /** The schema the files' text says. The first file's header names the
+    * columns (without a header, its first row says how many there are, named
+    * `_c0`, `_c1`, ...), and each column takes the narrowest type every field
+    * of the sample reads as ([[CsvSchemaInferer]]). The sample is the first
+    * `inferenceSampleRows` rows of the files in glob order, each later file's
+    * fields taken by its header's names: a file with no rows, such as the
+    * header alone that a writer leaves for an output partition holding none,
+    * says nothing of the types, so the sample reads on into the files after
+    * it. With no row in any file every column is a STRING. It read the first
+    * file alone, so a glob whose first part file was empty typed every column
+    * STRING, and a two-row first file decided every later file's types. */
+  private[csv] def infer(files: IndexedSeq[Path], options: CsvOptions): Inferred = {
+    val limit = options.inferenceSampleRows
+    val sample = scala.collection.mutable.ArrayBuffer.empty[Array[String]]
+    val sampled = Vector.newBuilder[Path]
+    var header: Option[Vector[String]] = None
+    var width = 0
+    var i = 0
+    while (i < files.length && (i == 0 || sample.length < limit)) {
+      val file = files(i)
+      val before = sample.length
+      naming(file, options) {
+        val parser = new CsvRowParser(open(file, options), options, file.toString)
+        try {
+          var order: Array[Int] = null
+          if (options.header) {
+            val names = nextNonBlank(parser).map(headerNames(_, options))
+            if (i == 0) {
+              names.foreach(checkHeader(_, file))
+              header = names.map(_.toVector)
+              width = names.map(_.length).getOrElse(0)
+            } else order = columnOrder(names, header.get, file, files.head)
+          }
+          val against =
+            if (i > 0) s"'${files.head}'" else if (header.isDefined) "its header" else "its first row"
+          // Without a header, the first row that is not a blank line says how
+          // many columns the file has; blank lines before it are rows if that
+          // is one.
+          val leadingBlanks = scala.collection.mutable.ArrayBuffer.empty[Array[String]]
+          var more = true
+          while (more && sample.length < limit) {
+            parser.readRow() match {
+              case Some(r) =>
+                if (width == 0) {
+                  if (parser.blank) leadingBlanks += r
+                  else {
+                    width = r.length
+                    if (width == 1) sample ++= leadingBlanks.take(limit)
+                    if (sample.length < limit) sample += r
+                  }
+                } else if (!(parser.blank && width > 1)) {
+                  checkWidth(r, width, file, parser.line, against)
+                  sample += (if (order == null) r else order.map(r(_)))
+                }
+              case None => more = false
+            }
+          }
+        } finally parser.close()
+      }
+      if (i == 0 && width == 0) throw new IllegalArgumentException(s"CSV file ${files.head} is empty")
+      if (i == 0 || sample.length > before) sampled += file
+      i += 1
+    }
+    val names = header.getOrElse((0 until width).map(i => s"_c$i").toVector)
+    Inferred(CsvSchemaInferer.infer(names, sample), header, sampled.result())
+  }
+
+  /** Where each of the first file's columns, `expected`, is in a later file
+    * of the glob whose header is `found`, matched by name regardless of case
+    * as a query reads names: null when the file names them in the same order,
+    * and for a file with no header at all, which has no rows either. A header
+    * naming other columns fails, naming both files' headers. */
+  private[csv] def columnOrder(found: Option[Array[String]], expected: Vector[String], file: Path,
+      first: Path): Array[Int] = found match {
+    case None => null
+    case Some(names) =>
+      def key(n: String) = n.toLowerCase(java.util.Locale.ROOT)
+      if (names.length == expected.length && names.indices.forall(k => key(names(k)) == key(expected(k)))) null
+      else {
+        val at = names.indices.groupBy(k => key(names(k)))
+        val order = expected.map(n => at.get(key(n)) match {
+          case Some(Seq(k)) => k
+          case _ => -1
+        })
+        if (names.length != expected.length || order.contains(-1))
+          throw new IllegalArgumentException(
+            s"CSV file '$file' names the columns ${names.mkString("[", ", ", "]")} in its header, where the " +
+              s"glob's first file '$first' names ${expected.mkString("[", ", ", "]")}; each file of a glob must " +
+              "name the same columns, in any order")
+        order.toArray
+      }
+  }
+
+  /** Files for a message: `'a.csv'`, `'a.csv' and 'b.csv'`, or the first and
+    * how many more. */
+  private[csv] def describe(files: Seq[Path]): String = files match {
+    case Seq(one) => s"'$one'"
+    case Seq(a, b) => s"'$a' and '$b'"
+    case many => s"'${many.head}' and ${many.length - 1} files after it"
+  }
+
   /** Build a reader from a path/glob string and an option bag. */
   def fromPath(pathOrGlob: String, options: CsvOptions): CsvReader = {
     val files = PathGlob.expand(pathOrGlob)
@@ -186,16 +266,28 @@ object CsvReader {
 }
 
 /** Iterator that streams one CSV file as a sequence of [[ColumnarBatch]]es of size
-  * `options.batchSize`. Header row (if any) is consumed up front.
+  * `options.batchSize`. Header row (if any) is consumed up front. `header`,
+  * the first file's header names and that file, makes this file's own header
+  * say where each column is ([[CsvReader.columnOrder]]); without it the
+  * header is skipped and fields are read in the schema's order.
   */
-final class CsvPartitionIterator(file: Path, schema: Schema, options: CsvOptions, typeOrigin: Option[String] = None)
+final class CsvPartitionIterator(file: Path, schema: Schema, options: CsvOptions, typeOrigin: Option[String] = None,
+    header: Option[(Vector[String], Path)] = None)
     extends Iterator[ColumnarBatch] {
 
   private val parser = CsvReader.naming(file, options)(new CsvRowParser(CsvReader.open(file, options), options, file.toString))
   private val width = schema.length
   private val against = if (options.inferSchema) { if (options.header) "its header" else "its first row" } else "the schema"
-  // Drop header if present.
-  if (options.header) CsvReader.naming(file, options)(CsvReader.nextNonBlank(parser))
+  /** Where each schema column is in this file's rows; null when in order. */
+  private val order: Array[Int] =
+    if (!options.header) null
+    else {
+      val names = CsvReader.naming(file, options)(CsvReader.nextNonBlank(parser)).map(CsvReader.headerNames(_, options))
+      header match {
+        case Some((expected, first)) => CsvReader.columnOrder(names, expected, file, first)
+        case None => null
+      }
+    }
 
   private var peeked: Option[Array[String]] = nextRow()
   private var peekedLine: Long = parser.line
@@ -234,7 +326,7 @@ final class CsvPartitionIterator(file: Path, schema: Schema, options: CsvOptions
   private def writeRow(batch: ColumnarBatch, row: Int, fields: Array[String]): Unit = {
     var c = 0
     while (c < width) {
-      val raw = fields(c)
+      val raw = if (order == null) fields(c) else fields(order(c))
       val dt = schema.fields(c).dataType
       // Only a STRING and a BINARY have an empty value; in any other column
       // an empty field is NULL, quoted or not.

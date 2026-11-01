@@ -4,7 +4,7 @@ import com.transformer.core.{Catalog, ColumnarBatch, DataType, Field, Materializ
 import com.transformer.sql.parse.SqlParser
 
 import net.sf.jsqlparser.expression.{
-  AllValue, AnalyticExpression, CaseExpression, CastExpression, DateValue, DoubleValue,
+  AllValue, AnalyticExpression, BooleanValue, CaseExpression, CastExpression, DateValue, DoubleValue,
   Expression, Function, LongValue, NotExpression, NullValue,
   SignedExpression, StringValue, TimeKeyExpression, TimestampValue, TimeValue, TrimFunction,
   WhenClause, WindowElement, WindowOffset
@@ -147,8 +147,6 @@ object LogicalBuilder {
     }
 
     sel match {
-      case _: WithItem => throw new IllegalArgumentException(
-        "WithItem reached buildAnySelect dispatch — this is a bug in the CTE builder")
       case ps: PlainSelect => buildSelect(ps, catalog, cteScope)
       case sol: SetOperationList => buildSetOperationList(sol, catalog, cteScope)
       case wrap: ParenthesedSelect => buildAnySelect(wrap.getSelect, catalog, cteScope, None)
@@ -753,7 +751,7 @@ object LogicalBuilder {
       * resolves in the input, as it does in WHERE, so a name two inputs have
       * is ambiguous here too; a column of the input that is no key is the
       * error that says the rule, and one the input does not have is its
-      * unknown column, or the literal TRUE or FALSE. */
+      * unknown column. */
     def groupedColumn(c: Column): Expr = {
       val qualifier = Option(c.getTable).map(t => unquoted(t.getName))
       val name = unquoted(c.getColumnName)
@@ -763,7 +761,7 @@ object LogicalBuilder {
             s"Column '${qualifier.fold("")(_ + ".")}$name' must appear in GROUP BY or inside an aggregate")
           case i => output(i)
         }
-        case None => booleanWord(c).getOrElse(throw Analyzer.unknownColumn(qualifier, name, sources))
+        case None => throw Analyzer.unknownColumn(qualifier, name, sources)
       }
     }
 
@@ -940,8 +938,7 @@ object LogicalBuilder {
   /** `left`, the left side of a comparison, arithmetic, `||`, LIKE, IS NULL,
     * IN or BETWEEN, unless it is a NOT. SQL's NOT negates the whole of one
     * (`NOT a = 1` is `NOT (a = 1)`), but JSqlParser hangs the second NOT of
-    * `NOT NOT a = 1`, and the only NOT of `COUNT_IF(NOT a = 1)` (the argument
-    * of any call with one), on the left side instead: `NOT ((NOT a) = 1)`.
+    * `NOT NOT a = 1` on the left side instead: `NOT ((NOT a) = 1)`.
     * Parentheses always reach the AST, so a NOT that is an operator's left
     * side was written without them, and binding it answers another question:
     * `NOT NOT flag IS NULL` kept the rows where `flag` is not NULL. AND and
@@ -985,8 +982,9 @@ object LogicalBuilder {
       val q = Option(c.getTable).map(t => unquoted(t.getName))
       val name = unquoted(c.getColumnName)
       Analyzer.findColumn(q, name, sources)
-        .orElse(booleanWord(c))
         .getOrElse(throw Analyzer.unknownColumn(q, name, sources))
+    // TRUE and FALSE are literals: a column named either is written in quotes.
+    case bv: BooleanValue => LitExpr(bv.getValue, DataType.BooleanType)
     case IntegerLiteral(v) => integerLiteral(v)
     case d: DoubleValue => doubleLiteral(d)
     // The value, each doubled quote one: `getValue` is the text between the
@@ -1056,6 +1054,11 @@ object LogicalBuilder {
           "IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it")
         case _ => throw new IllegalArgumentException("IN takes a list of values in parentheses")
       }
+      // Standard SQL and Postgres have no empty list, and the parser's
+      // acceptance of one gave `NULL NOT IN ()` NULL beside `1 NOT IN ()`
+      // TRUE, where a list of nothing holds no value of either.
+      if (items.isEmpty) throw new IllegalArgumentException(
+        s"${if (in.isNot) "NOT IN" else "IN"} needs at least one value in its list")
       val (operands, _) = Analyzer.unify(comparedBesideDecimals(left +: items, leftBound +: items.map(b)))
       InListExpr(operands.head, operands.tail, in.isNot)
 
@@ -1420,15 +1423,6 @@ object LogicalBuilder {
     case ae: AnalyticExpression => windowInputs(ae).exists(containsAggregate)
     case f: Function if isAggFn(f.getName) => true
     case _ => childExpressions(e).exists(containsAggregate)
-  }
-
-  /** TRUE or FALSE written as a bare word, which JSqlParser parses as a name:
-    * the literal, unless a column has the name. In quotes it is only a name. */
-  private def booleanWord(c: Column): Option[Expr] = {
-    val written = c.getColumnName
-    if (c.getTable == null && (written.equalsIgnoreCase("TRUE") || written.equalsIgnoreCase("FALSE")))
-      Some(LitExpr(written.equalsIgnoreCase("TRUE"), DataType.BooleanType))
-    else None
   }
 
   private def childExpressions(e: Expression): Seq[Expression] = e match {

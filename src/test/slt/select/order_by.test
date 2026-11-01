@@ -1,0 +1,93 @@
+# ORDER BY sees the output columns first (plans/robustness/22): a bare name
+# is the output column of that name when the SELECT list has one, an input
+# column otherwise. A NULL sorts as the smallest value unless the key says
+# NULLS FIRST or NULLS LAST. An ordinal names a SELECT-list position.
+
+statement ok
+CREATE TABLE t (a INT, b INT, s STRING)
+
+statement ok
+INSERT INTO t VALUES (1, 30, 'x'), (2, 10, 'y'), (3, 20, NULL), (4, NULL, 'x')
+
+# The alias b is the output column -b, so this sorts by -b.
+query INT nosort
+SELECT -b AS b FROM t ORDER BY b
+----
+NULL
+-30
+-20
+-10
+
+# An input column the SELECT list does not name.
+query STRING nosort
+SELECT s FROM t ORDER BY b DESC NULLS LAST
+----
+x
+NULL
+y
+x
+
+query INT,INT nosort
+SELECT a, b FROM t ORDER BY 2 DESC, 1
+----
+1	30
+3	20
+2	10
+4	NULL
+
+query INT nosort
+SELECT a FROM t ORDER BY b NULLS FIRST
+----
+4
+2
+3
+1
+
+query INT nosort
+SELECT a FROM t ORDER BY b DESC
+----
+1
+3
+2
+4
+
+# Inside an expression, a name that is both an input column and the alias of
+# something else is ambiguous.
+statement error
+SELECT -b AS b FROM t ORDER BY b + 0
+----
+ambiguous
+
+# Past DISTINCT, ORDER BY sees only the output columns.
+query STRING nosort
+SELECT DISTINCT s FROM t ORDER BY s NULLS LAST
+----
+x
+y
+NULL
+
+statement error
+SELECT s FROM t ORDER BY 3
+----
+position 3
+
+query INT,STRING nosort
+SELECT a, s FROM t ORDER BY s DESC, a DESC
+----
+2	y
+4	x
+1	x
+3	NULL
+
+query INT nosort
+SELECT a FROM t ORDER BY a LIMIT 2 OFFSET 1
+----
+2
+3
+
+query INT nosort
+SELECT a FROM t ORDER BY a DESC FETCH FIRST 3 ROWS ONLY
+----
+4
+3
+2

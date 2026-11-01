@@ -272,12 +272,13 @@ class SortExecTest {
 
   @Test def emitsBatchesAtDefaultCapacity(): Unit = {
     // The heap-merge path emits ColumnarBatches of DefaultCapacity. Generate
-    // just over capacity rows across two partitions and confirm we see one
-    // full batch + one short tail batch — the lazy emit honors DefaultCapacity
-    // instead of dumping everything into one batch.
+    // just over capacity rows across two partitions and confirm we see full
+    // batches + one short tail batch — the lazy emit honors DefaultCapacity
+    // instead of dumping everything into one batch. The suite also runs at a
+    // capacity of 1 and 2 rows (docs/testing.md), where 17 rows past it are
+    // several more full batches.
     val cap = ColumnarBatch.DefaultCapacity
-    val tail = 17
-    val total = cap + tail
+    val total = cap + 17
     val half = total / 2
     val parts = Vector(
       Vector.tabulate(half)(i => row(i * 2, 0)),
@@ -286,7 +287,7 @@ class SortExecTest {
     val it = SortExec(plan, Seq(SortKey(k, true))).execute(0)
     val sizes = mutable.ArrayBuffer.empty[Int]
     while (it.hasNext) sizes += it.next().numRows
-    assertEquals(Vector(cap, tail), sizes.toVector)
+    assertEquals(Vector.fill(total / cap)(cap) ++ Option(total % cap).filter(_ > 0), sizes.toVector)
   }
 
   /** Smoke for a monotone-key sort that crosses partition boundaries — the

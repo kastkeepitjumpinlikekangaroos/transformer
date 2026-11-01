@@ -1,5 +1,7 @@
 package com.transformer.gui
 
+import java.util.Locale
+
 /** One key the vim engine reads.
   *
   * A printable key arrives as the character it types, shift and the keyboard
@@ -49,7 +51,7 @@ object VimKey {
       val named =
         if (close > i + 1) {
           val name = notation.substring(i + 1, close)
-          val lower = name.toLowerCase
+          val lower = name.toLowerCase(Locale.ROOT)
           if (lower.startsWith("c-") && name.length == 3) Some(Ctrl(name.charAt(2).toLower))
           else Named.get(lower)
         } else None

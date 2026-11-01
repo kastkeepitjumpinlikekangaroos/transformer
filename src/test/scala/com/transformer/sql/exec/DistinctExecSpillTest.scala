@@ -5,6 +5,7 @@ import com.transformer.core.metrics.MetricsNode
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
+import org.junit.Assume.assumeTrue
 
 import java.nio.file.{Files, Path}
 import scala.collection.mutable
@@ -42,6 +43,14 @@ class DistinctExecSpillTest {
 
   private def spillyOpts(): ExecutionOptions =
     ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))
+
+  /** A one-byte threshold spills once per input batch, so a test that spills
+    * thousands of rows that way writes a run per batch: past
+    * `spill_max_runs` and into thousands of files under the 1- and 2-row
+    * batch capacities the whole suite also runs at (docs/testing.md), where
+    * the spill fuzzers and `slt_test`'s spill mode cover spilling instead. */
+  private def assumeFullBatches(): Unit =
+    assumeTrue("needs batches of 1024 rows or more", ColumnarBatch.DefaultCapacity >= 1024)
 
   private def drainRows(it: Iterator[ColumnarBatch], schema: Schema): Vector[Vector[Any]] = {
     val buf = mutable.ArrayBuffer.empty[Vector[Any]]
@@ -101,6 +110,7 @@ class DistinctExecSpillTest {
   }
 
   @Test def fixedWidthBitEqualWithAndWithoutSpill(): Unit = {
+    assumeFullBatches()
     val schema = Schema(Vector(Field("a", DataType.IntType), Field("b", DataType.IntType)))
     val rng = new Random(31L)
     val parts = (0 until 4).map { _ =>
@@ -117,6 +127,7 @@ class DistinctExecSpillTest {
   }
 
   @Test def variableWidthBitEqualWithAndWithoutSpill(): Unit = {
+    assumeFullBatches()
     val schema = Schema(Vector(Field("a", DataType.StringType), Field("b", DataType.IntType)))
     val rng = new Random(42L)
     val parts = (0 until 3).map { _ =>
@@ -167,6 +178,7 @@ class DistinctExecSpillTest {
   // ---- Sub-plan 2: spill + metrics composition ------------------------------
 
   @Test def spillAndMetricsComposeReportingNonZeroSpillCounters(): Unit = {
+    assumeFullBatches()
     val schema = Schema(Vector(Field("k", DataType.IntType), Field("v", DataType.IntType)))
     val rng = new Random(31L)
     val parts = (0 until 4).map { _ =>
@@ -199,6 +211,7 @@ class DistinctExecSpillTest {
   // foldSpillFiles. The spill set now uses positional names. See
   // plans/bugfixes/01.
   @Test def duplicateNamedChildSchemaUnderSpill(): Unit = {
+    assumeFullBatches()
     val schema = Schema(Vector(Field("a", DataType.IntType), Field("a", DataType.IntType)))
     val rng = new Random(2026L)
     val parts = (0 until 4).map { _ =>

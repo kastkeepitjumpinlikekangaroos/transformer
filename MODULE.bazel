@@ -7,8 +7,10 @@ bazel_dep(name = "rules_scala", version = "7.0.0")
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
 maven.install(
     artifacts = [
-        # SQL parser
-        "com.github.jsqlparser:jsqlparser:5.0",
+        # SQL parser. 5.2 reads four parentheses deep inside a call,
+        # `COALESCE((((a > 1))), FALSE)`, which 5.0 could not parse; 5.3
+        # refuses seventeen nested parentheses, which 5.2 reads at any depth.
+        "com.github.jsqlparser:jsqlparser:5.2",
 
         # Parquet (local FS only; Hadoop libs are minimal, no daemons)
         "org.apache.parquet:parquet-hadoop:1.14.3",

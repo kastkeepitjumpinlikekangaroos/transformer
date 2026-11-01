@@ -4022,15 +4022,16 @@ class SqlEngineTest {
   }
 
   /** A NOT negates what follows it as SQL reads it, or is refused. The parser
-    * hung the second NOT of `NOT NOT f IS NULL` on `f` alone, so the query
-    * kept the rows where `f` is not NULL, and the only NOT of `NOT f > TRUE`
-    * as a one-argument call's argument too, so `COUNT_IF` counted none of the
-    * two rows it holds for. Over a number each failed with `NOT takes a
-    * BOOLEAN, not INT`, about a NOT on `a` alone that the query never wrote. */
+    * hangs the second NOT of `NOT NOT f IS NULL` on `f` alone, so the query
+    * kept the rows where `f` is not NULL; over a number it failed with `NOT
+    * takes a BOOLEAN, not INT`, about a NOT on `a` alone that the query never
+    * wrote. JSqlParser 5.0 did the same to the only NOT of a one-argument
+    * call's argument, `COUNT_IF(NOT f > TRUE)`, which was refused; 5.3 reads
+    * it as SQL does. */
   @Test def aNotNegatesWhatFollowsIt(): Unit = {
     val cat = textCatalog()
-    Seq("SELECT id FROM flags WHERE NOT NOT f IS NULL", "SELECT COUNT_IF(NOT f > TRUE) AS n FROM flags",
-      "SELECT a FROM t WHERE NOT NOT a = 1", "SELECT MAX(NOT a = 1) AS m FROM t",
+    Seq("SELECT id FROM flags WHERE NOT NOT f IS NULL",
+      "SELECT a FROM t WHERE NOT NOT a = 1",
       "SELECT a FROM t WHERE NOT NOT a + 1 = 2", "SELECT a FROM t WHERE NOT NOT s LIKE 'x'",
       "SELECT a FROM t WHERE NOT NOT a IN (1, 2)", "SELECT a FROM t WHERE NOT NOT a BETWEEN 1 AND 2",
       "SELECT a FROM t WHERE NOT NOT s || 'x' = 'xx'"
@@ -4044,6 +4045,8 @@ class SqlEngineTest {
     assertEquals(Seq(3), column("SELECT id FROM flags WHERE NOT NOT (f IS NULL)", cat, "id"))
     assertEquals(Seq(3), column("SELECT id FROM flags WHERE NOT (NOT f IS NULL)", cat, "id"))
     assertEquals(Seq(2L), column("SELECT COUNT_IF(NOT (f > TRUE)) AS n FROM flags", cat, "n"))
+    assertEquals(Seq(2L), column("SELECT COUNT_IF(NOT f > TRUE) AS n FROM flags", cat, "n"))
+    assertEquals(column("SELECT MAX(NOT (a = 1)) AS m FROM t", cat, "m"), column("SELECT MAX(NOT a = 1) AS m FROM t", cat, "m"))
     assertEquals(Seq(1, 2), column("SELECT id FROM flags WHERE NOT f IS NULL ORDER BY id", cat, "id"))
     assertEquals(Seq(false, true, null), column("SELECT NOT f = TRUE AS g FROM flags ORDER BY id", cat, "g"))
     assertEquals(Seq(1, 1, 0), column("SELECT IF(NOT f IS NULL, 1, 0) AS g FROM flags ORDER BY id", cat, "g"))
@@ -4686,9 +4689,11 @@ class SqlEngineTest {
       try { SqlEngine.execute(sql, cat); fail(s"$sql was accepted"); "" }
       catch { case e: IllegalArgumentException => e.getMessage }
     Seq("'b'", "+1", "-1", "1.5", "NULL", "TRUE", "1 + 0", "CAST('1' AS INT)", "CURRENT_DATE", "RAND(7)").foreach { k =>
+      // The message names the key as JSqlParser renders it: TRUE as true.
+      val shown = if (k == "TRUE") "true" else k
       def refused(sql: String, clause: String): Unit = {
         val m = bindError(sql)
-        assertTrue(s"$sql -> $m", m.startsWith(s"$clause $k reads no column"))
+        assertTrue(s"$sql -> $m", m.startsWith(s"$clause $shown reads no column"))
       }
       refused(s"SELECT a, b FROM t ORDER BY $k", "ORDER BY")
       refused(s"SELECT a, b FROM t ORDER BY a, $k", "ORDER BY")
@@ -5121,5 +5126,68 @@ class SqlEngineTest {
     assertTrue(s"$outside of 20000", outside > 9000 && outside < 11000)
     // An operand that reads no RAND() is still the comparisons it was.
     assertEquals(Seq(Seq(5000L)), rowsOf("SELECT COUNT(*) AS n FROM many WHERE id BETWEEN 5000 AND 9999", cat))
+  }
+
+  /** An aggregate with no GROUP BY keys holds one group, so it never spills:
+    * it spilled its one state at the threshold like a grouped one, and with
+    * no aggregates either, `SELECT 1 FROM t GROUP BY ()`, the state had no
+    * columns and every spill failed with parquet's `Cannot write a schema
+    * with an empty group`. Found by `slt_test`'s spill mode. */
+  @Test def anAggregateWithoutKeysNeverSpills(): Unit = {
+    val cat = auditCatalog()
+    val spill = ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))
+    def spilled(sql: String): Seq[Seq[Any]] = {
+      val q = SqlEngine.execute(sql, cat, spill)
+      collectAllRows(q).map(r => q.schema.fieldNames.map(r))
+    }
+    assertEquals(Seq(Seq(1)), spilled("SELECT 1 AS one FROM t GROUP BY ()"))
+    assertEquals(Seq(Seq(3L, 60L)), spilled("SELECT COUNT(*) AS n, SUM(x) AS s FROM t"))
+    assertEquals(Seq(Seq("p", 2L), Seq("q", 1L)), spilled("SELECT g, COUNT(*) AS n FROM t GROUP BY g ORDER BY g"))
+  }
+
+  /** An IN list needs a value, as in standard SQL and Postgres (the user's
+    * choice): the parser read `x IN ()`, and it ran, `1 NOT IN ()` TRUE but
+    * `NULL NOT IN ()` NULL, where a list of nothing holds neither. Found by
+    * SQLite's sqllogictest corpus, which allows the empty list. */
+  @Test def anEmptyInListIsRefused(): Unit = {
+    val cat = auditCatalog()
+    for ((sql, word) <- Seq("SELECT x FROM t WHERE x IN ()" -> "IN", "SELECT x FROM t WHERE NULL NOT IN ()" -> "NOT IN")) {
+      val e = try { SqlEngine.execute(sql, cat); null } catch { case e: IllegalArgumentException => e }
+      assertNotNull(sql, e)
+      assertEquals(s"$word needs at least one value in its list", e.getMessage)
+    }
+  }
+
+  /** Two signs in a row are refused naming them: JSqlParser, in every
+    * version, cannot read `- -3` as a sign of a signed number, and said
+    * `Encountered unexpected token: "SELECT"`. A sign after an operator's,
+    * `5 - -3`, is one sign and parses; signs in a string or a comment are
+    * text; and a query that fails to parse for another reason says so. */
+  @Test def twoSignsInARowAreRefusedNamingThem(): Unit = {
+    val cat = auditCatalog()
+    def refusal(sql: String): String =
+      try { SqlEngine.execute(sql, cat); fail(s"expected a refusal: $sql"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    assertEquals("SQL parse error: two signs in a row, '- -' at line 1, column 8, cannot be parsed; put the second " +
+      "sign and what it applies to in parentheses, as in -(-3)", refusal("SELECT - -3 AS v"))
+    assertTrue(refusal("SELECT x / - + 2 AS v FROM t").contains("two signs in a row, '- +' at line 1, column 12"))
+    assertTrue(refusal("SELECT x\n  FROM t WHERE x > + - 2").contains("'+ -' at line 2, column 20"))
+    assertEquals(Seq(Seq(8, 3)), rowsOf("SELECT 5 - - 3 AS a, -(-3) AS b", cat))
+    assertEquals(Seq(Seq("- -", 1)), rowsOf("SELECT '- -' AS s, 1 -- - - 2\n AS n", cat))
+    assertFalse(refusal("SELECT - -3 FROM").contains("two signs"))
+  }
+
+  /** JSqlParser 5.3 reads four parentheses deep inside a call, which 5.0
+    * refused as a parse error, and TRUE and FALSE as literals in every
+    * position: 5.0 parsed them as names, and the binder read a column named
+    * `true` first. A column of that name is written in quotes. */
+  @Test def theParserReadsNestedParenthesesAndBooleanLiterals(): Unit = {
+    val cat = auditCatalog()
+    assertEquals(Seq(Seq(false), Seq(true), Seq(true)),
+      rowsOf("SELECT COALESCE((((x > 10))), FALSE) AS c FROM t ORDER BY x", cat))
+    assertEquals(Seq(Seq(true, false, 3L)), rowsOf("SELECT TRUE AS t, NOT TRUE AS f, COUNT(*) AS n FROM t WHERE TRUE", cat))
+    val named = new Catalog
+    named.register("b", memView(Schema(Vector(Field("true", DataType.IntType))), Seq(Seq(Array[Any](7)))))
+    assertEquals(Seq(Seq(7, true)), rowsOf("SELECT \"true\" AS c, true AS l FROM b", named))
   }
 }

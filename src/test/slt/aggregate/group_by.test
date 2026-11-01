@@ -1,0 +1,107 @@
+# A GROUP BY key is the expression it names, however it is written and
+# wherever it appears (plans/robustness/30); GROUP BY () groups by nothing;
+# a HAVING with no GROUP BY makes one group.
+
+statement ok
+CREATE TABLE t (a INT, b INT, s STRING)
+
+statement ok
+INSERT INTO t VALUES (1, 10, 'p'), (2, 20, 'q'), (3, 30, 'p'), (4, 40, 'q'), (5, 50, 'p')
+
+query STRING,BIGINT rowsort
+SELECT UPPER(s) || '!', COUNT(*) FROM t GROUP BY UPPER(s)
+----
+P!	3
+Q!	2
+
+query STRING,BIGINT rowsort
+SELECT CASE WHEN a % 2 = 0 THEN 'even' ELSE 'odd' END, SUM(b) FROM t GROUP BY a % 2
+----
+even	60
+odd	90
+
+query INT,BIGINT rowsort
+SELECT a % 2, COUNT(*) FROM t GROUP BY a % 2 HAVING a % 2 = 1
+----
+1	3
+
+query INT,STRING,BIGINT rowsort
+SELECT a % 2, s, COUNT(*) FROM t GROUP BY (a % 2), s
+----
+0	q	2
+1	p	3
+
+query INT,BIGINT rowsort
+SELECT t.a + 1, COUNT(*) FROM t GROUP BY a + 1
+----
+2	1
+3	1
+4	1
+5	1
+6	1
+
+# 1 + a is another expression than the key a + 1.
+statement error
+SELECT 1 + a FROM t GROUP BY a + 1
+----
+must appear in GROUP BY
+
+query BIGINT
+SELECT COUNT(*) FROM t GROUP BY ()
+----
+5
+
+query INT
+SELECT 1 FROM t GROUP BY ()
+----
+1
+
+query STRING
+SELECT 'non-empty' FROM t HAVING COUNT(*) > 0
+----
+non-empty
+
+query STRING
+SELECT 'none' FROM t HAVING COUNT(*) > 5
+----
+
+# An aggregate only in ORDER BY or inside a window makes the query an
+# aggregate too.
+query INT
+SELECT 1 FROM t ORDER BY COUNT(*)
+----
+1
+
+query BIGINT
+SELECT SUM(COUNT(*)) OVER () FROM t
+----
+5
+
+query STRING,BIGINT,BIGINT rowsort
+SELECT s, COUNT(*), SUM(COUNT(*)) OVER () FROM t GROUP BY s
+----
+p	3	5
+q	2	5
+
+statement error
+SELECT a, COUNT(*) FROM t
+----
+must appear in GROUP BY
+
+# A column whose name looks like an internal aggregate slot is just a column.
+statement ok
+CREATE TABLE u (_agg0 INT, x INT)
+
+statement ok
+INSERT INTO u VALUES (1, 10), (1, 5), (2, 7)
+
+query INT,BIGINT rowsort
+SELECT _agg0, SUM(x) FROM u GROUP BY _agg0
+----
+1	15
+2	7
+
+query INT rowsort
+SELECT _agg0 FROM u GROUP BY _agg0 HAVING SUM(x) > 10
+----
+1

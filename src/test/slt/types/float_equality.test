@@ -1,0 +1,102 @@
+# FLOAT and DOUBLE have one equality, Postgres's and Spark's
+# (plans/robustness/21): NaN equals NaN and sorts above every other value,
+# and -0.0 equals 0.0. Every operator that compares, groups, joins, ranks or
+# de-duplicates agrees with =. Division and % by zero are NULL, as for every
+# number type (plans/robustness/30).
+
+statement ok
+CREATE TABLE f (id INT, d DOUBLE)
+
+statement ok
+INSERT INTO f VALUES (1, CAST('NaN' AS DOUBLE)), (2, CAST('NaN' AS DOUBLE)), (3, 0.0), (4, -0.0), (5, CAST('Infinity' AS DOUBLE)), (6, 1.5), (7, NULL)
+
+query INT,DOUBLE rowsort
+SELECT id, d FROM f
+----
+1	NaN
+2	NaN
+3	0.0
+4	-0.0
+5	Infinity
+6	1.5
+7	NULL
+
+query INT,INT rowsort
+SELECT l.id, r.id FROM f l JOIN f r ON l.d = r.d WHERE l.id < r.id
+----
+1	2
+3	4
+
+query INT,BOOLEAN,BOOLEAN,BOOLEAN rowsort
+SELECT id, d = d, d > CAST('Infinity' AS DOUBLE), d < 0.0 FROM f
+----
+1	true	true	false
+2	true	true	false
+3	true	false	false
+4	true	false	false
+5	true	false	false
+6	true	false	false
+7	NULL	NULL	NULL
+
+# NaN sorts above Infinity; NULL sorts first under ASC.
+query INT
+SELECT id FROM f ORDER BY d, id
+----
+7
+3
+4
+6
+5
+1
+2
+
+query BIGINT
+SELECT COUNT(DISTINCT d) FROM f
+----
+4
+
+query BIGINT rowsort
+SELECT COUNT(*) FROM f GROUP BY d
+----
+1
+1
+1
+2
+2
+
+# The two zeros and the two NaNs are peers.
+query INT,BIGINT,BIGINT rowsort
+SELECT id, RANK() OVER (ORDER BY d), DENSE_RANK() OVER (ORDER BY d) FROM f
+----
+1	6	5
+2	6	5
+3	2	2
+4	2	2
+5	5	4
+6	4	3
+7	1	1
+
+# Of two equal zeros, MAX gives 0.0 and MIN -0.0, whatever their order.
+query DOUBLE,DOUBLE
+SELECT MAX(d), MIN(d) FROM f
+----
+NaN	-0.0
+
+query DOUBLE,DOUBLE
+SELECT MAX(d), MIN(d) FROM f WHERE d = 0.0
+----
+0.0	-0.0
+
+query INT rowsort
+SELECT id FROM f WHERE d IN (CAST('NaN' AS DOUBLE), 0.0)
+----
+1
+2
+3
+4
+
+# Division and % by zero are NULL; past the largest double is Infinity.
+query DOUBLE,DOUBLE,DOUBLE,DOUBLE
+SELECT 1.5 / 0.0, 1.5 % 0.0, -1.5 / -0.0, 1e308 * 10
+----
+NULL	NULL	NULL	Infinity

@@ -1,0 +1,131 @@
+# Each refusal the binder makes, with the words it says: a refusal is part of
+# the engine's surface as much as an answer is, and its message is how a user
+# learns what to write instead. One record per message no other test reads.
+
+statement ok
+CREATE TABLE t (a INT, b INT, s STRING, x BINARY)
+
+statement ok
+INSERT INTO t VALUES (1, 10, 'p', x'01'), (2, 20, 'q', x'02')
+
+statement error
+WITH RECURSIVE r AS (SELECT 1 AS n) SELECT n FROM r
+----
+Recursive CTEs (WITH RECURSIVE) are not supported
+
+statement error
+WITH c(p, q) AS (SELECT a FROM t) SELECT p FROM c
+----
+CTE 'c' declares 2 column alias(es) but its body
+
+statement error
+SELECT a FROM t ORDER BY a UNION ALL SELECT b FROM t
+----
+ORDER BY before the last arm of a UNION is not supported; put the arm in parentheses
+
+statement error
+SELECT a FROM t UNION ALL SELECT a, b FROM t
+----
+UNION arms have different column counts: 1 vs 2
+
+statement error
+SELECT a FROM t LIMIT 1, 1 OFFSET 1
+----
+OFFSET given twice
+
+statement error
+SELECT TOP 1 a FROM t OFFSET 1
+----
+TOP n with OFFSET is not supported; write LIMIT n OFFSET m
+
+statement error
+SELECT a FROM t LIMIT 1 FETCH FIRST 1 ROWS ONLY
+----
+both limit the rows; write one
+
+statement error
+SELECT a, b, COUNT(*) FROM t GROUP BY ROLLUP (a, b)
+----
+GROUP BY ROLLUP (...) is not supported
+
+statement error
+SELECT a, b, COUNT(*) FROM t GROUP BY CUBE (a, b)
+----
+GROUP BY CUBE (...) is not supported
+
+statement error
+SELECT * FROM t CROSS JOIN t u ON t.a = u.a
+----
+CROSS JOIN takes no ON
+
+statement error
+SELECT * FROM t, t u ON t.a = u.a
+----
+A table after a comma takes no ON
+
+statement error
+SELECT * FROM t JOIN t u
+----
+needs an ON condition; write CROSS JOIN to pair every row
+
+statement error
+SELECT * FROM t LEFT JOIN t u
+----
+needs an ON condition
+
+# A time of day is no type the engine has, written either way.
+statement error
+SELECT TIME '10:00:00'
+----
+Unsupported CAST target type: TIME
+
+statement error
+SELECT {t '10:00:00'}
+----
+TIME literal not supported
+
+statement error
+SELECT a FROM t WHERE s LIKE 'p%' ESCAPE 'ab'
+----
+ESCAPE must be a single-character string literal
+
+statement error
+SELECT TRIM(LEADING 'x' FROM s) FROM t
+----
+Only the single-argument TRIM(x) is supported
+
+statement error
+SELECT a FROM t WHERE SUM(b) > 1
+----
+SUM
+
+statement error
+SELECT a FROM t WHERE ROW_NUMBER() OVER (ORDER BY a) > 1
+----
+ROW_NUMBER
+
+statement error
+SELECT SUM(a, b) FROM t
+----
+Unsupported aggregate: SUM(2 args)
+
+statement error
+SELECT NO_SUCH_FUNCTION(a) FROM t
+----
+NO_SUCH_FUNCTION
+
+statement error
+SELECT CAST(a AS INTERVAL) FROM t
+----
+INTERVAL
+
+statement error
+SELECT UPPER(x) FROM t
+----
+on BINARY is not supported; a byte array is not text
+
+statement error
+SELECT SUM(a) OVER (ORDER BY a ROWS BETWEEN a PRECEDING AND CURRENT ROW) FROM t
+
+statement error
+SELECT NTILE(2) OVER (ORDER BY a) FROM t

@@ -1,0 +1,107 @@
+# An INT or BIGINT result that does not fit its type is an error naming the
+# value (plans/robustness/18), on the row and the vector path alike, and
+# whatever the partition layout: a SUM is exact before it is checked, so an
+# overflow does not depend on the order rows are added in.
+
+statement ok
+CREATE TABLE i (id INT, a INT, b BIGINT)
+
+statement ok
+INSERT INTO i VALUES (1, 2147483647, 9223372036854775807), (2, -2147483648, -9223372036854775808), (3, 1, 1)
+
+# INT arithmetic stays INT, and the edge values themselves are fine.
+query INT,INT,INT rowsort
+SELECT id, a, a - 0 FROM i
+----
+1	2147483647	2147483647
+2	-2147483648	-2147483648
+3	1	1
+
+statement error
+SELECT a + 1 FROM i WHERE id = 1
+----
+Integer overflow
+
+statement error
+SELECT a - 1 FROM i WHERE id = 2
+----
+Integer overflow
+
+statement error
+SELECT -a FROM i WHERE id = 2
+----
+Integer overflow
+
+statement error
+SELECT ABS(a) FROM i WHERE id = 2
+----
+Integer overflow
+
+statement error
+SELECT a * 2 FROM i WHERE id = 1
+----
+Integer overflow
+
+# The smallest value divided by -1 is the one division that overflows.
+statement error
+SELECT a / -1 FROM i WHERE id = 2
+----
+Integer overflow
+
+statement error
+SELECT b / -1 FROM i WHERE id = 2
+----
+Integer overflow
+
+# A remainder never overflows.
+query INT,BIGINT rowsort
+SELECT a % -1, b % -1 FROM i
+----
+0	0
+0	0
+0	0
+
+# INT beside BIGINT widens to BIGINT before it adds, so this fits.
+query BIGINT
+SELECT a + CAST(1 AS BIGINT) FROM i WHERE id = 1
+----
+2147483648
+
+statement error
+SELECT b + 1 FROM i WHERE id = 1
+----
+Integer overflow
+
+# SUM of INTs is a BIGINT, so INT's edges add up without overflow.
+query BIGINT
+SELECT SUM(a) FROM i
+----
+0
+
+# SUM of BIGINTs is exact while it adds: the maximum plus the minimum plus one
+# is 0, in every order the rows can arrive in.
+query BIGINT
+SELECT SUM(b) FROM i
+----
+0
+
+# The total itself must fit.
+statement error
+SELECT SUM(b) FROM i WHERE id IN (1, 3)
+----
+Integer overflow
+
+# A narrowing CAST that loses the value is an error too; a fraction truncates
+# toward zero.
+statement error
+SELECT CAST(b AS INT) FROM i WHERE id = 1
+----
+Integer overflow
+
+query INT,INT
+SELECT CAST(2.7 AS INT), CAST(-2.7 AS INT)
+----
+2	-2
+
+statement error
+SELECT CAST(CAST('NaN' AS DOUBLE) AS BIGINT)

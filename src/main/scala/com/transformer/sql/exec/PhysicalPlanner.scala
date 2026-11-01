@@ -350,9 +350,10 @@ object PhysicalPlanner {
             s"$NestedLoopMaxRows rows (left=$lc, right=$rc); add one to the ON condition")
       case _ => ()
     }
-    // A side that is itself such a join holds up to the product of its own
-    // sides, where its estimate says the larger. One small side and one
-    // large (100 buckets against a million rows) still runs.
+    // A side that is itself such a join, or a join on an equality over one,
+    // holds up to the product of the pairing's sides, where its estimate says
+    // the larger. One small side and one large (100 buckets against a
+    // million rows) still runs.
     (rowsAtMost(l), rowsAtMost(r)) match {
       case (Some((lb, lPaired)), Some((rb, rPaired))) if (lPaired || rPaired) && times(lb, rb) > NestedLoopMaxPairs =>
         throw new IllegalArgumentException(
@@ -386,11 +387,18 @@ object PhysicalPlanner {
   /** At most how many rows `p` produces, for [[enforceNestedLoopGuard]], and
     * whether that is the product of a join with no equality between its sides,
     * which pairs every row of one side with every row of the other that its
-    * condition keeps, so up to all of them. `None` where a size is unknown. */
+    * condition keeps, so up to all of them, or holds such a product's rows
+    * through a join on an equality. `None` where a size is unknown. */
   private def rowsAtMost(p: LogicalPlan): Option[(Long, Boolean)] = p match {
     case LogicalJoin(l, r, cond, _)
         if splitEqualityKeys(cond, l.outputSchema.length, r.outputSchema.length)._1.isEmpty =>
       for ((lc, _) <- rowsAtMost(l); (rc, _) <- rowsAtMost(r)) yield (times(lc, rc), true)
+    // A join on an equality keeps, by its estimate, its larger side's rows, so
+    // it is sized from its sides' bounds: the estimator sizes a pairing below
+    // it as that pairing's larger side.
+    case LogicalJoin(l, r, _, kind) =>
+      for ((lc, lPaired) <- rowsAtMost(l); (rc, rPaired) <- rowsAtMost(r))
+        yield (LogicalPlanCardinality.joinEstimate(lc, rc, kind), lPaired || rPaired)
     // Each keeps at most the rows it reads.
     case LogicalProject(child, _) => rowsAtMost(child)
     case LogicalFilter(child, _) => rowsAtMost(child)

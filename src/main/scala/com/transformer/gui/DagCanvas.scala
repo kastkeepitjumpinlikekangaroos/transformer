@@ -2,6 +2,7 @@ package com.transformer.gui
 
 import com.transformer.job.{InputFilePath, TaskDag, TaskStatus}
 
+import java.util.Locale
 import javafx.scene.canvas.GraphicsContext
 import javafx.scene.paint.Color
 import javafx.scene.text.TextAlignment
@@ -58,7 +59,7 @@ final class DagCanvas(session: JobSession) extends GraphCanvas {
   /** Which node is selected, as the edges see it. */
   private def selectedTask: Option[Int] = session.selectedTaskIndex
   private def selectedInput: Option[String] =
-    session.selectedInputIndex.flatMap(i => session.inputs.lift(i)).map(_.viewName.toLowerCase)
+    session.selectedInputIndex.flatMap(i => session.inputs.lift(i)).map(_.viewName.toLowerCase(Locale.ROOT))
 
   private def drawEdges(gc: GraphicsContext, layout: DagLayout): Unit = {
     val dag = session.dag.get
@@ -119,7 +120,7 @@ final class DagCanvas(session: JobSession) extends GraphCanvas {
     gc.setTextAlign(TextAlignment.LEFT)
     gc.setFill(accent)
     gc.setFont(TagFont)
-    gc.fillText(s"INPUT · ${in.detectedFormat.toUpperCase}", textX, box.y + 17)
+    gc.fillText(s"INPUT · ${in.detectedFormat.toUpperCase(Locale.ROOT)}", textX, box.y + 17)
     gc.setFill(Palette.Text)
     gc.setFont(TitleFont)
     gc.fillText(fit(in.viewName, TitleFont, textW), textX, box.y + 34)

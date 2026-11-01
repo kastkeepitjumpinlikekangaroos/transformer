@@ -1,0 +1,1490 @@
+# From SQLite's sqllogictest corpus (https://www.sqlite.org/sqllogictest,
+# mirrored at https://github.com/gregrahn/sqllogictest): test/index/view/10/slt_good_1.test,
+# up to its 150th query this engine runs. Its COPYRIGHT lets it be copied
+# freely. `skipif transformer` marks a record the engine answers otherwise
+# by design, with the reason.
+
+hash-threshold 8
+
+statement ok
+CREATE TABLE tab0(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+INSERT INTO tab0 VALUES(0,30,81.46,'iyrcg',91,30.73,'ifvzd')
+
+statement ok
+INSERT INTO tab0 VALUES(1,95,61.72,'rwhpv',97,41.75,'qbvag')
+
+statement ok
+INSERT INTO tab0 VALUES(2,22,73.2,'ndyff',83,78.44,'dddcg')
+
+statement ok
+INSERT INTO tab0 VALUES(3,45,69.17,'doinu',64,54.75,'slnqc')
+
+statement ok
+INSERT INTO tab0 VALUES(4,84,41.83,'jgcva',95,56.56,'qcysv')
+
+statement ok
+INSERT INTO tab0 VALUES(5,58,82.60,'eyddi',88,1.73,'zebga')
+
+statement ok
+INSERT INTO tab0 VALUES(6,0,52.14,'jxmel',22,2.27,'pzxbn')
+
+statement ok
+INSERT INTO tab0 VALUES(7,65,33.32,'dhwwf',58,31.42,'lfnyc')
+
+statement ok
+INSERT INTO tab0 VALUES(8,47,0.34,'qdhbg',51,80.85,'jaoya')
+
+statement ok
+INSERT INTO tab0 VALUES(9,88,80.81,'ulqwi',59,24.71,'rcujp')
+
+statement ok
+CREATE TABLE tab1(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab1_0 on tab1 (col0)
+
+statement ok
+CREATE INDEX idx_tab1_1 on tab1 (col1)
+
+statement ok
+CREATE INDEX idx_tab1_3 on tab1 (col3)
+
+statement ok
+CREATE INDEX idx_tab1_4 on tab1 (col4)
+
+statement ok
+INSERT INTO tab1 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab2(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab2_0 ON tab2 (col0 DESC)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab2_1 ON tab2 (col3 DESC,col4 DESC)
+
+statement ok
+CREATE INDEX idx_tab2_5 ON tab2 (col4)
+
+statement ok
+INSERT INTO tab2 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab3(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab3_0 ON tab3 (col4)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_1 ON tab3 (col1 DESC)
+
+statement ok
+CREATE INDEX idx_tab3_4 ON tab3 (col3)
+
+statement ok
+CREATE INDEX idx_tab3_5 ON tab3 (col0)
+
+statement ok
+INSERT INTO tab3 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab4(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab4_1 ON tab4 (col4 DESC,col3 DESC)
+
+statement ok
+CREATE INDEX idx_tab4_2 ON tab4 (col3 DESC)
+
+statement ok
+CREATE INDEX idx_tab4_4 ON tab4 (col1 DESC)
+
+statement ok
+INSERT INTO tab4 SELECT * FROM tab0
+
+query I rowsort label-empty
+SELECT pk FROM tab0 WHERE pk IS NULL
+----
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab0
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab0_153') DROP VIEW view_1_tab0_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab0_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab0_153') DROP VIEW view_2_tab0_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab0_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab0_153') DROP VIEW view_3_tab0_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab0_153
+
+statement ok
+CREATE VIEW view_1_tab0_153 AS SELECT pk, col0 FROM tab0 WHERE col0 = 49
+
+statement ok
+CREATE VIEW view_2_tab0_153 AS SELECT pk, col0 FROM tab0 WHERE NOT (col0 = 49)
+
+statement ok
+CREATE VIEW view_3_tab0_153 AS SELECT pk FROM view_1_tab0_153
+
+query II rowsort label-0-1
+SELECT pk, col0 FROM tab0 WHERE col0 = 49
+----
+
+query II rowsort label-0-2
+SELECT pk, col0 FROM tab0 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-0-1
+SELECT pk, col0 FROM view_1_tab0_153
+----
+
+query II rowsort label-0-2
+SELECT pk, col0 FROM view_2_tab0_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab0 WHERE col0 = 49 UNION ALL SELECT pk, col0 FROM tab0 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab0_153 UNION ALL SELECT pk, col0 FROM view_2_tab0_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab0 WHERE col0 = 49 UNION SELECT pk, col0 FROM tab0 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab0_153 UNION SELECT pk, col0 FROM view_2_tab0_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-0-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab0 WHERE col0 = 49 ) AS tab0_153
+----
+
+query I rowsort label-0-3
+SELECT * FROM view_3_tab0_153
+----
+
+query I rowsort label-0-3
+SELECT pk FROM tab0 WHERE col0 = 49
+----
+
+statement ok
+DROP VIEW view_1_tab0_153
+
+statement ok
+DROP VIEW view_2_tab0_153
+
+statement ok
+DROP VIEW view_3_tab0_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab1_153') DROP VIEW view_1_tab1_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab1_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab1_153') DROP VIEW view_2_tab1_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab1_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab1_153') DROP VIEW view_3_tab1_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab1_153
+
+statement ok
+CREATE VIEW view_1_tab1_153 AS SELECT pk, col0 FROM tab1 WHERE col0 = 49
+
+statement ok
+CREATE VIEW view_2_tab1_153 AS SELECT pk, col0 FROM tab1 WHERE NOT (col0 = 49)
+
+statement ok
+CREATE VIEW view_3_tab1_153 AS SELECT pk FROM view_1_tab1_153
+
+query II rowsort label-0-1
+SELECT pk, col0 FROM tab1 WHERE col0 = 49
+----
+
+query II rowsort label-0-2
+SELECT pk, col0 FROM tab1 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-0-1
+SELECT pk, col0 FROM view_1_tab1_153
+----
+
+query II rowsort label-0-2
+SELECT pk, col0 FROM view_2_tab1_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab1 WHERE col0 = 49 UNION ALL SELECT pk, col0 FROM tab1 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab1_153 UNION ALL SELECT pk, col0 FROM view_2_tab1_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab1 WHERE col0 = 49 UNION SELECT pk, col0 FROM tab1 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab1_153 UNION SELECT pk, col0 FROM view_2_tab1_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-0-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab1 WHERE col0 = 49 ) AS tab1_153
+----
+
+query I rowsort label-0-3
+SELECT * FROM view_3_tab1_153
+----
+
+query I rowsort label-0-3
+SELECT pk FROM tab1 WHERE col0 = 49
+----
+
+statement ok
+DROP VIEW view_1_tab1_153
+
+statement ok
+DROP VIEW view_2_tab1_153
+
+statement ok
+DROP VIEW view_3_tab1_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab2_153') DROP VIEW view_1_tab2_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab2_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab2_153') DROP VIEW view_2_tab2_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab2_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab2_153') DROP VIEW view_3_tab2_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab2_153
+
+statement ok
+CREATE VIEW view_1_tab2_153 AS SELECT pk, col0 FROM tab2 WHERE col0 = 49
+
+statement ok
+CREATE VIEW view_2_tab2_153 AS SELECT pk, col0 FROM tab2 WHERE NOT (col0 = 49)
+
+statement ok
+CREATE VIEW view_3_tab2_153 AS SELECT pk FROM view_1_tab2_153
+
+query II rowsort label-0-1
+SELECT pk, col0 FROM tab2 WHERE col0 = 49
+----
+
+query II rowsort label-0-2
+SELECT pk, col0 FROM tab2 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-0-1
+SELECT pk, col0 FROM view_1_tab2_153
+----
+
+query II rowsort label-0-2
+SELECT pk, col0 FROM view_2_tab2_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab2 WHERE col0 = 49 UNION ALL SELECT pk, col0 FROM tab2 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab2_153 UNION ALL SELECT pk, col0 FROM view_2_tab2_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab2 WHERE col0 = 49 UNION SELECT pk, col0 FROM tab2 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab2_153 UNION SELECT pk, col0 FROM view_2_tab2_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-0-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab2 WHERE col0 = 49 ) AS tab2_153
+----
+
+query I rowsort label-0-3
+SELECT * FROM view_3_tab2_153
+----
+
+query I rowsort label-0-3
+SELECT pk FROM tab2 WHERE col0 = 49
+----
+
+statement ok
+DROP VIEW view_1_tab2_153
+
+statement ok
+DROP VIEW view_2_tab2_153
+
+statement ok
+DROP VIEW view_3_tab2_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab3_153') DROP VIEW view_1_tab3_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab3_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab3_153') DROP VIEW view_2_tab3_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab3_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab3_153') DROP VIEW view_3_tab3_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab3_153
+
+statement ok
+CREATE VIEW view_1_tab3_153 AS SELECT pk, col0 FROM tab3 WHERE col0 = 49
+
+statement ok
+CREATE VIEW view_2_tab3_153 AS SELECT pk, col0 FROM tab3 WHERE NOT (col0 = 49)
+
+statement ok
+CREATE VIEW view_3_tab3_153 AS SELECT pk FROM view_1_tab3_153
+
+query II rowsort label-0-1
+SELECT pk, col0 FROM tab3 WHERE col0 = 49
+----
+
+query II rowsort label-0-2
+SELECT pk, col0 FROM tab3 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-0-1
+SELECT pk, col0 FROM view_1_tab3_153
+----
+
+query II rowsort label-0-2
+SELECT pk, col0 FROM view_2_tab3_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab3 WHERE col0 = 49 UNION ALL SELECT pk, col0 FROM tab3 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab3_153 UNION ALL SELECT pk, col0 FROM view_2_tab3_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab3 WHERE col0 = 49 UNION SELECT pk, col0 FROM tab3 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab3_153 UNION SELECT pk, col0 FROM view_2_tab3_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-0-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab3 WHERE col0 = 49 ) AS tab3_153
+----
+
+query I rowsort label-0-3
+SELECT * FROM view_3_tab3_153
+----
+
+query I rowsort label-0-3
+SELECT pk FROM tab3 WHERE col0 = 49
+----
+
+statement ok
+DROP VIEW view_1_tab3_153
+
+statement ok
+DROP VIEW view_2_tab3_153
+
+statement ok
+DROP VIEW view_3_tab3_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab4_153') DROP VIEW view_1_tab4_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab4_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab4_153') DROP VIEW view_2_tab4_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab4_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab4_153') DROP VIEW view_3_tab4_153
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab4_153
+
+statement ok
+CREATE VIEW view_1_tab4_153 AS SELECT pk, col0 FROM tab4 WHERE col0 = 49
+
+statement ok
+CREATE VIEW view_2_tab4_153 AS SELECT pk, col0 FROM tab4 WHERE NOT (col0 = 49)
+
+statement ok
+CREATE VIEW view_3_tab4_153 AS SELECT pk FROM view_1_tab4_153
+
+query II rowsort label-0-1
+SELECT pk, col0 FROM tab4 WHERE col0 = 49
+----
+
+query II rowsort label-0-2
+SELECT pk, col0 FROM tab4 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-0-1
+SELECT pk, col0 FROM view_1_tab4_153
+----
+
+query II rowsort label-0-2
+SELECT pk, col0 FROM view_2_tab4_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab4 WHERE col0 = 49 UNION ALL SELECT pk, col0 FROM tab4 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab4_153 UNION ALL SELECT pk, col0 FROM view_2_tab4_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab4 WHERE col0 = 49 UNION SELECT pk, col0 FROM tab4 WHERE NOT (col0 = 49)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab4_153 UNION SELECT pk, col0 FROM view_2_tab4_153
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-0-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab4 WHERE col0 = 49 ) AS tab4_153
+----
+
+query I rowsort label-0-3
+SELECT * FROM view_3_tab4_153
+----
+
+query I rowsort label-0-3
+SELECT pk FROM tab4 WHERE col0 = 49
+----
+
+statement ok
+DROP VIEW view_1_tab4_153
+
+statement ok
+DROP VIEW view_2_tab4_153
+
+statement ok
+DROP VIEW view_3_tab4_153
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab0_154') DROP VIEW view_1_tab0_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab0_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab0_154') DROP VIEW view_2_tab0_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab0_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab0_154') DROP VIEW view_3_tab0_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab0_154
+
+statement ok
+CREATE VIEW view_1_tab0_154 AS SELECT pk, col0 FROM tab0 WHERE col0 > 56
+
+statement ok
+CREATE VIEW view_2_tab0_154 AS SELECT pk, col0 FROM tab0 WHERE NOT (col0 > 56)
+
+statement ok
+CREATE VIEW view_3_tab0_154 AS SELECT pk FROM view_1_tab0_154
+
+query II rowsort label-100-1
+SELECT pk, col0 FROM tab0 WHERE col0 > 56
+----
+10 values hashing to 4af792288960cfe310566d7347be6868
+
+query II rowsort label-100-2
+SELECT pk, col0 FROM tab0 WHERE NOT (col0 > 56)
+----
+10 values hashing to 6e3d1976ccd05244488965cfcfec5d10
+
+query II rowsort label-100-1
+SELECT pk, col0 FROM view_1_tab0_154
+----
+10 values hashing to 4af792288960cfe310566d7347be6868
+
+query II rowsort label-100-2
+SELECT pk, col0 FROM view_2_tab0_154
+----
+10 values hashing to 6e3d1976ccd05244488965cfcfec5d10
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab0 WHERE col0 > 56 UNION ALL SELECT pk, col0 FROM tab0 WHERE NOT (col0 > 56)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab0_154 UNION ALL SELECT pk, col0 FROM view_2_tab0_154
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab0 WHERE col0 > 56 UNION SELECT pk, col0 FROM tab0 WHERE NOT (col0 > 56)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab0_154 UNION SELECT pk, col0 FROM view_2_tab0_154
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-100-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab0 WHERE col0 > 56 ) AS tab0_154
+----
+1
+4
+5
+7
+9
+
+query I rowsort label-100-3
+SELECT * FROM view_3_tab0_154
+----
+1
+4
+5
+7
+9
+
+query I rowsort label-100-3
+SELECT pk FROM tab0 WHERE col0 > 56
+----
+1
+4
+5
+7
+9
+
+statement ok
+DROP VIEW view_1_tab0_154
+
+statement ok
+DROP VIEW view_2_tab0_154
+
+statement ok
+DROP VIEW view_3_tab0_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab1_154') DROP VIEW view_1_tab1_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab1_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab1_154') DROP VIEW view_2_tab1_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab1_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab1_154') DROP VIEW view_3_tab1_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab1_154
+
+statement ok
+CREATE VIEW view_1_tab1_154 AS SELECT pk, col0 FROM tab1 WHERE col0 > 56
+
+statement ok
+CREATE VIEW view_2_tab1_154 AS SELECT pk, col0 FROM tab1 WHERE NOT (col0 > 56)
+
+statement ok
+CREATE VIEW view_3_tab1_154 AS SELECT pk FROM view_1_tab1_154
+
+query II rowsort label-100-1
+SELECT pk, col0 FROM tab1 WHERE col0 > 56
+----
+10 values hashing to 4af792288960cfe310566d7347be6868
+
+query II rowsort label-100-2
+SELECT pk, col0 FROM tab1 WHERE NOT (col0 > 56)
+----
+10 values hashing to 6e3d1976ccd05244488965cfcfec5d10
+
+query II rowsort label-100-1
+SELECT pk, col0 FROM view_1_tab1_154
+----
+10 values hashing to 4af792288960cfe310566d7347be6868
+
+query II rowsort label-100-2
+SELECT pk, col0 FROM view_2_tab1_154
+----
+10 values hashing to 6e3d1976ccd05244488965cfcfec5d10
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab1 WHERE col0 > 56 UNION ALL SELECT pk, col0 FROM tab1 WHERE NOT (col0 > 56)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab1_154 UNION ALL SELECT pk, col0 FROM view_2_tab1_154
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab1 WHERE col0 > 56 UNION SELECT pk, col0 FROM tab1 WHERE NOT (col0 > 56)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab1_154 UNION SELECT pk, col0 FROM view_2_tab1_154
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-100-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab1 WHERE col0 > 56 ) AS tab1_154
+----
+1
+4
+5
+7
+9
+
+query I rowsort label-100-3
+SELECT * FROM view_3_tab1_154
+----
+1
+4
+5
+7
+9
+
+query I rowsort label-100-3
+SELECT pk FROM tab1 WHERE col0 > 56
+----
+1
+4
+5
+7
+9
+
+statement ok
+DROP VIEW view_1_tab1_154
+
+statement ok
+DROP VIEW view_2_tab1_154
+
+statement ok
+DROP VIEW view_3_tab1_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab2_154') DROP VIEW view_1_tab2_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab2_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab2_154') DROP VIEW view_2_tab2_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab2_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab2_154') DROP VIEW view_3_tab2_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab2_154
+
+statement ok
+CREATE VIEW view_1_tab2_154 AS SELECT pk, col0 FROM tab2 WHERE col0 > 56
+
+statement ok
+CREATE VIEW view_2_tab2_154 AS SELECT pk, col0 FROM tab2 WHERE NOT (col0 > 56)
+
+statement ok
+CREATE VIEW view_3_tab2_154 AS SELECT pk FROM view_1_tab2_154
+
+query II rowsort label-100-1
+SELECT pk, col0 FROM tab2 WHERE col0 > 56
+----
+10 values hashing to 4af792288960cfe310566d7347be6868
+
+query II rowsort label-100-2
+SELECT pk, col0 FROM tab2 WHERE NOT (col0 > 56)
+----
+10 values hashing to 6e3d1976ccd05244488965cfcfec5d10
+
+query II rowsort label-100-1
+SELECT pk, col0 FROM view_1_tab2_154
+----
+10 values hashing to 4af792288960cfe310566d7347be6868
+
+query II rowsort label-100-2
+SELECT pk, col0 FROM view_2_tab2_154
+----
+10 values hashing to 6e3d1976ccd05244488965cfcfec5d10
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab2 WHERE col0 > 56 UNION ALL SELECT pk, col0 FROM tab2 WHERE NOT (col0 > 56)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab2_154 UNION ALL SELECT pk, col0 FROM view_2_tab2_154
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab2 WHERE col0 > 56 UNION SELECT pk, col0 FROM tab2 WHERE NOT (col0 > 56)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab2_154 UNION SELECT pk, col0 FROM view_2_tab2_154
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-100-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab2 WHERE col0 > 56 ) AS tab2_154
+----
+1
+4
+5
+7
+9
+
+query I rowsort label-100-3
+SELECT * FROM view_3_tab2_154
+----
+1
+4
+5
+7
+9
+
+query I rowsort label-100-3
+SELECT pk FROM tab2 WHERE col0 > 56
+----
+1
+4
+5
+7
+9
+
+statement ok
+DROP VIEW view_1_tab2_154
+
+statement ok
+DROP VIEW view_2_tab2_154
+
+statement ok
+DROP VIEW view_3_tab2_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab3_154') DROP VIEW view_1_tab3_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab3_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab3_154') DROP VIEW view_2_tab3_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab3_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab3_154') DROP VIEW view_3_tab3_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab3_154
+
+statement ok
+CREATE VIEW view_1_tab3_154 AS SELECT pk, col0 FROM tab3 WHERE col0 > 56
+
+statement ok
+CREATE VIEW view_2_tab3_154 AS SELECT pk, col0 FROM tab3 WHERE NOT (col0 > 56)
+
+statement ok
+CREATE VIEW view_3_tab3_154 AS SELECT pk FROM view_1_tab3_154
+
+query II rowsort label-100-1
+SELECT pk, col0 FROM tab3 WHERE col0 > 56
+----
+10 values hashing to 4af792288960cfe310566d7347be6868
+
+query II rowsort label-100-2
+SELECT pk, col0 FROM tab3 WHERE NOT (col0 > 56)
+----
+10 values hashing to 6e3d1976ccd05244488965cfcfec5d10
+
+query II rowsort label-100-1
+SELECT pk, col0 FROM view_1_tab3_154
+----
+10 values hashing to 4af792288960cfe310566d7347be6868
+
+query II rowsort label-100-2
+SELECT pk, col0 FROM view_2_tab3_154
+----
+10 values hashing to 6e3d1976ccd05244488965cfcfec5d10
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab3 WHERE col0 > 56 UNION ALL SELECT pk, col0 FROM tab3 WHERE NOT (col0 > 56)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab3_154 UNION ALL SELECT pk, col0 FROM view_2_tab3_154
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab3 WHERE col0 > 56 UNION SELECT pk, col0 FROM tab3 WHERE NOT (col0 > 56)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab3_154 UNION SELECT pk, col0 FROM view_2_tab3_154
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-100-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab3 WHERE col0 > 56 ) AS tab3_154
+----
+1
+4
+5
+7
+9
+
+query I rowsort label-100-3
+SELECT * FROM view_3_tab3_154
+----
+1
+4
+5
+7
+9
+
+query I rowsort label-100-3
+SELECT pk FROM tab3 WHERE col0 > 56
+----
+1
+4
+5
+7
+9
+
+statement ok
+DROP VIEW view_1_tab3_154
+
+statement ok
+DROP VIEW view_2_tab3_154
+
+statement ok
+DROP VIEW view_3_tab3_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab4_154') DROP VIEW view_1_tab4_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab4_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab4_154') DROP VIEW view_2_tab4_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab4_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab4_154') DROP VIEW view_3_tab4_154
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab4_154
+
+statement ok
+CREATE VIEW view_1_tab4_154 AS SELECT pk, col0 FROM tab4 WHERE col0 > 56
+
+statement ok
+CREATE VIEW view_2_tab4_154 AS SELECT pk, col0 FROM tab4 WHERE NOT (col0 > 56)
+
+statement ok
+CREATE VIEW view_3_tab4_154 AS SELECT pk FROM view_1_tab4_154
+
+query II rowsort label-100-1
+SELECT pk, col0 FROM tab4 WHERE col0 > 56
+----
+10 values hashing to 4af792288960cfe310566d7347be6868
+
+query II rowsort label-100-2
+SELECT pk, col0 FROM tab4 WHERE NOT (col0 > 56)
+----
+10 values hashing to 6e3d1976ccd05244488965cfcfec5d10
+
+query II rowsort label-100-1
+SELECT pk, col0 FROM view_1_tab4_154
+----
+10 values hashing to 4af792288960cfe310566d7347be6868
+
+query II rowsort label-100-2
+SELECT pk, col0 FROM view_2_tab4_154
+----
+10 values hashing to 6e3d1976ccd05244488965cfcfec5d10
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab4 WHERE col0 > 56 UNION ALL SELECT pk, col0 FROM tab4 WHERE NOT (col0 > 56)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab4_154 UNION ALL SELECT pk, col0 FROM view_2_tab4_154
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab4 WHERE col0 > 56 UNION SELECT pk, col0 FROM tab4 WHERE NOT (col0 > 56)
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab4_154 UNION SELECT pk, col0 FROM view_2_tab4_154
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-100-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab4 WHERE col0 > 56 ) AS tab4_154
+----
+1
+4
+5
+7
+9
+
+query I rowsort label-100-3
+SELECT * FROM view_3_tab4_154
+----
+1
+4
+5
+7
+9
+
+query I rowsort label-100-3
+SELECT pk FROM tab4 WHERE col0 > 56
+----
+1
+4
+5
+7
+9
+
+statement ok
+DROP VIEW view_1_tab4_154
+
+statement ok
+DROP VIEW view_2_tab4_154
+
+statement ok
+DROP VIEW view_3_tab4_154
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab0_155') DROP VIEW view_1_tab0_155
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab0_155
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab0_155') DROP VIEW view_2_tab0_155
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab0_155
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab0_155') DROP VIEW view_3_tab0_155
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab0_155
+
+statement ok
+CREATE VIEW view_1_tab0_155 AS SELECT pk, col0 FROM tab0 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22))
+
+statement ok
+CREATE VIEW view_2_tab0_155 AS SELECT pk, col0 FROM tab0 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+
+statement ok
+CREATE VIEW view_3_tab0_155 AS SELECT pk FROM view_1_tab0_155
+
+query II rowsort label-200-1
+SELECT pk, col0 FROM tab0 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22))
+----
+18 values hashing to 1cf5e33842cb88de423f90bc8276641d
+
+query II rowsort label-200-2
+SELECT pk, col0 FROM tab0 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+----
+6
+0
+
+query II rowsort label-200-1
+SELECT pk, col0 FROM view_1_tab0_155
+----
+18 values hashing to 1cf5e33842cb88de423f90bc8276641d
+
+query II rowsort label-200-2
+SELECT pk, col0 FROM view_2_tab0_155
+----
+6
+0
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab0 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) UNION ALL SELECT pk, col0 FROM tab0 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab0_155 UNION ALL SELECT pk, col0 FROM view_2_tab0_155
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab0 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) UNION SELECT pk, col0 FROM tab0 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab0_155 UNION SELECT pk, col0 FROM view_2_tab0_155
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-200-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab0 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) ) AS tab0_155
+----
+9 values hashing to b62312116f93d37c7a952ee38494f224
+
+query I rowsort label-200-3
+SELECT * FROM view_3_tab0_155
+----
+9 values hashing to b62312116f93d37c7a952ee38494f224
+
+query I rowsort label-200-3
+SELECT pk FROM tab0 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22))
+----
+9 values hashing to b62312116f93d37c7a952ee38494f224
+
+statement ok
+DROP VIEW view_1_tab0_155
+
+statement ok
+DROP VIEW view_2_tab0_155
+
+statement ok
+DROP VIEW view_3_tab0_155
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab1_155') DROP VIEW view_1_tab1_155
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab1_155
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab1_155') DROP VIEW view_2_tab1_155
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab1_155
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab1_155') DROP VIEW view_3_tab1_155
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab1_155
+
+statement ok
+CREATE VIEW view_1_tab1_155 AS SELECT pk, col0 FROM tab1 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22))
+
+statement ok
+CREATE VIEW view_2_tab1_155 AS SELECT pk, col0 FROM tab1 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+
+statement ok
+CREATE VIEW view_3_tab1_155 AS SELECT pk FROM view_1_tab1_155
+
+query II rowsort label-200-1
+SELECT pk, col0 FROM tab1 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22))
+----
+18 values hashing to 1cf5e33842cb88de423f90bc8276641d
+
+query II rowsort label-200-2
+SELECT pk, col0 FROM tab1 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+----
+6
+0
+
+query II rowsort label-200-1
+SELECT pk, col0 FROM view_1_tab1_155
+----
+18 values hashing to 1cf5e33842cb88de423f90bc8276641d
+
+query II rowsort label-200-2
+SELECT pk, col0 FROM view_2_tab1_155
+----
+6
+0
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab1 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) UNION ALL SELECT pk, col0 FROM tab1 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab1_155 UNION ALL SELECT pk, col0 FROM view_2_tab1_155
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab1 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) UNION SELECT pk, col0 FROM tab1 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab1_155 UNION SELECT pk, col0 FROM view_2_tab1_155
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-200-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab1 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) ) AS tab1_155
+----
+9 values hashing to b62312116f93d37c7a952ee38494f224
+
+query I rowsort label-200-3
+SELECT * FROM view_3_tab1_155
+----
+9 values hashing to b62312116f93d37c7a952ee38494f224
+
+query I rowsort label-200-3
+SELECT pk FROM tab1 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22))
+----
+9 values hashing to b62312116f93d37c7a952ee38494f224
+
+statement ok
+DROP VIEW view_1_tab1_155
+
+statement ok
+DROP VIEW view_2_tab1_155
+
+statement ok
+DROP VIEW view_3_tab1_155
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab2_155') DROP VIEW view_1_tab2_155
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab2_155
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab2_155') DROP VIEW view_2_tab2_155
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab2_155
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab2_155') DROP VIEW view_3_tab2_155
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab2_155
+
+statement ok
+CREATE VIEW view_1_tab2_155 AS SELECT pk, col0 FROM tab2 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22))
+
+statement ok
+CREATE VIEW view_2_tab2_155 AS SELECT pk, col0 FROM tab2 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+
+statement ok
+CREATE VIEW view_3_tab2_155 AS SELECT pk FROM view_1_tab2_155
+
+query II rowsort label-200-1
+SELECT pk, col0 FROM tab2 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22))
+----
+18 values hashing to 1cf5e33842cb88de423f90bc8276641d
+
+query II rowsort label-200-2
+SELECT pk, col0 FROM tab2 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+----
+6
+0
+
+query II rowsort label-200-1
+SELECT pk, col0 FROM view_1_tab2_155
+----
+18 values hashing to 1cf5e33842cb88de423f90bc8276641d
+
+query II rowsort label-200-2
+SELECT pk, col0 FROM view_2_tab2_155
+----
+6
+0
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab2 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) UNION ALL SELECT pk, col0 FROM tab2 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab2_155 UNION ALL SELECT pk, col0 FROM view_2_tab2_155
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab2 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) UNION SELECT pk, col0 FROM tab2 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+query II rowsort label-all
+SELECT pk, col0 FROM view_1_tab2_155 UNION SELECT pk, col0 FROM view_2_tab2_155
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d
+
+skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+query I rowsort label-200-3
+SELECT pk FROM ( SELECT pk, col0 FROM tab2 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) ) AS tab2_155
+----
+9 values hashing to b62312116f93d37c7a952ee38494f224
+
+query I rowsort label-200-3
+SELECT * FROM view_3_tab2_155
+----
+9 values hashing to b62312116f93d37c7a952ee38494f224
+
+query I rowsort label-200-3
+SELECT pk FROM tab2 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22))
+----
+9 values hashing to b62312116f93d37c7a952ee38494f224
+
+statement ok
+DROP VIEW view_1_tab2_155
+
+statement ok
+DROP VIEW view_2_tab2_155
+
+statement ok
+DROP VIEW view_3_tab2_155
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_1_tab3_155') DROP VIEW view_1_tab3_155
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_1_tab3_155
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_2_tab3_155') DROP VIEW view_2_tab3_155
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_2_tab3_155
+
+onlyif mssql # IF EXISTS support: 
+statement ok
+IF EXISTS (SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = 'view_3_tab3_155') DROP VIEW view_3_tab3_155
+
+skipif mssql # not compatible
+statement ok
+DROP VIEW IF EXISTS view_3_tab3_155
+
+statement ok
+CREATE VIEW view_1_tab3_155 AS SELECT pk, col0 FROM tab3 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22))
+
+statement ok
+CREATE VIEW view_2_tab3_155 AS SELECT pk, col0 FROM tab3 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+
+statement ok
+CREATE VIEW view_3_tab3_155 AS SELECT pk FROM view_1_tab3_155
+
+query II rowsort label-200-1
+SELECT pk, col0 FROM tab3 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22))
+----
+18 values hashing to 1cf5e33842cb88de423f90bc8276641d
+
+query II rowsort label-200-2
+SELECT pk, col0 FROM tab3 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+----
+6
+0
+
+query II rowsort label-200-1
+SELECT pk, col0 FROM view_1_tab3_155
+----
+18 values hashing to 1cf5e33842cb88de423f90bc8276641d
+
+query II rowsort label-200-2
+SELECT pk, col0 FROM view_2_tab3_155
+----
+6
+0
+
+query II rowsort label-all
+SELECT pk, col0 FROM tab3 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) UNION ALL SELECT pk, col0 FROM tab3 WHERE NOT (((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)))
+----
+20 values hashing to 7aa228701de8d21263c44e160305731d

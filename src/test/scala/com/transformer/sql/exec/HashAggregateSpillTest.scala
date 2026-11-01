@@ -5,6 +5,7 @@ import com.transformer.core.metrics.MetricsNode
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
+import org.junit.Assume.assumeTrue
 
 import java.nio.file.{Files, Path}
 import scala.collection.mutable
@@ -67,6 +68,14 @@ class HashAggregateSpillTest {
   private def spillyOpts(maxRuns: Int = ExecutionOptions.DefaultSpillMaxRuns): ExecutionOptions =
     ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L), spillMaxRuns = maxRuns)
 
+  /** A one-byte threshold spills once per input batch, so a test that spills
+    * thousands of rows that way writes a run per batch: past
+    * `spill_max_runs` and into thousands of files under the 1- and 2-row
+    * batch capacities the whole suite also runs at (docs/testing.md), where
+    * the spill fuzzers and `slt_test`'s spill mode cover spilling instead. */
+  private def assumeFullBatches(): Unit =
+    assumeTrue("needs batches of 1024 rows or more", ColumnarBatch.DefaultCapacity >= 1024)
+
   // ---- Long-key path -------------------------------------------------------
 
   /** Build a single-int-keyed plan: GROUP BY k, SUM(v). */
@@ -89,6 +98,7 @@ class HashAggregateSpillTest {
   }
 
   @Test def longKeyPathBitEqualWithAndWithoutSpill(): Unit = {
+    assumeFullBatches()
     val rng = new Random(1234L)
     val parts = (0 until 4).map { p =>
       (0 until 5000).map { _ =>
@@ -164,6 +174,7 @@ class HashAggregateSpillTest {
   }
 
   @Test def codecPathBitEqualWithAndWithoutSpill(): Unit = {
+    assumeFullBatches()
     val rng = new Random(99L)
     val parts = (0 until 3).map { _ =>
       (0 until 2000).map { _ =>
@@ -228,6 +239,7 @@ class HashAggregateSpillTest {
     * is the composition gate: spill bookkeeping must continue to fire under
     * metering. */
   @Test def spillAndMetricsComposeReportingNonZeroSpillCounters(): Unit = {
+    assumeFullBatches()
     val rng = new Random(1234L)
     val parts = (0 until 4).map { p =>
       (0 until 5000).map { _ =>
@@ -318,6 +330,7 @@ class HashAggregateSpillTest {
   // null page for the second and NPE'd. The spillSchema now names key columns
   // positionally (_k0, _k1). See plans/bugfixes/01.
   @Test def collidingGroupKeyNamesUnderSpill(): Unit = {
+    assumeFullBatches()
     val schema = Schema(Vector(
       Field("k0", DataType.IntType),
       Field("k1", DataType.IntType),
@@ -361,6 +374,7 @@ class HashAggregateSpillTest {
   // on every path. Surfaced by `fuzz/mode_differential_fuzz_test`, which had
   // the shape gated out of its generator until the engine was fixed.
   @Test def booleanMinMaxUnderSpill(): Unit = {
+    assumeFullBatches()
     val schema = Schema(Vector(
       Field("k", DataType.IntType),
       Field("b", DataType.BooleanType)))
@@ -494,6 +508,7 @@ class HashAggregateSpillTest {
   }
 
   @Test def minMaxOverNaNUnderSpillMatchesHeap(): Unit = {
+    assumeFullBatches()
     // Spill flushes partial states to disk and folds them back through `merge`,
     // so the restored NaN meets the accumulator in flush order rather than row
     // order. Enough groups and rows to force several runs.
@@ -629,6 +644,7 @@ class HashAggregateSpillTest {
   }
 
   @Test def minMaxOverDecimalAndBinaryUnderSpillMatchesHeap(): Unit = {
+    assumeFullBatches()
     // Spill writes each partial state through `MinMaxState.writeBoxed` and
     // folds it back through `merge` in flush order.
     val rng = new Random(20261003L)

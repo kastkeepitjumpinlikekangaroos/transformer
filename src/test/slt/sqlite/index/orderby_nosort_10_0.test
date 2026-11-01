@@ -1,0 +1,926 @@
+# From SQLite's sqllogictest corpus (https://www.sqlite.org/sqllogictest,
+# mirrored at https://github.com/gregrahn/sqllogictest): test/index/orderby_nosort/10/slt_good_0.test,
+# up to its 150th query this engine runs. Its COPYRIGHT lets it be copied
+# freely. `skipif transformer` marks a record the engine answers otherwise
+# by design, with the reason.
+
+hash-threshold 8
+
+statement ok
+CREATE TABLE tab0(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+INSERT INTO tab0 VALUES(0,26,41.54,'ducbo',8,61.75,'nbofo')
+
+statement ok
+INSERT INTO tab0 VALUES(1,51,56.10,'anmeb',48,5.54,'savce')
+
+statement ok
+INSERT INTO tab0 VALUES(2,23,1.26,'etvhp',86,94.34,'hinbg')
+
+statement ok
+INSERT INTO tab0 VALUES(3,96,98.60,'zyfjb',40,62.46,'kunbq')
+
+statement ok
+INSERT INTO tab0 VALUES(4,20,94.5,'vkaub',55,67.34,'zjkig')
+
+statement ok
+INSERT INTO tab0 VALUES(5,97,68.46,'hxkzu',58,16.15,'puizl')
+
+statement ok
+INSERT INTO tab0 VALUES(6,48,50.26,'iheej',28,65.46,'rfjrw')
+
+statement ok
+INSERT INTO tab0 VALUES(7,73,28.5,'ecdwv',53,38.84,'tsnfs')
+
+statement ok
+INSERT INTO tab0 VALUES(8,17,65.26,'ugaoh',97,39.47,'jdvgv')
+
+statement ok
+INSERT INTO tab0 VALUES(9,25,7.74,'rptlc',57,59.80,'jnosw')
+
+statement ok
+CREATE TABLE tab1(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab1_0 on tab1 (col0)
+
+statement ok
+CREATE INDEX idx_tab1_1 on tab1 (col1)
+
+statement ok
+CREATE INDEX idx_tab1_3 on tab1 (col3)
+
+statement ok
+CREATE INDEX idx_tab1_4 on tab1 (col4)
+
+statement ok
+INSERT INTO tab1 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab2(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab2_0 ON tab2 (col0,col4 DESC)
+
+statement ok
+CREATE INDEX idx_tab2_1 ON tab2 (col1 DESC)
+
+statement ok
+CREATE INDEX idx_tab2_2 ON tab2 (col3 DESC,col0 DESC)
+
+statement ok
+INSERT INTO tab2 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab3(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE INDEX idx_tab3_0 ON tab3 (col1 DESC,col0 DESC,col4 DESC)
+
+statement ok
+CREATE INDEX idx_tab3_1 ON tab3 (col0 DESC,col3 DESC,col4 DESC)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_2 ON tab3 (col3 DESC,col4)
+
+statement ok
+CREATE INDEX idx_tab3_3 ON tab3 (col1 DESC,col3)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab3_5 ON tab3 (col4 DESC)
+
+statement ok
+INSERT INTO tab3 SELECT * FROM tab0
+
+statement ok
+CREATE TABLE tab4(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab4_0 ON tab4 (col4 DESC)
+
+statement ok
+CREATE UNIQUE INDEX idx_tab4_2 ON tab4 (col3 DESC)
+
+statement ok
+INSERT INTO tab4 SELECT * FROM tab0
+
+query I nosort label-0-1-desc
+SELECT pk FROM tab0 WHERE col1 > 71.33 ORDER BY 1 DESC
+----
+4
+3
+
+query I nosort label-0-1-desc
+SELECT pk FROM tab1 WHERE col1 > 71.33 ORDER BY 1 DESC
+----
+4
+3
+
+query I nosort label-0-1-desc
+SELECT pk FROM tab2 WHERE col1 > 71.33 ORDER BY 1 DESC
+----
+4
+3
+
+query I nosort label-0-1-desc
+SELECT pk FROM tab3 WHERE col1 > 71.33 ORDER BY 1 DESC
+----
+4
+3
+
+query I nosort label-0-1-desc
+SELECT pk FROM tab4 WHERE col1 > 71.33 ORDER BY 1 DESC
+----
+4
+3
+
+query I nosort label-0-1
+SELECT pk FROM tab0 WHERE col1 > 71.33 ORDER BY 1
+----
+3
+4
+
+query I nosort label-0-1
+SELECT pk FROM tab1 WHERE col1 > 71.33 ORDER BY 1
+----
+3
+4
+
+query I nosort label-0-1
+SELECT pk FROM tab2 WHERE col1 > 71.33 ORDER BY 1
+----
+3
+4
+
+query I nosort label-0-1
+SELECT pk FROM tab3 WHERE col1 > 71.33 ORDER BY 1
+----
+3
+4
+
+query I nosort label-0-1
+SELECT pk FROM tab4 WHERE col1 > 71.33 ORDER BY 1
+----
+3
+4
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab0 WHERE col1 > 71.33 ORDER BY 1 DESC
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab1 WHERE col1 > 71.33 ORDER BY 1 DESC
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab2 WHERE col1 > 71.33 ORDER BY 1 DESC
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab3 WHERE col1 > 71.33 ORDER BY 1 DESC
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab4 WHERE col1 > 71.33 ORDER BY 1 DESC
+----
+4
+20
+3
+96
+
+query II nosort label-10-2-desc
+SELECT pk, col0 FROM tab0 WHERE col1 > 71.33 ORDER BY 2 DESC
+----
+3
+96
+4
+20
+
+query II nosort label-10-2-desc
+SELECT pk, col0 FROM tab1 WHERE col1 > 71.33 ORDER BY 2 DESC
+----
+3
+96
+4
+20
+
+query II nosort label-10-2-desc
+SELECT pk, col0 FROM tab2 WHERE col1 > 71.33 ORDER BY 2 DESC
+----
+3
+96
+4
+20
+
+query II nosort label-10-2-desc
+SELECT pk, col0 FROM tab3 WHERE col1 > 71.33 ORDER BY 2 DESC
+----
+3
+96
+4
+20
+
+query II nosort label-10-2-desc
+SELECT pk, col0 FROM tab4 WHERE col1 > 71.33 ORDER BY 2 DESC
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab0 WHERE col1 > 71.33 ORDER BY 1
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab1 WHERE col1 > 71.33 ORDER BY 1
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab2 WHERE col1 > 71.33 ORDER BY 1
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab3 WHERE col1 > 71.33 ORDER BY 1
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab4 WHERE col1 > 71.33 ORDER BY 1
+----
+3
+96
+4
+20
+
+query II nosort label-10-2
+SELECT pk, col0 FROM tab0 WHERE col1 > 71.33 ORDER BY 2
+----
+4
+20
+3
+96
+
+query II nosort label-10-2
+SELECT pk, col0 FROM tab1 WHERE col1 > 71.33 ORDER BY 2
+----
+4
+20
+3
+96
+
+query II nosort label-10-2
+SELECT pk, col0 FROM tab2 WHERE col1 > 71.33 ORDER BY 2
+----
+4
+20
+3
+96
+
+query II nosort label-10-2
+SELECT pk, col0 FROM tab3 WHERE col1 > 71.33 ORDER BY 2
+----
+4
+20
+3
+96
+
+query II nosort label-10-2
+SELECT pk, col0 FROM tab4 WHERE col1 > 71.33 ORDER BY 2
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab0 WHERE col1 > 71.33 ORDER BY 1 DESC,2 DESC
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab1 WHERE col1 > 71.33 ORDER BY 1 DESC,2 DESC
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab2 WHERE col1 > 71.33 ORDER BY 1 DESC,2 DESC
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab3 WHERE col1 > 71.33 ORDER BY 1 DESC,2 DESC
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab4 WHERE col1 > 71.33 ORDER BY 1 DESC,2 DESC
+----
+4
+20
+3
+96
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab0 WHERE col1 > 71.33 ORDER BY 1,2 DESC
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab1 WHERE col1 > 71.33 ORDER BY 1,2 DESC
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab2 WHERE col1 > 71.33 ORDER BY 1,2 DESC
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab3 WHERE col1 > 71.33 ORDER BY 1,2 DESC
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab4 WHERE col1 > 71.33 ORDER BY 1,2 DESC
+----
+3
+96
+4
+20
+
+query II nosort label-10-2-desc
+SELECT pk, col0 FROM tab0 WHERE col1 > 71.33 ORDER BY 2 DESC,1
+----
+3
+96
+4
+20
+
+query II nosort label-10-2-desc
+SELECT pk, col0 FROM tab1 WHERE col1 > 71.33 ORDER BY 2 DESC,1
+----
+3
+96
+4
+20
+
+query II nosort label-10-2-desc
+SELECT pk, col0 FROM tab2 WHERE col1 > 71.33 ORDER BY 2 DESC,1
+----
+3
+96
+4
+20
+
+query II nosort label-10-2-desc
+SELECT pk, col0 FROM tab3 WHERE col1 > 71.33 ORDER BY 2 DESC,1
+----
+3
+96
+4
+20
+
+query II nosort label-10-2-desc
+SELECT pk, col0 FROM tab4 WHERE col1 > 71.33 ORDER BY 2 DESC,1
+----
+3
+96
+4
+20
+
+query II nosort label-10-2
+SELECT pk, col0 FROM tab0 WHERE col1 > 71.33 ORDER BY 2,1
+----
+4
+20
+3
+96
+
+query II nosort label-10-2
+SELECT pk, col0 FROM tab1 WHERE col1 > 71.33 ORDER BY 2,1
+----
+4
+20
+3
+96
+
+query II nosort label-10-2
+SELECT pk, col0 FROM tab2 WHERE col1 > 71.33 ORDER BY 2,1
+----
+4
+20
+3
+96
+
+query II nosort label-10-2
+SELECT pk, col0 FROM tab3 WHERE col1 > 71.33 ORDER BY 2,1
+----
+4
+20
+3
+96
+
+query II nosort label-10-2
+SELECT pk, col0 FROM tab4 WHERE col1 > 71.33 ORDER BY 2,1
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab0 WHERE col1 > 71.33 ORDER BY 1 DESC,2
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab1 WHERE col1 > 71.33 ORDER BY 1 DESC,2
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab2 WHERE col1 > 71.33 ORDER BY 1 DESC,2
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab3 WHERE col1 > 71.33 ORDER BY 1 DESC,2
+----
+4
+20
+3
+96
+
+query II nosort label-10-1-desc
+SELECT pk, col0 FROM tab4 WHERE col1 > 71.33 ORDER BY 1 DESC,2
+----
+4
+20
+3
+96
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab0 WHERE col1 > 71.33 ORDER BY 1,2
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab1 WHERE col1 > 71.33 ORDER BY 1,2
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab2 WHERE col1 > 71.33 ORDER BY 1,2
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab3 WHERE col1 > 71.33 ORDER BY 1,2
+----
+3
+96
+4
+20
+
+query II nosort label-10-1
+SELECT pk, col0 FROM tab4 WHERE col1 > 71.33 ORDER BY 1,2
+----
+3
+96
+4
+20
+
+query I nosort label-60-1-desc
+SELECT pk FROM tab0 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC
+----
+
+query I nosort label-60-1-desc
+SELECT pk FROM tab1 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC
+----
+
+query I nosort label-60-1-desc
+SELECT pk FROM tab2 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC
+----
+
+query I nosort label-60-1-desc
+SELECT pk FROM tab3 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC
+----
+
+query I nosort label-60-1-desc
+SELECT pk FROM tab4 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC
+----
+
+query I nosort label-60-1
+SELECT pk FROM tab0 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1
+----
+
+query I nosort label-60-1
+SELECT pk FROM tab1 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1
+----
+
+query I nosort label-60-1
+SELECT pk FROM tab2 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1
+----
+
+query I nosort label-60-1
+SELECT pk FROM tab3 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1
+----
+
+query I nosort label-60-1
+SELECT pk FROM tab4 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab0 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab1 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab2 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab3 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab4 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC
+----
+
+query II nosort label-70-2-desc
+SELECT pk, col0 FROM tab0 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2 DESC
+----
+
+query II nosort label-70-2-desc
+SELECT pk, col0 FROM tab1 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2 DESC
+----
+
+query II nosort label-70-2-desc
+SELECT pk, col0 FROM tab2 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2 DESC
+----
+
+query II nosort label-70-2-desc
+SELECT pk, col0 FROM tab3 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2 DESC
+----
+
+query II nosort label-70-2-desc
+SELECT pk, col0 FROM tab4 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2 DESC
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab0 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab1 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab2 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab3 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab4 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1
+----
+
+query II nosort label-70-2
+SELECT pk, col0 FROM tab0 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2
+----
+
+query II nosort label-70-2
+SELECT pk, col0 FROM tab1 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2
+----
+
+query II nosort label-70-2
+SELECT pk, col0 FROM tab2 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2
+----
+
+query II nosort label-70-2
+SELECT pk, col0 FROM tab3 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2
+----
+
+query II nosort label-70-2
+SELECT pk, col0 FROM tab4 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab0 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC,2 DESC
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab1 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC,2 DESC
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab2 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC,2 DESC
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab3 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC,2 DESC
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab4 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC,2 DESC
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab0 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1,2 DESC
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab1 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1,2 DESC
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab2 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1,2 DESC
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab3 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1,2 DESC
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab4 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1,2 DESC
+----
+
+query II nosort label-70-2-desc
+SELECT pk, col0 FROM tab0 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2 DESC,1
+----
+
+query II nosort label-70-2-desc
+SELECT pk, col0 FROM tab1 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2 DESC,1
+----
+
+query II nosort label-70-2-desc
+SELECT pk, col0 FROM tab2 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2 DESC,1
+----
+
+query II nosort label-70-2-desc
+SELECT pk, col0 FROM tab3 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2 DESC,1
+----
+
+query II nosort label-70-2-desc
+SELECT pk, col0 FROM tab4 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2 DESC,1
+----
+
+query II nosort label-70-2
+SELECT pk, col0 FROM tab0 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2,1
+----
+
+query II nosort label-70-2
+SELECT pk, col0 FROM tab1 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2,1
+----
+
+query II nosort label-70-2
+SELECT pk, col0 FROM tab2 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2,1
+----
+
+query II nosort label-70-2
+SELECT pk, col0 FROM tab3 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2,1
+----
+
+query II nosort label-70-2
+SELECT pk, col0 FROM tab4 WHERE col3 = 59 AND col3 IS NULL ORDER BY 2,1
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab0 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC,2
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab1 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC,2
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab2 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC,2
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab3 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC,2
+----
+
+query II nosort label-70-1-desc
+SELECT pk, col0 FROM tab4 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1 DESC,2
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab0 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1,2
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab1 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1,2
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab2 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1,2
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab3 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1,2
+----
+
+query II nosort label-70-1
+SELECT pk, col0 FROM tab4 WHERE col3 = 59 AND col3 IS NULL ORDER BY 1,2
+----
+
+query I nosort label-120-1-desc
+SELECT pk FROM tab0 WHERE col3 IS NULL ORDER BY 1 DESC
+----
+
+query I nosort label-120-1-desc
+SELECT pk FROM tab1 WHERE col3 IS NULL ORDER BY 1 DESC
+----
+
+query I nosort label-120-1-desc
+SELECT pk FROM tab2 WHERE col3 IS NULL ORDER BY 1 DESC
+----
+
+query I nosort label-120-1-desc
+SELECT pk FROM tab3 WHERE col3 IS NULL ORDER BY 1 DESC
+----
+
+query I nosort label-120-1-desc
+SELECT pk FROM tab4 WHERE col3 IS NULL ORDER BY 1 DESC
+----
+
+query I nosort label-120-1
+SELECT pk FROM tab0 WHERE col3 IS NULL ORDER BY 1
+----
+
+query I nosort label-120-1
+SELECT pk FROM tab1 WHERE col3 IS NULL ORDER BY 1
+----
+
+query I nosort label-120-1
+SELECT pk FROM tab2 WHERE col3 IS NULL ORDER BY 1
+----
+
+query I nosort label-120-1
+SELECT pk FROM tab3 WHERE col3 IS NULL ORDER BY 1
+----
+
+query I nosort label-120-1
+SELECT pk FROM tab4 WHERE col3 IS NULL ORDER BY 1
+----
+
+query II nosort label-130-1-desc
+SELECT pk, col0 FROM tab0 WHERE col3 IS NULL ORDER BY 1 DESC
+----
+
+query II nosort label-130-1-desc
+SELECT pk, col0 FROM tab1 WHERE col3 IS NULL ORDER BY 1 DESC
+----
+
+query II nosort label-130-1-desc
+SELECT pk, col0 FROM tab2 WHERE col3 IS NULL ORDER BY 1 DESC
+----
+
+query II nosort label-130-1-desc
+SELECT pk, col0 FROM tab3 WHERE col3 IS NULL ORDER BY 1 DESC
+----
+
+query II nosort label-130-1-desc
+SELECT pk, col0 FROM tab4 WHERE col3 IS NULL ORDER BY 1 DESC
+----
+
+query II nosort label-130-2-desc
+SELECT pk, col0 FROM tab0 WHERE col3 IS NULL ORDER BY 2 DESC
+----
+
+query II nosort label-130-2-desc
+SELECT pk, col0 FROM tab1 WHERE col3 IS NULL ORDER BY 2 DESC
+----
+
+query II nosort label-130-2-desc
+SELECT pk, col0 FROM tab2 WHERE col3 IS NULL ORDER BY 2 DESC
+----
+
+query II nosort label-130-2-desc
+SELECT pk, col0 FROM tab3 WHERE col3 IS NULL ORDER BY 2 DESC
+----
+
+query II nosort label-130-2-desc
+SELECT pk, col0 FROM tab4 WHERE col3 IS NULL ORDER BY 2 DESC
+----
+
+query II nosort label-130-1
+SELECT pk, col0 FROM tab0 WHERE col3 IS NULL ORDER BY 1
+----
+
+query II nosort label-130-1
+SELECT pk, col0 FROM tab1 WHERE col3 IS NULL ORDER BY 1
+----
+
+query II nosort label-130-1
+SELECT pk, col0 FROM tab2 WHERE col3 IS NULL ORDER BY 1
+----
+
+query II nosort label-130-1
+SELECT pk, col0 FROM tab3 WHERE col3 IS NULL ORDER BY 1
+----
+
+query II nosort label-130-1
+SELECT pk, col0 FROM tab4 WHERE col3 IS NULL ORDER BY 1
+----
+
+query II nosort label-130-2
+SELECT pk, col0 FROM tab0 WHERE col3 IS NULL ORDER BY 2
+----
+
+query II nosort label-130-2
+SELECT pk, col0 FROM tab1 WHERE col3 IS NULL ORDER BY 2
+----
+
+query II nosort label-130-2
+SELECT pk, col0 FROM tab2 WHERE col3 IS NULL ORDER BY 2
+----
+
+query II nosort label-130-2
+SELECT pk, col0 FROM tab3 WHERE col3 IS NULL ORDER BY 2
+----
+
+query II nosort label-130-2
+SELECT pk, col0 FROM tab4 WHERE col3 IS NULL ORDER BY 2
+----

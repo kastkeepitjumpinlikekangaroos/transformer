@@ -102,12 +102,17 @@ final case class HashAggregateExec(
     else HashAggregateExec.KeyPathObject
   }
 
-  // Effective spill switch: user opted in AND every aggregate is spillable.
+  // Effective spill switch: user opted in, there are group keys, AND every
+  // aggregate is spillable. Without group keys every row folds into one
+  // group, so there is no map to bound: a spill would write that one state
+  // to disk and read it back, and with no aggregates either (`SELECT 1 FROM
+  // t GROUP BY ()`) the state has no columns, which no parquet file holds.
   // Queries with a DISTINCT aggregate (COUNT / SUM / AVG(DISTINCT ...)) fall
   // back to the heap-only path: the HashSet[Any] of values doesn't round-trip
   // through the typed spill schema.
   private val spillEnabled: Boolean =
-    opts.spillEnabled && AggStateSerde.allSpillable(aggregates.iterator.map(_._1).toIndexedSeq)
+    opts.spillEnabled && groupKeys.nonEmpty &&
+      AggStateSerde.allSpillable(aggregates.iterator.map(_._1).toIndexedSeq)
 
   /** Effective threshold in bytes. Lazy so the Runtime.maxMemory() call is
     * paid once per plan, not per task. */

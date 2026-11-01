@@ -485,8 +485,6 @@ object SqlTextGen {
     Beyond("two ONs on one join", "SELECT t.a FROM t JOIN u ON t.a = u.a ON t.b = u.b", wrappable = true, None),
     Beyond("a nested join", "SELECT t.a FROM t JOIN u JOIN u v ON u.a = v.a ON t.a = u.a", wrappable = true, None),
     Beyond("NOT NOT before IS NULL", "SELECT a FROM t WHERE NOT NOT TRUE IS NULL", wrappable = true, None),
-    Beyond("NOT before a comparison in a one-argument call", "SELECT COUNT_IF(NOT FALSE > TRUE) AS n FROM t",
-      wrappable = true, None),
     Beyond("string literals side by side", "SELECT 'a' 'b' FROM t", wrappable = true, None),
     Beyond("a string literal as a column alias", "SELECT a AS 'x' FROM t", wrappable = true, None),
     Beyond("a string literal as a table alias", "SELECT x.a FROM t AS 'x'", wrappable = true, None))

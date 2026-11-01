@@ -1,5 +1,6 @@
 package com.transformer.gui
 
+import java.util.Locale
 import javafx.scene.control.{ButtonType, Dialog, Label, ScrollPane}
 import javafx.scene.layout.GridPane
 import javafx.stage.Stage
@@ -9,7 +10,7 @@ import javafx.stage.Stage
   * View > Vim Keybindings is on. */
 object ShortcutsDialog {
 
-  private val IsMac = System.getProperty("os.name", "").toLowerCase.contains("mac")
+  private val IsMac = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac")
   /** The shortcut modifier as a key list writes it: ⌘ on macOS, Ctrl+ elsewhere. */
   val Cmd: String = if (IsMac) "⌘" else "Ctrl+"
   val Shift: String = if (IsMac) "⇧" else "Shift+"

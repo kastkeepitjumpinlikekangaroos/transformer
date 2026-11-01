@@ -3,6 +3,7 @@ package com.transformer.sql.exec
 import com.transformer.core._
 import com.transformer.sql.plan._
 import org.junit.Assert._
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 import scala.collection.mutable
@@ -457,6 +458,30 @@ class JoinSwapTest {
       "SELECT x.lk FROM l x JOIN r y ON x.lk = y.rk JOIN l z ON x.lv < z.lv", cat))
   }
 
+  /** The bound reaches through a join on an equality, which keeps by its
+    * estimate as many rows as its larger side: one over a pairing still holds
+    * every pair. Its size was the estimate of its inputs, and a pairing's
+    * estimate is its larger side, so a join on an equality between two
+    * pairings hid the first: SQLite's select5.test, ten-row tables joined in
+    * an unlucky order, ran a 2 GB heap out (plans/testing/04). */
+  @Test def aChainIsBoundedThroughAJoinOnAnEquality(): Unit = {
+    val l = view(LeftSchema, SmallLeftRows, Some(300L))
+    val r = view(RightSchema, SmallRightRows, Some(300L))
+    val cat = catalogWith("l" -> l, "r" -> r)
+    val ex = try {
+      SqlEngine.execute(
+        "SELECT x.lk FROM l x JOIN r y ON x.lv < y.rv JOIN l z ON x.lk = z.lk JOIN r w ON x.lv < w.rv", cat)
+      null
+    } catch { case e: IllegalArgumentException => e }
+    assertNotNull("expected the chain refused", ex)
+    assertEquals("A join without an equality between its two sides in ON is refused over the output of another " +
+      "such join when the two would pair more than 25000000 rows (left=90000, right=300); add an equality to one " +
+      "of the ON conditions", ex.getMessage)
+    // Joins on an equality over no pairing keep their larger side, and run.
+    collectAllRows(SqlEngine.execute(
+      "SELECT x.lk FROM l x JOIN r y ON x.lk = y.rk JOIN l z ON x.lk = z.lk JOIN r w ON x.lv < w.rv", cat))
+  }
+
   /** The guard refuses on sizes it can prove, never on a filter's guess: a
     * CROSS JOIN of two one-row filters over tables of a million rows runs.
     * It was refused as pairing 100000 rows with 100000, a filter on `=`
@@ -516,6 +541,7 @@ class JoinSwapTest {
   /** Both sides below the broadcast threshold → no exchange. The join's
     * `left` and `right` children are the original scans, not exchanges. */
   @Test def equiJoinSmallSidesSkipsExchange(): Unit = {
+    assumeTrue("needs the default broadcast threshold", LogicalPlanCardinality.BroadcastBuildThreshold > 100L)
     val l = emptyView(LeftSchema, Some(100L))
     val r = emptyView(RightSchema, Some(100L))
     val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
@@ -531,6 +557,7 @@ class JoinSwapTest {
     * exchange even though the other side is huge. The historic broadcast
     * shape is the right plan: build the small side, stream the big one. */
   @Test def equiJoinOneSideSmallSkipsExchange(): Unit = {
+    assumeTrue("needs the default broadcast threshold", LogicalPlanCardinality.BroadcastBuildThreshold > 100L)
     val l = emptyView(LeftSchema, Some(100L))
     val r = emptyView(RightSchema, Some(10_000_000L))
     val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
