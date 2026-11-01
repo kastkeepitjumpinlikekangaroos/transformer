@@ -3,6 +3,7 @@ package com.transformer.slt
 import com.transformer.core._
 import com.transformer.slt.Modes.Mode
 import com.transformer.slt.Script._
+import com.transformer.sql.exec.NestedLoopGuardException
 import com.transformer.sql.plan.LogicalBuilder
 
 import scala.collection.mutable
@@ -195,6 +196,10 @@ final class Runner(dialect: Dialect, modes: Seq[Mode] = Modes.Verification) {
             diff(baseline, printed).map(d => Diverged(m.name, d))
         }
       } catch {
+        // A mode that does not order the joins runs them as written, and may
+        // meet the nested-loop guard where the ordered baseline did not.
+        case f: RunFailure if f.atPlan && m.optimizer != Modes.Optimizer.Full && m.text == Modes.Text.AsWritten &&
+            f.cause.isInstanceOf[NestedLoopGuardException] => None
         case f: RunFailure => Some(Diverged(m.name, (if (f.atPlan) "refused: " else "failed on the data: ") + describe(f.cause)))
       }
     }.collectFirst { case Some(o) => o }.getOrElse(Passed)

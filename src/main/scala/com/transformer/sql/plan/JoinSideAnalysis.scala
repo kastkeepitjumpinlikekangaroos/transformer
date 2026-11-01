@@ -79,30 +79,50 @@ object JoinSideAnalysis {
     * shift a right-only filter conjunct so it can be wrapped as a
     * [[LogicalFilter]] over the right child).
     */
-  def shiftToRight(e: Expr, leftWidth: Int): Expr = e match {
-    case ColRefExpr(i, n, dt) => ColRefExpr(i - leftWidth, n, dt)
+  def shiftToRight(e: Expr, leftWidth: Int): Expr = remapColumns(e, _ - leftWidth)
+
+  /** `e` with each [[ColRefExpr]]'s index `i` replaced by `to(i)`: how a
+    * rewrite that moves columns ([[JoinOrder]] reorders a join's tables)
+    * moves the expressions that read them. */
+  def remapColumns(e: Expr, to: Int => Int): Expr = e match {
+    case ColRefExpr(i, n, dt) => ColRefExpr(to(i), n, dt)
     case lit: LitExpr => lit
-    case CastExpr(c, t) => CastExpr(shiftToRight(c, leftWidth), t)
-    case UnaryOpExpr(op, c, dt) => UnaryOpExpr(op, shiftToRight(c, leftWidth), dt)
-    case BinOpExpr(op, l, r, dt) =>
-      BinOpExpr(op, shiftToRight(l, leftWidth), shiftToRight(r, leftWidth), dt)
-    case FuncExpr(n, args, dt) => FuncExpr(n, args.map(shiftToRight(_, leftWidth)), dt)
+    case CastExpr(c, t) => CastExpr(remapColumns(c, to), t)
+    case UnaryOpExpr(op, c, dt) => UnaryOpExpr(op, remapColumns(c, to), dt)
+    case BinOpExpr(op, l, r, dt) => BinOpExpr(op, remapColumns(l, to), remapColumns(r, to), dt)
+    case FuncExpr(n, args, dt) => FuncExpr(n, args.map(remapColumns(_, to)), dt)
     case CaseExpr(branches, elseE, dt) =>
-      CaseExpr(
-        branches.map { case (a, b) => (shiftToRight(a, leftWidth), shiftToRight(b, leftWidth)) },
-        elseE.map(shiftToRight(_, leftWidth)),
-        dt)
-    case IsNullExpr(c, neg) => IsNullExpr(shiftToRight(c, leftWidth), neg)
-    case InListExpr(c, items, neg) =>
-      InListExpr(shiftToRight(c, leftWidth), items.map(shiftToRight(_, leftWidth)), neg)
-    case l: LikeExpr =>
-      l.copy(child = shiftToRight(l.child, leftWidth), pattern = shiftToRight(l.pattern, leftWidth))
+      CaseExpr(branches.map { case (a, b) => (remapColumns(a, to), remapColumns(b, to)) }, elseE.map(remapColumns(_, to)), dt)
+    case IsNullExpr(c, neg) => IsNullExpr(remapColumns(c, to), neg)
+    case InListExpr(c, items, neg) => InListExpr(remapColumns(c, to), items.map(remapColumns(_, to)), neg)
+    case l: LikeExpr => l.copy(child = remapColumns(l.child, to), pattern = remapColumns(l.pattern, to))
     case SwitchCaseExpr(operand, branches, elseE, dt) =>
-      SwitchCaseExpr(shiftToRight(operand, leftWidth),
-        branches.map(b => b.copy(when = shiftToRight(b.when, leftWidth), value = shiftToRight(b.value, leftWidth))),
-        elseE.map(shiftToRight(_, leftWidth)), dt)
-    case BetweenExpr(c, low, high) =>
-      BetweenExpr(shiftToRight(c, leftWidth), shiftToRight(low, leftWidth), shiftToRight(high, leftWidth))
+      SwitchCaseExpr(remapColumns(operand, to),
+        branches.map(b => b.copy(when = remapColumns(b.when, to), value = remapColumns(b.value, to))),
+        elseE.map(remapColumns(_, to)), dt)
+    case BetweenExpr(c, low, high) => BetweenExpr(remapColumns(c, to), remapColumns(low, to), remapColumns(high, to))
+  }
+
+  /** The indices of the columns `e` reads. */
+  def columnsRead(e: Expr): Set[Int] = {
+    val out = Set.newBuilder[Int]
+    def go(x: Expr): Unit = x match {
+      case ColRefExpr(i, _, _) => out += i
+      case _: LitExpr => ()
+      case CastExpr(c, _) => go(c)
+      case UnaryOpExpr(_, c, _) => go(c)
+      case BinOpExpr(_, l, r, _) => go(l); go(r)
+      case FuncExpr(_, args, _) => args.foreach(go)
+      case CaseExpr(branches, elseE, _) => branches.foreach { case (a, b) => go(a); go(b) }; elseE.foreach(go)
+      case IsNullExpr(c, _) => go(c)
+      case InListExpr(c, items, _) => go(c); items.foreach(go)
+      case LikeExpr(c, p, _, _) => go(c); go(p)
+      case SwitchCaseExpr(operand, branches, elseE, _) =>
+        go(operand); branches.foreach { b => go(b.when); go(b.value) }; elseE.foreach(go)
+      case BetweenExpr(c, low, high) => go(c); go(low); go(high)
+    }
+    go(e)
+    out.result()
   }
 
   /** The conjunction of `conjuncts`, as a balanced tree of ANDs. A pass that

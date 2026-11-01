@@ -59,6 +59,21 @@ scala_junit_test(
     ],
 )
 
+# JoinOrder: a table with no equality to those joined so far waits for one
+# that has one; every other order is kept; the answers are the same.
+scala_junit_test(
+    name = "join_order_test",
+    srcs = ["JoinOrderTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "//src/test/scala/com/transformer/fuzz",
+        "@maven//:junit_junit",
+    ],
+)
+
 scala_junit_test(
     name = "expr_batch_test",
     srcs = ["ExprBatchTest.scala"],

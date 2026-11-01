@@ -933,8 +933,10 @@ nothing happened".
 ## Add a logical-plan optimizer pass
 
 `LogicalOptimizer.optimize` (in `sql/plan/`) runs each pass once in a fixed
-order — `FilterPushdown` then `ColumnProjectionPushdown` today. To add a new
-pass:
+order — `FilterPushdown`, `JoinOrder`, then `ColumnProjectionPushdown` today.
+`JoinOrder` is the model for a pass that moves columns: it returns where each
+column went and re-indexes the expressions above up to the node that makes new
+columns. To add a new pass:
 
 1. New file `sql/plan/<MyPass>.scala` exposing a single
    `def apply(plan: LogicalPlan): LogicalPlan`. The body is a recursive

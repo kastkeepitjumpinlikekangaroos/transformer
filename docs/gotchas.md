@@ -2028,6 +2028,8 @@ globs, the parser, the nested-loop guard and the desktop GUI. Details are in
   now, none of the rest pairs more than ten million, and the file runs in two
   and a half minutes, though two joins of 21 and 25 tables still run a 2 GB
   heap out at ten million wide pairs (the collapsing path holds them all).
+  Plan 05 then ordered joins by their equalities (`JoinOrder`), and all 732
+  run, in under six seconds.
 - **The desktop GUI folded case in the JVM's locale.** Under a Turkish one,
   where `I` lowers to a dotless i, the SQL highlighter read `PARTITION` and
   `INT` as `partıtıon` and `ınt`, no keyword and no type; the task panel and
@@ -2057,6 +2059,14 @@ output, over every slt script and every query generator. Details are in
 
 ## What's intentionally NOT done
 
+- **Join order has no cost model.** `JoinOrder` keeps the written order but
+  where the next table has no equality with those joined so far, so it never
+  weighs one keyed order against another by the tables' sizes, starts from
+  the first written table even when another would make a smaller first join,
+  and does not move a table that nothing connects to (`FROM a, b, c WHERE b.k
+  = c.k` still pairs `a` with `b` first). Reordering changes which rows a
+  condition is evaluated on, never the answer, so a condition that fails on a
+  row (a division by zero) may fail in one order and not in another.
 - **Spill-to-disk** is implemented for `SortExec`, `HashAggregateExec`,
   `DistinctExec`, `HashJoinExec` (grace hash, equi-join only), and
   `WindowExec` (bucketed by PARTITION BY) but **disabled by default**.

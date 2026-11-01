@@ -157,6 +157,7 @@ manifest that could not reach a Failed or Skipped task's `_run.json` — and, re
 | `sql/plan/logical_plan_cardinality_test` | `LogicalPlanCardinality.estimate` for every plan node: scan / project / filter selectivity (per shape: `=` / range / `IS NULL` / `LIKE` / `NOT` inversion / default), AND multiplies / OR widens, limit caps both ways, distinct shrinks, aggregate without group keys collapses to 1, aggregate with group keys stays bounded by input, joins per kind (Inner=max / Left=left / Right=right / Full=sum) + None propagates when either side unknown, union sums and propagates unknown, sort / window pass through, `filterSelectivity` constants pinned to named `private[plan] val`s; `LogicalOffset` subtracts from its child's estimate, bottoms out at zero, propagates `None`, and composes under a `LogicalLimit` |
 | `sql/plan/filter_pushdown_test` | `FilterPushdown` over every join kind: inner pushes left-only / right-only conjuncts into the matching child and re-indexes right-side ColRefs; inner with cross-side or mixed conjuncts splits correctly; stacked Filter(Filter(Join)) flattens before pushing; LEFT outer pushes left-only conjuncts and refuses right-only (including the `r.x IS NULL` anti-join shape); RIGHT outer is symmetric; FULL outer never pushes; cascaded inner joins push all the way to the relevant leaf scan with the right per-side shifts; filter above an aggregate is not pushed across; idempotent when re-run; a conjunct touching both sides of an inner join joins its condition, and a comma join (`TRUE`) takes a WHERE equality as its condition |
 | `sql/plan/column_projection_pushdown_test` | Join pruning: parent + join-key columns survive on each side, columns referenced by neither are dropped; `SELECT *` leaves the join unchanged; self-join keeps colliding names on both sides (correctness over optimality); cross-side filter above a join still allows both sides to prune to the union of (parent + filter + join-key) refs |
+| `sql/plan/join_order_test` | `JoinOrder`: a table with no equality to the tables joined so far waits for the first later one that has one (`FROM a, b, c WHERE a.k = c.k AND b.j = c.j` joins a, c, b, both joins keyed); a written order that keys every join it can, one where no later table connects to the first, and a cross join with no equality are kept; the columns keep their written order; an outer join is a barrier whose sides' runs are ordered on their own; a run whose conditions read `RAND()` keeps its order; the answers are the same; and three 6000-row tables written with the unkeyed pair first, which the nested-loop guard refused, run |
 | `sql/plan/plan_validator_test` | `PlanValidator` refuses each malformed plan it checks for, naming the stage and the node's path from the root: a column reference past its input's columns or read as another type (in a projection, a filter, a join condition over both sides, and a window's PARTITION BY, which the projection pass's own check skipped), a condition that is no BOOLEAN (a filter, an AND operand, a CASE WHEN), a comparison of two types, union arms of other column types, a CTE scan left unresolved, and a pass that changes the plan's output; plans the binder and the optimizer make from SQL pass every stage |
 | `sql/plan/plan_sql_test` | `PlanSql` prints every construct the binder binds (each literal type and sign, casts, each operator, function, aggregate and window with frames, GROUP BY expressions and `()`, ORDER BY over output positions and computed keys, DISTINCT, LIMIT / OFFSET, every join kind, unions balanced and nested, CTEs read once and twice, nested WITH, column alias lists, quoted names, a SELECT with no FROM) as SQL that binds back to the same plan (`PlanRoundTrip.check`) and answers as the query does, and the optimized plan printed and run with the optimizer off answers so too; the text's forms are pinned (one SELECT per stack, a CTE for a filter pushed under a join, qualified columns, explicit casts but to DECIMAL, literals of their own type); a materialized CTE's scan is unprintable with the reason; two spellings of one aggregate or one window function are computed once (`COUNT()` and `COUNT(*)` were two slots, found by the round-trip campaign) |
 | `sql/plan/unsupported_clauses_test` | The rejection pass's audit (`UnsupportedClauses`) held against the two things it can drift from. It reads `LogicalBuilder`'s compiled class files (the constant pool, no bytecode library) to learn which JSqlParser classes the binder matches on and which getters it calls, then asserts: every public getter **and public field** of every audited class is read by the binder, rejected, or inert, exactly once (a partial rejection must be on a getter the binder reads, a total one on a getter it never reads); every concrete class the binder names or receives from a getter it calls is audited (`Distinct` arrives that way and is never matched on); every JSqlParser subclass of an audited class is audited or listed in `UnsupportedClauses.unreachable` with the reason; every rejection's example SQL reaches *that* rejection through `LogicalBuilder.build`; a corpus of supported SQL, including every spelling the audit calls inert and every clause plan 01's second half honours, passes the walk untouched (the negative control for presence tests like `Table.getDBLinkName`'s, and for a partial rejection's test widening back over what the binder now honours); no rejection leaks an internal slot name such as `_agg0`; and every JSqlParser expression, FROM item and set operation the audit does not cover, which the binder refuses by name, has a name in SQL's words in `UnsupportedClauses.refusal`'s table (`everyConstructTheBinderRefusesHasAName`; the binder named the class, plans/robustness/10). Each failure message says what to do. A JSqlParser upgrade that adds a getter fails it until the getter is classified |
@@ -328,7 +329,7 @@ scripts under `src/test/slt/plan/` whose records are `EXPLAIN <query>`, the
 plan the optimizer makes as a tree and as SQL: a comma join's equality
 becoming its key, filters pushed into each side of an inner join and kept above
 an outer join's padded side, nothing crossing an aggregate, a CTE read once
-inlined and one read twice materialized. An `EXPLAIN` runs in the baseline
+inlined and one read twice materialized, and the order inner joins run in. An `EXPLAIN` runs in the baseline
 alone (each verification mode makes another plan, and the reprinting modes
 have no plan of an EXPLAIN to print), and its sections are logical, which no
 JVM-wide setting changes, so they hold under every whole-suite configuration.
@@ -377,10 +378,20 @@ subquery, a parenthesized join, `EXCEPT` or `INTERSECT`, a column outside
 by design (82 a DOUBLE branch of a `CASE`, `COALESCE` or `NULLIF` before a
 division, 13 an INT product past INT on the data); none diverged; and
 1,424,981 were another engine's. Four scripts stop early, at `CREATE TRIGGER`,
-`INSERT OR REPLACE` and a `halt`. `select5.test` runs on its own, since its
-widest joins fill the heap that files beside it would share: in 155 s, 209 of
-its 732 queries pass, the guard refuses 521, and two run a 2 GB heap out
+`INSERT OR REPLACE` and a `halt`. `select5.test`, joins of 4 to 64 ten-row
+tables each written in three orders, ran on its own while the planner joined
+in written order: in 155 s, 209 of its 732 queries passed, the guard refused
+521, and two ran a 2 GB heap out
 ([plans/testing/04](../plans/testing/04-sql-logic-tests-and-whole-suite-configurations.md)).
+Since joins are ordered by their equalities
+([plans/testing/05](../plans/testing/05-plans-as-sql.md)) all 732 pass, in
+5.7 s, and its joins of four and of eight tables are vendored as
+`sqlite/select5.test`. A mode that leaves the optimizer off (or runs one pass
+of it) joins the tables as written, so the nested-loop guard refuses there
+what the ordered baseline runs; the runner takes that refusal
+(`NestedLoopGuardException`) in such a mode as no divergence, and holds the
+`optimized-reprinted` mode, which runs the ordered plan's SQL, to the
+baseline's answer.
 
 ## Property-based testing (fuzz)
 

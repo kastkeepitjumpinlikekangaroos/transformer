@@ -1485,15 +1485,26 @@ one over the output of another such join, directly or through joins on an
 equality, when the two would pair more than 25 million rows: a chain
 multiplies where each side alone looks small (three 300-row tables pair 27
 million). One small side against a large one, such as 100 buckets against a
-million-row table on `amount BETWEEN lo AND hi`, still runs. Joins run in the
-order `FROM` writes them, with no reordering: in `FROM a, b, c WHERE a.x = c.x
-AND c.y = b.y` the first join, `a` with `b`, has no condition of its own and
-pairs every row, so write each table after one it joins to (`FROM a, c, b`).
-Below the guard's bound such a pairing still costs memory, since a join
-without an equality holds every row it pairs until it has them all: in
-SQLite's test corpus, a join of 17 ten-row tables written in an unlucky order
-pairs ten million rows on its way to an answer of one row, and two wider ones
-run a 2 GB heap out.
+million-row table on `amount BETWEEN lo AND hi`, still runs.
+
+**Join order:** inner and comma joins run in the order `FROM` writes them,
+but where the next table has no equality with the tables joined so far, the
+first later table that has one is joined first: in `FROM a, b, c WHERE a.x =
+c.x AND c.y = b.y` the written first join, `a` with `b`, has no condition and
+would pair every row, so `c` is joined second and both joins hash. There is no
+cost model: a query whose written order already gives each join it can an
+equality keeps its plan, and a table no later table connects to stays where
+it is written (`FROM a, b, c WHERE b.k = c.k` pairs `a` with `b`). The columns
+keep their written order, an outer join is joined where it is written (the
+inner joins on either side of it are ordered on their own), and a run of joins
+whose conditions read `RAND()` keeps its order, since another order would draw
+it for other rows. The answer never depends on the order; which rows a
+condition is evaluated on does, so a condition that fails on some row (a
+division by zero) may fail in one order and not reach that row in another.
+`EXPLAIN` shows the order chosen. In SQLite's test corpus, whose
+`select5.test` joins 4 to 64 tables written in three orders each, every one of
+its 732 queries now runs, in under six seconds; written order refused 521 of
+them.
 
 **EXPLAIN:** `EXPLAIN <query>` returns the query's plan, without running any
 of it, as one `STRING` column, `plan`, a row per line: the plan the optimizer

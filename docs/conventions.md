@@ -218,7 +218,7 @@ specific traps.
   `JoinSwapRatio` / `NestedLoopMaxRows` thresholds.
 - **Logical-plan rewrites are explicit passes called in order, not a rule
   engine.** `LogicalOptimizer.optimize` calls each pass by name (`FilterPushdown`,
-  `ColumnProjectionPushdown`) in a fixed order, each through a method of
+  `JoinOrder`, `ColumnProjectionPushdown`) in a fixed order, each through a method of
   `LogicalOptimizer` that hands its output to `PlanValidator.afterPass` —
   adding a new pass is one more method and line. Don't introduce a generic
   optimizer-pass framework. A rewrite that touches `ColRefExpr` indices must

@@ -1,0 +1,102 @@
+# Golden plans for join order: each run of inner joins keeps the order FROM
+# writes, but where the next table has no equality with the tables joined so
+# far the first later table that has one comes in first, so the join hashes;
+# a projection above keeps the columns in their written order. An outer join
+# is a barrier, and a run whose conditions read RAND() stays as written.
+
+statement ok
+CREATE TABLE a (k INT, j INT, v STRING)
+
+statement ok
+CREATE TABLE b (k INT, j INT, v STRING)
+
+statement ok
+CREATE TABLE c (k INT, j INT, v STRING)
+
+# b has no equality with a, so c, which has one, comes first.
+query T nosort
+EXPLAIN SELECT a.v, b.v, c.v FROM a, b, c WHERE a.k = c.k AND b.j = c.j
+----
+== Optimized Logical Plan ==
+Project: a.v, b.v, c.v
+  Join INNER: b.j = c.j
+    Join INNER: a.k = c.k
+      Scan a: k, j, v
+      Scan c: k, j, v
+    Scan b: k, j, v
+== Optimized SQL ==
+SELECT a.v AS v, b.v AS v, c.v AS v
+FROM a
+JOIN c ON a.k = c.k
+JOIN b ON b.j = c.j
+
+# Written so that each join has its key already: kept.
+query T nosort
+EXPLAIN SELECT a.v, b.v, c.v FROM a, c, b WHERE a.k = c.k AND b.j = c.j
+----
+== Optimized Logical Plan ==
+Project: a.v, b.v, c.v
+  Join INNER: b.j = c.j
+    Join INNER: a.k = c.k
+      Scan a: k, j, v
+      Scan c: k, j, v
+    Scan b: k, j, v
+== Optimized SQL ==
+SELECT a.v AS v, b.v AS v, c.v AS v
+FROM a
+JOIN c ON a.k = c.k
+JOIN b ON b.j = c.j
+
+# No later table has an equality with a: kept, the first join a cross join.
+query T nosort
+EXPLAIN SELECT a.v, b.v, c.v FROM a, b, c WHERE b.k = c.k
+----
+== Optimized Logical Plan ==
+Project: a.v, b.v, c.v
+  Join INNER: b.k = c.k
+    Join CROSS
+      Scan a: k, j, v
+      Scan b: k, j, v
+    Scan c: k, j, v
+== Optimized SQL ==
+SELECT a.v AS v, b.v AS v, c.v AS v
+FROM a
+CROSS JOIN b
+JOIN c ON b.k = c.k
+
+# The run under the LEFT JOIN reorders; the outer join stays where it is.
+query T nosort
+EXPLAIN SELECT a.v, b.v, c.v FROM a, b, c LEFT JOIN b AS b2 ON b2.k = c.k WHERE a.k = c.k AND b.j = c.j
+----
+== Optimized Logical Plan ==
+Project: a.v, b.v, c.v
+  Join LEFT: b2.k = c.k
+    Join INNER: b.j = c.j
+      Join INNER: a.k = c.k
+        Scan a: k, j, v
+        Scan c: k, j, v
+      Scan b: k, j, v
+    Scan b AS b2: k, j, v
+== Optimized SQL ==
+SELECT a.v AS v, b.v AS v, c.v AS v
+FROM a
+JOIN c ON a.k = c.k
+JOIN b ON b.j = c.j
+LEFT JOIN b AS b2 ON b2.k = c.k
+
+# A condition that reads RAND() keeps its run as written.
+query T nosort
+EXPLAIN SELECT a.v FROM a, b, c WHERE a.k = c.k AND b.j = c.j AND a.j + RAND() > b.j
+----
+== Optimized Logical Plan ==
+Project: a.v
+  Join INNER: a.k = c.k AND b.j = c.j
+    Join INNER: CAST(a.j AS DOUBLE) + RAND() > CAST(b.j AS DOUBLE)
+      Scan a: k, j, v
+      Scan b: k, j, v
+    Scan c: k, j, v
+== Optimized SQL ==
+SELECT a.v AS v
+FROM a
+JOIN b ON CAST(a.j AS DOUBLE) + RAND() > CAST(b.j AS DOUBLE)
+JOIN c ON a.k = c.k AND b.j = c.j

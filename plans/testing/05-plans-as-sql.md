@@ -49,7 +49,7 @@ takes all of them but JSqlParser 5.3, which still refuses deep parentheses.
 | W1 | Plan validation after every pass | **done** 2026-11-01 |
 | W2 | `PlanSql`: a plan printed as SQL the binder reads back to it; the round trip as an slt mode and a fuzz property | **done** 2026-11-01 |
 | W3 | `EXPLAIN` and golden plans | **done** 2026-11-01 |
-| W4 | Join order by connectivity | |
+| W4 | Join order by connectivity | **done** 2026-11-01 |
 | W5 | A pairing that streams | |
 | W6 | Every hash zero (`--config=hashzero`) | |
 | W7 | A CSV glob's files with their columns in other orders | |
@@ -174,6 +174,24 @@ under it binds through every check a query does; golden plans under
 comma join's key, a CTE inlined or materialized, and EXPLAIN's own refusals.
 They also pin a limitation: a filter over an inlined CTE stays above the CTE's
 projection, since FilterPushdown moves filters through joins only.
+
+W4: `JoinOrder` runs between FilterPushdown and ColumnProjectionPushdown.
+SQLite's `select5.test`, written in unlucky orders on purpose, went from 209
+of 732 queries passing (521 refused by the nested-loop guard, two running a
+2 GB heap out, 155 s) to all 732 passing in 5.7 s. A first version restored
+the written column order with a projection over each reordered run, which
+printed as a CTE wrapping the joins with every column renamed; the column
+moves now travel up the plan to the block's projection, so a reordered query
+prints as one SELECT. The jaffle-shop job's plans keep their answers (15 of
+15 succeed, every validation passes), and the polymarket job keeps its
+pattern (14 succeeded, 2 failed their validations, 1 skipped) in 79 s.
+`select5.test`'s joins of four and of eight tables are vendored; the slt
+modes that leave the optimizer off join as written and meet the guard on the
+eight-table ones, so the guard's refusal is its own exception type
+(`NestedLoopGuardException`), which the runner takes as no divergence in
+those modes alone. The groups of five to seven tables pair up to ten million
+rows each in written order, minutes across the modes, and are left to the
+corpus audit.
 
 ### How the printer is built (W2)
 

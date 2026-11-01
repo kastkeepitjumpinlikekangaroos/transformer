@@ -26,6 +26,13 @@ import scala.collection.mutable
   * tree and the root [[MetricsNode]] for snapshotting after the iterator
   * drains.
   */
+/** The nested-loop guard's refusal ([[PhysicalPlanner]]): a join with no
+  * equality between its sides over inputs too large to pair. Which joins have
+  * one depends on the order the joins run in, which the optimizer chooses
+  * ([[com.transformer.sql.plan.JoinOrder]]), so a plan the optimizer did not
+  * order may meet it where the optimized plan does not. */
+final class NestedLoopGuardException(message: String) extends IllegalArgumentException(message)
+
 object PhysicalPlanner {
 
   def plan(logical: LogicalPlan, opts: ExecutionOptions = ExecutionOptions.Default): PhysicalPlan = {
@@ -345,7 +352,7 @@ object PhysicalPlanner {
   private def enforceNestedLoopGuard(l: LogicalPlan, r: LogicalPlan): Unit = {
     (provenRows(l), provenRows(r)) match {
       case (Some(lc), Some(rc)) if math.min(lc, rc) > NestedLoopMaxRows =>
-        throw new IllegalArgumentException(
+        throw new NestedLoopGuardException(
           s"A join without an equality between its two sides in ON is refused when both sides hold more than " +
             s"$NestedLoopMaxRows rows (left=$lc, right=$rc); add one to the ON condition")
       case _ => ()
@@ -356,7 +363,7 @@ object PhysicalPlanner {
     // million rows) still runs.
     (rowsAtMost(l), rowsAtMost(r)) match {
       case (Some((lb, lPaired)), Some((rb, rPaired))) if (lPaired || rPaired) && times(lb, rb) > NestedLoopMaxPairs =>
-        throw new IllegalArgumentException(
+        throw new NestedLoopGuardException(
           s"A join without an equality between its two sides in ON is refused over the output of another such " +
             s"join when the two would pair more than $NestedLoopMaxPairs rows (left=$lb, right=$rb); add an " +
             "equality to one of the ON conditions")
