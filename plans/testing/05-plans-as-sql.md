@@ -51,7 +51,7 @@ takes all of them but JSqlParser 5.3, which still refuses deep parentheses.
 | W3 | `EXPLAIN` and golden plans | **done** 2026-11-01 |
 | W4 | Join order by connectivity | **done** 2026-11-01 |
 | W5 | A pairing that streams | **done** 2026-11-01 |
-| W6 | Every hash zero (`--config=hashzero`) | |
+| W6 | Every hash zero (`--config=hashzero`) | **done** 2026-11-01 |
 | W7 | A CSV glob's files with their columns in other orders | |
 | W8 | A spill file's fixed cost | |
 | W9 | Ported Postgres regression tests | |
@@ -200,6 +200,15 @@ parallel and a pairing holds one wave's pairs. 25 million pairs, which the
 collapsing path ran a 256 MB heap out on, count in it; `select5.test` keeps
 its 5.7 s. Keyed joins under the broadcast size keep the collapsing path:
 their output is about their input, and they probe every partition at once.
+
+W6: every key hash goes through `KeyHash`, 0 under
+`-Dtransformer.hash_zero=true`. The whole suite under `--config=hashzero`
+changed no answer; the one failure was `ExchangeExecTest` asserting that
+hashes spread random keys, which now assumes they are not zero. A test of its
+own, `hash_zero_test`, runs GROUP BY, DISTINCT, joins and windows over every
+key codec under it in the default suite; its first draft used no packed key,
+so a `BytesKey` that trusted equal hashes passed it, and it was widened until
+that sabotage failed it.
 
 ### How the printer is built (W2)
 

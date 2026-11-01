@@ -24,3 +24,6 @@ test:batch2 --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.batch_capacity=2
 test:sharded "--test_env=JAVA_TOOL_OPTIONS=-Dtransformer.scheduler.shard_min_size=1 -Dtransformer.scheduler.broadcast_threshold=1 -Dtransformer.scheduler.shard_count=4"
 test:serial --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.scheduler.parallelism=1
 test:zone "--test_env=JAVA_TOOL_OPTIONS=-Duser.timezone=America/St_Johns -Duser.language=tr -Duser.country=TR"
+# Every key hash 0 (KeyHash), DuckDB's HASH_ZERO: every hash map meets only
+# collisions, every exchange and spill sends every row to one shard or bucket.
+test:hashzero --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.hash_zero=true

@@ -1770,9 +1770,13 @@ engine and multiply each one across execution modes:
   pass at a time, and the plan printed as SQL, below), DuckDB's query
   verification. Each mode must print the baseline's result.
 - **Whole-suite configurations** (`.bazelrc` `--config=batch1`, `batch2`,
-  `sharded`, `serial`, `zone`): the whole suite under one JVM-wide setting
-  apiece, the batch capacity among them, as DuckDB runs its tests at a vector
-  size of 2. A test that depends on a default says so with `assumeTrue`.
+  `sharded`, `serial`, `zone`, `hashzero`): the whole suite under one JVM-wide
+  setting apiece, the batch capacity among them, as DuckDB runs its tests at a
+  vector size of 2, and every key hash 0 (`KeyHash` in `core/HashKeys.scala`,
+  which every hash site goes through: the key wrappers and `LongHashMap` the
+  hash maps key by, `HashPartitioner`'s shard routing, the grace join's and the
+  spilling window's buckets), as DuckDB's `HASH_ZERO` build does. A test that
+  depends on a default says so with `assumeTrue`.
 
 Formats, modes, the corpus and how to write a script are in
 [testing.md](testing.md#sql-logic-tests).

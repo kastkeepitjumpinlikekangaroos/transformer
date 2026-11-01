@@ -3,6 +3,7 @@ package com.transformer.sql.exec
 import com.transformer.core._
 import com.transformer.sql.plan._
 import org.junit.Assert._
+import org.junit.Assume.assumeFalse
 import org.junit.Test
 
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch}
@@ -443,7 +444,9 @@ class ExchangeExecTest {
     // distribution shouldn't be perfectly uniform, but every shard should
     // hold at least one row. Catches a partitioner whose modulo collapses
     // to a single shard (the historical `Int.hashCode % K` regression on
-    // contiguous small keys, which `fmix32` is meant to fix).
+    // contiguous small keys, which `fmix32` is meant to fix). Under
+    // `--config=hashzero` every key hashes to one shard, by design.
+    assumeFalse("every key hashes to 0 under transformer.hash_zero", KeyHash.zero)
     val rnd = new Random(0xCAFEBABEL)
     val parts = Vector.tabulate(4)(_ => Vector.tabulate(1024)(_ => row(rnd.nextInt(), 0)))
     val K = 8

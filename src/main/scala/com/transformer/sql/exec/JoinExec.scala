@@ -906,7 +906,7 @@ final case class HashJoinExec(
       h = 31 * h + hi
       k += 1
     }
-    val mixed = HashJoinExec.fmix32(h)
+    val mixed = KeyHash(HashJoinExec.fmix32(h))
     (mixed & 0x7FFFFFFF) % K
   }
 

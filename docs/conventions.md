@@ -248,6 +248,12 @@ specific traps.
   turns a regrouped 5000-term WHERE back into a 5000-level chain; the same
   for any list a rewrite turns into nested binary nodes (`balancedUnion`
   does it for a UNION's arms). See [gotchas.md](gotchas.md).
+- **Every key hash goes through `KeyHash`.** A new hash site (a map keyed by
+  row values, a shard or a spill bucket chosen by a hash) wraps its hash in
+  `KeyHash(h)`, so `--config=hashzero` makes it 0 with every other one, and the
+  whole suite under that config shows whether the site tells keys of one hash
+  apart. A test that asserts hashes spread keys says so with
+  `assumeFalse(KeyHash.zero)`.
 - **Pipeline-breaking operators that key into a HashMap go through
   `core/HashKeys.scala`'s `KeyCodec`, not raw `Seq[Any]`.** That's the
   shared abstraction `HashAggregateExec`, `HashJoinExec`, `DistinctExec`,

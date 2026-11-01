@@ -240,7 +240,7 @@ final case class WindowExec(
       k += 1
     }
     if (anyNull) return 0
-    val mixed = HashJoinExec.fmix32(h)
+    val mixed = KeyHash(HashJoinExec.fmix32(h))
     (mixed & 0x7FFFFFFF) % K
   }
 

@@ -76,7 +76,7 @@ object HashPartitioner {
       h = 31 * h + hashCell(keyVecs(i), row)
       i += 1
     }
-    fmix32(h)
+    KeyHash(fmix32(h))
   }
 
   /** Hash one cell. NULL is the caller's concern — this is only reached for

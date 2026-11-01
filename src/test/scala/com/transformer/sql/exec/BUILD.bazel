@@ -12,6 +12,26 @@ scala_junit_test(
     ],
 )
 
+# Every key hash 0 and every breaker sharded four ways: each operator keyed by
+# a hash tells keys apart by their values (KeyHash; --config=hashzero runs the
+# whole suite so).
+scala_junit_test(
+    name = "hash_zero_test",
+    srcs = ["HashZeroTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = [
+        "-Dtransformer.hash_zero=true",
+        "-Dtransformer.scheduler.shard_min_size=1",
+        "-Dtransformer.scheduler.broadcast_threshold=1",
+        "-Dtransformer.scheduler.shard_count=4",
+    ],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "@maven//:junit_junit",
+    ],
+)
+
 # A join with no equality pairs a wave at a time: every kind answers as a
 # nested loop does, and 25 million pairs stream through a 256 MB heap.
 scala_junit_test(

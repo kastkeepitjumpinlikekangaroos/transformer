@@ -230,6 +230,21 @@ object KeyCodec {
   }
 }
 
+/** Every key hash the engine computes: the hash maps GROUP BY, DISTINCT and
+  * joins key their rows by, the shard an exchange routes a row to, the spill
+  * bucket a grace hash join or a spilling window writes it to. Under
+  * `-Dtransformer.hash_zero=true`, read once per JVM, each is 0, DuckDB's
+  * `HASH_ZERO` build: every hash map meets only collisions and every
+  * exchange and spill sends every row to one shard or bucket, so an operator
+  * that took two keys of one hash for one key answers wrong. The whole suite
+  * runs under it with `--config=hashzero`. */
+object KeyHash {
+  val zero: Boolean = java.lang.Boolean.getBoolean("transformer.hash_zero")
+
+  /** `h`, or 0 under `transformer.hash_zero`. */
+  @inline def apply(h: Int): Int = if (zero) 0 else h
+}
+
 /** Hashmap-suitable wrapper around a `byte[]`. Caches `hashCode`; `equals`
   * does `Arrays.equals` after a same-hash check.
   *
@@ -238,7 +253,7 @@ object KeyCodec {
   * allocates a fresh `BytesKey` so the bytes are stable.
   */
 sealed class BytesKey(val bytes: Array[Byte], protected var hash: Int) {
-  def this(bytes: Array[Byte]) = this(bytes, java.util.Arrays.hashCode(bytes))
+  def this(bytes: Array[Byte]) = this(bytes, KeyHash(java.util.Arrays.hashCode(bytes)))
   override def hashCode(): Int = hash
   override def equals(other: Any): Boolean = other match {
     case k: BytesKey => (k eq this) || (k.hash == hash && java.util.Arrays.equals(bytes, k.bytes))
@@ -270,7 +285,7 @@ final class BytesKeyScratch(initialCapacity: Int)
   /** Recompute the hash for the current `bytes` content. Called by the codec
     * after rewriting `bytes`. */
   def recomputeHash(): Unit = {
-    hash = java.util.Arrays.hashCode(bytes)
+    hash = KeyHash(java.util.Arrays.hashCode(bytes))
   }
   /** Materialize an immutable copy for insertion. */
   def toOwned: BytesKey = new BytesKey(bytes.clone(), hash)
@@ -325,7 +340,7 @@ object ObjectArrayKey {
       h = 31 * h + eh
       i += 1
     }
-    h
+    KeyHash(h)
   }
 }
 
@@ -765,7 +780,7 @@ final class LongHashMap[V >: Null <: AnyRef](initialCapacity: Int = 16, loadFact
     * causes when keys are dense small integers. */
   private def hash(key: Long): Int = {
     val h = key * 0x9E3779B97F4A7C15L
-    ((h ^ (h >>> 32)) & 0x7FFFFFFFL).toInt
+    KeyHash(((h ^ (h >>> 32)) & 0x7FFFFFFFL).toInt)
   }
 }
 
@@ -896,7 +911,7 @@ object SingleObjectKey {
     // wrapper hashes identically to a one-element ObjectArrayKey covering
     // the same value. Lets a future refactor that materializes a one-key
     // map under either codec migrate without re-hashing.
-    31 + eh
+    KeyHash(31 + eh)
   }
 }
 
