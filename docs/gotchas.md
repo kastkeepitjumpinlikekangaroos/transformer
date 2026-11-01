@@ -20,6 +20,23 @@ ship a fix or move something from "not done" to "done".
   "(" "("`. Two parse, as do any number around the tested value, after `LIKE`
   or beside `=`. SQLite's corpus writes the shape 13 times in 5.3 million
   records; write fewer parentheses.
+- **No JSqlParser 5.2 literal holds a backslash before a quote.** In
+  `'a\''b'` the parser reads `'a\'` as the literal and `'b'` as an alias, and
+  `'a\'b'` does not parse at all, so text holding `\'` cannot be written as a
+  literal; a backslash anywhere else, at the end included (`'a\'`), is itself.
+  `PlanSql` refuses to print a plan with such a value
+  (`UnprintablePlanException`); no literal written to the binder can make one.
+- **SQL here writes no cast to DECIMAL or BINARY**, though the binder inserts
+  both (an INT beside a DECIMAL, a NULL beside a BINARY). `PlanSql` prints
+  such a cast as its operand, and the binder casts it again in the same place,
+  since the operand's types are the same; a plan with a DECIMAL literal where no
+  DECIMAL stands beside it, which the binder never makes, would print as a
+  DOUBLE.
+- **A printed plan nests deeper than its query.** `PlanSql` writes the casts
+  the binder inserted and parentheses around operands, so a query within
+  `SqlParser.MaxNesting` can print as text past it. `PlanRoundTrip` reports
+  that as a verdict of its own (`TooDeep`), which the slt `reprinted` mode
+  runs as written and the fuzz guard counts.
 - **JSqlParser's `AllTableColumns` is a subtype of `AllColumns`.** Pattern-match
   `AllTableColumns` first or you'll never reach the `table.*` branch.
 - **JSqlParser's `SelectItem<? extends Expression>` generics confuse Scala
@@ -1945,7 +1962,8 @@ worth carrying:
 ## Defects the SQL logic tests found (2026-11-01, all fixed)
 
 The sqllogictest runner (`slt/slt_test`, [testing.md](testing.md#sql-logic-tests))
-replays every query of a script under eleven verification modes, and the
+replays every query of a script under its verification modes (eleven when
+these were found, thirteen since plan 05 added the printed plan), and the
 [whole-suite configurations](testing.md#whole-suite-configurations) rerun every
 test at a batch capacity of 1 and 2 rows, sharded, on one thread and in a
 hostile time zone and locale. SQLite's sqllogictest corpus, whose answers five
@@ -2013,6 +2031,22 @@ globs, the parser, the nested-loop guard and the desktop GUI. Details are in
   `job/locale_independence_test` scans the GUI's and the viewer's jars for case
   folding. Found by `--config=zone`, through the highlighter's test, with two
   tests that folded or printed a parquet type name in the default locale.
+
+## Defects the plan round trip found (2026-11-01, all fixed)
+
+Printing every plan as SQL and binding it again (`PlanSql`, `PlanRoundTrip`,
+[architecture.md](architecture.md#plans-as-sql)) holds the binder to its own
+output, over every slt script and every query generator. Details are in
+[plans/testing/05](../plans/testing/05-plans-as-sql.md).
+
+- **The binder kept an aggregate per spelling.** It keyed each aggregate and
+  window function by its text, so `COUNT()` and `COUNT(*)`, `SUM(a)` and
+  `SUM(t.a)`, or a window written twice with and without a table, were a slot
+  each and computed twice. The answers were right, but the printer writes one
+  spelling of each, so the printed query bound to a plan with one slot fewer.
+  Each is now computed once, its spellings reading one slot by their text.
+  Found by `plan_roundtrip_fuzz_campaign` on a frontend mutation, `SELECT s,
+  COUNT() FROM t GROUP BY s ORDER BY COUNT(*), s`.
 
 ## What's intentionally NOT done
 

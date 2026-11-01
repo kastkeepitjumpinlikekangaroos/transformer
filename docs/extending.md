@@ -83,7 +83,8 @@ instead, the way `LogicalBuilder.clockLiteral` binds `CURRENT_DATE` and
    through `Decimals` in `resultType`, accumulate `BigDecimal`s, merge them
    exactly, and fit the answer with `Decimals.fit` in `finish`, so it cannot
    depend on row order, merge order or spill.
-5. Wire it in `AggState.init` (`AggregateExec.scala`) and
+5. Wire it in `AggState.init` (`AggregateExec.scala`), `PlanSql`'s
+   `aggregateCall` if its `name` and `args` are not how it is written, and
    `LogicalBuilder.bindAgg` (`sql/plan/LogicalBuilder.scala`), checking its
    argument there as `SUM`'s is (`numberArg` for one it adds up,
    `Analyzer.condition` for a truth value, as `COUNT_IF`'s), and the same in
@@ -111,7 +112,8 @@ as their own `WindowFn` ADT cases in `sql/plan/Window.scala`. To add one:
    and `respectsFrame` (false for ranking/offset functions; true only if the
    function's value changes with the frame).
 2. Add a `case` in `LogicalBuilder.bindAnalytic` that recognises the function
-   name and returns the new `WindowFn`.
+   name and returns the new `WindowFn`, and one in `PlanSql.windowCall` that
+   writes it back.
 3. Add a `case` in `WindowExec.computeFunctions` that implements the per-row
    computation (it gets the sorted partition's row indices, the original
    row buffer, and the output column to populate). **If it has a notion of
@@ -375,7 +377,10 @@ in the inspector's header (`InspectorPane.renderHeader`).
    the shared-result option to reach for, and it needs no new `LogicalPlan`
    node. Inlining a plan subtree needs no planner or optimizer changes; a new
    `LogicalPlan` node does (every exhaustive match over the sealed trait must
-   learn the case).
+   learn the case, `PlanValidator` and `PlanSql` among them: the printer
+   prints a node as a slot of a SELECT or as a CTE the SELECT reads, and the
+   round trip in `plan_roundtrip_fuzz_test` and the slt `reprinted` mode holds
+   it to binding back as itself).
 2. Logical → physical mapping in `PhysicalPlanner.plan`.
 3. Optionally a new physical operator (one file in `sql/exec/`).
 4. Test against `SqlEngineTest`.
@@ -509,13 +514,18 @@ several passes walk every kind of it, so a new node (as `SwitchCaseExpr` and
    it.
 2. The walks over bound expressions: `Expr.readsRandom`,
    `LogicalBuilder.isConstant`, `JoinSideAnalysis.sideOf` and `shiftToRight`,
-   and `ColumnProjectionPushdown`'s five (`colRefNames`, `rewriteExpr`,
-   `joinCondNamesPerSide`, `remapJoinCondition`, `verify`). A walk that only
-   looks for a shape it can use, such as `ParquetFilterTranslator`, need not
-   know the node.
+   `ColumnProjectionPushdown`'s four (`colRefNames`, `rewriteExpr`,
+   `joinCondNamesPerSide`, `remapJoinCondition`), `PlanValidator.checkExpr`,
+   and `PlanSql.expr`, which prints it as the SQL the binder binds it from (an
+   operand in parentheses where the parser would otherwise read another tree).
+   A walk that only looks for a shape it can use, such as
+   `ParquetFilterTranslator`, need not know the node.
 3. The test harness's walks: `oracle/CleanRejection.children`,
-   `ExprGen.render`, `Shrinker`'s `childrenOf` and its rebuild, `QueryGen.expr`
-   and `ColumnProjectionPushdownTest`'s index check.
+   `ExprGen.render`, `Shrinker`'s `childrenOf` and its rebuild, `QueryGen.expr`,
+   `ColumnProjectionPushdownTest`'s index check, and `oracle/PlanRoundTrip`'s
+   `erase` and `PlanRoundTripFuzzTest`'s `kinds` and `children`, with the
+   node's name added to `RequiredKinds` if the generators write it (else a
+   case in `PlanSqlTest`'s queries).
 
 ## Add a sqllogictest script
 

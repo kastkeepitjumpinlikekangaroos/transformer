@@ -1,7 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core.{CatalogView, ColumnarBatch, ExecutionOptions, MaterializedView, Schema}
-import com.transformer.sql.plan.{BuiltQuery, LogicalOptimizer, LogicalPlan, LogicalScan, PendingCteView, PlanValidator}
+import com.transformer.sql.plan.{BuiltQuery, CteDef, LogicalOptimizer, LogicalPlan, LogicalScan, PendingCteView, PlanValidator}
 
 /** Resolves the placeholder [[PendingCteView]] scans that
   * [[com.transformer.sql.plan.LogicalBuilder]] emits for outermost-scope CTEs,
@@ -23,18 +23,39 @@ import com.transformer.sql.plan.{BuiltQuery, LogicalOptimizer, LogicalPlan, Logi
   */
 object CteResolver {
 
-  /** Rewrite `built.main` so no [[PendingCteView]] scans remain. CTEs are
-    * resolved in declaration order; substituting an already-resolved def into
-    * the not-yet-processed bodies means a later CTE that references an earlier
-    * one sees the earlier one's resolution (so a materialized `b` that reads
-    * `a` reads `a`'s already-materialized view). The no-CTE path returns `main`
+  /** Rewrite `built.main` so no [[PendingCteView]] scans remain: [[planned]]
+    * decides which CTEs are inlined, and each it keeps is materialized here,
+    * in declaration order, its rows scanned wherever it is read, the earlier
+    * ones in the later ones' bodies (so a materialized `b` that reads `a`
+    * reads `a`'s already-materialized view). The no-CTE path returns `main`
     * unchanged (a true no-op for the common case); otherwise the result is
-    * checked by [[PlanValidator.afterPass]]. */
+    * checked by [[PlanValidator.resolved]]. */
   def resolve(built: BuiltQuery, opts: ExecutionOptions): LogicalPlan =
     if (built.ctes.isEmpty) built.main
-    else PlanValidator.afterPass("CTE resolution", built.main, substituteAll(built, opts))
+    else {
+      val plan = planned(built)
+      val bodies = plan.ctes.iterator.map(_.body).toArray
+      var main = plan.main
+      plan.ctes.iterator.zipWithIndex.foreach { case (cte, i) =>
+        val scan = materialize(cte.name, bodies(i), opts) // compute once, scan many
+        var j = i + 1
+        while (j < bodies.length) {
+          bodies(j) = substitute(bodies(j), cte.pending, scan)
+          j += 1
+        }
+        main = substitute(main, cte.pending, scan)
+      }
+      PlanValidator.resolved(built.main, main)
+    }
 
-  private def substituteAll(built: BuiltQuery, opts: ExecutionOptions): LogicalPlan = {
+  /** The plan `built` runs as, decided without running anything: each CTE
+    * read at most once is inlined where it is read, and each read twice or
+    * more stays a scan of its pending view, to be materialized. The result's
+    * CTEs are those, in declaration order, each body with the earlier inlined
+    * ones substituted in as well. [[resolve]] materializes them; EXPLAIN
+    * shows them without running them. */
+  def planned(built: BuiltQuery): BuiltQuery = {
+    if (built.ctes.isEmpty) return built
     val bodies = built.ctes.iterator.map(_.body).toArray
     var main = built.main
 
@@ -53,23 +74,20 @@ object CteResolver {
       k -= 1
     }
 
+    val materialized = Seq.newBuilder[CteDef]
     built.ctes.iterator.zipWithIndex.foreach { case (cte, i) =>
-      // `bodies(i)` already has every earlier CTE substituted into it.
-      val resolvedBody = bodies(i)
-      val refs = reads(i)
-
-      val replacement: LogicalPlan =
-        if (refs >= 2) materialize(cte.name, resolvedBody, opts)  // compute once, scan many
-        else resolvedBody                                          // inline (refs 0 or 1)
-
-      var j = i + 1
-      while (j < bodies.length) {
-        bodies(j) = substitute(bodies(j), cte.pending, replacement)
-        j += 1
+      // `bodies(i)` already has every earlier inlined CTE substituted into it.
+      if (reads(i) >= 2) materialized += cte.copy(body = bodies(i))
+      else {
+        var j = i + 1
+        while (j < bodies.length) {
+          bodies(j) = substitute(bodies(j), cte.pending, bodies(i))
+          j += 1
+        }
+        main = substitute(main, cte.pending, bodies(i))
       }
-      main = substitute(main, cte.pending, replacement)
     }
-    main
+    BuiltQuery(main, materialized.result())
   }
 
   /** Materialize `body` once into an in-memory [[MaterializedView]] and return a

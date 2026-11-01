@@ -44,6 +44,21 @@ scala_junit_test(
     ],
 )
 
+# PlanSql: every construct the binder binds prints as SQL that binds back to
+# the same plan and answers as the query does, its optimized plan too.
+scala_junit_test(
+    name = "plan_sql_test",
+    srcs = ["PlanSqlTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "//src/test/scala/com/transformer/fuzz",
+        "@maven//:junit_junit",
+    ],
+)
+
 scala_junit_test(
     name = "expr_batch_test",
     srcs = ["ExprBatchTest.scala"],

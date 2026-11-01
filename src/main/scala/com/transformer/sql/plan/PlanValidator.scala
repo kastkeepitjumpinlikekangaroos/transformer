@@ -20,7 +20,7 @@ import com.transformer.core.{DataType, Schema}
   *     have the type their operand has, which the binder casts them to.
   *   - a union's arms have one width and one type per column.
   *   - a scan of a CTE the resolver has not replaced (a [[PendingCteView]])
-  *     appears only before CTE resolution.
+  *     does not survive CTE resolution.
   *
   * And a pass keeps what its plan returns: the same columns, by name and type,
   * in the same order. Each check walks the plan once, so it runs on every
@@ -35,13 +35,21 @@ object PlanValidator {
     plan
   }
 
-  /** `after`, which `stage` made from `before`, checked: well formed, with
-    * the output `before` had. */
-  def afterPass(stage: String, before: LogicalPlan, after: LogicalPlan): LogicalPlan = {
-    check(after, s"after $stage", ctesPending = false)
+  /** `after`, which the pass `stage` made from `before`, checked: well
+    * formed, with the output `before` had. A pass may meet a scan of a CTE
+    * that is materialized before the plan runs, as EXPLAIN shows one. */
+  def afterPass(stage: String, before: LogicalPlan, after: LogicalPlan): LogicalPlan =
+    checked(s"after $stage", before, after, ctesPending = true)
+
+  /** `after`, `before` with its CTEs resolved, checked: no CTE is pending. */
+  def resolved(before: LogicalPlan, after: LogicalPlan): LogicalPlan =
+    checked("after CTE resolution", before, after, ctesPending = false)
+
+  private def checked(stage: String, before: LogicalPlan, after: LogicalPlan, ctesPending: Boolean): LogicalPlan = {
+    check(after, stage, ctesPending)
     val (was, is) = (before.outputSchema, after.outputSchema)
     if (was.fields.map(f => (f.name, f.dataType)) != is.fields.map(f => (f.name, f.dataType)))
-      throw malformed(s"after $stage", "the plan", s"the output changed from ${columns(was)} to ${columns(is)}")
+      throw malformed(stage, "the plan", s"the output changed from ${columns(was)} to ${columns(is)}")
     after
   }
 

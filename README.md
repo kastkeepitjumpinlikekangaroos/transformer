@@ -1704,6 +1704,46 @@ regardless (for debugging), and a sample of failing rows is written to
 records](#run-records-and-historical-runs).
 
 
+### Plans and SQL
+
+SQL becomes a logical plan in `LogicalBuilder.build`, and `PlanSql.print`
+turns a plan back into SQL, which binds to the same plan again: the query as
+the engine read it, with each name qualified, each `*` written out, each cast
+the engine inserted written in, and each literal written so that it is its own
+type. The optimizer's plan prints too, so you can read what it made of a query:
+
+```scala
+import com.transformer.core.Catalog
+import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer, PlanSql}
+
+val catalog = new Catalog
+catalog.register("t", tView)
+catalog.register("u", uView)
+
+val built = LogicalBuilder.build(
+  "SELECT t.a, u.x FROM t JOIN u ON t.a = u.a WHERE u.x = 'two'", catalog)
+PlanSql.print(built, catalog)
+// SELECT t.a AS a, u.x AS x
+// FROM t
+// JOIN u ON t.a = u.a
+// WHERE u.x = 'two'
+
+PlanSql.print(LogicalOptimizer.optimize(built.main), catalog)
+// WITH q1 AS (
+//   SELECT u.a AS a, u.x AS x
+//   FROM u
+//   WHERE u.x = 'two'
+// )
+// SELECT t.a AS a, q1.x AS x
+// FROM t
+// JOIN q1 ON t.a = q1.a
+```
+
+A shape no SELECT holds, like the filter the optimizer pushed under the join
+above, is printed as a CTE the query reads. A plan that reads a view no catalog
+holds (a CTE's materialized rows) has no SQL form and throws
+`PlanSql.UnprintablePlanException`.
+
 ### Loading a job directory from code
 
 `DirectoryJobLoader.load` returns the same `DataJob` the CLI runs.
@@ -1872,8 +1912,8 @@ bazel build //:transformer_viewer_deploy.jar         # the data viewer
 Each leaf test directory has its own `scala_junit_test` target. SQL's
 semantics are also pinned as sqllogictest scripts under `src/test/slt/`
 (SQLite's format: each query beside its expected result), which
-`slt/slt_test` runs under eleven execution modes each, beside a slice of
-SQLite's own corpus. The suite reruns under `--config=batch1`, `batch2`,
+`slt/slt_test` runs under thirteen execution modes each (two of them run the
+query's plan printed back as SQL), beside a slice of SQLite's own corpus. The suite reruns under `--config=batch1`, `batch2`,
 `sharded`, `serial` and `zone`, one JVM-wide setting each. Before landing a
 change, also run the jaffle-shop example (see [Examples](#examples)).
 [docs/testing.md](docs/testing.md) has the details.

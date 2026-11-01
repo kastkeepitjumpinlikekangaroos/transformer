@@ -102,7 +102,7 @@ class PlanValidatorTest {
     ).foreach { sql =>
       val built = LogicalBuilder.build(sql, catalog)
       val main = built.ctes.foldLeft(built.main)((plan, cte) => substitute(plan, cte.pending, cte.body))
-      LogicalOptimizer.optimize(PlanValidator.afterPass("inlining", built.main, main))
+      LogicalOptimizer.optimize(PlanValidator.resolved(built.main, main))
     }
   }
 

@@ -228,6 +228,15 @@ specific traps.
   join-level expressions (`sideOf`, `shiftToRight`) live in
   `JoinSideAnalysis.scala` so the planner and any new pass can reuse them
   without duplicating the recursive Expr traversal.
+- **A bound plan prints as SQL that binds back to it.** `PlanSql` is
+  binding's inverse, and the round trip (`plan_sql_test`,
+  `plan_roundtrip_fuzz_test`, the slt `reprinted` mode) holds every plan the
+  binder makes to it. A change to what the binder makes for some SQL, or a new
+  node, keeps the two in step in the same commit: the printer writes the new
+  shape as the SQL that binds to it, and the binder binds a construct by what
+  it means rather than how it is spelled (each aggregate and window function is
+  computed once, whatever spelling reads it), since the printer writes one
+  spelling of each.
 - **A walk over the parsed tree or the bound plan stays within
   `SqlParser.MaxNesting`'s margin, and a rewrite rebuilds a long list
   balanced.** Every walk recurses about a level at a time, and the limit (256

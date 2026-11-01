@@ -25,6 +25,7 @@ scala_library(
         "//src/main/scala/com/transformer/read/csv",
         "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/parse",
         "//src/main/scala/com/transformer/sql/plan",
         "//src/main/scala/com/transformer/temporal",
         "//src/test/scala/com/transformer/read/parquet:external_parquet",
@@ -90,6 +91,23 @@ scala_junit_test(
     deps = [
         ":fuzz",
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Plans as SQL: every query QueryGen, MetaQueryGen and SqlTextGen write that
+# binds prints (PlanSql) as SQL that binds back to its own plan and answers as
+# the query does, its optimized plan too, run with the optimizer off. Default
+# budget, part of `bazel test //...`.
+scala_junit_test(
+    name = "plan_roundtrip_fuzz_test",
+    srcs = ["PlanRoundTripFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/sql/plan",
         "@maven//:junit_junit",
     ],
@@ -235,6 +253,20 @@ scala_junit_test(
     deps = [
         ":fuzz",
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "plan_roundtrip_fuzz_campaign",
+    srcs = ["PlanRoundTripFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/sql/plan",
         "@maven//:junit_junit",
     ],

@@ -47,7 +47,7 @@ takes all of them but JSqlParser 5.3, which still refuses deep parentheses.
 | # | Workstream | Status |
 |---|---|---|
 | W1 | Plan validation after every pass | **done** 2026-11-01 |
-| W2 | `PlanSql`: a plan printed as SQL the binder reads back to it; the round trip as an slt mode and a fuzz property | |
+| W2 | `PlanSql`: a plan printed as SQL the binder reads back to it; the round trip as an slt mode and a fuzz property | **done** 2026-11-01 |
 | W3 | `EXPLAIN` and golden plans | |
 | W4 | Join order by connectivity | |
 | W5 | A pairing that streams | |
@@ -157,7 +157,38 @@ ports.
 
 | # | What | How it was found | Now |
 |---|---|---|---|
-| 1 | `LogicalAggregate` carried a `having` condition nothing set: the binder puts HAVING in a filter above the aggregate, and the projection pass's check read the unused field against the aggregate's input | writing the validator, which would have had to give it a meaning | the field is gone |
+| 1 | `LogicalAggregate` carried a `having` condition nothing set: the binder puts HAVING in a filter above the aggregate, and the projection pass's check read the unused field against the aggregate's input | writing the validator, which would have had to give it a meaning | the field is gone (W1) |
+| 2 | The binder kept an aggregate, and a window function, per spelling: `COUNT()` and `COUNT(*)`, `SUM(a)` and `SUM(t.a)` were two slots computed twice; the printer writes one spelling of each, so the printed query bound to one slot | `plan_roundtrip_fuzz_campaign`, seed 4799, a frontend mutation dropping the `*` of `COUNT(*)` | each is computed once, its spellings reading one slot by their text (W2) |
+| 3 | A cast of NULL to BINARY, which the binder inserts beside a BINARY, has no SQL to write it | the round-trip guard's tally of unprintable plans | printed as its operand, as a cast to DECIMAL is, and inserted again by the binder (W2) |
 
 W1 found no malformed plan: the whole suite, fuzzers included, and the
 jaffle-shop job run with the validator on every stage.
+
+W2: every slt script round-trips, this repo's and the SQLite slices (about
+1,900 of SQLite's queries), under the `reprinted` and `optimized-reprinted`
+modes; so do 5,000 seeds of each generator's property after finding 2.
+
+### How the printer is built (W2)
+
+- Binding decides some types from how a value is written: a number beside a
+  DECIMAL is the decimal of its digits, a string literal beside a column is
+  read as that column's type, an integer that an INT holds is an INT. So the
+  printer prints the casts the binder inserted (but to DECIMAL and BINARY,
+  which SQL here cannot write and the binder inserts again, the operands'
+  types being the same), and each literal in a form whose type does not depend
+  on where it stands: `CAST('5' AS BIGINT)`, `CAST('1.5' AS FLOAT)`,
+  `CAST('NaN' AS DOUBLE)`, `DATE '...'`, `TIMESTAMP '...'`, a DECIMAL as its
+  digits (one stands only beside a DECIMAL, or past a BIGINT), a negative
+  number as the negation of its magnitude.
+- The comparison sets aside what binding chooses afresh: names (column
+  references', aliases, the names of projections, aggregates and windows but
+  the plan's own output names), a projection of every column in order (a CTE's
+  SELECT list over a query that ends in none), a projection of a scan's columns
+  (a pruned scan), the negation of a number (the negative number), and which
+  CTEs a query was written with (every CTE inlined). Float literals compare by
+  their bits, since Scala's `==` on two boxed NaNs is false.
+- `CteResolver.planned` decides which CTEs are materialized without running
+  them, so the optimized plan prints (and EXPLAIN shows it, W3) with a scan of
+  each materialized CTE and its body beside; `resolve` materializes what it
+  decided. Optimizer passes may now meet a pending CTE scan; the check after
+  CTE resolution still refuses one there.

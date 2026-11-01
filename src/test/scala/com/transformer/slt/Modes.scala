@@ -2,9 +2,10 @@ package com.transformer.slt
 
 import com.transformer.core._
 import com.transformer.fuzz.DataGen
+import com.transformer.fuzz.oracle.PlanRoundTrip
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.exec.{CteResolver, PhysicalPlanner, SqlEngine}
-import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer}
+import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer, PlanSql}
 import com.transformer.write.parquet.ParquetWriter
 
 import java.nio.file.{Files, Path}
@@ -54,7 +55,21 @@ object Modes {
     case object ProjectionPushdownOnly extends Optimizer
   }
 
-  final case class Mode(name: String, layout: Layout, options: ExecutionOptions, optimizer: Optimizer) {
+  /** The text a mode runs: the query as written, or its plan printed as SQL
+    * ([[PlanSql]]), DuckDB's re-parse verification. */
+  sealed trait Text
+  object Text {
+    case object AsWritten extends Text
+    /** The query's plan printed, which must bind back to the same plan
+      * ([[PlanRoundTrip.check]]), run in its place. */
+    case object Reprinted extends Text
+    /** The plan the optimizer makes of the query printed, and run with the
+      * optimizer off: each pass's rewrite, read afresh by the binder. */
+    case object OptimizedReprinted extends Text
+  }
+
+  final case class Mode(name: String, layout: Layout, options: ExecutionOptions, optimizer: Optimizer,
+      text: Text = Text.AsWritten) {
     /** Whether `sql` runs in this mode. */
     def runs(sql: String): Boolean = layout != Layout.Permuted || !Lexer.selectsStar(sql)
   }
@@ -74,12 +89,30 @@ object Modes {
     Mode("permuted-columns", Layout.Permuted, ExecutionOptions.Default, Optimizer.Full),
     Mode("optimizer-off", Layout.Single, ExecutionOptions.Default, Optimizer.Off),
     Mode("filter-pushdown-only", Layout.Split(2, 2, gaps = false), ExecutionOptions.Default, Optimizer.FilterPushdownOnly),
-    Mode("projection-pushdown-only", Layout.Split(2, 2, gaps = false), ExecutionOptions.Default, Optimizer.ProjectionPushdownOnly))
+    Mode("projection-pushdown-only", Layout.Split(2, 2, gaps = false), ExecutionOptions.Default, Optimizer.ProjectionPushdownOnly),
+    Mode("reprinted", Layout.Split(2, 2, gaps = false), ExecutionOptions.Default, Optimizer.Full, Text.Reprinted),
+    Mode("optimized-reprinted", Layout.Single, ExecutionOptions.Default, Optimizer.Off, Text.OptimizedReprinted))
 
   /** Run `sql` over `catalog` under `mode`. The plan is built eagerly, as
     * `SqlEngine.execute` builds it, so a refusal throws here and a failure on
-    * the data throws while the result is drained. */
-  def execute(sql: String, catalog: Catalog, mode: Mode): ExecutedQuery = mode.optimizer match {
+    * the data throws while the result is drained. A mode that reprints the
+    * query runs its printed plan; a query whose printed plan nests past the
+    * parser's limit runs as written. */
+  def execute(sql: String, catalog: Catalog, mode: Mode): ExecutedQuery = mode.text match {
+    case Text.AsWritten => executeText(sql, catalog, mode)
+    case Text.Reprinted =>
+      PlanRoundTrip.check(sql, catalog) match {
+        case PlanRoundTrip.Same(printed) => executeText(printed, catalog, mode)
+        case PlanRoundTrip.TooDeep(_) => executeText(sql, catalog, mode)
+        case PlanRoundTrip.Unprintable(reason) => throw new IllegalStateException(s"The plan has no SQL: $reason")
+      }
+    case Text.OptimizedReprinted =>
+      val printed = PlanRoundTrip.optimizedSql(sql, catalog).getOrElse(
+        throw new IllegalStateException("The optimized plan has no SQL"))
+      executeText(printed, catalog, mode)
+  }
+
+  private def executeText(sql: String, catalog: Catalog, mode: Mode): ExecutedQuery = mode.optimizer match {
     case Optimizer.Full => SqlEngine.execute(sql, catalog, mode.options)
     case partial =>
       val built = LogicalBuilder.build(sql, catalog)

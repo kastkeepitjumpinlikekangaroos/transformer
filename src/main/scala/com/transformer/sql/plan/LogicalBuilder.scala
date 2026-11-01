@@ -441,14 +441,19 @@ object LogicalBuilder {
     // or ORDER BY. The window-function call's internal expressions (partition
     // keys, order keys, function args) bind against the post-aggregation plan
     // via `preWindowBinder`.
-    val windowDefs = mutable.LinkedHashMap.empty[String, WindowDef]
+    // As an aggregate is, each window function is computed once however it
+    // is spelled, each spelling finding its column by its text.
+    val windowDefs = mutable.ArrayBuffer.empty[WindowDef]
+    val windowOf = mutable.HashMap.empty[String, Int]
     def collectWindows(e: Expression): Unit = e match {
       case ae: AnalyticExpression =>
         val key = canonicalSql(ae)
-        if (!windowDefs.contains(key)) {
-          val name = s"_win${windowDefs.size}"
-          val wd = bindAnalytic(ae, preWindowBinder).copy(outputName = name)
-          windowDefs.put(key, wd)
+        if (!windowOf.contains(key)) {
+          val wd = bindAnalytic(ae, preWindowBinder)
+          windowOf(key) = windowDefs.indexWhere(_.copy(outputName = "") == wd) match {
+            case -1 => windowDefs += wd.copy(outputName = s"_win${windowDefs.size}"); windowDefs.size - 1
+            case i => i
+          }
         }
       case _ => childExpressions(e).foreach(collectWindows)
     }
@@ -459,14 +464,12 @@ object LogicalBuilder {
       if (windowDefs.isEmpty) (preWindow, _ => None)
       else {
         val baseLen = preWindow.outputSchema.length
-        val keyToWindow: Map[String, (Int, WindowDef)] = windowDefs.zipWithIndex.map {
-          case ((k, wd), i) => k -> (baseLen + i, wd)
-        }.toMap
         val windowResolver: AnalyticExpression => Option[Expr] = ae =>
-          keyToWindow.get(canonicalSql(ae)).map { case (i, wd) =>
-            ColRefExpr(i, wd.outputName, wd.fn.resultType)
+          windowOf.get(canonicalSql(ae)).map { i =>
+            val wd = windowDefs(i)
+            ColRefExpr(baseLen + i, wd.outputName, wd.fn.resultType)
           }
-        (LogicalWindow(preWindow, windowDefs.values.toSeq), windowResolver)
+        (LogicalWindow(preWindow, windowDefs.toSeq), windowResolver)
       }
     val exprBinder: Expression => Expr = binderFactory(windowResolver, _ => None)
 
@@ -706,19 +709,31 @@ object LogicalBuilder {
     def aggregateName(i: Int): String =
       Iterator.from(0).map(n => if (n == 0) s"_agg$i" else s"_agg${i}_$n")
         .find(name => !keyNames(name.toLowerCase(Locale.ROOT))).get
-    val aggMap = mutable.LinkedHashMap.empty[String, (AggExpr, String)]
+    // Each aggregate is computed once, however it is spelled: `COUNT()` and
+    // `COUNT(*)`, `SUM(a)` and `SUM(t.a)` bind to one aggregate and read one
+    // slot, which each spelling finds by its text. They were a slot each,
+    // which the plan, printed as SQL (PlanSql), wrote alike, and which bound
+    // again as one.
+    val slots = mutable.ArrayBuffer.empty[(AggExpr, String)]
+    val slotOf = mutable.HashMap.empty[String, Int]
     def collect(e: Expression): Unit = e match {
       case ae: AnalyticExpression => windowInputs(ae).foreach(collect)
       case f: Function if isAggFn(f.getName) =>
         val key = canonicalSql(f)
-        if (!aggMap.contains(key)) aggMap.put(key, (bindAgg(f, sources), aggregateName(aggMap.size)))
+        if (!slotOf.contains(key)) {
+          val bound = bindAgg(f, sources)
+          slotOf(key) = slots.indexWhere(_._1 == bound) match {
+            case -1 => slots += ((bound, aggregateName(slots.size))); slots.size - 1
+            case i => i
+          }
+        }
       case _ => childExpressions(e).foreach(collect)
     }
     expandedItems.foreach { case (e, _) => collect(e) }
     Option(ps.getHaving).foreach(collect)
     Option(ps.getOrderByElements).foreach(_.asScala.foreach(obe => collect(obe.getExpression)))
 
-    val agg = LogicalAggregate(child, groupBound, aggMap.values.toSeq)
+    val agg = LogicalAggregate(child, groupBound, slots.toSeq)
 
     // A name binds through the resolver below, never by the output's names:
     // `_agg0` names no aggregate a query can write, and a name two inputs
@@ -726,8 +741,7 @@ object LogicalBuilder {
     val aggOutSources: Sources = Seq((None, Schema(agg.outputSchema.fields.take(groupBound.size))))
     val aggOutFieldNames: IndexedSeq[String] = agg.outputSchema.fieldNames
     def output(i: Int): Expr = ColRefExpr(i, aggOutFieldNames(i), agg.outputSchema.fields(i).dataType)
-    val aggregateAt: Map[String, Int] =
-      aggMap.keys.zipWithIndex.map { case (key, i) => key -> (groupBound.size + i) }.toMap
+    val aggregateAt: Map[String, Int] = slotOf.iterator.map { case (key, i) => key -> (groupBound.size + i) }.toMap
 
     /** The GROUP BY key `e` is, written another way: in parentheses, with or
       * without its table, in another case or spacing, which bind to the same
@@ -822,6 +836,9 @@ object LogicalBuilder {
     * list is evaluated once and no column name resolves. Operators never write
     * to their input batches, so one view serves every query. */
   private lazy val NoFromRow: MaterializedView = new MaterializedView(EmptyRow.schema, IndexedSeq(IndexedSeq(EmptyRow)))
+
+  /** Whether `scan` is what a SELECT with no FROM reads. */
+  def readsNoTable(scan: LogicalScan): Boolean = scan.view eq NoFromRow
 
   private def buildFromAndJoins(ps: PlainSelect, catalog: Catalog, cteScope: Map[String, CteScopeEntry]): (LogicalPlan, Sources) = {
     val (root, rootSources) =
