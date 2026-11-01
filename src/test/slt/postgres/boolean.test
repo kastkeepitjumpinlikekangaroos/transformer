@@ -1,0 +1,516 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/boolean.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/boolean.out at that commit, never the engine's.
+# Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group;
+# Portions Copyright (c) 1994, The Regents of the University of California.
+# Distributed under the PostgreSQL License, a permissive license whose text
+# travels with every copy: it is COPYRIGHT beside this file.
+#
+# The boolean type and three-valued logic: AND is NULL when a NULL meets no
+# FALSE and OR when a NULL meets no TRUE, whichever order the operands come
+# in. 79 of the file's 99 statements are here, each record naming the line of
+# boolean.sql it comes from. A statement is as Postgres wrote it but where a
+# rewrite cannot change what it means, which its record says: x::type and
+# bool '...' as the CASTs they are, bool 't' and bool 'f' as TRUE and FALSE
+# where the test is of what is done with the value rather than of how it is
+# spelled, and an alias named true or false in double quotes (the engine reads
+# TRUE and FALSE as the literals wherever they are written). A result in no
+# fixed order is compared as rowsort. `skipif transformer` marks the 12
+# records the engine answers otherwise by design: it casts text to BOOLEAN
+# from true and false alone, in any case and with no spaces around them.
+#
+# Left out (20 statements), by what they need:
+#   13  IS TRUE, IS NOT TRUE, IS FALSE, IS NOT FALSE, IS UNKNOWN and IS NOT
+#       UNKNOWN, which the engine refuses (it does not implement them), with
+#       the table only those read
+#    3  pg_input_is_valid() and pg_input_error_info()
+#    2  booleq() and boolne()
+#    1  psql's \pset, which changes how NULL prints
+#    1  dropping the table those tests read
+
+# boolean.sql:8: sanity check.
+query INT
+SELECT 1 AS one
+----
+1
+
+# boolean.sql:15: bool input syntax. The aliases true and false are
+# quoted, as the engine reads TRUE and FALSE as the literals wherever they
+# are written; the columns are named the same.
+query BOOLEAN
+SELECT true AS "true"
+----
+true
+
+# boolean.sql:17
+query BOOLEAN
+SELECT false AS "false"
+----
+false
+
+# boolean.sql:19: each bool '...' literal written as the CAST it is,
+# CAST('...' AS BOOLEAN). The engine casts text to BOOLEAN from true or false
+# alone, in any case and without spaces around it, so Postgres's other
+# spellings (t, f, y, yes, n, no, on, off, of, 1, 0, and spaces) are errors
+# there by design.
+skipif transformer # text casts to BOOLEAN from true and false alone
+query BOOLEAN
+SELECT CAST('t' AS BOOLEAN) AS "true"
+----
+true
+
+# boolean.sql:21
+skipif transformer # text casts to BOOLEAN from true and false alone, with no spaces around
+query BOOLEAN
+SELECT CAST('   f           ' AS BOOLEAN) AS "false"
+----
+false
+
+# boolean.sql:23
+query BOOLEAN
+SELECT CAST('true' AS BOOLEAN) AS "true"
+----
+true
+
+# boolean.sql:25. Postgres: invalid input syntax for type boolean.
+statement error
+SELECT CAST('test' AS BOOLEAN) AS error
+
+# boolean.sql:27
+query BOOLEAN
+SELECT CAST('false' AS BOOLEAN) AS "false"
+----
+false
+
+# boolean.sql:29
+statement error
+SELECT CAST('foo' AS BOOLEAN) AS error
+
+# boolean.sql:31
+skipif transformer # text casts to BOOLEAN from true and false alone
+query BOOLEAN
+SELECT CAST('y' AS BOOLEAN) AS "true"
+----
+true
+
+# boolean.sql:33
+skipif transformer # text casts to BOOLEAN from true and false alone
+query BOOLEAN
+SELECT CAST('yes' AS BOOLEAN) AS "true"
+----
+true
+
+# boolean.sql:35
+statement error
+SELECT CAST('yeah' AS BOOLEAN) AS error
+
+# boolean.sql:37
+skipif transformer # text casts to BOOLEAN from true and false alone
+query BOOLEAN
+SELECT CAST('n' AS BOOLEAN) AS "false"
+----
+false
+
+# boolean.sql:39
+skipif transformer # text casts to BOOLEAN from true and false alone
+query BOOLEAN
+SELECT CAST('no' AS BOOLEAN) AS "false"
+----
+false
+
+# boolean.sql:41
+statement error
+SELECT CAST('nay' AS BOOLEAN) AS error
+
+# boolean.sql:43
+skipif transformer # text casts to BOOLEAN from true and false alone
+query BOOLEAN
+SELECT CAST('on' AS BOOLEAN) AS "true"
+----
+true
+
+# boolean.sql:45
+skipif transformer # text casts to BOOLEAN from true and false alone
+query BOOLEAN
+SELECT CAST('off' AS BOOLEAN) AS "false"
+----
+false
+
+# boolean.sql:47
+skipif transformer # text casts to BOOLEAN from true and false alone
+query BOOLEAN
+SELECT CAST('of' AS BOOLEAN) AS "false"
+----
+false
+
+# boolean.sql:49
+statement error
+SELECT CAST('o' AS BOOLEAN) AS error
+
+# boolean.sql:51
+statement error
+SELECT CAST('on_' AS BOOLEAN) AS error
+
+# boolean.sql:53
+statement error
+SELECT CAST('off_' AS BOOLEAN) AS error
+
+# boolean.sql:55
+skipif transformer # text casts to BOOLEAN from true and false alone
+query BOOLEAN
+SELECT CAST('1' AS BOOLEAN) AS "true"
+----
+true
+
+# boolean.sql:57
+statement error
+SELECT CAST('11' AS BOOLEAN) AS error
+
+# boolean.sql:59
+skipif transformer # text casts to BOOLEAN from true and false alone
+query BOOLEAN
+SELECT CAST('0' AS BOOLEAN) AS "false"
+----
+false
+
+# boolean.sql:61
+statement error
+SELECT CAST('000' AS BOOLEAN) AS error
+
+# boolean.sql:63
+statement error
+SELECT CAST('' AS BOOLEAN) AS error
+
+# boolean.sql:72: and, or, not in qualifications. From here on bool 't'
+# and bool 'f', which are the constants true and false, are written TRUE and
+# FALSE.
+query BOOLEAN
+SELECT TRUE or FALSE AS "true"
+----
+true
+
+# boolean.sql:74
+query BOOLEAN
+SELECT TRUE and FALSE AS "false"
+----
+false
+
+# boolean.sql:76
+query BOOLEAN
+SELECT not FALSE AS "true"
+----
+true
+
+# boolean.sql:78
+query BOOLEAN
+SELECT TRUE = FALSE AS "false"
+----
+false
+
+# boolean.sql:80
+query BOOLEAN
+SELECT TRUE <> FALSE AS "true"
+----
+true
+
+# boolean.sql:82
+query BOOLEAN
+SELECT TRUE > FALSE AS "true"
+----
+true
+
+# boolean.sql:84
+query BOOLEAN
+SELECT TRUE >= FALSE AS "true"
+----
+true
+
+# boolean.sql:86
+query BOOLEAN
+SELECT FALSE < TRUE AS "true"
+----
+true
+
+# boolean.sql:88
+query BOOLEAN
+SELECT FALSE <= TRUE AS "true"
+----
+true
+
+# boolean.sql:91: explicit casts to and from text, each :: written as a
+# CAST.
+query BOOLEAN,BOOLEAN
+SELECT CAST(CAST('TrUe' AS text) AS boolean) AS "true", CAST(CAST('fAlse' AS text) AS boolean) AS "false"
+----
+true	false
+
+# boolean.sql:92. Postgres trims the spaces.
+skipif transformer # text casts to BOOLEAN from true and false alone, with no spaces around
+query BOOLEAN,BOOLEAN
+SELECT CAST(CAST('    true   ' AS text) AS boolean) AS "true",
+       CAST(CAST('     FALSE' AS text) AS boolean) AS "false"
+----
+true	false
+
+# boolean.sql:94
+query STRING,STRING
+SELECT CAST(CAST(true AS boolean) AS text) AS "true", CAST(CAST(false AS boolean) AS text) AS "false"
+----
+true	false
+
+# boolean.sql:96. Postgres: invalid input syntax for type boolean.
+statement error
+SELECT CAST(CAST('  tru e ' AS text) AS boolean) AS invalid
+
+# boolean.sql:97
+statement error
+SELECT CAST(CAST('' AS text) AS boolean) AS invalid
+
+# boolean.sql:99
+statement ok
+CREATE TABLE BOOLTBL1 (f1 bool)
+
+statement ok
+INSERT INTO BOOLTBL1 (f1) VALUES (TRUE)
+
+statement ok
+INSERT INTO BOOLTBL1 (f1) VALUES (TRUE)
+
+statement ok
+INSERT INTO BOOLTBL1 (f1) VALUES (TRUE)
+
+# boolean.sql:109: BOOLTBL1 should be full of true's at this point.
+query BOOLEAN rowsort
+SELECT BOOLTBL1.* FROM BOOLTBL1
+----
+true
+true
+true
+
+# boolean.sql:112
+query BOOLEAN rowsort
+SELECT BOOLTBL1.*
+   FROM BOOLTBL1
+   WHERE f1 = TRUE
+----
+true
+true
+true
+
+# boolean.sql:117
+query BOOLEAN rowsort
+SELECT BOOLTBL1.*
+   FROM BOOLTBL1
+   WHERE f1 <> FALSE
+----
+true
+true
+true
+
+# boolean.sql:125
+statement ok
+INSERT INTO BOOLTBL1 (f1) VALUES (FALSE)
+
+# boolean.sql:127
+query BOOLEAN rowsort
+SELECT BOOLTBL1.*
+   FROM BOOLTBL1
+   WHERE f1 = FALSE
+----
+false
+
+# boolean.sql:132
+statement ok
+CREATE TABLE BOOLTBL2 (f1 bool)
+
+statement ok
+INSERT INTO BOOLTBL2 (f1) VALUES (FALSE)
+
+statement ok
+INSERT INTO BOOLTBL2 (f1) VALUES (FALSE)
+
+statement ok
+INSERT INTO BOOLTBL2 (f1) VALUES (FALSE)
+
+statement ok
+INSERT INTO BOOLTBL2 (f1) VALUES (FALSE)
+
+# boolean.sql:144: an invalid expression, its bool 'XXX' written as the
+# CAST it is. Postgres: invalid input syntax for type boolean.
+statement error
+INSERT INTO BOOLTBL2 (f1)
+   VALUES (CAST('XXX' AS BOOLEAN))
+
+# boolean.sql:148: BOOLTBL2 should be full of false's at this point.
+query BOOLEAN rowsort
+SELECT BOOLTBL2.* FROM BOOLTBL2
+----
+false
+false
+false
+false
+
+# boolean.sql:151
+query BOOLEAN,BOOLEAN rowsort
+SELECT BOOLTBL1.*, BOOLTBL2.*
+   FROM BOOLTBL1, BOOLTBL2
+   WHERE BOOLTBL2.f1 <> BOOLTBL1.f1
+----
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+
+# boolean.sql:161
+query BOOLEAN,BOOLEAN rowsort
+SELECT BOOLTBL1.*, BOOLTBL2.*
+   FROM BOOLTBL1, BOOLTBL2
+   WHERE BOOLTBL2.f1 = BOOLTBL1.f1 and BOOLTBL1.f1 = FALSE
+----
+false	false
+false	false
+false	false
+false	false
+
+# boolean.sql:166
+query BOOLEAN,BOOLEAN nosort
+SELECT BOOLTBL1.*, BOOLTBL2.*
+   FROM BOOLTBL1, BOOLTBL2
+   WHERE BOOLTBL2.f1 = BOOLTBL1.f1 or BOOLTBL1.f1 = TRUE
+   ORDER BY BOOLTBL1.f1, BOOLTBL2.f1
+----
+false	false
+false	false
+false	false
+false	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+true	false
+
+# boolean.sql:231: short-circuiting and NULL handling, from a table so
+# that no constant is simplified. Postgres prints NULL as (null) here.
+statement ok
+CREATE TABLE booltbl4(isfalse bool, istrue bool, isnul bool)
+
+statement ok
+INSERT INTO booltbl4 VALUES (false, true, null)
+
+# boolean.sql:237: AND needs to return null if there's any nulls and not
+# all of the values are true.
+query BOOLEAN
+SELECT istrue AND isnul AND istrue FROM booltbl4
+----
+NULL
+
+# boolean.sql:238
+query BOOLEAN
+SELECT istrue AND istrue AND isnul FROM booltbl4
+----
+NULL
+
+# boolean.sql:239
+query BOOLEAN
+SELECT isnul AND istrue AND istrue FROM booltbl4
+----
+NULL
+
+# boolean.sql:240
+query BOOLEAN
+SELECT isfalse AND isnul AND istrue FROM booltbl4
+----
+false
+
+# boolean.sql:241
+query BOOLEAN
+SELECT istrue AND isfalse AND isnul FROM booltbl4
+----
+false
+
+# boolean.sql:242
+query BOOLEAN
+SELECT isnul AND istrue AND isfalse FROM booltbl4
+----
+false
+
+# boolean.sql:246: OR needs to return null if there's any nulls and none
+# of the values is true.
+query BOOLEAN
+SELECT isfalse OR isnul OR isfalse FROM booltbl4
+----
+NULL
+
+# boolean.sql:247
+query BOOLEAN
+SELECT isfalse OR isfalse OR isnul FROM booltbl4
+----
+NULL
+
+# boolean.sql:248
+query BOOLEAN
+SELECT isnul OR isfalse OR isfalse FROM booltbl4
+----
+NULL
+
+# boolean.sql:249
+query BOOLEAN
+SELECT isfalse OR isnul OR istrue FROM booltbl4
+----
+true
+
+# boolean.sql:250
+query BOOLEAN
+SELECT istrue OR isfalse OR isnul FROM booltbl4
+----
+true
+
+# boolean.sql:251
+query BOOLEAN
+SELECT isnul OR istrue OR isfalse FROM booltbl4
+----
+true
+
+# boolean.sql:254: casts, each :: written as a CAST.
+query BOOLEAN
+SELECT CAST(0 AS boolean)
+----
+false
+
+# boolean.sql:255
+query BOOLEAN
+SELECT CAST(1 AS boolean)
+----
+true
+
+# boolean.sql:256
+query BOOLEAN
+SELECT CAST(2 AS boolean)
+----
+true
+
+# boolean.sql:266
+statement ok
+DROP TABLE  BOOLTBL1
+
+statement ok
+DROP TABLE  BOOLTBL2
+
+statement ok
+DROP TABLE  BOOLTBL4

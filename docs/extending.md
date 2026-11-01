@@ -555,7 +555,13 @@ edge values. Scripts live in `src/test/slt/<area>/<name>.test`; the format is in
 The scripts are picked up by glob, so no BUILD change is needed. A slice of
 SQLite's corpus goes under `src/test/slt/sqlite/`, cut at a record boundary with
 a header naming its source; mark each record the engine answers otherwise by
-design with `skipif transformer # <why>` on the line before it.
+design with `skipif transformer # <why>` on the line before it. A port of
+another engine's tests (`src/test/slt/postgres/`) keeps that engine's answers,
+never the engine's own: its header names the source file and commit and
+counts what it leaves out by kind, each record names its source line and any
+rewrite (only one that cannot change the meaning), and a query the engine
+answers otherwise with no decision behind it stays out of the script as a
+finding until it is settled.
 
 A **golden plan** pins the plan a query gets, where a planner change could
 keep its answer and lose what makes it fast (a join that stops hashing, a

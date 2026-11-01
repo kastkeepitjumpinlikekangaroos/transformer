@@ -1,0 +1,1380 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/window.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/window.out at that commit, never the engine's.
+# Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group;
+# Portions Copyright (c) 1994, The Regents of the University of California.
+# Distributed under the PostgreSQL License, a permissive license whose text
+# travels with every copy: it is COPYRIGHT beside this file.
+#
+# 91 of the file's 400 statements are here: 7 that make, fill or drop a table
+# or a view, 76 queries, 7 statements that must fail, and one query the
+# engine answers otherwise by design, marked `skipif transformer` with the
+# reason. Each record names the line of window.sql it comes from. A statement
+# is as Postgres wrote it but where a rewrite cannot change what it means,
+# which its record says: a named WINDOW written inline in each OVER, a
+# subquery in FROM written as a WITH, x::type as CAST(x AS type), a frame
+# offset 2::int8 as 2, int8 as BIGINT, and generate_series() or a VALUES list
+# in FROM as a table of its rows, made here. tenk1, tenk2 and int4_tbl are
+# test_setup.sql's, tenk1 holding the 20 rows of data/tenk.data the queries
+# read (unique1 < 10 or unique2 < 10).
+#
+# A result Postgres printed in no fixed order, or in an order its ORDER BY
+# leaves tied, is compared as rowsort. Where Postgres's type differs from the
+# engine's by design and the value does not (avg of an integer is a numeric
+# there, a DOUBLE here), the value is written as the engine's type prints it,
+# and the record says so. VAR_POP, VAR_SAMP, VARIANCE and the STDDEVs are
+# DOUBLEs in the engine and numerics in Postgres, and are compared as SQLite's
+# R, to three places.
+#
+# Left out (309 statements), by what they need:
+#   58  FIRST_VALUE, LAST_VALUE, NTH_VALUE, NTILE, PERCENT_RANK or CUME_DIST
+#   49  EXPLAIN, whose answer is Postgres's plan
+#   49  RANGE over an INTERVAL, TIME, TIMETZ or TIMESTAMPTZ, or those types
+#   35  user-defined functions, aggregates and window functions
+#   32  an EXCLUDE clause
+#   30  a GROUPS frame
+#    9  SMALLINT or MONEY
+#    9  pg_get_viewdef(), SET or RESET
+#    8  a ROWS frame, or ROW_NUMBER over ties, on rows in no fixed order,
+#       whose answer is the order Postgres happened to read them in
+#    5  all 10,000 rows of tenk1: the spill/3-partitions mode spills a run
+#       per two-row batch, and an aggregate over them passes the operator's
+#       1,000-run guard
+#    5  EXTRACT, FILTER, to_char(), bool_and()/bool_or() or array_agg()
+#    4  a named WINDOW that, written inline, is another record's query or no
+#       window at all, or a WINDOW clause defining a name twice
+#    4  a LAG offset or a frame offset read from a column
+#    3  float4, and numeric Infinity and NaN, which no DECIMAL holds
+#    3  the errors of functions the engine lacks (generate_series() with
+#       OVER, ntile(0), nth_value(x, 0))
+#    2  a subquery
+#    2  a DELETE with a window function, which the runner, not the engine,
+#       carries out
+#    2  answered otherwise by the engine, not by a documented decision, and
+#       held out until that is settled: a ROWS offset past INT, which it
+#       refuses, and COUNT(), which it answers where Postgres refuses it
+
+statement ok
+CREATE TEMPORARY TABLE empsalary (
+    depname varchar,
+    empno bigint,
+    salary int,
+    enroll_date date
+)
+
+statement ok
+INSERT INTO empsalary VALUES
+('develop', 10, 5200, '2007-08-01'),
+('sales', 1, 5000, '2006-10-01'),
+('personnel', 5, 3500, '2007-12-10'),
+('sales', 4, 4800, '2007-08-08'),
+('personnel', 2, 3900, '2006-12-23'),
+('develop', 7, 4200, '2008-01-01'),
+('develop', 9, 4500, '2008-01-01'),
+('sales', 3, 4800, '2007-08-01'),
+('develop', 8, 6000, '2006-10-01'),
+('develop', 11, 5200, '2007-08-15')
+
+# tenk1 and int4_tbl as test_setup.sql creates them, int4 written INT and name
+# STRING. tenk1 holds the 20 rows of data/tenk.data, in its order, that the
+# queries here read: those with unique1 < 10 or unique2 < 10, as each query
+# that reads it says. test_setup.sql loads tenk1 with COPY and int4_tbl from
+# strings ('   0  '), written here as the numbers. tenk2 is its copy of tenk1.
+statement ok
+CREATE TABLE tenk1 (
+    unique1     INT,
+    unique2     INT,
+    two         INT,
+    four        INT,
+    ten         INT,
+    twenty      INT,
+    hundred     INT,
+    thousand    INT,
+    twothousand INT,
+    fivethous   INT,
+    tenthous    INT,
+    odd         INT,
+    even        INT,
+    stringu1    STRING,
+    stringu2    STRING,
+    string4     STRING
+)
+
+statement ok
+INSERT INTO tenk1 VALUES
+(8800, 0, 0, 0, 0, 0, 0, 800, 800, 3800, 8800, 0, 1, 'MAAAAA', 'AAAAAA', 'AAAAxx'),
+(1891, 1, 1, 3, 1, 11, 91, 891, 1891, 1891, 1891, 182, 183, 'TUAAAA', 'BAAAAA', 'HHHHxx'),
+(3420, 2, 0, 0, 0, 0, 20, 420, 1420, 3420, 3420, 40, 41, 'OBAAAA', 'CAAAAA', 'OOOOxx'),
+(9850, 3, 0, 2, 0, 10, 50, 850, 1850, 4850, 9850, 100, 101, 'WOAAAA', 'DAAAAA', 'VVVVxx'),
+(7164, 4, 0, 0, 4, 4, 64, 164, 1164, 2164, 7164, 128, 129, 'OPAAAA', 'EAAAAA', 'AAAAxx'),
+(8009, 5, 1, 1, 9, 9, 9, 9, 9, 3009, 8009, 18, 19, 'BWAAAA', 'FAAAAA', 'HHHHxx'),
+(5057, 6, 1, 1, 7, 17, 57, 57, 1057, 57, 5057, 114, 115, 'NMAAAA', 'GAAAAA', 'OOOOxx'),
+(6701, 7, 1, 1, 1, 1, 1, 701, 701, 1701, 6701, 2, 3, 'TXAAAA', 'HAAAAA', 'VVVVxx'),
+(4321, 8, 1, 1, 1, 1, 21, 321, 321, 4321, 4321, 42, 43, 'FKAAAA', 'IAAAAA', 'AAAAxx'),
+(3043, 9, 1, 3, 3, 3, 43, 43, 1043, 3043, 3043, 86, 87, 'BNAAAA', 'JAAAAA', 'HHHHxx'),
+(4, 1621, 0, 0, 4, 4, 4, 4, 4, 4, 4, 8, 9, 'EAAAAA', 'JKCAAA', 'HHHHxx'),
+(2, 2716, 0, 2, 2, 2, 2, 2, 2, 2, 2, 4, 5, 'CAAAAA', 'MAEAAA', 'AAAAxx'),
+(1, 2838, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 'BAAAAA', 'EFEAAA', 'OOOOxx'),
+(6, 2855, 0, 2, 6, 6, 6, 6, 6, 6, 6, 12, 13, 'GAAAAA', 'VFEAAA', 'VVVVxx'),
+(9, 4463, 1, 1, 9, 9, 9, 9, 9, 9, 9, 18, 19, 'JAAAAA', 'RPGAAA', 'VVVVxx'),
+(8, 5435, 0, 0, 8, 8, 8, 8, 8, 8, 8, 16, 17, 'IAAAAA', 'BBIAAA', 'VVVVxx'),
+(5, 5557, 1, 1, 5, 5, 5, 5, 5, 5, 5, 10, 11, 'FAAAAA', 'TFIAAA', 'HHHHxx'),
+(3, 5679, 1, 3, 3, 3, 3, 3, 3, 3, 3, 6, 7, 'DAAAAA', 'LKIAAA', 'VVVVxx'),
+(7, 8518, 1, 3, 7, 7, 7, 7, 7, 7, 7, 14, 15, 'HAAAAA', 'QPMAAA', 'OOOOxx'),
+(0, 9998, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 'AAAAAA', 'OUOAAA', 'OOOOxx')
+
+statement ok
+CREATE TABLE tenk2 AS SELECT * FROM tenk1
+
+statement ok
+CREATE TABLE INT4_TBL(f1 INT)
+
+statement ok
+INSERT INTO INT4_TBL(f1) VALUES
+  (0),
+  (123456),
+  (-123456),
+  (2147483647),
+  (-2147483647)
+
+# window.sql:24. rowsort: the ORDER BY leaves ties (develop's two 5200s,
+# sales's two 4800s).
+query STRING,BIGINT,INT,BIGINT rowsort
+SELECT depname, empno, salary, sum(salary) OVER (PARTITION BY depname) FROM empsalary ORDER BY depname, salary
+----
+develop	10	5200	25100
+develop	11	5200	25100
+develop	7	4200	25100
+develop	8	6000	25100
+develop	9	4500	25100
+personnel	2	3900	7400
+personnel	5	3500	7400
+sales	1	5000	14600
+sales	3	4800	14600
+sales	4	4800	14600
+
+# window.sql:26
+query STRING,BIGINT,INT,BIGINT rowsort
+SELECT depname, empno, salary, rank() OVER (PARTITION BY depname ORDER BY salary) FROM empsalary
+----
+develop	10	5200	3
+develop	11	5200	3
+develop	7	4200	1
+develop	8	6000	5
+develop	9	4500	2
+personnel	2	3900	2
+personnel	5	3500	1
+sales	1	5000	3
+sales	3	4800	1
+sales	4	4800	1
+
+# window.sql:32, its WINDOW w written inline.
+query STRING,BIGINT,INT,BIGINT rowsort
+SELECT depname, empno, salary, sum(salary) OVER (PARTITION BY depname) FROM empsalary
+----
+develop	10	5200	25100
+develop	11	5200	25100
+develop	7	4200	25100
+develop	8	6000	25100
+develop	9	4500	25100
+personnel	2	3900	7400
+personnel	5	3500	7400
+sales	1	5000	14600
+sales	3	4800	14600
+sales	4	4800	14600
+
+# window.sql:34, its WINDOW w written inline. rowsort: the ORDER BY leaves
+# ties.
+query STRING,BIGINT,INT,BIGINT rowsort
+SELECT depname, empno, salary, rank() OVER (PARTITION BY depname ORDER BY salary) FROM empsalary ORDER BY rank() OVER (PARTITION BY depname ORDER BY salary)
+----
+develop	10	5200	3
+develop	11	5200	3
+develop	7	4200	1
+develop	8	6000	5
+develop	9	4500	2
+personnel	2	3900	2
+personnel	5	3500	1
+sales	1	5000	3
+sales	3	4800	1
+sales	4	4800	1
+
+# window.sql:37: empty window specification.
+query BIGINT rowsort
+SELECT COUNT(*) OVER () FROM tenk1 WHERE unique2 < 10
+----
+10
+10
+10
+10
+10
+10
+10
+10
+10
+10
+
+# window.sql:45: cumulative aggregate.
+query BIGINT,INT,INT rowsort
+SELECT sum(four) OVER (PARTITION BY ten ORDER BY unique2) AS sum_1, ten, four FROM tenk1 WHERE unique2 < 10
+----
+0	0	0
+0	0	0
+0	4	0
+1	7	1
+1	9	1
+2	0	2
+3	1	3
+3	3	3
+4	1	1
+5	1	1
+
+# window.sql:47
+query BIGINT rowsort
+SELECT row_number() OVER (ORDER BY unique2) FROM tenk1 WHERE unique2 < 10
+----
+1
+10
+2
+3
+4
+5
+6
+7
+8
+9
+
+# window.sql:49
+query BIGINT,INT,INT rowsort
+SELECT rank() OVER (PARTITION BY four ORDER BY ten) AS rank_1, ten, four FROM tenk1 WHERE unique2 < 10
+----
+1	0	0
+1	0	0
+1	0	2
+1	1	1
+1	1	1
+1	1	3
+2	3	3
+3	4	0
+3	7	1
+4	9	1
+
+# window.sql:51
+query BIGINT,INT,INT rowsort
+SELECT dense_rank() OVER (PARTITION BY four ORDER BY ten), ten, four FROM tenk1 WHERE unique2 < 10
+----
+1	0	0
+1	0	0
+1	0	2
+1	1	1
+1	1	1
+1	1	3
+2	3	3
+2	4	0
+2	7	1
+3	9	1
+
+# window.sql:61
+query INT,INT,INT rowsort
+SELECT lag(ten) OVER (PARTITION BY four ORDER BY ten), ten, four FROM tenk1 WHERE unique2 < 10
+----
+0	0	0
+0	4	0
+1	1	1
+1	3	3
+1	7	1
+7	9	1
+NULL	0	0
+NULL	0	2
+NULL	1	1
+NULL	1	3
+
+# window.sql:68
+query INT,INT,INT rowsort
+SELECT lead(ten) OVER (PARTITION BY four ORDER BY ten), ten, four FROM tenk1 WHERE unique2 < 10
+----
+0	0	0
+1	1	1
+3	1	3
+4	0	0
+7	1	1
+9	7	1
+NULL	0	2
+NULL	3	3
+NULL	4	0
+NULL	9	1
+
+# window.sql:70
+query INT,INT,INT rowsort
+SELECT lead(ten * 2, 1) OVER (PARTITION BY four ORDER BY ten), ten, four FROM tenk1 WHERE unique2 < 10
+----
+0	0	0
+14	1	1
+18	7	1
+2	1	1
+6	1	3
+8	0	0
+NULL	0	2
+NULL	3	3
+NULL	4	0
+NULL	9	1
+
+# window.sql:72
+query INT,INT,INT rowsort
+SELECT lead(ten * 2, 1, -1) OVER (PARTITION BY four ORDER BY ten), ten, four FROM tenk1 WHERE unique2 < 10
+----
+-1	0	2
+-1	3	3
+-1	4	0
+-1	9	1
+0	0	0
+14	1	1
+18	7	1
+2	1	1
+6	1	3
+8	0	0
+
+# window.sql:73. Postgres's lead is a numeric here (0, 8, -1.4); the
+# engine's is a DOUBLE, since the default -1.4 is one, so each value prints
+# as a DOUBLE (0.0, 8.0, -1.4). rowsort: the ORDER BY leaves ties.
+query DOUBLE,INT,INT rowsort
+SELECT lead(ten * 2, 1, -1.4) OVER (PARTITION BY four ORDER BY ten), ten, four FROM tenk1 WHERE unique2 < 10 ORDER BY four, ten
+----
+-1.4	0	2
+-1.4	3	3
+-1.4	4	0
+-1.4	9	1
+0.0	0	0
+14.0	1	1
+18.0	7	1
+2.0	1	1
+6.0	1	3
+8.0	0	0
+
+# window.sql:90, its subquery in FROM written as a WITH.
+query BIGINT,INT rowsort
+WITH s AS (SELECT * FROM tenk1 WHERE two = 1)
+SELECT count(*) OVER (PARTITION BY four), four FROM s WHERE unique2 < 10
+----
+2	3
+2	3
+4	1
+4	1
+4	1
+4	1
+
+# window.sql:92, its ::varchar written as a CAST.
+query STRING rowsort
+SELECT CAST(count(*) OVER (PARTITION BY four ORDER BY ten) +
+  sum(hundred) OVER (PARTITION BY four ORDER BY ten) AS varchar) AS cntsum
+  FROM tenk1 WHERE unique2 < 10
+----
+136
+22
+22
+24
+24
+51
+82
+87
+92
+92
+
+# window.sql:106. Postgres's avg of an integer is a numeric (it prints
+# 0.00000000000000000000), the engine's a DOUBLE; the values are equal.
+query DOUBLE rowsort
+SELECT avg(four) OVER (PARTITION BY four ORDER BY thousand / 100) FROM tenk1 WHERE unique2 < 10
+----
+0.0
+0.0
+0.0
+1.0
+1.0
+1.0
+1.0
+2.0
+3.0
+3.0
+
+# window.sql:112: more than one window with GROUP BY.
+query BIGINT,BIGINT,BIGINT rowsort
+SELECT sum(salary),
+    row_number() OVER (ORDER BY depname),
+    sum(sum(salary)) OVER (ORDER BY depname DESC)
+FROM empsalary GROUP BY depname
+----
+14600	3	14600
+25100	1	47100
+7400	2	22000
+
+# window.sql:118: identical windows with different names, each written inline.
+query BIGINT,BIGINT rowsort
+SELECT sum(salary) OVER (ORDER BY salary), count(*) OVER (ORDER BY salary)
+FROM empsalary
+----
+11600	3
+16100	4
+25700	6
+25700	6
+30700	7
+3500	1
+41100	9
+41100	9
+47100	10
+7400	2
+
+# window.sql:126: empty table, its subquery in FROM written as a WITH.
+query BIGINT rowsort
+WITH s AS (SELECT * FROM tenk1 WHERE FALSE)
+SELECT count(*) OVER (PARTITION BY four) FROM s
+----
+
+# window.sql:129: mixture of agg/wfunc in the same window, its WINDOW w
+# written inline.
+query BIGINT,BIGINT rowsort
+SELECT sum(salary) OVER (PARTITION BY depname ORDER BY salary DESC), rank() OVER (PARTITION BY depname ORDER BY salary DESC) FROM empsalary
+----
+14600	2
+14600	2
+16400	2
+16400	2
+20900	4
+25100	5
+3900	1
+5000	1
+6000	1
+7400	2
+
+# window.sql:141: window function over ungrouped agg over empty row set.
+# Postgres's sum of a bigint is a numeric; 0 prints the same as a BIGINT.
+query BIGINT rowsort
+SELECT SUM(COUNT(f1)) OVER () FROM int4_tbl WHERE f1=42
+----
+0
+
+# window.sql:157: window functions returning pass-by-ref values from
+# different rows. Its subquery in FROM, x::numeric over generate_series(1,10),
+# is the table numerics_1_to_10 holding those rows, numeric written
+# DECIMAL(10,0).
+statement ok
+CREATE TABLE numerics_1_to_10 (x DECIMAL(10,0))
+
+statement ok
+INSERT INTO numerics_1_to_10 VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10)
+
+query DECIMAL(10,0),DECIMAL(10,0),DECIMAL(10,0) rowsort
+select x, lag(x, 1) over (order by x), lead(x, 3) over (order by x)
+from numerics_1_to_10
+----
+1	NULL	4
+10	9	NULL
+2	1	5
+3	2	6
+4	3	7
+5	4	8
+6	5	9
+7	6	10
+8	7	NULL
+9	8	NULL
+
+# window.sql:186
+query BIGINT,INT,INT rowsort
+SELECT sum(unique1) over (order by four range between current row and unbounded following),
+    unique1, four
+FROM tenk1 WHERE unique1 < 10
+----
+10	3	3
+10	7	3
+18	2	2
+18	6	2
+33	1	1
+33	5	1
+33	9	1
+45	0	0
+45	4	0
+45	8	0
+
+# generate_series(1, 10) as a table, for the view of window.sql:278.
+statement ok
+CREATE TABLE series_1_to_10 (i INT)
+
+statement ok
+INSERT INTO series_1_to_10 VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10)
+
+# window.sql:278, FROM generate_series(1, 10) i written FROM series_1_to_10.
+statement ok
+CREATE TEMP VIEW v_window AS
+    SELECT i, sum(i) over (order by i rows between 1 preceding and 1 following) as sum_rows
+    FROM series_1_to_10
+
+# window.sql:282
+query INT,BIGINT rowsort
+SELECT * FROM v_window
+----
+1	3
+10	19
+2	6
+3	9
+4	12
+5	15
+6	18
+7	21
+8	24
+9	27
+
+# window.sql:325
+statement ok
+DROP VIEW v_window
+
+# window.sql:361: RANGE offset PRECEDING/FOLLOWING, the offsets 2::int8 and
+# 1::int2 written 2 and 1 (the engine takes a frame offset as a number
+# written in the query).
+query BIGINT,INT,INT rowsort
+SELECT sum(unique1) over (order by four range between 2 preceding and 1 preceding),
+    unique1, four
+FROM tenk1 WHERE unique1 < 10
+----
+12	1	1
+12	5	1
+12	9	1
+23	3	3
+23	7	3
+27	2	2
+27	6	2
+NULL	0	0
+NULL	4	0
+NULL	8	0
+
+# window.sql:365, the offsets written as in the record before.
+query BIGINT,INT,INT rowsort
+SELECT sum(unique1) over (order by four desc range between 2 preceding and 1 preceding),
+    unique1, four
+FROM tenk1 WHERE unique1 < 10
+----
+10	2	2
+10	6	2
+18	1	1
+18	5	1
+18	9	1
+23	0	0
+23	4	0
+23	8	0
+NULL	3	3
+NULL	7	3
+
+# window.sql:393, the offsets 5::int8 and 6::int2 written 5 and 6.
+query BIGINT,INT,INT rowsort
+SELECT sum(unique1) over (partition by four order by unique1 range between 5 preceding and 6 following),
+    unique1, four
+FROM tenk1 WHERE unique1 < 10
+----
+10	3	3
+10	7	3
+12	4	0
+12	8	0
+14	9	1
+15	5	1
+4	0	0
+6	1	1
+8	2	2
+8	6	2
+
+# generate_series(1, 35, 2) and generate_series(5, 49, 2) as tables, for
+# window.sql:1008-1037, which show the differences in offset interpretation
+# between ROWS and RANGE.
+statement ok
+CREATE TABLE series_1_to_35_by_2 (n INT)
+
+statement ok
+INSERT INTO series_1_to_35_by_2 VALUES (1), (3), (5), (7), (9), (11), (13), (15), (17), (19), (21), (23), (25), (27), (29), (31), (33), (35)
+
+statement ok
+CREATE TABLE series_5_to_49_by_2 (n INT)
+
+statement ok
+INSERT INTO series_5_to_49_by_2 VALUES (5), (7), (9), (11), (13), (15), (17), (19), (21), (23), (25), (27), (29), (31), (33), (35), (37), (39), (41), (43), (45), (47), (49)
+
+# window.sql:1008, its WINDOW w written inline.
+query INT,BIGINT rowsort
+WITH cte (x) AS (
+        SELECT * FROM series_1_to_35_by_2
+)
+SELECT x, (sum(x) over (ORDER BY x rows between 1 preceding and 1 following))
+FROM cte
+----
+1	4
+11	33
+13	39
+15	45
+17	51
+19	57
+21	63
+23	69
+25	75
+27	81
+29	87
+3	9
+31	93
+33	99
+35	68
+5	15
+7	21
+9	27
+
+# window.sql:1015, its WINDOW w written inline.
+query INT,BIGINT rowsort
+WITH cte (x) AS (
+        SELECT * FROM series_1_to_35_by_2
+)
+SELECT x, (sum(x) over (ORDER BY x range between 1 preceding and 1 following))
+FROM cte
+----
+1	1
+11	11
+13	13
+15	15
+17	17
+19	19
+21	21
+23	23
+25	25
+27	27
+29	29
+3	3
+31	31
+33	33
+35	35
+5	5
+7	7
+9	9
+
+# window.sql:1029, its WINDOW w written inline.
+query INT,BIGINT rowsort
+WITH cte (x) AS (
+        select 1 union all select 1 union all select 1 union all
+        SELECT * FROM series_5_to_49_by_2
+)
+SELECT x, (sum(x) over (ORDER BY x rows between 1 preceding and 1 following))
+FROM cte
+----
+1	2
+1	3
+1	7
+11	33
+13	39
+15	45
+17	51
+19	57
+21	63
+23	69
+25	75
+27	81
+29	87
+31	93
+33	99
+35	105
+37	111
+39	117
+41	123
+43	129
+45	135
+47	141
+49	96
+5	13
+7	21
+9	27
+
+# window.sql:1037, its WINDOW w written inline.
+query INT,BIGINT rowsort
+WITH cte (x) AS (
+        select 1 union all select 1 union all select 1 union all
+        SELECT * FROM series_5_to_49_by_2
+)
+SELECT x, (sum(x) over (ORDER BY x range between 1 preceding and 1 following))
+FROM cte
+----
+1	3
+1	3
+1	3
+11	11
+13	13
+15	15
+17	17
+19	19
+21	21
+23	23
+25	25
+27	27
+29	29
+31	31
+33	33
+35	35
+37	37
+39	39
+41	41
+43	43
+45	45
+47	47
+49	49
+5	5
+7	7
+9	9
+
+# window.sql:1054: with UNION, its subquery in FROM written as a WITH.
+query BIGINT rowsort
+WITH s AS (SELECT * FROM tenk1 UNION ALL SELECT * FROM tenk2)
+SELECT count(*) OVER (PARTITION BY four) FROM s LIMIT 0
+----
+
+# window.sql:1057: degenerate cases (int8 written BIGINT).
+statement ok
+create temp table t1 (f1 int, f2 BIGINT)
+
+statement ok
+insert into t1 values (1,1),(1,2),(2,2)
+
+# window.sql:1060. Postgres: RANGE with offset PRECEDING/FOLLOWING requires
+# exactly one ORDER BY column.
+statement error
+select f1, sum(f1) over (partition by f1
+                         range between 1 preceding and 1 following)
+from t1 where f1 = f2
+
+# window.sql:1067
+query INT,BIGINT rowsort
+select f1, sum(f1) over (partition by f1 order by f2
+                         range between 1 preceding and 1 following)
+from t1 where f1 = f2
+----
+1	1
+2	2
+
+# window.sql:1070
+query INT,BIGINT rowsort
+select f1, sum(f1) over (partition by f1, f1 order by f2
+                         range between 2 preceding and 1 preceding)
+from t1 where f1 = f2
+----
+1	NULL
+2	NULL
+
+# window.sql:1073
+query INT,BIGINT rowsort
+select f1, sum(f1) over (partition by f1, f2 order by f2
+                         range between 1 following and 2 following)
+from t1 where f1 = f2
+----
+1	NULL
+2	NULL
+
+# window.sql:1095: ordering by a non-integer constant is allowed.
+skipif transformer # refused by design: a window's ORDER BY key that reads no column orders nothing
+query BIGINT rowsort
+SELECT rank() OVER (ORDER BY length('abc'))
+----
+1
+
+# window.sql:1098: can't order by another window function. Postgres: window
+# functions are not allowed in window definitions.
+statement error
+SELECT rank() OVER (ORDER BY rank() OVER (ORDER BY random()))
+
+# window.sql:1101. Postgres: window functions are not allowed in WHERE.
+statement error
+SELECT * FROM empsalary WHERE row_number() OVER (ORDER BY salary) < 10
+
+# window.sql:1103. Postgres: window functions are not allowed in JOIN
+# conditions.
+statement error
+SELECT * FROM empsalary INNER JOIN tenk1 ON row_number() OVER (ORDER BY salary) < 10
+
+# window.sql:1105. Postgres: window functions are not allowed in GROUP BY.
+statement error
+SELECT rank() OVER (ORDER BY 1), count(*) FROM empsalary GROUP BY 1
+
+# window.sql:1107. Postgres: syntax error at or near "ORDER".
+statement error
+SELECT * FROM rank() OVER (ORDER BY random())
+
+# window.sql:1115. Postgres: syntax error at or near "ORDER".
+statement error
+SELECT rank() OVER (PARTITION BY four, ORDER BY ten) FROM tenk1
+
+# window.sql:1211: the three statements that should give the same result,
+# each subquery in FROM written as a WITH.
+query BIGINT,BIGINT rowsort
+WITH emp AS
+  (SELECT empno,
+          row_number() OVER (ORDER BY empno) rn
+   FROM empsalary)
+SELECT * FROM emp
+WHERE rn < 3
+----
+1	1
+2	2
+
+# window.sql:1217
+query BIGINT,BIGINT rowsort
+WITH emp AS
+  (SELECT empno,
+          row_number() OVER (ORDER BY empno) rn
+   FROM empsalary)
+SELECT * FROM emp
+WHERE 3 > rn
+----
+1	1
+2	2
+
+# window.sql:1223
+query BIGINT,BIGINT rowsort
+WITH emp AS
+  (SELECT empno,
+          row_number() OVER (ORDER BY empno) rn
+   FROM empsalary)
+SELECT * FROM emp
+WHERE 2 >= rn
+----
+1	1
+2	2
+
+# window.sql:1238, its subquery in FROM written as a WITH.
+query BIGINT,INT,BIGINT rowsort
+WITH emp AS
+  (SELECT empno,
+          salary,
+          rank() OVER (ORDER BY salary DESC) r
+   FROM empsalary)
+SELECT * FROM emp
+WHERE r <= 3
+----
+10	5200	2
+11	5200	2
+8	6000	1
+
+# window.sql:1254, its subquery in FROM written as a WITH.
+query BIGINT,INT,BIGINT rowsort
+WITH emp AS
+  (SELECT empno,
+          salary,
+          dense_rank() OVER (ORDER BY salary DESC) dr
+   FROM empsalary)
+SELECT * FROM emp
+WHERE dr = 1
+----
+8	6000	1
+
+# window.sql:1270: COUNT(*), its subquery in FROM written as a WITH.
+query BIGINT,INT,BIGINT rowsort
+WITH emp AS
+  (SELECT empno,
+          salary,
+          count(*) OVER (ORDER BY salary DESC) c
+   FROM empsalary)
+SELECT * FROM emp
+WHERE c <= 3
+----
+10	5200	3
+11	5200	3
+8	6000	1
+
+# window.sql:1285: COUNT(expr), its subquery in FROM written as a WITH.
+query BIGINT,INT,BIGINT rowsort
+WITH emp AS
+  (SELECT empno,
+          salary,
+          count(empno) OVER (ORDER BY salary DESC) c
+   FROM empsalary)
+SELECT * FROM emp
+WHERE c <= 3
+----
+10	5200	3
+11	5200	3
+8	6000	1
+
+# window.sql:1327: with a PARTITION BY, its subquery in FROM written as a
+# WITH.
+query BIGINT,STRING,BIGINT rowsort
+WITH emp AS
+  (SELECT empno,
+          depname,
+          row_number() OVER (PARTITION BY depname ORDER BY empno) rn
+   FROM empsalary)
+SELECT * FROM emp
+WHERE rn < 3
+----
+1	sales	1
+2	personnel	1
+3	sales	2
+5	personnel	2
+7	develop	1
+8	develop	2
+
+# window.sql:1355, its subquery in FROM written as a WITH.
+query BIGINT,STRING,INT,BIGINT rowsort
+WITH emp AS
+  (SELECT empno,
+          depname,
+          salary,
+          count(empno) OVER (PARTITION BY depname ORDER BY salary DESC) c
+   FROM empsalary)
+SELECT * FROM emp
+WHERE c <= 3
+----
+1	sales	5000	1
+10	develop	5200	3
+11	develop	5200	3
+2	personnel	3900	1
+3	sales	4800	3
+4	sales	4800	3
+5	personnel	3500	2
+8	develop	6000	1
+
+# window.sql:1396: a window function with a byref return type, its subquery
+# in FROM written as a WITH.
+query BIGINT,STRING rowsort
+WITH emp AS
+  (SELECT row_number() OVER (PARTITION BY salary) AS rn,
+          lead(depname) OVER (PARTITION BY salary) || ' Department' AS n_dep
+   FROM empsalary)
+SELECT * FROM emp
+WHERE rn < 1
+----
+
+# window.sql:1663
+statement ok
+DROP TABLE empsalary
+
+# window.sql:1872-2026: the built-in aggregates' moving-aggregate support.
+# Each VALUES list in FROM is a table of its rows under the list's alias,
+# replaced when the next list differs; v::int and v::bigint are written as
+# CASTs, and v::numeric, over a list of numerics, as the column, numeric
+# written DECIMAL(10,1) or DECIMAL(10,2) for the digits the list writes.
+statement ok
+CREATE TABLE t (i INT, v INT)
+
+statement ok
+INSERT INTO t VALUES(1,1),(2,2),(3,NULL),(4,NULL)
+
+# window.sql:1872. Postgres's avg is a numeric (1.5000000000000000), the
+# engine's a DOUBLE; the values are equal.
+query INT,DOUBLE rowsort
+SELECT i,AVG(CAST(v AS bigint)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM t
+----
+1	1.5
+2	2.0
+3	NULL
+4	NULL
+
+# window.sql:1875, as the record before.
+query INT,DOUBLE rowsort
+SELECT i,AVG(CAST(v AS int)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM t
+----
+1	1.5
+2	2.0
+3	NULL
+4	NULL
+
+# window.sql:1923
+query INT,BIGINT rowsort
+SELECT i,SUM(CAST(v AS int)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM t
+----
+1	3
+2	2
+3	NULL
+4	NULL
+
+# window.sql:1926
+query INT,BIGINT rowsort
+SELECT i,SUM(CAST(v AS bigint)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM t
+----
+1	3
+2	2
+3	NULL
+4	NULL
+
+# window.sql:1941
+query INT,BIGINT rowsort
+SELECT i,COUNT(v) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM t
+----
+1	2
+2	1
+3	0
+4	0
+
+# window.sql:1944
+query INT,BIGINT rowsort
+SELECT i,COUNT(*) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM t
+----
+1	4
+2	3
+3	2
+4	1
+
+# window.sql:2020: inverse transition functions with various frame options.
+query INT,BIGINT rowsort
+SELECT i,SUM(CAST(v AS int)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND CURRENT ROW)
+  FROM t
+----
+1	1
+2	2
+3	NULL
+4	NULL
+
+# window.sql:2023
+query INT,BIGINT rowsort
+SELECT i,SUM(CAST(v AS int)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING)
+  FROM t
+----
+1	3
+2	2
+3	NULL
+4	NULL
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (i INT, v DECIMAL(10,1))
+
+statement ok
+INSERT INTO t VALUES(1,1.5),(2,2.5),(3,NULL),(4,NULL)
+
+# window.sql:1881. Postgres prints 2.0000000000000000: its avg of a numeric
+# keeps 16 places here, the engine's avg of a DECIMAL(10,1) four more than
+# the column's; the values are equal.
+query INT,DECIMAL(14,5) rowsort
+SELECT i,AVG(v) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM t
+----
+1	2.00000
+2	2.50000
+3	NULL
+4	NULL
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE t (i INT, v DECIMAL(10,1))
+
+statement ok
+INSERT INTO t VALUES(1,1.1),(2,2.2),(3,NULL),(4,NULL)
+
+# window.sql:1935
+query INT,DECIMAL(38,1) rowsort
+SELECT i,SUM(v) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM t
+----
+1	3.3
+2	2.2
+3	NULL
+4	NULL
+
+statement ok
+DROP TABLE t
+
+statement ok
+CREATE TABLE v (i INT, n DECIMAL(10,2))
+
+statement ok
+INSERT INTO v VALUES(1,1.01),(2,2),(3,3)
+
+# window.sql:1938. Postgres prints 5 and 3: its numeric keeps the scale each
+# value was written with, where a DECIMAL(10,2) column holds 2.00 and 3.00;
+# the values are equal.
+query DECIMAL(38,2) rowsort
+SELECT SUM(n) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM v
+----
+3.00
+5.00
+6.01
+
+statement ok
+DROP TABLE v
+
+# The statistics are DOUBLEs in the engine, numerics in Postgres, so each is
+# compared as SQLite's R, to three places.
+statement ok
+CREATE TABLE r (i INT, n INT)
+
+statement ok
+INSERT INTO r VALUES(1,600),(2,470),(3,170),(4,430),(5,300)
+
+# window.sql:1947
+query R rowsort
+SELECT VAR_POP(CAST(n AS bigint)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+0.000
+11266.667
+13868.750
+21704.000
+4225.000
+
+# window.sql:1950
+query R rowsort
+SELECT VAR_POP(CAST(n AS int)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+0.000
+11266.667
+13868.750
+21704.000
+4225.000
+
+# window.sql:1959
+query R rowsort
+SELECT VAR_SAMP(CAST(n AS bigint)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+16900.000
+18491.667
+27130.000
+8450.000
+NULL
+
+# window.sql:1962
+query R rowsort
+SELECT VAR_SAMP(CAST(n AS int)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+16900.000
+18491.667
+27130.000
+8450.000
+NULL
+
+# window.sql:1971
+query R rowsort
+SELECT VARIANCE(CAST(n AS bigint)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+16900.000
+18491.667
+27130.000
+8450.000
+NULL
+
+# window.sql:1974
+query R rowsort
+SELECT VARIANCE(CAST(n AS int)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+16900.000
+18491.667
+27130.000
+8450.000
+NULL
+
+statement ok
+DROP TABLE r
+
+statement ok
+CREATE TABLE r (i INT, n DECIMAL(10,0))
+
+statement ok
+INSERT INTO r VALUES(1,600),(2,470),(3,170),(4,430),(5,300)
+
+# window.sql:1956
+query R rowsort
+SELECT VAR_POP(n) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+0.000
+11266.667
+13868.750
+21704.000
+4225.000
+
+# window.sql:1968
+query R rowsort
+SELECT VAR_SAMP(n) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+16900.000
+18491.667
+27130.000
+8450.000
+NULL
+
+# window.sql:1980
+query R rowsort
+SELECT VARIANCE(n) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+16900.000
+18491.667
+27130.000
+8450.000
+NULL
+
+statement ok
+DROP TABLE r
+
+statement ok
+CREATE TABLE r (i INT, n INT)
+
+statement ok
+INSERT INTO r VALUES(1,NULL),(2,600),(3,470),(4,170),(5,430),(6,300)
+
+# window.sql:1983
+query R rowsort
+SELECT STDDEV_POP(CAST(n AS bigint)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+0.000
+106.145
+117.766
+147.323
+147.323
+65.000
+
+# window.sql:1986
+query R rowsort
+SELECT STDDEV_POP(CAST(n AS int)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+0.000
+106.145
+117.766
+147.323
+147.323
+65.000
+
+# window.sql:1995
+query R rowsort
+SELECT STDDEV_SAMP(CAST(n AS bigint)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+130.000
+135.984
+164.712
+164.712
+91.924
+NULL
+
+# window.sql:1998
+query R rowsort
+SELECT STDDEV_SAMP(CAST(n AS int)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+130.000
+135.984
+164.712
+164.712
+91.924
+NULL
+
+statement ok
+DROP TABLE r
+
+statement ok
+CREATE TABLE r (i INT, n DECIMAL(10,0))
+
+statement ok
+INSERT INTO r VALUES(1,NULL),(2,600),(3,470),(4,170),(5,430),(6,300)
+
+# window.sql:1992
+query R rowsort
+SELECT STDDEV_POP(n) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+0.000
+106.145
+117.766
+147.323
+147.323
+65.000
+
+# window.sql:2004
+query R rowsort
+SELECT STDDEV_SAMP(n) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+130.000
+135.984
+164.712
+164.712
+91.924
+NULL
+
+statement ok
+DROP TABLE r
+
+statement ok
+CREATE TABLE r (i INT, n INT)
+
+statement ok
+INSERT INTO r VALUES(0,NULL),(1,600),(2,470),(3,170),(4,430),(5,300)
+
+# window.sql:2007
+query R rowsort
+SELECT STDDEV(CAST(n AS bigint)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+130.000
+135.984
+164.712
+164.712
+91.924
+NULL
+
+# window.sql:2010
+query R rowsort
+SELECT STDDEV(CAST(n AS int)) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+130.000
+135.984
+164.712
+164.712
+91.924
+NULL
+
+statement ok
+DROP TABLE r
+
+statement ok
+CREATE TABLE r (i INT, n DECIMAL(10,0))
+
+statement ok
+INSERT INTO r VALUES(0,NULL),(1,600),(2,470),(3,170),(4,430),(5,300)
+
+# window.sql:2016
+query R rowsort
+SELECT STDDEV(n) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  FROM r
+----
+130.000
+135.984
+164.712
+164.712
+91.924
+NULL
+
+statement ok
+DROP TABLE r
+
+statement ok
+CREATE TABLE t (i INT, v INT)
+
+statement ok
+INSERT INTO t VALUES(1,1),(2,2),(3,3),(4,4)
+
+# window.sql:2026
+query INT,BIGINT rowsort
+SELECT i,SUM(CAST(v AS int)) OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+  FROM t
+----
+1	3
+2	6
+3	9
+4	7

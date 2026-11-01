@@ -1,6 +1,6 @@
 # Plan 05: plans as SQL, and plan 04's next round
 
-> Status: **in progress** 2026-11-01 · four decisions by the user, the
+> Status: **done** 2026-11-01, but the decisions W9's findings need · four decisions by the user, the
 > recommended option each time · one commit per workstream · Risk: low for the
 > printer and the tests; medium for join ordering and the streaming pairing,
 > which change how queries run
@@ -54,7 +54,7 @@ takes all of them but JSqlParser 5.3, which still refuses deep parentheses.
 | W6 | Every hash zero (`--config=hashzero`) | **done** 2026-11-01 |
 | W7 | A CSV glob's files with their columns in other orders | **done** 2026-11-01 |
 | W8 | A spill file's fixed cost | **done** 2026-11-01 |
-| W9 | Ported Postgres regression tests | |
+| W9 | Ported Postgres regression tests | **done** 2026-11-01; four findings await decisions |
 
 ### W1. Plan validation after every pass
 
@@ -241,6 +241,31 @@ spill half wrote a run per one-row batch past `spill_max_runs`, and under
 one thread gives only by chance (faster spill and output files left it fewer
 waits to run another task in). Both tests now run that part only where it
 holds; no answer changed in any configuration.
+
+W9: a background agent, in a worktree of its own, ported four files of
+PostgreSQL's regression suite (REL_18_6, commit 724edf9) with Postgres's
+answers: `window.test` (91 statements of 400), `numeric.test` (475 of
+1,058), `case.test` and `boolean.test`, 343 records in all, each passing
+under every verification mode and every whole-suite configuration, about 5 s
+of `slt_test`. 23 records are `skipif transformer` by a documented decision
+(a CAST to an integer truncates, text casts to BOOLEAN from true and false
+alone, division by zero is NULL, a constant window key is refused, DOUBLE
+statistics at magnitudes a DOUBLE does not hold). Four answers no decision
+covers are held out of the scripts, for the user to settle:
+
+| # | What | Postgres | Here |
+|---|---|---|---|
+| 1 | `COUNT()` with no argument, as an aggregate and in a window | refused ("count(*) must be used to call a parameterless aggregate function") | read as `COUNT(*)`, on purpose in `LogicalBuilder`, and in no doc |
+| 2 | A ROWS frame offset past INT (`ROWS BETWEEN CURRENT ROW AND 3000000000 FOLLOWING`) | runs (the offset is a BIGINT) | refused ("larger than the largest INT"); a RANGE offset of that size runs |
+| 3 | `LN`, `LOG` and `LOG10` of zero or a negative number, `LOG` to base 1, `SQRT` of a negative | errors ("cannot take logarithm of zero", "division by zero") | NaN, ±Infinity or -0.0 |
+| 4 | One-argument `LOG(x)` | base 10 (as SQLite and DuckDB) | the natural log (as Spark, MySQL and SQL Server) |
+
+It also met a limit of the harness, not of the engine: the spill/3-partitions
+mode writes a run per two-row batch, so an aggregate over about 3,000 rows
+passes the operator's 1,000-run guard, and window.sql's five queries over all
+10,000 rows of tenk1 stayed out (tenk1 holds the 20 rows the other queries
+read). Since W8 a spill run costs half a millisecond, so that mode could raise
+its guard and take them.
 
 ### How the printer is built (W2)
 
