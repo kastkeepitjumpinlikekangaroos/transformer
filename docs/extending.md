@@ -566,7 +566,12 @@ never the engine's own: its header names the source file and commit and
 counts what it leaves out by kind, each record names its source line and any
 rewrite (only one that cannot change the meaning), and a query the engine
 answers otherwise with no decision behind it stays out of the script as a
-finding until it is settled.
+finding until it is settled. A DOUBLE the other engine printed in full is
+compared exactly; one it printed to fewer digits (Postgres's float8 under
+`extra_float_digits = 0`, 15 significant digits) as SQLite's `T`, which prints
+a DOUBLE to 15, since `R` prints every integer digit of a large one; and one
+from a C math library function, whose last digit Java's need not share, as
+`R`, to three places.
 
 A **golden plan** pins the plan a query gets, where a planner change could
 keep its answer and lose what makes it fast (a join that stops hashing, a

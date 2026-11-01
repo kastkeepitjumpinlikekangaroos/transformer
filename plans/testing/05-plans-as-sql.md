@@ -290,6 +290,27 @@ tests of special values gave twelve statements over finite numbers to the port
 powers with Postgres's answers. The scripts hold 371 records, 43 of them
 `skipif transformer`.
 
+After the round float8.sql was ported the same way, as `float8.test`: 125 of
+its 184 statements, 127 records with test_setup.sql's float8_tbl, each passing
+under every verification mode and whole-suite configuration, under 2 s of
+`slt_test`. 13 records are `skipif transformer` by a documented decision: text
+casts to DOUBLE by CSV's grammar (so 'nan', 'infinity' and spaces around a
+number are errors), a division by zero, a logarithm of zero or less and a
+power with no real answer are NULL, arithmetic past DOUBLE's range is an
+infinity, and a CAST to an integer truncates. From float8.sql:117 to 235
+Postgres prints 15 significant digits (`extra_float_digits` 0, its own guard
+against the last digits platforms disagree on), so a value a function computes
+there is compared as SQLite's `T`, which prints a DOUBLE to the same 15: that
+is all Postgres printed, where `R`'s three places keep less and cannot hold at
+all the three results near 1e66 to 1e200, every integer digit of which `R`
+prints. A check outside the runner re-derived every expected block from
+float8.out. The port found one answer no decision covered, held out of the
+script:
+
+| # | What | Postgres | Here | Decided |
+|---|---|---|---|---|
+| 5 | A DOUBLE result too small to hold: `EXP(-1000.0)`, `POWER(0.5, 2000.0)`, `CAST('1e-200' AS DOUBLE) * CAST('1e-200' AS DOUBLE)`; float8.sql:188 (`f1 ^ '1e200'`) and 196 (`exp(f1)`) | refused, `value out of range: underflow`, where a product, quotient, `exp` or `pow` of nonzero finite values rounds to 0 | 0.0, or -0.0 when negative, as in Java, Spark, DuckDB, SQLite and MySQL; a subnormal is kept, as in Postgres | open |
+
 ### How the printer is built (W2)
 
 - Binding decides some types from how a value is written: a number beside a

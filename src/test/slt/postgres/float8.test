@@ -1,0 +1,912 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/float8.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/float8.out at that commit, never the engine's.
+# Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group;
+# Portions Copyright (c) 1994, The Regents of the University of California.
+# Distributed under the PostgreSQL License, a permissive license whose text
+# travels with every copy: it is COPYRIGHT beside this file.
+#
+# The DOUBLE, Postgres's float8, at its edges: the text a CAST reads, the
+# infinities and NaN in arithmetic, POWER's special cases, the rounding
+# functions, the hyperbolic functions, and casts to integers at the ends of
+# their ranges. 125 of the file's 184 statements are here: 8 that make, fill,
+# change or drop a table, 83 queries, 21 statements that must fail, and 13
+# records the engine answers otherwise by design, marked `skipif transformer`
+# with the reason. Each record names the line of float8.sql it comes from.
+#
+# A statement is as Postgres wrote it but where a rewrite cannot change what
+# it means, which its record says: float8 as DOUBLE, int4 and int8 as INT and
+# BIGINT, x::float8 and float8 'x' as CAST(x AS DOUBLE), Postgres's operators
+# |/ x, ||/ x, @ x and x ^ y as SQRT(x), CBRT(x), ABS(x) and POWER(x, y) (a
+# string beside ^ as the float8 Postgres reads it as, since the engine's
+# functions take no text), and Postgres's other spellings of the infinities
+# and NaN ('inf', 'infinity', 'nan') as Infinity and NaN where the test is of
+# what is done with the value rather than of how it is spelled. A string an
+# INSERT stores in the float8 column is written as the number it spells,
+# which Postgres reads, spaces and all; one Postgres refuses is written
+# CAST('...' AS DOUBLE), the conversion Postgres makes of it, so the engine
+# reads the text, not the runner, which stores no text in a DOUBLE column.
+# test_setup.sql's float8_tbl, which the file's temporary table hides until
+# the file drops it, is made after the DROP.
+#
+# A float8 Postgres prints in full, the shortest text that reads back as the
+# same double, is compared exactly, as Java's Double.toString prints a DOUBLE
+# (1004.3, 1.2345678901234E200, -10.0, -0.0). From float8.sql:117 to 235
+# Postgres prints 15 significant digits (extra_float_digits 0, C's %.15g), so
+# a value a function computes there (SQRT, CBRT, EXP of LN, POWER of finite
+# numbers, SINH, COSH and TANH) is compared as SQLite's T, which prints a
+# DOUBLE to the same 15 digits (SQLite's %!.15g, which writes a whole number
+# with .0 after it); the values there that are exact by definition, the
+# table's rows and the infinities, NaNs, zeros and ones that a function's
+# special cases are, are compared exactly. The one other function result,
+# POWER at float8.sql:91, comes from C's libm in Postgres, whose last digit
+# Java's need not share, so it is compared as SQLite's R, to three places. A
+# result in no fixed order is compared as rowsort. SIGN is an INT in the
+# engine and a float8 in Postgres; its values are written as the INT prints
+# them.
+#
+# `skipif transformer` marks what the engine answers otherwise by design,
+# with the reason: text casts to DOUBLE by CSV's grammar, which takes NaN,
+# Infinity and -Infinity as written and no spaces around a number (4); a
+# division by zero, a logarithm of zero or less and a power with no real
+# answer are NULL, which Postgres refuses (6); arithmetic past DOUBLE's range
+# is an infinity, not an error (1); and a CAST to an integer truncates, where
+# Postgres rounds (2).
+#
+# Left out (59 statements), by what they need:
+#   12  gamma() and lgamma()
+#   12  a type of the test's own, xfloat8, with its functions and casts, made
+#       to read bit patterns as float8s, the two queries over them, which also
+#       need float8send(), and the DROP
+#   11  asinh(), acosh() and atanh()
+#    6  sind(), cosd(), tand(), cotd(), asind(), acosd(), atand() and
+#       atan2d(), over generate_series() or a VALUES list
+#    5  SET and RESET of extra_float_digits, which say how Postgres prints a
+#       float8 (above)
+#    4  pg_input_is_valid() and pg_input_error_info()
+#    4  SMALLINT
+#    2  a DOUBLE result too small to hold, of EXP and POWER, which Postgres
+#       refuses (value out of range: underflow) and the engine answers with 0,
+#       held out until that is decided (plans/testing/05)
+#    1  erf() and erfc()
+#    1  float8send()
+#    1  numeric NaN, which no DECIMAL holds
+
+# float8.sql:10, float8 written DOUBLE.
+statement ok
+CREATE TEMP TABLE FLOAT8_TBL(f1 DOUBLE)
+
+# float8.sql:12, each string of these INSERTs written as the number it
+# spells: Postgres reads '    0.0   ', spaces and all.
+statement ok
+INSERT INTO FLOAT8_TBL(f1) VALUES (0.0)
+
+# float8.sql:13, '1004.30  '
+statement ok
+INSERT INTO FLOAT8_TBL(f1) VALUES (1004.30)
+
+# float8.sql:14, '   -34.84'
+statement ok
+INSERT INTO FLOAT8_TBL(f1) VALUES (-34.84)
+
+# float8.sql:15
+statement ok
+INSERT INTO FLOAT8_TBL(f1) VALUES (1.2345678901234e+200)
+
+# float8.sql:16
+statement ok
+INSERT INTO FLOAT8_TBL(f1) VALUES (1.2345678901234e-200)
+
+# float8.sql:19: text past DOUBLE's range, and text too small for it, each
+# '...'::float8 written CAST('...' AS DOUBLE). Postgres: "10e400" is out of
+# range for type double precision.
+statement error
+SELECT CAST('10e400' AS DOUBLE)
+
+# float8.sql:20. Postgres: "-10e400" is out of range for type double
+# precision.
+statement error
+SELECT CAST('-10e400' AS DOUBLE)
+
+# float8.sql:21. Postgres: "10e-400" is out of range for type double
+# precision.
+statement error
+SELECT CAST('10e-400' AS DOUBLE)
+
+# float8.sql:22. Postgres: "-10e-400" is out of range for type double
+# precision.
+statement error
+SELECT CAST('-10e-400' AS DOUBLE)
+
+# float8.sql:28: bad input. Each string, which Postgres refuses to store in
+# the float8 column, written CAST('...' AS DOUBLE), the conversion Postgres
+# makes of it. Postgres: invalid input syntax for type double precision: "".
+statement error
+INSERT INTO FLOAT8_TBL(f1) VALUES (CAST('' AS DOUBLE))
+
+# float8.sql:29. Postgres: invalid input syntax for type double precision:
+# "     ".
+statement error
+INSERT INTO FLOAT8_TBL(f1) VALUES (CAST('     ' AS DOUBLE))
+
+# float8.sql:30. Postgres: invalid input syntax for type double precision:
+# "xyz".
+statement error
+INSERT INTO FLOAT8_TBL(f1) VALUES (CAST('xyz' AS DOUBLE))
+
+# float8.sql:31. Postgres: invalid input syntax for type double precision:
+# "5.0.0".
+statement error
+INSERT INTO FLOAT8_TBL(f1) VALUES (CAST('5.0.0' AS DOUBLE))
+
+# float8.sql:32. Postgres: invalid input syntax for type double precision:
+# "5 . 0".
+statement error
+INSERT INTO FLOAT8_TBL(f1) VALUES (CAST('5 . 0' AS DOUBLE))
+
+# float8.sql:33. Postgres: invalid input syntax for type double precision:
+# "5.   0".
+statement error
+INSERT INTO FLOAT8_TBL(f1) VALUES (CAST('5.   0' AS DOUBLE))
+
+# float8.sql:34. Postgres: invalid input syntax for type double precision:
+# "    - 3".
+statement error
+INSERT INTO FLOAT8_TBL(f1) VALUES (CAST('    - 3' AS DOUBLE))
+
+# float8.sql:35. Postgres: invalid input syntax for type double precision:
+# "123           5".
+statement error
+INSERT INTO FLOAT8_TBL(f1) VALUES (CAST('123           5' AS DOUBLE))
+
+# float8.sql:44: special inputs.
+query DOUBLE
+SELECT CAST('NaN' AS DOUBLE)
+----
+NaN
+
+# float8.sql:45. The engine casts text to DOUBLE by the grammar CSV reads a
+# number by, which takes the words NaN, Infinity and -Infinity as the CSV
+# writer writes them, and no spaces around a number, so Postgres's other
+# spellings are errors there by design.
+skipif transformer # text casts to DOUBLE by CSV's grammar, which spells it NaN
+query DOUBLE
+SELECT CAST('nan' AS DOUBLE)
+----
+NaN
+
+# float8.sql:46
+skipif transformer # text casts to DOUBLE by CSV's grammar, which spells it NaN, with no spaces around
+query DOUBLE
+SELECT CAST('   NAN  ' AS DOUBLE)
+----
+NaN
+
+# float8.sql:47
+skipif transformer # text casts to DOUBLE by CSV's grammar, which spells it Infinity
+query DOUBLE
+SELECT CAST('infinity' AS DOUBLE)
+----
+Infinity
+
+# float8.sql:48
+skipif transformer # text casts to DOUBLE by CSV's grammar, which spells it -Infinity, with no spaces around
+query DOUBLE
+SELECT CAST('          -INFINiTY   ' AS DOUBLE)
+----
+-Infinity
+
+# float8.sql:50: bad special inputs. Postgres: invalid input syntax for type
+# double precision: "N A N".
+statement error
+SELECT CAST('N A N' AS DOUBLE)
+
+# float8.sql:51. Postgres: invalid input syntax for type double precision:
+# "NaN x".
+statement error
+SELECT CAST('NaN x' AS DOUBLE)
+
+# float8.sql:52. Postgres: invalid input syntax for type double precision:
+# " INFINITY    x".
+statement error
+SELECT CAST(' INFINITY    x' AS DOUBLE)
+
+# float8.sql:54. 100.0 is a numeric in Postgres, which adds it to a float8 as
+# a float8, and a DOUBLE in the engine.
+query DOUBLE
+SELECT CAST('Infinity' AS DOUBLE) + 100.0
+----
+Infinity
+
+# float8.sql:55
+query DOUBLE
+SELECT CAST('Infinity' AS DOUBLE) / CAST('Infinity' AS DOUBLE)
+----
+NaN
+
+# float8.sql:56
+query DOUBLE
+SELECT CAST('42' AS DOUBLE) / CAST('Infinity' AS DOUBLE)
+----
+0.0
+
+# float8.sql:57, 'nan' written 'NaN', as from here on: the rest of the file
+# tests what is done with these values, not how they are spelled.
+query DOUBLE
+SELECT CAST('NaN' AS DOUBLE) / CAST('NaN' AS DOUBLE)
+----
+NaN
+
+# float8.sql:58
+skipif transformer # a division by zero is NULL, NaN's too
+query DOUBLE
+SELECT CAST('NaN' AS DOUBLE) / CAST('0' AS DOUBLE)
+----
+NaN
+
+# float8.sql:61
+query DOUBLE rowsort
+SELECT * FROM FLOAT8_TBL
+----
+-34.84
+0.0
+1.2345678901234E-200
+1.2345678901234E200
+1004.3
+
+# float8.sql:63
+query DOUBLE rowsort
+SELECT f.* FROM FLOAT8_TBL f WHERE f.f1 <> '1004.3'
+----
+-34.84
+0.0
+1.2345678901234E-200
+1.2345678901234E200
+
+# float8.sql:65
+query DOUBLE rowsort
+SELECT f.* FROM FLOAT8_TBL f WHERE f.f1 = '1004.3'
+----
+1004.3
+
+# float8.sql:67
+query DOUBLE rowsort
+SELECT f.* FROM FLOAT8_TBL f WHERE '1004.3' > f.f1
+----
+-34.84
+0.0
+1.2345678901234E-200
+
+# float8.sql:69
+query DOUBLE rowsort
+SELECT f.* FROM FLOAT8_TBL f WHERE  f.f1 < '1004.3'
+----
+-34.84
+0.0
+1.2345678901234E-200
+
+# float8.sql:71
+query DOUBLE rowsort
+SELECT f.* FROM FLOAT8_TBL f WHERE '1004.3' >= f.f1
+----
+-34.84
+0.0
+1.2345678901234E-200
+1004.3
+
+# float8.sql:73
+query DOUBLE rowsort
+SELECT f.* FROM FLOAT8_TBL f WHERE  f.f1 <= '1004.3'
+----
+-34.84
+0.0
+1.2345678901234E-200
+1004.3
+
+# float8.sql:75
+query DOUBLE,DOUBLE rowsort
+SELECT f.f1, f.f1 * '-10' AS x
+   FROM FLOAT8_TBL f
+   WHERE f.f1 > '0.0'
+----
+1.2345678901234E-200	-1.2345678901234E-199
+1.2345678901234E200	-1.2345678901234E201
+1004.3	-10043.0
+
+# float8.sql:79
+query DOUBLE,DOUBLE rowsort
+SELECT f.f1, f.f1 + '-10' AS x
+   FROM FLOAT8_TBL f
+   WHERE f.f1 > '0.0'
+----
+1.2345678901234E-200	-10.0
+1.2345678901234E200	1.2345678901234E200
+1004.3	994.3
+
+# float8.sql:83
+query DOUBLE,DOUBLE rowsort
+SELECT f.f1, f.f1 / '-10' AS x
+   FROM FLOAT8_TBL f
+   WHERE f.f1 > '0.0'
+----
+1.2345678901234E-200	-1.2345678901234E-201
+1.2345678901234E200	-1.2345678901234E199
+1004.3	-100.42999999999999
+
+# float8.sql:87
+query DOUBLE,DOUBLE rowsort
+SELECT f.f1, f.f1 - '-10' AS x
+   FROM FLOAT8_TBL f
+   WHERE f.f1 > '0.0'
+----
+1.2345678901234E-200	10.0
+1.2345678901234E200	1.2345678901234E200
+1004.3	1014.3
+
+# float8.sql:91, f.f1 ^ '2.0' written POWER(f.f1, CAST('2.0' AS DOUBLE)).
+# Postgres's power is C's pow, compared as SQLite's R, to three places
+# (Postgres: 1008618.4899999999).
+query R
+SELECT POWER(f.f1, CAST('2.0' AS DOUBLE)) AS square_f1
+   FROM FLOAT8_TBL f where f.f1 = '1004.3'
+----
+1008618.490
+
+# float8.sql:95: absolute value, @f.f1 written ABS(f.f1).
+query DOUBLE,DOUBLE rowsort
+SELECT f.f1, ABS(f.f1) AS abs_f1
+   FROM FLOAT8_TBL f
+----
+-34.84	34.84
+0.0	0.0
+1.2345678901234E-200	1.2345678901234E-200
+1.2345678901234E200	1.2345678901234E200
+1004.3	1004.3
+
+# float8.sql:99: truncate.
+query DOUBLE,DOUBLE rowsort
+SELECT f.f1, trunc(f.f1) AS trunc_f1
+   FROM FLOAT8_TBL f
+----
+-34.84	-34.0
+0.0	0.0
+1.2345678901234E-200	0.0
+1.2345678901234E200	1.2345678901234E200
+1004.3	1004.0
+
+# float8.sql:103: round. Postgres rounds a float8 half to even, the engine
+# half away from zero; no value here is half way.
+query DOUBLE,DOUBLE rowsort
+SELECT f.f1, round(f.f1) AS round_f1
+   FROM FLOAT8_TBL f
+----
+-34.84	-35.0
+0.0	0.0
+1.2345678901234E-200	0.0
+1.2345678901234E200	1.2345678901234E200
+1004.3	1004.0
+
+# float8.sql:107: ceil and ceiling.
+query DOUBLE rowsort
+select ceil(f1) as ceil_f1 from float8_tbl f
+----
+-34.0
+0.0
+1.0
+1.2345678901234E200
+1005.0
+
+# float8.sql:108
+query DOUBLE rowsort
+select ceiling(f1) as ceiling_f1 from float8_tbl f
+----
+-34.0
+0.0
+1.0
+1.2345678901234E200
+1005.0
+
+# float8.sql:111: floor.
+query DOUBLE rowsort
+select floor(f1) as floor_f1 from float8_tbl f
+----
+-35.0
+0.0
+0.0
+1.2345678901234E200
+1004.0
+
+# float8.sql:114: sign, an INT in the engine and a float8 in Postgres
+# (0, 1, -1, 1, 1); the values are equal.
+query INT rowsort
+select sign(f1) as sign_f1 from float8_tbl f
+----
+-1
+0
+1
+1
+1
+
+# float8.sql:120: square root, float8 '64' written CAST('64' AS DOUBLE).
+# From here to float8.sql:235 Postgres prints 15 significant digits, and a
+# computed value is compared as SQLite's T, to the same 15.
+query T
+SELECT sqrt(CAST('64' AS DOUBLE)) AS eight
+----
+8.0
+
+# float8.sql:122, |/ written SQRT.
+query T
+SELECT SQRT(CAST('64' AS DOUBLE)) AS eight
+----
+8.0
+
+# float8.sql:124, |/f.f1 written SQRT(f.f1).
+query DOUBLE,T rowsort
+SELECT f.f1, SQRT(f.f1) AS sqrt_f1
+   FROM FLOAT8_TBL f
+   WHERE f.f1 > '0.0'
+----
+1.2345678901234E-200	1.11111110611109e-100
+1.2345678901234E200	1.11111110611109e+100
+1004.3	31.6906926399535
+
+# float8.sql:129: power, each float8 'x' written CAST('x' AS DOUBLE), and
+# 'inf' written 'Infinity'. A power of finite numbers is compared as SQLite's
+# T; each special case's value is exact.
+query T
+SELECT power(CAST('144' AS DOUBLE), CAST('0.5' AS DOUBLE))
+----
+12.0
+
+# float8.sql:130
+query DOUBLE
+SELECT power(CAST('NaN' AS DOUBLE), CAST('0.5' AS DOUBLE))
+----
+NaN
+
+# float8.sql:131
+query DOUBLE
+SELECT power(CAST('144' AS DOUBLE), CAST('NaN' AS DOUBLE))
+----
+NaN
+
+# float8.sql:132
+query DOUBLE
+SELECT power(CAST('NaN' AS DOUBLE), CAST('NaN' AS DOUBLE))
+----
+NaN
+
+# float8.sql:133
+query DOUBLE
+SELECT power(CAST('-1' AS DOUBLE), CAST('NaN' AS DOUBLE))
+----
+NaN
+
+# float8.sql:134
+query DOUBLE
+SELECT power(CAST('1' AS DOUBLE), CAST('NaN' AS DOUBLE))
+----
+1.0
+
+# float8.sql:135
+query DOUBLE
+SELECT power(CAST('NaN' AS DOUBLE), CAST('0' AS DOUBLE))
+----
+1.0
+
+# float8.sql:136
+query DOUBLE
+SELECT power(CAST('Infinity' AS DOUBLE), CAST('0' AS DOUBLE))
+----
+1.0
+
+# float8.sql:137
+query DOUBLE
+SELECT power(CAST('-Infinity' AS DOUBLE), CAST('0' AS DOUBLE))
+----
+1.0
+
+# float8.sql:138
+query DOUBLE
+SELECT power(CAST('0' AS DOUBLE), CAST('Infinity' AS DOUBLE))
+----
+0.0
+
+# float8.sql:139. Postgres: zero raised to a negative power is undefined.
+skipif transformer # zero to a negative power is NULL, as a division by zero is
+statement error
+SELECT power(CAST('0' AS DOUBLE), CAST('-Infinity' AS DOUBLE))
+
+# float8.sql:140
+query DOUBLE
+SELECT power(CAST('1' AS DOUBLE), CAST('Infinity' AS DOUBLE))
+----
+1.0
+
+# float8.sql:141
+query DOUBLE
+SELECT power(CAST('1' AS DOUBLE), CAST('-Infinity' AS DOUBLE))
+----
+1.0
+
+# float8.sql:142
+query DOUBLE
+SELECT power(CAST('-1' AS DOUBLE), CAST('Infinity' AS DOUBLE))
+----
+1.0
+
+# float8.sql:143
+query DOUBLE
+SELECT power(CAST('-1' AS DOUBLE), CAST('-Infinity' AS DOUBLE))
+----
+1.0
+
+# float8.sql:144
+query DOUBLE
+SELECT power(CAST('0.1' AS DOUBLE), CAST('Infinity' AS DOUBLE))
+----
+0.0
+
+# float8.sql:145
+query DOUBLE
+SELECT power(CAST('-0.1' AS DOUBLE), CAST('Infinity' AS DOUBLE))
+----
+0.0
+
+# float8.sql:146
+query DOUBLE
+SELECT power(CAST('1.1' AS DOUBLE), CAST('Infinity' AS DOUBLE))
+----
+Infinity
+
+# float8.sql:147
+query DOUBLE
+SELECT power(CAST('-1.1' AS DOUBLE), CAST('Infinity' AS DOUBLE))
+----
+Infinity
+
+# float8.sql:148
+query DOUBLE
+SELECT power(CAST('0.1' AS DOUBLE), CAST('-Infinity' AS DOUBLE))
+----
+Infinity
+
+# float8.sql:149
+query DOUBLE
+SELECT power(CAST('-0.1' AS DOUBLE), CAST('-Infinity' AS DOUBLE))
+----
+Infinity
+
+# float8.sql:150
+query DOUBLE
+SELECT power(CAST('1.1' AS DOUBLE), CAST('-Infinity' AS DOUBLE))
+----
+0.0
+
+# float8.sql:151
+query DOUBLE
+SELECT power(CAST('-1.1' AS DOUBLE), CAST('-Infinity' AS DOUBLE))
+----
+0.0
+
+# float8.sql:152
+query DOUBLE
+SELECT power(CAST('Infinity' AS DOUBLE), CAST('-2' AS DOUBLE))
+----
+0.0
+
+# float8.sql:153
+query DOUBLE
+SELECT power(CAST('Infinity' AS DOUBLE), CAST('2' AS DOUBLE))
+----
+Infinity
+
+# float8.sql:154
+query DOUBLE
+SELECT power(CAST('Infinity' AS DOUBLE), CAST('Infinity' AS DOUBLE))
+----
+Infinity
+
+# float8.sql:155
+query DOUBLE
+SELECT power(CAST('Infinity' AS DOUBLE), CAST('-Infinity' AS DOUBLE))
+----
+0.0
+
+# float8.sql:158, the string '0' read as the DOUBLE beside it, as Postgres
+# reads it. Postgres tests only that the power is zero, since one compiler
+# got its sign wrong.
+query BOOLEAN
+SELECT power(CAST('-Infinity' AS DOUBLE), CAST('-2' AS DOUBLE)) = '0'
+----
+true
+
+# float8.sql:159
+query DOUBLE
+SELECT power(CAST('-Infinity' AS DOUBLE), CAST('-3' AS DOUBLE))
+----
+-0.0
+
+# float8.sql:160
+query DOUBLE
+SELECT power(CAST('-Infinity' AS DOUBLE), CAST('2' AS DOUBLE))
+----
+Infinity
+
+# float8.sql:161
+query DOUBLE
+SELECT power(CAST('-Infinity' AS DOUBLE), CAST('3' AS DOUBLE))
+----
+-Infinity
+
+# float8.sql:162. Postgres: a negative number raised to a non-integer power
+# yields a complex result.
+skipif transformer # a negative number to a power that is not a whole number is NULL, as a division by zero is
+statement error
+SELECT power(CAST('-Infinity' AS DOUBLE), CAST('3.5' AS DOUBLE))
+
+# float8.sql:163
+query DOUBLE
+SELECT power(CAST('-Infinity' AS DOUBLE), CAST('Infinity' AS DOUBLE))
+----
+Infinity
+
+# float8.sql:164
+query DOUBLE
+SELECT power(CAST('-Infinity' AS DOUBLE), CAST('-Infinity' AS DOUBLE))
+----
+0.0
+
+# float8.sql:167: exp of ln.
+query DOUBLE,T rowsort
+SELECT f.f1, exp(ln(f.f1)) AS exp_ln_f1
+   FROM FLOAT8_TBL f
+   WHERE f.f1 > '0.0'
+----
+1.2345678901234E-200	1.23456789012339e-200
+1.2345678901234E200	1.23456789012338e+200
+1004.3	1004.3
+
+# float8.sql:172: exp's edge cases, 'inf'::float8 written
+# CAST('Infinity' AS DOUBLE).
+query DOUBLE,DOUBLE,DOUBLE
+SELECT exp(CAST('Infinity' AS DOUBLE)), exp(CAST('-Infinity' AS DOUBLE)), exp(CAST('NaN' AS DOUBLE))
+----
+Infinity	0.0	NaN
+
+# float8.sql:175: cube root, ||/ written CBRT.
+query T
+SELECT CBRT(CAST('27' AS DOUBLE)) AS three
+----
+3.0
+
+# float8.sql:177
+query DOUBLE,T rowsort
+SELECT f.f1, CBRT(f.f1) AS cbrt_f1 FROM FLOAT8_TBL f
+----
+-34.84	-3.26607421344208
+0.0	0.0
+1.2345678901234E-200	2.3112042409018e-67
+1.2345678901234E200	4.97933859234765e+66
+1004.3	10.014312837827
+
+# float8.sql:180
+query DOUBLE rowsort
+SELECT * FROM FLOAT8_TBL
+----
+-34.84
+0.0
+1.2345678901234E-200
+1.2345678901234E200
+1004.3
+
+# float8.sql:182
+statement ok
+UPDATE FLOAT8_TBL
+   SET f1 = FLOAT8_TBL.f1 * '-1'
+   WHERE FLOAT8_TBL.f1 > '0.0'
+
+# float8.sql:186. Postgres: value out of range: overflow.
+skipif transformer # arithmetic past DOUBLE's range is an infinity, not an error
+statement error
+SELECT f.f1 * '1e200' from FLOAT8_TBL f
+
+# float8.sql:190, x ^ y written POWER(x, y). Postgres reads 0 ^ 0 and 0 ^ 1
+# as float8s, 0 ^ 0.0 and 0 ^ 0.5 as numerics and their sum as a float8; in
+# the engine each is a DOUBLE.
+query DOUBLE
+SELECT POWER(0, 0) + POWER(0, 1) + POWER(0, 0.0) + POWER(0, 0.5)
+----
+2.0
+
+# float8.sql:192. Postgres: cannot take logarithm of zero.
+skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+statement error
+SELECT ln(f.f1) from FLOAT8_TBL f where f.f1 = '0.0'
+
+# float8.sql:194. Postgres: cannot take logarithm of a negative number.
+skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+statement error
+SELECT ln(f.f1) from FLOAT8_TBL f where f.f1 < '0.0'
+
+# float8.sql:198. Postgres: division by zero.
+skipif transformer # a division by zero is NULL
+statement error
+SELECT f.f1 / '0.0' from FLOAT8_TBL f
+
+# float8.sql:200
+query DOUBLE nosort
+SELECT * FROM FLOAT8_TBL ORDER BY 1
+----
+-1.2345678901234E200
+-1004.3
+-34.84
+-1.2345678901234E-200
+0.0
+
+# float8.sql:205: hyperbolic functions, compared as SQLite's T.
+query T
+SELECT sinh(CAST('1' AS DOUBLE))
+----
+1.1752011936438
+
+# float8.sql:206
+query T
+SELECT cosh(CAST('1' AS DOUBLE))
+----
+1.54308063481524
+
+# float8.sql:207
+query T
+SELECT tanh(CAST('1' AS DOUBLE))
+----
+0.761594155955765
+
+# float8.sql:212: the infinities and NaN in the hyperbolic functions,
+# 'infinity' written 'Infinity'.
+query DOUBLE
+SELECT sinh(CAST('Infinity' AS DOUBLE))
+----
+Infinity
+
+# float8.sql:213
+query DOUBLE
+SELECT sinh(CAST('-Infinity' AS DOUBLE))
+----
+-Infinity
+
+# float8.sql:214
+query DOUBLE
+SELECT sinh(CAST('NaN' AS DOUBLE))
+----
+NaN
+
+# float8.sql:215
+query DOUBLE
+SELECT cosh(CAST('Infinity' AS DOUBLE))
+----
+Infinity
+
+# float8.sql:216
+query DOUBLE
+SELECT cosh(CAST('-Infinity' AS DOUBLE))
+----
+Infinity
+
+# float8.sql:217
+query DOUBLE
+SELECT cosh(CAST('NaN' AS DOUBLE))
+----
+NaN
+
+# float8.sql:218
+query DOUBLE
+SELECT tanh(CAST('Infinity' AS DOUBLE))
+----
+1.0
+
+# float8.sql:219
+query DOUBLE
+SELECT tanh(CAST('-Infinity' AS DOUBLE))
+----
+-1.0
+
+# float8.sql:220
+query DOUBLE
+SELECT tanh(CAST('NaN' AS DOUBLE))
+----
+NaN
+
+# float8.sql:272: text past DOUBLE's range, and too small for it, stored,
+# each string written CAST('...' AS DOUBLE) as at float8.sql:28. Postgres:
+# "10e400" is out of range for type double precision.
+statement error
+INSERT INTO FLOAT8_TBL(f1) VALUES (CAST('10e400' AS DOUBLE))
+
+# float8.sql:274. Postgres: "-10e400" is out of range for type double
+# precision.
+statement error
+INSERT INTO FLOAT8_TBL(f1) VALUES (CAST('-10e400' AS DOUBLE))
+
+# float8.sql:276. Postgres: "10e-400" is out of range for type double
+# precision.
+statement error
+INSERT INTO FLOAT8_TBL(f1) VALUES (CAST('10e-400' AS DOUBLE))
+
+# float8.sql:278. Postgres: "-10e-400" is out of range for type double
+# precision.
+statement error
+INSERT INTO FLOAT8_TBL(f1) VALUES (CAST('-10e-400' AS DOUBLE))
+
+# float8.sql:280
+statement ok
+DROP TABLE FLOAT8_TBL
+
+# test_setup.sql's float8_tbl, which the temporary table hid, float8 written
+# DOUBLE and each string as the number it spells.
+statement ok
+CREATE TABLE FLOAT8_TBL(f1 DOUBLE)
+
+statement ok
+INSERT INTO FLOAT8_TBL(f1) VALUES
+  (0.0),
+  (-34.84),
+  (-1004.30),
+  (-1.2345678901234e+200),
+  (-1.2345678901234e-200)
+
+# float8.sql:284: test_setup.sql's float8_tbl, which other tests read.
+query DOUBLE rowsort
+SELECT * FROM FLOAT8_TBL
+----
+-1.2345678901234E-200
+-1.2345678901234E200
+-1004.3
+-34.84
+0.0
+
+# float8.sql:291: casts to integers at the ends of their ranges, each
+# ::float8::int4 written CAST(CAST(... AS DOUBLE) AS INT).
+query INT
+SELECT CAST(CAST('2147483647.4' AS DOUBLE) AS INT)
+----
+2147483647
+
+# float8.sql:292. Postgres rounds to 2147483648: integer out of range.
+skipif transformer # a CAST to an integer truncates, so the answer is 2147483647
+statement error
+SELECT CAST(CAST('2147483647.6' AS DOUBLE) AS INT)
+
+# float8.sql:293
+query INT
+SELECT CAST(CAST('-2147483648.4' AS DOUBLE) AS INT)
+----
+-2147483648
+
+# float8.sql:294. Postgres rounds to -2147483649: integer out of range.
+skipif transformer # a CAST to an integer truncates, so the answer is -2147483648
+statement error
+SELECT CAST(CAST('-2147483648.6' AS DOUBLE) AS INT)
+
+# float8.sql:295, ::int8 written AS BIGINT.
+query BIGINT
+SELECT CAST(CAST('9223372036854773760' AS DOUBLE) AS BIGINT)
+----
+9223372036854773760
+
+# float8.sql:296: the DOUBLE nearest 9223372036854775807 is 2^63. Postgres:
+# bigint out of range.
+statement error
+SELECT CAST(CAST('9223372036854775807' AS DOUBLE) AS BIGINT)
+
+# float8.sql:297: the DOUBLE nearest -9223372036854775808.5 is -2^63.
+query BIGINT
+SELECT CAST(CAST('-9223372036854775808.5' AS DOUBLE) AS BIGINT)
+----
+-9223372036854775808
+
+# float8.sql:298. Postgres: bigint out of range.
+statement error
+SELECT CAST(CAST('-9223372036854780000' AS DOUBLE) AS BIGINT)
