@@ -1175,14 +1175,13 @@ class SqlEngineTest {
     val p = tmpCsv("a.csv", "x\n1.0\n2.71828182845904523536\n10.0\n8.0\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
     val q = SqlEngine.execute(
-      "SELECT LN(x) AS ln, LOG(x) AS log1, LOG(2, x) AS log2_, " +
+      "SELECT LN(x) AS ln, LOG(2, x) AS log2_, " +
         "LOG10(x) AS l10, LOG2(x) AS l2, EXP(0) AS e0, EXP(1) AS e1 FROM t",
       cat)
     val rows = collectAllRows(q)
     assertEquals(4, rows.size)
-    // LN(1) == 0; LOG(1) == LN(1) for our MySQL-style LOG(x)
+    // LN(1) == 0
     assertEquals(0.0, rows(0)("ln").asInstanceOf[Double], DoubleEps)
-    assertEquals(0.0, rows(0)("log1").asInstanceOf[Double], DoubleEps)
     // LN(e) ≈ 1
     assertEquals(1.0, rows(1)("ln").asInstanceOf[Double], 1e-6)
     // LOG10(10) == 1, LOG2(8) == 3
@@ -1193,6 +1192,39 @@ class SqlEngineTest {
     // EXP(0) == 1, EXP(1) ≈ e
     assertEquals(1.0, rows(0)("e0").asInstanceOf[Double], DoubleEps)
     assertEquals(math.E, rows(0)("e1").asInstanceOf[Double], 1e-12)
+  }
+
+  /** A square root of less than zero is NULL, as are a logarithm of zero or
+    * less and one to a base of zero or less or of 1, as a division by zero is:
+    * no number answers them. They were Java's NaN, and -Infinity at zero. NaN
+    * stays NaN, -0.0 is zero, and an INT, a BIGINT, a DECIMAL and a DOUBLE
+    * agree. */
+  @Test def aSquareRootOrLogarithmOutsideItsDomainIsNull(): Unit = {
+    val c = new Catalog
+    val schema = Schema(Vector(Field("id", DataType.IntType), Field("i", DataType.IntType),
+      Field("b", DataType.LongType), Field("m", DataType.DecimalType(5, 2)), Field("d", DataType.DoubleType)))
+    c.register("t", memView(schema, Seq(Seq(
+      Array[Any](1, -4, -4L, dec("-4.00"), -4.0),
+      Array[Any](2, 0, 0L, dec("0.00"), -0.0),
+      Array[Any](3, 4, 4L, dec("4.00"), 4.0)))))
+    // As text, so NaN equals NaN and -0.0 is told from 0.0.
+    def v(expr: String): Seq[String] = column(s"SELECT $expr AS v FROM t ORDER BY id", c, "v").map(String.valueOf)
+    for (x <- Seq("i", "b", "m", "d")) {
+      assertEquals(x, Seq("null", if (x == "d") "-0.0" else "0.0", "2.0"), v(s"SQRT($x)"))
+      assertEquals(x, Seq("null", "null", s"${math.log(4)}"), v(s"LN($x)"))
+      assertEquals(x, Seq("null", "null", s"${math.log10(4)}"), v(s"LOG10($x)"))
+      assertEquals(x, Seq("null", "null", "2.0"), v(s"LOG2($x)"))
+      // As the value and as the base.
+      assertEquals(x, Seq("null", "null", "2.0"), v(s"LOG(2, $x)"))
+      assertEquals(x, Seq("null", "null", "0.5"), v(s"LOG($x, 2)"))
+    }
+    // Every power of 1 is 1, so no logarithm has base 1.
+    assertEquals(Seq.fill(3)("null"), v("LOG(1, ABS(d) + 1)"))
+    assertEquals(Seq.fill(3)("null"), v("LOG(1.0, 5)"))
+    assertEquals(Seq.fill(3)("null"), v("LN(CAST('-Infinity' AS DOUBLE))"))
+    assertEquals(Seq.fill(3)("Infinity"), v("LN(CAST('Infinity' AS DOUBLE))"))
+    for (f <- Seq("SQRT(x)", "LN(x)", "LOG10(x)", "LOG2(x)", "LOG(2, x)", "LOG(x, 2)"))
+      assertEquals(f, Seq.fill(3)("NaN"), v(f.replace("x", "CAST('NaN' AS DOUBLE)")))
   }
 
   @Test def mathSqrtCbrtAndSign(): Unit = {
@@ -4521,13 +4553,17 @@ class SqlEngineTest {
     // ROWS still counts rows, ties broken by the next key.
     assertEquals(Seq(1L, 10L, 30L, 60L, 100L, 150L), win("ORDER BY k, x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"))
     assertEquals(Seq(1L, 10L, 30L, 50L, 70L, 90L), win("ORDER BY k, x ROWS 1 PRECEDING"))
-    // An offset as large as an INT allows neither overflows nor runs past the partition.
-    assertEquals(Seq(1L, 150L, 140L, 120L, 90L, 50L),
-      win("ORDER BY k, x ROWS BETWEEN CURRENT ROW AND 2147483647 FOLLOWING"))
-    assertEquals(Seq(1L, 150L, 150L, 150L, 150L, 150L),
-      win("ORDER BY k, x ROWS BETWEEN 2147483647 PRECEDING AND 2147483647 FOLLOWING"))
-    assertEquals(Seq(null, null, null, null, null, null),
-      win("ORDER BY k, x ROWS BETWEEN 2147483647 FOLLOWING AND UNBOUNDED FOLLOWING"))
+    // An offset may be as large as a BIGINT, and neither overflows nor runs
+    // past the partition: one past INT was refused, and a row's position plus
+    // the largest BIGINT wrapped to a frame that ended before it.
+    for (n <- Seq("2147483647", "2147483648", "9223372036854775807")) {
+      assertEquals(n, Seq(1L, 150L, 140L, 120L, 90L, 50L), win(s"ORDER BY k, x ROWS BETWEEN CURRENT ROW AND $n FOLLOWING"))
+      assertEquals(n, Seq(1L, 150L, 150L, 150L, 150L, 150L),
+        win(s"ORDER BY k, x ROWS BETWEEN $n PRECEDING AND $n FOLLOWING"))
+      assertEquals(n, Seq(null, null, null, null, null, null),
+        win(s"ORDER BY k, x ROWS BETWEEN $n FOLLOWING AND UNBOUNDED FOLLOWING"))
+      assertEquals(n, Seq(null, null, null, null, null, null), win(s"ORDER BY k, x ROWS BETWEEN $n FOLLOWING AND 1 FOLLOWING"))
+    }
   }
 
   /** A frame SQL does not allow, and one written on a function that reads no

@@ -7,7 +7,7 @@ navigation hint, not a comprehensive directory listing.
 
 ## File-size hot spots
 
-- `sql/plan/LogicalBuilder.scala` (~1880 LOC) — largest file in `sql/plan`.
+- `sql/plan/LogicalBuilder.scala` (~1900 LOC) — largest file in `sql/plan`.
   Pattern matches every JSqlParser expression node, dispatches SELECT shapes,
   and (for
   outermost-scope `WITH` CTEs) emits placeholder `PendingCteView` scans +
@@ -71,7 +71,7 @@ navigation hint, not a comprehensive directory listing.
   `-0.0` rules), anything else through `Ops` (`genericCompare`) — is chosen in
   `VecOps.compare`; see
   [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec).
-- `sql/plan/Funcs.scala` (~550 LOC) — scalar function registry.
+- `sql/plan/Funcs.scala` (~630 LOC) — scalar function registry.
   `Funcs.signature` declares each function's arities, argument kinds and
   return type; `Funcs.apply` is the row-form dispatcher; `Funcs.applyVec` +
   the `VecFuncs` object carry the vectorized implementations for the hot
@@ -130,7 +130,7 @@ navigation hint, not a comprehensive directory listing.
   files via `fmix32(hash(joinKeys)) % K` and processes bucket pairs
   sequentially; per-bucket unmatched-build tracking preserves outer-join
   semantics.
-- `sql/exec/WindowExec.scala` (~660 LOC) — partition, sort, frame
+- `sql/exec/WindowExec.scala` (~750 LOC) — partition, sort, frame
   computation for every supported window function; pre-computes per-spec
   partition/order keys per row during the single materialization pass.
   Bucketed spill routes child rows into K=16 disk

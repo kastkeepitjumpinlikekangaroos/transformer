@@ -11,7 +11,7 @@
 # addition, subtraction, multiplication and division against bc(1)'s answers
 # over num_data, the aggregates of num_data, conversion to integers, CEIL,
 # FLOOR and ROUND, the corner cases of division, and EXP, LN and LOG of
-# numbers written with a point. 475 of the file's 1,058 statements are here
+# numbers written with a point. 485 of the file's 1,058 statements are here
 # (390 of its single-row INSERTs as five INSERTs of their rows), and each
 # record names the line of numeric.sql it comes from. A statement is as
 # Postgres wrote it but where a rewrite cannot change what it means, which its
@@ -30,10 +30,12 @@
 # where Postgres's numeric keeps the scale each value has, and a number written
 # with a point is a DOUBLE in the engine. EXP, LN, LOG and the statistics,
 # DOUBLEs in the engine and numerics in Postgres, are compared as SQLite's R,
-# to three places. `skipif transformer` marks the 9 records the engine
-# answers otherwise by design, each with the reason.
+# to three places. `skipif transformer` marks the 19 records the engine
+# answers otherwise by design, each with the reason: ten of them are LN and
+# LOG of zero or a negative number, and LOG to base 1, which Postgres refuses
+# and the engine answers with NULL, as it answers a division by zero.
 #
-# Left out (583 statements), by what they need:
+# Left out (573 statements), by what they need:
 #  101  to_char(), to_number() or lc_numeric
 #   61  numeric input syntax (strings with spaces, underscores, hex) or
 #       pg_input_is_valid()
@@ -58,10 +60,6 @@
 #   14  gcd(), lcm(), factorial() or pg_lsn()
 #    9  div()
 #    4  SMALLINT
-#   10  answered otherwise by the engine, not by a documented decision, and
-#       held out until that is settled: LN and LOG of zero or a negative
-#       number and LOG to base 1, which Postgres refuses and the engine
-#       answers with NaN or an infinity
 
 # numeric.sql:5-15, the tables the checks below read. Each numeric(210,10)
 # column is a DECIMAL(38,10), the widest a DECIMAL holds at the same scale,
@@ -844,6 +842,16 @@ select exp(1234.5678)
 ----
 146549072930959479983482138503979804217622199675223653966270157446954995433819741094410764947112047906012815540251009949604426069672532417736057033099274204598385314594846509975629046864798765888104789074984927709616261452461385220475510438783429612447831614003668421849727379202555580791042606170523016207262965336641214601082882495255771621327088265411334088968112458492660609809762865582162764292604697957813514621259353683899630997077707406305730694385703091201347848855199354307506425820147289848677003277208302716466011827836279231.967
 
+# numeric.sql:1394. Postgres: cannot take logarithm of a negative number.
+skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+statement error
+select ln(-12.34)
+
+# numeric.sql:1395. Postgres: cannot take logarithm of zero.
+skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+statement error
+select ln(0.0)
+
 # numeric.sql:1398: LN() over some random values.
 query R
 select ln(1.2345678e-28)
@@ -892,9 +900,20 @@ select ln(9.342536355e34)
 ----
 80.522
 
-# numeric.sql:1416: LOG() base 10. Postgres's one-argument log is the
-# base-10 logarithm, which the engine spells LOG10 (its one-argument LOG is
-# the natural logarithm), so log(x) is written log10(x).
+# numeric.sql:1412: LOG() base 10. Postgres's one-argument log is the
+# base-10 logarithm, which the engine spells LOG10 (it refuses a one-argument
+# LOG, whose base engines disagree on), so log(x) is written log10(x).
+# Postgres: cannot take logarithm of a negative number.
+skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+statement error
+select log10(-12.34)
+
+# numeric.sql:1413. Postgres: cannot take logarithm of zero.
+skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+statement error
+select log10(0.0)
+
+# numeric.sql:1416: some random values.
 query R
 select log10(1.234567e-89)
 ----
@@ -929,6 +948,36 @@ query R
 select log10(590489.45235237)
 ----
 5.771
+
+# numeric.sql:1428. Postgres: cannot take logarithm of a negative number.
+skipif transformer # a logarithm to a base of zero or less is NULL, as a division by zero is
+statement error
+select log(-12.34, 56.78)
+
+# numeric.sql:1429. Postgres: cannot take logarithm of a negative number.
+skipif transformer # a logarithm of zero or less, or to a base of zero or less, is NULL, as a division by zero is
+statement error
+select log(-12.34, -56.78)
+
+# numeric.sql:1430. Postgres: cannot take logarithm of a negative number.
+skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+statement error
+select log(12.34, -56.78)
+
+# numeric.sql:1431. Postgres: cannot take logarithm of zero.
+skipif transformer # a logarithm to a base of zero or less is NULL, as a division by zero is
+statement error
+select log(0.0, 12.34)
+
+# numeric.sql:1432. Postgres: cannot take logarithm of zero.
+skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+statement error
+select log(12.34, 0.0)
+
+# numeric.sql:1433. Postgres: division by zero.
+skipif transformer # a logarithm to base 1 is NULL: every power of 1 is 1
+statement error
+select log(1.0, 12.34)
 
 # numeric.sql:1436: LOG() with an arbitrary base, some random values.
 query R

@@ -112,7 +112,7 @@ class PlanSqlTest {
     "SELECT a + NULL AS x, m + NULL AS y, NULL = a AS z FROM t",
     // A table aliased by a word no keyword list holds but the parser reads as
     // the clock where it qualifies a column (found by the round-trip campaign).
-    "SELECT a, COUNT() AS n FROM t CURRENT_TIMESTAMP GROUP BY a",
+    "SELECT a, COUNT(*) AS n FROM t CURRENT_TIMESTAMP GROUP BY a",
     "SELECT CASE FLOOR(RAND() * 3) WHEN 0 THEN 'a' WHEN 1 THEN 'b' END IS NULL AS c, " +
       "RAND() BETWEEN 0.25 AND 0.75 AS bt FROM t WHERE RAND() >= 0"
   )
@@ -158,13 +158,13 @@ class PlanSqlTest {
     def find[A](p: LogicalPlan, f: PartialFunction[LogicalPlan, A]): A =
       f.lift(p).getOrElse(p.children.iterator.map(c => find(c, f)).next())
     val agg = LogicalBuilder.build(
-      "SELECT s, COUNT() AS a, COUNT(*) AS b, count( * ) AS c, SUM(a) AS d, SUM(t.a) AS e FROM t GROUP BY s " +
+      "SELECT s, Count(*) AS a, COUNT(*) AS b, count( * ) AS c, SUM(a) AS d, SUM(t.a) AS e FROM t GROUP BY s " +
         "ORDER BY COUNT(*)", catalog).main
     assertEquals(Seq("COUNT", "SUM"), find(agg, { case a: LogicalAggregate => a.aggregates.map(_._1.name) }))
     val win = LogicalBuilder.build(
       "SELECT ROW_NUMBER() OVER (ORDER BY a) AS r1, ROW_NUMBER() OVER (ORDER BY t.a) AS r2 FROM t", catalog).main
     assertEquals(1, find(win, { case w: LogicalWindow => w.windows.size }))
-    Seq("SELECT s, COUNT() AS a, COUNT(*) AS b FROM t GROUP BY s ORDER BY COUNT(*), s",
+    Seq("SELECT s, count( * ) AS a, COUNT(*) AS b FROM t GROUP BY s ORDER BY COUNT(*), s",
       "SELECT ROW_NUMBER() OVER (ORDER BY a) AS r1, ROW_NUMBER() OVER (ORDER BY t.a) AS r2 FROM t"
     ).foreach(sql => assertTrue(sql, PlanRoundTrip.check(sql, catalog).isInstanceOf[PlanRoundTrip.Same]))
   }

@@ -2078,7 +2078,32 @@ output, over every slt script and every query generator. Details are in
   spelling of each, so the printed query bound to a plan with one slot fewer.
   Each is now computed once, its spellings reading one slot by their text.
   Found by `plan_roundtrip_fuzz_campaign` on a frontend mutation, `SELECT s,
-  COUNT() FROM t GROUP BY s ORDER BY COUNT(*), s`.
+  COUNT() FROM t GROUP BY s ORDER BY COUNT(*), s` (`COUNT()` is now refused,
+  below).
+
+## Answers the PostgreSQL port settled (2026-11-01, all decided)
+
+Porting Postgres's regression tests (`src/test/slt/postgres/`, with
+Postgres's answers) found four answers that no decision covered. Their
+records were held out of the scripts until each was decided; they are in the
+scripts now, a logarithm's as `skipif transformer` with the reason. Details
+are in [plans/testing/05](../plans/testing/05-plans-as-sql.md).
+
+- **`COUNT()` with no argument was `COUNT(*)`**, as SQLite and DuckDB read
+  it, on purpose in `LogicalBuilder` and in no doc. Postgres refuses it, and so
+  does the engine now, as an aggregate and in a window, naming `COUNT(*)` and
+  `COUNT(x)`.
+- **A ROWS frame offset past INT was refused**, where a RANGE offset of any
+  size ran. A ROWS offset is now any `BIGINT`, and `WindowExec.rowsBound`
+  stops a row's position plus its `FOLLOWING` offset at `Long.MaxValue`, past
+  which the sum wrapped to a frame that ended before its row.
+- **A square root or a logarithm outside its domain was `NaN`**, or
+  `-Infinity` at zero: `SQRT` of less than zero, `LN`, `LOG10` and `LOG2` of
+  zero or less, and `LOG` to a base of zero or less or of 1, which Postgres
+  refuses. Each is now NULL, as a division by zero is; `NaN` stays `NaN`.
+- **One-argument `LOG(x)` was the natural logarithm**, as in MySQL, Spark and
+  SQL Server, where Postgres, SQLite and DuckDB read base 10. It is now
+  refused, naming `LN(x)`, `LOG10(x)` and `LOG(base, x)`.
 
 ## What's intentionally NOT done
 

@@ -7,8 +7,8 @@
 # Distributed under the PostgreSQL License, a permissive license whose text
 # travels with every copy: it is COPYRIGHT beside this file.
 #
-# 91 of the file's 400 statements are here: 7 that make, fill or drop a table
-# or a view, 76 queries, 7 statements that must fail, and one query the
+# 93 of the file's 400 statements are here: 7 that make, fill or drop a table
+# or a view, 77 queries, 8 statements that must fail, and one query the
 # engine answers otherwise by design, marked `skipif transformer` with the
 # reason. Each record names the line of window.sql it comes from. A statement
 # is as Postgres wrote it but where a rewrite cannot change what it means,
@@ -27,7 +27,7 @@
 # DOUBLEs in the engine and numerics in Postgres, and are compared as SQLite's
 # R, to three places.
 #
-# Left out (309 statements), by what they need:
+# Left out (307 statements), by what they need:
 #   58  FIRST_VALUE, LAST_VALUE, NTH_VALUE, NTILE, PERCENT_RANK or CUME_DIST
 #   49  EXPLAIN, whose answer is Postgres's plan
 #   49  RANGE over an INTERVAL, TIME, TIMETZ or TIMESTAMPTZ, or those types
@@ -51,9 +51,6 @@
 #    2  a subquery
 #    2  a DELETE with a window function, which the runner, not the engine,
 #       carries out
-#    2  answered otherwise by the engine, not by a documented decision, and
-#       held out until that is settled: a ROWS offset past INT, which it
-#       refuses, and COUNT(), which it answers where Postgres refuses it
 
 statement ok
 CREATE TEMPORARY TABLE empsalary (
@@ -527,6 +524,25 @@ SELECT * FROM v_window
 statement ok
 DROP VIEW v_window
 
+# window.sql:338: a frame offset as large as a BIGINT. The frame starts
+# past its end on every row, so every sum is NULL, whatever order the rows
+# are read in.
+query BIGINT,INT,INT rowsort
+SELECT sum(unique1) over (rows between 9223372036854775807 following and 1 following),
+	unique1, four
+FROM tenk1 WHERE unique1 < 10
+----
+NULL	0	0
+NULL	1	1
+NULL	2	2
+NULL	3	3
+NULL	4	0
+NULL	5	1
+NULL	6	2
+NULL	7	3
+NULL	8	0
+NULL	9	1
+
 # window.sql:361: RANGE offset PRECEDING/FOLLOWING, the offsets 2::int8 and
 # 1::int2 written 2 and 1 (the engine takes a frame offset as a number
 # written in the query).
@@ -800,6 +816,11 @@ SELECT * FROM rank() OVER (ORDER BY random())
 # window.sql:1115. Postgres: syntax error at or near "ORDER".
 statement error
 SELECT rank() OVER (PARTITION BY four, ORDER BY ten) FROM tenk1
+
+# window.sql:1117. Postgres: count(*) must be used to call a parameterless
+# aggregate function.
+statement error
+SELECT count() OVER () FROM tenk1
 
 # window.sql:1211: the three statements that should give the same result,
 # each subquery in FROM written as a WITH.

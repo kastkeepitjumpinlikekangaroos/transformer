@@ -1,7 +1,7 @@
 # Plan 05: plans as SQL, and plan 04's next round
 
-> Status: **done** 2026-11-01, but the decisions W9's findings need · four decisions by the user, the
-> recommended option each time · one commit per workstream · Risk: low for the
+> Status: **done** 2026-11-01 · four decisions by the user, the recommended
+> option each time, and four more on W9's findings · one commit per workstream · Risk: low for the
 > printer and the tests; medium for join ordering and the streaming pairing,
 > which change how queries run
 
@@ -54,7 +54,7 @@ takes all of them but JSqlParser 5.3, which still refuses deep parentheses.
 | W6 | Every hash zero (`--config=hashzero`) | **done** 2026-11-01 |
 | W7 | A CSV glob's files with their columns in other orders | **done** 2026-11-01 |
 | W8 | A spill file's fixed cost | **done** 2026-11-01 |
-| W9 | Ported Postgres regression tests | **done** 2026-11-01; four findings await decisions |
+| W9 | Ported Postgres regression tests | **done** 2026-11-01; its four findings decided and landed the same day |
 
 ### W1. Plan validation after every pass
 
@@ -251,14 +251,20 @@ of `slt_test`. 23 records are `skipif transformer` by a documented decision
 (a CAST to an integer truncates, text casts to BOOLEAN from true and false
 alone, division by zero is NULL, a constant window key is refused, DOUBLE
 statistics at magnitudes a DOUBLE does not hold). Four answers no decision
-covers are held out of the scripts, for the user to settle:
+covered were held out of the scripts, for the user to settle. The user chose
+the recommended option for each, and they landed together:
 
-| # | What | Postgres | Here |
-|---|---|---|---|
-| 1 | `COUNT()` with no argument, as an aggregate and in a window | refused ("count(*) must be used to call a parameterless aggregate function") | read as `COUNT(*)`, on purpose in `LogicalBuilder`, and in no doc |
-| 2 | A ROWS frame offset past INT (`ROWS BETWEEN CURRENT ROW AND 3000000000 FOLLOWING`) | runs (the offset is a BIGINT) | refused ("larger than the largest INT"); a RANGE offset of that size runs |
-| 3 | `LN`, `LOG` and `LOG10` of zero or a negative number, `LOG` to base 1, `SQRT` of a negative | errors ("cannot take logarithm of zero", "division by zero") | NaN, ±Infinity or -0.0 |
-| 4 | One-argument `LOG(x)` | base 10 (as SQLite and DuckDB) | the natural log (as Spark, MySQL and SQL Server) |
+| # | What | Postgres | Here, before | Decided |
+|---|---|---|---|---|
+| 1 | `COUNT()` with no argument, as an aggregate and in a window | refused ("count(*) must be used to call a parameterless aggregate function") | read as `COUNT(*)`, on purpose in `LogicalBuilder`, and in no doc | refused, naming `COUNT(*)` and `COUNT(x)` |
+| 2 | A ROWS frame offset past INT (`ROWS BETWEEN CURRENT ROW AND 3000000000 FOLLOWING`) | runs (the offset is a BIGINT) | refused ("larger than the largest INT"); a RANGE offset of that size runs | any BIGINT; `WindowExec.rowsBound` stops a position plus the offset at `Long.MaxValue`, past which it wrapped |
+| 3 | `LN`, `LOG` and `LOG10` of zero or a negative number, `LOG` to base 1, `SQRT` of a negative | errors ("cannot take logarithm of zero", "division by zero") | NaN, -Infinity, or -0.0 for `SQRT(-0.0)` | NULL, as a division by zero is (`LOG2` too); NaN stays NaN and `SQRT(-0.0)` is -0.0 |
+| 4 | One-argument `LOG(x)` | base 10 (as SQLite and DuckDB) | the natural log (as Spark, MySQL and SQL Server) | refused, naming `LN(x)`, `LOG10(x)` and `LOG(base, x)` |
+
+With them the scripts hold 355 records: window.sql's `count() OVER ()` as a
+statement that must fail and its BIGINT-offset query with Postgres's answer,
+and numeric.sql's ten logarithms outside their domain as `skipif transformer`
+(the engine answers NULL where Postgres refuses), 33 such records in all.
 
 It also met a limit of the harness, not of the engine: the spill/3-partitions
 mode writes a run per two-row batch, so an aggregate over about 3,000 rows

@@ -2,7 +2,8 @@
 # (plans/robustness/21): NaN equals NaN and sorts above every other value,
 # and -0.0 equals 0.0. Every operator that compares, groups, joins, ranks or
 # de-duplicates agrees with =. Division and % by zero are NULL, as for every
-# number type (plans/robustness/30).
+# number type (plans/robustness/30), and so are a square root of less than
+# zero and a logarithm of zero or less (plans/testing/05).
 
 statement ok
 CREATE TABLE f (id INT, d DOUBLE)
@@ -100,3 +101,26 @@ query DOUBLE,DOUBLE,DOUBLE,DOUBLE
 SELECT 1.5 / 0.0, 1.5 % 0.0, -1.5 / -0.0, 1e308 * 10
 ----
 NULL	NULL	NULL	Infinity
+
+# A square root of less than zero is NULL, as are a logarithm of zero or
+# less and one to a base of zero or less or of 1: no number answers them, as
+# none answers a division by zero. -0.0 is zero, and NaN stays NaN.
+query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE
+SELECT SQRT(-1), SQRT(-0.0), LN(0), LN(-1.5), LOG10(-0.0), LOG2(-8), LOG10(1000)
+----
+NULL	-0.0	NULL	NULL	NULL	NULL	3.0
+
+query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE
+SELECT LOG(0, 8), LOG(-2, 8), LOG(1, 8), LOG(2, 0), LOG(2, -8), LOG(10, 100)
+----
+NULL	NULL	NULL	NULL	NULL	2.0
+
+query INT,DOUBLE,DOUBLE rowsort
+SELECT id, SQRT(d), LN(d) FROM f WHERE id <> 6
+----
+1	NaN	NaN
+2	NaN	NaN
+3	0.0	NULL
+4	-0.0	NULL
+5	Infinity	Infinity
+7	NULL	NULL

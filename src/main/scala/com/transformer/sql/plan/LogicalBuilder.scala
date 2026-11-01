@@ -354,8 +354,9 @@ object LogicalBuilder {
     counts.headOption.fold(afterOffset) { case (_, n) => LogicalLimit(afterOffset, n) }
   }
 
-  /** A row count: a non-negative integer literal a BIGINT holds. JSqlParser
-    * parses a negative one as a minus over the number. */
+  /** A row count, as LIMIT, OFFSET and a ROWS frame's offset are: a
+    * non-negative integer literal a BIGINT holds. JSqlParser parses a negative
+    * one as a minus over the number. */
   private def rowCount(clause: String, e: Expression): Long = e match {
     case IntegerLiteral(v) if v.signum >= 0 =>
       if (v.bitLength < 64) v.longValue
@@ -709,8 +710,8 @@ object LogicalBuilder {
     def aggregateName(i: Int): String =
       Iterator.from(0).map(n => if (n == 0) s"_agg$i" else s"_agg${i}_$n")
         .find(name => !keyNames(name.toLowerCase(Locale.ROOT))).get
-    // Each aggregate is computed once, however it is spelled: `COUNT()` and
-    // `COUNT(*)`, `SUM(a)` and `SUM(t.a)` bind to one aggregate and read one
+    // Each aggregate is computed once, however it is spelled: `COUNT(*)` and
+    // `count( * )`, `SUM(a)` and `SUM(t.a)` bind to one aggregate and read one
     // slot, which each spelling finds by its text. They were a slot each,
     // which the plan, printed as SQL (PlanSql), wrote alike, and which bound
     // again as one.
@@ -1368,6 +1369,11 @@ object LogicalBuilder {
     // `CURRENT_DATE ()`, with a space, parses as a call rather than the keyword.
     if (args.isEmpty && UnsupportedClauses.ClockKeywords(name)) clockLiteral(name)
     else if (name == "MOD" && args.size == 2) Analyzer.arithmetic("%", args(0), args(1))
+    // Its base is e in MySQL and Spark and 10 in Postgres and SQLite.
+    else if (name == "LOG" && args.size == 1)
+      throw new IllegalArgumentException(
+        "LOG(x) with one argument is not supported, as engines disagree on its base; " +
+          "write LN(x) for base e, LOG10(x) for base 10, or LOG(base, x)")
     else {
       val signature = Funcs.signature(name, args)
         .getOrElse(throw new IllegalArgumentException(s"Unknown function '${f.getName}(${argTypes.mkString(",")})'"))
@@ -1394,7 +1400,8 @@ object LogicalBuilder {
     // SUM, AVG and the statistics add their values up.
     def number(i: Int): Expr = numberArg(upper, arg(i))
     upper match {
-      case "COUNT" if isStarArg || params.isEmpty => AggExprCountStar()
+      case "COUNT" if isStarArg => AggExprCountStar()
+      case "COUNT" if params.isEmpty => throw countWithoutArgument
       case "COUNT" if params.size == 1 => AggExprCount(arg(0), distinct)
       case "SUM" if params.size == 1 => distinctIf(distinct, AggExprSum(number(0)))
       case "AVG" if params.size == 1 => distinctIf(distinct, AggExprAvg(number(0)))
@@ -1413,6 +1420,11 @@ object LogicalBuilder {
         throw new IllegalArgumentException(s"Unsupported aggregate: ${f.getName}(${params.size} args)")
     }
   }
+
+  /** `COUNT()`, which SQLite and DuckDB read as `COUNT(*)` and Postgres
+    * refuses: the query says which count it means. */
+  private def countWithoutArgument = new IllegalArgumentException(
+    "COUNT() needs an argument: COUNT(*) counts the rows, COUNT(x) the rows where x is not NULL")
 
   /** `e`, the argument of the aggregate `fn`, which must be a number. */
   private def numberArg(fn: String, e: Expr): Expr = {
@@ -1561,7 +1573,8 @@ object LogicalBuilder {
         val offset = Option(ae.getOffset).map(extractNonNegativeInt("LEAD offset")).getOrElse(1)
         WindowFnLead(arg, offset, default)
       case "COUNT" =>
-        if (isStarArg || argExpr.isEmpty) WindowFnAgg(AggExprCountStar())
+        if (isStarArg) WindowFnAgg(AggExprCountStar())
+        else if (argExpr.isEmpty) throw countWithoutArgument
         else WindowFnAgg(AggExprCount(binder(argExpr.get), distinct = ae.isDistinct))
       case "SUM" => WindowFnAgg(AggExprSum(number()))
       case "AVG" => WindowFnAgg(AggExprAvg(number()))
@@ -1631,7 +1644,7 @@ object LogicalBuilder {
   private def bindFrameBound(wo: WindowOffset, frameType: FrameType, orderKeys: Seq[SortKey]): FrameBound = {
     def offset(side: String, e: Expression): FrameBound = frameType match {
       case FrameType.Rows =>
-        val n = extractNonNegativeInt(s"$side offset")(e).toLong
+        val n = rowCount(s"$side offset", e)
         if (side == "PRECEDING") FrameBound.Preceding(n) else FrameBound.Following(n)
       case FrameType.Range =>
         if (orderKeys.size != 1)

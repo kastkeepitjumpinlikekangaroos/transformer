@@ -1115,8 +1115,9 @@ are also available as window aggregates with `OVER (...)`. Variance and stddev
 use Welford + Chan's parallel merge for numerical stability; `*_SAMP` returns
 NULL when fewer than two non-NULL inputs are present. `SUM`, `AVG` and the
 statistics take a number, and `MIN`, `MAX` and `COUNT` any type (see the
-argument types below). `SUM` is a `BIGINT` over
-integers, a `DOUBLE` over floats, and over a `DECIMAL(p,s)` an exact
+argument types below). `COUNT()` with no argument is an error naming
+`COUNT(*)`, which counts the rows (SQLite and DuckDB read it as that, Postgres
+refuses it). `SUM` is a `BIGINT` over integers, a `DOUBLE` over floats, and over a `DECIMAL(p,s)` an exact
 `DECIMAL(38,s)`. `AVG` is a `DOUBLE`, but over a `DECIMAL(p,s)` an exact
 `DECIMAL(p+4,s+4)` (past 38 digits it gives way on scale, as arithmetic does,
 to at least four fractional digits, so the mean of values past about 10^34
@@ -1136,10 +1137,11 @@ keys take `ASC`/`DESC` and `NULLS FIRST`/`NULLS LAST` exactly as the outer
 `ORDER BY` does. A frame is `ROWS` or `RANGE`, `BETWEEN <start> AND <end>` or a
 start alone (whose end is `CURRENT ROW`), each bound one of `UNBOUNDED
 PRECEDING`, `n PRECEDING`, `CURRENT ROW`, `n FOLLOWING` and `UNBOUNDED
-FOLLOWING`. A `ROWS` offset counts rows. A `RANGE` frame takes rows by their
-`ORDER BY` value: its `CURRENT ROW` is the current row and every row the
-`ORDER BY` ties with it, its peers, and `n PRECEDING` / `n FOLLOWING` the rows
-whose value lies within `n` of the current row's on that side (`n` a number,
+FOLLOWING`. A `ROWS` offset counts rows and may be any `BIGINT`. A `RANGE`
+frame takes rows by their `ORDER BY` value: its `CURRENT ROW` is the current
+row and every row the `ORDER BY` ties with it, its peers, and `n PRECEDING` /
+`n FOLLOWING` the rows whose value lies within `n` of the current row's on
+that side (`n` a number,
 `1.5` too, and over a `FLOAT` or `DOUBLE` key one a `DOUBLE` holds, so not
 `1e309`; the window needs exactly one `ORDER BY` key, a number). With an
 `ORDER BY` and no frame, the frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND
@@ -1165,7 +1167,7 @@ FROM x)` and `TRIM(x, str)` are rejected with a clear error, and there is no
 `LTRIM`/`RTRIM`), `SUBSTRING`, `CONCAT`; flow — `COALESCE`, `IF`, `NULLIF`,
 `GREATEST`, `LEAST`;
 numeric — `ABS`, `ROUND`, `FLOOR`, `CEIL`/`CEILING`, `TRUNC`/`TRUNCATE`,
-`MOD`, `POW`/`POWER`, `SIGN`; math — `SQRT`, `CBRT`, `EXP`, `LN`, `LOG(x)`,
+`MOD`, `POW`/`POWER`, `SIGN`; math — `SQRT`, `CBRT`, `EXP`, `LN`,
 `LOG(base, x)`, `LOG10`, `LOG2`; trig — `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`,
 `ATAN`, `ATAN2(y, x)`, `SINH`, `COSH`, `TANH`, `DEGREES`, `RADIANS`;
 constants — `PI()`, `E()`; non-deterministic — `RAND()` / `RAND(seed)`;
@@ -1177,7 +1179,13 @@ every function but the flow ones, a NULL scale, position, length or seed
 included; `GREATEST`/`LEAST` skip NULLs and return NULL only when every
 argument is NULL, and of two equal zeros `GREATEST` gives `0.0` and `LEAST`
 `-0.0` in either order, as `MAX` and `MIN` do. `SIGN` is -1, 0 or 1, and of
-`NaN`, which is none of them, an error. `MOD(a, b)` is `a % b`, typed the same way. `ROUND`,
+`NaN`, which is none of them, an error. `MOD(a, b)` is `a % b`, typed the same way.
+A square root of less than zero is NULL, as are a logarithm of zero or less
+and one to a base of zero or less or of 1, as a division by zero is (no number
+answers them; they were `NaN`, and `-Infinity` at zero), and `NaN` stays
+`NaN`. `LOG(x)` with one argument is an error, as engines disagree on its base
+(e in MySQL and Spark, 10 in Postgres and SQLite): write `LN(x)` or
+`LOG10(x)`. `ROUND`,
 `TRUNC`, `FLOOR` and `CEIL` are exact: `ROUND` rounds half away from zero
 (`ROUND(2.5)` is 3 and `ROUND(-2.5)` is -3), `TRUNC` toward zero, `FLOOR`
 down and `CEIL` up, each at `scale` places (0 by default), a negative scale

@@ -603,7 +603,8 @@ final case class WindowExec(
       case FrameBound.UnboundedFollowing => if (isStart) n else n - 1
       case FrameBound.CurrentRow => r
       case FrameBound.Preceding(k) => clamp(r.toLong - k, isStart, n)
-      case FrameBound.Following(k) => clamp(r.toLong + k, isStart, n)
+      // An offset may be any BIGINT, which a row's position added to wraps.
+      case FrameBound.Following(k) => clamp(if (k > Long.MaxValue - r) Long.MaxValue else r + k, isStart, n)
       case other => throw new IllegalStateException(s"$other in a ROWS frame")
     }
     def rangeBound(r: Int, b: FrameBound, isStart: Boolean): Int = {

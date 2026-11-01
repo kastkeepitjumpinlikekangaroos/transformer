@@ -1847,6 +1847,6 @@ binder or printer chooses set aside, a projection of every column in order
 removed, a projection of a scan's columns read as a pruned scan, the negation
 of a number read as the negative number), with the same output names and
 types, and prints the second plan to the same text. Its first finding was the
-binder's: it kept an aggregate per spelling, so `COUNT()` and `COUNT(*)` were
+binder's: it kept an aggregate per spelling, so `SUM(a)` and `SUM(t.a)` were
 computed twice; each aggregate and window function is now computed once,
 however it is spelled.

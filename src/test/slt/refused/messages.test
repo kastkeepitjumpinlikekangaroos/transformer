@@ -129,3 +129,23 @@ SELECT SUM(a) OVER (ORDER BY a ROWS BETWEEN a PRECEDING AND CURRENT ROW) FROM t
 
 statement error
 SELECT NTILE(2) OVER (ORDER BY a) FROM t
+
+statement error
+SELECT COUNT() FROM t
+----
+COUNT() needs an argument: COUNT(*) counts the rows, COUNT(x) the rows where x is not NULL
+
+statement error
+SELECT a, COUNT() OVER (ORDER BY a) FROM t
+----
+COUNT() needs an argument
+
+statement error
+SELECT LOG(b) FROM t
+----
+LOG(x) with one argument is not supported, as engines disagree on its base; write LN(x) for base e, LOG10(x) for base 10, or LOG(base, x)
+
+statement error
+SELECT SUM(a) OVER (ORDER BY a ROWS BETWEEN CURRENT ROW AND 9223372036854775808 FOLLOWING) FROM t
+----
+FOLLOWING offset 9223372036854775808 is larger than the largest BIGINT, 9223372036854775807

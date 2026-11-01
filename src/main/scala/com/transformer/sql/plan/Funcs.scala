@@ -55,7 +55,7 @@ object Funcs {
       case "POW" | "POWER" if n == 2 => each(Number, DataType.DoubleType)
       case "SQRT" | "CBRT" | "EXP" if n == 1 => each(Number, DataType.DoubleType)
       case "LN" if n == 1 => each(Number, DataType.DoubleType)
-      case "LOG" if n == 1 || n == 2 => each(Number, DataType.DoubleType)
+      case "LOG" if n == 2 => each(Number, DataType.DoubleType)
       case "LOG10" | "LOG2" if n == 1 => each(Number, DataType.DoubleType)
       case "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" if n == 1 => each(Number, DataType.DoubleType)
       case "SINH" | "COSH" | "TANH" if n == 1 => each(Number, DataType.DoubleType)
@@ -126,27 +126,31 @@ object Funcs {
       case "POW" | "POWER" =>
         if (args(0) == null || args(1) == null) null
         else math.pow(args(0).asInstanceOf[Number].doubleValue, args(1).asInstanceOf[Number].doubleValue)
+      // A square root of less than zero, or a logarithm of zero or less, has
+      // no value, so it is NULL, as a division by zero is; it was NaN, and
+      // -Infinity at zero. NaN stays NaN.
       case "SQRT" =>
-        if (args.head == null) null else math.sqrt(args.head.asInstanceOf[Number].doubleValue)
+        if (args.head == null) null
+        else {
+          val x = args.head.asInstanceOf[Number].doubleValue
+          if (x < 0) null else math.sqrt(x)
+        }
       case "CBRT" =>
         if (args.head == null) null else math.cbrt(args.head.asInstanceOf[Number].doubleValue)
       case "EXP" =>
         if (args.head == null) null else math.exp(args.head.asInstanceOf[Number].doubleValue)
-      case "LN" =>
-        if (args.head == null) null else math.log(args.head.asInstanceOf[Number].doubleValue)
+      case "LN" => logarithm(args.head)(math.log)
+      // A base of zero or less has no logarithms, nor has 1, whose every power
+      // is 1.
       case "LOG" =>
         if (args.exists(_ == null)) null
-        else if (args.size == 1) math.log(args.head.asInstanceOf[Number].doubleValue)
         else {
           val base = args(0).asInstanceOf[Number].doubleValue
           val x = args(1).asInstanceOf[Number].doubleValue
-          math.log(x) / math.log(base)
+          if (base <= 0 || base == 1 || x <= 0) null else math.log(x) / math.log(base)
         }
-      case "LOG10" =>
-        if (args.head == null) null else math.log10(args.head.asInstanceOf[Number].doubleValue)
-      case "LOG2" =>
-        if (args.head == null) null
-        else math.log(args.head.asInstanceOf[Number].doubleValue) / math.log(2.0)
+      case "LOG10" => logarithm(args.head)(math.log10)
+      case "LOG2" => logarithm(args.head)(x => math.log(x) / math.log(2.0))
       case "SIN" => if (args.head == null) null else math.sin(args.head.asInstanceOf[Number].doubleValue)
       case "COS" => if (args.head == null) null else math.cos(args.head.asInstanceOf[Number].doubleValue)
       case "TAN" => if (args.head == null) null else math.tan(args.head.asInstanceOf[Number].doubleValue)
@@ -248,6 +252,14 @@ object Funcs {
     s.substring(from, until)
   }
 
+  /** `log` of the number `arg`, which is NULL when `arg` is, or is zero or
+    * less, where a logarithm has no value. */
+  private def logarithm(arg: Any)(log: Double => Double): Any =
+    if (arg == null) null
+    else {
+      val x = arg.asInstanceOf[Number].doubleValue
+      if (x <= 0) null else log(x)
+    }
 
   private[plan] def negativeLength(length: Long): IllegalArgumentException =
     new IllegalArgumentException(s"SUBSTRING's length $length is negative")
