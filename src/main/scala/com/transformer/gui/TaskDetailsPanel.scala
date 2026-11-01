@@ -1,37 +1,33 @@
 package com.transformer.gui
 
+import atlantafx.base.theme.{Styles, Tweaks}
 import com.transformer.job.{InputFilePath, JobFiles, TaskRunRecord, TaskRunStatus, TaskStatus, Validation}
 
-import java.nio.file.{Path, Paths}
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javafx.geometry.{Insets, Pos}
-import javafx.scene.control.{Alert, Button, ButtonType, Label, ScrollPane, Separator, Toggle, ToggleButton, ToggleGroup, Tooltip}
+import javafx.scene.control.{Alert, Button, ButtonType, Label, ScrollPane, Toggle, ToggleButton, ToggleGroup, Tooltip}
 import javafx.scene.layout.{FlowPane, HBox, Priority, Region, VBox}
-import javafx.scene.text.{Font, FontWeight}
 import javafx.stage.Stage
 import scala.util.control.NonFatal
 
-/** Right-side panel: shows full details for the currently-selected node — either
-  * a SQLTask or an input view.
+/** The Task details tab: everything about the selected node — either a
+  * SQLTask or an input view.
   *
-  * Task layout, top → bottom:
-  *   * Header: task name + colored status pill + duration/rows chips
+  * A header across the top: the task's name, status pill, and the actions on
+  * it (edit attributes, add a table or a validation, delete). Below it, two
+  * columns. On the left, scrolling on its own:
+  *   * Stat chips (rows, duration, queue wait, validations)
   *   * "Reads from": dep chips (tasks + inputs)
   *   * "Writes to": output path + provenance + historical-runs hint
   *   * Error panel: only visible when status is Failed / ValidationFailed
-  *   * Validations preview + "Inspect" button to jump to the bottom tab
-  *   * Source SQL pane (syntax-highlighted, with Copy + Open in editor)
-  *   * Rendered SQL pane (syntax-highlighted, with Copy)
+  *   * Validations summary + "Inspect" button to jump to the Validations tab
+  * On the right, the SQL, Source or Rendered, editable in place (Edit SQL /
+  * Save / Cancel, or vim's `:w` and `:q`).
   *
-  * Input layout swaps SQL views for input options and a "used by" task list.
+  * An input shows its options and its "used by" list, across the width.
   */
 final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) extends VBox {
-
-  private val PanelBg     = "#2a2c38"
-  private val MutedText   = "#9ba2b8"
-  private val Heading     = "#e8ecf5"
-  private val PathColor   = "#8ab4f8"
 
   private val TimeFmt: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'").withZone(ZoneOffset.UTC)
@@ -42,22 +38,26 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
   private var onInspectValidations: Int => Unit = _ => ()
   def setOnInspectValidations(handler: Int => Unit): Unit = { onInspectValidations = handler }
 
-  setSpacing(10)
-  setPadding(new Insets(14))
-  setStyle(s"-fx-background-color: $PanelBg;")
+  getStyleClass.add("panel")
+  setSpacing(14)
+  setPadding(new Insets(16, 20, 20, 20))
 
-  // ---- Toolbar (edit attrs / add / delete) ----------------------------------
-  // Buttons whose enabled-state depends on the kind of node selected (task vs
-  // input vs nothing). Edit/Save/Cancel-SQL live in the SQL header row below,
-  // so they sit right next to the SQL viewer they act on. See
+  // ---- Actions (edit attrs / add / delete) ---------------------------------
+  // Their enabled-state depends on the kind of node selected (task vs input vs
+  // nothing). Edit/Save/Cancel-SQL live beside the SQL they act on. See
   // [[updateToolbarState]] for the truth table.
-  private val editAttrsButton      = makeToolButton("Edit attrs…")
-  private val editSqlButton        = makeToolButton("Edit SQL")
-  private val saveSqlButton        = makePrimaryToolButton("Save SQL")
-  private val cancelSqlButton      = makeToolButton("Cancel")
-  private val addTableButton       = makeToolButton("+ Table…")
-  private val addValidationButton  = makeToolButton("+ Validation…")
-  private val deleteButton         = makeToolButton("Delete…")
+  private val editAttrsButton      = actionButton("Edit attributes…")
+  private val editSqlButton        = actionButton("Edit SQL", Icons.edit)
+  private val saveSqlButton        = actionButton("Save")
+  private val cancelSqlButton      = actionButton("Cancel")
+  private val addTableButton       = actionButton("Table…", Icons.plus)
+  private val addValidationButton  = actionButton("Validation…", Icons.plus)
+  private val deleteButton         = actionButton("Delete…")
+  saveSqlButton.getStyleClass.add(Styles.ACCENT)
+  cancelSqlButton.getStyleClass.add(Styles.FLAT)
+  deleteButton.getStyleClass.addAll(Styles.DANGER, Styles.FLAT)
+  addTableButton.setTooltip(new Tooltip("Add a table (its FROM starts at the selected node)"))
+  addValidationButton.setTooltip(new Tooltip("Add a validation to this table"))
 
   editAttrsButton.setOnAction(_ => onEditAttrs())
   editSqlButton.setOnAction(_ => onBeginSqlEdit())
@@ -71,25 +71,22 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
   saveSqlButton.setVisible(false);   saveSqlButton.setManaged(false)
   cancelSqlButton.setVisible(false); cancelSqlButton.setManaged(false)
 
-  private val toolbar = new HBox(6,
-    editAttrsButton, addTableButton, addValidationButton, deleteButton
-  )
-  toolbar.setAlignment(Pos.CENTER_LEFT)
+  private val toolbar = new HBox(6, editAttrsButton, addTableButton, addValidationButton, deleteButton)
+  toolbar.setAlignment(Pos.CENTER_RIGHT)
 
   // ---- Header row -----------------------------------------------------------
   private val nameLabel = new Label("(no task selected)")
-  nameLabel.setStyle(s"-fx-text-fill: $Heading;")
-  nameLabel.setFont(Font.font("Sans", FontWeight.BOLD, 17))
+  nameLabel.getStyleClass.add("panel-title")
   nameLabel.setWrapText(true)
-  HBox.setHgrow(nameLabel, Priority.ALWAYS)
-  nameLabel.setMaxWidth(Double.MaxValue)
 
   private val statusPill = new Label("")
-  styleChip(statusPill, ChipPalette.Neutral)
+  setTone(statusPill, Tone.Neutral)
   statusPill.setVisible(false)
   statusPill.setManaged(false)
 
-  private val header = new HBox(8, nameLabel, statusPill)
+  private val headerSpacer = new Region()
+  HBox.setHgrow(headerSpacer, Priority.ALWAYS)
+  private val header = new HBox(10, nameLabel, statusPill, headerSpacer, toolbar)
   header.setAlignment(Pos.CENTER_LEFT)
 
   // ---- Stat chips (rows, duration, validations) -----------------------------
@@ -97,91 +94,96 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
   statChips.setAlignment(Pos.CENTER_LEFT)
 
   // ---- Dependencies (used as "Reads from" / "Used by" depending on mode) ----
-  private val depsHeader = sectionLabel("Reads from")
+  private val depsHeader = sectionLabel("READS FROM")
   private val depsBox = new FlowPane(6, 4)
   depsBox.setAlignment(Pos.CENTER_LEFT)
-  private val noDepsLabel = mutedLabel("(no upstream tasks)")
+  private val noDepsLabel = hintLabel("(no upstream tasks)")
+  private val depsSection = new VBox(6, depsHeader, depsBox)
 
   // ---- Output path ----------------------------------------------------------
-  private val outputHeader = sectionLabel("Writes to")
+  private val outputHeader = sectionLabel("WRITES TO")
   private val outputPathLabel = new Label("")
-  outputPathLabel.setStyle(s"-fx-text-fill: $PathColor; -fx-font-size: 12px; -fx-font-family: monospace;")
+  outputPathLabel.getStyleClass.add("path-label")
   outputPathLabel.setWrapText(true)
   private val outputMetaLabel = mutedLabel("")
-  outputMetaLabel.setStyle(s"-fx-text-fill: $MutedText; -fx-font-size: 11px;")
   outputMetaLabel.setWrapText(true)
-  private val historyHintLabel = mutedLabel("")
-  historyHintLabel.setStyle("-fx-text-fill: #b9c2db; -fx-font-size: 11px; -fx-font-style: italic;")
+  private val historyHintLabel = hintLabel("")
   historyHintLabel.setWrapText(true)
-  private val outputBox = new VBox(3, outputPathLabel, outputMetaLabel, historyHintLabel)
+  private val outputSection = new VBox(4, outputHeader, outputPathLabel, outputMetaLabel, historyHintLabel)
 
   // ---- Error block (only visible when relevant) ----------------------------
   private val errorLabel = new Label("")
-  errorLabel.setStyle("-fx-text-fill: #f8a3a3; -fx-font-family: monospace; -fx-font-size: 11px;")
+  errorLabel.getStyleClass.addAll("error-text", "mono")
   errorLabel.setWrapText(true)
   private val errorScroll = new ScrollPane(errorLabel)
+  errorScroll.getStyleClass.add("error-box")
   errorScroll.setFitToWidth(true)
-  errorScroll.setPrefHeight(90)
-  errorScroll.setStyle("-fx-background: #3a2128; -fx-background-color: #3a2128;")
+  errorScroll.setPrefHeight(110)
   errorScroll.setVisible(false)
   errorScroll.setManaged(false)
 
   // ---- Validations summary + inspect button --------------------------------
-  private val validationsHeader = sectionLabel("Validations")
+  // The button sits at the right of the section's header, at its full width;
+  // the chips wrap below it across the whole column.
+  private val validationsHeader = sectionLabel("VALIDATIONS")
   private val validationsSummary = new FlowPane(6, 4)
   validationsSummary.setAlignment(Pos.CENTER_LEFT)
-  private val inspectValidationsButton = new Button("Inspect validations")
-  inspectValidationsButton.setStyle(
-    "-fx-background-color: #3a3f55; -fx-text-fill: #d7dcec; " +
-      "-fx-background-radius: 4; -fx-padding: 4 10; -fx-font-size: 11px;"
-  )
+  private val inspectValidationsButton = actionButton("Inspect validations")
+  inspectValidationsButton.getStyleClass.add(Styles.FLAT)
+  inspectValidationsButton.setMinWidth(Region.USE_PREF_SIZE)
   inspectValidationsButton.setOnAction(_ =>
     session.selectedTaskIndex.foreach(onInspectValidations)
   )
-  private val validationsRow = new HBox(8, validationsSummary, inspectValidationsButton)
-  validationsRow.setAlignment(Pos.CENTER_LEFT)
-  private val validationsBox = new VBox(4, validationsHeader, validationsRow)
+  private val validationsHeaderSpacer = new Region()
+  HBox.setHgrow(validationsHeaderSpacer, Priority.ALWAYS)
+  private val validationsHeaderRow = new HBox(10, validationsHeader, validationsHeaderSpacer, inspectValidationsButton)
+  validationsHeaderRow.setAlignment(Pos.CENTER_LEFT)
+  private val validationsBox = new VBox(6, validationsHeaderRow, validationsSummary)
   validationsBox.setVisible(false)
   validationsBox.setManaged(false)
 
-  // ---- SQL view (Source / Rendered toggle) ----------------------------------
+  // ---- SQL (Source / Rendered toggle) ---------------------------------------
   // One SqlView swapped between the on-disk source and the template-rendered
-  // body via a two-button toggle group. Keeps the panel short enough to live
-  // in a bottom tab instead of needing the full window height for two stacked
-  // viewers.
+  // body via a two-button toggle group, so the tab needs one viewer's height.
   private val sourceToggle = new ToggleButton("Source")
   private val renderedToggle = new ToggleButton("Rendered")
   private val sqlToggleGroup = new ToggleGroup()
+  sourceToggle.getStyleClass.addAll(Styles.LEFT_PILL, Styles.SMALL)
+  renderedToggle.getStyleClass.addAll(Styles.RIGHT_PILL, Styles.SMALL)
   Seq(sourceToggle, renderedToggle).foreach { tb =>
     tb.setToggleGroup(sqlToggleGroup)
-    tb.setStyle(
-      "-fx-background-color: #3a3f55; -fx-text-fill: #d7dcec; " +
-        "-fx-padding: 2 12; -fx-font-size: 11px; -fx-background-radius: 4;"
-    )
+    tb.setFocusTraversable(false)
   }
   sourceToggle.setSelected(true)
+  renderedToggle.setTooltip(new Tooltip("The SQL with its {{ templates }} rendered for the execution time"))
+  private val sqlToggles = new HBox(0, sourceToggle, renderedToggle)
   private val sqlHeader = sectionLabel("SQL")
   private val sqlHeaderSpacer = new Region()
   HBox.setHgrow(sqlHeaderSpacer, Priority.ALWAYS)
   // Edit / Save / Cancel sit on the right side of the SQL header so the
-  // controls are immediately adjacent to the viewer they act on. The toolbar
-  // up top is reserved for whole-task actions.
-  private val sqlHeaderRow = new HBox(8,
-    sqlHeader, sourceToggle, renderedToggle,
-    sqlHeaderSpacer,
-    editSqlButton, saveSqlButton, cancelSqlButton
-  )
+  // controls are immediately adjacent to the viewer they act on.
+  private val sqlView = new SqlView()
+  private val sqlHeaderRow = new HBox(10)
+  sqlHeaderRow.getChildren.addAll(sqlHeader, sqlToggles, sqlHeaderSpacer)
+  sqlHeaderRow.getChildren.addAll(sqlView.actions: _*)
+  sqlHeaderRow.getChildren.addAll(editSqlButton, cancelSqlButton, saveSqlButton)
   sqlHeaderRow.setAlignment(Pos.CENTER_LEFT)
-  private val sqlView = new SqlView(showOpenInEditor = true)
-  sqlView.setPrefHeight(280)
+  sqlView.setPrefHeight(240)
   VBox.setVgrow(sqlView, Priority.ALWAYS)
+  // Vim's :w saves the edit and :q cancels it, refusing to drop changes
+  // without the !.
+  sqlView.setOnWrite(() => if (sqlEditing) saveSqlEdit() else Some("Not editing: press Edit SQL first"))
+  sqlView.setOnQuit(force =>
+    if (!sqlEditing) Some("Not editing")
+    else if (!force && sqlView.isModified) Some("E37: No write since last change (add ! to override)")
+    else { onCancelSqlEdit(); None }
+  )
 
   // Backing state — the SqlView is reused, but we keep both bodies around so
   // toggling between Source / Rendered is instant (no reload of the source
   // file or re-render of templates).
   private var currentSourceSql: String = ""
   private var currentRenderedSql: String = ""
-  private var currentSourceFile: Option[Path] = None
 
   // Inline edit-mode bookkeeping. Only the task's main SQL is edited in place;
   // attribute changes and validation edits open their own modal dialogs.
@@ -196,41 +198,46 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     else updateSqlView()
   })
 
-  private def updateSqlView(): Unit = {
-    if (renderedToggle.isSelected) {
-      sqlView.setSql(currentRenderedSql)
-      sqlView.setSourceFile(None)
-    } else {
-      sqlView.setSql(currentSourceSql)
-      sqlView.setSourceFile(currentSourceFile)
-    }
-  }
+  private def updateSqlView(): Unit =
+    sqlView.setSql(if (renderedToggle.isSelected) currentRenderedSql else currentSourceSql)
 
   // ---- Input-only widgets ---------------------------------------------------
-  private val inputOptionsHeader = sectionLabel("Options")
+  private val inputOptionsHeader = sectionLabel("OPTIONS")
   private val inputOptionsBox = new VBox(2)
-  private val inputOptionsContainer = new VBox(4, inputOptionsHeader, inputOptionsBox)
+  private val inputOptionsContainer = new VBox(6, inputOptionsHeader, inputOptionsBox)
   inputOptionsContainer.setVisible(false)
   inputOptionsContainer.setManaged(false)
 
+
+  // ---- Empty state ----------------------------------------------------------
+  private val emptyState = new Label(
+    "Click a node in the DAG to see its details here. Double-click it to open its rows."
+  )
+  emptyState.getStyleClass.add("empty-state")
+  emptyState.setWrapText(true)
+
   // ---- Assemble -------------------------------------------------------------
-  getChildren.addAll(
-    toolbar,
-    new Separator(),
-    header,
+  private val infoColumn = new VBox(16,
     statChips,
-    new Separator(),
-    depsHeader,
-    depsBox,
-    outputHeader,
-    outputBox,
+    depsSection,
+    outputSection,
     errorScroll,
     validationsBox,
-    inputOptionsContainer,
-    new Separator(),
-    sqlHeaderRow,
-    sqlView
+    inputOptionsContainer
   )
+  infoColumn.getStyleClass.add("panel")
+  infoColumn.setPadding(new Insets(0, 8, 8, 0))
+  private val infoScroll = new ScrollPane(infoColumn)
+  infoScroll.getStyleClass.addAll("panel-scroll", Tweaks.EDGE_TO_EDGE)
+  infoScroll.setFitToWidth(true)
+  infoScroll.setPrefWidth(460)
+  infoScroll.setMinWidth(300)
+  private val sqlColumn = new VBox(8, sqlHeaderRow, sqlView)
+  HBox.setHgrow(sqlColumn, Priority.ALWAYS)
+  private val body = new HBox(20, infoScroll, sqlColumn)
+  VBox.setVgrow(body, Priority.ALWAYS)
+
+  getChildren.addAll(header, emptyState, body)
 
   session.addListener(() => refresh())
   refresh()
@@ -262,10 +269,11 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     if (i < 0 || i >= dag.nodes.size) { showNothing(); return }
     val node = dag.nodes(i)
     val task = node.task
+    setEmpty(empty = false)
     setSqlMode(visible = true)
     setInputMode(visible = false)
     nameLabel.setText(task.displayName)
-    depsHeader.setText("Reads from")
+    depsHeader.setText("READS FROM")
     renderStatus(i)
     renderStatChips(i)
     renderTaskDeps(node)
@@ -274,7 +282,6 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     renderValidationsSummary(i)
     currentSourceSql = safeLoad(task.loadSql _)
     currentRenderedSql = node.renderedMainSql
-    currentSourceFile = task.sqlFile.map(Paths.get(_))
     updateSqlView()
   }
 
@@ -282,13 +289,14 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     val inputs = session.inputs
     if (i < 0 || i >= inputs.size) { showNothing(); return }
     val in = inputs(i)
+    setEmpty(empty = false)
     setSqlMode(visible = false)
     setInputMode(visible = true)
     nameLabel.setText(in.viewName)
-    depsHeader.setText("Used by")
+    depsHeader.setText("USED BY")
     // Static "input" pill so the user can tell at a glance.
-    statusPill.setText(s"INPUT • ${in.detectedFormat.toUpperCase}")
-    styleChip(statusPill, ChipPalette.Input)
+    statusPill.setText(s"INPUT · ${in.detectedFormat.toUpperCase}")
+    setTone(statusPill, Tone.Input)
     statusPill.setVisible(true); statusPill.setManaged(true)
     statChips.getChildren.clear()
     statChips.getChildren.add(metricChip(if (in.cache) "cached in memory" else "streamed"))
@@ -300,14 +308,15 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
   }
 
   private def showNothing(): Unit = {
-    setSqlMode(visible = true)
+    setEmpty(empty = true)
+    setSqlMode(visible = false)
     setInputMode(visible = false)
-    nameLabel.setText("(nothing selected)")
+    nameLabel.setText("Nothing selected")
     statusPill.setVisible(false); statusPill.setManaged(false)
     statChips.getChildren.clear()
-    depsHeader.setText("Reads from")
+    depsHeader.setText("READS FROM")
     depsBox.getChildren.setAll(noDepsLabel)
-    outputHeader.setText("Writes to")
+    outputHeader.setText("WRITES TO")
     outputPathLabel.setText("Click a task node to inspect it.")
     outputPathLabel.setTooltip(null)
     outputMetaLabel.setText("Double-click a task node to load its output rows.")
@@ -318,13 +327,23 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     validationsBox.setVisible(false); validationsBox.setManaged(false)
     currentSourceSql = ""
     currentRenderedSql = ""
-    currentSourceFile = None
     updateSqlView()
   }
 
+  /** With nothing selected only the header and the empty state show. */
+  private def setEmpty(empty: Boolean): Unit = {
+    emptyState.setVisible(empty)
+    emptyState.setManaged(empty)
+    body.setVisible(!empty)
+    body.setManaged(!empty)
+  }
+
+  /** The SQL column, beside the details; without it (an input) the details
+    * take the width. */
   private def setSqlMode(visible: Boolean): Unit = {
-    sqlHeaderRow.setVisible(visible); sqlHeaderRow.setManaged(visible)
-    sqlView.setVisible(visible);      sqlView.setManaged(visible)
+    sqlColumn.setVisible(visible)
+    sqlColumn.setManaged(visible)
+    HBox.setHgrow(infoScroll, if (visible) Priority.NEVER else Priority.ALWAYS)
   }
 
   private def setInputMode(visible: Boolean): Unit = {
@@ -338,21 +357,21 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
       statusPill.setVisible(false); statusPill.setManaged(false)
       return
     }
-    val (label, palette) = states(i) match {
-      case UiTaskState.Pending => ("pending", ChipPalette.Neutral)
-      case UiTaskState.Queued  => ("queued", ChipPalette.Running)
-      case UiTaskState.Running => ("running", ChipPalette.Running)
+    val (label, tone) = states(i) match {
+      case UiTaskState.Pending => ("pending", Tone.Neutral)
+      case UiTaskState.Queued  => ("queued", Tone.Running)
+      case UiTaskState.Running => ("running", Tone.Running)
       case UiTaskState.Done(result) =>
         result.status match {
-          case TaskStatus.Succeeded            => ("succeeded", ChipPalette.Success)
-          case TaskStatus.Failed(_)            => ("failed", ChipPalette.Failed)
-          case TaskStatus.ValidationFailed(_)  => ("validation failed", ChipPalette.Warning)
-          case TaskStatus.Skipped(_)           => ("skipped", ChipPalette.Neutral)
-          case TaskStatus.Pending              => ("pending", ChipPalette.Neutral)
+          case TaskStatus.Succeeded            => ("succeeded", Tone.Success)
+          case TaskStatus.Failed(_)            => ("failed", Tone.Danger)
+          case TaskStatus.ValidationFailed(_)  => ("validation failed", Tone.Warning)
+          case TaskStatus.Skipped(_)           => ("skipped", Tone.Neutral)
+          case TaskStatus.Pending              => ("pending", Tone.Neutral)
         }
     }
     statusPill.setText(label.toUpperCase)
-    styleChip(statusPill, palette)
+    setTone(statusPill, tone)
     statusPill.setVisible(true); statusPill.setManaged(true)
   }
 
@@ -406,51 +425,50 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     // Inputs first (the data lineage roots), then upstream tasks.
     node.inputDeps.toSeq.sorted.foreach { name =>
       inputNameToIdx.get(name).foreach { idx =>
-        val chip = inputChip(inputs(idx).viewName)
-        chip.setOnMouseClicked(_ => session.select(Some(Selection.Input(idx))))
-        depsBox.getChildren.add(chip)
+        val c = chip(inputs(idx).viewName, "input")
+        c.setOnMouseClicked(_ => session.select(Some(Selection.Input(idx))))
+        depsBox.getChildren.add(c)
       }
     }
     node.deps.toSeq.sorted.foreach { d =>
-      val name = dag.nodes(d).task.displayName
-      val chip = depChip(name)
-      chip.setOnMouseClicked(_ => session.select(Some(Selection.Task(d))))
-      depsBox.getChildren.add(chip)
+      val c = chip(dag.nodes(d).task.displayName, "task")
+      c.setOnMouseClicked(_ => session.select(Some(Selection.Task(d))))
+      depsBox.getChildren.add(c)
     }
   }
 
   private def renderInputUsedBy(i: Int): Unit = {
     depsBox.getChildren.clear()
     val dag = session.dag.getOrElse {
-      depsBox.getChildren.add(mutedLabel("(no DAG loaded)"))
+      depsBox.getChildren.add(hintLabel("(no DAG loaded)"))
       return
     }
     val inputs = session.inputs
     if (i >= inputs.size) {
-      depsBox.getChildren.add(mutedLabel("(unknown input)"))
+      depsBox.getChildren.add(hintLabel("(unknown input)"))
       return
     }
     val viewLower = inputs(i).viewName.toLowerCase
     val users = dag.nodes.iterator.filter(_.inputDeps.contains(viewLower)).toSeq
     if (users.isEmpty) {
-      depsBox.getChildren.add(mutedLabel("(not used by any task)"))
+      depsBox.getChildren.add(hintLabel("(not used by any task)"))
       return
     }
     users.foreach { node =>
-      val chip = depChip(node.task.displayName)
+      val c = chip(node.task.displayName, "task")
       val idx = node.index
-      chip.setOnMouseClicked(_ => session.select(Some(Selection.Task(idx))))
-      depsBox.getChildren.add(chip)
+      c.setOnMouseClicked(_ => session.select(Some(Selection.Task(idx))))
+      depsBox.getChildren.add(c)
     }
   }
 
   private def renderInputPath(i: Int, in: InputFilePath): Unit = {
-    outputHeader.setText("File")
+    outputHeader.setText("FILE")
     val rendered = session.renderedInputPath(i).getOrElse(in.path)
     outputPathLabel.setText(rendered)
     outputPathLabel.setTooltip(new Tooltip(rendered))
     val source =
-      if (rendered != in.path) s"format: ${in.detectedFormat} • template: ${in.path}"
+      if (rendered != in.path) s"format: ${in.detectedFormat} · template: ${in.path}"
       else s"format: ${in.detectedFormat}"
     outputMetaLabel.setText(source)
     outputMetaLabel.setVisible(true); outputMetaLabel.setManaged(true)
@@ -461,11 +479,11 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
   private def renderInputOptions(in: InputFilePath): Unit = {
     inputOptionsBox.getChildren.clear()
     if (in.options.isEmpty) {
-      inputOptionsBox.getChildren.add(mutedLabel("(default options)"))
+      inputOptionsBox.getChildren.add(hintLabel("(default options)"))
     } else {
       in.options.toSeq.sortBy(_._1).foreach { case (k, v) =>
         val l = new Label(s"$k = $v")
-        l.setStyle("-fx-text-fill: #d7dcec; -fx-font-size: 11px; -fx-font-family: monospace;")
+        l.getStyleClass.addAll("option-label", "mono")
         inputOptionsBox.getChildren.add(l)
       }
     }
@@ -476,10 +494,10 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     val written = session.outputPathFor(i)
     val state = session.taskStates.lift(i)
     val (verb, path) = (planned, state, written) match {
-      case (Some(p), Some(UiTaskState.Done(_)), Some(actual)) if actual == p => ("Wrote to", Some(p))
-      case (Some(p), Some(UiTaskState.Done(_)), Some(actual))                => ("Wrote to", Some(actual))
-      case (Some(p), _, _)                                                   => ("Will write to", Some(p))
-      case (None, _, _)                                                      => ("Output", None)
+      case (Some(p), Some(UiTaskState.Done(_)), Some(actual)) if actual == p => ("WROTE TO", Some(p))
+      case (Some(p), Some(UiTaskState.Done(_)), Some(actual))                => ("WROTE TO", Some(actual))
+      case (Some(p), _, _)                                                   => ("WILL WRITE TO", Some(p))
+      case (None, _, _)                                                      => ("OUTPUT", None)
     }
     path match {
       case Some(p) =>
@@ -505,7 +523,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     historyHintLabel.setManaged(historyHintLabel.getText.nonEmpty)
   }
 
-  /** Compact one-line `2 rows • 1 part file • written 2026-…` summary of the
+  /** Compact one-line `2 rows · 1 part file · written 2026-…` summary of the
     * task's most recent `_run.json` record, plus a note if the recorded
     * executionTime differs from the session's and a status tag for non-
     * Succeeded outcomes (Validation failures, runtime errors, skips).
@@ -516,15 +534,15 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
       val plural = if (r.outputFiles.size == 1) "" else "s"
       val mismatch =
         if (r.executionTime != session.executionTime)
-          s" • this run's exec=${TimeFmt.format(r.executionTime)} differs from selected ${TimeFmt.format(session.executionTime)}"
+          s" · this run's exec=${TimeFmt.format(r.executionTime)} differs from selected ${TimeFmt.format(session.executionTime)}"
         else ""
       val statusTag = r.status match {
         case TaskRunStatus.Succeeded        => ""
-        case TaskRunStatus.ValidationFailed => " • validation failed"
-        case TaskRunStatus.Failed           => " • failed"
-        case TaskRunStatus.Skipped          => " • skipped"
+        case TaskRunStatus.ValidationFailed => " · validation failed"
+        case TaskRunStatus.Failed           => " · failed"
+        case TaskRunStatus.Skipped          => " · skipped"
       }
-      f"${r.rowsProduced}%,d rows • ${r.outputFiles.size} part file$plural • written ${TimeFmt.format(r.writtenAt)}$statusTag$mismatch"
+      f"${r.rowsProduced}%,d rows · ${r.outputFiles.size} part file$plural · written ${TimeFmt.format(r.writtenAt)}$statusTag$mismatch"
   }
 
   private def updateErrorPanel(i: Int): Unit = {
@@ -572,12 +590,12 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     validationsSummary.getChildren.clear()
     val state = session.taskStates.lift(i)
     validations.foreach { v =>
-      val (label, palette) = validationStatusFor(v, state)
-      val chip = smallChip(s"${v.name}: $label", palette)
-      chip.setTooltip(new Tooltip("Click to edit or delete this validation"))
-      chip.setStyle(chip.getStyle + " -fx-cursor: hand;")
-      chip.setOnMouseClicked(_ => openValidationEditor(i, v))
-      validationsSummary.getChildren.add(chip)
+      val (label, tone) = validationStatusFor(v, state)
+      val c = chip(s"${v.name}: $label", tone.css)
+      c.getStyleClass.add("clickable")
+      c.setTooltip(new Tooltip("Click to edit or delete this validation"))
+      c.setOnMouseClicked(_ => openValidationEditor(i, v))
+      validationsSummary.getChildren.add(c)
     }
   }
 
@@ -585,23 +603,23 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     * runner doesn't keep per-validation outcomes for the passing ones, but a
     * passing task implies all its validations passed.
     */
-  private def validationStatusFor(v: Validation, state: Option[UiTaskState]): (String, ChipPalette) = state match {
+  private def validationStatusFor(v: Validation, state: Option[UiTaskState]): (String, Tone) = state match {
     case Some(UiTaskState.Done(result)) =>
       result.status match {
-        case TaskStatus.Succeeded => ("passed", ChipPalette.Success)
+        case TaskStatus.Succeeded => ("passed", Tone.Success)
         case TaskStatus.ValidationFailed(fs) =>
           fs.find(_.validationName == v.name) match {
-            case Some(f)            => (s"failed (${f.rowCount} row${if (f.rowCount == 1) "" else "s"})", ChipPalette.Failed)
-            case None if fs.isEmpty => ("unknown", ChipPalette.Neutral)
-            case None               => ("passed", ChipPalette.Success)
+            case Some(f)            => (s"failed (${f.rowCount} row${if (f.rowCount == 1) "" else "s"})", Tone.Danger)
+            case None if fs.isEmpty => ("unknown", Tone.Neutral)
+            case None               => ("passed", Tone.Success)
           }
-        case TaskStatus.Failed(_)  => ("not run", ChipPalette.Neutral)
-        case TaskStatus.Skipped(_) => ("not run", ChipPalette.Neutral)
-        case TaskStatus.Pending    => ("pending", ChipPalette.Neutral)
+        case TaskStatus.Failed(_)  => ("not run", Tone.Neutral)
+        case TaskStatus.Skipped(_) => ("not run", Tone.Neutral)
+        case TaskStatus.Pending    => ("pending", Tone.Neutral)
       }
-    case Some(UiTaskState.Running) => ("running", ChipPalette.Running)
-    case Some(UiTaskState.Queued)  => ("queued", ChipPalette.Running)
-    case Some(UiTaskState.Pending) | None => ("pending", ChipPalette.Neutral)
+    case Some(UiTaskState.Running) => ("running", Tone.Running)
+    case Some(UiTaskState.Queued)  => ("queued", Tone.Running)
+    case Some(UiTaskState.Pending) | None => ("pending", Tone.Neutral)
   }
 
   // ---- Toolbar action handlers ----------------------------------------------
@@ -676,20 +694,24 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     updateToolbarState()
   }
 
-  private def onSaveSqlEdit(): Unit = {
-    val dir = session.jobDir.getOrElse { cancelSqlEditState(); return }
-    val viewName = editingViewName.getOrElse { cancelSqlEditState(); return }
+  private def onSaveSqlEdit(): Unit = saveSqlEdit()
+
+  /** Write the edit to the task's main.sql; None once written, or why not. */
+  private def saveSqlEdit(): Option[String] = {
+    val dir = session.jobDir.getOrElse { cancelSqlEditState(); return Some("No job directory") }
+    val viewName = editingViewName.getOrElse { cancelSqlEditState(); return Some("Not editing") }
     val newSql = sqlView.getCurrentSql
     try {
       JobFiles.writeMainSql(dir, viewName, newSql)
     } catch {
       case NonFatal(e) =>
-        FxHelpers.showError(ownerStage(), "Couldn't save SQL",
-          Option(e.getMessage).getOrElse(e.toString))
-        return
+        val msg = Option(e.getMessage).getOrElse(e.toString)
+        FxHelpers.showError(ownerStage(), "Couldn't save SQL", msg)
+        return Some(s"Not saved: $msg")
     }
     cancelSqlEditState()
     session.reloadPreservingSelection(Some(viewName))
+    None
   }
 
   private def onCancelSqlEdit(): Unit = {
@@ -787,6 +809,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     alert.initOwner(ownerStage())
     alert.setHeaderText(header)
     alert.setTitle("Confirm delete")
+    Theme.style(alert)
     val result = alert.showAndWait()
     result.isPresent && result.get() == ButtonType.OK
   }
@@ -803,121 +826,39 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
 
   private def sectionLabel(text: String): Label = {
     val l = new Label(text)
-    l.setStyle(s"-fx-text-fill: $Heading; -fx-font-size: 11px; -fx-font-weight: bold;")
+    l.getStyleClass.add("section-label")
     l
   }
 
   private def mutedLabel(text: String): Label = {
     val l = new Label(text)
-    l.setStyle(s"-fx-text-fill: $MutedText; -fx-font-size: 11px;")
+    l.getStyleClass.add("muted")
     l
   }
 
-  private def metricChip(text: String): Label = {
+  private def hintLabel(text: String): Label = {
     val l = new Label(text)
-    l.setStyle(
-      "-fx-background-color: #34384a; " +
-        "-fx-text-fill: #d7dcec; " +
-        "-fx-padding: 1 8; " +
-        "-fx-background-radius: 10; " +
-        "-fx-font-size: 11px;"
-    )
+    l.getStyleClass.add("hint")
     l
   }
 
-  private def depChip(text: String): Label = {
+  private def metricChip(text: String): Label = chip(text, "metric")
+
+  private def chip(text: String, kind: String): Label = {
     val l = new Label(text)
-    l.setStyle(
-      "-fx-background-color: #2b4f7a; " +
-        "-fx-text-fill: #d7dcec; " +
-        "-fx-padding: 2 10; " +
-        "-fx-background-radius: 10; " +
-        "-fx-border-color: #4a90e2; " +
-        "-fx-border-radius: 10; " +
-        "-fx-font-size: 11px; " +
-        "-fx-font-family: monospace; " +
-        "-fx-cursor: hand;"
-    )
+    l.getStyleClass.addAll("chip", kind)
     l
   }
 
-  private def inputChip(text: String): Label = {
-    val l = new Label(text)
-    l.setStyle(
-      "-fx-background-color: #2b4a3a; " +
-        "-fx-text-fill: #d7dcec; " +
-        "-fx-padding: 2 10; " +
-        "-fx-background-radius: 10; " +
-        "-fx-border-color: #5fa17a; " +
-        "-fx-border-radius: 10; " +
-        "-fx-font-size: 11px; " +
-        "-fx-font-family: monospace; " +
-        "-fx-cursor: hand;"
-    )
-    l
-  }
-
-  private def smallChip(text: String, palette: ChipPalette): Label = {
-    val l = new Label(text)
-    l.setStyle(
-      s"-fx-background-color: ${palette.bg}; " +
-        s"-fx-text-fill: ${palette.fg}; " +
-        "-fx-padding: 1 8; " +
-        "-fx-background-radius: 10; " +
-        "-fx-font-size: 11px;"
-    )
-    l
-  }
-
-  private def makeToolButton(text: String): Button = makeToolButtonStyled(text, primary = false)
-  private def makePrimaryToolButton(text: String): Button = makeToolButtonStyled(text, primary = true)
-
-  /** Toolbar button styling. Primary variant uses the same blue as the main
-    * Run button to visually mark the destructive-confirmation flow's "yes,
-    * do it" action.
-    */
-  private def makeToolButtonStyled(text: String, primary: Boolean): Button = {
-    val b = new Button(text)
-    val (base, hover, press) =
-      if (primary) ("#3d6ee8", "#4f7ef0", "#2c5dc5")
-      else         ("#3a3f55", "#4a5070", "#2a2f45")
-    val fg = if (primary) "#ffffff" else "#d7dcec"
-    def style(bg: String): String =
-      s"-fx-background-color: $bg; " +
-        s"-fx-text-fill: $fg; " +
-        "-fx-background-radius: 4; " +
-        "-fx-padding: 4 12; " +
-        "-fx-font-size: 11px; " +
-        "-fx-cursor: hand;"
-    b.setStyle(style(base))
-    b.setOnMouseEntered(_ => if (!b.isDisabled) b.setStyle(style(hover)))
-    b.setOnMouseExited(_ => b.setStyle(style(base)))
-    b.setOnMousePressed(_ => if (!b.isDisabled) b.setStyle(style(press)))
-    b.setOnMouseReleased(_ => b.setStyle(style(if (b.isHover && !b.isDisabled) hover else base)))
+  private def actionButton(text: String, icon: javafx.scene.Node = null): Button = {
+    val b = new Button(text, icon)
+    b.getStyleClass.add(Styles.SMALL)
     b
   }
 
-  private def styleChip(label: Label, palette: ChipPalette): Unit = {
-    label.setStyle(
-      s"-fx-background-color: ${palette.bg}; " +
-        s"-fx-text-fill: ${palette.fg}; " +
-        "-fx-padding: 3 10; " +
-        "-fx-background-radius: 10; " +
-        "-fx-font-size: 11px; " +
-        "-fx-font-weight: bold;"
-    )
-  }
+  private def setTone(label: Label, tone: Tone): Unit =
+    label.getStyleClass.setAll("label", "pill", tone.css)
 
   private def indent(s: String, prefix: String): String =
     s.split('\n').iterator.map(prefix + _).mkString("\n")
-}
-
-private final case class ChipPalette(bg: String, fg: String)
-private object ChipPalette {
-  val Neutral = ChipPalette("#3a3f55", "#d7dcec")
-  val Running = ChipPalette("#2b4f7a", "#ffffff")
-  val Success = ChipPalette("#1f5b30", "#ffffff")
-  val Warning = ChipPalette("#7a5a22", "#ffffff")
-  val Failed  = ChipPalette("#5a2828", "#ffffff")
-  val Input   = ChipPalette("#2b4a3a", "#9bd1ad")
 }

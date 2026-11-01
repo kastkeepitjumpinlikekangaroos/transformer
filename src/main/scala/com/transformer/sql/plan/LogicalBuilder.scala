@@ -62,6 +62,11 @@ object LogicalBuilder {
     * every partition and every reference to a CTE sees the same value. */
   private val statementStart = new DynamicVariable[Instant](null)
 
+  /** The SELECT list each PlainSelect of the statement being bound expanded
+    * to, an item per output column with each `*` written out as its columns,
+    * which a UNION reads its arms' written values from ([[unifyArms]]). */
+  private val expandedSelects = new DynamicVariable[java.util.IdentityHashMap[PlainSelect, Seq[Expression]]](null)
+
   def build(sql: String, catalog: Catalog): BuiltQuery = {
     val select = SqlParser.parseSelect(sql)
     // Everything below reads the AST through the getters it knows about, so a
@@ -71,9 +76,11 @@ object LogicalBuilder {
     // A TimestampVector holds microseconds, so a clock literal truncated to
     // them equals a stored copy of itself on the row path too.
     statementStart.withValue(Instant.now().truncatedTo(ChronoUnit.MICROS)) {
-      val collector = mutable.ArrayBuffer.empty[CteDef]
-      val main = buildAnySelect(select, catalog, Map.empty, Some(collector))
-      BuiltQuery(main, collector.toSeq)
+      expandedSelects.withValue(new java.util.IdentityHashMap[PlainSelect, Seq[Expression]]()) {
+        val collector = mutable.ArrayBuffer.empty[CteDef]
+        val main = buildAnySelect(select, catalog, Map.empty, Some(collector))
+        BuiltQuery(main, collector.toSeq)
+      }
     }
   }
 
@@ -199,6 +206,24 @@ object LogicalBuilder {
       case _ => (None, None, None)
     }
 
+    // Before the last arm such a clause has no meaning SQL gives it: the
+    // grammar puts ORDER BY, LIMIT, OFFSET and FETCH after the last arm, for
+    // the whole union, and inside parentheses for one arm. It was applied to
+    // its arm, as Postgres, MySQL and SQLite all refuse to guess.
+    selects.init.foreach {
+      case ps: PlainSelect =>
+        val clause =
+          if (Option(ps.getOrderByElements).exists(!_.isEmpty)) Some("ORDER BY")
+          else if (ps.getLimit != null) Some("LIMIT")
+          else if (ps.getOffset != null) Some("OFFSET")
+          else if (ps.getFetch != null) Some("FETCH")
+          else None
+        clause.foreach(c => throw new IllegalArgumentException(
+          s"$c before the last arm of a UNION is not supported; put the arm in parentheses, (SELECT ... $c ...), " +
+            "to apply it to that arm, or write it after the last arm to apply it to the whole union"))
+      case _ => ()
+    }
+
     val unions: Seq[UnionOp] = ops.map {
       case u: UnionOp => u
       case other => throw new IllegalArgumentException(UnsupportedClauses.refusal(other))
@@ -270,11 +295,13 @@ object LogicalBuilder {
       case p: ParenthesedSelect => plain(p.getSelect)
       case _ => None
     }
+    // A `*` among them is written out as its columns, so a number after one
+    // is still read as written: `SELECT *, 0.1000000000000000000001` lost its
+    // digits beside a DECIMAL arm, read through a DOUBLE.
     val items: Seq[Option[Seq[Expression]]] = arms.zip(written).map {
       case (LogicalProject(_, projections), arm) =>
-        plain(arm).map(_.getSelectItems.asScala.toSeq.asInstanceOf[Seq[SelectItem[_ <: Expression]]]
-          .map(_.getExpression: Expression))
-          .filter(list => list.size == projections.size && !list.exists(_.isInstanceOf[AllColumns]))
+        plain(arm).flatMap(ps => Option(expandedSelects.value).flatMap(selects => Option(selects.get(ps))))
+          .filter(_.size == projections.size)
       case _ => None
     }
     val names = arms.head.outputSchema.fieldNames
@@ -378,12 +405,22 @@ object LogicalBuilder {
       }
     }
 
-    val hasGroupBy = Option(ps.getGroupBy).exists(g => Option(g.getGroupByExpressionList).exists(!_.isEmpty))
-    val itemsContainAgg = expandedItems.exists { case (e, _) => containsAggregate(e) }
+    Option(expandedSelects.value).foreach(_.put(ps, expandedItems.map(_._1)))
+
+    // `GROUP BY ()` groups by no key: every row is one group, as with an
+    // aggregate and no GROUP BY. It used to be dropped, so `SELECT 1 FROM t
+    // GROUP BY ()` returned a row for each row of t.
+    val hasGroupBy = ps.getGroupBy != null
+    // An aggregate anywhere outside a FROM makes the query one: in the SELECT
+    // list, inside a window function's arguments or keys (`SUM(COUNT(*))
+    // OVER ()`), and in ORDER BY (`SELECT 1 FROM t ORDER BY COUNT(*)`), as in
+    // Postgres; the last two were refused as aggregates out of place.
+    val containsAgg = expandedItems.exists { case (e, _) => containsAggregate(e) } ||
+      Option(ps.getOrderByElements).exists(_.asScala.exists(obe => containsAggregate(obe.getExpression)))
     // A HAVING makes the query an aggregate too, over one group when there is
     // no GROUP BY. Only the aggregate path reads it, so without this term
     // `SELECT 1 AS x FROM t HAVING COUNT(*) > 10` returned every row.
-    val isAggregation = hasGroupBy || itemsContainAgg || ps.getHaving != null
+    val isAggregation = hasGroupBy || containsAgg || ps.getHaving != null
 
     // Stage 1: aggregation. `binderFactory` produces a binder parameterized by a
     // window resolver and an output-column resolver — we call it with the empty
@@ -663,16 +700,19 @@ object LogicalBuilder {
     // assign synthetic names. ORDER BY may name one the SELECT list does not
     // (`SELECT g ... GROUP BY g ORDER BY SUM(a)`), and the sort's rebind needs
     // its slot; so may a window function (`SUM(COUNT(*)) OVER ()`, which sums
-    // the groups' counts), whose own function is no group aggregate.
+    // the groups' counts), whose own function is no group aggregate. A name
+    // is one no GROUP BY key has, so a column of the input named `_agg0` is
+    // no aggregate's; each aggregate is read at its position.
+    val keyNames = groupBound.map(_._2.toLowerCase(Locale.ROOT)).toSet
+    def aggregateName(i: Int): String =
+      Iterator.from(0).map(n => if (n == 0) s"_agg$i" else s"_agg${i}_$n")
+        .find(name => !keyNames(name.toLowerCase(Locale.ROOT))).get
     val aggMap = mutable.LinkedHashMap.empty[String, (AggExpr, String)]
     def collect(e: Expression): Unit = e match {
       case ae: AnalyticExpression => windowInputs(ae).foreach(collect)
       case f: Function if isAggFn(f.getName) =>
         val key = canonicalSql(f)
-        if (!aggMap.contains(key)) {
-          val name = s"_agg${aggMap.size}"
-          aggMap.put(key, (bindAgg(f, sources), name))
-        }
+        if (!aggMap.contains(key)) aggMap.put(key, (bindAgg(f, sources), aggregateName(aggMap.size)))
       case _ => childExpressions(e).foreach(collect)
     }
     expandedItems.foreach { case (e, _) => collect(e) }
@@ -681,37 +721,56 @@ object LogicalBuilder {
 
     val agg = LogicalAggregate(child, groupBound, aggMap.values.toSeq, None)
 
-    val aggOutSources: Sources = Seq((None, agg.outputSchema))
-    val aggIndexes: Map[String, Int] = {
-      val gks = groupBound.zipWithIndex.map { case ((_, _), i) => (canonicalSql(groupExprs(i)), i) }
-      val ags = aggMap.toSeq.zipWithIndex.map { case ((k, _), i) => (k, groupBound.size + i) }
-      (gks ++ ags).toMap
-    }
+    // A name binds through the resolver below, never by the output's names:
+    // `_agg0` names no aggregate a query can write, and a name two inputs
+    // have is as ambiguous here as in WHERE.
+    val aggOutSources: Sources = Seq((None, Schema(agg.outputSchema.fields.take(groupBound.size))))
     val aggOutFieldNames: IndexedSeq[String] = agg.outputSchema.fieldNames
+    def output(i: Int): Expr = ColRefExpr(i, aggOutFieldNames(i), agg.outputSchema.fields(i).dataType)
+    val aggregateAt: Map[String, Int] =
+      aggMap.keys.zipWithIndex.map { case (key, i) => key -> (groupBound.size + i) }.toMap
 
-    /** A column the aggregate's output does not hold by that name: the GROUP
-      * BY key it is, written another way (`t.a` for a key written `a`), or an
-      * error. A column of the input that is no key is the error that says the
-      * rule, and one the input does not have is its unknown column. */
+    /** The GROUP BY key `e` is, written another way: in parentheses, with or
+      * without its table, in another case or spacing, which bind to the same
+      * expression over the input. It is found wherever it is written, so
+      * `SELECT UPPER(s) || '!' ... GROUP BY UPPER(s)` and `HAVING a % 2 = 1`
+      * over `GROUP BY a % 2` read the key; they were refused, since a key
+      * was matched by its text and only as a whole SELECT item. A column is
+      * [[groupedColumn]]'s. */
+    def groupKey(e: Expression): Option[Expr] = e match {
+      case _ if groupBound.isEmpty => None
+      case _: Column | _: AnalyticExpression => None
+      case _ =>
+        val bound = try Some(bindExpr(e, sources)) catch { case NonFatal(_) => None }
+        bound.flatMap(b => groupBound.indexWhere(_._1 == b) match {
+          case -1 => None
+          case i => Some(output(i))
+        })
+    }
+
+    /** A column outside an aggregate's arguments: the GROUP BY key it is,
+      * however it is written (`t.a` for a key written `a`), or an error. It
+      * resolves in the input, as it does in WHERE, so a name two inputs have
+      * is ambiguous here too; a column of the input that is no key is the
+      * error that says the rule, and one the input does not have is its
+      * unknown column, or the literal TRUE or FALSE. */
     def groupedColumn(c: Column): Expr = {
       val qualifier = Option(c.getTable).map(t => unquoted(t.getName))
       val name = unquoted(c.getColumnName)
-      val input = Analyzer.resolveColumn(qualifier, name, sources)
-      groupBound.indexWhere(_._1 == input) match {
-        case -1 => throw new IllegalArgumentException(
-          s"Column '${qualifier.fold("")(_ + ".")}$name' must appear in GROUP BY or inside an aggregate")
-        case i => ColRefExpr(i, aggOutFieldNames(i), agg.outputSchema.fields(i).dataType)
+      Analyzer.findColumn(qualifier, name, sources) match {
+        case Some(input) => groupBound.indexWhere(_._1 == input) match {
+          case -1 => throw new IllegalArgumentException(
+            s"Column '${qualifier.fold("")(_ + ".")}$name' must appear in GROUP BY or inside an aggregate")
+          case i => output(i)
+        }
+        case None => booleanWord(c).getOrElse(throw Analyzer.unknownColumn(qualifier, name, sources))
       }
     }
 
     val aggResolver: Expression => Option[Expr] = {
-      case f: Function if isAggFn(f.getName) =>
-        aggMap.get(canonicalSql(f)).map { case (_, name) =>
-          val i = aggOutFieldNames.indexOf(name)
-          ColRefExpr(i, name, agg.outputSchema.fields(i).dataType): Expr
-        }
+      case f: Function if isAggFn(f.getName) => aggregateAt.get(canonicalSql(f)).map(output)
       case c: Column => Some(groupedColumn(c))
-      case _ => None
+      case other => groupKey(other)
     }
 
     val factory: BinderFactory = { (windowResolver, outputs) =>
@@ -721,28 +780,8 @@ object LogicalBuilder {
         case c: Column => outputs(c).orElse(aggResolver(c))
         case other => aggResolver(other)
       }
-      def rebind(e: Expression): Expr = e match {
-        // Strip grouping parens before the group-key lookup below, so
-        // `SELECT (a + b) ... GROUP BY a + b` still matches its key by text.
-        case Grouped(inner) => rebind(inner)
-        case ae: AnalyticExpression =>
-          windowResolver(ae).getOrElse(throw new IllegalArgumentException(
-            s"Window function '${ae.getName}' used in non-window position"))
-        case f: Function if isAggFn(f.getName) =>
-          val key = canonicalSql(f)
-          val (_, name) = aggMap(key)
-          val i = aggOutFieldNames.indexOf(name)
-          ColRefExpr(i, name, agg.outputSchema.fields(i).dataType)
-        case _ =>
-          val key = canonicalSql(e)
-          aggIndexes.get(key) match {
-            case Some(i) =>
-              ColRefExpr(i, aggOutFieldNames(i), agg.outputSchema.fields(i).dataType)
-            case None =>
-              bindExprWithAggs(e, aggOutSources, resolver, windowResolver)
-          }
-      }
-      rebind
+      // An aggregate and a GROUP BY key are the resolver's, at any depth.
+      e: Expression => bindExprWithAggs(e, aggOutSources, resolver, windowResolver)
     }
 
     val havingBinder = factory(_ => None, _ => None)
@@ -796,6 +835,13 @@ object LogicalBuilder {
     val conditions = joinConditions(joins)
     joins.zip(conditions).foreach { case (j, on) =>
       val (rightPlan, rightSources) = fromItem(j.getRightItem, catalog, cteScope)
+      // A name a FROM gives two of its tables names neither: `x.b` read
+      // whichever of `t x JOIN u x` had a column `b`. Postgres refuses it too.
+      rightSources.flatMap(_._1).foreach { name =>
+        if (srcs.exists(_._1.exists(_.equalsIgnoreCase(name))))
+          throw new IllegalArgumentException(
+            s"FROM names two tables $name; give each its own alias (FROM t a JOIN t b ON ...)")
+      }
       val combinedSources = srcs ++ rightSources
       // A CROSS JOIN and a table after a comma pair every row.
       val condition: Expr = on.fold[Expr](LitExpr(true, DataType.BooleanType))(e =>
@@ -911,12 +957,14 @@ object LogicalBuilder {
     bindExprWithAggs(e, sources, _ => None, _ => None)
 
   /** Variant used inside aggregation, where `sources` is the aggregate's
-    * output: `aggResolver` returns a ColRef into it when called with an
-    * aggregate Function — letting expressions like `COUNT(*) > 1` (in HAVING /
-    * ORDER BY) bind cleanly — and decides a column the output does not hold by
-    * that name. `windowResolver` plays the same role for
-    * [[AnalyticExpression]]s after [[LogicalWindow]] has appended their output
-    * columns to the schema.
+    * output: `aggResolver` is asked first for every node but a window. In an
+    * aggregate query it answers a column with the GROUP BY key it reads, an
+    * aggregate with a ColRef into the output — letting expressions like
+    * `COUNT(*) > 1` (in HAVING / ORDER BY) bind cleanly — and a GROUP BY key
+    * written as an expression with the key, wherever it is; elsewhere it
+    * answers a name ORDER BY reads as an output column. `windowResolver`
+    * plays the same role for [[AnalyticExpression]]s after [[LogicalWindow]]
+    * has appended their output columns to the schema.
     */
   def bindExprWithAggs(
       e: Expression,
@@ -924,29 +972,33 @@ object LogicalBuilder {
       aggResolver: Expression => Option[Expr],
       windowResolver: AnalyticExpression => Option[Expr] = _ => None): Expr = {
     def b(x: Expression): Expr = bindExprWithAggs(x, sources, aggResolver, windowResolver)
+    object Resolved {
+      def unapply(x: Expression): Option[Expr] = x match {
+        case _: AnalyticExpression => None
+        case _ => aggResolver(x)
+      }
+    }
     e match {
     case Grouped(inner) => b(inner)
+    case Resolved(resolved) => resolved
     case c: Column =>
       val q = Option(c.getTable).map(t => unquoted(t.getName))
-      val written = c.getColumnName
-      val name = unquoted(written)
-      Analyzer.findColumn(q, name, sources).getOrElse {
-        // JSqlParser parses TRUE and FALSE as names; they are the literals
-        // unless a column has the name. In quotes they are only a name.
-        if (q.isEmpty && (written.equalsIgnoreCase("TRUE") || written.equalsIgnoreCase("FALSE")))
-          LitExpr(written.equalsIgnoreCase("TRUE"), DataType.BooleanType)
-        else aggResolver(c).getOrElse(throw Analyzer.unknownColumn(q, name, sources))
-      }
+      val name = unquoted(c.getColumnName)
+      Analyzer.findColumn(q, name, sources)
+        .orElse(booleanWord(c))
+        .getOrElse(throw Analyzer.unknownColumn(q, name, sources))
     case IntegerLiteral(v) => integerLiteral(v)
     case d: DoubleValue => doubleLiteral(d)
     // The value, each doubled quote one: `getValue` is the text between the
     // quotes as written, so 'it''s' was five characters.
     case s: StringValue => LitExpr(s.getNotExcapedValue, DataType.StringType)
     case _: NullValue => LitExpr(null, DataType.NullType)
-    case d: DateValue => LitExpr(d.getValue.toLocalDate, DataType.DateType)
-    // `{ts '...'}` holds its text as a wall-clock time, which is UTC here.
-    case t: TimestampValue =>
-      LitExpr(t.getValue.toLocalDateTime.toInstant(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS), DataType.TimestampType)
+    // `{d '...'}` and `{ts '...'}` are read as `DATE '...'` and `TIMESTAMP
+    // '...'` are, by the CAST from text: JSqlParser reads them leniently, so
+    // `{d '2026-02-30'}` was 2026-03-02. A time with no zone is UTC.
+    case d: DateValue =>
+      Analyzer.readLiteral(SqlParser.escapeLiteralText(d).getOrElse(d.getValue.toLocalDate.toString), DataType.DateType)
+    case t: TimestampValue => Analyzer.readLiteral(SqlParser.stringLiteralValue(t.getRawValue), DataType.TimestampType)
     case _: TimeValue => throw new IllegalArgumentException("TIME literal not supported")
     // UnsupportedClauses has already rejected every keyword but the two clock ones.
     case tk: TimeKeyExpression => clockLiteral(UnsupportedClauses.clockKeyword(tk.getStringValue))
@@ -957,7 +1009,11 @@ object LogicalBuilder {
         case '-' =>
           Analyzer.checkArithmetic(inner.dataType)
           UnaryOpExpr("-", inner, inner.dataType)
-        case '+' => inner
+        // A plus is arithmetic on a number too, as a minus is: `+'abc'` and
+        // `+TRUE` were their operands.
+        case '+' =>
+          Analyzer.checkArithmetic(inner.dataType)
+          inner
         case other => throw new IllegalArgumentException(s"The $other operator is not supported")
       }
     case n: NotExpression =>
@@ -1006,10 +1062,14 @@ object LogicalBuilder {
     case bw: Between =>
       val (operands, _) = Analyzer.unify(bindCompared(
         Seq(leftSide(bw.getLeftExpression), bw.getBetweenExpressionStart, bw.getBetweenExpressionEnd), b))
-      val expr: Expr = BinOpExpr("AND",
-        BinOpExpr(">=", operands(0), operands(1), DataType.BooleanType),
-        BinOpExpr("<=", operands(0), operands(2), DataType.BooleanType),
-        DataType.BooleanType)
+      // Its two comparisons, which read the operand twice, unless the
+      // operand differs each time it is read.
+      val expr: Expr =
+        if (Expr.readsRandom(operands(0))) BetweenExpr(operands(0), operands(1), operands(2))
+        else BinOpExpr("AND",
+          BinOpExpr(">=", operands(0), operands(1), DataType.BooleanType),
+          BinOpExpr("<=", operands(0), operands(2), DataType.BooleanType),
+          DataType.BooleanType)
       if (bw.isNot) UnaryOpExpr("NOT", expr, DataType.BooleanType) else expr
 
     case lk: LikeExpression =>
@@ -1039,20 +1099,28 @@ object LogicalBuilder {
     case c: CaseExpression =>
       val switch = Option(c.getSwitchExpression).map(s => (s, b(s)))
       val whens = c.getWhenClauses.asScala.toSeq.map(_.asInstanceOf[WhenClause])
-      val conds: Seq[Expr] = whens.map { whenExpr =>
-        switch match {
-          case None =>
-            Analyzer.condition(b(whenExpr.getWhenExpression), "CASE WHEN")
-          case Some((written, s)) =>
-            val when = whenExpr.getWhenExpression
-            val pair = comparedBesideDecimals(Seq(written, when), Seq(s, b(when)))
-            val (sl, wr, _) = Analyzer.promotePair(pair(0), pair(1))
-            BinOpExpr("=", sl, wr, DataType.BooleanType)
+      // A simple CASE compares its operand with each WHEN, each pair typed as
+      // a comparison's two sides are.
+      val compared: Seq[(Expr, Expr, DataType)] = switch.toSeq.flatMap { case (written, s) =>
+        whens.map { whenExpr =>
+          val when = whenExpr.getWhenExpression
+          val pair = comparedBesideDecimals(Seq(written, when), Seq(s, b(when)))
+          Analyzer.promotePair(pair(0), pair(1))
         }
       }
+      val conditions: Seq[Expr] =
+        if (switch.isDefined) compared.map { case (sl, wr, _) => BinOpExpr("=", sl, wr, DataType.BooleanType) }
+        else whens.map(w => Analyzer.condition(b(w.getWhenExpression), "CASE WHEN"))
       val elseE = Option(c.getElseExpression)
       val (values, resultType) = bindBranches("CASE", whens.map(_.getThenExpression) ++ elseE, b)
-      CaseExpr(conds.zip(values), elseE.map(_ => values.last), resultType)
+      val elseValue = elseE.map(_ => values.last)
+      switch match {
+        // An operand that differs each time it is read is read once.
+        case Some((_, s)) if Expr.readsRandom(s) =>
+          SwitchCaseExpr(s, compared.zip(values).map { case ((_, when, t), value) => SwitchBranch(t, when, value) },
+            elseValue, resultType)
+        case _ => CaseExpr(conditions.zip(values), elseValue, resultType)
+      }
 
     case ce: CastExpression =>
       val inner = b(ce.getLeftExpression)
@@ -1081,14 +1149,11 @@ object LogicalBuilder {
       Analyzer.checkText(trimmed.dataType, "TRIM")
       FuncExpr("TRIM", Seq(trimmed), DataType.StringType)
 
+    // The resolver has declined it (Resolved, above).
     case f: Function =>
-      aggResolver(f) match {
-        case Some(expr) => expr
-        case None =>
-          if (isAggFn(f.getName))
-            throw new IllegalArgumentException(s"Aggregate '${f.getName}' used in non-aggregating position")
-          bindScalarFunctionWithAggs(f, sources, aggResolver, windowResolver)
-      }
+      if (isAggFn(f.getName))
+        throw new IllegalArgumentException(s"Aggregate '${f.getName}' used in non-aggregating position")
+      bindScalarFunctionWithAggs(f, sources, aggResolver, windowResolver)
 
     case ae: AnalyticExpression =>
       windowResolver(ae).getOrElse(throw new IllegalArgumentException(
@@ -1349,10 +1414,21 @@ object LogicalBuilder {
   )
   private def isAggFn(name: String): Boolean = AggFns.contains(name.toUpperCase(Locale.ROOT))
 
+  /** Whether `e` holds a group aggregate. A window aggregate is none, but its
+    * arguments and keys may hold one, which it reads per group. */
   private def containsAggregate(e: Expression): Boolean = e match {
-    case _: AnalyticExpression => false  // window aggregates are not group aggregates
+    case ae: AnalyticExpression => windowInputs(ae).exists(containsAggregate)
     case f: Function if isAggFn(f.getName) => true
     case _ => childExpressions(e).exists(containsAggregate)
+  }
+
+  /** TRUE or FALSE written as a bare word, which JSqlParser parses as a name:
+    * the literal, unless a column has the name. In quotes it is only a name. */
+  private def booleanWord(c: Column): Option[Expr] = {
+    val written = c.getColumnName
+    if (c.getTable == null && (written.equalsIgnoreCase("TRUE") || written.equalsIgnoreCase("FALSE")))
+      Some(LitExpr(written.equalsIgnoreCase("TRUE"), DataType.BooleanType))
+    else None
   }
 
   private def childExpressions(e: Expression): Seq[Expression] = e match {
@@ -1562,6 +1638,13 @@ object LogicalBuilder {
         }
         if (v.signum < 0)
           throw new IllegalArgumentException(s"A RANGE frame's $side offset must not be negative")
+        // A FLOAT or DOUBLE key measures in DOUBLE, which holds no such
+        // offset, as it holds no such literal: an infinite offset made an
+        // infinite key's frame NaN, missing its own row.
+        if ((keyType == DataType.FloatType || keyType == DataType.DoubleType) && v.doubleValue.isInfinite)
+          throw new IllegalArgumentException(
+            s"A RANGE frame's $side offset ${Decimals.shownNumber(v.toString)} is too large for a DOUBLE, which " +
+              s"holds at most ${Double.MaxValue}")
         if (side == "PRECEDING") FrameBound.ValuePreceding(v) else FrameBound.ValueFollowing(v)
     }
     wo.getType match {
@@ -1678,6 +1761,10 @@ object LogicalBuilder {
     case IsNullExpr(c, _) => isConstant(c)
     case InListExpr(c, items, _) => isConstant(c) && items.forall(isConstant)
     case LikeExpr(c, pattern, _, _) => isConstant(c) && isConstant(pattern)
+    // Each reads RAND(), so neither is constant; the walk says so all the same.
+    case SwitchCaseExpr(operand, branches, elseExpr, _) =>
+      isConstant(operand) && branches.forall(b => isConstant(b.when) && isConstant(b.value)) && elseExpr.forall(isConstant)
+    case BetweenExpr(c, low, high) => isConstant(c) && isConstant(low) && isConstant(high)
   }
 
   /** The value of a constant `e` ([[isConstant]]), computed now. None when

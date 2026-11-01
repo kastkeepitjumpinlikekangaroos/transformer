@@ -79,6 +79,7 @@ object AddInputDialog {
     val optionsArea = new TextArea()
     optionsArea.setPromptText("Optional, one per line:\n  header=true\n  delimiter=,")
     optionsArea.setPrefRowCount(4)
+    optionsArea.getStyleClass.add("mono")
     optionsArea.setText(
       existing.map(_.options.toSeq.sortBy(_._1)
         .map { case (k, v) => s"$k=$v" }.mkString("\n"))
@@ -88,12 +89,14 @@ object AddInputDialog {
     val grid = new GridPane()
     grid.setHgap(8); grid.setVgap(8)
     grid.setPadding(new Insets(12, 4, 12, 4))
+    grid.getColumnConstraints.add(FxHelpers.labelColumn())
     grid.add(new Label("View name:"), 0, 0); grid.add(nameField, 1, 0)
     grid.add(new Label("Path:"),       0, 1); grid.add(pathRow,    1, 1)
     grid.add(new Label("Format:"),     0, 2); grid.add(formatCombo, 1, 2)
     grid.add(new Label(""),            0, 3); grid.add(cacheCheck,  1, 3)
     grid.add(new Label("Options:"),    0, 4); grid.add(optionsArea, 1, 4)
     dialog.getDialogPane.setContent(grid)
+    Theme.style(dialog)
 
     // Validate and write inside the OK event filter so failures keep the dialog open.
     val okButton = dialog.getDialogPane.lookupButton(okType)

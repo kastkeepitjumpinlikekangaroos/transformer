@@ -110,6 +110,27 @@ class ParquetRoundtripTest {
     assertEquals(60.0, rows(1)("total"))
   }
 
+  /** A column whose only value is the NULL literal has no type, which a
+    * parquet file must store, so writing one fails before any partition runs,
+    * naming the column and the CAST. It failed only in a partition with a row
+    * to write, as `Writing null to Parquet not supported in v1`, so an empty
+    * result wrote no file and succeeded. */
+  @Test def aColumnWithNoTypeIsRefusedBeforeAnythingIsWritten(): Unit = {
+    val schema = Schema(Field("id", DataType.IntType), Field("n", DataType.NullType))
+    val dir = Files.createTempDirectory("pq-null-").resolve("out")
+    def refusal(partitions: IndexedSeq[Iterator[ColumnarBatch]]): String =
+      try { TParquetWriter.writePartitioned(dir, schema, partitions); fail("wrote a NULL-typed column"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    val expected = "Column 'n' has no type, since its only value is NULL, and a parquet file stores a type for " +
+      "each column; CAST it to the type it holds, such as CAST(NULL AS INT) AS n"
+    assertEquals(expected, refusal(IndexedSeq(Iterator.empty)))
+    val oneRow = new ColumnarBatch(schema, 1)
+    oneRow.column(0).setBoxed(0, 1)
+    oneRow.setNumRows(1)
+    assertEquals(expected, refusal(IndexedSeq(Iterator(oneRow))))
+    assertFalse("nothing is written", Files.exists(dir))
+  }
+
   @Test def parquetMultiPartitionInputProducesMultipleOutputFiles(): Unit = {
     val schema = Schema(Field("v", DataType.IntType))
 

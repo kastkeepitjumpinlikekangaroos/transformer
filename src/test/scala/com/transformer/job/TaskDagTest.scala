@@ -42,6 +42,21 @@ class TaskDagTest {
     assertEquals(Set.empty[Int], dag.nodes(0).deps)
   }
 
+  /** A view only a validation reads is a dependency (the validation waits for
+    * it) but not where the task's rows come from: `mainDeps` and
+    * `mainInputDeps` hold what the main SQL reads, the lineage a run records. */
+  @Test def mainDepsLeaveOutWhatOnlyValidationsRead(): Unit = {
+    val a = task("SELECT * FROM events", viewName = "a")
+    val b = task("SELECT * FROM a", viewName = "b",
+      validations = Seq(Validation("v", sqlString = Some("SELECT * FROM users u JOIN c ON u.id = c.id"))))
+    val c = task("SELECT * FROM events", viewName = "c")
+    val dag = TaskDag.build(Seq(a, b, c), Set("events", "users"), vars)
+    val nb = dag.nodes(1)
+    assertEquals((Set(0, 2), Set("users")), (nb.deps, nb.inputDeps))
+    assertEquals((Set(0), Set.empty[String]), (nb.mainDeps, nb.mainInputDeps))
+    assertEquals((Set.empty[Int], Set("events")), (dag.nodes(0).mainDeps, dag.nodes(0).mainInputDeps))
+  }
+
   @Test def independentRoots(): Unit = {
     val a = task("SELECT * FROM events", viewName = "ea")
     val b = task("SELECT * FROM users", viewName = "ub")

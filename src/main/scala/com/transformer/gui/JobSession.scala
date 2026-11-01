@@ -839,15 +839,17 @@ object JobSession {
     else try Some(Paths.get(trimmed)) catch { case NonFatal(_) => None }
   }
 
-  /** Read an on-disk task output directory as a [[CatalogView]]. Mirrors the
-    * format detection used by `ResultsTabPane` for output previews so the
-    * interactive SQL catalog sees the same data the preview tab does.
+  /** Read an on-disk task output directory as a [[CatalogView]], as the
+    * output preview reads it, so the interactive SQL catalog sees the same
+    * data the preview tab does.
     *
-    * Detection order:
-    *   1. `_run.json` record's `format` field (the source of truth — written
-    *      by the runner alongside the part files).
-    *   2. `.parquet` / `.csv` substring in the path (legacy single-file paths
-    *      that pre-date the record, and ad-hoc paths the user types in).
+    *   1. A directory with a `_run.json` reads as the tasks after it read it
+    *      ([[TaskRunRecord.outputView]]): the part files its run wrote, in the
+    *      record's format, a CSV with the writer's options and the result's
+    *      column types.
+    *   2. Otherwise the `.parquet` / `.csv` substring in the path decides
+    *      (legacy single-file paths that pre-date the record, and ad-hoc paths
+    *      the user types in).
     *
     * Without (1) the path-substring check is the only signal, and
     * `DirectoryJobLoader` deliberately writes parquet to ext-less directories
@@ -855,19 +857,16 @@ object JobSession {
     * parquet directory to the CSV reader, which would then parse the raw
     * `PAR1`-magic bytes as a CSV header.
     */
-  private[gui] def readOutputAsView(path: String): CatalogView = {
+  def readOutputAsView(path: String): CatalogView = {
     val p = try Paths.get(path) catch { case NonFatal(_) => null }
-    val recordFormat: Option[String] =
-      if (p != null && Files.isDirectory(p)) TaskRunRecord.read(p).map(_.format.toLowerCase(Locale.ROOT))
-      else None
-    val isParquet = recordFormat match {
-      case Some(f) => f == "parquet"
+    val record = if (p != null && Files.isDirectory(p)) TaskRunRecord.read(p) else None
+    record match {
+      case Some(rec) => TaskRunRecord.outputView(p, rec)
       case None =>
         val lower = path.toLowerCase(Locale.ROOT)
-        lower.endsWith(".parquet") || lower.contains(".parquet")
+        if (lower.endsWith(".parquet") || lower.contains(".parquet")) ParquetReader.fromPath(path)
+        else CsvReader.fromPath(path, CsvOptions())
     }
-    if (isParquet) ParquetReader.fromPath(path)
-    else CsvReader.fromPath(path, CsvOptions())
   }
 }
 

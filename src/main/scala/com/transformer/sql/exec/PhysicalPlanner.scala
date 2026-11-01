@@ -130,9 +130,10 @@ object PhysicalPlanner {
       CountStarMetadataExec(view.exactRowCount.get, name)
     case LogicalAggregate(child, gks, aggs, _) =>
       val physChild = planInner(child, opts)
-      if (gks.isEmpty || !shouldShardForSize(child)) {
+      if (gks.isEmpty || !shouldShardForSize(child) || gks.exists(k => Expr.readsRandom(k._1))) {
         // No GROUP BY, OR the estimated input is small enough that the
-        // exchange-shard overhead would dominate the per-shard parallelism.
+        // exchange-shard overhead would dominate the per-shard parallelism,
+        // OR a key reads RAND(), which the exchange would read a second time.
         // Fall back to the collapsing aggregate (fan out + merge).
         HashAggregateExec(physChild, gks, aggs, opts)
       } else {
@@ -165,12 +166,13 @@ object PhysicalPlanner {
       val (leftKeys, rightKeys, extra) = splitEqualityKeys(cond, l.outputSchema.length, r.outputSchema.length)
       if (leftKeys.isEmpty && rightKeys.isEmpty) enforceNestedLoopGuard(l, r)
       val buildRight = shouldBuildRight(l, r, kind)
-      if (leftKeys.isEmpty || !shouldShardJoin(l, r)) {
+      if (leftKeys.isEmpty || !shouldShardJoin(l, r) || (leftKeys ++ rightKeys).exists(Expr.readsRandom)) {
         // Either non-equi (no keys to shard by) OR the smaller side is
         // broadcast-shaped (fits in heap) so we keep the historic shape:
         // build one side, stream the other. Sharding both sides forces an
         // extra pass over the *large* side just to redistribute rows; with
-        // a small build that pass dominates the join itself.
+        // a small build that pass dominates the join itself. A key that
+        // reads RAND() is read once, so it is never sharded.
         HashJoinExec(left, right, leftKeys, rightKeys, extra, kind, buildRight, opts)
       } else {
         // Equi-join with both sides large enough to benefit from sharded
@@ -207,7 +209,7 @@ object PhysicalPlanner {
     val distinctParts = windows.map(_.spec.partitionKeys).distinct
     val canShard =
       distinctParts.length == 1 && distinctParts.head.nonEmpty &&
-      shouldShardForSize(logicalChild)
+      !distinctParts.head.exists(Expr.readsRandom) && shouldShardForSize(logicalChild)
     if (canShard) {
       val partitionBy = distinctParts.head
       val exchanged = ExchangeExec(
@@ -328,19 +330,20 @@ object PhysicalPlanner {
     case JoinKind.Full  => true
   }
 
-  /** Throw when a non-equi join would have to scan a known-large input on
-    * both sides. The check is intentionally conservative: it never refuses a
-    * plan we can't size (estimates are `None` for streaming CSV inputs, so
-    * those still get a degenerate-hash plan). Only when both sides expose an
-    * exact row count and the smaller of the two exceeds [[NestedLoopMaxRows]]
-    * do we bail — at that point the user has the information to add
-    * equality keys and we have no business silently materializing a
-    * cartesian product.
+  /** Throw when a non-equi join would have to pair two inputs known to be
+    * large. The check never refuses a plan it cannot size: a side counts only
+    * when its rows are known exactly ([[provenRows]]), so streaming CSV
+    * inputs, and a side behind a filter, a grouping or a join condition, get
+    * a degenerate-hash plan. When both sides are known and the smaller
+    * exceeds [[NestedLoopMaxRows]] we bail — at that point the user has the
+    * information to add equality keys and we have no business silently
+    * materializing a cartesian product. The sizes in that message are facts:
+    * they were estimates, a filter keeping a guessed share of its input, so
+    * a CROSS JOIN of two one-row filters over 60,000-row tables was refused
+    * as pairing 6000 rows with 6000.
     */
   private def enforceNestedLoopGuard(l: LogicalPlan, r: LogicalPlan): Unit = {
-    val lEst = LogicalPlanCardinality.estimate(l)
-    val rEst = LogicalPlanCardinality.estimate(r)
-    (lEst, rEst) match {
+    (provenRows(l), provenRows(r)) match {
       case (Some(lc), Some(rc)) if math.min(lc, rc) > NestedLoopMaxRows =>
         throw new IllegalArgumentException(
           s"A join without an equality between its two sides in ON is refused when both sides hold more than " +
@@ -358,6 +361,26 @@ object PhysicalPlanner {
             "equality to one of the ON conditions")
       case _ => ()
     }
+  }
+
+  /** How many rows `p` produces, when the plan proves it: a scan's exact
+    * count, kept by the operators that keep every row (a projection, a sort,
+    * a window), cut by LIMIT and OFFSET, added by UNION ALL, one for an
+    * aggregate with no GROUP BY, and the product of a CROSS JOIN's sides.
+    * `None` where a filter, a grouping, DISTINCT or a join condition decides
+    * how many rows there are. */
+  private def provenRows(p: LogicalPlan): Option[Long] = p match {
+    case LogicalScan(_, view, _) => view.exactRowCount
+    case LogicalProject(child, _) => provenRows(child)
+    case LogicalSort(child, _) => provenRows(child)
+    case LogicalWindow(child, _) => provenRows(child)
+    case LogicalLimit(child, n) => provenRows(child).map(math.min(_, n))
+    case LogicalOffset(child, n) => provenRows(child).map(c => math.max(0L, c - n))
+    case LogicalUnion(l, r, true) => for (lc <- provenRows(l); rc <- provenRows(r)) yield lc + rc
+    case LogicalAggregate(_, Seq(), _, None) => Some(1L)
+    case LogicalJoin(l, r, LitExpr(true, _), JoinKind.Inner) =>
+      for (lc <- provenRows(l); rc <- provenRows(r)) yield times(lc, rc)
+    case _ => None
   }
 
   /** At most how many rows `p` produces, for [[enforceNestedLoopGuard]], and

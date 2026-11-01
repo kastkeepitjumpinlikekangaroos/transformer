@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, CatalogView, ExecutedQuery, ExecutionOptions, MaterializedView, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, DataType, ExecutedQuery, ExecutionOptions, MaterializedView, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.core.metrics.TaskMetricsRecord
 import com.transformer.temporal.TemporalVariables
 import org.junit.Assert._
@@ -8,7 +8,7 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 import java.nio.file.{Files, Path}
-import java.time.Instant
+import java.time.{Instant, LocalDate}
 import scala.jdk.CollectionConverters._
 
 class DataJobTest {
@@ -2054,5 +2054,99 @@ class DataJobTest {
       assertTrue(s"manifest runFile '$rf' for '${t.taskName}' does not exist",
         Files.isRegularFile(java.nio.file.Paths.get(rf)))
     }
+  }
+
+  /** `job.json` records the run's lineage: each input as the run read it (its
+    * path rendered and absolute, its format and options; an input no task
+    * reads too), what each task's main SQL reads (a view only a validation
+    * reads is not where the rows come from), the directory the record lives
+    * in with its templates unrendered, and an absolute `runFile`: so a reader
+    * joins one job's input to another job's output from any directory. */
+  @Test def jobRunRecordRecordsLineage(): Unit = {
+    val inDir = tmpDir("dj-lineage-in-")
+    val events = writeCsv(inDir, "events.csv", "id;kind\n1;a\n2;b\n")
+    val unused = writeCsv(inDir, "unused_20260518.csv", "x\n1\n")
+    val out = tmpDir("dj-lineage-out-").resolve("runs/day={{ today }}")
+    val job = DataJob(
+      inputs = Seq(
+        InputFilePath(events.toString, viewName = "Events", options = Map("delimiter" -> ";")),
+        InputFilePath(inDir.toString + "/unused_{{ today }}.csv", viewName = "unused")),
+      sql = Seq(
+        SQLTask(name = Some("kinds"), viewName = Some("kinds"),
+          sqlString = Some("SELECT kind, COUNT(*) AS n FROM events GROUP BY kind"),
+          outputFile = Some(OutputFilePath(s"$out/kinds"))),
+        SQLTask(name = Some("busy"), viewName = Some("busy"),
+          sqlString = Some("SELECT kind FROM kinds WHERE n > 0"),
+          outputFile = Some(OutputFilePath(s"$out/busy")),
+          validations = Seq(Validation("ids", sqlString = Some("SELECT id FROM events WHERE id IS NULL"))))),
+      temporalVariables = Some(TemporalVariables(Instant.parse("2026-05-18T00:00:00Z"))),
+      jobRunOutput = Some(OutputFilePath(s"$out/job.json")))
+    assertTrue(job.run().succeeded)
+    val dayDir = out.getParent.resolve("day=20260518")
+    val rec = JobRunRecord.read(dayDir.resolve("job.json")).getOrElse(fail("no job.json").asInstanceOf[JobRunRecord])
+
+    assertEquals(Some(Seq(
+      JobInputRecord("Events", events.toAbsolutePath.normalize.toString, "csv", Map("delimiter" -> ";")),
+      JobInputRecord("unused", unused.toAbsolutePath.normalize.toString, "csv"))), rec.inputs)
+    assertEquals(Some(out.toAbsolutePath.normalize.toString), rec.outputTemplate)
+    val byName = rec.tasks.map(t => t.taskName -> t).toMap
+    assertEquals((Seq("Events"), Nil), (byName("kinds").readsInputs, byName("kinds").readsTasks))
+    assertEquals((Nil, Seq("kinds")), (byName("busy").readsInputs, byName("busy").readsTasks))
+    rec.tasks.foreach { t =>
+      val rf = java.nio.file.Paths.get(t.runFile.get)
+      assertTrue(s"${t.taskName}: $rf", rf.isAbsolute && Files.isRegularFile(rf))
+    }
+  }
+
+  /** A task's `_run.json` says how to read its output back as it was written:
+    * the writer's options and the result's column types, which a CSV file
+    * cannot carry, and the SQL that made the rows. `TaskRunRecord.outputView`
+    * reads it so: a `|`-delimited CSV keeps its column types, and a STRING of
+    * digits stays the text `007`, where inference would read the number 7. */
+  @Test def taskRunRecordReadsTheOutputBackAsWritten(): Unit = {
+    val out = tmpDir("dj-as-written-").resolve("t")
+    val sql = "SELECT CAST(1 AS BIGINT) AS id, '007' AS code, DATE '2026-01-02' AS day, 'x|y' AS note"
+    val job = DataJob(inputs = Nil, sql = Seq(SQLTask(name = Some("t"), sqlString = Some(sql),
+      outputFile = Some(OutputFilePath(out.toString, options = Map("delimiter" -> "|"), format = Some("csv"))))))
+    val result = job.run()
+    assertTrue(result.tasks.map(_.status).mkString, result.succeeded)
+
+    val rec = TaskRunRecord.read(out).getOrElse(fail("no _run.json").asInstanceOf[TaskRunRecord])
+    val types = Seq(DataType.LongType, DataType.StringType, DataType.DateType, DataType.StringType)
+    assertEquals(Map("delimiter" -> "|"), rec.options)
+    assertEquals(Some(sql), rec.sql)
+    assertEquals(Some(Seq("id", "code", "day", "note")), rec.schema.map(_.fieldNames))
+    assertEquals(types, rec.schema.get.fields.map(_.dataType))
+
+    val view = TaskRunRecord.outputView(out, rec)
+    assertEquals(types, view.schema.fields.map(_.dataType))
+    val rows = (0 until view.numPartitions).flatMap(p => view.readPartition(p).flatMap(b =>
+      (0 until b.numRows).map(r => (0 until b.schema.length).map(c => b.column(c).getBoxed(r)))))
+    assertEquals(Seq(Seq(1L, "007", LocalDate.of(2026, 1, 2), "x|y")), rows)
+  }
+
+  /** Records written before they carried lineage, options, a schema and SQL
+    * still read, without them: an older output reads with inferred types. */
+  @Test def recordsFromBeforeLineageStillRead(): Unit = {
+    val dir = tmpDir("dj-old-records-")
+    Files.writeString(dir.resolve("job.json"),
+      """{"schemaVersion": 1, "succeeded": true, "errorMessage": null,
+        | "executionTime": "2026-01-01T00:00:00Z", "startedAt": "2026-01-01T00:00:00Z",
+        | "finishedAt": "2026-01-01T00:00:01Z",
+        | "tasks": [{"taskName": "t", "status": "Succeeded", "runFile": "t/_run.json", "rowsProduced": 1,
+        |   "failedValidationCount": 0, "errorMessage": null}],
+        | "warnings": []}""".stripMargin)
+    val job = JobRunRecord.read(dir.resolve("job.json")).getOrElse(fail("unread").asInstanceOf[JobRunRecord])
+    assertEquals((None, None), (job.inputs, job.outputTemplate))
+    assertEquals((Nil, Nil), (job.tasks.head.readsInputs, job.tasks.head.readsTasks))
+
+    val t = dir.resolve("t")
+    Files.createDirectories(t)
+    Files.writeString(t.resolve("part-00000.csv"), "amount\n2.50\n")
+    writeRecord(t, Instant.parse("2026-01-01T00:00:00Z"), Instant.parse("2026-01-01T00:00:01Z"),
+      rowsProduced = 1, format = "csv", outputFiles = Seq("part-00000.csv"))
+    val rec = TaskRunRecord.read(t).getOrElse(fail("unread").asInstanceOf[TaskRunRecord])
+    assertEquals((Map.empty[String, String], None, None), (rec.options, rec.schema, rec.sql))
+    assertEquals(Seq("amount"), TaskRunRecord.outputView(t, rec).schema.fieldNames)
   }
 }

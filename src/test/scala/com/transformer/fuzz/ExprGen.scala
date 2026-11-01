@@ -92,6 +92,10 @@ object ExprGen {
     case IsNullExpr(c, neg) => s"IsNullExpr(${render(c)},$neg)"
     case InListExpr(c, items, neg) => s"InListExpr(${render(c)},${items.map(render).mkString("List(", ", ", ")")},$neg)"
     case LikeExpr(c, p, neg, syntax) => s"LikeExpr(${render(c)},${render(p)},$neg,$syntax)"
+    case SwitchCaseExpr(operand, branches, elseExpr, dt) =>
+      val bs = branches.map(b => s"(${b.compareAs},${render(b.when)},${render(b.value)})").mkString("List(", ", ", ")")
+      s"SwitchCaseExpr(${render(operand)},$bs,${elseExpr.map(render)},$dt)"
+    case BetweenExpr(c, low, high) => s"BetweenExpr(${render(c)},${render(low)},${render(high)})"
   }
 
   // ---- type sets used throughout ----

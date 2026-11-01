@@ -2,7 +2,6 @@ package com.transformer.job
 
 import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, ExecutionOptions, MaterializedView, Scheduler, Schema, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.core.metrics.{MetricsCollector, TaskMetricsRecord}
-import com.transformer.read.parquet.ParquetReader
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
 import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
@@ -86,7 +85,7 @@ final case class DataJob(
     // The tasks alone decide the verdict: a warning never fails a run. A run
     // that stopped has a task that failed it.
     val succeeded = results.forall(_.succeeded)
-    writeJobRecord(results.toSeq, vars, runStarted, runFinished, succeeded, stopped, warnings)
+    writeJobRecord(dag, results.toSeq, vars, runStarted, runFinished, succeeded, stopped, warnings)
 
     JobResult(
       succeeded = succeeded,
@@ -443,9 +442,10 @@ final case class DataJob(
         val outputPath = writtenOutput.map(_._2)
         val finished = Instant.now()
         if (failures.nonEmpty) {
-          writeValidationFailedRecord(node, writtenOutput, q.rowsProduced, failures, enqueuedAt, started, finished, vars)
+          writeValidationFailedRecord(node, writtenOutput, q.schema, q.rowsProduced, failures, enqueuedAt, started,
+            finished, vars)
         } else {
-          writeSucceededRecord(node, writtenOutput, q.rowsProduced, enqueuedAt, started, finished, vars)
+          writeSucceededRecord(node, writtenOutput, q.schema, q.rowsProduced, enqueuedAt, started, finished, vars)
         }
         maybeWritePerfRecord(opts, taskName, writtenOutput, q, vars, enqueuedAt, started, finished,
           cpu0, alloc0, gc0, tid)
@@ -456,7 +456,7 @@ final case class DataJob(
           while (q.batches.hasNext) q.batches.next()
         }
         val finished = Instant.now()
-        writeSucceededRecord(node, writtenOutput, q.rowsProduced, enqueuedAt, started, finished, vars)
+        writeSucceededRecord(node, writtenOutput, q.schema, q.rowsProduced, enqueuedAt, started, finished, vars)
         maybeWritePerfRecord(opts, taskName, writtenOutput, q, vars, enqueuedAt, started, finished,
           cpu0, alloc0, gc0, tid)
         TaskRun(TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, writtenOutput.map(_._2), started, finished,
@@ -562,6 +562,7 @@ final case class DataJob(
   private def writeSucceededRecord(
       node: TaskDagNode,
       writtenOutput: Option[(OutputFilePath, String)],
+      schema: Schema,
       rowsProduced: Long,
       enqueuedAt: Instant,
       startedAt: Instant,
@@ -587,7 +588,10 @@ final case class DataJob(
         format = ofp.detectedFormat,
         outputFiles = files,
         validations = validations,
-        enqueuedAt = Some(enqueuedAt)
+        enqueuedAt = Some(enqueuedAt),
+        options = ofp.options,
+        schema = Some(schema),
+        sql = Some(node.renderedMainSql)
       ))
     } catch { case NonFatal(_) => () }
   }
@@ -599,6 +603,7 @@ final case class DataJob(
   private def writeValidationFailedRecord(
       node: TaskDagNode,
       writtenOutput: Option[(OutputFilePath, String)],
+      schema: Schema,
       rowsProduced: Long,
       failures: Seq[ValidationFailure],
       enqueuedAt: Instant,
@@ -643,7 +648,10 @@ final case class DataJob(
         format = ofp.detectedFormat,
         outputFiles = files,
         validations = validations,
-        enqueuedAt = Some(enqueuedAt)
+        enqueuedAt = Some(enqueuedAt),
+        options = ofp.options,
+        schema = Some(schema),
+        sql = Some(node.renderedMainSql)
       ))
     } catch { case NonFatal(_) => () }
   }
@@ -682,7 +690,9 @@ final case class DataJob(
         validations = node.task.validations.map(v =>
           ValidationRecord(v.name, passed = false, failedRowCount = 0L, sampleFile = None)
         ),
-        enqueuedAt = Some(enqueuedAt)
+        enqueuedAt = Some(enqueuedAt),
+        options = ofp.options,
+        sql = Some(node.renderedMainSql)
       ))
     } catch { case NonFatal(_) => () }
   }
@@ -715,7 +725,9 @@ final case class DataJob(
         validations = node.task.validations.map(v =>
           ValidationRecord(v.name, passed = false, failedRowCount = 0L, sampleFile = None)
         ),
-        enqueuedAt = Some(now)
+        enqueuedAt = Some(now),
+        options = ofp.options,
+        sql = Some(node.renderedMainSql)
       ))
     } catch { case NonFatal(_) => () }
   }
@@ -800,20 +812,9 @@ final case class DataJob(
     * the empty view of its schema. */
   private def materializeIfNeeded(
       q: ExecutedQuery, writtenOutput: Option[(OutputFilePath, String)], writtenFiles: Seq[String]): CatalogView = {
-    val schema = q.schema
     writtenOutput match {
       case Some((ofp, dir)) =>
-        val files = writtenFiles.map(f => Paths.get(dir).resolve(f)).toIndexedSeq
-        ofp.detectedFormat match {
-          case _ if files.isEmpty => new MaterializedView(schema, IndexedSeq.empty)
-          case "csv" =>
-            new com.transformer.read.csv.CsvReader(files,
-              com.transformer.read.csv.CsvOptions.forWrittenFile(ofp.options, schema))
-          case "parquet" =>
-            ParquetReader.fromFiles(files)
-          case other =>
-            throw new IllegalArgumentException(s"Cannot re-read output of unknown format '$other': $dir")
-        }
+        TaskRunRecord.outputView(Paths.get(dir), ofp.detectedFormat, writtenFiles, ofp.options, Some(q.schema))
       case None => MaterializedView.fromQuery(q)
     }
   }
@@ -860,8 +861,12 @@ final case class DataJob(
   /** Build the per-job [[JobRunRecord]] and atomically write it to
     * `jobRunOutput` (when configured). Each task's full record lives in its
     * own output directory; this file aggregates them with a `runFile`
-    * pointer per task so the GUI can load one file to find everything. */
+    * pointer per task so the GUI can load one file to find everything, and
+    * records the run's lineage: each input as it was read, and what each
+    * task's main SQL reads. Its paths are absolute, so a reader finds them
+    * from any working directory. */
   private def writeJobRecord(
+      dag: TaskDag,
       results: Seq[TaskResult],
       vars: TemporalVariables,
       startedAt: Instant,
@@ -876,6 +881,7 @@ final case class DataJob(
     }
     try {
       val target = Paths.get(TemplateRenderer.render(ofp.path, vars))
+      val inputNames = inputs.iterator.map(in => in.viewName.toLowerCase(Locale.ROOT) -> in.viewName).toMap
       val summaries: Seq[JobTaskSummary] = results.iterator.zipWithIndex.map { case (r, i) =>
         val (status, errMsg) = r.status match {
           case TaskStatus.Succeeded               => (TaskRunStatus.Succeeded,        None)
@@ -897,8 +903,9 @@ final case class DataJob(
         // cloud path writes no record at all, so it gets no pointer.
         val runFile = sql(i).outputFile
           .filterNot(_.isCloud)
-          .map(taskOut => Paths.get(TemplateRenderer.render(taskOut.path, vars))
+          .map(taskOut => Paths.get(TemplateRenderer.render(taskOut.path, vars)).toAbsolutePath.normalize()
             .resolve(TaskRunRecord.FileName).toString)
+        val node = dag.nodes(i)
         JobTaskSummary(
           taskName = r.taskName,
           status = status,
@@ -912,9 +919,15 @@ final case class DataJob(
           failedValidations = r.status match {
             case TaskStatus.ValidationFailed(fs) => fs.map(f => FailedValidation(f.validationName, f.rowCount))
             case _                               => Nil
-          }
+          },
+          readsInputs = node.mainInputDeps.toSeq.flatMap(inputNames.get).sorted,
+          readsTasks = node.mainDeps.toSeq.sorted.map(d => results(d).taskName)
         )
       }.toSeq
+      val inputRecords = inputs.map { in =>
+        val rendered = try TemplateRenderer.render(in.path, vars) catch { case NonFatal(_) => in.path }
+        JobInputRecord(in.viewName, absolute(rendered), in.detectedFormat, in.options)
+      }
       // perfManifest collects every `_perf.json` actually written under the
       // tasks' output directories. Populated only when at least one task
       // emitted a perf record — keeps `job.json`'s default shape unchanged
@@ -935,10 +948,20 @@ final case class DataJob(
         finishedAt = finishedAt,
         tasks = summaries,
         warnings = warnings,
-        perfManifest = perfManifest
+        perfManifest = perfManifest,
+        outputTemplate = try Option(Paths.get(absolute(ofp.path)).getParent).map(_.toString)
+          catch { case NonFatal(_) => None },
+        inputs = Some(inputRecords)
       ))
     } catch { case NonFatal(_) => () }
   }
+
+  /** `path` made absolute against the working directory, as the run reads and
+    * writes it; a cloud path, or one that is no path here (a glob on
+    * Windows), as it is. */
+  private def absolute(path: String): String =
+    if (path.startsWith("gs://") || path.startsWith("s3://")) path
+    else try Paths.get(path).toAbsolutePath.normalize().toString catch { case NonFatal(_) => path }
 
   /** How a failed input load reads in the run's records: the reason a task
     * that reads the input is skipped with, and the input's warning. */

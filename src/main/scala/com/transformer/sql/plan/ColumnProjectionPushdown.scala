@@ -196,6 +196,9 @@ object ColumnProjectionPushdown {
       case IsNullExpr(c, _) => go(c)
       case InListExpr(c, items, _) => go(c); items.foreach(go)
       case LikeExpr(s, p, _, _) => go(s); go(p)
+      case SwitchCaseExpr(operand, branches, elseE, _) =>
+        go(operand); branches.foreach { br => go(br.when); go(br.value) }; elseE.foreach(go)
+      case BetweenExpr(c, low, high) => go(c); go(low); go(high)
     }
     go(e); b.result()
   }
@@ -220,6 +223,12 @@ object ColumnProjectionPushdown {
     case IsNullExpr(c, neg) => IsNullExpr(rewriteExpr(c, remap), neg)
     case InListExpr(c, items, neg) => InListExpr(rewriteExpr(c, remap), items.map(rewriteExpr(_, remap)), neg)
     case l: LikeExpr => l.copy(child = rewriteExpr(l.child, remap), pattern = rewriteExpr(l.pattern, remap))
+    case SwitchCaseExpr(operand, branches, elseE, dt) =>
+      SwitchCaseExpr(rewriteExpr(operand, remap),
+        branches.map(b => b.copy(when = rewriteExpr(b.when, remap), value = rewriteExpr(b.value, remap))),
+        elseE.map(rewriteExpr(_, remap)), dt)
+    case BetweenExpr(c, low, high) =>
+      BetweenExpr(rewriteExpr(c, remap), rewriteExpr(low, remap), rewriteExpr(high, remap))
   }
 
   private def rewriteAgg(a: AggExpr, remap: Map[Int, Int]): AggExpr = a match {
@@ -276,6 +285,9 @@ object ColumnProjectionPushdown {
       case IsNullExpr(c, _) => go(c)
       case InListExpr(c, items, _) => go(c); items.foreach(go)
       case LikeExpr(s, p, _, _) => go(s); go(p)
+      case SwitchCaseExpr(operand, branches, elseE, _) =>
+        go(operand); branches.foreach { br => go(br.when); go(br.value) }; elseE.foreach(go)
+      case BetweenExpr(c, low, high) => go(c); go(low); go(high)
     }
     go(cond)
     (leftNames.result(), rightNames.result())
@@ -308,6 +320,9 @@ object ColumnProjectionPushdown {
       case IsNullExpr(c, neg) => IsNullExpr(go(c), neg)
       case InListExpr(c, items, neg) => InListExpr(go(c), items.map(go), neg)
       case l: LikeExpr => l.copy(child = go(l.child), pattern = go(l.pattern))
+      case SwitchCaseExpr(operand, branches, elseE, dt) =>
+        SwitchCaseExpr(go(operand), branches.map(b => b.copy(when = go(b.when), value = go(b.value))), elseE.map(go), dt)
+      case BetweenExpr(c, low, high) => BetweenExpr(go(c), go(low), go(high))
     }
     go(cond)
   }
@@ -359,6 +374,12 @@ object ColumnProjectionPushdown {
       case InListExpr(c, items, _) =>
         checkExpr(c, schema, ctx); items.foreach(checkExpr(_, schema, ctx))
       case LikeExpr(s, p, _, _) => checkExpr(s, schema, ctx); checkExpr(p, schema, ctx)
+      case SwitchCaseExpr(operand, branches, elseE, _) =>
+        checkExpr(operand, schema, ctx)
+        branches.foreach { b => checkExpr(b.when, schema, ctx); checkExpr(b.value, schema, ctx) }
+        elseE.foreach(checkExpr(_, schema, ctx))
+      case BetweenExpr(c, low, high) =>
+        checkExpr(c, schema, ctx); checkExpr(low, schema, ctx); checkExpr(high, schema, ctx)
     }
 
     def checkAgg(a: AggExpr, schema: Schema, ctx: String): Unit =

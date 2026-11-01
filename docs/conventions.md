@@ -59,6 +59,37 @@ specific traps.
   harness depend on `gui:session` precisely so they run without the toolkit, and
   a fuzz target never takes a JavaFX dependency. State a panel needs from a
   toolkit type stays in the panel.
+- **The vim engine builds without JavaFX too.** `VimKey`, `VimCommand`,
+  `VimText` and `VimEngine` are `//src/main/scala/com/transformer/gui:vim`, with
+  no dependency; the SQL editor implements `VimBuffer` over its text area, and
+  `VimKeyEvents` turns JavaFX key events into `VimKey`s. Keep JavaFX out of the
+  four files, so `gui/vim_engine_test` drives the engine with strings. A case
+  there states what Neovim (with its defaults and `shiftwidth=2 expandtab`)
+  leaves from the same text and keys: check a new one against `nvim --clean`
+  rather than memory of vim, which is how its cursor rules were settled.
+- **GUI colours and spacing live in `gui/transformer.css`, in the theme's
+  looked-up colours.** A control takes style classes (AtlantaFX's `Styles` and
+  `Tweaks` constants, or the GUI's own classes), never `setStyle` with literal
+  colours; the canvas paints with `Theme.Palette`, which holds the same
+  colours. Every `Scene`, `Dialog` and `Alert` the GUI makes goes through
+  `Theme.style`: the theme reaches it as the user-agent stylesheet, the GUI's
+  own classes only through that call. The data viewer's classes are in the
+  same file, under their own heading.
+- **What both GUIs show alike is one component, in `gui:components`.** The job
+  GUI and the data viewer share the theme, the SQL editor (its highlighting
+  and vim keys), the SQL console (`QueryConsole`), the grid rows show in
+  (`DataGrid`) and the canvas graphs are drawn on (`GraphCanvas`). A piece one
+  app needs from the other moves there, public, rather than being copied, and
+  it takes what it needs from the app as arguments (a catalog builder, a
+  default directory, the window's shortcuts), never an app's session. What
+  only one app does stays in `gui` or in `viewer`.
+- **The data viewer's model builds without JavaFX.** `RunFolder`, `Lineage`,
+  `LineageLayout` and `ViewerSession` are `//src/main/scala/com/transformer/viewer:model`,
+  so `viewer/model_test` runs real jobs into a folder and reads them back with
+  no toolkit; keep `javafx.*` imports out of those four files, as out of
+  `gui:session`. The viewer reads only what runs record, never a job
+  directory: what it needs to know about a run goes into `job.json` or
+  `_run.json`.
 - **The CLI's logic stays out of the entry point.** `cli/Cli.scala` (parsing,
   the headless run, exit codes) has no JavaFX dependency, and `cli_test`
   drives it with captured streams. `TransformerMain` only dispatches: `gui` to
@@ -145,7 +176,24 @@ specific traps.
   decimal it is written as, through `LogicalBuilder.besideDecimals`, wherever
   values meet. A text the binder compares two expressions by
   (`LogicalBuilder.canonicalSql`) folds only what SQL folds: names, never a
-  literal.
+  literal. Where two spellings must be one expression, a GROUP BY key and the
+  SELECT item that reads it, compare the bound expressions, which see through
+  parentheses, qualifiers and case, rather than the text.
+- **A slot the binder makes is addressed by its position, never by a name.**
+  A name the binder invents (`_agg0`, `_win0`, `_order0`) is one a query can
+  write too, so a lookup by name finds the user's column first; resolve a
+  user's name against the input, as WHERE does, and reach an aggregate, a
+  window or a sort key through the index the binder put it at.
+- **An operator that reads an expression twice must not be given one that
+  reads `RAND()`** (`Expr.readsRandom`): an exchange or a spill bucket that
+  reads a key to route a row, and the breaker that reads it again, see two
+  different values. Keep such a key on a path that reads it once, and bind a
+  construct that reads an operand more than once (a simple CASE, BETWEEN) to
+  a node that reads it once when it reads `RAND()`.
+- **Text is counted in characters, Unicode code points**, as SQL counts it
+  (`Funcs.length`, `Funcs.substring`), never in Java's UTF-16 chars, and a
+  pattern is read a code point at a time: half a surrogate pair is no text,
+  and a spill or a file writes it as `?`.
 - **Selectivity / cardinality constants live as named `private[plan] val`s**
   in `LogicalPlanCardinality.scala` (`SelectivityEq`, `SelectivityRange`,
   `SelectivityIsNull`, …). New shapes added to `filterSelectivity` should

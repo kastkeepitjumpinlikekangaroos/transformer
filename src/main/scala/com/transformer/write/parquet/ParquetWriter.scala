@@ -202,6 +202,10 @@ object ParquetWriter {
       partitions: IndexedSeq[Iterator[ColumnarBatch]],
       options: Map[String, String] = Map.empty
   ): Long = {
+    // A schema parquet cannot store fails here, before any partition runs,
+    // rather than in the first partition with a row to write: an empty result
+    // would otherwise succeed where any other fails.
+    ParquetSchema.toMessageType(schema)
     Files.createDirectories(targetDir)
     val n = partitions.length
     if (n == 0) return 0L

@@ -29,7 +29,8 @@ final case class PersistConfig(
   */
 object PersistDialog {
 
-  def show(owner: Stage, session: JobSession, defaultFormat: String): Option[PersistConfig] = {
+  /** Ask where and how to write the result, `defaultDir` filled in. */
+  def show(owner: Stage, defaultDir: Option[String], defaultFormat: String): Option[PersistConfig] = {
     val dialog = new Dialog[PersistConfig]()
     dialog.initOwner(owner)
     dialog.setTitle("Persist query results")
@@ -39,9 +40,7 @@ object PersistDialog {
     dialog.getDialogPane.getButtonTypes.addAll(okType, ButtonType.CANCEL)
 
     val dirField = new TextField()
-    session.effectiveOutputDirRendered.foreach { base =>
-      dirField.setText(new File(base, "interactive").getAbsolutePath)
-    }
+    defaultDir.foreach(dirField.setText)
     dirField.setPromptText("/path/to/output-dir")
     HBox.setHgrow(dirField, Priority.ALWAYS)
     val browseBtn = new Button("Browse…")
@@ -72,7 +71,7 @@ object PersistDialog {
     val headerCheck = new javafx.scene.control.CheckBox("Write header row")
     headerCheck.setSelected(true)
     val headerHint = new Label("(CSV only)")
-    headerHint.setStyle("-fx-text-fill: #9ba2b8; -fx-font-size: 11px;")
+    headerHint.getStyleClass.add("hint")
     val headerRow = new HBox(8, headerCheck, headerHint)
     headerRow.setAlignment(Pos.CENTER_LEFT)
     def syncHeaderEnabled(): Unit = {
@@ -85,11 +84,13 @@ object PersistDialog {
     val grid = new GridPane()
     grid.setHgap(8); grid.setVgap(8)
     grid.setPadding(new Insets(12, 4, 12, 4))
+    grid.getColumnConstraints.add(FxHelpers.labelColumn())
     grid.add(new Label("Output directory:"), 0, 0); grid.add(dirRow, 1, 0)
     grid.add(new Label("Format:"),            0, 1); grid.add(formatCombo, 1, 1)
     grid.add(new Label("Max part files:"),    0, 2); grid.add(maxPartsField, 1, 2)
     grid.add(new Label("CSV options:"),       0, 3); grid.add(headerRow, 1, 3)
     dialog.getDialogPane.setContent(grid)
+    Theme.style(dialog)
 
     // Validate via an event filter so a bad value keeps the dialog open.
     val okButton = dialog.getDialogPane.lookupButton(okType)
@@ -98,6 +99,7 @@ object PersistDialog {
         case Left(msg) =>
           val alert = new Alert(Alert.AlertType.ERROR, msg)
           alert.initOwner(owner)
+          Theme.style(alert)
           alert.showAndWait()
           ev.consume()
         case Right(_) => ()

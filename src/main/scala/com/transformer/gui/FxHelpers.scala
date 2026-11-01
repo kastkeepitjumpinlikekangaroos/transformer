@@ -3,6 +3,7 @@ package com.transformer.gui
 import javafx.application.Platform
 import javafx.scene.control.Alert
 import javafx.scene.control.Alert.AlertType
+import javafx.scene.layout.{ColumnConstraints, Region}
 import javafx.stage.{DirectoryChooser, Stage}
 
 import java.io.File
@@ -32,6 +33,14 @@ object FxHelpers {
     Option(chooser.showDialog(owner))
   }
 
+  /** The first column of a dialog's form grid: as wide as its labels, never
+    * squeezed by a wide field beside them. */
+  def labelColumn(): ColumnConstraints = {
+    val c = new ColumnConstraints()
+    c.setMinWidth(Region.USE_PREF_SIZE)
+    c
+  }
+
   /** Show a blocking error alert. Always call from the FX thread. */
   def showError(owner: Stage, header: String, body: String): Unit = {
     val alert = new Alert(AlertType.ERROR)
@@ -39,6 +48,7 @@ object FxHelpers {
     alert.setTitle("Error")
     alert.setHeaderText(header)
     alert.setContentText(body)
+    Theme.style(alert)
     alert.showAndWait()
     ()
   }

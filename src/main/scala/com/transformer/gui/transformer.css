@@ -1,0 +1,361 @@
+/*
+ * The GUI's own styles, over AtlantaFX's Primer Dark theme (Theme.install).
+ * Colours are the theme's looked-up colours (-color-*), so they follow it;
+ * the SQL token colours are GitHub's dark ones, defined here once. The
+ * monospace family comes from a stylesheet Theme builds at runtime, since CSS
+ * names one family and the GUI picks whichever is installed.
+ */
+
+.root {
+    -fx-font-size: 13px;
+    -sql-text: -color-fg-default;
+    -sql-keyword: #ff7b72;
+    -sql-function: #d2a8ff;
+    -sql-type: #ffa657;
+    -sql-string: #a5d6ff;
+    -sql-number: #79c0ff;
+    -sql-comment: #8b949e;
+    -sql-template: #7ee787;
+    -sql-punct: #8b949e;
+    -input-fg: #56d4dd;
+    -input-muted: rgba(57, 197, 207, 0.4);
+    -input-subtle: rgba(57, 197, 207, 0.12);
+    -done-fg: #a371f7;
+}
+
+/* ---------------------------------------------------------------- icons */
+
+.icon {
+    -fx-fill: transparent;
+    -fx-stroke: -color-fg-muted;
+    -fx-stroke-width: 1.5;
+    -fx-stroke-line-cap: round;
+    -fx-stroke-line-join: round;
+}
+.icon.solid {
+    -fx-fill: -color-fg-muted;
+    -fx-stroke: -color-fg-muted;
+    -fx-stroke-width: 1;
+}
+.button:hover .icon { -fx-stroke: -color-fg-default; }
+.button:hover .icon.solid { -fx-fill: -color-fg-default; }
+.button.accent .icon,
+.button.accent:hover .icon { -fx-stroke: -color-fg-emphasis; }
+.button.accent .icon.solid,
+.button.accent:hover .icon.solid { -fx-fill: -color-fg-emphasis; }
+.button:disabled .icon { -fx-stroke: -color-fg-subtle; }
+.button:disabled .icon.solid { -fx-fill: -color-fg-subtle; }
+
+/* --------------------------------------------------------------- header */
+
+.app-header {
+    -fx-background-color: -color-bg-subtle;
+    -fx-border-color: -color-border-default;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 10 16 10 16;
+    -fx-spacing: 22;
+    -fx-alignment: center-left;
+}
+.app-header .caption {
+    -fx-text-fill: -color-fg-subtle;
+    -fx-font-size: 11px;
+}
+.app-header .field-group {
+    -fx-spacing: 6;
+    -fx-alignment: center-left;
+}
+.app-title {
+    -fx-font-size: 15px;
+    -fx-font-weight: bold;
+    -fx-text-fill: -color-fg-emphasis;
+}
+.app-mark {
+    -fx-fill: -color-accent-emphasis;
+    -fx-arc-width: 6;
+    -fx-arc-height: 6;
+}
+.job-name {
+    -fx-font-size: 14px;
+    -fx-font-weight: bold;
+    -fx-text-fill: -color-fg-emphasis;
+}
+.job-path {
+    -fx-font-size: 11px;
+    -fx-text-fill: -color-fg-muted;
+}
+.time-field { -fx-pref-column-count: 6; }
+.time-field:danger { -fx-border-color: -color-danger-emphasis; }
+
+.status-pill {
+    -fx-background-color: -color-neutral-subtle;
+    -fx-background-radius: 999;
+    -fx-border-color: -color-border-default;
+    -fx-border-radius: 999;
+    -fx-padding: 4 12 4 10;
+    -fx-graphic-text-gap: 7;
+    -fx-text-fill: -color-fg-muted;
+    -fx-font-size: 12px;
+}
+.status-pill .dot { -fx-fill: -color-fg-subtle; }
+.status-pill.running { -fx-background-color: -color-accent-subtle; -fx-border-color: -color-accent-muted; -fx-text-fill: -color-accent-fg; }
+.status-pill.running .dot { -fx-fill: -color-accent-fg; }
+.status-pill.success { -fx-background-color: -color-success-subtle; -fx-border-color: -color-success-muted; -fx-text-fill: -color-success-fg; }
+.status-pill.success .dot { -fx-fill: -color-success-fg; }
+.status-pill.warning { -fx-background-color: -color-warning-subtle; -fx-border-color: -color-warning-muted; -fx-text-fill: -color-warning-fg; }
+.status-pill.warning .dot { -fx-fill: -color-warning-fg; }
+.status-pill.danger { -fx-background-color: -color-danger-subtle; -fx-border-color: -color-danger-muted; -fx-text-fill: -color-danger-fg; }
+.status-pill.danger .dot { -fx-fill: -color-danger-fg; }
+
+.run-button {
+    -fx-padding: 6 16 6 12;
+    -fx-graphic-text-gap: 6;
+    -fx-font-weight: bold;
+}
+.shortcut-hint {
+    -fx-text-fill: -color-fg-subtle;
+    -fx-font-size: 11px;
+}
+
+/* ------------------------------------------------------------ DAG pane */
+
+.dag-pane { -fx-background-color: -color-bg-default; }
+.dag-controls {
+    -fx-background-color: -color-bg-subtle;
+    -fx-background-radius: 8;
+    -fx-border-color: -color-border-default;
+    -fx-border-radius: 8;
+    -fx-padding: 3;
+    -fx-spacing: 2;
+    -fx-effect: dropshadow(gaussian, rgba(1, 4, 9, 0.6), 12, 0, 0, 3);
+}
+.dag-controls .button { -fx-padding: 5 7 5 7; }
+.dag-controls .zoom-label {
+    -fx-text-fill: -color-fg-muted;
+    -fx-font-size: 11px;
+    -fx-min-width: 42;
+    -fx-alignment: center;
+}
+.dag-summary { -fx-spacing: 6; }
+.dag-summary .count {
+    -fx-background-color: -color-bg-subtle;
+    -fx-background-radius: 999;
+    -fx-border-color: -color-border-default;
+    -fx-border-radius: 999;
+    -fx-padding: 3 10 3 8;
+    -fx-graphic-text-gap: 6;
+    -fx-font-size: 11px;
+    -fx-text-fill: -color-fg-muted;
+}
+
+/* ----------------------------------------------------------- bottom tabs */
+
+.results-tabs > .tab-header-area { -fx-padding: 4 12 0 12; }
+.results-tabs > .tab-header-area > .tab-header-background {
+    -fx-background-color: -color-bg-subtle;
+    -fx-border-color: -color-border-default;
+    -fx-border-width: 1 0 1 0;
+}
+.panel { -fx-background-color: -color-bg-default; }
+.panel-scroll, .panel-scroll > .viewport { -fx-background-color: -color-bg-default; }
+.panel-scroll { -fx-background-insets: 0; -fx-padding: 0; }
+
+/* ----------------------------------------------------- cards and chips */
+
+.card {
+    -fx-background-color: -color-bg-subtle;
+    -fx-background-radius: 8;
+    -fx-border-color: -color-border-default;
+    -fx-border-radius: 8;
+    -fx-padding: 12 14 12 14;
+    -fx-spacing: 8;
+}
+.card-title {
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-text-fill: -color-fg-emphasis;
+}
+.empty-state {
+    -fx-text-fill: -color-fg-muted;
+    -fx-font-size: 13px;
+}
+.panel-title {
+    -fx-font-size: 18px;
+    -fx-font-weight: bold;
+    -fx-text-fill: -color-fg-emphasis;
+}
+.section-label {
+    -fx-text-fill: -color-fg-muted;
+    -fx-font-size: 11px;
+    -fx-font-weight: bold;
+}
+.muted { -fx-text-fill: -color-fg-muted; -fx-font-size: 12px; }
+.muted:danger { -fx-text-fill: -color-danger-fg; }
+.hint { -fx-text-fill: -color-fg-subtle; -fx-font-size: 12px; -fx-font-style: italic; }
+.path-label { -fx-text-fill: -color-accent-fg; -fx-font-size: 12px; }
+.option-label { -fx-text-fill: -color-fg-default; -fx-font-size: 12px; }
+
+.chip {
+    -fx-background-color: -color-neutral-subtle;
+    -fx-background-radius: 999;
+    -fx-border-color: -color-border-default;
+    -fx-border-radius: 999;
+    -fx-padding: 2 10 2 10;
+    -fx-font-size: 11px;
+    -fx-text-fill: -color-fg-default;
+}
+.chip.task {
+    -fx-background-color: -color-accent-subtle;
+    -fx-border-color: -color-accent-muted;
+    -fx-text-fill: -color-accent-fg;
+    -fx-cursor: hand;
+}
+.chip.input {
+    -fx-background-color: -input-subtle;
+    -fx-border-color: -input-muted;
+    -fx-text-fill: -input-fg;
+    -fx-cursor: hand;
+}
+.chip.task:hover { -fx-border-color: -color-accent-fg; }
+.chip.input:hover { -fx-border-color: -input-fg; }
+.chip.clickable { -fx-cursor: hand; }
+.chip.clickable:hover { -fx-border-color: -color-fg-muted; }
+
+.pill {
+    -fx-background-radius: 999;
+    -fx-padding: 2 9 2 9;
+    -fx-font-size: 11px;
+    -fx-font-weight: bold;
+    -fx-background-color: -color-neutral-muted;
+    -fx-text-fill: -color-fg-default;
+}
+.pill.running { -fx-background-color: -color-accent-subtle; -fx-text-fill: -color-accent-fg; }
+.pill.success { -fx-background-color: -color-success-subtle; -fx-text-fill: -color-success-fg; }
+.pill.warning { -fx-background-color: -color-warning-subtle; -fx-text-fill: -color-warning-fg; }
+.pill.danger { -fx-background-color: -color-danger-subtle; -fx-text-fill: -color-danger-fg; }
+.pill.input { -fx-background-color: -input-subtle; -fx-text-fill: -input-fg; }
+.chip.success { -fx-background-color: -color-success-subtle; -fx-border-color: -color-success-muted; -fx-text-fill: -color-success-fg; }
+.chip.warning { -fx-background-color: -color-warning-subtle; -fx-border-color: -color-warning-muted; -fx-text-fill: -color-warning-fg; }
+.chip.danger { -fx-background-color: -color-danger-subtle; -fx-border-color: -color-danger-muted; -fx-text-fill: -color-danger-fg; }
+.chip.running { -fx-background-color: -color-accent-subtle; -fx-border-color: -color-accent-muted; -fx-text-fill: -color-accent-fg; }
+
+.error-box {
+    -fx-background-color: -color-danger-subtle;
+    -fx-background-radius: 6;
+    -fx-border-color: -color-danger-muted;
+    -fx-border-radius: 6;
+    -fx-padding: 10 12 10 12;
+}
+.error-box > .viewport { -fx-background-color: transparent; }
+.error-text { -fx-text-fill: -color-danger-fg; -fx-font-size: 12px; }
+.failing-rows {
+    -fx-font-size: 12px;
+    -fx-text-fill: -color-danger-fg;
+}
+
+/* ---------------------------------------------------------- SQL editor */
+
+.sql-editor {
+    -fx-background-color: -color-bg-default;
+    -fx-background-radius: 6;
+    -fx-border-color: -color-border-default;
+    -fx-border-radius: 6;
+}
+.sql-editor:focus-within { -fx-border-color: -color-accent-emphasis; }
+.sql-editor > .virtualized-scroll-pane { -fx-padding: 6 0 6 0; }
+.sql-editor .code-area {
+    -fx-background-color: transparent;
+    -fx-font-size: 13px;
+    -fx-highlight-fill: -color-accent-muted;
+}
+/* AtlantaFX gives every .text logical_vertical_center bounds; RichTextFX lays
+   out its text, caret and selection by the logical bounds JavaFX defaults to. */
+.code-area .text { -fx-fill: -sql-text; -fx-bounds-type: logical; }
+.code-area .keyword { -fx-fill: -sql-keyword; }
+.code-area .function { -fx-fill: -sql-function; }
+.code-area .type { -fx-fill: -sql-type; }
+.code-area .string { -fx-fill: -sql-string; }
+.code-area .number { -fx-fill: -sql-number; }
+.code-area .comment { -fx-fill: -sql-comment; -fx-font-style: italic; }
+.code-area .template { -fx-fill: -sql-template; }
+.code-area .punct { -fx-fill: -sql-punct; }
+.code-area .caret { -fx-stroke: -color-fg-emphasis; -fx-stroke-width: 1.5; }
+.code-area .main-selection { -fx-fill: -color-accent-muted; }
+.code-area .lineno {
+    -fx-background-color: transparent;
+    -fx-text-fill: -color-fg-subtle;
+    -fx-padding: 0 12 0 10;
+    -fx-font-size: 12px;
+    -fx-alignment: center-right;
+}
+.code-area .lineno.current { -fx-text-fill: -color-fg-default; }
+.sql-editor.read-only .code-area .lineno.current { -fx-text-fill: -color-fg-subtle; }
+.editor-placeholder { -fx-text-fill: -color-fg-subtle; -fx-font-style: italic; -fx-padding: 4 12 4 12; }
+
+.editor-status {
+    -fx-background-color: -color-bg-subtle;
+    -fx-background-radius: 0 0 6 6;
+    -fx-border-color: -color-border-default;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 3 8 3 8;
+    -fx-spacing: 10;
+    -fx-alignment: center-left;
+}
+.editor-status .label { -fx-font-size: 11px; -fx-text-fill: -color-fg-muted; }
+.editor-status .vim-message.error { -fx-text-fill: -color-danger-fg; }
+.editor-status .vim-pending { -fx-text-fill: -color-fg-default; }
+.editor-status .label.vim-mode {
+    -fx-background-radius: 4;
+    -fx-padding: 0 7 0 7;
+    -fx-font-weight: bold;
+    -fx-font-size: 10px;
+    -fx-text-fill: -color-bg-default;
+    -fx-background-color: -color-accent-fg;
+}
+.editor-status .label.vim-mode.insert { -fx-background-color: -color-success-fg; }
+.editor-status .label.vim-mode.visual { -fx-background-color: -done-fg; }
+.editor-status .label.vim-mode.replace { -fx-background-color: -color-danger-fg; }
+.editor-status .label.vim-mode.command { -fx-background-color: -color-warning-fg; }
+.vim-toggle {
+    -fx-font-size: 10px;
+    -fx-font-weight: bold;
+    -fx-padding: 1 7 1 7;
+    -fx-background-radius: 4;
+    -fx-border-radius: 4;
+}
+
+/* ------------------------------------------------------- tables and logs */
+
+.data-table .table-cell { -fx-font-size: 12px; }
+.data-table .table-cell.number-cell { -fx-alignment: center-right; }
+.data-table .table-cell.null-cell { -fx-text-fill: -color-fg-subtle; -fx-font-style: italic; }
+.data-table .column-header .column-name { -fx-font-size: 12px; -fx-font-weight: bold; -fx-text-fill: -color-fg-default; }
+.data-table .column-header .column-type { -fx-font-size: 10px; -fx-font-weight: normal; -fx-text-fill: -color-fg-subtle; }
+.log-view { -fx-font-size: 12px; }
+.log-view .content { -fx-background-color: -color-bg-default; }
+
+/* ------------------------------------------------------- the error dialog */
+
+.error-dialog { -fx-background-color: -color-bg-default; -fx-padding: 22; -fx-spacing: 12; }
+.error-dialog .heading { -fx-text-fill: -color-danger-fg; -fx-font-size: 20px; -fx-font-weight: bold; }
+.error-dialog .error-detail { -fx-font-size: 13px; }
+
+/* ------------------------------------------------------------- shortcuts */
+
+.shortcut-table { -fx-hgap: 18; -fx-vgap: 5; -fx-padding: 4 2 4 2; }
+.shortcut-table .keys { -fx-text-fill: -color-accent-fg; -fx-font-size: 12px; }
+.shortcut-table .what { -fx-text-fill: -color-fg-default; -fx-font-size: 12px; }
+.shortcut-table .group { -fx-text-fill: -color-fg-muted; -fx-font-size: 11px; -fx-font-weight: bold; -fx-padding: 8 0 2 0; }
+
+/* ----------------------------------------------------------- data viewer */
+
+.dataset-tree { -fx-border-color: -color-border-default; -fx-border-width: 0 1 0 0; }
+.dataset-tree .tree-view { -fx-background-color: -color-bg-default; }
+.dataset-tree .tree-cell { -fx-padding: 3 8 3 4; }
+.dataset-tree .tree-dataset { -fx-font-weight: bold; -fx-text-fill: -color-fg-emphasis; }
+.dataset-tree .tree-table { -fx-text-fill: -color-fg-default; }
+.dataset-tree .tree-input { -fx-text-fill: -input-fg; }
+.dataset-tree .tree-group { -fx-text-fill: -color-fg-muted; -fx-font-style: italic; }
+.dataset-tree .tree-count { -fx-text-fill: -color-fg-subtle; -fx-font-size: 11px; }
+.dataset-tree .tree-cell:selected .tree-count { -fx-text-fill: -color-fg-muted; }
+.columns-grid { -fx-hgap: 18; -fx-vgap: 3; }
+.columns-grid .column-type-name { -fx-text-fill: -sql-type; -fx-font-size: 12px; }

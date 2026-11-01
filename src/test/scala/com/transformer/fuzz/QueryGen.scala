@@ -404,6 +404,19 @@ object QueryGen {
     else LitExpr(genLitValue(rng, target), target)
   }
 
+  /** `CAST(source AS target)`, which fails on no row of the corpus: a FLOAT
+    * or DOUBLE source meets an integer target only where its magnitude is
+    * finite and in range, `CAST(CASE WHEN ABS(x) < 1e9 THEN x END AS BIGINT)`,
+    * since NaN and an infinity have no integer value (an error since
+    * plans/robustness/18) and DataGen draws both into a quarter of the float
+    * columns. Every other numeric cast holds the corpus's small values. */
+  private def genNumericCast(rng: Rng, source: Expr, target: DataType): Expr =
+    if (DataType.isIntegral(target) && (source.dataType == DataType.FloatType || source.dataType == DataType.DoubleType)) {
+      val inRange = BinOpExpr("<", FuncExpr("ABS", Seq(source), source.dataType), LitExpr(1.0e9, DataType.DoubleType),
+        DataType.BooleanType)
+      CastExpr(CaseExpr(Seq((inRange, source)), None, source.dataType), target)
+    } else CastExpr(source, target)
+
   private def genNumericExpr(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     def sub(t: DataType): Expr = genValue(rng, schema, t, depth - 1)
     val base: Seq[(Int, () => Expr)] = Seq(
@@ -415,7 +428,7 @@ object QueryGen {
       2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(target), sub(target)), target)),
       1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
       1 -> (() => genCase(rng, schema, target, depth)),
-      1 -> (() => CastExpr(sub(rng.oneOf(Numerics)), target)))
+      1 -> (() => genNumericCast(rng, sub(rng.oneOf(Numerics)), target)))
     val extra: Seq[(Int, () => Expr)] = target match {
       case DataType.IntType =>
         Seq(2 -> (() => FuncExpr("LENGTH", Seq(sub(DataType.StringType)), DataType.IntType)))
@@ -893,6 +906,10 @@ object SqlRender {
       else s"${expr(c)} ${if (neg) "NOT " else ""}IN (${items.map(expr).mkString(", ")})"
     case LikeExpr(c, p, neg, syntax) =>
       s"${expr(c)} ${if (neg) "NOT " else ""}${if (syntax.caseInsensitive) "ILIKE" else "LIKE"} ${expr(p)}"
+    case SwitchCaseExpr(operand, branches, elseE, _) =>
+      val ws = branches.map(b => s"WHEN ${expr(b.when)} THEN ${expr(b.value)}").mkString(" ")
+      s"CASE ${expr(operand)} $ws${elseE.map(x => s" ELSE ${expr(x)}").getOrElse("")} END"
+    case BetweenExpr(c, low, high) => s"${expr(c)} BETWEEN ${expr(low)} AND ${expr(high)}"
   }
 
   private val ArithmeticOps: Set[String] = Set("+", "-", "*", "/", "%")

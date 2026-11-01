@@ -288,13 +288,12 @@ ship a fix or move something from "not done" to "done".
   the whole string, and `ROUND(x, 1, 2)` ignored its third argument. A NULL
   scale, position, length or seed answers NULL on both paths, where `ROUND`'s,
   `SUBSTRING`'s and `RAND`'s threw `NullPointerException`. `ROUND` and `TRUNC`
-  are `Funcs.round` and `Funcs.trunc` on both paths, over `Funcs.atScale`,
-  which returns NaN, an infinity, or a value
-  whose digits at the scale reach 2^52 as they are, and 0 where 10^scale
-  underflows, because `math.round` of the scaled value clamps to a long past
-  2^63 (`ROUND(1e10, 10)` was 922337203.6854776) and reads NaN as 0, and
-  `math.pow(10, scale)` overflowed to an infinity or underflowed to 0 for a
-  scale of 400 or -400.
+  are `Rounding.apply` on both paths, exact: a number is rounded as the decimal
+  it is (a DOUBLE as the decimal it prints as), and NaN and the infinities are
+  their own answer, where the old double arithmetic's `math.round` of the
+  scaled value clamped to a long past 2^63 (`ROUND(1e10, 10)` was
+  922337203.6854776) and read NaN as 0, and `math.pow(10, scale)` overflowed to
+  an infinity or underflowed to 0 for a scale of 400 or -400.
 - **The clock keywords are a `TimeKeyExpression`, spelled as written.**
   `current_date`, `CURRENT_DATE()` and DB2's `CURRENT DATE` arrive as three
   different strings, and `CURRENT_DATE ()`, with a space, arrives as a
@@ -356,6 +355,63 @@ ship a fix or move something from "not done" to "done".
   `mac-aarch64` and `win` classifiers, so `transformer gui` runs on Apple
   Silicon macOS and Windows only. On Linux and Intel macOS the GUI fails to
   start, but `transformer run` (which never touches JavaFX) works.
+- **A jar's main class must not be a JavaFX `Application`.** When the class
+  `java -jar` starts extends `javafx.application.Application`, the launcher
+  insists on JavaFX being on the module path and stops with "JavaFX runtime
+  components are missing", though every JavaFX class is in the jar. So each
+  jar starts a plain object that calls `Application.launch`:
+  `TransformerMain` for `//:transformer`, `ViewerMain` for
+  `//:transformer_viewer`, `GuiAppLauncher` for `//examples/gui_app`.
+- **The data viewer names a table `<dataset>__<table>` because the catalog is
+  flat.** The binder refuses a qualified name (`FROM other.t` is "A qualified
+  table name" in `UnsupportedClauses`), and a quoted `"a.b"` would read as a
+  dataset and a table where it is one name. `QueryCatalog.catalogFor` turns
+  `jaffle_shop.customers` into an error naming `jaffle_shop__customers` before
+  the engine sees it. Schema-qualified names would be an engine change, in
+  the binder and in its audit.
+- **The viewer draws lineage only from records that carry it.** A `job.json`
+  written before runs recorded `inputs`, `readsInputs` and `readsTasks` opens
+  with its tables and no edges, and its box says so. Before then `runFile` was
+  as relative as the run's `--output`, so `RunFolder.locateRunFile` looks for a
+  relative one under the run's directory and each directory above it. A
+  folder moved since its runs keeps its records' old absolute paths: the
+  viewer finds each table under the run's directory now, and matches inputs
+  against the paths as recorded, so lineage survives the move. A path through
+  a symbolic link (`/tmp` is `/private/tmp` on macOS) matches the path it
+  leads to.
+- **JavaFX fires a scene accelerator only for a key no node consumed.**
+  `KeyboardShortcutsHandler` runs accelerators in the bubbling phase, after
+  the focused node. So the SQL editor's vim mode, which consumes every key it
+  reads, keeps them from the window: Esc never presses a dialog's Cancel while
+  an editable editor has focus (by design), and on Windows, where Ctrl is the
+  shortcut key, Ctrl+R in an editor is vim's redo rather than Run. On macOS
+  vim reads Ctrl and the window keeps Cmd. A key the editor should leave to
+  the window is `Pressed.PassThrough` in `VimKeyEvents`.
+- **CSS names one font family, with no fallback list.** A family that is not
+  installed falls back to the default UI font, so `-fx-font-family:
+  "JetBrains Mono"` in a stylesheet sets code in a proportional font on a
+  machine without it. `Theme.monoFamily` picks the first installed family of a
+  preferred list, and `Theme.style` adds a generated stylesheet naming it.
+- **A stylesheet added to the main scene does not reach a dialog.** Each
+  `Dialog` and `Alert` has a scene of its own. The theme reaches them as the
+  user-agent stylesheet, but `transformer.css` (the editor's colours, the
+  chips, the cards) only through `Theme.style(dialog)`.
+- **AtlantaFX is pinned at 2.0.1.** 2.1.0 declares `javafx-controls` 23, and
+  rules_jvm_external's resolution takes the highest version, which would lift
+  the whole GUI off JavaFX 21.0.1; 3.0.0 is Java 25 bytecode. Check
+  `bazel query 'deps(@maven//:io_github_mkpaz_atlantafx_base)' --output build`
+  for the JavaFX version before moving it.
+- **RichTextFX's line highlighter can stay drawn after it is turned off.** A
+  `CodeArea` made editable and then read-only kept a highlighted band on a
+  line, so the editor marks the current line in the gutter instead.
+- **An `HBox` too narrow for its children cuts a button's label to an
+  ellipsis.** It takes the shortfall from every child in equal shares, down to
+  each one's minimum width, and a `Button`'s minimum is its ellipsis; `hgrow`
+  only shares out extra space. A `FlowPane` prefers at least its
+  `prefWrapLength` (400px) however few children it holds, so the "Inspect
+  validations" button beside the validation chips showed "Inspect v...". A
+  button whose label must stay whole gets `setMinWidth(Region.USE_PREF_SIZE)`
+  (as `ControlsPanel`'s do) and a row where nothing wide competes with it.
 - **`java -jar` ignores a `scala_binary`'s `jvm_flags`.** `//:transformer`
   sets `-XX:MaxRAMPercentage=75.0`, but that only applies to the
   `bazel-bin/transformer` wrapper script. Users running
@@ -653,7 +709,9 @@ ship a fix or move something from "not done" to "done".
   conjuncts (right-side ones must NOT be pushed — they'd kill the
   null-extended rows that LEFT JOIN preserves when the right side has
   no match); RIGHT outer is symmetric; FULL outer pushes nothing.
-  Conjuncts touching both sides stay above. Stacked Filter(Filter(...))
+  Conjuncts touching both sides join an inner join's condition (so a comma
+  join's WHERE equality is its hash key) and stay above an outer join.
+  Stacked Filter(Filter(...))
   is flattened before the split, and a conjunct that lands above a deeper
   join cascades further on the recursive call. The win compounds with
   parquet predicate pushdown — a filter that sinks all the way to a
@@ -1803,6 +1861,56 @@ the parser into its time limit;
 above) are all fixed. `CleanRejection.Defect` and
 `SyntaxEquivalence.KnownDefects` are empty, and `BeyondTheTable` holds no
 `knownPlan`.
+
+## Defects the third audit found (2026-10-31, all fixed)
+
+The third audit ran the engine against SQLite on generated queries in the
+dialect both share (a deterministic wrong answer agrees with itself in every
+mode, so only another engine sees it), in default, spill and sharded modes,
+and probed windows, aggregates, joins and scalar expressions by hand. The
+operators themselves came out clean; the defects were in the binder, the
+planner, a few functions and the spill directory. Details and repros are in
+[plans/robustness/30](../plans/robustness/30-third-audit.md). The pitfalls
+worth carrying:
+
+- **A name the binder gives a slot must not be a name a query can write.** The
+  aggregate output named its aggregates `_agg0`, `_agg1`, ... and found each by
+  that name, so a column of the input named `_agg0` was taken for the first
+  (`SUM(x)` over `GROUP BY _agg0` returned the key), and `HAVING _agg0 > 1` read
+  the hidden SUM. Slots are addressed by position now, the names avoid every
+  GROUP BY key's, and a column in an aggregate query resolves in the input.
+- **A GROUP BY key matched by its text misses its other spellings.** Matched
+  as a whole SELECT item by `canonicalSql`, a key written inside a larger
+  expression (`UPPER(s) || '!'` over `GROUP BY UPPER(s)`, `HAVING a % 2 = 1`),
+  with its table (`t.a + 1` over `a + 1`), or beside another key in
+  parentheses (which JSqlParser keeps only then) was refused. The binder now
+  asks at every node whether the bound expression is a key.
+- **An operator that reads an expression twice must not be given one that
+  reads `RAND()`.** An exchange read a GROUP BY or PARTITION BY key to route a
+  row and the breaker read it again in the shard; grace-hash and window spill
+  read a key to choose a bucket and again inside it; a simple CASE read its
+  operand once per WHEN and BETWEEN read its operand twice. `Expr.readsRandom`
+  keeps such keys off those paths, and `SwitchCaseExpr` / `BetweenExpr` read a
+  RAND() operand once.
+- **Java counts UTF-16 chars, SQL counts characters.** `String.length`,
+  `substring` and `trim` (which also strips every char up to U+0020) are not
+  SQL's LENGTH, SUBSTRING and TRIM; half of a surrogate pair is no text, and a
+  spill or a parquet or CSV file writes it as `?`; `Pattern.quote` of half a
+  pair matches nothing, so a LIKE pattern holding an emoji matched no string.
+  String ORDERING is still UTF-16 (see the parquet pushdown entry above).
+- **JSqlParser reads `{d '...'}` through `java.sql.Date.valueOf`, which rolls
+  `2026-02-30` over to March.** `SqlParser.escapeLiteralText` reads the
+  literal's token text, which goes through the same strict CAST `DATE '...'`
+  does.
+- **A guard that decides on estimates states guesses as facts.** The nested-loop
+  guard refused two one-row filters over 60,000-row tables as joining "6000
+  rows to 6000"; its first rule now reads proven counts only. A comma join's
+  WHERE equality stayed above the join, so the join was a nested loop the
+  guard refused, asking for an ON the comma cannot take.
+- **The spill sweep deleted by name prefix beside its own directory.** It
+  removed every entry of `java.io.tmpdir` starting `transformer` but its root,
+  the jaffle example's output directory among them, and each JVM's exit
+  deleted the shared root under any other JVM spilling into it.
 
 ## What's intentionally NOT done
 

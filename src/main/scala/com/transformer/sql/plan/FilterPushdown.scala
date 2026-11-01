@@ -1,5 +1,7 @@
 package com.transformer.sql.plan
 
+import com.transformer.core.DataType
+
 /** Pushes filter conjuncts through joins so each conjunct sits as close to the
   * underlying scan as it can correctly run.
   *
@@ -9,7 +11,12 @@ package com.transformer.sql.plan
   * the join. The exact rules depend on the join kind:
   *
   *   - INNER: left-only conjuncts go into the left child; right-only into the
-  *     right child; both-side conjuncts stay above.
+  *     right child; both-side conjuncts join the join's own condition, so
+  *     `FROM t, u WHERE t.id = u.id` (and `CROSS JOIN ... WHERE`) is the equi-
+  *     join `t JOIN u ON t.id = u.id` is: a filter over an inner join keeps
+  *     the pairs the conjunct holds for, which is what the join keeps with it
+  *     in its condition. Left above, it was never a join key, so the join ran
+  *     as a nested loop, and was refused past a few thousand rows a side.
   *   - LEFT outer: left-only conjuncts push into the left child. Right-only
   *     conjuncts cannot be pushed — `LEFT JOIN ... WHERE r.x = 1` evaluates
   *     `r.x = 1` against the null-extended rows that come back when the right
@@ -82,6 +89,7 @@ object FilterPushdown {
 
     val leftPush = scala.collection.mutable.ArrayBuffer.empty[Expr]
     val rightPush = scala.collection.mutable.ArrayBuffer.empty[Expr]
+    val intoJoin = scala.collection.mutable.ArrayBuffer.empty[Expr]
     val keep = scala.collection.mutable.ArrayBuffer.empty[Expr]
 
     conjuncts.foreach { c =>
@@ -89,6 +97,7 @@ object FilterPushdown {
         case JoinSide.LeftOnly if pushLeftOk => leftPush += c
         case JoinSide.RightOnly if pushRightOk =>
           rightPush += JoinSideAnalysis.shiftToRight(c, leftWidth)
+        case JoinSide.Both if kind == JoinKind.Inner => intoJoin += c
         case _ => keep += c
       }
     }
@@ -100,7 +109,12 @@ object FilterPushdown {
       if (rightPush.isEmpty) right
       else rewrite(LogicalFilter(right, andAll(rightPush.toSeq)))
 
-    val newJoin = LogicalJoin(pushedLeft, pushedRight, cond, kind)
+    // The TRUE a CROSS JOIN or a comma binds with says nothing once the
+    // condition has a conjunct of its own.
+    val newCond =
+      if (intoJoin.isEmpty) cond
+      else andAll(collectConjuncts(cond).filterNot(_ == LitExpr(true, DataType.BooleanType)) ++ intoJoin)
+    val newJoin = LogicalJoin(pushedLeft, pushedRight, newCond, kind)
     if (keep.isEmpty) newJoin else LogicalFilter(newJoin, andAll(keep.toSeq))
   }
 

@@ -3,7 +3,7 @@ package com.transformer.fuzz.oracle
 import com.transformer.fuzz.JobDagGen.{Corruption, JobCase}
 import com.transformer.fuzz.oracle.DagSchedule.Run
 import com.transformer.gui.{JobSession, RunState, UiTaskState}
-import com.transformer.job.{FailedValidation, JobTaskSummary, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus}
+import com.transformer.job.{FailedValidation, JobInputRecord, JobTaskSummary, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus}
 
 import java.nio.file.{Path, Paths}
 import java.time.Instant
@@ -425,12 +425,20 @@ object Hydration {
     assert(rec.warnings == res.warnings, s"[hydration] job.json warnings ${rec.warnings}, run said ${res.warnings}$ctx")
     assert(rec.executionTime == run.executionTime,
       s"[hydration] job.json execution time ${rec.executionTime}, run ran at ${run.executionTime}$ctx")
+    // Every input as the run read it, one that failed to load or that no task
+    // reads too.
+    val inputs = jc.inputs.map(in => JobInputRecord(in.view, jc.inputPath(root, in), "csv"))
+    assert(rec.inputs.contains(inputs),
+      s"[hydration] job.json inputs ${rec.inputs.map(_.map(i => DagSchedule.shown(i.toString)))}, expected the run's $inputs$ctx")
     val expected = res.tasks.indices.map { k =>
       val t = res.tasks(k)
       val failed = t.status match {
         case TaskStatus.ValidationFailed(fs) => fs.map(f => FailedValidation(f.validationName, f.rowCount))
         case _ => Nil
       }
+      // What the task's main SQL reads, as generated: its FROM sources, never
+      // the task a validation reads.
+      val gen = jc.tasks(k)
       JobTaskSummary(
         taskName = t.taskName,
         status = runStatus(t.status),
@@ -441,7 +449,9 @@ object Hydration {
         startedAt = Some(t.startedAt),
         finishedAt = Some(t.finishedAt),
         enqueuedAt = Some(t.enqueuedAt),
-        failedValidations = failed)
+        failedValidations = failed,
+        readsInputs = gen.inputSrcs.distinct.map(i => jc.inputs(i).view).sorted,
+        readsTasks = gen.taskSrcs.distinct.sorted.map(i => res.tasks(i).taskName))
     }.toVector
     rec.tasks.toVector.zipAll(expected, null, null).zipWithIndex.foreach { case ((got, want), k) =>
       assert(got == want, s"[hydration] job.json entry $k reads back as ${DagSchedule.shown(String.valueOf(got))}, " +

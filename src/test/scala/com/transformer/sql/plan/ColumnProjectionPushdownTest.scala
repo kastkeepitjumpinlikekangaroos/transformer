@@ -252,6 +252,9 @@ class ColumnProjectionPushdownTest {
     case InListExpr(c, items, _) =>
       assertValidExprIndices(c, schema); items.foreach(assertValidExprIndices(_, schema))
     case LikeExpr(s, p, _, _) => assertValidExprIndices(s, schema); assertValidExprIndices(p, schema)
+    case SwitchCaseExpr(operand, branches, elseE, _) =>
+      (operand +: (branches.flatMap(b => Seq(b.when, b.value)) ++ elseE)).foreach(assertValidExprIndices(_, schema))
+    case BetweenExpr(c, low, high) => Seq(c, low, high).foreach(assertValidExprIndices(_, schema))
     case _: LitExpr => ()
   }
 }

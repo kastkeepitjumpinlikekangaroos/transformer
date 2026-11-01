@@ -40,6 +40,15 @@ maven.install(
         "org.openjfx:javafx-base:jar:win:21.0.1",
         "org.openjfx:javafx-controls:jar:win:21.0.1",
         "org.openjfx:javafx-graphics:jar:win:21.0.1",
+        # The GUI's SQL editor: a styled, virtualized text area (syntax
+        # highlighting, line numbers) that the GUI's vim mode drives. Pure
+        # Java; it expects the JavaFX above on the classpath.
+        "org.fxmisc.richtext:richtextfx:0.11.7",
+        # The GUI's theme for every standard control, dialogs and popups
+        # included. 2.0.1 is the last release built for JavaFX 21 and Java 21:
+        # 2.1.0 declares javafx-controls 23, which would lift the JavaFX pinned
+        # above, and 3.0.0 is Java 25 bytecode.
+        "io.github.mkpaz:atlantafx-base:2.0.1",
 
         # Testing
         "junit:junit:4.13.2",

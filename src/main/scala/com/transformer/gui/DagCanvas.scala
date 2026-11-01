@@ -2,35 +2,28 @@ package com.transformer.gui
 
 import com.transformer.job.{InputFilePath, TaskDag, TaskStatus}
 
-import javafx.scene.canvas.{Canvas, GraphicsContext}
-import javafx.scene.input.{MouseButton, MouseEvent, ScrollEvent}
+import javafx.scene.canvas.GraphicsContext
 import javafx.scene.paint.Color
-import javafx.scene.text.{Font, FontWeight, TextAlignment}
+import javafx.scene.text.TextAlignment
 
-/** JavaFX Canvas that draws the loaded [[com.transformer.job.TaskDag]] (plus its
-  * input views) and lets the user pan, zoom, single-click to select, and
-  * double-click to inspect a task's output or an input's contents.
+/** The [[GraphCanvas]] that draws the loaded [[com.transformer.job.TaskDag]]
+  * (plus its input views): single-click selects a node, double-click inspects
+  * a task's output or an input's contents.
   *
-  * Coordinates: the layout assigns world-space positions to every node. The
-  * canvas keeps a pan offset `(panX, panY)` and a `zoom` factor, and converts
-  * between world ↔ screen on the fly. World units are pixels at zoom=1.
+  * Each node is a card: a bar down its left edge in the colour of its status
+  * (an input's in the input colour), its name, and a status line. The edges
+  * into and out of the selected node are drawn in the accent colour, so its
+  * lineage stands out.
   *
   * Render is called explicitly on state changes (layout/run/selection); no
   * AnimationTimer — for a DAG visualizer the redraw rate is low and we'd rather
   * avoid burning CPU when nothing's happening.
   */
-final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
+final class DagCanvas(session: JobSession) extends GraphCanvas {
+  import GraphCanvas.{StatusFont, TagFont, TitleFont}
+  import Theme.Palette
 
-  // Pan/zoom state. Reset whenever a new DAG loads.
-  private var panX: Double = 0.0
-  private var panY: Double = 0.0
-  private var zoom: Double = 1.0
   private var lastFitDagIdentity: Option[TaskDag] = None
-
-  // Mouse drag tracking.
-  private var dragging: Boolean = false
-  private var lastDragX: Double = 0.0
-  private var lastDragY: Double = 0.0
 
   // External callbacks fired on double-click.
   private var onTaskActivated: Int => Unit = _ => ()
@@ -41,119 +34,66 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
   // Always redraw when the session changes.
   session.addListener(() => { autoFitIfNewDag(); render() })
 
-  // Repaint when the canvas itself resizes.
-  widthProperty().addListener((_, _, _) => render())
-  heightProperty().addListener((_, _, _) => render())
+  private val EdgeColor = Palette.Border
+  private val InputEdgeColor = Palette.Input.deriveColor(0, 1, 0.75, 0.45)
 
-  // Mouse: primary-drag pans, click/double-click selects/activates. JavaFX suppresses
-  // MOUSE_CLICKED after a significant drag, so panning never also triggers a click.
-  addEventHandler(MouseEvent.MOUSE_PRESSED, (e: MouseEvent) => handleMousePressed(e))
-  addEventHandler(MouseEvent.MOUSE_DRAGGED, (e: MouseEvent) => handleMouseDragged(e))
-  addEventHandler(MouseEvent.MOUSE_RELEASED, (e: MouseEvent) => handleMouseReleased(e))
-  addEventHandler(MouseEvent.MOUSE_CLICKED, (e: MouseEvent) => handleMouseClicked(e))
-  addEventHandler(ScrollEvent.SCROLL, (e: ScrollEvent) => handleScroll(e))
+  protected def contentSize: Option[(Double, Double)] = session.layout.map(l => (l.width, l.height))
 
-  override def isResizable: Boolean = true
-  override def prefWidth(h: Double): Double = getWidth
-  override def prefHeight(w: Double): Double = getHeight
+  protected def hint: String = "Drag to pan · scroll to zoom · double-click a node to open its rows"
 
-  // -------------------- rendering --------------------
-
-  def render(): Unit = {
-    val gc = getGraphicsContext2D
-    val w = getWidth
-    val h = getHeight
-
-    // Background.
-    gc.setFill(Color.web("#1e1e2a"))
-    gc.fillRect(0, 0, w, h)
-
-    session.layout match {
-      case None => drawHelpText(gc, w, h)
-      case Some(layout) =>
-        gc.save()
-        gc.translate(panX, panY)
-        gc.scale(zoom, zoom)
-        drawEdges(gc, layout)
-        drawInputNodes(gc, layout)
-        drawTaskNodes(gc, layout)
-        gc.restore()
-        drawHud(gc, w, h)
-    }
+  protected def paintContent(gc: GraphicsContext): Unit = session.layout.foreach { layout =>
+    drawEdges(gc, layout)
+    drawInputNodes(gc, layout)
+    drawTaskNodes(gc, layout)
   }
 
-  private def drawHelpText(gc: GraphicsContext, w: Double, h: Double): Unit = {
-    gc.setFill(Color.web("#7e8aa6"))
-    gc.setFont(Font.font("Sans", FontWeight.NORMAL, 14))
-    gc.setTextAlign(TextAlignment.CENTER)
-    val msg = session.runState match {
-      case RunState.LoadFailed(err) => s"Failed to load job:\n$err"
-      case _ => "Open a job directory (File menu) to see its DAG."
-    }
-    val lines = msg.split('\n')
-    var i = 0
-    while (i < lines.length) {
-      gc.fillText(lines(i), w / 2.0, h / 2.0 + i * 18.0)
-      i += 1
-    }
-    gc.setTextAlign(TextAlignment.LEFT)
+  protected def paintEmpty(gc: GraphicsContext, w: Double, h: Double): Unit = session.runState match {
+    case RunState.LoadFailed(err) =>
+      paintMessage(gc, w, h, "The job could not be loaded", Palette.Danger, err.split('\n').take(6).toSeq)
+    case _ =>
+      paintMessage(gc, w, h, "Open a job directory to see its DAG", Palette.Text,
+        Seq("File > Open Job Directory, or File > New Project"))
   }
+
+  /** Which node is selected, as the edges see it. */
+  private def selectedTask: Option[Int] = session.selectedTaskIndex
+  private def selectedInput: Option[String] =
+    session.selectedInputIndex.flatMap(i => session.inputs.lift(i)).map(_.viewName.toLowerCase)
 
   private def drawEdges(gc: GraphicsContext, layout: DagLayout): Unit = {
     val dag = session.dag.get
+    val lit = scala.collection.mutable.ArrayBuffer.empty[(NodeBox, NodeBox, Color)]
     gc.setLineWidth(1.5)
     var i = 0
     while (i < dag.nodes.size) {
       val toBox = layout.taskBoxes(i)
-      // Task → Task edges (existing).
-      gc.setStroke(Color.web("#5b6175"))
       dag.nodes(i).deps.foreach { d =>
         val fromBox = layout.taskBoxes(d)
-        drawEdge(gc, fromBox, toBox, Color.web("#5b6175"))
+        if (selectedTask.contains(i) || selectedTask.contains(d)) lit += ((fromBox, toBox, Palette.Accent))
+        else edge(gc, fromBox, toBox, EdgeColor)
       }
-      // Input → Task edges (new). Subtler colour so the eye can distinguish
-      // "data lineage" from "task ordering".
-      val inputEdgeColor = Color.web("#3f6f5c")
-      gc.setStroke(inputEdgeColor)
+      // Input → task edges: data lineage, in the input colour.
       dag.nodes(i).inputDeps.foreach { name =>
         layout.boxForInputName(name).foreach { fromBox =>
-          drawEdge(gc, fromBox, toBox, inputEdgeColor)
+          if (selectedTask.contains(i) || selectedInput.contains(name)) lit += ((fromBox, toBox, Palette.Input))
+          else edge(gc, fromBox, toBox, InputEdgeColor)
         }
       }
       i += 1
     }
+    gc.setLineWidth(2.0)
+    lit.foreach { case (from, to, color) => edge(gc, from, to, color) }
   }
 
-  private def drawEdge(gc: GraphicsContext, from: NodeBox, to: NodeBox, color: Color): Unit = {
-    val x1 = from.right
-    val y1 = from.centerY
-    val x2 = to.x
-    val y2 = to.centerY
-    // Bezier curve with horizontal tangents so the line bends out of the node
-    // edge cleanly even when the y coordinates differ between layers.
-    val midX = (x1 + x2) / 2.0
-    gc.beginPath()
-    gc.moveTo(x1, y1)
-    gc.bezierCurveTo(midX, y1, midX, y2, x2, y2)
-    gc.stroke()
-    // Arrowhead at (x2, y2) pointing right.
-    val ah = 7.0
-    gc.beginPath()
-    gc.moveTo(x2, y2)
-    gc.lineTo(x2 - ah, y2 - ah / 2.0)
-    gc.lineTo(x2 - ah, y2 + ah / 2.0)
-    gc.closePath()
-    gc.setFill(color)
-    gc.fill()
-  }
+  private def edge(gc: GraphicsContext, from: NodeBox, to: NodeBox, color: Color): Unit =
+    drawEdge(gc, from.right, from.centerY, to.x, to.centerY, color)
 
   private def drawInputNodes(gc: GraphicsContext, layout: DagLayout): Unit = {
     val inputs = session.inputs
     val selected = session.selectedInputIndex
     var i = 0
     while (i < layout.inputBoxes.size && i < inputs.size) {
-      drawInputNode(gc, layout.inputBoxes(i), inputs(i),
-        session.inputStateFor(i), selected.contains(i))
+      drawInputNode(gc, layout.inputBoxes(i), inputs(i), session.inputStateFor(i), selected.contains(i))
       i += 1
     }
   }
@@ -165,33 +105,27 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
       state: UiInputState,
       isSelected: Boolean
   ): Unit = {
-    val (fill, stroke, footerOverride) = state match {
-      case UiInputState.Pending     => (Color.web("#2b4a3a"), Color.web("#5fa17a"), None)
-      case UiInputState.Loading     => (Color.web("#324f6b"), Color.web("#4a90e2"), Some("loading…"))
-      case UiInputState.Loaded      => (Color.web("#244c2f"), Color.web("#4caf50"), None)
-      case UiInputState.Failed(err) => (Color.web("#5a2828"), Color.web("#e57373"), Some(s"failed: ${truncate(err, 28)}"))
+    val (accent, footer) = state match {
+      case UiInputState.Pending     => (Palette.Input, basename(in.path))
+      case UiInputState.Loading     => (Palette.Accent, "loading…")
+      case UiInputState.Loaded      => (Palette.Input, basename(in.path))
+      case UiInputState.Failed(err) => (Palette.Danger, s"failed: $err")
     }
-    gc.setFill(fill)
-    gc.fillRoundRect(box.x, box.y, box.width, box.height, 12, 12)
-    gc.setStroke(if (isSelected) Color.web("#ffd166") else stroke)
-    gc.setLineWidth(if (isSelected) 3.0 else 1.5)
-    gc.strokeRoundRect(box.x, box.y, box.width, box.height, 12, 12)
-    // Small "INPUT" tag on the top-left corner so inputs are unmistakable.
-    gc.setFill(Color.web("#9bd1ad"))
-    gc.setFont(Font.font("Sans", FontWeight.BOLD, 9))
+    card(gc, box, accent, isSelected)
+    // A small cylinder: the input is data, not a query.
+    drawCylinder(gc, box.x + 22, box.centerY, accent)
+    val textX = box.x + 38
+    val textW = box.right - textX - 10
     gc.setTextAlign(TextAlignment.LEFT)
-    gc.fillText(s"INPUT • ${in.detectedFormat.toUpperCase}", box.x + 12, box.y + 14)
-    // View name (the headline).
-    gc.setFill(Color.web("#f7f7fb"))
-    gc.setFont(Font.font("Sans", FontWeight.BOLD, 13))
-    gc.setTextAlign(TextAlignment.CENTER)
-    gc.fillText(truncate(in.viewName, 26), box.centerX, box.y + 32, box.width - 16)
-    // Footer: state-dependent status, falling back to the file basename.
-    gc.setFill(Color.web("#c5cad8"))
-    gc.setFont(Font.font("Sans", FontWeight.NORMAL, 11))
-    val footer = footerOverride.getOrElse(truncate(basename(in.path), 30))
-    gc.fillText(footer, box.centerX, box.y + 50, box.width - 16)
-    gc.setTextAlign(TextAlignment.LEFT)
+    gc.setFill(accent)
+    gc.setFont(TagFont)
+    gc.fillText(s"INPUT · ${in.detectedFormat.toUpperCase}", textX, box.y + 17)
+    gc.setFill(Palette.Text)
+    gc.setFont(TitleFont)
+    gc.fillText(fit(in.viewName, TitleFont, textW), textX, box.y + 34)
+    gc.setFill(Palette.TextMuted)
+    gc.setFont(StatusFont)
+    gc.fillText(fit(footer, StatusFont, textW), textX, box.y + 50)
   }
 
   private def basename(path: String): String = {
@@ -221,28 +155,29 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
       state: UiTaskState,
       isSelected: Boolean
   ): Unit = {
-    val (fill, stroke, statusLine) = nodeColors(state)
-    gc.setFill(fill)
-    gc.fillRoundRect(box.x, box.y, box.width, box.height, 12, 12)
-    gc.setStroke(if (isSelected) Color.web("#ffd166") else stroke)
-    gc.setLineWidth(if (isSelected) 3.0 else 1.5)
-    gc.strokeRoundRect(box.x, box.y, box.width, box.height, 12, 12)
-    // Task title (truncated if too long).
-    gc.setFill(Color.web("#f7f7fb"))
-    gc.setFont(Font.font("Sans", FontWeight.BOLD, 13))
-    gc.setTextAlign(TextAlignment.CENTER)
-    gc.fillText(truncate(label, 26), box.centerX, box.y + 22, box.width - 16)
-    // Status text.
-    gc.setFill(Color.web("#c5cad8"))
-    gc.setFont(Font.font("Sans", FontWeight.NORMAL, 11))
-    gc.fillText(statusLine, box.centerX, box.y + 42, box.width - 16)
+    val (accent, statusLine) = nodeStatus(state)
+    card(gc, box, accent, isSelected)
+    val textX = box.x + 18
+    val textW = box.right - textX - 10
     gc.setTextAlign(TextAlignment.LEFT)
+    gc.setFill(Palette.Text)
+    gc.setFont(TitleFont)
+    gc.fillText(fit(label, TitleFont, textW), textX, box.y + 25)
+    gc.setFill(accent)
+    gc.fillOval(textX, box.y + 37, 7, 7)
+    gc.setFill(Palette.TextMuted)
+    gc.setFont(StatusFont)
+    gc.fillText(fit(statusLine, StatusFont, textW - 12), textX + 12, box.y + 44)
   }
 
-  private def nodeColors(state: UiTaskState): (Color, Color, String) = state match {
-    case UiTaskState.Pending => (Color.web("#3a3f55"), Color.web("#5b6175"), "pending")
-    case UiTaskState.Queued  => (Color.web("#3e4a78"), Color.web("#6e80c5"), "queued…")
-    case UiTaskState.Running => (Color.web("#2b4f7a"), Color.web("#4a90e2"), "running…")
+  private def card(gc: GraphicsContext, box: NodeBox, accent: Color, isSelected: Boolean): Unit =
+    drawCard(gc, box.x, box.y, box.width, box.height, accent, isSelected)
+
+  /** A task's colour and status line. */
+  private def nodeStatus(state: UiTaskState): (Color, String) = state match {
+    case UiTaskState.Pending => (Palette.TextSubtle, "pending")
+    case UiTaskState.Queued  => (Palette.Done, "queued…")
+    case UiTaskState.Running => (Palette.Accent, "running…")
     case UiTaskState.Done(result) =>
       // A task restored from a job.json that predates entry timestamps has
       // them at the epoch: its duration is unknown, not 0 ms.
@@ -252,66 +187,22 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
         else s"${result.durationMillis} ms"
       result.status match {
         case TaskStatus.Succeeded =>
-          (Color.web("#244c2f"), Color.web("#4caf50"),
-            f"succeeded • ${result.rowsProduced}%,d rows • $durLine")
+          (Palette.Success, f"${result.rowsProduced}%,d rows · $durLine")
         case TaskStatus.Failed(_) =>
-          (Color.web("#5a2828"), Color.web("#e57373"),
-            s"failed • $durLine")
+          (Palette.Danger, s"failed · $durLine")
         case TaskStatus.ValidationFailed(fs) =>
           val count = if (fs.isEmpty) "" else s" (${fs.size})"
-          (Color.web("#5a4322"), Color.web("#ffa726"),
-            s"validation failed$count • $durLine")
+          (Palette.Warning, s"validation failed$count · $durLine")
         case TaskStatus.Skipped(_) =>
-          (Color.web("#34384a"), Color.web("#7a8095"), "skipped")
+          (Palette.TextSubtle.darker(), "skipped")
         case TaskStatus.Pending =>
-          (Color.web("#3a3f55"), Color.web("#5b6175"), "pending")
+          (Palette.TextSubtle, "pending")
       }
   }
 
-  private def drawHud(gc: GraphicsContext, w: Double, h: Double): Unit = {
-    val state = f"zoom ${zoom * 100}%.0f%% • pan ($panX%.0f, $panY%.0f)"
-    val hint = "drag to pan • scroll to zoom • click node to select • double-click to view output"
-    gc.setFont(Font.font("Sans", FontWeight.BOLD, 11))
-    gc.setFill(Color.web("#9ba2b8"))
-    gc.fillText(state, 12, h - 26)
-    gc.setFont(Font.font("Sans", FontWeight.NORMAL, 11))
-    gc.setFill(Color.web("#6a708a"))
-    gc.fillText(hint, 12, h - 10)
-  }
-
-  private def truncate(s: String, max: Int): String =
-    if (s.length <= max) s else s.substring(0, max - 1) + "…"
-
   // -------------------- interaction --------------------
 
-  private def handleMousePressed(e: MouseEvent): Unit = {
-    if (e.getButton != MouseButton.PRIMARY) return
-    // Always arm a pan on primary press; MOUSE_DRAGGED will move the canvas
-    // and JavaFX will suppress the subsequent MOUSE_CLICKED if the cursor
-    // moved enough to count as a drag — so a real drag pans without firing
-    // selection logic, and a still click still selects.
-    dragging = true
-    lastDragX = e.getX
-    lastDragY = e.getY
-  }
-
-  private def handleMouseDragged(e: MouseEvent): Unit = {
-    if (dragging) {
-      panX += e.getX - lastDragX
-      panY += e.getY - lastDragY
-      lastDragX = e.getX
-      lastDragY = e.getY
-      render()
-    }
-  }
-
-  private def handleMouseReleased(e: MouseEvent): Unit = {
-    if (dragging) dragging = false
-  }
-
-  private def handleMouseClicked(e: MouseEvent): Unit = {
-    if (e.getButton != MouseButton.PRIMARY) return
-    val (wx, wy) = screenToWorld(e.getX, e.getY)
+  protected def clicked(wx: Double, wy: Double, clicks: Int): Unit =
     session.layout.flatMap(_.hitTest(wx, wy)) match {
       case Some(box) =>
         val sel = box.kind match {
@@ -319,7 +210,7 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
           case NodeKind.Input => Selection.Input(box.index)
         }
         session.select(Some(sel))
-        if (e.getClickCount >= 2) {
+        if (clicks >= 2) {
           box.kind match {
             case NodeKind.Task => onTaskActivated(box.index)
             case NodeKind.Input => onInputActivated(box.index)
@@ -328,29 +219,8 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
       case None =>
         // Clicked empty space — only clear selection on a single click; a stray
         // double-click on whitespace shouldn't surprise the user.
-        if (e.getClickCount == 1) session.select(None)
+        if (clicks == 1) session.select(None)
     }
-  }
-
-  private def handleScroll(e: ScrollEvent): Unit = {
-    val factor = if (e.getDeltaY > 0) 1.1 else 1.0 / 1.1
-    val newZoom = math.max(0.2, math.min(3.0, zoom * factor))
-    if (newZoom != zoom) {
-      // Zoom around the mouse pointer for a natural feel.
-      val (wx, wy) = screenToWorld(e.getX, e.getY)
-      zoom = newZoom
-      val (sx, sy) = worldToScreen(wx, wy)
-      panX += e.getX - sx
-      panY += e.getY - sy
-      render()
-    }
-  }
-
-  private def screenToWorld(sx: Double, sy: Double): (Double, Double) =
-    ((sx - panX) / zoom, (sy - panY) / zoom)
-
-  private def worldToScreen(wx: Double, wy: Double): (Double, Double) =
-    (wx * zoom + panX, wy * zoom + panY)
 
   /** When a fresh DAG is loaded (i.e. identity changed) recenter the view so the
     * whole graph is visible. We keep the existing pan/zoom for in-place updates
@@ -363,21 +233,35 @@ final class DagCanvas(session: JobSession) extends Canvas(800, 600) {
       fitToWindow()
     }
   }
+}
 
-  def fitToWindow(): Unit = {
-    session.layout match {
-      case Some(layout) if layout.width > 0 && layout.height > 0 =>
-        val w = getWidth
-        val h = getHeight
-        if (w > 0 && h > 0) {
-          val zx = w / layout.width
-          val zy = h / layout.height
-          zoom = math.max(0.2, math.min(1.5, math.min(zx, zy) * 0.95))
-          panX = (w - layout.width * zoom) / 2.0
-          panY = (h - layout.height * zoom) / 2.0
-        }
-      case _ =>
-        panX = 0.0; panY = 0.0; zoom = 1.0
+/** The DAG canvas with what floats over it: a count of the tasks in each
+  * status at the top left, and zoom controls at the bottom right. */
+final class DagOverlay(session: JobSession, canvas: DagCanvas) extends GraphOverlay(canvas) {
+  import Theme.Palette
+
+  session.addListener(() => refreshSummary())
+  refreshSummary()
+
+  private def refreshSummary(): Unit = {
+    summary.getChildren.clear()
+    val dag = session.dag.getOrElse {
+      setControlsVisible(false)
+      return
     }
+    setControlsVisible(true)
+    val states = dag.nodes.indices.map(i => session.taskStates.lift(i).getOrElse(UiTaskState.Pending))
+    def done(p: TaskStatus => Boolean): Int = states.count {
+      case UiTaskState.Done(r) => p(r.status)
+      case _ => false
+    }
+    count("succeeded", Palette.Success, done(_ == TaskStatus.Succeeded))
+    count("failed", Palette.Danger, done(_.isInstanceOf[TaskStatus.Failed]))
+    count("validation failed", Palette.Warning, done(_.isInstanceOf[TaskStatus.ValidationFailed]))
+    count("skipped", Palette.TextSubtle.darker(), done(_.isInstanceOf[TaskStatus.Skipped]))
+    count("running", Palette.Accent, states.count(_ == UiTaskState.Running))
+    count("queued", Palette.Done, states.count(_ == UiTaskState.Queued))
+    count("pending", Palette.TextSubtle, states.count(_ == UiTaskState.Pending) + done(_ == TaskStatus.Pending))
+    count(if (session.inputs.size == 1) "input" else "inputs", Palette.Input, session.inputs.size)
   }
 }

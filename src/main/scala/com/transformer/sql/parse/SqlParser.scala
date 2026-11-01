@@ -120,6 +120,23 @@ object SqlParser {
 
   private val IdentifierQuotes: Set[Char] = Set('"', '`')
 
+  /** The text between the quotes of a JDBC escape literal, `{d '...'}`, as it
+    * is written, read off the tokens the node was parsed from: the node keeps
+    * only the date JSqlParser read the text as, leniently. None for a node
+    * built without the parser. */
+  def escapeLiteralText(literal: net.sf.jsqlparser.expression.DateValue): Option[String] =
+    Option(literal.getASTNode).flatMap { node =>
+      Iterator.iterate(node.jjtGetFirstToken)(_.next).takeWhile(_ != null).take(4)
+        .find(_.image.startsWith("'")).map(token => stringLiteralValue(token.image))
+    }
+
+  /** A string literal's value: the text between its quotes, each doubled
+    * quote one. */
+  def stringLiteralValue(literal: String): String =
+    if (literal.length >= 2 && literal.head == '\'' && literal.last == '\'')
+      literal.substring(1, literal.length - 1).replace("''", "'")
+    else literal
+
   /** JSqlParser parses one statement and stops at the `;` after it, so
     * anything written after that would never run: a second query, or `DROP
     * TABLE t`. A trailing `;` is fine, and so are more of them and a comment.

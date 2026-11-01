@@ -326,7 +326,7 @@ object JobDagGen {
 
     private def inputFile(root: Path, in: GenInput): Path = root.resolve("in").resolve(s"${in.view}.csv")
 
-    private def inputPath(root: Path, in: GenInput): String =
+    private[fuzz] def inputPath(root: Path, in: GenInput): String =
       if (in.broken) root.resolve("in").resolve(s"${in.view}-missing.csv").toString
       else inputFile(root, in).toString
 

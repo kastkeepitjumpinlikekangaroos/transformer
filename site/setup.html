@@ -134,9 +134,28 @@ Tables:         15
           watch each task go from queued to running to done. Double-click a
           table to preview its rows, open its validations, or query any
           output from the SQL console. Use the run picker to reopen a previous
-          run exactly as it finished.
+          run exactly as it finished. Every SQL editor highlights syntax and
+          takes vim's keys; <strong>View &rarr; Vim Keybindings</strong> turns
+          them off.
           <strong>File &rarr; New Project</strong> starts an empty project, and
           the Add Input and Add Table menus create the directories for you.
+        </p>
+      </div>
+
+      <div class="step">
+        <h3>Explore what it wrote</h3>
+<pre class="term"><span class="p">$ </span>bazel build //:transformer_viewer_deploy.jar
+<span class="p">$ </span>java -jar bazel-bin/transformer_viewer_deploy.jar /tmp/jaffle-out</pre>
+        <p class="muted">
+          The data viewer is a jar of its own for the data your jobs wrote.
+          Open it on a folder of job outputs, here the run above: each job's
+          output is a dataset, and its lineage shows how every table was made
+          from the others, within a job and across jobs when one job reads
+          another's output. Click a table to light up everything it comes
+          from and everything made from it; double-click it for a sample of
+          its rows. The Query tab runs SQL over every table, each named
+          <code>&lt;dataset&gt;__&lt;table&gt;</code>, such as
+          <code>jaffle_out__customers</code>, in the same editor as the GUI.
         </p>
       </div>
 

@@ -86,10 +86,11 @@ final case class WindowExec(
     * — same gate the planner uses for sharded windows. Empty PARTITION
     * BY (whole-result window) means a single global partition that can't
     * be bucketed without losing visibility; mixed PARTITION BYs would
-    * each need a different bucketing. */
+    * each need a different bucketing. A key that reads RAND() would be read
+    * twice, to choose the bucket and to partition in it. */
   private val canSpill: Boolean = {
     val distinctParts = windows.map(_.spec.partitionKeys).distinct
-    distinctParts.length == 1 && distinctParts.head.nonEmpty
+    distinctParts.length == 1 && distinctParts.head.nonEmpty && !distinctParts.head.exists(Expr.readsRandom)
   }
 
   private val spillEnabled: Boolean = opts.spillEnabled && canSpill

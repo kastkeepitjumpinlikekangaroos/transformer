@@ -23,6 +23,10 @@ Python environment, only Java 21.
   seconds on one Apple M4 (8 cores, 16 GB). See
   [Heavy-load example: polymarket](#heavy-load-example-polymarket).
 
+A second jar, the [data viewer](#data-viewer), opens a folder of job outputs:
+every table the jobs wrote, the lineage across them, a sample of any table's
+rows, and SQL over all of them.
+
 The project website lives in [`site/`](site/). Open `site/index.html` in a
 browser; it is static HTML with no build step.
 
@@ -164,8 +168,9 @@ downstream of it is `Skipped`.
 ## Command line
 
 The `transformer` deploy jar (`bazel build //:transformer_deploy.jar`) is the
-whole product: the engine, the CSV and Parquet readers and writers, and the
-GUI.
+whole product for building and running jobs: the engine, the CSV and Parquet
+readers and writers, and the GUI. The [data viewer](#data-viewer) is a jar of
+its own.
 
 ```
 transformer run <jobDir> [--output <dir>] [--execution-time <instant>]
@@ -254,9 +259,9 @@ clear error to fix instead of wrong data. See [SQL features](#sql-features).
 
 ## GUI
 
-A JavaFX visualizer / runner. Open a job directory, see its DAG, edit the
-execution time + output directory, press Run, watch task colors update live,
-double-click a node to inspect the persisted output rows.
+A desktop app to see and run a job: open a job directory, see its DAG, set the
+execution time and output directory, press Run and watch each task's status
+change live, then browse its rows, its validations and its SQL.
 
 ```bash
 java -jar transformer.jar gui examples/jaffle_shop/job
@@ -265,38 +270,105 @@ java -jar transformer.jar gui examples/jaffle_shop/job
 ```
 
 The GUI ships inside the `transformer` jar with JavaFX for macOS on Apple
-Silicon and Windows. On other platforms use `transformer run`.
+Silicon and Windows. On other platforms use `transformer run`. Every control
+is in a dark theme ([AtlantaFX](https://github.com/mkpaz/atlantafx)'s Primer
+Dark).
 
 Layout:
 
-- **Top** — menu bar (File: Open / Reload / Quit; View: Fit DAG) stacked
-  above a horizontal controls strip: open job dir, execution time (UTC date
-  + h/m/s spinners), output dir field, a small Run button (⌘R / Ctrl+R),
-  and run status. Hover the output-dir field for the effective rendered
-  path.
-- **Center top** — DAG canvas. Pan with right- or middle-mouse drag (or
-  Alt+left-drag), zoom with the scroll wheel. Click a node to select it;
-  double-click to load its output rows.
-- **Right** — selected task's source SQL, rendered (post-template) SQL,
-  status, error/validation summary, planned vs. actual output path, and any
-  `_run.json` provenance.
-- **Center bottom** — five tabs: task details, output data table (with a
-  partition picker above it when 2+ historical runs exist for the activated
-  task), Validations (per-validation cards with an Edit… button that pops
-  out the `AddValidationDialog.showEdit` editor and writes back to
-  `tables/<view>/validations/<name>.sql`), an ad-hoc SQL console, and a run
-  log.
+- **Header** — the open job, the execution time (a UTC date and an `HH:mm:ss`
+  time; Now resets both), the output directory (hover it for the rendered
+  path), a run picker when the output directory holds two or more run
+  snapshots, the run's status (with live progress while it runs) and **Run**
+  (⌘R / Ctrl+R). The menus (File, View, Help) are in the macOS menu bar, or
+  above the header elsewhere.
+- **DAG** — inputs on the left, tables in layers after them. A node's status is
+  the colour of the bar down its left edge, and its status line says rows and
+  time once it has run. Selecting a node lights up the edges into and out of
+  it. Drag to pan, scroll to zoom (or use the controls at the bottom right; ⌘0
+  fits the window), click to select, double-click to open its rows. The top
+  left counts the tasks in each status.
+- **Tabs below** — **Task details** (the selected task's status, metrics,
+  dependencies, output path and provenance, error and validation summary,
+  and beside them its SQL, source or rendered, editable in place), **Output
+  data** (the activated node's rows, with a partition picker above them when
+  2+ historical runs exist), **Validations** (a card per validation with its
+  status, its SQL, its failing rows, and an Edit… button that opens it in
+  the validation editor, which writes back to
+  `tables/<view>/validations/<name>.sql`), **SQL console** (ad-hoc SQL over the
+  inputs and the task outputs on disk; ⌘⏎ / Ctrl+Enter runs it and Persist
+  writes the result), and **Run log**.
 
-Node colors:
+Node colours:
 
-| Color | Meaning |
+| Colour | Meaning |
 |---|---|
 | Grey | Pending — not run yet, or nothing on disk records its run (no `_run.json` naming it, no `job.json` entry) |
+| Purple | Queued |
 | Blue | Running |
 | Green | Succeeded (either freshly this session, or hydrated from `_run.json`) |
 | Red | Failed (error message + timing reloaded from disk) |
-| Orange | Validation failed (per-validation pass/fail + sample CSV reloaded from disk) |
-| Light grey + dashed | Skipped (upstream failure) |
+| Amber | Validation failed (per-validation pass/fail + sample CSV reloaded from disk) |
+| Dark grey, "skipped" | Skipped (upstream failure) |
+| Teal | An input |
+
+### SQL editors and vim keybindings
+
+Everywhere SQL is shown or written (the SQL console, a task's SQL in Task
+details, the validation cards, the Add Table and validation dialogs, the
+query-error popup) is one editor: syntax highlighting (keywords, functions,
+types, strings, numbers, comments, `{{ template }}` placeholders), line
+numbers, and a status line with the cursor's position. A new line keeps the
+indent of the one before, and `Tab` indents by two spaces.
+
+The editors take vim's keys. That is on by default; View > Vim Keybindings, or
+the VIM button in an editor's status line, turns it off and on for every
+editor, and the choice is remembered. The status line shows the mode (NORMAL,
+INSERT, VISUAL, V-LINE, REPLACE, COMMAND), the command being typed, and vim's
+messages. Help > Keyboard Shortcuts (⌘/) lists the keys. What vim covers:
+
+- Modes: insert (`i a I A o O gi gI`), replace (`R`), visual by character or
+  by line (`v V gv`, `o` to the other end), and the command line (`: / ?`).
+- Motions, all with counts: `h j k l`, `w b e ge` and `W B E gE`, `0 ^ $ g_`,
+  `gg G`, `f t F T ; ,`, `%`, `{ }`, `H M L`, `+ - _ <CR>`,
+  `<C-d> <C-u> <C-f> <C-b>`, and search `/ ? n N * #`.
+- The operators `d c y > < g~ gu gU` with any motion, with a text object
+  (`iw aw iW aW ip ap`, brackets `i( a( ib i[ i{ iB i<`, quotes `` i" i' i` ``,
+  and their `a` forms), or doubled for whole lines (`dd`, `>>`, `gUU`); and
+  `x X s S D C Y p P gp gP r J gJ ~ <C-a> <C-x>`.
+- `u` and `<C-r>` (each change is one undo step, an insert from the command
+  that began it to `<Esc>` included), `.`, macros (`q{reg}`, `@{reg}`, `@@`,
+  `@:`), and registers: `"a` to `"z` (`"A` to `"Z` append), `"0` to `"9`,
+  `"-`, `"_`, and `"+` / `"*` for the system clipboard.
+- Ex commands: `:{n}`, `:s/pat/rep/` with `g` and `i` over `%`, `'<,'>` or a
+  range of lines (`&` repeats it), `:d :y :j :> :<`, and `:w :q :q! :wq :x`
+  with `ZZ ZQ`. In a task's SQL being edited `:w` saves it and `:q` cancels
+  the edit; in a dialog `:w` presses Save (or Create) and `:q` Cancel. `:q`
+  refuses to drop changes (E37) without the `!`.
+- In insert mode: `<C-w> <C-u> <C-t> <C-d> <C-r>{reg}` and the arrow keys.
+- Search patterns are vim's regex (`\(…\)`, `\|`, `\<…\>`, `\{n,m}`); `\c`
+  makes a search ignore case.
+
+Cursors, counts and indents follow Neovim's defaults (`nostartofline`,
+`autoindent`, `cw` changing to the end of the word) with `shiftwidth=2` and
+`expandtab`, the indent this repo's SQL uses. Not covered: visual block
+mode, marks, folds, the jump list, `<C-e>` / `<C-y>` scrolling, `:set`, and
+plugins.
+
+The platform's shortcuts still work: ⌘Z and ⇧⌘Z undo and redo (through vim's
+undo), ⌘C and ⌘X copy and cut a visual selection, ⌘V pastes, ⌘A selects
+everything. Every other ⌘ shortcut (⌘R, ⌘⏎) is the window's. On Windows Ctrl
+is both the shortcut key and vim's: Ctrl+C, X, V, Z and A are the clipboard,
+undo and select all there, and the other Ctrl keys are vim's, so Ctrl+R in an
+editor is vim's redo, not Run. A click moves the cursor and a drag selects in
+visual mode. `Esc` in an editable editor never closes the dialog it is in.
+
+Output data and the SQL console read a task's output as the tasks after it
+read it: the part files its run wrote, in the CSV writer's delimiter and with
+the column types it was written with, which its `_run.json` records (a column
+of digits written as text stays text). Their grids show each column's type
+under its name, NULL as `NULL`, numbers to the right, sort a column by value,
+and copy the selected rows as tab-separated text with ⌘C.
 
 When you open a job directory the GUI loads `<outputDir>/job.json` if it
 exists and follows each task's `runFile` pointer to its per-task
@@ -331,7 +403,102 @@ launches it, and `//examples/gui_app` is a GUI-only launcher. The launcher bundl
 preview works for both formats. The session state behind every panel
 (`JobSession`, which opens a job directory and rebuilds its last run, and
 `DagLayout`) builds on its own as `//src/main/scala/com/transformer/gui:session`,
-with no JavaFX, so it can be tested without a display.
+with no JavaFX, so it can be tested without a display; so does the editors'
+vim engine, as `//src/main/scala/com/transformer/gui:vim`.
+
+## Data viewer
+
+A second desktop app, a jar of its own, for what your jobs wrote: open a
+folder of job outputs and see every dataset in it, how its tables were made
+from each other within a job and across jobs, a sample of any table's rows,
+and SQL over all of them.
+
+```bash
+bazel build //:transformer_viewer_deploy.jar
+java -jar bazel-bin/transformer_viewer_deploy.jar /data/runs
+# The folder is optional; otherwise use File > Open Folder.
+```
+
+A **dataset** is one job's output: a directory holding the `job.json` its run
+wrote. The viewer finds every one under the folder you open, up to six levels
+down, so this folder holds three datasets:
+
+```
+/data/runs/
+  jaffle_shop/          job.json, customers/, orders/, ...  (--output /data/runs/jaffle_shop)
+  marketing/
+    day=20260101/       job.json, ...                       (--output "/data/runs/marketing/day={{ today }}")
+    day=20260102/       job.json, ...
+  finance/              job.json, ...
+```
+
+The runs of one job writing to a templated directory are one dataset, named
+without the part the template fills in: the two `marketing` runs show as
+`marketing`, at its newest run, with a run picker in its details. A folder that
+is itself one run's directory shows as one dataset, named after the folder.
+
+Layout:
+
+- **Header** — the folder, Open (⌘O) and Reload (⌘R), and how many datasets
+  and tables it holds.
+- **Datasets** (left) — each dataset, its tables (a dot in the colour of each
+  table's status, and its rows), and the inputs it read from outside the
+  folder. The field above it filters by name (⌘F).
+- **Lineage** (centre) — each dataset a box with its name and run, its inputs
+  and tables as cards inside, drawn as the job GUI draws a DAG: inputs on the
+  left, each table right of what it reads. An edge in a box is a table reading
+  an input or another table; an edge between boxes, in the input colour, is a
+  job's input reading another job's table. Click a table to light its whole
+  lineage, everything it is made from and everything made from it, across
+  jobs, and dim the rest; double-click it for a sample of its rows.
+- **Tabs below** — **Details** (for a table: its status, rows, the name to
+  query it by, where it is, what it reads and what reads it, its columns, its
+  validations and error, and beside them the SQL that made it; for a dataset:
+  its run, the datasets it reads and that read it, its tables and warnings),
+  **Query** (SQL over every table; ⌘T opens another query tab), and a tab per
+  sample, the first 1,000 rows of a table. A table's menu in the list also
+  queries it in a new tab and copies its name or path.
+
+Lineage comes from the run records. Each `job.json` lists the inputs its run
+read, with their paths rendered and made absolute, and what each table's main
+SQL reads ([Per-job `job.json`](#per-job-jobjson)). An input whose path is
+another dataset's table directory, a file in it, or a glob over its part files
+(`/data/runs/marketing/day=20260102/revenue/part-*.csv`) reads that table,
+whatever symbolic links the two paths go through. The match is made against
+every run of that dataset, so an input that read an older run than the one
+shown still joins the table, and its details say which run it read. An input
+that matches no table is data from outside the folder.
+
+**Querying.** Every table is named `<dataset>__<table>`, such as
+`jaffle_shop__customers`: the engine's catalog is flat, so the dataset and the
+table make one name, a double underscore between them, and each part is made a
+name SQL reads without quotes (`day=20260101` becomes `day_20260101`). An input
+read from outside the folder is `<dataset>__<input>`. Details shows each name.
+
+```sql
+SELECT s.segment, COUNT(*) AS orders, SUM(o.order_total) AS revenue
+FROM marketing__customer_segments s
+JOIN jaffle_shop__orders o ON o.customer_id = s.customer_id
+GROUP BY s.segment
+```
+
+A table reads as the tasks after it read it: the part files its run wrote,
+with the column types it was written with. `jaffle_shop.customers` is refused
+with the name to write instead, and a table whose task failed in the run shown
+says it has no rows. Persist writes a result as part files, under
+`<folder>/interactive` unless you choose another directory.
+
+A run written before records carried lineage still opens: its tables show,
+sample and query, but its box says lineage was not recorded, and what its
+tables read is unknown until the job runs again.
+
+The viewer is built from the same components as the job GUI
+(`//src/main/scala/com/transformer/gui:components`): the theme, the SQL editor
+with its highlighting and vim keys (View > Vim Keybindings is one setting for
+both apps), the SQL console, the grid that shows rows and the canvas graphs are
+drawn on. The viewer is `//src/main/scala/com/transformer/viewer`, and its
+model (finding the datasets, the lineage, the layout and the query catalog)
+builds on its own as `viewer:model`, with no JavaFX.
 
 ## Run records and historical runs
 
@@ -369,14 +536,27 @@ The record captures everything needed to reconstruct the task's UI state:
   "rowsProduced":  2,
   "format":        "csv",
   "outputFiles":   ["part-00000.csv"],
+  "options":       {"delimiter": "|"},
+  "schema": [{"name": "tier", "type": "string", "nullable": true},
+             {"name": "spend", "type": "decimal(38,2)", "nullable": true}],
   "validations": [
     { "name": "customer_id_unique", "passed": false, "failedRowCount": 7,
       "sampleFile": "_validation-customer_id_unique.csv" },
     { "name": "row_count_positive", "passed": true, "failedRowCount": 0,
       "sampleFile": null }
-  ]
+  ],
+  "sql": "SELECT tier, SUM(spend) AS spend\nFROM customers\nGROUP BY tier"
 }
 ```
+
+`options` (the table's `output.json` options) and `schema` (each column's
+name and type, absent for a task that wrote nothing) say how to read the part
+files back as they were written, which a CSV file alone cannot: its delimiter
+and header, and its column types, so a column of digits written as text reads
+back as text. The tasks after the task, the GUI's previews and the data viewer
+all read an output this way (`TaskRunRecord.outputView`). `sql` is the task's
+main SQL with its templates rendered: how the rows were made. A record from
+before these fields still reads; its CSV output reads with inferred types.
 
 `enqueuedAt` is the moment all of the task's inputs and upstream task results
 were available — i.e. when the runner *would* have started the task if the
@@ -424,6 +604,31 @@ Loading this one file is the GUI's entry point for hydrating the whole job;
 per-task records are loaded lazily as the user drills into each task. A
 `job.json` written before entries carried the timestamps and failed
 validations still reads, without them.
+
+It also records the run's lineage, which the [data viewer](#data-viewer) draws:
+
+```json
+{
+  "outputTemplate": "/data/runs/marketing/day={{ today }}",
+  "inputs": [
+    {"name": "customers", "path": "/data/runs/jaffle_shop/customers", "format": "parquet", "options": {}}
+  ],
+  "tasks": [
+    {"taskName": "customer_segments", "status": "Succeeded",
+     "runFile": "/data/runs/marketing/day=20260102/customer_segments/_run.json", ...,
+     "readsInputs": ["customers"], "readsTasks": []}
+  ]
+}
+```
+
+`inputs` holds every input as the run read it: its path with its templates
+rendered and made absolute (a cloud path as written), its format and options.
+Each task's `readsInputs` and `readsTasks` name what its main SQL reads; a
+table only a validation reads is not where its rows come from, so it is not
+listed. `outputTemplate` is the directory the record is in with its templates
+unrendered, which the runs of one job share. Every path in `job.json` is
+absolute, so a reader finds the records from any working directory. A
+`job.json` from before these fields reads without them.
 
 The manifest's `warnings` array (the same list as `JobResult.warnings`, shown
 in the GUI's run-log panel) holds what to look at before trusting the run's
@@ -634,7 +839,11 @@ InputFilePath("data.csv",
   decimal is written at the declared scale when it can be exactly (`1.5` in a
   `DECIMAL(10,2)` as `1.50`); one that would need rounding, or has more digits
   than `p`, fails the write, naming the value and the column, rather than
-  storing a different number.
+  storing a different number. A column whose only value is the untyped `NULL`
+  (`SELECT NULL AS n`) has no type, and parquet stores one for every column,
+  so it fails the write before anything is written, naming the column and the
+  `CAST` that gives it one (`CAST(NULL AS INT) AS n`); CSV, which stores no
+  types, writes it.
 
 Parquet is a first-class format — `job/` depends on the parquet read/write
 modules directly, so any user of the `DataJob` API gets parquet support out
@@ -667,7 +876,13 @@ is an error (`Only one statement is supported; remove the text after ';'`)
 rather than text that never runs. Each clause comes once: a second `ORDER BY`,
 `LIMIT`, `OFFSET` or `FETCH` for one query is an error, after the last arm of a
 `UNION` too, as is a `WITH` that defines one name twice (a `WITH` inside a CTE
-body may reuse an outer name, which it shadows there). Every join takes the
+body may reuse an outer name, which it shadows there). An `ORDER BY`, `LIMIT`,
+`OFFSET` or `FETCH` before the last arm of a `UNION` is an error too, as in
+Postgres, MySQL and SQLite: in parentheses, `(SELECT ... LIMIT 1) UNION ALL
+...`, it applies to that arm, and after the last arm to the whole union (it was
+applied to its arm unasked). A `FROM` names each of its tables once: `t x JOIN
+u x` and `t JOIN t` are errors asking for an alias each, where a qualified name
+read whichever of the two had the column. Every join takes the
 condition its kind takes: `JOIN`, `INNER`, `LEFT`, `RIGHT` and `FULL JOIN` one
 `ON`, and `CROSS JOIN` and a table after a comma none. So `t JOIN u` with no `ON`
 is an error, where MySQL and Spark read it as a cross join: write `CROSS JOIN`
@@ -718,12 +933,22 @@ do anywhere else. No column name resolves there, and `SELECT *` is an error.
 
 A `HAVING` with no `GROUP BY` makes the query an aggregate over a single group,
 as in standard SQL: `SELECT 'non-empty' AS s FROM t HAVING COUNT(*) > 0` returns
-one row or none. A column outside an aggregate is an error there, not the row
-filter MySQL makes of it. In any aggregate query the error says the rule,
-`Column 'a' must appear in GROUP BY or inside an aggregate`; a `GROUP BY` key
-may be written either way, so `SELECT t.a, COUNT(*) FROM t GROUP BY a` reads the
-key. A window function in a grouped query reads the groups' aggregates:
-`SUM(COUNT(*)) OVER ()` adds up the groups' counts.
+one row or none. So does `GROUP BY ()`, which groups by nothing, and an
+aggregate in `ORDER BY` or inside a window function's arguments or keys:
+`SELECT 1 FROM t ORDER BY COUNT(*)` and `SELECT SUM(COUNT(*)) OVER () FROM t`
+each return one row, as in Postgres. A column outside an aggregate is an error
+there, not the row filter MySQL makes of it. In any aggregate query the error
+says the rule, `Column 'a' must appear in GROUP BY or inside an aggregate`. A
+`GROUP BY` key is the expression it names however it is written and wherever
+it is: `SELECT t.a, COUNT(*) FROM t GROUP BY a` reads the key, and so do
+`SELECT UPPER(s) || '!' ... GROUP BY UPPER(s)`, `CASE WHEN a % 2 = 0 ...` and
+`HAVING a % 2 = 1` over `GROUP BY a % 2`, and `GROUP BY (a % 2), s`; a
+different expression (`1 + a` for a key `a + 1`) is not the key. A name two
+inputs have is as ambiguous in an aggregate query as in `WHERE`. A window
+function in a grouped query reads the groups' aggregates: `SUM(COUNT(*)) OVER
+()` adds up the groups' counts. (A key used to be matched by its text and only
+as a whole SELECT item, so each of these was refused, and `GROUP BY ()` was
+dropped, returning a row for each input row.)
 
 `GROUP BY` and `ORDER BY` also accept a **positional ordinal** — a bare integer
 naming a SELECT-list position, as in BigQuery / Postgres / MySQL. `ORDER BY 2
@@ -800,8 +1025,12 @@ statistics take a number, and `MIN`, `MAX` and `COUNT` any type (see the
 argument types below). `SUM` is a `BIGINT` over
 integers, a `DOUBLE` over floats, and over a `DECIMAL(p,s)` an exact
 `DECIMAL(38,s)`. `AVG` is a `DOUBLE`, but over a `DECIMAL(p,s)` an exact
-`DECIMAL(p+4,s+4)` (past 38 digits it gives way on scale, as arithmetic does),
-rounded half up. A decimal sum too long for 38 digits is an error, and so is
+`DECIMAL(p+4,s+4)` (past 38 digits it gives way on scale, as arithmetic does,
+to at least four fractional digits, so the mean of values past about 10^34
+can overflow it), rounded half up. `AVG` of integers divides their exact sum
+once, so it is the `DOUBLE` nearest the mean whatever the partitions: summed
+as doubles, BIGINTs past 2^53 averaged differently over one partition and
+two. A decimal sum too long for 38 digits is an error, and so is
 an integer sum past a `BIGINT`, decided from the true sum: a running total
 may pass the `BIGINT` range and come back, in whatever order the rows,
 partitions or a spill bring it.
@@ -818,7 +1047,8 @@ FOLLOWING`. A `ROWS` offset counts rows. A `RANGE` frame takes rows by their
 `ORDER BY` value: its `CURRENT ROW` is the current row and every row the
 `ORDER BY` ties with it, its peers, and `n PRECEDING` / `n FOLLOWING` the rows
 whose value lies within `n` of the current row's on that side (`n` a number,
-`1.5` too; the window needs exactly one `ORDER BY` key, a number). With an
+`1.5` too, and over a `FLOAT` or `DOUBLE` key one a `DOUBLE` holds, so not
+`1e309`; the window needs exactly one `ORDER BY` key, a number). With an
 `ORDER BY` and no frame, the frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND
 CURRENT ROW`, as in standard SQL: a running total gives tied rows one total,
 `SUM(x) OVER (ORDER BY day)` the total through the end of each day. Without an
@@ -837,7 +1067,7 @@ everywhere. No `FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`/`PERCENT_RANK`/
 `CUME_DIST`/`NTILE` yet.
 
 **Scalar functions:** strings — `LENGTH`/`LEN`, `UPPER`, `LOWER`, `TRIM`
-(single-argument whitespace trim only — `TRIM([LEADING|TRAILING|BOTH] [str]
+(single-argument trim of spaces only — `TRIM([LEADING|TRAILING|BOTH] [str]
 FROM x)` and `TRIM(x, str)` are rejected with a clear error, and there is no
 `LTRIM`/`RTRIM`), `SUBSTRING`, `CONCAT`; flow — `COALESCE`, `IF`, `NULLIF`,
 `GREATEST`, `LEAST`;
@@ -852,7 +1082,9 @@ scale, `SUBSTRING`'s position and length and `RAND`'s seed an `INT` or a
 `BIGINT` (see the argument types below). NULL propagates through
 every function but the flow ones, a NULL scale, position, length or seed
 included; `GREATEST`/`LEAST` skip NULLs and return NULL only when every
-argument is NULL. `MOD(a, b)` is `a % b`, typed the same way. `ROUND`,
+argument is NULL, and of two equal zeros `GREATEST` gives `0.0` and `LEAST`
+`-0.0` in either order, as `MAX` and `MIN` do. `SIGN` is -1, 0 or 1, and of
+`NaN`, which is none of them, an error. `MOD(a, b)` is `a % b`, typed the same way. `ROUND`,
 `TRUNC`, `FLOOR` and `CEIL` are exact: `ROUND` rounds half away from zero
 (`ROUND(2.5)` is 3 and `ROUND(-2.5)` is -3), `TRUNC` toward zero, `FLOOR`
 down and `CEIL` up, each at `scale` places (0 by default), a negative scale
@@ -860,14 +1092,22 @@ rounding to tens, hundreds, ... An `INT` or `BIGINT` keeps its type and every
 digit (`ROUND(15, -1)` is the `INT` 20, and an answer past the type is the
 integer overflow error); a `DECIMAL(p,s)` stays a `DECIMAL`, with the scale the
 query writes (`ROUND(price, 2)` over a `DECIMAL(10,3)` is a `DECIMAL(10,2)`,
-one more integer digit kept for a carry, and a scale that is not written as a
+one more integer digit kept for a carry, a negative one such as `-1` keeping
+none past the point, and a scale that is not written as a
 number keeps `s`); a `FLOAT` or `DOUBLE` is a `DOUBLE`, rounded as the decimal
 it prints as, so `ROUND(1.005, 2)` is 1.01 whatever the binary fraction
 nearest 1.005 would give, and `NaN` and the infinities are their own answer.
 Each of these used to compute in `DOUBLE`: `ROUND` of a `DECIMAL` 1.005 was 1.0,
-and `FLOOR` of a `BIGINT` past 2^53 lost its last digit. A `SUBSTRING` position before the first character counts from
+and `FLOOR` of a `BIGINT` past 2^53 lost its last digit. `LENGTH` and
+`SUBSTRING` count characters, Unicode code points, as Postgres and Spark do, so
+an emoji, which Java holds as two chars, is one: `LENGTH` counted chars, and
+`SUBSTRING` could cut a character in half, which a spill or a parquet or CSV
+file then wrote as `?`. A `SUBSTRING` position before the first character counts from
 the first, and one past the last, or a length of 0, gives the empty string; a
-negative length is an error, at bind time when it is written as a constant. `UPPER` and `LOWER` map
+negative length is an error, at bind time when it is written as a constant.
+`TRIM` removes the spaces (U+0020) a string starts and ends with, as SQL's does,
+and keeps a tab or a line break (Java's `trim`, which it used, took every
+character up to U+0020). `UPPER` and `LOWER` map
 case by Unicode's own rules, the same on every machine: the JVM's locale, under
 which a Turkish one would make `UPPER('i')` a dotted capital, plays no part, and
 neither does it in matching a name without regard to case.
@@ -896,11 +1136,20 @@ not NULL, `IN` its items up to the first that matches, and `AND` and `OR` their
 right side only where the left does not decide. So a `CASE` guards an
 expression that would fail on other rows: `CASE WHEN s <> 'n/a' THEN CAST(s AS
 INT) END` never casts `'n/a'`. (Write the guard as a `CASE`: the optimizer may
-move one condition of a `WHERE` ahead of another.) In a `LIKE` / `ILIKE`
+move one condition of a `WHERE` ahead of another.) A simple `CASE`'s operand
+(`CASE x WHEN 0 THEN ...`) and a `BETWEEN`'s are read once per row, as in
+Postgres, so `CASE CAST(FLOOR(RAND() * 3) AS INT) WHEN 0 THEN 'a' WHEN 1 THEN
+'b' WHEN 2 THEN 'c' END` puts every row in a bucket and `RAND() BETWEEN 0.25
+AND 0.75` holds on half the rows; read again for each comparison, as the
+standard's expansion into `x = 0 OR ...` reads it, a third of the rows fell
+through to NULL. In a `LIKE` / `ILIKE`
 pattern `\` makes the next `%` or `_` literal; `ESCAPE 'c'` names another
 character, and `ESCAPE ''` turns escaping off. A pattern that ends in its escape
 character escapes nothing and is an error, at bind time when the pattern is a
-constant: write the character twice to match one. Grouping parentheses work anywhere an expression does —
+constant: write the character twice to match one. A pattern reads a character
+outside the Basic Multilingual Plane, an emoji, as one character, and `_`
+matches one; split in two, a pattern holding one matched nothing, not even
+itself. A unary `+` is arithmetic, on a number, as `-` is. Grouping parentheses work anywhere an expression does —
 `SELECT (a + b) * c`, `WHERE (x = y)`, `ON (a = b)`, `HAVING (COUNT(*) > 1)` —
 and are transparent to column naming (`SELECT (a)` yields a column named `a`)
 and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
@@ -916,7 +1165,12 @@ widens to a `DECIMAL` where the two meet, and a `BINARY` casts to nothing. A
 A number casts to an `INT` or `BIGINT` as its integer part, a fraction
 truncated toward zero (`CAST(2.7 AS INT)` is 2 and `CAST(-2.7 AS INT)` is -2,
 as in Spark), and one outside the type, or NaN or an infinity, which have no
-integer, is an error rather than the type's limit or 0.
+integer, is an error rather than the type's limit or 0. A `DOUBLE` casts to
+the nearest `FLOAT`, and one a `FLOAT` cannot hold, past its range or so small
+it would be 0, is an error, as the same number as text is (`Float overflow:
+1.0E300 does not fit FLOAT`); NaN and the infinities cast to themselves. A
+`DECIMAL` casts to `STRING` as its digits, the text CSV writes for it
+(`0.000000100`, where Java's `toString` gave `1.00E-7`).
 
 Text casts to a number by the grammar CSV reads one by (see [CSV](#csv)): an
 optional sign and ASCII digits for an `INT` or `BIGINT` (`'007'`, `'+5'`), and a
@@ -941,7 +1195,9 @@ side of 1970 (an `INT` of days) and a `TIMESTAMP` about 292,000 (a `BIGINT` of
 microseconds); a value past either, from a CAST, a file or a `DATE` whose
 midnight no `TIMESTAMP` holds, is an error naming it. `DATE '2026-01-01'` and
 `TIMESTAMP '2026-01-01 05:30:21'` are literals, read when the query is bound like
-any string literal under a CAST, so a malformed one fails before anything runs. A
+any string literal under a CAST, so a malformed one fails before anything runs,
+and so are the JDBC escapes `{d '2026-01-01'}` and `{ts '2026-01-01 05:30:21'}`,
+which the parser read leniently (`{d '2026-02-30'}` was 2026-03-02). A
 number or a boolean does not cast to or from either type: an epoch in days,
 seconds or milliseconds would be a guess.
 
@@ -1045,7 +1301,10 @@ and an error naming the operation when it does not (`Integer overflow:
 Java's `int` does; `SUM` over integers is exact the same way (see Aggregates).
 An `INT` result that needs more room takes a `CAST(x AS BIGINT)` on an
 operand. Division by zero and `%` by zero are NULL, and a remainder never
-overflows.
+overflows. Division and `%` by zero are NULL for a `FLOAT` and a `DOUBLE`
+too, either zero (`7.0 / 0` and `0.0 / 0.0`), as Spark has it; they were
+IEEE's infinity and NaN. Past their range floats still overflow to an
+infinity (`1e308 * 10`).
 
 **A `BINARY` value is not text.** It casts to nothing else, so no CAST makes
 one text for `LIKE`, `||` and the string functions (`LENGTH`, `UPPER`, `LOWER`,
@@ -1062,8 +1321,12 @@ is materialized once into an in-memory result that every reference replays — s
 `FROM c x JOIN c y` executes the body once, not twice (and a non-deterministic
 body like `RAND()` yields the same rows to every reference). A CTE referenced at
 most once stays inlined (zero overhead, streaming preserved); a declared-but-
-unused CTE is never executed. Materialization buffers the body in heap.
-`WITH RECURSIVE` is rejected.
+unused CTE is never executed, and neither is one that only unused CTEs read
+(each of their references counted, so it ran, and could fail the query).
+Materialization buffers the body in heap. Only the outermost `WITH` is
+materialized: a CTE defined inside another CTE's body, or inside a
+parenthesized `UNION` arm, is inlined at each reference, so a `RAND()` in it
+gives each reference its own values. `WITH RECURSIVE` is rejected.
 
 **Subqueries:** not in v1 (scalar, IN/EXISTS, derived tables in FROM). Use a
 `WITH` CTE, or chain results across a multi-task pipeline with `viewName`.
@@ -1110,9 +1373,17 @@ exceeds 2×; LEFT outer always builds right (left stays on probe to preserve
 unmatched-left rows); RIGHT outer always builds left (right stays on probe);
 FULL outer keeps the default. Output schema and column order are always
 `left ++ right` regardless of which side ends up in the hash — `SELECT a.*,
-b.*` keeps its layout. Non-equi joins (no equality conjunct) work for tiny
-inputs but are refused when both sides expose a row count and the smaller
-side exceeds 5000 rows — at that scale you should add an equality key. So is
+b.*` keeps its layout. A condition of the `WHERE` that compares the two sides
+of an inner join is part of the join, so `FROM t, u WHERE t.id = u.id` (and
+`t CROSS JOIN u WHERE ...`) is the hash join `t JOIN u ON t.id = u.id` is; it
+stayed above the join, which then paired every row with every row. Non-equi
+joins (no equality conjunct) work for tiny inputs but are refused when both
+sides' row counts are known and the smaller exceeds 5000 rows — at that scale
+you should add an equality key. A row count is known for a parquet file or an
+in-memory table, through projections, sorts, windows, `LIMIT`, `OFFSET` and
+`UNION ALL`, and is not behind a filter, a grouping or a join condition, so
+two one-row filters over large tables join (they were refused on a guess of
+how many rows a filter keeps). So is
 one over the output of another such join when the two would pair more than
 25 million rows: a chain multiplies where each side alone looks small (three
 300-row tables pair 27 million). One small side against a large one, such as
@@ -1403,9 +1674,14 @@ JDK 21 or newer (tested through JDK 25).
   ```
 
   Spill defaults to **off** per task (no overhead when not needed) and is
-  not exposed as a global toggle. Temp files land under
-  `${java.io.tmpdir}/transformer-spill` by default — override via the
-  `transformer.spill.dir` system property. DISTINCT aggregates
+  not exposed as a global toggle. Temp files land in a directory of each
+  JVM's own under `${java.io.tmpdir}/transformer-spill` by default — override
+  the base via the `transformer.spill.dir` system property. A JVM deletes its
+  own directory when it exits, and the next JVM to spill deletes those that
+  JVMs no longer running left; nothing outside the base is touched (the sweep
+  used to delete whatever stood beside it with a name starting as its did,
+  such as `${java.io.tmpdir}/transformer-jaffle-out`, and a JVM exiting
+  deleted the files another was spilling). DISTINCT aggregates
   (`COUNT`, `SUM` and `AVG(DISTINCT …)`) silently disable spill on the whole
   operator (their state doesn't round-trip through a typed schema in v1).
 - **No subqueries** (scalar, IN/EXISTS, derived tables in FROM): use a `WITH`
@@ -1415,6 +1691,11 @@ JDK 21 or newer (tested through JDK 25).
   `CUME_DIST` or `NTILE`; a `RANGE` offset needs a single numeric `ORDER BY`
   key (a `DATE` would need an `INTERVAL`, which the engine has not).
   `COVAR_SAMP`/`COVAR_POP`/`CORR` are `GROUP BY` only.
+- **The data viewer names a dataset's table `<dataset>__<table>`**, since the
+  catalog has no schemas to write `jaffle_shop.customers` with, and it draws
+  lineage only for runs whose records carry it: a run from before records
+  listed their inputs shows its tables but not what they read. A cloud input
+  is always drawn as coming from outside the folder.
 - **Cloud paths recognized but unimplemented**: `gs://` and `s3://` paths are
   accepted by the config, and loading one raises a clear
   `UnsupportedOperationException`. See [Cloud](#cloud-gs--s3).
@@ -1479,6 +1760,7 @@ transformer is Scala 2.13 on JDK 21, built with Bazel (`rules_scala`).
 bazel test //...                                     # every test
 bazel test //src/test/scala/com/transformer/sql/...  # just the SQL tests
 bazel build //:transformer_deploy.jar                # the product jar
+bazel build //:transformer_viewer_deploy.jar         # the data viewer
 ```
 
 Each leaf test directory has its own `scala_junit_test` target. Before
@@ -1511,9 +1793,11 @@ back here and into `docs/`.
 .
 ├── MODULE.bazel               Bazel deps: rules_scala 7.0.0, scala 2.13.16,
 │                              jsqlparser 5.0, parquet-hadoop 1.14.3 (+ minimal
-│                              hadoop 3.4.3), openjfx 21.0.1 (gui only), junit
+│                              hadoop 3.4.3), openjfx 21.0.1, richtextfx
+│                              0.11.7 and atlantafx 2.0.1 (gui only), junit
 ├── .bazelrc                   JDK 21 build toolchain (runtime is JDK 21+)
-├── BUILD.bazel                //:transformer, the single deploy jar (CLI + GUI).
+├── BUILD.bazel                //:transformer, the deploy jar (CLI + GUI), and
+│                              //:transformer_viewer, the data viewer's.
 ├── site/                      The project website (static HTML, no build).
 ├── docs/                      Contributor documentation (architecture,
 │                              conventions, extending, gotchas, testing).
@@ -1532,7 +1816,13 @@ back here and into `docs/`.
 │   │                          SQLTask, DataJob runner, DirectoryJobLoader,
 │   │                          TaskDag, TaskRunRecord, JobRunRecord,
 │   │                          JobOutputLayout, Json parser.
-│   ├── gui/                   JavaFX visualiser/runner.
+│   ├── gui/                   JavaFX visualiser/runner, and the components
+│   │                          both GUIs share (gui:components): the theme,
+│   │                          the SQL editor and its vim engine, the SQL
+│   │                          console, the row grid, the graph canvas.
+│   ├── viewer/                The data viewer: a folder of job outputs, its
+│   │                          lineage, samples and SQL (viewer:model has no
+│   │                          JavaFX).
 │   └── cli/                   `transformer run|gui|help`: Cli (headless,
 │                              no JavaFX) + TransformerMain entry point.
 └── src/test/scala/com/transformer/...   (mirrors src/main/scala layout)

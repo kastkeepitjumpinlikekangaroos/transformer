@@ -3,7 +3,7 @@
 Eight plans from an audit on 2026-09-10, run from the opposite direction to the
 fuzz harness, six that came after: 09 from widening the SQL corpora to
 decimal arithmetic, and 10 to 14 from plan 05's frontend fuzzer, and 16 to 29
-from a second audit on 2026-10-31 (see [The second audit](#the-second-audit-2026-10-31)). The five existing fuzzers generate inputs the engine is *expected*
+from a second audit on 2026-10-31 (see [The second audit](#the-second-audit-2026-10-31)), and 30 from a third the same day, against SQLite (see [The third audit](#the-third-audit-2026-10-31)). The five existing fuzzers generate inputs the engine is *expected*
 to handle and ask whether the answer is right. This audit asked what the
 generators **structurally cannot produce**, and then checked those surfaces by
 hand.
@@ -280,6 +280,20 @@ against `CROSS JOIN WHERE p` and GROUP BY keys pairwise distinct under `=` (21),
 guarded-error shapes in the expression corpus (17), CAST against CSV's reading
 (24), and a test target under a Turkish locale (16).
 
+## The third audit (2026-10-31)
+
+With plans 16 to 29 landed, the third audit took the second's lesson further:
+a deterministic wrong answer is invisible to properties that compare the engine
+with itself, so the engine was compared with another engine. Generated queries
+in the dialect SQLite shares ran through both, in default, spill and sharded
+modes, and four probes read and ran windows, aggregates, joins and set
+operations, and scalar expressions. The operators held up; the binder, the
+planner, a few functions and the spill directory did not.
+
+| # | Plan | What | Status | Risk |
+|---|------|------|--------|------|
+| [30](30-third-audit.md) | The third audit | a column named `_agg0` taken for an aggregate, `GROUP BY ()` dropped, RAND() keys read twice under sharding and spill and by a simple CASE and BETWEEN, LIKE blind to emoji, `{d '2026-02-30'}` rolled over, the spill sweep deleting `transformer*` beside it; GROUP BY keys matched only by their text, comma joins never hashed, a nested-loop guard on guesses; four semantics decided (float division by zero NULL, TRIM of spaces, code-point LENGTH and SUBSTRING, an operand read once) | **done** 2026-10-31 | medium |
+
 ## Known outstanding, deliberately NOT planned here
 
 The audit also re-confirmed the inventory of things that are **already known and
@@ -314,10 +328,8 @@ intentionally NOT done" unless noted.
   arithmetic, an exact decimal `SUM` and a decimal `AVG` on 2026-10-04
   (`8eccd9b`), after which the SQL corpora draw both (see plan 04's
   Outcome).
-- **`LENGTH` and `SUBSTRING` count UTF-16 code units**, so a string of one
-  astral character plus `ab` has `LENGTH` 4 rather than 3, and `SUBSTRING(s, 1, 1)`
-  returns half a surrogate pair. Deliberate-by-default (it is what Java does);
-  undocumented.
+- **`LENGTH` and `SUBSTRING` counted UTF-16 code units** (resolved by
+  [30](30-third-audit.md): they count code points, the user's choice).
 - **No whole-stage codegen, no dynamic column-value partitioning, no
   `INFORMATION_SCHEMA`, no multi-statement SQL, CTEs buffer in heap.** All by
   design; see gotchas.

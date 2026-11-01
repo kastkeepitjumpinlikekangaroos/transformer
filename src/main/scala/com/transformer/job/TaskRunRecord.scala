@@ -1,7 +1,12 @@
 package com.transformer.job
 
+import com.transformer.core.{CatalogView, DataType, Field, MaterializedView, Schema}
+import com.transformer.read.csv.{CsvOptions, CsvReader}
+import com.transformer.read.parquet.ParquetReader
+
 import java.nio.file.{FileSystems, Files, Path, Paths, StandardCopyOption}
 import java.time.Instant
+import java.util.Locale
 import scala.collection.mutable
 import scala.util.control.NonFatal
 import scala.jdk.CollectionConverters._
@@ -22,6 +27,13 @@ import scala.jdk.CollectionConverters._
   *     [[outputFiles]]. Present for Succeeded and ValidationFailed records;
   *     empty for Failed/Skipped tasks.
   *
+  * The record also says how to read the part files back as the run wrote
+  * them, which [[TaskRunRecord.outputView]] does: the writer's `options` (a
+  * CSV's delimiter, header and null string) and the result's `schema`, which
+  * a CSV file cannot carry. `sql` is the task's main SQL with its templates
+  * rendered: how the rows were made. A record from before these fields reads
+  * with none of them, and its CSV output reads with inferred types.
+  *
   * On-disk JSON is hand-rolled (same approach as [[Json]] elsewhere in this
   * module) so the schema lives in one place and we don't take an external
   * dep just for serialization.
@@ -39,7 +51,10 @@ final case class TaskRunRecord(
     format: String,
     outputFiles: Seq[String],
     validations: Seq[ValidationRecord],
-    enqueuedAt: Option[Instant] = None
+    enqueuedAt: Option[Instant] = None,
+    options: Map[String, String] = Map.empty,
+    schema: Option[Schema] = None,
+    sql: Option[String] = None
 ) {
   /** True when the recorded status implies on-disk part files (and so a
     * missing one is a consistency warning). */
@@ -150,10 +165,65 @@ object TaskRunRecord {
         format = obj.optString("format", ctx).getOrElse("csv"),
         outputFiles = outputFiles,
         validations = validations,
-        enqueuedAt = obj.optString("enqueuedAt", ctx).map(Instant.parse)
+        enqueuedAt = obj.optString("enqueuedAt", ctx).map(Instant.parse),
+        options = obj.optStringMap("options", ctx).getOrElse(Map.empty),
+        schema = readSchema(obj.get("schema")),
+        sql = obj.optString("sql", ctx)
       ))
     } catch {
       case NonFatal(_) => None
+    }
+  }
+
+  /** A recorded schema, or None when there is none or a column's type is one
+    * this build has no name for: the output then reads as a record without
+    * one does, rather than not at all. */
+  private def readSchema(value: Option[JsonValue]): Option[Schema] = value match {
+    case Some(JsonArray(items)) =>
+      val fields = items.map {
+        case o: JsonObject =>
+          for {
+            name <- o.get("name").collect { case JsonString(s) => s }
+            dataType <- o.get("type").collect { case JsonString(s) => s }.flatMap(DataType.fromName)
+          } yield Field(name, dataType, o.get("nullable").collect { case JsonBool(b) => b }.getOrElse(true))
+        case _ => None
+      }
+      if (fields.forall(_.isDefined)) Some(Schema(fields.flatten.toVector)) else None
+    case _ => None
+  }
+
+  /** The output in `dir` of the run `record` describes, as a reader reads it:
+    * see the other overload. */
+  def outputView(dir: Path, record: TaskRunRecord): CatalogView =
+    outputView(dir, record.format, record.outputFiles, record.options, record.schema)
+
+  /** A task's output in `dir` as the tasks after it read it: the part files
+    * `files` its run wrote, by name, never a listing of the directory, so a
+    * file that is no part of the output (a README) is not read. A CSV output
+    * reads with the writer's `options` and, when known, the result's `schema`,
+    * so its columns keep the types they were written with; without one its
+    * types are inferred. An output of no part files (a parquet result of no
+    * partitions) is the empty view of its schema. */
+  def outputView(
+      dir: Path,
+      format: String,
+      files: Seq[String],
+      options: Map[String, String],
+      schema: Option[Schema]
+  ): CatalogView = {
+    val paths = files.map(f => dir.resolve(f)).toIndexedSeq
+    format.toLowerCase(Locale.ROOT) match {
+      case _ if paths.isEmpty => schema match {
+        case Some(s) => new MaterializedView(s, IndexedSeq.empty)
+        case None => throw new IllegalArgumentException(s"The output in $dir has no part files")
+      }
+      case "csv" =>
+        new CsvReader(paths, schema match {
+          case Some(s) => CsvOptions.forWrittenFile(options, s)
+          case None => CsvOptions.fromMap(options)
+        })
+      case "parquet" => ParquetReader.fromFiles(paths)
+      case other => throw new IllegalArgumentException(s"Cannot read an output of unknown format '$other': $dir")
     }
   }
 
@@ -325,14 +395,18 @@ object TaskRunRecord {
     sb.append("  \"writtenAt\": \"").append(Json.escape(r.writtenAt.toString)).append("\",\n")
     sb.append("  \"rowsProduced\": ").append(r.rowsProduced).append(",\n")
     sb.append("  \"format\": \"").append(Json.escape(r.format)).append("\",\n")
-    sb.append("  \"outputFiles\": [")
-    var i = 0
-    while (i < r.outputFiles.size) {
-      if (i > 0) sb.append(", ")
-      sb.append('"').append(Json.escape(r.outputFiles(i))).append('"')
-      i += 1
+    sb.append("  \"outputFiles\": ").append(Json.stringArray(r.outputFiles)).append(",\n")
+    sb.append("  \"options\": ").append(Json.stringMap(r.options)).append(",\n")
+    r.schema.foreach { s =>
+      sb.append("  \"schema\": [")
+      s.fields.iterator.zipWithIndex.foreach { case (f, i) =>
+        if (i > 0) sb.append(", ")
+        sb.append("{\"name\": \"").append(Json.escape(f.name)).append("\", ")
+        sb.append("\"type\": \"").append(Json.escape(f.dataType.name)).append("\", ")
+        sb.append("\"nullable\": ").append(f.nullable).append('}')
+      }
+      sb.append("],\n")
     }
-    sb.append("],\n")
     sb.append("  \"validations\": [")
     if (r.validations.nonEmpty) {
       sb.append('\n')
@@ -354,8 +428,9 @@ object TaskRunRecord {
       }
       sb.append("  ")
     }
-    sb.append("]\n")
-    sb.append("}\n")
+    sb.append("]")
+    r.sql.foreach(s => sb.append(",\n  \"sql\": \"").append(Json.escape(s)).append('"'))
+    sb.append("\n}\n")
     sb.toString
   }
 }

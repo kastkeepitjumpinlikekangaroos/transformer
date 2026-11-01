@@ -32,16 +32,18 @@ object ExprParity {
 
   private sealed trait Outcome
   private final case class Produced(value: Any) extends Outcome
-  private final case class Threw(cls: Class[_]) extends Outcome
+  private final case class Threw(error: Throwable) extends Outcome {
+    def cls: Class[_] = error.getClass
+  }
 
   def check(expr: Expr, batch: ColumnarBatch): Unit = {
-    val vecResult: Either[Class[_], ColumnVector] =
+    val vecResult: Either[Throwable, ColumnVector] =
       try Right(expr.evalVec(batch))
-      catch { case NonFatal(t) => Left(t.getClass) }
+      catch { case NonFatal(t) => Left(t) }
 
     vecResult match {
       case Right(vec) => checkColumn(expr, batch, vec)
-      case Left(vecExClass) => checkVecThrew(expr, batch, vecExClass)
+      case Left(vecError) => checkVecThrew(expr, batch, vecError)
     }
   }
 
@@ -62,29 +64,34 @@ object ExprParity {
               s"parity mismatch at row $i for $expr (dataType=${expr.dataType}): " +
                 s"eval=${RowOracle.describe(byEval)} vs evalVec=${RowOracle.describe(byVec)}")
           }
-        case Threw(cls) =>
+        case thrown @ Threw(_) =>
           throw new AssertionError(
             s"divergence at row $i for $expr (dataType=${expr.dataType}): " +
-              s"eval threw ${cls.getName} but evalVec produced ${RowOracle.describe(byVec)}")
+              s"eval threw ${thrown.cls.getName} but evalVec produced ${RowOracle.describe(byVec)}")
       }
       i += 1
     }
   }
 
   /** `evalVec` threw for the whole batch: agreement requires the row path to
-    * also throw, with the same class, at the first row where it throws. */
-  private def checkVecThrew(expr: Expr, batch: ColumnarBatch, vecExClass: Class[_]): Unit = {
+    * also throw, with the same class, at the first row where it throws, or
+    * both to fail on a value ([[owned]]): with two such failures on different
+    * rows, an overflow in one operand and a negative SUBSTRING length in
+    * another, the vector path meets them operand by operand and the row path
+    * row by row, so each may report another, and the query fails either way. */
+  private def checkVecThrew(expr: Expr, batch: ColumnarBatch, vecError: Throwable): Unit = {
+    val vecExClass = vecError.getClass
     val n = batch.numRows
     var i = 0
     while (i < n) {
       evalOutcome(expr, batch, i) match {
-        case Threw(cls) =>
-          if (cls != vecExClass) {
+        case thrown @ Threw(_) =>
+          if (thrown.cls != vecExClass && !(owned(vecError) && owned(thrown.error))) {
             throw new AssertionError(
               s"divergence at row $i for $expr: evalVec threw ${vecExClass.getName} " +
-                s"but eval threw ${cls.getName}")
+                s"but eval threw ${thrown.cls.getName}")
           }
-          return // both throw the same class at the first throwing row -> agree
+          return // both throw at the first throwing row -> agree
         case Produced(_) =>
           () // vec aborted before materializing this row; cannot compare it
       }
@@ -96,20 +103,17 @@ object ExprParity {
 
   /** A tree the generator built fails only where its own values do: an INT
     * or BIGINT result past its type, or a CAST of NaN or an infinity to an
-    * integer, each an `ArithmeticException` (plans/robustness/18), and a
-    * negative SUBSTRING length (plans/robustness/23), which [[check]] holds
-    * the two paths to agree on. Nothing else may throw. The
+    * integer, each an `ArithmeticException` (plans/robustness/18), as are a
+    * DOUBLE past a FLOAT's range under a CAST and SIGN of NaN
+    * (plans/robustness/30), and a negative SUBSTRING length and a LIKE
+    * pattern that ends in its escape character (plans/robustness/23), which
+    * [[check]] holds the two paths to agree on. Nothing else may throw. The
     * generator's other partial shapes are CASTs of a guard column under a
     * conditional that keeps them off the rows they fail on, so any other throw
     * means a conditional evaluated an operand where its answer did not need
     * it — which [[check]] cannot see when both paths do so (`IF` and
     * `COALESCE` once read every argument on both). */
   def checkTotal(expr: Expr, batch: ColumnarBatch): Unit = {
-    def owned(t: Throwable): Boolean = t match {
-      case _: ArithmeticException => true
-      case e: IllegalArgumentException => String.valueOf(e.getMessage).startsWith("SUBSTRING's length ")
-      case _ => false
-    }
     try expr.evalVec(batch)
     catch {
       case NonFatal(t) if owned(t) => ()
@@ -126,7 +130,18 @@ object ExprParity {
     }
   }
 
+  /** A failure on a value a generated tree's own data can cause, which
+    * [[checkTotal]] allows and [[checkVecThrew]] lets the two paths report
+    * differently. */
+  private def owned(t: Throwable): Boolean = t match {
+    case _: ArithmeticException => true
+    case e: IllegalArgumentException =>
+      val message = String.valueOf(e.getMessage)
+      message.startsWith("SUBSTRING's length ") || message.startsWith("The LIKE pattern ")
+    case _ => false
+  }
+
   private def evalOutcome(expr: Expr, batch: ColumnarBatch, row: Int): Outcome =
     try Produced(expr.eval(batch, row))
-    catch { case NonFatal(t) => Threw(t.getClass) }
+    catch { case NonFatal(t) => Threw(t) }
 }

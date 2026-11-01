@@ -11,14 +11,9 @@ import java.util.concurrent.atomic.AtomicInteger
 /** Tests for CTE materialization: a `WITH name AS (...)` CTE referenced
   * >= 2 times in a query is executed ONCE into a shared in-memory result and
   * every reference replays that shared result; a CTE referenced <= 1 time is
-  * inlined (executed per-reference).
-  *
-  * NOTE TO THE INTEGRATING ENGINEER: tests 1-3 below are BEHAVIORAL and are
-  * EXPECTED TO FAIL AT RUNTIME until the materialization code lands. They are
-  * authored against the public `SqlEngine.execute` entry point and the
-  * intended semantics, not against any internal materialization API. The file
-  * compiles today; the assertions become true once materialize-once is wired
-  * in.
+  * inlined (executed per-reference). Tests 1-3 below are behavioral, written
+  * against the public `SqlEngine.execute` entry point rather than any internal
+  * materialization API:
   *
   *   - [[computeOnceUnderMultipleReferences]] proves the source under a CTE
   *     referenced 3 times is scanned exactly once (once per partition), not 3x,
@@ -362,6 +357,28 @@ class CteMaterializationTest {
     case LocalLimitExec(c, _)     => countMetadataFastPaths(c)
     case GlobalLimitExec(c, _)    => countMetadataFastPaths(c)
     case _                        => 0
+  }
+
+  /** A CTE that only CTEs the query never reads refer to is never run. Each
+    * reference used to count, so `bad`, read twice by an unused CTE, was
+    * materialized, and its CAST failed a query that reads neither. */
+  @Test def aCteOnlyUnusedCtesReadIsNeverRun(): Unit = {
+    val reads = new AtomicInteger(0)
+    val cat = catalogWith("t", idScoreView(reads))
+    val sql =
+      "WITH bad AS (SELECT id, score FROM t), " +
+        "unused AS (SELECT b1.id FROM bad b1 JOIN bad b2 ON b1.id = b2.id), " +
+        "used AS (SELECT id FROM t) " +
+        "SELECT COUNT(*) AS n FROM used"
+    val resolved = CteResolver.resolve(LogicalBuilder.build(sql, cat), ExecutionOptions.Default)
+    assertEquals("nothing the query reads is materialized", 0, countMaterializedScans(resolved))
+    assertEquals("no view is read while the query is planned", 0, reads.get())
+    assertEquals(Seq(4L), collectAllRows(SqlEngine.execute(sql, cat, ExecutionOptions.Default)).map(r => asLong(r("n"))))
+  }
+
+  private def countMaterializedScans(plan: LogicalPlan): Int = plan match {
+    case LogicalScan(_, _: MaterializedView, _) => 1
+    case other => other.children.map(countMaterializedScans).sum
   }
 
   @Test def countStarOverMaterializedCteUsesMetadataFastPath(): Unit = {

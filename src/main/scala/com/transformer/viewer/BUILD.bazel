@@ -1,0 +1,50 @@
+load("@rules_scala//scala:scala.bzl", "scala_library")
+
+# The data viewer's model: a folder of job outputs as datasets, the lineage
+# across them, where the canvas draws it, and the catalog queries run against.
+# No JavaFX, so its tests run without the toolkit, as gui:session's do.
+MODEL = [
+    "Lineage.scala",
+    "LineageLayout.scala",
+    "RunFolder.scala",
+    "ViewerSession.scala",
+]
+
+scala_library(
+    name = "model",
+    srcs = MODEL,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/temporal",
+    ],
+)
+
+# The data viewer: a standalone JavaFX app (//:transformer_viewer) to explore
+# every dataset in a folder of job outputs, their lineage, samples of their
+# tables, and SQL across them. Built from the same components as the job GUI
+# (//src/main/scala/com/transformer/gui:components).
+scala_library(
+    name = "viewer",
+    srcs = glob(
+        ["*.scala"],
+        exclude = MODEL,
+    ),
+    visibility = ["//visibility:public"],
+    exports = [":model"],
+    deps = [
+        ":model",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/gui:components",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/sql/exec",
+        "@maven//:io_github_mkpaz_atlantafx_base",
+        "@maven//:org_openjfx_javafx_base",
+        "@maven//:org_openjfx_javafx_base_mac_aarch64",
+        "@maven//:org_openjfx_javafx_controls",
+        "@maven//:org_openjfx_javafx_controls_mac_aarch64",
+        "@maven//:org_openjfx_javafx_graphics",
+        "@maven//:org_openjfx_javafx_graphics_mac_aarch64",
+    ],
+)

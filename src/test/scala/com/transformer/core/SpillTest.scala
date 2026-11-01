@@ -34,6 +34,43 @@ class SpillTest {
     assertFalse("dir wiped on close", Files.exists(opDir.dir))
   }
 
+  /** The sweep deletes what a JVM that is no longer running left in the spill
+    * base, and nothing else: not a running JVM's dir, not a dir of another
+    * name in the base, and nothing beside the base. It deleted every entry
+    * beside the base whose name began as the base's did up to its first `-`,
+    * so a spill deleted `transformer-jaffle-out` in the temp directory. */
+  @Test def theStaleSweepDeletesOnlyDeadJvmsDirsInTheBase(): Unit = {
+    val base = tmpRoot.resolve("transformer-spill")
+    Files.createDirectories(base)
+    val exited = new ProcessBuilder("true").start()
+    exited.waitFor()
+    val deadPid = exited.pid()
+    val livePid = ProcessHandle.current().pid()
+    val dead = Files.createDirectories(base.resolve(s"jvm-$deadPid-abc123"))
+    Files.write(dead.resolve("run-1.parquet"), Array[Byte](1))
+    val deadOperator = Files.createDirectories(base.resolve(s"agg-$deadPid-7-beef"))
+    val live = Files.createDirectories(base.resolve(s"jvm-$livePid-abc123"))
+    val other = Files.createDirectories(base.resolve("notes"))
+    val beside = Files.createDirectories(tmpRoot.resolve("transformer-jaffle-out"))
+    Files.write(beside.resolve("part-00000.csv"), Array[Byte](1))
+    Spill.cleanupStaleRoots(base, s"jvm-$livePid-current")
+    assertFalse("a dead JVM's dir is swept", Files.exists(dead))
+    assertFalse("a dead JVM's operator dir is swept", Files.exists(deadOperator))
+    assertTrue("a running JVM's dir is kept", Files.isDirectory(live))
+    assertTrue("a dir of another name is kept", Files.isDirectory(other))
+    assertTrue("nothing beside the base is touched", Files.exists(beside.resolve("part-00000.csv")))
+  }
+
+  /** Each JVM spills under a dir of its own in the base, which its exit
+    * deletes, so a JVM that exits leaves another's files alone. */
+  @Test def eachJvmSpillsInADirOfItsOwn(): Unit = {
+    val opDir = Spill.openOperatorDir("sort")
+    assertEquals(Spill.rootDir, opDir.dir.getParent)
+    assertEquals(Spill.baseDir, Spill.rootDir.getParent)
+    assertTrue(Spill.rootDir.getFileName.toString.startsWith(s"jvm-${ProcessHandle.current().pid()}-"))
+    opDir.close()
+  }
+
   @Test def operatorDirCloseIsIdempotent(): Unit = {
     val opDir = Spill.openOperatorDir("sort")
     opDir.close()

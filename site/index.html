@@ -66,7 +66,7 @@
             rerun, and the 15-table jaffle-shop example finishes in about two
             seconds. The desktop GUI draws the DAG, shows live task status,
             previews every output, and has a SQL console for poking at
-            results.
+            results, in an editor that highlights SQL and takes vim's keys.
           </p>
         </div>
         <div class="card">
@@ -263,11 +263,20 @@ totals match orders. Run it until everything passes.</pre>
           SQL and paths resolves to that date, so reruns and backfills land in
           the right partition.
         </p>
+        <p class="muted">
+          Then open the data viewer, a jar of its own, on the folder your jobs
+          write to. It shows every job's tables, draws their lineage within
+          each job and across jobs (one job's input read from another's
+          output), opens a sample of any table on a double-click, and runs SQL
+          over all of them in the same editor.
+        </p>
         <p><a class="btn primary" href="setup.html">Set up the example project</a></p>
       </div>
       <div>
         <p class="code-label">Desktop GUI</p>
 <pre class="term"><span class="p">$ </span>java -jar transformer.jar gui examples/jaffle_shop/job</pre>
+        <p class="code-label">Data viewer</p>
+<pre class="term"><span class="p">$ </span>java -jar transformer_viewer.jar /data/runs</pre>
         <p class="code-label">Airflow</p>
 <pre><span class="k">BashOperator</span>(
     task_id=<span class="c">"jaffle_shop"</span>,

@@ -2,15 +2,19 @@ package com.transformer.gui
 
 /** Pure-Scala SQL tokenizer for the GUI's syntax highlighter.
   *
-  * Recognises SQL keywords, built-in functions, string literals (with the
-  * SQL doubled-quote escape `''`), line and block comments, numeric literals
-  * and `{{ template }}` placeholders embedded in source SQL. Anything else
-  * falls out as an identifier or punctuation.
+  * Recognises SQL keywords, function calls, type names, string literals (with
+  * the SQL doubled-quote escape `''`), line and block comments, numeric
+  * literals and `{{ template }}` placeholders embedded in source SQL. Anything
+  * else falls out as an identifier or punctuation.
+  *
+  * A word is a function when a `(` follows it, so a column named `count` or an
+  * alias `e` stays an identifier, and a call to any function is one. A type
+  * name is a type where one is written: after the `AS` of a `CAST`, before a
+  * `(` (`DECIMAL(10, 2)`), or before the string of a typed literal
+  * (`DATE '2026-01-01'`); elsewhere `date` is a column like any other.
   *
   * No deps; safe to call from any thread. Single-pass, O(n) on the input.
-  *
-  * Newlines are preserved verbatim inside [[Kind.Whitespace]] tokens; the
-  * caller can split on `\n` to render line by line.
+  * Concatenating the tokens' texts gives the input back.
   */
 object SqlHighlighter {
 
@@ -18,6 +22,7 @@ object SqlHighlighter {
   object Kind {
     case object Keyword    extends Kind
     case object Function   extends Kind
+    case object Type       extends Kind
     case object StringLit  extends Kind
     case object NumberLit  extends Kind
     case object Comment    extends Kind
@@ -29,32 +34,53 @@ object SqlHighlighter {
 
   final case class Token(kind: Kind, text: String)
 
+  /** The style class the editor gives a token of `kind`; none for plain
+    * text. `transformer.css` colours each. */
+  def styleClass(kind: Kind): Option[String] = kind match {
+    case Kind.Keyword    => Some("keyword")
+    case Kind.Function   => Some("function")
+    case Kind.Type       => Some("type")
+    case Kind.StringLit  => Some("string")
+    case Kind.NumberLit  => Some("number")
+    case Kind.Comment    => Some("comment")
+    case Kind.Template   => Some("template")
+    case Kind.Punct      => Some("punct")
+    case Kind.Identifier => None
+    case Kind.Whitespace => None
+  }
+
   private val Keywords: Set[String] = Set(
     "select", "from", "where", "group", "by", "order", "having", "limit",
     "offset", "distinct", "join", "inner", "outer", "left", "right",
     "full", "cross", "on", "using", "as", "and", "or", "not", "in", "is",
-    "null", "like", "between", "exists", "case", "when", "then", "else",
-    "end", "if", "true", "false", "union", "all", "intersect", "except",
+    "null", "like", "ilike", "between", "exists", "case", "when", "then", "else",
+    "end", "true", "false", "union", "all", "intersect", "except",
     "asc", "desc", "with", "over", "partition", "window", "any", "some",
-    "cast", "into", "values", "default",
+    "cast", "into", "values", "default", "top", "fetch", "next", "only",
     "rows", "range", "preceding", "following", "unbounded", "current", "row",
-    "nulls", "first", "last"
+    "nulls", "first", "last", "qualify", "natural", "lateral", "recursive",
+    "escape", "interval", "filter", "within", "ties", "percent", "rollup",
+    "cube", "grouping", "sets"
   )
 
-  private val Functions: Set[String] = Set(
-    "count", "sum", "avg", "min", "max",
-    "length", "len", "upper", "lower", "trim",
-    "substring", "concat", "coalesce", "nullif",
-    "abs", "round", "floor", "ceil", "ceiling",
-    "mod", "pow", "power",
-    "current_date", "current_timestamp",
-    "row_number", "rank", "dense_rank", "lag", "lead"
+  /** Functions written without parentheses. */
+  private val NiladicFunctions: Set[String] = Set("current_date", "current_timestamp")
+
+  private val Types: Set[String] = Set(
+    "int", "integer", "bigint", "smallint", "tinyint", "float", "real", "double",
+    "precision", "decimal", "numeric", "varchar", "char", "string", "text",
+    "boolean", "bool", "date", "timestamp", "binary", "varbinary", "long"
   )
 
   def tokenize(sql: String): Vector[Token] = {
     if (sql == null || sql.isEmpty) return Vector.empty
     val out = Vector.newBuilder[Token]
     val len = sql.length
+    // The word before each open parenthesis, innermost first, so the AS of a
+    // CAST can be told from an alias's.
+    var parens: List[String] = Nil
+    var lastWord = ""
+    var prevWord = ""
     var i = 0
     while (i < len) {
       val c = sql.charAt(i)
@@ -83,6 +109,7 @@ object SqlHighlighter {
           } else i += 1
         }
         out += Token(Kind.StringLit, sql.substring(start, i))
+        prevWord = ""
       } else if (c == '{' && i + 1 < len && sql.charAt(i + 1) == '{') {
         val start = i
         i += 2
@@ -102,17 +129,27 @@ object SqlHighlighter {
           while (i < len && isDigit(sql.charAt(i))) i += 1
         }
         out += Token(Kind.NumberLit, sql.substring(start, i))
+        prevWord = ""
       } else if (isIdentStart(c)) {
         val start = i
         while (i < len && isIdentPart(sql.charAt(i))) i += 1
         val text = sql.substring(start, i)
         val lower = text.toLowerCase
+        val next = nextSignificant(sql, i)
+        val castsTo = prevWord == "as" && parens.headOption.contains("cast")
         val kind =
           if (Keywords.contains(lower)) Kind.Keyword
-          else if (Functions.contains(lower)) Kind.Function
+          else if (Types.contains(lower) && (castsTo || next == '(' || next == '\'')) Kind.Type
+          else if (next == '(' || NiladicFunctions.contains(lower)) Kind.Function
           else Kind.Identifier
         out += Token(kind, text)
+        lastWord = lower
+        prevWord = lower
       } else {
+        if (c == '(') parens = lastWord :: parens
+        else if (c == ')' && parens.nonEmpty) parens = parens.tail
+        lastWord = ""
+        prevWord = ""
         out += Token(Kind.Punct, sql.substring(i, i + 1))
         i += 1
       }
@@ -120,33 +157,12 @@ object SqlHighlighter {
     out.result()
   }
 
-  /** Split a token stream into per-line slices, breaking any whitespace
-    * token that contains `\n` so each line's iterator is independent. Useful
-    * for laying out the highlighted SQL one line at a time without losing
-    * non-newline whitespace inside a line.
-    */
-  def splitIntoLines(tokens: Vector[Token]): Vector[Vector[Token]] = {
-    val lines = Vector.newBuilder[Vector[Token]]
-    val current = Vector.newBuilder[Token]
-    val it = tokens.iterator
-    while (it.hasNext) {
-      val tk = it.next()
-      if (tk.text.indexOf('\n') < 0) current += tk
-      else {
-        val parts = tk.text.split("\n", -1)
-        var pi = 0
-        while (pi < parts.length) {
-          if (parts(pi).nonEmpty) current += Token(tk.kind, parts(pi))
-          if (pi < parts.length - 1) {
-            lines += current.result()
-            current.clear()
-          }
-          pi += 1
-        }
-      }
-    }
-    lines += current.result()
-    lines.result()
+  /** The first character from `from` that is not white space, or 0 at the
+    * end. */
+  private def nextSignificant(sql: String, from: Int): Char = {
+    var i = from
+    while (i < sql.length && Character.isWhitespace(sql.charAt(i))) i += 1
+    if (i < sql.length) sql.charAt(i) else 0.toChar
   }
 
   private def isDigit(c: Char): Boolean = c >= '0' && c <= '9'

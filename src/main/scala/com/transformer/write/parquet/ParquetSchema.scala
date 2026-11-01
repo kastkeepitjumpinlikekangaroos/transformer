@@ -47,7 +47,12 @@ object ParquetSchema {
             else if (d.precision <= MaxLongDecimalDigits) PTypes.primitive(PrimitiveTypeName.INT64, rep)
             else PTypes.primitive(PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY, rep).length(decimalBytes(d.precision))
           builder.as(LogicalTypeAnnotation.decimalType(d.scale, d.precision)).named(f.name)
-        case other => throw new UnsupportedOperationException(s"Writing $other to Parquet not supported in v1")
+        // A column of nothing but the NULL literal has no type, and parquet
+        // stores one for every column; a guess (a BOOLEAN, an INT) would be
+        // what every reader of the file sees. CSV, which stores none, writes it.
+        case DataType.NullType => throw new IllegalArgumentException(
+          s"Column '${f.name}' has no type, since its only value is NULL, and a parquet file stores a type for each " +
+            s"column; CAST it to the type it holds, such as CAST(NULL AS INT) AS ${f.name}")
       }
     }
     new MessageType(rootName, ptypes.map(_.asInstanceOf[Type]).asJava)

@@ -35,14 +35,25 @@ object CteResolver {
     val bodies = built.ctes.iterator.map(_.body).toArray
     var main = built.main
 
+    // How many times each CTE is read: by the main query, and by the later
+    // CTEs that are themselves read, each of which runs once (materialized at
+    // two reads, inlined at one). Earlier bodies can't reference a CTE (it
+    // wasn't in scope when they were built), so counting from the last CTE
+    // back knows every reader's own count first. A reference from a CTE
+    // nothing reads used to count, so a CTE only it read twice ran.
+    val reads = new Array[Int](bodies.length)
+    var k = bodies.length - 1
+    while (k >= 0) {
+      val pending = built.ctes(k).pending
+      reads(k) = countScans(main, pending) +
+        (k + 1 until bodies.length).iterator.filter(reads(_) > 0).map(j => countScans(bodies(j), pending)).sum
+      k -= 1
+    }
+
     built.ctes.iterator.zipWithIndex.foreach { case (cte, i) =>
-      // `bodies(i)` already has every earlier CTE substituted into it. Earlier
-      // bodies can't reference this CTE (it wasn't in scope when they were
-      // built), so references live only in later sibling bodies + the main plan.
+      // `bodies(i)` already has every earlier CTE substituted into it.
       val resolvedBody = bodies(i)
-      var refs = countScans(main, cte.pending)
-      var k = i + 1
-      while (k < bodies.length) { refs += countScans(bodies(k), cte.pending); k += 1 }
+      val refs = reads(i)
 
       val replacement: LogicalPlan =
         if (refs >= 2) materialize(cte.name, resolvedBody, opts)  // compute once, scan many

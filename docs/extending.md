@@ -237,7 +237,8 @@ Conventions baked into the loader:
 
 `gui/` is a JavaFX library; `examples/gui_app/` is the launcher that bundles
 it with sql/exec. Parquet support is built into `gui/` directly via the same
-modules `job/` uses. Pattern recap:
+modules `job/` uses. The data viewer (`viewer/`, below) is the second GUI, and
+what the two share is `gui:components`. Pattern recap:
 
 1. **Mutable session, not Property-bound.** `JobSession` holds the truth;
    panels register a `() => Unit` listener and call `session.…` mutators on
@@ -247,39 +248,63 @@ modules `job/` uses. Pattern recap:
    thread via `FxHelpers.onFx`. Listeners passed into `DataJob.run` fire
    from runner workers — never touch FX state without marshalling.
 3. **Canvas is plain `Canvas` + GraphicsContext.** No scene-graph nodes per
-   DAG node; we render the whole graph in `DagCanvas.render()` and call it
-   imperatively whenever state changes. No AnimationTimer — DAG visualizers
-   don't need 60fps.
+   DAG node; we render the whole graph in `render()` and call it imperatively
+   whenever state changes. No AnimationTimer — DAG visualizers don't need
+   60fps. Both graphs extend `GraphCanvas`, which owns the pan, zoom, dot grid,
+   cards and edges: a subclass gives its size, paints in world coordinates and
+   handles a click, so a new graph looks and moves like the others.
 4. **Layout and session state are pure code.** `DagLayout` and `JobSession`
    have no JavaFX dep and build as `gui:session`, so they are testable without
    the toolkit — `gui/job_session_test`, `gui/dag_layout_test` and the fuzz
    harness's `Hydration` oracle depend on that target alone. Session state you
    add must keep it that way. World coords are zoom=1 pixels; screen coords are
    `world * zoom + pan`.
+5. **The look is the theme plus `transformer.css`.** `Theme.install` makes
+   AtlantaFX's Primer Dark the user-agent stylesheet, so every standard control
+   is styled; the GUI's own pieces take style classes defined in
+   `transformer.css` in the theme's looked-up colours (`-color-fg-muted`,
+   `-color-success-subtle`, ...), and the canvas paints with `Theme.Palette`.
+   A new scene, dialog or alert goes through `Theme.style`.
 
 To add a new panel: write a JavaFX `Region` subclass that takes `JobSession`
 in its ctor, registers a listener, and reads accessors. Wire it into
 `GuiApp.start` (BorderPane has free slots; or nest in the SplitPane). Don't
-add new state to JobSession unless multiple panels need it.
+add new state to JobSession unless multiple panels need it. Style it with
+classes: AtlantaFX's (`Styles.ACCENT`, `Styles.SMALL`, `Tweaks.EDGE_TO_EDGE`)
+for standard controls, and a class added to `transformer.css` for anything of
+its own (`.card`, `.chip`, `.pill` and `.section-label` are there already).
+SQL anywhere in it is a `SqlEditor` (or a `SqlView`, read-only with a Copy
+button), never a `TextArea`, and rows are a `DataGrid` (`DataGrid.sample`
+reads a view's first rows), never a bare `TableView`. A piece the data viewer
+could use too goes into `gui:components` (add its file to `COMPONENTS` in
+`gui/BUILD.bazel`), public and taking its inputs as arguments rather than a
+`JobSession`.
 
 To wire a new `DataJob` event into the GUI: extend `TaskProgressListener`
 (non-breaking — defaulted to `NoOp`) and have `ControlsPanel`'s listener
 forward to a new `JobSession.markXxx` method.
 
 To extend SQL syntax highlighting: `SqlHighlighter.scala` is a pure-Scala,
-single-pass tokenizer with no JavaFX deps. Add new keywords/functions by
-editing the in-file sets at the top, and cover the change in
-`gui/sql_highlighter_test`. Token colours live in `SqlView.colorFor` (palette
-intentionally mirrors VS Code's dark+ theme).
+single-pass tokenizer with no JavaFX deps. Add keywords and type names to the
+sets at the top; a function needs no entry, since a word followed by `(` is
+one (only functions written without parentheses, like `CURRENT_DATE`, are
+listed). Cover the change in `gui/sql_highlighter_test`. Each kind's style
+class comes from `SqlHighlighter.styleClass`, and its colour is a `-sql-*`
+looked-up colour in `transformer.css` (GitHub's dark palette).
 
-To change the editor that "Open in editor" launches: users set
-`TRANSFORMER_EDITOR=<cmd>` in their environment (the file path is appended
-as a single trailing arg, no shell). With no override `ExternalEditor` opens
-`Terminal.app` and runs `nvim <file>` via `osascript` on macOS, and throws a
-helpful error on other platforms. Buttons surface launch failures through an
-`Alert`.
+To add a vim command: give it an `Action` (or a `Motion`) in
+`VimCommand.scala`, read its keys in `VimParser` (`normalCommand`,
+`visualCommand` or `motion`, which operators share), and carry it out in
+`VimEngine.execute` (`evalMotion` for a motion: say whether it is exclusive,
+inclusive or linewise, and an operator gets it for free). A command that
+changes the text is listed in `VimEngine.changes`, which makes it one undo
+step and what `.` repeats. Add cases to `gui/vim_engine_test` whose expected
+text and cursor are what `nvim --clean` (with `shiftwidth=2 expandtab`) does
+from the same start, and list the command in README's vim section and
+`ShortcutsDialog`.
 
-To extend the interactive SQL console (`SqlConsolePanel`): the catalog comes
+To extend the interactive SQL console (`SqlConsolePanel`, the view chips over
+a `QueryConsole`): the catalog comes
 from `JobSession.buildInteractiveCatalog` — inputs are resolved via
 `InputResolver.resolve`, task outputs are read by `JobSession.readOutputAsView`
 under each task's `viewName`. Add a new view source by extending that method
@@ -290,6 +315,29 @@ to `CsvWriter.writePartitioned` or `ParquetWriter.writePartitioned`, honouring
 `OutputFilePath.maxPartitions` semantics. To add a new persist format,
 extend the format switch in `ResultPersister` and the dropdown in
 `PersistDialog`.
+
+### Extend the data viewer
+
+The viewer reads only run records, so what it shows about a run is what
+`job.json` and `_run.json` hold. To show something new: record it in
+`DataJob.writeJobRecord` (job-level, or a field of `JobTaskSummary`) or in the
+`TaskRunRecord` the four `write*Record` methods stamp, read it back in
+`JobRunRecord.read` / `TaskRunRecord.read` as absent for an older record, and
+check it in `DataJobTest` and, for `job.json`, the `Hydration` oracle (which
+builds every entry it expects, field for field). Then read it in
+`viewer:model` and show it in `DetailsPanel`.
+
+- **A new kind of lineage**: `Lineage.build` makes the nodes and edges. An
+  edge into an input comes from `TableIndex.sourceOf`, which matches the
+  input's recorded path against every table's directory; a new way for a path
+  to name a table (a partition directory above a table, say) is a case there
+  and a test in `viewer/LineageTest`.
+- **A new panel or tab**: a JavaFX node over `ViewerSession` (register a
+  listener, read accessors), wired in `ViewerApp.start`; `ViewerTabs` holds
+  the closable tabs. Selection goes through `ViewerSession.select`, so the
+  tree, the lineage and the details follow it.
+- **Query names**: `QueryCatalog.apply` names each table and outside input
+  (`<dataset>__<table>`); `catalogFor` registers what a query reads.
 
 ## Add a SQL operator (e.g., subqueries)
 
@@ -423,6 +471,29 @@ value (`HashPartitioner.decimalHash` for a route, `KeyCodec.decimalKey` for a
 stored value, never `BigDecimal.hashCode`, which includes the scale).
 `HashPartitioner.hashCell` and `HashJoinExec.columnHashCode` are the routing
 models, `DistinctElement` the set one.
+
+## Add an expression node
+
+A bound expression is the sealed `Expr` trait in `sql/plan/Expr.scala`, and
+several passes walk every kind of it, so a new node (as `SwitchCaseExpr` and
+`BetweenExpr` were) is a case in each, or a pass meets it and fails:
+
+1. The node itself: `dataType`, `eval(batch, row)`, and `evalVec(batch)` when
+   the default per-row loop is too slow. The two must agree on every value and
+   error (`fuzz/expr_parity_fuzz_test` holds them to it), and an operand needed
+   on only some rows goes through `Operand.evalVec`, as `CaseExpr`'s do. A node
+   that compares an operand it reads once can append that operand's vector to
+   the batch (`Expr.withColumn`) and reuse an existing node over a reference to
+   it.
+2. The walks over bound expressions: `Expr.readsRandom`,
+   `LogicalBuilder.isConstant`, `JoinSideAnalysis.sideOf` and `shiftToRight`,
+   and `ColumnProjectionPushdown`'s five (`colRefNames`, `rewriteExpr`,
+   `joinCondNamesPerSide`, `remapJoinCondition`, `verify`). A walk that only
+   looks for a shape it can use, such as `ParquetFilterTranslator`, need not
+   know the node.
+3. The test harness's walks: `oracle/CleanRejection.children`,
+   `ExprGen.render`, `Shrinker`'s `childrenOf` and its rebuild, `QueryGen.expr`
+   and `ColumnProjectionPushdownTest`'s index check.
 
 ## Add a property / generator
 

@@ -2,7 +2,7 @@ package com.transformer.fuzz
 
 import com.transformer.core._
 import com.transformer.fuzz.MetaQueryGen._
-import com.transformer.fuzz.oracle.{AggDecomposition, JoinCommutativity, MetaModeDifferential, NoRec, Tlp}
+import com.transformer.fuzz.oracle.{AggDecomposition, JoinCommutativity, MetaModeDifferential, NoRec, RelEngine, Tlp}
 import com.transformer.sql.plan.LogicalPlanCardinality
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -95,6 +95,33 @@ class ShardedModeFuzzTest {
     assertEquals(
       "jvm_flags broadcast_threshold=1 must reach LogicalPlanCardinality at class load",
       1L, LogicalPlanCardinality.BroadcastBuildThreshold)
+  }
+
+  /** A GROUP BY or PARTITION BY key that reads RAND() is read once per row
+    * here too: an exchange read it to route the row and the grouping read it
+    * again in the shard, so `GROUP BY RAND() > 0.5` made four groups (TRUE and
+    * FALSE in two shards each) and `PARTITION BY FLOOR(RAND() * 3)` nine
+    * partitions. Such a key is planned without the exchange. */
+  @Test def aKeyThatReadsRandIsReadOncePerRow(): Unit = {
+    val schema = Schema(Field("id", DataType.IntType))
+    val rowsPerPartition = 500
+    val view = new MaterializedView(schema, (0 until 4).map { p =>
+      val b = new ColumnarBatch(schema, rowsPerPartition)
+      (0 until rowsPerPartition).foreach(r => b.column(0).setBoxed(r, p * rowsPerPartition + r))
+      b.setNumRows(rowsPerPartition)
+      IndexedSeq(b)
+    })
+    val cat = new Catalog
+    cat.register("t", view)
+    val groups = RelEngine.runRows(cat,
+      "SELECT RAND() > 0.5 AS r, COUNT(*) AS n FROM t GROUP BY RAND() > 0.5", ExecutionOptions.Default)
+    assertEquals("one group per value", groups.map(_(0)).distinct.size, groups.size)
+    assertEquals(2000L, groups.map(_(1).asInstanceOf[Long]).sum)
+    val sized = RelEngine.runRows(cat,
+      "SELECT COUNT(*) OVER (PARTITION BY FLOOR(RAND() * 3)) AS n FROM t", ExecutionOptions.Default)
+    // A partition of n rows gives n rows of n, so the sum of 1/n over the rows counts the partitions.
+    val partitions = sized.map(r => 1.0 / r(0).asInstanceOf[Long]).sum
+    assertTrue(s"$partitions partitions of FLOOR(RAND() * 3)", math.round(partitions) <= 3)
   }
 
   // ---- the properties (identical to MetamorphicFuzzTest, under sharding) -----

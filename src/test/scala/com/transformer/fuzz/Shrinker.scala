@@ -188,6 +188,9 @@ object Shrinker {
     case IsNullExpr(c, _) => Seq(c)
     case InListExpr(c, items, _) => c +: items
     case LikeExpr(c, p, _, _) => Seq(c, p)
+    case SwitchCaseExpr(operand, branches, elseExpr, _) =>
+      operand +: (branches.flatMap(b => Seq(b.when, b.value)) ++ elseExpr.toSeq)
+    case BetweenExpr(c, low, high) => Seq(c, low, high)
   }
 
   // ---- QueryCase shrinker (mode-differential) -----------------------------
@@ -379,6 +382,10 @@ object Shrinker {
     case IsNullExpr(_, neg) => IsNullExpr(kids.head, neg)
     case InListExpr(_, items, neg) => InListExpr(kids.head, kids.drop(1).take(items.length), neg)
     case l: LikeExpr => l.copy(child = kids(0), pattern = kids(1))
+    case SwitchCaseExpr(_, branches, elseExpr, dt) =>
+      val rebuilt = branches.zip(kids.drop(1).grouped(2).toSeq).map { case (b, p) => b.copy(when = p(0), value = p(1)) }
+      SwitchCaseExpr(kids.head, rebuilt, if (elseExpr.isDefined) Some(kids(1 + 2 * branches.length)) else None, dt)
+    case BetweenExpr(_, _, _) => BetweenExpr(kids(0), kids(1), kids(2))
   }
 
   // ---- multi-relation MetaCase / NoRecCase shrinkers (metamorphic) ---------

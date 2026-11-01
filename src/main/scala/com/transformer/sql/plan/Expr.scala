@@ -44,6 +44,39 @@ sealed trait Expr {
   }
 }
 
+object Expr {
+
+  /** Whether `e` reads `RAND()`, whose value differs each time it is read, so
+    * two evaluations of `e` on one row may disagree (`RAND(seed)` is one
+    * value). An operator that reads a key twice, once to send a row to a
+    * shard or a spill bucket and again to group, match or partition it there,
+    * must not take such a key: `GROUP BY RAND() > 0.5` made four groups of
+    * two, as each half of a group went to another shard. */
+  def readsRandom(e: Expr): Boolean = e match {
+    case FuncExpr(name, args, _) =>
+      (args.isEmpty && (name.equalsIgnoreCase("RAND") || name.equalsIgnoreCase("RANDOM"))) || args.exists(readsRandom)
+    case _: ColRefExpr | _: LitExpr => false
+    case CastExpr(c, _) => readsRandom(c)
+    case UnaryOpExpr(_, c, _) => readsRandom(c)
+    case BinOpExpr(_, l, r, _) => readsRandom(l) || readsRandom(r)
+    case CaseExpr(branches, elseExpr, _) =>
+      branches.exists { case (w, t) => readsRandom(w) || readsRandom(t) } || elseExpr.exists(readsRandom)
+    case IsNullExpr(c, _) => readsRandom(c)
+    case InListExpr(c, items, _) => readsRandom(c) || items.exists(readsRandom)
+    case LikeExpr(c, pattern, _, _) => readsRandom(c) || readsRandom(pattern)
+    case SwitchCaseExpr(operand, branches, elseExpr, _) =>
+      readsRandom(operand) || branches.exists(b => readsRandom(b.when) || readsRandom(b.value)) ||
+        elseExpr.exists(readsRandom)
+    case BetweenExpr(c, low, high) => readsRandom(c) || readsRandom(low) || readsRandom(high)
+  }
+
+  /** `batch` with `column` beside its own columns, sharing them: how a node
+    * that reads an operand once hands its value to the expressions that
+    * compare it. */
+  private[plan] def withColumn(batch: ColumnarBatch, column: ColumnVector, dataType: DataType, n: Int): ColumnarBatch =
+    ColumnarBatch.fromColumns(Schema(batch.schema.fields :+ Field("<operand>", dataType)), batch.columns :+ column, n)
+}
+
 /** How a conditional evaluates an operand on only the rows that need it.
   *
   * `CASE`, `IF`, `COALESCE`, `AND`, `OR` and `IN` answer a row without reading
@@ -411,6 +444,89 @@ final case class CaseExpr(branches: Seq[(Expr, Expr)], elseExpr: Option[Expr], d
   }
 }
 
+/** One WHEN of a [[SwitchCaseExpr]]: the operand, read as `compareAs`, equals
+  * `when` (already of that type), and the CASE answers `value`. */
+final case class SwitchBranch(compareAs: DataType, when: Expr, value: Expr)
+
+/** `CASE operand WHEN w1 THEN r1 ... [ELSE e] END` whose operand is read once
+  * per row and compared with each WHEN as `=` compares the two, the operand
+  * read as `compareAs` beside each. The binder makes one only for an operand
+  * that reads RAND() ([[Expr.readsRandom]]): any other simple CASE is the
+  * searched CASE of its comparisons, `CASE WHEN operand = w1 ...`, which reads
+  * the operand once per WHEN to the same answer and keeps each comparison
+  * where the optimizer can read it. Read once per WHEN, `CASE FLOOR(RAND() *
+  * 3) WHEN 0 ... WHEN 1 ... WHEN 2 ... END` met a fresh value at each and left
+  * a third of the rows NULL. A WHEN and a THEN are read on the rows that need
+  * them, as in [[CaseExpr]]. */
+final case class SwitchCaseExpr(
+    operand: Expr,
+    branches: Seq[SwitchBranch],
+    elseExpr: Option[Expr],
+    dataType: DataType) extends Expr {
+
+  def eval(batch: ColumnarBatch, row: Int): Any = {
+    val v = operand.eval(batch, row)
+    if (v != null) {
+      val it = branches.iterator
+      while (it.hasNext) {
+        val b = it.next()
+        val w = b.when.eval(batch, row)
+        if (w != null && Ops.eq(Casts.cast(v, operand.dataType, b.compareAs), w)) return b.value.eval(batch, row)
+      }
+    }
+    elseExpr.map(_.eval(batch, row)).orNull
+  }
+
+  /** The operand's vector, read once, is a column appended to the batch, and
+    * the searched CASE of comparisons with that column answers: the same
+    * guards, over a value every WHEN reads alike. */
+  override def evalVec(batch: ColumnarBatch): ColumnVector = {
+    val n = batch.numRows
+    val width = batch.schema.length
+    val read = ColRefExpr(width, "<case operand>", operand.dataType)
+    val searched = CaseExpr(
+      branches.map(b => (BinOpExpr("=", Analyzer.implicitCast(read, b.compareAs), b.when, DataType.BooleanType), b.value)),
+      elseExpr, dataType)
+    searched.evalVec(Expr.withColumn(batch, operand.evalVec(batch), operand.dataType, n))
+  }
+}
+
+/** `x BETWEEN lo AND hi` whose `x` is read once per row: `x >= lo AND x <=
+  * hi`, the three of one type, with `hi` read only where `x >= lo` is not
+  * FALSE, as AND reads its right side. The binder makes one only for an `x`
+  * that reads RAND(); any other BETWEEN is its two comparisons, which a
+  * parquet scan can skip row groups by. Read twice, `RAND() BETWEEN 0.25 AND
+  * 0.75` held on 56% of rows rather than half. */
+final case class BetweenExpr(child: Expr, low: Expr, high: Expr) extends Expr {
+  def dataType: DataType = DataType.BooleanType
+
+  def eval(batch: ColumnarBatch, row: Int): Any = {
+    val v = child.eval(batch, row)
+    if (v == null) null
+    else {
+      val l = low.eval(batch, row)
+      val atLeast: Any = if (l == null) null else Ops.cmp(v, l) >= 0
+      if (atLeast == false) false
+      else {
+        val h = high.eval(batch, row)
+        val atMost: Any = if (h == null) null else Ops.cmp(v, h) <= 0
+        if (atMost == false) false
+        else if (atLeast == null || atMost == null) null
+        else true
+      }
+    }
+  }
+
+  override def evalVec(batch: ColumnarBatch): ColumnVector = {
+    val n = batch.numRows
+    val read = ColRefExpr(batch.schema.length, "<between operand>", child.dataType)
+    val both = BinOpExpr("AND",
+      BinOpExpr(">=", read, low, DataType.BooleanType),
+      BinOpExpr("<=", read, high, DataType.BooleanType), DataType.BooleanType)
+    both.evalVec(Expr.withColumn(batch, child.evalVec(batch), child.dataType, n))
+  }
+}
+
 final case class IsNullExpr(child: Expr, negated: Boolean) extends Expr {
   def dataType: DataType = DataType.BooleanType
   def eval(batch: ColumnarBatch, row: Int): Any = {
@@ -628,7 +744,10 @@ final case class LikeExpr(
         var i = 0
         while (i < n) { nulls.set(i); i += 1 }
       case LitExpr(p, _) =>
-        val matcher = LikeExpr.toRegex(p.toString, syntax).matcher("")
+        // Compiled at the first row that has a string to match, as the row
+        // path compiles it: a pattern that is no pattern (one ending in its
+        // escape) answers NULL on NULL rows rather than failing the batch.
+        lazy val matcher = LikeExpr.toRegex(p.toString, syntax).matcher("")
         var i = 0
         while (i < n) {
           if (cv.isNull(i)) nulls.set(i)
@@ -656,12 +775,21 @@ final case class LikeExpr(
 }
 
 object LikeExpr {
+  /** Compiled patterns, a column of patterns among them, so it is emptied
+    * once it holds [[CacheLimit]]: a pattern per row of a long-lived session
+    * otherwise held every one it had ever read. */
   private val cache = new java.util.concurrent.ConcurrentHashMap[(String, LikeSyntax), java.util.regex.Pattern]()
+  private val CacheLimit = 4096
   def toRegex(like: String, syntax: LikeSyntax = LikeSyntax.Default): java.util.regex.Pattern = {
     val key = (like, syntax)
     val cached = cache.get(key)
     if (cached != null) return cached
     val sb = new java.lang.StringBuilder("^")
+    // The pattern is read a character at a time, a character outside the
+    // Basic Multilingual Plane (an emoji) being one, though Java holds it as
+    // two chars: the regex reads its input so, and half of one matched
+    // nothing, so a pattern holding one matched no string, not even itself.
+    def character(at: Int): String = like.substring(at, at + Character.charCount(like.codePointAt(at)))
     var i = 0
     while (i < like.length) {
       val c = like.charAt(i)
@@ -672,20 +800,24 @@ object LikeExpr {
         if (i + 1 == like.length) throw new IllegalArgumentException(
           s"The LIKE pattern '${like.replace("'", "''")}' ends in its escape character, $c, which escapes " +
             s"nothing; write $c$c to match one")
-        sb.append(java.util.regex.Pattern.quote(like.substring(i + 1, i + 2)))
-        i += 1
+        val escaped = character(i + 1)
+        sb.append(java.util.regex.Pattern.quote(escaped))
+        i += 1 + escaped.length
       } else c match {
-        case '%' => sb.append(".*")
-        case '_' => sb.append('.')
-        case other => sb.append(java.util.regex.Pattern.quote(other.toString))
+        case '%' => sb.append(".*"); i += 1
+        case '_' => sb.append('.'); i += 1
+        case _ =>
+          val literal = character(i)
+          sb.append(java.util.regex.Pattern.quote(literal))
+          i += literal.length
       }
-      i += 1
     }
     sb.append("$")
     val caseFlags =
       if (syntax.caseInsensitive) java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE
       else 0
     val p = java.util.regex.Pattern.compile(sb.toString, java.util.regex.Pattern.DOTALL | caseFlags)
+    if (cache.size >= CacheLimit) cache.clear()
     cache.put(key, p)
     p
   }

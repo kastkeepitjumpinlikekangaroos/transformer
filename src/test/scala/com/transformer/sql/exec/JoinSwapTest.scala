@@ -457,6 +457,41 @@ class JoinSwapTest {
       "SELECT x.lk FROM l x JOIN r y ON x.lk = y.rk JOIN l z ON x.lv < z.lv", cat))
   }
 
+  /** The guard refuses on sizes it can prove, never on a filter's guess: a
+    * CROSS JOIN of two one-row filters over tables of a million rows runs.
+    * It was refused as pairing 100000 rows with 100000, a filter on `=`
+    * guessed to keep a tenth of its input. */
+  @Test def aFilteredSideIsNoProvenSize(): Unit = {
+    val l = view(LeftSchema, SmallLeftRows, Some(1_000_000L))
+    val r = view(RightSchema, SmallRightRows, Some(1_000_000L))
+    val cat = catalogWith("l" -> l, "r" -> r)
+    val rows = collectAllRows(SqlEngine.execute(
+      "SELECT l.lk, r.rk FROM l CROSS JOIN r WHERE l.lk = 1 AND r.rk = 1", cat))
+    assertEquals(1, rows.size)
+  }
+
+  /** A comma join's equality in WHERE is its join key, as `JOIN ... ON` is:
+    * the join hashes on it rather than pairing every row and filtering, so
+    * two tables past the nested-loop guard join. It was refused, asking for
+    * an equality in an ON a comma join cannot have. */
+  @Test def aCommaJoinOnAWhereEqualityIsAnEquiJoin(): Unit = {
+    val l = view(LeftSchema, SmallLeftRows, Some(1_000_000L))
+    val r = view(RightSchema, SmallRightRows, Some(1_000_000L))
+    val cat = catalogWith("l" -> l, "r" -> r)
+    val sql = "SELECT l.lk, r.rk FROM l, r WHERE l.lk = r.rk"
+    val expected = collectAllRows(SqlEngine.execute("SELECT l.lk, r.rk FROM l JOIN r ON l.lk = r.rk", cat))
+    assertEquals(expected.sortBy(_("lk").toString), collectAllRows(SqlEngine.execute(sql, cat)).sortBy(_("lk").toString))
+    val physical = PhysicalPlanner.plan(LogicalOptimizer.optimize(
+      CteResolver.resolve(LogicalBuilder.build(sql, cat), ExecutionOptions.Default)))
+    def hashKeys(p: PhysicalPlan): Seq[Int] = p match {
+      case j: HashJoinExec => Seq(j.leftKeys.size)
+      case ProjectExec(c, _) => hashKeys(c)
+      case FilterExec(c, _) => hashKeys(c)
+      case _ => Nil
+    }
+    assertEquals("the WHERE equality is the join's key", Seq(1), hashKeys(physical))
+  }
+
   /** Estimate unknown on either side → the planner can't size the join, so
     * it falls back to the permissive path (matches CSV inputs without
     * `exactRowCount`). */

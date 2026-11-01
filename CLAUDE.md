@@ -32,7 +32,7 @@ in [docs/testing.md](docs/testing.md).
 realistic job in the repo (15-task DAG, ~150k rows, 26 DBT data_tests ported
 as validations) and the fastest way to catch regressions unit tests miss —
 planner edge cases, runner orchestration, directory-loader behaviour, GUI
-hydration when the GUI changes. Run it after any non-trivial change to SQL,
+hydration when the GUI changes, and the run records the data viewer reads. Run it after any non-trivial change to SQL,
 the runner, or the directory loader:
 
 ```bash
@@ -69,9 +69,9 @@ A change that adds a feature without updating user docs is not done.
 
 - [README.md](README.md) — user-facing intro. Quick start, pipeline layout,
   the `transformer` CLI (`run` / `gui`) and scheduling, working with agents,
-  GUI, run records, supported file formats, SQL features, temporal
-  templating, examples, embedding in Scala, limitations. Start here for
-  anything user-visible.
+  GUI, the data viewer (`//:transformer_viewer`), run records, supported file
+  formats, SQL features, temporal templating, examples, embedding in Scala,
+  limitations. Start here for anything user-visible.
 - [site/](site/) — the static project website (home + setup pages).
 - [docs/README.md](docs/README.md) — index of contributor docs (the files
   below).

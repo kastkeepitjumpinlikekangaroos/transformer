@@ -25,6 +25,11 @@ import scala.jdk.CollectionConverters._
   * `DataJob.runUnifiedDag`), and UIs use these to draw input → task edges without
   * re-parsing the SQL.
   *
+  * `mainDeps` and `mainInputDeps` are the parts of `deps` and `inputDeps` the
+  * main SQL reads: what the task's rows are made from, which the run records
+  * as its lineage. A view only a validation reads is waited for, but the rows
+  * do not come from it.
+  *
   * Public so external surfaces (e.g. the GUI module) can render the DAG without
   * having to re-implement the analyzer.
   */
@@ -34,7 +39,9 @@ final case class TaskDagNode(
     renderedMainSql: String,
     renderedValidationSqls: Seq[String],
     deps: Set[Int],
-    inputDeps: Set[String] = Set.empty
+    inputDeps: Set[String] = Set.empty,
+    mainDeps: Set[Int] = Set.empty,
+    mainInputDeps: Set[String] = Set.empty
 )
 
 /** A fully-validated DAG of [[SQLTask]]s ready to be executed by the scheduler.
@@ -95,24 +102,9 @@ object TaskDag {
       t.validations.map(v => TemplateRenderer.render(v.loadSql(), vars))
     )
 
-    // A statement too deep to read is refused when its task runs, which fails
-    // that task and skips its dependents; here it reads no tables, so the
-    // rest of the job still runs.
-    def extract(sql: String): Set[String] = {
-      val stmt =
-        try SqlParser.parse(sql)
-        catch { case _: NestingLimitException => return Set.empty }
-      val ctes = stmt match {
-        case s: Select => cteNames(s)
-        case _ => Set.empty[String]
-      }
-      new TablesNamesFinder().getTableList(stmt).asScala.iterator
-        .map(name => SqlParser.unquote(name).toLowerCase(Locale.ROOT)).filterNot(ctes).toSet
-    }
-
-    val mainRefs: IndexedSeq[Set[String]] = tasks.indices.map(i => extract(renderedMains(i)))
+    val mainRefs: IndexedSeq[Set[String]] = tasks.indices.map(i => viewsRead(renderedMains(i)))
     val validationRefs: IndexedSeq[Set[String]] =
-      tasks.indices.map(i => renderedValidations(i).iterator.flatMap(extract).toSet)
+      tasks.indices.map(i => renderedValidations(i).iterator.flatMap(viewsRead).toSet)
 
     tasks.indices.foreach { i =>
       val selfView = tasks(i).viewName.map(_.toLowerCase(Locale.ROOT))
@@ -162,6 +154,9 @@ object TaskDag {
       val refs = mainRefs(i) ++ validationRefs(i)
       refs.iterator.filter(inputViewNames.contains).toSet
     }
+    val mainDeps: IndexedSeq[Set[Int]] =
+      tasks.indices.map(i => mainRefs(i).iterator.flatMap(viewNameToTaskIdx.get).filter(_ != i).toSet)
+    val mainInputDeps: IndexedSeq[Set[String]] = tasks.indices.map(i => mainRefs(i).filter(inputViewNames.contains))
 
     val inDeg = Array.tabulate(tasks.size)(i => deps(i).size)
     val dependentsAdj: IndexedSeq[mutable.Set[Int]] =
@@ -194,11 +189,31 @@ object TaskDag {
         renderedMainSql = renderedMains(i),
         renderedValidationSqls = renderedValidations(i),
         deps = deps(i),
-        inputDeps = inputDeps(i)
+        inputDeps = inputDeps(i),
+        mainDeps = mainDeps(i),
+        mainInputDeps = mainInputDeps(i)
       )
     }.toVector
 
     TaskDag(nodes = nodes, dependents = dependentsAdj.map(_.toSet).toVector)
+  }
+
+  /** The views `sql` reads, named as the binder resolves them: without
+    * quotes, in lower case, leaving out the CTEs it defines. A qualified name
+    * stays whole (`other.t`). A statement too deep to read is refused when
+    * it runs, which fails its task and skips its dependents; here it reads
+    * no views, so the rest of the job still runs. Text that does not parse
+    * throws, naming why. */
+  def viewsRead(sql: String): Set[String] = {
+    val stmt =
+      try SqlParser.parse(sql)
+      catch { case _: NestingLimitException => return Set.empty }
+    val ctes = stmt match {
+      case s: Select => cteNames(s)
+      case _ => Set.empty[String]
+    }
+    new TablesNamesFinder().getTableList(stmt).asScala.iterator
+      .map(name => SqlParser.unquote(name).toLowerCase(Locale.ROOT)).filterNot(ctes).toSet
   }
 
   /** The names every WITH in `select` defines, nested ones included, as the

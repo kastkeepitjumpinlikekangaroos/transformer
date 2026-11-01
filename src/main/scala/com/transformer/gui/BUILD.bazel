@@ -21,6 +21,81 @@ scala_library(
     ],
 )
 
+# The SQL editor's vim mode: keys, motions, operators, registers, undo and ex
+# commands over a plain string behind the VimBuffer trait. No JavaFX and no
+# other dependency, so its tests drive it with strings; `gui` exports it.
+scala_library(
+    name = "vim",
+    srcs = [
+        "VimCommand.scala",
+        "VimEngine.scala",
+        "VimKey.scala",
+        "VimText.scala",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# What every transformer GUI is built from, the job's and the data viewer's
+# (//src/main/scala/com/transformer/viewer): the theme and its stylesheet, the
+# SQL editor with its highlighting and vim keys, the SQL console, the grid that
+# shows rows, the canvas graphs are drawn on, icons and dialogs. One look and
+# one editor across both apps. `transformer.css` ships in the jar beside the
+# classes, as com/transformer/gui/transformer.css.
+COMPONENTS = [
+    "DataGrid.scala",
+    "FxHelpers.scala",
+    "GraphCanvas.scala",
+    "Icons.scala",
+    "PersistDialog.scala",
+    "QueryConsole.scala",
+    "ResultPersister.scala",
+    "ShortcutsDialog.scala",
+    "SqlEditor.scala",
+    "SqlErrorDialog.scala",
+    "SqlHighlighter.scala",
+    "SqlView.scala",
+    "Theme.scala",
+    "VimKeyEvents.scala",
+]
+
+# The JavaFX jars a GUI target compiles against. On JavaFX 21+ the bare jars
+# are metadata only — the actual classes live in the platform-specific
+# classifier jars. Depend on the mac variants here; a launcher adds the
+# others it ships (//:transformer adds Windows).
+JAVAFX = [
+    "@maven//:org_openjfx_javafx_base",
+    "@maven//:org_openjfx_javafx_controls",
+    "@maven//:org_openjfx_javafx_graphics",
+    "@maven//:org_openjfx_javafx_base_mac_aarch64",
+    "@maven//:org_openjfx_javafx_controls_mac_aarch64",
+    "@maven//:org_openjfx_javafx_graphics_mac_aarch64",
+]
+
+scala_library(
+    name = "components",
+    srcs = COMPONENTS,
+    resource_strip_prefix = "src/main/scala",
+    resources = ["transformer.css"],
+    visibility = ["//visibility:public"],
+    exports = [":vim"],
+    deps = [
+        ":vim",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/write/csv",
+        "//src/main/scala/com/transformer/write/parquet",
+        # The SQL editor (RichTextFX and the libraries its API is made of) and
+        # the theme. Pure Java; they use the JavaFX listed here.
+        "@maven//:io_github_mkpaz_atlantafx_base",
+        "@maven//:org_fxmisc_flowless_flowless",
+        "@maven//:org_fxmisc_richtext_richtextfx",
+        "@maven//:org_fxmisc_undo_undofx",
+        "@maven//:org_fxmisc_wellbehaved_wellbehavedfx",
+        "@maven//:org_reactfx_reactfx",
+    ] + JAVAFX,
+)
+
 # JavaFX GUI library: visualize and run a transformer DataJob (typically loaded
 # via DirectoryJobLoader) with live DAG status and post-run output preview.
 scala_library(
@@ -30,12 +105,22 @@ scala_library(
         exclude = [
             "DagLayout.scala",
             "JobSession.scala",
-        ],
+            "VimCommand.scala",
+            "VimEngine.scala",
+            "VimKey.scala",
+            "VimText.scala",
+        ] + COMPONENTS,
     ),
     visibility = ["//visibility:public"],
-    exports = [":session"],
-    deps = [
+    exports = [
+        ":components",
         ":session",
+        ":vim",
+    ],
+    deps = [
+        ":components",
+        ":session",
+        ":vim",
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",
         "//src/main/scala/com/transformer/read/csv",
@@ -44,15 +129,7 @@ scala_library(
         "//src/main/scala/com/transformer/temporal",
         "//src/main/scala/com/transformer/write/csv",
         "//src/main/scala/com/transformer/write/parquet",
-        "@maven//:org_openjfx_javafx_base",
-        "@maven//:org_openjfx_javafx_controls",
-        "@maven//:org_openjfx_javafx_graphics",
-        # On JavaFX 21+ the bare jars are metadata only — the actual classes
-        # live in the platform-specific classifier jars. Depend on the mac
-        # variants here; the launcher BUILD.bazel can add other platforms
-        # (win/linux) if cross-platform binaries are needed.
-        "@maven//:org_openjfx_javafx_base_mac_aarch64",
-        "@maven//:org_openjfx_javafx_controls_mac_aarch64",
-        "@maven//:org_openjfx_javafx_graphics_mac_aarch64",
-    ],
+        "@maven//:io_github_mkpaz_atlantafx_base",
+        "@maven//:org_fxmisc_richtext_richtextfx",
+    ] + JAVAFX,
 )

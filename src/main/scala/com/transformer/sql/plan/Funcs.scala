@@ -84,13 +84,13 @@ object Funcs {
     name.toUpperCase(Locale.ROOT) match {
       case "LENGTH" | "LEN" =>
         val v = args.head
-        if (v == null) null else v.toString.length
+        if (v == null) null else length(v.toString)
       case "UPPER" =>
         if (args.head == null) null else args.head.toString.toUpperCase(Locale.ROOT)
       case "LOWER" =>
         if (args.head == null) null else args.head.toString.toLowerCase(Locale.ROOT)
       case "TRIM" =>
-        if (args.head == null) null else args.head.toString.trim
+        if (args.head == null) null else trim(args.head.toString)
       case "SUBSTRING" =>
         if (args.exists(_ == null)) null
         else substring(args.head.toString, args(1).asInstanceOf[Number].longValue,
@@ -163,11 +163,14 @@ object Funcs {
         if (args.head == null) null else math.toDegrees(args.head.asInstanceOf[Number].doubleValue)
       case "RADIANS" =>
         if (args.head == null) null else math.toRadians(args.head.asInstanceOf[Number].doubleValue)
+      // NaN is neither above nor below zero, nor zero, so it has no sign an
+      // INT can say; it was 0.
       case "SIGN" =>
         if (args.head == null) null
         else {
           val d = args.head.asInstanceOf[Number].doubleValue
-          if (d > 0.0) 1 else if (d < 0.0) -1 else 0
+          if (d > 0.0) 1 else if (d < 0.0) -1 else if (d == 0.0) 0
+          else throw new ArithmeticException("SIGN of NaN is not defined; NaN is neither positive, negative nor zero")
         }
       case "PI" => math.Pi
       case "E"  => math.E
@@ -182,6 +185,9 @@ object Funcs {
       case other => throw new IllegalArgumentException(s"Unsupported function '$other'")
     }
 
+  /** The greatest or least of `args`, NULLs skipped. Of two equal zeros,
+    * GREATEST gives 0.0 and LEAST -0.0 whatever order they come in, as MAX
+    * and MIN do; the first written used to win. */
   private def pickByOrdering(args: Seq[Any], argTypes: Seq[DataType], resultType: DataType, greatest: Boolean): Any = {
     var best: Any = null
     var i = 0
@@ -191,7 +197,13 @@ object Funcs {
         val cast = Casts.cast(v, argTypes(i), resultType)
         if (best == null) best = cast
         else {
-          val c = Ops.cmp(cast, best)
+          val c = (cast, best) match {
+            case (x: java.lang.Double, y: java.lang.Double) if Ops.cmp(x, y) == 0 =>
+              java.lang.Double.compare(x.doubleValue, y.doubleValue)
+            case (x: java.lang.Float, y: java.lang.Float) if Ops.cmp(x, y) == 0 =>
+              java.lang.Float.compare(x.floatValue, y.floatValue)
+            case _ => Ops.cmp(cast, best)
+          }
           if ((greatest && c > 0) || (!greatest && c < 0)) best = cast
         }
       }
@@ -205,12 +217,35 @@ object Funcs {
     * character counts from the first; one past the last, or a length of 0,
     * gives the empty string, and a negative length is an error, as in
     * Postgres: it took nothing. Read as a BIGINT, a position past an INT's
-    * range is past the end rather than wrapped round to before the start. */
+    * range is past the end rather than wrapped round to before the start.
+    * A character is a Unicode code point ([[length]]), so no answer holds
+    * half of one. */
   private[plan] def substring(s: String, position: Long, length: Long): String = {
     if (length < 0) throw negativeLength(length)
+    val characters = Funcs.length(s)
     val start = if (position < 1) 0L else position - 1
-    if (start >= s.length || length <= 0) ""
-    else s.substring(start.toInt, if (length < s.length - start) (start + length).toInt else s.length)
+    if (start >= characters || length <= 0) ""
+    else {
+      val from = s.offsetByCodePoints(0, start.toInt)
+      s.substring(from, s.offsetByCodePoints(from, math.min(length, characters - start).toInt))
+    }
+  }
+
+  /** How many characters `s` holds: Unicode code points, as SQL counts them,
+    * so an emoji, which Java holds as two chars, is one. Counted in chars,
+    * `SUBSTRING` could cut one in half, and half a character is no text: a
+    * spill or a parquet or CSV file wrote it as `?`. */
+  private[plan] def length(s: String): Int = s.codePointCount(0, s.length)
+
+  /** `s` without the spaces (U+0020) it starts and ends with, which is what
+    * SQL's TRIM removes; Java's `trim`, which it used, also took tabs, line
+    * breaks and every other character up to U+0020. */
+  private[plan] def trim(s: String): String = {
+    var from = 0
+    var until = s.length
+    while (from < until && s.charAt(from) == ' ') from += 1
+    while (until > from && s.charAt(until - 1) == ' ') until -= 1
+    s.substring(from, until)
   }
 
 
@@ -297,7 +332,7 @@ object VecFuncs {
     var i = 0
     while (i < n) {
       if (argVec.isNull(i)) nulls.set(i)
-      else values(i) = argVec.getBoxed(i).toString.length
+      else values(i) = Funcs.length(argVec.getBoxed(i).toString)
       i += 1
     }
     new IntVector(values, nulls, cap)
@@ -328,7 +363,7 @@ object VecFuncs {
     var i = 0
     while (i < n) {
       if (argVec.isNull(i)) values(i) = null
-      else values(i) = argVec.getBoxed(i).toString.trim
+      else values(i) = Funcs.trim(argVec.getBoxed(i).toString)
       i += 1
     }
     new StringVector(values, cap)
@@ -533,6 +568,8 @@ private[plan] object Rounding {
           if (args.size == 1) Some(0L)
           else args(1) match {
             case LitExpr(v: java.lang.Number, _) => Some(v.longValue)
+            // `-1` binds as a minus over the literal 1.
+            case UnaryOpExpr("-", LitExpr(v: java.lang.Number, _), _) => Some(-v.longValue)
             case _ => None
           }
         scale match {

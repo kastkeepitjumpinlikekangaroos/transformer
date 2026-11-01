@@ -32,6 +32,18 @@ object DataType {
   val BINARY: DataType = BinaryType
   val NULL: DataType = NullType
 
+  private val Named: Map[String, DataType] =
+    Seq(StringType, IntType, LongType, FloatType, DoubleType, BooleanType, DateType, TimestampType, BinaryType,
+      NullType).map(t => t.name -> t).toMap
+  private val DecimalName = """decimal\((\d+),(\d+)\)""".r
+
+  /** The type whose [[DataType.name]] is `name` (`long`, `decimal(10,2)`), as
+    * a run record writes a column's type; None for a name no type has. */
+  def fromName(name: String): Option[DataType] = name match {
+    case DecimalName(p, s) => scala.util.Try(DecimalType(p.toInt, s.toInt)).toOption
+    case other => Named.get(other)
+  }
+
   def isNumeric(t: DataType): Boolean = t match {
     case IntType | LongType | FloatType | DoubleType | _: DecimalType => true
     case _ => false

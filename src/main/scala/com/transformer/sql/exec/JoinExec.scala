@@ -146,8 +146,10 @@ final case class HashJoinExec(
     *
     * Non-equi joins (the cartesian-shaped collapsing path) don't qualify
     * because there's no key to hash-bucket on; their size guard is
-    * [[PhysicalPlanner.enforceNestedLoopGuard]] above the planner. */
-  private val graceEnabled: Boolean = opts.spillEnabled && nKeys > 0
+    * [[PhysicalPlanner.enforceNestedLoopGuard]] above the planner. Nor do
+    * keys that read RAND(), which bucketing would read a second time. */
+  private val graceEnabled: Boolean =
+    opts.spillEnabled && nKeys > 0 && !(leftKeys ++ rightKeys).exists(Expr.readsRandom)
 
   // Stamp the constant key-codec path code into the metrics node once at
   // construction. See [[HashJoinExec]] companion for the path codes.

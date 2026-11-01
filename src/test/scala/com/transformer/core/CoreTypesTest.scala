@@ -21,6 +21,17 @@ class CoreTypesTest {
     assertEquals(Vector("c", "a"), sub.fieldNames)
   }
 
+  /** A run record writes a column's type by its name; every type reads back
+    * from it, and a name no type has reads as none. */
+  @Test def dataTypeNamesReadBack(): Unit = {
+    val types = Seq(DataType.StringType, DataType.IntType, DataType.LongType, DataType.FloatType,
+      DataType.DoubleType, DataType.BooleanType, DataType.DateType, DataType.TimestampType, DataType.BinaryType,
+      DataType.NullType, DataType.DecimalType(10, 2), DataType.DecimalType(38, 0))
+    types.foreach(t => assertEquals(t.name, Some(t), DataType.fromName(t.name)))
+    Seq("bigint", "decimal(10)", "decimal(1,2,3)", "LONG", "").foreach(n =>
+      assertEquals(n, None, DataType.fromName(n)))
+  }
+
   @Test def widerNumericPicksWiderRank(): Unit = {
     assertEquals(DataType.DoubleType, DataType.widerNumeric(DataType.IntType, DataType.DoubleType))
     assertEquals(DataType.LongType, DataType.widerNumeric(DataType.LongType, DataType.IntType))

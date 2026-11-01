@@ -22,3 +22,22 @@ scala_binary(
         "@maven//:org_openjfx_javafx_graphics_win",
     ],
 )
+
+# The data viewer, a jar of its own: `bazel build //:transformer_viewer_deploy.jar`,
+# then `java -jar bazel-bin/transformer_viewer_deploy.jar [folder]` explores
+# every job output in a folder: their lineage, samples of their tables, and SQL
+# across them. See README.md "Data viewer".
+scala_binary(
+    name = "transformer_viewer",
+    main_class = "com.transformer.viewer.ViewerMain",
+    jvm_flags = ["-XX:MaxRAMPercentage=75.0"],
+    deps = [
+        "//src/main/scala/com/transformer/viewer",
+        "@maven//:org_openjfx_javafx_base_mac_aarch64",
+        "@maven//:org_openjfx_javafx_base_win",
+        "@maven//:org_openjfx_javafx_controls_mac_aarch64",
+        "@maven//:org_openjfx_javafx_controls_win",
+        "@maven//:org_openjfx_javafx_graphics_mac_aarch64",
+        "@maven//:org_openjfx_javafx_graphics_win",
+    ],
+)

@@ -107,32 +107,43 @@ class FilterPushdownTest {
     }
   }
 
-  @Test def innerJoinCrossSideConjunctStaysAbove(): Unit = {
-    // l.id + r.score > 100  → references both sides → cannot be pushed.
+  @Test def innerJoinCrossSideConjunctJoinsTheCondition(): Unit = {
+    // l.id + r.score > 100 references both sides: it joins the inner join's
+    // own condition, where the join reads it, rather than staying above.
     val pred = bin(">",
       BinOpExpr("+", colInt(0, "id"), colInt(3, "score"), DataType.IntType),
       litInt(100))
     val out = FilterPushdown(LogicalFilter(innerJoin, pred))
     out match {
-      case LogicalFilter(LogicalJoin(_: LogicalScan, _: LogicalScan, _, _), kept) =>
-        assertEquals(pred, kept)
-      case other => fail(s"expected Filter(Join), got $other")
+      case LogicalJoin(_: LogicalScan, _: LogicalScan, cond, JoinKind.Inner) =>
+        assertEquals(and(joinEq, pred), cond)
+      case other => fail(s"expected Join with the conjunct in its condition, got $other")
     }
   }
 
   @Test def innerJoinMixedConjunctsSplit(): Unit = {
-    // left-only conjunct AND cross-side conjunct → left pushed, cross stays.
+    // left-only conjunct AND cross-side conjunct → left pushed, cross into the condition.
     val left = bin("=", colInt(0, "id"), litInt(7))
     val cross = bin(">",
       BinOpExpr("+", colInt(0, "id"), colInt(3, "score"), DataType.IntType),
       litInt(100))
     val out = FilterPushdown(LogicalFilter(innerJoin, and(left, cross)))
     out match {
-      case LogicalFilter(LogicalJoin(LogicalFilter(_: LogicalScan, lp),
-                                     _: LogicalScan, _, _), kept) =>
+      case LogicalJoin(LogicalFilter(_: LogicalScan, lp), _: LogicalScan, cond, JoinKind.Inner) =>
         assertTrue("left pushed", referencesLeftId(lp))
-        assertEquals(cross, kept)
-      case other => fail(s"expected Filter(Join(Filter,Scan)), got $other")
+        assertEquals(and(joinEq, cross), cond)
+      case other => fail(s"expected Join(Filter,Scan) with the cross conjunct in its condition, got $other")
+    }
+  }
+
+  /** A comma join binds as an inner join on TRUE; an equality of the WHERE
+    * between its sides becomes the condition, a key the join hashes on, and
+    * the TRUE goes. It stayed above, so the join ran as a nested loop. */
+  @Test def aCommaJoinTakesItsWhereEqualityAsItsCondition(): Unit = {
+    val commaJoin = LogicalJoin(leftScan, rightScan, LitExpr(true, DataType.BooleanType), JoinKind.Inner)
+    FilterPushdown(LogicalFilter(commaJoin, joinEq)) match {
+      case LogicalJoin(_: LogicalScan, _: LogicalScan, cond, JoinKind.Inner) => assertEquals(joinEq, cond)
+      case other => fail(s"expected Join on the equality, got $other")
     }
   }
 

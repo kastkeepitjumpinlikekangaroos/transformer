@@ -24,8 +24,49 @@ class SqlHighlighterTest {
   }
 
   @Test def functionsAreCaseInsensitive(): Unit = {
-    val ks = kinds("COUNT count Count")
-    assertEquals(Seq(Kind.Function, Kind.Function, Kind.Function), ks)
+    val words = SqlHighlighter.tokenize("COUNT(x) count (x) Count(*)").filter(_.text.head.isLetter)
+    assertEquals(Seq(Kind.Function, Kind.Identifier, Kind.Function, Kind.Identifier, Kind.Function), words.map(_.kind))
+  }
+
+  @Test def aWordIsAFunctionWhenAParenthesisFollows(): Unit = {
+    // A column named like a function, and an alias named like one, stay
+    // identifiers; a call to any function is a function.
+    val words = SqlHighlighter.tokenize("SELECT count, e, my_udf (count) FROM t e")
+      .filter(t => t.kind != Kind.Whitespace && t.kind != Kind.Punct)
+    assertEquals(
+      Seq(Kind.Keyword, Kind.Identifier, Kind.Identifier, Kind.Function, Kind.Identifier,
+        Kind.Keyword, Kind.Identifier, Kind.Identifier),
+      words.map(_.kind))
+    // A keyword before a parenthesis stays a keyword.
+    assertEquals(Seq(Kind.Keyword, Kind.Keyword, Kind.Keyword), kinds("IN (1) OVER (x) EXISTS (y)").filter(_ == Kind.Keyword))
+    assertEquals(Kind.Function, kinds("IF(a, b, c)").head)
+    assertEquals(Seq(Kind.Function, Kind.Function), kinds("CURRENT_DATE current_timestamp"))
+  }
+
+  @Test def typesWhereTypesAreWritten(): Unit = {
+    def kindOf(sql: String, word: String): Kind =
+      SqlHighlighter.tokenize(sql).find(_.text.equalsIgnoreCase(word)).get.kind
+    assertEquals(Kind.Type, kindOf("SELECT CAST(x AS BIGINT)", "bigint"))
+    assertEquals(Kind.Type, kindOf("SELECT CAST(f(x) AS date) FROM t", "date"))
+    assertEquals(Kind.Type, kindOf("SELECT CAST(x AS DECIMAL(10, 2))", "decimal"))
+    assertEquals(Kind.Type, kindOf("SELECT DATE '2026-01-01'", "date"))
+    assertEquals(Kind.Type, kindOf("SELECT TIMESTAMP '2026-01-01 00:00:00'", "timestamp"))
+    assertEquals(Kind.Identifier, kindOf("SELECT date FROM t", "date"))
+    assertEquals(Kind.Identifier, kindOf("SELECT x AS date FROM t", "date"))
+    assertEquals(Kind.Identifier, kindOf("SELECT f(x AS date)", "date"))
+  }
+
+  @Test def styleClassesNameEachColouredKind(): Unit = {
+    assertEquals(Some("keyword"), SqlHighlighter.styleClass(Kind.Keyword))
+    assertEquals(Some("function"), SqlHighlighter.styleClass(Kind.Function))
+    assertEquals(Some("type"), SqlHighlighter.styleClass(Kind.Type))
+    assertEquals(Some("string"), SqlHighlighter.styleClass(Kind.StringLit))
+    assertEquals(Some("number"), SqlHighlighter.styleClass(Kind.NumberLit))
+    assertEquals(Some("comment"), SqlHighlighter.styleClass(Kind.Comment))
+    assertEquals(Some("template"), SqlHighlighter.styleClass(Kind.Template))
+    assertEquals(Some("punct"), SqlHighlighter.styleClass(Kind.Punct))
+    assertEquals(None, SqlHighlighter.styleClass(Kind.Identifier))
+    assertEquals(None, SqlHighlighter.styleClass(Kind.Whitespace))
   }
 
   @Test def identifiersStayIdentifiers(): Unit = {
@@ -139,16 +180,6 @@ class SqlHighlighterTest {
     assertEquals(Seq("'{{ today }}'", "'buy'"), strings)
   }
 
-  @Test def splitIntoLinesPreservesContent(): Unit = {
-    val sql = "SELECT a\nFROM t\n\nWHERE x = 1"
-    val lines = SqlHighlighter.splitIntoLines(SqlHighlighter.tokenize(sql))
-    assertEquals(4, lines.size)
-    assertEquals("SELECT a", lines(0).map(_.text).mkString)
-    assertEquals("FROM t", lines(1).map(_.text).mkString)
-    assertEquals("", lines(2).map(_.text).mkString)
-    assertEquals("WHERE x = 1", lines(3).map(_.text).mkString)
-  }
-
   @Test def windowFunctionKeywords(): Unit = {
     val sql = "SELECT RANK() OVER (PARTITION BY cat ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
     val toks = SqlHighlighter.tokenize(sql).filterNot(_.kind == Kind.Whitespace)
@@ -162,16 +193,5 @@ class SqlHighlighterTest {
     assertTrue("PRECEDING", keywords.contains("PRECEDING"))
     assertTrue("CURRENT", keywords.contains("CURRENT"))
     assertTrue("ROW", keywords.contains("ROW"))
-  }
-
-  @Test def splitIntoLinesHandlesBlockCommentSpanningLines(): Unit = {
-    val sql = "SELECT /* hi\nthere */ 1"
-    val lines = SqlHighlighter.splitIntoLines(SqlHighlighter.tokenize(sql))
-    assertEquals(2, lines.size)
-    assertEquals("SELECT /* hi", lines.head.map(_.text).mkString)
-    assertEquals("there */ 1", lines(1).map(_.text).mkString)
-    // Both halves should still carry the Comment kind for their respective text.
-    assertEquals(Kind.Comment, lines.head.last.kind)
-    assertEquals(Kind.Comment, lines(1).head.kind)
   }
 }

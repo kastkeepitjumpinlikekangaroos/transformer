@@ -25,6 +25,14 @@ import scala.util.control.NonFatal
   * on every task — keeps the default `job.json` shape unchanged for unmetered
   * runs. The macro bench runner reads this list to find every `_perf.json` in
   * one query without re-walking the output tree.
+  *
+  * The run's lineage: [[inputs]] holds each input as the run read it, and each
+  * task's entry the inputs and tasks its main SQL reads. A reader of the
+  * output (the data viewer) joins a job's input path to the output of another
+  * job's task with them. [[outputTemplate]] is the directory this record
+  * lives in with its templates unrendered, made absolute
+  * (`/data/runs/{{ today }}`), which the runs of one job share. A `job.json`
+  * from before these fields reads with `inputs` and `outputTemplate` None.
   */
 final case class JobRunRecord(
     schemaVersion: Int,
@@ -35,18 +43,29 @@ final case class JobRunRecord(
     finishedAt: Instant,
     tasks: Seq[JobTaskSummary],
     warnings: Seq[String],
-    perfManifest: Option[Seq[String]] = None
+    perfManifest: Option[Seq[String]] = None,
+    outputTemplate: Option[String] = None,
+    inputs: Option[Seq[JobInputRecord]] = None
 )
+
+/** An input as a run read it: its view name, its path with its templates
+  * rendered (absolute, unless it is a cloud path), its format, and its
+  * options. */
+final case class JobInputRecord(name: String, path: String, format: String, options: Map[String, String] = Map.empty)
 
 /** Compact per-task entry in [[JobRunRecord.tasks]]. `runFile` is `Some(path)`
   * when the task has an `outputFile` (the full [[TaskRunRecord]] lives in
-  * that directory); otherwise it is None.
+  * that directory); otherwise it is None. It is an absolute path.
   *
   * The entry holds everything about the task but the sample rows of its
   * failed validations, which live beside its `_run.json`: so a task whose
   * record is missing, or that has none, reopens from the entry alone. The
   * timestamps and `failedValidations` are absent from a `job.json` written
-  * before entries carried them, which reads with them as None and empty. */
+  * before entries carried them, which reads with them as None and empty.
+  *
+  * `readsInputs` and `readsTasks` name the inputs and tasks the task's main
+  * SQL reads ([[TaskDagNode.mainDeps]]), as [[JobInputRecord.name]] and
+  * [[taskName]] name them. */
 final case class JobTaskSummary(
     taskName: String,
     status: TaskRunStatus,
@@ -57,7 +76,9 @@ final case class JobTaskSummary(
     startedAt: Option[Instant] = None,
     finishedAt: Option[Instant] = None,
     enqueuedAt: Option[Instant] = None,
-    failedValidations: Seq[FailedValidation] = Nil
+    failedValidations: Seq[FailedValidation] = Nil,
+    readsInputs: Seq[String] = Nil,
+    readsTasks: Seq[String] = Nil
 )
 
 /** A validation a task failed, as `job.json` records it: its name and the rows
@@ -119,10 +140,25 @@ object JobRunRecord {
                       failedRowCount = vo.get("failedRowCount").map(_.stringValue.toLong).getOrElse(0L))
                   }.toVector
                 case _ => Vector.empty
-              }
+              },
+              readsInputs = strings(o.get("readsInputs")),
+              readsTasks = strings(o.get("readsTasks"))
             )
           }.toVector
         case _ => Vector.empty
+      }
+      val inputs = obj.get("inputs") match {
+        case Some(JsonArray(items)) =>
+          Some(items.iterator.zipWithIndex.map { case (item, i) =>
+            val ictx = s"$ctx: inputs[$i]"
+            val o = item.asObject(ictx)
+            JobInputRecord(
+              name = o.requiredString("name", ictx),
+              path = o.requiredString("path", ictx),
+              format = o.requiredString("format", ictx),
+              options = o.optStringMap("options", ictx).getOrElse(Map.empty))
+          }.toVector: Seq[JobInputRecord])
+        case _ => None
       }
       val warnings = obj.get("warnings") match {
         case Some(JsonArray(items)) => items.iterator.map(_.stringValue).toVector
@@ -142,11 +178,18 @@ object JobRunRecord {
         finishedAt = Instant.parse(obj.requiredString("finishedAt", ctx)),
         tasks = tasks,
         warnings = warnings,
-        perfManifest = perfManifest
+        perfManifest = perfManifest,
+        outputTemplate = obj.optString("outputTemplate", ctx),
+        inputs = inputs
       ))
     } catch {
       case NonFatal(_) => None
     }
+  }
+
+  private def strings(value: Option[JsonValue]): Seq[String] = value match {
+    case Some(JsonArray(items)) => items.iterator.map(_.stringValue).toVector
+    case _ => Vector.empty
   }
 
   private def serialize(r: JobRunRecord): String = {
@@ -161,6 +204,23 @@ object JobRunRecord {
     sb.append("  \"executionTime\": \"").append(Json.escape(r.executionTime.toString)).append("\",\n")
     sb.append("  \"startedAt\": \"").append(Json.escape(r.startedAt.toString)).append("\",\n")
     sb.append("  \"finishedAt\": \"").append(Json.escape(r.finishedAt.toString)).append("\",\n")
+    r.outputTemplate.foreach(t => sb.append("  \"outputTemplate\": \"").append(Json.escape(t)).append("\",\n"))
+    r.inputs.foreach { inputs =>
+      sb.append("  \"inputs\": [")
+      if (inputs.nonEmpty) {
+        sb.append('\n')
+        inputs.iterator.zipWithIndex.foreach { case (in, i) =>
+          sb.append("    {\"name\": \"").append(Json.escape(in.name)).append("\", ")
+          sb.append("\"path\": \"").append(Json.escape(in.path)).append("\", ")
+          sb.append("\"format\": \"").append(Json.escape(in.format)).append("\", ")
+          sb.append("\"options\": ").append(Json.stringMap(in.options)).append('}')
+          if (i < inputs.size - 1) sb.append(',')
+          sb.append('\n')
+        }
+        sb.append("  ")
+      }
+      sb.append("],\n")
+    }
     sb.append("  \"tasks\": [")
     if (r.tasks.nonEmpty) {
       sb.append('\n')
@@ -196,6 +256,8 @@ object JobRunRecord {
           v += 1
         }
         sb.append(']')
+        sb.append(", \"readsInputs\": ").append(Json.stringArray(t.readsInputs))
+        sb.append(", \"readsTasks\": ").append(Json.stringArray(t.readsTasks))
         sb.append('}')
         if (i < r.tasks.size - 1) sb.append(',')
         sb.append('\n')

@@ -55,6 +55,11 @@ object JoinSideAnalysis {
       val all = sideOf(c, leftWidth) +: items.map(sideOf(_, leftWidth))
       all.foldLeft[JoinSide](JoinSide.Neither)(merge)
     case LikeExpr(s, p, _, _) => merge(sideOf(s, leftWidth), sideOf(p, leftWidth))
+    case SwitchCaseExpr(operand, branches, elseE, _) =>
+      (operand +: (branches.flatMap(b => Seq(b.when, b.value)) ++ elseE)).map(sideOf(_, leftWidth))
+        .foldLeft[JoinSide](JoinSide.Neither)(merge)
+    case BetweenExpr(c, low, high) =>
+      Seq(c, low, high).map(sideOf(_, leftWidth)).foldLeft[JoinSide](JoinSide.Neither)(merge)
   }
 
   def merge(a: JoinSide, b: JoinSide): JoinSide = (a, b) match {
@@ -92,6 +97,12 @@ object JoinSideAnalysis {
       InListExpr(shiftToRight(c, leftWidth), items.map(shiftToRight(_, leftWidth)), neg)
     case l: LikeExpr =>
       l.copy(child = shiftToRight(l.child, leftWidth), pattern = shiftToRight(l.pattern, leftWidth))
+    case SwitchCaseExpr(operand, branches, elseE, dt) =>
+      SwitchCaseExpr(shiftToRight(operand, leftWidth),
+        branches.map(b => b.copy(when = shiftToRight(b.when, leftWidth), value = shiftToRight(b.value, leftWidth))),
+        elseE.map(shiftToRight(_, leftWidth)), dt)
+    case BetweenExpr(c, low, high) =>
+      BetweenExpr(shiftToRight(c, leftWidth), shiftToRight(low, leftWidth), shiftToRight(high, leftWidth))
   }
 
   /** The conjunction of `conjuncts`, as a balanced tree of ANDs. A pass that

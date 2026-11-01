@@ -137,6 +137,16 @@ object Json {
     sb.toString
   }
 
+  /** `values` as a JSON array of strings, on one line. */
+  def stringArray(values: Seq[String]): String =
+    values.iterator.map(v => "\"" + escape(v) + "\"").mkString("[", ", ", "]")
+
+  /** `map` as a JSON object of strings, on one line, its keys sorted so a
+    * record reads the same from run to run. */
+  def stringMap(map: Map[String, String]): String =
+    map.toSeq.sortBy(_._1).iterator.map { case (k, v) => "\"" + escape(k) + "\": \"" + escape(v) + "\"" }
+      .mkString("{", ", ", "}")
+
   private def hex(sb: java.lang.StringBuilder, c: Char): Unit =
     sb.append('\\').append('u').append("%04x".formatLocal(Locale.ROOT, c.toInt))
 }

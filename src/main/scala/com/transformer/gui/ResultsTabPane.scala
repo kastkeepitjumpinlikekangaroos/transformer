@@ -1,16 +1,11 @@
 package com.transformer.gui
 
-import com.transformer.core.{ColumnarBatch, Schema}
+import atlantafx.base.theme.{Styles, Tweaks}
 import com.transformer.job.{InputFilePath, InputResolver, TaskRunRecord, TaskRunStatus, TaskStatus, Validation}
-import com.transformer.read.csv.{CsvOptions, CsvReader}
-import com.transformer.read.parquet.ParquetReader
 
-import javafx.beans.property.ReadOnlyStringWrapper
-import javafx.collections.{FXCollections, ObservableList}
 import javafx.geometry.{Insets, Pos}
 import javafx.scene.control._
 import javafx.scene.layout.{HBox, Priority, VBox}
-import javafx.scene.text.Font
 
 import java.nio.file.{Files, Path, Paths}
 import java.time.format.DateTimeFormatter
@@ -43,25 +38,23 @@ final class ResultsTabPane(
     details: TaskDetailsPanel
 ) extends TabPane {
 
-  private val MaxPreviewRows = 1000
-
   // ---- Output data tab ----
-  private val outputTable = new TableView[Array[Any]]()
-  outputTable.setPlaceholder(new Label(
+  private val outputTable = new DataGrid()
+  outputTable.setPlaceholderText(
     "Double-click a task or input node in the DAG to load its data.\n" +
       "Tasks without persisted output cannot be previewed — they will show a message instead."
-  ))
-  outputTable.setStyle("-fx-font-family: monospace; -fx-font-size: 12px;")
+  )
+  outputTable.getStyleClass.add(Tweaks.EDGE_TO_EDGE)
 
   // Partition picker — only visible when the currently-activated task has 2+
   // historical runs on disk.
-  private val pickerLabel = new Label("Run:")
-  pickerLabel.setStyle("-fx-text-fill: #c5cad8; -fx-padding: 0 6 0 0;")
+  private val pickerLabel = new Label("Run")
+  pickerLabel.getStyleClass.add("section-label")
   private val pickerCombo = new ComboBox[RunChoice]()
-  pickerCombo.setPrefWidth(560)
-  private val pickerRow = new HBox(pickerLabel, pickerCombo)
+  pickerCombo.setPrefWidth(600)
+  private val pickerRow = new HBox(8, pickerLabel, pickerCombo)
   pickerRow.setAlignment(Pos.CENTER_LEFT)
-  pickerRow.setPadding(new Insets(4, 8, 4, 8))
+  pickerRow.setPadding(new Insets(8, 12, 0, 12))
   pickerRow.setVisible(false)
   pickerRow.setManaged(false)
 
@@ -73,35 +66,35 @@ final class ResultsTabPane(
   })
 
   private val outputStatus = new Label("")
-  outputStatus.setStyle("-fx-text-fill: #c5cad8; -fx-padding: 4 8;")
+  outputStatus.getStyleClass.add("muted")
+  outputStatus.setPadding(new Insets(8, 12, 8, 12))
   outputStatus.setWrapText(true)
   private val outputBox = new VBox(pickerRow, outputStatus, outputTable)
+  outputBox.getStyleClass.add("panel")
   VBox.setVgrow(outputTable, Priority.ALWAYS)
   private val outputTab = new Tab("Output data", outputBox)
   outputTab.setClosable(false)
 
   // ---- Validations tab ----
   private val validationsHeaderLabel = new Label("Select a task to see its validations.")
-  validationsHeaderLabel.setStyle("-fx-text-fill: #c5cad8; -fx-padding: 4 8;")
+  validationsHeaderLabel.getStyleClass.add("card-title")
+  validationsHeaderLabel.setPadding(new Insets(14, 16, 0, 16))
   validationsHeaderLabel.setWrapText(true)
-  private val validationsContainer = new VBox(10)
-  validationsContainer.setPadding(new Insets(8))
-  validationsContainer.setStyle("-fx-background-color: #2a2c38;")
+  private val validationsContainer = new VBox(12)
+  validationsContainer.setPadding(new Insets(12, 16, 16, 16))
+  validationsContainer.getStyleClass.add("panel")
   private val validationsScroll = new ScrollPane(validationsContainer)
+  validationsScroll.getStyleClass.addAll("panel-scroll", Tweaks.EDGE_TO_EDGE)
   validationsScroll.setFitToWidth(true)
-  validationsScroll.setStyle("-fx-background: #2a2c38; -fx-background-color: #2a2c38;")
   private val validationsBox = new VBox(validationsHeaderLabel, validationsScroll)
+  validationsBox.getStyleClass.add("panel")
   VBox.setVgrow(validationsScroll, Priority.ALWAYS)
   private val validationsTab = new Tab("Validations", validationsBox)
   validationsTab.setClosable(false)
 
   // ---- Task details tab ----
-  // Host the right-side metadata panel here so the whole window's bottom area
-  // is one consistent tab pane.
-  private val detailsScroll = new ScrollPane(details)
-  detailsScroll.setFitToWidth(true)
-  detailsScroll.setStyle("-fx-background: #2a2c38; -fx-background-color: #2a2c38;")
-  private val detailsTab = new Tab("Task details", detailsScroll)
+  // The details panel scrolls its own left column, and its SQL fills the rest.
+  private val detailsTab = new Tab("Task details", details)
   detailsTab.setClosable(false)
 
   // ---- SQL console tab ----
@@ -113,14 +106,13 @@ final class ResultsTabPane(
   private val runLog = new TextArea("(no run yet)")
   runLog.setEditable(false)
   runLog.setWrapText(false)
-  runLog.setFont(Font.font("Monospaced", 12))
-  runLog.setStyle("-fx-control-inner-background: #1e1e2a; -fx-text-fill: #d4d4d4;")
+  runLog.getStyleClass.addAll("log-view", Tweaks.EDGE_TO_EDGE)
   private val runLogTab = new Tab("Run log", runLog)
   runLogTab.setClosable(false)
 
   getTabs.addAll(detailsTab, outputTab, validationsTab, sqlConsoleTab, runLogTab)
   setPadding(Insets.EMPTY)
-  setStyle("-fx-background-color: #2a2c38;")
+  getStyleClass.add("results-tabs")
 
   session.addListener(() => {
     refreshRunLog()
@@ -159,8 +151,7 @@ final class ResultsTabPane(
         finally pickerSuppressed = false
         loadFromPath(initial._1.toString, Some(toChoice(initial._1, initial._2)), nameOpt)
       case None =>
-        outputTable.getColumns.clear()
-        outputTable.getItems.clear()
+        outputTable.clear()
         outputStatus.setText(noOutputMessage(nameOpt, state.collect { case UiTaskState.Done(r) => r.status }))
     }
   }
@@ -174,8 +165,7 @@ final class ResultsTabPane(
     currentTaskIndex = None
     populatePicker(Nil, None)
     val input = session.inputs.lift(inputIndex).getOrElse {
-      outputTable.getColumns.clear()
-      outputTable.getItems.clear()
+      outputTable.clear()
       outputStatus.setText("(unknown input)")
       return
     }
@@ -224,16 +214,14 @@ final class ResultsTabPane(
   private def loadFromPath(path: String, choice: Option[RunChoice], explicitName: Option[String] = None): Unit = {
     val token = loadToken.incrementAndGet()
     outputStatus.setText("Loading…")
-    outputTable.getColumns.clear()
-    outputTable.getItems.clear()
+    outputTable.clear()
     val nameOpt = explicitName.orElse(
       currentTaskIndex.flatMap(i => session.dag.flatMap(_.nodes.lift(i))).map(_.task.displayName)
     )
-    val formatHint = choice.map(_.record.format)
     val worker = new Thread(new Runnable {
       def run(): Unit = {
         val outcome =
-          try LoadOutcome.Success(loadFromDisk(path, formatHint))
+          try LoadOutcome.Success(loadFromDisk(path))
           catch { case NonFatal(e) => LoadOutcome.Failed(Option(e.getMessage).getOrElse(e.toString)) }
         FxHelpers.onFx {
           if (loadToken.get() == token) applyOutcome(nameOpt, path, outcome, choice)
@@ -250,15 +238,14 @@ final class ResultsTabPane(
   private def loadInputFromResolver(input: InputFilePath, renderedPath: String): Unit = {
     val token = loadToken.incrementAndGet()
     outputStatus.setText("Loading…")
-    outputTable.getColumns.clear()
-    outputTable.getItems.clear()
+    outputTable.clear()
     val nameOpt = Some(s"input ${input.viewName}")
     val worker = new Thread(new Runnable {
       def run(): Unit = {
         val outcome =
           try {
             val resolved = input.copy(path = renderedPath)
-            LoadOutcome.Success(collectRows(InputResolver.resolve(resolved)))
+            LoadOutcome.Success(DataGrid.sample(InputResolver.resolve(resolved)))
           } catch {
             case NonFatal(e) => LoadOutcome.Failed(Option(e.getMessage).getOrElse(e.toString))
           }
@@ -289,26 +276,10 @@ final class ResultsTabPane(
       outcome: LoadOutcome,
       choice: Option[RunChoice]
   ): Unit = {
-    outputTable.getColumns.clear()
-    outputTable.getItems.clear()
+    outputTable.clear()
     outcome match {
       case LoadOutcome.Success(loaded) =>
-        val items: ObservableList[Array[Any]] = FXCollections.observableArrayList(loaded.rows: _*)
-        // Build columns from the schema.
-        var i = 0
-        while (i < loaded.schema.length) {
-          val col = new TableColumn[Array[Any], String](loaded.schema.fields(i).name)
-          val colIdx = i
-          col.setCellValueFactory(features => {
-            val row = features.getValue
-            val cell = if (row != null && colIdx < row.length) row(colIdx) else null
-            new ReadOnlyStringWrapper(formatCell(cell))
-          })
-          col.setPrefWidth(140)
-          outputTable.getColumns.add(col)
-          i += 1
-        }
-        outputTable.setItems(items)
+        outputTable.show(loaded.schema, loaded.rows)
         val truncated = if (loaded.truncated) " (preview truncated)" else ""
         val who = name.map(n => s"'$n'").getOrElse("Task")
         val runInfo = choice.map { c =>
@@ -316,80 +287,17 @@ final class ResultsTabPane(
           val exec = pickerTimeFmt.format(c.record.executionTime)
           s" • exec=$exec • written=$wrote"
         }.getOrElse("")
-        outputStatus.setText(f"$who • $path • ${items.size}%,d row(s) loaded$truncated$runInfo")
+        outputStatus.setText(f"$who • $path • ${loaded.rows.size}%,d row(s) loaded$truncated$runInfo")
       case LoadOutcome.Failed(err) =>
         outputStatus.setText(s"Failed to load $path:\n$err")
     }
   }
 
-  private def loadFromDisk(path: String, formatHint: Option[String]): LoadedRows = {
-    val p = Paths.get(path)
-    if (!Files.exists(p)) throw new RuntimeException(s"output path does not exist: $path")
-    val fmt = formatHint
-      .orElse(if (Files.isDirectory(p)) TaskRunRecord.read(p).map(_.format) else None)
-      .getOrElse(detectFormat(p))
-      .toLowerCase
-    fmt match {
-      case "parquet" =>
-        collectRows(ParquetReader.fromPath(path))
-      case _ => // CSV (and default)
-        val view = CsvReader.fromPath(path, CsvOptions())
-        collectRows(view)
-    }
-  }
-
-  private def detectFormat(p: Path): String = {
-    val s = p.toString.toLowerCase
-    if (s.endsWith(".parquet") || s.contains(".parquet")) "parquet"
-    else if (s.endsWith(".csv") || s.contains(".csv")) "csv"
-    else "csv"
-  }
-
-  private def collectRows(view: com.transformer.core.CatalogView): LoadedRows = {
-    val schema = view.schema
-    val rows = scala.collection.mutable.ArrayBuffer.empty[Array[Any]]
-    var truncated = false
-    var p = 0
-    val nPartitions = view.numPartitions
-    while (p < nPartitions && rows.size < MaxPreviewRows) {
-      val it = view.readPartition(p)
-      while (it.hasNext && rows.size < MaxPreviewRows) {
-        val batch = it.next()
-        appendBatch(batch, rows)
-      }
-      if (it.hasNext) truncated = true
-      p += 1
-    }
-    if (p < nPartitions) truncated = true
-    if (rows.size > MaxPreviewRows) {
-      rows.remove(MaxPreviewRows, rows.size - MaxPreviewRows)
-      truncated = true
-    }
-    LoadedRows(schema, rows.toSeq, truncated)
-  }
-
-  private def appendBatch(batch: ColumnarBatch, out: scala.collection.mutable.ArrayBuffer[Array[Any]]): Unit = {
-    val width = batch.schema.length
-    var r = 0
-    while (r < batch.numRows && out.size < MaxPreviewRows) {
-      val arr = new Array[Any](width)
-      var c = 0
-      while (c < width) {
-        val col = batch.column(c)
-        arr(c) = if (col.isNull(r)) null else col.getBoxed(r)
-        c += 1
-      }
-      out += arr
-      r += 1
-    }
-  }
-
-  private def formatCell(v: Any): String = v match {
-    case null => ""
-    case s: String => s
-    case bd: java.math.BigDecimal => bd.toPlainString
-    case bytes: Array[Byte] => s"<binary ${bytes.length} bytes>"
-    case other => String.valueOf(other)
+  /** A task output's first rows, read as [[JobSession.readOutputAsView]]
+    * reads it: through its `_run.json` when it has one. */
+  private def loadFromDisk(path: String): RowSample = {
+    if (!Files.exists(Paths.get(path))) throw new RuntimeException(s"output path does not exist: $path")
+    DataGrid.sample(JobSession.readOutputAsView(path))
   }
 
   // -------------------- validations tab --------------------
@@ -441,7 +349,7 @@ final class ResultsTabPane(
 
   private def emptyHint(text: String): javafx.scene.Node = {
     val l = new Label(text)
-    l.setStyle("-fx-text-fill: #9ba2b8; -fx-padding: 8; -fx-font-style: italic;")
+    l.getStyleClass.add("hint")
     l.setWrapText(true)
     l
   }
@@ -452,26 +360,28 @@ final class ResultsTabPane(
       state: Option[UiTaskState],
       tableViewName: Option[String]
   ): javafx.scene.Node = {
-    val (statusText, statusStyle, failureSample) = validationStatusFor(v, state)
+    val (statusText, tone, failureSample) = validationStatusFor(v, state)
     // Header: name + status pill + Edit button (right-aligned, next to the SQL
     // viewer this validation card owns).
     val nameLabel = new Label(v.name)
-    nameLabel.setStyle("-fx-text-fill: #e8ecf5; -fx-font-weight: bold; -fx-font-size: 13px;")
+    nameLabel.getStyleClass.add("card-title")
     val statusPill = new Label(statusText)
-    statusPill.setStyle(statusStyle)
+    statusPill.getStyleClass.addAll("pill", tone.css)
     val headerSpacer = new javafx.scene.layout.Region()
     HBox.setHgrow(headerSpacer, Priority.ALWAYS)
     val editButton = makeValidationEditButton()
     editButton.setDisable(session.jobDir.isEmpty || tableViewName.isEmpty)
     editButton.setOnAction(_ => tableViewName.foreach(name => openValidationEditor(name, v)))
-    val cardHeader = new HBox(8, nameLabel, statusPill, headerSpacer, editButton)
-    cardHeader.setAlignment(Pos.CENTER_LEFT)
 
-    // SQL: a small SqlView showing the rendered query.
-    val sqlView = new SqlView(showOpenInEditor = true)
+    // SQL: a SqlView showing the rendered query, as tall as the query.
+    val sqlView = new SqlView()
     sqlView.setSql(renderedSql)
-    sqlView.setSourceFile(v.sqlFile.map(Paths.get(_)))
-    sqlView.setPrefHeight(140)
+    sqlView.fitLines(12)
+
+    val cardHeader = new HBox(8, nameLabel, statusPill, headerSpacer)
+    cardHeader.getChildren.addAll(sqlView.actions: _*)
+    cardHeader.getChildren.add(editButton)
+    cardHeader.setAlignment(Pos.CENTER_LEFT)
 
     val cardChildren = new java.util.ArrayList[javafx.scene.Node]()
     cardChildren.add(cardHeader)
@@ -480,26 +390,24 @@ final class ResultsTabPane(
       // A failed validation's rows live beside the task's _run.json; restored
       // from job.json, the task has none.
       val note = new Label("Failing rows not recorded: this task was restored from job.json, which holds no sample rows.")
-      note.setStyle("-fx-text-fill: #c5cad8; -fx-font-size: 11px; -fx-font-style: italic;")
+      note.getStyleClass.add("hint")
       note.setWrapText(true)
       cardChildren.add(note)
     }
     failureSample.filter(_.nonEmpty).foreach { sample =>
-      val sampleLabel = new Label("Failing rows (first 10):")
-      sampleLabel.setStyle("-fx-text-fill: #f8a3a3; -fx-font-size: 11px; -fx-font-weight: bold;")
+      val sampleLabel = new Label("FAILING ROWS (FIRST 10)")
+      sampleLabel.getStyleClass.add("section-label")
       val sampleArea = new TextArea(sample)
       sampleArea.setEditable(false)
       sampleArea.setWrapText(false)
       sampleArea.setPrefRowCount(math.min(10, math.max(2, sample.count(_ == '\n') + 1)))
-      sampleArea.setFont(Font.font("Monospaced", 11))
-      sampleArea.setStyle("-fx-control-inner-background: #3a2128; -fx-text-fill: #f8a3a3;")
+      sampleArea.getStyleClass.addAll("failing-rows", "mono")
       cardChildren.add(sampleLabel)
       cardChildren.add(sampleArea)
     }
 
-    val card = new VBox(6)
-    card.setPadding(new Insets(10))
-    card.setStyle("-fx-background-color: #34384a; -fx-background-radius: 6;")
+    val card = new VBox()
+    card.getStyleClass.add("card")
     card.getChildren.addAll(cardChildren)
     card
   }
@@ -516,32 +424,18 @@ final class ResultsTabPane(
   }
 
   private def makeValidationEditButton(): Button = {
-    val b = new Button("Edit…")
-    val base  = "#3a3f55"
-    val hover = "#4a5070"
-    val press = "#2a2f45"
-    def style(bg: String): String =
-      s"-fx-background-color: $bg; -fx-text-fill: #d7dcec; " +
-        "-fx-background-radius: 4; -fx-padding: 4 12; " +
-        "-fx-font-size: 11px; -fx-cursor: hand;"
-    b.setStyle(style(base))
-    b.setOnMouseEntered(_ => if (!b.isDisabled) b.setStyle(style(hover)))
-    b.setOnMouseExited(_ => b.setStyle(style(base)))
-    b.setOnMousePressed(_ => if (!b.isDisabled) b.setStyle(style(press)))
-    b.setOnMouseReleased(_ => b.setStyle(style(if (b.isHover && !b.isDisabled) hover else base)))
+    val b = new Button("Edit…", Icons.edit)
+    b.getStyleClass.addAll(Styles.SMALL, Styles.FLAT)
     b.setTooltip(new Tooltip("Edit this validation's name, SQL, or delete it"))
     b
   }
 
-  /** Returns (status label, CSS for the status pill, optional sample CSV of failing rows). */
-  private def validationStatusFor(v: Validation, state: Option[UiTaskState]): (String, String, Option[String]) = {
-    def pill(bg: String, fg: String): String =
-      s"-fx-background-color: $bg; -fx-text-fill: $fg; -fx-padding: 2 10; " +
-        "-fx-background-radius: 10; -fx-font-size: 11px; -fx-font-weight: bold;"
-    val pass    = pill("#1f5b30", "#ffffff")
-    val fail    = pill("#5a2828", "#ffffff")
-    val neutral = pill("#3a3f55", "#d7dcec")
-    val running = pill("#2b4f7a", "#ffffff")
+  /** Returns (status label, the status pill's tone, optional sample CSV of failing rows). */
+  private def validationStatusFor(v: Validation, state: Option[UiTaskState]): (String, Tone, Option[String]) = {
+    val pass    = Tone.Success
+    val fail    = Tone.Danger
+    val neutral = Tone.Neutral
+    val running = Tone.Running
     state match {
       case Some(UiTaskState.Done(result)) =>
         result.status match {
@@ -551,7 +445,7 @@ final class ResultsTabPane(
             fs.find(_.validationName == v.name) match {
               case Some(f) =>
                 val plural = if (f.rowCount == 1) "" else "s"
-                (s"FAILED • ${f.rowCount} row$plural", fail, Some(f.sampleRowsCsv))
+                (s"FAILED · ${f.rowCount} row$plural", fail, Some(f.sampleRowsCsv))
               // A task restored from a job.json that predates failed validation
               // names: it failed some, which ones is not recorded.
               case None if fs.isEmpty =>
@@ -632,11 +526,9 @@ final class ResultsTabPane(
   }
 }
 
-private final case class LoadedRows(schema: Schema, rows: Seq[Array[Any]], truncated: Boolean)
-
 private sealed trait LoadOutcome
 private object LoadOutcome {
-  final case class Success(loaded: LoadedRows) extends LoadOutcome
+  final case class Success(loaded: RowSample) extends LoadOutcome
   final case class Failed(error: String) extends LoadOutcome
 }
 

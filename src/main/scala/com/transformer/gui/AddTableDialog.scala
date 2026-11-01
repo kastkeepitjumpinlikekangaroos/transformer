@@ -6,7 +6,7 @@ import java.nio.file.{Files, Path}
 import javafx.event.ActionEvent
 import javafx.geometry.Insets
 import javafx.scene.control._
-import javafx.scene.layout.GridPane
+import javafx.scene.layout.{GridPane, Priority}
 import javafx.stage.Stage
 import scala.util.control.NonFatal
 
@@ -59,22 +59,20 @@ object AddTableDialog {
     nameField.setText(existing.flatMap(_.viewName).getOrElse(""))
     nameField.setDisable(isEdit)
 
-    val sqlArea = new TextArea()
-    sqlArea.setPromptText("SELECT ...\nFROM ...")
-    sqlArea.setPrefRowCount(10)
-    sqlArea.setStyle("-fx-font-family: Monospaced;")
-    if (!isEdit) {
-      val seed = upstream match {
+    val sqlArea = new SqlEditor()
+    sqlArea.setPrefSize(600, 240)
+    GridPane.setHgrow(sqlArea, Priority.ALWAYS)
+    GridPane.setVgrow(sqlArea, Priority.ALWAYS)
+    val initialSql =
+      if (!isEdit) upstream match {
         case Some(name) => s"SELECT *\nFROM $name\n"
         case None       => "SELECT *\n"
       }
-      sqlArea.setText(seed)
-    } else {
-      // In Edit mode, SQL editing lives in the inline editor. Disable the textarea
-      // so the user understands this dialog only covers attributes.
-      sqlArea.setText(existing.flatMap(t => loadExistingSql(t)).getOrElse("(SQL is edited inline)"))
-      sqlArea.setDisable(true)
-    }
+      // In Edit mode, SQL editing lives in the inline editor. Show the SQL
+      // read-only so the user understands this dialog only covers attributes.
+      else existing.flatMap(t => loadExistingSql(t)).getOrElse("(SQL is edited inline)")
+    sqlArea.setText(initialSql)
+    sqlArea.setEditable(!isEdit)
 
     val formatCombo = new ComboBox[String]()
     formatCombo.getItems.addAll("csv", "parquet")
@@ -89,15 +87,18 @@ object AddTableDialog {
     maxPartsField.setText(existing.flatMap(_.outputFile).flatMap(_.maxPartitions).map(_.toString).getOrElse(""))
 
     val grid = new GridPane()
-    grid.setHgap(8); grid.setVgap(8)
+    grid.setHgap(10); grid.setVgap(10)
     grid.setPadding(new Insets(12, 4, 12, 4))
+    grid.getColumnConstraints.add(FxHelpers.labelColumn())
     var row = 0
-    grid.add(new Label("View name:"),    0, row); grid.add(nameField,      1, row); row += 1
-    grid.add(new Label("SQL:"),          0, row); grid.add(sqlArea,        1, row); row += 1
-    grid.add(new Label("Format:"),       0, row); grid.add(formatCombo,    1, row); row += 1
-    grid.add(new Label("Partition by:"), 0, row); grid.add(partitionField, 1, row); row += 1
-    grid.add(new Label("Max parts:"),    0, row); grid.add(maxPartsField,  1, row); row += 1
+    grid.add(new Label("View name"),    0, row); grid.add(nameField,      1, row); row += 1
+    grid.add(new Label("SQL"),          0, row); grid.add(sqlArea,        1, row); row += 1
+    grid.add(new Label("Format"),       0, row); grid.add(formatCombo,    1, row); row += 1
+    grid.add(new Label("Partition by"), 0, row); grid.add(partitionField, 1, row); row += 1
+    grid.add(new Label("Max parts"),    0, row); grid.add(maxPartsField,  1, row); row += 1
     dialog.getDialogPane.setContent(grid)
+    dialog.setResizable(true)
+    Theme.style(dialog)
 
     val okButton = dialog.getDialogPane.lookupButton(okType)
     okButton.addEventFilter(ActionEvent.ACTION, (ev: ActionEvent) => {
@@ -113,7 +114,7 @@ object AddTableDialog {
             throw new IllegalArgumentException(reason))
           JobFiles.ensureNotInUse(jobDir, name.trim).left.foreach(reason =>
             throw new IllegalArgumentException(reason))
-          val sql = Option(sqlArea.getText).getOrElse("")
+          val sql = Option(sqlArea.text).getOrElse("")
           if (sql.trim.isEmpty)
             throw new IllegalArgumentException("SQL cannot be empty.")
           JobFiles.addTable(jobDir, name.trim, sql, format, partitionBy, maxPartitions)
@@ -125,6 +126,14 @@ object AddTableDialog {
           ev.consume()
       }
     })
+
+    // Vim's :w presses Save (or Create), :q Cancel, which keeps an edit unless
+    // :q! says to drop it.
+    sqlArea.setOnWrite(() => { okButton.asInstanceOf[Button].fire(); None })
+    sqlArea.setOnQuit(force =>
+      if (!force && sqlArea.text != initialSql) Some("E37: No write since last change (add ! to override)")
+      else { dialog.getDialogPane.lookupButton(ButtonType.CANCEL).asInstanceOf[Button].fire(); None }
+    )
 
     dialog.setResultConverter(bt => if (bt == okType) nameField.getText.trim else null)
     val res = dialog.showAndWait()

@@ -4821,4 +4821,305 @@ class SqlEngineTest {
     // Text in a column fails as it is read: the first row's.
     assertTrue(failure("SELECT CAST(s AS DATE) AS v FROM tt").startsWith("+999999999-12-31 is past the range of a DATE"))
   }
+
+  // ---------------------------------------------------------------------------
+  // The third audit (plans/robustness/30): wrong answers and refusals found by
+  // running the engine against SQLite and by probes. Each test's comment
+  // records the old answer.
+  // ---------------------------------------------------------------------------
+
+  private def auditCatalog(): Catalog = {
+    val c = new Catalog
+    val t = Schema(Vector(Field("g", DataType.StringType), Field("x", DataType.IntType), Field("a", DataType.IntType)))
+    c.register("t", memView(t, Seq(Seq(Array[Any]("p", 10, 1), Array[Any]("p", 20, 2)), Seq(Array[Any]("q", 30, 3)))))
+    val named = Schema(Vector(Field("_agg0", DataType.IntType), Field("x", DataType.IntType)))
+    c.register("named", memView(named, Seq(Seq(Array[Any](1, 10), Array[Any](1, 20), Array[Any](2, 30)))))
+    val ua = Schema(Vector(Field("id", DataType.IntType), Field("a", DataType.IntType)))
+    c.register("u", memView(ua, Seq(Seq(Array[Any](1, 5), Array[Any](2, 6)))))
+    c.register("v", memView(ua, Seq(Seq(Array[Any](1, 7), Array[Any](2, 8)))))
+    c.register("e", memView(Schema(Vector(Field("g", DataType.StringType))), Seq(Seq())))
+    val s = Schema(Vector(Field("v", DataType.StringType), Field("d", DataType.DecimalType(10, 9)),
+      Field("x", DataType.DoubleType), Field("i", DataType.IntType)))
+    c.register("s", memView(s, Seq(Seq(
+      Array[Any]("x\uD83D\uDE00", dec("0.000000100"), 1e300, 1),
+      Array[Any]("ab", dec("0.000000001"), 1e-50, 2),
+      Array[Any]("\uD83D\uDE00\uD83D\uDE00", null, Double.NaN, 3)))))
+    val wide = Schema(Vector(Field("i", DataType.IntType), Field("price", DataType.DecimalType(30, 25))))
+    c.register("w", memView(wide, Seq(Seq(Array[Any](1, dec("1.5"))))))
+    c.register("j", memView(Schema(Vector(Field("j", DataType.IntType))), Seq(Seq(Array[Any](10), Array[Any](20)))))
+    c
+  }
+
+  private def rowsOf(sql: String, cat: Catalog): Seq[Seq[Any]] = {
+    val q = SqlEngine.execute(sql, cat)
+    collectAllRows(q).map(r => q.schema.fieldNames.map(r))
+  }
+
+  /** The aggregate output named its aggregates `_agg0`, `_agg1`, ... and found
+    * each by that name, so a column of the input named `_agg0` was taken for
+    * the first: `SUM(x)` over a GROUP BY `_agg0` returned the key, 1 and 2,
+    * typed INT, and `HAVING _agg0 > 25` read the hidden SUM on a table with no
+    * such column. */
+  @Test def aColumnNamedLikeAnInternalSlotIsNoAggregate(): Unit = {
+    val cat = auditCatalog()
+    assertEquals((DataType.LongType, Seq(30L, 30L)),
+      typedColumn("SELECT _agg0, SUM(x) AS s FROM named GROUP BY _agg0 ORDER BY _agg0", cat))
+    assertEquals(Seq(Seq(1, 30L), Seq(2, 30L)),
+      rowsOf("SELECT _agg0, SUM(x) AS s FROM named GROUP BY _agg0 HAVING SUM(x) > 25 ORDER BY _agg0", cat))
+    assertTrue(bindRejection("SELECT g, SUM(x) AS s FROM t GROUP BY g HAVING _agg0 > 25", cat)
+      .startsWith("Unknown column '_agg0'"))
+  }
+
+  /** A GROUP BY key is the same expression however it is written and wherever
+    * it is: inside a larger expression, in HAVING and ORDER BY, in parentheses
+    * beside another key, with its table. Each was refused (`Column 'a' must
+    * appear in GROUP BY`), since a key was matched by its text, and only as a
+    * whole SELECT item. A different expression is still no key. */
+  @Test def aGroupByKeyIsReadWhereverItIsWritten(): Unit = {
+    val cat = auditCatalog()
+    assertEquals(Seq(Seq("P!", 2L), Seq("Q!", 1L)),
+      rowsOf("SELECT UPPER(g) || '!' AS k, COUNT(*) AS n FROM t GROUP BY UPPER(g) ORDER BY k", cat))
+    assertEquals(Seq(Seq("even", 1L), Seq("odd", 2L)), rowsOf(
+      "SELECT CASE WHEN a % 2 = 0 THEN 'even' ELSE 'odd' END AS k, COUNT(*) AS n FROM t GROUP BY a % 2 ORDER BY k",
+      cat))
+    assertEquals(Seq(Seq(1, 2L)), rowsOf("SELECT a % 2 AS k, COUNT(*) AS n FROM t GROUP BY a % 2 HAVING a % 2 = 1", cat))
+    assertEquals(Seq(Seq(1, 40L), Seq(0, 20L)),
+      rowsOf("SELECT a % 2 AS k, SUM(x) AS n FROM t GROUP BY a % 2 ORDER BY (a % 2) + 0 DESC", cat))
+    assertEquals(Seq(Seq(1, "p", 1L), Seq(0, "p", 1L), Seq(1, "q", 1L)),
+      rowsOf("SELECT (a % 2) AS k, g, COUNT(*) AS n FROM t GROUP BY (a % 2), g ORDER BY g, k DESC", cat))
+    assertEquals(Seq(Seq(2), Seq(3), Seq(4)), rowsOf("SELECT t.a + 1 AS k FROM t GROUP BY a + 1 ORDER BY k", cat))
+    assertEquals("Column 'a' must appear in GROUP BY or inside an aggregate",
+      bindRejection("SELECT a + 1 AS k FROM t GROUP BY 1 + a", cat))
+  }
+
+  /** `GROUP BY ()` groups by nothing: every row is one group. It was dropped,
+    * so `SELECT 1 FROM t GROUP BY ()` returned a row for each of t's. */
+  @Test def groupByNothingIsOneGroup(): Unit = {
+    val cat = auditCatalog()
+    assertEquals(Seq(Seq(1)), rowsOf("SELECT 1 AS one FROM t GROUP BY ()", cat))
+    assertEquals(Seq(Seq(0L)), rowsOf("SELECT COUNT(*) AS n FROM e GROUP BY ()", cat))
+    assertEquals("Column 'g' must appear in GROUP BY or inside an aggregate",
+      bindRejection("SELECT g FROM t GROUP BY ()", cat))
+  }
+
+  /** An aggregate inside a window function's argument or in ORDER BY makes
+    * the query an aggregate, over one group without a GROUP BY, as in
+    * Postgres. Each was refused as an aggregate out of place. */
+  @Test def anAggregateInAWindowOrOrderByMakesTheQueryOne(): Unit = {
+    val cat = auditCatalog()
+    assertEquals(Seq(Seq(3L)), rowsOf("SELECT SUM(COUNT(*)) OVER () AS s FROM t", cat))
+    assertEquals(Seq(Seq(1L)), rowsOf("SELECT RANK() OVER (ORDER BY SUM(x)) AS r FROM t", cat))
+    assertEquals(Seq(Seq(1)), rowsOf("SELECT 1 AS one FROM t ORDER BY COUNT(*)", cat))
+    assertEquals("Column 'a' must appear in GROUP BY or inside an aggregate",
+      bindRejection("SELECT a FROM t ORDER BY COUNT(*)", cat))
+  }
+
+  /** A name two inputs have is ambiguous in a grouped query as it is in WHERE.
+    * The SELECT list read it by the GROUP BY key's name, so it took `u.a`. */
+  @Test def aNameTwoInputsHaveIsAmbiguousInAGroupedQuery(): Unit = {
+    val cat = auditCatalog()
+    assertEquals("Ambiguous column reference 'a' matches 2 columns",
+      bindRejection("SELECT a FROM u JOIN v ON u.id = v.id GROUP BY u.a", cat))
+    assertEquals(Seq(Seq(5), Seq(6)), rowsOf("SELECT u.a FROM u JOIN v ON u.id = v.id GROUP BY u.a ORDER BY 1", cat))
+  }
+
+  /** A LIKE pattern reads a character outside the Basic Multilingual Plane, an
+    * emoji, as one character, as the string it matches holds it: the pattern
+    * split it into halves, which matched nothing, so a pattern holding one
+    * matched no string, not even itself. */
+  @Test def likeReadsACharacterOutsideTheBasicPlaneWhole(): Unit = {
+    val cat = auditCatalog()
+    assertEquals(Seq(Seq("x\uD83D\uDE00", true, true, true), Seq("ab", false, false, false),
+      Seq("\uD83D\uDE00\uD83D\uDE00", false, true, true)),
+      rowsOf("SELECT v, v LIKE 'x\uD83D\uDE00' AS a, v LIKE '%\uD83D\uDE00' AS b, v LIKE '_\uD83D\uDE00' AS c FROM s " +
+        "ORDER BY i", cat))
+    assertEquals(Seq(Seq(true)), rowsOf("SELECT 'a\uD83D\uDE00' LIKE 'a#\uD83D\uDE00' ESCAPE '#' AS m", cat))
+  }
+
+  /** A DECIMAL casts to the digits CSV writes for it: its `toString` was
+    * scientific past six zeros after the point, `1.00E-7` and `1E-9`. */
+  @Test def aDecimalCastsToItsDigits(): Unit = {
+    val cat = auditCatalog()
+    assertEquals(Seq(Seq("0.000000100"), Seq("0.000000001"), Seq(null)),
+      rowsOf("SELECT CAST(d AS STRING) AS t FROM s ORDER BY i", cat))
+  }
+
+  /** `{d '...'}` and `{ts '...'}` are read as `DATE '...'` and `TIMESTAMP
+    * '...'` are, strictly. They were read leniently: `{d '2026-02-30'}` was
+    * 2026-03-02 and `{ts '2026-02-30 25:61:00'}` 2026-03-03 02:01. */
+  @Test def aJdbcEscapeLiteralIsReadAsItsTypedLiteralIs(): Unit = {
+    val cat = auditCatalog()
+    assertEquals(Seq(Seq(java.time.LocalDate.parse("2026-01-05"), java.time.Instant.parse("2026-01-05T05:30:21Z"))),
+      rowsOf("SELECT {d '2026-01-05'} AS x, {ts '2026-01-05 05:30:21'} AS y", cat))
+    assertEquals("Cannot cast '2026-02-30' to date", bindRejection("SELECT {d '2026-02-30'} AS x", cat))
+    assertEquals("Cannot cast '2026-1-5' to date", bindRejection("SELECT {d '2026-1-5'} AS x", cat))
+    assertEquals("Cannot cast '2026-02-30 25:61:00' to timestamp",
+      bindRejection("SELECT {ts '2026-02-30 25:61:00'} AS y", cat))
+  }
+
+  /** A UNION arm written with `*` reads a number after it as the decimal it
+    * is written as beside a DECIMAL arm, as any other arm does: it was read
+    * through a DOUBLE, so 0.1000000000000000000001 became 0.1. */
+  @Test def aUnionArmWithAStarKeepsALiteralsDigits(): Unit = {
+    val cat = auditCatalog()
+    for (star <- Seq("*", "j.*"))
+      assertEquals(Seq("1.5", "0.1000000000000000000001", "0.1000000000000000000001"),
+        typedColumn(s"SELECT i, price FROM w UNION ALL SELECT $star, 0.1000000000000000000001 FROM j ORDER BY 1", cat)._2
+          .map(_.asInstanceOf[java.math.BigDecimal].stripTrailingZeros.toPlainString))
+  }
+
+  /** A DOUBLE casts to a FLOAT that holds it or is an error, as text does: one
+    * past a FLOAT's range was Infinity and one too small for it 0. NaN casts. */
+  @Test def aDoubleOutsideAFloatIsNoFloat(): Unit = {
+    val cat = auditCatalog()
+    assertEquals("Float overflow: 1.0E300 does not fit FLOAT",
+      thrownBy("SELECT CAST(x AS FLOAT) AS f FROM s WHERE i = 1", cat).getMessage)
+    assertEquals("Float underflow: 1.0E-50 is too small for a FLOAT, which would read it as 0",
+      thrownBy("SELECT CAST(x AS FLOAT) AS f FROM s WHERE i = 2", cat).getMessage)
+    assertTrue(rowsOf("SELECT CAST(x AS FLOAT) AS f FROM s WHERE i = 3", cat).head.head.asInstanceOf[Float].isNaN)
+  }
+
+  /** Of two equal zeros GREATEST gives 0.0 and LEAST -0.0, whatever order
+    * they come in, as MAX and MIN do: the first written won. */
+  @Test def greatestAndLeastOfTwoZerosDoNotDependOnOrder(): Unit = {
+    val row = rowsOf("SELECT GREATEST(-0.0, 0.0) AS a, GREATEST(0.0, -0.0) AS b, LEAST(0.0, -0.0) AS c, " +
+      "LEAST(-0.0, 0.0) AS d", auditCatalog()).head
+    assertEquals(Seq(0.0, 0.0, -0.0, -0.0).map(java.lang.Double.doubleToRawLongBits),
+      row.map(v => java.lang.Double.doubleToRawLongBits(v.asInstanceOf[Double])))
+  }
+
+  /** A negative scale written in the query types ROUND of a DECIMAL as a
+    * positive one does: `-1` binds as a minus over 1, which the type rule did
+    * not read, so `ROUND(d, -1)` kept the DECIMAL(10,9)'s scale. */
+  @Test def roundAtANegativeScaleTypesADecimalByIt(): Unit = {
+    assertEquals((DataType.DecimalType(2, 0), Seq(dec("0"), dec("0"), null)),
+      typedColumn("SELECT i, ROUND(d, -1) AS r FROM s ORDER BY i", auditCatalog()))
+  }
+
+  /** A unary plus is arithmetic, on a number, as a minus is: `+'abc'` and
+    * `+TRUE` were their operands. SIGN of NaN is an error, as NaN has no sign
+    * an INT can say; it was 0. */
+  @Test def aUnaryPlusIsArithmeticAndNaNHasNoSign(): Unit = {
+    val cat = auditCatalog()
+    assertEquals("Arithmetic on STRING is not supported; CAST it to a number, or use || to join text",
+      bindRejection("SELECT +'abc' AS p", cat))
+    assertEquals("Arithmetic on BOOLEAN is not supported", bindRejection("SELECT +TRUE AS p", cat))
+    assertEquals(Seq(Seq(1), Seq(2), Seq(3)), rowsOf("SELECT +i AS p FROM s ORDER BY i", cat))
+    assertEquals("SIGN of NaN is not defined; NaN is neither positive, negative nor zero",
+      thrownBy("SELECT SIGN(x) AS g FROM s WHERE i = 3", cat).getMessage)
+  }
+
+  /** AVG of BIGINTs divides their exact sum once, so its answer is the DOUBLE
+    * nearest the mean however the rows are partitioned. They were summed as
+    * doubles, which past 2^53 dropped low digits differently in each order:
+    * 1.8014398509481985E15 over one partition, 1.8014398509481988E15 over two. */
+  @Test def avgOfIntegersIsTheMeanOfTheirExactSum(): Unit = {
+    val schema = Schema(Vector(Field("x", DataType.LongType)))
+    val values = Seq(9007199254740992L, 1L, 1L, 1L, 1L).map(v => Array[Any](v))
+    for (layout <- Seq(Seq(values), Seq(values.take(1), values.drop(1)), values.map(Seq(_)))) {
+      val cat = new Catalog
+      cat.register("l", memView(schema, layout))
+      assertEquals(1.8014398509481992E15, rowsOf("SELECT AVG(x) AS a FROM l", cat).head.head)
+      assertEquals(1.8014398509481992E15, rowsOf("SELECT AVG(x) OVER () AS a FROM l", cat).head.head)
+    }
+  }
+
+  /** A RANGE offset over a FLOAT or DOUBLE key is a DOUBLE, which holds no
+    * offset past its range, as it holds no such literal: `1e309 PRECEDING`
+    * made an infinite key's frame NaN, missing its own row. */
+  @Test def aRangeOffsetNoDoubleHoldsIsRefusedOverAFloatKey(): Unit = {
+    val cat = auditCatalog()
+    assertEquals("A RANGE frame's PRECEDING offset 1E+309 is too large for a DOUBLE, which holds at most " +
+      "1.7976931348623157E308",
+      bindRejection("SELECT SUM(i) OVER (ORDER BY x RANGE BETWEEN 1e309 PRECEDING AND CURRENT ROW) AS s FROM s", cat))
+    rowsOf("SELECT SUM(i) OVER (ORDER BY i RANGE BETWEEN 1e309 PRECEDING AND CURRENT ROW) AS s FROM s", cat)
+  }
+
+  /** A FROM gives each of its tables a name of its own: `x.b` read whichever
+    * of `t x JOIN u x` had a column `b`, and `t JOIN t` bound its names the
+    * same way. Postgres refuses both. */
+  @Test def aNameFromGivesTwoTablesIsRefused(): Unit = {
+    val cat = auditCatalog()
+    assertEquals("FROM names two tables x; give each its own alias (FROM t a JOIN t b ON ...)",
+      bindRejection("SELECT x.id FROM u x JOIN v x ON x.id = x.a", cat))
+    assertEquals("FROM names two tables U; give each its own alias (FROM t a JOIN t b ON ...)",
+      bindRejection("SELECT u.id FROM u CROSS JOIN U", cat))
+    assertEquals(Seq(Seq(1, 1), Seq(2, 2)), rowsOf("SELECT x.id, y.id AS id2 FROM u x JOIN u y ON x.id = y.id ORDER BY 1", cat))
+  }
+
+  /** ORDER BY, LIMIT, OFFSET and FETCH before a UNION's last arm belong in
+    * the arm's parentheses: SQL gives them no meaning there, and they were
+    * applied to that arm alone, where Postgres, MySQL and SQLite refuse. */
+  @Test def aTailClauseBeforeTheLastArmOfAUnionIsRefused(): Unit = {
+    val cat = auditCatalog()
+    for ((sql, clause) <- Seq(
+        "SELECT a FROM t LIMIT 1 UNION ALL SELECT a FROM u" -> "LIMIT",
+        "SELECT a FROM t ORDER BY a UNION ALL SELECT a FROM u" -> "ORDER BY",
+        "SELECT a FROM t UNION ALL SELECT a FROM u ORDER BY a DESC LIMIT 1 UNION ALL SELECT a FROM v" -> "ORDER BY"))
+      assertEquals(s"$clause before the last arm of a UNION is not supported; put the arm in parentheses, " +
+        s"(SELECT ... $clause ...), to apply it to that arm, or write it after the last arm to apply it to the whole union",
+        bindRejection(sql, cat))
+    assertEquals(Seq(Seq(3), Seq(5), Seq(6)),
+      rowsOf("(SELECT a FROM t ORDER BY a DESC LIMIT 1) UNION ALL SELECT a FROM u ORDER BY 1", cat))
+  }
+
+  /** Division and % by zero are NULL for a FLOAT and a DOUBLE as for every
+    * other number type (the user's choice, as Spark's): IEEE's answer was an
+    * infinity or NaN, `7.0 / 0` was Infinity. An overflow is still IEEE's. */
+  @Test def divisionByZeroIsNullForEveryNumberType(): Unit = {
+    val cat = auditCatalog()
+    assertEquals(Seq(Seq(null, null, null, null, null, null)),
+      rowsOf("SELECT 7.0 / 0 AS a, 0.0 / 0.0 AS b, 7.0 % 0 AS c, -1.5 / -0.0 AS d, MOD(2.5, 0.0) AS e, " +
+        "CAST(1 AS FLOAT) / 0 AS f", cat))
+    assertEquals(Seq(Seq(null, null), Seq(1.0, 0.0)),
+      rowsOf("SELECT CAST(i - 1 AS DOUBLE) / CAST(i - 1 AS DOUBLE) AS q, CAST(i AS DOUBLE) % (i - 1) AS r FROM s " +
+        "WHERE i < 3 ORDER BY i", cat))
+    assertEquals(Double.PositiveInfinity, rowsOf("SELECT 1e308 * 10 AS o", cat).head.head)
+  }
+
+  /** TRIM removes the spaces a string starts and ends with, as SQL's does
+    * (the user's choice): Java's `trim` took tabs, line breaks and every other
+    * character up to U+0020 too. */
+  @Test def trimRemovesSpacesOnly(): Unit = {
+    val cat = auditCatalog()
+    assertEquals(Seq(Seq("a", "\tb\n", "", null)),
+      rowsOf("SELECT TRIM('  a  ') AS a, TRIM(' \tb\n ') AS b, TRIM('   ') AS c, TRIM(CAST(NULL AS STRING)) AS d", cat))
+    val tabbed = new Catalog
+    tabbed.register("tt", memView(Schema(Vector(Field("s", DataType.StringType))), Seq(Seq(Array[Any]("\t x \t")))))
+    assertEquals(Seq(Seq("\t x \t")), rowsOf("SELECT TRIM(s) AS t FROM tt", tabbed))
+  }
+
+  /** LENGTH and SUBSTRING count characters, Unicode code points, as SQL does
+    * (the user's choice): an emoji, two chars in Java, is one. Counted in
+    * chars, SUBSTRING cut one in half, and half a character is no text: a
+    * spill wrote it as `?`, so `MAX(SUBSTRING(s, 1, 1))` changed with spill. */
+  @Test def lengthAndSubstringCountCharacters(): Unit = {
+    val cat = auditCatalog()
+    assertEquals(Seq(Seq(4, "\uD83D\uDE00", "yz", "\uD83D\uDE00")),
+      rowsOf("SELECT LENGTH('x\uD83D\uDE00yz') AS l, SUBSTRING('x\uD83D\uDE00yz', 2, 1) AS a, SUBSTRING('x\uD83D\uDE00yz', 3) AS b, " +
+        "SUBSTRING('\uD83D\uDE00\uD83D\uDE00', 2, 5) AS c", cat))
+    val grouped = "SELECT i, MAX(SUBSTRING(v, 1, 1)) AS m FROM s GROUP BY i ORDER BY i"
+    val spilled = SqlEngine.execute(grouped, cat, ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L)))
+    assertEquals(rowsOf(grouped, cat), collectAllRows(spilled).map(r => Seq(r("i"), r("m"))))
+    assertEquals(Seq(Seq(1, "x"), Seq(2, "a"), Seq(3, "\uD83D\uDE00")), rowsOf(grouped, cat))
+  }
+
+  /** A simple CASE's operand and a BETWEEN's are read once per row, as in
+    * Postgres (the user's choice). Read once per WHEN, a RAND() operand met a
+    * fresh value at each WHEN, so about 30% of rows matched none of three
+    * that cover every value; read twice, `RAND() BETWEEN 0.25 AND 0.75` held
+    * on 56% of rows. */
+  @Test def aRandomOperandIsReadOnce(): Unit = {
+    val schema = Schema(Vector(Field("id", DataType.IntType)))
+    val cat = new Catalog
+    cat.register("many", memView(schema, (0 until 4).map(p => (0 until 5000).map(r => Array[Any](p * 5000 + r)))))
+    assertEquals(Seq(Seq(0L)), rowsOf("SELECT COUNT(*) AS n FROM many WHERE CASE CAST(FLOOR(RAND() * 3) AS INT) " +
+      "WHEN 0 THEN 'a' WHEN 1 THEN 'b' WHEN 2 THEN 'c' END IS NULL", cat))
+    val inside = rowsOf("SELECT COUNT_IF(RAND() BETWEEN 0.25 AND 0.75) AS n FROM many", cat).head.head.asInstanceOf[Long]
+    assertTrue(s"$inside of 20000", inside > 9000 && inside < 11000)
+    val outside = rowsOf("SELECT COUNT_IF(RAND() NOT BETWEEN 0.25 AND 0.75) AS n FROM many", cat).head.head.asInstanceOf[Long]
+    assertTrue(s"$outside of 20000", outside > 9000 && outside < 11000)
+    // An operand that reads no RAND() is still the comparisons it was.
+    assertEquals(Seq(Seq(5000L)), rowsOf("SELECT COUNT(*) AS n FROM many WHERE id BETWEEN 5000 AND 9999", cat))
+  }
 }

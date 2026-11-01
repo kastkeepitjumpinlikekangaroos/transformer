@@ -180,6 +180,9 @@ object CleanRejection {
     """^Cannot cast (?:NaN|-?Infinity) to (?:INT|BIGINT): it has no integer value$""".r,
     """^Decimal overflow: \S+ does not fit decimal\(\d+,\d+\)$""".r,
     """^Integer overflow: .+ does not fit (?:INT|BIGINT)$""".r,
+    """^Float overflow: \S+ does not fit FLOAT$""".r,
+    """^Float underflow: \S+ is too small for a FLOAT, which would read it as 0$""".r,
+    """^SIGN of NaN is not defined; NaN is neither positive, negative nor zero$""".r,
     """^The LIKE pattern '.*' ends in its escape character, .+, which escapes nothing; write .+ to match one$""".r,
     """^SUBSTRING's length -\d+ is negative$""".r,
     """^\S+ is past the range of a (?:DATE|TIMESTAMP), about .+ either side of 1970$""".r)
@@ -305,5 +308,7 @@ object BoundPlan {
     case IsNullExpr(c, _) => Seq(c)
     case InListExpr(c, items, _) => c +: items
     case LikeExpr(c, p, _, _) => Seq(c, p)
+    case SwitchCaseExpr(operand, branches, elseE, _) => operand +: (branches.flatMap(b => Seq(b.when, b.value)) ++ elseE)
+    case BetweenExpr(c, low, high) => Seq(c, low, high)
   }
 }

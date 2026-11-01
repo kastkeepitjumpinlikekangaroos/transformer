@@ -751,6 +751,7 @@ object AggState {
     case s: AggExprSum => SumState.init(s)
     case a: AggExprAvg => a.resultType match {
       case d: DataType.DecimalType => new DecimalAvgState(d)
+      case _ if DataType.isIntegral(a.child.dataType) => new IntegerAvgState()
       case _ => new AvgState()
     }
     case m: AggExprMin => new MinMaxState(min = true, m.resultType)
@@ -905,26 +906,42 @@ object SumState {
     case _ => new DoubleSumState()
   }
 }
-/** `SUM` of INTs or BIGINTs, exact. The running sum is kept in 128 bits, the
-  * two's complement `hi`:`lo`, which no number of rows can overflow, so
-  * whether the answer fits its BIGINT is decided once, from the true sum, at
-  * [[finish]]: an error there is the SUM's, never a partial sum's that the row
-  * order, the partitions or a spill happened to reach first (`MAX + 1 - 1` in
-  * one order and `MAX - 1 + 1` in another). */
-final class LongSumState extends SumState {
-  private var lo: Long = 0L
-  private var hi: Long = 0L
-  private var sawAny: Boolean = false
+/** A running sum of INTs or BIGINTs, exact: 128 bits, the two's complement
+  * `hi`:`lo`, which no number of rows can overflow. */
+private[exec] final class ExactLongSum {
+  var lo: Long = 0L
+  var hi: Long = 0L
 
   /** Add the 128-bit `aHi`:`aLo`: the low words as unsigned 64-bit numbers,
     * their carry into the high words. */
-  private def add(aHi: Long, aLo: Long): Unit = {
+  def add(aHi: Long, aLo: Long): Unit = {
     val s = lo + aLo
     hi += aHi + (if (java.lang.Long.compareUnsigned(s, lo) < 0) 1L else 0L)
     lo = s
   }
   /** Add `v`, sign-extended to 128 bits. */
-  private def add(v: Long): Unit = add(v >> 63, v)
+  def add(v: Long): Unit = add(v >> 63, v)
+
+  /** Whether the sum is a BIGINT's value, `lo`. */
+  def fitsLong: Boolean = hi == (lo >> 63)
+
+  def toBigInteger: java.math.BigInteger =
+    java.math.BigInteger.valueOf(hi).shiftLeft(64).add(new java.math.BigInteger(java.lang.Long.toUnsignedString(lo)))
+
+  def write(out: DataOutput): Unit = { out.writeLong(lo); out.writeLong(hi) }
+  def read(in: DataInput): Unit = { lo = in.readLong(); hi = in.readLong() }
+}
+
+/** `SUM` of INTs or BIGINTs, exact ([[ExactLongSum]]), so whether the answer
+  * fits its BIGINT is decided once, from the true sum, at [[finish]]: an
+  * error there is the SUM's, never a partial sum's that the row order, the
+  * partitions or a spill happened to reach first (`MAX + 1 - 1` in one order
+  * and `MAX - 1 + 1` in another). */
+final class LongSumState extends SumState {
+  private val sum = new ExactLongSum
+  private var sawAny: Boolean = false
+
+  private def add(v: Long): Unit = sum.add(v)
 
   def updateAt(argVecs: Array[ColumnVector], r: Int): Unit = argVecs(0) match {
     case lv: LongVector =>
@@ -962,20 +979,19 @@ final class LongSumState extends SumState {
   }
   def merge(o: AggState): Unit = {
     val that = o.asInstanceOf[LongSumState]
-    add(that.hi, that.lo)
+    sum.add(that.sum.hi, that.sum.lo)
     sawAny = sawAny || that.sawAny
   }
   def finish(): Any =
     if (!sawAny) null
-    else if (hi == (lo >> 63)) lo
-    else Integers.sumFits(java.math.BigInteger.valueOf(hi).shiftLeft(64)
-      .add(new java.math.BigInteger(java.lang.Long.toUnsignedString(lo))))
+    else if (sum.fitsLong) sum.lo
+    else Integers.sumFits(sum.toBigInteger)
 
   override private[exec] def writeSelf(out: DataOutput): Unit = {
-    out.writeBoolean(sawAny); out.writeLong(lo); out.writeLong(hi)
+    out.writeBoolean(sawAny); sum.write(out)
   }
   override private[exec] def readSelf(in: DataInput): Unit = {
-    sawAny = in.readBoolean(); lo = in.readLong(); hi = in.readLong()
+    sawAny = in.readBoolean(); sum.read(in)
   }
 }
 final class DoubleSumState extends SumState {
@@ -1115,6 +1131,55 @@ final class DecimalAvgState(resultType: DataType.DecimalType) extends AggState {
   }
 }
 
+/** `AVG` of INTs or BIGINTs: the exact sum ([[ExactLongSum]]) and the count,
+  * divided once at the end to the DOUBLE nearest the mean, so the answer does
+  * not depend on row order, partitions or spill. Summed as doubles, a BIGINT
+  * past 2^53 lost its low digits differently in each order: the mean of
+  * 2^53 and four 1s was 1.8014398509481985E15 over one partition and
+  * 1.8014398509481988E15 over two. */
+final class IntegerAvgState extends AggState {
+  private val sum = new ExactLongSum
+  private var count: Long = 0L
+
+  private def add(v: Long): Unit = { sum.add(v); count += 1 }
+  def updateAt(argVecs: Array[ColumnVector], r: Int): Unit = argVecs(0) match {
+    case lv: LongVector => if (!lv.isNull(r)) add(lv.values(r))
+    case iv: IntVector => if (!iv.isNull(r)) add(iv.values(r).toLong)
+    case other => if (!other.isNull(r)) add(other.getBoxed(r).asInstanceOf[Number].longValue)
+  }
+  override def updateBatchAt(argVecs: Array[ColumnVector], n: Int): Unit = argVecs(0) match {
+    case lv: LongVector =>
+      var r = 0
+      while (r < n) { if (!lv.isNull(r)) add(lv.values(r)); r += 1 }
+    case iv: IntVector =>
+      var r = 0
+      while (r < n) { if (!iv.isNull(r)) add(iv.values(r).toLong); r += 1 }
+    case other =>
+      var r = 0
+      while (r < n) { if (!other.isNull(r)) add(other.getBoxed(r).asInstanceOf[Number].longValue); r += 1 }
+  }
+  def merge(o: AggState): Unit = {
+    val that = o.asInstanceOf[IntegerAvgState]
+    sum.add(that.sum.hi, that.sum.lo)
+    count += that.count
+  }
+  /** A sum a double holds exactly, divided by a count it holds, is one
+    * correctly rounded division; a larger one is divided as a decimal. */
+  def finish(): Any =
+    if (count == 0L) null
+    else if (sum.fitsLong && sum.lo >= -(1L << 53) && sum.lo <= (1L << 53)) sum.lo.toDouble / count.toDouble
+    else new java.math.BigDecimal(sum.toBigInteger)
+      .divide(java.math.BigDecimal.valueOf(count), java.math.MathContext.DECIMAL128).doubleValue
+
+  override private[exec] def writeSelf(out: DataOutput): Unit = {
+    out.writeLong(count); sum.write(out)
+  }
+  override private[exec] def readSelf(in: DataInput): Unit = {
+    count = in.readLong(); sum.read(in)
+  }
+}
+
+/** `AVG` of FLOATs or DOUBLEs, summed as a DOUBLE. */
 final class AvgState extends AggState {
   private var sum: Double = 0.0
   private var count: Long = 0L

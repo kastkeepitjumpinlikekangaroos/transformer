@@ -1,11 +1,14 @@
 package com.transformer.gui
 
+import atlantafx.base.theme.Styles
 import com.transformer.core.SqlExecutorRegistry
-import com.transformer.job.{JobRunRecord, TaskProgressListener, TaskResult, TaskRunStatus}
+import com.transformer.job.{JobRunRecord, TaskProgressListener, TaskResult, TaskRunStatus, TaskStatus}
 
-import javafx.geometry.{Insets, Orientation, Pos}
+import javafx.geometry.Pos
+import javafx.scene.Node
 import javafx.scene.control._
-import javafx.scene.layout.{HBox, Priority, VBox}
+import javafx.scene.layout.{HBox, Priority, Region, VBox}
+import javafx.scene.shape.{Circle, Rectangle}
 import javafx.stage.Stage
 
 import java.nio.file.Path
@@ -13,8 +16,9 @@ import java.time.{Instant, LocalDate, LocalDateTime, LocalTime, ZoneOffset}
 import java.time.format.DateTimeFormatter
 import scala.util.control.NonFatal
 
-/** Top horizontal panel: job-dir status, execution-time picker, output-dir
-  * override, and a compact Run button.
+/** The header across the top of the window: the job that is open, the
+  * execution time and output directory a run uses, a picker over the run
+  * snapshots on disk when there are two or more, the run's status, and Run.
   *
   * Mutations flow into [[JobSession]] (which notifies the rest of the UI).
   * Pressing Run launches a worker thread that calls `dataJob.run` with a
@@ -22,104 +26,106 @@ import scala.util.control.NonFatal
   */
 final class ControlsPanel(session: JobSession, owner: () => Stage) extends HBox {
 
-  setSpacing(12)
-  setPadding(new Insets(8, 12, 8, 12))
-  setAlignment(Pos.CENTER_LEFT)
-  setStyle("-fx-background-color: #2a2c38;")
+  // Declared first: the body below calls into code that reads them.
+  private val TimeFormat: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
+  private val runPickerTimeFmt: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'").withZone(ZoneOffset.UTC)
+  /** Set while both time fields change together, so they push once. */
+  private var pushSuppressed: Boolean = false
 
-  // ---- Job directory section ----
-  private val jobDirField = new TextField()
-  jobDirField.setEditable(false)
-  jobDirField.setPromptText("(no job loaded)")
-  jobDirField.setPrefColumnCount(22)
-  private val openButton = new Button("Open…")
-  openButton.setOnAction(_ => onOpen())
-  private val newProjectButton = new Button("New…")
-  newProjectButton.setStyle("-fx-background-color: #3a3f55; -fx-text-fill: #d7dcec;")
-  newProjectButton.setOnAction(_ => onNewProject())
-  private val jobDirRow = new HBox(6, jobDirField, openButton, newProjectButton)
-  jobDirRow.setAlignment(Pos.CENTER_LEFT)
-  private val jobDirSection = section("Job directory", jobDirRow)
+  getStyleClass.add("app-header")
 
-  // ---- Execution time section ----
+  // ---- Title ----
+  private val mark = new Rectangle(14, 14)
+  mark.getStyleClass.add("app-mark")
+  private val title = new Label("transformer", mark)
+  title.getStyleClass.add("app-title")
+  title.setGraphicTextGap(8)
+  title.setMinWidth(Region.USE_PREF_SIZE)
+
+  // ---- Job ----
+  private val jobName = new Label("No job open")
+  jobName.getStyleClass.add("job-name")
+  private val jobPath = new Label("")
+  jobPath.getStyleClass.add("job-path")
+  // A long path keeps its end, the part that names the job.
+  jobPath.setTextOverrun(OverrunStyle.LEADING_ELLIPSIS)
+  private val jobText = new VBox(0, jobName, jobPath)
+  jobText.setAlignment(Pos.CENTER_LEFT)
+  jobText.setMaxWidth(300)
+  jobText.setMinWidth(120)
+  private val openButton = iconButton(Icons.folder, "Open a job directory (⌘O)")(onOpen())
+  private val newProjectButton = iconButton(Icons.plus, "New project (⌘N)")(onNewProject())
+  private val jobSection = new HBox(10, jobText, openButton, newProjectButton)
+  jobSection.setAlignment(Pos.CENTER_LEFT)
+
+  // ---- Execution time ----
   private val datePicker = new DatePicker()
-  datePicker.setPrefWidth(130)
-  private val hourSpinner   = makeIntSpinner(0, 23, 0)
-  private val minuteSpinner = makeIntSpinner(0, 59, 0)
-  private val secondSpinner = makeIntSpinner(0, 59, 0)
-  private val resetTimeBtn = new Button("Now")
-  resetTimeBtn.setOnAction(_ => setExecutionUiToInstant(Instant.now()))
+  datePicker.setPrefWidth(142)
+  datePicker.setMinWidth(Region.USE_PREF_SIZE)
+  private val timeField = new TextField()
+  timeField.getStyleClass.add("time-field")
+  timeField.setPromptText("HH:mm:ss")
+  timeField.setMinWidth(Region.USE_PREF_SIZE)
+  timeField.setTooltip(new Tooltip("Time of day, UTC: HH:mm or HH:mm:ss. Enter or leaving the field applies it."))
+  private val nowButton = new Button("Now", Icons.clock)
+  nowButton.getStyleClass.addAll(Styles.FLAT, Styles.SMALL)
+  nowButton.setTooltip(new Tooltip("Set the execution time to now"))
+  nowButton.setOnAction(_ => setExecutionUiToInstant(Instant.now()))
+  nowButton.setMinWidth(Region.USE_PREF_SIZE)
   datePicker.valueProperty().addListener((_, _, _) => pushExecutionTime())
-  hourSpinner.valueProperty().addListener((_, _, _) => pushExecutionTime())
-  minuteSpinner.valueProperty().addListener((_, _, _) => pushExecutionTime())
-  secondSpinner.valueProperty().addListener((_, _, _) => pushExecutionTime())
-  private val timeRow = new HBox(
-    4,
-    datePicker, hourSpinner, new Label(":"), minuteSpinner, new Label(":"), secondSpinner, resetTimeBtn
-  )
-  timeRow.setAlignment(Pos.CENTER_LEFT)
-  private val timeSection = section("Execution time (UTC)", timeRow)
+  timeField.setOnAction(_ => pushExecutionTime())
+  timeField.focusedProperty().addListener((_, _, focused) => if (!focused) pushExecutionTime())
+  private val timeSection = section("Execution time (UTC)", datePicker, timeField, nowButton)
 
-  // ---- Output dir override section ----
+  // ---- Output dir override ----
   private val outputDirField = new TextField()
   outputDirField.setPromptText("<jobDir>/output (default)")
-  outputDirField.setPrefColumnCount(20)
-  private val outputDirBrowse = new Button("Choose…")
-  outputDirBrowse.setOnAction(_ => onChooseOutputDir())
+  outputDirField.setPrefColumnCount(22)
+  outputDirField.setMinWidth(140)
+  private val outputDirBrowse = iconButton(Icons.folder, "Choose the output directory")(onChooseOutputDir())
   outputDirField.focusedProperty().addListener((_, _, isFocused) => {
     if (!isFocused) pushOutputDir()
   })
   outputDirField.setOnAction(_ => pushOutputDir())
-  // Always-on hint showing the path the job will actually write under. Now a
-  // tooltip on the field — the multi-line label didn't fit horizontally, but
-  // the rendered path is still useful when debugging templated outputs.
+  // The path the job actually writes under, templates rendered.
   private val effectiveOutputTip = new Tooltip("")
   outputDirField.setTooltip(effectiveOutputTip)
-  private val outputRow = new HBox(6, outputDirField, outputDirBrowse)
-  outputRow.setAlignment(Pos.CENTER_LEFT)
-  private val outputSection = section("Output directory", outputRow)
+  private val outputSection = section("Output directory", outputDirField, outputDirBrowse)
 
-  // ---- Run picker section ----
+  // ---- Run picker ----
   // Visible only when 2+ run snapshots exist at the parent of the rendered
   // jobRunOutput path — i.e. the user has templated `outputDir` to vary by
   // run (e.g. `/data/runs/{{ today }}`) and multiple snapshots are on disk.
   // Selecting an entry rehydrates the GUI from that run's job.json without
   // re-running anything.
   private val runPickerCombo = new ComboBox[JobRunChoice]()
-  runPickerCombo.setPrefWidth(360)
+  runPickerCombo.setPrefWidth(340)
   private var runPickerSuppressed: Boolean = false
   runPickerCombo.getSelectionModel.selectedItemProperty().addListener((_, _, choice) => {
     if (!runPickerSuppressed && choice != null) session.selectRun(choice.dir)
   })
-  private val runPickerRow = new HBox(6, runPickerCombo)
-  runPickerRow.setAlignment(Pos.CENTER_LEFT)
-  private val runPickerSection = section("Inspect run", runPickerRow)
-  // Default hidden — refreshFromSession reveals it when 2+ runs exist.
+  private val runPickerSection = section("Inspect run", runPickerCombo)
   runPickerSection.setVisible(false)
   runPickerSection.setManaged(false)
 
-  // ---- Run button + status ----
-  private val runButton = new Button("Run")
-  runButton.setStyle("-fx-background-color: #3d6ee8; -fx-text-fill: white;")
-  runButton.setTooltip(new Tooltip("Run pipeline (⌘R)"))
+  // ---- Status and Run ----
+  private val statusDot = new Circle(4)
+  statusDot.getStyleClass.add("dot")
+  private val statusPill = new Label("", statusDot)
+  statusPill.getStyleClass.add("status-pill")
+  statusPill.setMinWidth(Region.USE_PREF_SIZE)
+  private val statusTip = new Tooltip("")
+  private val runButton = new Button("Run", Icons.play)
+  runButton.getStyleClass.addAll(Styles.ACCENT, "run-button")
+  runButton.setTooltip(new Tooltip("Run the pipeline (⌘R)"))
   runButton.setOnAction(_ => onRun())
-  private val statusLabel = new Label("Ready.")
-  statusLabel.setStyle("-fx-text-fill: #c5cad8;")
-  statusLabel.setMaxWidth(Double.MaxValue)
-  HBox.setHgrow(statusLabel, Priority.ALWAYS)
+  runButton.setMinWidth(Region.USE_PREF_SIZE)
 
-  // Assemble.
-  getChildren.addAll(
-    jobDirSection,
-    new Separator(Orientation.VERTICAL),
-    timeSection,
-    new Separator(Orientation.VERTICAL),
-    outputSection,
-    new Separator(Orientation.VERTICAL),
-    runPickerSection,
-    runButton,
-    statusLabel
-  )
+  private val spacer = new Region()
+  HBox.setHgrow(spacer, Priority.ALWAYS)
+
+  getChildren.addAll(title, jobSection, timeSection, outputSection, runPickerSection, spacer, statusPill, runButton)
 
   // Initialize pickers to "now"; this will fire push when a job is opened.
   setExecutionUiToInstant(session.executionTime)
@@ -136,51 +142,57 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends HBox 
 
   // -------------------- internal helpers --------------------
 
-  private def sectionHeader(text: String): Label = {
-    val l = new Label(text)
-    l.setStyle("-fx-text-fill: #c5cad8; -fx-font-size: 11px;")
-    l
-  }
-
-  private def section(headerText: String, body: javafx.scene.Node): VBox = {
-    val box = new VBox(2, sectionHeader(headerText), body)
+  private def section(caption: String, controls: Node*): VBox = {
+    val label = new Label(caption)
+    label.getStyleClass.add("caption")
+    val row = new HBox(controls: _*)
+    row.getStyleClass.add("field-group")
+    val box = new VBox(3, label, row)
     box.setAlignment(Pos.CENTER_LEFT)
     box
   }
 
-  private def makeIntSpinner(min: Int, max: Int, init: Int): Spinner[Integer] = {
-    val s = new Spinner[Integer](min, max, init)
-    s.setEditable(true)
-    s.setPrefWidth(60)
-    s
+  private def iconButton(icon: Node, tip: String)(f: => Unit): Button = {
+    val b = new Button(null, icon)
+    b.getStyleClass.addAll(Styles.BUTTON_ICON, Styles.FLAT)
+    b.setTooltip(new Tooltip(tip))
+    b.setOnAction(_ => f)
+    b
   }
 
   private def setExecutionUiToInstant(t: Instant): Unit = {
     val ldt = t.atZone(ZoneOffset.UTC).toLocalDateTime
-    // Avoid triggering pushes for each individual setter — set in a "silent"
-    // batch by temporarily noting the target and applying.
+    // Set both fields before pushing once, rather than a push per field.
     pushSuppressed = true
     try {
       datePicker.setValue(ldt.toLocalDate)
-      hourSpinner.getValueFactory.setValue(ldt.getHour)
-      minuteSpinner.getValueFactory.setValue(ldt.getMinute)
-      secondSpinner.getValueFactory.setValue(ldt.getSecond)
+      timeField.setText(TimeFormat.format(ldt.toLocalTime))
     } finally pushSuppressed = false
     pushExecutionTime()
   }
 
-  private var pushSuppressed: Boolean = false
+  /** `H:mm` or `H:mm:ss`, each part in range, or None. */
+  private def parseTime(raw: String): Option[LocalTime] = {
+    val parts = Option(raw).getOrElse("").trim.split(":", -1)
+    if (parts.length < 2 || parts.length > 3 || parts.exists(p => p.isEmpty || p.length > 2 || !p.forall(_.isDigit))) None
+    else {
+      val n = (parts :+ "0").take(3).map(_.toInt)
+      if (n(0) > 23 || n(1) > 59 || n(2) > 59) None else Some(LocalTime.of(n(0), n(1), n(2)))
+    }
+  }
 
   private def pushExecutionTime(): Unit = {
     if (pushSuppressed) return
     val date = Option(datePicker.getValue).getOrElse(LocalDate.now(ZoneOffset.UTC))
-    val time = LocalTime.of(
-      Option(hourSpinner.getValue).map(_.intValue).getOrElse(0),
-      Option(minuteSpinner.getValue).map(_.intValue).getOrElse(0),
-      Option(secondSpinner.getValue).map(_.intValue).getOrElse(0)
-    )
-    val instant = LocalDateTime.of(date, time).toInstant(ZoneOffset.UTC)
-    session.setExecutionTime(instant)
+    parseTime(timeField.getText) match {
+      case Some(time) =>
+        timeField.pseudoClassStateChanged(Styles.STATE_DANGER, false)
+        timeField.setText(TimeFormat.format(time))
+        session.setExecutionTime(LocalDateTime.of(date, time).toInstant(ZoneOffset.UTC))
+      case None =>
+        // Keep the session's time until the field holds one.
+        timeField.pseudoClassStateChanged(Styles.STATE_DANGER, true)
+    }
   }
 
   private def pushOutputDir(): Unit = {
@@ -208,7 +220,16 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends HBox 
   }
 
   private def refreshFromSession(): Unit = {
-    jobDirField.setText(session.jobDir.map(_.toString).getOrElse(""))
+    session.jobDir match {
+      case Some(dir) =>
+        jobName.setText(jobNameOf(dir))
+        jobPath.setText(dir.toString)
+        jobText.setVisible(true)
+        Tooltip.install(jobText, new Tooltip(dir.toString))
+      case None =>
+        jobName.setText("No job open")
+        jobPath.setText("File > Open Job Directory")
+    }
     // Only overwrite the output field if the user hasn't set it manually.
     val override_ = session.outputDirOverride
     if (override_.isEmpty && outputDirField.getText.isEmpty) {
@@ -218,17 +239,31 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends HBox 
     }
     effectiveOutputTip.setText(effectiveOutputText)
     runButton.setDisable(!session.canRun)
-    statusLabel.setText(statusMessage)
+    refreshStatus()
     refreshRunPicker()
-    // The "New…" button is only really useful before a job is loaded; once
-    // one is open it just clutters the panel.
+    // "New" is for before a job is open; once one is, File > New Project has it.
     val hasJob = session.jobDir.isDefined
     newProjectButton.setVisible(!hasJob)
     newProjectButton.setManaged(!hasJob)
   }
 
-  private val runPickerTimeFmt: DateTimeFormatter =
-    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'").withZone(ZoneOffset.UTC)
+  /** A job directory by its last two path segments: `jaffle_shop/job` says more
+    * than `job`. */
+  private def jobNameOf(dir: Path): String = {
+    val n = dir.getNameCount
+    if (n >= 2) s"${dir.getName(n - 2)}/${dir.getName(n - 1)}" else dir.toString
+  }
+
+  private def refreshStatus(): Unit = {
+    val (text, tone, tip) = statusMessage
+    statusPill.setText(text)
+    statusPill.getStyleClass.setAll("label", "status-pill", tone)
+    if (tip.isEmpty) statusPill.setTooltip(null)
+    else {
+      statusTip.setText(tip)
+      statusPill.setTooltip(statusTip)
+    }
+  }
 
   private def refreshRunPicker(): Unit = {
     val runs = session.availableRuns
@@ -264,20 +299,34 @@ final class ControlsPanel(session: JobSession, owner: () => Stage) extends HBox 
     }
   }
 
-  private def statusMessage: String = session.runState match {
+  /** The status pill: its text, its tone (a `.status-pill` class) and a
+    * tooltip with what does not fit. */
+  private def statusMessage: (String, String, String) = session.runState match {
     case RunState.Idle =>
       session.dag match {
-        case Some(d) => s"${d.nodes.size} task(s) loaded. Press Run."
-        case None => "Open a job directory to begin."
+        case Some(d) => (s"${d.nodes.size} task${if (d.nodes.size == 1) "" else "s"}", "neutral", "Press Run (⌘R) to run the job")
+        case None => ("No job", "neutral", "")
       }
-    case RunState.Running => "Running…"
+    case RunState.Running =>
+      val total = session.dag.map(_.nodes.size).getOrElse(0)
+      val done = session.taskStates.count(_.isInstanceOf[UiTaskState.Done])
+      (s"Running · $done/$total", "running", "")
     case RunState.Done(result) =>
-      if (result.succeeded) s"Run succeeded (${result.tasks.size} task(s))."
+      val statuses = result.tasks.map(_.status)
+      val failed = statuses.count(_.isInstanceOf[TaskStatus.Failed])
+      val invalid = statuses.count(_.isInstanceOf[TaskStatus.ValidationFailed])
+      val skipped = statuses.count(_.isInstanceOf[TaskStatus.Skipped])
+      if (result.succeeded) (s"Succeeded · ${result.tasks.size} tasks", "success", "")
+      else if (result.tasks.isEmpty) ("Run failed", "danger", result.error.getOrElse(""))
       else {
-        val failed = result.tasks.count(t => !t.succeeded)
-        s"Run finished with $failed failure(s)."
+        val parts = Seq(
+          if (failed > 0) Some(s"$failed failed") else None,
+          if (invalid > 0) Some(s"$invalid validation failed") else None,
+          if (skipped > 0) Some(s"$skipped skipped") else None
+        ).flatten
+        (parts.mkString(" · "), if (failed > 0) "danger" else "warning", result.error.getOrElse(""))
       }
-    case RunState.LoadFailed(err) => s"Load failed: $err"
+    case RunState.LoadFailed(err) => ("Load failed", "danger", err)
   }
 
   private def onRun(): Unit = {

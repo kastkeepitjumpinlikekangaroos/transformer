@@ -141,13 +141,15 @@ object Ops {
         // store. Narrowing here keeps eval and evalVec equal under composition.
         val l = lv.asInstanceOf[Number].doubleValue
         val r = rv.asInstanceOf[Number].doubleValue
-        (op match {
-          case Plus => l + r
-          case Minus => l - r
-          case Times => l * r
-          case Div => l / r
-          case Mod => l % r
-        }).toFloat
+        op match {
+          case Plus => (l + r).toFloat
+          case Minus => (l - r).toFloat
+          case Times => (l * r).toFloat
+          case Div => if (r == 0.0) null else (l / r).toFloat
+          case Mod => if (r == 0.0) null else (l % r).toFloat
+        }
+      // Division and % by zero (either zero) are NULL, as for every number
+      // type; IEEE's answer was an infinity or NaN.
       case DataType.DoubleType =>
         val l = lv.asInstanceOf[Number].doubleValue
         val r = rv.asInstanceOf[Number].doubleValue
@@ -155,8 +157,8 @@ object Ops {
           case Plus => l + r
           case Minus => l - r
           case Times => l * r
-          case Div => l / r
-          case Mod => l % r
+          case Div => if (r == 0.0) null else l / r
+          case Mod => if (r == 0.0) null else l % r
         }
       case other => throw new IllegalStateException(s"Arithmetic on $other not supported")
     }
@@ -216,7 +218,7 @@ object Integers {
 
   /** How an overflow message writes `n`: a decimal in plain digits, as
     * `2147483650` rather than `2.14748365E+9`. */
-  private def shown(n: Number): String = n match {
+  private[plan] def shown(n: Number): String = n match {
     case d: java.math.BigDecimal => d.toPlainString
     case other => String.valueOf(other)
   }
@@ -249,7 +251,12 @@ object Casts {
     if (v == null) return null
     if (from == to) return v
     to match {
-      case DataType.StringType => v.toString
+      // A decimal's text is its digits, as CSV writes it: its `toString` was
+      // scientific past six zeros after the point, so 0.000000100 was 1.00E-7.
+      case DataType.StringType => v match {
+        case d: java.math.BigDecimal => d.toPlainString
+        case other => other.toString
+      }
       case DataType.IntType =>
         v match {
           case s: String => parseNumber(s, to)(NumberText.int)
@@ -267,7 +274,7 @@ object Casts {
       case DataType.FloatType =>
         v match {
           case s: String => parseNumber(s, to)(NumberText.float)
-          case n: Number => n.floatValue
+          case n: Number => toFloat(n)
           case b: Boolean => if (b) 1.0f else 0.0f
           case _ => v.toString.toFloat
         }
@@ -333,6 +340,20 @@ object Casts {
     case f: java.lang.Float => new java.math.BigDecimal(java.lang.Float.toString(f.floatValue))
     case i: java.math.BigInteger => new java.math.BigDecimal(i)
     case _ => java.math.BigDecimal.valueOf(n.longValue)
+  }
+
+  /** `n` as a FLOAT, the nearest one, or an error when the FLOAT it would be
+    * is no value it holds: a finite number past a FLOAT's largest, which would
+    * be an infinity, or a nonzero one so small it would be 0, as text that
+    * says either is no FLOAT ([[NumberText.float]]). NaN and the infinities
+    * are their own FLOAT. */
+  def toFloat(n: Number): Float = {
+    val f = n.floatValue
+    if (isFinite(n) && (f.isInfinite || (f == 0.0f && n.doubleValue != 0.0)))
+      throw new ArithmeticException(
+        if (f.isInfinite) s"Float overflow: ${Integers.shown(n)} does not fit FLOAT"
+        else s"Float underflow: ${Integers.shown(n)} is too small for a FLOAT, which would read it as 0")
+    f
   }
 
   private[plan] def isFinite(n: Number): Boolean = n match {
@@ -971,18 +992,25 @@ object VecOps {
           else values(i) = readDouble(l, i) * readDouble(r, i)
           i += 1
         }
+      // Division and % by zero are NULL, as on the row path.
       case "/" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readDouble(l, i) / readDouble(r, i)
+          else {
+            val rv = readDouble(r, i)
+            if (rv == 0.0) nulls.set(i) else values(i) = readDouble(l, i) / rv
+          }
           i += 1
         }
       case "%" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = readDouble(l, i) % readDouble(r, i)
+          else {
+            val rv = readDouble(r, i)
+            if (rv == 0.0) nulls.set(i) else values(i) = readDouble(l, i) % rv
+          }
           i += 1
         }
       case other => throw new IllegalStateException(s"Unknown double arith op '$other'")
@@ -1022,14 +1050,20 @@ object VecOps {
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = (readDouble(l, i) / readDouble(r, i)).toFloat
+          else {
+            val rv = readDouble(r, i)
+            if (rv == 0.0) nulls.set(i) else values(i) = (readDouble(l, i) / rv).toFloat
+          }
           i += 1
         }
       case "%" =>
         var i = 0
         while (i < n) {
           if (l.isNull(i) || r.isNull(i)) nulls.set(i)
-          else values(i) = (readDouble(l, i) % readDouble(r, i)).toFloat
+          else {
+            val rv = readDouble(r, i)
+            if (rv == 0.0) nulls.set(i) else values(i) = (readDouble(l, i) % rv).toFloat
+          }
           i += 1
         }
       case other => throw new IllegalStateException(s"Unknown float arith op '$other'")

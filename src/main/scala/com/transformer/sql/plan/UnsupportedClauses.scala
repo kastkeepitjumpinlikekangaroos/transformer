@@ -600,7 +600,7 @@ object UnsupportedClauses {
       Seq("getValue" -> "the literal as written, each quote in it doubled; getNotExcapedValue is its value")),
     classOf[NullValue] -> audit(Nil),
     classOf[DateValue] -> audit(Nil),
-    classOf[TimestampValue] -> audit(Nil, Seq("getRawValue" -> "the literal as written")),
+    classOf[TimestampValue] -> audit(Nil, Seq("getValue" -> "the instant JSqlParser reads getRawValue as, leniently")),
     classOf[TimeValue] -> audit(Nil, Seq("getValue" -> "the binder rejects TIME literals outright")),
     classOf[TimeKeyExpression] -> audit(Seq(
       rejectsWhen[TimeKeyExpression]("getStringValue")("CURRENT_TIME",

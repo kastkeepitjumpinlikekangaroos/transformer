@@ -7,7 +7,7 @@ navigation hint, not a comprehensive directory listing.
 
 ## File-size hot spots
 
-- `sql/plan/LogicalBuilder.scala` (~1700 LOC) — largest file in `sql/plan`.
+- `sql/plan/LogicalBuilder.scala` (~1880 LOC) — largest file in `sql/plan`.
   Pattern matches every JSqlParser expression node, dispatches SELECT shapes,
   and (for
   outermost-scope `WITH` CTEs) emits placeholder `PendingCteView` scans +
@@ -55,9 +55,11 @@ navigation hint, not a comprehensive directory listing.
   `_run.json` writes + per-failure `_validation-<slug>.csv` sample writes +
   per-job `job.json` write + the run's warnings (inputs that failed to load,
   consistency checks).
-- `sql/plan/Expr.scala` (~715 LOC) — `Expr` ADT plus `eval` and `evalVec`
+- `sql/plan/Expr.scala` (~910 LOC) — `Expr` ADT plus `eval` and `evalVec`
   per subtype. `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` each carry
   an `evalVec` override; the rest of the hot subtypes delegate to `VecOps`.
+  `SwitchCaseExpr` and `BetweenExpr` read a `RAND()` operand once, and the
+  `Expr` companion's `readsRandom` says which expressions read RAND().
 - `sql/plan/Ops.scala` (~1120 LOC) — `Ops` (row-at-a-time binary ops, and
   `eq` / `cmp`, the engine's one equality and total order), `Casts`,
   `Decimals` (the declared type of each decimal result, the type that holds
@@ -74,9 +76,20 @@ navigation hint, not a comprehensive directory listing.
   return type; `Funcs.apply` is the row-form dispatcher; `Funcs.applyVec` +
   the `VecFuncs` object carry the vectorized implementations for the hot
   subset (COALESCE, string ops, ABS/FLOOR/CEIL/ROUND/TRUNC, IF, NULLIF,
-  SUBSTRING), sharing `substring`, `round` and `trunc` with the row form.
-- `gui/ResultsTabPane.scala` (~630 LOC) — partition picker + background
-  output loader + run-log rendering.
+  SUBSTRING), sharing `substring`, `length` and `trim` (code points, spaces)
+  and `Rounding` with the row form.
+- `gui/ResultsTabPane.scala` (~540 LOC) — partition picker + background
+  output loader + validation cards + run-log rendering; its rows are a
+  `DataGrid`.
+- `gui/VimEngine.scala` (~1780 LOC) — the SQL editor's vim mode: the
+  `VimBuffer` host trait, then the engine in sections (key dispatch, running a
+  command, motions, ranges and vim's exclusive-motion rules, operators,
+  registers, simple changes, visual mode, insert mode, repeat and macros, the
+  command line and ex commands, undo). Its grammar is `VimCommand.scala`
+  (~430 LOC: the command ADT and `VimParser`) and its text arithmetic
+  `VimText.scala` (~540 LOC: words, paragraphs, objects, vim regex). A new
+  command is an `Action` there and a case in `execute` here; see
+  [extending.md](extending.md#extend-the-gui).
 - `read/parquet/ParquetReader.scala` (~735 LOC) — `ParquetReader` (the footer
   pass that packs row groups into partitions and checks every file of a glob
   against the first), and `ParquetPartitionIterator`, most of whose length is
@@ -86,8 +99,14 @@ navigation hint, not a comprehensive directory listing.
 - `core/ColumnarBatch.scala` (~390 LOC) — defines ten `ColumnVector`
   subclasses. Adding a new `DataType` requires a new vector + companion case
   in `ColumnVector.allocate`.
-- `gui/DagCanvas.scala` (~380 LOC) — Canvas drawing + pan/zoom/click; renders
-  per-input load state alongside per-task status.
+- `gui/GraphCanvas.scala` (~345 LOC) — the canvas both GUIs draw graphs on:
+  pan/zoom, the dot grid, cards, edges, fitting text, and `GraphOverlay` (the
+  zoom controls). `gui/DagCanvas.scala` (~270 LOC) draws the job's DAG on it
+  (per-input load state beside per-task status, `DagOverlay`'s status counts),
+  and `viewer/LineageCanvas.scala` (~260 LOC) a folder's lineage.
+- `viewer/DetailsPanel.scala` (~480 LOC) — the data viewer's Details tab: a
+  table, an input, a dataset (with its run picker) or the folder, each built
+  afresh on a change of selection or of the run shown.
 - `sql/exec/JoinExec.scala` (~1040 LOC) — equi-join build + probe paths
   with build/probe role mirroring, the LongHashMap fast path, and
   per-batch `evalVec` key extraction for computed join keys on both

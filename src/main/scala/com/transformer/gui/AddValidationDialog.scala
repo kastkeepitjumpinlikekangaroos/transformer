@@ -6,7 +6,7 @@ import java.nio.file.{Files, Path, Paths}
 import javafx.event.ActionEvent
 import javafx.geometry.Insets
 import javafx.scene.control._
-import javafx.scene.layout.GridPane
+import javafx.scene.layout.{GridPane, Priority}
 import javafx.scene.control.ButtonBar
 import javafx.stage.Stage
 import scala.util.control.NonFatal
@@ -72,17 +72,22 @@ object AddValidationDialog {
     nameField.setText(existing.map(_._1).getOrElse(""))
     nameField.setDisable(isEdit)
 
-    val sqlArea = new TextArea()
-    sqlArea.setPrefRowCount(8)
-    sqlArea.setStyle("-fx-font-family: Monospaced;")
-    sqlArea.setText(existing.map(_._2).getOrElse(s"SELECT *\nFROM $tableViewName\nWHERE 1=0\n"))
+    val initialSql = existing.map(_._2).getOrElse(s"SELECT *\nFROM $tableViewName\nWHERE 1=0\n")
+    val sqlArea = new SqlEditor()
+    sqlArea.setText(initialSql)
+    sqlArea.setPrefSize(600, 260)
+    GridPane.setHgrow(sqlArea, Priority.ALWAYS)
+    GridPane.setVgrow(sqlArea, Priority.ALWAYS)
 
     val grid = new GridPane()
-    grid.setHgap(8); grid.setVgap(8)
+    grid.setHgap(10); grid.setVgap(10)
     grid.setPadding(new Insets(12, 4, 12, 4))
-    grid.add(new Label("Name:"), 0, 0); grid.add(nameField, 1, 0)
-    grid.add(new Label("SQL:"),  0, 1); grid.add(sqlArea,   1, 1)
+    grid.getColumnConstraints.add(FxHelpers.labelColumn())
+    grid.add(new Label("Name"), 0, 0); grid.add(nameField, 1, 0)
+    grid.add(new Label("SQL"),  0, 1); grid.add(sqlArea,   1, 1)
     dialog.getDialogPane.setContent(grid)
+    dialog.setResizable(true)
+    Theme.style(dialog)
 
     // Validate + write inside the OK event filter so save/delete failures keep
     // the dialog open.
@@ -90,7 +95,7 @@ object AddValidationDialog {
     okButton.addEventFilter(ActionEvent.ACTION, (ev: ActionEvent) => {
       val name = if (isEdit) existing.get._1 else nameField.getText
       try {
-        val sql = Option(sqlArea.getText).getOrElse("")
+        val sql = Option(sqlArea.text).getOrElse("")
         if (sql.trim.isEmpty)
           throw new IllegalArgumentException("Validation SQL cannot be empty.")
         if (isEdit) {
@@ -116,6 +121,7 @@ object AddValidationDialog {
           s"Delete validation '${existing.get._1}'? The .sql file will be removed.")
         confirm.initOwner(owner)
         confirm.setHeaderText("Delete validation")
+        Theme.style(confirm)
         val pick = confirm.showAndWait()
         if (!pick.isPresent || pick.get() != ButtonType.OK) {
           ev.consume()
@@ -130,6 +136,15 @@ object AddValidationDialog {
         }
       })
     }
+
+    // Vim's :w presses the dialog's Save (or Create), :q its Cancel, which
+    // keeps an edit unless :q! says to drop it.
+    sqlArea.setOnWrite(() => { okButton.asInstanceOf[Button].fire(); None })
+    sqlArea.setOnQuit(force =>
+      if (!force && sqlArea.text != initialSql) Some("E37: No write since last change (add ! to override)")
+      else { dialog.getDialogPane.lookupButton(ButtonType.CANCEL).asInstanceOf[Button].fire(); None }
+    )
+    dialog.setOnShown(_ => sqlArea.focusEditor())
 
     dialog.setResultConverter(bt => {
       if (bt == okType) Saved(if (isEdit) existing.get._1 else nameField.getText.trim)

@@ -14,17 +14,20 @@ import scala.jdk.CollectionConverters._
   *   - Estimate the heap cost of a [[ColumnarBatch]] before deciding to flush.
   *
   * Lifecycle:
-  *   - `Spill` registers a JVM shutdown hook on first use that recursively
-  *     deletes [[rootDir]]. Process crashes leave stale dirs behind; the next
-  *     JVM start sweeps them in [[cleanupStaleRoots]].
+  *   - Every JVM spills into a directory of its own under [[baseDir]],
+  *     [[rootDir]], and registers a shutdown hook on first use that deletes
+  *     it and nothing else, so JVMs that spill at once leave each other's
+  *     files alone. Process crashes leave stale dirs behind; the next JVM to
+  *     spill deletes those of JVMs no longer running ([[cleanupStaleRoots]]).
   *   - Each `OperatorSpillDir` deletes its own subtree on `close()` and re-
   *     registers a cleanup on shutdown.
   *
   * Defaults:
-  *   - Root dir: `${java.io.tmpdir}/transformer-spill`, overridable via the
+  *   - Base dir: `${java.io.tmpdir}/transformer-spill`, overridable via the
   *     `transformer.spill.dir` system property. The dir is a filesystem
   *     location, not a behavior toggle — this is the one and only global
-  *     knob spill code reads from system properties.
+  *     knob spill code reads from system properties. Nothing outside it is
+  *     ever deleted.
   *
   * NOT in scope here: spill thresholds, on-disk encoding, AggState
   * serialization. Those belong in `AggStateSerde` and in the per-operator
@@ -32,21 +35,40 @@ import scala.jdk.CollectionConverters._
   */
 object Spill {
 
-  /** System property holding the override for [[rootDir]]. Defaults to
+  /** System property holding the override for [[baseDir]]. Defaults to
     * `${java.io.tmpdir}/transformer-spill`. */
   val SpillDirProperty: String = "transformer.spill.dir"
 
-  /** Directory containing per-operator spill subdirectories. Lazy so tests
-    * that don't touch spill never create the dir. */
-  lazy val rootDir: Path = {
+  /** The name of a JVM's or an operator's spill directory, its pid captured
+    * ([[cleanupStaleRoots]]); declared before [[rootDir]], whose first use
+    * reads it. */
+  private val StaleName = """^[A-Za-z0-9_]+-(\d{1,19})-[0-9a-f]+(?:-[0-9a-f]+)?$""".r
+
+  /** The directory every JVM's spill directory is made in. */
+  lazy val baseDir: Path = {
     val configured = Option(System.getProperty(SpillDirProperty)).map(_.trim).filter(_.nonEmpty)
     val tmp = configured.getOrElse(System.getProperty("java.io.tmpdir") + "/transformer-spill")
-    val p = Paths.get(tmp).toAbsolutePath.normalize()
+    Paths.get(tmp).toAbsolutePath.normalize()
+  }
+
+  /** This JVM's spill directory, `jvm-<pid>-<suffix>` under [[baseDir]],
+    * holding every per-operator subdirectory. Lazy so tests that don't touch
+    * spill never create the dir. It was [[baseDir]] itself, shared by every
+    * JVM, so one JVM's exit deleted the files another was spilling; and the
+    * sweep of stale ones deleted whatever stood beside it with a name
+    * starting as its did up to the first `-`, `transformer-jaffle-out` in the
+    * temp directory among them. */
+  lazy val rootDir: Path = {
+    val base = baseDir
+    Files.createDirectories(base)
+    val pid = ProcessHandle.current().pid()
+    val suffix = java.lang.Long.toHexString(System.nanoTime() & 0xFFFFFFFFL)
+    val p = base.resolve(s"jvm-$pid-$suffix")
     Files.createDirectories(p)
     Runtime.getRuntime.addShutdownHook(new Thread(new Runnable {
       def run(): Unit = try deleteRecursively(p) catch { case _: Throwable => () }
     }, "transformer-spill-root-cleanup"))
-    cleanupStaleRoots(p.getParent, p.getFileName.toString)
+    cleanupStaleRoots(base, p.getFileName.toString)
     p
   }
 
@@ -148,30 +170,31 @@ object Spill {
   def storedType(t: DataType): DataType =
     if (t == DataType.NullType) DataType.BooleanType else t
 
-  /** Sweep stale `${rootDir}/transformer-spill-*` directories from prior
-    * JVM runs. Bounded by listing the immediate children of `parent`; does
-    * not recurse beyond one level. Failures are swallowed — a missing parent
-    * dir or a permission issue should not block the current run.
-    *
-    * Why this is safe: each spill subdir name embeds the JVM's pid +
-    * monotonic counter + nanoTime suffix, so a directory whose name's pid
-    * does not match an existing process can be reclaimed. We simplify by
-    * just sweeping the root on first use — concurrent JVMs is not a
-    * supported configuration. */
-  private[core] def cleanupStaleRoots(parent: Path, currentName: String): Unit = {
-    if (parent == null || !Files.isDirectory(parent)) return
+  /** Delete the spill directories in `base` that JVMs no longer running
+    * left behind: a JVM's own (`jvm-<pid>-<suffix>`), or an operator's from
+    * before each JVM had one (`<tag>-<pid>-<n>-<suffix>`), whose pid names no
+    * live process. Only `base`'s immediate children of those two shapes are
+    * candidates, so nothing else there and nothing outside it is touched.
+    * Failures are swallowed: a missing dir or a permission issue should not
+    * block the current run. A pid a later process has reused keeps its dir,
+    * which costs disk, never another JVM's files. */
+  private[core] def cleanupStaleRoots(base: Path, currentName: String): Unit = {
+    if (base == null || !Files.isDirectory(base)) return
     try {
-      val stream = Files.list(parent)
+      val stream = Files.list(base)
       try {
         stream.iterator().asScala.foreach { p =>
           val name = p.getFileName.toString
-          if (name.startsWith(currentName.takeWhile(_ != '-')) && name != currentName) {
-            try deleteRecursively(p) catch { case _: Throwable => () }
+          if (name != currentName && Files.isDirectory(p)) StaleName.unapplySeq(name).foreach { groups =>
+            val pid = groups.head.toLongOption
+            if (pid.exists(id => !ProcessHandle.of(id).isPresent))
+              try deleteRecursively(p) catch { case _: Throwable => () }
           }
         }
       } finally stream.close()
     } catch { case _: IOException => () }
   }
+
 
   private[core] def deleteRecursively(p: Path): Unit = {
     if (!Files.exists(p)) return
