@@ -43,7 +43,7 @@ parallel exchange / spill machinery.
 | [02](02-data-gen-mode-differential.md) | DataGen + mode-differential over single-table SQL | 3-5 days | medium | 01 (shared harness) |
 | [03](03-query-gen-metamorphic.md) | Multi-relation query gen + metamorphic (TLP) + shrinking | 1-2 weeks | medium-high | 01, 02 |
 | [04](04-sql-logic-tests-and-whole-suite-configurations.md) | sqllogictest scripts under eleven verification modes, SQLite's corpus, the whole suite at batch capacity 1 / 2, sharded, serial, in another zone (**done** 2026-11-01) | 1 day | low | — |
-| [05](05-plans-as-sql.md) | Plans as SQL: plan validation after every pass, a printer the binder reads back, the round trip as an slt mode and a fuzz property, EXPLAIN and golden plans; then plan 04's next round (join order, a streaming pairing, hash zero, CSV column order, spill cost, Postgres ports) (**done** 2026-11-01, the Postgres port's four findings decided and landed) | several days | low-medium | 04 |
+| [05](05-plans-as-sql.md) | Plans as SQL: plan validation after every pass, a printer the binder reads back, the round trip as an slt mode and a fuzz property, EXPLAIN and golden plans; then plan 04's next round (join order, a streaming pairing, hash zero, CSV column order, spill cost, Postgres ports) (**done** 2026-11-01, the Postgres ports' five findings decided and landed) | several days | low-medium | 04 |
 
 ## Recommended sequence
 

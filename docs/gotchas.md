@@ -2091,10 +2091,11 @@ output, over every slt script and every query generator. Details are in
 ## Answers the PostgreSQL port settled (2026-11-01, all decided)
 
 Porting Postgres's regression tests (`src/test/slt/postgres/`, with
-Postgres's answers) found four answers that no decision covered. Their
-records were held out of the scripts until each was decided; they are in the
-scripts now, a logarithm's as `skipif transformer` with the reason. Details
-are in [plans/testing/05](../plans/testing/05-plans-as-sql.md).
+Postgres's answers) found five answers that no decision covered, four in the
+first four files and one in float8.sql. Their records were held out of the
+scripts until each was decided; they are in the scripts now, a logarithm's
+and an underflow's as `skipif transformer` with the reason. Details are in
+[plans/testing/05](../plans/testing/05-plans-as-sql.md).
 
 - **`COUNT()` with no argument was `COUNT(*)`**, as SQLite and DuckDB read
   it, on purpose in `LogicalBuilder` and in no doc. Postgres refuses it, and so
@@ -2117,6 +2118,16 @@ are in [plans/testing/05](../plans/testing/05-plans-as-sql.md).
 - **One-argument `LOG(x)` was the natural logarithm**, as in MySQL, Spark and
   SQL Server, where Postgres, SQLite and DuckDB read base 10. It is now
   refused, naming `LN(x)`, `LOG10(x)` and `LOG(base, x)`.
+- **A `DOUBLE` (or `FLOAT`) result too small to hold was 0, and still is**:
+  `EXP(-1000.0)`, `POWER(0.5, 2000.0)` and `1e-200 * 1e-200` are 0.0, -0.0
+  when negative, where Postgres raises `value out of range: underflow`
+  (float8.sql:188 and 196). No rule said so. It stays IEEE's answer, as in
+  Java, Spark, DuckDB, SQLite and MySQL: the counterpart of a result past the
+  range being an infinity (`1e308 * 10`), so neither end of the range is an
+  error. A subnormal result is kept, as in Postgres, and text or a literal
+  too small for a `DOUBLE` (`'1e-400'`, `1e-400`) is still refused, as is a
+  narrowing `CAST` to `FLOAT` that would be 0. `types/float_equality.test`
+  pins it.
 
 ## What's intentionally NOT done
 

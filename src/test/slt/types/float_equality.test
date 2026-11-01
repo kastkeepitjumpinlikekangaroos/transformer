@@ -102,6 +102,14 @@ SELECT 1.5 / 0.0, 1.5 % 0.0, -1.5 / -0.0, 1e308 * 10
 ----
 NULL	NULL	NULL	Infinity
 
+# A result too small for a double is 0, or -0.0 when it is negative, not an
+# error (Postgres's "value out of range: underflow"), as one past the largest
+# is an infinity; a subnormal one, between, is kept.
+query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE
+SELECT 1e-200 * 1e-200, -1e-200 * 1e-200, 1e-300 / 1e100, EXP(-1000.0), POWER(0.5, 2000.0), 1e-200 * 1e-120
+----
+0.0	-0.0	0.0	0.0	0.0	1.0E-320
+
 # A square root of less than zero is NULL, as are a logarithm of zero or
 # less and one to a base of zero or less or of 1: no number answers them, as
 # none answers a division by zero. -0.0 is zero, and NaN stays NaN.

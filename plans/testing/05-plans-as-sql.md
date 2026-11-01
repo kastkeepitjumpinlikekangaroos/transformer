@@ -1,7 +1,7 @@
 # Plan 05: plans as SQL, and plan 04's next round
 
 > Status: **done** 2026-11-01 · four decisions by the user, the recommended
-> option each time, and four more on W9's findings · one commit per workstream · Risk: low for the
+> option each time, and five more on the Postgres ports' findings · one commit per workstream · Risk: low for the
 > printer and the tests; medium for join ordering and the streaming pairing,
 > which change how queries run
 
@@ -54,7 +54,7 @@ takes all of them but JSqlParser 5.3, which still refuses deep parentheses.
 | W6 | Every hash zero (`--config=hashzero`) | **done** 2026-11-01 |
 | W7 | A CSV glob's files with their columns in other orders | **done** 2026-11-01 |
 | W8 | A spill file's fixed cost | **done** 2026-11-01 |
-| W9 | Ported Postgres regression tests | **done** 2026-11-01; its four findings decided and landed the same day |
+| W9 | Ported Postgres regression tests | **done** 2026-11-01; its four findings decided and landed the same day, and float8.sql ported after, its one finding decided |
 
 ### W1. Plan validation after every pass
 
@@ -309,7 +309,17 @@ script:
 
 | # | What | Postgres | Here | Decided |
 |---|---|---|---|---|
-| 5 | A DOUBLE result too small to hold: `EXP(-1000.0)`, `POWER(0.5, 2000.0)`, `CAST('1e-200' AS DOUBLE) * CAST('1e-200' AS DOUBLE)`; float8.sql:188 (`f1 ^ '1e200'`) and 196 (`exp(f1)`) | refused, `value out of range: underflow`, where a product, quotient, `exp` or `pow` of nonzero finite values rounds to 0 | 0.0, or -0.0 when negative, as in Java, Spark, DuckDB, SQLite and MySQL; a subnormal is kept, as in Postgres | open |
+| 5 | A DOUBLE result too small to hold: `EXP(-1000.0)`, `POWER(0.5, 2000.0)`, `CAST('1e-200' AS DOUBLE) * CAST('1e-200' AS DOUBLE)`; float8.sql:188 (`f1 ^ '1e200'`) and 196 (`exp(f1)`) | refused, `value out of range: underflow`, where a product, quotient, `exp` or `pow` of nonzero finite values rounds to 0 | 0.0, or -0.0 when negative, as in Java, Spark, DuckDB, SQLite and MySQL; a subnormal is kept, as in Postgres | 0, as it was: the counterpart of an infinity past the range, so neither end is an error |
+
+The user chose the recommended option, over an error at this end alone, as
+Postgres has it, and an error at both ends, which would have reversed the
+third audit's decision that `1e308 * 10` is Infinity. Nothing in the engine
+changed: README and gotchas.md say the rule beside the overflow one,
+`types/float_equality.test` pins it (a product, a quotient, `EXP` and `POWER`
+going to 0, a negative product to -0.0, a subnormal kept), and float8.sql:188
+and 196 are in the port as `skipif transformer`, 127 of its statements, 15
+records skipped. The Postgres scripts hold 500 records, 58 of them `skipif
+transformer`.
 
 ### How the printer is built (W2)
 

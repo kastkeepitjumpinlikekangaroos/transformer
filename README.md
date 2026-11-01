@@ -1413,7 +1413,12 @@ operand. Division by zero and `%` by zero are NULL, and a remainder never
 overflows. Division and `%` by zero are NULL for a `FLOAT` and a `DOUBLE`
 too, either zero (`7.0 / 0` and `0.0 / 0.0`), as Spark has it; they were
 IEEE's infinity and NaN. Past their range floats still overflow to an
-infinity (`1e308 * 10`).
+infinity (`1e308 * 10`, `EXP(1000.0)`), and a result too small for them is 0,
+or -0.0 when it is negative (`1e-200 * 1e-200`, `EXP(-1000.0)`), where
+Postgres raises an error at either end; Java, Spark, DuckDB and SQLite give
+the same 0. A subnormal result, between, is kept (`1e-200 * 1e-120`). A
+number written in the query, or text cast, that a float cannot hold is still
+an error (`1e400`, `'1e-400'`).
 
 **A `BINARY` value is not text.** It casts to nothing else, so no CAST makes
 one text for `LIKE`, `||` and the string functions (`LENGTH`, `UPPER`, `LOWER`,

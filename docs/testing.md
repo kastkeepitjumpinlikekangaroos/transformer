@@ -346,7 +346,7 @@ those, and `SLT_TRACE` to see where each error came from.
 PostgreSQL License (`postgres/COPYRIGHT`): `window.test` (97 of window.sql's
 400 statements, over tenk1's 10,000 rows, loaded by `COPY` from Postgres's
 `postgres/data/tenk.data`), `numeric.test` (497 of numeric.sql's 1,058, the part a
-DECIMAL of 38 digits can run), `float8.test` (125 of float8.sql's 184, the
+DECIMAL of 38 digits can run), `float8.test` (127 of float8.sql's 184, the
 DOUBLE at its edges: the text a CAST reads, the infinities and NaN in
 arithmetic, `POWER`'s special cases, rounding, the hyperbolic functions and
 casts at the ends of the integer types), and for NULL and three-valued logic
@@ -361,19 +361,20 @@ prints it; one it prints to 15 significant digits (float8.sql sets
 a DOUBLE to the same 15; and a DOUBLE statistic, or a function Postgres
 computes over numerics or takes from C's math library, whose last digits Java
 need not share, to three places, as SQLite's `R`. A record the engine answers
-otherwise by a documented decision is `skipif transformer` with the reason (56
+otherwise by a documented decision is `skipif transformer` with the reason (58
 of them: a CAST to an integer truncates, text casts to BOOLEAN from true and
 false alone and to DOUBLE by CSV's grammar, division by zero is NULL, and so
 is a math function outside its domain, arithmetic past DOUBLE's range is an
-infinity, a constant window key is refused, and DOUBLE functions at
-magnitudes they do not hold). What each header leaves out it counts by kind.
-The port found four answers no decision covered (`COUNT()`, a ROWS offset past
-INT, a logarithm or square root outside its domain, one-argument `LOG`), held
-out of the scripts until each was decided
+infinity and below it 0, a constant window key is refused, and DOUBLE
+functions at magnitudes they do not hold). What each header leaves out it
+counts by kind. The port found four answers no decision covered (`COUNT()`, a
+ROWS offset past INT, a logarithm or square root outside its domain,
+one-argument `LOG`), held out of the scripts until each was decided
 ([plans/testing/05](../plans/testing/05-plans-as-sql.md)); their records are
 in the scripts now. float8.sql's port found a fifth, a DOUBLE result too small
-to hold, which Postgres refuses (`value out of range: underflow`) and the
-engine answers with 0; its two records are held out until it is decided.
+to hold, which Postgres refuses (`value out of range: underflow`): it stays 0,
+the counterpart of an infinity past the range, and its two records are
+`skipif transformer`.
 
 **Golden plans** (Spark's PlanStabilitySuite, DuckDB's `EXPLAIN` records) are
 scripts under `src/test/slt/plan/` whose records are `EXPLAIN <query>`, the

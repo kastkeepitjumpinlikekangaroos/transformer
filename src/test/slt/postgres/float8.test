@@ -10,8 +10,8 @@
 # The DOUBLE, Postgres's float8, at its edges: the text a CAST reads, the
 # infinities and NaN in arithmetic, POWER's special cases, the rounding
 # functions, the hyperbolic functions, and casts to integers at the ends of
-# their ranges. 125 of the file's 184 statements are here: 8 that make, fill,
-# change or drop a table, 83 queries, 21 statements that must fail, and 13
+# their ranges. 127 of the file's 184 statements are here: 8 that make, fill,
+# change or drop a table, 83 queries, 21 statements that must fail, and 15
 # records the engine answers otherwise by design, marked `skipif transformer`
 # with the reason. Each record names the line of float8.sql it comes from.
 #
@@ -51,10 +51,10 @@
 # Infinity and -Infinity as written and no spaces around a number (4); a
 # division by zero, a logarithm of zero or less and a power with no real
 # answer are NULL, which Postgres refuses (6); arithmetic past DOUBLE's range
-# is an infinity, not an error (1); and a CAST to an integer truncates, where
-# Postgres rounds (2).
+# is an infinity, and a result too small for it 0, not an error (3); and a
+# CAST to an integer truncates, where Postgres rounds (2).
 #
-# Left out (59 statements), by what they need:
+# Left out (57 statements), by what they need:
 #   12  gamma() and lgamma()
 #   12  a type of the test's own, xfloat8, with its functions and casts, made
 #       to read bit patterns as float8s, the two queries over them, which also
@@ -66,9 +66,6 @@
 #       float8 (above)
 #    4  pg_input_is_valid() and pg_input_error_info()
 #    4  SMALLINT
-#    2  a DOUBLE result too small to hold, of EXP and POWER, which Postgres
-#       refuses (value out of range: underflow) and the engine answers with 0,
-#       held out until that is decided (plans/testing/05)
 #    1  erf() and erfc()
 #    1  float8send()
 #    1  numeric NaN, which no DECIMAL holds
@@ -713,6 +710,12 @@ skipif transformer # arithmetic past DOUBLE's range is an infinity, not an error
 statement error
 SELECT f.f1 * '1e200' from FLOAT8_TBL f
 
+# float8.sql:188, f.f1 ^ '1e200' written POWER(f.f1, CAST('1e200' AS DOUBLE)).
+# Postgres: value out of range: overflow.
+skipif transformer # a power past DOUBLE's range is an infinity, and one too small for it 0, not an error
+statement error
+SELECT POWER(f.f1, CAST('1e200' AS DOUBLE)) from FLOAT8_TBL f
+
 # float8.sql:190, x ^ y written POWER(x, y). Postgres reads 0 ^ 0 and 0 ^ 1
 # as float8s, 0 ^ 0.0 and 0 ^ 0.5 as numerics and their sum as a float8; in
 # the engine each is a DOUBLE.
@@ -730,6 +733,11 @@ SELECT ln(f.f1) from FLOAT8_TBL f where f.f1 = '0.0'
 skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
 statement error
 SELECT ln(f.f1) from FLOAT8_TBL f where f.f1 < '0.0'
+
+# float8.sql:196. Postgres: value out of range: underflow.
+skipif transformer # a result too small for a DOUBLE is 0, not an error, as one past its range is an infinity
+statement error
+SELECT exp(f.f1) from FLOAT8_TBL f
 
 # float8.sql:198. Postgres: division by zero.
 skipif transformer # a division by zero is NULL
