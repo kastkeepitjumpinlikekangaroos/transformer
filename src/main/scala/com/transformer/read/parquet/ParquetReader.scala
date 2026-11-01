@@ -13,6 +13,7 @@ import org.apache.parquet.io.ParquetDecodingException
 import org.apache.parquet.io.api.{Converter, GroupConverter, PrimitiveConverter}
 import org.apache.parquet.filter2.predicate.FilterPredicate
 import org.apache.parquet.filter2.statisticslevel.StatisticsFilter
+import org.apache.parquet.HadoopReadOptions
 import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.hadoop.metadata.{BlockMetaData, ColumnChunkMetaData}
 import org.apache.parquet.hadoop.util.HadoopInputFile
@@ -177,7 +178,10 @@ object ParquetReader {
     def addPredicatePushedDown(n: Long): Unit
   }
 
-  private[parquet] def defaultConf: Configuration = {
+  /** The Hadoop configuration every reader starts from, built once: a
+    * `new Configuration()` parses Hadoop's default resources the first time
+    * it is read, a millisecond or two, which every spill file read paid. */
+  private lazy val baseConf: Configuration = {
     val c = new Configuration()
     // Pin local FS — no HDFS, no Hadoop runtime.
     c.set("fs.defaultFS", "file:///")
@@ -189,6 +193,20 @@ object ParquetReader {
     c.set("fs.file.impl", "org.apache.hadoop.fs.RawLocalFileSystem")
     c
   }
+
+  /** A reader's configuration: a copy of [[baseConf]], which clones its
+    * properties rather than parsing them again. */
+  private[parquet] def defaultConf: Configuration = new Configuration(baseConf)
+
+  /** `hif` opened for reading, with read options of its own built from the
+    * configuration it was opened with. parquet-mr's `open(file)` builds its
+    * options from a fresh `Configuration`, which parses Hadoop's default
+    * resources again: 2.2 ms an open, nearly all of what a small file such as
+    * a spill file cost to read, and a spill file was opened twice. The
+    * options are per reader, since the codec factory they hold is not shared
+    * safely. */
+  private[parquet] def open(hif: HadoopInputFile): ParquetFileReader =
+    ParquetFileReader.open(hif, HadoopReadOptions.builder(hif.getConfiguration).build())
 
   /** Compressed-bytes target for one partition's worth of work. Picked to
     * balance:
@@ -269,7 +287,7 @@ object ParquetReader {
       new Callable[(MessageType, IndexedSeq[PartitionMeta])] {
         def call(): (MessageType, IndexedSeq[PartitionMeta]) = {
           val hif = HadoopInputFile.fromPath(new HPath(f.toUri), conf)
-          val reader = ParquetFileReader.open(hif)
+          val reader = ParquetReader.open(hif)
           try {
             val blocks = reader.getRowGroups
             val parts = packRowGroups(hif, blocks, targetBytesPerPartition)
@@ -366,7 +384,7 @@ final class ParquetPartitionIterator(
 
   // Open once: same handle drives schema lookup, the column request,
   // skipNextRowGroup seeks, and the eventual readNextRowGroup loop.
-  private val reader: ParquetFileReader = ParquetFileReader.open(hif)
+  private val reader: ParquetFileReader = ParquetReader.open(hif)
   private val fileLabel: String = hif.getPath.toUri.getPath
   private val columns: ParquetColumns.FileColumns =
     try ParquetColumns.resolve(schema, reader.getFooter.getFileMetaData.getSchema, fileLabel)

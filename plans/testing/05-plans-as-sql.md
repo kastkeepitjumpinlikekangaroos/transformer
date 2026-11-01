@@ -53,7 +53,7 @@ takes all of them but JSqlParser 5.3, which still refuses deep parentheses.
 | W5 | A pairing that streams | **done** 2026-11-01 |
 | W6 | Every hash zero (`--config=hashzero`) | **done** 2026-11-01 |
 | W7 | A CSV glob's files with their columns in other orders | **done** 2026-11-01 |
-| W8 | A spill file's fixed cost | |
+| W8 | A spill file's fixed cost | **done** 2026-11-01 |
 | W9 | Ported Postgres regression tests | |
 
 ### W1. Plan validation after every pass
@@ -215,6 +215,22 @@ columns in another order and some with their header's names in upper case;
 the oracle reads each file's text back by position and puts it in the
 schema's order, so every expectation it had holds by name. No defect: plan
 04's fix holds. A reader taking later files by position again fails it.
+
+W8: measured with a probe writing and reading 200 four-row spill files and a
+stack sampler over the writer's construction. Warm, a spill file cost 12.3 ms:
+2 ms of every writer's and reader's `new Configuration()`, which parses
+Hadoop's default resources; 2.5 ms of the writer's file creation, which in
+Hadoop's `RawLocalFileSystem` runs `chmod` in a forked process when Hadoop's
+native library is not loaded (it never is); and 2.2 ms each time parquet-mr
+opened the file, twice a read, building read options from a fresh
+`Configuration`. The writer now writes through parquet-mr's `LocalOutputFile`
+(`java.nio`), both sides copy a configuration built once, and the reader opens
+files with options built from it: 0.45 ms a file. Uncompressed spill files
+would have saved 0.1 ms more, so they stay SNAPPY. The suite took notice:
+`slt_test` 102 s to 41 s, `mode_differential_fuzz_test` 158 s to 50 s,
+`hash_join_spill_test` 19 s to 5 s; `select5`'s slice in the two spill modes
+19 s to 2 s each. Polymarket, whose cost is its data, is unchanged at 80 s.
+`bench/spill_file_cost_test` (perf-tagged) holds a file under 2 ms.
 
 ### How the printer is built (W2)
 

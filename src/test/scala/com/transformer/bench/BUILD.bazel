@@ -43,3 +43,19 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+# What one small spill file costs to write and read back, held under 2 ms
+# (it was 12 ms: Hadoop forked `chmod` per file written, and parquet-mr built
+# a Hadoop Configuration per file opened). Machine-dependent, so `perf`.
+scala_junit_test(
+    name = "spill_file_cost_test",
+    srcs = ["SpillFileCostTest.scala"],
+    suffixes = ["Test"],
+    tags = ["perf"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/write/parquet",
+        "@maven//:junit_junit",
+    ],
+)

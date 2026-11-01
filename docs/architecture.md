@@ -438,6 +438,14 @@ would read it a second time. Stress-test parity
 enforced for every spill-capable operator in its respective
 `*SpillTest`.
 
+A spill file costs about half a millisecond to write and read back beyond
+its data: the writer writes through `java.nio` rather than Hadoop's local file
+system, which ran `chmod` in a process per file, and the reader builds its
+parquet-mr read options from a configuration built once, where parquet-mr
+parsed Hadoop's default resources for every open, twice a file. Together
+they cost 12 ms a file, so an operator spilling a run per batch spent most of
+its time opening files (plans/testing/05, W8).
+
 ### 2d. Per-operator instrumentation (opt-in)
 
 Every operator has a per-partition counter set wired in at planner time.

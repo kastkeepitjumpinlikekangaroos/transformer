@@ -3,11 +3,11 @@ package com.transformer.write.parquet
 import com.transformer.core._
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{Path => HPath}
 import org.apache.parquet.hadoop.ParquetWriter.DEFAULT_PAGE_SIZE
 import org.apache.parquet.hadoop.api.WriteSupport
 import org.apache.parquet.hadoop.api.WriteSupport.WriteContext
 import org.apache.parquet.hadoop.metadata.CompressionCodecName
+import org.apache.parquet.io.LocalOutputFile
 import org.apache.parquet.io.api.{Binary, RecordConsumer}
 import org.apache.parquet.schema.MessageType
 
@@ -38,20 +38,7 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
 
   private val messageType: MessageType = ParquetSchema.toMessageType(schema)
 
-  private val conf: Configuration = {
-    val c = new Configuration()
-    c.set("fs.defaultFS", "file:///")
-    // Use RawLocalFileSystem (no checksum sidecars) for the file:// scheme.
-    // Hadoop's default LocalFileSystem wraps RawLocalFileSystem in a
-    // ChecksumFileSystem that writes a `.<name>.crc` sibling for every data
-    // file. parquet-mr's own write supports already include per-page CRC32
-    // checksums in the parquet footer, so Hadoop's sibling .crc adds nothing
-    // — it just doubles the FS syscall count per file and leaves orphaned
-    // `.crc` files after the writer's atomic temp→target rename (the rename
-    // moves the data file but not the checksum sidecar).
-    c.set("fs.file.impl", "org.apache.hadoop.fs.RawLocalFileSystem")
-    c
-  }
+  private val conf: Configuration = new Configuration(ParquetWriter.baseConf)
 
   // Default SNAPPY — matches Spark / pyarrow / DuckDB. Dictionary encoding is
   // already enabled (`.withDictionaryEncoding(true)` below), and on high-
@@ -74,7 +61,7 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
   private val rowGroupSize: Long = ParquetWriter.rowGroupSizeOf(options)
 
   private val writer: org.apache.parquet.hadoop.ParquetWriter[BatchRowRef] =
-    new BatchParquetWriterBuilder(new HPath(tmp.toUri), schema, messageType)
+    new BatchParquetWriterBuilder(new LocalOutputFile(tmp), schema, messageType)
       .withConf(conf)
       .withCompressionCodec(codec)
       .withRowGroupSize(rowGroupSize)
@@ -117,6 +104,18 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
 }
 
 object ParquetWriter {
+
+  /** The Hadoop configuration every writer starts from, which parquet-mr
+    * reads its codec settings from. Built once: a writer copies it, which
+    * clones its properties rather than parsing Hadoop's default resources
+    * again, a millisecond or two a file. Files are written through `java.nio`
+    * ([[BatchParquetWriterBuilder]]), so no Hadoop file system is involved,
+    * and none writes a `.crc` sidecar beside the file. */
+  private lazy val baseConf: Configuration = {
+    val c = new Configuration()
+    c.set("fs.defaultFS", "file:///")
+    c
+  }
 
   /** The option keys a parquet output's writer reads. */
   val Keys: Seq[String] = Seq("compression", "parquet_row_group_size", "parquet_write_parallelism")
@@ -418,7 +417,12 @@ private final class BatchWriteSupport(schema: Schema, messageType: MessageType)
 /** Tiny builder so we can plug [[BatchWriteSupport]] into parquet-mr's
   * ParquetWriter.Builder pattern. Mirrors `ExampleParquetWriter.Builder` —
   * abstract base does the heavy lifting; we just hand it a `WriteSupport`. */
-private final class BatchParquetWriterBuilder(file: HPath, schema: Schema, messageType: MessageType)
+/** Writes through `java.nio` ([[LocalOutputFile]]), not Hadoop's local file
+  * system, which sets a new file's permissions by running `chmod` in a
+  * process of its own when Hadoop's native library is not loaded (it never
+  * is here): 2.5 ms a file, nearly all of what a small file such as a spill
+  * file cost to write. */
+private final class BatchParquetWriterBuilder(file: LocalOutputFile, schema: Schema, messageType: MessageType)
     extends org.apache.parquet.hadoop.ParquetWriter.Builder[BatchRowRef, BatchParquetWriterBuilder](file) {
 
   override def self(): BatchParquetWriterBuilder = this

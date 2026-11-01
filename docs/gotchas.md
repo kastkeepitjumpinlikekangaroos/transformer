@@ -673,6 +673,21 @@ ship a fix or move something from "not done" to "done".
   a wave at a time (`HashJoinExec.executePairing`), holding the build side
   and one wave's pairs; it held every pair before its first batch, and 25
   million wide ones filled a heap of a few GB (plans/testing/05).
+- **Hadoop's local file system runs `chmod` in a process of its own for each
+  file it creates**, since Hadoop's native library is never loaded here
+  (`RawLocalFileSystem.setPermission` falls back to a shell): 2.5 ms a file,
+  nearly all of what writing a spill file or a small part file cost.
+  `ParquetWriter` writes through `java.nio` (parquet-mr's `LocalOutputFile`)
+  instead, which writes no `.crc` sidecar either. Reading through Hadoop's
+  `RawLocalFileSystem` is still cheap: it sets no permissions.
+- **parquet-mr's `ParquetFileReader.open(file)` builds a fresh Hadoop
+  `Configuration`** for its read options (`ParquetReadOptions.builder()`),
+  which parses Hadoop's default resources: 2.2 ms an open, and a parquet
+  view opens each file twice (its footer, then each partition). Open through
+  `ParquetReader.open`, which builds the options from the configuration the
+  file was opened with; build those per reader, not once, since the codec
+  factory they hold is not safe to share. A new `Configuration()` costs the
+  same, so the reader and the writer each copy one built once.
 - **Spill files use positional column names, never the logical schema's.**
   Every spill-capable breaker (`HashJoinExec`, `HashAggregateExec`, `SortExec`,
   `DistinctExec`, `WindowExec`) writes its working set to temp parquet and reads

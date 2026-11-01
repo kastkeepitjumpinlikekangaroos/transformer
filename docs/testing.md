@@ -374,9 +374,10 @@ bazel run //src/test/scala/com/transformer/slt:corpus -- \
     <corpus>/test --modes none --threads 4 --report /tmp/slt-report.txt
 ```
 
-`--modes none` runs the baseline alone; with every mode a query costs about
-35 ms, most of it the parquet and spill files, so a run of the whole corpus is
-baseline-only and the modes go to slices.
+`--modes none` runs the baseline alone; with every mode a query cost about 35
+ms, most of it the parquet and spill files, each file 12 ms of setup before
+plans/testing/05 cut that to half a millisecond, so a run of the whole corpus
+is baseline-only and the modes go to slices.
 
 The run of 2026-11-01 over the corpus's `select1` to `select4`, `evidence` and
 `random` scripts (407 files, 5,304,916 records, 14 minutes on three threads)
@@ -926,3 +927,7 @@ the perf-tagged regression test. Short summary:
   `--test_tag_filters=perf`. Re-capture baselines after intentional perf
   changes — see the procedure in
   [`docs/benchmarking.md` §5](benchmarking.md#5-regression-guard).
+- `bench/spill_file_cost_test`, also perf-tagged, holds one small spill file's
+  write and read back under 2 ms, warm (it was 12 ms, almost none of it data;
+  about half a millisecond since plans/testing/05): a bound far above what it
+  costs, so it fails only on a regression to setup that costs per file.
