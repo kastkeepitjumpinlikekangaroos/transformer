@@ -50,7 +50,7 @@ takes all of them but JSqlParser 5.3, which still refuses deep parentheses.
 | W2 | `PlanSql`: a plan printed as SQL the binder reads back to it; the round trip as an slt mode and a fuzz property | **done** 2026-11-01 |
 | W3 | `EXPLAIN` and golden plans | **done** 2026-11-01 |
 | W4 | Join order by connectivity | **done** 2026-11-01 |
-| W5 | A pairing that streams | |
+| W5 | A pairing that streams | **done** 2026-11-01 |
 | W6 | Every hash zero (`--config=hashzero`) | |
 | W7 | A CSV glob's files with their columns in other orders | |
 | W8 | A spill file's fixed cost | |
@@ -192,6 +192,14 @@ eight-table ones, so the guard's refusal is its own exception type
 those modes alone. The groups of five to seven tables pair up to ten million
 rows each in written order, minutes across the modes, and are left to the
 corpus audit.
+
+W5: a join with no equality pairs in waves (`executePairing`), each advancing
+up to `Scheduler.parallelism` per-partition cursors by about 32768 pairs'
+worth of probe rows, so the probe side's partitions are still read in
+parallel and a pairing holds one wave's pairs. 25 million pairs, which the
+collapsing path ran a 256 MB heap out on, count in it; `select5.test` keeps
+its 5.7 s. Keyed joins under the broadcast size keep the collapsing path:
+their output is about their input, and they probe every partition at once.
 
 ### How the printer is built (W2)
 

@@ -12,6 +12,20 @@ scala_junit_test(
     ],
 )
 
+# A join with no equality pairs a wave at a time: every kind answers as a
+# nested loop does, and 25 million pairs stream through a 256 MB heap.
+scala_junit_test(
+    name = "pairing_join_test",
+    srcs = ["PairingJoinTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = ["-Xmx256m"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "@maven//:junit_junit",
+    ],
+)
+
 # EXPLAIN: a query's plan as rows, the optimized plan as a tree and as SQL,
 # VERBOSE adding the bound plan and the physical operators, nothing run.
 scala_junit_test(

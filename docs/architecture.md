@@ -1491,7 +1491,15 @@ never observe the swap.
 
 Non-equi joins (no equality conjunct after `splitEqualityKeys`) plan as a
 degenerate hash join — every probe row matches the single empty-key bucket
-holding every build row, which gives correct nested-loop semantics. To stop
+holding every build row, which gives correct nested-loop semantics. They run
+on a path of their own, `executePairing`: the build side is materialized, and
+the probe side is read through a cursor per probe partition and paired in
+waves, each advancing up to `Scheduler.parallelism` cursors in parallel by as
+many probe rows as pair about `PairsPerTask` (32768) rows, its output emitted
+before the next wave reads on. So a pairing holds its build side and one
+wave's pairs, never the product (the collapsing path it left held every pair
+before its first batch), and the build rows a RIGHT or FULL join leaves
+unmatched follow the last wave. To stop
 that from silently materializing an O(N*M) cartesian over millions of rows,
 `PhysicalPlanner.enforceNestedLoopGuard` refuses the plan when both sides'
 row counts are proven and `min(left, right) > 5000`, and when a side is itself

@@ -1485,7 +1485,10 @@ one over the output of another such join, directly or through joins on an
 equality, when the two would pair more than 25 million rows: a chain
 multiplies where each side alone looks small (three 300-row tables pair 27
 million). One small side against a large one, such as 100 buckets against a
-million-row table on `amount BETWEEN lo AND hi`, still runs.
+million-row table on `amount BETWEEN lo AND hi`, still runs. Such a join pairs
+its rows a wave at a time, so it holds its smaller side and a wave of pairs
+(a few hundred thousand rows), not every pair it makes: 25 million pairs count
+through a 256 MB heap.
 
 **Join order:** inner and comma joins run in the order `FROM` writes them,
 but where the next table has no equality with the tables joined so far, the

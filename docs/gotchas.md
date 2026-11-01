@@ -669,9 +669,10 @@ ship a fix or move something from "not done" to "done".
   redundant-but-cheap equality conjunct (`ON 1 = 1` won't help — it has
   no side info) or restructure the predicate so the planner can extract
   one. There's deliberately no per-task escape hatch — the threshold is
-  the contract. Below the bound a pairing still costs memory: the
-  collapsing path holds every row it pairs until it has them all, so 25
-  million pairs of wide rows can fill a heap of a few GB.
+  the contract. Below the bound a pairing costs time, not memory: it pairs
+  a wave at a time (`HashJoinExec.executePairing`), holding the build side
+  and one wave's pairs; it held every pair before its first batch, and 25
+  million wide ones filled a heap of a few GB (plans/testing/05).
 - **Spill files use positional column names, never the logical schema's.**
   Every spill-capable breaker (`HashJoinExec`, `HashAggregateExec`, `SortExec`,
   `DistinctExec`, `WindowExec`) writes its working set to temp parquet and reads
@@ -2027,7 +2028,8 @@ globs, the parser, the nested-loop guard and the desktop GUI. Details are in
   million rows, up to 10^23, and the file never finished; 521 are refused
   now, none of the rest pairs more than ten million, and the file runs in two
   and a half minutes, though two joins of 21 and 25 tables still run a 2 GB
-  heap out at ten million wide pairs (the collapsing path holds them all).
+  heap out at ten million wide pairs (the collapsing path held them all,
+  which the pairing path no longer does).
   Plan 05 then ordered joins by their equalities (`JoinOrder`), and all 732
   run, in under six seconds.
 - **The desktop GUI folded case in the JVM's locale.** Under a Turkish one,

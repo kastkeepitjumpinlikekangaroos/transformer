@@ -167,6 +167,7 @@ final case class HashJoinExec(
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     if (graceEnabled) executeGraceHash(partition)
     else if (isSharded) executePerShard(partition)
+    else if (nKeys == 0) executePairing(partition)
     else executeCollapsing(partition)
   }
 
@@ -230,6 +231,103 @@ final case class HashJoinExec(
       if (matchedBuild != null) emitUnmatchedBuild(build, matchedBuild)
       else Iterator.empty
     joined ++ unmatchedTail
+  }
+
+  // ---- Pairing path (no equality between the sides) ------------------------
+
+  /** A join with no equality between its sides pairs each probe row with
+    * every build row its condition keeps, up to the product of the two sides.
+    * The build side is materialized as on the collapsing path; the probe side
+    * is read through a [[PairingCursor]] per probe partition and paired in
+    * waves: each wave advances up to [[Scheduler.parallelism]] cursors in
+    * parallel by as many probe rows as pair about [[PairsPerTask]] rows, and
+    * its output is emitted before the next wave reads more. So the pairing
+    * holds the build side and one wave's pairs, where it held every pair it
+    * made before its first batch (the 25 million wide rows the nested-loop
+    * guard lets through filled a few GB of heap). The output is in waves, each
+    * the cursors' pairs in partition order; a partition joins the waves as an
+    * earlier one runs out. */
+  private def executePairing(partition: Int): Iterator[ColumnarBatch] = {
+    require(partition == 0, s"a join with no equality collapses to one partition; got partition=$partition")
+    val tBuild = if (metricsNode != null) System.nanoTime() else 0L
+    val build = buildSideAcrossAllPartitions()
+    if (metricsNode != null) {
+      metricsNode.counters(HashJoinExec.IdxBuildNanos).add(System.nanoTime() - tBuild)
+      metricsNode.counters(HashJoinExec.IdxBuildSideRows).add(build.rows.length.toLong)
+    }
+    val matchedBuild: util.HashSet[Int] = if (preserveBuildOuter) new util.HashSet[Int]() else null
+    val totals = new ProbeTallies
+    val rowsPerTask = math.max(1, HashJoinExec.PairsPerTask / math.max(1, build.rows.length))
+    val cursors = mutable.Queue.tabulate(probePlan.numPartitions)(p => new PairingCursor(p))
+    val waves = new Iterator[ColumnarBatch] {
+      private var current: Iterator[ColumnarBatch] = Iterator.empty
+      def hasNext: Boolean = {
+        while (!current.hasNext && cursors.nonEmpty) current = wave()
+        current.hasNext
+      }
+      def next(): ColumnarBatch = { hasNext; current.next() }
+
+      /** Advance the first cursors still reading, in parallel, and drop the
+        * ones that ran out. */
+      private def wave(): Iterator[ColumnarBatch] = {
+        val tProbe = if (metricsNode != null) System.nanoTime() else 0L
+        val advancing = cursors.take(Scheduler.parallelism).toVector
+        val results = Scheduler.submitAndAwaitAll(advancing.map { c =>
+          new Callable[ProbePartitionResult] {
+            def call(): ProbePartitionResult = c.pair(rowsPerTask, build)
+          }
+        })
+        val rows = mutable.ArrayBuffer.empty[Array[Any]]
+        results.foreach { r =>
+          rows ++= r.rows
+          if (matchedBuild != null) matchedBuild.addAll(r.matchedBuild)
+          totals.add(r.tallies)
+        }
+        cursors.filterInPlace(!_.done)
+        if (metricsNode != null) metricsNode.counters(HashJoinExec.IdxProbeNanos).add(System.nanoTime() - tProbe)
+        rowsToBatches(rows.toArray, outputSchema, ColumnarBatch.DefaultCapacity)
+      }
+    }
+    // The tail is read once every probe row is paired, so the build rows no
+    // probe row matched are known by then.
+    waves ++ {
+      recordProbeMetrics(totals)
+      if (matchedBuild != null) emitUnmatchedBuild(build, matchedBuild) else Iterator.empty
+    }
+  }
+
+  /** Where the pairing has read probe partition `partition` to: the batch it
+    * is in and the next row of it. A wave advances it on one pool thread; the
+    * next wave, which may run it on another, starts after this one is joined. */
+  private final class PairingCursor(partition: Int) {
+    private var batches: Iterator[ColumnarBatch] = null
+    private var batch: ColumnarBatch = null
+    private var row = 0
+    var done = false
+
+    /** Pair the next `rows` probe rows, or as many as are left, with `build`. */
+    def pair(rows: Int, build: BuildSide): ProbePartitionResult = {
+      val out = mutable.ArrayBuffer.empty[Array[Any]]
+      val matched = new util.HashSet[Int]()
+      val tallies = new ProbeTallies
+      if (batches == null) batches = probePlan.execute(partition)
+      var left = rows
+      while (left > 0 && !done) {
+        if (batch != null && row < batch.numRows) {
+          val until = math.min(batch.numRows, row + left)
+          probeBatchInto(batch, row, until, build, out, matched, tallies)
+          left -= until - row
+          row = until
+        } else if (batches.hasNext) {
+          batch = batches.next()
+          row = 0
+        } else {
+          done = true
+          batch = null
+        }
+      }
+      ProbePartitionResult(out, matched, tallies)
+    }
   }
 
   /** Materialize the build side across every build partition in parallel.
@@ -407,12 +505,15 @@ final case class HashJoinExec(
     val localMatched = new util.HashSet[Int]()
     val tallies = new ProbeTallies
     val probeIt = probePlan.execute(partitionIdx)
-    while (probeIt.hasNext) probeBatchInto(probeIt.next(), build, local, localMatched, tallies)
+    while (probeIt.hasNext) {
+      val b = probeIt.next()
+      probeBatchInto(b, 0, b.numRows, build, local, localMatched, tallies)
+    }
     ProbePartitionResult(local, localMatched, tallies)
   }
 
-  /** Probe every row of one batch against `build`, appending joined rows (and
-    * outer-preserved unmatched probe rows) to `out`. Matched build indices go
+  /** Probe rows `from` until `until` of one batch against `build`, appending
+    * joined rows (and outer-preserved unmatched probe rows) to `out`. Matched build indices go
     * into `matchedBuild` when non-null (joins that preserve the build side);
     * row counts accumulate into `tallies`. Shared by the in-memory probe
     * paths and the grace-hash bucket probe, so match semantics can't drift
@@ -425,12 +526,13 @@ final case class HashJoinExec(
     * per row. */
   private def probeBatchInto(
       b: ColumnarBatch,
+      from: Int,
+      until: Int,
       build: BuildSide,
       out: mutable.ArrayBuffer[Array[Any]],
       matchedBuild: util.HashSet[Int],
       tallies: ProbeTallies): Unit = {
-    val nrows = b.numRows
-    tallies.inputRows += nrows.toLong
+    tallies.inputRows += (until - from).toLong
     val probeWidth = probePlan.outputSchema.length
     // For non-ColRef probe keys, hoist Expr.eval out of the per-row loop.
     // ColRef keys go through `encodeFromBatchSkipIfAnyNull` which already
@@ -440,8 +542,8 @@ final case class HashJoinExec(
       if (probeKeysAreColRefs || useJoinLongKey) null
       else Array.tabulate(nKeys)(i => probeKeyExprs(i).evalVec(b))
     val keyBuf: Array[Any] = if (probeKeysAreColRefs) null else new Array[Any](nKeys)
-    var r = 0
-    while (r < nrows) {
+    var r = from
+    while (r < until) {
       val matches: util.ArrayList[Int] =
         if (useJoinLongKey) {
           val col = b.column(probeKeyLongIdx)
@@ -879,7 +981,10 @@ final case class HashJoinExec(
     var part = 0
     while (part < reader.numPartitions) {
       val it = reader.readPartition(part)
-      while (it.hasNext) probeBatchInto(it.next(), build, out, matchedBuild, tallies)
+      while (it.hasNext) {
+        val b = it.next()
+        probeBatchInto(b, 0, b.numRows, build, out, matchedBuild, tallies)
+      }
       part += 1
     }
     recordProbeMetrics(tallies)
@@ -917,6 +1022,11 @@ final case class HashJoinExec(
 }
 
 object HashJoinExec {
+  /** About how many pairs one pool task of the pairing path makes before its
+    * output is emitted: a wave holds at most [[Scheduler.parallelism]] times
+    * this many rows. */
+  private[exec] final val PairsPerTask: Int = 1 << 15
+
   // ---- Counter indices ------------------------------------------------------
   // In-memory path counters.
   final val IdxBuildSideRows: Int      = 0
