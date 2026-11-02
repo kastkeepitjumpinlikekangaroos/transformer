@@ -1357,6 +1357,40 @@ columns. To add a new pass:
 5. Update [`docs/architecture.md`'s "Logical plan optimization"](architecture.md#9-logical-plan-optimization)
    to describe the new pass and where it sits in the order.
 
+## Add a bytecode rule
+
+A convention a compiled class can show (a call no module makes, a call one
+place alone makes, a raw float comparison) is a rule in
+`src/test/scala/com/transformer/bytecode/BytecodeRules.scala`, which
+`bytecode:bytecode_rules_test` holds over every module a job runs and the
+desktop's:
+
+1. Measure first: write the rule with no allowlist and run the target. Its
+   failure lists every site the rule bans, each with its source line.
+2. Write the `Rule`: an id and a title; its scope (`Engine`, `JobModules`,
+   `Desktop` or `AllModules`); its bans, `member(owner, name, descriptor)` for
+   a call or a field access (any descriptor when none is given), each with
+   `instead` when one call replaces it, or a `Ban` of your own over the
+   reader's `Use`s; and the advice its failure prints, which points at the
+   convention in conventions.md.
+3. Give each site that a decision allows an `Allow(cls, method, reason)` in
+   `allowed`: the binary class name (`com.transformer.core.Ops$` for an
+   object), the method as written (it covers its lambdas, local defs, default
+   arguments and specialized copies; `*` a whole class) and the decision. A
+   site no decision covers is a finding: fix it if it is a defect, or put it
+   in `held` with why, for the user to decide. An allowlist past about ten
+   entries says the convention is not one rule; leave such a rule out.
+4. Add the rule to `BytecodeRules.All`, and sabotage it once: a violating call
+   in some module fails the test, naming the rule and its advice.
+5. Say in the convention's bullet in conventions.md that the rule holds it,
+   and add it to `bytecode_rules_test`'s row in testing.md.
+
+A new module joins the scan as a `Module` in `BytecodeRules.scala` and a
+`runtime_deps` entry of the target; `everyTransformerClassAModuleNamesIsInAModuleTheRulesRead`
+fails until it does. A kind of use the reader does not yet find (an opcode
+other than the float comparisons) is a case in `ClassFile.uses`, with a
+method in `ClassFileFixture` that `bytecode:classfile_test` finds it in.
+
 ## Add cloud support (v1.1 work)
 
 The interfaces are already in place:

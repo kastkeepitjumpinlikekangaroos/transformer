@@ -597,6 +597,30 @@ ship a fix or move something from "not done" to "done".
   `bazel cquery <target> --toolchain_resolution_debug='@@rules_scala~//scala:toolchain_type'`
   shows the choice (`Selected //:scala_toolchain_impl`); if rules_scala's
   default won, the options would do nothing and nothing would fail.
+- **A constant pool does not say which method calls.** A class file's pool
+  lists every class, field and method the class refers to, and holds no code:
+  a reference is placed in a method only by decoding the method's Code
+  attribute an instruction at a time (`bytecode/ClassFile.scala`), and a raw
+  `<` between two doubles is a `dcmpg` instruction there, no reference at all.
+  A rule read off the pool alone could only allow a whole class, and could not
+  see the comparison.
+- **A lambda's body is a method of its own.** scalac compiles a function
+  literal in method `m` to a static method `$anonfun$m$1` (with a boxing
+  adapter, `$anonfun$m$1$adapted`), and `m` holds only an `invokedynamic`
+  whose bootstrap arguments are a handle on it. A local def `go` in `m`
+  compiles to `go$1`, a default argument to `m$default$1`, a specialized copy
+  to `m$mcD$sp`, and a constructor's default argument, in the companion, to
+  `$lessinit$greater$default$1`. A bytecode rule's allowlist entry names `m`
+  and covers each of them; a lambda in a `val`'s initializer is
+  `$anonfun$<val>$1`.
+- **A string `match` calls `hashCode`.** Scala 2.13 compiles
+  `s match { case "a" => ...; case "b" => ... }` to a `lookupswitch` on
+  `s.hashCode`, then `equals` against each case. So a scan for hash calls finds
+  every string match and every case class's synthesized `hashCode`: when
+  plans/testing/18 measured it, 53 of the 59 classes of `core`, `sql`, `read`
+  and `write` that called a hash function did so only that way. That is why no
+  bytecode rule holds "every key hash goes through `KeyHash`";
+  `--config=hashzero` holds it by behaviour.
 - **`java -jar` ignores a `scala_binary`'s `jvm_flags`.** `//:transformer`
   sets `-XX:MaxRAMPercentage=75.0`, but that only applies to the
   `bazel-bin/transformer` wrapper script. Users running
@@ -1980,11 +2004,12 @@ ship a fix or move something from "not done" to "done".
   locale with non-ASCII numerals named part files and `{{ current_month_pad }}`
   in them. Every such call now names `Locale.ROOT`, and
   `job/locale_independence_test` runs under tr-TR (six of its tests failed at
-  the code before) and scans every module's compiled classes for the
-  default-locale forms, so a new one fails the suite. The desktop GUI and the
-  data viewer are scanned for case folding only, since their display text may
-  format a number in the user's locale; they folded keywords and input names in
-  the default locale until plans/testing/04 (below). See
+  the code before), and rule R1 of `bytecode/bytecode_rules_test` reads every
+  module's compiled classes for the default-locale forms, so a new one fails
+  the suite. The desktop GUI and the data viewer are held to case folding
+  only, since their display text may format a number in the user's locale;
+  they folded keywords and input names in the default locale until
+  plans/testing/04 (below). See
   [plans/robustness/16](../plans/robustness/16-locale-dependent-names.md).
 - **A `CASE`, `IF` or `COALESCE` used to evaluate every branch on every row
   — fixed.** `CaseExpr.evalVec` evaluated each branch's value over the whole
@@ -2333,9 +2358,9 @@ globs, the parser, the nested-loop guard and the desktop GUI. Details are in
   the DAG matched an input's name against the job's lowered names in it, so an
   input named with an I showed no task using it; vim's Ctrl-I arrived as
   Ctrl-ı; and the block caret's CSS printed `1,50px`, which CSS cannot read.
-  Every case fold names `Locale.ROOT` and the CSS is formatted in it, and
-  `job/locale_independence_test` scans the GUI's and the viewer's jars for case
-  folding. Found by `--config=zone`, through the highlighter's test, with two
+  Every case fold names `Locale.ROOT` and the CSS is formatted in it, and rule
+  R1 (desktop) of `bytecode/bytecode_rules_test` reads the GUI's and the
+  viewer's jars for case folding. Found by `--config=zone`, through the highlighter's test, with two
   tests that folded or printed a parquet type name in the default locale.
 
 ## Defects the plan round trip found (2026-11-01, all fixed)

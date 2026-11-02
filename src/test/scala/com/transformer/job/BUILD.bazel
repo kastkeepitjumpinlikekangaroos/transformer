@@ -96,9 +96,9 @@ scala_junit_test(
 # Runs under a Turkish locale, where "I".toLowerCase() is a dotless i: view,
 # column, function, CAST-type and template-variable names, UPPER / LOWER, ILIKE
 # and a directory job must behave as anywhere else; part file names and template
-# values keep ASCII digits under a locale that prints others; no compiled class
-# of a module a job runs calls a default-locale conversion or format; and none of
-# the desktop GUI's or the data viewer's folds case in the default locale.
+# values keep ASCII digits under a locale that prints others. Rule R1 of
+# //src/test/scala/com/transformer/bytecode:bytecode_rules_test holds the same
+# rule over the compiled classes.
 scala_junit_test(
     name = "locale_independence_test",
     srcs = ["LocaleIndependenceTest.scala"],
@@ -108,23 +108,12 @@ scala_junit_test(
     ],
     suffixes = ["Test"],
     deps = [
-        "//src/main/scala/com/transformer/cli",
         "//src/main/scala/com/transformer/core",
-        "//src/main/scala/com/transformer/gui:session",
         "//src/main/scala/com/transformer/job",
         "//src/main/scala/com/transformer/read/csv",
-        "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/sql/exec",
-        "//src/main/scala/com/transformer/sql/parse",
-        "//src/main/scala/com/transformer/sql/plan",
         "//src/main/scala/com/transformer/temporal",
         "//src/main/scala/com/transformer/write/csv",
-        "//src/main/scala/com/transformer/write/parquet",
         "@maven//:junit_junit",
-    ],
-    # Scanned, not called: the desktop GUI's and the data viewer's jars.
-    runtime_deps = [
-        "//src/main/scala/com/transformer/gui",
-        "//src/main/scala/com/transformer/viewer",
     ],
 )

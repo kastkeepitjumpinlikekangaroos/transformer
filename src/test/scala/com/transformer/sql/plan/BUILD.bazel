@@ -101,6 +101,7 @@ scala_junit_test(
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/sql/parse",
         "//src/main/scala/com/transformer/sql/plan",
+        "//src/test/scala/com/transformer/bytecode:classfile",
         "@maven//:com_github_jsqlparser_jsqlparser",
         "@maven//:junit_junit",
     ],

@@ -1,5 +1,6 @@
 package com.transformer.sql.plan
 
+import com.transformer.bytecode.{ClassFile, ClassFiles}
 import com.transformer.core.Catalog
 import com.transformer.sql.parse.SqlParser
 import net.sf.jsqlparser.expression.Expression
@@ -8,9 +9,7 @@ import net.sf.jsqlparser.statement.select.{AllColumns, AllTableColumns, FromItem
 import org.junit.Assert._
 import org.junit.Test
 
-import java.io.{ByteArrayInputStream, DataInputStream, File}
 import java.lang.reflect.{Modifier, ParameterizedType, Type, WildcardType}
-import java.nio.file.Files
 import java.util.jar.JarFile
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
@@ -255,10 +254,11 @@ object UnsupportedClausesTest {
   // ---------------------------------------------------------------------------
 
   /** Internal names (`net/sf/...`) of every class the binder's constant pools
-    * name, and every (owner, member) it calls or reads. */
+    * name, and every (owner, member) it calls or reads, by the class-file
+    * reader the bytecode rules share (`bytecode:classfile`). */
   private lazy val (binderClassNames: Seq[String], binderMemberRefs: Set[(String, String)]) = {
-    val pools = binderClassFiles.map(ConstantPool.read)
-    (pools.flatMap(_.classes).distinct, pools.flatMap(_.members).toSet)
+    val binder = binderClassFiles
+    (binder.flatMap(_.classes).distinct, binder.flatMap(_.references).map(r => (r.owner, r.name)).toSet)
   }
 
   /** Whether the binder reads `member` on a node of class `cls`: a call or
@@ -270,59 +270,13 @@ object UnsupportedClausesTest {
       m == member && loadJSqlParserClass(owner).exists(_.isAssignableFrom(cls))
     }
 
-  private def binderClassFiles: Seq[Array[Byte]] = {
-    val location = new File(LogicalBuilder.getClass.getProtectionDomain.getCodeSource.getLocation.toURI)
-    def wanted(name: String) = name.endsWith(".class") && BinderClassPrefixes.exists(name.startsWith)
-    val files =
-      if (location.isDirectory) {
-        val root = location.toPath
-        Files.walk(root).iterator.asScala.filter(Files.isRegularFile(_))
-          .filter(p => wanted(root.relativize(p).toString.replace(File.separatorChar, '/')))
-          .map(p => Files.readAllBytes(p)).toVector
-      } else {
-        val jar = new JarFile(location)
-        try jar.entries.asScala.filter(e => wanted(e.getName)).map(e => jar.getInputStream(e).readAllBytes()).toVector
-        finally jar.close()
-      }
+  private def binderClassFiles: Seq[ClassFile] = {
+    val location = ClassFiles.locationOf(LogicalBuilder.getClass)
+    val files = ClassFiles.in(location).collect {
+      case (path, bytes) if BinderClassPrefixes.exists(path.startsWith) => ClassFile.read(bytes)
+    }
     assertTrue(s"found no class files under $location for $BinderClassPrefixes", files.nonEmpty)
     files
-  }
-
-  /** The class and member references in one class file's constant pool (JVMS
-    * section 4.4) — enough to see what a class matches on and calls, without a
-    * bytecode library. */
-  private object ConstantPool {
-    final case class Refs(classes: Seq[String], members: Seq[(String, String)])
-
-    def read(bytes: Array[Byte]): Refs = {
-      val in = new DataInputStream(new ByteArrayInputStream(bytes))
-      require(in.readInt() == 0xCAFEBABE, "not a class file")
-      in.readUnsignedShort(); in.readUnsignedShort() // minor, major version
-      val n = in.readUnsignedShort()
-      val tag = new Array[Int](n)
-      val a = new Array[Int](n)
-      val b = new Array[Int](n)
-      val utf8 = new Array[String](n)
-      var i = 1
-      while (i < n) {
-        tag(i) = in.readUnsignedByte()
-        tag(i) match {
-          case 1                           => utf8(i) = in.readUTF()
-          case 3 | 4                       => in.readInt()
-          case 5 | 6                       => in.readLong(); i += 1 // takes two slots
-          case 7 | 8 | 16 | 19 | 20        => a(i) = in.readUnsignedShort()
-          case 9 | 10 | 11 | 12 | 17 | 18  => a(i) = in.readUnsignedShort(); b(i) = in.readUnsignedShort()
-          case 15                          => in.readUnsignedByte(); a(i) = in.readUnsignedShort()
-          case other                       => sys.error(s"unknown constant-pool tag $other")
-        }
-        i += 1
-      }
-      val classes = (1 until n).filter(tag(_) == 7).map(j => utf8(a(j)))
-      // Fieldref, Methodref, InterfaceMethodref: class index, then name-and-type.
-      val members = (1 until n).filter(j => tag(j) == 9 || tag(j) == 10 || tag(j) == 11)
-        .map(j => (utf8(a(a(j))), utf8(a(b(j)))))
-      Refs(classes, members)
-    }
   }
 
   // ---------------------------------------------------------------------------
@@ -350,8 +304,7 @@ object UnsupportedClausesTest {
   }
 
   private lazy val jsqlParserClasses: Seq[Class[_]] = {
-    val jar = new JarFile(new File(classOf[net.sf.jsqlparser.statement.Statement]
-      .getProtectionDomain.getCodeSource.getLocation.toURI))
+    val jar = new JarFile(ClassFiles.locationOf(classOf[net.sf.jsqlparser.statement.Statement]))
     try jar.entries.asScala.map(_.getName)
       .filter(n => n.startsWith("net/sf/jsqlparser/") && n.endsWith(".class"))
       .flatMap(n => loadJSqlParserClass(n.stripSuffix(".class"))).toVector

@@ -28,6 +28,22 @@ specific traps.
   the file. Scan a diff for what slipped through with
   `git diff -U0 | grep '^+' | perl -ne 'print if /[^\x00-\x7F]/'` (macOS
   `grep` has no `-P`).
+- **A rule a compiled class can show is held in bytecode.**
+  `bytecode:bytecode_rules_test` reads every compiled class of the modules a
+  job runs and of the desktop GUI and the data viewer through one hand-written
+  class-file reader (`bytecode/ClassFile.scala`: the constant pool, and each
+  method's code decoded an instruction at a time, no bytecode library), and
+  holds each rule of `bytecode/BytecodeRules.scala` over them: what it bans, in
+  which modules, and the advice its failure prints with each site's source
+  line. A rule's exceptions are its allowlist, each a class, a method and the
+  reason: an entry covers the lambdas written in its method
+  (`$anonfun$<method>$1`), its local defs, default arguments and specialized
+  copies, and `*` covers a whole class. Add one only for an exception a
+  decision made, and name the decision; an entry whose method no longer does
+  what its rule bans fails the test, so an exception cannot outlive its reason.
+  A site no decision covers goes in the rule's `held` list, with why, until the
+  user decides. Each bullet here that a rule holds says which one;
+  [extending.md](extending.md#add-a-bytecode-rule) says how to add a rule.
 - **Case folding and formatting name `Locale.ROOT`.** `toLowerCase` and
   `toUpperCase` with no argument, `String.format`, an `f"..."` interpolator and
   `DateTimeFormatter.ofPattern(pattern)` read the JVM's default locale, under
@@ -36,12 +52,13 @@ specific traps.
   are not ASCII (a part file named in Thai numerals). Every such call in a module
   a job runs names `Locale.ROOT`: `name.toLowerCase(Locale.ROOT)`,
   `"part-%05d.csv".formatLocal(Locale.ROOT, i)`.
-  `job:locale_independence_test` runs under tr-TR and fails on any compiled call
-  of the default-locale forms. The desktop GUI and the data viewer fold names,
-  keywords and keys the same way, and the test scans their jars for
-  `toLowerCase()` and `toUpperCase()`; their display text may format a number in
-  the user's locale, but text something parses, such as CSS, names
-  `Locale.ROOT` too.
+  `job:locale_independence_test` runs under tr-TR, and rule R1 of
+  `bytecode:bytecode_rules_test` fails on any compiled call of the
+  default-locale forms in a module a job runs. The desktop GUI and the data
+  viewer fold names, keywords and keys the same way, and R1 (desktop) holds
+  their jars to no `toLowerCase()` or `toUpperCase()`; their display text may
+  format a number in the user's locale, but text something parses, such as
+  CSS, names `Locale.ROOT` too.
 - **No `*/` inside Scaladoc** — the Scala lexer closes the comment at the first
   `*/`. Glob examples like `data/*.csv` inside a `/** */` block are a footgun;
   use `'*'.csv` or move the example to plain prose. We hit this twice.
