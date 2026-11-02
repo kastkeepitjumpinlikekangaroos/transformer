@@ -368,7 +368,7 @@ object Shrinker {
 
   /** Reassemble `e` from a new child list of the same length and shape as
     * [[childrenOf]] returned. */
-  private def rebuild(e: Expr, kids: Seq[Expr]): Expr = e match {
+  private[fuzz] def rebuild(e: Expr, kids: Seq[Expr]): Expr = e match {
     case LitExpr(_, _) => e
     case ColRefExpr(_, _, _) => e
     case CastExpr(_, t) => CastExpr(kids.head, t)

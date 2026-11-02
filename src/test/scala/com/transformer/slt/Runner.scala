@@ -336,6 +336,8 @@ final class Runner(dialect: Dialect, ledger: Ledger, modes: Seq[Mode] = Modes.Ve
         val (schema, rows) = run(sql, db, views, m)
         shapeProblem(schema, q.columns, rows) match {
           case Some(p) => Some(Diverged(m.name, p))
+          case None if m.unordered =>
+            diff(unordered(q, baseline), unordered(q, printedResult(q, schema, rows))).map(d => Diverged(m.name, d))
           case None =>
             diff(baseline, printedResult(q, schema, rows)).map(d => Diverged(m.name, d))
         }
@@ -347,6 +349,13 @@ final class Runner(dialect: Dialect, ledger: Ledger, modes: Seq[Mode] = Modes.Ve
         case f: RunFailure => Some(Diverged(m.name, (if (f.atPlan) "refused: " else "failed on the data: ") + describe(f.cause)))
       }
     }.collectFirst { case Some(o) => o }.getOrElse(Passed)
+
+  /** A printed result's rows in one order, whatever order they came in: a
+    * SQLite script's values regrouped into rows and sorted, the others'
+    * already sorted ([[printedResult]]). */
+  private def unordered(q: Query, printed: Vector[String]): Vector[String] =
+    if (format != Script.Format.Sqlite || q.sort == SortMode.ValueSort || q.columns.isEmpty) printed
+    else Values.arrange(printed.grouped(q.columns.length).toVector, SortMode.RowSort)
 
   /** Whether a result's columns are the record's: as many, and each exact
     * column of the type it names. */

@@ -1156,6 +1156,18 @@ shape to be observable against its degenerate query on a share of seeds. A shape
 that disagrees today is a defect: record it in `SyntaxEquivalence.KnownDefects`
 with its plan and a repro, never by leaving the shape out.
 
+**A value-preserving form** (EET, `oracle/Eet`) is a case of `Eet.wrap` and its
+name in `Eet.Forms`, which `rewritesReachEveryPositionAndForm` then holds to a
+share of the corpus. A form must keep its expression's type exactly (the
+binder's one rule for branches, `Analyzer.branches`, refuses a DECIMAL beside a
+DOUBLE no query wrote), must never evaluate what the unwrapped expression would
+not on a row that needs it (a branch it plants that fails must stay unused),
+and must print as text JSqlParser reads: probe a new shape in a CAST, under IS
+NULL and deep in an AND/OR chain, where it reads fewest. A position the binder
+reads a constant at (a ROUND's scale, a number beside a DECIMAL) is no position
+for a form, which is why `eligible` skips every expression that reads no
+column.
+
 **Three rules keep generated SQL sound and bindable** — hold them in any new
 relation or generator extension:
 

@@ -113,6 +113,23 @@ scala_junit_test(
     ],
 )
 
+# Value-preserving rewrites (EET): every query QueryGen, MetaQueryGen and
+# SqlTextGen (honoured clauses, spellings) write, its bound plan with up to
+# three subexpressions wrapped in forms that cannot change their values,
+# printed (PlanSql) and run, answers as the query does. Default budget, part
+# of `bazel test //...`.
+scala_junit_test(
+    name = "eet_fuzz_test",
+    srcs = ["EetFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 # The metamorphic gate re-run under SHARDED planning. The sharding gates
 # (LogicalPlanCardinality.{MinShardableSize, BroadcastBuildThreshold}) are vals
 # read at class load, so they need a separate JVM: jvm_flags set both to 1,
@@ -267,6 +284,19 @@ scala_junit_test(
         ":fuzz",
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "eet_fuzz_campaign",
+    srcs = ["EetFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/sql/plan",
         "@maven//:junit_junit",
     ],

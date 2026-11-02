@@ -20,6 +20,7 @@ scala_library(
         "//src/main/scala/com/transformer/read/csv",
         "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/parse",
         "//src/main/scala/com/transformer/sql/plan",
         "//src/main/scala/com/transformer/write/parquet",
         "//src/test/scala/com/transformer/fuzz",

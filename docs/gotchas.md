@@ -20,6 +20,18 @@ ship a fix or move something from "not done" to "done".
   "(" "("`. Two parse, as do any number around the tested value, after `LIKE`
   or beside `=`. SQLite's corpus writes the shape 13 times in 5.3 million
   records; write fewer parentheses.
+- **JSqlParser 5.2 does not read every chain of conditions it should.** Deep
+  in an AND/OR chain, `(((IF(TRUE, a <= b, NULL) AND ...` is `Encountered
+  unexpected token: "("` and `... OR (a = a) IS NULL)` is `Encountered
+  unexpected token: "IS"`, where the same pieces shallower parse, and a deep
+  condition written twice can run past its time limit, as can a CASE, an IF or
+  a NOT added inside parentheses nested five deep (seconds a query). A plan
+  the binder made from text that parsed prints as text that parses (the
+  `reprinted` modes pass every script), but a plan `oracle/Eet` rewrote holds
+  parentheses no written query had: the `rewritten` slt mode runs a query
+  nested five deep as written, and one whose rewrite does not parse, and the
+  EET properties count the second (`unparsed`); a form that writes its
+  expression twice takes one of twelve nodes or fewer.
 - **JSqlParser 5.2 reads a CAST of a condition only in parentheses.**
   `CAST((a = b) AS VARCHAR)` parses; `CAST(a = b AS VARCHAR)` is `SQL parse
   error: Encountered unexpected token: "="`, and so is a CAST whose operand is

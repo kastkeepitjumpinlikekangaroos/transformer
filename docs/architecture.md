@@ -1928,8 +1928,8 @@ Alongside the example-based unit tests, `src/test/scala/com/transformer/fuzz/`
 holds a hand-rolled property-based harness (no new dependency — PBT by hand, like
 the engine itself). Each property generates random-but-valid inputs, checks an
 invariant over many seeds, and shrinks any counterexample to a minimal repro.
-Six oracle families over generated queries, in increasing semantic reach, and a
-seventh over generated text:
+The oracle families over generated queries, in increasing semantic reach, and
+one over generated text:
 
 - **Expression parity** (`oracle/ExprParity`) — a generated type-correct `Expr`
   over a random `ColumnarBatch` must evaluate identically through the scalar
@@ -1960,6 +1960,15 @@ seventh over generated text:
   results. Run in heap and under spill, it drives the partial/final merge and the
   `AggState` spill serde that a global aggregate (one accumulator, never flushed)
   never reaches.
+- **Value-preserving rewrites** (`oracle/Eet`, EET's relation, OSDI 2024) — up
+  to three subexpressions of a query's bound plan, anywhere the binder puts
+  one, each wrapped in a form that cannot change its value (`CASE WHEN FALSE
+  THEN r ELSE e END` with an `r` that would fail, `COALESCE(e, e)`, a condition
+  ANDed with a tautology, ...), printed as SQL and run: the answer must not
+  change. It needs no reference engine and reaches every generator and, as the
+  slt `rewritten` mode, every script; it aims at the guards a conditional
+  keeps (a branch never taken must never run) and at passes that move or drop
+  a condition they do not recognize.
 - **Frontend robustness** (`oracle/CleanRejection`, `oracle/NoSilentDrop`,
   `oracle/SyntaxEquivalence`, over `SqlTextGen`) — every generator above renders
   its own typed AST, so its corpus is the supported grammar. This one writes
@@ -2012,10 +2021,11 @@ engine and multiply each one across execution modes:
   DuckDB agree on (`agreed/`, written by `slt/AgreedCorpus` through
   `fuzz/PortableSql`, which prints a generated query as SQL all three read
   alike). The runner
-  carries out the DDL itself (`Database`) and runs every query under thirteen
+  carries out the DDL itself (`Database`) and runs every query under fourteen
   verification modes (`Modes`: layouts, spill, metrics, parquet files read
   back, columns stored in another order, the logical optimizer off or one
-  pass at a time, and the plan printed as SQL, below), DuckDB's query
+  pass at a time, the plan printed as SQL, below, and the plan rewritten in
+  forms that cannot change its values, EET's relation), DuckDB's query
   verification. Each mode must print the baseline's result. A record the
   engine answers otherwise by design cites its rule in the ledger in
   [gotchas.md](gotchas.md#answers-that-differ-from-other-engines-by-design)

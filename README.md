@@ -2286,8 +2286,9 @@ an error, and so is a BUILD dependency no source uses
 Each leaf test directory has its own `scala_junit_test` target. SQL's
 semantics are also pinned as sqllogictest scripts under `src/test/slt/`
 (SQLite's format: each query beside its expected result), which
-`slt/slt_test` runs under thirteen execution modes each (two of them run the
-query's plan printed back as SQL), beside a slice of SQLite's own corpus,
+`slt/slt_test` runs under fourteen execution modes each (three of them run the
+query's plan printed back as SQL, one with up to three of its expressions
+rewritten in forms that cannot change their values), beside a slice of SQLite's own corpus,
 ports of Postgres's and Spark's tests with their answers, CockroachDB's and
 DataFusion's logic tests with theirs, eleven TPC-H queries with
 RisingWave's, and some 3,000 queries the fuzz generators drew with the answers
