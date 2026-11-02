@@ -697,8 +697,10 @@ Both directions skip the `Group`/`SimpleGroup` row-object model that
   unsigned `INT32` widens to `BIGINT` (`UnsignedInts`) and an unsigned
   `INT64` to `DECIMAL(20,0)` (`UnsignedLongs`), `FLOAT16` to `FLOAT`
   (`HalfFloats`), `JSON` and `ENUM` read as text, `BSON` and `UUID` as bytes,
+  an unannotated `BINARY` as bytes, or as strictly decoded UTF-8 text under
+  the input's `binaryAsString` (`BinaryText`, which pushes no comparison),
   and `TIME`, `INTERVAL`, a `REPEATED` column or a nested group fail, naming
-  the column. Each `Decoding` also says whether it `pushesComparisons`: true
+  the file and the column. Each `Decoding` also says whether it `pushesComparisons`: true
   for a plain copy in the engine's order, false where the decode changes the
   stored bits or where the file orders them otherwise (an unsigned 8- or 16-bit
   integer, `UnsignedNarrowInts`, reads as an `INT` but is ordered unsigned).

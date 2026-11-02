@@ -78,6 +78,11 @@ private[parquet] object ParquetColumns {
     /** Bytes as stored: an unannotated BINARY or FIXED_LEN_BYTE_ARRAY, a BSON
       * document (binary, not text) or a UUID. */
     case object Bytes extends Decoding(DataType.BinaryType, true)
+    /** An unannotated BINARY read as UTF-8 text, under an input's
+      * `binaryAsString`: each value must be UTF-8, and the column's
+      * statistics, which an older writer may have ordered as signed bytes,
+      * judge no comparison. */
+    case object BinaryText extends Decoding(DataType.StringType, false)
     /** A DECIMAL's unscaled value as an INT32. */
     final case class IntDecimals(precision: Int, scale: Int)
         extends Decoding(DataType.DecimalType(precision, scale), false)
@@ -92,8 +97,9 @@ private[parquet] object ParquetColumns {
   }
 
   /** The decoding for column `t` of the file `label`, or an error naming
-    * both when the engine has no type for what it holds. */
-  def decoding(t: Type, label: String): Decoding = {
+    * both when the engine has no type for what it holds. `binaryAsString`
+    * reads an unannotated BINARY as text. */
+  def decoding(t: Type, label: String, binaryAsString: Boolean): Decoding = {
     def refuse(what: String) =
       new ParquetReader.Unreadable(s"Parquet file '$label' column '${t.getName}' $what", null)
     if (!t.isPrimitive) {
@@ -126,7 +132,8 @@ private[parquet] object ParquetColumns {
       case (PrimitiveTypeName.FLOAT, null) => Decoding.Floats
       case (PrimitiveTypeName.DOUBLE, null) => Decoding.Doubles
 
-      case (PrimitiveTypeName.BINARY, null | _: BsonLogicalTypeAnnotation) => Decoding.Bytes
+      case (PrimitiveTypeName.BINARY, null) => if (binaryAsString) Decoding.BinaryText else Decoding.Bytes
+      case (PrimitiveTypeName.BINARY, _: BsonLogicalTypeAnnotation) => Decoding.Bytes
       case (PrimitiveTypeName.BINARY, _: StringLogicalTypeAnnotation | _: EnumLogicalTypeAnnotation | _: JsonLogicalTypeAnnotation) =>
         Decoding.Strings
       case (PrimitiveTypeName.BINARY, d: DecimalLogicalTypeAnnotation) => Decoding.ByteDecimals(d.getPrecision, d.getScale)
@@ -153,11 +160,11 @@ private[parquet] object ParquetColumns {
   /** The schema of a view over `files`, each a label for messages and the
     * file's footer schema: the first file's columns in its order, each
     * nullable if any file allows it a NULL. */
-  def viewSchema(files: Seq[(String, MessageType)]): Schema = {
+  def viewSchema(files: Seq[(String, MessageType)], binaryAsString: Boolean): Schema = {
     val (_, first) = files.head
     Schema(first.getFields.asScala.map { t =>
       val anyNullable = files.exists { case (_, mt) => field(mt, t.getName).exists(nullable) }
-      Field(t.getName, decoding(t, files.head._1).dataType, anyNullable)
+      Field(t.getName, decoding(t, files.head._1, binaryAsString).dataType, anyNullable)
     }.toVector)
   }
 
@@ -170,13 +177,13 @@ private[parquet] object ParquetColumns {
   /** Match `schema`'s columns to the file's by name. Fails, naming the file
     * (`label`) and the column, when the file lacks one or reads it as another
     * type. */
-  def resolve(schema: Schema, file: MessageType, label: String): FileColumns = {
+  def resolve(schema: Schema, file: MessageType, label: String, binaryAsString: Boolean): FileColumns = {
     val types: Vector[Type] = schema.fields.map { f =>
       field(file, f.name).getOrElse(throw new ParquetReader.Unreadable(
         s"Parquet file '$label' has no column '${f.name}', which the first file of its glob has", null))
     }
     val decodings = schema.fields.zip(types).map { case (f, t) =>
-      val d = decoding(t, label)
+      val d = decoding(t, label, binaryAsString)
       if (d.dataType != f.dataType) throw new ParquetReader.Unreadable(
         s"Parquet file '$label' has column '${f.name}' as ${d.dataType}, " +
           s"but the first file of its glob has it as ${f.dataType}", null)

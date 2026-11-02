@@ -702,6 +702,45 @@ class ParquetExternalFormatTest {
     assertEquals(Seq(Seq[Any](4294967295L, 1.5f)), query("SELECT u, h FROM t WHERE u > 10 AND h > 1.0", "t" -> view))
   }
 
+  /** Impala and old Hive stored text as a BINARY with no annotation, which
+    * reads as a `BINARY`, and a `BINARY` casts to nothing, so no query could
+    * use such a column as text (parquet-testing's Impala `alltypes_*` files).
+    * `binaryAsString`, Spark's name, reads each one as a `STRING` of its
+    * UTF-8 bytes (plans/testing/13, decision 3): strictly, a value that is
+    * no UTF-8 failing the read, naming its row of the file, where
+    * `toStringUsingUTF8` would have read it as U+FFFD. Annotated text,
+    * `BSON` and fixed-length bytes keep their types, and no comparison is
+    * pushed to the column's statistics, which an older writer ordered as
+    * signed bytes. */
+  @Test def binaryAsStringReadsUnannotatedBinaryAsText(): Unit = {
+    val file = writeFixture(
+      """message m {
+        |  required int32 id;
+        |  optional binary s;
+        |  optional binary j (BSON);
+        |  optional fixed_len_byte_array(2) f;
+        |  optional binary t (STRING);
+        |}""".stripMargin,
+      Seq(Seq(1, "h\u00e9llo", bytes(1, 2), bytes(3, 4), "x"), Seq(2, null, null, null, null), Seq(3, "", bytes(), bytes(5, 6), "")))
+    assertEquals(DataType.BinaryType, typeOf(read(file), "s"))
+    def asText(f: Path) = ParquetReader.fromPath(f.toString, ColumnarBatch.DefaultCapacity,
+      ParquetReader.DefaultTargetBytesPerPartition, binaryAsString = true)
+    val text = asText(file)
+    assertEquals(Seq(DataType.IntType, DataType.StringType, DataType.BinaryType, DataType.BinaryType, DataType.StringType),
+      text.schema.fields.map(_.dataType))
+    assertEquals(Seq("h\u00e9llo", null, ""), column(text, "s"))
+    assertEquals(Seq(Seq("H\u00c9LLO", 6L)), query("SELECT UPPER(s), LENGTH(s || t) FROM t WHERE id = 1", "t" -> text))
+    import com.transformer.sql.plan._
+    val eq = BinOpExpr("=", ColRefExpr(1, "s", DataType.StringType), LitExpr("", DataType.StringType), DataType.BooleanType)
+    assertEquals(None, text.withPushdownFilter(eq))
+    assertEquals(Seq(Seq(3)), query("SELECT id FROM t WHERE s = ''", "t" -> text))
+
+    val bad = writeFixture("message m { required int32 id; optional binary s; }",
+      Seq(Seq(1, "ok"), Seq(2, null), Seq(3, bytes(0xc3, 0x28))))
+    val msg = refusalOf(bad)(rows(asText(bad)))
+    assertTrue(msg, msg.endsWith("column 's' row 3 is not valid UTF-8, which binaryAsString reads the column as"))
+  }
+
   // ─────────────────────────────────────────────────────────────────────
   // Refusals: in the reader's words, naming the file.
   // ─────────────────────────────────────────────────────────────────────

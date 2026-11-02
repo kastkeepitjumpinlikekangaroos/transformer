@@ -65,7 +65,8 @@ final class ParquetReader private (
     parquetSchema_ : Schema,
     partitions: IndexedSeq[ParquetReader.PartitionMeta],
     pushdownFilter: Option[FilterPredicate],
-    comparableColumns: Set[String]
+    comparableColumns: Set[String],
+    binaryAsString: Boolean
 ) extends CatalogView {
   require(files.nonEmpty, "ParquetReader requires at least one file")
 
@@ -83,7 +84,7 @@ final class ParquetReader private (
   def readPartition(p: Int): Iterator[ColumnarBatch] = {
     val m = partitions(p)
     new ParquetPartitionIterator(m.hif, schema, batchSize,
-      m.startRowGroup, m.endRowGroup, pushdownFilter, null)
+      m.startRowGroup, m.endRowGroup, pushdownFilter, null, binaryAsString)
   }
 
   /** Instrumented partition read — funnels per-partition decode statistics
@@ -100,7 +101,7 @@ final class ParquetReader private (
     // happens inside ParquetPartitionIterator's loadNextGroup.
     if (pushdownFilter.isDefined) recorder.addPredicatePushedDown(1L)
     new ParquetPartitionIterator(m.hif, schema, batchSize,
-      m.startRowGroup, m.endRowGroup, pushdownFilter, recorder)
+      m.startRowGroup, m.endRowGroup, pushdownFilter, recorder, binaryAsString)
   }
 
   /** Sum the per-partition row counts already collected from each footer. Used
@@ -131,7 +132,8 @@ final class ParquetReader private (
     val available = parquetSchema_.fieldNames.toSet
     val keep = names.iterator.filter(available.contains).toSet
     if (keep.isEmpty || keep.size == parquetSchema_.length) None
-    else Some(new ParquetReader(files, batchSize, Some(keep), parquetSchema_, partitions, pushdownFilter, comparableColumns))
+    else Some(new ParquetReader(files, batchSize, Some(keep), parquetSchema_, partitions, pushdownFilter, comparableColumns,
+      binaryAsString))
   }
 
   /** Translate `predicate` into a parquet `FilterPredicate` and attach it to a
@@ -150,7 +152,8 @@ final class ParquetReader private (
     * ordered as unsigned, which puts a negative bound above every value. */
   def withPushdownFilter(predicate: Expr): Option[CatalogView] = {
     ParquetFilterTranslator.translate(predicate, comparableColumns.contains).map { fp =>
-      new ParquetReader(files, batchSize, projectedNames, parquetSchema_, partitions, Some(fp), comparableColumns)
+      new ParquetReader(files, batchSize, projectedNames, parquetSchema_, partitions, Some(fp), comparableColumns,
+        binaryAsString)
     }
   }
 }
@@ -293,15 +296,22 @@ object ParquetReader {
   def fromPath(pathOrGlob: String, batchSize: Int = ColumnarBatch.DefaultCapacity): ParquetReader =
     fromPath(pathOrGlob, batchSize, DefaultTargetBytesPerPartition)
 
+  def fromPath(pathOrGlob: String, batchSize: Int, targetBytesPerPartition: Long): ParquetReader =
+    fromPath(pathOrGlob, batchSize, targetBytesPerPartition, binaryAsString = false)
+
+  /** `binaryAsString` reads each unannotated `BINARY` column as a `STRING`
+    * of its UTF-8 bytes, a value that is not UTF-8 failing the read, naming
+    * its row (an input's option of the name). */
   def fromPath(
       pathOrGlob: String,
       batchSize: Int,
-      targetBytesPerPartition: Long
+      targetBytesPerPartition: Long,
+      binaryAsString: Boolean
   ): ParquetReader = {
     val files = PathGlob.expand(pathOrGlob).toIndexedSeq
     if (files.isEmpty)
       throw new IllegalArgumentException(s"No Parquet files matched '$pathOrGlob'")
-    fromFiles(files, batchSize, targetBytesPerPartition)
+    fromFiles(files, batchSize, targetBytesPerPartition, binaryAsString)
   }
 
   /** A view of exactly `files`, as a task's output is read back: the part
@@ -309,12 +319,13 @@ object ParquetReader {
   def fromFiles(
       files: IndexedSeq[Path],
       batchSize: Int = ColumnarBatch.DefaultCapacity,
-      targetBytesPerPartition: Long = DefaultTargetBytesPerPartition
+      targetBytesPerPartition: Long = DefaultTargetBytesPerPartition,
+      binaryAsString: Boolean = false
   ): ParquetReader = {
     require(files.nonEmpty, "ParquetReader requires at least one file")
-    val footers = readFooters(files, math.max(1L, targetBytesPerPartition))
+    val footers = readFooters(files, math.max(1L, targetBytesPerPartition), binaryAsString)
     new ParquetReader(files, batchSize, projectedNames = None, footers.schema, footers.partitions,
-      pushdownFilter = None, footers.comparableColumns)
+      pushdownFilter = None, footers.comparableColumns, binaryAsString)
   }
 
   /** What [[readFooters]] learns from every file of a view: its schema, its
@@ -335,7 +346,8 @@ object ParquetReader {
     */
   private def readFooters(
       files: IndexedSeq[Path],
-      targetBytesPerPartition: Long
+      targetBytesPerPartition: Long,
+      binaryAsString: Boolean
   ): Footers = {
     val conf = defaultConf
     val tasks: Seq[Callable[FileFooter]] = files.map { f =>
@@ -360,8 +372,8 @@ object ParquetReader {
     }
     val results = Scheduler.submitAndAwaitAll(tasks)
     val footers = files.map(_.toString).zip(results.map(_.schema))
-    val schema = ParquetColumns.viewSchema(footers)
-    val decodings = footers.map { case (label, mt) => ParquetColumns.resolve(schema, mt, label).decodings }
+    val schema = ParquetColumns.viewSchema(footers, binaryAsString)
+    val decodings = footers.map { case (label, mt) => ParquetColumns.resolve(schema, mt, label, binaryAsString).decodings }
     // A codec this classpath cannot decompress fails the view when it opens,
     // naming the column, rather than its first page partway through a scan.
     val viewColumns = schema.fieldNames.toSet
@@ -465,7 +477,8 @@ final class ParquetPartitionIterator(
     startRowGroup: Int = 0,
     endRowGroup: Int = Int.MaxValue,
     pushdownFilter: Option[FilterPredicate] = None,
-    metricsRecorder: ParquetReader.MetricsRecorder = null
+    metricsRecorder: ParquetReader.MetricsRecorder = null,
+    binaryAsString: Boolean = false
 ) extends Iterator[ColumnarBatch] {
 
   private val fileLabel: String = hif.getPath.toUri.getPath
@@ -478,7 +491,7 @@ final class ParquetPartitionIterator(
         throw ParquetFooter.refusal(fileLabel, java.nio.file.Paths.get(hif.getPath.toUri), e)
     }
   private val columns: ParquetColumns.FileColumns =
-    try ParquetColumns.resolve(schema, reader.getFooter.getFileMetaData.getSchema, fileLabel)
+    try ParquetColumns.resolve(schema, reader.getFooter.getFileMetaData.getSchema, fileLabel, binaryAsString)
     catch { case e: Throwable => reader.close(); throw e }
   // `setRequestedSchema` must come before any read/skip — it tells parquet-mr
   // which column chunks to actually fetch. The skip loop then advances the
@@ -533,6 +546,11 @@ final class ParquetPartitionIterator(
   private val stringInternCache: Array[java.util.HashMap[org.apache.parquet.io.api.Binary, String]] =
     new Array[java.util.HashMap[org.apache.parquet.io.api.Binary, String]](columnDescriptors.length)
   private val internedBytes: Array[Long] = new Array[Long](columnDescriptors.length)
+  // Strict UTF-8, for a binaryAsString column; one an iterator, which is read
+  // by one thread.
+  private lazy val utf8: java.nio.charset.CharsetDecoder = java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
 
   private val groupsToProcess: Int = math.max(0, endRowGroup - startRowGroup)
   private var groupsAdvanced: Int = 0
@@ -540,8 +558,10 @@ final class ParquetPartitionIterator(
   // decoded. Reset whenever we advance to a new row group.
   private var columnReaders: Array[org.apache.parquet.column.ColumnReader] = _
   private var currentRowsRemaining: Long = 0L
-  // The row group being read, by its place in the file, for a refusal.
+  // The row group being read, by its place in the file, for a refusal, and
+  // its rows.
   private var currentGroup: Int = startRowGroup
+  private var currentGroupRows: Long = 0L
   private var closed: Boolean = false
 
   private def closeQuietly(): Unit = {
@@ -597,6 +617,7 @@ final class ParquetPartitionIterator(
           catch { case e: Throwable if ParquetReader.libraryFailure(e) => throw columnRefusal(c, absoluteIdx, e) }
         }
         currentRowsRemaining = pages.getRowCount
+        currentGroupRows = pages.getRowCount
         // Reset the per-column intern caches — Binary refs from the prior
         // row group's page buffers are no longer valid once that row group's
         // pages are released.
@@ -624,9 +645,18 @@ final class ParquetPartitionIterator(
     currentRowsRemaining > 0L
   }
 
+  /** The first row of the file in the batch being decoded, counted from 0,
+    * for a refusal that names a value's row. */
+  private var batchFirstRow: Long = 0L
+
+  /** The rows of the file before each row group. */
+  private lazy val groupFirstRow: Array[Long] =
+    allBlocks.asScala.iterator.map(_.getRowCount).scanLeft(0L)(_ + _).toArray
+
   override def next(): ColumnarBatch = {
     if (!hasNext) throw new NoSuchElementException
     val rowsThisBatch = math.min(batchSize.toLong, currentRowsRemaining).toInt
+    batchFirstRow = groupFirstRow(currentGroup) + (currentGroupRows - currentRowsRemaining)
     val out = new ColumnarBatch(schema, rowsThisBatch)
     val ncols = schema.length
     var c = 0
@@ -838,6 +868,37 @@ final class ParquetPartitionIterator(
             var s = cache.get(bin)
             if (s == null) {
               s = bin.toStringUsingUTF8
+              if (internedBytes(col) < ParquetPartitionIterator.InternBudgetBytes) {
+                cache.put(bin, s)
+                internedBytes(col) += bin.length
+              }
+            }
+            v.set(r, s)
+          }
+          cr.consume(); r += 1
+        }
+      case ParquetColumns.Decoding.BinaryText =>
+        // As Strings, but each value is decoded strictly: bytes that are no
+        // UTF-8 fail the read rather than read as U+FFFD.
+        val v = vec.asInstanceOf[StringVector]
+        var cache = stringInternCache(col)
+        if (cache == null) {
+          cache = new java.util.HashMap[org.apache.parquet.io.api.Binary, String]()
+          stringInternCache(col) = cache
+        }
+        var r = 0
+        while (r < rowCount) {
+          if (cr.getCurrentDefinitionLevel < maxDef) v.setNull(r)
+          else {
+            val bin = cr.getBinary
+            var s = cache.get(bin)
+            if (s == null) {
+              s = try utf8.decode(bin.toByteBuffer).toString
+                catch {
+                  case _: java.nio.charset.CharacterCodingException => throw new ParquetReader.Unreadable(
+                    s"Parquet file '$fileLabel' column '${schema.fields(col).name}' row ${batchFirstRow + r + 1} is " +
+                      "not valid UTF-8, which binaryAsString reads the column as", null)
+                }
               if (internedBytes(col) < ParquetPartitionIterator.InternBudgetBytes) {
                 cache.put(bin, s)
                 internedBytes(col) += bin.length

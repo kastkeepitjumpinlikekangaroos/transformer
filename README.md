@@ -1011,6 +1011,7 @@ Options (passed via `InputFilePath.options` / `OutputFilePath.options`):
 | `lineEnding` (output) | `\n` | `\n`, `\r\n` or `\r` |
 | `inferSchema` | `true` | If false, `columns` is required (input) |
 | `read_partition_size_bytes` (input, parquet only) | 256 MB | The bytes of row groups one partition reads, a whole number |
+| `binaryAsString` (input, parquet only) | `false` | Read each `BINARY` column with no annotation as a `STRING` of its UTF-8 bytes (Spark's option of the name), for the text older writers such as Impala and Hive stored unannotated; a value that is not UTF-8 fails the read, naming its column and its row of the file. `BSON`, `FIXED_LEN_BYTE_ARRAY` and annotated columns keep their types |
 | `charset` | `UTF-8` | Bytes it cannot decode, or characters it cannot encode, fail the read or write |
 | `parquet_row_group_size`, `parquet_write_parallelism` (output, parquet only) | 32 MB, by heap | The bytes of a row group, and how many part files are written at once, each a whole number |
 | `compression` (output, parquet only) | `snappy` | `uncompressed` / `snappy` / `gzip` — `none` is an alias for `uncompressed`. Set `uncompressed` on tables whose schema is narrow-numeric (timestamps + prices etc.) where dictionary encoding alone is enough — they pay snappy CPU for negligible disk-size savings. |
@@ -1057,7 +1058,7 @@ InputFilePath("data.csv",
   | `FIXED_LEN_BYTE_ARRAY(2) FLOAT16` | `FLOAT`, exactly |
   | `DECIMAL(p,s)` as `INT32`, `INT64`, `FIXED_LEN_BYTE_ARRAY` or `BINARY` | `DECIMAL(p,s)` |
   | `BINARY STRING`, `ENUM` or `JSON` | `STRING` |
-  | `BINARY`, alone or `BSON`; `FIXED_LEN_BYTE_ARRAY`, alone or `UUID` | `BINARY` |
+  | `BINARY`, alone or `BSON`; `FIXED_LEN_BYTE_ARRAY`, alone or `UUID` | `BINARY` (a `BINARY` alone is a `STRING` under the input's `binaryAsString`) |
   | `TIME`, `INTERVAL`, a `REPEATED` column (a list per row), a nested group | none: the file cannot be read |
   | an annotation newer than the reader (`VARIANT`, `GEOMETRY`, `GEOGRAPHY`, or one it has no name for), or one the format does not allow on its physical type (`UUID` on an `INT32`) | none: the file cannot be read |
 

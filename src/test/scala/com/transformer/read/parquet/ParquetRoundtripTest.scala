@@ -200,6 +200,33 @@ class ParquetRoundtripTest {
     assertEquals(Vector(2, 4, 6, 8), values)
   }
 
+  /** `binaryAsString` is a parquet input's option: a job reads the input's
+    * unannotated `BINARY` column as text under it, `true` or `false` in any
+    * case and nothing else, and a CSV input refuses it as an option it does
+    * not read (plans/testing/13, decision 3). */
+  @Test def binaryAsStringIsAParquetInputsOption(): Unit = {
+    val schema = Schema(Field("id", DataType.IntType), Field("b", DataType.BinaryType))
+    val inDir = Files.createTempDirectory("pq-bin-in-")
+    TParquetWriter.writeAll(inDir.resolve("data.parquet"), schema,
+      Iterator(makeBatch(schema, Seq(Seq(1, "abc".getBytes("UTF-8")), Seq(2, null)))))
+    val outDir = Files.createTempDirectory("pq-bin-out-").resolve("upper")
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.parquet", viewName = "t", options = Map("binaryAsString" -> "TRUE"))),
+      sql = Seq(SQLTask(
+        sqlString = Some("SELECT id, UPPER(b) AS u FROM t ORDER BY id"),
+        outputFile = Some(OutputFilePath(outDir.toString, format = Some("parquet"))))))
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+    assertEquals(Vector(Map("id" -> 1, "u" -> "ABC"), Map("id" -> 2, "u" -> null)),
+      collectRows(ParquetReader.fromPath(outDir.toString)))
+    def refused(options: Map[String, String], path: String): String =
+      try { InputFilePath(path, viewName = "t", options = options); fail("accepted"); "" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    assertEquals("Option 'binaryAsString' must be true or false, not 'yes'",
+      refused(Map("binaryAsString" -> "yes"), "x.parquet"))
+    assertTrue(refused(Map("binaryAsString" -> "true"), "x.csv").startsWith("Unknown option 'binaryAsString' for a csv input"))
+  }
+
   @Test def parquetReaderExposesExactRowCount(): Unit = {
     val schema = Schema(Field("v", DataType.IntType))
     val inDir = Files.createTempDirectory("pq-rc-in-")

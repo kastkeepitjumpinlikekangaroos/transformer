@@ -21,8 +21,10 @@ object InputResolver {
         val target = input.options.get(InputFilePath.ParquetPartitionSizeKey)
           .map(OptionValues.positiveLong(InputFilePath.ParquetPartitionSizeKey, _))
           .getOrElse(ParquetReader.DefaultTargetBytesPerPartition)
+        val binaryAsString = input.options.get(InputFilePath.ParquetBinaryAsStringKey)
+          .exists(OptionValues.bool(InputFilePath.ParquetBinaryAsStringKey, _))
         ParquetReader.fromPath(input.path,
-          com.transformer.core.ColumnarBatch.DefaultCapacity, target)
+          com.transformer.core.ColumnarBatch.DefaultCapacity, target, binaryAsString)
       case other =>
         throw new IllegalArgumentException(
           s"Unsupported format '$other' for path '${input.path}'. Supported: csv, parquet."
