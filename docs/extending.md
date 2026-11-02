@@ -1168,6 +1168,16 @@ reads a constant at (a ROUND's scale, a number beside a DECIMAL) is no position
 for a form, which is why `eligible` skips every expression that reads no
 column.
 
+**A forced strategy** (DQP, `oracle/ForcedPlans`) is a `Spelling` case and a
+branch of `ForcedPlans.spell`, which rewrites one join's bound condition into
+another that keeps the same pairs, plus its entry in `ForcedPlans.Strategies`
+with the spill setting it runs under. Read where it lands off the physical
+plan, as `joinPaths` does, and add the path or codec it reaches to the
+assertions of `strategiesReachEveryPathAndCodec`, so a spelling the planner
+stops honouring fails the guard. A strategy that needs a JVM-wide setting (a
+sharding gate, the batch capacity) goes in a target with `jvm_flags`, as
+`sharded_forced_plan_fuzz_test`, never behind a seam in the planner.
+
 **Three rules keep generated SQL sound and bindable** — hold them in any new
 relation or generator extension:
 

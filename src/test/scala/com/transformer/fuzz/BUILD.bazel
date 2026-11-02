@@ -130,6 +130,49 @@ scala_junit_test(
     ],
 )
 
+# Forced plans (DQP): every plan the engine can be made to choose for one
+# MetaQueryGen query gives one multiset. The leading run of inner joins
+# written in every order of four tables or fewer (24 of a longer run), each
+# run with the optimizer off and on; and every join of the optimized plan
+# respelled on its key, computed keys, two keys or none, the first two with
+# spill on, the sides swapped half the time, printed and run as written.
+# Default budget, part of `bazel test //...`.
+scala_junit_test(
+    name = "forced_plan_fuzz_test",
+    srcs = ["ForcedPlanFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The strategy half of forced_plan_fuzz_test under sharded planning: the
+# jvm_flags open the sharding gates, read at class load, so a join on a key
+# runs per shard and the spelling with no key pairs unsharded, a sharded
+# join held against an unsharded one in one JVM. Part of `bazel test //...`.
+scala_junit_test(
+    name = "sharded_forced_plan_fuzz_test",
+    srcs = [
+        "ForcedPlanFuzzTest.scala",
+        "ShardedForcedPlanFuzzTest.scala",
+    ],
+    jvm_flags = [
+        "-Dtransformer.scheduler.shard_min_size=1",
+        "-Dtransformer.scheduler.broadcast_threshold=1",
+        "-Dtransformer.scheduler.shard_count=4",
+    ],
+    suffixes = ["ShardedForcedPlanFuzzTest"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 # The metamorphic gate re-run under SHARDED planning. The sharding gates
 # (LogicalPlanCardinality.{MinShardableSize, BroadcastBuildThreshold}) are vals
 # read at class load, so they need a separate JVM: jvm_flags set both to 1,
@@ -293,6 +336,19 @@ scala_junit_test(
 scala_junit_test(
     name = "eet_fuzz_campaign",
     srcs = ["EetFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "forced_plan_fuzz_campaign",
+    srcs = ["ForcedPlanFuzzTest.scala"],
     suffixes = ["Test"],
     tags = ["fuzz"],
     deps = [

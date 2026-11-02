@@ -1974,6 +1974,14 @@ one over generated text:
   slt `rewritten` mode, every script; it aims at the guards a conditional
   keeps (a branch never taken must never run) and at passes that move or drop
   a condition they do not recognize.
+- **Forced plans** (`oracle/ForcedPlans`, DQP's relation, SIGMOD 2024) — every
+  plan the engine can be made to choose for one query gives one multiset: the
+  leading run of inner joins written in every order and run with the
+  optimizer off and on, and every join respelled so it hashes on its key, on
+  computed keys, on two keys or on none (pairing row by row), with spill on or
+  off and its sides swapped, in a JVM with the sharding gates shut and in one
+  with them open. It aims at the paths and codecs a join chooses among, which
+  the planner otherwise picks one of for a query.
 - **Frontend robustness** (`oracle/CleanRejection`, `oracle/NoSilentDrop`,
   `oracle/SyntaxEquivalence`, over `SqlTextGen`) — every generator above renders
   its own typed AST, so its corpus is the supported grammar. This one writes
