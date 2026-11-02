@@ -1,48 +1,60 @@
 # Performance plans — index and status
 
-Twelve plans covering transformer's performance workstream. Each plan is
+Thirteen plans covering transformer's performance workstream. Each plan is
 self-contained: read the file, and if it still has open work, the launch
 prompt at the bottom of that file says how to pick it up.
 
-**Most of this workstream has shipped.** Ten of the twelve plans are
-landed — four of them (02, 09, 10, 11) with nothing at all left, the
+**Most of this workstream has shipped.** Ten of the first twelve plans
+are landed — four of them (02, 09, 10, 11) with nothing at all left, the
 other six with one optional, evidence-gated phase still open. Plan 06 is
 partial exactly as its own file describes, and plan 08 is deliberately
-unstarted pending profiler evidence. Read the status column before
-starting anything here — the standing failure mode for this directory is
-a session re-implementing work that already exists and is covered by
-tests.
+unstarted pending profiler evidence. Plan 13 was written 2026-11-01,
+after `transformer query` over the polymarket files found what a 2 GB
+heap cannot do; it is unstarted, and its evidence is already in its
+file. Read the status column before starting anything here — the
+standing failure mode for this directory is a session re-implementing
+work that already exists and is covered by tests.
 
 ## Status table
 
-Verified against `src/main` on 2026-09-06.
+Verified against `src/main` on 2026-09-06; rows 01 and 08 rechecked, and
+13 added, on 2026-11-01.
 
 | # | Plan | Status | Evidence |
 |---|------|--------|----------|
-| [01](01-kway-merge-sortexec.md) | K-way merge in SortExec | done | `SortExec.mergeEmit` runs a `java.util.PriorityQueue` heap merge over the sorted partials (`SortExec.scala:193`) |
+| [01](01-kway-merge-sortexec.md) | K-way merge in SortExec | done | `SortExec.mergeEmit` runs a `java.util.PriorityQueue` heap merge over the sorted partials (`SortExec.scala:164`) |
 | [02](02-packed-aggregate-keys.md) | Packed hash-aggregate/distinct/join keys | done | `core/HashKeys.scala` (`KeyCodec`, `PackedBytesCodec`, `ObjectArrayCodec`, `SingleObjectKeyCodec`, `LongHashMap`), consumed by `AggregateExec`, `DistinctExec`, `JoinExec`, `WindowExec`, `HashPartitioner` |
 | [03](03-vectorized-expr-eval.md) | Vectorized expression evaluation | done | every `Expr` subtype overrides `evalVec`; `ExprBatchTest` + `expr_parity_fuzz_test` are the parity gate; breakers extract keys batch-at-a-time |
 | [04](04-hash-partition-breakers.md) | Hash-partition between breakers | done | `ExchangeExec` + `HashPartitioner`, inserted by `PhysicalPlanner` above aggregate / join / window / union-distinct |
 | [05](05-join-planner.md) | Smarter join planner | done | `LogicalPlanCardinality.estimate` drives `PhysicalPlanner`'s build-side swap and `enforceNestedLoopGuard` |
 | [06](06-expand-parquet-pushdown.md) | Expand parquet predicate pushdown | partial, by design | `ParquetFilterTranslator` covers IS NULL / IS NOT NULL / IN / BETWEEN; decimal returns `None` at `:133` and `:258` |
 | [07](07-push-through-joins.md) | Push predicates/projections through joins | done | `FilterPushdown.scala` + `ColumnProjectionPushdown.scala`, run in order from `LogicalOptimizer.apply` |
-| [08](08-stream-emit-breakers.md) | Stream emit from breakers | not started | nothing under `sql/` streams; no producer/consumer queue exists there |
+| [08](08-stream-emit-breakers.md) | Stream emit from breakers | not started | no producer/consumer queue exists under `sql/`; its HashJoinExec phases are superseded by 13, and the pairing join (`JoinExec.executePairing`, plans/testing/05 W5) already emits wave by wave |
 | [09](09-spill-to-disk.md) | Spill-to-disk for breakers | done | `core/Spill.scala` + `AggStateSerde`; all five breakers spill, opt-in via `ExecutionOptions.spillEnabled`; `SpillStressTest` |
 | [10](10-instrumentation.md) | In-tree instrumentation framework | done | `core/metrics/*`, `_perf.json`, `metrics_collector_test` / `operator_counters_test` / `metrics_plan_wrap_test` |
 | [11](11-benchmarking.md) | Microbench + macro bench + regression guard | done | `benchmarks/{micro,macro,baseline}`, `docs/benchmarking.md` |
 | [12](12-cte-materialization.md) | Materialize multiply-referenced CTEs once | done | `sql/exec/CteResolver.scala` + `sql/plan/PendingCteView.scala` |
+| [13](13-stream-hash-join-output.md) | Stream a hash join's output | not started | `JoinExec`'s keyed paths (`executeCollapsing`, `executePerShard`, `executeGraceHash`) hold their whole output, a shard's when sharded, before their first batch; a 120M-row join over one polymarket orderbook day ran a 2 GB heap out (README Limitations: "A join holds its whole result in memory.") |
 
 ## What's actually left
 
-Every item below is optional and gated on evidence. None of them is
-blocking, and several were written as "only if profiling says so" from
-the start. Do not pick one up because it appears on a list — pick it up
-because a profile or a workload demands it.
+**Ready to start, with the evidence in hand:**
 
-- **08 — stream emit from breakers.** The only wholly unstarted plan.
-  Its own launch prompt gates it: profile a polymarket join + parquet-write
-  task first, and if writer wall time is under 10% of total, the
-  complexity is not worth it. Report and stop.
+- **13 — stream a hash join's output.** A join holds its build side and a
+  bounded amount of output, never its whole result. Six questions for the
+  user, each with a recommended answer, are in the plan; Steps 1, 3 and 4
+  need none of them answered.
+
+**Optional and gated on evidence.** None of the items below is blocking,
+and several were written as "only if profiling says so" from the start.
+Do not pick one up because it appears on a list — pick it up because a
+profile or a workload demands it.
+
+- **08 — stream emit from breakers.** Unstarted; its HashJoinExec phases
+  (2 and 3) are superseded by plan 13. Its own launch prompt gates the
+  rest: profile a polymarket join + parquet-write task first, and if
+  writer wall time is under 10% of total, the complexity is not worth it.
+  Report and stop.
 - **03 — `DATE_TRUNC` and the other date functions still take the boxed
   row loop.** `Funcs.applyVec` covers the string, numeric and conditional
   hot set but no date function, even though plan 03 Phase 5 named
@@ -55,7 +67,7 @@ because a profile or a workload demands it.
   vector whose lifetime crosses an operator boundary is a correctness
   bug, not just a leak.
 - **01 Phase 3 — pre-computed sort-key tuples.** `SortExec`'s comparator
-  still calls `Expr.eval` per comparison (`SortExec.scala:322`). Marked
+  still calls `Expr.eval` per comparison (`SortExec.scala:293`). Marked
   optional and separate-PR from the start.
 - **04 Phase 7 / Phase 8 — range-partition SortExec, skew salting.** Both
   optional. Skew handling in particular was explicitly deferred out of
@@ -78,8 +90,9 @@ From `CLAUDE.md`:
 1. `bazel test //...` green.
 2. `java -jar bazel-bin/examples/jaffle_shop/jaffle_shop_deploy.jar` exits
    0 with 15/15 tasks Succeeded.
-3. `java -jar bazel-bin/examples/polymarket/polymarket_deploy.jar` matches
-   the 15-Succeeded / 1-ValidationFailed / 1-Skipped pattern.
+3. `java -jar bazel-bin/examples/polymarket/polymarket_deploy.jar` exits 0
+   with the pattern README's polymarket section gives (14 Succeeded,
+   2 ValidationFailed, 1 Skipped, 0 Failed on 2026-11-01).
 4. Docs (`README.md`, `docs/architecture.md`, `docs/conventions.md`,
    `docs/extending.md`, `docs/gotchas.md`, `docs/testing.md`,
    `docs/code-map.md`) updated where claims are now stale.
@@ -96,10 +109,10 @@ Project-wide rules from `CLAUDE.md`:
 
 **Read the status table first.** Most prompts below launched work that
 has since landed; they are kept as a record of how each plan was run, not
-as an invitation to run it again. Each is marked. Only 08 is still live
-as written, and it is gated on profiling — for the optional phases listed
-under "What's actually left", the current prompt lives at the bottom of
-that plan's own file.
+as an invitation to run it again. Each is marked. Only 08 and 13 are
+still live as written, and 08 is gated on profiling — for the optional
+phases listed under "What's actually left", the current prompt lives at
+the bottom of that plan's own file.
 
 Each session's prompt is also embedded at the bottom of its own plan
 file. The launch prompts are designed for a fresh session with no prior
@@ -531,6 +544,33 @@ framework — keep withChildren a plain structural primitive.
 
 Include in PR description: the compute-once test result, jaffle + polymarket
 e2e status, and wall-time before/after on a 2x- and 4x-referenced aggregate CTE.
+```
+
+### 13 — Stream a hash join's output (not started; live)
+
+```
+Read plans/perf/13-stream-hash-join-output.md and implement it in step order,
+one commit per step.
+
+Use max effort. Honor CLAUDE.md: bazel test //... green, the jaffle-shop jar
+15/15 with every validation passing, the polymarket jar exiting 0, docs in the
+same commit. Peer sessions edit this tree: develop in a git worktree. Before
+Step 2, confirm the user's answers to the six questions (Q1 decides whether
+Step 2 happens); Steps 1, 3 and 4 need none.
+
+Liveness is the first risk. No readiness wait in engine execution: the shared
+build side is published by the pre-materialization pass, never a lazy val,
+never synchronized, never ForkJoinPool.managedBlock. Keep
+exchange_deadlock_stress_test green, and run the metamorphic and sharded
+campaigns at FUZZ_SEEDS=20000 before calling Step 2 done.
+
+Stop and ask before: (a) any producer/consumer queue, (b) changing ExchangeExec
+beyond moving its CAS claim and latch into the shared helper, (c) changing the
+build-side choice, the sharding gates or PairsPerTask, (d) landing Step 6 if it
+does not measure faster.
+
+Report: the polymarket query's wall time and peak RSS at -Xmx2g after Step 2
+and after Step 6, beside the aggregate-first form's 10 s and 0.55 GB.
 ```
 
 ## Notes on running these in fresh sessions

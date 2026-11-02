@@ -1,10 +1,14 @@
 # Plan 08: Stream emit from breakers
 
-> Status: **not started, and gated on evidence.** Nothing in `sql/exec`
-> streams: every breaker fully materializes before it emits, and there is
-> no producer/consumer queue anywhere under `sql/`. Per this plan's own
-> launch prompt, do not start it until a profile shows the parquet writer
-> genuinely starved by breaker CPU (writer wall time ≥10% of total).
+> Status: **not started, and gated on evidence.** There is no
+> producer/consumer queue anywhere under `sql/`. Phases 2 and 3
+> (HashJoinExec) are superseded by
+> [plan 13](13-stream-hash-join-output.md), which streams a hash join's
+> output without a queue; since plans/testing/05 W5 a join with no equality
+> pairs (`JoinExec.executePairing`) already emits wave by wave. Phases 1, 4
+> and 5 stand. Per this plan's own launch prompt, do not start it until a
+> profile shows the parquet writer genuinely starved by breaker CPU (writer
+> wall time ≥10% of total).
 > · Tier: 3 · Effort: 2-3 days · Risk: medium
 
 ## Goal
