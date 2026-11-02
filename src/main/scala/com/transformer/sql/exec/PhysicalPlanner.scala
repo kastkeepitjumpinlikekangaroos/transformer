@@ -400,12 +400,13 @@ object PhysicalPlanner {
     case LogicalJoin(l, r, cond, _)
         if splitEqualityKeys(cond, l.outputSchema.length)._1.isEmpty =>
       for ((lc, _) <- rowsAtMost(l); (rc, _) <- rowsAtMost(r)) yield (times(lc, rc), true)
-    // A join on an equality keeps, by its estimate, its larger side's rows, so
-    // it is sized from its sides' bounds: the estimator sizes a pairing below
-    // it as that pairing's larger side.
+    // A join on an equality is sized from its sides' bounds, since the
+    // estimator sizes a pairing below it as that pairing's larger side; and
+    // whatever its kind ([[keyedJoinRows]]), so an outer join is no smaller
+    // than the inner join it holds.
     case LogicalJoin(l, r, _, kind) =>
       for ((lc, lPaired) <- rowsAtMost(l); (rc, rPaired) <- rowsAtMost(r))
-        yield (LogicalPlanCardinality.joinEstimate(lc, rc, kind), lPaired || rPaired)
+        yield (keyedJoinRows(lc, rc, kind), lPaired || rPaired)
     // Each keeps at most the rows it reads.
     case LogicalProject(child, _) => rowsAtMost(child)
     case LogicalFilter(child, _) => rowsAtMost(child)
@@ -414,10 +415,31 @@ object PhysicalPlanner {
     case LogicalDistinct(child) => rowsAtMost(child)
     case LogicalOffset(child, _) => rowsAtMost(child)
     case LogicalLimit(child, n) => rowsAtMost(child).map { case (c, paired) => if (n < c) (n, false) else (c, paired) }
-    case other => LogicalPlanCardinality.estimate(other).map((_, false))
+    // A scan's count, and an aggregate's or a union's estimate, its joins
+    // sized as above, so a join under one is no smaller as an outer join
+    // either.
+    case other => LogicalPlanCardinality.estimateWith(other, keyedJoinRows).map((_, false))
   }
 
   private def times(a: Long, b: Long): Long = if (a != 0 && b > Long.MaxValue / a) Long.MaxValue else a * b
+
+  /** How many rows [[rowsAtMost]] counts a join on an equality as keeping,
+    * over sides of `l` and `r`: its larger side's for INNER, LEFT and RIGHT,
+    * both sides' for FULL; and any join under an aggregate or a union, which
+    * it sizes through the estimator. An outer join keeps every row the inner
+    * join it holds does, so it is counted no smaller (decision 3 of
+    * plans/testing/16, taken overnight as recommended): counted by its
+    * preserved side, as the estimator sizes it to pick a build side
+    * ([[LogicalPlanCardinality.joinEstimate]]), `a CROSS JOIN d LEFT JOIN b ON
+    * a.k = b.k CROSS JOIN c` over 10, 10, 300000 and 100 rows ran while its
+    * INNER JOIN, which pairs no more rows, was refused, so a restriction of a
+    * query could be refused where the query was not, and so could one of a
+    * CTE grouping such a join beneath two CROSS JOINs (found by plan 16's
+    * CERT property). */
+  private def keyedJoinRows(l: Long, r: Long, kind: JoinKind): Long = kind match {
+    case JoinKind.Full => if (l > Long.MaxValue - r) Long.MaxValue else l + r
+    case _ => math.max(l, r)
+  }
 
   /** Try to push a bound predicate into the underlying view. Today only
     * [[ParquetReader]] participates — its `withPushdownFilter` translates the

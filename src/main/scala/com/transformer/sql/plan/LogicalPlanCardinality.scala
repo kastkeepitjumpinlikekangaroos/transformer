@@ -76,51 +76,60 @@ object LogicalPlanCardinality {
   }
 
   /** Estimate the number of rows produced by `plan`. */
-  def estimate(plan: LogicalPlan): Option[Long] = plan match {
-    case LogicalScan(_, view, _) =>
-      view.exactRowCount
+  def estimate(plan: LogicalPlan): Option[Long] = estimateWith(plan, joinEstimate)
 
-    case LogicalFilter(child, pred) =>
-      estimate(child).map(n => math.max(0L, (n * filterSelectivity(pred)).toLong))
+  /** [[estimate]], each join sized by `join` over its sides' estimates and
+    * its kind rather than by [[joinEstimate]]: how the planner's nested-loop
+    * guard sizes what lies under an aggregate or a union
+    * (`PhysicalPlanner.keyedJoinRows`). */
+  private[sql] def estimateWith(plan: LogicalPlan, join: (Long, Long, JoinKind) => Long): Option[Long] = {
+    def estimate(p: LogicalPlan): Option[Long] = estimateWith(p, join)
+    plan match {
+      case LogicalScan(_, view, _) =>
+        view.exactRowCount
 
-    case LogicalProject(child, _) =>
-      estimate(child)
+      case LogicalFilter(child, pred) =>
+        estimate(child).map(n => math.max(0L, (n * filterSelectivity(pred)).toLong))
 
-    case LogicalLimit(child, n) =>
-      estimate(child) match {
-        case Some(c) => Some(math.min(c, n))
-        case None    => Some(n)
-      }
+      case LogicalProject(child, _) =>
+        estimate(child)
 
-    case LogicalOffset(child, n) =>
-      estimate(child).map(c => math.max(0L, c - n))
+      case LogicalLimit(child, n) =>
+        estimate(child) match {
+          case Some(c) => Some(math.min(c, n))
+          case None    => Some(n)
+        }
 
-    case LogicalDistinct(child) =>
-      estimate(child).map(n => math.max(1L, n / 2))
+      case LogicalOffset(child, n) =>
+        estimate(child).map(c => math.max(0L, c - n))
 
-    case LogicalAggregate(child, gks, _) =>
-      estimate(child).map { n =>
-        if (gks.isEmpty) 1L
-        else math.min(n, ndvHint(gks, n))
-      }
+      case LogicalDistinct(child) =>
+        estimate(child).map(n => math.max(1L, n / 2))
 
-    case LogicalJoin(l, r, _, kind) =>
-      for {
-        lc <- estimate(l)
-        rc <- estimate(r)
-      } yield joinEstimate(lc, rc, kind)
+      case LogicalAggregate(child, gks, _) =>
+        estimate(child).map { n =>
+          if (gks.isEmpty) 1L
+          else math.min(n, ndvHint(gks, n))
+        }
 
-    case LogicalUnion(l, r, _) =>
-      for {
-        lc <- estimate(l)
-        rc <- estimate(r)
-      } yield lc + rc
+      case LogicalJoin(l, r, _, kind) =>
+        for {
+          lc <- estimate(l)
+          rc <- estimate(r)
+        } yield join(lc, rc, kind)
 
-    case LogicalSort(child, _) =>
-      estimate(child)
+      case LogicalUnion(l, r, _) =>
+        for {
+          lc <- estimate(l)
+          rc <- estimate(r)
+        } yield lc + rc
 
-    case LogicalWindow(child, _) =>
-      estimate(child)
+      case LogicalSort(child, _) =>
+        estimate(child)
+
+      case LogicalWindow(child, _) =>
+        estimate(child)
+    }
   }
 
   private[plan] def filterSelectivity(pred: Expr): Double = pred match {
@@ -157,8 +166,11 @@ object LogicalPlanCardinality {
     * fan-out from key overlap, so use a side-aware upper bound: Inner takes
     * the larger side (a 1:1 join produces `max`, a fan-out produces more —
     * but for build-side selection we only need a coarse signal), Left/Right
-    * stay at their preserved-side size, Full is the sum. The planner's
-    * nested-loop guard sizes a join on an equality with it too.
+    * stay at their preserved-side size, Full is the sum. So an outer join can
+    * be sized smaller than the inner join it holds, which picking a build
+    * side does not mind; the planner's nested-loop guard counts a join on an
+    * equality its own way, no smaller for an outer join
+    * (`PhysicalPlanner.keyedJoinRows`, decision 3 of plans/testing/16).
     */
   private[sql] def joinEstimate(l: Long, r: Long, kind: JoinKind): Long = kind match {
     case JoinKind.Inner => math.max(l, r)

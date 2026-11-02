@@ -1782,7 +1782,10 @@ how many rows a filter keeps). So is
 one over the output of another such join, directly or through joins on an
 equality, when the two would pair more than 25 million rows: a chain
 multiplies where each side alone looks small (three 300-row tables pair 27
-million). One small side against a large one, such as 100 buckets against a
+million). A join on an equality counts as many rows as its larger side,
+both sides for a FULL join, whether it is INNER or outer, so a LEFT JOIN
+over such a chain is refused where its INNER JOIN, which pairs no more, is
+(it counted the LEFT JOIN's left side alone). One small side against a large one, such as 100 buckets against a
 million-row table on `amount BETWEEN lo AND hi`, still runs. Such a join pairs
 its rows a wave at a time, so it holds its smaller side and a wave of pairs
 (a few hundred thousand rows), not every pair it makes: 25 million pairs count

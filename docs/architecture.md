@@ -1690,9 +1690,16 @@ such a join, or a join on an equality over one, and the two would pair more
 than `NestedLoopMaxPairs` (25 million) rows: `rowsAtMost` bounds a join with
 no equality by the product of its sides, which its cardinality estimate (the
 larger side) understates, so a chain of them was the case the first rule
-missed; it sizes a join on an equality by that estimate over its sides'
-bounds, not by the estimator's own recursion, which sizes a pairing below it
-as the pairing's larger side and so hid it (plans/testing/04). A proven count
+missed; it sizes a join on an equality over its sides' bounds, not by the
+estimator's own recursion, which sizes a pairing below it as the pairing's
+larger side and so hid it (plans/testing/04), and by its larger side whatever
+its kind, both sides for FULL (`keyedJoinRows`), where the estimator sizes a
+LEFT or RIGHT join by its preserved side to pick a build side: so an outer
+join counts no fewer rows than the inner join it holds, and a restriction
+of a query, an outer join made INNER, is never refused in the query's own
+join order where the query is not (decision 3 of plans/testing/16, which
+CERT confirmed). Under an aggregate or a union it reads the estimator with
+joins sized that way (`LogicalPlanCardinality.estimateWith`). A proven count
 (`provenRows`) is a view's exact one, kept through the operators that keep
 every row (project, sort, window), cut by LIMIT and OFFSET, summed by UNION
 ALL, and multiplied by a CROSS JOIN; behind a filter, a grouping or a join

@@ -2396,6 +2396,21 @@ answer it should give by construction:
   without them takes. Each now sees through the wrapper (`ExchangeExec.feeds`).
   Found reading a join's path off its plan for plan 16's forced-plan guard;
   `ShardedModeFuzzTest.metricsLeaveAShardedPlanSharded` holds it.
+- **The nested-loop guard sized an outer join smaller than the inner join it
+  holds** (decision 3 of plans/testing/16, taken overnight as recommended,
+  not yet confirmed by the user). The guard counted a join on an equality as
+  the estimator sizes it to pick a build side, a LEFT or RIGHT join by its
+  preserved side, so `a CROSS JOIN d LEFT JOIN b ON a.k = b.k CROSS JOIN c`
+  over 10, 10, 300000 and 100 rows ran while its INNER JOIN, which pairs no
+  more rows, was refused: a restriction of a query refused where the query
+  ran. Under a grouping the same: a CTE grouping a LEFT JOIN beneath two
+  CROSS JOINs ran where its INNER JOIN was refused. The guard now counts a
+  join on an equality by its larger side whatever its kind, both sides for
+  FULL, under an aggregate or a union too, so it refuses the outer join
+  where it refuses the inner one; the estimator's `joinEstimate`, which picks
+  build sides, is unchanged. Found by CERT's guard rule
+  (`fuzzCertOverJoinShapes`, seed 2 before the change); `JoinSwapTest`'s
+  `anOuterJoinCountsNoFewerRowsThanTheInnerJoinItHolds` holds it.
 
 ## Answers the PostgreSQL port settled (2026-11-01, all decided)
 
