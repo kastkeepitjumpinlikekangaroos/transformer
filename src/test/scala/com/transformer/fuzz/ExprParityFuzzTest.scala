@@ -1,7 +1,7 @@
 package com.transformer.fuzz
 
 import com.transformer.core._
-import com.transformer.fuzz.oracle.{ExactIntegers, ExprParity}
+import com.transformer.fuzz.oracle.{CatalogNulls, ExactIntegers, ExprParity}
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.Test
@@ -35,6 +35,22 @@ class ExprParityFuzzTest {
     ) { c =>
       ExprParity.check(c.expr, c.batch)
       if (c.generated) ExprParity.checkTotal(c.expr, c.batch)
+    }
+  }
+
+  /** Every call of a catalog function in a generated tree answers NULL on a
+    * row exactly where its entry's NULL rule or domain explains it
+    * (`oracle/CatalogNulls`): `ExprParity` compares the two paths with each
+    * other, so it cannot see a function that answers NaN where its domain
+    * says NULL on both. */
+  @Test def fuzzCatalogNulls(): Unit = {
+    Props.forAll[ExprGen.ExprCase](
+      name = "catalog-nulls",
+      gen = ExprGen.generate,
+      shrink = c => Shrinker.expr(c.expr).map(e => new ExprGen.ExprCase(c.batch, e))
+    ) { c =>
+      CatalogNulls.check(c.expr, c.batch)
+      ()
     }
   }
 

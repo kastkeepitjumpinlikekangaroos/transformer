@@ -215,7 +215,7 @@ object MetaQueryGen {
     def outputSchema: Vector[(String, DataType)] =
       items.map { case (e, n) => (n, e.dataType) } ++ windows.map(w => (w.name, w.dataType))
     def tlpCandidates: Vector[(String, DataType)] =
-      items.collect { case (c: ColRefExpr, n) if isPartitionable(c.dataType) => (n, c.dataType) } ++
+      items.collect { case (e, n) if typeReliable(e) && isPartitionable(e.dataType) => (n, e.dataType) } ++
         windows.collect { case w if isPartitionable(w.dataType) => (w.name, w.dataType) }
     def hasWindow: Boolean = windows.nonEmpty
     def hasTieSensitiveWindow: Boolean = windows.exists(_.tieSensitive)
@@ -238,7 +238,7 @@ object MetaQueryGen {
     def outputSchema: Vector[(String, DataType)] =
       groupKeys.map { case (e, n) => (n, e.dataType) } ++ aggs.map { case (a, n) => (n, aggType(a)) }
     def tlpCandidates: Vector[(String, DataType)] =
-      groupKeys.collect { case (c: ColRefExpr, n) if isPartitionable(c.dataType) => (n, c.dataType) } ++
+      groupKeys.collect { case (e, n) if typeReliable(e) && isPartitionable(e.dataType) => (n, e.dataType) } ++
         aggs.collect { case (a, n) if isPartitionable(aggType(a)) => (n, aggType(a)) }
     def hasWindow: Boolean = false
     def hasTieSensitiveWindow: Boolean = false
@@ -736,10 +736,15 @@ object MetaQueryGen {
     val bareCount = rng.between(1, math.min(3, scope.length))
     val bare = distinctSubset(rng, scope, bareCount)
     val bareItems: Vector[(Expr, String)] = bare.zipWithIndex.map { case (sc, i) => (sc.ref, s"o$i") }
+    // A math function of a numeric column, now and then, whose type is its
+    // own whatever the column's, so TLP may partition on it, and on the rows
+    // its domain answers NULL over.
+    val numeric = scope.filter(c => DataType.isNumeric(c.dataType))
     val computed: Vector[(Expr, String)] =
       if (rng.bool(0.4)) {
         val t = ExprGen.pick(rng, ComputedTypes)
-        Vector((genValue(rng, scope, t, 2), s"o${bareItems.length}"))
+        val e = if (numeric.nonEmpty && rng.bool(0.3)) genDomainCall(rng, numeric) else genValue(rng, scope, t, 2)
+        Vector((e, s"o${bareItems.length}"))
       } else Vector.empty
     val items = bareItems ++ computed
     // Sometimes append window-function columns. A window whose value can differ
@@ -822,7 +827,12 @@ object MetaQueryGen {
       if (groupable.nonEmpty && rng.bool(0.8))
         distinctSubset(rng, groupable, rng.between(1, math.min(2, groupable.length)))
       else Vector.empty
-    val groupKeys: Vector[(Expr, String)] = keys.zipWithIndex.map { case (sc, i) => (sc.ref, s"o$i") }
+    // Now and then a key is a math function of a numeric column, so the rows
+    // its domain answers NULL over make a group of their own.
+    val numeric = scope.filter(c => DataType.isNumeric(c.dataType))
+    val keyExprs: Vector[Expr] = keys.map(_.ref) ++
+      (if (numeric.nonEmpty && rng.bool(0.25)) Vector(genDomainCall(rng, numeric)) else Vector.empty)
+    val groupKeys: Vector[(Expr, String)] = keyExprs.zipWithIndex.map { case (e, i) => (e, s"o$i") }
     val nAgg = rng.between(1, 2)
     val aggs: Vector[(QueryGen.AggSpec, String)] =
       (0 until nAgg).map(i => (genAggSpec(rng, scope), s"o${groupKeys.length + i}")).toVector
@@ -885,7 +895,8 @@ object MetaQueryGen {
     if (depth <= 0 || rng.bool(leafProb(depth))) genLeafValue(rng, scope, target)
     else if (!Numerics.contains(target) && target != DataType.StringType) {
       def coalesce(): Expr =
-        FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(genValue(rng, scope, target, depth - 1)), target)
+        FuncExpr(rng.weighted((3, "COALESCE"), (1, "GREATEST"), (1, "LEAST")),
+          Seq.fill(rng.between(1, 3))(genValue(rng, scope, target, depth - 1)), target)
       target match {
         case _: DataType.DecimalType =>
           val decimalCols = scope.filter(_.dataType.isInstanceOf[DataType.DecimalType])
@@ -899,14 +910,31 @@ object MetaQueryGen {
     }
     else if (target == DataType.StringType) genText(rng, scope, depth)
     else {
+      def sub(t: DataType): Expr = genValue(rng, scope, t, depth - 1)
       val options = Seq[(Int, () => Expr)](
-        (4, () => BinOpExpr(rng.oneOf(ArithOps), genValue(rng, scope, rng.oneOf(Numerics), depth - 1),
-          genValue(rng, scope, rng.oneOf(Numerics), depth - 1), target)),
-        (2, () => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(genValue(rng, scope, target, depth - 1)), target)),
-        (1, () => FuncExpr("ABS", Seq(genValue(rng, scope, target, depth - 1)), target)))
-      val length = Seq[(Int, () => Expr)](
-        (2, () => FuncExpr("LENGTH", Seq(genValue(rng, scope, DataType.StringType, depth - 1)), DataType.IntType)))
-      rng.weighted(options ++ (if (target == DataType.IntType) length else Nil): _*)()
+        (4, () => BinOpExpr(rng.oneOf(ArithOps), sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics)), target)),
+        (2, () => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(target)), target)),
+        (1, () => FuncExpr("ABS", Seq(sub(target)), target)),
+        (1, () => FuncExpr("MOD", Seq(sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics))), target)),
+        (1, () => FuncExpr(rng.oneOf(Seq("GREATEST", "LEAST")), Seq.fill(rng.between(1, 3))(sub(target)), target)),
+        (1, () => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
+        (1, () => FuncExpr("IF", Seq(genPredicate(rng, scope, depth - 1), sub(target), sub(target)), target)),
+        // A rounding function of any number, and ROUND and TRUNC to a scale
+        // a few places either way.
+        (1, () => {
+          val name = rng.oneOf(Seq("ROUND", "TRUNC", "FLOOR", "CEIL"))
+          val scale = if ((name == "ROUND" || name == "TRUNC") && rng.bool()) Seq(LitExpr(rng.between(-1, 2), DataType.IntType))
+            else Nil
+          FuncExpr(name, sub(rng.oneOf(Numerics)) +: scale, target)
+        }))
+      val byTarget = target match {
+        case DataType.IntType => Seq[(Int, () => Expr)](
+          (2, () => FuncExpr("LENGTH", Seq(sub(DataType.StringType)), DataType.IntType)),
+          (1, () => FuncExpr("SIGN", Seq(signArg(rng, scope)), DataType.IntType)))
+        case DataType.DoubleType => Seq[(Int, () => Expr)]((4, () => genMathCall(rng, scope, depth)))
+        case _ => Nil
+      }
+      rng.weighted(options ++ byTarget: _*)()
     }
   }
 
@@ -919,6 +947,7 @@ object MetaQueryGen {
     rng.weighted[() => Expr](
       (3, () => BinOpExpr("||", sub(), sub(), DataType.StringType)),
       (1, () => FuncExpr("CONCAT", Seq.fill(rng.between(1, 3))(sub()), DataType.StringType)),
+      (1, () => FuncExpr(rng.oneOf(Seq("GREATEST", "LEAST")), Seq.fill(rng.between(1, 3))(sub()), DataType.StringType)),
       (3, () => FuncExpr(rng.oneOf(Seq("UPPER", "LOWER")), Seq(sub()), DataType.StringType)),
       (1, () => FuncExpr("TRIM", Seq(sub()), DataType.StringType)),
       (2, () => {
@@ -1071,6 +1100,66 @@ object MetaQueryGen {
         val pattern = if (rng.bool(0.5)) rng.oneOf(TextPool.Patterns) else rng.oneOf(Seq("%", "a%", "%a%", "_"))
         LikeExpr(text, LitExpr(pattern, DataType.StringType), rng.bool(), LikeSyntax(caseInsensitive = rng.bool(0.4)))
       }))()
+  }
+
+  /** A call of one of `QueryGen.DoubleFunctions`, the catalog's functions
+    * that answer a DOUBLE whatever they are given, each number argument a
+    * numeric value in scope or one of `QueryGen.MathEdges`, the values a
+    * domain has its edge at, or NaN or an infinity; `RAND` with a literal
+    * seed. */
+  private def genMathCall(rng: Rng, scope: Vector[ScopeCol], depth: Int): Expr = {
+    // PI, E and RAND take no number, which genDomainCall draws the others
+    // over too, so they are drawn here four times as often.
+    val entry = rng.weighted(QueryGen.DoubleFunctions.map(e =>
+      (if (e.params.contains(Funcs.Param.Number)) 1 else 4, e)): _*)
+    val n = if (entry.name == "RAND") 1 else entry.arity.min
+    val args = entry.paramsAt(n).map {
+      case Funcs.Param.Number => rng.weighted[() => Expr](
+        (3, () => genValue(rng, scope, rng.oneOf(Numerics), math.max(0, depth - 1))),
+        (2, () => rng.oneOf(QueryGen.MathEdges)),
+        (1, () => floatSpecialLiteral(rng.oneOf(Seq("NaN", "Infinity", "-Infinity")), DataType.DoubleType)))()
+      case _ => LitExpr(rng.between(0, 9), DataType.IntType)
+    }
+    FuncExpr(rng.oneOf(entry.names), args, DataType.DoubleType)
+  }
+
+  /** `SIGN`'s argument: an integer or decimal column in scope, or a float one
+    * guarded to its finite values, since `SIGN` of NaN is an error. */
+  private def signArg(rng: Rng, scope: Vector[ScopeCol]): Expr = {
+    val numeric = scope.filter(c => DataType.isNumeric(c.dataType))
+    if (numeric.isEmpty) LitExpr(rng.between(-2, 2), DataType.IntType)
+    else {
+      val c = rng.oneOf(numeric)
+      if (c.dataType == DataType.FloatType || c.dataType == DataType.DoubleType) {
+        val finite = BinOpExpr("<", FuncExpr("ABS", Seq(c.ref), c.dataType), LitExpr(1.0e9, DataType.DoubleType),
+          DataType.BooleanType)
+        CaseExpr(Seq((finite, c.ref)), None, c.dataType)
+      } else c.ref
+    }
+  }
+
+  /** A call of a column in scope that answers a DOUBLE whatever the column
+    * is, as an output column TLP may partition on and a GROUP BY key: a math
+    * function of one number, or `POWER`, `LOG` or `ATAN2` of it and an edge
+    * value, so the rows its domain answers NULL over (`SQRT` of a negative)
+    * reach a partition and a group of their own. */
+  private def genDomainCall(rng: Rng, numeric: Vector[ScopeCol]): Expr = {
+    val c = rng.oneOf(numeric).ref
+    val unary = QueryGen.DoubleFunctions.filter(e => e.arity.min == 1 && e.arity.max.contains(1) && e.name != "RAND")
+    rng.weighted[() => Expr](
+      (4, () => FuncExpr(rng.oneOf(unary).name, Seq(c), DataType.DoubleType)),
+      (1, () => FuncExpr("POWER", Seq(c, rng.oneOf(QueryGen.MathEdges)), DataType.DoubleType)),
+      (1, () => FuncExpr("LOG", Seq(rng.oneOf(QueryGen.MathEdges), c), DataType.DoubleType)),
+      (1, () => FuncExpr("ATAN2", Seq(c, rng.oneOf(QueryGen.MathEdges)), DataType.DoubleType)))()
+  }
+
+  /** Whether `e`, an output column's expression, binds to its declared type
+    * whatever its arguments are: a call of a catalog function whose result is
+    * one type, as a math function's is a DOUBLE. */
+  private def typeReliable(e: Expr): Boolean = e match {
+    case _: ColRefExpr => true
+    case FuncExpr(name, _, _) => FunctionCatalog.lookup(name).exists(_.result.isInstanceOf[FunctionCatalog.Result.Fixed])
+    case _ => false
   }
 
   private def genLit(rng: Rng, dt: DataType): Any = dt match {

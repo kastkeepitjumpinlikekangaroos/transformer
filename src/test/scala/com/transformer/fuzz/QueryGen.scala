@@ -43,7 +43,9 @@ import com.transformer.sql.plan._
   *
   * Excluded so the result multiset stays mode-invariant: `RAND()` and the clock
   * functions (`CURRENT_DATE`/`CURRENT_TIMESTAMP`) — each execution of a query
-  * reads the clock afresh, so two modes legitimately disagree. `LIMIT` and `OFFSET` ARE generated, but only over a '''total'''
+  * reads the clock afresh, so two modes legitimately disagree. `RAND(k)` with
+  * a literal seed is one value, and is drawn with every other function of the
+  * catalog ([[CalledFunctions]]). `LIMIT` and `OFFSET` ARE generated, but only over a '''total'''
   * ORDER BY (every output column an order key), where rows tied at a cutoff are
   * identical rows and the kept slice is therefore a layout-independent multiset;
   * a bare `LIMIT` or `OFFSET` would keep a different SUBSET of the tied rows per
@@ -428,20 +430,88 @@ object QueryGen {
       2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(target), sub(target)), target)),
       1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
       1 -> (() => genCase(rng, schema, target, depth)),
-      1 -> (() => genNumericCast(rng, sub(rng.oneOf(Numerics)), target)))
+      1 -> (() => genNumericCast(rng, sub(rng.oneOf(Numerics)), target)),
+      1 -> (() => FuncExpr("MOD", Seq(sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics))), target)),
+      1 -> (() => genExtreme(rng, target, sub)))
     val extra: Seq[(Int, () => Expr)] = target match {
       case DataType.IntType =>
-        Seq(2 -> (() => FuncExpr("LENGTH", Seq(sub(DataType.StringType)), DataType.IntType)))
+        Seq(2 -> (() => FuncExpr("LENGTH", Seq(sub(DataType.StringType)), DataType.IntType)),
+          1 -> (() => FuncExpr("SIGN", Seq(signArg(rng, schema)), DataType.IntType)))
       case DataType.DoubleType =>
         Seq(
           1 -> (() => FuncExpr(rng.oneOf(Seq("FLOOR", "CEIL")), Seq(sub(rng.oneOf(Numerics))), DataType.DoubleType)),
-          1 -> (() => FuncExpr("ROUND", roundArgs(rng, schema, sub(rng.oneOf(Numerics))), DataType.DoubleType)))
+          1 -> (() => FuncExpr(rng.oneOf(Seq("ROUND", "TRUNC")), roundArgs(rng, schema, sub(rng.oneOf(Numerics))),
+            DataType.DoubleType)),
+          4 -> (() => genMathCall(rng, schema, depth)))
       case _ => Seq.empty
     }
     rng.weighted(base ++ extra: _*)()
   }
 
-  /** ROUND args: the value, and half the time a scale. */
+  // ---- the catalog's functions ----------------------------------------------
+
+  /** The functions a query calls by name and binds through `FunctionCatalog`:
+    * its scalar and flow entries and `MOD`, an operator written as a call,
+    * but not the clock functions, which each run reads afresh.
+    * `ModeDifferentialFuzzTest.everyCatalogFunctionIsDrawn` holds this
+    * generator and `MetaQueryGen` to drawing each of them, so a function the
+    * registry gains is drawn in SQL the day it lands, or the test says which. */
+  private[fuzz] val CalledFunctions: Seq[FunctionCatalog.Entry] = FunctionCatalog.Entries.filter(e =>
+    e.kind == FunctionCatalog.Kind.Scalar || e.kind == FunctionCatalog.Kind.Flow || e.kind == FunctionCatalog.Kind.Operator)
+
+  /** The catalog's functions that answer a DOUBLE whatever they are given:
+    * the math functions, `POWER`, two-argument `LOG`, `ATAN2`, `PI`, `E` and
+    * `RAND`, which the generators call with a literal seed only (unseeded,
+    * each row reads a fresh value, which no two runs agree on). */
+  private[fuzz] val DoubleFunctions: Seq[FunctionCatalog.Entry] = CalledFunctions.filter(e =>
+    e.kind == FunctionCatalog.Kind.Scalar && e.result == FunctionCatalog.Result.Fixed(DataType.DoubleType))
+
+  /** A call of one of [[DoubleFunctions]], each number argument drawn at its
+    * domain's edges as often as not ([[numberArg]]), a seed a small literal. */
+  private def genMathCall(rng: Rng, schema: Schema, depth: Int): Expr = {
+    val entry = rng.oneOf(DoubleFunctions)
+    val n = if (entry.name == "RAND") 1 else entry.arity.min
+    val args = entry.paramsAt(n).map {
+      case Funcs.Param.Number => numberArg(rng, schema, depth)
+      case _ => LitExpr(rng.between(0, 9), DataType.IntType)
+    }
+    FuncExpr(rng.oneOf(entry.names), args, DataType.DoubleType)
+  }
+
+  /** A math function's number: a numeric subtree or column, or one of the
+    * values a domain has its edge at (0, 1, -1, a fraction either way of
+    * zero, -0.0, NaN, the infinities), so `SQRT`, `LN`, `LOG`, `ASIN`,
+    * `ACOS` and `POWER` meet the arguments they answer NULL over
+    * (plans/testing/05). A negative number is a direct argument only, where
+    * its sign follows a parenthesis or a comma. */
+  private def numberArg(rng: Rng, schema: Schema, depth: Int): Expr = rng.weighted[() => Expr](
+    (3, () => genValue(rng, schema, rng.oneOf(Numerics), math.max(0, depth - 1))),
+    (2, () => rng.oneOf(MathEdges)),
+    (1, () => MetaQueryGen.floatSpecialLiteral(rng.oneOf(Seq("NaN", "Infinity", "-Infinity")), DataType.DoubleType)))()
+
+  /** Numbers at the edges of the math functions' domains. */
+  private[fuzz] val MathEdges: Seq[LitExpr] =
+    Seq[Any](0, 1, -1, 2, -2).map(v => LitExpr(v, DataType.IntType)) ++
+      Seq[Any](0.5, -0.5, 1.5, -0.0, 10.0).map(v => LitExpr(v, DataType.DoubleType))
+
+  /** `SIGN`'s argument: an INT, BIGINT or DECIMAL leaf, or a FLOAT or DOUBLE
+    * leaf guarded to its finite values (`CASE WHEN ABS(x) < 1e9 THEN x END`),
+    * since `SIGN` of NaN is an error (plans/robustness/30). */
+  private def signArg(rng: Rng, schema: Schema): Expr = {
+    val t = ExprGen.pick(rng, Numerics ++ ExprGen.DecimalTypes)
+    val leaf = genLeafValue(rng, schema, t)
+    if (t == DataType.FloatType || t == DataType.DoubleType) {
+      val finite = BinOpExpr("<", FuncExpr("ABS", Seq(leaf), t), LitExpr(1.0e9, DataType.DoubleType), DataType.BooleanType)
+      CaseExpr(Seq((finite, leaf)), None, t)
+    } else leaf
+  }
+
+  /** `GREATEST` or `LEAST` of one to three values of `target`, whose NULLs
+    * they skip. */
+  private def genExtreme(rng: Rng, target: DataType, sub: DataType => Expr): Expr =
+    FuncExpr(rng.oneOf(Seq("GREATEST", "LEAST")), Seq.fill(rng.between(1, 3))(sub(target)), target)
+
+  /** ROUND and TRUNC args: the value, and half the time a scale. */
   private def roundArgs(rng: Rng, schema: Schema, value: Expr): Seq[Expr] =
     if (rng.bool(0.5)) Seq(value, integerArg(rng, schema, rng.between(-1, 3))) else Seq(value)
 
@@ -472,7 +542,8 @@ object QueryGen {
       2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
       1 -> (() => FuncExpr("NULLIF", Seq(sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
       1 -> (() => genCase(rng, schema, DataType.StringType, depth)),
-      1 -> (() => CastExpr(sub(ExprGen.pick(rng, TextTypes)), DataType.StringType)))
+      1 -> (() => CastExpr(sub(ExprGen.pick(rng, TextTypes)), DataType.StringType)),
+      1 -> (() => genExtreme(rng, DataType.StringType, sub)))
     rng.weighted(producers: _*)()
   }
 
@@ -500,7 +571,8 @@ object QueryGen {
       2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(target)), target)),
       2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(target), sub(target)), target)),
       1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
-      1 -> (() => genCase(rng, schema, target, depth)))
+      1 -> (() => genCase(rng, schema, target, depth)),
+      1 -> (() => genExtreme(rng, target, sub)))
     val decimalCols = (0 until schema.length).filter(i => schema.fields(i).dataType.isInstanceOf[DataType.DecimalType])
     val extra: Seq[(Int, () => Expr)] = target match {
       case d: DataType.DecimalType if decimalCols.nonEmpty => Seq(

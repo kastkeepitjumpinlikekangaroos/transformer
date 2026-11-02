@@ -2,7 +2,7 @@ package com.transformer.fuzz
 
 import com.transformer.core._
 import com.transformer.fuzz.QueryGen._
-import com.transformer.fuzz.oracle.{ExactIntegers, KeyEquality, ModeDifferential, RelEngine, WindowFrames}
+import com.transformer.fuzz.oracle.{CatalogNulls, ExactIntegers, KeyEquality, ModeDifferential, RelEngine, WindowFrames}
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -151,6 +151,48 @@ class ModeDifferentialFuzzTest {
       KeyEquality.check(c)
     }
   }
+
+  /** Every call of a catalog function a generated query makes over its table
+    * answers NULL on a row exactly where its entry's NULL rule or domain
+    * explains it (`oracle/CatalogNulls`), read off the bound plan and
+    * evaluated over the dataset: the layout relations cannot see a function
+    * that answers NaN where its domain says NULL in every layout alike. */
+  @Test def fuzzCatalogNulls(): Unit = {
+    Props.forAll[QueryCase](
+      name = "catalog-nulls-sql",
+      gen = QueryGen.generate,
+      shrink = Shrinker.queryCase,
+      count = Props.seedCountOr(DefaultModeDiffSeeds * 4)
+    ) { qc =>
+      val view = qc.dataset.singlePartition()
+      val catalog = new Catalog
+      catalog.register(QueryGen.ViewName, view)
+      Try(LogicalBuilder.build(qc.sql, catalog)).toOption.foreach { built =>
+        val batches = (0 until view.numPartitions).flatMap(view.readPartition(_).toSeq)
+        oracle.BoundPlan.exprs(built.main).foreach { e =>
+          batches.foreach(b => if (readsOwnColumns(e, b)) CatalogNulls.check(e, b))
+        }
+      }
+    }
+  }
+
+  /** Every function the registry binds as a call, `MOD` among them and the
+    * clock functions apart, is drawn by `QueryGen` on a share of seeds, as
+    * `ExprGen` draws them: the list is `QueryGen.CalledFunctions`, read off
+    * `FunctionCatalog`, so a function the registry gains fails here until
+    * the SQL generators draw it. Generation only. */
+  @Test def everyCatalogFunctionIsDrawn(): Unit = {
+    val n = 40000
+    val drawn = ModeDifferentialFuzzTest.functionTally(n)(seed => QueryGen.generate(new Rng(seed)).query)
+    val counts = QueryGen.CalledFunctions.map(e => e.name -> drawn(e.name))
+    println(s"[mode-differential] catalog functions over $n seeds: " + counts.map { case (f, c) => s"$f=$c" }.mkString(", "))
+    // Measured over these seeds: the rarest are the math functions, each
+    // drawn among 26 that answer a DOUBLE, from 72 (TAN) to 95; the floor sits
+    // about 3x below them.
+    counts.foreach { case (f, c) => assertTrue(s"$f is drawn on $c of $n seeds", c > FunctionFloor) }
+  }
+
+  private val FunctionFloor = 24
 
   @Test def fuzzModeDifferential(): Unit = {
     Props.forAll[QueryCase](
@@ -979,6 +1021,32 @@ object ModeDifferentialFuzzTest {
       here ++ Shrinker.childrenOf(e).flatMap(walk)
     }
     roots.flatMap(walk)
+  }
+
+  /** On how many of seeds `0 until n` the query `query` draws calls each
+    * catalog function, by its canonical name, anywhere in it. */
+  def functionTally(n: Int)(query: Long => QueryGen.GenQuery): Map[String, Int] = {
+    val drawn = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    def names(e: Expr): Iterator[String] = (e match {
+      case FuncExpr(name, _, _) => FunctionCatalog.lookup(name).map(_.name).iterator
+      case _ => Iterator.empty
+    }) ++ Shrinker.childrenOf(e).iterator.flatMap(names)
+    (0 until n).foreach { seed =>
+      val roots: Seq[Expr] = query(seed.toLong) match {
+        case p: QueryGen.ProjectQuery => p.projection.map(_._1) ++ p.where.toSeq
+        case a: QueryGen.AggregateQuery => a.where.toSeq ++ a.aggregates.flatMap {
+          case (QueryGen.CountIf(e), _) => Seq(e)
+          case (QueryGen.Count(e, _), _) => Seq(e)
+          case (QueryGen.Sum(e, _), _) => Seq(e)
+          case (QueryGen.Avg(e, _), _) => Seq(e)
+          case (QueryGen.Min(e), _) => Seq(e)
+          case (QueryGen.Max(e), _) => Seq(e)
+          case _ => Seq.empty
+        }
+      }
+      roots.iterator.flatMap(names).toSet.foreach((f: String) => drawn(f) += 1)
+    }
+    drawn.toMap.withDefaultValue(0)
   }
 
   /** The (site, class) pairs `qc` reaches with text past ASCII, as

@@ -472,6 +472,55 @@ class MetamorphicFuzzTest {
     arm(mc.query).filter(_.nonEmpty)
   }
 
+  /** Every function the registry binds as a call, `MOD` among them and the
+    * clock functions apart (`QueryGen.CalledFunctions`), is drawn by
+    * `MetaQueryGen` on a share of seeds, in any arm of a query, so the
+    * metamorphic relations reach each one. Generation only. */
+  @Test def everyCatalogFunctionIsDrawn(): Unit = {
+    val n = 40000
+    val drawn = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    (0 until n).foreach { seed =>
+      MetamorphicFuzzTest.functionsDrawn(MetaQueryGen.generate(new Rng(seed.toLong)).query).foreach(f => drawn(f) += 1)
+    }
+    val counts = QueryGen.CalledFunctions.map(e => e.name -> drawn(e.name))
+    println(s"[metamorphic] catalog functions over $n seeds: " + counts.map { case (f, c) => s"$f=$c" }.mkString(", "))
+    // Measured over these seeds: the rarest are E, PI and RAND, 66 to 71,
+    // the other math functions 140 to 650; the floor sits about 3x below.
+    counts.foreach { case (f, c) => assertTrue(s"$f is drawn on $c of $n seeds", c > FunctionFloor) }
+  }
+
+  private val FunctionFloor = 22
+
+  /** The rows a math function's domain answers NULL over (`SQRT` of a
+    * negative, `LN` of zero, `ASIN` past 1: plans/testing/05) reach a TLP
+    * partition, which must put them in `p IS NULL`'s, and a GROUP BY key, which
+    * must make them one group: a math function of a column is an output
+    * column TLP partitions on, whose type is the function's whatever the
+    * column's, and a group key. Read off the base column's values by the
+    * function's entry in the catalog, so generation only. */
+  @Test def domainNullsReachATlpPartitionAndAGroupByKey(): Unit = {
+    val n = 20000
+    var tlpShape, tlpValue, groupShape, groupValue = 0
+    (0 until n).foreach { seed =>
+      val mc = MetaQueryGen.generate(new Rng(seed.toLong))
+      val tlpCalls = MetamorphicFuzzTest.domainCalls(mc, tlpOnly = true)
+      val groupCalls = MetamorphicFuzzTest.domainCalls(mc, tlpOnly = false)
+      if (tlpCalls.nonEmpty) tlpShape += 1
+      if (tlpCalls.exists(_._2)) tlpValue += 1
+      if (groupCalls.nonEmpty) groupShape += 1
+      if (groupCalls.exists(_._2)) groupValue += 1
+    }
+    println(s"[metamorphic] over $n seeds: TLP partitions a math function's column in $tlpShape, over a row its " +
+      s"domain answers NULL in $tlpValue; a GROUP BY key is one in $groupShape, over such a row in $groupValue")
+    // Measured over these seeds: TLP over a math function's column 437, a
+    // domain's NULL in it 125; a math GROUP BY key 803, a domain's NULL in it
+    // 206; bounds ~3x below.
+    assertTrue(s"TLP rarely partitions a math function's column (shape=$tlpShape)", tlpShape > 145)
+    assertTrue(s"a domain's NULL rarely reaches a TLP partition (value=$tlpValue)", tlpValue > 41)
+    assertTrue(s"a GROUP BY key is rarely a math function (shape=$groupShape)", groupShape > 267)
+    assertTrue(s"a domain's NULL rarely reaches a GROUP BY key (value=$groupValue)", groupValue > 68)
+  }
+
   /** Each class of the text past ASCII (`TextPool`) reaches each string site
     * of the metamorphic corpus, in any arm of a query: `LENGTH`, `SUBSTRING`,
     * `UPPER`, `LOWER`, `LIKE` and `ILIKE` over a base column holding it or a
@@ -1111,6 +1160,62 @@ object MetamorphicFuzzTest {
       }
     }
     out.result()
+  }
+
+  /** The canonical names of the catalog functions `q` calls, in any arm. */
+  def functionsDrawn(q: MetaQuery): Set[String] = {
+    def names(e: Expr): Iterator[String] = (e match {
+      case FuncExpr(name, _, _) => FunctionCatalog.lookup(name).map(_.name).iterator
+      case _ => Iterator.empty
+    }) ++ Shrinker.childrenOf(e).iterator.flatMap(names)
+    val here = (q.where.toSeq ++ q.from.joins.map(_.on) ++ (q.core match {
+      case p: ProjectCore => p.items.map(_._1)
+      case a: AggCore => a.groupKeys.map(_._1) ++ a.having.toSeq ++ a.aggs.flatMap {
+        case (QueryGen.Min(e), _) => Seq(e)
+        case (QueryGen.Max(e), _) => Seq(e)
+        case (QueryGen.Count(e, _), _) => Seq(e)
+        case (QueryGen.Sum(e, _), _) => Seq(e)
+        case (QueryGen.Avg(e, _), _) => Seq(e)
+        case (QueryGen.Stat(_, e), _) => Seq(e)
+        case _ => Seq.empty
+      }
+    })).iterator.flatMap(names).toSet
+    here ++ q.setOp.toSeq.flatMap { case (rhs, _) => functionsDrawn(rhs) } ++ q.ctes.flatMap(c => functionsDrawn(c.body))
+  }
+
+  /** The calls of a math function of one base column in `mc`'s main arm that
+    * are an output column TLP partitions on (`tlpOnly`) or a GROUP BY key,
+    * each with whether some row of the column, beside the call's literal
+    * arguments, lies outside the function's domain. */
+  def domainCalls(mc: MetaCase, tlpOnly: Boolean): Seq[(FuncExpr, Boolean)] = {
+    val q = mc.query
+    val partitioned: Set[String] = mc.tlp.toSeq.flatMap { p =>
+      s"${p.truePred} ${p.falsePred}".split("[^A-Za-z0-9_]").toSeq
+    }.toSet
+    val calls: Seq[FuncExpr] = q.core match {
+      case p: ProjectCore if tlpOnly => p.items.collect { case (f: FuncExpr, n) if partitioned(n) => f }
+      case a: AggCore => a.groupKeys.collect { case (f: FuncExpr, n) if !tlpOnly || partitioned(n) => f }
+      case _ => Seq.empty
+    }
+    calls.flatMap { f =>
+      val entry = FunctionCatalog.lookup(f.name).filter(_.domain.nonEmpty)
+      val column = f.args.collectFirst { case c: ColRefExpr => c }
+      (entry, column) match {
+        case (Some(e), Some(c)) =>
+          val cells = scopeCol(c).toSeq.flatMap(columnCells(mc.env, q.from, _))
+          val outside = cells.exists { v =>
+            v != null && {
+              val values = f.args.map {
+                case LitExpr(x, _) => x
+                case _ => v
+              }
+              !values.contains(null) && e.domain.exists(_.applies(values))
+            }
+          }
+          Some((f, outside))
+        case _ => None
+      }
+    }
   }
 
   /** The (site, class) pairs `mc` reaches with text past ASCII, as

@@ -28,7 +28,14 @@ relevant module lives, and that you'll follow the workflow in
    is matched as a string in the binder. `ExprGen` and `SqlTextGen` draw the new
    function from the catalog by its parameters, so it is fuzzed the day it
    lands (`expr_parity_fuzz_test`'s `everyCatalogFunctionIsDrawn` fails if the
-   generator cannot type it).
+   generator cannot type it), and `oracle/CatalogNulls` holds every call of it
+   to answer NULL exactly where its NULL rule or domain says. The SQL
+   generators, `QueryGen` and `MetaQueryGen`, list the catalog's called
+   functions too (`QueryGen.CalledFunctions`), and their own
+   `everyCatalogFunctionIsDrawn` guards (mode-differential, metamorphic) fail
+   until a producer draws the new one: a function of numbers that answers a
+   DOUBLE is drawn already (`genMathCall`, at its domain's edges); any other
+   needs a producer of its own.
 2. Add an `apply` case in `sql/plan/Funcs.scala` with the runtime semantics, under
    each of its names. A NULL
    argument answers NULL, a scale or a position included, unless the function
