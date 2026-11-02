@@ -1,10 +1,12 @@
 # Text casts by the grammar CSV reads a value by (plans/robustness/24): to a
 # BOOLEAN from true and false alone, in any case and with no spaces around
-# them, and to a FLOAT or DOUBLE from a plain decimal number, or NaN, Infinity
-# and -Infinity as written. Any other text is an error naming it. Postgres
-# reads more spellings of each, which its ports keep as skipped records
-# (postgres/boolean.test, postgres/float8.test); these are the pins of the
-# ledger's bool-text and double-text (docs/gotchas.md).
+# them, to an INT or BIGINT from an optional sign and ASCII digits, and to a
+# FLOAT or DOUBLE from a plain decimal number, or NaN, Infinity and -Infinity
+# as written. Any other text is an error naming it. Postgres reads more
+# spellings of each, which its ports keep as skipped records
+# (postgres/boolean.test, postgres/int4.test, postgres/float8.test); these are
+# the pins of the ledger's bool-text, int-text and double-text
+# (docs/gotchas.md).
 
 onlyif transformer bool-text
 query BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN
@@ -23,6 +25,30 @@ statement error
 SELECT CAST(' true' AS BOOLEAN)
 ----
 Cannot cast ' true' to boolean
+
+onlyif transformer int-text
+query INT,BIGINT,INT,BIGINT
+SELECT CAST('007' AS INT), CAST('+5' AS BIGINT), CAST('-2147483648' AS INT), CAST('-9223372036854775808' AS BIGINT)
+----
+7	5	-2147483648	-9223372036854775808
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0x42F' AS INT)
+----
+Cannot cast '0x42F' to int
+
+onlyif transformer int-text
+statement error
+SELECT CAST('1_000_000' AS BIGINT)
+----
+Cannot cast '1_000_000' to long
+
+onlyif transformer int-text
+statement error
+SELECT CAST(' 5' AS INT)
+----
+Cannot cast ' 5' to int
 
 onlyif transformer double-text
 query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,FLOAT

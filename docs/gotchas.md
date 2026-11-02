@@ -2316,6 +2316,26 @@ the ledger below, decided before the port. What the scripts leave out:
   outcome changes. The recommendation is for the parser to read SQL in a
   locale-independent way (the user's choice how: plans/testing/10's Outcome).
 
+## What the second PostgreSQL port held out (2026-11-02, held for the user)
+
+Porting ten more of Postgres's regression tests (`src/test/slt/postgres/`,
+[plans/testing/11](../plans/testing/11-postgres-ports-round-two.md)) took its
+five decisions overnight, as recommended and not yet confirmed by the user:
+REL_18_6 for every port, a SMALLINT value written as an INT where no answer
+depends on SMALLINT's range, a `CHAR(n)` column a STRING holding each value
+unpadded, Postgres's output vendored and checked in `slt_test`, and the ten
+files of the plan. Every other answer the engine gives otherwise is a rule of
+the ledger below, decided before the port (`int-text` joined it as a row of
+plans/robustness/24's rule). What the scripts hold out:
+
+- **Records both engines refuse, for different reasons**, held out as Spark's
+  were, since one engine's refusal for another reason is no agreement. In
+  each the engine refuses by a decided rule before it reaches what Postgres
+  refuses: int4.sql's six texts of a number one past `INT`'s range in base 2,
+  8 or 16 (`int4 '0x80000000'`), out of range for Postgres and no integer of
+  the engine's grammar (`int-text`). No answer differs. The recommendation is
+  to leave them out.
+
 ## Answers that differ from other engines by design
 
 The engine answers some queries otherwise than another engine does, on
@@ -2353,6 +2373,7 @@ choose it, and "since v1" one the engine has had from the start.
 | `cast-truncates` | A `CAST` of a number to `INT` or `BIGINT` truncates its fraction toward zero, where Postgres rounds. |  | [README](../README.md#sql-features), "Types in CAST" | Kept and documented with the overflow rule, by the user, 2026-10-31 ([robustness/18](../plans/robustness/18-integer-overflow-wraps.md)) | `types/integer_overflow.test` |
 | `bool-text` | Text casts to `BOOLEAN` from `true` and `false` alone, in any case and with no spaces around them, where Postgres also reads `t`, `yes`, `on`, `1` and the rest. |  | [README](../README.md#sql-features), "Types in CAST" | The user, 2026-10-03: a CAST reads its text strictly ([robustness/05](../plans/robustness/05-frontend-robustness-fuzzer.md)) | `types/casts.test` |
 | `double-text` | Text casts to `FLOAT` or `DOUBLE` by CSV's number grammar: `NaN`, `Infinity` and `-Infinity` as written, and no spaces around a number. |  | [README](../README.md#sql-features), "Types in CAST" | Claude, reported, 2026-10-31 ([robustness/24](../plans/robustness/24-cast-reads-javas-number-grammar.md)), on the grammar the user chose for CSV, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `types/casts.test` |
+| `int-text` | Text casts to `INT` or `BIGINT` by CSV's integer grammar, an optional sign and ASCII digits with no spaces around them, where Postgres also reads spaces around the number, `0x`, `0o` and `0b` prefixes and `_` between digits. |  | [README](../README.md#sql-features), "Types in CAST" | Claude, reported, 2026-10-31 ([robustness/24](../plans/robustness/24-cast-reads-javas-number-grammar.md)), on the grammar the user chose for CSV, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `types/casts.test` |
 | `double-range` | A `FLOAT` or `DOUBLE` result past the type's range is an infinity, and one too small for it 0, not an error. |  | [README](../README.md#sql-features), "`INT` and `BIGINT` arithmetic is exact, or an error"; [the PostgreSQL port](#answers-the-postgresql-port-settled-2026-11-01-all-decided) | Past the range by the user, 2026-10-31 ([robustness/30](../plans/robustness/30-third-audit.md)); too small by the user, 2026-11-01 ([testing/05](../plans/testing/05-plans-as-sql.md)) | `types/float_equality.test` |
 | `double-literal` | A number written with a point or an exponent is a `DOUBLE`, and beside a `DECIMAL` the decimal it is written as, where Postgres reads a numeric. |  | [README](../README.md#sql-features), "Literals and names mean what SQL writes" | Since v1; the decimal beside a `DECIMAL` by the user, 2026-10-30 ([robustness/13](../plans/robustness/13-literals-are-read-as-written.md)) | `types/decimal.test` |
 | `double-precision` | The math functions and the statistics compute in `DOUBLE`, over a `DECIMAL` too, and a `DOUBLE` holds 15 to 17 significant digits, where Postgres computes them in numeric. |  | [README](../README.md#limitations), "`DECIMAL` math functions and statistics compute in `DOUBLE`"; [not done](#whats-intentionally-not-done) | Since v1, and left so by [robustness/19](../plans/robustness/19-rounding-through-double.md), 2026-10-31, which made the rounding functions exact | `types/decimal.test` |
