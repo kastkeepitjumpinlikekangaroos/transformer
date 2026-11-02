@@ -391,7 +391,12 @@ ship a fix or move something from "not done" to "done".
   it cannot, and clears a failed run's files under its record
   (`OutputDirectory`, architecture.md §3a; plans/testing/06). The GUI's Persist
   had its own copy of the old steps and wrote over stray parts, naming them
-  all in its record; it goes through the same protocol now.
+  all in its record; it goes through the same protocol now. The fault
+  matrices then found the order a skipped task (or one failing before it
+  wrote) used, its record first and the earlier parts deleted after, leaving
+  a `Skipped` or `Failed` record beside parts when the clear stopped part
+  way; such a run marks the directory `Running` first now, as decision 1
+  says of any run that deletes a file there.
 - **Two runs writing one output directory at once are unsupported.** A
   `Running` record from a live run in another process looks the same as one a
   killed run left, so a second run started meanwhile clears the first's

@@ -2,7 +2,11 @@ load("@rules_scala//scala:scala.bzl", "scala_junit_test")
 
 scala_junit_test(
     name = "data_job_test",
-    srcs = ["DataJobTest.scala"],
+    srcs = [
+        "DataJobTest.scala",
+        # The job the fault matrices run, and the main a child JVM runs it through.
+        "FaultJob.scala",
+    ],
     suffixes = ["Test"],
     deps = [
         "//src/main/scala/com/transformer/core",

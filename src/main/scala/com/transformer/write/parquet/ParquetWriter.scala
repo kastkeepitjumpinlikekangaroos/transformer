@@ -264,7 +264,11 @@ object ParquetWriter {
         if (!it.hasNext) return 0L
         val w = new ParquetWriter(targetDir.resolve(partName(i)), schema, options)
         writers(i) = w
-        while (it.hasNext) w.write(it.next())
+        var first = true
+        while (it.hasNext) {
+          w.write(it.next())
+          if (first) { first = false; Faults.at(Faults.FirstBatch) }
+        }
         w.finish()
       }
     }
@@ -304,7 +308,7 @@ object ParquetWriter {
           writers(0) = w
           w.finish()
         }
-        writers.foreach(w => if (w != null) w.commit())
+        writers.foreach(w => if (w != null) { Faults.at(Faults.Commit); w.commit() })
       } catch { case t: Throwable => firstError = t }
     }
     if (firstError != null) {

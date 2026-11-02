@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, CatalogView, DataType, ExecutedQuery, ExecutionOptions, MaterializedView, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, DataType, ExecutedQuery, ExecutionOptions, Faults, MaterializedView, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.core.metrics.TaskMetricsRecord
 import com.transformer.temporal.TemporalVariables
 import org.junit.Assert._
@@ -1511,6 +1511,185 @@ class DataJobTest {
     assertTrue("the copy holds the run's parts", filesIn(killed).exists(_.startsWith("part-")))
 
     assertRerunIsClean(oneTaskJob(in, killed, sql, checks), killed, cleanRows(in, sql))
+  }
+
+  // ---- fault points (plans/testing/06, W2) ------------------------------------
+  //
+  // Every place a run changes the disk is a fault point (core.Faults), which a
+  // test arms to fail that change: FaultJob's job reaches every point in one
+  // run over an earlier run's output. However a run stops — an exception at a
+  // point here, the JVM halting at one in a child — every directory must say
+  // what it holds, and the next run, with nothing armed, must give a clean
+  // run's statuses and rows and leave nothing of the stopped one.
+
+  private def kindOf(s: TaskStatus): String = s match {
+    case TaskStatus.Succeeded => "Succeeded"
+    case _: TaskStatus.Failed => "Failed"
+    case _: TaskStatus.ValidationFailed => "ValidationFailed"
+    case _: TaskStatus.Skipped => "Skipped"
+    case TaskStatus.Pending => "Pending"
+  }
+
+  private def statusOf(rec: TaskRunRecord): String = TaskRunStatus.toJson(rec.status)
+
+  /** Each of FaultJob's tasks' rows, as its record reads them back, sorted. */
+  private def rowsOf(out: Path): Map[String, Seq[String]] = FaultJob.statuses().map { case (name, _) =>
+    val dir = out.resolve(name)
+    name -> (TaskRunRecord.read(dir) match {
+      case Some(rec) if statusOf(rec) == "Succeeded" || statusOf(rec) == "ValidationFailed" =>
+        val view = TaskRunRecord.outputView(dir, rec)
+        (0 until view.numPartitions).flatMap { p =>
+          view.readPartition(p).flatMap { b =>
+            (0 until b.numRows).map(r => (0 until b.schema.length).map(c => String.valueOf(b.column(c).getBoxed(r))).mkString(","))
+          }
+        }.sorted
+      case _ => Nil
+    })
+  }.toMap
+
+  /** What every task directory must say after any run, finished or not: it
+    * is absent or holds a readable record; a Failed or Skipped one holds no
+    * part file and no staged one; a Succeeded or ValidationFailed one holds
+    * exactly the part files its record names, and no staged one. Under a
+    * Running record anything may be left: its run stopped, and the next run
+    * clears it. */
+  private def assertDirectoriesSayWhatTheyHold(out: Path, context: String): Unit =
+    FaultJob.statuses().foreach { case (name, _) =>
+      val dir = out.resolve(name)
+      if (Files.isDirectory(dir)) {
+        val files = filesIn(dir)
+        val rec = TaskRunRecord.read(dir).getOrElse(
+          fail(s"$context: $dir holds ${files.mkString(", ")} and no readable record").asInstanceOf[TaskRunRecord])
+        val parts = files.filter(_.startsWith("part-"))
+        val staged = files.filter(_.startsWith("."))
+        statusOf(rec) match {
+          case "Failed" | "Skipped" =>
+            assertEquals(s"$context: ${statusOf(rec)} $name holds", Nil, parts ++ staged)
+          case "Succeeded" | "ValidationFailed" =>
+            assertEquals(s"$context: ${statusOf(rec)} $name's part files", rec.outputFiles.sorted, parts)
+            assertEquals(s"$context: ${statusOf(rec)} $name's staged files", Nil, staged)
+          case _ => ()
+        }
+      }
+    }
+
+  /** The statuses a run stopped by a fault gives: a clean run's, but where
+    * the fault failed a task (its message is the fault's), that task Failed
+    * and the tasks after it Skipped. A fault in a write that does not fail
+    * its task (a sample, `_perf.json`, `job.json`, a Failed or Skipped
+    * record) fails none. */
+  private def assertStatusesAfterAFault(result: JobResult, broken: Boolean, context: String): Unit = {
+    val got = result.tasks.map(t => t.taskName -> kindOf(t.status))
+    val hit = result.tasks.collect {
+      case t @ TaskResult(_, TaskStatus.Failed(msg), _, _, _, _, _)
+          if msg.contains("Injected fault") || msg.contains("No space left on device") => t.taskName
+    }
+    assertTrue(s"$context: the fault failed ${hit.mkString(", ")}", hit.size <= 1)
+    val after = Map("t" -> Seq("d"))
+    val expected = FaultJob.statuses(broken).map { case (name, st) =>
+      if (hit.contains(name)) name -> "Failed"
+      else if (hit.exists(h => after.getOrElse(h, Nil).contains(name))) name -> "Skipped"
+      else name -> st
+    }
+    assertEquals(context, expected, got)
+  }
+
+  /** A run with nothing armed, over what a stopped run left: a clean run's
+    * statuses and rows, each directory holding its record, the parts it names,
+    * its samples and its metrics and nothing else, and `job.json` saying so. */
+  private def assertRerunMatchesACleanRun(in: Path, out: Path, broken: Boolean, clean: Map[String, Seq[String]],
+      context: String): Unit = {
+    val rerun = FaultJob.job(in, out, broken).run()
+    assertEquals(context, FaultJob.statuses(broken), rerun.tasks.map(t => t.taskName -> kindOf(t.status)))
+    assertEquals(context, clean, rowsOf(out))
+    FaultJob.statuses(broken).foreach { case (name, _) =>
+      val dir = out.resolve(name)
+      val rec = TaskRunRecord.read(dir).get
+      val metrics = if (name == "t" && !broken) Seq(TaskMetricsRecord.FileName) else Nil
+      val expected = (Seq(TaskRunRecord.FileName) ++ rec.outputFiles ++ rec.validations.flatMap(_.sampleFile) ++ metrics)
+      assertEquals(s"$context: $name holds", expected.sorted, filesIn(dir))
+    }
+    val manifest = JobRunRecord.read(out.resolve("job.json")).get
+    assertEquals(context, FaultJob.statuses(broken), manifest.tasks.map(t => t.taskName -> TaskRunStatus.toJson(t.status)))
+  }
+
+  /** The fault points FaultJob's job reaches, each armed at its first reach,
+    * as each case stops a run: over the job, and, `broken`, over the job
+    * where `t` fails before writing and `d` is skipped, each over the parts
+    * the earlier run left it, where a record written before the clear sat
+    * beside parts the clear had not reached yet. */
+  private def faultCases(action: Faults.Action): Seq[(Faults.Arming, Boolean)] =
+    Faults.Points.map(p => (Faults.Arming(p, 1, action), false)) ++
+      Seq(Faults.ClearDelete, Faults.RunningRecord, Faults.FailedRecord, Faults.SkippedRecord)
+        .map(p => (Faults.Arming(p, 1, action), true))
+
+  /** Each case after an earlier clean run into a fresh directory, so the
+    * clear has files to delete: `stop` runs the case's job armed, and the
+    * checks above follow. */
+  private def eachFaultCase(cases: Seq[(Faults.Arming, Boolean)])(stop: (Faults.Arming, Boolean, Path, Path) => Unit): Unit = {
+    val in = tmpDir("dj-faults-in-")
+    FaultJob.writeInputs(in)
+    val clean = Map(false -> tmpDir("dj-faults-clean-"), true -> tmpDir("dj-faults-clean-broken-")).map {
+      case (broken, out) =>
+        val result = FaultJob.job(in, out, broken).run()
+        assertEquals(FaultJob.statuses(broken), result.tasks.map(t => t.taskName -> kindOf(t.status)))
+        broken -> rowsOf(out)
+    }
+    cases.foreach { case (arming, broken) =>
+      val context = s"$arming${if (broken) " (broken)" else ""}"
+      val out = tmpDir("dj-fault-")
+      FaultJob.job(in, out).run()
+      stop(arming, broken, in, out)
+      assertDirectoriesSayWhatTheyHold(out, s"after a fault at $context")
+      assertRerunMatchesACleanRun(in, out, broken, clean(broken), s"the rerun after a fault at $context")
+    }
+  }
+
+  /** Every fault point, armed in this JVM to throw as a failed write does. */
+  @Test def everyFaultPointLeavesDirectoriesThatSayWhatTheyHold(): Unit =
+    eachFaultCase(faultCases(Faults.Action.Throw) :+ ((Faults.Arming(Faults.FinalRecord, 1, Faults.Action.Enospc), false))) {
+      (arming, broken, in, out) =>
+        Faults.arm(arming)
+        val (result, fired) = try (FaultJob.job(in, out, broken).run(), Faults.fired) finally Faults.disarm()
+        assertTrue(s"$arming was never reached", fired)
+        assertStatusesAfterAFault(result, broken, s"a fault at $arming")
+    }
+
+  /** A full disk at the final record fails the task, naming the write: the
+    * record is the commit, and a task without one did not finish. */
+  @Test def aFullDiskAtTheFinalRecordFailsTheTaskNamingTheWrite(): Unit = {
+    val in = tmpDir("dj-enospc-in-")
+    FaultJob.writeInputs(in)
+    val out = tmpDir("dj-enospc-out-")
+    Faults.arm(Faults.Arming(Faults.FinalRecord, 1, Faults.Action.Enospc))
+    val result = try FaultJob.job(in, out).run() finally Faults.disarm()
+    val failed = result.tasks.collect { case TaskResult(name, TaskStatus.Failed(msg), _, _, _, _, _) => name -> msg }
+      .filterNot(_._1 == "f")
+    assertEquals(failed.toString, 1, failed.size)
+    val (name, msg) = failed.head
+    assertEquals(s"Could not write ${out.resolve(name).resolve(TaskRunRecord.FileName)}, which records the run: " +
+      "No space left on device", msg)
+    assertEquals(Seq(TaskRunRecord.FileName), filesIn(out.resolve(name)))
+  }
+
+  /** Every fault point, armed in a child JVM to halt it there, as a kill or
+    * a power cut stops a run: no `finally` block runs. The child runs
+    * FaultJob's main with `-Dtransformer.fault`; this JVM then checks what it
+    * left and reruns the job. A halt at the second commit leaves a part
+    * renamed under the Running record. */
+  @Test(timeout = 600000) def aJvmHaltedAtEveryFaultPointLeavesWhatTheNextRunClears(): Unit = {
+    val javaBin = java.nio.file.Paths.get(System.getProperty("java.home"), "bin", "java").toString
+    val logs = tmpDir("dj-halt-logs-")
+    eachFaultCase(faultCases(Faults.Action.Halt) :+ ((Faults.Arming(Faults.Commit, 2, Faults.Action.Halt), false))) {
+      (arming, broken, in, out) =>
+        val log = logs.resolve(s"${arming.point}-${arming.nth}-$broken.log")
+        val child = new ProcessBuilder(javaBin, "-cp", System.getProperty("java.class.path"),
+          s"-D${Faults.PropertyName}=$arming", FaultJob.getClass.getName.stripSuffix("$"),
+          in.toString, out.toString, if (broken) "broken" else "clean")
+          .redirectErrorStream(true).redirectOutput(log.toFile).start()
+        assertTrue(s"$arming: the child JVM did not end", child.waitFor(120, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals(s"$arming: the child did not halt there:\n${Files.readString(log)}", Faults.HaltStatus, child.exitValue)
+    }
   }
 
   /** A `Running` record has no `finishedAt`, which every other status needs;

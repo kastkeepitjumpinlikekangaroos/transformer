@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{ColumnarBatch, Schema, WrittenParts}
+import com.transformer.core.{ColumnarBatch, Faults, Schema, WrittenParts}
 import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
 import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
 
@@ -30,15 +30,14 @@ import scala.util.control.NonFatal
   *      run's last write in the directory. One that cannot be written fails
   *      the run.
   *
-  * A run that fails after step 2 deletes what it wrote, staged and committed,
-  * then writes its `Failed` record ([[fail]]), so a failed task's directory
-  * holds its record and nothing else. A run that dies after step 2 leaves the
-  * `Running` record, and the next run's step 3 deletes whatever it left.
-  *
-  * A run that writes no output — a task skipped, or one that failed before
-  * step 2 — replaces the record first and only then deletes the earlier
-  * run's files ([[replace]]). Nothing deletes a file a record names before
-  * the record is replaced.
+  * A run that ends without output ([[settle]]) — it failed, or its task was
+  * skipped — leaves its record and nothing else: once the directory is
+  * marked, whatever the run wrote there goes, staged or committed, then its
+  * `Failed` or `Skipped` record replaces `Running`. One that had not marked it
+  * yet marks it first, as step 2 does, then clears the earlier run's files.
+  * So a run that dies after step 2, or while it settles, leaves the `Running`
+  * record, and the next run's step 3 deletes whatever is left; and nothing
+  * deletes a file a record names before the record is replaced.
   */
 final class OutputDirectory(val dir: Path) {
 
@@ -51,8 +50,7 @@ final class OutputDirectory(val dir: Path) {
     if (stray.nonEmpty) throw new IllegalArgumentException(
       s"Output directory '$dir' already holds ${stray.mkString(", ")}, which no run record names, so a reader " +
         "of the directory would read them as part of this output; delete them or write to another directory")
-    TaskRunRecord.write(dir, running)
-    marked = true
+    mark(running)
     TaskRunRecord.clear(dir)
   }
 
@@ -70,12 +68,12 @@ final class OutputDirectory(val dir: Path) {
       case other => throw new IllegalArgumentException(s"Unsupported output format '$other' for '$dir'")
     }
 
-  /** Step 7: `record`, the run's final record, replaces `Running`. A reader
+  /** Step 7: `last`, the run's final record, replaces `Running`. A reader
     * outside the run trusts the directory only through it, so a run whose
     * record cannot be written did not finish for any reader: this throws,
     * naming the write. */
-  def finish(record: TaskRunRecord): Unit =
-    try TaskRunRecord.write(dir, record)
+  def finish(last: TaskRunRecord): Unit =
+    try record(last)
     catch {
       case NonFatal(e) =>
         throw new IOException(
@@ -83,26 +81,38 @@ final class OutputDirectory(val dir: Path) {
             Option(e.getMessage).getOrElse(e.toString), e)
     }
 
-  /** The run failed. Once it has marked the directory, everything it wrote
-    * there goes, staged and committed, and then `record`, its `Failed`
-    * record, replaces `Running`; a failure while deleting leaves `Running`,
-    * which the next run clears. A run that failed before marking writes
-    * `record` as [[replace]] does. */
-  def fail(record: TaskRunRecord): Unit =
-    if (!marked) replace(record)
-    else {
-      TaskRunRecord.clear(dir)
-      TaskRunRecord.write(dir, record)
+  /** The run ends without output, with `last`, its `Failed` or `Skipped`
+    * record. Unmarked, the directory is marked `Running` first, from `last`;
+    * then every file a run writes there but the record goes, this run's
+    * staged and committed parts and an earlier run's alike, and `last`
+    * replaces `Running`. A failure part way leaves `Running`, which the next
+    * run clears. In a directory of part files no record names this writes
+    * nothing, as a record there would make those files the job's to delete. */
+  def settle(last: TaskRunRecord): Unit = {
+    if (!marked) {
+      if (TaskRunRecord.unrecordedPartFiles(dir).nonEmpty) return
+      mark(last.copy(status = TaskRunStatus.Running, errorMessage = None, finishedAt = None, rowsProduced = 0L,
+        outputFiles = Nil, validations = Nil, schema = None))
     }
+    TaskRunRecord.clear(dir)
+    record(last)
+  }
 
-  /** A record for a run that wrote no output: `record` replaces the earlier
-    * record, and then the earlier run's files are deleted. In a directory of
-    * part files no record names this writes nothing, as a record there would
-    * make those files the job's to delete. */
-  def replace(record: TaskRunRecord): Unit =
-    if (TaskRunRecord.unrecordedPartFiles(dir).isEmpty) {
-      TaskRunRecord.write(dir, record)
-      marked = true
-      TaskRunRecord.clear(dir)
-    }
+  /** Step 2: `running` replaces the directory's record. */
+  private def mark(running: TaskRunRecord): Unit = {
+    record(running)
+    marked = true
+  }
+
+  /** Write `r` as the directory's record: a fault point of its own for each
+    * status ([[Faults]]). */
+  private def record(r: TaskRunRecord): Unit = {
+    Faults.at(r.status match {
+      case TaskRunStatus.Running => Faults.RunningRecord
+      case TaskRunStatus.Succeeded | TaskRunStatus.ValidationFailed => Faults.FinalRecord
+      case TaskRunStatus.Failed => Faults.FailedRecord
+      case TaskRunStatus.Skipped => Faults.SkippedRecord
+    })
+    TaskRunRecord.write(dir, r)
+  }
 }

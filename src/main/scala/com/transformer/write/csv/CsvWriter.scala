@@ -278,7 +278,11 @@ object CsvWriter {
           val w = new CsvWriter(targetDir.resolve(names(i)), schema, options)
           writers(i) = w
           val it = parts(i)
-          while (it.hasNext) w.write(it.next())
+          var first = true
+          while (it.hasNext) {
+            w.write(it.next())
+            if (first) { first = false; Faults.at(Faults.FirstBatch) }
+          }
           w.finish()
         }
       }
@@ -291,7 +295,7 @@ object CsvWriter {
       catch { case t: Throwable => if (firstError == null) firstError = t }
     }
     if (firstError == null) {
-      try writers.foreach(_.commit())
+      try writers.foreach { w => Faults.at(Faults.Commit); w.commit() }
       catch { case t: Throwable => firstError = t }
     }
     if (firstError != null) {

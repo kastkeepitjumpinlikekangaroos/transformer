@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, ExecutionOptions, MaterializedView, Scheduler, Schema, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, ExecutionOptions, Faults, MaterializedView, Scheduler, Schema, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.core.metrics.{MetricsCollector, TaskMetricsRecord}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
@@ -561,6 +561,7 @@ final case class DataJob(
           gcDeltaCount = gcDelta.count,
           gcDeltaNanos = gcDelta.nanos
         )
+        Faults.at(Faults.PerfRecord)
         TaskMetricsRecord.write(Paths.get(renderedPath), record)
       } catch { case NonFatal(_) => () }
     }
@@ -649,8 +650,10 @@ final case class DataJob(
       failureByName.get(v.name) match {
         case Some(f) =>
           val sampleName =
-            try Some(TaskRunRecord.writeValidationSample(out.dir, v.name, f.sampleRowsCsv, taken.toSet))
-            catch { case NonFatal(_) => None }
+            try {
+              Faults.at(Faults.ValidationSample)
+              Some(TaskRunRecord.writeValidationSample(out.dir, v.name, f.sampleRowsCsv, taken.toSet))
+            } catch { case NonFatal(_) => None }
           sampleName.foreach(taken += _)
           ValidationRecord(
             name = v.name,
@@ -668,11 +671,11 @@ final case class DataJob(
 
   /** Stamp a Failed [[TaskRunRecord]] for a task that threw. `output` is the
     * directory the run had started writing, whose files go first
-    * ([[OutputDirectory.fail]]); without one the task's path is rendered on
-    * a best-effort basis — if rendering itself throws, the failure is
+    * ([[OutputDirectory.settle]]); without one the task's path is rendered
+    * on a best-effort basis — if rendering itself throws, the failure is
     * recorded only in [[JobRunRecord]]. A record that cannot be written
-    * leaves the directory as it was, `Running` once the run marked it, which
-    * the next run clears. */
+    * leaves the directory `Running`, or as it was if not even that could
+    * be, which the next run clears. */
   private def writeFailedRecord(
       node: TaskDagNode,
       output: Option[OutputDirectory],
@@ -685,7 +688,7 @@ final case class DataJob(
     if (ofp.isCloud) return
     try {
       val out = output.getOrElse(new OutputDirectory(Paths.get(TemplateRenderer.render(ofp.path, vars))))
-      out.fail(TaskRunRecord(
+      out.settle(TaskRunRecord(
         schemaVersion = TaskRunRecord.SchemaVersion,
         taskName = node.task.displayName,
         status = TaskRunStatus.Failed,
@@ -707,9 +710,9 @@ final case class DataJob(
     } catch { case NonFatal(_) => () }
   }
 
-  /** Stamp a Skipped [[TaskRunRecord]] for a task whose upstream failed: it
-    * replaces the earlier record, and then the earlier run's files go
-    * ([[OutputDirectory.replace]]). */
+  /** Stamp a Skipped [[TaskRunRecord]] for a task whose upstream failed:
+    * the directory is marked `Running`, the earlier run's files go, and then
+    * the Skipped record ([[OutputDirectory.settle]]). */
   private def writeSkippedRecord(
       node: TaskDagNode,
       reason: String,
@@ -719,7 +722,7 @@ final case class DataJob(
     if (ofp.isCloud) return
     try {
       val rendered = TemplateRenderer.render(ofp.path, vars)
-      new OutputDirectory(Paths.get(rendered)).replace(TaskRunRecord(
+      new OutputDirectory(Paths.get(rendered)).settle(TaskRunRecord(
         schemaVersion = TaskRunRecord.SchemaVersion,
         taskName = node.task.displayName,
         status = TaskRunStatus.Skipped,
@@ -957,6 +960,7 @@ final case class DataJob(
         }
       }.toVector
       val perfManifest: Option[Seq[String]] = if (perfPaths.nonEmpty) Some(perfPaths) else None
+      Faults.at(Faults.JobRecord)
       JobRunRecord.write(target, JobRunRecord(
         schemaVersion = JobRunRecord.SchemaVersion,
         succeeded = succeeded,

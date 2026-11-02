@@ -826,12 +826,12 @@ then writes its `Failed` record, so a failed task's directory holds its record
 and nothing else. A final record that cannot be written (a full disk) fails
 the task, naming the write: its output was never published. A run killed
 after step 2 leaves the `Running` record, and the next run clears whatever it
-left, staged files included. A skipped task's `Skipped` record, like a
-`Failed` one written before step 2, replaces the earlier record first, and only
-then are the earlier files deleted: nothing deletes a file a record names
-before the record is replaced. A `Running` record has no `finishedAt`; a
-build from before it reads it as no record, and still clears the directory
-next run.
+left, staged files included. A skipped task, or one that failed before step
+2, marks its directory `Running` the same way, clears the earlier run's files
+and then writes its `Skipped` or `Failed` record: nothing deletes a file a
+record names before the record is replaced. A `Running` record has no
+`finishedAt`; a build from before it reads it as no record, and still clears
+the directory next run.
 
 A reader outside the job (Spark, DuckDB, another job's input glob) should read
 a directory only when its `_run.json` says `Succeeded` or `ValidationFailed`,

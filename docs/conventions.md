@@ -442,7 +442,13 @@ specific traps.
   stopped at any point leaves a record that says what the directory holds, or
   `Running`, which says to trust none of it, and never a part file that no
   record names. A final record that cannot be written fails its task; it is
-  the commit.
+  the commit. A run that ends without output marks the directory `Running`
+  before it deletes anything there, as one that writes does
+  (`OutputDirectory.settle`).
+- **Every disk change a run makes is a fault point.** A new write or deletion
+  in an output directory calls `Faults.at` first, per file, and joins
+  `Faults.Points` (extending.md "Add a fault point"), so the fault matrices
+  stop a run there.
 
 ## Counter discipline
 

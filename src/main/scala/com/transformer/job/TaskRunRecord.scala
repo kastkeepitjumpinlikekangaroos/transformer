@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{CatalogView, DataType, Field, MaterializedView, Schema}
+import com.transformer.core.{CatalogView, DataType, Faults, Field, MaterializedView, Schema}
 import com.transformer.read.csv.{CsvOptions, CsvReader}
 import com.transformer.read.parquet.ParquetReader
 
@@ -311,7 +311,10 @@ object TaskRunRecord {
           doomed += p
       }
     } finally stream.close()
-    doomed.foreach(Files.deleteIfExists(_))
+    doomed.foreach { p =>
+      Faults.at(Faults.ClearDelete)
+      Files.deleteIfExists(p)
+    }
     true
   }
 

@@ -186,6 +186,24 @@ pushdown reaches every referenced column.
    skips parts of the file by their statistics. Two parquet defects were in
    the order the statistics are kept in.
 
+## Add a fault point
+
+A run that gains a new write or deletion in an output directory (a new
+sidecar file, a second record) gets a fault point, so the fault matrices
+reach it:
+
+1. Name it in `core/Faults.scala` beside the others, and add it to
+   `Faults.Points` in the order a run reaches it.
+2. Call `Faults.at(Faults.YourPoint)` just before the change, once per file,
+   never per row. Where the write is best effort (its failure is swallowed),
+   put the call inside the `try`, so the fault takes the same path a failed
+   write does.
+3. Make `job/FaultJob.scala`'s job reach it in one run over an earlier run's
+   output; `job/data_job_test`'s matrices then arm it to throw and to halt a
+   child JVM, and assert it was reached.
+4. Document it in [testing.md's "Fault points"](testing.md#fault-points-transformerfault)
+   and architecture.md §3a.
+
 ## Add a config field to the directory loader
 
 `DirectoryJobLoader` (in `job/`) is a thin DBT-style layer over the programmatic

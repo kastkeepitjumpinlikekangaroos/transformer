@@ -64,7 +64,7 @@ object ResultPersister {
     } catch {
       case e: Throwable =>
         val message = Option(e.getMessage).getOrElse(e.toString)
-        try out.fail(record(TaskRunStatus.Failed, Nil, 0L, Some(message))) catch { case NonFatal(_) => () }
+        try out.settle(record(TaskRunStatus.Failed, Nil, 0L, Some(message))) catch { case NonFatal(_) => () }
         throw e
     }
   }
