@@ -2412,6 +2412,43 @@ answer it should give by construction:
   (`fuzzCertOverJoinShapes`, seed 2 before the change); `JoinSwapTest`'s
   `anOuterJoinCountsNoFewerRowsThanTheInnerJoinItHolds` holds it.
 
+## What the literature oracles held out (2026-11-02, held for the user)
+
+Three findings of [plans/testing/16](../plans/testing/16-literature-oracles.md)'s
+relations are choices rather than defects, so they are held for the user, each
+with its repro, and the relation that found it reports it rather than failing:
+
+- **T1. A DECIMAL compares with a float as a decimal, and fails on NaN.** An
+  INT or BIGINT beside a FLOAT or DOUBLE column is read as a DOUBLE, so `i >
+  f` over `f = NaN` answers (NaN sorts above every number); a DECIMAL beside
+  one reads the float as a decimal (`Ops`: a decimal against any number as
+  decimals), so `d > f`, `d = f`, `d IN (f)` and `d BETWEEN f AND x` fail
+  while running with `Cannot cast NaN to decimal(10,0)`, and so do the
+  infinities. Arithmetic, CASE, COALESCE and GREATEST refuse a DECIMAL beside
+  a FLOAT as the query binds instead (`a FLOAT has no scale for a DECIMAL
+  result to keep`). The options: refuse the comparison at bind time as the
+  others are, compare as a DOUBLE as the integers do, or keep it. TypeCheck
+  counts it (`float as a decimal`).
+- **G1. The nested-loop guard's bound depends on the order the optimizer
+  joins in.** It counts a join on an equality as its larger side, whatever
+  pairing comes before it, so a key joined before a CROSS JOIN counts their
+  product where joined after it does not, and a restriction that lets
+  `JoinOrder` bring the key forward (an outer join made INNER joins a run; a
+  WHERE equality keys a table) can be refused where the query is not:
+  `SELECT x.k AS a FROM x CROSS JOIN t1 INNER JOIN t2 ON x.k = t2.k CROSS JOIN
+  t3 RIGHT JOIN t4 ON t2.k = t4.k` (x a CTE of five rows, t1 4000, t2 0, t3
+  3, t4 5001 rows) runs, and with the RIGHT JOIN made INNER is refused.
+  Decision 3 made the guard monotone in the query's own join order only. CERT
+  counts it (`refused only in the order the optimizer chose`).
+- **E1. A restriction can be estimated larger once optimized.** The
+  estimator sizes an inner join by its larger side, so a filter the
+  optimizer pushes under one to the smaller side stops counting, where above
+  the join it cut the estimate: a FULL JOIN made LEFT lets a WHERE on the
+  left through, so `... FULL JOIN r0 AS t2 ON t0.c0 = t2.c0 WHERE t0.c1 = 3`
+  over two million-row tables is estimated larger as a LEFT JOIN. The bound
+  plans' estimates stay monotone, which CERT holds; it counts the optimized
+  ones.
+
 ## Answers the PostgreSQL port settled (2026-11-01, all decided)
 
 Porting Postgres's regression tests (`src/test/slt/postgres/`, with

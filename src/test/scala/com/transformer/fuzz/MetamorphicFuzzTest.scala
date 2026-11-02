@@ -2,7 +2,8 @@ package com.transformer.fuzz
 
 import com.transformer.core._
 import com.transformer.fuzz.MetaQueryGen._
-import com.transformer.fuzz.oracle.{AggDecomposition, JoinCommutativity, MetaModeDifferential, NoRec, RelEngine, Tlp}
+import com.transformer.fuzz.oracle.{AggDecomposition, Cert, JoinCommutativity, MetaModeDifferential, NoRec, RelEngine, Tlp,
+  TypeCheck, WindowCrossCheck}
 import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
@@ -10,7 +11,7 @@ import org.junit.{After, Before, Test}
 import java.nio.file.{Files, Path}
 import scala.util.Try
 
-import MetamorphicFuzzTest.{allWindows, columnCells}
+import MetamorphicFuzzTest._
 
 /** Property-based metamorphic gate over multi-relation SQL — the phase that finds
   * SEMANTIC bugs (wrong answers every execution mode agrees on, which
@@ -29,6 +30,16 @@ import MetamorphicFuzzTest.{allWindows, columnCells}
   *   - [[AggDecomposition]] — one-shot aggregation ≡ group-then-re-aggregate,
   *     which drives the partial/final merge and spill-serde paths a global
   *     aggregate never reaches.
+  *
+  * And three small relations from the literature (plans/testing/16, W4):
+  *   - [[TypeCheck]] — the INT columns stored as BIGINT and as DECIMAL(10,0)
+  *     answer as the INT form does, over `MetaQueryGen`'s queries and queries
+  *     aimed at each site whose values sit at INT's edges;
+  *   - [[WindowCrossCheck]] — two windows in one SELECT equal each alone,
+  *     joined on a unique id;
+  *   - [[Cert]] — a restriction of a plan gets no larger estimate, nor a
+  *     refusal from the nested-loop guard in the query's own join order,
+  *     planned over tables that report a size and hold no rows.
   *
   * Each case runs the engine several times, so the default budget is small; scale
   * it for a campaign with `-Dfuzz.seeds=N` / `FUZZ_SEEDS=N`:
@@ -121,6 +132,165 @@ class MetamorphicFuzzTest {
       // others'. An explicit `-Dfuzz.seeds=N` still scales it for a campaign.
       count = Props.seedCountOr(DefaultMetaSeeds / 4)
     ) { mc => AggDecomposition.check(mc); () }
+
+  // ---- three small relations (plans/testing/16, W4) ------------------------
+
+  /** TypeCheck: the INT columns stored as BIGINT and as DECIMAL(10,0) answer
+    * as the INT form does ([[TypeCheck]]). Three runs a case. */
+  @Test def fuzzTypeCheck(): Unit =
+    Props.forAll[MetaCase](
+      name = "type-check",
+      gen = MetaQueryGen.generate,
+      shrink = Shrinker.metaCase,
+      count = Props.seedCountOr(DefaultMetaSeeds * 2)
+    ) { mc => TypeCheck.check(mc); () }
+
+  /** TypeCheck over queries aimed at each site ([[TypeCheck.generateTargeted]]),
+    * whose INT values sit at the type's edges. */
+  @Test def fuzzTypeCheckTargeted(): Unit =
+    Props.forAll[TypeCheck.TargetedCase](
+      name = "type-check-targeted",
+      gen = TypeCheck.generateTargeted,
+      shrink = _ => Iterator.empty,
+      count = Props.seedCountOr(DefaultMetaSeeds * 4)
+    ) { c => typeCheckTargeted(c); () }
+
+  /** Each wider form is checked on a share of cases, and the INT values reach
+    * every site the relation names in a share of the cases it held on: a
+    * comparison, a join, GROUP BY, DISTINCT, ORDER BY, MIN, MAX, COUNT, SUM,
+    * `+`, `-` and `*`, read off the INT form's bound plan, over `MetaQueryGen`'s
+    * queries and the targeted ones. Runs each case. */
+  @Test def typeCheckReachesEverySiteInEachWiderForm(): Unit = {
+    val n = TypeCheckGuardSeeds
+    val forms = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    val sites = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    var withRows = 0
+    (0 until n).foreach { seed =>
+      val mc = MetaQueryGen.generate(new Rng(TypeCheckGuardBase + seed))
+      val tc = TypeCheck.generateTargeted(new Rng(TypeCheckGuardBase + seed))
+      Seq((TypeCheck.check(mc), mc.env, mc.query.renderBody), (typeCheckTargeted(tc), tc.env, tc.sql)).foreach {
+        case (outcome, env, sql) =>
+          outcome.forms.foreach(f => forms(s"${f.to} ${f.kind}") += 1)
+          if (outcome.forms.exists(_.kind == "held")) {
+            if (outcome.rows > 0) withRows += 1
+            TypeCheck.sites(LogicalBuilder.build(sql, env.catalog()).main).foreach(s => sites(s) += 1)
+          }
+      }
+    }
+    val report = s"over $n seeds of each generator: forms ${forms.toSeq.sorted.mkString(", ")}; held with rows " +
+      s"$withRows; sites " + TypeCheck.Sites.map(s => s"$s ${sites(s)}").mkString(", ")
+    println(s"[type-check] $report")
+    assertTrue(s"the BIGINT form rarely holds: $report", forms("long held") > TypeCheckFormFloor)
+    assertTrue(s"the DECIMAL form rarely holds: $report", forms("decimal(10,0) held") > TypeCheckFormFloor)
+    assertTrue(s"an INT rarely overflows where a wider form answers: $report",
+      forms("long wider answered") > TypeCheckSiteFloor)
+    TypeCheck.Sites.foreach(s => assertTrue(s"an INT rarely reaches $s: $report", sites(s) > TypeCheckSiteFloor))
+  }
+
+  /** Window cross_check: two windows in one SELECT answer as each alone,
+    * joined on the row id ([[WindowCrossCheck]]). Six runs a case. */
+  @Test def fuzzWindowCrossCheck(): Unit =
+    Props.forAll[WindowCrossCheck.WindowCase](
+      name = "window-cross-check",
+      gen = WindowCrossCheck.generate,
+      shrink = WindowCrossCheck.shrink,
+      count = Props.seedCountOr(DefaultMetaSeeds * 3)
+    ) { c => WindowCrossCheck.check(c); () }
+
+  /** Every kind of window is drawn, beside one of another kind and spec, and
+    * most cases run. Generation, and a run of each case. */
+  @Test def windowCrossCheckDrawsEveryKindOfWindow(): Unit = {
+    val n = WindowGuardSeeds
+    val kinds = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    var samePartitionOtherOrder, otherPartition, ran = 0
+    (0 until n).foreach { seed =>
+      val c = WindowCrossCheck.generate(new Rng(WindowGuardBase + seed))
+      Seq(c.w1, c.w2).foreach(w => kinds(w.kind) += 1)
+      if (c.w1.partition == c.w2.partition && c.w1.order != c.w2.order) samePartitionOtherOrder += 1
+      if (c.w1.partition != c.w2.partition) otherPartition += 1
+      if (WindowCrossCheck.check(c)) ran += 1
+    }
+    val report = s"over $n seeds: ${kinds.toSeq.sorted.mkString(", ")}; one partitioning, two orders $samePartitionOtherOrder; " +
+      s"two partitionings $otherPartition; ran $ran"
+    println(s"[window-cross-check] $report")
+    WindowCrossCheck.Kinds.foreach(k => assertTrue(s"a window is rarely $k: $report", kinds(k) > WindowKindFloor))
+    assertTrue(s"two orders over one partitioning are rare: $report", samePartitionOtherOrder > WindowPairFloor)
+    assertTrue(s"two partitionings are rare: $report", otherPartition > WindowPairFloor)
+    assertTrue(s"few cases run: $report", ran > n * 9 / 10)
+  }
+
+  /** CERT over the join shapes the nested-loop guard sizes: a restriction
+    * never gets a larger estimate, but where decision 3 keeps one, nor is it
+    * refused by the guard where the query is not ([[Cert]]). Planning only. */
+  @Test def fuzzCertOverJoinShapes(): Unit =
+    Props.forAll[Seeded[Cert.JoinShape]](
+      name = "cert-join-shapes",
+      gen = rng => Seeded(Cert.genShape(rng.split()), rng.nextLong()),
+      shrink = _ => Iterator.empty,
+      count = Props.seedCountOr(DefaultCertSeeds)
+    ) { c => Cert.bound(c.value.sql, c.value.catalog).foreach(p => Cert.check(p, new Rng(c.seed), c.value.toString)); () }
+
+  /** CERT over `MetaQueryGen`'s queries, their relations sized across the
+    * guard's thresholds. Planning only. */
+  @Test def fuzzCertOverGeneratedQueries(): Unit =
+    Props.forAll[Seeded[MetaCase]](
+      name = "cert-queries",
+      gen = rng => Seeded(MetaQueryGen.generate(rng.split()), rng.nextLong()),
+      shrink = c => Shrinker.metaCase(c.value).map(v => c.copy(value = v)),
+      count = Props.seedCountOr(DefaultCertSeeds)
+    ) { c =>
+      val rng = new Rng(c.seed)
+      val (catalog, sizes) = Cert.sizedCatalog(c.value, rng.split())
+      Cert.bound(c.value.bodySql, catalog).foreach(p => Cert.check(p, rng.split(), s"${c.value.bodySql}\n  sizes $sizes"))
+      ()
+    }
+
+  /** Every restriction is compared on a share of cases, over plans the guard
+    * refuses as well as accepts, so its bound is held where it decides. Also
+    * counted, for the user: a LEFT or RIGHT join made INNER the estimator
+    * sizes larger (decision 3 keeps it), a restriction whose optimized plan
+    * is estimated larger, and one the guard refuses only in the order the
+    * optimizer chooses for it (both held, plans/testing/16). Planning
+    * only. */
+  @Test def certReachesEveryRestrictionAndTheGuard(): Unit = {
+    val n = CertGuardSeeds
+    val compared = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    var refused, accepted, innerGrew, optimizedGrew, reordered = 0
+    val examples = scala.collection.mutable.LinkedHashMap.empty[String, String]
+    (0 until n).foreach { seed =>
+      val rng = new Rng(CertGuardBase + seed)
+      val shape = Cert.genShape(rng.split())
+      val mc = MetaQueryGen.generate(rng.split())
+      val (catalog, sizes) = Cert.sizedCatalog(mc, rng.split())
+      val plans = Cert.bound(shape.sql, shape.catalog).map(_ -> shape.toString).toSeq ++
+        Cert.bound(mc.bodySql, catalog).map(_ -> s"${mc.bodySql}, sizes ${sizes.toSeq.sorted.mkString(", ")}").toSeq
+      plans.foreach { case (p, text) =>
+        Cert.check(p, rng.split(), text).foreach { c =>
+          compared(c.restriction.name) += 1
+          if (c.refused) refused += 1 else accepted += 1
+          if (c.restriction.isInstanceOf[Cert.Restriction.Inner] && c.restricted.exists(r => c.estimate.exists(r > _)))
+            innerGrew += 1
+          if (!c.restriction.isInstanceOf[Cert.Restriction.Inner] &&
+              c.optimizedRestricted.exists(r => c.optimizedEstimate.exists(r > _))) {
+            optimizedGrew += 1
+            examples.getOrElseUpdate("estimated larger once optimized", s"${c.restriction}: $text")
+          }
+          if (c.refusedOnlyReordered) {
+            reordered += 1
+            examples.getOrElseUpdate("refused only reordered", s"${c.restriction}: $text")
+          }
+        }
+      }
+    }
+    val report = s"over $n seeds: ${compared.toSeq.sorted.mkString(", ")}; the query refused in $refused, accepted in " +
+      s"$accepted; an outer join made INNER estimated larger in $innerGrew; held: estimated larger once optimized in " +
+      s"$optimizedGrew, refused only in the order the optimizer chose for the restriction in $reordered" +
+      examples.map { case (k, v) => s"\n  e.g. $k: $v" }.mkString
+    println(s"[cert] $report")
+    Seq("a WHERE conjunct", "a LIMIT", "a LEFT join made INNER", "a RIGHT join made INNER", "a FULL join made LEFT",
+      "a FULL join made RIGHT").foreach(r => assertTrue(s"rarely $r: $report", compared(r) > CertRestrictionFloor))
+    assertTrue(s"the guard rarely refuses a query compared: $report", refused > CertRestrictionFloor)
+  }
 
   /** Bind-reject-rate report + guard. A rejection is the engine refusing the
     * generator's own multi-relation SQL at bind time — expected to be rare (the
@@ -1173,6 +1343,48 @@ class MetamorphicFuzzTest {
 }
 
 object MetamorphicFuzzTest {
+
+  /** A generated case and the seed its draws beyond the case (CERT's sizes
+    * and restrictions) come from. */
+  final case class Seeded[A](value: A, seed: Long) {
+    override def toString: String = s"$value\n  seed = $seed"
+  }
+
+  /** [[TypeCheck.check]] of a targeted case, whose conditions can fail where
+    * the plan the INT form binds to says. */
+  def typeCheckTargeted(c: TypeCheck.TargetedCase): TypeCheck.Outcome = {
+    val movable =
+      try oracle.Eet.movableFailure(LogicalBuilder.build(c.sql, c.env.catalog()))
+      catch { case _: IllegalArgumentException => true }
+    TypeCheck.check(c.env, c.sql, movable)
+  }
+
+  /** TypeCheck's guard block. Measured over 2000 seeds of each generator:
+    * the BIGINT form held on 2651 cases and the DECIMAL on 2629, an INT
+    * overflow answered as BIGINT on 200; the sites in the cases it held on,
+    * the thinnest COUNT 213, MIN 230, MAX 240, SUM 262 and DISTINCT 384.
+    * Bounds ~3x below. */
+  val TypeCheckGuardSeeds: Int = 2000
+  val TypeCheckGuardBase: Long = 910000L
+  val TypeCheckFormFloor: Int = 870
+  val TypeCheckSiteFloor: Int = 66
+
+  /** Window cross_check's guard block. Measured over 2000 seeds: each kind
+    * 522 (a rank) to 607 (ROW_NUMBER), two orders over one partitioning 297,
+    * two partitionings 1703, every case run. Bounds ~3x below. */
+  val WindowGuardSeeds: Int = 2000
+  val WindowGuardBase: Long = 920000L
+  val WindowKindFloor: Int = 170
+  val WindowPairFloor: Int = 95
+
+  /** CERT plans each case and its restrictions, and runs nothing. Measured
+    * over the guard's 3000 seeds: a FULL join made LEFT 984 times and RIGHT
+    * 1000, a LEFT join made INNER 3031, a RIGHT one 1984, a LIMIT and a
+    * conjunct 6000 each; the query refused in 3279. Bounds ~3x below. */
+  val DefaultCertSeeds: Int = 1500
+  val CertGuardSeeds: Int = 3000
+  val CertGuardBase: Long = 930000L
+  val CertRestrictionFloor: Int = 320
 
   private val SpillOn: ExecutionOptions = ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))
 

@@ -1997,6 +1997,15 @@ one over generated text:
   one relation here with an expected answer from outside the engine at fuzz
   volume, for multi-way and outer joins, where every relation that compares
   the engine with itself agrees with a wrong answer it gives everywhere.
+- **Three small relations** (plans/testing/16 W4, in `metamorphic_fuzz_test`) —
+  TypeCheck (PVLDB 2026, `oracle/TypeCheck`): the same values stored as INT,
+  BIGINT and DECIMAL(10,0) give the same answers, so the typing rules apply as
+  one rule; window cross_check (RisingWave, `oracle/WindowCrossCheck`): two
+  windows in one SELECT equal each alone joined on a row id, aimed at the one
+  `WindowExec` that computes every spec; CERT (ICSE 2024, `oracle/Cert`): a
+  restriction never gets a larger estimate, nor a refusal from the
+  nested-loop guard in the query's own join order, planned over tables that
+  report a size and hold no rows.
 - **Frontend robustness** (`oracle/CleanRejection`, `oracle/NoSilentDrop`,
   `oracle/SyntaxEquivalence`, over `SqlTextGen`) — every generator above renders
   its own typed AST, so its corpus is the supported grammar. This one writes
