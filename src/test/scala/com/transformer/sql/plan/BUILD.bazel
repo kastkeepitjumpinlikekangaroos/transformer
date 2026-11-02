@@ -135,13 +135,16 @@ scala_library(
     name = "semantics",
     testonly = True,
     srcs = [
+        "AggregateSweep.scala",
         "CastMatrix.scala",
         "CoercionMatrix.scala",
+        "FunctionSweep.scala",
         "Semantics.scala",
         "SemanticsTables.scala",
     ],
     deps = [
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/sql/plan",
         "//src/test/scala/com/transformer/fuzz",
         "//src/test/scala/com/transformer/slt",

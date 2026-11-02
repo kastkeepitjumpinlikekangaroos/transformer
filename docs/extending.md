@@ -51,8 +51,11 @@ relevant module lives, and that you'll follow the workflow in
    `function_catalog_test` fails until every name the catalog has is there,
    and every name there is the catalog's.
 7. Regenerate the [semantics tables](testing.md#semantics-tables) (`bazel run
-   //src/test/scala/com/transformer/sql/plan:semantics_tables -- --update`) and
-   review every cell the change adds, as you would review a test.
+   //src/test/scala/com/transformer/sql/plan:semantics_tables -- --update`),
+   whose function sweep runs the new entry over every kind of argument, and
+   review every cell it adds, as you would review a test: each NULL its entry
+   does not explain and each error it does not declare fails the test, so the
+   entry's domain and errors are written down before the sweep passes.
 
 A function that returns a `DECIMAL` computes in `BigDecimal` and fits its answer
 to the type it declares with `Decimals.fit`, the way `ABS` keeps a decimal exact
@@ -123,6 +126,8 @@ kind `Clock` whose `clock` builds the literal, the way `CURRENT_DATE` and
    holds both lists to the catalog), and (if the change affects window
    behaviour) the window-fn note in
    [architecture.md §6](architecture.md#6-window-functions-two-stage-logical-binding).
+   Regenerate the semantics tables, whose aggregate sweep runs it over each
+   type at each data set, and review its cells.
 
 Any new `AggExpr` can run as a window aggregate too, because
 `WindowExec.computeAggOverPartition` calls `AggState.init(agg)` over the

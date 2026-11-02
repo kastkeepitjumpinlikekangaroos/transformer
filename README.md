@@ -1625,8 +1625,17 @@ kinds where two values meet: the type they are compared as (`=`, `<`, `BETWEEN`,
 `IN`, `NULLIF`, a `CASE` switch), the type of the one result they become (a
 `CASE`, `COALESCE`, `IF`, `GREATEST`, `LEAST`, `LAG`'s default, a `UNION`
 column), the type of arithmetic on them (`+ - * / %`, `MOD`), or the refusal.
-The tables are the complete reference, and a change to a rule changes them in
-the same commit.
+[`functions-text.txt`](src/test/semantics/functions-text.txt),
+[`functions-math.txt`](src/test/semantics/functions-math.txt) and
+[`functions-flow.txt`](src/test/semantics/functions-flow.txt) are every function
+over every one of those kinds at its edge values, each NULL that no NULL
+argument gives named with the rule that gives it, and
+[`aggregates.txt`](src/test/semantics/aggregates.txt) and
+[`windows.txt`](src/test/semantics/windows.txt) every aggregate and window
+function over each type at the data that decides its answer: no rows, all
+NULL, duplicates, NaN, both zeros, sums past `BIGINT`'s and `DECIMAL(38,s)`'s
+range. The tables are the complete reference, and a change to a rule changes
+them in the same commit.
 
 **CTEs (`WITH`):** supported, non-recursive. `WITH a AS (...), b AS (SELECT ...
 FROM a) SELECT ... FROM b` — later CTEs may reference earlier ones, a CTE can

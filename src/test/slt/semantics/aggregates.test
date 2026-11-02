@@ -1,0 +1,137 @@
+# Hand-picked cells of the aggregate and window sweep, src/test/semantics/
+# aggregates.txt and windows.txt, which semantics_tables_test runs over one
+# partition and over a row per partition. Here they run under every
+# verification mode and as the plan printed back to SQL. A rule change
+# regenerates the sweep and changes these records in the same commit.
+
+statement ok
+CREATE TABLE a (k INT, i INT, b BIGINT, d DOUBLE, m DECIMAL(5,2), w DECIMAL(38,10), s STRING, t BOOLEAN)
+
+statement ok
+INSERT INTO a VALUES (1, 2, 9223372036854775807, 2.5, 2.50, 9999999999999999999999999999.9999999999, 'b', true), (2, NULL, 1, NULL, NULL, 9999999999999999999999999999.9999999999, NULL, NULL), (3, 2, -1, 2.5, 2.50, -9999999999999999999999999999.9999999999, 'b', true), (4, 5, NULL, -1.0, -1.00, NULL, 'a', false)
+
+statement ok
+CREATE TABLE e (k INT, d DOUBLE)
+
+# ---- over no rows: a count is 0 and every other aggregate NULL
+
+query BIGINT,BIGINT,DOUBLE,DOUBLE,DOUBLE,DOUBLE
+SELECT COUNT(*), COUNT(d), SUM(d), AVG(d), MIN(d), STDDEV_POP(d) FROM e
+----
+0	0	NULL	NULL	NULL	NULL
+
+# ---- duplicates beside a NULL
+
+query BIGINT,BIGINT,BIGINT,BIGINT,DOUBLE,INT,INT,BIGINT
+SELECT COUNT(*), COUNT(i), COUNT(DISTINCT i), SUM(i), AVG(i), MIN(i), MAX(DISTINCT i), COUNT_IF(t) FROM a
+----
+4	3	2	9	3.0	2	5	2
+
+query DECIMAL(38,2),DECIMAL(38,2),DECIMAL(9,6),DECIMAL(9,6),STRING,STRING
+SELECT SUM(m), SUM(DISTINCT m), AVG(m), AVG(DISTINCT m), MIN(s), MAX(s) FROM a
+----
+4.00	1.50	1.333333	0.750000	a	b
+
+# A statistic merges its partial sums in the order a layout gives, so its last
+# digits may differ by mode; it is read to nine places.
+query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE
+SELECT ROUND(STDDEV_SAMP(i), 9), ROUND(STDDEV_POP(i), 9), ROUND(VAR_SAMP(d), 9), ROUND(VAR_POP(d), 9), ROUND(COVAR_SAMP(i, d), 9), ROUND(CORR(i, m), 9) FROM a
+----
+1.732050808	1.414213562	4.083333333	2.722222222	-3.5	-1.0
+
+# ---- a BIGINT sum decided from its true value, a DECIMAL's past 38 digits an error
+
+query BIGINT,DOUBLE
+SELECT SUM(b), AVG(b) FROM a
+----
+9223372036854775807	3.0744573456182584E18
+
+statement error
+SELECT SUM(b) FROM a WHERE k < 3
+----
+Integer overflow: the SUM 9223372036854775808 does not fit BIGINT
+
+query DECIMAL(38,10),DECIMAL(38,10)
+SELECT SUM(w), AVG(w) FROM a
+----
+9999999999999999999999999999.9999999999	3333333333333333333333333333.3333333333
+
+statement error
+SELECT SUM(w) FROM a WHERE k < 3
+----
+Decimal overflow: 19999999999999999999999999999.9999999998 does not fit decimal(38,10)
+
+# ---- NaN and the zeros
+
+query DOUBLE,DOUBLE,DOUBLE,BIGINT
+WITH n AS (SELECT d AS x FROM a UNION ALL SELECT CAST('NaN' AS DOUBLE) UNION ALL SELECT -0.0 UNION ALL SELECT 0.0) SELECT SUM(x), MAX(x), MIN(x), COUNT(DISTINCT x) FROM n
+----
+NaN	NaN	-1.0	4
+
+# ---- refusals
+
+statement error
+SELECT SUM(s) FROM a
+----
+SUM on STRING is not supported; CAST it to a number
+
+statement error
+SELECT COUNT_IF(i) FROM a
+----
+COUNT_IF takes a BOOLEAN, not INT; compare it with a value, or CAST it to BOOLEAN for TRUE where it is not 0
+
+statement error
+SELECT STDDEV(DISTINCT i) FROM a
+----
+STDDEV(DISTINCT ...) is not supported
+
+statement error
+SELECT COUNT() FROM a
+----
+COUNT() needs an argument: COUNT(*) counts the rows, COUNT(x) the rows where x is not NULL
+
+# ---- windows: the whole partition, a ROWS frame and a RANGE frame
+
+query INT,BIGINT,BIGINT,DOUBLE,INT
+SELECT k, SUM(i) OVER (), SUM(i) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND CURRENT ROW), AVG(i) OVER (ORDER BY k RANGE BETWEEN 1 PRECEDING AND CURRENT ROW), MIN(i) OVER (ORDER BY k) FROM a ORDER BY k
+----
+1	9	2	2.0	2
+2	9	2	2.0	2
+3	9	2	2.0	2
+4	9	7	3.5	2
+
+query INT,BIGINT,BIGINT,DOUBLE
+SELECT k, COUNT(i) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND CURRENT ROW), COUNT(DISTINCT i) OVER (), ROUND(STDDEV_SAMP(d) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND CURRENT ROW), 9) FROM a ORDER BY k
+----
+1	1	2	NULL
+2	1	2	NULL
+3	1	2	NULL
+4	2	2	2.474873734
+
+query INT,BIGINT,BIGINT,BIGINT,INT,INT,INT
+SELECT k, ROW_NUMBER() OVER (ORDER BY i, k), RANK() OVER (ORDER BY i), DENSE_RANK() OVER (ORDER BY i), LAG(i) OVER (ORDER BY k), LEAD(i, 1, 0) OVER (ORDER BY k), LAG(i, 2, -1) OVER (ORDER BY k) FROM a ORDER BY k
+----
+1	2	2	2	NULL	NULL	-1
+2	1	1	1	2	2	-1
+3	3	2	2	NULL	5	2
+4	4	4	3	2	0	NULL
+
+statement error
+SELECT CORR(i, d) OVER () FROM a
+----
+CORR with more than one argument is not supported
+
+statement error
+SELECT COVAR_SAMP(i) OVER () FROM a
+----
+Unsupported window function: COVAR_SAMP
+
+statement error
+SELECT SUM(DISTINCT i) OVER () FROM a
+----
+SUM(DISTINCT ...) OVER (...) is not supported
+
+statement error
+SELECT SUM(b) OVER () FROM a WHERE k < 3
+----
+Integer overflow: the SUM 9223372036854775808 does not fit BIGINT

@@ -1166,7 +1166,10 @@ reads from it which calls take `DISTINCT`, an argument or an offset; and no
 function's name is matched as a string in the binder. `Funcs.apply` and
 `VecFuncs` read an argument as the `Number` or `String` it was declared, and
 answer NULL for a NULL one. `function_catalog_test` holds the README's lists of
-functions and CAST types to the catalog, both ways.
+functions and CAST types to the catalog, both ways, and the semantics tables'
+function sweep (`src/test/semantics/functions-*.txt`, `aggregates.txt`,
+`windows.txt`) runs every entry over every kind of argument, holding each NULL
+to the entry's NULL rule or domain and each error to the ones it declares.
 
 These are three families of rules: `unify` for the operands that are compared,
 `branches` for the values that become one result and `arithmetic` for

@@ -267,7 +267,8 @@ object Semantics {
   final case class Raised(sql: String, phase: CleanRejection.Phase, error: Throwable)
 
   /** A table as generated: its lines, every error a cell shows, and the cells
-    * whose two paths disagree. */
+    * whose two paths disagree, or (the function sweep's) whose NULL or error
+    * its entry does not explain. */
   final case class Generated(lines: Vector[String], raised: Vector[Raised], diverged: Vector[String])
 
   /** The errors among `outcomes` of `sql`. */

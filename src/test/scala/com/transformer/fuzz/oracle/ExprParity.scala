@@ -132,8 +132,9 @@ object ExprParity {
 
   /** A failure on a value a generated tree's own data can cause, which
     * [[checkTotal]] allows and [[checkVecThrew]] lets the two paths report
-    * differently. */
-  private def owned(t: Throwable): Boolean = t match {
+    * differently. The semantics tables hold every run-time error a function
+    * declares to it. */
+  def owned(t: Throwable): Boolean = t match {
     case _: ArithmeticException => true
     case e: IllegalArgumentException =>
       val message = String.valueOf(e.getMessage)

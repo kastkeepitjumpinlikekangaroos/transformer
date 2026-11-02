@@ -18,7 +18,11 @@ object SemanticsTables {
   /** Each table's file name and how to generate it. */
   val Tables: Seq[(String, () => Generated)] = Seq(
     CastMatrix.File -> (() => CastMatrix.generate())) ++
-    CoercionMatrix.Families.map(f => f.file -> (() => CoercionMatrix.generate(f)))
+    CoercionMatrix.Families.map(f => f.file -> (() => CoercionMatrix.generate(f))) ++
+    Seq(FunctionSweep.TextFile, FunctionSweep.MathFile, FunctionSweep.FlowFile)
+      .map(f => f -> (() => FunctionSweep.generate(f))) ++
+    Seq(AggregateSweep.AggregatesFile -> (() => AggregateSweep.generateAggregates()),
+      AggregateSweep.WindowsFile -> (() => AggregateSweep.generateWindows()))
 
   /** Where the files are: the runfiles tree under Bazel, the source tree
     * otherwise. */

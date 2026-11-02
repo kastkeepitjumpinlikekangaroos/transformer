@@ -26,9 +26,13 @@ class SemanticsTablesTest {
       "and review the diff in the same commit.", diffs.isEmpty)
   }
 
-  @Test def bothPathsAgreeOnEveryCell(): Unit = {
-    val diverged = generated.flatMap { case (file, g) => g.diverged.map(l => s"$file: $l") }
-    assertTrue(s"${diverged.size} cells whose paths disagree:\n${diverged.take(20).mkString("\n")}", diverged.isEmpty)
+  /** Every cell is one answer on both paths (both layouts, for an aggregate
+    * or a window), and the function sweep's every NULL and run-time error is
+    * one its FunctionCatalog entry explains. */
+  @Test def everyCellIsOneAnswerItsEntryExplains(): Unit = {
+    val wrong = generated.flatMap { case (file, g) => g.diverged.map(l => s"$file: $l") }
+    assertTrue(s"${wrong.size} cells whose paths disagree, or whose NULL or error its entry does not explain:\n" +
+      wrong.take(20).mkString("\n"), wrong.isEmpty)
   }
 
   // ---- the coercion tables' properties -------------------------------------
