@@ -337,4 +337,11 @@ class RunnerTest {
       "onlyif datafusion # needs the rows its plan reaches first", "query I", "SELECT b FROM t LIMIT 1", "----", "2")
     assertEquals(Skipped("held for datafusion", None), held.results.last.outcome)
   }
+
+  @Test def aScriptsHeaderSaysWhatAnUnconstrainedDecimalIsElseTheDialectDoes(): Unit = {
+    val sized = Dialect.Cockroach(Some(com.transformer.core.DataType.DecimalType(38, 2)))
+    assertEquals(sized, sized.forScript("statement ok\nSELECT 1\n"))
+    assertEquals(Dialect.Cockroach(Some(com.transformer.core.DataType.DecimalType(20, 4))),
+      sized.forScript("# transformer: an unconstrained DECIMAL is DECIMAL(20,4)\n"))
+  }
 }

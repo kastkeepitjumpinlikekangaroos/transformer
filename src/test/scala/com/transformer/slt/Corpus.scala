@@ -14,7 +14,7 @@ import scala.jdk.CollectionConverters._
   *
   * {{{
   *   bazel run //src/test/scala/com/transformer/slt:corpus -- \
-  *     <dir-or-file>... [--dialect sqlite|transformer|cockroach|datafusion|risingwave] \
+  *     <dir-or-file>... [--decimal p,s] [--dialect sqlite|transformer|cockroach|datafusion|risingwave] \
   *     [--modes all|none|<name>,...] \
   *     [--threads N] [--report <file> [--list-refusals]] [--memory]
   *   bazel run //src/test/scala/com/transformer/slt:corpus -- \
@@ -29,7 +29,12 @@ import scala.jdk.CollectionConverters._
   * baseline only, which is how a first pass over the whole corpus stays
   * affordable.
   * `--memory` prints the heap a script left live, after a collection, to
-  * find a leak across scripts.
+  * find a leak across scripts. `--keep-going` carries on past a statement
+  * that fails, and `--problems <file>` writes each record that did not pass,
+  * with the engine's own answer, a JSON line each: how a file of CockroachDB's
+  * or DataFusion's is vendored. `--decimal p,s` (before `--dialect`) is the
+  * unconstrained DECIMAL of a script whose header does not say, for an audit
+  * of a corpus as its upstream holds it.
   * `--complete` rewrites each script with the engine's results in its `----`
   * blocks ([[Runner.complete]]), for writing a new script.
   */
@@ -44,6 +49,10 @@ object Corpus {
     var listRefusals = false
     var memory = false
     var problems: Option[Path] = None
+    // What an unconstrained DECIMAL is in a script whose header does not say,
+    // for an audit of a corpus as its upstream holds it; given before
+    // --dialect.
+    var decimal: Option[com.transformer.core.DataType.DecimalType] = None
     var keepGoing = false
     val inputs = Seq.newBuilder[Path]
     var i = 0
@@ -54,9 +63,9 @@ object Corpus {
           dialect = args(i) match {
             case "sqlite" => Dialect.Sqlite
             case "transformer" => Dialect.Transformer
-            case "cockroach" => Dialect.Cockroach()
-            case "datafusion" => Dialect.DataFusion()
-            case "risingwave" => Dialect.RisingWave()
+            case "cockroach" => Dialect.Cockroach(decimal)
+            case "datafusion" => Dialect.DataFusion(decimal)
+            case "risingwave" => Dialect.RisingWave(decimal)
             case other => throw new IllegalArgumentException(s"unknown dialect $other")
           }
         case "--modes" =>
@@ -88,6 +97,10 @@ object Corpus {
         case "--memory" => memory = true
         case "--problems" => i += 1; problems = Some(resolve(args(i)))
         case "--keep-going" => keepGoing = true
+        case "--decimal" =>
+          i += 1
+          val Array(p, sc) = args(i).split(",").map(_.trim.toInt)
+          decimal = Some(com.transformer.core.DataType.DecimalType(p, sc))
         case path => inputs += resolve(path)
       }
       i += 1
@@ -100,7 +113,8 @@ object Corpus {
       } else Seq(p)
     }
     val problemLog = problems.map(p => new PrintWriter(Files.newBufferedWriter(p, StandardCharsets.UTF_8)))
-    val runner = new Runner(dialect, ledger, modes, problemLog.map(_ => new ProblemLog(keepGoing)))
+    val runner = new Runner(dialect, ledger, modes,
+      if (problemLog.isDefined || keepGoing) Some(new ProblemLog(keepGoing)) else None)
     val pool = Executors.newFixedThreadPool(threads)
     val started = System.nanoTime()
     val futures = files.map { f =>

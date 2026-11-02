@@ -842,6 +842,40 @@ what the ordered baseline runs; the runner takes that refusal
 `optimized-reprinted` mode, which runs the ordered plan's SQL, to the
 baseline's answer.
 
+CockroachDB's and DataFusion's whole trees were audited the same way on
+2026-11-02 ([plans/testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md),
+W6), each file as its upstream holds it, in the baseline alone, an unconstrained
+`DECIMAL` read as `DECIMAL(38,10)`:
+
+```bash
+bazel run //src/test/scala/com/transformer/slt:corpus -- <cockroach>/pkg/sql/logictest/testdata/logic_test \
+    --decimal 38,10 --dialect cockroach --modes none --threads 6 --report /tmp/cockroach-report.txt
+bazel run //src/test/scala/com/transformer/slt:corpus -- <datafusion>/datafusion/sqllogictest/test_files \
+    --decimal 38,10 --dialect datafusion --modes none --threads 6 --report /tmp/datafusion-report.txt
+```
+
+(a copy of DataFusion's tree with its CSV files in a `data/` beside each
+script). CockroachDB's 430 files, 3,268 records in 6 s: 963 passed, 1,577 were
+refused (most for a function the engine has not, 162; syntax the parser does
+not read, such as `::` after a parenthesis and `FROM` in `EXTRACT`, 178; a table
+function, a subquery or a row value in FROM; `EXISTS`; `SHOW` and the other
+statements that are no query), 726 failed (242 errors raised for another reason
+or in words no shared reason covers, 209 statements the runner cannot carry out,
+127 other answers, most after such a statement, 43 answers where CockroachDB
+raises an error), none was an internal error, and 375 files stopped early: 171
+at a line the reader does not know (`user`, `let`, `repeat`, `copy`, and query
+options such as `kvtrace`), 204 at a statement the runner cannot carry out,
+most a `SET` or an `ALTER`. DataFusion's 546 files, 7,585 records in 3 s: 2,187
+passed, 4,329 were refused (2,208 for a function the engine has not, 351 for
+`VALUES` in FROM, 213 for an array), 1,057 failed (385 errors raised for another
+reason, 202 results of another width, most a `SELECT *` over a table whose
+column the dialect left out, 185 statements the runner cannot carry out, 82
+other answers, 54 answers where DataFusion raises an error), none was an
+internal error, and 256 files stopped early, most at a setting that changes an
+answer, a function, `VALUES` in FROM or a parquet table. The vendored files
+are the part of each tree read record by record; the rest of each report is
+not.
+
 ## Semantics tables
 
 The engine's typing rules and functions are also tables, under

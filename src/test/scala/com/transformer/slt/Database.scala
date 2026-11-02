@@ -843,7 +843,7 @@ object Dialect {
     * [[Transformer]] stores them. */
   final case class Cockroach(decimal: Option[DataType.DecimalType] = None) extends Dialect {
     override def format: Script.Format = Script.Format.Cockroach
-    override def forScript(text: String): Dialect = copy(decimal = unconstrainedDecimal(text))
+    override def forScript(text: String): Dialect = copy(decimal = unconstrainedDecimal(text).orElse(decimal))
 
     def columnType(name: String): DataType = engineType(normalized(name)).getOrElse(
       throw new Database.Unsupported(s"the column type '$name'"))
@@ -1009,7 +1009,7 @@ object Dialect {
     * set aside. */
   final case class DataFusion(decimal: Option[DataType.DecimalType] = None) extends Dialect {
     override def format: Script.Format = Script.Format.DataFusion
-    override def forScript(text: String): Dialect = copy(decimal = unconstrainedDecimal(text))
+    override def forScript(text: String): Dialect = copy(decimal = unconstrainedDecimal(text).orElse(decimal))
 
     def columnType(name: String): DataType = normalized(name) match {
       case "INT" | "INTEGER" | "INT4" | "TINYINT" | "SMALLINT" | "INT2" | "TINYINT UNSIGNED" => DataType.IntType
@@ -1062,7 +1062,7 @@ object Dialect {
     * [[Transformer]] stores them. */
   final case class RisingWave(decimal: Option[DataType.DecimalType] = None) extends Dialect {
     override def format: Script.Format = Script.Format.RisingWave
-    override def forScript(text: String): Dialect = copy(decimal = unconstrainedDecimal(text))
+    override def forScript(text: String): Dialect = copy(decimal = unconstrainedDecimal(text).orElse(decimal))
 
     def columnType(name: String): DataType = normalized(name) match {
       case "INTEGER" | "INT" | "INT4" => DataType.IntType
