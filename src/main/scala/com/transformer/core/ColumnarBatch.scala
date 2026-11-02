@@ -117,20 +117,13 @@ object ColumnarBatch {
     * × 8192 rows × ~12 columns × 8B ≈ low MB of in-flight batch memory. Bump
     * higher only after profiling.
     *
-    * Read once per JVM from the `transformer.batch_capacity` system property
-    * or the `TRANSFORMER_BATCH_CAPACITY` env var, a whole number of 1 or
-    * more. Its use is the test suite's: run at 1 or 2 rows (docs/testing.md),
-    * every batch boundary inside an operator, where a full batch is emitted and
-    * a new one begun, is crossed on a test's few rows, as DuckDB runs its tests
-    * at a vector size of 2.
+    * Read once per JVM from [[Settings.BatchCapacity]]
+    * (`transformer.batch_capacity`). Its use is the test suite's: run at 1 or
+    * 2 rows (docs/testing.md), every batch boundary inside an operator, where
+    * a full batch is emitted and a new one begun, is crossed on a test's few
+    * rows, as DuckDB runs its tests at a vector size of 2.
     */
-  val DefaultCapacity: Int =
-    Option(System.getProperty("transformer.batch_capacity"))
-      .orElse(Option(System.getenv("TRANSFORMER_BATCH_CAPACITY")))
-      .map(_.trim).filter(_.nonEmpty)
-      .flatMap(s => try Some(s.toInt) catch { case _: NumberFormatException => None })
-      .filter(_ >= 1)
-      .getOrElse(8192)
+  val DefaultCapacity: Int = Settings.BatchCapacity.get
 
   /** Build a batch around pre-built column vectors. Capacity is the smallest
     * column capacity across all columns (each column must hold at least

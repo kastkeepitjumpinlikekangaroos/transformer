@@ -18,8 +18,9 @@ import java.util.concurrent.atomic.AtomicInteger
   * as a kill or a power cut would.
   *
   * Armed two ways: in this JVM through [[arm]] (tests), or in a child JVM
-  * through `-Dtransformer.fault=<point>:<n>:<action>`, read once when this
-  * object loads, as `transformer.hash_zero` is ([[KeyHash]]). A value that
+  * through `-Dtransformer.fault=<point>:<n>:<action>` ([[Settings.Fault]]),
+  * read once when this object loads, as `transformer.hash_zero` is
+  * ([[KeyHash]]). A value that
   * names no point or action fails the run loudly rather than arming nothing.
   */
 object Faults {
@@ -67,27 +68,24 @@ object Faults {
   /** The exit status of a JVM a [[Action.Halt]] stopped. */
   val HaltStatus: Int = 113
 
-  /** The property a child JVM is armed by: `<point>:<n>:<action>`. */
-  val PropertyName: String = "transformer.fault"
-
   /** `action` the `nth` time `point` is reached, counting from 1. */
   final case class Arming(point: String, nth: Int, action: Action) {
-    require(Points.contains(point), s"$PropertyName: no fault point is named '$point'; the points are ${Points.mkString(", ")}")
-    require(nth >= 1, s"$PropertyName: a point is reached for the first time at 1, not $nth")
+    require(Points.contains(point), s"${Settings.Fault.property}: no fault point is named '$point'; the points are ${Points.mkString(", ")}")
+    require(nth >= 1, s"${Settings.Fault.property}: a point is reached for the first time at 1, not $nth")
 
     override def toString: String = s"$point:$nth:${action.name}"
   }
 
   object Arming {
-    /** `<point>:<n>:<action>`, as [[PropertyName]] holds it. */
+    /** `<point>:<n>:<action>`, as [[Settings.Fault]] holds it. */
     def parse(text: String): Arming = text.split(':') match {
       case Array(point, n, action) =>
         val a = Action.All.find(_.name == action.toLowerCase(Locale.ROOT)).getOrElse(throw new IllegalArgumentException(
-          s"$PropertyName: no fault action is named '$action'; the actions are ${Action.All.map(_.name).mkString(", ")}"))
+          s"${Settings.Fault.property}: no fault action is named '$action'; the actions are ${Action.All.map(_.name).mkString(", ")}"))
         val nth = n.toIntOption.getOrElse(throw new IllegalArgumentException(
-          s"$PropertyName: '$n' is no count of times a point is reached"))
+          s"${Settings.Fault.property}: '$n' is no count of times a point is reached"))
         Arming(point, nth, a)
-      case _ => throw new IllegalArgumentException(s"$PropertyName must be <point>:<n>:<action>, not '$text'")
+      case _ => throw new IllegalArgumentException(s"${Settings.Fault.property} must be <point>:<n>:<action>, not '$text'")
     }
   }
 
@@ -98,7 +96,7 @@ object Faults {
   }
 
   @volatile private var armed: Armed =
-    Option(System.getProperty(PropertyName)).map(_.trim).filter(_.nonEmpty).map(p => new Armed(Arming.parse(p))).orNull
+    Settings.Fault.get.map(p => new Armed(Arming.parse(p))).orNull
 
   /** A run is about to change the disk at `point`. */
   def at(point: String): Unit = {

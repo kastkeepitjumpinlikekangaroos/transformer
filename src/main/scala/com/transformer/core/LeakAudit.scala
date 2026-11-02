@@ -7,8 +7,8 @@ import scala.jdk.CollectionConverters._
   * when still open, as Spark's `DebugFilesystem.assertNoOpenStreams` fails a
   * test that leaves a stream open (decision 3 of plans/testing/17).
   *
-  * Under `-Dtransformer.audit_leaks=true`, read once per JVM as
-  * `transformer.hash_zero` is ([[KeyHash]]), each resource registers itself
+  * Under `-Dtransformer.audit_leaks=true` ([[Settings.AuditLeaks]]), read once
+  * per JVM as `transformer.hash_zero` is ([[KeyHash]]), each resource registers itself
   * when it opens ([[opened]]) and leaves when it closes ([[closed]]): a file a
   * CSV or parquet reader reads (`CsvPartitionIterator`,
   * `ParquetPartitionIterator`, spill runs read back included), a file a writer
@@ -27,7 +27,7 @@ import scala.jdk.CollectionConverters._
 object LeakAudit {
 
   /** Whether the engine counts what it opens: `-Dtransformer.audit_leaks=true`. */
-  val enabled: Boolean = java.lang.Boolean.getBoolean("transformer.audit_leaks")
+  val enabled: Boolean = Settings.AuditLeaks.get
 
   /** The exit status of a JVM the audit found something left open in. */
   val LeakStatus: Int = 117
@@ -103,7 +103,7 @@ object LeakAudit {
     val _ = Scheduler.pool.awaitQuiescence(30, TimeUnit.SECONDS)
     val found = report()
     if (found.nonEmpty) {
-      System.err.println(s"transformer.audit_leaks: ${found.size} left open at exit")
+      System.err.println(s"${Settings.AuditLeaks.property}: ${found.size} left open at exit")
       found.foreach(f => System.err.println(f))
       System.err.flush()
       Runtime.getRuntime.halt(LeakStatus)

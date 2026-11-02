@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, CatalogView, DataType, ExecutedQuery, ExecutionOptions, Faults, MaterializedView, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, DataType, ExecutedQuery, ExecutionOptions, Faults, MaterializedView, Settings, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.core.metrics.TaskMetricsRecord
 import com.transformer.temporal.TemporalVariables
 import org.junit.Assert._
@@ -915,7 +915,7 @@ class DataJobTest {
   /** A task with no outputFile (drain-and-discard) runs with default opts —
     * there is no `output.json` to read spill config from. */
   @Test def runOneTaskWithoutOutputFileUsesDefaultExecutionOptions(): Unit = {
-    assumeTrue("requires spill not forced on every task", !DataJob.forceSpillFromSysprop)
+    assumeTrue("requires spill not forced on every task", !DataJob.forceSpill)
     val inDir = tmpDir("dj-opts-noout-")
     writeCsv(inDir, "a.csv", "x\n1\n")
     val seen = new java.util.concurrent.atomic.AtomicReference[ExecutionOptions](null)
@@ -1686,7 +1686,7 @@ class DataJobTest {
       (arming, broken, in, out) =>
         val log = logs.resolve(s"${arming.point}-${arming.nth}-$broken.log")
         val child = new ProcessBuilder(javaBin, "-cp", System.getProperty("java.class.path"),
-          s"-D${Faults.PropertyName}=$arming", FaultJob.getClass.getName.stripSuffix("$"),
+          s"-D${Settings.Fault.property}=$arming", FaultJob.getClass.getName.stripSuffix("$"),
           in.toString, out.toString, if (broken) "broken" else "clean")
           .redirectErrorStream(true).redirectOutput(log.toFile).start()
         assertTrue(s"$arming: the child JVM did not end", child.waitFor(120, java.util.concurrent.TimeUnit.SECONDS))

@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, CatalogView, Chaos, ColumnarBatch, ExecutedQuery, ExecutionOptions, Faults, MaterializedView, Scheduler, Schema, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, Chaos, ColumnarBatch, ExecutedQuery, ExecutionOptions, Faults, MaterializedView, Scheduler, Schema, Settings, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.core.metrics.{MetricsCollector, TaskMetricsRecord}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
@@ -525,11 +525,11 @@ final case class DataJob(
         else triState == ExecutionOptions.TrueTri
       base.copy(
         metricsEnabled = metrics,
-        spillEnabled = base.spillEnabled || DataJob.forceSpillFromSysprop)
+        spillEnabled = base.spillEnabled || DataJob.forceSpill)
     case None =>
       ExecutionOptions.Default.copy(
         metricsEnabled = MetricsCollector.globalDefault,
-        spillEnabled = DataJob.forceSpillFromSysprop)
+        spillEnabled = DataJob.forceSpill)
   }
 
   /** Write `_perf.json` next to the task's `_run.json` when metrics were
@@ -1084,27 +1084,12 @@ object DataJob {
     * it (`stopsTheJob`). */
   private final case class TaskRun(result: TaskResult, stop: Option[String])
 
-  /** Name of the sysprop the macro bench runner sets to force spill on every
-    * task. See [[buildExecutionOptions]]'s scaladoc for the full contract.
-    *
-    * One concrete consumer: the macro bench runner in `benchmarks/macro/`
-    * captures the spill-on baseline by invoking the deploy jar with
-    * `-Dtransformer.macro.force_spill=true`, which is cheaper than rewriting
-    * every task's `output.json` to add `options.spill = "true"`. */
-  val ForceSpillPropertyName: String = "transformer.macro.force_spill"
-
-  /** Env-var alternative to [[ForceSpillPropertyName]]. Set to `"true"` /
-    * `"1"` to force spill on every task. */
-  val ForceSpillEnvVarName: String = "TRANSFORMER_MACRO_FORCE_SPILL"
-
-  /** Resolved once at class load. True iff [[ForceSpillPropertyName]] or
-    * [[ForceSpillEnvVarName]] parse as truthy. */
-  val forceSpillFromSysprop: Boolean = {
-    val sys = Option(System.getProperty(ForceSpillPropertyName)).map(_.trim).filter(_.nonEmpty)
-    val env = Option(System.getenv(ForceSpillEnvVarName)).map(_.trim).filter(_.nonEmpty)
-    sys.orElse(env).exists { s =>
-      val t = s.toLowerCase(Locale.ROOT)
-      t == "true" || t == "1"
-    }
-  }
+  /** Whether every task spills, [[Settings.ForceSpill]]
+    * (`transformer.macro.force_spill`), resolved once at class load. See
+    * [[buildExecutionOptions]]'s scaladoc for the full contract. Its one
+    * consumer is the macro bench runner in `benchmarks/macro/`, which captures
+    * the spill-on baseline by invoking the deploy jar with
+    * `-Dtransformer.macro.force_spill=true`, cheaper than rewriting every
+    * task's `output.json` to add `options.spill = "true"`. */
+  val forceSpill: Boolean = Settings.ForceSpill.get
 }

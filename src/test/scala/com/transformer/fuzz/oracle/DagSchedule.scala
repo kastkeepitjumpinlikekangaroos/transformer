@@ -1,6 +1,6 @@
 package com.transformer.fuzz.oracle
 
-import com.transformer.core.{Chaos, Faults, SqlExecutorRegistry}
+import com.transformer.core.{Chaos, Faults, Settings, SqlExecutorRegistry}
 import com.transformer.fuzz.DagCrashChild
 import com.transformer.fuzz.JobDagGen.{Fails, FailsInValidation, FailsWhileWriting, FaultPlan, JobCase, Ok, ValidationFails}
 import com.transformer.job.{JobResult, JobRunRecord, TaskProgressListener, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus}
@@ -140,7 +140,7 @@ object DagSchedule {
     val log = root.resolve(s"child-$r.log")
     val javaBin = java.nio.file.Paths.get(System.getProperty("java.home"), "bin", "java").toString
     val child = new ProcessBuilder(javaBin, "-cp", System.getProperty("java.class.path"),
-      s"-D${Faults.PropertyName}=${plan.arming}", DagCrashChild.getClass.getName.stripSuffix("$"),
+      s"-D${Settings.Fault.property}=${plan.arming}", DagCrashChild.getClass.getName.stripSuffix("$"),
       caseFile.toString, root.toString, r.toString)
       .redirectErrorStream(true).redirectOutput(log.toFile).start()
     if (!child.waitFor(TimeoutMillis, TimeUnit.MILLISECONDS)) {

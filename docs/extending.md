@@ -1357,6 +1357,25 @@ columns. To add a new pass:
 5. Update [`docs/architecture.md`'s "Logical plan optimization"](architecture.md#9-logical-plan-optimization)
    to describe the new pass and where it sits in the order.
 
+## Add a setting
+
+A knob the engine reads from outside the program, for the whole JVM, is an
+entry of `src/main/scala/com/transformer/core/Settings.scala`:
+
+1. Add a `Setting[T]` beside the others: its property, `transformer.<name>`
+   (the environment twin, `TRANSFORMER_<NAME>`, follows from it), its default
+   as README writes it, and how its value parses, giving the default for none;
+   add it to `Settings.All`.
+2. Read it where it is used, once: `val x: T = Settings.YourSetting.get` in an
+   object, read when the object first loads. Never `System.getProperty` or
+   `System.getenv`: rule R8 of `bytecode:bytecode_rules_test` fails any other
+   engine class that reads a property or the environment, or names a setting.
+3. Add its row to README's "Settings" table, in `All`'s order;
+   `core:settings_test` fails until the property, the twin and the default
+   match.
+4. A test that varies it runs in a JVM of its own: a target's `jvm_flags`, or
+   a `.bazelrc` config for the whole suite ([testing.md](testing.md#whole-suite-configurations)).
+
 ## Add a bytecode rule
 
 A convention a compiled class can show (a call no module makes, a call one
@@ -1370,10 +1389,11 @@ desktop's:
 2. Write the `Rule`: an id and a title; its scope (`Engine`, `JobModules`,
    `Desktop` or `AllModules`); its bans, `member(owner, name, descriptor)` for
    a call or a field access (any descriptor when none is given), each with
-   `instead` when one call replaces it; `RawFloatComparison`, a raw float or
-   double comparison between two values; or a `Ban` of your own over the
-   reader's `Use`s; and the advice its failure prints, which points at the
-   convention in conventions.md.
+   `instead` when one call replaces it; `anyMember(owner)`, `anyOwner(name)`;
+   `stringConstant(regex, what)`; `RawFloatComparison`, a raw float or double
+   comparison between two values; or a `Ban` of your own over the reader's
+   `Use`s; and the advice its failure prints, which points at the convention
+   in conventions.md.
 3. Give each site that a decision allows an `Allow(cls, method, reason)` in
    `allowed`: the binary class name (`com.transformer.core.Ops$` for an
    object), the method as written (it covers its lambdas, local defs, default

@@ -1,5 +1,7 @@
 package com.transformer.bytecode
 
+import java.util.regex.Pattern
+
 /** The engine's one-rule-per-concept decisions that a compiled class can
   * show, as data. Each rule names what it bans, in which modules, the advice
   * its failure prints, and the methods allowed to do it anyway, each with its
@@ -113,6 +115,15 @@ object BytecodeRules {
       case Use.Reference(r, _) => r.name == name
       case _ => false
     }, instead)
+
+  /** A string constant all of which `regex` matches. */
+  def stringConstant(regex: String, what: String, instead: String = ""): Ban = {
+    val pattern = Pattern.compile(regex)
+    Ban(what, {
+      case Use.StringConstant(s, _) => pattern.matcher(s).matches()
+      case _ => false
+    }, instead)
+  }
 
   /** Two floats or doubles compared raw (`fcmpl`, `fcmpg`, `dcmpl`, `dcmpg`),
     * neither side a constant: `a < b`, `a == b` between two values. One side
@@ -241,6 +252,27 @@ object BytecodeRules {
           "and halts it with status 117 so Bazel fails the target. Written after this rule's plan, so no decision " +
           "names it")))
 
+  val R8Settings: Rule = Rule("R8", "settings", Engine,
+    Seq(
+      stringConstant("""transformer\.[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*""", "a transformer.* setting's name",
+        instead = "a Settings entry"),
+      stringConstant("""TRANSFORMER_[A-Z0-9_]+""", "a TRANSFORMER_* setting's name", instead = "a Settings entry")) ++
+      membersInstead("java/lang/System", "a Settings entry", "getProperty", "getProperties", "getenv") ++
+      membersInstead("java/lang/Boolean", "a Settings entry", "getBoolean") ++
+      membersInstead("java/lang/Integer", "a Settings entry", "getInteger") ++
+      membersInstead("java/lang/Long", "a Settings entry", "getLong") ++
+      membersInstead("scala/sys/package$", "a Settings entry", "props", "env"),
+    advice = "Every setting the engine reads from outside the program is an entry of core/Settings.scala: its " +
+      "system property transformer.<name>, its environment twin TRANSFORMER_<NAME>, its default and how its value " +
+      "parses, with a row in README's Settings table that core:settings_test holds to it. No other class of the " +
+      "engine reads a system property or an environment variable, or names a setting (plans/testing/18, " +
+      "decision 3).",
+    allowed = Seq(
+      Allow("com.transformer.core.Settings$", "*",
+        "decided: the one place, every setting with its name, its default and how it parses"),
+      Allow("com.transformer.core.Settings$Setting", "value",
+        "decided: reads a setting's system property, then its environment twin")))
+
   val R9DateDoors: Rule = Rule("R9", "dates enter vectors through one door", Engine, Seq(
     member("java/time/LocalDate", "toEpochDay", instead = "DateVector.epochDay(d)"),
     member("java/time/Instant", "getEpochSecond", instead = "TimestampVector.epochMicros(i)"),
@@ -329,7 +361,7 @@ object BytecodeRules {
       "only where a test reaches.")
 
   val All: Seq[Rule] = Seq(R1Locale, R1DesktopFolds, R2FloatOrder, R3FloatKeyBits, R4StringOrder, R5Clock, R6Random,
-    R7Quiet, R9DateDoors, R10Defaults)
+    R7Quiet, R8Settings, R9DateDoors, R10Defaults)
 
   // ---------------------------------------------------------------------------
   // Holding a rule

@@ -2214,7 +2214,8 @@ JDK 21 or newer (tested through JDK 25).
   Spill defaults to **off** per task (no overhead when not needed) and is
   not exposed as a global toggle. Temp files land in a directory of each
   JVM's own under `${java.io.tmpdir}/transformer-spill` by default — override
-  the base via the `transformer.spill.dir` system property. A JVM deletes its
+  the base with `transformer.spill.dir` (or `TRANSFORMER_SPILL_DIR`, see
+  [Settings](#settings)). A JVM deletes its
   own directory when it exits, and the next JVM to spill deletes those that
   JVMs no longer running left; nothing outside the base is touched (the sweep
   used to delete whatever stood beside it with a name starting as its did,
@@ -2307,6 +2308,42 @@ read.
 See [docs/benchmarking.md](docs/benchmarking.md) for the full counter inventory,
 the JMH microbench harness under `benchmarks/micro/`, the macro-bench runner
 under `benchmarks/macro/`, and the perf-tagged regression test.
+
+## Settings
+
+A few things the engine does are set from outside a job, for the whole JVM:
+each by a system property, `transformer.<name>`, or its environment variable
+twin, `TRANSFORMER_<NAME>` (the property's name upper-cased, its dots
+underscores). So `java -Dtransformer.scheduler.parallelism=4 -jar
+transformer.jar run job/` and `TRANSFORMER_SCHEDULER_PARALLELISM=4 java -jar
+transformer.jar run job/` both run on four threads. The property wins when
+both are set, and a blank value is unset. Each is read once, when the engine
+first needs it. A whole number that does not read is the default, and a flag
+is on at `true` or `1`, in any case; a chaos seed or a fault that does not
+read fails. The last five are for testing, and the test suite runs whole
+under each of the first four of them, as it does at a batch capacity of 1 and
+2, sharded and on one thread ([docs/testing.md](docs/testing.md#whole-suite-configurations)).
+
+| Property | Environment variable | Default | What it sets |
+|---|---|---|---|
+| `transformer.batch_capacity` | `TRANSFORMER_BATCH_CAPACITY` | 8192 | the rows a batch holds, a whole number of 1 or more |
+| `transformer.scheduler.parallelism` | `TRANSFORMER_SCHEDULER_PARALLELISM` | twice the processors | the threads of the pool every query and job runs on, at least 1 |
+| `transformer.scheduler.shard_count` | `TRANSFORMER_SCHEDULER_SHARD_COUNT` | the parallelism | the shards an exchange routes rows to, at least 1 |
+| `transformer.scheduler.shard_min_size` | `TRANSFORMER_SCHEDULER_SHARD_MIN_SIZE` | never | the estimated input rows from which a GROUP BY or a DISTINCT is sharded across the pool |
+| `transformer.scheduler.broadcast_threshold` | `TRANSFORMER_SCHEDULER_BROADCAST_THRESHOLD` | 1000000 | the estimated rows of a hash join's smaller side below which it is built once rather than sharded |
+| `transformer.metrics.enabled` | `TRANSFORMER_METRICS_ENABLED` | false | per-operator metrics for every task whose `output.json` does not say ([Performance instrumentation](#performance-instrumentation)) |
+| `transformer.macro.force_spill` | `TRANSFORMER_MACRO_FORCE_SPILL` | false | spill on for every task, as the macro bench captures its spill-on baseline ([docs/benchmarking.md](docs/benchmarking.md)) |
+| `transformer.spill.dir` | `TRANSFORMER_SPILL_DIR` | `<java.io.tmpdir>/transformer-spill` | the directory each JVM's spill directory is made in |
+| `transformer.hash_zero` | `TRANSFORMER_HASH_ZERO` | false | every key hash 0 (`--config=hashzero`) |
+| `transformer.verify` | `TRANSFORMER_VERIFY` | false | every batch every operator emits checked against the schema it declares (`--config=verify`) |
+| `transformer.audit_leaks` | `TRANSFORMER_AUDIT_LEAKS` | false | what a JVM leaves open at its exit reported, ending it with status 117 (`--config=leaks`) |
+| `transformer.chaos` | `TRANSFORMER_CHAOS` | off | a seed, a whole number: each handoff between threads does nothing, yields or sleeps up to 2 ms (`--config=chaos`) |
+| `transformer.fault` | `TRANSFORMER_FAULT` | none | `<point>:<n>:<action>`, a fault where a run changes the disk ([docs/testing.md](docs/testing.md#fault-points-transformerfault)) |
+
+`core/Settings.scala` reads every one, and no other class of the engine reads
+a system property or an environment variable: rule R8 of
+`bytecode:bytecode_rules_test` holds that, and `core:settings_test` holds this
+table to `Settings`.
 
 ## Development
 

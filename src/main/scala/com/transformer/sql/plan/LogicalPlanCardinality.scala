@@ -1,5 +1,7 @@
 package com.transformer.sql.plan
 
+import com.transformer.core.Settings
+
 /** Plan-time row-count estimation. Used by
   * [[com.transformer.sql.exec.PhysicalPlanner]] to pick the build side of a
   * hash join.
@@ -41,18 +43,11 @@ object LogicalPlanCardinality {
     * have per-key cardinality estimates and/or a streaming exchange (plan
     * 08), the safe default is to leave the historic shape on.
     *
-    * Override per-JVM via the `transformer.scheduler.shard_min_size`
-    * system property or `TRANSFORMER_SCHEDULER_SHARD_MIN_SIZE` env var.
-    * Workloads with provably high distinct-key counts (where the cross-
-    * partition merge actually is the wall) can set this to e.g. 1_000_000
-    * to opt back in. */
-  val MinShardableSize: Long = {
-    val configured = Option(System.getProperty("transformer.scheduler.shard_min_size"))
-      .orElse(Option(System.getenv("TRANSFORMER_SCHEDULER_SHARD_MIN_SIZE")))
-      .map(_.trim).filter(_.nonEmpty)
-      .flatMap(s => try Some(s.toLong) catch { case _: NumberFormatException => None })
-    configured.getOrElse(Long.MaxValue)
-  }
+    * Override per-JVM with [[Settings.ShardMinSize]]
+    * (`transformer.scheduler.shard_min_size`). Workloads with provably high
+    * distinct-key counts (where the cross-partition merge actually is the
+    * wall) can set this to e.g. 1_000_000 to opt back in. */
+  val MinShardableSize: Long = Settings.ShardMinSize.get
 
   /** Threshold for the broadcast-vs-shuffle decision on hash joins. If the
     * smaller side's estimate is below this, the planner refuses to insert
@@ -64,16 +59,10 @@ object LogicalPlanCardinality {
     * 1M is a conservative ceiling on what we'll broadcast — the build map
     * stays well inside the heap (~80MB at 80B/row), and any join above this
     * threshold is large enough that the per-shard parallelism gain
-    * dominates the extra shuffle pass. Override per-JVM via the
-    * `transformer.scheduler.broadcast_threshold` system property or
-    * `TRANSFORMER_SCHEDULER_BROADCAST_THRESHOLD` env var. */
-  val BroadcastBuildThreshold: Long = {
-    val configured = Option(System.getProperty("transformer.scheduler.broadcast_threshold"))
-      .orElse(Option(System.getenv("TRANSFORMER_SCHEDULER_BROADCAST_THRESHOLD")))
-      .map(_.trim).filter(_.nonEmpty)
-      .flatMap(s => try Some(s.toLong) catch { case _: NumberFormatException => None })
-    configured.getOrElse(1_000_000L)
-  }
+    * dominates the extra shuffle pass. Override per-JVM with
+    * [[Settings.BroadcastThreshold]]
+    * (`transformer.scheduler.broadcast_threshold`). */
+  val BroadcastBuildThreshold: Long = Settings.BroadcastThreshold.get
 
   /** Estimate the number of rows produced by `plan`. */
   def estimate(plan: LogicalPlan): Option[Long] = estimateWith(plan, joinEstimate)

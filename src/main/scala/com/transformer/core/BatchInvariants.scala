@@ -3,8 +3,8 @@ package com.transformer.core
 /** What every batch an operator emits must be, checked against the schema
   * the operator declares, and `--config=verify`'s switch for checking them.
   *
-  * Under `-Dtransformer.verify=true`, read once per JVM as
-  * `transformer.hash_zero` is ([[KeyHash]]), the physical planner wraps every
+  * Under `-Dtransformer.verify=true` ([[Settings.Verify]]), read once per JVM
+  * as `transformer.hash_zero` is ([[KeyHash]]), the physical planner wraps every
   * operator it builds in a check of each batch it emits
   * (`com.transformer.sql.exec.VerifiedPlan`), so a value its type cannot hold
   * fails the test at the operator that made it, rather than at a writer far
@@ -41,7 +41,7 @@ package com.transformer.core
 object BatchInvariants {
 
   /** Whether every operator's output is checked: `-Dtransformer.verify=true`. */
-  val enabled: Boolean = java.lang.Boolean.getBoolean("transformer.verify")
+  val enabled: Boolean = Settings.Verify.get
 
   /** How `batch` breaks an invariant: what, and where when it is one value. */
   final case class Violation(what: String, column: Int = -1, row: Int = -1)

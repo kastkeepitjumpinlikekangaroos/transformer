@@ -12,7 +12,8 @@ load("@rules_scala//scala:scala.bzl", "scala_binary", "scala_library")
 #     (//src/test/scala/com/transformer/bench:jaffle_regression_test).
 #
 # Both depend ONLY on //src/main/scala/com/transformer/core (for
-# TaskMetricsRecord + QueryMetrics + DataJob.ForceSpillPropertyName) and the
+# TaskMetricsRecord + QueryMetrics + Settings, which names the force-spill and
+# metrics settings) and the
 # stdlib — no new Maven deps, no JMH leak (JMH lives only under
 # //benchmarks/micro/).
 #
@@ -33,9 +34,8 @@ scala_library(
         "//src/test/scala/com/transformer/bench:__pkg__",
     ],
     deps = [
-        # TaskMetricsRecord.read + the DataJob.ForceSpillPropertyName constant.
+        # TaskMetricsRecord.read + Settings.ForceSpill and MetricsEnabled.
         "//src/main/scala/com/transformer/core",
-        "//src/main/scala/com/transformer/job",
     ],
 )
 

@@ -566,6 +566,18 @@ specific traps.
   submission, a publish) gets a chaos point (`Chaos.at`, architecture §3i), so
   `--config=chaos` perturbs it.
 
+- **A setting is read through `Settings`.** Everything the engine reads from
+  outside the program, for the whole JVM, is an entry of `core/Settings.scala`:
+  a system property `transformer.<name>` and its environment twin
+  `TRANSFORMER_<NAME>`, the property winning, with its default and how its
+  value parses (a whole number that does not read is the default, a flag is
+  on at `true` or `1`). Its owner reads it once, `Settings.X.get` in an
+  object's `val`, and README's "Settings" table has its row
+  (`core:settings_test` holds the table to `Settings.All`). Rule R8 of
+  `bytecode:bytecode_rules_test` holds the engine to no other
+  `System.getProperty`, `System.getenv`, `Boolean.getBoolean`, `sys.props` or
+  `sys.env`, and no `transformer.*` or `TRANSFORMER_*` name outside
+  `Settings`; [extending.md](extending.md#add-a-setting) has the recipe.
 - **A test that depends on a JVM-wide default says so.** The whole suite also
   runs at a batch capacity of 1 and 2 rows, sharded, on one thread and in
   another time zone and locale (`--config=batch1` and the rest,

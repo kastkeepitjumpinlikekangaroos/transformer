@@ -233,13 +233,14 @@ object KeyCodec {
 /** Every key hash the engine computes: the hash maps GROUP BY, DISTINCT and
   * joins key their rows by, the shard an exchange routes a row to, the spill
   * bucket a grace hash join or a spilling window writes it to. Under
-  * `-Dtransformer.hash_zero=true`, read once per JVM, each is 0, DuckDB's
+  * `-Dtransformer.hash_zero=true` ([[Settings.HashZero]]), read once per
+  * JVM, each is 0, DuckDB's
   * `HASH_ZERO` build: every hash map meets only collisions and every
   * exchange and spill sends every row to one shard or bucket, so an operator
   * that took two keys of one hash for one key answers wrong. The whole suite
   * runs under it with `--config=hashzero`. */
 object KeyHash {
-  val zero: Boolean = java.lang.Boolean.getBoolean("transformer.hash_zero")
+  val zero: Boolean = Settings.HashZero.get
 
   /** `h`, or 0 under `transformer.hash_zero`. */
   @inline def apply(h: Int): Int = if (zero) 0 else h

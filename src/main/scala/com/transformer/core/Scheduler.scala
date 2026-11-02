@@ -59,21 +59,13 @@ object Scheduler {
     * task is in its I/O phase. Doubling absorbs that — independent DAG
     * branches keep making progress while one branch's writers drain.
     *
-    * Override with the system property `transformer.scheduler.parallelism`
-    * (or the env var `TRANSFORMER_SCHEDULER_PARALLELISM`). Going higher costs
-    * heap (more in-flight `ColumnarBatch`es per writer × per scan) and may
-    * thrash under tight memory; going lower can be useful on shared hosts
-    * where you don't want transformer hogging cores.
+    * Override with [[Settings.Parallelism]]
+    * (`transformer.scheduler.parallelism`). Going higher costs heap (more
+    * in-flight `ColumnarBatch`es per writer × per scan) and may thrash under
+    * tight memory; going lower can be useful on shared hosts where you don't
+    * want transformer hogging cores.
     */
-  val parallelism: Int = {
-    val cores = math.max(1, Runtime.getRuntime.availableProcessors)
-    val configured = Option(System.getProperty("transformer.scheduler.parallelism"))
-      .orElse(Option(System.getenv("TRANSFORMER_SCHEDULER_PARALLELISM")))
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .flatMap(s => try Some(s.toInt) catch { case _: NumberFormatException => None })
-    math.max(1, configured.getOrElse(cores * 2))
-  }
+  val parallelism: Int = Settings.Parallelism.get
 
   /** The pool itself. Lifetime = JVM; threads are daemon so the pool never
     * prevents process exit. Sized to [[parallelism]]. */

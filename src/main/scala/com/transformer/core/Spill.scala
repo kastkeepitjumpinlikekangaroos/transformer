@@ -39,21 +39,15 @@ import scala.jdk.CollectionConverters._
   */
 object Spill {
 
-  /** System property holding the override for [[baseDir]]. Defaults to
-    * `${java.io.tmpdir}/transformer-spill`. */
-  val SpillDirProperty: String = "transformer.spill.dir"
-
   /** The name of a JVM's or an operator's spill directory, its pid captured
     * ([[cleanupStaleRoots]]); declared before [[rootDir]], whose first use
     * reads it. */
   private val StaleName = """^[A-Za-z0-9_]+-(\d{1,19})-[0-9a-f]+(?:-[0-9a-f]+)?$""".r
 
-  /** The directory every JVM's spill directory is made in. */
-  lazy val baseDir: Path = {
-    val configured = Option(System.getProperty(SpillDirProperty)).map(_.trim).filter(_.nonEmpty)
-    val tmp = configured.getOrElse(System.getProperty("java.io.tmpdir") + "/transformer-spill")
-    Paths.get(tmp).toAbsolutePath.normalize()
-  }
+  /** The directory every JVM's spill directory is made in,
+    * [[Settings.SpillDir]] (`transformer.spill.dir`), by default
+    * `<java.io.tmpdir>/transformer-spill`. */
+  lazy val baseDir: Path = Paths.get(Settings.SpillDir.get).toAbsolutePath.normalize()
 
   /** This JVM's spill directory, `jvm-<pid>-<suffix>` under [[baseDir]],
     * holding every per-operator subdirectory. Lazy so tests that don't touch

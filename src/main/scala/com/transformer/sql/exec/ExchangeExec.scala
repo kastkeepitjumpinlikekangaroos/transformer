@@ -339,20 +339,14 @@ object ExchangeExec {
   /** Default shard count used by callers (planner, breakers) that don't have
     * a workload-specific reason to override. Tracks [[Scheduler.parallelism]]
     * so a JVM sized for high concurrency gets proportionally more shards;
-    * override globally via the `transformer.scheduler.shard_count` system
-    * property or `TRANSFORMER_SCHEDULER_SHARD_COUNT` env var.
+    * override globally with [[Settings.ShardCount]]
+    * (`transformer.scheduler.shard_count`).
     *
     * Going higher costs heap (K × in-flight per-batch overhead during
     * materialization) and produces K writer part-files past any sharded
     * breaker; going lower flattens the post-breaker parallelism the whole
     * point of this operator is to unlock. */
-  val defaultNumShards: Int = {
-    val configured = Option(System.getProperty("transformer.scheduler.shard_count"))
-      .orElse(Option(System.getenv("TRANSFORMER_SCHEDULER_SHARD_COUNT")))
-      .map(_.trim).filter(_.nonEmpty)
-      .flatMap(s => try Some(s.toInt) catch { case _: NumberFormatException => None })
-    math.max(1, configured.getOrElse(Scheduler.parallelism))
-  }
+  val defaultNumShards: Int = Settings.ShardCount.get
 
   // ---- Counter indices ------------------------------------------------------
   // ExchangeExec's counter array length depends on the configured shard

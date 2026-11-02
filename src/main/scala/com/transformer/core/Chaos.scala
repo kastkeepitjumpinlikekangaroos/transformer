@@ -10,8 +10,8 @@ import scala.jdk.CollectionConverters._
   * concurrency defects have needed volume to show: the K>1 sharded deadlock
   * reproduced only at 20000 seeds (plans/bugfixes/02e).
   *
-  * Under `-Dtransformer.chaos=<seed>`, read once per JVM as
-  * `transformer.hash_zero` is ([[KeyHash]]), each named point the engine
+  * Under `-Dtransformer.chaos=<seed>` ([[Settings.ChaosSeed]]), read once per
+  * JVM as `transformer.hash_zero` is ([[KeyHash]]), each named point the engine
   * passes ([[at]]) does one of three things, drawn by a random number
   * generator of the passing thread's own, seeded from the seed and the
   * thread's id: nothing, a `Thread.yield`, or a sleep of 0 to 2 ms. The
@@ -32,14 +32,7 @@ import scala.jdk.CollectionConverters._
 object Chaos {
 
   /** The seed, when `-Dtransformer.chaos=<seed>` sets one: a whole number. */
-  val seed: Option[Long] =
-    Option(System.getProperty("transformer.chaos")).map(_.trim).filter(_.nonEmpty).map { s =>
-      try java.lang.Long.parseLong(s)
-      catch {
-        case _: NumberFormatException => throw new IllegalArgumentException(
-          s"transformer.chaos must be a whole number, a seed, not '$s'")
-      }
-    }
+  val seed: Option[Long] = Settings.ChaosSeed.get
 
   /** Whether the points perturb the threads that pass them. */
   val enabled: Boolean = seed.isDefined

@@ -1,7 +1,8 @@
 package com.transformer.bench
 
+import com.transformer.core.Settings
 import com.transformer.core.metrics.TaskMetricsRecord
-import com.transformer.job.{DataJob, DirectoryJobLoader}
+import com.transformer.job.DirectoryJobLoader
 import com.transformer.temporal.TemporalVariables
 
 import org.junit.Assert._
@@ -84,9 +85,9 @@ class JaffleRegressionTest {
     // Force-spill is plumbed via System.setProperty rather than the env var
     // because the test harness has full control of the JVM and setProperty
     // is reliable; setting env vars inside a running JVM is platform-flaky.
-    val prev = System.getProperty(DataJob.ForceSpillPropertyName)
-    if (forceSpill) System.setProperty(DataJob.ForceSpillPropertyName, "true")
-    else System.clearProperty(DataJob.ForceSpillPropertyName)
+    val prev = System.getProperty(Settings.ForceSpill.property)
+    if (forceSpill) System.setProperty(Settings.ForceSpill.property, "true")
+    else System.clearProperty(Settings.ForceSpill.property)
     val prevMetrics = System.getProperty("transformer.metrics.enabled")
     System.setProperty("transformer.metrics.enabled", "true")
     try {
@@ -125,8 +126,8 @@ class JaffleRegressionTest {
         fail(s"jaffle $mode regression:\n" + regressions.mkString("\n"))
       }
     } finally {
-      if (prev == null) System.clearProperty(DataJob.ForceSpillPropertyName)
-      else System.setProperty(DataJob.ForceSpillPropertyName, prev)
+      if (prev == null) System.clearProperty(Settings.ForceSpill.property)
+      else System.setProperty(Settings.ForceSpill.property, prev)
       if (prevMetrics == null) System.clearProperty("transformer.metrics.enabled")
       else System.setProperty("transformer.metrics.enabled", prevMetrics)
     }

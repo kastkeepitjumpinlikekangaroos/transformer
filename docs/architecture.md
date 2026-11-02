@@ -37,7 +37,7 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 
 | Path | Role | Key files |
 |---|---|---|
-| `core/` | Shared types crossed by every module. Zero deps. | `DataType.scala` (`sqlName`, the one spelling every grid and listing shows a type in: `BIGINT`, `DECIMAL(10,2)`), `ExecutionOptions.scala` (per-query knobs: spill, metrics, and `stopped`, §3g), `Schema.scala`, `ColumnarBatch.scala`, `Row.scala`, `Catalog.scala`, `NumberText.scala` (the one grammar text becomes a number by, for a CSV field and a CAST alike), `Scheduler.scala` (the shared `ForkJoinPool` every parallel call site funnels through), `SqlExecutor.scala` (`SqlExecutorRegistry`), `WrittenParts.scala` (the part files a partitioned write committed, which a run record names), `Faults.scala` (the fault points every disk change of a run calls, armed by a test or `-Dtransformer.fault`, §3a) |
+| `core/` | Shared types crossed by every module. Zero deps. | `DataType.scala` (`sqlName`, the one spelling every grid and listing shows a type in: `BIGINT`, `DECIMAL(10,2)`), `ExecutionOptions.scala` (per-query knobs: spill, metrics, and `stopped`, §3g), `Schema.scala`, `ColumnarBatch.scala`, `Row.scala`, `Catalog.scala`, `NumberText.scala` (the one grammar text becomes a number by, for a CSV field and a CAST alike), `Scheduler.scala` (the shared `ForkJoinPool` every parallel call site funnels through), `SqlExecutor.scala` (`SqlExecutorRegistry`), `WrittenParts.scala` (the part files a partitioned write committed, which a run record names), `Settings.scala` (every setting the engine reads from outside the program, a `transformer.*` system property or its `TRANSFORMER_*` environment twin, each with its default and how it parses: the one place that reads a property or the environment, rule R8), `Faults.scala` (the fault points every disk change of a run calls, armed by a test or `-Dtransformer.fault`, §3a) |
 | `temporal/` | Date/time template variables. No deps. | `TemporalVariables.scala`, `TemplateRenderer.scala` |
 | `read/csv/` | CSV input. Stdlib only. | `CsvOptions.scala` (also `forWrittenFile`, the options a job reads back its own CSV output with, and `checkSeparators`, which the writer shares), `CsvRowParser.scala` (state machine: an unquoted null string is NULL, a blank line is flagged rather than skipped, an unclosed quote fails), `CsvValues.scala` (the text of each type's values: what the writer prints, what the reader parses strictly, and what inference recognizes and joins), `CsvSchemaInferer.scala`, `PathGlob.scala`, `CsvReader.scala` (inference over the first rows of the glob's files in order, each later file read by its header's names, row width, blank lines as rows in a one-column file, typed parse errors naming file, line and column) |
 | `read/parquet/` | Parquet input. Depends on `parquet-hadoop` + minimal Hadoop. | `ParquetReader.scala`, `ParquetColumns.scala` (the type each parquet column reads as and how its values decode, decided per file from that file's footer; matches a view's columns to each file's by name), `ParquetFooter.scala` (why a footer parquet-mr refused does not read, in the reader's words, from its Thrift walked leniently by `CompactThrift`), `ParquetFilterTranslator.scala` |
@@ -265,7 +265,7 @@ the child's natural partitions); the planner picks which based on
   only when GROUP BY / PARTITION BY cardinality is high relative to input
   size; we don't have per-key NDV estimates yet. Workloads that profile as
   merge-bottlenecked can opt back in via the
-  `transformer.scheduler.shard_min_size` system property. Window has an
+  `transformer.scheduler.shard_min_size` setting (README, "Settings"). Window has an
   additional structural gate — every `WindowSpec` in the operator must
   share the same non-empty PARTITION BY key set, otherwise no single
   sharding satisfies all specs. No key may read `RAND()`
@@ -431,7 +431,8 @@ silently disable spill on the whole operator because the underlying
 use a fixed bucket count of 16 with no recursive bucketing — hot keys
 whose bucket exceeds heap will still OOM at processing time (v1.1).
 The temp-file base defaults to `${java.io.tmpdir}/transformer-spill`,
-overridable via the `transformer.spill.dir` system property. Each JVM spills
+overridable with the `transformer.spill.dir` setting (or
+`TRANSFORMER_SPILL_DIR`). Each JVM spills
 into a directory of its own under it, `Spill.rootDir` (`jvm-<pid>-<suffix>`),
 whose shutdown hook deletes that directory and nothing else; operator
 subdirectories are wiped when the result iterator drains, and the hook

@@ -28,17 +28,6 @@ class MetricsCollectorTest {
     assertEquals(a, b)
   }
 
-  @Test def parseBoolHandlesCaseAndAliases(): Unit = {
-    assertTrue(MetricsCollector.parseBool("true"))
-    assertTrue(MetricsCollector.parseBool("TRUE"))
-    assertTrue(MetricsCollector.parseBool("True"))
-    assertTrue(MetricsCollector.parseBool("1"))
-    assertFalse(MetricsCollector.parseBool("false"))
-    assertFalse(MetricsCollector.parseBool("0"))
-    assertFalse(MetricsCollector.parseBool("yes"))
-    assertFalse(MetricsCollector.parseBool(""))
-  }
-
   @Test def currentCpuNanosReturnsAValidValueOrMinusOne(): Unit = {
     val v = MetricsCollector.currentCpuNanos()
     // -1 is the documented unsupported sentinel; any non-negative value is

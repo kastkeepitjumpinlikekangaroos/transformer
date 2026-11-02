@@ -10,10 +10,11 @@ load("@rules_scala//scala:scala.bzl", "scala_junit_test")
 # regression numbers on a new machine.
 #
 # Pulls in:
-#   - //src/main/scala/com/transformer/job — DataJob.ForceSpillPropertyName +
-#     DirectoryJobLoader for in-process jaffle invocation.
-#   - //src/main/scala/com/transformer/core — TaskMetricsRecord for reading
-#     the `_perf.json` files written into each iteration's output dir.
+#   - //src/main/scala/com/transformer/job — DirectoryJobLoader for
+#     in-process jaffle invocation.
+#   - //src/main/scala/com/transformer/core — Settings.ForceSpill, and
+#     TaskMetricsRecord for reading the `_perf.json` files written into each
+#     iteration's output dir.
 #   - //src/main/scala/com/transformer/temporal — TemporalVariables for the
 #     fixed jaffle execution time.
 #   - //benchmarks/macro:macro_bench_lib — MacroBenchRunner.median +
