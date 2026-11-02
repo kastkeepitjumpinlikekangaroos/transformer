@@ -86,7 +86,7 @@ class PgExpectedTest {
       "1\t2", // 10: COPY's rows are not echoed
       "\\.", // 11
       "SET standard_conforming_strings TO off;", // 12
-      "SELECT 'a\\';b';", // 13: with it off, a plain string takes \'
+      "SELECT 'a\\';b', U&' \\' UESCAPE '!';", // 13: with it off, a plain string takes \', U&'...' does not
       "RESET standard_conforming_strings;", // 14
       "/* a comment", // 15
       "", // 16: inside a comment, echoed
@@ -96,6 +96,7 @@ class PgExpectedTest {
       (13, 13, false), (14, 14, false), (17, 17, false)), sql.statements.map(s => (s.first, s.last, s.meta)))
     assertEquals(Vector(1, 3, 4, 5, 7, 8, 9, 12, 13, 14, 15, 16, 17), sql.echoed)
     assertEquals("SELECT 'x\\';", sql.statements.last.text.trim)
+    assertEquals("SELECT 'a\\';b', U&' \\' UESCAPE '!';", sql.statements(6).text.trim)
     assertEquals(Some(2), sql.at(3).map(_.index))
   }
 

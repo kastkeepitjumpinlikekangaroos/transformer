@@ -21,8 +21,10 @@ import scala.collection.mutable
   * header names, as `sql/<name>.sql` and `expected/<name>.out`. A record names
   * the statement it comes from by a comment line just above it that starts
   * `# <name>.sql:<line>` (or `<line>-<last>` for records made of several
-  * statements); a record with no such line comes from the statement after its
-  * predecessor's, so a run of records ported in order needs one. A twin (the
+  * statements); a record with no comment comes from the statement after its
+  * predecessor's, so a run of records ported in order needs one citation,
+  * and a statement under a comment that cites no line is the port's own (a
+  * table it makes for a VALUES list) and comes from none. A twin (the
   * `onlyif transformer` record after a skip, the engine's own answer) is no
   * answer of Postgres's and is passed over, and so is a record whose comment
   * names another file. A skipped record keeps Postgres's answer, and is
@@ -158,8 +160,15 @@ object PgExpected {
               else {
                 if (first < 0) first = no
                 if (c == '\'') {
-                  val prev = if (i > 0) line(i - 1) else ' '
-                  val escapes = !stdStrings || ((prev == 'E' || prev == 'e') && !(i > 1 && isIdent(line(i - 2))))
+                  // E'...' takes backslash escapes, and so does a plain '...'
+                  // while standard_conforming_strings is off; U&'...', B'...'
+                  // and X'...' never do.
+                  val prefix = line.substring(0, i).reverse.takeWhile(ch => isIdent(ch) || ch == '&').reverse
+                  val escapes = prefix.toUpperCase(Locale.ROOT) match {
+                    case "E" => true
+                    case "U&" | "B" | "X" => false
+                    case _ => !stdStrings
+                  }
                   quote = Some(("'", escapes)); buf += c; i += 1
                 } else if (c == '"') { quote = Some(("\"", false)); buf += c; i += 1 }
                 else if (c == '$' && !(i > 0 && isIdent(line(i - 1)))) {
@@ -390,6 +399,10 @@ object PgExpected {
               case None =>
                 problems += s"$scriptName:${rec.line}: it cites $name.sql:$n, which is no statement's line"
             }
+          // A record under a comment that cites no line is the port's own (a
+          // table it makes for a VALUES list), and so is any after it with no
+          // comment, up to the next citation.
+          case None if comment.nonEmpty && !checked => prev = None
           case None =>
             val next = prev.flatMap(p => sql.statements.drop(p.index + 1).find(!_.setting))
             next match {
@@ -676,20 +689,37 @@ object PgExpected {
 
   private def read(path: Path): String = new String(Files.readAllBytes(path), StandardCharsets.UTF_8)
 
+  /** Each statement of the port's source, by its first line, with whether a
+    * record of the port holds it: what a header counts as left out. */
+  def listing(scriptName: String, scriptPath: Path, ledger: Ledger): Vector[String] = {
+    val script = read(scriptPath)
+    val records = Script.parse(scriptName, script, ledger)
+    val src = source(scriptPath, script)
+    val (placed, _) = place(scriptName, script, records, src.name, src.sql)
+    val held = placed.map(_.statement.index).toSet
+    s"${src.sql.statements.length} statements, ${held.size} held by a record" +:
+      src.sql.statements.map { st =>
+        f"${if (held(st.index)) "+" else "-"} ${st.first}%5d  ${st.text.trim.linesIterator.nextOption().getOrElse("").take(100)}"
+      }
+  }
+
   /** {{{
-    *   bazel run //src/test/scala/com/transformer/slt:pg_expected -- [--fill] <script>...
+    *   bazel run //src/test/scala/com/transformer/slt:pg_expected -- [--fill | --list] <script>...
     * }}}
     * Checks each port and prints every difference, exiting 1 if there is
     * one; `--fill` writes Postgres's values into each query's block instead,
-    * and prints what it could not fill. */
+    * and prints what it could not fill; `--list` prints each statement of the
+    * source, `+` where a record holds it. */
   def main(args: Array[String]): Unit = {
     val ledger = Ledger.load(resolve(Ledger.DefaultPath.toString))
     val fillMode = args.contains("--fill")
-    val scripts = args.filterNot(_ == "--fill").toVector
+    val listMode = args.contains("--list")
+    val scripts = args.filterNot(a => a == "--fill" || a == "--list").toVector
     var differences = 0
     scripts.foreach { s =>
       val path = resolve(s)
-      if (fillMode) {
+      if (listMode) listing(s, path, ledger).foreach(l => System.out.println(l))
+      else if (fillMode) {
         val (text, notes) = fill(s, path, ledger)
         Files.write(path, text.getBytes(StandardCharsets.UTF_8))
         notes.foreach(n => System.out.println(n))

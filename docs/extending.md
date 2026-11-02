@@ -669,8 +669,8 @@ then its records in the file's order, each query's header naming the engine's
 types of its columns and its sort mode (`rowsort` unless the ORDER BY fixes
 the order), with an empty `----` block, and each record under a comment that
 starts `# <name>.sql:<line>`, the line of the statement it ports (a record of
-the port's own, a table it makes for a VALUES list, takes no such comment).
-Then
+the port's own, a table it makes for a VALUES list, takes a comment that cites
+no line, as `# For int4.sql:130: ...` does). Then
 
 ```bash
 bazel run //src/test/scala/com/transformer/slt:pg_expected -- --fill src/test/slt/postgres/<name>.test
@@ -680,8 +680,11 @@ writes Postgres's values into every block, as each column prints them, and
 lists what it could not fill: a query Postgres refused, which is a `statement
 error`, and a cell psql prints alike for NULL and the empty string. Without
 `--fill` the binary reports every block that says other than Postgres printed,
-as `slt_test` does for every port. Where the engine answers otherwise, the
-record is a skip with its twin, or held out as a finding, as above.
+as `slt_test` does for every port, and with `--list` it prints each of the
+source's statements as psql cuts it, marked where a record holds it, which
+the header's count of what is left out is made from. Where the engine answers
+otherwise, the record is a skip with its twin, or held out as a finding, as
+above.
 
 Mark each record the engine answers otherwise by design with `skipif
 transformer <id>` on the line before it, the id of the rule it follows in the
