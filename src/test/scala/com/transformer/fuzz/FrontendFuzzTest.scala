@@ -477,9 +477,52 @@ class FrontendFuzzTest {
       val a = byShape.getOrElse(shape.shape, new Array[Int](5))
       assertTrue(s"${shape.shape} generated ${a(0)} times", a(0) > n / SqlTextGen.SpellingShapes.size / 3)
       assertEquals(s"${shape.shape} refused", 0, a(3))
-      if (SyntaxEquivalence.known(shape.shape).isEmpty)
+      // A shape known to disagree everywhere has no agreement to observe; one
+      // known to disagree only over some values must still be observable.
+      if (SyntaxEquivalence.known(shape.shape).forall(_.onlyWhere.isDefined))
         assertTrue(s"${shape.shape} observable on ${a(2)} of ${a(1)}", a(2) > a(1) / 10)
     }
+  }
+
+  /** Each class of the text past ASCII (`TextPool`) reaches each string site
+    * of the frontend corpus, in a spelling or an honoured case whose `t.s`
+    * holds it or whose text writes it: `LENGTH`, `SUBSTRING`, `UPPER`, `LOWER`,
+    * `LIKE` and `ILIKE`, an ORDER BY and a GROUP BY over `s`, and `MIN` or
+    * `MAX` of it. The catalog's `s` drew ASCII alone until plans/testing/15.
+    * Read off the text, so generation only. */
+  @Test def textReachesEveryStringSite(): Unit = {
+    val t = TextPool.tally(100000) { seed =>
+      val sc = SqlTextGen.genSpellingCase(new Rng(seed))
+      val hc = SqlTextGen.genHonouredCase(new Rng(seed + 5000000L))
+      FrontendFuzzTest.textSites(Seq(sc.left, sc.right), sc.tables) ++
+        FrontendFuzzTest.textSites(Seq(hc.contextSql, hc.honoured.withoutSql), hc.tables)
+    }
+    println(s"[frontend] text past ASCII ${t.report}")
+    // Measured over these seeds: the thinnest cell is 36 (SUBSTRING over a
+    // combining mark), LIKE, ILIKE and ORDER BY hundreds to two thousand; the
+    // floor sits about 3x below the thinnest. 100000 seeds of both kinds of
+    // case, generation only, about three seconds.
+    val low = t.below(TextFloor)
+    assertTrue(s"text past ASCII rarely reaches these sites (at most $TextFloor seeds):\n  ${low.mkString("\n  ")}\n${t.report}",
+      low.isEmpty)
+  }
+
+  private val TextFloor = 12
+
+  /** The disagreement plans/testing/15 holds (finding F1) shows over its own
+    * values and nowhere else: the ILIKE shape over a dotless i or a dotted
+    * capital I is known, and the same shape over values without one is not,
+    * so a split of another kind still fails. */
+  @Test def theIlikeDisagreementIsKnownOnlyOverAnUnpairedLetter(): Unit = {
+    val dotless = TextPool.text(0x131)
+    val ilike = SyntaxEquivalence.known("ILIKE").get
+    val over = SpellingCase(SqlTextGen.ReferenceTables, "ILIKE", s"SELECT a FROM t WHERE '$dotless' ILIKE 'I'",
+      s"SELECT a FROM t WHERE LOWER('$dotless') LIKE LOWER('I')", None)
+    assertEquals(SyntaxEquivalence.KnownDisagreement(ilike), SyntaxEquivalence.check(over))
+    val without = SpellingCase(SqlTextGen.ReferenceTables, "ILIKE", "SELECT a FROM t WHERE 'x' ILIKE 'X'",
+      "SELECT a FROM t WHERE 'x' LIKE 'X'", None)
+    val e = Try(SyntaxEquivalence.check(without)).failed.get
+    assertTrue(e.getMessage, e.getMessage.contains("the spellings disagree"))
   }
 
   /** Every recorded disagreement still disagrees on its repro, so a fix fails
@@ -543,5 +586,32 @@ class FrontendFuzzTest {
     }
     assertTrue(s"terminated (steps=$steps)", steps < 5000)
     assertTrue(s"reduced '${start.sql}' -> '${cur.sql}'", cur.sql.length < start.sql.length)
+  }
+}
+
+object FrontendFuzzTest {
+
+  /** A site's text in a query that reads `s`: the four functions by their
+    * names (only `s` and literals are text in this catalog), `LIKE` apart from
+    * `ILIKE`, and an ORDER BY, a GROUP BY and a `MIN` or `MAX` over `s`. */
+  private val SiteText: Seq[(String, scala.util.matching.Regex)] = Seq(
+    "LENGTH" -> """\bLEN(?:GTH)?\(""".r,
+    "SUBSTRING" -> """\bSUBSTRING\(""".r,
+    "UPPER" -> """\bUPPER\(""".r,
+    "LOWER" -> """\bLOWER\(""".r,
+    "LIKE" -> """(?<![A-Za-z])LIKE\b""".r,
+    "ILIKE" -> """\bILIKE\b""".r,
+    "ORDER BY" -> """ORDER BY [^)]*?\bs\b[^)]*?(?: LIMIT| OFFSET| FETCH|\)|$)""".r,
+    "GROUP BY" -> """GROUP BY [^)]*?\bs\b""".r,
+    "MIN/MAX" -> """\b(?:MIN|MAX)\(s\)""".r)
+
+  /** The (site, class) pairs `texts` reach over `tables`: a site any of them
+    * writes, with each class `t.s` holds or the texts write themselves. */
+  def textSites(texts: Seq[String], tables: SqlTextGen.Tables): Set[(String, TextPool.TextClass)] = {
+    val t = tables.table("t")
+    val i = t.schema.indexOf("s")
+    val classes: Set[TextPool.TextClass] = TextPool.columnClasses(t.rows.map(_(i))) ++ texts.flatMap(TextPool.classesOf)
+    val sites: Set[String] = SiteText.collect { case (site, re) if texts.exists(re.findFirstIn(_).isDefined) => site }.toSet
+    sites.flatMap(site => classes.map(c => (site, c)))
   }
 }

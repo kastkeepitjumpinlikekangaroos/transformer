@@ -2190,9 +2190,12 @@ worth carrying:
   RAND() operand once.
 - **Java counts UTF-16 chars, SQL counts characters.** `String.length`,
   `substring` and `trim` (which also strips every char up to U+0020) are not
-  SQL's LENGTH, SUBSTRING and TRIM; half of a surrogate pair is no text, and a
-  spill or a parquet or CSV file writes it as `?`; `Pattern.quote` of half a
-  pair matches nothing, so a LIKE pattern holding an emoji matched no string.
+  SQL's LENGTH, SUBSTRING and TRIM; half of a surrogate pair is no text: a
+  spill or a parquet file writes it as `?`, and `CsvWriter` refuses the write,
+  naming its row and column; `Pattern.quote` of half a pair matches nothing, so
+  a LIKE pattern holding an emoji matched no string. The SQL fuzzers'
+  `TextPool` draws no half pair for that reason, while what a STRING may hold
+  is plans/testing/17's decision.
   String ORDERING is still UTF-16 (see the parquet pushdown entry above).
 - **Java's `toUpperCase` and `toLowerCase` map case in full; SQL's `UPPER` and
   `LOWER` map one character to one.** The full mapping turns a sharp s
@@ -2206,7 +2209,10 @@ worth carrying:
   a regex folds a character as the small form of its capital, so `ILIKE`
   matches a dotless i (U+0131) and a dotted capital I to `i`, where `LOWER`
   keeps the dotless i and `UPPER` the dotted capital, which is held for a
-  decision (plans/testing/15).
+  decision (plans/testing/15, finding F1). The frontend fuzzer's ILIKE spelling
+  shape records it as a known disagreement that applies only where the case's
+  text or `t.s` holds such a letter (`SyntaxEquivalence.Known.onlyWhere`,
+  `TextPool.unpairedCase`), so a split of any other kind still fails.
 - **JSqlParser reads `{d '...'}` through `java.sql.Date.valueOf`, which rolls
   `2026-02-30` over to March.** `SqlParser.escapeLiteralText` reads the
   literal's token text, which goes through the same strict CAST `DATE '...'`

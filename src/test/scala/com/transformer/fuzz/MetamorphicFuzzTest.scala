@@ -413,7 +413,7 @@ class MetamorphicFuzzTest {
     * drawn either, holding NaN and both zeros, which one group must take.
     * Generation only. */
   @Test def floatAndBooleanKeysJoinAndGroupOverNaNAndBothZeros(): Unit = {
-    val n = 4000
+    val n = 6000
     var floatJoin, nanMeets, zerosMeet, booleanJoin, floatGroup, groupNaN, groupZeros = 0
     def cellsOf(r: Relation, i: Int): IndexedSeq[Any] = r.dataset.rows.map(_(i))
     def has(cells: IndexedSeq[Any], p: Double => Boolean): Boolean = cells.exists(isDouble(_, p))
@@ -444,15 +444,16 @@ class MetamorphicFuzzTest {
     println(s"[metamorphic] over $n seeds: a join on a float key in $floatJoin, NaN on both sides in $nanMeets, " +
       s"-0.0 beside 0.0 in $zerosMeet; on a boolean key in $booleanJoin; a float GROUP BY key in $floatGroup, " +
       s"holding NaN in $groupNaN, both zeros in $groupZeros")
-    // Measured over these seeds: a float join 499 (NaN meets NaN 141, the
-    // zeros 206), a boolean join 234, a float group key 219 (NaN 56, both
-    // zeros 42); bounds ~3x below.
-    assertTrue(s"a join is rarely on a float key (floatJoin=$floatJoin)", floatJoin > 165)
-    assertTrue(s"NaN rarely meets NaN across a join (nanMeets=$nanMeets)", nanMeets > 47)
-    assertTrue(s"-0.0 rarely meets 0.0 across a join (zerosMeet=$zerosMeet)", zerosMeet > 68)
-    assertTrue(s"a join is rarely on a boolean key (booleanJoin=$booleanJoin)", booleanJoin > 78)
-    assertTrue(s"a GROUP BY key is rarely a float (floatGroup=$floatGroup)", floatGroup > 73)
-    assertTrue(s"a float GROUP BY key rarely holds NaN (groupNaN=$groupNaN)", groupNaN > 18)
+    // Measured over these seeds: a float join 762 (NaN meets NaN 223, the
+    // zeros 293), a boolean join 362, a float group key 321 (NaN 79, both
+    // zeros 40); bounds ~3x below. 6000 seeds, since drawing text past ASCII
+    // left both zeros in a float key 27 of 4000.
+    assertTrue(s"a join is rarely on a float key (floatJoin=$floatJoin)", floatJoin > 250)
+    assertTrue(s"NaN rarely meets NaN across a join (nanMeets=$nanMeets)", nanMeets > 74)
+    assertTrue(s"-0.0 rarely meets 0.0 across a join (zerosMeet=$zerosMeet)", zerosMeet > 97)
+    assertTrue(s"a join is rarely on a boolean key (booleanJoin=$booleanJoin)", booleanJoin > 120)
+    assertTrue(s"a GROUP BY key is rarely a float (floatGroup=$floatGroup)", floatGroup > 107)
+    assertTrue(s"a float GROUP BY key rarely holds NaN (groupNaN=$groupNaN)", groupNaN > 26)
     assertTrue(s"a float GROUP BY key rarely holds both zeros (groupZeros=$groupZeros)", groupZeros > 14)
   }
 
@@ -470,6 +471,28 @@ class MetamorphicFuzzTest {
     }) ++ q.setOp.toVector.flatMap { case (rhs, _) => arm(rhs) } ++ q.ctes.flatMap(c => arm(c.body))
     arm(mc.query).filter(_.nonEmpty)
   }
+
+  /** Each class of the text past ASCII (`TextPool`) reaches each string site
+    * of the metamorphic corpus, in any arm of a query: `LENGTH`, `SUBSTRING`,
+    * `UPPER`, `LOWER`, `LIKE` and `ILIKE` over a base column holding it or a
+    * literal of it, an ORDER BY key (a window's or a top-n's) and a GROUP BY
+    * key over a column holding it, and `MIN`/`MAX`, as an aggregate, a window
+    * or the decomposition relation's. `MetaQueryGen` drew ASCII alone, and
+    * none of the four functions, until plans/testing/15. Generation only. */
+  @Test def textReachesEveryStringSite(): Unit = {
+    val t = TextPool.tally(100000)(seed => MetamorphicFuzzTest.textSites(MetaQueryGen.generate(new Rng(seed))))
+    println(s"[metamorphic] text past ASCII ${t.report}")
+    // Measured over these seeds: the thinnest cell is 23 (UPPER over a
+    // character from U+E000 to U+FFFF beside one past U+FFFF, the pair that
+    // takes two classes in one column), the function cells mostly 35 to 200,
+    // ORDER BY and MIN/MAX hundreds; the floor sits about 3x below the
+    // thinnest. 100000 seeds, generation only, under two seconds.
+    val low = t.below(TextFloor)
+    assertTrue(s"text past ASCII rarely reaches these sites (at most $TextFloor seeds):\n  ${low.mkString("\n  ")}\n${t.report}",
+      low.isEmpty)
+  }
+
+  private val TextFloor = 7
 
   private def isDouble(v: Any, p: Double => Boolean): Boolean = v match {
     case x: java.lang.Double => p(x.doubleValue)
@@ -501,26 +524,29 @@ class MetamorphicFuzzTest {
   // `MetaQueryGen` drew none of the four until plan 04. The guards read one
   // shared tally of the generated corpus.
   //
-  // Over the campaign's 20000 seeds, generation only (about a second):
+  // Over 30000 seeds, generation only (about a second and a half); the block
+  // was the campaign's 20000 until plans/testing/15 gave the join key and the
+  // TLP key three more types and drew text past ASCII, which left the four
+  // fewer draws:
   //
   //                  date  timestamp  binary  decimal
-  //   join key       1734       1751    1796     1742
-  //   comparison     2579       2664    2355     3399
-  //   ORDER BY       2247       2350    2300     2331
-  //   GROUP BY        891        868     914      939
-  //   MIN/MAX        4537       4603    4530     4562
-  //   TLP key        2371       2430     503     2780   (a BINARY only against
+  //   join key       1891       1844    1832     1755
+  //   comparison     3177       3104    2594     4124
+  //   ORDER BY       2806       2844    2747     2782
+  //   GROUP BY       1072       1009    1065     1007
+  //   MIN/MAX        5675       5727    5569     5614
+  //   TLP key        2586       2555     450     2989   (a BINARY only against
   //                                                       another BINARY column)
   //
   // and the columns holding each value pair, at join key / comparison / ORDER
-  // BY / GROUP BY / MIN/MAX: instants under a millisecond apart 1372 / 1430 /
-  // 1117 / 367 / 2088; bytes of one content 1653 / 1528 / 1343 / 458 / 2456;
-  // bytes one high bit apart 639 / 584 / 489 / 176 / 895; a decimal at two
-  // scales 845 / 1088 / 632 / 251 / 1146; decimals of one double 211 / 293 /
-  // 197 / 62 / 336. Decimal arithmetic on 1409 seeds, SUM or AVG of a decimal
-  // on 746 and the decomposition's decimal SUM on 4562, reading decimals a
-  // double adds wrong on 268, 118 and 879. Each bound sits about 3x below its
-  // count.
+  // BY / GROUP BY / MIN/MAX: instants under a millisecond apart 1418 / 1587 /
+  // 1370 / 395 / 2510; bytes of one content 1702 / 1660 / 1570 / 538 / 3026;
+  // bytes one high bit apart 672 / 660 / 587 / 184 / 1123; a decimal at two
+  // scales 838 / 1215 / 749 / 259 / 1417; decimals of one double 235 / 383 /
+  // 233 / 90 / 441. Decimal arithmetic on 1872 seeds, SUM or AVG of a decimal
+  // on 894 and the decomposition's decimal SUM on 5614, reading decimals a
+  // double adds wrong on 383, 148 and 1119. Each bound sits about 3x below its
+  // count, a few nearer 2.5x.
 
   import DataGen.ValueTag._
   import MetamorphicFuzzTest.{Tally, typeTally}
@@ -858,7 +884,7 @@ class MetamorphicFuzzTest {
     * campaign's first block of seeds, run each OFFSET query without its tail and
     * count the ones whose skip lands strictly inside the result. */
   @Test def offsetIsGeneratedAndObservable(): Unit = {
-    val n = 2000
+    val n = 3000
     var offsets, observable = 0
     var seed = 0
     while (seed < n) {
@@ -882,7 +908,7 @@ class MetamorphicFuzzTest {
     * So run each placed query again with the opposite placement and count the
     * ones whose answer differs. */
   @Test def nullPlacementIsGeneratedAndObservable(): Unit = {
-    val n = 2000
+    val n = 3000
     var placed, observable = 0
     var seed = 0
     while (seed < n) {
@@ -1087,9 +1113,83 @@ object MetamorphicFuzzTest {
     out.result()
   }
 
-  /** The tally over the first 20000 seeds, computed once for the four guards. */
+  /** The (site, class) pairs `mc` reaches with text past ASCII, as
+    * `textReachesEveryStringSite` counts them. */
+  def textSites(mc: MetaCase): Set[(String, TextPool.TextClass)] = {
+    val out = Set.newBuilder[(String, TextPool.TextClass)]
+    def classesOf(cells: IndexedSeq[Any]): Set[TextPool.TextClass] = TextPool.columnClasses(cells)
+    def cellsOf(from: FromClause, e: Expr): IndexedSeq[Any] = {
+      def refs(x: Expr): Seq[ColRefExpr] = x match {
+        case c: ColRefExpr if c.dataType == DataType.StringType => Seq(c)
+        case other => Shrinker.childrenOf(other).flatMap(refs)
+      }
+      refs(e).flatMap(scopeCol).flatMap(columnCells(mc.env, from, _)).toIndexedSeq
+    }
+    def literals(e: Expr): Set[TextPool.TextClass] = e match {
+      case LitExpr(s: String, _) => TextPool.classesOf(s)
+      case other => Shrinker.childrenOf(other).flatMap(literals).toSet
+    }
+    def arm(q: MetaQuery): Unit = {
+      def reads(e: Expr): Set[TextPool.TextClass] = classesOf(cellsOf(q.from, e)) ++ literals(e)
+      def walk(e: Expr): Unit = {
+        e match {
+          case FuncExpr(name @ ("LENGTH" | "SUBSTRING" | "UPPER" | "LOWER"), arg +: _, _) =>
+            reads(arg).foreach(c => out += ((name, c)))
+          case LikeExpr(child, pattern, _, syntax) =>
+            val site = if (syntax.caseInsensitive) "ILIKE" else "LIKE"
+            (reads(child) ++ literals(pattern)).foreach(c => out += ((site, c)))
+          case _ => ()
+        }
+        Shrinker.childrenOf(e).foreach(walk)
+      }
+      (q.where.toSeq ++ q.from.joins.map(_.on) ++ (q.core match {
+        case p: ProjectCore => p.items.map(_._1)
+        case a: AggCore => a.groupKeys.map(_._1) ++ a.having.toSeq ++ a.aggs.flatMap {
+          case (QueryGen.Min(e), _) => Seq(e)
+          case (QueryGen.Max(e), _) => Seq(e)
+          case (QueryGen.Count(e, _), _) => Seq(e)
+          case _ => Seq.empty
+        }
+      })).foreach(walk)
+      q.core match {
+        case a: AggCore =>
+          a.groupKeys.foreach { case (e, _) => if (e.dataType == DataType.StringType) reads(e).foreach(c => out += (("GROUP BY", c))) }
+          a.aggs.foreach {
+            case (QueryGen.Min(e), _) if e.dataType == DataType.StringType => reads(e).foreach(c => out += (("MIN/MAX", c)))
+            case (QueryGen.Max(e), _) if e.dataType == DataType.StringType => reads(e).foreach(c => out += (("MIN/MAX", c)))
+            case _ => ()
+          }
+        case p: ProjectCore =>
+          if (q.totalOrderKeys.isDefined) p.items.foreach { case (e, _) =>
+            if (e.dataType == DataType.StringType) reads(e).foreach(c => out += (("ORDER BY", c)))
+          }
+          p.windows.foreach { w =>
+            w.orderCols.filter(_.dataType == DataType.StringType)
+              .foreach(c => classesOf(columnCells(mc.env, q.from, c)).foreach(k => out += (("ORDER BY", k))))
+            if (w.dataType == DataType.StringType && (w.sql.startsWith("MIN(") || w.sql.startsWith("MAX("))) {
+              val col = w.sql.drop(4).takeWhile(_ != ')')
+              col.split('.') match {
+                case Array(alias, name) =>
+                  classesOf(columnCells(mc.env, q.from, ScopeCol(alias, name, DataType.StringType)))
+                    .foreach(k => out += (("MIN/MAX", k)))
+                case _ => ()
+              }
+            }
+          }
+      }
+      q.setOp.foreach { case (rhs, _) => arm(rhs) }
+      q.ctes.foreach(c => arm(c.body))
+    }
+    arm(mc.query)
+    AggDecomposition.aggregatedColumns(mc).foreach { case (dt, cells) =>
+      if (dt == DataType.StringType) classesOf(cells).foreach(k => out += (("MIN/MAX", k)))
+    }
+    out.result()
+  }
+
+  /** The tally over the first 30000 seeds, computed once for the four guards. */
   lazy val typeTally: Tally = {
-    val n = 20000
+    val n = 30000
     val shapes = scala.collection.mutable.Map.empty[(String, String), Int].withDefaultValue(0)
     val values = scala.collection.mutable.Map.empty[(String, DataGen.ValueTag), Int].withDefaultValue(0)
     var seed = 0

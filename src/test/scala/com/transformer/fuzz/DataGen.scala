@@ -217,7 +217,8 @@ object DataGen {
   private val DoublePool: IndexedSeq[Double] =
     IndexedSeq(0.0, 0.25, 0.5, 1.0, 2.0, -1.0, -2.5, 3.5, 10.0, 100.0)
   /** Narrow, so keys collide; `a` beside itself with a space at either end
-    * and a lone space, which `TRIM` strips and `=` does not. */
+    * and a lone space, which `TRIM` strips and `=` does not. A share of
+    * string columns ([[TextProb]]) draws from [[TextPool]] instead. */
   private val StringPool: IndexedSeq[String] =
     IndexedSeq("", " ", "a", " a", "a ", "b", "c", "d", "ab", "abc", "x", "y", "z")
 
@@ -233,6 +234,14 @@ object DataGen {
     * layout-differential properties aggregate over. */
   private[fuzz] val SpecialDoubles: IndexedSeq[Double] =
     IndexedSeq(Double.NaN, -0.0, Double.PositiveInfinity, Double.NegativeInfinity)
+
+  /** How often a STRING column draws a slice of [[TextPool]], the text past
+    * ASCII, rather than [[StringPool]]: often enough that each of its classes
+    * reaches every string site on a share of seeds
+    * (`ModeDifferentialFuzzTest.textReachesEveryStringSite`), seldom enough
+    * that most string columns keep the narrow ASCII pool the older guards
+    * were measured over. */
+  private val TextProb = 0.35
 
   /** Probability that a Float/Double column's domain carries IEEE specials at
     * all. A quarter of float columns is low enough to leave most of the corpus
@@ -265,7 +274,7 @@ object DataGen {
         IndexedSeq[Any](true),
         IndexedSeq[Any](false)))
     case DataType.StringType =>
-      pickSubset(rng, StringPool)
+      if (rng.bool(TextProb)) TextPool.slice(rng, 6) else pickSubset(rng, StringPool)
     case DataType.DateType => pickSubset(rng, ExprGen.DatePool.toIndexedSeq)
     case DataType.TimestampType => pickSubset(rng, ExprGen.TimestampPool.toIndexedSeq)
     case DataType.BinaryType => pickSubset(rng, ExprGen.BinaryPool.toIndexedSeq)

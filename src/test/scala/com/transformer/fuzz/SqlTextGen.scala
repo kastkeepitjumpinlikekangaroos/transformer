@@ -91,11 +91,14 @@ object SqlTextGen {
       Array[Any](1, 100), Array[Any](2, 200), Array[Any](5, 500), Array[Any](null, 0)))))
 
   /** `t` and `u`, each 0-16 rows; most of either 2-8. Each column has its own
-    * NULL density, from none to two in five. */
-  def genTables(rng: Rng): Tables =
+    * NULL density, from none to two in five. On two tables in five `t.s` also
+    * draws a slice of [[TextPool]], the text past ASCII, beside its own pool. */
+  def genTables(rng: Rng): Tables = {
+    val sPool = if (rng.bool(0.4)) TsPool ++ TextPool.slice(rng, 12) else TsPool
     Tables(Vector(
-      "t" -> genRows(rng.split(), TSchema, Vector(TaPool, TbPool, TsPool)),
+      "t" -> genRows(rng.split(), TSchema, Vector(TaPool, TbPool, sPool)),
       "u" -> genRows(rng.split(), USchema, Vector(UaPool, UbPool))))
+  }
 
   private def genRows(rng: Rng, schema: Schema, pools: Vector[IndexedSeq[Any]]): DataGen.Dataset = {
     val n = rng.weighted((1, 0), (2, 1), (9, -1), (3, -2)) match {
@@ -514,7 +517,7 @@ object SqlTextGen {
     "m" -> rng.oneOf(Seq("1", "2", "3")),
     "n" -> rng.oneOf(Seq("1", "2", "3", "5")),
     "k" -> rng.oneOf(Seq("0", "1", "2", "10")),
-    "pat" -> rng.oneOf(Seq("'ab'", "'a%'", "'%B'", "'A_'", "'AB%'", "'_b'")),
+    "pat" -> rng.oneOf(Seq("'ab'", "'a%'", "'%B'", "'A_'", "'AB%'", "'_b'", "'SS'", "'I'", "'%i%'")),
     "epat" -> rng.oneOf(Seq("'a!_b'", "'a!%b'", "'%!_%'", "'!_%'")))
 
   /** Every row of `t` in a total order, so a cutoff between tied rows keeps
@@ -669,13 +672,16 @@ object SqlTextGen {
   }
 
   /** `{x}` and `{y}` numbers in `t.a`'s range, `x <= y` more often than not;
-    * `{n}` a row count; `{m}` an OFFSET; `{p}` a LIKE pattern. */
+    * `{n}` a row count; `{m}` an OFFSET; `{p}` a LIKE pattern, a third of the
+    * time one of [[TextPool.Patterns]]. */
   private def spellingParams(rng: Rng): Map[String, String] = {
     val x = rng.between(-1, 3)
     val y = if (rng.bool(0.8)) rng.between(x, 3) else rng.between(-1, 3)
+    val pattern =
+      if (rng.bool(0.35)) "'" + rng.oneOf(TextPool.Patterns).replace("'", "''") + "'"
+      else rng.oneOf(Seq("'ab'", "'a%'", "'%B'", "'A_'", "'_b'"))
     Map("x" -> x.toString, "y" -> y.toString,
-      "n" -> rng.oneOf(Seq("1", "2", "3", "5")), "m" -> rng.oneOf(Seq("1", "2", "3")),
-      "p" -> rng.oneOf(Seq("'ab'", "'a%'", "'%B'", "'A_'", "'_b'")))
+      "n" -> rng.oneOf(Seq("1", "2", "3", "5")), "m" -> rng.oneOf(Seq("1", "2", "3")), "p" -> pattern)
   }
 
   private def where(p: String): String = s"$TAll WHERE $p"
@@ -794,6 +800,30 @@ object SqlTextGen {
       "SELECT CASE WHEN a = {x} THEN NULL ELSE a END AS v FROM t"), Some("SELECT a AS v FROM t")),
     Spelling("ILIKE", Vector(where("s ILIKE {p}"), where("LOWER(s) LIKE LOWER({p})"), where("UPPER(s) LIKE UPPER({p})")),
       Some(where("s LIKE {p}"))),
+    // The string rules over the pool's text past ASCII: a string's length in
+    // characters (code points) whatever its case, SUBSTRING parting it
+    // between two characters and never inside one, LIKE's `_` matching one
+    // character, and one order for MIN, a window's ORDER BY and RANK, and one
+    // grouping for GROUP BY and PARTITION BY.
+    Spelling("LENGTH", Vector("SELECT LENGTH(s) AS n FROM t", "SELECT LEN(s) AS n FROM t",
+      "SELECT LENGTH(UPPER(s)) AS n FROM t", "SELECT LENGTH(LOWER(s)) AS n FROM t"), None),
+    Spelling("SUBSTRING parts", Vector("SELECT s AS v FROM t", "SELECT SUBSTRING(s, 1, 1) || SUBSTRING(s, 2) AS v FROM t",
+      "SELECT CONCAT(SUBSTRING(s, 1, 2), SUBSTRING(s, 3)) AS v FROM t"), None),
+    Spelling("SUBSTRING to the end", Vector("SELECT SUBSTRING(s, 2) AS v FROM t",
+      "SELECT SUBSTRING(s, 2, LENGTH(s)) AS v FROM t", "SELECT SUBSTRING(s, 2, LENGTH(s) + 1) AS v FROM t"), None),
+    Spelling("LIKE one character", Vector(where("s LIKE '_'"), where("LENGTH(s) = 1"),
+      where("s LIKE '_%' AND NOT s LIKE '__%'")), Some(TAll)),
+    Spelling("LIKE two characters", Vector(where("s LIKE '__'"), where("LENGTH(s) = 2")), Some(TAll)),
+    Spelling("MIN as the first in order", Vector("SELECT b, MIN(s) AS m FROM t WHERE s IS NOT NULL GROUP BY b",
+      "WITH r AS (SELECT b, s, RANK() OVER (PARTITION BY b ORDER BY s) AS k FROM t WHERE s IS NOT NULL) " +
+        "SELECT DISTINCT b, s AS m FROM r WHERE k = 1"), None),
+    Spelling("MAX as the last in order", Vector("SELECT b, MAX(s) AS m FROM t WHERE s IS NOT NULL GROUP BY b",
+      "WITH r AS (SELECT b, s, DENSE_RANK() OVER (PARTITION BY b ORDER BY s DESC) AS k FROM t WHERE s IS NOT NULL) " +
+        "SELECT DISTINCT b, s AS m FROM r WHERE k = 1"), None),
+    Spelling("GROUP BY as PARTITION BY", Vector("SELECT s, COUNT(*) AS n FROM t GROUP BY s",
+      "SELECT DISTINCT s, COUNT(*) OVER (PARTITION BY s) AS n FROM t"), None),
+    Spelling("ORDER BY a string", Vector("SELECT s FROM t ORDER BY s LIMIT {n}", "SELECT s FROM t ORDER BY 1 LIMIT {n}",
+      "SELECT s FROM t ORDER BY s ASC NULLS FIRST LIMIT {n}"), Some("SELECT s FROM t ORDER BY s DESC LIMIT {n}")),
     Spelling("HAVING on a key", Vector("SELECT b, COUNT(*) AS n FROM t GROUP BY b HAVING b > {x}",
       "SELECT b, COUNT(*) AS n FROM t WHERE b > {x} GROUP BY b"), Some("SELECT b, COUNT(*) AS n FROM t GROUP BY b")),
     Spelling("ordinals", Vector(s"$TAll ORDER BY 1, 2, 3 LIMIT {n}", s"$TAll $TOrder LIMIT {n}"), Some(TAll)),
@@ -815,6 +845,18 @@ object SqlTextGen {
       None),
     Spelling("a quote inside a literal", Vector("SELECT a + LENGTH('it''s') AS n FROM t", "SELECT a + 4 AS n FROM t",
       "SELECT a + LENGTH('''') + 3 AS n FROM t"), Some("SELECT a + 5 AS n FROM t")))
+
+  /** Whether a spelling case's text, or the `s` of its tables, holds a
+    * letter whose capital and small forms are not one pair
+    * (`TextPool.unpairedCase`). */
+  def holdsUnpairedCase(sc: SpellingCase): Boolean =
+    Seq(sc.left, sc.right).exists(TextPool.holdsUnpairedCase) || sc.tables.tables.exists { case (_, d) =>
+      val i = d.schema.indexOf("s")
+      i >= 0 && d.rows.exists(r => r(i) match {
+        case s: String => TextPool.holdsUnpairedCase(s)
+        case _ => false
+      })
+    }
 
   def genSpellingCase(rng: Rng): SpellingCase = {
     val tables = genTables(rng.split())

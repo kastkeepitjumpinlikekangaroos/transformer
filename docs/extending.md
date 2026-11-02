@@ -939,8 +939,9 @@ went unfuzzed until plan 04.
 4. **`MetaQueryGen`.** Add it to `PayloadTypes` (which is `GenTypes`) and, if
    it can key a join, to `KeyTypes`, with a `payloadDomain` /
    `sharedKeyDomain` case and a `genLit` case; give `genAtom` its comparison,
-   and decide whether TLP may partition on it (`isPartitionable`: a comparison
-   of two non-NULL values of it must be TRUE or FALSE) and with what
+   and decide whether TLP may partition on it (`isPartitionable`, every type
+   today: a comparison of two non-NULL values of it must be TRUE or FALSE, as a
+   float's is since `NaN` sorts above every number) and with what
    (`hasLiteral`).
 5. **The guards assert the values, not just the shape.** Name the type's
    breaking pairs as a `DataGen.ValueTag` (`valueTags` reads them off a
@@ -957,6 +958,25 @@ went unfuzzed until plan 04.
    and mode-differential campaigns at `FUZZ_SEEDS=20000` and treat each
    finding the plan-02 way: a deterministic regression, the engine fix, and
    then the guard. Never gate the shape back out of the generator to get green.
+
+**To add a value class to a pool** (a kind of character to `TextPool`, a kind
+of edge value to a type's domain): put its values beside the neighbours they
+are easy to confuse with, since every generator draws a contiguous slice of a
+pool and a class only tests anything where it meets them; write text as code
+points (`TextPool.text(0x131)`), never as a backslash-u escape, which the
+editing tools decode into the raw character. A `TextPool.TextClass` names its
+code points, and the three `textReachesEveryStringSite` guards (mode-differential,
+metamorphic, frontend) tally every class at every string site by
+`TextClass.All`, so a new class is measured the day it lands: read the tallies,
+grow a block whose thinnest cell is under about 3x its floor, and never lower
+the floor. A class that can make a query fail on its data (a value at a type's
+edge) is the new-runtime-error checklist's: its message joins
+`CleanRejection.DataErrors` and `ExprParity.owned`, and the layout and
+metamorphic oracles take it by their failure rule. A class over which two
+spellings the frontend holds equal part by a rule no decision covers is a
+finding: record it as a `SyntaxEquivalence.Known` with `onlyWhere`, recognizing
+the case by what it holds (as the ILIKE shape over a letter whose capital and
+small forms are not one pair is), never by gating the class out of the pool.
 
 **To add a SQL shape to `QueryGen`** (the mode-differential fuzzer's query
 generator): add it to the structured `GenQuery` (a new `AggSpec` for an
@@ -1043,7 +1063,9 @@ run-time failure that can only be told by its plan wants the bound plan passed
 to `CleanRejection.classify` again, which `BoundPlan` walks), never the
 generator's intent; a
 `SyntaxEquivalence.Known` for a shape; or a `knownPlan` on an entry of
-`SqlTextGen.BeyondTheTable`. Each carries a repro over
+`SqlTextGen.BeyondTheTable`. A `Known` that holds only over some values gives
+`onlyWhere`, a test of what the case holds, and the shape stays held to its
+observability guard. Each carries a repro over
 `SqlTextGen.ReferenceTables`, and the matching `FrontendFuzzTest` check fails
 when the repro stops showing the defect, so the entry is removed with the fix,
 the same contract as removing a generator gate. Excuse no more than the defect:

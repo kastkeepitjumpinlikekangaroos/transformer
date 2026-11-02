@@ -3,6 +3,7 @@ package com.transformer.fuzz.oracle
 import com.transformer.core.{ExecutionOptions, Schema}
 import com.transformer.fuzz.RowOracle
 import com.transformer.fuzz.SqlTextGen.SpellingCase
+import com.transformer.fuzz.{SqlTextGen, TextPool}
 
 /** Equivalent spellings agree: two ways of writing one query
   * ([[SqlTextGen.SpellingShapes]]) produce the same column types and the same
@@ -38,12 +39,32 @@ object SyntaxEquivalence {
   final case class KnownDisagreement(known: Known) extends Verdict
 
   /** A shape whose spellings disagree today, and the plan that records why.
-    * `repro` is the pair over [[SqlTextGen.ReferenceTables]]. */
-  final case class Known(shape: String, why: String, plan: String, repro: (String, String))
+    * `repro` is the pair over [[SqlTextGen.ReferenceTables]]. `onlyWhere`,
+    * when set, says which cases the disagreement belongs to, read off what
+    * the case holds, never off the generator's intent: a disagreement of the
+    * shape anywhere else is still a failure. */
+  final case class Known(shape: String, why: String, plan: String, repro: (String, String),
+      onlyWhere: Option[SpellingCase => Boolean] = None) {
+    def applies(sc: SpellingCase): Boolean = onlyWhere.forall(_(sc))
+  }
 
-  /** None today: the last two, a quoted identifier and a quote inside a
-    * literal, were fixed by plans/robustness/13. */
-  val KnownDefects: Vector[Known] = Vector.empty
+  /** The ILIKE shape over a letter whose capital and small forms are not one
+    * pair (`TextPool.unpairedCase`): `ILIKE` folds a character to the small
+    * form of its capital, `LOWER` to its small form and `UPPER` to its
+    * capital, so a dotless i and a dotted capital I match `i` under ILIKE and
+    * part under the other two (plans/testing/15, finding F1, held for a
+    * decision). Recognized from the case's text and its `t.s` values. */
+  private val IlikeOverUnpairedCase = Known("ILIKE",
+    "ILIKE folds a letter to the small form of its capital, which LOWER and UPPER do not, for a dotless i and a " +
+      "dotted capital I",
+    "plans/testing/15 (finding F1)",
+    (s"SELECT a FROM t WHERE '${TextPool.text(0x131)}' ILIKE 'i'",
+      s"SELECT a FROM t WHERE LOWER('${TextPool.text(0x131)}') LIKE LOWER('i')"),
+    Some(sc => SqlTextGen.holdsUnpairedCase(sc)))
+
+  /** The last two before plans/testing/15, a quoted identifier and a quote
+    * inside a literal, were fixed by plans/robustness/13. */
+  val KnownDefects: Vector[Known] = Vector(IlikeOverUnpairedCase)
 
   def known(shape: String): Option[Known] = KnownDefects.find(_.shape == shape)
 
@@ -74,7 +95,7 @@ object SyntaxEquivalence {
     }
     disagreement match {
       case Some(why) =>
-        known(sc.shape) match {
+        known(sc.shape).filter(_.applies(sc)) match {
           case Some(k) => KnownDisagreement(k)
           case None => throw new AssertionError(s"[syntax-equivalence] ${sc.shape}: the spellings disagree: $why\n  $sc")
         }

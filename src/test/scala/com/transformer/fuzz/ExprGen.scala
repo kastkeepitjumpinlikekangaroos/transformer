@@ -141,6 +141,8 @@ object ExprGen {
   private val OrdOps = Seq("<", "<=", ">", ">=")
 
   private val NullLitProb = 0.12
+  /** How often a string value or LIKE pattern is drawn from [[TextPool]]. */
+  private val TextProb = 0.3
   private val ColRefProb = 0.7
 
   private val StringPool = Seq(
@@ -490,7 +492,7 @@ object ExprGen {
     case DataType.DoubleType =>
       if (r.bool(SpecialFloatProb)) r.oneOf(SpecialDoubles) else genDouble(r)
     case DataType.BooleanType => r.bool()
-    case DataType.StringType => r.oneOf(StringPool)
+    case DataType.StringType => if (r.bool(TextProb)) r.oneOf(TextPool.Values) else r.oneOf(StringPool)
     case DataType.DateType => r.oneOf(DatePool)
     case DataType.TimestampType => r.oneOf(TimestampPool)
     // A fresh array per draw: two cells with one content are two objects, as
@@ -898,7 +900,8 @@ object ExprGen {
     def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
     val child = sub(DataType.StringType)
     val pattern = r.weighted(
-      (5, () => LitExpr(r.oneOf(LikePatternPool), DataType.StringType)), // literal fast path
+      (5, () => LitExpr(if (r.bool(TextProb)) r.oneOf(TextPool.Patterns) else r.oneOf(LikePatternPool),
+        DataType.StringType)), // literal fast path
       (1, () => LitExpr(null, DataType.StringType)), // NULL pattern -> all NULL
       (3, () => sub(DataType.StringType)) // column/computed pattern -> slow path
     )()

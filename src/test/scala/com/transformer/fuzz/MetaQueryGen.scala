@@ -491,8 +491,7 @@ object MetaQueryGen {
       val w = rng.between(2, 4); val base = rng.oneOf(Seq(0, 1)); (0 until w).map(i => (base + i): Any)
     case DataType.LongType =>
       val w = rng.between(2, 4); val base = rng.oneOf(Seq(0L, 1L)); (0 until w).map(i => (base + i): Any)
-    case DataType.StringType =>
-      val w = rng.between(2, 4); StringPool.take(w).map(_.asInstanceOf[Any])
+    case DataType.StringType => stringDomain(rng)
     case DataType.BooleanType => IndexedSeq[Any](true, false)
     case DataType.DoubleType => slice(rng, FloatKeyPool.map(d => d: Any))
     case DataType.FloatType => slice(rng, FloatKeyPool.map(d => d.toFloat: Any))
@@ -571,9 +570,18 @@ object MetaQueryGen {
       DataGen.withSpecialDoubles(
         rng, DoublePool.take(rng.between(2, 4)).map(_.asInstanceOf[Any]), identity)
     case DataType.BooleanType => IndexedSeq[Any](true, false)
-    case DataType.StringType => StringPool.take(rng.between(2, 4)).map(_.asInstanceOf[Any])
+    case DataType.StringType => stringDomain(rng)
     case other => slice(rng, poolOf(other))
   }
+
+  /** A STRING column's values: the first 2-4 of the ASCII pool, or on a
+    * share of columns 2-4 neighbours of [[TextPool]], the text past ASCII. */
+  private def stringDomain(rng: Rng): IndexedSeq[Any] =
+    if (rng.bool(TextProb)) TextPool.slice(rng, 4)
+    else StringPool.take(rng.between(2, 4)).map(_.asInstanceOf[Any])
+
+  /** How often a STRING column, key or payload, draws from [[TextPool]]. */
+  private val TextProb = 0.35
 
   // ---- query generation ---------------------------------------------------
 
@@ -889,14 +897,35 @@ object MetaQueryGen {
         case _ => coalesce()
       }
     }
-    else if (target == DataType.StringType)
-      BinOpExpr("||", genValue(rng, scope, DataType.StringType, depth - 1),
-        genValue(rng, scope, DataType.StringType, depth - 1), DataType.StringType)
-    else rng.weighted(
-      (4, () => BinOpExpr(rng.oneOf(ArithOps), genValue(rng, scope, rng.oneOf(Numerics), depth - 1),
-        genValue(rng, scope, rng.oneOf(Numerics), depth - 1), target)),
-      (2, () => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(genValue(rng, scope, target, depth - 1)), target)),
-      (1, () => FuncExpr("ABS", Seq(genValue(rng, scope, target, depth - 1)), target)))()
+    else if (target == DataType.StringType) genText(rng, scope, depth)
+    else {
+      val options = Seq[(Int, () => Expr)](
+        (4, () => BinOpExpr(rng.oneOf(ArithOps), genValue(rng, scope, rng.oneOf(Numerics), depth - 1),
+          genValue(rng, scope, rng.oneOf(Numerics), depth - 1), target)),
+        (2, () => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(genValue(rng, scope, target, depth - 1)), target)),
+        (1, () => FuncExpr("ABS", Seq(genValue(rng, scope, target, depth - 1)), target)))
+      val length = Seq[(Int, () => Expr)](
+        (2, () => FuncExpr("LENGTH", Seq(genValue(rng, scope, DataType.StringType, depth - 1)), DataType.IntType)))
+      rng.weighted(options ++ (if (target == DataType.IntType) length else Nil): _*)()
+    }
+  }
+
+  /** A STRING value: `||`, `CONCAT`, `UPPER`, `LOWER`, `TRIM` and `SUBSTRING`
+    * of strings, so the text the pool draws reaches each function the
+    * engine's character rules are about. A `SUBSTRING` position or length is
+    * a small literal, a length never negative, which is an error. */
+  private def genText(rng: Rng, scope: Vector[ScopeCol], depth: Int): Expr = {
+    def sub(): Expr = genValue(rng, scope, DataType.StringType, depth - 1)
+    rng.weighted[() => Expr](
+      (3, () => BinOpExpr("||", sub(), sub(), DataType.StringType)),
+      (1, () => FuncExpr("CONCAT", Seq.fill(rng.between(1, 3))(sub()), DataType.StringType)),
+      (3, () => FuncExpr(rng.oneOf(Seq("UPPER", "LOWER")), Seq(sub()), DataType.StringType)),
+      (1, () => FuncExpr("TRIM", Seq(sub()), DataType.StringType)),
+      (2, () => {
+        val position = LitExpr(rng.between(-1, 4), DataType.IntType)
+        val args = if (rng.bool()) Seq(sub(), position, LitExpr(rng.between(0, 3), DataType.IntType)) else Seq(sub(), position)
+        FuncExpr("SUBSTRING", args, DataType.StringType)
+      }))()
   }
 
   /** A COALESCE, IF or CASE with a decimal product or quotient as one value
@@ -1012,11 +1041,36 @@ object MetaQueryGen {
     if (binaryCols.nonEmpty)
       options += ((1, () => BinOpExpr(rng.oneOf(RelOps), sub(DataType.BinaryType), sub(DataType.BinaryType), DataType.BooleanType)))
     options += ((2, () => IsNullExpr(sub(ExprGen.pick(rng, ValueTypes)), rng.bool())))
-    if (strCols.nonEmpty)
-      options += ((1, () => LikeExpr(rng.oneOf(strCols).ref, LitExpr(rng.oneOf(Seq("%", "a%", "%a%", "_")), DataType.StringType), rng.bool())))
+    if (strCols.nonEmpty) options += ((3, () => genTextAtom(rng, strCols)))
     if (boolCols.nonEmpty) options += ((2, () => rng.oneOf(boolCols).ref))
     options += ((1, () => LitExpr(rng.bool(), DataType.BooleanType)))
     rng.weighted(options.toSeq: _*)()
+  }
+
+  /** A predicate over a string column, as it is or through `UPPER`, `LOWER`,
+    * `TRIM` or `SUBSTRING`: its `LENGTH` compared with a small number, it
+    * compared with a literal, or it `LIKE` or `ILIKE` a pattern, a pattern
+    * now and then of [[TextPool.Patterns]]. So a column of the text past
+    * ASCII meets each function its characters are about in a filter, a join
+    * condition and a NoREC predicate. */
+  private def genTextAtom(rng: Rng, strCols: Vector[ScopeCol]): Expr = {
+    val col = rng.oneOf(strCols).ref
+    def int(n: Int): Expr = LitExpr(n, DataType.IntType)
+    val text: Expr = rng.weighted[() => Expr](
+      (2, () => col),
+      (3, () => FuncExpr(rng.oneOf(Seq("UPPER", "LOWER")), Seq(col), DataType.StringType)),
+      (1, () => FuncExpr("TRIM", Seq(col), DataType.StringType)),
+      (2, () => FuncExpr("SUBSTRING", Seq(col, int(rng.between(1, 3))) ++
+        (if (rng.bool()) Seq(int(rng.between(0, 2))) else Nil), DataType.StringType)))()
+    rng.weighted[() => Expr](
+      (2, () => BinOpExpr(rng.oneOf(RelOps), FuncExpr("LENGTH", Seq(text), DataType.IntType), int(rng.between(0, 3)),
+        DataType.BooleanType)),
+      (1, () => BinOpExpr(rng.oneOf(RelOps), text, LitExpr(genLit(rng, DataType.StringType), DataType.StringType),
+        DataType.BooleanType)),
+      (3, () => {
+        val pattern = if (rng.bool(0.5)) rng.oneOf(TextPool.Patterns) else rng.oneOf(Seq("%", "a%", "%a%", "_"))
+        LikeExpr(text, LitExpr(pattern, DataType.StringType), rng.bool(), LikeSyntax(caseInsensitive = rng.bool(0.4)))
+      }))()
   }
 
   private def genLit(rng: Rng, dt: DataType): Any = dt match {
@@ -1025,7 +1079,7 @@ object MetaQueryGen {
     case DataType.FloatType => rng.oneOf(DoublePool).toFloat: Any
     case DataType.DoubleType => rng.oneOf(DoublePool): Any
     case DataType.BooleanType => rng.bool(): Any
-    case DataType.StringType => rng.oneOf(StringPool): Any
+    case DataType.StringType => (if (rng.bool(0.25)) rng.oneOf(TextPool.Values) else rng.oneOf(StringPool)): Any
     case DataType.DateType => rng.oneOf(ExprGen.DatePool): Any
     case DataType.TimestampType => rng.oneOf(ExprGen.TimestampPool): Any
     case d: DataType.DecimalType => rng.oneOf(QueryGen.decimalLiterals(d)): Any

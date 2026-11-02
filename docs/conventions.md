@@ -22,8 +22,12 @@ specific traps.
   or an escape inside a string literal), never as the raw character:
   `job/Json.scala` once held a raw NUL in a char literal, which made git, `file`
   and editing tools treat the whole file as binary. Build test text past ASCII
-  from code points (`new String(Character.toChars(0x1F600))`) for the same
-  reason.
+  from code points (`new String(Character.toChars(0x1F600))`,
+  `TextPool.text(0xdf)`) for the same reason, and never as a backslash-u
+  escape: the editing tools decode one into the raw character as they write
+  the file. Scan a diff for what slipped through with
+  `git diff -U0 | grep '^+' | perl -ne 'print if /[^\x00-\x7F]/'` (macOS
+  `grep` has no `-P`).
 - **Case folding and formatting name `Locale.ROOT`.** `toLowerCase` and
   `toUpperCase` with no argument, `String.format`, an `f"..."` interpolator and
   `DateTimeFormatter.ofPattern(pattern)` read the JVM's default locale, under

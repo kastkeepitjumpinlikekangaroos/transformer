@@ -651,7 +651,7 @@ object QueryGen {
     options += ((4, () => BinOpExpr(rng.oneOf(RelOps), sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics)), DataType.BooleanType)))
     options += ((3, () => BinOpExpr(rng.oneOf(RelOps), sub(DataType.StringType), sub(DataType.StringType), DataType.BooleanType)))
     options += ((2, () => IsNullExpr(sub(ExprGen.pick(rng, ValueTypes)), rng.bool())))
-    options += ((2, () => LikeExpr(sub(DataType.StringType), LitExpr(rng.oneOf(LikePatternPool), DataType.StringType), rng.bool())))
+    options += ((2, () => genLike(rng, sub(DataType.StringType))))
     if (inCols.nonEmpty) options += ((2, () => genInList(rng, schema, rng.oneOf(inCols))))
     if (boolCols.nonEmpty) options += ((2, () => colRef(schema, rng.oneOf(boolCols))))
     // The four types the corpus once lacked, each where a column of it is in
@@ -728,6 +728,14 @@ object QueryGen {
     InListExpr(col, items.toSeq, rng.bool())
   }
 
+  /** `s [NOT] LIKE p` or `ILIKE`, a pattern from the ASCII pool or, a third of
+    * the time, from [[TextPool.Patterns]], whose `_` meets a character past
+    * U+FFFF and whose letters meet the pool's case pairs. */
+  private def genLike(rng: Rng, s: Expr): Expr = {
+    val pattern = if (rng.bool(0.35)) rng.oneOf(TextPool.Patterns) else rng.oneOf(LikePatternPool)
+    LikeExpr(s, LitExpr(pattern, DataType.StringType), rng.bool(), LikeSyntax(caseInsensitive = rng.bool(0.4)))
+  }
+
   // ---- literals -----------------------------------------------------------
 
   /** `DataGen`'s values: `a` beside itself with a space at either end. */
@@ -744,7 +752,7 @@ object QueryGen {
     case DataType.FloatType => rng.oneOf(DoublePool).toFloat: Any
     case DataType.DoubleType => rng.oneOf(DoublePool): Any
     case DataType.BooleanType => rng.bool(): Any
-    case DataType.StringType => rng.oneOf(StringPool): Any
+    case DataType.StringType => (if (rng.bool(0.25)) rng.oneOf(TextPool.Values) else rng.oneOf(StringPool)): Any
     case DataType.DateType => rng.oneOf(ExprGen.DatePool): Any
     case DataType.TimestampType => rng.oneOf(ExprGen.TimestampPool): Any
     case d: DataType.DecimalType => rng.oneOf(decimalLiterals(d)): Any

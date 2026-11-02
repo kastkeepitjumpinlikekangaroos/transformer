@@ -345,7 +345,7 @@ class ModeDifferentialFuzzTest {
     * binder builds: the shape from the calls that have one, the value by
     * evaluating them over the dataset's rows. */
   @Test def nullScalesAndPositionsReachTheirFunctions(): Unit = {
-    val n = 6000
+    val n = 8000
     var shape, value = 0
     var seed = 0
     while (seed < n) {
@@ -365,7 +365,9 @@ class ModeDifferentialFuzzTest {
     }
     println(s"[mode-differential] over $n seeds: a ROUND scale or SUBSTRING position or length in $shape, " +
       s"NULL beside a value in $value")
-    // Measured over these seeds: the shape 373, the value 108; bounds ~3x below.
+    // Measured over these seeds: the shape 422, the value 113; bounds ~3x
+    // below. 8000 seeds since plans/testing/15 widened the corpus, which left
+    // the value 82 of 6000.
     assertTrue(s"a scale, position or length is rarely generated (shape=$shape)", shape > 120)
     assertTrue(s"a NULL one rarely meets a value (value=$value)", value > 35)
   }
@@ -377,7 +379,7 @@ class ModeDifferentialFuzzTest {
     * Read off what the binder builds: the shape from its calls, the value by
     * evaluating each one's argument over the dataset's rows. */
   @Test def trimReachesValuesWithSpacesAtAnEnd(): Unit = {
-    val n = 6000
+    val n = 10000
     var shape, value = 0
     var seed = 0
     while (seed < n) {
@@ -399,9 +401,11 @@ class ModeDifferentialFuzzTest {
       seed += 1
     }
     println(s"[mode-differential] over $n seeds: TRIM in $shape, of a value with a space at an end in $value")
-    // Measured over these seeds: the shape 376, the value 105; bounds ~3x below.
-    assertTrue(s"TRIM is rarely generated (shape=$shape)", shape > 125)
-    assertTrue(s"TRIM rarely meets a space at an end (value=$value)", value > 35)
+    // Measured over these seeds: the shape 586, the value 115; bounds ~3x
+    // below. 10000 seeds, since a share of string columns draws text past
+    // ASCII, whose values a space ends less often.
+    assertTrue(s"TRIM is rarely generated (shape=$shape)", shape > 195)
+    assertTrue(s"TRIM rarely meets a space at an end (value=$value)", value > 38)
   }
 
   /** `IN` over a FLOAT or DOUBLE column, which `QueryGen` never drew, holding
@@ -435,6 +439,28 @@ class ModeDifferentialFuzzTest {
     assertTrue(s"IN over a float column rarely meets NaN (nan=$nan)", nan > 32)
     assertTrue(s"IN over a float column rarely meets -0.0 (negZero=$negZero)", negZero > 29)
   }
+
+  /** Each class of the text past ASCII (`TextPool`) reaches each string site
+    * of the corpus: `LENGTH`, `SUBSTRING`, `UPPER`, `LOWER`, `LIKE` and `ILIKE`
+    * over a column holding it or a literal of it, and an ORDER BY key, a GROUP
+    * BY key and a `MIN`/`MAX` argument over a column holding it, where the
+    * corpus drew ASCII alone until plans/testing/15. A character from U+E000
+    * to U+FFFF counts only beside one past U+FFFF, the pair UTF-16 and code
+    * point order disagree on. Generation only. */
+  @Test def textReachesEveryStringSite(): Unit = {
+    val t = TextPool.tally(60000)(seed => ModeDifferentialFuzzTest.textSites(QueryGen.generate(new Rng(seed))))
+    println(s"[mode-differential] text past ASCII ${t.report}")
+    // Measured over these seeds: the thinnest cell is 29 (LENGTH over a
+    // dotless i), most of the function cells 30 to 130, the LIKE and order
+    // cells hundreds; the floor sits about 3x below the thinnest. 60000 seeds,
+    // since a string function over a column of the pool is a narrow chain,
+    // and generation only, under a second.
+    val low = t.below(TextFloor)
+    assertTrue(s"text past ASCII rarely reaches these sites (at most $TextFloor seeds):\n  ${low.mkString("\n  ")}\n${t.report}",
+      low.isEmpty)
+  }
+
+  private val TextFloor = 9
 
   private def isDouble(v: Any, p: Double => Boolean): Boolean = v match {
     case x: java.lang.Double => p(x.doubleValue)
@@ -492,25 +518,27 @@ class ModeDifferentialFuzzTest {
   // tallies of the generated corpus, one by predicate and one by site; no
   // query runs.
   //
-  // 10000 seeds, because the thinnest chain (MIN/MAX over a decimal column
-  // holding two values of one double, which only DECIMAL(38,18) has) is 25 of
-  // them; generation only, well under a second. Measured over these seeds:
+  // 15000 seeds, because the thinnest chain (an IN over a decimal column
+  // holding two values of one double, which only DECIMAL(38,18) has) is 32 of
+  // them; generation only, well under a second. The block was 10000 until
+  // plans/testing/15 put float columns in IN lists and text past ASCII in the
+  // data, which left the four fewer draws. Measured over these seeds:
   //
   //                         date  timestamp  binary  decimal
-  //   comparison             495        536     421      685
-  //   IN                     250        281     293      207
-  //   ORDER BY               713        730     675      696
-  //   GROUP BY               612        655     639      658
-  //   MIN/MAX                243        276     244      225   (SUM/AVG decimal 363,
-  //                                                             arithmetic 584)
+  //   comparison             757        790     622     1017
+  //   IN                     336        363     356      278
+  //   ORDER BY              1052       1063     998     1069
+  //   GROUP BY               923        967     929      974
+  //   MIN/MAX                375        409     373      345   (SUM/AVG decimal 528,
+  //                                                             arithmetic 884)
   //
   // and the columns there holding each value pair, at comparison / IN /
-  // ORDER BY / GROUP BY / MIN/MAX: instants under a millisecond apart 272 /
-  // 174 / 425 / 373 / 150; bytes of one content 276 / 194 / 437 / 433 / 165;
-  // bytes one high bit apart 155 / 100 / 229 / 227 / 82; a decimal at two
-  // scales 279 / 90 / 293 / 275 / 96 (148 at SUM/AVG, 244 in arithmetic);
-  // decimals of one double 87 / 31 / 101 / 101 / 25 (44, 74); decimals a
-  // double adds wrong 109 at SUM/AVG and 165 in arithmetic. Each bound sits
+  // ORDER BY / GROUP BY / MIN/MAX: instants under a millisecond apart 386 /
+  // 214 / 631 / 568 / 227; bytes of one content 416 / 242 / 669 / 637 / 261;
+  // bytes one high bit apart 230 / 138 / 340 / 328 / 128; a decimal at two
+  // scales 387 / 119 / 441 / 401 / 147 (215 at SUM/AVG, 357 in arithmetic);
+  // decimals of one double 133 / 32 / 153 / 153 / 39 (64, 120); decimals a
+  // double adds wrong 157 at SUM/AVG and 260 in arithmetic. Each bound sits
   // about 3x below its count.
 
   import DataGen.ValueTag._
@@ -953,8 +981,55 @@ object ModeDifferentialFuzzTest {
     roots.flatMap(walk)
   }
 
+  /** The (site, class) pairs `qc` reaches with text past ASCII, as
+    * `textReachesEveryStringSite` counts them. */
+  def textSites(qc: QueryGen.QueryCase): Set[(String, TextPool.TextClass)] = {
+    val rows = qc.dataset.rows
+    def classesOf(cols: Seq[Int]): Set[TextPool.TextClass] =
+      cols.distinct.flatMap(c => TextPool.columnClasses(rows.map(_(c)))).toSet
+    def strings(e: Expr): Seq[Int] = e match {
+      case c: ColRefExpr if c.dataType == DataType.StringType => Seq(c.index)
+      case other => Shrinker.childrenOf(other).flatMap(strings)
+    }
+    def literals(e: Expr): Set[TextPool.TextClass] = e match {
+      case LitExpr(s: String, _) => TextPool.classesOf(s)
+      case other => Shrinker.childrenOf(other).flatMap(literals).toSet
+    }
+    def reads(e: Expr): Set[TextPool.TextClass] = classesOf(strings(e)) ++ literals(e)
+    val out = Set.newBuilder[(String, TextPool.TextClass)]
+    def walk(e: Expr): Unit = {
+      e match {
+        case FuncExpr(name @ ("LENGTH" | "SUBSTRING" | "UPPER" | "LOWER"), arg +: _, _) =>
+          reads(arg).foreach(c => out += ((name, c)))
+        case LikeExpr(child, pattern, _, syntax) =>
+          val site = if (syntax.caseInsensitive) "ILIKE" else "LIKE"
+          (reads(child) ++ literals(pattern)).foreach(c => out += ((site, c)))
+        case _ => ()
+      }
+      Shrinker.childrenOf(e).foreach(walk)
+    }
+    val roots: Seq[Expr] = qc.query match {
+      case p: QueryGen.ProjectQuery => p.projection.map(_._1) ++ p.where.toSeq
+      case a: QueryGen.AggregateQuery => a.where.toSeq ++ a.aggregates.flatMap {
+        case (QueryGen.CountIf(e), _) => Seq(e)
+        case (QueryGen.Count(e, _), _) => Seq(e)
+        case (QueryGen.Sum(e, _), _) => Seq(e)
+        case (QueryGen.Avg(e, _), _) => Seq(e)
+        case _ => Seq.empty
+      }
+    }
+    roots.foreach(walk)
+    val fields = qc.dataset.schema.fields
+    sites(qc.query).foreach {
+      case (site @ ("ORDER BY" | "GROUP BY" | "MIN/MAX"), c) if fields(c).dataType == DataType.StringType =>
+        classesOf(Seq(c)).foreach(k => out += ((site, k)))
+      case _ => ()
+    }
+    out.result()
+  }
+
   lazy val predicateTally: SiteTally = {
-    val n = 10000
+    val n = 15000
     val shapes = scala.collection.mutable.Map.empty[(String, String), Int].withDefaultValue(0)
     val values = scala.collection.mutable.Map.empty[(String, DataGen.ValueTag), Int].withDefaultValue(0)
     var seed = 0
@@ -971,7 +1046,7 @@ object ModeDifferentialFuzzTest {
   }
 
   lazy val siteTally: SiteTally = {
-    val n = 10000
+    val n = 15000
     val shapes = scala.collection.mutable.Map.empty[(String, String), Int].withDefaultValue(0)
     val values = scala.collection.mutable.Map.empty[(String, DataGen.ValueTag), Int].withDefaultValue(0)
     var seed = 0
