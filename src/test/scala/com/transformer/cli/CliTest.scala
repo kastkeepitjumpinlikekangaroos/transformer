@@ -149,6 +149,7 @@ class CliTest {
     // The job's execution time is now, in whole seconds, by default.
     assertEquals(Right(Command.Query(job = Some(JobArg(Paths.get("job"), None, Instant.parse("2026-03-04T05:06:07Z"))))),
       parse("query", "--job", "job"))
+    assertEquals(Right(Command.Query(sql = Some("SELECT 1"), spill = true)), parse("query", "--spill", "SELECT 1"))
     // After --, SQL may start with a dash.
     assertEquals(Right(Command.Query(sql = Some("-- note\nSELECT 1"))), parse("query", "--", "-- note\nSELECT 1"))
   }
@@ -173,6 +174,7 @@ class CliTest {
     assertEquals(Left("--format given twice"), parse("query", "--format", "csv", "--format", "json"))
     assertEquals(Left("--file given twice"), parse("query", "-f", "a.sql", "--file", "b.sql"))
     assertEquals(Left("--output needs a value"), parse("query", "--output"))
+    assertEquals(Left("--spill given twice"), parse("query", "--spill", "--spill"))
     assertEquals(Left("unknown option '--verbose'"), parse("query", "--verbose"))
   }
 

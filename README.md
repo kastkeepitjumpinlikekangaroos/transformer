@@ -244,6 +244,7 @@ java -jar transformer.jar query \
 | `--format <format>` | `table` (the default), `line`, `csv`, `tsv`, `json`, `jsonl` or `markdown`. |
 | `--max-rows <n>` | The rows a table shows, the first and last ones; 0 shows every row. Default: 40. |
 | `--output <file>` | Write the query's result to `<file>` (`.csv` or `.parquet`) instead of printing it. |
+| `--spill` | Let sorts, aggregates, `DISTINCT`, windows and joins spill to disk past their memory threshold, as a table's `"spill": "true"` does ([Limitations](#limitations)). |
 
 - **Tables.** A table reads as a job's input does: CSV or Parquet by its path's
   extension, a directory whose files are all `.parquet` as Parquet, and CSV by
@@ -322,6 +323,7 @@ commands go at the start of a line, in the shell or in a script:
 | `.mode [format]` | Print results in another format |
 | `.maxrows [n]` | The rows a table shows; 0 shows every row |
 | `.timer [on\|off]` | Print how long each statement takes, on stderr |
+| `.spill [on\|off]` | Let sorts, aggregates and joins spill to disk, as `--spill` does |
 | `.read file` | Run the statements in a file |
 | `.help` | List the commands |
 | `.quit`, `.exit` | Leave the shell |
@@ -2044,7 +2046,8 @@ JDK 21 or newer (tested through JDK 25).
   result, and `COPY` and `--output` write one file, pulling its partitions one
   after another, where a job's table writes a part file per partition in
   parallel: an aggregate fans out across the cores, but `SELECT *` of 326M
-  polymarket rows prints in about a minute. Its queries run without spill.
+  polymarket rows prints in about a minute. Its queries spill only with
+  `--spill`.
 - **A join holds its whole result in memory.** A hash join materializes every
   row it returns before the next operator sees one, and spill bounds only its
   inputs, not its result. Joining 326M orderbook rows to 124K markets (120M

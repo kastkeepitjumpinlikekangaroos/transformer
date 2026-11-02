@@ -39,7 +39,8 @@ object Cli {
         job: Option[JobArg] = None,
         format: OutputFormat = OutputFormat.Table,
         maxRows: Int = QuerySession.DefaultMaxRows,
-        output: Option[String] = None
+        output: Option[String] = None,
+        spill: Boolean = false
     ) extends Command
     final case class Gui(jobDir: Option[Path]) extends Command
     case object Help extends Command
@@ -93,6 +94,8 @@ object Cli {
       |                                    ones; 0 shows every row. Default: 40
       |         --output <file>            Write the query's result to <file>
       |                                    (.csv or .parquet) instead of printing it.
+      |         --spill                    Let sorts, aggregates and joins spill to
+      |                                    disk past their memory threshold.
       |gui    Open the desktop GUI, optionally on a job directory.
       |""".stripMargin
 
@@ -160,6 +163,7 @@ object Cli {
     var format = Option.empty[OutputFormat]
     var maxRows = Option.empty[Int]
     var output = Option.empty[String]
+    var spill = false
     val seen = mutable.Set.empty[String]
 
     def positional(value: String): Either[String, Unit] =
@@ -237,6 +241,9 @@ object Cli {
           }
           rest = Nil
           r
+        case "--spill" :: more =>
+          rest = more
+          if (spill) Left("--spill given twice") else { spill = true; Right(()) }
         case name :: tail if QueryFlags(name) =>
           tail match {
             case Nil => rest = Nil; Left(s"$name needs a value")
@@ -260,7 +267,8 @@ object Cli {
       job = job.map(JobArg(_, jobOutput, time.getOrElse(now.truncatedTo(ChronoUnit.SECONDS)))),
       format = format.getOrElse(OutputFormat.Table),
       maxRows = maxRows.getOrElse(QuerySession.DefaultMaxRows),
-      output = output
+      output = output,
+      spill = spill
     ))
   }
 
@@ -272,6 +280,7 @@ object Cli {
     val session = new QuerySession
     session.format = cmd.format
     session.maxRows = cmd.maxRows
+    session.spill = cmd.spill
     try {
       cmd.job.foreach(j => session.addJob(j.dir, j.output, j.executionTime, err))
       cmd.tables.foreach(t => session.addTable(t.name, t.path, t.format, t.options))

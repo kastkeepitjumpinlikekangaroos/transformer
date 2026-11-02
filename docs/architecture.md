@@ -1795,6 +1795,8 @@ they were written:
   through `checkError`. The system terminal prefers
   JLine's `exec` provider (no native code, so no JDK warns of native access) on
   macOS and Linux.
+- **Options.** Each statement runs with `QuerySession.optionsFor`: spill as
+  `--spill` or `.spill` set it, and scans that stop with its `Cancel`.
 
 ## Property-based testing
 

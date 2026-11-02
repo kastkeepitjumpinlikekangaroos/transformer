@@ -51,8 +51,8 @@ final class Cancel {
 
   def isCancelled: Boolean = cancelled
 
-  /** The options a statement runs with, which stop its scans once cancelled. */
-  val options: ExecutionOptions = ExecutionOptions(stopped = () => cancelled)
+  /** What a statement's scans ask before each batch ([[ExecutionOptions.stopped]]). */
+  val stopped: () => Boolean = () => cancelled
 
   /** `batches`, checked before each one. */
   def watch(batches: Iterator[ColumnarBatch]): Iterator[ColumnarBatch] = new Iterator[ColumnarBatch] {
@@ -88,6 +88,10 @@ final class QuerySession {
   var maxRows: Int = DefaultMaxRows
   /** Print each statement's run time. */
   var timer: Boolean = false
+  /** Let a statement's sorts, aggregates, DISTINCT, windows and joins spill
+    * to disk past their memory threshold, as a job's table with `"spill":
+    * "true"` does. */
+  var spill: Boolean = false
   /** The terminal's width, which a table fits itself to; None when the output
     * is no terminal. */
   @volatile var width: Option[Int] = None
@@ -238,13 +242,18 @@ final class QuerySession {
   }
 
   private def query(sql: String, io: Io): Unit = {
-    val executed = SqlEngine.execute(withViews(sql), catalog, io.cancel.options)
+    val executed = SqlEngine.execute(withViews(sql), catalog, optionsFor(io.cancel))
     val batches = io.printing(executed.batches)
     if (io.results > 0 && format.setApart) io.out.println()
     io.results += 1
     if (format == OutputFormat.Table && SqlParser.explained(sql).isDefined) ResultPrinter.lines(io.out, batches)
     else ResultPrinter.print(io.out, executed.schema, batches, format, maxRows, width)
   }
+
+  /** The options a statement runs with: spill as the session has it, and
+    * scans that stop once `cancel` is set. */
+  private[cli] def optionsFor(cancel: Cancel): ExecutionOptions =
+    ExecutionOptions(spillEnabled = spill, stopped = cancel.stopped)
 
   // ---------------------------------------------------------------------------
   // Views
@@ -340,7 +349,7 @@ final class QuerySession {
     if (Files.isDirectory(target))
       throw new IllegalArgumentException(s"${c.path} is a directory; COPY TO writes one file")
     val (fileFormat, options) = writeOptions(c.path, c.options)
-    val executed = SqlEngine.execute(withViews(sql), catalog, io.cancel.options)
+    val executed = SqlEngine.execute(withViews(sql), catalog, optionsFor(io.cancel))
     val names = executed.schema.fieldNames
     Schema.repeatedName(names).foreach { positions =>
       throw new IllegalArgumentException(
@@ -448,6 +457,12 @@ final class QuerySession {
         case Seq("off") => timer = false
         case _ => usage
       }
+      case "spill" => d.args.map(_.toLowerCase(Locale.ROOT)) match {
+        case Seq() => io.out.println(if (spill) "on" else "off")
+        case Seq("on") => spill = true
+        case Seq("off") => spill = false
+        case _ => usage
+      }
       case "read" => d.args match {
         case Seq(file) =>
           val path = Paths.get(file)
@@ -544,6 +559,7 @@ object QuerySession {
     ".mode [format]" -> s"Print results as ${OutputFormat.names}",
     ".maxrows [n]" -> "Rows a table shows, the first and last ones; 0 shows every row",
     ".timer [on|off]" -> "Print how long each statement takes",
+    ".spill [on|off]" -> "Let sorts, aggregates and joins spill to disk past their memory threshold, as --spill does",
     ".read file" -> "Run the statements in a file",
     ".help" -> "List these commands",
     ".quit" -> "Leave the shell (.exit and Ctrl-D too)")

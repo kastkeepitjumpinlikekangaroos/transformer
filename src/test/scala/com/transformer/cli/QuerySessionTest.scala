@@ -187,6 +187,13 @@ class QuerySessionTest {
     val timed = run(s, ".timer on\nSELECT 1 AS one")
     assertTrue(timed.err, timed.err.matches("(?s).*Run time: \\d+\\.\\d{3} s\n"))
     assertTrue(error(s, ".timer maybe").contains("Usage: .timer [on|off]"))
+    // Spill reaches the options each statement runs with.
+    assertEquals(lines("off"), ok(s, ".spill"))
+    assertFalse(s.optionsFor(new Cancel).spillEnabled)
+    ok(s, ".spill on")
+    assertTrue(s.optionsFor(new Cancel).spillEnabled)
+    assertTrue(ok(s, "SELECT a FROM t ORDER BY b DESC").contains("3 rows"))
+    assertTrue(error(s, ".spill sometimes").contains("Usage: .spill [on|off]"))
   }
 
   @Test def readRunsAScriptAndStopsWhereItFails(): Unit = {
