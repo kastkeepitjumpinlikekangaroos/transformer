@@ -2335,6 +2335,41 @@ plans/robustness/24's rule). What the scripts hold out:
   `INT`'s or `BIGINT`'s range in base 2, 8 or 16 (`int4 '0x80000000'`), out of
   range for Postgres and no integer of the engine's grammar (`int-text`). No
   answer differs. The recommendation is to leave them out.
+- **A number immediately followed by a letter is read as the number and an
+  alias** (numerology.sql:48-52, 78): `SELECT 0.a`, `0.0a`, `.0a`, `0.0e1a`
+  and `0.0e` answer 0.0 in a column named `a` or `e`, where Postgres refuses
+  each (`trailing junk after numeric literal`), and `SELECT .000_005` answers
+  0.0 in a column `_005`, where Postgres reads 0.000005. These are silent
+  misreads: a query that looks like a number gets another one. The
+  recommendation is to refuse a numeric literal immediately followed by a
+  letter or `_`, as Postgres 15 and later do, naming the text.
+- **A number Postgres 16 reads is refused as an unknown column or a parse
+  error** (26 of numerology.sql's statements): binary and octal integer
+  literals (`0b100101`, `0o273`) are `Unknown column '0b100101'. Available:
+  []`, and digits with `_` between them are an unknown column (`1_000_000`,
+  `0x1EEE_FFFF`) or a parse error in the parser's words (`1_000.000_005`,
+  `1_000.`, `1_000.5e0_1`). A hexadecimal integer (`0x42F`) is refused as such
+  (`refused-hex-literal`), and those records are skipped under that rule. No
+  decision says whether the others are numbers. The options: read them as
+  Postgres 16 does, or refuse each by name as the hexadecimal literal is
+  (recommended: a refusal that names the literal, so the text is not taken
+  for a column, with reading them a later choice).
+- **Text Postgres refuses as a malformed number, the engine refuses as
+  something else** (18): `123abc`, `0x0o`, `0b`, `1b`, `0x`, `1x`, `100_`,
+  `1_000._5` and the rest are an unknown column, and `0.0e+a`, `1_000_.5`,
+  `1_000.5_` and `1_000.5e_1` a parse error, where Postgres says `trailing
+  junk after numeric literal` or `invalid binary integer`. Both refuse; the
+  engine's words name a column the text is not. They are held out with the
+  rest of numerology.sql's literals, and settle with the decision above.
+- **`GROUP BY` an output column's name is refused** (numerology.sql:172):
+  `SELECT f1 AS two, ... GROUP BY two` is `Unknown column 'two'`, where
+  Postgres groups by the output column when no input column has the name, as
+  MySQL, SQLite and DuckDB do; SQL-92 does not allow it. The README states
+  how `ORDER BY` reads a name and says nothing of `GROUP BY`. The options:
+  accept it, under `ORDER BY`'s rule (an output column first, refused where
+  it is ambiguous), or keep refusing it and say so in the README, where a
+  `GROUP BY` key is described (recommended: accept it, since the engine
+  already resolves output names in `ORDER BY`).
 - **An alias named `minus` is a parse error.** JSqlParser 5.2 reserves
   `MINUS`, Oracle's spelling of `EXCEPT`, so `SELECT q1 - q2 AS minus FROM
   INT8_TBL` (int8.sql:66 and 69), which Postgres runs, fails with `SQL parse

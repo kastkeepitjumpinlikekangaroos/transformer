@@ -1,0 +1,341 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/numerology.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/numerology.out at that commit, never the
+# engine's. Portions Copyright (c) 1996-2026, PostgreSQL Global Development
+# Group; Portions Copyright (c) 1994, The Regents of the University of
+# California. Distributed under the PostgreSQL License, a permissive license
+# whose text travels with every copy: it is COPYRIGHT beside this file.
+#
+# How a number is read from the query text, and conversions and grouping
+# across INT and DOUBLE. 34 of the file's 89 statements are here, each record
+# naming the line of numerology.sql it comes from: 16 that make, fill or drop
+# a table, 5 queries and 2 statements that must fail, answered as Postgres
+# answers them, and 11 records the engine answers otherwise by design, below.
+# Most of the file's literals are held out, as findings for the user (below):
+# the engine reads them otherwise than Postgres, and no decision says how.
+#
+# A statement is as Postgres wrote it but where a rewrite cannot change what
+# it means, which its record says: int4 as INT, float8 as DOUBLE, and float8(x)
+# and int4(x) as CAST(x AS DOUBLE) and CAST(x AS INT); int2 as INT and int2(x)
+# as CAST(x AS INT), as no answer here depends on SMALLINT's range (the engine
+# has none): INT2_TBL's values are those of its range, and the INSERTs into
+# TEMP_INT2 keep only values within it. INT4_TBL, INT2_TBL and FLOAT8_TBL are
+# test_setup.sql's, each string they store written as the number Postgres
+# reads.
+#
+# `skipif transformer <id>` marks what the engine answers otherwise by
+# design, the id naming the rule in the ledger in docs/gotchas.md: a
+# hexadecimal literal, which the engine refuses (refused-hex-literal, 9), and
+# a CAST of a DOUBLE to INT, which truncates toward zero where Postgres
+# rounds (cast-truncates, 2), each followed by its twin, `onlyif transformer
+# cast-truncates`, the same query with the engine's own answer.
+#
+# Left out (4 statements), by what they need:
+#    3  PREPARE
+#    1  a DO block of PL/pgSQL
+#
+# Held out (51 statements), findings for the user (docs/gotchas.md, "What
+# the second PostgreSQL port held out"):
+#    6  a number the engine reads, and Postgres refuses or reads otherwise, as
+#       a number and an alias: 0.a, 0.0a, .0a, 0.0e1a and 0.0e are 0.0 in a
+#       column named a or e (numerology.sql:48-52), and .000_005 is 0.0 in a
+#       column _005 where Postgres reads 0.000005 (numerology.sql:78)
+#   26  a number Postgres 16 reads that the engine refuses, as an unknown
+#       column or a parse error: binary and octal literals (0b100101, 0o273,
+#       and their cases near the ends of INT and BIGINT) and digits with _
+#       between them (1_000_000, 0x1EEE_FFFF, 1_000.000_005, 1_000.,
+#       1_000.5e0_1)
+#   18  text Postgres refuses as a malformed number (trailing junk after
+#       numeric literal, invalid binary integer) and the engine as an
+#       unknown column or a parse error elsewhere: 123abc, 0x0o, 0.0e+a, 0b,
+#       1b, 0b0x, 0o, 1o, 0o0x, 0x, 1x, 0x0y, 100_, 100__000, 1_000_.5,
+#       1_000._5, 1_000.5_ and 1_000.5e_1
+#    1  GROUP BY an output column's name (numerology.sql:172), which Postgres
+#       reads when no input column has it and the engine refuses as an
+#       unknown column
+
+# test_setup.sql:67-75, 57-65 and 47-55: INT4_TBL, INT2_TBL and FLOAT8_TBL,
+# int4 and int2 written INT and float8 DOUBLE, each string test_setup.sql
+# stores written as the number Postgres reads it as ('   0  ' as 0). No answer
+# below depends on SMALLINT's range: INT2_TBL's values are those of its range.
+statement ok
+CREATE TABLE INT4_TBL(f1 INT)
+
+statement ok
+INSERT INTO INT4_TBL(f1) VALUES (0), (123456), (-123456), (2147483647), (-2147483647)
+
+statement ok
+CREATE TABLE INT2_TBL(f1 INT)
+
+statement ok
+INSERT INTO INT2_TBL(f1) VALUES (0), (1234), (-1234), (32767), (-32767)
+
+statement ok
+CREATE TABLE FLOAT8_TBL(f1 DOUBLE)
+
+statement ok
+INSERT INTO FLOAT8_TBL(f1) VALUES (0.0), (-34.84), (-1004.30), (-1.2345678901234e+200), (-1.2345678901234e-200)
+
+# numerology.sql:13: numeric literals. The engine refuses a hexadecimal
+# literal; Postgres's other non-decimal literals and the malformed ones the
+# engine reads otherwise are held out (the header says which).
+skipif transformer refused-hex-literal # the engine refuses a hexadecimal literal
+query INT nosort
+SELECT 0x42F
+----
+1071
+
+# numerology.sql:20: cases near int4 overflow.
+skipif transformer refused-hex-literal # the engine refuses a hexadecimal literal
+query INT nosort
+SELECT 0x7FFFFFFF
+----
+2147483647
+
+# numerology.sql:21
+skipif transformer refused-hex-literal # the engine refuses a hexadecimal literal
+query BIGINT nosort
+SELECT 0x80000000
+----
+2147483648
+
+# numerology.sql:27
+skipif transformer refused-hex-literal # the engine refuses a hexadecimal literal
+query INT nosort
+SELECT -0x80000000
+----
+-2147483648
+
+# numerology.sql:28
+skipif transformer refused-hex-literal # the engine refuses a hexadecimal literal
+query BIGINT nosort
+SELECT -0x80000001
+----
+-2147483649
+
+# numerology.sql:35: cases near int8 overflow.
+skipif transformer refused-hex-literal # the engine refuses a hexadecimal literal
+query BIGINT nosort
+SELECT 0x7FFFFFFFFFFFFFFF
+----
+9223372036854775807
+
+# numerology.sql:36
+skipif transformer refused-hex-literal # the engine refuses a hexadecimal literal
+query DECIMAL(19,0) nosort
+SELECT 0x8000000000000000
+----
+9223372036854775808
+
+# numerology.sql:42
+skipif transformer refused-hex-literal # the engine refuses a hexadecimal literal
+query BIGINT nosort
+SELECT -0x8000000000000000
+----
+-9223372036854775808
+
+# numerology.sql:43
+skipif transformer refused-hex-literal # the engine refuses a hexadecimal literal
+query DECIMAL(19,0) nosort
+SELECT -0x8000000000000001
+----
+-9223372036854775809
+
+# numerology.sql:91: error cases. Postgres: column "_100" does not exist.
+statement error
+SELECT _100
+
+# numerology.sql:95: Postgres: syntax error at or near ".5".
+statement error
+SELECT _1_000.5
+
+# numerology.sql:109: implicit type conversions, FLOAT8 written DOUBLE.
+statement ok
+CREATE TABLE TEMP_FLOAT (f1 DOUBLE)
+
+# numerology.sql:111: float8(f1), the function form of the cast, written
+# CAST(f1 AS DOUBLE).
+statement ok
+INSERT INTO TEMP_FLOAT (f1)
+  SELECT CAST(f1 AS DOUBLE) FROM INT4_TBL
+
+# numerology.sql:114
+statement ok
+INSERT INTO TEMP_FLOAT (f1)
+  SELECT CAST(f1 AS DOUBLE) FROM INT2_TBL
+
+# numerology.sql:117
+query DOUBLE nosort
+SELECT f1 FROM TEMP_FLOAT
+  ORDER BY f1
+----
+-2.147483647E9
+-123456.0
+-32767.0
+-1234.0
+0.0
+0.0
+1234.0
+32767.0
+123456.0
+2.147483647E9
+
+# numerology.sql:122: int4, written INT.
+statement ok
+CREATE TABLE TEMP_INT4 (f1 INT)
+
+# numerology.sql:124: int4(f1) written CAST(f1 AS INT).
+statement ok
+INSERT INTO TEMP_INT4 (f1)
+  SELECT CAST(f1 AS INT) FROM FLOAT8_TBL
+  WHERE (f1 > -2147483647) AND (f1 < 2147483647)
+
+# numerology.sql:128
+statement ok
+INSERT INTO TEMP_INT4 (f1)
+  SELECT CAST(f1 AS INT) FROM INT2_TBL
+
+# numerology.sql:131
+skipif transformer cast-truncates # int4(-34.84) truncates to -34 where Postgres rounds to -35
+query INT nosort
+SELECT f1 FROM TEMP_INT4
+  ORDER BY f1
+----
+-32767
+-1234
+-1004
+-35
+0
+0
+0
+1234
+32767
+
+onlyif transformer cast-truncates
+query INT nosort
+SELECT f1 FROM TEMP_INT4
+  ORDER BY f1
+----
+-32767
+-1234
+-1004
+-34
+0
+0
+0
+1234
+32767
+
+# numerology.sql:136: int2, written INT, and int2(f1) CAST(f1 AS INT): the
+# WHERE of each INSERT keeps every value within SMALLINT's range, so no answer
+# depends on it.
+statement ok
+CREATE TABLE TEMP_INT2 (f1 INT)
+
+# numerology.sql:138
+statement ok
+INSERT INTO TEMP_INT2 (f1)
+  SELECT CAST(f1 AS INT) FROM FLOAT8_TBL
+  WHERE (f1 >= -32767) AND (f1 <= 32767)
+
+# numerology.sql:142
+statement ok
+INSERT INTO TEMP_INT2 (f1)
+  SELECT CAST(f1 AS INT) FROM INT4_TBL
+  WHERE (f1 >= -32767) AND (f1 <= 32767)
+
+# numerology.sql:146
+skipif transformer cast-truncates # int2(-34.84), written CAST(f1 AS INT), truncates to -34 where Postgres rounds to -35
+query INT nosort
+SELECT f1 FROM TEMP_INT2
+  ORDER BY f1
+----
+-1004
+-35
+0
+0
+0
+
+onlyif transformer cast-truncates
+query INT nosort
+SELECT f1 FROM TEMP_INT2
+  ORDER BY f1
+----
+-1004
+-34
+0
+0
+0
+
+# numerology.sql:153: group-by combinations, INT4 written INT and FLOAT8
+# DOUBLE.
+statement ok
+CREATE TABLE TEMP_GROUP (f1 INT, f2 INT, f3 DOUBLE)
+
+# numerology.sql:155
+statement ok
+INSERT INTO TEMP_GROUP
+  SELECT 1, (- i.f1), (- f.f1)
+  FROM INT4_TBL i, FLOAT8_TBL f
+
+# numerology.sql:159
+statement ok
+INSERT INTO TEMP_GROUP
+  SELECT 2, i.f1, f.f1
+  FROM INT4_TBL i, FLOAT8_TBL f
+
+# numerology.sql:163
+query INT nosort
+SELECT DISTINCT f1 AS two FROM TEMP_GROUP ORDER BY 1
+----
+1
+2
+
+# numerology.sql:165
+query INT,DOUBLE,DOUBLE nosort
+SELECT f1 AS two, max(f3) AS max_float, min(f3) as min_float
+  FROM TEMP_GROUP
+  GROUP BY f1
+  ORDER BY two, max_float, min_float
+----
+1	1.2345678901234E200	-0.0
+2	0.0	-1.2345678901234E200
+
+# numerology.sql:177
+query INT,DOUBLE,DOUBLE nosort
+SELECT f1 AS two, (max(f3) + 1) AS max_plus_1, (min(f3) - 1) AS min_minus_1
+  FROM TEMP_GROUP
+  GROUP BY f1
+  ORDER BY two, min_minus_1
+----
+1	1.2345678901234E200	-1.0
+2	1.0	-1.2345678901234E200
+
+# numerology.sql:182
+query INT,INT,DOUBLE nosort
+SELECT f1 AS two,
+       max(f2) + min(f2) AS max_plus_min,
+       min(f3) - 1 AS min_minus_1
+  FROM TEMP_GROUP
+  GROUP BY f1
+  ORDER BY two, min_minus_1
+----
+1	0	-1.0
+2	0	-1.2345678901234E200
+
+# numerology.sql:189
+statement ok
+DROP TABLE TEMP_INT2
+
+# numerology.sql:191
+statement ok
+DROP TABLE TEMP_INT4
+
+# numerology.sql:193
+statement ok
+DROP TABLE TEMP_FLOAT
+
+# numerology.sql:195
+statement ok
+DROP TABLE TEMP_GROUP
