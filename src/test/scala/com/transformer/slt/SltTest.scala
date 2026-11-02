@@ -19,7 +19,9 @@ import scala.jdk.CollectionConverters._
   * the id of its rule in the ledger in `docs/gotchas.md` ([[Ledger]]), and
   * fails the script once it no longer diverges as the rule says. Every query
   * also runs under each verification mode ([[Modes.Verification]]) and must
-  * print what the baseline printed.
+  * print what the baseline printed. A port of Postgres's tests is also held to
+  * Postgres's own output beside it ([[PgExpected]]): an expected block that
+  * says other than Postgres printed fails the script.
   *
   * Set `SLT_FILTER` to a substring of a script's path to run only those
   * scripts.
@@ -31,6 +33,8 @@ class SltTest(name: String, path: Path) {
     val dialect = if (name.startsWith("sqlite/")) Dialect.Sqlite else Dialect.Transformer
     val result = new Runner(dialect, SltTest.ledger).run(name, path)
     val problems = result.problems
+    val differences = if (name.startsWith("postgres/")) PgExpected.check(name, path, SltTest.ledger) else Vector.empty
+    assertTrue(s"$name says other than Postgres printed:\n  ${differences.mkString("\n  ")}", differences.isEmpty)
     if (problems.nonEmpty || result.stoppedAt.isDefined) {
       val shown = problems.take(10).map { r =>
         val sql = r.record match {

@@ -2,7 +2,9 @@
 # sqlite/ holds files of SQLite's corpus (https://www.sqlite.org/sqllogictest,
 # free to copy as its COPYRIGHT says); postgres/ ports of PostgreSQL's
 # regression tests, with Postgres's answers, under the PostgreSQL License
-# (postgres/COPYRIGHT); spark/ ports of Spark's SQLQueryTestSuite files, with
+# (postgres/COPYRIGHT), and in postgres/sql/ and postgres/expected/ each ported
+# file's source and the output psql printed for it, which slt_test checks the
+# ports' answers against; spark/ ports of Spark's SQLQueryTestSuite files, with
 # Spark's ANSI answers, written by //src/test/scala/com/transformer/slt:spark_import,
 # under the Apache License 2.0 (spark/LICENSE and spark/NOTICE); every other
 # script is this repo's own. A `.data` file
@@ -10,6 +12,11 @@
 # Postgres's own, as its regression suite loads them.
 filegroup(
     name = "scripts",
-    srcs = glob(["**/*.test", "**/*.data"]),
+    srcs = glob([
+        "**/*.test",
+        "**/*.data",
+        "postgres/sql/*.sql",
+        "postgres/expected/*.out",
+    ]),
     visibility = ["//visibility:public"],
 )

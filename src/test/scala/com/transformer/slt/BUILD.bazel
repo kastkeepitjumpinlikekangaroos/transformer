@@ -75,6 +75,24 @@ scala_junit_test(
     ],
 )
 
+# The checker that holds each Postgres port to Postgres's output: an edited
+# answer named with both values, a statement error Postgres ran, a query it
+# refused; psql's statements and aligned output read on inline cases.
+scala_junit_test(
+    name = "pg_expected_test",
+    srcs = ["PgExpectedTest.scala"],
+    suffixes = ["Test"],
+    data = [
+        "//:docs/gotchas.md",
+        "//src/test/slt:scripts",
+    ],
+    deps = [
+        ":slt",
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)
+
 # Ports Spark's SQLQueryTestSuite golden files to the scripts under
 # src/test/slt/spark/ (docs/extending.md, "Importing a Spark test file"); the
 # scripts are vendored, so no test runs it.
@@ -83,6 +101,18 @@ scala_binary(
     testonly = True,
     main_class = "com.transformer.slt.SparkImport",
     jvm_flags = ["-Xmx2g"],
+    deps = [":slt"],
+)
+
+# Checks a port of a PostgreSQL regression test against what Postgres printed,
+# its directory's expected/<name>.out, and reports every expected block that
+# says otherwise; --fill writes Postgres's values into a new port's blocks
+# (docs/extending.md, "A port of another engine's tests"). slt_test runs the
+# same check over every port under src/test/slt/postgres/.
+scala_binary(
+    name = "pg_expected",
+    testonly = True,
+    main_class = "com.transformer.slt.PgExpected",
     deps = [":slt"],
 )
 

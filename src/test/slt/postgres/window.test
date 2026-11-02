@@ -506,8 +506,8 @@ group by ten order by ten
 8	9991305	6
 9	10040184	7
 
-# window.sql:157: window functions returning pass-by-ref values from
-# different rows. Its subquery in FROM, x::numeric over generate_series(1,10),
+# For window.sql:157, window functions returning pass-by-ref values from
+# different rows: its subquery in FROM, x::numeric over generate_series(1,10),
 # is the table numerics_1_to_10 holding those rows, numeric written
 # DECIMAL(10,0).
 statement ok
@@ -516,6 +516,7 @@ CREATE TABLE numerics_1_to_10 (x DECIMAL(10,0))
 statement ok
 INSERT INTO numerics_1_to_10 VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10)
 
+# window.sql:157
 query DECIMAL(10,0),DECIMAL(10,0),DECIMAL(10,0) rowsort
 select x, lag(x, 1) over (order by x), lead(x, 3) over (order by x)
 from numerics_1_to_10

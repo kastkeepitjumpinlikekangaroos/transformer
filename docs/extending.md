@@ -660,6 +660,29 @@ source's license text and notice (`postgres/COPYRIGHT`, `spark/LICENSE` and
 `spark/NOTICE`). A port's new directory joins `LedgerTest.Ports`, which holds
 a port to the engine's answers in twins alone.
 
+**Porting a Postgres test file.** Fetch Postgres at the commit the other ports
+name (`postgres/COPYRIGHT`), shallow and sparse, into a scratch directory as
+data, and copy the file's `src/test/regress/sql/<name>.sql` and
+`expected/<name>.out` to `postgres/sql/` and `postgres/expected/` unchanged.
+Write the port's header (the source, the commit, what it leaves out by kind),
+then its records in the file's order, each query's header naming the engine's
+types of its columns and its sort mode (`rowsort` unless the ORDER BY fixes
+the order), with an empty `----` block, and each record under a comment that
+starts `# <name>.sql:<line>`, the line of the statement it ports (a record of
+the port's own, a table it makes for a VALUES list, takes no such comment).
+Then
+
+```bash
+bazel run //src/test/scala/com/transformer/slt:pg_expected -- --fill src/test/slt/postgres/<name>.test
+```
+
+writes Postgres's values into every block, as each column prints them, and
+lists what it could not fill: a query Postgres refused, which is a `statement
+error`, and a cell psql prints alike for NULL and the empty string. Without
+`--fill` the binary reports every block that says other than Postgres printed,
+as `slt_test` does for every port. Where the engine answers otherwise, the
+record is a skip with its twin, or held out as a finding, as above.
+
 Mark each record the engine answers otherwise by design with `skipif
 transformer <id>` on the line before it, the id of the rule it follows in the
 [ledger](gotchas.md#answers-that-differ-from-other-engines-by-design), and

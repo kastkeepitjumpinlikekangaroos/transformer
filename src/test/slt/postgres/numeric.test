@@ -503,7 +503,7 @@ INSERT INTO num_data VALUES
 (8, 74881),
 (9, -24926804.045047420)
 
-# numeric.sql:518: addition check.
+# numeric.sql:515-521: addition check.
 statement ok
 DELETE FROM num_result
 
@@ -533,7 +533,7 @@ SELECT t1.id1, t1.id2, t1.result, round(t2.expected, 10) as expected
     AND t1.result != round(t2.expected, 10)
 ----
 
-# numeric.sql:537: subtraction check.
+# numeric.sql:534-540: subtraction check.
 statement ok
 DELETE FROM num_result
 
@@ -563,7 +563,7 @@ SELECT t1.id1, t1.id2, t1.result, round(t2.expected, 40)
     AND t1.result != round(t2.expected, 40)
 ----
 
-# numeric.sql:556: multiply check. Postgres rounds each product to ten
+# numeric.sql:553-559: multiply check. Postgres rounds each product to ten
 # places as it stores it in num_result's numeric(210,10) column; the runner
 # stores only a value its column holds exactly, so the INSERT's SELECT says
 # the rounding, ROUND(..., 10), which rounds half away from zero as the
@@ -582,7 +582,7 @@ SELECT t1.id1, t1.id2, t1.result, t2.expected
     AND t1.result != t2.expected
 ----
 
-# numeric.sql:564, the storing rounding said as in the record before.
+# numeric.sql:561-567, the storing rounding said as in the record before.
 statement ok
 DELETE FROM num_result
 
@@ -597,7 +597,7 @@ SELECT t1.id1, t1.id2, t1.result, round(t2.expected, 30) as expected
     AND t1.result != round(t2.expected, 30)
 ----
 
-# numeric.sql:576: division check, the storing rounding said as for
+# numeric.sql:572-579: division check, the storing rounding said as for
 # the products, and '0.0' written 0.0 (a DECIMAL reads no string literal).
 statement ok
 DELETE FROM num_result
@@ -614,7 +614,7 @@ SELECT t1.id1, t1.id2, t1.result, t2.expected
     AND t1.result != t2.expected
 ----
 
-# numeric.sql:585, as the record before.
+# numeric.sql:581-588, as the record before.
 statement ok
 DELETE FROM num_result
 
