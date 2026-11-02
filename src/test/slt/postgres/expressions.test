@@ -1,0 +1,146 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/expressions.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/expressions.out at that commit, never the
+# engine's. Portions Copyright (c) 1996-2026, PostgreSQL Global Development
+# Group; Portions Copyright (c) 1994, The Regents of the University of
+# California. Distributed under the PostgreSQL License, a permissive license
+# whose text travels with every copy: it is COPYRIGHT beside this file.
+#
+# NULL in long IN and NOT IN lists: a value that is in the list is TRUE (FALSE
+# under NOT IN) whatever NULLs the list holds, and a value that is not, or a
+# NULL value, is NULL once a NULL is anywhere in the comparison. 15 of the
+# file's 81 statements are here, each record naming the line of
+# expressions.sql it comes from, and the engine's answer is Postgres's in
+# each. Postgres calls return_int_input(x) and return_text_input(x), PL/pgSQL
+# functions that return their argument, STABLE so the planner cannot fold the
+# list over a constant (Postgres hashes a list of nine or more); each call is
+# written as the column x of a one-row table holding the argument, made here,
+# a rewrite that cannot change what the query means.
+#
+# Left out (66 statements), by what they need:
+#   30  a type of the test's own, myint, with its functions, operators, casts
+#       and operator class, the table over it and the twelve queries that read
+#       it, in a transaction
+#   19  now(), current_time, localtime and the other SQL value functions,
+#       current_catalog and current_schema, and the settings of search_path
+#       between them
+#   10  views over numeric and bpchar typmods, read by psql's \d+ and
+#       EXPLAIN, in a transaction
+#    4  the two PL/pgSQL functions the one-row tables stand in for, and the
+#       transaction around them
+#    3  EXPLAIN, and the point and box types
+
+# For expressions.sql:118-133: return_int_input(x) and return_text_input(x)
+# are PL/pgSQL functions that return their argument, STABLE so that the
+# planner cannot fold the IN list over a constant before it runs; each call
+# here is the column x of a one-row table holding the argument, which no
+# planner folds either.
+statement ok
+CREATE TABLE int_input (x INT)
+
+statement ok
+INSERT INTO int_input VALUES (1)
+
+statement ok
+CREATE TABLE null_int_input (x INT)
+
+statement ok
+INSERT INTO null_int_input VALUES (NULL)
+
+statement ok
+CREATE TABLE text_input (x STRING)
+
+statement ok
+INSERT INTO text_input VALUES ('a')
+
+# expressions.sql:118: return_int_input(x) and return_text_input(x), each the
+# column x of a one-row table holding x, made above.
+query BOOLEAN nosort
+SELECT x in (10, 9, 2, 8, 3, 7, 4, 6, 5, 1) FROM int_input
+----
+true
+
+# expressions.sql:119
+query BOOLEAN nosort
+SELECT x in (10, 9, 2, 8, 3, 7, 4, 6, 5, null) FROM int_input
+----
+NULL
+
+# expressions.sql:120
+query BOOLEAN nosort
+SELECT x in (null, null, null, null, null, null, null, null, null, null, null) FROM int_input
+----
+NULL
+
+# expressions.sql:121
+query BOOLEAN nosort
+SELECT x in (10, 9, 2, 8, 3, 7, 4, 6, 5, 1, null) FROM int_input
+----
+true
+
+# expressions.sql:122
+query BOOLEAN nosort
+SELECT x in (10, 9, 2, 8, 3, 7, 4, 6, 5, 1) FROM null_int_input
+----
+NULL
+
+# expressions.sql:123
+query BOOLEAN nosort
+SELECT x in (10, 9, 2, 8, 3, 7, 4, 6, 5, null) FROM null_int_input
+----
+NULL
+
+# expressions.sql:124
+query BOOLEAN nosort
+SELECT x in ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j') FROM text_input
+----
+true
+
+# expressions.sql:126: NOT IN.
+query BOOLEAN nosort
+SELECT x not in (10, 9, 2, 8, 3, 7, 4, 6, 5, 1) FROM int_input
+----
+false
+
+# expressions.sql:127
+query BOOLEAN nosort
+SELECT x not in (10, 9, 2, 8, 3, 7, 4, 6, 5, 0) FROM int_input
+----
+true
+
+# expressions.sql:128
+query BOOLEAN nosort
+SELECT x not in (10, 9, 2, 8, 3, 7, 4, 6, 5, 2, null) FROM int_input
+----
+NULL
+
+# expressions.sql:129
+query BOOLEAN nosort
+SELECT x not in (10, 9, 2, 8, 3, 7, 4, 6, 5, 1, null) FROM int_input
+----
+false
+
+# expressions.sql:130
+query BOOLEAN nosort
+SELECT x not in (null, null, null, null, null, null, null, null, null, null, null) FROM int_input
+----
+NULL
+
+# expressions.sql:131
+query BOOLEAN nosort
+SELECT x not in (10, 9, 2, 8, 3, 7, 4, 6, 5, 1) FROM null_int_input
+----
+NULL
+
+# expressions.sql:132
+query BOOLEAN nosort
+SELECT x not in (10, 9, 2, 8, 3, 7, 4, 6, 5, null) FROM null_int_input
+----
+NULL
+
+# expressions.sql:133
+query BOOLEAN nosort
+SELECT x not in ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j') FROM text_input
+----
+false
