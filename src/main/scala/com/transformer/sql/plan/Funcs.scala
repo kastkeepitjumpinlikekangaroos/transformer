@@ -61,9 +61,9 @@ object Funcs {
         val v = args.head
         if (v == null) null else length(v.toString)
       case "UPPER" =>
-        if (args.head == null) null else args.head.toString.toUpperCase(Locale.ROOT)
+        if (args.head == null) null else upper(args.head.toString)
       case "LOWER" =>
-        if (args.head == null) null else args.head.toString.toLowerCase(Locale.ROOT)
+        if (args.head == null) null else lower(args.head.toString)
       case "TRIM" =>
         if (args.head == null) null else trim(args.head.toString)
       case "SUBSTRING" =>
@@ -227,6 +227,41 @@ object Funcs {
     * spill or a parquet or CSV file wrote it as `?`. */
   private[plan] def length(s: String): Int = s.codePointCount(0, s.length)
 
+  /** `s` in capitals by Unicode's simple case mapping: each character to
+    * one character (`Character.toUpperCase` of its code point), whatever the
+    * JVM's locale. So a string keeps its length, and `UPPER(s) LIKE UPPER(p)`
+    * pairs characters one with one as `s ILIKE p` does: a sharp s (U+00DF)
+    * and the ligature fi (U+FB01) stay as they are, where Java's
+    * `String.toUpperCase`, the full mapping, wrote `SS` and `FI`, which
+    * matched `'SS'` where `ILIKE` never did. */
+  private[plan] def upper(s: String): String = eachCharacter(s, Character.toUpperCase(_: Int))
+
+  /** `s` in small letters by Unicode's simple case mapping, as [[upper]]:
+    * a capital I with a dot above (U+0130) is `i`, where the full mapping
+    * wrote `i` and a combining dot, two characters for one. */
+  private[plan] def lower(s: String): String = eachCharacter(s, Character.toLowerCase(_: Int))
+
+  /** `s` with `f` applied to each code point; half a surrogate pair maps to
+    * itself. A string `f` leaves alone is returned as it is. */
+  private def eachCharacter(s: String, f: Int => Int): String = {
+    var i = 0
+    while (i < s.length) {
+      val c = s.codePointAt(i)
+      if (f(c) != c) {
+        val out = new java.lang.StringBuilder(s.length)
+        out.append(s, 0, i)
+        while (i < s.length) {
+          val d = s.codePointAt(i)
+          out.appendCodePoint(f(d))
+          i += Character.charCount(d)
+        }
+        return out.toString
+      }
+      i += Character.charCount(c)
+    }
+    s
+  }
+
   /** `s` without the spaces (U+0020) it starts and ends with, which is what
     * SQL's TRIM removes; Java's `trim`, which it used, also took tabs, line
     * breaks and every other character up to U+0020. */
@@ -346,7 +381,7 @@ object VecFuncs {
       if (argVec.isNull(i)) values(i) = null
       else {
         val s = argVec.getBoxed(i).toString
-        values(i) = if (lower) s.toLowerCase(Locale.ROOT) else s.toUpperCase(Locale.ROOT)
+        values(i) = if (lower) Funcs.lower(s) else Funcs.upper(s)
       }
       i += 1
     }

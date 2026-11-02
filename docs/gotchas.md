@@ -2194,6 +2194,19 @@ worth carrying:
   spill or a parquet or CSV file writes it as `?`; `Pattern.quote` of half a
   pair matches nothing, so a LIKE pattern holding an emoji matched no string.
   String ORDERING is still UTF-16 (see the parquet pushdown entry above).
+- **Java's `toUpperCase` and `toLowerCase` map case in full; SQL's `UPPER` and
+  `LOWER` map one character to one.** The full mapping turns a sharp s
+  (U+00DF) into `SS`, the ligature fi (U+FB01) into `FI` and a capital I with
+  a dot above (U+0130) into `i` and a combining dot, so a string's length
+  changed under `UPPER`, and `UPPER(s) LIKE UPPER('SS')` matched a sharp s
+  that `s ILIKE 'SS'` did not, while `ILIKE`'s regex (`CASE_INSENSITIVE |
+  UNICODE_CASE`) compares one character with one. `Funcs.upper` and
+  `Funcs.lower` apply `Character.toUpperCase` / `toLowerCase` to each code
+  point, Unicode's simple mapping (plans/testing/15, decision 2). What remains:
+  a regex folds a character as the small form of its capital, so `ILIKE`
+  matches a dotless i (U+0131) and a dotted capital I to `i`, where `LOWER`
+  keeps the dotless i and `UPPER` the dotted capital, which is held for a
+  decision (plans/testing/15).
 - **JSqlParser reads `{d '...'}` through `java.sql.Date.valueOf`, which rolls
   `2026-02-30` over to March.** `SqlParser.escapeLiteralText` reads the
   literal's token text, which goes through the same strict CAST `DATE '...'`

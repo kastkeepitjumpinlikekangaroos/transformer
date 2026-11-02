@@ -5215,6 +5215,40 @@ class SqlEngineTest {
     assertEquals(Seq(Seq(1, "x"), Seq(2, "a"), Seq(3, "\uD83D\uDE00")), rowsOf(grouped, cat))
   }
 
+  /** UPPER and LOWER map each character to one character, by Unicode's
+    * simple case mapping (plans/testing/15, decision 2): a sharp s stays itself
+    * under UPPER, where the full mapping Java's `String.toUpperCase` applies
+    * made it `SS`, and a capital I with a dot above lowers to `i`, where it
+    * became `i` and a combining dot. A string keeps its length, and over the
+    * plan's table `s ILIKE p`, `UPPER(s) LIKE UPPER(p)` and `LOWER(s) LIKE
+    * LOWER(p)` give one answer, where they gave three. */
+  @Test def upperAndLowerMapOneCharacterToOne(): Unit = {
+    def ch(codePoints: Int*): String = new String(codePoints.toArray, 0, codePoints.length)
+    val sharpS = ch(0xdf)
+    val dottedI = ch(0x130)
+    val fi = ch(0xfb01)
+    val street = s"stra${sharpS}e"
+    val cat = new Catalog
+    cat.register("u", memView(Schema(Vector(Field("s", DataType.StringType))),
+      Seq(Seq(Array[Any](sharpS), Array[Any](dottedI), Array[Any](street), Array[Any](fi), Array[Any]("ab")))))
+    assertEquals(Seq(Seq(sharpS, "i", fi, fi, "I", ch(0xff41), ch(0x41, 0x130), 6, 6)), rowsOf(
+      s"SELECT UPPER('$sharpS') AS a, LOWER('$dottedI') AS b, UPPER('$fi') AS c, LOWER('$fi') AS d, " +
+        s"UPPER('${ch(0x131)}') AS e, LOWER('${ch(0xff21)}') AS f, UPPER('a$dottedI') AS g, " +
+        s"LENGTH(UPPER('$street')) AS h, LENGTH(LOWER('$street')) AS i", cat))
+    // The plan's table, each value with ILIKE, UPPER(s) LIKE UPPER(p) and
+    // LOWER(s) LIKE LOWER(p) against 'SS' and against '_', and the lengths.
+    val table = rowsOf("SELECT s, s ILIKE 'SS' AS i1, UPPER(s) LIKE UPPER('SS') AS u1, LOWER(s) LIKE LOWER('SS') AS l1, " +
+      "s ILIKE '_' AS i2, UPPER(s) LIKE UPPER('_') AS u2, LOWER(s) LIKE LOWER('_') AS l2, LENGTH(s) AS n, " +
+      "LENGTH(UPPER(s)) AS nu, LENGTH(LOWER(s)) AS nl FROM u", cat)
+    def row(v: String, one: Boolean, n: Int) = Seq(v, false, false, false, one, one, one, n, n, n)
+    assertEquals(Seq(row(sharpS, one = true, 1), row(dottedI, one = true, 1), row(street, one = false, 6),
+      row(fi, one = true, 1), row("ab", one = false, 2)), table)
+    // Both paths: the vector path over the column and the row path over a
+    // CASE that reads one row at a time.
+    assertEquals(Seq(Seq(sharpS, sharpS)), rowsOf(s"SELECT UPPER(s) AS v, CASE WHEN LENGTH(s) = 1 THEN UPPER(s) END " +
+      s"AS w FROM u WHERE s = '$sharpS'", cat))
+  }
+
   /** A simple CASE's operand and a BETWEEN's are read once per row, as in
     * Postgres (the user's choice). Read once per WHEN, a RAND() operand met a
     * fresh value at each WHEN, so about 30% of rows matched none of three

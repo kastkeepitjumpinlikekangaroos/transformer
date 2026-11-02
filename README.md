@@ -1432,9 +1432,19 @@ negative length is an error, at bind time when it is written as a constant.
 `TRIM` removes the spaces (U+0020) a string starts and ends with, as SQL's does,
 and keeps a tab or a line break (Java's `trim`, which it used, took every
 character up to U+0020). `UPPER` and `LOWER` map
-case by Unicode's own rules, the same on every machine: the JVM's locale, under
-which a Turkish one would make `UPPER('i')` a dotted capital, plays no part, and
-neither does it in matching a name without regard to case.
+each character to one character, by Unicode's simple case mapping, the same on
+every machine: the JVM's locale, under which a Turkish one would make
+`UPPER('i')` a dotted capital, plays no part, and neither does it in matching a
+name without regard to case. So a string keeps its length: a sharp s (`ß`,
+U+00DF) and the ligature `ﬁ` (U+FB01), which have no one-character capital,
+stay as they are, and a capital I with a dot above (`İ`, U+0130) lowers to
+`i`, where Java's full mapping wrote them as SS, FI and an i with a combining
+dot.
+`s ILIKE p`, `UPPER(s) LIKE UPPER(p)` and `LOWER(s) LIKE LOWER(p)` then pair
+characters one with one and match alike, but for the few letters whose capital
+and small forms are not one pair: `ILIKE` takes a letter as the small form of
+its capital, so `'ı' ILIKE 'i'` and `'İ' ILIKE 'i'` are both true, where
+`LOWER('ı')` is `ı` and `UPPER('İ')` is `İ`.
 
 `CURRENT_DATE` and `CURRENT_TIMESTAMP` take every spelling other engines accept
 (`current_date`, `CURRENT_DATE()`, DB2's `CURRENT DATE`). Both read the wall

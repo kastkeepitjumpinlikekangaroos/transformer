@@ -24,7 +24,7 @@ SELECT id, UPPER(s), TRIM(s), SUBSTRING(s, 2), SUBSTRING(s, 2, 2), CONCAT(s, 'ab
 query INT,STRING,STRING,STRING
 SELECT LENGTH('x𠀀y'), UPPER('ß'), LOWER('İ'), CONCAT()
 ----
-3	SS	i̇	(empty)
+3	ß	i	(empty)
 
 query STRING,STRING,STRING,STRING
 SELECT SUBSTRING('abc', -1, 2), SUBSTRING('abc', 0, 2), SUBSTRING('abc', 4), SUBSTRING('abc', 2147483648)
