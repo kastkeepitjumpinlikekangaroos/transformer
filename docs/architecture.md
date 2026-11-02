@@ -40,7 +40,7 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 | `core/` | Shared types crossed by every module. Zero deps. | `DataType.scala` (`sqlName`, the one spelling every grid and listing shows a type in: `BIGINT`, `DECIMAL(10,2)`), `ExecutionOptions.scala` (per-query knobs: spill, metrics, and `stopped`, §3g), `Schema.scala`, `ColumnarBatch.scala`, `Row.scala`, `Catalog.scala`, `NumberText.scala` (the one grammar text becomes a number by, for a CSV field and a CAST alike), `Scheduler.scala` (the shared `ForkJoinPool` every parallel call site funnels through), `SqlExecutor.scala` (`SqlExecutorRegistry`), `WrittenParts.scala` (the part files a partitioned write committed, which a run record names), `Faults.scala` (the fault points every disk change of a run calls, armed by a test or `-Dtransformer.fault`, §3a) |
 | `temporal/` | Date/time template variables. No deps. | `TemporalVariables.scala`, `TemplateRenderer.scala` |
 | `read/csv/` | CSV input. Stdlib only. | `CsvOptions.scala` (also `forWrittenFile`, the options a job reads back its own CSV output with, and `checkSeparators`, which the writer shares), `CsvRowParser.scala` (state machine: an unquoted null string is NULL, a blank line is flagged rather than skipped, an unclosed quote fails), `CsvValues.scala` (the text of each type's values: what the writer prints, what the reader parses strictly, and what inference recognizes and joins), `CsvSchemaInferer.scala`, `PathGlob.scala`, `CsvReader.scala` (inference over the first rows of the glob's files in order, each later file read by its header's names, row width, blank lines as rows in a one-column file, typed parse errors naming file, line and column) |
-| `read/parquet/` | Parquet input. Depends on `parquet-hadoop` + minimal Hadoop. | `ParquetReader.scala`, `ParquetColumns.scala` (the type each parquet column reads as and how its values decode, decided per file from that file's footer; matches a view's columns to each file's by name), `ParquetFilterTranslator.scala` |
+| `read/parquet/` | Parquet input. Depends on `parquet-hadoop` + minimal Hadoop. | `ParquetReader.scala`, `ParquetColumns.scala` (the type each parquet column reads as and how its values decode, decided per file from that file's footer; matches a view's columns to each file's by name), `ParquetFooter.scala` (why a footer parquet-mr refused does not read, in the reader's words, from its Thrift walked leniently by `CompactThrift`), `ParquetFilterTranslator.scala` |
 | `write/csv/` | CSV output. Stdlib only; uses `read/csv`'s `CsvValues`, so the writer and reader share one text per type. | `CsvWriter.scala` (`CsvWriter`, one file staged under a hidden temp name and committed by a rename, and `writePartitioned`, which commits every part together once all are written; `CsvRowWriter`, the header and rows' text on any `Writer`, which `transformer query` prints CSV through, so its stdout reads back as a file does) |
 | `write/parquet/` | Parquet output. | `ParquetSchema.scala` (the parquet schema transformer writes for a `Schema`), `ParquetWriter.scala` (staged and committed as `CsvWriter` is) |
 | `sql/parse/` | JSqlParser façade: one statement, none of its text lost on the way to the AST, and no tree too deep to walk. | `SqlParser.scala` (refuses text after the statement's `;` and a repeated tail clause JSqlParser overwrites — see §10; refuses parentheses that do not balance and a tree deeper than `MaxNesting`, 256 levels, once AND / OR chains are regrouped balanced; `unquote` / `quote`, the one rule for the name a quoted identifier names; `escapeLiteralText`, the text a JDBC `{d '...'}` escape was written with, which its node does not keep) |
@@ -704,6 +704,28 @@ Both directions skip the `Group`/`SimpleGroup` row-object model that
   integer, `UnsignedNarrowInts`, reads as an `INT` but is ordered unsigned).
   Only a column that pushes comparisons in every file takes a pushed one
   (see 3d).
+- A file the reader cannot read fails in the reader's words, never
+  parquet-mr's: a `ParquetReader.Unreadable` (an `IllegalArgumentException`)
+  whose message names the file, and the column and row group where the
+  reader knows them, with parquet-mr's exception as its cause. Three places
+  wrap the library. Opening a file (`readFooters`, and the iterator's own
+  open): when parquet-mr cannot read the footer, `ParquetFooter` reads it
+  again, walking its compact Thrift leniently (`CompactThrift`, where a union
+  member or an enum value newer than parquet-mr's generated classes is a
+  number), and says what it finds: an encrypted file, a file that is not
+  parquet, a logical type, encoding or codec newer than the library, a column
+  chunk the schema lacks, an annotation the format does not allow on its type
+  (found by converting each column alone with parquet-mr's own rules), or a
+  footer that is not valid metadata. Reading a row group
+  (`readNextRowGroup`, which reads each chunk's page headers): the column at
+  fault is found by reading each chunk alone. Decoding a column (its
+  dictionary page as its reader is made, its data pages in `decodeColumn`):
+  the column is the one being read. `ParquetReader.libraryFailure` says what
+  is the library's to wrap: not the reader's own refusals, not a fatal error
+  or an interruption, but a missing codec library's `LinkageError`. A codec
+  the classpath cannot decompress (`ParquetReader.decompresses`, a
+  decompressor made once a codec) fails the view as it opens, as an engine
+  type the file's column has none of does.
 - Write: a custom `BatchWriteSupport` drives parquet-mr's `RecordConsumer`
   directly from the `ColumnarBatch` vectors. Each batch row maps to one
   `writer.write()` call (parquet-mr needs that 1:1 mapping so its

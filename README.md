@@ -1059,12 +1059,29 @@ InputFilePath("data.csv",
   | `BINARY STRING`, `ENUM` or `JSON` | `STRING` |
   | `BINARY`, alone or `BSON`; `FIXED_LEN_BYTE_ARRAY`, alone or `UUID` | `BINARY` |
   | `TIME`, `INTERVAL`, a `REPEATED` column (a list per row), a nested group | none: the file cannot be read |
+  | an annotation newer than the reader (`VARIANT`, `GEOMETRY`, `GEOGRAPHY`, or one it has no name for), or one the format does not allow on its physical type (`UUID` on an `INT32`) | none: the file cannot be read |
 
-  The last row fails when the view is opened, naming the column, even for a
-  query that never mentions it: the view's schema is the file's, and the
-  engine has no type to give it. No annotation falls through to its physical
-  type, which would read a `DECIMAL` as its unscaled integer or an unsigned
-  integer as a negative one.
+  The last two rows fail when the view is opened, naming the file, the column
+  and the annotation, even for a query that never mentions it: the view's
+  schema is the file's, and the engine has no type to give it. No annotation
+  falls through to its physical type, which would read a `DECIMAL` as its
+  unscaled integer or an unsigned integer as a negative one, and a `GEOMETRY`
+  as the bytes it is stored in.
+- Codecs read: `UNCOMPRESSED`, `SNAPPY`, `GZIP`, `ZSTD` and `LZ4_RAW`. A column
+  compressed with a codec the reader does not have (`BROTLI`, `LZO`) fails the
+  view as it opens, naming the file, the column and the codec, rather than at
+  its first page partway through a scan. An encrypted file is refused as one,
+  whether its footer is encrypted or only its columns: the reader holds no
+  keys.
+- A file the reader cannot read is refused in its own words, naming the file
+  (`Parquet file 'x.parquet' ...`), and the column and row group where it
+  knows them: a footer that is not valid parquet metadata, a file that does
+  not end in parquet's magic bytes, a column in an encoding the reader does
+  not decode (`ALP`), a page that does not decode
+  (`Parquet file 'x.parquet' column 'c', row group 3: a page does not decode`).
+  parquet-mr's own exception is the error's cause, never its message, which
+  showed its classes and code (`Cannot invoke "...LogicalType$_Fields.ordinal()"`,
+  Thrift's dump of a struct).
 - A parquet `TIMESTAMP` reads as the instant it stores, whatever its unit:
   `MILLIS`, `MICROS` and `NANOS` alike, and the legacy 12-byte `INT96` too. A
   `TIMESTAMP` holds microseconds, so a `NANOS` value is truncated to its

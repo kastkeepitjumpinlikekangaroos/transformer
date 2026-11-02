@@ -22,10 +22,10 @@ import scala.jdk.CollectionConverters._
   * name and decoding them as it declares them.
   *
   * Every pairing of physical type and annotation is decided here, and anything
-  * not listed fails naming the column, rather than falling through to its
-  * physical type: a parquet annotation says what the stored bits mean, and
-  * reading the bits without it (an unsigned integer as a signed one, a decimal
-  * as its unscaled integer) is a wrong answer, not a fallback.
+  * not listed fails naming the file and the column, rather than falling
+  * through to its physical type: a parquet annotation says what the stored
+  * bits mean, and reading the bits without it (an unsigned integer as a signed
+  * one, a decimal as its unscaled integer) is a wrong answer, not a fallback.
   */
 private[parquet] object ParquetColumns {
 
@@ -91,13 +91,19 @@ private[parquet] object ParquetColumns {
         extends Decoding(DataType.DecimalType(precision, scale), false)
   }
 
-  /** The decoding for column `t`, or an error naming it when the engine has
-    * no type for what it holds. */
-  def decoding(t: Type): Decoding = {
-    if (!t.isPrimitive) throw new UnsupportedOperationException(
-      s"Parquet column '${t.getName}' is nested ($t), and only flat schemas are supported")
-    if (t.isRepetition(Type.Repetition.REPEATED)) throw new UnsupportedOperationException(
-      s"Parquet column '${t.getName}' is repeated, a list of values in each row, which a column cannot hold")
+  /** The decoding for column `t` of the file `label`, or an error naming
+    * both when the engine has no type for what it holds. */
+  def decoding(t: Type, label: String): Decoding = {
+    def refuse(what: String) =
+      new ParquetReader.Unreadable(s"Parquet file '$label' column '${t.getName}' $what", null)
+    if (!t.isPrimitive) {
+      val g = t.asGroupType
+      val group = Option(g.getLogicalTypeAnnotation).map(a => s"a group annotated $a")
+        .getOrElse(s"a group of ${g.getFieldCount} field${if (g.getFieldCount == 1) "" else "s"}")
+      throw refuse(s"is nested, $group, and only flat schemas are supported")
+    }
+    if (t.isRepetition(Type.Repetition.REPEATED))
+      throw refuse("is repeated, a list of values in each row, and only flat schemas are supported")
     val pt = t.asPrimitiveType
     (pt.getPrimitiveTypeName, pt.getLogicalTypeAnnotation) match {
       case (PrimitiveTypeName.BOOLEAN, null) => Decoding.Booleans
@@ -130,9 +136,11 @@ private[parquet] object ParquetColumns {
       case (PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY, d: DecimalLogicalTypeAnnotation) =>
         Decoding.ByteDecimals(d.getPrecision, d.getScale)
 
-      // TIME, INTERVAL, and anything a later format version adds.
-      case (name, annotation) => throw new UnsupportedOperationException(
-        s"Parquet column '${t.getName}' is ${name.toString.toLowerCase(Locale.ROOT)} $annotation, which has no transformer type")
+      // TIME, INTERVAL, and anything a later format version adds that
+      // parquet-mr knows; one newer than parquet-mr fails as the footer is
+      // read, and ParquetFooter names it.
+      case (name, annotation) =>
+        throw refuse(s"is ${name.toString.toLowerCase(Locale.ROOT)} $annotation, which has no transformer type")
     }
   }
 
@@ -149,7 +157,7 @@ private[parquet] object ParquetColumns {
     val (_, first) = files.head
     Schema(first.getFields.asScala.map { t =>
       val anyNullable = files.exists { case (_, mt) => field(mt, t.getName).exists(nullable) }
-      Field(t.getName, decoding(t).dataType, anyNullable)
+      Field(t.getName, decoding(t, files.head._1).dataType, anyNullable)
     }.toVector)
   }
 
@@ -164,14 +172,14 @@ private[parquet] object ParquetColumns {
     * type. */
   def resolve(schema: Schema, file: MessageType, label: String): FileColumns = {
     val types: Vector[Type] = schema.fields.map { f =>
-      field(file, f.name).getOrElse(throw new IllegalArgumentException(
-        s"Parquet file '$label' has no column '${f.name}', which the first file of its glob has"))
+      field(file, f.name).getOrElse(throw new ParquetReader.Unreadable(
+        s"Parquet file '$label' has no column '${f.name}', which the first file of its glob has", null))
     }
     val decodings = schema.fields.zip(types).map { case (f, t) =>
-      val d = decoding(t)
-      if (d.dataType != f.dataType) throw new IllegalArgumentException(
+      val d = decoding(t, label)
+      if (d.dataType != f.dataType) throw new ParquetReader.Unreadable(
         s"Parquet file '$label' has column '${f.name}' as ${d.dataType}, " +
-          s"but the first file of its glob has it as ${f.dataType}")
+          s"but the first file of its glob has it as ${f.dataType}", null)
       d
     }
     FileColumns(new MessageType(file.getName, types.asJava), decodings.toArray)

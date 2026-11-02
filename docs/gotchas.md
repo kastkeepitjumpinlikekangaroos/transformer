@@ -806,6 +806,26 @@ ship a fix or move something from "not done" to "done".
   file was opened with; build those per reader, not once, since the codec
   factory they hold is not safe to share. A new `Configuration()` costs the
   same, so the reader and the writer each copy one built once.
+- **parquet-mr fails on a file it cannot read with whatever its code met
+  first**, and none of it names the file: a logical type newer than it (a
+  `GEOMETRY`, a `VARIANT`) is a `NullPointerException`, `Cannot invoke
+  "org.apache.parquet.format.LogicalType$_Fields.ordinal()"`, because its
+  generated Thrift union drops a member it does not know and its converter
+  switches on the missing one; an enum value it does not know (the `ALP`
+  encoding) or a corrupt schema is Thrift's `Required field 'type' was not
+  present! Struct: ...`, the struct and its statistics bytes printed; an
+  annotation on the wrong physical type is its own `UUID can only annotate
+  FIXED_LEN_BYTE_ARRAY(16)`; a missing codec library is a
+  `NoClassDefFoundError`, an `Error`, which `NonFatal` does not catch. So the
+  reader wraps every call into the library (`ParquetReader.libraryFailure`
+  decides what to wrap) and diagnoses a footer again itself
+  (`ParquetFooter`), never matching parquet-mr's text: a library upgrade
+  changes its words, and the tests read the reader's only. The generated
+  Thrift classes cannot say what a newer writer wrote, so the diagnosis
+  walks the footer's compact Thrift as plain values (`CompactThrift`), every
+  length bounded by the bytes left. A row group that fails is pinned to its
+  column by reading each chunk alone: parquet-mr reads a group's chunks
+  together, and its error names none.
 - **A footer's sizes are a writer's claim, never a reason to skip rows.**
   `ParquetReader.packRowGroups` packs a file's row groups into partitions by
   their bytes. It packed by `total_byte_size` alone and emitted a partition

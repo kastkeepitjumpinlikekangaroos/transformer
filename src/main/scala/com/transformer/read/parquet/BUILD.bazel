@@ -13,6 +13,9 @@ scala_library(
         "@maven//:org_apache_hadoop_hadoop_common",
         "@maven//:org_apache_parquet_parquet_column",
         "@maven//:org_apache_parquet_parquet_common",
+        # The footer's Thrift records, which ParquetFooter reads again to say
+        # why a footer parquet-mr refused does not read.
+        "@maven//:org_apache_parquet_parquet_format_structures",
         "@maven//:org_apache_parquet_parquet_hadoop",
     ],
     # What parquet-mr and Hadoop load as they run, which no source here names

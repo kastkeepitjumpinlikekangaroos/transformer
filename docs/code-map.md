@@ -101,12 +101,15 @@ navigation hint, not a comprehensive directory listing.
   `VimText.scala` (~540 LOC: words, paragraphs, objects, vim regex). A new
   command is an `Action` there and a case in `execute` here; see
   [extending.md](extending.md#extend-the-gui).
-- `read/parquet/ParquetReader.scala` (~735 LOC) — `ParquetReader` (the footer
+- `read/parquet/ParquetReader.scala` (~930 LOC) — `ParquetReader` (the footer
   pass that packs row groups into partitions and checks every file of a glob
-  against the first), and `ParquetPartitionIterator`, most of whose length is
+  against the first, the reader's own exceptions and what of parquet-mr's it
+  wraps), and `ParquetPartitionIterator`, most of whose length is
   `decodeColumn`: one tight loop per `ParquetColumns.Decoding`. Reading a new
   kind of parquet column is a `Decoding` case in `ParquetColumns.scala` plus
-  its loop here.
+  its loop here. Why a footer parquet-mr refused does not read is
+  `ParquetFooter.scala` (~310 LOC), with the lenient Thrift walker
+  `CompactThrift`.
 - `core/ColumnarBatch.scala` (~390 LOC) — defines ten `ColumnVector`
   subclasses. Adding a new `DataType` requires a new vector + companion case
   in `ColumnVector.allocate`.

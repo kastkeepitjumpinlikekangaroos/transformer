@@ -224,6 +224,16 @@ specific traps.
   `oracle/CleanRejection` (`fuzz/frontend_fuzz_test`) holds every failure to
   this; its known defects are where the engine does not yet
   ([plans/robustness/14](../plans/robustness/14-pathological-nesting.md)).
+- **A reader of a file format refuses in its own words, naming the file.**
+  A library's exception never reaches the caller as itself: the reader
+  catches what its library throws, says what is wrong with the file in the
+  file's terms (its column, row group, encoding, codec), names the file
+  first (`Parquet file 'x.parquet' ...`, as `CSV file 'x.csv' line 2 ...`),
+  and keeps the library's exception as the cause, never in the message. Its
+  own refusals are a class of its own (`ParquetReader.Unreadable`, an
+  `IllegalArgumentException`), so a wrapper never wraps them again; a value
+  past what the engine holds stays an `ArithmeticException`
+  (`ParquetReader.OutOfRange`), a failure on the data.
 - **A literal is its value and a name is what it names, read from what was
   written, never from a getter that lost part of it.** JSqlParser keeps both as
   text: a string literal with each quote doubled (`StringValue.getValue`; the

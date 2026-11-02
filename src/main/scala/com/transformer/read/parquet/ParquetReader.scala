@@ -9,20 +9,22 @@ import org.apache.hadoop.fs.{Path => HPath}
 import org.apache.parquet.column.ColumnDescriptor
 import org.apache.parquet.column.impl.ColumnReadStoreImpl
 import org.apache.parquet.column.page.PageReadStore
-import org.apache.parquet.io.ParquetDecodingException
 import org.apache.parquet.io.api.{Converter, GroupConverter, PrimitiveConverter}
 import org.apache.parquet.filter2.predicate.FilterPredicate
 import org.apache.parquet.filter2.statisticslevel.StatisticsFilter
 import org.apache.parquet.HadoopReadOptions
-import org.apache.parquet.hadoop.ParquetFileReader
-import org.apache.parquet.hadoop.metadata.{BlockMetaData, ColumnChunkMetaData}
+import org.apache.parquet.hadoop.{CodecFactory, ParquetFileReader}
+import org.apache.parquet.hadoop.metadata.{BlockMetaData, ColumnChunkMetaData, CompressionCodecName, FileMetaData}
 import org.apache.parquet.hadoop.util.HadoopInputFile
 import org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit
 import org.apache.parquet.schema.MessageType
 
+import java.nio.channels.ClosedByInterruptException
 import java.nio.file.Path
 import java.util.concurrent.Callable
 import scala.collection.mutable
+import scala.jdk.CollectionConverters._
+import scala.util.control.NonFatal
 
 /** Reads a folder/glob of Parquet files as a single named view.
   *
@@ -208,6 +210,51 @@ object ParquetReader {
   private[parquet] def open(hif: HadoopInputFile): ParquetFileReader =
     ParquetFileReader.open(hif, HadoopReadOptions.builder(hif.getConfiguration).build())
 
+  /** A parquet file the reader refuses, in its own words: the message names
+    * the file, and the column and row group where the reader knows them, and
+    * `cause` keeps what parquet-mr threw, which the message never quotes (a
+    * library's exception names its classes and its code's state, and changes
+    * with its version). An `IllegalArgumentException`, as every failure the
+    * input caused is. */
+  final class Unreadable(message: String, cause: Throwable) extends IllegalArgumentException(message, cause)
+
+  /** A stored value that has no engine value, a timestamp past the range of
+    * microseconds: a failure on the data, as a CAST that cannot read its text
+    * is. */
+  final class OutOfRange(message: String) extends ArithmeticException(message)
+
+  /** Whether `e`, thrown as parquet-mr reads a file, is the library's own
+    * failure on it, which the reader names in its own words: anything but the
+    * reader's own refusals, a fatal error and an interruption. A codec whose
+    * library is missing throws a `LinkageError` (`NoClassDefFoundError`),
+    * which is the file's codec at fault, not the JVM. */
+  private[parquet] def libraryFailure(e: Throwable): Boolean = e match {
+    case _: Unreadable | _: OutOfRange => false
+    case _: LinkageError => true
+    case _ => NonFatal(e) && !causes(e).exists {
+      case _: InterruptedException | _: java.io.InterruptedIOException | _: ClosedByInterruptException => true
+      case _ => false
+    }
+  }
+
+  /** `t` and its causes, outermost first. */
+  private[parquet] def causes(t: Throwable): Iterator[Throwable] =
+    Iterator.iterate(t)(_.getCause).takeWhile(_ != null).take(20)
+
+  private val codecsDecompressed = new java.util.concurrent.ConcurrentHashMap[CompressionCodecName, java.lang.Boolean]()
+
+  /** Whether parquet-mr can decompress `codec` on this classpath: it makes a
+    * decompressor for it, once a codec. `BROTLI` and `LZO` need codec classes
+    * nothing here ships, and Hadoop's `LZ4` needs the lz4 library. */
+  private[parquet] def decompresses(codec: CompressionCodecName): Boolean =
+    codecsDecompressed.computeIfAbsent(codec, c => java.lang.Boolean.valueOf(
+      c == CompressionCodecName.UNCOMPRESSED || {
+        val factory = new CodecFactory(defaultConf, 0)
+        try { factory.getDecompressor(c); true }
+        catch { case e: Throwable if NonFatal(e) || e.isInstanceOf[LinkageError] => false }
+        finally factory.release()
+      })).booleanValue
+
   /** Compressed-bytes target for one partition's worth of work. Picked to
     * balance:
     *   * enough work per task that scheduling overhead is negligible
@@ -283,28 +330,52 @@ object ParquetReader {
       targetBytesPerPartition: Long
   ): Footers = {
     val conf = defaultConf
-    val tasks: Seq[Callable[(MessageType, IndexedSeq[PartitionMeta])]] = files.map { f =>
-      new Callable[(MessageType, IndexedSeq[PartitionMeta])] {
-        def call(): (MessageType, IndexedSeq[PartitionMeta]) = {
+    val tasks: Seq[Callable[FileFooter]] = files.map { f =>
+      new Callable[FileFooter] {
+        def call(): FileFooter = {
           val hif = HadoopInputFile.fromPath(new HPath(f.toUri), conf)
-          val reader = ParquetReader.open(hif)
+          val reader =
+            try ParquetReader.open(hif)
+            catch { case e: Throwable if libraryFailure(e) => throw ParquetFooter.refusal(f.toString, f, e) }
           try {
+            // A file whose footer is plain text but whose columns are not
+            // opens; reading a column of it would fail on its first page.
+            if (reader.getFooter.getFileMetaData.getEncryptionType != FileMetaData.EncryptionType.UNENCRYPTED)
+              throw new Unreadable(s"Parquet file '$f' ${ParquetFooter.Encrypted}", null)
             val blocks = reader.getRowGroups
-            val parts = packRowGroups(hif, blocks, targetBytesPerPartition)
-            (reader.getFooter.getFileMetaData.getSchema, parts)
+            val codecs = blocks.asScala.iterator.flatMap(_.getColumns.asScala.map(c => c.getPath.toDotString -> c.getCodec))
+              .toVector.distinct
+            FileFooter(reader.getFooter.getFileMetaData.getSchema, packRowGroups(hif, blocks, targetBytesPerPartition), codecs)
           } finally reader.close()
         }
       }
     }
     val results = Scheduler.submitAndAwaitAll(tasks)
-    val footers = files.map(_.toString).zip(results.map(_._1))
+    val footers = files.map(_.toString).zip(results.map(_.schema))
     val schema = ParquetColumns.viewSchema(footers)
     val decodings = footers.map { case (label, mt) => ParquetColumns.resolve(schema, mt, label).decodings }
+    // A codec this classpath cannot decompress fails the view when it opens,
+    // naming the column, rather than its first page partway through a scan.
+    val viewColumns = schema.fieldNames.toSet
+    footers.zip(results).foreach { case ((label, _), r) =>
+      r.codecs.find { case (column, codec) => viewColumns(column) && !decompresses(codec) }.foreach {
+        case (column, codec) => throw new Unreadable(
+          s"Parquet file '$label' column '$column' is compressed with $codec, which transformer cannot decompress", null)
+      }
+    }
     val comparable = schema.fields.indices.collect {
       case i if decodings.forall(_(i).pushesComparisons) => schema.fields(i).name
     }.toSet
-    Footers(schema, results.flatMap(_._2).toIndexedSeq, comparable)
+    Footers(schema, results.flatMap(_.partitions).toIndexedSeq, comparable)
   }
+
+  /** What one file's footer gives: its schema, its partitions, and the codec
+    * of each of its columns (by dotted path; a column in several codecs, one
+    * row group to the next, is listed once each). */
+  private final case class FileFooter(
+      schema: MessageType,
+      partitions: IndexedSeq[PartitionMeta],
+      codecs: Vector[(String, CompressionCodecName)])
 
   /** Greedily pack contiguous row groups into partitions of close to `target`
     * bytes each. A row group that is by itself larger than `target` becomes
@@ -389,10 +460,15 @@ final class ParquetPartitionIterator(
     metricsRecorder: ParquetReader.MetricsRecorder = null
 ) extends Iterator[ColumnarBatch] {
 
+  private val fileLabel: String = hif.getPath.toUri.getPath
   // Open once: same handle drives schema lookup, the column request,
   // skipNextRowGroup seeks, and the eventual readNextRowGroup loop.
-  private val reader: ParquetFileReader = ParquetReader.open(hif)
-  private val fileLabel: String = hif.getPath.toUri.getPath
+  private val reader: ParquetFileReader =
+    try ParquetReader.open(hif)
+    catch {
+      case e: Throwable if ParquetReader.libraryFailure(e) =>
+        throw ParquetFooter.refusal(fileLabel, java.nio.file.Paths.get(hif.getPath.toUri), e)
+    }
   private val columns: ParquetColumns.FileColumns =
     try ParquetColumns.resolve(schema, reader.getFooter.getFileMetaData.getSchema, fileLabel)
     catch { case e: Throwable => reader.close(); throw e }
@@ -402,9 +478,16 @@ final class ParquetPartitionIterator(
   // we can land on `startRowGroup` without paying the full read cost the old
   // `HParquetReader` approach incurred.
   locally {
-    reader.setRequestedSchema(columns.requested)
-    var i = 0
-    while (i < startRowGroup) { reader.skipNextRowGroup(); i += 1 }
+    try {
+      reader.setRequestedSchema(columns.requested)
+      var i = 0
+      while (i < startRowGroup) { reader.skipNextRowGroup(); i += 1 }
+    } catch {
+      case e: Throwable =>
+        reader.close()
+        if (!ParquetReader.libraryFailure(e)) throw e
+        throw new ParquetReader.Unreadable(s"Parquet file '$fileLabel' row group $startRowGroup cannot be read", e)
+    }
   }
 
   // Cached for the stats-level pushdown check — `getRowGroups` returns the
@@ -449,6 +532,8 @@ final class ParquetPartitionIterator(
   // decoded. Reset whenever we advance to a new row group.
   private var columnReaders: Array[org.apache.parquet.column.ColumnReader] = _
   private var currentRowsRemaining: Long = 0L
+  // The row group being read, by its place in the file, for a refusal.
+  private var currentGroup: Int = startRowGroup
   private var closed: Boolean = false
 
   private def closeQuietly(): Unit = {
@@ -481,21 +566,28 @@ final class ParquetPartitionIterator(
         try reader.skipNextRowGroup() catch { case _: Throwable => () }
         if (metricsRecorder != null) metricsRecorder.addRowGroupsSkipped(1L)
       } else {
-        val pages: PageReadStore = reader.readNextRowGroup()
+        currentGroup = absoluteIdx
+        val pages: PageReadStore =
+          try reader.readNextRowGroup()
+          catch { case e: Throwable if ParquetReader.libraryFailure(e) => throw groupRefusal(absoluteIdx, e) }
         if (pages == null) {
           closeQuietly()
           return false
         }
         // ColumnReadStoreImpl needs a GroupConverter for the (unused-by-us)
         // record-assembly path; supply a no-op one so we never pay for record
-        // materialization — we drive each column reader directly.
+        // materialization — we drive each column reader directly. Making a
+        // column's reader reads its dictionary page.
         val crs = new ColumnReadStoreImpl(
           pages,
           ParquetPartitionIterator.NoopGroupConverter,
           columns.requested,
           reader.getFileMetaData.getCreatedBy
         )
-        columnReaders = columnDescriptors.map(crs.getColumnReader)
+        columnReaders = Array.tabulate(columnDescriptors.length) { c =>
+          try crs.getColumnReader(columnDescriptors(c))
+          catch { case e: Throwable if ParquetReader.libraryFailure(e) => throw columnRefusal(c, absoluteIdx, e) }
+        }
         currentRowsRemaining = pages.getRowCount
         // Reset the per-column intern caches — Binary refs from the prior
         // row group's page buffers are no longer valid once that row group's
@@ -531,12 +623,48 @@ final class ParquetPartitionIterator(
     val ncols = schema.length
     var c = 0
     while (c < ncols) {
-      decodeColumn(out, c, rowsThisBatch)
+      try decodeColumn(out, c, rowsThisBatch)
+      catch { case e: Throwable if ParquetReader.libraryFailure(e) => throw columnRefusal(c, currentGroup, e) }
       c += 1
     }
     out.setNumRows(rowsThisBatch)
     currentRowsRemaining -= rowsThisBatch.toLong
     out
+  }
+
+  /** The refusal for column `c` of row group `group`, a page of which
+    * parquet-mr failed to decode with `thrown`. Closes the file. */
+  private def columnRefusal(c: Int, group: Int, thrown: Throwable): ParquetReader.Unreadable = {
+    closeQuietly()
+    new ParquetReader.Unreadable(
+      s"Parquet file '$fileLabel' column '${schema.fields(c).name}', row group $group: a page does not decode", thrown)
+  }
+
+  /** The refusal for row group `group`, whose column chunks parquet-mr failed
+    * to read with `thrown`: it reads every chunk with its pages' headers
+    * together, so the column at fault is found by reading each alone. Closes
+    * the file. */
+  private def groupRefusal(group: Int, thrown: Throwable): ParquetReader.Unreadable = {
+    closeQuietly()
+    columnDescriptors.indices.find(c => !readsAlone(c, group)) match {
+      case Some(c) => new ParquetReader.Unreadable(
+        s"Parquet file '$fileLabel' column '${schema.fields(c).name}', row group $group: a page does not decode", thrown)
+      case None => new ParquetReader.Unreadable(s"Parquet file '$fileLabel' row group $group cannot be read", thrown)
+    }
+  }
+
+  /** Whether column `c`'s chunk of row group `group`, its pages' headers
+    * included, reads when it is the only column read. */
+  private def readsAlone(c: Int, group: Int): Boolean = {
+    val alone = try ParquetReader.open(hif) catch { case e: Throwable if ParquetReader.libraryFailure(e) => return false }
+    try {
+      alone.setRequestedSchema(new MessageType(columns.requested.getName, columns.requested.getType(c)))
+      var i = 0
+      while (i < group) { alone.skipNextRowGroup(); i += 1 }
+      alone.readNextRowGroup()
+      true
+    } catch { case e: Throwable if ParquetReader.libraryFailure(e) => false }
+    finally alone.close()
   }
 
   /** Drain `rowCount` values from `columnReaders(col)` into `batch.column(col)`.
@@ -620,7 +748,7 @@ final class ParquetPartitionIterator(
               else {
                 val millis = cr.getLong
                 if (millis > ParquetPartitionIterator.MaxMillis || millis < ParquetPartitionIterator.MinMillis)
-                  throw new ArithmeticException(
+                  throw new ParquetReader.OutOfRange(
                     s"Parquet file '$fileLabel' column '${schema.fields(col).name}' holds TIMESTAMP(MILLIS) " +
                       s"$millis, which is past the range of a timestamp in microseconds")
                 v.set(r, millis * 1000L)
@@ -644,7 +772,7 @@ final class ParquetPartitionIterator(
           else v.set(r,
             try ParquetPartitionIterator.int96ToMicros(cr.getBinary.getBytes)
             catch {
-              case e: ArithmeticException => throw new ArithmeticException(
+              case e: ArithmeticException => throw new ParquetReader.OutOfRange(
                 s"Parquet file '$fileLabel' column '${schema.fields(col).name}' holds an ${e.getMessage}, " +
                   "which is past the range of a timestamp in microseconds")
             })
@@ -737,8 +865,8 @@ final class ParquetPartitionIterator(
             // BigInteger reads big-endian two's complement and copies what
             // it keeps, so the page's own bytes can be handed over.
             val unscaled = cr.getBinary.getBytesUnsafe
-            if (unscaled.length == 0) throw new ParquetDecodingException(
-              s"Parquet file '$fileLabel' column '${schema.fields(col).name}' holds a DECIMAL with no bytes")
+            if (unscaled.length == 0) throw new ParquetReader.Unreadable(
+              s"Parquet file '$fileLabel' column '${schema.fields(col).name}' holds a DECIMAL with no bytes", null)
             v.set(r, new java.math.BigDecimal(new java.math.BigInteger(unscaled), scale))
           }
           cr.consume(); r += 1
