@@ -2041,7 +2041,11 @@ output as DuckDB re-parses each statement it prints.
   BINARY, which the binder inserts again wherever the operands' types call for
   it (SQL cannot write a BINARY's, and a written cast to DECIMAL is a
   `DecimalCastExpr`, which fits its value where the binder's reads it exactly,
-  so it prints as itself). A literal is printed so that it binds to its own
+  so it prints as itself). The one place the binder's DECIMAL casts are not
+  what its operands call for again is a BETWEEN, whose three operands meet as
+  one type where each of its two comparisons would meet as a pair, so the
+  comparisons it expands to print as the BETWEEN where its operand is cast to
+  a DECIMAL (`DecimalBetween`). A literal is printed so that it binds to its own
   type wherever it stands: a BIGINT an INT would hold as `CAST('5' AS BIGINT)`,
   a FLOAT, NaN and the infinities as a CAST of their text, a DATE and a
   TIMESTAMP as `DATE '...'` and `TIMESTAMP '...'`, a DECIMAL as its digits

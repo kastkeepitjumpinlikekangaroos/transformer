@@ -2296,6 +2296,30 @@ output, over every slt script and every query generator. Details are in
   COUNT() FROM t GROUP BY s ORDER BY COUNT(*), s` (`COUNT()` is now refused,
   below).
 
+## Defects the agreed corpus found (2026-11-02, all fixed)
+
+Running the fuzz generators' queries through Postgres, DuckDB and the engine
+under every verification mode
+([plans/testing/14](../plans/testing/14-multi-engine-generated-corpus.md))
+found one defect no other check had, in the printer rather than in an answer:
+
+- **The plan of a BETWEEN over two DECIMAL types did not bind back.**
+  `d2 BETWEEN d18 AND i` over a `DECIMAL(9,2)`, a `DECIMAL(38,18)` and an
+  `INT` compares its three operands as the one DECIMAL that holds them all,
+  `DECIMAL(38,18)`, and binds as `d2 >= d18 AND d2 <= i` with each operand
+  cast to it. `PlanSql` leaves its casts to a DECIMAL to the binder, so it
+  printed the two comparisons bare, and bound again each compared its own
+  pair, `d2 <= i` as a `DECIMAL(12,2)`: another plan, so the `reprinted` modes
+  failed the query and `EXPLAIN` printed SQL that did not bind back to its
+  plan. The answers were the same, a DECIMAL comparison being exact at any
+  type. The printer now writes that expansion as the `BETWEEN` it came from
+  where its operand is cast to a DECIMAL (`PlanSql.DecimalBetween`), which
+  binds to the same casts; two comparisons written over one operand with no
+  such cast stay two. Found on 8 of the decimal feature's first 600 queries,
+  each a `BETWEEN` the corpus's own decimal producer draws over columns of two
+  decimal types and an integer; `types/decimal.test` and `PlanSqlTest` hold
+  it.
+
 ## Answers the PostgreSQL port settled (2026-11-01, all decided)
 
 Porting Postgres's regression tests (`src/test/slt/postgres/`, with

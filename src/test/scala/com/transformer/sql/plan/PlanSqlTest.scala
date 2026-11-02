@@ -115,6 +115,13 @@ class PlanSqlTest {
     "SELECT a FROM t WHERE NOT (a = 1) AND NOT f AND NOT (NOT f)",
     "SELECT a FROM t WHERE dt < '2024-01-01' AND ts >= '2024-01-01 06:00:00'",
     "SELECT a + NULL AS x, m + NULL AS y, NULL = a AS z FROM t",
+    // A BETWEEN over two DECIMAL types compares its three operands as the
+    // DECIMAL that holds them all, where its two comparisons alone would
+    // each compare a pair as another (found by the agreed corpus,
+    // plans/testing/14).
+    "SELECT a FROM t WHERE m BETWEEN CAST(b AS DECIMAL(25,5)) AND a",
+    "SELECT m BETWEEN a AND CAST(d AS DECIMAL(20,4)) AS x, m NOT BETWEEN CAST(b AS DECIMAL(25,5)) AND 2.5 AS y " +
+      "FROM t WHERE a > 0 AND m BETWEEN CAST(a AS DECIMAL(20,4)) AND b AND f",
     // A table aliased by a word no keyword list holds but the parser reads as
     // the clock where it qualifies a column (found by the round-trip campaign).
     "SELECT a, COUNT(*) AS n FROM t CURRENT_TIMESTAMP GROUP BY a",
