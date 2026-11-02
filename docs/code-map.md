@@ -101,7 +101,7 @@ navigation hint, not a comprehensive directory listing.
   `VimText.scala` (~540 LOC: words, paragraphs, objects, vim regex). A new
   command is an `Action` there and a case in `execute` here; see
   [extending.md](extending.md#extend-the-gui).
-- `read/parquet/ParquetReader.scala` (~930 LOC) — `ParquetReader` (the footer
+- `read/parquet/ParquetReader.scala` (~1000 LOC) — `ParquetReader` (the footer
   pass that packs row groups into partitions and checks every file of a glob
   against the first, the reader's own exceptions and what of parquet-mr's it
   wraps), and `ParquetPartitionIterator`, most of whose length is
