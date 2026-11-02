@@ -22,7 +22,9 @@ import scala.jdk.CollectionConverters._
   *
   * Prints one summary line per script and a total; `--report` writes every
   * record that did not pass (refusals tallied by message, failures and
-  * divergences in full with their SQL). `--modes none` runs the baseline only,
+  * divergences in full with their SQL) and the skips tallied by their rule.
+  * A script's conditions on transformer cite the ledger in the workspace's
+  * `docs/gotchas.md` ([[Ledger]]). `--modes none` runs the baseline only,
   * which is how a first pass over the whole corpus stays affordable.
   * `--memory` prints the heap a script left live, after a collection, to
   * find a leak across scripts.
@@ -32,6 +34,7 @@ import scala.jdk.CollectionConverters._
 object Corpus {
 
   def main(args: Array[String]): Unit = {
+    lazy val ledger = Ledger.load(resolve(Ledger.DefaultPath.toString))
     var dialect: Dialect = Dialect.Sqlite
     var modes = Modes.Verification
     var threads = 1
@@ -64,7 +67,7 @@ object Corpus {
         case "--complete" =>
           // Write each script given after this flag back with the engine's
           // results filled in, and stop.
-          val runner = new Runner(dialect, Nil)
+          val runner = new Runner(dialect, ledger, Nil)
           args.drop(i + 1).foreach { f =>
             val path = resolve(f)
             val (text, problems) = runner.complete(f, path)
@@ -87,7 +90,7 @@ object Corpus {
         finally walk.close()
       } else Seq(p)
     }
-    val runner = new Runner(dialect, modes)
+    val runner = new Runner(dialect, ledger, modes)
     val pool = Executors.newFixedThreadPool(threads)
     val started = System.nanoTime()
     val futures = files.map { f =>
@@ -146,6 +149,10 @@ object Corpus {
         }
         w.println()
       }
+      w.println("== skips by rule")
+      results.flatMap(_.skipTally).groupMapReduce(_._1)(_._2)(_ + _).toSeq.sortBy { case (id, n) => (-n, id) }
+        .foreach { case (id, n) => w.println(f"$n%8d  $id") }
+      w.println()
       w.println("== files stopped early")
       results.filter(_.stoppedAt.isDefined).foreach(r => w.println(s"${r.file}: ${r.stoppedAt.get}"))
       w.println()

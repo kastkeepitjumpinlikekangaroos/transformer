@@ -5,9 +5,10 @@ import java.nio.file.{Files, Path, Paths}
 
 /** The rules by which the engine answers otherwise than other engines, on
   * purpose: the table under [[Ledger.Heading]] in `docs/gotchas.md`, a rule
-  * a row. Each rule has an id, and a script of this repo's own pins it: a
-  * record of the engine's own answer under the rule, after a line `onlyif
-  * transformer <id>`.
+  * a row. A script cites a rule by its id, in `skipif transformer <id>` before
+  * a record of another engine's answer the engine does not give, and in
+  * `onlyif transformer <id>` before a record of the engine's own answer under
+  * the rule (see [[Script]]).
   *
   * {{{
   *   | id | rule | refusal | stated in | decided in | pinned by |

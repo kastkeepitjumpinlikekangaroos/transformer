@@ -9,7 +9,22 @@ import java.util.Locale
   *
   * A script is records separated by blank lines. Lines starting with `#` are
   * comments. A record may be preceded by `skipif <engine>` / `onlyif <engine>`
-  * lines, which say which engines run it; this engine is `transformer`.
+  * lines, which say which engines run it; this engine is `transformer`, and
+  * a condition on it cites a rule of the [[Ledger]] by its id:
+  *
+  *   - `skipif transformer <id> [# comment]` before another engine's answer
+  *     the engine does not give, by that rule.
+  *   - `onlyif transformer <id> [# comment]` before a record of the engine's
+  *     own answer under the rule: in a port, the twin that follows a skip
+  *     whose rule is not a refusal, with the same SQL; in a script of this
+  *     repo's own, the rule's pin.
+  *
+  * A condition on transformer with no id, or with one the ledger does not
+  * have, is a [[ParseError]]; so is a skip whose rule is not a refusal with no
+  * twin after it. A record carries one condition on transformer, and no
+  * `onlyif` on another engine beside it, which would keep it from this one
+  * anyway. Conditions on other engines keep their free form (`skipif mysql #
+  * not compatible`).
   *
   * {{{
   *   statement ok
@@ -48,9 +63,13 @@ object Script {
   /** The name this engine answers to in `skipif` and `onlyif`. */
   val EngineName: String = "transformer"
 
-  final case class Condition(skip: Boolean, engine: String) {
+  /** `skipif` or `onlyif` an engine; `rule` is the ledger id a condition on
+    * [[EngineName]] cites, and None on any other engine. */
+  final case class Condition(skip: Boolean, engine: String, rule: Option[String]) {
     /** Whether this condition lets the record run on [[EngineName]]. */
-    def admits: Boolean = if (skip) !engine.equalsIgnoreCase(EngineName) else engine.equalsIgnoreCase(EngineName)
+    def admits: Boolean = if (skip) !onThisEngine else onThisEngine
+
+    def onThisEngine: Boolean = engine.equalsIgnoreCase(EngineName)
   }
 
   sealed trait SortMode
@@ -77,6 +96,12 @@ object Script {
     def line: Int
     def conditions: Seq[Condition]
     def runs: Boolean = conditions.forall(_.admits)
+
+    /** The rule a `skipif transformer` before the record cites. */
+    def skipRule: Option[String] = conditions.collectFirst { case Condition(true, _, Some(id)) => id }
+
+    /** The rule an `onlyif transformer` before the record cites. */
+    def onlyRule: Option[String] = conditions.collectFirst { case Condition(false, _, Some(id)) => id }
   }
 
   final case class Statement(line: Int, conditions: Seq[Condition], sql: String, expectError: Boolean,
@@ -108,7 +133,31 @@ object Script {
   final class ParseError(file: String, line: Int, msg: String)
     extends RuntimeException(s"$file:$line: $msg")
 
-  def parse(file: String, text: String): Vector[Record] = {
+  /** The records of `text`, the script `file`, each condition on transformer
+    * checked against `ledger`. */
+  def parse(file: String, text: String, ledger: Ledger): Vector[Record] = {
+    val records = read(file, text, ledger)
+    records.indices.foreach { i =>
+      val rec = records(i)
+      for (id <- rec.skipRule; rule <- ledger.rule(id) if !rule.refuses) {
+        val twin = records.lift(i + 1).filter(n => n.onlyRule.contains(id) && sqlOf(n).isDefined && sqlOf(n) == sqlOf(rec))
+        if (twin.isEmpty)
+          throw new ParseError(file, rec.line, s"a record skipped as $id is followed by its twin, a record " +
+            s"'onlyif $EngineName $id' of the same SQL with the engine's own answer, since the rule says the " +
+            "engine answers otherwise rather than that it refuses")
+      }
+    }
+    records
+  }
+
+  /** A record's SQL, if it has one. */
+  def sqlOf(rec: Record): Option[String] = rec match {
+    case q: Query => Some(q.sql)
+    case s: Statement => Some(s.sql)
+    case _ => None
+  }
+
+  private def read(file: String, text: String, ledger: Ledger): Vector[Record] = {
     val lines = text.split("\n", -1).map(l => if (l.endsWith("\r")) l.dropRight(1) else l)
     val out = Vector.newBuilder[Record]
     var i = 0
@@ -131,16 +180,24 @@ object Script {
       val raw = lines(i)
       if (raw.trim.isEmpty || raw.trim.startsWith("#")) i += 1
       else {
-        val conditions = Vector.newBuilder[Condition]
+        val builder = Vector.newBuilder[Condition]
         var tokens = tokenize(raw)
         while (tokens.headOption.exists(t => t == "skipif" || t == "onlyif")) {
           if (tokens.length < 2) throw new ParseError(file, i + 1, s"'${tokens.head}' names no engine")
-          conditions += Condition(tokens.head == "skipif", tokens(1))
+          val onThisEngine = tokens(1).equalsIgnoreCase(EngineName)
+          builder += Condition(tokens.head == "skipif", tokens(1),
+            if (onThisEngine) Some(ruleId(file, i + 1, lines(i), tokens, ledger)) else None)
           i += 1
           if (i >= lines.length) throw new ParseError(file, i, "a condition with no record after it")
           tokens = tokenize(lines(i))
         }
         val start = i + 1
+        val conditions = builder.result()
+        if (conditions.count(_.onThisEngine) > 1)
+          throw new ParseError(file, start, s"a record takes one condition on $EngineName")
+        if (conditions.exists(_.onThisEngine) && conditions.exists(c => !c.skip && !c.onThisEngine))
+          throw new ParseError(file, start, s"a record with an onlyif on another engine takes no condition on " +
+            s"$EngineName: the onlyif keeps it from this engine already")
         tokens.headOption match {
           case Some("statement") =>
             val expectError = tokens.lift(1) match {
@@ -158,7 +215,7 @@ object Script {
               errorText = Some(msg.mkString("\n"))
               next = end
             }
-            out += Statement(start, conditions.result(), sqlLines.mkString("\n"), expectError, errorText)
+            out += Statement(start, conditions, sqlLines.mkString("\n"), expectError, errorText)
             i = next
           case Some("query") =>
             if (tokens.length < 2) throw new ParseError(file, start, "a query names no columns")
@@ -182,22 +239,47 @@ object Script {
               }
               next = end
             }
-            out += Query(start, conditions.result(), sqlLines.mkString("\n"), columns, sort, label, expected, after, next)
+            out += Query(start, conditions, sqlLines.mkString("\n"), columns, sort, label, expected, after, next)
             i = next
           case Some("hash-threshold") =>
+            if (conditions.exists(_.onThisEngine))
+              throw new ParseError(file, start, s"a hash-threshold takes no condition on $EngineName")
             val n = tokens.lift(1).flatMap(s => s.toIntOption)
               .getOrElse(throw new ParseError(file, start, "hash-threshold takes a number"))
             out += HashThreshold(start, n)
             i += 1
           case Some("halt") =>
-            out += Halt(start, conditions.result())
+            if (conditions.exists(_.onThisEngine))
+              throw new ParseError(file, start, s"a halt takes no condition on $EngineName")
+            out += Halt(start, conditions)
             i += 1
           case Some(other) => throw new ParseError(file, start, s"unknown record type '$other'")
-          case None => i += 1
+          case None =>
+            if (conditions.nonEmpty) throw new ParseError(file, start, "a condition with no record after it")
+            i += 1
         }
       }
     }
     out.result()
+  }
+
+  /** The id a condition on transformer cites, its third token: one the
+    * ledger has, then nothing but a comment. `raw` is the condition's line. */
+  private def ruleId(file: String, line: Int, raw: String, tokens: Vector[String], ledger: Ledger): String = {
+    val written = s"${tokens.head} $EngineName"
+    tokens.lift(2) match {
+      case None =>
+        val comment = raw.indexOf('#') match { case -1 => ""; case k => raw.substring(k + 1) }
+        val nearest = ledger.suggest(comment).map(id => s"; the nearest to its comment is '$id'").getOrElse("")
+        throw new ParseError(file, line, s"'$written' cites no rule: write the id of the rule the record follows, " +
+          s"from the ledger in docs/gotchas.md (${ledger.ids.mkString(", ")})$nearest")
+      case Some(id) if ledger.rule(id).isEmpty =>
+        throw new ParseError(file, line, s"'$written $id' cites a rule the ledger in docs/gotchas.md does not " +
+          s"have; the nearest is '${ledger.nearest(id)}'")
+      case Some(id) if tokens.length > 3 =>
+        throw new ParseError(file, line, s"'$written $id' takes a comment after a #, not '${tokens(3)}'")
+      case Some(id) => id
+    }
   }
 
   /** The whitespace-separated tokens of a record's first line, up to a `#`. */

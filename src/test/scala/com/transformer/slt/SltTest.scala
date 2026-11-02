@@ -28,7 +28,7 @@ class SltTest(name: String, path: Path) {
 
   @Test def scriptPasses(): Unit = {
     val dialect = if (name.startsWith("sqlite/")) Dialect.Sqlite else Dialect.Transformer
-    val result = new Runner(dialect).run(name, path)
+    val result = new Runner(dialect, SltTest.ledger).run(name, path)
     val problems = result.problems
     if (problems.nonEmpty || result.stoppedAt.isDefined) {
       val shown = problems.take(10).map { r =>
@@ -55,6 +55,9 @@ object SltTest {
   /** Where the scripts are: the runfiles tree under Bazel, the source tree
     * otherwise. */
   private val Root: Path = Paths.get("src/test/slt")
+
+  /** The ledger every script's conditions on transformer cite. */
+  private lazy val ledger: Ledger = Ledger.load(Ledger.DefaultPath)
 
   @Parameters(name = "{0}")
   def scripts(): java.util.Collection[Array[AnyRef]] = {

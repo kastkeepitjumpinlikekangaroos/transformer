@@ -624,7 +624,8 @@ a header naming its source. A port of another engine's tests
 (`src/test/slt/postgres/`) keeps that engine's answers, never the engine's own:
 its header names the source file and commit and counts what it leaves out by
 kind, and each record names its source line and any rewrite (only one that
-cannot change the meaning).
+cannot change the meaning). A port's new directory joins `LedgerTest.Ports`,
+which holds a port to the engine's answers in twins alone.
 
 Mark each record the engine answers otherwise by design with `skipif
 transformer <id>` on the line before it, the id of the rule it follows in the

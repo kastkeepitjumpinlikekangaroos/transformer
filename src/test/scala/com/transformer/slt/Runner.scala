@@ -23,12 +23,12 @@ import scala.util.control.NonFatal
   * statement this runner cannot carry out ends the script, since every record
   * after it reads what it would have built.
   */
-final class Runner(dialect: Dialect, modes: Seq[Mode] = Modes.Verification) {
+final class Runner(dialect: Dialect, ledger: Ledger, modes: Seq[Mode] = Modes.Verification) {
 
   import Runner._
 
   /** Run the script at `path`, named `file` in what it reports. */
-  def run(file: String, path: Path): FileResult = run(file, Script.parse(file, read(path)), directory(path))
+  def run(file: String, path: Path): FileResult = run(file, Script.parse(file, read(path), ledger), directory(path))
 
   /** Run `records`, whose COPY statements name files in `dir`. */
   def run(file: String, records: Seq[Record], dir: Path): FileResult = {
@@ -41,7 +41,9 @@ final class Runner(dialect: Dialect, modes: Seq[Mode] = Modes.Verification) {
       val it = records.iterator
       while (stoppedAt.isEmpty && it.hasNext) {
         val rec = it.next()
-        if (!rec.runs) results += RecordResult(rec, Skipped("its conditions exclude this engine"))
+        if (!rec.runs)
+          results += RecordResult(rec, Skipped(rec.skipRule.fold("its conditions exclude this engine")(id =>
+            s"skipped as $id"), rec.skipRule))
         else rec match {
           case HashThreshold(_, _) => ()
           case Halt(_, _) => stoppedAt = Some("halt")
@@ -49,7 +51,7 @@ final class Runner(dialect: Dialect, modes: Seq[Mode] = Modes.Verification) {
             val outcome = statement(s, db, views)
             results += RecordResult(rec, outcome)
             outcome match {
-              case Skipped(reason) if !s.expectError => stoppedAt = Some(s"line ${s.line}: $reason")
+              case Skipped(reason, _) if !s.expectError => stoppedAt = Some(s"line ${s.line}: $reason")
               case Failed(reason) if !s.expectError => stoppedAt = Some(s"line ${s.line}: a statement failed: $reason")
               case _ => ()
             }
@@ -75,7 +77,7 @@ final class Runner(dialect: Dialect, modes: Seq[Mode] = Modes.Verification) {
     val problems = Vector.newBuilder[String]
     var copied = 0
     try {
-      Script.parse(file, text).foreach {
+      Script.parse(file, text, ledger).foreach {
         case q: Query if q.runs =>
           out ++= lines.slice(copied, q.sqlEnd)
           try {
@@ -110,7 +112,7 @@ final class Runner(dialect: Dialect, modes: Seq[Mode] = Modes.Verification) {
       if (s.expectError) Failed("the statement succeeded; it should fail")
       else Passed
     } catch {
-      case u: Database.Unsupported => Skipped(u.getMessage)
+      case u: Database.Unsupported => Skipped(u.getMessage, None)
       case NonFatal(e) =>
         if (!s.expectError) Failed(describe(e))
         else if (!clean(e, running = true)) Failed("an internal error passed for the expected one: " + describe(e))
@@ -253,7 +255,9 @@ object Runner {
 
   sealed trait Outcome
   case object Passed extends Outcome
-  final case class Skipped(reason: String) extends Outcome
+  /** A record the engine does not run: one its conditions give to other
+    * engines (`rule` None), or one `skipif transformer <rule>` keeps from it. */
+  final case class Skipped(reason: String, rule: Option[String]) extends Outcome
   /** The engine refused a query whose result the script gives. */
   final case class Refused(message: String) extends Outcome
   /** A wrong result, a wrong error, or no error where the script expects one. */
@@ -264,10 +268,10 @@ object Runner {
   final case class RecordResult(record: Record, outcome: Outcome)
 
   /** A script's outcomes reduced to counts by kind, refusals tallied by
-    * message, and the records an audit reports (failures and divergences,
-    * and refusals when asked). */
+    * message and skips by rule, and the records an audit reports (failures
+    * and divergences, and refusals when asked). */
   final case class CompactResult(file: String, counts: Map[String, Int], refusalTally: Map[String, Int],
-      kept: Vector[RecordResult], stoppedAt: Option[String])
+      skipTally: Map[String, Int], kept: Vector[RecordResult], stoppedAt: Option[String])
 
   final case class FileResult(file: String, results: Vector[RecordResult], stoppedAt: Option[String]) {
     def compact(keepRefusals: Boolean): CompactResult = {
@@ -280,6 +284,7 @@ object Runner {
       }
       CompactResult(file, results.groupMapReduce(r => kind(r.outcome))(_ => 1)(_ + _),
         results.collect { case RecordResult(_, Refused(m)) => Corpus.normalizeMessage(m) }.groupMapReduce(identity)(_ => 1)(_ + _),
+        results.collect { case RecordResult(_, Skipped(_, Some(id))) => id }.groupMapReduce(identity)(_ => 1)(_ + _),
         results.filter(r => r.outcome match {
           case _: Failed | _: Diverged => true
           case _: Refused => keepRefusals
@@ -290,7 +295,7 @@ object Runner {
 
     def count(p: Outcome => Boolean): Int = results.count(r => p(r.outcome))
     def problems: Vector[RecordResult] = results.filter(r => r.outcome match {
-      case Passed | Skipped(_) => false
+      case Passed | Skipped(_, _) => false
       case _ => true
     })
     def summary: String = {

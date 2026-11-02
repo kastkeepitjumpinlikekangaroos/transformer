@@ -26,23 +26,27 @@ scala_library(
 )
 
 # Every script under src/test/slt, each a JUnit case, each query under every
-# verification mode. Four shards split the scripts between four JVMs. Part of
+# verification mode, each condition on transformer checked against the ledger
+# in docs/gotchas.md. Four shards split the scripts between four JVMs. Part of
 # `bazel test //...`.
 scala_junit_test(
     name = "slt_test",
     srcs = ["SltTest.scala"],
     suffixes = ["Test"],
     shard_count = 4,
-    data = ["//src/test/slt:scripts"],
+    data = [
+        "//:docs/gotchas.md",
+        "//src/test/slt:scripts",
+    ],
     deps = [
         ":slt",
         "@maven//:junit_junit",
     ],
 )
 
-# The ledger in docs/gotchas.md: its table read strictly, and each rule
-# pinned by a record of the engine's own answer in a script of this repo's
-# own.
+# The ledger in docs/gotchas.md: its table read strictly, and against every
+# script each rule cited by a skip or pinned, each pin a record of the
+# engine's own answer in a script of this repo's own.
 scala_junit_test(
     name = "ledger_test",
     srcs = ["LedgerTest.scala"],
@@ -51,6 +55,19 @@ scala_junit_test(
         "//:docs/gotchas.md",
         "//src/test/slt:scripts",
     ],
+    deps = [
+        ":slt",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The runner over scripts written inline: a condition on transformer cites a
+# rule, a skip whose rule is no refusal has its twin, and a skipped record is
+# reported as its rule.
+scala_junit_test(
+    name = "runner_test",
+    srcs = ["RunnerTest.scala"],
+    suffixes = ["Test"],
     deps = [
         ":slt",
         "@maven//:junit_junit",
