@@ -134,9 +134,10 @@ final case class HashJoinExec(
     * large probe just to redistribute rows costs more than the join itself.
     *
     * Detected via child type rather than a flag so direct construction over
-    * non-exchange children (existing tests, future callers) still works. */
-  private val isSharded: Boolean =
-    left.isInstanceOf[ExchangeExec] && right.isInstanceOf[ExchangeExec]
+    * non-exchange children (existing tests, future callers) still works; a
+    * child the metrics wrapper meters is the exchange it wraps
+    * ([[ExchangeExec.feeds]]). */
+  private val isSharded: Boolean = ExchangeExec.feeds(left) && ExchangeExec.feeds(right)
 
   def numPartitions: Int = if (isSharded) left.numPartitions else 1
 

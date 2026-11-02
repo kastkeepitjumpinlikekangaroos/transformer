@@ -53,7 +53,7 @@ final case class DistinctExec(
     * Same gate as [[HashAggregateExec.isSharded]] / [[HashJoinExec.isSharded]]
     * — runtime detection via the child's concrete type so direct construction
     * over a non-exchange child still works (collapsing mode). */
-  private val isSharded: Boolean = child.isInstanceOf[ExchangeExec]
+  private val isSharded: Boolean = ExchangeExec.feeds(child)
 
   def numPartitions: Int = if (isSharded) child.numPartitions else 1
 

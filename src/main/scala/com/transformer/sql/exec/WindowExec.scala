@@ -77,7 +77,7 @@ final case class WindowExec(
     * partitioned by the shared PARTITION BY keys of every WindowSpec. The
     * planner only does this when all specs agree on a single non-empty
     * PARTITION BY key set; the operator just trusts the wrapper. */
-  private val isSharded: Boolean = child.isInstanceOf[ExchangeExec]
+  private val isSharded: Boolean = ExchangeExec.feeds(child)
 
   def numPartitions: Int = if (isSharded) child.numPartitions else 1
 

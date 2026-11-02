@@ -2387,6 +2387,15 @@ answer it should give by construction:
   prints in parentheses. Found by the `rewritten` slt mode, whose rewrite
   wrapped a boolean under a CAST in a form that cannot change its value;
   `PlanSqlTest` holds it.
+- **With metrics on, a sharded plan ran unsharded.** A join, an aggregate, a
+  DISTINCT and a window run per shard when the planner put an exchange under
+  them, which each told by its child's class; with metrics on, that child is
+  the wrapper that meters the exchange (`MeteredPlan`), so each ran on one
+  partition, reading every shard: the same answer, the parallelism the
+  exchange was there for gone, and the metrics describing a plan no run
+  without them takes. Each now sees through the wrapper (`ExchangeExec.feeds`).
+  Found reading a join's path off its plan for plan 16's forced-plan guard;
+  `ShardedModeFuzzTest.metricsLeaveAShardedPlanSharded` holds it.
 
 ## Answers the PostgreSQL port settled (2026-11-01, all decided)
 

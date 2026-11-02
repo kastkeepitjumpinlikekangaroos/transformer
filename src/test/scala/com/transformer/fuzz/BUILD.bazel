@@ -163,6 +163,7 @@ scala_junit_test(
     deps = [
         ":fuzz",
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/sql/plan",
         "@maven//:junit_junit",
     ],
@@ -343,6 +344,7 @@ scala_junit_test(
     deps = [
         ":fuzz",
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/sql/plan",
         "@maven//:junit_junit",
     ],

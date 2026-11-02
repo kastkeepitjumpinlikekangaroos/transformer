@@ -3,7 +3,8 @@ package com.transformer.fuzz
 import com.transformer.core._
 import com.transformer.fuzz.MetaQueryGen._
 import com.transformer.fuzz.oracle.{AggDecomposition, JoinCommutativity, MetaModeDifferential, NoRec, RelEngine, Tlp}
-import com.transformer.sql.plan.LogicalPlanCardinality
+import com.transformer.sql.exec.PhysicalPlanner
+import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer, LogicalPlanCardinality}
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
 
@@ -122,6 +123,34 @@ class ShardedModeFuzzTest {
     // A partition of n rows gives n rows of n, so the sum of 1/n over the rows counts the partitions.
     val partitions = sized.map(r => 1.0 / r(0).asInstanceOf[Long]).sum
     assertTrue(s"$partitions partitions of FLOOR(RAND() * 3)", math.round(partitions) <= 3)
+  }
+
+  /** Metrics watch a plan; they do not change it. With metrics on, a sharded
+    * join, aggregate, DISTINCT and window each ran on one partition: each
+    * told its exchange child by its class, and with metrics on the child is
+    * the wrapper that meters it (found by plans/testing/16's forced-plan
+    * guard, reading a join's path off its plan). */
+  @Test def metricsLeaveAShardedPlanSharded(): Unit = {
+    val schema = Schema(Vector(Field("k", DataType.IntType), Field("v", DataType.IntType)))
+    val rows = (0 until 40).map(i => Array[Any](i % 7, i))
+    val cat = new Catalog
+    cat.register("a", DataGen.Dataset(schema, rows).evenPartitions(4, 5))
+    cat.register("b", DataGen.Dataset(schema, rows).evenPartitions(4, 5))
+    val metrics = ExecutionOptions(metricsEnabled = true)
+    Seq(
+      "SELECT a.k, b.v FROM a JOIN b ON a.k = b.k",
+      "SELECT k, COUNT(*) AS n FROM a GROUP BY k",
+      "SELECT DISTINCT k FROM a",
+      "SELECT k, SUM(v) OVER (PARTITION BY k) AS s FROM a").foreach { sql =>
+      val logical = LogicalOptimizer.optimize(LogicalBuilder.build(sql, cat).main)
+      assertEquals(s"the planner shards $sql", 4, PhysicalPlanner.plan(logical, ExecutionOptions.Default).numPartitions)
+      assertEquals(s"with metrics on, $sql runs on as many partitions", 4, PhysicalPlanner.plan(logical, metrics).numPartitions)
+      val q = RelEngine.execute(cat, sql, ExecutionOptions.Default)
+      val expected = RelEngine.collectRows(q)
+      val metered = RelEngine.execute(cat, sql, metrics)
+      RowOracle.multisetEquals(q.schema, expected, RelEngine.collectRows(metered)).foreach(d => fail(s"$sql\n$d"))
+      metered.metricsSnapshot
+    }
   }
 
   // ---- the properties (identical to MetamorphicFuzzTest, under sharding) -----

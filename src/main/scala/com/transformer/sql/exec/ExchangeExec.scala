@@ -323,6 +323,16 @@ final case class ExchangeExec(
 }
 
 object ExchangeExec {
+  /** Whether `p` is an exchange, or the wrapper that meters one: what a
+    * breaker over it reads to run per shard. Metrics watch a plan and must
+    * not change it, so the wrapper is seen through; with metrics on, a
+    * sharded join, aggregate, DISTINCT and window ran on one partition. */
+  private[exec] def feeds(p: PhysicalPlan): Boolean = p match {
+    case _: ExchangeExec => true
+    case m: MeteredPlan => feeds(m.underlying)
+    case _ => false
+  }
+
   /** Default shard count used by callers (planner, breakers) that don't have
     * a workload-specific reason to override. Tracks [[Scheduler.parallelism]]
     * so a JVM sized for high concurrency gets proportionally more shards;

@@ -460,6 +460,11 @@ from the operator's `IdxCounterNames` array, and `DataJob.runOneTask`
 writes a sibling `_perf.json` next to `_run.json` with the operator
 tree snapshot plus per-task `ThreadMXBean` CPU / allocation / GC deltas.
 
+Metrics watch a plan and never change it: an operator that runs per shard
+over an exchange tells by its child, and sees through the wrapper that
+meters it (`ExchangeExec.feeds`), so a sharded plan stays sharded with
+metrics on.
+
 Enablement plumbing mirrors spill: a new `metricsEnabled: Boolean` field
 on `ExecutionOptions` threaded through `SqlExecutor.execute` →
 `SqlEngine.execute` → `PhysicalPlanner.plan` to the operator

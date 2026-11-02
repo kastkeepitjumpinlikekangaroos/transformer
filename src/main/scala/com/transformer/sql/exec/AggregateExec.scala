@@ -65,7 +65,7 @@ final case class HashAggregateExec(
   /** True when the planner has wrapped `child` in an `ExchangeExec` that
     * has hash-partitioned by the same `groupKeys`. Drives the per-shard vs
     * collapsing dispatch in [[execute]]. */
-  private val isSharded: Boolean = child.isInstanceOf[ExchangeExec]
+  private val isSharded: Boolean = ExchangeExec.feeds(child)
 
   def numPartitions: Int = if (isSharded) child.numPartitions else 1
 
