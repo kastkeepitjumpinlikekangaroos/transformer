@@ -504,6 +504,46 @@ class ModeDifferentialFuzzTest {
 
   private val TextFloor = 9
 
+  /** The shapes the renderer could not write paren-free, which `QueryGen`
+    * kept out until plans/testing/15: a negation of a computed value, which
+    * renders `-(x)`, and a NOT over an AND or an OR, which renders `NOT (...)`.
+    * Both must be drawn, and the queries that hold them bind. Generation and
+    * binding only. */
+  @Test def negationsAndNotsOverCompoundsAreDrawnAndBind(): Unit = {
+    val n = 6000
+    var negation, notOverCompound, rejected = 0
+    (0 until n).foreach { seed =>
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val nodes = nodesOf(qc.query)
+      val neg = nodes.exists {
+        case UnaryOpExpr("-", c, _) => !c.isInstanceOf[ColRefExpr] && !c.isInstanceOf[LitExpr]
+        case _ => false
+      }
+      val not = nodes.exists {
+        case UnaryOpExpr("NOT", BinOpExpr("AND" | "OR", _, _, _), _) => true
+        case _ => false
+      }
+      if (neg) negation += 1
+      if (not) notOverCompound += 1
+      // Refused as text: a parse error, or the binder's refusal of two signs
+      // in a row or of a NOT hung on a comparison's left side. A branch list
+      // mixing a DECIMAL and a DOUBLE is the corpus's own known refusal.
+      if (neg || not) ModeDifferential.bindReject(qc).foreach { reason =>
+        if (reason.startsWith("SQL parse error") || reason.contains("NOT")) {
+          rejected += 1
+          println(s"  refused: ${reason.take(160)}  e.g. ${qc.sql.take(300)}")
+        }
+      }
+    }
+    println(s"[mode-differential] over $n seeds: a negation of a computed value in $negation, a NOT over an AND " +
+      s"or an OR in $notOverCompound; of those, $rejected refused as text")
+    // Measured over these seeds: a negation 221, a NOT over an AND or an OR
+    // 147; bounds ~3x below.
+    assertTrue(s"a computed value is rarely negated ($negation)", negation > 73)
+    assertTrue(s"a NOT rarely takes an AND or an OR ($notOverCompound)", notOverCompound > 49)
+    assertEquals(s"queries refused as text: $rejected", 0, rejected)
+  }
+
   private def isDouble(v: Any, p: Double => Boolean): Boolean = v match {
     case x: java.lang.Double => p(x.doubleValue)
     case x: java.lang.Float => p(x.doubleValue)

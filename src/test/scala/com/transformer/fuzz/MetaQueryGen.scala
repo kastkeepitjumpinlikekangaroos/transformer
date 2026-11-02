@@ -1130,6 +1130,7 @@ object MetaQueryGen {
         (4, () => BinOpExpr(rng.oneOf(ArithOps), sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics)), target)),
         (2, () => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(target)), target)),
         (1, () => FuncExpr("ABS", Seq(sub(target)), target)),
+        (1, () => UnaryOpExpr("-", sub(target), target)),
         (1, () => FuncExpr("MOD", Seq(sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics))), target)),
         (1, () => FuncExpr(rng.oneOf(Seq("GREATEST", "LEAST")), Seq.fill(rng.between(1, 3))(sub(target)), target)),
         (1, () => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
@@ -1232,14 +1233,16 @@ object MetaQueryGen {
     else LitExpr(genLit(rng, target), target)
   }
 
-  /** A boolean predicate over `scope`. Paren-free: AND/OR compose by precedence;
-    * comparisons are same-category; `NOT` wraps only a boolean leaf. */
+  /** A boolean predicate over `scope`. AND/OR compose by precedence;
+    * comparisons are same-category; `NOT` wraps a boolean leaf or any
+    * predicate, which `SqlRender` puts in parentheses. */
   private def genPredicate(rng: Rng, scope: Vector[ScopeCol], depth: Int): Expr = {
     if (depth <= 0 || rng.bool(leafProb(depth))) genAtom(rng, scope, depth)
     else rng.weighted(
       (3, () => BinOpExpr("AND", genPredicate(rng, scope, depth - 1), genPredicate(rng, scope, depth - 1), DataType.BooleanType)),
       (3, () => BinOpExpr("OR", genPredicate(rng, scope, depth - 1), genPredicate(rng, scope, depth - 1), DataType.BooleanType)),
       (2, () => UnaryOpExpr("NOT", genBoolLeaf(rng, scope), DataType.BooleanType)),
+      (1, () => UnaryOpExpr("NOT", genPredicate(rng, scope, depth - 1), DataType.BooleanType)),
       (5, () => genAtom(rng, scope, depth)))()
   }
 

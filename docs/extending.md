@@ -1001,11 +1001,12 @@ the reject rate near zero and the property sound:
   it does, the rule below still binds.) Only generate
   trees that stay type-correct under a precedence-only reparse: arithmetic
   operands numeric, `||` operands string, comparisons same-category (never a
-  boolean operand), and `NOT` only over a boolean leaf (the frontend binds `NOT`
-  tighter than comparison). Decimal arithmetic is the exception: its type
-  depends on what each side is, so `SqlRender.decimalSide` gives it the
-  parentheses precedence needs (only those: JSqlParser rejects some statements
-  with three stacked). Confirm with the `bindRejectRateIsLow` guard before
+  boolean operand). Decimal arithmetic is the exception: its type depends on
+  what each side is, so `SqlRender.decimalSide` gives it the parentheses
+  precedence needs (only those: JSqlParser rejects some statements with three
+  stacked). A unary minus renders `-(x)` and a `NOT` over anything but a
+  column or a literal `NOT (...)`, since two signs in a row do not parse and
+  the parser hangs a second `NOT` on a comparison's left side. Confirm with the `bindRejectRateIsLow` guard before
   merging, and over a large block when the change is to a type rule or to
   rendering: 500 seeds missed a reject that 20000 found. `FUZZ_PROBE_SEEDS=20000`
   (or `-Dfuzz.probe_seeds`) sets both guards' block without an edit, e.g.

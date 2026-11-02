@@ -25,15 +25,16 @@ import com.transformer.sql.plan._
   * this property rather than reusing the bound-`Expr` shapes from [[ExprGen]],
   * for two reasons:
   *
-  *   - '''Paren-free, but for decimal arithmetic.''' Expressions render without
-  *     grouping parentheses and rely on operator precedence, so the generators
-  *     only build trees that stay type-correct under a precedence-only reparse:
-  *     arithmetic operands are numeric, `||` operands are string, comparisons
-  *     are numeric-vs-numeric or string-vs-string (never boolean), and `NOT`
-  *     wraps a single atom — so the reparsed grouping may differ but the result
-  *     type never does. (Every mode runs the identical text, so a regrouped
-  *     reparse is harmless.) Decimal arithmetic is the exception, rendered
-  *     with the parentheses its shape needs (see [[SqlRender]]).
+  *   - '''Paren-free, but for decimal arithmetic, negation and NOT.'''
+  *     Expressions render without grouping parentheses and rely on operator
+  *     precedence, so the generators only build trees that stay type-correct
+  *     under a precedence-only reparse: arithmetic operands are numeric, `||`
+  *     operands are string, comparisons are numeric-vs-numeric or
+  *     string-vs-string (never boolean) — so the reparsed grouping may differ
+  *     but the result type never does. (Every mode runs the identical text, so
+  *     a regrouped reparse is harmless.) Decimal arithmetic, a unary minus and
+  *     a `NOT` over anything but a leaf are the exceptions, rendered with the
+  *     parentheses their shape needs (see [[SqlRender]]).
   *
   *   - '''Total by construction.''' Like [[ExprGen]], nothing here can throw for
   *     in-range input: casts are numeric->numeric or anything->string (never the
@@ -422,9 +423,9 @@ object QueryGen {
   private def genNumericExpr(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     def sub(t: DataType): Expr = genValue(rng, schema, t, depth - 1)
     val base: Seq[(Int, () => Expr)] = Seq(
-      // No unary minus: paren-free `- - x` / `- -1` do not parse. Negative values
-      // still arise from column data and subtraction.
       5 -> (() => BinOpExpr(rng.oneOf(ArithOps), sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics)), target)),
+      // A negation of any value, which `SqlRender` writes `-(x)`.
+      2 -> (() => UnaryOpExpr("-", sub(target), target)),
       2 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
       2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(target)), target)),
       2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(target), sub(target)), target)),
@@ -576,6 +577,7 @@ object QueryGen {
     val decimalCols = (0 until schema.length).filter(i => schema.fields(i).dataType.isInstanceOf[DataType.DecimalType])
     val extra: Seq[(Int, () => Expr)] = target match {
       case d: DataType.DecimalType if decimalCols.nonEmpty => Seq(
+        1 -> (() => UnaryOpExpr("-", colRef(schema, rng.oneOf(decimalCols)), target)),
         4 -> (() => genDecimalArith(rng, schema, target, decimalCols, depth)),
         5 -> (() => genDecimalBranches(rng, schema, target, decimalCols, depth)),
         1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
@@ -686,17 +688,18 @@ object QueryGen {
     CaseExpr(branches, elseE, target)
   }
 
-  /** A boolean predicate. Paren-free-safe: AND/OR compose by precedence and
-    * comparisons are same-category. `NOT` is applied ONLY to a boolean leaf —
-    * JSqlParser reads `NOT NOT a >= b` as `NOT ((NOT a) >= b)`, which the
-    * binder refuses. A comparison is negated instead by flipping its relop;
-    * IS NULL / IN / LIKE carry their own negation. */
+  /** A boolean predicate. AND/OR compose by precedence and comparisons are
+    * same-category. `NOT` is applied to a boolean leaf, or to any predicate,
+    * an AND and an OR among them, which `SqlRender` writes in parentheses
+    * (JSqlParser reads `NOT NOT a >= b` as `NOT ((NOT a) >= b)`, which the
+    * binder refuses); IS NULL / IN / LIKE carry their own negation too. */
   private def genPredicate(rng: Rng, schema: Schema, depth: Int): Expr = {
     if (depth <= 0 || rng.bool(leafProb(depth))) genAtom(rng, schema, depth)
     else rng.weighted(
       (3, () => BinOpExpr("AND", genPredicate(rng, schema, depth - 1), genPredicate(rng, schema, depth - 1), DataType.BooleanType)),
       (3, () => BinOpExpr("OR", genPredicate(rng, schema, depth - 1), genPredicate(rng, schema, depth - 1), DataType.BooleanType)),
       (2, () => UnaryOpExpr("NOT", genBoolLeaf(rng, schema), DataType.BooleanType)),
+      (2, () => UnaryOpExpr("NOT", genPredicate(rng, schema, depth - 1), DataType.BooleanType)),
       (5, () => genAtom(rng, schema, depth)))()
   }
 
@@ -985,7 +988,11 @@ object QueryGen {
   * tree. Its type depends on what each side is (`Analyzer.arithmetic`), and a
   * regrouped reparse could join an integer column with a number, a DOUBLE,
   * which the binder refuses beside a DECIMAL. Only the parentheses precedence
-  * needs, since JSqlParser rejects some statements with three stacked ones. */
+  * needs, since JSqlParser rejects some statements with three stacked ones.
+  * A unary minus takes its operand in parentheses, `-(x)`, since two signs in
+  * a row do not parse, and so does a `NOT` over anything but a column or a
+  * literal, `NOT (a AND b)`, since the parser hangs a second `NOT` on a
+  * comparison's left side. */
 object SqlRender {
 
   def expr(e: Expr): String = e match {
@@ -994,8 +1001,14 @@ object SqlRender {
     case ColRefExpr(_, name, _) => name
     case CastExpr(c, t) => s"CAST(${expr(c)} AS ${sqlType(t)})"
     case DecimalCastExpr(c, t) => s"CAST(${expr(c)} AS DECIMAL(${t.precision},${t.scale}))"
-    case UnaryOpExpr("NOT", c, _) => s"NOT ${expr(c)}"
-    case UnaryOpExpr("-", c, _) => s"- ${expr(c)}"
+    // A NOT over anything but a leaf, and every unary minus, takes its operand
+    // in parentheses: the parser reads `NOT NOT a >= b` as `NOT ((NOT a) >=
+    // b)` and refuses `- -3`, two signs in a row.
+    case UnaryOpExpr("NOT", c, _) => c match {
+      case _: ColRefExpr | _: LitExpr => s"NOT ${expr(c)}"
+      case _ => s"NOT (${expr(c)})"
+    }
+    case UnaryOpExpr("-", c, _) => s"-(${expr(c)})"
     case UnaryOpExpr("+", c, _) => s"+ ${expr(c)}"
     case UnaryOpExpr(op, _, _) => throw new IllegalArgumentException(s"SqlRender: unknown unary op '$op'")
     case BinOpExpr(op, l, r, _: DataType.DecimalType) if ArithmeticOps(op) =>
