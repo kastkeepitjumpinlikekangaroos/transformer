@@ -440,8 +440,9 @@ ship a fix or move something from "not done" to "done".
 - **JavaFX 21+ ships classes only in platform-classifier jars.** The bare
   `org.openjfx:javafx-{base,controls,graphics}` artifacts are metadata-only —
   depending on them alone gives "not found: type Stage" at compile time. The
-  `gui/` BUILD lists both the bare jars *and* the `mac-aarch64` classifier
-  jars. Add other platforms (`win`, Linux) the same way when building
+  `gui/` BUILD lists the `mac-aarch64` classifier jars and not the bare ones,
+  which hold no class, so the unused-dependency checker refuses them. Add
+  other platforms (`win`, Linux) the same way when building
   cross-platform binaries. The product jar (`//:transformer`) lists the
   `mac-aarch64` and `win` classifiers, so `transformer gui` runs on Apple
   Silicon macOS and Windows only. On Linux and Intel macOS the GUI fails to

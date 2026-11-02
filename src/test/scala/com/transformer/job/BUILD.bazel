@@ -48,7 +48,6 @@ scala_junit_test(
     deps = [
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",
-        "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/temporal",
         "@maven//:junit_junit",
     ],

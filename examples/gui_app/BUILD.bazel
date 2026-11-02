@@ -18,16 +18,16 @@ scala_binary(
     # explicitly in that case.
     jvm_flags = ["-XX:MaxRAMPercentage=75.0"],
     deps = [
-        # strict-deps: SqlEngine.init returns a type from core, so we list core
-        # explicitly even though gui already depends on it transitively.
+        # SqlEngine.init returns a type from core, and a target compiles
+        # against its direct deps only, so core is listed though gui has it.
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/gui",
         "//src/main/scala/com/transformer/sql/exec",
-        "@maven//:org_openjfx_javafx_base",
+    ],
+    # The JavaFX the launcher runs on: classes and natives for mac.
+    runtime_deps = [
         "@maven//:org_openjfx_javafx_base_mac_aarch64",
-        "@maven//:org_openjfx_javafx_controls",
         "@maven//:org_openjfx_javafx_controls_mac_aarch64",
-        "@maven//:org_openjfx_javafx_graphics",
         "@maven//:org_openjfx_javafx_graphics_mac_aarch64",
     ],
 )

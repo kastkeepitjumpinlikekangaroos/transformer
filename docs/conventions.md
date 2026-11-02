@@ -57,7 +57,13 @@ specific traps.
   `"direct"`, under which its strict-deps check is off): if you call into a
   type that lives in `core`, you must list `//src/main/scala/com/transformer/core`
   even when an indirect dep already brings it in. The error message is "Symbol
-  'term com.transformer.core' is missing from the classpath."
+  'term com.transformer.core' is missing from the classpath." The other way
+  round, a dependency none of the target's sources uses fails its build (the
+  toolchain's unused-dependency checker, `"error"`): "Target ... is specified
+  as a dependency to ... but isn't used, please remove it from the deps". A
+  jar something loads only as it runs (Hadoop's mapreduce classes, slf4j's
+  binding, a launcher's JavaFX natives) goes in `runtime_deps`, with a
+  comment saying what needs it.
 - **The compiler's warnings are errors.** The Scala toolchain in the root
   `BUILD.bazel`, which every target compiles with, fails the build on a
   deprecation; an unused import, private member, local, pattern variable or

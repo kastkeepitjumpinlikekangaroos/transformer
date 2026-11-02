@@ -95,6 +95,10 @@ scala_toolchain(
         # Every other warning fails the build too. Later -Wconf rules win.
         "-Werror",
     ],
+    # A BUILD dependency no source of the target uses fails its build: it
+    # costs a rebuild whenever it changes. A jar needed only at run time is
+    # a runtime_dep.
+    unused_dependency_checker_mode = "error",
     use_argument_file_in_runner = True,
     visibility = ["//visibility:public"],
 )

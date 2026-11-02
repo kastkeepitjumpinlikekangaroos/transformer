@@ -78,14 +78,11 @@ COMPONENTS = [
     "VimKeyEvents.scala",
 ]
 
-# The JavaFX jars a GUI target compiles against. On JavaFX 21+ the bare jars
-# are metadata only — the actual classes live in the platform-specific
-# classifier jars. Depend on the mac variants here; a launcher adds the
+# The JavaFX jars a GUI target compiles against. On JavaFX 21+ the classes
+# live in the platform-specific classifier jars; the bare jars hold none, so
+# no target lists them. Depend on the mac variants here; a launcher adds the
 # others it ships (//:transformer adds Windows).
 JAVAFX = [
-    "@maven//:org_openjfx_javafx_base",
-    "@maven//:org_openjfx_javafx_controls",
-    "@maven//:org_openjfx_javafx_graphics",
     "@maven//:org_openjfx_javafx_base_mac_aarch64",
     "@maven//:org_openjfx_javafx_controls_mac_aarch64",
     "@maven//:org_openjfx_javafx_graphics_mac_aarch64",
@@ -104,15 +101,12 @@ scala_library(
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",
         "//src/main/scala/com/transformer/sql/exec",
-        "//src/main/scala/com/transformer/write/csv",
-        "//src/main/scala/com/transformer/write/parquet",
         # The SQL editor (RichTextFX and the libraries its API is made of) and
         # the theme. Pure Java; they use the JavaFX listed here.
         "@maven//:io_github_mkpaz_atlantafx_base",
         "@maven//:org_fxmisc_flowless_flowless",
         "@maven//:org_fxmisc_richtext_richtextfx",
         "@maven//:org_fxmisc_undo_undofx",
-        "@maven//:org_fxmisc_wellbehaved_wellbehavedfx",
         "@maven//:org_reactfx_reactfx",
     ] + JAVAFX,
 )
@@ -144,13 +138,7 @@ scala_library(
         ":vim",
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",
-        "//src/main/scala/com/transformer/read/csv",
-        "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/sql/exec",
-        "//src/main/scala/com/transformer/temporal",
-        "//src/main/scala/com/transformer/write/csv",
-        "//src/main/scala/com/transformer/write/parquet",
         "@maven//:io_github_mkpaz_atlantafx_base",
-        "@maven//:org_fxmisc_richtext_richtextfx",
     ] + JAVAFX,
 )
