@@ -1,7 +1,7 @@
 # Plan 07: the compiler warns, and a warning fails the build
 
 > Status: **done** 2026-11-02 (d4cf5a1, 7519079, 0eff1a9, 029c683, 1c885d5,
-> b8ede39 W2; 9991420 W3; b0cb011 W4; see [Outcome](#outcome); every open
+> b8ede39 W2; 9991420 W3; b0cb011, ab3dba2 W4; see [Outcome](#outcome); every open
 > decision taken overnight as recommended, not yet confirmed by the user) ·
 > from the 2026-11-01 test survey, category 9 of 9
 > (part 1; part 2 is [19](19-mutation-testing.md)) · Effort: 2-3 days ·
@@ -406,7 +406,7 @@ the following inputs: BinaryType, ..."), a dropped `Set.add` Boolean in
 `List[Int]` pattern ("No warnings can be incurred under -Werror") and a
 missing interpolator; the same dropped Boolean in a test compiled.
 
-**W4**, `b0cb011`: the 40 dependencies removed, or moved to `runtime_deps`
+**W4**, `b0cb011` (and `ab3dba2`, a comment): the 40 dependencies removed, or moved to `runtime_deps`
 where something loads them only as it runs (commons-collections and
 Hadoop's mapreduce classes for both parquet modules, slf4j-nop for
 read/parquet, the JavaFX mac jars of `gui_app`), and the checker set to
