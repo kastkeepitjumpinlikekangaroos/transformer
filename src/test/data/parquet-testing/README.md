@@ -2,12 +2,15 @@
 
 Files of [apache/parquet-testing](https://github.com/apache/parquet-testing) at
 commit `eedfad3f086678d282a00d8ff3cf8932d5d29af5` (2026-10-27), as they are
-there, under the Apache License 2.0 (`LICENSE.txt`, upstream's). Written by
-parquet-cpp, Arrow, parquet-mr, parquet-rs, Impala, Spark and others; `bad_data/`
-holds files that once crashed a reader. `MANIFEST` says what the engine does
-with each, and `read/parquet:parquet_testing_test` holds every file to its line.
+there, under the Apache License 2.0 (`LICENSE.txt`, upstream's), written by
+parquet-cpp, Arrow, parquet-mr, parquet-rs, Impala, Spark and others
+(`bad_data/` holds files that once crashed a reader); and files pyarrow wrote
+for this repo (`pyarrow/`). `MANIFEST` says what the engine does with each,
+and `read/parquet:parquet_testing_test` holds every file to its line.
 
 ## What is here
+
+`data/` and `bad_data/` are upstream's; `pyarrow/` is this repo's own (below).
 
 - `bad_data/`: all 24 files (`variants/` included).
 - `data/`: every file of upstream's `data/` under 100 KB (74, the encrypted
@@ -19,11 +22,26 @@ with each, and `read/parquet:parquet_testing_test` holds every file to its line.
 - Left out: the `_larger` copies, `alltypes_tiny_pages_plain.parquet`, the
   rest of `geospatial/`, `variant/`, `shredded_variant/`, the bloom filter
   binaries and upstream's READMEs.
-- `expect/`: the engine's CSV text of each file it reads (below).
+- `pyarrow/`: 26 files pyarrow 26.0.0 (parquet-cpp-arrow 26.0.0) wrote
+  with `pyarrow/make_files.py`, run once outside the build, one or a few for
+  each row of the README's parquet type table and each layout the reader
+  must meet: every codec pyarrow writes (`BROTLI` refused), data pages v1
+  and v2 with and without a dictionary, the delta and byte-stream-split
+  encodings, every integer width signed and unsigned at its edges, `FLOAT`,
+  `DOUBLE` and `FLOAT16` at NaN, the infinities, -0.0 and their smallest
+  subnormal, decimals stored as `INT32`, `INT64` and `FIXED_LEN_BYTE_ARRAY`
+  (`BINARY` is upstream's `byte_array_decimal.parquet`), dates from year 1 to
+  9999, timestamps in seconds, milliseconds, microseconds and nanoseconds,
+  marked UTC and local, as `INT96`, and nanoseconds that are no whole
+  microsecond either side of 1970, text past the BMP, a dictionary-typed
+  column, bytes of each kind, NULLs at pages' edges, a column of only NULLs,
+  pyarrow's null type, a file of no rows, and a CRC on every page. 90 KB.
+- `expect/`: the engine's CSV text of each file it reads (below); files
+  holding one table share one.
 
-Budget: 2.6 MB here (2.1 MB of parquet, 0.3 MB of upstream's expect CSVs,
-0.1 MB of `expect/`), of the 3 MB plans/testing/13 allows its fixtures in all.
-A file added past it needs that plan's budget raised first.
+Budget: 2.7 MB here (2.2 MB of parquet, 0.3 MB of upstream's expect CSVs,
+0.15 MB of `expect/`), of the 3 MB plans/testing/13 allows its fixtures in
+all. A file added past it needs that plan's budget raised first.
 
 ## How each line of MANIFEST was made
 

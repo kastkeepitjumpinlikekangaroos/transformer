@@ -1,5 +1,5 @@
-# What the engine does with each parquet file under data/ and bad_data/, a line
-# a file, held by //src/test/scala/com/transformer/read/parquet:parquet_testing_test
+# What the engine does with each parquet file under data/, bad_data/ and
+# pyarrow/, a line a file, held by //src/test/scala/com/transformer/read/parquet:parquet_testing_test
 # (README.md says how each line was made):
 #
 #   <file> reads <rows> <expect file>   reads <rows> rows, whose CSV text is the
@@ -119,3 +119,29 @@ data/single_nan.parquet reads 1 expect/data/single_nan.parquet.csv
 data/sort_columns.parquet reads 6 expect/data/sort_columns.parquet.csv
 data/uniform_encryption.parquet.encrypted refused is encrypted, and transformer reads no encrypted parquet
 data/unknown-logical-type.parquet refused by-design refused-parquet-type
+pyarrow/all_nulls.parquet reads 3 expect/pyarrow/all_nulls.parquet.csv
+pyarrow/booleans.parquet reads 400 expect/pyarrow/booleans.parquet.csv
+pyarrow/codec_brotli.parquet refused by-design refused-parquet-codec
+pyarrow/codec_gzip.parquet reads 200 expect/pyarrow/codecs.csv
+pyarrow/codec_lz4.parquet reads 200 expect/pyarrow/codecs.csv
+pyarrow/codec_none.parquet reads 200 expect/pyarrow/codecs.csv
+pyarrow/codec_snappy.parquet reads 200 expect/pyarrow/codecs.csv
+pyarrow/codec_zstd.parquet reads 200 expect/pyarrow/codecs.csv
+pyarrow/dates.parquet reads 6 expect/pyarrow/dates.parquet.csv
+pyarrow/decimals_as_fixed.parquet reads 5 expect/pyarrow/decimals_as_fixed.parquet.csv
+pyarrow/decimals_as_integers.parquet reads 5 expect/pyarrow/decimals_as_integers.parquet.csv
+pyarrow/encodings.parquet reads 300 expect/pyarrow/encodings.parquet.csv.gz
+pyarrow/floats.parquet reads 7 expect/pyarrow/floats.parquet.csv
+pyarrow/integers.parquet reads 5 expect/pyarrow/integers.parquet.csv
+pyarrow/no_rows.parquet reads 0 expect/pyarrow/no_rows.parquet.csv
+pyarrow/null_type.parquet reads 2 expect/pyarrow/null_type.parquet.csv  # pyarrow's null type, INT32 annotated UNKNOWN, all NULL: an INT here
+pyarrow/nulls_at_page_edges.parquet reads 120 expect/pyarrow/nulls_at_page_edges.parquet.csv
+pyarrow/page_checksums.parquet reads 300 expect/pyarrow/page_checksums.parquet.csv
+pyarrow/pages_v1_dictionary.parquet reads 500 expect/pyarrow/pages.csv
+pyarrow/pages_v1_plain.parquet reads 500 expect/pyarrow/pages.csv
+pyarrow/pages_v2_dictionary.parquet reads 500 expect/pyarrow/pages.csv
+pyarrow/pages_v2_plain.parquet reads 500 expect/pyarrow/pages.csv
+pyarrow/text.parquet reads 6 expect/pyarrow/text.parquet.csv
+pyarrow/timestamps_int96.parquet reads 6 expect/pyarrow/timestamps_int96.parquet.csv
+pyarrow/timestamps_nanos.parquet reads 5 expect/pyarrow/timestamps_nanos.parquet.csv
+pyarrow/timestamps.parquet reads 6 expect/pyarrow/timestamps.parquet.csv  # seconds stored as MILLIS; local ones read as UTC

@@ -228,7 +228,9 @@ is the pattern.
    with the upstream licence beside them and a `README.md` giving the
    repository, the commit, what was taken and what left out, the size budget
    and how each expectation was made. Never vendor past the budget the plan
-   sets; raise it in the plan first.
+   sets; raise it in the plan first. Files another program writes for this
+   repo go in a subdirectory of their own beside the script that wrote them,
+   run once outside the build (`pyarrow/make_files.py`), never by a test.
 2. Read each file twice, outside the repo: with the engine (`transformer
    query --table t=<file> --format jsonl ...`) and with another reader
    (pyarrow for parquet), and compare value by value, by type. Only a file
