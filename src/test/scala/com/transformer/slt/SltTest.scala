@@ -16,9 +16,10 @@ import scala.jdk.CollectionConverters._
   * [[Dialect.Transformer]]: this repo's own, or under `postgres/` a port of
   * PostgreSQL's regression tests with Postgres's answers. Either way each record must pass: a record the
   * engine answers differently by design carries `skipif transformer <id>`,
-  * the id of its rule in the ledger in `docs/gotchas.md` ([[Ledger]]). Every
-  * query also runs under each verification mode ([[Modes.Verification]]) and
-  * must print what the baseline printed.
+  * the id of its rule in the ledger in `docs/gotchas.md` ([[Ledger]]), and
+  * fails the script once it no longer diverges as the rule says. Every query
+  * also runs under each verification mode ([[Modes.Verification]]) and must
+  * print what the baseline printed.
   *
   * Set `SLT_FILTER` to a substring of a script's path to run only those
   * scripts.
@@ -37,7 +38,7 @@ class SltTest(name: String, path: Path) {
           case s: Script.Statement => s.sql
           case _ => ""
         }
-        s"  line ${r.record.line}: ${r.outcome}\n    ${sql.replace("\n", "\n    ")}"
+        s"  line ${r.record.line}: ${Runner.show(r.outcome)}\n    ${sql.replace("\n", "\n    ")}"
       }
       fail(s"${result.summary}\n${shown.mkString("\n")}" +
         (if (problems.length > 10) s"\n  ... and ${problems.length - 10} more" else ""))

@@ -1937,7 +1937,8 @@ engine and multiply each one across execution modes:
   verification. Each mode must print the baseline's result. A record the
   engine answers otherwise by design cites its rule in the ledger in
   [gotchas.md](gotchas.md#answers-that-differ-from-other-engines-by-design)
-  (`skipif transformer <id>`).
+  (`skipif transformer <id>`) and still runs once, so a skip that no longer
+  diverges fails.
 - **Whole-suite configurations** (`.bazelrc` `--config=batch1`, `batch2`,
   `sharded`, `serial`, `zone`, `hashzero`): the whole suite under one JVM-wide
   setting apiece, the batch capacity among them, as DuckDB runs its tests at a

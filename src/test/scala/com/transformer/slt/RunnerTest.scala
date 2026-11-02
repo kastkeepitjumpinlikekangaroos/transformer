@@ -7,8 +7,8 @@ import org.junit.Test
 import java.nio.file.Paths
 
 /** The runner over scripts written here, against a ledger of two rules: a
-  * condition on transformer cites a rule, a skipped record is reported as its
-  * rule, and a twin runs like any record. */
+  * condition on transformer cites a rule, a skipped record still runs once and
+  * must still diverge as its rule says, and a twin runs like any record. */
 class RunnerTest {
 
   private val ledger = Ledger.parse("ledger.md", Seq(
@@ -92,7 +92,7 @@ class RunnerTest {
     parse("skipif transformer refused-except-intersect", "statement error", "SELECT a FROM t EXCEPT SELECT a FROM t")
   }
 
-  // ---- running -------------------------------------------------------------------
+  // ---- the stale check -----------------------------------------------------------
 
   @Test def aValueSkipThatStillDivergesIsSkippedAsItsRuleAndItsTwinRuns(): Unit = {
     val result = run(
@@ -110,12 +110,75 @@ class RunnerTest {
     assertTrue(result.summary, outcomeAt(result, Rec + 4).isInstanceOf[Failed])
   }
 
-  @Test def anAuditTalliesSkipsByRule(): Unit = {
+  @Test def aSkippedQueryTheEngineNowAnswersIsStale(): Unit = {
+    val result = run(
+      "skipif transformer div-zero-null", "query I rowsort", "SELECT a / 0 FROM t", "----", "NULL", "NULL", "",
+      "onlyif transformer div-zero-null", "query I rowsort", "SELECT a / 0 FROM t", "----", "NULL", "NULL")
+    assertEquals(Stale("div-zero-null", "skipped as div-zero-null, but the engine now gives the record's answer, " +
+      "compared as I (an integer's low 32 bits); remove the skip"), outcomeAt(result, Rec))
+    assertEquals(Vector(Rec), result.problems.map(_.record.line))
+  }
+
+  @Test def aSkippedStatementErrorTheEngineNowRefusesIsStale(): Unit = {
+    val twin = Seq("onlyif transformer div-zero-null", "statement error", "SELECT CAST('x' AS INT)")
+    val now = run(Seq("skipif transformer div-zero-null", "statement error", "SELECT CAST('x' AS INT)", "") ++ twin: _*)
+    assertTrue(show(outcomeAt(now, Rec)), show(outcomeAt(now, Rec)).startsWith(
+      "skipped as div-zero-null, but the engine now fails as the record expects, with IllegalArgumentException: " +
+        "Cannot cast 'x' to int"))
+    // With the other engine's words, which the engine's do not contain, the
+    // record would still fail; the rule says the engine answers, and it does
+    // not.
+    val other = run(Seq("skipif transformer div-zero-null", "statement error", "SELECT CAST('x' AS INT)", "----",
+      "invalid input syntax for type integer", "") ++ twin: _*)
+    assertTrue(show(outcomeAt(other, Rec)), show(outcomeAt(other, Rec)).startsWith(
+      "skipped as div-zero-null, but the rule says the engine answers where the other engine refuses, and the " +
+        "engine now fails"))
+  }
+
+  @Test def aRefusalSkipStillRefusedWithItsRulesWordsIsSkipped(): Unit = {
+    val result = run("skipif transformer refused-except-intersect", "query I rowsort",
+      "SELECT a FROM t EXCEPT SELECT a FROM t", "----")
+    assertEquals(Skipped("skipped as refused-except-intersect", Some("refused-except-intersect")),
+      outcomeAt(result, Rec))
+  }
+
+  @Test def aRefusalSkipRefusedForAnotherReasonIsStale(): Unit = {
+    val result = run("skipif transformer refused-except-intersect", "query I rowsort",
+      "SELECT a FROM t WHERE a IN (SELECT a FROM t)", "----", "1", "2")
+    val o = show(outcomeAt(result, Rec))
+    assertTrue(o, o.startsWith("skipped as refused-except-intersect, but the engine refuses it for another reason, " +
+      "IllegalArgumentException: IN with a subquery is not supported"))
+    assertTrue(o, o.endsWith("the rule's refusal says [only UNION and UNION ALL are supported]"))
+  }
+
+  @Test def aRefusalSkipTheEngineNowRunsIsStale(): Unit = {
+    val right = run("skipif transformer refused-except-intersect", "query I rowsort",
+      "SELECT a FROM t UNION SELECT a FROM t", "----", "1", "2")
+    assertEquals(Stale("refused-except-intersect", "skipped as refused-except-intersect, but the engine now gives " +
+      "the record's answer, compared as I (an integer's low 32 bits); remove the skip"), outcomeAt(right, Rec))
+    val wrong = run("skipif transformer refused-except-intersect", "query I rowsort",
+      "SELECT a FROM t UNION SELECT a FROM t", "----", "1", "3")
+    val o = show(outcomeAt(wrong, Rec))
+    assertTrue(o, o.startsWith("skipped as refused-except-intersect, but the engine no longer refuses it, and " +
+      "answers otherwise than the record (2 values expected, 2 returned; first difference at value 2"))
+  }
+
+  @Test def aSkippedRecordThatChangesATableFails(): Unit = {
+    val result = run("skipif transformer refused-except-intersect", "statement ok", "INSERT INTO t VALUES (3)")
+    assertEquals(Failed("skipped as refused-except-intersect, but it is no query: a skipped record runs to check " +
+      "its skip, so it must change no table"), outcomeAt(result, Rec))
+  }
+
+  @Test def anAuditTalliesSkipsByRuleAndKeepsStaleOnes(): Unit = {
     val result = run(
       "skipif transformer refused-except-intersect", "query I", "SELECT a FROM t EXCEPT SELECT a FROM t", "----", "",
+      "skipif transformer refused-except-intersect", "query I rowsort", "SELECT a FROM t UNION SELECT a FROM t",
+      "----", "1", "2", "",
       "onlyif mysql", "query I", "SELECT 1", "----", "1")
     val c = result.compact(keepRefusals = false)
     assertEquals(Map("refused-except-intersect" -> 1), c.skipTally)
+    assertEquals(Some(1), c.counts.get("stale"))
     assertEquals(Some(2), c.counts.get("skipped"))
+    assertTrue(c.kept.exists(_.outcome.isInstanceOf[Stale]))
   }
 }

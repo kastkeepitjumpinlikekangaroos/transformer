@@ -21,11 +21,12 @@ import scala.jdk.CollectionConverters._
   * }}}
   *
   * Prints one summary line per script and a total; `--report` writes every
-  * record that did not pass (refusals tallied by message, failures and
-  * divergences in full with their SQL) and the skips tallied by their rule.
-  * A script's conditions on transformer cite the ledger in the workspace's
-  * `docs/gotchas.md` ([[Ledger]]). `--modes none` runs the baseline only,
-  * which is how a first pass over the whole corpus stays affordable.
+  * record that did not pass (refusals tallied by message, failures,
+  * divergences and stale skips in full with their SQL) and the skips tallied
+  * by their rule. A script's conditions on transformer cite the ledger in the
+  * workspace's `docs/gotchas.md` ([[Ledger]]). `--modes none` runs the
+  * baseline only, which is how a first pass over the whole corpus stays
+  * affordable.
   * `--memory` prints the heap a script left live, after a collection, to
   * find a leak across scripts.
   * `--complete` rewrites each script with the engine's results in its `----`
@@ -120,7 +121,7 @@ object Corpus {
     def n(kind: String) = results.map(_.counts.getOrElse(kind, 0)).sum
     System.out.println(f"TOTAL ${files.length} files, ${results.map(_.counts.values.sum).sum} records in $secs%.1f s: " +
       s"${n("passed")} passed, ${n("refused")} refused, ${n("failed")} failed, ${n("diverged")} diverged, " +
-      s"${n("skipped")} skipped; ${results.count(_.stoppedAt.isDefined)} files stopped early")
+      s"${n("skipped")} skipped, ${n("stale")} stale; ${results.count(_.stoppedAt.isDefined)} files stopped early")
     report.foreach(p => writeReport(p, results, listRefusals))
   }
 
@@ -157,11 +158,12 @@ object Corpus {
       results.filter(_.stoppedAt.isDefined).foreach(r => w.println(s"${r.file}: ${r.stoppedAt.get}"))
       w.println()
       for ((label, pick) <- Seq[(String, Outcome => Boolean)](
-          "failed" -> (_.isInstanceOf[Failed]), "diverged" -> (_.isInstanceOf[Diverged]))) {
+          "failed" -> (_.isInstanceOf[Failed]), "diverged" -> (_.isInstanceOf[Diverged]),
+          "stale skips" -> (_.isInstanceOf[Stale]))) {
         w.println(s"== $label")
         results.foreach { fr =>
           fr.kept.filter(r => pick(r.outcome)).foreach { r =>
-            w.println(s"${fr.file}:${r.record.line}: ${r.outcome}")
+            w.println(s"${fr.file}:${r.record.line}: ${show(r.outcome)}")
             r.record match {
               case q: Script.Query => w.println("  " + q.sql.replace("\n", "\n  "))
               case s: Script.Statement => w.println("  " + s.sql.replace("\n", "\n  "))

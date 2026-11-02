@@ -26,8 +26,9 @@ scala_library(
 )
 
 # Every script under src/test/slt, each a JUnit case, each query under every
-# verification mode, each condition on transformer checked against the ledger
-# in docs/gotchas.md. Four shards split the scripts between four JVMs. Part of
+# verification mode, each skipped record once in the baseline to check that
+# it still diverges as the rule its skip cites in docs/gotchas.md's ledger
+# says. Four shards split the scripts between four JVMs. Part of
 # `bazel test //...`.
 scala_junit_test(
     name = "slt_test",
@@ -62,8 +63,8 @@ scala_junit_test(
 )
 
 # The runner over scripts written inline: a condition on transformer cites a
-# rule, a skip whose rule is no refusal has its twin, and a skipped record is
-# reported as its rule.
+# rule, a skip whose rule is no refusal has its twin, and a skipped record
+# runs once and must still diverge as its rule says.
 scala_junit_test(
     name = "runner_test",
     srcs = ["RunnerTest.scala"],

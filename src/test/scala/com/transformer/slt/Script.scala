@@ -13,7 +13,8 @@ import java.util.Locale
   * a condition on it cites a rule of the [[Ledger]] by its id:
   *
   *   - `skipif transformer <id> [# comment]` before another engine's answer
-  *     the engine does not give, by that rule.
+  *     the engine does not give, by that rule. The runner still runs the
+  *     record once ([[Runner]]), and it must still diverge as the rule says.
   *   - `onlyif transformer <id> [# comment]` before a record of the engine's
   *     own answer under the rule: in a port, the twin that follows a skip
   *     whose rule is not a refusal, with the same SQL; in a script of this

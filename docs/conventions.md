@@ -463,7 +463,8 @@ specific traps.
   followed by its twin, the engine's own answer. A rule no decision covers gets
   no id: its records stay out of the script as a finding. The commit that
   decides a new rule adds its row and its pin, `onlyif transformer <id>` before
-  a record of the engine's answer in a script of this repo's own.
+  a record of the engine's answer in a script of this repo's own. A skip that
+  no longer diverges fails `slt_test`, so it goes when the engine changes.
 - **Every file of a glob is read by its own column names.** A parquet file by
   its footer's, a CSV file by its header's, matched to the first file's names
   regardless of case; a file that names other columns is refused, naming both.

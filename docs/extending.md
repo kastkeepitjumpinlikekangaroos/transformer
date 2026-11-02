@@ -636,12 +636,15 @@ more. Any other rule says the engine answers otherwise, so follow the skip with
 its twin: the same SQL under `onlyif transformer <id>`, with the engine's own
 answer, which `--complete` fills and you check by hand against the rule
 (compare a DOUBLE whose last digit Java need not share, from `EXP`, `LN` or a
-statistic, as SQLite's `T`). A record the engine answers otherwise with no
-rule in the ledger stays out of the script as a finding until a decision
-settles it; the commit that decides it adds the rule's row (for a `refused-`
-rule, with the text its refusal must contain) and its pin, a record of the
-engine's answer under `onlyif transformer <id>` in a script of this repo's
-own, then the skips that cite it. A DOUBLE the other engine printed in full is
+statistic, as SQLite's `T`). `slt_test` runs every skipped record once, in the
+baseline, and fails a script whose skip no longer diverges as its rule says:
+then the engine has changed, and the skip (and its twin) goes, or the rule
+changes with a decision. A record the engine answers otherwise with no rule in
+the ledger stays out of the script as a finding until a decision settles it;
+the commit that decides it adds the rule's row (for a `refused-` rule, with
+the text its refusal must contain) and its pin, a record of the engine's
+answer under `onlyif transformer <id>` in a script of this repo's own, then
+the skips that cite it. A DOUBLE the other engine printed in full is
 compared exactly; one it printed to fewer digits (Postgres's float8 under
 `extra_float_digits = 0`, 15 significant digits) as SQLite's `T`, which prints
 a DOUBLE to 15, since `R` prints every integer digit of a large one; and one

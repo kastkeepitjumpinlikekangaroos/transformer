@@ -22,6 +22,11 @@ import scala.util.control.NonFatal
   * SQLite's loose typing, which the engine refuses by design), and a
   * statement this runner cannot carry out ends the script, since every record
   * after it reads what it would have built.
+  *
+  * A record `skipif transformer <rule>` keeps from the engine still runs,
+  * once, in the baseline alone, and must still diverge as its rule in the
+  * [[Ledger]] says ([[Runner.checkSkip]]); one that no longer does is
+  * [[Runner.Stale]], so a skip cannot outlive its reason.
   */
 final class Runner(dialect: Dialect, ledger: Ledger, modes: Seq[Mode] = Modes.Verification) {
 
@@ -41,26 +46,30 @@ final class Runner(dialect: Dialect, ledger: Ledger, modes: Seq[Mode] = Modes.Ve
       val it = records.iterator
       while (stoppedAt.isEmpty && it.hasNext) {
         val rec = it.next()
-        if (!rec.runs)
-          results += RecordResult(rec, Skipped(rec.skipRule.fold("its conditions exclude this engine")(id =>
-            s"skipped as $id"), rec.skipRule))
-        else rec match {
-          case HashThreshold(_, _) => ()
-          case Halt(_, _) => stoppedAt = Some("halt")
-          case s: Statement =>
-            val outcome = statement(s, db, views)
-            results += RecordResult(rec, outcome)
-            outcome match {
-              case Skipped(reason, _) if !s.expectError => stoppedAt = Some(s"line ${s.line}: $reason")
-              case Failed(reason) if !s.expectError => stoppedAt = Some(s"line ${s.line}: a statement failed: $reason")
-              case _ => ()
-            }
-          case q: Query => results += RecordResult(rec, query(q, db, views, labels))
+        rec.skipRule match {
+          case Some(id) => results += RecordResult(rec, checkSkip(rec, rule(id), db, views))
+          case None if !rec.runs => results += RecordResult(rec, Skipped("its conditions exclude this engine", None))
+          case None => rec match {
+            case HashThreshold(_, _) => ()
+            case Halt(_, _) => stoppedAt = Some("halt")
+            case s: Statement =>
+              val outcome = statement(s, db, views)
+              results += RecordResult(rec, outcome)
+              outcome match {
+                case Skipped(reason, _) if !s.expectError => stoppedAt = Some(s"line ${s.line}: $reason")
+                case Failed(reason) if !s.expectError => stoppedAt = Some(s"line ${s.line}: a statement failed: $reason")
+                case _ => ()
+              }
+            case q: Query => results += RecordResult(rec, query(q, db, views, labels))
+          }
         }
       }
     } finally views.close()
     FileResult(file, results.result(), stoppedAt)
   }
+
+  private def rule(id: String): Ledger.Rule =
+    ledger.rule(id).getOrElse(throw new IllegalArgumentException(s"no rule '$id' in the ledger"))
 
   /** `text` with each query's `----` block replaced by what the engine
     * returns under the baseline, a row per line with its values separated by
@@ -151,6 +160,65 @@ final class Runner(dialect: Dialect, ledger: Ledger, modes: Seq[Mode] = Modes.Ve
     }
   }
 
+  // ---- skips ---------------------------------------------------------------------
+
+  /** A record `skipif transformer <rule>` keeps from the engine, run once, in
+    * the baseline alone (the verification modes compare runs with each other,
+    * not with a skip): it must still diverge as `rule` says, or it is
+    * [[Stale]]. Under a refusal rule the engine must refuse it cleanly, with
+    * the rule's text in the message. Under any other rule the record must not
+    * pass: a query must not return the record's answer, and a statement error
+    * must run, since the rule says the engine answers where the other engine
+    * refused. An internal error fails the record, skipped or not. */
+  private def checkSkip(rec: Record, rule: Ledger.Rule, db: Database, views: Modes.Views): Outcome = {
+    val written = Script.sqlOf(rec).getOrElse("")
+    def stale(why: String): Outcome = Stale(rule.id, s"skipped as ${rule.id}, but $why")
+    if (!startsQuery(written))
+      return Failed(s"skipped as ${rule.id}, but it is no query: a skipped record runs to check its skip, so it " +
+        "must change no table")
+    val sql = dialect.prepare(written)
+    val base =
+      try Right(run(sql, db, views, Modes.Baseline))
+      catch { case f: RunFailure => Left(f) }
+    val still = Skipped(s"skipped as ${rule.id}", Some(rule.id))
+    base match {
+      case Left(f) if !clean(f.cause, running = !f.atPlan || binds(sql, db, views)) =>
+        Failed(s"skipped as ${rule.id}, but the engine fails with an internal error: ${describe(f.cause)}")
+      case Left(f) => (rule.refusal, rec) match {
+        case (Some(_), _) if !f.atPlan =>
+          stale(s"the engine does not refuse it: it fails on the data with ${describe(f.cause)}")
+        case (Some(text), _) if !message(f.cause).contains(text) =>
+          stale(s"the engine refuses it for another reason, ${describe(f.cause)}; the rule's refusal says [$text]")
+        case (None, s: Statement) if s.expectError && s.errorText.forall(message(f.cause).contains(_)) =>
+          stale(s"the engine now fails as the record expects, with ${describe(f.cause)}; remove the skip")
+        case (None, s: Statement) if s.expectError =>
+          stale(s"the rule says the engine answers where the other engine refuses, and the engine now fails: " +
+            describe(f.cause))
+        // A refusal, or a query the engine fails where the other engine
+        // answers, which the twin after it pins.
+        case _ => still
+      }
+      case Right((schema, rows)) =>
+        val problem = rec match {
+          case q: Query => shapeProblem(schema, q.columns)
+            .orElse(expectedProblem(q, Values.arrange(Values.formatRows(rows, q.columns), q.sort)))
+          case s: Statement if s.expectError => Some("the statement succeeds where the record expects an error")
+          case _ => None
+        }
+        val compared = rec match {
+          case q: Query => s", compared as ${q.columns.map(columnText).mkString(", ")}"
+          case _ => ""
+        }
+        (rule.refusal, problem) match {
+          case (_, None) => stale(s"the engine now gives the record's answer$compared; remove the skip")
+          case (Some(_), Some(p)) =>
+            stale(s"the engine no longer refuses it, and answers otherwise than the record ($p); cite the rule " +
+              "that says why, or hold the record out as a finding")
+          case (None, Some(_)) => still
+        }
+    }
+  }
+
   // ---- queries -------------------------------------------------------------------
 
   private def query(q: Query, db: Database, views: Modes.Views,
@@ -174,15 +242,7 @@ final class Runner(dialect: Dialect, ledger: Ledger, modes: Seq[Mode] = Modes.Ve
               case None => labels(l) = h; None
             }
           }
-          val expectedProblem = q.expected match {
-            case Expected.Unchecked => None
-            case Expected.Hash(n, md5) =>
-              val got = Values.hashLine(printed)
-              if (got == s"$n values hashing to $md5") None
-              else Some(s"expected $n values hashing to $md5, got $got${preview(printed)}")
-            case Expected.Values(values) => diff(values, printed)
-          }
-          expectedProblem.orElse(labelProblem) match {
+          expectedProblem(q, printed).orElse(labelProblem) match {
             case Some(problem) => Failed(problem)
             case None => verify(q, sql, db, views, printed)
           }
@@ -256,8 +316,12 @@ object Runner {
   sealed trait Outcome
   case object Passed extends Outcome
   /** A record the engine does not run: one its conditions give to other
-    * engines (`rule` None), or one `skipif transformer <rule>` keeps from it. */
+    * engines (`rule` None), or one `skipif transformer <rule>` keeps from it,
+    * which still diverges as the rule says. */
   final case class Skipped(reason: String, rule: Option[String]) extends Outcome
+  /** A record `skipif transformer <rule>` keeps from the engine that no
+    * longer diverges as the rule says: the skip has outlived its reason. */
+  final case class Stale(rule: String, detail: String) extends Outcome
   /** The engine refused a query whose result the script gives. */
   final case class Refused(message: String) extends Outcome
   /** A wrong result, a wrong error, or no error where the script expects one. */
@@ -267,9 +331,16 @@ object Runner {
 
   final case class RecordResult(record: Record, outcome: Outcome)
 
+  /** An outcome as a report prints it: a stale skip as the sentence that
+    * says what to do. */
+  def show(o: Outcome): String = o match {
+    case Stale(_, detail) => detail
+    case other => other.toString
+  }
+
   /** A script's outcomes reduced to counts by kind, refusals tallied by
-    * message and skips by rule, and the records an audit reports (failures
-    * and divergences, and refusals when asked). */
+    * message and skips by rule, and the records an audit reports (failures,
+    * divergences and stale skips, and refusals when asked). */
   final case class CompactResult(file: String, counts: Map[String, Int], refusalTally: Map[String, Int],
       skipTally: Map[String, Int], kept: Vector[RecordResult], stoppedAt: Option[String])
 
@@ -281,12 +352,13 @@ object Runner {
         case _: Refused => "refused"
         case _: Failed => "failed"
         case _: Diverged => "diverged"
+        case _: Stale => "stale"
       }
       CompactResult(file, results.groupMapReduce(r => kind(r.outcome))(_ => 1)(_ + _),
         results.collect { case RecordResult(_, Refused(m)) => Corpus.normalizeMessage(m) }.groupMapReduce(identity)(_ => 1)(_ + _),
         results.collect { case RecordResult(_, Skipped(_, Some(id))) => id }.groupMapReduce(identity)(_ => 1)(_ + _),
         results.filter(r => r.outcome match {
-          case _: Failed | _: Diverged => true
+          case _: Failed | _: Diverged | _: Stale => true
           case _: Refused => keepRefusals
           case _ => false
         }),
@@ -302,7 +374,8 @@ object Runner {
       val q = results.count(_.record.isInstanceOf[Query])
       s"$file: ${results.length} records ($q queries): ${count(_ == Passed)} passed, " +
         s"${count(_.isInstanceOf[Refused])} refused, ${count(_.isInstanceOf[Failed])} failed, " +
-        s"${count(_.isInstanceOf[Diverged])} diverged, ${count(_.isInstanceOf[Skipped])} skipped" +
+        s"${count(_.isInstanceOf[Diverged])} diverged, ${count(_.isInstanceOf[Skipped])} skipped, " +
+        s"${count(_.isInstanceOf[Stale])} stale" +
         stoppedAt.map(s => s"; stopped at $s").getOrElse("")
     }
   }
@@ -373,6 +446,25 @@ object Runner {
         s"    expected: ${expected.slice(math.max(0, i - 2), i + shown).mkString(" | ")}\n" +
         s"    returned: ${got.slice(math.max(0, i - 2), i + shown).mkString(" | ")}")
     }
+
+  /** What a query's `----` block says that `printed`, its printed result,
+    * does not, or None. */
+  private def expectedProblem(q: Query, printed: Vector[String]): Option[String] = q.expected match {
+    case Expected.Unchecked => None
+    case Expected.Hash(n, md5) =>
+      val got = Values.hashLine(printed)
+      if (got == s"$n values hashing to $md5") None
+      else Some(s"expected $n values hashing to $md5, got $got${preview(printed)}")
+    case Expected.Values(values) => diff(values, printed)
+  }
+
+  /** How a column compares, for a stale skip's message. */
+  private def columnText(c: Column): String = c match {
+    case Column.Integer => "I (an integer's low 32 bits)"
+    case Column.Real => "R (to three places)"
+    case Column.Text => "T (as text)"
+    case Column.Exact(t) => typeName(t)
+  }
 
   private def preview(printed: Seq[String]): String =
     if (printed.length <= 24) s" (values: ${printed.mkString(" | ")})" else ""

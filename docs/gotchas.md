@@ -2245,12 +2245,14 @@ purpose: it refuses a construct the other engine runs, or answers by a rule of
 its own. Each such rule is a row of the table below, the ledger, and has an id
 that the [SQL logic tests](testing.md#sql-logic-tests) cite. A record of
 another engine's answer that the engine does not give is `skipif transformer
-<id>` in a script. A rule whose id starts `refused-` is a construct the engine
-refuses, and `refusal` is the text its refusal must contain. Under any other
-rule a skipped record is followed by its twin, `onlyif transformer <id>`
-before the same SQL with the engine's own answer. `pinned by` names the script
-of this repo's own that holds a record of the engine's answer under the rule,
-`onlyif transformer <id>` before it.
+<id>` in a script, and `slt_test` still runs it, once, and fails when it no
+longer diverges as its rule says, so a skip cannot outlive its reason. A rule
+whose id starts `refused-` is a construct the engine refuses, and `refusal`
+is the text its refusal must contain. Under any other rule a skipped record is
+followed by its twin, `onlyif transformer <id>` before the same SQL with the
+engine's own answer. `pinned by` names the script of this repo's own that
+holds a record of the engine's answer under the rule, `onlyif transformer
+<id>` before it.
 
 The table is the only list of these rules. The build reads it
 (`src/test/scala/com/transformer/slt/Ledger.scala`), so its columns are fixed
