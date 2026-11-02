@@ -356,6 +356,8 @@ class CteMaterializationTest {
     case FilterExec(c, _)         => countMetadataFastPaths(c)
     case LocalLimitExec(c, _)     => countMetadataFastPaths(c)
     case GlobalLimitExec(c, _)    => countMetadataFastPaths(c)
+    // Under `--config=verify` every operator is wrapped in a check.
+    case w: PlanWrapper           => countMetadataFastPaths(w.underlying)
     case _                        => 0
   }
 

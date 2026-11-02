@@ -56,6 +56,9 @@ final class CsvReader(val files: IndexedSeq[Path], val options: CsvOptions) exte
 
   def numPartitions: Int = files.length
 
+  /** Its strings are decoded text: the decoder refuses half a surrogate pair. */
+  override def stringsAreText: Boolean = true
+
   def readPartition(p: Int): Iterator[ColumnarBatch] = {
     require(p >= 0 && p < files.length, s"partition $p out of range [0,${files.length})")
     val header = if (p == 0) None else inferred.flatMap(_.header).map(_ -> files.head)

@@ -81,6 +81,10 @@ final class ParquetReader private (
 
   def numPartitions: Int = partitions.length
 
+  /** Its strings are decoded from UTF-8, which cannot encode half a
+    * surrogate pair. */
+  override def stringsAreText: Boolean = true
+
   def readPartition(p: Int): Iterator[ColumnarBatch] = {
     val m = partitions(p)
     new ParquetPartitionIterator(m.hif, schema, batchSize,

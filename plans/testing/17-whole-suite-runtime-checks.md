@@ -202,12 +202,14 @@ campaigns at their usual budgets.
 
 ## Decisions for the user
 
-1. **What W1 verifies.**
+1. **What W1 verifies.** *Taken overnight as recommended, not yet confirmed
+   by the user: (a).*
    - (a) **(recommended)** Every operator's output. A bad value is named
      where it was made.
    - (b) The root output only. Cheaper, but a value a later operator drops
      or re-casts is never seen.
-2. **Half a surrogate pair in a STRING.**
+2. **Half a surrogate pair in a STRING.** *Taken overnight as recommended,
+   not yet confirmed by the user: (a).*
    - (a) **(recommended)** Not a value. The verifier flags one, and the paths
      that can make one refuse it: a literal through the Scala API, a view built
      in Scala. A file cannot hold one: UTF-8 has no encoding for it. Then every

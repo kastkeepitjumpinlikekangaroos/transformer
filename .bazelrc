@@ -27,3 +27,6 @@ test:zone "--test_env=JAVA_TOOL_OPTIONS=-Duser.timezone=America/St_Johns -Duser.
 # Every key hash 0 (KeyHash), DuckDB's HASH_ZERO: every hash map meets only
 # collisions, every exchange and spill sends every row to one shard or bucket.
 test:hashzero --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.hash_zero=true
+# Every batch every operator emits checked against the schema it declares
+# (BatchInvariants): a value its type cannot hold fails where it was made.
+test:verify --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.verify=true

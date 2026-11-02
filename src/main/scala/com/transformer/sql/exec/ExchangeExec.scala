@@ -323,13 +323,14 @@ final case class ExchangeExec(
 }
 
 object ExchangeExec {
-  /** Whether `p` is an exchange, or the wrapper that meters one: what a
-    * breaker over it reads to run per shard. Metrics watch a plan and must
-    * not change it, so the wrapper is seen through; with metrics on, a
-    * sharded join, aggregate, DISTINCT and window ran on one partition. */
-  private[exec] def feeds(p: PhysicalPlan): Boolean = p match {
+  /** Whether `p` is an exchange, or a wrapper that meters or verifies one:
+    * what a breaker over it reads to run per shard. Metrics and verification
+    * watch a plan and must not change it, so a wrapper is seen through; with
+    * metrics on, a sharded join, aggregate, DISTINCT and window ran on one
+    * partition. */
+  def feeds(p: PhysicalPlan): Boolean = p match {
     case _: ExchangeExec => true
-    case m: MeteredPlan => feeds(m.underlying)
+    case w: PlanWrapper => feeds(w.underlying)
     case _ => false
   }
 

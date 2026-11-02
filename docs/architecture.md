@@ -87,6 +87,13 @@ typed:
 - References (String, Binary, Decimal): the array itself holds `null` for SQL
   NULL — no separate bitset.
 
+A STRING holds text: never half a surrogate pair, which UTF-8 cannot encode.
+No reader gives one and no function makes one of text, and where one could
+come in it is refused: a string literal at bind time, a `MaterializedView`
+built in Scala when it is built, and a `CatalogView` of one's own when a scan
+reads it (`CatalogView.stringsAreText`, which the readers and
+`MaterializedView` say for themselves, so their scans check nothing).
+
 Operators emit batches in two ways:
 - **Pipeline operators** (Scan/Filter/Project/LocalLimit) preserve `numPartitions`
   and stream batches via `Iterator[ColumnarBatch]`.
@@ -464,6 +471,24 @@ Metrics watch a plan and never change it: an operator that runs per shard
 over an exchange tells by its child, and sees through the wrapper that
 meters it (`ExchangeExec.feeds`), so a sharded plan stays sharded with
 metrics on.
+
+The wrap is one walk of the planned tree (`PhysicalPlanner`'s `Walk`), which
+rebuilds each operator over its wrapped children and wraps it, in a
+`MeteredPlan` with metrics on and, under `--config=verify`
+(`-Dtransformer.verify=true`, read once per JVM), in a `VerifiedPlan` inside
+it, which checks each batch the operator emits against the schema it declares
+(`core/BatchInvariants`: a vector per column of the declared type, the rows
+within each vector, a DECIMAL that fits its type, a STRING holding text, the
+batch's own names and types the operator's) and fails with an
+`AssertionError` naming the operator by its line of the plan as `EXPLAIN
+VERBOSE` prints it (`Explain.operatorLines`), the column, the row and the
+value. Both wrappers are `PlanWrapper`s, which whatever reads a plan's shape
+sees through (`ExchangeExec.feeds`, `preMaterializeExchanges`, `EXPLAIN`), so
+neither changes the plan. Every operator the planner builds has a branch in the
+walk; under verify one without fails the walk (with metrics alone it is left
+unwrapped, its own output still metered), and `sql/exec:verify_test` finds the
+operator classes by reflection and checks its queries build each. With neither
+on, the walk does not run.
 
 Enablement plumbing mirrors spill: a new `metricsEnabled: Boolean` field
 on `ExecutionOptions` threaded through `SqlExecutor.execute` →
@@ -2069,13 +2094,15 @@ engine and multiply each one across execution modes:
   (`skipif transformer <id>`) and still runs once, so a skip that no longer
   diverges fails.
 - **Whole-suite configurations** (`.bazelrc` `--config=batch1`, `batch2`,
-  `sharded`, `serial`, `zone`, `hashzero`): the whole suite under one JVM-wide
-  setting apiece, the batch capacity among them, as DuckDB runs its tests at a
-  vector size of 2, and every key hash 0 (`KeyHash` in `core/HashKeys.scala`,
-  which every hash site goes through: the key wrappers and `LongHashMap` the
-  hash maps key by, `HashPartitioner`'s shard routing, the grace join's and the
-  spilling window's buckets), as DuckDB's `HASH_ZERO` build does. A test that
-  depends on a default says so with `assumeTrue`.
+  `sharded`, `serial`, `zone`, `hashzero`, `verify`): the whole suite under one
+  JVM-wide setting apiece, the batch capacity among them, as DuckDB runs its
+  tests at a vector size of 2, every key hash 0 (`KeyHash` in
+  `core/HashKeys.scala`, which every hash site goes through: the key wrappers
+  and `LongHashMap` the hash maps key by, `HashPartitioner`'s shard routing, the
+  grace join's and the spilling window's buckets), as DuckDB's `HASH_ZERO`
+  build does, and every batch every operator emits checked against its schema
+  (§2d), as DuckDB's debug builds verify every vector. A test that depends on a
+  default says so with `assumeTrue`.
 
 Formats, modes, the corpus and how to write a script are in
 [testing.md](testing.md#sql-logic-tests).

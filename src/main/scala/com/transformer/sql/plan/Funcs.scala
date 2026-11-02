@@ -497,6 +497,10 @@ object VecFuncs {
           i += 1
         }
         new FloatVector(values, nulls, cap)
+      // ABS(NULL) is NULL, of the NULL type its argument has: it was a
+      // DOUBLE vector of NULLs under a column declared NULL (found by
+      // `--config=verify`, plans/testing/17).
+      case DataType.NullType => new NullVectorImpl(cap)
       case _ =>
         val values = new Array[Double](cap)
         val nulls = new util.BitSet(cap)

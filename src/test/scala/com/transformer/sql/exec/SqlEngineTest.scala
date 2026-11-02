@@ -37,6 +37,89 @@ class SqlEngineTest {
     buf.toSeq
   }
 
+  // ---- Found by --config=verify and decided by plans/testing/17 ---------
+
+  /** A view built in Scala over `rows` of one column `s` of `t`. */
+  private def scalaView(t: DataType, rows: Any*): Catalog = {
+    val schema = Schema(Vector(Field("s", t)))
+    val b = new ColumnarBatch(schema, math.max(1, rows.size))
+    rows.zipWithIndex.foreach { case (v, r) => b.column(0).setBoxed(r, v) }
+    b.setNumRows(rows.size)
+    catalogWith("v" -> new CatalogView {
+      def schema: Schema = b.schema
+      def numPartitions: Int = 1
+      def readPartition(p: Int): Iterator[ColumnarBatch] = Iterator.single(b)
+    })
+  }
+
+  /** A UNION ALL's result is named as its left side is, and so is every
+    * batch of it: the right side's batches kept the right side's names, so
+    * `CsvWriter` refused them ("Batch schema Schema(k:int?) does not match
+    * writer schema Schema(x:int?)"). */
+  @Test def aUnionAllsBatchesCarryItsNamesAndWriteAsCsv(): Unit = {
+    val t = tmpCsv("t.csv", "a,b\n1,x\n2,y\n")
+    val u = tmpCsv("u.csv", "k,n\n3,z\n")
+    val c = new Catalog
+    c.register("t", CsvReader.fromPath(t.toString, CsvOptions()))
+    c.register("u", CsvReader.fromPath(u.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT a AS x FROM t UNION ALL SELECT k FROM u", c)
+    val dir = Files.createTempDirectory("sql-engine-union-")
+    val written = com.transformer.write.csv.CsvWriter.writePartitioned(dir, q.schema,
+      (0 until q.numPartitions).map(q.partition))
+    assertEquals(3L, written.rows)
+    val back = SqlEngine.execute("SELECT x FROM r ORDER BY x",
+      catalogWith("r" -> CsvReader.fromPath(dir.toString, CsvOptions())))
+    assertEquals(Seq(1, 2, 3), collectAllRows(back).map(_("x")))
+    val again = SqlEngine.execute("SELECT a AS x FROM t UNION ALL SELECT k FROM u", c)
+    again.batches.foreach(b => assertEquals(Vector("x"), b.schema.fieldNames))
+  }
+
+  /** ABS(NULL) is NULL of the NULL type, its vector one of NULLs: it was a
+    * DOUBLE vector under a column declared NULL. */
+  @Test def absOfNullIsANullColumn(): Unit = {
+    val q = SqlEngine.execute("SELECT ABS(NULL) AS x", new Catalog)
+    assertEquals(DataType.NullType, q.schema.fields.head.dataType)
+    val b = q.batches.next()
+    assertEquals(DataType.NullType, b.column(0).dataType)
+    assertTrue(b.column(0).isNull(0))
+  }
+
+  /** Half a surrogate pair is no text (decision 2 of plans/testing/17): SQL
+    * passed through the Scala API, as a Java string, can hold one in a
+    * literal, and the literal is refused. */
+  @Test def aStringLiteralHoldingHalfASurrogatePairIsRefused(): Unit = {
+    val half = s"ab${0xd800.toChar}"
+    val e = assertThrows(classOf[IllegalArgumentException], () => { val _ = SqlEngine.execute(s"SELECT '$half' AS s", new Catalog) })
+    assertEquals("The string literal 'ab\\ud800' holds half a surrogate pair, U+D800 at char 2, which is no text",
+      e.getMessage)
+    val esc = assertThrows(classOf[IllegalArgumentException], () => {
+      val _ = SqlEngine.execute(s"SELECT 'x' LIKE 'x' ESCAPE '${0xdc00.toChar}' AS m", new Catalog)
+    })
+    assertTrue(esc.getMessage, esc.getMessage.contains("holds half a surrogate pair, U+DC00"))
+    val whole = s"a${0xd83d.toChar}${0xde00.toChar}"
+    val q = SqlEngine.execute(s"SELECT '$whole' AS s", new Catalog)
+    assertEquals(whole, q.batches.next().column(0).getBoxed(0))
+  }
+
+  /** A view built in Scala can hold half a surrogate pair, and is refused:
+    * a [[MaterializedView]] when it is built, a view of one's own when a
+    * scan reads it, naming the column and row. */
+  @Test def aViewBuiltInScalaHoldingHalfASurrogatePairIsRefused(): Unit = {
+    val half = s"x${0xdbff.toChar}"
+    val schema = Schema(Vector(Field("s", DataType.StringType)))
+    val b = new ColumnarBatch(schema, 2)
+    b.column(0).setBoxed(0, "fine")
+    b.column(0).setBoxed(1, half)
+    b.setNumRows(2)
+    val built = assertThrows(classOf[IllegalArgumentException], () => { val _ = new MaterializedView(schema, IndexedSeq(IndexedSeq(b))) })
+    assertTrue(built.getMessage, built.getMessage.startsWith("Column 's' of a view built in Scala, row 1 of a batch: 'x\\udbff' holds half a surrogate pair, U+DBFF at char 1"))
+    val scanned = assertThrows(classOf[IllegalArgumentException], () =>
+      SqlEngine.execute("SELECT UPPER(s) AS u FROM v", scalaView(DataType.StringType, "ok", half)).batches.foreach(_ => ()))
+    assertTrue(scanned.getMessage, scanned.getMessage.startsWith("Column 's' of a view built in Scala, row 1 of a batch"))
+    val fine = SqlEngine.execute("SELECT s FROM v", scalaView(DataType.StringType, "ok", s"${0xd83d.toChar}${0xde00.toChar}"))
+    assertEquals(2, collectAllRows(fine).size)
+  }
+
   @Test def selectStarReturnsAllRows(): Unit = {
     val p = tmpCsv("a.csv", "id,name\n1,alice\n2,bob\n3,charlie\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))

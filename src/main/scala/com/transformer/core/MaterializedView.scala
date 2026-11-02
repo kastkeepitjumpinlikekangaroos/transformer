@@ -7,11 +7,26 @@ import java.util.concurrent.Callable
   * Each entry of `partitionBatches` is one partition; iterating that entry
   * replays its batches without doing any I/O. Constructed by
   * [[MaterializedView.materializeInParallel]] after eager input loading.
+  *
+  * Its strings are text ([[CatalogView.stringsAreText]]): one built in Scala,
+  * through the public constructor, refuses a STRING holding half a surrogate
+  * pair, naming its column and row; one the engine builds holds what a query
+  * or a view of text gave it.
   */
-final class MaterializedView(
+final class MaterializedView private (
     val schema: Schema,
-    private val partitionBatches: IndexedSeq[IndexedSeq[ColumnarBatch]]
+    private val partitionBatches: IndexedSeq[IndexedSeq[ColumnarBatch]],
+    checked: Boolean
 ) extends CatalogView {
+
+  /** A view of `partitionBatches`, one entry a partition, built in Scala: a
+    * STRING in them that holds half a surrogate pair is refused. */
+  def this(schema: Schema, partitionBatches: IndexedSeq[IndexedSeq[ColumnarBatch]]) =
+    this(schema, partitionBatches, checked = false)
+
+  if (!checked) partitionBatches.foreach(_.foreach(b => BatchInvariants.requireText(b, "a view built in Scala")))
+
+  override def stringsAreText: Boolean = true
 
   def numPartitions: Int = partitionBatches.length
 
@@ -44,14 +59,14 @@ object MaterializedView {
     */
   def materializeInParallel(view: CatalogView): MaterializedView = {
     val n = view.numPartitions
-    if (n == 0) return new MaterializedView(view.schema, IndexedSeq.empty)
+    if (n == 0) return new MaterializedView(view.schema, IndexedSeq.empty, checked = true)
     val tasks: Seq[Callable[IndexedSeq[ColumnarBatch]]] = (0 until n).map { p =>
       new Callable[IndexedSeq[ColumnarBatch]] {
         def call(): IndexedSeq[ColumnarBatch] = drain(view.readPartition(p))
       }
     }
     val partitions = Scheduler.submitAndAwaitAll(tasks)
-    new MaterializedView(view.schema, partitions)
+    new MaterializedView(view.schema, partitions, checked = view.stringsAreText)
   }
 
   /** Drain a finished query into a [[MaterializedView]], one pool task per
@@ -69,13 +84,14 @@ object MaterializedView {
     */
   def fromQuery(q: ExecutedQuery): MaterializedView = {
     val n = q.numPartitions
-    if (n == 0) return new MaterializedView(q.schema, IndexedSeq.empty)
+    if (n == 0) return new MaterializedView(q.schema, IndexedSeq.empty, checked = true)
     val tasks: Seq[Callable[IndexedSeq[ColumnarBatch]]] = (0 until n).map { p =>
       new Callable[IndexedSeq[ColumnarBatch]] {
         def call(): IndexedSeq[ColumnarBatch] = drain(q.partition(p))
       }
     }
-    new MaterializedView(q.schema, Scheduler.submitAndAwaitAll(tasks))
+    // A query's strings are text: its scans and literals refuse anything else.
+    new MaterializedView(q.schema, Scheduler.submitAndAwaitAll(tasks), checked = true)
   }
 
   /** Drain many views concurrently on the shared [[Scheduler]] pool. All input
@@ -84,7 +100,7 @@ object MaterializedView {
     * Returns one [[MaterializedView]] per input in the original order.
     */
   def materializeManyInParallel(views: Seq[CatalogView]): IndexedSeq[MaterializedView] = {
-    val perViewFutures: IndexedSeq[(Schema, IndexedSeq[Scheduler.Submitted[IndexedSeq[ColumnarBatch]]])] =
+    val perViewFutures: IndexedSeq[(CatalogView, IndexedSeq[Scheduler.Submitted[IndexedSeq[ColumnarBatch]]])] =
       views.toIndexedSeq.map { view =>
         val n = view.numPartitions
         val fs = (0 until n).map { p =>
@@ -92,10 +108,10 @@ object MaterializedView {
             def call(): IndexedSeq[ColumnarBatch] = drain(view.readPartition(p))
           })
         }
-        (view.schema, fs)
+        (view, fs)
       }
-    perViewFutures.map { case (schema, fs) =>
-      new MaterializedView(schema, fs.map(_.await()))
+    perViewFutures.map { case (view, fs) =>
+      new MaterializedView(view.schema, fs.map(_.await()), checked = view.stringsAreText)
     }
   }
 

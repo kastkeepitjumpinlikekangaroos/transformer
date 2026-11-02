@@ -114,6 +114,8 @@ class JoinSwapTest {
     */
   private def findHashJoin(p: PhysicalPlan): HashJoinExec = p match {
     case j: HashJoinExec => j
+    // Under `--config=verify` every operator is wrapped in a check.
+    case w: PlanWrapper => findHashJoin(w.underlying)
     case other =>
       fail(s"Expected HashJoinExec at top of plan, got ${other.getClass.getSimpleName}")
       throw new IllegalStateException("unreachable")
@@ -564,6 +566,7 @@ class JoinSwapTest {
       case j: HashJoinExec => Seq(j.leftKeys.size)
       case ProjectExec(c, _) => hashKeys(c)
       case FilterExec(c, _) => hashKeys(c)
+      case w: PlanWrapper => hashKeys(w.underlying)
       case _ => Nil
     }
     assertEquals("the WHERE equality is the join's key", Seq(1), hashKeys(physical))
@@ -599,9 +602,9 @@ class JoinSwapTest {
     val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
     val join = findHashJoin(plan)
     assertFalse("left should not be wrapped in ExchangeExec for small × small",
-      join.left.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.left))
     assertFalse("right should not be wrapped in ExchangeExec for small × small",
-      join.right.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.right))
     assertEquals("collapsing join emits one partition", 1, join.numPartitions)
   }
 
@@ -615,9 +618,9 @@ class JoinSwapTest {
     val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
     val join = findHashJoin(plan)
     assertFalse("broadcast-shaped join must not wrap left in ExchangeExec",
-      join.left.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.left))
     assertFalse("broadcast-shaped join must not wrap right in ExchangeExec",
-      join.right.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.right))
   }
 
   /** Both sides above the broadcast threshold → exchange both sides so the
@@ -630,9 +633,9 @@ class JoinSwapTest {
     val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
     val join = findHashJoin(plan)
     assertTrue("sharded join must wrap left in ExchangeExec",
-      join.left.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.left))
     assertTrue("sharded join must wrap right in ExchangeExec",
-      join.right.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.right))
     assertEquals("sharded join numPartitions matches exchange K",
       ExchangeExec.defaultNumShards, join.numPartitions)
   }
@@ -647,9 +650,9 @@ class JoinSwapTest {
     val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
     val join = findHashJoin(plan)
     assertFalse("unknown-size side → no exchange wrap on left",
-      join.left.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.left))
     assertFalse("unknown-size side → no exchange wrap on right",
-      join.right.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.right))
   }
 
   /** Post-impl expectation: a residual non-equi predicate (kept on the join

@@ -474,7 +474,11 @@ specific traps.
   planning), so no worker ever parks on exchange readiness — the K>1 liveness
   fix (plans/bugfixes/02f). Two obligations follow: (a) a new physical operator
   with children needs a `PhysicalPlanner.childrenOf` branch (a missed branch
-  silently exempts its subtree's exchanges from the pass); (b) a new
+  silently exempts its subtree's exchanges from the pass), and every new
+  operator a branch in the plan walk's `wrapChildren`, which rebuilds it over
+  its metered and verified children (under `--config=verify` an operator with
+  none fails the walk, and `sql/exec:verify_test` fails until a query there
+  builds it); (b) a new
   exchange-like structure — any once-computed result that multiple pool tasks
   might wait on — must either be wired into the pass or be published eagerly
   before pool tasks can reach it (CTE materialization is the in-tree exemplar).

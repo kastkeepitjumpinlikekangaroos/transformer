@@ -71,8 +71,15 @@ class MetricsPlanWrapTest {
     case ExchangeExec(c, _, _, _, _) => Seq(c)
     case WindowExec(c, _, _, _) => Seq(c)
     case UnionExec(l, r) => Seq(l, r)
-    case mp: MeteredPlan => Seq(mp.underlying)
+    case w: PlanWrapper => Seq(w.underlying)
     case _ => Nil
+  }
+
+  /** The operator a metered wrapper meters: under `--config=verify` it sits
+    * inside the operator's [[VerifiedPlan]]. */
+  private def metered(mp: MeteredPlan): PhysicalPlan = mp.underlying match {
+    case v: VerifiedPlan => v.underlying
+    case other => other
   }
 
   @Test def enabledOptionsWrapEveryOperator(): Unit = {
@@ -84,14 +91,14 @@ class MetricsPlanWrapTest {
       plan.isInstanceOf[MeteredPlan])
     val rootMP = plan.asInstanceOf[MeteredPlan]
     assertEquals("ProjectExec", rootMP.node.name)
-    val rootInner = rootMP.underlying
+    val rootInner = metered(rootMP)
     assertTrue(rootInner.isInstanceOf[ProjectExec])
     val proj = rootInner.asInstanceOf[ProjectExec]
     // The Project's child should be a metered FilterExec.
     assertTrue(proj.child.isInstanceOf[MeteredPlan])
     val filterMP = proj.child.asInstanceOf[MeteredPlan]
     assertEquals("FilterExec", filterMP.node.name)
-    val filterInner = filterMP.underlying.asInstanceOf[FilterExec]
+    val filterInner = metered(filterMP).asInstanceOf[FilterExec]
     assertTrue(filterInner.child.isInstanceOf[MeteredPlan])
     val scanMP = filterInner.child.asInstanceOf[MeteredPlan]
     assertEquals("ScanExec", scanMP.node.name)

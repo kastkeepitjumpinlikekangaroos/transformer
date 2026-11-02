@@ -2221,9 +2221,16 @@ worth carrying:
   SQL's LENGTH, SUBSTRING and TRIM; half of a surrogate pair is no text: a
   spill or a parquet file writes it as `?`, and `CsvWriter` refuses the write,
   naming its row and column; `Pattern.quote` of half a pair matches nothing, so
-  a LIKE pattern holding an emoji matched no string. The SQL fuzzers'
-  `TextPool` draws no half pair for that reason, while what a STRING may hold
-  is plans/testing/17's decision.
+  a LIKE pattern holding an emoji matched no string. So a STRING never holds
+  one (decision 2 of plans/testing/17, taken overnight as recommended, not yet
+  confirmed by the user): where one can come in it is refused, a string
+  literal (SQL passed through the Scala API as a Java string) at bind time and
+  a view built in Scala, a `MaterializedView` when it is built and a
+  `CatalogView` of one's own when a scan reads it (`stringsAreText`, which the
+  readers and `MaterializedView` say for themselves); no reader gives one, and
+  no function makes one of text, so no writer meets one, and
+  `--config=verify` flags one at the operator that emits it. The SQL fuzzers'
+  `TextPool` draws no half pair.
   String ORDERING is still UTF-16 (see the parquet pushdown entry above).
 - **Java's `toUpperCase` and `toLowerCase` map case in full; SQL's `UPPER` and
   `LOWER` map one character to one.** The full mapping turns a sharp s
@@ -2411,6 +2418,26 @@ answer it should give by construction:
   build sides, is unchanged. Found by CERT's guard rule
   (`fuzzCertOverJoinShapes`, seed 2 before the change); `JoinSwapTest`'s
   `anOuterJoinCountsNoFewerRowsThanTheInnerJoinItHolds` holds it.
+
+## Defects the whole-suite runtime checks found (2026-11-02, all fixed)
+
+`--config=verify` ([plans/testing/17](../plans/testing/17-whole-suite-runtime-checks.md),
+`core/BatchInvariants`) checks every batch every operator emits against the
+schema it declares, so a value its type cannot hold fails where it was made:
+
+- **A UNION ALL's right side kept its own column names.** `UnionExec` passed
+  the right side's batches through as they were, so they named the right
+  side's columns where the union names the left's, and `CsvWriter`, which
+  checks each batch's names against the output's, refused `SELECT a AS x
+  FROM t UNION ALL SELECT k FROM u` ("Batch schema Schema(k:int?) does not
+  match writer schema Schema(x:int?)"), in a job and in `transformer query
+  --output` alike; a parquet output, which reads by position, wrote it. The
+  union now relabels the right side's batches with its own schema, the same
+  vectors. `SqlEngineTest.aUnionAllsBatchesCarryItsNamesAndWriteAsCsv`.
+- **`ABS(NULL)` was a DOUBLE vector under a column declared NULL.** The
+  vectorized ABS chose its output vector by the result type, with DOUBLE for
+  every type it did not name, NULL among them. Every value was NULL, so no
+  answer changed. `SqlEngineTest.absOfNullIsANullColumn`.
 
 ## What the literature oracles held out (2026-11-02, held for the user)
 

@@ -1,6 +1,6 @@
 package com.transformer.gui
 
-import com.transformer.core.{ColumnarBatch, DataType, Field, IntVector, MaterializedView, Schema, StringVector}
+import com.transformer.core.{ColumnarBatch, DataType, Faults, Field, IntVector, MaterializedView, Schema, StringVector}
 import com.transformer.job.{TaskRunRecord, TaskRunStatus}
 
 import org.junit.Assert._
@@ -179,15 +179,21 @@ class ResultPersisterTest {
   }
 
   /** A save that fails part way leaves no part file, staged or committed,
-    * only a Failed record. Here the second partition holds half a surrogate
-    * pair, which no CSV file can hold; the first partition's part stayed. */
+    * only a Failed record. Here the second partition to write a batch fails
+    * there ([[Faults]]); the first partition's part stayed. (It held half a
+    * surrogate pair, which no CSV file can hold, until a view built in Scala
+    * refused one, plans/testing/17.) */
   @Test def aFailedPersistLeavesNoPartFile(): Unit = {
     val dir = tmpDir.resolve("failed")
-    val mv = mvOfPartitions(Seq(Seq((1, "alpha")), Seq((2, "half " + 0xd800.toChar))))
+    val mv = mvOfPartitions(Seq(Seq((1, "alpha")), Seq((2, "beta"))))
     val cfg = PersistConfig(outputDir = dir.toString, format = "csv", maxPartitions = None, csvHeader = true)
-    val thrown = try { ResultPersister.persist(mv, cfg); null } catch { case e: IllegalArgumentException => e }
-    assertNotNull("wrote half a surrogate pair", thrown)
-    assertTrue(thrown.getMessage, thrown.getMessage.contains("surrogate"))
+    Faults.arm(Faults.Arming(Faults.FirstBatch, 2, Faults.Action.Throw))
+    val thrown =
+      try { ResultPersister.persist(mv, cfg); null }
+      catch { case e: java.io.IOException => e }
+      finally Faults.disarm()
+    assertNotNull("the second partition failed", thrown)
+    assertEquals("Injected fault at first-batch:2:throw", thrown.getMessage)
     assertEquals(Seq(TaskRunRecord.FileName), filesIn(dir))
     val record = TaskRunRecord.read(dir).get
     assertEquals(TaskRunStatus.Failed, record.status)

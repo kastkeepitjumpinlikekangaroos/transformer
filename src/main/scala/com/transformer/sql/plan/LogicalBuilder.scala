@@ -1,6 +1,6 @@
 package com.transformer.sql.plan
 
-import com.transformer.core.{Catalog, ColumnarBatch, DataType, Field, MaterializedView, Schema}
+import com.transformer.core.{BatchInvariants, Catalog, ColumnarBatch, DataType, Field, MaterializedView, Schema}
 import com.transformer.sql.parse.SqlParser
 
 import net.sf.jsqlparser.expression.{
@@ -833,6 +833,17 @@ object LogicalBuilder {
     row
   }
 
+  /** A string literal's value, which is text: one holding half a surrogate
+    * pair, which SQL passed as a Java string through the Scala API can and a
+    * file cannot, is refused (decision 2 of plans/testing/17). */
+  private def textLiteral(value: String): String = {
+    val at = BatchInvariants.halfPair(value)
+    if (at >= 0) throw new IllegalArgumentException(
+      s"The string literal '${BatchInvariants.escaped(value)}' holds half a surrogate pair, " +
+        s"U+${"%04X".formatLocal(java.util.Locale.ROOT, value.charAt(at).toInt)} at char $at, which is no text")
+    value
+  }
+
   /** What a SELECT with no FROM reads: one row and no columns, so the SELECT
     * list is evaluated once and no column name resolves. Operators never write
     * to their input batches, so one view serves every query. */
@@ -1008,7 +1019,7 @@ object LogicalBuilder {
     case d: DoubleValue => doubleLiteral(d)
     // The value, each doubled quote one: `getValue` is the text between the
     // quotes as written, so 'it''s' was five characters.
-    case s: StringValue => LitExpr(s.getNotExcapedValue, DataType.StringType)
+    case s: StringValue => LitExpr(textLiteral(s.getNotExcapedValue), DataType.StringType)
     case _: NullValue => LitExpr(null, DataType.NullType)
     // `{d '...'}` and `{ts '...'}` are read as `DATE '...'` and `TIMESTAMP
     // '...'` are, by the CAST from text: JSqlParser reads them leniently, so
@@ -1104,7 +1115,7 @@ object LogicalBuilder {
         caseInsensitive = lk.getLikeKeyWord == LikeExpression.KeyWord.ILIKE,
         escape = Option(lk.getEscape) match {
           case None => LikeSyntax.Default.escape
-          case Some(esc: StringValue) if esc.getNotExcapedValue.length <= 1 => esc.getNotExcapedValue.headOption
+          case Some(esc: StringValue) if esc.getNotExcapedValue.length <= 1 => textLiteral(esc.getNotExcapedValue).headOption
           case Some(_) => throw new IllegalArgumentException("ESCAPE must be a single-character string literal")
         })
       Seq(s, p).foreach(e => Analyzer.checkText(e.dataType, if (syntax.caseInsensitive) "ILIKE" else "LIKE"))

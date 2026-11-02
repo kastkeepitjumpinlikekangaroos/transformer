@@ -24,7 +24,12 @@ trait PhysicalPlan {
   * have no row-group metadata to attribute.
   *
   * `stopped` is the query's [[ExecutionOptions.stopped]], asked before each
-  * batch; once it says true, the scan throws [[QueryStoppedException]]. */
+  * batch; once it says true, the scan throws [[QueryStoppedException]].
+  *
+  * A view whose strings are not known to be text
+  * ([[CatalogView.stringsAreText]]), one built in Scala, has each STRING it
+  * gives checked, and one holding half a surrogate pair is refused, naming
+  * its column and row (decision 2 of plans/testing/17). */
 final case class ScanExec(view: CatalogView, metricsNode: MetricsNode = null,
     stopped: () => Boolean = ExecutionOptions.NeverStopped) extends PhysicalPlan {
   def outputSchema: Schema = view.schema
@@ -44,10 +49,13 @@ final case class ScanExec(view: CatalogView, metricsNode: MetricsNode = null,
         })
       case _ => view.readPartition(partition)
     }
-    if (stopped eq ExecutionOptions.NeverStopped) batches
+    val text =
+      if (view.stringsAreText || !view.schema.fields.exists(_.dataType == DataType.StringType)) batches
+      else batches.map { b => BatchInvariants.requireText(b, "a view built in Scala"); b }
+    if (stopped eq ExecutionOptions.NeverStopped) text
     else new Iterator[ColumnarBatch] {
-      def hasNext: Boolean = { if (stopped()) throw new QueryStoppedException; batches.hasNext }
-      def next(): ColumnarBatch = batches.next()
+      def hasNext: Boolean = { if (stopped()) throw new QueryStoppedException; text.hasNext }
+      def next(): ColumnarBatch = text.next()
     }
   }
 }

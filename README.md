@@ -1320,6 +1320,15 @@ the smallest `BIGINT`. A number written with a point or an exponent is a
 `1e-400`). A `LIMIT`, `OFFSET`, `FETCH`, `TOP` or ordinal past `BIGINT` is an
 error naming it.
 
+**A `STRING` holds text.** Half of a surrogate pair, the two chars Java holds a
+character past U+FFFF in, is no character: UTF-8 has no encoding for it, so no
+file can hold one, and no reader gives one. Where one can come in, it is
+refused: a string literal holding one (SQL passed through the Scala API as a
+Java string can), naming the char, and a view built in Scala, a
+`MaterializedView` when it is built and a `CatalogView` of your own when a
+query reads it, naming the column and row. Every writer then agrees: a spill
+or a parquet file wrote one as `?`, where a CSV file refused it.
+
 **Aggregates:** `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `COUNT_IF(pred)`,
 `SUM`, `AVG`, `MIN`, `MAX` (each of these four also as `SUM(DISTINCT col)` and so
 on, which aggregates each distinct non-NULL value once),

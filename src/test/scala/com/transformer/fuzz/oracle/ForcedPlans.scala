@@ -4,7 +4,7 @@ import com.transformer.core.{Catalog, DataType, ExecutedQuery, ExecutionOptions}
 import com.transformer.core.metrics.MetricsNode
 import com.transformer.fuzz.MetaQueryGen._
 import com.transformer.fuzz.{Rng, RowOracle, Shrinker}
-import com.transformer.sql.exec.{CteResolver, ExchangeExec, HashJoinExec, PhysicalPlan, PhysicalPlanner}
+import com.transformer.sql.exec.{CteResolver, ExchangeExec, HashJoinExec, PhysicalPlan, PhysicalPlanner, PlanWrapper}
 import com.transformer.sql.plan._
 
 import scala.collection.mutable
@@ -274,7 +274,7 @@ object ForcedPlans {
     joins.zipWithIndex.map { case (j, i) =>
       val path =
         if (opts.spillEnabled && j.leftKeys.nonEmpty && !(j.leftKeys ++ j.rightKeys).exists(Expr.readsRandom)) "grace hash"
-        else if (j.left.isInstanceOf[ExchangeExec] && j.right.isInstanceOf[ExchangeExec]) "per-shard"
+        else if (ExchangeExec.feeds(j.left) && ExchangeExec.feeds(j.right)) "per-shard"
         else if (j.leftKeys.isEmpty) "pairing"
         else "collapsing"
       val codec =
@@ -297,6 +297,8 @@ object ForcedPlans {
       case _ => Vector.empty
     }
     val children = p match {
+      // Under `--config=verify` every operator is wrapped in a check.
+      case w: PlanWrapper => Vector(w.underlying)
       case prod: Product => prod.productIterator.collect { case c: PhysicalPlan => c }.toVector
       case _ => Vector.empty
     }

@@ -518,8 +518,16 @@ README's [Querying files](../README.md#querying-files-transformer-query).
    round trip in `plan_roundtrip_fuzz_test` and the slt `reprinted` mode holds
    it to binding back as itself).
 2. Logical → physical mapping in `PhysicalPlanner.plan`.
-3. Optionally a new physical operator (one file in `sql/exec/`).
-4. Test against `SqlEngineTest`.
+3. Optionally a new physical operator (one file in `sql/exec/`). Give it a
+   branch in the plan walk's `wrapChildren` in `PhysicalPlanner`, which
+   rebuilds it over its metered and verified children, and in `childrenOf`
+   (the exchange pass), and a line in `Explain.describe`; a reader of a
+   plan's shape sees through a `PlanWrapper`. Under `--config=verify` the
+   walk refuses an operator it has no branch for, and
+   `sql/exec:verify_test` finds the operator classes by reflection and fails
+   until one of its queries builds yours.
+4. Test against `SqlEngineTest`, and run the suite under `--config=verify`,
+   which checks every batch the operator emits against the schema it declares.
 5. Move the feature from "intentionally NOT done" in
    [`docs/gotchas.md`](gotchas.md#whats-intentionally-not-done) to the
    supported list in [`README.md`'s "SQL features"](../README.md#sql-features).
