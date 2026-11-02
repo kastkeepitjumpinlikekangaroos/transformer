@@ -45,6 +45,12 @@ object Props {
     * `-Dfuzz.seeds=N` campaign. */
   def seedCountOr(default: Int): Int = intConfig("fuzz.seeds", "FUZZ_SEEDS", default)
 
+  /** The block a bind-rejection guard reads: `default`, or `fuzz.probe_seeds` /
+    * `FUZZ_PROBE_SEEDS` when set. A generator change that touches typing or
+    * rendering is probed at 20000 seeds or more, since a rejection is counted
+    * rather than failed and a rare one hides in the default block. */
+  def probeSeedsOr(default: Int): Int = intConfig("fuzz.probe_seeds", "FUZZ_PROBE_SEEDS", default)
+
   /** Run `prop` over `count` generated values (default: the global [[seedCount]]).
     * On the first failure, minimize and fail the enclosing JUnit test. */
   def forAll[A](name: String, gen: Rng => A, shrink: A => Iterator[A], count: Int = seedCount)(prop: A => Unit): Unit = {

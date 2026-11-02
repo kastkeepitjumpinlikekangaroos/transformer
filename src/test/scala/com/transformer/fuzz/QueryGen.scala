@@ -462,8 +462,10 @@ object QueryGen {
       // also keeps a precedence reparse from meeting a string with an
       // arithmetic `+`. Other types reach them through a CAST to STRING.
       3 -> (() => BinOpExpr("||", sub(DataType.StringType), sub(DataType.StringType), DataType.StringType)),
-      // UPPER/LOWER only: TRIM parses to a TrimFunction node the binder rejects.
       3 -> (() => FuncExpr(rng.oneOf(Seq("UPPER", "LOWER")), Seq(sub(DataType.StringType)), DataType.StringType)),
+      // TRIM strips spaces only (U+0020), which the pool puts at either end
+      // of a value beside the same value without them.
+      3 -> (() => FuncExpr("TRIM", Seq(sub(DataType.StringType)), DataType.StringType)),
       3 -> (() => FuncExpr("CONCAT", Seq.fill(rng.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
       2 -> (() => FuncExpr("SUBSTRING", substringArgs(rng, schema, sub(DataType.StringType)), DataType.StringType)),
       2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
@@ -640,7 +642,7 @@ object QueryGen {
     def colsWhere(p: DataType => Boolean): Vector[Int] =
       (0 until n).filter(i => p(schema.fields(i).dataType)).toVector
     val boolCols = colsWhere(_ == DataType.BooleanType)
-    val inCols = colsWhere(t => t != DataType.BooleanType && !(t == DataType.FloatType || t == DataType.DoubleType))
+    val inCols = colsWhere(_ != DataType.BooleanType)
     val temporalCols = colsWhere(t => t == DataType.DateType || t == DataType.TimestampType)
     val decimalCols = colsWhere(_.isInstanceOf[DataType.DecimalType])
     val binaryCols = colsWhere(_ == DataType.BinaryType)
@@ -701,10 +703,15 @@ object QueryGen {
 
   /** `col [NOT] IN (...)`: literal items, a NULL now and then, and for a
     * BINARY, which has no literal, the BINARY columns in scope. A DATE or
-    * TIMESTAMP item is now and then a quoted ISO string. */
+    * TIMESTAMP item is now and then a quoted ISO string. A FLOAT or DOUBLE
+    * item is now and then NaN, -0.0 or an infinity, as SQL writes them
+    * (`CAST('NaN' AS DOUBLE)`, `-0.0`), or another column of the type, so the
+    * values `IN` once compared by bits rather than by `=` meet in it at the
+    * SQL level too. */
   private def genInList(rng: Rng, schema: Schema, colIdx: Int): Expr = {
     val col = colRef(schema, colIdx)
     val binaryCols = (0 until schema.length).filter(i => schema.fields(i).dataType == DataType.BinaryType).toVector
+    val sameType = (0 until schema.length).filter(i => i != colIdx && schema.fields(i).dataType == col.dataType).toVector
     val nItems = rng.between(1, 4)
     val items = (0 until nItems).map { _ =>
       if (rng.bool(0.15)) LitExpr(null, col.dataType)
@@ -712,6 +719,9 @@ object QueryGen {
         case DataType.BinaryType => colRef(schema, rng.oneOf(binaryCols))
         case t @ (DataType.DateType | DataType.TimestampType) if rng.bool(0.3) =>
           LitExpr(SqlRender.temporalText(genLitValue(rng, t)), DataType.StringType)
+        case t @ (DataType.FloatType | DataType.DoubleType) if rng.bool(0.4) =>
+          if (sameType.nonEmpty && rng.bool(0.3)) colRef(schema, rng.oneOf(sameType))
+          else MetaQueryGen.floatSpecialLiteral(rng.oneOf(Seq("NaN", "-0.0", "Infinity")), t)
         case t => LitExpr(genLitValue(rng, t), t)
       }
     }
@@ -720,7 +730,8 @@ object QueryGen {
 
   // ---- literals -----------------------------------------------------------
 
-  private val StringPool = Seq("", "a", "b", "c", "d", "ab", "abc", "x", "y", "z")
+  /** `DataGen`'s values: `a` beside itself with a space at either end. */
+  private val StringPool = Seq("", " ", "a", " a", "a ", "b", "c", "d", "ab", "abc", "x", "y", "z")
   private val LikePatternPool = Seq("%", "_", "a%", "%a", "%a%", "a_c", "%", "ab%", "")
   // Non-negative: a negative numeric literal as an infix operand renders to a
   // `op -lit` sequence that does not parse paren-free. Negative VALUES still

@@ -216,8 +216,10 @@ object DataGen {
   // neighbour by RowOracle's tolerant compare.
   private val DoublePool: IndexedSeq[Double] =
     IndexedSeq(0.0, 0.25, 0.5, 1.0, 2.0, -1.0, -2.5, 3.5, 10.0, 100.0)
+  /** Narrow, so keys collide; `a` beside itself with a space at either end
+    * and a lone space, which `TRIM` strips and `=` does not. */
   private val StringPool: IndexedSeq[String] =
-    IndexedSeq("", "a", "b", "c", "d", "ab", "abc", "x", "y", "z")
+    IndexedSeq("", " ", "a", " a", "a ", "b", "c", "d", "ab", "abc", "x", "y", "z")
 
   /** IEEE values a Float/Double column's domain can carry on top of
     * [[DoublePool]]. Ordered by how much of the engine they exercise, because

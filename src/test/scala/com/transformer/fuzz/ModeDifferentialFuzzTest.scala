@@ -166,17 +166,15 @@ class ModeDifferentialFuzzTest {
     }
   }
 
-  /** Bind-reject rate report + guard. A rejection is the engine refusing the
-    * generator's own SQL — expected to be rare; a spike means the renderer
-    * regressed into emitting malformed SQL. Prints the rate (captured for the PR)
-    * and fails if it crosses a generous ceiling. */
   /** Bind-reject-rate report and guard. A rejection is the engine refusing the
     * generator's own SQL at bind time — expected to be rare (the renderer aims
     * for always-bindable SQL); a spike means a renderer regression. Prints the
     * rate (captured for the PR) plus a per-reason tally on any rejects, and fails
-    * if the rate crosses a generous ceiling. */
+    * if the rate crosses a generous ceiling. `FUZZ_PROBE_SEEDS=20000` probes a
+    * larger block, as a generator change that touches typing or rendering
+    * should be. */
   @Test def bindRejectRateIsLow(): Unit = {
-    val n = 500
+    val n = Props.probeSeedsOr(500)
     val reasons = scala.collection.mutable.LinkedHashMap.empty[String, (Int, String)]
     var rejects = 0
     var seed = 0
@@ -370,6 +368,105 @@ class ModeDifferentialFuzzTest {
     // Measured over these seeds: the shape 373, the value 108; bounds ~3x below.
     assertTrue(s"a scale, position or length is rarely generated (shape=$shape)", shape > 120)
     assertTrue(s"a NULL one rarely meets a value (value=$value)", value > 35)
+  }
+
+  /** `TRIM`, which `QueryGen` never drew while the binder refused it, over a
+    * value with a space at an end, which it strips, beside one without: it
+    * strips U+0020 only (the third audit), and a corpus with no space at an
+    * end could not tell that from no TRIM at all.
+    * Read off what the binder builds: the shape from its calls, the value by
+    * evaluating each one's argument over the dataset's rows. */
+  @Test def trimReachesValuesWithSpacesAtAnEnd(): Unit = {
+    val n = 6000
+    var shape, value = 0
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val view = qc.dataset.singlePartition()
+      val catalog = new Catalog
+      catalog.register(QueryGen.ViewName, view)
+      Try(LogicalBuilder.build(qc.sql, catalog)).toOption.foreach { built =>
+        val calls = oracle.BoundPlan.exprs(built.main).collect { case f @ FuncExpr("TRIM", Seq(_), _) => f }.toSeq
+        if (calls.nonEmpty) shape += 1
+        val batches = (0 until view.numPartitions).flatMap(view.readPartition(_).toSeq)
+        if (calls.exists(f => batches.exists(b => readsOwnColumns(f, b) && (0 until b.numRows).exists { row =>
+            f.args.head.eval(b, row) match {
+              case s: String => s.nonEmpty && (s.head == ' ' || s.last == ' ')
+              case _ => false
+            }
+          }))) value += 1
+      }
+      seed += 1
+    }
+    println(s"[mode-differential] over $n seeds: TRIM in $shape, of a value with a space at an end in $value")
+    // Measured over these seeds: the shape 376, the value 105; bounds ~3x below.
+    assertTrue(s"TRIM is rarely generated (shape=$shape)", shape > 125)
+    assertTrue(s"TRIM rarely meets a space at an end (value=$value)", value > 35)
+  }
+
+  /** `IN` over a FLOAT or DOUBLE column, which `QueryGen` never drew, holding
+    * NaN and -0.0 on some row or as an item (`CAST('NaN' AS DOUBLE)`, `-0.0`):
+    * the values `IN`'s hashed membership once keyed by bits, not by `=`.
+    * Generation only. */
+  @Test def floatInListsReachNaNAndNegativeZero(): Unit = {
+    val n = 6000
+    var shape, nan, negZero = 0
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val lists = nodesOf(qc.query).collect { case in @ InListExpr(c: ColRefExpr, _, _) if isFloating(c.dataType) => in }
+      if (lists.nonEmpty) shape += 1
+      def meets(p: Double => Boolean): Boolean = lists.exists { case InListExpr(c: ColRefExpr, items, _) =>
+        qc.dataset.rows.exists(r => isDouble(r(c.index), p)) || items.exists {
+          case LitExpr(v, _) => isDouble(v, p)
+          case CastExpr(LitExpr(text: String, _), _) => p(text.toDouble)
+          case ref: ColRefExpr => qc.dataset.rows.exists(r => isDouble(r(ref.index), p))
+          case _ => false
+        }
+      case _ => false
+      }
+      if (meets(java.lang.Double.isNaN)) nan += 1
+      if (meets(d => d == 0.0 && java.lang.Double.compare(d, 0.0) < 0)) negZero += 1
+      seed += 1
+    }
+    println(s"[mode-differential] over $n seeds: IN over a float column in $shape, meeting NaN in $nan, -0.0 in $negZero")
+    // Measured over these seeds: the shape 260, NaN 97, -0.0 88; bounds ~3x below.
+    assertTrue(s"IN over a float column is rarely generated (shape=$shape)", shape > 86)
+    assertTrue(s"IN over a float column rarely meets NaN (nan=$nan)", nan > 32)
+    assertTrue(s"IN over a float column rarely meets -0.0 (negZero=$negZero)", negZero > 29)
+  }
+
+  private def isDouble(v: Any, p: Double => Boolean): Boolean = v match {
+    case x: java.lang.Double => p(x.doubleValue)
+    case x: java.lang.Float => p(x.doubleValue)
+    case _ => false
+  }
+
+  /** Every node of `q`'s expressions: its WHERE, its projection and the
+    * arguments of its aggregates, walked to the leaves. */
+  private def nodesOf(q: QueryGen.GenQuery): Seq[Expr] = {
+    val roots: Seq[Expr] = q match {
+      case p: QueryGen.ProjectQuery => p.projection.map(_._1) ++ p.where.toSeq
+      case a: QueryGen.AggregateQuery => a.where.toSeq ++ a.aggregates.flatMap {
+        case (QueryGen.CountIf(e), _) => Seq(e)
+        case (QueryGen.Count(e, _), _) => Seq(e)
+        case (QueryGen.Sum(e, _), _) => Seq(e)
+        case (QueryGen.Avg(e, _), _) => Seq(e)
+        case _ => Seq.empty
+      }
+    }
+    def walk(e: Expr): Seq[Expr] = e +: Shrinker.childrenOf(e).flatMap(walk)
+    roots.flatMap(walk)
+  }
+
+  /** Whether every column `e` reads is a column of `batch`, of its type, so
+    * `e` can be evaluated over it. */
+  private def readsOwnColumns(e: Expr, batch: ColumnarBatch): Boolean = {
+    val fields = batch.schema.fields
+    oracle.BoundPlan.subtree(e).forall {
+      case c: ColRefExpr => c.index < fields.length && fields(c.index).dataType == c.dataType
+      case _ => true
+    }
   }
 
   /** Whether `f`'s first argument is a value and another is NULL on some row

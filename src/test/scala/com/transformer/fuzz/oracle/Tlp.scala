@@ -28,9 +28,11 @@ import com.transformer.fuzz.RowOracle
   * partition-and-re-aggregate step (which would be unsound for AVG / stddev /
   * COUNT DISTINCT). The three partitions cover every output row exactly once: a
   * row where `p` is TRUE, FALSE, or UNKNOWN, and `p IS NULL` captures exactly the
-  * UNKNOWN rows. The partition predicate is restricted to non-float output
-  * columns, so a comparison is UNKNOWN exactly when an operand is NULL (no `NaN`
-  * can fall into none of the three partitions).
+  * UNKNOWN rows. A comparison is UNKNOWN exactly when an operand is NULL, over
+  * every type, floats included: `NaN` equals `NaN` and orders above every other
+  * number, and `-0.0` equals `0.0`, so a `NaN` row falls into a partition like
+  * any other. The partition may compare a float column with `NaN`, `-0.0` or an
+  * infinity itself.
   *
   * All four queries run against ONE fixed single-partition layout, so the
   * comparison is immune to any layout-dependent output ordering (e.g. a window
@@ -41,7 +43,7 @@ import com.transformer.fuzz.RowOracle
 object Tlp {
 
   def check(mc: MetaCase): RelEngine.Verdict = mc.tlp match {
-    case None => RelEngine.Skipped // no non-float output column to partition on
+    case None => RelEngine.Skipped // no type-reliable output column to partition on
     case Some(pred) =>
       val base = mc.query.tlpBase // WITH [cte defs,] q AS (...) SELECT * FROM q
       val catalog = mc.env.catalog() // one fixed single-partition layout for all four
@@ -54,10 +56,15 @@ object Tlp {
 
       val schema = baseQ.schema
       val baseRows = RelEngine.collectRows(baseQ)
-      val partRows =
-        RelEngine.runRows(catalog, s"$base WHERE ${pred.truePred}", ExecutionOptions.Default) ++
-        RelEngine.runRows(catalog, s"$base WHERE ${pred.falsePred}", ExecutionOptions.Default) ++
-        RelEngine.runRows(catalog, s"$base WHERE ${pred.nullPred}", ExecutionOptions.Default)
+      // A partition that does not bind names a column the base no longer
+      // returns, which only a shrink step makes (one that drops the column
+      // the predicate reads): nothing to check, like a base that does not.
+      val partRows = Seq(pred.truePred, pred.falsePred, pred.nullPred).flatMap { p =>
+        val q =
+          try RelEngine.execute(catalog, s"$base WHERE $p", ExecutionOptions.Default)
+          catch { case e: IllegalArgumentException => return RelEngine.Rejected(RelEngine.rejectReason(e)) }
+        RelEngine.collectRows(q)
+      }
 
       RowOracle.multisetEquals(schema, baseRows, partRows).foreach { diff =>
         throw new AssertionError(

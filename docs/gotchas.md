@@ -1451,10 +1451,15 @@ ship a fix or move something from "not done" to "done".
   algebra. Input-level and aggregate-decomposition TLP are deliberately NOT used.
   The same wrap could be a derived-table subquery in FROM, but the binder rejects
   those (see "No subqueries" below), so the CTE form is the only route. The
-  partition column is also restricted to type-reliable non-float output columns:
-  a computed `Int`-labelled column can reparse to `Double` (`-1.0 % c`) and a
-  `NaN` there falls into none of the three partitions, breaking the reassembly
-  through no engine fault.
+  partition column is also restricted to type-reliable output columns (a bare
+  column, a group key, an aggregate, a window): a computed `Int`-labelled column
+  can reparse to `Double` (`-1.0 % c`), so a literal or a column of its
+  declared type may not be what it meets. A FLOAT or DOUBLE column partitions
+  like any other since plans/robustness/21 gave floats one equality and one
+  order: a `NaN` row is TRUE or FALSE under every comparison, where under
+  IEEE's it fell into none of the three partitions (plans/testing/15 removed the
+  gate that kept floats out, and showed TLP catching IEEE comparisons put
+  back).
 
 - **The sharding gates are frozen at class load, so testing the sharded path
   needs a separate JVM.** `LogicalPlanCardinality.MinShardableSize`

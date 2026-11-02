@@ -126,9 +126,11 @@ class MetamorphicFuzzTest {
     * generator's own multi-relation SQL at bind time — expected to be rare (the
     * generator aims for always-bindable, scope-correct SQL); a spike means the
     * generator regressed. Prints the rate (captured for the PR) plus a per-reason
-    * tally, and fails if the rate crosses a generous ceiling. */
+    * tally, and fails if the rate crosses a generous ceiling. `FUZZ_PROBE_SEEDS=20000`
+    * probes a larger block, as a generator change that touches typing or
+    * rendering should be. */
   @Test def bindRejectRateIsLow(): Unit = {
-    val n = 500
+    val n = Props.probeSeedsOr(500)
     val reasons = scala.collection.mutable.LinkedHashMap.empty[String, (Int, String)]
     var rejects = 0
     var probes = 0
@@ -359,6 +361,120 @@ class MetamorphicFuzzTest {
     assertTrue(s"a rank window never orders by a float column (floatKeys=$floatKeys)", floatKeys > 100)
     assertTrue(s"a rank window's float order key never carries a NaN (nan=$nan)", nan > 12)
     assertTrue(s"a rank window's float order key never carries a -0.0 (negZero=$negZero)", negZero > 9)
+  }
+
+  /** TLP partitions on a FLOAT or DOUBLE output column, which it never did
+    * while a NaN fell into none of its three partitions, and the rows it
+    * partitions hold NaN and -0.0: read by running the TLP base, on the one
+    * layout TLP runs it on, for the seeds whose partition is over a float.
+    * Since plans/robustness/21 a comparison of two non-NULL floats is TRUE or
+    * FALSE, so the partitions must still add up. */
+  @Test def tlpPartitionsFloatColumnsHoldingNaNAndNegativeZero(): Unit = {
+    val n = 3000
+    var shape, nan, negZero, special = 0
+    var seed = 0
+    while (seed < n) {
+      val mc = MetaQueryGen.generate(new Rng(seed.toLong))
+      val floats = tlpColumns(mc).filter { case (_, t) => isFloat(t) }
+      if (floats.nonEmpty) {
+        shape += 1
+        if (mc.tlp.exists(p => Seq("NaN", "Infinity", "-0.0").exists(p.truePred.contains))) special += 1
+        Try {
+          val q = RelEngine.execute(mc.env.catalog(), mc.query.tlpBase, ExecutionOptions.Default)
+          val idx = floats.map { case (name, _) => q.schema.indexOf(name) }.filter(_ >= 0)
+          val rows = RelEngine.collectRows(q)
+          if (rows.exists(r => idx.exists(i => isDouble(r(i), java.lang.Double.isNaN)))) nan += 1
+          if (rows.exists(r => idx.exists(i => isDouble(r(i), d => d == 0.0 && java.lang.Double.compare(d, 0.0) < 0))))
+            negZero += 1
+        }
+      }
+      seed += 1
+    }
+    println(s"[metamorphic] over $n seeds: TLP partitions a float column in $shape, its rows holding NaN in $nan, " +
+      s"-0.0 in $negZero; the partition compares with NaN, -0.0 or an infinity in $special")
+    // Measured over these seeds: the shape 664, NaN 96, -0.0 45, a special
+    // partition constant 159; bounds ~3x below.
+    assertTrue(s"TLP rarely partitions a float column (shape=$shape)", shape > 220)
+    assertTrue(s"a float partition's rows rarely hold NaN (nan=$nan)", nan > 32)
+    assertTrue(s"a float partition's rows rarely hold -0.0 (negZero=$negZero)", negZero > 15)
+    assertTrue(s"a float partition rarely compares with NaN, -0.0 or an infinity (special=$special)", special > 53)
+  }
+
+  /** The output columns `mc`'s TLP predicate reads, with their types. */
+  private def tlpColumns(mc: MetaCase): Vector[(String, DataType)] = mc.tlp.toVector.flatMap { p =>
+    val words = s"${p.truePred} ${p.falsePred}".split("[^A-Za-z0-9_]").toSet
+    mc.query.tlpCandidates.filter { case (name, _) => words(name) }
+  }
+
+  /** FLOAT, DOUBLE and BOOLEAN join keys, which `MetaQueryGen` never drew, and
+    * a float key's NaN and both zeros meeting across a join: a NaN on both
+    * sides, and -0.0 on one beside 0.0 on the other, the keys a hash join
+    * matched by bits before plans/robustness/21. And float GROUP BY keys, never
+    * drawn either, holding NaN and both zeros, which one group must take.
+    * Generation only. */
+  @Test def floatAndBooleanKeysJoinAndGroupOverNaNAndBothZeros(): Unit = {
+    val n = 4000
+    var floatJoin, nanMeets, zerosMeet, booleanJoin, floatGroup, groupNaN, groupZeros = 0
+    def cellsOf(r: Relation, i: Int): IndexedSeq[Any] = r.dataset.rows.map(_(i))
+    def has(cells: IndexedSeq[Any], p: Double => Boolean): Boolean = cells.exists(isDouble(_, p))
+    val isNaN: Double => Boolean = java.lang.Double.isNaN
+    val isNegZero: Double => Boolean = d => d == 0.0 && java.lang.Double.compare(d, 0.0) < 0
+    val isPosZero: Double => Boolean = d => d == 0.0 && java.lang.Double.compare(d, 0.0) == 0
+    var seed = 0
+    while (seed < n) {
+      val mc = MetaQueryGen.generate(new Rng(seed.toLong))
+      val rels = mc.env.relations
+      val keyType = rels.head.schema.fields(rels.head.keyCols.head).dataType
+      if (mc.query.hasAnyJoin && isFloat(keyType)) {
+        floatJoin += 1
+        val keyCells = rels.map(r => r.keyCols.flatMap(cellsOf(r, _)))
+        if (keyCells.count(has(_, isNaN)) >= 2) nanMeets += 1
+        if (keyCells.indices.exists(i => keyCells.indices.exists(j =>
+            i != j && has(keyCells(i), isNegZero) && has(keyCells(j), isPosZero)))) zerosMeet += 1
+      }
+      if (mc.query.hasAnyJoin && keyType == DataType.BooleanType) booleanJoin += 1
+      val groupCells = floatGroupKeys(mc)
+      if (groupCells.nonEmpty) {
+        floatGroup += 1
+        if (groupCells.exists(has(_, isNaN))) groupNaN += 1
+        if (groupCells.exists(cs => has(cs, isNegZero) && has(cs, isPosZero))) groupZeros += 1
+      }
+      seed += 1
+    }
+    println(s"[metamorphic] over $n seeds: a join on a float key in $floatJoin, NaN on both sides in $nanMeets, " +
+      s"-0.0 beside 0.0 in $zerosMeet; on a boolean key in $booleanJoin; a float GROUP BY key in $floatGroup, " +
+      s"holding NaN in $groupNaN, both zeros in $groupZeros")
+    // Measured over these seeds: a float join 499 (NaN meets NaN 141, the
+    // zeros 206), a boolean join 234, a float group key 219 (NaN 56, both
+    // zeros 42); bounds ~3x below.
+    assertTrue(s"a join is rarely on a float key (floatJoin=$floatJoin)", floatJoin > 165)
+    assertTrue(s"NaN rarely meets NaN across a join (nanMeets=$nanMeets)", nanMeets > 47)
+    assertTrue(s"-0.0 rarely meets 0.0 across a join (zerosMeet=$zerosMeet)", zerosMeet > 68)
+    assertTrue(s"a join is rarely on a boolean key (booleanJoin=$booleanJoin)", booleanJoin > 78)
+    assertTrue(s"a GROUP BY key is rarely a float (floatGroup=$floatGroup)", floatGroup > 73)
+    assertTrue(s"a float GROUP BY key rarely holds NaN (groupNaN=$groupNaN)", groupNaN > 18)
+    assertTrue(s"a float GROUP BY key rarely holds both zeros (groupZeros=$groupZeros)", groupZeros > 14)
+  }
+
+  /** The cells of each float GROUP BY key of any arm of `mc`'s query, read in
+    * the base relation its alias names. */
+  private def floatGroupKeys(mc: MetaCase): Vector[IndexedSeq[Any]] = {
+    def arm(q: MetaQuery): Vector[IndexedSeq[Any]] = (q.core match {
+      case a: AggCore => a.groupKeys.collect { case (c: ColRefExpr, _) if isFloat(c.dataType) =>
+        c.name.split('.') match {
+          case Array(alias, col) => columnCells(mc.env, q.from, ScopeCol(alias, col, c.dataType))
+          case _ => IndexedSeq.empty[Any]
+        }
+      }
+      case _ => Vector.empty
+    }) ++ q.setOp.toVector.flatMap { case (rhs, _) => arm(rhs) } ++ q.ctes.flatMap(c => arm(c.body))
+    arm(mc.query).filter(_.nonEmpty)
+  }
+
+  private def isDouble(v: Any, p: Double => Boolean): Boolean = v match {
+    case x: java.lang.Double => p(x.doubleValue)
+    case x: java.lang.Float => p(x.doubleValue)
+    case _ => false
   }
 
   private def isRank(w: WinItem): Boolean =

@@ -26,10 +26,9 @@ import com.transformer.sql.plan._
   *     arithmetic operands are numeric, `||` operands string, comparisons
   *     same-category — the same discipline [[QueryGen]] uses so a precedence-only
   *     reparse stays type-correct. Every one of the ten types is a column type
-  *     (and all but FLOAT, DOUBLE and BOOLEAN a join-key type); a DATE,
-  *     TIMESTAMP or BINARY meets only its own type and does no arithmetic, and
-  *     a DECIMAL meets decimals and integer columns or literals, in a
-  *     comparison or in arithmetic.
+  *     and a join-key type; a DATE, TIMESTAMP or BINARY meets only its own type
+  *     and does no arithmetic, and a DECIMAL meets decimals and integer columns
+  *     or literals, in a comparison or in arithmetic.
   *
   *   - '''Total + paren-free.''' Nothing here builds a tree that throws for
   *     in-range input, and expressions render without grouping parens but for
@@ -39,10 +38,12 @@ import com.transformer.sql.plan._
   * Excluded so the output multiset is well-defined for the metamorphic relations:
   * `RAND()` and the clock functions, which are mode-dependent. `LIMIT` and
   * `OFFSET` ARE generated, but only in the '''top-n''' shape — a bare,
-  * type-reliable, non-float projection ordered by every one of its columns (see
+  * type-reliable projection ordered by every one of its columns (see
   * [[MetaQuery.totalOrderKeys]]). Rows tied at a cutoff are then identical rows,
   * so the kept multiset is the same under every layout, every build-side swap,
-  * and in each of TLP's four separate executions. The relations share a narrow
+  * and in each of TLP's four separate executions; the one tie that is not two
+  * identical values, -0.0 beside 0.0 in a float key, `RowOracle` compares as
+  * equal, as it does every float column. The relations share a narrow
   * join-key domain so equi-joins actually match — wide-random keys would make
   * every outer join all-unmatched and hide the null-extension bugs the oracles
   * target.
@@ -182,13 +183,15 @@ object MetaQueryGen {
     /** Output column names + types — the schema of the query body, which the
       * mode-agreement oracle compares over. */
     def outputSchema: Vector[(String, DataType)]
-    /** Output columns whose declared type is RELIABLE and non-float — the only
-      * columns TLP may partition on. A bare column reference / group key / aggregate
-      * / window output binds to its declared type exactly; a computed expression
+    /** Output columns whose declared type is RELIABLE — the only columns TLP
+      * may partition on. A bare column reference / group key / aggregate /
+      * window output binds to its declared type exactly; a computed expression
       * does not, because its paren-free SQL can reparse to a wider type (e.g. an
-      * `Int`-labelled `-1.0 % c` reparses to `Double`, whose `NaN` would fall into
-      * none of TLP's three partitions). Restricting to reliable non-float columns
-      * keeps a TLP comparison UNKNOWN exactly when an operand is NULL. */
+      * `Int`-labelled `-1.0 % c` reparses to `Double`), so a literal or another
+      * column of its declared type may not be what it compares with. Every
+      * type partitions, floats included: a comparison of two non-NULL values is
+      * TRUE or FALSE, NaN among them (see [[TlpPred]]), so it is UNKNOWN exactly
+      * when an operand is NULL. */
     def tlpCandidates: Vector[(String, DataType)]
     /** Whether this core projects a window function at all — the shape-coverage
       * tally reads this. */
@@ -262,9 +265,11 @@ object MetaQueryGen {
   // ---- the metamorphic case ----------------------------------------------
 
   /** A predicate over the query's OUTPUT columns, in the three TLP partitions.
-    * Each shape renders all three variants paren-free; restricted to non-float
-    * output columns so a comparison is NULL exactly when an operand is NULL (no
-    * NaN can fall into none of the three partitions). */
+    * Each shape renders all three variants paren-free. A comparison is NULL
+    * exactly when an operand is NULL, over every type: a float's NaN equals
+    * NaN and orders above every other number, and -0.0 equals 0.0
+    * (plans/robustness/21), so no non-NULL row falls into none of the three
+    * partitions. A float column was kept out of them until that held. */
   sealed trait TlpPred {
     def truePred: String
     def falsePred: String
@@ -319,9 +324,10 @@ object MetaQueryGen {
     def whereSql: String = where.map(w => s" WHERE ${SqlRender.expr(w)}").getOrElse("")
 
     /** The SOURCE columns behind every projected item, when the SELECT list is all
-      * bare, type-reliable, non-float column references — the condition under which
-      * `ORDER BY` over all of them is a TOTAL order on the output, so two rows tied
-      * at a `LIMIT` cutoff are identical rows and top-`n` yields one fixed multiset.
+      * bare, type-reliable column references — the condition under which `ORDER
+      * BY` over all of them is a TOTAL order on the output, so two rows tied at a
+      * `LIMIT` cutoff are identical rows (or, in a float column, -0.0 and 0.0,
+      * which `RowOracle` compares as equal) and top-`n` yields one fixed multiset.
       * `None` (and so no `LIMIT`) for every other shape.
       *
       * The keys are the SOURCE columns, qualified (`t0.c0`), which an `ORDER BY`
@@ -454,14 +460,16 @@ object MetaQueryGen {
 
   // ---- relation environment generation -----------------------------------
 
-  /** Join-key column types: every type but FLOAT, DOUBLE and BOOLEAN. A DATE
-    * or TIMESTAMP key takes the `LongHashMap` fast path INT and BIGINT take; a
-    * BINARY or DECIMAL key takes the object codecs, the grace-hash spill buckets
-    * and shard routing, each of which once split keys `=` calls equal (plan
-    * 02). Draw with `ExprGen.pick`. `private[fuzz]` for the coverage guards. */
+  /** Join-key column types: every one of the ten. A DATE or TIMESTAMP key takes
+    * the `LongHashMap` fast path INT and BIGINT take; a BINARY or DECIMAL key
+    * takes the object codecs, the grace-hash spill buckets and shard routing,
+    * each of which once split keys `=` calls equal (plan 02); a FLOAT or DOUBLE
+    * key holds NaN and both zeros, which `=` calls equal to NaN and to each
+    * other (plans/robustness/21), and a BOOLEAN key has two values. Draw with
+    * `ExprGen.pick`. `private[fuzz]` for the coverage guards. */
   private[fuzz] val KeyTypes: Seq[DataType] =
-    Seq(DataType.IntType, DataType.LongType, DataType.StringType, DataType.DateType, DataType.TimestampType,
-      DataType.BinaryType) ++ ExprGen.DecimalTypes
+    Seq(DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType, DataType.BooleanType,
+      DataType.StringType, DataType.DateType, DataType.TimestampType, DataType.BinaryType) ++ ExprGen.DecimalTypes
   /** Payload (non-key) column types: all ten, `ExprGen.GenTypes`. Draw with
     * `ExprGen.pick`. `private[fuzz]` so the coverage guards can assert every
     * one of them still reaches the oracles. */
@@ -485,8 +493,17 @@ object MetaQueryGen {
       val w = rng.between(2, 4); val base = rng.oneOf(Seq(0L, 1L)); (0 until w).map(i => (base + i): Any)
     case DataType.StringType =>
       val w = rng.between(2, 4); StringPool.take(w).map(_.asInstanceOf[Any])
+    case DataType.BooleanType => IndexedSeq[Any](true, false)
+    case DataType.DoubleType => slice(rng, FloatKeyPool.map(d => d: Any))
+    case DataType.FloatType => slice(rng, FloatKeyPool.map(d => d.toFloat: Any))
     case other => slice(rng, poolOf(other))
   }
+
+  /** A float key's values, ordered so a slice of neighbours usually holds two
+    * of NaN, -0.0 and 0.0, the keys whose equality IEEE and Java's boxes get
+    * wrong: NaN beside a number and beside -0.0, -0.0 beside 0.0. */
+  private val FloatKeyPool: IndexedSeq[Double] =
+    IndexedSeq(1.0, Double.NaN, -0.0, 0.0, 2.5, Double.PositiveInfinity)
 
   /** The pool a DATE, TIMESTAMP, BINARY or DECIMAL column takes its values from:
     * `ExprGen`'s pools for the first three, whose neighbours are the pairs a
@@ -542,10 +559,8 @@ object MetaQueryGen {
   /** A payload column's candidate non-null values. Float/Double columns can also
     * carry `NaN` / `-0.0` / an infinity, through `DataGen.withSpecialDoubles` —
     * the pool and the rate live there, so this corpus and the mode-differential
-    * one widen together. PAYLOAD columns only: `KeyTypes` has no float type, so
-    * a join or GROUP BY key never draws one. What a `NaN` KEY does is a separate
-    * question from what `MIN`/`MAX` does with a `NaN` VALUE (see
-    * `docs/architecture.md` §2a for the answer). */
+    * one widen together. A float KEY column draws from `FloatKeyPool` instead,
+    * which holds NaN and both zeros on most slices. */
   private def payloadDomain(rng: Rng, dt: DataType): IndexedSeq[Any] = dt match {
     case DataType.IntType => val b = rng.oneOf(Seq(-1, 0, 1)); (0 until rng.between(2, 4)).map(i => (b + i): Any)
     case DataType.LongType => val b = rng.oneOf(Seq(-1L, 0L, 1L)); (0 until rng.between(2, 4)).map(i => (b + i): Any)
@@ -597,9 +612,9 @@ object MetaQueryGen {
   private def genLimit(rng: Rng): Long = rng.weighted(
     (1, 0L), (3, 1L), (4, 2L), (4, 5L), (2, 17L), (2, 1000L))
 
-  /** The projection a `LIMIT` is sound over: 1-3 bare, type-reliable, non-float
-    * columns, no DISTINCT, no window, no computed item — so the rendered
-    * `ORDER BY` covers every output column and the order is total. */
+  /** The projection a `LIMIT` is sound over: 1-3 bare, type-reliable columns,
+    * no DISTINCT, no window, no computed item — so the rendered `ORDER BY`
+    * covers every output column and the order is total. */
   private def genTopNCore(rng: Rng, scope: Vector[ScopeCol]): ProjectCore = {
     val orderable = scope.filter(c => isPartitionable(c.dataType))
     val cols = distinctSubset(rng, orderable, rng.between(1, math.min(3, orderable.length)))
@@ -708,8 +723,8 @@ object MetaQueryGen {
 
   private def genProjectCore(rng: Rng, scope: Vector[ScopeCol]): ProjectCore = {
     val distinct = rng.bool(0.4)
-    // Always project a couple of bare columns (TLP needs a non-float output
-    // column to partition on); occasionally add a shallow computed column.
+    // Always project a couple of bare columns (TLP partitions on a bare
+    // output column); occasionally add a shallow computed column.
     val bareCount = rng.between(1, math.min(3, scope.length))
     val bare = distinctSubset(rng, scope, bareCount)
     val bareItems: Vector[(Expr, String)] = bare.zipWithIndex.map { case (sc, i) => (sc.ref, s"o$i") }
@@ -792,8 +807,8 @@ object MetaQueryGen {
   private def avgType(dt: DataType): DataType = AggExprAvg(ColRefExpr(0, "", dt)).resultType
 
   private def genAggCore(rng: Rng, scope: Vector[ScopeCol]): AggCore = {
-    // Group keys: bare non-float scope columns (float group keys are legal but a
-    // poor TLP partition source). A global aggregate (no keys) is allowed too.
+    // Group keys: bare scope columns of any type, a float's NaN and both zeros
+    // among them. A global aggregate (no keys) is allowed too.
     val groupable = scope.filter(c => isPartitionable(c.dataType))
     val keys: Vector[ScopeCol] =
       if (groupable.nonEmpty && rng.bool(0.8))
@@ -1019,14 +1034,11 @@ object MetaQueryGen {
 
   // ---- TLP partition-predicate selection ---------------------------------
 
-  /** Non-float, comparison-clean output types eligible as TLP partition keys:
-    * a comparison of two non-NULL values of one of these is TRUE or FALSE,
-    * never UNKNOWN, so the three partitions cover every row. */
-  private def isPartitionable(dt: DataType): Boolean = dt match {
-    case DataType.IntType | DataType.LongType | DataType.StringType | DataType.BooleanType => true
-    case DataType.DateType | DataType.TimestampType | DataType.BinaryType | _: DataType.DecimalType => true
-    case _ => false
-  }
+  /** The output types eligible as TLP partition keys, top-n keys and GROUP BY
+    * keys: every value type. A comparison of two non-NULL values of one is TRUE
+    * or FALSE, never UNKNOWN, floats included (see [[TlpPred]]), so the three
+    * partitions cover every row. */
+  private def isPartitionable(dt: DataType): Boolean = dt != DataType.NullType
   /** The partitionable types TLP compares with `<`, `=` and the rest: all but
     * BOOLEAN, which partitions as a predicate of its own. */
   private def isOrdered(dt: DataType): Boolean = isPartitionable(dt) && dt != DataType.BooleanType
@@ -1034,8 +1046,8 @@ object MetaQueryGen {
     * so a BINARY output column partitions against another BINARY column. */
   private def hasLiteral(dt: DataType): Boolean = isOrdered(dt) && dt != DataType.BinaryType
 
-  /** Choose a TLP partition predicate over the query's type-reliable, non-float
-    * output columns ([[QueryCore.tlpCandidates]]), or `None` when there are none. */
+  /** Choose a TLP partition predicate over the query's type-reliable output
+    * columns ([[QueryCore.tlpCandidates]]), or `None` when there are none. */
   private def genTlpPred(rng: Rng, cand: Vector[(String, DataType)]): Option[TlpPred] = {
     if (cand.isEmpty) return None
     val boolCols = cand.collect { case (n, DataType.BooleanType) => n }
@@ -1047,7 +1059,7 @@ object MetaQueryGen {
       choices += ((2, () => {
         val (n, t) = rng.oneOf(literalCols)
         val (op, neg) = rng.oneOf(cmpPairs)
-        TlpCmpLit(n, op, neg, SqlRender.expr(LitExpr(genLit(rng, t), t)))
+        TlpCmpLit(n, op, neg, SqlRender.expr(tlpLiteral(rng, t)))
       }))
     }
     if (orderedCols.nonEmpty) {
@@ -1063,6 +1075,23 @@ object MetaQueryGen {
     }
     if (choices.isEmpty) None else Some(rng.weighted(choices.toSeq: _*)())
   }
+
+  /** The literal a TLP partition compares a column of `t` with: one of its
+    * pool's, and for a FLOAT or DOUBLE now and then NaN, -0.0 or an infinity,
+    * which SQL writes as a CAST of its text (`CAST('NaN' AS DOUBLE)`), so the
+    * partition's own constant sits at the ends of the order and beside 0.0. */
+  private def tlpLiteral(rng: Rng, t: DataType): Expr = t match {
+    case DataType.FloatType | DataType.DoubleType if rng.bool(0.3) =>
+      floatSpecialLiteral(rng.oneOf(Seq("NaN", "-0.0", "Infinity", "-Infinity")), t)
+    case _ => LitExpr(genLit(rng, t), t)
+  }
+
+  /** A FLOAT or DOUBLE literal SQL has no plain spelling for: NaN and the
+    * infinities as a CAST of their text, and -0.0 as the negative number it
+    * is written as. */
+  private[fuzz] def floatSpecialLiteral(text: String, t: DataType): Expr =
+    if (text == "-0.0") LitExpr(if (t == DataType.FloatType) -0.0f else -0.0, t)
+    else CastExpr(LitExpr(text, DataType.StringType), t)
 
   /** (op, negatedOp) pairs: for non-null operands exactly one of the two holds. */
   private val cmpPairs: Seq[(String, String)] =

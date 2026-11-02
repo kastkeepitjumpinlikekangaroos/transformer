@@ -13,7 +13,7 @@ import scala.collection.mutable
   * A query the engine REJECTS at bind/plan time (an `IllegalArgumentException`
   * from the generator's own SQL) is not a finding — the oracles return
   * [[Rejected]] and the caller counts it toward the bind-reject rate. A query
-  * that has nothing to check (e.g. TLP with no non-float output column to
+  * that has nothing to check (e.g. TLP with no type-reliable output column to
   * partition on) returns [[Skipped]]. Only a successfully-planned query whose
   * metamorphic relation fails throws `AssertionError`, which the harness
   * minimizes.

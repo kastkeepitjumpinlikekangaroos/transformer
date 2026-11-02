@@ -979,8 +979,12 @@ the reject rate near zero and the property sound:
   depends on what each side is, so `SqlRender.decimalSide` gives it the
   parentheses precedence needs (only those: JSqlParser rejects some statements
   with three stacked). Confirm with the `bindRejectRateIsLow` guard before
-  merging, and over a large block when the change is to a type rule: 500 seeds
-  missed a reject that 20000 found.
+  merging, and over a large block when the change is to a type rule or to
+  rendering: 500 seeds missed a reject that 20000 found. `FUZZ_PROBE_SEEDS=20000`
+  (or `-Dfuzz.probe_seeds`) sets both guards' block without an edit, e.g.
+  `bazel test //src/test/scala/com/transformer/fuzz:mode_differential_fuzz_test
+  --test_filter='.*#bindRejectRateIsLow' --test_env=FUZZ_PROBE_SEEDS=20000`,
+  and the tally of reasons it prints is what to read.
 
 Exclude anything non-deterministic (`RAND()`, the clock functions) or
 mode-unstable (`LIMIT` and `OFFSET` without a total order — a cutoff among tied
@@ -1124,11 +1128,13 @@ relation or generator extension:
   stay type-correct under a precedence-only reparse (see
   [gotchas.md](gotchas.md)).
 - **TLP partition keys must be type-reliable.** `QueryCore.tlpCandidates`
-  restricts the partition column to non-float output columns whose runtime type
-  survives a precedence-only reparse. A computed `Int`-labelled column can reparse
-  to `Double` (e.g. `-1.0 % c`); a `NaN` there falls into none of `p` / `NOT p` /
-  `p IS NULL`, breaking the reassembly through no fault of the engine. Float and
-  double keys are excluded for the same reason.
+  restricts the partition column to output columns whose runtime type survives
+  a precedence-only reparse: a bare column, a group key, an aggregate or a
+  window. A computed `Int`-labelled column can reparse to `Double` (e.g. `-1.0 %
+  c`), so a literal of its declared type may not be what it compares with. Every
+  type partitions, FLOAT and DOUBLE included: a comparison of two non-NULL
+  floats is TRUE or FALSE (`NaN` equals `NaN` and sorts above every number), so
+  a `NaN` row lands in exactly one of `p` / `NOT p` / `p IS NULL`.
 - **TLP partitions the OUTPUT, not the input.** The base is a CTE wrapper,
   `WITH [cte defs,] q AS (<body>) SELECT * FROM q [WHERE <partition>]`
   (`MetaQuery.tlpBase`), so the relation holds for aggregates, windows, unions,
