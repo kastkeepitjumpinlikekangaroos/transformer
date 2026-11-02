@@ -1,11 +1,12 @@
 # Text casts by the grammar CSV reads a value by (plans/robustness/24): to a
 # BOOLEAN from true and false alone, in any case and with no spaces around
-# them, to an INT or BIGINT from an optional sign and ASCII digits, and to a
-# FLOAT or DOUBLE from a plain decimal number, or NaN, Infinity and -Infinity
-# as written. Any other text is an error naming it. Postgres reads more
-# spellings of each, which its ports keep as skipped records
-# (postgres/boolean.test, postgres/int4.test, postgres/float8.test); these are
-# the pins of the ledger's bool-text, int-text and double-text
+# them, to an INT or BIGINT from an optional sign and ASCII digits, to a FLOAT
+# or DOUBLE from a plain decimal number, or NaN, Infinity and -Infinity as
+# written, and to a DATE from an ISO date, a year past 9999 or before 1 with
+# a sign. Any other text is an error naming it. Postgres reads more spellings
+# of each, which its ports keep as skipped records (postgres/boolean.test,
+# postgres/int4.test, postgres/float8.test, postgres/date.test); these are
+# the pins of the ledger's bool-text, int-text, double-text and date-text-iso
 # (docs/gotchas.md).
 
 onlyif transformer bool-text
@@ -76,3 +77,21 @@ query INT,FLOAT,BIGINT,BOOLEAN
 SELECT '1' + CAST(1 AS INT), '1' + CAST(1 AS FLOAT), CAST(1 AS BIGINT) * '3', CAST(1 AS INT) < '10'
 ----
 2	2.0	3	true
+
+onlyif transformer date-text-iso
+query DATE,DATE,DATE
+SELECT CAST('2026-01-31' AS DATE), CAST('+10000-01-01' AS DATE), CAST('-0001-12-31' AS DATE)
+----
+2026-01-31	+10000-01-01	-0001-12-31
+
+onlyif transformer date-text-iso
+statement error
+SELECT CAST('January 8, 1999' AS DATE)
+----
+Cannot cast 'January 8, 1999' to date
+
+onlyif transformer date-text-iso
+statement error
+SELECT CAST('19990108' AS DATE)
+----
+Cannot cast '19990108' to date

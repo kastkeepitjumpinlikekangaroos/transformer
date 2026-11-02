@@ -1,0 +1,1374 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/date.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/date.out at that commit, never the engine's.
+# Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group;
+# Portions Copyright (c) 1994, The Regents of the University of California.
+# Distributed under the PostgreSQL License, a permissive license whose text
+# travels with every copy: it is COPYRIGHT beside this file.
+#
+# DATE: a table of ISO dates, one before year 1, compared with ISO literals,
+# and the text Postgres reads as a date under each DateStyle field order (YMD,
+# DMY, MDY), which the engine reads only as an ISO date, and the ends of
+# Postgres's date range. 126 of the file's 271 statements are here, each
+# record naming the line of date.sql it comes from: 17 that make or fill the
+# table, 15 queries and 10 statements that must fail, answered as Postgres
+# answers them, and 84 queries the engine answers otherwise by design, below.
+# Postgres prints a date as MM-DD-YYYY under its first DateStyle (Postgres,
+# MDY) and as ISO after SET datestyle; each is written as the engine prints
+# it, ISO, a year before 1 as ISO 8601's astronomical year (1 BC is 0000).
+#
+# A statement is as Postgres wrote it but where a rewrite cannot change what
+# it means, which its record says: date as DATE, a string an INSERT stores
+# written as the date it is in ISO form ('2040-04-10 BC' as '-2039-04-10'),
+# and one Postgres refuses as CAST('...' AS DATE), the conversion Postgres
+# makes of it, so the engine reads the text, not the runner. The settings of
+# DateStyle are left out; the records under each are kept, and say which.
+#
+# `skipif transformer date-text-iso` marks the 84 queries whose text Postgres
+# reads as a date and the engine does not, by that rule of the ledger in
+# docs/gotchas.md: text casts to DATE from an ISO date alone, a year past 9999
+# or before 1 with a sign, where Postgres reads its DateStyle's formats
+# ('January 8, 1999', '1/8/1999', '19990108', '1999.008', 'J2451187') and BC
+# after a year. After each, its twin, `onlyif transformer date-text-iso`, is
+# the same statement with the engine's own answer, an error naming the text.
+# A text no date in either grammar is an error in both (Postgres: invalid
+# input syntax), and so is 1997-02-29.
+#
+# Left out (114 statements), by what they need:
+#   71  date_part() and EXTRACT
+#   10  date_trunc()
+#   10  make_date() and make_time()
+#    8  a DATE minus a DATE, over the special values epoch, today, yesterday
+#       and tomorrow
+#    5  SET and RESET of DateStyle
+#    5  pg_input_is_valid() and pg_input_error_info()
+#    5  the dates infinity and -infinity, which a DATE does not hold
+#
+# Held out (31 statements), both engines refusing them for different
+# reasons: text in a DateStyle format that Postgres reads and finds a field
+# out of range in (1/8/1999 under YMD, 08-01-1999 under YMD), and the dates
+# one past each end of Postgres's range (4714-11-23 BC, 5874898-01-01), which
+# the engine refuses as no ISO date. docs/gotchas.md lists them.
+
+# date.sql:5
+statement ok
+CREATE TABLE DATE_TBL (f1 date)
+
+# date.sql:7
+statement ok
+INSERT INTO DATE_TBL VALUES ('1957-04-09')
+
+# date.sql:8
+statement ok
+INSERT INTO DATE_TBL VALUES ('1957-06-13')
+
+# date.sql:9
+statement ok
+INSERT INTO DATE_TBL VALUES ('1996-02-28')
+
+# date.sql:10
+statement ok
+INSERT INTO DATE_TBL VALUES ('1996-02-29')
+
+# date.sql:11
+statement ok
+INSERT INTO DATE_TBL VALUES ('1996-03-01')
+
+# date.sql:12
+statement ok
+INSERT INTO DATE_TBL VALUES ('1996-03-02')
+
+# date.sql:13
+statement ok
+INSERT INTO DATE_TBL VALUES ('1997-02-28')
+
+# date.sql:14: a date that does not exist, written CAST('...' AS DATE), the
+# conversion Postgres makes of it as it stores it, so the engine reads the
+# text, not the runner. Postgres: date/time field value out of range:
+# "1997-02-29".
+statement error
+INSERT INTO DATE_TBL VALUES (CAST('1997-02-29' AS DATE))
+
+# date.sql:15
+statement ok
+INSERT INTO DATE_TBL VALUES ('1997-03-01')
+
+# date.sql:16
+statement ok
+INSERT INTO DATE_TBL VALUES ('1997-03-02')
+
+# date.sql:17
+statement ok
+INSERT INTO DATE_TBL VALUES ('2000-04-01')
+
+# date.sql:18
+statement ok
+INSERT INTO DATE_TBL VALUES ('2000-04-02')
+
+# date.sql:19
+statement ok
+INSERT INTO DATE_TBL VALUES ('2000-04-03')
+
+# date.sql:20
+statement ok
+INSERT INTO DATE_TBL VALUES ('2038-04-08')
+
+# date.sql:21
+statement ok
+INSERT INTO DATE_TBL VALUES ('2039-04-09')
+
+# date.sql:22
+statement ok
+INSERT INTO DATE_TBL VALUES ('2040-04-10')
+
+# date.sql:23: '2040-04-10 BC' written as the same date in ISO 8601, whose
+# year 0 is 1 BC, so -2039 is 2040 BC: the stored value, which the runner
+# reads only as ISO text.
+statement ok
+INSERT INTO DATE_TBL VALUES ('-2039-04-10')
+
+# date.sql:25
+query DATE rowsort
+SELECT f1 FROM DATE_TBL
+----
+-2039-04-10
+1957-04-09
+1957-06-13
+1996-02-28
+1996-02-29
+1996-03-01
+1996-03-02
+1997-02-28
+1997-03-01
+1997-03-02
+2000-04-01
+2000-04-02
+2000-04-03
+2038-04-08
+2039-04-09
+2040-04-10
+
+# date.sql:27
+query DATE rowsort
+SELECT f1 FROM DATE_TBL WHERE f1 < '2000-01-01'
+----
+-2039-04-10
+1957-04-09
+1957-06-13
+1996-02-28
+1996-02-29
+1996-03-01
+1996-03-02
+1997-02-28
+1997-03-01
+1997-03-02
+
+# date.sql:29
+query DATE rowsort
+SELECT f1 FROM DATE_TBL
+  WHERE f1 BETWEEN '2000-01-01' AND '2001-01-01'
+----
+2000-04-01
+2000-04-02
+2000-04-03
+
+# date.sql:39
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'January 8, 1999' by its DateStyle
+query DATE nosort
+SELECT date 'January 8, 1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'January 8, 1999'
+----
+Cannot cast 'January 8, 1999' to date
+
+# date.sql:40
+query DATE nosort
+SELECT date '1999-01-08'
+----
+1999-01-08
+
+# date.sql:41
+query DATE nosort
+SELECT date '1999-01-18'
+----
+1999-01-18
+
+# date.sql:45
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '01/02/03' by its DateStyle
+query DATE nosort
+SELECT date '01/02/03'
+----
+2001-02-03
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '01/02/03'
+----
+Cannot cast '01/02/03' to date
+
+# date.sql:46
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '19990108' by its DateStyle
+query DATE nosort
+SELECT date '19990108'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '19990108'
+----
+Cannot cast '19990108' to date
+
+# date.sql:47
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '990108' by its DateStyle
+query DATE nosort
+SELECT date '990108'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '990108'
+----
+Cannot cast '990108' to date
+
+# date.sql:48
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999.008' by its DateStyle
+query DATE nosort
+SELECT date '1999.008'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999.008'
+----
+Cannot cast '1999.008' to date
+
+# date.sql:49
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'J2451187' by its DateStyle
+query DATE nosort
+SELECT date 'J2451187'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'J2451187'
+----
+Cannot cast 'J2451187' to date
+
+# date.sql:52
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '99-Jan-08' by its DateStyle
+query DATE nosort
+SELECT date '99-Jan-08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '99-Jan-08'
+----
+Cannot cast '99-Jan-08' to date
+
+# date.sql:53
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999-Jan-08' by its DateStyle
+query DATE nosort
+SELECT date '1999-Jan-08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999-Jan-08'
+----
+Cannot cast '1999-Jan-08' to date
+
+# date.sql:55
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08-Jan-1999' by its DateStyle
+query DATE nosort
+SELECT date '08-Jan-1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08-Jan-1999'
+----
+Cannot cast '08-Jan-1999' to date
+
+# date.sql:57
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'Jan-08-1999' by its DateStyle
+query DATE nosort
+SELECT date 'Jan-08-1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'Jan-08-1999'
+----
+Cannot cast 'Jan-08-1999' to date
+
+# date.sql:58: Postgres: invalid input syntax for type date: "99-08-Jan".
+statement error
+SELECT date '99-08-Jan'
+
+# date.sql:59: Postgres: invalid input syntax for type date: "1999-08-Jan".
+statement error
+SELECT date '1999-08-Jan'
+
+# date.sql:61
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '99 Jan 08' by its DateStyle
+query DATE nosort
+SELECT date '99 Jan 08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '99 Jan 08'
+----
+Cannot cast '99 Jan 08' to date
+
+# date.sql:62
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999 Jan 08' by its DateStyle
+query DATE nosort
+SELECT date '1999 Jan 08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999 Jan 08'
+----
+Cannot cast '1999 Jan 08' to date
+
+# date.sql:64
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08 Jan 1999' by its DateStyle
+query DATE nosort
+SELECT date '08 Jan 1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08 Jan 1999'
+----
+Cannot cast '08 Jan 1999' to date
+
+# date.sql:66
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'Jan 08 1999' by its DateStyle
+query DATE nosort
+SELECT date 'Jan 08 1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'Jan 08 1999'
+----
+Cannot cast 'Jan 08 1999' to date
+
+# date.sql:67
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '99 08 Jan' by its DateStyle
+query DATE nosort
+SELECT date '99 08 Jan'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '99 08 Jan'
+----
+Cannot cast '99 08 Jan' to date
+
+# date.sql:68
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999 08 Jan' by its DateStyle
+query DATE nosort
+SELECT date '1999 08 Jan'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999 08 Jan'
+----
+Cannot cast '1999 08 Jan' to date
+
+# date.sql:70
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '99-01-08' by its DateStyle
+query DATE nosort
+SELECT date '99-01-08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '99-01-08'
+----
+Cannot cast '99-01-08' to date
+
+# date.sql:71
+query DATE nosort
+SELECT date '1999-01-08'
+----
+1999-01-08
+
+# date.sql:76
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '99-08-01' by its DateStyle
+query DATE nosort
+SELECT date '99-08-01'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '99-08-01'
+----
+Cannot cast '99-08-01' to date
+
+# date.sql:77
+query DATE nosort
+SELECT date '1999-08-01'
+----
+1999-08-01
+
+# date.sql:79
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '99 01 08' by its DateStyle
+query DATE nosort
+SELECT date '99 01 08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '99 01 08'
+----
+Cannot cast '99 01 08' to date
+
+# date.sql:80
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999 01 08' by its DateStyle
+query DATE nosort
+SELECT date '1999 01 08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999 01 08'
+----
+Cannot cast '1999 01 08' to date
+
+# date.sql:85
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '99 08 01' by its DateStyle
+query DATE nosort
+SELECT date '99 08 01'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '99 08 01'
+----
+Cannot cast '99 08 01' to date
+
+# date.sql:86
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999 08 01' by its DateStyle
+query DATE nosort
+SELECT date '1999 08 01'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999 08 01'
+----
+Cannot cast '1999 08 01' to date
+
+# date.sql:90
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'January 8, 1999' by its DateStyle
+query DATE nosort
+SELECT date 'January 8, 1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'January 8, 1999'
+----
+Cannot cast 'January 8, 1999' to date
+
+# date.sql:91
+query DATE nosort
+SELECT date '1999-01-08'
+----
+1999-01-08
+
+# date.sql:92
+query DATE nosort
+SELECT date '1999-01-18'
+----
+1999-01-18
+
+# date.sql:93
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1/8/1999' by its DateStyle
+query DATE nosort
+SELECT date '1/8/1999'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1/8/1999'
+----
+Cannot cast '1/8/1999' to date
+
+# date.sql:95
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '18/1/1999' by its DateStyle
+query DATE nosort
+SELECT date '18/1/1999'
+----
+1999-01-18
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '18/1/1999'
+----
+Cannot cast '18/1/1999' to date
+
+# date.sql:96
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '01/02/03' by its DateStyle
+query DATE nosort
+SELECT date '01/02/03'
+----
+2003-02-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '01/02/03'
+----
+Cannot cast '01/02/03' to date
+
+# date.sql:97
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '19990108' by its DateStyle
+query DATE nosort
+SELECT date '19990108'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '19990108'
+----
+Cannot cast '19990108' to date
+
+# date.sql:98
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '990108' by its DateStyle
+query DATE nosort
+SELECT date '990108'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '990108'
+----
+Cannot cast '990108' to date
+
+# date.sql:99
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999.008' by its DateStyle
+query DATE nosort
+SELECT date '1999.008'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999.008'
+----
+Cannot cast '1999.008' to date
+
+# date.sql:100
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'J2451187' by its DateStyle
+query DATE nosort
+SELECT date 'J2451187'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'J2451187'
+----
+Cannot cast 'J2451187' to date
+
+# date.sql:101
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'January 8, 99 BC' by its DateStyle
+query DATE nosort
+SELECT date 'January 8, 99 BC'
+----
+-0098-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'January 8, 99 BC'
+----
+Cannot cast 'January 8, 99 BC' to date
+
+# date.sql:104
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999-Jan-08' by its DateStyle
+query DATE nosort
+SELECT date '1999-Jan-08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999-Jan-08'
+----
+Cannot cast '1999-Jan-08' to date
+
+# date.sql:105
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08-Jan-99' by its DateStyle
+query DATE nosort
+SELECT date '08-Jan-99'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08-Jan-99'
+----
+Cannot cast '08-Jan-99' to date
+
+# date.sql:106
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08-Jan-1999' by its DateStyle
+query DATE nosort
+SELECT date '08-Jan-1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08-Jan-1999'
+----
+Cannot cast '08-Jan-1999' to date
+
+# date.sql:107
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'Jan-08-99' by its DateStyle
+query DATE nosort
+SELECT date 'Jan-08-99'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'Jan-08-99'
+----
+Cannot cast 'Jan-08-99' to date
+
+# date.sql:108
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'Jan-08-1999' by its DateStyle
+query DATE nosort
+SELECT date 'Jan-08-1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'Jan-08-1999'
+----
+Cannot cast 'Jan-08-1999' to date
+
+# date.sql:109: Postgres: invalid input syntax for type date: "99-08-Jan".
+statement error
+SELECT date '99-08-Jan'
+
+# date.sql:110: Postgres: invalid input syntax for type date: "1999-08-Jan".
+statement error
+SELECT date '1999-08-Jan'
+
+# date.sql:113
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999 Jan 08' by its DateStyle
+query DATE nosort
+SELECT date '1999 Jan 08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999 Jan 08'
+----
+Cannot cast '1999 Jan 08' to date
+
+# date.sql:114
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08 Jan 99' by its DateStyle
+query DATE nosort
+SELECT date '08 Jan 99'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08 Jan 99'
+----
+Cannot cast '08 Jan 99' to date
+
+# date.sql:115
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08 Jan 1999' by its DateStyle
+query DATE nosort
+SELECT date '08 Jan 1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08 Jan 1999'
+----
+Cannot cast '08 Jan 1999' to date
+
+# date.sql:116
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'Jan 08 99' by its DateStyle
+query DATE nosort
+SELECT date 'Jan 08 99'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'Jan 08 99'
+----
+Cannot cast 'Jan 08 99' to date
+
+# date.sql:117
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'Jan 08 1999' by its DateStyle
+query DATE nosort
+SELECT date 'Jan 08 1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'Jan 08 1999'
+----
+Cannot cast 'Jan 08 1999' to date
+
+# date.sql:118: Postgres: invalid input syntax for type date: "99 08 Jan".
+statement error
+SELECT date '99 08 Jan'
+
+# date.sql:119
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999 08 Jan' by its DateStyle
+query DATE nosort
+SELECT date '1999 08 Jan'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999 08 Jan'
+----
+Cannot cast '1999 08 Jan' to date
+
+# date.sql:122
+query DATE nosort
+SELECT date '1999-01-08'
+----
+1999-01-08
+
+# date.sql:123
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08-01-99' by its DateStyle
+query DATE nosort
+SELECT date '08-01-99'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08-01-99'
+----
+Cannot cast '08-01-99' to date
+
+# date.sql:124
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08-01-1999' by its DateStyle
+query DATE nosort
+SELECT date '08-01-1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08-01-1999'
+----
+Cannot cast '08-01-1999' to date
+
+# date.sql:125
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '01-08-99' by its DateStyle
+query DATE nosort
+SELECT date '01-08-99'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '01-08-99'
+----
+Cannot cast '01-08-99' to date
+
+# date.sql:126
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '01-08-1999' by its DateStyle
+query DATE nosort
+SELECT date '01-08-1999'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '01-08-1999'
+----
+Cannot cast '01-08-1999' to date
+
+# date.sql:128
+query DATE nosort
+SELECT date '1999-08-01'
+----
+1999-08-01
+
+# date.sql:131
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999 01 08' by its DateStyle
+query DATE nosort
+SELECT date '1999 01 08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999 01 08'
+----
+Cannot cast '1999 01 08' to date
+
+# date.sql:132
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08 01 99' by its DateStyle
+query DATE nosort
+SELECT date '08 01 99'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08 01 99'
+----
+Cannot cast '08 01 99' to date
+
+# date.sql:133
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08 01 1999' by its DateStyle
+query DATE nosort
+SELECT date '08 01 1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08 01 1999'
+----
+Cannot cast '08 01 1999' to date
+
+# date.sql:134
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '01 08 99' by its DateStyle
+query DATE nosort
+SELECT date '01 08 99'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '01 08 99'
+----
+Cannot cast '01 08 99' to date
+
+# date.sql:135
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '01 08 1999' by its DateStyle
+query DATE nosort
+SELECT date '01 08 1999'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '01 08 1999'
+----
+Cannot cast '01 08 1999' to date
+
+# date.sql:137
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999 08 01' by its DateStyle
+query DATE nosort
+SELECT date '1999 08 01'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999 08 01'
+----
+Cannot cast '1999 08 01' to date
+
+# date.sql:141
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'January 8, 1999' by its DateStyle
+query DATE nosort
+SELECT date 'January 8, 1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'January 8, 1999'
+----
+Cannot cast 'January 8, 1999' to date
+
+# date.sql:142
+query DATE nosort
+SELECT date '1999-01-08'
+----
+1999-01-08
+
+# date.sql:143
+query DATE nosort
+SELECT date '1999-01-18'
+----
+1999-01-18
+
+# date.sql:144
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1/8/1999' by its DateStyle
+query DATE nosort
+SELECT date '1/8/1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1/8/1999'
+----
+Cannot cast '1/8/1999' to date
+
+# date.sql:145
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1/18/1999' by its DateStyle
+query DATE nosort
+SELECT date '1/18/1999'
+----
+1999-01-18
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1/18/1999'
+----
+Cannot cast '1/18/1999' to date
+
+# date.sql:147
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '01/02/03' by its DateStyle
+query DATE nosort
+SELECT date '01/02/03'
+----
+2003-01-02
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '01/02/03'
+----
+Cannot cast '01/02/03' to date
+
+# date.sql:148
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '19990108' by its DateStyle
+query DATE nosort
+SELECT date '19990108'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '19990108'
+----
+Cannot cast '19990108' to date
+
+# date.sql:149
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '990108' by its DateStyle
+query DATE nosort
+SELECT date '990108'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '990108'
+----
+Cannot cast '990108' to date
+
+# date.sql:150
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999.008' by its DateStyle
+query DATE nosort
+SELECT date '1999.008'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999.008'
+----
+Cannot cast '1999.008' to date
+
+# date.sql:151
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'J2451187' by its DateStyle
+query DATE nosort
+SELECT date 'J2451187'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'J2451187'
+----
+Cannot cast 'J2451187' to date
+
+# date.sql:152
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'January 8, 99 BC' by its DateStyle
+query DATE nosort
+SELECT date 'January 8, 99 BC'
+----
+-0098-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'January 8, 99 BC'
+----
+Cannot cast 'January 8, 99 BC' to date
+
+# date.sql:155
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999-Jan-08' by its DateStyle
+query DATE nosort
+SELECT date '1999-Jan-08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999-Jan-08'
+----
+Cannot cast '1999-Jan-08' to date
+
+# date.sql:156
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08-Jan-99' by its DateStyle
+query DATE nosort
+SELECT date '08-Jan-99'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08-Jan-99'
+----
+Cannot cast '08-Jan-99' to date
+
+# date.sql:157
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08-Jan-1999' by its DateStyle
+query DATE nosort
+SELECT date '08-Jan-1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08-Jan-1999'
+----
+Cannot cast '08-Jan-1999' to date
+
+# date.sql:158
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'Jan-08-99' by its DateStyle
+query DATE nosort
+SELECT date 'Jan-08-99'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'Jan-08-99'
+----
+Cannot cast 'Jan-08-99' to date
+
+# date.sql:159
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'Jan-08-1999' by its DateStyle
+query DATE nosort
+SELECT date 'Jan-08-1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'Jan-08-1999'
+----
+Cannot cast 'Jan-08-1999' to date
+
+# date.sql:160: Postgres: invalid input syntax for type date: "99-08-Jan".
+statement error
+SELECT date '99-08-Jan'
+
+# date.sql:161: Postgres: invalid input syntax for type date: "1999-08-Jan".
+statement error
+SELECT date '1999-08-Jan'
+
+# date.sql:163: Postgres: invalid input syntax for type date: "99 Jan 08".
+statement error
+SELECT date '99 Jan 08'
+
+# date.sql:164
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999 Jan 08' by its DateStyle
+query DATE nosort
+SELECT date '1999 Jan 08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999 Jan 08'
+----
+Cannot cast '1999 Jan 08' to date
+
+# date.sql:165
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08 Jan 99' by its DateStyle
+query DATE nosort
+SELECT date '08 Jan 99'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08 Jan 99'
+----
+Cannot cast '08 Jan 99' to date
+
+# date.sql:166
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08 Jan 1999' by its DateStyle
+query DATE nosort
+SELECT date '08 Jan 1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08 Jan 1999'
+----
+Cannot cast '08 Jan 1999' to date
+
+# date.sql:167
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'Jan 08 99' by its DateStyle
+query DATE nosort
+SELECT date 'Jan 08 99'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'Jan 08 99'
+----
+Cannot cast 'Jan 08 99' to date
+
+# date.sql:168
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads 'Jan 08 1999' by its DateStyle
+query DATE nosort
+SELECT date 'Jan 08 1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date 'Jan 08 1999'
+----
+Cannot cast 'Jan 08 1999' to date
+
+# date.sql:169: Postgres: invalid input syntax for type date: "99 08 Jan".
+statement error
+SELECT date '99 08 Jan'
+
+# date.sql:170
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999 08 Jan' by its DateStyle
+query DATE nosort
+SELECT date '1999 08 Jan'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999 08 Jan'
+----
+Cannot cast '1999 08 Jan' to date
+
+# date.sql:173
+query DATE nosort
+SELECT date '1999-01-08'
+----
+1999-01-08
+
+# date.sql:174
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08-01-99' by its DateStyle
+query DATE nosort
+SELECT date '08-01-99'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08-01-99'
+----
+Cannot cast '08-01-99' to date
+
+# date.sql:175
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08-01-1999' by its DateStyle
+query DATE nosort
+SELECT date '08-01-1999'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08-01-1999'
+----
+Cannot cast '08-01-1999' to date
+
+# date.sql:176
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '01-08-99' by its DateStyle
+query DATE nosort
+SELECT date '01-08-99'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '01-08-99'
+----
+Cannot cast '01-08-99' to date
+
+# date.sql:177
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '01-08-1999' by its DateStyle
+query DATE nosort
+SELECT date '01-08-1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '01-08-1999'
+----
+Cannot cast '01-08-1999' to date
+
+# date.sql:179
+query DATE nosort
+SELECT date '1999-08-01'
+----
+1999-08-01
+
+# date.sql:182
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999 01 08' by its DateStyle
+query DATE nosort
+SELECT date '1999 01 08'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999 01 08'
+----
+Cannot cast '1999 01 08' to date
+
+# date.sql:183
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08 01 99' by its DateStyle
+query DATE nosort
+SELECT date '08 01 99'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08 01 99'
+----
+Cannot cast '08 01 99' to date
+
+# date.sql:184
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '08 01 1999' by its DateStyle
+query DATE nosort
+SELECT date '08 01 1999'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '08 01 1999'
+----
+Cannot cast '08 01 1999' to date
+
+# date.sql:185
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '01 08 99' by its DateStyle
+query DATE nosort
+SELECT date '01 08 99'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '01 08 99'
+----
+Cannot cast '01 08 99' to date
+
+# date.sql:186
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '01 08 1999' by its DateStyle
+query DATE nosort
+SELECT date '01 08 1999'
+----
+1999-01-08
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '01 08 1999'
+----
+Cannot cast '01 08 1999' to date
+
+# date.sql:188
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where Postgres reads '1999 08 01' by its DateStyle
+query DATE nosort
+SELECT date '1999 08 01'
+----
+1999-08-01
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '1999 08 01'
+----
+Cannot cast '1999 08 01' to date
+
+# date.sql:191
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, where 4714-11-24 BC is -4713-11-24
+query DATE nosort
+SELECT date '4714-11-24 BC'
+----
+-4713-11-24
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '4714-11-24 BC'
+----
+Cannot cast '4714-11-24 BC' to date
+
+# date.sql:193
+skipif transformer date-text-iso # text casts to DATE from an ISO date alone, whose year past 9999 takes a sign, +5874897-12-31
+query DATE nosort
+SELECT date '5874897-12-31'
+----
++5874897-12-31
+
+onlyif transformer date-text-iso
+statement error
+SELECT date '5874897-12-31'
+----
+Cannot cast '5874897-12-31' to date
