@@ -1,6 +1,9 @@
 # Plan 11: PostgreSQL's integer, text, date and SELECT regression tests
 
-> Status: **not started** · from the 2026-11-01 test survey, category 2 of 9
+> Status: **done** 2026-11-02 (8f122ce W1, 6db2cd3, c3643a8, 911a797, 9a1f36d,
+> d6b6769, bbb4fa9, 7ddbcf7 W2, 77c4fc6, 7a41251, cbff308 W3; see
+> [Outcome](#outcome); the five decisions taken overnight as recommended, not
+> yet confirmed by the user) · from the 2026-11-01 test survey, category 2 of 9
 > (answers from outside the engine, part 2) · Effort: 3-5 days, the larger
 > files a day each · Risk: low for the scripts; each answer no decision covers
 > is a finding for the user · Depends on: [08](08-skips-cite-decisions.md)
@@ -191,6 +194,15 @@ Each is a decision already made; plan 08's ledger gives it an id.
      select_distinct and union as a plan of their own after it.
    - (b) All fourteen now.
 
+**Taken overnight as recommended, not yet confirmed by the user** (2026-11-02):
+decision 1 (a), REL_18_6 at `724edf9` for every port; decision 2 (a), a
+SMALLINT value written as an INT where the answer cannot depend on SMALLINT's
+range, the records that test it left out and `int2.sql` with them; decision 3
+(a), a CHAR(n) column a STRING holding each value unpadded (no record's answer
+shows the pad, so no `no-char-type` rule was needed); decision 4 (a), the
+`.out` files vendored under `postgres/expected/` and the checker run in
+`slt_test`; decision 5 (a), this plan's ten files.
+
 ## Decisions already made
 
 - W9's porting rules (above), and that a finding is held out until decided.
@@ -261,3 +273,116 @@ Report: per file, statements ported of the total, records skipped by ledger
 id, what was left out by kind; the findings table; the checker's result over
 all ports; slt_test's time before and after.
 ```
+
+## Outcome
+
+Landed overnight on `testing-round-3`, 2026-11-02, one commit for the
+checker and one per ported file (`select.sql`'s carrying W2's fixture). At
+each, `bazel test //...` passed (71 targets) and the jaffle-shop job gave
+15/15 Succeeded with every validation passing; each port passed every
+verification mode and each of the six whole-suite configurations (`batch1`,
+`batch2`, `sharded`, `serial`, `zone`, `hashzero`), alone when it landed and
+all together at the end. No engine code changed.
+
+**W1**, `8f122ce`: `PgExpected` (`slt:pg_expected`) holds each port to what
+psql printed in Postgres's own run. `postgres/sql/` and `postgres/expected/`
+hold every ported file's source and output as Postgres has them at
+`724edf9`. It cuts the `.sql` file as psql does, finds each statement's echo
+in the `.out` file, reads the aligned table (a cell over several lines, a
+table of no columns), the `ERROR:` or the notices after it, places each
+record at the statement its `# <name>.sql:<line>` comment names, prints
+Postgres's values as the record's columns print them and reports every block
+that says otherwise, every `statement error` Postgres ran and every query it
+refused. `slt_test` runs it over every port; `--fill` writes Postgres's
+values into a new port and `--list` prints the source's statements for a
+header's counts. It re-derives the five first ports with no difference
+(371 records), once two of their comments named the right statements
+(numeric's six check groups, window's VALUES table); `pg_expected_test`
+proves it names an edited value with both values, an error Postgres never
+raised and a query it refused.
+
+**W2**, in `7ddbcf7`: `postgres/data/onek.data`, loaded by `COPY` as
+test_setup.sql loads it; every other fixture table is each port's own
+statements, each value stored as Postgres stores it.
+
+**W3**, a commit per file. Per file: statements in its script of the file's,
+skipped by rule, left out by need, and held out.
+
+| file | commit | here | skipped, by rule | left out, by need | held |
+|---|---|---|---|---|---|
+| select_having | `6db2cd3` | 23 of 23 | - | - | - |
+| select_implicit | `c3643a8` | 44 of 44 | - | - | - |
+| int4 | `911a797` | 76 of 94 | `int-text` 14, `cast-truncates` 2 | gcd() and lcm() 6, pg_input_is_valid() 4, `<<` 2 | 6 |
+| int8 | `9a1f36d` | 123 of 174 | `int-text` 14, `div-zero-null` 4, `cast-truncates` 2 | to_char() 24, gcd() and lcm() 6, bitwise operators 4, pg_input_is_valid() 4, generate_series() 3, CAST to SMALLINT 2, oid 2 | 6 |
+| numerology | `d6b6769` | 34 of 89 | `refused-hex-literal` 9, `cast-truncates` 2 | PREPARE 3, a DO block 1 | 51 |
+| expressions | `bbb4fa9` | 15 of 81 | - | a type of the test's own and its operators 30, SQL value functions and now() 19, typmod views 10, PL/pgSQL functions 4, EXPLAIN over points 3 | - |
+| select | `7ddbcf7` | 48 of 87 | `nulls-sort-low` 9 | EXPLAIN 11, planner settings 10, a set-returning function 4, whole-row references 3, a table of no columns 3, partitioned tables 3, subqueries 2, inheritance 2, FOR UPDATE 1 | - |
+| float4 | `77c4fc6` | 63 of 100 | `double-text` 6, `div-zero-null` 1 | float4send() 17, the bit-pattern type 11, pg_input_is_valid() 4, CAST to SMALLINT 4, numeric NaN 1 | - |
+| strings | `7a41251` | 64 of 507 | - | regular expressions 146, bytea 109, string literal syntax 78, string functions the engine lacks 54, TOAST 35, char(n), varchar and name 14, outside the sections ported 5, \pset 2 | - |
+| date | `cbff308` | 126 of 271 | `date-text-iso` 84 | date_part() and EXTRACT 71, date_trunc() 10, make_date() 10, date arithmetic 8, DateStyle settings 5, pg_input_is_valid() 5, infinite dates 5 | 31 |
+
+In all 1,470 statements: 616 in ten scripts, 760 left out by need, 94 held
+out. Of the 616, 540 hold Postgres's answers (the rest make tables), 393
+answered as Postgres does and 147 skipped by seven rules, each followed by
+its twin but under `refused-hex-literal`; the checker places and agrees with
+all 540, and with the five first ports' 371, 911 in fifteen ports. Two rules
+joined the ledger, each a row of a rule already decided: `int-text` (text
+casts to an integer by CSV's grammar, plans/robustness/24) and
+`date-text-iso` (a DATE reads only ISO text, the strict CAST of
+plans/robustness/05), both pinned in `types/casts.test`; `nulls-sort-low` is
+cited for the first time. `date-range` was not needed: `5874898-01-01`,
+written without a sign, is no date to the engine, so its record is held, not
+skipped. `slt_test`'s four shards took 24.4 to 31.6 s before the round and
+25.1 to 33.8 s after it.
+
+**Fixed on the way** (test code, no engine change): the `reprinted` mode
+failed on `-(CAST('-9223372036854775807' AS BIGINT))`, whose answer was
+right. The printer writes the negation of that BIGINT literal as
+`-(-9223372036854775807)`, which binds as two negations, and
+`PlanRoundTrip.normalize` folded only one; it now folds a chain of them
+innermost first (`9a1f36d`, pinned in `plan_roundtrip_fuzz_test`; one
+2000-seed block of `plan_roundtrip_fuzz_campaign` green).
+
+**W4, the findings**, each held out of its script, none settled by a
+semantic change (docs/gotchas.md, "What the second PostgreSQL port held
+out"):
+
+| # | query | Postgres | engine | options (recommended first) |
+|---|---|---|---|---|
+| 1 | `SELECT 0.0e`, `0.a`, `0.0a`, `.0a`, `0.0e1a` (numerology.sql:48-52) | error: trailing junk after numeric literal | 0.0, in a column `e` or `a` | (a) refuse a numeric literal followed by a letter or `_`, naming the text; (b) keep |
+| 2 | `SELECT .000_005` (numerology.sql:78) | 0.000005 | 0.0, in a column `_005` | as 1 |
+| 3 | `SELECT 0b100101`, `0o273`, `1_000_000`, `0x1EEE_FFFF`, `1_000.000_005` and the rest (26) | 37, 187, 1000000, ... | `Unknown column '0b100101'. Available: []`, or a parse error in the parser's words | (a) refuse each by name, as a hexadecimal literal is; (b) read them as Postgres 16 does; (c) keep |
+| 4 | `SELECT 123abc`, `0b`, `1x`, `100_` and the rest (18) | error: trailing junk, invalid binary integer | an unknown column, or a parse error elsewhere | settles with 1 and 3 |
+| 5 | `SELECT f1 AS two, ... GROUP BY two` (numerology.sql:172) | groups by the output column | `Unknown column 'two'` | (a) accept it under ORDER BY's rule (an output column first, refused where ambiguous); (b) keep refusing and say so in the README |
+| 6 | `SELECT q1 - q2 AS minus FROM INT8_TBL` (int8.sql:66, 69) | runs | `SQL parse error: Encountered unexpected token: "minus" "MINUS"` (JSqlParser reserves MINUS) | (a) document the words a name must quote and name the word in the refusal; (b) keep. The port writes `AS "minus"` |
+| 7 | 43 records both engines refuse for different reasons: int4.sql's and int8.sql's six texts one past the range in base 2, 8 or 16; date.sql's 31 DateStyle texts with a field out of range, and the two dates past an end of Postgres's range | out of range | no integer or ISO date of the engine's grammar | (a) leave them out; (b) keep them as errors both raise |
+
+**Decisions, taken overnight as recommended, not yet confirmed by the
+user**: 1 (a), 2 (a), 3 (a), 4 (a) and 5 (a), recorded under the decisions
+above.
+
+**Claude's calls within them** (revisit if the user objects):
+
+- The `.sql` files are vendored beside the `.out` files: each record cites
+  its line of the `.sql` file, and psql's echo leaves out blank lines.
+- A record with no comment comes from the statement after its
+  predecessor's; one under a comment that cites no line is the port's own (a
+  table made for a VALUES list), and so is any uncommented record after it.
+- A record both engines refuse is kept as `statement error` where the
+  reason is one (text that is no value of its type, a value past its type,
+  an ambiguous name) and held out where it is not, as plan 10 held Spark's.
+- `int2` values and `TEMP_INT2`'s column are INT where the answer cannot
+  depend on SMALLINT's range (a `WHERE` there keeps every value within it);
+  a CAST to SMALLINT, which tests the range, is left out.
+- Rewrites that cannot change a meaning, each said in its record: `AS
+  "minus"`; VALUES as a query as the UNION ALL of its rows' SELECTs, which
+  Postgres's documentation says it means; `TABLE t` as `SELECT * FROM t`;
+  `SUBSTRING(x FROM s FOR n)` as `SUBSTRING(x, s, n)`; `ORDER BY x USING >`
+  as `DESC`; a PL/pgSQL identity function as a one-row table's column;
+  `'2040-04-10 BC'` stored as `'-2039-04-10'`.
+- strings.sql is ported to the plan's sections only; five statements outside
+  them the engine might run (`length()` and four concatenations) are left for
+  a later round, and counted so in its header.
+- The CHAR(n) columns of select_having and select_implicit are the runner's
+  STRING as written; no answer depends on the pad, so no `no-char-type` rule
+  was needed.

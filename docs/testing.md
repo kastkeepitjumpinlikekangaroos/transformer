@@ -467,9 +467,10 @@ whose statement Postgres ran and every query Postgres refused. A twin is the
 engine's answer and is passed over; a skipped record keeps Postgres's and is
 checked. `slt_test` runs the check over every port, so a block edited by hand
 fails its script: `postgres/case.test:90 (case.sql:42): row 1, column 2: the
-record has [4] where Postgres printed [3]`. The five first ports check whole:
-of their 371 records with Postgres's answers (boolean 64, case 22, float8
-119, numeric 76, window 90) every one is placed and none differs. With
+record has [4] where Postgres printed [3]`. All fifteen ports check whole:
+of their 911 records with Postgres's answers every one is placed and none
+differs (the five first 371, boolean 64, case 22, float8 119, numeric 76 and
+window 90; plans/testing/11's ten 540). With
 `--fill` the same binary writes Postgres's values into a new port's blocks,
 and with `--list` it prints each statement of the source as psql cuts it,
 marked where a record holds it, which is what a header counts:
