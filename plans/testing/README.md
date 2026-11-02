@@ -1,10 +1,12 @@
-# Property-based testing plans — index and launch prompts
+# Testing plans — index and launch prompts
 
 A hand-rolled property-based testing (PBT) harness for the SQL engine, so
-we can fuzz orders of magnitude more cases than we can write by hand. Three
-phases, built bottom-up. Each file is self-contained: read it, paste the
-launch prompt at its bottom into a fresh Claude session, and the agent has
-what it needs.
+we can fuzz orders of magnitude more cases than we can write by hand, built
+bottom-up in plans 01-03. Plans 04 and 05 added answers from outside the
+engine and plans as SQL. Plans 06-19 are the round the 2026-11-01 survey
+proposed ([below](#plans-06-19-the-2026-11-01-survey)). Each file is
+self-contained: read it, paste the launch prompt at its bottom into a fresh
+Claude session, and the agent has what it needs.
 
 ## Design decisions (locked)
 
@@ -44,15 +46,86 @@ parallel exchange / spill machinery.
 | [03](03-query-gen-metamorphic.md) | Multi-relation query gen + metamorphic (TLP) + shrinking | 1-2 weeks | medium-high | 01, 02 |
 | [04](04-sql-logic-tests-and-whole-suite-configurations.md) | sqllogictest scripts under eleven verification modes, SQLite's corpus, the whole suite at batch capacity 1 / 2, sharded, serial, in another zone (**done** 2026-11-01) | 1 day | low | — |
 | [05](05-plans-as-sql.md) | Plans as SQL: plan validation after every pass, a printer the binder reads back, the round trip as an slt mode and a fuzz property, EXPLAIN and golden plans; then plan 04's next round (join order, a streaming pairing, hash zero, CSV column order, spill cost, Postgres ports) (**done** 2026-11-01, the Postgres ports' five findings decided and landed) | several days | low-medium | 04 |
+| [06](06-a-failed-run-leaves-no-partial-output.md) | A failed run leaves no partial output, and its rerun needs no cleanup: the defect the survey found, with the commit protocol the user chose, fault points at every write and a crash campaign | 2-3 days | medium | none |
+| [07](07-compiler-warnings.md) | The compiler warns, and a warning fails the build | 2-3 days | low | none; land early |
+| [08](08-skips-cite-decisions.md) | Every skip names its decision, and a stale skip fails | 1-2 days | low | none; before 10-14 |
+| [09](09-semantics-tables.md) | The engine's rules as tables: one function catalog, the cast matrix, the coercion tables, a function sweep | 4-6 days | medium (W1) | 08; pairs with 10 |
+| [10](10-spark-typing-ports.md) | Spark's decimal and type-coercion tests, with Spark's ANSI answers | 3-5 days, +1-2 for CAST to DECIMAL | medium | 08; pairs with 09 |
+| [11](11-postgres-ports-round-two.md) | PostgreSQL's integer, text, date and SELECT regression tests | 3-5 days | low | 08 |
+| [12](12-cockroachdb-and-datafusion-corpora.md) | CockroachDB's and DataFusion's logic tests, and TPC-H with answers | 1-2 weeks | medium (the runner) | 08; 11 first is better |
+| [13](13-external-file-fixtures.md) | Parquet and CSV files other programs wrote | 3-4 days | low-medium | 08 |
+| [14](14-multi-engine-generated-corpus.md) | A generated corpus whose answers Postgres and DuckDB agree on | 4-6 days | low-medium | 08; gains from 15 |
+| [15](15-generator-gates.md) | The fuzz generators draw what they leave out today | 3-5 days | low-medium | none |
+| [16](16-literature-oracles.md) | Oracles from the literature: rewrites, forced plans and known join answers | 1-2 weeks | low | 15 (its W4), PlanSql |
+| [17](17-whole-suite-runtime-checks.md) | Whole-suite runtime checks: batch invariants, leaks and chaos scheduling | about a week | low-medium | none; W3 after 06 |
+| [18](18-one-rule-per-concept-in-bytecode.md) | One rule per concept, held in bytecode | 2-3 days | low | none |
+| [19](19-mutation-testing.md) | Mutation testing measures the net | 3-4 days | low | last, after 06-18 |
 
 ## Recommended sequence
 
-Strictly in order. Phase 01 builds the shared core (`Rng`, `Shrinker`,
+Plans 01-03 strictly in order. Phase 01 builds the shared core (`Rng`, `Shrinker`,
 `Props`, `RowOracle`) against an oracle we already trust (`ExprBatchTest`),
 so the plumbing is proven before it carries a harder property. Phase 02 adds
 the data generator and the mode-differential runner. Phase 03 grows the
 query generator to joins/window/CTE/union and adds the metamorphic oracles
-plus full AST+data shrinking — the bulk of the work.
+plus full AST+data shrinking — the bulk of the work. Plans 06-19 have their
+own order, below.
+
+## Plans 06-19: the 2026-11-01 survey
+
+After plan 05 the user asked what more the engine could borrow from other
+projects' testing, and how to keep making things consistent. A survey read
+the whole test suite against nine kinds of check other engines use, and
+checked outside corpora's licenses at their sources. The user took all nine;
+each plan is one of them, or one source of outside answers:
+
+| # | Survey category | Plans |
+|---|---|---|
+| 1 | What a run leaves when it fails | 06 |
+| 2 | More answers from outside the engine | 10 (Spark), 11 (Postgres), 12 (CockroachDB, DataFusion, TPC-H), 13 (parquet and CSV files), 14 (a generated corpus Postgres and DuckDB agree on) |
+| 3 | Oracles from the literature | 16 |
+| 4 | Runtime checks over the whole suite | 17 |
+| 5 | What the generators leave out | 15 |
+| 6 | The engine's rules as tables | 09 |
+| 7 | One rule per concept, in bytecode | 18 |
+| 8 | Skips tied to decisions | 08 |
+| 9 | Hygiene: compiler warnings, mutation testing | 07, 19 |
+
+**Order.** 06 first: it fixes a confirmed defect in the part of the product
+nothing else tests. 07 next, so later code is held to its warnings, then 08,
+so every skip the ports add cites a decision from its first record. Then
+09 with 10, one round on typing: the same rules, held once to their own
+tables and once to Spark's answers. Then 11, 12, 13 and 14, the outside
+answers; 15, then 16, which builds on 15's shapes; 17 and 18; 19 last, to
+measure the net the others built. 07, 13, 15, 17 and 18 depend on no other
+plan and can move earlier.
+
+Two sessions should not run plans that edit the same files at once. The slt
+runner is shared by 08, 10, 11, 12 and 14. The fuzz generators are shared by
+15, 16 and 14's renderer. The output writers and `DataJob` are shared by 06
+and 17's W3. And every plan edits `docs/testing.md`.
+
+**Decisions.** Each plan lists its open decisions, each with a recommended
+option. Plan 06's are settled: the user chose option (c) for the commit
+protocol, and that a final record that cannot be written fails the task.
+
+**Defects found while writing the plans**, each in the plan that fixes it:
+
+| Defect | Status | Plan |
+|---|---|---|
+| A task that fails after its parts are committed (a later partition, a validation that throws, a record that cannot be written, a crash) leaves part files and no record, and the next run refuses the task until someone deletes them | confirmed with the CLI jar | 06 |
+| The GUI's `ResultPersister` writes into a directory of stray part files and records every `part-*` there as its output | confirmed against HEAD's classes | 06 |
+| An INT or BIGINT beside a FLOAT is typed FLOAT: `CAST(16777217 AS INT) = CAST(16777216 AS FLOAT)` is TRUE, and `COALESCE(CAST(NULL AS FLOAT), 2147483647)` is 2.1474836E9 | confirmed | 10, decision 2 |
+| A parquet row group whose footer reports 0 bytes is never read: 25 rows read as none (`ParquetReader.packRowGroups`) | confirmed against pyarrow | 13, W1 |
+| Parquet refusals in parquet-mr's, Thrift's or the JVM's words: a NullPointerException's message for an unknown logical type, a missing LZ4 class | confirmed | 13, W2 |
+| UPPER and LOWER map case in full while ILIKE folds a character at a time: `'ß' ILIKE 'SS'` is false, `UPPER('ß') LIKE UPPER('SS')` true | confirmed | 15, decision 2 |
+| `SELECT 0.0e` answers `0.0` in a column `e`; `1_000_000` is refused as an unknown column | confirmed | 11, W4 |
+| Gates gone stale: TLP never partitions on a float column, QueryGen never draws TRIM, the expression fuzzer never draws 23 of the 40 scalar functions | read in the generators | 15, 09 |
+| An abandoned query (a LIMIT, an error) keeps its files open until garbage collection and its spill directories until the JVM exits | suspected from the code | 17, decision 4 |
+| The nested-loop guard sizes an outer join smaller than the inner join it contains, so a restriction of an accepted query can be refused | suspected from the code | 16, decision 3 |
+| Parquet and spill write half a surrogate pair as `?` where `CsvWriter` refuses it, and gotchas.md says otherwise | read in the code | 17, decision 2 |
+| A coverage guard's failure message prints `${entry.example.get}` (a missing `s`), `MODULE.bazel` names a file rules_scala 7 does not have, conventions.md misnames the direct-deps check | found by the warnings | 07 |
+| Nine `transformer.*` properties and seven `TRANSFORMER_*` variables are read in eight classes, three of them documented nowhere | read in the bytecode | 18, decision 3 |
 
 ## Shared module (introduced in 01, extended in 02/03)
 
@@ -82,7 +155,8 @@ unaffected but must stay green:
 2. `java -jar bazel-bin/examples/jaffle_shop/jaffle_shop_deploy.jar` exits 0,
    15/15 Succeeded.
 3. `java -jar bazel-bin/examples/polymarket/polymarket_deploy.jar` matches
-   the 15-Succeeded / 1-ValidationFailed / 1-Skipped pattern.
+   its pattern, 14 Succeeded / 2 ValidationFailed / 1 Skipped (the launcher
+   exits 0 only then; it needs the dataset in `~/Downloads/archive/`).
 4. Docs updated where claims are now stale — primarily `docs/testing.md`
    (new targets) and `docs/extending.md` (a "add a generator / property"
    recipe); `docs/gotchas.md` for the cross-JVM class-load-frozen sysprop
