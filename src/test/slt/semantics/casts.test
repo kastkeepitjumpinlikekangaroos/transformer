@@ -1,0 +1,225 @@
+# Hand-picked cells of the cast matrix, src/test/semantics/casts.txt, which
+# semantics_tables_test generates by evaluating each CAST alone on both
+# paths. Here they run through the whole engine, under every verification
+# mode and as the plan printed back to SQL. A rule change regenerates the
+# matrix and changes these records in the same commit.
+
+statement ok
+CREATE TABLE c (id INT, i INT, b BIGINT, f FLOAT, d DOUBLE, m DECIMAL(5,2), w DECIMAL(38,10), t BOOLEAN, s STRING, dt DATE, ts TIMESTAMP)
+
+statement ok
+INSERT INTO c VALUES (1, 0, 0, 0.0, 0.0, 0.00, 0.0, false, '007', DATE '2026-01-01', TIMESTAMP '2026-01-01 05:30:21.123456'), (2, 2147483647, 9007199254740993, 2.7, -2.7, 2.70, -2.7, true, '+5', DATE '1970-01-01', TIMESTAMP '1970-01-01 00:00:00'), (3, -2147483648, 2147483648, 2.5, 2.5, -999.99, 2147483648.0, NULL, 'TRUE', NULL, NULL), (4, 16777217, NULL, NULL, 1e-300, NULL, NULL, NULL, NULL, NULL, NULL)
+
+# ---- to an integer: a fraction truncated toward zero, past the type an error
+
+query INT,INT,INT,INT,BIGINT
+SELECT id, CAST(f AS INT), CAST(d AS INT), CAST(m AS INT), CAST(w AS BIGINT) FROM c ORDER BY id
+----
+1	0	0	0	0
+2	2	-2	2	-2
+3	2	2	-999	2147483648
+4	NULL	0	NULL	NULL
+
+query INT,INT,BIGINT,INT
+SELECT id, CAST(t AS INT), CAST(t AS BIGINT), CAST(s AS INT) FROM c WHERE id < 3 ORDER BY id
+----
+1	0	0	7
+2	1	1	5
+
+statement error
+SELECT CAST(b AS INT) FROM c WHERE id = 2
+----
+Integer overflow: 9007199254740993 does not fit INT
+
+statement error
+SELECT CAST(w AS INT) FROM c WHERE id = 3
+----
+Integer overflow: 2147483648.0000000000 does not fit INT
+
+statement error
+SELECT CAST(CAST('NaN' AS DOUBLE) AS INT)
+----
+Cannot cast NaN to INT: it has no integer value
+
+statement error
+SELECT CAST(CAST('-Infinity' AS FLOAT) AS BIGINT)
+----
+Cannot cast -Infinity to BIGINT: it has no integer value
+
+statement error
+SELECT CAST(s AS INT) FROM c WHERE id = 3
+----
+Cannot cast 'TRUE' to int
+
+query INT,BIGINT,BIGINT
+SELECT CAST(-2147483648 AS INT), CAST(-9223372036854775808 AS BIGINT), CAST(1.5e10 AS BIGINT)
+----
+-2147483648	-9223372036854775808	15000000000
+
+statement error
+SELECT CAST(2147483648 AS INT)
+----
+Integer overflow: 2147483648 does not fit INT
+
+statement error
+SELECT CAST(9223372036854775808 AS BIGINT)
+----
+Integer overflow: 9223372036854775808 does not fit BIGINT
+
+# ---- to FLOAT and DOUBLE: the nearest value, a FLOAT's range an error
+
+query FLOAT,FLOAT,DOUBLE,DOUBLE
+SELECT CAST(i AS FLOAT), CAST(b AS FLOAT), CAST(b AS DOUBLE), CAST(f AS DOUBLE) FROM c WHERE id = 2
+----
+2.1474836E9	9.007199E15	9.007199254740992E15	2.700000047683716
+
+query INT,FLOAT
+SELECT id, CAST(i AS FLOAT) FROM c WHERE id = 4
+----
+4	1.6777216E7
+
+statement error
+SELECT CAST(CAST(1e300 AS DOUBLE) AS FLOAT)
+----
+Float overflow: 1.0E300 does not fit FLOAT
+
+statement error
+SELECT CAST(d AS FLOAT) FROM c WHERE id = 4
+----
+Float underflow: 1.0E-300 is too small for a FLOAT, which would read it as 0
+
+query DOUBLE,DOUBLE,FLOAT,DOUBLE
+SELECT CAST('+5' AS DOUBLE), CAST('NaN' AS DOUBLE), CAST('-Infinity' AS FLOAT), CAST(TRUE AS DOUBLE)
+----
+5.0	NaN	-Infinity	1.0
+
+statement error
+SELECT CAST('nan' AS DOUBLE)
+----
+Cannot cast 'nan' to double
+
+statement error
+SELECT CAST('1e400' AS DOUBLE)
+----
+Cannot cast '1e400' to double
+
+query FLOAT,DOUBLE
+SELECT CAST(0.00000000000000000000000000000000000001 AS FLOAT), CAST(99999999999999999999999999999999999999 AS DOUBLE)
+----
+1.0E-38	1.0E38
+
+# ---- to STRING: a decimal its digits, a DOUBLE as Java prints it
+
+query INT,STRING,STRING,STRING,STRING,STRING
+SELECT id, CAST(m AS STRING), CAST(w AS STRING), CAST(d AS STRING), CAST(f AS STRING), CAST(t AS STRING) FROM c WHERE id < 4 ORDER BY id
+----
+1	0.00	0.0000000000	0.0	0.0	false
+2	2.70	-2.7000000000	-2.7	2.7	true
+3	-999.99	2147483648.0000000000	2.5	2.5	NULL
+
+query INT,STRING,STRING
+SELECT id, CAST(dt AS STRING), CAST(ts AS STRING) FROM c WHERE id < 3 ORDER BY id
+----
+1	2026-01-01	2026-01-01T05:30:21.123456Z
+2	1970-01-01	1970-01-01T00:00:00Z
+
+query STRING,STRING,STRING
+SELECT CAST(1e300 AS STRING), CAST(9223372036854775808 AS STRING), CAST(-0.0 AS STRING)
+----
+1.0E300	9223372036854775808	-0.0
+
+# ---- to BOOLEAN: a number TRUE where it is not 0, text 'true' or 'false' in any case
+
+query INT,BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN
+SELECT id, CAST(i AS BOOLEAN), CAST(d AS BOOLEAN), CAST(m AS BOOLEAN), CAST(f AS BOOLEAN) FROM c WHERE id < 4 ORDER BY id
+----
+1	false	false	false	false
+2	true	true	true	true
+3	true	true	true	true
+
+query BOOLEAN,BOOLEAN,BOOLEAN
+SELECT CAST(CAST('NaN' AS DOUBLE) AS BOOLEAN), CAST(s AS BOOLEAN), CAST('true' AS BOOLEAN) FROM c WHERE id = 3
+----
+true	true	true
+
+statement error
+SELECT CAST('true ' AS BOOLEAN)
+----
+Cannot cast 'true ' to boolean
+
+statement error
+SELECT CAST(s AS BOOLEAN) FROM c WHERE id = 1
+----
+Cannot cast '007' to boolean
+
+# ---- to DATE and TIMESTAMP: from text and from each other, never a number
+
+query DATE,TIMESTAMP,TIMESTAMP
+SELECT CAST('2026-01-01' AS DATE), CAST('2026-01-01 05:30:21+02:00' AS TIMESTAMP), CAST('2026-01-01' AS TIMESTAMP)
+----
+2026-01-01	2026-01-01T03:30:21Z	2026-01-01T00:00:00Z
+
+query INT,DATE,TIMESTAMP
+SELECT id, CAST(ts AS DATE), CAST(dt AS TIMESTAMP) FROM c WHERE id < 4 ORDER BY id
+----
+1	2026-01-01	2026-01-01T00:00:00Z
+2	1970-01-01	1970-01-01T00:00:00Z
+3	NULL	NULL
+
+statement error
+SELECT CAST('2026-02-30' AS DATE)
+----
+Cannot cast '2026-02-30' to date
+
+statement error
+SELECT CAST('2026-01-01 05:30:21+02:00' AS DATE)
+----
+Cannot cast '2026-01-01 05:30:21+02:00' to date; cast it to TIMESTAMP first, then to DATE for its date in UTC
+
+statement ok
+CREATE TABLE u (s STRING)
+
+statement ok
+INSERT INTO u VALUES ('2026-01-01 05:30:21+02:00')
+
+statement error
+SELECT CAST(s AS DATE) FROM u
+----
+Cannot cast '2026-01-01 05:30:21+02:00' to date; cast it to TIMESTAMP first, then to DATE for its date in UTC
+
+statement error
+SELECT CAST(i AS DATE) FROM c
+----
+Cannot cast INT to DATE
+
+statement error
+SELECT CAST(b AS TIMESTAMP) FROM c
+----
+Cannot cast LONG to TIMESTAMP
+
+statement error
+SELECT CAST(2.5 AS DATE)
+----
+Cannot cast DOUBLE to DATE
+
+statement error
+SELECT CAST(dt AS INT) FROM c
+----
+Cannot cast DATE to INT
+
+# ---- no CAST to DECIMAL or BINARY, and a BINARY casts to nothing
+
+statement error
+SELECT CAST(i AS DECIMAL(10,2)) FROM c
+----
+Unsupported CAST target type: DECIMAL (10, 2)
+
+statement error
+SELECT CAST(s AS BINARY) FROM c
+----
+Unsupported CAST target type: BINARY
+
+query INT,BIGINT,DOUBLE,STRING,DATE
+SELECT CAST(NULL AS INT), CAST(NULL AS BIGINT), CAST(NULL AS DOUBLE), CAST(NULL AS STRING), CAST(NULL AS DATE)
+----
+NULL	NULL	NULL	NULL	NULL

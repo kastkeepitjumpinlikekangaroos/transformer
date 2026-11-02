@@ -1610,6 +1610,17 @@ result that would read one as a string is an error before the query runs. Each
 of these used to read the array's identity, text like `[B@1a96d94c` that changed
 on every run.
 
+**Every case, as a table.** The paragraphs above state the rules; the tables
+under [`src/test/semantics/`](src/test/semantics/) list their every case, one
+line each, which a test generates and holds the engine to.
+[`casts.txt`](src/test/semantics/casts.txt) is every `CAST` of a column of each
+type, of `NULL`, and of a text, an integer and a decimal literal, at the edge
+values of each (the zeros, `NaN`, the infinities, each type's limits, the first
+and last date and timestamp, text that is almost a value), to every type: the
+value it gives, or the error, with whether the query is refused before it runs
+or fails on the value. The tables are the complete reference, and a change to a
+rule changes them in the same commit.
+
 **CTEs (`WITH`):** supported, non-recursive. `WITH a AS (...), b AS (SELECT ...
 FROM a) SELECT ... FROM b` — later CTEs may reference earlier ones, a CTE can
 carry an explicit column-alias list (`WITH c(x, y) AS (...)`), and a CTE name

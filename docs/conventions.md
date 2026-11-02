@@ -192,6 +192,13 @@ specific traps.
   `Analyzer.condition`, never an implicit cast to one, and a function declares
   what each of its arguments must be beside its arity (its `FunctionCatalog`
   entry), so nothing is read as the type a function wanted.
+- **A rule change regenerates its semantics tables in the same commit.** The
+  tables under `src/test/semantics/` ([testing.md](testing.md#semantics-tables))
+  list every case of the typing rules and functions; a commit that changes one
+  runs `bazel run //src/test/scala/com/transformer/sql/plan:semantics_tables --
+  --update` and commits the diff with the change, so the review sees every cell
+  the rule reaches and no other. A table's first generation is reviewed cell
+  by cell, never accepted wholesale.
 - **A function is one entry of `FunctionCatalog`, and the binder matches no
   function's name.** `LogicalBuilder`, `UnsupportedClauses`, `Analyzer` and
   `PlanValidator` look a call up by name and act on what its entry says (its

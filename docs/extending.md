@@ -50,6 +50,9 @@ relevant module lives, and that you'll follow the workflow in
 6. Add each of its names to [`README.md`'s **Scalar functions:** list](../README.md#sql-features):
    `function_catalog_test` fails until every name the catalog has is there,
    and every name there is the catalog's.
+7. Regenerate the [semantics tables](testing.md#semantics-tables) (`bazel run
+   //src/test/scala/com/transformer/sql/plan:semantics_tables -- --update`) and
+   review every cell the change adds, as you would review a test.
 
 A function that returns a `DECIMAL` computes in `BigDecimal` and fits its answer
 to the type it declares with `Decimals.fit`, the way `ABS` keeps a decimal exact
