@@ -13,8 +13,10 @@
 # 64 statements are here, as Postgres wrote them, each record naming the line
 # of case.sql it comes from. A result in no fixed order is compared as
 # rowsort; a double precision Postgres prints as 1 prints as the DOUBLE 1.0.
-# `skipif transformer` marks the one record the engine answers otherwise by
-# design, with the reason.
+# `skipif transformer <id>` marks the one record the engine answers otherwise
+# by design, with the id of its rule in the ledger in docs/gotchas.md and the
+# reason; its twin after it, `onlyif transformer <id>`, is the same statement
+# with the engine's own answer.
 #
 # Left out (26 statements), by what they need:
 #   21  user-defined functions, domains, operators, arrays and an enum type,
@@ -138,9 +140,18 @@ SELECT CASE 1 WHEN 0 THEN 1/0 WHEN 1 THEN 1 ELSE 2/0 END
 
 # case.sql:72: Postgres folds the reachable 1/0 and fails (division by
 # zero).
-skipif transformer # an integer divided by zero is NULL, and a CASE reads only the branch it takes, so every row is 0
+skipif transformer div-zero-null # an integer divided by zero is NULL, and a CASE reads only the branch it takes, so every row is 0
 statement error
 SELECT CASE WHEN i > 100 THEN 1/0 ELSE 0 END FROM case_tbl
+
+onlyif transformer div-zero-null
+query INT rowsort
+SELECT CASE WHEN i > 100 THEN 1/0 ELSE 0 END FROM case_tbl
+----
+0
+0
+0
+0
 
 # case.sql:75: untyped literals in the test expression.
 query INT

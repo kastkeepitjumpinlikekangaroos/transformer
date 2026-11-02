@@ -620,14 +620,27 @@ edge values. Scripts live in `src/test/slt/<area>/<name>.test`; the format is in
 
 The scripts are picked up by glob, so no BUILD change is needed. A slice of
 SQLite's corpus goes under `src/test/slt/sqlite/`, cut at a record boundary with
-a header naming its source; mark each record the engine answers otherwise by
-design with `skipif transformer # <why>` on the line before it. A port of
-another engine's tests (`src/test/slt/postgres/`) keeps that engine's answers,
-never the engine's own: its header names the source file and commit and
-counts what it leaves out by kind, each record names its source line and any
-rewrite (only one that cannot change the meaning), and a query the engine
-answers otherwise with no decision behind it stays out of the script as a
-finding until it is settled. A DOUBLE the other engine printed in full is
+a header naming its source. A port of another engine's tests
+(`src/test/slt/postgres/`) keeps that engine's answers, never the engine's own:
+its header names the source file and commit and counts what it leaves out by
+kind, and each record names its source line and any rewrite (only one that
+cannot change the meaning).
+
+Mark each record the engine answers otherwise by design with `skipif
+transformer <id>` on the line before it, the id of the rule it follows in the
+[ledger](gotchas.md#answers-that-differ-from-other-engines-by-design), and
+after a `#` what the particular case is, where the rule does not say it. A rule
+whose id starts `refused-` is a construct the engine refuses, and needs nothing
+more. Any other rule says the engine answers otherwise, so follow the skip with
+its twin: the same SQL under `onlyif transformer <id>`, with the engine's own
+answer, which `--complete` fills and you check by hand against the rule
+(compare a DOUBLE whose last digit Java need not share, from `EXP`, `LN` or a
+statistic, as SQLite's `T`). A record the engine answers otherwise with no
+rule in the ledger stays out of the script as a finding until a decision
+settles it; the commit that decides it adds the rule's row (for a `refused-`
+rule, with the text its refusal must contain) and its pin, a record of the
+engine's answer under `onlyif transformer <id>` in a script of this repo's
+own, then the skips that cite it. A DOUBLE the other engine printed in full is
 compared exactly; one it printed to fewer digits (Postgres's float8 under
 `extra_float_digits = 0`, 15 significant digits) as SQLite's `T`, which prints
 a DOUBLE to 15, since `R` prints every integer digit of a large one; and one

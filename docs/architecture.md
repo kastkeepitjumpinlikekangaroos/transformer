@@ -1934,7 +1934,10 @@ engine and multiply each one across execution modes:
   verification modes (`Modes`: layouts, spill, metrics, parquet files read
   back, columns stored in another order, the logical optimizer off or one
   pass at a time, and the plan printed as SQL, below), DuckDB's query
-  verification. Each mode must print the baseline's result.
+  verification. Each mode must print the baseline's result. A record the
+  engine answers otherwise by design cites its rule in the ledger in
+  [gotchas.md](gotchas.md#answers-that-differ-from-other-engines-by-design)
+  (`skipif transformer <id>`).
 - **Whole-suite configurations** (`.bazelrc` `--config=batch1`, `batch2`,
   `sharded`, `serial`, `zone`, `hashzero`): the whole suite under one JVM-wide
   setting apiece, the batch capacity among them, as DuckDB runs its tests at a

@@ -15,9 +15,10 @@ import scala.jdk.CollectionConverters._
   * in [[Dialect.Sqlite]]; every other script is read in
   * [[Dialect.Transformer]]: this repo's own, or under `postgres/` a port of
   * PostgreSQL's regression tests with Postgres's answers. Either way each record must pass: a record the
-  * engine answers differently by design carries `skipif transformer` and a
-  * comment saying why. Every query also runs under each verification mode
-  * ([[Modes.Verification]]) and must print what the baseline printed.
+  * engine answers differently by design carries `skipif transformer <id>`,
+  * the id of its rule in the ledger in `docs/gotchas.md` ([[Ledger]]). Every
+  * query also runs under each verification mode ([[Modes.Verification]]) and
+  * must print what the baseline printed.
   *
   * Set `SLT_FILTER` to a substring of a script's path to run only those
   * scripts.

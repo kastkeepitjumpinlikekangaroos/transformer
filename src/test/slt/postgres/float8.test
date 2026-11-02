@@ -12,8 +12,8 @@
 # functions, the hyperbolic functions, and casts to integers at the ends of
 # their ranges. 127 of the file's 184 statements are here: 8 that make, fill,
 # change or drop a table, 83 queries, 21 statements that must fail, and 15
-# records the engine answers otherwise by design, marked `skipif transformer`
-# with the reason. Each record names the line of float8.sql it comes from.
+# records the engine answers otherwise by design, marked `skipif transformer
+# <id>`, below. Each record names the line of float8.sql it comes from.
 #
 # A statement is as Postgres wrote it but where a rewrite cannot change what
 # it means, which its record says: float8 as DOUBLE, int4 and int8 as INT and
@@ -46,13 +46,18 @@
 # engine and a float8 in Postgres; its values are written as the INT prints
 # them.
 #
-# `skipif transformer` marks what the engine answers otherwise by design,
-# with the reason: text casts to DOUBLE by CSV's grammar, which takes NaN,
-# Infinity and -Infinity as written and no spaces around a number (4); a
-# division by zero, a logarithm of zero or less and a power with no real
-# answer are NULL, which Postgres refuses (6); arithmetic past DOUBLE's range
-# is an infinity, and a result too small for it 0, not an error (3); and a
-# CAST to an integer truncates, where Postgres rounds (2).
+# `skipif transformer <id>` marks what the engine answers otherwise by
+# design, the id naming the rule in the ledger in docs/gotchas.md and the
+# comment the case: text casts to DOUBLE by CSV's grammar, which takes NaN,
+# Infinity and -Infinity as written and no spaces around a number
+# (double-text, 4); a division by zero, a logarithm of zero or less and a
+# power with no real answer are NULL, which Postgres refuses (div-zero-null
+# and math-domain-null, 6); arithmetic past DOUBLE's range is an infinity, and
+# a result too small for it 0, not an error (double-range, 3); and a CAST to
+# an integer truncates, where Postgres rounds (cast-truncates, 2). After each,
+# its twin, `onlyif transformer <id>`, is the same statement with the engine's
+# own answer, compared exactly but for EXP of a finite number, compared as
+# SQLite's T, since its last digit Java's need not share.
 #
 # Left out (57 statements), by what they need:
 #   12  gamma() and lgamma()
@@ -167,32 +172,56 @@ NaN
 # number by, which takes the words NaN, Infinity and -Infinity as the CSV
 # writer writes them, and no spaces around a number, so Postgres's other
 # spellings are errors there by design.
-skipif transformer # text casts to DOUBLE by CSV's grammar, which spells it NaN
+skipif transformer double-text # text casts to DOUBLE by CSV's grammar, which spells it NaN
 query DOUBLE
 SELECT CAST('nan' AS DOUBLE)
 ----
 NaN
 
+onlyif transformer double-text
+statement error
+SELECT CAST('nan' AS DOUBLE)
+----
+Cannot cast 'nan' to double
+
 # float8.sql:46
-skipif transformer # text casts to DOUBLE by CSV's grammar, which spells it NaN, with no spaces around
+skipif transformer double-text # text casts to DOUBLE by CSV's grammar, which spells it NaN, with no spaces around
 query DOUBLE
 SELECT CAST('   NAN  ' AS DOUBLE)
 ----
 NaN
 
+onlyif transformer double-text
+statement error
+SELECT CAST('   NAN  ' AS DOUBLE)
+----
+Cannot cast '   NAN  ' to double
+
 # float8.sql:47
-skipif transformer # text casts to DOUBLE by CSV's grammar, which spells it Infinity
+skipif transformer double-text # text casts to DOUBLE by CSV's grammar, which spells it Infinity
 query DOUBLE
 SELECT CAST('infinity' AS DOUBLE)
 ----
 Infinity
 
+onlyif transformer double-text
+statement error
+SELECT CAST('infinity' AS DOUBLE)
+----
+Cannot cast 'infinity' to double
+
 # float8.sql:48
-skipif transformer # text casts to DOUBLE by CSV's grammar, which spells it -Infinity, with no spaces around
+skipif transformer double-text # text casts to DOUBLE by CSV's grammar, which spells it -Infinity, with no spaces around
 query DOUBLE
 SELECT CAST('          -INFINiTY   ' AS DOUBLE)
 ----
 -Infinity
+
+onlyif transformer double-text
+statement error
+SELECT CAST('          -INFINiTY   ' AS DOUBLE)
+----
+Cannot cast '          -INFINiTY   ' to double
 
 # float8.sql:50: bad special inputs. Postgres: invalid input syntax for type
 # double precision: "N A N".
@@ -236,11 +265,17 @@ SELECT CAST('NaN' AS DOUBLE) / CAST('NaN' AS DOUBLE)
 NaN
 
 # float8.sql:58
-skipif transformer # a division by zero is NULL, NaN's too
+skipif transformer div-zero-null # a division by zero is NULL, NaN's too
 query DOUBLE
 SELECT CAST('NaN' AS DOUBLE) / CAST('0' AS DOUBLE)
 ----
 NaN
+
+onlyif transformer div-zero-null
+query DOUBLE
+SELECT CAST('NaN' AS DOUBLE) / CAST('0' AS DOUBLE)
+----
+NULL
 
 # float8.sql:61
 query DOUBLE rowsort
@@ -512,9 +547,15 @@ SELECT power(CAST('0' AS DOUBLE), CAST('Infinity' AS DOUBLE))
 0.0
 
 # float8.sql:139. Postgres: zero raised to a negative power is undefined.
-skipif transformer # zero to a negative power is NULL, as a division by zero is
+skipif transformer math-domain-null # zero to a negative power is NULL, as a division by zero is
 statement error
 SELECT power(CAST('0' AS DOUBLE), CAST('-Infinity' AS DOUBLE))
+
+onlyif transformer math-domain-null
+query DOUBLE
+SELECT power(CAST('0' AS DOUBLE), CAST('-Infinity' AS DOUBLE))
+----
+NULL
 
 # float8.sql:140
 query DOUBLE
@@ -640,9 +681,15 @@ SELECT power(CAST('-Infinity' AS DOUBLE), CAST('3' AS DOUBLE))
 
 # float8.sql:162. Postgres: a negative number raised to a non-integer power
 # yields a complex result.
-skipif transformer # a negative number to a power that is not a whole number is NULL, as a division by zero is
+skipif transformer math-domain-null # a negative number to a power that is not a whole number is NULL, as a division by zero is
 statement error
 SELECT power(CAST('-Infinity' AS DOUBLE), CAST('3.5' AS DOUBLE))
+
+onlyif transformer math-domain-null
+query DOUBLE
+SELECT power(CAST('-Infinity' AS DOUBLE), CAST('3.5' AS DOUBLE))
+----
+NULL
 
 # float8.sql:163
 query DOUBLE
@@ -706,15 +753,35 @@ UPDATE FLOAT8_TBL
    WHERE FLOAT8_TBL.f1 > '0.0'
 
 # float8.sql:186. Postgres: value out of range: overflow.
-skipif transformer # arithmetic past DOUBLE's range is an infinity, not an error
+skipif transformer double-range # arithmetic past DOUBLE's range is an infinity, not an error
 statement error
 SELECT f.f1 * '1e200' from FLOAT8_TBL f
 
+onlyif transformer double-range
+query DOUBLE rowsort
+SELECT f.f1 * '1e200' from FLOAT8_TBL f
+----
+-1.0042999999999999E203
+-1.2345678901234
+-3.484E201
+-Infinity
+0.0
+
 # float8.sql:188, f.f1 ^ '1e200' written POWER(f.f1, CAST('1e200' AS DOUBLE)).
 # Postgres: value out of range: overflow.
-skipif transformer # a power past DOUBLE's range is an infinity, and one too small for it 0, not an error
+skipif transformer double-range # a power past DOUBLE's range is an infinity, and one too small for it 0, not an error
 statement error
 SELECT POWER(f.f1, CAST('1e200' AS DOUBLE)) from FLOAT8_TBL f
+
+onlyif transformer double-range
+query DOUBLE rowsort
+SELECT POWER(f.f1, CAST('1e200' AS DOUBLE)) from FLOAT8_TBL f
+----
+0.0
+0.0
+Infinity
+Infinity
+Infinity
 
 # float8.sql:190, x ^ y written POWER(x, y). Postgres reads 0 ^ 0 and 0 ^ 1
 # as float8s, 0 ^ 0.0 and 0 ^ 0.5 as numerics and their sum as a float8; in
@@ -725,24 +792,59 @@ SELECT POWER(0, 0) + POWER(0, 1) + POWER(0, 0.0) + POWER(0, 0.5)
 2.0
 
 # float8.sql:192. Postgres: cannot take logarithm of zero.
-skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm of zero or less is NULL, as a division by zero is
 statement error
 SELECT ln(f.f1) from FLOAT8_TBL f where f.f1 = '0.0'
 
+onlyif transformer math-domain-null
+query DOUBLE rowsort
+SELECT ln(f.f1) from FLOAT8_TBL f where f.f1 = '0.0'
+----
+NULL
+
 # float8.sql:194. Postgres: cannot take logarithm of a negative number.
-skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm of zero or less is NULL, as a division by zero is
 statement error
 SELECT ln(f.f1) from FLOAT8_TBL f where f.f1 < '0.0'
 
+onlyif transformer math-domain-null
+query DOUBLE rowsort
+SELECT ln(f.f1) from FLOAT8_TBL f where f.f1 < '0.0'
+----
+NULL
+NULL
+NULL
+NULL
+
 # float8.sql:196. Postgres: value out of range: underflow.
-skipif transformer # a result too small for a DOUBLE is 0, not an error, as one past its range is an infinity
+skipif transformer double-range # a result too small for a DOUBLE is 0, not an error, as one past its range is an infinity
 statement error
 SELECT exp(f.f1) from FLOAT8_TBL f
 
+onlyif transformer double-range
+query T rowsort
+SELECT exp(f.f1) from FLOAT8_TBL f
+----
+0.0
+0.0
+1.0
+1.0
+7.39912306090513e-16
+
 # float8.sql:198. Postgres: division by zero.
-skipif transformer # a division by zero is NULL
+skipif transformer div-zero-null # a division by zero is NULL
 statement error
 SELECT f.f1 / '0.0' from FLOAT8_TBL f
+
+onlyif transformer div-zero-null
+query DOUBLE rowsort
+SELECT f.f1 / '0.0' from FLOAT8_TBL f
+----
+NULL
+NULL
+NULL
+NULL
+NULL
 
 # float8.sql:200
 query DOUBLE nosort
@@ -883,9 +985,15 @@ SELECT CAST(CAST('2147483647.4' AS DOUBLE) AS INT)
 2147483647
 
 # float8.sql:292. Postgres rounds to 2147483648: integer out of range.
-skipif transformer # a CAST to an integer truncates, so the answer is 2147483647
+skipif transformer cast-truncates # a CAST to an integer truncates, so the answer is 2147483647
 statement error
 SELECT CAST(CAST('2147483647.6' AS DOUBLE) AS INT)
+
+onlyif transformer cast-truncates
+query INT
+SELECT CAST(CAST('2147483647.6' AS DOUBLE) AS INT)
+----
+2147483647
 
 # float8.sql:293
 query INT
@@ -894,9 +1002,15 @@ SELECT CAST(CAST('-2147483648.4' AS DOUBLE) AS INT)
 -2147483648
 
 # float8.sql:294. Postgres rounds to -2147483649: integer out of range.
-skipif transformer # a CAST to an integer truncates, so the answer is -2147483648
+skipif transformer cast-truncates # a CAST to an integer truncates, so the answer is -2147483648
 statement error
 SELECT CAST(CAST('-2147483648.6' AS DOUBLE) AS INT)
+
+onlyif transformer cast-truncates
+query INT
+SELECT CAST(CAST('-2147483648.6' AS DOUBLE) AS INT)
+----
+-2147483648
 
 # float8.sql:295, ::int8 written AS BIGINT.
 query BIGINT

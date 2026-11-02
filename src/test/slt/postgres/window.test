@@ -9,8 +9,10 @@
 #
 # 97 of the file's 400 statements are here: 7 that make, fill or drop a table
 # or a view, 81 queries, 8 statements that must fail, and one query the
-# engine answers otherwise by design, marked `skipif transformer` with the
-# reason. Each record names the line of window.sql it comes from. A statement
+# engine answers otherwise by design, marked `skipif transformer
+# window-constant-key`, its rule in the ledger in docs/gotchas.md, and
+# followed by its twin, the engine's refusal. Each record names the line of
+# window.sql it comes from. A statement
 # is as Postgres wrote it but where a rewrite cannot change what it means,
 # which its record says: a named WINDOW written inline in each OVER, a
 # subquery in FROM written as a WITH, x::type as CAST(x AS type), a frame
@@ -839,11 +841,17 @@ from t1 where f1 = f2
 2	NULL
 
 # window.sql:1095: ordering by a non-integer constant is allowed.
-skipif transformer # refused by design: a window's ORDER BY key that reads no column orders nothing
+skipif transformer window-constant-key # refused by design: a window's ORDER BY key that reads no column orders nothing
 query BIGINT rowsort
 SELECT rank() OVER (ORDER BY length('abc'))
 ----
 1
+
+onlyif transformer window-constant-key
+statement error
+SELECT rank() OVER (ORDER BY length('abc'))
+----
+reads no column, so it orders nothing
 
 # window.sql:1098: can't order by another window function. Postgres: window
 # functions are not allowed in window definitions.

@@ -2202,8 +2202,9 @@ Porting Postgres's regression tests (`src/test/slt/postgres/`, with
 Postgres's answers) found five answers that no decision covered, four in the
 first four files and one in float8.sql. Their records were held out of the
 scripts until each was decided; they are in the scripts now, a logarithm's
-and an underflow's as `skipif transformer` with the reason. Details are in
-[plans/testing/05](../plans/testing/05-plans-as-sql.md).
+and an underflow's as `skipif transformer` with the id of its rule in the
+[ledger below](#answers-that-differ-from-other-engines-by-design). Details are
+in [plans/testing/05](../plans/testing/05-plans-as-sql.md).
 
 - **`COUNT()` with no argument was `COUNT(*)`**, as SQLite and DuckDB read
   it, on purpose in `LogicalBuilder` and in no doc. Postgres refuses it, and so
@@ -2241,11 +2242,15 @@ and an underflow's as `skipif transformer` with the reason. Details are in
 
 The engine answers some queries otherwise than another engine does, on
 purpose: it refuses a construct the other engine runs, or answers by a rule of
-its own. Each such rule is a row of the table below, the ledger, with an id. A
-rule whose id starts `refused-` is a construct the engine refuses, and
-`refusal` is the text its refusal must contain. `pinned by` names the script
+its own. Each such rule is a row of the table below, the ledger, and has an id
+that the [SQL logic tests](testing.md#sql-logic-tests) cite. A record of
+another engine's answer that the engine does not give is `skipif transformer
+<id>` in a script. A rule whose id starts `refused-` is a construct the engine
+refuses, and `refusal` is the text its refusal must contain. Under any other
+rule a skipped record is followed by its twin, `onlyif transformer <id>`
+before the same SQL with the engine's own answer. `pinned by` names the script
 of this repo's own that holds a record of the engine's answer under the rule,
-after a line `onlyif transformer <id>`.
+`onlyif transformer <id>` before it.
 
 The table is the only list of these rules. The build reads it
 (`src/test/scala/com/transformer/slt/Ledger.scala`), so its columns are fixed

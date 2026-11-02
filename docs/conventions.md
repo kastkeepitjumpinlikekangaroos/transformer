@@ -456,11 +456,14 @@ specific traps.
   it decides, with their expected results checked by hand, in
   `src/test/slt/<area>/`, so every mode is held to them (`slt/slt_test`);
   `--complete` fills a new script's results from the engine, for checking.
-- **A rule by which the engine answers otherwise than other engines is a row
-  of the ledger** in gotchas.md ("Answers that differ from other engines by
-  design"), with an id and a pin, a record of the engine's own answer after a
-  line `onlyif transformer <id>` in a script of this repo's own. The commit
-  that decides the rule adds both.
+- **Every skip cites a rule of the ledger.** A record of another engine's
+  answer that the engine does not give is `skipif transformer <id>`, the id of
+  its rule in the ledger in gotchas.md ("Answers that differ from other engines
+  by design"), never a reason in free text, and one whose rule is no refusal is
+  followed by its twin, the engine's own answer. A rule no decision covers gets
+  no id: its records stay out of the script as a finding. The commit that
+  decides a new rule adds its row and its pin, `onlyif transformer <id>` before
+  a record of the engine's answer in a script of this repo's own.
 - **Every file of a glob is read by its own column names.** A parquet file by
   its footer's, a CSV file by its header's, matched to the first file's names
   regardless of case; a file that names other columns is refused, naming both.

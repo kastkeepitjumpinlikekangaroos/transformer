@@ -1,8 +1,9 @@
 # From SQLite's sqllogictest corpus (https://www.sqlite.org/sqllogictest,
 # mirrored at https://github.com/gregrahn/sqllogictest): test/index/delete/10/slt_good_0.test,
 # up to its 150th query this engine runs. Its COPYRIGHT lets it be copied
-# freely. `skipif transformer` marks a record the engine answers otherwise
-# by design, with the reason.
+# freely. `skipif transformer <id>` marks a record the engine answers
+# otherwise by design, with the id of its rule in the ledger in
+# docs/gotchas.md.
 
 hash-threshold 8
 

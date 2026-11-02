@@ -1,8 +1,9 @@
 # From SQLite's sqllogictest corpus (https://www.sqlite.org/sqllogictest,
 # mirrored at https://github.com/gregrahn/sqllogictest): test/select4.test,
 # up to its 150th query this engine runs. Its COPYRIGHT lets it be copied
-# freely. `skipif transformer` marks a record the engine answers otherwise
-# by design, with the reason.
+# freely. `skipif transformer <id>` marks a record the engine answers
+# otherwise by design, with the id of its rule in the ledger in
+# docs/gotchas.md.
 
 statement ok
 CREATE TABLE t1(
@@ -3232,7 +3233,7 @@ SELECT * FROM t9
 ----
 588 values hashing to be47bb47837e44b32abdcfb5f1645153
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e1 FROM t1
    WHERE a1 in (767,433,637,363,776,109,451)
@@ -3273,7 +3274,7 @@ UNION
 ----
 41 values hashing to bbf619d1c2aae1fc385fb08bddcae829
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c8 FROM t8
    WHERE d8 in (883,523,81,667,20,690,124,2)
@@ -3310,7 +3311,7 @@ EXCEPT
 ----
 9 values hashing to 0242ff524f6efe4a8115ad23f4d8659a
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c4 FROM t4
    WHERE d4 in (481,449,617,989,356,681,136,86,821,968,249,628,889,794)
@@ -3334,7 +3335,7 @@ EXCEPT
 ----
 20 values hashing to 3766301bf3fa068cbcf5df057f20b1b4
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e9 FROM t9
    WHERE (264=e9)
@@ -3361,7 +3362,7 @@ EXCEPT
 736
 788
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e6 FROM t6
    WHERE (c6=528 AND d6=991)
@@ -3371,7 +3372,7 @@ INTERSECT
    WHERE NOT ((149=b1 AND a1=776))
 ----
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b1 FROM t1
    WHERE (d1=806 AND 289=c1)
@@ -3410,7 +3411,7 @@ UNION ALL
 ----
 54 values hashing to a67a5b11c1b84f9a132ad71cec377cbc
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b7 FROM t7
    WHERE c7 in (375,672,280,853,145,729,518,206,301,238,257)
@@ -3450,7 +3451,7 @@ UNION
 ----
 27 values hashing to aeaaf7203a02879f27361a8532cf76ef
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a5 FROM t5
    WHERE b5 in (878,391,640,320,609,998,858,495,306)
@@ -3482,7 +3483,7 @@ EXCEPT
 ----
 18 values hashing to 8bdfd70f5413bea85e8826e9587834a9
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a1 FROM t1
    WHERE (a1=996 AND 177=c1 AND e1=602 AND 577=d1 AND 297=b1)
@@ -3542,7 +3543,7 @@ UNION ALL
 ----
 67 values hashing to f98c2d4d2a39578f3cf26a31dce5817a
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c1 FROM t1
    WHERE e1 in (268,312,896,95,504,763,795,110,558,125,813,523)
@@ -3570,7 +3571,7 @@ UNION ALL
 ----
 33 values hashing to fc2abaf4ef7388669cda23f4133b75de
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c3 FROM t3
    WHERE (272=e3 AND 303=a3 AND 779=b3)
@@ -3598,7 +3599,7 @@ UNION
 ----
 50 values hashing to 9a533062bf7ea86aed6fe94d816fd73d
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e8 FROM t8
    WHERE c8 in (501,74,979,692,907)
@@ -3624,7 +3625,7 @@ EXCEPT
 ----
 9 values hashing to b79423199aa8eb9f210d3da7b70c2bcb
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e4 FROM t4
    WHERE a4 in (373,990,234,228)
@@ -3659,7 +3660,7 @@ UNION
 ----
 30 values hashing to 26b7338cd3c4153e158aabc6f7c1697e
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e5 FROM t5
    WHERE (c5=471 OR 642=a5 OR e5=888)
@@ -3682,7 +3683,7 @@ EXCEPT
 ----
 18 values hashing to b5f5121cd33b589a7c1faab9e49a32ac
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e3 FROM t3
    WHERE (b3=740 AND 406=e3 AND 644=a3 AND 482=d3)
@@ -3699,7 +3700,7 @@ EXCEPT
 ----
 21 values hashing to 4d066eac2b56fa3445b905774d53c2d6
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b6 FROM t6
    WHERE (243=b6)
@@ -3772,7 +3773,7 @@ UNION
 ----
 38 values hashing to f73c9b6c421b82aff3603ecc86cbd48f
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e9 FROM t9
    WHERE b9 in (228,16,66,819,239,262,680,751,2,64,568,348,12)
@@ -3786,7 +3787,7 @@ INTERSECT
 ----
 657
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d8 FROM t8
    WHERE b8 in (52,366,673,397)
@@ -3821,7 +3822,7 @@ UNION
 835
 93
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a2 FROM t2
    WHERE b2 in (329,674,509)
@@ -3849,7 +3850,7 @@ UNION ALL
 ----
 47 values hashing to bcb6d61e9a1c9b7f05e468da3966a1d1
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a5 FROM t5
    WHERE (e5=154 OR 771=b5 OR 971=b5)
@@ -3887,7 +3888,7 @@ EXCEPT
 ----
 24 values hashing to 3c1a34d3c1ef00132a3573821a6fc675
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d9 FROM t9
    WHERE (c9=110 OR 646=d9)
@@ -3903,7 +3904,7 @@ EXCEPT
 ----
 9 values hashing to 57f08f2834649d3c0742f51693e28c6d
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d1 FROM t1
    WHERE (731=e1)
@@ -3921,7 +3922,7 @@ UNION
 ----
 9 values hashing to 3c03d2e18d1097f7b0d2d24609a53b73
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d7 FROM t7
    WHERE c7 in (174,931,575,441,843,249,857,305,770,260)
@@ -3950,7 +3951,7 @@ EXCEPT
 ----
 17 values hashing to a4682f3ddc8f9f22429f63279901899f
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b5 FROM t5
    WHERE (c5=978 AND d5=280 AND e5=655 AND 597=a5 AND 389=b5)
@@ -3987,7 +3988,7 @@ UNION
 ----
 41 values hashing to ca625b6d2b6fe8890d1edb33bf94ab08
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d6 FROM t6
    WHERE (b6=507 AND 821=a6 AND 751=c6 AND d6=35 AND 257=e6)
@@ -4024,7 +4025,7 @@ UNION ALL
 ----
 50 values hashing to b8293b5642614e554890f5cacc142ef2
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e7 FROM t7
    WHERE a7 in (134,795,806)
@@ -4059,7 +4060,7 @@ EXCEPT
 ----
 27 values hashing to b58882b6b4221de44db9f7bee1d1d540
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e9 FROM t9
    WHERE (a9=824)
@@ -4098,7 +4099,7 @@ EXCEPT
 836
 995
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b7 FROM t7
    WHERE b7 in (896,30,396,921,426,266,973,867,670,804,220,832)
@@ -4125,7 +4126,7 @@ EXCEPT
 ----
 11 values hashing to f825735d72a46d9f44d2a68fe96283a0
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c9 FROM t9
    WHERE (e9=657 OR 834=c9 OR 19=e9)
@@ -4147,7 +4148,7 @@ UNION
 834
 936
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b9 FROM t9
    WHERE b9 in (171,893,13,578)
@@ -4180,7 +4181,7 @@ EXCEPT
 ----
 9 values hashing to f8235437c31d21e22bf6b9afeff29f46
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a5 FROM t5
    WHERE (a5=667 AND e5=232 AND c5=797 AND 495=d5)
@@ -4207,7 +4208,7 @@ UNION ALL
 ----
 24 values hashing to 09951fcb097cdfd6251650ee51e6707a
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d3 FROM t3
    WHERE a3 in (265,499,777)
@@ -4229,7 +4230,7 @@ UNION
 869
 916
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d7 FROM t7
    WHERE b7 in (670,480,396,234,562,495,855,693,166,979,409,804)
@@ -4246,7 +4247,7 @@ EXCEPT
 ----
 31 values hashing to 21a38b5ca1d7cde124e628f9dc39127e
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b2 FROM t2
    WHERE (e2=783)
@@ -4282,7 +4283,7 @@ UNION ALL
 707
 811
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e5 FROM t5
    WHERE c5 in (747,44,820,72,934,734,299,733,601,723,625,210,384,855)
@@ -4309,7 +4310,7 @@ UNION
 ----
 65 values hashing to b0a3898e4cf9e6395ec980681a39e428
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c4 FROM t4
    WHERE (b4=888 OR 844=d4 OR 422=c4)
@@ -4351,7 +4352,7 @@ UNION
 ----
 49 values hashing to dc64241390944e12d20ffb4146e1129b
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d8 FROM t8
    WHERE (841=a8 OR 696=b8)
@@ -4368,7 +4369,7 @@ EXCEPT
 ----
 494
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b6 FROM t6
    WHERE (337=d6)
@@ -4415,7 +4416,7 @@ UNION ALL
 511
 634
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e5 FROM t5
    WHERE c5 in (824,147,923)
@@ -4448,7 +4449,7 @@ EXCEPT
 ----
 23 values hashing to ea13e2d506aed36acc3f51eaf8909705
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d2 FROM t2
    WHERE e2 in (812,981,659,654,125,621,463,815,629,841)
@@ -4494,7 +4495,7 @@ UNION ALL
 ----
 28 values hashing to 954b4dda890271eda9f40468fa738bf3
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b6 FROM t6
    WHERE (c6=673 AND 91=e6)
@@ -4526,7 +4527,7 @@ UNION ALL
 ----
 32 values hashing to 5e5770f9a8ad39106da8bcfd54fb49f6
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d6 FROM t6
    WHERE b6 in (490,351,512,390,348,267,583,350,281,882)
@@ -4559,7 +4560,7 @@ UNION ALL
 ----
 24 values hashing to 0dd544159b89cad7bc211836a1736026
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e6 FROM t6
    WHERE b6 in (507,229,967,421,716,989,92,974,512,834,511)
@@ -4592,7 +4593,7 @@ EXCEPT
 ----
 36 values hashing to 4b2fd76347a131710f2ef1acde2cf558
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d8 FROM t8
    WHERE (d8=630 OR b8=665)
@@ -4621,7 +4622,7 @@ EXCEPT
 ----
 35 values hashing to e119ffe25db051d6bab2819c75a39e14
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c5 FROM t5
    WHERE (12=c5 OR 708=e5)
@@ -4636,7 +4637,7 @@ EXCEPT
 ----
 17 values hashing to 0c14b9e5d2837a014f52ef2b3d8c477c
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d9 FROM t9
    WHERE e9 in (704,965,251,672,477,477,161,788,301,968,936)
@@ -4653,7 +4654,7 @@ EXCEPT
 ----
 13 values hashing to 83ece101bf7035182a8427bb8ed89a39
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b7 FROM t7
    WHERE (b7=360 AND 439=a7 AND c7=948)
@@ -4695,7 +4696,7 @@ UNION
 ----
 20 values hashing to f5ef1cc9499c56f8a16da1074d0482d1
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c2 FROM t2
    WHERE a2 in (966,779,279,10,718,691)
@@ -4726,7 +4727,7 @@ EXCEPT
 ----
 16 values hashing to 8e7bb7ec64ebe2f0c4c94dc88c52b4c9
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b7 FROM t7
    WHERE (b7=129)
@@ -4746,7 +4747,7 @@ EXCEPT
 ----
 18 values hashing to 84d145a13d9c678f3b885e5300a5bb4e
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d1 FROM t1
    WHERE (e1=288 OR 733=e1)
@@ -4777,7 +4778,7 @@ UNION
 ----
 47 values hashing to ff0145c9db9643db10e52853aa694f4d
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c8 FROM t8
    WHERE d8 in (989,889,14,624,845,636,96,899,743,192)
@@ -4808,7 +4809,7 @@ UNION ALL
 ----
 39 values hashing to a5df9620e306263d9a37d4d4c4fb717c
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b7 FROM t7
    WHERE e7 in (988,122,970,48,793,280,156,462,436,851,605,144,31,827)
@@ -4855,7 +4856,7 @@ UNION ALL
 ----
 42 values hashing to b434eb6726d46fb3f51df3e2c2a48dec
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b2 FROM t2
    WHERE (b2=897 OR e2=223 OR b2=820)
@@ -4891,7 +4892,7 @@ EXCEPT
 ----
 21 values hashing to a4f17e983f20abe402899302fae7feca
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a8 FROM t8
    WHERE c8 in (231,250,693,501,117,394,225,935,691)
@@ -4926,7 +4927,7 @@ UNION ALL
 702
 992
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a6 FROM t6
    WHERE (696=a6)
@@ -4940,7 +4941,7 @@ EXCEPT
 ----
 628
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b4 FROM t4
    WHERE (29=e4 OR 719=e4)
@@ -4961,7 +4962,7 @@ UNION
 ----
 19 values hashing to 7a4193d407c6e05b34b01b41ad1ff27f
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c8 FROM t8
    WHERE a8 in (359,72,920,250,653,129,563,795,597,637,47,838,822)
@@ -4982,7 +4983,7 @@ EXCEPT
 ----
 18 values hashing to 65458cc9744f7a7431a83cd1247fe87d
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e9 FROM t9
    WHERE e9 in (936,477,486,368,704,575,264,251,619)
@@ -5016,7 +5017,7 @@ EXCEPT
 ----
 23 values hashing to ab33e63adc541620b4948dec8419d079
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b1 FROM t1
    WHERE (d1=662 OR 876=c1)
@@ -5046,7 +5047,7 @@ UNION ALL
 ----
 47 values hashing to aaa3dc7798208effa1eb480f2cfcef94
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e7 FROM t7
    WHERE (c7=729 OR e7=302)
@@ -5076,7 +5077,7 @@ EXCEPT
 ----
 29 values hashing to a1808ab7b79429ad416519eb6f0b8a2a
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c3 FROM t3
    WHERE (837=e3 AND 737=d3)
@@ -5103,7 +5104,7 @@ UNION ALL
 ----
 19 values hashing to 6f4e6da3aba0b3138970c6092113e3a3
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d7 FROM t7
    WHERE (323=b7 AND c7=589)
@@ -5130,7 +5131,7 @@ UNION ALL
 ----
 35 values hashing to b738fc28b26ae7a6a92253af8f79cf61
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c6 FROM t6
    WHERE (c6=480 AND 186=d6 AND 128=a6 AND 588=e6)
@@ -5161,7 +5162,7 @@ UNION ALL
 936
 979
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c4 FROM t4
    WHERE e4 in (236,184,543,835)
@@ -5194,7 +5195,7 @@ EXCEPT
 ----
 16 values hashing to 739cd8e48a603f19a3b54381a0c6031b
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c1 FROM t1
    WHERE (525=a1 AND c1=670)
@@ -5219,7 +5220,7 @@ EXCEPT
 ----
 9 values hashing to d8d786d98118f80ec7add228db2acbfe
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d8 FROM t8
    WHERE (283=c8 OR b8=253)
@@ -5266,7 +5267,7 @@ UNION ALL
 954
 963
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c2 FROM t2
    WHERE e2 in (114,936,696)
@@ -5305,7 +5306,7 @@ UNION ALL
 701
 844
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b2 FROM t2
    WHERE d2 in (398,328,80,256,315,669,682,367,332)
@@ -5331,7 +5332,7 @@ EXCEPT
 ----
 18 values hashing to 13489ec2b75fd7dfc7cb1525c17f0a4e
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e6 FROM t6
    WHERE (378=b6 AND 946=e6 AND d6=901 AND 585=a6)
@@ -5364,7 +5365,7 @@ EXCEPT
 ----
 20 values hashing to f9a7943c052ccced9c0b4c2e074668e1
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d5 FROM t5
    WHERE b5 in (606,605,424,544,846,82,113,98,403,69,326,723,84,336)
@@ -5406,7 +5407,7 @@ UNION ALL
 ----
 45 values hashing to 5f03e3ba729d6098d3ac0437a0c0d64d
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c6 FROM t6
    WHERE (270=c6 AND d6=151)
@@ -5436,7 +5437,7 @@ EXCEPT
 ----
 23 values hashing to 8f309beab5beedf73aa6b2f203335a1a
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c2 FROM t2
    WHERE a2 in (123,283,471,159,442,664,93,922,574,254,139,735,588,175)
@@ -5452,7 +5453,7 @@ EXCEPT
 ----
 16 values hashing to 1f5912f2ce327e982aeb0fc270a197ed
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d9 FROM t9
    WHERE c9 in (253,476,800,180)
@@ -5505,7 +5506,7 @@ UNION ALL
 ----
 18 values hashing to 5ff5ed7bd08a7e769f39be58a4fa44e6
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a7 FROM t7
    WHERE (285=a7 AND c7=564 AND 250=b7 AND 841=e7 AND 500=d7)
@@ -5545,7 +5546,7 @@ UNION ALL
 ----
 42 values hashing to dd754e6c2499d191472f904d96eb7e1b
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e1 FROM t1
    WHERE a1 in (23,524,668)
@@ -5586,7 +5587,7 @@ UNION ALL
 ----
 40 values hashing to ceed9a0d3b1e499447da346b53a67ccc
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e3 FROM t3
    WHERE (737=d3 AND 454=b3 AND e3=837 AND 836=a3 AND 339=c3)
@@ -5631,7 +5632,7 @@ UNION
 ----
 51 values hashing to c846e8e69915ff831ff077b19505f37d
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e8 FROM t8
    WHERE (427=c8 AND 487=b8)
@@ -5671,7 +5672,7 @@ UNION ALL
 ----
 16 values hashing to 14be769842d5ce20504627c45ba64bb1
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e6 FROM t6
    WHERE (415=c6 OR 258=c6 OR b6=281)
@@ -5722,7 +5723,7 @@ UNION ALL
 ----
 57 values hashing to ef7716ca47576dddfc0ec1cd12bfabc0
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e3 FROM t3
    WHERE a3 in (965,184,594,548,282,560,429,637,181,135,145,379)
@@ -5772,7 +5773,7 @@ UNION
 ----
 32 values hashing to 9f0d7449f428cbab8bdad13cd7744268
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e8 FROM t8
    WHERE e8 in (806,179,864,463,223,981)
@@ -5795,7 +5796,7 @@ EXCEPT
 ----
 20 values hashing to 282ee696866f5316001d25468c591645
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a9 FROM t9
    WHERE (575=c9 OR d9=270 OR b9=118)
@@ -5831,7 +5832,7 @@ EXCEPT
 ----
 42 values hashing to 9505df376c50bc3572b2f09d5abedb08
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c5 FROM t5
    WHERE (e5=72 AND b5=412 AND c5=598)
@@ -5862,7 +5863,7 @@ UNION
 ----
 37 values hashing to 594e2bdf9f8b6794b7a597f9431e54e3
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e2 FROM t2
    WHERE c2 in (996,967,964,509,220,107,83,557,807,625,22,411,692)
@@ -5884,7 +5885,7 @@ EXCEPT
 ----
 46 values hashing to 944b34bab4d0c3ca1c458aa659fa8c51
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a6 FROM t6
    WHERE c6 in (187,615,648,411,45,454,122,572,534,123,415,161,65)
@@ -5899,7 +5900,7 @@ EXCEPT
 ----
 17 values hashing to f8e1db98f83b50cbabef4ad1a8376e94
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e8 FROM t8
    WHERE (a8=127 OR 844=c8 OR 683=c8)
@@ -5938,7 +5939,7 @@ UNION ALL
 ----
 29 values hashing to 7457e72fa9f780de96092233b93869ae
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d6 FROM t6
    WHERE (449=b6 OR d6=647 OR b6=512)
@@ -5998,7 +5999,7 @@ UNION ALL
 726
 779
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a7 FROM t7
    WHERE (290=e7)
@@ -6036,7 +6037,7 @@ EXCEPT
 ----
 15 values hashing to 0751fee5cb037d422c0367e047760930
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b3 FROM t3
    WHERE (355=d3 AND e3=854)
@@ -6071,7 +6072,7 @@ UNION ALL
 ----
 34 values hashing to ac54f565024d8355cb6afabdb40f07b6
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b3 FROM t3
    WHERE (a3=499 AND 651=e3 AND b3=665)
@@ -6101,7 +6102,7 @@ UNION
 ----
 14 values hashing to 904024ba71940e8528a83271729e4d4d
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e9 FROM t9
    WHERE (c9=75 AND a9=847 AND 129=d9 AND 19=b9 AND e9=549)
@@ -6128,7 +6129,7 @@ UNION
 888
 921
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d8 FROM t8
    WHERE (769=d8 AND c8=266 AND 306=a8)
@@ -6166,7 +6167,7 @@ EXCEPT
 ----
 37 values hashing to 08b3db67eb4edff7c569f6b8a8f48c7f
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a9 FROM t9
    WHERE (d9=960 AND 834=c9 AND e9=704 AND a9=776 AND b9=680)
@@ -6214,7 +6215,7 @@ EXCEPT
 775
 776
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a4 FROM t4
    WHERE e4 in (958,415,63,1,372,296,575,290)
@@ -6246,7 +6247,7 @@ EXCEPT
 ----
 19 values hashing to 70e141c40c1105455f9b4fac988071bb
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c2 FROM t2
    WHERE (c2=182)
@@ -6267,7 +6268,7 @@ EXCEPT
 ----
 182
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a7 FROM t7
    WHERE (127=e7 AND 159=b7)
@@ -6304,7 +6305,7 @@ UNION ALL
 ----
 25 values hashing to 623ac60450e95676316cce5d5a4b6170
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e2 FROM t2
    WHERE b2 in (592,985,635)
@@ -6337,7 +6338,7 @@ EXCEPT
 ----
 25 values hashing to af9e3b28cc120e6d765410fb981d68f5
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b3 FROM t3
    WHERE (e3=818 AND a3=41)
@@ -6374,7 +6375,7 @@ EXCEPT
 ----
 14 values hashing to 5ffaf7de058cff4d51ebc2d0deb7c418
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c8 FROM t8
    WHERE (7=b8 AND e8=955 AND c8=998 AND 876=d8)
@@ -6398,7 +6399,7 @@ EXCEPT
 84
 998
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e1 FROM t1
    WHERE (955=c1 AND 222=a1 AND e1=87 AND b1=440)
@@ -6426,7 +6427,7 @@ UNION ALL
 ----
 22 values hashing to 080ffaa2dd4cd20516a11ae91c0fe218
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e7 FROM t7
    WHERE d7 in (787,828,599,974)
@@ -6444,7 +6445,7 @@ EXCEPT
 ----
 23 values hashing to 37786cb8db201a25423bd01542a8ce16
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e9 FROM t9
    WHERE d9 in (678,55,145,987,790,383,360,389,224,682,258)
@@ -6466,7 +6467,7 @@ UNION
 ----
 17 values hashing to 12755f1ba5727688f5d0e388d5e11eb2
 
-skipif transformer # refused: INTERSECT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a2 FROM t2
    WHERE b2 in (357,8,414,549,888,857,820,285,846,784,93,938,649)
@@ -6510,7 +6511,7 @@ UNION ALL
 ----
 22 values hashing to 4c5fa283e9b663bbd85446d141d4518d
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b7 FROM t7
    WHERE (b7=306 AND 238=c7 AND 139=d7 AND a7=90)
@@ -6520,7 +6521,7 @@ EXCEPT
 ----
 306
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c5 FROM t5
    WHERE (159=b5 AND 556=a5 AND 756=c5 AND d5=269 AND e5=436)
@@ -6559,7 +6560,7 @@ EXCEPT
 ----
 24 values hashing to 7fa9fee68831d034715824768742f149
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b1 FROM t1
    WHERE (e1=89 OR c1=39 OR 525=b1)
@@ -6582,7 +6583,7 @@ UNION
 569
 766
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d8 FROM t8
    WHERE (166=c8 AND 981=b8 AND a8=502 AND 918=e8)
@@ -6600,7 +6601,7 @@ UNION ALL
 ----
 11 values hashing to df1f3e84c69b1b22292c9844bc1651f6
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d4 FROM t4
    WHERE (c4=455)
@@ -6622,7 +6623,7 @@ EXCEPT
 ----
 10 values hashing to 5c757965762832ad5bc52708243eb9d4
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT a8 FROM t8
    WHERE b8 in (609,52,244,656,351,773,325,870,105,365)
@@ -6659,7 +6660,7 @@ UNION
 907
 969
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT b2 FROM t2
    WHERE a2 in (304,123,135,691,262,954,495,863,336,93,442,922)
@@ -6702,7 +6703,7 @@ UNION ALL
 ----
 61 values hashing to 83d28a8a37d9e1ce393c66fad7c8780e
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c2 FROM t2
    WHERE (818=b2 OR e2=339)
@@ -6741,7 +6742,7 @@ UNION ALL
 ----
 74 values hashing to ee5b4adbbe7369ee11ab261160bd9b9d
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT e4 FROM t4
    WHERE e4 in (677,38,9,592,482,312,252,350,958)
@@ -6770,7 +6771,7 @@ EXCEPT
 ----
 25 values hashing to 956e8df3a6a8d209ae3a72bf1d9a5353
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d2 FROM t2
    WHERE e2 in (720,499,899,428,981,692,151,647,945,147,535,547,433)
@@ -6785,7 +6786,7 @@ EXCEPT
 ----
 31 values hashing to 8865e7e1f9c94932e766c5ce4523818b
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT c4 FROM t4
    WHERE a4 in (469,502,847,621)
@@ -6811,7 +6812,7 @@ EXCEPT
 ----
 14 values hashing to 2e658db4781fa5b68a6d596cd70e6663
 
-skipif transformer # refused: EXCEPT is not supported; only UNION and UNION ALL are supported
+skipif transformer refused-except-intersect
 query T valuesort
   SELECT d3 FROM t3
    WHERE (b3=665 OR 710=b3 OR 988=d3)
