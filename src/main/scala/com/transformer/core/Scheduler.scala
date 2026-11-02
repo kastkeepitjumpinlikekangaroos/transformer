@@ -84,6 +84,10 @@ object Scheduler {
     /*asyncMode =*/ false
   )
 
+  // Under `--config=leaks` the exit audit watches every JVM that runs the
+  // engine, whatever it opens.
+  LeakAudit.watch()
+
   /** Submit a `Callable` on the shared pool. [[Submitted.await]] waits for it,
     * and from a pool worker that wait work-helps, so nested submission won't
     * deadlock.
@@ -102,14 +106,23 @@ object Scheduler {
     * submission order. Convenience for the common "fan out N partitions, wait
     * for them all" pattern in pipeline-breaking operators.
     *
-    * The first task in submission order that failed throws its own exception
-    * here, as [[Submitted.await]] does, and the tasks after it are not waited
-    * for. Caller is responsible for cleanup ordering; everything else is
-    * best-effort draining.
+    * Every task is waited for, whether or not one failed, and then the first
+    * in submission order that failed throws its own exception here, as
+    * [[Submitted.await]] does: so when it throws, nothing it started still
+    * runs, and the caller can release what the tasks shared (a spill
+    * directory) without a task still writing there. It returned at the first
+    * failure, and a sibling task could hold its input open, or spill into a
+    * directory already deleted, after the query had failed (plans/testing/17).
     */
   def submitAndAwaitAll[T](tasks: Seq[Callable[T]]): IndexedSeq[T] = {
     val submitted = tasks.iterator.map(submit(_)).toIndexedSeq
-    submitted.map(_.await())
+    var failure: Throwable = null
+    val results = submitted.map { s =>
+      try s.await()
+      catch { case t: Throwable => if (failure == null) failure = t; null.asInstanceOf[T] }
+    }
+    if (failure != null) throw failure
+    results
   }
 
   /** A callable running on [[pool]], and what it threw if it failed. */

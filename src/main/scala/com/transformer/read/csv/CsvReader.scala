@@ -284,28 +284,35 @@ object CsvReader {
   * the first file's header names and that file, makes this file's own header
   * say where each column is ([[CsvReader.columnOrder]]); without it the
   * header is skipped and fields are read in the schema's order.
+  *
+  * The file is open from construction until the last row is read or
+  * [[close]] is called, whichever comes first, or the construction fails
+  * ([[Closing]]).
   */
 final class CsvPartitionIterator(file: Path, schema: Schema, options: CsvOptions, typeOrigin: Option[String] = None,
     header: Option[(Vector[String], Path)] = None)
-    extends Iterator[ColumnarBatch] {
+    extends Iterator[ColumnarBatch] with AutoCloseable {
 
   private val parser = CsvReader.naming(file, options)(new CsvRowParser(CsvReader.open(file, options), options, file.toString))
+  LeakAudit.opened(this, s"the CSV file '$file'")
   private val width = schema.length
   private val against = if (options.inferSchema) { if (options.header) "its header" else "its first row" } else "the schema"
+  private var closed: Boolean = false
   /** Where each schema column is in this file's rows; null when in order. */
   private val order: Array[Int] =
-    if (!options.header) null
-    else {
-      val names = CsvReader.naming(file, options)(CsvReader.nextNonBlank(parser)).map(CsvReader.headerNames(_, options))
-      header match {
-        case Some((expected, first)) => CsvReader.columnOrder(names, expected, file, first)
-        case None => null
+    try {
+      if (!options.header) null
+      else {
+        val names = CsvReader.naming(file, options)(CsvReader.nextNonBlank(parser)).map(CsvReader.headerNames(_, options))
+        header match {
+          case Some((expected, first)) => CsvReader.columnOrder(names, expected, file, first)
+          case None => null
+        }
       }
-    }
+    } catch { case e: Throwable => close(); throw e }
 
-  private var peeked: Option[Array[String]] = nextRow()
+  private var peeked: Option[Array[String]] = try nextRow() catch { case e: Throwable => close(); throw e }
   private var peekedLine: Long = parser.line
-  private var closed: Boolean = false
 
   /** The next row: in a file of two or more columns a blank line is no row. */
   private def nextRow(): Option[Array[String]] = CsvReader.naming(file, options) {
@@ -323,16 +330,18 @@ final class CsvPartitionIterator(file: Path, schema: Schema, options: CsvOptions
     }
   }
 
+  /** The next batch. A read that fails, on a row or a value the file cannot
+    * give, closes the file: nothing reads it after. */
   override def next(): ColumnarBatch = {
     if (!hasNext) throw new NoSuchElementException("CsvPartitionIterator exhausted")
     val batch = new ColumnarBatch(schema, options.batchSize)
     var rowIdx = 0
-    while (rowIdx < options.batchSize && peeked.isDefined) {
+    try while (rowIdx < options.batchSize && peeked.isDefined) {
       writeRow(batch, rowIdx, peeked.get)
       rowIdx += 1
       peeked = nextRow()
       peekedLine = parser.line
-    }
+    } catch { case e: Throwable => close(); throw e }
     batch.setNumRows(rowIdx)
     batch
   }
@@ -361,6 +370,13 @@ final class CsvPartitionIterator(file: Path, schema: Schema, options: CsvOptions
   private def ensureClosed(): Unit = if (!closed) {
     closed = true
     try parser.close() catch { case _: Throwable => () }
+    LeakAudit.closed(this)
+  }
+
+  /** Close the file, whether or not every row was read. */
+  def close(): Unit = {
+    peeked = None
+    ensureClosed()
   }
 }
 

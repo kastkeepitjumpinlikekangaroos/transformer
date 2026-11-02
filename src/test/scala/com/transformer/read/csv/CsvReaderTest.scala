@@ -104,7 +104,7 @@ class CsvReaderTest {
     val r = CsvReader.fromPath(dir.toString + "/*.csv", CsvOptions())
     assertEquals(2, r.numPartitions)
     val all = (0 until r.numPartitions).flatMap { p =>
-      val b = r.readPartition(p).next()
+      val b = Closing.draining(r.readPartition(p))(_.next())
       (0 until b.numRows).map(b.column(0).asInstanceOf[IntVector].get)
     }.sorted
     assertEquals(Seq(1, 2), all)

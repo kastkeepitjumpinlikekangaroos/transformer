@@ -477,6 +477,9 @@ object ParquetReader {
   * If `pushdownFilter` is set, each candidate row group's column statistics
   * are checked against the filter before opening it; groups proven not to
   * match are skipped without reading their column data.
+  *
+  * The file is open from construction until its last row group is read or
+  * [[close]] is called, whichever comes first ([[Closing]]).
   */
 final class ParquetPartitionIterator(
     hif: org.apache.parquet.hadoop.util.HadoopInputFile,
@@ -488,7 +491,7 @@ final class ParquetPartitionIterator(
     metricsRecorder: ParquetReader.MetricsRecorder = null,
     binaryAsString: Boolean = false,
     label: String = null
-) extends Iterator[ColumnarBatch] {
+) extends Iterator[ColumnarBatch] with AutoCloseable {
 
   // The file as messages name it: the path its view was given, else hif's.
   private val fileLabel: String = if (label != null) label else hif.getPath.toUri.getPath
@@ -500,9 +503,10 @@ final class ParquetPartitionIterator(
       case e: Throwable if ParquetReader.libraryFailure(e) =>
         throw ParquetFooter.refusal(fileLabel, java.nio.file.Paths.get(hif.getPath.toUri), e)
     }
+  LeakAudit.opened(this, s"the parquet file '$fileLabel'")
   private val columns: ParquetColumns.FileColumns =
     try ParquetColumns.resolve(schema, reader.getFooter.getFileMetaData.getSchema, fileLabel, binaryAsString)
-    catch { case e: Throwable => reader.close(); throw e }
+    catch { case e: Throwable => reader.close(); LeakAudit.closed(this); throw e }
   // `setRequestedSchema` must come before any read/skip — it tells parquet-mr
   // which column chunks to actually fetch. The skip loop then advances the
   // row-group cursor without reading data (O(1) metadata advance per call) so
@@ -516,6 +520,7 @@ final class ParquetPartitionIterator(
     } catch {
       case e: Throwable =>
         reader.close()
+        LeakAudit.closed(this)
         if (!ParquetReader.libraryFailure(e)) throw e
         throw new ParquetReader.Unreadable(s"Parquet file '$fileLabel' row group $startRowGroup cannot be read", e)
     }
@@ -578,8 +583,15 @@ final class ParquetPartitionIterator(
     if (!closed) {
       closed = true
       try reader.close() catch { case _: Throwable => () }
+      // The row group being read is let go with the file.
+      columnReaders = null
+      currentRowsRemaining = 0L
+      LeakAudit.closed(this)
     }
   }
+
+  /** Close the file, whether or not every row group was read. */
+  def close(): Unit = closeQuietly()
 
   /** Load the next row group's [[PageReadStore]] and prime per-column
     * readers, transparently skipping any row groups whose statistics prove
@@ -648,12 +660,15 @@ final class ParquetPartitionIterator(
     false
   }
 
-  override def hasNext: Boolean = {
-    while (currentRowsRemaining == 0L && !closed) {
-      if (!loadNextGroup()) return false
-    }
-    currentRowsRemaining > 0L
-  }
+  /** A read that fails, on a row group or a value the file cannot give,
+    * closes the file: nothing reads it after. */
+  override def hasNext: Boolean =
+    try {
+      while (currentRowsRemaining == 0L && !closed) {
+        if (!loadNextGroup()) return false
+      }
+      currentRowsRemaining > 0L
+    } catch { case e: Throwable => closeQuietly(); throw e }
 
   /** The first row of the file in the batch being decoded, counted from 0,
     * for a refusal that names a value's row. */
@@ -670,11 +685,11 @@ final class ParquetPartitionIterator(
     val out = new ColumnarBatch(schema, rowsThisBatch)
     val ncols = schema.length
     var c = 0
-    while (c < ncols) {
+    try while (c < ncols) {
       try decodeColumn(out, c, rowsThisBatch)
       catch { case e: Throwable if ParquetReader.libraryFailure(e) => throw columnRefusal(c, currentGroup, e) }
       c += 1
-    }
+    } catch { case e: Throwable => closeQuietly(); throw e }
     out.setNumRows(rowsThisBatch)
     currentRowsRemaining -= rowsThisBatch.toLong
     out

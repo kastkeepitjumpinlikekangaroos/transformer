@@ -4,9 +4,9 @@ import com.transformer.core.{Faults, Scheduler, Spill}
 import com.transformer.fuzz.JobDagGen.JobCase
 import com.transformer.fuzz.oracle.{DagSchedule, Hydration}
 import org.junit.Assert._
-import org.junit.{After, Before, Test}
+import org.junit.{After, Test}
 
-import java.nio.file.{Files, Path}
+import java.nio.file.Path
 
 /** Property-based gate over the job-level DAG scheduler — the layer above SQL
   * execution, where `DataJob.runUnifiedDag` decides what may run and when.
@@ -48,31 +48,12 @@ class DagSchedulerFuzzTest {
     * properties. */
   private val DefaultDagSeeds: Int = 40
 
-  // Generated tasks may enable spill at a 1-byte threshold; keep those files out
-  // of the default spill location.
-  private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
-  private var tmpRoot: Path = _
-
-  @Before def setSpillDir(): Unit = {
-    tmpRoot = Files.createTempDirectory("dag-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmpRoot.resolve("transformer-spill").toString)
-  }
-
-  @After def restoreSpillDir(): Unit = {
-    if (originalDirProp == null) System.clearProperty(Spill.SpillDirProperty)
-    else System.setProperty(Spill.SpillDirProperty, originalDirProp)
-    deleteRecursively(tmpRoot)
-  }
-
-  private def deleteRecursively(p: Path): Unit = {
-    if (p == null || !Files.exists(p)) return
-    if (Files.isDirectory(p)) {
-      val s = Files.list(p)
-      try { val it = s.iterator(); while (it.hasNext) deleteRecursively(it.next()) }
-      finally s.close()
-    }
-    try Files.deleteIfExists(p) catch { case _: java.io.IOException => () }
-  }
+  // This JVM's spill directory is read once (`Spill.baseDir`, under
+  // java.io.tmpdir, which Bazel sets to the target's own TEST_TMPDIR), so a
+  // test cannot move it. Every operator that spills closes its directory once
+  // nothing reads it, so each test leaves none (plans/testing/17).
+  @After def leavesNoSpillDirectory(): Unit =
+    assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
 
   // ---- the property ---------------------------------------------------------
 

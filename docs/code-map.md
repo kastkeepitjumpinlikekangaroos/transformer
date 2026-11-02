@@ -42,11 +42,13 @@ navigation hint, not a comprehensive directory listing.
   `AggExpr` types with the right `AggState` subtype for round-trip
   serialization. `isSpillable` gates the operator-level switch (false for
   the DISTINCT aggregates, `CountDistinctState` and `DistinctState`).
-- `core/Spill.scala` (~230 LOC) — temp-dir lifecycle, per-operator subdir
+- `core/Spill.scala` (~300 LOC) — temp-dir lifecycle, per-operator subdir
   allocation (`OperatorSpillDir`, whose `closeOnDrain` wipes the subdir
-  when an operator's output iterator drains), `ColumnarBatch` byte
-  estimator, and the `effectiveThresholdBytes` helper that turns
-  `ExecutionOptions` into a concrete flush threshold.
+  when an operator's output iterator drains or is closed), `ColumnarBatch`
+  byte estimator, and the `effectiveThresholdBytes` helper that turns
+  `ExecutionOptions` into a concrete flush threshold. `core/Closing.scala`
+  holds the close protocol's helpers (architecture §3h) and
+  `core/LeakAudit.scala` the `--config=leaks` audit.
 - `core/ExecutionOptions.scala` (~120 LOC) — per-query knobs threaded from
   `DataJob.runOneTask` to spill-capable operators. `fromOutputOptions`
   parses the `output.json` `options` map with tolerance for typos.

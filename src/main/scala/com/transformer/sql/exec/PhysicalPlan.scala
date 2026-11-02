@@ -7,6 +7,11 @@ import com.transformer.sql.plan._
 
 /** Physical operator. One partition = one independent stream of [[ColumnarBatch]].
   * The executor schedules partitions onto a [[java.util.concurrent.ForkJoinPool]].
+  *
+  * The close protocol ([[Closing]]): an operator whose output holds anything,
+  * itself or upstream of it, returns an iterator that is `AutoCloseable`, and
+  * closing it closes its inputs; one that stops reading an input early closes
+  * it; a pool task that drains an input closes it however the drain ends.
   */
 trait PhysicalPlan {
   def outputSchema: Schema
@@ -51,12 +56,12 @@ final case class ScanExec(view: CatalogView, metricsNode: MetricsNode = null,
     }
     val text =
       if (view.stringsAreText || !view.schema.fields.exists(_.dataType == DataType.StringType)) batches
-      else batches.map { b => BatchInvariants.requireText(b, "a view built in Scala"); b }
+      else Closing.over(batches.map { b => BatchInvariants.requireText(b, "a view built in Scala"); b }, batches)
     if (stopped eq ExecutionOptions.NeverStopped) text
-    else new Iterator[ColumnarBatch] {
+    else Closing.over(new Iterator[ColumnarBatch] {
       def hasNext: Boolean = { if (stopped()) throw new QueryStoppedException; text.hasNext }
       def next(): ColumnarBatch = text.next()
-    }
+    }, text)
   }
 }
 
@@ -100,7 +105,8 @@ final case class FilterExec(child: PhysicalPlan, predicate: Expr) extends Physic
   def outputSchema: Schema = child.outputSchema
   def numPartitions: Int = child.numPartitions
   def execute(partition: Int): Iterator[ColumnarBatch] = {
-    child.execute(partition).flatMap { batch =>
+    val input = child.execute(partition)
+    Closing.over(input.flatMap { batch =>
       // One vectorized predicate eval per batch — primitive bool array, no
       // per-row Expr dispatch. We pass the BooleanVector straight to
       // `selectByBoolean` so the intermediate `Array[Boolean]` the old path
@@ -110,7 +116,7 @@ final case class FilterExec(child: PhysicalPlan, predicate: Expr) extends Physic
       val resultCol = predicate.evalVec(batch).asInstanceOf[BooleanVector]
       val filtered = batch.selectByBoolean(resultCol)
       if (filtered.numRows == 0) Iterator.empty else Iterator.single(filtered)
-    }
+    }, input)
   }
 }
 
@@ -121,7 +127,8 @@ final case class ProjectExec(child: PhysicalPlan, projections: Seq[(Expr, String
   private val projArr: Array[Expr] = projections.iterator.map(_._1).toArray
   def numPartitions: Int = child.numPartitions
   def execute(partition: Int): Iterator[ColumnarBatch] = {
-    child.execute(partition).map(projectBatch)
+    val input = child.execute(partition)
+    Closing.over(input.map(projectBatch), input)
   }
   private def projectBatch(batch: ColumnarBatch): ColumnarBatch = {
     val n = batch.numRows
@@ -140,22 +147,26 @@ final case class ProjectExec(child: PhysicalPlan, projections: Seq[(Expr, String
 }
 
 /** Per-partition limit. The executor adds a [[GlobalLimitExec]] above this when
-  * `numPartitions > 1` so the global cap is enforced.
+  * `numPartitions > 1` so the global cap is enforced. Once it has its rows it
+  * closes its input, which it reads no more ([[Closing.limited]]).
   */
 final case class LocalLimitExec(child: PhysicalPlan, n: Long) extends PhysicalPlan {
   def outputSchema: Schema = child.outputSchema
   def numPartitions: Int = child.numPartitions
   def execute(partition: Int): Iterator[ColumnarBatch] =
-    LimitExec.truncate(child.execute(partition), n)
+    Closing.limited(child.execute(partition), n)
 }
 
-/** Global limit collapses all partitions into one stream, stops after `n` rows. */
+/** Global limit collapses all partitions into one stream, stops after `n` rows.
+  * Each partition is executed when the one before it runs out, and once the
+  * limit has its rows the partition it stopped in is closed; the ones after
+  * it were never executed. */
 final case class GlobalLimitExec(child: PhysicalPlan, n: Long) extends PhysicalPlan {
   def outputSchema: Schema = child.outputSchema
   def numPartitions: Int = 1
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0)
-    LimitExec.truncate((0 until child.numPartitions).iterator.flatMap(child.execute), n)
+    Closing.limited(LimitExec.partitions(child), n)
   }
 }
 
@@ -168,11 +179,17 @@ final case class OffsetExec(child: PhysicalPlan, n: Long) extends PhysicalPlan {
   def numPartitions: Int = 1
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0)
-    LimitExec.skip((0 until child.numPartitions).iterator.flatMap(child.execute), n)
+    val input = LimitExec.partitions(child)
+    Closing.over(LimitExec.skip(input, n), input)
   }
 }
 
 private[exec] object LimitExec {
+  /** Every partition of `plan` in turn, each executed when the one before it
+    * runs out ([[Closing.concat]]). */
+  def partitions(plan: PhysicalPlan): Iterator[ColumnarBatch] =
+    Closing.concat((0 until plan.numPartitions).iterator.map(p => () => plan.execute(p)))
+
   /** Drop the first `n` rows, then pass everything else through: whole batches
     * are skipped, and the batch that crosses the boundary keeps only its tail. */
   def skip(it: Iterator[ColumnarBatch], n: Long): Iterator[ColumnarBatch] = {
@@ -192,22 +209,4 @@ private[exec] object LimitExec {
     }
   }
 
-  /** Pass batches through until `n` rows have been emitted, trimming the batch
-    * that crosses the boundary. Shared by [[LocalLimitExec]] (per-partition
-    * cap) and [[GlobalLimitExec]] (single-stream cap). */
-  def truncate(it: Iterator[ColumnarBatch], n: Long): Iterator[ColumnarBatch] = {
-    var remaining = n
-    it.takeWhile(_ => remaining > 0).map { b =>
-      if (b.numRows <= remaining) {
-        remaining -= b.numRows
-        b
-      } else {
-        val mask = new Array[Boolean](b.numRows)
-        var i = 0
-        while (i < remaining.toInt) { mask(i) = true; i += 1 }
-        remaining = 0
-        b.select(mask)
-      }
-    }
-  }
 }

@@ -107,8 +107,8 @@ final case class WindowExec(
     else {
       val it: Iterator[ColumnarBatch] =
         if (isSharded) child.execute(partition)
-        else (0 until child.numPartitions).iterator.flatMap(child.execute)
-      processBatches(it)
+        else Closing.concat((0 until child.numPartitions).iterator.map(p => () => child.execute(p)))
+      Closing.draining(it)(processBatches)
     }
   }
 
@@ -122,16 +122,20 @@ final case class WindowExec(
     val childParts: Seq[Int] =
       if (isSharded) Seq(partition) else 0 until child.numPartitions
 
-    val bucketFiles = routeChildToBuckets(childParts, K, spillDir)
+    val bucketFiles =
+      try routeChildToBuckets(childParts, K, spillDir)
+      catch { case t: Throwable => spillDir.close(); throw t }
 
-    val concat = bucketFiles.iterator.flatMap { file =>
+    // Each bucket is read whole when the one before it runs out; the
+    // directory goes when the output is drained or closed.
+    val concat = Closing.concat(bucketFiles.iterator.map { file => () =>
       if (file == null) Iterator.empty
       else {
         val reader = ParquetReader.fromPath(file.toString)
-        val batchIt = (0 until reader.numPartitions).iterator.flatMap(reader.readPartition)
-        processBatches(batchIt)
+        Closing.draining(Closing.concat((0 until reader.numPartitions).iterator.map(p => () => reader.readPartition(p))))(
+          processBatches)
       }
-    }
+    })
     spillDir.closeOnDrain(concat)
   }
 
@@ -173,9 +177,9 @@ final case class WindowExec(
       pendingCounts(b) = 0
     }
 
-    parts.foreach { p =>
+    try parts.foreach { p =>
       val it = child.execute(p)
-      while (it.hasNext) {
+      try while (it.hasNext) {
         val batch = it.next()
         val nrows = batch.numRows
         if (nrows > 0) {
@@ -199,15 +203,26 @@ final case class WindowExec(
             r += 1
           }
         }
-      }
+      } finally Closing.close(it)
+    }
+    catch {
+      case t: Throwable =>
+        writers.foreach(w => if (w != null) w.abort())
+        throw t
     }
     var b = 0
-    while (b < K) { flushBucket(b); b += 1 }
-    b = 0
-    while (b < K) {
-      val w = writers(b)
-      if (w != null) { val _ = w.close() }
-      b += 1
+    try {
+      while (b < K) { flushBucket(b); b += 1 }
+      b = 0
+      while (b < K) {
+        val w = writers(b)
+        if (w != null) { val _ = w.close() }
+        b += 1
+      }
+    } catch {
+      case t: Throwable =>
+        writers.foreach(w => if (w != null) w.abort())
+        throw t
     }
     if (metricsNode != null) {
       metricsNode.counters(WindowExec.IdxPeakBufferedRows).add(peakBuffered)

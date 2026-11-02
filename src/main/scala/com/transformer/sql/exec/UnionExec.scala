@@ -29,7 +29,7 @@ final case class UnionExec(left: PhysicalPlan, right: PhysicalPlan) extends Phys
     else {
       val batches = right.execute(partition - left.numPartitions)
       if (!relabel) batches
-      else batches.map(b => ColumnarBatch.fromColumns(outputSchema, b.columns, b.numRows))
+      else Closing.over(batches.map(b => ColumnarBatch.fromColumns(outputSchema, b.columns, b.numRows)), batches)
     }
   }
 }

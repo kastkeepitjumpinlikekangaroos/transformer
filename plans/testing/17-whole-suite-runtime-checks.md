@@ -219,14 +219,16 @@ campaigns at their usual budgets.
    - (b) A value every writer refuses, spill included. Whether a query fails
      would then depend on whether it spilled.
    - (c) Leave it as `docs/gotchas.md:2006-2012` documents.
-3. **How W2's audit fails a target.**
+3. **How W2's audit fails a target.** *Taken overnight as recommended, not
+   yet confirmed by the user: (a).*
    - (a) **(recommended)** The exit audit with each opener's stack, ending the
      JVM non-zero. No test class changes, and the same `JAVA_TOOL_OPTIONS`
      pattern as every other configuration.
    - (b) A JUnit rule in every test class. Per-test attribution, but 79
      targets to edit.
    - (c) Both.
-4. **Abandoned iterators.**
+4. **Abandoned iterators.** *Taken overnight as recommended, not yet
+   confirmed by the user: (a).*
    - (a) **(recommended)** The close protocol above. Files and spill
      directories are released when a consumer stops: LIMIT, an error, a stop.
    - (b) The audit counts only fully drained queries, and the leak is

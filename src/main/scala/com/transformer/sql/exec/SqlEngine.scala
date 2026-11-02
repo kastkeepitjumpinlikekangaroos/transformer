@@ -1,6 +1,6 @@
 package com.transformer.sql.exec
 
-import com.transformer.core.{Catalog, ColumnarBatch, ExecutedQuery, ExecutionOptions, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, Closing, ColumnarBatch, ExecutedQuery, ExecutionOptions, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.core.metrics.QueryMetrics
 import com.transformer.sql.parse.SqlParser
 import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer}
@@ -45,9 +45,22 @@ object SqlEngine extends SqlExecutor {
     // consumer task can ever wait on exchange readiness (the K>1 liveness
     // fix — see preMaterializeExchanges' scaladoc). No-op without exchanges.
     PhysicalPlanner.preMaterializeExchanges(physical)
-    val parts: IndexedSeq[Iterator[ColumnarBatch]] =
-      (0 until physical.numPartitions).map(p => physical.execute(p))
-    new ExecutedQuery(physical.outputSchema, parts)
+    new ExecutedQuery(physical.outputSchema, partitions(physical))
+  }
+
+  /** Every partition of `physical`, executed: a breaker at the root does its
+    * work here. One that fails closes the ones executed before it, which
+    * nothing will read ([[Closing]]). */
+  private def partitions(physical: PhysicalPlan): IndexedSeq[Iterator[ColumnarBatch]] = {
+    val parts = IndexedSeq.newBuilder[Iterator[ColumnarBatch]]
+    try {
+      (0 until physical.numPartitions).foreach(p => parts += physical.execute(p))
+      parts.result()
+    } catch {
+      case t: Throwable =>
+        parts.result().foreach(Closing.close)
+        throw t
+    }
   }
 
   /** Enabled path: wraps each phase in a nanoTime delta and captures the
@@ -73,8 +86,7 @@ object SqlEngine extends SqlExecutor {
     // pass existed that cost hid in the caller's post-return drain where
     // executeNanos never saw it.
     PhysicalPlanner.preMaterializeExchanges(physical)
-    val parts: IndexedSeq[Iterator[ColumnarBatch]] =
-      (0 until physical.numPartitions).map(p => physical.execute(p))
+    val parts = partitions(physical)
     val t5 = System.nanoTime()
 
     val parseNanos = t1 - t0

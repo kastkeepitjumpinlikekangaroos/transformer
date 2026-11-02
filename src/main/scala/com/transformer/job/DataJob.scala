@@ -407,8 +407,12 @@ final case class DataJob(
     // The task's output directory, once the run has started writing it: a
     // failure from then on must leave it holding only the Failed record.
     var output: Option[OutputDirectory] = None
+    // The query, closed however the task ends: one that failed, or that a
+    // writer stopped reading, still holds its files and spill directories.
+    var executed: Option[ExecutedQuery] = None
     try {
       val q = executor.execute(node.renderedMainSql, catalog, opts)
+      executed = Some(q)
       // A task's result is a table other tasks, validations and engines read
       // by name, so it may not repeat one: a downstream task failed on it,
       // naming neither this task nor the columns (plans/robustness/26).
@@ -483,7 +487,7 @@ final case class DataJob(
         writeFailedRecord(node, output, msg, enqueuedAt, started, finished, vars)
         TaskRun(TaskResult(taskName, TaskStatus.Failed(msg), 0L, None, started, finished, enqueuedAt),
           stopReason(taskName, e))
-    }
+    } finally executed.foreach(_.close())
   }
 
   /** Build the per-task [[ExecutionOptions]] from the output config's options
@@ -850,7 +854,8 @@ final case class DataJob(
     node.task.validations.iterator.zip(node.renderedValidationSqls.iterator).flatMap { case (v, sql) =>
       val q = executor.execute(sql, catalog, opts)
       val rows = mutable.ArrayBuffer.empty[ColumnarBatch]
-      while (q.batches.hasNext) rows += q.batches.next()
+      try while (q.batches.hasNext) rows += q.batches.next()
+      finally q.close()
       val total = rows.iterator.map(_.numRows.toLong).sum
       if (total == 0L) None
       else Some(ValidationFailure(v.name, total, sampleAsCsv(q.schema, rows.toSeq, maxRows = 10)))

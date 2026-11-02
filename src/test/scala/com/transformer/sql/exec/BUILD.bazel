@@ -13,6 +13,26 @@ scala_junit_test(
     ],
 )
 
+# The close protocol: a LIMIT over parquet, CSV and a spilled sort, a breaker
+# whose input fails or is stopped, and a query that fails, is stopped or is
+# read in part release every file and spill directory they opened, held to
+# the JVM's open file count, its spill directory and the leak audit, which
+# runs here in every run (--config=leaks runs it over the whole suite).
+scala_junit_test(
+    name = "closing_test",
+    srcs = ["ClosingTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = ["-Dtransformer.audit_leaks=true"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/csv",
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/write/parquet",
+        "@maven//:junit_junit",
+    ],
+)
+
 # --config=verify: each batch invariant fails a hand-built batch, the plan
 # walk wraps every operator the planner builds in a check and refuses one it
 # has no branch for, and a bad batch fails at the operator that emitted it

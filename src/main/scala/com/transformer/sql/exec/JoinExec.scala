@@ -260,7 +260,13 @@ final case class HashJoinExec(
     val totals = new ProbeTallies
     val rowsPerTask = math.max(1, HashJoinExec.PairsPerTask / math.max(1, build.rows.length))
     val cursors = mutable.Queue.tabulate(probePlan.numPartitions)(p => new PairingCursor(p))
-    val waves = new Iterator[ColumnarBatch] {
+    val waves = new Iterator[ColumnarBatch] with AutoCloseable {
+      /** Close every probe partition still being read: the consumer stopped. */
+      def close(): Unit = {
+        cursors.foreach(_.close())
+        cursors.clear()
+        current = Iterator.empty
+      }
       private var current: Iterator[ColumnarBatch] = Iterator.empty
       def hasNext: Boolean = {
         while (!current.hasNext && cursors.nonEmpty) current = wave()
@@ -294,10 +300,10 @@ final case class HashJoinExec(
     }
     // The tail is read once every probe row is paired, so the build rows no
     // probe row matched are known by then.
-    waves ++ {
+    Closing.over(waves ++ {
       recordProbeMetrics(totals)
       if (matchedBuild != null) emitUnmatchedBuild(build, matchedBuild) else Iterator.empty
-    }
+    }, waves)
   }
 
   /** Where the pairing has read probe partition `partition` to: the batch it
@@ -331,6 +337,13 @@ final case class HashJoinExec(
         }
       }
       ProbePartitionResult(out, matched, tallies)
+    }
+
+    /** Close the probe partition, read to its end or not. */
+    def close(): Unit = {
+      done = true
+      batch = null
+      if (batches != null) Closing.close(batches)
     }
   }
 
@@ -460,7 +473,7 @@ final case class HashJoinExec(
     val keyBufRow: Array[Any] = if (keysBuf != null) new Array[Any](nKeys) else null
     val it = buildPlan.execute(p)
     val nCols = buildPlan.outputSchema.length
-    while (it.hasNext) appendBuildBatch(it.next(), nCols, rowsBuf, keysBuf, keyBufRow)
+    try while (it.hasNext) appendBuildBatch(it.next(), nCols, rowsBuf, keysBuf, keyBufRow) finally Closing.close(it)
     CollectedBuildPartition(rowsBuf, keysBuf)
   }
 
@@ -509,10 +522,10 @@ final case class HashJoinExec(
     val localMatched = new util.HashSet[Int]()
     val tallies = new ProbeTallies
     val probeIt = probePlan.execute(partitionIdx)
-    while (probeIt.hasNext) {
+    try while (probeIt.hasNext) {
       val b = probeIt.next()
       probeBatchInto(b, 0, b.numRows, build, local, localMatched, tallies)
-    }
+    } finally Closing.close(probeIt)
     ProbePartitionResult(local, localMatched, tallies)
   }
 
@@ -709,8 +722,15 @@ final case class HashJoinExec(
 
   private def executeGraceHash(partition: Int): Iterator[ColumnarBatch] = {
     require(graceEnabled, "executeGraceHash called with graceEnabled=false")
-    val K = GraceBuckets
+    // Every bucket is joined before the output is emitted, so the directory
+    // goes then, or once the join failed.
     val spillDir = Spill.openOperatorDir("hashjoin")
+    try executeGraceHash(partition, spillDir) finally spillDir.close()
+  }
+
+  /** [[executeGraceHash]]'s work, its buckets in `spillDir`. */
+  private def executeGraceHash(partition: Int, spillDir: OperatorSpillDir): Iterator[ColumnarBatch] = {
+    val K = GraceBuckets
     if (metricsNode != null) metricsNode.counters(HashJoinExec.IdxBucketCount).add(K.toLong)
 
     val buildParts: Seq[Int] =
@@ -752,7 +772,6 @@ final case class HashJoinExec(
       k += 1
     }
     if (metricsNode != null) metricsNode.counters(HashJoinExec.IdxBucketsLoadedNanos).add(System.nanoTime() - tLoad)
-    spillDir.close()
     rowsToBatches(out.toArray, outputSchema, ColumnarBatch.DefaultCapacity)
   }
 
@@ -800,24 +819,34 @@ final case class HashJoinExec(
       pendingCounts(b) = 0
     }
 
-    parts.foreach { p =>
+    try parts.foreach { p =>
       val it = plan.execute(p)
-      while (it.hasNext) {
+      try while (it.hasNext) {
         val batch = it.next()
         if (batch.numRows > 0) routeBatchToBuckets(
           batch, ncols, keyExprs, keysAreColRefs, keyColIndices, K,
           pending, pendingCounts, flushBucket _)
-      }
+      } finally Closing.close(it)
     }
-    // Final flush.
+    catch {
+      case t: Throwable =>
+        writers.foreach(w => if (w != null) w.abort())
+        throw t
+    }
+    // Final flush, and the writers closed; a failure discards them all.
     var b = 0
-    while (b < K) { flushBucket(b); b += 1 }
-    // Close writers.
-    b = 0
-    while (b < K) {
-      val w = writers(b)
-      if (w != null) { val _ = w.close() }
-      b += 1
+    try {
+      while (b < K) { flushBucket(b); b += 1 }
+      b = 0
+      while (b < K) {
+        val w = writers(b)
+        if (w != null) { val _ = w.close() }
+        b += 1
+      }
+    } catch {
+      case t: Throwable =>
+        writers.foreach(w => if (w != null) w.abort())
+        throw t
     }
     // Attribute spill bytes per-side. Done after close so the size on disk
     // is final. Also surface peak bucket bytes (max across buckets) for
@@ -964,7 +993,7 @@ final case class HashJoinExec(
     var part = 0
     while (part < reader.numPartitions) {
       val it = reader.readPartition(part)
-      while (it.hasNext) appendBuildBatch(it.next(), ncols, rows, keys, keyBufRow)
+      try while (it.hasNext) appendBuildBatch(it.next(), ncols, rows, keys, keyBufRow) finally Closing.close(it)
       part += 1
     }
     if (rows.isEmpty) return null
@@ -985,10 +1014,10 @@ final case class HashJoinExec(
     var part = 0
     while (part < reader.numPartitions) {
       val it = reader.readPartition(part)
-      while (it.hasNext) {
+      try while (it.hasNext) {
         val b = it.next()
         probeBatchInto(b, 0, b.numRows, build, out, matchedBuild, tallies)
-      }
+      } finally Closing.close(it)
       part += 1
     }
     recordProbeMetrics(tallies)
@@ -1006,7 +1035,7 @@ final case class HashJoinExec(
     var part = 0
     while (part < reader.numPartitions) {
       val it = reader.readPartition(part)
-      while (it.hasNext) {
+      try while (it.hasNext) {
         val b = it.next()
         val n = b.numRows
         var r = 0
@@ -1015,7 +1044,7 @@ final case class HashJoinExec(
           r += 1
         }
         rowsHere += n.toLong
-      }
+      } finally Closing.close(it)
       part += 1
     }
     if (metricsNode != null && rowsHere > 0L) {

@@ -6,9 +6,8 @@ import com.transformer.fuzz.oracle.{AggDecomposition, JoinCommutativity, MetaMod
 import com.transformer.sql.exec.PhysicalPlanner
 import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer, LogicalPlanCardinality}
 import org.junit.Assert._
-import org.junit.{After, Before, Test}
+import org.junit.{After, Test}
 
-import java.nio.file.{Files, Path}
 
 /** The metamorphic gate re-run under SHARDED planning — a separate JVM forced
   * onto the shuffle-join + sharded-aggregate/distinct paths the default gate
@@ -57,31 +56,12 @@ class ShardedModeFuzzTest {
     * several times across modes/partitions; raise via `-Dfuzz.seeds=N`. */
   private val DefaultShardedSeeds: Int = 60
 
-  // Isolate spill files in a temp dir (the spill-on mode flushes at a 1-byte
-  // threshold) so the default spill location is never littered.
-  private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
-  private var tmpRoot: Path = _
-
-  @Before def setSpillDir(): Unit = {
-    tmpRoot = Files.createTempDirectory("sharded-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmpRoot.resolve("transformer-spill").toString)
-  }
-
-  @After def restoreSpillDir(): Unit = {
-    if (originalDirProp == null) System.clearProperty(Spill.SpillDirProperty)
-    else System.setProperty(Spill.SpillDirProperty, originalDirProp)
-    deleteRecursively(tmpRoot)
-  }
-
-  private def deleteRecursively(p: Path): Unit = {
-    if (p == null || !Files.exists(p)) return
-    if (Files.isDirectory(p)) {
-      val s = Files.list(p)
-      try { val it = s.iterator(); while (it.hasNext) deleteRecursively(it.next()) }
-      finally s.close()
-    }
-    try Files.deleteIfExists(p) catch { case _: java.io.IOException => () }
-  }
+  // This JVM's spill directory is read once (`Spill.baseDir`, under
+  // java.io.tmpdir, which Bazel sets to the target's own TEST_TMPDIR), so a
+  // test cannot move it. Every operator that spills closes its directory once
+  // nothing reads it, so each test leaves none (plans/testing/17).
+  @After def leavesNoSpillDirectory(): Unit =
+    assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
 
   // ---- gate -----------------------------------------------------------------
 

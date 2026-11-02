@@ -1,6 +1,6 @@
 package com.transformer.core.metrics
 
-import com.transformer.core.ColumnarBatch
+import com.transformer.core.{Closing, ColumnarBatch}
 
 /** JIT-friendly wrapper that meters a child [[Iterator]] of
   * [[ColumnarBatch]]es.
@@ -37,7 +37,10 @@ import com.transformer.core.ColumnarBatch
   *              [[MetricsNode.wallNanos]] on every batch.
   */
 final class MeteredIterator(inner: Iterator[ColumnarBatch], node: MetricsNode)
-    extends Iterator[ColumnarBatch] {
+    extends Iterator[ColumnarBatch] with AutoCloseable {
+
+  /** Close what the metered operator's output holds ([[Closing]]). */
+  def close(): Unit = Closing.close(inner)
 
   // We intentionally do NOT cache hasNext or buffer batches — the contract of
   // Iterator[ColumnarBatch] in this codebase is single-pass and pull-driven;

@@ -143,7 +143,9 @@ final class QueryConsole(
       val outcome = try {
         val start = System.nanoTime()
         val executed = SqlExecutorRegistry.get.execute(sql, catalogFor(sql))
-        val partitions = (0 until executed.numPartitions).map(p => executed.partition(p).toIndexedSeq)
+        val partitions =
+          try (0 until executed.numPartitions).map(p => executed.partition(p).toIndexedSeq)
+          finally executed.close()
         val mv = new MaterializedView(executed.schema, partitions)
         QueryConsole.Outcome.Success(mv, (System.nanoTime() - start) / 1000000L)
       } catch {

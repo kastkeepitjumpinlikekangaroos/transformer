@@ -72,8 +72,20 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
   // write rather than reaching the file as `?`.
   private val out = new BufferedWriter(
     new OutputStreamWriter(Files.newOutputStream(tmp), CsvWriter.reportingEncoder(options.charset)))
+  LeakAudit.opened(this, s"the CSV file '$tmp', being written")
 
-  private val rows = new CsvRowWriter(out, schema, options, s"CSV file '$target'")
+  // The header is written here: one a charset cannot encode fails the
+  // writer, and its staged file goes. It was left open, and on disk
+  // (plans/testing/17's leak audit).
+  private val rows =
+    try new CsvRowWriter(out, schema, options, s"CSV file '$target'")
+    catch {
+      case e: Throwable =>
+        try out.close() catch { case _: Throwable => () }
+        LeakAudit.closed(this)
+        try Files.deleteIfExists(tmp) catch { case _: Throwable => () }
+        throw e
+    }
 
   private var committed = false
 
@@ -84,6 +96,7 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
   def finish(): Long = {
     out.flush()
     out.close()
+    LeakAudit.closed(this)
     rows.rowsWritten
   }
 
@@ -103,6 +116,7 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
   /** Discard the file: the staged one, or the target once it is committed. */
   def abort(): Unit = {
     try out.close() catch { case _: Throwable => () }
+    LeakAudit.closed(this)
     try Files.deleteIfExists(tmp) catch { case _: Throwable => () }
     if (committed) try Files.deleteIfExists(target) catch { case _: Throwable => () }
     ()

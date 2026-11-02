@@ -526,8 +526,14 @@ README's [Querying files](../README.md#querying-files-transformer-query).
    walk refuses an operator it has no branch for, and
    `sql/exec:verify_test` finds the operator classes by reflection and fails
    until one of its queries builds yours.
+   The operator follows the close protocol (architecture §3h): its output
+   closes its inputs (`Closing.over`), a pool task of it drains an input in
+   `Closing.draining`, and a spill directory it opens is released when its
+   output is drained or closed, or when it fails.
 4. Test against `SqlEngineTest`, and run the suite under `--config=verify`,
-   which checks every batch the operator emits against the schema it declares.
+   which checks every batch the operator emits against the schema it declares,
+   and `--config=leaks`, which fails a target that leaves a file or a spill
+   directory open.
 5. Move the feature from "intentionally NOT done" in
    [`docs/gotchas.md`](gotchas.md#whats-intentionally-not-done) to the
    supported list in [`README.md`'s "SQL features"](../README.md#sql-features).

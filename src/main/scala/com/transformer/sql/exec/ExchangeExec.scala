@@ -222,10 +222,10 @@ final case class ExchangeExec(
   private def shardChildPartition(p: Int): Array[Array[ColumnarBatch]] = {
     val perShard = Array.fill(numShards)(mutable.ArrayBuffer.empty[ColumnarBatch])
     val it = child.execute(p)
-    while (it.hasNext) {
+    try while (it.hasNext) {
       val batch = it.next()
       if (batch.numRows > 0) routeBatch(batch, perShard)
-    }
+    } finally Closing.close(it)
     Array.tabulate(numShards)(s => perShard(s).toArray)
   }
 

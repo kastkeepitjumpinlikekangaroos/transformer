@@ -134,6 +134,22 @@ class CsvWriterTest {
     assertFalse(Files.exists(tmp))
   }
 
+  /** A header the charset cannot encode fails the write, and its staged
+    * file goes with it: the writer opened the file and then threw writing
+    * the header, so the file stayed open and on disk, beside the parts
+    * (found by plans/testing/17's leak audit). */
+  @Test def aHeaderTheCharsetCannotEncodeLeavesNoStagedFile(): Unit = {
+    val dir = Files.createTempDirectory("csv-header-")
+    val s = Schema(Field(s"caf${0xe9.toChar}", DataType.IntType))
+    val e = assertThrows(classOf[IllegalArgumentException], () => {
+      val _ = CsvWriter.writePartitioned(dir, s, IndexedSeq(Iterator(makeBatch(s, Seq(Seq(1))))),
+        CsvWriteOptions(charset = StandardCharsets.US_ASCII))
+    })
+    assertTrue(e.getMessage, e.getMessage.contains("US-ASCII cannot encode"))
+    val left = { val l = Files.list(dir); try l.iterator().asScala.map(_.getFileName.toString).toVector finally l.close() }
+    assertEquals("no part and no staged file", Vector.empty, left)
+  }
+
   // ---- regressions: plans/robustness/06 ----------------------------------
 
   private def written(schema: Schema, rows: Seq[Seq[Any]], options: CsvWriteOptions = CsvWriteOptions()): String = {

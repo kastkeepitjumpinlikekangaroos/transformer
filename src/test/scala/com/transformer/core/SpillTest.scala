@@ -7,18 +7,19 @@ import java.nio.file.{Files, Path}
 
 class SpillTest {
 
-  private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
+  // A base of the test's own for the stale sweep. This JVM's spill directory
+  // is read once (`Spill.baseDir`, under java.io.tmpdir, which Bazel sets to
+  // the target's own TEST_TMPDIR), so a test cannot move it; each leaves no
+  // operator directory in it (plans/testing/17).
   private var tmpRoot: Path = _
 
-  @Before def setOverride(): Unit = {
+  @Before def makeTmpRoot(): Unit = {
     tmpRoot = Files.createTempDirectory("spill-test-")
-    System.setProperty(Spill.SpillDirProperty, tmpRoot.resolve("transformer-spill").toString)
   }
 
-  @After def restoreOverride(): Unit = {
-    if (originalDirProp == null) System.clearProperty(Spill.SpillDirProperty)
-    else System.setProperty(Spill.SpillDirProperty, originalDirProp)
+  @After def leavesNoSpillDirectory(): Unit = {
     Spill.deleteRecursively(tmpRoot)
+    assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
   }
 
   @Test def operatorDirCreatesAndCleansUp(): Unit = {

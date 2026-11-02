@@ -2439,6 +2439,38 @@ schema it declares, so a value its type cannot hold fails where it was made:
   every type it did not name, NULL among them. Every value was NULL, so no
   answer changed. `SqlEngineTest.absOfNullIsANullColumn`.
 
+`--config=leaks` (`core/LeakAudit`) reports at each test JVM's exit what it
+left open, and the close protocol (architecture §3h, decision 4) releases it:
+
+- **A query its consumer stopped reading held what it had opened.** A
+  parquet partition closed its file only once its last row group was read, a
+  CSV partition only when it found no next row, and a spilling operator's
+  directory went only when its output was drained, its shutdown hook covering
+  the rest. So `LIMIT` (which stopped pulling), a query that failed or was
+  stopped part way, and the data viewer's preview (`DataGrid.sample`, which
+  reads the first rows of a partition) left files open until garbage
+  collection and spill directories until the JVM exited, which in the GUI,
+  the viewer or the `transformer query` shell accumulates. `sql/exec:closing_test`
+  holds each case to the JVM's open file count and its spill directory.
+- **A failed fan-out returned before its other tasks ended.**
+  `Scheduler.submitAndAwaitAll` threw at the first failure, so a sort's or an
+  aggregate's other partitions went on reading their inputs, and spilling into
+  a directory, after the query had failed. It now waits for every task, then
+  throws the first failure.
+- **A CSV writer whose header could not be written left its staged file open,
+  and on disk.** The header is written as the writer is made, after its staged
+  file is opened; a column name the charset cannot encode threw there, and the
+  partitioned write, which aborts the writers it has, never had this one.
+  `CsvWriterTest.aHeaderTheCharsetCannotEncodeLeavesNoStagedFile`.
+- **The tests' spill isolation held for the first test of a JVM only.** The
+  spill directory is read once per JVM (`Spill.baseDir`), so the per-test
+  `transformer.spill.dir` that fourteen test classes set in `@Before` moved
+  nothing after the first, and their `@After` deleted the directory the next
+  test spilled into. Bazel sets `java.io.tmpdir` to each target's own
+  `TEST_TMPDIR`, under which the default spill directory already lies, so the
+  tests set nothing now, and their `@After` checks that no operator's
+  directory is left (`Spill.operatorDirsLeft`) rather than deleting it.
+
 ## What the literature oracles held out (2026-11-02, held for the user)
 
 Three findings of [plans/testing/16](../plans/testing/16-literature-oracles.md)'s

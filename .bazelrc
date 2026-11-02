@@ -30,3 +30,7 @@ test:hashzero --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.hash_zero=true
 # Every batch every operator emits checked against the schema it declares
 # (BatchInvariants): a value its type cannot hold fails where it was made.
 test:verify --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.verify=true
+# What a test leaves open at JVM exit, reported with the stack that opened it,
+# fails the target (LeakAudit): files the readers and writers open, operator
+# spill directories, and threads the engine started.
+test:leaks --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.audit_leaks=true

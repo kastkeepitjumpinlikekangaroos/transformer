@@ -73,6 +73,7 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
       .withPageSize(DEFAULT_PAGE_SIZE)
       .withDictionaryEncoding(true)
       .build()
+  LeakAudit.opened(this, s"the parquet file '$tmp', being written")
 
   // Reusable per-row handle. parquet-mr's `ParquetWriter.write(T)` increments
   // its internal `recordCount` by 1 per call (used to decide when to flush row
@@ -101,6 +102,7 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
     * Returns the rows written. */
   def finish(): Long = {
     writer.close()
+    LeakAudit.closed(this)
     rowsWritten
   }
 
@@ -120,6 +122,7 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
   /** Discard the file: the staged one, or the target once it is committed. */
   def abort(): Unit = {
     try writer.close() catch { case _: Throwable => () }
+    LeakAudit.closed(this)
     try Files.deleteIfExists(tmp) catch { case _: Throwable => () }
     if (committed) try Files.deleteIfExists(target) catch { case _: Throwable => () }
     ()

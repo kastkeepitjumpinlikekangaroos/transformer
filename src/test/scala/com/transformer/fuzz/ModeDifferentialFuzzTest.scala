@@ -5,9 +5,8 @@ import com.transformer.fuzz.QueryGen._
 import com.transformer.fuzz.oracle.{CatalogNulls, ExactIntegers, KeyEquality, ModeDifferential, RelEngine, WindowFrames}
 import com.transformer.sql.plan._
 import org.junit.Assert._
-import org.junit.{After, Before, Test}
+import org.junit.{After, Test}
 
-import java.nio.file.{Files, Path}
 import scala.util.Try
 
 /** Property-based mode-differential gate over single-table SQL — the generated
@@ -38,31 +37,12 @@ class ModeDifferentialFuzzTest {
     * case executes the engine once per mode; raise via `-Dfuzz.seeds=N`. */
   private val DefaultModeDiffSeeds: Int = 120
 
-  // Isolate spill files in a temp dir (mirrors the *SpillTest setup) so the
-  // 1-byte-threshold spill modes don't litter the default spill location.
-  private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
-  private var tmpRoot: Path = _
-
-  @Before def setSpillDir(): Unit = {
-    tmpRoot = Files.createTempDirectory("mode-diff-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmpRoot.resolve("transformer-spill").toString)
-  }
-
-  @After def restoreSpillDir(): Unit = {
-    if (originalDirProp == null) System.clearProperty(Spill.SpillDirProperty)
-    else System.setProperty(Spill.SpillDirProperty, originalDirProp)
-    deleteRecursively(tmpRoot)
-  }
-
-  private def deleteRecursively(p: Path): Unit = {
-    if (p == null || !Files.exists(p)) return
-    if (Files.isDirectory(p)) {
-      val s = Files.list(p)
-      try { val it = s.iterator(); while (it.hasNext) deleteRecursively(it.next()) }
-      finally s.close()
-    }
-    try Files.deleteIfExists(p) catch { case _: java.io.IOException => () }
-  }
+  // This JVM's spill directory is read once (`Spill.baseDir`, under
+  // java.io.tmpdir, which Bazel sets to the target's own TEST_TMPDIR), so a
+  // test cannot move it. Every operator that spills closes its directory once
+  // nothing reads it, so each test leaves none (plans/testing/17).
+  @After def leavesNoSpillDirectory(): Unit =
+    assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
 
   // ---- the property -------------------------------------------------------
 

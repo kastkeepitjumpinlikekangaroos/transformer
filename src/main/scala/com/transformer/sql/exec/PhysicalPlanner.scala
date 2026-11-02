@@ -1,6 +1,6 @@
 package com.transformer.sql.exec
 
-import com.transformer.core.{BatchInvariants, CatalogView, ColumnarBatch, DataType, ExecutionOptions, Schema}
+import com.transformer.core.{BatchInvariants, CatalogView, Closing, ColumnarBatch, DataType, ExecutionOptions, Schema}
 import com.transformer.core.metrics.{MeteredIterator, MetricsNode}
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
@@ -682,10 +682,11 @@ private[exec] final class VerifiedPlan(inner: PhysicalPlan, raw: PhysicalPlan, i
   def numPartitions: Int = inner.numPartitions
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     val schema = outputSchema
-    inner.execute(partition).map { batch =>
+    val batches = inner.execute(partition)
+    Closing.over(batches.map { batch =>
       BatchInvariants.violation(batch, schema).foreach(v => throw failure(batch, schema, partition, v))
       batch
-    }
+    }, batches)
   }
 
   /** The wrapped plan, as [[MeteredPlan.underlying]] gives its own. */

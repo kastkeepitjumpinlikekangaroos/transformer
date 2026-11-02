@@ -88,22 +88,32 @@ final case class DistinctExec(
   private def executePerShard(partition: Int): Iterator[ColumnarBatch] = {
     require(partition >= 0 && partition < numPartitions,
       s"partition $partition out of range [0,$numPartitions)")
+    // The spill runs are folded back into the set before it emits, so the
+    // directory goes before the output is read, or once the work failed.
     val spillDir = if (spillEnabled) Some(Spill.openOperatorDir("distinct-shard")) else None
-    val r = collect(partition, spillDir)
-    val tMerge = if (metricsNode != null) System.nanoTime() else 0L
-    DistinctSpiller.foldSpillFiles(r.spillFiles, codec, ncols, r.set)
-    if (metricsNode != null) {
-      metricsNode.counters(DistinctExec.IdxMergeNanos).add(System.nanoTime() - tMerge)
-      metricsNode.counters(DistinctExec.IdxSpillRunsRead).add(r.spillFiles.length.toLong)
-      metricsNode.counters(DistinctExec.IdxGroupCount).add(r.set.size.toLong)
-    }
-    wrapWithSpillCleanup(emit(r.set), spillDir)
+    try {
+      val r = collect(partition, spillDir)
+      val tMerge = if (metricsNode != null) System.nanoTime() else 0L
+      DistinctSpiller.foldSpillFiles(r.spillFiles, codec, ncols, r.set)
+      if (metricsNode != null) {
+        metricsNode.counters(DistinctExec.IdxMergeNanos).add(System.nanoTime() - tMerge)
+        metricsNode.counters(DistinctExec.IdxSpillRunsRead).add(r.spillFiles.length.toLong)
+        metricsNode.counters(DistinctExec.IdxGroupCount).add(r.set.size.toLong)
+      }
+      emit(r.set)
+    } finally spillDir.foreach(_.close())
   }
 
   private def executeCollapsing(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0,
       s"collapsing distinct has only one partition; got partition=$partition")
     val spillDir = if (spillEnabled) Some(Spill.openOperatorDir("distinct")) else None
+    try executeCollapsing(spillDir) finally spillDir.foreach(_.close())
+  }
+
+  /** [[executeCollapsing]]'s work, its spill runs in `spillDir`, folded back
+    * into the merged set before it emits. */
+  private def executeCollapsing(spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] = {
     val tasks: Seq[Callable[DistinctExec.PartialSet]] =
       (0 until child.numPartitions).map { p =>
         new Callable[DistinctExec.PartialSet] {
@@ -124,14 +134,8 @@ final case class DistinctExec(
       metricsNode.counters(DistinctExec.IdxSpillRunsRead).add(runsRead)
       metricsNode.counters(DistinctExec.IdxGroupCount).add(merged.size.toLong)
     }
-    wrapWithSpillCleanup(emit(merged), spillDir)
+    emit(merged)
   }
-
-  /** Wipe the spill subdir once the consumer drains the iterator. */
-  private def wrapWithSpillCleanup(
-      inner: Iterator[ColumnarBatch],
-      spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] =
-    spillDir.fold(inner)(_.closeOnDrain(inner))
 
   private def collect(p: Int, spillDir: Option[OperatorSpillDir]): DistinctExec.PartialSet = {
     val tStart = if (metricsNode != null) System.nanoTime() else 0L
@@ -143,7 +147,7 @@ final case class DistinctExec(
     var peakBytes: Long = 0L
     val scratch = codec.newScratch()
     val it = child.execute(p)
-    while (it.hasNext) {
+    try while (it.hasNext) {
       val b = it.next()
       if (spillDir.isDefined) {
         bytesSinceFlush += Spill.estimateBytes(b)
@@ -177,7 +181,7 @@ final case class DistinctExec(
             s"DistinctExec produced ${spillFiles.length} spill runs in partition $p, " +
             s"exceeding spill_max_runs=${opts.spillMaxRuns}.")
       }
-    }
+    } finally Closing.close(it)
     if (metricsNode != null) {
       metricsNode.counters(DistinctExec.IdxPartialAggregateNanos).add(System.nanoTime() - tStart)
       metricsNode.counters(DistinctExec.IdxHashMapPeakSize).add(peakSize)
@@ -287,7 +291,7 @@ private[exec] object DistinctSpiller {
       var part = 0
       while (part < reader.numPartitions) {
         val batchIt = reader.readPartition(part)
-        while (batchIt.hasNext) {
+        try while (batchIt.hasNext) {
           val batch = batchIt.next()
           var r = 0
           while (r < batch.numRows) {
@@ -301,7 +305,7 @@ private[exec] object DistinctSpiller {
             target.add(key)
             r += 1
           }
-        }
+        } finally Closing.close(batchIt)
         part += 1
       }
       f += 1

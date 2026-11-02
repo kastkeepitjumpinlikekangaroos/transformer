@@ -4,10 +4,9 @@ import com.transformer.core._
 import com.transformer.core.metrics.MetricsNode
 import com.transformer.sql.plan._
 import org.junit.Assert._
-import org.junit.{After, Before, Test}
+import org.junit.{After, Test}
 import org.junit.Assume.assumeTrue
 
-import java.nio.file.{Files, Path}
 import scala.collection.mutable
 import scala.util.Random
 
@@ -27,31 +26,12 @@ class SortExecSpillTest {
   private val k: Expr = ColRefExpr(0, "k", DataType.IntType)
   private val keysAsc: Seq[SortKey] = Seq(SortKey(k, true))
 
-  private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
-  private var tmpRoot: Path = _
-
-  @Before def setOverride(): Unit = {
-    tmpRoot = Files.createTempDirectory("sort-spill-test-")
-    System.setProperty(Spill.SpillDirProperty, tmpRoot.resolve("transformer-spill").toString)
-  }
-
-  @After def restoreOverride(): Unit = {
-    if (originalDirProp == null) System.clearProperty(Spill.SpillDirProperty)
-    else System.setProperty(Spill.SpillDirProperty, originalDirProp)
-    deleteRecursively(tmpRoot)
-  }
-
-  private def deleteRecursively(p: Path): Unit = {
-    if (!Files.exists(p)) return
-    if (Files.isDirectory(p)) {
-      val s = Files.list(p)
-      try {
-        val it = s.iterator()
-        while (it.hasNext) deleteRecursively(it.next())
-      } finally s.close()
-    }
-    try Files.deleteIfExists(p) catch { case _: java.io.IOException => () }
-  }
+  // This JVM's spill directory is read once (`Spill.baseDir`, under
+  // java.io.tmpdir, which Bazel sets to the target's own TEST_TMPDIR), so a
+  // test cannot move it. Every operator that spills closes its directory once
+  // nothing reads it, so each test leaves none (plans/testing/17).
+  @After def leavesNoSpillDirectory(): Unit =
+    assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
 
   // ---- helpers -------------------------------------------------------------
 

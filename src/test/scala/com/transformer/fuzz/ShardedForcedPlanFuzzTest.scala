@@ -4,9 +4,8 @@ import com.transformer.core._
 import com.transformer.fuzz.oracle.ForcedPlans
 import com.transformer.sql.plan.LogicalPlanCardinality
 import org.junit.Assert._
-import org.junit.{After, Before, Test}
+import org.junit.{After, Test}
 
-import java.nio.file.{Files, Path}
 
 /** The strategy half of [[ForcedPlanFuzzTest]] under sharded planning: its
   * own JVM, whose `jvm_flags` open the sharding gates
@@ -20,19 +19,12 @@ class ShardedForcedPlanFuzzTest {
 
   import ForcedPlanFuzzTest._
 
-  private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
-  private var tmpRoot: Path = _
-
-  @Before def setSpillDir(): Unit = {
-    tmpRoot = Files.createTempDirectory("sharded-forced-plans-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmpRoot.resolve("transformer-spill").toString)
-  }
-
-  @After def restoreSpillDir(): Unit = {
-    if (originalDirProp == null) System.clearProperty(Spill.SpillDirProperty)
-    else System.setProperty(Spill.SpillDirProperty, originalDirProp)
-    deleteRecursively(tmpRoot)
-  }
+  // This JVM's spill directory is read once (`Spill.baseDir`, under
+  // java.io.tmpdir, which Bazel sets to the target's own TEST_TMPDIR), so a
+  // test cannot move it. Every operator that spills closes its directory once
+  // nothing reads it, so each test leaves none (plans/testing/17).
+  @After def leavesNoSpillDirectory(): Unit =
+    assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
 
   /** The `jvm_flags` reached `LogicalPlanCardinality` at class load. */
   @Test def shardingGateIsActive(): Unit = {

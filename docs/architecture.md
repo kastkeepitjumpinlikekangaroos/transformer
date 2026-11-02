@@ -939,6 +939,44 @@ itself when it sees it (`eq`), costing nothing. Only `transformer query` sets
 it: its `Cancel` stops a statement on Ctrl-C in the shell, and asks the same
 question before each batch it prints or writes (§11).
 
+### 3h. Releasing what a query opened
+
+A query opens files (each scan's reader) and spill directories (a spilling
+sort, aggregate, DISTINCT, grace-hash join or window), and releases them when
+its consumer stops reading, however it stops (`core/Closing`, decision 4 of
+plans/testing/17):
+
+- **An output that holds anything is `AutoCloseable`.** A reader
+  (`CsvPartitionIterator`, `ParquetPartitionIterator`) closes its file when it
+  runs out or is closed; an operator's output closes its inputs
+  (`Closing.over`), so closing a query's partitions closes the plan under them;
+  a breaker that reads its spill runs as it emits (a sort's merge, a spilled
+  window's buckets) closes them and its directory when drained or closed
+  (`OperatorSpillDir.closeOnDrain`). An aggregate, a DISTINCT and a grace-hash
+  join fold or join their runs before they emit, so their directories go
+  then.
+- **What stops reading closes.** A `LIMIT` closes its input once it has its
+  rows (`Closing.limited`), and `GlobalLimitExec` and `OffsetExec` execute each
+  partition only when the one before it runs out (`Closing.concat`). A pool
+  task that drains an input closes it however the drain ends, and a breaker
+  that fails releases its spill directory. `Scheduler.submitAndAwaitAll`
+  waits for every task before it throws the first failure, so nothing a
+  failed fan-out started is still writing when its caller releases.
+- **The consumer closes the query.** `ExecutedQuery.close()` closes every
+  partition, read or not; the job runner (after the task, failed or not, and
+  after each validation), the GUI's query console, the data viewer's preview
+  (`DataGrid.sample`, which reads a partition in part) and `transformer query`
+  (a print that `| head` or Ctrl-C stops, and `COPY`) call it, and
+  `SqlEngine` closes the partitions it executed when a later one fails.
+
+`--config=leaks` (`-Dtransformer.audit_leaks=true`, `core/LeakAudit`) holds
+every test to it: each reader and writer file and each operator spill
+directory registers when it opens, with its stack, and leaves when it closes;
+at exit a shutdown hook waits for the pool to go quiet, then reports what is
+still open, any directory left in the JVM's spill directory and any thread the
+engine started (`transformer-*`, not the pool's) still alive, and ends the JVM
+with status 117. Off, it is a final val read.
+
 ### 4. Run records and historical-run discovery
 
 The runner persists a per-task `_run.json` for **every termination status**
@@ -2094,15 +2132,17 @@ engine and multiply each one across execution modes:
   (`skipif transformer <id>`) and still runs once, so a skip that no longer
   diverges fails.
 - **Whole-suite configurations** (`.bazelrc` `--config=batch1`, `batch2`,
-  `sharded`, `serial`, `zone`, `hashzero`, `verify`): the whole suite under one
+  `sharded`, `serial`, `zone`, `hashzero`, `verify`, `leaks`): the whole suite under one
   JVM-wide setting apiece, the batch capacity among them, as DuckDB runs its
   tests at a vector size of 2, every key hash 0 (`KeyHash` in
   `core/HashKeys.scala`, which every hash site goes through: the key wrappers
   and `LongHashMap` the hash maps key by, `HashPartitioner`'s shard routing, the
   grace join's and the spilling window's buckets), as DuckDB's `HASH_ZERO`
   build does, and every batch every operator emits checked against its schema
-  (§2d), as DuckDB's debug builds verify every vector. A test that depends on a
-  default says so with `assumeTrue`.
+  (§2d), as DuckDB's debug builds verify every vector, and what each test
+  JVM leaves open audited at its exit (§3h), as Spark's `DebugFilesystem`
+  fails a test that leaves a stream open. A test that depends on a default
+  says so with `assumeTrue`.
 
 Formats, modes, the corpus and how to write a script are in
 [testing.md](testing.md#sql-logic-tests).

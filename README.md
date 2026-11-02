@@ -2066,6 +2066,32 @@ regardless (for debugging), and a sample of failing rows is written to
 records](#run-records-and-historical-runs).
 
 
+### Running a query
+
+`SqlEngine.execute(sql, catalog)` runs one statement over a `Catalog` of views
+and returns an `ExecutedQuery`: its schema, and its rows as partitions of
+`ColumnarBatch`es read lazily. Close it once you stop reading it, however you
+stop:
+
+```scala
+import com.transformer.core.Catalog
+import com.transformer.read.csv.{CsvOptions, CsvReader}
+import com.transformer.sql.exec.SqlEngine
+
+val catalog = new Catalog
+catalog.register("events", CsvReader.fromPath("data/events/*.csv", CsvOptions()))
+
+val q = SqlEngine.execute("SELECT user_id, amount FROM events WHERE amount > 10", catalog)
+try q.batches.take(3).foreach(b => println(s"${b.numRows} rows"))
+finally q.close()
+```
+
+A query read to its end has released what it opened, but one read in part, or
+that failed or was stopped as it was read, holds the files its scans read and
+the spill directories its operators wrote until `close()`. A `LIMIT` closes
+what it stops reading itself. The job runner, the GUI's query console, the
+data viewer and `transformer query` each close every query they run.
+
 ### Plans and SQL
 
 SQL becomes a logical plan in `LogicalBuilder.build`, and `PlanSql.print`

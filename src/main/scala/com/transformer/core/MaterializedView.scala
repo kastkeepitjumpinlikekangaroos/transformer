@@ -115,7 +115,8 @@ object MaterializedView {
     }
   }
 
-  private def drain(it: Iterator[ColumnarBatch]): IndexedSeq[ColumnarBatch] = {
+  /** Every batch of `it`, which is closed however the drain ends. */
+  private def drain(it: Iterator[ColumnarBatch]): IndexedSeq[ColumnarBatch] = Closing.draining(it) { it =>
     val buf = scala.collection.mutable.ArrayBuffer.empty[ColumnarBatch]
     while (it.hasNext) buf += it.next()
     buf.toIndexedSeq

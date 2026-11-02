@@ -239,11 +239,14 @@ final class QuerySession {
 
   private def query(sql: String, io: Io): Unit = {
     val executed = SqlEngine.execute(withViews(sql), catalog, io.cancel.options)
-    val batches = io.printing(executed.batches)
-    if (io.results > 0 && format.setApart) io.out.println()
-    io.results += 1
-    if (format == OutputFormat.Table && SqlParser.explained(sql).isDefined) ResultPrinter.lines(io.out, batches)
-    else ResultPrinter.print(io.out, executed.schema, batches, format, maxRows, width)
+    // Closed however the print ends: `| head` stops it, Ctrl-C stops it.
+    try {
+      val batches = io.printing(executed.batches)
+      if (io.results > 0 && format.setApart) io.out.println()
+      io.results += 1
+      if (format == OutputFormat.Table && SqlParser.explained(sql).isDefined) ResultPrinter.lines(io.out, batches)
+      else ResultPrinter.print(io.out, executed.schema, batches, format, maxRows, width)
+    } finally executed.close()
   }
 
   // ---------------------------------------------------------------------------
@@ -341,17 +344,18 @@ final class QuerySession {
       throw new IllegalArgumentException(s"${c.path} is a directory; COPY TO writes one file")
     val (fileFormat, options) = writeOptions(c.path, c.options)
     val executed = SqlEngine.execute(withViews(sql), catalog, io.cancel.options)
-    val names = executed.schema.fieldNames
-    Schema.repeatedName(names).foreach { positions =>
-      throw new IllegalArgumentException(
-        s"The result has more than one column named '${names(positions.head)}', columns " +
-          s"${Schema.describePositions(names, positions)}, which a file read by column name could not tell apart, " +
-          "names being read regardless of case; give each its own name with AS")
-    }
-    val batches = io.cancel.watch(executed.batches)
-    val rows =
+    val rows = try {
+      val names = executed.schema.fieldNames
+      Schema.repeatedName(names).foreach { positions =>
+        throw new IllegalArgumentException(
+          s"The result has more than one column named '${names(positions.head)}', columns " +
+            s"${Schema.describePositions(names, positions)}, which a file read by column name could not tell apart, " +
+            "names being read regardless of case; give each its own name with AS")
+      }
+      val batches = io.cancel.watch(executed.batches)
       if (fileFormat == "csv") CsvWriter.writeAll(target, executed.schema, batches, CsvWriteOptions.fromMap(options))
       else ParquetWriter.writeAll(target, executed.schema, batches, options)
+    } finally executed.close()
     io.err.println(s"Wrote ${count(rows, "row")} to ${c.path}")
   }
 

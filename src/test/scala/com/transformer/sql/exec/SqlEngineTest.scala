@@ -3199,9 +3199,6 @@ class SqlEngineTest {
     val queries = Seq(
       "SELECT g, SUM(k) AS s, AVG(k) AS v FROM tm GROUP BY g ORDER BY 2",
       "SELECT id, a * c AS p, a / 3 AS q FROM ta ORDER BY 2, 1")
-    val prevProp = System.getProperty(Spill.SpillDirProperty)
-    val tmp = Files.createTempDirectory("sqlengine-decimal-arith-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
     try {
       for (sql <- queries) {
         def run(opts: ExecutionOptions): Seq[Map[String, Any]] = collectAllRows(SqlEngine.execute(sql, cat, opts))
@@ -3209,10 +3206,7 @@ class SqlEngineTest {
         assertTrue(s"expected a non-empty result: $sql", expected.nonEmpty)
         assertEquals(sql, expected, run(ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))))
       }
-    } finally {
-      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
-      else System.setProperty(Spill.SpillDirProperty, prevProp)
-    }
+    } finally assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
   }
 
   // ---- Values that become one result ----------------------------------------
@@ -3392,9 +3386,6 @@ class SqlEngineTest {
       "SELECT DISTINCT id, COALESCE(k, w * w) AS v FROM t",
       "SELECT i, SUM(IF(id = 1, k, k * w)) AS s, MAX(CASE WHEN id = 3 THEN k ELSE k * w END) AS m FROM t GROUP BY i",
       "SELECT id, LAG(k, 1, 0.125) OVER (PARTITION BY i ORDER BY id) AS v FROM t")
-    val prevProp = System.getProperty(Spill.SpillDirProperty)
-    val tmp = Files.createTempDirectory("sqlengine-branch-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
     try {
       for (sql <- queries) {
         def run(opts: ExecutionOptions): Seq[String] =
@@ -3403,10 +3394,7 @@ class SqlEngineTest {
         assertTrue(s"expected a non-empty result: $sql", expected.nonEmpty)
         assertEquals(sql, expected, run(ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))))
       }
-    } finally {
-      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
-      else System.setProperty(Spill.SpillDirProperty, prevProp)
-    }
+    } finally assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
   }
 
   /** Two BIGINTs compare as longs. They compared as doubles, which cannot
@@ -3500,17 +3488,11 @@ class SqlEngineTest {
     val expected = run(ExecutionOptions.Default).sorted
     // Isolate spill output under a throwaway dir (spill is otherwise unused in
     // this test class, so the lazy Spill.rootDir initializes here).
-    val prevProp = System.getProperty(Spill.SpillDirProperty)
-    val tmp = Files.createTempDirectory("sqlengine-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
     try {
       val actual = run(ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))).sorted
       assertTrue("expected a non-empty result", expected.nonEmpty)
       assertEquals(expected, actual)
-    } finally {
-      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
-      else System.setProperty(Spill.SpillDirProperty, prevProp)
-    }
+    } finally assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
   }
 
   /** Every spilling operator writes its working set to parquet and reads it
@@ -3545,9 +3527,6 @@ class SqlEngineTest {
       "SELECT DISTINCT d FROM t" -> false,
       "SELECT a.k, b.k AS k2, a.d FROM t a JOIN t b ON a.d = b.d" -> false,
       "SELECT k, d, ROW_NUMBER() OVER (PARTITION BY d ORDER BY k) AS rn FROM t" -> false)
-    val prevProp = System.getProperty(Spill.SpillDirProperty)
-    val tmp = Files.createTempDirectory("sqlengine-decimal-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
     try {
       for ((sql, ordered) <- queries) {
         val expected = run(sql, ExecutionOptions.Default)
@@ -3556,10 +3535,7 @@ class SqlEngineTest {
         if (ordered) assertEquals(sql, expected, actual)
         else assertEquals(sql, expected.sorted, actual.sorted)
       }
-    } finally {
-      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
-      else System.setProperty(Spill.SpillDirProperty, prevProp)
-    }
+    } finally assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
   }
 
   /** A NULL-typed column spills like any other. It is the type of an untyped
@@ -3600,9 +3576,6 @@ class SqlEngineTest {
       "WITH a AS (SELECT k, NULL AS x FROM t WHERE g = 0) SELECT b.k, a.x FROM t b LEFT JOIN a ON a.k = b.k" -> false,
       "SELECT g, NULL AS x FROM t UNION SELECT g, NULL AS x FROM t" -> false,
       "SELECT k, NULL AS x, COUNT(*) OVER (PARTITION BY g) AS n FROM t" -> false)
-    val prevProp = System.getProperty(Spill.SpillDirProperty)
-    val tmp = Files.createTempDirectory("sqlengine-null-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
     try {
       for ((sql, ordered) <- queries) {
         val expected = run(sql, ExecutionOptions.Default)
@@ -3611,10 +3584,7 @@ class SqlEngineTest {
         if (ordered) assertEquals(sql, expected, actual)
         else assertEquals(sql, expected.sorted, actual.sorted)
       }
-    } finally {
-      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
-      else System.setProperty(Spill.SpillDirProperty, prevProp)
-    }
+    } finally assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
   }
 
   // ---- Failures say what the user wrote -------------------------------------

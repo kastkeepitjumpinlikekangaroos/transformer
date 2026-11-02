@@ -486,6 +486,17 @@ specific traps.
   the 02e wedge (`sql/exec:exchange_deadlock_stress_test` with `STRESS_LAZY=1`
   demonstrates it on demand).
 
+- **Whatever a query opens it releases, however its reader stops** (the close
+  protocol, architecture §3h). A new resource (a file a reader or writer
+  opens, a directory) registers with `LeakAudit` when it opens and leaves when
+  it closes, and its holder is `AutoCloseable`. A new operator's output closes
+  its inputs (`Closing.over`), an operator that stops reading an input early
+  closes it, a pool task that drains an input does so inside
+  `Closing.draining` or a `try ... finally Closing.close(it)`, and a breaker
+  that fails releases its spill directory. A consumer of an `ExecutedQuery`
+  closes it in a `finally`. `--config=leaks` fails a target whose JVM leaves
+  anything open.
+
 - **A test that depends on a JVM-wide default says so.** The whole suite also
   runs at a batch capacity of 1 and 2 rows, sharded, on one thread and in
   another time zone and locale (`--config=batch1` and the rest,
