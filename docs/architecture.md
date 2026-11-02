@@ -500,8 +500,9 @@ It returns the first `n` rows of a stable sort: rows that sort alike come in
 the order they were read, partition by partition, as `SortExec` returns them
 below `SmallNThreshold` (its heap merge of larger inputs orders such rows by
 the heap). A later row replaces the one at the head only when it sorts strictly
-before it. `LIMIT 0`, a key that reads `RAND()` (the binder computes one in a
-column, so this does not happen from SQL) and a count past `TopNExec.MaxRows`
+before it. `LIMIT 0`, a key that reads `RAND()` (a plain SELECT's binder computes
+one in a column, but over a DISTINCT or a set operation the sort reads it
+itself; plans/perf/15 records what that breaks) and a count past `TopNExec.MaxRows`
 (10,000, with the offset) plan the sort, which can spill, instead.
 
 ### 3. Parallel execution

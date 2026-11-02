@@ -389,7 +389,7 @@ README's [Querying files](../README.md#querying-files-transformer-query).
   (keep the query inside as its written text, a substring between two tokens,
   never JSqlParser's rendering), and a case in `QuerySession.execute`. Run any
   query in it through `withViews`, so it reads views, and with
-  `io.cancel.options`, so Ctrl-C stops it; wrap the batches it pulls in
+  `optionsFor(io.cancel)`, so Ctrl-C stops it and `.spill` applies; wrap the batches it pulls in
   `io.cancel.watch`. The engine's dialect stays as it is: what the CLI reads is
   only what wraps a query.
 - **A flag**: a case in `Cli.parseQuery` (`QueryFlags` for one that takes a
