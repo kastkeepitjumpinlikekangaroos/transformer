@@ -1,0 +1,292 @@
+# From Apache Spark's SQL query tests (https://github.com/apache/spark):
+# sql/core/src/test/resources/sql-tests/inputs/typeCoercion/native/implicitTypeCasts.sql
+# at commit b98123545915a84403c7fa89e8d977ee0b2f5aed, with every answer from
+# the golden file results/typeCoercion/native/implicitTypeCasts.sql.out at that
+# commit, Spark's answer under ANSI mode, never the engine's. Licensed to the
+# Apache Software Foundation under the Apache License, Version 2.0: LICENSE and
+# NOTICE in src/test/slt/spark/ hold the license and Spark's notice. Written by
+# //src/test/scala/com/transformer/slt:spark_import, which docs/extending.md
+# describes; edit the converter, not this file.
+#
+# A string literal beside a number in arithmetic, and a number where text is
+# taken: under ||, LIKE and LENGTH. 30 of the file's 47 statements are here, 27
+# of them records the engine answers otherwise by a rule of the ledger in
+# docs/gotchas.md, marked skipif transformer <id> and, for a rule that is no
+# refusal, followed by its twin, onlyif transformer <id> with the engine's own
+# answer.
+#
+# A statement is as Spark wrote it but where a rewrite cannot change what it
+# means, which its record names: a temporary view of literals as a table of
+# their types holding one row of them; a decimal literal, a number with a point
+# and no exponent or one with Spark's BD suffix, as the CAST of its text to the
+# DECIMAL(p,s) Spark types it as (here a number with a point is a DOUBLE until
+# it meets a DECIMAL). A column is the engine's type of the name Spark's schema
+# gives it. A result is compared as rowsort unless its query ends in ORDER BY,
+# as Spark sorts every result its plan does not.
+#
+# Skipped, by rule:
+#     15  refused-implicit-text
+#      8  refused-text-comparison
+#      3  text-literal-typed
+#      1  division-keeps-type
+#
+# Left out (17 statements), by what they need:
+#      4  Spark's function date()
+#      2  SMALLINT
+#      2  Spark's function timestamp()
+#      2  TIME
+#      1  Spark's function day()
+#      1  Spark's function hour()
+#      1  Spark's function minute()
+#      1  Spark's function month()
+#      1  Spark's function second()
+#      1  Spark's function time_trunc()
+#      1  Spark's function year()
+
+# implicitTypeCasts.sql:20, the temporary view as a table of one row
+statement ok
+CREATE TABLE t (c1 INT)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+# implicitTypeCasts.sql:22
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query BIGINT rowsort
+SELECT 1 + '2' FROM t
+----
+3
+
+onlyif transformer text-literal-typed
+query INT rowsort
+SELECT 1 + '2' FROM t
+----
+3
+
+# implicitTypeCasts.sql:23
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query BIGINT rowsort
+SELECT 1 - '2' FROM t
+----
+-1
+
+onlyif transformer text-literal-typed
+query INT rowsort
+SELECT 1 - '2' FROM t
+----
+-1
+
+# implicitTypeCasts.sql:24
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query BIGINT rowsort
+SELECT 1 * '2' FROM t
+----
+2
+
+onlyif transformer text-literal-typed
+query INT rowsort
+SELECT 1 * '2' FROM t
+----
+2
+
+# implicitTypeCasts.sql:25
+skipif transformer division-keeps-type # / keeps its operands' type
+query DOUBLE rowsort
+SELECT 4 / '2' FROM t
+----
+2.0
+
+onlyif transformer division-keeps-type
+query INT rowsort
+SELECT 4 / '2' FROM t
+----
+2
+
+# implicitTypeCasts.sql:26; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT CAST('1.1' AS DECIMAL(2,1)) + '2' FROM t
+----
+3.1
+
+# implicitTypeCasts.sql:27; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT CAST('1.1' AS DECIMAL(2,1)) - '2' FROM t
+----
+-0.8999999999999999
+
+# implicitTypeCasts.sql:28; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT CAST('1.1' AS DECIMAL(2,1)) * '2' FROM t
+----
+2.2
+
+# implicitTypeCasts.sql:29; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT CAST('4.4' AS DECIMAL(2,1)) / '2' FROM t
+----
+2.2
+
+# implicitTypeCasts.sql:30; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT CAST('1.1' AS DECIMAL(2,1)) + '2.2' FROM t
+----
+3.3000000000000003
+
+# implicitTypeCasts.sql:31; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT CAST('1.1' AS DECIMAL(2,1)) - '2.2' FROM t
+----
+-1.1
+
+# implicitTypeCasts.sql:32; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT CAST('1.1' AS DECIMAL(2,1)) * '2.2' FROM t
+----
+2.4200000000000004
+
+# implicitTypeCasts.sql:33; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT CAST('4.4' AS DECIMAL(2,1)) / '2.2' FROM t
+----
+2.0
+
+# implicitTypeCasts.sql:37
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query STRING rowsort
+SELECT '$' || 1 || '$' FROM t
+----
+$1$
+
+# implicitTypeCasts.sql:38
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query STRING rowsort
+SELECT '$' || cast(1 as bigint) || '$' FROM t
+----
+$1$
+
+# implicitTypeCasts.sql:39; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query STRING rowsort
+SELECT '$' || cast(CAST('1.1' AS DECIMAL(2,1)) as float) || '$' FROM t
+----
+$1.1$
+
+# implicitTypeCasts.sql:40; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query STRING rowsort
+SELECT '$' || cast(CAST('1.1' AS DECIMAL(2,1)) as double) || '$' FROM t
+----
+$1.1$
+
+# implicitTypeCasts.sql:41; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query STRING rowsort
+SELECT '$' || CAST('1.1' AS DECIMAL(2,1)) || '$' FROM t
+----
+$1.1$
+
+# implicitTypeCasts.sql:42; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query STRING rowsort
+SELECT '$' || cast(CAST('1.1' AS DECIMAL(2,1)) as decimal(8,3)) || '$' FROM t
+----
+$1.100$
+
+# implicitTypeCasts.sql:43
+query STRING rowsort
+SELECT '$' || 'abcd' || '$' FROM t
+----
+$abcd$
+
+# implicitTypeCasts.sql:49
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query INT rowsort
+SELECT length(cast(1 as int)) FROM t
+----
+1
+
+# implicitTypeCasts.sql:50
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query INT rowsort
+SELECT length(cast(1 as bigint)) FROM t
+----
+1
+
+# implicitTypeCasts.sql:51; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query INT rowsort
+SELECT length(cast(CAST('1.1' AS DECIMAL(2,1)) as float)) FROM t
+----
+3
+
+# implicitTypeCasts.sql:52; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query INT rowsort
+SELECT length(cast(CAST('1.1' AS DECIMAL(2,1)) as double)) FROM t
+----
+3
+
+# implicitTypeCasts.sql:53; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query INT rowsort
+SELECT length(CAST('1.1' AS DECIMAL(2,1))) FROM t
+----
+3
+
+# implicitTypeCasts.sql:54; each decimal literal written as the CAST to Spark's
+# DECIMAL type for it
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query INT rowsort
+SELECT length(cast(CAST('1.1' AS DECIMAL(2,1)) as decimal(8,3))) FROM t
+----
+5
+
+# implicitTypeCasts.sql:55
+query INT rowsort
+SELECT length('four') FROM t
+----
+4
+
+# implicitTypeCasts.sql:73
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query BOOLEAN rowsort
+select 1 like '%' FROM t
+----
+true
+
+# implicitTypeCasts.sql:75
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query BOOLEAN rowsort
+select '1' like 1 FROM t
+----
+true
+
+# implicitTypeCasts.sql:76
+skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
+query BOOLEAN rowsort
+select '1 ' like 1 FROM t
+----
+false

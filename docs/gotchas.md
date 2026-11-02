@@ -2275,6 +2275,38 @@ in [plans/testing/05](../plans/testing/05-plans-as-sql.md).
   narrowing `CAST` to `FLOAT` that would be 0. `types/float_equality.test`
   pins it.
 
+## What the Spark port left out (2026-11-02, held for the user)
+
+Porting Spark's SQL query tests (`src/test/slt/spark/`, with Spark's ANSI
+answers, [plans/testing/10](../plans/testing/10-spark-typing-ports.md)) took
+three decisions overnight, as recommended and not yet confirmed by the user: a
+query writes `CAST(x AS DECIMAL(p,s))`; an `INT` or `BIGINT` beside a `FLOAT`
+is a `DOUBLE`; and a `BIGINT` beside a `DECIMAL` stays a `DECIMAL(19,0)`
+(`bigint-decimal`). Every other answer the engine gives otherwise is a rule of
+the ledger below, decided before the port. What the scripts leave out:
+
+- **Records that need what the engine lacks** (1,317 statements):
+  `TINYINT`, `SMALLINT`, `BINARY` and `X''` literals, `INTERVAL` (and text
+  minus a date or a timestamp, an `INTERVAL` in Spark), `TIME`, arrays and
+  maps, Spark's functions and operators (`pmod`, `div`, `<=>`, `date()`,
+  `string()` and the rest), the literal suffixes `Y`, `S`, `L` and `D`, a bare
+  `DECIMAL` (Spark's `DECIMAL(10,0)`), and decimalArithmeticOperations.sql's
+  half under `allowPrecisionLoss=false`, which gives a NULL or an error past 38
+  digits where the engine, like Spark by default, gives way on the scale.
+- **Records both engines refuse, for different reasons** (42), held out as
+  findings, since one engine's refusal for another reason is no agreement. In
+  each the engine refuses by a decided rule before it reaches what Spark
+  refuses. 32 are decimalPrecision.sql's timestamps written with the operator
+  under test for their dashes (`cast('2017*12*11 09:30:00.0' as timestamp) *
+  ...`, as Spark's input has them): Spark refuses the operator's types without
+  reading the text, the engine reads a CAST's string literal when the query is
+  bound and refuses the text first. 7 are `cast('1' as boolean) IN (...)` with a
+  number or a date in the list, where Spark refuses the list's types and the
+  engine `'1'` as no BOOLEAN first (`bool-text`). 3 are RANGE frames ordered by
+  a STRING, a BOOLEAN or a TIMESTAMP, where Spark refuses the frame's type and
+  the engine `PARTITION BY 1` first (`window-constant-key`). No answer differs
+  in any of them, and the recommendation is to leave them out as they are.
+
 ## Answers that differ from other engines by design
 
 The engine answers some queries otherwise than another engine does, on

@@ -1,0 +1,240 @@
+# From Apache Spark's SQL query tests (https://github.com/apache/spark):
+# sql/core/src/test/resources/sql-tests/inputs/typeCoercion/native/windowFrameCoercion.sql
+# at commit b98123545915a84403c7fa89e8d977ee0b2f5aed, with every answer from
+# the golden file results/typeCoercion/native/windowFrameCoercion.sql.out at
+# that commit, Spark's answer under ANSI mode, never the engine's. Licensed to
+# the Apache Software Foundation under the Apache License, Version 2.0: LICENSE
+# and NOTICE in src/test/slt/spark/ hold the license and Spark's notice.
+# Written by //src/test/scala/com/transformer/slt:spark_import, which
+# docs/extending.md describes; edit the converter, not this file.
+#
+# A window ordered by a value of each type. 16 of the file's 25 statements are
+# here, 15 of them records the engine answers otherwise by a rule of the ledger
+# in docs/gotchas.md, marked skipif transformer <id> and, for a rule that is no
+# refusal, followed by its twin, onlyif transformer <id> with the engine's own
+# answer.
+#
+# A statement is as Spark wrote it but where a rewrite cannot change what it
+# means, which its record names: a temporary view of literals as a table of
+# their types holding one row of them; a timestamp's text cast to DATE as the
+# DATE literal of its date (Spark's cast drops the time; this engine reads only
+# an ISO date as a DATE, and a test of that cast is no test of its subject). A
+# column is the engine's type of the name Spark's schema gives it. A result is
+# compared as rowsort unless its query ends in ORDER BY, as Spark sorts every
+# result its plan does not. An error under ANSI is a statement error, Spark's
+# error class in its comment and after ---- the engine's own words for the same
+# reason.
+#
+# Skipped, by rule:
+#     15  window-constant-key
+#
+# Left out (9 statements), by what they need:
+#      2  BINARY, and X'' literals
+#      2  SMALLINT
+#      2  TINYINT
+#      3  both engines refuse it, for different reasons, which is no
+#         agreement: each is held for the user (plans/testing/10)
+
+# windowFrameCoercion.sql:18, the temporary view as a table of one row
+statement ok
+CREATE TABLE t (c1 INT)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+# windowFrameCoercion.sql:22
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as int)) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as int)) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:23
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as bigint)) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as bigint)) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:24
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as float)) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as float)) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:25
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as double)) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as double)) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:26
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as decimal(10, 0))) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as decimal(10, 0))) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:27
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as string)) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as string)) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:29
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as boolean)) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as boolean)) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:30
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:31; a timestamp's text cast to DATE written as the
+# DATE literal of its date
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY DATE '2017-12-11') FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY DATE '2017-12-11') FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:35
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as int) DESC RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as int) DESC RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:36
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as bigint) DESC RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as bigint) DESC RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:37
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as float) DESC RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as float) DESC RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:38
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as double) DESC RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as double) DESC RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:39
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as decimal(10, 0)) DESC RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY cast(1 as decimal(10, 0)) DESC RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing
+
+# windowFrameCoercion.sql:44; a timestamp's text cast to DATE written as the
+# DATE literal of its date
+skipif transformer window-constant-key # a window key that reads no column is refused
+query BIGINT rowsort
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY DATE '2017-12-11' DESC RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM t
+----
+1
+
+onlyif transformer window-constant-key
+statement error
+SELECT COUNT(*) OVER (PARTITION BY 1 ORDER BY DATE '2017-12-11' DESC RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM t
+----
+PARTITION BY 1 reads no column, so it partitions nothing

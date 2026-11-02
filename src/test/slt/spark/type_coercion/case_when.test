@@ -1,0 +1,581 @@
+# From Apache Spark's SQL query tests (https://github.com/apache/spark):
+# sql/core/src/test/resources/sql-tests/inputs/typeCoercion/native/caseWhenCoercion.sql
+# at commit b98123545915a84403c7fa89e8d977ee0b2f5aed, with every answer from
+# the golden file results/typeCoercion/native/caseWhenCoercion.sql.out at that
+# commit, Spark's answer under ANSI mode, never the engine's. Licensed to the
+# Apache Software Foundation under the Apache License, Version 2.0: LICENSE and
+# NOTICE in src/test/slt/spark/ hold the license and Spark's notice. Written by
+# //src/test/scala/com/transformer/slt:spark_import, which docs/extending.md
+# describes; edit the converter, not this file.
+#
+# CASE WHEN's two values, of each pair of types. 82 of the file's 145
+# statements are here, 24 of them records the engine answers otherwise by a
+# rule of the ledger in docs/gotchas.md, marked skipif transformer <id> and,
+# for a rule that is no refusal, followed by its twin, onlyif transformer <id>
+# with the engine's own answer.
+#
+# A statement is as Spark wrote it but where a rewrite cannot change what it
+# means, which its record names: a temporary view of literals as a table of
+# their types holding one row of them; a timestamp's text cast to DATE as the
+# DATE literal of its date (Spark's cast drops the time; this engine reads only
+# an ISO date as a DATE, and a test of that cast is no test of its subject). A
+# column is the engine's type of the name Spark's schema gives it. A TIMESTAMP
+# Spark prints in the suite's zone is the instant of that local time in UTC,
+# the engine's zone, which keeps every value here, since no record moves a time
+# between zones. A result is compared as rowsort unless its query ends in ORDER
+# BY, as Spark sorts every result its plan does not. An error under ANSI is a
+# statement error, Spark's error class in its comment and after ---- the
+# engine's own words for the same reason.
+#
+# Skipped, by rule:
+#     16  refused-text-branch
+#      4  refused-decimal-beside-float
+#      2  bigint-decimal
+#      2  refused-date-beside-timestamp
+#
+# Left out (63 statements), by what they need:
+#     23  TINYINT
+#     21  SMALLINT
+#     19  BINARY, and X'' literals
+
+# caseWhenCoercion.sql:18, the temporary view as a table of one row
+statement ok
+CREATE TABLE t (c1 INT)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+# caseWhenCoercion.sql:48
+query INT rowsort
+SELECT CASE WHEN true THEN cast(1 as int) ELSE cast(2 as int) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:49
+query BIGINT rowsort
+SELECT CASE WHEN true THEN cast(1 as int) ELSE cast(2 as bigint) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:50
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as int) ELSE cast(2 as float) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:51
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as int) ELSE cast(2 as double) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:52
+query DECIMAL(10,0) rowsort
+SELECT CASE WHEN true THEN cast(1 as int) ELSE cast(2 as decimal(10, 0)) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:53
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query BIGINT rowsort
+SELECT CASE WHEN true THEN cast(1 as int) ELSE cast(2 as string) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:55; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as int) ELSE cast(2 as boolean) END FROM t
+----
+CASE cannot mix INT and BOOLEAN
+
+# caseWhenCoercion.sql:56; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as int) ELSE cast('2017-12-11 09:30:00.0' as timestamp) END FROM t
+----
+CASE cannot mix INT and TIMESTAMP
+
+# caseWhenCoercion.sql:57; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as int) ELSE DATE '2017-12-11' END FROM t
+----
+CASE cannot mix INT and DATE
+
+# caseWhenCoercion.sql:61
+query BIGINT rowsort
+SELECT CASE WHEN true THEN cast(1 as bigint) ELSE cast(2 as int) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:62
+query BIGINT rowsort
+SELECT CASE WHEN true THEN cast(1 as bigint) ELSE cast(2 as bigint) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:63
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as bigint) ELSE cast(2 as float) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:64
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as bigint) ELSE cast(2 as double) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:65
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(20,0) rowsort
+SELECT CASE WHEN true THEN cast(1 as bigint) ELSE cast(2 as decimal(10, 0)) END FROM t
+----
+1
+
+onlyif transformer bigint-decimal
+query DECIMAL(19,0) rowsort
+SELECT CASE WHEN true THEN cast(1 as bigint) ELSE cast(2 as decimal(10, 0)) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:66
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query BIGINT rowsort
+SELECT CASE WHEN true THEN cast(1 as bigint) ELSE cast(2 as string) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:68; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as bigint) ELSE cast(2 as boolean) END FROM t
+----
+CASE cannot mix LONG and BOOLEAN
+
+# caseWhenCoercion.sql:69; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as bigint) ELSE cast('2017-12-11 09:30:00.0' as timestamp) END FROM t
+----
+CASE cannot mix LONG and TIMESTAMP
+
+# caseWhenCoercion.sql:70; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as bigint) ELSE DATE '2017-12-11' END FROM t
+----
+CASE cannot mix LONG and DATE
+
+# caseWhenCoercion.sql:74
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as float) ELSE cast(2 as int) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:75
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as float) ELSE cast(2 as bigint) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:76
+query FLOAT rowsort
+SELECT CASE WHEN true THEN cast(1 as float) ELSE cast(2 as float) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:77
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as float) ELSE cast(2 as double) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:78
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as float) ELSE cast(2 as decimal(10, 0)) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:79
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as float) ELSE cast(2 as string) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:81; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as float) ELSE cast(2 as boolean) END FROM t
+----
+CASE cannot mix FLOAT and BOOLEAN
+
+# caseWhenCoercion.sql:82; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as float) ELSE cast('2017-12-11 09:30:00.0' as timestamp) END FROM t
+----
+CASE cannot mix FLOAT and TIMESTAMP
+
+# caseWhenCoercion.sql:83; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as float) ELSE DATE '2017-12-11' END FROM t
+----
+CASE cannot mix FLOAT and DATE
+
+# caseWhenCoercion.sql:87
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as double) ELSE cast(2 as int) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:88
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as double) ELSE cast(2 as bigint) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:89
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as double) ELSE cast(2 as float) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:90
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as double) ELSE cast(2 as double) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:91
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as double) ELSE cast(2 as decimal(10, 0)) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:92
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as double) ELSE cast(2 as string) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:94; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as double) ELSE cast(2 as boolean) END FROM t
+----
+CASE cannot mix DOUBLE and BOOLEAN
+
+# caseWhenCoercion.sql:95; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as double) ELSE cast('2017-12-11 09:30:00.0' as timestamp) END FROM t
+----
+CASE cannot mix DOUBLE and TIMESTAMP
+
+# caseWhenCoercion.sql:96; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as double) ELSE DATE '2017-12-11' END FROM t
+----
+CASE cannot mix DOUBLE and DATE
+
+# caseWhenCoercion.sql:100
+query DECIMAL(10,0) rowsort
+SELECT CASE WHEN true THEN cast(1 as decimal(10, 0)) ELSE cast(2 as int) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:101
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(20,0) rowsort
+SELECT CASE WHEN true THEN cast(1 as decimal(10, 0)) ELSE cast(2 as bigint) END FROM t
+----
+1
+
+onlyif transformer bigint-decimal
+query DECIMAL(19,0) rowsort
+SELECT CASE WHEN true THEN cast(1 as decimal(10, 0)) ELSE cast(2 as bigint) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:102
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as decimal(10, 0)) ELSE cast(2 as float) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:103
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as decimal(10, 0)) ELSE cast(2 as double) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:104
+query DECIMAL(10,0) rowsort
+SELECT CASE WHEN true THEN cast(1 as decimal(10, 0)) ELSE cast(2 as decimal(10, 0)) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:105
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as decimal(10, 0)) ELSE cast(2 as string) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:107; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as decimal(10, 0)) ELSE cast(2 as boolean) END FROM t
+----
+CASE cannot mix DECIMAL(10,0) and BOOLEAN
+
+# caseWhenCoercion.sql:108; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as decimal(10, 0)) ELSE cast('2017-12-11 09:30:00.0' as timestamp) END FROM t
+----
+CASE cannot mix DECIMAL(10,0) and TIMESTAMP
+
+# caseWhenCoercion.sql:109; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as decimal(10, 0)) ELSE DATE '2017-12-11' END FROM t
+----
+CASE cannot mix DECIMAL(10,0) and DATE
+
+# caseWhenCoercion.sql:113
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query BIGINT rowsort
+SELECT CASE WHEN true THEN cast(1 as string) ELSE cast(2 as int) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:114
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query BIGINT rowsort
+SELECT CASE WHEN true THEN cast(1 as string) ELSE cast(2 as bigint) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:115
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as string) ELSE cast(2 as float) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:116
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as string) ELSE cast(2 as double) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:117
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DOUBLE rowsort
+SELECT CASE WHEN true THEN cast(1 as string) ELSE cast(2 as decimal(10, 0)) END FROM t
+----
+1.0
+
+# caseWhenCoercion.sql:118
+query STRING rowsort
+SELECT CASE WHEN true THEN cast(1 as string) ELSE cast(2 as string) END FROM t
+----
+1
+
+# caseWhenCoercion.sql:120
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query BOOLEAN rowsort
+SELECT CASE WHEN true THEN cast(1 as string) ELSE cast(2 as boolean) END FROM t
+----
+true
+
+# caseWhenCoercion.sql:121; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+statement error
+SELECT CASE WHEN true THEN cast(1 as string) ELSE cast('2017-12-11 09:30:00.0' as timestamp) END FROM t
+
+# caseWhenCoercion.sql:122; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+statement error
+SELECT CASE WHEN true THEN cast(1 as string) ELSE DATE '2017-12-11' END FROM t
+
+# caseWhenCoercion.sql:139; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as boolean) ELSE cast(2 as int) END FROM t
+----
+CASE cannot mix BOOLEAN and INT
+
+# caseWhenCoercion.sql:140; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as boolean) ELSE cast(2 as bigint) END FROM t
+----
+CASE cannot mix BOOLEAN and LONG
+
+# caseWhenCoercion.sql:141; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as boolean) ELSE cast(2 as float) END FROM t
+----
+CASE cannot mix BOOLEAN and FLOAT
+
+# caseWhenCoercion.sql:142; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as boolean) ELSE cast(2 as double) END FROM t
+----
+CASE cannot mix BOOLEAN and DOUBLE
+
+# caseWhenCoercion.sql:143; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as boolean) ELSE cast(2 as decimal(10, 0)) END FROM t
+----
+CASE cannot mix DECIMAL(10,0) and BOOLEAN
+
+# caseWhenCoercion.sql:144
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query BOOLEAN rowsort
+SELECT CASE WHEN true THEN cast(1 as boolean) ELSE cast(2 as string) END FROM t
+----
+true
+
+# caseWhenCoercion.sql:146
+query BOOLEAN rowsort
+SELECT CASE WHEN true THEN cast(1 as boolean) ELSE cast(2 as boolean) END FROM t
+----
+true
+
+# caseWhenCoercion.sql:147; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as boolean) ELSE cast('2017-12-11 09:30:00.0' as timestamp) END FROM t
+----
+CASE cannot mix BOOLEAN and TIMESTAMP
+
+# caseWhenCoercion.sql:148; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast(1 as boolean) ELSE DATE '2017-12-11' END FROM t
+----
+CASE cannot mix BOOLEAN and DATE
+
+# caseWhenCoercion.sql:152; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast('2017-12-12 09:30:00.0' as timestamp) ELSE cast(2 as int) END FROM t
+----
+CASE cannot mix TIMESTAMP and INT
+
+# caseWhenCoercion.sql:153; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast('2017-12-12 09:30:00.0' as timestamp) ELSE cast(2 as bigint) END FROM t
+----
+CASE cannot mix TIMESTAMP and LONG
+
+# caseWhenCoercion.sql:154; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast('2017-12-12 09:30:00.0' as timestamp) ELSE cast(2 as float) END FROM t
+----
+CASE cannot mix TIMESTAMP and FLOAT
+
+# caseWhenCoercion.sql:155; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast('2017-12-12 09:30:00.0' as timestamp) ELSE cast(2 as double) END FROM t
+----
+CASE cannot mix TIMESTAMP and DOUBLE
+
+# caseWhenCoercion.sql:156; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast('2017-12-12 09:30:00.0' as timestamp) ELSE cast(2 as decimal(10, 0)) END FROM t
+----
+CASE cannot mix DECIMAL(10,0) and TIMESTAMP
+
+# caseWhenCoercion.sql:157
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query TIMESTAMP rowsort
+SELECT CASE WHEN true THEN cast('2017-12-12 09:30:00.0' as timestamp) ELSE cast(2 as string) END FROM t
+----
+2017-12-12T09:30:00Z
+
+# caseWhenCoercion.sql:159; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN cast('2017-12-12 09:30:00.0' as timestamp) ELSE cast(2 as boolean) END FROM t
+----
+CASE cannot mix TIMESTAMP and BOOLEAN
+
+# caseWhenCoercion.sql:160
+query TIMESTAMP rowsort
+SELECT CASE WHEN true THEN cast('2017-12-12 09:30:00.0' as timestamp) ELSE cast('2017-12-11 09:30:00.0' as timestamp) END FROM t
+----
+2017-12-12T09:30:00Z
+
+# caseWhenCoercion.sql:161; a timestamp's text cast to DATE written as the DATE
+# literal of its date
+skipif transformer refused-date-beside-timestamp # a DATE beside a TIMESTAMP
+query TIMESTAMP rowsort
+SELECT CASE WHEN true THEN cast('2017-12-12 09:30:00.0' as timestamp) ELSE DATE '2017-12-11' END FROM t
+----
+2017-12-12T09:30:00Z
+
+# caseWhenCoercion.sql:165; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN DATE '2017-12-12' ELSE cast(2 as int) END FROM t
+----
+CASE cannot mix DATE and INT
+
+# caseWhenCoercion.sql:166; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN DATE '2017-12-12' ELSE cast(2 as bigint) END FROM t
+----
+CASE cannot mix DATE and LONG
+
+# caseWhenCoercion.sql:167; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN DATE '2017-12-12' ELSE cast(2 as float) END FROM t
+----
+CASE cannot mix DATE and FLOAT
+
+# caseWhenCoercion.sql:168; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN DATE '2017-12-12' ELSE cast(2 as double) END FROM t
+----
+CASE cannot mix DATE and DOUBLE
+
+# caseWhenCoercion.sql:169; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN DATE '2017-12-12' ELSE cast(2 as decimal(10, 0)) END FROM t
+----
+CASE cannot mix DECIMAL(10,0) and DATE
+
+# caseWhenCoercion.sql:170; a timestamp's text cast to DATE written as the DATE
+# literal of its date
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DATE rowsort
+SELECT CASE WHEN true THEN DATE '2017-12-12' ELSE cast(2 as string) END FROM t
+----
+2017-12-12
+
+# caseWhenCoercion.sql:172; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT CASE WHEN true THEN DATE '2017-12-12' ELSE cast(2 as boolean) END FROM t
+----
+CASE cannot mix DATE and BOOLEAN
+
+# caseWhenCoercion.sql:173; a timestamp's text cast to DATE written as the DATE
+# literal of its date
+skipif transformer refused-date-beside-timestamp # a DATE beside a TIMESTAMP
+query TIMESTAMP rowsort
+SELECT CASE WHEN true THEN DATE '2017-12-12' ELSE cast('2017-12-11 09:30:00.0' as timestamp) END FROM t
+----
+2017-12-12T00:00:00Z
+
+# caseWhenCoercion.sql:174; a timestamp's text cast to DATE written as the DATE
+# literal of its date
+query DATE rowsort
+SELECT CASE WHEN true THEN DATE '2017-12-12' ELSE DATE '2017-12-11' END FROM t
+----
+2017-12-12

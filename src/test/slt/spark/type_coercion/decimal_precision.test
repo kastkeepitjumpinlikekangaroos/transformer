@@ -1,0 +1,4466 @@
+# From Apache Spark's SQL query tests (https://github.com/apache/spark):
+# sql/core/src/test/resources/sql-tests/inputs/typeCoercion/native/decimalPrecision.sql
+# at commit b98123545915a84403c7fa89e8d977ee0b2f5aed, with every answer from
+# the golden file results/typeCoercion/native/decimalPrecision.sql.out at that
+# commit, Spark's answer under ANSI mode, never the engine's. Licensed to the
+# Apache Software Foundation under the Apache License, Version 2.0: LICENSE and
+# NOTICE in src/test/slt/spark/ hold the license and Spark's notice. Written by
+# //src/test/scala/com/transformer/slt:spark_import, which docs/extending.md
+# describes; edit the converter, not this file.
+#
+# Every operator (+ - * / % = <> < <= > >=) of a value of each type beside a
+# DECIMAL at four precisions. 673 of the file's 1145 statements are here, 151
+# of them records the engine answers otherwise by a rule of the ledger in
+# docs/gotchas.md, marked skipif transformer <id> and, for a rule that is no
+# refusal, followed by its twin, onlyif transformer <id> with the engine's own
+# answer.
+#
+# A statement is as Spark wrote it but where a rewrite cannot change what it
+# means, which its record names: a temporary view of literals as a table of
+# their types holding one row of them; a timestamp's text cast to DATE as the
+# DATE literal of its date (Spark's cast drops the time; this engine reads only
+# an ISO date as a DATE, and a test of that cast is no test of its subject). A
+# column is the engine's type of the name Spark's schema gives it. A result is
+# compared as rowsort unless its query ends in ORDER BY, as Spark sorts every
+# result its plan does not. An error under ANSI is a statement error, Spark's
+# error class in its comment and after ---- the engine's own words for the same
+# reason.
+#
+# Skipped, by rule:
+#     80  refused-decimal-beside-float
+#     27  bigint-decimal
+#     24  refused-text-comparison
+#     20  refused-text-arithmetic
+#
+# Left out (472 statements), by what they need:
+#    104  BINARY, and X'' literals
+#    104  SMALLINT
+#    104  TINYINT
+#     64  Spark's function pmod()
+#     64  Spark's operator <=>
+#     32  both engines refuse it, for different reasons, which is no
+#         agreement: each is held for the user (plans/testing/10)
+
+# decimalPrecision.sql:18, the temporary view as a table of one row
+statement ok
+CREATE TABLE t (c1 INT)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+# decimalPrecision.sql:30
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as int) + cast(1 as decimal(3, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:31
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as int) + cast(1 as decimal(5, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:32
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as int) + cast(1 as decimal(10, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:33
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as int) + cast(1 as decimal(20, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:35
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as bigint) + cast(1 as decimal(3, 0)) FROM t
+----
+2
+
+onlyif transformer bigint-decimal
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as bigint) + cast(1 as decimal(3, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:36
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as bigint) + cast(1 as decimal(5, 0)) FROM t
+----
+2
+
+onlyif transformer bigint-decimal
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as bigint) + cast(1 as decimal(5, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:37
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as bigint) + cast(1 as decimal(10, 0)) FROM t
+----
+2
+
+onlyif transformer bigint-decimal
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as bigint) + cast(1 as decimal(10, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:38
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as bigint) + cast(1 as decimal(20, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:40
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) + cast(1 as decimal(3, 0)) FROM t
+----
+2.0
+
+# decimalPrecision.sql:41
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) + cast(1 as decimal(5, 0)) FROM t
+----
+2.0
+
+# decimalPrecision.sql:42
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) + cast(1 as decimal(10, 0)) FROM t
+----
+2.0
+
+# decimalPrecision.sql:43
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) + cast(1 as decimal(20, 0)) FROM t
+----
+2.0
+
+# decimalPrecision.sql:45
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) + cast(1 as decimal(3, 0)) FROM t
+----
+2.0
+
+# decimalPrecision.sql:46
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) + cast(1 as decimal(5, 0)) FROM t
+----
+2.0
+
+# decimalPrecision.sql:47
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) + cast(1 as decimal(10, 0)) FROM t
+----
+2.0
+
+# decimalPrecision.sql:48
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) + cast(1 as decimal(20, 0)) FROM t
+----
+2.0
+
+# decimalPrecision.sql:50
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(10, 0)) + cast(1 as decimal(3, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:51
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(10, 0)) + cast(1 as decimal(5, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:52
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(10, 0)) + cast(1 as decimal(10, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:53
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(10, 0)) + cast(1 as decimal(20, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:60; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) + cast(1 as decimal(3, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:61; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) + cast(1 as decimal(5, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:62; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) + cast(1 as decimal(10, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:63; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) + cast(1 as decimal(20, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:65; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT DATE '2017-12-11' + cast(1 as decimal(3, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:66; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT DATE '2017-12-11' + cast(1 as decimal(5, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:67; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT DATE '2017-12-11' + cast(1 as decimal(10, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:68; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT DATE '2017-12-11' + cast(1 as decimal(20, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:80
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(3, 0))  + cast(1 as int) FROM t
+----
+2
+
+# decimalPrecision.sql:81
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(5, 0))  + cast(1 as int) FROM t
+----
+2
+
+# decimalPrecision.sql:82
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(10, 0)) + cast(1 as int) FROM t
+----
+2
+
+# decimalPrecision.sql:83
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(20, 0)) + cast(1 as int) FROM t
+----
+2
+
+# decimalPrecision.sql:85
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(3, 0))  + cast(1 as bigint) FROM t
+----
+2
+
+onlyif transformer bigint-decimal
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as decimal(3, 0))  + cast(1 as bigint) FROM t
+----
+2
+
+# decimalPrecision.sql:86
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(5, 0))  + cast(1 as bigint) FROM t
+----
+2
+
+onlyif transformer bigint-decimal
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as decimal(5, 0))  + cast(1 as bigint) FROM t
+----
+2
+
+# decimalPrecision.sql:87
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(10, 0)) + cast(1 as bigint) FROM t
+----
+2
+
+onlyif transformer bigint-decimal
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as decimal(10, 0)) + cast(1 as bigint) FROM t
+----
+2
+
+# decimalPrecision.sql:88
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(20, 0)) + cast(1 as bigint) FROM t
+----
+2
+
+# decimalPrecision.sql:90
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  + cast(1 as float) FROM t
+----
+2.0
+
+# decimalPrecision.sql:91
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  + cast(1 as float) FROM t
+----
+2.0
+
+# decimalPrecision.sql:92
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) + cast(1 as float) FROM t
+----
+2.0
+
+# decimalPrecision.sql:93
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) + cast(1 as float) FROM t
+----
+2.0
+
+# decimalPrecision.sql:95
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  + cast(1 as double) FROM t
+----
+2.0
+
+# decimalPrecision.sql:96
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  + cast(1 as double) FROM t
+----
+2.0
+
+# decimalPrecision.sql:97
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) + cast(1 as double) FROM t
+----
+2.0
+
+# decimalPrecision.sql:98
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) + cast(1 as double) FROM t
+----
+2.0
+
+# decimalPrecision.sql:100
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(3, 0))  + cast(1 as decimal(10, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:101
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(5, 0))  + cast(1 as decimal(10, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:102
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(10, 0)) + cast(1 as decimal(10, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:103
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(20, 0)) + cast(1 as decimal(10, 0)) FROM t
+----
+2
+
+# decimalPrecision.sql:105
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  + cast(1 as string) FROM t
+----
+2.0
+
+# decimalPrecision.sql:106
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  + cast(1 as string) FROM t
+----
+2.0
+
+# decimalPrecision.sql:107
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) + cast(1 as string) FROM t
+----
+2.0
+
+# decimalPrecision.sql:108
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) + cast(1 as string) FROM t
+----
+2.0
+
+# decimalPrecision.sql:115; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  + cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:116; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  + cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:117; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) + cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:118; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) + cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:120; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  + cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:121; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  + cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:122; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) + cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:123; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) + cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:125; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast(1 as decimal(3, 0))  + DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:126; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast(1 as decimal(5, 0))  + DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:127; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast(1 as decimal(10, 0)) + DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:128; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast(1 as decimal(20, 0)) + DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:140
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as int) - cast(1 as decimal(3, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:141
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as int) - cast(1 as decimal(5, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:142
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as int) - cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:143
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as int) - cast(1 as decimal(20, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:145
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as bigint) - cast(1 as decimal(3, 0)) FROM t
+----
+0
+
+onlyif transformer bigint-decimal
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as bigint) - cast(1 as decimal(3, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:146
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as bigint) - cast(1 as decimal(5, 0)) FROM t
+----
+0
+
+onlyif transformer bigint-decimal
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as bigint) - cast(1 as decimal(5, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:147
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as bigint) - cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+onlyif transformer bigint-decimal
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as bigint) - cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:148
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as bigint) - cast(1 as decimal(20, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:150
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) - cast(1 as decimal(3, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:151
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) - cast(1 as decimal(5, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:152
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) - cast(1 as decimal(10, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:153
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) - cast(1 as decimal(20, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:155
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) - cast(1 as decimal(3, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:156
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) - cast(1 as decimal(5, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:157
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) - cast(1 as decimal(10, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:158
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) - cast(1 as decimal(20, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:160
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(10, 0)) - cast(1 as decimal(3, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:161
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(10, 0)) - cast(1 as decimal(5, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:162
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(10, 0)) - cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:163
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(10, 0)) - cast(1 as decimal(20, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:170; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) - cast(1 as decimal(3, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:171; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) - cast(1 as decimal(5, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:172; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) - cast(1 as decimal(10, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:173; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) - cast(1 as decimal(20, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:175; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT DATE '2017-12-11' - cast(1 as decimal(3, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:176; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT DATE '2017-12-11' - cast(1 as decimal(5, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:177; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT DATE '2017-12-11' - cast(1 as decimal(10, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:178; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT DATE '2017-12-11' - cast(1 as decimal(20, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:190
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(3, 0))  - cast(1 as int) FROM t
+----
+0
+
+# decimalPrecision.sql:191
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(5, 0))  - cast(1 as int) FROM t
+----
+0
+
+# decimalPrecision.sql:192
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(10, 0)) - cast(1 as int) FROM t
+----
+0
+
+# decimalPrecision.sql:193
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(20, 0)) - cast(1 as int) FROM t
+----
+0
+
+# decimalPrecision.sql:195
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(3, 0))  - cast(1 as bigint) FROM t
+----
+0
+
+onlyif transformer bigint-decimal
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as decimal(3, 0))  - cast(1 as bigint) FROM t
+----
+0
+
+# decimalPrecision.sql:196
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(5, 0))  - cast(1 as bigint) FROM t
+----
+0
+
+onlyif transformer bigint-decimal
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as decimal(5, 0))  - cast(1 as bigint) FROM t
+----
+0
+
+# decimalPrecision.sql:197
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(10, 0)) - cast(1 as bigint) FROM t
+----
+0
+
+onlyif transformer bigint-decimal
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as decimal(10, 0)) - cast(1 as bigint) FROM t
+----
+0
+
+# decimalPrecision.sql:198
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(20, 0)) - cast(1 as bigint) FROM t
+----
+0
+
+# decimalPrecision.sql:200
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  - cast(1 as float) FROM t
+----
+0.0
+
+# decimalPrecision.sql:201
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  - cast(1 as float) FROM t
+----
+0.0
+
+# decimalPrecision.sql:202
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) - cast(1 as float) FROM t
+----
+0.0
+
+# decimalPrecision.sql:203
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) - cast(1 as float) FROM t
+----
+0.0
+
+# decimalPrecision.sql:205
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  - cast(1 as double) FROM t
+----
+0.0
+
+# decimalPrecision.sql:206
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  - cast(1 as double) FROM t
+----
+0.0
+
+# decimalPrecision.sql:207
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) - cast(1 as double) FROM t
+----
+0.0
+
+# decimalPrecision.sql:208
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) - cast(1 as double) FROM t
+----
+0.0
+
+# decimalPrecision.sql:210
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(3, 0))  - cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:211
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(5, 0))  - cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:212
+query DECIMAL(11,0) rowsort
+SELECT cast(1 as decimal(10, 0)) - cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:213
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(20, 0)) - cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:215
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  - cast(1 as string) FROM t
+----
+0.0
+
+# decimalPrecision.sql:216
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  - cast(1 as string) FROM t
+----
+0.0
+
+# decimalPrecision.sql:217
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) - cast(1 as string) FROM t
+----
+0.0
+
+# decimalPrecision.sql:218
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) - cast(1 as string) FROM t
+----
+0.0
+
+# decimalPrecision.sql:225; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  - cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:226; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  - cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:227; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) - cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:228; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) - cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:230; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast(1 as decimal(3, 0))  - cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:231; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast(1 as decimal(5, 0))  - cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:232; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast(1 as decimal(10, 0)) - cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:233; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast(1 as decimal(20, 0)) - cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:235; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast(1 as decimal(3, 0))  - DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:236; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast(1 as decimal(5, 0))  - DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:237; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast(1 as decimal(10, 0)) - DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:238; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT cast(1 as decimal(20, 0)) - DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:250
+query DECIMAL(14,0) rowsort
+SELECT cast(1 as int) * cast(1 as decimal(3, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:251
+query DECIMAL(16,0) rowsort
+SELECT cast(1 as int) * cast(1 as decimal(5, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:252
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as int) * cast(1 as decimal(10, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:253
+query DECIMAL(31,0) rowsort
+SELECT cast(1 as int) * cast(1 as decimal(20, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:255
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(24,0) rowsort
+SELECT cast(1 as bigint) * cast(1 as decimal(3, 0)) FROM t
+----
+1
+
+onlyif transformer bigint-decimal
+query DECIMAL(23,0) rowsort
+SELECT cast(1 as bigint) * cast(1 as decimal(3, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:256
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(26,0) rowsort
+SELECT cast(1 as bigint) * cast(1 as decimal(5, 0)) FROM t
+----
+1
+
+onlyif transformer bigint-decimal
+query DECIMAL(25,0) rowsort
+SELECT cast(1 as bigint) * cast(1 as decimal(5, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:257
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(31,0) rowsort
+SELECT cast(1 as bigint) * cast(1 as decimal(10, 0)) FROM t
+----
+1
+
+onlyif transformer bigint-decimal
+query DECIMAL(30,0) rowsort
+SELECT cast(1 as bigint) * cast(1 as decimal(10, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:258
+query DECIMAL(38,0) rowsort
+SELECT cast(1 as bigint) * cast(1 as decimal(20, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:260
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) * cast(1 as decimal(3, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:261
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) * cast(1 as decimal(5, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:262
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) * cast(1 as decimal(10, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:263
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) * cast(1 as decimal(20, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:265
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) * cast(1 as decimal(3, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:266
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) * cast(1 as decimal(5, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:267
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) * cast(1 as decimal(10, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:268
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) * cast(1 as decimal(20, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:270
+query DECIMAL(14,0) rowsort
+SELECT cast(1 as decimal(10, 0)) * cast(1 as decimal(3, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:271
+query DECIMAL(16,0) rowsort
+SELECT cast(1 as decimal(10, 0)) * cast(1 as decimal(5, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:272
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(10, 0)) * cast(1 as decimal(10, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:273
+query DECIMAL(31,0) rowsort
+SELECT cast(1 as decimal(10, 0)) * cast(1 as decimal(20, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:300
+query DECIMAL(14,0) rowsort
+SELECT cast(1 as decimal(3, 0))  * cast(1 as int) FROM t
+----
+1
+
+# decimalPrecision.sql:301
+query DECIMAL(16,0) rowsort
+SELECT cast(1 as decimal(5, 0))  * cast(1 as int) FROM t
+----
+1
+
+# decimalPrecision.sql:302
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(10, 0)) * cast(1 as int) FROM t
+----
+1
+
+# decimalPrecision.sql:303
+query DECIMAL(31,0) rowsort
+SELECT cast(1 as decimal(20, 0)) * cast(1 as int) FROM t
+----
+1
+
+# decimalPrecision.sql:305
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(24,0) rowsort
+SELECT cast(1 as decimal(3, 0))  * cast(1 as bigint) FROM t
+----
+1
+
+onlyif transformer bigint-decimal
+query DECIMAL(23,0) rowsort
+SELECT cast(1 as decimal(3, 0))  * cast(1 as bigint) FROM t
+----
+1
+
+# decimalPrecision.sql:306
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(26,0) rowsort
+SELECT cast(1 as decimal(5, 0))  * cast(1 as bigint) FROM t
+----
+1
+
+onlyif transformer bigint-decimal
+query DECIMAL(25,0) rowsort
+SELECT cast(1 as decimal(5, 0))  * cast(1 as bigint) FROM t
+----
+1
+
+# decimalPrecision.sql:307
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(31,0) rowsort
+SELECT cast(1 as decimal(10, 0)) * cast(1 as bigint) FROM t
+----
+1
+
+onlyif transformer bigint-decimal
+query DECIMAL(30,0) rowsort
+SELECT cast(1 as decimal(10, 0)) * cast(1 as bigint) FROM t
+----
+1
+
+# decimalPrecision.sql:308
+query DECIMAL(38,0) rowsort
+SELECT cast(1 as decimal(20, 0)) * cast(1 as bigint) FROM t
+----
+1
+
+# decimalPrecision.sql:310
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  * cast(1 as float) FROM t
+----
+1.0
+
+# decimalPrecision.sql:311
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  * cast(1 as float) FROM t
+----
+1.0
+
+# decimalPrecision.sql:312
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) * cast(1 as float) FROM t
+----
+1.0
+
+# decimalPrecision.sql:313
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) * cast(1 as float) FROM t
+----
+1.0
+
+# decimalPrecision.sql:315
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  * cast(1 as double) FROM t
+----
+1.0
+
+# decimalPrecision.sql:316
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  * cast(1 as double) FROM t
+----
+1.0
+
+# decimalPrecision.sql:317
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) * cast(1 as double) FROM t
+----
+1.0
+
+# decimalPrecision.sql:318
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) * cast(1 as double) FROM t
+----
+1.0
+
+# decimalPrecision.sql:320
+query DECIMAL(14,0) rowsort
+SELECT cast(1 as decimal(3, 0))  * cast(1 as decimal(10, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:321
+query DECIMAL(16,0) rowsort
+SELECT cast(1 as decimal(5, 0))  * cast(1 as decimal(10, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:322
+query DECIMAL(21,0) rowsort
+SELECT cast(1 as decimal(10, 0)) * cast(1 as decimal(10, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:323
+query DECIMAL(31,0) rowsort
+SELECT cast(1 as decimal(20, 0)) * cast(1 as decimal(10, 0)) FROM t
+----
+1
+
+# decimalPrecision.sql:325
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  * cast(1 as string) FROM t
+----
+1.0
+
+# decimalPrecision.sql:326
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  * cast(1 as string) FROM t
+----
+1.0
+
+# decimalPrecision.sql:327
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) * cast(1 as string) FROM t
+----
+1.0
+
+# decimalPrecision.sql:328
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) * cast(1 as string) FROM t
+----
+1.0
+
+# decimalPrecision.sql:335; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  * cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:336; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  * cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:337; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) * cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:338; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) * cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:360
+query DECIMAL(16,6) rowsort
+SELECT cast(1 as int) / cast(1 as decimal(3, 0)) FROM t
+----
+1.000000
+
+# decimalPrecision.sql:361
+query DECIMAL(16,6) rowsort
+SELECT cast(1 as int) / cast(1 as decimal(5, 0)) FROM t
+----
+1.000000
+
+# decimalPrecision.sql:362
+query DECIMAL(21,11) rowsort
+SELECT cast(1 as int) / cast(1 as decimal(10, 0)) FROM t
+----
+1.00000000000
+
+# decimalPrecision.sql:363
+query DECIMAL(31,21) rowsort
+SELECT cast(1 as int) / cast(1 as decimal(20, 0)) FROM t
+----
+1.000000000000000000000
+
+# decimalPrecision.sql:365
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(26,6) rowsort
+SELECT cast(1 as bigint) / cast(1 as decimal(3, 0)) FROM t
+----
+1.000000
+
+onlyif transformer bigint-decimal
+query DECIMAL(25,6) rowsort
+SELECT cast(1 as bigint) / cast(1 as decimal(3, 0)) FROM t
+----
+1.000000
+
+# decimalPrecision.sql:366
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(26,6) rowsort
+SELECT cast(1 as bigint) / cast(1 as decimal(5, 0)) FROM t
+----
+1.000000
+
+onlyif transformer bigint-decimal
+query DECIMAL(25,6) rowsort
+SELECT cast(1 as bigint) / cast(1 as decimal(5, 0)) FROM t
+----
+1.000000
+
+# decimalPrecision.sql:367
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(31,11) rowsort
+SELECT cast(1 as bigint) / cast(1 as decimal(10, 0)) FROM t
+----
+1.00000000000
+
+onlyif transformer bigint-decimal
+query DECIMAL(30,11) rowsort
+SELECT cast(1 as bigint) / cast(1 as decimal(10, 0)) FROM t
+----
+1.00000000000
+
+# decimalPrecision.sql:368
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(38,18) rowsort
+SELECT cast(1 as bigint) / cast(1 as decimal(20, 0)) FROM t
+----
+1.000000000000000000
+
+onlyif transformer bigint-decimal
+query DECIMAL(38,19) rowsort
+SELECT cast(1 as bigint) / cast(1 as decimal(20, 0)) FROM t
+----
+1.0000000000000000000
+
+# decimalPrecision.sql:370
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) / cast(1 as decimal(3, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:371
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) / cast(1 as decimal(5, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:372
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) / cast(1 as decimal(10, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:373
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) / cast(1 as decimal(20, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:375
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) / cast(1 as decimal(3, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:376
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) / cast(1 as decimal(5, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:377
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) / cast(1 as decimal(10, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:378
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) / cast(1 as decimal(20, 0)) FROM t
+----
+1.0
+
+# decimalPrecision.sql:380
+query DECIMAL(16,6) rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as decimal(3, 0)) FROM t
+----
+1.000000
+
+# decimalPrecision.sql:381
+query DECIMAL(16,6) rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as decimal(5, 0)) FROM t
+----
+1.000000
+
+# decimalPrecision.sql:382
+query DECIMAL(21,11) rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as decimal(10, 0)) FROM t
+----
+1.00000000000
+
+# decimalPrecision.sql:383
+query DECIMAL(31,21) rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as decimal(20, 0)) FROM t
+----
+1.000000000000000000000
+
+# decimalPrecision.sql:410
+query DECIMAL(14,11) rowsort
+SELECT cast(1 as decimal(3, 0))  / cast(1 as int) FROM t
+----
+1.00000000000
+
+# decimalPrecision.sql:411
+query DECIMAL(16,11) rowsort
+SELECT cast(1 as decimal(5, 0))  / cast(1 as int) FROM t
+----
+1.00000000000
+
+# decimalPrecision.sql:412
+query DECIMAL(21,11) rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as int) FROM t
+----
+1.00000000000
+
+# decimalPrecision.sql:413
+query DECIMAL(31,11) rowsort
+SELECT cast(1 as decimal(20, 0)) / cast(1 as int) FROM t
+----
+1.00000000000
+
+# decimalPrecision.sql:415
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(24,21) rowsort
+SELECT cast(1 as decimal(3, 0))  / cast(1 as bigint) FROM t
+----
+1.000000000000000000000
+
+onlyif transformer bigint-decimal
+query DECIMAL(23,20) rowsort
+SELECT cast(1 as decimal(3, 0))  / cast(1 as bigint) FROM t
+----
+1.00000000000000000000
+
+# decimalPrecision.sql:416
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(26,21) rowsort
+SELECT cast(1 as decimal(5, 0))  / cast(1 as bigint) FROM t
+----
+1.000000000000000000000
+
+onlyif transformer bigint-decimal
+query DECIMAL(25,20) rowsort
+SELECT cast(1 as decimal(5, 0))  / cast(1 as bigint) FROM t
+----
+1.00000000000000000000
+
+# decimalPrecision.sql:417
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(31,21) rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as bigint) FROM t
+----
+1.000000000000000000000
+
+onlyif transformer bigint-decimal
+query DECIMAL(30,20) rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as bigint) FROM t
+----
+1.00000000000000000000
+
+# decimalPrecision.sql:418
+query DECIMAL(38,18) rowsort
+SELECT cast(1 as decimal(20, 0)) / cast(1 as bigint) FROM t
+----
+1.000000000000000000
+
+# decimalPrecision.sql:420
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  / cast(1 as float) FROM t
+----
+1.0
+
+# decimalPrecision.sql:421
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  / cast(1 as float) FROM t
+----
+1.0
+
+# decimalPrecision.sql:422
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as float) FROM t
+----
+1.0
+
+# decimalPrecision.sql:423
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) / cast(1 as float) FROM t
+----
+1.0
+
+# decimalPrecision.sql:425
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  / cast(1 as double) FROM t
+----
+1.0
+
+# decimalPrecision.sql:426
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  / cast(1 as double) FROM t
+----
+1.0
+
+# decimalPrecision.sql:427
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as double) FROM t
+----
+1.0
+
+# decimalPrecision.sql:428
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) / cast(1 as double) FROM t
+----
+1.0
+
+# decimalPrecision.sql:430
+query DECIMAL(14,11) rowsort
+SELECT cast(1 as decimal(3, 0))  / cast(1 as decimal(10, 0)) FROM t
+----
+1.00000000000
+
+# decimalPrecision.sql:431
+query DECIMAL(16,11) rowsort
+SELECT cast(1 as decimal(5, 0))  / cast(1 as decimal(10, 0)) FROM t
+----
+1.00000000000
+
+# decimalPrecision.sql:432
+query DECIMAL(21,11) rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as decimal(10, 0)) FROM t
+----
+1.00000000000
+
+# decimalPrecision.sql:433
+query DECIMAL(31,11) rowsort
+SELECT cast(1 as decimal(20, 0)) / cast(1 as decimal(10, 0)) FROM t
+----
+1.00000000000
+
+# decimalPrecision.sql:435
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  / cast(1 as string) FROM t
+----
+1.0
+
+# decimalPrecision.sql:436
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  / cast(1 as string) FROM t
+----
+1.0
+
+# decimalPrecision.sql:437
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as string) FROM t
+----
+1.0
+
+# decimalPrecision.sql:438
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) / cast(1 as string) FROM t
+----
+1.0
+
+# decimalPrecision.sql:445; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  / cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:446; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  / cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:447; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) / cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:448; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) / cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:470
+query DECIMAL(3,0) rowsort
+SELECT cast(1 as int) % cast(1 as decimal(3, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:471
+query DECIMAL(5,0) rowsort
+SELECT cast(1 as int) % cast(1 as decimal(5, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:472
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as int) % cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:473
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as int) % cast(1 as decimal(20, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:475
+query DECIMAL(3,0) rowsort
+SELECT cast(1 as bigint) % cast(1 as decimal(3, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:476
+query DECIMAL(5,0) rowsort
+SELECT cast(1 as bigint) % cast(1 as decimal(5, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:477
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as bigint) % cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:478
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as bigint) % cast(1 as decimal(20, 0)) FROM t
+----
+0
+
+onlyif transformer bigint-decimal
+query DECIMAL(19,0) rowsort
+SELECT cast(1 as bigint) % cast(1 as decimal(20, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:480
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) % cast(1 as decimal(3, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:481
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) % cast(1 as decimal(5, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:482
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) % cast(1 as decimal(10, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:483
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) % cast(1 as decimal(20, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:485
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) % cast(1 as decimal(3, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:486
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) % cast(1 as decimal(5, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:487
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) % cast(1 as decimal(10, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:488
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) % cast(1 as decimal(20, 0)) FROM t
+----
+0.0
+
+# decimalPrecision.sql:490
+query DECIMAL(3,0) rowsort
+SELECT cast(1 as decimal(10, 0)) % cast(1 as decimal(3, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:491
+query DECIMAL(5,0) rowsort
+SELECT cast(1 as decimal(10, 0)) % cast(1 as decimal(5, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:492
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as decimal(10, 0)) % cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:493
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as decimal(10, 0)) % cast(1 as decimal(20, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:500; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) % cast(1 as decimal(3, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:501; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) % cast(1 as decimal(5, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:502; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) % cast(1 as decimal(10, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:503; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) % cast(1 as decimal(20, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:505; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' % cast(1 as decimal(3, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:506; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' % cast(1 as decimal(5, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:507; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' % cast(1 as decimal(10, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:508; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' % cast(1 as decimal(20, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:520
+query DECIMAL(3,0) rowsort
+SELECT cast(1 as decimal(3, 0))  % cast(1 as int) FROM t
+----
+0
+
+# decimalPrecision.sql:521
+query DECIMAL(5,0) rowsort
+SELECT cast(1 as decimal(5, 0))  % cast(1 as int) FROM t
+----
+0
+
+# decimalPrecision.sql:522
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as decimal(10, 0)) % cast(1 as int) FROM t
+----
+0
+
+# decimalPrecision.sql:523
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as decimal(20, 0)) % cast(1 as int) FROM t
+----
+0
+
+# decimalPrecision.sql:525
+query DECIMAL(3,0) rowsort
+SELECT cast(1 as decimal(3, 0))  % cast(1 as bigint) FROM t
+----
+0
+
+# decimalPrecision.sql:526
+query DECIMAL(5,0) rowsort
+SELECT cast(1 as decimal(5, 0))  % cast(1 as bigint) FROM t
+----
+0
+
+# decimalPrecision.sql:527
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as decimal(10, 0)) % cast(1 as bigint) FROM t
+----
+0
+
+# decimalPrecision.sql:528
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as decimal(20, 0)) % cast(1 as bigint) FROM t
+----
+0
+
+onlyif transformer bigint-decimal
+query DECIMAL(19,0) rowsort
+SELECT cast(1 as decimal(20, 0)) % cast(1 as bigint) FROM t
+----
+0
+
+# decimalPrecision.sql:530
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  % cast(1 as float) FROM t
+----
+0.0
+
+# decimalPrecision.sql:531
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  % cast(1 as float) FROM t
+----
+0.0
+
+# decimalPrecision.sql:532
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) % cast(1 as float) FROM t
+----
+0.0
+
+# decimalPrecision.sql:533
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) % cast(1 as float) FROM t
+----
+0.0
+
+# decimalPrecision.sql:535
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  % cast(1 as double) FROM t
+----
+0.0
+
+# decimalPrecision.sql:536
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  % cast(1 as double) FROM t
+----
+0.0
+
+# decimalPrecision.sql:537
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) % cast(1 as double) FROM t
+----
+0.0
+
+# decimalPrecision.sql:538
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) % cast(1 as double) FROM t
+----
+0.0
+
+# decimalPrecision.sql:540
+query DECIMAL(3,0) rowsort
+SELECT cast(1 as decimal(3, 0))  % cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:541
+query DECIMAL(5,0) rowsort
+SELECT cast(1 as decimal(5, 0))  % cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:542
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as decimal(10, 0)) % cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:543
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as decimal(20, 0)) % cast(1 as decimal(10, 0)) FROM t
+----
+0
+
+# decimalPrecision.sql:545
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(3, 0))  % cast(1 as string) FROM t
+----
+0.0
+
+# decimalPrecision.sql:546
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(5, 0))  % cast(1 as string) FROM t
+----
+0.0
+
+# decimalPrecision.sql:547
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) % cast(1 as string) FROM t
+----
+0.0
+
+# decimalPrecision.sql:548
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(20, 0)) % cast(1 as string) FROM t
+----
+0.0
+
+# decimalPrecision.sql:555; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  % cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:556; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  % cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:557; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) % cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:558; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) % cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# decimalPrecision.sql:560; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  % cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:561; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  % cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:562; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) % cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:563; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) % cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# decimalPrecision.sql:565; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  % DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:566; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  % DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:567; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) % DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:568; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) % DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# decimalPrecision.sql:690
+query BOOLEAN rowsort
+SELECT cast(1 as int) = cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:691
+query BOOLEAN rowsort
+SELECT cast(1 as int) = cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:692
+query BOOLEAN rowsort
+SELECT cast(1 as int) = cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:693
+query BOOLEAN rowsort
+SELECT cast(1 as int) = cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:695
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) = cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:696
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) = cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:697
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) = cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:698
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) = cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:700
+query BOOLEAN rowsort
+SELECT cast(1 as float) = cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:701
+query BOOLEAN rowsort
+SELECT cast(1 as float) = cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:702
+query BOOLEAN rowsort
+SELECT cast(1 as float) = cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:703
+query BOOLEAN rowsort
+SELECT cast(1 as float) = cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:705
+query BOOLEAN rowsort
+SELECT cast(1 as double) = cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:706
+query BOOLEAN rowsort
+SELECT cast(1 as double) = cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:707
+query BOOLEAN rowsort
+SELECT cast(1 as double) = cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:708
+query BOOLEAN rowsort
+SELECT cast(1 as double) = cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:710
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) = cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:711
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) = cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:712
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) = cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:713
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) = cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:720; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) = cast(1 as decimal(3, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(3,0)
+
+# decimalPrecision.sql:721; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) = cast(1 as decimal(5, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(5,0)
+
+# decimalPrecision.sql:722; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) = cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(10,0)
+
+# decimalPrecision.sql:723; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) = cast(1 as decimal(20, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(20,0)
+
+# decimalPrecision.sql:725; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' = cast(1 as decimal(3, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(3,0)
+
+# decimalPrecision.sql:726; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' = cast(1 as decimal(5, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(5,0)
+
+# decimalPrecision.sql:727; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' = cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(10,0)
+
+# decimalPrecision.sql:728; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' = cast(1 as decimal(20, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(20,0)
+
+# decimalPrecision.sql:740
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  = cast(1 as int) FROM t
+----
+true
+
+# decimalPrecision.sql:741
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  = cast(1 as int) FROM t
+----
+true
+
+# decimalPrecision.sql:742
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) = cast(1 as int) FROM t
+----
+true
+
+# decimalPrecision.sql:743
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) = cast(1 as int) FROM t
+----
+true
+
+# decimalPrecision.sql:745
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  = cast(1 as bigint) FROM t
+----
+true
+
+# decimalPrecision.sql:746
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  = cast(1 as bigint) FROM t
+----
+true
+
+# decimalPrecision.sql:747
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) = cast(1 as bigint) FROM t
+----
+true
+
+# decimalPrecision.sql:748
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) = cast(1 as bigint) FROM t
+----
+true
+
+# decimalPrecision.sql:750
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  = cast(1 as float) FROM t
+----
+true
+
+# decimalPrecision.sql:751
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  = cast(1 as float) FROM t
+----
+true
+
+# decimalPrecision.sql:752
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) = cast(1 as float) FROM t
+----
+true
+
+# decimalPrecision.sql:753
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) = cast(1 as float) FROM t
+----
+true
+
+# decimalPrecision.sql:755
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  = cast(1 as double) FROM t
+----
+true
+
+# decimalPrecision.sql:756
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  = cast(1 as double) FROM t
+----
+true
+
+# decimalPrecision.sql:757
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) = cast(1 as double) FROM t
+----
+true
+
+# decimalPrecision.sql:758
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) = cast(1 as double) FROM t
+----
+true
+
+# decimalPrecision.sql:760
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  = cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:761
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  = cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:762
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) = cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:763
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) = cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:765
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  = cast(1 as string) FROM t
+----
+true
+
+# decimalPrecision.sql:766
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  = cast(1 as string) FROM t
+----
+true
+
+# decimalPrecision.sql:767
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) = cast(1 as string) FROM t
+----
+true
+
+# decimalPrecision.sql:768
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) = cast(1 as string) FROM t
+----
+true
+
+# decimalPrecision.sql:775; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  = cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(3,0) with BOOLEAN
+
+# decimalPrecision.sql:776; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  = cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(5,0) with BOOLEAN
+
+# decimalPrecision.sql:777; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) = cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(10,0) with BOOLEAN
+
+# decimalPrecision.sql:778; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) = cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(20,0) with BOOLEAN
+
+# decimalPrecision.sql:780; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  = cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(3,0) with TIMESTAMP
+
+# decimalPrecision.sql:781; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  = cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(5,0) with TIMESTAMP
+
+# decimalPrecision.sql:782; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) = cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(10,0) with TIMESTAMP
+
+# decimalPrecision.sql:783; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) = cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(20,0) with TIMESTAMP
+
+# decimalPrecision.sql:785; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  = DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(3,0) with DATE
+
+# decimalPrecision.sql:786; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  = DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(5,0) with DATE
+
+# decimalPrecision.sql:787; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) = DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(10,0) with DATE
+
+# decimalPrecision.sql:788; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) = DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(20,0) with DATE
+
+# decimalPrecision.sql:910
+query BOOLEAN rowsort
+SELECT cast(1 as int) < cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:911
+query BOOLEAN rowsort
+SELECT cast(1 as int) < cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:912
+query BOOLEAN rowsort
+SELECT cast(1 as int) < cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:913
+query BOOLEAN rowsort
+SELECT cast(1 as int) < cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:915
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) < cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:916
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) < cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:917
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) < cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:918
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) < cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:920
+query BOOLEAN rowsort
+SELECT cast(1 as float) < cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:921
+query BOOLEAN rowsort
+SELECT cast(1 as float) < cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:922
+query BOOLEAN rowsort
+SELECT cast(1 as float) < cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:923
+query BOOLEAN rowsort
+SELECT cast(1 as float) < cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:925
+query BOOLEAN rowsort
+SELECT cast(1 as double) < cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:926
+query BOOLEAN rowsort
+SELECT cast(1 as double) < cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:927
+query BOOLEAN rowsort
+SELECT cast(1 as double) < cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:928
+query BOOLEAN rowsort
+SELECT cast(1 as double) < cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:930
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) < cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:931
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) < cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:932
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) < cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:933
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) < cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:940; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) < cast(1 as decimal(3, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(3,0)
+
+# decimalPrecision.sql:941; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) < cast(1 as decimal(5, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(5,0)
+
+# decimalPrecision.sql:942; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) < cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(10,0)
+
+# decimalPrecision.sql:943; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) < cast(1 as decimal(20, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(20,0)
+
+# decimalPrecision.sql:945; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' < cast(1 as decimal(3, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(3,0)
+
+# decimalPrecision.sql:946; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' < cast(1 as decimal(5, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(5,0)
+
+# decimalPrecision.sql:947; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' < cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(10,0)
+
+# decimalPrecision.sql:948; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' < cast(1 as decimal(20, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(20,0)
+
+# decimalPrecision.sql:960
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  < cast(1 as int) FROM t
+----
+false
+
+# decimalPrecision.sql:961
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  < cast(1 as int) FROM t
+----
+false
+
+# decimalPrecision.sql:962
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) < cast(1 as int) FROM t
+----
+false
+
+# decimalPrecision.sql:963
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) < cast(1 as int) FROM t
+----
+false
+
+# decimalPrecision.sql:965
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  < cast(1 as bigint) FROM t
+----
+false
+
+# decimalPrecision.sql:966
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  < cast(1 as bigint) FROM t
+----
+false
+
+# decimalPrecision.sql:967
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) < cast(1 as bigint) FROM t
+----
+false
+
+# decimalPrecision.sql:968
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) < cast(1 as bigint) FROM t
+----
+false
+
+# decimalPrecision.sql:970
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  < cast(1 as float) FROM t
+----
+false
+
+# decimalPrecision.sql:971
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  < cast(1 as float) FROM t
+----
+false
+
+# decimalPrecision.sql:972
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) < cast(1 as float) FROM t
+----
+false
+
+# decimalPrecision.sql:973
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) < cast(1 as float) FROM t
+----
+false
+
+# decimalPrecision.sql:975
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  < cast(1 as double) FROM t
+----
+false
+
+# decimalPrecision.sql:976
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  < cast(1 as double) FROM t
+----
+false
+
+# decimalPrecision.sql:977
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) < cast(1 as double) FROM t
+----
+false
+
+# decimalPrecision.sql:978
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) < cast(1 as double) FROM t
+----
+false
+
+# decimalPrecision.sql:980
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  < cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:981
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  < cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:982
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) < cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:983
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) < cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:985
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  < cast(1 as string) FROM t
+----
+false
+
+# decimalPrecision.sql:986
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  < cast(1 as string) FROM t
+----
+false
+
+# decimalPrecision.sql:987
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) < cast(1 as string) FROM t
+----
+false
+
+# decimalPrecision.sql:988
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) < cast(1 as string) FROM t
+----
+false
+
+# decimalPrecision.sql:995; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  < cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(3,0) with BOOLEAN
+
+# decimalPrecision.sql:996; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  < cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(5,0) with BOOLEAN
+
+# decimalPrecision.sql:997; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) < cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(10,0) with BOOLEAN
+
+# decimalPrecision.sql:998; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) < cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(20,0) with BOOLEAN
+
+# decimalPrecision.sql:1000; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  < cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(3,0) with TIMESTAMP
+
+# decimalPrecision.sql:1001; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  < cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(5,0) with TIMESTAMP
+
+# decimalPrecision.sql:1002; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) < cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(10,0) with TIMESTAMP
+
+# decimalPrecision.sql:1003; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) < cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(20,0) with TIMESTAMP
+
+# decimalPrecision.sql:1005; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  < DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(3,0) with DATE
+
+# decimalPrecision.sql:1006; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  < DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(5,0) with DATE
+
+# decimalPrecision.sql:1007; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) < DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(10,0) with DATE
+
+# decimalPrecision.sql:1008; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) < DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(20,0) with DATE
+
+# decimalPrecision.sql:1020
+query BOOLEAN rowsort
+SELECT cast(1 as int) <= cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1021
+query BOOLEAN rowsort
+SELECT cast(1 as int) <= cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1022
+query BOOLEAN rowsort
+SELECT cast(1 as int) <= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1023
+query BOOLEAN rowsort
+SELECT cast(1 as int) <= cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1025
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) <= cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1026
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) <= cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1027
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) <= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1028
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) <= cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1030
+query BOOLEAN rowsort
+SELECT cast(1 as float) <= cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1031
+query BOOLEAN rowsort
+SELECT cast(1 as float) <= cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1032
+query BOOLEAN rowsort
+SELECT cast(1 as float) <= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1033
+query BOOLEAN rowsort
+SELECT cast(1 as float) <= cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1035
+query BOOLEAN rowsort
+SELECT cast(1 as double) <= cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1036
+query BOOLEAN rowsort
+SELECT cast(1 as double) <= cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1037
+query BOOLEAN rowsort
+SELECT cast(1 as double) <= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1038
+query BOOLEAN rowsort
+SELECT cast(1 as double) <= cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1040
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <= cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1041
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <= cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1042
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1043
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <= cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1050; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) <= cast(1 as decimal(3, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(3,0)
+
+# decimalPrecision.sql:1051; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) <= cast(1 as decimal(5, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(5,0)
+
+# decimalPrecision.sql:1052; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) <= cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(10,0)
+
+# decimalPrecision.sql:1053; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) <= cast(1 as decimal(20, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(20,0)
+
+# decimalPrecision.sql:1055; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' <= cast(1 as decimal(3, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(3,0)
+
+# decimalPrecision.sql:1056; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' <= cast(1 as decimal(5, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(5,0)
+
+# decimalPrecision.sql:1057; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' <= cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(10,0)
+
+# decimalPrecision.sql:1058; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' <= cast(1 as decimal(20, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(20,0)
+
+# decimalPrecision.sql:1070
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  <= cast(1 as int) FROM t
+----
+true
+
+# decimalPrecision.sql:1071
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  <= cast(1 as int) FROM t
+----
+true
+
+# decimalPrecision.sql:1072
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <= cast(1 as int) FROM t
+----
+true
+
+# decimalPrecision.sql:1073
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) <= cast(1 as int) FROM t
+----
+true
+
+# decimalPrecision.sql:1075
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  <= cast(1 as bigint) FROM t
+----
+true
+
+# decimalPrecision.sql:1076
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  <= cast(1 as bigint) FROM t
+----
+true
+
+# decimalPrecision.sql:1077
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <= cast(1 as bigint) FROM t
+----
+true
+
+# decimalPrecision.sql:1078
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) <= cast(1 as bigint) FROM t
+----
+true
+
+# decimalPrecision.sql:1080
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  <= cast(1 as float) FROM t
+----
+true
+
+# decimalPrecision.sql:1081
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  <= cast(1 as float) FROM t
+----
+true
+
+# decimalPrecision.sql:1082
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <= cast(1 as float) FROM t
+----
+true
+
+# decimalPrecision.sql:1083
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) <= cast(1 as float) FROM t
+----
+true
+
+# decimalPrecision.sql:1085
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  <= cast(1 as double) FROM t
+----
+true
+
+# decimalPrecision.sql:1086
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  <= cast(1 as double) FROM t
+----
+true
+
+# decimalPrecision.sql:1087
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <= cast(1 as double) FROM t
+----
+true
+
+# decimalPrecision.sql:1088
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) <= cast(1 as double) FROM t
+----
+true
+
+# decimalPrecision.sql:1090
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  <= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1091
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  <= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1092
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1093
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) <= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1095
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  <= cast(1 as string) FROM t
+----
+true
+
+# decimalPrecision.sql:1096
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  <= cast(1 as string) FROM t
+----
+true
+
+# decimalPrecision.sql:1097
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <= cast(1 as string) FROM t
+----
+true
+
+# decimalPrecision.sql:1098
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) <= cast(1 as string) FROM t
+----
+true
+
+# decimalPrecision.sql:1105; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  <= cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(3,0) with BOOLEAN
+
+# decimalPrecision.sql:1106; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  <= cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(5,0) with BOOLEAN
+
+# decimalPrecision.sql:1107; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) <= cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(10,0) with BOOLEAN
+
+# decimalPrecision.sql:1108; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) <= cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(20,0) with BOOLEAN
+
+# decimalPrecision.sql:1110; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  <= cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(3,0) with TIMESTAMP
+
+# decimalPrecision.sql:1111; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  <= cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(5,0) with TIMESTAMP
+
+# decimalPrecision.sql:1112; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) <= cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(10,0) with TIMESTAMP
+
+# decimalPrecision.sql:1113; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) <= cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(20,0) with TIMESTAMP
+
+# decimalPrecision.sql:1115; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  <= DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(3,0) with DATE
+
+# decimalPrecision.sql:1116; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  <= DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(5,0) with DATE
+
+# decimalPrecision.sql:1117; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) <= DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(10,0) with DATE
+
+# decimalPrecision.sql:1118; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) <= DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(20,0) with DATE
+
+# decimalPrecision.sql:1130
+query BOOLEAN rowsort
+SELECT cast(1 as int) > cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1131
+query BOOLEAN rowsort
+SELECT cast(1 as int) > cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1132
+query BOOLEAN rowsort
+SELECT cast(1 as int) > cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1133
+query BOOLEAN rowsort
+SELECT cast(1 as int) > cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1135
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) > cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1136
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) > cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1137
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) > cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1138
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) > cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1140
+query BOOLEAN rowsort
+SELECT cast(1 as float) > cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1141
+query BOOLEAN rowsort
+SELECT cast(1 as float) > cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1142
+query BOOLEAN rowsort
+SELECT cast(1 as float) > cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1143
+query BOOLEAN rowsort
+SELECT cast(1 as float) > cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1145
+query BOOLEAN rowsort
+SELECT cast(1 as double) > cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1146
+query BOOLEAN rowsort
+SELECT cast(1 as double) > cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1147
+query BOOLEAN rowsort
+SELECT cast(1 as double) > cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1148
+query BOOLEAN rowsort
+SELECT cast(1 as double) > cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1150
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) > cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1151
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) > cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1152
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) > cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1153
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) > cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1160; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) > cast(1 as decimal(3, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(3,0)
+
+# decimalPrecision.sql:1161; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) > cast(1 as decimal(5, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(5,0)
+
+# decimalPrecision.sql:1162; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) > cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(10,0)
+
+# decimalPrecision.sql:1163; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) > cast(1 as decimal(20, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(20,0)
+
+# decimalPrecision.sql:1165; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' > cast(1 as decimal(3, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(3,0)
+
+# decimalPrecision.sql:1166; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' > cast(1 as decimal(5, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(5,0)
+
+# decimalPrecision.sql:1167; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' > cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(10,0)
+
+# decimalPrecision.sql:1168; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' > cast(1 as decimal(20, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(20,0)
+
+# decimalPrecision.sql:1180
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  > cast(1 as int) FROM t
+----
+false
+
+# decimalPrecision.sql:1181
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  > cast(1 as int) FROM t
+----
+false
+
+# decimalPrecision.sql:1182
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) > cast(1 as int) FROM t
+----
+false
+
+# decimalPrecision.sql:1183
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) > cast(1 as int) FROM t
+----
+false
+
+# decimalPrecision.sql:1185
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  > cast(1 as bigint) FROM t
+----
+false
+
+# decimalPrecision.sql:1186
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  > cast(1 as bigint) FROM t
+----
+false
+
+# decimalPrecision.sql:1187
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) > cast(1 as bigint) FROM t
+----
+false
+
+# decimalPrecision.sql:1188
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) > cast(1 as bigint) FROM t
+----
+false
+
+# decimalPrecision.sql:1190
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  > cast(1 as float) FROM t
+----
+false
+
+# decimalPrecision.sql:1191
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  > cast(1 as float) FROM t
+----
+false
+
+# decimalPrecision.sql:1192
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) > cast(1 as float) FROM t
+----
+false
+
+# decimalPrecision.sql:1193
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) > cast(1 as float) FROM t
+----
+false
+
+# decimalPrecision.sql:1195
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  > cast(1 as double) FROM t
+----
+false
+
+# decimalPrecision.sql:1196
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  > cast(1 as double) FROM t
+----
+false
+
+# decimalPrecision.sql:1197
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) > cast(1 as double) FROM t
+----
+false
+
+# decimalPrecision.sql:1198
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) > cast(1 as double) FROM t
+----
+false
+
+# decimalPrecision.sql:1200
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  > cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1201
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  > cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1202
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) > cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1203
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) > cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1205
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  > cast(1 as string) FROM t
+----
+false
+
+# decimalPrecision.sql:1206
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  > cast(1 as string) FROM t
+----
+false
+
+# decimalPrecision.sql:1207
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) > cast(1 as string) FROM t
+----
+false
+
+# decimalPrecision.sql:1208
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) > cast(1 as string) FROM t
+----
+false
+
+# decimalPrecision.sql:1215; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  > cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(3,0) with BOOLEAN
+
+# decimalPrecision.sql:1216; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  > cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(5,0) with BOOLEAN
+
+# decimalPrecision.sql:1217; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) > cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(10,0) with BOOLEAN
+
+# decimalPrecision.sql:1218; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) > cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(20,0) with BOOLEAN
+
+# decimalPrecision.sql:1220; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  > cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(3,0) with TIMESTAMP
+
+# decimalPrecision.sql:1221; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  > cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(5,0) with TIMESTAMP
+
+# decimalPrecision.sql:1222; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) > cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(10,0) with TIMESTAMP
+
+# decimalPrecision.sql:1223; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) > cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(20,0) with TIMESTAMP
+
+# decimalPrecision.sql:1225; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  > DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(3,0) with DATE
+
+# decimalPrecision.sql:1226; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  > DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(5,0) with DATE
+
+# decimalPrecision.sql:1227; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) > DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(10,0) with DATE
+
+# decimalPrecision.sql:1228; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) > DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(20,0) with DATE
+
+# decimalPrecision.sql:1240
+query BOOLEAN rowsort
+SELECT cast(1 as int) >= cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1241
+query BOOLEAN rowsort
+SELECT cast(1 as int) >= cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1242
+query BOOLEAN rowsort
+SELECT cast(1 as int) >= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1243
+query BOOLEAN rowsort
+SELECT cast(1 as int) >= cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1245
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) >= cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1246
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) >= cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1247
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) >= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1248
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) >= cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1250
+query BOOLEAN rowsort
+SELECT cast(1 as float) >= cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1251
+query BOOLEAN rowsort
+SELECT cast(1 as float) >= cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1252
+query BOOLEAN rowsort
+SELECT cast(1 as float) >= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1253
+query BOOLEAN rowsort
+SELECT cast(1 as float) >= cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1255
+query BOOLEAN rowsort
+SELECT cast(1 as double) >= cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1256
+query BOOLEAN rowsort
+SELECT cast(1 as double) >= cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1257
+query BOOLEAN rowsort
+SELECT cast(1 as double) >= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1258
+query BOOLEAN rowsort
+SELECT cast(1 as double) >= cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1260
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) >= cast(1 as decimal(3, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1261
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) >= cast(1 as decimal(5, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1262
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) >= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1263
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) >= cast(1 as decimal(20, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1270; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) >= cast(1 as decimal(3, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(3,0)
+
+# decimalPrecision.sql:1271; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) >= cast(1 as decimal(5, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(5,0)
+
+# decimalPrecision.sql:1272; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) >= cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(10,0)
+
+# decimalPrecision.sql:1273; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) >= cast(1 as decimal(20, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(20,0)
+
+# decimalPrecision.sql:1275; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' >= cast(1 as decimal(3, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(3,0)
+
+# decimalPrecision.sql:1276; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' >= cast(1 as decimal(5, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(5,0)
+
+# decimalPrecision.sql:1277; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' >= cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(10,0)
+
+# decimalPrecision.sql:1278; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' >= cast(1 as decimal(20, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(20,0)
+
+# decimalPrecision.sql:1290
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  >= cast(1 as int) FROM t
+----
+true
+
+# decimalPrecision.sql:1291
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  >= cast(1 as int) FROM t
+----
+true
+
+# decimalPrecision.sql:1292
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) >= cast(1 as int) FROM t
+----
+true
+
+# decimalPrecision.sql:1293
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) >= cast(1 as int) FROM t
+----
+true
+
+# decimalPrecision.sql:1295
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  >= cast(1 as bigint) FROM t
+----
+true
+
+# decimalPrecision.sql:1296
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  >= cast(1 as bigint) FROM t
+----
+true
+
+# decimalPrecision.sql:1297
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) >= cast(1 as bigint) FROM t
+----
+true
+
+# decimalPrecision.sql:1298
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) >= cast(1 as bigint) FROM t
+----
+true
+
+# decimalPrecision.sql:1300
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  >= cast(1 as float) FROM t
+----
+true
+
+# decimalPrecision.sql:1301
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  >= cast(1 as float) FROM t
+----
+true
+
+# decimalPrecision.sql:1302
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) >= cast(1 as float) FROM t
+----
+true
+
+# decimalPrecision.sql:1303
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) >= cast(1 as float) FROM t
+----
+true
+
+# decimalPrecision.sql:1305
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  >= cast(1 as double) FROM t
+----
+true
+
+# decimalPrecision.sql:1306
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  >= cast(1 as double) FROM t
+----
+true
+
+# decimalPrecision.sql:1307
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) >= cast(1 as double) FROM t
+----
+true
+
+# decimalPrecision.sql:1308
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) >= cast(1 as double) FROM t
+----
+true
+
+# decimalPrecision.sql:1310
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  >= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1311
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  >= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1312
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) >= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1313
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) >= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# decimalPrecision.sql:1315
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  >= cast(1 as string) FROM t
+----
+true
+
+# decimalPrecision.sql:1316
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  >= cast(1 as string) FROM t
+----
+true
+
+# decimalPrecision.sql:1317
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) >= cast(1 as string) FROM t
+----
+true
+
+# decimalPrecision.sql:1318
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) >= cast(1 as string) FROM t
+----
+true
+
+# decimalPrecision.sql:1325; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  >= cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(3,0) with BOOLEAN
+
+# decimalPrecision.sql:1326; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  >= cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(5,0) with BOOLEAN
+
+# decimalPrecision.sql:1327; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) >= cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(10,0) with BOOLEAN
+
+# decimalPrecision.sql:1328; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) >= cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(20,0) with BOOLEAN
+
+# decimalPrecision.sql:1330; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  >= cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(3,0) with TIMESTAMP
+
+# decimalPrecision.sql:1331; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  >= cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(5,0) with TIMESTAMP
+
+# decimalPrecision.sql:1332; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) >= cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(10,0) with TIMESTAMP
+
+# decimalPrecision.sql:1333; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) >= cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(20,0) with TIMESTAMP
+
+# decimalPrecision.sql:1335; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  >= DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(3,0) with DATE
+
+# decimalPrecision.sql:1336; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  >= DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(5,0) with DATE
+
+# decimalPrecision.sql:1337; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) >= DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(10,0) with DATE
+
+# decimalPrecision.sql:1338; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) >= DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(20,0) with DATE
+
+# decimalPrecision.sql:1350
+query BOOLEAN rowsort
+SELECT cast(1 as int) <> cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1351
+query BOOLEAN rowsort
+SELECT cast(1 as int) <> cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1352
+query BOOLEAN rowsort
+SELECT cast(1 as int) <> cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1353
+query BOOLEAN rowsort
+SELECT cast(1 as int) <> cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1355
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) <> cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1356
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) <> cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1357
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) <> cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1358
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) <> cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1360
+query BOOLEAN rowsort
+SELECT cast(1 as float) <> cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1361
+query BOOLEAN rowsort
+SELECT cast(1 as float) <> cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1362
+query BOOLEAN rowsort
+SELECT cast(1 as float) <> cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1363
+query BOOLEAN rowsort
+SELECT cast(1 as float) <> cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1365
+query BOOLEAN rowsort
+SELECT cast(1 as double) <> cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1366
+query BOOLEAN rowsort
+SELECT cast(1 as double) <> cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1367
+query BOOLEAN rowsort
+SELECT cast(1 as double) <> cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1368
+query BOOLEAN rowsort
+SELECT cast(1 as double) <> cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1370
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <> cast(1 as decimal(3, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1371
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <> cast(1 as decimal(5, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1372
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <> cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1373
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <> cast(1 as decimal(20, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1380; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) <> cast(1 as decimal(3, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(3,0)
+
+# decimalPrecision.sql:1381; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) <> cast(1 as decimal(5, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(5,0)
+
+# decimalPrecision.sql:1382; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) <> cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(10,0)
+
+# decimalPrecision.sql:1383; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) <> cast(1 as decimal(20, 0)) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(20,0)
+
+# decimalPrecision.sql:1385; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' <> cast(1 as decimal(3, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(3,0)
+
+# decimalPrecision.sql:1386; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' <> cast(1 as decimal(5, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(5,0)
+
+# decimalPrecision.sql:1387; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' <> cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(10,0)
+
+# decimalPrecision.sql:1388; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' <> cast(1 as decimal(20, 0)) FROM t
+----
+Cannot compare DATE with DECIMAL(20,0)
+
+# decimalPrecision.sql:1400
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  <> cast(1 as int) FROM t
+----
+false
+
+# decimalPrecision.sql:1401
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  <> cast(1 as int) FROM t
+----
+false
+
+# decimalPrecision.sql:1402
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <> cast(1 as int) FROM t
+----
+false
+
+# decimalPrecision.sql:1403
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) <> cast(1 as int) FROM t
+----
+false
+
+# decimalPrecision.sql:1405
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  <> cast(1 as bigint) FROM t
+----
+false
+
+# decimalPrecision.sql:1406
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  <> cast(1 as bigint) FROM t
+----
+false
+
+# decimalPrecision.sql:1407
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <> cast(1 as bigint) FROM t
+----
+false
+
+# decimalPrecision.sql:1408
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) <> cast(1 as bigint) FROM t
+----
+false
+
+# decimalPrecision.sql:1410
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  <> cast(1 as float) FROM t
+----
+false
+
+# decimalPrecision.sql:1411
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  <> cast(1 as float) FROM t
+----
+false
+
+# decimalPrecision.sql:1412
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <> cast(1 as float) FROM t
+----
+false
+
+# decimalPrecision.sql:1413
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) <> cast(1 as float) FROM t
+----
+false
+
+# decimalPrecision.sql:1415
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  <> cast(1 as double) FROM t
+----
+false
+
+# decimalPrecision.sql:1416
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  <> cast(1 as double) FROM t
+----
+false
+
+# decimalPrecision.sql:1417
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <> cast(1 as double) FROM t
+----
+false
+
+# decimalPrecision.sql:1418
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) <> cast(1 as double) FROM t
+----
+false
+
+# decimalPrecision.sql:1420
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  <> cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1421
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  <> cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1422
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <> cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1423
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) <> cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# decimalPrecision.sql:1425
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(3, 0))  <> cast(1 as string) FROM t
+----
+false
+
+# decimalPrecision.sql:1426
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(5, 0))  <> cast(1 as string) FROM t
+----
+false
+
+# decimalPrecision.sql:1427
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <> cast(1 as string) FROM t
+----
+false
+
+# decimalPrecision.sql:1428
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(20, 0)) <> cast(1 as string) FROM t
+----
+false
+
+# decimalPrecision.sql:1435; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  <> cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(3,0) with BOOLEAN
+
+# decimalPrecision.sql:1436; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  <> cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(5,0) with BOOLEAN
+
+# decimalPrecision.sql:1437; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) <> cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(10,0) with BOOLEAN
+
+# decimalPrecision.sql:1438; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) <> cast(1 as boolean) FROM t
+----
+Cannot compare DECIMAL(20,0) with BOOLEAN
+
+# decimalPrecision.sql:1440; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  <> cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(3,0) with TIMESTAMP
+
+# decimalPrecision.sql:1441; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  <> cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(5,0) with TIMESTAMP
+
+# decimalPrecision.sql:1442; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) <> cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(10,0) with TIMESTAMP
+
+# decimalPrecision.sql:1443; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) <> cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare DECIMAL(20,0) with TIMESTAMP
+
+# decimalPrecision.sql:1445; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(3, 0))  <> DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(3,0) with DATE
+
+# decimalPrecision.sql:1446; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(5, 0))  <> DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(5,0) with DATE
+
+# decimalPrecision.sql:1447; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) <> DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(10,0) with DATE
+
+# decimalPrecision.sql:1448; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(20, 0)) <> DATE '2017-12-11' FROM t
+----
+Cannot compare DECIMAL(20,0) with DATE

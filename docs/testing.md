@@ -442,7 +442,27 @@ engines, and a `UNION ALL` of decimal casts; `2.35E10 * 1.0` is a `DECIMAL`
 here (`double-literal`). The half under
 `spark.sql.decimalOperations.allowPrecisionLoss=false` (26 statements) is left
 out, since the engine gives way on the scale as Spark does by default, and so
-are `pmod` and `div`.
+are `pmod` and `div`. The twelve scripts under `spark/type_coercion/` hold the
+files of `typeCoercion/native` with a record the engine can run, each a matrix
+of the types' pairs over one construct: `binary_comparison` (121 of its 265
+statements), `boolean_equality` (37 of 97), `case_when` (82 of 145),
+`decimal_precision` (673 of 1,145, every operator of a value of each type
+beside a `DECIMAL` at four precisions), `division` (82 of 145), `if` (82 of
+145), `implicit_casts` (30 of 47), `in` (156 of 289), `promote_strings` (198 of
+316), `string_cast` (8 of 32), `union` (82 of 145) and `window_frame` (16 of
+25); `arrayJoin`, `concat`, `dateTimeOperations`, `elt`, `mapconcat` and
+`mapZipWith` have none. Of the 1,593 statements the thirteen Spark scripts
+hold, 619 queries answer as Spark does, type and value; 492 are errors both
+engines raise for one reason (the types do not meet, text is no value of its
+type, a value is past its type); 28 build tables; and 467 are skipped by 14
+rules of the ledger (below), each followed by its twin but under a refusal.
+1,317 statements are left out by what they need: `BINARY` and `X''` literals
+(306), `TINYINT` (306), `SMALLINT` (296), a function Spark has and the engine
+does not (183), the operator `<=>` (117), `INTERVAL` (37), a view over arrays,
+maps or Spark's `VALUES` (33), the `allowPrecisionLoss=false` half (26), and a
+few `TIME`s, Spark's `SET`s and literal suffixes. 42 more are held out: both
+engines refuse them, for different reasons, which is no agreement
+([plans/testing/10](../plans/testing/10-spark-typing-ports.md), Outcome).
 
 **Golden plans** (Spark's PlanStabilitySuite, DuckDB's `EXPLAIN` records) are
 scripts under `src/test/slt/plan/` whose records are `EXPLAIN <query>`, the
@@ -512,24 +532,34 @@ script, as `FrontendFuzzTest`'s known defects fail it once they stop
 reproducing: `line 58: skipped as bool-text, but the engine now gives the
 record's answer, compared as BOOLEAN; remove the skip`. The corpus binary runs
 the same check and reports stale skips in a section of their own, and its
-report tallies the skips by rule. The scripts hold 449 skips:
+report tallies the skips by rule. The scripts hold 913 skips:
 
 | rule | skips | where |
 |---|---|---|
 | `refused-subquery` | 248 | `sqlite/`: `select1` 85, `evidence/in1` 74, `index/between_10_0` 40, `index/commute_10_0` 20, `index/in_10_0` 15, `index/view_10_1` 13, `evidence/in2` 1 |
+| `refused-text-comparison` | 161 | `spark/type_coercion/`: `binary_comparison` 72, `in` 31, `decimal_precision` 24, `promote_strings` 22, `implicit_casts` 8, `boolean_equality` 4 |
 | `refused-except-intersect` | 114 | `sqlite/select4` |
+| `refused-decimal-beside-float` | 96 | `spark/type_coercion/`: `decimal_precision` 80, `case_when`, `division`, `if` and `union` 4 each |
+| `refused-text-branch` | 48 | `spark/type_coercion/`: `case_when`, `if` and `union` 16 each |
+| `refused-text-arithmetic` | 47 | `sqlite/index/random_10_0` 15; `spark/type_coercion/`: `decimal_precision` 20, `division` 10, `promote_strings` 2 |
+| `bigint-decimal` | 35 | `spark/type_coercion/`: `decimal_precision` 27, `case_when`, `division`, `if` and `union` 2 each |
+| `bool-text` | 26 | `postgres/boolean` 12; `spark/type_coercion/`: `promote_strings` 12, `in` 2 |
 | `math-domain-null` | 22 | `postgres/`: `numeric` 18, `float8` 4 |
-| `refused-text-arithmetic` | 15 | `sqlite/index/random_10_0` |
-| `bool-text` | 12 | `postgres/boolean` |
+| `text-literal-typed` | 19 | `spark/type_coercion/`: `promote_strings` 16, `implicit_casts` 3 |
+| `window-constant-key` | 16 | `spark/type_coercion/window_frame` 15, `postgres/window` 1 |
+| `refused-implicit-text` | 15 | `spark/type_coercion/implicit_casts` |
+| `division-keeps-type` | 12 | `spark/type_coercion/`: `promote_strings` 6, `division` 5, `implicit_casts` 1 |
+| `refused-date-beside-timestamp` | 10 | `spark/type_coercion/`: `in` 4, `case_when`, `if` and `union` 2 each |
 | `refused-empty-in` | 8 | `sqlite/evidence/in2` |
 | `div-zero-null` | 7 | `postgres/`: `float8` 2, `numeric` 2, `case` 1; `spark/decimal_arithmetic` 2 |
+| `refused-implicit-number` | 7 | `spark/type_coercion/promote_strings` |
 | `cast-truncates` | 5 | `postgres/`: `numeric` 3, `float8` 2 |
 | `double-range` | 4 | `postgres/`: `float8` 3, `numeric` 1 |
 | `double-text` | 4 | `postgres/float8` |
 | `double-literal` | 3 | `postgres/numeric` 2, `spark/decimal_arithmetic` 1 |
 | `double-precision` | 2 | `postgres/numeric` |
 | `refused-hex-literal` | 2 | `sqlite/evidence/in1` |
-| `decimal-result-type`, `refused-parenthesized-join`, `window-constant-key` | 1 each | `postgres/numeric`, `sqlite/random/aggregates_0`, `postgres/window` |
+| `decimal-result-type`, `refused-parenthesized-join` | 1 each | `postgres/numeric`, `sqlite/random/aggregates_0` |
 
 `int-is-int`, `branch-double` and `nulls-sort-low` are cited by no skip yet,
 only pinned: the ports plans/testing/11-12 add meet them first. The nine rules
@@ -537,8 +567,8 @@ plans/testing/10 added for Spark's answers (`refused-text-comparison`,
 `refused-text-branch`, `refused-date-beside-timestamp`,
 `refused-decimal-beside-float`, `refused-implicit-text`,
 `refused-implicit-number`, `division-keeps-type`, `text-literal-typed` and
-`bigint-decimal`) are pinned in `refused/messages.test` and `types/`, for the
-skips of the scripts `SparkImport` writes. The check adds
+`bigint-decimal`) are pinned in `refused/messages.test` and `types/` and cited
+by the Spark scripts' skips. The check adds
 no time `slt_test` shows: its four shards took 21.5 to 26.9 s before it and
 21.8 to 26.4 s after.
 
