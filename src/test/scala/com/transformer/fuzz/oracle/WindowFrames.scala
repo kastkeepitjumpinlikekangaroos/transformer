@@ -43,6 +43,7 @@ object WindowFrames {
         case (x: java.lang.Double, y: java.math.BigDecimal) => java.lang.Double.compare(x, y.doubleValue)
         case (x: java.lang.Number, y: java.lang.Number) =>
           new java.math.BigDecimal(x.toString).compareTo(new java.math.BigDecimal(y.toString))
+        case (x, y) => throw new IllegalArgumentException(s"an ORDER BY value that is not a number: $x or $y")
       }
       if (o.asc) v else -v
     }
@@ -58,6 +59,7 @@ object WindowFrames {
       case n: java.lang.Number =>
         val x = new java.math.BigDecimal(n.toString)
         if (up) x.add(k) else x.subtract(k)
+      case other => throw new IllegalArgumentException(s"an ORDER BY value that is not a number: $other")
     }
   }
 

@@ -118,6 +118,7 @@ object Funcs {
             case DataType.FloatType => math.abs(n.doubleValue).toFloat
             case _ => math.abs(n.doubleValue)
           }
+          case other => throw new IllegalStateException(s"ABS of $other, a ${other.getClass.getName}, not a number")
         }
       case "ROUND" | "TRUNC" | "TRUNCATE" | "FLOOR" | "CEIL" | "CEILING" =>
         if (args.exists(_ == null)) null

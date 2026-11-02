@@ -1228,6 +1228,15 @@ class ExprBatchTest {
     * both paths. Both computed in DOUBLE, and the vector path returned a
     * DoubleVector under the DECIMAL type: the parity fuzzer's first finding over
     * a decimal column. */
+  /** ABS of a value that is not a number is a binder's mistake, refused
+    * naming the value: the match on the argument had no case for one, so it
+    * threw a bare MatchError. */
+  @Test def funcAbsOfANonNumberNamesIt(): Unit = {
+    val e = assertThrows(scala.Predef.classOf[IllegalStateException],
+      () => Funcs("ABS", Seq("seven"), DataType.IntType, Seq(DataType.StringType)))
+    assertEquals("ABS of seven, a java.lang.String, not a number", e.getMessage)
+  }
+
   @Test def funcAbsDecimal(): Unit = {
     val dt = DataType.DecimalType(38, 3)
     val b = batch("x" -> decCol(dt, i => SpecialDecimals(i % 8), i => i % 13 == 0))

@@ -159,6 +159,8 @@ final class CsvRowParser(in: Reader, opts: CsvOptions, source: String = "<input>
               // Lenient: garbage between closing quote and next delimiter — append it.
               cur.append(c)
             }
+
+          case other => throw new IllegalStateException(s"CSV parser in unknown state $other")
         }
       }
     }
