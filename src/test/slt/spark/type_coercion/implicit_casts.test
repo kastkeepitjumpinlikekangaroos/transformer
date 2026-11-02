@@ -9,7 +9,7 @@
 # describes; edit the converter, not this file.
 #
 # A string literal beside a number in arithmetic, and a number where text is
-# taken: under ||, LIKE and LENGTH. 30 of the file's 47 statements are here, 27
+# taken: under ||, LIKE and LENGTH. 27 of the file's 47 statements are here, 24
 # of them records the engine answers otherwise by a rule of the ledger in
 # docs/gotchas.md, marked skipif transformer <id> and, for a rule that is no
 # refusal, followed by its twin, onlyif transformer <id> with the engine's own
@@ -25,12 +25,12 @@
 # as Spark sorts every result its plan does not.
 #
 # Skipped, by rule:
-#     15  refused-implicit-text
+#     12  refused-implicit-text
 #      8  refused-text-comparison
 #      3  text-literal-typed
 #      1  division-keeps-type
 #
-# Left out (17 statements), by what they need:
+# Left out (20 statements), by what they need:
 #      4  Spark's function date()
 #      2  SMALLINT
 #      2  Spark's function timestamp()
@@ -42,6 +42,8 @@
 #      1  Spark's function second()
 #      1  Spark's function time_trunc()
 #      1  Spark's function year()
+#      3  the engine's outcome changes under a Turkish default locale (the
+#         whole-suite configuration zone), a defect held for the user
 
 # implicitTypeCasts.sql:20, the temporary view as a table of one row
 statement ok
@@ -269,24 +271,3 @@ query INT rowsort
 SELECT length('four') FROM t
 ----
 4
-
-# implicitTypeCasts.sql:73
-skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
-query BOOLEAN rowsort
-select 1 like '%' FROM t
-----
-true
-
-# implicitTypeCasts.sql:75
-skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
-query BOOLEAN rowsort
-select '1' like 1 FROM t
-----
-true
-
-# implicitTypeCasts.sql:76
-skipif transformer refused-implicit-text # a function, LIKE or || takes a STRING
-query BOOLEAN rowsort
-select '1 ' like 1 FROM t
-----
-false

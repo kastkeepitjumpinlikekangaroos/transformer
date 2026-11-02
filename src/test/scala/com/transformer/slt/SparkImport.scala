@@ -383,6 +383,25 @@ object SparkImport {
     def close(): Unit = views.close()
   }
 
+  /** `f` run with the JVM's default locale and time zone those of the
+    * whole-suite configuration `zone` (`.bazelrc`), Turkish and
+    * `America/St_Johns`, as `slt_test --config=zone` runs every record. */
+  def inZoneConfig[T](f: => T): T = {
+    val (locale, zone) = (Locale.getDefault, java.util.TimeZone.getDefault)
+    Locale.setDefault(Locale.forLanguageTag("tr-TR"))
+    java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("America/St_Johns"))
+    try f
+    finally { Locale.setDefault(locale); java.util.TimeZone.setDefault(zone) }
+  }
+
+  /** Whether two runs of a record had one outcome: the same printed answer,
+    * or a failure with the same message. */
+  private def sameOutcome(a: EngineOutcome, b: EngineOutcome, sort: SortMode): Boolean = (a, b) match {
+    case (x: Answer, y: Answer) => x.types == y.types && printed(x, sort) == printed(y, sort)
+    case (x: Failure, y: Failure) => x.message == y.message
+    case _ => false
+  }
+
   // ---------------------------------------------------------------------------
   // Why the engine answers otherwise
   // ---------------------------------------------------------------------------
@@ -513,6 +532,8 @@ object SparkImport {
 
   private val RefusedForAnotherReason = "refused for another reason:"
 
+  private val ZoneDependent = "another outcome under the zone configuration's Turkish locale and St John's time:"
+
   private def columnsText(types: Seq[DataType]): String = types.map(Script.typeName).mkString(",")
 
   private def sortOf(sql: String): SortMode =
@@ -568,6 +589,7 @@ object SparkImport {
           cells.zip(types).map { case (v, t) => sparkValue(v, t) }
         }
       val outcome = engine.query(sql)
+      val zoned = inZoneConfig(engine.query(sql))
       val c = Case(g, sql, types, rows, outcome)
       val sparkRecord =
         if (g.isError) Seq("statement error", sql).mkString("\n")
@@ -577,6 +599,11 @@ object SparkImport {
         s"${columnsText(types)} ${rows.map(_.mkString(" ")).mkString(" | ")}", why)
       (g.isError, outcome) match {
         case (_, f: Failure) if !f.clean => held(s"an internal error: ${Runner.describe(f.error)}")
+        case _ if !sameOutcome(outcome, zoned, sort) =>
+          held(s"$ZoneDependent ${zoned match {
+            case f: Failure => Runner.describe(f.error)
+            case a: Answer => printed(a, sort).map(_.mkString(" ")).mkString(" | ")
+          }}")
         case (true, f: Failure) if sparkReason(g.errorClass) == engineReason(f) =>
           Kept(Seq(comment(notes), "statement error", sql, "----", reasonWords(f.message)).mkString("\n"), None,
             rewritten.notes)
@@ -726,8 +753,16 @@ object SparkImport {
         header += f"#   $refusedByBoth%4d  both engines refuse it, for different reasons, which is no"
         header += "#         agreement: each is held for the user (plans/testing/10)"
       }
-      if (held > refusedByBoth)
-        header += f"#   ${held - refusedByBoth}%4d  the engine answers otherwise, by no rule of the ledger: held for the user"
+      val zoneDependent = all.count {
+        case (_, _, h: Held) => h.engine.startsWith(ZoneDependent)
+        case _ => false
+      }
+      if (zoneDependent > 0) {
+        header += f"#   $zoneDependent%4d  the engine's outcome changes under a Turkish default locale (the"
+        header += "#         whole-suite configuration zone), a defect held for the user"
+      }
+      if (held > refusedByBoth + zoneDependent)
+        header += f"#   ${held - refusedByBoth - zoneDependent}%4d  the engine answers otherwise, by no rule of the ledger: held for the user"
 
     }
     (header.mkString("\n") +: kept.map(_.text)).mkString("\n\n") + "\n"

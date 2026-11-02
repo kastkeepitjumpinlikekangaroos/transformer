@@ -2306,6 +2306,15 @@ the ledger below, decided before the port. What the scripts leave out:
   a STRING, a BOOLEAN or a TIMESTAMP, where Spark refuses the frame's type and
   the engine `PARTITION BY 1` first (`window-constant-key`). No answer differs
   in any of them, and the recommendation is to leave them out as they are.
+- **Records whose outcome changes with the JVM's locale** (3), held out as a
+  defect: implicitTypeCasts.sql writes `like` in lower case (`select 1 like
+  '%'`), and under a Turkish default locale, as the whole-suite configuration
+  `zone` runs, JSqlParser upper-cases the keyword to `LİKE`, which is no
+  constant of its `LikeExpression.KeyWord`, and the query is a parse error
+  naming the parser's class. Upper-case `LIKE` parses in every locale. The
+  converter runs each record in that locale too and holds out any whose
+  outcome changes. The recommendation is for the parser to read SQL in a
+  locale-independent way (the user's choice how: plans/testing/10's Outcome).
 
 ## Answers that differ from other engines by design
 

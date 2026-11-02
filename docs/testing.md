@@ -448,21 +448,26 @@ of the types' pairs over one construct: `binary_comparison` (121 of its 265
 statements), `boolean_equality` (37 of 97), `case_when` (82 of 145),
 `decimal_precision` (673 of 1,145, every operator of a value of each type
 beside a `DECIMAL` at four precisions), `division` (82 of 145), `if` (82 of
-145), `implicit_casts` (30 of 47), `in` (156 of 289), `promote_strings` (198 of
+145), `implicit_casts` (27 of 47), `in` (156 of 289), `promote_strings` (198 of
 316), `string_cast` (8 of 32), `union` (82 of 145) and `window_frame` (16 of
 25); `arrayJoin`, `concat`, `dateTimeOperations`, `elt`, `mapconcat` and
-`mapZipWith` have none. Of the 1,593 statements the thirteen Spark scripts
-hold, 619 queries answer as Spark does, type and value; 492 are errors both
-engines raise for one reason (the types do not meet, text is no value of its
-type, a value is past its type); 28 build tables; and 467 are skipped by 14
-rules of the ledger (below), each followed by its twin but under a refusal.
+`mapZipWith` have none. Of the
+1,590 statements the thirteen Spark scripts hold, 619 queries answer as Spark
+does, type and value; 492 are errors both engines raise for one reason (the
+types do not meet, text is no value of its type, a value is past its type); 28
+build tables; and 464 are skipped by 14 rules of the ledger (below), each
+followed by its twin but under a refusal.
 1,317 statements are left out by what they need: `BINARY` and `X''` literals
 (306), `TINYINT` (306), `SMALLINT` (296), a function Spark has and the engine
 does not (183), the operator `<=>` (117), `INTERVAL` (37), a view over arrays,
 maps or Spark's `VALUES` (33), the `allowPrecisionLoss=false` half (26), and a
-few `TIME`s, Spark's `SET`s and literal suffixes. 42 more are held out: both
-engines refuse them, for different reasons, which is no agreement
-([plans/testing/10](../plans/testing/10-spark-typing-ports.md), Outcome).
+few `TIME`s, Spark's `SET`s and literal suffixes. 45 more are held out
+([plans/testing/10](../plans/testing/10-spark-typing-ports.md), Outcome): 42
+both engines refuse, for different reasons, which is no agreement, and 3 whose
+outcome changes under the `zone` configuration, since a lowercase `like` does
+not parse under a Turkish default locale. The converter runs every record in
+the `zone` configuration's locale and time zone as well as in the default, so
+a script it writes passes under both.
 
 **Golden plans** (Spark's PlanStabilitySuite, DuckDB's `EXPLAIN` records) are
 scripts under `src/test/slt/plan/` whose records are `EXPLAIN <query>`, the
@@ -532,7 +537,7 @@ script, as `FrontendFuzzTest`'s known defects fail it once they stop
 reproducing: `line 58: skipped as bool-text, but the engine now gives the
 record's answer, compared as BOOLEAN; remove the skip`. The corpus binary runs
 the same check and reports stale skips in a section of their own, and its
-report tallies the skips by rule. The scripts hold 913 skips:
+report tallies the skips by rule. The scripts hold 910 skips:
 
 | rule | skips | where |
 |---|---|---|
@@ -547,7 +552,7 @@ report tallies the skips by rule. The scripts hold 913 skips:
 | `math-domain-null` | 22 | `postgres/`: `numeric` 18, `float8` 4 |
 | `text-literal-typed` | 19 | `spark/type_coercion/`: `promote_strings` 16, `implicit_casts` 3 |
 | `window-constant-key` | 16 | `spark/type_coercion/window_frame` 15, `postgres/window` 1 |
-| `refused-implicit-text` | 15 | `spark/type_coercion/implicit_casts` |
+| `refused-implicit-text` | 12 | `spark/type_coercion/implicit_casts` |
 | `division-keeps-type` | 12 | `spark/type_coercion/`: `promote_strings` 6, `division` 5, `implicit_casts` 1 |
 | `refused-date-beside-timestamp` | 10 | `spark/type_coercion/`: `in` 4, `case_when`, `if` and `union` 2 each |
 | `refused-empty-in` | 8 | `sqlite/evidence/in2` |
