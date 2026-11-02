@@ -111,6 +111,12 @@ class PlanRoundTripFuzzTest {
     assertEquals(base, plan("SELECT x.a AS p, x.b AS q FROM t AS x WHERE x.a > 1 AND x.b < 2.5"))
     assertEquals(base, plan("WITH c AS (SELECT * FROM t) SELECT a, b FROM c WHERE a > 1 AND b < 2.5"))
     assertEquals(plan("SELECT -5 AS n"), plan("SELECT CAST('-5' AS INT) AS n"))
+    // The negation of a BIGINT literal, which the printer writes as a
+    // negation of the negative number's text (found by postgres/int8.test).
+    assertEquals(plan("SELECT -(CAST('-9223372036854775807' AS BIGINT)) AS n"),
+      plan("SELECT -(-9223372036854775807) AS n"))
+    assertNotEquals(plan("SELECT -(CAST('-9223372036854775807' AS BIGINT)) AS n"),
+      plan("SELECT -9223372036854775807 AS n"))
   }
 }
 

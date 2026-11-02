@@ -2331,10 +2331,19 @@ plans/robustness/24's rule). What the scripts hold out:
 - **Records both engines refuse, for different reasons**, held out as Spark's
   were, since one engine's refusal for another reason is no agreement. In
   each the engine refuses by a decided rule before it reaches what Postgres
-  refuses: int4.sql's six texts of a number one past `INT`'s range in base 2,
-  8 or 16 (`int4 '0x80000000'`), out of range for Postgres and no integer of
-  the engine's grammar (`int-text`). No answer differs. The recommendation is
-  to leave them out.
+  refuses: int4.sql's and int8.sql's six texts each of a number one past
+  `INT`'s or `BIGINT`'s range in base 2, 8 or 16 (`int4 '0x80000000'`), out of
+  range for Postgres and no integer of the engine's grammar (`int-text`). No
+  answer differs. The recommendation is to leave them out.
+- **An alias named `minus` is a parse error.** JSqlParser 5.2 reserves
+  `MINUS`, Oracle's spelling of `EXCEPT`, so `SELECT q1 - q2 AS minus FROM
+  INT8_TBL` (int8.sql:66 and 69), which Postgres runs, fails with `SQL parse
+  error: Encountered unexpected token: "minus" "MINUS"`, the parser's words;
+  `AS "minus"` runs, and the port writes it so, a rewrite that cannot change
+  what the query means. No doc lists the words a name must quote for the
+  parser. The recommendation is to say so where the README describes names
+  (`MINUS` with the words the parser reserves), and to name the word in the
+  refusal rather than the parser's tokens.
 
 ## Answers that differ from other engines by design
 
