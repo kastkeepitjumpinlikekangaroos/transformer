@@ -54,6 +54,7 @@ SELECT id, price * qty FROM p
 3	NULL
 4	19999999.98
 
+onlyif transformer decimal-result-type
 query INT,DECIMAL(13,6) rowsort
 SELECT id, price / 3 FROM p
 ----
@@ -73,6 +74,21 @@ query DECIMAL(12,2),DOUBLE
 SELECT price - price + 0.1 + 0.2, CAST(0.1 AS DOUBLE) + CAST(0.2 AS DOUBLE) FROM p WHERE id = 1
 ----
 0.30	0.30000000000000004
+
+# On its own a number written with a point is a DOUBLE, so 0.1 + 0.2 is the
+# DOUBLE nearest their sum.
+onlyif transformer double-literal
+query DOUBLE
+SELECT 0.1 + 0.2
+----
+0.30000000000000004
+
+# A math function of a DECIMAL computes in DOUBLE, and returns one.
+onlyif transformer double-precision
+query DOUBLE
+SELECT SQRT(price) FROM p WHERE id = 1
+----
+4.471017781221631
 
 statement error
 SELECT price + rate FROM p

@@ -149,3 +149,47 @@ statement error
 SELECT SUM(a) OVER (ORDER BY a ROWS BETWEEN CURRENT ROW AND 9223372036854775808 FOLLOWING) FROM t
 ----
 FOLLOWING offset 9223372036854775808 is larger than the largest BIGINT, 9223372036854775807
+
+# The refusals the ledger's rules name (docs/gotchas.md, "Answers that differ
+# from other engines by design"), each the pin of its rule.
+onlyif transformer refused-text-arithmetic
+statement error
+SELECT s + 1 FROM t
+----
+Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+
+onlyif transformer refused-empty-in
+statement error
+SELECT a FROM t WHERE a IN ()
+----
+IN needs at least one value in its list
+
+onlyif transformer refused-empty-in
+statement error
+SELECT a FROM t WHERE a NOT IN ()
+----
+NOT IN needs at least one value in its list
+
+onlyif transformer refused-hex-literal
+statement error
+SELECT x'303132' FROM t
+----
+A hexadecimal literal is not supported
+
+onlyif transformer refused-parenthesized-join
+statement error
+SELECT l.a FROM (t AS l CROSS JOIN t AS r)
+----
+A parenthesized join in FROM is not supported; write the joins without the parentheses
+
+onlyif transformer window-constant-key
+statement error
+SELECT a, RANK() OVER (ORDER BY 'b') FROM t
+----
+ORDER BY 'b' reads no column, so it orders nothing
+
+onlyif transformer window-constant-key
+statement error
+SELECT a, SUM(b) OVER (PARTITION BY 1 + 0) FROM t
+----
+PARTITION BY 1 + 0 reads no column, so it partitions nothing

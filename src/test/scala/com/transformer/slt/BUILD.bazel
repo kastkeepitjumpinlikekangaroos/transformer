@@ -40,6 +40,23 @@ scala_junit_test(
     ],
 )
 
+# The ledger in docs/gotchas.md: its table read strictly, and each rule
+# pinned by a record of the engine's own answer in a script of this repo's
+# own.
+scala_junit_test(
+    name = "ledger_test",
+    srcs = ["LedgerTest.scala"],
+    suffixes = ["Test"],
+    data = [
+        "//:docs/gotchas.md",
+        "//src/test/slt:scripts",
+    ],
+    deps = [
+        ":slt",
+        "@maven//:junit_junit",
+    ],
+)
+
 # Runs scripts given on the command line and reports every record that did
 # not pass; for audits over SQLite's corpus, not a gate.
 scala_binary(

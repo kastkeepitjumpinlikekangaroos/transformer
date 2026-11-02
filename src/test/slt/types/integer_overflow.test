@@ -61,6 +61,21 @@ SELECT a % -1, b % -1 FROM i
 0	0
 0	0
 
+# A whole number an INT holds is an INT, so two of them add as INTs and
+# overflow past INT's range, where SQLite's integers have 64 bits; the next
+# whole number is a BIGINT.
+onlyif transformer int-is-int
+query INT,BIGINT
+SELECT 2147483647, 2147483648
+----
+2147483647	2147483648
+
+onlyif transformer int-is-int
+statement error
+SELECT 2147483647 + 1
+----
+Integer overflow: 2147483647 + 1 does not fit INT
+
 # INT beside BIGINT widens to BIGINT before it adds, so this fits.
 query BIGINT
 SELECT a + CAST(1 AS BIGINT) FROM i WHERE id = 1
@@ -98,6 +113,7 @@ SELECT CAST(b AS INT) FROM i WHERE id = 1
 ----
 Integer overflow
 
+onlyif transformer cast-truncates
 query INT,INT
 SELECT CAST(2.7 AS INT), CAST(-2.7 AS INT)
 ----

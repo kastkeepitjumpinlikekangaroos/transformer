@@ -8,11 +8,20 @@ CREATE TABLE c (id INT, i INT, d DECIMAL(5,2), x DOUBLE)
 statement ok
 INSERT INTO c VALUES (1, 1, 1.25, 0.5), (2, 0, 2.50, 1.5), (3, NULL, NULL, NULL)
 
+onlyif transformer branch-double
 query INT,DOUBLE rowsort
 SELECT id, CASE WHEN i = 1 THEN 1 ELSE 2.5 END FROM c
 ----
 1	1.0
 2	2.5
+3	2.5
+
+onlyif transformer branch-double
+query INT,DOUBLE rowsort
+SELECT id, COALESCE(i, 2.5) FROM c
+----
+1	1.0
+2	0.0
 3	2.5
 
 query INT,DECIMAL(12,2) rowsort

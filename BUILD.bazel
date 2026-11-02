@@ -2,6 +2,14 @@
 load("@rules_scala//scala:scala.bzl", "scala_binary")
 load("@rules_scala//scala:scala_toolchain.bzl", "scala_toolchain")
 
+# The ledger of the engine's answers that differ from other engines' by
+# design is a table in docs/gotchas.md, which the SQL logic tests read: each
+# `skipif transformer <id>` in a script cites a row of it.
+exports_files(
+    ["docs/gotchas.md"],
+    visibility = ["//src/test/scala/com/transformer/slt:__pkg__"],
+)
+
 # The one jar a user needs: `bazel build //:transformer_deploy.jar`, then
 # `java -jar bazel-bin/transformer_deploy.jar run <jobDir>` (headless) or
 # `... gui [jobDir]` (desktop GUI). See README.md "Command line".

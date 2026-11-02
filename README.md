@@ -2130,9 +2130,10 @@ JDK 21 or newer (tested through JDK 25).
   parser can still take seconds over some balanced nesting: 25 nested `CAST`s
   run it past its time limit, a parse error that says so.
 - **`DECIMAL` math functions and statistics compute in `DOUBLE`.** Comparison,
-  arithmetic, `ABS`, `SUM` and `AVG` keep a `DECIMAL` exact, but `ROUND`,
-  `FLOOR`, `CEIL`, `TRUNC`, `SQRT`, `POWER` and the other math functions, and
-  `STDDEV` / `VARIANCE`, read a decimal as a `DOUBLE` and return one. There is
+  arithmetic, `ABS`, `SUM`, `AVG` and the rounding functions (`ROUND`,
+  `FLOOR`, `CEIL`, `TRUNC`) keep a `DECIMAL` exact, but `SQRT`, `POWER` and the
+  other math functions, and `STDDEV` / `VARIANCE`, read a decimal as a
+  `DOUBLE` and return one, which holds 15 to 17 significant digits. There is
   no `CAST` to a `DECIMAL`, so a query cannot choose a decimal result's type.
 
 ## Performance instrumentation

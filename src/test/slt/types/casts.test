@@ -1,0 +1,43 @@
+# Text casts by the grammar CSV reads a value by (plans/robustness/24): to a
+# BOOLEAN from true and false alone, in any case and with no spaces around
+# them, and to a FLOAT or DOUBLE from a plain decimal number, or NaN, Infinity
+# and -Infinity as written. Any other text is an error naming it. Postgres
+# reads more spellings of each, which its ports keep as skipped records
+# (postgres/boolean.test, postgres/float8.test); these are the pins of the
+# ledger's bool-text and double-text (docs/gotchas.md).
+
+onlyif transformer bool-text
+query BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN
+SELECT CAST('true' AS BOOLEAN), CAST('FALSE' AS BOOLEAN), CAST('True' AS BOOLEAN), CAST('fAlSe' AS BOOLEAN)
+----
+true	false	true	false
+
+onlyif transformer bool-text
+statement error
+SELECT CAST('t' AS BOOLEAN)
+----
+Cannot cast 't' to boolean
+
+onlyif transformer bool-text
+statement error
+SELECT CAST(' true' AS BOOLEAN)
+----
+Cannot cast ' true' to boolean
+
+onlyif transformer double-text
+query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,FLOAT
+SELECT CAST('NaN' AS DOUBLE), CAST('Infinity' AS DOUBLE), CAST('-Infinity' AS DOUBLE), CAST('-2.5' AS DOUBLE), CAST('1e3' AS DOUBLE), CAST('.5' AS FLOAT)
+----
+NaN	Infinity	-Infinity	-2.5	1000.0	0.5
+
+onlyif transformer double-text
+statement error
+SELECT CAST('nan' AS DOUBLE)
+----
+Cannot cast 'nan' to double
+
+onlyif transformer double-text
+statement error
+SELECT CAST(' 5' AS DOUBLE)
+----
+Cannot cast ' 5' to double
