@@ -47,7 +47,7 @@ parallel exchange / spill machinery.
 | [04](04-sql-logic-tests-and-whole-suite-configurations.md) | sqllogictest scripts under eleven verification modes, SQLite's corpus, the whole suite at batch capacity 1 / 2, sharded, serial, in another zone (**done** 2026-11-01) | 1 day | low | — |
 | [05](05-plans-as-sql.md) | Plans as SQL: plan validation after every pass, a printer the binder reads back, the round trip as an slt mode and a fuzz property, EXPLAIN and golden plans; then plan 04's next round (join order, a streaming pairing, hash zero, CSV column order, spill cost, Postgres ports) (**done** 2026-11-01, the Postgres ports' five findings decided and landed) | several days | low-medium | 04 |
 | [06](06-a-failed-run-leaves-no-partial-output.md) | A failed run leaves no partial output, and its rerun needs no cleanup: the defect the survey found, with the commit protocol the user chose, fault points at every write and a crash campaign (**done** 2026-11-01 overnight on `testing-round-3`: 5c2c5bc, 261d510, 0857a0e; one finding held out, a halt as a directory is created leaves it with no record) | 2-3 days | medium | none |
-| [07](07-compiler-warnings.md) | The compiler warns, and a warning fails the build | 2-3 days | low | none; land early |
+| [07](07-compiler-warnings.md) | The compiler warns, and a warning fails the build (**done** 2026-11-02 overnight on `testing-round-3`: d4cf5a1, 7519079, 0eff1a9, 029c683, 1c885d5, b8ede39, 9991420, b0cb011; every decision taken as recommended, unconfirmed; one finding held out, VimEngine's `:join` on the last line runs a macro on where Neovim stops it) | 2-3 days | low | none; land early |
 | [08](08-skips-cite-decisions.md) | Every skip names its decision, and a stale skip fails | 1-2 days | low | none; before 10-14 |
 | [09](09-semantics-tables.md) | The engine's rules as tables: one function catalog, the cast matrix, the coercion tables, a function sweep | 4-6 days | medium (W1) | 08; pairs with 10 |
 | [10](10-spark-typing-ports.md) | Spark's decimal and type-coercion tests, with Spark's ANSI answers | 3-5 days, +1-2 for CAST to DECIMAL | medium | 08; pairs with 09 |
@@ -114,7 +114,7 @@ protocol, and that a final record that cannot be written fails the task.
 | Defect | Status | Plan |
 |---|---|---|
 | A task that fails after its parts are committed (a later partition, a validation that throws, a record that cannot be written, a crash) leaves part files and no record, and the next run refuses the task until someone deletes them | fixed (5c2c5bc) | 06 |
-| The GUI's `ResultPersister` writes into a directory of stray part files and records every `part-*` there as its output | fixed (5c2c5bc) | 06 |
+| The GUI's `ResultPersister` writes into a directory of stray part files and records every `part-*` there as its output | fixed (5c2c5bc, before 07's warnings could) | 06 |
 | An INT or BIGINT beside a FLOAT is typed FLOAT: `CAST(16777217 AS INT) = CAST(16777216 AS FLOAT)` is TRUE, and `COALESCE(CAST(NULL AS FLOAT), 2147483647)` is 2.1474836E9 | confirmed | 10, decision 2 |
 | A parquet row group whose footer reports 0 bytes is never read: 25 rows read as none (`ParquetReader.packRowGroups`) | confirmed against pyarrow | 13, W1 |
 | Parquet refusals in parquet-mr's, Thrift's or the JVM's words: a NullPointerException's message for an unknown logical type, a missing LZ4 class | confirmed | 13, W2 |
@@ -124,7 +124,9 @@ protocol, and that a final record that cannot be written fails the task.
 | An abandoned query (a LIMIT, an error) keeps its files open until garbage collection and its spill directories until the JVM exits | suspected from the code | 17, decision 4 |
 | The nested-loop guard sizes an outer join smaller than the inner join it contains, so a restriction of an accepted query can be refused | suspected from the code | 16, decision 3 |
 | Parquet and spill write half a surrogate pair as `?` where `CsvWriter` refuses it, and gotchas.md says otherwise | read in the code | 17, decision 2 |
-| A coverage guard's failure message prints `${entry.example.get}` (a missing `s`), `MODULE.bazel` names a file rules_scala 7 does not have, conventions.md misnames the direct-deps check | found by the warnings | 07 |
+| A coverage guard's failure message prints `${entry.example.get}` (a missing `s`), `MODULE.bazel` names a file rules_scala 7 does not have, conventions.md misnames the direct-deps check | fixed (029c683, 9991420) | 07 |
+| `Row.getInt` and its siblings, and the row path's `ABS`, throw a bare `MatchError` on a value they have no case for | fixed (0eff1a9) | 07 |
+| VimEngine's `:join` on the last line ignores the failure, so a macro runs on where Neovim stops it | confirmed against Neovim 0.11.4, held for the user | 07 |
 | Nine `transformer.*` properties and seven `TRANSFORMER_*` variables are read in eight classes, three of them documented nowhere | read in the bytecode | 18, decision 3 |
 
 ## Shared module (introduced in 01, extended in 02/03)
