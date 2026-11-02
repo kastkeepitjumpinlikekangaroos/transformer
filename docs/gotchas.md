@@ -597,6 +597,31 @@ ship a fix or move something from "not done" to "done".
   `bazel cquery <target> --toolchain_resolution_debug='@@rules_scala~//scala:toolchain_type'`
   shows the choice (`Selected //:scala_toolchain_impl`); if rules_scala's
   default won, the options would do nothing and nothing would fail.
+- **An interface jar makes a body-only change cheap to build, not to test.**
+  rules_scala compiles each Scala library to a jar and an interface jar
+  (`plan-ijar.jar`), and dependents compile against the interface. A change
+  inside a method body, such as a mutant (testing.md, "Mutation testing"),
+  recompiles its own library alone; every dependent's compile action is a
+  cache hit. But each test target holds the full jar in its runfiles, so every
+  test that depends on the library runs again. A changed constant (`final val
+  X = 1`) is in the interface and recompiles the dependents too.
+- **Bazel's action cache holds one result per output, not per input.** After
+  a build of a changed file, the cache entry for its library's jar is the
+  changed one's, so putting the file back recompiles the library: the
+  unmutated jar is gone. A disk cache (`--disk_cache`) is keyed by the
+  action's inputs and gives the old outputs back, which is why the mutation
+  runner keeps one: each kill reruns its target on the unmutated file, and the
+  next mutant may be in another library.
+- **JUnit prints its total time in the JVM's locale.** Under tr-TR,
+  `job:locale_independence_test`'s log ends `Time: 0,688`, which a parser
+  reading `,` as a thousands separator takes for 688 seconds. Read a test's
+  duration from its `test.xml` or Bazel's build event protocol
+  (`testAttemptDurationMillis`), as the mutation runner does.
+- **A mutated loop condition can hang a test.** `while (!done)` with its `!`
+  dropped never runs its body, and a reader that returns an empty row instead
+  of the end of its input loops forever. Each stage of a mutation campaign
+  runs under `--test_timeout`, three times its slowest target's baseline (at
+  least 60 s), and such a mutant's outcome is `timeout`.
 - **A constant pool does not say which method calls.** A class file's pool
   lists every class, field and method the class refers to, and holds no code:
   a reference is placed in a method only by decoding the method's Code

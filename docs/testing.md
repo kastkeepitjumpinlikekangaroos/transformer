@@ -210,6 +210,7 @@ manifest that could not reach a Failed or Skipped task's `_run.json` — and, re
 | `bytecode/classfile_test` | The class-file reader every test over compiled classes shares (`bytecode:classfile`, `ClassFile.scala`: hand-written from JVMS chapter 4, no bytecode library). In a fixture compiled with the test, a `Double.compare` call, a raw `<` between two doubles, a comparison with `0.0` on either side and with an Int constant widened by `i2d` (`x > 3`), a string `match` (a switch on `hashCode`), a field read and a string constant are each found in the method that holds them, with its source line, and a call in a lambda in the lambda's `$anonfun$` method, its handle in the method that makes it; hand-assembled code decodes `tableswitch` and `lookupswitch` at each of the four paddings and `wide` before a load and an `iinc`; every method of the Scala library and of `java.base` decodes to its last byte, and every reference their pools hold is found in some method |
 | `bytecode/bytecode_rules_test` | The rules of `BytecodeRules.scala` (plans/testing/18), held under tr-TR over the compiled classes of every module a job runs (core, sql, read, write, job, temporal, cli, gui:session) and of the desktop GUI and the data viewer (gui:vim, gui:chart, gui:components, gui, viewer:model, viewer, read at run time through `runtime_deps`). **R1**: no module a job runs calls a default-locale `toLowerCase()`, `toUpperCase()`, `String.format`, `formatted`, `f"..."`, `DateTimeFormatter.ofPattern(p)` or `NumberFormat.getInstance()`, and no desktop module folds case in the default locale (their display text may format a number in the user's locale, plans/testing/04). In the engine (core, sql, read, write, job, temporal): **R2**, no `Double.compare`, `Float.compare`, boxed `compareTo` or `equals`, and no raw float comparison between two values (`dcmpg` and the rest, neither side a constant), but in `Ops.floatCompare`, `MinMaxState`'s and `pickByOrdering`'s decided tie-breaks and five comparisons of no SQL value; **R3**, no float's raw bits (`doubleToLongBits` and the rest) but in `KeyCodec`'s key bits and `HashPartitioner.decimalHash`; **R4**, no string ordering (`String.compareTo`, `<` on strings) but in `Ops.cmp`; **R9**, no `toEpochDay`, `getEpochSecond`, `getNano` or `ChronoUnit.between` but in `DateVector.epochDay` and `TimestampVector.epochMicros`. In every module a job runs: **R5**, no wall-clock read (`System.currentTimeMillis`, a `java.time` `now()`, `Clock.system*`) but `CURRENT_DATE`'s statement start, the default execution time (`TemporalVariables`, the CLI's, the GUI session's) and a run's record stamps (`DataJob`); **R6**, no random source (`Random`, `ThreadLocalRandom`, `SplittableRandom`, `Math.random`, `UUID.randomUUID`) but `RAND()`'s, the chaos points' held for the user. In the engine again: **R8**, no `System.getProperty`, `System.getenv`, `Boolean.getBoolean`, `sys.props` or `sys.env`, and no `transformer.*` or `TRANSFORMER_*` name, but in `core/Settings` (decision 3); **R7**, no printing, exiting or sleeping (`System.out`, `System.err`, `println`, `printStackTrace`, `System.exit`, `Runtime.halt`, `Thread.sleep`) but the fault hook's armed halt, the leak audit's exit report held for the user. In every module, the desktop's too: **R10**, no default charset or zone (`String.getBytes()`, `new String(bytes)`, a reader, writer or `PrintStream` without a charset, `Charset.defaultCharset`, `TimeZone.getDefault`, `ZoneId.systemDefault`, `Clock.systemDefaultZone`). A failure names the rule, each site with its source line and what to write instead, and the rule's advice; an allowlist entry whose method no longer does what its rule bans fails as stale. Also: each module is a jar of its own; every `com.transformer` class a scanned class names is in a scanned module, so a new module cannot go unread; every reference a pool holds is found in a method; an entry covers its method's lambdas, and `*` its class |
 | `//tools/mutation:mutator_test` | The [mutation tool](#mutation-testing)'s lexer and mutator over fixtures under `tools/mutation/testdata/`: a string (an escaped quote, a triple-quoted one with quotes before its end, an interpolation with braces and strings of its own and one inside another), a character literal such as `'<'`, a nested block comment and a backquoted name are each one token and hold no site; numbers; an unclosed string fails naming its line; each of the eight operators finds the sites of its fixture and none of the look-alikes beside them (`<-`, `=>`, `<:`, `<<`, a `*` of repeated parameters, a `+` beside a string, a sign after an `if` header, a call that continues on the next line or is a block's value); every mutant is its source with its site's tokens replaced and nothing else, a token operator's site one token; a sample deals each file's quota an operator at a time and is fixed by its seed; the ledger leaves out an equivalent mutant by its line's text, wherever the line moved |
+| `//tools/mutation:runner_test` | The mutation runner's decisions over a scripted executor and a file held in memory: a target that fails only on the mutant kills it at its stage, after a rerun on the unmutated file without the cache, and the later stages do not run; a target that fails on the unmutated file too kills nothing; one that fails at random over 400 mutants kills one only when its rerun passes; a timeout, a mutant that does not compile (no test runs) and a test target that does not build with it; the file put back when a test run throws; a mutant whose site the file no longer holds refused; the build event protocol read for each target's worst shard, its longest attempt, a target that did not build, and a `test.xml`'s failed tests |
 | `job/json_test` | The stdlib JSON parser in `job/Json.scala` — scalars, escapes, nested objects, arrays, type errors, trailing content, scalar→string coercion for the option map; **`Json.escape` writes any string as JSON text UTF-8 holds and `parse` reads back unchanged**: every control character, a surrogate pair as itself, and half of one or a reversed pair as `\u` escapes (written raw, half a pair failed the whole file's write); **a key written twice in one object** is an error naming it, where the second value won (`errorsOnAKeyWrittenTwice`, plans/robustness/27) |
 | `job/job_files_test` | The GUI's job-directory writes (`JobFiles`): names, collisions, minimal and full configs, relative and cloud paths, updates, deletes, JSON that parses back, and **what the loader would refuse is refused before writing** (`addInput_rejectsWhatTheLoaderWould`: an unknown option, a value its option cannot take and a format that is none, for an input and a table, leave nothing on disk, plans/robustness/27) |
 | `job/directory_job_loader_test` | End-to-end `DirectoryJobLoader.load(...)`: basic run, relative vs absolute input paths, validations dir (success + failure), templated input paths + outputDir, alphabetical chaining, default outputDir, JSON scalar→option-map coercion, error cases (no/multiple `.json`, missing `main.sql`, missing jobDir), **per-table `output.json` `partitionBy` extends output path, absent leaves path unchanged, malformed throws**, **default `jobRunOutput` lands at `<outputDir>/job.json`**; **a key, option or value the loader cannot read fails the load** (`aKeyOrValueTheLoaderCannotReadFailsTheLoad`: each row of plan 27's table, an unknown input key, a misspelt CSV option, `"header": "yes"`, an unknown format, a key written twice, a misspelt `output.json` key, `"spill": "yes"`, a size with a unit, an option of the other format and an unknown compression, each naming the file, the key and what it takes, while a config of every accepted key loads, plans/robustness/27) |
@@ -1890,8 +1891,9 @@ campaign measures what they would catch: a mutant is a small deliberate
 defect in a source (`<` for `<=`, `&&` for `||`, a dropped `!`, a deleted
 cleanup call), and a suite that passes with a mutant in place has a blind spot
 exactly there. `//tools/mutation` (package `com.transformer.tools.mutation`)
-makes the mutants and keeps the ledger of mutants that change no behaviour.
-It links nothing of the engine, and needs nothing from outside the repo.
+makes the mutants, runs each through Bazel as the suite runs, and keeps the
+ledger of mutants that change no behaviour. It links nothing of the engine,
+and needs nothing from outside the repo.
 
 ### The operators
 
@@ -1928,26 +1930,94 @@ declared `: Unit`): elsewhere it is the block's value, and deleting it would
 not compile. `//tools/mutation:mutator_test` holds each operator to a fixture
 under `tools/mutation/testdata/`.
 
-### Listing and sampling mutants
+### Running a campaign
 
-The tool is built once in the repo and run with the output base's JDK 21 (the
-system `java` may be older):
+The tool is built once in the repo and run from outside it, with the output
+base's JDK 21 (the system `java` may be older). Mutants run in a git worktree
+outside the repo, at a clean commit, with an output base and a disk cache of
+their own: the runner refuses a worktree with changes, so a peer's uncommitted
+edits never reach a mutant's baseline, and the repo's own `bazel test //...`
+never sees a worktree (one under `.claude/worktrees` breaks it unless a
+`.bazelignore` names it). Check `df` first: the output base takes about 2 GB.
 
 ```bash
 bazel build //tools/mutation:mutate_deploy.jar
 S=<scratch directory>
 cp bazel-bin/tools/mutation/mutate_deploy.jar $S/mutate.jar
 JAVA="$(bazel info output_base)/external/rules_java~~toolchains~remotejdk21_macos_aarch64/bin/java"
+git worktree add --detach $S/mwt HEAD
+cp MODULE.bazel.lock $S/mwt/            # untracked; spares the worktree a module resolution
 
 # Every site of every operator in a file, with the line it is on.
 $JAVA -jar $S/mutate.jar sites src/main/scala/com/transformer/read/csv/CsvRowParser.scala
 # The mutants to run: every site, or a sample stratified by operator
 # (--per-file N): each file's quota dealt out an operator at a time. The seed
 # fixes the draw; the ledger's mutants are left out.
-$JAVA -jar $S/mutate.jar sample --per-file 15 --seed 19 <file>... > $S/mutants.tsv
-# One mutant written into its file, to see a test kill it; then put it back.
-$JAVA -jar $S/mutate.jar apply --mutants $S/mutants.tsv --id m012
-git checkout -- <file>
+cd $S/mwt && $JAVA -jar $S/mutate.jar sample --per-file 15 --seed 19 <file>... > $S/mutants.tsv
+# Run them. Each result is appended to $S/out/results.tsv as it is decided, and
+# a run that stops can be started again: what is in results.tsv is skipped.
+$JAVA -jar $S/mutate.jar run --repo $S/mwt --output-base $S/ob --disk-cache $S/dc \
+    --out $S/out --mutants $S/mutants.tsv [--sharded 'ExchangeExec|Scheduler']
+# The tables, killed / timed out / survived / stillborn per file and operator.
+$JAVA -jar $S/mutate.jar report $S/out/results.tsv
+# One mutant written into its file, to see a new test kill it; then put it back.
+$JAVA -jar $S/mutate.jar apply --repo $S/mwt --mutants $S/mutants.tsv --id m012
+git -C $S/mwt checkout -- <file>
+# Afterwards.
+cd $S/mwt && bazel --output_base=$S/ob clean --expunge && cd - && git worktree remove $S/mwt
+```
+
+**The stages.** For each file, `bazel query` finds its label, the targets
+that compile it (`rdeps` at depth 1) and every test that depends on it, less
+those tagged `manual`, `fuzz` or `perf` (the default suite's filter;
+`--exclude-tags` changes it). They run in stages, and a mutant is killed at
+the first stage in which a test fails; the later stages do not run:
+
+1. the tests of the file's own package (the package it is in, or its twin
+   under `src/test`);
+2. `sql/exec:sql_engine_test`, `slt:slt_test` and the `job` tests;
+3. every other test that depends on the file, the default-budget fuzz tests
+   among them;
+4. for the files `--sharded` matches, stages 1 and 2 again under
+   `--config=sharded`, since a defect in an exchange shows only when rows
+   move between shards.
+
+**The run.** The runner first runs every stage's targets once, uncached, on
+the unmutated tree: the baseline must be green, and each target's longest
+attempt there sets its stage's timeout, three times the stage's slowest
+target (at least 60 s), passed to Bazel as `--test_timeout` (a mutated loop
+condition can loop forever). Then, for each mutant, it writes the mutated
+file, builds the targets that compile it (a mutant that does not compile is
+**stillborn**, and the compiler's first error is its note; the build's warnings
+are errors, so a mutant that leaves a value unused is stillborn too), runs the
+stages, and puts the file back whatever happened. A target that fails a stage
+is run once more on the unmutated file without Bazel's cached result: one
+that fails there too is flaky, kills nothing (the note names it), and the
+stages go on. After each mutant, what the disk cache gained is deleted; what
+the unmutated tree built stays, so putting a file back puts every action back
+on the cache.
+
+**Outcomes.** `results.tsv` holds a line a mutant: its id, file, line, column,
+operator, the original and mutated text, the outcome (`killed`, `timeout`,
+`survived` or `stillborn`), the stage, target and JUnit tests that killed it,
+its seconds and a note. Bazel's results are read from its build event protocol
+(`--build_event_json_file`) and each failed target's `test.xml`, never from
+the console: JUnit prints its `Time:` line in the JVM's locale, so
+`job:locale_independence_test`'s log under tr-TR says `Time: 0,688`, which a
+parser reading `,` as a thousands separator takes for 688 seconds. Each Bazel
+invocation's console is kept under `out/logs/`, and the run's progress in
+`out/progress.log`.
+
+**The flaky-kill check.** `//tools/mutation:runner_test` drives the runner
+with a target that fails at random over 400 mutants: it kills a mutant only
+when its rerun on the unmutated file passes. The same check through Bazel
+runs on a fixture, `tools/mutation/testdata/flaky`, whose `flaky_test`
+(tagged `manual`) fails half its runs whatever its source says:
+
+```bash
+cd $S/mwt && $JAVA -jar $S/mutate.jar sample --repo . tools/mutation/testdata/flaky/Flaky.scala > $S/flaky.tsv
+$JAVA -jar $S/mutate.jar run --repo $S/mwt --output-base $S/ob --disk-cache $S/dc \
+    --out $S/flaky --mutants $S/flaky.tsv --exclude-tags 'fuzz|perf'
 ```
 
 ### Survivors and the ledger

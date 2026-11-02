@@ -1,0 +1,22 @@
+load("@rules_scala//scala:scala.bzl", "scala_junit_test", "scala_library")
+
+# A source for the runner to mutate, and a test that fails at random whatever
+# the source says: none of its failures may count as a kill unless the test
+# passes when run again on the unmutated source (docs/testing.md, "Mutation
+# testing", the flaky-kill check). The test is tagged manual, so `bazel test
+# //...` leaves it out; `mutate run --exclude-tags 'fuzz|perf'` takes it.
+scala_library(
+    name = "flaky",
+    srcs = ["Flaky.scala"],
+)
+
+scala_junit_test(
+    name = "flaky_test",
+    srcs = ["FlakyTest.scala"],
+    suffixes = ["Test"],
+    tags = ["manual"],
+    deps = [
+        ":flaky",
+        "@maven//:junit_junit",
+    ],
+)

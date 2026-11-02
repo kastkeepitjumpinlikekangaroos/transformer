@@ -9,6 +9,10 @@ import java.nio.file.{Files, Path, Paths}
   * mutate sites <file>...                       every site of every operator
   * mutate sample [--per-file N] [--seed S] [--ledger F] [--repo D] <file>...
   *                                              the mutants to run, as TSV
+  * mutate run --repo D --output-base D --disk-cache D --out D --mutants F
+  *            [--sharded REGEX] [--exclude-tags REGEX]
+  *                                              run them in a worktree
+  * mutate report <results.tsv>                  the tables, as Markdown
   * mutate apply --repo D --mutants F --id ID    write one mutant into its file
   * }}}
   *
@@ -19,9 +23,11 @@ object Main {
   def main(args: Array[String]): Unit = args.toList match {
     case "sites" :: files if files.nonEmpty => sites(files)
     case "sample" :: rest => sample(rest)
+    case "run" :: rest => run(rest)
+    case "report" :: results :: Nil => print(Report.markdown(Sample.readTsv(Paths.get(results))))
     case "apply" :: rest => applyOne(rest)
     case _ =>
-      System.err.println("usage: mutate sites|sample|apply ... (see docs/testing.md, \"Mutation testing\")")
+      System.err.println("usage: mutate sites|sample|run|report|apply ... (see docs/testing.md, \"Mutation testing\")")
       sys.exit(2)
   }
 
@@ -49,6 +55,16 @@ object Main {
     val mutants = Sample.mutants(files.map(f => f -> read(repo, f)), quota, seed, ledger)
     println(Sample.MutantHeader)
     mutants.foreach(m => println(Sample.mutantRow(m)))
+  }
+
+  private def run(args: List[String]): Unit = {
+    val (opts, _) = options(args)
+    def path(name: String) = Paths.get(opts.getOrElse(name, throw new IllegalArgumentException(s"--$name is required"))).toAbsolutePath
+    val repo = path("repo")
+    val mutants = Sample.readMutants(path("mutants"), read(repo, _))
+    val sharded = opts.get("sharded").map(_.r)
+    Campaign.run(repo, path("output-base"), path("disk-cache"), path("out"), mutants,
+      f => sharded.exists(_.findFirstIn(f).isDefined), opts.getOrElse("exclude-tags", Campaign.ExcludedTags))
   }
 
   private def applyOne(args: List[String]): Unit = {

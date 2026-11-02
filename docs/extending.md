@@ -1434,6 +1434,28 @@ kind of small defect `tools/mutation/Mutator.scala` plants:
    its site, and `eachOperatorHasAFixture` fails until the fixture is listed.
 4. Add its row to docs/testing.md's operator table.
 
+## Run mutation testing on a new module
+
+A campaign takes any Scala source under a Bazel package; what it needs is
+in the BUILD files:
+
+- The library that compiles the source lists it in `srcs`, and its tests
+  depend on that library. The stages come from `bazel query` over those
+  dependencies, so a test that reaches the module only through a deploy jar or
+  a data file never runs against its mutants.
+- Stage 1 is the source's own package and its twin under `src/test`; a
+  module whose unit tests live elsewhere runs them at stage 3, after the
+  slower suites.
+- Code whose defects show only under a whole-suite configuration gets
+  `--sharded <regex of its paths>`, which adds a stage under
+  `--config=sharded`.
+- Run its files with `mutate sites` first: a file with no sites of an
+  operator gets none in a sample, and a file of many sites of one operator is
+  a reason to raise `--per-file` for it alone.
+
+Then sample, run and triage as docs/testing.md says, and add the file to the
+next campaign's list there.
+
 ## Add cloud support (v1.1 work)
 
 The interfaces are already in place:

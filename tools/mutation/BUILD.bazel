@@ -2,14 +2,19 @@ load("@rules_scala//scala:scala.bzl", "scala_binary", "scala_junit_test", "scala
 
 # The mutation tool (docs/testing.md, "Mutation testing"): a lexer and the
 # mutator that lists every site of each mutation operator in a Scala source,
-# the stratified sample and the ledger of equivalent mutants. It links nothing
-# of the engine it mutates.
+# the stratified sample and the ledger of equivalent mutants, and the runner
+# that takes each mutant through Bazel's stages in a worktree. It links
+# nothing of the engine it mutates.
 scala_library(
     name = "mutation",
     srcs = [
+        "BuildEvents.scala",
+        "Campaign.scala",
         "Ledger.scala",
         "Lexer.scala",
         "Mutator.scala",
+        "Report.scala",
+        "Runner.scala",
         "Sample.scala",
     ],
 )
@@ -29,6 +34,20 @@ scala_junit_test(
     name = "mutator_test",
     srcs = ["MutatorTest.scala"],
     data = glob(["testdata/*.txt"]),
+    suffixes = ["Test"],
+    deps = [
+        ":mutation",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The runner's decisions over a scripted executor: stages in order up to the
+# first kill, a target that fails on the unmutated file too killing nothing (a
+# target that fails at random among them), timeouts, stillborn mutants, the
+# file put back; and the build event protocol read.
+scala_junit_test(
+    name = "runner_test",
+    srcs = ["RunnerTest.scala"],
     suffixes = ["Test"],
     deps = [
         ":mutation",

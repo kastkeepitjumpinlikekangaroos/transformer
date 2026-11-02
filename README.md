@@ -2382,8 +2382,9 @@ under `--config=batch1`, `batch2`,
 under three runtime checks: `verify` checks every batch every operator emits
 against the schema it declares, `leaks` fails a target whose JVM leaves a
 file, a spill directory or an engine thread behind, and `chaos` perturbs every
-handoff between threads by a seed. `//tools/mutation` lists the small defects
-a mutation campaign plants in a source, one operator at a time
+handoff between threads by a seed. A mutation campaign (`//tools/mutation`)
+measures what the suite would catch: it plants small defects in the engine's
+sources, one at a time, and lists each one no test fails on
 ([docs/testing.md](docs/testing.md#mutation-testing)). Before landing a
 change, also run the jaffle-shop example (see [Examples](#examples)).
 [docs/testing.md](docs/testing.md) has the details.
