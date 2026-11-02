@@ -13,27 +13,27 @@ class HashKeysTest {
   // ---------------------------------------------------------------------------
 
   @Test def forColumnsPicksPackedBytesForFixedWidthOnly(): Unit = {
-    val c = KeyCodec.forColumns(Array(0, 1), Array(DataType.LongType, DataType.IntType))
+    val c = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.LongType, DataType.IntType))
     assertTrue(c.isInstanceOf[PackedBytesCodec])
   }
 
   @Test def forColumnsPicksObjectArrayWhenStringPresent(): Unit = {
-    val c = KeyCodec.forColumns(Array(0, 1), Array(DataType.StringType, DataType.LongType))
+    val c = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.StringType, DataType.LongType))
     assertTrue(c.isInstanceOf[ObjectArrayCodec])
   }
 
   @Test def forColumnsPicksSingleObjectForSingleDecimal(): Unit = {
-    val c = KeyCodec.forColumns(Array(0), Array(DataType.DecimalType(10, 2)))
+    val c = KeyCodec.forColumns(Array(0), Array[DataType](DataType.DecimalType(10, 2)))
     assertTrue(c.isInstanceOf[SingleObjectKeyCodec])
   }
 
   @Test def forColumnsPicksSingleObjectForSingleBinary(): Unit = {
-    val c = KeyCodec.forColumns(Array(0), Array(DataType.BinaryType))
+    val c = KeyCodec.forColumns(Array(0), Array[DataType](DataType.BinaryType))
     assertTrue(c.isInstanceOf[SingleObjectKeyCodec])
   }
 
   @Test def forColumnsPicksSingleObjectForSingleString(): Unit = {
-    val c = KeyCodec.forColumns(Array(0), Array(DataType.StringType))
+    val c = KeyCodec.forColumns(Array(0), Array[DataType](DataType.StringType))
     assertTrue(c.isInstanceOf[SingleObjectKeyCodec])
   }
 
@@ -44,7 +44,7 @@ class HashKeysTest {
 
   @Test def forColumnsRejectsMismatchedLengths(): Unit = {
     try {
-      KeyCodec.forColumns(Array(0, 1), Array(DataType.IntType))
+      KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.IntType))
       fail("expected IAE")
     } catch { case _: IllegalArgumentException => () }
   }
@@ -113,7 +113,7 @@ class HashKeysTest {
 
   @Test def packedRoundTripLong(): Unit = {
     val schema = Schema(Field("x", DataType.LongType))
-    val codec = KeyCodec.forColumns(Array(0), Array(DataType.LongType))
+    val codec = KeyCodec.forColumns(Array(0), Array[DataType](DataType.LongType))
     val src = new ColumnarBatch(schema, 4)
     val v = src.column(0).asInstanceOf[LongVector]
     v.set(0, 42L); v.set(1, -1L); v.setNull(2); v.set(3, Long.MaxValue)
@@ -146,8 +146,8 @@ class HashKeysTest {
     )
     val codec = KeyCodec.forColumns(
       Array(0, 1, 2, 3, 4, 5, 6),
-      Array(DataType.IntType, DataType.LongType, DataType.FloatType,
-            DataType.DoubleType, DataType.BooleanType, DataType.DateType, DataType.TimestampType))
+      Array[DataType](DataType.IntType, DataType.LongType, DataType.FloatType,
+                      DataType.DoubleType, DataType.BooleanType, DataType.DateType, DataType.TimestampType))
     assertTrue(codec.isInstanceOf[PackedBytesCodec])
 
     val src = new ColumnarBatch(schema, 1)
@@ -174,7 +174,7 @@ class HashKeysTest {
 
   @Test def packedNullsGroupTogether(): Unit = {
     val schema = Schema(Field("x", DataType.LongType), Field("y", DataType.IntType))
-    val codec = KeyCodec.forColumns(Array(0, 1), Array(DataType.LongType, DataType.IntType))
+    val codec = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.LongType, DataType.IntType))
     val b = new ColumnarBatch(schema, 3)
     val xs = b.column(0).asInstanceOf[LongVector]
     val ys = b.column(1).asInstanceOf[IntVector]
@@ -192,7 +192,7 @@ class HashKeysTest {
 
   @Test def packedSkipIfAnyNullReturnsJavaNull(): Unit = {
     val schema = Schema(Field("x", DataType.LongType), Field("y", DataType.IntType))
-    val codec = KeyCodec.forColumns(Array(0, 1), Array(DataType.LongType, DataType.IntType))
+    val codec = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.LongType, DataType.IntType))
     val b = new ColumnarBatch(schema, 2)
     val xs = b.column(0).asInstanceOf[LongVector]
     val ys = b.column(1).asInstanceOf[IntVector]
@@ -205,7 +205,7 @@ class HashKeysTest {
 
   @Test def packedBoxedAndDirectAgree(): Unit = {
     val schema = Schema(Field("x", DataType.LongType), Field("y", DataType.IntType))
-    val codec = KeyCodec.forColumns(Array(0, 1), Array(DataType.LongType, DataType.IntType))
+    val codec = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.LongType, DataType.IntType))
     val b = new ColumnarBatch(schema, 1)
     b.column(0).asInstanceOf[LongVector].set(0, 42L)
     b.column(1).asInstanceOf[IntVector].set(0, 7)
@@ -218,7 +218,7 @@ class HashKeysTest {
 
   @Test def packedDistinguishesColumnOrder(): Unit = {
     val schema = Schema(Field("a", DataType.IntType), Field("b", DataType.IntType))
-    val codec = KeyCodec.forColumns(Array(0, 1), Array(DataType.IntType, DataType.IntType))
+    val codec = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.IntType, DataType.IntType))
     val b = new ColumnarBatch(schema, 2)
     val xs = b.column(0).asInstanceOf[IntVector]
     val ys = b.column(1).asInstanceOf[IntVector]
@@ -238,7 +238,7 @@ class HashKeysTest {
 
   @Test def objectArrayRoundTripString(): Unit = {
     val schema = Schema(Field("s", DataType.StringType), Field("l", DataType.LongType))
-    val codec = KeyCodec.forColumns(Array(0, 1), Array(DataType.StringType, DataType.LongType))
+    val codec = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.StringType, DataType.LongType))
     assertTrue(codec.isInstanceOf[ObjectArrayCodec])
     val src = new ColumnarBatch(schema, 3)
     val ss = src.column(0).asInstanceOf[StringVector]
@@ -264,7 +264,7 @@ class HashKeysTest {
 
   @Test def objectArrayDifferentInstanceStringsCompareEqual(): Unit = {
     val schema = Schema(Field("s", DataType.StringType))
-    val codec = KeyCodec.forColumns(Array(0), Array(DataType.StringType))
+    val codec = KeyCodec.forColumns(Array(0), Array[DataType](DataType.StringType))
     val src = new ColumnarBatch(schema, 2)
     val ss = src.column(0).asInstanceOf[StringVector]
     ss.set(0, new String("foo".toCharArray)) // forces a fresh String instance
@@ -278,7 +278,7 @@ class HashKeysTest {
 
   @Test def objectArrayRoundTripBinary(): Unit = {
     val schema = Schema(Field("b", DataType.BinaryType))
-    val codec = KeyCodec.forColumns(Array(0), Array(DataType.BinaryType))
+    val codec = KeyCodec.forColumns(Array(0), Array[DataType](DataType.BinaryType))
     val src = new ColumnarBatch(schema, 1)
     src.column(0).asInstanceOf[BinaryVector].set(0, Array[Byte](7, 8, 9))
     src.setNumRows(1)
@@ -300,7 +300,7 @@ class HashKeysTest {
   @Test def objectArrayRoundTripDecimal(): Unit = {
     val dt = DataType.DecimalType(10, 2)
     val schema = Schema(Field("d", dt))
-    val codec = KeyCodec.forColumns(Array(0), Array(dt))
+    val codec = KeyCodec.forColumns(Array(0), Array[DataType](dt))
     val src = new ColumnarBatch(schema, 2)
     val dv = src.column(0).asInstanceOf[DecimalVector]
     dv.set(0, new java.math.BigDecimal("123.45"))
@@ -369,7 +369,7 @@ class HashKeysTest {
 
   @Test def objectArraySkipIfAnyNullReturnsJavaNull(): Unit = {
     val schema = Schema(Field("s", DataType.StringType), Field("l", DataType.LongType))
-    val codec = KeyCodec.forColumns(Array(0, 1), Array(DataType.StringType, DataType.LongType))
+    val codec = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.StringType, DataType.LongType))
     val b = new ColumnarBatch(schema, 2)
     b.column(0).asInstanceOf[StringVector].setNull(0)
     b.column(1).asInstanceOf[LongVector].set(0, 1L)
@@ -382,7 +382,7 @@ class HashKeysTest {
 
   @Test def objectArrayBoxedAndDirectAgree(): Unit = {
     val schema = Schema(Field("s", DataType.StringType), Field("l", DataType.LongType))
-    val codec = KeyCodec.forColumns(Array(0, 1), Array(DataType.StringType, DataType.LongType))
+    val codec = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.StringType, DataType.LongType))
     val b = new ColumnarBatch(schema, 1)
     b.column(0).asInstanceOf[StringVector].set(0, "abc")
     b.column(1).asInstanceOf[LongVector].set(0, 99L)
@@ -395,7 +395,7 @@ class HashKeysTest {
 
   @Test def objectArrayDistinguishesColumnOrder(): Unit = {
     val schema = Schema(Field("a", DataType.StringType), Field("b", DataType.StringType))
-    val codec = KeyCodec.forColumns(Array(0, 1), Array(DataType.StringType, DataType.StringType))
+    val codec = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.StringType, DataType.StringType))
     val b = new ColumnarBatch(schema, 2)
     b.column(0).asInstanceOf[StringVector].set(0, "x")
     b.column(1).asInstanceOf[StringVector].set(0, "y")
@@ -416,7 +416,7 @@ class HashKeysTest {
 
   @Test def packedKeysWorkAsHashMapKeys(): Unit = {
     val schema = Schema(Field("a", DataType.LongType), Field("b", DataType.IntType))
-    val codec = KeyCodec.forColumns(Array(0, 1), Array(DataType.LongType, DataType.IntType))
+    val codec = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.LongType, DataType.IntType))
     val b1 = new ColumnarBatch(schema, 1)
     b1.column(0).asInstanceOf[LongVector].set(0, 7L)
     b1.column(1).asInstanceOf[IntVector].set(0, 3)
@@ -432,7 +432,7 @@ class HashKeysTest {
 
   @Test def objectArrayKeysWorkAsHashMapKeys(): Unit = {
     val schema = Schema(Field("s", DataType.StringType), Field("l", DataType.LongType))
-    val codec = KeyCodec.forColumns(Array(0, 1), Array(DataType.StringType, DataType.LongType))
+    val codec = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.StringType, DataType.LongType))
     val b1 = new ColumnarBatch(schema, 1)
     b1.column(0).asInstanceOf[StringVector].set(0, "hi")
     b1.column(1).asInstanceOf[LongVector].set(0, 100L)

@@ -215,7 +215,7 @@ object TaskDag {
       case s: Select => cteNames(s)
       case _ => Set.empty[String]
     }
-    new TablesNamesFinder().getTableList(stmt).asScala.iterator
+    new TablesNamesFinder().getTables(stmt).asScala.iterator
       .map(name => SqlParser.unquote(name).toLowerCase(Locale.ROOT)).filterNot(ctes).toSet
   }
 

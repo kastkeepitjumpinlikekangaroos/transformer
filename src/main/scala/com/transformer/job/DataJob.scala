@@ -398,7 +398,7 @@ final case class DataJob(
     // runs this task body and the thread that signs the metrics snapshot are
     // the same (the executor's scheduler call), so the per-thread CPU /
     // allocation reads here are meaningful. GC is process-wide.
-    val tid = Thread.currentThread.getId
+    val tid = Thread.currentThread.threadId
     val cpu0 = if (opts.metricsEnabled) MetricsCollector.currentCpuNanos() else -1L
     val alloc0 = if (opts.metricsEnabled) MetricsCollector.currentAllocatedBytes(tid) else -1L
     val gc0 = if (opts.metricsEnabled) MetricsCollector.gcSample() else com.transformer.core.metrics.GcSample.Zero

@@ -156,7 +156,7 @@ object Values {
       if (math.abs(d) >= 1e15 || math.abs(d) < 1e-4) {
         val e = g.precision - g.scale - 1
         val digits = g.unscaledValue.abs.toString
-        val mant = if (digits.length == 1) digits + ".0" else digits.head + "." + digits.tail
+        val mant = if (digits.length == 1) digits + ".0" else s"${digits.head}.${digits.tail}"
         (if (d < 0) "-" else "") + mant + "e" + (if (e < 0) "-" else "+") + f"${math.abs(e)}%02d"
       } else g.toPlainString
     }

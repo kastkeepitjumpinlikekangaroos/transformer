@@ -138,7 +138,9 @@ object ExternalParquet {
         HadoopOutputFile.fromPath(new HPath(path.toUri), conf), schema, ParquetFileWriter.Mode.CREATE,
         // The groups are already cut; this bounds only padding, of which
         // there is none.
-        org.apache.parquet.hadoop.ParquetWriter.DEFAULT_BLOCK_SIZE.toLong, 0)
+        org.apache.parquet.hadoop.ParquetWriter.DEFAULT_BLOCK_SIZE.toLong, 0,
+        ParquetProperties.DEFAULT_COLUMN_INDEX_TRUNCATE_LENGTH, ParquetProperties.DEFAULT_STATISTICS_TRUNCATE_LENGTH,
+        ParquetProperties.DEFAULT_PAGE_WRITE_CHECKSUM_ENABLED)
       writer.start()
       groups.zipWithIndex.foreach { case ((rows, layout), i) =>
         val part = parts.resolve(s"group-$i.parquet")

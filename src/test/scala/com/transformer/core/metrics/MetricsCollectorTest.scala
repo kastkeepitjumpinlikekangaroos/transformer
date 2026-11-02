@@ -47,7 +47,7 @@ class MetricsCollectorTest {
   }
 
   @Test def currentAllocatedBytesIsConsistentlySignaled(): Unit = {
-    val tid = Thread.currentThread.getId
+    val tid = Thread.currentThread.threadId
     val v = MetricsCollector.currentAllocatedBytes(tid)
     if (MetricsCollector.supportsThreadAllocations)
       assertTrue(s"alloc bytes must be >= 0 on HotSpot, got $v", v >= 0L)

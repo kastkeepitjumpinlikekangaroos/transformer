@@ -676,6 +676,6 @@ class ParquetExternalFormatTest {
     assertTrue(view.withPushdownFilter(gt("n", DataType.LongType, java.lang.Long.valueOf(10L))).isDefined)
     assertTrue(view.withPushdownFilter(IsNullExpr(ColRefExpr(0, "u", DataType.LongType), negated = false)).isDefined)
     // Through the planner, the residual filter answers on the engine values.
-    assertEquals(Seq(Seq(4294967295L, 1.5f)), query("SELECT u, h FROM t WHERE u > 10 AND h > 1.0", "t" -> view))
+    assertEquals(Seq(Seq[Any](4294967295L, 1.5f)), query("SELECT u, h FROM t WHERE u > 10 AND h > 1.0", "t" -> view))
   }
 }
