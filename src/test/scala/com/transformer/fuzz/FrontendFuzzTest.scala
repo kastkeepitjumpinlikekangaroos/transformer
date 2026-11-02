@@ -289,7 +289,7 @@ class FrontendFuzzTest {
         case None =>
           problems += s"${entry.clause}: an entry on ${SqlTextGen.classesOf(entry).mkString(", ")} needs an example " +
             "written as SELECT <one item> FROM t or SELECT <items> FROM t [, u] WHERE <predicate>, so its clause " +
-            "can be spliced into every position; `${entry.example.get}` is neither"
+            s"can be spliced into every position; `${entry.example.get}` is neither"
         case Some(f) =>
           val sites = for { p <- SqlTextGen.positionsFor(f); c <- contexts if hosts((p.name, c)) } yield (p.name, c)
           val reached = sites.count { case (p, c) => fired.get((entry, p)).exists(_(c)) }
