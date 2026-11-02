@@ -306,18 +306,26 @@ object ParquetReader {
     Footers(schema, results.flatMap(_._2).toIndexedSeq, comparable)
   }
 
-  /** Greedily pack contiguous row groups into partitions whose summed
-    * `totalByteSize` stays close to `target`. A row group that is by itself
-    * larger than `target` becomes its own partition (we never split a row
-    * group across partitions — there's no public API to read part of one).
+  /** Greedily pack contiguous row groups into partitions of close to `target`
+    * bytes each. A row group that is by itself larger than `target` becomes
+    * its own partition (we never split a row group across partitions —
+    * there's no public API to read part of one).
+    *
+    * Every group lands in exactly one partition, whatever bytes its footer
+    * gives it: a group counts as the larger of its `total_byte_size` and its
+    * column chunks' compressed bytes, and as one byte at least, and the last
+    * partition closes whenever it holds a group. Packed by `total_byte_size`
+    * alone, with a partition emitted only when its bytes were above 0, a file
+    * whose writer left that field 0 read as empty (parquet-testing's
+    * `nation.dict-malformed.parquet`, 25 rows read as none, `COUNT(*)` 0), and a
+    * zero-byte group after a full partition was dropped the same way.
     */
-  private def packRowGroups(
+  private[parquet] def packRowGroups(
       hif: HadoopInputFile,
-      blocks: java.util.List[org.apache.parquet.hadoop.metadata.BlockMetaData],
+      blocks: java.util.List[BlockMetaData],
       target: Long
   ): IndexedSeq[PartitionMeta] = {
     val n = blocks.size
-    if (n == 0) return IndexedSeq.empty
     val out = mutable.ArrayBuffer.empty[PartitionMeta]
     var startGroup = 0
     var accBytes = 0L
@@ -325,21 +333,20 @@ object ParquetReader {
     var i = 0
     while (i < n) {
       val b = blocks.get(i)
-      val groupBytes = b.getTotalByteSize
-      val groupRows = b.getRowCount
+      val groupBytes = math.max(math.max(b.getTotalByteSize, b.getCompressedSize), 1L)
       // If adding this group would push us past target AND we already have at
       // least one group in the partition, close out the current partition first.
-      if (accBytes > 0L && accBytes + groupBytes > target) {
+      if (i > startGroup && accBytes + groupBytes > target) {
         out += PartitionMeta(hif, accRows, startGroup, i)
         startGroup = i
         accBytes = 0L
         accRows = 0L
       }
       accBytes += groupBytes
-      accRows += groupRows
+      accRows += b.getRowCount
       i += 1
     }
-    if (accBytes > 0L) out += PartitionMeta(hif, accRows, startGroup, n)
+    if (startGroup < n) out += PartitionMeta(hif, accRows, startGroup, n)
     out.toIndexedSeq
   }
 }

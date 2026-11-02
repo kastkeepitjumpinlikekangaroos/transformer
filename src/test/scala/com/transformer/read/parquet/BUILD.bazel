@@ -46,6 +46,8 @@ scala_library(
         "@maven//:org_apache_hadoop_hadoop_common",
         "@maven//:org_apache_parquet_parquet_column",
         "@maven//:org_apache_parquet_parquet_common",
+        # The footer's Thrift record, which rewriteFooter edits.
+        "@maven//:org_apache_parquet_parquet_format_structures",
         "@maven//:org_apache_parquet_parquet_hadoop",
     ],
     # A schema here is parquet-mr's MessageType, and a Layout names its
@@ -77,6 +79,10 @@ scala_junit_test(
         "//src/main/scala/com/transformer/sql/plan",
         "//src/main/scala/com/transformer/write/parquet",
         "@maven//:org_apache_parquet_parquet_column",
+        # The footer's Thrift record a test edits, and the row-group metadata
+        # the packing test hands the reader.
+        "@maven//:org_apache_parquet_parquet_format_structures",
+        "@maven//:org_apache_parquet_parquet_hadoop",
         "@maven//:junit_junit",
     ],
 )

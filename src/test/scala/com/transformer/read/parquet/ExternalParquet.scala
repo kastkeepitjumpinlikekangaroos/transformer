@@ -6,6 +6,7 @@ import org.apache.parquet.column.ParquetProperties
 import org.apache.parquet.column.ParquetProperties.WriterVersion
 import org.apache.parquet.example.data.Group
 import org.apache.parquet.example.data.simple.SimpleGroupFactory
+import org.apache.parquet.format.{FileMetaData, Util}
 import org.apache.parquet.hadoop.{ParquetFileWriter, ParquetReader => MrReader}
 import org.apache.parquet.hadoop.example.{ExampleParquetWriter, GroupReadSupport}
 import org.apache.parquet.hadoop.metadata.CompressionCodecName
@@ -14,6 +15,9 @@ import org.apache.parquet.io.api.Binary
 import org.apache.parquet.schema.{MessageType, MessageTypeParser}
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
+import java.nio.{ByteBuffer, ByteOrder}
+import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
@@ -187,6 +191,26 @@ object ExternalParquet {
       }
     } finally reader.close()
     out.toSeq
+  }
+
+  /** Rewrite the footer of the file at `path` in place: `edit` changes the
+    * format's own Thrift record of it (`org.apache.parquet.format`), as a
+    * writer that got a field wrong would have written it. The pages are left
+    * as they are, so every offset the footer gives still holds. */
+  def rewriteFooter(path: Path)(edit: FileMetaData => Unit): Unit = {
+    val bytes = Files.readAllBytes(path)
+    val footerLength = ByteBuffer.wrap(bytes, bytes.length - 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt
+    val footerStart = bytes.length - 8 - footerLength
+    val metadata = Util.readFileMetaData(new ByteArrayInputStream(bytes, footerStart, footerLength))
+    edit(metadata)
+    val footer = new ByteArrayOutputStream
+    Util.writeFileMetaData(metadata, footer)
+    val out = new ByteArrayOutputStream
+    out.write(bytes, 0, footerStart)
+    footer.writeTo(out)
+    out.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(footer.size).array)
+    out.write("PAR1".getBytes(StandardCharsets.US_ASCII))
+    Files.write(path, out.toByteArray)
   }
 
   /** The footer schema of `path`, as parquet-mr reads it. */

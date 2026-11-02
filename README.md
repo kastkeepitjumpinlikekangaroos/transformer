@@ -1030,7 +1030,9 @@ InputFilePath("data.csv",
 - Read: vectorized — `parquet-hadoop` open + `ColumnReadStoreImpl` decode
   straight into `ColumnarBatch` primitive vectors. No `Group`/`SimpleGroup`
   objects allocated per row. Row groups are packed into ~256MB partitions so a
-  multi-GB single file still saturates worker threads.
+  multi-GB single file still saturates worker threads. A row group counts as
+  the larger of its footer's uncompressed and compressed sizes, so one whose
+  writer left its size 0 is read too (it was skipped, and its rows lost).
 - A glob of parquet files is one view whose schema is the first file's. Every
   other file's columns are found **by name** and decoded as that file declares
   them, so the files may order their columns differently, add columns of their

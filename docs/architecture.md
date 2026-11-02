@@ -528,9 +528,11 @@ shared pool fixes that: total OS-level parallelism is bounded by `cores`, and
 when one stage blocks on I/O the others keep making progress.
 
 Parallelism still scales with input partitioning. CSV → one partition per
-file. Parquet → one partition per ~256MB of compressed row groups: a small
-file with a few row groups packs into one partition, a multi-GB file splits
-into several. The split uses the low-level `ParquetFileReader.skipNextRowGroup`
+file. Parquet → one partition per ~256MB of row groups, each counted as the
+larger of its footer's uncompressed and compressed bytes and one byte at
+least, so a group whose footer gives it none is still read: a small file with
+a few row groups packs into one partition, a multi-GB file splits into
+several. The split uses the low-level `ParquetFileReader.skipNextRowGroup`
 to seek (metadata-only — no decoding), so a partition that starts at row group
 50 pays O(50 metadata ticks) instead of O(rows-before-50) for the seek. Tune
 per-input via `options("read_partition_size_bytes")` (e.g. drop it for highly

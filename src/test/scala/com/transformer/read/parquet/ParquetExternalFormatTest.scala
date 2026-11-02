@@ -3,6 +3,7 @@ package com.transformer.read.parquet
 import com.transformer.core._
 import com.transformer.sql.exec.SqlEngine
 import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
+import org.apache.parquet.hadoop.metadata.BlockMetaData
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.junit.Assert._
 import org.junit.Test
@@ -12,6 +13,7 @@ import java.nio.file.{Files, Path}
 import java.time.{Instant, LocalDateTime, ZoneOffset}
 import java.time.temporal.ChronoUnit
 import java.util.Locale
+import scala.jdk.CollectionConverters._
 
 /** Our reader against files parquet-mr wrote, and our writer against
   * parquet-mr's reading of what it wrote.
@@ -677,5 +679,70 @@ class ParquetExternalFormatTest {
     assertTrue(view.withPushdownFilter(IsNullExpr(ColRefExpr(0, "u", DataType.LongType), negated = false)).isDefined)
     // Through the planner, the residual filter answers on the engine values.
     assertEquals(Seq(Seq[Any](4294967295L, 1.5f)), query("SELECT u, h FROM t WHERE u > 10 AND h > 1.0", "t" -> view))
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Row groups: each read once, whatever bytes its footer gives it.
+  // ─────────────────────────────────────────────────────────────────────
+
+  /** A file of `n` row groups of ten ids each, counting from 0, with the
+    * groups at `zero` given no bytes in the footer's `total_byte_size`, as a
+    * writer that left the field unset wrote them. */
+  private def zeroByteGroups(n: Int, zero: Set[Int]): Path = {
+    val file = newDir().resolve("groups.parquet")
+    ExternalParquet.writeRowGroups(file, ExternalParquet.schema("message m { required int32 id; }"),
+      (0 until n).map(g => ((0 until 10).map(i => Seq[Any](g * 10 + i)), ExternalParquet.Layout())))
+    ExternalParquet.rewriteFooter(file) { footer =>
+      footer.getRow_groups.asScala.zipWithIndex.foreach { case (g, i) => if (zero(i)) g.setTotal_byte_size(0L) }
+    }
+    file
+  }
+
+  /** The reader packed row groups into partitions by `total_byte_size` alone
+    * and emitted a partition only when its bytes were above 0, so a file of
+    * one group whose footer gave it no bytes read as empty, `COUNT(*)` 0
+    * (parquet-testing's `nation.dict-malformed.parquet`), and so did a
+    * zero-byte group after a full partition. Every group is read once, in
+    * order, and `COUNT(*)` counts every row. */
+  @Test def aRowGroupIsReadWhateverBytesItsFooterGivesIt(): Unit = {
+    val default = ParquetReader.DefaultTargetBytesPerPartition
+    for ((n, zero, target) <- Seq(
+        (1, Set(0), default),
+        (3, Set(0, 1, 2), default),
+        (3, Set(0), 1L),
+        (3, Set(2), 1L),
+        (4, Set(1, 3), 1L))) {
+      val view = ParquetReader.fromPath(zeroByteGroups(n, zero).toString, ColumnarBatch.DefaultCapacity, target)
+      val what = s"$n groups, those at $zero of no bytes, a target of $target bytes"
+      assertEquals(what, (0 until n * 10).toVector, rows(view).map(_.head).toVector)
+      assertEquals(what, Some(n * 10L), view.exactRowCount)
+      assertEquals(what, Seq(Seq(n * 10L)), query("SELECT COUNT(*) FROM t", "t" -> view))
+    }
+  }
+
+  /** The packing itself: every group lands in exactly one partition, the
+    * partitions in order and each holding a group at least, whatever the
+    * groups' bytes, none at all, a negative count, or more than the target. */
+  @Test def everyRowGroupPacksIntoExactlyOnePartition(): Unit = {
+    def block(bytes: Long, rows: Long): BlockMetaData = {
+      val b = new BlockMetaData()
+      b.setTotalByteSize(bytes)
+      b.setRowCount(rows)
+      b
+    }
+    for ((bytes, target) <- Seq(
+        (Seq.empty[Long], 100L), (Seq(0L), 100L), (Seq(0L, 0L, 0L), 100L), (Seq(0L, 0L, 0L), 1L),
+        (Seq(0L, 50L, 50L), 100L), (Seq(100L, 0L), 100L), (Seq(100L, 0L, 0L), 1L),
+        (Seq(60L, 60L, 0L, 60L, 0L), 100L), (Seq(0L, 200L, 0L), 100L), (Seq(-5L, 10L), 1L))) {
+      val blocks = bytes.zipWithIndex.map { case (b, i) => block(b, i + 1L) }
+      val parts = ParquetReader.packRowGroups(null, blocks.asJava, target)
+      val what = s"groups of $bytes bytes, a target of $target"
+      assertEquals(what, bytes.indices.toVector, parts.flatMap(p => p.startRowGroup until p.endRowGroup).toVector)
+      parts.foreach { p =>
+        assertTrue(what, p.endRowGroup > p.startRowGroup)
+        assertEquals(what, (p.startRowGroup until p.endRowGroup).map(_ + 1L).sum, p.rowCount)
+      }
+      if (target == 1L) assertEquals(what, bytes.length, parts.length)
+    }
   }
 }

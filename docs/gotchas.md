@@ -806,6 +806,19 @@ ship a fix or move something from "not done" to "done".
   file was opened with; build those per reader, not once, since the codec
   factory they hold is not safe to share. A new `Configuration()` costs the
   same, so the reader and the writer each copy one built once.
+- **A footer's sizes are a writer's claim, never a reason to skip rows.**
+  `ParquetReader.packRowGroups` packs a file's row groups into partitions by
+  their bytes. It packed by `total_byte_size` alone and emitted a partition
+  only when its bytes were above 0, so a file whose writer left the field 0
+  (parquet-testing's `nation.dict-malformed.parquet`, 25 rows) read as empty,
+  its `COUNT(*)` 0, and a zero-byte group after a full partition was dropped
+  the same way, silently. A group now counts as the larger of
+  `total_byte_size` and its column chunks' compressed bytes, and one byte at
+  least, and the last partition closes whenever it holds a group, so every
+  group lands in exactly one partition and `exactRowCount` is the footer's
+  row count (`parquet_external_format_test`,
+  `aRowGroupIsReadWhateverBytesItsFooterGivesIt`, edits a footer with
+  `ExternalParquet.rewriteFooter`).
 - **Spill files use positional column names, never the logical schema's.**
   Every spill-capable breaker (`HashJoinExec`, `HashAggregateExec`, `SortExec`,
   `DistinctExec`, `WindowExec`) writes its working set to temp parquet and reads
