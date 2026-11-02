@@ -107,7 +107,26 @@ bazel-bin/examples/gui_app/gui_app [job-dir]
 bazel build //tools/parquet_peek:parquet_peek_deploy.jar
 java -jar bazel-bin/tools/parquet_peek/parquet_peek_deploy.jar \
     'path/or/glob/*.parquet' [--rows N]
+
+# Every warning scalac can give, each with its category, and every BUILD
+# dependency a target's sources do not use, none of them fatal: what a
+# stricter toolchain than the build's would refuse (docs/conventions.md,
+# "The compiler's warnings are errors"). It recompiles every target, and so
+# does the next build without it.
+bazel build //... --keep_going --extra_toolchains=//:scala_toolchain_all_warnings
 ```
+
+A warning prints once per target that compiles a source, so a fuzz source
+shared by a `*_fuzz_test` and its `*_fuzz_campaign` prints twice; count
+sites. On 2026-11-01 (plans/testing/07) it gave 2,159 sites before the build
+refused any, and 2,023 after: none in a category the build refuses, three
+quarters of the rest `-Wtostring-interpolated`, the unused-value check in
+tests and `-Wnumeric-widen`. A quicker count, outside Bazel, runs the output
+base's scalac 2.13.16 over a `git archive` of the sources with the maven jars
+on its classpath and the same options; the tests take two runs, since
+`SortExecTest` and `ExchangeExecTest` each define a private top-level
+`InMemoryPartitionedPlan` in one package, which Bazel compiles as separate
+targets.
 
 Tests are JUnit 4 via `scala_junit_test`. Each leaf test directory has a
 `BUILD.bazel` with one target per test class. When you add a new test, make

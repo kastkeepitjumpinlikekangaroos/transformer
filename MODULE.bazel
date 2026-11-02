@@ -93,8 +93,10 @@ scala_deps = use_extension(
 scala_deps.scala()
 scala_deps.junit()
 
-scala_toolchains = use_extension(
-    "@rules_scala//scala/extensions:toolchains.bzl",
-    "scala_toolchains",
-)
-scala_toolchains.testing()
+# The Scala toolchain is the root BUILD.bazel's: rules_scala's Scala jars,
+# from its rules_scala_toolchains repository, with the compiler's warnings as
+# errors. A root module's toolchains are tried before those rules_scala
+# registers.
+use_repo(scala_deps, "rules_scala_toolchains")
+
+register_toolchains("//:scala_toolchain")

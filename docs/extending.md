@@ -1017,8 +1017,9 @@ columns. To add a new pass:
 
 1. New file `sql/plan/<MyPass>.scala` exposing a single
    `def apply(plan: LogicalPlan): LogicalPlan`. The body is a recursive
-   `rewrite` matching every `LogicalPlan` case — Scala's exhaustivity
-   check will flag missed cases. Pass-through nodes (Project, Sort, Limit,
+   `rewrite` matching every `LogicalPlan` case — a missed case is a compile
+   error ("match may not be exhaustive"), as every compiler warning is
+   ([conventions](conventions.md)). Pass-through nodes (Project, Sort, Limit,
    Distinct, Union, Window, …) just recurse on their children; the
    interesting work happens on the shape your pass targets.
 2. **Don't drift `ColRefExpr` indices without remapping.** Any rewrite

@@ -52,10 +52,36 @@ specific traps.
   value the writer prints is one the reader reads back; the writer depends on
   `read/csv` for it. A type a format gains gets its print, its parse and its
   inference there together, and `fuzz/csv_fuzz_test` checks they compose.
-- **Prefer dependencies on direct uses.** rules_scala uses strict-deps; if you
-  call into a type that lives in `core`, you must list `//src/main/scala/com/transformer/core`
+- **Prefer dependencies on direct uses.** rules_scala compiles a target
+  against its direct dependencies alone (the toolchain's `dependency_mode`,
+  `"direct"`, under which its strict-deps check is off): if you call into a
+  type that lives in `core`, you must list `//src/main/scala/com/transformer/core`
   even when an indirect dep already brings it in. The error message is "Symbol
   'term com.transformer.core' is missing from the classpath."
+- **The compiler's warnings are errors.** The Scala toolchain in the root
+  `BUILD.bazel`, which every target compiles with, fails the build on a
+  deprecation; an unused import, private member, local, pattern variable or
+  implicit parameter, and an `@nowarn` that silences nothing; a match that
+  may not be exhaustive, over a sealed type or, with no catch-all, over one
+  that is not; a string literal holding `$name` or `${...}` with no
+  interpolator; a pattern variable named as a term already in scope; and, in
+  main code, a statement whose value nothing reads (`-Wnonunit-statement`):
+  drop one on purpose with `val _ = ...`, or in a class body with `: Unit`, as
+  `val _` there makes a field. `-Werror` makes any other warning scalac gives
+  (an unchecked type pattern, a feature) an error too, so a build never
+  prints one: Bazel prints a warning only when its target compiles, which a
+  cached target never does again. To keep one deliberate warning, annotate
+  the site `@nowarn("cat=<category>")` (`scala.annotation.nowarn`) with a
+  comment saying why; the error's "Applicable -Wconf / @nowarn filters" line
+  names the category. Off: unused explicit parameters (one is often part of a
+  call shape, `Ops.apply`'s), and the checks that say nothing about this code
+  — `-Wtostring-interpolated` (numbers in messages), `-Wnumeric-widen`,
+  `-Wvalue-discard`, `-Wperformance` (a `var` a closure captures),
+  `-Xlint:infer-any` (JUnit's `assertEquals(Object, Object)`) and
+  `-Xlint:nonlocal-return` (`getOrElse(return)` in GUI handlers). Tests may
+  drop a value: a fixture made for what making it writes, a drained iterator.
+  `bazel build //... --extra_toolchains=//:scala_toolchain_all_warnings`
+  prints every warning, none fatal ([testing.md](testing.md)).
 - **The GUI's session state builds without JavaFX.** `JobSession` and
   `DagLayout` are their own target, `//src/main/scala/com/transformer/gui:session`,
   with no JavaFX dependency; `gui` exports it, so a panel sees it as before. Keep

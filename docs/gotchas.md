@@ -519,6 +519,29 @@ ship a fix or move something from "not done" to "done".
   `GraphicsContext` also keeps what the last paint set (text alignment,
   baseline, line width, caps), so each `ChartCanvas` paint sets them back
   before it starts.
+- **Bazel prints a compiler warning only when its target compiles.** A cached
+  target prints nothing, so a warning that does not fail the build is seen
+  once, by whoever changed the file, if they look. That is why every warning
+  is an error here ([conventions.md](conventions.md)); the ones the toolchain
+  leaves off print with `--extra_toolchains=//:scala_toolchain_all_warnings`,
+  which changes every compile action and so recompiles every target.
+- **A `-Wconf:src=` filter matches a source's real path.** scalac reads the
+  canonical path, which resolves Bazel's sandbox and execroot symlinks to the
+  file in the workspace (or under the output base's `external/` for another
+  repository's source), and with no `-rootdir` the regex need only match a
+  suffix that starts at a path segment. So `src/test/scala/.*` matches every
+  test source wherever the checkout lives, and `execroot/_main/src/.*`
+  matches nothing (Bazel 7.4.1, rules_scala 7.0.0).
+- **The root module's Scala toolchain compiles rules_scala's sources too.**
+  `register_toolchains("//:scala_toolchain")` in MODULE.bazel is tried before
+  the toolchains rules_scala registers, so ours wins resolution, and
+  rules_scala's own Scala targets (the JUnit runner's test discovery, the
+  dependency analyzer) compile with it: its Stream and JavaConverters
+  deprecations would fail the build, hence the toolchain's
+  `-Wconf:src=external/rules_scala[^/]*/.*:s`.
+  `bazel cquery <target> --toolchain_resolution_debug='@@rules_scala~//scala:toolchain_type'`
+  shows the choice (`Selected //:scala_toolchain_impl`); if rules_scala's
+  default won, the options would do nothing and nothing would fail.
 - **`java -jar` ignores a `scala_binary`'s `jvm_flags`.** `//:transformer`
   sets `-XX:MaxRAMPercentage=75.0`, but that only applies to the
   `bazel-bin/transformer` wrapper script. Users running

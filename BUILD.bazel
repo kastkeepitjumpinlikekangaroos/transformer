@@ -1,5 +1,6 @@
 # Root build file for transformer project.
 load("@rules_scala//scala:scala.bzl", "scala_binary")
+load("@rules_scala//scala:scala_toolchain.bzl", "scala_toolchain")
 
 # The one jar a user needs: `bazel build //:transformer_deploy.jar`, then
 # `java -jar bazel-bin/transformer_deploy.jar run <jobDir>` (headless) or
@@ -40,4 +41,107 @@ scala_binary(
         "@maven//:org_openjfx_javafx_graphics_mac_aarch64",
         "@maven//:org_openjfx_javafx_graphics_win",
     ],
+)
+
+# The Scala toolchain every target compiles with, registered in MODULE.bazel
+# ahead of rules_scala's default: the same Scala 2.13.16 jars, and the
+# compiler's warnings as errors. A warning only prints when its target
+# compiles, and a cached target never does, so a warning that did not fail the
+# build would be seen once. docs/conventions.md lists the checks and how to
+# silence one site with @nowarn.
+SCALA_JARS = [
+    "@rules_scala_toolchains//scala:scala_xml_provider",
+    "@rules_scala_toolchains//scala:parser_combinators_provider",
+    "@rules_scala_toolchains//scala:scala_compile_classpath_provider",
+    "@rules_scala_toolchains//scala:scala_library_classpath_provider",
+    "@rules_scala_toolchains//scala:scala_macro_classpath_provider",
+]
+
+scala_toolchain(
+    name = "scala_toolchain_impl",
+    dep_providers = SCALA_JARS,
+    scalacopts = [
+        # Each deprecation and feature in full, not as a count.
+        "-deprecation",
+        "-feature",
+        # Imports, private members, locals, pattern variables and implicit
+        # parameters nothing uses, and an @nowarn that silences nothing. Not
+        # explicit parameters: an unused one is often part of a call shape.
+        "-Wunused:imports,privates,locals,patvars,implicits,nowarn",
+        # A match with no case for some value of a type that is not sealed
+        # (the exhaustivity check covers sealed ones); a plain string holding
+        # `$name` or `${...}`; a pattern variable named as a term in scope.
+        "-Xlint:strict-unsealed-patmat,missing-interpolator,pattern-shadow",
+        # A statement whose value nothing reads ("unused value of type ...").
+        "-Wnonunit-statement",
+        "-Wconf:" + ",".join([
+            "cat=deprecation:e",
+            "cat=feature:e",
+            "cat=unused:e",
+            "cat=other-match-analysis:e",
+            "cat=lint-missing-interpolator:e",
+            "cat=other-shadowing:e",
+            "cat=other-pure-statement:e",
+        ]),
+        # Tests drop values on purpose (a fixture made for what making it
+        # writes, a drained iterator, a JUnit call's result), so the unused
+        # value check is main code's alone. The path is the source's real
+        # one, a suffix of the workspace path, never the sandbox's.
+        "-Wconf:src=src/test/scala/.*&cat=other-pure-statement&msg=^unused value:s",
+        # rules_scala's own Scala sources (the test runner's discovery of
+        # test classes) compile with this toolchain too; their warnings are
+        # not this repository's.
+        "-Wconf:src=external/rules_scala[^/]*/.*:s",
+        # Every other warning fails the build too. Later -Wconf rules win.
+        "-Werror",
+    ],
+    use_argument_file_in_runner = True,
+    visibility = ["//visibility:public"],
+)
+
+toolchain(
+    name = "scala_toolchain",
+    toolchain = ":scala_toolchain_impl",
+    toolchain_type = "@rules_scala//scala:toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+# Every warning scalac can give, each printed with its category and none
+# fatal, and every BUILD dependency a target's sources do not use: for
+# measuring what a stricter toolchain would refuse. Not registered; a build
+# takes it with --extra_toolchains=//:scala_toolchain_all_warnings
+# (docs/testing.md, "Build / test commands"), which recompiles every target.
+scala_toolchain(
+    name = "scala_toolchain_all_warnings_impl",
+    dep_providers = SCALA_JARS,
+    scalacopts = [
+        "-deprecation",
+        "-feature",
+        "-unchecked",
+        "-Xlint",
+        "-Wdead-code",
+        "-Wextra-implicit",
+        "-Wnumeric-widen",
+        "-Wvalue-discard",
+        "-Wnonunit-statement",
+        "-Wunused:_",
+        "-Wtostring-interpolated",
+        "-Wperformance",
+        "-Wmultiarg-infix",
+        "-Woctal-literal",
+        "-Wconf:any:wv",
+        "-Wconf:src=external/rules_scala[^/]*/.*:s",
+        "-Xmaxwarns",
+        "1000000",
+    ],
+    unused_dependency_checker_mode = "warn",
+    use_argument_file_in_runner = True,
+    visibility = ["//visibility:public"],
+)
+
+toolchain(
+    name = "scala_toolchain_all_warnings",
+    toolchain = ":scala_toolchain_all_warnings_impl",
+    toolchain_type = "@rules_scala//scala:toolchain_type",
+    visibility = ["//visibility:public"],
 )

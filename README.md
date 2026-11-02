@@ -2175,6 +2175,10 @@ bazel build //:transformer_deploy.jar                # the product jar
 bazel build //:transformer_viewer_deploy.jar         # the data viewer
 ```
 
+The compiler's warnings fail the build: a deprecation, unused code, a match
+that may not be exhaustive, or a value main code computes and never reads is
+an error ([docs/conventions.md](docs/conventions.md)).
+
 Each leaf test directory has its own `scala_junit_test` target. SQL's
 semantics are also pinned as sqllogictest scripts under `src/test/slt/`
 (SQLite's format: each query beside its expected result), which
