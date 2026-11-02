@@ -180,6 +180,7 @@ object Shrinker {
     case LitExpr(_, _) => Nil
     case ColRefExpr(_, _, _) => Nil
     case CastExpr(c, _) => Seq(c)
+    case DecimalCastExpr(c, _) => Seq(c)
     case UnaryOpExpr(_, c, _) => Seq(c)
     case BinOpExpr(_, l, r, _) => Seq(l, r)
     case FuncExpr(_, args, _) => args
@@ -371,6 +372,7 @@ object Shrinker {
     case LitExpr(_, _) => e
     case ColRefExpr(_, _, _) => e
     case CastExpr(_, t) => CastExpr(kids.head, t)
+    case DecimalCastExpr(_, t) => DecimalCastExpr(kids.head, t)
     case UnaryOpExpr(op, _, dt) => UnaryOpExpr(op, kids.head, dt)
     case BinOpExpr(op, _, _, dt) => BinOpExpr(op, kids(0), kids(1), dt)
     case FuncExpr(name, _, dt) => FuncExpr(name, kids, dt)

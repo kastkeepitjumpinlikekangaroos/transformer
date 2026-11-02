@@ -1141,10 +1141,22 @@ with one difference: they are kept, so their type must hold each of them. Two
 decimals meet there as `Decimals.holding`, the longer integer part at the
 larger scale, given way past 38 digits as an arithmetic result's is, and a
 `FLOAT` or `DOUBLE` beside a `DECIMAL` is the error it is in arithmetic. A
-`CAST` between two `DECIMAL`s produces a value of the target
+cast the binder inserts between two `DECIMAL`s produces a value of the target
 (`Decimals.fit`), so a comparison of two decimals reads both as
 `Decimals.wider`, which holds both with no bound on its digits and so never
 rounds; any other number is read exactly, as a comparison needs.
+
+So there are two kinds of cast to a `DECIMAL`. The binder's own, a `CastExpr`
+it inserts where types meet, reads a number exactly, an integer at the
+target's scale whatever its digits, and may name a `DECIMAL` wider than 38
+digits. A query's `CAST(x AS DECIMAL(p,s))` binds to a node of its own,
+`DecimalCastExpr`, which fits every value to the type it names
+(`Casts.toWrittenDecimal`: rounded half up, an error past the precision, text
+read by `NumberText`'s decimal grammar, a number written in the query read as
+written through `decimalConstant`) and names only a type a query can write.
+`PlanValidator` checks that last, and `PlanSql` prints the query's cast as
+itself and the binder's as its operand, which the binder casts again in the
+same place; printing the binder's as a written cast would make it round.
 
 Conditions and function arguments are typed at bind time too, so evaluation
 can cast to the kind it expects. Every condition (WHERE, HAVING, ON, CASE WHEN,
@@ -1999,8 +2011,10 @@ output as DuckDB re-parses each statement it prints.
   an output position (`ORDER BY 2`) or the expression it computes; a CTE whose
   columns repeat a name is printed with them renamed.
 - **Types.** Each cast the binder inserted is printed, but a cast to DECIMAL or
-  BINARY, which SQL here cannot write and the binder inserts again wherever the
-  operands' types call for it. A literal is printed so that it binds to its own
+  BINARY, which the binder inserts again wherever the operands' types call for
+  it (SQL cannot write a BINARY's, and a written cast to DECIMAL is a
+  `DecimalCastExpr`, which fits its value where the binder's reads it exactly,
+  so it prints as itself). A literal is printed so that it binds to its own
   type wherever it stands: a BIGINT an INT would hold as `CAST('5' AS BIGINT)`,
   a FLOAT, NaN and the infinities as a CAST of their text, a DATE and a
   TIMESTAMP as `DATE '...'` and `TIMESTAMP '...'`, a DECIMAL as its digits

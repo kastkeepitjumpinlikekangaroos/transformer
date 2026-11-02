@@ -1448,11 +1448,28 @@ and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
 (`(a, b) = (c, d)`) are not supported.
 
 **Types in CAST:** `INT`, `INTEGER`, `BIGINT`, `LONG`, `FLOAT`, `REAL`,
-`DOUBLE`/`DOUBLE PRECISION`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`,
-`DATE`, `TIMESTAMP`. A `DECIMAL` or `BINARY` column comes from a declared schema or a
-parquet file; neither type is a CAST target. A number
-widens to a `DECIMAL` where the two meet, and a `BINARY` casts to nothing. A
-`BOOLEAN` casts to any number as 1 for true and 0 for false.
+`DOUBLE`/`DOUBLE PRECISION`, `DECIMAL(p,s)`/`NUMERIC(p,s)`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`,
+`BOOLEAN`/`BOOL`, `DATE`, `TIMESTAMP`. A `DECIMAL` is named with its precision
+and scale, p digits in all (1 to 38) and s of them after the point (0 to p), so
+a bare `DECIMAL`, or `DECIMAL(10)`, is an error that says so. A `BINARY` column
+comes from a declared schema or a parquet file; nothing casts to one, and it
+casts to nothing. A `BOOLEAN` casts to any number as 1 for true and 0 for
+false.
+
+A number casts to a `DECIMAL(p,s)` rounded half up to its scale, and one whose
+integer part has more digits than the type holds is an error naming it
+(`Decimal overflow: 123.45 does not fit decimal(4,2)`), never a NULL or a
+rounded answer: `CAST(2.675 AS DECIMAL(5,2))` is 2.68 and `CAST(-0.005 AS
+DECIMAL(3,2))` is -0.01. A number written in the query is the decimal it is
+written as, every digit of it, as it is beside a `DECIMAL` (below), and a
+`FLOAT` or `DOUBLE` value the decimal it prints as; NaN and the infinities,
+which have none, are errors. Text is read by the grammar CSV reads a decimal by
+(see [CSV](#csv)) and then rounded, so `CAST('-1.5e2' AS DECIMAL(5,1))` is
+-150.0, and text that is no number or is too long for the type is an error
+naming it (`Cannot cast '1e9' to decimal(5,1)`), before the query runs when it
+is a string literal. The cast says the type of what it gives, so it chooses a
+decimal result's type: `CAST(price AS DECIMAL(12,2)) * qty` is typed from
+`DECIMAL(12,2)` by the rules below.
 
 A number casts to an `INT` or `BIGINT` as its integer part, a fraction
 truncated toward zero (`CAST(2.7 AS INT)` is 2 and `CAST(-2.7 AS INT)` is -2,
@@ -2165,8 +2182,7 @@ JDK 21 or newer (tested through JDK 25).
   arithmetic, `ABS`, `SUM`, `AVG` and the rounding functions (`ROUND`,
   `FLOOR`, `CEIL`, `TRUNC`) keep a `DECIMAL` exact, but `SQRT`, `POWER` and the
   other math functions, and `STDDEV` / `VARIANCE`, read a decimal as a
-  `DOUBLE` and return one, which holds 15 to 17 significant digits. There is
-  no `CAST` to a `DECIMAL`, so a query cannot choose a decimal result's type.
+  `DOUBLE` and return one, which holds 15 to 17 significant digits.
 
 ## Performance instrumentation
 

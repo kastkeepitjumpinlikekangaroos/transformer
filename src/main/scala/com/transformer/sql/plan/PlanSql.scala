@@ -145,10 +145,13 @@ object PlanSql {
   private def expr(e: Expr, scope: Scope): Fragment = e match {
     case ColRefExpr(i, _, _) => scope(i)
     case LitExpr(v, t) => literal(v, t)
-    // SQL here writes no cast to DECIMAL or BINARY; the binder casts to one
-    // wherever the operands' types call for it, which they do again.
+    // The binder's own casts to a DECIMAL, which read a number exactly, and
+    // to a BINARY, which SQL here cannot write: it casts to one wherever the
+    // operands' types call for it, which they do again.
     case CastExpr(c, _: DataType.DecimalType | DataType.BinaryType) => expr(c, scope)
     case CastExpr(c, t) => Fragment(s"CAST(${top(c, scope)} AS ${typeName(t)})", Atomic)
+    // A cast the query wrote, which fits its value to the type.
+    case DecimalCastExpr(c, t) => Fragment(s"CAST(${top(c, scope)} AS DECIMAL(${t.precision},${t.scale}))", Atomic)
     case UnaryOpExpr("-", c, _) =>
       val inner = expr(c, scope)
       Fragment("-" + (if (inner.prec == Atomic) inner.text else parens(inner)), Unary)

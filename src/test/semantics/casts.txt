@@ -868,21 +868,124 @@ CAST(x AS TIMESTAMP)       integer literal  -9223372036854775808                
 CAST(x AS TIMESTAMP)       integer literal  9223372036854775808                          -> bind error: Cannot cast DECIMAL(19,0) to TIMESTAMP
 CAST(x AS TIMESTAMP)       integer literal  99999999999999999999999999999999999999       -> bind error: Cannot cast DECIMAL(38,0) to TIMESTAMP
 CAST(x AS TIMESTAMP)       decimal literal  (any)                                        -> bind error: Cannot cast DOUBLE to TIMESTAMP
-CAST(x AS DECIMAL(10,2))   INT              (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   BIGINT           (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   FLOAT            (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   DOUBLE           (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   DECIMAL(5,2)     (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   DECIMAL(38,10)   (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   BOOLEAN          (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   STRING           (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   DATE             (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   TIMESTAMP        (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   BINARY           (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   NULL literal     NULL                                         -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   text literal     (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   integer literal  (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
-CAST(x AS DECIMAL(10,2))   decimal literal  (any)                                        -> bind error: Unsupported CAST target type: DECIMAL (10, 2)
+CAST(x AS DECIMAL(10,2))   INT              NULL                                         -> DECIMAL(10,2) NULL
+CAST(x AS DECIMAL(10,2))   INT              0                                            -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   INT              -2147483648                                  -> run error: Decimal overflow: -2147483648 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   INT              2147483647                                   -> run error: Decimal overflow: 2147483647 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   INT              16777217                                     -> DECIMAL(10,2) 16777217.00
+CAST(x AS DECIMAL(10,2))   BIGINT           NULL                                         -> DECIMAL(10,2) NULL
+CAST(x AS DECIMAL(10,2))   BIGINT           0                                            -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   BIGINT           -9223372036854775808                         -> run error: Decimal overflow: -9223372036854775808 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   BIGINT           9223372036854775807                          -> run error: Decimal overflow: 9223372036854775807 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   BIGINT           16777217                                     -> DECIMAL(10,2) 16777217.00
+CAST(x AS DECIMAL(10,2))   BIGINT           2147483648                                   -> run error: Decimal overflow: 2147483648 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   BIGINT           9007199254740993                             -> run error: Decimal overflow: 9007199254740993 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   FLOAT            NULL                                         -> DECIMAL(10,2) NULL
+CAST(x AS DECIMAL(10,2))   FLOAT            0.0                                          -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   FLOAT            -0.0                                         -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   FLOAT            NaN                                          -> run error: Cannot cast NaN to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   FLOAT            Infinity                                     -> run error: Cannot cast Infinity to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   FLOAT            -Infinity                                    -> run error: Cannot cast -Infinity to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   FLOAT            2.7                                          -> DECIMAL(10,2) 2.70
+CAST(x AS DECIMAL(10,2))   FLOAT            -2.7                                         -> DECIMAL(10,2) -2.70
+CAST(x AS DECIMAL(10,2))   FLOAT            2.5                                          -> DECIMAL(10,2) 2.50
+CAST(x AS DECIMAL(10,2))   FLOAT            1.6777216E7                                  -> DECIMAL(10,2) 16777216.00
+CAST(x AS DECIMAL(10,2))   FLOAT            3.4028235E38                                 -> run error: Decimal overflow: 3.4028235E38 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   DOUBLE           NULL                                         -> DECIMAL(10,2) NULL
+CAST(x AS DECIMAL(10,2))   DOUBLE           0.0                                          -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   DOUBLE           -0.0                                         -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   DOUBLE           NaN                                          -> run error: Cannot cast NaN to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   DOUBLE           Infinity                                     -> run error: Cannot cast Infinity to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   DOUBLE           -Infinity                                    -> run error: Cannot cast -Infinity to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   DOUBLE           2.7                                          -> DECIMAL(10,2) 2.70
+CAST(x AS DECIMAL(10,2))   DOUBLE           -2.7                                         -> DECIMAL(10,2) -2.70
+CAST(x AS DECIMAL(10,2))   DOUBLE           2.5                                          -> DECIMAL(10,2) 2.50
+CAST(x AS DECIMAL(10,2))   DOUBLE           1.6777217E7                                  -> DECIMAL(10,2) 16777217.00
+CAST(x AS DECIMAL(10,2))   DOUBLE           2.147483648E9                                -> run error: Decimal overflow: 2.147483648E9 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   DOUBLE           9.3E18                                       -> run error: Decimal overflow: 9.3E18 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   DOUBLE           1.0E300                                      -> run error: Decimal overflow: 1.0E300 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   DOUBLE           1.0E-300                                     -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   DECIMAL(5,2)     NULL                                         -> DECIMAL(10,2) NULL
+CAST(x AS DECIMAL(10,2))   DECIMAL(5,2)     0.00                                         -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   DECIMAL(5,2)     2.70                                         -> DECIMAL(10,2) 2.70
+CAST(x AS DECIMAL(10,2))   DECIMAL(5,2)     -2.70                                        -> DECIMAL(10,2) -2.70
+CAST(x AS DECIMAL(10,2))   DECIMAL(5,2)     2.50                                         -> DECIMAL(10,2) 2.50
+CAST(x AS DECIMAL(10,2))   DECIMAL(5,2)     999.99                                       -> DECIMAL(10,2) 999.99
+CAST(x AS DECIMAL(10,2))   DECIMAL(5,2)     -999.99                                      -> DECIMAL(10,2) -999.99
+CAST(x AS DECIMAL(10,2))   DECIMAL(38,10)   NULL                                         -> DECIMAL(10,2) NULL
+CAST(x AS DECIMAL(10,2))   DECIMAL(38,10)   0.0000000000                                 -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   DECIMAL(38,10)   2.7000000000                                 -> DECIMAL(10,2) 2.70
+CAST(x AS DECIMAL(10,2))   DECIMAL(38,10)   -2.7000000000                                -> DECIMAL(10,2) -2.70
+CAST(x AS DECIMAL(10,2))   DECIMAL(38,10)   2.5000000000                                 -> DECIMAL(10,2) 2.50
+CAST(x AS DECIMAL(10,2))   DECIMAL(38,10)   0.0000000001                                 -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   DECIMAL(38,10)   2147483648.0000000000                        -> run error: Decimal overflow: 2147483648.0000000000 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   DECIMAL(38,10)   9999999999999999999999999999.9999999999      -> run error: Decimal overflow: 9999999999999999999999999999.9999999999 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   DECIMAL(38,10)   -9999999999999999999999999999.9999999999     -> run error: Decimal overflow: -9999999999999999999999999999.9999999999 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   BOOLEAN          NULL                                         -> DECIMAL(10,2) NULL
+CAST(x AS DECIMAL(10,2))   BOOLEAN          true                                         -> DECIMAL(10,2) 1.00
+CAST(x AS DECIMAL(10,2))   BOOLEAN          false                                        -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   STRING           NULL                                         -> DECIMAL(10,2) NULL
+CAST(x AS DECIMAL(10,2))   STRING           ''                                           -> run error: Cannot cast '' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           ' 5'                                         -> run error: Cannot cast ' 5' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           '5d'                                         -> run error: Cannot cast '5d' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           '1e400'                                      -> run error: Cannot cast '1e400' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           '0x10'                                       -> run error: Cannot cast '0x10' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           '+5'                                         -> DECIMAL(10,2) 5.00
+CAST(x AS DECIMAL(10,2))   STRING           '007'                                        -> DECIMAL(10,2) 7.00
+CAST(x AS DECIMAL(10,2))   STRING           'nan'                                        -> run error: Cannot cast 'nan' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           'TRUE'                                       -> run error: Cannot cast 'TRUE' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           'true '                                      -> run error: Cannot cast 'true ' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           '2026-02-30'                                 -> run error: Cannot cast '2026-02-30' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           '2026-01-01 05:30:21+02:00'                  -> run error: Cannot cast '2026-01-01 05:30:21+02:00' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           '1'                                          -> DECIMAL(10,2) 1.00
+CAST(x AS DECIMAL(10,2))   STRING           '5'                                          -> DECIMAL(10,2) 5.00
+CAST(x AS DECIMAL(10,2))   STRING           '-2.5'                                       -> DECIMAL(10,2) -2.50
+CAST(x AS DECIMAL(10,2))   STRING           '2147483648'                                 -> run error: Cannot cast '2147483648' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           'NaN'                                        -> run error: Cannot cast 'NaN' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           '-Infinity'                                  -> run error: Cannot cast '-Infinity' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           'true'                                       -> run error: Cannot cast 'true' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   STRING           '2026-01-01'                                 -> run error: Cannot cast '2026-01-01' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   DATE             (any)                                        -> bind error: Cannot cast DATE to DECIMAL(10,2)
+CAST(x AS DECIMAL(10,2))   TIMESTAMP        (any)                                        -> bind error: Cannot cast TIMESTAMP to DECIMAL(10,2)
+CAST(x AS DECIMAL(10,2))   BINARY           (any)                                        -> bind error: Cannot cast BINARY to DECIMAL(10,2)
+CAST(x AS DECIMAL(10,2))   NULL literal     NULL                                         -> DECIMAL(10,2) NULL
+CAST(x AS DECIMAL(10,2))   text literal     ''                                           -> bind error: Cannot cast '' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     ' 5'                                         -> bind error: Cannot cast ' 5' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     '5d'                                         -> bind error: Cannot cast '5d' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     '1e400'                                      -> bind error: Cannot cast '1e400' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     '0x10'                                       -> bind error: Cannot cast '0x10' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     '+5'                                         -> DECIMAL(10,2) 5.00
+CAST(x AS DECIMAL(10,2))   text literal     '007'                                        -> DECIMAL(10,2) 7.00
+CAST(x AS DECIMAL(10,2))   text literal     'nan'                                        -> bind error: Cannot cast 'nan' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     'TRUE'                                       -> bind error: Cannot cast 'TRUE' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     'true '                                      -> bind error: Cannot cast 'true ' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     '2026-02-30'                                 -> bind error: Cannot cast '2026-02-30' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     '2026-01-01 05:30:21+02:00'                  -> bind error: Cannot cast '2026-01-01 05:30:21+02:00' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     '1'                                          -> DECIMAL(10,2) 1.00
+CAST(x AS DECIMAL(10,2))   text literal     '5'                                          -> DECIMAL(10,2) 5.00
+CAST(x AS DECIMAL(10,2))   text literal     '-2.5'                                       -> DECIMAL(10,2) -2.50
+CAST(x AS DECIMAL(10,2))   text literal     '2147483648'                                 -> bind error: Cannot cast '2147483648' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     'NaN'                                        -> bind error: Cannot cast 'NaN' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     '-Infinity'                                  -> bind error: Cannot cast '-Infinity' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     'true'                                       -> bind error: Cannot cast 'true' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   text literal     '2026-01-01'                                 -> bind error: Cannot cast '2026-01-01' to decimal(10,2)
+CAST(x AS DECIMAL(10,2))   integer literal  0                                            -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   integer literal  16777217                                     -> DECIMAL(10,2) 16777217.00
+CAST(x AS DECIMAL(10,2))   integer literal  2147483647                                   -> run error: Decimal overflow: 2147483647 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   integer literal  2147483648                                   -> run error: Decimal overflow: 2147483648 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   integer literal  -2147483648                                  -> run error: Decimal overflow: -2147483648 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   integer literal  9223372036854775807                          -> run error: Decimal overflow: 9223372036854775807 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   integer literal  -9223372036854775808                         -> run error: Decimal overflow: -9223372036854775808 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   integer literal  9223372036854775808                          -> run error: Decimal overflow: 9223372036854775808 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   integer literal  99999999999999999999999999999999999999       -> run error: Decimal overflow: 99999999999999999999999999999999999999 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   decimal literal  0.0                                          -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   decimal literal  -0.0                                         -> DECIMAL(10,2) 0.00
+CAST(x AS DECIMAL(10,2))   decimal literal  2.7                                          -> DECIMAL(10,2) 2.70
+CAST(x AS DECIMAL(10,2))   decimal literal  -2.7                                         -> DECIMAL(10,2) -2.70
+CAST(x AS DECIMAL(10,2))   decimal literal  2.5                                          -> DECIMAL(10,2) 2.50
+CAST(x AS DECIMAL(10,2))   decimal literal  1.5e10                                       -> run error: Decimal overflow: 15000000000 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   decimal literal  1e300                                        -> run error: Decimal overflow: 1.0E300 does not fit decimal(10,2)
+CAST(x AS DECIMAL(10,2))   decimal literal  0.00000000000000000000000000000000000001     -> DECIMAL(10,2) 0.00
 CAST(x AS BINARY)          INT              (any)                                        -> bind error: Unsupported CAST target type: BINARY
 CAST(x AS BINARY)          BIGINT           (any)                                        -> bind error: Unsupported CAST target type: BINARY
 CAST(x AS BINARY)          FLOAT            (any)                                        -> bind error: Unsupported CAST target type: BINARY

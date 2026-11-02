@@ -224,6 +224,7 @@ class ColumnProjectionPushdownTest {
     case BinOpExpr(_, l, r, _) => assertValidExprIndices(l, schema); assertValidExprIndices(r, schema)
     case UnaryOpExpr(_, c, _) => assertValidExprIndices(c, schema)
     case CastExpr(c, _) => assertValidExprIndices(c, schema)
+    case DecimalCastExpr(c, _) => assertValidExprIndices(c, schema)
     case FuncExpr(_, args, _) => args.foreach(assertValidExprIndices(_, schema))
     case CaseExpr(branches, elseE, _) =>
       branches.foreach { case (a, b) =>

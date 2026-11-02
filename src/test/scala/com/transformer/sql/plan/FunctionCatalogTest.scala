@@ -46,13 +46,18 @@ class FunctionCatalogTest {
   }
 
   /** The README's `**Types in CAST:**` list names exactly the types a CAST
-    * takes. */
+    * takes, a DECIMAL's names written with their precision and scale. */
   @Test def theCastTypesAreTheDocumentedOnes(): Unit = {
-    val registered = FunctionCatalog.CastTargets.flatMap(_._2).toSet
+    val named = FunctionCatalog.CastTargets.flatMap(_._2).toSet
+    val registered = named ++ FunctionCatalog.DecimalCastNames.map(_ + "(p,s)")
     val documented = Readme.castTypes
-    assertEquals("README's **Types in CAST:** list against FunctionCatalog.CastTargets",
+    assertEquals("README's **Types in CAST:** list against FunctionCatalog.CastTargets and DecimalCastNames",
       registered.toSeq.sorted, documented.toSeq.sorted)
-    registered.foreach(n => assertTrue(n, FunctionCatalog.castTarget(n.toLowerCase(java.util.Locale.ROOT)).isDefined))
+    named.foreach(n => assertTrue(n, FunctionCatalog.castTarget(n.toLowerCase(java.util.Locale.ROOT)).isDefined))
+    FunctionCatalog.DecimalCastNames.foreach { n =>
+      assertEquals(n, Some(DataType.DecimalType(10, 2)), FunctionCatalog.castTarget(s"${n.toLowerCase(java.util.Locale.ROOT)} (10, 2)"))
+      assertEquals(n, None, FunctionCatalog.castTarget(n))
+    }
   }
 
   // ---- the binder ----------------------------------------------------------------

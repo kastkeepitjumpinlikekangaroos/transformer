@@ -158,6 +158,7 @@ object PlanRoundTrip {
     case LitExpr(f: java.lang.Float, t) => LitExpr(FloatBits(java.lang.Float.floatToIntBits(f).toLong), t)
     case l: LitExpr => l
     case CastExpr(c, t) => CastExpr(erase(c), t)
+    case DecimalCastExpr(c, t) => DecimalCastExpr(erase(c), t)
     case UnaryOpExpr("-", c, t) => c match {
       case LitExpr(v, lt) if lt == t => negated(v, t).map(erase).getOrElse(UnaryOpExpr("-", erase(c), t))
       case _ => UnaryOpExpr("-", erase(c), t)

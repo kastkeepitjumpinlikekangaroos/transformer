@@ -40,6 +40,7 @@ object JoinSideAnalysis {
       if (i < leftWidth) JoinSide.LeftOnly else JoinSide.RightOnly
     case LitExpr(_, _) => JoinSide.Neither
     case CastExpr(c, _) => sideOf(c, leftWidth)
+    case DecimalCastExpr(c, _) => sideOf(c, leftWidth)
     case UnaryOpExpr(_, c, _) => sideOf(c, leftWidth)
     case BinOpExpr(_, l, r, _) => merge(sideOf(l, leftWidth), sideOf(r, leftWidth))
     case FuncExpr(_, args, _) =>
@@ -88,6 +89,7 @@ object JoinSideAnalysis {
     case ColRefExpr(i, n, dt) => ColRefExpr(to(i), n, dt)
     case lit: LitExpr => lit
     case CastExpr(c, t) => CastExpr(remapColumns(c, to), t)
+    case DecimalCastExpr(c, t) => DecimalCastExpr(remapColumns(c, to), t)
     case UnaryOpExpr(op, c, dt) => UnaryOpExpr(op, remapColumns(c, to), dt)
     case BinOpExpr(op, l, r, dt) => BinOpExpr(op, remapColumns(l, to), remapColumns(r, to), dt)
     case FuncExpr(n, args, dt) => FuncExpr(n, args.map(remapColumns(_, to)), dt)
@@ -110,6 +112,7 @@ object JoinSideAnalysis {
       case ColRefExpr(i, _, _) => out += i
       case _: LitExpr => ()
       case CastExpr(c, _) => go(c)
+      case DecimalCastExpr(c, _) => go(c)
       case UnaryOpExpr(_, c, _) => go(c)
       case BinOpExpr(_, l, r, _) => go(l); go(r)
       case FuncExpr(_, args, _) => args.foreach(go)

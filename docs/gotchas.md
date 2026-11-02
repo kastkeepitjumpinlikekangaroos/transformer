@@ -32,12 +32,30 @@ ship a fix or move something from "not done" to "done".
   not have it. `PlanSql.identifier` writes a plain word bare only if a test
   statement using it as a CTE, a table, an alias, a qualifier and a column
   reads it back as each, once a word, and quotes it otherwise.
-- **SQL here writes no cast to DECIMAL or BINARY**, though the binder inserts
-  both (an INT beside a DECIMAL, a NULL beside a BINARY). `PlanSql` prints
-  such a cast as its operand, and the binder casts it again in the same place,
-  since the operand's types are the same; a plan with a DECIMAL literal where no
-  DECIMAL stands beside it, which the binder never makes, would print as a
-  DOUBLE.
+- **The binder's casts to DECIMAL and BINARY print as their operand.** The
+  binder inserts both (an INT beside a DECIMAL, a NULL beside a BINARY), and
+  `PlanSql` prints such a cast as its operand, which the binder casts again in
+  the same place, since the operand's types are the same. SQL cannot write a
+  cast to BINARY, and the cast to DECIMAL it writes, `CAST(x AS DECIMAL(p,s))`,
+  is another node (`DecimalCastExpr`): it rounds its value to the type and
+  fails past its digits, where the binder's reads a number exactly, so printing
+  the binder's as a written one would change what it answers. A string literal
+  under a written one stays the text it is in the plan, so it prints back as
+  the cast it was. A plan with a DECIMAL literal where no DECIMAL stands beside
+  it, which the binder never makes, would print as a DOUBLE.
+- **A CAST to DECIMAL fails two ways, by what it reads.** A number past the
+  type is `Decimal overflow: ... does not fit decimal(p,s)`, an
+  `ArithmeticException` while the query runs, as arithmetic's is (a FLOAT or
+  DOUBLE named as it prints, `1.0E300`, not by every digit of its decimal).
+  Text past the type is `Cannot cast '...' to decimal(p,s)`, an
+  `IllegalArgumentException`, as text past an INT's range is, because a string
+  literal under the cast is read when the query is bound, where an
+  `ArithmeticException` would be no clean refusal. NaN and the infinities are
+  `Cannot cast NaN to decimal(p,s)`, the binder's own cast's words for them.
+  A number written in the query is read as the decimal it is written as
+  (`decimalConstant`), so `CAST(1.0000000000000000001 AS DECIMAL(20,19))`
+  keeps its last digit, which a DOUBLE would round away; one no DECIMAL holds
+  (`1e-400`) stays the DOUBLE it binds as alone.
 - **`EXPLAIN` is read off the text before JSqlParser sees it.**
   `SqlParser.explained` finds the `EXPLAIN` token and `VERBOSE` after it, and
   the query is the text that follows, bound as any query is, so every check the
@@ -251,8 +269,9 @@ ship a fix or move something from "not done" to "done".
   overflow. Promoting a DATE beside a TIMESTAMP to its midnight, as some engines
   do, would make `d = ts` match only midnight, and a boolean beside a number
   would have to mean 1 and 0, which is why those pairs need a CAST too. The same
-  strictness runs through `CAST`: a string literal under one is folded at bind
-  time, text that is no number fails as `Cannot cast 'x' to int` rather than
+  strictness runs through `CAST`: a string literal under one is read at bind
+  time (folded, or under a CAST to DECIMAL checked and kept as its text), text
+  that is no number fails as `Cannot cast 'x' to int` rather than
   Java's `NumberFormatException`, BOOLEAN reads only `true` and `false` (Java's
   `parseBoolean` read every other text as false, and `WHERE NOT s` returned
   every row), `Analyzer.checkCast` refuses numbers and booleans to or from
@@ -302,9 +321,11 @@ ship a fix or move something from "not done" to "done".
   target (`Decimals.fit`: rounded half up, an error past its digits), so a
   comparison of two decimals reads both as `Decimals.wider`, the holding type
   with no bound on its digits: a comparison's operands are never stored, and a
-  bounded type would round one of them. Any other number cast to a `DECIMAL` is
-  still read exactly (an integer at the target's scale), since a comparison
-  reads an `INT` beside a `DECIMAL(5,2)` as it is. A `UNION` arm that ends in
+  bounded type would round one of them. Any other number the binder casts to a
+  `DECIMAL` is still read exactly (an integer at the target's scale), since a
+  comparison reads an `INT` beside a `DECIMAL(5,2)` as it is; a query's own
+  `CAST(x AS DECIMAL(p,s))` is another node, which fits every value
+  (plans/testing/10). A `UNION` arm that ends in
   its SELECT list is retyped in place, so a literal there is read as the type it
   meets; any other arm is wrapped in a casting projection. NULLIF compares
   through `unify` and returns its first operand as it is, the one place the
@@ -810,8 +831,9 @@ ship a fix or move something from "not done" to "done".
   the operator's own schema. `positionalSchema` applies it, so a new write site
   that wraps its schema as above is covered. The six-type fuzz corpora never
   wrote an untyped `NULL` (each typed NULL was a `CAST`), so the defect was
-  unreachable to them; it is the only NULL a DECIMAL or a BINARY has, since the
-  binder reads no CAST target for either, and widening the mode-differential
+  unreachable to them; it is the only NULL a BINARY has, since nothing casts to
+  one, and the only one the generators write for a DECIMAL (a query may write
+  `CAST(NULL AS DECIMAL(p,s))` since plans/testing/10), and widening the mode-differential
   corpus to every type
   ([plan 04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)) found it
   at seed 1796. Pinned by `SqlEngineTest.nullTypedColumnsSpillEndToEnd` (every
@@ -1277,10 +1299,9 @@ ship a fix or move something from "not done" to "done".
   the NULL type, and `VecOps.arith` and `VecOps.negate`, which a projection, a
   WHERE and an aggregate's argument run on, had no case for it: `Arithmetic on
   null not supported` and `Unary - on null`, internal `IllegalStateException`s,
-  where the row path answered NULL. Both now return an all-NULL vector. A
-  `DECIMAL` has no typed NULL (the binder reads no CAST target for one), so
-  decimal arithmetic in a query reaches `NULL * NULL` as soon as both sides are
-  NULL. Pinned by `ExprBatchTest.arithOnNullAloneIsNull` and
+  where the row path answered NULL. Both now return an all-NULL vector. An
+  untyped NULL beside a `DECIMAL` takes its type, so decimal arithmetic in a
+  query reaches `NULL * NULL` as soon as both sides are an untyped NULL. Pinned by `ExprBatchTest.arithOnNullAloneIsNull` and
   `SqlEngineTest.arithmeticOnNullAloneIsNull`.
 
 - **Mode-differential comparison is a multiset with a floating-point tolerance.**

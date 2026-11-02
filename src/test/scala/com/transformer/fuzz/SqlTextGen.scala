@@ -956,8 +956,11 @@ object SqlTextGen {
     (oneArgument.flatMap(_.names) ++
       oneArgument.filter(_.distinct != FunctionCatalog.DistinctUse.Refused).flatMap(_.names).map(_ + "(DISTINCT")).toVector
   }
-  /** Every name a CAST takes a type by. */
-  private val CastTargets: Vector[String] = FunctionCatalog.CastTargets.flatMap(_._2).toVector
+  /** Every name a CAST takes a type by, a DECIMAL's at a few precisions and
+    * scales (one too narrow for most values, so its cast fails on the data),
+    * and a DECIMAL short of both, which the binder refuses. */
+  private val CastTargets: Vector[String] = FunctionCatalog.CastTargets.flatMap(_._2).toVector ++
+    FunctionCatalog.DecimalCastNames.flatMap(n => Seq(s"$n(10,2)", s"$n(38,18)", s"$n(3,0)")) :+ "DECIMAL"
   private val TypingLiterals: Vector[String] = Vector("1", "2.5", "'x'", "NULL", "TRUE", "DATE '2024-02-29'", "-1")
 
   /** A function, an aggregate, a CAST, a UNION, a branch list, a condition

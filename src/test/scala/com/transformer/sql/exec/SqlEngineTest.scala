@@ -3046,6 +3046,54 @@ class SqlEngineTest {
       overflow("SELECT SUM(b) AS v FROM tb"))
   }
 
+  /** `CAST(x AS DECIMAL(p,s))` and `NUMERIC(p,s)`: a number rounded half up
+    * to the scale and an error past the precision, a number written in the
+    * query read as the decimal it is written as, text read now when it is a
+    * literal, and the cast's type the one arithmetic types its result from.
+    * A DECIMAL short of its precision or scale, or past their range, is
+    * refused, naming what to write; a date is no number. */
+  @Test def castToDecimalFitsTheValueToTheType(): Unit = {
+    val cat = decimalArithCatalog()
+    def typed(expr: String): (DataType, Seq[Any]) = typedColumn(s"SELECT id, $expr AS v FROM ta ORDER BY id", cat)
+    def d(p: Int, s: Int): DataType = DataType.DecimalType(p, s)
+    assertEquals((d(3, 1), Seq(dec("1.3"), dec("-2.5"), null)), typed("CAST(a AS DECIMAL(3,1))"))
+    assertEquals((d(38, 10), Seq(dec("0.0001000000"), dec("3.0000000000"), dec("0.3333000000"))), typed("CAST(c AS NUMERIC(38, 10))"))
+    assertEquals((d(4, 0), Seq(dec("3"), dec("0"), dec("7"))), typed("CAST(i AS DECIMAL(4,0))"))
+    assertEquals((d(5, 2), Seq(dec("0.50"), dec("1.50"), null)), typed("CAST(d AS decimal(5, 2))"))
+    // The cast's type is what arithmetic reads: DECIMAL(4,1) * DECIMAL(10,0),
+    // over 0.881, 30.88 and 4.213 rounded to 0.9, 30.9 and 4.2.
+    assertEquals((d(15, 1), Seq(dec("2.7"), dec("0.0"), dec("29.4"))),
+      typed("CAST(c * 10 + 0.88 AS DECIMAL(4,1)) * i"))
+    // Written numbers keep every digit, where a DOUBLE keeps about seventeen.
+    assertEquals((d(38, 37), Seq.fill(3)(dec("1.0000000000000000000000000000000000001"))),
+      typed("CAST(1.0000000000000000000000000000000000001 AS DECIMAL(38,37))"))
+    assertEquals((d(5, 2), Seq.fill(3)(dec("2.68"))), typed("CAST(2.675 AS DECIMAL(5,2))"))
+    assertEquals((d(3, 2), Seq.fill(3)(dec("-0.01"))), typed("CAST(-0.005 AS DECIMAL(3,2))"))
+    assertEquals((d(5, 1), Seq.fill(3)(dec("-150.0"))), typed("CAST('-1.5e2' AS DECIMAL(5,1))"))
+    assertEquals((d(4, 2), Seq.fill(3)(dec("1.00"))), typed("CAST(TRUE AS DECIMAL(4,2))"))
+    assertEquals((d(4, 2), Seq.fill(3)(null)), typed("CAST(NULL AS DECIMAL(4,2))"))
+    def runError(sql: String): String =
+      try { collectAllRows(SqlEngine.execute(sql, cat)); fail(s"$sql ran"); "" }
+      catch { case e: ArithmeticException => e.getMessage }
+    assertEquals("Decimal overflow: 123.45 does not fit decimal(4,2)", runError("SELECT CAST(123.45 AS DECIMAL(4,2)) AS v FROM ta"))
+    assertEquals("Decimal overflow: 10000000000 does not fit decimal(10,0)", runError("SELECT CAST(l AS DECIMAL(10,0)) AS v FROM ta"))
+    assertEquals("Cannot cast NaN to decimal(4,2)",
+      try { collectAllRows(SqlEngine.execute("SELECT CAST(CAST('NaN' AS DOUBLE) AS DECIMAL(4,2)) AS v FROM ta", cat)); "" }
+      catch { case e: IllegalArgumentException => e.getMessage })
+    // Text that is no number, or too long for the type, fails before the query runs.
+    assertEquals("Cannot cast '1e9' to decimal(5,1)", bindRejection("SELECT CAST('1e9' AS DECIMAL(5,1)) AS v FROM ta", cat))
+    assertEquals("Cannot cast 'ten' to decimal(5,1)", bindRejection("SELECT CAST('ten' AS DECIMAL(5,1)) AS v FROM ta", cat))
+    val bare = "A CAST to DECIMAL names its precision and scale: write DECIMAL(p,s), with p digits in all (1 to 38) " +
+      "and s of them after the point (0 to p)"
+    assertEquals(bare, bindRejection("SELECT CAST(a AS DECIMAL) AS v FROM ta", cat))
+    assertEquals(bare, bindRejection("SELECT CAST(a AS DECIMAL(10)) AS v FROM ta", cat))
+    assertEquals(bare.replace("DECIMAL", "NUMERIC"), bindRejection("SELECT CAST(a AS numeric) AS v FROM ta", cat))
+    for ((p, s) <- Seq((39, 2), (0, 0), (5, 6)))
+      assertEquals(s"DECIMAL($p,$s) is no DECIMAL: one has 1 to 38 digits in all, its precision, and 0 to that many " +
+        "after the point, its scale", bindRejection(s"SELECT CAST(a AS DECIMAL($p,$s)) AS v FROM ta", cat))
+    assertEquals("Cannot cast DATE to DECIMAL(5,2)", bindRejection("SELECT CAST(DATE '2026-01-01' AS DECIMAL(5,2)) AS v FROM ta", cat))
+  }
+
   /** Arithmetic on NULL alone is NULL. A projection or a WHERE, which run on
     * the vector path, threw `IllegalStateException: Arithmetic on null not
     * supported` (and `Unary - on null`), and so did an aggregate over one. A

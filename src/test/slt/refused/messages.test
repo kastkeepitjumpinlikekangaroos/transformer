@@ -119,6 +119,30 @@ SELECT CAST(a AS INTERVAL) FROM t
 ----
 INTERVAL
 
+# A DECIMAL is named with its precision and scale, which the message says
+# how to write.
+statement error
+SELECT CAST(a AS DECIMAL) FROM t
+----
+A CAST to DECIMAL names its precision and scale: write DECIMAL(p,s), with p digits in all (1 to 38) and s of them after the point (0 to p)
+
+statement error
+SELECT CAST(a AS NUMERIC(12)) FROM t
+----
+A CAST to NUMERIC names its precision and scale: write NUMERIC(p,s)
+
+statement error
+SELECT CAST(a AS DECIMAL(40,2)) FROM t
+----
+DECIMAL(40,2) is no DECIMAL: one has 1 to 38 digits in all, its precision, and 0 to that many after the point, its scale
+
+# Text a CAST to DECIMAL cannot hold is refused before the query runs, as any
+# other text a CAST cannot read is.
+statement error
+SELECT CAST('123.45' AS DECIMAL(4,2)) FROM t
+----
+Cannot cast '123.45' to decimal(4,2)
+
 statement error
 SELECT UPPER(x) FROM t
 ----

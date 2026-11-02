@@ -531,8 +531,9 @@ object FunctionCatalog {
   // CAST's target types
   // ---------------------------------------------------------------------------
 
-  /** Each type a CAST can name, and the names it goes by. A DECIMAL and a
-    * BINARY are no CAST target. */
+  /** Each type a CAST can name by a name alone, and the names it goes by. A
+    * DECIMAL is named with its precision and scale ([[DecimalCastNames]]),
+    * and a BINARY is no CAST target. */
   val CastTargets: Seq[(DataType, Seq[String])] = Seq(
     DataType.IntType -> Seq("INT", "INTEGER"),
     DataType.LongType -> Seq("BIGINT", "LONG"),
@@ -543,13 +544,44 @@ object FunctionCatalog {
     DataType.DateType -> Seq("DATE"),
     DataType.TimestampType -> Seq("TIMESTAMP"))
 
+  /** The names of a CAST to a DECIMAL, each written with the type's precision
+    * and scale, `DECIMAL(p,s)`: p digits in all, 1 to [[Decimals.MaxPrecision]],
+    * and s of them after the point, 0 to p. */
+  val DecimalCastNames: Seq[String] = Seq("DECIMAL", "NUMERIC")
+
   private val castTargetByName: Map[String, DataType] =
     CastTargets.flatMap { case (t, names) => names.map(_ -> t) }.toMap
 
-  /** The type a CAST names as `written`, in any case. */
-  def castTarget(written: String): Option[DataType] = castTargetByName.get(written.toUpperCase(Locale.ROOT))
+  /** A DECIMAL's name as the parser renders it, `DECIMAL (10, 2)`, with none,
+    * one or both of its numbers. */
+  private val WrittenDecimal: Regex = """(?i)(DECIMAL|NUMERIC)\s*(?:\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\))?""".r
 
-  /** A CAST to a type no CAST takes. */
-  def unsupportedCastTarget(written: String): String =
-    s"Unsupported CAST target type: ${written.toUpperCase(Locale.ROOT)}"
+  /** Whether `p` and `s`, as written, are a precision and a scale a DECIMAL
+    * has. */
+  private def isDecimalType(p: String, s: String): Boolean = {
+    val (precision, scale) = (BigInt(p), BigInt(s))
+    precision >= 1 && precision <= Decimals.MaxPrecision && scale >= 0 && scale <= precision
+  }
+
+  /** The type a CAST names as `written`, in any case: a name of
+    * [[CastTargets]], or a DECIMAL with its precision and scale. */
+  def castTarget(written: String): Option[DataType] = written match {
+    case WrittenDecimal(_, p, s) if p != null && s != null && isDecimalType(p, s) =>
+      Some(DataType.DecimalType(p.toInt, s.toInt))
+    case _ => castTargetByName.get(written.toUpperCase(Locale.ROOT))
+  }
+
+  /** A CAST to a type no CAST takes: a DECIMAL short of its precision or its
+    * scale or past their range, or another type. */
+  def unsupportedCastTarget(written: String): String = written match {
+    case WrittenDecimal(name, p, s) =>
+      val upper = name.toUpperCase(Locale.ROOT)
+      if (p == null || s == null)
+        s"A CAST to $upper names its precision and scale: write $upper(p,s), with p digits in all " +
+          s"(1 to ${Decimals.MaxPrecision}) and s of them after the point (0 to p)"
+      else
+        s"$upper($p,$s) is no DECIMAL: one has 1 to ${Decimals.MaxPrecision} digits in all, its precision, " +
+          "and 0 to that many after the point, its scale"
+    case _ => s"Unsupported CAST target type: ${written.toUpperCase(Locale.ROOT)}"
+  }
 }

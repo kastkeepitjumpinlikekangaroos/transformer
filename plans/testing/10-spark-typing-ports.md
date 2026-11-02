@@ -261,6 +261,11 @@ skipped record still diverges.
      Spark's BIGINT × DECIMAL records are skipped under its id.
    - **(b) Spark's DECIMAL(20,0).** Exact parity with Spark, one digit wider.
 
+**Taken overnight as recommended, not yet confirmed by the user** (2026-11-02):
+decision 1 (a), `CAST(x AS DECIMAL(p,s))` with W1's semantics; decision 2
+(a), an INT or BIGINT beside a FLOAT is a DOUBLE in comparisons, branches and
+arithmetic; decision 3 (a), BIGINT's decimal stays DECIMAL(19,0).
+
 ## Decisions already made
 
 - **Spark's answers are the expected values, never the engine's,** as in the

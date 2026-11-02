@@ -290,6 +290,31 @@ class ExprParityFuzzTest {
     assertTrue(s"a scale, position or length rarely passes an edge, $report", edge > 12)
   }
 
+  /** Coverage guard: a query's CAST to DECIMAL reaches both paths, rounding a
+    * value to the target's scale on some row and passing its integer digits
+    * on another, the overflow both paths must raise alike. Prints the tally.
+    * The cast is one of the shapes a DECIMAL is drawn as, at weight 1 of
+    * 16, so the shape is on 1043 of these 100000 seeds, a rounding on 35 and
+    * an overflow on 84 (a rounding takes a source with more places than its
+    * target, and a value that uses them); each bound sits about 3x below. */
+  @Test def writtenDecimalCastsRoundAndOverflow(): Unit = {
+    val n = 100000
+    var shape, rounded, overflowed = 0
+    var seed = 0
+    while (seed < n) {
+      val cov = ExprGen.writtenDecimalCastCoverage(ExprGen.generate(new Rng(seed.toLong)))
+      if (cov.shape) shape += 1
+      if (cov.rounded) rounded += 1
+      if (cov.overflowed) overflowed += 1
+      seed += 1
+    }
+    val report = s"over $n seeds: shape=$shape rounded=$rounded overflowed=$overflowed"
+    println(s"[expr-parity] written CAST to DECIMAL $report")
+    assertTrue(s"a CAST to DECIMAL is rarely generated, $report", shape > 340)
+    assertTrue(s"a CAST to DECIMAL rarely rounds, $report", rounded > 11)
+    assertTrue(s"a CAST to DECIMAL rarely overflows, $report", overflowed > 28)
+  }
+
   /** Coverage guard: every function the catalog binds as a call
     * (`FunctionCatalog`'s scalar and flow entries) is drawn, each on a share
     * of the block. The generator draws its functions from the catalog by

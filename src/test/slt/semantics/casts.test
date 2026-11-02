@@ -207,12 +207,34 @@ SELECT CAST(dt AS INT) FROM c
 ----
 Cannot cast DATE to INT
 
-# ---- no CAST to DECIMAL or BINARY, and a BINARY casts to nothing
+# ---- to a DECIMAL: rounded half up to the scale, past the precision an
+# error; no CAST to BINARY, and a BINARY casts to nothing
+
+query INT,DECIMAL(10,2),DECIMAL(10,2),DECIMAL(10,2),DECIMAL(10,2),DECIMAL(10,2)
+SELECT id, CAST(f AS DECIMAL(10,2)), CAST(d AS DECIMAL(10,2)), CAST(m AS DECIMAL(10,2)), CAST(t AS DECIMAL(10,2)), CAST(s AS DECIMAL(10,2)) FROM c WHERE id < 3 ORDER BY id
+----
+1	0.00	0.00	0.00	0.00	7.00
+2	2.70	-2.70	2.70	1.00	5.00
+
+query DECIMAL(4,1),DECIMAL(4,1),DECIMAL(38,37)
+SELECT CAST(2.25 AS DECIMAL(4,1)), CAST(-2.25 AS DECIMAL(4,1)), CAST(1.0000000000000000000000000000000000001 AS DECIMAL(38,37))
+----
+2.3	-2.3	1.0000000000000000000000000000000000001
 
 statement error
-SELECT CAST(i AS DECIMAL(10,2)) FROM c
+SELECT CAST(i AS DECIMAL(10,2)) FROM c WHERE id = 2
 ----
-Unsupported CAST target type: DECIMAL (10, 2)
+Decimal overflow: 2147483647 does not fit decimal(10,2)
+
+statement error
+SELECT CAST(w AS DECIMAL(10,2)) FROM c WHERE id = 3
+----
+Decimal overflow: 2147483648.0000000000 does not fit decimal(10,2)
+
+statement error
+SELECT CAST(s AS DECIMAL(10,2)) FROM c WHERE id = 3
+----
+Cannot cast 'TRUE' to decimal(10,2)
 
 statement error
 SELECT CAST(s AS BINARY) FROM c

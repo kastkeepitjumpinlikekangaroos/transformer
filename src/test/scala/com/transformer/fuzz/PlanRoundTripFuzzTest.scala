@@ -125,7 +125,7 @@ object PlanRoundTripFuzzTest {
   val RequiredKinds: Seq[String] = Seq(
     "Scan", "Project", "Filter", "Aggregate", "Sort", "Limit", "Offset", "Distinct", "Window",
     "Join Inner", "Join Left", "Join Right", "Join Full", "Union all", "Union distinct",
-    "Lit", "ColRef", "Cast", "Negate", "Not", "Arithmetic", "Comparison", "And", "Or", "Concat",
+    "Lit", "ColRef", "Cast", "DecimalCast", "Negate", "Not", "Arithmetic", "Comparison", "And", "Or", "Concat",
     "Func", "Case", "IsNull", "InList", "Like")
 
   /** What happened to a query: `same`, `refused`, `unprintable` or `too
@@ -204,6 +204,7 @@ object PlanRoundTripFuzzTest {
         case _: LitExpr => out += "Lit"
         case _: ColRefExpr => out += "ColRef"
         case _: CastExpr => out += "Cast"
+        case _: DecimalCastExpr => out += "DecimalCast"
         case UnaryOpExpr("-", _, _) => out += "Negate"
         case UnaryOpExpr(_, _, _) => out += "Not"
         case BinOpExpr("AND", _, _, _) => out += "And"
@@ -246,6 +247,7 @@ object PlanRoundTripFuzzTest {
   private def children(e: Expr): Seq[Expr] = e match {
     case _: LitExpr | _: ColRefExpr => Nil
     case CastExpr(c, _) => Seq(c)
+    case DecimalCastExpr(c, _) => Seq(c)
     case UnaryOpExpr(_, c, _) => Seq(c)
     case BinOpExpr(_, l, r, _) => Seq(l, r)
     case FuncExpr(_, args, _) => args

@@ -56,6 +56,7 @@ object Expr {
     case FuncExpr(name, args, _) => FunctionCatalog.readsRandom(name, args.size) || args.exists(readsRandom)
     case _: ColRefExpr | _: LitExpr => false
     case CastExpr(c, _) => readsRandom(c)
+    case DecimalCastExpr(c, _) => readsRandom(c)
     case UnaryOpExpr(_, c, _) => readsRandom(c)
     case BinOpExpr(_, l, r, _) => readsRandom(l) || readsRandom(r)
     case CaseExpr(branches, elseExpr, _) =>
@@ -181,6 +182,32 @@ final case class CastExpr(child: Expr, target: DataType) extends Expr {
   override def evalVec(batch: ColumnarBatch): ColumnVector = {
     val c = child.evalVec(batch)
     VecOps.cast(c, child.dataType, target, batch.numRows)
+  }
+}
+
+/** `CAST(x AS DECIMAL(p,s))` as a query writes it: its value as one of the
+  * type, rounded half up to the scale and an error past the precision
+  * ([[Casts.toWrittenDecimal]]). The binder's own casts to a DECIMAL are
+  * [[CastExpr]]s, which read a number exactly, as the comparison or the
+  * result they serve needs; the two stay apart, so a printed plan writes
+  * this one and leaves the binder to insert its own again. */
+final case class DecimalCastExpr(child: Expr, target: DataType.DecimalType) extends Expr {
+  def dataType: DataType = target
+  def eval(batch: ColumnarBatch, row: Int): Any = {
+    val v = child.eval(batch, row)
+    if (v == null) null else Casts.toWrittenDecimal(v, target)
+  }
+
+  override def evalVec(batch: ColumnarBatch): ColumnVector = {
+    val c = child.evalVec(batch)
+    val n = batch.numRows
+    val out = ColumnVector.allocate(target, math.max(1, n))
+    var i = 0
+    while (i < n) {
+      if (c.isNull(i)) out.setNull(i) else out.setBoxed(i, Casts.toWrittenDecimal(c.getBoxed(i), target))
+      i += 1
+    }
+    out
   }
 }
 

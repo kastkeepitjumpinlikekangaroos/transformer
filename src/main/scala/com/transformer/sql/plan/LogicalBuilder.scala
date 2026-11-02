@@ -1151,10 +1151,12 @@ object LogicalBuilder {
       val inner = b(ce.getLeftExpression)
       val target = parseTypeName(ce.getColDataType.getDataType)
       Analyzer.checkCast(inner.dataType, target)
-      inner match {
+      (inner, target) match {
+        case (_, decimal: DataType.DecimalType) =>
+          DecimalCastExpr(decimalCastOperand(ce.getLeftExpression, inner, decimal), decimal)
         // A string literal is read now, so bad text fails before the query
         // runs. `DATE '...'` and `TIMESTAMP '...'` literals are this cast.
-        case LitExpr(s: String, DataType.StringType) => Analyzer.readLiteral(s, target)
+        case (LitExpr(s: String, DataType.StringType), _) => Analyzer.readLiteral(s, target)
         case _ => CastExpr(inner, target)
       }
 
@@ -1267,6 +1269,23 @@ object LogicalBuilder {
       case a: Modulo => step("%", a.getLeftExpression, a.getRightExpression)
       case _ => None
     }
+  }
+
+  /** The operand of `CAST(e AS DECIMAL(p,s))`, `e` written as it is and
+    * `bound` as it binds alone. A number written in the query is the decimal
+    * it is written as ([[decimalConstant]]), as it is beside a DECIMAL, so a
+    * long one loses no digit to a DOUBLE before the cast fits it; one a
+    * DECIMAL cannot hold (`1e-400`) stays the DOUBLE it is. A string literal
+    * is read now, so text that is no number, or one too long for the type,
+    * fails before the query runs, and stays the text it is in the plan, which
+    * prints back as the cast it was written as. */
+  private def decimalCastOperand(e: Expression, bound: Expr, target: DataType.DecimalType): Expr = bound match {
+    case LitExpr(s: String, DataType.StringType) =>
+      val _ = Casts.toWrittenDecimal(s, target)
+      bound
+    case _ =>
+      try decimalConstant(e).getOrElse(bound)
+      catch { case _: IllegalArgumentException => bound } // more digits than a DECIMAL holds
   }
 
   /** Whether `e` is a constant of INT and BIGINT literals alone, which
@@ -1784,6 +1803,7 @@ object LogicalBuilder {
     case FuncExpr(name, args, _) if FunctionCatalog.readsRandom(name, args.size) => false
     case FuncExpr(_, args, _) => args.forall(isConstant)
     case CastExpr(c, _) => isConstant(c)
+    case DecimalCastExpr(c, _) => isConstant(c)
     case UnaryOpExpr(_, c, _) => isConstant(c)
     case BinOpExpr(_, l, r, _) => isConstant(l) && isConstant(r)
     case CaseExpr(branches, elseExpr, _) =>

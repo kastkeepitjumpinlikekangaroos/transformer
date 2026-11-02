@@ -84,6 +84,7 @@ object ExprGen {
     case LitExpr(v, dt) => s"LitExpr(${RowOracle.show(v)},$dt)"
     case ColRefExpr(_, _, _) => e.toString
     case CastExpr(c, t) => s"CastExpr(${render(c)},$t)"
+    case DecimalCastExpr(c, t) => s"DecimalCastExpr(${render(c)},$t)"
     case UnaryOpExpr(op, c, dt) => s"UnaryOpExpr($op,${render(c)},$dt)"
     case BinOpExpr(op, l, r, dt) => s"BinOpExpr($op,${render(l)},${render(r)},$dt)"
     case FuncExpr(name, args, dt) => s"FuncExpr($name,${args.map(render).mkString("List(", ", ", ")")},$dt)"
@@ -939,6 +940,18 @@ object ExprGen {
 
   private def integerDigits(t: DataType.DecimalType): Int = t.precision - t.scale
 
+  /** A query's `CAST(x AS DECIMAL(p,s))`, which fits its value to the type,
+    * from an INT, a BIGINT, a BOOLEAN or any DECIMAL: one with more places
+    * than the target rounds, and one with more integer digits can pass it,
+    * an `ArithmeticException` both paths must raise alike ([[ExprParity]]
+    * owns it). Not a FLOAT or DOUBLE, whose NaN and infinities have no
+    * decimal, which is an error of another kind. */
+  private def genWrittenDecimalCast(r: Rng, schema: Schema, target: DataType.DecimalType, depth: Int): Expr =
+    DecimalCastExpr(genTyped(r, schema, pick(r, WrittenDecimalSources), depth - 1), target)
+
+  private val WrittenDecimalSources: Seq[DataType] =
+    Seq(DataType.IntType, DataType.LongType, DataType.BooleanType) ++ DecimalTypes
+
   /** A DECIMAL, DATE, TIMESTAMP or BINARY expression: the conditional forms
     * every type has, and a CAST in from the types that cast to `target` without
     * throwing. A DECIMAL also takes arithmetic, unary `+` and `-`, and `ABS`. */
@@ -948,10 +961,11 @@ object ExprGen {
       6 -> (() => genCall(r, pickFlow(r), target, sub)),
       1 -> (() => genCaseExpr(r, schema, target, depth)))
     val extra: Seq[(Int, () => Expr)] = target match {
-      case _: DataType.DecimalType => Seq(
+      case d: DataType.DecimalType => Seq(
         4 -> (() => genDecimalArith(r, schema, target)),
         1 -> (() => genRounding(r, target, sub)),
         1 -> (() => genCastTo(r, schema, target, depth)),
+        1 -> (() => genWrittenDecimalCast(r, schema, d, depth)),
         1 -> (() => UnaryOpExpr(r.oneOf(Seq("+", "-")), sub(target), target)),
         1 -> (() => genCall(r, r.oneOf(SameTypeFunctions), target, sub)))
       case DataType.DateType | DataType.TimestampType => Seq(1 -> (() => genCastTo(r, schema, target, depth)))
@@ -1090,6 +1104,37 @@ object ExprGen {
 
     walk(c.expr)
     DecimalArithCoverage(ops.toSet, rounded, byZero)
+  }
+
+  /** What a case's written CASTs to DECIMAL meet: whether it has one, and
+    * whether on some row one rounds its value to the target's scale, and one
+    * passes the target's integer digits, both read off every row. */
+  final case class WrittenDecimalCastCoverage(shape: Boolean, rounded: Boolean, overflowed: Boolean)
+
+  def writtenDecimalCastCoverage(c: ExprCase): WrittenDecimalCastCoverage = {
+    var shape, rounded, overflowed = false
+    def walk(e: Expr): Unit = {
+      e match {
+        case DecimalCastExpr(child, t) =>
+          shape = true
+          var row = 0
+          while (row < c.batch.numRows) {
+            valueAt(child, c.batch, row) match {
+              case n: Number =>
+                val v = Casts.toDecimal(n)
+                val atScale = v.setScale(t.scale, java.math.RoundingMode.HALF_UP)
+                if (atScale.compareTo(v) != 0) rounded = true
+                if (atScale.precision > t.precision) overflowed = true
+              case _ => ()
+            }
+            row += 1
+          }
+        case _ => ()
+      }
+      Shrinker.childrenOf(e).foreach(walk)
+    }
+    walk(c.expr)
+    WrittenDecimalCastCoverage(shape, rounded, overflowed)
   }
 
   /** What a case's `ROUND`, `TRUNC` and `SUBSTRING` calls give their scale,

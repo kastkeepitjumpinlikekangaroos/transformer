@@ -57,13 +57,15 @@ navigation hint, not a comprehensive directory listing.
   consistency checks). The order a task's directory is written in, and what a
   failure leaves there, is `job/OutputDirectory.scala`'s, which `DataJob` and
   the GUI's `ResultPersister` both call.
-- `sql/plan/Expr.scala` (~910 LOC) — `Expr` ADT plus `eval` and `evalVec`
-  per subtype. `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` each carry
+- `sql/plan/Expr.scala` (~930 LOC) — `Expr` ADT plus `eval` and `evalVec`
+  per subtype (`CastExpr` the binder's casts, `DecimalCastExpr` a query's
+  `CAST(x AS DECIMAL(p,s))`). `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` each carry
   an `evalVec` override; the rest of the hot subtypes delegate to `VecOps`.
   `SwitchCaseExpr` and `BetweenExpr` read a `RAND()` operand once, and the
   `Expr` companion's `readsRandom` says which expressions read RAND().
-- `sql/plan/Ops.scala` (~1120 LOC) — `Ops` (row-at-a-time binary ops, and
-  `eq` / `cmp`, the engine's one equality and total order), `Casts`,
+- `sql/plan/Ops.scala` (~1280 LOC) — `Ops` (row-at-a-time binary ops, and
+  `eq` / `cmp`, the engine's one equality and total order), `Casts` (the
+  binder's casts, and `toWrittenDecimal`, a query's cast to DECIMAL),
   `Decimals` (the declared type of each decimal result, the type that holds
   two decimals, and the one function both paths compute and fit a value
   with), and `VecOps` (one specialized loop per (op,
@@ -73,11 +75,12 @@ navigation hint, not a comprehensive directory listing.
   `-0.0` rules), anything else through `Ops` (`genericCompare`) — is chosen in
   `VecOps.compare`; see
   [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec).
-- `sql/plan/FunctionCatalog.scala` (~560 LOC) — every function a query can
+- `sql/plan/FunctionCatalog.scala` (~590 LOC) — every function a query can
   call, one `Entry` each (name, aliases, kind, arities, parameters, result
   rule, NULL rule, domain, run-time errors, vector path, window and
   `DISTINCT` use, ledger ids), the builders of what an aggregate, a window
-  function or a clock keyword binds to, and the CAST target names. The binder
+  function or a clock keyword binds to, and the CAST target names, a
+  DECIMAL's read with its precision and scale. The binder
   binds by it and matches no name itself.
 - `sql/plan/Funcs.scala` (~620 LOC) — the scalar functions' implementations.
   `Funcs.signature` is the catalog's lookup of a call's parameters and return

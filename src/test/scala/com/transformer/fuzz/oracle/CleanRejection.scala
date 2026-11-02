@@ -303,6 +303,7 @@ object BoundPlan {
   private def children(e: Expr): Seq[Expr] = e match {
     case _: LitExpr | _: ColRefExpr => Nil
     case CastExpr(c, _) => Seq(c)
+    case DecimalCastExpr(c, _) => Seq(c)
     case UnaryOpExpr(_, c, _) => Seq(c)
     case BinOpExpr(_, l, r, _) => Seq(l, r)
     case FuncExpr(_, args, _) => args

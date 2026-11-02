@@ -489,9 +489,9 @@ object QueryGen {
   }
 
   /** A DECIMAL, DATE, TIMESTAMP or BINARY value: the conditional forms every
-    * type has, arithmetic and `ABS` of a DECIMAL, and a CAST between DATE and
-    * TIMESTAMP. The engine has no arithmetic on the last three, and no CAST
-    * into a DECIMAL or a BINARY, since the binder reads no type name for one. */
+    * type has, arithmetic, `ABS` and a CAST into it of a DECIMAL, and a CAST
+    * between DATE and TIMESTAMP. The engine has no arithmetic on the last
+    * three, and no CAST into a BINARY. */
   private def genOtherExpr(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     def sub(t: DataType): Expr = genValue(rng, schema, t, depth - 1)
     val base: Seq[(Int, () => Expr)] = Seq(
@@ -501,17 +501,32 @@ object QueryGen {
       1 -> (() => genCase(rng, schema, target, depth)))
     val decimalCols = (0 until schema.length).filter(i => schema.fields(i).dataType.isInstanceOf[DataType.DecimalType])
     val extra: Seq[(Int, () => Expr)] = target match {
-      case _: DataType.DecimalType if decimalCols.nonEmpty => Seq(
+      case d: DataType.DecimalType if decimalCols.nonEmpty => Seq(
         4 -> (() => genDecimalArith(rng, schema, target, decimalCols, depth)),
         5 -> (() => genDecimalBranches(rng, schema, target, decimalCols, depth)),
-        1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
-      case _: DataType.DecimalType => Seq(1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
+        1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
+        1 -> (() => genWrittenDecimalCast(rng, schema, d)))
+      case d: DataType.DecimalType => Seq(
+        1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
+        1 -> (() => genWrittenDecimalCast(rng, schema, d)))
       case DataType.DateType => Seq(1 -> (() => CastExpr(sub(DataType.TimestampType), target)))
       case DataType.TimestampType => Seq(1 -> (() => CastExpr(sub(DataType.DateType), target)))
       case _ => Seq.empty
     }
     rng.weighted(base ++ extra: _*)()
   }
+
+  /** `CAST(x AS DECIMAL(p,s))`, which fits its value to the type, of a leaf
+    * whose every value the corpus draws fits each generated DECIMAL: an INT, a
+    * BIGINT or a BOOLEAN (1 or 0), or a DECIMAL, the corpus's values being
+    * small. Not a FLOAT or a DOUBLE, whose NaN and infinities have no decimal,
+    * and not a computed value, which could pass a DECIMAL(9,2)'s seven integer
+    * digits. */
+  private def genWrittenDecimalCast(rng: Rng, schema: Schema, target: DataType.DecimalType): Expr =
+    DecimalCastExpr(genLeafValue(rng, schema, ExprGen.pick(rng, WrittenDecimalSources)), target)
+
+  private val WrittenDecimalSources: Seq[DataType] =
+    Seq(DataType.IntType, DataType.LongType, DataType.BooleanType) ++ ExprGen.DecimalTypes
 
   /** `(l op r)` over decimals, for the binder to type (`Analyzer.arithmetic`).
     * One side is an anchor, a DECIMAL column or arithmetic over one, which SQL
@@ -887,6 +902,7 @@ object SqlRender {
     case LitExpr(v, dt) => lit(v, dt)
     case ColRefExpr(_, name, _) => name
     case CastExpr(c, t) => s"CAST(${expr(c)} AS ${sqlType(t)})"
+    case DecimalCastExpr(c, t) => s"CAST(${expr(c)} AS DECIMAL(${t.precision},${t.scale}))"
     case UnaryOpExpr("NOT", c, _) => s"NOT ${expr(c)}"
     case UnaryOpExpr("-", c, _) => s"- ${expr(c)}"
     case UnaryOpExpr("+", c, _) => s"+ ${expr(c)}"
@@ -946,10 +962,11 @@ object SqlRender {
     case other => throw new IllegalArgumentException(s"SqlRender: no SQL type name for $other")
   }
 
-  /** A typed NULL, `CAST(NULL AS t)`. The binder reads no type name for a
-    * DECIMAL or a BINARY, so their NULL is the untyped one, which takes the type
-    * of what it meets (the other side of a comparison, COALESCE's or CASE's
-    * other values) and is NULL-typed where it meets nothing. */
+  /** A typed NULL, `CAST(NULL AS t)`. A BINARY has no CAST, and a DECIMAL's
+    * NULL is written as the untyped one too, as the generators' decimal shapes
+    * expect: it takes the type of what it meets (the other side of a
+    * comparison or of arithmetic, COALESCE's or CASE's other values) and is
+    * NULL-typed where it meets nothing. */
   private def nullLit(dt: DataType): String = dt match {
     case DataType.NullType | DataType.BinaryType | _: DataType.DecimalType => "NULL"
     case other => s"CAST(NULL AS ${sqlType(other)})"

@@ -179,6 +179,7 @@ object ColumnProjectionPushdown {
       case ColRefExpr(_, n, _) => b += n
       case LitExpr(_, _) => ()
       case CastExpr(c, _) => go(c)
+      case DecimalCastExpr(c, _) => go(c)
       case UnaryOpExpr(_, c, _) => go(c)
       case BinOpExpr(_, l, r, _) => go(l); go(r)
       case FuncExpr(_, args, _) => args.foreach(go)
@@ -205,6 +206,7 @@ object ColumnProjectionPushdown {
     case ColRefExpr(i, n, dt) => ColRefExpr(remap.getOrElse(i, i), n, dt)
     case c: LitExpr => c
     case CastExpr(c, t) => CastExpr(rewriteExpr(c, remap), t)
+    case DecimalCastExpr(c, t) => DecimalCastExpr(rewriteExpr(c, remap), t)
     case UnaryOpExpr(op, c, dt) => UnaryOpExpr(op, rewriteExpr(c, remap), dt)
     case BinOpExpr(op, l, r, dt) => BinOpExpr(op, rewriteExpr(l, remap), rewriteExpr(r, remap), dt)
     case FuncExpr(n, args, dt) => FuncExpr(n, args.map(rewriteExpr(_, remap)), dt)
@@ -267,6 +269,7 @@ object ColumnProjectionPushdown {
         if (i < leftWidth) leftNames += n else rightNames += n
       case LitExpr(_, _) => ()
       case CastExpr(c, _) => go(c)
+      case DecimalCastExpr(c, _) => go(c)
       case UnaryOpExpr(_, c, _) => go(c)
       case BinOpExpr(_, l, r, _) => go(l); go(r)
       case FuncExpr(_, args, _) => args.foreach(go)
@@ -303,6 +306,7 @@ object ColumnProjectionPushdown {
       case ColRefExpr(i, n, dt) => ColRefExpr(remapIndex(i), n, dt)
       case lit: LitExpr => lit
       case CastExpr(c, t) => CastExpr(go(c), t)
+      case DecimalCastExpr(c, t) => DecimalCastExpr(go(c), t)
       case UnaryOpExpr(op, c, dt) => UnaryOpExpr(op, go(c), dt)
       case BinOpExpr(op, l, r, dt) => BinOpExpr(op, go(l), go(r), dt)
       case FuncExpr(n, args, dt) => FuncExpr(n, args.map(go), dt)
