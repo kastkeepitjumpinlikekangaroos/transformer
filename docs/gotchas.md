@@ -826,6 +826,22 @@ ship a fix or move something from "not done" to "done".
   length bounded by the bytes left. A row group that fails is pinned to its
   column by reading each chunk alone: parquet-mr reads a group's chunks
   together, and its error names none.
+- **parquet's `LZ4` is Hadoop's codec, which needs the lz4 library; `BROTLI`
+  and `LZO` have no codec here.** parquet-mr decompresses `LZ4` through
+  Hadoop's `Lz4Codec`, which calls `net.jpountz.lz4` (lz4-java), a dependency
+  Hadoop leaves optional, so without it every `LZ4` file failed with a
+  `NoClassDefFoundError`, an `Error`. `at.yawk.lz4:lz4-java` is a runtime
+  dependency of `read/parquet` and `read/parquet:external_parquet`: the
+  coordinates `org.lz4:lz4-java` relocate there past 1.8.0, and the release
+  is pinned at one with every published decompression flaw fixed, since a
+  file's pages are untrusted input. Hadoop's codec reads a block framed with
+  its lengths, so an `LZ4` file early parquet-cpp wrote as bare blocks fails
+  as a page that does not decode (pyarrow falls back to bare blocks;
+  parquet-testing's `non_hadoop_lz4_compressed.parquet`). `BROTLI` needs a
+  codec class with a native library, and `LZO` one under the GPL, so neither
+  ships: `ParquetReader.decompresses` asks parquet-mr for a decompressor once
+  a codec, and a column in one it cannot make fails the view as it opens,
+  naming the codec. `LZ4_RAW` is parquet-mr's own and needs nothing.
 - **A footer's sizes are a writer's claim, never a reason to skip rows.**
   `ParquetReader.packRowGroups` packs a file's row groups into partitions by
   their bytes. It packed by `total_byte_size` alone and emitted a partition

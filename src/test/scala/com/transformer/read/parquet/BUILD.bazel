@@ -57,9 +57,10 @@ scala_library(
         "@maven//:org_apache_parquet_parquet_common",
     ],
     # parquet-mr's reader reaches Hadoop's mapreduce classes (FileInputFormat)
-    # at run time; read/parquet carries them too, but this library must work
-    # in a test that never touches our reader.
+    # at run time, and its LZ4 codec the lz4 library; read/parquet carries them
+    # too, but this library must work in a test that never touches our reader.
     runtime_deps = [
+        "@maven//:at_yawk_lz4_lz4_java",
         "@maven//:commons_collections_commons_collections",
         "@maven//:org_apache_hadoop_hadoop_mapreduce_client_core",
         "@maven//:org_slf4j_slf4j_nop",

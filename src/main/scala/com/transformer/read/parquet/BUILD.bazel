@@ -20,8 +20,10 @@ scala_library(
     ],
     # What parquet-mr and Hadoop load as they run, which no source here names
     # and parquet-hadoop's own dependencies leave out: Hadoop's mapreduce
-    # classes, commons-collections, and the logging binding they log through.
+    # classes, commons-collections, the logging binding they log through, and
+    # the lz4 library Hadoop's LZ4 codec decompresses with.
     runtime_deps = [
+        "@maven//:at_yawk_lz4_lz4_java",
         "@maven//:commons_collections_commons_collections",
         "@maven//:org_apache_hadoop_hadoop_mapreduce_client_core",
         "@maven//:org_slf4j_slf4j_nop",

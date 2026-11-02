@@ -1067,7 +1067,11 @@ InputFilePath("data.csv",
   falls through to its physical type, which would read a `DECIMAL` as its
   unscaled integer or an unsigned integer as a negative one, and a `GEOMETRY`
   as the bytes it is stored in.
-- Codecs read: `UNCOMPRESSED`, `SNAPPY`, `GZIP`, `ZSTD` and `LZ4_RAW`. A column
+- Codecs read: `UNCOMPRESSED`, `SNAPPY`, `GZIP`, `ZSTD`, `LZ4_RAW`, and `LZ4`,
+  the legacy codec older Hadoop and Spark wrote (framed as Hadoop frames a
+  block; the lz4 library decompresses it, where such a file failed with a
+  `NoClassDefFoundError`). An `LZ4` file written without Hadoop's framing, as
+  early parquet-cpp wrote one, fails as a page that does not decode. A column
   compressed with a codec the reader does not have (`BROTLI`, `LZO`) fails the
   view as it opens, naming the file, the column and the codec, rather than at
   its first page partway through a scan. An encrypted file is refused as one,
@@ -2295,7 +2299,8 @@ back here and into `docs/`.
 .
 ├── MODULE.bazel               Bazel deps: rules_scala 7.0.0, scala 2.13.16,
 │                              jsqlparser 5.2, parquet-hadoop 1.14.3 (+ minimal
-│                              hadoop 3.4.3), openjfx 21.0.1, richtextfx
+│                              hadoop 3.4.3, lz4-java 1.12.1 for its LZ4
+│                              codec), openjfx 21.0.1, richtextfx
 │                              0.11.7 and atlantafx 2.0.1 (gui only), jline
 │                              4.4.8 (the query shell), junit
 ├── .bazelrc                   JDK 21 build toolchain (runtime is JDK 21+)

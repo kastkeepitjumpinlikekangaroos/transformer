@@ -4,7 +4,8 @@ import com.transformer.core._
 import com.transformer.sql.exec.SqlEngine
 import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
 import org.apache.parquet.format.{CompressionCodec, LogicalType, UUIDType}
-import org.apache.parquet.hadoop.metadata.BlockMetaData
+import org.apache.parquet.column.ParquetProperties
+import org.apache.parquet.hadoop.metadata.{BlockMetaData, CompressionCodecName}
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.junit.Assert._
 import org.junit.Test
@@ -812,6 +813,25 @@ class ParquetExternalFormatTest {
       val msg = refusalOf(file)(read(file))
       assertTrue(msg, msg.endsWith(s"column 'id' is compressed with $codec, which transformer cannot decompress"))
     }
+  }
+
+  /** Hadoop's LZ4 codec, which older Hadoop and Spark wrote (parquet's
+    * `LZ4`, framed as Hadoop frames a block, not `LZ4_RAW`), decompresses
+    * with the lz4 library, which was not on the classpath: such a file failed
+    * with `java.lang.NoClassDefFoundError: net/jpountz/lz4/LZ4Factory`, then
+    * was refused as a codec the reader does not have (plans/testing/13,
+    * decision 4). Every row group of it reads, its pages v1 and v2, a
+    * dictionary or none. */
+  @Test def aHadoopLz4FileReads(): Unit = {
+    val file = newDir().resolve("lz4.parquet")
+    val schema = ExternalParquet.schema("message m { required int32 id; optional binary s (STRING); optional double d; }")
+    def group(from: Int) = (from until from + 300).map(i => Seq[Any](i, if (i % 7 == 0) null else s"v${i % 13}", i * 0.5))
+    ExternalParquet.writeRowGroups(file, schema, Seq(
+      (group(0), ExternalParquet.Layout(codec = CompressionCodecName.LZ4)),
+      (group(300), ExternalParquet.Layout(codec = CompressionCodecName.LZ4, dictionary = false,
+        writerVersion = ParquetProperties.WriterVersion.PARQUET_2_0))))
+    assertEquals((0 until 600).map(i => Seq[Any](i, if (i % 7 == 0) null else s"v${i % 13}", i * 0.5)),
+      rows(read(file)))
   }
 
   /** A page header that is not parquet's Thrift failed with Thrift's text,
