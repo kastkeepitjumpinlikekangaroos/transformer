@@ -464,6 +464,7 @@ object PgExpected {
         case None => numeric(text).map(v => Values.format(v, column)).getOrElse(text)
       })
       case Column.Exact(t) => Vector(exact(text, t))
+      case Column.Letter(c) => throw new IllegalArgumentException(s"a port of Postgres's tests has no column '$c'")
     }
   }
 
@@ -557,6 +558,7 @@ object PgExpected {
           case SortMode.RowSort => matchRows(mine, pg)
           case SortMode.ValueSort => matchRows(mine.flatten.map(Vector(_)), pg.flatten.map(Vector(_)))
         }
+      case Expected.Rows(_) => Some("a port of Postgres's tests writes its results as SQLite does")
     }
   }
 

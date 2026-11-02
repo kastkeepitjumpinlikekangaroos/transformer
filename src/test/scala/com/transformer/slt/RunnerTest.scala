@@ -8,7 +8,9 @@ import java.nio.file.Paths
 
 /** The runner over scripts written here, against a ledger of two rules: a
   * condition on transformer cites a rule, a skipped record still runs once and
-  * must still diverge as its rule says, and a twin runs like any record. */
+  * must still diverge as its rule says, and a twin runs like any record; and
+  * CockroachDB's and DataFusion's formats and dialects, each directive read or
+  * refused by name, each result compared as that engine's runner compares it. */
 class RunnerTest {
 
   private val ledger = Ledger.parse("ledger.md", Seq(
@@ -180,5 +182,137 @@ class RunnerTest {
     assertEquals(Some(1), c.counts.get("stale"))
     assertEquals(Some(2), c.counts.get("skipped"))
     assertTrue(c.kept.exists(_.outcome.isInstanceOf[Stale]))
+  }
+
+  // ---- CockroachDB's and DataFusion's formats -----------------------------------------
+
+  private def runAs(dialect: Dialect, lines: String*): FileResult = {
+    val text = lines.mkString("\n")
+    new Runner(dialect.forScript(text), ledger, Modes.Verification)
+      .run("inline.test", Script.parse("inline.test", text, ledger, dialect.format), Paths.get("."))
+  }
+
+  private def problems(r: FileResult): String = r.problems.map(p => s"${p.record.line}: ${show(p.outcome)}").mkString("\n")
+
+  @Test def cockroachsDirectivesAreReadAndAnUnknownOneFailsByName(): Unit = {
+    val recs = Script.parse("c.test", Seq(
+      "# LogicTest: local", "subtest one", "",
+      "statement OK", "CREATE TABLE t (a INT)", "",
+      "statement", "INSERT INTO t VALUES (1)", "",
+      "statement count 1", "INSERT INTO t VALUES (2)", "",
+      "statement error pgcode 42703 column \"x\" does not exist", "SELECT x FROM t", "",
+      "skipif config local", "onlyif config fakedist", "query IT colnames,partialsort(1) lbl", "SELECT a, a FROM t", "----",
+      "a a", "1 1").mkString("\n"), ledger, Script.Format.Cockroach)
+    assertEquals(5, recs.length)
+    val err = recs(3).asInstanceOf[Script.Statement]
+    assertEquals(Some("column \"x\" does not exist"), err.errorPattern)
+    val q = recs(4).asInstanceOf[Script.Query]
+    assertTrue(q.colNames)
+    assertEquals(Seq(1), q.partialSort)
+    assertEquals(Some("lbl"), q.label)
+    assertFalse(q.runs) // onlyif config fakedist: this engine is no configuration of CockroachDB's
+    def fails(lines: String*): String =
+      assertThrows(classOf[Script.ParseError], () => { Script.parse("c.test", lines.mkString("\n"), ledger,
+        Script.Format.Cockroach); () }).getMessage
+    assertTrue(fails("let $x", "SELECT 1").contains("unknown record type 'let'"))
+    assertTrue(fails("query I kvtrace", "SELECT 1").contains("unknown query option 'kvtrace'"))
+    assertTrue(fails("query IX", "SELECT 1").contains("unknown column type 'X'"))
+  }
+
+  @Test def dataFusionsDirectivesAreReadAndAnIncludeReadsItsFile(): Unit = {
+    val recs = Script.parse("d.slt", Seq(
+      "# configMatrix: none", "include ./part.slt.part", "",
+      "query error DataFusion error: .* not found", "SELECT x", "",
+      "statement error", "SELECT y", "----", "the whole message", "",
+      "onlyif postgres", "query D", "SELECT DATE '2020-01-01'", "----", "2020-01-01").mkString("\n"),
+      ledger, Script.Format.DataFusion, name => if (name == "./part.slt.part") "statement ok\nCREATE TABLE p (a INT)\n"
+        else throw new IllegalArgumentException(s"no file $name"))
+    assertEquals(4, recs.length)
+    assertEquals(Some("DataFusion error: .* not found"), recs(1).asInstanceOf[Script.Statement].errorPattern)
+    assertEquals(Some("the whole message"), recs(2).asInstanceOf[Script.Statement].errorText)
+    assertFalse(recs(3).runs)
+    assertTrue(assertThrows(classOf[Script.ParseError], () => {
+      Script.parse("d.slt", "system ok\nls\n", ledger, Script.Format.DataFusion); ()
+    }).getMessage.contains("unknown record type 'system'"))
+  }
+
+  @Test def cockroachsTablesDropATypeTheEngineHasNotAndTheirClauses(): Unit = {
+    val r = runAs(Dialect.Cockroach(),
+      "# transformer: an unconstrained DECIMAL is DECIMAL(38,10)", "",
+      "statement ok", "CREATE TABLE t (k INT PRIMARY KEY, i INTERVAL, arr INT[], d DECIMAL, s STRING DEFAULT 'z',",
+      "  INDEX (k), FAMILY (k, i))", "",
+      "statement ok", "INSERT INTO t VALUES (1, '1 day', ARRAY[1], 1.5); INSERT INTO t (k, d) VALUES (3, 2)", "",
+      // INT is CockroachDB's 64 bits: 2^31 fits, and ::INT is a BIGINT here too.
+      "query IRT rowsort", "SELECT k + 2147483647, d, s FROM t", "----", "2147483648 1.5 z", "2147483650 2 z", "",
+      "query I", "SELECT 3000000000::INT", "----", "3000000000", "",
+      "query R", "SELECT avg(k) FROM t", "----", "2.0000000000000000000", "",
+      "query T", "SELECT ''", "----", "\u00b7", "",
+      "query error pgcode 42703 column \"i\" does not exist", "SELECT i FROM t")
+    assertEquals("", problems(r))
+  }
+
+  @Test def cockroachsWordsAreComparedOneByOneAndAFloatTo15Digits(): Unit = {
+    val r = runAs(Dialect.Cockroach(),
+      "statement ok", "CREATE TABLE f (x FLOAT, s STRING)", "",
+      "statement ok", "INSERT INTO f VALUES (0.1, 'a b'), (1e6, 'c'), (1.0 / 3.0, NULL)", "",
+      // A float compares to 15 significant digits, whatever the form it is
+      // written in; a value's words are compared one by one, across lines.
+      "query F nosort", "SELECT x FROM f ORDER BY x", "----", "0.1", "0.333333333333333", "1e+06", "",
+      "query T rowsort", "SELECT s FROM f", "----", "a b", "c", "NULL", "",
+      "query T nosort", "SELECT s FROM f ORDER BY x", "----", "a", "b NULL c", "",
+      "query T colnames", "SELECT s AS label FROM f WHERE x > 1", "----", "label", "c")
+    assertEquals("", problems(r))
+    val wrong = runAs(Dialect.Cockroach(),
+      "query F", "SELECT 1.0 / 3.0", "----", "0.33333333333334")
+    assertTrue(problems(wrong), problems(wrong).contains("expected [0.33333333333334]"))
+  }
+
+  @Test def dataFusionsRowsCompareAsItsRunnerPrintsThem(): Unit = {
+    val r = runAs(Dialect.DataFusion(),
+      "statement ok", "CREATE TABLE v AS VALUES (1, 'a', 0.5), (2, '', NULL)", "",
+      "query ITR rowsort", "SELECT column1, column2, column3 / 3 FROM v", "----",
+      "1 a 0.166666666667", "2 (empty) NULL", "",
+      "statement ok", "set datafusion.execution.target_partitions = 2", "",
+      "query D", "SELECT DATE '2020-01-31'", "----", "2020-01-31", "",
+      "query P", "SELECT CAST('2020-01-31 10:00:00.5' AS TIMESTAMP)", "----", "2020-01-31T10:00:00.500")
+    assertEquals("", problems(r))
+  }
+
+  @Test def anErrorInAnotherEnginesWordsPassesForTheSameReasonOnly(): Unit = {
+    val r = runAs(Dialect.Cockroach(),
+      "statement ok", "CREATE TABLE t (a INT)", "",
+      "query error column \"b\" does not exist", "SELECT b FROM t", "",
+      "query error at or near \"from\": syntax error", "SELECT a a a FROM t")
+    assertEquals("", problems(r))
+    val other = runAs(Dialect.Cockroach(),
+      "statement ok", "CREATE TABLE t (a INT)", "",
+      "query error division by zero", "SELECT b FROM t")
+    assertTrue(problems(other), problems(other).contains("in which the record's pattern [division by zero] finds nothing"))
+  }
+
+  @Test def aRecordHeldForItsEngineRunsOnceAndMustStillNotPass(): Unit = {
+    val held = runAs(Dialect.Cockroach(),
+      "onlyif cockroachdb # needs EXTRACT", "query I", "SELECT extract(year FROM DATE '2020-01-01')", "----", "2020")
+    assertEquals(Skipped("held for cockroachdb", None), held.results.head.outcome)
+    val stale = runAs(Dialect.Cockroach(),
+      "onlyif cockroachdb # held: a finding", "query I", "SELECT 1 + 1", "----", "2")
+    assertTrue(show(stale.results.head.outcome),
+      show(stale.results.head.outcome).endsWith("but the engine now gives the record's answer; remove the hold"))
+  }
+
+  @Test def aStatementTheRunnerCannotCarryOutFailsInAnUpstreamScript(): Unit = {
+    val r = runAs(Dialect.Cockroach(), "statement ok", "ALTER TABLE t ADD COLUMN b INT")
+    assertTrue(problems(r), problems(r).contains("unsupported statement: ALTER statement: hold the record for cockroachdb"))
+  }
+
+  @Test def aViewReadsItsTablesAsTheyAre(): Unit = {
+    val r = runAs(Dialect.Cockroach(),
+      "statement ok", "CREATE TABLE t (a INT); CREATE VIEW v AS SELECT a FROM t; INSERT INTO t VALUES (7)", "",
+      "query I", "SELECT a FROM v", "----", "7")
+    assertEquals("", problems(r))
+  }
+
+  @Test def anRe2PatternReadsAsJavaReadsIt(): Unit = {
+    assertEquals("<tuple\\{int\\}> IN x{2}", Runner.javaRegex("<tuple{int}> IN x{2}"))
   }
 }

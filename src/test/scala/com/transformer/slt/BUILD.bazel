@@ -17,6 +17,7 @@ scala_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/csv",
         "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/sql/plan",
@@ -64,13 +65,15 @@ scala_junit_test(
 
 # The runner over scripts written inline: a condition on transformer cites a
 # rule, a skip whose rule is no refusal has its twin, and a skipped record
-# runs once and must still diverge as its rule says.
+# runs once and must still diverge as its rule says; CockroachDB's and
+# DataFusion's formats, dialects and comparisons.
 scala_junit_test(
     name = "runner_test",
     srcs = ["RunnerTest.scala"],
     suffixes = ["Test"],
     deps = [
         ":slt",
+        "//src/main/scala/com/transformer/core",
         "@maven//:junit_junit",
     ],
 )

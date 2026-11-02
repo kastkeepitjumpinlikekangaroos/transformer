@@ -710,6 +710,44 @@ a DOUBLE to 15, since `R` prints every integer digit of a large one; and one
 from a C math library function, whose last digit Java's need not share, as
 `R`, to three places.
 
+**Vendoring a file of CockroachDB's or DataFusion's.** These come in as they
+are (plans/testing/12, decision 1), read through their dialect at load time,
+so a later re-sync is a copy and the diff against upstream shows every line
+added. Fetch the source at the tag or commit the directory's other files name
+(`cockroach/NOTICE`, `datafusion/NOTICE`), shallow and sparse, into a scratch
+directory as data, and never run anything in it; never take CockroachDB's
+master or anything under `pkg/ccl/`. Copy the file to
+`src/test/slt/<cockroach|datafusion>/<name>.test` under a header naming its
+source path and commit and, where its tables have unconstrained `DECIMAL`s,
+the line `# transformer: an unconstrained DECIMAL is DECIMAL(p,s)` with the
+scale its values need. Then run it, carrying on past a statement that fails,
+and write what did not pass:
+
+```bash
+bazel run //src/test/scala/com/transformer/slt:corpus -- src/test/slt/cockroach/<name>.test \
+    --dialect cockroach --modes none --keep-going --problems /tmp/<name>.jsonl
+```
+
+Each line is a record that did not pass, with the engine's own answer. Mark
+each with a condition line above its directive, and run again until none is
+left, since a record held now changes what later ones read:
+
+- a construct the engine refuses by a rule of the ledger: `skipif transformer
+  <id>`, and for a rule that is no refusal (`div-zero-null`,
+  `division-keeps-type`, `no-interval`, ...) the twin after the record, the same
+  SQL under `onlyif transformer <id>` with the engine's answer, written as the
+  format writes a result;
+- what the engine or the runner lacks (a function, a clause, a type in a cast,
+  a statement such as `ALTER` or `SET`, a constraint's error, the rows or the
+  table a held statement makes): `onlyif cockroachdb # needs <what>`;
+- an answer no rule covers, or an error both engines raise for different
+  reasons: `onlyif cockroachdb # held: finding <id>, <what>`, listed in the
+  plan's findings for the user until a decision settles it.
+
+`slt_test` then runs the file under every mode; a hold or a skip that no
+longer diverges fails it as stale. Count what each file runs, skips by rule and
+holds by kind in its header.
+
 **Importing a Spark test file.** Spark's `SQLQueryTestSuite` files are ported
 by a converter rather than by hand, since one file can hold over a thousand
 records: `SparkImport` (`//src/test/scala/com/transformer/slt:spark_import`)

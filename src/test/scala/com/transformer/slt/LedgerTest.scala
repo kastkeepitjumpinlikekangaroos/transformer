@@ -100,7 +100,7 @@ object LedgerTest {
   private val Root: Path = Paths.get("src/test/slt")
 
   /** The directories of ports, scripts with another engine's answers. */
-  private val Ports = Set("sqlite", "postgres", "spark")
+  private val Ports = Set("sqlite", "postgres", "spark", "cockroach", "datafusion", "tpch")
 
   private def isPort(name: String): Boolean = Ports.contains(name.takeWhile(_ != '/'))
 
@@ -114,7 +114,9 @@ object LedgerTest {
       finally walk.close()
     files.map { p =>
       val name = Root.relativize(p).toString.replace('\\', '/')
-      name -> Script.parse(name, new String(Files.readAllBytes(p), StandardCharsets.UTF_8), ledger)
+      val include: String => String = n => new String(Files.readAllBytes(p.getParent.resolve(n)), StandardCharsets.UTF_8)
+      name -> Script.parse(name, new String(Files.readAllBytes(p), StandardCharsets.UTF_8), ledger,
+        Dialect.forPath(name).format, include)
     }
   }
 

@@ -96,6 +96,25 @@ object Lexer {
     throw new IllegalArgumentException(s"unclosed quote at ${s.substring(open, math.min(s.length, open + 20))}")
   }
 
+  /** `sql` cut into its statements at each `;` outside quotes and
+    * parentheses, each trimmed; a piece holding no token (a comment, or
+    * nothing after the last `;`) is no statement. */
+  def splitStatements(sql: String): Vector[String] = {
+    val out = Vector.newBuilder[String]
+    var depth = 0
+    var start = 0
+    tokens(sql).foreach { tk =>
+      if (tk.kind == Token.Symbol && tk.text == "(") depth += 1
+      else if (tk.kind == Token.Symbol && tk.text == ")") depth -= 1
+      else if (tk.kind == Token.Symbol && tk.text == ";" && depth == 0) {
+        out += sql.substring(start, tk.start)
+        start = tk.end
+      }
+    }
+    out += sql.substring(start)
+    out.result().map(_.trim).filter(p => tokens(p).nonEmpty)
+  }
+
   /** Tokens split at the commas outside parentheses. */
   def splitCommas(t: Vector[Token]): Vector[Vector[Token]] = {
     if (t.isEmpty) return Vector.empty

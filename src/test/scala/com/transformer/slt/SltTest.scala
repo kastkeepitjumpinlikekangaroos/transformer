@@ -11,10 +11,12 @@ import scala.jdk.CollectionConverters._
 
 /** Every sqllogictest script under `src/test/slt`, one JUnit case each.
   *
-  * A script under `src/test/slt/sqlite/` is a file of SQLite's corpus, read
-  * in [[Dialect.Sqlite]]; every other script is read in
-  * [[Dialect.Transformer]]: this repo's own, or under `postgres/` a port of
-  * PostgreSQL's regression tests with Postgres's answers. Either way each record must pass: a record the
+  * A script is read in the dialect of its directory ([[Dialect.forPath]]):
+  * under `sqlite/` a file of SQLite's corpus, under `cockroach/` one of
+  * CockroachDB's logic tests, under `datafusion/` one of DataFusion's, under
+  * `tpch/` RisingWave's TPC-H queries; every other script in
+  * [[Dialect.Transformer]], this repo's own, or under `postgres/` and `spark/`
+  * a port of PostgreSQL's or Spark's tests with their answers. Either way each record must pass: a record the
   * engine answers differently by design carries `skipif transformer <id>`,
   * the id of its rule in the ledger in `docs/gotchas.md` ([[Ledger]]), and
   * fails the script once it no longer diverges as the rule says. Every query
@@ -30,8 +32,7 @@ import scala.jdk.CollectionConverters._
 class SltTest(name: String, path: Path) {
 
   @Test def scriptPasses(): Unit = {
-    val dialect = if (name.startsWith("sqlite/")) Dialect.Sqlite else Dialect.Transformer
-    val result = new Runner(dialect, SltTest.ledger).run(name, path)
+    val result = new Runner(Dialect.forPath(name), SltTest.ledger).run(name, path)
     val problems = result.problems
     val differences = if (name.startsWith("postgres/")) PgExpected.check(name, path, SltTest.ledger) else Vector.empty
     assertTrue(s"$name says other than Postgres printed:\n  ${differences.mkString("\n  ")}", differences.isEmpty)

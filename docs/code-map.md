@@ -202,6 +202,11 @@ navigation hint, not a comprehensive directory listing.
 - `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` (~2000 LOC)
   — the parity gate for every `Expr.evalVec` override. New overrides extend
   this first; see [testing.md](testing.md) for the coverage matrix.
+- `src/test/scala/com/transformer/slt/Database.scala` (~1100 LOC) — the
+  tables an slt script builds, held as rows, and the `Dialect`s that read
+  them: this repo's own, SQLite's, CockroachDB's, DataFusion's (with its VALUES
+  and CSV-backed external tables) and RisingWave's TPC-H; a column of a type
+  the engine has not left out, a view recomputed when its tables change.
 - `src/test/scala/com/transformer/slt/SparkImport.scala` (~810 LOC) — the
   converter that writes `src/test/slt/spark/` from Spark's golden files: their
   parse, the rewrites and what the engine lacks (`Rewrite`), the run of each

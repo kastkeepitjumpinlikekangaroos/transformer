@@ -14,7 +14,8 @@ import scala.jdk.CollectionConverters._
   *
   * {{{
   *   bazel run //src/test/scala/com/transformer/slt:corpus -- \
-  *     <dir-or-file>... [--dialect sqlite|transformer] [--modes all|none|<name>,...] \
+  *     <dir-or-file>... [--dialect sqlite|transformer|cockroach|datafusion|risingwave] \
+  *     [--modes all|none|<name>,...] \
   *     [--threads N] [--report <file> [--list-refusals]] [--memory]
   *   bazel run //src/test/scala/com/transformer/slt:corpus -- \
   *     --dialect transformer --complete <script>...
@@ -42,6 +43,8 @@ object Corpus {
     var report: Option[Path] = None
     var listRefusals = false
     var memory = false
+    var problems: Option[Path] = None
+    var keepGoing = false
     val inputs = Seq.newBuilder[Path]
     var i = 0
     while (i < args.length) {
@@ -51,6 +54,9 @@ object Corpus {
           dialect = args(i) match {
             case "sqlite" => Dialect.Sqlite
             case "transformer" => Dialect.Transformer
+            case "cockroach" => Dialect.Cockroach()
+            case "datafusion" => Dialect.DataFusion()
+            case "risingwave" => Dialect.RisingWave()
             case other => throw new IllegalArgumentException(s"unknown dialect $other")
           }
         case "--modes" =>
@@ -80,6 +86,8 @@ object Corpus {
         case "--report" => i += 1; report = Some(resolve(args(i)))
         case "--list-refusals" => listRefusals = true
         case "--memory" => memory = true
+        case "--problems" => i += 1; problems = Some(resolve(args(i)))
+        case "--keep-going" => keepGoing = true
         case path => inputs += resolve(path)
       }
       i += 1
@@ -87,11 +95,12 @@ object Corpus {
     val files = inputs.result().flatMap { p =>
       if (Files.isDirectory(p)) {
         val walk = Files.walk(p)
-        try walk.iterator.asScala.filter(f => f.toString.endsWith(".test")).toVector.sortBy(_.toString)
+        try walk.iterator.asScala.filter(f => Files.isRegularFile(f) && isScript(f, dialect)).toVector.sortBy(_.toString)
         finally walk.close()
       } else Seq(p)
     }
-    val runner = new Runner(dialect, ledger, modes)
+    val problemLog = problems.map(p => new PrintWriter(Files.newBufferedWriter(p, StandardCharsets.UTF_8)))
+    val runner = new Runner(dialect, ledger, modes, problemLog.map(_ => new ProblemLog(keepGoing)))
     val pool = Executors.newFixedThreadPool(threads)
     val started = System.nanoTime()
     val futures = files.map { f =>
@@ -108,6 +117,17 @@ object Corpus {
             s" [heap ${(rt.totalMemory - rt.freeMemory) / (1024 * 1024)} MB]"
           }
           System.out.println(s"${r.summary} [${ms} ms]$heap")
+          problemLog.foreach { w =>
+            val seen = ProblemLog.seen.get
+            w.synchronized {
+              r.results.foreach { case RecordResult(rec, o) =>
+                if (o match { case _: Failed | _: Refused | _: Diverged | _: Stale => true; case _ => false })
+                  w.println(ProblemLog.json(r.file, rec, o, Option(seen.get(rec)), dialect.format))
+              }
+              w.flush()
+            }
+            seen.clear()
+          }
           // Keep what the totals and the report read, not the record of every
           // query that passed: the whole corpus is millions of records.
           r.compact(keepRefusals = listRefusals)
@@ -123,6 +143,76 @@ object Corpus {
       s"${n("passed")} passed, ${n("refused")} refused, ${n("failed")} failed, ${n("diverged")} diverged, " +
       s"${n("skipped")} skipped, ${n("stale")} stale; ${results.count(_.stoppedAt.isDefined)} files stopped early")
     report.foreach(p => writeReport(p, results, listRefusals))
+    problemLog.foreach(_.close())
+  }
+
+  /** The runner's audit for `--problems`: what the engine did with each
+    * record, kept per thread's script, and `--keep-going`. */
+  private final class ProblemLog(val keepGoing: Boolean) extends Runner.Audit {
+    def observe(rec: Script.Record, result: Either[Throwable, (com.transformer.core.Schema, Vector[Array[Any]])]): Unit =
+      ProblemLog.seen.get.put(rec, result)
+  }
+
+  private object ProblemLog {
+    val seen: ThreadLocal[java.util.IdentityHashMap[Script.Record, Either[Throwable, (com.transformer.core.Schema, Vector[Array[Any]])]]] =
+      ThreadLocal.withInitial(() => new java.util.IdentityHashMap())
+
+    private def str(s: String): String = {
+      val sb = new StringBuilder("\"")
+      s.foreach {
+        case '"' => sb ++= "\\\""
+        case '\\' => sb ++= "\\\\"
+        case '\n' => sb ++= "\\n"
+        case '\t' => sb ++= "\\t"
+        case '\r' => sb ++= "\\r"
+        case c if c < ' ' => sb ++= f"\\u${c.toInt}%04x"
+        case c => sb += c
+      }
+      sb += '"'
+      sb.result()
+    }
+
+    /** One problem record as a JSON line: where it is, what went wrong, its
+      * SQL, and the engine's own answer to it in the baseline (its error, or
+      * its column names, types and rows as the format prints them). */
+    def json(file: String, rec: Script.Record, o: Outcome,
+        seen: Option[Either[Throwable, (com.transformer.core.Schema, Vector[Array[Any]])]], format: Script.Format): String = {
+      val (kind, detail) = o match {
+        case Failed(d) => ("failed", d)
+        case Refused(m) => ("refused", m)
+        case Diverged(m, d) => ("diverged", s"$m: $d")
+        case Stale(_, d) => ("stale", d)
+        case other => ("other", other.toString)
+      }
+      val sql = Script.sqlOf(rec).getOrElse("")
+      val (stmt, expectError) = rec match {
+        case s: Script.Statement => (true, s.expectError)
+        case _ => (false, false)
+      }
+      val engine = seen match {
+        case None => "null"
+        case Some(Left(e)) => s"{\"error\":${str(Option(e.getMessage).getOrElse(e.getClass.getName))}}"
+        case Some(Right((schema, rows))) =>
+          val names = schema.fields.map(f => str(f.name)).mkString("[", ",", "]")
+          val types = schema.fields.map(f => str(Script.typeName(f.dataType))).mkString("[", ",", "]")
+          val printed = rows.map(r => schema.fields.indices.map(c => str(Values.upstream(r(c), format))).mkString("[", ",", "]")).mkString("[", ",", "]")
+          s"{\"names\":$names,\"types\":$types,\"rows\":$printed}"
+      }
+      s"{\"file\":${str(file)},\"line\":${rec.line},\"kind\":\"$kind\",\"detail\":${str(detail)},\"sql\":${str(sql)}," +
+        s"\"statement\":$stmt,\"expectError\":$expectError,\"engine\":$engine}"
+    }
+  }
+
+  /** Whether `f`, a file under a directory given, is a script of `dialect`:
+    * a `.test` file, and in an upstream checkout of CockroachDB's logic tests
+    * any file without a dot, in DataFusion's an `.slt` file. */
+  private def isScript(f: Path, dialect: Dialect): Boolean = {
+    val name = f.getFileName.toString
+    name.endsWith(".test") || (dialect.format match {
+      case Script.Format.Cockroach => !name.contains('.')
+      case Script.Format.DataFusion | Script.Format.RisingWave => name.endsWith(".slt")
+      case Script.Format.Sqlite => false
+    })
   }
 
   /** A path given on the command line: under `bazel run` a relative one is
