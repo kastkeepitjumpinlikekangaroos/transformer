@@ -321,13 +321,15 @@ ship a fix or move something from "not done" to "done".
   a join's single ON condition and IF's condition took no cast at all and died
   on their first row with a `ClassCastException` (`IF(NULL, 1, 2)` too, on the
   vector path, where `VecFuncs.iff` casts its condition's vector). A function
-  declares what each argument must be beside its arity, in `Funcs.signature`
-  (`Param.Number`, `Param.Integer` for a scale, a position, a length or a seed,
-  `Param.Text`, and `Param.AnyValue` for the flow functions, whose arguments
+  declares what each argument must be beside its arity, in its
+  `FunctionCatalog` entry (`Param.Number`, `Param.Integer` for a scale, a
+  position, a length or a seed, `Param.Text`, `Param.Condition` for a truth
+  value, and for the flow functions `Param.Branch` and `Param.Compared`, which
   `branches` and `unify` type), and `LogicalBuilder` checks each argument
   against it through `Analyzer.checkArgument`; the aggregates that add their
-  values up check theirs in `bindAgg` and `bindAnalytic`. `Funcs.signature`
-  replaced a `returnType` that matched on the argument count alone, so `SUM(s)`
+  values up check theirs in `bindAgg` and `bindAnalytic`, by the same entries.
+  `Funcs.signature` replaced a `returnType` that matched on the argument count
+  alone, so `SUM(s)`
   and the math functions over a date bound and threw `ClassCastException`
   inside the worker, `ABS` of a date fell through to `case _ => null` and
   answered NULL on every row, `ROUND(x, 1.5)` cut its scale with `intValue`,
@@ -346,9 +348,10 @@ ship a fix or move something from "not done" to "done".
   different strings, and `CURRENT_DATE ()`, with a space, arrives as a
   zero-argument `Function` instead. `UnsupportedClauses.clockKeyword` folds the
   spellings for the audit and the binder alike, and the binder sends the call
-  form to the same place. That place is `LogicalBuilder.clockLiteral`, not
-  `Funcs`: `build` captures one instant per statement and both keywords bind to
-  a `LitExpr` of it, which is what keeps them equal across rows, partitions and
+  form to the same place. That place is `LogicalBuilder.clockLiteral`, which
+  builds the literal by the keyword's `FunctionCatalog` entry (kind `Clock`),
+  not `Funcs`: `build` captures one instant per statement and both keywords
+  bind to a `LitExpr` of it, which is what keeps them equal across rows, partitions and
   CTE references. A `Funcs` entry would read the clock per row and stamp a large
   result with many instants. The instant is truncated to microseconds, the unit
   a `TimestampVector` holds, so the literal also equals a stored copy of itself
@@ -1402,10 +1405,10 @@ ship a fix or move something from "not done" to "done".
   silently: `TRIM(BOTH 'x' FROM 'xxaxx')` returns `x`. `TRIM(x, 'a')` is worse,
   because it sets neither the specification nor the FROM keyword — the remstr
   just lands in `getFromExpression` and gets dropped. So `Funcs` implements the
-  single-argument whitespace trim (`Funcs.scala` gates TRIM on
-  `argTypes.size == 1` in both `returnType` and `applyVec`) and the binder
-  rejects every other form with "Only the single-argument TRIM(x) is
-  supported". `LTRIM`/`RTRIM` parse as ordinary `Function`s and are simply
+  single-argument whitespace trim (TRIM's `FunctionCatalog` entry takes one
+  argument, and `applyVec` gates it on one too) and the binder rejects every
+  other form with "Only the single-argument TRIM(x) is supported", the message
+  its entry gives the arities it refuses. `LTRIM`/`RTRIM` parse as ordinary `Function`s and are simply
   unknown functions.
 
   `QueryGen` / `MetaQueryGen` still render paren-free but for decimal

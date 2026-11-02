@@ -17,7 +17,8 @@ import com.transformer.sql.plan._
   *     throw for in-range, type-correct input, so the property reduces to
   *     "every row agrees, and neither path throws" (the precedent
   *     `ExprBatchTest` is likewise total). Concretely it avoids the engine's
-  *     partial shapes: `RAND()` (no parity meaning — excluded entirely), casts
+  *     partial shapes: `RAND()` (no parity meaning — drawn only with a seed,
+  *     which makes it one value), casts
   *     that parse (`String ->` numeric/boolean/date/timestamp, `Boolean ->`
   *     float/double), and a cast from FLOAT or DOUBLE to DECIMAL (`NaN` and the
   *     infinities have no decimal, and the cast refuses them), with one
@@ -680,48 +681,114 @@ object ExprGen {
       5 -> (() => BinOpExpr(r.oneOf(ArithOps), sub(r.oneOf(Arithmetic)), sub(r.oneOf(Arithmetic)), target)),
       2 -> (() => UnaryOpExpr("-", sub(target), target)),
       1 -> (() => UnaryOpExpr("+", sub(target), target)),
-      2 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
-      2 -> (() => FuncExpr("COALESCE", Seq.fill(r.between(1, 3))(sub(target)), target)),
-      2 -> (() => FuncExpr("IF", Seq(sub(DataType.BooleanType), sub(target), sub(target)), target)),
-      1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
+      2 -> (() => genCall(r, r.oneOf(SameTypeFunctions), target, sub)),
+      6 -> (() => genCall(r, pickFlow(r), target, sub)),
       1 -> (() => genCaseExpr(r, schema, target, depth)),
       1 -> (() => genCastTo(r, schema, target, depth)))
     val extra: Seq[(Int, () => Expr)] = target match {
       case DataType.IntType =>
-        Seq(2 -> (() => FuncExpr("LENGTH", Seq(sub(DataType.StringType)), DataType.IntType)),
+        Seq(2 -> (() => genCall(r, r.oneOf(functionsReturning(DataType.IntType)), target, sub)),
           1 -> (() => genRounding(r, target, sub)))
       case DataType.LongType => Seq(1 -> (() => genRounding(r, target, sub)))
       case DataType.DoubleType =>
         Seq(
           // FLOOR, CEIL, ROUND and TRUNC of a FLOAT or DOUBLE are a DOUBLE; of
           // an integer or a DECIMAL, their argument's type (genRounding).
-          1 -> (() => FuncExpr(r.oneOf(Seq("FLOOR", "CEIL", "CEILING")), Seq(sub(r.oneOf(Floatings))), DataType.DoubleType)),
-          1 -> (() => FuncExpr("ROUND", roundlikeArgs(r, sub(r.oneOf(Floatings)), sub), DataType.DoubleType)),
-          1 -> (() => FuncExpr(r.oneOf(Seq("TRUNC", "TRUNCATE")), roundlikeArgs(r, sub(r.oneOf(Floatings)), sub), DataType.DoubleType)),
-          // SQRT/LN/EXP are not in Funcs.applyVec — they exercise the default
-          // evalVec row loop (which routes through eval, so it cannot diverge,
-          // but it proves the fallback path stays correct).
-          1 -> (() => FuncExpr(r.oneOf(Seq("SQRT", "LN", "EXP")), Seq(sub(pick(r, Numerics))), DataType.DoubleType)))
+          3 -> (() => genCall(r, r.oneOf(RoundingFunctions), target, _ => sub(r.oneOf(Floatings)), Some(sub))),
+          // The math functions are not in Funcs.applyVec: they exercise the
+          // default evalVec row loop (which routes through eval, so it cannot
+          // diverge, but it proves the fallback path stays correct).
+          3 -> (() => genCall(r, r.oneOf(functionsReturning(DataType.DoubleType)), target, sub)))
       case _ => Seq.empty
     }
     r.weighted(base ++ extra: _*)()
   }
 
-  /** ROUND/TRUNC args: the value, and most of the time a scale. */
-  /** `FLOOR`, `CEIL`, `ROUND` or `TRUNC` of a `target`-typed value (an INT, a
-    * BIGINT or a DECIMAL), typed as the binder types it
-    * (`Funcs.signature`), under a CAST to `target` where that gives a DECIMAL
-    * another scale. */
+  /** A rounding function of the catalog (`FLOOR`, `CEIL`, `ROUND`, `TRUNC`
+    * under any of their names) of a `target`-typed value (an INT, a BIGINT or
+    * a DECIMAL), typed as the binder types it, under a CAST to `target` where
+    * that gives a DECIMAL another scale. */
   private def genRounding(r: Rng, target: DataType, sub: DataType => Expr): Expr = {
-    val fn = r.oneOf(Seq("FLOOR", "CEIL", "CEILING", "ROUND", "TRUNC", "TRUNCATE"))
-    val value = sub(target)
-    val args = if (fn.startsWith("ROUND") || fn.startsWith("TRUNC")) roundlikeArgs(r, value, sub) else Seq(value)
-    val call = FuncExpr(fn, args, Funcs.signature(fn, args).get.returnType)
+    val call = genCall(r, r.oneOf(RoundingFunctions), target, sub)
     if (call.dataType == target) call else CastExpr(call, target)
   }
 
-  private def roundlikeArgs(r: Rng, value: Expr, sub: DataType => Expr): Seq[Expr] =
-    if (r.bool(0.6)) Seq(value, integerArg(r, r.between(-2, 4), sub)) else Seq(value)
+  // ---- the catalog's functions ----------------------------------------------
+
+  /** Every function a call of which binds as a [[FuncExpr]]: the catalog's
+    * scalar and flow entries. `expr_parity_fuzz_test` holds the generator to
+    * drawing each of them ([[functionsDrawn]]), so a function added to the
+    * catalog is fuzzed the day it lands. */
+  private[fuzz] val CalledFunctions: Seq[FunctionCatalog.Entry] = FunctionCatalog.Entries.filter(e =>
+    e.kind == FunctionCatalog.Kind.Scalar || e.kind == FunctionCatalog.Kind.Flow)
+  /** The flow functions, which answer with a value of any type. */
+  private val FlowFunctions = CalledFunctions.filter(_.kind == FunctionCatalog.Kind.Flow)
+  /** A flow function, one that takes a condition (`IF`) drawn twice as often
+    * as the others: a condition is where comparisons, the densest source of
+    * the shapes this fuzzer exists for, come from. */
+  private def pickFlow(r: Rng): FunctionCatalog.Entry =
+    r.weighted(FlowFunctions.map(e => (if (e.params.contains(Funcs.Param.Condition)) 2 else 1, e)): _*)
+  /** The functions typed as their number argument (`ABS`). */
+  private val SameTypeFunctions = CalledFunctions.filter(e =>
+    e.kind == FunctionCatalog.Kind.Scalar && e.result == FunctionCatalog.Result.FirstArgument)
+  /** The functions typed as their argument when it is an INT, a BIGINT or a
+    * DECIMAL, and a DOUBLE otherwise. */
+  private val RoundingFunctions = CalledFunctions.filter(_.result.isInstanceOf[FunctionCatalog.Result.Rounded])
+  /** The scalar functions that return `t` whatever their arguments. */
+  private def functionsReturning(t: DataType): Seq[FunctionCatalog.Entry] =
+    CalledFunctions.filter(e => e.kind == FunctionCatalog.Kind.Scalar && e.result == FunctionCatalog.Result.Fixed(t))
+
+  /** A call of `entry`, under one of its names, typed `target`, with as many
+    * arguments as it takes (never an arity at which it reads a fresh value
+    * each time, which has no parity to hold), each drawn by its parameter: a
+    * STRING for a text, a truth value for a condition, `target` for a value
+    * it may answer with or compare, an INT or BIGINT for a count
+    * ([[integerArg]]), and for a number `value`'s draw where the result is
+    * typed by it, any number otherwise. A rounding function's scale comes
+    * most of the time; `scaleSub` draws a subtree for a count where it is not
+    * `sub`. */
+  private def genCall(
+      r: Rng,
+      entry: FunctionCatalog.Entry,
+      target: DataType,
+      value: DataType => Expr,
+      scaleSub: Option[DataType => Expr] = None): Expr = {
+    import Funcs.Param._
+    val sub: DataType => Expr = scaleSub.getOrElse(value)
+    val n = entry.result match {
+      case _: FunctionCatalog.Result.Rounded if entry.arity.admits(2) => if (r.bool(0.6)) 2 else 1
+      case _ => r.oneOf((entry.arity.min to entry.arity.max.getOrElse(3)).filterNot(entry.readsRandom))
+    }
+    val typedByArgument = entry.result == FunctionCatalog.Result.FirstArgument ||
+      entry.result.isInstanceOf[FunctionCatalog.Result.Rounded]
+    val args = entry.paramsAt(n).map {
+      case Text => sub(DataType.StringType)
+      case Condition => sub(DataType.BooleanType)
+      case Branch | Compared | AnyValue | Operand => sub(target)
+      case Number => if (typedByArgument) value(target) else sub(pick(r, Numerics))
+      case Integer(role) => integerArg(r, smallCount(r, role), sub)
+    }
+    FuncExpr(r.oneOf(entry.names), args, entry.resultType(args))
+  }
+
+  /** A small value for a count of `role`: a scale a few places either way, a
+    * position from before the start to past a short string's end, a length
+    * up to past its end, a seed. */
+  private def smallCount(r: Rng, role: String): Int = role match {
+    case "scale" => r.between(-2, 4)
+    case "position" => r.between(-2, 8)
+    case "length" => r.between(0, 8)
+    case _ => r.between(0, 9)
+  }
+
+  /** The catalog entries `c`'s tree calls, by their canonical names. */
+  def functionsDrawn(c: ExprCase): Set[String] = {
+    def walk(e: Expr): Iterator[String] = (e match {
+      case FuncExpr(name, _, _) => FunctionCatalog.lookup(name).map(_.name).iterator
+      case _ => Iterator.empty
+    }) ++ Shrinker.childrenOf(e).iterator.flatMap(walk)
+    walk(c.expr).toSet
+  }
 
   /** A scale, a position or a length: mostly `small`, else a NULL, which
     * answers NULL, or an INT or BIGINT subtree, which can be NULL on some rows
@@ -737,20 +804,10 @@ object ExprGen {
     val producers: Seq[(Int, () => Expr)] = Seq(
       4 -> (() => BinOpExpr("||", sub(DataType.StringType), sub(DataType.StringType), DataType.StringType)),
       2 -> (() => CastExpr(sub(pick(r, TextTypes)), DataType.StringType)),
-      3 -> (() => FuncExpr(r.oneOf(Seq("UPPER", "LOWER", "TRIM")), Seq(sub(DataType.StringType)), DataType.StringType)),
-      3 -> (() => FuncExpr("CONCAT", Seq.fill(r.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
-      2 -> (() => FuncExpr("SUBSTRING", substringArgs(r, sub(DataType.StringType), sub), DataType.StringType)),
-      2 -> (() => FuncExpr("COALESCE", Seq.fill(r.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
-      2 -> (() => FuncExpr("IF", Seq(sub(DataType.BooleanType), sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
-      1 -> (() => FuncExpr("NULLIF", Seq(sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
+      8 -> (() => genCall(r, r.oneOf(functionsReturning(DataType.StringType)), DataType.StringType, sub)),
+      6 -> (() => genCall(r, pickFlow(r), DataType.StringType, sub)),
       1 -> (() => genCaseExpr(r, schema, DataType.StringType, depth)))
     r.weighted(producers: _*)()
-  }
-
-  /** SUBSTRING args: the string, a position, and half the time a length. */
-  private def substringArgs(r: Rng, s: Expr, sub: DataType => Expr): Seq[Expr] = {
-    val start = integerArg(r, r.between(-2, 8), sub)
-    if (r.bool(0.5)) Seq(s, start, integerArg(r, r.between(0, 8), sub)) else Seq(s, start)
   }
 
   /** A CAST of the guard text to INT under a conditional that evaluates it
@@ -850,14 +907,8 @@ object ExprGen {
       LikeSyntax(caseInsensitive = r.bool(0.3), escape = r.weighted((6, Some('\\')), (3, Some('!')), (1, None))))
   }
 
-  private def genBoolFunc(r: Rng, schema: Schema, depth: Int): Expr = {
-    def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
-    r.weighted(
-      (2, () => FuncExpr("IF", Seq(sub(DataType.BooleanType), sub(DataType.BooleanType), sub(DataType.BooleanType)), DataType.BooleanType)),
-      (2, () => FuncExpr("COALESCE", Seq.fill(r.between(1, 3))(sub(DataType.BooleanType)), DataType.BooleanType)),
-      (1, () => FuncExpr("NULLIF", Seq(sub(DataType.BooleanType), sub(DataType.BooleanType)), DataType.BooleanType))
-    )()
-  }
+  private def genBoolFunc(r: Rng, schema: Schema, depth: Int): Expr =
+    genCall(r, pickFlow(r), DataType.BooleanType, genTyped(r, schema, _, depth - 1))
 
   private def genCastTo(r: Rng, schema: Schema, target: DataType, depth: Int): Expr =
     CastExpr(genTyped(r, schema, pick(r, totalCastSources(target)), depth - 1), target)
@@ -894,9 +945,7 @@ object ExprGen {
   private def genOther(r: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
     val base: Seq[(Int, () => Expr)] = Seq(
-      2 -> (() => FuncExpr("COALESCE", Seq.fill(r.between(1, 3))(sub(target)), target)),
-      2 -> (() => FuncExpr("IF", Seq(sub(DataType.BooleanType), sub(target), sub(target)), target)),
-      1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
+      6 -> (() => genCall(r, pickFlow(r), target, sub)),
       1 -> (() => genCaseExpr(r, schema, target, depth)))
     val extra: Seq[(Int, () => Expr)] = target match {
       case _: DataType.DecimalType => Seq(
@@ -904,7 +953,7 @@ object ExprGen {
         1 -> (() => genRounding(r, target, sub)),
         1 -> (() => genCastTo(r, schema, target, depth)),
         1 -> (() => UnaryOpExpr(r.oneOf(Seq("+", "-")), sub(target), target)),
-        1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
+        1 -> (() => genCall(r, r.oneOf(SameTypeFunctions), target, sub)))
       case DataType.DateType | DataType.TimestampType => Seq(1 -> (() => genCastTo(r, schema, target, depth)))
       case _ => Seq.empty
     }

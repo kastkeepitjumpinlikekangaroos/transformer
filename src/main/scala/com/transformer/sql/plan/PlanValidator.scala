@@ -134,7 +134,11 @@ object PlanValidator {
         }
       case FuncExpr(name, args, _) =>
         args.foreach(go)
-        if (name.equalsIgnoreCase("IF") && args.size == 3) requireBoolean(args.head, stage, at)
+        // A condition argument (IF's first) is a BOOLEAN, as every condition is.
+        FunctionCatalog.paramsOf(name, args.size).zip(args).foreach {
+          case (Funcs.Param.Condition, arg) => requireBoolean(arg, stage, at)
+          case _ => ()
+        }
       case CaseExpr(branches, elseExpr, _) =>
         branches.foreach { case (w, t) => go(w); requireBoolean(w, stage, at); go(t) }
         elseExpr.foreach(go)

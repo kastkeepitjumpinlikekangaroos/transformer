@@ -7,17 +7,30 @@ relevant module lives, and that you'll follow the workflow in
 
 ## Add a scalar SQL function
 
-1. Add it to `Funcs.signature` in `sql/plan/Funcs.scala`: the arities it
-   takes, what each argument must be (`Param.Number`, `Param.Integer` for a
-   count such as a scale or a position, `Param.Text`, or `Param.AnyValue` for
-   one it returns), and the type it returns, from the arguments' types or,
-   where a number written in the query decides it, from the arguments
-   themselves (a `DECIMAL`'s `ROUND` takes the scale it is given, `Rounding.
-   resultType`). The binder checks every argument
-   against its `Param` (`Analyzer.checkArgument`), so the function never meets
-   a value it cannot take while running; a kind none of these say is a new
-   `Param` and a new check in `checkArgument`, not an argument left unchecked.
-2. Add an `apply` case in the same file with the runtime semantics. A NULL
+1. Add an entry to `FunctionCatalog.Entries` in `sql/plan/FunctionCatalog.scala`:
+   its name and aliases, its kind (`Scalar`, or `Flow` for one that answers with
+   one of its arguments), the arities it takes, what each argument must be
+   (`Param.Number`, `Param.Integer` for a count such as a scale or a position,
+   `Param.Text`, `Param.Branch` for a value it may answer with, `Param.Compared`
+   for one it compares, `Param.Condition` for a truth value), the rule its
+   result's type follows (`Result.Fixed`, `FirstArgument`, `Branches`,
+   `Rounded`, which reads a scale written as a number), what a NULL argument
+   does, the arguments outside its domain that answer NULL, the errors it can
+   raise while running (each also in `CleanRejection.DataErrors` and
+   `ExprParity`'s owned set, [testing.md](testing.md)), whether it has a vector
+   path, and the ids of the ledger's rows its rules follow (`docs/gotchas.md`,
+   "Answers that differ from other engines by design"). That entry is the whole
+   of its binding: `LogicalBuilder` binds every call by its entry, checks every
+   argument against its `Param` (`Analyzer.checkArgument`), so the function
+   never meets a value it cannot take while running, and refuses every other
+   arity; a kind none of these say is a new `Param` and a new case in
+   `bindArguments` or `checkArgument`, not an argument left unchecked. No name
+   is matched as a string in the binder. `ExprGen` and `SqlTextGen` draw the new
+   function from the catalog by its parameters, so it is fuzzed the day it
+   lands (`expr_parity_fuzz_test`'s `everyCatalogFunctionIsDrawn` fails if the
+   generator cannot type it).
+2. Add an `apply` case in `sql/plan/Funcs.scala` with the runtime semantics, under
+   each of its names. A NULL
    argument answers NULL, a scale or a position included, unless the function
    is a flow function that says otherwise. An argument outside the function's
    domain, which no number answers, answers NULL too, as a division by zero
@@ -34,27 +47,30 @@ relevant module lives, and that you'll follow the workflow in
    vectorized path. Cover no-null / mixed-null / all-null inputs and any
    special branches (variadic args, null arg propagation rules).
 5. Add an end-to-end test in `src/test/scala/com/transformer/sql/exec/SqlEngineTest.scala`.
-6. Update [`README.md`'s "SQL features"](../README.md#sql-features) so users
-   can see the new function in the supported list.
+6. Add each of its names to [`README.md`'s **Scalar functions:** list](../README.md#sql-features):
+   `function_catalog_test` fails until every name the catalog has is there,
+   and every name there is the catalog's.
 
 A function that returns a `DECIMAL` computes in `BigDecimal` and fits its answer
 to the type it declares with `Decimals.fit`, the way `ABS` keeps a decimal exact
 (see the decimal entry in [conventions.md](conventions.md)); one that reads a
 decimal's `doubleValue` declares a `DOUBLE`, as `ROUND` and `SQRT` do. A function
 that is an operator by another name binds as the operator, the way
-`LogicalBuilder` binds `MOD(a, b)` as `a % b` through `Analyzer.arithmetic`, so
-the two cannot be typed differently. A function that answers with one of its
-arguments, as `COALESCE`, `IF`, `GREATEST` and `LEAST` do, gives those
-arguments one type in `bindScalarFunctionWithAggs` through
-`LogicalBuilder.bindBranches` (`Analyzer.branches`), and `Funcs.signature` then
-reads that type; one that compares two arguments, as `NULLIF` does, types them
-with `Analyzer.unify`; and one that reads a truth value, as `IF`'s first
-argument is, binds it through `Analyzer.condition`, as every condition is.
+`MOD(a, b)`'s entry is of kind `Operator` and binds as `a % b` through
+`Analyzer.arithmetic`, so the two cannot be typed differently. A function that
+answers with one of its arguments, as `COALESCE`, `IF`, `GREATEST` and `LEAST`
+do, declares those arguments `Param.Branch`, and `LogicalBuilder.bindArguments`
+gives them one type through `bindBranches` (`Analyzer.branches`), which
+`Result.Branches` then reads; one that compares two arguments, as `NULLIF` does,
+declares them `Param.Compared`, typed with `Analyzer.unify`; and one that reads
+a truth value, as `IF`'s first argument is, declares it `Param.Condition`, bound
+through `Analyzer.condition`, as every condition is.
 
 A function whose value must hold still for a whole query, as the clock keywords'
-must, does not belong in `Funcs`, which evaluates per row. Bind it to a literal
-instead, the way `LogicalBuilder.clockLiteral` binds `CURRENT_DATE` and
-`CURRENT_TIMESTAMP` to the instant `build` captured for the statement.
+must, does not belong in `Funcs`, which evaluates per row. Give it an entry of
+kind `Clock` whose `clock` builds the literal, the way `CURRENT_DATE` and
+`CURRENT_TIMESTAMP` bind to the instant `build` captured for the statement
+(`LogicalBuilder.clockLiteral`).
 
 ## Add an aggregate function
 
@@ -87,24 +103,27 @@ instead, the way `LogicalBuilder.clockLiteral` binds `CURRENT_DATE` and
    exactly, and fit the answer with `Decimals.fit` in `finish`, so it cannot
    depend on row order, merge order or spill.
 5. Wire it in `AggState.init` (`AggregateExec.scala`), `PlanSql`'s
-   `aggregateCall` if its `name` and `args` are not how it is written, and
-   `LogicalBuilder.bindAgg` (`sql/plan/LogicalBuilder.scala`), checking its
-   argument there as `SUM`'s is (`numberArg` for one it adds up,
-   `Analyzer.condition` for a truth value, as `COUNT_IF`'s), and the same in
-   `bindAnalytic` if it is a window function by name. A one-argument
-   aggregate gets `DISTINCT` by wrapping it in `AggExprDistinct` in `bindAgg`
-   (`DistinctState` replays the distinct values into the aggregate's own state)
-   and adding its name to `UnsupportedClauses.DistinctAggregates`; until then
-   `AGG(DISTINCT x)` is rejected, never bound as plain `AGG(x)`.
+   `aggregateCall` if its `name` and `args` are not how it is written, and give
+   it an entry of kind `Aggregate` in `FunctionCatalog` whose `aggregate`
+   builds the `AggExpr`: its parameters say how each argument is checked
+   (`Param.Number` for one it adds up, `Param.Condition` for a truth value, as
+   `COUNT_IF`'s, `Param.AnyValue` for any), `window = true` makes it a window
+   function by name, and `distinct` and `windowDistinct` say whether
+   `AGG(DISTINCT x)` binds. A one-argument aggregate honours `DISTINCT` by
+   wrapping itself in `AggExprDistinct` when its builder is asked to
+   (`DistinctState` replays the distinct values into the aggregate's own
+   state); until its entry says `DistinctUse.Honoured`, `AGG(DISTINCT x)` is
+   rejected by `UnsupportedClauses`, never bound as plain `AGG(x)`.
 6. Test it.
-7. Update [`README.md`'s "SQL features"](../README.md#sql-features) and (if
-   the change affects window behaviour) the window-fn note in
+7. Add each of its names to [`README.md`'s **Aggregates:** list](../README.md#sql-features),
+   and to the **Window functions:** list if it runs as one (`function_catalog_test`
+   holds both lists to the catalog), and (if the change affects window
+   behaviour) the window-fn note in
    [architecture.md §6](architecture.md#6-window-functions-two-stage-logical-binding).
 
-Any new `AggExpr` is automatically usable as a window aggregate too, because
+Any new `AggExpr` can run as a window aggregate too, because
 `WindowExec.computeAggOverPartition` calls `AggState.init(agg)` over the
-frame's rows. To expose it as a window function by name, also add a case to
-`LogicalBuilder.bindAnalytic`'s `fnName match { ... }`.
+frame's rows; its entry's `window` flag is what exposes it by name.
 
 ## Add a window function
 
@@ -114,9 +133,13 @@ as their own `WindowFn` ADT cases in `sql/plan/Window.scala`. To add one:
 1. New `WindowFn*` case in `sql/plan/Window.scala`. Set `name`, `resultType`,
    and `respectsFrame` (false for ranking/offset functions; true only if the
    function's value changes with the frame).
-2. Add a `case` in `LogicalBuilder.bindAnalytic` that recognises the function
-   name and returns the new `WindowFn`, and one in `PlanSql.windowCall` that
-   writes it back.
+2. Add an entry to `FunctionCatalog`, of kind `Ranking` with a `ranking` that
+   builds the new `WindowFn`, or `Offset` with an `offset` builder (an offset
+   function's value and default meet as a CASE's values, and its offset is a
+   constant); `LogicalBuilder.bindAnalytic` binds it by its kind, and
+   `UnsupportedClauses` reads the kind to refuse an argument to a ranking
+   function or a second one to any but an offset function. Add a case in
+   `PlanSql.windowCall` that writes it back.
 3. Add a `case` in `WindowExec.computeFunctions` that implements the per-row
    computation (it gets the sorted partition's row indices, the original
    row buffer, and the output column to populate). **If it has a notion of
@@ -131,12 +154,12 @@ as their own `WindowFn` ADT cases in `sql/plan/Window.scala`. To add one:
 
 Aggregate window functions (SUM/AVG/MIN/MAX/COUNT/COUNT_IF and the univariate
 stats STDDEV*/VAR*) reuse the existing `AggExpr` and `AggState` machinery via
-`WindowFnAgg(agg)` — see the previous section. New `AggExpr`s become available
-as window aggregates automatically once they're wired into both
-`LogicalBuilder.bindAgg` (group context) and `LogicalBuilder.bindAnalytic`
-(window context). Multi-arg aggregates (e.g. `COVAR`, `CORR`) store all their
-operand expressions on `AggExpr.args: Seq[Expr]` so column-projection
-pushdown reaches every referenced column.
+`WindowFnAgg(agg)` — see the previous section. An aggregate whose catalog entry
+says `window = true` binds in a window by the same entry it binds by in a
+group. Multi-arg aggregates (e.g. `COVAR`, `CORR`) store all their operand
+expressions on `AggExpr.args: Seq[Expr]` so column-projection pushdown reaches
+every referenced column; they are no window functions (`window = false`), since
+a window function takes one argument but an offset function's.
 
 ## Add a new file format (e.g., JSON)
 

@@ -73,9 +73,15 @@ navigation hint, not a comprehensive directory listing.
   `-0.0` rules), anything else through `Ops` (`genericCompare`) — is chosen in
   `VecOps.compare`; see
   [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec).
-- `sql/plan/Funcs.scala` (~630 LOC) — scalar function registry.
-  `Funcs.signature` declares each function's arities, argument kinds and
-  return type; `Funcs.apply` is the row-form dispatcher; `Funcs.applyVec` +
+- `sql/plan/FunctionCatalog.scala` (~560 LOC) — every function a query can
+  call, one `Entry` each (name, aliases, kind, arities, parameters, result
+  rule, NULL rule, domain, run-time errors, vector path, window and
+  `DISTINCT` use, ledger ids), the builders of what an aggregate, a window
+  function or a clock keyword binds to, and the CAST target names. The binder
+  binds by it and matches no name itself.
+- `sql/plan/Funcs.scala` (~620 LOC) — the scalar functions' implementations.
+  `Funcs.signature` is the catalog's lookup of a call's parameters and return
+  type; `Funcs.apply` is the row-form dispatcher; `Funcs.applyVec` +
   the `VecFuncs` object carry the vectorized implementations for the hot
   subset (COALESCE, string ops, ABS/FLOOR/CEIL/ROUND/TRUNC, IF, NULLIF,
   SUBSTRING), sharing `substring`, `length` and `trim` (code points, spaces)

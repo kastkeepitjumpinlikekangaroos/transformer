@@ -323,9 +323,11 @@ object Analyzer {
   }
 
   /** Refuse an argument of the function `fn` that is not the kind its
-    * [[Funcs.Param]] says. */
+    * [[Funcs.Param]] says. A value, a branch, a compared value, a condition
+    * and an operand were typed as the binder bound them. */
   def checkArgument(fn: String, param: Funcs.Param, e: Expr): Unit = param match {
-    case Funcs.Param.AnyValue => ()
+    case Funcs.Param.AnyValue | Funcs.Param.Branch | Funcs.Param.Compared | Funcs.Param.Condition |
+         Funcs.Param.Operand => ()
     case Funcs.Param.Number => checkNumber(e.dataType, fn)
     case Funcs.Param.Integer(role) => checkInteger(e.dataType, s"$fn's $role")
     case Funcs.Param.Text => checkText(e.dataType, fn)

@@ -21,7 +21,7 @@ import net.sf.jsqlparser.expression.operators.relational.{
 import net.sf.jsqlparser.schema.Column
 import net.sf.jsqlparser.statement.select._
 
-import java.time.{Instant, LocalDate, ZoneOffset}
+import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.Locale
 import scala.collection.mutable
@@ -1017,8 +1017,11 @@ object LogicalBuilder {
       Analyzer.readLiteral(SqlParser.escapeLiteralText(d).getOrElse(d.getValue.toLocalDate.toString), DataType.DateType)
     case t: TimestampValue => Analyzer.readLiteral(SqlParser.stringLiteralValue(t.getRawValue), DataType.TimestampType)
     case _: TimeValue => throw new IllegalArgumentException("TIME literal not supported")
-    // UnsupportedClauses has already rejected every keyword but the two clock ones.
-    case tk: TimeKeyExpression => clockLiteral(UnsupportedClauses.clockKeyword(tk.getStringValue))
+    // UnsupportedClauses has already rejected every keyword but the clock ones.
+    case tk: TimeKeyExpression =>
+      val keyword = UnsupportedClauses.clockKeyword(tk.getStringValue)
+      clockLiteral(FunctionCatalog.lookup(keyword).filter(_.kind == FunctionCatalog.Kind.Clock)
+        .getOrElse(throw new IllegalStateException(s"$keyword is no clock keyword")))
     case se: SignedExpression =>
       val sign = se.getSign
       val inner = b(se.getExpression)
@@ -1166,15 +1169,16 @@ object LogicalBuilder {
       // the extended forms instead of answering the wrong question quietly.
       if (tf.getTrimSpecification != null || tf.isUsingFromKeyword ||
           tf.getFromExpression != null || tf.getExpression == null)
-        throw new IllegalArgumentException("Only the single-argument TRIM(x) is supported")
-      val trimmed = b(tf.getExpression)
-      Analyzer.checkText(trimmed.dataType, "TRIM")
-      FuncExpr("TRIM", Seq(trimmed), DataType.StringType)
+        throw new IllegalArgumentException(FunctionCatalog.OnlySingleArgumentTrim)
+      val trimmed = Seq(b(tf.getExpression))
+      val trim = FunctionCatalog.Trim
+      trim.paramsAt(1).zip(trimmed).foreach { case (param, arg) => Analyzer.checkArgument(trim.name, param, arg) }
+      FuncExpr(trim.name, trimmed, trim.resultType(trimmed))
 
     // The resolver has declined it (Resolved, above).
     case f: Function =>
-      if (isAggFn(f.getName))
-        throw new IllegalArgumentException(s"Aggregate '${f.getName}' used in non-aggregating position")
+      if (FunctionCatalog.isAggregate(f.getName))
+        throw new IllegalArgumentException(FunctionCatalog.aggregateOutOfPlace(f.getName))
       bindScalarFunctionWithAggs(f, sources, aggResolver, windowResolver)
 
     case ae: AnalyticExpression =>
@@ -1332,15 +1336,19 @@ object LogicalBuilder {
     * `getValue` is the DOUBLE they round to. */
   private def writtenDigits(d: DoubleValue): java.math.BigDecimal = new java.math.BigDecimal(d.toString)
 
-  /** CURRENT_DATE or CURRENT_TIMESTAMP: the statement's start, in UTC like
-    * every time in the engine. */
-  private def clockLiteral(keyword: String): Expr = {
+  /** A clock keyword, CURRENT_DATE or CURRENT_TIMESTAMP: the statement's
+    * start, in UTC like every time in the engine. */
+  private def clockLiteral(clock: FunctionCatalog.Entry): Expr = {
     val now = statementStart.value
-    if (now == null) throw new IllegalStateException(s"$keyword was bound outside LogicalBuilder.build")
-    if (keyword == "CURRENT_DATE") LitExpr(LocalDate.ofInstant(now, ZoneOffset.UTC), DataType.DateType)
-    else LitExpr(now, DataType.TimestampType)
+    if (now == null) throw new IllegalStateException(s"${clock.name} was bound outside LogicalBuilder.build")
+    clock.clock.get(now)
   }
 
+  /** A call outside OVER of a scalar, flow, operator or clock function,
+    * bound by its entry in [[FunctionCatalog]]: its arguments as its
+    * parameters say ([[bindArguments]]), checked against them, and typed by
+    * its result rule. A name no entry has, or an arity its entry does not
+    * take, is refused, by the entry's own message where it has one. */
   private def bindScalarFunctionWithAggs(f: Function, sources: Sources,
                                           aggResolver: Expression => Option[Expr],
                                           windowResolver: AnalyticExpression => Option[Expr]): Expr = {
@@ -1349,43 +1357,69 @@ object LogicalBuilder {
     val params: Seq[Expression] = Option(f.getParameters)
       .map(_.asInstanceOf[ExpressionList[_]].asScala.asInstanceOf[Iterable[Expression]].toSeq)
       .getOrElse(Nil)
-    val args: Seq[Expr] = name match {
-      // Each returns one of its arguments, so they meet as a CASE's values
-      // do. IF's first argument is its condition.
-      case "COALESCE" | "GREATEST" | "LEAST" if params.nonEmpty => bindBranches(name, params, bind)._1
-      case "IF" if params.size == 3 =>
-        Analyzer.condition(bind(params.head), "IF") +: bindBranches(name, params.tail, bind)._1
-      // NULLIF compares its two and returns the first as it is, but for a
-      // string literal, which is read as the type it meets.
-      case "NULLIF" if params.size == 2 =>
-        val (first, second) = (bind(params(0)), bind(params(1)))
-        val (compared, _) = Analyzer.unify(comparedBesideDecimals(params, Seq(first, second)))
-        Seq(if (Analyzer.isStringLiteral(first)) compared(0) else first, compared(1))
-      // MOD(a, b) is a % b, typed and computed as that is.
-      case "MOD" if params.size == 2 => bindOperands(params, bind)
-      case _ => params.map(bind)
+    val entry = FunctionCatalog.call(name).filter(_.arity.admits(params.size))
+    val args: Seq[Expr] = entry match {
+      case Some(e) => bindArguments(name, e.paramsAt(params.size), params, bind)
+      case None => params.map(bind)
     }
-    val argTypes = args.map(_.dataType)
-    // `CURRENT_DATE ()`, with a space, parses as a call rather than the keyword.
-    if (args.isEmpty && UnsupportedClauses.ClockKeywords(name)) clockLiteral(name)
-    else if (name == "MOD" && args.size == 2) Analyzer.arithmetic("%", args(0), args(1))
-    // Its base is e in MySQL and Spark and 10 in Postgres and SQLite.
-    else if (name == "LOG" && args.size == 1)
-      throw new IllegalArgumentException(
-        "LOG(x) with one argument is not supported, as engines disagree on its base; " +
-          "write LN(x) for base e, LOG10(x) for base 10, or LOG(base, x)")
-    else {
-      val signature = Funcs.signature(name, args)
-        .getOrElse(throw new IllegalArgumentException(s"Unknown function '${f.getName}(${argTypes.mkString(",")})'"))
-      signature.params.zip(args).foreach { case (param, arg) => Analyzer.checkArgument(name, param, arg) }
-      if (name == "SUBSTRING" && args.size == 3) constantValue(args(2)).foreach {
-        case n: Number if n.longValue < 0 => throw Funcs.negativeLength(n.longValue)
-        case _ => ()
-      }
-      FuncExpr(name, args, signature.returnType)
+    entry match {
+      // `CURRENT_DATE ()`, with a space, parses as a call rather than the keyword.
+      case Some(e) if e.kind == FunctionCatalog.Kind.Clock => clockLiteral(e)
+      // MOD(a, b) is a % b, typed and computed as that is.
+      case Some(e) if e.kind == FunctionCatalog.Kind.Operator =>
+        Analyzer.arithmetic(e.operator.get, args(0), args(1))
+      case _ =>
+        FunctionCatalog.call(name).flatMap(_.refusedArities.get(args.size))
+          .foreach(message => throw new IllegalArgumentException(message))
+        val signature = Funcs.signature(name, args).getOrElse(
+          throw new IllegalArgumentException(FunctionCatalog.unknownFunction(f.getName, args.map(_.dataType))))
+        signature.params.zip(args).foreach { case (param, arg) => Analyzer.checkArgument(name, param, arg) }
+        entry.flatMap(_.bindCheck).foreach(check => check(i => if (i < args.size) constantValue(args(i)) else None))
+        FuncExpr(name, args, signature.returnType)
     }
   }
 
+  /** The arguments `params` of a call of `name`, each bound as its parameter
+    * `kinds` says, in the order written: a condition as every condition is,
+    * the values the call may answer with together, as a CASE's values meet
+    * ([[bindBranches]]), the two NULLIF compares as a comparison's sides
+    * ([[bindNullIf]]), an operator's operands as arithmetic's
+    * ([[bindOperands]]), and any other on its own. */
+  private def bindArguments(
+      name: String,
+      kinds: Seq[Funcs.Param],
+      params: Seq[Expression],
+      bind: Expression => Expr): Seq[Expr] = {
+    val bound = new Array[Expr](params.size)
+    def together(kind: Funcs.Param)(bindAll: Seq[Expression] => Seq[Expr]): Unit = {
+      val at = kinds.indices.filter(kinds(_) == kind)
+      bindAll(at.map(params)).zip(at).foreach { case (e, j) => bound(j) = e }
+    }
+    kinds.indices.foreach { i =>
+      if (bound(i) == null) kinds(i) match {
+        case Funcs.Param.Condition => bound(i) = Analyzer.condition(bind(params(i)), name)
+        case Funcs.Param.Branch => together(Funcs.Param.Branch)(values => bindBranches(name, values, bind)._1)
+        case Funcs.Param.Compared => together(Funcs.Param.Compared)(bindNullIf(_, bind))
+        case Funcs.Param.Operand => together(Funcs.Param.Operand)(bindOperands(_, bind))
+        case _ => bound(i) = bind(params(i))
+      }
+    }
+    bound.toSeq
+  }
+
+  /** NULLIF's two arguments, compared as a comparison's two sides are; the
+    * first is returned as it is, but for a string literal, which is read as
+    * the type it meets. */
+  private def bindNullIf(params: Seq[Expression], bind: Expression => Expr): Seq[Expr] = {
+    val (first, second) = (bind(params(0)), bind(params(1)))
+    val (compared, _) = Analyzer.unify(comparedBesideDecimals(params, Seq(first, second)))
+    Seq(if (Analyzer.isStringLiteral(first)) compared(0) else first, compared(1))
+  }
+
+  /** An aggregate call, bound by its entry in [[FunctionCatalog]]: `COUNT(*)`
+    * where the entry takes a star, each argument as its parameter says
+    * ([[aggregateArgument]]), and an arity the entry does not take refused,
+    * by its own message where it has one. */
   private def bindAgg(f: Function, sources: Sources): AggExpr = {
     val upper = f.getName.toUpperCase(Locale.ROOT)
     val params: Seq[Expression] = Option(f.getParameters)
@@ -1396,35 +1430,27 @@ object LogicalBuilder {
     // something else: the ALL quantifier of COUNT(ALL x), which is the default
     // and changes nothing, so it is never read.
     val isStarArg = params.size == 1 && params.head.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns]
-    def arg(i: Int): Expr = bindExpr(params(i), sources)
-    // SUM, AVG and the statistics add their values up.
-    def number(i: Int): Expr = numberArg(upper, arg(i))
-    upper match {
-      case "COUNT" if isStarArg => AggExprCountStar()
-      case "COUNT" if params.isEmpty => throw countWithoutArgument
-      case "COUNT" if params.size == 1 => AggExprCount(arg(0), distinct)
-      case "SUM" if params.size == 1 => distinctIf(distinct, AggExprSum(number(0)))
-      case "AVG" if params.size == 1 => distinctIf(distinct, AggExprAvg(number(0)))
-      // DISTINCT cannot change an extreme, so MIN / MAX ignore it.
-      case "MIN" if params.size == 1 => AggExprMin(arg(0))
-      case "MAX" if params.size == 1 => AggExprMax(arg(0))
-      case "COUNT_IF" if params.size == 1 => AggExprCountIf(Analyzer.condition(arg(0), "COUNT_IF"))
-      case "STDDEV" | "STDDEV_SAMP" | "STDEV" if params.size == 1 => AggExprStddev(number(0), sample = true)
-      case "STDDEV_POP" | "STDEVP" if params.size == 1 => AggExprStddev(number(0), sample = false)
-      case "VARIANCE" | "VAR_SAMP" | "VAR" if params.size == 1 => AggExprVariance(number(0), sample = true)
-      case "VAR_POP" | "VARP" if params.size == 1 => AggExprVariance(number(0), sample = false)
-      case "COVAR_SAMP" if params.size == 2 => AggExprCovar(number(0), number(1), sample = true)
-      case "COVAR_POP" if params.size == 2 => AggExprCovar(number(0), number(1), sample = false)
-      case "CORR" if params.size == 2 => AggExprCorr(number(0), number(1))
-      case _ =>
-        throw new IllegalArgumentException(s"Unsupported aggregate: ${f.getName}(${params.size} args)")
+    FunctionCatalog.aggregate(upper) match {
+      case Some(e) if e.star && isStarArg => e.aggregate.get(Nil, false)
+      case Some(e) if e.refusedArities.contains(params.size) =>
+        throw new IllegalArgumentException(e.refusedArities(params.size))
+      case Some(e) if e.arity.admits(params.size) =>
+        val args = e.paramsAt(params.size).zip(params).map { case (kind, p) =>
+          aggregateArgument(upper, kind, bindExpr(p, sources))
+        }
+        e.aggregate.get(args, distinct)
+      case _ => throw new IllegalArgumentException(FunctionCatalog.unsupportedAggregate(f.getName, params.size))
     }
   }
 
-  /** `COUNT()`, which SQLite and DuckDB read as `COUNT(*)` and Postgres
-    * refuses: the query says which count it means. */
-  private def countWithoutArgument = new IllegalArgumentException(
-    "COUNT() needs an argument: COUNT(*) counts the rows, COUNT(x) the rows where x is not NULL")
+  /** `e`, an argument of the aggregate `fn`, of the kind `kind` says: a number
+    * for one that adds its values up (SUM, AVG and the statistics), a truth
+    * value for COUNT_IF's, any value for MIN's, MAX's and COUNT's. */
+  private def aggregateArgument(fn: String, kind: Funcs.Param, e: Expr): Expr = kind match {
+    case Funcs.Param.Number => numberArg(fn, e)
+    case Funcs.Param.Condition => Analyzer.condition(e, fn)
+    case _ => e
+  }
 
   /** `e`, the argument of the aggregate `fn`, which must be a number. */
   private def numberArg(fn: String, e: Expr): Expr = {
@@ -1432,20 +1458,11 @@ object LogicalBuilder {
     e
   }
 
-  private def distinctIf(distinct: Boolean, agg: AggExpr): AggExpr =
-    if (distinct) AggExprDistinct(agg) else agg
-
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private val AggFns: Set[String] = Set(
-    "COUNT", "SUM", "AVG", "MIN", "MAX", "COUNT_IF",
-    "STDDEV", "STDDEV_SAMP", "STDDEV_POP", "STDEV", "STDEVP",
-    "VARIANCE", "VAR_SAMP", "VAR_POP", "VAR", "VARP",
-    "COVAR_SAMP", "COVAR_POP", "CORR"
-  )
-  private def isAggFn(name: String): Boolean = AggFns.contains(name.toUpperCase(Locale.ROOT))
+  private def isAggFn(name: String): Boolean = FunctionCatalog.isAggregate(name)
 
   /** Whether `e` holds a group aggregate. A window aggregate is none, but its
     * arguments and keys may hold one, which it reads per group. */
@@ -1543,15 +1560,11 @@ object LogicalBuilder {
     // is the ALL quantifier and is never read.
     val isStarArg: Boolean =
       Option(ae.getExpression).exists(_.isInstanceOf[net.sf.jsqlparser.statement.select.AllColumns])
-    def argument(): Expr =
-      binder(argExpr.getOrElse(throw new IllegalArgumentException(s"$fnName requires an argument")))
-    // SUM, AVG and the statistics add their values up.
-    def number(): Expr = numberArg(fnName, argument())
 
     // LAG's and LEAD's value and default are one result, as a CASE's values
     // are: the default is what a row with no row that far away gets.
     def valueAndDefault(): (Expr, Option[Expr]) = {
-      val arg = argExpr.getOrElse(throw new IllegalArgumentException(s"$fnName requires an argument"))
+      val arg = argExpr.getOrElse(throw new IllegalArgumentException(FunctionCatalog.requiresArgument(fnName)))
       Option(ae.getDefaultValue) match {
         case Some(default) =>
           val (values, _) = bindBranches(fnName, Seq(arg, default), binder)
@@ -1560,33 +1573,25 @@ object LogicalBuilder {
       }
     }
 
-    val fn: WindowFn = fnName match {
-      case "ROW_NUMBER" => WindowFnRowNumber()
-      case "RANK" => WindowFnRank()
-      case "DENSE_RANK" => WindowFnDenseRank()
-      case "LAG" =>
+    // The window function the name is, by its entry in FunctionCatalog: a
+    // ranking function, an offset function, or an aggregate that runs as one,
+    // its argument checked as an aggregate's is.
+    val fn: WindowFn = FunctionCatalog.window(fnName) match {
+      case Some(e) if e.kind == FunctionCatalog.Kind.Ranking => e.ranking.get()
+      case Some(e) if e.kind == FunctionCatalog.Kind.Offset =>
         val (arg, default) = valueAndDefault()
-        val offset = Option(ae.getOffset).map(extractNonNegativeInt("LAG offset")).getOrElse(1)
-        WindowFnLag(arg, offset, default)
-      case "LEAD" =>
-        val (arg, default) = valueAndDefault()
-        val offset = Option(ae.getOffset).map(extractNonNegativeInt("LEAD offset")).getOrElse(1)
-        WindowFnLead(arg, offset, default)
-      case "COUNT" =>
-        if (isStarArg) WindowFnAgg(AggExprCountStar())
-        else if (argExpr.isEmpty) throw countWithoutArgument
-        else WindowFnAgg(AggExprCount(binder(argExpr.get), distinct = ae.isDistinct))
-      case "SUM" => WindowFnAgg(AggExprSum(number()))
-      case "AVG" => WindowFnAgg(AggExprAvg(number()))
-      case "MIN" => WindowFnAgg(AggExprMin(argument()))
-      case "MAX" => WindowFnAgg(AggExprMax(argument()))
-      case "COUNT_IF" => WindowFnAgg(AggExprCountIf(Analyzer.condition(argument(), "COUNT_IF")))
-      case "STDDEV" | "STDDEV_SAMP" | "STDEV" => WindowFnAgg(AggExprStddev(number(), sample = true))
-      case "STDDEV_POP" | "STDEVP" => WindowFnAgg(AggExprStddev(number(), sample = false))
-      case "VARIANCE" | "VAR_SAMP" | "VAR" => WindowFnAgg(AggExprVariance(number(), sample = true))
-      case "VAR_POP" | "VARP" => WindowFnAgg(AggExprVariance(number(), sample = false))
-      case other =>
-        throw new IllegalArgumentException(s"Unsupported window function: $other")
+        val offset = Option(ae.getOffset).map(extractNonNegativeInt(s"$fnName offset")).getOrElse(1)
+        e.offset.get(arg, offset, default)
+      case Some(e) =>
+        if (e.star && isStarArg) WindowFnAgg(e.aggregate.get(Nil, false))
+        else {
+          val arg = argExpr.getOrElse(throw new IllegalArgumentException(
+            e.refusedArities.getOrElse(0, FunctionCatalog.requiresArgument(fnName))))
+          val bound = aggregateArgument(fnName, e.paramsAt(1).head, binder(arg))
+          WindowFnAgg(e.aggregate.get(Seq(bound),
+            ae.isDistinct && e.windowDistinct == FunctionCatalog.DistinctUse.Honoured))
+        }
+      case None => throw new IllegalArgumentException(FunctionCatalog.unsupportedWindow(fnName))
     }
     // A ranking function and LAG / LEAD read no frame, so one written on them
     // cannot change the answer.
@@ -1776,7 +1781,7 @@ object LogicalBuilder {
   private def isConstant(e: Expr): Boolean = e match {
     case _: ColRefExpr => false
     case _: LitExpr => true
-    case FuncExpr("RAND" | "RANDOM", Seq(), _) => false
+    case FuncExpr(name, args, _) if FunctionCatalog.readsRandom(name, args.size) => false
     case FuncExpr(_, args, _) => args.forall(isConstant)
     case CastExpr(c, _) => isConstant(c)
     case UnaryOpExpr(_, c, _) => isConstant(c)
@@ -1891,15 +1896,7 @@ object LogicalBuilder {
   private def columnNamed(table: Option[String], name: String): Expression =
     new Column((table.toSeq :+ name).map(SqlParser.quote).asJava)
 
-  private def parseTypeName(s: String): DataType = s.toUpperCase(Locale.ROOT) match {
-    case "INT" | "INTEGER" => DataType.IntType
-    case "BIGINT" | "LONG" => DataType.LongType
-    case "FLOAT" | "REAL" => DataType.FloatType
-    case "DOUBLE" | "DOUBLE PRECISION" => DataType.DoubleType
-    case "STRING" | "VARCHAR" | "TEXT" | "CHAR" => DataType.StringType
-    case "BOOLEAN" | "BOOL" => DataType.BooleanType
-    case "DATE" => DataType.DateType
-    case "TIMESTAMP" => DataType.TimestampType
-    case other => throw new IllegalArgumentException(s"Unsupported CAST target type: $other")
-  }
+  /** The type a CAST names, by [[FunctionCatalog.CastTargets]]. */
+  private def parseTypeName(s: String): DataType =
+    FunctionCatalog.castTarget(s).getOrElse(throw new IllegalArgumentException(FunctionCatalog.unsupportedCastTarget(s)))
 }

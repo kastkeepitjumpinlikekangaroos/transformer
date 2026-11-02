@@ -190,8 +190,16 @@ specific traps.
   them when adding a type, or a construct whose answer is one of its values.
   A construct that reads a truth value takes a BOOLEAN through
   `Analyzer.condition`, never an implicit cast to one, and a function declares
-  what each of its arguments must be beside its arity (`Funcs.signature`), so
-  nothing is read as the type a function wanted.
+  what each of its arguments must be beside its arity (its `FunctionCatalog`
+  entry), so nothing is read as the type a function wanted.
+- **A function is one entry of `FunctionCatalog`, and the binder matches no
+  function's name.** `LogicalBuilder`, `UnsupportedClauses`, `Analyzer` and
+  `PlanValidator` look a call up by name and act on what its entry says (its
+  kind, parameters, arities, result rule, `DISTINCT`, window and random
+  flags), so a function added, renamed or given an alias changes one entry,
+  the README's lists (`function_catalog_test`), and nothing else. A second
+  list of names, in the binder or a generator, is the bug this rule exists to
+  prevent.
 - **A failure the user caused is an `IllegalArgumentException` in SQL's words,
   raised at bind time unless a value causes it.** Never an internal exception
   class (`UnsupportedOperationException`, `IllegalStateException`, a

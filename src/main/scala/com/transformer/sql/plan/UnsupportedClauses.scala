@@ -230,7 +230,6 @@ object UnsupportedClauses {
   private[plan] def clockKeyword(written: String): String =
     written.toUpperCase(Locale.ROOT).stripSuffix("()").trim.replaceAll("\\s+", "_")
 
-  private[plan] val ClockKeywords = Set("CURRENT_DATE", "CURRENT_TIMESTAMP")
 
   /** The words of a FETCH clause other than the noise words ROW / ROWS / ONLY:
     * `WITH TIES` and `PERCENT`. */
@@ -238,9 +237,6 @@ object UnsupportedClauses {
     Option(f.getFetchParameters).map(_.asScala.toSeq).getOrElse(Nil)
       .filterNot(p => Set("ROW", "ROWS", "ONLY")(p.toUpperCase(Locale.ROOT)))
 
-  private val RankingFunctions = Set("ROW_NUMBER", "RANK", "DENSE_RANK")
-  private val DistinctAggregates = Set("COUNT", "SUM", "AVG", "MIN", "MAX")
-  private val OffsetFunctions = Set("LAG", "LEAD")
 
   // ---------------------------------------------------------------------------
   // Statements and FROM
@@ -351,7 +347,7 @@ object UnsupportedClauses {
         example = "SELECT STDDEV(DISTINCT a) FROM t",
         partial = true,
         describe = f => s"${upper(f.getName)}(DISTINCT ...)"
-      )(f => f.isDistinct && !DistinctAggregates(upper(f.getName))),
+      )(f => f.isDistinct && !FunctionCatalog.acceptsDistinct(f.getName)),
       rejectsWhen[Function]("isUnique")("UNIQUE inside a function call",
         advice = "write DISTINCT",
         example = "SELECT COUNT(UNIQUE a) FROM t",
@@ -406,18 +402,19 @@ object UnsupportedClauses {
         example = "SELECT SUM(DISTINCT a) OVER () FROM t",
         partial = true,
         describe = ae => s"${upper(ae.getName)}(DISTINCT ...) OVER (...)"
-      )(ae => ae.isDistinct && !"COUNT".equalsIgnoreCase(ae.getName)),
+      )(ae => ae.isDistinct && !FunctionCatalog.acceptsDistinctInWindow(ae.getName)),
       rejectsWhen[AnalyticExpression]("getExpression")("An argument to ROW_NUMBER / RANK / DENSE_RANK",
         example = "SELECT ROW_NUMBER(a) OVER (ORDER BY a) FROM t",
         partial = true,
         describe = ae => s"${upper(ae.getName)} with an argument"
-      )(ae => RankingFunctions(upper(ae.getName)) && ae.getExpression != null),
+      )(ae => FunctionCatalog.isKind(ae.getName, FunctionCatalog.Kind.Ranking) && ae.getExpression != null),
       rejectsWhen[AnalyticExpression]("getOffset", "getDefaultValue")(
         "A second or third argument to a window function other than LAG / LEAD",
         example = "SELECT SUM(a, 2) OVER () FROM t",
         partial = true,
         describe = ae => s"${upper(ae.getName)} with more than one argument"
-      )(ae => !OffsetFunctions(upper(ae.getName)) && (ae.getOffset != null || ae.getDefaultValue != null)),
+      )(ae => !FunctionCatalog.isKind(ae.getName, FunctionCatalog.Kind.Offset) &&
+        (ae.getOffset != null || ae.getDefaultValue != null)),
       rejectsWhen[AnalyticExpression]("isUnique")("UNIQUE inside a window function",
         advice = "write DISTINCT",
         example = "SELECT COUNT(UNIQUE a) OVER () FROM t"
@@ -653,7 +650,7 @@ object UnsupportedClauses {
         advice = "the engine has no TIME type; CURRENT_TIMESTAMP carries the time of day",
         example = "SELECT CURRENT_TIME FROM t", partial = true,
         describe = tk => clockKeyword(tk.getStringValue))(
-        tk => !ClockKeywords(clockKeyword(tk.getStringValue))))),
+        tk => !FunctionCatalog.isKind(clockKeyword(tk.getStringValue), FunctionCatalog.Kind.Clock)))),
     classOf[AllValue] -> audit(Nil),
     classOf[ExpressionList[_]] -> audit(Nil, ListShape),
     classOf[ParenthesedExpressionList[_]] -> audit(Nil, ListShape)

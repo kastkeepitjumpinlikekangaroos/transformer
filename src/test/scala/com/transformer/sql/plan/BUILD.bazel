@@ -105,3 +105,25 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+# FunctionCatalog against what it must agree with: README.md's lists of
+# functions and CAST types, both ways, read by their bold labels; the binder,
+# which binds every entry at each declared arity and refuses every other with
+# the catalog's message; the ledger in docs/gotchas.md, which has a row for
+# every rule an entry cites; and Funcs.applyVec.
+scala_junit_test(
+    name = "function_catalog_test",
+    srcs = ["FunctionCatalogTest.scala"],
+    data = [
+        "//:README.md",
+        "//:docs/gotchas.md",
+    ],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "//src/test/scala/com/transformer/fuzz",
+        "//src/test/scala/com/transformer/slt",
+        "@maven//:junit_junit",
+    ],
+)

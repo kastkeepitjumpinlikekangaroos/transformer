@@ -1,7 +1,7 @@
 package com.transformer.fuzz
 
 import com.transformer.core._
-import com.transformer.sql.plan.UnsupportedClauses
+import com.transformer.sql.plan.{FunctionCatalog, UnsupportedClauses}
 
 import java.util.Locale
 
@@ -941,14 +941,23 @@ object SqlTextGen {
 
   // ---- typing queries -------------------------------------------------------
 
-  private val TypingFunctions1: Vector[String] = Vector("UPPER", "LOWER", "TRIM", "LENGTH", "ABS", "ROUND", "FLOOR",
-    "CEIL", "SQRT", "EXP", "LN", "SIN", "SIGN", "DEGREES", "CONCAT", "RAND")
-  private val TypingFunctions2: Vector[String] = Vector("ROUND", "TRUNC", "POWER", "ATAN2", "LOG", "SUBSTRING",
-    "COALESCE", "NULLIF", "GREATEST", "LEAST", "CONCAT")
-  private val TypingAggregates: Vector[String] = Vector("SUM", "AVG", "MIN", "MAX", "COUNT", "STDDEV", "VARIANCE",
-    "COUNT_IF", "SUM(DISTINCT", "AVG(DISTINCT")
-  private val CastTargets: Vector[String] = Vector("INT", "BIGINT", "FLOAT", "DOUBLE", "STRING", "BOOLEAN", "DATE",
-    "TIMESTAMP")
+  /** Every name of every function `FunctionCatalog` binds as a call outside
+    * OVER that takes `n` arguments, so a function added there is drawn the
+    * day it lands. */
+  private def callsTaking(n: Int): Vector[String] =
+    FunctionCatalog.Entries.filter(e => FunctionCatalog.call(e.name).isDefined && e.arity.admits(n))
+      .flatMap(_.names).toVector
+  private val TypingFunctions1: Vector[String] = callsTaking(1)
+  private val TypingFunctions2: Vector[String] = callsTaking(2)
+  /** Every name of every aggregate of one argument, and the DISTINCT form of
+    * each that takes one. */
+  private val TypingAggregates: Vector[String] = {
+    val oneArgument = FunctionCatalog.Entries.filter(e => e.kind == FunctionCatalog.Kind.Aggregate && e.arity.admits(1))
+    (oneArgument.flatMap(_.names) ++
+      oneArgument.filter(_.distinct != FunctionCatalog.DistinctUse.Refused).flatMap(_.names).map(_ + "(DISTINCT")).toVector
+  }
+  /** Every name a CAST takes a type by. */
+  private val CastTargets: Vector[String] = FunctionCatalog.CastTargets.flatMap(_._2).toVector
   private val TypingLiterals: Vector[String] = Vector("1", "2.5", "'x'", "NULL", "TRUE", "DATE '2024-02-29'", "-1")
 
   /** A function, an aggregate, a CAST, a UNION, a branch list, a condition

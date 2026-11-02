@@ -1287,8 +1287,8 @@ error naming it.
 **Aggregates:** `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `COUNT_IF(pred)`,
 `SUM`, `AVG`, `MIN`, `MAX` (each of these four also as `SUM(DISTINCT col)` and so
 on, which aggregates each distinct non-NULL value once),
-`STDDEV`/`STDDEV_SAMP`/`STDDEV_POP`, `VARIANCE`/`VAR_SAMP`/`VAR_POP`,
-`COVAR_SAMP`/`COVAR_POP`, `CORR`. Univariate variance/stddev (and `COUNT_IF`)
+`STDDEV`/`STDDEV_SAMP`/`STDEV`, `STDDEV_POP`/`STDEVP`, `VARIANCE`/`VAR_SAMP`/`VAR`,
+`VAR_POP`/`VARP`, `COVAR_SAMP`/`COVAR_POP`, `CORR`. Univariate variance/stddev (and `COUNT_IF`)
 are also available as window aggregates with `OVER (...)`. Variance and stddev
 use Welford + Chan's parallel merge for numerical stability; `*_SAMP` returns
 NULL when fewer than two non-NULL inputs are present. `SUM`, `AVG` and the
@@ -1310,7 +1310,11 @@ partitions or a spill bring it.
 **Window functions:** `<fn>() OVER ([PARTITION BY <exprs>] [ORDER BY <keys>]
 [<frame>])` — `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`/`LEAD` (with the SQL
 `offset` and `default` arguments; the default meets the value it stands in for
-as a `CASE`'s values do, below), and the aggregate forms above. The `ORDER BY`
+as a `CASE`'s values do, below), and the aggregates `COUNT`, `COUNT_IF`, `SUM`,
+`AVG`, `MIN`, `MAX`, `STDDEV`/`STDDEV_SAMP`/`STDEV`, `STDDEV_POP`/`STDEVP`,
+`VARIANCE`/`VAR_SAMP`/`VAR` and `VAR_POP`/`VARP`. `COVAR_SAMP`, `COVAR_POP` and
+`CORR` are aggregates only, and of the aggregates in a window only `COUNT` takes
+`DISTINCT`. The `ORDER BY`
 keys take `ASC`/`DESC` and `NULLS FIRST`/`NULLS LAST` exactly as the outer
 `ORDER BY` does. A frame is `ROWS` or `RANGE`, `BETWEEN <start> AND <end>` or a
 start alone (whose end is `CURRENT ROW`), each bound one of `UNBOUNDED
@@ -1348,7 +1352,8 @@ numeric — `ABS`, `ROUND`, `FLOOR`, `CEIL`/`CEILING`, `TRUNC`/`TRUNCATE`,
 `MOD`, `POW`/`POWER`, `SIGN`; math — `SQRT`, `CBRT`, `EXP`, `LN`,
 `LOG(base, x)`, `LOG10`, `LOG2`; trig — `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`,
 `ATAN`, `ATAN2(y, x)`, `SINH`, `COSH`, `TANH`, `DEGREES`, `RADIANS`;
-constants — `PI()`, `E()`; non-deterministic — `RAND()` / `RAND(seed)`;
+constants — `PI()`, `E()`; non-deterministic — `RAND()` / `RAND(seed)`, also
+spelled `RANDOM`;
 temporal — `CURRENT_DATE`, `CURRENT_TIMESTAMP`. The string functions take a
 `STRING`, the numeric and math functions a number, and `ROUND`'s and `TRUNC`'s
 scale, `SUBSTRING`'s position and length and `RAND`'s seed an `INT` or a
@@ -1443,8 +1448,8 @@ and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
 (`(a, b) = (c, d)`) are not supported.
 
 **Types in CAST:** `INT`, `INTEGER`, `BIGINT`, `LONG`, `FLOAT`, `REAL`,
-`DOUBLE`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`, `DATE`,
-`TIMESTAMP`. A `DECIMAL` or `BINARY` column comes from a declared schema or a
+`DOUBLE`/`DOUBLE PRECISION`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`,
+`DATE`, `TIMESTAMP`. A `DECIMAL` or `BINARY` column comes from a declared schema or a
 parquet file; neither type is a CAST target. A number
 widens to a `DECIMAL` where the two meet, and a `BINARY` casts to nothing. A
 `BOOLEAN` casts to any number as 1 for true and 0 for false.
