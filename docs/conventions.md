@@ -245,6 +245,18 @@ specific traps.
   `oracle/CleanRejection` (`fuzz/frontend_fuzz_test`) holds every failure to
   this; its known defects are where the engine does not yet
   ([plans/robustness/14](../plans/robustness/14-pathological-nesting.md)).
+- **The engine is a library: it does not print, exit or sleep.** What a run
+  meets that does not fail it is a warning in its result and its `job.json`
+  (`JobResult.warnings`; a warning never fails a run, plans/robustness/08), and
+  what fails it is an exception or a task's status: never a line on standard
+  output or error, which a program embedding the engine can neither see nor
+  silence. A cloud `jobRunOutput`, which v1 does not write, is such a warning.
+  The engine never ends the JVM and never sleeps to wait for something. Rule
+  R7 of `bytecode:bytecode_rules_test` holds the engine to no `System.out` or
+  `err`, `println`, `printStackTrace`, `System.exit`, `Runtime.halt` or
+  `Thread.sleep`; the fault hook's armed halt (`Faults.fire`, plans/testing/06)
+  is its decided exception, and the leak audit's exit report is held for the
+  user. The CLI and the examples print and exit.
 - **A reader of a file format refuses in its own words, naming the file.**
   A library's exception never reaches the caller as itself: the reader
   catches what its library throws, says what is wrong with the file in the

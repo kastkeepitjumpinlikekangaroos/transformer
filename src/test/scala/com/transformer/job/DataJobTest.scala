@@ -1981,6 +1981,31 @@ class DataJobTest {
     assertEquals(result.warnings, rec.warnings)
   }
 
+  /** A cloud `jobRunOutput`, where v1 writes no record, is the run's one
+    * warning: the run succeeds, the warning names the path, and nothing is
+    * printed to standard error (plans/testing/18, decision 4). */
+  @Test def aCloudJobRunOutputIsAWarningAndPrintsNothing(): Unit = {
+    val inDir = tmpDir("dj-cloud-record-in-")
+    writeCsv(inDir, "events.csv", "id\n1\n")
+    val outDir = tmpDir("dj-cloud-record-out-")
+    val cloud = "gs://bucket/runs/job.json"
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.resolve("events.csv").toString, viewName = "events")),
+      sql = Seq(SQLTask(name = Some("t"),
+        sqlString = Some("SELECT id FROM events"),
+        outputFile = Some(OutputFilePath(outDir.resolve("t").toString)))),
+      jobRunOutput = Some(OutputFilePath(cloud)))
+    val err = new java.io.ByteArrayOutputStream
+    val previous = System.err
+    System.setErr(new java.io.PrintStream(err, true, java.nio.charset.StandardCharsets.UTF_8))
+    val result = try job.run() finally System.setErr(previous)
+    assertTrue(s"a warning never fails a run: ${result.tasks}", result.succeeded)
+    assertEquals(Seq(TaskStatus.Succeeded), result.tasks.map(_.status))
+    assertEquals(Seq(s"the job-run record was not written: '$cloud' is a cloud path, which v1 does not support"),
+      result.warnings)
+    assertEquals("nothing printed to standard error", "", err.toString(java.nio.charset.StandardCharsets.UTF_8))
+  }
+
   /** A task reading two inputs that fail to load is skipped naming the first
     * failure it met. The warnings name both, in declared order, so the other
     * failure is recorded too; and the run fails through the skipped task. */

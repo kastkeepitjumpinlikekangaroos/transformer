@@ -81,7 +81,7 @@ final case class DataJob(
     val (results, inputFailures, stopped) = runUnifiedDag(dag, executor, catalog, vars, listener)
     val runFinished = Instant.now()
 
-    val warnings = inputWarnings(dag, inputFailures) ++ runConsistencyChecks(results.toSeq)
+    val warnings = inputWarnings(dag, inputFailures) ++ runConsistencyChecks(results.toSeq) ++ cloudRecordWarning
     // The tasks alone decide the verdict: a warning never fails a run. A run
     // that stopped has a task that failed it.
     val succeeded = results.forall(_.succeeded)
@@ -895,7 +895,8 @@ final case class DataJob(
   }
 
   /** Build the per-job [[JobRunRecord]] and atomically write it to
-    * `jobRunOutput` (when configured). Each task's full record lives in its
+    * `jobRunOutput` (when configured, and not a cloud path, which v1 does not
+    * write: [[cloudRecordWarning]] says so). Each task's full record lives in its
     * own output directory; this file aggregates them with a `runFile`
     * pointer per task so the GUI can load one file to find everything, and
     * records the run's lineage: each input as it was read, and what each
@@ -910,11 +911,7 @@ final case class DataJob(
       succeeded: Boolean,
       errorMessage: Option[String],
       warnings: Seq[String]
-  ): Unit = jobRunOutput.foreach { ofp =>
-    if (ofp.isCloud) {
-      System.err.println(s"Cloud job-run paths not supported in v1; ignoring '${ofp.path}'.")
-      return
-    }
+  ): Unit = jobRunOutput.filterNot(_.isCloud).foreach { ofp =>
     try {
       val target = Paths.get(TemplateRenderer.render(ofp.path, vars))
       val inputNames = inputs.iterator.map(in => in.viewName.toLowerCase(Locale.ROOT) -> in.viewName).toMap
@@ -991,6 +988,14 @@ final case class DataJob(
         inputs = Some(inputRecords)
       ))
     } catch { case NonFatal(_) => () }
+  }
+
+  /** The run's warning that its job-run record was not written, when
+    * `jobRunOutput` is a cloud path: v1 writes none there. It is in the run's
+    * result, as every problem a run meets is (plans/robustness/08), and never
+    * on standard error; a warning never fails a run. */
+  private def cloudRecordWarning: Seq[String] = jobRunOutput.filter(_.isCloud).toSeq.map { ofp =>
+    s"the job-run record was not written: '${ofp.path}' is a cloud path, which v1 does not support"
   }
 
   /** `path` made absolute against the working directory, as the run reads and

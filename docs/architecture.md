@@ -1134,7 +1134,9 @@ that failed to load (`DataJob.inputWarnings`, see 3f), then
 disk, referenced `runFile` paths that don't exist, missing validation
 samples, etc. These are non-fatal — the run still `succeeded` if every task is
 Succeeded — but they surface in the GUI's run-log panel so the user
-notices.
+notices. A `jobRunOutput` that is a cloud path writes no manifest at all; the
+run's result carries a last warning saying so (`DataJob.cloudRecordWarning`),
+where it was a line on standard error before plans/testing/18.
 
 The manifest records the run's lineage too, for the data viewer: `inputs`
 (each `JobInputRecord`: the input's view name, its path rendered and made

@@ -1160,7 +1160,10 @@ of the box.
 
 v1: any cloud path triggers `UnsupportedOperationException` with a clear v1.1
 message. The cache directory layout (`./.transformer-cache/<sha1(path)>/`) is
-already in the design; v1.1 will populate it from GCS/S3.
+already in the design; v1.1 will populate it from GCS/S3. A cloud path as the
+job's run record (`jobRunOutput`) writes no `job.json`: the run carries a
+warning saying so (`the job-run record was not written: 'gs://...' is a cloud
+path, which v1 does not support`), and a warning never fails a run.
 
 ## SQL features
 
@@ -2250,7 +2253,8 @@ JDK 21 or newer (tested through JDK 25).
   5.5 billion polymarket orderbook rows (38 GB) runs in a 2 GB heap.
 - **Cloud paths recognized but unimplemented**: `gs://` and `s3://` paths are
   accepted by the config, and loading one raises a clear
-  `UnsupportedOperationException`. See [Cloud](#cloud-gs--s3).
+  `UnsupportedOperationException`; a cloud run-record path is a warning in the
+  run's result. See [Cloud](#cloud-gs--s3).
 - **A CSV glob's schema is inferred from its first 1000 rows**, read across its
   files in order. A later value that does not read as its column's type fails
   the read, naming the file, line, column and value; an explicit schema

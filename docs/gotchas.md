@@ -2930,6 +2930,11 @@ is a defect. Each is allowed in its rule's `held` list in
   (plans/testing/17). It moves when a thread runs, never a value, and is off
   unless the setting is set; it was written after the rule's plan, so no
   decision names it.
+- **R7: the leak audit's exit report.** `LeakAudit.exit`, under
+  `-Dtransformer.audit_leaks=true` only (plans/testing/17), prints what a JVM
+  left open to standard error and halts it with status 117, so Bazel fails the
+  target: a report at exit that no warning can carry. Written after the rule's
+  plan, so no decision names it.
 
 ## Answers that differ from other engines by design
 

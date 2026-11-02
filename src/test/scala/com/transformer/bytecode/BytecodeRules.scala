@@ -106,6 +106,14 @@ object BytecodeRules {
       case _ => false
     }, instead)
 
+  /** A member named `name` of any owner: an instance method is referenced
+    * through its receiver's static type (`java/io/IOException.printStackTrace`). */
+  def anyOwner(name: String, instead: String = ""): Ban =
+    Ban(s"*.$name", {
+      case Use.Reference(r, _) => r.name == name
+      case _ => false
+    }, instead)
+
   /** Two floats or doubles compared raw (`fcmpl`, `fcmpg`, `dcmpl`, `dcmpg`),
     * neither side a constant: `a < b`, `a == b` between two values. One side
     * a constant (`x > 0.0`, `x == 3`) is not this. */
@@ -206,6 +214,33 @@ object BytecodeRules {
       "on which of two strings comes first (docs/conventions.md, \"Anything that ORDERS values\").",
     allowed = Seq(Allow("com.transformer.sql.plan.Ops$", "cmp", "the one total order, where two strings compare")))
 
+  val R7Quiet: Rule = Rule("R7", "library code does not print, exit or sleep", Engine,
+    Seq(
+      member("java/lang/System", "out", instead = "a warning in the run's result, or an exception"),
+      member("java/lang/System", "err", instead = "a warning in the run's result, or an exception"),
+      anyOwner("printStackTrace", instead = "the exception, thrown or in the task's status"),
+      member("java/lang/System", "exit", instead = "an exception"),
+      member("java/lang/Runtime", "exit", instead = "an exception"),
+      member("java/lang/Runtime", "halt", instead = "an exception"),
+      member("scala/sys/package$", "exit", instead = "an exception"),
+      member("java/lang/Thread", "sleep", instead = "a wait on what is awaited"),
+      member("java/util/concurrent/TimeUnit", "sleep", instead = "a wait on what is awaited")) ++
+      membersInstead("scala/Console$", "a warning in the run's result", "println", "print", "printf", "out", "err") ++
+      membersInstead("scala/Predef$", "a warning in the run's result", "println", "print", "printf"),
+    advice = "The engine is a library: what a run meets is a warning in its result and its job.json, or an exception, " +
+      "never a line on standard output or error, which a program embedding it can neither see nor silence " +
+      "(plans/robustness/08: a warning never fails a run). It never ends the JVM, and never sleeps to wait. The CLI " +
+      "and the examples print and exit.",
+    allowed = Seq(
+      Allow("com.transformer.core.Faults$", "fire",
+        "plans/testing/06's fault hook: an armed halt says where it halts and ends the JVM, the crash it injects, " +
+          "only where a test armed it")),
+    held = Seq(
+      Allow("com.transformer.core.LeakAudit$", "exit",
+        "held: plans/testing/17's exit audit, on only under -Dtransformer.audit_leaks, prints what a JVM left open " +
+          "and halts it with status 117 so Bazel fails the target. Written after this rule's plan, so no decision " +
+          "names it")))
+
   val R9DateDoors: Rule = Rule("R9", "dates enter vectors through one door", Engine, Seq(
     member("java/time/LocalDate", "toEpochDay", instead = "DateVector.epochDay(d)"),
     member("java/time/Instant", "getEpochSecond", instead = "TimestampVector.epochMicros(i)"),
@@ -294,7 +329,7 @@ object BytecodeRules {
       "only where a test reaches.")
 
   val All: Seq[Rule] = Seq(R1Locale, R1DesktopFolds, R2FloatOrder, R3FloatKeyBits, R4StringOrder, R5Clock, R6Random,
-    R9DateDoors, R10Defaults)
+    R7Quiet, R9DateDoors, R10Defaults)
 
   // ---------------------------------------------------------------------------
   // Holding a rule
