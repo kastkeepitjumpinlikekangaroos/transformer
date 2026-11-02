@@ -700,6 +700,73 @@ six tables, Q10's four); Q19's join condition, an OR of three conjunctions each
 holding `p_partkey = l_partkey`, is no equality the planner hashes on, so its
 join is a nested loop.
 
+**The agreed corpus** (`src/test/slt/agreed/`,
+[plans/testing/14](../plans/testing/14-multi-engine-generated-corpus.md)) is
+queries the fuzz generators drew, each run in PostgreSQL, in DuckDB and in the
+engine, and kept where the two references give one answer and the engine gives
+it too, in every mode. SQLite's corpus predates window functions and CTEs and
+has no DECIMAL, DATE or TIMESTAMP, and the Postgres ports are a few hundred
+records written by hand; this one reaches what they do not, a script per
+feature of `fuzz/AgreedGen.Feature`: `window` (frames, ROWS and RANGE with
+numeric offsets, peers, `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG` and `LEAD`
+with defaults), `decimal` (arithmetic, comparison, `SUM`, `AVG`, `MIN`, `MAX`,
+`ROUND` and `TRUNC`), `outer_join`, `string` (`LENGTH`, `UPPER`, `LOWER`,
+`TRIM`, `SUBSTRING`, `CONCAT`, `||`, `LIKE`), `datetime` (comparison,
+`BETWEEN`, ordering, grouping, joins, casts to and from text),
+`cte_union_distinct` and `order_limit` (a top-n over every type).
+`//src/test/scala/com/transformer/slt:agreed_corpus` writes them (`AgreedCorpus`):
+`AgreedGen` draws a feature's cases, tables of at most 32 rows and eight
+queries each, from `QueryGen` and `MetaQueryGen` where those reach the feature
+and from their pools and node types where they do not; `fuzz/PortableSql`
+prints each query as one text the three read alike (every type spelled as all
+three read it, every operand that is an operator in parentheses, a literal's
+type written as a CAST, NULL placement on every `ORDER BY` key, `ESCAPE '\'`
+on every `LIKE`, `IF` as a `CASE`, a divisor `NULLIF(<divisor>, 0)`), and
+refuses a query outside what they share by their rules (arithmetic on a
+`FLOAT`, `ROUND` of a `DOUBLE`, a CAST of a fraction to an integer, a float's
+text, `MIN` of a `BOOLEAN`), counting why. The tool runs `psql` and `duckdb`
+from `PATH` as subprocesses, a Postgres session a case with its tables `TEMP`,
+a DuckDB process a query with `SET integer_division = true`, so neither
+reference is on any classpath, and the engine in process. Both answers are read
+into the engine's result types and compared by named rules, each listed in
+every script's header (`AgreedCorpus.Normalize`): NULL, booleans and integers
+by value; a DECIMAL by value at the engine's scale, kept where that is the
+references' value or, for a quotient or an average at the top of a column, the
+exact quotient rounded half away from zero, with DuckDB's quotients, which it
+computes in DOUBLE, agreeing to 15 significant digits and Postgres's digits
+written; a DOUBLE exactly when both give the same shortest value, else to 15
+significant digits as `T`, else not at all; text, dates, timestamps and bytes
+exactly. A query lands in one of: kept; by design, where the engine differs by
+a rule of the ledger (refused in the rule's words; `decimal-result-type`, where
+Postgres, given the query with each DECIMAL the engine computes rounded to the
+type the engine gives it, gives the engine's answer; `double-precision`, a
+statistic whose last digits the engine's DOUBLE arithmetic moves), written
+`skipif transformer <id>` with its twin; held, a finding already reported
+whose rule Postgres confirms the same way (`PortableSql.HeldRules`), not
+written; a finding, reported with its case and repro, not written; references
+disagree, dropped and counted; both error, written `statement error` where the
+engine refuses cleanly too. Every written record is run through the runner
+under every mode before it is written, so a record the engine answers in one
+mode and not another is a finding, not a script that fails. A feature takes
+its cases in seed order until it keeps its quota, so two runs over one checkout
+write the same bytes, whatever the threads. Regenerating needs a Postgres
+cluster (Homebrew's `postgresql@17`) and DuckDB:
+
+```bash
+initdb -D <scratch>/pg --locale=C --encoding=UTF8 -U postgres
+pg_ctl -D <scratch>/pg -o "-p 54329 -c listen_addresses=127.0.0.1 -c unix_socket_directories='' -c TimeZone=UTC" \
+    -l <scratch>/pg.log start
+bazel run //src/test/scala/com/transformer/slt:agreed_corpus -- --seeds 0:2000 --pg-port 54329 \
+    --psql "$(brew --prefix postgresql@17)/bin/psql" --report <scratch>/agreed-report.txt
+pg_ctl -D <scratch>/pg stop
+```
+
+(`--out` names another directory, `--features` some features, `--dry-run`
+writes nothing but the report.) Regeneration is deliberate, never in CI; a
+script is regenerated in place to re-triage after a decision changes, and its
+diff shows every record the decision moved, and another major version of
+either reference is a full re-triage, which the headers' versions show.
+
 **A skip cites the rule it follows, and fails once the rule no longer holds.**
 Each rule by which the engine answers otherwise than another engine is a row
 of the ledger, the table under ["Answers that differ from other engines by

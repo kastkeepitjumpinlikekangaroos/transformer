@@ -215,12 +215,20 @@ navigation hint, not a comprehensive directory listing.
   parse, the rewrites and what the engine lacks (`Rewrite`), the run of each
   record on the engine, and the rules that put a difference down to the ledger
   (`Rules`); see [extending.md](extending.md), "Importing a Spark test file".
-- `src/test/scala/com/transformer/fuzz/` (~13400 LOC) — the hand-rolled
+- `src/test/scala/com/transformer/slt/AgreedCorpus.scala` (~870 LOC) — the
+  tool that writes `src/test/slt/agreed/`: each case through `psql`, `duckdb`
+  and the engine, the normalization rules (`Normalize`), the triage
+  (`triage`, `decimalByDesign`, `doublePrecision`), each record run under every
+  mode before it is written, and the scripts and the report; see
+  [testing.md](testing.md#sql-logic-tests), "The agreed corpus".
+- `src/test/scala/com/transformer/fuzz/` (~18700 LOC) — the hand-rolled
   property-based testing harness (`Rng`, `Props`, `Shrinker`, `RowOracle`), the
   generators (`ExprGen`, `DataGen`, `QueryGen`, `MetaQueryGen` for SQL,
   `SqlTextGen` for SQL text, `JobDagGen` for whole jobs, `ParquetGen` (~730 LOC)
-  for parquet files parquet-mr writes, `CsvTextGen` for CSV data and text), and
-  the oracles under `oracle/` (`ExprParity`, `ModeDifferential`,
+  for parquet files parquet-mr writes, `CsvTextGen` for CSV data and text),
+  `PortableSql` (~700 LOC), which prints the generators' queries as SQL the
+  engine, Postgres and DuckDB read alike, `AgreedGen`, the agreed corpus's
+  cases per feature, and the oracles under `oracle/` (`ExprParity`, `ModeDifferential`,
   `MetaModeDifferential`, `Tlp`, `NoRec`, `JoinCommutativity`,
   `AggDecomposition`; `CleanRejection`, `NoSilentDrop` and `SyntaxEquivalence`
   for the frontend; `DagSchedule` for the job-level DAG scheduler; and

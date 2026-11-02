@@ -826,6 +826,39 @@ logical, so the plan holds under every whole-suite configuration; `EXPLAIN
 VERBOSE`'s physical section depends on the sharding settings and is no golden
 plan.
 
+**The agreed corpus** (`src/test/slt/agreed/`, written by
+`//src/test/scala/com/transformer/slt:agreed_corpus`, testing.md's "The agreed
+corpus") is regenerated, never edited by hand. Each change below regenerates
+under review, its diff showing every record it moved:
+
+- **A feature, or a feature's quota**: a `Feature` in
+  `fuzz/AgreedGen.scala`, its id the script's name and its quota the records
+  the tool keeps for it, and a producer in `AgreedGen.draw`.
+  Draw from `QueryGen` and `MetaQueryGen` where they reach the shape (filtered
+  by what the query reaches, as `readsDecimal` does); build it from their pools
+  and node types where they do not, as `window`, `decimal`, `text`, `temporal`
+  and `topN` do; a shape both generators should draw belongs in them (plans/testing/15).
+- **A normalization rule** (what counts as the references' one answer): a
+  named entry of `AgreedCorpus.Normalize.Rules`, which every script's header
+  lists, and its use in `Normalize.read` or
+  `AgreedCorpus.agree`. A looser rule turns a real difference into agreement,
+  so say in its text exactly what it lets through.
+- **A construct the three do not share**: an `Outside` in `fuzz/PortableSql`
+  naming why (Postgres has no such function, or the engines compute it each
+  their own way), which the report counts; never one the references agree on
+  and the engine answers otherwise, which is a finding or a ledger rule.
+- **A finding held for the user**: its id in `PortableSql.HeldRules`, and how
+  the engine-typed variant writes the engine's rule in Postgres's SQL (as
+  `concat-null` writes `CONCAT` as `||`), so the tool holds exactly the records
+  that rule explains and reports any other difference as new. Once the user
+  decides, the rule becomes a ledger row (the tool's by-design classification
+  then cites it, with its twin) or the engine changes; either way the held id
+  goes.
+- **A ledger rule the tool cites**: a refusal is found by its text; a value
+  rule needs a check that confirms it, as `decimalByDesign` asks Postgres for
+  the query with the engine's DECIMAL types written in, and `doublePrecision`
+  holds a statistic to 15 digits.
+
 ## Add a property / generator
 
 The property-based testing harness lives in `src/test/scala/com/transformer/fuzz/`

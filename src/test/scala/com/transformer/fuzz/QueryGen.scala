@@ -209,7 +209,7 @@ object QueryGen {
 
   // ---- query generation ---------------------------------------------------
 
-  private def genQuery(rng: Rng, schema: Schema): GenQuery =
+  private[fuzz] def genQuery(rng: Rng, schema: Schema): GenQuery =
     if (rng.bool(0.5)) genAggregateQuery(rng, schema) else genProjectQuery(rng, schema)
 
   private def genProjectQuery(rng: Rng, schema: Schema): ProjectQuery = {
@@ -833,7 +833,7 @@ object QueryGen {
     }
   }
 
-  private val WindowKeyDomains: Seq[(DataType, Seq[Any])] = Seq(
+  private[fuzz] val WindowKeyDomains: Seq[(DataType, Seq[Any])] = Seq(
     DataType.IntType -> (-2 to 4).map(i => i: Any),
     DataType.LongType -> (-2 to 4).map(i => i.toLong: Any),
     DataType.DoubleType -> Seq[Any](-1.5, 0.0, 0.5, 1.0, 2.5, Double.NaN, Double.PositiveInfinity, Double.NegativeInfinity),
@@ -867,7 +867,7 @@ object QueryGen {
   /** Two bounds SQL allows: a start that is not UNBOUNDED FOLLOWING, an end
     * that is not UNBOUNDED PRECEDING, and a start no later in the order of
     * kinds than its end. A RANGE offset needs an ORDER BY (`offsets`). */
-  private def genFrame(r: Rng, rows: Boolean, offsets: Boolean = true): GenFrame = {
+  private[fuzz] def genFrame(r: Rng, rows: Boolean, offsets: Boolean = true): GenFrame = {
     def offset(): java.math.BigDecimal =
       if (rows) java.math.BigDecimal.valueOf(r.between(0, 3).toLong)
       else new java.math.BigDecimal(r.oneOf(Seq("0", "1", "2", "1.5")))

@@ -469,7 +469,7 @@ object MetaQueryGen {
   private val StringPool: IndexedSeq[String] = IndexedSeq("a", "b", "c", "d", "")
   private val DoublePool: IndexedSeq[Double] = IndexedSeq(0.0, 0.5, 1.0, 2.0, -1.0, 10.0)
 
-  private def genEnv(rng: Rng): RelEnv = {
+  private[fuzz] def genEnv(rng: Rng): RelEnv = {
     val keyType = ExprGen.pick(rng, KeyTypes)
     val keyDomain = sharedKeyDomain(rng, keyType)
     val n = rng.between(2, 3)
@@ -562,7 +562,7 @@ object MetaQueryGen {
 
   // ---- query generation ---------------------------------------------------
 
-  private def genQuery(rng: Rng, env: RelEnv): MetaQuery = {
+  private[fuzz] def genQuery(rng: Rng, env: RelEnv): MetaQuery = {
     // CTEs are scanned by the outer query like tables. A CTE referenced twice is
     // materialized once by the engine, referenced once it is inlined — both
     // covered because the outer FROM draws CTE names from the same source pool as

@@ -122,6 +122,20 @@ scala_binary(
     deps = [":slt"],
 )
 
+# Writes src/test/slt/agreed/, the corpus of answers PostgreSQL and DuckDB
+# agree on (plans/testing/14): the fuzz generators' queries printed in the SQL
+# the three read alike (fuzz/PortableSql), run through psql and duckdb from
+# PATH as subprocesses and through the engine, and kept where the two agree
+# and the engine does too (docs/testing.md, "The agreed corpus"). Regenerating
+# needs a Postgres cluster and DuckDB, so no test runs it.
+scala_binary(
+    name = "agreed_corpus",
+    testonly = True,
+    main_class = "com.transformer.slt.AgreedCorpus",
+    jvm_flags = ["-Xmx2g"],
+    deps = [":slt"],
+)
+
 # Runs scripts given on the command line and reports every record that did
 # not pass; for audits over SQLite's corpus, not a gate.
 scala_binary(
