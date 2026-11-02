@@ -199,9 +199,14 @@ navigation hint, not a comprehensive directory listing.
 
 ### Test suites
 
-- `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` (~1220 LOC)
+- `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` (~2000 LOC)
   — the parity gate for every `Expr.evalVec` override. New overrides extend
   this first; see [testing.md](testing.md) for the coverage matrix.
+- `src/test/scala/com/transformer/slt/SparkImport.scala` (~810 LOC) — the
+  converter that writes `src/test/slt/spark/` from Spark's golden files: their
+  parse, the rewrites and what the engine lacks (`Rewrite`), the run of each
+  record on the engine, and the rules that put a difference down to the ledger
+  (`Rules`); see [extending.md](extending.md), "Importing a Spark test file".
 - `src/test/scala/com/transformer/fuzz/` (~13400 LOC) — the hand-rolled
   property-based testing harness (`Rng`, `Props`, `Shrinker`, `RowOracle`), the
   generators (`ExprGen`, `DataGen`, `QueryGen`, `MetaQueryGen` for SQL,

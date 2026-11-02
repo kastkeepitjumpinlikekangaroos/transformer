@@ -480,6 +480,13 @@ specific traps.
   decides a new rule adds its row and its pin, `onlyif transformer <id>` before
   a record of the engine's answer in a script of this repo's own. A skip that
   no longer diverges fails `slt_test`, so it goes when the engine changes.
+- **Vendored tests carry their license and provenance.** A port of another
+  project's tests (`src/test/slt/postgres/`, `src/test/slt/spark/`) keeps the
+  project's license text and notice in its directory (`COPYRIGHT`; `LICENSE`
+  and `NOTICE`), and each script's header names the source file, the commit it
+  was taken at, and that every answer is the other engine's. A script a
+  converter writes (`spark/`, by `slt:spark_import`) says so in its header and
+  is changed by changing the converter and regenerating, never by hand.
 - **Every file of a glob is read by its own column names.** A parquet file by
   its footer's, a CSV file by its header's, matched to the first file's names
   regardless of case; a file that names other columns is refused, naming both.

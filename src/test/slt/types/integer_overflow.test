@@ -121,3 +121,12 @@ SELECT CAST(2.7 AS INT), CAST(-2.7 AS INT)
 
 statement error
 SELECT CAST(CAST('NaN' AS DOUBLE) AS BIGINT)
+
+# / keeps its operands' type: integer division, its fraction dropped, for two
+# integers, and a FLOAT for two FLOATs, as in Postgres (Spark's / is always a
+# DOUBLE).
+onlyif transformer division-keeps-type
+query INT,BIGINT,INT,FLOAT
+SELECT 10 / 4, CAST(7 AS BIGINT) / 2, -7 / 2, CAST(1 AS FLOAT) / CAST(4 AS FLOAT)
+----
+2	3	-3	0.25

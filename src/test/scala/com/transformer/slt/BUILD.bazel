@@ -75,6 +75,17 @@ scala_junit_test(
     ],
 )
 
+# Ports Spark's SQLQueryTestSuite golden files to the scripts under
+# src/test/slt/spark/ (docs/extending.md, "Importing a Spark test file"); the
+# scripts are vendored, so no test runs it.
+scala_binary(
+    name = "spark_import",
+    testonly = True,
+    main_class = "com.transformer.slt.SparkImport",
+    jvm_flags = ["-Xmx2g"],
+    deps = [":slt"],
+)
+
 # Runs scripts given on the command line and reports every record that did
 # not pass; for audits over SQLite's corpus, not a gate.
 scala_binary(

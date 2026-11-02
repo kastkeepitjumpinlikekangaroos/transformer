@@ -652,11 +652,13 @@ edge values. Scripts live in `src/test/slt/<area>/<name>.test`; the format is in
 The scripts are picked up by glob, so no BUILD change is needed. A slice of
 SQLite's corpus goes under `src/test/slt/sqlite/`, cut at a record boundary with
 a header naming its source. A port of another engine's tests
-(`src/test/slt/postgres/`) keeps that engine's answers, never the engine's own:
-its header names the source file and commit and counts what it leaves out by
-kind, and each record names its source line and any rewrite (only one that
-cannot change the meaning). A port's new directory joins `LedgerTest.Ports`,
-which holds a port to the engine's answers in twins alone.
+(`src/test/slt/postgres/`, `src/test/slt/spark/`) keeps that engine's answers,
+never the engine's own: its header names the source file and commit and counts
+what it leaves out by kind, and each record names its source line and any
+rewrite (only one that cannot change the meaning). Its directory holds the
+source's license text and notice (`postgres/COPYRIGHT`, `spark/LICENSE` and
+`spark/NOTICE`). A port's new directory joins `LedgerTest.Ports`, which holds
+a port to the engine's answers in twins alone.
 
 Mark each record the engine answers otherwise by design with `skipif
 transformer <id>` on the line before it, the id of the rule it follows in the
@@ -681,6 +683,40 @@ compared exactly; one it printed to fewer digits (Postgres's float8 under
 a DOUBLE to 15, since `R` prints every integer digit of a large one; and one
 from a C math library function, whose last digit Java's need not share, as
 `R`, to three places.
+
+**Importing a Spark test file.** Spark's `SQLQueryTestSuite` files are ported
+by a converter rather than by hand, since one file can hold over a thousand
+records: `SparkImport` (`//src/test/scala/com/transformer/slt:spark_import`)
+reads each source's input (`inputs/<name>.sql`, for line numbers) and golden
+file (`results/<name>.sql.out`, every statement's schema and output under ANSI
+mode) and writes the scripts under `src/test/slt/spark/`. To add a file, add
+its `Source` to `SparkImport.Sources` (the script it goes to and the sentence
+its header describes it by), then run the converter over a checkout of Spark's
+`sql/core/src/test/resources/sql-tests` at the commit the scripts name:
+
+```bash
+bazel run //src/test/scala/com/transformer/slt:spark_import -- \
+    --sql-tests <spark>/sql/core/src/test/resources/sql-tests \
+    --commit <sha> --report /tmp/spark-report.txt
+```
+
+Clone Spark into a scratch directory as data, shallow and sparse (the
+`sql-tests` directories you need, `LICENSE` and `NOTICE`), and never run
+anything in it. The converter runs each record on the engine in the baseline:
+a record the engine answers as Spark does is kept; one it answers otherwise by
+a rule of the ledger (`SparkImport.Rules`, each reading both the SQL and both
+answers) is skipped under that rule, with its twin; one needing a type, a
+literal or a function the engine lacks is left out and counted
+(`Rewrite.lacks`); and one no rule explains, or that both engines refuse for
+different reasons, is held out and listed in the report, a finding for the
+user rather than a skip. The scripts are vendored, so read the report and the
+diff: each held record is a question, and each new skip should read as its
+rule. A new kind of divergence gets a rule only from a decision, with its
+ledger row and pin. Changing the converter regenerates every script; the
+commit carries the new scripts with it. A file's records keep Spark's answers,
+`slt_test` runs them under every mode, and a rewrite the converter does not
+already make (`SparkImport.Rewrite`) is a change to the converter, named in
+each record it touches and in the script's header.
 
 A **golden plan** pins the plan a query gets, where a planner change could
 keep its answer and lose what makes it fast (a join that stops hashing, a

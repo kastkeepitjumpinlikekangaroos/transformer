@@ -217,3 +217,45 @@ statement error
 SELECT a, SUM(b) OVER (PARTITION BY 1 + 0) FROM t
 ----
 PARTITION BY 1 + 0 reads no column, so it partitions nothing
+
+onlyif transformer refused-text-comparison
+statement error
+SELECT a FROM t WHERE a = s
+----
+Cannot compare INT with STRING; only a string literal is read as an INT, so CAST the expression to INT, or the INT to STRING to compare text
+
+onlyif transformer refused-text-comparison
+statement error
+SELECT CAST(a AS DECIMAL(10,0)) = '1' FROM t
+----
+Cannot compare DECIMAL(10,0) with STRING
+
+onlyif transformer refused-text-branch
+statement error
+SELECT CASE WHEN a > 1 THEN a ELSE s END FROM t
+----
+CASE cannot mix INT and STRING; only a string literal is read as an INT, so CAST the STRING to INT, or the INT to STRING
+
+onlyif transformer refused-date-beside-timestamp
+statement error
+SELECT a FROM t WHERE DATE '2026-01-01' = TIMESTAMP '2026-01-01 00:00:00'
+----
+Cannot compare DATE with TIMESTAMP; CAST one side: a DATE as a TIMESTAMP is its midnight, a TIMESTAMP as a DATE its date in UTC
+
+onlyif transformer refused-decimal-beside-float
+statement error
+SELECT CAST(a AS DECIMAL(10,0)) + CAST(b AS DOUBLE) FROM t
+----
+Arithmetic on DECIMAL(10,0) and DOUBLE is not supported: a DOUBLE has no scale for a DECIMAL result to keep; CAST the DECIMAL to DOUBLE to compute in DOUBLE
+
+onlyif transformer refused-implicit-text
+statement error
+SELECT a || 'x' FROM t
+----
+|| on INT is not supported; CAST it to STRING
+
+onlyif transformer refused-implicit-number
+statement error
+SELECT ABS(s) FROM t
+----
+ABS on STRING is not supported; CAST it to a number

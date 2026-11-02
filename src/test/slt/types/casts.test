@@ -41,3 +41,12 @@ statement error
 SELECT CAST(' 5' AS DOUBLE)
 ----
 Cannot cast ' 5' to double
+
+# A string literal beside a value of another type is read as that type when
+# the query is bound: '1' + i over an INT is an INT, beside a FLOAT a FLOAT,
+# beside a BIGINT a BIGINT (Spark reads the text as a BIGINT or a DOUBLE).
+onlyif transformer text-literal-typed
+query INT,FLOAT,BIGINT,BOOLEAN
+SELECT '1' + CAST(1 AS INT), '1' + CAST(1 AS FLOAT), CAST(1 AS BIGINT) * '3', CAST(1 AS INT) < '10'
+----
+2	2.0	3	true

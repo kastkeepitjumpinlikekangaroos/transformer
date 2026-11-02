@@ -100,7 +100,7 @@ object LedgerTest {
   private val Root: Path = Paths.get("src/test/slt")
 
   /** The directories of ports, scripts with another engine's answers. */
-  private val Ports = Set("sqlite", "postgres")
+  private val Ports = Set("sqlite", "postgres", "spark")
 
   private def isPort(name: String): Boolean = Ports.contains(name.takeWhile(_ != '/'))
 
