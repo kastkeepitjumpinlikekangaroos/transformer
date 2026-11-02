@@ -1998,6 +1998,17 @@ ship a fix or move something from "not done" to "done".
   SUMs over edge values to the exact answer worked out in `BigInt`, and failed
   at seed 0 at the code before. See
   [plans/robustness/18](../plans/robustness/18-integer-overflow-wraps.md).
+- **A global aggregate fails on its data while its query is planned, not
+  while it is drained.** `SqlEngine.execute` runs an aggregate with no GROUP BY
+  eagerly (`HashAggregateExec.executeCollapsing`), so a `SUM` past a BIGINT
+  throws from `execute` itself, where a grouped aggregate's or a projection's
+  failure throws from the drain. A test that reads an exception around
+  `execute` as a bind rejection and one around the drain as a failure on the
+  data misfiles the first, and some failures on the data are
+  `IllegalArgumentException`s, as a bind rejection is. The fuzz oracles run a
+  query through `RelEngine.answer`, which takes both in one place and tells a
+  failure on the data (`CleanRejection.isDataError`) by its message
+  (plans/testing/15 W7, where `AggDecomposition` first met it).
 - **RANGE frames, the default frame among them, used to run as ROWS —
   fixed.** `WindowExec.frameBoundsFor` mapped every bound to a row offset
   whatever the frame type, so `SUM(x) OVER (PARTITION BY g ORDER BY k)`, whose
@@ -2810,6 +2821,15 @@ choose it, and "since v1" one the engine has had from the start.
 | `refused-parquet-timestamp-range` | A parquet `TIMESTAMP(MILLIS)` or `INT96` value with no microsecond value, more than about 292,000 years from 1970, fails the read, naming the file and the column, where pyarrow reads an `INT96` as nanoseconds. | `past the range of a timestamp in microseconds` | [README](../README.md#parquet), "A parquet `TIMESTAMP` reads as the instant it stores" | `MILLIS` by [robustness/03](../plans/robustness/03-parquet-external-format-fidelity.md), 2026-10-03; `INT96` by [robustness/25](../plans/robustness/25-dates-past-the-storable-range.md), 2026-10-31 | `src/test/data/parquet-testing/MANIFEST` |
 
 ## What's intentionally NOT done
+
+- **The fuzz corpora draw no FLOAT or DOUBLE at the ends of its range.**
+  Integers, decimals, dates and timestamps take their types' edges on a share
+  of datasets (`DataGen.Edges`, plans/testing/15 W7), and the layout relations
+  hold every layout to fail alike on them. A float `SUM` near the end of the
+  range overflows to an infinity or not as the rows arrive (`MAX + MAX - MAX`
+  is an infinity in one order and `MAX` in another), and no layout relation
+  can call those equal, so the float pools stay where they are: NaN, -0.0 and
+  the infinities, but no finite value that sums past the range.
 
 - **Join order has no cost model.** `JoinOrder` keeps the written order but
   where the next table has no equality with those joined so far, so it never

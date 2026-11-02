@@ -22,6 +22,10 @@ import com.transformer.fuzz.SqlRender
   * Empty-relation edge: `COUNT(*) WHERE p` is `0`, while `SUM(...)` over no rows
   * is SQL NULL — both normalize to `0` here ([[RelEngine.scalarLong]] maps the
   * NULL to `None`), so the relation still holds.
+  *
+  * Where either side fails on its data, the relation checks nothing: `p` is
+  * a WHERE condition on the left, which the optimizer may split and reorder,
+  * and decision 1 of plans/testing/15 promises no more of one.
   */
 object NoRec {
 
@@ -34,10 +38,13 @@ object NoRec {
     val filtered = s"SELECT COUNT(*) AS c FROM $from WHERE $p"
     val summed = s"SELECT SUM(CASE WHEN $p THEN 1 ELSE 0 END) AS c FROM $from"
 
-    val filteredRows =
-      try RelEngine.runRows(catalog, filtered, ExecutionOptions.Default)
+    val byFilter =
+      try RelEngine.answer(catalog, filtered, ExecutionOptions.Default)
       catch { case e: IllegalArgumentException => return RelEngine.Rejected(RelEngine.rejectReason(e)) }
-    val summedRows = RelEngine.runRows(catalog, summed, ExecutionOptions.Default)
+    val (filteredRows, summedRows) = (byFilter, RelEngine.answer(catalog, summed, ExecutionOptions.Default)) match {
+      case (Right(f), Right(s)) => (f.rows, s.rows)
+      case _ => return RelEngine.Skipped
+    }
 
     val byWhere = RelEngine.scalarLong(filteredRows).getOrElse(0L)
     val bySum = RelEngine.scalarLong(summedRows).getOrElse(0L)

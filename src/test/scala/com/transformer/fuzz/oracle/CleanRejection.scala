@@ -190,6 +190,21 @@ object CleanRejection {
     """^SUBSTRING's length -\d+ is negative$""".r,
     """^\S+ is past the range of a (?:DATE|TIMESTAMP), about .+ either side of 1970$""".r)
 
+  /** Whether `message` is a run-time failure about a value ([[DataErrors]]). */
+  def isDataMessage(message: String): Boolean =
+    message != null && DataErrors.exists(_.findFirstIn(message).isDefined)
+
+  /** Whether `t`, or a cause of it, is a failure about a value: an
+    * `IllegalArgumentException` or `ArithmeticException` whose message is one
+    * of [[DataErrors]]. The layout and metamorphic oracles accept such a
+    * failure by decision 1 of plans/testing/15: every layout must agree on
+    * whether a query fails on its data, but where the failure can come from a
+    * WHERE or ON condition the optimizer may move. */
+  def isDataError(t: Throwable): Boolean = causes(t).exists {
+    case e @ (_: IllegalArgumentException | _: ArithmeticException) => isDataMessage(e.getMessage)
+    case _ => false
+  }
+
   /** SQL's own vocabulary, which a message may name a construct by even when
     * the query does not spell it that way (`Only SELECT statements are
     * supported` for an INSERT). */

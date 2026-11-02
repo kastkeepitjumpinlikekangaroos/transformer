@@ -1,9 +1,10 @@
 package com.transformer.fuzz.oracle
 
-import com.transformer.core.{Catalog, ColumnarBatch, ExecutedQuery, ExecutionOptions}
+import com.transformer.core.{Catalog, ColumnarBatch, ExecutedQuery, ExecutionOptions, Schema}
 import com.transformer.sql.exec.SqlEngine
 
 import scala.collection.mutable
+import scala.util.control.NonFatal
 
 /** Shared engine-run helpers for the metamorphic oracles (`Tlp`, `NoRec`,
   * `MetaModeDifferential`, `JoinCommutativity`, `AggDecomposition`): run a SQL
@@ -62,6 +63,29 @@ object RelEngine {
     * cell (e.g. `SUM` over an empty relation) to `None`. */
   def scalarLong(rows: Vector[Array[Any]]): Option[Long] =
     rows.headOption.flatMap(r => Option(r(0))).map(_.asInstanceOf[Number].longValue)
+
+  /** A query's answer: its schema and every row it returned. */
+  final case class Answer(schema: Schema, rows: Vector[Array[Any]])
+
+  /** `sql` run under `opts` to its last row, or the message of the failure on
+    * its data it stopped with (`CleanRejection.isDataError`), whether the
+    * drain met it or planning did: a global aggregate runs as its query is
+    * planned. A rejection at bind or plan time is thrown, as the
+    * `IllegalArgumentException` it is, and so is any other failure. `after`
+    * sees the query once it is drained. */
+  def answer(catalog: Catalog, sql: String, opts: ExecutionOptions,
+      after: ExecutedQuery => Unit = _ => ()): Either[String, Answer] =
+    try {
+      val q = execute(catalog, sql, opts)
+      val rows = collectRows(q)
+      after(q)
+      Right(Answer(q.schema, rows))
+    } catch { case NonFatal(e) if CleanRejection.isDataError(e) => Left(dataMessage(e)) }
+
+  /** The message of the failure about a value `e` carries, itself or a
+    * cause. */
+  def dataMessage(e: Throwable): String =
+    CleanRejection.causes(e).map(_.getMessage).find(CleanRejection.isDataMessage).getOrElse(String.valueOf(e.getMessage))
 
   def rejectReason(e: IllegalArgumentException): String = {
     val m = Option(e.getMessage).getOrElse(e.getClass.getName)

@@ -36,11 +36,17 @@ import com.transformer.sql.plan._
   *     a `NOT` over anything but a leaf are the exceptions, rendered with the
   *     parentheses their shape needs (see [[SqlRender]]).
   *
-  *   - '''Total by construction.''' Like [[ExprGen]], nothing here can throw for
-  *     in-range input: casts are numeric->numeric or anything->string (never the
-  *     string->numeric parse that can throw), and integer divide-by-zero returns
-  *     NULL, as a NULL `ROUND` scale or `SUBSTRING` position does. So a query
-  *     that binds also runs, in every mode.
+  *   - '''Fails only on its data.''' A query that binds also runs, in every
+  *     mode, but where its data makes it fail: a dataset at the edges
+  *     (`DataGen.Edges`) overflows arithmetic, a SUM and a CAST, a float read
+  *     as an integer unguarded fails on NaN and the infinities
+  *     ([[genNumericCast]]), and a column's text read as another type fails
+  *     where the type does not read it ([[genTextCast]]), under an IN, in a
+  *     comparison and in an aggregate (plans/testing/15 W7). Every mode must
+  *     then fail alike, but where a WHERE condition that can fail is there to
+  *     move ([[GenQuery.movableFailure]], decision 1). Integer division by
+  *     zero returns NULL, as a NULL `ROUND` scale or `SUBSTRING` position
+  *     does.
   *
   * Excluded so the result multiset stays mode-invariant: `RAND()` and the clock
   * functions (`CURRENT_DATE`/`CURRENT_TIMESTAMP`) — each execution of a query
@@ -92,6 +98,28 @@ object QueryGen {
       * the oracle's sortedness sub-check. Always projected, so present in the
       * output schema by name. */
     def orderBy: Vector[OrderKey]
+    /** The WHERE, the one condition the optimizer may move. */
+    def where: Option[Expr]
+    /** Whether the query's WHERE can fail on its data ([[mayFail]]). Where it
+      * can, the optimizer may evaluate it on rows the written order of its
+      * conditions would not, so layouts may part on whether the query fails
+      * at all; decision 1 of plans/testing/15 holds them to agree on it
+      * everywhere else. */
+    def movableFailure: Boolean = where.exists(mayFail)
+  }
+
+  /** Whether `e` can fail on a value of its data: arithmetic past its type, a
+    * negation, a CAST that cannot read or hold its input, or a function the
+    * catalog says raises an error while running (`ABS` of the smallest
+    * integer, a rounding past its type, a negative `SUBSTRING` length, `SIGN`
+    * of NaN). Over-approximate: a node of these kinds may fail whatever its
+    * operands are. */
+  def mayFail(e: Expr): Boolean = e match {
+    case BinOpExpr("+" | "-" | "*" | "/" | "%", _, _, _) => true
+    case UnaryOpExpr("-", _, _) => true
+    case _: CastExpr | _: DecimalCastExpr => true
+    case FuncExpr(name, _, _) if name == "MOD" || FunctionCatalog.lookup(name).exists(_.errors.nonEmpty) => true
+    case other => Shrinker.childrenOf(other).exists(mayFail)
   }
 
   /** One ORDER BY key. `nullsFirst` is an explicit `NULLS FIRST` /
@@ -338,6 +366,17 @@ object QueryGen {
       options += ((3, () => Sum(numericArg(rng, schema, numeric))))
       options += ((3, () => Avg(numericArg(rng, schema, numeric))))
     }
+    // SUM, MIN or MAX of a CAST that can fail, which the aggregate evaluates
+    // as it reads each row: an INT, a BIGINT or a DECIMAL that a SUM adds
+    // exactly, or any type a CAST reads text as.
+    options += ((1, () => {
+      val target = ExprGen.pick(rng, Seq(DataType.IntType, DataType.LongType) ++ ExprGen.DecimalTypes)
+      Sum(genFailingCast(rng, schema, target, 2))
+    }))
+    options += ((1, () => {
+      val target = ExprGen.pick(rng, TextCastTargets)
+      if (rng.bool()) Min(genFailingCast(rng, schema, target, 2)) else Max(genFailingCast(rng, schema, target, 2))
+    }))
     if (integral.nonEmpty) {
       // Statistical aggregates over integral columns only: exact, well-conditioned
       // inputs keep cross-layout reordering well inside the float tolerance.
@@ -379,7 +418,7 @@ object QueryGen {
     }
   }
 
-  // ---- expression generation (paren-free, total) --------------------------
+  // ---- expression generation (paren-free) ----------------------------------
 
   private def leafProb(depth: Int): Double = if (depth <= 1) 0.5 else 0.25
   private val NullLitProb = 0.1
@@ -407,18 +446,70 @@ object QueryGen {
     else LitExpr(genLitValue(rng, target), target)
   }
 
-  /** `CAST(source AS target)`, which fails on no row of the corpus: a FLOAT
-    * or DOUBLE source meets an integer target only where its magnitude is
-    * finite and in range, `CAST(CASE WHEN ABS(x) < 1e9 THEN x END AS BIGINT)`,
-    * since NaN and an infinity have no integer value (an error since
-    * plans/robustness/18) and DataGen draws both into a quarter of the float
-    * columns. Every other numeric cast holds the corpus's small values. */
+  /** `CAST(source AS target)`. A FLOAT or DOUBLE source meets an integer
+    * target where its magnitude is finite and in range,
+    * `CAST(CASE WHEN ABS(x) < 1e9 THEN x END AS BIGINT)`, since NaN and an
+    * infinity have no integer value (an error since plans/robustness/18) and
+    * DataGen draws both into a quarter of the float columns, but on
+    * [[FailingCastProb]] of them unguarded, which fails on those rows. A
+    * BIGINT cast to an INT fails on a dataset at the edges
+    * (`DataGen.Edges`). */
   private def genNumericCast(rng: Rng, source: Expr, target: DataType): Expr =
-    if (DataType.isIntegral(target) && (source.dataType == DataType.FloatType || source.dataType == DataType.DoubleType)) {
+    if (DataType.isIntegral(target) && (source.dataType == DataType.FloatType || source.dataType == DataType.DoubleType) &&
+        !rng.bool(FailingCastProb)) {
       val inRange = BinOpExpr("<", FuncExpr("ABS", Seq(source), source.dataType), LitExpr(1.0e9, DataType.DoubleType),
         DataType.BooleanType)
       CastExpr(CaseExpr(Seq((inRange, source)), None, source.dataType), target)
     } else CastExpr(source, target)
+
+  /** How often a CAST that can fail on its input is drawn where one that
+    * cannot would be: a float to an integer unguarded ([[genNumericCast]]),
+    * and text read as another type ([[genTextCast]]). */
+  private val FailingCastProb = 0.3
+
+  /** `CAST(s AS target)` of a string, which fails on the rows whose text
+    * `target` does not read: every type but STRING and BINARY, a DECIMAL as
+    * the query writes one. The text is a column's: mostly a value's own,
+    * `CAST(x AS STRING)`, of `target`'s type, which reads back but at the
+    * edges (a year past 9999 is written with its sign), or of another, whose
+    * text may not read (`2.5` as an INT, a TIMESTAMP's as a DATE); else a
+    * string column, which fails on every row but those of a column of
+    * `DataGen.Edges.CastText`, text some types read and others do not. Never
+    * a literal, which the binder would fold, and fail, before any row is
+    * read. Where no column has text, a value of `target` instead. */
+  private def genTextCast(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
+    def columns(p: DataType => Boolean): Vector[Int] = (0 until schema.length).filter(i => p(schema.fields(i).dataType)).toVector
+    val own = columns(_ == target)
+    val other = columns(t => t != target && t != DataType.StringType && t != DataType.BinaryType)
+    val strings = columns(_ == DataType.StringType)
+    val sources = scala.collection.mutable.ArrayBuffer.empty[(Int, () => Expr)]
+    if (own.nonEmpty) sources += ((3, () => CastExpr(colRef(schema, rng.oneOf(own)), DataType.StringType)))
+    if (other.nonEmpty) sources += ((2, () => CastExpr(colRef(schema, rng.oneOf(other)), DataType.StringType)))
+    if (strings.nonEmpty) sources += ((1, () => colRef(schema, rng.oneOf(strings))))
+    if (sources.isEmpty) genValue(rng, schema, target, depth)
+    else {
+      val text = rng.weighted(sources.toSeq: _*)()
+      target match {
+        case d: DataType.DecimalType => DecimalCastExpr(text, d)
+        case t => CastExpr(text, t)
+      }
+    }
+  }
+
+  /** The types [[genTextCast]] reads text as. */
+  private val TextCastTargets: Seq[DataType] =
+    Seq(DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType, DataType.BooleanType,
+      DataType.DateType, DataType.TimestampType) ++ ExprGen.DecimalTypes
+
+  /** A CAST that can fail on its input, of a type [[TextCastTargets]] holds:
+    * text read as it, or for an integer, a float column unguarded. */
+  private def genFailingCast(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
+    val floats = (0 until schema.length).filter { i =>
+      schema.fields(i).dataType == DataType.FloatType || schema.fields(i).dataType == DataType.DoubleType
+    }.toVector
+    if (DataType.isIntegral(target) && floats.nonEmpty && rng.bool(0.4)) CastExpr(colRef(schema, rng.oneOf(floats)), target)
+    else genTextCast(rng, schema, target, depth)
+  }
 
   private def genNumericExpr(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     def sub(t: DataType): Expr = genValue(rng, schema, t, depth - 1)
@@ -432,6 +523,7 @@ object QueryGen {
       1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
       1 -> (() => genCase(rng, schema, target, depth)),
       1 -> (() => genNumericCast(rng, sub(rng.oneOf(Numerics)), target)),
+      1 -> (() => genTextCast(rng, schema, target, depth)),
       1 -> (() => FuncExpr("MOD", Seq(sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics))), target)),
       1 -> (() => genExtreme(rng, target, sub)))
     val extra: Seq[(Int, () => Expr)] = target match {
@@ -581,12 +673,18 @@ object QueryGen {
         4 -> (() => genDecimalArith(rng, schema, target, decimalCols, depth)),
         5 -> (() => genDecimalBranches(rng, schema, target, decimalCols, depth)),
         1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
-        1 -> (() => genWrittenDecimalCast(rng, schema, d)))
+        1 -> (() => genWrittenDecimalCast(rng, schema, d)),
+        1 -> (() => genTextCast(rng, schema, target, depth)))
       case d: DataType.DecimalType => Seq(
         1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
-        1 -> (() => genWrittenDecimalCast(rng, schema, d)))
-      case DataType.DateType => Seq(1 -> (() => CastExpr(sub(DataType.TimestampType), target)))
-      case DataType.TimestampType => Seq(1 -> (() => CastExpr(sub(DataType.DateType), target)))
+        1 -> (() => genWrittenDecimalCast(rng, schema, d)),
+        1 -> (() => genTextCast(rng, schema, target, depth)))
+      case DataType.DateType => Seq(
+        1 -> (() => CastExpr(sub(DataType.TimestampType), target)),
+        1 -> (() => genTextCast(rng, schema, target, depth)))
+      case DataType.TimestampType => Seq(
+        1 -> (() => CastExpr(sub(DataType.DateType), target)),
+        1 -> (() => genTextCast(rng, schema, target, depth)))
       case _ => Seq.empty
     }
     rng.weighted(base ++ extra: _*)()
@@ -749,7 +847,21 @@ object QueryGen {
     if (binaryCols.nonEmpty) options += ((2, () =>
       BinOpExpr(rng.oneOf(RelOps), sub(DataType.BinaryType), sub(DataType.BinaryType), DataType.BooleanType)))
     options += ((1, () => LitExpr(rng.bool(), DataType.BooleanType)))
+    // A CAST that can fail, under an IN and read as a condition itself.
+    options += ((1, () => genCastIn(rng, schema, depth)))
+    options += ((1, () => genTextCast(rng, schema, DataType.BooleanType, depth)))
     rng.weighted(options.toSeq: _*)()
+  }
+
+  /** `CAST(...) [NOT] IN (...)` over a CAST that can fail
+    * ([[genFailingCast]]), whose items are literals of its type and now and
+    * then a NULL. */
+  private def genCastIn(rng: Rng, schema: Schema, depth: Int): Expr = {
+    val target = ExprGen.pick(rng, TextCastTargets.filterNot(_ == DataType.BooleanType))
+    val items = (0 until rng.between(1, 3)).map { _ =>
+      if (rng.bool(0.15)) LitExpr(null, target) else LitExpr(genLitValue(rng, target), target)
+    }
+    InListExpr(genFailingCast(rng, schema, target, depth), items, rng.bool())
   }
 
   /** The other side of a comparison with a DATE or TIMESTAMP: an expression of

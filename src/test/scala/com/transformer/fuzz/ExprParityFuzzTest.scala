@@ -141,13 +141,16 @@ class ExprParityFuzzTest {
     * corpus that never produces the values that break them, so both halves are
     * measured. Prints the tally for the PR.
     *
-    * The block is 8000 seeds: drawing the catalog's every function (the math
+    * The block is 13000 seeds: drawing the catalog's every function (the math
     * functions, `GREATEST` and `LEAST`) left a float operand fewer draws, and
     * over 40000 seeds the shapes fell from 3.9% and 1.15% of seeds to 3.55%
     * and 1.06%; at 4000 seeds the rarest value, -0.0 in an IN list, had come
-    * within two seeds of its bound before the change too. */
+    * within two seeds of its bound before the change too; and the failing
+    * CASTs of plans/testing/15 W7 left 15 of 8000. Measured over these
+    * seeds: an ordering 435 (NaN 56, -0.0 52), an IN list 91 (NaN 24, -0.0
+    * 25). */
   @Test def generatorReachesIeeeSpecialValues(): Unit = {
-    val n = 8000
+    val n = 13000
     var ordShape, ordNan, ordNegZero, inShape, inNan, inNegZero = 0
     var seed = 0
     while (seed < n) {
@@ -248,15 +251,16 @@ class ExprParityFuzzTest {
     * declared scale and divisors of zero reach it too (the value), since a
     * corpus of exact answers over nonzero divisors would leave
     * `Decimals.arith`'s rounding and its NULL untested on the vector path.
-    * 60000 seeds: 40000 since sides drawn for a narrower DECIMAL an answer is
+    * 72000 seeds: 40000 since sides drawn for a narrower DECIMAL an answer is
     * cast to (which rounds it, and fails past its integer digits) made
-    * rounding rarer, and 60000 since the generator drew the catalog's every
-    * function, which left decimal arithmetic about a third fewer draws.
-    * Measured over these seeds: `+` 541, `-` 614, `*` 572, `/` 599, `%` 573,
-    * negation 369; an answer that rounded 188, a zero divisor 131. Each bound
+    * rounding rarer, 60000 since the generator drew the catalog's every
+    * function, which left decimal arithmetic about a third fewer draws, and
+    * 72000 since the failing CASTs of plans/testing/15 W7 took a share too.
+    * Measured over these seeds: `+` 565, `-` 546, `*` 547, `/` 594, `%` 539,
+    * negation 360; an answer that rounded 211, a zero divisor 130. Each bound
     * sits about 3x below the smallest count it covers. */
   @Test def decimalArithmeticRoundsAndMeetsZeroDivisors(): Unit = {
-    val n = 60000
+    val n = 72000
     val ops = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
     var rounded, byZero = 0
     var seed = 0
@@ -331,16 +335,49 @@ class ExprParityFuzzTest {
     assertTrue(s"a CAST to DECIMAL rarely overflows, $report", overflowed > 28)
   }
 
+  /** Coverage guard: each kind of CAST that can fail on its input
+    * (`ExprGen.FailingCastKinds`: text read as another type, a float as an
+    * integer or a DECIMAL, a DATE as a TIMESTAMP) is drawn, and fails on
+    * some row of its batch, where `ExprParity` holds both paths to fail
+    * alike. Prints the tally. */
+  @Test def failingCastsAreDrawnAndFail(): Unit = {
+    val n = 40000
+    val shape = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    val fails = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    var seed = 0
+    while (seed < n) {
+      ExprGen.failingCastCoverage(ExprGen.generate(new Rng(seed.toLong))).foreach { case (kind, failed) =>
+        shape(kind) += 1
+        if (failed) fails(kind) += 1
+      }
+      seed += 1
+    }
+    val report = ExprGen.FailingCastKinds.map(k => s"$k: drawn ${shape(k)}, fails ${fails(k)}").mkString("; ")
+    println(s"[expr-parity] failing CASTs over $n seeds: $report")
+    // Measured over 20000 seeds: text drawn 1654, failing 1346; a float to an
+    // integer 469 and 94; a float to a DECIMAL 113 and 19; a DATE to a
+    // TIMESTAMP 228 and 36. This block is twice that; bounds ~3x below it.
+    val floors = Map("text" -> (1100, 900), "float to integer" -> (310, 62), "float to decimal" -> (75, 12),
+      "date to timestamp" -> (150, 24))
+    ExprGen.FailingCastKinds.foreach { k =>
+      val (drawn, failing) = floors(k)
+      assertTrue(s"a $k CAST is rarely drawn, $report", shape(k) > drawn)
+      assertTrue(s"a $k CAST rarely fails, $report", fails(k) > failing)
+    }
+  }
+
   /** Coverage guard: every function the catalog binds as a call
     * (`FunctionCatalog`'s scalar and flow entries) is drawn, each on a share
     * of the block. The generator draws its functions from the catalog by
     * what they take and return, so a function added there is fuzzed the day
     * it lands, and one the generator cannot type fails here. Prints the
     * tally. The rarest are the two dozen functions that return a DOUBLE
-    * whatever they are given, each on 30 to 55 of these 40000 seeds, so the
-    * block is the campaign's and the bound sits 3x below. */
+    * whatever they are given, each on 30 to 65 of these 46000 seeds, so the
+    * block is the campaign's and the bound sits 3x below; 46000 since the
+    * failing CASTs of plans/testing/15 W7 took a share of the numbers, which
+    * left LN 27 of 40000. */
   @Test def everyCatalogFunctionIsDrawn(): Unit = {
-    val n = 40000
+    val n = 46000
     val drawn = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
     var seed = 0
     while (seed < n) {

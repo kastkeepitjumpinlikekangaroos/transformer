@@ -1970,6 +1970,19 @@ seventh over generated text:
   must be refused or keep its meaning in every context; two spellings must
   agree. Known defects are recorded in the oracles with their plans and repros.
 
+**A query that fails on its data.** The generators draw values at their
+types' edges and CASTs that can fail, so a generated query may stop on an
+integer overflow, a decimal past its precision, a date past a TIMESTAMP's range
+or text a CAST cannot read (`CleanRejection.DataErrors`). The layout and
+metamorphic relations hold every layout to agree on whether a query fails and,
+where it answers, on the answer, but where the failure can come from a WHERE or
+ON condition the optimizer may move (`QueryGen.mayFail`, `movableFailure`), since
+pushing a filter into a join or reordering joins evaluates a condition on other
+rows; TLP checks nothing when the query fails, and which failure a layout
+reports is never compared (decision 1 of plans/testing/15). `RelEngine.answer`
+returns a failure on the data wherever it is met: in the drain, or while
+planning, since a global aggregate runs as its query is planned.
+
 Every generator draws all ten of the engine's value types, and every oracle
 compares with the engine's own equality rather than the JVM's (`RowOracle`): a
 byte array by content, a decimal by value whatever its scale. Each property

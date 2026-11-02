@@ -13,23 +13,25 @@ import com.transformer.sql.plan._
   *     `dataType` equals the target, so a generator bug surfaces as its own
   *     error rather than masquerading as an engine divergence.
   *
-  *   - '''Total by construction.''' The generator never builds a tree that can
-  *     throw for in-range, type-correct input, so the property reduces to
-  *     "every row agrees, and neither path throws" (the precedent
-  *     `ExprBatchTest` is likewise total). Concretely it avoids the engine's
-  *     partial shapes: `RAND()` (no parity meaning — drawn only with a seed,
-  *     which makes it one value), casts
-  *     that parse (`String ->` numeric/boolean/date/timestamp, `Boolean ->`
-  *     float/double), and a cast from FLOAT or DOUBLE to DECIMAL (`NaN` and the
-  *     infinities have no decimal, and the cast refuses them), with one
-  *     exception that is the point of it: a CAST of a batch's guard column
+  *   - '''Total but on its values.''' A tree fails only where a value of its
+  *     data does, with an `ArithmeticException` or one of
+  *     `CleanRejection.DataErrors` (`ExprParity.owned`), which both paths must
+  *     raise alike, so the property is "every row agrees, and neither path
+  *     throws but on a value" (the precedent `ExprBatchTest` is likewise
+  *     total). `RAND()` has no parity meaning and is drawn only with a seed,
+  *     which makes it one value. The CASTs that can fail are drawn on purpose
+  *     ([[genFailingCast]], plans/testing/15): text read as any type but INT
+  *     and STRING, a float read as an integer or a written DECIMAL, and a DATE
+  *     past a TIMESTAMP's range read as one. Text read as INT is the one
+  *     shape kept for another purpose: a CAST of a batch's guard column
   *     ([[GuardPairProb]]) to INT, which fails on some of its rows, built only
   *     under a `CASE`, `IF`, `COALESCE`, `AND`, `OR` or `IN` whose guard
   *     excludes exactly those rows ([[genGuarded]]). Such a tree is total if
   *     and only if each conditional evaluates an operand only on the rows that
-  *     need it, which the vector path did not (plans/robustness/17). A
-  *     `ROUND` or `TRUNC` scale and a `SUBSTRING` position or length are any
-  *     INT or BIGINT, NULL included, since NULL there answers NULL.
+  *     need it, which the vector path did not (plans/robustness/17), and its
+  *     failure is never owned. A `ROUND` or `TRUNC` scale and a `SUBSTRING`
+  *     position or length are any INT or BIGINT, NULL included, since NULL
+  *     there answers NULL.
   *
   * Columns and expressions take every one of the engine's ten value types
   * ([[GenTypes]]). A type takes part in what the engine gives it and nothing
@@ -493,8 +495,8 @@ object ExprGen {
       if (r.bool(SpecialFloatProb)) r.oneOf(SpecialDoubles) else genDouble(r)
     case DataType.BooleanType => r.bool()
     case DataType.StringType => if (r.bool(TextProb)) r.oneOf(TextPool.Values) else r.oneOf(StringPool)
-    case DataType.DateType => r.oneOf(DatePool)
-    case DataType.TimestampType => r.oneOf(TimestampPool)
+    case DataType.DateType => if (r.bool(TemporalEdgeProb)) r.oneOf(DataGen.DateEdges) else r.oneOf(DatePool)
+    case DataType.TimestampType => if (r.bool(TemporalEdgeProb)) r.oneOf(DataGen.TimestampEdges) else r.oneOf(TimestampPool)
     // A fresh array per draw: two cells with one content are two objects, as
     // they are in every vector the engine reads, so a comparison by identity
     // cannot pass for one by content.
@@ -502,6 +504,12 @@ object ExprGen {
     case d: DataType.DecimalType => r.oneOf(DecimalPools(d))
     case other => throw new IllegalArgumentException(s"genValue: unsupported $other")
   }
+
+  /** How often a DATE or TIMESTAMP value is one at the ends of what its type
+    * stores, or in year 1 or before (`DataGen.DateEdges`, `TimestampEdges`):
+    * the dates past a TIMESTAMP's range fail a CAST to one, and the rest meet
+    * the comparisons, `IN`, the conditionals and the CASTs to text. */
+  private val TemporalEdgeProb = 0.1
 
   /** Dates around the US daylight-saving changes of 2024 and the leap day
     * before them, either side of the epoch. Every time in the engine is UTC, so
@@ -633,7 +641,8 @@ object ExprGen {
       2 -> (() => genLike(r, schema, depth)),
       1 -> (() => genCaseExpr(r, schema, DataType.BooleanType, depth)),
       1 -> (() => genBoolFunc(r, schema, depth)),
-      1 -> (() => genCastTo(r, schema, DataType.BooleanType, depth)))
+      1 -> (() => genCastTo(r, schema, DataType.BooleanType, depth)),
+      1 -> (() => genFailingCast(r, schema, DataType.BooleanType, depth)))
     r.weighted(producers: _*)()
   }
 
@@ -687,7 +696,8 @@ object ExprGen {
       2 -> (() => genCall(r, r.oneOf(SameTypeFunctions), target, sub)),
       6 -> (() => genCall(r, pickFlow(r), target, sub)),
       1 -> (() => genCaseExpr(r, schema, target, depth)),
-      1 -> (() => genCastTo(r, schema, target, depth)))
+      1 -> (() => genCastTo(r, schema, target, depth)),
+      1 -> (() => genFailingCast(r, schema, target, depth)))
     val extra: Seq[(Int, () => Expr)] = target match {
       case DataType.IntType =>
         Seq(2 -> (() => genCall(r, r.oneOf(functionsReturning(DataType.IntType)), target, sub)),
@@ -917,15 +927,39 @@ object ExprGen {
   private def genCastTo(r: Rng, schema: Schema, target: DataType, depth: Int): Expr =
     CastExpr(genTyped(r, schema, pick(r, totalCastSources(target)), depth - 1), target)
 
-  /** Source types that cast to `target` without ever throwing (see the totality
-    * note on the object). Into a DECIMAL, the integers and the decimals whose
-    * integer part it holds: a decimal is rounded to the target's scale and is
-    * an error past its integer digits, and an integer, which is read as it
-    * is, would leave a DECIMAL-typed value that a later CAST could not fit. A
-    * FLOAT or DOUBLE is not a total source for a DECIMAL either: `NaN` and the
-    * infinities have none. A DATE and a TIMESTAMP cast to each other (midnight
-    * UTC, the date in UTC); text into either can fail to parse. A BINARY casts
-    * to nothing else and nothing else to it. */
+  /** A CAST that can fail on its input (plans/testing/15): text read as any
+    * type but INT and STRING, a FLOAT or DOUBLE as an INT or a BIGINT (NaN,
+    * the infinities and values past the type have no integer), and a FLOAT
+    * or DOUBLE as a DECIMAL the query writes (NaN and the infinities have
+    * none, and a large value passes its digits). A DATE past a TIMESTAMP's
+    * range ([[TemporalEdgeProb]]) fails the total-looking CAST to one too.
+    * Not text to INT: that is the guarded shapes' CAST ([[genGuarded]]),
+    * whose failure stays the sign that a conditional evaluated it on a row
+    * its guard keeps it off (`ExprParity.owned`). Both paths must fail
+    * alike, which `ExprParity.check` holds them to. */
+  private def genFailingCast(r: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
+    def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
+    val fromFloat = r.bool(0.5)
+    target match {
+      case DataType.IntType => CastExpr(sub(r.oneOf(Floatings)), target)
+      case DataType.LongType if fromFloat => CastExpr(sub(r.oneOf(Floatings)), target)
+      case d: DataType.DecimalType => DecimalCastExpr(sub(if (fromFloat) r.oneOf(Floatings) else DataType.StringType), d)
+      case t => CastExpr(sub(DataType.StringType), t)
+    }
+  }
+
+  /** Source types that cast to `target` without throwing but on a value (see
+    * the totality note on the object). Into an integer, the numbers, whose
+    * NaN, infinities and values past the type fail, as the CASTs of
+    * [[genFailingCast]] mean to. Into a DECIMAL, the integers and the
+    * decimals whose integer part it holds: a decimal is rounded to the
+    * target's scale and is an error past its integer digits, and an integer,
+    * which is read as it is, would leave a DECIMAL-typed value that a later
+    * CAST could not fit. A FLOAT or DOUBLE is not a source for a DECIMAL here
+    * ([[genFailingCast]] draws it). A DATE and a TIMESTAMP cast to each other
+    * (midnight UTC, the date in UTC), a DATE past a TIMESTAMP's range failing
+    * ([[TemporalEdgeProb]]); text into either can fail to parse. A BINARY
+    * casts to nothing else and nothing else to it. */
   private def totalCastSources(target: DataType): Seq[DataType] = target match {
     case DataType.IntType | DataType.LongType => Numerics :+ DataType.BooleanType
     case DataType.FloatType | DataType.DoubleType => Numerics
@@ -969,9 +1003,12 @@ object ExprGen {
         1 -> (() => genRounding(r, target, sub)),
         1 -> (() => genCastTo(r, schema, target, depth)),
         1 -> (() => genWrittenDecimalCast(r, schema, d, depth)),
+        1 -> (() => genFailingCast(r, schema, target, depth)),
         1 -> (() => UnaryOpExpr(r.oneOf(Seq("+", "-")), sub(target), target)),
         1 -> (() => genCall(r, r.oneOf(SameTypeFunctions), target, sub)))
-      case DataType.DateType | DataType.TimestampType => Seq(1 -> (() => genCastTo(r, schema, target, depth)))
+      case DataType.DateType | DataType.TimestampType => Seq(
+        1 -> (() => genCastTo(r, schema, target, depth)),
+        1 -> (() => genFailingCast(r, schema, target, depth)))
       case _ => Seq.empty
     }
     r.weighted(base ++ extra: _*)()
@@ -1109,6 +1146,40 @@ object ExprGen {
     DecimalArithCoverage(ops.toSet, rounded, byZero)
   }
 
+  /** The kinds of CAST that can fail on their input ([[genFailingCast]]),
+    * by name: text read as another type, a float as an integer or a DECIMAL,
+    * and a DATE as a TIMESTAMP. */
+  val FailingCastKinds: Seq[String] = Seq("text", "float to integer", "float to decimal", "date to timestamp")
+
+  /** The kind of failing CAST `e` is, if it is one. Text to INT is not: it
+    * is the guarded shapes'. */
+  def failingCastKind(e: Expr): Option[String] = e match {
+    case CastExpr(c, t) if c.dataType == DataType.StringType && t != DataType.StringType && t != DataType.IntType =>
+      Some("text")
+    case DecimalCastExpr(c, _) if c.dataType == DataType.StringType => Some("text")
+    case CastExpr(c, DataType.IntType | DataType.LongType) if Floatings.contains(c.dataType) => Some("float to integer")
+    case DecimalCastExpr(c, _) if Floatings.contains(c.dataType) => Some("float to decimal")
+    case CastExpr(c, DataType.TimestampType) if c.dataType == DataType.DateType => Some("date to timestamp")
+    case _ => None
+  }
+
+  /** For each kind of failing CAST a case holds, whether one fails on some
+    * row of its batch, evaluated on its own. */
+  def failingCastCoverage(c: ExprCase): Map[String, Boolean] = {
+    val found = scala.collection.mutable.Map.empty[String, Boolean]
+    def walk(e: Expr): Unit = {
+      failingCastKind(e).foreach { kind =>
+        val fails = (0 until c.batch.numRows).exists { row =>
+          try { e.eval(c.batch, row); false } catch { case scala.util.control.NonFatal(_) => true }
+        }
+        found(kind) = found.getOrElse(kind, false) || fails
+      }
+      Shrinker.childrenOf(e).foreach(walk)
+    }
+    walk(c.expr)
+    found.toMap
+  }
+
   /** What a case's written CASTs to DECIMAL meet: whether it has one, and
     * whether on some row one rounds its value to the target's scale, and one
     * passes the target's integer digits, both read off every row. */
@@ -1123,7 +1194,7 @@ object ExprGen {
           var row = 0
           while (row < c.batch.numRows) {
             valueAt(child, c.batch, row) match {
-              case n: Number =>
+              case n: Number if !n.doubleValue.isNaN && !n.doubleValue.isInfinite =>
                 val v = Casts.toDecimal(n)
                 val atScale = v.setScale(t.scale, java.math.RoundingMode.HALF_UP)
                 if (atScale.compareTo(v) != 0) rounded = true

@@ -30,10 +30,16 @@ import com.transformer.sql.plan._
   *     and does no arithmetic, and a DECIMAL meets decimals and integer columns
   *     or literals, in a comparison or in arithmetic.
   *
-  *   - '''Total + paren-free.''' Nothing here builds a tree that throws for
-  *     in-range input, and expressions render without grouping parens but for
-  *     decimal arithmetic, which takes the ones its shape needs (`SqlRender`).
-  *     So a query that binds also runs, in every mode.
+  *   - '''Fails only on its data, and paren-free.''' A query that binds
+  *     runs, but where its data makes it fail: an environment at the edges
+  *     (`DataGen.Edges`) and the calls that fail on them ([[EdgeCall]]) stop
+  *     a query on an overflow, a decimal past its precision or a date past a
+  *     TIMESTAMP's range, which every layout must then do alike but where a
+  *     WHERE or ON condition that can fail is there to move
+  *     ([[MetaQuery.movableFailure]], decision 1 of plans/testing/15).
+  *     Expressions render without grouping parens but for decimal arithmetic,
+  *     a unary minus and a NOT over a compound, which take the ones their
+  *     shapes need (`SqlRender`).
   *
   * Excluded so the output multiset is well-defined for the metamorphic relations:
   * `RAND()` and the clock functions, which are mode-dependent. `LIMIT` and
@@ -421,6 +427,14 @@ object MetaQueryGen {
 
     def renderBody: String = if (ctes.isEmpty) mainSelectSql else s"WITH $cteClause $mainSelectSql"
 
+    /** Whether a WHERE or an ON condition of any arm or CTE body can fail on
+      * its data (`QueryGen.mayFail`): the conditions the optimizer may move,
+      * where decision 1 of plans/testing/15 lets layouts part on whether the
+      * query fails. */
+    def movableFailure: Boolean =
+      (where.toSeq ++ from.joins.map(_.on)).exists(QueryGen.mayFail) ||
+        setOp.exists(_._1.movableFailure) || ctes.exists(_.body.movableFailure)
+
     /** The TLP base: the query's output wrapped in a CTE `q` so a partition
       * predicate can filter it. Any existing `WITH` definitions are HOISTED to sit
       * beside `q` (rather than nesting a `WITH` inside `q`'s body), which the
@@ -484,11 +498,14 @@ object MetaQueryGen {
   /** Generate a single relation + a predicate over it, for the NoREC relation. */
   def generateNoRec(rng: Rng): NoRecCase = {
     val keyType = ExprGen.pick(rng, KeyTypes)
-    val keyDomain = sharedKeyDomain(rng.split(), keyType)
-    val rel = genRelation(rng.split(), "r0", keyType, keyDomain)
+    val keyRng = rng.split()
+    val relRng = rng.split()
+    val predRng = rng.split()
+    val depth = rng.between(1, 3)
+    val edges = DataGen.Edges.draw(rng.split())
+    val rel = genRelation(relRng, "r0", keyType, edges.widen(keyType, sharedKeyDomain(keyRng, keyType)), small = false, edges)
     val scope = rel.schema.fields.map(f => ScopeCol("t", f.name, f.dataType)).toVector
-    val pred = genPredicate(rng.split(), scope, rng.between(1, 3))
-    NoRecCase(rel, pred)
+    NoRecCase(rel, genPredicate(predRng, scope, depth))
   }
 
   // ---- relation environment generation -----------------------------------
@@ -515,9 +532,16 @@ object MetaQueryGen {
     * join up to six of them (`maxLeavesOf`). */
   private[fuzz] def genEnv(rng: Rng): RelEnv = {
     val keyType = ExprGen.pick(rng, KeyTypes)
-    val keyDomain = sharedKeyDomain(rng, keyType)
+    val narrowKeys = sharedKeyDomain(rng, keyType)
     val n = rng.weighted((5, 2), (4, 3), (1, 4), (1, 5), (1, 6))
-    val relations = (0 until n).map(i => genRelation(rng.split(), s"r$i", keyType, keyDomain, small = n > 3)).toVector
+    val relationRngs = (0 until n).map(_ => rng.split())
+    // Drawn after everything else, so an environment away from the edges is
+    // the one it was before they existed (`DataGen.Edges`).
+    val edges = DataGen.Edges.draw(rng.split())
+    val keyDomain = edges.widen(keyType, narrowKeys)
+    val relations = relationRngs.zipWithIndex.map { case (r, i) =>
+      genRelation(r, s"r$i", keyType, keyDomain, small = n > 3, edges)
+    }.toVector
     RelEnv(relations)
   }
 
@@ -561,7 +585,7 @@ object MetaQueryGen {
   }
 
   private def genRelation(rng: Rng, name: String, keyType: DataType, keyDomain: IndexedSeq[Any],
-      small: Boolean = false): Relation = {
+      small: Boolean, edges: DataGen.Edges): Relation = {
     val nKeys = rng.between(1, 2)
     val nPayload = rng.between(1, 3)
     val keyFields = (0 until nKeys).map(i => Field(s"c$i", keyType))
@@ -573,7 +597,7 @@ object MetaQueryGen {
     // (sometimes nullable, exercising 3VL join keys + outer null-extension).
     val specs: IndexedSeq[(Double, IndexedSeq[Any])] = schema.fields.zipWithIndex.map { case (f, idx) =>
       if (idx < nKeys) (rng.weighted((5, 0.0), (2, 0.2)), keyDomain)
-      else (payloadNullProb(rng), payloadDomain(rng, f.dataType))
+      else (payloadNullProb(rng), edges.widen(f.dataType, payloadDomain(rng, f.dataType)))
     }
     val numRows = rng.weighted((2, 0), (3, 1), (5, 2), (2, 3)) match {
       case 0 => 0
@@ -818,7 +842,21 @@ object MetaQueryGen {
     val anyPairs = for { a <- l._1.cols; b <- r._1.cols if a.dataType == b.dataType } yield (a, b)
     val pairs = if (keyPairs.nonEmpty) keyPairs else anyPairs
     if (pairs.isEmpty) None
-    else { val (a, b) = rng.oneOf(pairs); Some(BinOpExpr("=", a.ref, b.ref, DataType.BooleanType)) }
+    else { val (a, b) = rng.oneOf(pairs); Some(keyEqual(rng, a, b)) }
+  }
+
+  /** `a = b`, or on [[EdgeCallProb]] one [[EdgeCall]] of each, which matches
+    * the rows the plain equality does where neither side fails. */
+  private def keyEqual(rng: Rng, a: ScopeCol, b: ScopeCol): Expr = {
+    val plain = BinOpExpr("=", a.ref, b.ref, DataType.BooleanType)
+    if (!hasEdgeCall(a.dataType) || !rng.bool(EdgeCallProb)) plain
+    else {
+      val call = edgeCall(rng)
+      (call(a.ref), call(b.ref)) match {
+        case (Some(x), Some(y)) => BinOpExpr("=", x, y, DataType.BooleanType)
+        case _ => plain
+      }
+    }
   }
 
   private def shuffle[A](rng: Rng, xs: Vector[A]): Vector[A] = distinctSubset(rng, xs, xs.length)
@@ -877,7 +915,7 @@ object MetaQueryGen {
       TrueLit
     } else {
       val (l, r) = rng.oneOf(pairs)
-      val equi: Expr = BinOpExpr("=", l.ref, r.ref, DataType.BooleanType)
+      val equi: Expr = keyEqual(rng, l, r)
       // A second equality with another table before, so a table this join
       // follows need not be the one it keys on.
       val others = before.filterNot(_.alias == l.alias)
@@ -904,10 +942,14 @@ object MetaQueryGen {
     // own whatever the column's, so TLP may partition on it, and on the rows
     // its domain answers NULL over.
     val numeric = scope.filter(c => DataType.isNumeric(c.dataType))
+    val edged = scope.filter(c => hasEdgeCall(c.dataType))
     val computed: Vector[(Expr, String)] =
       if (rng.bool(0.4)) {
         val t = ExprGen.pick(rng, ComputedTypes)
-        val e = if (numeric.nonEmpty && rng.bool(0.3)) genDomainCall(rng, numeric) else genValue(rng, scope, t, 2)
+        val e =
+          if (edged.nonEmpty && rng.bool(EdgeCallProb)) edgeCall(rng)(rng.oneOf(edged).ref).get
+          else if (numeric.nonEmpty && rng.bool(0.3)) genDomainCall(rng, numeric)
+          else genValue(rng, scope, t, 2)
         Vector((e, s"o${bareItems.length}"))
       } else Vector.empty
     val items = bareItems ++ computed
@@ -941,16 +983,25 @@ object MetaQueryGen {
     def over(body: String): String = s"OVER (${Seq(partBy, body).filter(_.nonEmpty).mkString(" ")})"
 
     val numeric = scope.filter(c => DataType.isNumeric(c.dataType))
-    /** A number argument and the type a SUM of it is: a column, or `ABS` of
-      * one, which keeps its type. */
+    /** A number argument and the type a SUM of it is: a column, `ABS` of
+      * one, which keeps its type, or a call that fails at the edges
+      * ([[EdgeCall]]). */
     def numberArg(): (String, DataType) = {
       val c = rng.oneOf(numeric)
-      (if (rng.bool(0.25)) s"ABS(${c.qualified})" else c.qualified, c.dataType)
+      if (hasEdgeCall(c.dataType) && rng.bool(EdgeCallProb)) {
+        val e = edgeCall(rng)(c.ref).get
+        (SqlRender.expr(e), e.dataType)
+      } else (if (rng.bool(0.25)) s"ABS(${c.qualified})" else c.qualified, c.dataType)
     }
-    /** Any argument of MIN or MAX: a column, or `UPPER` of a string one. */
+    /** Any argument of MIN or MAX: a column, `UPPER` of a string one, or a
+      * call that fails at the edges ([[EdgeCall]]). */
     def anyArg(): (String, DataType) = {
       val c = rng.oneOf(scope)
-      (if (c.dataType == DataType.StringType && rng.bool(0.3)) s"UPPER(${c.qualified})" else c.qualified, c.dataType)
+      if (c.dataType == DataType.StringType && rng.bool(0.3)) (s"UPPER(${c.qualified})", c.dataType)
+      else if (hasEdgeCall(c.dataType) && rng.bool(EdgeCallProb)) {
+        val e = edgeCall(rng)(c.ref).get
+        (SqlRender.expr(e), e.dataType)
+      } else (c.qualified, c.dataType)
     }
     val choices = scala.collection.mutable.ArrayBuffer.empty[(Int, () => WinItem)]
     // Tie-sensitive: the value depends on which of two tied rows comes first.
@@ -1010,6 +1061,19 @@ object MetaQueryGen {
       choices += ((1, () => { val (a, t) = numberArg()
         WinItem(s"AVG($a) ${over("")}", name, avgType(t), tieSensitive = false) }))
     }
+    // A call that fails at the edges ([[EdgeCall]]) as the argument of a
+    // whole-partition aggregate, or as the only ORDER BY key of a rank, which
+    // the window evaluates as it reads its rows.
+    val edged = scope.filter(c => hasEdgeCall(c.dataType))
+    if (edged.nonEmpty)
+      choices += ((8, () => {
+        val c = rng.oneOf(edged)
+        val e = edgeCall(rng)(c.ref).get
+        val text = SqlRender.expr(e)
+        if (rng.bool()) WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}($text) ${over("")}", name, e.dataType, tieSensitive = false)
+        else WinItem(s"${rng.oneOf(Seq("RANK", "DENSE_RANK"))}() ${over(s"ORDER BY $text ${direction()}")}", name,
+          DataType.LongType, tieSensitive = false, Vector(c))
+      }))
     choices += ((1, () => { val (a, t) = anyArg()
       WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}($a) ${over(orderBy)}", name, t,
         tieSensitive = false, orderCols) }))
@@ -1020,9 +1084,10 @@ object MetaQueryGen {
 
   /** A PARTITION BY or ORDER BY key over `c`: the column, or now and then an
     * expression of it, `ABS` or `+ 1` of a number, `UPPER` or `LENGTH` of a
-    * string. */
+    * string, or a call that fails at the edges ([[EdgeCall]]). */
   private def keyText(rng: Rng, c: ScopeCol): String =
-    if (!rng.bool(0.25)) c.qualified
+    if (hasEdgeCall(c.dataType) && rng.bool(EdgeCallProb)) SqlRender.expr(edgeCall(rng)(c.ref).get)
+    else if (!rng.bool(0.25)) c.qualified
     else c.dataType match {
       case t if DataType.isNumeric(t) => if (rng.bool()) s"ABS(${c.qualified})" else s"${c.qualified} + 1"
       case DataType.StringType => if (rng.bool()) s"UPPER(${c.qualified})" else s"LENGTH(${c.qualified})"
@@ -1045,8 +1110,10 @@ object MetaQueryGen {
     // Now and then a key is a math function of a numeric column, so the rows
     // its domain answers NULL over make a group of their own.
     val numeric = scope.filter(c => DataType.isNumeric(c.dataType))
+    val edged = scope.filter(c => hasEdgeCall(c.dataType))
     val keyExprs: Vector[Expr] = keys.map(_.ref) ++
-      (if (numeric.nonEmpty && rng.bool(0.25)) Vector(genDomainCall(rng, numeric)) else Vector.empty)
+      (if (numeric.nonEmpty && rng.bool(0.25)) Vector(genDomainCall(rng, numeric)) else Vector.empty) ++
+      (if (edged.nonEmpty && rng.bool(EdgeCallProb / 2)) edgeCall(rng)(rng.oneOf(edged).ref).toVector else Vector.empty)
     val groupKeys: Vector[(Expr, String)] = keyExprs.zipWithIndex.map { case (e, i) => (e, s"o$i") }
     val nAgg = rng.between(1, 2)
     val aggs: Vector[(QueryGen.AggSpec, String)] =
@@ -1081,10 +1148,19 @@ object MetaQueryGen {
     if (integral.nonEmpty)
       options += ((1, () => QueryGen.Stat(rng.oneOf(Seq("STDDEV_SAMP", "STDDEV_POP", "VAR_SAMP", "VAR_POP")),
         rng.oneOf(integral).ref)))
+    // MIN, MAX or SUM of a call that fails at the edges, which the aggregate
+    // evaluates as it reads each row.
+    val edged = scope.filter(c => hasEdgeCall(c.dataType))
+    if (edged.nonEmpty)
+      options += ((3, () => {
+        val e = edgeCall(rng)(rng.oneOf(edged).ref).get
+        if (DataType.isNumeric(e.dataType) && rng.bool()) QueryGen.Sum(e)
+        else if (rng.bool()) QueryGen.Min(e) else QueryGen.Max(e)
+      }))
     rng.weighted(options.toSeq: _*)()
   }
 
-  // ---- scope-aware scalar generators (paren-free, total) ------------------
+  // ---- scope-aware scalar generators (paren-free) ---------------------------
 
   private val Numerics: Seq[DataType] =
     Seq(DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType)
@@ -1370,6 +1446,36 @@ object MetaQueryGen {
       (1, () => FuncExpr("LOG", Seq(rng.oneOf(QueryGen.MathEdges), c), DataType.DoubleType)),
       (1, () => FuncExpr("ATAN2", Seq(c, rng.oneOf(QueryGen.MathEdges)), DataType.DoubleType)))()
   }
+
+  // ---- calls that fail at the edges -----------------------------------------
+
+  /** One of the expressions over a column that fail on its type's edges
+    * (`DataGen.Edges`), drawn once so a join can apply it to both its sides:
+    * `c + 1` or `ABS(c)` of an INT or BIGINT, past the type at its largest or
+    * its smallest value; a CAST of a DECIMAL to one integer digit fewer, which
+    * its largest value does not fit; a CAST of a DATE to a TIMESTAMP, whose
+    * range ends millions of years inside a DATE's. Over the rest of the
+    * corpus each answers, so an environment at the edges is where they
+    * fail. */
+  private final case class EdgeCall(shape: Int) {
+    def apply(c: Expr): Option[Expr] = c.dataType match {
+      case t @ (DataType.IntType | DataType.LongType) =>
+        Some(if (shape == 0) BinOpExpr("+", c, LitExpr(1, DataType.IntType), t) else FuncExpr("ABS", Seq(c), t))
+      case d: DataType.DecimalType if d.precision - d.scale > 1 =>
+        Some(DecimalCastExpr(c, DataType.DecimalType(d.precision - 1, d.scale)))
+      case DataType.DateType => Some(CastExpr(c, DataType.TimestampType))
+      case _ => None
+    }
+  }
+
+  private def edgeCall(rng: Rng): EdgeCall = EdgeCall(rng.between(0, 1))
+
+  /** Whether some call of [[EdgeCall]] applies to a column of `dt`. */
+  private def hasEdgeCall(dt: DataType): Boolean = EdgeCall(0)(ColRefExpr(0, "", dt)).isDefined
+
+  /** How often a join's equality, a projection, an aggregate's argument, a
+    * GROUP BY key and a window's key read a column through an [[EdgeCall]]. */
+  private val EdgeCallProb = 0.4
 
   /** Whether `e`, an output column's expression, binds to its declared type
     * whatever its arguments are: a call of a catalog function whose result is

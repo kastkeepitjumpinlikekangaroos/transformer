@@ -896,11 +896,14 @@ engine — the parity fuzzer then guards its `evalVec` override automatically):
    target `DataType` and recurses for children via the local `sub(t)`.
 2. Hold the two invariants `ExprGen` documents: **type-correct** (the node's
    `dataType` must equal the requested target — `generate` asserts this) and
-   **total** (never generate inputs that throw — mirror the existing exclusions
-   for partial casts and NULL `ROUND`/`SUBSTRING` scale args). If your node
-   genuinely composes a new partial shape, extend `oracle/ExprParity` rather
-   than letting the generator throw. Totality is the *only* reason to exclude a
-   shape: a shape held out because the engine diverges on it needs an engine
+   **total but on its values** (a tree may fail only where a value does, with
+   an `ArithmeticException` or one of `CleanRejection.DataErrors`, which
+   `ExprParity.owned` lets through and both paths must raise alike; the CASTs
+   that can fail are drawn on purpose by `genFailingCast`, but text to INT,
+   the guarded shapes' CAST, whose failure means a conditional evaluated an
+   operand it did not need). If your node fails some other way, extend
+   `oracle/ExprParity` rather than letting the generator throw. Totality is
+   the *only* reason to exclude a shape: a shape held out because the engine diverges on it needs an engine
    fix plus a coverage guard on the way back in, not a permanent gate — see
    `generatorReachesIeeeSpecialValues` and the `NaN`/`-0.0` entry in
    [gotchas.md](gotchas.md).
@@ -992,9 +995,15 @@ new clause field), render it in the matching `render` / `SqlRender` branch, and
 extend the `Shrinker.queryCase` moves so it still minimizes. Two invariants keep
 the reject rate near zero and the property sound:
 
-- **Total** — never generate SQL that throws at execution (mirror the existing
-  exclusions: numeric->numeric / anything->string casts only, non-null
-  `ROUND`/`SUBSTRING` scales). A query that binds must run, in every mode.
+- **Fails only on its data** — a query that binds must run in every mode, or
+  fail on a value of its data with one of `CleanRejection.DataErrors` (an
+  overflow, a decimal past its precision, a date past its range, text a CAST
+  cannot read), which every mode must then do alike (decision 1 of
+  plans/testing/15). A new node kind that can fail on a value joins
+  `QueryGen.mayFail`, so a WHERE or ON condition holding it is one the
+  optimizer may move; a new failure is the new-runtime-error checklist's (its
+  message in `DataErrors` and `ExprParity.owned`). Never cast a literal that
+  can fail: the binder folds it, and the query fails before it reads a row.
 - **Paren-free-safe** — `SqlRender` emits no grouping parentheses and relies on
   precedence. (The binder rejected them historically; it accepts them now, so
   teaching `SqlRender` to emit them is an open widening opportunity — but until

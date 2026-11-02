@@ -182,13 +182,15 @@ class ModeDifferentialFuzzTest {
     * `FunctionCatalog`, so a function the registry gains fails here until
     * the SQL generators draw it. Generation only. */
   @Test def everyCatalogFunctionIsDrawn(): Unit = {
-    val n = 40000
+    val n = 57000
     val drawn = ModeDifferentialFuzzTest.functionTally(n)(seed => QueryGen.generate(new Rng(seed)).query)
     val counts = QueryGen.CalledFunctions.map(e => e.name -> drawn(e.name))
     println(s"[mode-differential] catalog functions over $n seeds: " + counts.map { case (f, c) => s"$f=$c" }.mkString(", "))
     // Measured over these seeds: the rarest are the math functions, each
-    // drawn among 26 that answer a DOUBLE, from 72 (TAN) to 95; the floor sits
-    // about 3x below them.
+    // drawn among 26 that answer a DOUBLE, from 81 (PI) to about 110; the
+    // floor sits about 3x below them. 57000 seeds since the failing CASTs of
+    // plans/testing/15 W7 took a share of the numbers, which left LOG 51 of
+    // 40000.
     counts.foreach { case (f, c) => assertTrue(s"$f is drawn on $c of $n seeds", c > FunctionFloor) }
   }
 
@@ -319,7 +321,7 @@ class ModeDifferentialFuzzTest {
     * here. Measured over these 10000 seeds: the shape 421, NaN 55, -0.0 52, an
     * infinity 35; each bound sits ~3x below. */
   @Test def generatorReachesMinMaxOverIeeeSpecialValues(): Unit = {
-    val n = 10000
+    val n = 11000
     var shape, nan, negZero, infinite = 0
     var seed = 0
     while (seed < n) {
@@ -339,8 +341,10 @@ class ModeDifferentialFuzzTest {
     println(s"[mode-differential] over $n seeds: MIN/MAX over a float column in $shape " +
       s"(carrying NaN=$nan, -0.0=$negZero, an infinity=$infinite)")
     assertTrue(s"no MIN/MAX over a float column generated (shape=$shape)", shape > 140)
-    // Each bound sits ~3x below the measured rate, so it separates a corpus that
-    // stopped producing the value from one that merely drifted.
+    // Each bound sits ~3x below the measured rate (the shape 423, NaN 60,
+    // -0.0 52, an infinity 38), so it separates a corpus that stopped
+    // producing the value from one that merely drifted. 11000 seeds since the
+    // failing CASTs of plans/testing/15 W7 took a share of the aggregates.
     assertTrue(s"MIN/MAX never sees a NaN (nan=$nan)", nan > 18)
     assertTrue(s"MIN/MAX never sees a -0.0 (negZero=$negZero)", negZero > 17)
     assertTrue(s"MIN/MAX never sees an infinity (infinite=$infinite)", infinite > 11)
@@ -356,7 +360,7 @@ class ModeDifferentialFuzzTest {
     * from the values under each list's CASTs, the value by evaluating the
     * list over the dataset's rows. */
   @Test def decimalArithmeticReachesBranches(): Unit = {
-    val n = 6000
+    val n = 7500
     var shape, value = 0
     var seed = 0
     while (seed < n) {
@@ -374,9 +378,10 @@ class ModeDifferentialFuzzTest {
     }
     println(s"[mode-differential] over $n seeds: decimal arithmetic beside another DECIMAL in a branch list " +
       s"in $shape, with more fractional digits than the first value's type in $value")
-    // Measured over these seeds: the shape 103, the value 17. Each bound sits
-    // ~3x below; 6000 seeds rather than 4000 keep the value's bound off the
-    // handful where a drift would cross it.
+    // Measured over these seeds: the shape 102, the value 16. Each bound sits
+    // ~3x below; 7500 seeds rather than 4000 keep the value's bound off the
+    // handful where a drift would cross it, and the failing CASTs of
+    // plans/testing/15 W7 took a share of the decimals.
     assertTrue(s"decimal arithmetic rarely meets another DECIMAL in a branch list (shape=$shape)", shape > 34)
     assertTrue(s"its answers rarely outgrow the first value's scale (value=$value)", value > 5)
   }
@@ -387,7 +392,7 @@ class ModeDifferentialFuzzTest {
     * binder builds: the shape from the calls that have one, the value by
     * evaluating them over the dataset's rows. */
   @Test def nullScalesAndPositionsReachTheirFunctions(): Unit = {
-    val n = 8000
+    val n = 11000
     var shape, value = 0
     var seed = 0
     while (seed < n) {
@@ -407,9 +412,9 @@ class ModeDifferentialFuzzTest {
     }
     println(s"[mode-differential] over $n seeds: a ROUND scale or SUBSTRING position or length in $shape, " +
       s"NULL beside a value in $value")
-    // Measured over these seeds: the shape 422, the value 113; bounds ~3x
-    // below. 8000 seeds since plans/testing/15 widened the corpus, which left
-    // the value 82 of 6000.
+    // Measured over these seeds: the shape 453, the value 111; bounds ~3x
+    // below. 11000 seeds since plans/testing/15 widened the corpus, which left
+    // the value 78 of 8000.
     assertTrue(s"a scale, position or length is rarely generated (shape=$shape)", shape > 120)
     assertTrue(s"a NULL one rarely meets a value (value=$value)", value > 35)
   }
@@ -421,7 +426,7 @@ class ModeDifferentialFuzzTest {
     * Read off what the binder builds: the shape from its calls, the value by
     * evaluating each one's argument over the dataset's rows. */
   @Test def trimReachesValuesWithSpacesAtAnEnd(): Unit = {
-    val n = 10000
+    val n = 14000
     var shape, value = 0
     var seed = 0
     while (seed < n) {
@@ -434,8 +439,8 @@ class ModeDifferentialFuzzTest {
         if (calls.nonEmpty) shape += 1
         val batches = (0 until view.numPartitions).flatMap(view.readPartition(_).toSeq)
         if (calls.exists(f => batches.exists(b => readsOwnColumns(f, b) && (0 until b.numRows).exists { row =>
-            f.args.head.eval(b, row) match {
-              case s: String => s.nonEmpty && (s.head == ' ' || s.last == ' ')
+            evalAt(f.args.head, b, row) match {
+              case Some(s: String) => s.nonEmpty && (s.head == ' ' || s.last == ' ')
               case _ => false
             }
           }))) value += 1
@@ -443,9 +448,9 @@ class ModeDifferentialFuzzTest {
       seed += 1
     }
     println(s"[mode-differential] over $n seeds: TRIM in $shape, of a value with a space at an end in $value")
-    // Measured over these seeds: the shape 586, the value 115; bounds ~3x
-    // below. 10000 seeds, since a share of string columns draws text past
-    // ASCII, whose values a space ends less often.
+    // Measured over these seeds: the shape 709, the value 120; bounds ~3x
+    // below. 14000 seeds, since a share of string columns draws text past
+    // ASCII or text a CAST reads, whose values a space ends less often.
     assertTrue(s"TRIM is rarely generated (shape=$shape)", shape > 195)
     assertTrue(s"TRIM rarely meets a space at an end (value=$value)", value > 38)
   }
@@ -455,7 +460,7 @@ class ModeDifferentialFuzzTest {
     * the values `IN`'s hashed membership once keyed by bits, not by `=`.
     * Generation only. */
   @Test def floatInListsReachNaNAndNegativeZero(): Unit = {
-    val n = 6000
+    val n = 9000
     var shape, nan, negZero = 0
     var seed = 0
     while (seed < n) {
@@ -476,7 +481,9 @@ class ModeDifferentialFuzzTest {
       seed += 1
     }
     println(s"[mode-differential] over $n seeds: IN over a float column in $shape, meeting NaN in $nan, -0.0 in $negZero")
-    // Measured over these seeds: the shape 260, NaN 97, -0.0 88; bounds ~3x below.
+    // Measured over these seeds: the shape 327, NaN 117, -0.0 100; bounds ~3x
+    // below. 9000 seeds since the failing CASTs of plans/testing/15 W7 took a
+    // share of the conditions, which left -0.0 59 of 6000.
     assertTrue(s"IN over a float column is rarely generated (shape=$shape)", shape > 86)
     assertTrue(s"IN over a float column rarely meets NaN (nan=$nan)", nan > 32)
     assertTrue(s"IN over a float column rarely meets -0.0 (negZero=$negZero)", negZero > 29)
@@ -490,13 +497,14 @@ class ModeDifferentialFuzzTest {
     * to U+FFFF counts only beside one past U+FFFF, the pair UTF-16 and code
     * point order disagree on. Generation only. */
   @Test def textReachesEveryStringSite(): Unit = {
-    val t = TextPool.tally(60000)(seed => ModeDifferentialFuzzTest.textSites(QueryGen.generate(new Rng(seed))))
+    val t = TextPool.tally(130000)(seed => ModeDifferentialFuzzTest.textSites(QueryGen.generate(new Rng(seed))))
     println(s"[mode-differential] text past ASCII ${t.report}")
-    // Measured over these seeds: the thinnest cell is 29 (LENGTH over a
-    // dotless i), most of the function cells 30 to 130, the LIKE and order
-    // cells hundreds; the floor sits about 3x below the thinnest. 60000 seeds,
-    // since a string function over a column of the pool is a narrow chain,
-    // and generation only, under a second.
+    // Measured over these seeds: the thinnest cell is 32 (LENGTH over a
+    // combining mark), most of the function cells 40 to 230, the LIKE and
+    // order cells hundreds; the floor sits about 3x below the thinnest.
+    // 130000 seeds, since a string function over a column of the pool is a
+    // narrow chain, and generation only, a second or two; 60000 left that
+    // cell 13 once string columns held text a CAST reads too.
     val low = t.below(TextFloor)
     assertTrue(s"text past ASCII rarely reaches these sites (at most $TextFloor seeds):\n  ${low.mkString("\n  ")}\n${t.report}",
       low.isEmpty)
@@ -510,7 +518,7 @@ class ModeDifferentialFuzzTest {
     * Both must be drawn, and the queries that hold them bind. Generation and
     * binding only. */
   @Test def negationsAndNotsOverCompoundsAreDrawnAndBind(): Unit = {
-    val n = 6000
+    val n = 7000
     var negation, notOverCompound, rejected = 0
     (0 until n).foreach { seed =>
       val qc = QueryGen.generate(new Rng(seed.toLong))
@@ -538,10 +546,45 @@ class ModeDifferentialFuzzTest {
     println(s"[mode-differential] over $n seeds: a negation of a computed value in $negation, a NOT over an AND " +
       s"or an OR in $notOverCompound; of those, $rejected refused as text")
     // Measured over these seeds: a negation 221, a NOT over an AND or an OR
-    // 147; bounds ~3x below.
+    // 181; bounds ~3x below. 7000 seeds since the failing CASTs of
+    // plans/testing/15 W7 took a share of the numbers.
     assertTrue(s"a computed value is rarely negated ($negation)", negation > 73)
     assertTrue(s"a NOT rarely takes an AND or an OR ($notOverCompound)", notOverCompound > 49)
     assertEquals(s"queries refused as text: $rejected", 0, rejected)
+  }
+
+  /** A CAST that can fail on its input (text read as another type, a float
+    * as an integer with no guard, plans/testing/15) sits under an IN, in a
+    * comparison and in an aggregate's argument, and the query fails on its
+    * data there, which every mode must then do alike (decision 1). Each
+    * query with one runs once in the baseline layout. Prints the tally. */
+  @Test def failingCastsReachAnInAComparisonAndAnAggregate(): Unit = {
+    val n = 4000
+    val sites = Seq("IN", "comparison", "aggregate")
+    val shape = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    val failed = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    (0 until n).foreach { seed =>
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val found = ModeDifferentialFuzzTest.failingCastSites(qc.query)
+      found.foreach(site => shape(site) += 1)
+      if (found.nonEmpty) {
+        val cat = new Catalog
+        cat.register(QueryGen.ViewName, qc.dataset.singlePartition())
+        val castFailed =
+          Try(RelEngine.answer(cat, qc.sql, ExecutionOptions.Default)).toOption.exists(_.left.exists(_.startsWith("Cannot cast")))
+        if (castFailed) found.foreach(site => failed(site) += 1)
+      }
+    }
+    val report = sites.map(site => s"$site: drawn ${shape(site)}, fails ${failed(site)}").mkString("; ")
+    println(s"[mode-differential] a CAST that can fail over $n seeds: $report")
+    // Measured over these seeds: under an IN drawn 373, failing 135; in a
+    // comparison 134 and 49; in an aggregate 497 and 205. Bounds ~3x below.
+    assertTrue(s"a CAST that can fail rarely sits under an IN, $report", shape("IN") > 126)
+    assertTrue(s"a CAST under an IN rarely fails, $report", failed("IN") > 35)
+    assertTrue(s"a CAST that can fail rarely sits in a comparison, $report", shape("comparison") > 45)
+    assertTrue(s"a CAST in a comparison rarely fails, $report", failed("comparison") > 15)
+    assertTrue(s"a CAST that can fail rarely sits in an aggregate, $report", shape("aggregate") > 170)
+    assertTrue(s"a CAST in an aggregate rarely fails, $report", failed("aggregate") > 45)
   }
 
   private def isDouble(v: Any, p: Double => Boolean): Boolean = v match {
@@ -586,9 +629,13 @@ class ModeDifferentialFuzzTest {
       case c: ColRefExpr => c.index < fields.length && fields(c.index).dataType == c.dataType
       case _ => true
     } && (0 until batch.numRows).exists { row =>
-      f.args.head.eval(batch, row) != null && f.args.tail.exists(_.eval(batch, row) == null)
+      evalAt(f.args.head, batch, row).exists(_ != null) && f.args.tail.exists(a => evalAt(a, batch, row).contains(null))
     }
   }
+
+  /** `e` on `row` of `batch`, or None where it fails on the row's values. */
+  private def evalAt(e: Expr, batch: ColumnarBatch, row: Int): Option[Any] =
+    try Some(e.eval(batch, row)) catch { case scala.util.control.NonFatal(_) => None }
 
   // ---- DATE, TIMESTAMP, BINARY and DECIMAL coverage ----------------------
   //
@@ -1000,6 +1047,54 @@ class ModeDifferentialFuzzTest {
 }
 
 object ModeDifferentialFuzzTest {
+
+  /** Whether `e` is a CAST that can fail on its input: text read as another
+    * type, or a FLOAT or DOUBLE read as an integer with no
+    * `CASE WHEN ABS(x) < 1e9` around it. */
+  private def failingCast(e: Expr): Boolean = e match {
+    case CastExpr(c, t) if c.dataType == DataType.StringType => t != DataType.StringType
+    case DecimalCastExpr(c, _) if c.dataType == DataType.StringType => true
+    case CastExpr(_: CaseExpr, _) => false
+    case CastExpr(c, DataType.IntType | DataType.LongType) =>
+      c.dataType == DataType.FloatType || c.dataType == DataType.DoubleType
+    case _ => false
+  }
+
+  private def holdsFailingCast(e: Expr): Boolean = failingCast(e) || Shrinker.childrenOf(e).exists(holdsFailingCast)
+
+  /** The sites of `q` a CAST that can fail sits at: under an IN (its value
+    * or an item), a comparison's side, an aggregate's argument. */
+  private[fuzz] def failingCastSites(q: QueryGen.GenQuery): Set[String] = {
+    val found = scala.collection.mutable.Set.empty[String]
+    def walk(e: Expr): Unit = {
+      e match {
+        case InListExpr(v, items, _) if (v +: items).exists(holdsFailingCast) => found += "IN"
+        case BinOpExpr("<" | "<=" | ">" | ">=" | "=" | "<>", l, r, _) if holdsFailingCast(l) || holdsFailingCast(r) =>
+          found += "comparison"
+        case _ => ()
+      }
+      Shrinker.childrenOf(e).foreach(walk)
+    }
+    val (roots, aggArgs): (Seq[Expr], Seq[Expr]) = q match {
+      case p: QueryGen.ProjectQuery => (p.projection.map(_._1) ++ p.where.toSeq, Seq.empty)
+      case a: QueryGen.AggregateQuery =>
+        val args = a.aggregates.flatMap {
+          case (QueryGen.Sum(e, _), _) => Seq(e)
+          case (QueryGen.Avg(e, _), _) => Seq(e)
+          case (QueryGen.Min(e), _) => Seq(e)
+          case (QueryGen.Max(e), _) => Seq(e)
+          case (QueryGen.Count(e, _), _) => Seq(e)
+          case (QueryGen.CountIf(e), _) => Seq(e)
+          case (QueryGen.Stat(_, e), _) => Seq(e)
+          case (QueryGen.Bivar(_, x, y), _) => Seq(x, y)
+          case _ => Seq.empty
+        }
+        (a.where.toSeq ++ args, args)
+    }
+    roots.foreach(walk)
+    if (aggArgs.exists(holdsFailingCast)) found += "aggregate"
+    found.toSet
+  }
 
   /** Over a seed block, how many seeds put a column of each kind at each site
     * (`shapes`, keyed by site and `ExprGen.kind`), and how many of those put a

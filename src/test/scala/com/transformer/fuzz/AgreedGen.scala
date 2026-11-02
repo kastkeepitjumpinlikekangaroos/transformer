@@ -16,7 +16,11 @@ import java.math.{BigDecimal => JBigDecimal}
   * `TRIM`, `LAG` and `LEAD` with a default and a top-n over a float key
   * themselves; the producers here stay, so a regeneration keeps every
   * feature's quota, and they could draw from the generators the next time the
-  * corpus is regenerated, with Postgres and DuckDB at hand to check it.
+  * corpus is regenerated, with Postgres and DuckDB at hand to check it. The
+  * generators also draw values at their types' edges and CASTs that can
+  * fail now (W7), which the corpus was not regenerated over: a regeneration
+  * meets queries that fail on their data, whose errors each engine words its
+  * own way.
   * `slt.AgreedCorpus` prints each case with [[PortableSql]] and runs it in
   * the engine and both references.
   *

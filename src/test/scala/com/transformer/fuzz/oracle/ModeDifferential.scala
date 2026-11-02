@@ -3,10 +3,7 @@ package com.transformer.fuzz.oracle
 import com.transformer.core._
 import com.transformer.fuzz.QueryGen.{OrderKey, QueryCase}
 import com.transformer.fuzz.{DataGen, QueryGen, RowOracle}
-import com.transformer.sql.exec.SqlEngine
 import com.transformer.sql.plan.{LogicalBuilder, Ops}
-
-import scala.collection.mutable
 
 /** The mode-differential property for one `(dataset, query)`: every execution
   * mode the engine exposes must produce the SAME result multiset.
@@ -38,6 +35,16 @@ import scala.collection.mutable
   * from the generator's own SQL) is not a finding — [[check]] returns
   * [[Rejected]] and the caller counts it. Only a successfully-planned query whose
   * modes disagree throws (an `AssertionError`, which the harness minimizes).
+  *
+  * '''A query that fails on its data.''' The corpus draws values at their
+  * types' edges, so a query can fail while it runs: an overflow, a decimal
+  * past its type's digits, a date past its range (`CleanRejection.isDataError`).
+  * By decision 1 of plans/testing/15, every mode must agree on whether the
+  * query fails, and where it answers, on the answer; the one exception is a
+  * failure a WHERE condition can cause (`GenQuery.movableFailure`), which the
+  * optimizer may evaluate ahead of the condition that guards it. Which
+  * failure a mode reports is not compared, since its rows meet the failing
+  * values in another order.
   */
 object ModeDifferential {
 
@@ -62,26 +69,38 @@ object ModeDifferential {
     val baselineView = dataset.singlePartition()
 
     // The baseline doubles as the bind/plan probe: `SqlEngine.execute` runs
-    // parse -> bind -> optimize -> plan eagerly and returns before any row is
-    // pulled, so an IllegalArgumentException here is a bind/plan rejection (not
-    // an execution divergence). Because binding and planning are independent of
-    // ExecutionOptions and of partition layout, a query that plans for the
-    // baseline plans for every mode.
-    val baselineQ =
-      try SqlEngine.execute(sql, catalogOf(baselineView), ExecutionOptions.Default)
+    // parse -> bind -> optimize -> plan eagerly, so an IllegalArgumentException
+    // it throws that is not a failure on the data (which `RelEngine.answer`
+    // returns, a global aggregate running as it is planned) is a bind/plan
+    // rejection, not an execution divergence. Because binding and planning are
+    // independent of ExecutionOptions and of partition layout, a query that
+    // plans for the baseline plans for every mode.
+    val baseline =
+      try RelEngine.answer(catalogOf(baselineView), sql, ExecutionOptions.Default)
       catch { case e: IllegalArgumentException => return Rejected(rejectReason(e)) }
-
-    val schema = baselineQ.schema
-    val baselineRows = collectRows(baselineQ)
-    assertSorted(schema, baselineRows, qc.query.orderBy, "baseline", sql)
+    baseline.foreach(a => assertSorted(a.schema, a.rows, qc.query.orderBy, "baseline", sql))
+    val movable = qc.query.movableFailure
 
     modes(dataset).foreach { case (label, view, opts) =>
-      val rows = run(view, sql, opts)
-      RowOracle.multisetEquals(schema, baselineRows, rows).foreach { diff =>
-        throw new AssertionError(
-          s"[mode-differential] $label disagrees with baseline.\n  sql = $sql\n$diff")
+      // Drain-then-snapshot exercises the metrics path end to end without
+      // affecting the result; the snapshot is discarded.
+      val other = RelEngine.answer(catalogOf(view), sql, opts, q => if (opts.metricsEnabled) q.metricsSnapshot)
+      (baseline, other) match {
+        case (Right(baselineAnswer), Right(answer)) =>
+          RowOracle.multisetEquals(baselineAnswer.schema, baselineAnswer.rows, answer.rows).foreach { diff =>
+            throw new AssertionError(
+              s"[mode-differential] $label disagrees with baseline.\n  sql = $sql\n$diff")
+          }
+          assertSorted(baselineAnswer.schema, answer.rows, qc.query.orderBy, label, sql)
+        case (Left(_), Left(_)) => ()
+        case _ if movable => ()
+        case (Left(failure), Right(_)) =>
+          throw new AssertionError(s"[mode-differential] $label answers where the baseline fails on its data " +
+            s"($failure), and no WHERE condition that can fail is there to move.\n  sql = $sql")
+        case (Right(_), Left(failure)) =>
+          throw new AssertionError(s"[mode-differential] $label fails on its data ($failure) where the baseline " +
+            s"answers, and no WHERE condition that can fail is there to move.\n  sql = $sql")
       }
-      assertSorted(schema, rows, qc.query.orderBy, label, sql)
     }
     Agreed
   }
@@ -114,40 +133,10 @@ object ModeDifferential {
     ("metrics-on", d.singlePartition(), MetricsOn),
     ("spill+metrics/4-partitions", d.evenPartitions(3, batchRows = 4), SpillAndMetrics))
 
-  private def run(view: MaterializedView, sql: String, opts: ExecutionOptions): Vector[Array[Any]] = {
-    val q = SqlEngine.execute(sql, catalogOf(view), opts)
-    val rows = collectRows(q)
-    // Drain-then-snapshot exercises the metrics path end to end without
-    // affecting the result; the snapshot is discarded.
-    if (opts.metricsEnabled) q.metricsSnapshot
-    rows
-  }
-
   private def catalogOf(view: MaterializedView): Catalog = {
     val c = new Catalog
     c.register(QueryGen.ViewName, view)
     c
-  }
-
-  private def collectRows(q: ExecutedQuery): Vector[Array[Any]] = {
-    val ncols = q.schema.length
-    val buf = mutable.ArrayBuffer.empty[Array[Any]]
-    val it = q.batches
-    while (it.hasNext) {
-      val b = it.next()
-      var r = 0
-      while (r < b.numRows) {
-        val arr = new Array[Any](ncols)
-        var c = 0
-        while (c < ncols) {
-          arr(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
-          c += 1
-        }
-        buf += arr
-        r += 1
-      }
-    }
-    buf.toVector
   }
 
   /** Assert the output is sorted by the primary ORDER BY key: its NULLs sit

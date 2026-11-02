@@ -105,9 +105,12 @@ object ExprParity {
     * or BIGINT result past its type, or a CAST of NaN or an infinity to an
     * integer, each an `ArithmeticException` (plans/robustness/18), as are a
     * DOUBLE past a FLOAT's range under a CAST and SIGN of NaN
-    * (plans/robustness/30), and a negative SUBSTRING length and a LIKE
-    * pattern that ends in its escape character (plans/robustness/23), which
-    * [[check]] holds the two paths to agree on. Nothing else may throw. The
+    * (plans/robustness/30), a negative SUBSTRING length and a LIKE pattern
+    * that ends in its escape character (plans/robustness/23), and the CASTs
+    * that can fail the generator draws on purpose (text to a type other than
+    * INT, a float to an integer or a DECIMAL, a DATE to a TIMESTAMP past its
+    * range: plans/testing/15), which [[check]] holds the two paths to agree
+    * on. Nothing else may throw. The
     * generator's other partial shapes are CASTs of a guard column under a
     * conditional that keeps them off the rows they fail on, so any other throw
     * means a conditional evaluated an operand where its answer did not need
@@ -132,15 +135,25 @@ object ExprParity {
 
   /** A failure on a value a generated tree's own data can cause, which
     * [[checkTotal]] allows and [[checkVecThrew]] lets the two paths report
-    * differently. The semantics tables hold every run-time error a function
-    * declares to it. */
+    * differently: an `ArithmeticException`, or an `IllegalArgumentException`
+    * whose message is one of `CleanRejection.DataErrors`, which lists every
+    * failure about a value (a CAST that cannot read its input, a date past
+    * its range, a negative SUBSTRING length, a LIKE pattern ending in its
+    * escape), so the two lists cannot drift apart, but a CAST of text to INT,
+    * the guarded shapes' ([[TextToInt]]). The semantics tables hold every
+    * run-time error a function declares to it. */
   def owned(t: Throwable): Boolean = t match {
     case _: ArithmeticException => true
     case e: IllegalArgumentException =>
-      val message = String.valueOf(e.getMessage)
-      message.startsWith("SUBSTRING's length ") || message.startsWith("The LIKE pattern ")
+      CleanRejection.isDataMessage(e.getMessage) && !TextToInt.matches(String.valueOf(e.getMessage))
     case _ => false
   }
+
+  /** The failure of a CAST of text to INT, which only the guarded shapes
+    * draw: a generated tree that fails this way evaluated a guarded CAST on a
+    * row its guard keeps it off, so it is never owned. The CASTs of text the
+    * generator draws unguarded name another type. */
+  private val TextToInt = "^Cannot cast '.*' to int$".r
 
   private def evalOutcome(expr: Expr, batch: ColumnarBatch, row: Int): Outcome =
     try Produced(expr.eval(batch, row))

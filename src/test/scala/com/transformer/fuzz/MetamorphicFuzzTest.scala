@@ -569,6 +569,47 @@ class MetamorphicFuzzTest {
     assertTrue(s"a UNION arm rarely computes an item ($unionComputed)", unionComputed > 29)
   }
 
+  /** The values at their types' edges make queries fail on their data, and
+    * each of the three failures they cause, an integer overflow, a decimal
+    * past its precision and a date past a TIMESTAMP's range, is raised inside
+    * a join, a window, an aggregate and a spill, where the layout relations
+    * hold every layout to fail alike (decision 1 of plans/testing/15). A case
+    * whose relations hold no edge value cannot fail this way and is not run;
+    * each other one runs once with spill on, and the site is the operator on
+    * the failure's stack ([[MetamorphicFuzzTest.failureReach]]). */
+  @Test def dataFailuresReachAJoinAWindowAnAggregateAndSpill(): Unit = {
+    val n = 15000
+    val reached = scala.collection.mutable.Map.empty[(String, String), Int].withDefaultValue(0)
+    var atEdges, failed = 0
+    (0 until n).foreach { seed =>
+      val mc = MetaQueryGen.generate(new Rng(seed.toLong))
+      if (MetamorphicFuzzTest.holdsAnEdge(mc.env)) {
+        atEdges += 1
+        val cells = MetamorphicFuzzTest.failureReach(mc)
+        if (cells.nonEmpty) failed += 1
+        cells.foreach(c => reached(c) += 1)
+      }
+    }
+    val table = MetamorphicFuzzTest.FailureKinds.map { case (kind, _) =>
+      f"  $kind%-17s" + MetamorphicFuzzTest.FailureSites.map { case (site, _) => f" $site=${reached((kind, site))}%-5d" }.mkString
+    }.mkString("\n")
+    println(s"[metamorphic] over $n seeds, $atEdges hold an edge value and $failed of them fail on their data " +
+      s"under spill; by failure and site:\n$table")
+    // Measured over these seeds (4854 at the edges, 556 failing):
+    //   integer overflow  join 155, window 42, aggregate 140, spill 69
+    //   decimal overflow  join 100, window 29, aggregate 72, spill 56
+    //   date range        join 105, window 29, aggregate 81, spill 33
+    // Bounds ~3x below.
+    val floors = Map(
+      "integer overflow" -> Seq(51, 14, 46, 23),
+      "decimal overflow" -> Seq(33, 9, 24, 18),
+      "date range" -> Seq(35, 9, 27, 11))
+    for {
+      (kind, _) <- MetamorphicFuzzTest.FailureKinds
+      ((site, _), floor) <- MetamorphicFuzzTest.FailureSites.zip(floors(kind))
+    } assertTrue(s"a $kind rarely reaches a $site (${reached((kind, site))})\n$table", reached((kind, site)) > floor)
+  }
+
   /** Every function the registry binds as a call, `MOD` among them and the
     * clock functions apart (`QueryGen.CalledFunctions`), is drawn by
     * `MetaQueryGen` on a share of seeds, in any arm of a query, so the
@@ -626,13 +667,15 @@ class MetamorphicFuzzTest {
     * or the decomposition relation's. `MetaQueryGen` drew ASCII alone, and
     * none of the four functions, until plans/testing/15. Generation only. */
   @Test def textReachesEveryStringSite(): Unit = {
-    val t = TextPool.tally(100000)(seed => MetamorphicFuzzTest.textSites(MetaQueryGen.generate(new Rng(seed))))
+    val t = TextPool.tally(150000)(seed => MetamorphicFuzzTest.textSites(MetaQueryGen.generate(new Rng(seed))))
     println(s"[metamorphic] text past ASCII ${t.report}")
     // Measured over these seeds: the thinnest cell is 23 (UPPER over a
     // character from U+E000 to U+FFFF beside one past U+FFFF, the pair that
-    // takes two classes in one column), the function cells mostly 35 to 200,
+    // takes two classes in one column), the function cells mostly 50 to 260,
     // ORDER BY and MIN/MAX hundreds; the floor sits about 3x below the
-    // thinnest. 100000 seeds, generation only, under two seconds.
+    // thinnest. 150000 seeds, generation only, two or three seconds; 100000
+    // left that cell 14 once the edge calls of plans/testing/15 W7 took a
+    // share of the items and keys.
     val low = t.below(TextFloor)
     assertTrue(s"text past ASCII rarely reaches these sites (at most $TextFloor seeds):\n  ${low.mkString("\n  ")}\n${t.report}",
       low.isEmpty)
@@ -1130,6 +1173,49 @@ class MetamorphicFuzzTest {
 }
 
 object MetamorphicFuzzTest {
+
+  private val SpillOn: ExecutionOptions = ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))
+
+  /** The failures on data W7's edge values cause, by the message's start. */
+  private[fuzz] val FailureKinds: Seq[(String, scala.util.matching.Regex)] = Seq(
+    "integer overflow" -> "^Integer overflow: ".r,
+    "decimal overflow" -> "^Decimal overflow: ".r,
+    "date range" -> " is past the range of a (?:DATE|TIMESTAMP),".r)
+
+  /** The operators a failure is raised in, by a frame of its stack. */
+  private[fuzz] val FailureSites: Seq[(String, StackTraceElement => Boolean)] = Seq(
+    "join" -> (f => f.getClassName.contains("JoinExec")),
+    "window" -> (f => f.getClassName.contains("WindowExec")),
+    "aggregate" -> (f => f.getClassName.contains("AggregateExec") || f.getClassName.endsWith("State")),
+    "spill" -> (f => f.getMethodName.toLowerCase(java.util.Locale.ROOT).contains("spill") ||
+      f.getClassName.contains("DiskRun") || f.getClassName.contains("Spill")))
+
+  /** Whether a relation of `env` holds a value at its type's edges
+    * (`DataGen.Edges`). */
+  private[fuzz] def holdsAnEdge(env: RelEnv): Boolean = env.relations.exists { r =>
+    r.schema.fields.indices.exists { i =>
+      val edges = DataGen.Edges.of(r.schema.fields(i).dataType).toSet
+      edges.nonEmpty && r.dataset.rows.exists(row => edges(row(i)))
+    }
+  }
+
+  /** The (failure, site) pairs `mc`'s body reaches when it runs with spill
+    * on: the kind of failure on its data it stops with, and each operator
+    * on the stack of the exception that raised it. Empty when it answers or
+    * does not bind. */
+  private[fuzz] def failureReach(mc: MetaCase): Set[(String, String)] =
+    try { RelEngine.runRows(mc.env.catalog(), mc.query.renderBody, SpillOn); Set.empty }
+    catch {
+      case scala.util.control.NonFatal(e) if oracle.CleanRejection.isDataError(e) =>
+        val raised = oracle.CleanRejection.causes(e).filter(c => oracle.CleanRejection.isDataMessage(c.getMessage))
+        val frames = raised.flatMap(_.getStackTrace)
+        val message = raised.headOption.map(_.getMessage).getOrElse("")
+        (for {
+          (kind, re) <- FailureKinds if re.findFirstIn(message).isDefined
+          (site, at) <- FailureSites if frames.exists(at)
+        } yield (kind, site)).toSet
+      case scala.util.control.NonFatal(_) => Set.empty
+    }
 
   /** Every window in any arm of `q` (this body, a UNION arm, a CTE body), paired
     * with the FROM clause its `orderCols` resolve against. */
