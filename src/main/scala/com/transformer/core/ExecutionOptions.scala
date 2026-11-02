@@ -26,12 +26,24 @@ package com.transformer.core
   *   `PhysicalPlanner.plan`. When true, each operator's iterator is wrapped in
   *   a `MeteredIterator` and `DataJob.runOneTask` writes a `_perf.json` sibling
   *   to `_run.json`.
+  * @param stopped
+  *   Asked before each batch every scan of the query reads, on whichever thread
+  *   reads it; once it says true, the scan throws [[QueryStoppedException]],
+  *   which fails the query wherever it is, so no operator reads another row.
+  *   Work already holding its rows (a sort of what it has read) runs to its
+  *   end first. Never, by default; `transformer query` stops a statement on
+  *   Ctrl-C through it.
   */
 final case class ExecutionOptions(
     spillEnabled: Boolean = false,
     spillThresholdBytes: Option[Long] = None,
     spillMaxRuns: Int = ExecutionOptions.DefaultSpillMaxRuns,
-    metricsEnabled: Boolean = false)
+    metricsEnabled: Boolean = false,
+    stopped: () => Boolean = ExecutionOptions.NeverStopped)
+
+/** What a scan throws once its query's [[ExecutionOptions.stopped]] says to
+  * stop. */
+final class QueryStoppedException extends RuntimeException("the query was stopped")
 
 object ExecutionOptions {
 
@@ -39,6 +51,10 @@ object ExecutionOptions {
     * trip it under normal conditions, low enough that a stuck loop produces a
     * clear error before exhausting disk. */
   val DefaultSpillMaxRuns: Int = 1000
+
+  /** The default [[ExecutionOptions.stopped]]: one value, so options that
+    * leave it alone are equal. */
+  val NeverStopped: () => Boolean = () => false
 
   /** Default options — spill disabled. Use this in any code path that doesn't
     * carry per-task config (GUI SQL Console, tests that don't care). */

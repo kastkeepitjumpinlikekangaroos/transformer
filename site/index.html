@@ -105,6 +105,7 @@
           <li>Reads and writes CSV and Parquet, using Parquet row-group pruning and parallel scans</li>
           <li>Paths and SQL accept time variables like <code>{{ today }}</code>, so each scheduled run writes its own partition</li>
           <li>Every run leaves a <code>job.json</code> and a per-task <code>_run.json</code> with status, row counts, timings, and samples of the rows that failed a validation</li>
+          <li>One-off SQL over files, or over a job's tables, with <code>transformer query</code>: one command, or a shell with history and tab completion</li>
         </ul>
       </div>
       <div>
@@ -145,6 +146,7 @@
           <li><strong>Scaffold.</strong> Make a directory per table and write the SQL. The layout is the same in every project, so an agent can copy it from one example.</li>
           <li><strong>Run.</strong> <code>transformer run &lt;jobDir&gt;</code> exits 0 only when every task and validation passes.</li>
           <li><strong>Diagnose.</strong> Each failed task prints its reason, and <code>job.json</code> names failing validations with row counts and points to a CSV of sample bad rows.</li>
+          <li><strong>Inspect.</strong> <code>transformer query --job &lt;jobDir&gt; "SELECT ..."</code> runs SQL over any table the run wrote, or over any CSV or Parquet file, and prints a table or JSON.</li>
           <li><strong>Verify.</strong> Data-quality checks are SQL files the agent writes next to the table it's changing.</li>
         </ul>
       </div>

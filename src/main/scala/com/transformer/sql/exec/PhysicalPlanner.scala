@@ -120,13 +120,13 @@ object PhysicalPlanner {
   }
 
   private def planInner(logical: LogicalPlan, opts: ExecutionOptions): PhysicalPlan = logical match {
-    case LogicalScan(_, view, _) => ScanExec(view)
+    case LogicalScan(_, view, _) => ScanExec(view, stopped = opts.stopped)
     case LogicalFilter(LogicalScan(name, view, schema), pred) =>
       // Best-effort: try to push the predicate into the scan view. The original
       // FilterExec stays in place — pushdown only enables row-group skipping
       // (stats can prove non-matching groups, never prove matching ones).
       val pushed = tryPushdown(view, pred)
-      FilterExec(ScanExec(pushed.getOrElse(view)), pred)
+      FilterExec(ScanExec(pushed.getOrElse(view), stopped = opts.stopped), pred)
     case LogicalFilter(child, pred) => FilterExec(planInner(child, opts), pred)
     case LogicalProject(child, projs) => ProjectExec(planInner(child, opts), projs)
     // Fast path: `SELECT COUNT(*) FROM <view>` with no WHERE, no GROUP BY, no HAVING.
@@ -540,7 +540,7 @@ object PhysicalPlanner {
     case s: ScanExec =>
       // Leaf — no children to wrap. Rebuild with the metrics node so
       // ParquetReader-backed views can populate scan-side counters.
-      (ScanExec(s.view, node), Vector.empty)
+      (ScanExec(s.view, node, s.stopped), Vector.empty)
     case _: CountStarMetadataExec =>
       (plan, Vector.empty)
     case FilterExec(child, pred) =>

@@ -126,6 +126,32 @@ Tables:         15
       </div>
 
       <div class="step">
+        <h3>Query what it wrote</h3>
+<pre class="term"><span class="p">$ </span>java -jar transformer.jar query --job examples/jaffle_shop/job \
+    --job-output /tmp/jaffle-out \
+    "SELECT customer_type, COUNT(*) AS customers, ROUND(AVG(lifetime_spend), 2) AS avg_spend
+     FROM customers GROUP BY customer_type ORDER BY customer_type"
+┌───────────────┬───────────┬───────────┐
+│ customer_type │ customers │ avg_spend │
+│ STRING        │    BIGINT │    DOUBLE │
+├───────────────┼───────────┼───────────┤
+│ new           │         6 │     18.91 │
+│ returning     │       929 │    722.62 │
+└───────────────┴───────────┴───────────┘
+2 rows</pre>
+        <p class="muted">
+          <code>transformer query</code> runs SQL from the command line, here
+          over the job's inputs and the tables its run wrote, each by its
+          name. <code>--table orders=data/orders.csv</code> names any CSV or
+          Parquet file instead, with no job at all. Add
+          <code>--format csv</code> or <code>--format json</code> for a
+          script, and <code>--output result.parquet</code> to write the
+          result to a file. With no SQL it opens a shell, where
+          <code>.tables</code> lists what you can query.
+        </p>
+      </div>
+
+      <div class="step">
         <h3>Open it in the GUI</h3>
 <pre class="term"><span class="p">$ </span>java -jar transformer.jar gui examples/jaffle_shop/job</pre>
         <p class="muted">

@@ -5248,4 +5248,57 @@ class SqlEngineTest {
     named.register("b", memView(Schema(Vector(Field("true", DataType.IntType))), Seq(Seq(Array[Any](7)))))
     assertEquals(Seq(Seq(7, true)), rowsOf("SELECT \"true\" AS c, true AS l FROM b", named))
   }
+
+  // ---- ExecutionOptions.stopped ------------------------------------------------
+
+  /** `parts` partitions of 4-row batches without end, counting what it serves. */
+  private final class Endless(parts: Int) extends CatalogView {
+    val served = new java.util.concurrent.atomic.AtomicInteger
+    val schema: Schema = Schema(Vector(Field("k", DataType.IntType), Field("v", DataType.IntType)))
+    def numPartitions: Int = parts
+    def readPartition(p: Int): Iterator[ColumnarBatch] = Iterator.continually {
+      val b = new ColumnarBatch(schema, 4)
+      (0 until 4).foreach { r => b.column(0).setBoxed(r, r % 2); b.column(1).setBoxed(r, r) }
+      b.setNumRows(4)
+      served.incrementAndGet()
+      b
+    }
+  }
+
+  /** Options that stop the query once its scans have asked `after` times. */
+  private def stoppingAfter(after: Int): ExecutionOptions = {
+    val asked = new java.util.concurrent.atomic.AtomicInteger
+    ExecutionOptions(stopped = () => asked.incrementAndGet() > after)
+  }
+
+  private def stops(run: => Unit): Unit =
+    try { run; fail("the query did not stop") }
+    catch {
+      case e: Throwable =>
+        if (!Iterator.iterate(e)(_.getCause).takeWhile(_ != null).exists(_.isInstanceOf[QueryStoppedException])) throw e
+    }
+
+  @Test def aQueryStopsAtTheNextBatchEachScanReadsOnceItsOptionsSaySo(): Unit = {
+    val endless = new Endless(parts = 3)
+    val cat = catalogWith("t" -> endless)
+    // A grouped aggregate reads its partitions on the pool's threads.
+    stops(SqlEngine.execute("SELECT k, SUM(v) AS s FROM t GROUP BY k", cat, stoppingAfter(10)).batches.foreach(_ => ()))
+    assertTrue(s"served ${endless.served.get}", endless.served.get <= 10)
+    // So does a join, on both sides.
+    val both = new Endless(parts = 2)
+    val cat2 = catalogWith("t" -> both)
+    cat2.register("u", new Endless(parts = 2))
+    stops(SqlEngine.execute("SELECT t.k FROM t JOIN u ON t.k = u.k", cat2, stoppingAfter(6)).batches.foreach(_ => ()))
+    assertTrue(s"served ${both.served.get}", both.served.get <= 6)
+  }
+
+  @Test def aStopReachesACteTheQueryMaterializesAsItPlans(): Unit = {
+    val p = tmpCsv("a.csv", "x\n1\n2\n")
+    val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
+    val twice = "WITH q AS (SELECT x FROM t) SELECT a.x FROM q a JOIN q b ON a.x = b.x"
+    stops(SqlEngine.execute(twice, cat, ExecutionOptions(stopped = () => true)).batches.foreach(_ => ()))
+    // Never stopped, it answers.
+    assertEquals(Seq(1, 2), collectAllRows(SqlEngine.execute(twice, cat, ExecutionOptions())).map(_("x").asInstanceOf[Int]).sorted)
+  }
 }
+

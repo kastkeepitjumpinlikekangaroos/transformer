@@ -37,7 +37,7 @@ final class DataGrid extends TableView[Array[Any]] {
     fieldNames = schema.fieldNames
     schema.fields.iterator.zipWithIndex.foreach { case (field, i) =>
       val widest = rows.iterator.take(200).map(r => if (i < r.length) DataGrid.format(r(i)).length else 0)
-        .foldLeft(math.max(field.name.length, DataGrid.typeName(field.dataType).length))(math.max)
+        .foldLeft(math.max(field.name.length, DataType.sqlName(field.dataType).length))(math.max)
       val col = column(field.name, field.dataType, i)
       col.setPrefWidth(math.max(70.0, math.min(360.0, widest * 7.6 + 28)))
       getColumns.add(col)
@@ -62,7 +62,7 @@ final class DataGrid extends TableView[Array[Any]] {
     val col = new TableColumn[Array[Any], Any]()
     val title = new Label(name)
     title.getStyleClass.add("column-name")
-    val typeLabel = new Label(DataGrid.typeName(dataType))
+    val typeLabel = new Label(DataType.sqlName(dataType))
     typeLabel.getStyleClass.add("column-type")
     col.setGraphic(new VBox(0, title, typeLabel))
     col.setCellValueFactory(features => {
@@ -120,21 +120,6 @@ object DataGrid {
     case bd: java.math.BigDecimal => bd.toPlainString
     case bytes: Array[Byte] => s"<binary ${bytes.length} bytes>"
     case other => String.valueOf(other)
-  }
-
-  /** A type as SQL writes it: BIGINT, DECIMAL(10,2). */
-  def typeName(t: DataType): String = t match {
-    case DataType.StringType => "STRING"
-    case DataType.IntType => "INT"
-    case DataType.LongType => "BIGINT"
-    case DataType.FloatType => "FLOAT"
-    case DataType.DoubleType => "DOUBLE"
-    case DataType.BooleanType => "BOOLEAN"
-    case DataType.DateType => "DATE"
-    case DataType.TimestampType => "TIMESTAMP"
-    case DataType.BinaryType => "BINARY"
-    case DataType.NullType => "NULL"
-    case DataType.DecimalType(p, s) => s"DECIMAL($p,$s)"
   }
 
   /** The first `max` rows of `view`, read a partition at a time, stopping as

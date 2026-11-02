@@ -4,7 +4,7 @@ import com.transformer.gui.GuiApp
 import com.transformer.sql.exec.SqlEngine
 
 /** Entry point of the `transformer` deploy jar. `gui` opens the JavaFX app;
-  * every other command is [[Cli]]'s. */
+  * every other command (`run`, `query`, `help`) is [[Cli]]'s. */
 object TransformerMain {
 
   def main(args: Array[String]): Unit = {
@@ -21,6 +21,8 @@ object TransformerMain {
         GuiApp.main(jobDir.map(_.toString).toArray)
       case Right(cmd: Cli.Command.Run) =>
         System.exit(Cli.run(cmd, System.out, System.err))
+      case Right(cmd: Cli.Command.Query) =>
+        System.exit(Cli.query(cmd, System.in, System.out, System.err, Cli.onTerminal()))
     }
   }
 }

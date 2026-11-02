@@ -122,7 +122,7 @@ object Explain {
     }.mkString(", ")
     def visit(p: PhysicalPlan, depth: Int): Unit = {
       val (line, children) = p match {
-        case ScanExec(view, _) =>
+        case ScanExec(view, _, _) =>
           val name = Option(names.get(view)).fold("a view")(n => PlanSql.identifier(n))
           (s"Scan $name: ${view.schema.fieldNames.map(PlanSql.identifier).mkString(", ")}", Nil)
         case CountStarMetadataExec(count, column) =>

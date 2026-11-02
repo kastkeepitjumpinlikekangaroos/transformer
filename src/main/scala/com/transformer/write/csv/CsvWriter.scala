@@ -3,7 +3,7 @@ package com.transformer.write.csv
 import com.transformer.core._
 import com.transformer.read.csv.{CsvOptions, CsvValues}
 
-import java.io.{BufferedWriter, OutputStreamWriter}
+import java.io.{BufferedWriter, OutputStreamWriter, Writer}
 import java.nio.charset.{Charset, CharsetEncoder, CodingErrorAction, StandardCharsets}
 import java.nio.file.{Files, Path, Paths, StandardCopyOption}
 import java.util.Locale
@@ -51,18 +51,10 @@ object CsvWriteOptions {
   }
 }
 
-/** Writes a stream of [[ColumnarBatch]]es to a single CSV file. Writes go to a temp
-  * file in the same directory and are atomically renamed at close, so partial output
-  * never appears at the target path on failure.
-  *
-  * A NULL is the null string, unquoted. A value is its text ([[CsvValues.format]],
-  * which the reader parses back), quoted when it holds the delimiter, the quote or
-  * a line break, when it is the null string itself (the empty string, by default),
-  * or when it starts with a byte-order mark, which the reader would otherwise take
-  * for one; and an empty column name is quoted, so a header is never blank. Inside
-  * quotes the quote is doubled, or escaped with `escape`, which is then escaped
-  * too. A value holding a character the charset cannot encode, or half of a
-  * surrogate pair, fails the write naming its row and column.
+/** Writes a stream of [[ColumnarBatch]]es to a single CSV file, as
+  * [[CsvRowWriter]] writes rows. Writes go to a temp file in the same directory
+  * and are atomically renamed at close, so partial output never appears at the
+  * target path on failure.
   */
 final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = CsvWriteOptions()) {
 
@@ -73,9 +65,46 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
     if (parent != null) parent.resolve(name) else Paths.get(name)
   }
 
-  private def reportingEncoder(): CharsetEncoder = options.charset.newEncoder()
-    .onMalformedInput(CodingErrorAction.REPORT)
-    .onUnmappableCharacter(CodingErrorAction.REPORT)
+  // A reporting encoder, so a value that slipped past the checks fails the
+  // write rather than reaching the file as `?`.
+  private val out = new BufferedWriter(
+    new OutputStreamWriter(Files.newOutputStream(tmp), CsvWriter.reportingEncoder(options.charset)))
+
+  private val rows = new CsvRowWriter(out, schema, options, s"CSV file '$target'")
+
+  def write(batch: ColumnarBatch): Unit = rows.write(batch)
+
+  /** Flush, close, and atomically rename to the target path. */
+  def close(): Long = {
+    out.flush()
+    out.close()
+    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+    rows.rowsWritten
+  }
+
+  /** Discard any buffered output and remove the temp file. */
+  def abort(): Unit = {
+    try out.close() catch { case _: Throwable => () }
+    try Files.deleteIfExists(tmp) catch { case _: Throwable => () }
+    ()
+  }
+}
+
+/** CSV text on `out`: the header, when `options` has one, then each row
+  * written. `destination` names where the text goes in an error (`CSV file
+  * 'x.csv'`). A CSV file is written through one ([[CsvWriter]]), and so is a
+  * result `transformer query` prints as CSV.
+  *
+  * A NULL is the null string, unquoted. A value is its text ([[CsvValues.format]],
+  * which the reader parses back), quoted when it holds the delimiter, the quote or
+  * a line break, when it is the null string itself (the empty string, by default),
+  * or when it starts with a byte-order mark, which the reader would otherwise take
+  * for one; and an empty column name is quoted, so a header is never blank. Inside
+  * quotes the quote is doubled, or escaped with `escape`, which is then escaped
+  * too. A value holding a character the charset cannot encode, or half of a
+  * surrogate pair, fails the write naming its row and column.
+  */
+final class CsvRowWriter(out: Writer, schema: Schema, options: CsvWriteOptions, destination: String) {
 
   /** Asks whether a value encodes, for a charset that does not encode every
     * character; the stream keeps an encoder of its own, whose state a check
@@ -83,14 +112,10 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
     * half of a surrogate pair fails, which [[formatField]] looks for itself. */
   private val checker: Option[CharsetEncoder] = {
     val name = options.charset.name.toUpperCase(Locale.ROOT)
-    if (name.startsWith("UTF-") || name == "GB18030") None else Some(reportingEncoder())
+    if (name.startsWith("UTF-") || name == "GB18030") None else Some(CsvWriter.reportingEncoder(options.charset))
   }
 
-  // A reporting encoder, so a value that slipped past the checks fails the
-  // write rather than reaching the file as `?`.
-  private val out = new BufferedWriter(new OutputStreamWriter(Files.newOutputStream(tmp), reportingEncoder()))
-
-  private val rowsWritten: Array[Long] = Array(0L)
+  private var written: Long = 0L
 
   if (options.header) {
     var i = 0
@@ -102,6 +127,9 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
     }
     out.write(options.lineEnding)
   }
+
+  /** The rows written so far, the header not counted. */
+  def rowsWritten: Long = written
 
   def write(batch: ColumnarBatch): Unit = {
     if (batch.schema != schema && batch.schema.fieldNames != schema.fieldNames) {
@@ -118,28 +146,13 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
         if (c > 0) out.write(options.delimiter.toInt)
         val v = batch.column(c)
         if (v.isNull(row)) out.write(options.nullValue)
-        else out.write(formatField(CsvValues.format(v, row), rowsWritten(0) + row + 1, c))
+        else out.write(formatField(CsvValues.format(v, row), written + row + 1, c))
         c += 1
       }
       out.write(options.lineEnding)
       row += 1
     }
-    rowsWritten(0) += nrows
-  }
-
-  /** Flush, close, and atomically rename to the target path. */
-  def close(): Long = {
-    out.flush()
-    out.close()
-    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-    rowsWritten(0)
-  }
-
-  /** Discard any buffered output and remove the temp file. */
-  def abort(): Unit = {
-    try out.close() catch { case _: Throwable => () }
-    try Files.deleteIfExists(tmp) catch { case _: Throwable => () }
-    ()
+    written += nrows
   }
 
   /** `s` as the file holds it: as is, or quoted with its quotes (and
@@ -188,12 +201,18 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
   private def unwritable(row: Long, column: Int, what: String): Nothing = {
     val where = if (row == 0L) "the header" else s"row $row"
     throw new IllegalArgumentException(
-      s"Cannot write CSV file '$target': $where, column '${schema.fields(column).name}' holds $what")
+      s"Cannot write $destination: $where, column '${schema.fields(column).name}' holds $what")
   }
 }
 
 object CsvWriter {
-  private val ByteOrderMark: Char = 0xfeff.toChar
+  private[csv] val ByteOrderMark: Char = 0xfeff.toChar
+
+  /** An encoder of `charset` that fails on a character it cannot encode,
+    * rather than writing `?`. */
+  private[csv] def reportingEncoder(charset: Charset): CharsetEncoder = charset.newEncoder()
+    .onMalformedInput(CodingErrorAction.REPORT)
+    .onUnmappableCharacter(CodingErrorAction.REPORT)
 
   /** Drain an iterator of batches into a single CSV file. Returns rows written. */
   def writeAll(target: Path, schema: Schema, batches: Iterator[ColumnarBatch],

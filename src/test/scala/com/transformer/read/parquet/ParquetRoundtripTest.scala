@@ -314,4 +314,21 @@ class ParquetRoundtripTest {
     assertEquals(0, ks.min)
     assertEquals(511, ks.max)
   }
+
+  @Test def aStringColumnPastItsInternBudgetReadsEveryValue(): Unit = {
+    // One row group holding more distinct text than a column interns (about
+    // 7 MB of it, past the 4 MB budget): the values read once the budget is
+    // spent are decoded each time, the repeats come from the cache, and every
+    // value reads back as it was written.
+    val schema = Schema(Field("i", DataType.IntType), Field("s", DataType.StringType))
+    val wide = "x" * 2000
+    val rows = (0 until 6000).map { i =>
+      Seq[Any](i, if (i % 3 == 0) "repeated" else if (i % 7 == 0) null else s"$i-$wide")
+    }
+    val target = Files.createTempFile("pq-intern-", ".parquet")
+    Files.delete(target)
+    TParquetWriter.writeAll(target, schema, rows.grouped(1000).map(makeBatch(schema, _)))
+    val back = collectRows(ParquetReader.fromPath(target.toString)).sortBy(_("i").asInstanceOf[Int])
+    assertEquals(rows.map(_(1)), back.map(_("s")))
+  }
 }

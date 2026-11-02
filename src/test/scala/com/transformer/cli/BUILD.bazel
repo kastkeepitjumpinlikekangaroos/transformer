@@ -1,11 +1,22 @@
 load("@rules_scala//scala:scala.bzl", "scala_junit_test")
 
+# The `transformer` command line: `run` and `query` parsed and run headless,
+# and `query`'s parts (the script reader, the result printer, the session's
+# views, COPY and dot commands, and the shell on a dumb JLine terminal).
 scala_junit_test(
     name = "cli_test",
-    srcs = ["CliTest.scala"],
+    srcs = [
+        "CliTest.scala",
+        "QuerySessionTest.scala",
+        "ResultPrinterTest.scala",
+        "ShellTest.scala",
+        "SqlScriptTest.scala",
+    ],
     suffixes = ["Test"],
     deps = [
         "//src/main/scala/com/transformer/cli",
+        "//src/main/scala/com/transformer/core",
         "@maven//:junit_junit",
+        "@maven//:org_jline_jline",
     ],
 )

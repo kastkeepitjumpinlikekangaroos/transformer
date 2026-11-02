@@ -21,23 +21,34 @@ trait PhysicalPlan {
   * scan-side counters (bytesRead, rowGroupsRead / rowGroupsSkipped,
   * predicatePushedDownCount) flow into the node via a per-call recorder. For
   * non-parquet views (CSV, in-memory) the counters stay zero — those readers
-  * have no row-group metadata to attribute. */
-final case class ScanExec(view: CatalogView, metricsNode: MetricsNode = null) extends PhysicalPlan {
+  * have no row-group metadata to attribute.
+  *
+  * `stopped` is the query's [[ExecutionOptions.stopped]], asked before each
+  * batch; once it says true, the scan throws [[QueryStoppedException]]. */
+final case class ScanExec(view: CatalogView, metricsNode: MetricsNode = null,
+    stopped: () => Boolean = ExecutionOptions.NeverStopped) extends PhysicalPlan {
   def outputSchema: Schema = view.schema
   def numPartitions: Int = view.numPartitions
-  def execute(partition: Int): Iterator[ColumnarBatch] = view match {
-    case pr: ParquetReader if metricsNode != null =>
-      pr.readPartitionWithMetrics(partition, new ParquetReader.MetricsRecorder {
-        def addBytesRead(n: Long): Unit =
-          metricsNode.counters(ScanExec.IdxBytesRead).add(n)
-        def addRowGroupsRead(n: Long): Unit =
-          metricsNode.counters(ScanExec.IdxRowGroupsRead).add(n)
-        def addRowGroupsSkipped(n: Long): Unit =
-          metricsNode.counters(ScanExec.IdxRowGroupsSkipped).add(n)
-        def addPredicatePushedDown(n: Long): Unit =
-          metricsNode.counters(ScanExec.IdxPredicatePushedDownCount).add(n)
-      })
-    case _ => view.readPartition(partition)
+  def execute(partition: Int): Iterator[ColumnarBatch] = {
+    val batches = view match {
+      case pr: ParquetReader if metricsNode != null =>
+        pr.readPartitionWithMetrics(partition, new ParquetReader.MetricsRecorder {
+          def addBytesRead(n: Long): Unit =
+            metricsNode.counters(ScanExec.IdxBytesRead).add(n)
+          def addRowGroupsRead(n: Long): Unit =
+            metricsNode.counters(ScanExec.IdxRowGroupsRead).add(n)
+          def addRowGroupsSkipped(n: Long): Unit =
+            metricsNode.counters(ScanExec.IdxRowGroupsSkipped).add(n)
+          def addPredicatePushedDown(n: Long): Unit =
+            metricsNode.counters(ScanExec.IdxPredicatePushedDownCount).add(n)
+        })
+      case _ => view.readPartition(partition)
+    }
+    if (stopped eq ExecutionOptions.NeverStopped) batches
+    else new Iterator[ColumnarBatch] {
+      def hasNext: Boolean = { if (stopped()) throw new QueryStoppedException; batches.hasNext }
+      def next(): ColumnarBatch = batches.next()
+    }
   }
 }
 

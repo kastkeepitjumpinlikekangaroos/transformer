@@ -1,16 +1,32 @@
 load("@rules_scala//scala:scala.bzl", "scala_library")
 
-# The `transformer` command line without the GUI: argument parsing and the
-# headless `run` command. No JavaFX, so a test drives it directly.
+# The `transformer` command line without the GUI: argument parsing, the
+# headless `run` command, and `query` (SQL over files, one-off or in a JLine
+# shell). No JavaFX, so a test drives it directly. gui:session is the GUI's
+# toolkit-free job session, which `query --job` reads a job through as the
+# GUI's SQL console does.
 scala_library(
     name = "cli",
-    srcs = ["Cli.scala"],
+    srcs = [
+        "Cli.scala",
+        "QuerySession.scala",
+        "ResultPrinter.scala",
+        "Shell.scala",
+        "SqlScript.scala",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/gui:session",
         "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/read/csv",
         "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/parse",
+        "//src/main/scala/com/transformer/sql/plan",
         "//src/main/scala/com/transformer/temporal",
+        "//src/main/scala/com/transformer/write/csv",
+        "//src/main/scala/com/transformer/write/parquet",
+        "@maven//:org_jline_jline",
     ],
 )
 

@@ -1,0 +1,304 @@
+package com.transformer.cli
+
+import com.transformer.core._
+import org.junit.Assert._
+import org.junit.Test
+
+import java.io.{ByteArrayOutputStream, IOException, OutputStream, PrintStream}
+import java.nio.charset.StandardCharsets
+import java.nio.file.{Files, Path}
+import java.util.concurrent.atomic.AtomicInteger
+
+class QuerySessionTest {
+
+  private val dir: Path = Files.createTempDirectory("query-session-")
+
+  private def file(name: String, contents: String): Path = {
+    val p = dir.resolve(name)
+    Files.createDirectories(p.getParent)
+    Files.writeString(p, contents)
+  }
+
+  /** A session printing CSV, with `t` (a, b: 1..3) and `u` (a, s). */
+  private def session(): QuerySession = {
+    val s = new QuerySession
+    s.format = OutputFormat.Csv
+    s.addTable("t", file("t.csv", "a,b\n1,10\n2,20\n3,30\n").toString, None, Map.empty)
+    s.addTable("u", file("u.csv", "a,s\n1,one\n3,three\n").toString, None, Map.empty)
+    s
+  }
+
+  private final class Ran(val ok: Boolean, val out: String, val err: String)
+
+  private def run(s: QuerySession, script: String, into: Option[String] = None, cancel: Cancel = new Cancel): Ran = {
+    val out = new ByteArrayOutputStream()
+    val err = new ByteArrayOutputStream()
+    val ok = s.runScript(script, new Io(new PrintStream(out, true, "UTF-8"), new PrintStream(err, true, "UTF-8"), cancel), into)
+    new Ran(ok, out.toString(StandardCharsets.UTF_8), err.toString(StandardCharsets.UTF_8))
+  }
+
+  private def lines(s: String*): String = s.mkString("", "\n", "\n")
+
+  private def ok(s: QuerySession, script: String): String = {
+    val r = run(s, script)
+    assertTrue(s"failed: ${r.err}", r.ok)
+    r.out
+  }
+
+  private def error(s: QuerySession, script: String): String = {
+    val r = run(s, script)
+    assertFalse(s"ran: ${r.out}", r.ok)
+    r.err
+  }
+
+  // ---- views --------------------------------------------------------------------
+
+  @Test def aViewIsDefinedAheadOfEachStatementThatReadsIt(): Unit = {
+    val s = session()
+    assertEquals(lines("n", "2", "a", "2", "3"), ok(s, """
+      CREATE VIEW big AS SELECT a, b FROM t WHERE b > 15;
+      CREATE VIEW total (n) AS SELECT COUNT(*) FROM big;
+      SELECT * FROM total;
+      SELECT a FROM big ORDER BY a"""))
+    // In a statement's own WITH, in a join, and under EXPLAIN.
+    assertEquals(lines("n", "2"), ok(s, "WITH q AS (SELECT a FROM big) SELECT COUNT(*) AS n FROM q"))
+    assertEquals(lines("s", "three"), ok(s, "SELECT u.s FROM big JOIN u ON big.a = u.a"))
+    s.format = OutputFormat.Table
+    assertTrue(ok(s, "EXPLAIN SELECT * FROM total").contains("Scan t"))
+  }
+
+  @Test def aViewWithItsOwnWithAndAColumnListBindsAsWritten(): Unit = {
+    val s = session()
+    ok(s, "CREATE VIEW v (x, y) AS WITH q AS (SELECT a, b FROM t) SELECT a * 2, b FROM q -- doubled")
+    assertEquals(lines("x,y", "6,30"), ok(s, "SELECT x, y FROM v WHERE y = 30"))
+  }
+
+  @Test def aViewReadsTheFilesAsTheyAreNow(): Unit = {
+    val s = session()
+    ok(s, "CREATE VIEW v AS SELECT SUM(a) AS total FROM t")
+    assertEquals(lines("total", "6"), ok(s, "SELECT total FROM v"))
+    ok(s, s".table t ${file("t2.csv", "a\n100\n200\n")}")
+    assertEquals(lines("total", "300"), ok(s, "SELECT total FROM v"))
+  }
+
+  @Test def createViewRefusesWhatWouldNotRead(): Unit = {
+    val s = session()
+    ok(s, "CREATE VIEW v AS SELECT a FROM t")
+    assertTrue(error(s, "CREATE VIEW v AS SELECT b FROM t").contains("View v already exists; CREATE OR REPLACE VIEW replaces it"))
+    ok(s, "CREATE OR REPLACE VIEW v AS SELECT b FROM t")
+    assertEquals(lines("b", "10", "20", "30"), ok(s, "SELECT * FROM v"))
+    assertTrue(error(s, "CREATE VIEW t AS SELECT 1 AS one").contains("The name t is taken by the table t"))
+    assertTrue(error(s, "CREATE OR REPLACE VIEW v AS SELECT * FROM v").contains("View v would read itself"))
+    ok(s, "CREATE VIEW w AS SELECT b FROM v")
+    assertTrue(error(s, "CREATE OR REPLACE VIEW v AS SELECT b FROM w").contains("View v would read itself"))
+    assertTrue(error(s, "CREATE VIEW twice AS SELECT a, a FROM t").contains("returns more than one column named 'a'"))
+    assertTrue(error(s, "CREATE VIEW bad AS SELECT nope FROM t").contains("Unknown column 'nope'"))
+    assertTrue(error(s, "CREATE VIEW none AS SELECT a FROM missing").contains("missing"))
+    // A refused view is not created.
+    assertTrue(error(s, "SELECT * FROM bad").contains("bad"))
+  }
+
+  @Test def dropViewDropsOnlyAView(): Unit = {
+    val s = session()
+    ok(s, "CREATE VIEW v AS SELECT a FROM t; DROP VIEW v")
+    assertTrue(error(s, "SELECT * FROM v").contains("'v'"))
+    ok(s, "DROP VIEW IF EXISTS v")
+    assertTrue(error(s, "DROP VIEW v").contains("There is no view v"))
+    assertTrue(error(s, "DROP VIEW t").contains("t is the table t"))
+  }
+
+  // ---- COPY -----------------------------------------------------------------------
+
+  @Test def copyWritesOneFileInTheFormatItsNameSays(): Unit = {
+    val s = session()
+    val csv = dir.resolve("out/pipes.csv")
+    val r = run(s, s"COPY (SELECT a, b FROM t WHERE a > 1 ORDER BY a) TO '$csv' (delimiter '|', HEADER false)")
+    assertTrue(r.err, r.ok)
+    assertEquals(lines(s"Wrote 2 rows to $csv"), r.err)
+    assertEquals("2|20\n3|30\n", Files.readString(csv))
+
+    val parquet = dir.resolve("out/t.parquet")
+    ok(s, s"CREATE VIEW v AS SELECT a, b * 2 AS b2 FROM t; COPY v TO '$parquet' (compression gzip)")
+    ok(s, s".table back $parquet")
+    assertEquals(lines("a,b2", "3,60"), ok(s, "SELECT * FROM back WHERE a = 3"))
+
+    // FORMAT names the format whatever the name says.
+    val txt = dir.resolve("out/t.txt")
+    ok(s, s"COPY t TO '$txt' (FORMAT csv)")
+    assertTrue(Files.readString(txt).startsWith("a,b\n"))
+  }
+
+  @Test def copyRefusesWhatItCannotWrite(): Unit = {
+    val s = session()
+    assertTrue(error(s, s"COPY t TO '${dir.resolve("x.txt")}'").contains("Cannot tell the format of"))
+    assertTrue(error(s, s"COPY t TO '${dir.resolve("x.csv")}' (delimitr ';')")
+      .contains("COPY TO a csv file takes FORMAT and header, delimiter, quote, escape, nullValue, charset, lineEnding, not delimitr"))
+    assertTrue(error(s, s"COPY t TO '${dir.resolve("x.parquet")}' (parquet_write_parallelism 2)")
+      .contains("takes FORMAT and compression, parquet_row_group_size, not parquet_write_parallelism"))
+    assertTrue(error(s, s"COPY t TO '${dir.resolve("x.csv")}' (header false, HEADER true)").contains("names the option header twice"))
+    assertTrue(error(s, s"COPY t TO '${dir.resolve("x.csv")}' (FORMAT xml)").contains("FORMAT csv or FORMAT parquet, not xml"))
+    assertTrue(error(s, s"COPY t TO '${dir.resolve("x.csv")}' (header maybe)").contains("must be true or false"))
+    assertTrue(error(s, s"COPY t TO '$dir'").contains("is a directory"))
+    assertTrue(error(s, s"COPY (SELECT a, a FROM t) TO '${dir.resolve("x.csv")}'").contains("more than one column named 'a'"))
+    assertFalse(Files.exists(dir.resolve("x.csv")))
+  }
+
+  // ---- dot commands ---------------------------------------------------------------
+
+  @Test def tablesAndSchemaListWhatSqlCanRead(): Unit = {
+    val s = session()
+    ok(s, "CREATE VIEW v AS SELECT a,\n  s FROM u")
+    assertEquals(lines("name,kind,source", s"t,table,${dir.resolve("t.csv")}", s"u,table,${dir.resolve("u.csv")}",
+      "v,view,\"SELECT a, s FROM u\""), ok(s, ".tables"))
+    assertEquals(lines("column_name,column_type", "a,INT", "s,STRING"), ok(s, ".schema v"))
+    assertEquals(lines("name,column_name,column_type", "t,a,INT", "t,b,INT", "u,a,INT", "u,s,STRING", "v,a,INT",
+      "v,s,STRING"), ok(s, ".schema"))
+    assertTrue(error(s, ".schema nope").contains("No table or view is named nope; .tables lists them"))
+    assertTrue(error(s, ".schema a b").contains("Usage: .schema [name]"))
+  }
+
+  @Test def dotTableNamesAFileWithItsOptions(): Unit = {
+    val s = session()
+    ok(s, s".table p '${file("pipes data.txt", "x|y\n1|a\n")}' delimiter=| header=true")
+    assertEquals(lines("x,y", "1,a"), ok(s, "SELECT * FROM p"))
+    ok(s, s"COPY t TO '${dir.resolve("parts/one.parquet")}'; COPY t TO '${dir.resolve("parts/two.parquet")}'")
+    // A directory of parquet files reads as parquet; format= says so of any path.
+    ok(s, s".table parts ${dir.resolve("parts")}")
+    assertEquals(lines("n", "6"), ok(s, "SELECT COUNT(*) AS n FROM parts"))
+    ok(s, s".table named ${dir.resolve("parts/one.parquet")} format=parquet")
+    assertTrue(error(s, s".table q ${dir.resolve("t.csv")} delimter=;").contains("Unknown option 'delimter' for a csv input"))
+    assertTrue(error(s, s".table q ${dir.resolve("t.csv")} nokey").contains("An option of .table is key=value, not 'nokey'"))
+    assertTrue(error(s, s".table 9q ${dir.resolve("t.csv")}").contains("A table's name is letters, digits and underscores"))
+    assertTrue(error(s, s".table q ${dir.resolve("absent.csv")}").contains("No file is at"))
+    ok(s, "CREATE VIEW v AS SELECT 1 AS one")
+    assertTrue(error(s, s".table v ${dir.resolve("t.csv")}").contains("The name v is taken by the view v"))
+    assertTrue(error(s, ".table only").contains("Usage: .table name path [key=value ...]"))
+  }
+
+  @Test def modeMaxRowsAndTimerSetHowResultsPrint(): Unit = {
+    val s = session()
+    assertEquals(lines("csv"), ok(s, ".mode"))
+    assertEquals(lines("[{\"a\":1}]"), ok(s, ".mode json\nSELECT a FROM t WHERE a = 1"))
+    assertTrue(error(s, ".mode xml").contains(".mode takes table, line, csv, tsv, json, jsonl or markdown, not xml"))
+    s.format = OutputFormat.Table
+    assertTrue(ok(s, ".maxrows 2\nSELECT a FROM t").contains("3 rows (2 shown)"))
+    assertEquals(lines("2"), ok(s, ".maxrows"))
+    assertTrue(error(s, ".maxrows -1").contains("a whole number, 0 for every row"))
+    val timed = run(s, ".timer on\nSELECT 1 AS one")
+    assertTrue(timed.err, timed.err.matches("(?s).*Run time: \\d+\\.\\d{3} s\n"))
+    assertTrue(error(s, ".timer maybe").contains("Usage: .timer [on|off]"))
+  }
+
+  @Test def readRunsAScriptAndStopsWhereItFails(): Unit = {
+    val s = session()
+    file("inner.sql", "SELECT 1 AS one;\nSELECT nope FROM t;\nSELECT 3 AS three;\n")
+    file("outer.sql", s".read ${dir.resolve("inner.sql")}\nSELECT 4 AS four;\n")
+    val r = run(s, s".read ${dir.resolve("outer.sql")}\nSELECT 5 AS five")
+    assertFalse(r.ok)
+    assertEquals(lines("one", "1"), r.out)
+    assertEquals(lines("Error in the statement on line 2: Unknown column 'nope'. Available: [t.a, t.b]"), r.err)
+    file("self.sql", s".read ${dir.resolve("self.sql")}\n")
+    assertTrue(error(s, s".read ${dir.resolve("self.sql")}").contains("at most 16 deep"))
+    assertTrue(error(s, s".read ${dir.resolve("absent.sql")}").contains("No file is at"))
+  }
+
+  @Test def quitStopsTheScriptAndUnknownCommandsAreRefused(): Unit = {
+    val s = session()
+    assertEquals(lines("one", "1"), ok(s, "SELECT 1 AS one;\n.quit\nSELECT 2 AS two"))
+    assertTrue(s.quit)
+    assertTrue(error(new QuerySession, ".frobnicate").contains("Unknown command .frobnicate; .help lists the commands"))
+    assertTrue(ok(new QuerySession, ".help").contains(".table name path [key=value ...]"))
+  }
+
+  // ---- how a script runs -------------------------------------------------------------
+
+  @Test def theFirstStatementThatFailsStopsTheScriptAndSaysWhere(): Unit = {
+    val r = run(session(), "SELECT 1 AS one;\nSELECT nope\n  FROM t;\nSELECT 3 AS three")
+    assertFalse(r.ok)
+    assertEquals(lines("one", "1"), r.out)
+    assertEquals(lines("Error in the statement on line 2: Unknown column 'nope'. Available: [t.a, t.b]"), r.err)
+    // One statement alone says no line.
+    assertEquals(lines("Error: Unknown column 'nope'. Available: [t.a, t.b]"), run(session(), "SELECT nope FROM t").err)
+  }
+
+  @Test def tablesPrintedOneAfterAnotherAreSetApart(): Unit = {
+    val s = session()
+    s.format = OutputFormat.Table
+    assertTrue(ok(s, "SELECT 1 AS one; SELECT 2 AS two").contains("1 row\n\n"))
+  }
+
+  @Test def intoWritesTheScriptsOneQuery(): Unit = {
+    val s = session()
+    val target = dir.resolve("into.csv")
+    val r = run(s, "CREATE VIEW v AS SELECT a FROM t WHERE a < 3;\nSELECT * FROM v", into = Some(target.toString))
+    assertTrue(r.err, r.ok)
+    assertEquals("", r.out)
+    assertEquals("a\n1\n2\n", Files.readString(target))
+    val two = run(s, "SELECT 1 AS one; SELECT 2 AS two", into = Some(target.toString))
+    assertFalse(two.ok)
+    assertTrue(two.err.contains("--output writes the result of one query, and the script holds 2"))
+  }
+
+  @Test def aCancelledStatementPrintsNothingAndWritesNoFile(): Unit = {
+    val s = session()
+    val cancel = new Cancel
+    cancel.cancel()
+    val target = dir.resolve("cancelled.csv")
+    val r = run(s, s"SELECT * FROM t; COPY t TO '$target'", cancel = cancel)
+    assertFalse(r.ok)
+    assertEquals("", r.out)
+    assertEquals("", r.err)
+    assertFalse(Files.exists(target))
+  }
+
+  /** A table `endless` of `parts` partitions of 4-row batches without end,
+    * calling `served` with the count of batches served after each. */
+  private def withEndless(s: QuerySession, parts: Int)(served: Int => Unit): Unit = {
+    val count = new AtomicInteger
+    val rowSchema = Schema(Vector(Field("x", DataType.IntType)))
+    s.addTable("endless", new CatalogView {
+      def schema: Schema = rowSchema
+      def numPartitions: Int = parts
+      def readPartition(p: Int): Iterator[ColumnarBatch] = Iterator.continually {
+        val b = new ColumnarBatch(rowSchema, 4)
+        (0 until 4).foreach(r => b.column(0).setBoxed(r, r))
+        b.setNumRows(4)
+        served(count.incrementAndGet())
+        b
+      }
+    }, "a test")
+  }
+
+  @Test def cancellingStopsTheEnginesScansAtTheirNextBatch(): Unit = {
+    val s = new QuerySession
+    val cancel = new Cancel
+    var served = 0
+    // The fifth batch served cancels.
+    withEndless(s, parts = 3) { n => served = math.max(served, n); if (n == 5) cancel.cancel() }
+    val r = run(s, "SELECT x, COUNT(*) AS n FROM endless GROUP BY x", cancel = cancel)
+    assertFalse(r.ok)
+    assertEquals("", r.err)
+    assertTrue(s"served $served batches", served <= 5 + 3)
+  }
+
+  @Test(timeout = 30000) def aStatementStopsWhenItsOutputIsClosed(): Unit = {
+    val s = new QuerySession
+    s.format = OutputFormat.Csv
+    var served = 0
+    withEndless(s, parts = 1)(n => served = n)
+    // A reader that leaves after 200 bytes, as `head` does.
+    val closing = new OutputStream {
+      private var written = 0
+      def write(b: Int): Unit = write(Array(b.toByte), 0, 1)
+      override def write(b: Array[Byte], off: Int, len: Int): Unit = {
+        written += len
+        if (written > 200) throw new IOException("Broken pipe")
+      }
+    }
+    val err = new ByteArrayOutputStream()
+    assertFalse(s.runScript("SELECT x FROM endless", new Io(new PrintStream(closing, true, "UTF-8"),
+      new PrintStream(err, true, "UTF-8"))))
+    assertEquals("", err.toString(StandardCharsets.UTF_8))
+    assertTrue(s"served $served batches", served < 100)
+  }
+}

@@ -68,7 +68,7 @@ A change that adds a feature without updating user docs is not done.
 ## Where to look for what
 
 - [README.md](README.md) — user-facing intro. Quick start, pipeline layout,
-  the `transformer` CLI (`run` / `gui`) and scheduling, working with agents,
+  the `transformer` CLI (`run` / `query` / `gui`) and scheduling, working with agents,
   GUI, the data viewer (`//:transformer_viewer`), run records, supported file
   formats, SQL features, temporal templating, examples, embedding in Scala,
   limitations. Start here for anything user-visible.

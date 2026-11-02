@@ -44,6 +44,22 @@ object DataType {
     case other => Named.get(other)
   }
 
+  /** `t` as SQL writes it, as every grid and listing shows a column's type:
+    * BIGINT, DECIMAL(10,2). */
+  def sqlName(t: DataType): String = t match {
+    case StringType => "STRING"
+    case IntType => "INT"
+    case LongType => "BIGINT"
+    case FloatType => "FLOAT"
+    case DoubleType => "DOUBLE"
+    case BooleanType => "BOOLEAN"
+    case DateType => "DATE"
+    case TimestampType => "TIMESTAMP"
+    case BinaryType => "BINARY"
+    case NullType => "NULL"
+    case DecimalType(p, s) => s"DECIMAL($p,$s)"
+  }
+
   def isNumeric(t: DataType): Boolean = t match {
     case IntType | LongType | FloatType | DoubleType | _: DecimalType => true
     case _ => false

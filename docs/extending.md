@@ -366,6 +366,37 @@ in the inspector's header (`InspectorPane.renderHeader`).
 - **Query names**: `QueryCatalog.apply` names each table and outside input
   (`<dataset>__<table>`); `catalogFor` registers what a query reads.
 
+## Extend `transformer query`
+
+The command line lives in `src/main/scala/com/transformer/cli/` (architecture
+§11). Each addition below lands with a case in `cli_test`, a line in
+`Cli.Usage` or `QuerySession.Help` where it is a flag or a command, and the
+README's [Querying files](../README.md#querying-files-transformer-query).
+
+- **An output format**: a case object of `OutputFormat` (its `name`, and
+  `setApart` when a result after another wants a blank line), in
+  `OutputFormat.All`, which `--format`, `.mode` and their messages read, and a
+  case in `ResultPrinter.print`. Pull the batches as they come rather than
+  holding them, as every format but `markdown` does, and write a value's text
+  as `CsvValues.format` does, so every format agrees on what a value is.
+- **A dot command**: a case in `QuerySession.dot` and an entry in
+  `QuerySession.DotCommands` (its syntax and what it does), which `.help`, its
+  usage error and the shell's completion all read. A command that lists
+  something prints a result (`ResultPrinter.strings`), so `.mode` formats it
+  like any other.
+- **A statement of the CLI's own**: a case of `SqlScript.Statement`, read off
+  the front of the statement in `SqlScript.sqlStatement` with its `Lexer`
+  (keep the query inside as its written text, a substring between two tokens,
+  never JSqlParser's rendering), and a case in `QuerySession.execute`. Run any
+  query in it through `withViews`, so it reads views, and with
+  `io.cancel.options`, so Ctrl-C stops it; wrap the batches it pulls in
+  `io.cancel.watch`. The engine's dialect stays as it is: what the CLI reads is
+  only what wraps a query.
+- **A flag**: a case in `Cli.parseQuery` (`QueryFlags` for one that takes a
+  value), a field of `Command.Query`, and its use in `Cli.query`. A flag that
+  names something to read registers it in the session before the script runs,
+  so an error in it exits 1 before any statement does.
+
 ## Add a SQL operator (e.g., subqueries)
 
 1. AST handling in `LogicalBuilder.fromItem` (which today handles plain

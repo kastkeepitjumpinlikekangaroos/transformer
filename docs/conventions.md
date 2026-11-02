@@ -204,6 +204,10 @@ specific traps.
   different values. Keep such a key on a path that reads it once, and bind a
   construct that reads an operand more than once (a simple CASE, BETWEEN) to
   a node that reads it once when it reads `RAND()`.
+- **A column's type is shown as `DataType.sqlName` spells it** (`BIGINT`,
+  `DECIMAL(10,2)`), in every grid, listing and table header: the job GUI's, the
+  data viewer's and `transformer query`'s. `DataType.name` (`long`) is the
+  spelling a run record stores, not one to show.
 - **Text is counted in characters, Unicode code points**, as SQL counts it
   (`Funcs.length`, `Funcs.substring`), never in Java's UTF-16 chars, and a
   pattern is read a code point at a time: half a surrogate pair is no text,

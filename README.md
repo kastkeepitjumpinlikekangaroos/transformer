@@ -18,6 +18,10 @@ Python environment, only Java 21.
   The CLI reports through exit codes, and every run writes JSON run records.
   A coding agent such as Claude Code can scaffold a pipeline, run it, read
   what failed, and fix it, all on the local machine.
+- **One-off queries too.** `transformer query` runs SQL over CSV and Parquet
+  files, or over a job's inputs and the tables its last run wrote, from one
+  command or an interactive shell, and prints a table, CSV or JSON. See
+  [Querying files](#querying-files-transformer-query).
 - **Fast on big data.** The polymarket example stages 166M rows from a 39 GB
   Parquet dataset, then builds 17 tables and runs 59 validations in 90
   seconds on one Apple M4 (8 cores, 16 GB). See
@@ -175,6 +179,7 @@ its own.
 
 ```
 transformer run <jobDir> [--output <dir>] [--execution-time <instant>]
+transformer query [<sql>] [--table <name>=<path>]... [options]
 transformer gui [jobDir]
 transformer help
 ```
@@ -202,6 +207,124 @@ version, read `<output>/job.json` (see
 workloads. Pass `-Xmx` (e.g. `-Xmx2g` for jaffle-shop, `-Xmx12g` for
 polymarket) or `-XX:MaxRAMPercentage=75.0`. The `bazel-bin/transformer` wrapper
 script that `bazel build //:transformer` produces sets the latter for you.
+
+### Querying files: `transformer query`
+
+`transformer query` runs SQL over files with no job directory, as `duckdb`
+does: name each file with `--table`, then query it by that name.
+
+```bash
+java -jar transformer.jar query \
+    --table orders=examples/jaffle_shop/job/data/raw_orders.csv \
+    --table stores=examples/jaffle_shop/job/data/raw_stores.csv \
+    "SELECT s.name, COUNT(*) AS orders, SUM(o.order_total) AS revenue
+     FROM orders o JOIN stores s ON o.store_id = s.id
+     GROUP BY s.name ORDER BY revenue DESC"
+```
+
+```
+┌──────────────┬────────┬──────────┐
+│ name         │ orders │  revenue │
+│ STRING       │ BIGINT │   BIGINT │
+├──────────────┼────────┼──────────┤
+│ Philadelphia │  39931 │ 45096965 │
+│ Brooklyn     │  22017 │ 22045572 │
+└──────────────┴────────┴──────────┘
+2 rows
+```
+
+| Option | Meaning |
+|---|---|
+| `--table <name>=<path>` | A file, a glob (`'logs/*.parquet'`) or a directory SQL reads as `<name>`. Repeatable. |
+| `--option <name>.<key>=<value>` | A read option of table `<name>`, as an input's `config.json` takes it (`--option events.delimiter=';'`), or `format=csv` / `format=parquet`. Repeatable. |
+| `--job <jobDir>` | Read the job's inputs and the tables of its last run by name. |
+| `--job-output <dir>` | Where that job writes. Default: `<jobDir>/output`. |
+| `--execution-time <instant>` | The instant the job's templates resolve against. Default: now. |
+| `-f`, `--file <file>` | Run the statements in `<file>`. |
+| `--format <format>` | `table` (the default), `line`, `csv`, `tsv`, `json`, `jsonl` or `markdown`. |
+| `--max-rows <n>` | The rows a table shows, the first and last ones; 0 shows every row. Default: 40. |
+| `--output <file>` | Write the query's result to `<file>` (`.csv` or `.parquet`) instead of printing it. |
+
+- **Tables.** A table reads as a job's input does: CSV or Parquet by its path's
+  extension, a directory whose files are all `.parquet` as Parquet, and CSV by
+  the options and strict reading of [Supported file formats](#supported-file-formats).
+  An option its format does not read, or a value none of its option's, is an
+  error, as in a `config.json`. A directory a job wrote, holding a `_run.json`,
+  reads as the tables after it read it: its part files, with the types and
+  options its run recorded. A table's name is letters, digits and underscores,
+  which SQL reads unquoted. The SQL is the engine's, unchanged, so a file is
+  read only under the name a flag gives it.
+- **A job.** `--job` names the job's inputs and its tables as the GUI's SQL
+  console sees them: the inputs at their paths rendered for the execution time,
+  and the tables of that instant's run under the job's output directory, else
+  of the newest run there. An input that does not load, and a job with no run
+  on disk, is a warning on stderr, and what did load can be queried.
+- **Statements.** The SQL is the argument, the file `--file` names, or
+  whatever standard input holds when it is no terminal
+  (`transformer query --table t=x.csv < report.sql`). Statements end with `;`,
+  the last needing none, and run in order. The first that fails stops the
+  script: its error goes to stderr (with its line when the script has several
+  statements) and the command exits 1. Besides queries (`SELECT`, `WITH`,
+  `EXPLAIN`), three statements are the CLI's own; each holds a query, which
+  goes to the engine as written:
+  - `CREATE [OR REPLACE] VIEW name [(column, ...)] AS query` names a query for
+    the rest of the session. A view is kept as written and defined, in a `WITH`
+    ahead of each statement that reads it, together with the views it reads, so
+    it reads the files as they are when that statement runs and a filter on it
+    reaches the files it reads. Each of its columns needs a name of its own,
+    and a view may not read itself.
+  - `DROP VIEW [IF EXISTS] name`.
+  - `COPY (query) TO 'file'` or `COPY name TO 'file'` writes one `.csv` or
+    `.parquet` file, in the format its name says or `FORMAT` names, with the
+    options a table's `output.json` takes for that format:
+    `COPY (SELECT ...) TO 'out.csv' (delimiter '|', header false)`,
+    `COPY orders TO 'orders.parquet' (compression 'gzip')`. It says
+    `Wrote 5 rows to out.csv` on stderr.
+- **Output.** A table heads each column with its name and type, puts numbers
+  on the right, shows each value as the CSV writer writes it (NULL as `NULL`, a
+  control character as an escape) and cuts one longer than 40 columns short.
+  Past `--max-rows` it shows the first and the last rows and says how many it
+  left out, and on a terminal the columns in the middle give way to its width.
+  `EXPLAIN`'s plan prints as its lines. Every other format prints every row in
+  full: `line` a line per value, `csv` and `tsv` as the CSV writer writes a
+  file, `json` an array of objects and `jsonl` an object a line (numbers as
+  numbers, NaN and the infinities as strings, every other value as a string),
+  and `markdown` a table. `--output` writes the script's one query to a file,
+  as `COPY` does.
+- **Exit codes.** 0 when every statement ran, 1 when one failed or a table or
+  the job could not be read, 2 for bad arguments. A statement whose output
+  closes, as when it is piped into `head`, stops reading there, and the
+  command exits 1 without a message.
+
+With no SQL on a terminal, `transformer query` opens a shell. A statement may
+run over several lines, Enter carrying on until its `;`, and is one entry of
+the history, kept in `~/.transformer_history`. Tab completes the names of
+tables and views, keywords and dot commands.
+
+```
+transformer> CREATE VIEW big AS SELECT * FROM orders WHERE order_total > 3000;
+transformer> SELECT store_id, COUNT(*) AS n
+        ...> FROM big GROUP BY store_id;
+```
+
+Ctrl-C stops the running statement: each of its scans stops at its next
+batch, it prints nothing more and writes no file, and the prompt returns once
+it has stopped. Work that already holds its rows, such as a sort of what it
+has read, finishes first; a second Ctrl-C returns to the prompt without
+waiting for that. Ctrl-C while typing drops the input, and Ctrl-D leaves. Dot
+commands go at the start of a line, in the shell or in a script:
+
+| Command | Does |
+|---|---|
+| `.tables` | List the tables and views SQL can read, with their kind and source |
+| `.schema [name]` | List the columns and types of a table or view, or of every one |
+| `.table name path [key=value ...]` | Name a file as `--table` does, its format and options after it (`format=parquet`, `delimiter=;`); a table of the name is replaced |
+| `.mode [format]` | Print results in another format |
+| `.maxrows [n]` | The rows a table shows; 0 shows every row |
+| `.timer [on\|off]` | Print how long each statement takes, on stderr |
+| `.read file` | Run the statements in a file |
+| `.help` | List the commands |
+| `.quit`, `.exit` | Leave the shell |
 
 ### Scheduling (Airflow, cron, CI)
 
@@ -242,6 +365,9 @@ a pipeline end to end:
   `_validation-<name>.csv` holds sample offending rows.
 - **Tests are SQL.** The agent writes data-quality checks as zero-row queries
   next to the table it's changing, then reruns until they pass.
+- **Outputs are queryable.** `transformer query --job <jobDir> --job-output
+  <dir> --format json "SELECT ..."` reads any table the run wrote, and
+  `--table` any file, so the agent can check a fix against the data it made.
 
 A short brief is enough to point an agent at a project:
 
@@ -251,6 +377,8 @@ Inputs live in inputs/<name>/config.json, tables in tables/<name>/main.sql,
 tests in tables/<name>/validations/*.sql (pass = zero rows).
 Run with: java -jar transformer.jar run <jobDir> --output <dir>
 It exits 0 only when everything passes; failures are in <dir>/job.json.
+Query what it wrote with:
+  java -jar transformer.jar query --job <jobDir> --job-output <dir> "SELECT ..."
 ```
 
 Supported SQL is strict. A query that would need a guess, such as an implicit
@@ -1912,6 +2040,19 @@ JDK 21 or newer (tested through JDK 25).
   lineage only for runs whose records carry it: a run from before records
   listed their inputs shows its tables but not what they read. A cloud input
   is always drawn as coming from outside the folder.
+- **`transformer query` reads a result one partition at a time.** It prints a
+  result, and `COPY` and `--output` write one file, pulling its partitions one
+  after another, where a job's table writes a part file per partition in
+  parallel: an aggregate fans out across the cores, but `SELECT *` of 326M
+  polymarket rows prints in about a minute. Its queries run without spill.
+- **A join holds its whole result in memory, and so does a sort.** A hash join
+  materializes every row it returns before the next operator sees one, and
+  `ORDER BY` every row it sorts, even under a `LIMIT` (with spill on, a job's
+  sort spills to disk, but not a join's result). Joining 326M orderbook rows
+  to 124K markets (120M joined rows) runs out of a 2 GB heap; aggregate the
+  large side first, then join, which reads the same rows in 0.5 GB. Scans,
+  filters and aggregates stream, in any size of input: an aggregate over all
+  5.5 billion polymarket orderbook rows (38 GB) runs in a 2 GB heap.
 - **Cloud paths recognized but unimplemented**: `gs://` and `s3://` paths are
   accepted by the config, and loading one raises a clear
   `UnsupportedOperationException`. See [Cloud](#cloud-gs--s3).
@@ -2018,7 +2159,8 @@ back here and into `docs/`.
 ├── MODULE.bazel               Bazel deps: rules_scala 7.0.0, scala 2.13.16,
 │                              jsqlparser 5.2, parquet-hadoop 1.14.3 (+ minimal
 │                              hadoop 3.4.3), openjfx 21.0.1, richtextfx
-│                              0.11.7 and atlantafx 2.0.1 (gui only), junit
+│                              0.11.7 and atlantafx 2.0.1 (gui only), jline
+│                              4.4.8 (the query shell), junit
 ├── .bazelrc                   JDK 21 build toolchain (runtime is JDK 21+)
 ├── BUILD.bazel                //:transformer, the deploy jar (CLI + GUI), and
 │                              //:transformer_viewer, the data viewer's.
@@ -2049,8 +2191,9 @@ back here and into `docs/`.
 │   │                          outputs, and each table's rows, columns,
 │   │                          record and lineage (viewer:model has no
 │   │                          JavaFX).
-│   └── cli/                   `transformer run|gui|help`: Cli (headless,
-│                              no JavaFX) + TransformerMain entry point.
+│   └── cli/                   `transformer run|query|gui|help`: Cli, the
+│                              query session, its result printer and JLine
+│                              shell (headless, no JavaFX) + TransformerMain.
 └── src/test/scala/com/transformer/...   (mirrors src/main/scala layout)
 ```
 

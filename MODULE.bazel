@@ -52,6 +52,11 @@ maven.install(
         # above, and 3.0.0 is Java 25 bytecode.
         "io.github.mkpaz:atlantafx-base:2.0.1",
 
+        # The `transformer query` shell: line editing, history and Ctrl-C on a
+        # terminal. The bundle jar holds the reader and every terminal
+        # provider, and its dependencies are all optional.
+        "org.jline:jline:4.4.8",
+
         # Testing
         "junit:junit:4.13.2",
 

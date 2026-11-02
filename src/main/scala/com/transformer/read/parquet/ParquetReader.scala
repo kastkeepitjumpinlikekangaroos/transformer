@@ -421,11 +421,20 @@ final class ParquetPartitionIterator(
   // hold a tiny dictionary of unique values repeated millions of times — so
   // we cache `Binary → String` per row group and reuse the same `String`
   // instance for matching subsequent rows. The cache is reset at row-group
-  // boundaries because `Binary` references point into the page buffers
-  // freed when the next row group is read. Null entries mean "not a string
-  // column" — populated lazily in `decodeColumn`.
+  // boundaries. Null entries mean "not a string column" — populated lazily in
+  // `decodeColumn`.
+  //
+  // A column caches at most `InternBudgetBytes` of values a row group. A key
+  // is the `Binary` the decoder returned: a dictionary's own value, which a
+  // lookup finds by reference, or a slice of a page buffer, which keeps that
+  // page alive while the row group is read. Unbounded, a column whose values
+  // do not repeat, such as a JSON document per row, kept every value of the
+  // row group and every page it was read from (some 600 MB a row group of
+  // polymarket's snapshots, on each thread reading one), so a scan of it ran
+  // out of a 4 GB heap; bounded, it keeps the pages of its first values.
   private val stringInternCache: Array[java.util.HashMap[org.apache.parquet.io.api.Binary, String]] =
     new Array[java.util.HashMap[org.apache.parquet.io.api.Binary, String]](columnDescriptors.length)
+  private val internedBytes: Array[Long] = new Array[Long](columnDescriptors.length)
 
   private val groupsToProcess: Int = math.max(0, endRowGroup - startRowGroup)
   private var groupsAdvanced: Int = 0
@@ -485,6 +494,7 @@ final class ParquetPartitionIterator(
         // row group's page buffers are no longer valid once that row group's
         // pages are released.
         java.util.Arrays.fill(stringInternCache.asInstanceOf[Array[AnyRef]], null)
+        java.util.Arrays.fill(internedBytes, 0L)
         if (metricsRecorder != null) {
           metricsRecorder.addRowGroupsRead(1L)
           // Compressed bytes for the row group from the footer — cheap and
@@ -678,7 +688,10 @@ final class ParquetPartitionIterator(
             var s = cache.get(bin)
             if (s == null) {
               s = bin.toStringUsingUTF8
-              cache.put(bin, s)
+              if (internedBytes(col) < ParquetPartitionIterator.InternBudgetBytes) {
+                cache.put(bin, s)
+                internedBytes(col) += bin.length
+              }
             }
             v.set(r, s)
           }
@@ -740,6 +753,11 @@ object ParquetPartitionIterator {
 
   // Added to a negative INT64's value, its value read as unsigned.
   private[parquet] val TwoTo64: java.math.BigInteger = java.math.BigInteger.ONE.shiftLeft(64)
+
+  /** The bytes of values a string column interns a row group: past them, a
+    * value not yet cached is decoded each time it is read. A foreign key's
+    * distinct values in a row group fit many times over. */
+  private[parquet] val InternBudgetBytes: Long = 4L * 1024 * 1024
 
   // The TIMESTAMP(MILLIS) values that have a microsecond value: times 1000,
   // anything past these overflows a long.

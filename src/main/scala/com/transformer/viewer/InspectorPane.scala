@@ -1,7 +1,7 @@
 package com.transformer.viewer
 
 import atlantafx.base.theme.{Styles, Tweaks}
-import com.transformer.core.Schema
+import com.transformer.core.{DataType, Schema}
 import com.transformer.gui.{DataGrid, FxHelpers, Icons, RowSample, Tone}
 import com.transformer.job.TaskRunStatus
 
@@ -429,7 +429,7 @@ final class ColumnsPane(session: ViewerSession, node: NodeId) extends VBox {
 
   private def showSchema(schema: Schema, source: String): Unit = {
     table.setItems(FXCollections.observableArrayList(schema.fields.iterator.zipWithIndex.map { case (f, i) =>
-      ColumnRow(i + 1, f.name, DataGrid.typeName(f.dataType))
+      ColumnRow(i + 1, f.name, DataType.sqlName(f.dataType))
     }.toSeq: _*))
     status.setText(s"${schema.length} ${if (schema.length == 1) "column" else "columns"}, $source")
   }

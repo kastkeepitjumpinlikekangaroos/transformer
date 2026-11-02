@@ -1859,6 +1859,46 @@ ship a fix or move something from "not done" to "done".
   DISTINCT, UNION, PARTITION BY and RANK to `=`, and failed at seed 1 at the
   code before. See
   [plans/robustness/21](../plans/robustness/21-two-float-equalities.md).
+- **JLine rewrites a line of SQL unless told not to.** Its `DefaultParser`
+  takes `\` for an escape, and `LineReader` drops each one from the line it
+  returns, so `'x\ty'` reached the engine as `'xty'`; and its history
+  expansion reads `!` as an event, which `a != 1` is not. The shell's
+  `StatementParser` escapes nothing (`isEscapeChar` false) and
+  `DISABLE_EVENT_EXPANSION` is on. `ShellTest` sends both through.
+- **`TerminalBuilder.streams(in, out)` makes a pty, not a dumb terminal.** JLine
+  4 builds a `PosixPtyTerminal` that pumps the input through a real pty, echoing
+  it, and a short input ends before the reader has read a line of it, so the
+  shell saw only end of input. A test of the shell builds a `DumbTerminal`
+  over its streams directly (`ShellTest.terminal`).
+- **A pty of no size elides JLine's prompt.** Under a pty whose window size was
+  never set (columns 0), JLine draws `transformer> ` as `>....`; a terminal
+  always has a size, a test pty may not, so a driver sets one (`TIOCSWINSZ`).
+- **Java's `user.home` is the account's home, not `$HOME`.** A run of the
+  shell with `HOME` pointed at a scratch directory still writes
+  `~/.transformer_history`; pass `-Duser.home=...`, or `Shell.run`'s `history`.
+- **JLine's native terminal providers warn on newer JDKs.** Its `jni` and `ffm`
+  providers call restricted methods, which JDK 24 (JNI) and 22 (FFM) warn of
+  without `--enable-native-access`; `Shell.systemTerminal` asks for `exec`
+  first on macOS and Linux, which runs `stty` and loads no native code, so only
+  Windows loads JLine's native library.
+- **A `PrintStream` swallows a closed pipe.** Java ignores SIGPIPE, and a
+  `PrintStream` catches the `IOException` a write into a pipe whose reader has
+  gone (`| head`) raises, keeping only `checkError`'s flag; so `transformer
+  query --format csv "SELECT * FROM big" | head` went on reading every row,
+  minutes for polymarket's 326M-row day. `Io.printing` asks `checkError` before
+  each batch it prints and stops the statement as Ctrl-C does.
+- **A parquet string column's intern cache had no bound.** Its keys are slices
+  of page buffers, so a column whose values never repeat (a JSON document per
+  row) kept every value of a row group and every page of it: polymarket's
+  snapshots ran out of a 4 GB heap on a three-group aggregate. It now caches 4
+  MB of values a row group (architecture §3c).
+- **A stopped query finishes the work that holds its rows.** Ctrl-C in
+  `transformer query`'s shell sets `ExecutionOptions.stopped`, which every scan
+  asks before each batch (architecture §3g); a sort merging what it read, or a
+  probe of a batch already read, runs to its end first. Stopping only the
+  thread that prints, as the shell first did, left the query's pool tasks
+  running after the prompt returned: a three-way self-join ran the JVM out of
+  heap a few seconds after Ctrl-C and took the shell with it.
 
 ## Wrong answers the I/O properties found (2026-10-14, all fixed)
 
@@ -2221,7 +2261,17 @@ and an underflow's as `skipif transformer` with the reason. Details are in
   (it's the run's executionTime), not bucketed per row by a column value
   like Spark's `partitionBy("col")`.
 - **No INFORMATION_SCHEMA / catalog introspection.** Views are
-  programmatically registered via `DataJob.inputs`.
+  programmatically registered via `DataJob.inputs`. `transformer query` lists
+  its tables and their columns with `.tables` and `.schema`, not in SQL; no
+  `DESCRIBE` or `SHOW TABLES`.
+- **No file paths in SQL.** `transformer query` reads a file only under the name
+  `--table` (or `.table`) gives it; `FROM 'data.csv'` and `read_csv(...)`, which
+  JSqlParser parses as DuckDB writes them, stay refused, in a job and in the
+  CLI alike, so a job's DAG and lineage name every file it reads. The CLI's own
+  statements (`CREATE VIEW`, `DROP VIEW`, `COPY ... TO`) wrap a query rather
+  than extend the dialect: there is no `COPY ... FROM`, `CREATE TABLE`, or
+  `INSERT`, and `COPY` writes one file, not a directory of part files with a
+  `_run.json`.
 - **No bytecode-level optimizations.** Hot loops use `while` and indexed
   arrays. That's enough.
 - **Heap is not fully exercised under the default config.** Each in-flight

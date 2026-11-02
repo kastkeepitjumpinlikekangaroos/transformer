@@ -37,11 +37,11 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 
 | Path | Role | Key files |
 |---|---|---|
-| `core/` | Shared types crossed by every module. Zero deps. | `DataType.scala`, `Schema.scala`, `ColumnarBatch.scala`, `Row.scala`, `Catalog.scala`, `NumberText.scala` (the one grammar text becomes a number by, for a CSV field and a CAST alike), `Scheduler.scala` (the shared `ForkJoinPool` every parallel call site funnels through), `SqlExecutor.scala` (`SqlExecutorRegistry`) |
+| `core/` | Shared types crossed by every module. Zero deps. | `DataType.scala` (`sqlName`, the one spelling every grid and listing shows a type in: `BIGINT`, `DECIMAL(10,2)`), `ExecutionOptions.scala` (per-query knobs: spill, metrics, and `stopped`, §3g), `Schema.scala`, `ColumnarBatch.scala`, `Row.scala`, `Catalog.scala`, `NumberText.scala` (the one grammar text becomes a number by, for a CSV field and a CAST alike), `Scheduler.scala` (the shared `ForkJoinPool` every parallel call site funnels through), `SqlExecutor.scala` (`SqlExecutorRegistry`) |
 | `temporal/` | Date/time template variables. No deps. | `TemporalVariables.scala`, `TemplateRenderer.scala` |
 | `read/csv/` | CSV input. Stdlib only. | `CsvOptions.scala` (also `forWrittenFile`, the options a job reads back its own CSV output with, and `checkSeparators`, which the writer shares), `CsvRowParser.scala` (state machine: an unquoted null string is NULL, a blank line is flagged rather than skipped, an unclosed quote fails), `CsvValues.scala` (the text of each type's values: what the writer prints, what the reader parses strictly, and what inference recognizes and joins), `CsvSchemaInferer.scala`, `PathGlob.scala`, `CsvReader.scala` (inference over the first rows of the glob's files in order, each later file read by its header's names, row width, blank lines as rows in a one-column file, typed parse errors naming file, line and column) |
 | `read/parquet/` | Parquet input. Depends on `parquet-hadoop` + minimal Hadoop. | `ParquetReader.scala`, `ParquetColumns.scala` (the type each parquet column reads as and how its values decode, decided per file from that file's footer; matches a view's columns to each file's by name), `ParquetFilterTranslator.scala` |
-| `write/csv/` | CSV output. Stdlib only; uses `read/csv`'s `CsvValues`, so the writer and reader share one text per type. | `CsvWriter.scala` |
+| `write/csv/` | CSV output. Stdlib only; uses `read/csv`'s `CsvValues`, so the writer and reader share one text per type. | `CsvWriter.scala` (`CsvWriter`, one file through a temp file and a rename; `CsvRowWriter`, the header and rows' text on any `Writer`, which `transformer query` prints CSV through, so its stdout reads back as a file does) |
 | `write/parquet/` | Parquet output. | `ParquetSchema.scala` (the parquet schema transformer writes for a `Schema`), `ParquetWriter.scala` |
 | `sql/parse/` | JSqlParser façade: one statement, none of its text lost on the way to the AST, and no tree too deep to walk. | `SqlParser.scala` (refuses text after the statement's `;` and a repeated tail clause JSqlParser overwrites — see §10; refuses parentheses that do not balance and a tree deeper than `MaxNesting`, 256 levels, once AND / OR chains are regrouped balanced; `unquote` / `quote`, the one rule for the name a quoted identifier names; `escapeLiteralText`, the text a JDBC `{d '...'}` escape was written with, which its node does not keep) |
 | `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `Funcs.scala`, `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `PendingCteView.scala` (placeholder for an unresolved CTE reference), `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo), `LogicalOptimizer.scala` and its passes (`FilterPushdown`, `JoinOrder`, `ColumnProjectionPushdown`), `PlanValidator.scala` (the check every stage's plan passes, §9), `PlanSql.scala` (a plan printed as SQL the binder reads back, "Plans as SQL"), `PlanTree.scala` (a plan as EXPLAIN's tree), `UnsupportedClauses.scala` (the rejection pass that runs before binding, and its audit of every JSqlParser getter the binder does not read — see §10) |
@@ -49,7 +49,7 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 | `job/` | User-facing API + runner. Depends directly on `read/{csv,parquet}` and `write/{csv,parquet}` — parquet is a first-class format. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala`, `JobFiles.scala` (filesystem ops for the GUI's edit-validation flow — `writeValidationSql` / `deleteValidation`), `TaskDag.scala` (DAG analyzer/builder from SQL refs; `TaskDag` + `TaskDagNode` are public so the GUI can render without re-implementing), `TaskProgressListener.scala` (per-task callbacks fired from runner worker threads), `TaskRunRecord.scala` (`_run.json` write/read/discover for per-task run records — every status, with `_validation-<slug>.csv` failure samples), `JobRunRecord.scala` (`job.json` aggregate manifest pointing at every task's record + the run's warnings), `JobOutputLayout.scala` (classifies an output dir as `SingleRun`/`MultiRun`/`Empty` for the GUI's run picker), `DirectoryJobLoader.scala` (DBT-style directory loader; supports optional per-table `output.json` with `partitionBy`; threads default `<outputDir>/job.json` as `jobRunOutput` so the manifest lives alongside its data), `Json.scala` (stdlib JSON parser used by the loader + record readers) |
 | `gui/` | JavaFX visualizer/runner. Depends on `job/`, `core/`, `read/{csv,parquet}/`, `write/{csv,parquet}/`, `sql/exec/`, `temporal/`, plus `org.openjfx:javafx-{base,controls,graphics}` (bare jars + platform-classifier jars), RichTextFX (the SQL editor, with the flowless / reactfx / undofx / wellbehavedfx jars its API is made of) and AtlantaFX (the theme). `JobSession.scala` and `DagLayout.scala` build separately as `gui:session`, which has no JavaFX dependency; the vim engine (`VimKey`, `VimCommand`, `VimText`, `VimEngine`) builds as `gui:vim`, with no dependency at all. `gui` exports both, so tests and the fuzz harness reach them without the toolkit. What both GUIs (this one and `viewer/`) are built from is `gui:components`: `Theme`, `transformer.css`, `Icons`, `FxHelpers`, `SqlHighlighter`, `SqlEditor`, `VimKeyEvents`, `SqlView`, `SqlErrorDialog`, `ShortcutsDialog`, `PersistDialog`, `ResultPersister`, `DataGrid`, `QueryConsole`, `ChartPane`, `ChartCanvas` and `GraphCanvas`; `gui` exports it too. What a chart draws (`ChartData`, `ChartScale`) builds as `gui:chart`, with no JavaFX. | `GuiApp.scala` (Application boot: installs the theme, then a BorderPane with the menu bar (in the macOS menu bar there) and the header (`ControlsPanel`) above a vertical split of the DAG over the ResultsTabPane; scene-level ⌘R / Ctrl+R accelerator calls `controls.triggerRun()`; File, View (fit, zoom, Vim Keybindings) and Help menus), `Theme.scala` (AtlantaFX Primer Dark as the user-agent stylesheet; `Theme.style` adds `transformer.css` and a generated stylesheet naming the installed monospace family to every scene, dialog and alert; `Palette`, the theme's colours, for the canvas), `transformer.css` (the GUI's own style classes in the theme's looked-up colours, and the SQL token colours; ships in the jar as `com/transformer/gui/transformer.css`), `Icons.scala` (SVG line icons), `JobSession.scala` (mutable FX-thread session state — jobDir, executionTime, outputDir, DAG, per-task UI states, task records, historical runs, job manifest, available run snapshots, selected run; loads `<outputDir>/job.json` (or any sibling snapshot the user picks) and follows each task's `runFile` to reconstruct full `TaskStatus` including `ValidationFailed(failures)` with sample CSVs; `buildInteractiveCatalog` assembles a Catalog over inputs + persisted task outputs for ad-hoc SQL), `DagLayout.scala` (pure-Scala layered DAG layout), `GraphCanvas.scala` (components: `GraphCanvas`, the canvas both GUIs draw graphs on — a dot grid, pan/zoom, cards with a bar in a status colour, curved edges, fitting text; `GraphOverlay`, the zoom controls and a summary row over one), `DagCanvas.scala` (`DagCanvas`: the job's DAG on a `GraphCanvas` — the selection's edges in the accent colour, click/double-click; `DagOverlay`: the per-status task counts over it), `ControlsPanel.scala` (the header: open job, execution date + `HH:mm:ss` time, output-dir field, optional run picker for multi-run output dirs, a status pill with live progress, Run on a worker thread; exposes `triggerRun()` for the keyboard accelerator), `TaskDetailsPanel.scala` (the selected task/input: a header with the actions on it, a column of details — status chips, deps, output, error, validations — and a Source/Rendered SQL column editable in place, where vim's `:w` saves and `:q` cancels), `SqlEditor.scala` (the SQL editor everywhere: RichTextFX `CodeArea`, `SqlHighlighter` styling, line numbers, a status line, and vim through `VimEngine` over a `VimBuffer` on the area while `SqlEditor.vimEnabled` is on, remembered in java.util.prefs), `VimKeyEvents.scala` (a JavaFX key event as an engine key, a platform shortcut, or the window's), `VimKey.scala` / `VimCommand.scala` / `VimText.scala` / `VimEngine.scala` (`gui:vim`: key notation; the normal/visual command grammar and its parser; lines, words, paragraphs, text objects and vim regex over a string; and the engine — modes, operators, registers, undo, `.`, macros, search, ex commands), `SqlHighlighter.scala` (pure-Scala tokenizer: keywords, functions (a word before `(`), types (where one is written), strings, numbers, comments, templates, and each kind's style class — testable, no JavaFX deps), `SqlView.scala` (a read-only `SqlEditor` the host can make editable, with a Copy action for the host's header), `ResultsTabPane.scala` (5 tabs: **Task details**, Output data, Validations — per-validation cards with an Edit… button that pops out the `AddValidationDialog.showEdit` editor (round-trips through `JobFiles.writeValidationSql` / `deleteValidation`) — **SQL console**, Run log), `AddValidationDialog.scala` (the validation editor dialog used by both the task-details chip and the per-card Edit button; supports add + edit + delete; `:w` presses Save, `:q` Cancel), `AddTableDialog.scala`, `AddInputDialog.scala`, `QueryConsole.scala` (components: a `SqlEditor` with Run query and Persist results… beside the result, or above it with `Orientation.VERTICAL`, as the data viewer's query tabs have it: a `DataGrid` of its rows in a Rows tab beside a Chart tab; ⌘⏎ / Ctrl+Enter runs it; the host's `prepare` runs on the FX thread and returns the catalog builder the worker calls; materializes the result so Persist can replay it and the chart read every row), `ChartPane.scala` (components: the Chart tab — the type, X, Y and its aggregation, Split by — over a `ChartCanvas`, worked out on a worker while the tab shows; Save PNG… paints the chart again at twice its size and writes it with `ImageIO`), `ChartCanvas.scala` (components: bars, lines, areas, dots or a pie on a plain `Canvas` — axes, legend, the pointer's reading; below 240px tall, axes untitled to keep the plot's height — and `image`, the same paint at a scale), `ChartData.scala` (`gui:chart`: `ChartSpec`, what to draw, and `ChartSpec.fit`, which suggests one for a result and carries one over to the next; `ChartData.build`, one pass over a result's batches into what each X and series hold, then series in order, folded into Other past eight), `ChartScale.scala` (`gui:chart`: round ticks, calendar ticks in UTC, and how ticks, values and times are written), `DataGrid.scala` (components: rows in a `TableView` — each column's type under its name, NULL in its own style, numbers right, sorting by value, ⌘C copies rows — plus `DataGrid.sample`, a view's first rows), `SqlConsolePanel.scala` (the job's console: chips for the registered views above a `QueryConsole` over `JobSession.buildInteractiveCatalog`), `PersistDialog.scala` (modal: output dir, format, maxPartitions, CSV header — mirrors `OutputFilePath` fields), `ResultPersister.scala` (writes a `MaterializedView` via `CsvWriter.writePartitioned` / `ParquetWriter.writePartitioned` + stamps a `_run.json` record with status=Succeeded), `ShortcutsDialog.scala` (Help > Keyboard Shortcuts), `SqlErrorDialog.scala`, `FxHelpers.scala` |
 | `viewer/` | The data viewer, a standalone JavaFX app (`//:transformer_viewer`): every job output in a folder as a dataset, SQL over all of their tables with a chart of each result, and an inspector per table (its rows, columns, recorded details and lineage within and across jobs). Depends on `gui:components`, `job/`, `core/`, `sql/exec/`. `viewer:model` (`RunFolder`, `Lineage`, `LineageLayout`, `ViewerSession` with `QueryCatalog`, `InspectorView` and `InspectorHistory`) has no JavaFX; see §4. | `ViewerApp.scala` (the window, menus and header; `ViewerMain`, the entry point, apart from the `Application` so `java -jar` starts it), `RunFolder.scala` (finding the runs, grouping them into datasets, names), `Lineage.scala` (nodes, edges, input → table matching, a node's whole lineage), `LineageLayout.scala` (boxes and cards, of the folder or of one lineage), `ViewerSession.scala` (state, selection, the run shown per dataset, finding a selection again in a folder read again, `QueryCatalog`, an inspector's views and Back/Forward history), `ViewerTabs.scala` (the workspace: query tabs, inspector tabs, the preview tab), `InspectorPane.scala` (an inspector's header and views; `SamplePane`, `ColumnsPane`, `TablesPane`), `DetailsPanel.scala` (the Details view), `LineageCanvas.scala` (the Lineage view on a `GraphCanvas`; `LineageOverlay` with its whole-folder switch), `DatasetTree.scala` (the list with its filter) |
-| `cli/` | The `transformer` command line. `:cli` (`Cli.scala`) parses `run` / `gui` / `help`, and runs a job directory headless through `DirectoryJobLoader` with a `TaskProgressListener` printing one line per finished task. Exit code 0 = every task Succeeded, 1 = anything else or the job would not load, 2 = usage. No JavaFX, so `cli_test` drives it directly. `:main` (`TransformerMain.scala`) adds the `gui` dispatch to `GuiApp`. | `Cli.scala`, `TransformerMain.scala` |
+| `cli/` | The `transformer` command line. `:cli` (`Cli.scala`) parses `run` / `query` / `gui` / `help`, runs a job directory headless through `DirectoryJobLoader` with a `TaskProgressListener` printing one line per finished task (exit code 0 = every task Succeeded, 1 = anything else or the job would not load, 2 = usage), and runs `query` (§11): SQL over files named by flag, a job's tables, the CLI's own `CREATE VIEW` / `DROP VIEW` / `COPY`, dot commands, seven output formats, and a JLine shell. No JavaFX, so `cli_test` drives it directly; it depends on `gui:session`, the GUI's toolkit-free `JobSession`, for `--job`. `:main` (`TransformerMain.scala`) adds the `gui` dispatch to `GuiApp`. | `Cli.scala`, `SqlScript.scala` (a script cut into statements and dot commands; the CLI's statements read off the front of one; a WITH put ahead of a query), `QuerySession.scala` (the tables, the job's views and the session's views, each statement run, views defined ahead of what reads them, COPY, dot commands; `Io` and `Cancel`), `ResultPrinter.scala` (`OutputFormat`, the box table and the other formats), `Shell.scala` (the JLine shell: multi-line input, history, completion, Ctrl-C), `TransformerMain.scala` |
 | `examples/scala_app/` | Sample app built as a `scala_binary` deploy jar — programmatic `DataJob(...)` API. | `src/main/scala/com/example/ExampleJob.scala` |
 | `examples/directory_app/` | Sample app using `DirectoryJobLoader` — whole job is a folder of JSON configs + SQL files. | `src/main/scala/com/example/directory/DirectoryJobExample.scala`, `job/inputs/<view>/config.json`, `job/tables/<view>/main.sql`, `job/tables/<view>/validations/*.sql`. Accepts optional 3rd CLI arg for `executionTime` (ISO instant) so the same job can produce multiple partitions for testing. |
 | `examples/jaffle_shop/` | Port of [dbt-labs/jaffle-shop](https://github.com/dbt-labs/jaffle-shop) to the directory format. 6 raw seed CSVs → 6 staging tables → 3 intermediate aggregations → 3 marts (`customers`, `orders`, `order_items`) + 3 passthroughs (`locations`, `products`, `supplies`). 26 DBT data_tests ported as zero-row validation queries. Exercises the DAG scheduler at a realistic scale (~150k rows, 15 tasks). Omissions vs. DBT: `metricflow_time_spine` (needs `dbt_date`); `customer_order_number` ROW_NUMBER column on `orders` (no window functions); semantic models / metrics / saved_queries / unit_tests (no equivalent layer). DBT CTEs are mostly split into their own SQLTasks (the staging -> intermediate -> mart layering), but `order_items_summary` keeps an in-query `WITH` to exercise CTE support end-to-end through the job runner; `LogicalBuilder.fromItem` resolves CTE names from the WITH scope before falling back to the catalog. | `src/main/scala/com/example/jaffle/JaffleShopExample.scala`, `job/data/raw_*.csv`, `job/inputs/<view>/config.json`, `job/tables/<view>/{main.sql,validations/}`. |
@@ -665,7 +665,15 @@ allocation down to one `String` per unique value per row group. On the
 polymarket orderbook scan that's ~13K String objects instead of ~210M,
 which eliminates the dominant young-gen allocation source AND lets
 downstream `ObjectArrayCodec`-keyed group-bys hit identity-equality
-fast paths on the cached `String`'s cached `hashCode`.
+fast paths on the cached `String`'s cached `hashCode`. A key is the
+decoder's own `Binary` (a dictionary value, found by reference), so a key
+from a plain page keeps that page alive; a column therefore caches at most
+`InternBudgetBytes` (4 MB) of values a row group, past which a new value is
+decoded each time. Unbounded, a column of values that never repeat (polymarket
+snapshots' JSON `data`, 317 MB a row group decompressed) kept all of them and
+their pages, about 600 MB a row group on each thread reading one, and a scan
+of it ran out of a 4 GB heap; bounded, it reads in 2 GB, and a foreign key's
+distinct values fit many times over.
 
 ### 3d. Parquet predicate pushdown
 
@@ -786,6 +794,26 @@ historically the GUI reported only `finishedAt - startedAt`, which is why a
 2.5-second task on a saturated pool felt like 30 seconds of wall time. An
 `enqueuedAt` at the epoch is unknown (a record written before records carried
 it), and its queue wait is 0.
+
+### 3g. Stopping a query
+
+`ExecutionOptions.stopped` is asked before each batch every scan of a query
+reads (`ScanExec`, whichever thread pulls it); once it says true, the scan
+throws `QueryStoppedException`. The query then fails as any query does wherever
+it is: a pool task that was reading fails, `Scheduler` rethrows the task's own
+exception to its waiter, and so on up to the caller. A CTE body materialized
+while planning (§6b) and an exchange materialized before the plan runs (§2b)
+plan with the same options, so they stop too. What a stop cannot reach is work
+that already holds its rows and reads no more, such as a sort's merge of what
+it has read, a window over a partition it holds, or a hash table being probed
+with a batch already read; it runs to its end, bounded by the rows it read, and
+the next batch read stops.
+
+The default, `ExecutionOptions.NeverStopped`, is one shared value, so options
+that leave it alone are equal, and `ScanExec` hands out the view's iterator
+itself when it sees it (`eq`), costing nothing. Only `transformer query` sets
+it: its `Cancel` stops a statement on Ctrl-C in the shell, and asks the same
+question before each batch it prints or writes (§11).
 
 ### 4. Run records and historical-run discovery
 
@@ -1698,6 +1726,55 @@ A sort, group or partition key that reads no column (`ORDER BY 'b'`, `GROUP BY
 refused at every key site (`refuseConstantKey`), and so are a LIKE pattern that
 ends in its escape character and a negative SUBSTRING length, at bind time when
 `constantValue` can compute them and on the row otherwise.
+
+### 11. `transformer query`
+
+The engine reads a query and nothing else, so `transformer query` keeps what
+a DuckDB-style CLI adds around SQL in the CLI, and hands the engine queries as
+they were written:
+
+- **Script.** `SqlScript.split` cuts a script into statements at each `;`
+  outside quotes and comments, and into dot commands, each a line starting
+  with `.` where a statement would start. `SqlScript.sqlStatement` reads
+  `CREATE VIEW`, `DROP VIEW` and `COPY ... TO` off the front of a statement
+  with a small lexer of its own (JSqlParser parses no `COPY`), keeping the
+  query inside as the text the user wrote, so the engine's errors are about
+  their own text. Any other statement goes to the engine whole.
+- **Tables.** `--table` and `.table` name a file through `InputResolver`, with
+  an `InputFilePath`'s strict format and options, and a job's output directory
+  through `TaskRunRecord.outputView`; `--job` takes the catalog
+  `JobSession.buildInteractiveCatalog` builds for the GUI's SQL console. All of
+  them are views of one flat `Catalog`. The dialect is unchanged: a file has
+  only the name a flag gives it.
+- **Views.** A view is its query's text, the names it reads
+  (`TaskDag.viewsRead`) and its columns. Before a statement runs,
+  `QuerySession.withViews` finds the views it reads, and those they read, and
+  defines them, each after the views it reads, in a WITH ahead of it
+  (`SqlScript.withDefinitions`: into the statement's own WITH when it has one,
+  after an EXPLAIN's keywords when it is one), each body on lines of its own so
+  a trailing comment cannot swallow the parenthesis. The engine then binds and
+  optimizes the view inside the statement, as it would a CTE written there; a
+  view read twice in one statement is materialized once, as such a CTE is
+  (§6b). A view is bound when it is created, which checks it and records its
+  columns, and refused if it would read itself.
+- **Output.** `ResultPrinter` prints an `ExecutedQuery`'s batches as it pulls
+  them: a table keeps only its first rows and a ring of its last, the other
+  formats stream. CSV goes through `CsvRowWriter`, JSON escapes through
+  `Json.escape`, a type is named by `DataType.sqlName`, and a value's text is
+  `CsvValues.format`'s, the text the CSV writer writes. `COPY` and `--output`
+  write one file through `CsvWriter.writeAll` / `ParquetWriter.writeAll`.
+- **Shell.** `Shell` reads inputs through JLine. Its parser answers JLine's
+  "is this line whole?" with `SqlScript.complete`, so a statement over several
+  lines is one input and one history entry, and treats no character as an
+  escape (JLine's default drops each backslash). History expansion is off, as
+  `!=` is SQL's. Each input runs on a thread of its own, through an `Io` whose
+  streams fall silent once its `Cancel` is set; Ctrl-C sets it (§3g) and the
+  prompt returns when the statement has stopped. A statement printing rows
+  also stops once its output can take no more (`Io.printing`: a reader that
+  closed its end of a pipe, as `head` does), which a `PrintStream` reports only
+  through `checkError`. The system terminal prefers
+  JLine's `exec` provider (no native code, so no JDK warns of native access) on
+  macOS and Linux.
 
 ## Property-based testing
 
