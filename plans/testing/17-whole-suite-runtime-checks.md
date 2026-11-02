@@ -1,6 +1,8 @@
 # Plan 17: whole-suite runtime checks: batch invariants, leaks and chaos scheduling
 
-> Status: **not started** · from the 2026-11-01 test survey, category 4 of 9 ·
+> Status: **done** 2026-11-02 (ee326f9 W1, 0ab531f W2, f520f05 W3; see
+> [Outcome](#outcome); the five decisions taken overnight as recommended, not
+> yet confirmed by the user; no finding held) · from the 2026-11-01 test survey, category 4 of 9 ·
 > Effort: about a week (W1 2 days, W2 2-3 days with the close protocol, W3
 > 2 days) · Risk: low for the checks, which are off by default and read once
 > per JVM; medium for W2's close protocol, which runs through every operator
@@ -277,6 +279,101 @@ asserting. Verify slows the suite, which is why it is opt-in. Chaos failures
 do not replay exactly, so the thread dump and the last points passed carry the
 diagnosis. The close protocol touches every operator that holds a resource:
 land it with W2's audit as its test.
+
+## Outcome
+
+Landed overnight on `testing-round-3`, 2026-11-02, one commit per workstream:
+W1 `ee326f9`, W2 `0ab531f`, W3 `f520f05`. At each, `bazel test //...` passed
+(78 targets before, 79 after W1, 80 after W2, 83 after W3) and the jaffle-shop
+job gave 15/15 Succeeded with every validation passing (JDK 21). At `f520f05`
+all 83 passed by default (234 s), under `verify` (226 s), under `leaks`
+(229 s) and under `chaos` at seeds 1 to 5. Each
+regression failed at its workstream's base, run in a temporary worktree: W1's
+four `SqlEngineTest` cases at `077c903`, W2's five base-observable
+`ClosingTest` cases and `CsvWriterTest`'s staged-file case at `ee326f9`.
+
+**Decisions**, each taken overnight as recommended, not yet confirmed by the
+user:
+
+1. (a) W1 verifies every operator's output.
+2. (a) Half a surrogate pair is no text: the verifier flags one, a string
+   literal holding one is refused at bind time, a `MaterializedView` built in
+   Scala when it is built, and a `CatalogView` of one's own when a scan reads
+   it (`CatalogView.stringsAreText`, which the readers and `MaterializedView`
+   say for themselves). No reader gives one and no function makes one of text,
+   so no writer meets one.
+3. (a) The audit is an exit hook, ending the JVM with status 117.
+4. (a) The close protocol (`core/Closing`, architecture §3h).
+5. (a) Chaos runs on demand only.
+
+**What each configuration found.**
+
+- `verify` (231 s for the suite): a `UNION ALL` passed its right side's
+  batches through under that side's names, so `CsvWriter` refused `SELECT a AS
+  x FROM t UNION ALL SELECT k FROM u` ("Batch schema Schema(k:int?) does not
+  match writer schema Schema(x:int?)"), in a job and in `transformer query
+  --output`; and `ABS(NULL)` was a `DOUBLE` vector under a column declared
+  `NULL` (`SELECT ABS(NULL)`). Both fixed. The rest were the checks' own: the
+  tests that read a physical plan's shape see through the wrappers now, and
+  `ResultPersisterTest`'s failing save, which held half a surrogate pair,
+  fails with a fault instead. Invariant 4 (a DATE or TIMESTAMP past its range)
+  holds by construction, the vectors storing an `Int` of days and a `Long` of
+  microseconds, the types' ranges exactly, so nothing checks it and the
+  plan's test of a date past its range cannot be built.
+- `leaks` (262 s the first run, six targets failed in eight JVMs, 4 to 66
+  files each; 227 s green): files a test or an oracle read in part or whose
+  read failed, and one defect, fixed: a CSV writer whose header the charset
+  cannot encode (a column name with an accented letter, written as US-ASCII)
+  left its staged file
+  open and on disk. The close protocol itself replaced what the plan's
+  evidence named: LIMIT, a failing drain and a stopped query left files open
+  until garbage collection and spill directories until exit, the data
+  viewer's preview left the partition it read in part open, and
+  `Scheduler.submitAndAwaitAll` returned at the first failure while its other
+  tasks went on reading and spilling. The fourteen test classes that set the
+  once-read spill directory per test moved nothing after the first; Bazel
+  sets `java.io.tmpdir` to each target's `TEST_TMPDIR`, under which the
+  default spill directory lies, so they set nothing now (rather than set it
+  in `jvm_flags`, which would say the same thing again) and check after each
+  test that no operator directory is left. Under the audit polymarket ran in
+  78 s and left nothing open.
+- `chaos` (258 to 296 s a seed, against about 250 without it): nothing. The
+  suite was green at seeds 1 to 5, and the sharded and starved DAG-scheduler
+  campaigns at their 2000-seed block under seed 11 (120 s and 127 s, every
+  invariant and the hydration oracle holding). No race, no hang, and no test
+  asserted a timing it upset. The points are reached (`job/chaos_job_test`
+  passes every one in one job) and the watchdog's thread dump names each
+  thread's last points (`fuzz/dag_watchdog_test`, over a pool wedged on
+  purpose). The jaffle-shop job gave 15/15 under chaos, and under all three
+  checks at once.
+
+**Tests that say what they assume.** None needed an `assumeTrue`: no test
+asserted something only the default makes true under verify, leaks or chaos.
+The tests that read a physical plan's shape (`JoinSwapTest`,
+`CteMaterializationTest`, `MetricsPlanWrapTest`, `ForcedPlans`) see through the
+wrappers instead, and the fourteen spill test classes check that each test
+leaves no operator directory behind.
+
+**Polymarket**, after W2: exit 0, 14 Succeeded, 2 ValidationFailed, 1 Skipped,
+97 s (`-Xmx12g`, JDK 21), output deleted after.
+
+**Calls taken without asking.** The verifier names an operator by its line
+of the physical plan as `EXPLAIN VERBOSE` prints it (`PlanTree` renders
+logical plans only), with the whole plan after; the walk refuses an operator
+it has no branch for under verify only, so a metrics-only walk keeps its
+documented fallback; `PlanWrapper` and `ExchangeExec.feeds` are public so the
+fuzz oracles can see through the wrappers; an aggregate, a DISTINCT and a
+grace-hash join release their spill directory before they emit, as they fold
+or join every run first; a failed read closes the partitions no one has read
+yet, never one another thread is reading; the audit names engine threads by
+the `transformer-` prefix the pool, the hooks and the query shell's worker
+use; a chaos point's three actions are a third each.
+
+**For the user.** Merging `main` brings `TopNExec` (a87f97f), which needs a
+branch in the plan walk (`wrapChildren`, `childrenOf`), the close protocol
+(its child drained in `Closing.draining`), and a query in `VerifyTest` that
+builds it; until then `--config=verify` fails every `ORDER BY ... LIMIT`
+query and `verify_test` names the class.
 
 ## Launch prompt
 
