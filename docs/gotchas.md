@@ -2260,6 +2260,11 @@ and an underflow's as `skipif transformer` with the reason. Details are in
   path themselves) — but the partition value is fixed for the whole job
   (it's the run's executionTime), not bucketed per row by a column value
   like Spark's `partitionBy("col")`.
+- **No top-n past 10,000 rows.** `ORDER BY ... LIMIT n` keeps only its rows
+  while `n` and its `OFFSET` add up to at most `TopNExec.MaxRows`; past that
+  it is a sort of every row, which spills when spill is on, as a heap of a
+  million rows on each thread would not. `LIMIT 0` is a sort too, which reads
+  every row as before.
 - **No INFORMATION_SCHEMA / catalog introspection.** Views are
   programmatically registered via `DataJob.inputs`. `transformer query` lists
   its tables and their columns with `.tables` and `.schema`, not in SQL; no

@@ -112,6 +112,7 @@ object PhysicalPlanner {
     case a: HashAggregateExec     => Seq(a.child)
     case j: HashJoinExec          => Seq(j.left, j.right)
     case s: SortExec              => Seq(s.child)
+    case t: TopNExec              => Seq(t.child)
     case d: DistinctExec          => Seq(d.child)
     case e: ExchangeExec          => Seq(e.child)
     case w: WindowExec            => Seq(w.child)
@@ -163,9 +164,11 @@ object PhysicalPlanner {
       else if (shouldShardUnion(l, r)) buildShardedDistinct(u, opts)
       else DistinctExec(u, opts)
     case LogicalLimit(child, n) =>
-      val p = planInner(child, opts)
-      if (p.numPartitions <= 1) LocalLimitExec(p, n)
-      else GlobalLimitExec(LocalLimitExec(p, n), n)
+      topN(child, n, opts).getOrElse {
+        val p = planInner(child, opts)
+        if (p.numPartitions <= 1) LocalLimitExec(p, n)
+        else GlobalLimitExec(LocalLimitExec(p, n), n)
+      }
     case LogicalOffset(child, n) => OffsetExec(planInner(child, opts), n)
     case LogicalJoin(l, r, cond, kind) =>
       val left = planInner(l, opts)
@@ -419,6 +422,21 @@ object PhysicalPlanner {
 
   private def times(a: Long, b: Long): Long = if (a != 0 && b > Long.MaxValue / a) Long.MaxValue else a * b
 
+  /** `child` under a `LIMIT n` as a [[TopNExec]] when it is a sort, below any
+    * projections and an OFFSET the binder places between them: the sort keeps
+    * only the rows the limit can return, with an `OFFSET m` the first `n + m`,
+    * and the offset and projections run on those. A projection keeps its
+    * input's row count, so the rows it sees are the ones the limit would have
+    * kept. None for any other shape, for `LIMIT 0`, and past
+    * [[TopNExec.MaxRows]] rows, where the sort, which can spill, runs whole. */
+  private def topN(child: LogicalPlan, n: Long, opts: ExecutionOptions): Option[PhysicalPlan] = child match {
+    case LogicalSort(c, keys) if n >= 1 && n <= TopNExec.MaxRows && !keys.exists(k => Expr.readsRandom(k.expr)) =>
+      Some(TopNExec(planInner(c, opts), keys, n.toInt))
+    case LogicalProject(c, projections) => topN(c, n, opts).map(ProjectExec(_, projections))
+    case LogicalOffset(c, m) if m <= TopNExec.MaxRows - n => topN(c, n + m, opts).map(OffsetExec(_, m))
+    case _ => None
+  }
+
   /** Try to push a bound predicate into the underlying view. Today only
     * [[ParquetReader]] participates — its `withPushdownFilter` translates the
     * expression to a parquet `FilterPredicate` and returns a new view that
@@ -565,6 +583,9 @@ object PhysicalPlanner {
       val (wl, ln) = walkAndWrap(left, idCounter)
       val (wr, rn) = walkAndWrap(right, idCounter)
       (HashJoinExec(wl, wr, lk, rk, extra, kind, br, opts, node), Vector(ln, rn))
+    case TopNExec(child, keys, n) =>
+      val (wc, cn) = walkAndWrap(child, idCounter)
+      (TopNExec(wc, keys, n), Vector(cn))
     case SortExec(child, keys, opts, _) =>
       val (wc, cn) = walkAndWrap(child, idCounter)
       (SortExec(wc, keys, opts, node), Vector(cn))

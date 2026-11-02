@@ -139,40 +139,11 @@ final case class SortExec(
     val sorted = sortBuffer(buf)
     buf.clear()
     val file = spillDir.newSpillFile(".parquet")
-    val batches = batchIterator(sorted, schema)
+    val batches = SortExec.batches(sorted, schema)
     // Runs are read back by index (see DiskRunCursor); positional names keep a
     // duplicate-named child schema round-trippable. See Spill.positionalSchema.
     ParquetWriter.writeAll(file, Spill.positionalSchema(schema), batches)
     runs += file
-  }
-
-  /** Stream sorted rows as capacity-sized batches. Serves both the in-memory
-    * emit paths (via [[emit]], which fixes the schema to [[outputSchema]]) and
-    * the spill-run parquet writes in [[flushRun]]. */
-  private def batchIterator(sorted: Array[Array[Any]], schema: Schema): Iterator[ColumnarBatch] = {
-    val capacity = ColumnarBatch.DefaultCapacity
-    val totalRows = sorted.length
-    var produced = 0
-    new Iterator[ColumnarBatch] {
-      def hasNext: Boolean = produced < totalRows
-      def next(): ColumnarBatch = {
-        val take = math.min(capacity, totalRows - produced)
-        val out = new ColumnarBatch(schema, take max 1)
-        var r = 0
-        while (r < take) {
-          val row = sorted(produced + r)
-          var c = 0
-          while (c < schema.length) {
-            if (row(c) == null) out.column(c).setNull(r) else out.column(c).setBoxed(r, row(c))
-            c += 1
-          }
-          r += 1
-        }
-        out.setNumRows(take)
-        produced += take
-        out
-      }
-    }
   }
 
   private def sortBuffer(buf: mutable.ArrayBuffer[Array[Any]]): Array[Array[Any]] = {
@@ -348,7 +319,7 @@ final case class SortExec(
   }
 
   private def emit(sorted: Array[Array[Any]]): Iterator[ColumnarBatch] =
-    batchIterator(sorted, outputSchema)
+    SortExec.batches(sorted, outputSchema)
 }
 
 object SortExec {
@@ -392,6 +363,137 @@ object SortExec {
   private[exec] final case class PartitionResult(
       inMemory: Array[Array[Any]],
       diskRuns: Array[Path])
+
+  /** Sorted rows as capacity-sized batches: a sort's output, a spill run's
+    * content, and a top-n's rows. */
+  private[exec] def batches(sorted: Array[Array[Any]], schema: Schema): Iterator[ColumnarBatch] = {
+    val capacity = ColumnarBatch.DefaultCapacity
+    val totalRows = sorted.length
+    var produced = 0
+    new Iterator[ColumnarBatch] {
+      def hasNext: Boolean = produced < totalRows
+      def next(): ColumnarBatch = {
+        val take = math.min(capacity, totalRows - produced)
+        val out = new ColumnarBatch(schema, take max 1)
+        var r = 0
+        while (r < take) {
+          val row = sorted(produced + r)
+          var c = 0
+          while (c < schema.length) {
+            if (row(c) == null) out.column(c).setNull(r) else out.column(c).setBoxed(r, row(c))
+            c += 1
+          }
+          r += 1
+        }
+        out.setNumRows(take)
+        produced += take
+        out
+      }
+    }
+  }
+}
+
+/** `ORDER BY keys` keeping only the first `n` rows it would return: what a
+  * sort followed by `LIMIT n` returns, holding `n` rows a partition however
+  * many it reads, where the sort holds every row. Each partition keeps, in a
+  * heap, the `n` rows that sort first of those it has read, the one that sorts
+  * last at the head to be replaced; then the partitions' rows sort together
+  * and the first `n` are returned. Rows that sort alike come in the order they
+  * were read, partition by partition, as a stable sort leaves them, and so as
+  * [[SortExec]] returns them below its [[SortExec.SmallNThreshold]]: a later
+  * row is kept only when it sorts strictly before the row it replaces.
+  *
+  * Each row's keys are evaluated once, as the row is read; a sort key is a
+  * column or an expression of columns (the binder computes `RAND()` in a
+  * column below the sort), so that reads what a sort's comparisons read. The
+  * planner uses it for `ORDER BY ... LIMIT n`, with an `OFFSET m` for `n + m`
+  * rows, from 1 to [[TopNExec.MaxRows]] rows. */
+final case class TopNExec(child: PhysicalPlan, keys: Seq[SortKey], n: Int) extends PhysicalPlan {
+  require(n >= 1 && n <= TopNExec.MaxRows, s"a top-n keeps 1 to ${TopNExec.MaxRows} rows, not $n")
+
+  def outputSchema: Schema = child.outputSchema
+  def numPartitions: Int = 1
+
+  private val keyExprs: Array[Expr] = keys.map(_.expr).toArray
+  private val sortKeys: Array[SortKey] = keys.toArray
+
+  def execute(partition: Int): Iterator[ColumnarBatch] = {
+    require(partition == 0)
+    val tasks: Seq[Callable[Array[TopNExec.Kept]]] = (0 until child.numPartitions).map { p =>
+      new Callable[Array[TopNExec.Kept]] { def call(): Array[TopNExec.Kept] = keep(p) }
+    }
+    // In partition order, each partition's rows in its own order: the stable
+    // sort keeps rows that sort alike in the order they were read.
+    val kept = Scheduler.submitAndAwaitAll(tasks).iterator.flatten.toArray
+    java.util.Arrays.sort(kept, byKeys)
+    SortExec.batches(kept.iterator.take(n).map(_.row).toArray, outputSchema)
+  }
+
+  private val byKeys: java.util.Comparator[TopNExec.Kept] =
+    (a: TopNExec.Kept, b: TopNExec.Kept) => compareKeys(a.keys, b.keys)
+
+  private def compareKeys(a: Array[Any], b: Array[Any]): Int = {
+    var i = 0
+    while (i < sortKeys.length) {
+      val c = sortKeys(i).compare(a(i), b(i))
+      if (c != 0) return c
+      i += 1
+    }
+    0
+  }
+
+  /** The `n` rows of partition `p` that sort first, in order, rows that sort
+    * alike in the order read. */
+  private def keep(p: Int): Array[TopNExec.Kept] = {
+    // The row that sorts last at the head; among rows that sort alike, the
+    // one read last.
+    val heap = new java.util.PriorityQueue[TopNExec.Kept](math.min(n, 1024) + 1,
+      (a: TopNExec.Kept, b: TopNExec.Kept) => {
+        val c = compareKeys(b.keys, a.keys)
+        if (c != 0) c else java.lang.Long.compare(b.ordinal, a.ordinal)
+      })
+    val ncols = child.outputSchema.length
+    val nkeys = keyExprs.length
+    var ordinal = 0L
+    // A row's keys, read into this until the row is kept.
+    val rowKeys = new Array[Any](nkeys)
+    val it = child.execute(p)
+    while (it.hasNext) {
+      val b = it.next()
+      var r = 0
+      while (r < b.numRows) {
+        var k = 0
+        while (k < nkeys) { rowKeys(k) = keyExprs(k).eval(b, r); k += 1 }
+        if (heap.size < n || compareKeys(rowKeys, heap.peek.keys) < 0) {
+          if (heap.size == n) heap.poll()
+          val row = new Array[Any](ncols)
+          var c = 0
+          while (c < ncols) {
+            row(c) = if (b.column(c).isNull(r)) null else b.column(c).getBoxed(r)
+            c += 1
+          }
+          heap.add(new TopNExec.Kept(row, rowKeys.clone(), ordinal))
+        }
+        ordinal += 1
+        r += 1
+      }
+    }
+    val out = heap.toArray(new Array[TopNExec.Kept](0))
+    java.util.Arrays.sort(out, (a: TopNExec.Kept, b: TopNExec.Kept) => {
+      val c = compareKeys(a.keys, b.keys)
+      if (c != 0) c else java.lang.Long.compare(a.ordinal, b.ordinal)
+    })
+    out
+  }
+}
+
+object TopNExec {
+  /** The most rows a top-n keeps: past them, a sort, which can spill. A
+    * partition holds this many rows at most, and every partition at once. */
+  val MaxRows: Int = 10000
+
+  /** A row kept, its keys' values, and where it was read in its partition. */
+  private[exec] final class Kept(val row: Array[Any], val keys: Array[Any], val ordinal: Long)
 }
 
 /** One cursor over a sorted stream of rows. Consumed by the merge heap.

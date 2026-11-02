@@ -2045,14 +2045,17 @@ JDK 21 or newer (tested through JDK 25).
   after another, where a job's table writes a part file per partition in
   parallel: an aggregate fans out across the cores, but `SELECT *` of 326M
   polymarket rows prints in about a minute. Its queries run without spill.
-- **A join holds its whole result in memory, and so does a sort.** A hash join
-  materializes every row it returns before the next operator sees one, and
-  `ORDER BY` every row it sorts, even under a `LIMIT` (with spill on, a job's
-  sort spills to disk, but not a join's result). Joining 326M orderbook rows
-  to 124K markets (120M joined rows) runs out of a 2 GB heap; aggregate the
-  large side first, then join, which reads the same rows in 0.5 GB. Scans,
-  filters and aggregates stream, in any size of input: an aggregate over all
-  5.5 billion polymarket orderbook rows (38 GB) runs in a 2 GB heap.
+- **A join holds its whole result in memory.** A hash join materializes every
+  row it returns before the next operator sees one, and spill bounds only its
+  inputs, not its result. Joining 326M orderbook rows to 124K markets (120M
+  joined rows) runs out of a 2 GB heap; aggregate the large side first, then
+  join, which reads the same rows in 0.5 GB. Scans, filters and aggregates
+  stream, in any size of input: an aggregate over all 5.5 billion polymarket
+  orderbook rows (38 GB) runs in a 2 GB heap.
+- **A sort holds every row it sorts, unless it spills.** `ORDER BY ... LIMIT n`
+  with `n` and its `OFFSET` up to 10,000 rows keeps only those rows (a top-n:
+  the first 3 of 132M rows in 3 s and 0.5 GB); any other `ORDER BY` sorts every
+  row in memory, or on disk with spill on.
 - **Cloud paths recognized but unimplemented**: `gs://` and `s3://` paths are
   accepted by the config, and loading one raises a clear
   `UnsupportedOperationException`. See [Cloud](#cloud-gs--s3).

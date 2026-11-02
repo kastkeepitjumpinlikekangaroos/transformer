@@ -103,6 +103,35 @@ scala_junit_test(
     ],
 )
 
+# ORDER BY ... LIMIT as a top-n: the first rows of a stable sort, over
+# random partitionings, ties, NULL placement and NaN; what the planner plans as
+# one; and the same answers as without it.
+scala_junit_test(
+    name = "top_n_exec_test",
+    srcs = ["TopNExecTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+# A top-n of 20 million rows in a 256 MB heap, which a sort of them could not
+# hold: it keeps the rows it returns, not its input's.
+scala_junit_test(
+    name = "top_n_memory_test",
+    srcs = ["TopNMemoryTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = ["-Xmx256m"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "@maven//:junit_junit",
+    ],
+)
+
 scala_junit_test(
     name = "join_swap_test",
     srcs = ["JoinSwapTest.scala"],

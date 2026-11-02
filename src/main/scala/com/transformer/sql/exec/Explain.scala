@@ -148,6 +148,7 @@ object Explain {
           if (leftKeys.isEmpty) (s"NestedLoopJoin $kindName: ${on.mkString(" AND ")}; $build", Seq(l, r))
           else (s"HashJoin $kindName: ${on.mkString(" AND ")}; $build", Seq(l, r))
         case SortExec(c, ks, _, _) => (s"Sort: ${keys(ks, c)}", Seq(c))
+        case TopNExec(c, ks, n) => (s"Top $n: ${keys(ks, c)}", Seq(c))
         case LocalLimitExec(c, n) => (s"Limit (each partition): $n", Seq(c))
         case GlobalLimitExec(c, n) => (s"Limit: $n", Seq(c))
         case OffsetExec(c, n) => (s"Offset: $n", Seq(c))
