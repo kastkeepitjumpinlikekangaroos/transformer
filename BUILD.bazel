@@ -89,8 +89,8 @@ scala_toolchain(
         # one, a suffix of the workspace path, never the sandbox's.
         "-Wconf:src=src/test/scala/.*&cat=other-pure-statement&msg=^unused value:s",
         # rules_scala's own Scala sources (the test runner's discovery of
-        # test classes) compile with this toolchain too; their warnings are
-        # not this repository's.
+        # test classes, the unused-dependency checker's analyzer) compile
+        # with this toolchain too; their warnings are not this repository's.
         "-Wconf:src=external/rules_scala[^/]*/.*:s",
         # Every other warning fails the build too. Later -Wconf rules win.
         "-Werror",
