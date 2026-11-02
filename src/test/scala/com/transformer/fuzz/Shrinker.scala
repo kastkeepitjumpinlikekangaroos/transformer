@@ -549,6 +549,15 @@ object Shrinker {
     val dropCorruption: Iterator[JobDagGen.JobCase] =
       if (jc.corruption.isEmpty) Iterator.empty else Iterator(jc.copy(corruption = None))
 
+    // A failure that survives without its fault is not about the fault; one
+    // that needs it may need it over a fresh directory, or reached first.
+    val simplerFault: Iterator[JobDagGen.JobCase] = jc.fault.iterator.flatMap { f =>
+      Iterator(jc.copy(fault = None)) ++
+        (if (f.overEarlier) Iterator(jc.copy(fault = Some(f.copy(overEarlier = false)))) else Iterator.empty) ++
+        (if (f.arming.nth > 1) Iterator(jc.copy(fault = Some(f.copy(arming = f.arming.copy(nth = f.arming.nth - 1)))))
+         else Iterator.empty)
+    }
+
     val dropValidationEdge: Iterator[JobDagGen.JobCase] =
       jc.tasks.indices.iterator.filter(jc.tasks(_).validationTaskSrc.isDefined).map { i =>
         jc.copy(tasks = jc.tasks.updated(i, jc.tasks(i).copy(validationTaskSrc = None)))
@@ -592,7 +601,7 @@ object Shrinker {
 
     dropLastTask ++ dropUnreadInput ++ dropEdge ++ dropValidationEdge ++ healInput ++ healTask ++ dropOutput ++
       dropValidation ++ shrinkRowCount ++ dropSecondRun ++ dropRunDir ++ dropPartition ++ plainStrings ++
-      dropCorruption
+      dropCorruption ++ simplerFault
   }
 
   // ---- ParquetCase shrinker (external-format differential) -----------------

@@ -200,7 +200,9 @@ reach it:
    write does.
 3. Make `job/FaultJob.scala`'s job reach it in one run over an earlier run's
    output; `job/data_job_test`'s matrices then arm it to throw and to halt a
-   child JVM, and assert it was reached.
+   child JVM, and assert it was reached. The DAG fuzzer's fault mode and its
+   crash campaign draw from `Faults.Points` too, and their guard
+   (`generatorCoversFaultPoints`) fails until some generated run reaches it.
 4. Document it in [testing.md's "Fault points"](testing.md#fault-points-transformerfault)
    and architecture.md §3a.
 

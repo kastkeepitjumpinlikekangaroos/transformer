@@ -421,3 +421,19 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+# The DAG fuzzer's crash campaign (plans/testing/06): each generated job has
+# one run halted at a fault point in a child JVM (DagCrashChild, armed with
+# -Dtransformer.fault=<point>:<n>:halt), then checked and rerun in this JVM.
+# A JVM per case, so it runs on demand with FUZZ_SEEDS=N.
+scala_junit_test(
+    name = "dag_crash_fuzz_campaign",
+    srcs = ["DagCrashFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)

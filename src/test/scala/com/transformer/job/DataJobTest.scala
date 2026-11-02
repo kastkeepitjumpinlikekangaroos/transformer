@@ -1552,22 +1552,26 @@ class DataJobTest {
     * part file and no staged one; a Succeeded or ValidationFailed one holds
     * exactly the part files its record names, and no staged one. Under a
     * Running record anything may be left: its run stopped, and the next run
-    * clears it. */
+    * clears it. A halt as a run created the directory for its first record
+    * leaves it with no record, and nothing but that record's temp file. */
   private def assertDirectoriesSayWhatTheyHold(out: Path, context: String): Unit =
     FaultJob.statuses().foreach { case (name, _) =>
       val dir = out.resolve(name)
       if (Files.isDirectory(dir)) {
         val files = filesIn(dir)
-        val rec = TaskRunRecord.read(dir).getOrElse(
-          fail(s"$context: $dir holds ${files.mkString(", ")} and no readable record").asInstanceOf[TaskRunRecord])
         val parts = files.filter(_.startsWith("part-"))
         val staged = files.filter(_.startsWith("."))
-        statusOf(rec) match {
+        // A halt as a run created a fresh directory for its first record
+        // leaves no record, and nothing but the record's temp file.
+        val rec = TaskRunRecord.read(dir)
+        if (rec.isEmpty) assertTrue(s"$context: $dir holds ${files.mkString(", ")} and no readable record",
+          files.forall(_ == TaskRunRecord.FileName + ".tmp"))
+        rec.map(statusOf).getOrElse("") match {
           case "Failed" | "Skipped" =>
-            assertEquals(s"$context: ${statusOf(rec)} $name holds", Nil, parts ++ staged)
+            assertEquals(s"$context: ${statusOf(rec.get)} $name holds", Nil, parts ++ staged)
           case "Succeeded" | "ValidationFailed" =>
-            assertEquals(s"$context: ${statusOf(rec)} $name's part files", rec.outputFiles.sorted, parts)
-            assertEquals(s"$context: ${statusOf(rec)} $name's staged files", Nil, staged)
+            assertEquals(s"$context: ${statusOf(rec.get)} $name's part files", rec.get.outputFiles.sorted, parts)
+            assertEquals(s"$context: ${statusOf(rec.get)} $name's staged files", Nil, staged)
           case _ => ()
         }
       }

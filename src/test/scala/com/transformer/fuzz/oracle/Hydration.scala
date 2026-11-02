@@ -1,9 +1,10 @@
 package com.transformer.fuzz.oracle
 
+import com.transformer.fuzz.JobDagGen
 import com.transformer.fuzz.JobDagGen.{Corruption, JobCase}
 import com.transformer.fuzz.oracle.DagSchedule.Run
 import com.transformer.gui.{JobSession, RunState, UiTaskState}
-import com.transformer.job.{FailedValidation, JobInputRecord, JobTaskSummary, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus}
+import com.transformer.job.{FailedValidation, JobTaskSummary, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus}
 
 import java.nio.file.{Path, Paths}
 import java.time.Instant
@@ -60,6 +61,11 @@ import scala.collection.mutable
   * Then the case's [[Corruption]] is applied to the latest run's files and the
   * sessions are opened again over the damaged tree; the same rules decide what
   * they must show, from a model of the damage ([[corrupted]]).
+  *
+  * A run a fault stopped is reopened before it reruns ([[checkUnfinished]]):
+  * a task whose record says `Running` shows as unfinished, never as
+  * succeeded. Its rerun leaves the tree as a clean run would, which the rules
+  * above then decide.
   *
   * A directory job names a task after its directory, so a session cannot match
   * a task the case gave an adversarial name to: its records never name a task
@@ -254,6 +260,12 @@ object Hydration {
     var multiPartitionTasks: Int = 0
     /** Sessions whose run picker listed two or more runs. */
     var multiRunSessions: Int = 0
+    /** Runs a fault stopped, by its point and whether it was reached. */
+    val faults: mutable.Map[(String, Boolean), Int] = mutable.Map.empty.withDefaultValue(0)
+    /** Tasks a session reopened unfinished after a run a fault stopped. */
+    var unfinished: Int = 0
+    /** Tasks rigged to fail after they start writing that did, by outcome. */
+    val writeFailures: mutable.Map[String, Int] = mutable.Map.empty.withDefaultValue(0)
 
     def add(other: Report): Unit = {
       other.sources.foreach { case (k, v) => sources(k) += v }
@@ -264,6 +276,9 @@ object Hydration {
       other.strings.foreach { case (k, v) => strings(k) += v }
       multiPartitionTasks += other.multiPartitionTasks
       multiRunSessions += other.multiRunSessions
+      other.faults.foreach { case (k, v) => faults(k) += v }
+      unfinished += other.unfinished
+      other.writeFailures.foreach { case (k, v) => writeFailures(k) += v }
     }
   }
 
@@ -272,6 +287,19 @@ object Hydration {
     * asserts the same of the sessions over the damaged tree. */
   def check(jc: JobCase, runs: Vector[Run], root: Path): Report = {
     val report = new Report
+    runs.flatMap(_.stopped).foreach { st =>
+      report.faults((st.plan.arming.point, st.fired)) += 1
+      report.unfinished += st.unfinished
+    }
+    runs.foreach { run =>
+      jc.tasks.foreach { t =>
+        (t.outcome, run.result.tasks(t.index).status) match {
+          case (o @ (JobDagGen.FailsWhileWriting | JobDagGen.FailsInValidation), TaskStatus.Failed(_)) =>
+            report.writeFailures(o.toString) += 1
+          case _ => ()
+        }
+      }
+    }
     val jobDir = jc.writeDirectoryJob(root)
     val intact = disk(jc, runs, root)
     checkRecordsRead(jc, runs, intact, report)
@@ -336,6 +364,33 @@ object Hydration {
       val earlier = open(jc, root, jobDir, time)
       compare(jc, runs, root, d, earlier, view(jc, runs, root, d, time, None), s"at execution time $time$damage", report)
       report.openings("earlier") += 1
+    }
+  }
+
+  /** After `jc`'s run at `time` was stopped by a fault: a session opened then
+    * shows a task whose record says `Running` as unfinished, with that
+    * record's start and nothing else, never as succeeded; and shows a task
+    * unfinished only for such a record. Returns how many it showed
+    * unfinished. */
+  def checkUnfinished(jc: JobCase, root: Path, time: Instant): Int = {
+    val s = open(jc, root, jc.writeDirectoryJob(root), time)
+    def ctx: String = s"\n  reopened after the run at $time a fault stopped\n  case = $jc"
+    assert(s.runState == RunState.Idle, s"[hydration] the session did not load the job: ${s.runState}$ctx")
+    jc.tasks.indices.count { i =>
+      val running = s.taskRecordFor(i).filter(_.status == TaskRunStatus.Running)
+      (running, s.taskStates(i)) match {
+        case (Some(rec), UiTaskState.Unfinished(at)) =>
+          assert(at == rec.startedAt && s.outputPathFor(i).isEmpty,
+            s"[hydration] task t$i is unfinished from ${rec.startedAt}, yet the session shows it from $at with " +
+              s"output ${s.outputPathFor(i)}$ctx")
+          true
+        case (Some(_), other) =>
+          throw new AssertionError(s"[hydration] task t$i's record says Running, yet the session shows $other$ctx")
+        case (None, UiTaskState.Unfinished(_)) =>
+          throw new AssertionError(
+            s"[hydration] task t$i shows unfinished, yet its record is ${s.taskRecordFor(i).map(_.status)}$ctx")
+        case _ => false
+      }
     }
   }
 
@@ -427,7 +482,7 @@ object Hydration {
       s"[hydration] job.json execution time ${rec.executionTime}, run ran at ${run.executionTime}$ctx")
     // Every input as the run read it, one that failed to load or that no task
     // reads too.
-    val inputs = jc.inputs.map(in => JobInputRecord(in.view, jc.inputPath(root, in), "csv"))
+    val inputs = jc.inputRecords(root)
     assert(rec.inputs.contains(inputs),
       s"[hydration] job.json inputs ${rec.inputs.map(_.map(i => DagSchedule.shown(i.toString)))}, expected the run's $inputs$ctx")
     val expected = res.tasks.indices.map { k =>
@@ -450,7 +505,7 @@ object Hydration {
         finishedAt = Some(t.finishedAt),
         enqueuedAt = Some(t.enqueuedAt),
         failedValidations = failed,
-        readsInputs = gen.inputSrcs.distinct.map(i => jc.inputs(i).view).sorted,
+        readsInputs = jc.readsInputs(gen),
         readsTasks = gen.taskSrcs.distinct.sorted.map(i => res.tasks(i).taskName))
     }.toVector
     rec.tasks.toVector.zipAll(expected, null, null).zipWithIndex.foreach { case ((got, want), k) =>

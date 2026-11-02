@@ -49,8 +49,9 @@ object Faults {
   val Points: Vector[String] = Vector(RunningRecord, ClearDelete, FirstBatch, Commit, ValidationSample, PerfRecord,
     FinalRecord, FailedRecord, SkippedRecord, JobRecord)
 
-  /** What an armed point does. */
-  sealed abstract class Action(val name: String)
+  /** What an armed point does. Serializable, as an [[Arming]] is, so a test
+    * can hand one to a child JVM. */
+  sealed abstract class Action(val name: String) extends Serializable
   object Action {
     /** An `IOException` naming the point. */
     case object Throw extends Action("throw")

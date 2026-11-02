@@ -447,8 +447,8 @@ specific traps.
   (`OutputDirectory.settle`).
 - **Every disk change a run makes is a fault point.** A new write or deletion
   in an output directory calls `Faults.at` first, per file, and joins
-  `Faults.Points` (extending.md "Add a fault point"), so the fault matrices
-  stop a run there.
+  `Faults.Points` (extending.md "Add a fault point"), so the fault matrices and
+  the DAG fuzzer stop a run there.
 
 ## Counter discipline
 

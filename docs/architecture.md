@@ -917,7 +917,12 @@ exists without a readable `job.json`. A task with no output directory has only
 its entry, by design, and gets no warning. A record that says `Running`,
 reached by any of these routes, reopens its task as `UiTaskState.Unfinished`:
 no duration, rows or output, whatever `job.json` says, as that record, not
-the manifest, says what the directory holds now.
+the manifest, says what the directory holds now. The DAG fuzzer's fault mode
+stops a generated run at a fault point (throwing, or halting a child JVM)
+and reopens what it left before rerunning it: a session must show a task
+whose record says `Running` as unfinished, never as succeeded
+(`Hydration.checkUnfinished`); the rerun leaves the tree a clean run would,
+which the rules above then decide.
 
 #### Per-task record (`_run.json`)
 

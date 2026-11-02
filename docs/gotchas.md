@@ -397,6 +397,15 @@ ship a fix or move something from "not done" to "done".
   a `Skipped` or `Failed` record beside parts when the clear stopped part
   way; such a run marks the directory `Running` first now, as decision 1
   says of any run that deletes a file there.
+- **A kill as a run creates a task's directory leaves it with no record.** A
+  run creates a fresh output directory as it writes the first record there
+  (`TaskRunRecord.write`: the directory, then `_run.json.tmp`, then the
+  rename); a halt in between, in another thread than the one a fault halted,
+  leaves the directory empty or holding only `_run.json.tmp`. That holds
+  nothing a reader takes for output and nothing the next run refuses (no
+  part file), and its mark clears the temp file; closing the window would
+  need the directory and its record created in one rename. The crash
+  campaign found it, and its directory invariant allows exactly that.
 - **Two runs writing one output directory at once are unsupported.** A
   `Running` record from a live run in another process looks the same as one a
   killed run left, so a second run started meanwhile clears the first's
