@@ -1370,7 +1370,8 @@ desktop's:
 2. Write the `Rule`: an id and a title; its scope (`Engine`, `JobModules`,
    `Desktop` or `AllModules`); its bans, `member(owner, name, descriptor)` for
    a call or a field access (any descriptor when none is given), each with
-   `instead` when one call replaces it, or a `Ban` of your own over the
+   `instead` when one call replaces it; `RawFloatComparison`, a raw float or
+   double comparison between two values; or a `Ban` of your own over the
    reader's `Use`s; and the advice its failure prints, which points at the
    convention in conventions.md.
 3. Give each site that a decision allows an `Allow(cls, method, reason)` in

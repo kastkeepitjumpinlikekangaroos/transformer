@@ -2913,6 +2913,18 @@ its partial results merge in, was not written: no defect, the
 `double-precision` rule again, which the runner's own CockroachDB and
 DataFusion comparisons allow for.
 
+## What the bytecode rules hold out (2026-11-02, held for the user)
+
+[plans/testing/18](../plans/testing/18-one-rule-per-concept-in-bytecode.md)'s
+rules found methods that do what a rule bans and that no decision names. None
+is a defect. Each is allowed in its rule's `held` list in
+`bytecode/BytecodeRules.scala`, saying why, until the user decides:
+
+- **R2: `FunctionCatalog`'s POWER domain.** `math.floor(y) != y`, whether an
+  exponent is whole, in the catalog's description of when POWER is NULL
+  (`FunctionCatalog.Entries`): the test `Funcs.apply` makes, which R2 allows,
+  written a second time by plans/testing/09.
+
 ## Answers that differ from other engines by design
 
 The engine answers some queries otherwise than another engine does, on

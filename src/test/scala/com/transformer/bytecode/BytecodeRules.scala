@@ -95,6 +95,18 @@ object BytecodeRules {
   /** Each of `names` on `owner`, any descriptor. */
   def members(owner: String, names: String*): Seq[Ban] = names.map(member(owner, _))
 
+  /** Each of `names` on `owner`, any descriptor, with what to write instead. */
+  def membersInstead(owner: String, instead: String, names: String*): Seq[Ban] =
+    names.map(member(owner, _, instead = instead))
+
+  /** Two floats or doubles compared raw (`fcmpl`, `fcmpg`, `dcmpl`, `dcmpg`),
+    * neither side a constant: `a < b`, `a == b` between two values. One side
+    * a constant (`x > 0.0`, `x == 3`) is not this. */
+  val RawFloatComparison: Ban = Ban("a raw <, <=, >, >=, == or != between two floats or doubles", {
+    case Use.FloatComparison(_, false, _) => true
+    case _ => false
+  }, instead = "Ops.floatCompare(a, b)")
+
   // ---------------------------------------------------------------------------
   // The rules
   // ---------------------------------------------------------------------------
@@ -127,7 +139,81 @@ object BytecodeRules {
       "does: under tr-TR the SQL highlighter read PARTITION as no keyword. Their display text may format a number " +
       "in the user's locale (plans/testing/04, decision 6).")
 
-  val All: Seq[Rule] = Seq(R1Locale, R1DesktopFolds)
+  val R2FloatOrder: Rule = Rule("R2", "float ordering and equality", Engine,
+    membersInstead("java/lang/Double", "Ops.floatCompare (a double slot) or Ops.cmp (boxed)", "compare", "compareTo",
+      "equals") ++
+      membersInstead("java/lang/Float", "Ops.floatCompare (a float slot) or Ops.cmp (boxed)", "compare", "compareTo",
+        "equals") :+
+      RawFloatComparison,
+    advice = "Anything that orders or matches two values compares through the one total order: Ops.cmp boxed, " +
+      "Ops.floatCompare on a primitive float or double slot, where NaN equals NaN and sorts above every number and " +
+      "-0.0 equals 0.0. A raw < or == is false both ways on NaN, so the answer moves with the order rows arrive " +
+      "in, and java.lang.Double.compare puts -0.0 below 0.0; MinMaxState's accumulator, evalVec's comparisons and " +
+      "WindowExec.sameKey each broke the rule so (docs/conventions.md, \"Anything that ORDERS values\"). A " +
+      "comparison with a constant (x > 0.0) is not banned.",
+    allowed = Seq(
+      Allow("com.transformer.sql.plan.Ops$", "floatCompare",
+        "the one total order on a primitive float or double, the comparison every other site makes"),
+      Allow("com.transformer.sql.exec.MinMaxState", "updateAt",
+        "decided: of two zeros Ops.cmp calls equal, Double.compare orders -0.0 below 0.0, so MIN and MAX of " +
+          "equal zeros do not move with row order (docs/conventions.md)"),
+      Allow("com.transformer.sql.exec.MinMaxState", "updateBatchAt", "the same tie-break, a batch at a time"),
+      Allow("com.transformer.sql.exec.MinMaxState", "merge", "the same tie-break, merging two partitions' states"),
+      Allow("com.transformer.sql.plan.Funcs$", "pickByOrdering",
+        "decided: GREATEST and LEAST break a tie between two zeros as MAX and MIN do, by Double.compare and " +
+          "Float.compare, once Ops.cmp has called them equal"),
+      Allow("com.transformer.sql.plan.Funcs$", "apply",
+        "POWER's domain test, math.floor(y) != y: whether an exponent is whole, comparing no two SQL values"),
+      Allow("com.transformer.sql.exec.PhysicalPlanner$", "shouldBuildRight",
+        "compares two row estimates to choose a join's build side, no SQL value"),
+      Allow("com.transformer.job.JsonValue", "stringValue",
+        "whether a JSON number is whole, to print it as one; no SQL value"),
+      Allow("com.transformer.job.JsonNumber", "equals", "the case class's synthesized equals of a JSON number"),
+      Allow("com.transformer.core.metrics.JsonMini$JNum", "equals",
+        "the case class's synthesized equals of a JSON number in the metrics' reader")),
+    held = Seq(
+      Allow("com.transformer.sql.plan.FunctionCatalog$", "Entries",
+        "held: POWER's domain test again, math.floor(y) != y, in the catalog's description of when POWER is " +
+          "NULL (plans/testing/09 wrote this copy after the plan's measurement). The same exception as " +
+          "Funcs.apply's, for the user to confirm")))
+
+  val R3FloatKeyBits: Rule = Rule("R3", "float key bits", Engine,
+    membersInstead("java/lang/Double", "KeyCodec.doubleKeyBits", "doubleToLongBits", "doubleToRawLongBits") ++
+      membersInstead("java/lang/Float", "KeyCodec.floatKeyBits", "floatToIntBits", "floatToRawIntBits"),
+    advice = "A float key's bits are KeyCodec.floatKeyBits / doubleKeyBits: -0.0 as the 0.0 = calls it equal, and " +
+      "every NaN as one. The raw bits separate two values = calls equal, so a map, a shard or a spill bucket keyed " +
+      "by them splits one group in two (docs/conventions.md, \"Anything that HASHES, GROUPS or DE-DUPLICATES " +
+      "values agrees with Ops.eq\").",
+    allowed = Seq(
+      Allow("com.transformer.core.KeyCodec$", "floatKeyBits", "the sanctioned bits of a FLOAT key, -0.0 read as 0.0"),
+      Allow("com.transformer.core.KeyCodec$", "doubleKeyBits", "the sanctioned bits of a DOUBLE key, -0.0 read as 0.0"),
+      Allow("com.transformer.sql.exec.HashPartitioner$", "decimalHash",
+        "the bits of a decimal's doubleValue, which equal decimals share whatever their scales; no float key")))
+
+  val R4StringOrder: Rule = Rule("R4", "string ordering", Engine,
+    membersInstead("java/lang/String", "Ops.cmp(a, b)", "compareTo", "compareToIgnoreCase") ++
+      membersInstead("scala/collection/StringOps$", "Ops.cmp(a, b)", "compare$extension", "$less$extension",
+        "$less$eq$extension", "$greater$extension", "$greater$eq$extension"),
+    advice = "Two strings order through Ops.cmp, the one total order ORDER BY, every comparison, MIN and MAX, a " +
+      "window's peers and every sorted key follow; a second string order beside it lets two operators disagree " +
+      "on which of two strings comes first (docs/conventions.md, \"Anything that ORDERS values\").",
+    allowed = Seq(Allow("com.transformer.sql.plan.Ops$", "cmp", "the one total order, where two strings compare")))
+
+  val R9DateDoors: Rule = Rule("R9", "dates enter vectors through one door", Engine, Seq(
+    member("java/time/LocalDate", "toEpochDay", instead = "DateVector.epochDay(d)"),
+    member("java/time/Instant", "getEpochSecond", instead = "TimestampVector.epochMicros(i)"),
+    member("java/time/Instant", "getNano", instead = "TimestampVector.epochMicros(i)"),
+    member("java/time/temporal/ChronoUnit", "between", instead = "DateVector.epochDay / TimestampVector.epochMicros")),
+    advice = "A date or a timestamp enters a vector through DateVector.epochDay and TimestampVector.epochMicros, " +
+      "which give the INT of days or the BIGINT of microseconds it is stored as and an error past it; " +
+      "toEpochDay.toInt and getEpochSecond * 1000000L wrap it round to another date (docs/conventions.md, \"A " +
+      "date or a timestamp enters a vector\"; plans/robustness/25). Out of a vector, or into a duration, is not " +
+      "banned.",
+    allowed = Seq(
+      Allow("com.transformer.core.DateVector$", "epochDay", "the one door a date enters a vector by"),
+      Allow("com.transformer.core.TimestampVector$", "epochMicros", "the one door a timestamp enters a vector by")))
+
+  val All: Seq[Rule] = Seq(R1Locale, R1DesktopFolds, R2FloatOrder, R3FloatKeyBits, R4StringOrder, R9DateDoors)
 
   // ---------------------------------------------------------------------------
   // Holding a rule

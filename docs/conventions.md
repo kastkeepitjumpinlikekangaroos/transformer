@@ -363,7 +363,7 @@ specific traps.
   the other way around. On floating-point operands, `NaN` / `-0.0` parity
   too: equality and ordering both go through `Ops.floatCompare`, in both
   paths, so a vectorized helper may not reach for the raw `<` or `==` just
-  because the operands are `double`. Two integers
+  because the operands are `double` (rule R2, below). Two integers
   compare as longs and a decimal exactly, in both paths, so neither may be
   read through `readDouble`. The
   property-based `ExprParityFuzzTest` is the generative net over that gate;
@@ -385,7 +385,15 @@ specific traps.
   at a new sort site), `Funcs.pickByOrdering` and `MinMaxState`'s accumulator
   are all ordering sites,
   and `MinMaxState`'s was the one that reached for the raw `<` because its slot
-  was a primitive. Every comparison against `NaN` is false in both directions,
+  was a primitive. Rule R2 of `bytecode:bytecode_rules_test` holds the float
+  half in the engine: no `Double.compare`, `Float.compare`, `compareTo` or
+  `equals` on a boxed float, and no raw `<`, `<=`, `>`, `>=`, `==` or `!=`
+  between two float or double values (one against a constant, `x > 0.0`, is
+  allowed), but in `Ops.floatCompare` and the decided exceptions in its
+  allowlist: `MinMaxState`'s and `pickByOrdering`'s tie-break, and comparisons
+  of no SQL value (an exponent's integrality, two row estimates, JSON
+  numbers). Rule R4 holds the string half: no `String.compareTo` or `<` on
+  strings in the engine but in `Ops.cmp`. Every comparison against `NaN` is false in both directions,
   so a raw `<` silently makes the answer depend on the order values arrive in.
   An accumulator makes that worse than an expression does: it also depends on
   partition fan-out and spill flush order, which no `eval`/`evalVec` parity gate
@@ -417,7 +425,11 @@ specific traps.
   as surely as a hash map would. A float keys and hashes as
   `KeyCodec.floatKeyBits` / `floatKeyValue`, `-0.0` as `0.0`
   ([architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers));
-  its raw bits and `Double.equals` separate two values `=` calls equal.
+  its raw bits and `Double.equals` separate two values `=` calls equal. Rule R3
+  of `bytecode_rules_test` holds that half: no `doubleToLongBits`,
+  `floatToIntBits` or their raw forms in the engine but in
+  `KeyCodec.floatKeyBits` / `doubleKeyBits` and `HashPartitioner.decimalHash`
+  (a decimal's double, which equal decimals share).
 - **Integer arithmetic goes through `Integers`.** An INT or BIGINT result
   past its type is an error naming the operation (`Integers` in `Ops.scala`),
   on the row path, in `VecOps`' loops, in `ABS` and in every CAST to an
@@ -431,7 +443,10 @@ specific traps.
   `toEpochDay.toInt` and `getEpochSecond * 1000000L` wrap it round to another
   date. A CAST checks its result the same way (`Casts.storable`), since on the
   row path the value stays a `LocalDate` or an `Instant`, which reach further
-  than the column it lands in.
+  than the column it lands in. Rule R9 of `bytecode_rules_test` holds the way
+  in: no `toEpochDay`, `getEpochSecond`, `getNano` or `ChronoUnit.between` in
+  the engine but in those two. The way out (`LocalDate.ofEpochDay` for a
+  value's text) and a duration (`toEpochMilli`) are not banned.
 - **A decimal result is computed exactly and fitted to its declared type,
   once.** An operation or aggregate that produces a `DECIMAL` declares its type
   through `Decimals` (`resultType`, `sumType`, `avgType`, or a rule of the same
