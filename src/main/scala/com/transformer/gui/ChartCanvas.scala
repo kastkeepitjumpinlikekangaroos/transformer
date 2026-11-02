@@ -84,7 +84,7 @@ final class ChartCanvas extends Canvas(800, 400) {
     val canvas = new Canvas(math.ceil(w * scale), math.ceil(h * scale))
     val gc = canvas.getGraphicsContext2D
     gc.scale(scale, scale)
-    paint(gc, w, h, None)
+    val _ = paint(gc, w, h, None)
     val params = new SnapshotParameters()
     params.setFill(Palette.Background)
     canvas.snapshot(params, null)

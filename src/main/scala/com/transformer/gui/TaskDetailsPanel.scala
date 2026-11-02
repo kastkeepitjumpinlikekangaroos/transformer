@@ -704,7 +704,8 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     updateToolbarState()
   }
 
-  private def onSaveSqlEdit(): Unit = saveSqlEdit()
+  /** Save's button: a write that fails has shown its error already. */
+  private def onSaveSqlEdit(): Unit = { val _ = saveSqlEdit() }
 
   /** Write the edit to the task's main.sql; None once written, or why not. */
   private def saveSqlEdit(): Option[String] = {

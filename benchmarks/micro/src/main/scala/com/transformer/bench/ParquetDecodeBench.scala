@@ -72,7 +72,7 @@ class ParquetDecodeBench {
         out
       }
     }
-    ParquetWriter.writeAll(parquetPath, schema, batches)
+    val _ = ParquetWriter.writeAll(parquetPath, schema, batches)
   }
 
   @TearDown(Level.Trial)

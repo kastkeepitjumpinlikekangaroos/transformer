@@ -206,7 +206,7 @@ final case class WindowExec(
     b = 0
     while (b < K) {
       val w = writers(b)
-      if (w != null) w.close()
+      if (w != null) { val _ = w.close() }
       b += 1
     }
     if (metricsNode != null) {

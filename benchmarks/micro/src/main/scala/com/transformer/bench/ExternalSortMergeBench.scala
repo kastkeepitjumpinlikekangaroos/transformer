@@ -102,7 +102,7 @@ class ExternalSortMergeBench {
           out
         }
       }
-      ParquetWriter.writeAll(path, Schema_, batches)
+      val _ = ParquetWriter.writeAll(path, Schema_, batches)
       r += 1
     }
   }

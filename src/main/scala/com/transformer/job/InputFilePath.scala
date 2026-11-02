@@ -71,7 +71,6 @@ object InputFilePath {
     val format = in.detectedFormat
     refuseUnknown(in.options, optionKeys(format), s"a $format input")
     if (format == "parquet") in.options.get(ParquetPartitionSizeKey).foreach(OptionValues.positiveLong(ParquetPartitionSizeKey, _))
-    else CsvOptions.fromMap(in.options)
-    ()
+    else { val _ = CsvOptions.fromMap(in.options) }
   }
 }

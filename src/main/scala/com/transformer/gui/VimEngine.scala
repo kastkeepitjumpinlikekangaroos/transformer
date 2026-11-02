@@ -1154,7 +1154,7 @@ final class VimEngine(buffer: VimBuffer) {
       key match {
         case Typed(r) =>
           readRegister(Some(r)).foreach(reg => insertRaw(reg.text))
-          session.keys += Ctrl('r') += key
+          session.keys ++= Seq(Ctrl('r'), key)
         case _ => ()
       }
       return true
@@ -1327,7 +1327,7 @@ final class VimEngine(buffer: VimBuffer) {
           case Typed(r) => readRegister(Some(r)).foreach(reg => insertRaw(reg.text))
           case _ => ()
         }
-      case key => insertEffect(key, session)
+      case key => val _ = insertEffect(key, session)
     }
   }
 
@@ -1394,7 +1394,7 @@ final class VimEngine(buffer: VimBuffer) {
       var k = 0
       while (k < n && !failed) {
         val it = keys.iterator
-        while (it.hasNext && !failed) handleKey(it.next())
+        while (it.hasNext && !failed) { val _ = handleKey(it.next()) }
         k += 1
       }
     } finally replayDepth -= 1
@@ -1509,7 +1509,7 @@ final class VimEngine(buffer: VimBuffer) {
                 delete(Lines(first, last), register)
                 cursor = firstNonBlank(t, lineStartOf(t, math.min(first, lastLine)))
               case "j" | "join" =>
-                join(first, math.max(2, last - first + 1), spaces = true)
+                val _ = join(first, math.max(2, last - first + 1), spaces = true)
                 cursor = firstNonBlank(t, lineStartOf(t, first))
               case dir =>
                 shiftLines(first, last, 1, right = dir == ">")
@@ -1577,7 +1577,7 @@ final class VimEngine(buffer: VimBuffer) {
     while (i < args.length && parts.length < 2) {
       val c = args.charAt(i)
       if (c == '\\' && i + 1 < args.length && args.charAt(i + 1) == delim) { sb.append(delim); i += 2 }
-      else if (c == '\\' && i + 1 < args.length) { sb.append(c).append(args.charAt(i + 1)); i += 2 }
+      else if (c == '\\' && i + 1 < args.length) { sb.append(c); sb.append(args.charAt(i + 1)); i += 2 }
       else if (c == delim) { parts += sb.toString; sb.clear(); i += 1 }
       else { sb.append(c); i += 1 }
     }
@@ -1677,7 +1677,7 @@ final class VimEngine(buffer: VimBuffer) {
     changeStart = None
   }
 
-  private def trimUndo(): Unit = if (undoStack.length > MaxUndo) undoStack.remove(0)
+  private def trimUndo(): Unit = if (undoStack.length > MaxUndo) undoStack.remove(0, 1)
 
   private def undoSteps(n: Int): Unit = {
     var k = 0

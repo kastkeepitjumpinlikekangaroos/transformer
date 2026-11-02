@@ -271,7 +271,7 @@ private[exec] object DistinctSpiller {
         out
       }
     }
-    ParquetWriter.writeAll(file, spillFileSchema, batchIter)
+    val _ = ParquetWriter.writeAll(file, spillFileSchema, batchIter)
   }
 
   def foldSpillFiles(

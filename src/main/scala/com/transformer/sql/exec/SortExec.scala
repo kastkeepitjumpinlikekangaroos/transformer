@@ -142,7 +142,7 @@ final case class SortExec(
     val batches = batchIterator(sorted, schema)
     // Runs are read back by index (see DiskRunCursor); positional names keep a
     // duplicate-named child schema round-trippable. See Spill.positionalSchema.
-    ParquetWriter.writeAll(file, Spill.positionalSchema(schema), batches)
+    val _ = ParquetWriter.writeAll(file, Spill.positionalSchema(schema), batches)
     runs += file
   }
 

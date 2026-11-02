@@ -51,7 +51,7 @@ final class OutputDirectory(val dir: Path) {
       s"Output directory '$dir' already holds ${stray.mkString(", ")}, which no run record names, so a reader " +
         "of the directory would read them as part of this output; delete them or write to another directory")
     mark(running)
-    TaskRunRecord.clear(dir)
+    val _ = TaskRunRecord.clear(dir)
   }
 
   /** Steps 4 and 5: stage each of `partitions` as a part file in `format`
@@ -94,7 +94,7 @@ final class OutputDirectory(val dir: Path) {
       mark(last.copy(status = TaskRunStatus.Running, errorMessage = None, finishedAt = None, rowsProduced = 0L,
         outputFiles = Nil, validations = Nil, schema = None))
     }
-    TaskRunRecord.clear(dir)
+    val _ = TaskRunRecord.clear(dir)
     record(last)
   }
 

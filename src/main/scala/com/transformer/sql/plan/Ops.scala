@@ -371,10 +371,10 @@ object Casts {
   /** `d`, a date a DATE holds, or an error naming it: on the row path a cast's
     * date stays a `LocalDate`, which reaches further than the column it lands
     * in, so the row and the vector path answered differently past it. */
-  private def storable(d: LocalDate): LocalDate = { DateVector.epochDay(d); d }
+  private def storable(d: LocalDate): LocalDate = { val _ = DateVector.epochDay(d); d }
 
   /** `i`, an instant a TIMESTAMP holds, or an error naming it. */
-  private def storable(i: Instant): Instant = { TimestampVector.epochMicros(i); i }
+  private def storable(i: Instant): Instant = { val _ = TimestampVector.epochMicros(i); i }
 
   /** `true` or `false` in any case, the text CSV inference reads as a
     * BOOLEAN. Any other text is an error rather than false. */
@@ -419,7 +419,7 @@ object Casts {
     catch {
       case _: DateTimeParseException =>
         val advice =
-          try { parseInstant(s); "; cast it to TIMESTAMP first, then to DATE for its date in UTC" }
+          try { val _ = parseInstant(s); "; cast it to TIMESTAMP first, then to DATE for its date in UTC" }
           catch { case _: IllegalArgumentException => "" }
         throw new IllegalArgumentException(s"Cannot cast '$s' to date$advice")
     }

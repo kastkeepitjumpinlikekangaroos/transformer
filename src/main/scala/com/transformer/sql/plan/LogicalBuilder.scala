@@ -110,7 +110,7 @@ object LogicalBuilder {
       outerCteScope: Map[String, CteScopeEntry],
       collector: Option[mutable.ArrayBuffer[CteDef]]): LogicalPlan = {
     val withItems = Option(sel.getWithItemsList).map(_.asScala.toSeq).getOrElse(Nil)
-    withItems.map(item => unquoted(item.getAlias.getName)).foldLeft(Set.empty[String]) { (defined, name) =>
+    val _ = withItems.map(item => unquoted(item.getAlias.getName)).foldLeft(Set.empty[String]) { (defined, name) =>
       if (defined(name.toLowerCase(Locale.ROOT)))
         throw new IllegalArgumentException(s"WITH defines '$name' twice; give each query its own name")
       defined + name.toLowerCase(Locale.ROOT)

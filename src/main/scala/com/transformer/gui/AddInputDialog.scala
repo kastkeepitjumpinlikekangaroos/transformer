@@ -107,13 +107,13 @@ object AddInputDialog {
       try {
         val options = parseOptions(optionsArea.getText)
         if (isEdit) {
-          JobFiles.updateInputConfig(jobDir, name.trim, path.trim, format, cacheCheck.isSelected, options)
+          val _ = JobFiles.updateInputConfig(jobDir, name.trim, path.trim, format, cacheCheck.isSelected, options)
         } else {
           JobFiles.validateViewName(name).left.foreach(reason =>
             throw new IllegalArgumentException(reason))
           JobFiles.ensureNotInUse(jobDir, name.trim).left.foreach(reason =>
             throw new IllegalArgumentException(reason))
-          JobFiles.addInput(jobDir, name.trim, path.trim, format, cacheCheck.isSelected, options)
+          val _ = JobFiles.addInput(jobDir, name.trim, path.trim, format, cacheCheck.isSelected, options)
         }
       } catch {
         case NonFatal(e) =>

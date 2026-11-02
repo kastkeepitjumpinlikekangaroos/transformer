@@ -109,7 +109,7 @@ final case class ExchangeExec(
     * structurally unreachable for planned queries — the pass's calling
     * thread is always the first toucher and the fan-out below it is a pure
     * task tree (every nested exchange is already published). */
-  private[exec] def materializeNow(): Unit = ensureMaterialized()
+  private[exec] def materializeNow(): Unit = { val _ = ensureMaterialized() }
 
   /** CAS-claim + latch — the lazy fallback for DIRECTLY-CONSTRUCTED
     * exchanges; engine-planned ones arrive through [[materializeNow]] with

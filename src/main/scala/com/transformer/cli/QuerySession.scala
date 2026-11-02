@@ -264,12 +264,12 @@ final class QuerySession {
     if (inDependencyOrder(created.reads, others).exists(_.reads(key(v.name))) || created.reads(key(v.name)))
       throw new IllegalArgumentException(s"View ${v.name} would read itself")
     // Bound now, so a view that cannot be read is never created.
-    schemaOf(created, others + (key(v.name) -> created))
+    val _ = schemaOf(created, others + (key(v.name) -> created))
     sources(key(v.name)) = created
   }
 
   private def dropView(name: String, ifExists: Boolean): Unit = sources.get(key(name)) match {
-    case Some(_: View) => sources.remove(key(name)); ()
+    case Some(_: View) => sources -= key(name)
     case None if ifExists => ()
     case None => throw new IllegalArgumentException(s"There is no view $name")
     case Some(other) => throw new IllegalArgumentException(
@@ -375,7 +375,7 @@ final class QuerySession {
       accepted.find(_.equalsIgnoreCase(k)).getOrElse(throw new IllegalArgumentException(
         s"COPY TO a $fileFormat file takes FORMAT and ${accepted.mkString(", ")}, not $k")) -> v
     }.toMap
-    if (fileFormat == "csv") CsvWriteOptions.fromMap(options) else ParquetWriter.checkOptions(options)
+    if (fileFormat == "csv") { val _ = CsvWriteOptions.fromMap(options) } else ParquetWriter.checkOptions(options)
     (fileFormat, options)
   }
 

@@ -147,7 +147,9 @@ object ParquetWriter {
     * value of its key, as the writer would once a task had run; the map
     * carries the task's execution options too, whose keys the caller checks. */
   def checkOptions(options: Map[String, String]): Unit = {
-    codecOf(options); rowGroupSizeOf(options); writeParallelismOf(options); ()
+    val _ = codecOf(options)
+    val _ = rowGroupSizeOf(options)
+    val _ = writeParallelismOf(options)
   }
 
   /** `compression`: `snappy` (the default), `gzip`, or `uncompressed` and
@@ -234,7 +236,7 @@ object ParquetWriter {
     // A schema parquet cannot store fails here, before any partition runs,
     // rather than in the first partition with a row to write: an empty result
     // would otherwise succeed where any other fails.
-    ParquetSchema.toMessageType(schema)
+    val _ = ParquetSchema.toMessageType(schema)
     Files.createDirectories(targetDir)
     val n = partitions.length
     if (n == 0) return WrittenParts(Vector.empty, 0L)
@@ -306,7 +308,7 @@ object ParquetWriter {
         if (writers.forall(_ == null)) {
           val w = new ParquetWriter(targetDir.resolve(partName(0)), schema, options)
           writers(0) = w
-          w.finish()
+          val _ = w.finish()
         }
         writers.foreach(w => if (w != null) { Faults.at(Faults.Commit); w.commit() })
       } catch { case t: Throwable => firstError = t }

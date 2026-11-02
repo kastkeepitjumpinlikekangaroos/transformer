@@ -71,7 +71,7 @@ final class ViewerTabs(session: ViewerSession, owner: () => Stage) extends Stack
     def onChanged(c: ListChangeListener.Change[_ <: Tab]): Unit = {
       while (c.next()) c.getRemoved.forEach { t =>
         consoles.remove(t).foreach(starters.remove)
-        inspectors.remove(t)
+        inspectors -= t
         if (preview.contains(t)) preview = None
         if (lastQuery.contains(t)) lastQuery = None
       }
@@ -110,7 +110,7 @@ final class ViewerTabs(session: ViewerSession, owner: () => Stage) extends Stack
     }
   })
 
-  addQueryTab(starterSql, starter = true)
+  addQueryTab(starterSql, starter = true): Unit
 
   // ==================== inspecting ====================
 
@@ -225,10 +225,7 @@ final class ViewerTabs(session: ViewerSession, owner: () => Stage) extends Stack
   }
 
   /** A new, empty query tab. */
-  def newQueryTab(): Unit = {
-    addQueryTab("")
-    ()
-  }
+  def newQueryTab(): Unit = { val _ = addQueryTab("") }
 
   private def addQueryTab(sql: String, starter: Boolean = false): Tab = {
     val c = new QueryConsole(

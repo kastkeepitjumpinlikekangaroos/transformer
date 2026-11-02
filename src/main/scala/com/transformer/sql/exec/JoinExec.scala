@@ -265,7 +265,10 @@ final case class HashJoinExec(
         while (!current.hasNext && cursors.nonEmpty) current = wave()
         current.hasNext
       }
-      def next(): ColumnarBatch = { hasNext; current.next() }
+      def next(): ColumnarBatch = {
+        val _ = hasNext // moves to the next wave when this one is spent
+        current.next()
+      }
 
       /** Advance the first cursors still reading, in parallel, and drop the
         * ones that ran out. */
@@ -391,7 +394,7 @@ final case class HashJoinExec(
         var list = keyMap.get(k)
         if (list == null) {
           list = new util.ArrayList[Int]()
-          keyMap.put(k, list)
+          val _ = keyMap.put(k, list)
         }
         list.add(i)
       }
@@ -812,7 +815,7 @@ final case class HashJoinExec(
     b = 0
     while (b < K) {
       val w = writers(b)
-      if (w != null) w.close()
+      if (w != null) { val _ = w.close() }
       b += 1
     }
     // Attribute spill bytes per-side. Done after close so the size on disk

@@ -68,8 +68,7 @@ object OutputFilePath {
     InputFilePath.checkFormat(out.format, "output")
     val format = out.detectedFormat
     InputFilePath.refuseUnknown(out.options, optionKeys(format), s"a $format output")
-    if (format == "parquet") ParquetWriter.checkOptions(out.options) else CsvWriteOptions.fromMap(out.options)
-    ExecutionOptions.fromOutputOptions(out.options)
-    ()
+    if (format == "parquet") ParquetWriter.checkOptions(out.options) else { val _ = CsvWriteOptions.fromMap(out.options) }
+    val _ = ExecutionOptions.fromOutputOptions(out.options)
   }
 }

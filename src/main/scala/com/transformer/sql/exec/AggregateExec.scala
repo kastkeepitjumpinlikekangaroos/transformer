@@ -246,7 +246,7 @@ final case class HashAggregateExec(
         var i = 0
         while (i < existing.length) { existing(i).merge(bs(i)); i += 1 }
       } else {
-        if (isNull) a.putNull(bs) else a.put(k, bs)
+        val _ = if (isNull) a.putNull(bs) else a.put(k, bs)
       }
     }
     a
@@ -558,12 +558,12 @@ final case class HashAggregateExec(
           val states: Array[AggState] =
             if (col.isNull(r)) {
               var s = map.getNull
-              if (s == null) { s = newStates(); map.putNull(s) }
+              if (s == null) { s = newStates(); val _ = map.putNull(s) }
               s
             } else {
               val k = KeyCodec.readAsLong(col, r)
               var s = map.get(k)
-              if (s == null) { s = newStates(); map.put(k, s) }
+              if (s == null) { s = newStates(); val _ = map.put(k, s) }
               s
             }
           updateStatesAt(states, argVecsByAgg, r)
@@ -1817,7 +1817,7 @@ private[exec] object AggSpiller {
         out
       }
     }
-    ParquetWriter.writeAll(file, outSchema, batchIter)
+    val _ = ParquetWriter.writeAll(file, outSchema, batchIter)
   }
 
   /** Fold every spill file's entries into `target`. For each row in each
@@ -1932,7 +1932,7 @@ private[exec] object AggSpiller {
         out
       }
     }
-    ParquetWriter.writeAll(file, outSchema, batchIter)
+    val _ = ParquetWriter.writeAll(file, outSchema, batchIter)
   }
 
   def foldLongSpillFiles(
@@ -1980,7 +1980,7 @@ private[exec] object AggSpiller {
                 states(a) = AggStateSerde.deserializeBytes(aggs(a), bytes, stats)
                 a += 1
               }
-              if (isNull) target.putNull(states) else target.put(k, states)
+              val _ = if (isNull) target.putNull(states) else target.put(k, states)
             }
             r += 1
           }

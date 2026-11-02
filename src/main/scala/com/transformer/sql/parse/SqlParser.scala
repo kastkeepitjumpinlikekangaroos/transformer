@@ -386,7 +386,7 @@ object SqlParser {
       link.setRightExpression(subtree(mid, until))
       link
     }
-    join(head, 0, operands.size)
+    val _ = join(head, 0, operands.size)
   }
 
   /** Refuse a statement whose tree nests deeper than [[MaxNesting]], walking

@@ -241,7 +241,9 @@ final case class DataJob(
           try listener.onTaskEnqueued(i, node.task.displayName)
           catch { case _: Throwable => () }
           val needsView = taskDependents(i).nonEmpty
-          Scheduler.submit(new Callable[Unit] {
+          // The task reports through `events`, whatever it throws, so its
+          // handle is not kept.
+          val _ = Scheduler.submit(new Callable[Unit] {
             def call(): Unit = {
               // runOneTask turns what its task throws into the task's result;
               // this is for what its own failure handling throws, such as a
@@ -465,7 +467,7 @@ final case class DataJob(
           stop = None)
       } else {
         if (writtenOutput.isEmpty) {
-          while (q.batches.hasNext) q.batches.next()
+          q.batches.foreach(_ => ())
         }
         val finished = Instant.now()
         finishOutput(Nil, finished)

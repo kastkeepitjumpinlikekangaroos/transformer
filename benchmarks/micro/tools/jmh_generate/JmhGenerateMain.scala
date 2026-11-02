@@ -221,11 +221,11 @@ object JmhGenerateMain {
         val e = entries.nextElement()
         val target = outDir.resolve(e.getName)
         if (e.isDirectory) {
-          Files.createDirectories(target)
+          val _ = Files.createDirectories(target)
         } else {
           if (target.getParent != null) Files.createDirectories(target.getParent)
           val in = jar.getInputStream(e)
-          try Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING)
+          try { val _ = Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING) }
           finally in.close()
         }
       }
@@ -253,7 +253,7 @@ object JmhGenerateMain {
           entry.setTime(0L) // reproducible
           out.putNextEntry(entry)
           val in = new FileInputStream(c)
-          try in.transferTo(out)
+          try { val _ = in.transferTo(out) }
           finally in.close()
           out.closeEntry()
         }

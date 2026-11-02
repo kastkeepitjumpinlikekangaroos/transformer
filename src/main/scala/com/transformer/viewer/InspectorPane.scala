@@ -456,7 +456,7 @@ final class ColumnsPane(session: ViewerSession, node: NodeId) extends VBox {
     if (!names.isEmpty) {
       val content = new ClipboardContent()
       val sb = new StringBuilder
-      names.forEach(r => sb.append(if (sb.isEmpty) "" else ", ").append(r.name))
+      names.forEach { r => if (sb.nonEmpty) sb.append(", "); sb.append(r.name) }
       content.putString(sb.toString)
       Clipboard.getSystemClipboard.setContent(content)
     }

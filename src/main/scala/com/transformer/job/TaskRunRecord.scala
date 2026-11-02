@@ -377,7 +377,7 @@ object TaskRunRecord {
     val tmp = dir.resolve(name + ".tmp")
     Files.writeString(tmp, csv)
     try {
-      Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+      val _ = Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
     } catch {
       case _: java.nio.file.AtomicMoveNotSupportedException =>
         Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING)

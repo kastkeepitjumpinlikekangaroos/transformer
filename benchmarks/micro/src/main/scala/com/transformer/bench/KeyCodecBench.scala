@@ -68,7 +68,7 @@ class KeyCodecBench {
       // distribution it built on.
       val k = packedBatch.column(0).asInstanceOf[LongVector].values(i)
       val boxed: java.lang.Long = java.lang.Long.valueOf(k)
-      longMapWarm.put(k, boxed)
+      val _ = longMapWarm.put(k, boxed)
       i += 1
     }
   }
@@ -111,7 +111,7 @@ class KeyCodecBench {
     while (r < BatchRows) {
       val k = kCol.values(r)
       val v: java.lang.Long = java.lang.Long.valueOf(k)
-      map.getOrInsert(k, v)
+      val _ = map.getOrInsert(k, v)
       r += 1
     }
     bh.consume(map.size)

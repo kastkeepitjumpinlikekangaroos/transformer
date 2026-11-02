@@ -260,7 +260,7 @@ object TaskDag {
       false
     }
     val start = remaining.min
-    dfs(start)
+    val _ = dfs(start)
     if (cycleStart < 0) Seq.empty
     else {
       val path = mutable.ArrayBuffer[Int]()

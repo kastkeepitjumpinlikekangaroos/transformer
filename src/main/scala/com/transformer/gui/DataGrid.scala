@@ -92,9 +92,9 @@ final class DataGrid extends TableView[Array[Any]] {
     val rows = getSelectionModel.getSelectedItems
     if (rows.isEmpty) return
     val sb = new StringBuilder()
-    sb.append(fieldNames.mkString("\t")).append('\n')
+    sb.append(fieldNames.mkString("", "\t", "\n"))
     rows.forEach { row =>
-      sb.append(row.iterator.map(v => if (v == null) "" else DataGrid.format(v)).mkString("\t")).append('\n')
+      sb.append(row.iterator.map(v => if (v == null) "" else DataGrid.format(v)).mkString("", "\t", "\n"))
     }
     val content = new ClipboardContent()
     content.putString(sb.toString)

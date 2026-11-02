@@ -117,7 +117,7 @@ object AddTableDialog {
           val sql = Option(sqlArea.text).getOrElse("")
           if (sql.trim.isEmpty)
             throw new IllegalArgumentException("SQL cannot be empty.")
-          JobFiles.addTable(jobDir, name.trim, sql, format, partitionBy, maxPartitions)
+          val _ = JobFiles.addTable(jobDir, name.trim, sql, format, partitionBy, maxPartitions)
         }
       } catch {
         case NonFatal(e) =>
