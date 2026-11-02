@@ -1,0 +1,17 @@
+# Parquet files of apache/parquet-testing, Apache License 2.0 (LICENSE.txt,
+# README.md), held by //src/test/scala/com/transformer/read/parquet:parquet_testing_test
+# to the lines of MANIFEST, which the ledger in docs/gotchas.md also cites.
+filegroup(
+    name = "files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "manifest",
+    srcs = ["MANIFEST"],
+    visibility = ["//visibility:public"],
+)

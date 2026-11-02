@@ -973,7 +973,7 @@ class ParquetExternalFormatTest {
         (Seq(0L, 50L, 50L), 100L), (Seq(100L, 0L), 100L), (Seq(100L, 0L, 0L), 1L),
         (Seq(60L, 60L, 0L, 60L, 0L), 100L), (Seq(0L, 200L, 0L), 100L), (Seq(-5L, 10L), 1L))) {
       val blocks = bytes.zipWithIndex.map { case (b, i) => block(b, i + 1L) }
-      val parts = ParquetReader.packRowGroups(null, blocks.asJava, target)
+      val parts = ParquetReader.packRowGroups(null, "groups.parquet", blocks.asJava, target)
       val what = s"groups of $bytes bytes, a target of $target"
       assertEquals(what, bytes.indices.toVector, parts.flatMap(p => p.startRowGroup until p.endRowGroup).toVector)
       parts.foreach { p =>

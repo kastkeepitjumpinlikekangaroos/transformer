@@ -11,8 +11,9 @@ import scala.jdk.CollectionConverters._
   * read, and against every script under `src/test/slt` each rule is cited by
   * a skip or pinned, each pin is a record of the engine's own answer
   * (`onlyif transformer <id>`) in the script of this repo's own its row
-  * names, and a port, which keeps another engine's answers, holds the
-  * engine's only as the twins of its skips. */
+  * names, or a file refused under the rule in the fixture manifest it names
+  * (`refused by-design <id>`), and a port, which keeps another engine's
+  * answers, holds the engine's only as the twins of its skips. */
 class LedgerTest {
 
   import LedgerTest._
@@ -31,6 +32,7 @@ class LedgerTest {
     assertTrue(ledgerError("| `refused-x` | r | | s | d | `x.test` |").contains("gives the text its refusal must contain"))
     assertTrue(ledgerError("| `a-b` | r | `t` | s | d | `x.test` |").contains("only a refused- rule gives"))
     assertTrue(ledgerError("| `a-b` | r | | s | d | x.test |").contains("is pinned by a script"))
+    assertTrue(ledgerError("| `a-b` | r | | s | d | `docs/MANIFEST` |").contains("or a fixture manifest under src/test/data"))
     assertTrue(ledgerError("| `a-b` | r | | s | d | `x.test` |", "| `a-b` | q | | s | d | `x.test` |")
       .startsWith("ledger.md:6: 'a-b' is the id of line 5 too"))
   }
@@ -53,7 +55,12 @@ class LedgerTest {
   @Test def everyRuleIsPinnedInAScriptOfThisReposOwn(): Unit = {
     val problems = ledger.rules.flatMap { r =>
       val name = r.pinnedBy
-      if (!Files.isRegularFile(Root.resolve(name))) Some(s"${r.id}: the script that pins it, $name, does not exist")
+      if (r.pinnedByManifest) {
+        if (!Files.isRegularFile(Paths.get(name))) Some(s"${r.id}: the manifest that pins it, $name, does not exist")
+        else if (!manifestCitations(name).contains(r.id)) Some(s"${r.id}: $name refuses no file 'by-design ${r.id}'")
+        else None
+      }
+      else if (!Files.isRegularFile(Root.resolve(name))) Some(s"${r.id}: the script that pins it, $name, does not exist")
       else if (isPort(name)) Some(s"${r.id}: $name is a port, which keeps another engine's answers, not the engine's")
       else if (!pins(name).contains(r.id))
         Some(s"${r.id}: $name holds no record 'onlyif ${Script.EngineName} ${r.id}' that is not a twin")
@@ -63,7 +70,8 @@ class LedgerTest {
   }
 
   @Test def everyRuleIsCitedByASkipOrPinned(): Unit = {
-    val cited = scripts.iterator.flatMap(_._2).flatMap(r => r.skipRule ++ r.onlyRule).toSet
+    val cited = scripts.iterator.flatMap(_._2).flatMap(r => r.skipRule ++ r.onlyRule).toSet ++
+      ledger.rules.filter(_.pinnedByManifest).map(_.pinnedBy).distinct.flatMap(manifestCitations)
     val idle = ledger.ids.filterNot(cited)
     assertTrue(s"rules no script cites: ${idle.mkString(", ")}", idle.isEmpty)
   }
@@ -98,6 +106,10 @@ object LedgerTest {
   /** Where the scripts are: the runfiles tree under Bazel, the source tree
     * otherwise. */
   private val Root: Path = Paths.get("src/test/slt")
+
+  /** The ids the fixture manifest at `path` cites. */
+  private def manifestCitations(path: String): Set[String] =
+    Ledger.manifestCitations(new String(Files.readAllBytes(Paths.get(path)), StandardCharsets.UTF_8))
 
   /** The directories of ports, scripts with another engine's answers. */
   private val Ports = Set("sqlite", "postgres", "spark", "cockroach", "datafusion", "tpch")

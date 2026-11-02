@@ -234,6 +234,15 @@ specific traps.
   `IllegalArgumentException`), so a wrapper never wraps them again; a value
   past what the engine holds stays an `ArithmeticException`
   (`ParquetReader.OutOfRange`), a failure on the data.
+- **Vendored data says where it came from and how its expectations were
+  made.** A directory of another project's files (`src/test/slt/postgres/`,
+  `src/test/data/parquet-testing/`) carries the upstream licence, and a
+  README or COPYRIGHT naming the repository and the commit, what was taken
+  and what was left out, and how each expected answer was made: copied from
+  the other project, or the engine's own frozen after another reader agreed
+  with it. Nothing in it is edited; what the engine does with each file is
+  said beside it (a script's conditions, a fixture's manifest line), never by
+  changing the file.
 - **A literal is its value and a name is what it names, read from what was
   written, never from a getter that lost part of it.** JSqlParser keeps both as
   text: a string literal with each quote doubled (`StringValue.getValue`; the

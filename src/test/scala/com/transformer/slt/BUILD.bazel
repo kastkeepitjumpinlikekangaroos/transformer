@@ -48,13 +48,15 @@ scala_junit_test(
 
 # The ledger in docs/gotchas.md: its table read strictly, and against every
 # script each rule cited by a skip or pinned, each pin a record of the
-# engine's own answer in a script of this repo's own.
+# engine's own answer in a script of this repo's own, or a file refused under
+# the rule in a fixture manifest.
 scala_junit_test(
     name = "ledger_test",
     srcs = ["LedgerTest.scala"],
     suffixes = ["Test"],
     data = [
         "//:docs/gotchas.md",
+        "//src/test/data/parquet-testing:manifest",
         "//src/test/slt:scripts",
     ],
     deps = [

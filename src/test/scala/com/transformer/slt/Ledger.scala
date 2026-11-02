@@ -21,7 +21,9 @@ import java.nio.file.{Files, Path, Paths}
   * id starts `refused-` is a construct the engine refuses, and gives in
   * `refusal` the text its refusal must contain, which no other rule gives; and
   * `pinned by` names the script, under `src/test/slt`, holding a record of the
-  * engine's own answer under the rule. A `|` inside a cell is written `\|`.
+  * engine's own answer under the rule, or, for a rule about files rather than
+  * SQL, the fixture manifest under `src/test/data` holding a file refused
+  * under it (`refused by-design <id>`). A `|` inside a cell is written `\|`.
   */
 final case class Ledger(rules: Vector[Ledger.Rule]) {
 
@@ -54,7 +56,19 @@ object Ledger {
   final case class Rule(id: String, rule: String, refusal: Option[String], statedIn: String, decidedIn: String,
       pinnedBy: String, line: Int) {
     def refuses: Boolean = refusal.isDefined
+    /** Whether a fixture manifest pins the rule, rather than a script. */
+    def pinnedByManifest: Boolean = pinnedBy.endsWith(ManifestName)
   }
+
+  /** The name of a fixture manifest: a line a file of the fixture directory
+    * it is in, and what the engine does with the file. */
+  val ManifestName: String = "MANIFEST"
+
+  /** The ids a fixture manifest's text cites, `refused by-design <id>`. */
+  def manifestCitations(text: String): Set[String] =
+    text.split("\n").iterator.map(_.takeWhile(_ != '#').trim.split("\\s+").toSeq).collect {
+      case Seq(_, "refused", "by-design", id, _*) => id
+    }.toSet
 
   val Heading: String = "## Answers that differ from other engines by design"
 
@@ -66,7 +80,7 @@ object Ledger {
 
   private val IdCell = """`([a-z0-9]+(?:-[a-z0-9]+)*)`""".r
   private val CodeCell = """`([^`]+)`""".r
-  private val ScriptCell = """`([^`]+\.test)`""".r
+  private val ScriptCell = """`([^`]+\.test|src/test/data/[^`]+/MANIFEST)`""".r
   private val Separator = """:?-{3,}:?""".r
 
   def load(path: Path): Ledger =
@@ -114,7 +128,8 @@ object Ledger {
       if (row(4).isEmpty) fail(line, s"'$id' names no decision")
       val pin = row(5) match {
         case ScriptCell(p) => p
-        case other => fail(line, s"'$id' is pinned by a script under src/test/slt, in backquotes, not '$other'")
+        case other => fail(line, s"'$id' is pinned by a script under src/test/slt or a fixture manifest under " +
+          s"src/test/data, in backquotes, not '$other'")
       }
       out += Rule(id, row(1), refusal, row(3), row(4), pin, line)
       k += 1

@@ -87,3 +87,29 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+# Every parquet file of apache/parquet-testing vendored under
+# src/test/data/parquet-testing held to its line of that directory's
+# MANIFEST: read, its CSV text the expect file's (or its values upstream's
+# expect CSV's) and COUNT(*) its rows, or refused cleanly, naming the file, by
+# the ledger's rule (docs/gotchas.md) or with the line's text.
+scala_junit_test(
+    name = "parquet_testing_test",
+    srcs = ["ParquetTestingTest.scala"],
+    suffixes = ["Test"],
+    data = [
+        "//:docs/gotchas.md",
+        "//src/test/data/parquet-testing:files",
+    ],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/write/csv",
+        # CleanRejection's markers of an internal message.
+        "//src/test/scala/com/transformer/fuzz",
+        # The ledger a by-design refusal cites.
+        "//src/test/scala/com/transformer/slt",
+        "@maven//:junit_junit",
+    ],
+)

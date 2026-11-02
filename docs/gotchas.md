@@ -2553,6 +2553,42 @@ decision covers, held as `onlyif datafusion # held: finding D<n>`:
   no aliases, a numeric literal past `DECIMAL`'s 38 digits), where DataFusion
   refuses for its own. The recommendation is to leave them held.
 
+## What the external file fixtures held out (2026-11-02, held for the user)
+
+Vendoring apache/parquet-testing's files (`src/test/data/parquet-testing/`,
+[plans/testing/13](../plans/testing/13-external-file-fixtures.md)) and
+comparing the engine's reading of each with pyarrow 26's found what no
+decision covers yet. Each refused file is held in the manifest as `refused
+... # held`, so the test fails if it starts to read.
+
+- **P1. A column chunk whose stated length leaves out its dictionary page's
+  header is read alone wrong, by parquet-mr** (`nation.dict-malformed.parquet`,
+  written by an old parquet-cpp: the `name` chunk is given 322 bytes, and its
+  pages, from the dictionary page's 15-byte header to the end of its data
+  page, take 337). Read with the file's other columns, parquet-mr fails on
+  the row group, and the engine refuses it cleanly (`row group 0 cannot be
+  read`) where pyarrow reads its 25 rows. Read alone, `SELECT name FROM t`,
+  parquet-mr decodes rows 8 to 24 as `ALGERIA`, with no error, where pyarrow
+  reads `INDIA`, `INDONESIA` and the rest: a silent wrong answer. The options:
+  check each chunk's page headers against its stated length before reading
+  it, and refuse a chunk whose pages run past it, naming the column
+  (recommended: the wrong answer becomes a refusal, at the cost of walking a
+  chunk's page headers, which parquet-mr reads anyway); read past the stated
+  length as pyarrow does; or keep it.
+- **P2. `LZ4` written as bare blocks is refused** (`non_hadoop_lz4_compressed.parquet`):
+  early parquet-cpp wrote `LZ4` pages without Hadoop's framing, which Hadoop's
+  codec reads as a corrupt frame, so the page does not decode; pyarrow tries
+  Hadoop's framing and falls back to a bare block. The options: keep the
+  refusal (recommended: the format's `LZ4` is Hadoop's, and guessing the
+  framing is how pyarrow reads it); or fall back to a bare block as pyarrow
+  does, a decompressor of the reader's own around lz4-java.
+- **P3. A `STRING` column whose bytes are not UTF-8 reads with U+FFFD**: a
+  value `C3 28` reads as `�(`, through parquet-mr's `toStringUsingUTF8`, where
+  a CSV file's bytes that are no text fail the read, naming the line, and so
+  does such a value of a column `binaryAsString` reads. The options: fail the
+  read, naming the column and row, as both of those do (recommended); or keep
+  it, and say so in the README's parquet section.
+
 ## Answers that differ from other engines by design
 
 The engine answers some queries otherwise than another engine does, on
@@ -2567,7 +2603,10 @@ is the text its refusal must contain. Under any other rule a skipped record is
 followed by its twin, `onlyif transformer <id>` before the same SQL with the
 engine's own answer. `pinned by` names the script of this repo's own that
 holds a record of the engine's answer under the rule, `onlyif transformer
-<id>` before it.
+<id>` before it; a rule about files another program wrote rather than about
+SQL (`refused-parquet-...`) is pinned by the manifest of a fixture directory
+under `src/test/data`, which lists a file refused under it, `refused
+by-design <id>`, and whose test holds the refusal to the rule's text.
 
 The table is the only list of these rules. The build reads it
 (`src/test/scala/com/transformer/slt/Ledger.scala`), so its columns are fixed
@@ -2618,6 +2657,11 @@ choose it, and "since v1" one the engine has had from the start.
 | `no-time` | The engine has no `TIME` type, a time of day: a `CAST` to one is refused, and a table of a script of another engine's leaves its `TIME` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
 | `no-bytes` | The engine has no `BYTES` type of CockroachDB (its `BINARY` takes no `CAST`): a `CAST` to one is refused, and a table of a script of another engine's leaves its `BYTES` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
 | `no-json` | The engine has no `JSON` or `JSONB` type: a `CAST` to one is refused, and a table of a script of another engine's leaves its `JSONB` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `refused-parquet-nested` | A parquet column that is nested, a group (a struct, a list or a map), or repeated, a list of values in each row, makes its file unreadable, where pyarrow reads lists, maps and structs: a column holds one value a row. | `only flat schemas are supported` | [README](../README.md#parquet), "Types read" | Flat schemas since v1; a repeated column by [robustness/03](../plans/robustness/03-parquet-external-format-fidelity.md), 2026-10-03 | `src/test/data/parquet-testing/MANIFEST` |
+| `refused-parquet-type` | A parquet column whose annotation has no engine type makes its file unreadable, never read as its physical type: `TIME`, `INTERVAL`, and an annotation newer than the reader (`VARIANT`, `GEOMETRY`, `GEOGRAPHY`, or one it has no name for), where pyarrow reads `TIME`, and an annotation it does not know as its physical type. | `which has no transformer type` | [README](../README.md#parquet), "Types read" | `TIME` and `INTERVAL` by [robustness/03](../plans/robustness/03-parquet-external-format-fidelity.md), 2026-10-03; an annotation newer than the reader by [testing/13](../plans/testing/13-external-file-fixtures.md)'s decision 1, taken overnight as recommended, not yet confirmed by the user | `src/test/data/parquet-testing/MANIFEST` |
+| `refused-parquet-annotation` | A parquet annotation the format does not allow on its column's physical type (a `UUID` on an `INT32`, a `TIMESTAMP` on a `FIXED_LEN_BYTE_ARRAY`) makes its file unreadable, as parquet-mr has it, where pyarrow reads the physical type and drops the annotation. | `which the format does not allow` | [README](../README.md#parquet), "Types read" | Claude, reported, 2026-11-02 ([testing/13](../plans/testing/13-external-file-fixtures.md)), by robustness/03's rule that no annotation falls through to its physical type | `src/test/data/parquet-testing/MANIFEST` |
+| `refused-parquet-checksum` | A parquet page whose bytes do not match the CRC its header carries fails the read, naming the file, the column and the row group, where pyarrow and parquet-mr check no CRC unless asked. | `does not match its checksum` | [README](../README.md#parquet), "A page whose header carries a CRC" | [testing/13](../plans/testing/13-external-file-fixtures.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `src/test/data/parquet-testing/MANIFEST` |
+| `refused-parquet-timestamp-range` | A parquet `TIMESTAMP(MILLIS)` or `INT96` value with no microsecond value, more than about 292,000 years from 1970, fails the read, naming the file and the column, where pyarrow reads an `INT96` as nanoseconds. | `past the range of a timestamp in microseconds` | [README](../README.md#parquet), "A parquet `TIMESTAMP` reads as the instant it stores" | `MILLIS` by [robustness/03](../plans/robustness/03-parquet-external-format-fidelity.md), 2026-10-03; `INT96` by [robustness/25](../plans/robustness/25-dates-past-the-storable-range.md), 2026-10-31 | `src/test/data/parquet-testing/MANIFEST` |
 
 ## What's intentionally NOT done
 

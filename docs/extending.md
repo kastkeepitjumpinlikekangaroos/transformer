@@ -217,6 +217,33 @@ a window function takes one argument but an offset function's.
    skips parts of the file by their statistics. Two parquet defects were in
    the order the statistics are kept in.
 
+## Add an external fixture
+
+Files another program wrote, vendored so the reader is held to more than its
+own writer and parquet-mr (plans/testing/13): `src/test/data/parquet-testing/`
+is the pattern.
+
+1. Check the licence lets the files be copied (Apache-2.0, MIT, BSD) and copy
+   them as they are into a directory of their own under `src/test/data/`,
+   with the upstream licence beside them and a `README.md` giving the
+   repository, the commit, what was taken and what left out, the size budget
+   and how each expectation was made. Never vendor past the budget the plan
+   sets; raise it in the plan first.
+2. Read each file twice, outside the repo: with the engine (`transformer
+   query --table t=<file> --format jsonl ...`) and with another reader
+   (pyarrow for parquet), and compare value by value, by type. Only a file
+   both read alike gets a `reads` line and an expect file, the engine's CSV
+   text (`--format csv`), gzipped past 8 KB.
+3. Give every file one line of the directory's `MANIFEST`: `reads <rows>
+   <expect>`, `refused by-design <id>` when a rule of the ledger in
+   `docs/gotchas.md` refuses it (add the rule first, pinned by this manifest,
+   if none fits), or `refused <text>`. A file another reader reads that the
+   engine refuses with no rule behind it is a finding: keep it `refused`,
+   mark it `# held: ...`, and list it in gotchas.md for the user.
+4. The test (`read/parquet:parquet_testing_test`) reads every file under the
+   directory, so a file with no line fails; add the directory's filegroup to
+   its `data`, and the manifest to `slt:ledger_test`'s if a rule cites it.
+
 ## Add a fault point
 
 A run that gains a new write or deletion in an output directory (a new

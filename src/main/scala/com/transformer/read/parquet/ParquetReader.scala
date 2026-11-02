@@ -84,7 +84,7 @@ final class ParquetReader private (
   def readPartition(p: Int): Iterator[ColumnarBatch] = {
     val m = partitions(p)
     new ParquetPartitionIterator(m.hif, schema, batchSize,
-      m.startRowGroup, m.endRowGroup, pushdownFilter, null, binaryAsString)
+      m.startRowGroup, m.endRowGroup, pushdownFilter, null, binaryAsString, m.label)
   }
 
   /** Instrumented partition read — funnels per-partition decode statistics
@@ -101,7 +101,7 @@ final class ParquetReader private (
     // happens inside ParquetPartitionIterator's loadNextGroup.
     if (pushdownFilter.isDefined) recorder.addPredicatePushedDown(1L)
     new ParquetPartitionIterator(m.hif, schema, batchSize,
-      m.startRowGroup, m.endRowGroup, pushdownFilter, recorder, binaryAsString)
+      m.startRowGroup, m.endRowGroup, pushdownFilter, recorder, binaryAsString, m.label)
   }
 
   /** Sum the per-partition row counts already collected from each footer. Used
@@ -280,7 +280,8 @@ object ParquetReader {
   val DefaultTargetBytesPerPartition: Long = 256L * 1024L * 1024L
 
   /** One reader partition: a half-open row-group range [startRowGroup, endRowGroup)
-    * inside `hif`, with the total `rowCount` pre-computed for fast COUNT(*).
+    * inside `hif`, with the total `rowCount` pre-computed for fast COUNT(*),
+    * and the file as messages name it, the path it was given by.
     *
     * Most partitions cover several row groups (packed up to
     * [[DefaultTargetBytesPerPartition]]). A file whose total compressed size
@@ -290,7 +291,8 @@ object ParquetReader {
       hif: HadoopInputFile,
       rowCount: Long,
       startRowGroup: Int,
-      endRowGroup: Int
+      endRowGroup: Int,
+      label: String
   )
 
   def fromPath(pathOrGlob: String, batchSize: Int = ColumnarBatch.DefaultCapacity): ParquetReader =
@@ -365,7 +367,8 @@ object ParquetReader {
             val blocks = reader.getRowGroups
             val codecs = blocks.asScala.iterator.flatMap(_.getColumns.asScala.map(c => c.getPath.toDotString -> c.getCodec))
               .toVector.distinct
-            FileFooter(reader.getFooter.getFileMetaData.getSchema, packRowGroups(hif, blocks, targetBytesPerPartition), codecs)
+            FileFooter(reader.getFooter.getFileMetaData.getSchema, packRowGroups(hif, f.toString, blocks, targetBytesPerPartition),
+              codecs)
           } finally reader.close()
         }
       }
@@ -413,6 +416,7 @@ object ParquetReader {
     */
   private[parquet] def packRowGroups(
       hif: HadoopInputFile,
+      label: String,
       blocks: java.util.List[BlockMetaData],
       target: Long
   ): IndexedSeq[PartitionMeta] = {
@@ -428,7 +432,7 @@ object ParquetReader {
       // If adding this group would push us past target AND we already have at
       // least one group in the partition, close out the current partition first.
       if (i > startGroup && accBytes + groupBytes > target) {
-        out += PartitionMeta(hif, accRows, startGroup, i)
+        out += PartitionMeta(hif, accRows, startGroup, i, label)
         startGroup = i
         accBytes = 0L
         accRows = 0L
@@ -437,7 +441,7 @@ object ParquetReader {
       accRows += b.getRowCount
       i += 1
     }
-    if (startGroup < n) out += PartitionMeta(hif, accRows, startGroup, n)
+    if (startGroup < n) out += PartitionMeta(hif, accRows, startGroup, n, label)
     out.toIndexedSeq
   }
 }
@@ -478,10 +482,12 @@ final class ParquetPartitionIterator(
     endRowGroup: Int = Int.MaxValue,
     pushdownFilter: Option[FilterPredicate] = None,
     metricsRecorder: ParquetReader.MetricsRecorder = null,
-    binaryAsString: Boolean = false
+    binaryAsString: Boolean = false,
+    label: String = null
 ) extends Iterator[ColumnarBatch] {
 
-  private val fileLabel: String = hif.getPath.toUri.getPath
+  // The file as messages name it: the path its view was given, else hif's.
+  private val fileLabel: String = if (label != null) label else hif.getPath.toUri.getPath
   // Open once: same handle drives schema lookup, the column request,
   // skipNextRowGroup seeks, and the eventual readNextRowGroup loop.
   private val reader: ParquetFileReader =

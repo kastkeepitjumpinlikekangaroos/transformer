@@ -4,8 +4,8 @@ load("@rules_scala//scala:scala_toolchain.bzl", "scala_toolchain")
 
 # The ledger of the engine's answers that differ from other engines' by
 # design is a table in docs/gotchas.md, which the SQL logic tests read: each
-# `skipif transformer <id>` in a script cites a row of it, and each rule of
-# the function catalog its row. README.md's lists of functions and CAST types
+# `skipif transformer <id>` in a script cites a row of it, each rule of the
+# function catalog its row, and each fixture refused by design its row. README.md's lists of functions and CAST types
 # are held to the catalog by sql/plan:function_catalog_test.
 exports_files(
     [
@@ -13,6 +13,7 @@ exports_files(
         "docs/gotchas.md",
     ],
     visibility = [
+        "//src/test/scala/com/transformer/read/parquet:__pkg__",
         "//src/test/scala/com/transformer/slt:__pkg__",
         "//src/test/scala/com/transformer/sql/plan:__pkg__",
     ],
