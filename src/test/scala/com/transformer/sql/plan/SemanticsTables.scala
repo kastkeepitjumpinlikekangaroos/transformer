@@ -17,7 +17,8 @@ object SemanticsTables {
 
   /** Each table's file name and how to generate it. */
   val Tables: Seq[(String, () => Generated)] = Seq(
-    CastMatrix.File -> (() => CastMatrix.generate()))
+    CastMatrix.File -> (() => CastMatrix.generate())) ++
+    CoercionMatrix.Families.map(f => f.file -> (() => CoercionMatrix.generate(f)))
 
   /** Where the files are: the runfiles tree under Bazel, the source tree
     * otherwise. */

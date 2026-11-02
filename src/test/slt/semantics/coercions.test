@@ -1,0 +1,124 @@
+# Hand-picked cells of the coercion tables, src/test/semantics/comparisons.txt,
+# branches.txt and arithmetic.txt, which semantics_tables_test reads off bound
+# plans with no data. Here they run through the whole engine, under every
+# verification mode and as the plan printed back to SQL; each record's column
+# types are the tables' cells. A rule change regenerates the tables and changes
+# these records in the same commit.
+
+statement ok
+CREATE TABLE n (i INT, b BIGINT, f FLOAT, d DOUBLE, m DECIMAL(5,2), w DECIMAL(38,10), t BOOLEAN, s STRING, dt DATE, ts TIMESTAMP)
+
+statement ok
+INSERT INTO n VALUES (16777217, 16777217, 16777216.0, 2.5, 2.50, 2.5, true, 'x', DATE '2026-01-01', TIMESTAMP '2026-01-01 00:00:00')
+
+# ---- comparisons: operands meet as one type
+
+query BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN
+SELECT i = f, i = b, b = f, m = d, m = w, m < 3 FROM n
+----
+true	true	true	true	true	true
+
+query BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN
+SELECT i = '16777217', t = 'true', dt = '2026-01-01', ts = '2026-01-01', m = 2.5 FROM n
+----
+true	true	true	true	true
+
+query BOOLEAN,BOOLEAN,INT,INT
+SELECT i BETWEEN b AND b, i IN (b), NULLIF(i, b), CASE i WHEN b THEN 1 END FROM n
+----
+true	true	NULL	1
+
+statement error
+SELECT i = s FROM n
+----
+Cannot compare INT with STRING; only a string literal is read as an INT, so CAST the expression to INT, or the INT to STRING to compare text
+
+statement error
+SELECT dt = ts FROM n
+----
+Cannot compare DATE with TIMESTAMP; CAST one side: a DATE as a TIMESTAMP is its midnight, a TIMESTAMP as a DATE its date in UTC
+
+statement error
+SELECT t = 1 FROM n
+----
+Cannot compare BOOLEAN with INT; CAST the BOOLEAN to INT for 1 and 0, or compare it with TRUE or FALSE
+
+statement error
+SELECT m = '1' FROM n
+----
+Cannot compare DECIMAL(5,2) with STRING
+
+statement error
+SELECT i IN (dt) FROM n
+----
+Cannot compare INT with DATE
+
+# ---- branches: values become one result, of a type its every value takes
+
+query BIGINT,DECIMAL(12,2),DECIMAL(21,2),DECIMAL(38,10),FLOAT,DOUBLE,DECIMAL(5,2)
+SELECT CASE WHEN t THEN i ELSE b END, COALESCE(i, m), IF(t, b, m), GREATEST(m, w), LEAST(i, f), COALESCE(i, 2.5), COALESCE(m, 1) FROM n
+----
+16777217	16777217.00	16777217.00	2.5000000000	1.6777216E7	1.6777217E7	2.50
+
+query BIGINT,STRING,DATE
+SELECT LAG(i, 1, b) OVER (ORDER BY i), COALESCE(s, 'y'), CASE WHEN t THEN dt ELSE '2026-02-01' END FROM n
+----
+16777217	x	2026-01-01
+
+query DECIMAL(12,2) rowsort
+SELECT i FROM n UNION ALL SELECT m FROM n
+----
+16777217.00
+2.50
+
+statement error
+SELECT COALESCE(m, d) FROM n
+----
+COALESCE cannot mix DECIMAL(5,2) and DOUBLE: a DOUBLE has no scale for a DECIMAL result to keep; CAST the DECIMAL to DOUBLE to return a DOUBLE
+
+statement error
+SELECT CASE WHEN t THEN i ELSE s END FROM n
+----
+CASE cannot mix INT and STRING; only a string literal is read as an INT, so CAST the STRING to INT, or the INT to STRING
+
+statement error
+SELECT dt FROM n UNION ALL SELECT ts FROM n
+----
+UNION column 1 (dt) cannot mix DATE and TIMESTAMP; CAST one: a DATE as a TIMESTAMP is its midnight, a TIMESTAMP as a DATE its date in UTC
+
+statement error
+SELECT GREATEST(t, i) FROM n
+----
+GREATEST cannot mix BOOLEAN and INT; CAST the BOOLEAN to INT for 1 and 0
+
+# ---- arithmetic: the result's type, a DECIMAL's by Spark's and SQL Server's rules
+
+query BIGINT,FLOAT,INT,DOUBLE
+SELECT i + b, i * f, i / 2, i + 2.5 FROM n
+----
+33554434	2.8147498E14	8388608	1.67772195E7
+
+query DECIMAL(13,2),DECIMAL(11,4),DECIMAL(13,8),DECIMAL(5,2),DECIMAL(5,2),DECIMAL(6,2),DECIMAL(16,13)
+SELECT m + i, m * m, m / m, m % i, MOD(m, i), m + 1.05, m / i FROM n
+----
+16777219.50	6.2500	1.00000000	2.50	2.50	3.55	0.0000001490116
+
+statement error
+SELECT m + d FROM n
+----
+Arithmetic on DECIMAL(5,2) and DOUBLE is not supported: a DOUBLE has no scale for a DECIMAL result to keep; CAST the DECIMAL to DOUBLE to compute in DOUBLE
+
+statement error
+SELECT s + 1 FROM n
+----
+Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+
+statement error
+SELECT dt + 1 FROM n
+----
+Arithmetic on DATE is not supported
+
+statement error
+SELECT m + '1' FROM n
+----
+Cannot compare DECIMAL(5,2) with STRING

@@ -1168,6 +1168,17 @@ function's name is matched as a string in the binder. `Funcs.apply` and
 answer NULL for a NULL one. `function_catalog_test` holds the README's lists of
 functions and CAST types to the catalog, both ways.
 
+These are three families of rules: `unify` for the operands that are compared,
+`branches` for the values that become one result and `arithmetic` for
+arithmetic. Each family's every construct types a pair alike, and the families
+agree but where a rule says otherwise: a `DECIMAL` beside a `FLOAT` or `DOUBLE`
+column compares but is refused in a branch and in arithmetic, arithmetic
+declares a decimal's type by its operator where a branch takes the type that
+holds both, and arithmetic is on numbers alone. The coercion tables under
+`src/test/semantics/` list every pair in every construct, and
+`semantics_tables_test` holds the families to those properties (testing.md,
+"Semantics tables").
+
 Arithmetic with a `DECIMAL` on either side is typed by `Analyzer.arithmetic`
 instead, because the result's type depends on both sides' digits (`Decimals`,
 in `Ops.scala`). Each side becomes a `DECIMAL` of its own: an `INT` the

@@ -1618,8 +1618,15 @@ type, of `NULL`, and of a text, an integer and a decimal literal, at the edge
 values of each (the zeros, `NaN`, the infinities, each type's limits, the first
 and last date and timestamp, text that is almost a value), to every type: the
 value it gives, or the error, with whether the query is refused before it runs
-or fails on the value. The tables are the complete reference, and a change to a
-rule changes them in the same commit.
+or fails on the value. [`comparisons.txt`](src/test/semantics/comparisons.txt),
+[`branches.txt`](src/test/semantics/branches.txt) and
+[`arithmetic.txt`](src/test/semantics/arithmetic.txt) are every pair of those
+kinds where two values meet: the type they are compared as (`=`, `<`, `BETWEEN`,
+`IN`, `NULLIF`, a `CASE` switch), the type of the one result they become (a
+`CASE`, `COALESCE`, `IF`, `GREATEST`, `LEAST`, `LAG`'s default, a `UNION`
+column), the type of arithmetic on them (`+ - * / %`, `MOD`), or the refusal.
+The tables are the complete reference, and a change to a rule changes them in
+the same commit.
 
 **CTEs (`WITH`):** supported, non-recursive. `WITH a AS (...), b AS (SELECT ...
 FROM a) SELECT ... FROM b` — later CTEs may reference earlier ones, a CTE can

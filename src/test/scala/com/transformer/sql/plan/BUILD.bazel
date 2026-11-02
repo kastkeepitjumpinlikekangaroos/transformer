@@ -136,6 +136,7 @@ scala_library(
     testonly = True,
     srcs = [
         "CastMatrix.scala",
+        "CoercionMatrix.scala",
         "Semantics.scala",
         "SemanticsTables.scala",
     ],
@@ -167,6 +168,7 @@ scala_junit_test(
     suffixes = ["Test"],
     deps = [
         ":semantics",
+        "//src/main/scala/com/transformer/core",
         "//src/test/scala/com/transformer/fuzz",
         "@maven//:junit_junit",
     ],
