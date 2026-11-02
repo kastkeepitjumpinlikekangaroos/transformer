@@ -9,11 +9,16 @@ import java.math.{BigDecimal => JBigDecimal}
 /** The cases of the corpus whose answers Postgres and DuckDB agree on
   * (plans/testing/14, W3): for each of its features, tables and queries
   * over them, drawn from `QueryGen` and `MetaQueryGen` where those reach the
-  * feature, and built here from their pools and node types where they do not
-  * (`TRIM`, `ROUND` and `TRUNC` of a decimal, `LAG` and `LEAD` with a
-  * default, `BETWEEN`, a date's and a timestamp's text, a top-n over a float
-  * key). `slt.AgreedCorpus` prints each case with [[PortableSql]] and runs it
-  * in the engine and both references.
+  * feature, and built here from their pools and node types where they did not
+  * when the corpus was written (`TRIM`, `ROUND` and `TRUNC` of a decimal, `LAG`
+  * and `LEAD` with a default, `BETWEEN`, a date's and a timestamp's text, a
+  * top-n over a float key). Since plans/testing/15 the generators draw
+  * `TRIM`, `LAG` and `LEAD` with a default and a top-n over a float key
+  * themselves; the producers here stay, so a regeneration keeps every
+  * feature's quota, and they could draw from the generators the next time the
+  * corpus is regenerated, with Postgres and DuckDB at hand to check it.
+  * `slt.AgreedCorpus` prints each case with [[PortableSql]] and runs it in
+  * the engine and both references.
   *
   * A case is a few tables and up to [[QueriesPerCase]] queries over them, each
   * of which reaches the case's feature. Tables keep at most [[MaxRows]] rows,

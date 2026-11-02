@@ -223,9 +223,9 @@ class MetamorphicFuzzTest {
     // MIN/MAX over a Boolean column: the accumulator-slot shape that returned NULL
     // under spill until the engine was fixed. It was kept OUT of the generator
     // while the bug stood, so an assertion that it is back is what stops the
-    // exclusion from silently returning. Narrow shape (~0.95% of seeds, 38 of
+    // exclusion from silently returning. Narrow shape (~1.7% of seeds, 67 of
     // this block — the column must be Boolean AND draw a MIN/MAX, and Boolean
-    // is one payload type of ten), so the bound sits about 3x below to separate
+    // is one payload type of ten), so the bound sits well below to separate
     // "rare" from "gone"; `aggDecompositionCoversEveryColumnType` is the dense
     // guard on it.
     assertTrue(s"boolMinMax=$boolMinMax", boolMinMax > 12)
@@ -370,7 +370,7 @@ class MetamorphicFuzzTest {
     * Since plans/robustness/21 a comparison of two non-NULL floats is TRUE or
     * FALSE, so the partitions must still add up. */
   @Test def tlpPartitionsFloatColumnsHoldingNaNAndNegativeZero(): Unit = {
-    val n = 3000
+    val n = 5000
     var shape, nan, negZero, special = 0
     var seed = 0
     while (seed < n) {
@@ -392,8 +392,10 @@ class MetamorphicFuzzTest {
     }
     println(s"[metamorphic] over $n seeds: TLP partitions a float column in $shape, its rows holding NaN in $nan, " +
       s"-0.0 in $negZero; the partition compares with NaN, -0.0 or an infinity in $special")
-    // Measured over these seeds: the shape 664, NaN 96, -0.0 45, a special
-    // partition constant 159; bounds ~3x below.
+    // Measured over these seeds: the shape 1317, NaN 109, -0.0 58, a special
+    // partition constant 309; bounds ~3x below. 5000 seeds since the joins,
+    // windows and math functions plans/testing/15 added gave TLP more
+    // columns to choose from, which left NaN 58 of 3000.
     assertTrue(s"TLP rarely partitions a float column (shape=$shape)", shape > 220)
     assertTrue(s"a float partition's rows rarely hold NaN (nan=$nan)", nan > 32)
     assertTrue(s"a float partition's rows rarely hold -0.0 (negZero=$negZero)", negZero > 15)
@@ -470,6 +472,101 @@ class MetamorphicFuzzTest {
       case _ => Vector.empty
     }) ++ q.setOp.toVector.flatMap { case (rhs, _) => arm(rhs) } ++ q.ctes.flatMap(c => arm(c.body))
     arm(mc.query).filter(_.nonEmpty)
+  }
+
+  /** The FROM shapes plans/testing/15 opened: up to six tables, written as
+    * `JOIN ... ON`, a comma list or `CROSS JOIN`s; a run of three or more
+    * inner tables that `JoinOrder` reorders, which it does only where a table
+    * has no equality with the ones before it; and a join with no equality,
+    * which the engine pairs row by row. Read off the bound plan:
+    * `JoinOrder` over the plan `FilterPushdown` leaves changes it, and the
+    * optimized plan holds a join whose condition has no equality between its
+    * sides. */
+  @Test def joinsReachJoinOrderAndThePairingPath(): Unit = {
+    val n = 3000
+    val styles = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    var fourOrMore, reordered, pairing, outerPairing = 0
+    (0 until n).foreach { seed =>
+      val mc = MetaQueryGen.generate(new Rng(seed.toLong))
+      val from = mc.query.from
+      if (from.joins.nonEmpty) styles(from.style.name) += 1
+      if (from.joins.length >= 3) fourOrMore += 1
+      MetamorphicFuzzTest.joinFacts(mc).foreach { f =>
+        if (f.reorderedRun >= 3) reordered += 1
+        if (f.pairing) pairing += 1
+        if (f.outerPairing) outerPairing += 1
+      }
+    }
+    println(s"[metamorphic] joins over $n seeds: styles ${styles.toSeq.sorted.mkString(", ")}; four tables or more " +
+      s"in $fourOrMore; JoinOrder reorders a run of three or more in $reordered; a join on the pairing path in " +
+      s"$pairing, an outer one in $outerPairing")
+    // Measured over these seeds: a comma list 534, CROSS JOIN 262 (JOIN ... ON
+    // 1505), four tables or more 174, a reordered run of three or more 190, a
+    // join on the pairing path 446, an outer one 198; bounds ~3x below.
+    assertTrue(s"a comma list is rarely drawn (${styles("a comma list")})", styles("a comma list") > 178)
+    assertTrue(s"CROSS JOIN is rarely drawn (${styles("CROSS JOIN")})", styles("CROSS JOIN") > 87)
+    assertTrue(s"four tables or more are rarely joined ($fourOrMore)", fourOrMore > 58)
+    assertTrue(s"JoinOrder rarely reorders a run of three or more ($reordered)", reordered > 63)
+    assertTrue(s"a join rarely takes the pairing path ($pairing)", pairing > 148)
+    assertTrue(s"an outer join rarely takes the pairing path ($outerPairing)", outerPairing > 66)
+  }
+
+  /** The window shapes plans/testing/15 opened, each in a share of seeds:
+    * a ROWS frame with offsets, a RANGE frame with offsets over a number
+    * key (which the mode-agreement oracle runs, its frames being sets of
+    * values), `LAG` and `LEAD` with an offset and a default, and an
+    * expression as an argument and as a key; beside the default frame and
+    * the whole partition. Generation only. */
+  @Test def windowsReachEveryFrameKind(): Unit = {
+    val n = 12000
+    val kinds = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    (0 until n).foreach { seed =>
+      val mc = MetaQueryGen.generate(new Rng(seed.toLong))
+      val wins = allWindows(mc.query).map(_._2)
+      val here = wins.flatMap(MetamorphicFuzzTest.windowKinds).toSet ++
+        (if (mc.query.isLayoutInvariant && wins.exists(w => MetamorphicFuzzTest.windowKinds(w)("RANGE offsets")))
+          Set("RANGE offsets, layout-invariant") else Set.empty[String])
+      here.foreach(k => kinds(k) += 1)
+    }
+    println(s"[metamorphic] window kinds over $n seeds: ${kinds.toSeq.sorted.mkString(", ")}")
+    // Measured over these seeds: a RANGE frame with offsets 139 (layout-
+    // invariant 107), a ROWS frame 140, LAG or LEAD with a default 161, an
+    // expression argument 167 and key 474, the default frame 877 and the
+    // whole partition 564; the bound sits ~3x below the thinnest. 12000
+    // seeds, since a window is on a tenth of them.
+    for (k <- MetamorphicFuzzTest.WindowKinds :+ "RANGE offsets, layout-invariant")
+      assertTrue(s"a window rarely has $k (${kinds(k)})", kinds(k) > 35)
+  }
+
+  /** A CTE that reads a CTE, which the engine inlines or materializes inside
+    * another, and a UNION whose arms are any core: a join, an aggregate, a
+    * window or a computed item. Generation only. */
+  @Test def ctesReadCtesAndUnionArmsTakeAnyCore(): Unit = {
+    val n = 4000
+    var cteOverCte, unionJoin, unionAggregate, unionWindow, unionComputed = 0
+    (0 until n).foreach { seed =>
+      val q = MetaQueryGen.generate(new Rng(seed.toLong)).query
+      val names = q.ctes.map(_.name).toSet
+      if (q.ctes.exists(c => names(c.body.from.root.relName))) cteOverCte += 1
+      q.setOp.foreach { _ =>
+        if (q.from.joins.nonEmpty) unionJoin += 1
+        q.core match {
+          case _: AggCore => unionAggregate += 1
+          case p: ProjectCore =>
+            if (p.windows.nonEmpty) unionWindow += 1
+            if (p.items.exists(!_._1.isInstanceOf[ColRefExpr])) unionComputed += 1
+        }
+      }
+    }
+    println(s"[metamorphic] over $n seeds: a CTE over a CTE in $cteOverCte; a UNION arm with a join in $unionJoin, " +
+      s"an aggregate in $unionAggregate, a window in $unionWindow, a computed item in $unionComputed")
+    // Measured over these seeds: a CTE over a CTE 507; a UNION arm with a join
+    // 395, an aggregate 239, a window 63, a computed item 89; bounds ~3x below.
+    assertTrue(s"a CTE rarely reads a CTE ($cteOverCte)", cteOverCte > 169)
+    assertTrue(s"a UNION arm rarely joins ($unionJoin)", unionJoin > 131)
+    assertTrue(s"a UNION arm is rarely an aggregate ($unionAggregate)", unionAggregate > 79)
+    assertTrue(s"a UNION arm rarely has a window ($unionWindow)", unionWindow > 21)
+    assertTrue(s"a UNION arm rarely computes an item ($unionComputed)", unionComputed > 29)
   }
 
   /** Every function the registry binds as a call, `MOD` among them and the
@@ -579,23 +676,23 @@ class MetamorphicFuzzTest {
   // fewer draws:
   //
   //                  date  timestamp  binary  decimal
-  //   join key       1891       1844    1832     1755
-  //   comparison     3177       3104    2594     4124
-  //   ORDER BY       2806       2844    2747     2782
-  //   GROUP BY       1072       1009    1065     1007
+  //   join key       2301       2293    2222     2244
+  //   comparison     3588       3620    3136     4730
+  //   ORDER BY       2782       2726    2744     2752
+  //   GROUP BY       1208       1218    1194     1143
   //   MIN/MAX        5675       5727    5569     5614
-  //   TLP key        2586       2555     450     2989   (a BINARY only against
+  //   TLP key        2407       2415     534     2831   (a BINARY only against
   //                                                       another BINARY column)
   //
   // and the columns holding each value pair, at join key / comparison / ORDER
-  // BY / GROUP BY / MIN/MAX: instants under a millisecond apart 1418 / 1587 /
-  // 1370 / 395 / 2510; bytes of one content 1702 / 1660 / 1570 / 538 / 3026;
-  // bytes one high bit apart 672 / 660 / 587 / 184 / 1123; a decimal at two
-  // scales 838 / 1215 / 749 / 259 / 1417; decimals of one double 235 / 383 /
-  // 233 / 90 / 441. Decimal arithmetic on 1872 seeds, SUM or AVG of a decimal
-  // on 894 and the decomposition's decimal SUM on 5614, reading decimals a
-  // double adds wrong on 383, 148 and 1119. Each bound sits about 3x below its
-  // count, a few nearer 2.5x.
+  // BY / GROUP BY / MIN/MAX: instants under a millisecond apart 1815 / 1908 /
+  // 1226 / 474 / 2442; bytes of one content 2095 / 2077 / 1564 / 579 / 2988;
+  // bytes one high bit apart 820 / 782 / 572 / 198 / 1069; a decimal at two
+  // scales 1107 / 1432 / 711 / 264 / 1366; decimals of one double 308 / 452 /
+  // 245 / 77 / 424. Decimal arithmetic on 2104 seeds, SUM or AVG of a decimal
+  // on 1030 and the decomposition's decimal SUM on 5614, reading decimals a
+  // double adds wrong on 418, 207 and 1094. Each bound sits about 3x below its
+  // count or further.
 
   import DataGen.ValueTag._
   import MetamorphicFuzzTest.{Tally, typeTally}
@@ -1160,6 +1257,68 @@ object MetamorphicFuzzTest {
       }
     }
     out.result()
+  }
+
+  /** What the bound plan of `mc`'s body does with its joins: the most tables
+    * of a run of inner joins when `JoinOrder` reorders it (0 when it reorders
+    * none), and whether the optimized plan holds a join with no equality
+    * between its sides, inner or outer. None where the body does not bind. */
+  final case class JoinFacts(reorderedRun: Int, pairing: Boolean, outerPairing: Boolean)
+
+  def joinFacts(mc: MetaCase): Option[JoinFacts] = scala.util.Try {
+    val built = LogicalBuilder.build(mc.bodySql, mc.env.catalog())
+    val pushed = LogicalOptimizer.filterPushdown(built.main)
+    def leaves(p: LogicalPlan): Iterator[LogicalPlan] = p match {
+      case LogicalJoin(l, r, _, JoinKind.Inner) => leaves(l) ++ leaves(r)
+      case other => Iterator(other)
+    }
+    def runs(p: LogicalPlan): Iterator[Int] = p match {
+      case j @ LogicalJoin(_, _, _, JoinKind.Inner) => Iterator(leaves(j).size) ++ leaves(j).flatMap(_.children).flatMap(runs)
+      case other => other.children.iterator.flatMap(runs)
+    }
+    val reordered = if (JoinOrder(pushed) != pushed) runs(pushed).maxOption.getOrElse(0) else 0
+    def joins(p: LogicalPlan): Iterator[LogicalJoin] = (p match {
+      case j: LogicalJoin => Iterator(j)
+      case _ => Iterator.empty
+    }) ++ p.children.iterator.flatMap(joins)
+    def conjuncts(e: Expr): Seq[Expr] = e match {
+      case BinOpExpr("AND", a, b, _) => conjuncts(a) ++ conjuncts(b)
+      case other => Seq(other)
+    }
+    def keyed(j: LogicalJoin): Boolean = {
+      val width = j.left.outputSchema.length
+      conjuncts(j.condition).exists {
+        case BinOpExpr("=", a, b, _) =>
+          Set(JoinSideAnalysis.sideOf(a, width), JoinSideAnalysis.sideOf(b, width)) == Set(JoinSide.LeftOnly, JoinSide.RightOnly)
+        case _ => false
+      }
+    }
+    val unkeyed = joins(LogicalOptimizer.optimize(built.main)).filterNot(keyed).toVector
+    JoinFacts(reordered, unkeyed.nonEmpty, unkeyed.exists(_.kind != JoinKind.Inner))
+  }.toOption
+
+  /** The window kinds `windowsReachEveryFrameKind` asserts, by name. */
+  val WindowKinds: Seq[String] = Seq("ROWS frame", "RANGE offsets", "default frame", "whole partition",
+    "LAG or LEAD with a default", "expression argument", "expression key")
+
+  private val RangeOffset = """RANGE (?:BETWEEN )?[^)]*\d (?:PRECEDING|FOLLOWING)""".r
+  private val OffsetDefault = """^(?:LAG|LEAD)\([^,]+, \d+, """.r
+  private val ExpressionArgument = """^(?:SUM|AVG|MIN|MAX)\((?:ABS|UPPER)\(""".r
+  private val ExpressionKey = """(?:PARTITION BY|ORDER BY) [^)]*(?:ABS\(|UPPER\(|LENGTH\(| \+ 1)""".r
+
+  /** The kinds of [[WindowKinds]] `w` is, read off its SQL. */
+  def windowKinds(w: WinItem): Set[String] = {
+    val sql = w.sql
+    val over = sql.substring(sql.indexOf(" OVER (") + 1)
+    Map(
+      "ROWS frame" -> over.contains(" ROWS "),
+      "RANGE offsets" -> RangeOffset.findFirstIn(over).isDefined,
+      "default frame" -> (over.contains("ORDER BY") && !over.contains(" ROWS ") && !over.contains(" RANGE ")),
+      "whole partition" -> !over.contains("ORDER BY"),
+      "LAG or LEAD with a default" -> OffsetDefault.findFirstIn(sql).isDefined,
+      "expression argument" -> ExpressionArgument.findFirstIn(sql).isDefined,
+      "expression key" -> ExpressionKey.findFirstIn(over).isDefined
+    ).collect { case (k, true) => k }.toSet
   }
 
   /** The canonical names of the catalog functions `q` calls, in any arm. */

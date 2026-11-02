@@ -117,10 +117,23 @@ object MetaQueryGen {
   }
 
   /** One join step: `<KIND> JOIN <leaf> ON <pred>`. Left-deep, matching how the
-    * binder folds `ps.getJoins` into a chain of [[LogicalJoin]]s. */
+    * binder folds `ps.getJoins` into a chain of [[LogicalJoin]]s. Its condition
+    * reads only this leaf and the ones before it, whichever [[JoinStyle]]
+    * writes it. */
   final case class JoinItem(kind: JoinKind, leaf: FromLeaf, on: Expr)
 
-  final case class FromClause(root: FromLeaf, joins: Vector[JoinItem]) {
+  /** How a FROM writes its joins: `JOIN ... ON` of any kind; or a comma list or
+    * `CROSS JOIN`s, inner joins whose conditions sit in the WHERE, where
+    * `FilterPushdown` moves each to the first join that has every table it
+    * reads and `JoinOrder` orders the tables (plans/testing/05). */
+  sealed abstract class JoinStyle(val name: String) { override def toString: String = name }
+  object JoinStyle {
+    case object On extends JoinStyle("JOIN ... ON")
+    case object Comma extends JoinStyle("a comma list")
+    case object Cross extends JoinStyle("CROSS JOIN")
+  }
+
+  final case class FromClause(root: FromLeaf, joins: Vector[JoinItem], style: JoinStyle = JoinStyle.On) {
     /** Columns in scope at the end of the FROM clause (root then each join leaf,
       * left-to-right). */
     def scope: Vector[ScopeCol] = root.cols ++ joins.flatMap(_.leaf.cols)
@@ -128,12 +141,24 @@ object MetaQueryGen {
     def render: String = {
       val sb = new StringBuilder(root.render)
       joins.foreach { j =>
-        sb.append(' ').append(joinKeyword(j.kind)).append(" JOIN ").append(j.leaf.render)
-          .append(" ON ").append(SqlRender.expr(j.on))
+        style match {
+          case JoinStyle.On =>
+            sb.append(' ').append(joinKeyword(j.kind)).append(" JOIN ").append(j.leaf.render)
+              .append(" ON ").append(SqlRender.expr(j.on))
+          case JoinStyle.Comma => sb.append(", ").append(j.leaf.render)
+          case JoinStyle.Cross => sb.append(" CROSS JOIN ").append(j.leaf.render)
+        }
       }
       sb.toString
     }
+
+    /** The conditions a comma list or `CROSS JOIN`s write in the WHERE: each
+      * join's, but where it is TRUE. */
+    def whereConditions: Vector[Expr] =
+      if (style == JoinStyle.On) Vector.empty else joins.map(_.on).filterNot(_ == TrueLit)
   }
+
+  private val TrueLit: Expr = LitExpr(true, DataType.BooleanType)
 
   private def joinKeyword(k: JoinKind): String = k match {
     case JoinKind.Inner => "INNER"
@@ -321,7 +346,15 @@ object MetaQueryGen {
       nullsFirst: Option[Boolean] = None) {
     def outputSchema: Vector[(String, DataType)] = core.outputSchema
     def tlpCandidates: Vector[(String, DataType)] = core.tlpCandidates
-    def whereSql: String = where.map(w => s" WHERE ${SqlRender.expr(w)}").getOrElse("")
+    /** The WHERE: a comma list's or `CROSS JOIN`s' join conditions, then the
+      * query's own predicate, in parentheses beside them, so an OR in it
+      * cannot take a join condition with it. */
+    def whereSql: String = {
+      val joined = from.whereConditions.map(SqlRender.expr)
+      val own = where.map(w => if (joined.isEmpty) SqlRender.expr(w) else s"(${SqlRender.expr(w)})")
+      val all = joined ++ own
+      if (all.isEmpty) "" else all.mkString(" WHERE ", " AND ", "")
+    }
 
     /** The SOURCE columns behind every projected item, when the SELECT list is all
       * bare, type-reliable column references — the condition under which `ORDER
@@ -477,11 +510,14 @@ object MetaQueryGen {
   private val StringPool: IndexedSeq[String] = IndexedSeq("a", "b", "c", "d", "")
   private val DoublePool: IndexedSeq[Double] = IndexedSeq(0.0, 0.5, 1.0, 2.0, -1.0, 10.0)
 
+  /** Two to six relations over one key type and domain. An environment of
+    * four or more holds small relations, of ten rows at most, so a FROM may
+    * join up to six of them (`maxLeavesOf`). */
   private[fuzz] def genEnv(rng: Rng): RelEnv = {
     val keyType = ExprGen.pick(rng, KeyTypes)
     val keyDomain = sharedKeyDomain(rng, keyType)
-    val n = rng.between(2, 3)
-    val relations = (0 until n).map(i => genRelation(rng.split(), s"r$i", keyType, keyDomain)).toVector
+    val n = rng.weighted((5, 2), (4, 3), (1, 4), (1, 5), (1, 6))
+    val relations = (0 until n).map(i => genRelation(rng.split(), s"r$i", keyType, keyDomain, small = n > 3)).toVector
     RelEnv(relations)
   }
 
@@ -524,7 +560,8 @@ object MetaQueryGen {
     pool.slice(start, start + w)
   }
 
-  private def genRelation(rng: Rng, name: String, keyType: DataType, keyDomain: IndexedSeq[Any]): Relation = {
+  private def genRelation(rng: Rng, name: String, keyType: DataType, keyDomain: IndexedSeq[Any],
+      small: Boolean = false): Relation = {
     val nKeys = rng.between(1, 2)
     val nPayload = rng.between(1, 3)
     val keyFields = (0 until nKeys).map(i => Field(s"c$i", keyType))
@@ -541,8 +578,8 @@ object MetaQueryGen {
     val numRows = rng.weighted((2, 0), (3, 1), (5, 2), (2, 3)) match {
       case 0 => 0
       case 1 => 1
-      case 2 => rng.between(2, 10)
-      case _ => rng.between(11, 24)
+      case 2 => if (small) rng.between(2, 6) else rng.between(2, 10)
+      case _ => if (small) rng.between(7, 10) else rng.between(11, 24)
     }
     val rows = IndexedSeq.tabulate(numRows) { _ =>
       Array.tabulate[Any](schema.length) { c =>
@@ -590,21 +627,44 @@ object MetaQueryGen {
     // materialized once by the engine, referenced once it is inlined — both
     // covered because the outer FROM draws CTE names from the same source pool as
     // base relations (so the same CTE can be picked for two leaves / both union
-    // arms). CTE bodies read only base relations, so resolution order is simple.
+    // arms). A CTE's body reads a base relation or a CTE defined before it.
     val ctes = genCtes(rng, env)
     val sources = env.relations.map(_.asSource) ++ ctes.map(_.asSource)
-    val q = if (rng.bool(0.2)) genUnion(rng, sources) else genSelect(rng, sources)
+    val sizes = sourceSizes(env, ctes)
+    val maxLeaves = maxLeavesOf(env)
+    val q =
+      if (rng.bool(0.2)) genUnion(rng, sources, sizes, maxLeaves)
+      else genSelect(rng, sources, sizes, maxLeaves, topNAllowed = true)
     q.copy(ctes = ctes)
   }
 
-  private def genSelect(rng: Rng, sources: Vector[FromSource]): MetaQuery = {
-    val from = genFrom(rng, sources)
+  /** How many tables a FROM may join: up to six over small relations (an
+    * environment of four or more, whose relations hold ten rows at most), up
+    * to three otherwise. */
+  private def maxLeavesOf(env: RelEnv): Int = if (env.relations.length > 3) 6 else 3
+
+  /** Each source's rows, a CTE's as many as the source its body reads. */
+  private def sourceSizes(env: RelEnv, ctes: Vector[CteDef]): Map[String, Int] =
+    ctes.foldLeft(env.relations.map(r => r.name -> r.dataset.numRows).toMap) { (sizes, c) =>
+      sizes + (c.name -> sizes.getOrElse(c.body.from.root.relName, 0))
+    }
+
+  /** About as many rows as a FROM's joins pair before the next is added: an
+    * equality over the narrow key domain keeps about half of each pairing,
+    * a join with none keeps them all. A join is not added past
+    * [[JoinBudget]], so a chain of six, or a join with no equality, stays
+    * small enough to run a dozen times a case. */
+  private val JoinBudget = 2000.0
+
+  private def genSelect(rng: Rng, sources: Vector[FromSource], sizes: Map[String, Int], maxLeaves: Int,
+      topNAllowed: Boolean): MetaQuery = {
+    val from = genFrom(rng, sources, sizes, maxLeaves)
     val scope = from.scope
     val where = if (rng.bool(0.6)) Some(genPredicate(rng, scope, rng.between(1, 3))) else None
     // A top-n query needs a core that satisfies `MetaQuery.totalOrderKeys`, which a
     // freely-generated one rarely does (a computed item, a window, or DISTINCT each
     // break it), so the shape is generated deliberately rather than hoped for.
-    val topN = rng.bool(0.2) && scope.exists(c => isPartitionable(c.dataType))
+    val topN = topNAllowed && rng.bool(0.2) && scope.exists(c => isPartitionable(c.dataType))
     val core =
       if (topN) genTopNCore(rng, scope)
       else if (rng.bool(0.5)) genAggCore(rng, scope)
@@ -629,17 +689,25 @@ object MetaQueryGen {
     ProjectCore(cols.zipWithIndex.map { case (c, i) => (c.ref, s"o$i") }, distinct = false)
   }
 
-  /** A `UNION` / `UNION ALL` of two single-source arms that both project one bare
-    * key column. The arms are schema-compatible by construction: every source
-    * shares the env key type, so both arms output `[o0: keyType]`. UNION (distinct)
-    * and UNION ALL (multiset) are both generated; TLP over the union output and the
-    * dedup-vs-concat distinction are what this exercises. When the source pool
-    * holds a CTE, both arms can reference it (a CTE feeding both union arms). */
-  private def genUnion(rng: Rng, sources: Vector[FromSource]): MetaQuery = {
+  /** A `UNION` / `UNION ALL` of two arms of one output schema. Either two
+    * single-source arms that each project one bare key column (every source
+    * shares the env's key type, so both output `[o0: keyType]`), or any core
+    * over any FROM (joins, an aggregate, windows, a computed item) beside the
+    * same core with a WHERE of its own, the same schema by construction. No
+    * arm has a `LIMIT`, which a union takes only as a whole. UNION (distinct)
+    * and UNION ALL (multiset) are both generated; when the source pool holds a
+    * CTE, both arms can reference it. */
+  private def genUnion(rng: Rng, sources: Vector[FromSource], sizes: Map[String, Int], maxLeaves: Int): MetaQuery = {
     val all = rng.bool()
-    val arm1 = genUnionArm(rng, sources)
-    val arm2 = genUnionArm(rng, sources)
-    arm1.copy(setOp = Some((arm2, all)))
+    if (rng.bool(0.4)) {
+      val arm1 = genUnionArm(rng, sources)
+      val arm2 = genUnionArm(rng, sources)
+      arm1.copy(setOp = Some((arm2, all)))
+    } else {
+      val arm1 = genSelect(rng, sources, sizes, maxLeaves, topNAllowed = false)
+      val ownWhere = if (rng.bool(0.7)) Some(genPredicate(rng, arm1.from.scope, rng.between(1, 2))) else None
+      arm1.copy(setOp = Some((arm1.copy(where = ownWhere), all)))
+    }
   }
 
   private def genUnionArm(rng: Rng, sources: Vector[FromSource]): MetaQuery = {
@@ -652,80 +720,176 @@ object MetaQueryGen {
     MetaQuery(FromClause(FromLeaf(src.name, alias, cols), Vector.empty), where, core)
   }
 
-  /** 0-2 CTEs, each a single-relation projection of the relation's key column(s)
-    * plus an optional extra column, so every CTE exposes a key-typed (joinable)
-    * output. CTE bodies read only base relations (not other CTEs). */
+  /** 0-3 CTEs, each a projection of one source's key column(s) plus an
+    * optional extra column, so every CTE exposes a key-typed (joinable)
+    * output. A CTE's source is a base relation or, now and then, a CTE
+    * defined before it, which the engine then inlines or materializes inside
+    * another. */
   private def genCtes(rng: Rng, env: RelEnv): Vector[CteDef] =
     if (!rng.bool(0.35)) Vector.empty
-    else (0 until rng.between(1, 2)).map(i => genCte(rng, env, s"w$i")).toVector
+    else (0 until rng.between(1, 3)).foldLeft(Vector.empty[CteDef]) { (done, i) =>
+      done :+ genCte(rng, env, done, s"w$i")
+    }
 
-  private def genCte(rng: Rng, env: RelEnv, name: String): CteDef = {
-    val rel = rng.oneOf(env.relations)
+  private def genCte(rng: Rng, env: RelEnv, earlier: Vector[CteDef], name: String): CteDef = {
+    val src: FromSource =
+      if (earlier.nonEmpty && rng.bool(0.4)) rng.oneOf(earlier).asSource
+      else rng.oneOf(env.relations).asSource
     val alias = "t0"
-    val cols = rel.schema.fields.map(f => ScopeCol(alias, f.name, f.dataType)).toVector
-    val keyType = rel.schema.fields(rel.keyCols.head).dataType
-    val projKeys = distinctSubset(rng, rel.keyCols.map(cols), rng.between(1, rel.keyCols.length))
+    val cols = src.fields.map(f => ScopeCol(alias, f.name, f.dataType))
+    val keyType = cols(src.keyCols.head).dataType
+    val projKeys = distinctSubset(rng, src.keyCols.map(cols), rng.between(1, src.keyCols.length))
     val extra = if (rng.bool(0.5)) Vector(rng.oneOf(cols)) else Vector.empty
     val projected = projKeys ++ extra
     val items = projected.zipWithIndex.map { case (c, i) => (c.ref, s"o$i") }
     val where = if (rng.bool(0.5)) Some(genPredicate(rng, cols, rng.between(1, 2))) else None
-    val body = MetaQuery(FromClause(FromLeaf(rel.name, alias, cols), Vector.empty), where,
+    val body = MetaQuery(FromClause(FromLeaf(src.name, alias, cols), Vector.empty), where,
       ProjectCore(items, distinct = rng.bool(0.2)))
     val keyCols = body.outputSchema.zipWithIndex.collect { case ((_, t), i) if t == keyType => i }.toVector
     CteDef(name, body, keyCols)
   }
 
-  /** A left-deep FROM over the source pool (base relations + CTEs): a root source
-    * plus 0-2 joins. The same source may appear under several fresh aliases (a
-    * self-join, or a CTE referenced twice). */
-  private def genFrom(rng: Rng, sources: Vector[FromSource]): FromClause = {
+  /** A left-deep FROM over the source pool (base relations + CTEs): a root
+    * source plus up to `maxLeaves - 1` joins, written as `JOIN ... ON`, as a
+    * comma list or as `CROSS JOIN`s ([[JoinStyle]]). The same source may
+    * appear under several fresh aliases (a self-join, or a CTE referenced
+    * twice). A join is not added once the rows the joins pair would pass
+    * [[JoinBudget]]. */
+  private def genFrom(rng: Rng, sources: Vector[FromSource], sizes: Map[String, Int], maxLeaves: Int): FromClause = {
     var aliasN = 0
     def freshAlias(): String = { val a = s"t$aliasN"; aliasN += 1; a }
     def leafOf(src: FromSource): (FromLeaf, Vector[Int]) = {
       val alias = freshAlias()
-      val cols = src.fields.map(f => ScopeCol(alias, f.name, f.dataType)).toVector
+      val cols = src.fields.map(f => ScopeCol(alias, f.name, f.dataType))
       (FromLeaf(src.name, alias, cols), src.keyCols)
     }
-
-    val (root, _) = leafOf(rng.oneOf(sources))
-    val nJoins = rng.weighted((2, 0), (5, 1), (2, 2))
-    var scope = root.cols
-    val joins = Vector.newBuilder[JoinItem]
-    var i = 0
-    while (i < nJoins) {
-      val (leaf, keyCols) = leafOf(rng.oneOf(sources))
-      val kind = rng.weighted(
-        (4, JoinKind.Inner), (3, JoinKind.Left), (2, JoinKind.Right), (2, JoinKind.Full))
-      val on = genJoinOn(rng, scope, leaf, keyCols)
-      joins += JoinItem(kind, leaf, on)
-      scope = scope ++ leaf.cols
-      i += 1
-    }
-    FromClause(root, joins.result())
+    val nJoins = math.min(maxLeaves - 1, rng.weighted((2, 0), (5, 1), (2, 2), (1, 3), (1, 4), (1, 5)))
+    val style = if (nJoins == 0) JoinStyle.On else rng.weighted[JoinStyle]((6, JoinStyle.On), (2, JoinStyle.Comma),
+      (1, JoinStyle.Cross))
+    val picked = (0 to nJoins).map(_ => leafOf(rng.oneOf(sources))).toVector
+    val joins = if (style == JoinStyle.On) joinsOn(rng, picked) else joinsInWhere(rng, picked)
+    within(FromClause(picked.head._1, joins, style), sizes)
   }
 
-  /** An ON predicate: an equi-join between a same-typed (left-scope, right-leaf)
-    * column pair — preferring the right source's key columns so the join matches —
-    * and an optional extra comparison conjunct. */
-  private def genJoinOn(rng: Rng, leftScope: Vector[ScopeCol], rightLeaf: FromLeaf, rightKeyColIdx: Vector[Int]): Expr = {
+  /** The joins of `JOIN ... ON`, each of any kind: most on an equality with a
+    * table before it, now and then two, and at most one on no equality at all
+    * ([[genPairingOn]]), which the engine pairs row by row. A table whose ON
+    * has no equality, before one whose ON has equalities with both it and the
+    * tables before it, is a run `JoinOrder` reorders where the joins are
+    * inner. */
+  private def joinsOn(rng: Rng, picked: Vector[(FromLeaf, Vector[Int])]): Vector[JoinItem] = {
+    var pairing = false
+    picked.indices.drop(1).map { i =>
+      val (leaf, keyCols) = picked(i)
+      val before = picked.take(i).map(_._1)
+      val kind = rng.weighted(
+        (4, JoinKind.Inner), (3, JoinKind.Left), (2, JoinKind.Right), (2, JoinKind.Full))
+      val on =
+        if (!pairing && rng.bool(0.15)) { pairing = true; genPairingOn(rng, before.flatMap(_.cols), leaf) }
+        else genJoinOn(rng, before, leaf, keyCols)
+      JoinItem(kind, leaf, on)
+    }.toVector
+  }
+
+  /** The joins of a comma list or `CROSS JOIN`s: inner joins whose equalities
+    * make a random spanning tree over the tables, each equality written on the
+    * join of the later of its two tables. So a table's equalities may all be
+    * with tables after it, and `JoinOrder` brings one of those in first; now
+    * and then an edge has no equality, and that join pairs every row. */
+  private def joinsInWhere(rng: Rng, picked: Vector[(FromLeaf, Vector[Int])]): Vector[JoinItem] = {
+    val n = picked.length
+    val order = shuffle(rng, (0 until n).toVector)
+    val conds = Array.fill(n)(Vector.empty[Expr])
+    (1 until n).foreach { k =>
+      val (a, b) = (order(k), order(rng.between(0, k - 1)))
+      val (lo, hi) = (math.min(a, b), math.max(a, b))
+      if (!rng.bool(0.08)) keyEquality(rng, picked(lo), picked(hi)).foreach(e => conds(hi) = conds(hi) :+ e)
+    }
+    (1 until n).map { i =>
+      val on = if (conds(i).isEmpty) TrueLit else conds(i).reduceLeft((l, r) => BinOpExpr("AND", l, r, DataType.BooleanType))
+      JoinItem(JoinKind.Inner, picked(i)._1, on)
+    }.toVector
+  }
+
+  /** `l.k = r.k` over a key column of each, or another pair of one type, or
+    * nothing when the two share no type. */
+  private def keyEquality(rng: Rng, l: (FromLeaf, Vector[Int]), r: (FromLeaf, Vector[Int])): Option[Expr] = {
+    val keyPairs = for { i <- l._2; j <- r._2 if l._1.cols(i).dataType == r._1.cols(j).dataType } yield (l._1.cols(i), r._1.cols(j))
+    val anyPairs = for { a <- l._1.cols; b <- r._1.cols if a.dataType == b.dataType } yield (a, b)
+    val pairs = if (keyPairs.nonEmpty) keyPairs else anyPairs
+    if (pairs.isEmpty) None
+    else { val (a, b) = rng.oneOf(pairs); Some(BinOpExpr("=", a.ref, b.ref, DataType.BooleanType)) }
+  }
+
+  private def shuffle[A](rng: Rng, xs: Vector[A]): Vector[A] = distinctSubset(rng, xs, xs.length)
+
+  /** `from` with its joins up to the first that would pair past
+    * [[JoinBudget]] rows. */
+  private def within(from: FromClause, sizes: Map[String, Int]): FromClause = {
+    def size(leaf: FromLeaf): Double = math.max(1, sizes.getOrElse(leaf.relName, 1)).toDouble
+    var rows = size(from.root)
+    val kept = from.joins.takeWhile { j =>
+      val equality = conjuncts(j.on).exists { case BinOpExpr("=", _, _, _) => true; case _ => false }
+      rows = rows * size(j.leaf) / (if (equality) 2.0 else 1.0)
+      rows <= JoinBudget
+    }
+    from.copy(joins = kept)
+  }
+
+  private def conjuncts(e: Expr): Seq[Expr] = e match {
+    case BinOpExpr("AND", l, r, _) => conjuncts(l) ++ conjuncts(r)
+    case other => Seq(other)
+  }
+
+  /** An ON with no equality: a comparison of a column before the join with
+    * one of the joined table, of one type, or TRUE where they share none. The
+    * engine pairs every row of one side with every row of the other
+    * (`JoinExec`'s pairing path), which the nested-loop guard never refuses
+    * at these sizes. */
+  private def genPairingOn(rng: Rng, leftScope: Vector[ScopeCol], rightLeaf: FromLeaf): Expr = {
+    val pairs = for { l <- leftScope; r <- rightLeaf.cols if r.dataType == l.dataType } yield (l, r)
+    if (pairs.isEmpty) TrueLit
+    else {
+      val (l, r) = rng.oneOf(pairs)
+      BinOpExpr(rng.oneOf(Seq("<", "<=", ">", ">=", "<>")), l.ref, r.ref, DataType.BooleanType)
+    }
+  }
+
+  /** An ON predicate: an equi-join between a same-typed (earlier table, joined
+    * table) column pair — preferring the joined source's key columns so the
+    * join matches — now and then a second equality with another earlier
+    * table, and an optional extra comparison conjunct. */
+  private def genJoinOn(rng: Rng, before: Vector[FromLeaf], rightLeaf: FromLeaf, rightKeyColIdx: Vector[Int]): Expr = {
+    val leftScope = before.flatMap(_.cols)
     val rightKeyCols = rightKeyColIdx.map(i => rightLeaf.cols(i))
     // Same-typed pairs (leftScopeCol, rightLeafCol), keys first for match likelihood.
-    val keyPairs = for {
-      l <- leftScope if l.dataType == rightKeyCols.headOption.map(_.dataType).getOrElse(DataType.NullType)
-      r <- rightKeyCols if r.dataType == l.dataType
-    } yield (l, r)
-    val anyPairs = for { l <- leftScope; r <- rightLeaf.cols if r.dataType == l.dataType } yield (l, r)
-    val pairs = if (keyPairs.nonEmpty) keyPairs else anyPairs
+    def pairsWith(scope: Vector[ScopeCol]): Vector[(ScopeCol, ScopeCol)] = {
+      val keyPairs = for {
+        l <- scope if l.dataType == rightKeyCols.headOption.map(_.dataType).getOrElse(DataType.NullType)
+        r <- rightKeyCols if r.dataType == l.dataType
+      } yield (l, r)
+      val anyPairs = for { l <- scope; r <- rightLeaf.cols if r.dataType == l.dataType } yield (l, r)
+      if (keyPairs.nonEmpty) keyPairs else anyPairs
+    }
+    val pairs = pairsWith(leftScope)
     if (pairs.isEmpty) {
       // No comparable columns — degenerate to a TRUE (cross) join.
-      LitExpr(true, DataType.BooleanType)
+      TrueLit
     } else {
       val (l, r) = rng.oneOf(pairs)
       val equi: Expr = BinOpExpr("=", l.ref, r.ref, DataType.BooleanType)
+      // A second equality with another table before, so a table this join
+      // follows need not be the one it keys on.
+      val others = before.filterNot(_.alias == l.alias)
+      val second: Option[Expr] =
+        if (others.nonEmpty && rng.bool(0.3)) pairsWith(rng.oneOf(others).cols).headOption.map { case (a, b) =>
+          BinOpExpr("=", a.ref, b.ref, DataType.BooleanType)
+        } else None
+      val keyed = second.fold(equi)(s => BinOpExpr("AND", equi, s, DataType.BooleanType))
       if (rng.bool(0.25)) {
         val extra = genAtom(rng, leftScope ++ rightLeaf.cols, 1)
-        BinOpExpr("AND", equi, extra, DataType.BooleanType)
-      } else equi
+        BinOpExpr("AND", keyed, extra, DataType.BooleanType)
+      } else keyed
     }
   }
 
@@ -758,19 +922,36 @@ object MetaQueryGen {
 
   // ---- window functions ---------------------------------------------------
 
-  /** One `<fn>() OVER (PARTITION BY ... ORDER BY ... [frame])` column. Aggregate
-    * arguments and LAG/LEAD targets are bare columns so the output type is exact.
-    * The OVER parentheses are function syntax, not grouping parens, so this stays
-    * paren-free-safe. */
+  /** One `<fn>() OVER (PARTITION BY ... ORDER BY ... [frame])` column. The
+    * OVER parentheses are function syntax, not grouping parens, so this stays
+    * paren-free-safe. An aggregate's argument is a column or a call that
+    * keeps its type (`ABS` of a number, `UPPER` of a string), so the output
+    * type is exact; a PARTITION BY or ORDER BY key is a column or now and then
+    * an expression over one ([[keyText]]). The frames: none (the whole
+    * partition), the default (RANGE from the first row to the current one's
+    * last peer), ROWS with offsets either side, and RANGE with offsets, over a
+    * single number key, the value it measures. */
   private def genWindowItem(rng: Rng, scope: Vector[ScopeCol], idx: Int): WinItem = {
     val name = s"o$idx"
     val partCols = distinctSubset(rng, scope, rng.between(0, math.min(2, scope.length)))
     val orderCols = distinctSubset(rng, scope, rng.between(1, math.min(2, scope.length)))
-    val partBy = if (partCols.isEmpty) "" else "PARTITION BY " + partCols.map(_.qualified).mkString(", ")
-    val orderBy = "ORDER BY " + orderCols.map(c => s"${c.qualified} ${if (rng.bool()) "ASC" else "DESC"}").mkString(", ")
+    val partBy = if (partCols.isEmpty) "" else "PARTITION BY " + partCols.map(keyText(rng, _)).mkString(", ")
+    def direction(): String = if (rng.bool()) "ASC" else "DESC"
+    val orderBy = "ORDER BY " + orderCols.map(c => s"${keyText(rng, c)} ${direction()}").mkString(", ")
     def over(body: String): String = s"OVER (${Seq(partBy, body).filter(_.nonEmpty).mkString(" ")})"
 
     val numeric = scope.filter(c => DataType.isNumeric(c.dataType))
+    /** A number argument and the type a SUM of it is: a column, or `ABS` of
+      * one, which keeps its type. */
+    def numberArg(): (String, DataType) = {
+      val c = rng.oneOf(numeric)
+      (if (rng.bool(0.25)) s"ABS(${c.qualified})" else c.qualified, c.dataType)
+    }
+    /** Any argument of MIN or MAX: a column, or `UPPER` of a string one. */
+    def anyArg(): (String, DataType) = {
+      val c = rng.oneOf(scope)
+      (if (c.dataType == DataType.StringType && rng.bool(0.3)) s"UPPER(${c.qualified})" else c.qualified, c.dataType)
+    }
     val choices = scala.collection.mutable.ArrayBuffer.empty[(Int, () => WinItem)]
     // Tie-sensitive: the value depends on which of two tied rows comes first.
     choices += ((3, () => WinItem(s"ROW_NUMBER() ${over(orderBy)}", name, DataType.LongType,
@@ -778,6 +959,18 @@ object MetaQueryGen {
     choices += ((2, () => { val c = rng.oneOf(scope)
       WinItem(s"${rng.oneOf(Seq("LAG", "LEAD"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType,
         tieSensitive = true, orderCols) }))
+    // LAG and LEAD with an offset and a default, which takes the value's type
+    // by the branch rule: the value itself, or a literal of its type where
+    // SQL writes one that keeps it.
+    choices += ((2, () => { val c = rng.oneOf(scope)
+      val default = c.dataType match {
+        case DataType.IntType | DataType.LongType | DataType.DoubleType | DataType.StringType | DataType.DateType |
+            DataType.TimestampType | DataType.BooleanType if rng.bool(0.6) =>
+          SqlRender.expr(LitExpr(genLit(rng, c.dataType), c.dataType))
+        case _ => c.qualified
+      }
+      WinItem(s"${rng.oneOf(Seq("LAG", "LEAD"))}(${c.qualified}, ${rng.between(1, 3)}, $default) ${over(orderBy)}",
+        name, c.dataType, tieSensitive = true, orderCols) }))
     // Tie-insensitive: peers share a rank, and a no-ORDER-BY aggregate window
     // frames the whole partition. These are the shapes the mode-agreement oracle
     // may run, which is how the sharded window path gets differential coverage.
@@ -786,33 +979,55 @@ object MetaQueryGen {
     choices += ((3, () => WinItem(s"COUNT(*) ${over("")}", name, DataType.LongType, tieSensitive = false)))
     if (numeric.nonEmpty) {
       // Running aggregates over the default RANGE frame: peers share a frame.
-      choices += ((2, () => { val c = rng.oneOf(numeric)
-        WinItem(s"SUM(${c.qualified}) ${over(orderBy)}", name, sumType(c.dataType),
-          tieSensitive = false, orderCols) }))
-      choices += ((1, () => { val c = rng.oneOf(numeric)
-        WinItem(s"AVG(${c.qualified}) ${over(orderBy)}", name, avgType(c.dataType),
-          tieSensitive = false, orderCols) }))
-      choices += ((1, () => { val c = rng.oneOf(numeric)
-        WinItem(s"SUM(${c.qualified}) OVER (${Seq(partBy, orderBy, frame(rng)).filter(_.nonEmpty).mkString(" ")})",
-          name, sumType(c.dataType), tieSensitive = true, orderCols) }))
+      choices += ((2, () => { val (a, t) = numberArg()
+        WinItem(s"SUM($a) ${over(orderBy)}", name, sumType(t), tieSensitive = false, orderCols) }))
+      choices += ((1, () => { val (a, t) = numberArg()
+        WinItem(s"AVG($a) ${over(orderBy)}", name, avgType(t), tieSensitive = false, orderCols) }))
+      // A ROWS frame counts rows, so which of two peers comes first decides
+      // what each sees.
+      choices += ((2, () => { val (a, t) = numberArg()
+        val f = QueryGen.genFrame(rng, rows = true)
+        WinItem(s"SUM($a) OVER (${Seq(partBy, orderBy, f.sql).filter(_.nonEmpty).mkString(" ")})",
+          name, sumType(t), tieSensitive = true, orderCols) }))
+      // A RANGE frame with offsets measures one number key: its frames are
+      // sets of values, which ties cannot change.
+      choices += ((3, () => {
+        val k = rng.oneOf(numeric)
+        val key = if (rng.bool(0.3)) s"ABS(${k.qualified})" else k.qualified
+        val f = QueryGen.genFrame(rng, rows = false)
+        val rangeOrder = s"ORDER BY $key ${direction()}"
+        val body = Seq(partBy, rangeOrder, f.sql).filter(_.nonEmpty).mkString(" ")
+        rng.weighted[() => WinItem](
+          (3, () => { val (a, t) = numberArg(); WinItem(s"SUM($a) OVER ($body)", name, sumType(t), tieSensitive = false, Vector(k)) }),
+          (1, () => { val (a, t) = numberArg(); WinItem(s"AVG($a) OVER ($body)", name, avgType(t), tieSensitive = false, Vector(k)) }),
+          (1, () => WinItem(s"COUNT(*) OVER ($body)", name, DataType.LongType, tieSensitive = false, Vector(k))),
+          (1, () => { val (a, t) = anyArg()
+            WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}($a) OVER ($body)", name, t, tieSensitive = false, Vector(k)) }))()
+      }))
       // Whole-partition aggregate windows: no ORDER BY, so no frame to split peers.
-      choices += ((2, () => { val c = rng.oneOf(numeric)
-        WinItem(s"SUM(${c.qualified}) ${over("")}", name, sumType(c.dataType), tieSensitive = false) }))
-      choices += ((1, () => { val c = rng.oneOf(numeric)
-        WinItem(s"AVG(${c.qualified}) ${over("")}", name, avgType(c.dataType), tieSensitive = false) }))
+      choices += ((2, () => { val (a, t) = numberArg()
+        WinItem(s"SUM($a) ${over("")}", name, sumType(t), tieSensitive = false) }))
+      choices += ((1, () => { val (a, t) = numberArg()
+        WinItem(s"AVG($a) ${over("")}", name, avgType(t), tieSensitive = false) }))
     }
-    choices += ((1, () => { val c = rng.oneOf(scope)
-      WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over(orderBy)}", name, c.dataType,
+    choices += ((1, () => { val (a, t) = anyArg()
+      WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}($a) ${over(orderBy)}", name, t,
         tieSensitive = false, orderCols) }))
-    choices += ((2, () => { val c = rng.oneOf(scope)
-      WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}(${c.qualified}) ${over("")}", name, c.dataType, tieSensitive = false) }))
+    choices += ((2, () => { val (a, t) = anyArg()
+      WinItem(s"${rng.oneOf(Seq("MIN", "MAX"))}($a) ${over("")}", name, t, tieSensitive = false) }))
     rng.weighted(choices.toSeq: _*)()
   }
 
-  /** A `ROWS BETWEEN ... AND ...` frame clause. */
-  private def frame(rng: Rng): String =
-    s"ROWS BETWEEN ${rng.oneOf(Seq("UNBOUNDED PRECEDING", "1 PRECEDING", "0 PRECEDING"))} " +
-      s"AND ${rng.oneOf(Seq("CURRENT ROW", "1 FOLLOWING", "UNBOUNDED FOLLOWING"))}"
+  /** A PARTITION BY or ORDER BY key over `c`: the column, or now and then an
+    * expression of it, `ABS` or `+ 1` of a number, `UPPER` or `LENGTH` of a
+    * string. */
+  private def keyText(rng: Rng, c: ScopeCol): String =
+    if (!rng.bool(0.25)) c.qualified
+    else c.dataType match {
+      case t if DataType.isNumeric(t) => if (rng.bool()) s"ABS(${c.qualified})" else s"${c.qualified} + 1"
+      case DataType.StringType => if (rng.bool()) s"UPPER(${c.qualified})" else s"LENGTH(${c.qualified})"
+      case _ => c.qualified
+    }
 
   /** A window SUM's and AVG's types over a column of `dt`, as the engine's
     * `AggExprSum` and `AggExprAvg` decide them. */

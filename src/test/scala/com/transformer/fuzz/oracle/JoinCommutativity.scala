@@ -61,11 +61,12 @@ object JoinCommutativity {
   /** Swap the FROM root with the first join's leaf, flipping that join's kind.
     * Any further joins keep their kind and ON predicate: they see the same set of
     * aliases in scope, so a left-deep chain stays bindable and its semantics are
-    * unchanged. */
+    * unchanged. A comma list or `CROSS JOIN`s keep their style and their WHERE,
+    * so `JoinOrder` meets the tables in another written order. */
   private def commuteFirstJoin(from: FromClause): FromClause = {
     val first = from.joins.head
     val rest = from.joins.tail
-    FromClause(first.leaf, JoinItem(flip(first.kind), from.root, first.on) +: rest)
+    from.copy(root = first.leaf, joins = JoinItem(flip(first.kind), from.root, first.on) +: rest)
   }
 
   private def flip(k: JoinKind): JoinKind = k match {

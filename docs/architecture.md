@@ -1738,6 +1738,10 @@ each in a fixed order:
    conditions read `RAND()` keeps its order, since another would evaluate them
    on other rows. It runs after FilterPushdown, which moves a WHERE's
    conjuncts over two tables into the joins' conditions, where it reads them.
+   `sql/plan:join_order_test` holds it to fixed shapes and the metamorphic
+   fuzzer to generated ones: comma lists and `CROSS JOIN`s whose equalities
+   make a random spanning tree, so a table's equalities may all be with tables
+   after it, of up to six tables (plans/testing/15).
 
 3. **`ColumnProjectionPushdown`** prunes unreferenced columns out of
    scans, threading through joins so each side reads only the columns its
