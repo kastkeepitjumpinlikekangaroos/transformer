@@ -64,12 +64,16 @@ final class DetailsPanel(
     table.foreach { t =>
       val s = t.summary
       val stats = flow()
-      if (wrote(s.status)) stats.getChildren.add(chip(f"${s.rowsProduced}%,d rows"))
+      if (t.wrote) stats.getChildren.add(chip(f"${s.rowsProduced}%,d rows"))
       record.foreach(r => stats.getChildren.add(chip(r.format.toUpperCase(java.util.Locale.ROOT))))
-      for (a <- s.startedAt; b <- s.finishedAt if a != java.time.Instant.EPOCH)
+      // An unfinished table has no duration: its run never finished it.
+      for (a <- s.startedAt; b <- s.finishedAt if a != java.time.Instant.EPOCH && !t.unfinished)
         stats.getChildren.add(chip(s"took ${Duration.between(a, b).toMillis} ms"))
       record.foreach(r => stats.getChildren.add(chip(s"written ${LineageCanvas.RunTime.format(r.writtenAt)}")))
       facts.getChildren.add(stats)
+      if (t.unfinished) facts.getChildren.add(section("UNFINISHED", hint(
+        "The run writing this table stopped before it finished, or is still running in another process: its " +
+          "_run.json says Running, so there are no rows to read. The next run of its job clears the directory.")))
     }
     sqlNameSection(n)
     facts.getChildren.add(section("LOCATION", pathLabel(table.flatMap(_.dir).map(_.toString)
@@ -258,7 +262,7 @@ final class DetailsPanel(
     val dataset = if (m.dataset == here) "" else s"${l.folder.datasets(m.dataset).name}."
     m match {
       case t: NodeId.Table =>
-        val status = l.shownRuns(t.dataset).table(t.name).map(_.summary.status)
+        val status = l.shownRuns(t.dataset).table(t.name).map(_.status)
         val c = navChip(dataset + t.name, "task", Some(ViewerSelection.OfNode(t)))
         status.filterNot(_ == TaskRunStatus.Succeeded).foreach(s => c.getStyleClass.add(tone(s).css))
         c
@@ -280,9 +284,10 @@ final class DetailsPanel(
 object DetailsPanel {
 
   /** Whether a task with `s` wrote its output. */
-  def wrote(s: TaskRunStatus): Boolean = s == TaskRunStatus.Succeeded || s == TaskRunStatus.ValidationFailed
+  def wrote(s: TaskRunStatus): Boolean = TaskRunStatus.wroteOutput(s)
 
   def statusText(s: TaskRunStatus): String = s match {
+    case TaskRunStatus.Running => "UNFINISHED"
     case TaskRunStatus.Succeeded => "SUCCEEDED"
     case TaskRunStatus.ValidationFailed => "VALIDATION FAILED"
     case TaskRunStatus.Failed => "FAILED"
@@ -290,6 +295,7 @@ object DetailsPanel {
   }
 
   def tone(s: TaskRunStatus): Tone = s match {
+    case TaskRunStatus.Running => Tone.Warning
     case TaskRunStatus.Succeeded => Tone.Success
     case TaskRunStatus.ValidationFailed => Tone.Warning
     case TaskRunStatus.Failed => Tone.Danger

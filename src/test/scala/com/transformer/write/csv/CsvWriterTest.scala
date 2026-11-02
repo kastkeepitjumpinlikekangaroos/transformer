@@ -7,6 +7,7 @@ import org.junit.Test
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
+import scala.jdk.CollectionConverters._
 
 class CsvWriterTest {
 
@@ -239,10 +240,46 @@ class CsvWriterTest {
   @Test def noPartitionsWriteOneEmptyPartFile(): Unit = {
     val s = Schema(Field("x", DataType.IntType))
     val dir = Files.createTempDirectory("no-parts-")
-    assertEquals(0L, CsvWriter.writePartitioned(dir, s, IndexedSeq.empty))
+    assertEquals(WrittenParts(Vector("part-00000.csv"), 0L), CsvWriter.writePartitioned(dir, s, IndexedSeq.empty))
     assertEquals("x\n", Files.readString(dir.resolve("part-00000.csv")))
     val r = CsvReader.fromPath(dir.toString, CsvOptions.forWrittenFile(Map.empty, s))
     assertEquals(0, (0 until r.numPartitions).map(p => r.readPartition(p).map(_.numRows).sum).sum)
+  }
+
+  /** The files in `dir`, by name, hidden ones too. */
+  private def filesIn(dir: Path): Seq[String] = {
+    val stream = Files.list(dir)
+    try stream.iterator().asScala.map(_.getFileName.toString).toVector.sorted finally stream.close()
+  }
+
+  /** A partition whose rows throw. */
+  private def failing(after: ColumnarBatch*): Iterator[ColumnarBatch] =
+    after.iterator ++ Iterator.continually[ColumnarBatch](throw new IllegalStateException("partition 1 failed")).take(1)
+
+  /** Every part is staged under a hidden name and renamed only once every
+    * partition is written, so a partition that fails leaves no part file,
+    * staged or committed. Each part was renamed the moment its own partition
+    * ended, so `part-00000.csv` stayed beside the failure, and a reader of the
+    * directory took it for the output (plans/testing/06). */
+  @Test def aPartitionThatFailsLeavesNoPartFile(): Unit = {
+    val s = Schema(Field("x", DataType.IntType))
+    val dir = Files.createTempDirectory("failed-parts-")
+    val thrown =
+      try { CsvWriter.writePartitioned(dir, s, IndexedSeq(Iterator(makeBatch(s, Seq(Seq(1)))), failing())); null }
+      catch { case e: IllegalStateException => e }
+    assertEquals("partition 1 failed", thrown.getMessage)
+    assertEquals(Seq.empty, filesIn(dir))
+  }
+
+  /** A write names the parts it committed, in partition order, and leaves no
+    * staged file behind. */
+  @Test def aWriteNamesThePartsItCommitted(): Unit = {
+    val s = Schema(Field("x", DataType.IntType))
+    val dir = Files.createTempDirectory("written-parts-")
+    val written = CsvWriter.writePartitioned(dir, s,
+      IndexedSeq(Iterator(makeBatch(s, Seq(Seq(1), Seq(2)))), Iterator.empty, Iterator(makeBatch(s, Seq(Seq(3))))))
+    assertEquals(WrittenParts(Vector("part-00000.csv", "part-00001.csv", "part-00002.csv"), 3L), written)
+    assertEquals(written.files, filesIn(dir))
   }
 
   @Test def separatorsThatCannotBeReadBackAreRefused(): Unit = {

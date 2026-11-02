@@ -312,6 +312,7 @@ object DagSchedule {
   }
 
   private def runStatusName(s: TaskRunStatus): String = s match {
+    case TaskRunStatus.Running => "Running"
     case TaskRunStatus.Succeeded => "Succeeded"
     case TaskRunStatus.Failed => "Failed"
     case TaskRunStatus.ValidationFailed => "ValidationFailed"

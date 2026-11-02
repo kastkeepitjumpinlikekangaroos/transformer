@@ -51,7 +51,7 @@ class JobSessionTest {
       errorMessage  = None,
       executionTime = t,
       startedAt     = t,
-      finishedAt    = t,
+      finishedAt    = Some(t),
       writtenAt     = t,
       rowsProduced  = 0L,
       format        = format,
@@ -207,7 +207,7 @@ class JobSessionTest {
       errorMessage = None,
       executionTime = ExecutionTime,
       startedAt = started,
-      finishedAt = started.plusMillis(5),
+      finishedAt = Some(started.plusMillis(5)),
       writtenAt = started.plusMillis(6),
       rowsProduced = 1L,
       format = "csv",
@@ -324,5 +324,43 @@ class JobSessionTest {
     assertEquals(TaskStatus.ValidationFailed(Nil), back.status)
     assertEquals(Instant.EPOCH, back.startedAt)
     assertEquals(0L, back.queueWaitMillis)
+  }
+
+  /** `a_ok`'s record as a run that stopped while writing its directory left
+    * it: `Running`, with no `finishedAt` and no output, written as text, the
+    * way a run of another process left it. */
+  private def stopWhileWriting(jobDir: Path): Unit = {
+    val file = record(jobDir, "a_ok")
+    val text = Files.readString(file)
+      .replace("\"status\": \"Succeeded\"", "\"status\": \"Running\"")
+      .replaceAll("  \"finishedAt\": \"[^\"]*\",\n", "")
+    Files.writeString(file, text)
+    // The run had cleared the earlier parts.
+    Files.list(file.getParent).iterator().asScala.filter(_.getFileName.toString.startsWith("part-"))
+      .foreach(Files.delete(_))
+  }
+
+  /** A task whose `_run.json` says `Running` reopens as a run that never
+    * finished: no duration, no rows, no output path and no preview, though
+    * `job.json` says the run it shows succeeded. A run killed while writing
+    * the directory leaves that record, and the directory then holds nothing
+    * a reader can trust (plans/testing/06). */
+  @Test def aTaskWhoseRunStoppedWhileWritingReopensAsUnfinished(): Unit = {
+    val jobDir = writeFourStatusJob()
+    val result = run(jobDir)
+    stopWhileWriting(jobDir)
+    val session = reopen(jobDir)
+    assertEquals(UiTaskState.Unfinished(result.tasks(0).startedAt), session.taskStates(0))
+    assertEquals(None, session.outputPathFor(0))
+    assertEquals(Some(TaskRunStatus.Running), session.taskRecordFor(0).map(_.status))
+    assertEquals(None, session.taskRecordFor(0).flatMap(_.finishedAt))
+    val dir = record(jobDir, "a_ok").getParent
+    val refused = try { JobSession.readOutputAsView(dir.toString); null } catch { case e: IllegalArgumentException => e }
+    assertNotNull("previewed an unfinished output", refused)
+    assertTrue(refused.getMessage, refused.getMessage.contains("unfinished"))
+    // The partition picker lists it as it is.
+    assertEquals(Seq(TaskRunStatus.Running), session.historicalRunsFor(0).map(_._2.status))
+    // The other tasks reopen as their run left them.
+    (1 until result.tasks.size).foreach(i => assertEquals(result.tasks(i), hydrated(session, i)))
   }
 }

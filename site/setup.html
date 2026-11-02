@@ -112,14 +112,15 @@ Tables:         15
           when anything fails, and <code>2</code> when the arguments are wrong.
           Leave out <code>--output</code> to write to
           <code>&lt;jobDir&gt;/output</code>, and leave out
-          <code>--execution-time</code> to use the current time.
+          <code>--execution-time</code> to use the current time. A run that
+          fails, or is killed, needs no cleanup: run the same command again.
         </p>
         <p class="muted">Each table gets its own output directory, and the run's summary goes in <code>job.json</code>:</p>
 <pre class="tree"><span class="d">/tmp/jaffle-out/</span>
   <span class="f">job.json</span>                 <span class="c">every task's status, rows, timings, failed validations</span>
   <span class="d">customers/</span>
     <span class="f">part-00000.parquet</span>
-    <span class="f">_run.json</span>              <span class="c">this task's full run record</span>
+    <span class="f">_run.json</span>              <span class="c">this task's run record: read the parts it names once it says Succeeded</span>
   <span class="d">orders/</span>
   <span class="d">stg_orders/</span>
   <span class="c">...</span></pre>

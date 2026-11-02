@@ -347,6 +347,13 @@ Airflow renders `{{ ... }}` in `bash_command` itself, so this example uses
 Airflow's `ds_nodash` for the output path. transformer's own templates in
 `config.json`, `main.sql`, and `output.json` are untouched by Airflow.
 
+A failed run is retried as it is: rerun the same command, with nothing to
+delete first. A failed task leaves its directory holding only its `_run.json`,
+and a run that was killed leaves `Running` records, which the next run clears
+([the order a run writes in](#per-task-_runjson)). Do not start two runs that
+write one output directory at once: a run cannot tell another's `Running`
+record from one a killed run left, and clears it.
+
 ## Working with a coding agent
 
 transformer is designed so that an agent harness such as Claude Code can own
@@ -440,6 +447,7 @@ Node colours:
 | Red | Failed (error message + timing reloaded from disk) |
 | Amber | Validation failed (per-validation pass/fail + sample CSV reloaded from disk) |
 | Dark grey, "skipped" | Skipped (upstream failure) |
+| Amber, "unfinished" | Unfinished: its `_run.json` says `Running`, so its run stopped before it finished, or is still running in another process. No duration, rows or preview |
 | Teal | An input |
 
 ### SQL editors and vim keybindings
@@ -646,8 +654,12 @@ GROUP BY s.segment
 A table reads as the tasks after it read it: the part files its run wrote,
 with the column types it was written with. `jaffle_shop.customers` is refused
 with the name to write instead, and a table whose task failed in the run shown
-says it has no rows. Persist writes a result as part files, under
-`<folder>/interactive` unless you choose another directory.
+says it has no rows. So does an unfinished one, whose `_run.json` says
+`Running` whatever its run's `job.json` says: a later run stopped while
+writing it, or is writing it now. Persist writes a result as part files, under
+`<folder>/interactive` unless you choose another directory, in the order a
+job's task writes its directory: a directory of part files no `_run.json`
+names is refused, and a save that fails leaves no part file.
 
 A run written before records carried lineage (before 2026-10-31) still
 opens: its tables show their rows and query, but nothing in it says what each
@@ -716,8 +728,10 @@ the viewer's dark theme, named after what it draws (`revenue_by_month.png`).
 The runner persists a full run record for every task **at every termination
 status** — Succeeded, ValidationFailed, Failed, Skipped — so reopening the
 GUI against a previous run shows the exact same status, validation
-detail, and error messages it did during the live run. Reruns at the same
-templated output path completely overwrite prior state.
+detail, and error messages it did during the live run. While a run writes a
+task's directory its record says `Running`. Reruns at the same templated
+output path completely overwrite prior state, and a run that failed or was
+killed needs no cleanup before its rerun.
 
 There are two artifacts.
 
@@ -785,16 +799,52 @@ stops the run instead: no task starts after it, each that had not started is
 (...)`, and the run's error (`JobResult.error`, and `errorMessage` in
 `job.json`) says the same.
 
-The underscore prefix means CSV/Parquet readers skip both the record and the
-validation samples when reading the directory as data. The tasks after a task,
-and its validations, read exactly the part files its run wrote, by name, so
-another file in the directory (a README) is never read as data. A run clears a
-directory its earlier run recorded, deleting the files a run writes there
-(`part-*`, `_*`, `.*`) and leaving any other file alone. A directory holding
-`part-*` files that no `_run.json` names, left by a run killed between clearing
-and recording, another job writing there or a copy, fails the task before it
-writes, naming the files: delete them or write elsewhere. Such a directory is
-not marked as the job's either, so no later run deletes those files.
+The record is the commit. A run writes a task's directory in this order:
+
+1. **Check.** A directory holding `part-*` files that no `_run.json` names
+   (another job writing there, a copy) fails the task before it writes,
+   naming the files: delete them or write elsewhere. Such a directory is not
+   marked as the job's, so no run deletes those files.
+2. **Mark.** `_run.json` becomes a `Running` record, replacing the earlier
+   record in one rename. From then on the directory is the job's, whatever
+   the run leaves in it.
+3. **Clear.** The earlier run's files go: every `part-*`, `_*` and `.*` file
+   but the record. Any other file (a README) stays.
+4. **Stage.** Each partition writes its part under a hidden name,
+   `.part-00000.csv.<nanos>.tmp` (`.tmp.parquet` for parquet).
+5. **Commit.** Once every partition has succeeded, the parts are renamed to
+   `part-00000.csv`, ... in partition order.
+6. The output is read back and validated; `_perf.json` and any validation
+   samples are written.
+7. **Record.** The final record, `Succeeded` or `ValidationFailed`, naming
+   exactly the part files the run committed, replaces `Running`: the run's
+   last write in the directory.
+
+A task that fails after step 2 (a later partition, a validation whose SQL
+fails, its record's write) deletes what it wrote, staged and committed, and
+then writes its `Failed` record, so a failed task's directory holds its record
+and nothing else. A final record that cannot be written (a full disk) fails
+the task, naming the write: its output was never published. A run killed
+after step 2 leaves the `Running` record, and the next run clears whatever it
+left, staged files included. A skipped task's `Skipped` record, like a
+`Failed` one written before step 2, replaces the earlier record first, and only
+then are the earlier files deleted: nothing deletes a file a record names
+before the record is replaced. A `Running` record has no `finishedAt`; a
+build from before it reads it as no record, and still clears the directory
+next run.
+
+A reader outside the job (Spark, DuckDB, another job's input glob) should read
+a directory only when its `_run.json` says `Succeeded` or `ValidationFailed`,
+and then the part files it names. No part file appears before the commit, and
+the underscore and dot prefixes mean the engine's own CSV/Parquet readers, and
+most others, skip the record, the samples and the staged parts when reading
+the directory as data. After a crash during the renames a reader can see some
+parts under a `Running` record. The tasks after a task, and its validations,
+read exactly the part files its run wrote, by name, so another file in the
+directory (a README) is never read as data. The GUI and the data viewer show
+a task whose record says `Running` as unfinished, with no rows and no
+preview: its run stopped, or is still running in another process.
+
 `TaskRunRecord.discover(templatedPattern)` glob-walks the filesystem and
 returns every directory matching the pattern that contains a `_run.json`,
 sorted newest-first. This is what powers the GUI's partition picker — open
@@ -2028,6 +2078,10 @@ JDK 21 or newer (tested through JDK 25).
   deleted the files another was spilling). DISTINCT aggregates
   (`COUNT`, `SUM` and `AVG(DISTINCT …)`) silently disable spill on the whole
   operator (their state doesn't round-trip through a typed schema in v1).
+- **One run per output directory at a time.** Two runs writing one task's
+  directory at once (two schedulers, or the GUI's Run beside a cron run) are
+  not supported: a `Running` record from a live run looks the same as one a
+  killed run left, and the second run clears it.
 - **No subqueries** (scalar, IN/EXISTS, derived tables in FROM): use a `WITH`
   CTE, or chain `SQLTask`s via `viewName`.
 - **Window functions: no `GROUPS` frames or `EXCLUDE`**, which the parser does

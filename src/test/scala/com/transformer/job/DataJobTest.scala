@@ -44,7 +44,7 @@ class DataJobTest {
     errorMessage = errorMessage,
     executionTime = executionTime,
     startedAt = writtenAt,
-    finishedAt = writtenAt,
+    finishedAt = Some(writtenAt),
     writtenAt = writtenAt,
     rowsProduced = rowsProduced,
     format = format,
@@ -1362,7 +1362,195 @@ class DataJobTest {
     assertEquals("n\n0", count(empty))
   }
 
-  @Test def clearIfMarkedDeletesTopLevelFilesAndRecord(): Unit = {
+  // ---- a failed run leaves no partial output (plans/testing/06) -------------
+  //
+  // A task that failed after its first part was committed (a later partition,
+  // a validation, its record's write, the process) left part files and no
+  // _run.json, and the next run refused the directory as holding part files
+  // no record names until someone deleted them. Each case below runs, then
+  // reruns with the cause fixed: the rerun must succeed with a clean run's
+  // rows, and the failed run must leave no part file.
+
+  /** Every file in `dir`, hidden ones too, by name. */
+  private def filesIn(dir: Path): Seq[String] = {
+    val stream = Files.list(dir)
+    try stream.iterator().asScala.map(_.getFileName.toString).toVector.sorted finally stream.close()
+  }
+
+  /** A job reading every CSV in `in` as `src` into one task, `t`, written to
+    * `out`, with `validations`. */
+  private def oneTaskJob(in: Path, out: Path, sql: String, validations: Seq[Validation] = Nil): DataJob = DataJob(
+    inputs = Seq(InputFilePath(in.toString + "/*.csv", viewName = "src")),
+    sql = Seq(SQLTask(name = Some("t"), viewName = Some("t"), sqlString = Some(sql),
+      outputFile = Some(OutputFilePath(out.toString)), validations = validations)))
+
+  /** `job` run with `executor`, the engine unless given. */
+  private def runWith(job: DataJob, executor: SqlExecutor = null): JobResult = {
+    com.transformer.sql.exec.SqlEngine.init()
+    job.run(Option(executor).getOrElse(SqlExecutorRegistry.get), TaskProgressListener.NoOp)
+  }
+
+  /** The rows a clean run of `sql` over `in` writes, read back. */
+  private def cleanRows(in: Path, sql: String): String = {
+    val out = tmpDir("dj-clean-").resolve("t")
+    val result = runWith(oneTaskJob(in, out, sql))
+    assertTrue(result.tasks.map(_.status).toString, result.succeeded)
+    readOutputDir(out)
+  }
+
+  /** What a failed run must leave in a task's directory: its Failed record
+    * and nothing else, no part file and no staged one. */
+  private def assertOnlyAFailedRecord(out: Path): Unit = {
+    assertEquals(Seq(TaskRunRecord.FileName), filesIn(out))
+    assertEquals(Some(TaskRunStatus.Failed), TaskRunRecord.read(out).map(_.status))
+  }
+
+  /** The rerun with the cause fixed succeeds with a clean run's rows, and its
+    * directory holds its record and the parts it names. */
+  private def assertRerunIsClean(job: DataJob, out: Path, clean: String): Unit = {
+    val rerun = runWith(job)
+    assertTrue(rerun.tasks.map(_.status).toString, rerun.succeeded)
+    assertEquals(clean, readOutputDir(out))
+    val record = TaskRunRecord.read(out).get
+    assertEquals(TaskRunStatus.Succeeded, record.status)
+    assertEquals((TaskRunRecord.FileName +: record.outputFiles).sorted, filesIn(out))
+  }
+
+  private def failure(result: JobResult): String = result.tasks.head.status match {
+    case TaskStatus.Failed(msg) => msg
+    case other => fail(s"expected the task to fail, got $other").asInstanceOf[String]
+  }
+
+  /** A later partition fails: a glob of `a.csv` and `b.csv`, whose last value
+    * doubled is past INT. `a.csv`'s part was committed when its partition
+    * ended and stayed, with no record. */
+  @Test def aTaskThatFailsWhileWritingLeavesNoPartFile(): Unit = {
+    val in = tmpDir("dj-fww-in-")
+    writeCsv(in, "a.csv", "x\n" + (1 to 10).map(i => s"$i\n").mkString)
+    writeCsv(in, "b.csv", "x\n1\n2\n2000000000\n")
+    val sql = "SELECT x * 2 AS y FROM src"
+    val out = tmpDir("dj-fww-out-").resolve("doubled")
+    val failed = runWith(oneTaskJob(in, out, sql))
+    assertTrue(failure(failed), failure(failed).contains("Integer overflow"))
+    assertOnlyAFailedRecord(out)
+
+    writeCsv(in, "b.csv", "x\n1\n2\n7\n")
+    assertRerunIsClean(oneTaskJob(in, out, sql), out, cleanRows(in, sql))
+  }
+
+  /** A validation whose SQL fails at run time, after the one part is
+    * written: the part stayed, with no record. */
+  @Test def aTaskWhoseValidationFailsToRunLeavesNoPartFile(): Unit = {
+    val in = tmpDir("dj-fiv-in-")
+    writeCsv(in, "a.csv", "x\n1\n2000000000\n")
+    val sql = "SELECT x FROM src"
+    val checks = Seq(Validation("no_negative_doubles", sqlString = Some("SELECT x FROM t WHERE x * 2 < 0")))
+    val out = tmpDir("dj-fiv-out-").resolve("t")
+    val failed = runWith(oneTaskJob(in, out, sql, checks))
+    assertTrue(failure(failed), failure(failed).contains("Integer overflow"))
+    assertOnlyAFailedRecord(out)
+
+    writeCsv(in, "a.csv", "x\n1\n7\n")
+    assertRerunIsClean(oneTaskJob(in, out, sql, checks), out, cleanRows(in, sql))
+  }
+
+  /** The final record cannot be written: here a directory stands where its
+    * temp file goes, as a full disk would refuse it, made while the
+    * validation runs. The task reported Succeeded with every part on disk and
+    * no record. It fails now, naming the write, and leaves no part file. */
+  @Test def aTaskWhoseRecordCannotBeWrittenFailsAndLeavesNoPartFile(): Unit = {
+    val in = tmpDir("dj-frw-in-")
+    writeCsv(in, "a.csv", "x\n1\n2\n")
+    val sql = "SELECT x FROM src"
+    val check = "SELECT x FROM t WHERE x < 0"
+    val out = tmpDir("dj-frw-out-").resolve("t")
+    val blocker = out.resolve(TaskRunRecord.FileName + ".tmp")
+    val diskFills = new SqlExecutor {
+      def execute(q: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
+        if (q == check) Files.createDirectories(blocker)
+        SqlExecutorRegistry.get.execute(q, catalog, opts)
+      }
+    }
+    val job = oneTaskJob(in, out, sql, Seq(Validation("no_negatives", sqlString = Some(check))))
+    val failed = runWith(job, diskFills)
+    assertTrue(failure(failed), failure(failed).contains(out.resolve(TaskRunRecord.FileName).toString))
+    assertEquals(Nil, filesIn(out).filter(f => f.startsWith("part-") || f.startsWith(".")))
+
+    Files.delete(blocker)
+    assertRerunIsClean(job, out, cleanRows(in, sql))
+  }
+
+  /** The process dies after the parts are committed, before the record: the
+    * directory as it stood while the validation ran, copied, is what a kill
+    * then leaves. It held every part and no record. */
+  @Test def aRunKilledAfterItsPartsWereWrittenIsClearedByTheNextRun(): Unit = {
+    val in = tmpDir("dj-kill-in-")
+    writeCsv(in, "a.csv", "x\n1\n2\n")
+    writeCsv(in, "b.csv", "x\n3\n")
+    val sql = "SELECT x FROM src"
+    val check = "SELECT x FROM t WHERE x < 0"
+    val checks = Seq(Validation("no_negatives", sqlString = Some(check)))
+    val out = tmpDir("dj-kill-out-").resolve("t")
+    val reached = new java.util.concurrent.CountDownLatch(1)
+    val release = new java.util.concurrent.CountDownLatch(1)
+    val pauses = new SqlExecutor {
+      def execute(q: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
+        if (q == check) { reached.countDown(); release.await() }
+        SqlExecutorRegistry.get.execute(q, catalog, opts)
+      }
+    }
+    val runner = new Thread(() => { runWith(oneTaskJob(in, out, sql, checks), pauses); () })
+    runner.setDaemon(true)
+    runner.start()
+    assertTrue("the run never reached its validation", reached.await(60, java.util.concurrent.TimeUnit.SECONDS))
+    val killed = tmpDir("dj-kill-left-").resolve("t")
+    Files.createDirectories(killed)
+    filesIn(out).foreach(f => Files.copy(out.resolve(f), killed.resolve(f)))
+    release.countDown()
+    runner.join(60000)
+    assertTrue("the copy holds the run's parts", filesIn(killed).exists(_.startsWith("part-")))
+
+    assertRerunIsClean(oneTaskJob(in, killed, sql, checks), killed, cleanRows(in, sql))
+  }
+
+  /** A `Running` record has no `finishedAt`, which every other status needs;
+    * an older reader takes a status it does not know for no record. */
+  @Test def aRunningRecordReadsBackWithoutFinishedAt(): Unit = {
+    val dir = tmpDir("dj-running-")
+    val t = Instant.parse("2026-11-01T00:00:00Z")
+    val running = TaskRunRecord(
+      schemaVersion = TaskRunRecord.SchemaVersion, taskName = "t", status = TaskRunStatus.Running,
+      errorMessage = None, executionTime = t, startedAt = t, finishedAt = None, writtenAt = t, rowsProduced = 0L,
+      format = "csv", outputFiles = Nil, validations = Nil, enqueuedAt = Some(t), options = Map("delimiter" -> "|"),
+      sql = Some("SELECT 1"))
+    TaskRunRecord.write(dir, running)
+    assertFalse(Files.readString(dir.resolve(TaskRunRecord.FileName)).contains("finishedAt"))
+    assertEquals(Some(running), TaskRunRecord.read(dir))
+    try { TaskRunRecord.outputView(dir, running); fail("read an unfinished output") }
+    catch { case e: IllegalArgumentException => assertTrue(e.getMessage, e.getMessage.contains("unfinished")) }
+    // Any other status without one is no record.
+    val text = Files.readString(dir.resolve(TaskRunRecord.FileName))
+    Files.writeString(dir.resolve(TaskRunRecord.FileName), text.replace("\"Running\"", "\"Succeeded\""))
+    assertEquals(None, TaskRunRecord.read(dir))
+  }
+
+  /** A task that fails before it writes, over an earlier run's output: its
+    * Failed record replaces the earlier record, and then the earlier parts
+    * go. */
+  @Test def aTaskThatFailsBeforeWritingReplacesTheEarlierRun(): Unit = {
+    val in = tmpDir("dj-fbw-in-")
+    writeCsv(in, "a.csv", "x\n1\n")
+    val out = tmpDir("dj-fbw-out-").resolve("t")
+    assertTrue(runWith(oneTaskJob(in, out, "SELECT x FROM src")).succeeded)
+    assertTrue(filesIn(out).exists(_.startsWith("part-")))
+    failure(runWith(oneTaskJob(in, out, "SELECT no_such_column FROM src")))
+    assertOnlyAFailedRecord(out)
+  }
+
+  /** A clear deletes every file a run writes beside the record, staged parts
+    * included, and leaves the record, so a clear stopped part way leaves a
+    * directory still marked as the job's. */
+  @Test def clearDeletesTopLevelFilesAndLeavesTheRecord(): Unit = {
     val dir = tmpDir("dj-cim-")
     Files.writeString(dir.resolve("part-00000.csv"), "a\n1\n")
     Files.writeString(dir.resolve("part-00001.csv"), "a\n2\n")
@@ -1372,34 +1560,38 @@ class DataJobTest {
       outputFiles = Seq("part-00000.csv", "part-00001.csv"))
     Files.writeString(dir.resolve("_validation-check.csv"), "a\n")
     Files.writeString(dir.resolve(".part-00000.csv.crc"), "x")
+    Files.writeString(dir.resolve(".part-00002.csv.123.tmp"), "a\n3\n")
     Files.writeString(dir.resolve("README.md"), "keep")
-    assertTrue(TaskRunRecord.clearIfMarked(dir))
+    assertTrue(TaskRunRecord.clear(dir))
     assertFalse(Files.exists(dir.resolve("part-00000.csv")))
     assertFalse(Files.exists(dir.resolve("part-00001.csv")))
-    assertFalse(Files.exists(dir.resolve(TaskRunRecord.FileName)))
     assertFalse(Files.exists(dir.resolve("_validation-check.csv")))
     assertFalse(Files.exists(dir.resolve(".part-00000.csv.crc")))
+    assertFalse(Files.exists(dir.resolve(".part-00002.csv.123.tmp")))
+    assertTrue("the record stays", Files.isRegularFile(dir.resolve(TaskRunRecord.FileName)))
     // A file a run does not write is not the run's to delete.
     assertEquals("keep", Files.readString(dir.resolve("README.md")))
     assertTrue("the directory itself should still exist", Files.isDirectory(dir))
   }
 
-  @Test def clearIfMarkedNoOpWithoutRecord(): Unit = {
+  @Test def clearIsANoOpWithoutRecord(): Unit = {
     val dir = tmpDir("dj-cim-nomarker-")
     Files.writeString(dir.resolve("user_file.txt"), "keep")
-    assertFalse(TaskRunRecord.clearIfMarked(dir))
+    Files.writeString(dir.resolve("part-00000.csv"), "a\n1\n")
+    assertFalse(TaskRunRecord.clear(dir))
     assertTrue("user file should be untouched when no record is present",
       Files.isRegularFile(dir.resolve("user_file.txt")))
+    assertTrue("a part file no record names is someone else's", Files.isRegularFile(dir.resolve("part-00000.csv")))
   }
 
-  @Test def clearIfMarkedNoOpWhenDirectoryMissing(): Unit = {
+  @Test def clearIsANoOpWhenDirectoryMissing(): Unit = {
     val parent = tmpDir("dj-cim-missing-")
     val dir = parent.resolve("does-not-exist")
-    assertFalse(TaskRunRecord.clearIfMarked(dir))
+    assertFalse(TaskRunRecord.clear(dir))
     assertFalse(Files.exists(dir))
   }
 
-  @Test def clearIfMarkedPreservesSubdirectories(): Unit = {
+  @Test def clearPreservesSubdirectories(): Unit = {
     // The clear is top-level only — any nested directories are not part of
     // our flat output layout, so we don't touch them.
     val dir = tmpDir("dj-cim-subdirs-")
@@ -1411,7 +1603,7 @@ class DataJobTest {
       executionTime = Instant.now(), writtenAt = Instant.now(),
       rowsProduced = 1, format = "csv", outputFiles = Seq("part-00000.csv"))
 
-    assertTrue(TaskRunRecord.clearIfMarked(dir))
+    assertTrue(TaskRunRecord.clear(dir))
     assertFalse(Files.exists(dir.resolve("part-00000.csv")))
     assertTrue("subdirectory should be preserved", Files.isDirectory(sub))
     assertEquals("keep me", Files.readString(sub.resolve("inner.txt")))

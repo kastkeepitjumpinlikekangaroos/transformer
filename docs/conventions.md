@@ -429,6 +429,20 @@ specific traps.
   regardless of case; a file that names other columns is refused, naming both.
   Reading by position read one column's values into another wherever two
   files ordered them differently.
+- **A writer never publishes a part file before its task commits.** A part is
+  staged under a hidden name and renamed only once every partition of the
+  write has succeeded, and only after a `Running` record marks the directory
+  (`job/OutputDirectory.scala`, architecture.md §3a). A new writer of an output
+  directory goes through `OutputDirectory`, never straight to
+  `writePartitioned`, and a new output format's writer stages and commits as
+  `CsvWriter` does (extending.md).
+- **A record is replaced before any file it names is deleted.** Every record a
+  run writes replaces the one before it in one rename (`TaskRunRecord.write`),
+  and the files go after: `TaskRunRecord.clear` leaves the record. So a run
+  stopped at any point leaves a record that says what the directory holds, or
+  `Running`, which says to trust none of it, and never a part file that no
+  record names. A final record that cannot be written fails its task; it is
+  the commit.
 
 ## Counter discipline
 

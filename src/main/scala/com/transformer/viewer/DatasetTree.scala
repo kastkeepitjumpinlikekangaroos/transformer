@@ -2,7 +2,6 @@ package com.transformer.viewer
 
 import atlantafx.base.theme.{Styles, Tweaks}
 import com.transformer.gui.{Icons, Theme}
-import com.transformer.job.TaskRunStatus
 
 import javafx.geometry.{Insets, Pos}
 import javafx.scene.Node
@@ -279,10 +278,10 @@ final class DatasetTree(session: ViewerSession) extends VBox {
             session.datasets.lift(d).map(_.name).getOrElse(""),
             s"$tables ${if (tables == 1) "table" else "tables"}", "tree-dataset")
         case TreeEntry.OfNode(t: NodeId.Table) =>
-          val summary = session.shownRun(t.dataset).flatMap(_.table(t.name)).map(_.summary)
-          val color = summary.map(s => LineageCanvas.tableStatus(s.status, s.rowsProduced)._1).getOrElse(Palette.TextSubtle)
-          val rows = summary.filter(s => s.status == TaskRunStatus.Succeeded || s.status == TaskRunStatus.ValidationFailed)
-            .map(s => f"${s.rowsProduced}%,d").getOrElse(summary.map(s => TaskRunStatus.toJson(s.status).toLowerCase(Locale.ROOT)).getOrElse(""))
+          val table = session.shownRun(t.dataset).flatMap(_.table(t.name))
+          val color = table.map(i => LineageCanvas.tableStatus(i.status, i.summary.rowsProduced)._1).getOrElse(Palette.TextSubtle)
+          val rows = table.filter(_.wrote).map(i => f"${i.summary.rowsProduced}%,d")
+            .getOrElse(table.map(i => DetailsPanel.statusText(i.status).toLowerCase(Locale.ROOT)).getOrElse(""))
           (dot(color), t.name, rows, "tree-table")
         case TreeEntry.OfNode(i: NodeId.Input) =>
           val format = session.lineage.flatMap(_.inputRecord(i)).map(_.format.toUpperCase(Locale.ROOT)).getOrElse("")

@@ -141,10 +141,20 @@ pushdown reaches every referenced column.
 ## Add a new file format (e.g., JSON)
 
 1. `read/json/` module with a `JsonReader extends CatalogView` and BUILD file.
-2. `write/json/` with a `JsonWriter` (atomic temp + rename pattern).
+2. `write/json/` with a `JsonWriter` that stages and commits, as `CsvWriter`
+   does: it writes under a hidden temp name (`.<part>.<nanos>.tmp`, a name
+   starting with `.`, which a clear deletes and readers skip), `finish()`
+   closes it without renaming, `commit()` renames it to its part name, and
+   `abort()` deletes it, staged or committed. Its `writePartitioned` finishes
+   every partition, then commits them in partition order, aborts every part
+   when any partition or rename fails, and returns the names it committed
+   (`core.WrittenParts`): no part may appear before the whole write has
+   succeeded (conventions.md).
 3. Add `read/json` + `write/json` to `job/BUILD.bazel`'s deps and extend
-   `InputResolver.resolve`, `DataJob.writeOutput`, and
+   `InputResolver.resolve`, `OutputDirectory.write`, and
    `DataJob.materializeIfNeeded` with the new case (same pattern as parquet).
+   `OutputDirectory` runs the rest of the protocol — the `Running` mark, the
+   clear, the final record — for every format alike.
 4. Update `InputFilePath.detectedFormat` and `OutputFilePath.detectedFormat`
    to recognize the extension.
 5. Update [`README.md`'s "Supported file formats"](../README.md#supported-file-formats)

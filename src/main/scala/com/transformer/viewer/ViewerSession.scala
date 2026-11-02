@@ -306,12 +306,13 @@ object QueryCatalog {
         run.tables.map(t => RunFolder.sqlIdentifier(t.name)) ++ externals.map(in => RunFolder.sqlIdentifier(in.name)))
       val names = local.map(n => s"${dataset.sqlName}__$n")
       run.tables.zip(names).foreach { case (t, name) =>
-        val wrote = t.summary.status == TaskRunStatus.Succeeded || t.summary.status == TaskRunStatus.ValidationFailed
-        t.dir.filter(dir => wrote && Files.isDirectory(dir)) match {
+        t.dir.filter(dir => t.wrote && Files.isDirectory(dir)) match {
           case Some(dir) => entries += QueryEntry.Table(name, NodeId.Table(d, t.name), dir)
           case None =>
             noRows += ((NodeId.Table(d, t.name), name,
-              if (!wrote) s"$name has no rows on disk: its task ${TaskRunStatus.toJson(t.summary.status)} in the run shown"
+              if (t.unfinished) s"$name has no rows on disk: the run writing it did not finish (its _run.json says " +
+                "Running), as it stopped part way or is still running"
+              else if (!t.wrote) s"$name has no rows on disk: its task ${TaskRunStatus.toJson(t.status)} in the run shown"
               else s"$name has no output on disk: ${t.recordedDir.getOrElse("its directory")} is gone"))
         }
       }

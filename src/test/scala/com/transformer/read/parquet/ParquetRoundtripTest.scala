@@ -7,6 +7,7 @@ import org.junit.Assert._
 import org.junit.Test
 
 import java.nio.file.{Files, Path}
+import scala.jdk.CollectionConverters._
 
 class ParquetRoundtripTest {
 
@@ -129,6 +130,42 @@ class ParquetRoundtripTest {
     oneRow.setNumRows(1)
     assertEquals(expected, refusal(IndexedSeq(Iterator(oneRow))))
     assertFalse("nothing is written", Files.exists(dir))
+  }
+
+  /** Every part is staged under a hidden name and renamed only once every
+    * partition is written, so a partition that fails leaves no part file,
+    * staged or committed: `part-00000.parquet` used to stay beside the
+    * failure, renamed the moment its own partition ended (plans/testing/06).
+    * An empty partition writes no part, and an all-empty result one
+    * header-only part. */
+  @Test def aPartitionThatFailsLeavesNoPartFile(): Unit = {
+    val schema = Schema(Field("v", DataType.IntType))
+    def batch(v: Int): ColumnarBatch = {
+      val b = new ColumnarBatch(schema, 1)
+      b.column(0).setBoxed(0, v)
+      b.setNumRows(1)
+      b
+    }
+    def files(dir: Path): Seq[String] = {
+      val stream = Files.list(dir)
+      try stream.iterator().asScala.map(_.getFileName.toString).toVector.sorted finally stream.close()
+    }
+    val failed = Files.createTempDirectory("pq-failed-parts-")
+    val failing = Iterator(batch(2)) ++ Iterator.continually[ColumnarBatch](throw new IllegalStateException("boom")).take(1)
+    val thrown =
+      try { TParquetWriter.writePartitioned(failed, schema, IndexedSeq(Iterator(batch(1)), failing)); null }
+      catch { case e: IllegalStateException => e }
+    assertEquals("boom", thrown.getMessage)
+    assertEquals(Seq.empty, files(failed))
+
+    val written = Files.createTempDirectory("pq-written-parts-")
+    assertEquals(WrittenParts(Vector("part-00000.parquet", "part-00002.parquet"), 2L),
+      TParquetWriter.writePartitioned(written, schema, IndexedSeq(Iterator(batch(1)), Iterator.empty, Iterator(batch(3)))))
+    assertEquals(Seq("part-00000.parquet", "part-00002.parquet"), files(written))
+    val empty = Files.createTempDirectory("pq-empty-parts-")
+    assertEquals(WrittenParts(Vector("part-00000.parquet"), 0L),
+      TParquetWriter.writePartitioned(empty, schema, IndexedSeq(Iterator.empty, Iterator.empty)))
+    assertEquals(Seq("part-00000.parquet"), files(empty))
   }
 
   @Test def parquetMultiPartitionInputProducesMultipleOutputFiles(): Unit = {

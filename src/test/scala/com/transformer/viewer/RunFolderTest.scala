@@ -104,4 +104,32 @@ class RunFolderTest {
     assertEquals(Some(moved.resolve("shop/day=20260101/customers")), table.dir)
     assertEquals(Some(root.resolve("shop/day=20260101/customers").toString), table.recordedDir)
   }
+
+  /** A table whose `_run.json` says `Running` is listed as unfinished, with no
+    * rows, though the run's `job.json` says it succeeded: a later run of the
+    * job stopped while writing its directory, which then holds nothing a
+    * reader can trust, and a query of it is told so (plans/testing/06). */
+  @Test def aTableWhoseRunStoppedWhileWritingIsUnfinished(): Unit = {
+    val root = temp("rf-unfinished-")
+    shop(s"$root/shop", rawCustomers(temp("rf-raw-")))
+    val dir = root.resolve("shop/customers")
+    val text = Files.readString(dir.resolve("_run.json"))
+      .replace("\"status\": \"Succeeded\"", "\"status\": \"Running\"")
+      .replaceAll("  \"finishedAt\": \"[^\"]*\",\n", "")
+    Files.writeString(dir.resolve("_run.json"), text)
+    val folder = RunFolder.scan(root)
+    val run = folder.datasets.head.runs.head
+    val customers = run.table("customers").get
+    assertEquals(TaskRunStatus.Succeeded, customers.summary.status)
+    assertTrue(customers.unfinished)
+    assertEquals(TaskRunStatus.Running, customers.status)
+    assertFalse("an unfinished table has rows", customers.wrote)
+    val gold = run.table("gold").get
+    assertEquals((false, TaskRunStatus.Succeeded, true), (gold.unfinished, gold.status, gold.wrote))
+    val session = new ViewerSession
+    session.open(folder)
+    val why = session.queryCatalog.unreadable(NodeId.Table(0, "customers"))
+    assertTrue(why.toString, why.exists(_.contains("did not finish")))
+    assertEquals(None, session.queryCatalog.sqlName(NodeId.Table(0, "customers")))
+  }
 }

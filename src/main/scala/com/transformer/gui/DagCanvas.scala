@@ -179,6 +179,7 @@ final class DagCanvas(session: JobSession) extends GraphCanvas {
     case UiTaskState.Pending => (Palette.TextSubtle, "pending")
     case UiTaskState.Queued  => (Palette.Done, "queued…")
     case UiTaskState.Running => (Palette.Accent, "running…")
+    case UiTaskState.Unfinished(_) => (Palette.Warning, "unfinished")
     case UiTaskState.Done(result) =>
       // A task restored from a job.json that predates entry timestamps has
       // them at the epoch: its duration is unknown, not 0 ms.
@@ -260,6 +261,7 @@ final class DagOverlay(session: JobSession, canvas: DagCanvas) extends GraphOver
     count("failed", Palette.Danger, done(_.isInstanceOf[TaskStatus.Failed]))
     count("validation failed", Palette.Warning, done(_.isInstanceOf[TaskStatus.ValidationFailed]))
     count("skipped", Palette.TextSubtle.darker(), done(_.isInstanceOf[TaskStatus.Skipped]))
+    count("unfinished", Palette.Warning, states.count(_.isInstanceOf[UiTaskState.Unfinished]))
     count("running", Palette.Accent, states.count(_ == UiTaskState.Running))
     count("queued", Palette.Done, states.count(_ == UiTaskState.Queued))
     count("pending", Palette.TextSubtle, states.count(_ == UiTaskState.Pending) + done(_ == TaskStatus.Pending))

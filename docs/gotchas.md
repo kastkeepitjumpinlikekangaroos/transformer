@@ -377,6 +377,36 @@ ship a fix or move something from "not done" to "done".
   and a directory holding part files no `_run.json` names is refused before
   a write: such files used to join the output, so a stray `part-00007.csv`
   added its row to a downstream count (plans/robustness/29).
+- **A failed run left part files and no record, and its rerun refused them.**
+  Each part was renamed into place the moment its own partition ended, a
+  failure elsewhere deleted only temp files, a validation that threw or a
+  final record that could not be written (swallowed, so the task said
+  `Succeeded`) came after every part was in place, and `clearIfMarked`
+  deleted the record before the files. So a later partition overflowing, a
+  validation failing to run, a full disk or a kill left `part-*` files that no
+  `_run.json` names, which the next run refused as someone else's until a
+  person deleted them, and a reader outside the job read the partial table.
+  A run now marks the directory `Running` first, stages every part and
+  renames them together, writes the final record last and fails the task when
+  it cannot, and clears a failed run's files under its record
+  (`OutputDirectory`, architecture.md §3a; plans/testing/06). The GUI's Persist
+  had its own copy of the old steps and wrote over stray parts, naming them
+  all in its record; it goes through the same protocol now.
+- **Two runs writing one output directory at once are unsupported.** A
+  `Running` record from a live run in another process looks the same as one a
+  killed run left, so a second run started meanwhile clears the first's
+  files. Schedule one run per output directory at a time.
+- **An outside reader of an output directory checks its `_run.json`.** No part
+  file appears before the run commits, and staged parts and records start with
+  `.` or `_`, which Spark, DuckDB and the engine's own `PathGlob` skip; but a
+  crash during the commit's renames leaves some parts under a `Running`
+  record. Read a directory when its record says `Succeeded` or
+  `ValidationFailed`, and then the files it names.
+- **A build from before `Running` reads that record as no record.** Its
+  `TaskRunRecord.read` returns None for a status it does not know, as for any
+  record it cannot read, so it shows the task as not run. `isMarked` asks only
+  whether `_run.json` exists, so its next run still clears the directory
+  rather than refusing it.
 - **Hadoop-common pre-3.4.3 breaks on JDK 24+.** `UserGroupInformation.getCurrentUser()`
   in 3.3.x/3.4.0/.1/.2 calls `Subject.getSubject(AccessControlContext)`, which
   throws `UnsupportedOperationException` once JEP 486 (Security Manager
@@ -1580,7 +1610,7 @@ ship a fix or move something from "not done" to "done".
   `fuzz/dag_scheduler_fuzz_test`.
 
 - **A reopened task is the `TaskResult` its run returned, field for field.**
-  `JobSession.taskResultFromRecord` rebuilds each task from its `_run.json`
+  `JobSession.stateFromRecord` rebuilds each task from its `_run.json`
   when a job directory is opened, and it used to get two fields wrong for every
   reopened run. It dropped the record's `enqueuedAt`, so the task came back
   enqueued at the epoch and `queueWaitMillis` was the start time in epoch

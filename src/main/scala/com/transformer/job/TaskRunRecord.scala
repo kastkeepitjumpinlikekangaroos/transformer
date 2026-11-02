@@ -11,9 +11,11 @@ import scala.collection.mutable
 import scala.util.control.NonFatal
 import scala.jdk.CollectionConverters._
 
-/** Per-task run record written into each task's output directory at the end
-  * of every run attempt — Succeeded, ValidationFailed, Failed, or Skipped.
-  * Reruns of the same execution-time + output path completely overwrite it.
+/** Per-task run record in each task's output directory: `Running` while a run
+  * writes the directory, then what the run came to — Succeeded,
+  * ValidationFailed, Failed or Skipped. Each record replaces the one before it
+  * in one rename, and no file a record names is deleted before the record is
+  * replaced ([[OutputDirectory]] holds the order a run writes in).
   *
   * File name: `_run.json` (the `_` prefix means
   * [[com.transformer.read.csv.PathGlob]] and friends skip it when re-reading
@@ -25,7 +27,12 @@ import scala.jdk.CollectionConverters._
   *     validation has [[ValidationRecord.passed]] = false.
   *   * `part-NNNNN.<ext>` — the actual data files, named in
   *     [[outputFiles]]. Present for Succeeded and ValidationFailed records;
-  *     empty for Failed/Skipped tasks.
+  *     none for Failed and Skipped ones. Under a `Running` record the
+  *     directory holds whatever the run had written when it stopped, or is
+  *     writing still, and no reader reads it as an output.
+  *
+  * A `Running` record has no `finishedAt`: nothing finished. Every other
+  * status has one.
   *
   * The record also says how to read the part files back as the run wrote
   * them, which [[TaskRunRecord.outputView]] does: the writer's `options` (a
@@ -45,7 +52,7 @@ final case class TaskRunRecord(
     errorMessage: Option[String],
     executionTime: Instant,
     startedAt: Instant,
-    finishedAt: Instant,
+    finishedAt: Option[Instant],
     writtenAt: Instant,
     rowsProduced: Long,
     format: String,
@@ -58,10 +65,7 @@ final case class TaskRunRecord(
 ) {
   /** True when the recorded status implies on-disk part files (and so a
     * missing one is a consistency warning). */
-  def expectsDataFiles: Boolean = status match {
-    case TaskRunStatus.Succeeded | TaskRunStatus.ValidationFailed => outputFiles.nonEmpty
-    case _                                                        => false
-  }
+  def expectsDataFiles: Boolean = TaskRunStatus.wroteOutput(status) && outputFiles.nonEmpty
 }
 
 /** Flat status discriminator persisted as a string in `_run.json`. The runner
@@ -69,12 +73,18 @@ final case class TaskRunRecord(
   * just the serialized projection. */
 sealed trait TaskRunStatus
 object TaskRunStatus {
+  /** A run is writing the directory, or stopped before it finished: written
+    * before the run deletes or writes any other file there, so whatever the
+    * run leaves is the job's, and the next run clears it. Only a task's own
+    * record holds it, never `job.json`. */
+  case object Running extends TaskRunStatus
   case object Succeeded extends TaskRunStatus
   case object ValidationFailed extends TaskRunStatus
   case object Failed extends TaskRunStatus
   case object Skipped extends TaskRunStatus
 
   def fromJson(s: String): Option[TaskRunStatus] = s match {
+    case "Running"          => Some(Running)
     case "Succeeded"        => Some(Succeeded)
     case "ValidationFailed" => Some(ValidationFailed)
     case "Failed"           => Some(Failed)
@@ -83,10 +93,18 @@ object TaskRunStatus {
   }
 
   def toJson(s: TaskRunStatus): String = s match {
+    case Running          => "Running"
     case Succeeded        => "Succeeded"
     case ValidationFailed => "ValidationFailed"
     case Failed           => "Failed"
     case Skipped          => "Skipped"
+  }
+
+  /** Whether a record of status `s` names the output its run wrote: the run
+    * finished writing, whatever its validations then said. */
+  def wroteOutput(s: TaskRunStatus): Boolean = s match {
+    case Succeeded | ValidationFailed  => true
+    case Running | Failed | Skipped    => false
   }
 }
 
@@ -159,7 +177,10 @@ object TaskRunRecord {
         errorMessage = obj.optString("errorMessage", ctx),
         executionTime = Instant.parse(obj.requiredString("executionTime", ctx)),
         startedAt = Instant.parse(obj.requiredString("startedAt", ctx)),
-        finishedAt = Instant.parse(obj.requiredString("finishedAt", ctx)),
+        // Nothing finished under a Running record; every other one says when.
+        finishedAt =
+          if (status == TaskRunStatus.Running) obj.optString("finishedAt", ctx).map(Instant.parse)
+          else Some(Instant.parse(obj.requiredString("finishedAt", ctx))),
         writtenAt = Instant.parse(obj.requiredString("writtenAt", ctx)),
         rowsProduced = obj.get("rowsProduced").map(_.stringValue.toLong).getOrElse(0L),
         format = obj.optString("format", ctx).getOrElse("csv"),
@@ -193,9 +214,14 @@ object TaskRunRecord {
   }
 
   /** The output in `dir` of the run `record` describes, as a reader reads it:
-    * see the other overload. */
-  def outputView(dir: Path, record: TaskRunRecord): CatalogView =
+    * see the other overload. A `Running` record describes no output: its run
+    * stopped before it finished, or is writing the directory still. */
+  def outputView(dir: Path, record: TaskRunRecord): CatalogView = {
+    if (record.status == TaskRunStatus.Running) throw new IllegalArgumentException(
+      s"The output in $dir is unfinished: its _run.json says a run is writing it, so that run stopped before it " +
+        "finished or is still running")
     outputView(dir, record.format, record.outputFiles, record.options, record.schema)
+  }
 
   /** A task's output in `dir` as the tasks after it read it: the part files
     * `files` its run wrote, by name, never a listing of the directory, so a
@@ -261,40 +287,41 @@ object TaskRunRecord {
     results.sortWith((a, b) => a._2.writtenAt.isAfter(b._2.writtenAt)).toVector
   }
 
-  /** If `dir` contains a `_run.json`, delete the files a run writes at the
-    * top level of `dir` (the record, part files, validation samples, metrics
-    * and the writers' hidden sidecars, each `part-*`, `_*` or `.*`) and return
-    * true. The record file is deleted first so an interrupted clear leaves a
-    * directory that no longer claims a coherent run. Any other file, a README
-    * someone put there, is left alone, as no reader of the output reads it
-    * (plans/robustness/29).
+  /** If `dir` holds a `_run.json`, delete every other file a run writes at the
+    * top level of `dir` — part files, validation samples, metrics, staged
+    * parts and the writers' hidden sidecars, each `part-*`, `_*` or `.*` — and
+    * return true; the record stays. So a clear stopped part way leaves the
+    * record that marks what is left as a run's, and the next run clears it.
+    * Any other file, a README someone put there, is left alone, as no reader
+    * of the output reads it (plans/robustness/29).
     *
     * Subdirectories are deliberately left alone — our output layout is flat,
     * so a nested directory is not "ours" to wipe.
     */
-  def clearIfMarked(dir: Path): Boolean = {
+  def clear(dir: Path): Boolean = {
     if (!isMarked(dir)) return false
-    Files.deleteIfExists(dir.resolve(FileName))
+    val doomed = mutable.ArrayBuffer.empty[Path]
     val stream = Files.list(dir)
     try {
       val it = stream.iterator()
       while (it.hasNext) {
         val p = it.next()
         val n = p.getFileName.toString
-        if (Files.isRegularFile(p) && (n.startsWith("part-") || n.startsWith("_") || n.startsWith(".")))
-          Files.deleteIfExists(p)
+        if (n != FileName && Files.isRegularFile(p) && (n.startsWith("part-") || n.startsWith("_") || n.startsWith(".")))
+          doomed += p
       }
     } finally stream.close()
+    doomed.foreach(Files.deleteIfExists(_))
     true
   }
 
   /** Whether `dir` holds a run's record, which makes its part files a run's. */
   def isMarked(dir: Path): Boolean = Files.isRegularFile(dir.resolve(FileName))
 
-  /** The part files in `dir` that no record names as a run's: what a run that
-    * stopped between clearing the directory and writing its record left,
-    * another job writing there, or a person copying files in. A reader of the
-    * directory, Spark or DuckDB, would read them as part of the output. */
+  /** The part files in `dir` that no record names as a run's: what another
+    * job writing there, a person copying files in, or a run of a build from
+    * before runs marked a directory first left. A reader of the directory,
+    * Spark or DuckDB, would read them as part of the output. */
   def unrecordedPartFiles(dir: Path): Seq[String] =
     if (isMarked(dir)) Nil else listPartFiles(dir)
 
@@ -391,7 +418,9 @@ object TaskRunRecord {
       sb.append("  \"enqueuedAt\": \"").append(Json.escape(ea.toString)).append("\",\n")
     }
     sb.append("  \"startedAt\": \"").append(Json.escape(r.startedAt.toString)).append("\",\n")
-    sb.append("  \"finishedAt\": \"").append(Json.escape(r.finishedAt.toString)).append("\",\n")
+    r.finishedAt.foreach { fa =>
+      sb.append("  \"finishedAt\": \"").append(Json.escape(fa.toString)).append("\",\n")
+    }
     sb.append("  \"writtenAt\": \"").append(Json.escape(r.writtenAt.toString)).append("\",\n")
     sb.append("  \"rowsProduced\": ").append(r.rowsProduced).append(",\n")
     sb.append("  \"format\": \"").append(Json.escape(r.format)).append("\",\n")

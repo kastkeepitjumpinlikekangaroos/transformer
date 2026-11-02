@@ -3,10 +3,8 @@ package com.transformer.job
 import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, ExecutionOptions, MaterializedView, Scheduler, Schema, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.core.metrics.{MetricsCollector, TaskMetricsRecord}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
-import com.transformer.write.csv.{CsvWriteOptions, CsvWriter}
-import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Paths}
 import java.time.Instant
 import java.util.Locale
 import java.util.concurrent.{Callable, LinkedBlockingQueue}
@@ -19,7 +17,9 @@ import scala.util.control.NonFatal
   * Output paths refer to *directories*. Each task writes one or more
   * `part-NNNNN.<ext>` files inside its directory (one per source partition by
   * default; capped by [[OutputFilePath.maxPartitions]] when set). Part files
-  * are written in parallel.
+  * are written in parallel under hidden names and renamed together once all
+  * are written, between a `Running` record and the task's final one, in the
+  * order [[OutputDirectory]] sets out.
   *
   * Scheduling model: inputs and SQL tasks are scheduled together on a single
   * shared [[com.transformer.core.Scheduler]] work-stealing pool. Each input
@@ -389,7 +389,6 @@ final case class DataJob(
     val task = node.task
     val started = Instant.now()
     val taskName = task.displayName
-    var renderedOutputForRecord: Option[(OutputFilePath, String)] = None
     // Per-task execution knobs (spill, thresholds, metrics) live alongside
     // writer options inside `OutputFilePath.options`. Tasks with no outputFile
     // run with [[ExecutionOptions.Default]] (spill + metrics disabled) — they
@@ -403,6 +402,9 @@ final case class DataJob(
     val cpu0 = if (opts.metricsEnabled) MetricsCollector.currentCpuNanos() else -1L
     val alloc0 = if (opts.metricsEnabled) MetricsCollector.currentAllocatedBytes(tid) else -1L
     val gc0 = if (opts.metricsEnabled) MetricsCollector.gcSample() else com.transformer.core.metrics.GcSample.Zero
+    // The task's output directory, once the run has started writing it: a
+    // failure from then on must leave it holding only the Failed record.
+    var output: Option[OutputDirectory] = None
     try {
       val q = executor.execute(node.renderedMainSql, catalog, opts)
       // A task's result is a table other tasks, validations and engines read
@@ -422,9 +424,26 @@ final case class DataJob(
           s"Cloud output paths not yet implemented (v1.1). Got: '${ofp.path}'"
         )
         val rendered = TemplateRenderer.render(ofp.path, vars)
-        renderedOutputForRecord = Some((ofp, rendered))
-        writtenFiles = writeOutput(ofp, rendered, q)
+        val out = new OutputDirectory(Paths.get(rendered))
+        output = Some(out)
+        writtenFiles = writeOutput(out, ofp, node, q, vars, enqueuedAt, started)
         (ofp, rendered)
+      }
+
+      // The final record: `_perf.json` and the validation samples go before
+      // it, as it is the run's last write in the output directory. One that
+      // cannot be written throws, and fails the task.
+      def finishOutput(failures: Seq[ValidationFailure], finished: Instant): Unit = {
+        maybeWritePerfRecord(opts, taskName, writtenOutput, q, vars, enqueuedAt, started, finished,
+          cpu0, alloc0, gc0, tid)
+        for (out <- output; (ofp, _) <- writtenOutput) {
+          if (failures.nonEmpty)
+            writeValidationFailedRecord(out, node, ofp, writtenFiles, q.schema, q.rowsProduced, failures,
+              enqueuedAt, started, finished, vars)
+          else
+            writeSucceededRecord(out, node, ofp, writtenFiles, q.schema, q.rowsProduced, enqueuedAt, started,
+              finished, vars)
+        }
       }
 
       // Re-publish the freshly-written output to the catalog ONLY when something
@@ -439,26 +458,17 @@ final case class DataJob(
         val materialized = materializeIfNeeded(q, writtenOutput, writtenFiles)
         catalog.replace(name, materialized)
         val failures = runValidations(node, executor, catalog, opts)
-        val outputPath = writtenOutput.map(_._2)
         val finished = Instant.now()
-        if (failures.nonEmpty) {
-          writeValidationFailedRecord(node, writtenOutput, q.schema, q.rowsProduced, failures, enqueuedAt, started,
-            finished, vars)
-        } else {
-          writeSucceededRecord(node, writtenOutput, q.schema, q.rowsProduced, enqueuedAt, started, finished, vars)
-        }
-        maybeWritePerfRecord(opts, taskName, writtenOutput, q, vars, enqueuedAt, started, finished,
-          cpu0, alloc0, gc0, tid)
+        finishOutput(failures, finished)
         val status = if (failures.nonEmpty) TaskStatus.ValidationFailed(failures) else TaskStatus.Succeeded
-        TaskRun(TaskResult(taskName, status, q.rowsProduced, outputPath, started, finished, enqueuedAt), stop = None)
+        TaskRun(TaskResult(taskName, status, q.rowsProduced, writtenOutput.map(_._2), started, finished, enqueuedAt),
+          stop = None)
       } else {
         if (writtenOutput.isEmpty) {
           while (q.batches.hasNext) q.batches.next()
         }
         val finished = Instant.now()
-        writeSucceededRecord(node, writtenOutput, q.schema, q.rowsProduced, enqueuedAt, started, finished, vars)
-        maybeWritePerfRecord(opts, taskName, writtenOutput, q, vars, enqueuedAt, started, finished,
-          cpu0, alloc0, gc0, tid)
+        finishOutput(Nil, finished)
         TaskRun(TaskResult(taskName, TaskStatus.Succeeded, q.rowsProduced, writtenOutput.map(_._2), started, finished,
           enqueuedAt), stop = None)
       }
@@ -468,7 +478,7 @@ final case class DataJob(
       case e: Throwable =>
         val finished = Instant.now()
         val msg = failureMessage(e)
-        writeFailedRecord(node, msg, enqueuedAt, started, finished, vars)
+        writeFailedRecord(node, output, msg, enqueuedAt, started, finished, vars)
         TaskRun(TaskResult(taskName, TaskStatus.Failed(msg), 0L, None, started, finished, enqueuedAt),
           stopReason(taskName, e))
     }
@@ -556,53 +566,73 @@ final case class DataJob(
     }
   }
 
-  /** Stamp a Succeeded [[TaskRunRecord]] when the task ran cleanly. Silently
-    * swallows write failures — a missing record should never poison an
-    * otherwise-successful run. */
-  private def writeSucceededRecord(
+  /** The record a run writes for a task that ran: `status`, the output files
+    * it committed, and the rest of what the task's directory says of the
+    * run. */
+  private def ranRecord(
       node: TaskDagNode,
-      writtenOutput: Option[(OutputFilePath, String)],
+      ofp: OutputFilePath,
+      status: TaskRunStatus,
+      files: Seq[String],
+      schema: Schema,
+      rowsProduced: Long,
+      validations: Seq[ValidationRecord],
+      enqueuedAt: Instant,
+      startedAt: Instant,
+      finishedAt: Instant,
+      vars: TemporalVariables
+  ): TaskRunRecord = TaskRunRecord(
+    schemaVersion = TaskRunRecord.SchemaVersion,
+    taskName = node.task.displayName,
+    status = status,
+    errorMessage = None,
+    executionTime = vars.executionTime,
+    startedAt = startedAt,
+    finishedAt = Some(finishedAt),
+    writtenAt = Instant.now(),
+    rowsProduced = rowsProduced,
+    format = ofp.detectedFormat,
+    outputFiles = files,
+    validations = validations,
+    enqueuedAt = Some(enqueuedAt),
+    options = ofp.options,
+    schema = Some(schema),
+    sql = Some(node.renderedMainSql)
+  )
+
+  /** Stamp a Succeeded [[TaskRunRecord]], naming the part files `files` the
+    * run committed. A record that cannot be written fails the task
+    * ([[OutputDirectory.finish]]). */
+  private def writeSucceededRecord(
+      out: OutputDirectory,
+      node: TaskDagNode,
+      ofp: OutputFilePath,
+      files: Seq[String],
       schema: Schema,
       rowsProduced: Long,
       enqueuedAt: Instant,
       startedAt: Instant,
       finishedAt: Instant,
       vars: TemporalVariables
-  ): Unit = writtenOutput.foreach { case (ofp, renderedPath) =>
-    try {
-      val dir = Paths.get(renderedPath)
-      val files = TaskRunRecord.listPartFiles(dir)
-      val validations = node.task.validations.map { v =>
-        ValidationRecord(name = v.name, passed = true, failedRowCount = 0L, sampleFile = None)
-      }
-      TaskRunRecord.write(dir, TaskRunRecord(
-        schemaVersion = TaskRunRecord.SchemaVersion,
-        taskName = node.task.displayName,
-        status = TaskRunStatus.Succeeded,
-        errorMessage = None,
-        executionTime = vars.executionTime,
-        startedAt = startedAt,
-        finishedAt = finishedAt,
-        writtenAt = Instant.now(),
-        rowsProduced = rowsProduced,
-        format = ofp.detectedFormat,
-        outputFiles = files,
-        validations = validations,
-        enqueuedAt = Some(enqueuedAt),
-        options = ofp.options,
-        schema = Some(schema),
-        sql = Some(node.renderedMainSql)
-      ))
-    } catch { case NonFatal(_) => () }
+  ): Unit = {
+    val validations = node.task.validations.map { v =>
+      ValidationRecord(name = v.name, passed = true, failedRowCount = 0L, sampleFile = None)
+    }
+    out.finish(ranRecord(node, ofp, TaskRunStatus.Succeeded, files, schema, rowsProduced, validations, enqueuedAt,
+      startedAt, finishedAt, vars))
   }
 
-  /** Stamp a ValidationFailed [[TaskRunRecord]] alongside per-validation
+  /** Stamp a ValidationFailed [[TaskRunRecord]] after per-validation
     * `_validation-<slug>.csv` sample files. Part files are left on disk — the
-    * data was successfully produced, only the integrity checks disagreed.
+    * data was successfully produced, only the integrity checks disagreed. A
+    * sample that cannot be written is recorded without one; a record that
+    * cannot be written fails the task.
     */
   private def writeValidationFailedRecord(
+      out: OutputDirectory,
       node: TaskDagNode,
-      writtenOutput: Option[(OutputFilePath, String)],
+      ofp: OutputFilePath,
+      files: Seq[String],
       schema: Schema,
       rowsProduced: Long,
       failures: Seq[ValidationFailure],
@@ -610,57 +640,42 @@ final case class DataJob(
       startedAt: Instant,
       finishedAt: Instant,
       vars: TemporalVariables
-  ): Unit = writtenOutput.foreach { case (ofp, renderedPath) =>
-    try {
-      val dir = Paths.get(renderedPath)
-      val files = TaskRunRecord.listPartFiles(dir)
-      val failureByName = failures.iterator.map(f => f.validationName -> f).toMap
-      // Each failed validation's sample gets its own file, even where two names
-      // reduce to the same one.
-      val taken = mutable.Set.empty[String]
-      val validations = node.task.validations.map { v =>
-        failureByName.get(v.name) match {
-          case Some(f) =>
-            val sampleName =
-              try Some(TaskRunRecord.writeValidationSample(dir, v.name, f.sampleRowsCsv, taken.toSet))
-              catch { case NonFatal(_) => None }
-            sampleName.foreach(taken += _)
-            ValidationRecord(
-              name = v.name,
-              passed = false,
-              failedRowCount = f.rowCount,
-              sampleFile = sampleName
-            )
-          case None =>
-            ValidationRecord(name = v.name, passed = true, failedRowCount = 0L, sampleFile = None)
-        }
+  ): Unit = {
+    val failureByName = failures.iterator.map(f => f.validationName -> f).toMap
+    // Each failed validation's sample gets its own file, even where two names
+    // reduce to the same one.
+    val taken = mutable.Set.empty[String]
+    val validations = node.task.validations.map { v =>
+      failureByName.get(v.name) match {
+        case Some(f) =>
+          val sampleName =
+            try Some(TaskRunRecord.writeValidationSample(out.dir, v.name, f.sampleRowsCsv, taken.toSet))
+            catch { case NonFatal(_) => None }
+          sampleName.foreach(taken += _)
+          ValidationRecord(
+            name = v.name,
+            passed = false,
+            failedRowCount = f.rowCount,
+            sampleFile = sampleName
+          )
+        case None =>
+          ValidationRecord(name = v.name, passed = true, failedRowCount = 0L, sampleFile = None)
       }
-      TaskRunRecord.write(dir, TaskRunRecord(
-        schemaVersion = TaskRunRecord.SchemaVersion,
-        taskName = node.task.displayName,
-        status = TaskRunStatus.ValidationFailed,
-        errorMessage = None,
-        executionTime = vars.executionTime,
-        startedAt = startedAt,
-        finishedAt = finishedAt,
-        writtenAt = Instant.now(),
-        rowsProduced = rowsProduced,
-        format = ofp.detectedFormat,
-        outputFiles = files,
-        validations = validations,
-        enqueuedAt = Some(enqueuedAt),
-        options = ofp.options,
-        schema = Some(schema),
-        sql = Some(node.renderedMainSql)
-      ))
-    } catch { case NonFatal(_) => () }
+    }
+    out.finish(ranRecord(node, ofp, TaskRunStatus.ValidationFailed, files, schema, rowsProduced, validations,
+      enqueuedAt, startedAt, finishedAt, vars))
   }
 
-  /** Stamp a Failed [[TaskRunRecord]] for a task that threw during execution.
-    * Renders the task's outputFile path on a best-effort basis — if rendering
-    * itself throws, the failure is recorded only in [[JobRunRecord]]. */
+  /** Stamp a Failed [[TaskRunRecord]] for a task that threw. `output` is the
+    * directory the run had started writing, whose files go first
+    * ([[OutputDirectory.fail]]); without one the task's path is rendered on
+    * a best-effort basis — if rendering itself throws, the failure is
+    * recorded only in [[JobRunRecord]]. A record that cannot be written
+    * leaves the directory as it was, `Running` once the run marked it, which
+    * the next run clears. */
   private def writeFailedRecord(
       node: TaskDagNode,
+      output: Option[OutputDirectory],
       errorMessage: String,
       enqueuedAt: Instant,
       startedAt: Instant,
@@ -669,20 +684,15 @@ final case class DataJob(
   ): Unit = node.task.outputFile.foreach { ofp =>
     if (ofp.isCloud) return
     try {
-      val rendered = TemplateRenderer.render(ofp.path, vars)
-      val dir = Paths.get(rendered)
-      // A record would make part files no run wrote this job's, and the next
-      // run would delete them; job.json records the failure instead.
-      if (TaskRunRecord.unrecordedPartFiles(dir).nonEmpty) return
-      TaskRunRecord.clearIfMarked(dir)
-      TaskRunRecord.write(dir, TaskRunRecord(
+      val out = output.getOrElse(new OutputDirectory(Paths.get(TemplateRenderer.render(ofp.path, vars))))
+      out.fail(TaskRunRecord(
         schemaVersion = TaskRunRecord.SchemaVersion,
         taskName = node.task.displayName,
         status = TaskRunStatus.Failed,
         errorMessage = Some(errorMessage),
         executionTime = vars.executionTime,
         startedAt = startedAt,
-        finishedAt = finishedAt,
+        finishedAt = Some(finishedAt),
         writtenAt = Instant.now(),
         rowsProduced = 0L,
         format = ofp.detectedFormat,
@@ -697,7 +707,9 @@ final case class DataJob(
     } catch { case NonFatal(_) => () }
   }
 
-  /** Stamp a Skipped [[TaskRunRecord]] for a task whose upstream failed. */
+  /** Stamp a Skipped [[TaskRunRecord]] for a task whose upstream failed: it
+    * replaces the earlier record, and then the earlier run's files go
+    * ([[OutputDirectory.replace]]). */
   private def writeSkippedRecord(
       node: TaskDagNode,
       reason: String,
@@ -707,17 +719,14 @@ final case class DataJob(
     if (ofp.isCloud) return
     try {
       val rendered = TemplateRenderer.render(ofp.path, vars)
-      val dir = Paths.get(rendered)
-      if (TaskRunRecord.unrecordedPartFiles(dir).nonEmpty) return
-      TaskRunRecord.clearIfMarked(dir)
-      TaskRunRecord.write(dir, TaskRunRecord(
+      new OutputDirectory(Paths.get(rendered)).replace(TaskRunRecord(
         schemaVersion = TaskRunRecord.SchemaVersion,
         taskName = node.task.displayName,
         status = TaskRunStatus.Skipped,
         errorMessage = Some(reason),
         executionTime = vars.executionTime,
         startedAt = now,
-        finishedAt = now,
+        finishedAt = Some(now),
         writtenAt = Instant.now(),
         rowsProduced = 0L,
         format = ofp.detectedFormat,
@@ -732,37 +741,46 @@ final case class DataJob(
     } catch { case NonFatal(_) => () }
   }
 
-  /** Drains `q` into a directory of part files at `renderedPath`, and returns
-    * the names of the part files it wrote. Parts are coalesced down to
+  /** Writes `q` into the task's output directory `out` and returns the part
+    * files it committed, one per source partition, coalesced down to
     * [[OutputFilePath.maxPartitions]] if that's set and the source produced
     * more partitions than the cap.
     *
-    * A directory a run recorded is cleared first. One holding part files that
-    * no record names is refused before anything is written: they would join
-    * the output for every reader of the directory, and the tasks after this
-    * one read them too, where a stray `part-00007.csv` added its row to a
-    * downstream count (plans/robustness/29). So the part files in the
-    * directory after the write are exactly the ones this run wrote.
+    * The directory is opened as [[OutputDirectory]] says: refused when it
+    * holds part files that no record names, as they would join the output
+    * for every reader of the directory, and the tasks after this one read
+    * them too, where a stray `part-00007.csv` added its row to a downstream
+    * count (plans/robustness/29); then marked with a `Running` record and
+    * cleared of the earlier run's files. The parts are staged and committed
+    * together, so the part files in the directory afterwards are exactly the
+    * ones this run wrote.
     */
   private def writeOutput(
-      ofp: OutputFilePath, renderedPath: String, q: ExecutedQuery): Seq[String] = {
-    val parts = coalescedPartitions(q, ofp.maxPartitions)
-    val dir = Paths.get(renderedPath)
-    if (!TaskRunRecord.clearIfMarked(dir)) {
-      val stray = TaskRunRecord.unrecordedPartFiles(dir)
-      if (stray.nonEmpty) throw new IllegalArgumentException(
-        s"Output directory '$dir' already holds ${stray.mkString(", ")}, which no run record names, so a reader " +
-          "of the directory would read them as part of this output; delete them or write to another directory")
-    }
-    ofp.detectedFormat match {
-      case "csv" =>
-        CsvWriter.writePartitioned(dir, q.schema, parts, CsvWriteOptions.fromMap(ofp.options))
-      case "parquet" =>
-        TParquetWriter.writePartitioned(dir, q.schema, parts, ofp.options)
-      case other =>
-        throw new IllegalArgumentException(s"Unsupported output format '$other' for '$renderedPath'")
-    }
-    TaskRunRecord.listPartFiles(dir)
+      out: OutputDirectory,
+      ofp: OutputFilePath,
+      node: TaskDagNode,
+      q: ExecutedQuery,
+      vars: TemporalVariables,
+      enqueuedAt: Instant,
+      startedAt: Instant): Seq[String] = {
+    out.open(TaskRunRecord(
+      schemaVersion = TaskRunRecord.SchemaVersion,
+      taskName = node.task.displayName,
+      status = TaskRunStatus.Running,
+      errorMessage = None,
+      executionTime = vars.executionTime,
+      startedAt = startedAt,
+      finishedAt = None,
+      writtenAt = Instant.now(),
+      rowsProduced = 0L,
+      format = ofp.detectedFormat,
+      outputFiles = Nil,
+      validations = Nil,
+      enqueuedAt = Some(enqueuedAt),
+      options = ofp.options,
+      sql = Some(node.renderedMainSql)
+    ))
+    out.write(ofp.detectedFormat, q.schema, coalescedPartitions(q, ofp.maxPartitions), ofp.options).files
   }
 
   /** Map the executor's `numPartitions` source partitions to at most

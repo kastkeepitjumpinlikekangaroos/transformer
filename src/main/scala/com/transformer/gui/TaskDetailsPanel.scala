@@ -362,6 +362,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
       case UiTaskState.Pending => ("pending", Tone.Neutral)
       case UiTaskState.Queued  => ("queued", Tone.Running)
       case UiTaskState.Running => ("running", Tone.Running)
+      case UiTaskState.Unfinished(_) => ("unfinished", Tone.Warning)
       case UiTaskState.Done(result) =>
         result.status match {
           case TaskStatus.Succeeded            => ("succeeded", Tone.Success)
@@ -396,7 +397,8 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
         statChips.getChildren.add(metricChip("queued…"))
       case UiTaskState.Running =>
         statChips.getChildren.add(metricChip("running…"))
-      case UiTaskState.Pending =>
+      // No duration and no rows: its run never finished.
+      case UiTaskState.Pending | UiTaskState.Unfinished(_) =>
         validationsCountChip(i).foreach(statChips.getChildren.add)
     }
   }
@@ -497,6 +499,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     val (verb, path) = (planned, state, written) match {
       case (Some(p), Some(UiTaskState.Done(_)), Some(actual)) if actual == p => ("WROTE TO", Some(p))
       case (Some(p), Some(UiTaskState.Done(_)), Some(actual))                => ("WROTE TO", Some(actual))
+      case (Some(p), Some(UiTaskState.Unfinished(_)), _)                     => ("UNFINISHED IN", Some(p))
       case (Some(p), _, _)                                                   => ("WILL WRITE TO", Some(p))
       case (None, _, _)                                                      => ("OUTPUT", None)
     }
@@ -537,13 +540,14 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
         if (r.executionTime != session.executionTime)
           s" · this run's exec=${TimeFmt.format(r.executionTime)} differs from selected ${TimeFmt.format(session.executionTime)}"
         else ""
-      val statusTag = r.status match {
-        case TaskRunStatus.Succeeded        => ""
-        case TaskRunStatus.ValidationFailed => " · validation failed"
-        case TaskRunStatus.Failed           => " · failed"
-        case TaskRunStatus.Skipped          => " · skipped"
+      val written = f"${r.rowsProduced}%,d rows · ${r.outputFiles.size} part file$plural · written ${TimeFmt.format(r.writtenAt)}"
+      r.status match {
+        case TaskRunStatus.Running          => s"unfinished · its run started ${TimeFmt.format(r.startedAt)}$mismatch"
+        case TaskRunStatus.Succeeded        => s"$written$mismatch"
+        case TaskRunStatus.ValidationFailed => s"$written · validation failed$mismatch"
+        case TaskRunStatus.Failed           => s"$written · failed$mismatch"
+        case TaskRunStatus.Skipped          => s"$written · skipped$mismatch"
       }
-      f"${r.rowsProduced}%,d rows · ${r.outputFiles.size} part file$plural · written ${TimeFmt.format(r.writtenAt)}$statusTag$mismatch"
   }
 
   private def updateErrorPanel(i: Int): Unit = {
@@ -571,6 +575,10 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
           case _ =>
             setErrorText("")
         }
+      case UiTaskState.Unfinished(_) =>
+        setErrorText("Unfinished: the run that started this task stopped before it finished, or is still " +
+          "running in another process. Its _run.json says Running, so its output directory holds nothing a " +
+          "reader can trust; the next run clears it.")
       case _ =>
         setErrorText("")
     }
@@ -618,6 +626,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
         case TaskStatus.Skipped(_) => ("not run", Tone.Neutral)
         case TaskStatus.Pending    => ("pending", Tone.Neutral)
       }
+    case Some(UiTaskState.Unfinished(_)) => ("not run", Tone.Neutral)
     case Some(UiTaskState.Running) => ("running", Tone.Running)
     case Some(UiTaskState.Queued)  => ("queued", Tone.Running)
     case Some(UiTaskState.Pending) | None => ("pending", Tone.Neutral)
