@@ -228,11 +228,20 @@ object PgExpected {
         val next = sql.echoed.lift(k + 1).map(n => sql.lines(n - 1))
         val blocks = mutable.ArrayBuffer.empty[Either[String, Table]]
         var unexplained: Option[String] = None
+        // A table of no columns: `--`, which a comment's echo can be too,
+        // then its row count.
+        def noColumns(k: Int): Option[Int] =
+          if (lines(k) == "--" && k + 2 < lines.length && lines(k + 2).isEmpty)
+            lines(k + 1) match { case Footer(n) => Some(n.toInt); case _ => None }
+          else None
         // Read blocks until the next echoed line, which no block's own line
         // is: a table is read whole, header to blank line.
-        while (o < lines.length && !next.contains(lines(o))) {
+        while (o < lines.length && (!next.contains(lines(o)) || noColumns(o).isDefined)) {
           val l = lines(o)
-          if (l.startsWith("ERROR:")) { blocks += Left(l.stripPrefix("ERROR:").trim); o += 1 }
+          if (noColumns(o).isDefined) {
+            blocks += Right(Table(Vector.empty, Vector.fill(noColumns(o).get)(Vector.empty)))
+            o += 3
+          } else if (l.startsWith("ERROR:")) { blocks += Left(l.stripPrefix("ERROR:").trim); o += 1 }
           else if (Diagnostic.matches(l)) o += 1
           else if (l.nonEmpty && l.trim == "^") o += 1
           else if (o + 1 < lines.length && Separator.matches(lines(o + 1))) readTable(lines, o, next) match {

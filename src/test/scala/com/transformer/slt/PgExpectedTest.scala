@@ -106,7 +106,9 @@ class PgExpectedTest {
       "SELECT a, b FROM t;",
       "SELECT 1/0;",
       "\\pset null '(null)'",
-      "SELECT x FROM u;"
+      "SELECT x FROM u;",
+      "SELECT FROM u;",
+      "--"
     ).mkString("\n") + "\n")
     val out = Seq(
       "SELECT a, b FROM t;",
@@ -128,7 +130,12 @@ class PgExpectedTest {
       " (null)",
       " ",
       "(2 rows)",
-      ""
+      "",
+      "SELECT FROM u;",
+      "--",
+      "(2 rows)",
+      "",
+      "--"
     ).mkString("\n") + "\n"
     val o = PgExpected.readOutput("t.out", sql, out)
     val t = o(0).tables.head
@@ -138,6 +145,8 @@ class PgExpectedTest {
     assertEquals(Vector("division by zero"), o(1).errors)
     assertEquals("(null)", o(3).nullDisplay)
     assertEquals(Vector(Vector("(null)"), Vector("")), o(3).tables.head.rows)
+    // A table of no columns prints as --, which the next comment's echo is too.
+    assertEquals(Vector(Vector(), Vector()), o(4).tables.head.rows)
     assertTrue(o.values.forall(_.unexplained.isEmpty))
     val failure = assertThrows(classOf[PgExpected.OutError], () => { PgExpected.readOutput("t.out", sql, "SELECT 2;\n"); () })
     assertTrue(failure.getMessage, failure.getMessage.startsWith("t.out:1: expected the echo of line 1"))

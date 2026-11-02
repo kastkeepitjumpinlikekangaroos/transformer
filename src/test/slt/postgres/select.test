@@ -1,0 +1,814 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/select.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/select.out at that commit, never the engine's.
+# Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group;
+# Portions Copyright (c) 1994, The Regents of the University of California.
+# Distributed under the PostgreSQL License, a permissive license whose text
+# travels with every copy: it is COPYRIGHT beside this file.
+#
+# SELECT over onek, Postgres's 1,000-row table: ORDER BY in each direction on
+# one and two keys, a VALUES list joined in, VALUES as a query and in a UNION,
+# where a NULL sorts with and without NULLS FIRST and NULLS LAST, the queries
+# Postgres runs over its partial indexes, ORDER BY a constant, and X = X,
+# which keeps no NULL. 48 of the file's 87 statements are here, each record
+# naming the line of select.sql it comes from: 7 that make or fill a table or
+# an index, 32 queries answered as Postgres answers them, and 9 the engine
+# answers otherwise by design, below.
+#
+# A statement is as Postgres wrote it but where a rewrite cannot change what
+# it means, which its record says: ORDER BY x USING > and USING < as DESC and
+# ASC, the orders of those operators, which put NULLs where USING does (and no
+# key they order is NULL); a VALUES list in FROM as a table of its rows, made
+# here; VALUES as a query as the SELECTs of its rows joined by UNION ALL,
+# which Postgres's documentation says it is equivalent to and the engine's
+# refusal of VALUES advises; and TABLE t as SELECT * FROM t, which it means.
+# A numeric Postgres makes of an integer and 77.7 is a DOUBLE in the engine,
+# as 77.7 is; its values are written as the DOUBLE prints them. onek and
+# INT8_TBL are test_setup.sql's, onek loaded with COPY from data/onek.data,
+# Postgres's own file, as test_setup.sql loads it, and onek2 its copy; an
+# index changes no answer, and the runner keeps only its name. A result in no
+# fixed order is compared as rowsort.
+#
+# `skipif transformer nulls-sort-low` marks the 9 queries whose answer is
+# where a NULL sorts: the engine sorts it as the smallest value, first under
+# ASC and last under DESC, where Postgres sorts it last under ASC and first
+# under DESC, by the rule of the ledger in docs/gotchas.md. After each, its
+# twin, `onlyif transformer nulls-sort-low`, is the same query with the
+# engine's own answer. With NULLS FIRST or NULLS LAST written, the engines
+# agree.
+#
+# Left out (39 statements), by what they need:
+#   11  EXPLAIN, whose answer is Postgres's plan
+#   10  planner settings and ANALYZE, which change no answer
+#    4  a set-returning SQL function
+#    3  a whole-row reference to a subquery
+#    3  a table of no columns, DEFAULT VALUES and LATERAL
+#    3  a partitioned table
+#    2  a subquery, as a value and in IN
+#    2  a table's inheritance children (person*), over the point type
+#    1  FOR UPDATE, a row lock the engine never takes
+
+# test_setup.sql:118-142: onek as test_setup.sql creates it, int4 written INT
+# and name STRING, loaded with COPY from data/onek.data, Postgres's file of
+# its 1,000 rows, as test_setup.sql loads it, and onek2, its copy.
+statement ok
+CREATE TABLE onek (
+    unique1     INT,
+    unique2     INT,
+    two         INT,
+    four        INT,
+    ten         INT,
+    twenty      INT,
+    hundred     INT,
+    thousand    INT,
+    twothousand INT,
+    fivethous   INT,
+    tenthous    INT,
+    odd         INT,
+    even        INT,
+    stringu1    STRING,
+    stringu2    STRING,
+    string4     STRING
+)
+
+statement ok
+COPY onek FROM 'data/onek.data'
+
+statement ok
+CREATE TABLE onek2 AS SELECT * FROM onek
+
+# test_setup.sql:77-85: INT8_TBL, int8 written BIGINT, each string
+# test_setup.sql stores written as the number Postgres reads it as.
+statement ok
+CREATE TABLE INT8_TBL(q1 BIGINT, q2 BIGINT)
+
+statement ok
+INSERT INTO INT8_TBL VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123), (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+
+# select.sql:8: btree index.
+query INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,STRING,STRING,STRING nosort
+SELECT * FROM onek
+   WHERE onek.unique1 < 10
+   ORDER BY onek.unique1
+----
+0	998	0	0	0	0	0	0	0	0	0	0	1	AAAAAA	KMBAAA	OOOOxx
+1	214	1	1	1	1	1	1	1	1	1	2	3	BAAAAA	GIAAAA	OOOOxx
+2	326	0	2	2	2	2	2	2	2	2	4	5	CAAAAA	OMAAAA	OOOOxx
+3	431	1	3	3	3	3	3	3	3	3	6	7	DAAAAA	PQAAAA	VVVVxx
+4	833	0	0	4	4	4	4	4	4	4	8	9	EAAAAA	BGBAAA	HHHHxx
+5	541	1	1	5	5	5	5	5	5	5	10	11	FAAAAA	VUAAAA	HHHHxx
+6	978	0	2	6	6	6	6	6	6	6	12	13	GAAAAA	QLBAAA	OOOOxx
+7	647	1	3	7	7	7	7	7	7	7	14	15	HAAAAA	XYAAAA	VVVVxx
+8	653	0	0	8	8	8	8	8	8	8	16	17	IAAAAA	DZAAAA	HHHHxx
+9	49	1	1	9	9	9	9	9	9	9	18	19	JAAAAA	XBAAAA	HHHHxx
+
+# select.sql:15: ORDER BY x USING >, the descending order of >, written DESC,
+# which puts NULLs where USING > does (first); no key here is NULL.
+query INT,STRING nosort
+SELECT onek.unique1, onek.stringu1 FROM onek
+   WHERE onek.unique1 < 20
+   ORDER BY unique1 DESC
+----
+19	TAAAAA
+18	SAAAAA
+17	RAAAAA
+16	QAAAAA
+15	PAAAAA
+14	OAAAAA
+13	NAAAAA
+12	MAAAAA
+11	LAAAAA
+10	KAAAAA
+9	JAAAAA
+8	IAAAAA
+7	HAAAAA
+6	GAAAAA
+5	FAAAAA
+4	EAAAAA
+3	DAAAAA
+2	CAAAAA
+1	BAAAAA
+0	AAAAAA
+
+# select.sql:22: USING < written ASC.
+query INT,STRING nosort
+SELECT onek.unique1, onek.stringu1 FROM onek
+   WHERE onek.unique1 > 980
+   ORDER BY stringu1 ASC
+----
+988	AMAAAA
+989	BMAAAA
+990	CMAAAA
+991	DMAAAA
+992	EMAAAA
+993	FMAAAA
+994	GMAAAA
+995	HMAAAA
+996	IMAAAA
+997	JMAAAA
+998	KMAAAA
+999	LMAAAA
+981	TLAAAA
+982	ULAAAA
+983	VLAAAA
+984	WLAAAA
+985	XLAAAA
+986	YLAAAA
+987	ZLAAAA
+
+# select.sql:30
+query INT,STRING nosort
+SELECT onek.unique1, onek.string4 FROM onek
+   WHERE onek.unique1 > 980
+   ORDER BY string4 ASC, unique1 DESC
+----
+999	AAAAxx
+995	AAAAxx
+983	AAAAxx
+982	AAAAxx
+981	AAAAxx
+998	HHHHxx
+997	HHHHxx
+993	HHHHxx
+990	HHHHxx
+986	HHHHxx
+996	OOOOxx
+991	OOOOxx
+988	OOOOxx
+987	OOOOxx
+985	OOOOxx
+994	VVVVxx
+992	VVVVxx
+989	VVVVxx
+984	VVVVxx
+
+# select.sql:38
+query INT,STRING nosort
+SELECT onek.unique1, onek.string4 FROM onek
+   WHERE onek.unique1 > 980
+   ORDER BY string4 DESC, unique1 ASC
+----
+984	VVVVxx
+989	VVVVxx
+992	VVVVxx
+994	VVVVxx
+985	OOOOxx
+987	OOOOxx
+988	OOOOxx
+991	OOOOxx
+996	OOOOxx
+986	HHHHxx
+990	HHHHxx
+993	HHHHxx
+997	HHHHxx
+998	HHHHxx
+981	AAAAxx
+982	AAAAxx
+983	AAAAxx
+995	AAAAxx
+999	AAAAxx
+
+# select.sql:46
+query INT,STRING nosort
+SELECT onek.unique1, onek.string4 FROM onek
+   WHERE onek.unique1 < 20
+   ORDER BY unique1 DESC, string4 ASC
+----
+19	OOOOxx
+18	VVVVxx
+17	HHHHxx
+16	OOOOxx
+15	VVVVxx
+14	AAAAxx
+13	OOOOxx
+12	AAAAxx
+11	OOOOxx
+10	AAAAxx
+9	HHHHxx
+8	HHHHxx
+7	VVVVxx
+6	OOOOxx
+5	HHHHxx
+4	HHHHxx
+3	VVVVxx
+2	OOOOxx
+1	OOOOxx
+0	OOOOxx
+
+# select.sql:54
+query INT,STRING nosort
+SELECT onek.unique1, onek.string4 FROM onek
+   WHERE onek.unique1 < 20
+   ORDER BY unique1 ASC, string4 DESC
+----
+0	OOOOxx
+1	OOOOxx
+2	OOOOxx
+3	VVVVxx
+4	HHHHxx
+5	HHHHxx
+6	OOOOxx
+7	VVVVxx
+8	HHHHxx
+9	HHHHxx
+10	AAAAxx
+11	OOOOxx
+12	AAAAxx
+13	OOOOxx
+14	AAAAxx
+15	VVVVxx
+16	OOOOxx
+17	HHHHxx
+18	VVVVxx
+19	OOOOxx
+
+# select.sql:74: the queries Postgres runs over its partial btree indexes,
+# with seqscan, bitmapscan and sort turned off, settings which change no
+# answer and are left out.
+query INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,STRING,STRING,STRING rowsort
+SELECT onek2.* FROM onek2 WHERE onek2.unique1 < 10
+----
+0	998	0	0	0	0	0	0	0	0	0	0	1	AAAAAA	KMBAAA	OOOOxx
+1	214	1	1	1	1	1	1	1	1	1	2	3	BAAAAA	GIAAAA	OOOOxx
+2	326	0	2	2	2	2	2	2	2	2	4	5	CAAAAA	OMAAAA	OOOOxx
+3	431	1	3	3	3	3	3	3	3	3	6	7	DAAAAA	PQAAAA	VVVVxx
+4	833	0	0	4	4	4	4	4	4	4	8	9	EAAAAA	BGBAAA	HHHHxx
+5	541	1	1	5	5	5	5	5	5	5	10	11	FAAAAA	VUAAAA	HHHHxx
+6	978	0	2	6	6	6	6	6	6	6	12	13	GAAAAA	QLBAAA	OOOOxx
+7	647	1	3	7	7	7	7	7	7	7	14	15	HAAAAA	XYAAAA	VVVVxx
+8	653	0	0	8	8	8	8	8	8	8	16	17	IAAAAA	DZAAAA	HHHHxx
+9	49	1	1	9	9	9	9	9	9	9	18	19	JAAAAA	XBAAAA	HHHHxx
+
+# select.sql:79
+query INT,STRING nosort
+SELECT onek2.unique1, onek2.stringu1 FROM onek2
+    WHERE onek2.unique1 < 20
+    ORDER BY unique1 DESC
+----
+19	TAAAAA
+18	SAAAAA
+17	RAAAAA
+16	QAAAAA
+15	PAAAAA
+14	OAAAAA
+13	NAAAAA
+12	MAAAAA
+11	LAAAAA
+10	KAAAAA
+9	JAAAAA
+8	IAAAAA
+7	HAAAAA
+6	GAAAAA
+5	FAAAAA
+4	EAAAAA
+3	DAAAAA
+2	CAAAAA
+1	BAAAAA
+0	AAAAAA
+
+# select.sql:86
+query INT,STRING rowsort
+SELECT onek2.unique1, onek2.stringu1 FROM onek2
+   WHERE onek2.unique1 > 980
+----
+981	TLAAAA
+982	ULAAAA
+983	VLAAAA
+984	WLAAAA
+985	XLAAAA
+986	YLAAAA
+987	ZLAAAA
+988	AMAAAA
+989	BMAAAA
+990	CMAAAA
+991	DMAAAA
+992	EMAAAA
+993	FMAAAA
+994	GMAAAA
+995	HMAAAA
+996	IMAAAA
+997	JMAAAA
+998	KMAAAA
+999	LMAAAA
+
+# For select.sql:121: its VALUES list in FROM, v (i, j), is the table v of
+# its rows.
+statement ok
+CREATE TABLE v (i INT, j STRING)
+
+statement ok
+INSERT INTO v VALUES (147, 'RFAAAA'), (931, 'VJAAAA')
+
+# select.sql:121
+query INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,STRING,STRING,STRING,INT,STRING rowsort
+select * from onek, v
+    WHERE onek.unique1 = v.i and onek.stringu1 = v.j
+----
+147	0	1	3	7	7	7	47	147	147	147	14	15	RFAAAA	AAAAAA	AAAAxx	147	RFAAAA
+931	1	1	3	1	11	1	31	131	431	931	2	3	VJAAAA	BAAAAA	HHHHxx	931	VJAAAA
+
+# select.sql:138: VALUES as a query, written as the SELECTs of its rows joined
+# by UNION ALL, which Postgres's documentation says it is equivalent to and
+# the engine's refusal of VALUES advises. Its second column is a numeric in
+# Postgres and a DOUBLE in the engine, as 77.7 is; the values are equal.
+query INT,DOUBLE rowsort
+SELECT 1 AS column1, 2 AS column2 UNION ALL SELECT 3, 4+4 UNION ALL SELECT 7, 77.7
+----
+1	2.0
+3	8.0
+7	77.7
+
+# select.sql:140: the same, and TABLE int8_tbl written SELECT * FROM int8_tbl,
+# which it means (the engine's parser does not read TABLE). The second column
+# is a numeric in Postgres and a DOUBLE in the engine; every value of it is a
+# double's.
+query BIGINT,DOUBLE rowsort
+SELECT 1 AS column1, 2 AS column2 UNION ALL SELECT 3, 4+4 UNION ALL SELECT 7, 77.7
+UNION ALL
+SELECT 2+2, 57
+UNION ALL
+SELECT * FROM int8_tbl
+----
+1	2.0
+123	4.567890123456789E15
+123	456.0
+3	8.0
+4	57.0
+4567890123456789	-4.567890123456789E15
+4567890123456789	123.0
+4567890123456789	4.567890123456789E15
+7	77.7
+
+# select.sql:155: ORDER BY options.
+statement ok
+CREATE TEMP TABLE foo (f1 int)
+
+# select.sql:157
+statement ok
+INSERT INTO foo VALUES (42),(3),(10),(7),(null),(null),(1)
+
+# select.sql:159
+skipif transformer nulls-sort-low # a NULL sorts first under ASC, where Postgres sorts it last
+query INT nosort
+SELECT * FROM foo ORDER BY f1
+----
+1
+3
+7
+10
+42
+NULL
+NULL
+
+onlyif transformer nulls-sort-low
+query INT nosort
+SELECT * FROM foo ORDER BY f1
+----
+NULL
+NULL
+1
+3
+7
+10
+42
+
+# select.sql:160
+skipif transformer nulls-sort-low # a NULL sorts first under ASC, where Postgres sorts it last
+query INT nosort
+SELECT * FROM foo ORDER BY f1 ASC
+----
+1
+3
+7
+10
+42
+NULL
+NULL
+
+onlyif transformer nulls-sort-low
+query INT nosort
+SELECT * FROM foo ORDER BY f1 ASC
+----
+NULL
+NULL
+1
+3
+7
+10
+42
+
+# select.sql:161
+query INT nosort
+SELECT * FROM foo ORDER BY f1 NULLS FIRST
+----
+NULL
+NULL
+1
+3
+7
+10
+42
+
+# select.sql:162
+skipif transformer nulls-sort-low # a NULL sorts last under DESC, where Postgres sorts it first
+query INT nosort
+SELECT * FROM foo ORDER BY f1 DESC
+----
+NULL
+NULL
+42
+10
+7
+3
+1
+
+onlyif transformer nulls-sort-low
+query INT nosort
+SELECT * FROM foo ORDER BY f1 DESC
+----
+42
+10
+7
+3
+1
+NULL
+NULL
+
+# select.sql:163
+query INT nosort
+SELECT * FROM foo ORDER BY f1 DESC NULLS LAST
+----
+42
+10
+7
+3
+1
+NULL
+NULL
+
+# select.sql:166: an index Postgres sorts by, with sort turned off, a setting
+# left out; an index changes no answer, and the runner keeps only its name.
+statement ok
+CREATE INDEX fooi ON foo (f1)
+
+# select.sql:169
+skipif transformer nulls-sort-low # a NULL sorts first under ASC, where Postgres sorts it last
+query INT nosort
+SELECT * FROM foo ORDER BY f1
+----
+1
+3
+7
+10
+42
+NULL
+NULL
+
+onlyif transformer nulls-sort-low
+query INT nosort
+SELECT * FROM foo ORDER BY f1
+----
+NULL
+NULL
+1
+3
+7
+10
+42
+
+# select.sql:170
+query INT nosort
+SELECT * FROM foo ORDER BY f1 NULLS FIRST
+----
+NULL
+NULL
+1
+3
+7
+10
+42
+
+# select.sql:171
+skipif transformer nulls-sort-low # a NULL sorts last under DESC, where Postgres sorts it first
+query INT nosort
+SELECT * FROM foo ORDER BY f1 DESC
+----
+NULL
+NULL
+42
+10
+7
+3
+1
+
+onlyif transformer nulls-sort-low
+query INT nosort
+SELECT * FROM foo ORDER BY f1 DESC
+----
+42
+10
+7
+3
+1
+NULL
+NULL
+
+# select.sql:172
+query INT nosort
+SELECT * FROM foo ORDER BY f1 DESC NULLS LAST
+----
+42
+10
+7
+3
+1
+NULL
+NULL
+
+# select.sql:174
+statement ok
+DROP INDEX fooi
+
+# select.sql:175
+statement ok
+CREATE INDEX fooi ON foo (f1 DESC)
+
+# select.sql:177
+skipif transformer nulls-sort-low # a NULL sorts first under ASC, where Postgres sorts it last
+query INT nosort
+SELECT * FROM foo ORDER BY f1
+----
+1
+3
+7
+10
+42
+NULL
+NULL
+
+onlyif transformer nulls-sort-low
+query INT nosort
+SELECT * FROM foo ORDER BY f1
+----
+NULL
+NULL
+1
+3
+7
+10
+42
+
+# select.sql:178
+query INT nosort
+SELECT * FROM foo ORDER BY f1 NULLS FIRST
+----
+NULL
+NULL
+1
+3
+7
+10
+42
+
+# select.sql:179
+skipif transformer nulls-sort-low # a NULL sorts last under DESC, where Postgres sorts it first
+query INT nosort
+SELECT * FROM foo ORDER BY f1 DESC
+----
+NULL
+NULL
+42
+10
+7
+3
+1
+
+onlyif transformer nulls-sort-low
+query INT nosort
+SELECT * FROM foo ORDER BY f1 DESC
+----
+42
+10
+7
+3
+1
+NULL
+NULL
+
+# select.sql:180
+query INT nosort
+SELECT * FROM foo ORDER BY f1 DESC NULLS LAST
+----
+42
+10
+7
+3
+1
+NULL
+NULL
+
+# select.sql:182
+statement ok
+DROP INDEX fooi
+
+# select.sql:183
+statement ok
+CREATE INDEX fooi ON foo (f1 DESC NULLS LAST)
+
+# select.sql:185
+skipif transformer nulls-sort-low # a NULL sorts first under ASC, where Postgres sorts it last
+query INT nosort
+SELECT * FROM foo ORDER BY f1
+----
+1
+3
+7
+10
+42
+NULL
+NULL
+
+onlyif transformer nulls-sort-low
+query INT nosort
+SELECT * FROM foo ORDER BY f1
+----
+NULL
+NULL
+1
+3
+7
+10
+42
+
+# select.sql:186
+query INT nosort
+SELECT * FROM foo ORDER BY f1 NULLS FIRST
+----
+NULL
+NULL
+1
+3
+7
+10
+42
+
+# select.sql:187
+skipif transformer nulls-sort-low # a NULL sorts last under DESC, where Postgres sorts it first
+query INT nosort
+SELECT * FROM foo ORDER BY f1 DESC
+----
+NULL
+NULL
+42
+10
+7
+3
+1
+
+onlyif transformer nulls-sort-low
+query INT nosort
+SELECT * FROM foo ORDER BY f1 DESC
+----
+42
+10
+7
+3
+1
+NULL
+NULL
+
+# select.sql:188
+query INT nosort
+SELECT * FROM foo ORDER BY f1 DESC NULLS LAST
+----
+42
+10
+7
+3
+1
+NULL
+NULL
+
+# select.sql:197: cases with partial indexes, without the EXPLAINs of
+# Postgres's plans for them.
+query INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,STRING,STRING,STRING rowsort
+select * from onek2 where unique2 = 11 and stringu1 = 'ATAAAA'
+----
+494	11	0	2	4	14	4	94	94	494	494	8	9	ATAAAA	LAAAAA	VVVVxx
+
+# select.sql:203
+query INT rowsort
+select unique2 from onek2 where unique2 = 11 and stringu1 = 'ATAAAA'
+----
+11
+
+# select.sql:207
+query INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,STRING,STRING,STRING rowsort
+select * from onek2 where unique2 = 11 and stringu1 < 'B'
+----
+494	11	0	2	4	14	4	94	94	494	494	8	9	ATAAAA	LAAAAA	VVVVxx
+
+# select.sql:210
+query INT rowsort
+select unique2 from onek2 where unique2 = 11 and stringu1 < 'B'
+----
+11
+
+# select.sql:218
+query INT rowsort
+select unique2 from onek2 where unique2 = 11 and stringu1 < 'C'
+----
+11
+
+# select.sql:223
+query INT rowsort
+select unique2 from onek2 where unique2 = 11 and stringu1 < 'B'
+----
+11
+
+# select.sql:229
+query INT,INT rowsort
+select unique1, unique2 from onek2
+  where (unique2 = 11 or unique1 = 0) and stringu1 < 'B'
+----
+0	998
+494	11
+
+# select.sql:234
+query INT,INT rowsort
+select unique1, unique2 from onek2
+  where (unique2 = 11 and stringu1 < 'B') or unique1 = 0
+----
+0	998
+494	11
+
+# select.sql:242: corner cases that have confused Postgres's planner: ORDER BY
+# a constant.
+query INT nosort
+SELECT 1 AS x ORDER BY x
+----
+1
+
+# For select.sql:255 and 256: their VALUES list in FROM, v(k), is the table
+# v_k of its rows.
+statement ok
+CREATE TABLE v_k (k INT)
+
+statement ok
+INSERT INTO v_k VALUES (2), (NULL), (1)
+
+# select.sql:255: X = X is X IS NOT NULL where = is strict; the VALUES list in
+# FROM is the table v_k of its rows, made above.
+query INT nosort
+select * from v_k v where k = k order by k
+----
+1
+2
+
+# select.sql:256
+query INT rowsort
+select * from v_k v where k = k
+----
+1
+2
