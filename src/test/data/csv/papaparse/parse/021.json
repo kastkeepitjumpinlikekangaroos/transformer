@@ -1,0 +1,21 @@
+{
+ "description": "Tab delimiter",
+ "options": {
+  "header": "false",
+  "delimiter": "\t"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "e",
+   "f"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

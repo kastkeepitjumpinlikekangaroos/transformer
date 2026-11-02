@@ -1,0 +1,22 @@
+{
+ "description": "Custom delimiter (semicolon)",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n",
+  "delimiter": ";"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "A",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "e",
+   "f"
+  ]
+ ],
+ "text": "A;b;c\r\nd;e;f"
+}

@@ -1,0 +1,9 @@
+{
+ "description": "Empty input string",
+ "options": {
+  "header": "false"
+ },
+ "rows": [],
+ "fields": null,
+ "errors": []
+}

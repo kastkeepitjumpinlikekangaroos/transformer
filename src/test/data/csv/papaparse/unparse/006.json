@@ -1,0 +1,25 @@
+{
+ "description": "With header row, missing a field in a row",
+ "options": {
+  "header": "true",
+  "lineEnding": "\r\n"
+ },
+ "fields": [
+  "Col1",
+  "Col2",
+  "Col3"
+ ],
+ "rows": [
+  [
+   "a",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   null,
+   "f"
+  ]
+ ],
+ "text": "Col1,Col2,Col3\r\na,b,c\r\nd,,f"
+}

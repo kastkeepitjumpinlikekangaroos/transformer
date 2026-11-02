@@ -1,0 +1,15 @@
+{
+ "description": "test defeault escapeChar",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "foo",
+   "\"quoted\""
+  ]
+ ],
+ "text": "foo,\"\"\"quoted\"\"\""
+}

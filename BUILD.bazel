@@ -13,6 +13,7 @@ exports_files(
         "docs/gotchas.md",
     ],
     visibility = [
+        "//src/test/scala/com/transformer/read/csv:__pkg__",
         "//src/test/scala/com/transformer/read/parquet:__pkg__",
         "//src/test/scala/com/transformer/slt:__pkg__",
         "//src/test/scala/com/transformer/sql/plan:__pkg__",

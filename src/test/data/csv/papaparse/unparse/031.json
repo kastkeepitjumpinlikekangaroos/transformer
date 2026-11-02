@@ -1,0 +1,20 @@
+{
+ "description": "JSON null is treated as empty value",
+ "options": {
+  "header": "true",
+  "lineEnding": "\r\n"
+ },
+ "fields": [
+  "Col1",
+  "Col2",
+  "Col3"
+ ],
+ "rows": [
+  [
+   "a",
+   null,
+   "c"
+  ]
+ ],
+ "text": "Col1,Col2,Col3\r\na,,c"
+}

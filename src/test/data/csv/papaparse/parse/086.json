@@ -1,0 +1,32 @@
+{
+ "description": "Using reserved regex character . as quote character",
+ "options": {
+  "header": "false",
+  "quote": ".",
+  "escape": "."
+ },
+ "rows": [
+  [
+   "a\na",
+   "b"
+  ],
+  [
+   "c",
+   "d"
+  ],
+  [
+   "e",
+   "f"
+  ],
+  [
+   "g",
+   "h"
+  ],
+  [
+   "i",
+   "j"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

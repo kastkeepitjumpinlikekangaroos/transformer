@@ -1,0 +1,15 @@
+{
+ "description": "Misplaced quotes in data, not as opening quotes",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   "B \"B\"",
+   "C"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

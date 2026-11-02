@@ -1,0 +1,390 @@
+[
+ [
+  "core 040 Commented line at beginning",
+  "options the reader has not: comments"
+ ],
+ [
+  "core 041 Commented line in middle",
+  "options the reader has not: comments"
+ ],
+ [
+  "core 042 Commented line at end",
+  "options the reader has not: comments"
+ ],
+ [
+  "core 043 Two comment lines consecutively",
+  "options the reader has not: comments"
+ ],
+ [
+  "core 044 Two comment lines consecutively at end of file",
+  "options the reader has not: comments"
+ ],
+ [
+  "core 045 Three comment lines consecutively at beginning of file",
+  "options the reader has not: comments"
+ ],
+ [
+  "core 046 Entire file is comment lines",
+  "options the reader has not: comments"
+ ],
+ [
+  "core 047 Comment with non-default character",
+  "options the reader has not: comments"
+ ],
+ [
+  "core 048 Bad comments value specified",
+  "options the reader has not: comments"
+ ],
+ [
+  "core 049 Multi-character comment string",
+  "options the reader has not: comments"
+ ],
+ [
+  "core 050 Input with only a commented line",
+  "options the reader has not: comments"
+ ],
+ [
+  "core 051 Input with only a commented line and blank line after",
+  "options the reader has not: comments"
+ ],
+ [
+  "core 056 Fast mode, basic",
+  "options the reader has not: fastMode"
+ ],
+ [
+  "core 057 Fast mode with comments",
+  "options the reader has not: comments, fastMode"
+ ],
+ [
+  "core 058 Fast mode with preview",
+  "options the reader has not: fastMode, preview"
+ ],
+ [
+  "core 059 Fast mode with blank line at end",
+  "options the reader has not: fastMode"
+ ],
+ [
+  "core 061 Duplicated header names with headerTransform",
+  "its case holds a function"
+ ],
+ [
+  "parse 018 Header rows are transformed when transformHeader function is provided",
+  "its case holds a function"
+ ],
+ [
+  "parse 019 transformHeader accepts and optional index attribute",
+  "its case holds a function"
+ ],
+ [
+  "parse 025 Bad delimiter (\\n)",
+  "a delimiter the reader refuses, a line break, which PapaParse replaces by its guess"
+ ],
+ [
+  "parse 026 Multi-character delimiter",
+  "a separator of more than one character"
+ ],
+ [
+  "parse 027 Multi-character delimiter (length 2) with quoted field",
+  "a separator of more than one character"
+ ],
+ [
+  "parse 028 Callback delimiter",
+  "its case holds a function"
+ ],
+ [
+  "parse 029 Dynamic typing converts numeric literals and maintains precision",
+  "options the reader has not: dynamicTyping"
+ ],
+ [
+  "parse 030 Dynamic typing converts boolean literals",
+  "options the reader has not: dynamicTyping"
+ ],
+ [
+  "parse 031 Dynamic typing doesn't convert other types",
+  "options the reader has not: dynamicTyping"
+ ],
+ [
+  "parse 032 Dynamic typing applies to specific columns",
+  "options the reader has not: dynamicTyping"
+ ],
+ [
+  "parse 033 Dynamic typing applies to specific columns by index",
+  "options the reader has not: dynamicTyping"
+ ],
+ [
+  "parse 034 Dynamic typing can be applied to `__parsed_extra`",
+  "options the reader has not: dynamicTyping"
+ ],
+ [
+  "parse 035 Dynamic typing by indices can be determined by function",
+  "its case holds a function"
+ ],
+ [
+  "parse 036 Dynamic typing by headers can be determined by function",
+  "its case holds a function"
+ ],
+ [
+  "parse 037 Dynamic typing converts empty values into NULL",
+  "options the reader has not: dynamicTyping"
+ ],
+ [
+  "parse 038 Custom transform function is applied to values",
+  "its case holds a function"
+ ],
+ [
+  "parse 039 Custom transform accepts column number also",
+  "its case holds a function"
+ ],
+ [
+  "parse 040 Custom transform accepts header name when using header",
+  "its case holds a function"
+ ],
+ [
+  "parse 041 Dynamic typing converts ISO date strings to Dates",
+  "its case holds a constructor"
+ ],
+ [
+  "parse 042 Dynamic typing skips ISO date strings ocurring in other strings",
+  "its case holds a constructor"
+ ],
+ [
+  "parse 053 Preview 0 rows should default to parsing all",
+  "options the reader has not: preview"
+ ],
+ [
+  "parse 054 Preview 1 row",
+  "options the reader has not: preview"
+ ],
+ [
+  "parse 055 Preview 2 rows",
+  "options the reader has not: preview"
+ ],
+ [
+  "parse 056 Preview all (3) rows",
+  "options the reader has not: preview"
+ ],
+ [
+  "parse 057 Preview more rows than input has",
+  "options the reader has not: preview"
+ ],
+ [
+  "parse 058 Preview should count rows, not lines",
+  "options the reader has not: preview"
+ ],
+ [
+  "parse 059 Preview with header row",
+  "options the reader has not: preview"
+ ],
+ [
+  "parse 061 Skip empty lines",
+  "options the reader has not: skipEmptyLines"
+ ],
+ [
+  "parse 062 Skip empty lines, with newline at end of input",
+  "options the reader has not: skipEmptyLines"
+ ],
+ [
+  "parse 063 Skip empty lines, with empty input",
+  "options the reader has not: skipEmptyLines"
+ ],
+ [
+  "parse 064 Skip empty lines, with first line only whitespace",
+  "options the reader has not: skipEmptyLines"
+ ],
+ [
+  "parse 065 Skip empty lines while detecting delimiter",
+  "options the reader has not: skipEmptyLines"
+ ],
+ [
+  "parse 066 Lines with comments are not used when guessing the delimiter in an escaped file",
+  "options the reader has not: comments"
+ ],
+ [
+  "parse 067 Lines with comments are not used when guessing the delimiter in a non-escaped file",
+  "options the reader has not: comments"
+ ],
+ [
+  "parse 077 Header row with preceding comment",
+  "options the reader has not: comments, skipEmptyLines"
+ ],
+ [
+  "parse 084 Using \\r\\n endings with \\n in header field with skip empty lines uses \\r\\n linebreak",
+  "options the reader has not: skipEmptyLines"
+ ],
+ [
+  "parse 090 Parsing with skipEmptyLines set to 'greedy'",
+  "options the reader has not: skipEmptyLines"
+ ],
+ [
+  "parse 091 Parsing with skipEmptyLines set to 'greedy' with quotes and delimiters as content",
+  "options the reader has not: skipEmptyLines"
+ ],
+ [
+  "parse 094 Skip First N number of lines , with header and 2 rows",
+  "options the reader has not: skipFirstNLines"
+ ],
+ [
+  "parse 095 Skip First N number of lines , with header and 2 rows",
+  "options the reader has not: skipFirstNLines"
+ ],
+ [
+  "parse 096 Skip First N number of lines , with header false",
+  "options the reader has not: skipFirstNLines"
+ ],
+ [
+  "parse 097 Skip First N number of lines , with header false and skipFirstNLines as negative value",
+  "options the reader has not: skipFirstNLines"
+ ],
+ [
+  "parse 098 Skip first 2 lines , with custom newline character",
+  "options the reader has not: skipFirstNLines"
+ ],
+ [
+  "unparse 010 Specifying data only (no field names), improperly",
+  "a row that is no list"
+ ],
+ [
+  "unparse 015 Custom delimiter (Multi-character)",
+  "a separator of more than one character"
+ ],
+ [
+  "unparse 016 Custom delimiter (Multi-character), field contains custom delimiter",
+  "a separator of more than one character"
+ ],
+ [
+  "unparse 017 Bad delimiter (\\n)",
+  "a delimiter the writer refuses, a line break"
+ ],
+ [
+  "unparse 020 Custom, but strange, line ending ($)",
+  "a newline the writer has not: it ends a line with a line break"
+ ],
+ [
+  "unparse 021 Force quotes around all fields",
+  "options the writer has not: quotes"
+ ],
+ [
+  "unparse 022 Force quotes around all fields (with header row)",
+  "options the writer has not: quotes"
+ ],
+ [
+  "unparse 023 Force quotes around certain fields only",
+  "options the writer has not: quotes"
+ ],
+ [
+  "unparse 024 Force quotes around certain fields only (with header row)",
+  "options the writer has not: quotes"
+ ],
+ [
+  "unparse 025 Force quotes around string fields only",
+  "its case holds a function"
+ ],
+ [
+  "unparse 026 Force quotes around string fields only (with header row)",
+  "its case holds a function"
+ ],
+ [
+  "unparse 028 Empty input with columns",
+  "options the writer has not: columns"
+ ],
+ [
+  "unparse 029 Empty input with columns and disabled header",
+  "options the writer has not: columns"
+ ],
+ [
+  "unparse 030 Mismatched field counts in rows",
+  "rows of different widths, which a table has not"
+ ],
+ [
+  "unparse 034 Date objects are exported in its ISO representation",
+  "its case holds a constructor"
+ ],
+ [
+  "unparse 035 Invalid Date objects are exported as an empty field",
+  "its case holds a constructor"
+ ],
+ [
+  "unparse 036 Date objects with an expanded year are exported in its full ISO representation",
+  "its case holds a constructor"
+ ],
+ [
+  "unparse 037 Returns empty rows when empty rows are passed and skipEmptyLines is false",
+  "options the writer has not: skipEmptyLines"
+ ],
+ [
+  "unparse 038 Returns without empty rows when skipEmptyLines is true",
+  "options the writer has not: skipEmptyLines"
+ ],
+ [
+  "unparse 039 Returns without rows with no content when skipEmptyLines is 'greedy'",
+  "its case holds a computed key at '.concat(new Array(500000).fill'"
+ ],
+ [
+  "unparse 040 Skips single-cell rows containing null or undefined when skipEmptyLines is true",
+  "options the writer has not: skipEmptyLines"
+ ],
+ [
+  "unparse 041 Returns empty rows for single-cell rows containing null or undefined when skipEmptyLines is false",
+  "options the writer has not: skipEmptyLines"
+ ],
+ [
+  "unparse 042 Skips single-cell rows containing null or undefined when skipEmptyLines is 'greedy'",
+  "options the writer has not: skipEmptyLines"
+ ],
+ [
+  "unparse 043 Does not skip single-cell rows containing 0 when skipEmptyLines is true",
+  "options the writer has not: skipEmptyLines"
+ ],
+ [
+  "unparse 044 Returns empty rows when empty rows are passed and skipEmptyLines is false with headers",
+  "options the writer has not: skipEmptyLines"
+ ],
+ [
+  "unparse 045 Returns without empty rows when skipEmptyLines is true with headers",
+  "options the writer has not: skipEmptyLines"
+ ],
+ [
+  "unparse 046 Returns without rows with no content when skipEmptyLines is 'greedy' with headers",
+  "options the writer has not: skipEmptyLines"
+ ],
+ [
+  "unparse 047 Column option used to manually specify keys",
+  "options the writer has not: columns"
+ ],
+ [
+  "unparse 048 Column option used to manually specify keys with input type object",
+  "options the writer has not: columns"
+ ],
+ [
+  "unparse 053 Escape formulae",
+  "options the writer has not: escapeFormulae"
+ ],
+ [
+  "unparse 055 Escape formulae with forced quotes",
+  "options the writer has not: escapeFormulae, quotes"
+ ],
+ [
+  "unparse 056 Escape formulae with single-quote quoteChar and escapeChar",
+  "options the writer has not: escapeFormulae"
+ ],
+ [
+  "unparse 057 Escape formulae with single-quote quoteChar and escapeChar and forced quotes",
+  "options the writer has not: escapeFormulae, quotes"
+ ],
+ [
+  "unparse 058 Escape formulae with tab and carriage-return",
+  "options the writer has not: escapeFormulae"
+ ],
+ [
+  "unparse 059 Escape formulae with tab and carriage-return, with forced quotes",
+  "options the writer has not: escapeFormulae, quotes"
+ ],
+ [
+  "unparse 060 Escape formulae with tab and carriage-return, with single-quote quoteChar and escapeChar",
+  "options the writer has not: escapeFormulae"
+ ],
+ [
+  "unparse 061 Escape formulae with tab and carriage-return, with single-quote quoteChar and escapeChar and forced quotes",
+  "options the writer has not: escapeFormulae, quotes"
+ ]
+]

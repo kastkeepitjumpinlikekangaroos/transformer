@@ -1,0 +1,16 @@
+{
+ "description": "Custom escape character in the middle",
+ "options": {
+  "header": "false",
+  "escape": "\\"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   "c\"d\"f"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

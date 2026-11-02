@@ -1,0 +1,10 @@
+{
+ "description": "Empty input",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n"
+ },
+ "fields": null,
+ "rows": [],
+ "text": ""
+}

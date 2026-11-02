@@ -1,0 +1,21 @@
+{
+ "description": "Custom line ending (\\r)",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "a",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "e",
+   "f"
+  ]
+ ],
+ "text": "a,b,c\rd,e,f"
+}

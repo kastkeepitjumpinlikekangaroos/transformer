@@ -1,0 +1,15 @@
+{
+ "description": "Quoted field with quotes on right side of delimiter",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   ",\"",
+   "C"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

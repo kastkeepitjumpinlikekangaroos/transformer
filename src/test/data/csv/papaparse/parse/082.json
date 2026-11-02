@@ -1,0 +1,30 @@
+{
+ "description": "Using \\r\\n endings with \\r\\n in header field uses \\r\\n linebreak",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a\r\na",
+   "b"
+  ],
+  [
+   "c",
+   "d"
+  ],
+  [
+   "e",
+   "f"
+  ],
+  [
+   "g",
+   "h"
+  ],
+  [
+   "i",
+   "j"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

@@ -1,0 +1,30 @@
+{
+ "description": "Don't escape formulae by default",
+ "options": {
+  "header": "true",
+  "lineEnding": "\r\n"
+ },
+ "fields": [
+  "Col1",
+  "Col2",
+  "Col3"
+ ],
+ "rows": [
+  [
+   "=danger",
+   "@danger",
+   "safe"
+  ],
+  [
+   "safe=safe",
+   "+danger",
+   "-danger, danger"
+  ],
+  [
+   "'+safe",
+   "'@safe",
+   "safe, safe"
+  ]
+ ],
+ "text": "Col1,Col2,Col3\r\n=danger,@danger,safe\r\nsafe=safe,+danger,\"-danger, danger\"\r\n'+safe,'@safe,\"safe, safe\""
+}

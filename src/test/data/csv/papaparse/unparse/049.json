@@ -1,0 +1,16 @@
+{
+ "description": "Use different escapeChar",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n",
+  "escape": "\\"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "foo",
+   "\"quoted\""
+  ]
+ ],
+ "text": "foo,\"\\\"quoted\\\"\""
+}

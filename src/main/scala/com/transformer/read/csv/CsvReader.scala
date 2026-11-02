@@ -2,7 +2,7 @@ package com.transformer.read.csv
 
 import com.transformer.core._
 
-import java.io.{BufferedReader, InputStreamReader, Reader}
+import java.io.{BufferedInputStream, BufferedReader, InputStreamReader, Reader}
 import java.nio.charset.CodingErrorAction
 import java.nio.file.{Files, Path}
 
@@ -128,7 +128,7 @@ object CsvReader {
           }
         } finally parser.close()
       }
-      if (i == 0 && width == 0) throw new IllegalArgumentException(s"CSV file ${files.head} is empty")
+      if (i == 0 && width == 0) throw new IllegalArgumentException(s"CSV file '${files.head}' is empty")
       if (i == 0 || sample.length > before) sampled += file
       i += 1
     }
@@ -179,12 +179,23 @@ object CsvReader {
   }
 
   /** `file` as text in the options' charset, failing on bytes that are no
-    * text in it rather than reading them as U+FFFD. */
-  private[csv] def open(file: Path, options: CsvOptions): Reader =
-    new BufferedReader(new InputStreamReader(Files.newInputStream(file),
-      options.charset.newDecoder()
+    * text in it rather than reading them as U+FFFD. A file that starts with
+    * gzip's magic bytes is refused as compressed, whatever the charset: one
+    * that decodes every byte would read it as text, and UTF-8 said only that
+    * its first line was no text. */
+  private[csv] def open(file: Path, options: CsvOptions): Reader = {
+    val in = new BufferedInputStream(Files.newInputStream(file))
+    try {
+      in.mark(2)
+      val magic = (in.read(), in.read())
+      in.reset()
+      if (magic == ((0x1f, 0x8b))) throw new IllegalArgumentException(
+        s"CSV file '$file' is compressed with gzip, and CSV is read as text: decompress it first")
+      new BufferedReader(new InputStreamReader(in, options.charset.newDecoder()
         .onMalformedInput(CodingErrorAction.REPORT)
         .onUnmappableCharacter(CodingErrorAction.REPORT)))
+    } catch { case e: Throwable => in.close(); throw e }
+  }
 
   /** Run `body` over `file`, naming the line of any bytes in it that are no
     * text in the charset. */

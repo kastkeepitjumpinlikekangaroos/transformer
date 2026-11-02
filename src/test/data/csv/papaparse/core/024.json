@@ -1,0 +1,17 @@
+{
+ "description": "Quoted field has invalid trailing quote after new line",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "b,c\nd\"e,f,g"
+  ]
+ ],
+ "fields": null,
+ "errors": [
+  "InvalidQuotes",
+  "MissingQuotes"
+ ]
+}

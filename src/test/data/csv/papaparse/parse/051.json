@@ -1,0 +1,14 @@
+{
+ "description": "Input is just the delimiter (2 empty fields)",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "",
+   ""
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

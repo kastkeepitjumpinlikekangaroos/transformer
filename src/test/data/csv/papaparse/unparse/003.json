@@ -1,0 +1,21 @@
+{
+ "description": "Data with quotes",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "a",
+   "\"b\"",
+   "c"
+  ],
+  [
+   "\"d\"",
+   "e",
+   "f"
+  ]
+ ],
+ "text": "a,\"\"\"b\"\"\",c\r\n\"\"\"d\"\"\",e,f"
+}

@@ -1,0 +1,21 @@
+{
+ "description": "Pipe delimiter",
+ "options": {
+  "header": "false",
+  "delimiter": "|"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "e",
+   "f"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

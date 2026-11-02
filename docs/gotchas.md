@@ -2555,11 +2555,13 @@ decision covers, held as `onlyif datafusion # held: finding D<n>`:
 
 ## What the external file fixtures held out (2026-11-02, held for the user)
 
-Vendoring apache/parquet-testing's files (`src/test/data/parquet-testing/`,
-[plans/testing/13](../plans/testing/13-external-file-fixtures.md)) and
-comparing the engine's reading of each with pyarrow 26's found what no
-decision covers yet. Each refused file is held in the manifest as `refused
-... # held`, so the test fails if it starts to read.
+Vendoring apache/parquet-testing's files (`src/test/data/parquet-testing/`)
+and DuckDB's, PapaParse's and csv-spectrum's CSV inputs (`src/test/data/csv/`,
+[plans/testing/13](../plans/testing/13-external-file-fixtures.md)), and
+comparing the engine's reading of each with pyarrow 26's, DuckDB 2.0's and the
+other parsers', found what no decision covers yet. Each is held in its
+manifest with a `# held` comment beside the engine's present answer, so the
+test fails if that answer changes.
 
 - **P1. A column chunk whose stated length leaves out its dictionary page's
   header is read alone wrong, by parquet-mr** (`nation.dict-malformed.parquet`,
@@ -2589,6 +2591,25 @@ decision covers yet. Each refused file is held in the manifest as `refused
   read, naming the column and row, as both of those do (recommended); or keep
   it, and say so in the README's parquet section.
 
+- **C1. An escape before a character that is not the quote is dropped**
+  (PapaParse's "Custom escape character not used for escaping",
+  `papaparse/parse/076.csv`): with `escape` `\`, the quoted field `"c\d"`
+  reads `cd`, where PapaParse reads `c\d`, an escape escaping only the quote
+  (and itself). The README says an escape that is not the quote "escapes the
+  quote and itself inside quotes", and nothing of the escape before another
+  character. The options: keep the escape before any other character as text,
+  as PapaParse and DuckDB do (recommended: the README's rule, read
+  literally); or say in the README that it escapes any character.
+
+The CSV corpus found nothing else no decision covers: under the engine's
+options DuckDB reads its files as the engine does, value for value, but where
+a ledger rule parts them, and PapaParse's and csv-spectrum's readings differ
+only by the ledger's CSV rules (`csv-empty-null`, `csv-blank-line`,
+`csv-text-after-quote`, `csv-line-ends`, `csv-inference`, and the refusals of
+ragged rows, unclosed quotes and repeated header names). csv-spectrum's
+`location_coordinates` pair is held as a defect of the fixture: its JSON holds
+no row of its CSV.
+
 ## Answers that differ from other engines by design
 
 The engine answers some queries otherwise than another engine does, on
@@ -2604,9 +2625,9 @@ followed by its twin, `onlyif transformer <id>` before the same SQL with the
 engine's own answer. `pinned by` names the script of this repo's own that
 holds a record of the engine's answer under the rule, `onlyif transformer
 <id>` before it; a rule about files another program wrote rather than about
-SQL (`refused-parquet-...`) is pinned by the manifest of a fixture directory
-under `src/test/data`, which lists a file refused under it, `refused
-by-design <id>`, and whose test holds the refusal to the rule's text.
+SQL (`refused-parquet-...`, `csv-...`) is pinned by the manifest of a fixture
+directory under `src/test/data`, which lists a file read or refused under it,
+`by-design <id>`, and whose test holds the file to the rule.
 
 The table is the only list of these rules. The build reads it
 (`src/test/scala/com/transformer/slt/Ledger.scala`), so its columns are fixed
@@ -2657,6 +2678,16 @@ choose it, and "since v1" one the engine has had from the start.
 | `no-time` | The engine has no `TIME` type, a time of day: a `CAST` to one is refused, and a table of a script of another engine's leaves its `TIME` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
 | `no-bytes` | The engine has no `BYTES` type of CockroachDB (its `BINARY` takes no `CAST`): a `CAST` to one is refused, and a table of a script of another engine's leaves its `BYTES` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
 | `no-json` | The engine has no `JSON` or `JSONB` type: a `CAST` to one is refused, and a table of a script of another engine's leaves its `JSONB` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `csv-empty-null` | A CSV field that is the null string, unquoted, is NULL, in a `STRING` column too, and the null string is empty by default, so an unquoted empty field is NULL; a quoted empty field is the empty string in a `STRING` column, where PapaParse and csv-spectrum read both as the empty string. | | [README](../README.md#csv), "A field is NULL when it is the null string unquoted" | The user, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)): Postgres's rule | `src/test/data/csv/MANIFEST` |
+| `csv-blank-line` | A blank line of a CSV file is a row only in a file of one column, the row whose one field is empty, and is skipped in a wider file; the line break that ends the last line adds no row, where PapaParse reads each blank line, and a last line break, as a row of one empty field. | | [README](../README.md#csv), "A blank line is a row only in a one-column file" | The user, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `src/test/data/csv/MANIFEST` |
+| `csv-text-after-quote` | Text after a CSV field's closing quote joins the field (`"a" b` is `a b`), and a quote inside an unquoted field is a character of it, where PapaParse drops spaces after a closing quote and DuckDB refuses such a file unless told not to be strict. | | [README](../README.md#csv), "Text after a closing quote joins the field" | Claude, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)), not put to the user; reported again by [testing/13](../plans/testing/13-external-file-fixtures.md) | `src/test/data/csv/MANIFEST` |
+| `csv-line-ends` | A CSV line ends at `\n`, `\r\n` or a lone `\r`, each line by itself, where PapaParse ends every line as the file's first line ends and reads any other break as text. | | [README](../README.md#csv), "Malformed text fails the read" (and the parser's lines) | Since v1 | `src/test/data/csv/MANIFEST` |
+| `csv-inference` | A CSV column's type is inferred from its text by the engine's grammar, so `08123` in a column of integers is the `INT` 8123, where csv-spectrum and PapaParse keep each field as text. | | [README](../README.md#csv), "Schema inference" | Inference since v1; its joins by the user, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `src/test/data/csv/MANIFEST` |
+| `refused-csv-ragged` | A CSV row with more or fewer fields than the file has columns (its header, the schema, or its first row) fails the read, naming the file and the line, where PapaParse reads it and reports an error, and DuckDB pads or skips it when told to. | `field` | [README](../README.md#csv), "Malformed text fails the read" | The user, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `src/test/data/csv/MANIFEST` |
+| `refused-csv-unclosed-quote` | A CSV quote that is never closed fails the read, naming the line it opens on, where PapaParse reads the rest of the file as the field and reports an error. | `is never closed` | [README](../README.md#csv), "Malformed text fails the read" | The user, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `src/test/data/csv/MANIFEST` |
+| `refused-csv-header-name` | A CSV header with an empty name, or a name it gives twice regardless of case, fails the read with inferred types, naming the columns, where DuckDB and PapaParse rename them. | `in its header` | [README](../README.md#csv), "Options" (`header`) | [robustness/26](../plans/robustness/26-duplicate-column-names.md), 2026-10-31 | `src/test/data/csv/MANIFEST` |
+| `refused-csv-charset` | Bytes of a CSV file that are no text in its `charset` (UTF-8 by default) fail the read, naming the line, where DuckDB reads the file in the encoding it is told. | `is not valid` | [README](../README.md#csv), "Malformed text fails the read" | The user, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `src/test/data/csv/MANIFEST` |
+| `refused-csv-compressed` | A CSV file that starts with gzip's magic bytes is refused as compressed, naming the file, where DuckDB decompresses it. | `is compressed with gzip` | [README](../README.md#csv), "Malformed text fails the read" | [testing/13](../plans/testing/13-external-file-fixtures.md)'s finding 6, fixed without asking: it was refused as text that is not UTF-8 | `src/test/data/csv/MANIFEST` |
 | `refused-parquet-nested` | A parquet column that is nested, a group (a struct, a list or a map), or repeated, a list of values in each row, makes its file unreadable, where pyarrow reads lists, maps and structs: a column holds one value a row. | `only flat schemas are supported` | [README](../README.md#parquet), "Types read" | Flat schemas since v1; a repeated column by [robustness/03](../plans/robustness/03-parquet-external-format-fidelity.md), 2026-10-03 | `src/test/data/parquet-testing/MANIFEST` |
 | `refused-parquet-type` | A parquet column whose annotation has no engine type makes its file unreadable, never read as its physical type: `TIME`, `INTERVAL`, and an annotation newer than the reader (`VARIANT`, `GEOMETRY`, `GEOGRAPHY`, or one it has no name for), where pyarrow reads `TIME`, and an annotation it does not know as its physical type. | `which has no transformer type` | [README](../README.md#parquet), "Types read" | `TIME` and `INTERVAL` by [robustness/03](../plans/robustness/03-parquet-external-format-fidelity.md), 2026-10-03; an annotation newer than the reader by [testing/13](../plans/testing/13-external-file-fixtures.md)'s decision 1, taken overnight as recommended, not yet confirmed by the user | `src/test/data/parquet-testing/MANIFEST` |
 | `refused-parquet-annotation` | A parquet annotation the format does not allow on its column's physical type (a `UUID` on an `INT32`, a `TIMESTAMP` on a `FIXED_LEN_BYTE_ARRAY`) makes its file unreadable, as parquet-mr has it, where pyarrow reads the physical type and drops the annotation. | `which the format does not allow` | [README](../README.md#parquet), "Types read" | Claude, reported, 2026-11-02 ([testing/13](../plans/testing/13-external-file-fixtures.md)), by robustness/03's rule that no annotation falls through to its physical type | `src/test/data/parquet-testing/MANIFEST` |

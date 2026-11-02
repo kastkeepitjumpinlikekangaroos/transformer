@@ -22,8 +22,8 @@ import java.nio.file.{Files, Path, Paths}
   * `refusal` the text its refusal must contain, which no other rule gives; and
   * `pinned by` names the script, under `src/test/slt`, holding a record of the
   * engine's own answer under the rule, or, for a rule about files rather than
-  * SQL, the fixture manifest under `src/test/data` holding a file refused
-  * under it (`refused by-design <id>`). A `|` inside a cell is written `\|`.
+  * SQL, the fixture manifest under `src/test/data` holding a file read or
+  * refused under it (`by-design <id>`). A `|` inside a cell is written `\|`.
   */
 final case class Ledger(rules: Vector[Ledger.Rule]) {
 
@@ -64,10 +64,10 @@ object Ledger {
     * it is in, and what the engine does with the file. */
   val ManifestName: String = "MANIFEST"
 
-  /** The ids a fixture manifest's text cites, `refused by-design <id>`. */
+  /** The ids a fixture manifest's text cites, `by-design <id>` in a line. */
   def manifestCitations(text: String): Set[String] =
-    text.split("\n").iterator.map(_.takeWhile(_ != '#').trim.split("\\s+").toSeq).collect {
-      case Seq(_, "refused", "by-design", id, _*) => id
+    text.split("\n").iterator.map(_.takeWhile(_ != '#').trim.split("\\s+").toSeq).flatMap { words =>
+      words.sliding(2).collect { case Seq("by-design", id) => id }
     }.toSet
 
   val Heading: String = "## Answers that differ from other engines by design"

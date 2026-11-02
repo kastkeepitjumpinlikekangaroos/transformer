@@ -1,0 +1,21 @@
+{
+ "description": "Data with newlines",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "a",
+   "b\nb",
+   "c"
+  ],
+  [
+   "d",
+   "e",
+   "f\r\nf"
+  ]
+ ],
+ "text": "a,\"b\nb\",c\r\nd,e,\"f\r\nf\""
+}

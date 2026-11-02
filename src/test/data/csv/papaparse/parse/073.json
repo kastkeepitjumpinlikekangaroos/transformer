@@ -1,0 +1,17 @@
+{
+ "description": "Single quote as quote character",
+ "options": {
+  "header": "false",
+  "quote": "'",
+  "escape": "'"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   "c,d"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

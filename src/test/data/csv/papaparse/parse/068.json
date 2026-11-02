@@ -1,0 +1,20 @@
+{
+ "description": "Pipe delimiter is guessed correctly when mixed with comas",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "one",
+   "two,two",
+   "three"
+  ],
+  [
+   "four",
+   "five,five",
+   "six"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

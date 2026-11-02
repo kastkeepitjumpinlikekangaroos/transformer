@@ -1,0 +1,25 @@
+{
+ "description": "Multiple rows, one column (no delimiter found)",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a"
+  ],
+  [
+   "b"
+  ],
+  [
+   "c"
+  ],
+  [
+   "d"
+  ],
+  [
+   "e"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

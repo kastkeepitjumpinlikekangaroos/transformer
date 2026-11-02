@@ -1,0 +1,15 @@
+{
+ "description": "One row",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   "b",
+   "c"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

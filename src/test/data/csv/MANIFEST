@@ -1,0 +1,502 @@
+# What the engine does with each CSV input here, a line an input, held by
+# //src/test/scala/com/transformer/read/csv:csv_corpus_test (README.md says
+# where each input came from and how its line was made). A file of its own is
+# read with the default options; a case, with the options of its .json beside
+# it, which also holds the other parser's reading:
+#
+#   <file> reads <rows> <expect>          reads <rows> rows, whose CSV text is
+#                                         the expect file's (gzipped past 8 KB)
+#   <file> refused by-design <id>         refused under the ledger's rule <id>
+#                                         (docs/gotchas.md), its text in it
+#   <file> refused <text>                 refused, the message holding <text>
+#   <case> agrees                         reads the other parser's rows
+#   <case> differs by-design <id> <expect>
+#                                         reads rows of its own, under the
+#                                         ledger's rule <id>, whose CSV text is
+#                                         the expect file's
+#   <case> writes agrees                  writes PapaParse's text
+#   <case> writes differs by-design <id> <expect>
+#
+# Every refusal names the file and shows no internal marker. Text after a #
+# is a comment; "held" marks a finding no decision covers yet.
+csv-spectrum/csvs/comma_in_quotes.csv differs by-design csv-inference expect/csv-spectrum/csvs/comma_in_quotes.csv.csv
+csv-spectrum/csvs/empty.csv differs by-design csv-empty-null expect/csv-spectrum/csvs/empty.csv.csv
+csv-spectrum/csvs/empty_crlf.csv differs by-design csv-empty-null expect/csv-spectrum/csvs/empty_crlf.csv.csv
+csv-spectrum/csvs/escaped_quotes.csv agrees
+csv-spectrum/csvs/json.csv agrees
+csv-spectrum/csvs/location_coordinates.csv reads 1 expect/csv-spectrum/csvs/location_coordinates.csv.csv  # held: its json/location_coordinates.json holds no row, a defect of the fixture
+csv-spectrum/csvs/newlines.csv agrees
+csv-spectrum/csvs/newlines_crlf.csv agrees
+csv-spectrum/csvs/quotes_and_newlines.csv agrees
+csv-spectrum/csvs/simple.csv agrees
+csv-spectrum/csvs/simple_crlf.csv agrees
+csv-spectrum/csvs/utf8.csv agrees
+duckdb/afl/1.csv refused is empty
+duckdb/afl/10.csv refused line 2 is not valid UTF-8
+duckdb/afl/11.csv refused is empty
+duckdb/afl/12.csv refused line 4 is not valid UTF-8
+duckdb/afl/13.csv refused line 5 is not valid UTF-8
+duckdb/afl/14.csv refused line 5 is not valid UTF-8
+duckdb/afl/15.csv refused line 5 is not valid UTF-8
+duckdb/afl/16.csv refused line 4 is not valid UTF-8
+duckdb/afl/17.csv refused line 4 is not valid UTF-8
+duckdb/afl/18.csv refused line 4 is not valid UTF-8
+duckdb/afl/19.csv refused line 7 is not valid UTF-8
+duckdb/afl/2.csv refused line 1 is not valid UTF-8
+duckdb/afl/20.csv refused line 1 is not valid UTF-8
+duckdb/afl/20250211_csv_fuzz_crash/case_53.csv refused line 9 has 9 fields, but its header has 1
+duckdb/afl/20250226_csv_fuzz_error/case_1.csv refused line 2 has 1 field, but its header has 3
+duckdb/afl/21.csv refused line 4 is not valid UTF-8
+duckdb/afl/22.csv refused line 1 is not valid UTF-8
+duckdb/afl/23.csv reads 8 expect/duckdb/afl/23.csv.csv
+duckdb/afl/24.csv reads 1 expect/duckdb/afl/24.csv.csv
+duckdb/afl/25.csv refused is empty
+duckdb/afl/3.csv refused is empty
+duckdb/afl/3977/case_1.csv refused line 1 is not valid UTF-8
+duckdb/afl/3977/case_10.csv refused line 21 is not valid UTF-8
+duckdb/afl/3977/case_11.csv refused line 21 is not valid UTF-8
+duckdb/afl/3977/case_12.csv refused line 31 is not valid UTF-8
+duckdb/afl/3977/case_13.csv refused line 30 is not valid UTF-8
+duckdb/afl/3977/case_14.csv refused line 25 is not valid UTF-8
+duckdb/afl/3977/case_15.csv refused line 31 is not valid UTF-8
+duckdb/afl/3977/case_16.csv refused line 3 is not valid UTF-8
+duckdb/afl/3977/case_17.csv refused line 4 is not valid UTF-8
+duckdb/afl/3977/case_18.csv refused line 26 is not valid UTF-8
+duckdb/afl/3977/case_19.csv refused line 10 is not valid UTF-8
+duckdb/afl/3977/case_2.csv reads 2 expect/duckdb/afl/3977/case_2.csv.csv
+duckdb/afl/3977/case_20.csv refused line 3 is not valid UTF-8
+duckdb/afl/3977/case_21.csv refused line 17 is not valid UTF-8
+duckdb/afl/3977/case_22.csv refused line 22 is not valid UTF-8
+duckdb/afl/3977/case_23.csv refused line 34 is not valid UTF-8
+duckdb/afl/3977/case_24.csv refused line 31 is not valid UTF-8
+duckdb/afl/3977/case_25.csv refused line 31 is not valid UTF-8
+duckdb/afl/3977/case_26.csv refused line 5 is not valid UTF-8
+duckdb/afl/3977/case_27.csv reads 30 expect/duckdb/afl/3977/case_27.csv.csv
+duckdb/afl/3977/case_28.csv refused line 22 is not valid UTF-8
+duckdb/afl/3977/case_29.csv refused line 27 is not valid UTF-8
+duckdb/afl/3977/case_3.csv reads 0 expect/duckdb/afl/3977/case_3.csv.csv
+duckdb/afl/3977/case_30.csv refused line 5 is not valid UTF-8
+duckdb/afl/3977/case_31.csv refused line 29 is not valid UTF-8
+duckdb/afl/3977/case_32.csv refused line 34 is not valid UTF-8
+duckdb/afl/3977/case_33.csv refused line 28 is not valid UTF-8
+duckdb/afl/3977/case_34.csv refused line 1 is not valid UTF-8
+duckdb/afl/3977/case_35.csv refused line 28 is not valid UTF-8
+duckdb/afl/3977/case_36.csv refused line 3 is not valid UTF-8
+duckdb/afl/3977/case_37.csv refused line 10 is not valid UTF-8
+duckdb/afl/3977/case_38.csv refused line 31 is not valid UTF-8
+duckdb/afl/3977/case_39.csv refused line 1 is not valid UTF-8
+duckdb/afl/3977/case_4.csv refused is empty
+duckdb/afl/3977/case_40.csv refused line 13 is not valid UTF-8
+duckdb/afl/3977/case_41.csv refused line 25 is not valid UTF-8
+duckdb/afl/3977/case_42.csv refused line 22 is not valid UTF-8
+duckdb/afl/3977/case_43.csv refused line 20 is not valid UTF-8
+duckdb/afl/3977/case_44.csv refused line 20 is not valid UTF-8
+duckdb/afl/3977/case_45.csv refused line 2 is not valid UTF-8
+duckdb/afl/3977/case_46.csv refused line 29 is not valid UTF-8
+duckdb/afl/3977/case_47.csv refused line 6 is not valid UTF-8
+duckdb/afl/3977/case_48.csv refused line 21 is not valid UTF-8
+duckdb/afl/3977/case_49.csv refused line 1 is not valid UTF-8
+duckdb/afl/3977/case_5.csv refused line 2 has 2 fields, but its header has 1
+duckdb/afl/3977/case_50.csv refused line 33 is not valid UTF-8
+duckdb/afl/3977/case_51.csv refused line 31 is not valid UTF-8
+duckdb/afl/3977/case_52.csv refused line 33 is not valid UTF-8
+duckdb/afl/3977/case_53.csv refused line 14 is not valid UTF-8
+duckdb/afl/3977/case_54.csv refused line 31 is not valid UTF-8
+duckdb/afl/3977/case_55.csv refused line 2 is not valid UTF-8
+duckdb/afl/3977/case_56.csv refused line 2 is not valid UTF-8
+duckdb/afl/3977/case_57.csv refused line 15 is not valid UTF-8
+duckdb/afl/3977/case_58.csv refused line 15 is not valid UTF-8
+duckdb/afl/3977/case_59.csv refused line 5 is not valid UTF-8
+duckdb/afl/3977/case_6.csv refused line 21 is not valid UTF-8
+duckdb/afl/3977/case_60.csv refused line 6 is not valid UTF-8
+duckdb/afl/3977/case_61.csv refused line 4 is not valid UTF-8
+duckdb/afl/3977/case_62.csv refused line 2 is not valid UTF-8
+duckdb/afl/3977/case_63.csv refused line 11 is not valid UTF-8
+duckdb/afl/3977/case_64.csv refused line 1 is not valid UTF-8
+duckdb/afl/3977/case_65.csv refused line 15 is not valid UTF-8
+duckdb/afl/3977/case_66.csv refused line 35 is not valid UTF-8
+duckdb/afl/3977/case_67.csv refused line 26 is not valid UTF-8
+duckdb/afl/3977/case_68.csv refused line 15 is not valid UTF-8
+duckdb/afl/3977/case_69.csv refused line 3 is not valid UTF-8
+duckdb/afl/3977/case_7.csv refused line 30 is not valid UTF-8
+duckdb/afl/3977/case_70.csv refused line 1 is not valid UTF-8
+duckdb/afl/3977/case_71.csv refused line 15 is not valid UTF-8
+duckdb/afl/3977/case_72.csv refused line 18 is not valid UTF-8
+duckdb/afl/3977/case_73.csv refused line 30 is not valid UTF-8
+duckdb/afl/3977/case_74.csv refused line 15 is not valid UTF-8
+duckdb/afl/3977/case_75.csv refused line 11 is not valid UTF-8
+duckdb/afl/3977/case_76.csv refused line 1 is not valid UTF-8
+duckdb/afl/3977/case_77.csv refused line 10 is not valid UTF-8
+duckdb/afl/3977/case_78.csv refused line 11 is not valid UTF-8
+duckdb/afl/3977/case_79.csv refused line 14 is not valid UTF-8
+duckdb/afl/3977/case_8.csv refused line 3 is not valid UTF-8
+duckdb/afl/3977/case_80.csv refused line 15 is not valid UTF-8
+duckdb/afl/3977/case_81.csv refused line 17 is not valid UTF-8
+duckdb/afl/3977/case_82.csv refused line 1 is not valid UTF-8
+duckdb/afl/3977/case_83.csv refused line 15 is not valid UTF-8
+duckdb/afl/3977/case_84.csv refused line 15 is not valid UTF-8
+duckdb/afl/3977/case_85.csv refused line 11 is not valid UTF-8
+duckdb/afl/3977/case_86.csv refused line 15 is not valid UTF-8
+duckdb/afl/3977/case_87.csv refused line 15 is not valid UTF-8
+duckdb/afl/3977/case_88.csv refused line 5 is not valid UTF-8
+duckdb/afl/3977/case_9.csv refused line 1 is not valid UTF-8
+duckdb/afl/4.csv refused is empty
+duckdb/afl/4086/case_1.csv refused line 1 is not valid UTF-8
+duckdb/afl/4086/case_2.csv refused line 44 is not valid UTF-8
+duckdb/afl/4086/case_3.csv refused line 44 is not valid UTF-8
+duckdb/afl/4234/test_fuzz_4234.csv refused line 2 has 2 fields, but its header has 1
+duckdb/afl/4329/case_1.csv refused line 2 is not valid UTF-8
+duckdb/afl/4496/crashes/case_0.csv refused line 44 is not valid UTF-8
+duckdb/afl/4496/crashes/case_1.csv refused line 15 is not valid UTF-8
+duckdb/afl/4793/crashes/case_0.csv refused line 1 is not valid UTF-8
+duckdb/afl/4793/crashes/case_1.csv refused line 25 is not valid UTF-8
+duckdb/afl/5.csv reads 0 expect/duckdb/afl/5.csv.csv
+duckdb/afl/5194/crashes/case_0.csv refused line 20 has 2 fields, but its header has 3
+duckdb/afl/5194/crashes/case_4.csv refused line 2 has 2 fields, but its header has 1
+duckdb/afl/6.csv refused line 3 is not valid UTF-8
+duckdb/afl/7.csv refused line 2 is not valid UTF-8
+duckdb/afl/8.csv refused line 4 is not valid UTF-8
+duckdb/afl/9.csv refused line 2 is not valid UTF-8
+duckdb/afl/ignore_errors/1.csv refused line 5 is not valid UTF-8
+duckdb/afl/ignore_errors/10.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/11.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/12.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/13.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/14.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/15.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/16.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/17.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/18.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/19.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/20.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/21.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/22.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/23.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/24.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/25.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/26.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/27.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/28.csv refused line 3 is not valid UTF-8
+duckdb/afl/ignore_errors/29.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/30.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/31.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/32.csv refused line 19 has 1 field, but its header has 2
+duckdb/afl/ignore_errors/33.csv refused line 2 is not valid UTF-8
+duckdb/afl/ignore_errors/34.csv refused line 13 is not valid UTF-8
+duckdb/afl/ignore_errors/35.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/36.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/37.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/38.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/39.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/40.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/41.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/42.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/43.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/44.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/45.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/46.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/47.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/48.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/49.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/50.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/51.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/52.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/53.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/54.csv refused line 1 is not valid UTF-8
+duckdb/afl/ignore_errors/55.csv refused line 1 is not valid UTF-8
+duckdb/afl/no_parameter/1.csv refused line 1 is not valid UTF-8
+duckdb/afl/no_parameter/10.csv reads 0 expect/duckdb/afl/no_parameter/10.csv.csv
+duckdb/afl/no_parameter/11.csv refused line 2 is not valid UTF-8
+duckdb/afl/no_parameter/12.csv refused the quoted field that opens on line 1 is never closed
+duckdb/afl/no_parameter/13.csv refused line 2 has 4 fields, but its header has 1
+duckdb/afl/no_parameter/14.csv reads 0 expect/duckdb/afl/no_parameter/14.csv.csv
+duckdb/afl/no_parameter/15.csv reads 0 expect/duckdb/afl/no_parameter/15.csv.csv
+duckdb/afl/no_parameter/16.csv refused the quoted field that opens on line 1 is never closed
+duckdb/afl/no_parameter/17.csv refused the quoted field that opens on line 1 is never closed
+duckdb/afl/no_parameter/18.csv refused names more than one column '3' in its header, columns 1 (3) and 3 (3), names being read regardless of case; give each its own name
+duckdb/afl/no_parameter/19.csv refused the quoted field that opens on line 1 is never closed
+duckdb/afl/no_parameter/2.csv refused has a column with no name in its header, column 3; name it
+duckdb/afl/no_parameter/20.csv reads 0 expect/duckdb/afl/no_parameter/20.csv.csv
+duckdb/afl/no_parameter/21.csv refused the quoted field that opens on line 1 is never closed
+duckdb/afl/no_parameter/22.csv refused line 1 is not valid UTF-8
+duckdb/afl/no_parameter/23.csv refused the quoted field that opens on line 1 is never closed
+duckdb/afl/no_parameter/24.csv refused the quoted field that opens on line 2 is never closed
+duckdb/afl/no_parameter/3.csv refused line 1 is not valid UTF-8
+duckdb/afl/no_parameter/4.csv refused the quoted field that opens on line 1 is never closed
+duckdb/afl/no_parameter/5.csv refused has a column with no name in its header, column 1; name it
+duckdb/afl/no_parameter/6.csv refused the quoted field that opens on line 1 is never closed
+duckdb/afl/no_parameter/7.csv refused the quoted field that opens on line 2 is never closed
+duckdb/afl/no_parameter/8.csv refused the quoted field that opens on line 1 is never closed
+duckdb/afl/no_parameter/9.csv refused the quoted field that opens on line 1 is never closed
+duckdb/afl/null_padding/1.csv refused the quoted field that opens on line 3 is never closed
+duckdb/afl/null_padding/10.csv refused the quoted field that opens on line 3 is never closed
+duckdb/afl/null_padding/11.csv refused the quoted field that opens on line 14 is never closed
+duckdb/afl/null_padding/12.csv refused has a column with no name in its header, column 2; name it
+duckdb/afl/null_padding/13.csv refused has a column with no name in its header, column 2; name it
+duckdb/afl/null_padding/14.csv refused line 5 is not valid UTF-8
+duckdb/afl/null_padding/15.csv reads 8 expect/duckdb/afl/null_padding/15.csv.csv
+duckdb/afl/null_padding/16.csv refused line 3 is not valid UTF-8
+duckdb/afl/null_padding/17.csv refused line 2 has 2 fields, but its header has 1
+duckdb/afl/null_padding/18.csv refused line 2 is not valid UTF-8
+duckdb/afl/null_padding/19.csv refused line 2 is not valid UTF-8
+duckdb/afl/null_padding/2.csv refused the quoted field that opens on line 2 is never closed
+duckdb/afl/null_padding/20.csv refused line 2 is not valid UTF-8
+duckdb/afl/null_padding/21.csv refused line 6 is not valid UTF-8
+duckdb/afl/null_padding/22.csv refused the quoted field that opens on line 2 is never closed
+duckdb/afl/null_padding/23.csv refused line 2 is not valid UTF-8
+duckdb/afl/null_padding/24.csv refused line 2 is not valid UTF-8
+duckdb/afl/null_padding/25.csv reads 30 expect/duckdb/afl/null_padding/25.csv.csv
+duckdb/afl/null_padding/26.csv reads 18 expect/duckdb/afl/null_padding/26.csv.csv
+duckdb/afl/null_padding/27.csv refused has a column with no name in its header, column 2; name it
+duckdb/afl/null_padding/28.csv refused line 3 is not valid UTF-8
+duckdb/afl/null_padding/29.csv refused line 2 is not valid UTF-8
+duckdb/afl/null_padding/3.csv refused has a column with no name in its header, column 1; name it
+duckdb/afl/null_padding/30.csv refused the quoted field that opens on line 5 is never closed
+duckdb/afl/null_padding/31.csv refused line 2 is not valid UTF-8
+duckdb/afl/null_padding/32.csv refused line 7 is not valid UTF-8
+duckdb/afl/null_padding/33.csv refused line 4 is not valid UTF-8
+duckdb/afl/null_padding/34.csv reads 1 expect/duckdb/afl/null_padding/34.csv.csv
+duckdb/afl/null_padding/35.csv refused line 2 has 4 fields, but its header has 1
+duckdb/afl/null_padding/36.csv refused line 1 is not valid UTF-8
+duckdb/afl/null_padding/37.csv refused line 3 is not valid UTF-8
+duckdb/afl/null_padding/38.csv refused line 3 is not valid UTF-8
+duckdb/afl/null_padding/39.csv refused the quoted field that opens on line 2 is never closed
+duckdb/afl/null_padding/4.csv refused line 2 has 1 field, but its header has 3
+duckdb/afl/null_padding/40.csv refused line 4 is not valid UTF-8
+duckdb/afl/null_padding/41.csv refused the quoted field that opens on line 3 is never closed
+duckdb/afl/null_padding/42.csv refused line 9159 has 2 fields, but its header has 1
+duckdb/afl/null_padding/43.csv refused line 9158 has 2 fields, but its header has 1
+duckdb/afl/null_padding/44.csv reads 6 expect/duckdb/afl/null_padding/44.csv.csv
+duckdb/afl/null_padding/45.csv refused has a column with no name in its header, column 1; name it
+duckdb/afl/null_padding/5.csv refused line 2 has 2 fields, but its header has 3
+duckdb/afl/null_padding/6.csv refused line 4 has 2 fields, but its header has 1
+duckdb/afl/null_padding/7.csv refused the quoted field that opens on line 2 is never closed
+duckdb/afl/null_padding/8.csv refused the quoted field that opens on line 3 is never closed
+duckdb/afl/null_padding/9.csv refused line 3 has 2 fields, but its header has 1
+duckdb/afl/skip/1.csv reads 2 expect/duckdb/afl/skip/1.csv.csv
+duckdb/afl/skip/2.csv refused line 1 is not valid UTF-8
+duckdb/comments/14635.csv reads 1 expect/duckdb/comments/14635.csv.csv
+duckdb/comments/14648.csv refused by-design refused-csv-ragged
+duckdb/comments/17226.csv refused by-design refused-csv-ragged
+duckdb/comments/comment_skip.csv refused by-design refused-csv-ragged
+duckdb/comments/empty_space.csv reads 5 expect/duckdb/comments/empty_space.csv.csv
+duckdb/comments/invalid_rows.csv reads 9 expect/duckdb/comments/invalid_rows.csv.csv
+duckdb/comments/mid_line.csv reads 2 expect/duckdb/comments/mid_line.csv.csv
+duckdb/comments/mid_line_header.csv reads 3 expect/duckdb/comments/mid_line_header.csv.csv
+duckdb/comments/mid_line_invalid.csv reads 3 expect/duckdb/comments/mid_line_invalid.csv.csv
+duckdb/comments/mid_line_null.csv reads 3 expect/duckdb/comments/mid_line_null.csv.csv
+duckdb/comments/mid_line_quote.csv reads 3 expect/duckdb/comments/mid_line_quote.csv.csv
+duckdb/comments/midline_empty_space.csv reads 3 expect/duckdb/comments/midline_empty_space.csv.csv
+duckdb/comments/mixed_options.csv refused by-design refused-csv-header-name
+duckdb/comments/only_midline.csv reads 1 expect/duckdb/comments/only_midline.csv.csv
+duckdb/comments/simple.csv reads 6 expect/duckdb/comments/simple.csv.csv
+duckdb/comments/simple_comma.csv refused by-design refused-csv-header-name
+duckdb/comments/simple_mid_line.csv reads 8 expect/duckdb/comments/simple_mid_line.csv.csv
+duckdb/encodings/all_latin1.csv refused by-design refused-csv-charset
+duckdb/encodings/latin1.csv refused by-design refused-csv-charset
+duckdb/encodings/latin1.csv.gz refused by-design refused-csv-compressed
+duckdb/encodings/only_latin1.csv refused by-design refused-csv-charset
+duckdb/encodings/only_utf16.csv refused by-design refused-csv-charset
+duckdb/encodings/shift_jis.csv refused by-design refused-csv-charset
+duckdb/encodings/straddle_cp932_1k.csv.gz refused by-design refused-csv-compressed
+duckdb/encodings/straddle_gb18030_2k.csv.gz refused by-design refused-csv-compressed
+duckdb/encodings/utf16.csv refused by-design refused-csv-charset
+duckdb/encodings/utf16.csv.gz refused by-design refused-csv-compressed
+duckdb/encodings/utf16_odd_length.csv reads 2 expect/duckdb/encodings/utf16_odd_length.csv.csv
+duckdb/error/date_multiple_file/0.csv reads 1 expect/duckdb/error/date_multiple_file/0.csv.csv
+duckdb/error/date_multiple_file/1.csv reads 1 expect/duckdb/error/date_multiple_file/1.csv.csv
+duckdb/error/json.csv refused by-design refused-csv-ragged
+duckdb/error/mid_null.csv reads 3 expect/duckdb/error/mid_null.csv.csv
+duckdb/error/mismatch/bad.csv refused by-design refused-csv-header-name
+duckdb/error/mismatch/bad2.csv refused by-design refused-csv-header-name
+duckdb/error/mismatch/example.tsv reads 2 expect/duckdb/error/mismatch/example.tsv.csv
+duckdb/error/mismatch/small1.csv reads 5 expect/duckdb/error/mismatch/small1.csv.csv
+duckdb/error/mismatch/small2.csv reads 4 expect/duckdb/error/mismatch/small2.csv.csv
+duckdb/fuzzing/0.csv refused line 1 is not valid UTF-8
+duckdb/fuzzing/1.csv reads 2 expect/duckdb/fuzzing/1.csv.csv
+duckdb/fuzzing/10.csv refused line 3 is not valid UTF-8
+duckdb/fuzzing/11.csv reads 6 expect/duckdb/fuzzing/11.csv.csv
+duckdb/fuzzing/12.csv refused line 5 is not valid UTF-8
+duckdb/fuzzing/13.csv reads 8 expect/duckdb/fuzzing/13.csv.csv
+duckdb/fuzzing/14.csv refused line 1 is not valid UTF-8
+duckdb/fuzzing/15.csv refused line 5 is not valid UTF-8
+duckdb/fuzzing/16.csv refused line 3 is not valid UTF-8
+duckdb/fuzzing/17.csv reads 7 expect/duckdb/fuzzing/17.csv.csv
+duckdb/fuzzing/18.csv refused line 4 is not valid UTF-8
+duckdb/fuzzing/19.csv reads 6 expect/duckdb/fuzzing/19.csv.csv
+duckdb/fuzzing/2.csv reads 4 expect/duckdb/fuzzing/2.csv.csv
+duckdb/fuzzing/20.csv refused line 3 is not valid UTF-8
+duckdb/fuzzing/21.csv reads 6 expect/duckdb/fuzzing/21.csv.csv
+duckdb/fuzzing/22.csv refused line 4 is not valid UTF-8
+duckdb/fuzzing/23.csv refused line 3 is not valid UTF-8
+duckdb/fuzzing/24.csv refused line 4 is not valid UTF-8
+duckdb/fuzzing/25.csv refused line 3 is not valid UTF-8
+duckdb/fuzzing/26.csv refused line 4 is not valid UTF-8
+duckdb/fuzzing/27.csv refused line 2 is not valid UTF-8
+duckdb/fuzzing/28.csv reads 5 expect/duckdb/fuzzing/28.csv.csv
+duckdb/fuzzing/29.csv refused line 4 has 3 fields, but its header has 1
+duckdb/fuzzing/3.csv reads 3 expect/duckdb/fuzzing/3.csv.csv
+duckdb/fuzzing/30.csv refused line 8 is not valid UTF-8
+duckdb/fuzzing/31.csv reads 9 expect/duckdb/fuzzing/31.csv.csv
+duckdb/fuzzing/32.csv refused line 2 is not valid UTF-8
+duckdb/fuzzing/33.csv refused line 2 has 2 fields, but its header has 1
+duckdb/fuzzing/34.csv refused line 4 has 2 fields, but its header has 5
+duckdb/fuzzing/35.csv refused line 2 has 4 fields, but its header has 3
+duckdb/fuzzing/36.csv refused names more than one column 'twR' in its header, columns 2 (twR), 5 (twR) and 7 (twR), names being read regardless of case; give each its own name
+duckdb/fuzzing/37.csv refused line 2 has 2 fields, but its header has 3
+duckdb/fuzzing/38.csv refused line 2 has 2 fields, but its header has 3
+duckdb/fuzzing/39.csv refused has a column with no name in its header, column 4; name it
+duckdb/fuzzing/4.csv reads 2 expect/duckdb/fuzzing/4.csv.csv
+duckdb/fuzzing/5.csv refused line 545 is not valid UTF-8
+duckdb/fuzzing/6.csv refused line 8 is not valid UTF-8
+duckdb/fuzzing/7.csv refused line 6 is not valid UTF-8
+duckdb/fuzzing/8.csv refused line 3 is not valid UTF-8
+duckdb/fuzzing/9.csv refused line 2 is not valid UTF-8
+duckdb/headers/all_varchar.csv reads 1 expect/duckdb/headers/all_varchar.csv.csv
+duckdb/headers/borked_type.csv reads 2 expect/duckdb/headers/borked_type.csv.csv
+duckdb/headers/empty_1.csv reads 2 expect/duckdb/headers/empty_1.csv.csv
+duckdb/headers/empty_2.csv refused by-design refused-csv-header-name
+duckdb/headers/empty_3.csv reads 2 expect/duckdb/headers/empty_3.csv.csv
+duckdb/headers/empty_4.csv reads 2 expect/duckdb/headers/empty_4.csv.csv
+duckdb/headers/escaped_quote.csv reads 2 expect/duckdb/headers/escaped_quote.csv.csv
+duckdb/headers/integer.csv reads 0 expect/duckdb/headers/integer.csv.csv
+duckdb/headers/single_line.csv reads 0 expect/duckdb/headers/single_line.csv.csv
+duckdb/headers/undetected_type.csv refused by-design refused-csv-ragged
+duckdb/headers/unescaped_quote.csv reads 2 expect/duckdb/headers/unescaped_quote.csv.csv
+duckdb/null/hive_partition_null_overwrite.csv reads 2 expect/duckdb/null/hive_partition_null_overwrite.csv.csv
+duckdb/null/multiple_nulls.csv reads 3 expect/duckdb/null/multiple_nulls.csv.csv
+duckdb/null/multiple_quoted_nulls.csv reads 3 expect/duckdb/null/multiple_quoted_nulls.csv.csv
+duckdb/unescaped_quotes/end_quote.csv reads 1 expect/duckdb/unescaped_quotes/end_quote.csv.csv
+duckdb/unescaped_quotes/end_quote_2.csv reads 2 expect/duckdb/unescaped_quotes/end_quote_2.csv.csv
+duckdb/unescaped_quotes/end_quote_3.csv reads 2 expect/duckdb/unescaped_quotes/end_quote_3.csv.csv
+duckdb/unescaped_quotes/end_quote_mixed.csv reads 2 expect/duckdb/unescaped_quotes/end_quote_mixed.csv.csv
+duckdb/unescaped_quotes/some_escaped_some_not.csv reads 3 expect/duckdb/unescaped_quotes/some_escaped_some_not.csv.csv
+duckdb/unescaped_quotes/stops.csv reads 9 expect/duckdb/unescaped_quotes/stops.csv.csv
+duckdb/unescaped_quotes/unescaped_quote.csv reads 5 expect/duckdb/unescaped_quotes/unescaped_quote.csv.csv
+duckdb/unescaped_quotes/unescaped_quote_new_line.csv reads 11 expect/duckdb/unescaped_quotes/unescaped_quote_new_line.csv.csv
+duckdb/unescaped_quotes/unescaped_quote_new_line_rn.csv reads 11 expect/duckdb/unescaped_quotes/unescaped_quote_new_line_rn.csv.csv
+papaparse/core/001.csv agrees
+papaparse/core/002.csv agrees
+papaparse/core/003.csv agrees
+papaparse/core/004.csv agrees
+papaparse/core/005.csv agrees
+papaparse/core/006.csv agrees
+papaparse/core/007.csv agrees
+papaparse/core/008.csv agrees
+papaparse/core/009.csv agrees
+papaparse/core/010.csv agrees
+papaparse/core/011.csv agrees
+papaparse/core/012.csv agrees
+papaparse/core/013.csv agrees
+papaparse/core/014.csv agrees
+papaparse/core/015.csv agrees
+papaparse/core/016.csv agrees
+papaparse/core/017.csv agrees
+papaparse/core/018.csv agrees
+papaparse/core/019.csv agrees
+papaparse/core/020.csv refused by-design refused-csv-unclosed-quote
+papaparse/core/021.csv refused by-design refused-csv-ragged
+papaparse/core/022.csv refused by-design refused-csv-ragged
+papaparse/core/023.csv refused by-design refused-csv-ragged
+papaparse/core/024.csv refused by-design refused-csv-ragged
+papaparse/core/025.csv agrees
+papaparse/core/026.csv agrees
+papaparse/core/027.csv agrees
+papaparse/core/028.csv agrees
+papaparse/core/029.csv agrees
+papaparse/core/030.csv differs by-design csv-empty-null expect/papaparse/core/030.csv.csv
+papaparse/core/031.csv agrees
+papaparse/core/032.csv differs by-design csv-empty-null expect/papaparse/core/032.csv.csv
+papaparse/core/033.csv agrees
+papaparse/core/034.csv agrees
+papaparse/core/035.csv differs by-design csv-empty-null expect/papaparse/core/035.csv.csv
+papaparse/core/036.csv agrees
+papaparse/core/037.csv differs by-design csv-empty-null expect/papaparse/core/037.csv.csv
+papaparse/core/038.csv refused by-design refused-csv-ragged
+papaparse/core/039.csv agrees
+papaparse/core/052.csv agrees
+papaparse/core/053.csv agrees
+papaparse/core/054.csv agrees
+papaparse/core/055.csv differs by-design csv-blank-line expect/papaparse/core/055.csv.csv
+papaparse/core/060.csv refused by-design refused-csv-header-name
+papaparse/core/062.csv refused by-design refused-csv-header-name
+papaparse/core/063.csv refused by-design refused-csv-header-name
+papaparse/parse/001.csv agrees
+papaparse/parse/002.csv agrees
+papaparse/parse/003.csv agrees
+papaparse/parse/004.csv agrees
+papaparse/parse/005.csv agrees
+papaparse/parse/006.csv differs by-design csv-text-after-quote expect/papaparse/parse/006.csv.csv
+papaparse/parse/007.csv differs by-design csv-text-after-quote expect/papaparse/parse/007.csv.csv
+papaparse/parse/008.csv differs by-design csv-text-after-quote expect/papaparse/parse/008.csv.csv
+papaparse/parse/009.csv agrees
+papaparse/parse/010.csv differs by-design csv-line-ends expect/papaparse/parse/010.csv.csv
+papaparse/parse/011.csv agrees
+papaparse/parse/012.csv agrees
+papaparse/parse/013.csv refused by-design refused-csv-ragged
+papaparse/parse/014.csv refused by-design refused-csv-ragged
+papaparse/parse/015.csv differs by-design csv-empty-null expect/papaparse/parse/015.csv.csv
+papaparse/parse/016.csv differs by-design csv-empty-null expect/papaparse/parse/016.csv.csv
+papaparse/parse/017.csv differs by-design csv-empty-null expect/papaparse/parse/017.csv.csv
+papaparse/parse/020.csv differs by-design csv-empty-null expect/papaparse/parse/020.csv.csv
+papaparse/parse/021.csv agrees
+papaparse/parse/022.csv agrees
+papaparse/parse/023.csv agrees
+papaparse/parse/024.csv agrees
+papaparse/parse/043.csv refused by-design refused-csv-ragged
+papaparse/parse/044.csv differs by-design csv-blank-line expect/papaparse/parse/044.csv.csv
+papaparse/parse/045.csv differs by-design csv-blank-line expect/papaparse/parse/045.csv.csv
+papaparse/parse/046.csv refused by-design refused-csv-ragged
+papaparse/parse/047.csv differs by-design csv-empty-null expect/papaparse/parse/047.csv.csv
+papaparse/parse/048.csv differs by-design csv-empty-null expect/papaparse/parse/048.csv.csv
+papaparse/parse/049.csv differs by-design csv-empty-null expect/papaparse/parse/049.csv.csv
+papaparse/parse/050.csv agrees
+papaparse/parse/051.csv differs by-design csv-empty-null expect/papaparse/parse/051.csv.csv
+papaparse/parse/052.csv agrees
+papaparse/parse/060.csv refused by-design refused-csv-ragged
+papaparse/parse/068.csv refused by-design refused-csv-ragged
+papaparse/parse/069.csv agrees
+papaparse/parse/070.csv refused by-design refused-csv-ragged
+papaparse/parse/071.csv refused by-design refused-csv-ragged
+papaparse/parse/072.csv refused by-design refused-csv-ragged
+papaparse/parse/073.csv agrees
+papaparse/parse/074.csv agrees
+papaparse/parse/075.csv agrees
+papaparse/parse/076.csv reads 1 expect/papaparse/parse/076.csv.csv  # held: finding C1, an escape before a character that is not the quote is dropped
+papaparse/parse/078.csv agrees
+papaparse/parse/079.csv agrees
+papaparse/parse/080.csv agrees
+papaparse/parse/081.csv agrees
+papaparse/parse/082.csv agrees
+papaparse/parse/083.csv agrees
+papaparse/parse/085.csv agrees
+papaparse/parse/086.csv agrees
+papaparse/parse/087.csv agrees
+papaparse/parse/088.csv agrees
+papaparse/parse/089.csv agrees
+papaparse/parse/092.csv differs by-design csv-text-after-quote expect/papaparse/parse/092.csv.csv
+papaparse/parse/093.csv differs by-design csv-text-after-quote expect/papaparse/parse/093.csv.csv
+papaparse/unparse/001.json writes agrees
+papaparse/unparse/002.json writes agrees
+papaparse/unparse/003.json writes agrees
+papaparse/unparse/004.json writes agrees
+papaparse/unparse/005.json writes agrees
+papaparse/unparse/006.json writes agrees
+papaparse/unparse/007.json writes agrees
+papaparse/unparse/008.json writes agrees
+papaparse/unparse/009.json writes agrees
+papaparse/unparse/011.json writes agrees
+papaparse/unparse/012.json writes agrees
+papaparse/unparse/013.json writes agrees
+papaparse/unparse/014.json writes agrees
+papaparse/unparse/018.json writes agrees
+papaparse/unparse/019.json writes agrees
+papaparse/unparse/027.json writes agrees
+papaparse/unparse/031.json writes agrees
+papaparse/unparse/032.json writes agrees
+papaparse/unparse/033.json writes agrees
+papaparse/unparse/049.json writes agrees
+papaparse/unparse/050.json writes agrees
+papaparse/unparse/051.json writes agrees
+papaparse/unparse/052.json writes agrees
+papaparse/unparse/054.json writes agrees

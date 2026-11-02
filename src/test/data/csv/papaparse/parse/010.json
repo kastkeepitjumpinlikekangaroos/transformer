@@ -1,0 +1,25 @@
+{
+ "description": "Mixed slash n and slash r should choose first as precident",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "e",
+   "f\rg",
+   "h",
+   "i"
+  ],
+  [
+   ""
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

@@ -1,0 +1,14 @@
+{
+ "description": "Specifying column names only (no data)",
+ "options": {
+  "header": "true",
+  "lineEnding": "\r\n"
+ },
+ "fields": [
+  "Col1",
+  "Col2",
+  "Col3"
+ ],
+ "rows": [],
+ "text": "Col1,Col2,Col3"
+}

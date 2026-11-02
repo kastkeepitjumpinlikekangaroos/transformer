@@ -1,0 +1,22 @@
+{
+ "description": "Custom delimiter (ASCII 30)",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n",
+  "delimiter": "\u001e"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "a",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "e",
+   "f"
+  ]
+ ],
+ "text": "a\u001eb\u001ec\r\nd\u001ee\u001ef"
+}

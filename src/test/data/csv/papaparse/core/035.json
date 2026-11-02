@@ -1,0 +1,26 @@
+{
+ "description": "Multiple consecutive empty fields",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   "",
+   "",
+   "c",
+   "d"
+  ],
+  [
+   "",
+   "",
+   "e",
+   "",
+   "",
+   "f"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

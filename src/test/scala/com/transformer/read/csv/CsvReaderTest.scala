@@ -247,6 +247,30 @@ class CsvReaderTest {
       rows(CsvReader.fromPath(p.toString, CsvOptions(charset = java.nio.charset.StandardCharsets.ISO_8859_1))))
   }
 
+  /** An empty file's message named it unquoted, `CSV file /x/a.csv is
+    * empty`, where every other message quotes its path; a gzip-compressed
+    * CSV (five of DuckDB's data/csv files) was refused as `line 1 is not
+    * valid UTF-8`, and read as garbage under a charset that decodes every
+    * byte. It is refused as compressed, naming the file (plans/testing/13,
+    * finding 6). */
+  @Test def anEmptyOrCompressedFileIsRefusedNamingIt(): Unit = {
+    val dir = Files.createTempDirectory("transformer-csv-")
+    val empty = dir.resolve("empty.csv")
+    Files.write(empty, Array.emptyByteArray)
+    assertEquals(s"CSV file '$empty' is empty", failure(CsvReader.fromPath(empty.toString, CsvOptions())))
+    val gz = dir.resolve("data.csv.gz")
+    val bytes = new java.io.ByteArrayOutputStream
+    val zip = new java.util.zip.GZIPOutputStream(bytes)
+    zip.write("a,b\n1,2\n".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+    zip.close()
+    Files.write(gz, bytes.toByteArray)
+    val compressed = s"CSV file '$gz' is compressed with gzip, and CSV is read as text: decompress it first"
+    assertEquals(compressed, failure(CsvReader.fromPath(gz.toString, CsvOptions())))
+    assertEquals(compressed, failure(rows(CsvReader.fromPath(gz.toString, explicitColumns("a" -> DataType.StringType)))))
+    assertEquals(compressed,
+      failure(CsvReader.fromPath(gz.toString, CsvOptions(charset = java.nio.charset.StandardCharsets.ISO_8859_1))))
+  }
+
   /** A field that does not read as its column's type fails naming the file,
     * line, column and text, where it used to throw a bare
     * NumberFormatException, or for a BOOLEAN read as false. */

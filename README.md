@@ -941,7 +941,11 @@ chosen `job.json` without re-running anything.
   is never closed, a row with more or fewer fields than the file has columns
   (its header, the schema, or its first row), and bytes that are no text in the
   `charset`. Text after a closing quote joins the field (`"a"b` is `ab`), and a
-  quote inside an unquoted field is a character of it.
+  quote inside an unquoted field is a character of it. An empty file is
+  refused (`CSV file 'x.csv' is empty`), and so is a file compressed with gzip
+  (`CSV file 'x.csv.gz' is compressed with gzip, and CSV is read as text:
+  decompress it first`), which was refused as text that is not UTF-8, or under
+  a charset that decodes every byte, read as garbage.
 - **Every field is read strictly as its column's type**, declared or inferred,
   and one that does not read as it fails the read, naming the file, line,
   column and text (for an inferred column, also where its type came from):
@@ -2276,9 +2280,12 @@ semantics are also pinned as sqllogictest scripts under `src/test/slt/`
 query's plan printed back as SQL), beside a slice of SQLite's own corpus,
 ports of Postgres's and Spark's tests with their answers, CockroachDB's and
 DataFusion's logic tests with theirs, and eleven TPC-H queries with
-RisingWave's. Parquet files other programs wrote, apache/parquet-testing's
-under `src/test/data/`, are each held to a line of a manifest: read as
-pyarrow reads them, or refused cleanly, naming the file. The suite reruns
+RisingWave's. Files other programs wrote are each held to a line of a
+manifest under `src/test/data/`: apache/parquet-testing's parquet and files
+pyarrow wrote, read as pyarrow reads them or refused cleanly, naming the file;
+and DuckDB's CSV files (its AFL crash inputs among them), PapaParse's cases
+and csv-spectrum's, read as the other parser reads them, otherwise by a rule
+of the ledger, or refused cleanly. The suite reruns
 under `--config=batch1`, `batch2`,
 `sharded`, `serial`, `zone` and `hashzero`, one JVM-wide setting each. Before landing a
 change, also run the jaffle-shop example (see [Examples](#examples)).

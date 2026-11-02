@@ -1,0 +1,28 @@
+{
+ "description": "Quoted fields with spaces between closing quote and next new line",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   "B",
+   "C",
+   "D"
+  ],
+  [
+   "E",
+   "F",
+   "G",
+   "H"
+  ],
+  [
+   "Q",
+   "W",
+   "E",
+   "R"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

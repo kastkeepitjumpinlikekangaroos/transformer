@@ -1,0 +1,15 @@
+{
+ "description": "Quoted field with 5 quotes in a row and a delimiter in there, too",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "1",
+   "cnonce=\"\",nc=\"\"",
+   "2"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

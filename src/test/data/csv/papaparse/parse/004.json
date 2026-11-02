@@ -1,0 +1,15 @@
+{
+ "description": "Quoted field with \\r",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   "B\rB",
+   "C"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

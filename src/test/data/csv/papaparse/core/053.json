@@ -1,0 +1,20 @@
+{
+ "description": "Input without comments with line starting with whitespace",
+ "options": {
+  "header": "false",
+  "delimiter": ","
+ },
+ "rows": [
+  [
+   "a"
+  ],
+  [
+   " b"
+  ],
+  [
+   "c"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

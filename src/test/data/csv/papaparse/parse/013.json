@@ -1,0 +1,16 @@
+{
+ "description": "Row with too few fields",
+ "options": {
+  "header": "true"
+ },
+ "rows": [
+  {
+   "A": "a",
+   "B": "b"
+  }
+ ],
+ "fields": null,
+ "errors": [
+  "TooFewFields"
+ ]
+}

@@ -1,0 +1,25 @@
+{
+ "description": "Delimiter is guessed correctly when a quoted field holds newlines and other delimiter characters",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "id",
+   "title",
+   "data"
+  ],
+  [
+   "1",
+   "row one",
+   "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3,\n  \"d\": 4\n}"
+  ],
+  [
+   "2",
+   "row two",
+   "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3,\n  \"d\": 4\n}"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

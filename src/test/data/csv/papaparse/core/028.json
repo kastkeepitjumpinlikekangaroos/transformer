@@ -1,0 +1,14 @@
+{
+ "description": "Quoted field contains delimiters and \\n with valid trailing quote",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "b,c\nd,e,f"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

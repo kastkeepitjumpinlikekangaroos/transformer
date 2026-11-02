@@ -1,0 +1,15 @@
+{
+ "description": "Quoted field with extra whitespace on edges",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   " B  ",
+   "C"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

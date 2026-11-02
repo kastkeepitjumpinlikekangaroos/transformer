@@ -1,0 +1,14 @@
+{
+ "description": "UTF-8 BOM encoded input with header produces column key stripped from invisible BOM character",
+ "options": {
+  "header": "true"
+ },
+ "rows": [
+  {
+   "A": "X",
+   "B": "Y"
+  }
+ ],
+ "fields": null,
+ "errors": []
+}

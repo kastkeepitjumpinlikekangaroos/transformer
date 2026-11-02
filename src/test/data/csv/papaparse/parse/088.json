@@ -1,0 +1,18 @@
+{
+ "description": "UTF-8 BOM encoded input is stripped from invisible BOM character",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   "B"
+  ],
+  [
+   "X",
+   "Y"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

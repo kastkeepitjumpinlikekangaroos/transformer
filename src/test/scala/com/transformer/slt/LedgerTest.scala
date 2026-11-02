@@ -11,8 +11,8 @@ import scala.jdk.CollectionConverters._
   * read, and against every script under `src/test/slt` each rule is cited by
   * a skip or pinned, each pin is a record of the engine's own answer
   * (`onlyif transformer <id>`) in the script of this repo's own its row
-  * names, or a file refused under the rule in the fixture manifest it names
-  * (`refused by-design <id>`), and a port, which keeps another engine's
+  * names, or a file read or refused under the rule in the fixture manifest
+  * it names (`by-design <id>`), and a port, which keeps another engine's
   * answers, holds the engine's only as the twins of its skips. */
 class LedgerTest {
 
@@ -57,7 +57,7 @@ class LedgerTest {
       val name = r.pinnedBy
       if (r.pinnedByManifest) {
         if (!Files.isRegularFile(Paths.get(name))) Some(s"${r.id}: the manifest that pins it, $name, does not exist")
-        else if (!manifestCitations(name).contains(r.id)) Some(s"${r.id}: $name refuses no file 'by-design ${r.id}'")
+        else if (!manifestCitations(name).contains(r.id)) Some(s"${r.id}: $name holds no file 'by-design ${r.id}'")
         else None
       }
       else if (!Files.isRegularFile(Root.resolve(name))) Some(s"${r.id}: the script that pins it, $name, does not exist")

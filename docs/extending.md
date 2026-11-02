@@ -242,9 +242,14 @@ is the pattern.
    if none fits), or `refused <text>`. A file another reader reads that the
    engine refuses with no rule behind it is a finding: keep it `refused`,
    mark it `# held: ...`, and list it in gotchas.md for the user.
-4. The test (`read/parquet:parquet_testing_test`) reads every file under the
-   directory, so a file with no line fails; add the directory's filegroup to
-   its `data`, and the manifest to `slt:ledger_test`'s if a rule cites it.
+4. The test (`read/parquet:parquet_testing_test`, `read/csv:csv_corpus_test`)
+   reads every file under the directory, so a file with no line fails; add
+   the directory's filegroup to its `data`, and the manifest to
+   `slt:ledger_test`'s if a rule cites it. A case with another parser's
+   reading beside it (`papaparse/NNN.json`) is `agrees`, or `differs
+   by-design <id> <expect>` when a ledger rule makes the engine's reading its
+   own; `csv_corpus_test`'s report mode prints the engine's reading of every
+   input to make the line from.
 
 ## Add a fault point
 

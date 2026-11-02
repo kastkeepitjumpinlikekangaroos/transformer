@@ -1,0 +1,9 @@
+{
+ "description": "Header row only",
+ "options": {
+  "header": "true"
+ },
+ "rows": [],
+ "fields": null,
+ "errors": []
+}
