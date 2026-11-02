@@ -225,6 +225,31 @@ object Lexer {
     }
   }
 
+  /** Whether `sql` orders its result: an `ORDER BY` outside parentheses (one
+    * inside a window's `OVER (...)` or a subquery orders no result). */
+  def ordersResult(sql: String): Boolean = {
+    val t = tokens(sql)
+    var depth = 0
+    t.indices.exists { i =>
+      if (t(i).kind == Token.Symbol && t(i).text == "(") depth += 1
+      else if (t(i).kind == Token.Symbol && t(i).text == ")") depth -= 1
+      depth == 0 && t(i).kind == Token.Word && t(i).upper == "ORDER" && t.lift(i + 1).exists(_.upper == "BY")
+    }
+  }
+
+  /** Whether `sql` keeps some rows of its result and not others with no
+    * `ORDER BY` to say which: a `LIMIT`, `OFFSET` or `FETCH` outside
+    * parentheses in a query that orders nothing. */
+  def keepsUnorderedRows(sql: String): Boolean = !ordersResult(sql) && {
+    val t = tokens(sql)
+    var depth = 0
+    t.exists { tk =>
+      if (tk.kind == Token.Symbol && tk.text == "(") depth += 1
+      else if (tk.kind == Token.Symbol && tk.text == ")") depth -= 1
+      depth == 0 && tk.kind == Token.Word && Set("LIMIT", "OFFSET", "FETCH", "TOP")(tk.upper)
+    }
+  }
+
   /** Whether `sql` is an EXPLAIN, whose plan text differs by mode, so it
     * runs in the baseline alone. */
   def explains(sql: String): Boolean =

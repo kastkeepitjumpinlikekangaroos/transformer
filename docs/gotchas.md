@@ -2445,6 +2445,51 @@ in `slt_test`, which fails once the engine gives CockroachDB's answer:
   cast to TIMESTAMP, which the engine has no cast for. No answer differs. The
   recommendation is to leave them held, as the Spark and Postgres ports did.
 
+## What DataFusion's sqllogictest files held out (2026-11-02, held for the user)
+
+Vendoring 27 of Apache DataFusion's sqllogictest files at `934691e`
+(`src/test/slt/datafusion/`,
+[plans/testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md))
+took the same decisions overnight. DataFusion's answers outside `pg_compat`
+are one engine's, so each difference was read before it was put down to a
+rule: most are the ledger's (`nulls-sort-low`, since DataFusion sorts NULL
+last under `ASC`; `div-zero-null` and `math-domain-null`, where DataFusion
+answers an infinity or NaN or raises an error; `decimal-result-type`), and its
+`EXPLAIN` records print DataFusion's own plans and are held for it. What no
+decision covers, held as `onlyif datafusion # held: finding D<n>`:
+
+- **D1. `ROUND` takes a number of places past INT** (`math`, `scalar`, 2):
+  `round(1.25, 2147483648)` answers 1.25, where DataFusion refuses the places
+  as past its i32. The options: refuse places past INT, naming them
+  (recommended, beside the README's LIMIT and OFFSET past BIGINT); or keep it.
+- **D2. `CONCAT` of no arguments is the empty string** (`scalar`, 1), where
+  DataFusion refuses it. The options: refuse it, as `COUNT()` is refused
+  (recommended); or keep it.
+- **D3. `CONCAT(NULL)` is NULL** (`expr`, 1), where DataFusion, like Postgres's
+  `concat()`, skips a NULL argument and answers the empty string. The engine's
+  `CONCAT` is `||` by another name. The options: keep it and say so where the
+  README lists the string functions (recommended); or skip NULLs as Postgres's
+  `concat()` does.
+- **D4. Two output columns may share a name** (`aggregate`, 1): `SELECT state,
+  sum(salary) AS state ... GROUP BY state` answers, where DataFusion refuses
+  the second `state`. Postgres answers too. The recommendation is to keep it,
+  with a ledger row.
+- **D5. A window frame that starts after it ends is empty** (`window`, 2):
+  `RANGE BETWEEN 1 PRECEDING AND 2 PRECEDING` counts no rows, where DataFusion
+  refuses the frame; Postgres answers as the engine does. The recommendation
+  is to keep it, with a ledger row.
+- **D6. A sliding window's `VAR` and `STDDEV` agree with DataFusion's to 11
+  digits** (`window`, 1), not the 15 a DOUBLE is compared at: the engine's
+  `46721.333333333234` is nearer the exact 46721⅓ than DataFusion's
+  `46721.33333333174`. No change is recommended; the record stays held, as one
+  engine's less exact answer.
+- **D7. Records both engines refuse, for different reasons** (27): the engine
+  refuses by a rule of its own first (a NOT of an integer, a string condition,
+  a `LIMIT` that is no literal, `HAVING` or `GROUP BY` an output name, a LAG
+  offset that is no literal, a RANGE offset written as text, a self-join with
+  no aliases, a numeric literal past `DECIMAL`'s 38 digits), where DataFusion
+  refuses for its own. The recommendation is to leave them held.
+
 ## Answers that differ from other engines by design
 
 The engine answers some queries otherwise than another engine does, on

@@ -315,4 +315,26 @@ class RunnerTest {
   @Test def anRe2PatternReadsAsJavaReadsIt(): Unit = {
     assertEquals("<tuple\\{int\\}> IN x{2}", Runner.javaRegex("<tuple{int}> IN x{2}"))
   }
+
+  @Test def aResultNoOrderByOrdersComparesAsAMultiset(): Unit = {
+    val r = runAs(Dialect.DataFusion(),
+      "statement ok", "CREATE TABLE t (a BIGINT UNSIGNED, b INT)", "",
+      "statement ok", "INSERT INTO t VALUES (18446744073709551615, 2), (1, 1)", "",
+      // An unsigned 64-bit column is the DECIMAL(20,0) that holds each value,
+      // which an I column takes.
+      "query II", "SELECT a, b FROM t", "----", "1 1", "18446744073709551615 2", "",
+      "query II", "SELECT a, b FROM t ORDER BY b DESC", "----", "18446744073709551615 2", "1 1")
+    assertEquals("", problems(r))
+    val ordered = runAs(Dialect.DataFusion(),
+      "statement ok", "CREATE TABLE t (b INT)", "", "statement ok", "INSERT INTO t VALUES (2), (1)", "",
+      "query I", "SELECT b FROM t ORDER BY b", "----", "2", "1")
+    assertTrue(problems(ordered), problems(ordered).contains("expected [2] got [1]"))
+  }
+
+  @Test def aHeldRecordWhoseRowsNoOrderByFixesIsNotRun(): Unit = {
+    val held = runAs(Dialect.DataFusion(),
+      "statement ok", "CREATE TABLE t (b INT)", "", "statement ok", "INSERT INTO t VALUES (2), (1)", "",
+      "onlyif datafusion # needs the rows its plan reaches first", "query I", "SELECT b FROM t LIMIT 1", "----", "2")
+    assertEquals(Skipped("held for datafusion", None), held.results.last.outcome)
+  }
 }

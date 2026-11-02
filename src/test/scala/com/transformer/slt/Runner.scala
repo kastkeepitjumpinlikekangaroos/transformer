@@ -36,8 +36,11 @@ import scala.util.control.NonFatal
   * out fails there, rather than passing unseen. A record such a script holds
   * for its own engine (`onlyif cockroachdb`), for what it needs or as a
   * finding not yet decided, runs once in the baseline, if it is a query the
-  * parser can read ([[Dialect.unreadable]]), and must still not pass, or it is
-  * [[Runner.Stale]] ([[Runner.checkHeld]]).
+  * parser can read ([[Dialect.unreadable]]) whose rows are fixed (no `LIMIT`
+  * without an `ORDER BY`, [[Lexer.keepsUnorderedRows]]), and must still not
+  * pass, or it is [[Runner.Stale]] ([[Runner.checkHeld]]). Such a script's
+  * result that no `ORDER BY` orders compares as a multiset, as its rows come
+  * in the order the plan leaves them in.
   */
 final class Runner(dialect: Dialect, ledger: Ledger, modes: Seq[Mode] = Modes.Verification,
     audit: Option[Runner.Audit] = None) {
@@ -276,7 +279,7 @@ final class Runner(dialect: Dialect, ledger: Ledger, modes: Seq[Mode] = Modes.Ve
   private def checkHeld(rec: Record, db: Database, views: Modes.Views): Outcome = {
     val held = Skipped(s"held for ${format.upstream.getOrElse("its engine")}", None)
     val written = Script.sqlOf(rec).getOrElse("")
-    if (!startsQuery(written) || dialect.unreadable(written)) return held
+    if (!startsQuery(written) || dialect.unreadable(written) || Lexer.keepsUnorderedRows(written)) return held
     val sql = dialect.prepare(written)
     val base =
       try Right(run(sql, db, views, Modes.Baseline))
@@ -363,27 +366,33 @@ final class Runner(dialect: Dialect, ledger: Ledger, modes: Seq[Mode] = Modes.Ve
   /** A result as the verification modes compare it with the baseline's: its
     * values printed as the record's columns print them, in the order its
     * sort mode compares them. A CockroachDB or sqllogictest-rs record's rows
-    * are sorted as text unless it keeps their order, and a float in them is
-    * printed to the 15 significant digits its answer is compared at, since a
-    * statistic's last digits follow the order its partial results merge in,
-    * which the layout sets. */
+    * are compared as a multiset, its order checked against the record in the
+    * baseline alone: rows its ORDER BY leaves tied come in the order the
+    * layout gives them, and a vendored file cannot add the key that would
+    * break the tie. A float in them is printed to the 15 significant digits
+    * its answer is compared at, since a statistic's last digits follow the
+    * order its partial results merge in, which the layout sets. */
   private def printedResult(q: Query, schema: Schema, rows: Vector[Array[Any]]): Vector[String] =
     if (format == Script.Format.Sqlite) Values.arrange(Values.formatRows(rows, q.columns), q.sort)
     else {
       val printed = rows.map(r => q.columns.indices.map(c => r(c) match {
         case d: java.lang.Double if !d.isNaN && !d.isInfinite && d.doubleValue != 0.0 =>
-          new java.math.BigDecimal(d.doubleValue).round(new java.math.MathContext(15)).toString
+          new java.math.BigDecimal(d.doubleValue).round(new java.math.MathContext(15)).stripTrailingZeros.toString
         case f: java.lang.Float if !f.isNaN && !f.isInfinite && f.floatValue != 0.0f =>
-          new java.math.BigDecimal(f.doubleValue).round(new java.math.MathContext(7)).toString
+          new java.math.BigDecimal(f.doubleValue).round(new java.math.MathContext(7)).stripTrailingZeros.toString
         case v => Values.upstream(v, format)
       }).mkString("\u0001"))
-      if (q.sort == SortMode.NoSort && q.partialSort.isEmpty) printed else printed.sorted
+      printed.sorted
     }
 
   /** What the record's `----` block says that the result does not, or None. */
   private def answerProblem(q: Query, schema: Schema, rows: Vector[Array[Any]]): Option[String] = q.expected match {
     case Expected.Rows(lines) =>
-      Values.checkRows(lines, q.columns, q.sort, q.partialSort, q.colNames, schema.fields.map(_.name),
+      // A result no ORDER BY orders comes in the order the plan leaves it in,
+      // which the other engine's need not share: it compares as a multiset.
+      val sort = if (q.sort == SortMode.NoSort && q.partialSort.isEmpty && !Lexer.ordersResult(q.sql)) SortMode.RowSort
+        else q.sort
+      Values.checkRows(lines, q.columns, sort, q.partialSort, q.colNames, schema.fields.map(_.name),
         schema.fields.map(f => f.dataType == DataType.DoubleType || f.dataType == DataType.FloatType), rows, format)
     case Expected.Hash(n, md5) if format != Script.Format.Sqlite =>
       val got = Values.hashLine(Values.upstreamWords(q.columns.length, q.sort, rows, format))
@@ -454,7 +463,7 @@ object Runner {
       "(?i)aggregate functions are not allowed|aggregate function calls cannot be nested".r,
       "Aggregate '[^']*' used in non-aggregating position|cannot refer to aggregate".r),
     Reason("a window function where none can be",
-      "(?i)window functions are not allowed|window function calls cannot be nested".r,
+      "(?i)window functions are not allowed|window function calls cannot be nested|window function calls? (are|is) not allowed".r,
       "Window function '[^']*' used in non-window position".r),
     Reason("an integer past its type", "(?i)integer out of range".r, "Integer overflow".r),
     Reason("a decimal past its type", "(?i)value with precision \\d+, scale \\d+ must round|numeric field overflow".r,
@@ -464,8 +473,9 @@ object Runner {
     Reason("a key that reads no column", "(?i)non-integer constant in (ORDER|GROUP) BY".r, "reads no column".r),
     Reason("arms of a UNION of different widths", "(?i)must have the same number of columns".r,
       "different column counts".r),
-    Reason("an ambiguous name", "(?i)is ambiguous".r, "(?i)ambiguous".r),
-    Reason("text that is no value of its type", "(?i)could not parse \"|invalid input syntax for type".r,
+    Reason("an ambiguous name", "(?i)is ambiguous|ambiguous reference".r, "(?i)ambiguous".r),
+    Reason("a join with no condition", "(?i)join condition".r, "needs an ON condition".r),
+    Reason("text that is no value of its type", "(?i)could not parse \"|invalid input syntax for type|cannot cast string".r,
       "Cannot cast '".r),
     Reason("text that does not parse", "(?i)syntax error".r, "SQL parse error".r),
     Reason("a DECIMAL's scale past its precision", "(?i)scale \\S+ must be between 0 and precision".r,

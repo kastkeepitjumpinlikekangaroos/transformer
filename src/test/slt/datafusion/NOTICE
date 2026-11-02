@@ -1,0 +1,21 @@
+Apache DataFusion's sqllogictest files
+
+The scripts in this directory are files of Apache DataFusion's
+datafusion/sqllogictest/test_files/ at commit
+934691e9af8f11bf4b629f21bb17795abfb84d93 (https://github.com/apache/datafusion),
+each as it is there but for its header and the condition lines added before its
+records (`skipif transformer <id>`, `onlyif datafusion # ...`) and the twins after
+some of them; join_part.test is test_files/join.slt.part, which join_only.slt
+includes. data/ holds the CSV files they read: aggregate_test_100.csv from Apache
+Arrow's arrow-testing (data/csv/, at commit
+7df2b70baf4f081ebf8e0c6bd22745cf3cbfd824, DataFusion's testing submodule), and the
+others from DataFusion's datafusion/core/tests/data/ at the same commit.
+
+Apache DataFusion
+Copyright 2019-2026 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Both are under the Apache License, Version 2.0, whose text is LICENSE beside this
+file.

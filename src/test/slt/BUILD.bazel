@@ -11,7 +11,10 @@
 # lines that say what the engine does with each record, under the Apache License
 # 2.0 since their BSL's Change Date, 2026-10-01 (cockroach/LICENSE,
 # cockroach/NOTICE; postgresjoin.test also under the PostgreSQL License,
-# cockroach/POSTGRESQL-LICENSE); every other script is this repo's own. A `.data` file
+# cockroach/POSTGRESQL-LICENSE); datafusion/ files of Apache DataFusion's
+# sqllogictest files at 934691e, vendored the same way, and in datafusion/data/
+# the CSV files they read, under the Apache License 2.0 (datafusion/LICENSE,
+# datafusion/NOTICE); every other script is this repo's own. A `.data` file
 # is a table's rows, which a script loads with COPY: postgres/data/ holds
 # Postgres's own, as its regression suite loads them.
 filegroup(
@@ -19,6 +22,7 @@ filegroup(
     srcs = glob([
         "**/*.test",
         "**/*.data",
+        "datafusion/data/*.csv",
         "postgres/sql/*.sql",
         "postgres/expected/*.out",
     ]),

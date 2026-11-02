@@ -1,0 +1,232 @@
+# From Apache DataFusion's sqllogictest files (https://github.com/apache/datafusion):
+# datafusion/sqllogictest/test_files/pg_compat/pg_compat_union.slt at commit
+# 934691e9af8f11bf4b629f21bb17795abfb84d93, as it is there but for this header
+# and the condition lines added before records, under the Apache License 2.0
+# (LICENSE beside this file; NOTICE says whose they are).
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 9 records: 3 run as DataFusion answers them; 4 skipped by a rule of the
+# ledger in docs/gotchas.md (refused-subquery 4).
+
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
+# SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
+
+onlyif postgres
+statement ok
+CREATE TABLE aggregate_test_100_by_sql
+(
+    c1  character varying NOT NULL,
+    c2  smallint          NOT NULL,
+    c3  smallint          NOT NULL,
+    c4  smallint,
+    c5  integer,
+    c6  bigint            NOT NULL,
+    c7  smallint          NOT NULL,
+    c8  integer           NOT NULL,
+    c9  bigint            NOT NULL,
+    c10 character varying NOT NULL,
+    c11 real              NOT NULL,
+    c12 double precision  NOT NULL,
+    c13 character varying NOT NULL
+);
+
+# Copy the data
+onlyif postgres
+statement ok
+COPY aggregate_test_100_by_sql
+    FROM '../../testing/data/csv/aggregate_test_100.csv'
+    DELIMITER ','
+    CSV HEADER;
+
+###
+## Setup test for datafusion
+###
+skipif postgres
+statement ok
+CREATE EXTERNAL TABLE aggregate_test_100_by_sql (
+  c1  VARCHAR NOT NULL,
+  c2  TINYINT NOT NULL,
+  c3  SMALLINT NOT NULL,
+  c4  SMALLINT,
+  c5  INT,
+  c6  BIGINT NOT NULL,
+  c7  SMALLINT NOT NULL,
+  c8  INT NOT NULL,
+  c9  BIGINT UNSIGNED NOT NULL,
+  c10 VARCHAR NOT NULL,
+  c11 FLOAT NOT NULL,
+  c12 DOUBLE NOT NULL,
+  c13 VARCHAR NOT NULL
+)
+STORED AS CSV
+LOCATION '../../testing/data/csv/aggregate_test_100.csv'
+OPTIONS ('format.has_header' 'true');
+
+skipif transformer refused-subquery
+query I rowsort
+SELECT * FROM (
+    SELECT c2
+    FROM aggregate_test_100_by_sql t1
+    EXCEPT
+    SELECT c2
+    FROM aggregate_test_100_by_sql t2
+    WHERE c2 IN (3, 4)
+) s
+----
+1
+2
+5
+
+skipif transformer refused-subquery
+query I rowsort
+SELECT * FROM (
+    SELECT c2
+    FROM aggregate_test_100_by_sql t1
+    EXCEPT ALL
+    SELECT c2
+    FROM aggregate_test_100_by_sql t2
+    WHERE c2 IN (3, 4)
+) s
+----
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+5
+
+
+skipif transformer refused-subquery
+query I rowsort
+SELECT * FROM (
+    SELECT c2
+    FROM aggregate_test_100_by_sql t1
+    INTERSECT
+    SELECT c2
+    FROM aggregate_test_100_by_sql t2
+    WHERE c2 IN (3, 4)
+) s
+----
+3
+4
+
+
+skipif transformer refused-subquery
+query I rowsort
+SELECT * FROM (
+    SELECT c2
+    FROM aggregate_test_100_by_sql t1
+    INTERSECT ALL
+    SELECT c2
+    FROM aggregate_test_100_by_sql t2
+    WHERE c2 IN (3, 4)
+) s
+----
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+3
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+4
+
+
+query I
+SELECT 1 num UNION ALL SELECT 2 num ORDER BY num;
+----
+1
+2
+
+########
+# Clean up after the test
+########
+statement ok
+DROP TABLE aggregate_test_100_by_sql

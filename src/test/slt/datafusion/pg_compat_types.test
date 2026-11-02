@@ -1,0 +1,129 @@
+# From Apache DataFusion's sqllogictest files (https://github.com/apache/datafusion):
+# datafusion/sqllogictest/test_files/pg_compat/pg_compat_types.slt at commit
+# 934691e9af8f11bf4b629f21bb17795abfb84d93, as it is there but for this header
+# and the condition lines added before records, under the Apache License 2.0
+# (LICENSE beside this file; NOTICE says whose they are).
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 20 records: 10 run as DataFusion answers them; 10 held for DataFusion,
+# `onlyif datafusion # needs ...`, by what they need: a type the engine has not
+# 7, a value or type the dialect reads otherwise 3.
+
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
+# SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
+
+query T
+select null::VARCHAR
+----
+NULL
+
+query TT
+select 'a'::VARCHAR, ''::VARCHAR
+----
+a (empty)
+
+skipif postgres
+query TT
+select 'a'::CHAR, ''::CHAR
+----
+a (empty)
+
+query TT
+select 'a'::TEXT, ''::TEXT
+----
+a (empty)
+
+skipif postgres
+onlyif datafusion # needs a CAST to TINYINT
+query I
+select -1::TINYINT
+----
+-1
+
+onlyif datafusion # needs a CAST to SMALLINT
+query I
+select -1::SMALLINT
+----
+-1
+
+query II
+select -1::INT as one, -2::INTEGER as two
+----
+-1 -2
+
+query I
+select -1::BIGINT
+----
+-1
+
+skipif postgres
+onlyif datafusion # needs a CAST to TINYINT UNSIGNED
+query I
+select 1::TINYINT UNSIGNED
+----
+1
+
+onlyif datafusion # needs a CAST to SMALLINT UNSIGNED
+query I
+select 1::SMALLINT UNSIGNED
+----
+1
+
+skipif postgres
+onlyif datafusion # needs a CAST to INT UNSIGNED
+query II
+select 1::INT UNSIGNED as one, 2::INTEGER UNSIGNED as two
+----
+1 2
+
+onlyif datafusion # needs a CAST to BIGINT UNSIGNED
+query I
+select 1::BIGINT UNSIGNED
+----
+1
+
+onlyif datafusion # needs float text the engine does not read ('+Inf')
+query RRRRR
+select 1.0::FLOAT, 1.023::FLOAT, 'NaN'::FLOAT,'+Inf'::FLOAT,'-Inf'::FLOAT
+----
+1 1.023 NaN Infinity -Infinity
+
+onlyif datafusion # needs float text the engine does not read ('+Inf')
+query RRRRR
+select 1.0::REAL, 1.023::REAL, 'NaN'::REAL,'+Inf'::REAL,'-Inf'::REAL
+----
+1 1.023 NaN Infinity -Infinity
+
+skipif postgres
+onlyif datafusion # needs double text the engine does not read ('+Inf')
+query RRRRR
+select 1.0::DOUBLE, 1.023::DOUBLE, 'NaN'::DOUBLE,'+Inf'::DOUBLE,'-Inf'::DOUBLE
+----
+1 1.023 NaN Infinity -Infinity
+
+query RRR
+select 1.0::DECIMAL(5,3) as one, 2.023::DECIMAL(5,3) as two, 3.023::DECIMAL(5,2) as three
+----
+1.000 2.023 3.02
+
+query D
+select '2018-01-01'::DATE
+----
+2018-01-01
+
+onlyif datafusion # needs a CAST to TIME
+query D
+select '12:00:01'::TIME
+----
+12:00:01
+
+query P
+select '2018-01-01 12:00:00'::TIMESTAMP
+----
+2018-01-01T12:00:00
+
+query BB
+select true::BOOLEAN, 'false'::BOOLEAN
+----
+true false

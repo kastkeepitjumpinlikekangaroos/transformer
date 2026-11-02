@@ -287,12 +287,16 @@ object Values {
   }
 
   /** Whether a result column of type `t` is of the kind a letter names, or
-    * what it is instead: `I` an integer, `R` and `F` a number, `B` a
+    * what it is instead: `I` an integer (a `DECIMAL` of no places too), `R`
+    * and `F` a number, `B` a
     * boolean, `D` a date, `P` a timestamp; any other letter takes any type,
     * as does a column of NULLs. */
   def letterProblem(letter: Char, t: DataType): Option[String] = {
     val ok = t == DataType.NullType || (letter match {
-      case 'I' => t == DataType.IntType || t == DataType.LongType
+      case 'I' => t == DataType.IntType || t == DataType.LongType || (t match {
+        case DataType.DecimalType(_, 0) => true
+        case _ => false
+      })
       case 'R' | 'F' => DataType.isNumeric(t)
       case 'B' => t == DataType.BooleanType
       case 'D' => t == DataType.DateType

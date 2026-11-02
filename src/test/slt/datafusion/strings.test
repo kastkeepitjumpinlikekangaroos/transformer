@@ -1,0 +1,475 @@
+# From Apache DataFusion's sqllogictest files (https://github.com/apache/datafusion):
+# datafusion/sqllogictest/test_files/strings.slt at commit
+# 934691e9af8f11bf4b629f21bb17795abfb84d93, as it is there but for this header
+# and the condition lines added before records, under the Apache License 2.0
+# (LICENSE beside this file; NOTICE says whose they are).
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 68 records: 16 run as DataFusion answers them; 52 held for DataFusion,
+# `onlyif datafusion # needs ...`, by what they need: a clause or construct the
+# engine refuses 47, a type the engine has not 3, a statement the runner does
+# not carry out 2.
+
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
+# SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
+
+statement ok
+CREATE TABLE test(
+  s TEXT
+) as VALUES
+  ('p1'),
+  ('p1e1'),
+  ('p1m1e1'),
+  ('P1'),
+  ('P1e1'),
+  ('P1m1e1'),
+  ('e1'),
+  ('p2'),
+  ('p2e1'),
+  ('p2m1e1')
+;
+
+# LIKE
+query T rowsort
+SELECT s FROM test WHERE s LIKE 'p1%';
+----
+p1
+p1e1
+p1m1e1
+
+query T rowsort
+SELECT s FROM test WHERE s LIKE '%m1%';
+----
+P1m1e1
+p1m1e1
+p2m1e1
+
+# REGEX
+onlyif datafusion # needs The ~ operator
+query T rowsort
+SELECT s FROM test WHERE s ~ 'p[12].*';
+----
+p1
+p1e1
+p1m1e1
+p2
+p2e1
+p2m1e1
+
+# REGEX nocase
+onlyif datafusion # needs The ~* operator
+query T rowsort
+SELECT s FROM test WHERE s ~* 'p[12].*';
+----
+P1
+P1e1
+P1m1e1
+p1
+p1e1
+p1m1e1
+p2
+p2e1
+p2m1e1
+
+# SIMILAR TO with `%` wildcard (zero or more characters)
+onlyif datafusion # needs SIMILAR TO
+query T rowsort
+SELECT s FROM test WHERE s SIMILAR TO 'p1%';
+----
+p1
+p1e1
+p1m1e1
+
+# SIMILAR TO with `_` wildcard (exactly one character)
+onlyif datafusion # needs SIMILAR TO
+query T rowsort
+SELECT s FROM test WHERE s SIMILAR TO 'p_';
+----
+p1
+p2
+
+# SIMILAR TO requires full-string match (no implicit substring)
+onlyif datafusion # needs SIMILAR TO
+query T rowsort
+SELECT s FROM test WHERE s SIMILAR TO 'p1';
+----
+p1
+
+# SIMILAR TO treats `. ^ $` as SQL literals (not as regex metachars).
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'a.' SIMILAR TO 'a.';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'ab' SIMILAR TO 'a.';
+----
+false
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT '^x$' SIMILAR TO '^x$';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'x' SIMILAR TO '^x$';
+----
+false
+
+# SIMILAR TO supports the POSIX metacharacters `| * + ? ( ) { } [ ]`.
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'a' SIMILAR TO 'a|b';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'c' SIMILAR TO 'a|b';
+----
+false
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT '' SIMILAR TO 'a*';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'aa' SIMILAR TO 'a*';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'ab' SIMILAR TO 'a*';
+----
+false
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'a' SIMILAR TO 'a+';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT '' SIMILAR TO 'a+';
+----
+false
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT '' SIMILAR TO 'a?';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'a' SIMILAR TO 'a?';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'aa' SIMILAR TO 'a?';
+----
+false
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'ab' SIMILAR TO '(ab)';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'a' SIMILAR TO 'a{2}';
+----
+false
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'aa' SIMILAR TO 'a{2}';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'a' SIMILAR TO '[ab]';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'c' SIMILAR TO '[ab]';
+----
+false
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'c' SIMILAR TO '[^ab]';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'a' SIMILAR TO '[^ab]';
+----
+false
+
+# SIMILAR TO wildcards match newlines.
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'a' || chr(10) || 'b' SIMILAR TO 'a%b';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'a' || chr(10) || 'b' SIMILAR TO 'a_b';
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'ab' SIMILAR TO 'a_b';
+----
+false
+
+# SIMILAR TO with a dynamic (column) pattern: wildcards and regex-only
+# metacharacters are translated the same way as for literal patterns.
+statement ok
+CREATE TABLE dynamic_patterns(text TEXT, pattern TEXT) AS VALUES
+  ('abc', 'a%'),
+  ('ab', 'a.'),
+  ('x', '_'),
+  ('hello world', 'hello%');
+
+onlyif datafusion # needs SIMILAR TO
+query T rowsort
+SELECT text FROM dynamic_patterns WHERE text SIMILAR TO pattern;
+----
+abc
+hello world
+x
+
+onlyif datafusion # needs SIMILAR TO
+query T rowsort
+SELECT text FROM dynamic_patterns WHERE text NOT SIMILAR TO pattern;
+----
+ab
+
+statement ok
+DROP TABLE dynamic_patterns;
+
+# SIMILAR TO with a dynamic pattern produced by a function.
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'abc' SIMILAR TO concat('a', '%');
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'ab' SIMILAR TO concat('a', '.');
+----
+false
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'x' SIMILAR TO lower('X');
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'X' SIMILAR TO lower('X');
+----
+false
+
+# NOT SIMILAR TO with a literal pattern.
+onlyif datafusion # needs SIMILAR TO
+query T rowsort
+SELECT s FROM test WHERE s NOT SIMILAR TO 'p1%';
+----
+P1
+P1e1
+P1m1e1
+e1
+p2
+p2e1
+p2m1e1
+
+# SIMILAR TO NULL pattern returns NULL.
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'a' SIMILAR TO NULL;
+----
+NULL
+
+# SIMILAR TO with a non-string pattern is rejected by the analyzer.
+onlyif datafusion # needs SIMILAR TO
+statement error There isn't a common type to coerce Utf8 and Int64 in SIMILAR TO expression
+SELECT 'a' SIMILAR TO 1;
+
+# The value and the pattern are coerced to a common string type, so mixing
+# `Utf8`, `LargeUtf8` and `Utf8View` works instead of failing in the regex
+# kernel.
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT 'abc' SIMILAR TO arrow_cast('a%', 'LargeUtf8');
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT arrow_cast('ab', 'Utf8View') SIMILAR TO arrow_cast('a.', 'LargeUtf8');
+----
+false
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT arrow_cast('a', 'Utf8View') SIMILAR TO NULL;
+----
+NULL
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT arrow_cast('a', 'LargeUtf8') SIMILAR TO arrow_cast(NULL, 'Utf8View');
+----
+NULL
+
+statement ok
+CREATE TABLE mixed_patterns(text TEXT, pattern TEXT) AS VALUES ('abc', 'a%');
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT text SIMILAR TO arrow_cast(pattern, 'LargeUtf8') FROM mixed_patterns;
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT arrow_cast(text, 'Utf8View') SIMILAR TO arrow_cast(pattern, 'LargeUtf8')
+FROM mixed_patterns;
+----
+true
+
+# Dictionary-encoded values are coerced to their value type.
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT arrow_cast(text, 'Dictionary(Int32, Utf8)') SIMILAR TO 'a%'
+FROM mixed_patterns;
+----
+true
+
+onlyif datafusion # needs SIMILAR TO
+query B
+SELECT arrow_cast(text, 'Dictionary(Int32, Utf8)') SIMILAR TO pattern
+FROM mixed_patterns;
+----
+true
+
+statement ok
+DROP TABLE mixed_patterns;
+
+# NOT LIKE
+query T rowsort
+SELECT s FROM test WHERE s NOT LIKE 'p1%';
+----
+P1
+P1e1
+P1m1e1
+e1
+p2
+p2e1
+p2m1e1
+
+
+# ILIKE
+query T rowsort
+SELECT s FROM test WHERE s ILIKE 'p1%';
+----
+P1
+P1e1
+P1m1e1
+p1
+p1e1
+p1m1e1
+
+query T rowsort
+SELECT s FROM test WHERE s ILIKE 'p1';
+----
+P1
+p1
+
+# NOT ILIKE
+query T rowsort
+SELECT s FROM test WHERE s NOT ILIKE 'p1%';
+----
+e1
+p2
+p2e1
+p2m1e1
+
+## VARCHAR with length support
+
+# Lengths can be used by default
+onlyif datafusion # needs a CAST to VARCHAR (2)
+query T
+SELECT '12345'::VARCHAR(2);
+----
+12345
+
+# Lengths can not be used when the config setting is disabled
+
+onlyif datafusion # needs SET statement
+statement ok
+set datafusion.sql_parser.support_varchar_with_length = false;
+
+query error
+SELECT '12345'::VARCHAR(2);
+
+query error
+SELECT s::VARCHAR(2) FROM (VALUES ('12345')) t(s);
+
+statement ok
+create table vals(s char) as values('abc'), ('def');
+
+query error
+SELECT s::VARCHAR(2) FROM vals
+
+# Lengths can be used when the config setting is enabled
+
+onlyif datafusion # needs SET statement
+statement ok
+set datafusion.sql_parser.support_varchar_with_length = true;
+
+onlyif datafusion # needs a CAST to VARCHAR (2)
+query T
+SELECT '12345'::VARCHAR(2)
+----
+12345
+
+onlyif datafusion # needs VALUES in FROM
+query T
+SELECT s::VARCHAR(2) FROM (VALUES ('12345')) t(s)
+----
+12345
+
+onlyif datafusion # needs a CAST to VARCHAR (2)
+query T
+SELECT s::VARCHAR(2) FROM vals
+----
+abc
+def
+
+statement ok
+drop table vals;

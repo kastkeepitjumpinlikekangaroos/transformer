@@ -1000,10 +1000,10 @@ object Dialect {
   /** DataFusion's sqllogictest files, read as DataFusion stores their
     * values: `INT` and `INTEGER` an INT, `BIGINT` a BIGINT, `TINYINT` and
     * `SMALLINT` an INT (and unsigned, an INT for a byte, a BIGINT for 16 or
-    * 32 bits), `FLOAT` and `REAL` a FLOAT, `DOUBLE` a DOUBLE, `VARCHAR`,
-    * `TEXT`, `STRING` and `CHAR` a STRING, `DECIMAL(p,s)` as written; a
-    * `BIGINT UNSIGNED`, an `INTERVAL`, a `BYTEA` or an array column is left
-    * out of its table. A VALUES table types a whole number a BIGINT and a
+    * 32 bits, the `DECIMAL(20,0)` that holds each value for 64), `FLOAT` and
+    * `REAL` a FLOAT, `DOUBLE` a DOUBLE, `VARCHAR`, `TEXT`, `STRING` and `CHAR`
+    * a STRING, `DECIMAL(p,s)` as written; an `INTERVAL`, a `BYTEA` or an
+    * array column is left out of its table. A VALUES table types a whole number a BIGINT and a
     * number with a point a DOUBLE, as DataFusion does. A `SET datafusion.`
     * setting of execution, the optimizer or EXPLAIN changes no answer and is
     * set aside. */
@@ -1014,6 +1014,9 @@ object Dialect {
     def columnType(name: String): DataType = normalized(name) match {
       case "INT" | "INTEGER" | "INT4" | "TINYINT" | "SMALLINT" | "INT2" | "TINYINT UNSIGNED" => DataType.IntType
       case "BIGINT" | "INT8" | "INT UNSIGNED" | "INTEGER UNSIGNED" | "SMALLINT UNSIGNED" => DataType.LongType
+      // No BIGINT holds an unsigned 64-bit value past 2^63; the DECIMAL of
+      // its 20 digits holds each one.
+      case "BIGINT UNSIGNED" => DataType.DecimalType(20, 0)
       case "FLOAT" | "REAL" | "FLOAT4" => DataType.FloatType
       case "DOUBLE" | "DOUBLE PRECISION" | "FLOAT8" => DataType.DoubleType
       case "VARCHAR" | "TEXT" | "STRING" | "CHAR" | "CHARACTER VARYING" => DataType.StringType
@@ -1024,9 +1027,9 @@ object Dialect {
       case u => decimalType(u, decimal).getOrElse(throw new Database.Unsupported(s"the column type '$name'"))
     }
 
-    override def lacks(name: String): Option[String] = normalized(name) match {
-      case "BIGINT UNSIGNED" => Some("BIGINT UNSIGNED")
-      case u => cockroachLacks(u).orElse(if (u.startsWith("TIMESTAMP(") || u.contains("TIME ZONE")) Some(u) else None)
+    override def lacks(name: String): Option[String] = {
+      val u = normalized(name)
+      cockroachLacks(u).orElse(if (u.startsWith("TIMESTAMP(") || u.contains("TIME ZONE")) Some(u) else None)
     }
 
     override def valuesType(t: DataType, v: Any): DataType = t match {
