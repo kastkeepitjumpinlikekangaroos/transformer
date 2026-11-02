@@ -1,0 +1,262 @@
+# From CockroachDB's logic tests (https://github.com/cockroachdb/cockroach):
+# pkg/sql/logictest/testdata/logic_test/distinct at tag v23.2.0, commit
+# 8f14432835d667982828b5319cfd130991fbf80c, as it is there but for this header
+# and the condition lines added before records. CockroachDB 23.2's files were
+# under the Business Source License 1.1, whose Change Date, 2026-10-01, put
+# them under the Apache License 2.0: its text is LICENSE beside this file, and
+# NOTICE says whose they are.
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 36 records: 23 run as CockroachDB answers them; 3 skipped by a rule of the
+# ledger in docs/gotchas.md (refused-subquery 3); 10 held for CockroachDB,
+# `onlyif cockroachdb # needs ...`, by what they need: a clause or construct
+# the engine refuses 6, a statement the runner does not carry out 2, what a
+# held statement makes 2.
+
+statement ok
+CREATE TABLE xyz (
+  x INT PRIMARY KEY,
+  y INT,
+  z INT,
+  INDEX foo (z, y)
+)
+
+statement ok
+INSERT INTO xyz VALUES
+  (1, 2, 3),
+  (2, 5, 6),
+  (3, 2, 3),
+  (4, 5, 6),
+  (5, 2, 6),
+  (6, 3, 5),
+  (7, 2, 9)
+
+query II rowsort
+SELECT y, z FROM xyz
+----
+2 3
+5 6
+2 3
+5 6
+2 6
+3 5
+2 9
+
+query II rowsort
+SELECT DISTINCT y, z FROM xyz
+----
+2 3
+5 6
+2 6
+3 5
+2 9
+
+skipif transformer refused-subquery
+query I rowsort
+SELECT y FROM (SELECT DISTINCT y, z FROM xyz)
+----
+2
+5
+2
+3
+2
+
+query II partialsort(2)
+SELECT DISTINCT y, z FROM xyz ORDER BY z
+----
+2 3
+3 5
+2 6
+5 6
+2 9
+
+query II partialsort(1)
+SELECT DISTINCT y, z FROM xyz ORDER BY y
+----
+2 3
+2 6
+2 9
+3 5
+5 6
+
+query II
+SELECT DISTINCT y, z FROM xyz ORDER BY y, z
+----
+2 3
+2 6
+2 9
+3 5
+5 6
+
+onlyif cockroachdb # needs the column y
+query I
+SELECT DISTINCT y + z FROM xyz ORDER by (y + z)
+----
+5
+8
+11
+
+query II
+SELECT DISTINCT y AS w, z FROM xyz ORDER by z, w
+----
+2  3
+3  5
+2  6
+5  6
+2  9
+
+onlyif cockroachdb # needs the column y
+query I
+SELECT DISTINCT y AS w FROM xyz ORDER by y
+----
+2
+3
+5
+
+# Insert NULL values for z.
+statement ok
+INSERT INTO xyz (x, y) VALUES (8, 2), (9, 2)
+
+query II rowsort
+SELECT DISTINCT y,z FROM xyz
+----
+2 3
+5 6
+2 6
+3 5
+2 9
+2 NULL
+
+onlyif cockroachdb # needs A row value (a, b, ...)
+query T rowsort
+SELECT DISTINCT (y,z) FROM xyz
+----
+(2,3)
+(5,6)
+(2,6)
+(3,5)
+(2,9)
+(2,)
+
+skipif transformer refused-subquery
+query I
+SELECT count(*) FROM (SELECT DISTINCT y FROM xyz)
+----
+3
+
+statement ok
+CREATE TABLE kv (k INT PRIMARY KEY, v INT, UNIQUE INDEX idx(v))
+
+statement ok
+INSERT INTO kv VALUES (1, 1), (2, 2), (3, NULL), (4, NULL), (5, 5), (6, NULL)
+
+query I rowsort
+SELECT DISTINCT v FROM kv
+----
+NULL
+1
+2
+5
+
+onlyif cockroachdb # needs A database link (t@link)
+query I rowsort
+SELECT DISTINCT v FROM kv@idx
+----
+NULL
+1
+2
+5
+
+onlyif cockroachdb # needs A database link (t@link)
+query I rowsort
+SELECT DISTINCT v FROM kv@idx WHERE v > 0
+----
+1
+2
+5
+
+# Regression test for #44296.
+statement ok
+CREATE TABLE t0(c0 INT UNIQUE);
+
+statement ok
+CREATE VIEW v0(c0) AS SELECT DISTINCT t0.c0 FROM t0;
+
+statement ok
+INSERT INTO t0 (c0) VALUES (NULL), (NULL);
+
+query I
+SELECT * FROM v0 WHERE v0.c0 IS NULL
+----
+NULL
+
+# Regression test for #44079.
+onlyif cockroachdb # needs CREATE TABLE t44079, whose every column is of a type the engine has not
+statement ok
+CREATE TABLE t44079 (x INT[]);
+INSERT INTO t44079 VALUES (NULL), (ARRAY[NULL])
+
+onlyif cockroachdb # needs the table t44079, which a held statement makes
+query T rowsort
+SELECT DISTINCT * FROM t44079
+----
+NULL
+{NULL}
+
+onlyif cockroachdb # needs CREATE TABLE t, whose every column is of a type the engine has not
+statement ok
+DROP TABLE IF EXISTS t;
+CREATE TABLE t (x JSONB);
+INSERT INTO t VALUES
+  ('{"foo" : "bar"}'),
+  ('{"foo" : "bar"}'),
+  ('[1, 2]'),
+  ('[2, 1]'),
+  ('[1, 2]'),
+  ('{"foo": {"bar" : "baz"}}')
+
+onlyif cockroachdb # needs the table t, which a held statement makes
+query T rowsort
+SELECT DISTINCT (x) FROM t
+----
+[2, 1]
+[1, 2]
+{"foo": {"bar": "baz"}}
+{"foo": "bar"}
+
+statement ok
+DROP TABLE IF EXISTS t;
+
+statement ok
+CREATE TABLE t (x DECIMAL);
+
+statement ok
+INSERT INTO t VALUES (1.0), (1.00), (1.000)
+
+# We want to ensure that this only returns 1 element. We don't
+# check the element directly because it returns 1.0, 1.00, or
+# 1.000 non-deterministically in a distributed setting.
+skipif transformer refused-subquery
+query I
+SELECT COUNT (*) FROM (SELECT DISTINCT (array[x]) FROM t)
+----
+1
+
+# Regression for #46709.
+statement ok
+DROP TABLE IF EXISTS t;
+
+statement ok
+CREATE TABLE t (i INT, x INT, y INT, z STRING);
+
+statement ok
+INSERT INTO t VALUES
+  (1, 1, 2, 'hello'),
+  (2, 1, 2, 'hello'),
+  (3, 1, 2, 'hello there')
+
+onlyif cockroachdb # needs JSONB_AGG(DISTINCT ...)
+query IT
+SELECT x, jsonb_agg(DISTINCT jsonb_build_object('y', y, 'z', z)) FROM (SELECT * FROM t ORDER BY i) GROUP BY x
+----
+1 [{"y": 2, "z": "hello"}, {"y": 2, "z": "hello there"}]

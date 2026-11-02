@@ -259,3 +259,45 @@ statement error
 SELECT ABS(s) FROM t
 ----
 ABS on STRING is not supported; CAST it to a number
+
+onlyif transformer no-interval
+statement error
+SELECT CAST('1 day' AS INTERVAL)
+----
+Unsupported CAST target type: INTERVAL
+
+onlyif transformer no-array
+statement error
+SELECT CAST('{1}' AS INT[])
+----
+An array type in a CAST is not supported
+
+onlyif transformer no-uuid
+statement error
+SELECT CAST('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' AS UUID)
+----
+Unsupported CAST target type: UUID
+
+onlyif transformer no-timestamptz
+statement error
+SELECT CAST('2020-01-01 00:00:00+00' AS TIMESTAMPTZ)
+----
+Unsupported CAST target type: TIMESTAMPTZ
+
+onlyif transformer no-time
+statement error
+SELECT CAST('10:00:00' AS TIME)
+----
+Unsupported CAST target type: TIME
+
+onlyif transformer no-bytes
+statement error
+SELECT CAST('a' AS BYTES)
+----
+Unsupported CAST target type: BYTES
+
+onlyif transformer no-json
+statement error
+SELECT CAST('{}' AS JSONB)
+----
+Unsupported CAST target type: JSONB

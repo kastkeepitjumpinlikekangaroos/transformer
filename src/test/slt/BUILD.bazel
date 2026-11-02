@@ -6,8 +6,12 @@
 # file's source and the output psql printed for it, which slt_test checks the
 # ports' answers against; spark/ ports of Spark's SQLQueryTestSuite files, with
 # Spark's ANSI answers, written by //src/test/scala/com/transformer/slt:spark_import,
-# under the Apache License 2.0 (spark/LICENSE and spark/NOTICE); every other
-# script is this repo's own. A `.data` file
+# under the Apache License 2.0 (spark/LICENSE and spark/NOTICE); cockroach/
+# files of CockroachDB's logic tests at v23.2.0, vendored with the condition
+# lines that say what the engine does with each record, under the Apache License
+# 2.0 since their BSL's Change Date, 2026-10-01 (cockroach/LICENSE,
+# cockroach/NOTICE; postgresjoin.test also under the PostgreSQL License,
+# cockroach/POSTGRESQL-LICENSE); every other script is this repo's own. A `.data` file
 # is a table's rows, which a script loads with COPY: postgres/data/ holds
 # Postgres's own, as its regression suite loads them.
 filegroup(

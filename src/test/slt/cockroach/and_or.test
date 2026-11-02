@@ -1,0 +1,53 @@
+# From CockroachDB's logic tests (https://github.com/cockroachdb/cockroach):
+# pkg/sql/logictest/testdata/logic_test/and_or at tag v23.2.0, commit
+# 8f14432835d667982828b5319cfd130991fbf80c, as it is there but for this header
+# and the condition lines added before records. CockroachDB 23.2's files were
+# under the Business Source License 1.1, whose Change Date, 2026-10-01, put
+# them under the Apache License 2.0: its text is LICENSE beside this file, and
+# NOTICE says whose they are.
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 6 records: 6 run as CockroachDB answers them.
+
+statement ok
+DROP TABLE IF EXISTS t; CREATE TABLE t (k INT PRIMARY KEY, a INT, b INT)
+
+statement ok
+INSERT INTO t VALUES (1, NULL, NULL), (2, NULL, 1), (3, 1, NULL), (4, 2, 0), (5, 3, 3)
+
+# Test AND short-circuiting projection logic (check that the right side is not
+# evaluated when the left side is false).
+query B
+SELECT a <> 2 AND 3 / b = 1 FROM t ORDER BY k
+----
+NULL
+false
+NULL
+false
+true
+
+# Test AND short-circuiting selection logic (check that the right side is not
+# evaluated when the left side is false).
+query I
+SELECT a FROM t WHERE a <> 2 AND 3 / b = 1 ORDER BY k
+----
+3
+
+# Test OR short-circuiting projection logic (check that the right side is not
+# evaluated when the left side is true).
+query B
+SELECT a = 2 OR 3 / b = 1 FROM t ORDER BY k
+----
+NULL
+NULL
+NULL
+true
+true
+
+# Test OR short-circuiting selection logic (check that the right side is not
+# evaluated when the left side is true).
+query I
+SELECT a FROM t WHERE a = 2 OR 3 / b = 1 ORDER BY k
+----
+2
+3

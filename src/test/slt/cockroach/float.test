@@ -1,0 +1,254 @@
+# From CockroachDB's logic tests (https://github.com/cockroachdb/cockroach):
+# pkg/sql/logictest/testdata/logic_test/float at tag v23.2.0, commit
+# 8f14432835d667982828b5319cfd130991fbf80c, as it is there but for this header
+# and the condition lines added before records. CockroachDB 23.2's files were
+# under the Business Source License 1.1, whose Change Date, 2026-10-01, put
+# them under the Apache License 2.0: its text is LICENSE beside this file, and
+# NOTICE says whose they are.
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 40 records: 13 run as CockroachDB answers them; 23 held for CockroachDB,
+# `onlyif cockroachdb # needs ...`, by what they need: syntax the parser does
+# not read 10, a clause or construct the engine refuses 5, a statement the
+# runner does not carry out 4, an error the runner does not raise 2, a value or
+# type the dialect reads otherwise 1, what a held statement makes 1; 4 held as
+# findings for the user (C2 4), listed in plans/testing/12.
+
+# -0 and 0 should not be possible in a unique index.
+
+statement ok
+CREATE TABLE p (f float null, unique index (f))
+
+onlyif cockroachdb # needs double text the engine does not read ('Inf')
+statement ok
+INSERT INTO p VALUES (NULL), ('NaN'::float), ('Inf'::float), ('-Inf'::float), ('0'::float), (1), (-1)
+
+# -0 and 0 should both equate to zero with or without an index.
+
+onlyif cockroachdb # needs the error the runner does not raise: duplicate key value
+statement error duplicate key value
+INSERT INTO p VALUES ('-0'::float)
+
+onlyif cockroachdb # needs the rows of p, which a held statement writes
+query R
+SELECT * FROM p WHERE f = 'NaN'
+----
+NaN
+
+onlyif cockroachdb # needs syntax the parser does not read, at "IS"
+query RBBB
+SELECT f, f IS NaN, f = 'NaN', isnan(f) FROM p@{FORCE_INDEX=p_pkey} ORDER BY 1
+----
+NULL  NULL   NULL   NULL
+NaN   true   true   true
+-Inf  false  false  false
+-1    false  false  false
+0     false  false  false
+1     false  false  false
++Inf  false  false  false
+
+onlyif cockroachdb # needs syntax the parser does not read, at "IS"
+query RBBB
+SELECT f, f IS NaN, f = 'NaN', isnan(f) FROM p@{FORCE_INDEX=p_f_key} ORDER BY 1
+----
+NULL  NULL   NULL   NULL
+NaN   true   true   true
+-Inf  false  false  false
+-1    false  false  false
+0     false  false  false
+1     false  false  false
++Inf  false  false  false
+
+onlyif cockroachdb # needs syntax the parser does not read, at "{"
+query RB
+select f, f > 'NaN' from p@{FORCE_INDEX=p_pkey} where f > 'NaN' ORDER BY f
+----
+-Inf  true
+-1    true
+0     true
+1     true
++Inf  true
+
+onlyif cockroachdb # needs syntax the parser does not read, at "{"
+query RB
+select f, f > 'NaN' from p@{FORCE_INDEX=p_f_key} where f > 'NaN' ORDER BY f
+----
+-Inf  true
+-1    true
+0     true
+1     true
++Inf  true
+
+statement ok
+CREATE TABLE i (f float)
+
+statement ok
+INSERT INTO i VALUES (0), ('-0'::float)
+
+query R rowsort
+SELECT * FROM i WHERE f = 0
+----
+-0
+0
+
+statement ok
+CREATE INDEX i_f_asc ON i (f)
+
+query R rowsort
+SELECT * FROM i WHERE f = 0
+----
+-0
+0
+
+statement ok
+CREATE INDEX i_f_desc ON i (f DESC)
+
+onlyif cockroachdb # needs A database link (t@link)
+query R rowsort
+SELECT * FROM i@i_f_asc;
+----
+-0
+0
+
+onlyif cockroachdb # needs A database link (t@link)
+query R rowsort
+SELECT * FROM i@i_f_desc;
+----
+-0
+0
+
+onlyif cockroachdb # needs the error the runner does not raise: violates unique constraint
+statement error violates unique constraint
+CREATE UNIQUE INDEX ON i (f)
+
+subtest extra_float_digits
+
+statement ok
+CREATE TABLE vals(f FLOAT);
+  INSERT INTO vals VALUES (0.0), (123.4567890123456789), (12345678901234567890000), (0.0001234567890123456789)
+
+onlyif cockroachdb # held: finding C2, a DOUBLE cast to text prints as Java prints it (0.0, 1.2345678901234567E-4)
+query RT rowsort
+SELECT f, f::string FROM vals
+----
+0                       0
+123.45678901234568      123.45678901234568
+1.2345678901234568e+22  1.2345678901234568e+22
+0.00012345678901234567  0.00012345678901234567
+
+onlyif cockroachdb # needs SET statement
+statement ok
+SET extra_float_digits = 3
+
+onlyif cockroachdb # held: finding C2, a DOUBLE cast to text prints as Java prints it (0.0, 1.2345678901234567E-4)
+query RT rowsort
+SELECT f, f::string FROM vals
+----
+0                       0
+123.45678901234568      123.45678901234568
+1.2345678901234568e+22  1.2345678901234568e+22
+0.00012345678901234567  0.00012345678901234567
+
+onlyif cockroachdb # needs SET statement
+statement ok
+SET extra_float_digits = -8
+
+onlyif cockroachdb # held: finding C2, a DOUBLE cast to text prints as Java prints it (0.0, 1.2345678901234567E-4)
+query RT rowsort
+SELECT f, f::string FROM vals
+----
+0             0
+123.4568      123.4568
+1.234568e+22  1.234568e+22
+0.0001234568  0.0001234568
+
+onlyif cockroachdb # needs SET statement
+statement ok
+SET extra_float_digits = -15
+
+onlyif cockroachdb # held: finding C2, a DOUBLE cast to text prints as Java prints it (0.0, 1.2345678901234567E-4)
+query RT rowsort
+SELECT f, f::string FROM vals
+----
+0       0
+100     1e+02
+1e+22   1e+22
+0.0001  0.0001
+
+statement ok
+DROP TABLE vals
+
+onlyif cockroachdb # needs RESET statement
+statement ok
+RESET extra_float_digits
+
+# Test that floating point numbers are compared with 15 decimal digits
+# precision.
+query FFF
+SELECT -0.1234567890123456, 123456789012345.6, 1234567.890123456
+----
+-0.1234567890123457 123456789012345.7 1234567.890123457
+
+# Regression test to make sure `IS NAN` does not coerce NaN to a string.
+onlyif cockroachdb # needs syntax the parser does not read, at "IS"
+statement error unsupported comparison operator: <tuple> = <decimal>
+SELECT ROW() IS NAN
+
+onlyif cockroachdb # needs syntax the parser does not read, at "IS"
+statement error unsupported comparison operator: <tuple> != <decimal>
+SELECT ROW() IS NOT NAN
+
+onlyif cockroachdb # needs syntax the parser does not read, at "IS"
+statement error unsupported comparison operator: <string> = <decimal>
+SELECT 'NaN'::string IS NAN
+
+onlyif cockroachdb # needs syntax the parser does not read, at "IS"
+query BB
+SELECT 'nan'::float IS NAN, 'nan'::float IS NOT NAN
+----
+true  false
+
+onlyif cockroachdb # needs syntax the parser does not read, at "IS"
+query BB
+SELECT 'nan'::decimal IS NAN, 'nan'::decimal IS NOT NAN
+----
+true  false
+
+statement ok
+CREATE TABLE t87605 (col2 FLOAT8 NULL)
+
+statement ok
+insert into t87605 values (1.234567890123456e+13), (1.234567890123456e+6)
+
+# Regression test for issue #87605.
+# The floor division operator `//` should not be folded away.
+onlyif cockroachdb # needs syntax the parser does not read
+query F
+SELECT ((col2::FLOAT8 // 1.0:::FLOAT8::FLOAT8)::FLOAT8) FROM t87605@[0] ORDER BY 1
+----
+1.234567e+06
+1.2345678901234e+13
+
+# Regression test for issue #89961.
+
+statement ok
+CREATE TABLE t89961 (a float PRIMARY KEY, INDEX (a DESC))
+
+onlyif cockroachdb # needs a STRING value NaN cannot be stored in a DOUBLE column
+statement ok
+INSERT INTO t89961 VALUES ('NaN')
+
+# We use st_makepointm because it is sensitive to different NaN encodings. The
+# following two queries should have the same result.
+
+onlyif cockroachdb # needs A database link (t@link)
+query T
+SELECT st_makepointm(a, 1.234567890123456e+07, -0.6571774097533073)::string FROM t89961@t89961_pkey
+----
+0101000040010000000000F87FDCE9D6DC298C67412DEF51EB9807E5BF
+
+onlyif cockroachdb # needs A database link (t@link)
+query T
+SELECT st_makepointm(a, 1.234567890123456e+07, -0.6571774097533073)::string FROM t89961@t89961_a_idx;
+----
+0101000040010000000000F87FDCE9D6DC298C67412DEF51EB9807E5BF

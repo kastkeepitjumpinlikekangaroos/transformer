@@ -1,0 +1,378 @@
+# From CockroachDB's logic tests (https://github.com/cockroachdb/cockroach):
+# pkg/sql/logictest/testdata/logic_test/case_sensitive_names at tag v23.2.0, commit
+# 8f14432835d667982828b5319cfd130991fbf80c, as it is there but for this header
+# and the condition lines added before records. CockroachDB 23.2's files were
+# under the Business Source License 1.1, whose Change Date, 2026-10-01, put
+# them under the Apache License 2.0: its text is LICENSE beside this file, and
+# NOTICE says whose they are.
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 78 records: 6 run as CockroachDB answers them; 5 skipped by a rule of the
+# ledger in docs/gotchas.md (names-ignore-case 4, refused-subquery 1), each
+# skip whose rule is no refusal followed by its twin, the engine's own answer
+# (4); 66 held for CockroachDB, `onlyif cockroachdb # needs ...`, by what they
+# need: a statement the runner does not carry out 34, what a held statement
+# makes 13, an error the runner does not raise 11, a clause or construct the
+# engine refuses 4, syntax the parser does not read 4; 1 held as findings for
+# the user (C6 1), listed in plans/testing/12.
+
+# Case sensitivity of database names
+
+onlyif cockroachdb # needs CREATE DATABASE
+statement ok
+CREATE DATABASE D
+
+onlyif cockroachdb # needs SHOW statement
+statement ok
+SHOW TABLES FROM d
+
+onlyif cockroachdb # needs SHOW statement
+statement error target database or schema does not exist
+SHOW TABLES FROM "D"
+
+onlyif cockroachdb # needs CREATE DATABASE
+statement ok
+CREATE DATABASE "E"
+
+onlyif cockroachdb # needs SHOW statement
+statement error target database or schema does not exist
+SHOW TABLES FROM e
+
+onlyif cockroachdb # needs SHOW statement
+statement ok
+SHOW TABLES FROM "E"
+
+# Case sensitivity of table names:
+# When non-quoted, table names are normalized during creation.
+
+statement ok
+CREATE TABLE A(x INT)
+
+onlyif cockroachdb # needs SHOW statement
+statement error pgcode 42P01 relation "A" does not exist
+SHOW COLUMNS FROM "A"
+
+onlyif cockroachdb # needs SHOW statement
+statement error pgcode 42P01 relation "A" does not exist
+SHOW INDEXES FROM "A"
+
+onlyif cockroachdb # needs SHOW statement
+statement error pgcode 42P01 relation "A" does not exist
+SHOW CREATE TABLE "A"
+
+onlyif cockroachdb # needs SHOW statement
+statement error pgcode 42P01 relation "A" does not exist
+SHOW GRANTS ON TABLE "A"
+
+onlyif cockroachdb # needs SHOW statement
+statement error pgcode 42P01 relation "test.A" does not exist
+SHOW GRANTS ON TABLE test."A"
+
+onlyif cockroachdb # needs SHOW statement
+statement error pgcode 42P01 relation "A" does not exist
+SHOW CONSTRAINTS FROM "A"
+
+skipif transformer names-ignore-case
+statement error pgcode 42P01 relation "A" does not exist
+SELECT * FROM "A"
+
+onlyif transformer names-ignore-case
+query I
+SELECT * FROM "A"
+----
+
+onlyif cockroachdb # needs the error the runner does not raise: pgcode 42P01 relation "A" does not exist
+statement error pgcode 42P01 relation "A" does not exist
+INSERT INTO "A"(x) VALUES(1)
+
+onlyif cockroachdb # needs the error the runner does not raise: pgcode 42P01 relation "A" does not exist
+statement error pgcode 42P01 relation "A" does not exist
+UPDATE "A" SET x = 42
+
+onlyif cockroachdb # needs the error the runner does not raise: pgcode 42P01 relation "A" does not exist
+statement error pgcode 42P01 relation "A" does not exist
+DELETE FROM "A"
+
+onlyif cockroachdb # needs the error the runner does not raise: pgcode 42P01 relation "A" does not exist
+statement error pgcode 42P01 relation "A" does not exist
+TRUNCATE "A"
+
+onlyif cockroachdb # needs the error the runner does not raise: pgcode 42P01 relation "A" does not exist
+statement error pgcode 42P01 relation "A" does not exist
+DROP TABLE "A"
+
+onlyif cockroachdb # needs SHOW statement
+statement ok
+SHOW COLUMNS FROM a
+
+onlyif cockroachdb # needs SHOW statement
+statement ok
+SHOW INDEXES FROM a
+
+onlyif cockroachdb # needs SHOW statement
+statement ok
+SHOW CREATE TABLE a
+
+onlyif cockroachdb # needs SHOW statement
+statement ok
+SHOW CONSTRAINTS FROM a
+
+onlyif cockroachdb # needs the table a, which a held statement makes
+statement ok
+SELECT * FROM a
+
+onlyif cockroachdb # needs the table a, which a held statement makes
+statement ok
+INSERT INTO a(x) VALUES(1)
+
+onlyif cockroachdb # needs the table a, which a held statement makes
+statement ok
+UPDATE a SET x = 42
+
+onlyif cockroachdb # needs the table a, which a held statement makes
+statement ok
+DELETE FROM a
+
+onlyif cockroachdb # needs the table a, which a held statement makes
+statement ok
+TRUNCATE a
+
+onlyif cockroachdb # needs the table a, which a held statement makes
+statement ok
+DROP TABLE a
+
+# When quoted, a table name does not get normalized during create, and
+# must be thus quoted during use.
+
+statement ok
+CREATE TABLE "B"(x INT)
+
+onlyif cockroachdb # needs SHOW statement
+statement error pgcode 42P01 relation "b" does not exist
+SHOW COLUMNS FROM B
+
+onlyif cockroachdb # needs SHOW statement
+statement error pgcode 42P01 relation "b" does not exist
+SHOW INDEXES FROM B
+
+onlyif cockroachdb # needs SHOW statement
+statement error pgcode 42P01 relation "b" does not exist
+SHOW CREATE TABLE B
+
+onlyif cockroachdb # needs SHOW statement
+statement error pgcode 42P01 relation "b" does not exist
+SHOW GRANTS ON TABLE B
+
+onlyif cockroachdb # needs SHOW statement
+statement error pgcode 42P01 relation "test.b" does not exist
+SHOW GRANTS ON TABLE test.B
+
+onlyif cockroachdb # needs SHOW statement
+statement error pgcode 42P01 relation "b" does not exist
+SHOW CONSTRAINTS FROM B
+
+skipif transformer names-ignore-case
+statement error pgcode 42P01 relation "b" does not exist
+SELECT * FROM B
+
+onlyif transformer names-ignore-case
+query I
+SELECT * FROM B
+----
+
+onlyif cockroachdb # needs the error the runner does not raise: pgcode 42P01 relation "b" does not exist
+statement error pgcode 42P01 relation "b" does not exist
+INSERT INTO B(x) VALUES(1)
+
+onlyif cockroachdb # needs the error the runner does not raise: pgcode 42P01 relation "b" does not exist
+statement error pgcode 42P01 relation "b" does not exist
+UPDATE B SET x = 42
+
+onlyif cockroachdb # needs the error the runner does not raise: pgcode 42P01 relation "b" does not exist
+statement error pgcode 42P01 relation "b" does not exist
+DELETE FROM B
+
+onlyif cockroachdb # needs the error the runner does not raise: pgcode 42P01 relation "b" does not exist
+statement error pgcode 42P01 relation "b" does not exist
+TRUNCATE B
+
+onlyif cockroachdb # needs the error the runner does not raise: pgcode 42P01 relation "b" does not exist
+statement error pgcode 42P01 relation "b" does not exist
+DROP TABLE B
+
+onlyif cockroachdb # needs SHOW statement
+statement ok
+SHOW COLUMNS FROM "B"
+
+onlyif cockroachdb # needs SHOW statement
+statement ok
+SHOW INDEXES FROM "B"
+
+onlyif cockroachdb # needs SHOW statement
+statement ok
+SHOW CREATE TABLE "B"
+
+onlyif cockroachdb # needs SHOW statement
+statement ok
+SHOW GRANTS ON TABLE "B"
+
+onlyif cockroachdb # needs SHOW statement
+statement ok
+SHOW GRANTS ON TABLE test."B"
+
+onlyif cockroachdb # needs SHOW statement
+statement ok
+SHOW CONSTRAINTS FROM "B"
+
+onlyif cockroachdb # needs the table B, which a held statement makes
+statement ok
+SELECT * FROM "B"
+
+onlyif cockroachdb # needs the table B, which a held statement makes
+statement ok
+INSERT INTO "B"(x) VALUES(1)
+
+onlyif cockroachdb # needs the table B, which a held statement makes
+statement ok
+UPDATE "B" SET x = 42
+
+onlyif cockroachdb # needs the table B, which a held statement makes
+statement ok
+DELETE FROM "B"
+
+onlyif cockroachdb # needs the table B, which a held statement makes
+statement ok
+TRUNCATE "B"
+
+onlyif cockroachdb # needs the table B, which a held statement makes
+statement ok
+DROP TABLE "B"
+
+# Case sensitivity of column names.
+
+statement ok
+CREATE TABLE foo(X INT, "Y" INT)
+
+onlyif cockroachdb # held: finding C6, an unquoted name names its column as written, where CockroachDB folds it to lower case
+query III colnames
+SELECT x, X, "Y" FROM foo
+----
+x x Y
+
+skipif transformer names-ignore-case
+statement error column "X" does not exist
+SELECT "X" FROM foo
+
+onlyif transformer names-ignore-case
+query I
+SELECT "X" FROM foo
+----
+
+skipif transformer names-ignore-case
+statement error column "y" does not exist
+SELECT Y FROM foo
+
+onlyif transformer names-ignore-case
+query I
+SELECT Y FROM foo
+----
+
+# The following should not be ambiguous.
+skipif transformer refused-subquery
+query II colnames
+SELECT Y, "Y" FROM (SELECT x as y, "Y" FROM foo)
+----
+y Y
+
+# Case sensitivity of view names.
+
+statement ok
+CREATE VIEW XV AS SELECT X, "Y" FROM foo
+
+onlyif cockroachdb # needs a statement other than a query
+query TT
+SHOW CREATE VIEW xv
+----
+xv  CREATE VIEW public.xv (
+      x,
+      "Y"
+    ) AS SELECT x, "Y" FROM test.public.foo
+
+onlyif cockroachdb # needs SHOW statement
+query error pgcode 42P01 relation "XV" does not exist
+SHOW CREATE VIEW "XV"
+
+statement ok
+CREATE VIEW "YV" AS SELECT X, "Y" FROM foo
+
+onlyif cockroachdb # needs a statement other than a query
+query TT
+SHOW CREATE VIEW "YV"
+----
+"YV"  CREATE VIEW public."YV" (
+        x,
+        "Y"
+      ) AS SELECT x, "Y" FROM test.public.foo
+
+onlyif cockroachdb # needs SHOW statement
+query error pgcode 42P01 relation "yv" does not exist
+SHOW CREATE VIEW YV
+
+# Case sensitivity of index names.
+
+onlyif cockroachdb # needs the table a, which a held statement drops
+statement ok
+CREATE TABLE a(x INT, y INT, CONSTRAINT Foo PRIMARY KEY(x)); CREATE INDEX I ON a(y)
+
+onlyif cockroachdb # needs A database link (t@link)
+statement error index "I" not found
+SELECT * FROM a@"I"
+
+onlyif cockroachdb # needs A database link (t@link)
+statement error index "Foo" not found
+SELECT * FROM a@"Foo"
+
+onlyif cockroachdb # needs syntax the parser does not read, at "a@"
+statement error index "I" not found
+SELECT * FROM a ORDER BY INDEX a@"I"
+
+onlyif cockroachdb # needs syntax the parser does not read, at "a@"
+statement error index "Foo" not found
+SELECT * FROM a ORDER BY INDEX a@"Foo"
+
+onlyif cockroachdb # needs DROP a @ "I"
+statement error index "I" does not exist
+DROP INDEX a@"I"
+
+onlyif cockroachdb # needs A database link (t@link)
+statement ok
+SELECT * FROM a@I
+
+onlyif cockroachdb # needs A database link (t@link)
+statement ok
+SELECT * FROM a@Foo
+
+onlyif cockroachdb # needs syntax the parser does not read, at "a@I"
+statement ok
+SELECT * FROM a ORDER BY INDEX a@I
+
+onlyif cockroachdb # needs syntax the parser does not read, at "a@Foo"
+statement ok
+SELECT * FROM a ORDER BY INDEX a@Foo
+
+onlyif cockroachdb # needs DROP a @ I
+statement ok
+DROP INDEX a@I
+
+# Unicode sequences are preserved.
+
+# Check that normalization occurs
+onlyif cockroachdb # needs the error the runner does not raise: duplicate column name: "Amélie"
+statement error duplicate column name: "Amélie"
+CREATE TABLE Amelie("Amélie" INT, "Amélie" INT); INSERT INTO Amelie VALUES (1, 2)
+
+# Check that function names are also recognized case-insensitively.
+query I
+SELECT LENGTH('abc') -- lint: uppercase function OK
+----
+3

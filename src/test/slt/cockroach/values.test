@@ -1,0 +1,83 @@
+# From CockroachDB's logic tests (https://github.com/cockroachdb/cockroach):
+# pkg/sql/logictest/testdata/logic_test/values at tag v23.2.0, commit
+# 8f14432835d667982828b5319cfd130991fbf80c, as it is there but for this header
+# and the condition lines added before records. CockroachDB 23.2's files were
+# under the Business Source License 1.1, whose Change Date, 2026-10-01, put
+# them under the Apache License 2.0: its text is LICENSE beside this file, and
+# NOTICE says whose they are.
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 11 records: 2 run as CockroachDB answers them; 9 held for CockroachDB,
+# `onlyif cockroachdb # needs ...`, by what they need: a clause or construct
+# the engine refuses 8, a statement the runner does not carry out 1.
+
+# Tests for the implicit one row, zero column values operator.
+query I
+SELECT 1
+----
+1
+
+query I
+SELECT 1 + 2
+----
+3
+
+onlyif cockroachdb # needs VALUES
+query III colnames,nosort
+VALUES (1, 2, 3), (4, 5, 6)
+----
+column1 column2 column3
+1       2       3
+4       5       6
+
+onlyif cockroachdb # needs VALUES
+query I nosort
+VALUES (length('a')), (1 + length('a')), (length('abc')), (length('ab') * 2)
+----
+1
+2
+3
+4
+
+onlyif cockroachdb # needs VALUES in FROM
+query I nosort
+SELECT a + b FROM (VALUES (1, 2), (3, 4), (5, 6)) AS v(a, b)
+----
+3
+7
+11
+
+onlyif cockroachdb # needs VALUES
+query error pgcode 42601 VALUES lists must all be the same length, expected 1 columns, found 2
+VALUES (1), (2, 3)
+
+onlyif cockroachdb # needs VALUES
+query I
+VALUES (1), (1), (2), (3) ORDER BY 1 DESC LIMIT 3
+----
+3
+2
+1
+
+onlyif cockroachdb # needs VALUES
+query error pgcode 42703 column "z" does not exist
+VALUES (1), (1), (2), (3) ORDER BY z
+
+# subqueries can be evaluated in VALUES
+onlyif cockroachdb # needs VALUES
+query I nosort
+VALUES ((SELECT 1)), ((SELECT 2))
+----
+1
+2
+
+onlyif cockroachdb # needs VALUES
+query error pgcode 42804 VALUES types string and int cannot be matched
+VALUES (NULL, 1), (2, NULL), (NULL, 'a')
+
+# subqueries in VALUES don't cause problems in EXPLAIN(DISTSQL), despite forcing
+# execution on the gateway.
+
+onlyif cockroachdb # needs EXPLAIN statement
+statement ok
+EXPLAIN(DISTSQL) VALUES((SELECT 1), 3)

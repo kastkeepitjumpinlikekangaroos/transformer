@@ -2384,6 +2384,67 @@ plans/robustness/24's rule). What the scripts hold out:
   (`MINUS` with the words the parser reserves), and to name the word in the
   refusal rather than the parser's tokens.
 
+## What CockroachDB's logic tests held out (2026-11-02, held for the user)
+
+Vendoring thirty of CockroachDB v23.2.0's logic tests (`src/test/slt/cockroach/`,
+[plans/testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md))
+took the plan's decisions overnight, as recommended and not yet confirmed by
+the user: the files vendored as they are and read through a dialect, a column
+of a type the engine has not left out of its table and a record that reads it
+skipped under a `no-<type>` rule, every record under every mode. Records the
+engine answers otherwise by a decided rule are skipped under it (two rows
+joined the ledger as rows of rules already decided: `avg-sum-int`, since v1,
+and `names-ignore-case`, the user's of 2026-10-30); what the engine or the
+runner lacks is held, `onlyif cockroachdb # needs ...`. What no decision covers
+is held as a finding, `onlyif cockroachdb # held: finding C<n>`, and runs once
+in `slt_test`, which fails once the engine gives CockroachDB's answer:
+
+- **C1. An alias after a qualified star is dropped** (`select`, 1): `SELECT
+  kv.* AS foo FROM kv` returns `kv`'s columns under their own names, where
+  CockroachDB refuses it (`"kv.*" cannot be aliased`). The binder reads no
+  alias there, and nothing refuses it, so the clause vanishes, which
+  plans/robustness/01 set out to stop. The options: refuse `t.* AS x` by name,
+  as `UnsupportedClauses` refuses the other clauses the binder does not read
+  (recommended); or keep it.
+- **C2. A DOUBLE or FLOAT cast to text prints as Java prints it** (`float` 4,
+  `cast` 1): `CAST(f AS STRING)` is `0.0`, `1.2345678901234567E-4`,
+  `1.2345678901234568E22` and, for a FLOAT, `0.33333334`, where CockroachDB
+  and Postgres write `0`, `0.00012345678901234567`, `1.2345678901234568e+22`
+  and the float's shortest decimal. The options: print a float's text as
+  Postgres does, the shortest digits with no trailing `.0` and an exponent only
+  past its range (recommended, since text a CAST makes is compared, joined and
+  written out); or keep Java's and state it with the cast rules.
+- **C3. A TIMESTAMP cast to text prints as an ISO instant** (`datetime`, 1):
+  `CAST(TIMESTAMP '2016-02-10 19:46:33.306157' AS STRING)` is
+  `2016-02-10T19:46:33.306157Z`, where CockroachDB and Postgres write
+  `2016-02-10 19:46:33.306157`. The options as C2's: SQL's form (recommended),
+  or keep it and say so.
+- **C4. Text with a UTC offset cast to TIMESTAMP moves to UTC** (`datetime`, 3):
+  `CAST('2015-08-25 05:45:45-01:00' AS TIMESTAMP)` is `06:45:45`, where
+  CockroachDB and Postgres, whose `TIMESTAMP` has no time zone, drop the offset
+  (`05:45:45`). The options: refuse an offset in text cast to a TIMESTAMP, as a
+  CAST reads its text strictly (recommended: the value is a `TIMESTAMPTZ`'s,
+  which the engine has not); drop it as Postgres does; or keep converting.
+- **C5. A DATE before 4714 BC is a date** (`datetime`, 1): `CAST('-5632-12-26'
+  AS DATE)` answers, where CockroachDB and Postgres refuse it as out of range.
+  The options: keep the wider range and give it a ledger row (recommended); or
+  refuse a date outside Postgres's range.
+- **C6. An unquoted name names its output column as written** (`select` 2,
+  `case_sensitive_names` 1): `SELECT -488 AS OF` names its column `OF` and
+  `SELECT x, X` names them `x` and `X`, where CockroachDB and Postgres fold an
+  unquoted name to lower case (`of`, `x`). The options: keep the written case,
+  as Spark and DuckDB do, beside the user's rule that names match regardless
+  of case, with a ledger row (recommended); or fold unquoted names.
+- **C7. Records both engines refuse, for different reasons** (15): in each the
+  engine refuses by a rule of its own before it reaches CockroachDB's reason:
+  a `LIMIT` or `OFFSET` that is no literal (`LIMIT sum(v)`, `LIMIT x`, 6),
+  `HAVING k` over a `k` outside `GROUP BY` (CockroachDB: not a boolean),
+  `WHERE 'hello'` (a STRING condition), text that is no ISO date of the
+  engine's grammar (`4714-11-24 BC`, `infinity`, `5874897-12-31`,
+  `05-07-2020`, 6, where CockroachDB finds a date out of range), and a BIGINT
+  cast to TIMESTAMP, which the engine has no cast for. No answer differs. The
+  recommendation is to leave them held, as the Spark and Postgres ports did.
+
 ## Answers that differ from other engines by design
 
 The engine answers some queries otherwise than another engine does, on
@@ -2430,16 +2491,25 @@ choose it, and "since v1" one the engine has had from the start.
 | `window-constant-key` | A window's `ORDER BY` or `PARTITION BY` key that reads no column is refused, as such a key of a query's `ORDER BY` or `GROUP BY` is. |  | [README](../README.md#sql-features), "A key that reads no column orders, groups and partitions nothing" | Claude, reported, 2026-10-31 ([robustness/23](../plans/robustness/23-clauses-that-cannot-change-the-answer.md)) | `refused/messages.test` |
 | `nulls-sort-low` | A NULL sorts as the smallest value, first under `ASC` and last under `DESC`, where Postgres, DataFusion and CockroachDB sort it last under `ASC`. |  | [README](../README.md#sql-features), "A NULL sorts as the smallest value unless the key says otherwise" | Since v1, kept when `NULLS FIRST` and `NULLS LAST` landed ([robustness/01](../plans/robustness/01-reject-or-honor-every-clause.md), 2026-10-01) | `select/order_by.test` |
 | `int-is-int` | A whole number an `INT` holds is an `INT`, and `INT` arithmetic past its range is an error, where SQLite's integers are 64-bit. |  | [README](../README.md#sql-features), "Literals and names mean what SQL writes" and "`INT` and `BIGINT` arithmetic is exact, or an error" | Since v1; an integer past `BIGINT` a `DECIMAL` by the user, 2026-10-30 ([robustness/13](../plans/robustness/13-literals-are-read-as-written.md)), and overflow an error by the user, 2026-10-31 ([robustness/18](../plans/robustness/18-integer-overflow-wraps.md)) | `types/integer_overflow.test` |
-| `branch-double` | The values that become one result take a type that holds each of them, so a `CASE` or `COALESCE` with a `DOUBLE` branch is a `DOUBLE`, where SQLite keeps each value's own type. |  | [README](../README.md#sql-features), "Values that become one result take a type that holds each of them" | The user, 2026-10-16 ([robustness/09](../plans/robustness/09-branch-result-types.md)) | `conditional/case.test` |
+| `branch-double` | The values that become one result take a type that holds each of them, so a `CASE` or `COALESCE` with a `DOUBLE` branch is a `DOUBLE`, where SQLite keeps each value's own type and CockroachDB refuses an integer beside a decimal. |  | [README](../README.md#sql-features), "Values that become one result take a type that holds each of them" | The user, 2026-10-16 ([robustness/09](../plans/robustness/09-branch-result-types.md)) | `conditional/case.test` |
 | `refused-text-comparison` | Text meets a value of another type only as a string literal, read as that type when the query is bound, and a `DECIMAL` reads none (write the number): a `STRING` expression compared with a number, a `BOOLEAN`, a `DATE` or a `TIMESTAMP`, and a string literal beside a `DECIMAL` in a comparison or in arithmetic, are refused, where Spark casts the text. | `with STRING` | [README](../README.md#sql-features), "Values of different types meet only as numbers, or through a string literal" | The user, 2026-10-03: a number or a boolean compares only with its own type (584995f, [robustness/05](../plans/robustness/05-frontend-robustness-fuzzer.md)) | `refused/messages.test` |
 | `refused-text-branch` | Values that become one result meet as a comparison's operands do, so a `STRING` expression beside a value of another type in a `CASE`, `IF`, `COALESCE`, `GREATEST`, `LEAST` or a `UNION` column is refused, where Spark casts the text. | `and STRING` | [README](../README.md#sql-features), "Values that become one result take a type that holds each of them" | The user, 2026-10-16 ([robustness/09](../plans/robustness/09-branch-result-types.md)) | `refused/messages.test` |
 | `refused-date-beside-timestamp` | A `DATE` beside a `TIMESTAMP` takes a `CAST` either way, in a comparison and in a result both become, where Spark reads the date as its midnight. | `a DATE as a TIMESTAMP is its midnight` | [README](../README.md#sql-features), "Values of different types meet only as numbers, or through a string literal" | The user, 2026-10-03 for comparisons (584995f, [robustness/05](../plans/robustness/05-frontend-robustness-fuzzer.md)), and 2026-10-16 for results ([robustness/09](../plans/robustness/09-branch-result-types.md)) | `refused/messages.test` |
 | `refused-decimal-beside-float` | A `DECIMAL` beside a `FLOAT` or `DOUBLE` that is not written in the query is refused in arithmetic and in a result both become, where Spark computes in `DOUBLE`: a `DOUBLE` has no scale for a `DECIMAL` result to keep. The two compare, as the decimal each value prints as. | `has no scale for a DECIMAL result to keep` | [README](../README.md#sql-features), "`DECIMAL` arithmetic is exact, and declares a type that holds its result" | The user, 2026-10-04 for arithmetic ([robustness/04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)), and 2026-10-16 for results ([robustness/09](../plans/robustness/09-branch-result-types.md)) | `refused/messages.test` |
 | `refused-implicit-text` | Only a `STRING` is text: `LIKE`, `ILIKE`, `\|\|`, `CONCAT` and the string functions refuse any other type, where Spark reads its text. | `CAST it to STRING` | [README](../README.md#sql-features), "Every condition is a BOOLEAN, and every function takes the types it computes on" | The user, 2026-10-18 ([robustness/11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md)) | `refused/messages.test` |
 | `refused-implicit-number` | The math functions and the aggregates that add their values up take a number, so text takes a `CAST` to the number type meant, where Spark reads it as a `DOUBLE`. | `CAST it to a number` | [README](../README.md#sql-features), "Every condition is a BOOLEAN, and every function takes the types it computes on" | The user, 2026-10-18 ([robustness/11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md)) | `refused/messages.test` |
-| `division-keeps-type` | `/` keeps its operands' type, as in Postgres: integer division for an `INT` or a `BIGINT` (`10 / 4` is 2), a `FLOAT` for two `FLOAT`s, where Spark's `/` is always a `DOUBLE` or a `DECIMAL`. |  | [README](../README.md#sql-features), "`DECIMAL` arithmetic is exact, and declares a type that holds its result" ("`10 / 4` is 2 there as anywhere") | Since v1, as Postgres has it; kept for integer constants beside a `DECIMAL` by the user, 2026-10-04 ([robustness/04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)) | `types/integer_overflow.test` |
+| `division-keeps-type` | `/` keeps its operands' type, as in Postgres: integer division for an `INT` or a `BIGINT` (`10 / 4` is 2), a `FLOAT` for two `FLOAT`s, where Spark's `/` is always a `DOUBLE` or a `DECIMAL`, and CockroachDB's of two integers a `DECIMAL`. |  | [README](../README.md#sql-features), "`DECIMAL` arithmetic is exact, and declares a type that holds its result" ("`10 / 4` is 2 there as anywhere") | Since v1, as Postgres has it; kept for integer constants beside a `DECIMAL` by the user, 2026-10-04 ([robustness/04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)) | `types/integer_overflow.test` |
 | `text-literal-typed` | A string literal beside a value of another type is read as that type when the query is bound, so `'1' + i` over an `INT` is an `INT` and `'1' + f` over a `FLOAT` a `FLOAT`, where Spark reads the text as a `BIGINT` or a `DOUBLE`. |  | [README](../README.md#sql-features), "Values of different types meet only as numbers, or through a string literal" | The user, 2026-10-03 (584995f, [robustness/05](../plans/robustness/05-frontend-robustness-fuzzer.md)) | `types/casts.test` |
 | `bigint-decimal` | A `BIGINT` beside a `DECIMAL` counts as the `DECIMAL(19,0)` its every value fits, as SQL Server has it, where Spark counts it as a `DECIMAL(20,0)`, so each result type has a digit fewer. |  | [README](../README.md#sql-features), "`DECIMAL` arithmetic is exact, and declares a type that holds its result" | The user, 2026-10-04 ([robustness/04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)); kept by [testing/10](../plans/testing/10-spark-typing-ports.md)'s decision 3, taken overnight as recommended, not yet confirmed by the user | `types/decimal.test` |
+| `avg-sum-int` | `AVG` of integers is a `DOUBLE` and `SUM` of integers a `BIGINT`, where Postgres and CockroachDB make each a numeric: the value is the same where a `DOUBLE` holds it, but prints otherwise. | | [README](../README.md#sql-features), "Aggregates" ("`SUM` is a `BIGINT` over integers", "`AVG` is a `DOUBLE`") | Since v1; a `DECIMAL`'s exact `SUM` and `AVG` by the user, 2026-10-04 ([robustness/04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)) | `aggregate/group_by.test` |
+| `names-ignore-case` | Every name, quoted or bare, matches regardless of case, so `"A"` names a column `a`, where Postgres and CockroachDB keep a quoted name's case and refuse it. | | [README](../README.md#sql-features), "Literals and names mean what SQL writes" ("Quotes do not make a name case-sensitive") | The user, 2026-10-30 ([robustness/13](../plans/robustness/13-literals-are-read-as-written.md)) | `select/order_by.test` |
+| `no-interval` | The engine has no `INTERVAL` type: an `INTERVAL` literal or a `CAST` to one is refused, and a table of a script of another engine's leaves its `INTERVAL` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `no-array` | The engine has no array types: an array, an array type and a subscript are refused, and a table of a script of another engine's leaves its array columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `no-uuid` | The engine has no `UUID` type: a `CAST` to one is refused, and a table of a script of another engine's leaves its `UUID` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `no-timestamptz` | The engine has no `TIMESTAMPTZ` type, a timestamp with a time zone: a `CAST` to one is refused, and a table of a script of another engine's leaves its `TIMESTAMPTZ` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `no-time` | The engine has no `TIME` type, a time of day: a `CAST` to one is refused, and a table of a script of another engine's leaves its `TIME` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `no-bytes` | The engine has no `BYTES` type of CockroachDB (its `BINARY` takes no `CAST`): a `CAST` to one is refused, and a table of a script of another engine's leaves its `BYTES` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `no-json` | The engine has no `JSON` or `JSONB` type: a `CAST` to one is refused, and a table of a script of another engine's leaves its `JSONB` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
 
 ## What's intentionally NOT done
 

@@ -1,0 +1,123 @@
+# From CockroachDB's logic tests (https://github.com/cockroachdb/cockroach):
+# pkg/sql/logictest/testdata/logic_test/vectorize_agg at tag v23.2.0, commit
+# 8f14432835d667982828b5319cfd130991fbf80c, as it is there but for this header
+# and the condition lines added before records. CockroachDB 23.2's files were
+# under the Business Source License 1.1, whose Change Date, 2026-10-01, put
+# them under the Apache License 2.0: its text is LICENSE beside this file, and
+# NOTICE says whose they are.
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 15 records: 7 run as CockroachDB answers them; 3 skipped by a rule of the
+# ledger in docs/gotchas.md (no-bytes 3), each skip whose rule is no refusal
+# followed by its twin, the engine's own answer (3); 5 held for CockroachDB,
+# `onlyif cockroachdb # needs ...`, by what they need: a clause or construct
+# the engine refuses 2, a function the engine has not 2, syntax the parser does
+# not read 1.
+
+statement ok
+CREATE TABLE bools (a INT, b BOOL)
+
+onlyif cockroachdb # needs bool_and()
+query BB
+SELECT bool_and(b), bool_or(b) FROM bools
+----
+NULL NULL
+
+onlyif cockroachdb # needs Column 'b' must appear in GROUP BY or inside an aggregate
+query BB
+SELECT bool_and(b), bool_or(b) FROM bools GROUP BY a
+----
+
+statement OK
+INSERT INTO bools VALUES
+(0, NULL),
+(1, true),  (1, true),
+(2, false), (2, false),
+(3, false), (3, true), (3, true),
+(4, NULL),  (4, true),
+(5, false), (5, NULL)
+
+onlyif cockroachdb # needs Column 'b' must appear in GROUP BY or inside an aggregate
+query BB rowsort
+SELECT bool_and(b), bool_or(b) FROM bools GROUP BY a;
+----
+NULL NULL
+true true
+false false
+false true
+true true
+false false
+
+statement ok
+CREATE TABLE bytes_string(_group INT, _bytes BYTES, _string STRING)
+
+skipif transformer no-bytes
+query TT
+SELECT concat_agg(_bytes), concat_agg(_string) FROM bytes_string
+----
+NULL NULL
+
+onlyif transformer no-bytes
+statement error Unknown column '_bytes'
+SELECT concat_agg(_bytes), concat_agg(_string) FROM bytes_string
+
+skipif transformer no-bytes
+query TT
+SELECT concat_agg(_bytes), concat_agg(_string) FROM bytes_string GROUP BY _group
+----
+
+onlyif transformer no-bytes
+statement error Unknown column '_bytes'
+SELECT concat_agg(_bytes), concat_agg(_string) FROM bytes_string GROUP BY _group
+
+statement ok
+INSERT INTO bytes_string VALUES
+(0, NULL, NULL),
+(1, b'1', '1'),
+(2, b'2', '2'), (2, b'2', '2'),
+(3, b'3', '3'), (3, NULL, NULL), (3, b'3', '3')
+
+skipif transformer no-bytes
+query TT
+SELECT concat_agg(_bytes), concat_agg(_string) FROM bytes_string GROUP BY _group ORDER BY _group
+----
+NULL NULL
+1    1
+22   22
+33   33
+
+onlyif transformer no-bytes
+statement error Unknown column '_bytes'
+SELECT concat_agg(_bytes), concat_agg(_string) FROM bytes_string GROUP BY _group ORDER BY _group
+
+# Regression test for incorrect handling of non-scalar GROUP BY with no
+# aggregate functions (#87619).
+statement ok
+CREATE TABLE t87619 (b) AS SELECT true;
+SET testing_optimizer_random_seed = 3164997759865821235;
+SET testing_optimizer_disable_rule_probability = 0.500000;
+
+query B
+SELECT true FROM t87619 GROUP BY b HAVING b
+----
+true
+
+statement ok
+RESET testing_optimizer_random_seed;
+RESET testing_optimizer_disable_rule_probability;
+
+# Regression test for releasing the memory of datums in the datum-backed vector
+# from the incorrect memory account (#97603).
+onlyif cockroachdb # needs generate_series()
+statement ok
+CREATE TABLE t97603 (id PRIMARY KEY) AS SELECT generate_series(1, 50000);
+
+# The important bits are to use an aggregate function that is not supported
+# natively in the vectorized engine and to have a projection operator that is
+# producing a datum-backed vector (constant OID projection).
+onlyif cockroachdb # needs syntax the parser does not read, at "::"
+statement ok
+SELECT
+     var_pop(crdb_internal_mvcc_timestamp::DECIMAL),
+     1:::OID
+FROM t97603 GROUP BY id HAVING bool_or(true)
