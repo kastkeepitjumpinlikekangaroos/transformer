@@ -152,4 +152,27 @@ class CsvRowParserTest {
     val r = parseAll("\"hello\\\" world\",b\n", opts)
     assertArrayEquals(Array[Object]("hello\" world", "b"), r.head.asInstanceOf[Array[Object]])
   }
+
+  private def rows(input: String, opts: CsvOptions = CsvOptions()): List[Seq[String]] = parseAll(input, opts).map(_.toSeq)
+
+  /** A NUL is a character like any other, wherever the parser reads one: it
+    * is told from the end of the input, which `read` gives as -1. Each of
+    * these places read the next character with `>= 0`, and a mutant's `> 0`
+    * there survived every test (plans/testing/19). */
+  @Test def aNulIsACharacterWhereverItIs(): Unit = {
+    val nul = 0.toChar.toString
+    assertEquals("after an escape", List(Seq("a" + nul + "b")), rows("\"a\\" + nul + "b\"\n", CsvOptions(escape = '\\')))
+    assertEquals("after a closing quote", List(Seq("a" + nul)), rows("\"a\"" + nul + "\n"))
+    assertEquals("after a carriage return", List(Seq("a"), Seq(nul + "b")), rows("a\r" + nul + "b\n"))
+    assertEquals("after a carriage return in quotes", List(Seq("a\r" + nul + "b")), rows("\"a\r" + nul + "b\"\n"))
+    assertEquals("as the quote, doubled in a quoted field", List(Seq("a" + nul + "b", "c")),
+      rows(nul + "a" + nul + nul + "b" + nul + ",c\n", CsvOptions(quote = 0.toChar, escape = 0.toChar)))
+  }
+
+  /** Before its first row a parser is on line 1, and has read no blank line. */
+  @Test def beforeItsFirstRowAParserIsOnLineOne(): Unit = {
+    val parser = new CsvRowParser(new StringReader("\na\n"), CsvOptions())
+    assertEquals(1L, parser.line)
+    assertFalse(parser.blank)
+  }
 }

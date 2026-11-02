@@ -35,8 +35,12 @@ object BuildEvents {
     val attempts = Vector.newBuilder[TestAttempt]
     val unbuilt = Vector.newBuilder[String]
     if (Files.exists(file)) Files.readAllLines(file).asScala.foreach { line =>
-      if (line.contains("\"testResult\"") || line.contains("\"targetCompleted\"")) {
-        val event = MiniJson.parse(line)
+      // A line cut short (a command stopped as it wrote) is no event.
+      val parsed =
+        if (line.contains("\"testResult\"") || line.contains("\"targetCompleted\""))
+          try Some(MiniJson.parse(line)) catch { case _: IllegalArgumentException | _: StringIndexOutOfBoundsException => None }
+        else None
+      parsed.foreach { event =>
         val id = event.field("id")
         id.field("testResult") match {
           case MiniJson.Obj(_) =>

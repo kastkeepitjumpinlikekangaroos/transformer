@@ -33,7 +33,7 @@ scala_binary(
 scala_junit_test(
     name = "mutator_test",
     srcs = ["MutatorTest.scala"],
-    data = glob(["testdata/*.txt"]),
+    data = ["equivalent.tsv"] + glob(["testdata/*.txt"]),
     suffixes = ["Test"],
     deps = [
         ":mutation",

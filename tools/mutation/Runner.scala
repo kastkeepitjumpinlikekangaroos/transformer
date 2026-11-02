@@ -42,10 +42,12 @@ final class DirectoryWorkspace(root: Path) extends Workspace {
   }
 }
 
-/** What became of one mutant: `killed` (by `target`'s `tests`, at `stage`),
-  * `timeout` (`target` ran past its stage's timeout), `survived` or
-  * `stillborn` (it did not compile: `note` holds the compiler's error). A
-  * target that also failed on the unmutated file is no kill: `note` names it. */
+/** What became of one mutant: `killed` (at `stage`, by the targets `target`
+  * lists, separated by spaces, with the JUnit `tests` that failed),
+  * `timeout` (every target that caught it ran past its stage's timeout),
+  * `survived` or `stillborn` (it did not compile: `note` holds the
+  * compiler's error). A target that also failed on the unmutated file is no
+  * kill: `note` names it. */
 final case class Result(mutant: Mutant, outcome: String, stage: Int, target: String, tests: Vector[String], seconds: Long, note: String)
 
 object Result {
@@ -68,6 +70,27 @@ object Result {
   * once more on the unmutated file, without Bazel's cached result: a target
   * that fails there too is flaky and kills nothing, and the stages go on. */
 final class Runner(workspace: Workspace, executor: Executor, log: String => Unit) {
+  private val lock = new Object
+  /** The file of the mutant in progress and its unmutated text. */
+  private var pending: Option[(String, String)] = None
+  @volatile private var stopped = false
+
+  /** Whether [[restore]] has stopped the runner. */
+  def isStopped: Boolean = stopped
+
+  /** Puts back the file of the mutant in progress, if any, and stops the
+    * runner: no mutant is written again, and no stage starts. A campaign
+    * stopped mid-mutant (its JVM's shutdown hook calls this) so leaves its
+    * worktree clean, to be run again. */
+  def restore(): Unit = lock.synchronized {
+    stopped = true
+    pending.foreach { case (file, text) => workspace.write(file, text) }
+  }
+
+  /** Writes the mutant's text, unless the runner has stopped. */
+  private def mutate(file: String, text: String): Unit = lock.synchronized {
+    if (!stopped) workspace.write(file, text)
+  }
 
   def run(mutant: Mutant, libraries: Seq[String], stages: Seq[Stage]): Result = {
     val started = System.nanoTime()
@@ -76,7 +99,8 @@ final class Runner(workspace: Workspace, executor: Executor, log: String => Unit
     val mutated = mutant.site.applyTo(original)
     if (Site.shown(original.substring(mutant.site.start, mutant.site.end)) != Site.shown(mutant.site.original))
       throw new IllegalStateException(s"${mutant.id}: ${mutant.file} no longer holds '${mutant.site.original}' at ${mutant.site.line}:${mutant.site.column}")
-    workspace.write(mutant.file, mutated)
+    lock.synchronized { pending = Some((mutant.file, original)) }
+    mutate(mutant.file, mutated)
     try {
       executor.build(libraries) match {
         case Some(error) => Result(mutant, "stillborn", 0, "", Vector.empty, seconds, error)
@@ -84,7 +108,7 @@ final class Runner(workspace: Workspace, executor: Executor, log: String => Unit
           val notes = Vector.newBuilder[String]
           var result: Option[Result] = None
           val remaining = stages.iterator
-          while (result.isEmpty && remaining.hasNext) {
+          while (result.isEmpty && remaining.hasNext && !stopped) {
             val stage = remaining.next()
             log(s"${mutant.id} stage ${stage.number} (${stage.name}): ${stage.targets.size} targets")
             val run = executor.test(stage.targets, stage.flags, stage.timeoutSeconds, cached = true)
@@ -95,22 +119,27 @@ final class Runner(workspace: Workspace, executor: Executor, log: String => Unit
               result = Some(Result(mutant, "stillborn", stage.number, unbuilt.head, Vector.empty, seconds,
                 s"${unbuilt.mkString(" ")} did not build"))
             else if (failing.nonEmpty) {
-              workspace.write(mutant.file, original)
+              lock.synchronized(workspace.write(mutant.file, original))
               val again = executor.test(failing, stage.flags, stage.timeoutSeconds, cached = false)
-              workspace.write(mutant.file, mutated)
+              mutate(mutant.file, mutated)
               val (confirmed, flaky) = failing.partition(again.status(_) == "PASSED")
               if (flaky.nonEmpty) notes += s"stage ${stage.number}: ${flaky.mkString(" ")} failed on the unmutated file too, no kill"
-              val killer = confirmed.find(run.status(_) == "FAILED").orElse(confirmed.headOption)
-              killer.foreach { t =>
-                val outcome = if (run.status(t) == "TIMEOUT") "timeout" else "killed"
-                result = Some(Result(mutant, outcome, stage.number, t, run.failedTests.getOrElse(t, Vector.empty), seconds,
-                  notes.result().mkString("; ")))
+              // Every target that killed it, those that failed before those
+              // that ran past their time.
+              val killers = confirmed.filter(run.status(_) == "FAILED") ++ confirmed.filter(run.status(_) == "TIMEOUT")
+              if (killers.nonEmpty) {
+                val outcome = if (run.status(killers.head) == "TIMEOUT") "timeout" else "killed"
+                result = Some(Result(mutant, outcome, stage.number, killers.mkString(" "),
+                  killers.flatMap(run.failedTests.getOrElse(_, Vector.empty)).toVector, seconds, notes.result().mkString("; ")))
               }
             } else if (missing.nonEmpty)
               notes += s"stage ${stage.number}: ${missing.mkString(" ")} gave no status"
           }
           result.getOrElse(Result(mutant, "survived", 0, "", Vector.empty, seconds, notes.result().mkString("; ")))
       }
-    } finally workspace.write(mutant.file, original)
+    } finally lock.synchronized {
+      workspace.write(mutant.file, original)
+      pending = None
+    }
   }
 }

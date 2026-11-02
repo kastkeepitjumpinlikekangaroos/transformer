@@ -144,6 +144,25 @@ class MutatorTest {
     assertEquals("a quota past the sites takes them all", sites.toSet, Sample.stratified("f.scala", sites, 999, 7L).toSet)
   }
 
+  /** The repository's ledger reads, and each entry names an operator, a
+    * change and why it changes nothing. */
+  @Test def theLedgerReadsAndEachEntryGivesItsReason(): Unit = {
+    val entries = Ledger.read(Paths.get("tools/mutation/equivalent.tsv"))
+    entries.foreach { e =>
+      assertTrue(e.toString, Mutator.Operators.contains(e.operator))
+      assertTrue(e.toString, e.file.startsWith("src/main/scala/") && e.lineText.nonEmpty && e.reason.nonEmpty)
+    }
+    assertEquals("one entry per change and line", entries.size, entries.map(e => (e.file, e.operator, e.original, e.mutated, e.lineText)).distinct.size)
+  }
+
+  @Test def anEntryWhoseLineWentIsStale(): Unit = {
+    val src = fixture("relational")
+    val live = Equivalent("r.scala", "relational", "<", "<=", "def f(a: Int, b: Int): Boolean = a < b", "reason")
+    val gone = live.copy(lineText = "def f(a: Int, b: Int): Boolean = b < a")
+    assertEquals(Seq(gone), Ledger.stale(Seq(live, gone), Seq("r.scala" -> src)))
+    assertEquals("an entry for a file not sampled is not judged", Nil, Ledger.stale(Seq(gone), Seq("other.scala" -> src)))
+  }
+
   @Test def theLedgerLeavesOutAnEquivalentMutantByItsLineText(): Unit = {
     val src = fixture("relational")
     val equivalent = Equivalent("r.scala", "relational", "<", "<=",

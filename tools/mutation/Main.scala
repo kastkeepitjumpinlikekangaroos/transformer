@@ -52,7 +52,10 @@ object Main {
     val ledger = Ledger.read(repo.resolve(opts.getOrElse("ledger", "tools/mutation/equivalent.tsv")))
     val quota = opts.get("per-file").map(_.toInt)
     val seed = opts.get("seed").map(_.toLong).getOrElse(19L)
-    val mutants = Sample.mutants(files.map(f => f -> read(repo, f)), quota, seed, ledger)
+    val sources = files.map(f => f -> read(repo, f))
+    Ledger.stale(ledger, sources).foreach(e =>
+      System.err.println(s"stale ledger entry, it covers no site of ${e.file}: ${e.operator} '${e.original}' on '${e.lineText}'"))
+    val mutants = Sample.mutants(sources, quota, seed, ledger)
     println(Sample.MutantHeader)
     mutants.foreach(m => println(Sample.mutantRow(m)))
   }

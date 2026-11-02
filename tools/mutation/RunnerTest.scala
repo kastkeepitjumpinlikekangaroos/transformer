@@ -107,6 +107,17 @@ class RunnerTest {
     assertTrue(s"both cases drawn: $counted counted, $refused refused", counted > 50 && refused > 50)
   }
 
+  @Test def everyTargetThatKillsAMutantIsNamedThoseThatFailedFirst(): Unit = {
+    val memory = new Memory
+    val script = new Script(memory, answer = (text, targets, _) =>
+      targets.map(t => t -> (if (text == source) "PASSED" else if (t == "//e:engine_test") "TIMEOUT" else "FAILED")).toMap)
+    val r = new Runner(memory, script, _ => ()).run(mutant, Seq("//a:lib"),
+      Seq(Stage(2, "engine, slt and job", Vector("//e:engine_test", "//e:slt_test"), Vector.empty, 60)))
+    assertEquals("killed", r.outcome)
+    assertEquals("//e:slt_test //e:engine_test", r.target)
+    assertEquals(Vector("//e:slt_test.someTest"), r.tests)
+  }
+
   @Test def aTargetPastItsTimeoutIsATimeout(): Unit = {
     val memory = new Memory
     val script = new Script(memory, answer = (text, targets, _) =>
@@ -152,6 +163,41 @@ class RunnerTest {
     assertEquals(source, memory.text)
   }
 
+  /** What a stopped campaign's shutdown hook does: put back the file of the
+    * mutant in progress, and nothing once none is. */
+  @Test def restoreMidMutantPutsTheFileBack(): Unit = {
+    val memory = new Memory
+    var runner: Runner = null
+    var seen = ""
+    val script = new Script(memory, answer = (_, targets, _) => {
+      runner.restore()
+      seen = memory.text
+      passing(targets)
+    })
+    runner = new Runner(memory, script, _ => ())
+    val _ = runner.run(mutant, Seq("//a:lib"), stages)
+    assertEquals(source, seen)
+    assertEquals("a stopped runner starts no further stage", 1, script.runs.size)
+    assertTrue(runner.isStopped)
+    memory.text = "edited"
+    runner.restore()
+    assertEquals("no mutant in progress: nothing to put back", "edited", memory.text)
+  }
+
+  /** A stop during the rerun on the unmutated file: the mutant is not written
+    * back. */
+  @Test def aStopDuringTheRerunLeavesTheFileUnmutated(): Unit = {
+    val memory = new Memory
+    var runner: Runner = null
+    val script = new Script(memory, answer = (text, targets, cached) => {
+      if (!cached) runner.restore()
+      targets.map(t => t -> (if (t == "//a:unit_test" && text != source) "FAILED" else "PASSED")).toMap
+    })
+    runner = new Runner(memory, script, _ => ())
+    val _ = runner.run(mutant, Seq("//a:lib"), stages)
+    assertEquals(source, memory.text)
+  }
+
   @Test def aMutantWhoseSiteNoLongerMatchesTheFileIsRefused(): Unit = {
     val memory = new Memory
     memory.text = source.replace("a < 1", "a > 1")
@@ -176,7 +222,9 @@ class RunnerTest {
       attempt("//s:slt_test", 2, "FAILED", 1200),
       attempt("//a:unit_test", 1, "PASSED", 50),
       """{"id":{"targetCompleted":{"label":"//b:broken_test"}},"aborted":{"reason":"ANALYSIS_FAILURE"}}""",
-      """{"id":{"targetCompleted":{"label":"//a:unit_test"}},"completed":{"success":true}}""").mkString("\n"))
+      """{"id":{"targetCompleted":{"label":"//a:unit_test"}},"completed":{"success":true}}""",
+      // The last line cut short, as a stopped command leaves it: no event.
+      """{"id":{"testResult":{"label":"//c:cut_test","run":1,"shard":1,"at""").mkString("\n"))
     val events = BuildEvents.read(bep)
     assertEquals(Map("//s:slt_test" -> "FAILED", "//a:unit_test" -> "PASSED", "//b:broken_test" -> "FAILED_TO_BUILD"),
       events.statuses)

@@ -14,6 +14,12 @@ import scala.util.Using
   * console goes to a file under `logs`. */
 final class BazelExecutor(repo: Path, outputBase: Path, diskCache: Path, logs: Path, log: String => Unit) extends Executor {
   private var invocation = 0
+  /** The Bazel client running now, for [[stop]]. */
+  @volatile private var running: Option[Process] = None
+
+  /** Stops the Bazel client running now, if any; Bazel's server cancels its
+    * command. */
+  def stop(): Unit = running.foreach(_.destroy())
 
   private val common = Vector(
     s"--disk_cache=$diskCache", "--color=no", "--curses=no", "--noshow_progress", "--keep_going")
@@ -26,7 +32,9 @@ final class BazelExecutor(repo: Path, outputBase: Path, diskCache: Path, logs: P
     val cmd = Vector("bazel", s"--output_base=$outputBase", command) ++ args
     val pb = new ProcessBuilder(cmd.asJava).directory(repo.toFile).redirectErrorStream(true).redirectOutput(out.toFile)
     val p = pb.start()
-    if (p.waitFor(wallSeconds, TimeUnit.SECONDS)) (p.exitValue(), out)
+    running = Some(p)
+    val finished = try p.waitFor(wallSeconds, TimeUnit.SECONDS) finally running = None
+    if (finished) (p.exitValue(), out)
     else {
       log(s"bazel $command ran past ${wallSeconds}s: stopping it and its server")
       p.destroy()
@@ -103,8 +111,9 @@ final class BazelExecutor(repo: Path, outputBase: Path, diskCache: Path, logs: P
 /** A campaign over a list of mutants in a worktree: the stages of each file,
   * a baseline that sets each stage's timeout, then each mutant through the
   * [[Runner]], its result appended to the results file as it is decided. A
-  * campaign that stops can be run again: mutants already in the results file
-  * are skipped. */
+  * campaign stopped by a signal puts back the file of the mutant in progress
+  * and stops its Bazel command, and can be run again: mutants already in the
+  * results file are skipped. */
 object Campaign {
   /** The suites a mutant meets in the second stage, after its own package's
     * tests: the engine's end-to-end tests, the SQL logic tests and the job
@@ -198,13 +207,19 @@ object Campaign {
     val done = Sample.readTsv(resultsFile).map(_("id")).toSet
     val cutoff = Instant.now()
     val runner = new Runner(new DirectoryWorkspace(repo), bazel, log)
-    mutants.filterNot(m => done(m.id)).foreach { m =>
+    // Stopped (SIGTERM, Ctrl-C) mid-mutant: the file goes back, and so the
+    // worktree is clean for the run that resumes this one.
+    Runtime.getRuntime.addShutdownHook(new Thread(() => { runner.restore(); bazel.stop() }))
+    mutants.filterNot(m => done(m.id)).iterator.takeWhile(_ => !runner.isStopped).foreach { m =>
       log(s"${m.id} ${m.file} ${m.site.describe}")
       val p = plans(m.file)
       val r = runner.run(m, p.libraries, p.stages.map(timed))
-      log(s"${m.id} ${r.outcome} ${if (r.target.nonEmpty) s"by ${r.target} at stage ${r.stage}" else ""} in ${r.seconds}s ${r.note}")
-      val _ = Files.writeString(resultsFile, Result.row(r) + "\n", StandardCharsets.UTF_8, StandardOpenOption.APPEND)
-      bazel.pruneCache(cutoff)
+      // A mutant the stop cut short has no outcome: it runs again on resuming.
+      if (!runner.isStopped) {
+        log(s"${m.id} ${r.outcome} ${if (r.target.nonEmpty) s"by ${r.target} at stage ${r.stage}" else ""} in ${r.seconds}s ${r.note}")
+        val _ = Files.writeString(resultsFile, Result.row(r) + "\n", StandardCharsets.UTF_8, StandardOpenOption.APPEND)
+        bazel.pruneCache(cutoff)
+      }
     }
   }
 }

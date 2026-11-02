@@ -34,6 +34,15 @@ object Ledger {
           }
       }
 
+  /** The entries for one of `files` (each a name and its text) that cover no
+    * site there: the line changed or went, and the entry is stale. */
+  def stale(entries: Seq[Equivalent], files: Seq[(String, String)]): Seq[Equivalent] = {
+    val byName = files.toMap
+    entries.filter(e => byName.get(e.file).exists { src =>
+      !Mutator.sites(src).exists(s => e.covers(e.file, s, lineText(src, s)))
+    })
+  }
+
   /** The text of the line `site` starts on. */
   def lineText(src: String, site: Site): String = {
     val from = src.lastIndexOf('\n', site.start - 1) + 1

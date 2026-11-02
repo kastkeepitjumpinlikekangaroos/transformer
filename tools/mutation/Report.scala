@@ -1,7 +1,9 @@
 package com.transformer.tools.mutation
 
 /** A campaign's results as Markdown: killed, timed out, survived and
-  * stillborn per file and per operator, and each survivor with its change. */
+  * stillborn per file and per operator, how many mutants each target killed
+  * (a mutant counts for every target that killed it), and each survivor with
+  * its change. */
 object Report {
   def markdown(rows: Vector[Map[String, String]]): String = {
     val sb = new StringBuilder
@@ -21,6 +23,14 @@ object Report {
     }
     table("file", _("file").stripPrefix("src/main/scala/com/transformer/"))
     table("operator", _("operator"))
+    val killers = rows.filter(r => r("outcome") == "killed" || r("outcome") == "timeout")
+      .flatMap(r => r("target").split(" ").filter(_.nonEmpty)).groupBy(identity).toVector
+      .map { case (t, ts) => (t, ts.size) }.sortBy { case (t, n) => (-n, t) }
+    if (killers.nonEmpty) {
+      sb ++= "| target | mutants it killed |\n|---|---:|\n"
+      killers.foreach { case (t, n) => sb ++= s"| `${t.stripPrefix("//src/test/scala/com/transformer/")}` | $n |\n" }
+      sb ++= "\n"
+    }
     val survivors = rows.filter(_("outcome") == "survived")
     if (survivors.nonEmpty) {
       sb ++= "| survivor | where | operator | change |\n|---|---|---|---|\n"
