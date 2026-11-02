@@ -46,7 +46,7 @@ parallel exchange / spill machinery.
 | [03](03-query-gen-metamorphic.md) | Multi-relation query gen + metamorphic (TLP) + shrinking | 1-2 weeks | medium-high | 01, 02 |
 | [04](04-sql-logic-tests-and-whole-suite-configurations.md) | sqllogictest scripts under eleven verification modes, SQLite's corpus, the whole suite at batch capacity 1 / 2, sharded, serial, in another zone (**done** 2026-11-01) | 1 day | low | — |
 | [05](05-plans-as-sql.md) | Plans as SQL: plan validation after every pass, a printer the binder reads back, the round trip as an slt mode and a fuzz property, EXPLAIN and golden plans; then plan 04's next round (join order, a streaming pairing, hash zero, CSV column order, spill cost, Postgres ports) (**done** 2026-11-01, the Postgres ports' five findings decided and landed) | several days | low-medium | 04 |
-| [06](06-a-failed-run-leaves-no-partial-output.md) | A failed run leaves no partial output, and its rerun needs no cleanup: the defect the survey found, with the commit protocol the user chose, fault points at every write and a crash campaign | 2-3 days | medium | none |
+| [06](06-a-failed-run-leaves-no-partial-output.md) | A failed run leaves no partial output, and its rerun needs no cleanup: the defect the survey found, with the commit protocol the user chose, fault points at every write and a crash campaign (**done** 2026-11-01 overnight on `testing-round-3`: 5c2c5bc, 261d510, 0857a0e; one finding held out, a halt as a directory is created leaves it with no record) | 2-3 days | medium | none |
 | [07](07-compiler-warnings.md) | The compiler warns, and a warning fails the build | 2-3 days | low | none; land early |
 | [08](08-skips-cite-decisions.md) | Every skip names its decision, and a stale skip fails | 1-2 days | low | none; before 10-14 |
 | [09](09-semantics-tables.md) | The engine's rules as tables: one function catalog, the cast matrix, the coercion tables, a function sweep | 4-6 days | medium (W1) | 08; pairs with 10 |
@@ -113,8 +113,8 @@ protocol, and that a final record that cannot be written fails the task.
 
 | Defect | Status | Plan |
 |---|---|---|
-| A task that fails after its parts are committed (a later partition, a validation that throws, a record that cannot be written, a crash) leaves part files and no record, and the next run refuses the task until someone deletes them | confirmed with the CLI jar | 06 |
-| The GUI's `ResultPersister` writes into a directory of stray part files and records every `part-*` there as its output | confirmed against HEAD's classes | 06 |
+| A task that fails after its parts are committed (a later partition, a validation that throws, a record that cannot be written, a crash) leaves part files and no record, and the next run refuses the task until someone deletes them | fixed (5c2c5bc) | 06 |
+| The GUI's `ResultPersister` writes into a directory of stray part files and records every `part-*` there as its output | fixed (5c2c5bc) | 06 |
 | An INT or BIGINT beside a FLOAT is typed FLOAT: `CAST(16777217 AS INT) = CAST(16777216 AS FLOAT)` is TRUE, and `COALESCE(CAST(NULL AS FLOAT), 2147483647)` is 2.1474836E9 | confirmed | 10, decision 2 |
 | A parquet row group whose footer reports 0 bytes is never read: 25 rows read as none (`ParquetReader.packRowGroups`) | confirmed against pyarrow | 13, W1 |
 | Parquet refusals in parquet-mr's, Thrift's or the JVM's words: a NullPointerException's message for an unknown logical type, a missing LZ4 class | confirmed | 13, W2 |

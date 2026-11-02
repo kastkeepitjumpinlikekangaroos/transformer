@@ -1,6 +1,7 @@
 # Plan 06: a failed run leaves no partial output, and its rerun needs no cleanup
 
-> Status: **not started** · found 2026-11-01 by the test survey (category 1 of
+> Status: **done** 2026-11-01 (5c2c5bc W1, 261d510 W2, 0857a0e W3; see
+> [Outcome](#outcome)) · found 2026-11-01 by the test survey (category 1 of
 > 9) and confirmed with the CLI jar · decided by the user: option (c), parts
 > staged under hidden names and renamed once every partition has succeeded,
 > and an in-progress `_run.json` written first; a final record that cannot be
@@ -324,4 +325,129 @@ before the fix, the fault points and how often the fuzzer reached each, any
 defect the new outcomes found, and the jaffle-shop and polymarket timings
 before and after.
 ```
+
+## Outcome
+
+Implemented overnight on 2026-11-01, on branch `testing-round-3` from
+`ca56985`, one commit per workstream, each with its tests and docs:
+
+- **5c2c5bc, W1, the protocol.** `job/OutputDirectory.scala` holds the order
+  for both writers of an output directory, `DataJob` and the GUI's
+  `ResultPersister`: refuse strays (plan 29, unchanged), mark `Running`,
+  clear (`TaskRunRecord.clear`, which leaves the record), stage, commit in
+  partition order, read back and validate, `_perf.json` and samples, then the
+  final record, whose failure fails the task as `Could not write
+  <dir>/_run.json, which records the run: <cause>`. Records name the files the
+  write committed (`core.WrittenParts`). `TaskRunStatus.Running` has no
+  `finishedAt` (`TaskRunRecord.finishedAt` is an `Option`); `outputView`
+  refuses it; the GUI shows it as `UiTaskState.Unfinished` and the viewer's
+  `TableInfo.status` as `Running` ("unfinished"), with no duration, rows or
+  preview. `ResultPersister` refuses strays, marks first, leaves only a
+  `Failed` record on failure, and now records its options and schema.
+- **261d510, W2, fault points.** `core/Faults.scala`: ten points
+  (`first-batch`, `commit`, `running-record`, `final-record`,
+  `failed-record`, `skipped-record`, `clear-delete`, `validation-sample`,
+  `perf-record`, `job-record`), one volatile read unarmed, armed by
+  `Faults.arm` or `-Dtransformer.fault=<point>:<n>:<throw|enospc|halt>`.
+  `job/data_job_test` arms every point to throw and to halt a child JVM
+  (`FaultJob`), plus the second commit, and a full disk at the final record.
+- **0857a0e, W3, the DAG fuzzer.** `FailsWhileWriting` (a `poison` input of
+  two part files whose second ends past INT, doubled in a last arm) and
+  `FailsInValidation` (a validation that overflows on every row), drawn for
+  two thirds of the failing tasks with an output directory and no injected
+  message, statuses unchanged; a `FaultPlan` in three tenths of the cases (a
+  stopped attempt, then the run reruns clean: same execution time, so it is
+  the retry a failed run gets); the directory invariants after every run;
+  `Hydration.checkUnfinished`; guards; and `fuzz:dag_crash_fuzz_campaign`
+  (`DagCrashChild` runs the stopped attempt in a child JVM from the serialized
+  case).
+
+**The four regressions, at `ca56985`** (each checked in a temporary
+worktree; the variants there compile against the base APIs):
+
+| Case | What the base printed |
+|---|---|
+| A later partition overflows (`a.csv` + `b.csv` ending in 2000000000, `SELECT x * 2`) | the directory held `part-00000.csv` and no `_run.json` |
+| A validation's SQL overflows | `part-00000.csv` and no `_run.json` |
+| The final record cannot be written (a directory where `_run.json.tmp` goes) | `expected the task to fail, got Succeeded` |
+| The process killed after the commit (the directory copied mid-validation) | the rerun failed: `Output directory '.../t' already holds part-00000.csv, part-00001.csv, which no run record names, ...` |
+
+The writer tests (`part-00000.csv` / `.parquet` left beside a failed
+partition), the three `ResultPersister` tests (strays overwritten and all
+four named; `part-00000.csv` left by a failed save), the reopened `Running`
+task (`Done(Succeeded)` at the base) and the viewer's unfinished table (the
+catalog offered it) failed there too. With its fault points ported, the base
+failed 10 of 15 throw cases and 11 of 15 halt cases of W2's matrices, and
+W3's property at once (minimized: one CSV task, `commit:1:throw`, leaving
+`part-00001.csv` with no record; and each new outcome, `finished Failed but
+wrote no _run.json`); the crash property at seed 2 (one parquet task halted
+at its first commit beside a staged file and no record).
+
+**Fault points reached.** The in-JVM guard reached all ten within 57 stopped
+runs at the default seed (commit 7, running-record 5, job-record 4,
+final-record 3, skipped-record 3, and first-batch, clear-delete,
+validation-sample, perf-record and failed-record once each), three of which
+left a task reopened unfinished; the crash guard halted all ten within 113
+cases (commit 12, running-record 9, final-record 9, skipped-record 6,
+job-record 5, first-batch 4, failed-record 3, perf-record 2,
+validation-sample 2, clear-delete 1), 42 tasks reopened unfinished. Each point
+is drawn 47 to 69 times over 2000 seeds. Blocks: `dag_scheduler_fuzz_campaign`
+2000 seeds from 100000 (62 s) and `dag_crash_fuzz_campaign` 300 seeds from
+200000 (184 s), both green.
+
+**What the new tests found.**
+
+1. *W2's matrices, in W1:* the protocol section's order for a `Skipped`
+   record, or a `Failed` one before the mark (the record first, the earlier
+   files after), left that record beside the earlier run's parts when the
+   clear stopped part way (`Failed t holds part-00000.parquet,
+   part-00001.parquet`, throw and halt alike), against this plan's own
+   invariant. Fixed in W2: `OutputDirectory.settle` marks such a directory
+   `Running` first, as decision 1 says of any run that deletes a file there,
+   then clears, then writes the record.
+2. *The crash campaign:* a halt in another thread, as a task creates its
+   fresh directory for its first record (between `createDirectories` and the
+   rename), leaves the directory with no record, empty or holding
+   `_run.json.tmp`, against "every task's directory is absent or holds a
+   record". It holds no part file, nothing a reader takes for output, and
+   nothing the next run refuses; its mark clears the temp file. Closing it
+   needs a directory and its record created in one rename (a temp directory
+   renamed into place, which would leave hidden directories in the output root
+   after a crash instead). **Held out for the user**: the invariant allows
+   exactly that state, and gotchas.md says so.
+3. The new outcomes found no defect beyond the one this plan fixed: both
+   catch it at the base on their own.
+4. Incidentally: `ResultPersister`'s record carried no options or schema, so a
+   CSV saved with `csvHeader = false` read back through its record with its
+   first row as a header; it records both now.
+
+**Decisions.** None was open: the protocol, the stage-and-commit and the
+failed final record are the user's (decisions 1 to 3), kept as decided.
+Claude's calls within them, all listed for the user to revisit:
+
+- The five above (a failed task leaves no part file; `Running` on disk,
+  `UNFINISHED` in readers; no `finishedAt` for `Running`; `schemaVersion` 1;
+  two runs into one directory unsupported, in gotchas.md and README's
+  limitations).
+- A `Skipped` record, or a `Failed` one before the mark, marks `Running`
+  first (finding 1), where the protocol section wrote "replaces the old one
+  first": the same intent, nothing deletes a record before its replacement.
+- The invariant for a directory a halt caught at its creation (finding 2).
+- `UiTaskState.Unfinished(startedAt)` is a GUI state of its own, not a
+  `TaskStatus`; a `job.json` entry never says `Running`, and one that did
+  would reopen unfinished too.
+- Validation samples, `_perf.json`, `job.json`, and the `Running`, `Failed`
+  and `Skipped` records stay best effort; only the final record fails a task.
+- The fault mode's stopped attempt is followed by a clean rerun of the same
+  run, half the time over that run's own clean output so clearing has files
+  to delete; an in-JVM fault throws (or throws a full disk's message), and
+  only a child JVM halts.
+- A `FailsWhileWriting` task reads a `poison` input the generator adds only
+  for it; each `FaultPlan` and write failure is drawn from a trailing stream,
+  so every older seed keeps its DAG.
+
+**Timings.** Jaffle-shop 15/15 in about 2 s before and after each commit (and
+rerun over its own output). Polymarket exit 0, 14 / 2 / 1: 99 s at the base
+(orchestrator's baseline), 79 s after W1, 83 s after W2, 79 s after W3.
+`bazel test //...` 66/66 after each commit.
 
