@@ -386,7 +386,7 @@ class FrontendFuzzTest {
     * (counting rows hides a change of values, so the share there is lower).
     * Prints the measured shares. */
   @Test def noSilentDropHonouredClausesAreObservable(): Unit = {
-    val n = 3000
+    val n = Props.probeSeedsOr(3000)
     val byClause = mutable.LinkedHashMap.empty[String, Array[Int]] // generated, refused, observable
     val byContext = mutable.LinkedHashMap.empty[String, Array[Int]] // generated, observable in context
     var seed = 0
@@ -453,7 +453,7 @@ class FrontendFuzzTest {
     * shape that agrees must be observable on a share of its cases, so the
     * data tells the pair's subject from its absence. Prints the shares. */
   @Test def syntaxEquivalenceIsNotVacuous(): Unit = {
-    val n = 3000
+    val n = Props.probeSeedsOr(3000)
     val byShape = mutable.LinkedHashMap.empty[String, Array[Int]] // generated, agreed, observable, refused, known
     var seed = 0
     while (seed < n) {
@@ -491,23 +491,66 @@ class FrontendFuzzTest {
     * `MAX` of it. The catalog's `s` drew ASCII alone until plans/testing/15.
     * Read off the text, so generation only. */
   @Test def textReachesEveryStringSite(): Unit = {
-    val t = TextPool.tally(100000) { seed =>
+    val t = TextPool.tally(140000) { seed =>
       val sc = SqlTextGen.genSpellingCase(new Rng(seed))
       val hc = SqlTextGen.genHonouredCase(new Rng(seed + 5000000L))
       FrontendFuzzTest.textSites(Seq(sc.left, sc.right), sc.tables) ++
         FrontendFuzzTest.textSites(Seq(hc.contextSql, hc.honoured.withoutSql), hc.tables)
     }
     println(s"[frontend] text past ASCII ${t.report}")
-    // Measured over these seeds: the thinnest cell is 36 (SUBSTRING over a
-    // combining mark), LIKE, ILIKE and ORDER BY hundreds to two thousand; the
-    // floor sits about 3x below the thinnest. 100000 seeds of both kinds of
-    // case, generation only, about three seconds.
+    // Measured over these seeds: the thinnest cells are about 40 (MIN/MAX and
+    // GROUP BY over a combining mark, SUBSTRING over U+E000 or U+FFFD beside a
+    // character past U+FFFF), LIKE, ILIKE and ORDER BY hundreds to thousands;
+    // the floor sits about 3x below the thinnest. 140000 seeds of both kinds
+    // of case, generation only, about four seconds: 100000 until the catalog's
+    // other types brought eight more spelling shapes, which left these 28.
     val low = t.below(TextFloor)
     assertTrue(s"text past ASCII rarely reaches these sites (at most $TextFloor seeds):\n  ${low.mkString("\n  ")}\n${t.report}",
       low.isEmpty)
   }
 
   private val TextFloor = 12
+
+  /** The catalog's other types meet their breaking values in the spellings
+    * that read them: a DOUBLE holding NaN and -0.0 in the IN and grouping
+    * shapes, a DECIMAL holding one value at two scales in the BETWEEN and
+    * conditional shapes, a DATE holding two dates in the BETWEEN, a
+    * TIMESTAMP holding NULL beside instants under a millisecond apart in the
+    * NULLS LAST shape, and a BINARY holding two arrays of one content in the
+    * grouping shape. Generation only. */
+  @Test def everyTypeOfTheCatalogMeetsItsValues(): Unit = {
+    val n = 40000
+    val met = mutable.LinkedHashMap.empty[String, Int].withDefaultValue(0)
+    (0 until n).foreach { seed =>
+      val sc = SqlTextGen.genSpellingCase(new Rng(seed.toLong))
+      val t = sc.tables.table("t")
+      def cells(col: String): IndexedSeq[Any] = { val i = t.schema.indexOf(col); t.rows.map(_(i)) }
+      def double(p: Double => Boolean): Boolean = cells("f").exists {
+        case d: java.lang.Double => p(d.doubleValue)
+        case _ => false
+      }
+      val holds = sc.shape match {
+        case "IN over a DOUBLE" | "NOT IN over a DOUBLE" | "DISTINCT over a DOUBLE as GROUP BY" =>
+          double(java.lang.Double.isNaN) && double(d => d == 0.0 && 1.0 / d < 0)
+        case "BETWEEN over a DECIMAL" | "conditionals over a DECIMAL beside an INT" =>
+          DataGen.valueTags(cells("d"))(DataGen.ValueTag.DecimalAtTwoScales)
+        case "BETWEEN over a DATE" => cells("dt").filter(_ != null).distinct.size >= 2
+        case "ORDER BY a TIMESTAMP NULLS LAST" =>
+          cells("ts").contains(null) && DataGen.valueTags(cells("ts"))(DataGen.ValueTag.InstantsUnderAMillisecondApart)
+        case "GROUP BY a BINARY as PARTITION BY" => DataGen.valueTags(cells("bn"))(DataGen.ValueTag.BytesOfOneContent)
+        case _ => false
+      }
+      if (holds) met(sc.shape) += 1
+    }
+    println(s"[frontend] the catalog's other types over $n seeds, cases meeting their values: " +
+      met.toSeq.map { case (k, v) => s"$k=$v" }.mkString(", "))
+    // Measured over these seeds: the thinnest, DISTINCT over a DOUBLE with NaN
+    // and -0.0 in it, 95; the others 129 to 408. The bound sits about 3x
+    // below the thinnest.
+    Seq("IN over a DOUBLE", "NOT IN over a DOUBLE", "DISTINCT over a DOUBLE as GROUP BY", "BETWEEN over a DECIMAL",
+      "conditionals over a DECIMAL beside an INT", "BETWEEN over a DATE", "ORDER BY a TIMESTAMP NULLS LAST",
+      "GROUP BY a BINARY as PARTITION BY").foreach(k => assertTrue(s"$k rarely meets its values (${met(k)})", met(k) > 31))
+  }
 
   /** The disagreement plans/testing/15 holds (finding F1) shows over its own
     * values and nowhere else: the ILIKE shape over a dotless i or a dotted
