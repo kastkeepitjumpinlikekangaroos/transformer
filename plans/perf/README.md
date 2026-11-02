@@ -1,6 +1,6 @@
 # Performance plans — index and status
 
-Thirteen plans covering transformer's performance workstream. Each plan is
+Fifteen plans covering transformer's performance workstream. Each plan is
 self-contained: read the file, and if it still has open work, the launch
 prompt at the bottom of that file says how to pick it up.
 
@@ -8,17 +8,17 @@ prompt at the bottom of that file says how to pick it up.
 are landed — four of them (02, 09, 10, 11) with nothing at all left, the
 other six with one optional, evidence-gated phase still open. Plan 06 is
 partial exactly as its own file describes, and plan 08 is deliberately
-unstarted pending profiler evidence. Plan 13 was written 2026-11-01,
-after `transformer query` over the polymarket files found what a 2 GB
-heap cannot do; it is unstarted, and its evidence is already in its
-file. Read the status column before starting anything here — the
+unstarted pending profiler evidence. Plans 13-15 were written
+2026-11-01, after `transformer query` over the polymarket files found what
+a 2 GB heap cannot do and how far it trails DuckDB; they are unstarted, and
+their evidence is already in their files. Read the status column before starting anything here — the
 standing failure mode for this directory is a session re-implementing
 work that already exists and is covered by tests.
 
 ## Status table
 
 Verified against `src/main` on 2026-09-06; rows 01 and 08 rechecked, and
-13 added, on 2026-11-01.
+13-15 added, on 2026-11-01.
 
 | # | Plan | Status | Evidence |
 |---|------|--------|----------|
@@ -35,6 +35,8 @@ Verified against `src/main` on 2026-09-06; rows 01 and 08 rechecked, and
 | [11](11-benchmarking.md) | Microbench + macro bench + regression guard | done | `benchmarks/{micro,macro,baseline}`, `docs/benchmarking.md` |
 | [12](12-cte-materialization.md) | Materialize multiply-referenced CTEs once | done | `sql/exec/CteResolver.scala` + `sql/plan/PendingCteView.scala` |
 | [13](13-stream-hash-join-output.md) | Stream a hash join's output | not started | `JoinExec`'s keyed paths (`executeCollapsing`, `executePerShard`, `executeGraceHash`) hold their whole output, a shard's when sharded, before their first batch; a 120M-row join over one polymarket orderbook day ran a 2 GB heap out (README Limitations: "A join holds its whole result in memory.") |
+| [14](14-parallel-result-drain.md) | Read a printed result's partitions in parallel | not started | `ExecutedQuery.batches` is `(0 until numPartitions).iterator.flatMap(partition)`, pulled by the CLI's one statement thread: `SELECT *` over a 326M-row orderbook day takes 57 s where a grouped aggregate takes 5-7 s |
+| [15](15-typed-sort-keys.md) | Sorts compare typed keys, not boxed rows | not started | `SortExec.rowOrdering` builds two `RowView`s and evaluates every key per comparison over `Array[Any]` rows; a spilling sort of 132M rows takes 333 s (DuckDB 95 s) and without spill runs a 2 GB heap out |
 
 ## What's actually left
 
@@ -44,6 +46,15 @@ Verified against `src/main` on 2026-09-06; rows 01 and 08 rechecked, and
   bounded amount of output, never its whole result. Six questions for the
   user, each with a recommended answer, are in the plan; Steps 1, 3 and 4
   need none of them answered.
+- **14 — read a printed result's partitions in parallel.** Two drains in
+  `core` that keep every wait a `Submitted.await` (no blocking queue: JDK
+  21's condition waits call `ForkJoinPool.managedBlock`, 02b's regression).
+  Six questions; Q6 suggests its Steps 1-2 land before plan 13's Step 2.
+- **15 — sorts compare typed keys.** Typed key columns, an `Int` index
+  sort, row-for-row parity with today's `SortExec` until Q1. Supersedes
+  plan 01 Phase 3. It also records a live bug: `SELECT DISTINCT ... ORDER
+  BY RAND()` can fail with TimSort's "Comparison method violates its
+  general contract!".
 
 **Optional and gated on evidence.** None of the items below is blocking,
 and several were written as "only if profiling says so" from the start.
@@ -66,7 +77,7 @@ profile or a workload demands it.
   trap: `ColRefExpr.evalVec` aliases the input column, so pooling a
   vector whose lifetime crosses an operator boundary is a correctness
   bug, not just a leak.
-- **01 Phase 3 — pre-computed sort-key tuples.** `SortExec`'s comparator
+- **01 Phase 3 — pre-computed sort-key tuples.** Superseded by plan 15. `SortExec`'s comparator
   still calls `Expr.eval` per comparison (`SortExec.scala:293`). Marked
   optional and separate-PR from the start.
 - **04 Phase 7 / Phase 8 — range-partition SortExec, skew salting.** Both
@@ -109,7 +120,7 @@ Project-wide rules from `CLAUDE.md`:
 
 **Read the status table first.** Most prompts below launched work that
 has since landed; they are kept as a record of how each plan was run, not
-as an invitation to run it again. Each is marked. Only 08 and 13 are
+as an invitation to run it again. Each is marked. Only 08 and 13-15 are
 still live as written, and 08 is gated on profiling — for the optional
 phases listed under "What's actually left", the current prompt lives at
 the bottom of that plan's own file.
@@ -571,6 +582,69 @@ does not measure faster.
 
 Report: the polymarket query's wall time and peak RSS at -Xmx2g after Step 2
 and after Step 6, beside the aggregate-first form's 10 s and 0.55 GB.
+```
+
+### 14 — Read a printed result's partitions in parallel (not started; live)
+
+```
+Read plans/perf/14-parallel-result-drain.md and implement it in step order,
+one commit per step.
+
+Use max effort. Honor CLAUDE.md: bazel test //... green, the jaffle-shop jar
+15/15 with every validation passing, docs in the same commit. Peer sessions
+edit this tree: develop in a git worktree (a local .bazelignore with .claude
+while an agent worktree lives under it), copy back after comparing against a
+base snapshot. Run jars with bazel's remotejdk21; the system java is 17.
+Steps 1 and 2 proceed on the recommended answers to Q1 and Q4 unless the user
+has said otherwise; confirm Q5 before Step 3 and Q2 before Step 4.
+
+Liveness comes first: nothing in Scheduler.pool waits for the consumer. No
+BlockingQueue, SynchronousQueue or Condition on a pool worker (JDK 21's await
+calls ForkJoinPool.managedBlock, 02b's regression), no thread of the drain's
+own, no monitor held across a pool wait; every wait is Submitted.await. Keep
+scheduler_test and exchange_deadlock_stress_test green and run the new targets
+under every .bazelrc config. Output comes second:
+every format prints byte for byte what it printed (compare the base commit's
+jar on the orderbook day). Comments say what the code does, never which step
+added it.
+
+Stop and ask before: (a) changing how the engine partitions a result or any
+operator, (b) reading ahead more than (K + 1) x chunk batches, (c) formatting
+text on pool threads, (d) touching DataJob.
+
+Report: the 326M-row SELECT * at -Xmx2g (wall time, peak RSS) before and after
+Step 1, csv to /dev/null and a COPY before and after Step 2, beside today's
+57 s and 1.0 GB.
+```
+
+### 15 — Sorts compare typed keys, not boxed rows (not started; live)
+
+```
+Read plans/perf/15-typed-sort-keys.md and implement it in phase order, one
+commit per phase.
+
+Use max effort. Honor CLAUDE.md: bazel test //... green, the jaffle-shop jar
+15/15 with every validation passing, the polymarket jar on its README pattern,
+docs in the same commit. Peer sessions edit this tree: develop in a git
+worktree. Take Phase 0's measurements at the base commit before changing code.
+Confirm the user's answers before Phase 4 (Q1), Phase 5 (Q2) and Phase 6 (Q3);
+Phases 0-3 need none. WindowExec stays out (Q4) unless the user says otherwise.
+
+Parity is the first risk: land sort_key_order_test and index_sort_test before
+any operator change, and keep Phases 2 and 3 row for row equal to today's
+operator (BoxedSortExec), ties included. Every type's order comes from Ops:
+KeyOrder calls Ops.floatCompare and the new Ops primitives, never a raw < on
+floats or String.compareTo outside Ops. No new dependency (no fastutil).
+
+Stop and ask before: (a) changing the spill file beyond appending computed key
+columns, (b) changing Spill.estimateBytes for another operator, (c) touching
+WindowExec, or the planner beyond topN's RAND() gate, (d) landing Phase 6
+without its measured gain, (e) any change to which rows a query returns, or
+their order, outside Phase 4.
+
+Report: the three polymarket measurements (wall time, peak RSS) and
+SortExecBench before and after each phase, and the JFR hot methods of the full
+sort at the base commit and after Phase 5.
 ```
 
 ## Notes on running these in fresh sessions

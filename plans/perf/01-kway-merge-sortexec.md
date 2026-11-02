@@ -4,7 +4,8 @@
 > `java.util.PriorityQueue` K-way heap merge over the sorted partials
 > (`SortExec.scala:193-260`). Phase 3 (pre-computed sort-key tuples) is
 > still open and still optional: the comparator calls `Expr.eval` per
-> comparison at `SortExec.scala:322-323`.
+> comparison at `SortExec.scala:322-323`. Plan 15 (typed sort keys)
+> supersedes Phase 3.
 > · Tier: 2 (quick win) · Effort: ~1 day · Risk: low
 
 ## Goal
