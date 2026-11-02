@@ -1,0 +1,7 @@
+object Checked {
+  def f(a: Int, b: Int): Int = Math.addExact(a, b)
+  def g(a: Long, b: Long): Long = Math.multiplyExact(a, f(2, 3).toLong)
+  def h(a: Long): Long = Math.negateExact(a)
+  def i(a: Long): Int = Math.toIntExact(a)
+  def j(a: Int): Int = Math.abs(a)
+}

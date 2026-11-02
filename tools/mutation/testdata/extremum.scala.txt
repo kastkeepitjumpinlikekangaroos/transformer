@@ -1,0 +1,7 @@
+object Extremum {
+  def f(a: Int, b: Int): Int = math.max(a, b)
+  def g(a: Long, b: Long): Long = Math.min(a, b)
+  def h(xs: Seq[Int]): Int = xs.max
+  def i(a: Int, b: Int): Int = a max b
+  def j(a: Int, b: Int): Int = scala.math.min(a, b)
+}

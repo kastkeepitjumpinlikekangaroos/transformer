@@ -209,6 +209,7 @@ manifest that could not reach a Failed or Skipped task's `_run.json` — and, re
 | `job/locale_independence_test` | Runs under tr-TR (`jvm_flags`), where `"I".toLowerCase()` is a dotless i: view, column, function (`min`, `sin`, `if`, `count_if`), CAST-type and CTE names resolve whatever their case, `UPPER` / `LOWER` / `ILIKE` fold as anywhere else, `{{ ISO_DATE }}` renders, and a directory job with a mixed-case input, a task read under another case and a parquet `"compression": "gzip"` output runs; under a Thai-numeral format locale, template values and part file names keep ASCII digits. Six of its tests failed at the code before plans/robustness/16. Rule R1 of `bytecode/bytecode_rules_test` holds the same rule over the compiled classes |
 | `bytecode/classfile_test` | The class-file reader every test over compiled classes shares (`bytecode:classfile`, `ClassFile.scala`: hand-written from JVMS chapter 4, no bytecode library). In a fixture compiled with the test, a `Double.compare` call, a raw `<` between two doubles, a comparison with `0.0` on either side and with an Int constant widened by `i2d` (`x > 3`), a string `match` (a switch on `hashCode`), a field read and a string constant are each found in the method that holds them, with its source line, and a call in a lambda in the lambda's `$anonfun$` method, its handle in the method that makes it; hand-assembled code decodes `tableswitch` and `lookupswitch` at each of the four paddings and `wide` before a load and an `iinc`; every method of the Scala library and of `java.base` decodes to its last byte, and every reference their pools hold is found in some method |
 | `bytecode/bytecode_rules_test` | The rules of `BytecodeRules.scala` (plans/testing/18), held under tr-TR over the compiled classes of every module a job runs (core, sql, read, write, job, temporal, cli, gui:session) and of the desktop GUI and the data viewer (gui:vim, gui:chart, gui:components, gui, viewer:model, viewer, read at run time through `runtime_deps`). **R1**: no module a job runs calls a default-locale `toLowerCase()`, `toUpperCase()`, `String.format`, `formatted`, `f"..."`, `DateTimeFormatter.ofPattern(p)` or `NumberFormat.getInstance()`, and no desktop module folds case in the default locale (their display text may format a number in the user's locale, plans/testing/04). In the engine (core, sql, read, write, job, temporal): **R2**, no `Double.compare`, `Float.compare`, boxed `compareTo` or `equals`, and no raw float comparison between two values (`dcmpg` and the rest, neither side a constant), but in `Ops.floatCompare`, `MinMaxState`'s and `pickByOrdering`'s decided tie-breaks and five comparisons of no SQL value; **R3**, no float's raw bits (`doubleToLongBits` and the rest) but in `KeyCodec`'s key bits and `HashPartitioner.decimalHash`; **R4**, no string ordering (`String.compareTo`, `<` on strings) but in `Ops.cmp`; **R9**, no `toEpochDay`, `getEpochSecond`, `getNano` or `ChronoUnit.between` but in `DateVector.epochDay` and `TimestampVector.epochMicros`. In every module a job runs: **R5**, no wall-clock read (`System.currentTimeMillis`, a `java.time` `now()`, `Clock.system*`) but `CURRENT_DATE`'s statement start, the default execution time (`TemporalVariables`, the CLI's, the GUI session's) and a run's record stamps (`DataJob`); **R6**, no random source (`Random`, `ThreadLocalRandom`, `SplittableRandom`, `Math.random`, `UUID.randomUUID`) but `RAND()`'s, the chaos points' held for the user. In the engine again: **R8**, no `System.getProperty`, `System.getenv`, `Boolean.getBoolean`, `sys.props` or `sys.env`, and no `transformer.*` or `TRANSFORMER_*` name, but in `core/Settings` (decision 3); **R7**, no printing, exiting or sleeping (`System.out`, `System.err`, `println`, `printStackTrace`, `System.exit`, `Runtime.halt`, `Thread.sleep`) but the fault hook's armed halt, the leak audit's exit report held for the user. In every module, the desktop's too: **R10**, no default charset or zone (`String.getBytes()`, `new String(bytes)`, a reader, writer or `PrintStream` without a charset, `Charset.defaultCharset`, `TimeZone.getDefault`, `ZoneId.systemDefault`, `Clock.systemDefaultZone`). A failure names the rule, each site with its source line and what to write instead, and the rule's advice; an allowlist entry whose method no longer does what its rule bans fails as stale. Also: each module is a jar of its own; every `com.transformer` class a scanned class names is in a scanned module, so a new module cannot go unread; every reference a pool holds is found in a method; an entry covers its method's lambdas, and `*` its class |
+| `//tools/mutation:mutator_test` | The [mutation tool](#mutation-testing)'s lexer and mutator over fixtures under `tools/mutation/testdata/`: a string (an escaped quote, a triple-quoted one with quotes before its end, an interpolation with braces and strings of its own and one inside another), a character literal such as `'<'`, a nested block comment and a backquoted name are each one token and hold no site; numbers; an unclosed string fails naming its line; each of the eight operators finds the sites of its fixture and none of the look-alikes beside them (`<-`, `=>`, `<:`, `<<`, a `*` of repeated parameters, a `+` beside a string, a sign after an `if` header, a call that continues on the next line or is a block's value); every mutant is its source with its site's tokens replaced and nothing else, a token operator's site one token; a sample deals each file's quota an operator at a time and is fixed by its seed; the ledger leaves out an equivalent mutant by its line's text, wherever the line moved |
 | `job/json_test` | The stdlib JSON parser in `job/Json.scala` — scalars, escapes, nested objects, arrays, type errors, trailing content, scalar→string coercion for the option map; **`Json.escape` writes any string as JSON text UTF-8 holds and `parse` reads back unchanged**: every control character, a surrogate pair as itself, and half of one or a reversed pair as `\u` escapes (written raw, half a pair failed the whole file's write); **a key written twice in one object** is an error naming it, where the second value won (`errorsOnAKeyWrittenTwice`, plans/robustness/27) |
 | `job/job_files_test` | The GUI's job-directory writes (`JobFiles`): names, collisions, minimal and full configs, relative and cloud paths, updates, deletes, JSON that parses back, and **what the loader would refuse is refused before writing** (`addInput_rejectsWhatTheLoaderWould`: an unknown option, a value its option cannot take and a format that is none, for an input and a table, leave nothing on disk, plans/robustness/27) |
 | `job/directory_job_loader_test` | End-to-end `DirectoryJobLoader.load(...)`: basic run, relative vs absolute input paths, validations dir (success + failure), templated input paths + outputDir, alphabetical chaining, default outputDir, JSON scalar→option-map coercion, error cases (no/multiple `.json`, missing `main.sql`, missing jobDir), **per-table `output.json` `partitionBy` extends output path, absent leaves path unchanged, malformed throws**, **default `jobRunOutput` lands at `<outputDir>/job.json`**; **a key, option or value the loader cannot read fails the load** (`aKeyOrValueTheLoaderCannotReadFailsTheLoad`: each row of plan 27's table, an unknown input key, a misspelt CSV option, `"header": "yes"`, an unknown format, a key written twice, a misspelt `output.json` key, `"spill": "yes"`, a size with a unit, an option of the other format and an unknown compression, each naming the file, the key and what it takes, while a config of every accepted key loads, plans/robustness/27) |
@@ -1881,6 +1882,91 @@ Add a new generator /
 property by following the recipe in
 [extending.md](extending.md#add-a-property--generator), or a new metamorphic
 relation via [extending.md](extending.md#add-a-metamorphic-relation).
+
+## Mutation testing
+
+Every other number this page gives counts what the tests ran. A mutation
+campaign measures what they would catch: a mutant is a small deliberate
+defect in a source (`<` for `<=`, `&&` for `||`, a dropped `!`, a deleted
+cleanup call), and a suite that passes with a mutant in place has a blind spot
+exactly there. `//tools/mutation` (package `com.transformer.tools.mutation`)
+makes the mutants and keeps the ledger of mutants that change no behaviour.
+It links nothing of the engine, and needs nothing from outside the repo.
+
+### The operators
+
+`Mutator` reads a source with a lexer of its own (`Lexer`), which knows string
+literals (triple-quoted and interpolated ones, an interpolation's `${...}`
+with nested braces and strings counted as part of its string), character
+literals such as `'<'`, line comments and nested block comments, and
+backquoted names. Nothing inside a string, a character literal, a comment or
+a backquoted name changes, nor inside `[...]` (in Scala that is always a
+type), an annotation's arguments, or an `import` or `package` line.
+
+| operator | mutation | what it asks of the tests |
+|---|---|---|
+| `relational` | `<` and `<=`, `>` and `>=`, `==` and `!=` swapped (never `<-`, `=>`, `<:`, `>:`, `<<`, `>>`) | a boundary row |
+| `logical` | `&&` and `\|\|` swapped; a prefix `!` dropped | each half of a condition |
+| `arithmetic` | binary `+` and `-`, `*` and `/` swapped (not a `+` beside a string literal); `+ 1` to `+ 0` and `- 1` to `- 0`, after `+=` and `-=` too | an off-by-one |
+| `constant` | `0` and `1` swapped (`0L` and `1L` too), `true` and `false` swapped | a flag or a starting value |
+| `extremum` | `math.max` and `math.min` swapped (`Math`'s too) | a clamp |
+| `checked` | `Math.addExact(a, b)` to `(a + b)`, and each other `*Exact` to its plain operation | an overflow |
+| `statement` | a call that is a statement of its own line deleted (`spillDir.foreach(_.close())`, `w.abort()`) | cleanup and resource release |
+| `refusal` | a `throw` that is the body of an `if` with no `else`, to `()` | a refusal's own test |
+
+An operator is binary only with an operand on each side and the left one on
+its own line (a `-` that starts a line starts a statement in Scala 2), and
+the `)` of an `if`, `while` or `for` header ends no operand, so the `-` of
+`if (a) -1 else 1` is a sign, not a subtraction. A `statement` is a dotted
+path with at least one argument list, the whole of its line, where the line
+before ends a statement of the same block or opens the block and the line
+after does not continue it; a bare constructor or `apply` (`Some(x)`) is a
+value, not a call made for what it does. The last statement of a block is one
+only where the block's value goes nowhere (the body of a `while` or a `for`,
+of an `if` with no `else`, of a `finally`, of a `foreach`, of a method
+declared `: Unit`): elsewhere it is the block's value, and deleting it would
+not compile. `//tools/mutation:mutator_test` holds each operator to a fixture
+under `tools/mutation/testdata/`.
+
+### Listing and sampling mutants
+
+The tool is built once in the repo and run with the output base's JDK 21 (the
+system `java` may be older):
+
+```bash
+bazel build //tools/mutation:mutate_deploy.jar
+S=<scratch directory>
+cp bazel-bin/tools/mutation/mutate_deploy.jar $S/mutate.jar
+JAVA="$(bazel info output_base)/external/rules_java~~toolchains~remotejdk21_macos_aarch64/bin/java"
+
+# Every site of every operator in a file, with the line it is on.
+$JAVA -jar $S/mutate.jar sites src/main/scala/com/transformer/read/csv/CsvRowParser.scala
+# The mutants to run: every site, or a sample stratified by operator
+# (--per-file N): each file's quota dealt out an operator at a time. The seed
+# fixes the draw; the ledger's mutants are left out.
+$JAVA -jar $S/mutate.jar sample --per-file 15 --seed 19 <file>... > $S/mutants.tsv
+# One mutant written into its file, to see a test kill it; then put it back.
+$JAVA -jar $S/mutate.jar apply --mutants $S/mutants.tsv --id m012
+git checkout -- <file>
+```
+
+### Survivors and the ledger
+
+Each survivor gets one of two outcomes (docs/conventions.md, "A surviving
+mutant gets a test or a ledger line"):
+
+- **A test** that kills it, in the target nearest the code: a unit test, or
+  an slt record for SQL semantics. The test passes at HEAD and fails with the
+  mutant applied (`mutate apply`), the base-commit practice turned around.
+- **A line in `tools/mutation/equivalent.tsv`**, for a mutant that changes no
+  behaviour, such as `<` to `<=` where the two sides cannot be equal: its
+  file, operator, original and mutated text, the text of its line (not the
+  line's number, so the entry survives edits elsewhere) and the reason. An
+  entry covers every such site on a line of that text, and sampling leaves it
+  out.
+
+A survivor that reveals a defect is written up in docs/gotchas.md with a
+minimized repro, and its test waits for the fix.
 
 ## Performance regression guard
 

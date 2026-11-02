@@ -1412,6 +1412,28 @@ fails until it does. A kind of use the reader does not yet find (an opcode
 other than the float comparisons) is a case in `ClassFile.uses`, with a
 method in `ClassFileFixture` that `bytecode:classfile_test` finds it in.
 
+## Add a mutation operator
+
+An operator of the mutation tool (docs/testing.md, "Mutation testing") is a
+kind of small defect `tools/mutation/Mutator.scala` plants:
+
+1. Add its name to `Mutator.Operators`; its place there is its turn when a
+   sample deals out a file's quota.
+2. Find its sites from the lexer's tokens, never the source's characters, so
+   nothing inside a string, a character literal or a comment can change: a
+   one-token change is a case in `Sites.at`, and a construct of several
+   tokens a method of its own, as `checked`, `statement` and `refusal` are.
+   `skipped(i)` marks the tokens no operator touches (types, annotation
+   arguments, imports). A mutant that does not compile costs a build and
+   tells nothing, so leave out the sites where it would not, as `statement`
+   leaves out a block's value.
+3. Add a fixture, `tools/mutation/testdata/<operator>.scala.txt`, holding its
+   sites and the look-alikes it must not take; add it to `MutatorTest`'s
+   `fixtures` and a test listing the sites it finds.
+   `eachMutantDiffersFromItsSourceInItsSiteAlone` then holds every mutant to
+   its site, and `eachOperatorHasAFixture` fails until the fixture is listed.
+4. Add its row to docs/testing.md's operator table.
+
 ## Add cloud support (v1.1 work)
 
 The interfaces are already in place:

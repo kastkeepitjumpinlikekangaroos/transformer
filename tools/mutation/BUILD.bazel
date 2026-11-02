@@ -1,0 +1,37 @@
+load("@rules_scala//scala:scala.bzl", "scala_binary", "scala_junit_test", "scala_library")
+
+# The mutation tool (docs/testing.md, "Mutation testing"): a lexer and the
+# mutator that lists every site of each mutation operator in a Scala source,
+# the stratified sample and the ledger of equivalent mutants. It links nothing
+# of the engine it mutates.
+scala_library(
+    name = "mutation",
+    srcs = [
+        "Ledger.scala",
+        "Lexer.scala",
+        "Mutator.scala",
+        "Sample.scala",
+    ],
+)
+
+# `bazel build //tools/mutation:mutate_deploy.jar`, then run the jar with JDK 21
+# from outside the worktree it mutates.
+scala_binary(
+    name = "mutate",
+    srcs = ["Main.scala"],
+    main_class = "com.transformer.tools.mutation.Main",
+    deps = [":mutation"],
+)
+
+# The lexer over strings, characters, comments and backquoted names, and each
+# operator's sites in its fixture under testdata/, each mutant one token away.
+scala_junit_test(
+    name = "mutator_test",
+    srcs = ["MutatorTest.scala"],
+    data = glob(["testdata/*.txt"]),
+    suffixes = ["Test"],
+    deps = [
+        ":mutation",
+        "@maven//:junit_junit",
+    ],
+)

@@ -2382,7 +2382,9 @@ under `--config=batch1`, `batch2`,
 under three runtime checks: `verify` checks every batch every operator emits
 against the schema it declares, `leaks` fails a target whose JVM leaves a
 file, a spill directory or an engine thread behind, and `chaos` perturbs every
-handoff between threads by a seed. Before landing a
+handoff between threads by a seed. `//tools/mutation` lists the small defects
+a mutation campaign plants in a source, one operator at a time
+([docs/testing.md](docs/testing.md#mutation-testing)). Before landing a
 change, also run the jaffle-shop example (see [Examples](#examples)).
 [docs/testing.md](docs/testing.md) has the details.
 
@@ -2425,7 +2427,8 @@ back here and into `docs/`.
 │                              conventions, extending, gotchas, testing).
 ├── examples/                  Bazel-deployable example apps (programmatic,
 │                              directory-driven, jaffle-shop, GUI launcher).
-├── tools/                     Stand-alone CLIs (e.g. `parquet_peek`).
+├── tools/                     Stand-alone CLIs: `parquet_peek`, and `mutation`,
+│                              the mutation-testing tool.
 ├── src/main/scala/com/transformer/
 │   ├── core/                  Shared types: DataType, Schema, ColumnarBatch,
 │   │                          Catalog, SqlExecutor boundary + registry.

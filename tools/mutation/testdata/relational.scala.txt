@@ -1,0 +1,10 @@
+object Relational {
+  def f(a: Int, b: Int): Boolean = a < b
+  def g(a: Int, b: Int): Boolean = a <= b && a > b || a >= b
+  def h(a: Int, b: Int): Boolean = a == b || a != b
+  def arrows(xs: List[Int]): List[Int] = for (x <- xs) yield x
+  def lambda: Int => Int = x => x
+  def bounds[A <: AnyRef, B >: Null](a: A): A = a
+  def shifts(a: Int): Int = (a << 2) >> 3 >>> 4
+  def method[T](a: T)(implicit ord: Ordering[T]): Boolean = ord.lt(a, a)
+}

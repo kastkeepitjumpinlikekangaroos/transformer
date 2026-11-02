@@ -631,6 +631,16 @@ specific traps.
   in an output directory calls `Faults.at` first, per file, and joins
   `Faults.Points` (extending.md "Add a fault point"), so the fault matrices and
   the DAG fuzzer stop a run there.
+- **A surviving mutant gets a test or a ledger line.** A mutant a campaign
+  runs (testing.md, "Mutation testing") that no test kills gets a test that
+  kills it, in the target nearest the code (a unit test, or an slt record for
+  SQL semantics), which passes at HEAD and fails with the mutant applied; or,
+  when it changes no behaviour, a line in `tools/mutation/equivalent.tsv` with
+  the reason. A survivor is never killed by changing `src/main`: one that
+  reveals a defect is written up with a repro, for a decision, before any
+  test that would fail on it lands. No more than a quarter of a file's
+  survivors go to the ledger; a file that seems to need more is a sign the
+  reasons are wrong.
 
 ## Counter discipline
 

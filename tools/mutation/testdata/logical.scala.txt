@@ -1,0 +1,8 @@
+object Logical {
+  def f(a: Boolean, b: Boolean): Boolean = a && b || !a
+  def g(a: Boolean): Boolean = !(a && !a)
+  def h(a: Boolean, b: Boolean): Boolean = a != b
+  def i(a: Int): Int = ~a
+  def j(a: Boolean): Boolean =
+    if (a) !a else a
+}

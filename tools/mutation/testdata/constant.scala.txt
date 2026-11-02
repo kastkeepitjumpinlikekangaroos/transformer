@@ -1,0 +1,13 @@
+@SerialVersionUID(1L)
+class Constant {
+  val zero = 0
+  val one = 1L
+  val flag = true
+  val other = false
+  val ten = 10
+  val half = 0.5
+  val hex = 0x1
+  def f(a: Int): Int = a + 1
+  def g(xs: Seq[Int]): Int = xs(0) * xs(1)
+  def h: Map[Int, Boolean] = Map.empty[Int, Boolean]
+}
