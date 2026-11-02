@@ -1101,7 +1101,7 @@ object LogicalBuilder {
         caseInsensitive = lk.getLikeKeyWord == LikeExpression.KeyWord.ILIKE,
         escape = Option(lk.getEscape) match {
           case None => LikeSyntax.Default.escape
-          case Some(e: StringValue) if e.getNotExcapedValue.length <= 1 => e.getNotExcapedValue.headOption
+          case Some(esc: StringValue) if esc.getNotExcapedValue.length <= 1 => esc.getNotExcapedValue.headOption
           case Some(_) => throw new IllegalArgumentException("ESCAPE must be a single-character string literal")
         })
       Seq(s, p).foreach(e => Analyzer.checkText(e.dataType, if (syntax.caseInsensitive) "ILIKE" else "LIKE"))
