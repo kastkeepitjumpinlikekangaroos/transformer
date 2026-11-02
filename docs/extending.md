@@ -1168,6 +1168,15 @@ reads a constant at (a ROUND's scale, a number beside a DECIMAL) is no position
 for a form, which is why `eligible` skips every expression that reads no
 column.
 
+**A TQS split** (`oracle/JoinTruth`) grows by a table or a key in `genSplit`, an
+`Edge` naming the column that keys it, and a query shape in `genQuery` that
+`expected` can answer: keep the evaluator to joins along keys, comparisons
+of a column with a literal and the four aggregates, since it is a second
+implementation of join semantics and a richer one would share the engine's
+mistakes. A new shape gets a tally in `queriesReachEveryKindAndBothUnmatchedSides`
+and, where the evaluator learns something new, a case written out by hand in
+`theEvaluatorKnowsEachJoinsAnswer`.
+
 **A forced strategy** (DQP, `oracle/ForcedPlans`) is a `Spelling` case and a
 branch of `ForcedPlans.spell`, which rewrites one join's bound condition into
 another that keeps the same pairs, plus its entry in `ForcedPlans.Strategies`

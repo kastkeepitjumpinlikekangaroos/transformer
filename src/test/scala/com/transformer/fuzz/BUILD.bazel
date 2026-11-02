@@ -173,6 +173,24 @@ scala_junit_test(
     ],
 )
 
+# Known join answers (TQS): a wide table split along its keys into a fact
+# table and dimension tables, NULL keys and dimension rows no fact keys among
+# them; queries walking the keys with every join kind, a WHERE of
+# comparisons with literals, projections and grouped COUNT, SUM, MIN and
+# MAX, each answer worked out without the engine (oracle/JoinTruth). Default
+# budget, part of `bazel test //...`.
+scala_junit_test(
+    name = "join_truth_fuzz_test",
+    srcs = ["JoinTruthFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 # The metamorphic gate re-run under SHARDED planning. The sharding gates
 # (LogicalPlanCardinality.{MinShardableSize, BroadcastBuildThreshold}) are vals
 # read at class load, so they need a separate JVM: jvm_flags set both to 1,
@@ -349,6 +367,19 @@ scala_junit_test(
 scala_junit_test(
     name = "forced_plan_fuzz_campaign",
     srcs = ["ForcedPlanFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "join_truth_fuzz_campaign",
+    srcs = ["JoinTruthFuzzTest.scala"],
     suffixes = ["Test"],
     tags = ["fuzz"],
     deps = [

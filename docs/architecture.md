@@ -1982,6 +1982,14 @@ one over generated text:
   off and its sides swapped, in a JVM with the sharding gates shut and in one
   with them open. It aims at the paths and codecs a join chooses among, which
   the planner otherwise picks one of for a query.
+- **Known join answers** (`oracle/JoinTruth`, TQS's relation, SIGMOD 2023) — a
+  wide table split along its keys into a fact table and dimension tables, so
+  the answer to a query walking the keys is known without the engine: a
+  small evaluator joins the tables by nested loops, pads an outer join's
+  unmatched rows, filters in three-valued logic and adds in `BigInt`. The
+  one relation here with an expected answer from outside the engine at fuzz
+  volume, for multi-way and outer joins, where every relation that compares
+  the engine with itself agrees with a wrong answer it gives everywhere.
 - **Frontend robustness** (`oracle/CleanRejection`, `oracle/NoSilentDrop`,
   `oracle/SyntaxEquivalence`, over `SqlTextGen`) — every generator above renders
   its own typed AST, so its corpus is the supported grammar. This one writes
