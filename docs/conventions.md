@@ -290,7 +290,30 @@ specific traps.
   reads a key to route a row, and the breaker that reads it again, see two
   different values. Keep such a key on a path that reads it once, and bind a
   construct that reads an operand more than once (a simple CASE, BETWEEN) to
-  a node that reads it once when it reads `RAND()`.
+  a node that reads it once when it reads `RAND()`. `RAND()` is the engine's
+  one random source, and rule R6 of `bytecode:bytecode_rules_test` holds it so:
+  no `Random`, `ThreadLocalRandom`, `SplittableRandom`, `Math.random` or
+  `UUID.randomUUID` in a module a job runs but in `Funcs`' `RAND()`, since a
+  second source would not be kept off those paths.
+- **A query's answer does not read the wall clock.** `CURRENT_DATE` and
+  `CURRENT_TIMESTAMP` read the statement's start once, as it binds
+  (`LogicalBuilder.build`), a job's templates read its execution time
+  (`TemporalVariables`, now unless given), and a run's records stamp when
+  things happened (`DataJob`). A clock read anywhere else, inside an operator
+  or a function, would make an answer move with the time it runs; rule R5 of
+  `bytecode_rules_test` holds the modules a job runs to no
+  `System.currentTimeMillis`, `java.time` `now()` or `Clock.system*` but in
+  those places, the CLI's default execution time and the GUI session's.
+  `System.nanoTime`, for a duration, is not a clock read.
+- **Text names its charset, and a time its zone.** A file is read and written
+  in a charset the code names (UTF-8 almost everywhere), and a time is placed
+  in a zone the code names (UTC: every template variable is), never the JVM's
+  default, which is the machine's. Rule R10 of `bytecode_rules_test` holds
+  every module, the desktop's too, to no `String.getBytes()`, `new
+  String(bytes)`, reader, writer or `PrintStream` made without a charset,
+  `Charset.defaultCharset`, `TimeZone.getDefault`, `ZoneId.systemDefault` or
+  `Clock.systemDefaultZone`; `--config=zone` holds the zone only where a test
+  reaches.
 - **A column's type is shown as `DataType.sqlName` spells it** (`BIGINT`,
   `DECIMAL(10,2)`), in every grid, listing and table header: the job GUI's, the
   data viewer's and `transformer query`'s. `DataType.name` (`long`) is the

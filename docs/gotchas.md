@@ -2924,6 +2924,12 @@ is a defect. Each is allowed in its rule's `held` list in
   exponent is whole, in the catalog's description of when POWER is NULL
   (`FunctionCatalog.Entries`): the test `Funcs.apply` makes, which R2 allows,
   written a second time by plans/testing/09.
+- **R6: the chaos points' generator.** `Chaos.draw` and the per-thread state
+  it draws from (`Chaos$ThreadState`) make nothing, a yield or a sleep of 0 to
+  2 ms from a `SplittableRandom` seeded per thread from `-Dtransformer.chaos`
+  (plans/testing/17). It moves when a thread runs, never a value, and is off
+  unless the setting is set; it was written after the rule's plan, so no
+  decision names it.
 
 ## Answers that differ from other engines by design
 

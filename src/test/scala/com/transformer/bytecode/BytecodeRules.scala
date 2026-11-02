@@ -99,6 +99,13 @@ object BytecodeRules {
   def membersInstead(owner: String, instead: String, names: String*): Seq[Ban] =
     names.map(member(owner, _, instead = instead))
 
+  /** Any member of `owner`, its constructors too. */
+  def anyMember(owner: String, instead: String = ""): Ban =
+    Ban(s"$owner (any member)", {
+      case Use.Reference(r, _) => r.owner == owner
+      case _ => false
+    }, instead)
+
   /** Two floats or doubles compared raw (`fcmpl`, `fcmpg`, `dcmpl`, `dcmpg`),
     * neither side a constant: `a < b`, `a == b` between two values. One side
     * a constant (`x > 0.0`, `x == 3`) is not this. */
@@ -213,7 +220,81 @@ object BytecodeRules {
       Allow("com.transformer.core.DateVector$", "epochDay", "the one door a date enters a vector by"),
       Allow("com.transformer.core.TimestampVector$", "epochMicros", "the one door a timestamp enters a vector by")))
 
-  val All: Seq[Rule] = Seq(R1Locale, R1DesktopFolds, R2FloatOrder, R3FloatKeyBits, R4StringOrder, R9DateDoors)
+  val R5Clock: Rule = Rule("R5", "clock", JobModules, Seq(
+    member("java/lang/System", "currentTimeMillis"),
+    Ban("java/time/*.now", {
+      case Use.Reference(r, _) => r.owner.startsWith("java/time/") && r.name == "now"
+      case _ => false
+    })) ++ members("java/time/Clock", "systemUTC", "systemDefaultZone", "system"),
+    advice = "No module a job runs reads the wall clock but where a decision says: a clock read inside an operator " +
+      "or a function makes a query's answer move with the time it runs. CURRENT_DATE and CURRENT_TIMESTAMP read " +
+      "the statement's start once, as it binds (README, \"SQL features\"), a job's templates read its execution " +
+      "time, and a run's records stamp when things happened. System.nanoTime, for a duration, is not banned.",
+    allowed = Seq(
+      Allow("com.transformer.sql.plan.LogicalBuilder$", "build",
+        "decided: CURRENT_DATE and CURRENT_TIMESTAMP read the wall clock once, at the statement's start"),
+      Allow("com.transformer.temporal.TemporalVariables$", "*",
+        "decided: a job's execution time defaults to now (the default of the constructor's and apply's argument)"),
+      Allow("com.transformer.job.DataJob", "*",
+        "a run's records stamp when the run, each task and each record began and ended; no answer reads them"),
+      Allow("com.transformer.job.DataJob$$anon$2", "call",
+        "the same stamps, in the task the runner submits for each SQL task"),
+      Allow("com.transformer.cli.Cli$", "parse", "`transformer run`'s execution time defaults to now"),
+      Allow("com.transformer.gui.JobSession", "<init>", "a session's execution time starts as now, as the GUI shows it")))
+
+  val R6Random: Rule = Rule("R6", "randomness", JobModules, Seq(
+    anyMember("java/util/Random"),
+    anyMember("java/util/concurrent/ThreadLocalRandom"),
+    anyMember("java/util/SplittableRandom"),
+    anyMember("scala/util/Random"),
+    anyMember("scala/util/Random$"),
+    member("java/lang/Math", "random"),
+    member("java/lang/StrictMath", "random"),
+    member("scala/math/package$", "random"),
+    member("java/util/UUID", "randomUUID")),
+    advice = "RAND() is the engine's one random source, and the planner keeps it off the paths that read an " +
+      "expression twice, an exchange's or a spill bucket's key (Expr.readsRandom; docs/conventions.md, \"An " +
+      "operator that reads an expression twice\"). A second source would not be kept off them, and its answers " +
+      "would not repeat.",
+    allowed = Seq(
+      Allow("com.transformer.sql.plan.Funcs$", "apply", "decided: RAND() and RAND(seed), the one random source"),
+      Allow("com.transformer.sql.plan.Funcs$$anon$1", "initialValue", "RAND()'s generator, one per thread")),
+    held = Seq(
+      Allow("com.transformer.core.Chaos$", "draw",
+        "held: plans/testing/17's chaos points draw nothing, a yield or a sleep from a generator seeded per thread " +
+          "from -Dtransformer.chaos; they move when a thread runs, never a value, and are off unless the setting is " +
+          "set. Written after this rule's plan, so no decision names it"),
+      Allow("com.transformer.core.Chaos$ThreadState", "<init>", "held: the chaos points' generator, made per thread")))
+
+  val R10Defaults: Rule = Rule("R10", "default charset and zone", AllModules, Seq(
+    member("java/lang/String", "getBytes", "()[B", instead = "getBytes(StandardCharsets.UTF_8)"),
+    member("java/lang/String", "<init>", "([B)V", instead = "new String(bytes, StandardCharsets.UTF_8)"),
+    member("java/lang/String", "<init>", "([BII)V", instead = "new String(bytes, offset, length, StandardCharsets.UTF_8)"),
+    member("java/io/InputStreamReader", "<init>", "(Ljava/io/InputStream;)V", instead = "a charset argument"),
+    member("java/io/OutputStreamWriter", "<init>", "(Ljava/io/OutputStream;)V", instead = "a charset argument"),
+    member("java/io/FileReader", "<init>", "(Ljava/lang/String;)V", instead = "Files.newBufferedReader(path, charset)"),
+    member("java/io/FileReader", "<init>", "(Ljava/io/File;)V", instead = "Files.newBufferedReader(path, charset)"),
+    member("java/io/FileReader", "<init>", "(Ljava/io/FileDescriptor;)V", instead = "a charset argument"),
+    member("java/io/FileWriter", "<init>", "(Ljava/lang/String;)V", instead = "Files.newBufferedWriter(path, charset)"),
+    member("java/io/FileWriter", "<init>", "(Ljava/lang/String;Z)V", instead = "Files.newBufferedWriter(path, charset)"),
+    member("java/io/FileWriter", "<init>", "(Ljava/io/File;)V", instead = "Files.newBufferedWriter(path, charset)"),
+    member("java/io/FileWriter", "<init>", "(Ljava/io/File;Z)V", instead = "Files.newBufferedWriter(path, charset)"),
+    member("java/io/FileWriter", "<init>", "(Ljava/io/FileDescriptor;)V", instead = "a charset argument"),
+    member("java/io/PrintStream", "<init>", "(Ljava/io/OutputStream;)V", instead = "a charset argument"),
+    member("java/io/PrintStream", "<init>", "(Ljava/io/OutputStream;Z)V", instead = "a charset argument"),
+    member("java/io/PrintStream", "<init>", "(Ljava/lang/String;)V", instead = "a charset argument"),
+    member("java/io/PrintStream", "<init>", "(Ljava/io/File;)V", instead = "a charset argument"),
+    member("java/nio/charset/Charset", "defaultCharset", instead = "StandardCharsets.UTF_8"),
+    member("java/util/TimeZone", "getDefault", instead = "an explicit zone, ZoneOffset.UTC"),
+    member("java/time/ZoneId", "systemDefault", instead = "an explicit zone, ZoneOffset.UTC"),
+    member("java/time/Clock", "systemDefaultZone", instead = "an explicit zone, ZoneOffset.UTC")),
+    advice = "Text is read and written in a charset the code names, and a time is placed in a zone the code names: " +
+      "the JVM's default charset and zone are the machine's, so a file or a value would change with where it runs. " +
+      "Every template variable is UTC (TemporalVariables); --config=zone runs the suite in a half-hour zone, but " +
+      "only where a test reaches.")
+
+  val All: Seq[Rule] = Seq(R1Locale, R1DesktopFolds, R2FloatOrder, R3FloatKeyBits, R4StringOrder, R5Clock, R6Random,
+    R9DateDoors, R10Defaults)
 
   // ---------------------------------------------------------------------------
   // Holding a rule
