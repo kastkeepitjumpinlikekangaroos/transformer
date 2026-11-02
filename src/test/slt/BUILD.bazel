@@ -14,7 +14,9 @@
 # cockroach/POSTGRESQL-LICENSE); datafusion/ files of Apache DataFusion's
 # sqllogictest files at 934691e, vendored the same way, and in datafusion/data/
 # the CSV files they read, under the Apache License 2.0 (datafusion/LICENSE,
-# datafusion/NOTICE); every other script is this repo's own. A `.data` file
+# datafusion/NOTICE); tpch/ TPC-H's queries over RisingWave's tiny TPC-H tables
+# with RisingWave's answers, its CREATE TABLE and INSERT files included as they
+# are (tpch/LICENSE, tpch/NOTICE); every other script is this repo's own. A `.data` file
 # is a table's rows, which a script loads with COPY: postgres/data/ holds
 # Postgres's own, as its regression suite loads them.
 filegroup(
@@ -23,6 +25,7 @@ filegroup(
         "**/*.test",
         "**/*.data",
         "datafusion/data/*.csv",
+        "tpch/*.slt.part",
         "postgres/sql/*.sql",
         "postgres/expected/*.out",
     ]),

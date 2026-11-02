@@ -330,10 +330,11 @@ object Values {
     *     the expected one or, in an `F` or `R` column, the same number
     *     ([[sameNumber]]).
     *   - sqllogictest-rs: a row is its values joined by spaces, a line of the
-    *     block; `rowsort` sorts the lines, `valuesort` the values. A row whose
-    *     line splits into as many words as the query has columns compares
-    *     word by word, an `R` column's as the same number; any other compares
-    *     as its whole line. */
+    *     block, runs of spaces read as one (RisingWave's runner normalizes
+    *     them, and DataFusion's writes one); `rowsort` sorts the lines,
+    *     `valuesort` the values. Each of the engine's values takes as many of
+    *     the line's words as it prints, so a value with spaces lines up, and
+    *     an `R` value compares as the same number. */
   def checkRows(expected: Seq[String], columns: Seq[Column], sort: SortMode, partialSort: Seq[Int],
       colNames: Boolean, names: Seq[String], inexact: Seq[Boolean], rows: Seq[Array[Any]], format: Format): Option[String] = {
     val letters = columns.map { case Column.Letter(c) => c; case _ => 'T' }
@@ -370,25 +371,42 @@ object Values {
           !((letters(c) == 'F' || letters(c) == 'R') && sameNumber(want(i), actual(i), inexact(c), format, letters(c)))
       }.flatMap(i => Runner.diff(want.drop(i), actual.drop(i)).map(d => s"from value ${i + 1}: $d"))
     } else {
-      val lines = printed.map(_.mkString(" ").reverse.dropWhile(_ == ' ').reverse)
+      // A row is its values joined by spaces. Each of the engine's values
+      // takes as many of the expected line's words as it prints, so a value
+      // with spaces in it lines up, and an `R` value compares as a number.
+      def words(s: String): Vector[String] = s.trim.split("\\s+").toVector.filter(_.nonEmpty)
+      val actualRows = printed.map(_.map(v => words(v).mkString(" ")))
+      def line(row: Vector[String]): String = row.mkString(" ")
       def arrange(rs: Vector[String]): Vector[String] = sort match {
         case SortMode.RowSort => rs.sortWith((a, b) => strcmp(a, b) < 0)
-        case SortMode.ValueSort => rs.flatMap(_.split(" ")).sortWith((a, b) => strcmp(a, b) < 0)
+        case SortMode.ValueSort => rs.flatMap(words).sortWith((a, b) => strcmp(a, b) < 0)
         case SortMode.NoSort => rs
       }
-      val want = arrange(expected.toVector.map(l => l.reverse.dropWhile(_.isWhitespace).reverse))
-      val actual = arrange(lines)
-      if (want.length != actual.length) return Runner.diff(want, actual)
+      val want = arrange(expected.toVector.map(l => words(l).mkString(" ")))
+      if (sort == SortMode.ValueSort) {
+        val got = arrange(actualRows.map(line))
+        return if (want == got) None else Runner.diff(want, got)
+      }
+      val got = sort match {
+        case SortMode.RowSort => actualRows.sortWith((a, b) => strcmp(line(a), line(b)) < 0)
+        case _ => actualRows
+      }
+      if (want.length != got.length) return Runner.diff(want, got.map(line))
       want.indices.find { i =>
         val e = want(i)
-        val a = actual(i)
-        e != a && {
-          val ew = e.split(" ", -1)
-          val aw = a.split(" ", -1)
-          sort == SortMode.ValueSort || ew.length != n || aw.length != n ||
-            ew.indices.exists(c => ew(c) != aw(c) && !(letters(c) == 'R' && sameNumber(ew(c), aw(c), inexact(c), format, 'R')))
+        val row = got(i)
+        e != line(row) && {
+          val ew = words(e)
+          var pos = 0
+          val aligned = row.indices.forall { c =>
+            val k = math.max(1, words(row(c)).length)
+            val piece = ew.slice(pos, pos + k).mkString(" ")
+            pos += k
+            piece == row(c) || (letters(c) == 'R' && sameNumber(piece, row(c), inexact(c), format, 'R'))
+          }
+          !(aligned && pos == ew.length)
         }
-      }.flatMap(i => Runner.diff(want.drop(i), actual.drop(i)).map(d => s"from row ${i + 1}: $d"))
+      }.flatMap(i => Runner.diff(want.drop(i), got.drop(i).map(line)).map(d => s"from row ${i + 1}: $d"))
     }
   }
 

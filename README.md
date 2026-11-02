@@ -2242,8 +2242,9 @@ semantics are also pinned as sqllogictest scripts under `src/test/slt/`
 (SQLite's format: each query beside its expected result), which
 `slt/slt_test` runs under thirteen execution modes each (two of them run the
 query's plan printed back as SQL), beside a slice of SQLite's own corpus,
-ports of Postgres's and Spark's tests with their answers, and CockroachDB's
-and DataFusion's logic tests with theirs. The suite reruns under `--config=batch1`, `batch2`,
+ports of Postgres's and Spark's tests with their answers, CockroachDB's and
+DataFusion's logic tests with theirs, and eleven TPC-H queries with
+RisingWave's. The suite reruns under `--config=batch1`, `batch2`,
 `sharded`, `serial`, `zone` and `hashzero`, one JVM-wide setting each. Before landing a
 change, also run the jaffle-shop example (see [Examples](#examples)).
 [docs/testing.md](docs/testing.md) has the details.
