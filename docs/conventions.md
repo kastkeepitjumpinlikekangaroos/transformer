@@ -495,7 +495,9 @@ specific traps.
   `Closing.draining` or a `try ... finally Closing.close(it)`, and a breaker
   that fails releases its spill directory. A consumer of an `ExecutedQuery`
   closes it in a `finally`. `--config=leaks` fails a target whose JVM leaves
-  anything open.
+  anything open. A new handoff between threads (a queue, a latch, a
+  submission, a publish) gets a chaos point (`Chaos.at`, architecture §3i), so
+  `--config=chaos` perturbs it.
 
 - **A test that depends on a JVM-wide default says so.** The whole suite also
   runs at a batch capacity of 1 and 2 rows, sharded, on one thread and in

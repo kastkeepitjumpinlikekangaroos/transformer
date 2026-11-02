@@ -2337,7 +2337,11 @@ and DuckDB's CSV files (its AFL crash inputs among them), PapaParse's cases
 and csv-spectrum's, read as the other parser reads them, otherwise by a rule
 of the ledger, or refused cleanly. The suite reruns
 under `--config=batch1`, `batch2`,
-`sharded`, `serial`, `zone` and `hashzero`, one JVM-wide setting each. Before landing a
+`sharded`, `serial`, `zone` and `hashzero`, one JVM-wide setting each, and
+under three runtime checks: `verify` checks every batch every operator emits
+against the schema it declares, `leaks` fails a target whose JVM leaves a
+file, a spill directory or an engine thread behind, and `chaos` perturbs every
+handoff between threads by a seed. Before landing a
 change, also run the jaffle-shop example (see [Examples](#examples)).
 [docs/testing.md](docs/testing.md) has the details.
 

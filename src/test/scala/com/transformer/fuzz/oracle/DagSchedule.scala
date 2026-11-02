@@ -1,6 +1,6 @@
 package com.transformer.fuzz.oracle
 
-import com.transformer.core.{Faults, SqlExecutorRegistry}
+import com.transformer.core.{Chaos, Faults, SqlExecutorRegistry}
 import com.transformer.fuzz.DagCrashChild
 import com.transformer.fuzz.JobDagGen.{Fails, FailsInValidation, FailsWhileWriting, FaultPlan, JobCase, Ok, ValidationFails}
 import com.transformer.job.{JobResult, JobRunRecord, TaskProgressListener, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus}
@@ -55,7 +55,10 @@ import scala.jdk.CollectionConverters._
   *   8. '''Liveness''' — the run terminates. The job executes on a watchdog
   *      thread; a job still running past [[TimeoutMillis]] fails the property
   *      with a full thread dump, which is how a `Scheduler.pool` starvation
-  *      deadlock surfaces here rather than hanging CI silently.
+  *      deadlock surfaces here rather than hanging CI silently. Under
+  *      `--config=chaos` each thread in the dump carries the last chaos points
+  *      it passed ([[Chaos.lastPoints]]): an interleaving does not replay from
+  *      its seed, so they are its record.
   *   9. '''Directories say what they hold''' ([[checkDirectories]]) —
   *      after any run, finished or stopped, each task's directory is absent or
   *      holds a record; a `Failed` or `Skipped` one holds no part file and no
@@ -163,20 +166,27 @@ object DagSchedule {
     val job = jc.build(root, time)
     SqlEngine.init()
     val executor = jc.executor(SqlExecutorRegistry.get)
-    val out = new AtomicReference[JobResult](null)
+    watched(s"case = $jc", TimeoutMillis)(job.run(executor, TaskProgressListener.NoOp))
+  }
+
+  /** Run `body` on a thread of its own, and fail with a thread dump, each
+    * thread's last chaos points in it, when it is still running after
+    * `timeoutMillis`; `what` names it in the failure. */
+  def watched[T](what: String, timeoutMillis: Long)(body: => T): T = {
+    val out = new AtomicReference[Option[T]](None)
     val err = new AtomicReference[Throwable](null)
     val t = new Thread(() => {
-      try out.set(job.run(executor, TaskProgressListener.NoOp))
+      try out.set(Some(body))
       catch { case e: Throwable => err.set(e) }
     }, "fuzz-dag-runner")
     t.setDaemon(true)
     t.start()
-    t.join(TimeoutMillis)
+    t.join(timeoutMillis)
     if (t.isAlive) throw new AssertionError(
-      s"[dag-schedule] job did not terminate within ${TimeoutMillis}ms — scheduler liveness bug.\n" +
-        s"  case = $jc\n${threadDump()}")
-    if (err.get != null) throw new AssertionError(s"[dag-schedule] job.run() threw.\n  case = $jc", err.get)
-    out.get
+      s"[dag-schedule] job did not terminate within ${timeoutMillis}ms — scheduler liveness bug.\n" +
+        s"  $what\n${threadDump()}")
+    if (err.get != null) throw new AssertionError(s"[dag-schedule] job.run() threw.\n  $what", err.get)
+    out.get.get
   }
 
   /** What a run a fault stopped must still be. Its tasks give a clean run's
@@ -536,9 +546,12 @@ object DagSchedule {
     all.forEach { (t, st) =>
       if (t.getName.startsWith("transformer-") || t.getName.startsWith("fuzz-dag")) {
         sb.append(s"  ${t.getName} [${t.getState}]\n")
+        val points = Chaos.lastPointsOf(t)
+        if (points.nonEmpty) sb.append(s"    last chaos points: ${points.mkString(", ")}\n")
         st.take(18).foreach(f => sb.append(s"      at $f\n"))
       }
     }
+    if (Chaos.enabled) sb.append(s"  (chaos seed ${Chaos.seed.get}, ${Chaos.passed} points passed)\n")
     sb.toString
   }
 

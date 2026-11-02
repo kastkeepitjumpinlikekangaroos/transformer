@@ -113,6 +113,7 @@ object Spill {
     * something short like `"sort"` or `"agg"`. The full path looks like
     * `${rootDir}/agg-1234-7-abcdef/`. */
   def openOperatorDir(operatorTag: String): OperatorSpillDir = {
+    Chaos.at(Chaos.SpillDir)
     val id = operatorCounter.incrementAndGet()
     val pid = ProcessHandle.current().pid()
     val suffix = java.lang.Long.toHexString(System.nanoTime() & 0xFFFFFFFFL)

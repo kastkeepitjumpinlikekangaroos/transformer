@@ -34,3 +34,7 @@ test:verify --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.verify=true
 # fails the target (LeakAudit): files the readers and writers open, operator
 # spill directories, and threads the engine started.
 test:leaks --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.audit_leaks=true
+# Interleavings on purpose (Chaos): at every handoff between threads a thread
+# does nothing, yields or sleeps 0 to 2 ms, by a generator of its own seeded
+# from the seed. Another seed: --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.chaos=<n>.
+test:chaos --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.chaos=1

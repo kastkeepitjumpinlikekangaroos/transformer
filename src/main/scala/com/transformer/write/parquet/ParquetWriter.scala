@@ -313,7 +313,7 @@ object ParquetWriter {
           writers(0) = w
           val _ = w.finish()
         }
-        writers.foreach(w => if (w != null) { Faults.at(Faults.Commit); w.commit() })
+        writers.foreach(w => if (w != null) { Chaos.at(Chaos.WriterCommit); Faults.at(Faults.Commit); w.commit() })
       } catch { case t: Throwable => firstError = t }
     }
     if (firstError != null) {

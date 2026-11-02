@@ -233,7 +233,8 @@ campaigns at their usual budgets.
      directories are released when a consumer stops: LIMIT, an error, a stop.
    - (b) The audit counts only fully drained queries, and the leak is
      documented.
-5. **Chaos in the default suite.**
+5. **Chaos in the default suite.** *Taken overnight as recommended, not yet
+   confirmed by the user: (a).*
    - (a) **(recommended)** No: on demand, like the other configurations.
    - (b) A single-seed smoke run in `//...`.
 

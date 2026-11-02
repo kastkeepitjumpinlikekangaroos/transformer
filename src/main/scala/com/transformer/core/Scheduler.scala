@@ -96,8 +96,10 @@ object Scheduler {
     val failure = new AtomicReference[Throwable]
     val task = pool.submit(new Callable[T] {
       def call(): T =
-        try c.call()
-        catch { case t: Throwable => failure.set(t); throw t }
+        try {
+          Chaos.at(Chaos.Submit)
+          c.call()
+        } catch { case t: Throwable => failure.set(t); throw t }
     })
     new Submitted(task, failure)
   }
@@ -144,7 +146,10 @@ object Scheduler {
       * helping mechanism goes away.
       */
     def await(): T =
-      try task.get()
+      try {
+        Chaos.at(Chaos.Await)
+        task.get()
+      }
       catch {
         case e: ExecutionException => throw Option(failure.get).fold[Throwable](e)(rethrowable)
       }

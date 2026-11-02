@@ -309,7 +309,7 @@ object CsvWriter {
       catch { case t: Throwable => if (firstError == null) firstError = t }
     }
     if (firstError == null) {
-      try writers.foreach { w => Faults.at(Faults.Commit); w.commit() }
+      try writers.foreach { w => Chaos.at(Chaos.WriterCommit); Faults.at(Faults.Commit); w.commit() }
       catch { case t: Throwable => firstError = t }
     }
     if (firstError != null) {

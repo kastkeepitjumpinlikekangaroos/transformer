@@ -40,6 +40,19 @@ scala_junit_test(
     ],
 )
 
+# --config=chaos's points: the seed read once, a third each of nothing, a
+# yield and a sleep of 0 to 2 ms, and each thread's last points kept (Chaos).
+scala_junit_test(
+    name = "chaos_test",
+    srcs = ["ChaosTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = ["-Dtransformer.chaos=42"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)
+
 # Work-helping mechanism guard (plans/bugfixes/02a H4, promoted to CI by 02d).
 # Nested sharded materialization stays live only because ForkJoinTask.get()
 # work-helps; this suite proves a depth-5/fan-4 fan-out completes on a 2-thread

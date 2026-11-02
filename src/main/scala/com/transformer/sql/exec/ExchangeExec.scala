@@ -156,12 +156,14 @@ final case class ExchangeExec(
   private def ensureMaterialized(): Array[Array[ColumnarBatch]] = {
     val s = shards
     if (s != null) return s
+    Chaos.at(Chaos.ExchangeClaim)
     if (claimed.compareAndSet(false, true)) { // exactly one publishing materializer
       claimer = Thread.currentThread()
       try shards = materialize()
       catch { case t: Throwable => matFailure = t }
       finally {
         claimer = null
+        Chaos.at(Chaos.ExchangePublish)
         ready.countDown()
       }
     } else if (claimer eq Thread.currentThread()) {

@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, ExecutedQuery, ExecutionOptions, Faults, MaterializedView, Scheduler, Schema, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, Chaos, ColumnarBatch, ExecutedQuery, ExecutionOptions, Faults, MaterializedView, Scheduler, Schema, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.core.metrics.{MetricsCollector, TaskMetricsRecord}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
@@ -189,6 +189,7 @@ final case class DataJob(
     // throws is why it failed, running out of memory included (as caching a
     // large input can), which [[oomHint]] explains.
     inputs.iterator.zipWithIndex.foreach { case (in, i) =>
+      Chaos.at(Chaos.JobSubmit)
       Scheduler.submit(new Callable[Unit] {
         def call(): Unit = {
           var cause: Option[String] = Some(s"the load of input '${in.viewName}' ended without a result")
@@ -208,7 +209,10 @@ final case class DataJob(
               }
             try listener.onInputFinish(i, in.viewName, cause.isEmpty, cause.map(inputLoadFailure(in.viewName, _)))
             catch { case _: Throwable => () }
-          } finally events.put(InputCompleted(i, cause))
+          } finally {
+            Chaos.at(Chaos.JobEvent)
+            events.put(InputCompleted(i, cause))
+          }
         }
       })
     }
@@ -243,6 +247,7 @@ final case class DataJob(
           val needsView = taskDependents(i).nonEmpty
           // The task reports through `events`, whatever it throws, so its
           // handle is not kept.
+          Chaos.at(Chaos.JobSubmit)
           val _ = Scheduler.submit(new Callable[Unit] {
             def call(): Unit = {
               // runOneTask turns what its task throws into the task's result;
@@ -270,6 +275,7 @@ final case class DataJob(
                   stopReason(name, e).foreach(stopped.compareAndSet(null, _))
               } finally {
                 try listener.onTaskFinish(i, result) catch { case _: Throwable => () }
+                Chaos.at(Chaos.JobEvent)
                 events.put(TaskCompleted(i, result))
               }
             }
@@ -318,6 +324,7 @@ final case class DataJob(
     var remainingInputs = nInputs
     var remainingTasks = nTasks - taskResults.count(_ != null)
     while (remainingInputs > 0 || remainingTasks > 0) {
+      Chaos.at(Chaos.JobEvent)
       events.take() match {
         case InputCompleted(index, cause) =>
           remainingInputs -= 1
@@ -839,6 +846,7 @@ final case class DataJob(
     * the empty view of its schema. */
   private def materializeIfNeeded(
       q: ExecutedQuery, writtenOutput: Option[(OutputFilePath, String)], writtenFiles: Seq[String]): CatalogView = {
+    Chaos.at(Chaos.TaskOutput)
     writtenOutput match {
       case Some((ofp, dir)) =>
         TaskRunRecord.outputView(Paths.get(dir), ofp.detectedFormat, writtenFiles, ofp.options, Some(q.schema))

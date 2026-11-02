@@ -250,6 +250,20 @@ scala_junit_test(
     ],
 )
 
+# The DAG fuzzer's watchdog under chaos reports a pool wedged on purpose with
+# a thread dump that names each worker's last chaos points.
+scala_junit_test(
+    name = "dag_watchdog_test",
+    srcs = ["DagWatchdogTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = ["-Dtransformer.chaos=3"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)
+
 # Frontend fuzzer: SQL TEXT the engine is not already expected to handle --
 # mutated queries, every entry of the UnsupportedClauses table spliced into
 # every context and position, honoured clauses with their clause-free twins,

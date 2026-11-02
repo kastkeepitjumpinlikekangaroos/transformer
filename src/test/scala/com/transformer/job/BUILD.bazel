@@ -19,6 +19,25 @@ scala_junit_test(
     ],
 )
 
+# Under chaos, a job that reads, spills a sharded aggregate, writes and hands
+# its output on passes every chaos point and answers as it does without them.
+scala_junit_test(
+    name = "chaos_job_test",
+    srcs = ["ChaosJobTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = [
+        "-Dtransformer.chaos=7",
+        "-Dtransformer.scheduler.shard_min_size=1",
+        "-Dtransformer.scheduler.broadcast_threshold=1",
+        "-Dtransformer.scheduler.shard_count=4",
+    ],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/job",
+        "@maven//:junit_junit",
+    ],
+)
+
 scala_junit_test(
     name = "json_test",
     srcs = ["JsonTest.scala"],

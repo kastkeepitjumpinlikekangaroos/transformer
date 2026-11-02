@@ -977,6 +977,21 @@ still open, any directory left in the JVM's spill directory and any thread the
 engine started (`transformer-*`, not the pool's) still alive, and ends the JVM
 with status 117. Off, it is a final val read.
 
+### 3i. Chaos points
+
+Each handoff between threads is a named point (`core/Chaos`): a pool task
+about to run and a wait for one (`Scheduler`), an exchange's claim and publish,
+the job runner's event queue and task and input submissions, a partitioned
+writer's commit, a spill directory made, and a task's output read back for the
+tasks after it. Under `-Dtransformer.chaos=<seed>` (`--config=chaos`, read
+once per JVM) a thread passing one does nothing, yields or sleeps 0 to 2 ms, a
+third each, drawn by a generator of its own seeded from the seed and its id,
+so the whole suite runs under interleavings the pool's timing alone would not
+give. The threads that reach a point, and their order, are the run's, so an
+interleaving does not replay from its seed: each thread keeps the last eight
+points it passed (`Chaos.lastPointsOf`), and the DAG fuzzer's watchdog prints
+them beside each thread in its dump. Off, a point is a final val read.
+
 ### 4. Run records and historical-run discovery
 
 The runner persists a per-task `_run.json` for **every termination status**
@@ -2132,7 +2147,7 @@ engine and multiply each one across execution modes:
   (`skipif transformer <id>`) and still runs once, so a skip that no longer
   diverges fails.
 - **Whole-suite configurations** (`.bazelrc` `--config=batch1`, `batch2`,
-  `sharded`, `serial`, `zone`, `hashzero`, `verify`, `leaks`): the whole suite under one
+  `sharded`, `serial`, `zone`, `hashzero`, `verify`, `leaks`, `chaos`): the whole suite under one
   JVM-wide setting apiece, the batch capacity among them, as DuckDB runs its
   tests at a vector size of 2, every key hash 0 (`KeyHash` in
   `core/HashKeys.scala`, which every hash site goes through: the key wrappers
@@ -2141,8 +2156,9 @@ engine and multiply each one across execution modes:
   build does, and every batch every operator emits checked against its schema
   (§2d), as DuckDB's debug builds verify every vector, and what each test
   JVM leaves open audited at its exit (§3h), as Spark's `DebugFilesystem`
-  fails a test that leaves a stream open. A test that depends on a default
-  says so with `assumeTrue`.
+  fails a test that leaves a stream open, and every handoff between threads
+  perturbed by a seed (§3i). A test that depends on a default says so with
+  `assumeTrue`.
 
 Formats, modes, the corpus and how to write a script are in
 [testing.md](testing.md#sql-logic-tests).
