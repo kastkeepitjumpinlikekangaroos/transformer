@@ -2066,7 +2066,9 @@ output as DuckDB re-parses each statement it prints.
   what its operands call for again is a BETWEEN, whose three operands meet as
   one type where each of its two comparisons would meet as a pair, so the
   comparisons it expands to print as the BETWEEN where its operand is cast to
-  a DECIMAL (`DecimalBetween`). A literal is printed so that it binds to its own
+  a DECIMAL (`DecimalBetween`). A CAST's operand that is a condition (a
+  comparison, IS NULL, IN, LIKE, BETWEEN, AND or OR) is printed in
+  parentheses, the only way JSqlParser reads it. A literal is printed so that it binds to its own
   type wherever it stands: a BIGINT an INT would hold as `CAST('5' AS BIGINT)`,
   a FLOAT, NaN and the infinities as a CAST of their text, a DATE and a
   TIMESTAMP as `DATE '...'` and `TIMESTAMP '...'`, a DECIMAL as its digits

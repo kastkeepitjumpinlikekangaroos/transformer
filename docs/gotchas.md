@@ -20,6 +20,11 @@ ship a fix or move something from "not done" to "done".
   "(" "("`. Two parse, as do any number around the tested value, after `LIKE`
   or beside `=`. SQLite's corpus writes the shape 13 times in 5.3 million
   records; write fewer parentheses.
+- **JSqlParser 5.2 reads a CAST of a condition only in parentheses.**
+  `CAST((a = b) AS VARCHAR)` parses; `CAST(a = b AS VARCHAR)` is `SQL parse
+  error: Encountered unexpected token: "="`, and so is a CAST whose operand is
+  an IS NULL, an IN, a LIKE, a BETWEEN, an AND or an OR (a NOT parses bare).
+  `PlanSql` writes such an operand in parentheses (`castOperand`).
 - **No JSqlParser 5.2 literal holds a backslash before a quote.** In
   `'a\''b'` the parser reads `'a\'` as the literal and `'b'` as an alias, and
   `'a\'b'` does not parse at all, so text holding `\'` cannot be written as a
@@ -2354,6 +2359,22 @@ found one defect no other check had, in the printer rather than in an answer:
   each a `BETWEEN` the corpus's own decimal producer draws over columns of two
   decimal types and an integer; `types/decimal.test` and `PlanSqlTest` hold
   it.
+
+## Defects the literature oracles found (2026-11-02, all fixed)
+
+The relations of [plans/testing/16](../plans/testing/16-literature-oracles.md),
+borrowed from the database-testing literature, each hold the engine to an
+answer it should give by construction:
+
+- **The plan of a CAST of a condition did not parse.** `SELECT CAST((a = b)
+  AS VARCHAR) FROM t` binds, and `PlanSql` printed its plan as `CAST(t.a =
+  t.b AS VARCHAR)`, which JSqlParser does not read, so the `reprinted` modes
+  would fail such a query and `EXPLAIN` printed SQL that did not parse. The
+  same held for an operand that is an IS NULL, an IN, a LIKE, a BETWEEN, an
+  AND or an OR. A CAST's operand that binds looser than a concatenation now
+  prints in parentheses. Found by the `rewritten` slt mode, whose rewrite
+  wrapped a boolean under a CAST in a form that cannot change its value;
+  `PlanSqlTest` holds it.
 
 ## Answers the PostgreSQL port settled (2026-11-01, all decided)
 

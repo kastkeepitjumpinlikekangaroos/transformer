@@ -149,9 +149,10 @@ object PlanSql {
     // to a BINARY, which SQL here cannot write: it casts to one wherever the
     // operands' types call for it, which they do again.
     case CastExpr(c, _: DataType.DecimalType | DataType.BinaryType) => expr(c, scope)
-    case CastExpr(c, t) => Fragment(s"CAST(${top(c, scope)} AS ${typeName(t)})", Atomic)
+    case CastExpr(c, t) => Fragment(s"CAST(${castOperand(c, scope)} AS ${typeName(t)})", Atomic)
     // A cast the query wrote, which fits its value to the type.
-    case DecimalCastExpr(c, t) => Fragment(s"CAST(${top(c, scope)} AS DECIMAL(${t.precision},${t.scale}))", Atomic)
+    case DecimalCastExpr(c, t) =>
+      Fragment(s"CAST(${castOperand(c, scope)} AS DECIMAL(${t.precision},${t.scale}))", Atomic)
     case UnaryOpExpr("-", c, _) =>
       val inner = expr(c, scope)
       Fragment("-" + (if (inner.prec == Atomic) inner.text else parens(inner)), Unary)
@@ -199,6 +200,17 @@ object PlanSql {
       }
       Fragment(s"${operand(expr(c, scope))} ${if (negated) "NOT " else ""}$keyword ${operand(expr(pattern, scope))}$escape",
         Compare)
+  }
+
+  /** A CAST's operand: bare when it is a concatenation or binds tighter, in
+    * parentheses otherwise, since the parser reads no comparison, IS NULL,
+    * IN, LIKE, BETWEEN, AND or OR before `AS` without them:
+    * `CAST((a = b) AS VARCHAR)` printed as `CAST(t.a = t.b AS VARCHAR)`,
+    * which did not parse (found by the `rewritten` slt mode,
+    * plans/testing/16). */
+  private def castOperand(c: Expr, scope: Scope): String = {
+    val f = expr(c, scope)
+    if (f.prec >= Concat) f.text else parens(f)
   }
 
   /** `l op r` for an arithmetic `op` binding at `prec`: the parser reads a

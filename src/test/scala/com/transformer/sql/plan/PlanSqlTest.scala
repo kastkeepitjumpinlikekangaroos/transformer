@@ -122,6 +122,11 @@ class PlanSqlTest {
     "SELECT a FROM t WHERE m BETWEEN CAST(b AS DECIMAL(25,5)) AND a",
     "SELECT m BETWEEN a AND CAST(d AS DECIMAL(20,4)) AS x, m NOT BETWEEN CAST(b AS DECIMAL(25,5)) AND 2.5 AS y " +
       "FROM t WHERE a > 0 AND m BETWEEN CAST(a AS DECIMAL(20,4)) AND b AND f",
+    // A CAST of a condition, whose operand the parser reads only in
+    // parentheses (found by the `rewritten` slt mode, plans/testing/16).
+    "SELECT CAST((a = 1) AS VARCHAR) AS e, CAST((s LIKE 'x%') AS INT) AS l, CAST((f AND a > 1) AS VARCHAR) AS c, " +
+      "CAST((s IS NULL) AS VARCHAR) AS n, CAST((a IN (1, 2)) AS VARCHAR) AS i, CAST((a BETWEEN 1 AND 2) AS VARCHAR) AS b, " +
+      "CAST((f OR NOT f) AS VARCHAR) AS o, CAST((NOT f) AS VARCHAR) AS nf FROM t",
     // A table aliased by a word no keyword list holds but the parser reads as
     // the clock where it qualifies a column (found by the round-trip campaign).
     "SELECT a, COUNT(*) AS n FROM t CURRENT_TIMESTAMP GROUP BY a",
