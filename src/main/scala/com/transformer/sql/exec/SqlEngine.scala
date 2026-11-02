@@ -1,7 +1,7 @@
 package com.transformer.sql.exec
 
 import com.transformer.core.{Catalog, ColumnarBatch, ExecutedQuery, ExecutionOptions, SqlExecutor, SqlExecutorRegistry}
-import com.transformer.core.metrics.{MetricsNode, QueryMetrics}
+import com.transformer.core.metrics.QueryMetrics
 import com.transformer.sql.parse.SqlParser
 import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer}
 

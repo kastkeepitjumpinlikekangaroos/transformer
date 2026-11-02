@@ -195,7 +195,6 @@ final case class SortExec(
       spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] = {
     val schema = outputSchema
     val cursorList = mutable.ArrayBuffer.empty[SortCursor]
-    val nKeys = keys.length
     var total: Long = 0L
     partials.foreach { res =>
       res.diskRuns.foreach { file =>

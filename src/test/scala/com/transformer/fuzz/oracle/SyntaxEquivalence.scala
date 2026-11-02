@@ -1,7 +1,7 @@
 package com.transformer.fuzz.oracle
 
 import com.transformer.core.{ExecutionOptions, Schema}
-import com.transformer.fuzz.{RowOracle, SqlTextGen}
+import com.transformer.fuzz.RowOracle
 import com.transformer.fuzz.SqlTextGen.SpellingCase
 
 /** Equivalent spellings agree: two ways of writing one query

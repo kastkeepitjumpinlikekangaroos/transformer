@@ -130,7 +130,7 @@ object UnsupportedClauses {
   private def rejectsWhen[N <: AnyRef](getters: String*)(
       clause: String,
       advice: String = "",
-      example: String = null,
+      example: String,
       partial: Boolean = false,
       describe: N => String = null)(test: N => Boolean): Rejection =
     new Rejection(getters, clause, advice, Option(example), partial,

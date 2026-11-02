@@ -12,7 +12,7 @@ class TaskDagTest {
 
   private def task(
       sql: String,
-      viewName: String = null,
+      viewName: String,
       validations: Seq[Validation] = Nil,
       name: String = null,
       outputPath: String = null

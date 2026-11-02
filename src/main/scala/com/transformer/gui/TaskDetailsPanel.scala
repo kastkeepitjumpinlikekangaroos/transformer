@@ -498,7 +498,7 @@ final class TaskDetailsPanel(session: JobSession, ownerStage: () => Stage) exten
     val state = session.taskStates.lift(i)
     val (verb, path) = (planned, state, written) match {
       case (Some(p), Some(UiTaskState.Done(_)), Some(actual)) if actual == p => ("WROTE TO", Some(p))
-      case (Some(p), Some(UiTaskState.Done(_)), Some(actual))                => ("WROTE TO", Some(actual))
+      case (Some(_), Some(UiTaskState.Done(_)), Some(actual))                => ("WROTE TO", Some(actual))
       case (Some(p), Some(UiTaskState.Unfinished(_)), _)                     => ("UNFINISHED IN", Some(p))
       case (Some(p), _, _)                                                   => ("WILL WRITE TO", Some(p))
       case (None, _, _)                                                      => ("OUTPUT", None)

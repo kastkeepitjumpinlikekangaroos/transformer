@@ -107,9 +107,6 @@ class WindowExecSpillTest {
     buf.toVector
   }
 
-  private def multisetOf(v: Vector[Vector[Any]]): Map[Vector[Any], Int] =
-    v.groupBy(identity).view.mapValues(_.size).toMap
-
   /** Build a (k, v) test plan: k ∈ [0, K), v ∈ [0, N) with no key→v
     * correlation. Used by row_number / rank / lag / lead tests. */
   private def kvPlan(N: Int, K: Int, seed: Long): InMemoryPlan = {
@@ -146,6 +143,7 @@ class WindowExecSpillTest {
       expected.map(row => (row(0).asInstanceOf[Integer].intValue, row(2).asInstanceOf[java.lang.Long].longValue))
     val actByKey: Vector[(Int, Long)] =
       actual.map(row => (row(0).asInstanceOf[Integer].intValue, row(2).asInstanceOf[java.lang.Long].longValue))
+    assertEquals("the (k, row_number) multiset", byKey.sorted, actByKey.sorted)
     // Within each key, the multiset of row_numbers must be 1..N_k.
     expected.groupBy(_(0)).foreach { case (key, rows) =>
       val rns = rows.map(_(2).asInstanceOf[java.lang.Long].longValue).sorted
@@ -396,7 +394,7 @@ class WindowExecSpillTest {
       ds: Seq[Any],
       asc: Boolean,
       opts: ExecutionOptions,
-      nullsFirst: Option[Boolean] = None): Map[Int, (Long, Long)] = {
+      nullsFirst: Option[Boolean]): Map[Int, (Long, Long)] = {
     val rows = ds.iterator.zipWithIndex.map { case (d, i) =>
       Array[Any](java.lang.Integer.valueOf(1), d, java.lang.Integer.valueOf(i))
     }.toVector

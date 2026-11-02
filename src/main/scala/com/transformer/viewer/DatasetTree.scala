@@ -286,7 +286,7 @@ final class DatasetTree(session: ViewerSession) extends VBox {
         case TreeEntry.OfNode(i: NodeId.Input) =>
           val format = session.lineage.flatMap(_.inputRecord(i)).map(_.format.toUpperCase(Locale.ROOT)).getOrElse("")
           (Icons.database, i.name, format, "tree-input")
-        case TreeEntry.Sources(d) =>
+        case TreeEntry.Sources(_) =>
           val n = items.get(item).map(_.getChildren.size).getOrElse(0)
           (Icons.folder, "read from outside", n.toString, "tree-group")
       }

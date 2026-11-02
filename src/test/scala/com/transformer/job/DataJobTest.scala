@@ -21,8 +21,6 @@ class DataJobTest {
     p
   }
 
-  private def readCsv(p: Path): String = Files.readString(p)
-
   /** Convenience constructor for the new schema-rich [[TaskRunRecord]] —
     * tests usually only care about a few fields, so this fills in defaults
     * for the rest. Mirrors the old `RunMarker` parameter set. */

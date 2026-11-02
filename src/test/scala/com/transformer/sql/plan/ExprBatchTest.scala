@@ -110,7 +110,6 @@ class ExprBatchTest {
   // Null mask predicates.
   // ---------------------------------------------------------------------------
 
-  private val NoNulls: Int => Boolean = _ => false
   private val EveryOther: Int => Boolean = _ % 2 == 0
   private val AllNulls: Int => Boolean = _ => true
 

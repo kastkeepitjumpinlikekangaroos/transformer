@@ -1,6 +1,6 @@
 package com.transformer.bench
 
-import java.nio.file.{Files, Path, Paths, StandardCopyOption}
+import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 import scala.collection.mutable

@@ -320,7 +320,7 @@ final case class WindowExec(
       }
     }
 
-    emit(rows, windowValues, childSchema, childWidth, nWindows)
+    emit(rows, windowValues, childWidth, nWindows)
   }
 
   /** Snapshot the per-row values from a batch's pre-computed key vectors. */
@@ -688,7 +688,6 @@ final case class WindowExec(
   private def emit(
       rows: mutable.ArrayBuffer[Array[Any]],
       windowValues: Array[Array[Any]],
-      childSchema: Schema,
       childWidth: Int,
       nWindows: Int): Iterator[ColumnarBatch] = {
     val capacity = ColumnarBatch.DefaultCapacity

@@ -1,6 +1,5 @@
 package com.transformer.slt
 
-import com.transformer.slt.Runner._
 import org.junit.Assert._
 import org.junit.Test
 import org.junit.runner.RunWith

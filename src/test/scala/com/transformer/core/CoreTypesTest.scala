@@ -277,7 +277,6 @@ class CoreTypesTest {
   }
 
   @Test def materializeManyInParallelHandlesEmptyView(): Unit = {
-    val schema = Schema(Field("x", DataType.IntType))
     val empty = new CatalogView {
       def schema: Schema = Schema(Field("x", DataType.IntType))
       def numPartitions: Int = 0

@@ -1,6 +1,6 @@
 package com.transformer.fuzz.oracle
 
-import com.transformer.core.{Catalog, ColumnarBatch, ExecutedQuery, ExecutionOptions, Schema}
+import com.transformer.core.{Catalog, ColumnarBatch, ExecutedQuery, ExecutionOptions}
 import com.transformer.sql.exec.SqlEngine
 
 import scala.collection.mutable

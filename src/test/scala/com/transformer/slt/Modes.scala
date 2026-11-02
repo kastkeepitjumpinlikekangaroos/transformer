@@ -5,7 +5,7 @@ import com.transformer.fuzz.DataGen
 import com.transformer.fuzz.oracle.PlanRoundTrip
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.exec.{CteResolver, PhysicalPlanner, SqlEngine}
-import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer, PlanSql}
+import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer}
 import com.transformer.write.parquet.ParquetWriter
 
 import java.nio.file.{Files, Path}

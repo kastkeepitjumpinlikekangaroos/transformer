@@ -1,7 +1,7 @@
 package com.transformer.fuzz.oracle
 
 import com.transformer.core._
-import com.transformer.fuzz.{DataGen, Rng, RowOracle}
+import com.transformer.fuzz.{DataGen, RowOracle}
 import com.transformer.sql.exec.SqlEngine
 import com.transformer.sql.plan._
 

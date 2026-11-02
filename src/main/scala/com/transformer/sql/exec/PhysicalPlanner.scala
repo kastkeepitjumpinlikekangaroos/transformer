@@ -121,7 +121,7 @@ object PhysicalPlanner {
 
   private def planInner(logical: LogicalPlan, opts: ExecutionOptions): PhysicalPlan = logical match {
     case LogicalScan(_, view, _) => ScanExec(view, stopped = opts.stopped)
-    case LogicalFilter(LogicalScan(name, view, schema), pred) =>
+    case LogicalFilter(LogicalScan(_, view, _), pred) =>
       // Best-effort: try to push the predicate into the scan view. The original
       // FilterExec stays in place — pushdown only enables row-group skipping
       // (stats can prove non-matching groups, never prove matching ones).
@@ -170,7 +170,7 @@ object PhysicalPlanner {
     case LogicalJoin(l, r, cond, kind) =>
       val left = planInner(l, opts)
       val right = planInner(r, opts)
-      val (leftKeys, rightKeys, extra) = splitEqualityKeys(cond, l.outputSchema.length, r.outputSchema.length)
+      val (leftKeys, rightKeys, extra) = splitEqualityKeys(cond, l.outputSchema.length)
       if (leftKeys.isEmpty && rightKeys.isEmpty) enforceNestedLoopGuard(l, r)
       val buildRight = shouldBuildRight(l, r, kind)
       if (leftKeys.isEmpty || !shouldShardJoin(l, r) || (leftKeys ++ rightKeys).exists(Expr.readsRandom)) {
@@ -398,7 +398,7 @@ object PhysicalPlanner {
     * through a join on an equality. `None` where a size is unknown. */
   private def rowsAtMost(p: LogicalPlan): Option[(Long, Boolean)] = p match {
     case LogicalJoin(l, r, cond, _)
-        if splitEqualityKeys(cond, l.outputSchema.length, r.outputSchema.length)._1.isEmpty =>
+        if splitEqualityKeys(cond, l.outputSchema.length)._1.isEmpty =>
       for ((lc, _) <- rowsAtMost(l); (rc, _) <- rowsAtMost(r)) yield (times(lc, rc), true)
     // A join on an equality keeps, by its estimate, its larger side's rows, so
     // it is sized from its sides' bounds: the estimator sizes a pairing below
@@ -433,7 +433,7 @@ object PhysicalPlanner {
     * residual predicate. References on the right side of the join begin at column
     * index `leftWidth` in the combined schema.
     */
-  private def splitEqualityKeys(cond: Expr, leftWidth: Int, rightWidth: Int): (Seq[Expr], Seq[Expr], Option[Expr]) = {
+  private def splitEqualityKeys(cond: Expr, leftWidth: Int): (Seq[Expr], Seq[Expr], Option[Expr]) = {
     val conjuncts = collectConjuncts(cond)
     val leftKeys = mutable.ArrayBuffer.empty[Expr]
     val rightKeys = mutable.ArrayBuffer.empty[Expr]

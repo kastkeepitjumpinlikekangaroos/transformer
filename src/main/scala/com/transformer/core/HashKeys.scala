@@ -619,7 +619,7 @@ final class LongHashMap[V >: Null <: AnyRef](initialCapacity: Int = 16, loadFact
 
   private var entryKeys: Array[Long] = new Array[Long](16)
   private var entryValues: Array[AnyRef] = new Array[AnyRef](16)
-  private var entryIsNull: java.util.BitSet = new java.util.BitSet(16)
+  private val entryIsNull: java.util.BitSet = new java.util.BitSet(16)
   private var _size: Int = 0
   private var nullEntryIdx: Int = -1
 

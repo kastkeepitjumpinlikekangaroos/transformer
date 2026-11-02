@@ -2,7 +2,6 @@ package com.transformer.sql.exec
 
 import com.transformer.core._
 import com.transformer.core.metrics.MetricsNode
-import com.transformer.sql.plan._
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
 import org.junit.Assume.assumeTrue

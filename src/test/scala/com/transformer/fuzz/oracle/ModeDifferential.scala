@@ -4,7 +4,7 @@ import com.transformer.core._
 import com.transformer.fuzz.QueryGen.{OrderKey, QueryCase}
 import com.transformer.fuzz.{DataGen, QueryGen, RowOracle}
 import com.transformer.sql.exec.SqlEngine
-import com.transformer.sql.plan.{ColRefExpr, LogicalBuilder, Ops}
+import com.transformer.sql.plan.{LogicalBuilder, Ops}
 
 import scala.collection.mutable
 

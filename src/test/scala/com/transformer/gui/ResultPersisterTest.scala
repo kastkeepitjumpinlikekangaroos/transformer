@@ -6,7 +6,7 @@ import com.transformer.job.{TaskRunRecord, TaskRunStatus}
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 import java.util.Comparator
 import scala.jdk.CollectionConverters._
 

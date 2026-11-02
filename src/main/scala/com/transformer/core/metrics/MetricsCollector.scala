@@ -1,6 +1,6 @@
 package com.transformer.core.metrics
 
-import java.lang.management.{GarbageCollectorMXBean, ManagementFactory, ThreadMXBean}
+import java.lang.management.{ManagementFactory, ThreadMXBean}
 import java.util.Locale
 
 import scala.jdk.CollectionConverters._
