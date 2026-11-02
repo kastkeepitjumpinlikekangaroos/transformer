@@ -842,6 +842,20 @@ ship a fix or move something from "not done" to "done".
   ships: `ParquetReader.decompresses` asks parquet-mr for a decompressor once
   a codec, and a column in one it cannot make fails the view as it opens,
   naming the codec. `LZ4_RAW` is parquet-mr's own and needs nothing.
+- **parquet-mr reads no page's CRC unless asked.** A page header may carry
+  a CRC32 of its bytes (parquet-mr writes one on every page, Arrow none by
+  default), and `parquet.page.verify-checksum.enabled` is off by default, in
+  pyarrow too, so a page whose bytes rotted decoded to whatever they now
+  said: parquet-testing's `datapage_v1-corrupt-checksum.parquet` read as
+  data. `ParquetReader.open` asks for the check (`usePageChecksumVerification`),
+  which parquet-mr makes as it reads a row group's page headers, so a
+  mismatch fails `readNextRowGroup`, and the refusal finds its column by
+  reading each alone, with the check and then without: one that reads
+  without it is the column whose page does not match. CRC32 is an intrinsic,
+  far cheaper than the decompression beside it; on the polymarket job,
+  whose inputs carry none but whose task outputs, read back by the tasks
+  after them, do, it was within the run-to-run spread (plans/testing/13,
+  decision 2).
 - **A footer's sizes are a writer's claim, never a reason to skip rows.**
   `ParquetReader.packRowGroups` packs a file's row groups into partitions by
   their bytes. It packed by `total_byte_size` alone and emitted a partition

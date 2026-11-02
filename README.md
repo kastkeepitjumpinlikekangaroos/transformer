@@ -1077,6 +1077,14 @@ InputFilePath("data.csv",
   its first page partway through a scan. An encrypted file is refused as one,
   whether its footer is encrypted or only its columns: the reader holds no
   keys.
+- A page whose header carries a CRC is checked against it, and one whose
+  bytes do not match fails the read, naming the file, the column and the row
+  group (`... column 'c', row group 0: a page does not match its checksum`):
+  its bytes changed after they were written, and decoded they would be
+  whatever the change made them. parquet-mr writes a CRC on every page, so
+  every file the engine writes carries them; Arrow writes none unless asked,
+  and a page without one is read as it is. (pyarrow and parquet-mr check
+  none by default.)
 - A file the reader cannot read is refused in its own words, naming the file
   (`Parquet file 'x.parquet' ...`), and the column and row group where it
   knows them: a footer that is not valid parquet metadata, a file that does

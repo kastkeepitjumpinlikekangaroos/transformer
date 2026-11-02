@@ -206,9 +206,17 @@ object ParquetReader {
     * resources again: 2.2 ms an open, nearly all of what a small file such as
     * a spill file cost to read, and a spill file was opened twice. The
     * options are per reader, since the codec factory they hold is not shared
-    * safely. */
-  private[parquet] def open(hif: HadoopInputFile): ParquetFileReader =
-    ParquetFileReader.open(hif, HadoopReadOptions.builder(hif.getConfiguration).build())
+    * safely.
+    *
+    * A page whose header carries a CRC is checked against it as its row
+    * group is read (`verifyChecksums`), so a page whose bytes changed after
+    * they were written fails the read rather than decoding to whatever they
+    * now say. parquet-mr and pyarrow check none by default. A file need not
+    * carry them: Arrow writes none unless asked, parquet-mr one on every page.
+    * Only a refusal's diagnosis reads with them unchecked. */
+  private[parquet] def open(hif: HadoopInputFile, verifyChecksums: Boolean = true): ParquetFileReader =
+    ParquetFileReader.open(hif,
+      HadoopReadOptions.builder(hif.getConfiguration).usePageChecksumVerification(verifyChecksums).build())
 
   /** A parquet file the reader refuses, in its own words: the message names
     * the file, and the column and row group where the reader knows them, and
@@ -642,21 +650,28 @@ final class ParquetPartitionIterator(
 
   /** The refusal for row group `group`, whose column chunks parquet-mr failed
     * to read with `thrown`: it reads every chunk with its pages' headers
-    * together, so the column at fault is found by reading each alone. Closes
-    * the file. */
+    * together, checking each page's CRC, so the column at fault is found by
+    * reading each alone, and a column that reads alone with the checks left
+    * off has a page whose bytes are not the ones its CRC was taken of.
+    * Closes the file. */
   private def groupRefusal(group: Int, thrown: Throwable): ParquetReader.Unreadable = {
     closeQuietly()
-    columnDescriptors.indices.find(c => !readsAlone(c, group)) match {
-      case Some(c) => new ParquetReader.Unreadable(
-        s"Parquet file '$fileLabel' column '${schema.fields(c).name}', row group $group: a page does not decode", thrown)
+    columnDescriptors.indices.find(c => !readsAlone(c, group, verifyChecksums = true)) match {
+      case Some(c) =>
+        val what =
+          if (readsAlone(c, group, verifyChecksums = false)) "a page does not match its checksum, so its bytes are not the ones written"
+          else "a page does not decode"
+        new ParquetReader.Unreadable(s"Parquet file '$fileLabel' column '${schema.fields(c).name}', row group $group: $what", thrown)
       case None => new ParquetReader.Unreadable(s"Parquet file '$fileLabel' row group $group cannot be read", thrown)
     }
   }
 
   /** Whether column `c`'s chunk of row group `group`, its pages' headers
     * included, reads when it is the only column read. */
-  private def readsAlone(c: Int, group: Int): Boolean = {
-    val alone = try ParquetReader.open(hif) catch { case e: Throwable if ParquetReader.libraryFailure(e) => return false }
+  private def readsAlone(c: Int, group: Int, verifyChecksums: Boolean): Boolean = {
+    val alone =
+      try ParquetReader.open(hif, verifyChecksums)
+      catch { case e: Throwable if ParquetReader.libraryFailure(e) => return false }
     try {
       alone.setRequestedSchema(new MessageType(columns.requested.getName, columns.requested.getType(c)))
       var i = 0

@@ -853,6 +853,33 @@ class ParquetExternalFormatTest {
     assertTrue(msg, msg.endsWith("column 'n', row group 1: a page does not decode"))
   }
 
+  /** parquet-mr writes a CRC of each page's bytes into its header, and read
+    * none of them back: a page whose bytes changed after they were written
+    * decoded to whatever they now said, here a value read as another. The
+    * read fails, naming the column and row group (plans/testing/13,
+    * decision 2), for a data page and for a dictionary page alike; a file
+    * whose pages carry no CRC reads as before. */
+  @Test def aPageThatDoesNotMatchItsChecksumFailsTheRead(): Unit = {
+    val schema = ExternalParquet.schema("message m { required int32 id; required int32 n; }")
+    for ((dictionary, what) <- Seq(false -> "a data page", true -> "a dictionary page")) {
+      val file = newDir().resolve("crc.parquet")
+      ExternalParquet.writeRowGroups(file, schema, Seq(
+        ((0 until 5).map(i => Seq[Any](i, i)), ExternalParquet.Layout(dictionary = false)),
+        ((5 until 10).map(i => Seq[Any](i, 1000 + i % 2)), ExternalParquet.Layout(dictionary = dictionary))))
+      // The last byte of the second group's 'n' before its data page: a
+      // value of its dictionary page, or the last value of the first
+      // group's 'n', whose data page ends where the second group starts.
+      val at = if (dictionary) ExternalParquet.dataPageOffsets(file)(1)(1) - 1 else ExternalParquet.dataPageOffsets(file)(1)(0) - 1
+      val bytes = Files.readAllBytes(file)
+      bytes(at.toInt) = (bytes(at.toInt) ^ 0x01).toByte
+      Files.write(file, bytes)
+      val group = if (dictionary) 1 else 0
+      val msg = refusalOf(file)(rows(read(file)))
+      assertTrue(s"$what: $msg",
+        msg.endsWith(s"column 'n', row group $group: a page does not match its checksum, so its bytes are not the ones written"))
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────────
   // Row groups: each read once, whatever bytes its footer gives it.
   // ─────────────────────────────────────────────────────────────────────
