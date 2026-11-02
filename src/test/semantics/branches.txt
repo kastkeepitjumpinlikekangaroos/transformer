@@ -16,7 +16,7 @@
 x                y                CASE THEN x ELSE y COALESCE(x, y)  IF(c, x, y)     GREATEST(x, y)  LEAST(x, y)     LAG(x, 1, y)    x UNION y
 INT              INT              INT             INT             INT             INT             INT             INT             INT
 INT              BIGINT           BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT
-INT              FLOAT            FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
+INT              FLOAT            DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 INT              DOUBLE           DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 INT              DECIMAL(5,2)     DECIMAL(12,2)   DECIMAL(12,2)   DECIMAL(12,2)   DECIMAL(12,2)   DECIMAL(12,2)   DECIMAL(12,2)   DECIMAL(12,2)
 INT              DECIMAL(38,10)   DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)
@@ -31,7 +31,7 @@ INT              integer literal  INT             INT             INT           
 INT              decimal literal  DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 BIGINT           INT              BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT
 BIGINT           BIGINT           BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT
-BIGINT           FLOAT            FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
+BIGINT           FLOAT            DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 BIGINT           DOUBLE           DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 BIGINT           DECIMAL(5,2)     DECIMAL(21,2)   DECIMAL(21,2)   DECIMAL(21,2)   DECIMAL(21,2)   DECIMAL(21,2)   DECIMAL(21,2)   DECIMAL(21,2)
 BIGINT           DECIMAL(38,10)   DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)
@@ -44,8 +44,8 @@ BIGINT           NULL literal     BIGINT          BIGINT          BIGINT        
 BIGINT           text literal     BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT
 BIGINT           integer literal  BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT
 BIGINT           decimal literal  DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
-FLOAT            INT              FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
-FLOAT            BIGINT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
+FLOAT            INT              DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
+FLOAT            BIGINT           DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 FLOAT            FLOAT            FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
 FLOAT            DOUBLE           DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 FLOAT            DECIMAL(5,2)     Ra96812         Ra96812         Ra96812         Ra96812         Ra96812         Ra96812         Ra96812
@@ -57,7 +57,7 @@ FLOAT            TIMESTAMP        R9e2d4b         R9e2d4b         R9e2d4b       
 FLOAT            BINARY           R60fa1e         R60fa1e         R60fa1e         R60fa1e         R60fa1e         R60fa1e         R60fa1e
 FLOAT            NULL literal     FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
 FLOAT            text literal     FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
-FLOAT            integer literal  FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
+FLOAT            integer literal  DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 FLOAT            decimal literal  DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 DOUBLE           INT              DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 DOUBLE           BIGINT           DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
@@ -211,7 +211,7 @@ text literal     integer literal  INT             INT             INT           
 text literal     decimal literal  DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 integer literal  INT              INT             INT             INT             INT             INT             INT             INT
 integer literal  BIGINT           BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT
-integer literal  FLOAT            FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
+integer literal  FLOAT            DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 integer literal  DOUBLE           DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 integer literal  DECIMAL(5,2)     DECIMAL(5,2)    DECIMAL(5,2)    DECIMAL(5,2)    DECIMAL(5,2)    DECIMAL(5,2)    DECIMAL(5,2)    DECIMAL(5,2)
 integer literal  DECIMAL(38,10)   DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)  DECIMAL(38,10)

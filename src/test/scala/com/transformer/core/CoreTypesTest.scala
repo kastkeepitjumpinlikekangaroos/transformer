@@ -33,10 +33,17 @@ class CoreTypesTest {
       assertEquals(n, None, DataType.fromName(n)))
   }
 
+  /** The wider type, but an INT or BIGINT beside a FLOAT is a DOUBLE, which
+    * holds every INT (plans/testing/10, decision 2). */
   @Test def widerNumericPicksWiderRank(): Unit = {
     assertEquals(DataType.DoubleType, DataType.widerNumeric(DataType.IntType, DataType.DoubleType))
     assertEquals(DataType.LongType, DataType.widerNumeric(DataType.LongType, DataType.IntType))
-    assertEquals(DataType.FloatType, DataType.widerNumeric(DataType.FloatType, DataType.IntType))
+    assertEquals(DataType.FloatType, DataType.widerNumeric(DataType.FloatType, DataType.FloatType))
+    assertEquals(DataType.DoubleType, DataType.widerNumeric(DataType.FloatType, DataType.DoubleType))
+    for (i <- Seq(DataType.IntType, DataType.LongType)) {
+      assertEquals(DataType.DoubleType, DataType.widerNumeric(DataType.FloatType, i))
+      assertEquals(DataType.DoubleType, DataType.widerNumeric(i, DataType.FloatType))
+    }
   }
 
   @Test def intVectorNullsRoundtrip(): Unit = {

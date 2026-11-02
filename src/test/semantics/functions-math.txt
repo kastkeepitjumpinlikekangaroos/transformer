@@ -828,17 +828,17 @@ MOD(x, 2)                          BIGINT           9223372036854775807         
 MOD(x, 2)                          BIGINT           16777217                                     -> BIGINT 1
 MOD(x, 2)                          BIGINT           2147483648                                   -> BIGINT 0
 MOD(x, 2)                          BIGINT           9007199254740993                             -> BIGINT 1
-MOD(x, 2)                          FLOAT            NULL                                         -> FLOAT NULL
-MOD(x, 2)                          FLOAT            0.0                                          -> FLOAT 0.0
-MOD(x, 2)                          FLOAT            -0.0                                         -> FLOAT -0.0
-MOD(x, 2)                          FLOAT            NaN                                          -> FLOAT NaN
-MOD(x, 2)                          FLOAT            Infinity                                     -> FLOAT NaN
-MOD(x, 2)                          FLOAT            -Infinity                                    -> FLOAT NaN
-MOD(x, 2)                          FLOAT            2.7                                          -> FLOAT 0.70000005
-MOD(x, 2)                          FLOAT            -2.7                                         -> FLOAT -0.70000005
-MOD(x, 2)                          FLOAT            2.5                                          -> FLOAT 0.5
-MOD(x, 2)                          FLOAT            1.6777216E7                                  -> FLOAT 0.0
-MOD(x, 2)                          FLOAT            3.4028235E38                                 -> FLOAT 0.0
+MOD(x, 2)                          FLOAT            NULL                                         -> DOUBLE NULL
+MOD(x, 2)                          FLOAT            0.0                                          -> DOUBLE 0.0
+MOD(x, 2)                          FLOAT            -0.0                                         -> DOUBLE -0.0
+MOD(x, 2)                          FLOAT            NaN                                          -> DOUBLE NaN
+MOD(x, 2)                          FLOAT            Infinity                                     -> DOUBLE NaN
+MOD(x, 2)                          FLOAT            -Infinity                                    -> DOUBLE NaN
+MOD(x, 2)                          FLOAT            2.7                                          -> DOUBLE 0.7000000476837158
+MOD(x, 2)                          FLOAT            -2.7                                         -> DOUBLE -0.7000000476837158
+MOD(x, 2)                          FLOAT            2.5                                          -> DOUBLE 0.5
+MOD(x, 2)                          FLOAT            1.6777216E7                                  -> DOUBLE 0.0
+MOD(x, 2)                          FLOAT            3.4028235E38                                 -> DOUBLE 0.0
 MOD(x, 2)                          DOUBLE           NULL                                         -> DOUBLE NULL
 MOD(x, 2)                          DOUBLE           0.0                                          -> DOUBLE 0.0
 MOD(x, 2)                          DOUBLE           -0.0                                         -> DOUBLE -0.0
@@ -924,17 +924,17 @@ MOD(2, x)                          BIGINT           9223372036854775807         
 MOD(2, x)                          BIGINT           16777217                                     -> BIGINT 2
 MOD(2, x)                          BIGINT           2147483648                                   -> BIGINT 2
 MOD(2, x)                          BIGINT           9007199254740993                             -> BIGINT 2
-MOD(2, x)                          FLOAT            NULL                                         -> FLOAT NULL
-MOD(2, x)                          FLOAT            0.0                                          -> FLOAT NULL (a divisor of zero)
-MOD(2, x)                          FLOAT            -0.0                                         -> FLOAT NULL (a divisor of zero)
-MOD(2, x)                          FLOAT            NaN                                          -> FLOAT NaN
-MOD(2, x)                          FLOAT            Infinity                                     -> FLOAT 2.0
-MOD(2, x)                          FLOAT            -Infinity                                    -> FLOAT 2.0
-MOD(2, x)                          FLOAT            2.7                                          -> FLOAT 2.0
-MOD(2, x)                          FLOAT            -2.7                                         -> FLOAT 2.0
-MOD(2, x)                          FLOAT            2.5                                          -> FLOAT 2.0
-MOD(2, x)                          FLOAT            1.6777216E7                                  -> FLOAT 2.0
-MOD(2, x)                          FLOAT            3.4028235E38                                 -> FLOAT 2.0
+MOD(2, x)                          FLOAT            NULL                                         -> DOUBLE NULL
+MOD(2, x)                          FLOAT            0.0                                          -> DOUBLE NULL (a divisor of zero)
+MOD(2, x)                          FLOAT            -0.0                                         -> DOUBLE NULL (a divisor of zero)
+MOD(2, x)                          FLOAT            NaN                                          -> DOUBLE NaN
+MOD(2, x)                          FLOAT            Infinity                                     -> DOUBLE 2.0
+MOD(2, x)                          FLOAT            -Infinity                                    -> DOUBLE 2.0
+MOD(2, x)                          FLOAT            2.7                                          -> DOUBLE 2.0
+MOD(2, x)                          FLOAT            -2.7                                         -> DOUBLE 2.0
+MOD(2, x)                          FLOAT            2.5                                          -> DOUBLE 2.0
+MOD(2, x)                          FLOAT            1.6777216E7                                  -> DOUBLE 2.0
+MOD(2, x)                          FLOAT            3.4028235E38                                 -> DOUBLE 2.0
 MOD(2, x)                          DOUBLE           NULL                                         -> DOUBLE NULL
 MOD(2, x)                          DOUBLE           0.0                                          -> DOUBLE NULL (a divisor of zero)
 MOD(2, x)                          DOUBLE           -0.0                                         -> DOUBLE NULL (a divisor of zero)

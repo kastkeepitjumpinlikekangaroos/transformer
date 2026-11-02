@@ -15,7 +15,7 @@
 x                y                x + y           x - y           x * y           x / y           x % y           MOD(x, y)
 INT              INT              INT             INT             INT             INT             INT             INT
 INT              BIGINT           BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT
-INT              FLOAT            FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
+INT              FLOAT            DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 INT              DOUBLE           DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 INT              DECIMAL(5,2)     DECIMAL(13,2)   DECIMAL(13,2)   DECIMAL(16,2)   DECIMAL(18,6)   DECIMAL(5,2)    DECIMAL(5,2)
 INT              DECIMAL(38,10)   DECIMAL(38,9)   DECIMAL(38,9)   DECIMAL(38,6)   DECIMAL(38,18)  DECIMAL(20,10)  DECIMAL(20,10)
@@ -30,7 +30,7 @@ INT              integer literal  INT             INT             INT           
 INT              decimal literal  DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 BIGINT           INT              BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT
 BIGINT           BIGINT           BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT
-BIGINT           FLOAT            FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
+BIGINT           FLOAT            DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 BIGINT           DOUBLE           DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 BIGINT           DECIMAL(5,2)     DECIMAL(22,2)   DECIMAL(22,2)   DECIMAL(25,2)   DECIMAL(27,6)   DECIMAL(5,2)    DECIMAL(5,2)
 BIGINT           DECIMAL(38,10)   DECIMAL(38,9)   DECIMAL(38,9)   DECIMAL(38,6)   DECIMAL(38,9)   DECIMAL(29,10)  DECIMAL(29,10)
@@ -43,8 +43,8 @@ BIGINT           NULL literal     BIGINT          BIGINT          BIGINT        
 BIGINT           text literal     BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT
 BIGINT           integer literal  BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT
 BIGINT           decimal literal  DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
-FLOAT            INT              FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
-FLOAT            BIGINT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
+FLOAT            INT              DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
+FLOAT            BIGINT           DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 FLOAT            FLOAT            FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
 FLOAT            DOUBLE           DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 FLOAT            DECIMAL(5,2)     Ra546dc         Ra546dc         Ra546dc         Ra546dc         Ra546dc         Ra546dc
@@ -56,7 +56,7 @@ FLOAT            TIMESTAMP        R434da3         R434da3         R434da3       
 FLOAT            BINARY           R263778         R263778         R263778         R263778         R263778         R263778
 FLOAT            NULL literal     FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
 FLOAT            text literal     FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
-FLOAT            integer literal  FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
+FLOAT            integer literal  DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 FLOAT            decimal literal  DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 DOUBLE           INT              DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 DOUBLE           BIGINT           DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
@@ -210,7 +210,7 @@ text literal     integer literal  INT             INT             INT           
 text literal     decimal literal  DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 integer literal  INT              INT             INT             INT             INT             INT             INT
 integer literal  BIGINT           BIGINT          BIGINT          BIGINT          BIGINT          BIGINT          BIGINT
-integer literal  FLOAT            FLOAT           FLOAT           FLOAT           FLOAT           FLOAT           FLOAT
+integer literal  FLOAT            DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 integer literal  DOUBLE           DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE          DOUBLE
 integer literal  DECIMAL(5,2)     DECIMAL(6,2)    DECIMAL(6,2)    DECIMAL(7,2)    DECIMAL(9,6)    DECIMAL(3,2)    DECIMAL(3,2)
 integer literal  DECIMAL(38,10)   DECIMAL(38,9)   DECIMAL(38,9)   DECIMAL(38,8)   DECIMAL(38,27)  DECIMAL(11,10)  DECIMAL(11,10)

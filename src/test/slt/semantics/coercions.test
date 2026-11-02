@@ -13,10 +13,11 @@ INSERT INTO n VALUES (16777217, 16777217, 16777216.0, 2.5, 2.50, 2.5, true, 'x',
 
 # ---- comparisons: operands meet as one type
 
+# An INT or BIGINT meets a FLOAT as a DOUBLE, which holds 16777217.
 query BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN
 SELECT i = f, i = b, b = f, m = d, m = w, m < 3 FROM n
 ----
-true	true	true	true	true	true
+false	true	false	true	true	true
 
 query BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN
 SELECT i = '16777217', t = 'true', dt = '2026-01-01', ts = '2026-01-01', m = 2.5 FROM n
@@ -55,7 +56,7 @@ Cannot compare INT with DATE
 
 # ---- branches: values become one result, of a type its every value takes
 
-query BIGINT,DECIMAL(12,2),DECIMAL(21,2),DECIMAL(38,10),FLOAT,DOUBLE,DECIMAL(5,2)
+query BIGINT,DECIMAL(12,2),DECIMAL(21,2),DECIMAL(38,10),DOUBLE,DOUBLE,DECIMAL(5,2)
 SELECT CASE WHEN t THEN i ELSE b END, COALESCE(i, m), IF(t, b, m), GREATEST(m, w), LEAST(i, f), COALESCE(i, 2.5), COALESCE(m, 1) FROM n
 ----
 16777217	16777217.00	16777217.00	2.5000000000	1.6777216E7	1.6777217E7	2.50
@@ -93,10 +94,10 @@ GREATEST cannot mix BOOLEAN and INT; CAST the BOOLEAN to INT for 1 and 0
 
 # ---- arithmetic: the result's type, a DECIMAL's by Spark's and SQL Server's rules
 
-query BIGINT,FLOAT,INT,DOUBLE
+query BIGINT,DOUBLE,INT,DOUBLE
 SELECT i + b, i * f, i / 2, i + 2.5 FROM n
 ----
-33554434	2.8147498E14	8388608	1.67772195E7
+33554434	2.81474993487872E14	8388608	1.67772195E7
 
 query DECIMAL(13,2),DECIMAL(11,4),DECIMAL(13,8),DECIMAL(5,2),DECIMAL(5,2),DECIMAL(6,2),DECIMAL(16,13)
 SELECT m + i, m * m, m / m, m % i, MOD(m, i), m + 1.05, m / i FROM n

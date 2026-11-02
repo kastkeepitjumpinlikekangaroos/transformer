@@ -1131,8 +1131,9 @@ Three-valued boolean logic is handled inside `BinOpExpr` for `AND`/`OR`.
 Arithmetic and comparison are NULL-propagating via the `lv == null || rv == null
 => null` short-circuit at the top of the generic branch. Their operands arrive
 with one type: `Analyzer.unify` types every set of operands that meet when the
-query is bound (numbers widen, a string literal is read as the type beside it,
-any other mix is a bind error), so a bound comparison never asks `Ops` to order
+query is bound (numbers widen, an `INT` or `BIGINT` beside a `FLOAT` to a
+`DOUBLE`, which holds every `INT`, by `DataType.widerNumeric`; a string literal
+is read as the type beside it; any other mix is a bind error), so a bound comparison never asks `Ops` to order
 a number against a string. Values that become one result — a `CASE`'s `THEN`s
 and `ELSE`, the arguments of `COALESCE`, `GREATEST` and `LEAST`, `IF`'s two,
 `LAG`'s or `LEAD`'s value and default, a column across a `UNION`'s arms

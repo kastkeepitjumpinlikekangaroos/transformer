@@ -43,6 +43,19 @@ ship a fix or move something from "not done" to "done".
   under a written one stays the text it is in the plan, so it prints back as
   the cast it was. A plan with a DECIMAL literal where no DECIMAL stands beside
   it, which the binder never makes, would print as a DOUBLE.
+- **An INT or BIGINT beside a FLOAT meets it as a DOUBLE** (plans/testing/10,
+  decision 2, taken overnight as recommended, not yet confirmed by the user).
+  `DataType.widerNumeric` ranked a FLOAT above a BIGINT, so all three
+  families (a comparison, a result both become, arithmetic) made such a pair a
+  FLOAT, which holds no odd integer past 16777216:
+  `CAST(16777217 AS INT) = CAST(16777216 AS FLOAT)` was TRUE, and
+  `COALESCE(CAST(NULL AS FLOAT), 2147483647)` was 2.1474836E9. A DOUBLE holds
+  every INT, and it is Spark's type for a comparison and a branch of the two.
+  It changed the type of queries that ran before: `int_col * float_col`, and
+  a FLOAT column times an integer literal, are DOUBLEs, and so is an output
+  column that holds one. A BIGINT past 2^53 still loses its last digits beside
+  a FLOAT or a DOUBLE, as in every engine. Pinned by `types/float_equality.test`
+  and the coercion tables.
 - **A CAST to DECIMAL fails two ways, by what it reads.** A number past the
   type is `Decimal overflow: ... does not fit decimal(p,s)`, an
   `ArithmeticException` while the query runs, as arithmetic's is (a FLOAT or

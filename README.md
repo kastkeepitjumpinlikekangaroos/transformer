@@ -1512,7 +1512,12 @@ seconds or milliseconds would be a guess.
 
 **Values of different types meet only as numbers, or through a string
 literal.** Wherever values meet — a comparison, `BETWEEN`, an `IN` list, a
-`CASE` switch, arithmetic — numbers widen to the widest among them. A `DECIMAL`
+`CASE` switch, arithmetic — numbers widen to the widest among them, but an
+`INT` or `BIGINT` beside a `FLOAT` meets it as a `DOUBLE`: a `FLOAT` holds no
+odd integer past 16777216, so `CAST(16777217 AS INT) = CAST(16777216 AS FLOAT)`
+is false, and `int_col * float_col` and `float_col * 2` are `DOUBLE`s. A
+`DOUBLE` holds every `INT`, and a `BIGINT` to 2^53, past which it holds no odd
+integer either, as in every engine. A `DECIMAL`
 is the widest: an integer meets one exactly, a number written in the query as
 the decimal it is written as, every digit of it (`price = 0.1` finds a `0.10`,
 and `price = 0.120000000000000000001` no `0.12`), and a `FLOAT` or `DOUBLE`
@@ -1563,10 +1568,13 @@ of a date was NULL, and `SUM(s)` over text failed on its first row.
 `THEN` and `ELSE` values of a `CASE`, the arguments of `COALESCE`, `GREATEST`
 and `LEAST`, `IF`'s two values, `LAG`'s or `LEAD`'s value and default, and each
 column of a `UNION`'s arms meet by the rule above, whatever order they come in:
-`CASE WHEN p THEN 1 ELSE 2.5 END` is the `DOUBLE` 2.5, `COALESCE(i, '0')` reads
+`CASE WHEN p THEN 1 ELSE 2.5 END` is the `DOUBLE` 2.5, `COALESCE(f, i)` over a
+`FLOAT` and an `INT` is a `DOUBLE`, `COALESCE(i, '0')` reads
 the `'0'` as an `INT`, and `COALESCE(s, 1)` over a string column, a `DATE`
 beside a `TIMESTAMP`, a `BOOLEAN` beside a number and a `UNION` of an `INT` arm
-and a `STRING` arm are errors naming the CAST. A `DECIMAL` is held exactly: two
+and a `STRING` arm are errors naming the CAST. The one value a result's type
+may not hold exactly is a `BIGINT` past 2^53 beside a `FLOAT` or `DOUBLE`,
+which becomes the nearest `DOUBLE` (above). A `DECIMAL` is held exactly: two
 meet as the `DECIMAL` with the longer integer part and the larger scale, so
 `COALESCE(price, price * rate)` over a `DECIMAL(9,2)` and a `DECIMAL(18,4)` is
 a `DECIMAL(28,6)`; an `INT` or `BIGINT` counts as the `DECIMAL(10,0)` or

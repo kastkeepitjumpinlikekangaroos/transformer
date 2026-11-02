@@ -171,3 +171,43 @@ SELECT id, POWER(d, -1), POWER(d, 0.5), ASIN(d) FROM f
 5	0.0	Infinity	NULL
 6	0.6666666666666666	1.224744871391589	NULL
 7	NULL	NULL	NULL
+
+# An INT or BIGINT beside a FLOAT meets it as a DOUBLE, in a comparison, a
+# result both become and arithmetic (plans/testing/10, decision 2): a FLOAT
+# holds no odd integer past 16777216, so meeting as a FLOAT made
+# 16777217 = 16777216 true and COALESCE read 2147483647 as 2.1474836E9.
+query BOOLEAN,BOOLEAN,BOOLEAN
+SELECT CAST(16777217 AS INT) = CAST(16777216 AS FLOAT), CAST(16777217 AS INT) IN (CAST(16777216 AS FLOAT)), CAST(16777217 AS BIGINT) > CAST(16777216 AS FLOAT)
+----
+false	false	true
+
+query DOUBLE,DOUBLE,DOUBLE,DOUBLE
+SELECT COALESCE(CAST(NULL AS FLOAT), 2147483647), CASE WHEN TRUE THEN CAST(16777217 AS INT) ELSE CAST(1 AS FLOAT) END, CAST(16777217 AS INT) + CAST(0 AS FLOAT), CAST(1.5 AS FLOAT) * 2
+----
+2.147483647E9	1.6777217E7	1.6777217E7	3.0
+
+statement ok
+CREATE TABLE w (i INT, b BIGINT, r FLOAT)
+
+statement ok
+INSERT INTO w VALUES (16777217, 9007199254740993, 16777216.0), (3, 4, 2.5), (NULL, 1, NULL)
+
+# A FLOAT column beside an integer one is a DOUBLE in a UNION's column too,
+# and the integer keeps every digit a DOUBLE holds; a BIGINT past 2^53 does
+# not, as in every engine.
+query DOUBLE rowsort
+SELECT i FROM w UNION ALL SELECT r FROM w
+----
+1.6777216E7
+1.6777217E7
+2.5
+3.0
+NULL
+NULL
+
+query BOOLEAN,BOOLEAN,DOUBLE rowsort
+SELECT i = r, b = CAST(9007199254740992 AS DOUBLE), i * r FROM w
+----
+NULL	false	NULL
+false	false	7.5
+false	true	2.81474993487872E14
