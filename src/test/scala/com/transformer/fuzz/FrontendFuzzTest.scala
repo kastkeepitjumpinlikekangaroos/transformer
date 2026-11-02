@@ -201,6 +201,8 @@ class FrontendFuzzTest {
     val sql = "SELECT x FROM t"
     clean(sql, Phase.Bind, new IllegalArgumentException("Unknown column 'x'. Available: [t.a, t.b, t.s]"))
     clean(sql, Phase.Run, new IllegalArgumentException("Cannot cast 'x' to int"))
+    clean(sql, Phase.Run, new IllegalArgumentException(
+      "Cannot cast '2026-01-01 05:30:21+02:00' to date; cast it to TIMESTAMP first, then to DATE for its date in UTC"))
     clean(sql, Phase.Run, new ArithmeticException("Decimal overflow: 1234.5 does not fit decimal(5,2)"))
     clean(sql, Phase.Run, new ArithmeticException("Integer overflow: 3 - -9223372036854775807 does not fit BIGINT"))
     clean(sql, Phase.Run, new ArithmeticException("Integer overflow: ABS(-2147483648) does not fit INT"))
