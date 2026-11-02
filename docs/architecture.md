@@ -1989,8 +1989,12 @@ engine and multiply each one across execution modes:
 
 - **sqllogictest scripts** (`src/test/slt/`, run by
   `src/test/scala/com/transformer/slt/`): each query beside its expected
-  result, in SQLite's format, this repo's own scripts per area of semantics and
-  slices of SQLite's corpus, whose answers five engines agreed on. The runner
+  result, in SQLite's format, this repo's own scripts per area of semantics,
+  slices of SQLite's corpus, whose answers five engines agreed on, and the
+  agreed corpus, queries the fuzz generators drew whose answers Postgres and
+  DuckDB agree on (`agreed/`, written by `slt/AgreedCorpus` through
+  `fuzz/PortableSql`, which prints a generated query as SQL all three read
+  alike). The runner
   carries out the DDL itself (`Database`) and runs every query under thirteen
   verification modes (`Modes`: layouts, spill, metrics, parquet files read
   back, columns stored in another order, the logical optimizer off or one

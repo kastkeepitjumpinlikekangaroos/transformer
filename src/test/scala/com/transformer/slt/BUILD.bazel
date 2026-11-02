@@ -66,6 +66,24 @@ scala_junit_test(
     ],
 )
 
+# The agreed corpus keeps its quotas (plans/testing/14, W6): each feature's
+# scripts under src/test/slt/agreed hold at least the records its quota in
+# fuzz/AgreedGen says, and each says how it was made.
+scala_junit_test(
+    name = "agreed_corpus_test",
+    srcs = ["AgreedCorpusTest.scala"],
+    suffixes = ["Test"],
+    data = [
+        "//:docs/gotchas.md",
+        "//src/test/slt:scripts",
+    ],
+    deps = [
+        ":slt",
+        "//src/test/scala/com/transformer/fuzz",
+        "@maven//:junit_junit",
+    ],
+)
+
 # The runner over scripts written inline: a condition on transformer cites a
 # rule, a skip whose rule is no refusal has its twin, and a skipped record
 # runs once and must still diverge as its rule says; CockroachDB's and

@@ -833,14 +833,15 @@ under review, its diff showing every record it moved:
 
 - **A feature, or a feature's quota**: a `Feature` in
   `fuzz/AgreedGen.scala`, its id the script's name and its quota the records
-  the tool keeps for it, and a producer in `AgreedGen.draw`.
+  the tool keeps for it, which `slt/agreed_corpus_test` holds the script to,
+  and a producer in `AgreedGen.draw`.
   Draw from `QueryGen` and `MetaQueryGen` where they reach the shape (filtered
   by what the query reaches, as `readsDecimal` does); build it from their pools
   and node types where they do not, as `window`, `decimal`, `text`, `temporal`
   and `topN` do; a shape both generators should draw belongs in them (plans/testing/15).
 - **A normalization rule** (what counts as the references' one answer): a
   named entry of `AgreedCorpus.Normalize.Rules`, which every script's header
-  lists, and its use in `Normalize.read` or
+  lists and the guard checks, and its use in `Normalize.read` or
   `AgreedCorpus.agree`. A looser rule turns a real difference into agreement,
   so say in its text exactly what it lets through.
 - **A construct the three do not share**: an `Outside` in `fuzz/PortableSql`

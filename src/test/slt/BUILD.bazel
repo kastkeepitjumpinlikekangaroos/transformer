@@ -16,7 +16,11 @@
 # the CSV files they read, under the Apache License 2.0 (datafusion/LICENSE,
 # datafusion/NOTICE); tpch/ TPC-H's queries over RisingWave's tiny TPC-H tables
 # with RisingWave's answers, its CREATE TABLE and INSERT files included as they
-# are (tpch/LICENSE, tpch/NOTICE); every other script is this repo's own. A `.data` file
+# are (tpch/LICENSE, tpch/NOTICE); agreed/ queries the fuzz generators drew with
+# the answers PostgreSQL and DuckDB agree on, written by
+# //src/test/scala/com/transformer/slt:agreed_corpus (plans/testing/14), each
+# script's header naming its seeds, the tool's commit and both references'
+# versions; every other script is this repo's own. A `.data` file
 # is a table's rows, which a script loads with COPY: postgres/data/ holds
 # Postgres's own, as its regression suite loads them.
 filegroup(

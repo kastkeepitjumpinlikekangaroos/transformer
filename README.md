@@ -2279,8 +2279,9 @@ semantics are also pinned as sqllogictest scripts under `src/test/slt/`
 `slt/slt_test` runs under thirteen execution modes each (two of them run the
 query's plan printed back as SQL), beside a slice of SQLite's own corpus,
 ports of Postgres's and Spark's tests with their answers, CockroachDB's and
-DataFusion's logic tests with theirs, and eleven TPC-H queries with
-RisingWave's. Files other programs wrote are each held to a line of a
+DataFusion's logic tests with theirs, eleven TPC-H queries with
+RisingWave's, and some 3,000 queries the fuzz generators drew with the answers
+PostgreSQL and DuckDB agree on. Files other programs wrote are each held to a line of a
 manifest under `src/test/data/`: apache/parquet-testing's parquet and files
 pyarrow wrote, read as pyarrow reads them or refused cleanly, naming the file;
 and DuckDB's CSV files (its AFL crash inputs among them), PapaParse's cases

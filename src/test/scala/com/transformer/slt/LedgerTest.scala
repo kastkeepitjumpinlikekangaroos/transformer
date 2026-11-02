@@ -111,8 +111,9 @@ object LedgerTest {
   private def manifestCitations(path: String): Set[String] =
     Ledger.manifestCitations(new String(Files.readAllBytes(Paths.get(path)), StandardCharsets.UTF_8))
 
-  /** The directories of ports, scripts with another engine's answers. */
-  private val Ports = Set("sqlite", "postgres", "spark", "cockroach", "datafusion", "tpch")
+  /** The directories of ports, scripts with another engine's answers: the
+    * agreed corpus's are Postgres's and DuckDB's. */
+  private val Ports = Set("sqlite", "postgres", "spark", "cockroach", "datafusion", "tpch", "agreed")
 
   private def isPort(name: String): Boolean = Ports.contains(name.takeWhile(_ != '/'))
 

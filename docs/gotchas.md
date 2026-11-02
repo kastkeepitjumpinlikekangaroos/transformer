@@ -2634,6 +2634,72 @@ ragged rows, unclosed quotes and repeated header names). csv-spectrum's
 `location_coordinates` pair is held as a defect of the fixture: its JSON holds
 no row of its CSV.
 
+## What the agreed corpus held out (2026-11-02, held for the user)
+
+The corpus of answers Postgres and DuckDB agree on (`src/test/slt/agreed/`,
+[plans/testing/14](../plans/testing/14-multi-engine-generated-corpus.md)) took
+the plan's five decisions overnight, as recommended and not yet confirmed by
+the user: the fuzz generators through a portable renderer, in a testonly Scala
+tool running `psql` and `duckdb` as subprocesses; about 3,000 records near
+1 MB; a DOUBLE agreeing exactly where both references give the same shortest
+value, else to 15 significant digits as `T`, else not at all; a record both
+references answer one way and the engine another by a decided rule written
+`skipif transformer <id>` with its twin; and Postgres and DuckDB as the
+references. A record the engine answers otherwise by a rule no decision covers
+is held out, unwritten, once Postgres, given the query with the engine's rule
+written in (`PortableSql.HeldRules`), gives the engine's answer; any other
+difference would be a finding of its own, and there was none:
+
+- **A1. A SUBSTRING position before the first character counts from the
+  first** (new; 12 records, 11 of them under D3 too): `SUBSTRING('abc', 0, 2)`
+  is `ab` and `SUBSTRING('abc', 0, 1)` is `a`, where Postgres and DuckDB count
+  the positions before the first character toward the length, `a` and the
+  empty string, as the standard's `SUBSTRING('abc' FROM 0 FOR 2)` does. A
+  negative start parts the two references (Postgres counts it the same way,
+  DuckDB from the string's end), so only a start of 0 is a record. The README
+  states the engine's rule, which is Spark's. The options: keep it, with a
+  ledger row (recommended: it is stated, and the generated queries that meet
+  it are otherwise right); or count the positions before the first character,
+  as the standard and Postgres do.
+- **D3 of [plans/testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md),
+  `CONCAT` of a NULL is NULL** (35 records): `CONCAT('a', NULL, 'b')` is NULL,
+  where both references skip the NULL argument (`ab`, and `CONCAT(NULL)` the
+  empty string). Held there already, with its options.
+- **C3 of plans/testing/12, a TIMESTAMP cast to text is its ISO instant** (9
+  records): `2024-03-10T07:00:00.000001Z`, where both references write
+  `2024-03-10 07:00:00.000001`. Held there already, with its options; the
+  engine's CSV writer writes the same instant text, so the cast is consistent
+  with what the engine writes. C2, a float's text, is a construct the renderer
+  does not draw (each of the three prints a float its own way).
+
+Where the two references disagree with each other the record is dropped, 11
+times in all, each a place where the engine's docs should say which it
+follows: DuckDB computes a DECIMAL quotient in DOUBLE, so the `%`, the
+`ROUND`, the comparison or the `DISTINCT` over one, or its last digits, differ
+from Postgres's exact numeric (4; the engine is exact, as Postgres is, and the
+README says so); a `SUBSTRING` from a negative position (3; A1 above); a
+`STDDEV` past its 15th digit (1; `double-precision`); a `CORR` of no variance,
+NULL in Postgres and the engine and NaN in DuckDB (1; the README does not
+say); and a lone `NULL` beside a `bytea`, which Postgres types as text and
+refuses (2; the engine's NULL takes the type it meets, as the README says). What the
+renderer does not draw because the references part by their rules is counted
+in testing.md ("The agreed corpus"): Postgres has no `MIN` or `MAX` of a
+boolean or a `bytea`, no `%` of a float, no `SUBSTRING` or `ROUND` position
+of a BIGINT and no cast from a boolean but to an integer; it rounds a float
+half to even where DuckDB and the engine round half away; and each engine
+widens a `REAL` in arithmetic its own way.
+
+The by-design records the corpus writes cite their rules: 51
+`decimal-result-type`, a DECIMAL the engine rounds inside a query to the type
+its rules give (a quotient's six places and more under a product, an average,
+a scale given way past 38 digits), each confirmed by Postgres computing the
+query with the engine's types written in; and one `double-precision`, a
+`VAR_SAMP` whose last digits the engine's DOUBLE arithmetic moves. One more
+query, a `STDDEV_SAMP` whose 15th digit moved under the `spill` mode, the order
+its partial results merge in, was not written: no defect, the
+`double-precision` rule again, which the runner's own CockroachDB and
+DataFusion comparisons allow for.
+
 ## Answers that differ from other engines by design
 
 The engine answers some queries otherwise than another engine does, on
