@@ -10,10 +10,11 @@ other six with one optional, evidence-gated phase still open. Plan 06 is
 partial exactly as its own file describes, and plan 08 is deliberately
 unstarted pending profiler evidence. Plans 13-15 were written
 2026-11-01, after `transformer query` over the polymarket files found what
-a 2 GB heap cannot do and how far it trails DuckDB; they are unstarted, and
-their evidence is already in their files. Read the status column before starting anything here — the
-standing failure mode for this directory is a session re-implementing
-work that already exists and is covered by tests.
+a 2 GB heap cannot do and how far it trails DuckDB; they are unstarted,
+and their evidence is already in their files. Read the status column
+before starting anything here — the standing failure mode for this
+directory is a session re-implementing work that already exists and is
+covered by tests.
 
 ## Status table
 
@@ -77,9 +78,10 @@ profile or a workload demands it.
   trap: `ColRefExpr.evalVec` aliases the input column, so pooling a
   vector whose lifetime crosses an operator boundary is a correctness
   bug, not just a leak.
-- **01 Phase 3 — pre-computed sort-key tuples.** Superseded by plan 15. `SortExec`'s comparator
-  still calls `Expr.eval` per comparison (`SortExec.scala:293`). Marked
-  optional and separate-PR from the start.
+- **01 Phase 3 — pre-computed sort-key tuples.** Superseded by plan 15,
+  which goes further: typed keys and no boxed rows. `SortExec`'s
+  comparator still calls `Expr.eval` per comparison
+  (`SortExec.scala:293`).
 - **04 Phase 7 / Phase 8 — range-partition SortExec, skew salting.** Both
   optional. Skew handling in particular was explicitly deferred out of
   plan 04's scope.

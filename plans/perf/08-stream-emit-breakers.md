@@ -5,8 +5,11 @@
 > (HashJoinExec) are superseded by
 > [plan 13](13-stream-hash-join-output.md), which streams a hash join's
 > output without a queue; since plans/testing/05 W5 a join with no equality
-> pairs (`JoinExec.executePairing`) already emits wave by wave. Phases 1, 4
-> and 5 stand. Per this plan's own launch prompt, do not start it until a
+> pairs (`JoinExec.executePairing`) already emits wave by wave. Plan 13
+> narrows this plan's queue to an ordered parallel drain for one-stream
+> readers, and [plan 14](14-parallel-result-drain.md) is that drain, built
+> without a queue (JDK 21's queue waits call `ForkJoinPool.managedBlock`).
+> Phases 1, 4 and 5 stand. Per this plan's own launch prompt, do not start it until a
 > profile shows the parquet writer genuinely starved by breaker CPU (writer
 > wall time ≥10% of total).
 > · Tier: 3 · Effort: 2-3 days · Risk: medium
