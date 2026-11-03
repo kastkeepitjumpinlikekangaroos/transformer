@@ -61,6 +61,17 @@ class ClosingTest {
     d.resolve("*.csv").toString
   }
 
+  /** One CSV file of 9000 rows of one key, then a value that is no INT: a
+    * hash join's bucket for that key fills a batch, and opens its spill file,
+    * before the read fails. */
+  private lazy val skewedBad: String = {
+    val d = dir.resolve("skewed")
+    Files.createDirectories(d)
+    val lines = (0 until 9000).map(i => s"1,row $i") :+ "oops,last"
+    val _ = Files.writeString(d.resolve("part-0.csv"), ("k,s" +: lines).mkString("", "\n", "\n"))
+    d.resolve("*.csv").toString
+  }
+
   private val declared = CsvOptions(inferSchema = false, columns = Some(schema.fields))
 
   private def catalog: Catalog = {
@@ -68,6 +79,7 @@ class ClosingTest {
     c.register("p", ParquetReader.fromPath(parquetFile.toString, 100))
     c.register("c", CsvReader.fromPath(csvGlob("good"), declared))
     c.register("bad", CsvReader.fromPath(csvGlob("bad", bad = true), declared))
+    c.register("skewed", CsvReader.fromPath(skewedBad, declared))
     c
   }
 
@@ -121,6 +133,15 @@ class ClosingTest {
     releases("a GROUP BY over a scan that fails") { c =>
       val e = assertThrows(classOf[IllegalArgumentException], () =>
         rows(SqlEngine.execute("SELECT k, COUNT(*) AS n FROM bad GROUP BY k", c, spill)))
+      assertTrue(e.getMessage, e.getMessage.contains("'oops' cannot be read as"))
+    }
+
+  /** A spilled hash join whose input fails as it is split into buckets
+    * discards the bucket files it had begun. */
+  @Test def aSpilledHashJoinWhoseInputFailsDiscardsItsBuckets(): Unit =
+    releases("a spilled hash join over a scan that fails") { c =>
+      val e = assertThrows(classOf[IllegalArgumentException], () =>
+        rows(SqlEngine.execute("SELECT * FROM skewed JOIN c ON skewed.k = c.k", c, spill)))
       assertTrue(e.getMessage, e.getMessage.contains("'oops' cannot be read as"))
     }
 

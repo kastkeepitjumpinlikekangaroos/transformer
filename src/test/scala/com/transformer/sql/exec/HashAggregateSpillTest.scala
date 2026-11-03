@@ -249,6 +249,11 @@ class HashAggregateSpillTest {
       snap.counter("spillRunsWritten") > 0L)
     assertTrue(s"groupCount must be > 0, got ${snap.counter("groupCount")}",
       snap.counter("groupCount") > 0L)
+    // The fold that reads the runs back records them, and its decode time.
+    assertTrue(s"spillRunsRead must be > 0, got ${snap.counter("spillRunsRead")}",
+      snap.counter("spillRunsRead") > 0L)
+    assertTrue(s"serdeReadNanos must be > 0, got ${snap.counter("serdeReadNanos")}",
+      snap.counter("serdeReadNanos") > 0L)
   }
 
   @Test def countDistinctDisablesSpillNotErrors(): Unit = {

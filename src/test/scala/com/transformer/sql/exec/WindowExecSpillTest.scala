@@ -137,6 +137,26 @@ class WindowExecSpillTest {
 
   // ---- SUM as whole-partition aggregate -----------------------------------
 
+  /** A ROWS frame that ends at UNBOUNDED PRECEDING ends before the first row:
+    * it is empty for every row, its SUM NULL and its COUNT 0. The binder
+    * refuses such a frame in SQL; WindowExec takes the frames a plan built in
+    * code holds. */
+  @Test def aFrameEndingAtUnboundedPrecedingIsEmpty(): Unit = {
+    val plan = kvPlan(N = 40, K = 3, seed = 5L)
+    val k = ColRefExpr(0, "k", DataType.IntType)
+    val v = ColRefExpr(1, "v", DataType.LongType)
+    val frame = WindowFrame(FrameType.Rows, FrameBound.UnboundedPreceding, FrameBound.UnboundedPreceding)
+    val spec = WindowSpec(Seq(k), Seq(SortKey(v, true)), frame)
+    val wins = Seq(WindowDef(spec, WindowFnAgg(AggExprSum(v)), "s"), WindowDef(spec, WindowFnAgg(AggExprCountStar()), "c"))
+    val outSchema = Schema(plan.outputSchema.fields ++ Seq(Field("s", DataType.LongType), Field("c", DataType.LongType)))
+    val rows = drainRows(WindowExec(plan, wins).execute(0), outSchema)
+    assertEquals(40, rows.size)
+    rows.foreach { r =>
+      assertNull(r.toString, r(2))
+      assertEquals(r.toString, 0L, r(3))
+    }
+  }
+
   /** SUM(v) over whole partition (no ORDER BY) must broadcast the same
     * per-partition sum to every row in the partition under spill. */
   @Test def whorlAggregateBroadcastParity(): Unit = {
