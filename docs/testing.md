@@ -2053,6 +2053,126 @@ mutant gets a test or a ledger line"):
 A survivor that reveals a defect is written up in docs/gotchas.md with a
 minimized repro, and its test waits for the fix.
 
+### The 2026-11-02 campaign
+
+The first campaign ([plans/testing/19](../plans/testing/19-mutation-testing.md))
+ran 248 mutants over sixteen files where a wrong answer is silent, on 8
+cores: every site of `read/csv/CsvRowParser.scala` (the smoke campaign, 88
+mutants at 7bd5dd0), then 11 a file, stratified by operator with seed 19,
+over the other fifteen (`FilterPushdown.scala` 7 and
+`ParquetFilterTranslator.scala` 10, every site they have): 160 mutants at
+1757963. No file is an exchange or a scheduler, so no stage ran under
+`--config=sharded`. The mutants took 1.3 and 4.1 hours of machine time, each
+campaign after a baseline of about 4 minutes. A killed mutant cost 11 seconds
+in the CSV parser and 40 elsewhere; a survivor about 4.3 minutes, stage 2
+waiting on `slt_test`'s shards (about 95 s) and stage 3 on the longest
+default-budget fuzz test (about 175 s).
+
+| file | mutants | killed | timed out | survived | stillborn | killed or timed out, of those that compiled |
+|---|---:|---:|---:|---:|---:|---:|
+| `core/HashKeys.scala` | 11 | 6 | 1 | 4 | 0 | 64% |
+| `job/DataJob.scala` | 11 | 2 | 0 | 9 | 0 | 18% |
+| `job/TaskRunRecord.scala` | 11 | 7 | 0 | 4 | 0 | 64% |
+| `read/csv/CsvRowParser.scala` | 88 | 71 | 3 | 14 | 0 | 84% |
+| `read/csv/CsvValues.scala` | 11 | 9 | 0 | 2 | 0 | 82% |
+| `read/parquet/ParquetFilterTranslator.scala` | 10 | 9 | 0 | 1 | 0 | 90% |
+| `sql/exec/AggregateExec.scala` | 11 | 8 | 0 | 2 | 1 | 80% |
+| `sql/exec/JoinExec.scala` | 11 | 7 | 0 | 4 | 0 | 64% |
+| `sql/exec/SortExec.scala` | 11 | 6 | 1 | 3 | 1 | 70% |
+| `sql/exec/WindowExec.scala` | 11 | 8 | 1 | 2 | 0 | 82% |
+| `sql/plan/Analyzer.scala` | 11 | 9 | 0 | 2 | 0 | 82% |
+| `sql/plan/ColumnProjectionPushdown.scala` | 11 | 7 | 0 | 4 | 0 | 64% |
+| `sql/plan/FilterPushdown.scala` | 7 | 7 | 0 | 0 | 0 | 100% |
+| `sql/plan/Funcs.scala` | 11 | 9 | 1 | 1 | 0 | 91% |
+| `sql/plan/JoinOrder.scala` | 11 | 10 | 0 | 1 | 0 | 91% |
+| `sql/plan/Ops.scala` | 11 | 9 | 2 | 0 | 0 | 100% |
+| **all** | 248 | 184 | 9 | 53 | 2 | 78% |
+
+| operator | mutants | killed | timed out | survived | stillborn | killed or timed out, of those that compiled |
+|---|---:|---:|---:|---:|---:|---:|
+| `arithmetic` | 27 | 16 | 5 | 6 | 0 | 78% |
+| `checked` | 1 | 1 | 0 | 0 | 0 | 100% |
+| `constant` | 61 | 43 | 1 | 17 | 0 | 72% |
+| `extremum` | 11 | 10 | 0 | 1 | 0 | 91% |
+| `logical` | 39 | 31 | 1 | 7 | 0 | 82% |
+| `refusal` | 11 | 8 | 0 | 3 | 0 | 73% |
+| `relational` | 64 | 47 | 2 | 15 | 0 | 77% |
+| `statement` | 34 | 28 | 0 | 4 | 2 | 88% |
+| **all** | 248 | 184 | 9 | 53 | 2 | 78% |
+
+176 mutants died at stage 1, in their own package's tests; 11 at stage 2,
+every one to `slt_test`; 6 at stage 3, each to a fuzz test
+(`csv_fuzz_test`: a CRLF after a quoted field, a line break counted inside
+quotes, a timestamp's fraction written to CSV; `dag_scheduler_fuzz_test`: the
+depth `discover` walks, a skipped task's rows). The CSV parser's corpus test
+(`read/csv:csv_corpus_test`, the inputs DuckDB, PapaParse and csv-spectrum
+wrote) caught 69 of its 74 caught mutants, `csv_row_parser_test` 56 and
+`csv_reader_test` 47 (the smoke campaign named one target per kill; these
+counts are rebuilt from its logs). No
+target failed on an unmutated file, so no kill was refused as flaky.
+
+Of the 53 survivors, 35 now have a test that fails with the mutant applied
+(each checked in the campaign's worktree), 8 are in the ledger, 9 stay open,
+believed equivalent but held by the rule that no more than a quarter of a
+file's survivors go to the ledger, and one shows a latent defect, held for
+the user ([gotchas.md](gotchas.md#what-the-mutation-campaign-held-out-2026-11-02-held-for-the-user)):
+
+| mutant | where | operator | the line | mutated | what became of it |
+|---|---|---|---|---|---|
+| m002 | `read/csv/CsvRowParser.scala:37` | constant | `private var rowLine: Long = 1L` | `private var rowLine: Long = 0L` | test: `CsvRowParserTest.beforeItsFirstRowAParserIsOnLineOne` |
+| m003 | `read/csv/CsvRowParser.scala:38` | constant | `private var rowBlank: Boolean = false` | `private var rowBlank: Boolean = true` | test: `CsvRowParserTest.beforeItsFirstRowAParserIsOnLineOne` |
+| m013 | `read/csv/CsvRowParser.scala:70` | constant | `var quoteOpenedOn = 0L` | `var quoteOpenedOn = 1L` | ledger |
+| m051 | `read/csv/CsvRowParser.scala:131` | relational | `if (n >= 0) { cur.append(n.toChar); countLine(n) }` | `if (n > 0) { cur.append(n.toChar); countLine(n) }` | test: `CsvRowParserTest.aNulIsACharacterWhereverItIs` |
+| m052 | `read/csv/CsvRowParser.scala:131` | constant | `if (n >= 0) { cur.append(n.toChar); countLine(n) }` | `if (n >= 1) { cur.append(n.toChar); countLine(n) }` | test: `CsvRowParserTest.aNulIsACharacterWhereverItIs` |
+| m054 | `read/csv/CsvRowParser.scala:135` | relational | `if (n >= 0 && n.toChar == quote) {` | `if (n > 0 && n.toChar == quote) {` | test: `CsvRowParserTest.aNulIsACharacterWhereverItIs` |
+| m055 | `read/csv/CsvRowParser.scala:135` | constant | `if (n >= 0 && n.toChar == quote) {` | `if (n >= 1 && n.toChar == quote) {` | test: `CsvRowParserTest.aNulIsACharacterWhereverItIs` |
+| m058 | `read/csv/CsvRowParser.scala:138` | relational | `if (n >= 0) reader.unread(n)` | `if (n > 0) reader.unread(n)` | test: `CsvRowParserTest.aNulIsACharacterWhereverItIs` |
+| m059 | `read/csv/CsvRowParser.scala:138` | constant | `if (n >= 0) reader.unread(n)` | `if (n >= 1) reader.unread(n)` | test: `CsvRowParserTest.aNulIsACharacterWhereverItIs` |
+| m071 | `read/csv/CsvRowParser.scala:173` | constant | `private var quotedField: Boolean = false` | `private var quotedField: Boolean = true` | ledger |
+| m078 | `read/csv/CsvRowParser.scala:185` | relational | `if (n >= 0 && n.toChar != '\n') reader.unread(n)` | `if (n > 0 && n.toChar != '\n') reader.unread(n)` | test: `CsvRowParserTest.aNulIsACharacterWhereverItIs` |
+| m079 | `read/csv/CsvRowParser.scala:185` | constant | `if (n >= 0 && n.toChar != '\n') reader.unread(n)` | `if (n >= 1 && n.toChar != '\n') reader.unread(n)` | test: `CsvRowParserTest.aNulIsACharacterWhereverItIs` |
+| m085 | `read/csv/CsvRowParser.scala:195` | relational | `if (n >= 0) reader.unread(n)` | `if (n > 0) reader.unread(n)` | test: `CsvRowParserTest.aNulIsACharacterWhereverItIs` |
+| m086 | `read/csv/CsvRowParser.scala:195` | constant | `if (n >= 0) reader.unread(n)` | `if (n >= 1) reader.unread(n)` | test: `CsvRowParserTest.aNulIsACharacterWhereverItIs` |
+| m104 | `sql/plan/Funcs.scala:217` | relational | `if (start >= characters \|\| length <= 0) ""` | `if (start >= characters \|\| length < 0) ""` | open, believed equivalent |
+| m112 | `sql/plan/Analyzer.scala:71` | statement | `checkBinaryCast(e.dataType, to)` | `(deleted)` | test: `AnalyzerTest.anImplicitCastOfABinaryToAnotherTypeIsRefused` |
+| m117 | `sql/plan/Analyzer.scala:185` | logical | `case LitExpr(n: Number, t) if !isDecimal(t) => Some(Decimals.literal(n))` | `case LitExpr(n: Number, t) if isDecimal(t) => Some(Decimals.literal(n))` | test: `AnalyzerTest.aNumberBesideADecimalIsTheDecimalItIsWrittenAs` |
+| m123 | `sql/plan/JoinOrder.scala:133` | arithmetic | `flatten(r, offset + l.outputSchema.length)` | `flatten(r, offset - l.outputSchema.length)` | test: `JoinOrderTest.aJoinNestedOnTheRightKeepsItsAnswer` |
+| m141 | `sql/plan/ColumnProjectionPushdown.scala:169` | relational | `while (i < n) { b += (i -> i); i += 1 }` | `while (i <= n) { b += (i -> i); i += 1 }` | ledger |
+| m142 | `sql/plan/ColumnProjectionPushdown.scala:252` | constant | `case DataType.BooleanType => 1` | `case DataType.BooleanType => 0` | test: `ColumnProjectionPushdownTest.aScanThatFeedsNoColumnKeepsTheNarrowestFirst` |
+| m143 | `sql/plan/ColumnProjectionPushdown.scala:253` | constant | `case DataType.NullType => 1` | `case DataType.NullType => 0` | test: `ColumnProjectionPushdownTest.aScanThatFeedsNoColumnKeepsTheNarrowestFirst` |
+| m145 | `sql/plan/ColumnProjectionPushdown.scala:277` | statement | `branches.foreach { case (a, c) => go(a); go(c) }` | `(deleted)` | test: `ColumnProjectionPushdownTest.aJoinConditionKeepsTheColumnsOfItsCase` |
+| m155 | `sql/exec/WindowExec.scala:617` | constant | `case FrameBound.UnboundedPreceding => if (isStart) 0 else -1` | `case FrameBound.UnboundedPreceding => if (isStart) 1 else -1` | open, believed equivalent |
+| m156 | `sql/exec/WindowExec.scala:617` | constant | `case FrameBound.UnboundedPreceding => if (isStart) 0 else -1` | `case FrameBound.UnboundedPreceding => if (isStart) 0 else -0` | test: `WindowExecSpillTest.aFrameEndingAtUnboundedPrecedingIsEmpty` |
+| m163 | `sql/exec/AggregateExec.scala:297` | relational | `if (stats != null) {` | `if (stats == null) {` | test: `HashAggregateSpillTest.spillAndMetricsComposeReportingNonZeroSpillCounters` |
+| m164 | `sql/exec/AggregateExec.scala:388` | constant | `var peakBytes: Long = 0L` | `var peakBytes: Long = 1L` | test: `OperatorCountersTest.hashAggregateExecOverNoRowsBuffersNoBytes` |
+| m175 | `sql/exec/SortExec.scala:165` | arithmetic | `val take = math.min(capacity, totalRows - produced)` | `val take = math.min(capacity, totalRows + produced)` | test: `SortExecSpillTest.aRunLongerThanABatchReadsBackWhole` |
+| m176 | `sql/exec/SortExec.scala:277` | logical | `if (done \|\| heap.isEmpty)` | `if (done && heap.isEmpty)` | test: `SortExecSpillTest.theMergeHasNothingAfterItsEndOrItsClose` |
+| m177 | `sql/exec/SortExec.scala:278` | refusal | `throw new NoSuchElementException("SortExec merge exhausted")` | `()` | test: `SortExecSpillTest.theMergeHasNothingAfterItsEndOrItsClose` |
+| m184 | `sql/exec/JoinExec.scala:67` | constant | `buildRight: Boolean = true,` | `buildRight: Boolean = false,` | test: `OperatorCountersTest.hashJoinExecBuildsItsRightSideByDefault` |
+| m185 | `sql/exec/JoinExec.scala:220` | relational | `val tBuild = if (metricsNode != null) System.nanoTime() else 0L` | `val tBuild = if (metricsNode == null) System.nanoTime() else 0L` | test: `OperatorCountersTest.hashJoinExecPopulatesInMemoryCounters` |
+| m190 | `sql/exec/JoinExec.scala:795` | relational | `val sideName = if (side == HashJoinExec.SideBuild) "build" else "probe"` | `val sideName = if (side != HashJoinExec.SideBuild) "build" else "probe"` | ledger |
+| m191 | `sql/exec/JoinExec.scala:833` | statement | `writers.foreach(w => if (w != null) w.abort())` | `(deleted)` | test: `ClosingTest.aSpilledHashJoinWhoseInputFailsDiscardsItsBuckets` |
+| m196 | `core/HashKeys.scala:279` | refusal | `throw new IllegalStateException(` | `() ...` | test: `HashKeysTest.bytesKeyScratchRefusesAnotherWidth` |
+| m197 | `core/HashKeys.scala:310` | logical | `if (k.hash != hash \|\| k.values.length != values.length) return false` | `if (k.hash != hash && k.values.length != values.length) return false` | test: `HashKeysTest.objectArrayKeysOfOtherWidthsDifferUnderOneHash` |
+| m202 | `core/HashKeys.scala:616` | extremum | `private var threshold: Int = math.max(1, (capacity * loadFactor).toInt)` | `private var threshold: Int = math.min(1, (capacity * loadFactor).toInt)` | open, believed equivalent |
+| m203 | `core/HashKeys.scala:659` | relational | `if (_size > threshold) resize()` | `if (_size >= threshold) resize()` | ledger |
+| m215 | `read/parquet/ParquetFilterTranslator.scala:318` | relational | `private def ordersAlike(literal: String): Boolean = literal.forall(_ < Character.MIN_SURROGATE)` | `private def ordersAlike(literal: String): Boolean = literal.forall(_ <= Character.MIN_SURROGATE)` | test: `ParquetFilterTranslatorTest.aStringRangeStopsPushingAtTheFirstSurrogate` |
+| m221 | `read/csv/CsvValues.scala:151` | arithmetic | `val digits = s.length - (if (s.charAt(0) == '+' \|\| s.charAt(0) == '-') 1 else 0)` | `val digits = s.length + (if (s.charAt(0) == '+' \|\| s.charAt(0) == '-') 1 else 0)` | open, believed equivalent |
+| m222 | `read/csv/CsvValues.scala:151` | logical | `val digits = s.length - (if (s.charAt(0) == '+' \|\| s.charAt(0) == '-') 1 else 0)` | `val digits = s.length - (if (s.charAt(0) == '+' && s.charAt(0) == '-') 1 else 0)` | open, believed equivalent |
+| m227 | `job/TaskRunRecord.scala:68` | logical | `def expectsDataFiles: Boolean = TaskRunStatus.wroteOutput(status) && outputFiles.nonEmpty` | `def expectsDataFiles: Boolean = TaskRunStatus.wroteOutput(status) \|\| outputFiles.nonEmpty` | test: `DataJobTest.aRecordExpectsDataFilesOnlyWhenItsStatusWroteThem` |
+| m228 | `job/TaskRunRecord.scala:124` | constant | `val SchemaVersion: Int = 1` | `val SchemaVersion: Int = 0` | test: `DataJobTest.aRunRecordSaysItsFormatIsVersionOne` |
+| m235 | `job/TaskRunRecord.scala:402` | relational | `if (lastSep < 0) (".", pattern)` | `if (lastSep <= 0) (".", pattern)` | **shows a latent defect, held for the user** |
+| m236 | `job/TaskRunRecord.scala:403` | arithmetic | `else (before.substring(0, lastSep), pattern.substring(lastSep + 1))` | `else (before.substring(0, lastSep), pattern.substring(lastSep - 1))` | ledger |
+| m238 | `job/DataJob.scala:327` | statement | `Chaos.at(Chaos.JobEvent)` | `(deleted)` | open, believed equivalent |
+| m239 | `job/DataJob.scala:334` | arithmetic | `remainingTasks -= 1` | `remainingTasks -= 0` | ledger |
+| m240 | `job/DataJob.scala:436` | refusal | `if (ofp.isCloud) throw new UnsupportedOperationException(` | `if (ofp.isCloud) () ...` | test: `DataJobTest.aCloudOutputPathFailsItsTask` |
+| m241 | `job/DataJob.scala:562` | relational | `val allocDelta = if (alloc0 < 0L \|\| alloc1 < 0L) -1L else alloc1 - alloc0` | `val allocDelta = if (alloc0 <= 0L \|\| alloc1 < 0L) -1L else alloc1 - alloc0` | open, believed equivalent |
+| m242 | `job/DataJob.scala:562` | logical | `val allocDelta = if (alloc0 < 0L \|\| alloc1 < 0L) -1L else alloc1 - alloc0` | `val allocDelta = if (alloc0 < 0L && alloc1 < 0L) -1L else alloc1 - alloc0` | ledger |
+| m243 | `job/DataJob.scala:562` | relational | `val allocDelta = if (alloc0 < 0L \|\| alloc1 < 0L) -1L else alloc1 - alloc0` | `val allocDelta = if (alloc0 < 0L \|\| alloc1 <= 0L) -1L else alloc1 - alloc0` | open, believed equivalent |
+| m244 | `job/DataJob.scala:562` | constant | `val allocDelta = if (alloc0 < 0L \|\| alloc1 < 0L) -1L else alloc1 - alloc0` | `val allocDelta = if (alloc0 < 0L \|\| alloc1 < 1L) -1L else alloc1 - alloc0` | open, believed equivalent |
+| m247 | `job/DataJob.scala:820` | arithmetic | `val from = g * perGroup` | `val from = g / perGroup` | test: `DataJobTest.maxPartitionsCoalescesPartsBelowSourcePartitions` |
+| m248 | `job/DataJob.scala:1005` | logical | `if (path.startsWith("gs://") \|\| path.startsWith("s3://")) path` | `if (path.startsWith("gs://") && path.startsWith("s3://")) path` | test: `DataJobTest.jobRunRecordKeepsACloudInputsPathAsWritten` |
+
 ## Performance regression guard
 
 [`docs/benchmarking.md`](benchmarking.md) is the full reference for the

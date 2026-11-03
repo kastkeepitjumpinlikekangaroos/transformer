@@ -2961,6 +2961,52 @@ is a defect. Each is allowed in its rule's `held` list in
   target: a report at exit that no warning can carry. Written after the rule's
   plan, so no decision names it.
 
+## What the mutation campaign held out (2026-11-02, held for the user)
+
+[plans/testing/19](../plans/testing/19-mutation-testing.md)'s campaign gave
+every surviving mutant a test or a ledger line where it could
+([testing.md](testing.md#the-2026-11-02-campaign)). Ten are held instead.
+
+**A latent defect.** `TaskRunRecord.discover`, which the GUI's partition
+picker calls, finds its walk's root by `splitAtFirstWildcard`: everything
+before the last `/` ahead of the first `*`. For a pattern whose first
+templated segment sits right under `/`, that is the empty string, which
+`Paths.get("")` reads as the working directory:
+
+```scala
+TaskRunRecord.discover("/day={{ today }}")
+// splitAtFirstWildcard("/day=*") is ("", "day=*"): the walk starts in the
+// working directory, not at /, so /day=20260101/_run.json is never found.
+```
+
+The mutant `lastSep <= 0`, which takes that case for a pattern with no `/`
+at all, gives `"."`, the same directory, and survived every test. Held:
+writing under `/` takes privileges no test has (macOS's system volume is
+read-only), and the fix (the root `/` when the separator is the first
+character) changes what the picker shows.
+
+**Nine survivors believed equivalent**, held out of
+`tools/mutation/equivalent.tsv` by the rule that no more than a quarter of a
+file's survivors go there (conventions.md, "A surviving mutant gets a test or
+a ledger line"): a file with one or two survivors may put none there. Each
+changes no answer, as far as reading the code shows:
+
+- `Funcs.substring`, `length <= 0` as `< 0`: a length of 0 takes the other
+  branch, which takes 0 code points, the same empty string.
+- `WindowExec.rowsBound`, a frame's start at UNBOUNDED PRECEDING as row 1: a
+  frame from UNBOUNDED PRECEDING is aggregated from its first row, reading
+  only each row's end.
+- `LongHashMap`'s first threshold as `math.min(1, ...)`: the map resizes at
+  its second entry, and the resize sets the threshold anew.
+- `CsvValues.classify`'s count of digits with the sign added, or never taken
+  off: the count only decides when to skip an INT or BIGINT parse, whose
+  answer is the same.
+- `DataJob`'s event loop without its chaos point: chaos is off in the suite,
+  and under `chaos_job_test` the other two `JobEvent` points still pass.
+- `DataJob`'s allocation delta with a reading of 0 counted as none (`<= 0`
+  twice, `< 1`): a task thread's allocated bytes are never 0 at its start or
+  its end.
+
 ## Answers that differ from other engines by design
 
 The engine answers some queries otherwise than another engine does, on
