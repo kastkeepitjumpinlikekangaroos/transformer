@@ -518,9 +518,10 @@ specific traps.
   plans/bugfixes/02b tried exactly that and was reverted (see gotchas.md). Never
   hold a JVM monitor across a pool-blocking call either (a monitor is invisible to
   work-stealing); the in-tree exemplar of the compliant pattern is
-  `ExchangeExec.ensureMaterialized` — a CAS claim + published `CountDownLatch`, so
-  no monitor is held across the pool-driven `materialize()` and the loser-wait
-  stays a plain (uncompensated) `await()`. The helping mechanism itself is pinned
+  `SharedOnce.get` (`sql/exec/SharedResult.scala`, which an exchange's shards and
+  a broadcast join's build side are kept in) — a CAS claim + published
+  `CountDownLatch`, so no monitor is held across the pool-driven computation and
+  the loser-wait stays a plain (uncompensated) `await()`. The helping mechanism itself is pinned
   by `//src/test/scala/com/transformer/core:scheduler_test`. Know its limit:
   helping is a tree-shape guarantee only — helpJoin can inline non-descendant
   tasks under a worker's stack, and combined with an exactly-once readiness gate
@@ -547,23 +548,31 @@ specific traps.
   stops the run is a separate decision (`stopsTheJob`: the JVM's own failures
   but a stack overflow), made where the failure is caught.
 - **Never let a pool task wait on a lazily-shared breaker result — publish it
-  first.** Engine plans pre-materialize every `ExchangeExec` bottom-up via
-  `PhysicalPlanner.preMaterializeExchanges` before consumers exist (both
-  `SqlEngine` execute paths + `CteResolver.materialize` call it right after
-  planning), so no worker ever parks on exchange readiness — the K>1 liveness
-  fix (plans/bugfixes/02f). Two obligations follow: (a) a new physical operator
+  first.** Engine plans pre-materialize every shared result bottom-up via
+  `PhysicalPlanner.preMaterialize` before consumers exist (both `SqlEngine`
+  execute paths + `CteResolver.materialize` call it right after planning): each
+  `ExchangeExec`'s shards and each broadcast `HashJoinExec`'s build side, so no
+  worker ever parks on one being ready — the K>1 liveness fix
+  (plans/bugfixes/02f). Three obligations follow: (a) a new physical operator
   with children needs a `PhysicalPlanner.childrenOf` branch (a missed branch
-  silently exempts its subtree's exchanges from the pass), and every new
+  silently exempts its subtree's shared results from the pass), and every new
   operator a branch in the plan walk's `wrapChildren`, which rebuilds it over
   its metered and verified children (under `--config=verify` an operator with
   none fails the walk, and `sql/exec:verify_test` fails until a query there
-  builds it); (b) a new
-  exchange-like structure — any once-computed result that multiple pool tasks
-  might wait on — must either be wired into the pass or be published eagerly
-  before pool tasks can reach it (CTE materialization is the in-tree exemplar).
-  Draining lazily-nested exchanges from pool tasks without the pass reproduces
-  the 02e wedge (`sql/exec:exchange_deadlock_stress_test` with `STRESS_LAZY=1`
-  demonstrates it on demand).
+  builds it); (b) a new once-computed result that multiple pool tasks might
+  wait on is a shared result: its operator extends `SharedResult`, keeps the
+  result in a `SharedOnce` and computes it in `materializeNow`, which the pass
+  calls — or the result is published eagerly before pool tasks can reach it
+  (CTE materialization is the in-tree exemplar); (c) never a Scala `lazy val`,
+  a `synchronized` block or `ForkJoinPool.managedBlock` for one: the first two
+  hold the operator's monitor across the computation's pool fan-out
+  (plans/bugfixes/02d), the third wedged the pool (02b). An operator with no
+  pass to rely on (a plan built in code) takes its shared result in
+  `execute(p)`, on the calling thread, never on the first pull, where its
+  consumer's pool tasks would race for it. Draining lazily-nested shared
+  results from pool tasks without the pass reproduces the 02e wedge
+  (`sql/exec:exchange_deadlock_stress_test` with `STRESS_LAZY=1` demonstrates
+  it on demand).
 
 - **Whatever a query opens it releases, however its reader stops** (the close
   protocol, architecture §3h). A new resource (a file a reader or writer

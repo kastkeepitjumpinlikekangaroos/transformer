@@ -208,7 +208,7 @@ class PlanSqlTest {
           else {
             val physical = PhysicalPlanner.plan(CteResolver.resolve(LogicalBuilder.build(printed, catalog),
               ExecutionOptions.Default), ExecutionOptions.Default)
-            PhysicalPlanner.preMaterializeExchanges(physical)
+            PhysicalPlanner.preMaterialize(physical)
             new ExecutedQuery(physical.outputSchema, (0 until physical.numPartitions).map(physical.execute))
           }
         (q.schema, RelEngine.collectRows(q))

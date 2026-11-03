@@ -21,8 +21,11 @@ import scala.collection.mutable
   *     partition land in the same shard, so each shard processes its rows
   *     independently — no cross-shard coordination. `numPartitions = K`.
   *   - **Collapsing** (child is anything else): no exchange. The operator
-  *     reads every child partition, materializes all rows into one buffer,
-  *     and emits as a single output partition. Reached when PARTITION BY is
+  *     reads every child partition, in parallel on the pool
+  *     ([[ParallelDrain.eachPartition]]), materializes each into a buffer of
+  *     its own, concatenates them in partition order (so ties come out as
+  *     they would read one partition after another), and emits as a single
+  *     output partition. Reached when PARTITION BY is
   *     empty (whole-result window), when window specs disagree on their
   *     PARTITION BY keys (no single sharding satisfies both), or when the
   *     planner's cardinality estimate is below
@@ -95,6 +98,9 @@ final case class WindowExec(
 
   private val spillEnabled: Boolean = opts.spillEnabled && canSpill
 
+  /** Distinct specs in declaration order. One spec → one partitioning pass. */
+  private val specs: Array[WindowSpec] = windows.iterator.map(_.spec).toArray.distinct
+
   /** Bucket count for the spill path. Fixed at 16 — same default as
     * [[HashJoinExec]]'s grace hash. Power-of-two so `& (K-1)` works for
     * the modulo. Recursive sub-bucketing for hot keys is v1.1. */
@@ -104,11 +110,15 @@ final case class WindowExec(
     require(partition >= 0 && partition < numPartitions,
       s"partition $partition out of range [0,$numPartitions)")
     if (spillEnabled) executeSpilled(partition)
+    else if (isSharded) Closing.draining(child.execute(partition))(processBatches)
     else {
-      val it: Iterator[ColumnarBatch] =
-        if (isSharded) child.execute(partition)
-        else Closing.concat((0 until child.numPartitions).iterator.map(p => () => child.execute(p)))
-      Closing.draining(it)(processBatches)
+      // Every child partition read at once, each into its own buffer, a
+      // failure in one stopping the rest at their next batch.
+      val stopped = new java.util.concurrent.atomic.AtomicBoolean(false)
+      val stop = ParallelDrain.Stop(() => stopped.get || opts.stopped(), () => stopped.set(true))
+      val n = child.numPartitions
+      val parts = ParallelDrain.eachPartition(n, ParallelDrain.inFlight(n), stop)(child.execute)((_, it) => collect(it))
+      process(Collected.concat(parts, specs.length))
     }
   }
 
@@ -259,18 +269,18 @@ final case class WindowExec(
     (mixed & 0x7FFFFFFF) % K
   }
 
-  /** The original execute() body, parameterized by a batch iterator. Used
-    * by both the in-memory path (whole-input iterator) and the spill path
-    * (one iterator per bucket file). Memory bound = the iterator's full
-    * row content; correctness depends on every row sharing a partition
-    * key collocating in this iterator's input. */
-  private def processBatches(it: Iterator[ColumnarBatch]): Iterator[ColumnarBatch] = {
+  /** The window over every row of `it`: the sharded path (a shard), the
+    * spill path (one bucket file) and, through [[collect]] per partition,
+    * the collapsing path. Memory bound = the iterator's full row content;
+    * correctness depends on every row sharing a partition key collocating
+    * in this iterator's input. */
+  private def processBatches(it: Iterator[ColumnarBatch]): Iterator[ColumnarBatch] = process(collect(it))
+
+  /** Every row of `it`, boxed, with each spec's partition and order keys,
+    * evaluated once a batch. */
+  private def collect(it: Iterator[ColumnarBatch]): Collected = {
     val childSchema = child.outputSchema
     val childWidth = childSchema.length
-    val nWindows = windows.size
-
-    // Distinct specs in declaration order. One spec → one partitioning pass.
-    val specs: Array[WindowSpec] = windows.iterator.map(_.spec).toArray.distinct
     val nSpecs = specs.length
     val specPartKeyExprs: Array[Array[Expr]] = specs.map(_.partitionKeys.toArray)
     val specOrderKeyExprs: Array[Array[Expr]] = specs.map(_.orderKeys.iterator.map(_.expr).toArray)
@@ -309,7 +319,18 @@ final case class WindowExec(
         r += 1
       }
     }
+    Collected(rows, partKeysByRow, orderKeysByRow)
+  }
 
+  /** The window functions over `collected`'s rows, emitted in their order. */
+  private def process(collected: Collected): Iterator[ColumnarBatch] = {
+    val childSchema = child.outputSchema
+    val childWidth = childSchema.length
+    val nWindows = windows.size
+    val nSpecs = specs.length
+    val rows = collected.rows
+    val partKeysByRow = collected.partKeysByRow
+    val orderKeysByRow = collected.orderKeysByRow
     val n = rows.length
     val windowValues = Array.ofDim[Any](n, nWindows)
 
@@ -738,6 +759,35 @@ final case class WindowExec(
       }
     }
   }
+}
+
+/** The rows a window reads, boxed, and per distinct spec each row's partition
+  * keys and order keys, in row order. */
+private[exec] final case class Collected(
+    rows: mutable.ArrayBuffer[Array[Any]],
+    partKeysByRow: Array[mutable.ArrayBuffer[Array[Any]]],
+    orderKeysByRow: Array[mutable.ArrayBuffer[Array[Any]]])
+
+private[exec] object Collected {
+  /** `parts` one after another, in order: what reading them in turn would
+    * have collected. */
+  def concat(parts: IndexedSeq[Collected], nSpecs: Int): Collected =
+    if (parts.length == 1) parts.head
+    else {
+      val rows = mutable.ArrayBuffer.empty[Array[Any]]
+      val partKeys = Array.fill(nSpecs)(mutable.ArrayBuffer.empty[Array[Any]])
+      val orderKeys = Array.fill(nSpecs)(mutable.ArrayBuffer.empty[Array[Any]])
+      parts.foreach { p =>
+        rows ++= p.rows
+        var si = 0
+        while (si < nSpecs) {
+          partKeys(si) ++= p.partKeysByRow(si)
+          orderKeys(si) ++= p.orderKeysByRow(si)
+          si += 1
+        }
+      }
+      Collected(rows, partKeys, orderKeys)
+    }
 }
 
 object WindowExec {

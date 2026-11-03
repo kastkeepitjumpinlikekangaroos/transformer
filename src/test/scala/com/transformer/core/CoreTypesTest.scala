@@ -63,6 +63,59 @@ class CoreTypesTest {
   /** A typed getter reads a number or its text, and fails on any other
     * value as `getString` does, with a cast that names the column and the
     * value: its match had no case for one, so it threw a bare MatchError. */
+  /** `gather` writes each selected source row, NULL for a negative index or a
+    * NULL source value, into consecutive rows from its offset, a column at a
+    * time, and leaves every other row as it was: for every type, NULLs,
+    * `NullType`, `DECIMAL` and `BINARY` among them. A source of another class
+    * is copied as `copyTo` copies a cell. */
+  @Test def gatherWritesTheSelectedRowsOfEveryType(): Unit = {
+    def value(t: DataType, i: Int): Any = t match {
+      case DataType.IntType => i * 7
+      case DataType.LongType => i * 1000000007L
+      case DataType.FloatType => i + 0.5f
+      case DataType.DoubleType => i - 0.25
+      case DataType.BooleanType => i % 2 == 0
+      case DataType.StringType => s"s$i"
+      case DataType.BinaryType => Array[Byte](i.toByte, 7)
+      case DataType.DateType => java.time.LocalDate.of(2020, 1, 1).plusDays(i.toLong)
+      case DataType.TimestampType => java.time.Instant.ofEpochSecond(1700000000L + i)
+      case _: DataType.DecimalType => new java.math.BigDecimal(s"$i.25")
+      case DataType.NullType => null
+    }
+    def fill(t: DataType, n: Int, from: Int, nulls: Set[Int]): ColumnVector = {
+      val v = ColumnVector.allocate(t, n)
+      (0 until n).foreach(r => if (nulls(r)) v.setNull(r) else v.setBoxed(r, value(t, from + r)))
+      v
+    }
+    def same(a: Any, b: Any): Boolean = (a, b) match {
+      case (x: Array[Byte], y: Array[Byte]) => java.util.Arrays.equals(x, y)
+      case _ => a == b
+    }
+    val types = Seq(DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType, DataType.BooleanType,
+      DataType.StringType, DataType.BinaryType, DataType.DateType, DataType.TimestampType, DataType.DecimalType(10, 2),
+      DataType.NullType)
+    val sel = Array(4, 3, -1, 0, 5, 3, 1)
+    types.foreach { t =>
+      val src = fill(t, 6, 0, nulls = Set(1, 5))
+      val dst = fill(t, 9, 100, nulls = Set(0, 8))
+      val before = (0 until 9).map(dst.getBoxed)
+      // Rows 1 to 5 of the selection, written from row 2.
+      dst.gather(src, sel, 1, 6, 2)
+      (0 until 9).foreach { r =>
+        val expected =
+          if (r >= 2 && r < 7) { val i = sel(r - 1); if (i < 0) null else src.getBoxed(i) }
+          else before(r)
+        assertTrue(s"$t row $r: ${dst.getBoxed(r)}, expected $expected", same(dst.getBoxed(r), expected))
+        assertEquals(s"$t row $r null", expected == null, dst.isNull(r))
+      }
+    }
+    // A source of another class, copied cell by cell.
+    val ints = fill(DataType.IntType, 6, 0, nulls = Set(2))
+    val longs = ColumnVector.allocate(DataType.LongType, 4)
+    longs.gather(ints, Array(1, 2, -1, 0), 0, 4, 0)
+    assertEquals(Seq[Any](7L, null, null, 0L), (0 until 4).map(longs.getBoxed))
+  }
+
   @Test def rowGettersNameAValueTheyCannotRead(): Unit = {
     val row = Row(Schema(Field("n", DataType.IntType), Field("flag", DataType.BooleanType), Field("z", DataType.IntType)),
       Array[Any](java.lang.Integer.valueOf(7), java.lang.Boolean.TRUE, null))

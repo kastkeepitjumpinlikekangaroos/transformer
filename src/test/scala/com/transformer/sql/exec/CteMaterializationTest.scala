@@ -294,6 +294,26 @@ class CteMaterializationTest {
       view.numPartitions, reads.get())
   }
 
+  /** A CTE body that joins publishes its join's build side once, in the pass
+    * its materialization runs first, and reads each probe partition once as
+    * the body is drained in parallel. */
+  @Test def aCteBodysJoinBuildsOnce(): Unit = {
+    val buildReads = new AtomicInteger(0)
+    val probeReads = new AtomicInteger(0)
+    val build = new CountingIdScoreView(Vector((1L, 10L), (2L, 20L), (3L, 30L)), 3, buildReads)
+    val probe = new CountingIdScoreView((1L to 12L).map(i => (i % 4, i)).toVector, 4, probeReads)
+    val cat = new Catalog
+    cat.register("p", probe)
+    cat.register("b", build)
+    val built = LogicalBuilder.build(
+      "WITH c AS (SELECT p.id, p.score AS s, b.score AS w FROM p JOIN b ON p.id = b.id) " +
+        "SELECT x.id, x.s, y.w FROM c x JOIN c y ON x.s = y.s", cat)
+    val resolved = CteResolver.resolve(built, ExecutionOptions.Default)
+    assertEquals("both references scan the shared result", 2, countMaterializedViewScans(resolved))
+    assertEquals("the body's join built once: each build partition read once", build.numPartitions, buildReads.get())
+    assertEquals("each probe partition read once", probe.numPartitions, probeReads.get())
+  }
+
   // ---------------------------------------------------------------------------
   // 5. Dependent CTEs (b reads a), both referenced >= 2 times.
   // ---------------------------------------------------------------------------

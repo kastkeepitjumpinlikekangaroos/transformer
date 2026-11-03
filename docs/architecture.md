@@ -29,8 +29,10 @@ of rows with one typed column vector per field. Operators read batches and
 emit batches. Expression evaluation runs in two modes: pipeline operators
 (Project, Filter) drive `Expr.evalVec(batch): ColumnVector` for column-at-a-time
 primitive-array work (no boxing, JIT-friendly inner loops); RowBuf-driven
-paths (sort comparators, hash-join key reads, window per-row callbacks) still
-use boxed `Any` via `Expr.eval(batch, row)`. See
+paths (sort comparators, window per-row callbacks) still use boxed `Any` via
+`Expr.eval(batch, row)`. A hash join boxes no row: it gathers its output a
+column at a time by selection vectors, and evaluates its residual condition
+with `evalVec` over a chunk of candidate pairs (§8). See
 [§5a Vectorized expression evaluation (`evalVec`)](#5a-vectorized-expression-evaluation-evalvec).
 
 ## Module map
@@ -45,7 +47,7 @@ use boxed `Any` via `Expr.eval(batch, row)`. See
 | `write/parquet/` | Parquet output. | `ParquetSchema.scala` (the parquet schema transformer writes for a `Schema`), `ParquetWriter.scala` (staged and committed as `CsvWriter` is) |
 | `sql/parse/` | JSqlParser façade: one statement, none of its text lost on the way to the AST, and no tree too deep to walk. | `SqlParser.scala` (refuses text after the statement's `;` and a repeated tail clause JSqlParser overwrites — see §10; refuses parentheses that do not balance and a tree deeper than `MaxNesting`, 256 levels, once AND / OR chains are regrouped balanced; `unquote` / `quote`, the one rule for the name a quoted identifier names; `escapeLiteralText`, the text a JDBC `{d '...'}` escape was written with, which its node does not keep) |
 | `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `FunctionCatalog.scala` (every function a query can call, one entry each, which the binder binds by and the README's lists, the fuzz generators and the tests read), `Funcs.scala` (the scalar functions' implementations), `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `PendingCteView.scala` (placeholder for an unresolved CTE reference), `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo), `LogicalOptimizer.scala` and its passes (`FilterPushdown`, `JoinOrder`, `ColumnProjectionPushdown`), `PlanValidator.scala` (the check every stage's plan passes, §9), `PlanSql.scala` (a plan printed as SQL the binder reads back, "Plans as SQL"), `PlanTree.scala` (a plan as EXPLAIN's tree), `UnsupportedClauses.scala` (the rejection pass that runs before binding, and its audit of every JSqlParser getter the binder does not read — see §10) |
-| `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala`, `SortExec.scala` (also `TopNExec`, §2e), `DistinctExec.scala`, `UnionExec.scala`, `WindowExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala`, `CteResolver.scala` (inline-vs-materialize CTE pass + `PhysicalPlanView`), `SqlEngine.scala`, `Explain.scala` (what `EXPLAIN` returns) |
+| `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala` (the hash join's four paths, every one probing through one resumable cursor, §8), `SortExec.scala` (also `TopNExec`, §2e), `DistinctExec.scala`, `UnionExec.scala`, `WindowExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala` (with `preMaterialize`, the pass that publishes every shared result before a plan runs, §2b), `SharedResult.scala` (the trait an operator holding a result computed once extends, an exchange or a broadcast join, and `SharedOnce`, the publication it is kept in), `CteResolver.scala` (inline-vs-materialize CTE pass + `PhysicalPlanView`), `SqlEngine.scala`, `Explain.scala` (what `EXPLAIN` returns) |
 | `job/` | User-facing API + runner. Depends directly on `read/{csv,parquet}` and `write/{csv,parquet}` — parquet is a first-class format. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala`, `JobFiles.scala` (filesystem ops for the GUI's edit-validation flow — `writeValidationSql` / `deleteValidation`), `TaskDag.scala` (DAG analyzer/builder from SQL refs; `TaskDag` + `TaskDagNode` are public so the GUI can render without re-implementing), `TaskProgressListener.scala` (per-task callbacks fired from runner worker threads), `TaskRunRecord.scala` (`_run.json` write/read/discover for per-task run records — `Running` while a run writes the directory, then every final status, with `_validation-<slug>.csv` failure samples; `clear`, which deletes what a run wrote beside the record), `OutputDirectory.scala` (the order every writer of an output directory follows — check, mark `Running`, clear, stage, commit, final record — and what a run that ends without output leaves, `settle`; §3a), `JobRunRecord.scala` (`job.json` aggregate manifest pointing at every task's record + the run's warnings), `JobOutputLayout.scala` (classifies an output dir as `SingleRun`/`MultiRun`/`Empty` for the GUI's run picker), `DirectoryJobLoader.scala` (DBT-style directory loader; supports optional per-table `output.json` with `partitionBy`; threads default `<outputDir>/job.json` as `jobRunOutput` so the manifest lives alongside its data), `Json.scala` (stdlib JSON parser used by the loader + record readers) |
 | `gui/` | JavaFX visualizer/runner. Depends on `job/`, `core/`, `read/{csv,parquet}/`, `sql/exec/`, `temporal/` (and on `write/{csv,parquet}/` through `job/`), plus `org.openjfx:javafx-{base,controls,graphics}` (the platform-classifier jars), RichTextFX (the SQL editor, with the flowless / reactfx / undofx / wellbehavedfx jars its API is made of) and AtlantaFX (the theme). `JobSession.scala` and `DagLayout.scala` build separately as `gui:session`, which has no JavaFX dependency; the vim engine (`VimKey`, `VimCommand`, `VimText`, `VimEngine`) builds as `gui:vim`, with no dependency at all. `gui` exports both, so tests and the fuzz harness reach them without the toolkit. What both GUIs (this one and `viewer/`) are built from is `gui:components`: `Theme`, `transformer.css`, `Icons`, `FxHelpers`, `SqlHighlighter`, `SqlEditor`, `VimKeyEvents`, `SqlView`, `SqlErrorDialog`, `ShortcutsDialog`, `PersistDialog`, `ResultPersister`, `DataGrid`, `QueryConsole`, `ChartPane`, `ChartCanvas` and `GraphCanvas`; `gui` exports it too. What a chart draws (`ChartData`, `ChartScale`) builds as `gui:chart`, with no JavaFX. | `GuiApp.scala` (Application boot: installs the theme, then a BorderPane with the menu bar (in the macOS menu bar there) and the header (`ControlsPanel`) above a vertical split of the DAG over the ResultsTabPane; scene-level ⌘R / Ctrl+R accelerator calls `controls.triggerRun()`; File, View (fit, zoom, Vim Keybindings) and Help menus), `Theme.scala` (AtlantaFX Primer Dark as the user-agent stylesheet; `Theme.style` adds `transformer.css` and a generated stylesheet naming the installed monospace family to every scene, dialog and alert; `Palette`, the theme's colours, for the canvas), `transformer.css` (the GUI's own style classes in the theme's looked-up colours, and the SQL token colours; ships in the jar as `com/transformer/gui/transformer.css`), `Icons.scala` (SVG line icons), `JobSession.scala` (mutable FX-thread session state — jobDir, executionTime, outputDir, DAG, per-task UI states, task records, historical runs, job manifest, available run snapshots, selected run; loads `<outputDir>/job.json` (or any sibling snapshot the user picks) and follows each task's `runFile` to reconstruct full `TaskStatus` including `ValidationFailed(failures)` with sample CSVs, and a task whose record says `Running` as `UiTaskState.Unfinished`; `buildInteractiveCatalog` assembles a Catalog over inputs + persisted task outputs for ad-hoc SQL), `DagLayout.scala` (pure-Scala layered DAG layout), `GraphCanvas.scala` (components: `GraphCanvas`, the canvas both GUIs draw graphs on — a dot grid, pan/zoom, cards with a bar in a status colour, curved edges, fitting text; `GraphOverlay`, the zoom controls and a summary row over one), `DagCanvas.scala` (`DagCanvas`: the job's DAG on a `GraphCanvas` — the selection's edges in the accent colour, click/double-click; `DagOverlay`: the per-status task counts over it), `ControlsPanel.scala` (the header: open job, execution date + `HH:mm:ss` time, output-dir field, optional run picker for multi-run output dirs, a status pill with live progress, Run on a worker thread; exposes `triggerRun()` for the keyboard accelerator), `TaskDetailsPanel.scala` (the selected task/input: a header with the actions on it, a column of details — status chips, deps, output, error, validations — and a Source/Rendered SQL column editable in place, where vim's `:w` saves and `:q` cancels), `SqlEditor.scala` (the SQL editor everywhere: RichTextFX `CodeArea`, `SqlHighlighter` styling, line numbers, a status line, and vim through `VimEngine` over a `VimBuffer` on the area while `SqlEditor.vimEnabled` is on, remembered in java.util.prefs), `VimKeyEvents.scala` (a JavaFX key event as an engine key, a platform shortcut, or the window's), `VimKey.scala` / `VimCommand.scala` / `VimText.scala` / `VimEngine.scala` (`gui:vim`: key notation; the normal/visual command grammar and its parser; lines, words, paragraphs, text objects and vim regex over a string; and the engine — modes, operators, registers, undo, `.`, macros, search, ex commands), `SqlHighlighter.scala` (pure-Scala tokenizer: keywords, functions (a word before `(`), types (where one is written), strings, numbers, comments, templates, and each kind's style class — testable, no JavaFX deps), `SqlView.scala` (a read-only `SqlEditor` the host can make editable, with a Copy action for the host's header), `ResultsTabPane.scala` (5 tabs: **Task details**, Output data, Validations — per-validation cards with an Edit… button that pops out the `AddValidationDialog.showEdit` editor (round-trips through `JobFiles.writeValidationSql` / `deleteValidation`) — **SQL console**, Run log), `AddValidationDialog.scala` (the validation editor dialog used by both the task-details chip and the per-card Edit button; supports add + edit + delete; `:w` presses Save, `:q` Cancel), `AddTableDialog.scala`, `AddInputDialog.scala`, `QueryConsole.scala` (components: a `SqlEditor` with Run query and Persist results… beside the result, or above it with `Orientation.VERTICAL`, as the data viewer's query tabs have it: a `DataGrid` of its rows in a Rows tab beside a Chart tab; ⌘⏎ / Ctrl+Enter runs it; the host's `prepare` runs on the FX thread and returns the catalog builder the worker calls; materializes the result, its partitions read at once on the pool with a stop of its own (`ParallelDrain.eachPartition`, a failure in one stopping the rest), so Persist can replay it and the chart read every row), `ChartPane.scala` (components: the Chart tab — the type, X, Y and its aggregation, Split by — over a `ChartCanvas`, worked out on a worker while the tab shows; Save PNG… paints the chart again at twice its size and writes it with `ImageIO`), `ChartCanvas.scala` (components: bars, lines, areas, dots or a pie on a plain `Canvas` — axes, legend, the pointer's reading; below 240px tall, axes untitled to keep the plot's height — and `image`, the same paint at a scale), `ChartData.scala` (`gui:chart`: `ChartSpec`, what to draw, and `ChartSpec.fit`, which suggests one for a result and carries one over to the next; `ChartData.build`, one pass over a result's batches into what each X and series hold, then series in order, folded into Other past eight), `ChartScale.scala` (`gui:chart`: round ticks, calendar ticks in UTC, and how ticks, values and times are written), `DataGrid.scala` (components: rows in a `TableView` — each column's type under its name, NULL in its own style, numbers right, sorting by value, ⌘C copies rows — plus `DataGrid.sample`, a view's first rows), `SqlConsolePanel.scala` (the job's console: chips for the registered views above a `QueryConsole` over `JobSession.buildInteractiveCatalog`), `PersistDialog.scala` (modal: output dir, format, maxPartitions, CSV header — mirrors `OutputFilePath` fields), `ResultPersister.scala` (writes a `MaterializedView` through `job.OutputDirectory`, as a job's task writes its directory: strays refused, a `Running` mark, parts staged and committed, a `Succeeded` record naming them, or a `Failed` one and no part file), `ShortcutsDialog.scala` (Help > Keyboard Shortcuts), `SqlErrorDialog.scala`, `FxHelpers.scala` |
 | `viewer/` | The data viewer, a standalone JavaFX app (`//:transformer_viewer`): every job output in a folder as a dataset, SQL over all of their tables with a chart of each result, and an inspector per table (its rows, columns, recorded details and lineage within and across jobs). Depends on `gui:components`, `job/`, `core/`, `sql/exec/`. `viewer:model` (`RunFolder`, `Lineage`, `LineageLayout`, `ViewerSession` with `QueryCatalog`, `InspectorView` and `InspectorHistory`) has no JavaFX; see §4. | `ViewerApp.scala` (the window, menus and header; `ViewerMain`, the entry point, apart from the `Application` so `java -jar` starts it), `RunFolder.scala` (finding the runs, grouping them into datasets, names; `TableInfo.status`, `Running` for a table whose `_run.json` says so whatever `job.json` says), `Lineage.scala` (nodes, edges, input → table matching, a node's whole lineage), `LineageLayout.scala` (boxes and cards, of the folder or of one lineage), `ViewerSession.scala` (state, selection, the run shown per dataset, finding a selection again in a folder read again, `QueryCatalog`, an inspector's views and Back/Forward history), `ViewerTabs.scala` (the workspace: query tabs, inspector tabs, the preview tab), `InspectorPane.scala` (an inspector's header and views; `SamplePane`, `ColumnsPane`, `TablesPane`), `DetailsPanel.scala` (the Details view), `LineageCanvas.scala` (the Lineage view on a `GraphCanvas`; `LineageOverlay` with its whole-folder switch), `DatasetTree.scala` (the list with its filter) |
@@ -115,11 +117,17 @@ Operators emit batches in two ways:
     [[com.transformer.sql.plan.LogicalPlanCardinality]] estimates (see §2b).
   - **Collapsing breakers** — Sort, TopN (§2e), GlobalLimit, and any of the above when
     the planner's cardinality gates aren't met (most aggregates by default;
-    joins with one side small enough to broadcast; non-equi joins; windows
-    whose specs disagree on PARTITION BY or whose PARTITION BY is empty).
-    Fan out across the child's partitions via `Scheduler.submitAndAwaitAll`
-    to build their state, merge across the partials, and emit
-    `numPartitions = 1`.
+    windows whose specs disagree on PARTITION BY or whose PARTITION BY is
+    empty). Fan out across the child's partitions via `Scheduler.submitAndAwaitAll`
+    (a window through `ParallelDrain.eachPartition`, §6) to build their
+    state, merge across the partials, and emit `numPartitions = 1`.
+  - **Broadcast joins** — an equi-join under the broadcast threshold that
+    keeps no unmatched build row (a planned INNER, LEFT or RIGHT join) is no
+    breaker on its probe side: its build side is built once, before the plan
+    runs (§2b), and it runs in its probe side's partitions, each streaming
+    its own probe partition against the shared build side. A join that keeps
+    unmatched build rows (a planned FULL join) and one with no equality run
+    on one partition, in waves (§8).
 
 `SqlEngine.execute` returns an `ExecutedQuery` that exposes both `numPartitions`
 + `partition(i)` and a flattened `batches` view. The writer pipeline pulls
@@ -127,12 +135,14 @@ per-partition iterators so it can fan out one output part file per partition
 in parallel, and so do in-memory materialization (`MaterializedView.fromQuery`)
 and the readers of a whole result, `transformer query` and the GUI's query
 console, through `core/ParallelDrain` (§3); a validation's drain uses the flat
-view. A partition may move from thread to thread between reads, each finished
-before the next begins: no iterator keeps state tied to its thread, and no
-batch changes once `next()` has returned it.
+view, so a validation whose root is a join probes a partition at a time. A
+partition may move from thread to thread between reads, each finished before
+the next begins: no iterator keeps state tied to its thread, and no batch
+changes once `next()` has returned it.
 
-When operators need to evaluate an `Expr` over a *materialized row* (sort
-comparators, hash-join keys, residual predicates), they use `RowBuf`:
+When operators need to evaluate an `Expr` over a *materialized row* (window
+callbacks), they use `RowBuf` (sort comparators read a boxed row through
+`RowView`, which allocates no batch):
 a reusable 1-row batch that the surrounding loop refills with `.set(rowArr)`
 or `.setFromBatch(srcBatch, srcRow)`. Don't allocate fresh `ColumnarBatch`es
 per row in tight loops — that defeats the JIT.
@@ -281,14 +291,16 @@ the child's natural partitions); the planner picks which based on
   both sides only when the smaller side estimate is
   `≥ LogicalPlanCardinality.BroadcastBuildThreshold` (default 1M, overridable
   via `transformer.scheduler.broadcast_threshold`). Below that, the
-  build map fits in heap and the historic collapsing path (build small,
-  stream-probe large) is faster than scattering both sides. A key that
-  reads `RAND()` is never shuffled, for the reason above.
+  build map fits in heap and a broadcast join (build the small side once,
+  stream-probe the large one in its own partitions) is faster than
+  scattering both sides. A key that reads `RAND()` is never shuffled, for
+  the reason above.
 
 Operators detect their mode by inspecting whether `child` (or both sides,
 for joins) is an `ExchangeExec`. Direct construction of a breaker over a
-non-exchange child silently picks collapsing mode — robust for tests and
-future callers that bypass the planner.
+non-exchange child silently picks collapsing mode (a join: broadcast, or in
+waves when it keeps unmatched build rows) — robust for tests and future
+callers that bypass the planner.
 
 The exchange is the intra-JVM analog of Spark's shuffle exchange — no
 serialization, no disk, no network; the materialized shuffle is K arrays
@@ -314,40 +326,60 @@ them. Both policies are deterministic and pinned across runs.
 Materialization is **eager and bottom-up for engine-planned queries**:
 right after physical planning, both drain entry points (`SqlEngine`'s two
 execute paths and `CteResolver`'s CTE-body materialization) run
-`PhysicalPlanner.preMaterializeExchanges`, a post-order walk (identity-
-deduped, `MeteredPlan`-transparent) that publishes every exchange children-
-first before any consumer task exists. Each exchange's build reads all
-child partitions in parallel through `Scheduler.submitAndAwaitAll`, routes
-every row, and scatters into K size-exact output batches; consumers then
-only ever take the published fast path — `execute(s)` is an array read.
-A materialization failure is thrown out of the pass at `SqlEngine.execute`
-time as itself — never retried. The memory cost is roughly what
-`HashAggregate.partialAggregate` already paid; no new spill semantics are
-introduced.
+`PhysicalPlanner.preMaterialize`, a post-order walk (identity-deduped,
+`MeteredPlan`-transparent) that publishes every **shared result** children-
+first before any consumer task exists: an operator that holds a result
+computed once and read by every partition extends `SharedResult`
+(`sql/exec/SharedResult.scala`), and the pass calls its `materializeNow`.
+Two do: each exchange, whose build reads all child partitions in parallel
+through `Scheduler.submitAndAwaitAll`, routes every row, and scatters into K
+size-exact output batches; and each broadcast hash join, whose build side is
+built the same way, across its build partitions (§8). Consumers then only
+ever take the published fast path — an exchange's `execute(s)` is an array
+read, a broadcast join's `execute(p)` a read of its build side and a probe
+of partition `p` opened by its first pull. A materialization failure is
+thrown out of the pass at `SqlEngine.execute` time as itself — never
+retried. The memory cost is roughly what `HashAggregate.partialAggregate`
+already paid; no new spill semantics are introduced. A broadcast join's
+build side lives as long as the query: built in `SqlEngine.execute`, it is
+read by each partition as it is pulled, so a consumer holding the query
+(the job runner holds it through the validations) holds the build side.
 
 The bottom-up ordering is the K>1 **liveness guarantee** (plans/bugfixes/02f):
-a wait on an unready exchange was the one wait in the engine that does not
-follow the task-creation tree, so the one wait `ForkJoinTask.get()`
+a wait on an unready shared result was the one wait in the engine that does
+not follow the task-creation tree, so the one wait `ForkJoinTask.get()`
 work-helping cannot rescue — helpJoin can inline a *consumer* of an exchange
 beneath that exchange's own materialization frames (helping runs tasks from
 stealers' queues, which need not be descendants of the awaited task), closing
 a winner → shard-task → consumer → exchange cycle no monitor-vs-latch choice
-avoids (reproduced at campaign scale, plans/bugfixes/02e). With every
-exchange published before its consumers run, no worker ever waits on
-exchange readiness; every remaining pool wait is a pure tree await, which
-work-helping completes — the mechanism
-`//src/test/scala/com/transformer/core:scheduler_test` pins, and the wedge
-shape `sql/exec:exchange_deadlock_stress_test` re-drives green under churn.
+avoids (reproduced at campaign scale, plans/bugfixes/02e). With every shared
+result published before its consumers run, no worker ever waits on one being
+ready; every remaining pool wait is a pure tree await, which work-helping
+completes — the mechanism `//src/test/scala/com/transformer/core:scheduler_test`
+pins, and the wedge shape `sql/exec:exchange_deadlock_stress_test` re-drives
+green under churn, its inner joins now publishing builds too. A broadcast
+join's partition iterator, a shard's and a grace bucket's fan nothing out of
+their own and wait on no shared result (what they read may fan out, a tree);
+the only other waits a join has are its build's and its waves'
+`submitAndAwaitAll`, over its build partitions and over cursors reading their
+own probe partitions (§8), pure trees.
 
-Directly-constructed exchanges (tests, embedders that bypass the planner)
-fall back to lazy one-shot materialization: concurrent first-callers race a
-CAS claim (`AtomicBoolean`); exactly one winner runs `materialize()` with
-**no JVM monitor held**, publishes through a `@volatile` field, and opens a
-`CountDownLatch`; losers park on a plain **uncompensated** `ready.await()`
-and wake together. The loser-wait is deliberately not
+Directly-constructed plans (tests, embedders that bypass the planner) fall
+back to lazy one-shot materialization, through the same helper
+(`SharedOnce`): concurrent first-callers race a CAS claim (`AtomicBoolean`);
+exactly one winner computes the result with **no JVM monitor held**,
+publishes it through a `@volatile` field, and opens a `CountDownLatch`;
+losers park on a plain **uncompensated** `ready.await()` and wake together; a
+consumer helpJoin inlines beneath the winner's own frames sees itself the
+claimer and computes a private copy. The loser-wait is deliberately not
 `ForkJoinPool.managedBlock`-wrapped (that compensation was the reverted
-plans/bugfixes/02b regression — see §3). This fallback keeps the helpJoin
-hazard: do not drain lazily-nested exchanges from pool tasks — run the
+plans/bugfixes/02b regression — see §3), nor a `lazy val` or `synchronized`,
+which hold the operator's monitor across the computation's pool fan-out. A
+broadcast join's fallback builds in `execute(p)` on the calling thread, never
+on the first pull: a caller that skips the pass calls `execute(p)` for every
+partition on one thread, where a build deferred to the first pull would race
+from the consumer's pool tasks. This fallback keeps the helpJoin hazard: do
+not drain lazily-nested shared results from pool tasks — run the
 pre-materialization pass first, like the engine does (see
 [gotchas.md](gotchas.md)).
 
@@ -392,13 +424,16 @@ Per-operator format:
 - `DistinctExec` writes one row per distinct key (the operator's output
   columns, positionally renamed — see below) and the union step folds
   spill files back into the final set.
-- `HashJoinExec` uses **grace hash**: with spill enabled, both sides
-  are routed into K=16 disk buckets by `fmix32(hash(joinKeys)) % K`,
-  then each `(build_k, probe_k)` pair is processed sequentially —
-  load `build_k` into an in-memory keymap, stream `probe_k` against
-  it, emit matches. Outer-join unmatched-build emission happens
-  per-bucket (a build row unmatched in its bucket is unmatched
-  globally because both sides hash on the same key). Restricted to
+- `HashJoinExec` uses **grace hash**: with spill enabled, on its first
+  pull both sides are routed into K=16 disk buckets by
+  `fmix32(hash(joinKeys)) % K`; then the `(build_k, probe_k)` pairs are
+  processed one after another as the output is pulled — load `build_k`
+  into an in-memory keymap, stream `probe_k` against it a batch at a time,
+  emit matches, then the bucket's unmatched build rows. Outer-join
+  unmatched-build emission happens per-bucket (a build row unmatched in its
+  bucket is unmatched globally because both sides hash on the same key). So
+  spill bounds a join's result as well as its build side: it holds one
+  bucket's build rows and an output batch, both inputs on disk. Restricted to
   equi-joins; non-equi joins ignore the spill option since they have
   no key to bucket on.
 - `WindowExec` uses **bucketed spill**: with spill enabled and a
@@ -490,7 +525,7 @@ batch's own names and types the operator's) and fails with an
 `AssertionError` naming the operator by its line of the plan as `EXPLAIN
 VERBOSE` prints it (`Explain.operatorLines`), the column, the row and the
 value. Both wrappers are `PlanWrapper`s, which whatever reads a plan's shape
-sees through (`ExchangeExec.feeds`, `preMaterializeExchanges`, `EXPLAIN`), so
+sees through (`ExchangeExec.feeds`, `preMaterialize`, `EXPLAIN`), so
 neither changes the plan. Every operator the planner builds has a branch in the
 walk; under verify one without fails the walk (with metrics alone it is left
 unwrapped, its own output still metered), and `sql/exec:verify_test` finds the
@@ -577,11 +612,13 @@ sharded exchange can still deadlock (see §2b and gotchas.md).
 
 **Reading a whole result: `ParallelDrain`.** `SqlEngine.execute` runs a
 collapsing breaker at the root on the pool before it returns, but a scan and
-its filters and projections, a union's concatenation, the pairing join's waves
-and a sharded breaker's emit run as their partitions are pulled, so a consumer
-that pulls every partition on one thread decodes a scan on one core.
-`core/ParallelDrain` reads an `ExecutedQuery` on the pool two ways, for
-`transformer query` (§11) and the GUI's query console:
+its filters and projections, a union's concatenation, a join's probe (a
+broadcast join's partitions, a join's waves, a shard's or a grace bucket's
+probe) and a sharded breaker's emit run as their partitions are pulled, so a
+consumer that pulls every partition on one thread decodes a scan, or probes a
+join, on one core. `core/ParallelDrain` reads an `ExecutedQuery` on the pool
+two ways, for `transformer query` (§11) and the GUI's query console, and a
+plan's partitions one way, for `WindowExec` over its whole input (§6):
 
 - `eachPartition(q, inFlight, stop)(f)`: up to `inFlight` pool tasks each take
   the next partition no task has taken (an `AtomicInteger`, so a slow one holds
@@ -640,7 +677,7 @@ per-input via `options("read_partition_size_bytes")` (e.g. drop it for highly
 contested input where you want even more parallelism, raise it to consolidate
 small files). Plan output cap (`OutputFilePath.maxPartitions`) accordingly —
 the writer fans out 1:1 by default, so a 4-partition source produces 4 part
-files unless capped.
+files unless capped, and so does a broadcast join probing it (§8).
 
 ### 3a. Output is always a directory of part files, committed by its record
 
@@ -997,12 +1034,14 @@ reads (`ScanExec`, whichever thread pulls it); once it says true, the scan
 throws `QueryStoppedException`. The query then fails as any query does wherever
 it is: a pool task that was reading fails, `Scheduler` rethrows the task's own
 exception to its waiter, and so on up to the caller. A CTE body materialized
-while planning (§6b) and an exchange materialized before the plan runs (§2b)
-plan with the same options, so they stop too. What a stop cannot reach is work
-that already holds its rows and reads no more, such as a sort's merge of what
-it has read, a window over a partition it holds, or a hash table being probed
-with a batch already read; it runs to its end, bounded by the rows it read, and
-the next batch read stops.
+while planning (§6b), and an exchange or a broadcast join's build side
+materialized before the plan runs (§2b), plan with the same options, so they
+stop too. A join's probe side is read as its output is pulled, so a join
+stops probing at its probe side's next batch, on whichever thread pulls it.
+What a stop cannot reach is work that already holds its rows and reads no
+more, such as a sort's merge of what it has read, a window over a partition it
+holds, or a hash table being probed with a batch already read; it runs to its
+end, bounded by the rows it read, and the next batch read stops.
 
 The default, `ExecutionOptions.NeverStopped`, is one shared value, so options
 that leave it alone are equal, and `ScanExec` hands out the view's iterator
@@ -1028,13 +1067,16 @@ plans/testing/17):
   runs out or is closed; an operator's output closes its inputs
   (`Closing.over`), so closing a query's partitions closes the plan under them;
   a breaker that reads its spill runs as it emits (a sort's merge, a spilled
-  window's buckets) closes them and its directory when drained or closed
-  (`OperatorSpillDir.closeOnDrain`). An aggregate, a DISTINCT and a grace-hash
-  join fold or join their runs before they emit, so their directories go
-  then.
+  window's buckets, a grace-hash join's buckets) closes them and its
+  directory when drained or closed (`OperatorSpillDir.closeOnDrain`); an
+  abandoned one, neither drained nor closed, keeps its files until the JVM
+  exits. An aggregate and a DISTINCT fold their runs before they emit, so
+  their directories go then.
 - **What stops reading closes.** A `LIMIT` closes its input once it has its
   rows (`Closing.limited`), and `GlobalLimitExec` and `OffsetExec` execute each
-  partition only when the one before it runs out (`Closing.concat`). A pool
+  partition only when the one before it runs out (`Closing.concat`). A join's
+  output closes the probe partition it reads, so a `LIMIT` over a join stops
+  its probe and closes the file it stopped in. A pool
   task that drains an input closes it however the drain ends, and a breaker
   that fails releases its spill directory. `Scheduler.submitAndAwaitAll`
   waits for every task before it throws the first failure, so nothing a
@@ -1062,7 +1104,8 @@ with status 117. Off, it is a final val read.
 ### 3i. Chaos points
 
 Each handoff between threads is a named point (`core/Chaos`): a pool task
-about to run and a wait for one (`Scheduler`), an exchange's claim and publish,
+about to run and a wait for one (`Scheduler`), a shared result's claim and
+publish (an exchange's shards, a broadcast join's build side: `SharedOnce`),
 the job runner's event queue and task and input submissions, a partitioned
 writer's commit, a spill directory made, and a task's output read back for the
 tasks after it. Under `-Dtransformer.chaos=<seed>` (`--config=chaos`, read
@@ -1596,10 +1639,13 @@ typed vector for the whole batch instead of N recursive `Expr.eval` calls.
   once per scan batch for non-ColRef keys. The per-row loop reads
   `keyVecs(i).getBoxed(r)` into the key buffer instead of calling
   `keyExprs(i).eval(batch, r)`.
-- **`HashJoinExec`** does the same on both sides. Build-side keys are
-  pre-encoded per scan batch in `collectBuildPartition` (eliminating the
-  former RowBuf-driven walk in `buildCodecKeyMap`). Probe-side keys are
-  pre-evaluated per probe batch in the probe worker.
+- **`HashJoinExec`** does the same on both sides. Computed build-side keys
+  are evaluated and encoded per scan batch as the build side is collected;
+  ColRef build keys are encoded from the compacted build batch through a
+  codec bound to the build columns, the probe's codec layout, so both sides'
+  keys compare equal. Probe-side keys are evaluated once per probe batch by
+  the probe cursor, when it moves to the batch, however many fills that
+  batch's rows take.
 - **`WindowExec`** is more invasive: during the single materialization pass
   it eval-vecs each spec's partition keys + order keys per scan batch and
   stashes the per-row values in `Array[Array[Any]]` arrays. Downstream
@@ -1702,7 +1748,14 @@ mode the planner has hash-partitioned by the shared PARTITION BY keys, so
 each shard processes its rows independently and `numPartitions = K`; in
 **collapsing** mode (no exchange — empty PARTITION BY, disagreeing specs,
 or sub-threshold input size) the operator reads every child partition and
-emits as a single output partition. Ranking functions and LAG/LEAD read no
+emits as a single output partition. It reads them at once on the pool
+(`ParallelDrain.eachPartition` over the child's partitions, each opened when
+a task takes it), each partition's rows and keys into a buffer of its own,
+concatenated in partition order: the rows the window sees, and so how its
+ties come out, are those reading one partition after another gave. Its child
+is often a join running in its probe side's partitions, whose probe this
+spreads over the cores; a partition's failure stops the others at their
+next batch. Ranking functions and LAG/LEAD read no
 frame (the binder refuses one written on them). An aggregate reads each row's
 frame, `WindowExec.frameBounds`'s inclusive positions [lo, hi] in the sorted
 partition: a `ROWS` offset in long arithmetic clamped to the partition, and a
@@ -1834,17 +1887,63 @@ mirrors build/probe roles through `probeIsLeft`/`buildIsLeft` flags;
 to write each row into the correct half of the output array, so callers
 never observe the swap.
 
+**Running a join.** `HashJoinExec` builds one side into one columnar batch
+(its partitions' batches compacted, `ColumnVector.gather`) and a multi-map
+from key to the indices of its rows (`IntList`s, unboxed), and reads the
+other through a probe cursor (`ProbeCursor`), which every path shares, so
+match semantics live in one place: it holds a probe stream (opened by its
+first fill), the batch it is in and that batch's computed key vectors, the
+next row, and for the row being matched its candidates, the next to examine
+and whether a candidate kept it; a fill stops at a row limit (an output
+batch) or a work limit (`PairsPerTask` units: a probe row read, a candidate
+pair examined or an unmatched row padded), mid-row if need be, so a probe
+row matching ten million build rows emits them a batch at a time. No row is
+boxed: the cursor writes each joined row's probe row and build row into two
+selection vectors (-1 for a NULL-padded side), and the output batch gathers
+each probe column from the probe batch before the cursor moves past it and
+each build column from the build side's batch once the output batch is done,
+a column at a time (`ColumnVector.gather`). A residual condition (`extra`) is evaluated with
+`evalVec` over a chunk of candidate pairs at once, the columns it reads
+gathered for them, each probe row finished once its last candidate is
+checked. A join that keeps the build rows no probe row matched records the
+ones it matched in a `BitSet` per cursor. Four paths, chosen from the plan as
+built:
+
+| Path | Taken when | Partitions | Holds |
+|---|---|---|---|
+| Broadcast | a keyed join that keeps no unmatched build row (planned INNER, LEFT, RIGHT under the broadcast threshold) | the probe side's | the build side, built once by the pre-materialization pass (§2b), and per partition being pulled a probe batch and an output batch |
+| In waves | no equality, or a keyed join that keeps unmatched build rows (planned FULL) | 1 | the build side and one wave (`Scheduler.parallelism` × `PairsPerTask` rows, 524,288 at 16 threads), a `BitSet` per cursor |
+| Per shard | both children are exchanges (smaller side at or above the broadcast threshold) | K | the two exchanges, which hold both inputs, and per shard being pulled its build rows and an output batch: shard `s` builds on its first pull, streams probe shard `s`, then emits its unmatched build rows |
+| Grace hash | spill on, keys, none reading `RAND()` (§2c) | 1, K when sharded | one bucket's build rows and an output batch; both inputs on disk, bucketed on the first pull |
+
+So no join holds its result, and a join under an aggregate, a sort, a top-n,
+a writer, a CTE's materialization or a LIMIT streams as a scan does: a LIMIT
+over a join stops after its rows, and one over an endless probe side
+returns. A broadcast join's partitions are its probe side's, read in parallel
+by whatever reads partitions in parallel, so a job table over one writes a
+part file per probe partition (`maxPartitions` caps them; `1` writes one). Its
+rows, read flat, come in probe order, as the collapsing join that preceded it
+gave them; an aggregate over it merges a partial per probe partition, as over
+a multi-partition scan, so a `DOUBLE` sum's last digits may differ from one
+collapsing partial's. A join in waves emits each wave's rows (its cursors'
+chunks in partition order) and then the unmatched build rows; a FULL join's
+rows used to be in probe order. A consumer that reads one stream (OFFSET
+without LIMIT, a validation's rows, `ExecutedQuery.batches`) probes a
+partition at a time; `transformer query` and the GUI's console read a join's
+partitions on the pool like any result's (§3), with the probe inside their
+reads.
+
 Non-equi joins (no equality conjunct after `splitEqualityKeys`) plan as a
 degenerate hash join — every probe row matches the single empty-key bucket
 holding every build row, which gives correct nested-loop semantics. They run
-on a path of their own, `executePairing`: the build side is materialized, and
-the probe side is read through a cursor per probe partition and paired in
-waves, each advancing up to `Scheduler.parallelism` cursors in parallel by as
-many probe rows as pair about `PairsPerTask` (32768) rows, its output emitted
-before the next wave reads on. So a pairing holds its build side and one
-wave's pairs, never the product (the collapsing path it left held every pair
-before its first batch), and the build rows a RIGHT or FULL join leaves
-unmatched follow the last wave. To stop
+in waves, as a join that keeps unmatched build rows does (`executeInWaves`):
+the build side is materialized, and the probe side is read through a cursor
+per probe partition and paired in waves, each advancing up to
+`Scheduler.parallelism` cursors in parallel by at most `PairsPerTask` (32768)
+units of work, its output emitted before the next wave reads on. So a pairing
+holds its build side and one wave's pairs, never the product (the collapsing
+path it left held every pair before its first batch), and the build rows a
+RIGHT or FULL join leaves unmatched follow the last wave. To stop
 that from silently materializing an O(N*M) cartesian over millions of rows,
 `PhysicalPlanner.enforceNestedLoopGuard` refuses the plan when both sides'
 row counts are proven and `min(left, right) > 5000`, and when a side is itself
@@ -2095,7 +2194,11 @@ they were written:
   `DataType.sqlName`, and a value's text is `CsvValues.format`'s, the text the
   CSV writer writes. `COPY` and `--output` write one file through
   `CsvWriter.writeAll` / `ParquetWriter.writeAll` from `inOrder`'s iterator,
-  decoded ahead on the pool and encoded on the statement's thread. `COPY ...
+  decoded ahead on the pool and encoded on the statement's thread. A join's
+  probe runs inside those reads (§8): a table or markdown probes every
+  partition at once, an ordered format or a one-file `COPY` mostly the
+  partition being written, since the read-ahead holds one chunk of each
+  partition ahead and a selective join's chunk is many probe batches. `COPY ...
   (FORMAT parquet, PER_PARTITION_OUTPUT true)` writes a new or empty directory
   of a parquet file a partition through `ParquetWriter.writePartitioned`, as a
   job's table is written but with no `_run.json`, its partitions claimed and

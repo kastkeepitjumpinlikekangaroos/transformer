@@ -103,8 +103,8 @@ In-memory counters:
 | `probeSideRows` | Rows probed against the build map. |
 | `matchedRows` | Probe rows with at least one match surviving the residual (`extra`) predicate. |
 | `unmatchedRows` | Rows emitted null-padded by outer-join preservation — unmatched probe rows and unmatched build rows both count. |
-| `buildNanos` | Time spent building the keymap. |
-| `probeNanos` | Time spent probing. |
+| `buildNanos` | Time spent building the keymap: once for a broadcast join (in the pre-materialization pass) or a join in waves, once a shard for a sharded one. |
+| `probeNanos` | Time spent in the probe loop, summed over every partition and wave task that probed, whichever thread it ran on. A join's output is made as it is pulled, so the time a consumer spends between pulls is not in it; with partitions probed at once it can exceed the query's wall time. |
 | `keyCodecPath` | 0 = LongHashMap fast path, 1 = `PackedBytesCodec`, 2 = `ObjectArrayCodec`, 3 = `SingleObjectKeyCodec` (single non-packable column — e.g. `GROUP BY market_id`). |
 
 Grace-hash spill counters:
@@ -114,7 +114,7 @@ Grace-hash spill counters:
 | `bucketCount` | Number of disk buckets the join used (fixed at 16 when spill triggers; 0 when spill never triggered). |
 | `bytesSpilledBuild` | Bytes written to the build-side bucket files. |
 | `bytesSpilledProbe` | Bytes written to the probe-side bucket files. |
-| `bucketsLoadedNanos` | Time loading each `build_k` partition into memory before probing `probe_k`. |
+| `bucketsLoadedNanos` | Time loading each `build_k` bucket into memory before probing `probe_k`, summed over the buckets; probing them is in `probeNanos`. |
 | `peakBucketBytes` | Largest single-bucket size observed across the build phase. |
 
 ### Sort

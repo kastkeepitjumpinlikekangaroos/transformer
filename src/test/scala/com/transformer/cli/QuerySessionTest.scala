@@ -290,6 +290,45 @@ class QuerySessionTest {
     assertTrue(s"served $served batches", served <= 5 + 3)
   }
 
+  /** `m` (x, label): the endless table's four values, a row each. */
+  private def withSmall(s: QuerySession): Unit =
+    s.addTable("m", file("m.csv", "x,label\n0,zero\n1,one\n2,two\n3,three\n").toString, None, Map.empty)
+
+  /** A LIMIT over a join of an endless table returns once it has its rows: the
+    * join probes as it is read, an output batch at a time, where it probed
+    * the whole of its probe side before its first row, which never came.
+    * Each probe batch of four rows joins four rows, so one output batch is a
+    * quarter as many probe batches as it holds rows. */
+  @Test def aLimitOverAJoinOfAnEndlessTableReturns(): Unit = {
+    val s = new QuerySession
+    s.format = OutputFormat.Csv
+    val served = new AtomicInteger
+    withEndless(s, parts = 3)(n => { val _ = served.accumulateAndGet(n, (a, b) => math.max(a, b)) })
+    withSmall(s)
+    val r = run(s, "SELECT e.x, m.label FROM endless e JOIN m ON e.x = m.x LIMIT 5")
+    assertTrue(r.err, r.ok)
+    assertEquals(r.out, 6, r.out.linesIterator.size)
+    val oneOutputBatch = (ColumnarBatch.DefaultCapacity + 3) / 4
+    assertTrue(s"served ${served.get} batches", served.get <= math.max(oneOutputBatch, 2) + 1)
+  }
+
+  /** Cancelling stops a join's probe, read on the pool under an aggregate,
+    * at its next batch. */
+  @Test def cancellingStopsAJoinsProbeAtItsNextBatch(): Unit = {
+    val s = new QuerySession
+    val cancel = new Cancel
+    val served = new AtomicInteger
+    withEndless(s, parts = 3) { n =>
+      val _ = served.accumulateAndGet(n, (a, b) => math.max(a, b))
+      if (n == 5) cancel.cancel()
+    }
+    withSmall(s)
+    val r = run(s, "SELECT m.label, COUNT(*) AS n FROM endless e JOIN m ON e.x = m.x GROUP BY m.label", cancel = cancel)
+    assertFalse(r.ok)
+    assertEquals("", r.err)
+    assertTrue(s"served ${served.get} batches", served.get <= 5 + 3)
+  }
+
   /** A table `name` of `parts` partitions of 4-row batches, calling `served`
     * with the count of batches served, and `fail(p, k)` before partition
     * `p` serves its k-th batch (from 1). */

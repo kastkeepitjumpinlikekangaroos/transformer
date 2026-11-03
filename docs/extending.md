@@ -532,11 +532,20 @@ README's [Querying files](../README.md#querying-files-transformer-query).
 3. Optionally a new physical operator (one file in `sql/exec/`). Give it a
    branch in the plan walk's `wrapChildren` in `PhysicalPlanner`, which
    rebuilds it over its metered and verified children, and in `childrenOf`
-   (the exchange pass), and a line in `Explain.describe`; a reader of a
-   plan's shape sees through a `PlanWrapper`. Under `--config=verify` the
+   (the pre-materialization pass), and a line in `Explain.describe`; a reader
+   of a plan's shape sees through a `PlanWrapper`. Under `--config=verify` the
    walk refuses an operator it has no branch for, and
    `sql/exec:verify_test` finds the operator classes by reflection and fails
    until one of its queries builds yours.
+   An operator holding a result computed once and read by every partition
+   that runs it (an exchange's shards, a broadcast join's build side) extends
+   `SharedResult` (`sql/exec/SharedResult.scala`): it keeps the result in a
+   `SharedOnce`, takes it in `execute(p)` with `get()`, and computes it in
+   `materializeNow`, which `PhysicalPlanner.preMaterialize` calls children
+   first before any partition runs, so no pool task waits for it
+   (docs/conventions.md, "Never let a pool task wait on a lazily-shared
+   breaker result"). Never a `lazy val` or `synchronized`; `SharedOnce`'s
+   claim and latch are the fallback for a plan run without the pass.
    The operator follows the close protocol (architecture §3h): its output
    closes its inputs (`Closing.over`), a pool task of it drains an input in
    `Closing.draining`, and a spill directory it opens is released when its

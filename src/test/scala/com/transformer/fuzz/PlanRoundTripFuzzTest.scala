@@ -191,7 +191,7 @@ object PlanRoundTripFuzzTest {
         else {
           val physical = PhysicalPlanner.plan(
             CteResolver.resolve(LogicalBuilder.build(sql, catalog), ExecutionOptions.Default), ExecutionOptions.Default)
-          PhysicalPlanner.preMaterializeExchanges(physical)
+          PhysicalPlanner.preMaterialize(physical)
           new ExecutedQuery(physical.outputSchema, (0 until physical.numPartitions).map(physical.execute))
         }
       Right((q.schema, RelEngine.collectRows(q)))

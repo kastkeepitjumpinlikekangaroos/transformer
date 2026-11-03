@@ -16,8 +16,9 @@ import scala.jdk.CollectionConverters._
   * generator of the passing thread's own, seeded from the seed and the
   * thread's id: nothing, a `Thread.yield`, or a sleep of 0 to 2 ms. The
   * points are the handoffs between threads: a pool task about to run
-  * ([[Submit]]) and a wait for one ([[Await]]); an exchange's claim and
-  * publish ([[ExchangeClaim]], [[ExchangePublish]]); the job runner's event
+  * ([[Submit]]) and a wait for one ([[Await]]); a shared result's claim and
+  * publish ([[SharedClaim]], [[SharedPublish]]: an exchange's shards, a
+  * broadcast join's build side); the job runner's event
   * queue ([[JobEvent]]) and its task submissions ([[JobSubmit]]); a
   * partitioned writer's commit ([[WriterCommit]]); a spill directory made
   * ([[SpillDir]]); a task's output read back for the tasks after it
@@ -39,8 +40,8 @@ object Chaos {
 
   val Submit: String = "submit"
   val Await: String = "await"
-  val ExchangeClaim: String = "exchange-claim"
-  val ExchangePublish: String = "exchange-publish"
+  val SharedClaim: String = "shared-claim"
+  val SharedPublish: String = "shared-publish"
   val JobEvent: String = "job-event"
   val JobSubmit: String = "job-submit"
   val WriterCommit: String = "writer-commit"
@@ -49,7 +50,7 @@ object Chaos {
 
   /** Every point. */
   val Points: Vector[String] =
-    Vector(Submit, Await, ExchangeClaim, ExchangePublish, JobEvent, JobSubmit, WriterCommit, SpillDir, TaskOutput)
+    Vector(Submit, Await, SharedClaim, SharedPublish, JobEvent, JobSubmit, WriterCommit, SpillDir, TaskOutput)
 
   /** What a point does. */
   sealed trait Action

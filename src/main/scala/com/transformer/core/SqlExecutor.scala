@@ -78,7 +78,7 @@ final class ExecutedQuery(
     * thread at a time (the underlying physical-plan iterator is not itself
     * thread-safe): one partition may move from thread to thread between
     * reads, each finished before the next begins, as a pool task's completion
-    * comes before the next task is submitted ([[ParallelDrain]], the pairing
+    * comes before the next task is submitted ([[ParallelDrain]], a hash
     * join's waves). That holds because no iterator keeps state tied to the
     * thread that reads it, and no batch is changed once `next()` has returned
     * it.

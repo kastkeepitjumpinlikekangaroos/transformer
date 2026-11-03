@@ -137,18 +137,26 @@ navigation hint, not a comprehensive directory listing.
   the grid views (`SamplePane`, `ColumnsPane`, `TablesPane`). The Details view
   is `viewer/DetailsPanel.scala` (~340 LOC); the tabs around them are
   `viewer/ViewerTabs.scala` (~270 LOC: query tabs, the preview tab).
-- `sql/exec/JoinExec.scala` (~1040 LOC) — equi-join build + probe paths
-  with build/probe role mirroring, the LongHashMap fast path, and
-  per-batch `evalVec` key extraction for computed join keys on both
-  sides. `probeBatchInto` is the one per-row probe body shared by the
-  in-memory and grace-hash paths. Grace hash join is the additional
-  `executeGraceHash` path that buckets both sides into K=16 disk parquet
-  files via `fmix32(hash(joinKeys)) % K` and processes bucket pairs
-  sequentially; per-bucket unmatched-build tracking preserves outer-join
-  semantics.
-- `sql/exec/WindowExec.scala` (~750 LOC) — partition, sort, frame
+- `sql/exec/JoinExec.scala` (~1280 LOC) — the hash join's four paths
+  (broadcast in the probe side's partitions, in waves, per shard, grace
+  hash), each streaming its output, with build/probe role mirroring, the
+  LongHashMap fast path, and per-batch `evalVec` key extraction for computed
+  join keys on both sides. `ProbeCursor` is the one probe body every path
+  shares: it stops after any row or candidate pair and goes on later, and
+  writes selection vectors from which `Output` gathers each column of a
+  batch; a residual condition is evaluated over a chunk of candidate pairs.
+  The build side is one compacted batch (`BuildSide`, `IntList` row lists).
+  Grace hash buckets both sides into K=16 disk parquet files via
+  `fmix32(hash(joinKeys)) % K` on its first pull and joins the bucket pairs
+  one after another as its output is pulled; per-bucket unmatched-build
+  tracking preserves outer-join semantics. `SharedResult.scala` holds the
+  trait and the publication (`SharedOnce`) a broadcast join's build side
+  shares with an exchange's shards.
+- `sql/exec/WindowExec.scala` (~810 LOC) — partition, sort, frame
   computation for every supported window function; pre-computes per-spec
-  partition/order keys per row during the single materialization pass.
+  partition/order keys per row during the single materialization pass, which
+  over a whole input reads the child's partitions in parallel
+  (`ParallelDrain.eachPartition`), concatenated in partition order.
   Bucketed spill routes child rows into K=16 disk
   parquet buckets by `fmix32(hash(partitionKey)) % K` and processes each
   bucket through the same in-memory pipeline — every row sharing a

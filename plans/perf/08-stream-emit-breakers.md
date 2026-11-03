@@ -3,17 +3,22 @@
 > Status: **not started, and gated on evidence.** There is no
 > producer/consumer queue anywhere under `sql/`. Phases 2 and 3
 > (HashJoinExec) are superseded by
-> [plan 13](13-stream-hash-join-output.md), which streams a hash join's
-> output without a queue; since plans/testing/05 W5 a join with no equality
-> pairs (`JoinExec.executePairing`) already emits wave by wave. Plan 13
-> narrows this plan's queue to an ordered parallel drain for one-stream
-> readers, and [plan 14](14-parallel-result-drain.md) is that drain, landed
-> without a queue as `core/ParallelDrain.inOrder` (2026-11-03): JDK 21's
-> queue waits call `ForkJoinPool.managedBlock`, so its fills each read a
-> bounded chunk and return, and nothing in the pool waits for the consumer.
-> Phases 1, 4 and 5 stand. Per this plan's own launch prompt, do not start it until a
-> profile shows the parquet writer genuinely starved by breaker CPU (writer
-> wall time ≥10% of total).
+> [plan 13](13-stream-hash-join-output.md), landed 2026-11-03: every hash
+> join streams its output without a queue, a broadcast join in its probe
+> side's partitions (so each writer task probes its own partition, and
+> probing overlaps writing), a FULL join and one with no equality in waves
+> (`JoinExec.executeInWaves`), whose tail of unmatched build rows is the
+> barrier this plan gated with a latch. Plan 13 narrows this plan's queue to
+> an ordered parallel drain for one-stream readers, and
+> [plan 14](14-parallel-result-drain.md) is that drain, landed without a
+> queue as `core/ParallelDrain.inOrder` (2026-11-03): JDK 21's queue waits
+> call `ForkJoinPool.managedBlock`, so its fills each read a bounded chunk
+> and return, and nothing in the pool waits for the consumer. Phases 1
+> (the queue), 4 (Distinct) and 5 (HashAggregate and Window) stand; plan 13
+> made a window over its whole input read its child's partitions in
+> parallel, but it still emits once it holds them. Per this plan's own launch prompt, do
+> not start it until a profile shows the parquet writer genuinely starved by
+> breaker CPU (writer wall time ≥10% of total).
 > · Tier: 3 · Effort: 2-3 days · Risk: medium
 
 ## Goal

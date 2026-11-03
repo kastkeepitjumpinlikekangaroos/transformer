@@ -1821,6 +1821,22 @@ its rows a wave at a time, so it holds its smaller side and a wave of pairs
 (a few hundred thousand rows), not every pair it makes: 25 million pairs count
 through a 256 MB heap.
 
+**How a join runs:** no join holds its result. A join on an equality (but a
+FULL, sharded or spilling one, below) builds one side once, before the
+query runs, and runs in the other side's partitions, each probing its own partition against the built side as its
+rows are read: an aggregate, a sort, a writer or a `LIMIT` above it reads it
+as it would read that side, so a job table over a join of a three-file CSV
+glob to a lookup table writes three part files, as a table over the glob
+would (`maxPartitions` caps them, and `1` writes one), and a `DOUBLE` sum
+over a join adds a partial a partition, as over a multi-file scan, so its
+last digits can differ from one summed in one. Rows come in the order of the
+side read, each with its matches in the order of the other. A FULL join,
+which must know which built rows nothing matched, runs on one partition: its
+rows come a wave of the probe side's partitions at a time, then the built
+rows no row matched. With sharding on, a join of two large sides runs a shard
+at a time, and with spill on it joins a bucket of each side at a time, its
+inputs on disk.
+
 **Join order:** inner and comma joins run in the order `FROM` writes them,
 but where the next table has no equality with the tables joined so far, the
 first later table that has one is joined first: in `FROM a, b, c WHERE a.x =
@@ -2218,7 +2234,8 @@ JDK 21 or newer (tested through JDK 25).
   Mitigations: give the JVM more heap, OR opt into **spill-to-disk** for
   `ORDER BY` / `GROUP BY` / `DISTINCT` / equi `JOIN` / window functions
   with a non-empty `PARTITION BY` (the five operators that currently
-  support it) by adding to a task's `output.json`:
+  support it; a join streams its result either way, and spill bounds its
+  build side) by adding to a task's `output.json`:
 
   ```json
   {
@@ -2268,11 +2285,21 @@ JDK 21 or newer (tested through JDK 25).
   3.5 minutes (4.5 before), and `COPY` to one parquet file about as long,
   where `COPY ... (FORMAT parquet, PER_PARTITION_OUTPUT true)` writes its 18
   files in parallel in about 70 s. Its queries spill only with `--spill`.
-- **A join holds its whole result in memory.** A hash join materializes every
-  row it returns before the next operator sees one, and spill bounds only its
-  inputs, not its result. Joining 326M orderbook rows to 124K markets (120M
-  joined rows) runs out of a 2 GB heap; aggregate the large side first, then
-  join, which reads the same rows in 0.5 GB. Scans, filters and aggregates
+- **A join holds its build side, not its result.** A hash join holds the
+  side it builds in memory (which side, "Join planning" under
+  [SQL features](#sql-features) says; one under
+  `transformer.scheduler.broadcast_threshold` rows, a million by default, is
+  built once before the query runs) and streams the other against it a batch
+  at a time, in that side's partitions: joining a 326M-row orderbook day to
+  124K markets (120M joined rows) under a `GROUP BY` takes 7 s at 0.7 GB in a
+  2 GB heap, where the join used to hold all 120M rows and ran the heap out,
+  and the same join with `LIMIT 10` returns in a second. Spill bounds the
+  build side too, a sixteenth at a time. A build side too large for the heap
+  still runs it out, and a RIGHT join builds its left side whatever its size.
+  A `COPY` or `--output` of a join's rows to one file probes mostly the
+  partition it is writing, so 6M joined rows took 21 s where holding them
+  first took 10 s (and more than twice the memory); `PER_PARTITION_OUTPUT
+  true` writes every partition at once. Scans, filters and aggregates
   stream, in any size of input: an aggregate over all 5.5 billion polymarket
   orderbook rows (38 GB) runs in a 2 GB heap.
 - **A sort holds every row it sorts, unless it spills.** `ORDER BY ... LIMIT n`

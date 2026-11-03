@@ -161,9 +161,31 @@ sealed trait ColumnVector {
   def getBoxed(row: Int): Any
   def setBoxed(row: Int, value: Any): Unit
   def copyTo(srcRow: Int, dst: ColumnVector, dstRow: Int): Unit
+
+  /** Write rows `sel(from)`, ..., `sel(until - 1)` of `src` into this
+    * vector's rows `at`, ..., `at + until - from - 1`, a column at a time: a
+    * negative index writes NULL. A hash join gathers its output so, each
+    * column from its probe batch or its build side by the rows a probe
+    * matched. `src` of this vector's own class is read through its arrays,
+    * with no boxing; any other is copied cell by cell, as [[copyTo]] copies
+    * one. */
+  def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit
 }
 
 object ColumnVector {
+  /** [[ColumnVector.gather]] a cell at a time: `src` of another class than
+    * `dst`. */
+  private[core] def gatherCells(src: ColumnVector, dst: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = {
+    var i = from
+    var d = at
+    while (i < until) {
+      val r = sel(i)
+      if (r < 0) dst.setNull(d) else src.copyTo(r, dst, d)
+      i += 1
+      d += 1
+    }
+  }
+
   def allocate(dt: DataType, capacity: Int): ColumnVector = dt match {
     case DataType.IntType       => new IntVector(new Array[Int](capacity), new util.BitSet(capacity), capacity)
     case DataType.LongType      => new LongVector(new Array[Long](capacity), new util.BitSet(capacity), capacity)
@@ -198,6 +220,21 @@ final class IntVector(val values: Array[Int], val nulls: util.BitSet, val capaci
       if (isNull(srcRow)) d.setNull(dstRow) else d.set(dstRow, values(srcRow))
     case other => other.setBoxed(dstRow, getBoxed(srcRow))
   }
+  def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = src match {
+    case s: IntVector =>
+      val sv = s.values
+      val sn = s.nulls
+      var i = from
+      var d = at
+      while (i < until) {
+        val r = sel(i)
+        if (r < 0 || sn.get(r)) { nulls.set(d); values(d) = 0 }
+        else { nulls.clear(d); values(d) = sv(r) }
+        i += 1
+        d += 1
+      }
+    case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
+  }
 }
 
 final class LongVector(val values: Array[Long], val nulls: util.BitSet, val capacity: Int) extends ColumnVector {
@@ -218,6 +255,21 @@ final class LongVector(val values: Array[Long], val nulls: util.BitSet, val capa
     case d: LongVector =>
       if (isNull(srcRow)) d.setNull(dstRow) else d.set(dstRow, values(srcRow))
     case other => other.setBoxed(dstRow, getBoxed(srcRow))
+  }
+  def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = src match {
+    case s: LongVector =>
+      val sv = s.values
+      val sn = s.nulls
+      var i = from
+      var d = at
+      while (i < until) {
+        val r = sel(i)
+        if (r < 0 || sn.get(r)) { nulls.set(d); values(d) = 0L }
+        else { nulls.clear(d); values(d) = sv(r) }
+        i += 1
+        d += 1
+      }
+    case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
   }
 }
 
@@ -240,6 +292,21 @@ final class FloatVector(val values: Array[Float], val nulls: util.BitSet, val ca
       if (isNull(srcRow)) d.setNull(dstRow) else d.set(dstRow, values(srcRow))
     case other => other.setBoxed(dstRow, getBoxed(srcRow))
   }
+  def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = src match {
+    case s: FloatVector =>
+      val sv = s.values
+      val sn = s.nulls
+      var i = from
+      var d = at
+      while (i < until) {
+        val r = sel(i)
+        if (r < 0 || sn.get(r)) { nulls.set(d); values(d) = 0f }
+        else { nulls.clear(d); values(d) = sv(r) }
+        i += 1
+        d += 1
+      }
+    case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
+  }
 }
 
 final class DoubleVector(val values: Array[Double], val nulls: util.BitSet, val capacity: Int) extends ColumnVector {
@@ -261,6 +328,21 @@ final class DoubleVector(val values: Array[Double], val nulls: util.BitSet, val 
       if (isNull(srcRow)) d.setNull(dstRow) else d.set(dstRow, values(srcRow))
     case other => other.setBoxed(dstRow, getBoxed(srcRow))
   }
+  def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = src match {
+    case s: DoubleVector =>
+      val sv = s.values
+      val sn = s.nulls
+      var i = from
+      var d = at
+      while (i < until) {
+        val r = sel(i)
+        if (r < 0 || sn.get(r)) { nulls.set(d); values(d) = 0.0 }
+        else { nulls.clear(d); values(d) = sv(r) }
+        i += 1
+        d += 1
+      }
+    case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
+  }
 }
 
 final class BooleanVector(val values: Array[Boolean], val nulls: util.BitSet, val capacity: Int) extends ColumnVector {
@@ -281,6 +363,21 @@ final class BooleanVector(val values: Array[Boolean], val nulls: util.BitSet, va
       if (isNull(srcRow)) d.setNull(dstRow) else d.set(dstRow, values(srcRow))
     case other => other.setBoxed(dstRow, getBoxed(srcRow))
   }
+  def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = src match {
+    case s: BooleanVector =>
+      val sv = s.values
+      val sn = s.nulls
+      var i = from
+      var d = at
+      while (i < until) {
+        val r = sel(i)
+        if (r < 0 || sn.get(r)) { nulls.set(d); values(d) = false }
+        else { nulls.clear(d); values(d) = sv(r) }
+        i += 1
+        d += 1
+      }
+    case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
+  }
 }
 
 final class StringVector(val values: Array[String], val capacity: Int) extends ColumnVector {
@@ -299,6 +396,19 @@ final class StringVector(val values: Array[String], val capacity: Int) extends C
     case d: StringVector => d.set(dstRow, values(srcRow))
     case other => other.setBoxed(dstRow, getBoxed(srcRow))
   }
+  def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = src match {
+    case s: StringVector =>
+      val sv = s.values
+      var i = from
+      var d = at
+      while (i < until) {
+        val r = sel(i)
+        values(d) = if (r < 0) null else sv(r)
+        i += 1
+        d += 1
+      }
+    case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
+  }
 }
 
 final class BinaryVector(val values: Array[Array[Byte]], val capacity: Int) extends ColumnVector {
@@ -316,6 +426,19 @@ final class BinaryVector(val values: Array[Array[Byte]], val capacity: Int) exte
   def copyTo(srcRow: Int, dst: ColumnVector, dstRow: Int): Unit = dst match {
     case d: BinaryVector => d.set(dstRow, values(srcRow))
     case other => other.setBoxed(dstRow, getBoxed(srcRow))
+  }
+  def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = src match {
+    case s: BinaryVector =>
+      val sv = s.values
+      var i = from
+      var d = at
+      while (i < until) {
+        val r = sel(i)
+        values(d) = if (r < 0) null else sv(r)
+        i += 1
+        d += 1
+      }
+    case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
   }
 }
 
@@ -339,6 +462,21 @@ final class DateVector(val values: Array[Int], val nulls: util.BitSet, val capac
     case d: DateVector =>
       if (isNull(srcRow)) d.setNull(dstRow) else d.set(dstRow, values(srcRow))
     case other => other.setBoxed(dstRow, getBoxed(srcRow))
+  }
+  def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = src match {
+    case s: DateVector =>
+      val sv = s.values
+      val sn = s.nulls
+      var i = from
+      var d = at
+      while (i < until) {
+        val r = sel(i)
+        if (r < 0 || sn.get(r)) { nulls.set(d); values(d) = 0 }
+        else { nulls.clear(d); values(d) = sv(r) }
+        i += 1
+        d += 1
+      }
+    case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
   }
 }
 
@@ -378,6 +516,21 @@ final class TimestampVector(val values: Array[Long], val nulls: util.BitSet, val
     case d: TimestampVector =>
       if (isNull(srcRow)) d.setNull(dstRow) else d.set(dstRow, values(srcRow))
     case other => other.setBoxed(dstRow, getBoxed(srcRow))
+  }
+  def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = src match {
+    case s: TimestampVector =>
+      val sv = s.values
+      val sn = s.nulls
+      var i = from
+      var d = at
+      while (i < until) {
+        val r = sel(i)
+        if (r < 0 || sn.get(r)) { nulls.set(d); values(d) = 0L }
+        else { nulls.clear(d); values(d) = sv(r) }
+        i += 1
+        d += 1
+      }
+    case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
   }
 }
 
@@ -421,6 +574,19 @@ final class DecimalVector(val values: Array[java.math.BigDecimal], val precision
     case d: DecimalVector => d.set(dstRow, values(srcRow))
     case other => other.setBoxed(dstRow, getBoxed(srcRow))
   }
+  def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = src match {
+    case s: DecimalVector =>
+      val sv = s.values
+      var i = from
+      var d = at
+      while (i < until) {
+        val r = sel(i)
+        values(d) = if (r < 0) null else sv(r)
+        i += 1
+        d += 1
+      }
+    case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
+  }
 }
 
 /** Column with no data (all nulls). Used for the NULL literal type. */
@@ -431,4 +597,5 @@ final class NullVectorImpl(val capacity: Int) extends ColumnVector {
   def getBoxed(row: Int): Any = null
   def setBoxed(row: Int, value: Any): Unit = ()
   def copyTo(srcRow: Int, dst: ColumnVector, dstRow: Int): Unit = dst.setNull(dstRow)
+  def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = ()
 }

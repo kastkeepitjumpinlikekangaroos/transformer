@@ -830,6 +830,31 @@ ship a fix or move something from "not done" to "done".
   will notice that the build side is no longer 1:1 with how the user
   wrote `FROM a JOIN b`. See
   [architecture.md §8](architecture.md#8-hash-join-build-side-selection).
+- **A broadcast join runs in its probe side's partitions** (plans/perf/13).
+  A planned INNER, LEFT or RIGHT join under the broadcast threshold builds its
+  build side once, in the pre-materialization pass that `SqlEngine.execute`
+  runs, and streams each probe partition against it as that partition is
+  pulled; it held its whole result, built and probed inside
+  `SqlEngine.execute`, on one partition. What follows: a job table over such
+  a join writes a part file per probe partition (18 for a polymarket
+  orderbook day; `maxPartitions: 1` writes one), as a table over the scan
+  would; an aggregate over it merges a partial per probe partition, so a
+  `DOUBLE` `SUM` or `AVG` over a join can differ in its last digits from one
+  computed in one partial; a probe-side failure surfaces where its partition
+  is read (a writer task, an aggregate's partial, the CLI's printer), not in
+  `SqlEngine.execute`, while a build-side failure still surfaces there; a
+  `LIMIT` over a join stops after its rows, a full output batch of them, so
+  a condition that fails on a later row is not reached (as join order can
+  move it), while a residual condition is evaluated over a chunk of
+  candidate pairs at once, so one failing on a candidate past the rows a
+  `LIMIT` keeps can fail it; and a consumer that reads one stream (OFFSET
+  without LIMIT, a validation's rows, a `COPY` of one file) probes mostly a
+  partition at a time. A FULL join, which keeps the build rows no probe row
+  matched, runs on one partition in waves, its
+  rows in wave chunks and then the unmatched build rows, where they came in
+  probe order. A RIGHT join still builds its left side whatever its size, so
+  `ob RIGHT JOIN markets` builds the orderbook (EXPLAIN VERBOSE says "builds
+  the left side"); building an outer join's smaller side is a follow-up.
 - **Non-equi joins are refused over large known inputs.** When a join's
   ON clause has no equality conjunct, `HashJoinExec` runs as a
   degenerate hash (one bucket = whole build side) — correct nested-loop
@@ -854,9 +879,10 @@ ship a fix or move something from "not done" to "done".
   no side info) or restructure the predicate so the planner can extract
   one. There's deliberately no per-task escape hatch — the threshold is
   the contract. Below the bound a pairing costs time, not memory: it pairs
-  a wave at a time (`HashJoinExec.executePairing`), holding the build side
-  and one wave's pairs; it held every pair before its first batch, and 25
-  million wide ones filled a heap of a few GB (plans/testing/05).
+  a wave at a time (`HashJoinExec.executeInWaves`, which a FULL join on a key
+  runs on too), holding the build side and one wave's pairs; it held every
+  pair before its first batch, and 25 million wide ones filled a heap of a
+  few GB (plans/testing/05).
 - **Hadoop's local file system runs `chmod` in a process of its own for each
   file it creates**, since Hadoop's native library is never loaded here
   (`RawLocalFileSystem.setPermission` falls back to a shell): 2.5 ms a file,
@@ -1118,15 +1144,18 @@ ship a fix or move something from "not done" to "done".
     winner's OWN stack — there the old reentrant monitor silently
     double-materialized (live), and a naive CAS+latch self-deadlocks against
     its own latch (this bit 02d's first cut: the default-seed fuzzer, green
-    for months, timed out). `ensureMaterialized` therefore detects
-    winner-reentrancy via a `claimer` thread check and materializes a private
-    unpublished copy (duplicate work, live). The cross-thread variant admits
+    for months, timed out). The claim (`SharedOnce.get` since plans/perf/13,
+    which an exchange's shards and a broadcast join's build side share)
+    therefore detects winner-reentrancy via a `claimer` thread check and
+    computes a private unpublished copy (duplicate work, live). The
+    cross-thread variant admits
     no such point escape (a cross-exchange pair of hosts evades any
     "am I above a producer of THIS exchange" check), which is why the fix
     removes the wait instead: every deadlock cycle must pass through an
     exchange-readiness wait — the one wait that does not follow the
-    task-creation tree — and `PhysicalPlanner.preMaterializeExchanges`
-    publishes every exchange bottom-up at the drain choke points
+    task-creation tree — and `PhysicalPlanner.preMaterialize` publishes
+    every shared result (each exchange, and since plans/perf/13 each
+    broadcast join's build side) bottom-up at the drain choke points
     (`SqlEngine`'s two execute paths, `CteResolver.materialize`) before any
     consumer task exists, so no worker ever performs that wait
     (plans/bugfixes/02f).
@@ -1179,13 +1208,17 @@ ship a fix or move something from "not done" to "done".
   transparent); `sql/exec:exchange_deadlock_stress_test` re-drives the exact
   captured wedge topology through the pass under heavy steal churn (green
   ~2s in the default suite; `STRESS_LAZY=1` skips the pass and reproduces the
-  historical wedge in seconds as a manual red instrument). RESIDUAL: the lazy
-  `ensureMaterialized` fallback still exists for directly-constructed
-  exchanges, and draining lazily-NESTED exchanges from pool tasks without the
-  pass can still wedge — don't do that; run
-  `PhysicalPlanner.preMaterializeExchanges` first like the engine does. The
+  historical wedge in seconds as a manual red instrument; its inner joins now
+  publish their builds through the pass too). RESIDUAL: the lazy `SharedOnce`
+  fallback still exists for directly-constructed exchanges and broadcast
+  joins, and draining lazily-NESTED shared results from pool tasks without
+  the pass can still wedge — don't do that; run
+  `PhysicalPlanner.preMaterialize` first like the engine does. A plan built in
+  code that skips it builds a broadcast join's side in the join's first
+  `execute(p)`, on the calling thread, which is safe when that thread is not a
+  pool worker waiting on another's work (a test's, `SqlEngine`'s). The
   general rules stand: never hold a JVM monitor across a
-  `Scheduler.pool`-blocking call (`ExchangeExec.ensureMaterialized` is the
+  `Scheduler.pool`-blocking call (`SharedOnce.get` is the
   in-tree exemplar of the compliant pattern), and do not reach for
   `ForkJoinPool.managedBlock` as a blanket wrapper on pool-task waits (02b's
   mistake — it wedges the pool even faster).
@@ -3172,7 +3205,9 @@ choose it, and "since v1" one the engine has had from the start.
 - **No whole-stage codegen**, no Janino, no LLVM. The closest analogue is
   `Expr.evalVec` (see [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec))
   — one call per Expr per batch, primitive-array inner loops, no codegen step.
-  `ProjectExec` and `FilterExec` use it; everything else (sort/join/window
+  `ProjectExec` and `FilterExec` use it, and so does a hash join's residual
+  condition, over a chunk of candidate pairs (its output is gathered a column
+  at a time, no row boxed, plans/perf/13); everything else (sort/window
   per-row callbacks, aggregate state updates over `RowBuf`) still uses boxed
   `eval(batch, row)` because those are 1-row paths where vectorization gives
   nothing back.

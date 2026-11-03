@@ -76,16 +76,20 @@ scala_junit_test(
     ],
 )
 
-# A join with no equality pairs a wave at a time: every kind answers as a
-# nested loop does, and 25 million pairs stream through a 256 MB heap.
+# Every hash join streams its output: on every path (broadcast, in waves,
+# per shard, grace hash) every kind answers as a nested loop over the two
+# sides does, whatever the keys, NULLs, empty sides and partitions; a
+# broadcast join's build side is built once, by the pass, and read by every
+# partition; and joins of 25 to 80 million rows stream through a 256 MB heap.
 scala_junit_test(
-    name = "pairing_join_test",
-    srcs = ["PairingJoinTest.scala"],
+    name = "streaming_join_test",
+    srcs = ["StreamingJoinTest.scala"],
     suffixes = ["Test"],
     jvm_flags = ["-Xmx256m"],
     deps = [
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
         "@maven//:junit_junit",
     ],
 )
@@ -204,7 +208,7 @@ scala_junit_test(
 # (docs/gotchas.md "Sharded execution at K>1"; diagnosed in plans/bugfixes/02e,
 # fixed in 02f). Rebuilds the captured wedge's plan shape from real exec
 # classes and loops it under heavy steal churn with the 02f
-# preMaterializeExchanges pass applied per iteration — the engine drain
+# preMaterialize pass applied per iteration — the engine drain
 # contract — and must stay green (~2s). STRESS_LAZY=1 skips the pass and
 # reproduces the historical wedge on the lazy fallback path within seconds
 # (manual red instrument, not a CI assertion — the hit is probabilistic):
@@ -309,11 +313,16 @@ scala_junit_test(
 # closed-form analytical checks (no in-memory oracle). Stays under ~20s
 # on a modest box so it runs as part of `bazel test //...`; for real
 # above-heap pressure, scale the row counts up and run with `-Xmx` outside
-# Bazel.
+# Bazel. The heap is bounded: the hash join's 65 million joined rows, a few
+# GB boxed, stream through grace hash a bucket at a time. The timeout is
+# long for `--config=hashzero`, where its DISTINCT of 200,000 distinct rows
+# scans a hash map per lookup: two minutes alone, past five beside the suite.
 scala_junit_test(
     name = "spill_stress_test",
     srcs = ["SpillStressTest.scala"],
     suffixes = ["Test"],
+    timeout = "long",
+    jvm_flags = ["-Xmx512m"],
     deps = [
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/sql/exec",

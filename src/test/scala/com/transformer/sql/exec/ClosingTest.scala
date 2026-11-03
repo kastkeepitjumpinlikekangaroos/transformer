@@ -157,6 +157,33 @@ class ClosingTest {
       assertTrue(e.getMessage, e.getMessage.contains("'oops' cannot be read as"))
     }
 
+  /** A LIMIT over a broadcast join stops probing and closes the probe
+    * partition it stopped in. */
+  @Test def aLimitOverAJoinClosesItsProbeSide(): Unit =
+    releases("a LIMIT over a broadcast join") { c =>
+      assertEquals(1, rows(SqlEngine.execute("SELECT p.k, c.s FROM p JOIN c ON p.k = c.k LIMIT 1", c)))
+    }
+
+  /** A grace hash join buckets both sides on its first pull and joins bucket
+    * by bucket as it is read: drained, it leaves no bucket and no
+    * directory. */
+  @Test def aSpilledHashJoinDrainedDeletesItsDirectory(): Unit =
+    releases("a spilled hash join drained") { c =>
+      assertEquals(12000, rows(SqlEngine.execute("SELECT c.k, x.s FROM c JOIN c x ON c.k = x.k", c, spill)))
+    }
+
+  /** Stopped part way, by a LIMIT or by closing the query, a grace hash join
+    * closes the bucket it was reading and deletes its directory. */
+  @Test def aSpilledHashJoinReadInPartIsReleased(): Unit = {
+    releases("a LIMIT over a spilled hash join") { c =>
+      assertEquals(3, rows(SqlEngine.execute("SELECT c.k, x.s FROM c JOIN c x ON c.k = x.k LIMIT 3", c, spill)))
+    }
+    releases("a spilled hash join read in part") { c =>
+      val q = SqlEngine.execute("SELECT c.k, x.s FROM c JOIN c x ON c.k = x.k", c, spill)
+      try assertTrue(q.batches.hasNext) finally q.close()
+    }
+  }
+
   @Test def aStoppedBreakerClosesEveryInput(): Unit =
     releases("a stopped sort") { c =>
       val stopped = ExecutionOptions(stopped = () => true)

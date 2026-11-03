@@ -6,7 +6,9 @@ import scala.collection.mutable
 
 /** An [[ExecutedQuery]]'s partitions read on [[Scheduler.pool]], for a
   * consumer that reads a whole result: `transformer query`'s formats and
-  * `COPY`, and the GUI's query console. Two ways:
+  * `COPY`, and the GUI's query console; and a plan's, for an operator that
+  * reads every partition of its child before it emits (`WindowExec` over its
+  * whole input). Two ways:
   *
   *   - [[eachPartition]], for a consumer that needs no row order across
   *     partitions: up to `inFlight` pool tasks each take the next partition no
@@ -84,13 +86,32 @@ object ParallelDrain {
     q.numPartitions match {
       case 0 => IndexedSeq.empty
       case 1 => IndexedSeq(f(0, watched(q.partition(0), stop.stopped)))
-      case n => new Each(q, n, inFlight, stop, f).run()
+      case n =>
+        // Claimed before any is read, so a failure in one does not close
+        // another under the task reading it.
+        val parts = Vector.tabulate(n)(q.claim)
+        try new Each(n, parts, inFlight, stop, f).run()
+        finally parts.foreach(Closing.close)
     }
 
-  private final class Each[A](q: ExecutedQuery, n: Int, inFlight: Int, stop: Stop, f: (Int, Iterator[ColumnarBatch]) => A) {
-    // Claimed before any is read, so a failure in one does not close another
-    // under the task reading it.
-    private val parts = Vector.tabulate(n)(q.claim)
+  /** [[eachPartition]] over the `n` partitions of a plan an operator reads,
+    * `open(p)` making partition `p`'s batches: each partition is opened when
+    * a task takes it and closed once read, so one never taken is never
+    * opened. An operator that reads every partition of its child before it
+    * emits (a window over its whole input) reads them so, in parallel, its
+    * results in partition order. One partition is read on the caller's
+    * thread. The tasks' waits are the operator's own descendants', a tree,
+    * as any breaker's fan-out is. */
+  def eachPartition[A](n: Int, inFlight: Int, stop: Stop)(open: Int => Iterator[ColumnarBatch])(
+      f: (Int, Iterator[ColumnarBatch]) => A): IndexedSeq[A] =
+    n match {
+      case 0 => IndexedSeq.empty
+      case 1 => IndexedSeq(Closing.draining(open(0))(it => f(0, watched(it, stop.stopped))))
+      case _ => new Each(n, open, inFlight, stop, f).run()
+    }
+
+  private final class Each[A](n: Int, open: Int => Iterator[ColumnarBatch], inFlight: Int, stop: Stop,
+      f: (Int, Iterator[ColumnarBatch]) => A) {
     // Each written by the task that read the partition, and read once every
     // task has returned.
     private val results = new Array[Any](n)
@@ -103,7 +124,6 @@ object ParallelDrain {
         def call(): Unit = work()
       }))
       tasks.foreach(t => try t.await() catch { case e: Throwable => failures.record(n, e) })
-      parts.foreach(Closing.close)
       failures.thrown.foreach(t => throw t)
       // A partition no task read: the drain was stopped before it began.
       if (!read.forall(identity)) throw new QueryStoppedException
@@ -114,7 +134,7 @@ object ParallelDrain {
       var p = taken.getAndIncrement()
       while (p < n && !stop.stopped()) {
         try {
-          results(p) = Closing.draining(parts(p))(it => f(p, watched(it, stop.stopped)))
+          results(p) = Closing.draining(open(p))(it => f(p, watched(it, stop.stopped)))
           read(p) = true
         } catch { case t: Throwable => failures.record(p, t) }
         p = taken.getAndIncrement()

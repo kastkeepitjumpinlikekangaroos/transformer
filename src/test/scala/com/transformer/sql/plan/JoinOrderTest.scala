@@ -39,6 +39,9 @@ class JoinOrderTest {
     val expected = RelEngine.runRows(catalog, sql, ExecutionOptions.Default)
     val physical = PhysicalPlanner.plan(CteResolver.resolve(LogicalBuilder.build(sql, catalog), ExecutionOptions.Default),
       ExecutionOptions.Default)
+    // Every shared result published first, as the engine does: a join's
+    // partitions then never wait for its build side.
+    PhysicalPlanner.preMaterialize(physical)
     val q = new ExecutedQuery(physical.outputSchema, (0 until physical.numPartitions).map(physical.execute))
     RowOracle.multisetEquals(q.schema, expected, RelEngine.collectRows(q)).foreach(d => fail(s"$sql: $d"))
   }
@@ -101,6 +104,7 @@ class JoinOrderTest {
     assertEquals(Seq("a", "c", "b"), order(reordered))
     def rows(p: LogicalPlan): Vector[Array[Any]] = {
       val physical = PhysicalPlanner.plan(p, ExecutionOptions.Default)
+      PhysicalPlanner.preMaterialize(physical)
       RelEngine.collectRows(new ExecutedQuery(physical.outputSchema, (0 until physical.numPartitions).map(physical.execute)))
     }
     RowOracle.multisetEquals(plan.outputSchema, rows(plan), rows(reordered)).foreach(d => fail(d))

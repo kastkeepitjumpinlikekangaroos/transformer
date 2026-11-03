@@ -10,9 +10,9 @@ other six with one optional, evidence-gated phase still open. Plan 06 is
 partial exactly as its own file describes, and plan 08 is deliberately
 unstarted pending profiler evidence. Plans 13-15 were written
 2026-11-01, after `transformer query` over the polymarket files found what
-a 2 GB heap cannot do and how far it trails DuckDB. Plan 14 landed
-2026-11-03, overnight, but for one part held for the user; 13 and 15 are
-unstarted, and their evidence is already in their files. Read the status column
+a 2 GB heap cannot do and how far it trails DuckDB. Plans 14 and 13 landed
+2026-11-03, overnight (14 but for one part held for the user); 15 is
+unstarted, and its evidence is already in its file. Read the status column
 before starting anything here — the standing failure mode for this
 directory is a session re-implementing work that already exists and is
 covered by tests.
@@ -20,7 +20,7 @@ covered by tests.
 ## Status table
 
 Verified against `src/main` on 2026-09-06; rows 01 and 08 rechecked, and
-13-15 added, on 2026-11-01.
+13-15 added, on 2026-11-01; rows 08, 13 and 14 rechecked on 2026-11-03.
 
 | # | Plan | Status | Evidence |
 |---|------|--------|----------|
@@ -31,12 +31,12 @@ Verified against `src/main` on 2026-09-06; rows 01 and 08 rechecked, and
 | [05](05-join-planner.md) | Smarter join planner | done | `LogicalPlanCardinality.estimate` drives `PhysicalPlanner`'s build-side swap and `enforceNestedLoopGuard` |
 | [06](06-expand-parquet-pushdown.md) | Expand parquet predicate pushdown | partial, by design | `ParquetFilterTranslator` covers IS NULL / IS NOT NULL / IN / BETWEEN; decimal returns `None` at `:133` and `:258` |
 | [07](07-push-through-joins.md) | Push predicates/projections through joins | done | `FilterPushdown.scala` + `ColumnProjectionPushdown.scala`, run in order from `LogicalOptimizer.apply` |
-| [08](08-stream-emit-breakers.md) | Stream emit from breakers | not started | no producer/consumer queue exists under `sql/`; its HashJoinExec phases are superseded by 13, and the pairing join (`JoinExec.executePairing`, plans/testing/05 W5) already emits wave by wave |
+| [08](08-stream-emit-breakers.md) | Stream emit from breakers | not started | no producer/consumer queue exists under `sql/`; its HashJoinExec phases are superseded by 13, landed: every hash join streams its output (`JoinExec`), a broadcast join in its probe side's partitions, a FULL join and the pairing in waves (`executeInWaves`) |
 | [09](09-spill-to-disk.md) | Spill-to-disk for breakers | done | `core/Spill.scala` + `AggStateSerde`; all five breakers spill, opt-in via `ExecutionOptions.spillEnabled`; `SpillStressTest` |
 | [10](10-instrumentation.md) | In-tree instrumentation framework | done | `core/metrics/*`, `_perf.json`, `metrics_collector_test` / `operator_counters_test` / `metrics_plan_wrap_test` |
 | [11](11-benchmarking.md) | Microbench + macro bench + regression guard | done | `benchmarks/{micro,macro,baseline}`, `docs/benchmarking.md` |
 | [12](12-cte-materialization.md) | Materialize multiply-referenced CTEs once | done | `sql/exec/CteResolver.scala` + `sql/plan/PendingCteView.scala` |
-| [13](13-stream-hash-join-output.md) | Stream a hash join's output | not started | `JoinExec`'s keyed paths (`executeCollapsing`, `executePerShard`, `executeGraceHash`) hold their whole output, a shard's when sharded, before their first batch; a 120M-row join over one polymarket orderbook day ran a 2 GB heap out (README Limitations: "A join holds its whole result in memory.") |
+| [13](13-stream-hash-join-output.md) | Stream a hash join's output | done | `JoinExec`'s four paths (broadcast in the probe side's partitions, its build side a `SharedResult` the pass publishes; in waves; per shard; grace hash) all probe through `ProbeCursor` and stream, gathering output a column at a time (`ColumnVector.gather`); `sql/exec/SharedResult.scala` (`SharedOnce`, the claim and latch `ExchangeExec` shares); `PhysicalPlanner.preMaterialize`; `WindowExec` over a whole input reads partitions through `ParallelDrain.eachPartition`; `sql/exec:streaming_join_test`; the 120M-row polymarket join runs in 6.8 s at 0.7 GB in a 2 GB heap |
 | [14](14-parallel-result-drain.md) | Read a printed result's partitions in parallel | done, but CSV part files (held) | `core/ParallelDrain.scala` (`eachPartition`, `inOrder`, no queue); `ResultPrinter.print(io, q, ...)` reads a table and markdown through `eachPartition` (`TableSlices`) and every other format, `COPY` and `--output` through `inOrder`; `QueryConsole.runQuery` through `eachPartition`; `COPY ... (FORMAT parquet, PER_PARTITION_OUTPUT true)`; `core:parallel_drain_test`, `parallel_drain_serial_test` |
 | [15](15-typed-sort-keys.md) | Sorts compare typed keys, not boxed rows | not started | `SortExec.rowOrdering` builds two `RowView`s and evaluates every key per comparison over `Array[Any]` rows; a spilling sort of 132M rows takes 333 s (DuckDB 95 s) and without spill runs a 2 GB heap out |
 
@@ -44,15 +44,28 @@ Verified against `src/main` on 2026-09-06; rows 01 and 08 rechecked, and
 
 **Ready to start, with the evidence in hand:**
 
-- **13 — stream a hash join's output.** A join holds its build side and a
-  bounded amount of output, never its whole result. Six questions for the
-  user, each with a recommended answer, are in the plan; Steps 1, 3 and 4
-  need none of them answered.
 - **15 — sorts compare typed keys.** Typed key columns, an `Int` index
   sort, row-for-row parity with today's `SortExec` until Q1. Supersedes
   plan 01 Phase 3. It also records a live bug: `SELECT DISTINCT ... ORDER
   BY RAND()` can fail with TimSort's "Comparison method violates its
   general contract!".
+
+**Held for the user, from plan 13** (landed 2026-11-03 in an overnight run;
+its file's "What landed" has the measurements and every call taken):
+
+- **The six questions** were each taken on their recommended answer, and
+  wait for the user to confirm: Q1 (a broadcast join runs in its probe
+  side's partitions, so a job table over one writes a part file per
+  partition) is the visible one.
+- **A one-file `COPY` of a join probes mostly the partition it writes**:
+  6M joined rows took 21 s, where holding them all took 10 s (and more than
+  twice the memory), since plan 14's read-ahead holds one chunk a partition. Deeper
+  read-ahead is plan 14's stop-and-ask (b); one file written in parallel is
+  plan 14's Q3.
+- **Its follow-ups**: building an outer join's smaller side (a RIGHT join
+  builds its left side whatever its size), and whether `PairsPerTask`'s
+  32768 units suit a FULL join's waves (measure one over the polymarket
+  tables first).
 
 **Held for the user, from plan 14** (landed 2026-11-03 in an overnight run;
 its file's "What landed" has the measurements and every call taken):
@@ -133,7 +146,7 @@ Project-wide rules from `CLAUDE.md`:
 
 **Read the status table first.** Most prompts below launched work that
 has since landed; they are kept as a record of how each plan was run, not
-as an invitation to run it again. Each is marked. Only 08, 13 and 15 are
+as an invitation to run it again. Each is marked. Only 08 and 15 are
 still live as written, and 08 is gated on profiling — for the optional
 phases listed under "What's actually left", the current prompt lives at
 the bottom of that plan's own file.
@@ -570,7 +583,7 @@ Include in PR description: the compute-once test result, jaffle + polymarket
 e2e status, and wall-time before/after on a 2x- and 4x-referenced aggregate CTE.
 ```
 
-### 13 — Stream a hash join's output (not started; live)
+### 13 — Stream a hash join's output (landed 2026-11-03; historical — do not re-run. Its open questions and follow-ups are in the plan file's "What landed")
 
 ```
 Read plans/perf/13-stream-hash-join-output.md and implement it in step order,

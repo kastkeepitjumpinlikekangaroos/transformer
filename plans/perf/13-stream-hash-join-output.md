@@ -1,10 +1,14 @@
 # Plan 13: Stream a hash join's output
 
-> Status: **not started** (written 2026-11-01 against `a408d07`, which has
-> `TopNExec`) · six decisions for the user below, each with a recommended
-> answer · Effort: 4-6 days · Risk: medium: the join becomes the second
-> operator whose shared result the K>1 liveness pass publishes, and the number
-> of partitions (so of part files) a broadcast join returns changes
+> Status: **done, all six steps** (landed 2026-11-03 in one commit on
+> `b14cdd5`, an overnight run; see "What landed" at the end). Written
+> 2026-11-01 against `a408d07`, which has `TopNExec`; plan 14 landed between
+> the writing and the work, so the passages on one-stream consumers and Step 5
+> carry notes on what it changed · six decisions for the user below, each
+> taken overnight on its recommended answer, none yet confirmed by the user ·
+> Effort: 4-6 days · Risk: medium: the join becomes the second operator whose
+> shared result the K>1 liveness pass publishes, and the number of partitions
+> (so of part files) a broadcast join returns changes
 
 ## Goal
 
@@ -105,7 +109,12 @@ skips an empty partition, CSV writes a header-only part for it). One after
 another: `GlobalLimitExec`, `OffsetExec`, `WindowExec`'s collapsing non-spill
 path (`flatMap(child.execute)`), `ExecutedQuery.batches` (validations,
 `transformer query`'s `ResultPrinter`, `COPY` and `--output` through
-`writeAll`), and the GUI's `QueryConsole`.
+`writeAll`), and the GUI's `QueryConsole`. (Plan 14, landed 2026-11-03 before
+this plan's work began, moved `transformer query`'s printing, `COPY`,
+`--output` and `QueryConsole` onto the pool: `ParallelDrain.eachPartition`
+reads a table, markdown and the console's result a partition a task, and
+`ParallelDrain.inOrder` the ordered formats, `COPY` and `--output`, with a
+read-ahead of one chunk a partition. Validations still read `batches`.)
 
 ## Design
 
@@ -254,7 +263,12 @@ says otherwise:
    reads a result one partition at a time" does for scans, and have the two that
    only materialize (`WindowExec`'s collapsing path, `QueryConsole`) drain in
    parallel (Step 5). Or: an ordered, bounded parallel drain here, plan 08's
-   queue narrowed, with its deadlock analysis.
+   queue narrowed, with its deadlock analysis. (Plan 14 then landed that
+   drain, without a queue: `transformer query`'s table and markdown read a
+   join's partitions at once, and its ordered formats, `COPY` and `--output`
+   read ahead one chunk a partition, so they probe mostly the partition being
+   written; `QueryConsole` already drains in parallel. What stays one
+   partition at a time: OFFSET without LIMIT, and a validation's rows.)
 4. **Columnar output:** recommended in this plan as its last step, landed only if
    it measures faster; or a plan of its own.
 5. **The two timers:** recommended as the table says, written into
@@ -318,6 +332,9 @@ drain; SpillStressTest's 65M-row join in the bounded heap. Docs: architecture
 parallel into buffers concatenated in partition order, so a window's ties and
 the console's rows come out as before. Tests: a window over a multi-partition
 join; the GUI tests that run the console. Docs: architecture §6, README.
+(Plan 14's Step 3 already put `QueryConsole` on `ParallelDrain.eachPartition`,
+results in partition order, so this step is the window's, through the same
+drain.)
 
 **Step 6: columnar output (Q4).** Tests: all of the above; a `core` test of the
 gather for every vector type with NULLs, `NullType`, DECIMAL and BINARY. Docs:
@@ -385,6 +402,10 @@ architecture §2 (`RowBuf`) and §5b, gotchas' "What's intentionally NOT done"
   of a printed query, a `COPY`, an OFFSET or a validation's rows loses the
   parallel probe `probeAcrossAllPartitions` gave it. Its printer or single file
   is one stream anyway; measure a `COPY` of a large join before and after Step 2.
+  (Measured: see "What landed". With plan 14's read-ahead a `COPY` probes the
+  partition it writes and one chunk of each partition ahead, and a selective
+  join's chunk is many probe batches, so it ran about twice as long as the
+  eager parallel probe did, in less than half the memory.)
 - **A build side lives longer.** The pass builds each broadcast join's side in
   `SqlEngine.execute` and the operator keeps it until the result is dropped
   (`DataJob` holds `q` through the validations); today it is garbage once
@@ -426,6 +447,248 @@ profiling gate stand; its queue narrows to Q3's follow-up, an ordered drain for
 one-stream consumers, which must answer this plan's deadlock analysis. Its
 plans/perf/README.md row ("nothing under `sql/` streams") has been stale since
 plans/testing/05 W5's pairing waves.
+
+## What landed (2026-11-03, overnight)
+
+All six steps, in one commit on `b14cdd5` (the overnight run's orchestrator
+asked for one commit for the plan, not one a step). Nothing on the
+stop-and-ask list was crossed: no queue, `ExchangeExec` changed only by its
+claim and latch moving into the shared helper, the build-side choice, the
+sharding gates and `PairsPerTask`'s 32768 unchanged, and Step 6 landed on its
+measurement.
+
+- **Step 1.** `ProbeCursor`, the one probe every path reads through: a probe
+  stream opened by its first fill, the batch it is in and its key vectors
+  (evaluated once a batch), the next row, and for the row being matched its
+  candidates, the next to examine and whether one kept it. A fill stops at a
+  full output batch or at `PairsPerTask` units, mid-row if need be. Matched
+  build rows are a `BitSet` per cursor. A join that keeps unmatched build rows
+  and a pairing run in waves (`executeInWaves`), on one partition, each wave
+  up to `Scheduler.parallelism` cursors advanced by at most `PairsPerTask`
+  units, the cursors' `BitSet`s merged on the consumer's thread as each
+  finishes, the unmatched build rows after the last wave.
+- **Step 2.** `sql/exec/SharedResult.scala`: the trait `SharedResult`
+  (`materializeNow`) and `SharedOnce`, which holds `ExchangeExec`'s CAS claim,
+  latch and `claimer` escape, moved there unchanged, and a broadcast join's
+  build side. `PhysicalPlanner.preMaterializeExchanges` is
+  `preMaterialize`, matching the trait, at every caller (`SqlEngine` twice,
+  `CteResolver.materialize`, and the tests `ExchangeDeadlockStressTest`,
+  `ExchangeExecTest`, slt `Modes`, `PlanSqlTest`, `PlanRoundTripFuzzTest` and
+  the forced-plan oracle's `ForcedPlans`); `JoinOrderTest` runs it now. A
+  broadcast join (`executeBroadcast`) runs in its probe side's partitions;
+  `numPartitions` stays a function of the children. The chaos points
+  `exchange-claim` and `exchange-publish` are `shared-claim` and
+  `shared-publish`, since both shared results pass them.
+- **Step 3.** A sharded join builds shard `s` on its first pull and streams
+  it, then the shard's unmatched build rows.
+- **Step 4.** Grace hash buckets both sides on its first pull, joins the
+  bucket pairs one after another as its output is pulled (`Closing.concat`),
+  and its directory goes when the output is drained or closed
+  (`closeOnDrain`); `bucketsLoadedNanos` times loading only.
+- **Step 5.** `WindowExec`'s collapsing non-spill path reads its child's
+  partitions through `ParallelDrain.eachPartition`, reused through a new
+  overload over a plan's partitions (each opened when a task takes it and
+  closed once read) rather than a second mechanism: it fits the liveness
+  rule, since its tasks wait only on their own operators' fan-outs, a tree,
+  and the window waits in `Submitted.await`. Each partition's rows and keys
+  are collected into a buffer of its own and concatenated in partition order.
+  Its stop is a flag of its own or the query's. `QueryConsole` already read a
+  result through `eachPartition` (plan 14's Step 3), so it is unchanged.
+- **Step 6.** The build side is one batch, its partitions' batches
+  compacted, with each key's rows in an unboxed `IntList`; ColRef build keys
+  are encoded from it through a codec bound to the build columns, computed
+  ones per batch as before. The cursor writes selection vectors (probe row,
+  build row, -1 for a NULL-padded side) and each output batch gathers its
+  columns by them (`ColumnVector.gather`, new: a column at a time, unboxed
+  for a source of its own class, cell by cell otherwise). `extra` is
+  evaluated with `evalVec` over a chunk of candidate pairs of one probe
+  batch, at most an output batch's room, the columns it reads gathered for
+  them. It measured faster (below), so it landed.
+- **Tests.** `sql/exec:streaming_join_test` (`PairingJoinTest`'s file and
+  target, widened, still at `-Xmx256m`): the equivalence matrix (4800 joins
+  built directly on every path against a nested loop, broadcast in its probe
+  order, and the same tables through the planner), the shared build side
+  (`SqlEngine.execute` reads the build side once and no probe row, a diamond
+  builds once and answers twice, the pass reaches a metered join, 32 racing
+  first callers build once, a failed build reaches every caller and is not
+  retried), a window over a join keeping its ties in partition order, and
+  the bounded-memory cases (INNER under an aggregate, LEFT with unmatched
+  keys, INNER read flat, FULL in waves, per shard, grace hash: 50 to 80
+  million joined rows each) beside the pairings. `explain_test` (`[3
+  partitions]`), `cli_test` (a `LIMIT` over a join of an endless table
+  returns; cancelling stops a join's probe), `cte_materialization_test` (a
+  CTE body's join builds once), `closing_test` (a `LIMIT` over a join closes
+  its probe side; a grace join drained, stopped by a `LIMIT` or closed part
+  way leaves no directory), `core_types_test` (`gather` over every type,
+  NULLs, `NullType`, `DECIMAL`, `BINARY`, and a source of another class);
+  `spill_stress_test` now runs at `-Xmx512m`, its 65M-row grace join
+  streaming through it.
+  `JoinSwapTest.equiJoinSmallSidesSkipsExchange` and
+  `SqlEngineTest.equiJoinOnSmallCsvUsesBroadcastPath` assert the probe's
+  three partitions. The forced-plan oracle names the paths `broadcast` and
+  `in waves` (was `collapsing`), and its guard holds `in waves` to a floor of
+  its own (120; 240 joins over the guard's 600 seeds).
+
+### Overnight decisions
+
+Taken overnight as recommended, not yet confirmed by the user:
+
+- **Q1** (a broadcast INNER, LEFT or RIGHT join runs in its probe side's
+  partitions): yes. A job table over one writes a part file per probe
+  partition (`maxPartitions: 1` folds them).
+- **Q2** (a FULL join): A, one partition in waves.
+- **Q3** (one-stream consumers): accepted. Plan 14 had already landed the
+  ordered drain, so `transformer query`'s formats read a join's partitions on
+  the pool; a `COPY` of a join probes mostly the partition it writes
+  (measured below).
+- **Q4** (columnar output): in this plan as Step 6, landed only because it
+  measured faster.
+- **Q5** (the two timers): as the table says, in docs/benchmarking.md:
+  `probeNanos` the probe loop's time summed over partitions and wave tasks,
+  `bucketsLoadedNanos` the time loading build buckets.
+- **Q6** (the pairing): unchanged, one partition in waves, sharing the
+  cursor.
+
+Calls of my own, for the user to look at:
+
+- **A fill stops at a full output batch**, as the design says: a `LIMIT` over a
+  join reads one output batch's worth of probe batches (for the endless
+  table of four-row batches in `cli_test`, 2048 of them), not one probe batch.
+- **A unit of work is also an unmatched probe row padded**, beside a probe
+  row read and a candidate pair examined, so a fill adds at most its units of
+  rows.
+- **`ParallelDrain.eachPartition` gained an overload** for an operator
+  reading its child (Step 5), rather than a second drain.
+- **The chaos points were renamed** (`shared-claim`, `shared-publish`).
+- **NULL build keys are kept out of the key map**: they were in it under keys
+  no probe could look up; the answers are the same.
+- **A build side is built even for a probe of no partitions**, so a build
+  that fails fails the query as it did, whatever the probe side holds.
+- **A residual condition is evaluated a chunk of candidates at a time**
+  (Step 6): a condition that fails on a candidate past the rows a `LIMIT`
+  keeps can fail the query, as the plan's risks foresaw; docs/gotchas.md
+  says so.
+- **The forced-plan path tally** splits `collapsing` into `broadcast` and
+  `in waves`, with a floor of its own for the second.
+
+### Held for the user
+
+Nothing on the stop-and-ask list. Open, as follow-ups:
+
+- **A one-file `COPY` of a join is slower than the eager probe was** (21 s
+  against 10 s for 6M joined rows), in less than half the memory and able to
+  write results larger than the heap. Plan 14's `inOrder` reads one chunk a
+  partition ahead, and a chunk of a selective join is hundreds of probe
+  batches, so the partition being written is probed mostly alone. Ways past
+  it: a deeper read-ahead (plan 14's stop-and-ask (b)), or one file written in
+  parallel (plan 14's Q3); `PER_PARTITION_OUTPUT true` already writes each
+  partition on its own.
+- **Building an outer join's smaller side** (a RIGHT join builds its left
+  side whatever its size), and **`PairsPerTask` for keyed waves** (measure a
+  FULL join of the polymarket tables first), both open in the plan.
+- **The console by hand.** `QueryConsole` is unchanged (plan 14's drain); the
+  Monocle harness plan 14 left had no Monocle jar left beside it, so no
+  headless check of a join in the console was run.
+
+### Found on the way
+
+- **`metamorphic_fuzz_test` failed under `--config=sharded` before this
+  plan.** Its guard `dataFailuresReachAJoinAWindowAnAggregateAndSpill` reads
+  the operator off each data failure's stack, with floors measured under the
+  default sharding gates; with every breaker sharded most of those failures
+  are raised as an exchange is materialized, which is none of its sites, so
+  199 seeds fail where 556 do and a join is reached on 26 (floor 51). The base
+  commit's engine, swapped in for the measurement, gives the same counts. The
+  guard now skips itself with the gates open (`assumeTrue`, as
+  docs/testing.md asks of a test that depends on a default), and so does this
+  plan's own floor for the in-waves path in `forced_plan_fuzz_test` (36 FULL
+  joins run in waves with the gates open, the rest sharded).
+- **A job's parquet part files differ in their bytes between two runs of
+  one jar** (13 of jaffle's 15 tables between two runs of the base jar, at
+  the same execution time), so a byte comparison of a job's output says
+  nothing; rows read sorted do.
+- **`core:parallel_drain_test` failed one run in about fifteen under `chaos`,
+  before this plan.** In `ofTwoFailuresTheLowerNumberedIsThrown`'s `inOrder`
+  half, plan 14's code, which this plan does not touch, a fill of partition 6
+  could fail before partition 2's fill began, so partition 2 was stopped,
+  which is no failure, and partition 6's failure was thrown: 3 runs of 48
+  with the base commit's `core` swapped in, 6 of 72 with this plan's.
+  Partition 6 now fails only once partition 2 is being read, a second latch:
+  96 runs of 96.
+- **`spill_stress_test` timed out under `hashzero` beside the whole suite**,
+  twice. Alone it passes in 131 s, 105 to 115 s of it its DISTINCT case,
+  200,000 distinct rows whose every hash collides, a scan per lookup, code
+  this plan does not touch: eight GC pauses of 18 ms in all at the target's
+  new `-Xmx512m`, and 107 s at `-Xmx4g`. docs/testing.md had it at three and
+  a half minutes beside the suite. Its timeout is long now.
+
+### Measurements
+
+The 2026-03-06 orderbook day (2.1 GB, 326M rows, 18 partitions) and the
+124K markets, JDK 21 (bazel's remotejdk21), Apple M4, 8 cores, 16 GB,
+`-Xmx2g`, one run at a time, each after a warm-up run of the same jar; peak
+RSS is `/usr/bin/time -l`'s maximum resident set size. "Before" is the base
+commit `b14cdd5`'s jar; Step 2 is this work's jar before Step 6 (Steps 1-5),
+which runs the plan's query exactly as Step 2 alone would (it takes no
+sharded, grace or window path).
+
+| Statement | Before (`b14cdd5`) | After Step 2 | After Step 6 |
+|---|---|---|---|
+| the plan's query (`GROUP BY m.category` over the join) | out of heap after 138.5 s, 2.23 GB | 7.6 s, 0.73 GB | 6.8 s, 0.68 GB |
+| the aggregate-first form | 6.8 s, 0.52 GB | 6.9 s, 0.52 GB | |
+| `... JOIN markets m ... LIMIT 10` | out of heap after 90.4 s, 2.22 GB | 0.9 s, 0.23 GB | 0.9 s, 0.21 GB |
+| `COPY` of the join `WHERE ob.timestamp_received % 20 = 0` (about 6M rows) to one parquet file | 10.3 s, 1.97 GB | 21.8 s, 0.85 GB | 21.2 s, 0.69 GB |
+| EXPLAIN VERBOSE's join line | `[1 partition]` | `[18 partitions]` | |
+
+- **The plan's query** answers 119,852,314 rows, 12,665 markets and an
+  `AVG(spread)` of 0.07940793410537297 after both steps, byte for byte the
+  same output; the aggregate-first form gives 0.07940793410537322, the last
+  digits the plan foresaw. Step 2 and Step 6 alternated three times: 8.0,
+  8.2, 8.1 s against 6.7, 6.9, 6.9 s; peak RSS 0.67 to 0.86 GB.
+- **The aggregate-first form**, `WITH a AS (SELECT market_id, COUNT(*) AS n,
+  SUM(spread) AS s, COUNT(spread) AS c FROM ob GROUP BY market_id) SELECT
+  m.category, SUM(a.n), COUNT(DISTINCT a.market_id), SUM(a.s) / SUM(a.c) FROM
+  a JOIN markets m ON a.market_id = m.condition_id GROUP BY m.category ORDER
+  BY 2 DESC LIMIT 8`, took 10 s and 0.55 GB when the plan was written
+  (`a408d07`); it takes 6.8 s and 0.52 GB at `b14cdd5`. The join, which
+  probes 120M matches, now runs as fast as it, where the plan expected a small
+  multiple.
+- **The `COPY`** wrote the same 5,852,549 bytes from every jar.
+
+### Gates
+
+- **`bazel test //...`**: 93/93 under the default config and under each of
+  `sharded`, `serial`, `verify`, `leaks`, `batch1`, `batch2` and `zone`. Under
+  `chaos`, 92/93 at first, `parallel_drain_test` failing, and 93/93 once its
+  race was fixed; under `hashzero`, 92/93 twice, `spill_stress_test` past its
+  five-minute timeout, and 93/93 once its timeout was long (it took 384 s;
+  both under "Found on the way"). The two drain targets green after their fix
+  under the default config and all nine, `parallel_drain_test` 96 runs of 96
+  under `chaos`.
+- **Liveness.** `core:scheduler_test` untouched and green;
+  `sql/exec:exchange_deadlock_stress_test` green in its default mode in every
+  run above. Its red instrument still wedges: with `STRESS_LAZY=1` four runs
+  of five wedged (at iterations 10, 205, 529 and 874 of a driver group), each
+  classified as the 02e family, `SharedOnce.get` and `helpJoin` frames on the
+  stuck stacks; one run of the default 6000 iterations passed. Its joins J2
+  now run in their probe side's partitions and build through the shared
+  helper, so the lazy mode reaches the hazard through a join's build as well
+  as an exchange's.
+- **Campaigns** at `FUZZ_SEEDS=20000` (seeds 0 to 19999, eight blocks of
+  2500 each, three JVMs at `-Xmx1200m` from the built launchers with bazel
+  shut down, the properties only): `metamorphic_fuzz_campaign` and
+  `sharded_mode_fuzz_campaign` clean, all sixteen blocks green (86 to 118 s a
+  block, against about 10 s at the default budget); and
+  `starved_dag_scheduler_fuzz_campaign` once, at 2000 seeds, green (63 s).
+- **The jaffle-shop jar**: exit 0, 15/15 Succeeded, every validation passing,
+  each table still one part file; its 15 tables hold the same rows, compared
+  sorted, as the base jar's at the same execution time (their parquet bytes
+  differ between any two runs, the base jar's own included).
+- **The polymarket jar** (`-Xmx12g`, as README's polymarket section runs it):
+  exit 0, 14 Succeeded, 2 ValidationFailed, 1 Skipped, 0 Failed, in 75 s at
+  7.2 GB peak RSS (the base jar: the same pattern, 84 s, 6.1 GB); the five
+  tables that join hold the same rows as the base jar's, a part file each
+  (their probe sides are aggregates of one partition).
 
 ## Launch prompt
 

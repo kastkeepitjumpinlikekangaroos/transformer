@@ -283,16 +283,20 @@ class ParallelDrainTest {
 
   /** Of two partitions that fail, the lower-numbered's failure is the one
     * thrown, though it failed second: partition 2 fails only once partition
-    * 6 has. */
+    * 6 has, and partition 6 only once partition 2 is being read, since a
+    * partition not yet read when another fails is stopped, which is no
+    * failure (under `--config=chaos` a fill of partition 6 could run before
+    * partition 2's began, one run in about fifteen). */
   @Test(timeout = 60000) def ofTwoFailuresTheLowerNumberedIsThrown(): Unit = {
     assumeTrue("needs two partitions read at once", Scheduler.parallelism >= 2)
     def run(drain: ExecutedQuery => Unit): Unit = {
+      val twoRead = new CountDownLatch(1)
       val sixFailed = new CountDownLatch(1)
       val two = new IllegalArgumentException("partition 2")
       val six = new IllegalArgumentException("partition 6")
       val sources = (0 until 8).map {
-        case 2 => endless(2, _ => { sixFailed.await(30, TimeUnit.SECONDS); throw two })
-        case 6 => endless(6, _ => { sixFailed.countDown(); throw six })
+        case 2 => endless(2, _ => { twoRead.countDown(); sixFailed.await(30, TimeUnit.SECONDS); throw two })
+        case 6 => endless(6, _ => { twoRead.await(30, TimeUnit.SECONDS); sixFailed.countDown(); throw six })
         case p => finite(p, 3)
       }
       val thrown = thrownBy(drain(query(sources)))

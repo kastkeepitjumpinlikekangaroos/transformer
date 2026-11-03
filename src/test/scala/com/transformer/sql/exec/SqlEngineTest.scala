@@ -1785,18 +1785,22 @@ class SqlEngineTest {
   @Test def equiJoinOnSmallCsvUsesBroadcastPath(): Unit = {
     // Cardinality gate: CSV inputs have no exactRowCount, so the planner can't
     // prove either side is ≥ BroadcastBuildThreshold and falls back to the
-    // historic broadcast hash-join (build one side, stream the other —
-    // collapses to one output partition). The point is correctness on the
-    // broadcast path remains intact; the partition-shape changes are
-    // exercised at the operator level in [[ExchangeExecTest]] / [[JoinSwapTest]].
-    val left = tmpCsv("l.csv", "id,name\n1,a\n2,b\n3,c\n4,d\n5,e\n6,f\n7,g\n8,h\n")
+    // broadcast hash join: build one side once, stream the other, in the
+    // probe side's partitions (a CSV file each, three here). The point is
+    // correctness on the broadcast path remains intact; the partition-shape
+    // changes are exercised at the operator level in [[ExchangeExecTest]] /
+    // [[JoinSwapTest]] / [[StreamingJoinTest]].
+    val dir = Files.createTempDirectory("sql-engine-")
+    Files.writeString(dir.resolve("l1.csv"), "id,name\n1,a\n2,b\n3,c\n")
+    Files.writeString(dir.resolve("l2.csv"), "id,name\n4,d\n5,e\n6,f\n")
+    Files.writeString(dir.resolve("l3.csv"), "id,name\n7,g\n8,h\n")
     val right = tmpCsv("r.csv", "uid,score\n1,10\n2,20\n3,30\n4,40\n5,50\n6,60\n7,70\n8,80\n")
     val cat = new Catalog
-    cat.register("u", CsvReader.fromPath(left.toString, CsvOptions()))
+    cat.register("u", CsvReader.fromPath(dir.resolve("l*.csv").toString, CsvOptions()))
     cat.register("s", CsvReader.fromPath(right.toString, CsvOptions()))
     val q = SqlEngine.execute(
       "SELECT u.name, s.score FROM u JOIN s ON u.id = s.uid", cat)
-    assertEquals("broadcast path emits one partition", 1, q.numPartitions)
+    assertEquals("a broadcast join runs in its probe side's partitions", 3, q.numPartitions)
     val rows = collectAllRows(q).sortBy(_("name").toString)
     assertEquals(8, rows.size)
     assertEquals(Vector("a", "b", "c", "d", "e", "f", "g", "h"),

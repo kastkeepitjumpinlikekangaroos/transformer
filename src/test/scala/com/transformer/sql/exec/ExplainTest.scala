@@ -11,8 +11,7 @@ import org.junit.Test
 class ExplainTest {
 
   /** A view that fails if read: EXPLAIN must plan over it without reading. */
-  private final class Unreadable(val schema: Schema) extends CatalogView {
-    def numPartitions: Int = 1
+  private final class Unreadable(val schema: Schema, val numPartitions: Int = 1) extends CatalogView {
     def readPartition(p: Int): Iterator[ColumnarBatch] = throw new AssertionError("EXPLAIN read a row")
   }
 
@@ -20,6 +19,7 @@ class ExplainTest {
     val c = new Catalog
     c.register("t", new Unreadable(Schema(Vector(Field("a", DataType.IntType), Field("s", DataType.StringType)))))
     c.register("u", new Unreadable(Schema(Vector(Field("a", DataType.IntType), Field("x", DataType.StringType)))))
+    c.register("t3", new Unreadable(Schema(Vector(Field("a", DataType.IntType), Field("s", DataType.StringType))), 3))
     c
   }
 
@@ -60,6 +60,19 @@ class ExplainTest {
       "  Project: s, _agg0 AS n [1 partition]",
       "    HashAggregate: GROUP BY s; COUNT(*) AS _agg0 [1 partition]",
       "      Scan t: a, s [1 partition]"), physical)
+  }
+
+  /** A broadcast join runs in its probe side's partitions, which EXPLAIN
+    * VERBOSE shows without building or reading anything: a join of a table
+    * of three partitions to one of one runs in three. */
+  @Test def aBroadcastJoinRunsInItsProbeSidesPartitions(): Unit = {
+    val lines = rows("EXPLAIN VERBOSE SELECT t3.a, u.x FROM t3 JOIN u ON t3.a = u.a")
+    val physical = lines.dropWhile(_ != "== Physical Plan ==").tail
+    assertEquals(physical.mkString("\n"), Vector(
+      "Project: a, x [3 partitions]",
+      "  HashJoin INNER: a = a; builds the right side [3 partitions]",
+      "    Scan t3: a, s [3 partitions]",
+      "    Scan u: a, x [1 partition]"), physical)
   }
 
   /** A CTE read twice is materialized before the query runs: the tree scans

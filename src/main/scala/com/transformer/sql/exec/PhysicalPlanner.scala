@@ -64,50 +64,51 @@ object PhysicalPlanner {
       (wrapped, Option(node))
     }
 
-  /** Materialize every [[ExchangeExec]] in `plan` bottom-up (post-order:
-    * children before parents), BEFORE any consumer of the plan runs. Both
-    * engine drain paths call this right after planning ([[SqlEngine]]'s two
-    * execute paths and [[CteResolver]]'s CTE-body materialization), so by the
-    * time consumer tasks exist every exchange is published and `execute(s)`
-    * is a plain array read.
+  /** Publish every shared result in `plan` ([[SharedResult]]: each
+    * [[ExchangeExec]]'s shards and each broadcast [[HashJoinExec]]'s build
+    * side) bottom-up (post-order: children before parents), BEFORE any
+    * consumer of the plan runs. Both engine drain paths call this right after
+    * planning ([[SqlEngine]]'s two execute paths and [[CteResolver]]'s
+    * CTE-body materialization), so by the time consumer tasks exist every
+    * shared result is published and `execute(p)` reads it as a plain field.
     *
     * This ordering is the K>1 sharded-execution liveness fix
     * (plans/bugfixes/02f). Every deadlock cycle observed at campaign scale
-    * (02e) runs through a thread waiting on an exchange that is not yet
-    * materialized — the one wait in the engine that does not follow the
+    * (02e) runs through a thread waiting on a shared result that is not yet
+    * computed — the one wait in the engine that does not follow the
     * task-creation tree, so the one wait `ForkJoinTask.get()` work-helping
-    * cannot rescue once helpJoin has inlined a consumer of the exchange
-    * beneath the materializer's own frames. Materializing in dependency
-    * order removes that wait entirely: when an exchange materializes here,
-    * every exchange in its child subtree is already published, so its
+    * cannot rescue once helpJoin has inlined a consumer of the result
+    * beneath its computation's own frames. Computing in dependency order
+    * removes that wait entirely: when a shared result is computed here,
+    * every one in its child subtree is already published, so its
     * `Scheduler` fan-out is a pure task tree (work-helping completes it —
     * the `core:scheduler_test` invariant) and no readiness wait exists
-    * anywhere in flight. Plans with no exchanges (sharding off — the
-    * shipping default) walk and find nothing.
+    * anywhere in flight. A plan with no exchange and no broadcast join walks
+    * and finds nothing; EXPLAIN plans without calling it, so it reads
+    * nothing.
     *
     * Shared subtrees (CTE inlining shares plan nodes, making the tree a DAG)
-    * are visited once, by identity, so a diamond-shared exchange
-    * materializes exactly once. [[PlanWrapper]]s are transparent. */
-  def preMaterializeExchanges(plan: PhysicalPlan): Unit = {
+    * are visited once, by identity, so a diamond-shared exchange or join
+    * computes exactly once. [[PlanWrapper]]s are transparent. */
+  def preMaterialize(plan: PhysicalPlan): Unit = {
     val visited = java.util.Collections.newSetFromMap(
       new java.util.IdentityHashMap[PhysicalPlan, java.lang.Boolean])
     def walk(p: PhysicalPlan): Unit = {
       if (!visited.add(p)) return
       childrenOf(p).foreach(walk)
       p match {
-        case e: ExchangeExec => e.materializeNow()
+        case s: SharedResult => s.materializeNow()
         case _               => ()
       }
     }
     walk(plan)
   }
 
-  /** Immediate children of a physical operator, for [[preMaterializeExchanges]]'
+  /** Immediate children of a physical operator, for [[preMaterialize]]'s
     * walk. Mirrors [[wrapChildren]]'s arity knowledge — a new operator with
     * children needs a branch in BOTH places (here, a missed branch means a
-    * subtree's exchanges escape pre-materialization and fall back to the lazy
-    * latch path, whose nesting hazards `ExchangeExec.ensureMaterialized`
-    * documents). */
+    * subtree's shared results escape pre-materialization and fall back to the
+    * lazy latch path, whose nesting hazards [[SharedOnce]] documents). */
   private def childrenOf(plan: PhysicalPlan): Seq[PhysicalPlan] = plan match {
     case w: PlanWrapper           => Seq(w.underlying)
     case f: FilterExec            => Seq(f.child)
@@ -646,7 +647,7 @@ object PhysicalPlanner {
 /** What the plan walk puts around an operator: the same plan, its output
   * watched. Anything that reads a plan's shape sees through one to
   * `underlying`, as metrics and verification watch a plan and must not change
-  * it ([[ExchangeExec.feeds]], [[PhysicalPlanner.preMaterializeExchanges]],
+  * it ([[ExchangeExec.feeds]], [[PhysicalPlanner.preMaterialize]],
   * `EXPLAIN`). */
 sealed trait PlanWrapper extends PhysicalPlan {
   def underlying: PhysicalPlan

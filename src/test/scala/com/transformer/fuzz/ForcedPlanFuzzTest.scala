@@ -4,7 +4,7 @@ import com.transformer.core._
 import com.transformer.fuzz.MetaQueryGen.MetaCase
 import com.transformer.fuzz.oracle.ForcedPlans
 import com.transformer.fuzz.oracle.ForcedPlans.Strategy
-import com.transformer.sql.plan.LogicalBuilder
+import com.transformer.sql.plan.{LogicalBuilder, LogicalPlanCardinality}
 import org.junit.Assert._
 import org.junit.{After, Test}
 
@@ -109,8 +109,12 @@ class ForcedPlanFuzzTest {
   @Test def strategiesReachEveryPathAndCodec(): Unit = {
     val (paths, codecs, report) = pathTally(StrategyGuardSeeds)
     println(s"[forced-plans] $report")
-    Seq("collapsing", "pairing", "grace hash").foreach(p =>
+    Seq("broadcast", "pairing", "grace hash").foreach(p =>
       assertTrue(s"a join rarely takes the $p path: $report", paths(p) > PathFloor))
+    // A FULL join on a key runs in waves unless it is sharded, which every one
+    // over sides of known sizes is with the gates open (`--config=sharded`).
+    if (LogicalPlanCardinality.BroadcastBuildThreshold > 1000L)
+      assertTrue(s"a join rarely takes the in waves path: $report", paths("in waves") > WavesFloor)
     Seq("long", "packed", "single object", "object").foreach(k =>
       assertTrue(s"a join rarely hashes with the $k codec: $report", codecs(k) > CodecFloor))
   }
@@ -155,6 +159,11 @@ object ForcedPlanFuzzTest {
     * 2017, single object 748, object 257. Bounds ~3x below the thinnest. */
   val StrategyGuardSeeds: Int = 600
   val PathFloor: Int = 210
+  /** A keyed join runs in waves when it keeps unmatched build rows, which a
+    * planned join does only when it is FULL, and is not sharded: 240 over the
+    * guard's seeds on 2026-11-03 under the default gates (36 with them open),
+    * where the other paths each passed 1300. */
+  val WavesFloor: Int = 120
   val CodecFloor: Int = 85
   val GuardBase: Long = 800000L
 

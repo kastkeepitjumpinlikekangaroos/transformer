@@ -49,11 +49,13 @@ class JoinSwapTest {
   private final class FakeCountView(
       val schema: Schema,
       rows: Seq[Array[Any]],
-      reportedCount: Option[Long]
+      reportedCount: Option[Long],
+      partitions: Int = 1
   ) extends CatalogView {
-    def numPartitions: Int = 1
+    def numPartitions: Int = partitions
     def readPartition(p: Int): Iterator[ColumnarBatch] = {
-      require(p == 0)
+      require(p >= 0 && p < partitions)
+      if (p > 0) return Iterator.empty
       if (rows.isEmpty) {
         val b = new ColumnarBatch(schema, 1)
         b.setNumRows(0)
@@ -594,10 +596,11 @@ class JoinSwapTest {
   // ---------------------------------------------------------------------------
 
   /** Both sides below the broadcast threshold → no exchange. The join's
-    * `left` and `right` children are the original scans, not exchanges. */
+    * `left` and `right` children are the original scans, not exchanges, and
+    * it runs in its probe side's partitions (the left side's three). */
   @Test def equiJoinSmallSidesSkipsExchange(): Unit = {
     assumeTrue("needs the default broadcast threshold", LogicalPlanCardinality.BroadcastBuildThreshold > 100L)
-    val l = emptyView(LeftSchema, Some(100L))
+    val l = new FakeCountView(LeftSchema, Nil, Some(100L), partitions = 3)
     val r = emptyView(RightSchema, Some(100L))
     val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
     val join = findHashJoin(plan)
@@ -605,7 +608,7 @@ class JoinSwapTest {
       ExchangeExec.feeds(join.left))
     assertFalse("right should not be wrapped in ExchangeExec for small × small",
       ExchangeExec.feeds(join.right))
-    assertEquals("collapsing join emits one partition", 1, join.numPartitions)
+    assertEquals("a broadcast join runs in its probe side's partitions", 3, join.numPartitions)
   }
 
   /** One side small enough to broadcast (under threshold) → still no

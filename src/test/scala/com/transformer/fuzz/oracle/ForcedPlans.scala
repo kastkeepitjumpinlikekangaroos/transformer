@@ -25,8 +25,9 @@ import scala.collection.mutable
   *   - '''Strategies, by spelling.''' The plan the optimizer makes of a query
   *     is respelled at every join ([[respelled]]) and printed ([[PlanSql]]),
   *     then run as printed with the optimizer off: an equality between the
-  *     sides as written (the collapsing hash join, with the long-key codec for
-  *     one integer key that is a bare column), its sides as computed keys
+  *     sides as written (the broadcast hash join, in waves for a FULL join,
+  *     with the long-key codec for one integer key that is a bare column),
+  *     its sides as computed keys
   *     `COALESCE(k, k)` (the packed or object codecs), each written twice (two
   *     keys), or the whole condition as `CASE WHEN p THEN TRUE ELSE FALSE END`,
   *     which hides every key, so the join pairs row by row; with spill on a
@@ -272,11 +273,18 @@ object ForcedPlans {
     val codecs = PhysicalPlanner.planWithMetrics(resolved, opts.copy(metricsEnabled = true))._2.toVector
       .flatMap(metricsJoins).map(n => n.counters(HashJoinExec.IdxKeyCodecPath).sum())
     joins.zipWithIndex.map { case (j, i) =>
+      // A join that keeps the build rows no probe row matched (a FULL join
+      // as planned) runs in waves on one partition; any other keyed join
+      // broadcasts its build side to its probe side's partitions.
+      val keepsUnmatchedBuildRows =
+        if (j.buildRight) j.kind == JoinKind.Right || j.kind == JoinKind.Full
+        else j.kind == JoinKind.Left || j.kind == JoinKind.Full
       val path =
         if (opts.spillEnabled && j.leftKeys.nonEmpty && !(j.leftKeys ++ j.rightKeys).exists(Expr.readsRandom)) "grace hash"
         else if (ExchangeExec.feeds(j.left) && ExchangeExec.feeds(j.right)) "per-shard"
         else if (j.leftKeys.isEmpty) "pairing"
-        else "collapsing"
+        else if (keepsUnmatchedBuildRows) "in waves"
+        else "broadcast"
       val codec =
         if (j.leftKeys.isEmpty || codecs.length != joins.length) None
         else Some(codecs(i) match {
@@ -351,7 +359,7 @@ object ForcedPlans {
   def answerAsWritten(catalog: Catalog, sql: String, opts: ExecutionOptions): Either[String, RelEngine.Answer] =
     try {
       val physical = PhysicalPlanner.plan(CteResolver.resolve(LogicalBuilder.build(sql, catalog), opts), opts)
-      PhysicalPlanner.preMaterializeExchanges(physical)
+      PhysicalPlanner.preMaterialize(physical)
       val q = new ExecutedQuery(physical.outputSchema, (0 until physical.numPartitions).map(physical.execute))
       Right(RelEngine.Answer(q.schema, RelEngine.collectRows(q)))
     } catch {

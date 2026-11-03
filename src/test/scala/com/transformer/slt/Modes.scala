@@ -202,7 +202,7 @@ object Modes {
         case _ => resolved
       }
       val physical = PhysicalPlanner.plan(optimized, mode.options)
-      PhysicalPlanner.preMaterializeExchanges(physical)
+      PhysicalPlanner.preMaterialize(physical)
       new ExecutedQuery(physical.outputSchema, (0 until physical.numPartitions).map(p => physical.execute(p)))
   }
 

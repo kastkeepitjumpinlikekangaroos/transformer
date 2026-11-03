@@ -373,7 +373,7 @@ class ExchangeExecTest {
     }
   }
 
-  // ---- preMaterializeExchanges (the 02f engine pass) ------------------------
+  // ---- preMaterialize (the 02f engine pass) --------------------------------
 
   @Test def preMaterializePassPublishesADiamondSharedExchangeOnce(): Unit = {
     // CTE inlining shares plan subtrees, so one ExchangeExec instance can have
@@ -386,7 +386,7 @@ class ExchangeExecTest {
     val ex = ExchangeExec(counting, Seq(intKey), numShards = 4)
     val diamond = UnionExec(ex, ex)
 
-    PhysicalPlanner.preMaterializeExchanges(diamond)
+    PhysicalPlanner.preMaterialize(diamond)
     assertEquals("child drained exactly once by the pass",
       counting.numPartitions, counting.executeCalls.get)
 
@@ -408,7 +408,7 @@ class ExchangeExecTest {
     val ex = ExchangeExec(counting, Seq(intKey), numShards = 4)
     val (wrapped, _) = PhysicalPlanner.wrapWithMetrics(ex)
 
-    PhysicalPlanner.preMaterializeExchanges(wrapped)
+    PhysicalPlanner.preMaterialize(wrapped)
     assertEquals("exchange under MeteredPlan published by the pass",
       counting.numPartitions, counting.executeCalls.get)
 

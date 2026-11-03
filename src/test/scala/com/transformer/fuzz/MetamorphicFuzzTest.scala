@@ -728,6 +728,14 @@ class MetamorphicFuzzTest {
     * each other one runs once with spill on, and the site is the operator on
     * the failure's stack ([[MetamorphicFuzzTest.failureReach]]). */
   @Test def dataFailuresReachAJoinAWindowAnAggregateAndSpill(): Unit = {
+    // The floors are read off the plans the default sharding gates make. With
+    // every breaker sharded (`--config=sharded`) most of these failures are
+    // raised as an exchange is materialized, which is none of the sites here:
+    // 199 of the seeds fail there against 556, the base engine's counts and
+    // this one's alike.
+    org.junit.Assume.assumeTrue("the floors are measured under the default sharding gates",
+      LogicalPlanCardinality.MinShardableSize == Long.MaxValue &&
+        LogicalPlanCardinality.BroadcastBuildThreshold > 1000L)
     val n = 15000
     val reached = scala.collection.mutable.Map.empty[(String, String), Int].withDefaultValue(0)
     var atEdges, failed = 0

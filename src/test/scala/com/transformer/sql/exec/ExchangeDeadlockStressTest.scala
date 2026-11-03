@@ -31,14 +31,18 @@ import java.util.concurrent.{Callable, TimeUnit, TimeoutException}
   * pool-task drivers per iteration.
   *
   * DEFAULT (CI) MODE encodes the 02f contract: each iteration runs
-  * [[PhysicalPlanner.preMaterializeExchanges]] on the graph — exactly what
+  * [[PhysicalPlanner.preMaterialize]] on the graph — exactly what
   * the engine's drain paths do after planning — before the drivers are
-  * submitted. Under that ordering the wedge is structurally impossible and
-  * the loop must stay green under full steal churn.
+  * submitted. It publishes every shared result bottom-up: each J2's build
+  * side (a broadcast join's, read by its probe partitions), then E2, J1's
+  * pairing being built as E1 reads it, then E1. Under that ordering the
+  * wedge is structurally impossible and the loop must stay green under full
+  * steal churn.
   *
   * `STRESS_LAZY=1` skips the pass and drains the same graph through the lazy
-  * `ensureMaterialized` fallback from pool tasks — the pre-02f engine
-  * behavior. That mode WEDGES within seconds (measured on an 8-core arm64
+  * [[SharedOnce]] fallback from pool tasks — the pre-02f engine behavior,
+  * with each J2's build now a lazily shared result as well. That mode
+  * WEDGES within seconds (measured on an 8-core arm64
   * mac, JDK 21.0.6, parallelism=16: 7/7 trials, median ~130 iterations to
   * hit, ~1/150 per iteration — full table in plans/bugfixes/02f). It is the
   * manual red instrument, not a CI assertion: the hit is probabilistic
@@ -64,7 +68,7 @@ import java.util.concurrent.{Callable, TimeUnit, TimeoutException}
   *
   * On a stall the test dumps every thread whose stack holds transformer or
   * ForkJoinPool frames, classifies whether the captured 02e shape is present
-  * (`ensureMaterialized` + `helpJoin`), and fails.
+  * (`SharedOnce.get` + `helpJoin`), and fails.
   */
 class ExchangeDeadlockStressTest {
 
@@ -140,7 +144,7 @@ class ExchangeDeadlockStressTest {
     // The 02f contract: engine drain paths publish every exchange bottom-up
     // before consumers exist. STRESS_LAZY=1 skips this to demonstrate the
     // historical wedge on the lazy fallback path.
-    if (!lazyMode) PhysicalPlanner.preMaterializeExchanges(e1)
+    if (!lazyMode) PhysicalPlanner.preMaterialize(e1)
     val drivers: Seq[Callable[Long]] = (0 until numShards).map { s =>
       new Callable[Long] {
         def call(): Long = countRows(e1.execute(s))
@@ -163,10 +167,12 @@ class ExchangeDeadlockStressTest {
   /** driver(K) -> E1 -> J1(probe = E2, build = 1-row scan; cartesian)
     *           -> E2 -> union of `unionFan` J2 subtrees
     *           -> J2_i = equi join, build side `buildParts` partitions.
-    * All collapsing joins: J1/J2 have a non-exchange side, so
-    * `numPartitions == 1` and both fan out via `submitAndAwaitAll` — J1's
-    * probe fan-out spawns the K consumer tasks of E2, J2's build fan-out is
-    * the nested `.get()` where helpJoin inlines one of them. */
+    * No join is sharded (each has a non-exchange side). J1 pairs on one
+    * partition, its waves fanning out over E2's K partitions, the consumer
+    * tasks of E2. Each J2 broadcasts, running in its probe side's two
+    * partitions; its build fan-out via `submitAndAwaitAll` is the nested
+    * `.get()` where helpJoin inlines a consumer when nothing published the
+    * build first (lazy mode). */
   private def buildTopology(): ExchangeExec = {
     val j2s: Seq[PhysicalPlan] = (0 until unionFan).map { i =>
       val probe = new InMemoryRowsPlan(probeSchema, partitionRows(
@@ -210,7 +216,7 @@ class ExchangeDeadlockStressTest {
     val sb = new StringBuilder
     sb.append(s"WEDGE: group $group iteration $iter driver shard $shard exceeded ")
     sb.append(s"${iterDeadline}ms — permanent stall suspected (02e helpJoin cycle).\n")
-    var sawEnsure = false
+    var sawShared = false
     var sawHelpJoin = false
     val stacks = Thread.getAllStackTraces
     stacks.forEach { (t, frames) =>
@@ -223,15 +229,15 @@ class ExchangeDeadlockStressTest {
         sb.append(s"\n\"${t.getName}\" state=${t.getState}\n")
         frames.foreach { f =>
           val line = f.toString
-          if (line.contains("ensureMaterialized")) sawEnsure = true
+          if (line.contains("SharedOnce.get")) sawShared = true
           if (line.contains("helpJoin")) sawHelpJoin = true
           sb.append("    at ").append(line).append('\n')
         }
       }
     }
-    sb.append(s"\nclassification: ensureMaterialized frames=$sawEnsure, helpJoin frames=$sawHelpJoin ")
-    sb.append(if (sawEnsure) "(exchange-readiness wait present — the 02e family)"
-              else "(NO exchange frames — different stall, investigate)")
+    sb.append(s"\nclassification: SharedOnce.get frames=$sawShared, helpJoin frames=$sawHelpJoin ")
+    sb.append(if (sawShared) "(shared-result readiness wait present — the 02e family)"
+              else "(NO shared-result frames — different stall, investigate)")
     System.err.println(sb.toString)
     fail(sb.toString.take(4000))
     throw new IllegalStateException("unreachable")
