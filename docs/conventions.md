@@ -527,6 +527,18 @@ specific traps.
   that deadlocks K>1 sharded plans (see gotchas.md). See
   [architecture.md §3](architecture.md#3-parallel-execution) and
   [gotchas.md](gotchas.md).
+- **No pool task waits for a consumer, and no pool worker waits on a queue or
+  a condition.** A reader of a result on the pool hands its batches back as a
+  task's result, never by a producer that waits for room: `ParallelDrain`'s
+  fills each read a bounded chunk and return, and the consumer submits the next
+  as it takes one, so a slow consumer (a terminal, a pipe into `less`) leaves
+  nothing running. A `BlockingQueue`'s `put` or `take`, a `SynchronousQueue`, or
+  a `Condition`'s `await` on a pool worker is a `ForkJoinPool.managedBlock` in
+  JDK 21, which compensates it with a spare thread: 02b's regression again. Nor
+  does the drain start threads of its own, outside the one pool and its
+  `transformer.scheduler.parallelism`. Every wait is `Submitted.await`, on the
+  waiter's own descendants; `core:parallel_drain_test` holds a stalled consumer
+  to a bounded read-ahead and no worker held.
 - **A worker posts what its scheduler waits for in a `finally`, and turns
   every `Throwable` into its work's failure.** `DataJob.runUnifiedDag` waits
   for one event per input and per task; a worker that catches `NonFatal`

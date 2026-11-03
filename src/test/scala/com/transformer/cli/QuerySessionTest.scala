@@ -134,7 +134,9 @@ class QuerySessionTest {
     assertTrue(error(s, s"COPY t TO '${dir.resolve("x.csv")}' (delimitr ';')")
       .contains("COPY TO a csv file takes FORMAT and header, delimiter, quote, escape, nullValue, charset, lineEnding, not delimitr"))
     assertTrue(error(s, s"COPY t TO '${dir.resolve("x.parquet")}' (parquet_write_parallelism 2)")
-      .contains("takes FORMAT and compression, parquet_row_group_size, not parquet_write_parallelism"))
+      .contains("takes parquet_write_parallelism only with PER_PARTITION_OUTPUT true"))
+    assertTrue(error(s, s"COPY t TO '${dir.resolve("x.parquet")}' (rowgroups 2)")
+      .contains("takes FORMAT and compression, parquet_row_group_size, PER_PARTITION_OUTPUT, not rowgroups"))
     assertTrue(error(s, s"COPY t TO '${dir.resolve("x.csv")}' (header false, HEADER true)").contains("names the option header twice"))
     assertTrue(error(s, s"COPY t TO '${dir.resolve("x.csv")}' (FORMAT xml)").contains("FORMAT csv or FORMAT parquet, not xml"))
     assertTrue(error(s, s"COPY t TO '${dir.resolve("x.csv")}' (header maybe)").contains("must be true or false"))
@@ -286,6 +288,229 @@ class QuerySessionTest {
     assertFalse(r.ok)
     assertEquals("", r.err)
     assertTrue(s"served $served batches", served <= 5 + 3)
+  }
+
+  /** A table `name` of `parts` partitions of 4-row batches, calling `served`
+    * with the count of batches served, and `fail(p, k)` before partition
+    * `p` serves its k-th batch (from 1). */
+  private def withParts(s: QuerySession, name: String, parts: Int, served: AtomicInteger,
+      fail: (Int, Int) => Unit = (_, _) => ()): Unit = {
+    val rowSchema = Schema(Vector(Field("x", DataType.IntType)))
+    s.addTable(name, new CatalogView {
+      def schema: Schema = rowSchema
+      def numPartitions: Int = parts
+      def readPartition(p: Int): Iterator[ColumnarBatch] = {
+        var k = 0
+        Iterator.continually {
+          k += 1
+          fail(p, k)
+          val b = new ColumnarBatch(rowSchema, 4)
+          (0 until 4).foreach(r => b.column(0).setBoxed(r, p * 1000 + r))
+          b.setNumRows(4)
+          val _ = served.incrementAndGet()
+          b
+        }
+      }
+    }, "a test")
+  }
+
+  /** The batches served once they stop growing, sampled 200 ms apart:
+    * nothing reads after the statement returned. */
+  private def settledAfterReturn(served: AtomicInteger): Int = {
+    val first = served.get
+    Thread.sleep(200)
+    assertEquals("a partition was read after the statement returned", first, served.get)
+    first
+  }
+
+  /** Cancelling stops a table and CSV over four partitions read at once:
+    * every partition stops at its next batch, and the statement says
+    * nothing. */
+  @Test(timeout = 60000) def cancellingStopsEveryPartitionOfATableAndOfCsv(): Unit =
+    for (format <- Seq(OutputFormat.Table, OutputFormat.Csv)) {
+      val s = new QuerySession
+      s.format = format
+      val cancel = new Cancel
+      val served = new AtomicInteger
+      withParts(s, "endless", 4, served, (_, _) => if (served.get >= 20) cancel.cancel())
+      val r = run(s, "SELECT x FROM endless", cancel = cancel)
+      assertFalse(r.ok)
+      assertEquals("", r.err)
+      val n = settledAfterReturn(served)
+      // Each partition read at most a batch past the stop, CSV its chunks ahead too.
+      assertTrue(s"$format: served $n batches", n <= 20 + 4 + 5 * ParallelDrain.ChunkBatches)
+    }
+
+  @Test(timeout = 30000) def aClosingOutputStopsCsvOverSeveralPartitions(): Unit = {
+    val s = new QuerySession
+    s.format = OutputFormat.Csv
+    val served = new AtomicInteger
+    withParts(s, "endless", 4, served)
+    val closing = new OutputStream {
+      private var written = 0
+      def write(b: Int): Unit = write(Array(b.toByte), 0, 1)
+      override def write(b: Array[Byte], off: Int, len: Int): Unit = {
+        written += len
+        if (written > 200) throw new IOException("Broken pipe")
+      }
+    }
+    val err = new ByteArrayOutputStream()
+    assertFalse(s.runScript("SELECT x FROM endless", new Io(new PrintStream(closing, true, "UTF-8"),
+      new PrintStream(err, true, "UTF-8"))))
+    assertEquals("", err.toString(StandardCharsets.UTF_8))
+    val n = settledAfterReturn(served)
+    assertTrue(s"served $n batches", n < 100)
+  }
+
+  /** Partition 0 throws at its third batch: the statement fails with its
+    * message, the other partitions, without end, stop, and nothing reads
+    * after the script returns. (The first, so that a pool of one thread,
+    * reading a partition at a time, reaches it.) */
+  @Test(timeout = 60000) def aFailingPartitionFailsTheStatementAndStopsTheRest(): Unit =
+    for (format <- Seq(OutputFormat.Table, OutputFormat.Csv, OutputFormat.Markdown)) {
+      val s = new QuerySession
+      s.format = format
+      val served = new AtomicInteger
+      withParts(s, "endless", 4, served,
+        (p, k) => if (p == 0 && k == 3) throw new IllegalStateException("partition 0 holds a bad value"))
+      val r = run(s, "SELECT x FROM endless")
+      assertFalse(r.ok)
+      assertEquals(s"$format", lines("Error: partition 0 holds a bad value"), r.err)
+      val _ = settledAfterReturn(served)
+    }
+
+  /** A table prints once its partitions are read, so after a statement
+    * whose output closed it reads nothing: the script stops there. */
+  @Test(timeout = 30000) def aTableAfterAnOutputClosedReadsNothing(): Unit = {
+    val s = session()
+    s.format = OutputFormat.Table
+    val served = new AtomicInteger
+    withParts(s, "endless", 4, served)
+    val closing = new OutputStream {
+      private var written = 0
+      def write(b: Int): Unit = write(Array(b.toByte), 0, 1)
+      override def write(b: Array[Byte], off: Int, len: Int): Unit = {
+        written += len
+        if (written > 20) throw new IOException("Broken pipe")
+      }
+    }
+    val err = new ByteArrayOutputStream()
+    assertFalse(s.runScript("SELECT * FROM t; SELECT x FROM endless", new Io(new PrintStream(closing, true, "UTF-8"),
+      new PrintStream(err, true, "UTF-8"))))
+    assertEquals("", err.toString(StandardCharsets.UTF_8))
+    assertEquals(0, served.get)
+  }
+
+  /** A LIMIT is one partition, read on the statement's thread: it returns
+    * after a batch or two, whatever the partitions without end. */
+  @Test(timeout = 30000) def aLimitReadsABatchOrTwo(): Unit = {
+    val s = new QuerySession
+    s.format = OutputFormat.Csv
+    val served = new AtomicInteger
+    withParts(s, "endless", 4, served)
+    val r = run(s, "SELECT x FROM endless LIMIT 5")
+    assertTrue(r.err, r.ok)
+    assertEquals(lines("x", "0", "1", "2", "3", "0"), r.out)
+    assertTrue(s"served ${served.get} batches", served.get <= 3)
+  }
+
+  /** Three CSV files of 20,000 rows, a partition each of several batches. */
+  private def threeFiles(): QuerySession = {
+    val s = session()
+    (0 until 3).foreach { f =>
+      file(s"many/part$f.csv", (0 until 20000).map(i => s"${f * 20000 + i},v${f * 20000 + i}").mkString("a,s\n", "\n", "\n"))
+    }
+    ok(s, s".table many ${dir.resolve("many")}/*.csv")
+    s
+  }
+
+  private val threeFilesCsv: String = (0 until 60000).map(i => s"$i,v$i").mkString("a,s\n", "\n", "\n")
+
+  /** COPY and --output of several partitions write the text a write on one
+    * thread writes, in partition order, and parquet that reads back in it. */
+  @Test(timeout = 120000) def copyOfSeveralPartitionsWritesThemInOrder(): Unit = {
+    val s = threeFiles()
+    val csv = dir.resolve("many-out/copy.csv")
+    ok(s, s"COPY many TO '$csv'")
+    assertEquals(threeFilesCsv, Files.readString(csv))
+    val into = dir.resolve("many-out/into.csv")
+    val r = run(s, "SELECT * FROM many", into = Some(into.toString))
+    assertTrue(r.err, r.ok)
+    assertEquals(threeFilesCsv, Files.readString(into))
+    val parquet = dir.resolve("many-out/copy.parquet")
+    ok(s, s"COPY many TO '$parquet'")
+    ok(s, s".table back $parquet")
+    assertEquals(threeFilesCsv, ok(s, "SELECT * FROM back"))
+  }
+
+  // ---- COPY ... (FORMAT parquet, PER_PARTITION_OUTPUT true) -----------------------------
+
+  /** A directory of a parquet file a partition, as a job writes a table:
+    * an empty partition writes none, the files read back in partition
+    * order, and no `_run.json`. */
+  @Test(timeout = 120000) def copyWritesAPartitionAFileWithPerPartitionOutput(): Unit = {
+    val s = threeFiles()
+    file("many/part1b.csv", "a,s\n") // an empty partition, between parts 1 and 2
+    ok(s, s".table many ${dir.resolve("many")}/*.csv")
+    val out = dir.resolve("parts-out/day=1")
+    val r = run(s, s"COPY many TO '$out' (FORMAT parquet, per_partition_output true, compression gzip, " +
+      "parquet_write_parallelism 2)")
+    assertTrue(r.err, r.ok)
+    assertEquals(lines(s"Wrote 60000 rows to $out (3 files)"), r.err)
+    val names = Files.list(out).toArray.map(_.asInstanceOf[Path].getFileName.toString).sorted.toSeq
+    assertEquals(Seq("part-00000.parquet", "part-00001.parquet", "part-00003.parquet"), names)
+    ok(s, s".table back $out")
+    assertEquals(threeFilesCsv, ok(s, "SELECT * FROM back"))
+    // An aggregate is one partition, and one file.
+    val one = dir.resolve("parts-out/one")
+    assertEquals(lines(s"Wrote 1 row to $one (1 file)"), run(s,
+      s"COPY (SELECT COUNT(*) AS n FROM many) TO '$one' (FORMAT parquet, PER_PARTITION_OUTPUT true)").err)
+  }
+
+  @Test def perPartitionOutputRefusesWhatItCannotWrite(): Unit = {
+    val s = session()
+    val full = dir.resolve("full")
+    file("full/x.txt", "taken")
+    assertTrue(error(s, s"COPY t TO '$full' (FORMAT parquet, PER_PARTITION_OUTPUT true)")
+      .contains("is a directory that holds files"))
+    assertTrue(error(s, s"COPY t TO '${dir.resolve("full/x.txt")}' (FORMAT parquet, PER_PARTITION_OUTPUT true)")
+      .contains("is a file; COPY TO with PER_PARTITION_OUTPUT true writes a directory"))
+    assertTrue(error(s, s"COPY t TO '${dir.resolve("csvparts")}' (FORMAT csv, PER_PARTITION_OUTPUT true)")
+      .contains("writes parquet files; a CSV result is written as one file"))
+    assertTrue(error(s, s"COPY t TO '${dir.resolve("p")}' (FORMAT parquet, PER_PARTITION_OUTPUT maybe)")
+      .contains("must be true or false"))
+    assertTrue(error(s, s"COPY t TO '$dir'").contains(
+      "is a directory; COPY TO writes one file, or a directory of parquet files with (FORMAT parquet, PER_PARTITION_OUTPUT true)"))
+    assertFalse(Files.exists(dir.resolve("csvparts")))
+  }
+
+  /** A partition that fails stops the others and leaves no part file, nor
+    * the directory the COPY made; an empty directory that was there stays,
+    * empty. A cancelled COPY writes nothing either. */
+  @Test(timeout = 60000) def aFailedOrStoppedPerPartitionCopyLeavesNothing(): Unit = {
+    val s = new QuerySession
+    val served = new AtomicInteger
+    withParts(s, "failing", 4, served,
+      (p, k) => if (p == 0 && k == 3) throw new IllegalStateException("partition 0 holds a bad value"))
+    val made = dir.resolve("made/parts")
+    val r = run(s, s"COPY failing TO '$made' (FORMAT parquet, PER_PARTITION_OUTPUT true)")
+    assertFalse(r.ok)
+    assertEquals(lines("Error: partition 0 holds a bad value"), r.err)
+    assertFalse(Files.exists(dir.resolve("made")))
+    val _ = settledAfterReturn(served)
+    val empty = Files.createDirectories(dir.resolve("empty"))
+    assertFalse(run(s, s"COPY failing TO '$empty' (FORMAT parquet, PER_PARTITION_OUTPUT true)").ok)
+    assertTrue(Files.isDirectory(empty))
+    assertEquals(0L, Files.list(empty).count())
+    // Stopped: every partition without end, and the run cancelled part way.
+    val cancel = new Cancel
+    val stopped = new AtomicInteger
+    withParts(s, "endless", 4, stopped, (_, _) => if (stopped.get >= 30) cancel.cancel())
+    val target = dir.resolve("stopped")
+    val c = run(s, s"COPY endless TO '$target' (FORMAT parquet, PER_PARTITION_OUTPUT true)", cancel = cancel)
+    assertFalse(c.ok)
+    assertEquals("", c.err)
+    assertFalse(Files.exists(target))
   }
 
   @Test(timeout = 30000) def aStatementStopsWhenItsOutputIsClosed(): Unit = {

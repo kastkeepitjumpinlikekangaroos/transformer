@@ -2137,7 +2137,10 @@ ship a fix or move something from "not done" to "done".
   gone (`| head`) raises, keeping only `checkError`'s flag; so `transformer
   query --format csv "SELECT * FROM big" | head` went on reading every row,
   minutes for polymarket's 326M-row day. `Io.printing` asks `checkError` before
-  each batch it prints and stops the statement as Ctrl-C does.
+  each batch it prints and stops the statement as Ctrl-C does; a table and
+  markdown of several partitions, which print only once every partition is
+  read, ask it before they read (`Io.stopIfClosed`), so a script piped into
+  `head` stops at its next statement.
 - **A parquet string column's intern cache had no bound.** Its keys are slices
   of page buffers, so a column whose values never repeat (a JSON document per
   row) kept every value of a row group and every page of it: polymarket's
@@ -2150,6 +2153,30 @@ ship a fix or move something from "not done" to "done".
   thread that prints, as the shell first did, left the query's pool tasks
   running after the prompt returned: a three-way self-join ran the JVM out of
   heap a few seconds after Ctrl-C and took the shell with it.
+- **A bounded queue between the pool and a consumer is 02b again.** The
+  obvious way to read a result's partitions in parallel and print them in
+  order is producer tasks putting batches into an `ArrayBlockingQueue` that the
+  printing thread takes from. In JDK 21, `ArrayBlockingQueue`'s and
+  `LinkedBlockingQueue`'s `put` and `take` wait in
+  `AbstractQueuedSynchronizer.ConditionObject.await`, and `SynchronousQueue` in
+  `LinkedTransferQueue`, and both call `ForkJoinPool.managedBlock` on a pool
+  worker: a slow consumer (a terminal, `| less`) parks a worker per producer,
+  and the pool makes spare threads for them, plans/bugfixes/02b's wedge.
+  `ParallelDrain` has no producer that waits: a fill reads a bounded chunk and
+  returns, and the consumer submits the next as it takes one (architecture §3,
+  conventions.md). Its partitions are claimed before any is read
+  (`ExecutedQuery.claim`): a failed read closes every partition no one has read
+  yet, and one a fill was about to read could be closed under it, its end read
+  as the partition's.
+- **What `transformer query` still does on one thread.** Every format's text
+  is made on the statement's thread, so CSV, JSON and the other ordered
+  formats gain only the decoding the pool takes off it: CSV of a 326M-row
+  orderbook day is bound by its text. A one-file `COPY` and `--output` encode
+  there too (`PER_PARTITION_OUTPUT true` writes a file a partition on the
+  pool instead). A partition's own batches are read in order, one fill after
+  another; work inside `execute(p)`, such as a sharded breaker's per-shard
+  build, runs as the engine runs it; and `DataJob.runValidations` reads a
+  validation's result through `batches`.
 
 ## Wrong answers the I/O properties found (2026-10-14, all fixed)
 
@@ -3207,8 +3234,9 @@ choose it, and "since v1" one the engine has had from the start.
   CLI alike, so a job's DAG and lineage name every file it reads. The CLI's own
   statements (`CREATE VIEW`, `DROP VIEW`, `COPY ... TO`) wrap a query rather
   than extend the dialect: there is no `COPY ... FROM`, `CREATE TABLE`, or
-  `INSERT`, and `COPY` writes one file, not a directory of part files with a
-  `_run.json`.
+  `INSERT`, and `COPY` writes one file, or with `PER_PARTITION_OUTPUT true` a
+  directory of a parquet file a partition with no `_run.json`, never CSV part
+  files.
 - **No bytecode-level optimizations.** Hot loops use `while` and indexed
   arrays. That's enough.
 - **Heap is not fully exercised under the default config.** Each in-flight

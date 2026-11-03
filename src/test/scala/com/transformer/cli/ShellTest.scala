@@ -52,7 +52,16 @@ class ShellTest {
     assertTrue(out.toString(UTF_8).contains("{\"one\":1}\n"))
   }
 
-  @Test def ctrlCStopsTheRunningStatementAndTheShellReadsOn(): Unit = {
+  @Test def ctrlCStopsTheRunningStatementAndTheShellReadsOn(): Unit =
+    ctrlCStops("SELECT x, COUNT(*) AS n FROM endless GROUP BY x;\n")
+
+  /** A table of two partitions read at once, which prints only once both are
+    * read: Ctrl-C stops both. */
+  @Test def ctrlCStopsATableReadingSeveralPartitions(): Unit = ctrlCStops("SELECT x FROM endless;\n")
+
+  /** Ctrl-C while `statement` reads a table of two partitions without end
+    * stops it, says so, and the shell runs the next statement. */
+  private def ctrlCStops(statement: String): Unit = {
     val session = new QuerySession
     val started = new CountDownLatch(1)
     val rows = Schema(Vector(Field("x", DataType.IntType)))
@@ -74,7 +83,7 @@ class ShellTest {
     val t = terminal(in, out)
     val shell = new Thread(() => Shell.run(session, t, new PrintStream(err, true, "UTF-8"), None))
     shell.start()
-    toShell.write("SELECT x, COUNT(*) AS n FROM endless GROUP BY x;\n".getBytes(UTF_8))
+    toShell.write(statement.getBytes(UTF_8))
     toShell.flush()
     assertTrue("the statement never read", started.await(30, TimeUnit.SECONDS))
     t.raise(Terminal.Signal.INT)

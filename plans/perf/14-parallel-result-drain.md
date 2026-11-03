@@ -1,11 +1,14 @@
 # Plan 14: Read a printed result's partitions in parallel
 
-> Status: **not started** (written 2026-11-01 against `32e89b1`: top-n landed
-> in `a87f97f`, `--spill` and `QuerySession.optionsFor` in `a408d07`, plan 13
-> in `32e89b1`) · six questions for the user, each with a recommended answer
-> · Effort: 3-4 days, one more for Q2 · Risk: medium: the CLI's read path
-> becomes concurrent, every way a statement stops must stop all of it, and
-> every format must print byte for byte what it prints now
+> Status: **done, but for CSV part files in Step 4, held** (landed
+> 2026-11-03 in one commit on `881de64`, an overnight run; see "What landed"
+> at the end). Written 2026-11-01 against `32e89b1`: top-n landed in
+> `a87f97f`, `--spill` and `QuerySession.optionsFor` in `a408d07`, plan 13 in
+> `32e89b1` · six questions for the user, each taken overnight on its
+> recommended answer, none yet confirmed by the user · Effort: 3-4 days, one
+> more for Q2 · Risk: medium: the CLI's read path becomes concurrent, every
+> way a statement stops must stop all of it, and every format must print byte
+> for byte what it prints now
 
 ## Goal
 
@@ -384,6 +387,175 @@ producer that waits. After plan 13 a broadcast join reaches the CLI as its
 probe side's 18 partitions, read in parallel here with the lazy probe inside
 fills; both plans touch `QueryConsole` (its Step 5, this Step 3): the second
 to land keeps one drain.
+
+## What landed (2026-11-03, overnight)
+
+All four steps, in one commit on `881de64` (the overnight run's orchestrator
+asked for one commit for the plan, not one a step), but for the CSV half of
+Step 4, held (below).
+
+- **Step 1.** `core/ParallelDrain.scala`: `Stop` (`stopped`, `stop`),
+  `inFlight` (the partitions, `Scheduler.parallelism`, the processors and
+  `maxHeap / 256 MB`, whichever is fewest: 8 here at `-Xmx2g`), `eachPartition`
+  (tasks taking the next untaken partition from an `AtomicInteger`, results in
+  partition order, the caller waiting in `Submitted.await` for every task),
+  and the failure record (the lowest-numbered partition's failure that is no
+  stop, through `Scheduler.rethrowable`). `ExecutedQuery.claim` (new) and
+  `partition`'s scaladoc ("one thread at a time"). `Cancel.child()` and
+  `optionsFor(stop)`; `Cancel.drainStop`. `ResultPrinter.print(io, q, stop,
+  ...)`: a table of several partitions through `eachPartition` with
+  `TableSlices`, markdown through `eachPartition`, both after
+  `Io.stopIfClosed`; one partition, and the listings, as before.
+- **Step 2.** `ParallelDrain.inOrder` (fills of `ChunkBatches` = 8 batches, a
+  window of `inFlight` partitions, nothing submitted before the first
+  `hasNext`, `close()` stopping, waiting for every fill and closing every
+  partition); line, csv, tsv, json, jsonl, `COPY` and `--output` through it,
+  closed in a `finally` before the query.
+- **Step 3.** `QueryConsole.runQuery` through `eachPartition`, with a stop of
+  its own in its `ExecutionOptions`. Checked headless under Monocle (the
+  plan's "by hand"; see Measurements).
+- **Step 4.** `COPY (query) TO 'dir' (FORMAT parquet, PER_PARTITION_OUTPUT
+  true)` through `ParquetWriter.writePartitioned`: a new or empty directory
+  (a file, or a directory holding files, refused), `parquet_write_parallelism`
+  accepted with it only, partitions claimed and wrapped to cancel the
+  statement's stop at a failure, no `_run.json`, every directory it made
+  removed when it fails or stops, `Wrote N rows to dir (k files)`.
+  `QuerySession.Help` says it.
+- **Tests.** `core:parallel_drain_test` (a pool of two) and
+  `core:parallel_drain_serial_test` (one), each pinned by its `jvm_flags`;
+  `cli_test` gained the byte-for-byte cases (every format, partitions of 0, 1,
+  H - 1, H, H + 1 and many rows, `maxRows` 0, 1, 2, 3, 40 and past the total),
+  the slow first partition before 10,000 one-row ones, cancel and a closed
+  output over four partitions, a failing partition, a table after a closed
+  output, `LIMIT`, `COPY` and `--output` of several partitions, the directory
+  form and its refusals and failures, and Ctrl-C of a table in the shell.
+
+### Overnight decisions
+
+Taken overnight as recommended, not yet confirmed by the user:
+
+- **Q1** (what a failing partition stops): everything at once; the
+  lowest-numbered partition's failure that is no stop is said; an ordered
+  format may print fewer rows before it. Once the run's `Cancel` is set
+  (Ctrl-C, a closed output), a failure met on the way out says nothing
+  (`QuerySession.run`), as "with the session's `Cancel` set, the stop wins".
+- **Q2** (a directory of part files): yes, behind `PER_PARTITION_OUTPUT true`,
+  parquet only for now (CSV held, below).
+- **Q3** (one file written in parallel): a follow-up, not done.
+- **Q4** (where the drains live): `core`.
+- **Q5** (the console): `QueryConsole` through `eachPartition` with a stop of
+  its own.
+- **Q6** (order with plan 13): Steps 1 and 2 land first; plan 13 is still
+  unstarted.
+
+Calls of my own, for the user to look at:
+
+- **A table's slices hold values, not cells.** The design's table said each
+  partition gives "its first H and last T rows as cells". Making a cell's text
+  is formatting text, which stop-and-ask (c) reserves for the user, so each
+  partition keeps its first and last rows as the values its batches hold
+  (whole batches by reference, a part of one copied into a batch of the same
+  vector types), and the statement's thread makes the text of the rows shown,
+  at most `maxRows` of them, once every partition is read. Byte for byte the
+  same; it also makes fewer cells than the sequential table, which made the
+  last T rows of every batch. Markdown keeps every batch, then makes its
+  text as before.
+- **The pruning keeps two Fenwick trees** of the partitions' counts (in order
+  and reversed), so each finished partition finds, in log time, the
+  partitions whose first rows and last rows can no longer show, and lets go
+  of them: a slow first partition before 10,000 one-row ones leaves at most
+  400 rows held in the test, where keeping every finished partition's first
+  and last rows would hold 20,000.
+- **`ExecutedQuery.claim`, a new method.** A failed read closes every
+  partition no one has read yet (plans/testing/17's close protocol), and with
+  partitions read on other threads that close can land on a partition a fill
+  is about to read, so its end reads as the partition's, or the close races
+  the read. Each drain claims every partition before it reads one, and closes
+  them itself once no thread reads them; `DataJob`, which never claims, is as
+  it was.
+- **COPY's own options are named in capitals in messages** (`FORMAT`,
+  `PER_PARTITION_OUTPUT`), the writer's as `output.json` spells them;
+  `parquet_write_parallelism` on a one-file COPY now says it needs
+  `PER_PARTITION_OUTPUT true` (it said the option was unknown).
+- **A COPY to a directory removes every directory it made** when it fails,
+  the target and each parent it lacked, not only the target.
+- **The console stops a query's other partitions only at a failure**; a
+  query superseded by a newer one still runs to its end in the background,
+  as before.
+- **The one-partition paths are today's code**: a table or markdown of one
+  partition prints through the sequential printer over its batches, which
+  stays as the reference the byte-for-byte tests compare against.
+
+### Held for the user
+
+- **CSV part files** (`COPY ... (FORMAT csv, PER_PARTITION_OUTPUT true)`):
+  `CsvWriter.writePartitioned` makes each value's CSV text on a pool thread,
+  which stop-and-ask (c) reserves, so the option is refused for CSV ("writes
+  parquet files; a CSV result is written as one file"). Allowing it is the
+  writer's existing path: drop the refusal in `QuerySession.writeOptions` and
+  choose `CsvWriter.writePartitioned` in `writeParts`.
+
+### Found on the way
+
+- **Every pool worker is named `transformer-worker-0`.** `Scheduler`'s thread
+  factory names a worker by `getPoolIndex`, which is 0 until the worker
+  registers with the pool as it starts, after the factory has named it. Thread
+  dumps (the DAG fuzzer's watchdog's) show one name for every worker, and
+  `Chaos.lastPoints`, keyed by thread name, keeps one entry for them all. Not
+  fixed here (outside this plan); `parallel_drain_test` tells threads apart by
+  id.
+
+### Measurements
+
+The 2026-03-06 orderbook day (2.1 GB, 326M rows, 11 columns, 18
+partitions), JDK 21 (bazel's remotejdk21), Apple M4, 8 cores, 16 GB, one run
+at a time, each twice, the second kept; peak RSS is `/usr/bin/time -l`'s
+maximum resident set size. "Before" is the base commit `881de64`'s jar,
+measured the same morning: the plan's 57 s and 1.0 GB were measured at
+`32e89b1` on 2026-11-01, and at `881de64` the same command took 58.2 s and
+0.52 GB.
+
+| Statement | Before (`881de64`) | After |
+|---|---|---|
+| `SELECT * FROM ob`, table, `-Xmx2g` (K = 8) | 58.2 s, 0.52 GB | 16.0 s, 1.02 GB (3.6x) |
+| the same at `-Xmx1g` (K = 4) | | 20.8 s, 0.91 GB |
+| `SELECT market_id, COUNT(*) AS n FROM ob GROUP BY market_id` | 5.1 s, 0.41 GB | 5.0 s, 0.51 GB |
+| `--format csv`, into `/dev/null` | 265.4 s, 0.43 GB | 206.3 s, 0.76 GB (1.29x) |
+| `COPY (SELECT * FROM ob) TO 'ob.parquet'` | 252.2 s, 0.71 GB | 197.7 s, 0.82 GB (1.28x); the same 2,954,505,885 bytes |
+| `COPY ... (FORMAT parquet, PER_PARTITION_OUTPUT true)` | | 72.6 s, 1.95 GB; 18 files, 2.9 GB (3.5x the one-file `COPY`) |
+
+- **Step 1** lands at 3.6x: under the plan's 6x bound for 18 partitions in
+  three waves of 8, over its "under 3x, profile before tuning" line, so
+  nothing was tuned. No `OutOfMemoryError` at `-Xmx2g` or `-Xmx1g`; the
+  256 MB a reader stands.
+- **The ordered formats gain far less** than the plan's "2x for few large
+  partitions": decoding was about a fifth of CSV's time (the table's 58 s
+  inside CSV's 265 s), and the rest is CSV's text, made on the statement's
+  thread. A one-file `COPY` is the same with parquet-mr's encoding. Q3, one
+  file written in parallel, is the way past it; `PER_PARTITION_OUTPUT true`
+  already is for a directory.
+- **Byte for byte.** The base jar and the new one print the same bytes
+  (`shasum`) for `SELECT * FROM ob WHERE timestamp_received % 50000 = 7`
+  (5,958 rows drawn from all 18 partitions) in every format: table at
+  `--max-rows` 0, 1, 2, 3, 40, 5957, 5958 and 5959, line, csv, tsv, json,
+  jsonl and markdown, and a `COPY` to CSV and `--output` to CSV (18 outputs
+  and their stderr); and for each of jaffle's 21 tables and inputs from its
+  run (`--job`), in table, csv, json, markdown, line and table of every row
+  (126 outputs, all equal).
+- **Step 3 by hand**, headless under Monocle (docs/testing.md's recipe): the
+  job GUI's SQL console over a job input of four CSV files (100,000 rows)
+  said `100,000 row(s) • 116 ms (showing the first 1,000)`, rows 0 to 999 in
+  order; a data viewer query tab over that job's table of four part files
+  said `100,000 row(s) • 637 ms (showing the first 1,000)`, the same rows; a
+  query whose every partition overflowed said `Query failed — see error
+  popup.` and returned.
+- **Gates.** `bazel test //...` 93/93, and 93/93 again under
+  `--config=serial`; the two new targets and `cli_test` green under batch1,
+  batch2, sharded, serial, zone, hashzero, verify, leaks and chaos;
+  `scheduler_test` and `exchange_deadlock_stress_test` green in the suite;
+  the jaffle-shop jar 15/15, every validation passing; the polymarket jar 14
+  Succeeded, 2 ValidationFailed, 1 Skipped, 0 Failed, exit 0 (86 s, 5.4 GB at
+  `-Xmx12g`).
 
 ## Launch prompt
 

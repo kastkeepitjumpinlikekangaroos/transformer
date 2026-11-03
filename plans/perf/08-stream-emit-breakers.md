@@ -7,8 +7,10 @@
 > output without a queue; since plans/testing/05 W5 a join with no equality
 > pairs (`JoinExec.executePairing`) already emits wave by wave. Plan 13
 > narrows this plan's queue to an ordered parallel drain for one-stream
-> readers, and [plan 14](14-parallel-result-drain.md) is that drain, built
-> without a queue (JDK 21's queue waits call `ForkJoinPool.managedBlock`).
+> readers, and [plan 14](14-parallel-result-drain.md) is that drain, landed
+> without a queue as `core/ParallelDrain.inOrder` (2026-11-03): JDK 21's
+> queue waits call `ForkJoinPool.managedBlock`, so its fills each read a
+> bounded chunk and return, and nothing in the pool waits for the consumer.
 > Phases 1, 4 and 5 stand. Per this plan's own launch prompt, do not start it until a
 > profile shows the parquet writer genuinely starved by breaker CPU (writer
 > wall time ≥10% of total).

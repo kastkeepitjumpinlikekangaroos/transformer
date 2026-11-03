@@ -84,3 +84,43 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+# ParallelDrain (plans/perf/14): a result's partitions read on the pool, each
+# partition's result in order (eachPartition) or every batch in order with a
+# bounded read-ahead (inOrder), over synthetic partitions that record each
+# pull and its thread. Order by identity across partition counts, windows and
+# chunks; no two pulls of a partition overlapping though its fills move
+# threads; a stalled consumer holding at most readAhead + 1 chunks and no pool
+# thread; stops and closes leaving nothing running; a failure thrown as itself,
+# the lower-numbered of two, never replaced by a stop, an Error wrapped; and
+# partitions that fan out on the pool draining from outside and inside it.
+# Each pool size in a JVM of its own (Scheduler.parallelism is read once);
+# parallel_drain_test.parallelism repeats it for the test to check.
+scala_junit_test(
+    name = "parallel_drain_test",
+    srcs = ["ParallelDrainTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = [
+        "-Dtransformer.scheduler.parallelism=2",
+        "-Dparallel_drain_test.parallelism=2",
+    ],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The same on a pool of one thread.
+scala_junit_test(
+    name = "parallel_drain_serial_test",
+    srcs = ["ParallelDrainTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = [
+        "-Dtransformer.scheduler.parallelism=1",
+        "-Dparallel_drain_test.parallelism=1",
+    ],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)

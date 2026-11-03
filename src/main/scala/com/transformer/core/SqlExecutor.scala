@@ -13,7 +13,7 @@ import com.transformer.core.metrics.QueryMetrics
   *     spill, set per-operator thresholds, etc.
   *   - `execute(sql, catalog)` is a `final` shim that delegates with
   *     [[ExecutionOptions.Default]]. Callers that don't carry per-task config
-  *     (GUI SQL Console, ad-hoc tests) use it without thinking about opts.
+  *     (ad-hoc tests) use it without thinking about opts.
   */
 trait SqlExecutor {
   def execute(sql: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery
@@ -28,7 +28,8 @@ trait SqlExecutor {
   * [[ColumnarBatch]]es (e.g. one input file, one Parquet row group). Callers can
   * either drain everything sequentially via [[batches]] or consume partitions
   * individually via [[partition]] — the latter is what the multi-file writer uses
-  * to fan out one output file per partition in parallel.
+  * to fan out one output file per partition in parallel, and [[ParallelDrain]]
+  * to read a whole result on several threads.
   *
   * `rowsProduced` is filled in lazily as batches are pulled; it is safe to
   * read from any thread once all partitions have been drained (it uses a
@@ -42,9 +43,10 @@ trait SqlExecutor {
   *
   * Its consumer closes it ([[close]]) once it stops reading, however it
   * stops: a query that was read to its end has released what it opened, and a
-  * read that fails or is stopped closes its partition and every partition not
-  * yet read as the failure goes by, but one read in part holds its files and
-  * spill directories until it is closed ([[Closing]]).
+  * read that fails or is stopped closes its partition and every partition no
+  * one has read or claimed ([[claim]]) as the failure goes by, but one read in
+  * part holds its files and spill directories until it is closed
+  * ([[Closing]]).
   */
 final class ExecutedQuery(
     val schema: Schema,
@@ -52,12 +54,13 @@ final class ExecutedQuery(
 ) extends AutoCloseable {
   private val _rows = new LongAdder()
 
-  /** Whether each partition has been read, or closed unread. */
+  /** Whether each partition has been read or claimed, or closed unread. */
   private val started = Array.fill(partitionSources.length)(new java.util.concurrent.atomic.AtomicBoolean(false))
 
   /** A read of a partition failed or was stopped: the partitions no one has
     * read yet are closed, as nothing will read them now. One being read on
-    * another thread is its reader's to close, or [[close]]'s. */
+    * another thread, or claimed by a reader ([[claim]]), is its reader's to
+    * close, or [[close]]'s. */
   private def failed(): Unit =
     partitionSources.indices.foreach { j =>
       if (started(j).compareAndSet(false, true)) Closing.close(partitionSources(j))
@@ -71,9 +74,14 @@ final class ExecutedQuery(
   def numPartitions: Int = partitionSources.length
 
   /** Counted view of partition `i`. The underlying source iterator is consumed
-    * lazily; consuming partitions from multiple threads concurrently is safe so
-    * long as each partition is drained by exactly one thread (the underlying
-    * physical-plan iterator is not itself thread-safe).
+    * lazily. Partitions may be read on several threads at once, each by one
+    * thread at a time (the underlying physical-plan iterator is not itself
+    * thread-safe): one partition may move from thread to thread between
+    * reads, each finished before the next begins, as a pool task's completion
+    * comes before the next task is submitted ([[ParallelDrain]], the pairing
+    * join's waves). That holds because no iterator keeps state tied to the
+    * thread that reads it, and no batch is changed once `next()` has returned
+    * it.
     */
   def partition(i: Int): Iterator[ColumnarBatch] = new Iterator[ColumnarBatch] with AutoCloseable {
     private val src = partitionSources(i)
@@ -90,6 +98,16 @@ final class ExecutedQuery(
       b
     }
     def close(): Unit = Closing.close(src)
+  }
+
+  /** Partition `i` as [[partition]] gives it, claimed by a reader that reads
+    * partitions on several threads ([[ParallelDrain]]): a failure reading
+    * another partition does not close it, as it closes a partition no one has
+    * read yet, since that close could come while a thread was reading it. Its
+    * reader closes it, and [[close]] does. */
+  def claim(i: Int): Iterator[ColumnarBatch] = {
+    started(i).set(true)
+    partition(i)
   }
 
   /** Release what every partition holds, read or not: the files its scans

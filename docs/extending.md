@@ -480,7 +480,15 @@ README's [Querying files](../README.md#querying-files-transformer-query).
   `OutputFormat.All`, which `--format`, `.mode` and their messages read, and a
   case in `ResultPrinter.print`. Pull the batches as they come rather than
   holding them, as every format but `markdown` does, and write a value's text
-  as `CsvValues.format` does, so every format agrees on what a value is.
+  as `CsvValues.format` does, so every format agrees on what a value is. The
+  query-level `ResultPrinter.print` picks how its partitions are read
+  (architecture §3): a format that prints its rows in order prints from
+  `ParallelDrain.inOrder`'s iterator, closed in a `finally`, and needs nothing
+  more; one that prints only once it has read every row can read each
+  partition on its own through `eachPartition`, as a table and markdown do,
+  keeping values, not text, and making the text on the statement's thread
+  once all are read, so its output is byte for byte what it prints from the
+  batches in order (`ResultPrinterTest` compares the two).
 - **A dot command**: a case in `QuerySession.dot` and an entry in
   `QuerySession.DotCommands` (its syntax and what it does), which `.help`, its
   usage error and the shell's completion all read. A command that lists
@@ -490,8 +498,11 @@ README's [Querying files](../README.md#querying-files-transformer-query).
   the front of the statement in `SqlScript.sqlStatement` with its `Lexer`
   (keep the query inside as its written text, a substring between two tokens,
   never JSqlParser's rendering), and a case in `QuerySession.execute`. Run any
-  query in it through `withViews`, so it reads views, and with
-  `optionsFor(io.cancel)`, so Ctrl-C stops it and `.spill` applies; wrap the batches it pulls in
+  query in it through `withViews`, so it reads views, and with a stop of its
+  own, `io.cancel.child()`, in `optionsFor(stop)`, so Ctrl-C stops it,
+  `.spill` applies and a failing partition stops the rest; read its partitions
+  through a drain (`ParallelDrain.inOrder` with `stop.drainStop`, closed in a
+  `finally` before the query is closed), and wrap the batches it pulls in
   `io.cancel.watch`. The engine's dialect stays as it is: what the CLI reads is
   only what wraps a query.
 - **A flag**: a case in `Cli.parseQuery` (`QueryFlags` for one that takes a

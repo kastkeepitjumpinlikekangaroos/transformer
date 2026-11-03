@@ -10,8 +10,9 @@ other six with one optional, evidence-gated phase still open. Plan 06 is
 partial exactly as its own file describes, and plan 08 is deliberately
 unstarted pending profiler evidence. Plans 13-15 were written
 2026-11-01, after `transformer query` over the polymarket files found what
-a 2 GB heap cannot do and how far it trails DuckDB; they are unstarted,
-and their evidence is already in their files. Read the status column
+a 2 GB heap cannot do and how far it trails DuckDB. Plan 14 landed
+2026-11-03, overnight, but for one part held for the user; 13 and 15 are
+unstarted, and their evidence is already in their files. Read the status column
 before starting anything here — the standing failure mode for this
 directory is a session re-implementing work that already exists and is
 covered by tests.
@@ -36,7 +37,7 @@ Verified against `src/main` on 2026-09-06; rows 01 and 08 rechecked, and
 | [11](11-benchmarking.md) | Microbench + macro bench + regression guard | done | `benchmarks/{micro,macro,baseline}`, `docs/benchmarking.md` |
 | [12](12-cte-materialization.md) | Materialize multiply-referenced CTEs once | done | `sql/exec/CteResolver.scala` + `sql/plan/PendingCteView.scala` |
 | [13](13-stream-hash-join-output.md) | Stream a hash join's output | not started | `JoinExec`'s keyed paths (`executeCollapsing`, `executePerShard`, `executeGraceHash`) hold their whole output, a shard's when sharded, before their first batch; a 120M-row join over one polymarket orderbook day ran a 2 GB heap out (README Limitations: "A join holds its whole result in memory.") |
-| [14](14-parallel-result-drain.md) | Read a printed result's partitions in parallel | not started | `ExecutedQuery.batches` is `(0 until numPartitions).iterator.flatMap(partition)`, pulled by the CLI's one statement thread: `SELECT *` over a 326M-row orderbook day takes 57 s where a grouped aggregate takes 5-7 s |
+| [14](14-parallel-result-drain.md) | Read a printed result's partitions in parallel | done, but CSV part files (held) | `core/ParallelDrain.scala` (`eachPartition`, `inOrder`, no queue); `ResultPrinter.print(io, q, ...)` reads a table and markdown through `eachPartition` (`TableSlices`) and every other format, `COPY` and `--output` through `inOrder`; `QueryConsole.runQuery` through `eachPartition`; `COPY ... (FORMAT parquet, PER_PARTITION_OUTPUT true)`; `core:parallel_drain_test`, `parallel_drain_serial_test` |
 | [15](15-typed-sort-keys.md) | Sorts compare typed keys, not boxed rows | not started | `SortExec.rowOrdering` builds two `RowView`s and evaluates every key per comparison over `Array[Any]` rows; a spilling sort of 132M rows takes 333 s (DuckDB 95 s) and without spill runs a 2 GB heap out |
 
 ## What's actually left
@@ -47,15 +48,25 @@ Verified against `src/main` on 2026-09-06; rows 01 and 08 rechecked, and
   bounded amount of output, never its whole result. Six questions for the
   user, each with a recommended answer, are in the plan; Steps 1, 3 and 4
   need none of them answered.
-- **14 — read a printed result's partitions in parallel.** Two drains in
-  `core` that keep every wait a `Submitted.await` (no blocking queue: JDK
-  21's condition waits call `ForkJoinPool.managedBlock`, 02b's regression).
-  Six questions; Q6 suggests its Steps 1-2 land before plan 13's Step 2.
 - **15 — sorts compare typed keys.** Typed key columns, an `Int` index
   sort, row-for-row parity with today's `SortExec` until Q1. Supersedes
   plan 01 Phase 3. It also records a live bug: `SELECT DISTINCT ... ORDER
   BY RAND()` can fail with TimSort's "Comparison method violates its
   general contract!".
+
+**Held for the user, from plan 14** (landed 2026-11-03 in an overnight run;
+its file's "What landed" has the measurements and every call taken):
+
+- **CSV part files.** `COPY ... (FORMAT parquet, PER_PARTITION_OUTPUT true)`
+  writes a directory of parquet files; the CSV form of Q2 would format CSV
+  text on pool threads, which the plan's stop-and-ask (c) reserves, so CSV
+  is refused with that option until the user says otherwise.
+- **The six questions** were each taken on their recommended answer, and
+  wait for the user to confirm.
+- **Its follow-ups**: one file written in parallel (Q3), since a one-file
+  `COPY` stays bound by the thread that encodes it; and a validation counted
+  and sampled through `eachPartition`, which touches `DataJob`
+  (stop-and-ask (d)).
 
 **Optional and gated on evidence.** None of the items below is blocking,
 and several were written as "only if profiling says so" from the start.
@@ -122,7 +133,7 @@ Project-wide rules from `CLAUDE.md`:
 
 **Read the status table first.** Most prompts below launched work that
 has since landed; they are kept as a record of how each plan was run, not
-as an invitation to run it again. Each is marked. Only 08 and 13-15 are
+as an invitation to run it again. Each is marked. Only 08, 13 and 15 are
 still live as written, and 08 is gated on profiling — for the optional
 phases listed under "What's actually left", the current prompt lives at
 the bottom of that plan's own file.
@@ -586,7 +597,7 @@ Report: the polymarket query's wall time and peak RSS at -Xmx2g after Step 2
 and after Step 6, beside the aggregate-first form's 10 s and 0.55 GB.
 ```
 
-### 14 — Read a printed result's partitions in parallel (not started; live)
+### 14 — Read a printed result's partitions in parallel (landed 2026-11-03; historical — do not re-run. Its held part, CSV part files, is in the plan file's "What landed")
 
 ```
 Read plans/perf/14-parallel-result-drain.md and implement it in step order,

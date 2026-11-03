@@ -561,8 +561,8 @@ final class ParquetPartitionIterator(
   private val stringInternCache: Array[java.util.HashMap[org.apache.parquet.io.api.Binary, String]] =
     new Array[java.util.HashMap[org.apache.parquet.io.api.Binary, String]](columnDescriptors.length)
   private val internedBytes: Array[Long] = new Array[Long](columnDescriptors.length)
-  // Strict UTF-8, for a binaryAsString column; one an iterator, which is read
-  // by one thread.
+  // Strict UTF-8, for a binaryAsString column; one an iterator, which one
+  // thread at a time reads.
   private lazy val utf8: java.nio.charset.CharsetDecoder = java.nio.charset.StandardCharsets.UTF_8.newDecoder()
     .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
     .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)

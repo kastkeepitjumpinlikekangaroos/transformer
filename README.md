@@ -280,7 +280,17 @@ java -jar transformer.jar query \
     options a table's `output.json` takes for that format:
     `COPY (SELECT ...) TO 'out.csv' (delimiter '|', header false)`,
     `COPY orders TO 'orders.parquet' (compression 'gzip')`. It says
-    `Wrote 5 rows to out.csv` on stderr.
+    `Wrote 5 rows to out.csv` on stderr. With `PER_PARTITION_OUTPUT true` it
+    writes a new or empty directory of parquet files instead, one for each of
+    the result's partitions that has rows, written in parallel as a job writes
+    a table: `COPY (SELECT ...) TO 'day=1' (FORMAT parquet,
+    PER_PARTITION_OUTPUT true)` writes `day=1/part-00000.parquet`, ..., a file
+    for each CSV file a scan reads or each ~256 MB of a parquet file's row
+    groups, and one for an aggregate. It takes `parquet_write_parallelism`
+    too, and says `Wrote 5958 rows to day=1 (18 files)`. It writes no
+    `_run.json`, so `--table` reads the directory as its files in name order,
+    which is the result's order. A write that fails or is stopped leaves no
+    part file, nor a directory it made. CSV is written as one file only.
 - **Output.** A table heads each column with its name and type, puts numbers
   on the right, shows each value as the CSV writer writes it (NULL as `NULL`, a
   control character as an escape) and cuts one longer than 40 columns short.
@@ -291,7 +301,13 @@ java -jar transformer.jar query \
   file, `json` an array of objects and `jsonl` an object a line (numbers as
   numbers, NaN and the infinities as strings, every other value as a string),
   and `markdown` a table. `--output` writes the script's one query to a file,
-  as `COPY` does.
+  as `COPY` does. A result of several partitions (a scan of several files or
+  of a large parquet file) is read on several cores: a table and markdown read
+  its partitions at once and print once all are read, and every other format,
+  `COPY` and `--output` read the rows ahead and print or write them in order.
+  When one partition fails, the others stop and the statement says the
+  failure of the lowest-numbered partition that failed; an ordered format may
+  have printed fewer of the rows before it.
 - **Exit codes.** 0 when every statement ran, 1 when one failed or a table or
   the job could not be read, 2 for bad arguments. A statement whose output
   closes, as when it is piped into `head`, stops reading there, and the
@@ -2241,12 +2257,17 @@ JDK 21 or newer (tested through JDK 25).
   lineage only for runs whose records carry it: a run from before records
   listed their inputs shows its tables but not what they read. A cloud input
   is always drawn as coming from outside the folder.
-- **`transformer query` reads a result one partition at a time.** It prints a
-  result, and `COPY` and `--output` write one file, pulling its partitions one
-  after another, where a job's table writes a part file per partition in
-  parallel: an aggregate fans out across the cores, but `SELECT *` of 326M
-  polymarket rows prints in about a minute. Its queries spill only with
-  `--spill`.
+- **`transformer query` makes every value's text on one thread.** It reads a
+  result of several partitions on as many cores at once as the partitions, the
+  processors and the heap allow, a partition for each 256 MB of `-Xmx` (8 at
+  `-Xmx2g` on 8 cores, 4 at `-Xmx1g`): `SELECT *` of a 326M-row polymarket
+  orderbook day prints its table in 16 s at `-Xmx2g`, where it took a minute
+  read one partition after another. Every other format, `COPY` and `--output`
+  read ahead on the pool, a bounded number of batches, but print or write the
+  rows in order on one thread, which bounds them: CSV of that day takes about
+  3.5 minutes (4.5 before), and `COPY` to one parquet file about as long,
+  where `COPY ... (FORMAT parquet, PER_PARTITION_OUTPUT true)` writes its 18
+  files in parallel in about 70 s. Its queries spill only with `--spill`.
 - **A join holds its whole result in memory.** A hash join materializes every
   row it returns before the next operator sees one, and spill bounds only its
   inputs, not its result. Joining 326M orderbook rows to 124K markets (120M

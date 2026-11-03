@@ -1,7 +1,7 @@
 package com.transformer.gui
 
 import atlantafx.base.theme.{Styles, Tweaks}
-import com.transformer.core.{Catalog, MaterializedView, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, ExecutionOptions, MaterializedView, ParallelDrain, SqlExecutorRegistry}
 
 import javafx.geometry.{Insets, Orientation, Pos}
 import javafx.scene.control.{Button, Label, SplitPane, Tab, TabPane, Tooltip}
@@ -10,7 +10,7 @@ import javafx.scene.layout.{HBox, Priority, Region, VBox}
 import javafx.stage.Stage
 
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
@@ -25,9 +25,11 @@ import scala.util.control.NonFatal
   * `prepare` itself runs on the FX thread as the query starts, so it can read
   * the host's state there; the function it returns builds the catalog for the
   * query's text, on the worker, where reading files does not hold up the
-  * window. The result is materialized, so Persist can write it after; the
-  * grid shows its first [[DataGrid.PreviewRows]] rows. A query started later
-  * always wins over one still running.
+  * window. The result is materialized, so Persist can write it after, its
+  * partitions read on the pool at once ([[ParallelDrain.eachPartition]]), a
+  * failure in one stopping the rest; the grid shows its first
+  * [[DataGrid.PreviewRows]] rows. A query started later always wins over one
+  * still running.
   */
 final class QueryConsole(
     owner: () => Stage,
@@ -142,9 +144,14 @@ final class QueryConsole(
     val worker = new Thread(() => {
       val outcome = try {
         val start = System.nanoTime()
-        val executed = SqlExecutorRegistry.get.execute(sql, catalogFor(sql))
+        // The query's own stop, which its scans ask before each batch: a
+        // partition that fails stops the others through it.
+        val stopped = new AtomicBoolean(false)
+        val stop = ParallelDrain.Stop(() => stopped.get, () => stopped.set(true))
+        val executed = SqlExecutorRegistry.get.execute(sql, catalogFor(sql), ExecutionOptions(stopped = stop.stopped))
         val partitions =
-          try (0 until executed.numPartitions).map(p => executed.partition(p).toIndexedSeq)
+          try ParallelDrain.eachPartition(executed, ParallelDrain.inFlight(executed.numPartitions), stop)(
+            (_, batches) => batches.toIndexedSeq)
           finally executed.close()
         val mv = new MaterializedView(executed.schema, partitions)
         QueryConsole.Outcome.Success(mv, (System.nanoTime() - start) / 1000000L)

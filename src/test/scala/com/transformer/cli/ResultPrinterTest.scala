@@ -182,6 +182,115 @@ class ResultPrinterTest {
     assertEquals(lines("s = a,b", "i = 1", "d = 2.5", "b = true", "", "s = NULL", "i = NULL", "d = NaN", "b = false"),
       printed(typed, typedRows, OutputFormat.Line))
 
+  // ---- a result of several partitions, read on the pool ----------------------------------
+
+  private val partitionedFields = Vector(Field("n", DataType.IntType), Field("s", DataType.StringType),
+    Field("d", DataType.DoubleType), Field("q", DataType.DecimalType(9, 2)))
+  private val partitionedSchema = Schema(partitionedFields)
+
+  /** Row `g` of a partitioned result: NULLs, a value too long for a cell,
+    * control characters, a pipe, NaN, a wide character. */
+  private def partitionedRow(g: Int): Seq[Any] = Seq(
+    g,
+    if (g % 7 == 3) null
+    else s"v$g" + (if (g % 11 == 5) "x" * 50 else "") + (if (g % 13 == 4) "\n|\t" else "") +
+      (if (g % 17 == 6) chars(0x65E5) else ""),
+    if (g % 5 == 2) Double.NaN else g * 0.5,
+    if (g % 6 == 1) null else java.math.BigDecimal.valueOf(g.toLong, 2))
+
+  /** A result of partitions of `sizes` rows, `perBatch` rows a batch, its
+    * rows numbered across the partitions in order; the first sleeps `slow`
+    * ms before its first batch. */
+  private def partitioned(sizes: Seq[Int], perBatch: Int, slow: Long = 0L): ExecutedQuery = {
+    val starts = sizes.scanLeft(0)(_ + _)
+    val parts = sizes.indices.map { p =>
+      val batches = (starts(p) until starts(p + 1)).grouped(perBatch).map { rows =>
+        val b = new ColumnarBatch(partitionedSchema, rows.size)
+        rows.zipWithIndex.foreach { case (g, r) => partitionedRow(g).zipWithIndex.foreach { case (v, c) => b.column(c).setBoxed(r, v) } }
+        b.setNumRows(rows.size)
+        b
+      }
+      if (p == 0 && slow > 0) new Iterator[ColumnarBatch] {
+        private var slept = false
+        def hasNext: Boolean = {
+          if (!slept) { Thread.sleep(slow); slept = true }
+          batches.hasNext
+        }
+        def next(): ColumnarBatch = batches.next()
+      } else batches
+    }
+    new ExecutedQuery(partitionedSchema, parts)
+  }
+
+  /** What `print` writes for `q`, read on the pool, through a stream of
+    * `charset`. */
+  private def printedInParallel(q: ExecutedQuery, format: OutputFormat, maxRows: Int, width: Option[Int],
+      charset: String): String = {
+    val bytes = new ByteArrayOutputStream()
+    val io = new Io(new PrintStream(bytes, true, charset), new PrintStream(new ByteArrayOutputStream(), true, charset))
+    try ResultPrinter.print(io, q, io.cancel.child(), format, maxRows, width) finally q.close()
+    io.out.flush()
+    bytes.toString(charset)
+  }
+
+  /** What `print` writes for `q`'s batches in order, on this thread: the
+    * reference. */
+  private def printedInOrder(q: ExecutedQuery, format: OutputFormat, maxRows: Int, width: Option[Int],
+      charset: String): String = {
+    val bytes = new ByteArrayOutputStream()
+    val out = new PrintStream(bytes, true, charset)
+    try ResultPrinter.print(out, q.schema, q.batches, format, maxRows, width) finally q.close()
+    out.flush()
+    bytes.toString(charset)
+  }
+
+  /** Every format prints a result of several partitions, read on the pool,
+    * byte for byte as it prints its batches in order: partitions of 0, 1,
+    * H - 1, H, H + 1 and many rows, H the first rows a table shows, some
+    * empty, a row or seven a batch, every row or 1, 2, 3, 40 or past the
+    * total; a table also at a width its columns give way to, and in ASCII. */
+  @Test(timeout = 120000) def aResultOfSeveralPartitionsPrintsAsItsBatchesInOrderDo(): Unit =
+    for (perBatch <- Seq(1, 7); charset <- Seq("UTF-8", "US-ASCII")) {
+      for (maxRows <- Seq(0, 1, 2, 3, 40, 1000, 5000); width <- Seq(None, Some(50))) {
+        val h = if (maxRows == 0) 20 else (maxRows + 1) / 2
+        val sizes = Seq(0, 1, h - 1, h, h + 1, 0, 600, 2, 0, 1)
+        val where = s"table, maxRows $maxRows, width $width, $perBatch a batch, $charset"
+        assertEquals(where,
+          printedInOrder(partitioned(sizes, perBatch), OutputFormat.Table, maxRows, width, charset),
+          printedInParallel(partitioned(sizes, perBatch), OutputFormat.Table, maxRows, width, charset))
+      }
+      val sizes = Seq(0, 1, 19, 20, 21, 0, 600, 2, 0, 1)
+      for (format <- OutputFormat.All.filterNot(_ == OutputFormat.Table))
+        assertEquals(s"$format, $perBatch a batch, $charset",
+          printedInOrder(partitioned(sizes, perBatch), format, 40, None, charset),
+          printedInParallel(partitioned(sizes, perBatch), format, 40, None, charset))
+    }
+
+  /** Results of no partition, of one, and of several that are all empty
+    * print as they do in order. */
+  @Test def emptyResultsPrintAsInOrder(): Unit =
+    for (sizes <- Seq(Seq.empty[Int], Seq(0), Seq(5), Seq(0, 0, 0)); format <- OutputFormat.All)
+      assertEquals(s"$format of $sizes",
+        printedInOrder(partitioned(sizes, 2), format, 40, None, "UTF-8"),
+        printedInParallel(partitioned(sizes, 2), format, 40, None, "UTF-8"))
+
+  /** A slow first partition before 10,000 of a row each: the partitions
+    * finished while it reads let go of the rows that cannot show, so the
+    * table holds a bounded number of rows, not one or two a partition. */
+  @Test(timeout = 120000) def aSlowFirstPartitionLeavesTheRowsHeldBounded(): Unit = {
+    val sizes = 5 +: Seq.fill(10000)(1)
+    val bytes = new ByteArrayOutputStream()
+    val out = new PrintStream(bytes, true, "UTF-8")
+    val q = partitioned(sizes, 1, slow = 300L)
+    val slices =
+      try ResultPrinter.tableOfPartitions(out, q, ParallelDrain.inFlight(q.numPartitions),
+        new Cancel().drainStop, maxRows = 40, width = None)
+      finally q.close()
+    out.flush()
+    assertEquals(printedInOrder(partitioned(sizes, 1), OutputFormat.Table, 40, None, "UTF-8"), bytes.toString("UTF-8"))
+    assertTrue(s"the finished partitions held ${slices.mostRowsHeld} rows at once", slices.mostRowsHeld <= 400)
+  }
+
   @Test def formatsAreNamedInAnyCase(): Unit = {
     assertEquals(Some(OutputFormat.JsonLines), OutputFormat.named("JSONL"))
     assertEquals(None, OutputFormat.named("xml"))

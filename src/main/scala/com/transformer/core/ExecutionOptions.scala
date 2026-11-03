@@ -6,8 +6,8 @@ package com.transformer.core
   *
   * The defaults disable spill and metrics entirely — the only way a query
   * spills or emits a `_perf.json` is for the caller to explicitly construct
-  * non-default `ExecutionOptions`. Ad-hoc paths (GUI SQL Console, the 2-arg
-  * `SqlExecutor.execute` shim) always use `ExecutionOptions.Default`.
+  * non-default `ExecutionOptions`. The 2-arg `SqlExecutor.execute` shim uses
+  * `ExecutionOptions.Default`; the GUI's SQL console sets only `stopped`.
   *
   * @param spillEnabled
   *   Master switch for spill. When false, no operator touches the spill path
@@ -32,7 +32,9 @@ package com.transformer.core
   *   which fails the query wherever it is, so no operator reads another row.
   *   Work already holding its rows (a sort of what it has read) runs to its
   *   end first. Never, by default; `transformer query` stops a statement on
-  *   Ctrl-C through it.
+  *   Ctrl-C through it, and it and the GUI's SQL console stop the other
+  *   partitions of a query one of whose partitions failed
+  *   ([[ParallelDrain]]).
   */
 final case class ExecutionOptions(
     spillEnabled: Boolean = false,
@@ -57,7 +59,7 @@ object ExecutionOptions {
   val NeverStopped: () => Boolean = () => false
 
   /** Default options — spill disabled. Use this in any code path that doesn't
-    * carry per-task config (GUI SQL Console, tests that don't care). */
+    * carry per-task config (tests that don't care). */
   val Default: ExecutionOptions = ExecutionOptions()
 
   /** Config key for the master spill switch (read from `output.json`'s

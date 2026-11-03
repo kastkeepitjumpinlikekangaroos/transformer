@@ -1,8 +1,8 @@
 package com.transformer.cli
 
 import com.transformer.cli.SqlScript.{Piece, Statement}
-import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, DataType, ExecutionOptions, QueryStoppedException,
-  Schema}
+import com.transformer.core.{Catalog, CatalogView, ColumnarBatch, DataType, ExecutedQuery, ExecutionOptions,
+  OptionValues, ParallelDrain, QueryStoppedException, Schema}
 import com.transformer.gui.{JobSession, RunState, ViewKind}
 import com.transformer.job.{InputFilePath, InputResolver, TaskDag, TaskRunRecord}
 import com.transformer.read.csv.PathGlob
@@ -37,26 +37,48 @@ final class Io(val out: PrintStream, val err: PrintStream, val cancel: Cancel = 
       def next(): ColumnarBatch = watched.next()
     }
   }
+
+  /** Stop here, as [[printing]] stops before a batch, when `out` can take no
+    * more or the run was cancelled: for a result printed only once it is all
+    * read, so a script piped into `head` stops at its next statement. */
+  def stopIfClosed(): Unit = {
+    if (out.checkError()) cancel.cancel()
+    if (cancel.isCancelled) throw new QueryStoppedException
+  }
 }
 
 /** Stops a statement from another thread, as Ctrl-C in the shell does. The
   * engine's scans ask it before each batch they read ([[ExecutionOptions.stopped]]),
   * and so does the CLI before each batch it prints or writes: the statement
   * fails with a [[QueryStoppedException]] wherever it is, and a file it was
-  * writing is not written. */
-final class Cancel {
+  * writing is not written.
+  *
+  * A run's `Cancel` stops every statement of it; each statement runs with a
+  * [[child]] of its own, which stops it alone when one of its partitions
+  * fails ([[ParallelDrain]]). */
+final class Cancel private (parent: Cancel) {
+  def this() = this(null)
+
   @volatile private var cancelled = false
 
   def cancel(): Unit = cancelled = true
 
-  def isCancelled: Boolean = cancelled
+  /** Whether this, or the `Cancel` it is a child of, was cancelled. */
+  def isCancelled: Boolean = cancelled || (parent != null && parent.isCancelled)
 
   /** What a statement's scans ask before each batch ([[ExecutionOptions.stopped]]). */
-  val stopped: () => Boolean = () => cancelled
+  val stopped: () => Boolean = () => isCancelled
+
+  /** A stop for one statement: cancelled when it is, or when this is.
+    * Cancelling it leaves this as it was. */
+  def child(): Cancel = new Cancel(this)
+
+  /** This as a drain's stop: it asks [[stopped]], and stops by cancelling. */
+  def drainStop: ParallelDrain.Stop = ParallelDrain.Stop(stopped, () => cancel())
 
   /** `batches`, checked before each one. */
   def watch(batches: Iterator[ColumnarBatch]): Iterator[ColumnarBatch] = new Iterator[ColumnarBatch] {
-    def hasNext: Boolean = { if (cancelled) throw new QueryStoppedException; batches.hasNext }
+    def hasNext: Boolean = { if (isCancelled) throw new QueryStoppedException; batches.hasNext }
     def next(): ColumnarBatch = batches.next()
   }
 }
@@ -218,7 +240,9 @@ final class QuerySession {
       try { execute(rewrite(SqlScript.statement(piece)), io); true }
       catch {
         case _: ScriptFailed => false
-        case e: Throwable if stopped(e) => false
+        // Stopped as it was asked to; once the run is cancelled, a failure
+        // met on the way out says nothing either.
+        case e: Throwable if ParallelDrain.isStop(e) || io.cancel.isCancelled => false
         case e: VirtualMachineError => report(piece, e, io, many)
         case NonFatal(e) => report(piece, e, io, many)
       }
@@ -242,19 +266,23 @@ final class QuerySession {
   }
 
   private def query(sql: String, io: Io): Unit = {
-    val executed = SqlEngine.execute(withViews(sql), catalog, optionsFor(io.cancel))
-    // Closed however the print ends: `| head` stops it, Ctrl-C stops it.
+    // The statement's own stop: a partition that fails stops the others
+    // through it, and leaves the run's to Ctrl-C and a closed output.
+    val stop = io.cancel.child()
+    val executed = SqlEngine.execute(withViews(sql), catalog, optionsFor(stop))
+    // Closed however the print ends: `| head` stops it, Ctrl-C stops it, a
+    // partition fails.
     try {
-      val batches = io.printing(executed.batches)
       if (io.results > 0 && format.setApart) io.out.println()
       io.results += 1
-      if (format == OutputFormat.Table && SqlParser.explained(sql).isDefined) ResultPrinter.lines(io.out, batches)
-      else ResultPrinter.print(io.out, executed.schema, batches, format, maxRows, width)
+      if (format == OutputFormat.Table && SqlParser.explained(sql).isDefined)
+        ResultPrinter.lines(io.out, io.printing(executed.batches))
+      else ResultPrinter.print(io, executed, stop, format, maxRows, width)
     } finally executed.close()
   }
 
   /** The options a statement runs with: spill as the session has it, and
-    * scans that stop once `cancel` is set. */
+    * scans that stop once `cancel`, the statement's own, is set. */
   private[cli] def optionsFor(cancel: Cancel): ExecutionOptions =
     ExecutionOptions(spillEnabled = spill, stopped = cancel.stopped)
 
@@ -349,11 +377,18 @@ final class QuerySession {
   private def copy(c: Statement.Copy, io: Io): Unit = {
     val sql = c.source.fold(name => s"SELECT * FROM ${SqlParser.quote(name)}", identity)
     val target = Paths.get(c.path)
-    if (Files.isDirectory(target))
-      throw new IllegalArgumentException(s"${c.path} is a directory; COPY TO writes one file")
-    val (fileFormat, options) = writeOptions(c.path, c.options)
-    val executed = SqlEngine.execute(withViews(sql), catalog, optionsFor(io.cancel))
-    val rows = try {
+    val perPartition = c.options.collectFirst { case (k, v) if k.equalsIgnoreCase(PerPartitionKey) =>
+      OptionValues.bool(PerPartitionKey, v)
+    }.getOrElse(false)
+    if (!perPartition && Files.isDirectory(target)) throw new IllegalArgumentException(
+      s"${c.path} is a directory; COPY TO writes one file, or a directory of parquet files with " +
+        s"(FORMAT parquet, $PerPartitionKey true)")
+    val to = writeOptions(c.path, c.options, perPartition)
+    if (perPartition) checkPartsDirectory(c.path, target)
+    // The statement's own stop, as a query's.
+    val stop = io.cancel.child()
+    val executed = SqlEngine.execute(withViews(sql), catalog, optionsFor(stop))
+    val (rows, files) = try {
       val names = executed.schema.fieldNames
       Schema.repeatedName(names).foreach { positions =>
         throw new IllegalArgumentException(
@@ -361,20 +396,93 @@ final class QuerySession {
             s"${Schema.describePositions(names, positions)}, which a file read by column name could not tell apart, " +
             "names being read regardless of case; give each its own name with AS")
       }
-      val batches = io.cancel.watch(executed.batches)
-      if (fileFormat == "csv") CsvWriter.writeAll(target, executed.schema, batches, CsvWriteOptions.fromMap(options))
-      else ParquetWriter.writeAll(target, executed.schema, batches, options)
+      if (perPartition) writeParts(target, executed, stop, to.options)
+      else (writeOne(target, executed, stop, io, to), 1)
     } finally executed.close()
-    io.err.println(s"Wrote ${count(rows, "row")} to ${c.path}")
+    val parts = if (perPartition) s" (${count(files.toLong, "file")})" else ""
+    io.err.println(s"Wrote ${count(rows, "row")} to ${c.path}$parts")
   }
+
+  /** `executed` written to the one file `target`, its partitions read ahead
+    * on the pool and written in order on this thread. Returns the rows
+    * written. */
+  private def writeOne(target: Path, executed: ExecutedQuery, stop: Cancel, io: Io, to: CopyTarget): Long = {
+    val ordered = ParallelDrain.inOrder(executed, ParallelDrain.inFlight(executed.numPartitions),
+      ParallelDrain.ChunkBatches, stop.drainStop)
+    try {
+      val batches = io.cancel.watch(ordered)
+      if (to.format == "csv") CsvWriter.writeAll(target, executed.schema, batches, CsvWriteOptions.fromMap(to.options))
+      else ParquetWriter.writeAll(target, executed.schema, batches, to.options)
+    } finally ordered.close()
+  }
+
+  /** `executed` written to the directory `target` as a parquet file a
+    * partition, as a job writes a table: `part-00000.parquet`, ..., each
+    * written on the pool, committed together once all are written, an empty
+    * partition writing none. A partition that fails stops the others, and
+    * neither a failed write nor a stopped one leaves a part file, or a
+    * directory this made. Returns the rows written and the files. */
+  private def writeParts(target: Path, executed: ExecutedQuery, stop: Cancel,
+      options: Map[String, String]): (Long, Int) = {
+    val n = executed.numPartitions
+    // Each partition's failure, first by partition.
+    val failures = new java.util.concurrent.atomic.AtomicReferenceArray[Throwable](math.max(1, n))
+    // Claimed before any is read, so a failure in one does not close another
+    // under the writer reading it; `executed.close()` closes them all.
+    val parts = (0 until n).map { p =>
+      val it = executed.claim(p)
+      new Iterator[ColumnarBatch] {
+        private def failed(t: Throwable): Nothing = {
+          val _ = failures.compareAndSet(p, null, t)
+          stop.cancel()
+          throw t
+        }
+        def hasNext: Boolean = {
+          if (stop.isCancelled) throw new QueryStoppedException
+          try it.hasNext catch { case t: Throwable => failed(t) }
+        }
+        def next(): ColumnarBatch = try it.next() catch { case t: Throwable => failed(t) }
+      }
+    }
+    // The directories the write makes, the deepest first: the target and each
+    // parent it lacks.
+    val made = Iterator.iterate(target.toAbsolutePath)(_.getParent).takeWhile(d => d != null && !Files.exists(d))
+      .toVector
+    try {
+      val written = ParquetWriter.writePartitioned(target, executed.schema, parts, options)
+      (written.rows, written.files.size)
+    } catch {
+      case t: Throwable =>
+        made.foreach(d => try Files.deleteIfExists(d) catch { case NonFatal(_) => () })
+        // The writer gives the first failure in partition order, which can be
+        // a partition stopped by another's failure: that failure is said.
+        val real = (0 until n).iterator.map(failures.get).find(f => f != null && !ParallelDrain.isStop(f))
+        throw (if (ParallelDrain.isStop(t)) real.getOrElse(t) else t)
+    }
+  }
+
+  /** A COPY's directory of part files is a new one or an empty one. */
+  private def checkPartsDirectory(path: String, target: Path): Unit =
+    if (Files.exists(target)) {
+      if (!Files.isDirectory(target)) throw new IllegalArgumentException(
+        s"$path is a file; COPY TO with $PerPartitionKey true writes a directory of part files")
+      val entries = Files.list(target)
+      val empty = try !entries.iterator.hasNext finally entries.close()
+      if (!empty) throw new IllegalArgumentException(
+        s"$path is a directory that holds files; COPY TO with $PerPartitionKey true writes its part files into " +
+          "a new directory or an empty one")
+    }
 
   /** The format a COPY writes `path` in, by its FORMAT option or else its
     * extension, and the writer's options among those `written`, each named in
-    * any case and read as an `output.json` reads it. */
-  private def writeOptions(path: String, written: Seq[(String, String)]): (String, Map[String, String]) = {
+    * any case and read as an `output.json` reads it. With `perPartition` it
+    * writes a directory of parquet files, which `parquet_write_parallelism`
+    * says how many of to write at once. */
+  private def writeOptions(path: String, written: Seq[(String, String)], perPartition: Boolean): CopyTarget = {
     written.groupBy(_._1.toLowerCase(Locale.ROOT)).collectFirst { case (_, Seq(first, _, _*)) => first._1 }
       .foreach(k => throw new IllegalArgumentException(s"COPY names the option $k twice"))
-    val (formats, rest) = written.partition(_._1.equalsIgnoreCase("format"))
+    val (formats, others) = written.partition(_._1.equalsIgnoreCase("format"))
+    val rest = others.filterNot(_._1.equalsIgnoreCase(PerPartitionKey))
     val named = formats.headOption.map(_._2.toLowerCase(Locale.ROOT))
     named.filterNot(f => WriteFormats.contains(f)).foreach { f =>
       throw new IllegalArgumentException(s"COPY writes FORMAT csv or FORMAT parquet, not $f")
@@ -383,13 +491,20 @@ final class QuerySession {
     val fileFormat = named.orElse(WriteFormats.find(f => lower.endsWith("." + f))).getOrElse(
       throw new IllegalArgumentException(s"Cannot tell the format of $path from its name; name it .csv or .parquet, " +
         "or add (FORMAT csv) or (FORMAT parquet)"))
-    val accepted = if (fileFormat == "csv") CsvWriteOptions.Keys else ParquetFileKeys
+    if (perPartition && fileFormat == "csv") throw new IllegalArgumentException(
+      s"COPY TO with $PerPartitionKey true writes parquet files; a CSV result is written as one file")
+    val accepted = if (fileFormat == "csv") CsvWriteOptions.Keys else if (perPartition) ParquetWriter.Keys else ParquetFileKeys
     val options = rest.map { case (k, v) =>
-      accepted.find(_.equalsIgnoreCase(k)).getOrElse(throw new IllegalArgumentException(
-        s"COPY TO a $fileFormat file takes FORMAT and ${accepted.mkString(", ")}, not $k")) -> v
+      accepted.find(_.equalsIgnoreCase(k)).getOrElse {
+        if (fileFormat == "parquet" && k.equalsIgnoreCase(ParallelismKey)) throw new IllegalArgumentException(
+          s"COPY TO a parquet file takes $ParallelismKey only with $PerPartitionKey true, which writes a directory " +
+            "of a file a partition")
+        val listed = if (fileFormat == "csv") accepted else accepted :+ PerPartitionKey
+        throw new IllegalArgumentException(s"COPY TO a $fileFormat file takes FORMAT and ${listed.mkString(", ")}, not $k")
+      } -> v
     }.toMap
     if (fileFormat == "csv") { val _ = CsvWriteOptions.fromMap(options) } else ParquetWriter.checkOptions(options)
-    (fileFormat, options)
+    CopyTarget(fileFormat, options)
   }
 
   // ---------------------------------------------------------------------------
@@ -529,9 +644,18 @@ object QuerySession {
 
   private val WriteFormats = Seq("csv", "parquet")
 
+  /** COPY's option for a directory of a parquet file a partition. */
+  val PerPartitionKey = "PER_PARTITION_OUTPUT"
+
+  /** The parquet writer's option for how many part files it writes at once. */
+  private val ParallelismKey = "parquet_write_parallelism"
+
   /** The parquet writer's options that a single file can take: how many files
     * are written at once is no question for one. */
-  private val ParquetFileKeys = ParquetWriter.Keys.filterNot(_ == "parquet_write_parallelism")
+  private val ParquetFileKeys = ParquetWriter.Keys.filterNot(_ == ParallelismKey)
+
+  /** What a COPY writes: its format, and the writer's options. */
+  private final case class CopyTarget(format: String, options: Map[String, String])
 
   private val MaxReadDepth = 16
 
@@ -539,11 +663,6 @@ object QuerySession {
   private final class ScriptFailed extends RuntimeException("the script failed", null, false, false)
 
   private def count(n: Long, what: String): String = if (n == 1) s"1 $what" else s"$n ${what}s"
-
-  /** Whether `t` is a statement stopping as it was asked to, however the
-    * engine's threads passed the stop on. */
-  private def stopped(t: Throwable): Boolean =
-    Iterator.iterate(t)(_.getCause).takeWhile(_ != null).exists(_.isInstanceOf[QueryStoppedException])
 
   /** What a failure says: its message, or for an `Error`, what happened. */
   def message(t: Throwable): String =
@@ -577,7 +696,8 @@ object QuerySession {
       s"  ${SqlScript.CreateViewSyntax}",
       s"  ${SqlScript.DropViewSyntax}",
       "  COPY (query) TO 'file' [(option value, ...)]   and   COPY name TO 'file' [(...)]",
-      "    write one .csv or .parquet file; options: FORMAT, and output.json's options for the format",
+      "    write one .csv or .parquet file; options: FORMAT, and output.json's options for the format;",
+      s"    with (FORMAT parquet, $PerPartitionKey true), a new or empty directory of a parquet file a partition",
       "Ctrl-C stops a running statement, and clears a line being typed."
     )).mkString("", "\n", "\n")
   }
