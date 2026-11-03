@@ -325,6 +325,17 @@ class ParquetFilterTranslatorTest {
       Seq(lit("\ufffd", DataType.StringType), lit("\ud83d\ude00", DataType.StringType)), negated = false)).isDefined)
   }
 
+  /** U+D7FF is the last character below the surrogates and U+D800 the first
+    * that is not: a range against a literal that holds U+D800 is not pushed.
+    * A STRING holds no lone surrogate, but the translator judges the literal
+    * it is given. */
+  @Test def aStringRangeStopsPushingAtTheFirstSurrogate(): Unit = {
+    def lessThan(v: String) = ParquetFilterTranslator.translate(
+      BinOpExpr("<", col("s", DataType.StringType), lit(v, DataType.StringType), DataType.BooleanType))
+    assertTrue(lessThan("a" + 0xD7FF.toChar).isDefined)
+    assertEquals(None, lessThan("a" + 0xD800.toChar))
+  }
+
   @Test def dateLiteralPushdownMatchesBruteForce(): Unit = {
     val schema = Schema(Field("d", DataType.DateType))
     val dir = Files.createTempDirectory("pq-pushdown-dates-")

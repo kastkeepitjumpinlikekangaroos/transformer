@@ -81,6 +81,16 @@ class HashKeysTest {
     assertNotEquals(a, c)
   }
 
+  /** A scratch key is as wide as its codec's packed layout; a request for
+    * another width is a codec of another size, refused before a row's bytes
+    * overrun it or leave stale ones behind. */
+  @Test def bytesKeyScratchRefusesAnotherWidth(): Unit = {
+    val scratch = new BytesKeyScratch(8)
+    assertEquals(8, scratch.writableBuffer(8).length)
+    val e = assertThrows(classOf[IllegalStateException], () => { val _ = scratch.writableBuffer(16) })
+    assertTrue(e.getMessage, e.getMessage.contains("capacity 8 != requested 16"))
+  }
+
   @Test def objectArrayKeyEqualsByContent(): Unit = {
     val a = new ObjectArrayKey(Array[AnyRef](java.lang.Long.valueOf(1L), "hello"))
     val b = new ObjectArrayKey(Array[AnyRef](java.lang.Long.valueOf(1L), new String("hello")))
@@ -88,6 +98,17 @@ class HashKeysTest {
     assertEquals(a, b)
     assertEquals(a.hashCode(), b.hashCode())
     assertNotEquals(a, c)
+  }
+
+  /** Equal hashes do not make keys equal: under `transformer.hash_zero` every
+    * key's hash is 0, and a key is still equal only to one as wide with equal
+    * values, whichever side asks. */
+  @Test def objectArrayKeysOfOtherWidthsDifferUnderOneHash(): Unit = {
+    val short = new ObjectArrayKey(Array[AnyRef]("a"), 0)
+    val long = new ObjectArrayKey(Array[AnyRef]("a", "b"), 0)
+    assertNotEquals(short, long)
+    assertNotEquals(long, short)
+    assertEquals(short, new ObjectArrayKey(Array[AnyRef]("a"), 0))
   }
 
   @Test def objectArrayKeyHandlesNullElement(): Unit = {
