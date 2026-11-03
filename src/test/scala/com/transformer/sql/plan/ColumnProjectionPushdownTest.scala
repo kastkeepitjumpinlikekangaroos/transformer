@@ -110,6 +110,42 @@ class ColumnProjectionPushdownTest {
     }
   }
 
+  /** A join condition's columns survive pruning wherever they are in it,
+    * a CASE's WHEN and THEN among them. */
+  @Test def aJoinConditionKeepsTheColumnsOfItsCase(): Unit = {
+    val l = LogicalScan("l", new ProjectableView(Schema(Vector(
+      Field("id", DataType.IntType), Field("name", DataType.StringType)))), Some("l"))
+    val r = LogicalScan("r", new ProjectableView(Schema(Vector(
+      Field("flag", DataType.BooleanType), Field("a", DataType.IntType), Field("b", DataType.IntType),
+      Field("score", DataType.IntType)))), Some("r"))
+    // SELECT l.name FROM l JOIN r ON l.id = CASE WHEN r.flag THEN r.a ELSE r.b END
+    val pick = CaseExpr(Seq((ColRefExpr(2, "flag", DataType.BooleanType), colInt(3, "a"))), Some(colInt(4, "b")), DataType.IntType)
+    val join = LogicalJoin(l, r, BinOpExpr("=", colInt(0, "id"), pick, DataType.BooleanType), JoinKind.Inner)
+    ColumnProjectionPushdown(LogicalProject(join, Seq((colStr(1, "name"), "name")))) match {
+      case LogicalProject(LogicalJoin(newL: LogicalScan, newR: LogicalScan, _, _), _) =>
+        assertEquals(Vector("id", "name"), newL.outputSchema.fieldNames)
+        assertEquals(Vector("flag", "a", "b"), newR.outputSchema.fieldNames)
+      case other => fail(s"expected pruned Project(Join), got $other")
+    }
+  }
+
+  /** A scan whose parent reads none of its columns still decodes one, to
+    * drive its batches: the narrowest, the first of those as narrow. A
+    * BOOLEAN and a NULL column are each a byte wide. */
+  @Test def aScanThatFeedsNoColumnKeepsTheNarrowestFirst(): Unit = {
+    def kept(fields: (String, DataType)*): Seq[String] = {
+      val scan = LogicalScan("t", new ProjectableView(Schema(fields.map { case (n, t) => Field(n, t) }.toVector)), Some("t"))
+      ColumnProjectionPushdown(LogicalProject(scan, Seq((LitExpr(1, DataType.IntType), "one")))) match {
+        case LogicalProject(s: LogicalScan, _) => s.outputSchema.fieldNames
+        case other => fail(s"unexpected plan $other"); Nil
+      }
+    }
+    assertEquals(Seq("b"),
+      kept("s" -> DataType.StringType, "b" -> DataType.BooleanType, "n" -> DataType.NullType, "i" -> DataType.IntType))
+    assertEquals(Seq("n"),
+      kept("s" -> DataType.StringType, "n" -> DataType.NullType, "b" -> DataType.BooleanType, "i" -> DataType.IntType))
+  }
+
   @Test def selectStarKeepsEveryColumn(): Unit = {
     // SELECT * FROM l JOIN r — every column is needed, no pruning.
     val lSchema = Schema(Vector(Field("a", DataType.IntType), Field("b", DataType.IntType)))

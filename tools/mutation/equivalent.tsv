@@ -1,3 +1,4 @@
 file	operator	original	mutated	line	reason
 src/main/scala/com/transformer/read/csv/CsvRowParser.scala	constant	0L	1L	var quoteOpenedOn = 0L	Read only by the unclosed-quote refusal, after the quote that opens the field has set it to its line: the starting value is never read.
 src/main/scala/com/transformer/read/csv/CsvRowParser.scala	constant	false	true	private var quotedField: Boolean = false	Set false at the start of every readRow, before endField, its only reader, can run: the starting value is never read.
+src/main/scala/com/transformer/sql/plan/ColumnProjectionPushdown.scala	relational	<	<=	while (i < n) { b += (i -> i); i += 1 }	An identity remap one key wider (n to n): every reader asks for a column below n, through getOrElse, and a join combines its left remap before its right one, so the right side's first column overwrites the extra key or, pruned, is read by nothing.

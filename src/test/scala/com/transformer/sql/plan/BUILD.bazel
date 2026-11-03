@@ -59,6 +59,19 @@ scala_junit_test(
     ],
 )
 
+# The Analyzer's typing helpers called directly, for the cases each of the
+# binder's callers refuses before it asks them.
+scala_junit_test(
+    name = "analyzer_test",
+    srcs = ["AnalyzerTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 # JoinOrder: a table with no equality to those joined so far waits for one
 # that has one; every other order is kept; the answers are the same.
 scala_junit_test(
