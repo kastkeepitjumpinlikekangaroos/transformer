@@ -180,6 +180,7 @@ object Shrinker {
     case LitExpr(_, _) => Nil
     case ColRefExpr(_, _, _) => Nil
     case CastExpr(c, _) => Seq(c)
+    case DecimalCastExpr(c, _) => Seq(c)
     case UnaryOpExpr(_, c, _) => Seq(c)
     case BinOpExpr(_, l, r, _) => Seq(l, r)
     case FuncExpr(_, args, _) => args
@@ -367,10 +368,11 @@ object Shrinker {
 
   /** Reassemble `e` from a new child list of the same length and shape as
     * [[childrenOf]] returned. */
-  private def rebuild(e: Expr, kids: Seq[Expr]): Expr = e match {
+  private[fuzz] def rebuild(e: Expr, kids: Seq[Expr]): Expr = e match {
     case LitExpr(_, _) => e
     case ColRefExpr(_, _, _) => e
     case CastExpr(_, t) => CastExpr(kids.head, t)
+    case DecimalCastExpr(_, t) => DecimalCastExpr(kids.head, t)
     case UnaryOpExpr(op, _, dt) => UnaryOpExpr(op, kids.head, dt)
     case BinOpExpr(op, _, _, dt) => BinOpExpr(op, kids(0), kids(1), dt)
     case FuncExpr(name, _, dt) => FuncExpr(name, kids, dt)
@@ -549,6 +551,15 @@ object Shrinker {
     val dropCorruption: Iterator[JobDagGen.JobCase] =
       if (jc.corruption.isEmpty) Iterator.empty else Iterator(jc.copy(corruption = None))
 
+    // A failure that survives without its fault is not about the fault; one
+    // that needs it may need it over a fresh directory, or reached first.
+    val simplerFault: Iterator[JobDagGen.JobCase] = jc.fault.iterator.flatMap { f =>
+      Iterator(jc.copy(fault = None)) ++
+        (if (f.overEarlier) Iterator(jc.copy(fault = Some(f.copy(overEarlier = false)))) else Iterator.empty) ++
+        (if (f.arming.nth > 1) Iterator(jc.copy(fault = Some(f.copy(arming = f.arming.copy(nth = f.arming.nth - 1)))))
+         else Iterator.empty)
+    }
+
     val dropValidationEdge: Iterator[JobDagGen.JobCase] =
       jc.tasks.indices.iterator.filter(jc.tasks(_).validationTaskSrc.isDefined).map { i =>
         jc.copy(tasks = jc.tasks.updated(i, jc.tasks(i).copy(validationTaskSrc = None)))
@@ -592,7 +603,7 @@ object Shrinker {
 
     dropLastTask ++ dropUnreadInput ++ dropEdge ++ dropValidationEdge ++ healInput ++ healTask ++ dropOutput ++
       dropValidation ++ shrinkRowCount ++ dropSecondRun ++ dropRunDir ++ dropPartition ++ plainStrings ++
-      dropCorruption
+      dropCorruption ++ simplerFault
   }
 
   // ---- ParquetCase shrinker (external-format differential) -----------------

@@ -96,6 +96,25 @@ object Lexer {
     throw new IllegalArgumentException(s"unclosed quote at ${s.substring(open, math.min(s.length, open + 20))}")
   }
 
+  /** `sql` cut into its statements at each `;` outside quotes and
+    * parentheses, each trimmed; a piece holding no token (a comment, or
+    * nothing after the last `;`) is no statement. */
+  def splitStatements(sql: String): Vector[String] = {
+    val out = Vector.newBuilder[String]
+    var depth = 0
+    var start = 0
+    tokens(sql).foreach { tk =>
+      if (tk.kind == Token.Symbol && tk.text == "(") depth += 1
+      else if (tk.kind == Token.Symbol && tk.text == ")") depth -= 1
+      else if (tk.kind == Token.Symbol && tk.text == ";" && depth == 0) {
+        out += sql.substring(start, tk.start)
+        start = tk.end
+      }
+    }
+    out += sql.substring(start)
+    out.result().map(_.trim).filter(p => tokens(p).nonEmpty)
+  }
+
   /** Tokens split at the commas outside parentheses. */
   def splitCommas(t: Vector[Token]): Vector[Vector[Token]] = {
     if (t.isEmpty) return Vector.empty
@@ -203,6 +222,31 @@ object Lexer {
         (before.kind == Token.Word && Set("SELECT", "DISTINCT", "ALL")(before.upper)) ||
           (before.kind == Token.Symbol && (before.text == "," || before.text == "."))
       }
+    }
+  }
+
+  /** Whether `sql` orders its result: an `ORDER BY` outside parentheses (one
+    * inside a window's `OVER (...)` or a subquery orders no result). */
+  def ordersResult(sql: String): Boolean = {
+    val t = tokens(sql)
+    var depth = 0
+    t.indices.exists { i =>
+      if (t(i).kind == Token.Symbol && t(i).text == "(") depth += 1
+      else if (t(i).kind == Token.Symbol && t(i).text == ")") depth -= 1
+      depth == 0 && t(i).kind == Token.Word && t(i).upper == "ORDER" && t.lift(i + 1).exists(_.upper == "BY")
+    }
+  }
+
+  /** Whether `sql` keeps some rows of its result and not others with no
+    * `ORDER BY` to say which: a `LIMIT`, `OFFSET` or `FETCH` outside
+    * parentheses in a query that orders nothing. */
+  def keepsUnorderedRows(sql: String): Boolean = !ordersResult(sql) && {
+    val t = tokens(sql)
+    var depth = 0
+    t.exists { tk =>
+      if (tk.kind == Token.Symbol && tk.text == "(") depth += 1
+      else if (tk.kind == Token.Symbol && tk.text == ")") depth -= 1
+      depth == 0 && tk.kind == Token.Word && Set("LIMIT", "OFFSET", "FETCH", "TOP")(tk.upper)
     }
   }
 

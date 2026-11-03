@@ -4,9 +4,8 @@ import com.transformer.core._
 import com.transformer.core.metrics.MetricsNode
 import com.transformer.sql.plan._
 import org.junit.Assert._
-import org.junit.{After, Before, Test}
+import org.junit.{After, Test}
 
-import java.nio.file.{Files, Path}
 import scala.collection.mutable
 import scala.util.Random
 
@@ -29,31 +28,12 @@ import scala.util.Random
   * but asserting them through both paths costs one extra run. */
 class WindowExecSpillTest {
 
-  private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
-  private var tmpRoot: Path = _
-
-  @Before def setOverride(): Unit = {
-    tmpRoot = Files.createTempDirectory("window-spill-test-")
-    System.setProperty(Spill.SpillDirProperty, tmpRoot.resolve("transformer-spill").toString)
-  }
-
-  @After def restoreOverride(): Unit = {
-    if (originalDirProp == null) System.clearProperty(Spill.SpillDirProperty)
-    else System.setProperty(Spill.SpillDirProperty, originalDirProp)
-    deleteRecursively(tmpRoot)
-  }
-
-  private def deleteRecursively(p: Path): Unit = {
-    if (!Files.exists(p)) return
-    if (Files.isDirectory(p)) {
-      val s = Files.list(p)
-      try {
-        val it = s.iterator()
-        while (it.hasNext) deleteRecursively(it.next())
-      } finally s.close()
-    }
-    try Files.deleteIfExists(p) catch { case _: java.io.IOException => () }
-  }
+  // This JVM's spill directory is read once (`Spill.baseDir`, under
+  // java.io.tmpdir, which Bazel sets to the target's own TEST_TMPDIR), so a
+  // test cannot move it. Every operator that spills closes its directory once
+  // nothing reads it, so each test leaves none (plans/testing/17).
+  @After def leavesNoSpillDirectory(): Unit =
+    assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
 
   private def spillyOpts(): ExecutionOptions =
     ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))
@@ -107,9 +87,6 @@ class WindowExecSpillTest {
     buf.toVector
   }
 
-  private def multisetOf(v: Vector[Vector[Any]]): Map[Vector[Any], Int] =
-    v.groupBy(identity).view.mapValues(_.size).toMap
-
   /** Build a (k, v) test plan: k ∈ [0, K), v ∈ [0, N) with no key→v
     * correlation. Used by row_number / rank / lag / lead tests. */
   private def kvPlan(N: Int, K: Int, seed: Long): InMemoryPlan = {
@@ -146,6 +123,7 @@ class WindowExecSpillTest {
       expected.map(row => (row(0).asInstanceOf[Integer].intValue, row(2).asInstanceOf[java.lang.Long].longValue))
     val actByKey: Vector[(Int, Long)] =
       actual.map(row => (row(0).asInstanceOf[Integer].intValue, row(2).asInstanceOf[java.lang.Long].longValue))
+    assertEquals("the (k, row_number) multiset", byKey.sorted, actByKey.sorted)
     // Within each key, the multiset of row_numbers must be 1..N_k.
     expected.groupBy(_(0)).foreach { case (key, rows) =>
       val rns = rows.map(_(2).asInstanceOf[java.lang.Long].longValue).sorted
@@ -158,6 +136,26 @@ class WindowExecSpillTest {
   }
 
   // ---- SUM as whole-partition aggregate -----------------------------------
+
+  /** A ROWS frame that ends at UNBOUNDED PRECEDING ends before the first row:
+    * it is empty for every row, its SUM NULL and its COUNT 0. The binder
+    * refuses such a frame in SQL; WindowExec takes the frames a plan built in
+    * code holds. */
+  @Test def aFrameEndingAtUnboundedPrecedingIsEmpty(): Unit = {
+    val plan = kvPlan(N = 40, K = 3, seed = 5L)
+    val k = ColRefExpr(0, "k", DataType.IntType)
+    val v = ColRefExpr(1, "v", DataType.LongType)
+    val frame = WindowFrame(FrameType.Rows, FrameBound.UnboundedPreceding, FrameBound.UnboundedPreceding)
+    val spec = WindowSpec(Seq(k), Seq(SortKey(v, true)), frame)
+    val wins = Seq(WindowDef(spec, WindowFnAgg(AggExprSum(v)), "s"), WindowDef(spec, WindowFnAgg(AggExprCountStar()), "c"))
+    val outSchema = Schema(plan.outputSchema.fields ++ Seq(Field("s", DataType.LongType), Field("c", DataType.LongType)))
+    val rows = drainRows(WindowExec(plan, wins).execute(0), outSchema)
+    assertEquals(40, rows.size)
+    rows.foreach { r =>
+      assertNull(r.toString, r(2))
+      assertEquals(r.toString, 0L, r(3))
+    }
+  }
 
   /** SUM(v) over whole partition (no ORDER BY) must broadcast the same
     * per-partition sum to every row in the partition under spill. */
@@ -396,7 +394,7 @@ class WindowExecSpillTest {
       ds: Seq[Any],
       asc: Boolean,
       opts: ExecutionOptions,
-      nullsFirst: Option[Boolean] = None): Map[Int, (Long, Long)] = {
+      nullsFirst: Option[Boolean]): Map[Int, (Long, Long)] = {
     val rows = ds.iterator.zipWithIndex.map { case (d, i) =>
       Array[Any](java.lang.Integer.valueOf(1), d, java.lang.Integer.valueOf(i))
     }.toVector

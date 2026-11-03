@@ -1,0 +1,14 @@
+{
+ "description": "Input with only a commented line, without comments enabled",
+ "options": {
+  "header": "false",
+  "delimiter": ","
+ },
+ "rows": [
+  [
+   "#commented line"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

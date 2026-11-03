@@ -145,10 +145,14 @@ object PlanSql {
   private def expr(e: Expr, scope: Scope): Fragment = e match {
     case ColRefExpr(i, _, _) => scope(i)
     case LitExpr(v, t) => literal(v, t)
-    // SQL here writes no cast to DECIMAL or BINARY; the binder casts to one
-    // wherever the operands' types call for it, which they do again.
+    // The binder's own casts to a DECIMAL, which read a number exactly, and
+    // to a BINARY, which SQL here cannot write: it casts to one wherever the
+    // operands' types call for it, which they do again.
     case CastExpr(c, _: DataType.DecimalType | DataType.BinaryType) => expr(c, scope)
-    case CastExpr(c, t) => Fragment(s"CAST(${top(c, scope)} AS ${typeName(t)})", Atomic)
+    case CastExpr(c, t) => Fragment(s"CAST(${castOperand(c, scope)} AS ${typeName(t)})", Atomic)
+    // A cast the query wrote, which fits its value to the type.
+    case DecimalCastExpr(c, t) =>
+      Fragment(s"CAST(${castOperand(c, scope)} AS DECIMAL(${t.precision},${t.scale}))", Atomic)
     case UnaryOpExpr("-", c, _) =>
       val inner = expr(c, scope)
       Fragment("-" + (if (inner.prec == Atomic) inner.text else parens(inner)), Unary)
@@ -159,6 +163,9 @@ object PlanSql {
       val inner = expr(c, scope)
       Fragment("NOT " + (if (inner.prec == Atomic) inner.text else parens(inner)), Not)
     case UnaryOpExpr(_, c, _) => expr(c, scope)
+    case DecimalBetween(c, low, high) =>
+      Fragment(s"${operand(expr(c, scope))} BETWEEN ${operand(expr(low, scope))} AND ${operand(expr(high, scope))}",
+        Compare)
     case b @ BinOpExpr("AND" | "OR", _, _, _) => chain(b, scope)
     case BinOpExpr("||", l, r, _) =>
       val (lf, rf) = (expr(l, scope), expr(r, scope))
@@ -195,6 +202,17 @@ object PlanSql {
         Compare)
   }
 
+  /** A CAST's operand: bare when it is a concatenation or binds tighter, in
+    * parentheses otherwise, since the parser reads no comparison, IS NULL,
+    * IN, LIKE, BETWEEN, AND or OR before `AS` without them:
+    * `CAST((a = b) AS VARCHAR)` printed as `CAST(t.a = t.b AS VARCHAR)`,
+    * which did not parse (found by the `rewritten` slt mode,
+    * plans/testing/16). */
+  private def castOperand(c: Expr, scope: Scope): String = {
+    val f = expr(c, scope)
+    if (f.prec >= Concat) f.text else parens(f)
+  }
+
   /** `l op r` for an arithmetic `op` binding at `prec`: the parser reads a
     * run of one level left to right, so a right operand of the same level is
     * in parentheses, and a sign after an operator always is. */
@@ -220,6 +238,7 @@ object PlanSql {
     if (regrouped(b, op)) Fragment(operands(b, op).map(side).mkString(s" $op "), prec)
     else {
       def half(e: Expr): String = e match {
+        case DecimalBetween(_, _, _) => side(e)
         case inner @ BinOpExpr(`op`, _, _, _) => parens(chain(inner, scope))
         case other => side(other)
       }
@@ -228,18 +247,41 @@ object PlanSql {
   }
 
   private def operands(e: Expr, op: String): Seq[Expr] = e match {
+    case DecimalBetween(_, _, _) => Seq(e)
     case BinOpExpr(`op`, l, r, _) => operands(l, op) ++ operands(r, op)
     case other => Seq(other)
+  }
+
+  /** `x >= low AND x <= high` as the binder expands `x BETWEEN low AND high`
+    * whose three operands meet as a DECIMAL: one `x`, cast to that DECIMAL
+    * where its own type is another, on both sides. The printer writes it as
+    * the BETWEEN, since it leaves its casts to a DECIMAL to the binder, and
+    * the two comparisons alone would each cast a pair to the DECIMAL that
+    * holds those two, another type where the third operand is a wider
+    * DECIMAL. (A comparison written as two over one operand with no cast
+    * between them reads its operands as a BETWEEN does.) */
+  private object DecimalBetween {
+    def unapply(e: Expr): Option[(Expr, Expr, Expr)] = e match {
+      case BinOpExpr("AND", BinOpExpr(">=", x, low, _), BinOpExpr("<=", x2, high, _), _)
+          if x == x2 && x.dataType.isInstanceOf[DataType.DecimalType] &&
+            Seq(x, low, high).exists {
+              case CastExpr(_, _: DataType.DecimalType) => true
+              case _ => false
+            } => Some((x, low, high))
+      case _ => None
+    }
   }
 
   /** Whether the `op` tree at `e` is the one the parser regroups its operands
     * into: each node's left side holds half its operands, rounded down. */
   private def regrouped(e: Expr, op: String): Boolean = {
     def count(x: Expr): Int = x match {
+      case DecimalBetween(_, _, _) => 1
       case BinOpExpr(`op`, l, r, _) => count(l) + count(r)
       case _ => 1
     }
     def check(x: Expr, n: Int): Boolean = x match {
+      case DecimalBetween(_, _, _) => n == 1
       case BinOpExpr(`op`, l, r, _) =>
         val left = count(l)
         left == n / 2 && check(l, left) && check(r, n - left)

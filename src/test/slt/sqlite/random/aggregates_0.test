@@ -1,8 +1,9 @@
 # From SQLite's sqllogictest corpus (https://www.sqlite.org/sqllogictest,
 # mirrored at https://github.com/gregrahn/sqllogictest): test/random/aggregates/slt_good_0.test,
 # up to its 200th query this engine runs. Its COPYRIGHT lets it be copied
-# freely. `skipif transformer` marks a record the engine answers otherwise
-# by design, with the reason.
+# freely. `skipif transformer <id>` marks a record the engine answers
+# otherwise by design, with the id of its rule in the ledger in
+# docs/gotchas.md.
 
 hash-threshold 8
 
@@ -83,7 +84,7 @@ SELECT + + MIN( ALL - + 32 ) AS col0, + COUNT( * ) * + COUNT( * ) FROM ( tab0 AS
 -32
 81
 
-skipif transformer # refused: A parenthesized join in FROM is not supported; write the joins without the parentheses
+skipif transformer refused-parenthesized-join
 skipif mysql # not compatible
 query II rowsort label-4
 SELECT + + MIN ( ALL - + 32 ) AS col0, + COUNT ( * ) * + COUNT ( * ) FROM ( tab0 AS cor0 CROSS JOIN tab0 cor1 )

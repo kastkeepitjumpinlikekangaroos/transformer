@@ -1,0 +1,21 @@
+{
+ "description": "Two rows",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "A",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "E",
+   "f"
+  ]
+ ],
+ "text": "A,b,c\r\nd,E,f"
+}

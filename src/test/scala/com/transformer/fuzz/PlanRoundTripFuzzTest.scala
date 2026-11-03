@@ -34,7 +34,7 @@ class PlanRoundTripFuzzTest {
       gen = QueryGen.generate,
       shrink = Shrinker.queryCase,
       count = Props.seedCountOr(DefaultSeeds)
-    ) { qc => roundTrip(qc.sql, queryCatalog(qc)); () }
+    ) { qc => roundTrip(qc.sql, queryCatalog(qc), qc.query.movableFailure); () }
 
   @Test def fuzzMultiRelationQueries(): Unit =
     Props.forAll[MetaCase](
@@ -42,7 +42,7 @@ class PlanRoundTripFuzzTest {
       gen = MetaQueryGen.generate,
       shrink = Shrinker.metaCase,
       count = Props.seedCountOr(DefaultSeeds)
-    ) { mc => roundTrip(mc.bodySql, mc.env.catalog()); () }
+    ) { mc => roundTrip(mc.bodySql, mc.env.catalog(), mc.query.movableFailure); () }
 
   @Test def fuzzFrontendTexts(): Unit =
     Props.forAll[SqlTextGen.TextCase](
@@ -111,6 +111,12 @@ class PlanRoundTripFuzzTest {
     assertEquals(base, plan("SELECT x.a AS p, x.b AS q FROM t AS x WHERE x.a > 1 AND x.b < 2.5"))
     assertEquals(base, plan("WITH c AS (SELECT * FROM t) SELECT a, b FROM c WHERE a > 1 AND b < 2.5"))
     assertEquals(plan("SELECT -5 AS n"), plan("SELECT CAST('-5' AS INT) AS n"))
+    // The negation of a BIGINT literal, which the printer writes as a
+    // negation of the negative number's text (found by postgres/int8.test).
+    assertEquals(plan("SELECT -(CAST('-9223372036854775807' AS BIGINT)) AS n"),
+      plan("SELECT -(-9223372036854775807) AS n"))
+    assertNotEquals(plan("SELECT -(CAST('-9223372036854775807' AS BIGINT)) AS n"),
+      plan("SELECT -9223372036854775807 AS n"))
   }
 }
 
@@ -125,7 +131,7 @@ object PlanRoundTripFuzzTest {
   val RequiredKinds: Seq[String] = Seq(
     "Scan", "Project", "Filter", "Aggregate", "Sort", "Limit", "Offset", "Distinct", "Window",
     "Join Inner", "Join Left", "Join Right", "Join Full", "Union all", "Union distinct",
-    "Lit", "ColRef", "Cast", "Negate", "Not", "Arithmetic", "Comparison", "And", "Or", "Concat",
+    "Lit", "ColRef", "Cast", "DecimalCast", "Negate", "Not", "Arithmetic", "Comparison", "And", "Or", "Concat",
     "Func", "Case", "IsNull", "InList", "Like")
 
   /** What happened to a query: `same`, `refused`, `unprintable` or `too
@@ -140,8 +146,12 @@ object PlanRoundTripFuzzTest {
 
   /** Round trip `sql` over `catalog`, and compare the answers of the query,
     * its printed plan and its printed optimized plan. A query the engine
-    * refuses has nothing to check. */
-  def roundTrip(sql: String, catalog: Catalog): Outcome = {
+    * refuses has nothing to check. Two runs that fail on their data agree,
+    * whichever failure each meets first; where one fails on its data and the
+    * other answers, they part only if no WHERE or ON condition that can fail
+    * is there to move (`movable`, decision 1 of plans/testing/15), which a
+    * text whose conditions are unknown is taken to have. */
+  def roundTrip(sql: String, catalog: Catalog, movable: Boolean = true): Outcome = {
     val verdict =
       try PlanRoundTrip.check(sql, catalog)
       catch { case _: IllegalArgumentException => return Outcome("refused") }
@@ -149,9 +159,9 @@ object PlanRoundTripFuzzTest {
       case PlanRoundTrip.Same(printed) =>
         if (deterministic(sql)) {
           val expected = answer(sql, catalog, optimize = true)
-          compare(sql, printed, expected, answer(printed, catalog, optimize = true))
+          compare(sql, printed, expected, answer(printed, catalog, optimize = true), movable)
           PlanRoundTrip.optimizedSql(sql, catalog).foreach { optimized =>
-            compare(sql, optimized, expected, answer(optimized, catalog, optimize = false))
+            compare(sql, optimized, expected, answer(optimized, catalog, optimize = false), movable)
           }
         }
         Outcome("same")
@@ -169,7 +179,11 @@ object PlanRoundTripFuzzTest {
     !Seq("RAND", "CURRENT_", "LIMIT", "OFFSET", "FETCH", "TOP ").exists(upper.contains)
   }
 
-  /** The rows `sql` returns, or the class of what it threw on the data. */
+  /** What [[answer]] says of a run that failed on its data. */
+  private val DataFailure = "a failure on its data"
+
+  /** The rows `sql` returns, or [[DataFailure]], or the class of anything
+    * else it threw. */
   private def answer(sql: String, catalog: Catalog, optimize: Boolean): Either[String, (Schema, Vector[Array[Any]])] =
     try {
       val q =
@@ -181,13 +195,15 @@ object PlanRoundTripFuzzTest {
           new ExecutedQuery(physical.outputSchema, (0 until physical.numPartitions).map(physical.execute))
         }
       Right((q.schema, RelEngine.collectRows(q)))
-    } catch { case e: Exception => Left(e.getClass.getName) }
+    } catch { case e: Exception => Left(if (oracle.CleanRejection.isDataError(e)) DataFailure else e.getClass.getName) }
 
   private def compare(sql: String, printed: String,
       expected: Either[String, (Schema, Vector[Array[Any]])],
-      actual: Either[String, (Schema, Vector[Array[Any]])]): Unit = {
+      actual: Either[String, (Schema, Vector[Array[Any]])],
+      movable: Boolean): Unit = {
     val problem = (expected, actual) match {
       case (Left(a), Left(b)) => if (a == b) None else Some(s"it fails with $b where the query fails with $a")
+      case (Left(DataFailure), Right(_)) | (Right(_), Left(DataFailure)) if movable => None
       case (Left(a), Right(_)) => Some(s"it runs where the query fails with $a")
       case (Right(_), Left(b)) => Some(s"it fails with $b where the query runs")
       case (Right((schema, rows)), Right((_, other))) => RowOracle.multisetEquals(schema, rows, other)
@@ -204,6 +220,7 @@ object PlanRoundTripFuzzTest {
         case _: LitExpr => out += "Lit"
         case _: ColRefExpr => out += "ColRef"
         case _: CastExpr => out += "Cast"
+        case _: DecimalCastExpr => out += "DecimalCast"
         case UnaryOpExpr("-", _, _) => out += "Negate"
         case UnaryOpExpr(_, _, _) => out += "Not"
         case BinOpExpr("AND", _, _, _) => out += "And"
@@ -246,6 +263,7 @@ object PlanRoundTripFuzzTest {
   private def children(e: Expr): Seq[Expr] = e match {
     case _: LitExpr | _: ColRefExpr => Nil
     case CastExpr(c, _) => Seq(c)
+    case DecimalCastExpr(c, _) => Seq(c)
     case UnaryOpExpr(_, c, _) => Seq(c)
     case BinOpExpr(_, l, r, _) => Seq(l, r)
     case FuncExpr(_, args, _) => args

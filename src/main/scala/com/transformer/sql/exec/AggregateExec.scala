@@ -65,7 +65,7 @@ final case class HashAggregateExec(
   /** True when the planner has wrapped `child` in an `ExchangeExec` that
     * has hash-partitioned by the same `groupKeys`. Drives the per-shard vs
     * collapsing dispatch in [[execute]]. */
-  private val isSharded: Boolean = child.isInstanceOf[ExchangeExec]
+  private val isSharded: Boolean = ExchangeExec.feeds(child)
 
   def numPartitions: Int = if (isSharded) child.numPartitions else 1
 
@@ -140,23 +140,27 @@ final case class HashAggregateExec(
       s"partition $partition out of range [0,$numPartitions)")
     // One final map per shard. No fan-out across child.numPartitions; the
     // exchange already routed rows so each shard's input is key-disjoint.
+    // The spill runs are folded back into the map before it emits, so the
+    // directory goes before the output is read, or once the work failed.
     val spillDir = if (spillEnabled) Some(Spill.openOperatorDir("agg-shard")) else None
-    val stats = if (metricsNode == null) null else new AggStateSerde.SerdeStats
-    if (useLongKey) {
-      val pa = partialAggregateLong(partition, spillDir)
-      val tFold = if (metricsNode != null) System.nanoTime() else 0L
-      AggSpiller.foldLongSpillFiles(pa.spillFiles, aggArr, pa.map, stats)
-      recordSpillFoldMetrics(tFold, pa.spillFiles.length.toLong, stats)
-      if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxGroupCount).add(pa.map.size.toLong)
-      wrapWithSpillCleanup(emitLong(pa.map), spillDir)
-    } else {
-      val pa = partialAggregate(partition, spillDir)
-      val tFold = if (metricsNode != null) System.nanoTime() else 0L
-      AggSpiller.foldCodecSpillFiles(pa.spillFiles, keyCodec, nKeys, aggArr, pa.map, stats)
-      recordSpillFoldMetrics(tFold, pa.spillFiles.length.toLong, stats)
-      if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxGroupCount).add(pa.map.size.toLong)
-      wrapWithSpillCleanup(emit(pa.map), spillDir)
-    }
+    try {
+      val stats = if (metricsNode == null) null else new AggStateSerde.SerdeStats
+      if (useLongKey) {
+        val pa = partialAggregateLong(partition, spillDir)
+        val tFold = if (metricsNode != null) System.nanoTime() else 0L
+        AggSpiller.foldLongSpillFiles(pa.spillFiles, aggArr, pa.map, stats)
+        recordSpillFoldMetrics(tFold, pa.spillFiles.length.toLong, stats)
+        if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxGroupCount).add(pa.map.size.toLong)
+        emitLong(pa.map)
+      } else {
+        val pa = partialAggregate(partition, spillDir)
+        val tFold = if (metricsNode != null) System.nanoTime() else 0L
+        AggSpiller.foldCodecSpillFiles(pa.spillFiles, keyCodec, nKeys, aggArr, pa.map, stats)
+        recordSpillFoldMetrics(tFold, pa.spillFiles.length.toLong, stats)
+        if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxGroupCount).add(pa.map.size.toLong)
+        emit(pa.map)
+      }
+    } finally spillDir.foreach(_.close())
   }
 
   // ---- Collapsing paths: no exchange; fan out + merge -----------------------
@@ -169,6 +173,12 @@ final case class HashAggregateExec(
     require(partition == 0,
       s"collapsing aggregate has only one partition; got partition=$partition")
     val spillDir = if (spillEnabled) Some(Spill.openOperatorDir("agg")) else None
+    try executeCollapsing(spillDir) finally spillDir.foreach(_.close())
+  }
+
+  /** [[executeCollapsing]]'s work, its spill runs in `spillDir`, folded back
+    * into the merged map before it emits. */
+  private def executeCollapsing(spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] = {
     val tasks: Seq[Callable[PartialAgg]] =
       (0 until child.numPartitions).map { p =>
         new Callable[PartialAgg] {
@@ -199,7 +209,7 @@ final case class HashAggregateExec(
       merged.put(keyCodec.encodeBoxed(EmptyKeyBuf), newStates())
     }
     if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxGroupCount).add(merged.size.toLong)
-    wrapWithSpillCleanup(emit(merged), spillDir)
+    emit(merged)
   }
 
   /** Long-key collapsing path. Same fan-out + merge shape as
@@ -212,6 +222,12 @@ final case class HashAggregateExec(
     require(partition == 0,
       s"collapsing aggregate has only one partition; got partition=$partition")
     val spillDir = if (spillEnabled) Some(Spill.openOperatorDir("agg-long")) else None
+    try executeCollapsingLong(spillDir) finally spillDir.foreach(_.close())
+  }
+
+  /** [[executeCollapsingLong]]'s work, its spill runs in `spillDir`, folded
+    * back into the merged map before it emits. */
+  private def executeCollapsingLong(spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] = {
     val tasks: Seq[Callable[PartialAggLong]] =
       (0 until child.numPartitions).map { p =>
         new Callable[PartialAggLong] {
@@ -232,7 +248,7 @@ final case class HashAggregateExec(
     }
     recordSpillFoldMetrics(tFold, runsRead, stats)
     if (metricsNode != null) metricsNode.counters(HashAggregateExec.IdxGroupCount).add(merged.size.toLong)
-    wrapWithSpillCleanup(emitLong(merged), spillDir)
+    emitLong(merged)
   }
 
   /** Merge `b` into `a` for the long-key map, in place. Used by
@@ -246,7 +262,7 @@ final case class HashAggregateExec(
         var i = 0
         while (i < existing.length) { existing(i).merge(bs(i)); i += 1 }
       } else {
-        if (isNull) a.putNull(bs) else a.put(k, bs)
+        val _ = if (isNull) a.putNull(bs) else a.put(k, bs)
       }
     }
     a
@@ -267,12 +283,6 @@ final case class HashAggregateExec(
     * parquet, and adds one Binary state column per aggregate on top. */
   private val groupKeySchema: Schema =
     Schema(groupKeys.map { case (e, n) => Field(n, e.dataType) }.toVector)
-
-  /** Wipe the spill subdir once the consumer drains the iterator. */
-  private def wrapWithSpillCleanup(
-      inner: Iterator[ColumnarBatch],
-      spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] =
-    spillDir.fold(inner)(_.closeOnDrain(inner))
 
   /** Record the counters for folding spill runs back into a final map: fold
     * wall time, run-file count, and codec serde time. `IdxGroupCount` is
@@ -386,7 +396,7 @@ final case class HashAggregateExec(
     // For computed keys we still pay the per-row `encodeBoxed` allocation
     // because the codec's scratch API works off direct ColumnVector reads.
     val scratchKey: AnyRef = if (keysAreColRefs && groupKeys.nonEmpty) keyCodec.newScratch() else null
-    while (it.hasNext) {
+    try while (it.hasNext) {
       val batch = it.next()
       val nrows = batch.numRows
       if (spillDir.isDefined) {
@@ -469,7 +479,7 @@ final case class HashAggregateExec(
             s"HashAggregateExec produced ${spillFiles.length} spill runs in partition $p, " +
             s"exceeding spill_max_runs=${opts.spillMaxRuns}.")
       }
-    }
+    } finally Closing.close(it)
     recordPartialMetrics(tStart, peakMapSize, peakBytes)
     PartialAgg(map, spillFiles.toArray)
   }
@@ -539,7 +549,7 @@ final case class HashAggregateExec(
     var peakBytes: Long = 0L
     val it = child.execute(p)
     val argVecsCache = new ArgVecsCache()
-    while (it.hasNext) {
+    try while (it.hasNext) {
       val batch = it.next()
       val col = batch.column(longKeyColIdx)
       val nrows = batch.numRows
@@ -558,12 +568,12 @@ final case class HashAggregateExec(
           val states: Array[AggState] =
             if (col.isNull(r)) {
               var s = map.getNull
-              if (s == null) { s = newStates(); map.putNull(s) }
+              if (s == null) { s = newStates(); val _ = map.putNull(s) }
               s
             } else {
               val k = KeyCodec.readAsLong(col, r)
               var s = map.get(k)
-              if (s == null) { s = newStates(); map.put(k, s) }
+              if (s == null) { s = newStates(); val _ = map.put(k, s) }
               s
             }
           updateStatesAt(states, argVecsByAgg, r)
@@ -585,7 +595,7 @@ final case class HashAggregateExec(
             s"HashAggregateExec produced ${spillFiles.length} spill runs in partition $p (long key), " +
             s"exceeding spill_max_runs=${opts.spillMaxRuns}.")
       }
-    }
+    } finally Closing.close(it)
     recordPartialMetrics(tStart, peakMapSize, peakBytes)
     PartialAggLong(map, spillFiles.toArray)
   }
@@ -1817,7 +1827,7 @@ private[exec] object AggSpiller {
         out
       }
     }
-    ParquetWriter.writeAll(file, outSchema, batchIter)
+    val _ = ParquetWriter.writeAll(file, outSchema, batchIter)
   }
 
   /** Fold every spill file's entries into `target`. For each row in each
@@ -1850,7 +1860,7 @@ private[exec] object AggSpiller {
       var part = 0
       while (part < reader.numPartitions) {
         val batchIt = reader.readPartition(part)
-        while (batchIt.hasNext) {
+        try while (batchIt.hasNext) {
           val batch = batchIt.next()
           var r = 0
           while (r < batch.numRows) {
@@ -1882,7 +1892,7 @@ private[exec] object AggSpiller {
             }
             r += 1
           }
-        }
+        } finally Closing.close(batchIt)
         part += 1
       }
       f += 1
@@ -1932,7 +1942,7 @@ private[exec] object AggSpiller {
         out
       }
     }
-    ParquetWriter.writeAll(file, outSchema, batchIter)
+    val _ = ParquetWriter.writeAll(file, outSchema, batchIter)
   }
 
   def foldLongSpillFiles(
@@ -1955,7 +1965,7 @@ private[exec] object AggSpiller {
       var part = 0
       while (part < reader.numPartitions) {
         val batchIt = reader.readPartition(part)
-        while (batchIt.hasNext) {
+        try while (batchIt.hasNext) {
           val batch = batchIt.next()
           val keyCol = batch.column(0)
           var r = 0
@@ -1980,11 +1990,11 @@ private[exec] object AggSpiller {
                 states(a) = AggStateSerde.deserializeBytes(aggs(a), bytes, stats)
                 a += 1
               }
-              if (isNull) target.putNull(states) else target.put(k, states)
+              val _ = if (isNull) target.putNull(states) else target.put(k, states)
             }
             r += 1
           }
-        }
+        } finally Closing.close(batchIt)
         part += 1
       }
       f += 1

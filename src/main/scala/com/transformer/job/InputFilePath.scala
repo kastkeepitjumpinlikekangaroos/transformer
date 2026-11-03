@@ -49,9 +49,15 @@ object InputFilePath {
   /** A parquet input's target bytes per partition. */
   val ParquetPartitionSizeKey: String = "read_partition_size_bytes"
 
+  /** A parquet input's: read each `BINARY` column with no annotation as a
+    * `STRING` of its UTF-8 bytes, as Spark's option of the name does, for the
+    * text older writers (Impala, old Hive) stored unannotated. Off by
+    * default, when such a column is a `BINARY`. */
+  val ParquetBinaryAsStringKey: String = "binaryAsString"
+
   /** The option keys an input of `format` reads. */
   def optionKeys(format: String): Seq[String] =
-    if (format == "parquet") Seq(ParquetPartitionSizeKey) else CsvOptions.Keys
+    if (format == "parquet") Seq(ParquetPartitionSizeKey, ParquetBinaryAsStringKey) else CsvOptions.Keys
 
   /** `format`, when it names one of [[Formats]]; `role` says whose. */
   private[job] def checkFormat(format: Option[String], role: String): Unit =
@@ -70,8 +76,9 @@ object InputFilePath {
     checkFormat(in.format, "input")
     val format = in.detectedFormat
     refuseUnknown(in.options, optionKeys(format), s"a $format input")
-    if (format == "parquet") in.options.get(ParquetPartitionSizeKey).foreach(OptionValues.positiveLong(ParquetPartitionSizeKey, _))
-    else CsvOptions.fromMap(in.options)
-    ()
+    if (format == "parquet") {
+      in.options.get(ParquetPartitionSizeKey).foreach(OptionValues.positiveLong(ParquetPartitionSizeKey, _))
+      in.options.get(ParquetBinaryAsStringKey).foreach(OptionValues.bool(ParquetBinaryAsStringKey, _))
+    } else { val _ = CsvOptions.fromMap(in.options) }
   }
 }

@@ -1,0 +1,15 @@
+{
+ "description": "Header row with one row of data",
+ "options": {
+  "header": "true"
+ },
+ "rows": [
+  {
+   "A": "a",
+   "B": "b",
+   "C": "c"
+  }
+ ],
+ "fields": null,
+ "errors": []
+}

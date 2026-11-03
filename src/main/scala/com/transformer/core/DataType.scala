@@ -70,8 +70,12 @@ object DataType {
     case _ => false
   }
 
-  // Returns the wider numeric type for binary numeric operations.
-  // Caller should ensure both inputs are numeric.
+  /** The type two numbers meet as, in a comparison, a result they both
+    * become, or arithmetic: the wider of the two, but an INT or BIGINT
+    * beside a FLOAT is a DOUBLE, since a FLOAT, with 24 bits of mantissa,
+    * holds no integer past 16777216 that is odd, and a DOUBLE holds every
+    * INT (a BIGINT past 2^53 still loses its last digits there, as in every
+    * engine). Callers pass two numeric types. */
   def widerNumeric(a: DataType, b: DataType): DataType = {
     def rank(t: DataType): Int = t match {
       case IntType => 1
@@ -81,6 +85,9 @@ object DataType {
       case _: DecimalType => 5
       case _ => 0
     }
-    if (rank(a) >= rank(b)) a else b
+    (a, b) match {
+      case (FloatType, IntType | LongType) | (IntType | LongType, FloatType) => DoubleType
+      case _ => if (rank(a) >= rank(b)) a else b
+    }
   }
 }

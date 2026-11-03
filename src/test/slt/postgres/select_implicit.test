@@ -1,0 +1,375 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/select_implicit.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/select_implicit.out at that commit, never the
+# engine's. Portions Copyright (c) 1996-2026, PostgreSQL Global Development
+# Group; Portions Copyright (c) 1994, The Regents of the University of
+# California. Distributed under the PostgreSQL License, a permissive license
+# whose text travels with every copy: it is COPYRIGHT beside this file.
+#
+# GROUP BY and ORDER BY on columns and expressions the SELECT list does not
+# name, by reference number, and in a self-join, where a name both sides
+# have is ambiguous unless it is qualified: an error in GROUP BY, ORDER BY or
+# an aggregate, and none where two columns of the SELECT list are the same
+# column or expression. All 44 of the file's statements are here, each
+# record naming the line of select_implicit.sql it comes from, as Postgres
+# wrote it, and the engine's answer is Postgres's in every one, the six
+# errors each refused for Postgres's reason. test_missing_target's c char(8)
+# and d char are STRING columns, as the runner reads CHAR(n), each value
+# stored as written, unpadded: Postgres pads c to eight characters and
+# compares, groups, sorts and lowers it without the pad, so no answer here
+# depends on it, and psql's output does not show it. A result in no fixed
+# order, a table's rows read back, is compared as rowsort.
+
+# select_implicit.sql:10: load test data.
+statement ok
+CREATE TABLE test_missing_target (a int, b int, c char(8), d char)
+
+# select_implicit.sql:11
+statement ok
+INSERT INTO test_missing_target VALUES (0, 1, 'XXXX', 'A')
+
+# select_implicit.sql:12
+statement ok
+INSERT INTO test_missing_target VALUES (1, 2, 'ABAB', 'b')
+
+# select_implicit.sql:13
+statement ok
+INSERT INTO test_missing_target VALUES (2, 2, 'ABAB', 'c')
+
+# select_implicit.sql:14
+statement ok
+INSERT INTO test_missing_target VALUES (3, 3, 'BBBB', 'D')
+
+# select_implicit.sql:15
+statement ok
+INSERT INTO test_missing_target VALUES (4, 3, 'BBBB', 'e')
+
+# select_implicit.sql:16
+statement ok
+INSERT INTO test_missing_target VALUES (5, 3, 'bbbb', 'F')
+
+# select_implicit.sql:17
+statement ok
+INSERT INTO test_missing_target VALUES (6, 4, 'cccc', 'g')
+
+# select_implicit.sql:18
+statement ok
+INSERT INTO test_missing_target VALUES (7, 4, 'cccc', 'h')
+
+# select_implicit.sql:19
+statement ok
+INSERT INTO test_missing_target VALUES (8, 4, 'CCCC', 'I')
+
+# select_implicit.sql:20
+statement ok
+INSERT INTO test_missing_target VALUES (9, 4, 'CCCC', 'j')
+
+# select_implicit.sql:24: with the GROUP BY target in the SELECT list.
+query STRING,BIGINT nosort
+SELECT c, count(*) FROM test_missing_target GROUP BY test_missing_target.c ORDER BY c
+----
+ABAB	2
+BBBB	2
+CCCC	2
+XXXX	1
+bbbb	1
+cccc	2
+
+# select_implicit.sql:27: without it, a relation name in the GROUP BY clause.
+query BIGINT nosort
+SELECT count(*) FROM test_missing_target GROUP BY test_missing_target.c ORDER BY c
+----
+2
+2
+2
+1
+1
+2
+
+# select_implicit.sql:31: without it, and ordered by another column: an error.
+# Postgres: column "test_missing_target.b" must appear in the GROUP BY clause
+# or be used in an aggregate function.
+statement error
+SELECT count(*) FROM test_missing_target GROUP BY a ORDER BY b
+
+# select_implicit.sql:34: without it, ordered by the same column.
+query BIGINT nosort
+SELECT count(*) FROM test_missing_target GROUP BY b ORDER BY b
+----
+1
+2
+3
+4
+
+# select_implicit.sql:37: with it, a relation name in the SELECT list.
+query INT,BIGINT nosort
+SELECT test_missing_target.b, count(*)
+  FROM test_missing_target GROUP BY b ORDER BY b
+----
+1	1
+2	2
+3	3
+4	4
+
+# select_implicit.sql:41: ordered by a column the SELECT list does not name.
+query STRING nosort
+SELECT c FROM test_missing_target ORDER BY a
+----
+XXXX
+ABAB
+ABAB
+BBBB
+BBBB
+bbbb
+cccc
+cccc
+CCCC
+CCCC
+
+# select_implicit.sql:44: without the ORDER BY target in the SELECT list.
+query BIGINT nosort
+SELECT count(*) FROM test_missing_target GROUP BY b ORDER BY b desc
+----
+4
+3
+2
+1
+
+# select_implicit.sql:47: ordered by a reference number.
+query BIGINT nosort
+SELECT count(*) FROM test_missing_target ORDER BY 1 desc
+----
+10
+
+# select_implicit.sql:50: grouped and ordered by a reference number.
+query STRING,BIGINT nosort
+SELECT c, count(*) FROM test_missing_target GROUP BY 1 ORDER BY 1
+----
+ABAB	2
+BBBB	2
+CCCC	2
+XXXX	1
+bbbb	1
+cccc	2
+
+# select_implicit.sql:54: grouped by a reference number out of range.
+# Postgres: GROUP BY position 3 is not in select list.
+statement error
+SELECT c, count(*) FROM test_missing_target GROUP BY 3
+
+# select_implicit.sql:58: grouped and ordered by a name both sides of a
+# self-join have. Postgres: column reference "b" is ambiguous.
+statement error
+SELECT count(*) FROM test_missing_target x, test_missing_target y
+	WHERE x.a = y.a
+	GROUP BY b ORDER BY b
+
+# select_implicit.sql:64: ordered by a name two columns of the SELECT list
+# have, both the same column: no error.
+query INT,INT nosort
+SELECT a, a FROM test_missing_target
+	ORDER BY a
+----
+0	0
+1	1
+2	2
+3	3
+4	4
+5	5
+6	6
+7	7
+8	8
+9	9
+
+# select_implicit.sql:69: ordered by an expression two columns of the SELECT
+# list are: no error.
+query INT,INT nosort
+SELECT a/2, a/2 FROM test_missing_target
+	ORDER BY a/2
+----
+0	0
+0	0
+1	1
+1	1
+2	2
+2	2
+3	3
+3	3
+4	4
+4	4
+
+# select_implicit.sql:74: grouped and ordered by that expression: no error.
+query INT,INT nosort
+SELECT a/2, a/2 FROM test_missing_target
+	GROUP BY a/2 ORDER BY a/2
+----
+0	0
+1	1
+2	2
+3	3
+4	4
+
+# select_implicit.sql:78: a self-join grouped by a qualified name the SELECT
+# list names.
+query INT,BIGINT nosort
+SELECT x.b, count(*) FROM test_missing_target x, test_missing_target y
+	WHERE x.a = y.a
+	GROUP BY x.b ORDER BY x.b
+----
+1	1
+2	2
+3	3
+4	4
+
+# select_implicit.sql:83: one it does not name.
+query BIGINT nosort
+SELECT count(*) FROM test_missing_target x, test_missing_target y
+	WHERE x.a = y.a
+	GROUP BY x.b ORDER BY x.b
+----
+1
+2
+3
+4
+
+# select_implicit.sql:89: the same query made a table.
+statement ok
+CREATE TABLE test_missing_target2 AS
+SELECT count(*)
+FROM test_missing_target x, test_missing_target y
+	WHERE x.a = y.a
+	GROUP BY x.b ORDER BY x.b
+
+# select_implicit.sql:94
+query BIGINT rowsort
+SELECT * FROM test_missing_target2
+----
+1
+2
+3
+4
+
+# select_implicit.sql:100: functions and expressions, with the GROUP BY target
+# in the SELECT list.
+query INT,BIGINT nosort
+SELECT a%2, count(b) FROM test_missing_target
+GROUP BY test_missing_target.a%2
+ORDER BY test_missing_target.a%2
+----
+0	5
+1	5
+
+# select_implicit.sql:105: without it, a relation name in the GROUP BY clause.
+query BIGINT nosort
+SELECT count(c) FROM test_missing_target
+GROUP BY lower(test_missing_target.c)
+ORDER BY lower(test_missing_target.c)
+----
+2
+3
+4
+1
+
+# select_implicit.sql:111: without it, ordered by another column. Postgres:
+# column "test_missing_target.b" must appear in the GROUP BY clause or be used
+# in an aggregate function.
+statement error
+SELECT count(a) FROM test_missing_target GROUP BY a ORDER BY b
+
+# select_implicit.sql:114: without it, ordered by the same expression.
+query BIGINT nosort
+SELECT count(b) FROM test_missing_target GROUP BY b/2 ORDER BY b/2
+----
+1
+5
+4
+
+# select_implicit.sql:117: with it, a relation name in the SELECT list.
+query STRING,BIGINT nosort
+SELECT lower(test_missing_target.c), count(c)
+  FROM test_missing_target GROUP BY lower(c) ORDER BY lower(c)
+----
+abab	2
+bbbb	3
+cccc	4
+xxxx	1
+
+# select_implicit.sql:121: ordered by an expression the SELECT list does not
+# hold.
+query INT nosort
+SELECT a FROM test_missing_target ORDER BY upper(d)
+----
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+
+# select_implicit.sql:124: grouped and ordered by an expression the SELECT
+# list does not hold.
+query BIGINT nosort
+SELECT count(b) FROM test_missing_target
+	GROUP BY (b + 1) / 2 ORDER BY (b + 1) / 2 desc
+----
+7
+3
+
+# select_implicit.sql:129: a self-join grouped and ordered by an expression of
+# a name both sides have. Postgres: column reference "b" is ambiguous.
+statement error
+SELECT count(x.a) FROM test_missing_target x, test_missing_target y
+	WHERE x.a = y.a
+	GROUP BY b/2 ORDER BY b/2
+
+# select_implicit.sql:134: grouped by an expression of a qualified name the
+# SELECT list holds.
+query INT,BIGINT nosort
+SELECT x.b/2, count(x.b) FROM test_missing_target x, test_missing_target y
+	WHERE x.a = y.a
+	GROUP BY x.b/2 ORDER BY x.b/2
+----
+0	1
+1	5
+2	4
+
+# select_implicit.sql:140: an aggregate of a name both sides have. Postgres:
+# column reference "b" is ambiguous.
+statement error
+SELECT count(b) FROM test_missing_target x, test_missing_target y
+	WHERE x.a = y.a
+	GROUP BY x.b/2
+
+# select_implicit.sql:146: the query of select_implicit.sql:134 without its
+# first column, made a table.
+statement ok
+CREATE TABLE test_missing_target3 AS
+SELECT count(x.b)
+FROM test_missing_target x, test_missing_target y
+	WHERE x.a = y.a
+	GROUP BY x.b/2 ORDER BY x.b/2
+
+# select_implicit.sql:151
+query BIGINT rowsort
+SELECT * FROM test_missing_target3
+----
+1
+4
+5
+
+# select_implicit.sql:154: cleanup.
+statement ok
+DROP TABLE test_missing_target
+
+# select_implicit.sql:155
+statement ok
+DROP TABLE test_missing_target2
+
+# select_implicit.sql:156
+statement ok
+DROP TABLE test_missing_target3

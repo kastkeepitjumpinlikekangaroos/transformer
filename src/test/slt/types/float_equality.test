@@ -96,15 +96,24 @@ SELECT id FROM f WHERE d IN (CAST('NaN' AS DOUBLE), 0.0)
 3
 4
 
-# Division and % by zero are NULL; past the largest double is Infinity.
-query DOUBLE,DOUBLE,DOUBLE,DOUBLE
-SELECT 1.5 / 0.0, 1.5 % 0.0, -1.5 / -0.0, 1e308 * 10
+# Division and % by zero are NULL, for every number type.
+onlyif transformer div-zero-null
+query INT,INT,BIGINT,DOUBLE,DOUBLE,DOUBLE
+SELECT 7 / 0, 7 % 0, CAST(7 AS BIGINT) / 0, 1.5 / 0.0, 1.5 % 0.0, -1.5 / -0.0
 ----
-NULL	NULL	NULL	Infinity
+NULL	NULL	NULL	NULL	NULL	NULL
+
+# Past the largest double is an infinity, not an error.
+onlyif transformer double-range
+query DOUBLE,DOUBLE
+SELECT 1e308 * 10, -1e308 * 10
+----
+Infinity	-Infinity
 
 # A result too small for a double is 0, or -0.0 when it is negative, not an
 # error (Postgres's "value out of range: underflow"), as one past the largest
 # is an infinity; a subnormal one, between, is kept.
+onlyif transformer double-range
 query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE
 SELECT 1e-200 * 1e-200, -1e-200 * 1e-200, 1e-300 / 1e100, EXP(-1000.0), POWER(0.5, 2000.0), 1e-200 * 1e-120
 ----
@@ -113,11 +122,13 @@ SELECT 1e-200 * 1e-200, -1e-200 * 1e-200, 1e-300 / 1e100, EXP(-1000.0), POWER(0.
 # A square root of less than zero is NULL, as are a logarithm of zero or
 # less and one to a base of zero or less or of 1: no number answers them, as
 # none answers a division by zero. -0.0 is zero, and NaN stays NaN.
+onlyif transformer math-domain-null
 query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE
 SELECT SQRT(-1), SQRT(-0.0), LN(0), LN(-1.5), LOG10(-0.0), LOG2(-8), LOG10(1000)
 ----
 NULL	-0.0	NULL	NULL	NULL	NULL	3.0
 
+onlyif transformer math-domain-null
 query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE
 SELECT LOG(0, 8), LOG(-2, 8), LOG(1, 8), LOG(2, 0), LOG(2, -8), LOG(10, 100)
 ----
@@ -135,6 +146,7 @@ SELECT id, SQRT(d), LN(d) FROM f WHERE id <> 6
 
 # An arcsine or arccosine is of a number from -1 to 1, and an infinity has no
 # sine, cosine or tangent: each is NULL past them.
+onlyif transformer math-domain-null
 query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE
 SELECT ASIN(2), ACOS(-1.5), ASIN(1), SIN(CAST('Infinity' AS DOUBLE)), COS(CAST('-Infinity' AS DOUBLE)), TAN(CAST('Infinity' AS DOUBLE))
 ----
@@ -143,6 +155,7 @@ NULL	NULL	1.5707963267948966	NULL	NULL	NULL
 # Zero to a negative power, and a number below zero to a finite power that is
 # not whole, are NULL. Otherwise POWER is C's pow: 1 to any power, and -1 to an
 # infinite one, is 1, where Java's pow gives NaN.
+onlyif transformer math-domain-null
 query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE
 SELECT POWER(0, -1), POWER(-8, 0.5), POWER(-2, 3), POWER(-2, -1), POWER(1, CAST('NaN' AS DOUBLE)), POWER(-1, CAST('Infinity' AS DOUBLE)), POWER(-2, CAST('Infinity' AS DOUBLE))
 ----
@@ -158,3 +171,43 @@ SELECT id, POWER(d, -1), POWER(d, 0.5), ASIN(d) FROM f
 5	0.0	Infinity	NULL
 6	0.6666666666666666	1.224744871391589	NULL
 7	NULL	NULL	NULL
+
+# An INT or BIGINT beside a FLOAT meets it as a DOUBLE, in a comparison, a
+# result both become and arithmetic (plans/testing/10, decision 2): a FLOAT
+# holds no odd integer past 16777216, so meeting as a FLOAT made
+# 16777217 = 16777216 true and COALESCE read 2147483647 as 2.1474836E9.
+query BOOLEAN,BOOLEAN,BOOLEAN
+SELECT CAST(16777217 AS INT) = CAST(16777216 AS FLOAT), CAST(16777217 AS INT) IN (CAST(16777216 AS FLOAT)), CAST(16777217 AS BIGINT) > CAST(16777216 AS FLOAT)
+----
+false	false	true
+
+query DOUBLE,DOUBLE,DOUBLE,DOUBLE
+SELECT COALESCE(CAST(NULL AS FLOAT), 2147483647), CASE WHEN TRUE THEN CAST(16777217 AS INT) ELSE CAST(1 AS FLOAT) END, CAST(16777217 AS INT) + CAST(0 AS FLOAT), CAST(1.5 AS FLOAT) * 2
+----
+2.147483647E9	1.6777217E7	1.6777217E7	3.0
+
+statement ok
+CREATE TABLE w (i INT, b BIGINT, r FLOAT)
+
+statement ok
+INSERT INTO w VALUES (16777217, 9007199254740993, 16777216.0), (3, 4, 2.5), (NULL, 1, NULL)
+
+# A FLOAT column beside an integer one is a DOUBLE in a UNION's column too,
+# and the integer keeps every digit a DOUBLE holds; a BIGINT past 2^53 does
+# not, as in every engine.
+query DOUBLE rowsort
+SELECT i FROM w UNION ALL SELECT r FROM w
+----
+1.6777216E7
+1.6777217E7
+2.5
+3.0
+NULL
+NULL
+
+query BOOLEAN,BOOLEAN,DOUBLE rowsort
+SELECT i = r, b = CAST(9007199254740992 AS DOUBLE), i * r FROM w
+----
+NULL	false	NULL
+false	false	7.5
+false	true	2.81474993487872E14

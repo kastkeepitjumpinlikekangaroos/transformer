@@ -156,9 +156,15 @@ object DataGen {
   def generate(rng: Rng): Dataset = {
     val structRng = rng.split()
     val dataRng = rng.split()
+    // Split after the other two, so a dataset away from the edges draws the
+    // values it drew before they existed.
+    val edges = Edges.draw(rng.split())
     val schema = genSchema(structRng)
     val numRows = genRowCount(structRng)
-    val specs = schema.fields.map(f => genColumnSpec(structRng, f.dataType))
+    val specs = schema.fields.map { f =>
+      val spec = genColumnSpec(structRng, f.dataType)
+      spec.copy(domain = edges.widen(f.dataType, spec.domain))
+    }
     val rows = IndexedSeq.tabulate(numRows) { _ =>
       Array.tabulate[Any](schema.length) { c =>
         val spec = specs(c)
@@ -216,8 +222,11 @@ object DataGen {
   // neighbour by RowOracle's tolerant compare.
   private val DoublePool: IndexedSeq[Double] =
     IndexedSeq(0.0, 0.25, 0.5, 1.0, 2.0, -1.0, -2.5, 3.5, 10.0, 100.0)
+  /** Narrow, so keys collide; `a` beside itself with a space at either end
+    * and a lone space, which `TRIM` strips and `=` does not. A share of
+    * string columns ([[TextProb]]) draws from [[TextPool]] instead. */
   private val StringPool: IndexedSeq[String] =
-    IndexedSeq("", "a", "b", "c", "d", "ab", "abc", "x", "y", "z")
+    IndexedSeq("", " ", "a", " a", "a ", "b", "c", "d", "ab", "abc", "x", "y", "z")
 
   /** IEEE values a Float/Double column's domain can carry on top of
     * [[DoublePool]]. Ordered by how much of the engine they exercise, because
@@ -231,6 +240,14 @@ object DataGen {
     * layout-differential properties aggregate over. */
   private[fuzz] val SpecialDoubles: IndexedSeq[Double] =
     IndexedSeq(Double.NaN, -0.0, Double.PositiveInfinity, Double.NegativeInfinity)
+
+  /** How often a STRING column draws a slice of [[TextPool]], the text past
+    * ASCII, rather than [[StringPool]]: often enough that each of its classes
+    * reaches every string site on a share of seeds
+    * (`ModeDifferentialFuzzTest.textReachesEveryStringSite`), seldom enough
+    * that most string columns keep the narrow ASCII pool the older guards
+    * were measured over. */
+  private val TextProb = 0.35
 
   /** Probability that a Float/Double column's domain carries IEEE specials at
     * all. A quarter of float columns is low enough to leave most of the corpus
@@ -263,13 +280,95 @@ object DataGen {
         IndexedSeq[Any](true),
         IndexedSeq[Any](false)))
     case DataType.StringType =>
-      pickSubset(rng, StringPool)
+      if (rng.bool(TextProb)) TextPool.slice(rng, 6) else pickSubset(rng, StringPool)
     case DataType.DateType => pickSubset(rng, ExprGen.DatePool.toIndexedSeq)
     case DataType.TimestampType => pickSubset(rng, ExprGen.TimestampPool.toIndexedSeq)
     case DataType.BinaryType => pickSubset(rng, ExprGen.BinaryPool.toIndexedSeq)
     case d: DataType.DecimalType => pickSubset(rng, DecimalPools(d))
     case other =>
       throw new IllegalArgumentException(s"DataGen.genDomain: unsupported $other")
+  }
+
+  /** Where a dataset, or `MetaQueryGen`'s environment of relations, takes
+    * values a query can fail on: on [[Edges.EdgyProb]] of them each INT,
+    * BIGINT, DECIMAL, DATE or TIMESTAMP column draws its type's edges
+    * ([[Edges.of]]) beside its narrow domain on [[Edges.ColumnProb]], so
+    * arithmetic, a SUM, a CAST, a join, a window and a spill over it can
+    * fail on its data, while the rest of the corpus answers as before; and
+    * on any dataset a STRING column holds text a CAST reads as some types
+    * and not others ([[Edges.CastText]]) on [[Edges.CastTextProb]]. Drawn
+    * from a stream of its own, so the narrow domains stay what they were. */
+  private[fuzz] final class Edges private (rng: Rng, edgy: Boolean) {
+    /** `base` and, on this dataset's share of columns, `dt`'s edges, or for a
+      * STRING column now and then a slice of [[Edges.CastText]] instead. */
+    def widen(dt: DataType, base: IndexedSeq[Any]): IndexedSeq[Any] = dt match {
+      case DataType.StringType =>
+        if (rng.bool(Edges.CastTextProb)) slice(rng, Edges.CastText.map(t => t: Any)) else base
+      case _ =>
+        val edges = Edges.of(dt)
+        if (edgy && edges.nonEmpty && rng.bool(Edges.ColumnProb)) base ++ edges else base
+    }
+  }
+
+  private[fuzz] object Edges {
+    /** How often a dataset or an environment is at the edges. */
+    val EdgyProb = 0.4
+    /** In one, how often a column of a type with edges draws them. */
+    val ColumnProb = 0.7
+    /** How often a STRING column holds [[CastText]]. */
+    val CastTextProb = 0.12
+
+    /** Text a CAST reads as some types and not others, neighbours parting on
+      * one type: integers, one past a BIGINT, a decimal, an exponent, a word,
+      * a boolean, a date and an instant, and a leading space. */
+    val CastText: IndexedSeq[String] = IndexedSeq(
+      "1", "-7", "9223372036854775808", "2.5", "1e3", "x", "true", "2024-03-10", "2024-03-10 07:00:00", " 2")
+
+    /** A fresh draw: whether this dataset is at the edges, and the stream its
+      * columns draw from. */
+    def draw(rng: Rng): Edges = new Edges(rng, rng.bool(EdgyProb))
+
+    /** Each type's values at its edges: an INT and a BIGINT at and one inside
+      * its limits, where arithmetic, a negation, `ABS` and a SUM overflow; a
+      * DECIMAL at the end of its precision, which arithmetic, a SUM and a CAST
+      * to a narrower type pass; a DATE at either end of what a DATE stores,
+      * whose midnight no TIMESTAMP holds, and years 1 and before; a TIMESTAMP
+      * at either end of what it stores, and years 1 and 1900. FLOAT and DOUBLE
+      * have none: a float SUM near the range's end differs with row order,
+      * Infinity against a finite value, which no layout relation can call
+      * equal. */
+    def of(dt: DataType): IndexedSeq[Any] = dt match {
+      case DataType.IntType => IndexedSeq(Int.MaxValue, Int.MaxValue - 1, Int.MinValue, Int.MinValue + 1)
+      case DataType.LongType => IndexedSeq(Long.MaxValue, Long.MaxValue - 1, Long.MinValue, Long.MinValue + 1)
+      case d: DataType.DecimalType =>
+        val largest = new java.math.BigDecimal("9" * (d.precision - d.scale) + (if (d.scale > 0) "." + "9" * d.scale else ""))
+        IndexedSeq(largest, largest.negate)
+      case DataType.DateType => DateEdges
+      case DataType.TimestampType => TimestampEdges
+      case _ => IndexedSeq.empty
+    }
+  }
+
+  /** `n` neighbours of `pool`, 2 to 4 of them. */
+  private def slice(rng: Rng, pool: IndexedSeq[Any]): IndexedSeq[Any] = {
+    val w = rng.between(2, math.min(4, pool.length))
+    val start = rng.between(0, pool.length - w)
+    pool.slice(start, start + w)
+  }
+
+  /** The first and last DATE (epoch days at an INT's limits), the first day
+    * of year 1, and a day before it. */
+  private[fuzz] val DateEdges: IndexedSeq[Any] = IndexedSeq(
+    java.time.LocalDate.ofEpochDay(Int.MaxValue.toLong), java.time.LocalDate.ofEpochDay(Int.MinValue.toLong),
+    java.time.LocalDate.of(1, 1, 1), java.time.LocalDate.of(-5, 3, 1), java.time.LocalDate.of(1900, 1, 1))
+
+  /** The first and last TIMESTAMP (microseconds at a BIGINT's limits), and
+    * the start of years 1 and 1900. */
+  private[fuzz] val TimestampEdges: IndexedSeq[Any] = {
+    def micros(m: Long): java.time.Instant =
+      java.time.Instant.ofEpochSecond(Math.floorDiv(m, 1000000L), Math.floorMod(m, 1000000L) * 1000L)
+    IndexedSeq(micros(Long.MaxValue), micros(Long.MinValue), java.time.Instant.parse("0001-01-01T00:00:00Z"),
+      java.time.Instant.parse("1900-01-01T00:00:00Z"))
   }
 
   /** A decimal column's candidate values, for each of `ExprGen.DecimalTypes`.
@@ -283,8 +382,9 @@ object DataGen {
     * computed in DOUBLE would be off in its last digits, and would move with
     * the order rows arrive in, which is what the layout properties compare.
     * Every value fits its declared precision and scale, and none is large, so
-    * no generated arithmetic overflows its declared type. The pools in
-    * `ExprGen` run to the edge of their precision instead. */
+    * no arithmetic over the pool alone overflows its declared type; a column
+    * at the edges ([[Edges]]) is where a SUM or arithmetic overflows. The
+    * pools in `ExprGen` run to the edge of their precision too. */
   private[fuzz] val DecimalPools: Map[DataType, IndexedSeq[java.math.BigDecimal]] = Map[DataType, Seq[String]](
     DataType.DecimalType(9, 2) ->
       Seq("-2.50", "-0.07", "0", "0.00", "1", "1.0", "1.00", "0.10", "0.20", "33.33"),

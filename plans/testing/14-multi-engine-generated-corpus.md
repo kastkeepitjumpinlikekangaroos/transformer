@@ -1,6 +1,8 @@
 # Plan 14: a generated corpus whose answers Postgres and DuckDB agree on
 
-> Status: **not started** · from the 2026-11-01 test survey, category 2 of 9
+> Status: **done** 2026-11-02 (febca22 W1 and W2, 98e672e W5, a6c67ac W3 and
+> W6; see [Outcome](#outcome); every open decision taken overnight as
+> recommended, not yet confirmed by the user) · from the 2026-11-01 test survey, category 2 of 9
 > (answers from outside the engine, part 5) · Effort: 4-6 days · Risk: low for
 > the engine (test data only); medium for the tool (normalization decides what
 > counts as agreement) · Depends on: [08](08-skips-cite-decisions.md) (the
@@ -200,17 +202,23 @@ the headers.
    - (b) A Python generator and driver under `tools/`, the third audit's
      method: independent of the engine's typing assumptions, but a second
      generator to keep in step, and the repo's first Python.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 2. **Size.**
    - (a) **(recommended)** About 3,000 records near 1 MB, half again the
      records the scripts hold, measured against `slt_test`'s time before
      landing (expected to add well under half its 41 s).
    - (b) About 10,000, most of them in a `fuzz`-tagged slt target outside the
      default suite.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 3. **What agreement means for a DOUBLE.**
    - (a) **(recommended)** Exact when both references give the same shortest
      value, else 15 significant digits as `T`, else dropped.
    - (b) SQLite's `R` (three decimals) everywhere. Simpler, but it loses every
      digit of a large or small magnitude.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 4. **A record both references answer one way and the engine another, by a
    documented decision.**
    - (a) **(recommended)** Vendored with `skipif transformer` and the decision
@@ -218,11 +226,15 @@ the headers.
      record shows how far the rule reaches.
    - (b) Kept out at generation by a gate: a smaller corpus that records
      nothing of the rule.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 5. **The references.** (a) **(recommended)** Postgres and DuckDB: Postgres is
    the reference most decisions cite, DuckDB independent code, and their
    disagreements visible; (b) SQLite as a third vote, whose loose typing (no
    DECIMAL, integer `%`, case-insensitive LIKE) would drop most decimal, date
    and string records.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 
 ## Decisions already made
 
@@ -298,3 +310,117 @@ Report: records generated, kept, by design, findings, refusals, and dropped
 because the references disagreed, per feature; the corpus size and the time
 it adds to slt_test; every engine finding with its repro and what was decided.
 ```
+
+## Findings
+
+| # | Finding | Minimized repro | What became of it |
+|---|---|---|---|
+| F1 | The plan of a `BETWEEN` over two DECIMAL types does not bind back: the binder compares the three operands as the one DECIMAL that holds them all, `PlanSql` printed the two comparisons it expands to without their DECIMAL casts, and bound again each compared its own pair, another plan. The `reprinted` modes failed the query and `EXPLAIN` printed SQL that did not bind back; the answers were right. | `CREATE TABLE b (i INT, d2 DECIMAL(9,2), d18 DECIMAL(38,18))`; `SELECT d2 FROM b WHERE d2 BETWEEN d18 AND i` under the `reprinted` mode | Fixed in `98e672e` (no semantic choice: the printer writes the expansion back as the `BETWEEN`), with `types/decimal.test` and `PlanSqlTest`, both failing at `febca22`. 8 of the decimal feature's first 600 queries. |
+| A1 | A `SUBSTRING` position before the first character counts from the first: `SUBSTRING('abc', 0, 2)` is `ab`, `SUBSTRING('abc', 0, 1)` is `a`, where Postgres and DuckDB give `a` and the empty string, as the standard counts the positions before the first character toward the length. A negative start parts the two references (DuckDB counts it from the end). | `SELECT SUBSTRING('abc', 0, 2)` | Held for the user (gotchas.md, "What the agreed corpus held out"): keep it with a ledger row (recommended: the README states it, as Spark has it), or count as the standard does. 12 records held. |
+| D3 | `CONCAT` of a NULL is NULL, where both references skip the NULL argument (finding D3 of plans/testing/12). | `SELECT CONCAT('a', NULL, 'b')` | Already held for the user there; 35 records held under it. |
+| C3 | A `TIMESTAMP` cast to text is its ISO instant, `2024-03-10T07:00:00.000001Z`, where both references write `2024-03-10 07:00:00.000001` (finding C3 of plans/testing/12). | `SELECT CAST(TIMESTAMP '2024-03-10 07:00:00.000001' AS STRING)` | Already held for the user there; 9 records held under it. |
+| — | A `STDDEV_SAMP` of 64 BIGINTs agreed with both references to 15 digits in the baseline and moved one digit under the `spill` mode, the order Welford's partial results merge in. | (outer_join case 24 of the report) | No defect: the `double-precision` rule, which the runner already allows for in CockroachDB's and DataFusion's statistics. Not written. |
+
+Each held record is held only once Postgres, given the query with the engine's
+rule written in (`PortableSql.HeldRules`: `CONCAT` as `||`, a start before 1 as
+1, a timestamp's text as its ISO instant), gives the engine's answer, so no
+other difference can hide under a held id. The tool's first passes, before
+its normalization was finished, also reported differences of its own making (a
+DECIMAL compared at each reference's scale, a one-column row of the empty
+string read as no row, a row of spaces ending a record's block), each fixed in
+the tool before W1+W2 landed; no other engine finding came up.
+
+## Outcome
+
+Landed overnight on `testing-round-3`, 2026-11-02, in the plan's grouping:
+W1 and W2 `febca22`, the engine fix of W5 `98e672e` (before its records were
+written, as W5 asks), W3 and W6 `a6c67ac`. At each, `bazel test //...` passed
+(73 targets, 74 with W6's guard) and the jaffle-shop job gave 15/15
+Succeeded with every validation passing. W5's regressions failed at
+`febca22`, checked in a temporary worktree. The references were Homebrew's
+PostgreSQL 17.11 (the user allowed `postgresql@17`, where the plan's Setup
+named 18), in a cluster made under the scratchpad with `--locale=C
+--encoding=UTF8`, `TimeZone=UTC`, listening on 127.0.0.1:54329 (the
+scratchpad's path is too long for a Unix socket), and Homebrew's DuckDB 2.0.0,
+run with `-no-agent`. Neither is on any classpath; the cluster was stopped
+once the corpus was written.
+
+**The corpus**, written at `98e672e` from seeds 0 to 2000, 1.05 MB:
+
+| feature | quota | cases | queries | kept | by design | held | finding | outside | references disagree |
+|---|---|---|---|---|---|---|---|---|---|
+| `window` | 600 | 79 | 604 | 604 | | | | | |
+| `decimal` | 500 | 84 | 602 | 500 | 48 | | | 50 | 4 |
+| `outer_join` | 400 | 65 | 499 | 406 | 1 | | 1 | 89 | 2 |
+| `string` | 400 | 70 | 525 | 400 | | 36 | | 86 | 3 |
+| `datetime` | 300 | 47 | 341 | 303 | | 9 | | 29 | |
+| `cte_union_distinct` | 400 | 59 | 465 | 401 | 1 | | | 61 | 2 |
+| `order_limit` | 400 | 54 | 417 | 400 | 2 | | | 15 | |
+| all | 3,000 | 458 | 3,453 | 3,014 | 52 | 45 | 1 | 330 | 11 |
+
+No query both references answered did the engine refuse, and none raised an
+error in both references. By design: 51 `decimal-result-type` (a DECIMAL the
+engine rounds inside a query to the type its rules give, each confirmed by
+Postgres computing the query with the engine's types written in) and one
+`double-precision` (a `VAR_SAMP`'s last digits), each with its twin. Held: 45
+(A1 12, D3 35, C3 9; 11 under both A1 and D3). Outside, by why: arithmetic on
+a FLOAT 169, `MIN` or `MAX` of a BOOLEAN or BINARY 58, a window `MetaQueryGen`
+orders by no unique key 40, `%` of a DOUBLE 24, a float's text 11, a CAST of a
+fraction to an integer 9, a BOOLEAN cast to a number 9, a BIGINT position or
+scale 6, `ROUND` of a DOUBLE 4. The references disagreed on 11: DuckDB's
+DECIMAL quotients in DOUBLE (4), a `SUBSTRING` from a negative position (3), a
+`STDDEV` past its 15th digit (1), a `CORR` of no variance, NULL or NaN (1),
+and a lone NULL beside a `bytea`, which Postgres types as text (2); gotchas.md
+says which way the engine goes on each.
+
+**Time**: the seven scripts' 14 executions a record take 117 s of `slt_test`'s
+265 s across its four shards (191 s before); its longest shard went from 60.2 s
+to 74.4 s, about a quarter more, under the half the plan expected. The scripts
+pass under `batch1`, `batch2`, `sharded`, `serial`, `zone` and `hashzero`.
+Generating the whole corpus takes about 45 s on eight threads; two runs from a
+clean checkout, at different thread counts and batch sizes, wrote the same
+bytes. `agreed_corpus_test` fails on a `window.test` cut to 218 of its 600
+records. One block of `plan_roundtrip_fuzz_campaign` (3,000 seeds) ran after
+the printer changed, green in a minute.
+
+**Calls made overnight**, beyond the five decisions:
+
+- **The renderer transforms where it can and refuses where it must.** A
+  divisor is `NULLIF(<divisor>, 0)`, so a division by a possible zero is never
+  generated rather than never kept; a literal's type is a CAST (a decimal one
+  of its own digits, `CAST(0.07 AS DECIMAL(2,2))`, so `double-literal` never
+  arises); a lone DECIMAL NULL is `CAST(NULL AS DECIMAL(p,s))`, since Postgres
+  types a bare one meeting nothing as text. What the references part on by
+  their rules is `Outside`, counted by why.
+- **One SQL text for all three.** The engine reads every portable spelling
+  (`INTEGER`, `REAL`, `DOUBLE PRECISION`, `TEXT`), so each record's SQL is the
+  text both references ran; only a BINARY column's DDL and values are spelled
+  per engine.
+- **By design is confirmed, not guessed.** `decimal-result-type` is cited only
+  where Postgres, given the query with each DECIMAL node the engine computes
+  rounded to the type the engine binds it to (`typingProbes` binds each node
+  alone), gives the engine's answer; a quotient or average at the top of a
+  column, rounded half away from zero at its scale, is kept, as the plan's
+  rule says. `double-precision` is cited for a statistic whose engine answer
+  agrees to 15 digits, its twin printing the DOUBLE as `T`.
+- **Held findings the same way**: a record is held under a finding only where
+  Postgres with the engine's rule written in gives the engine's answer.
+  `concat-null` and `timestamp-text` are plans/testing/12's D3 and C3, held
+  there already; `substring-before-start` is new, A1.
+- **Every written record runs under the runner first**, under every mode, so
+  a record one mode answers otherwise is a finding rather than a script that
+  fails.
+- **Size**: tables of at most 32 rows and eight queries a case, which brought
+  the corpus from 1.15 MB to 1.05 MB at the same quotas; no -0.0 in the data,
+  since which of two tied zeros a group, a `DISTINCT`, a `MIN` or a cutoff
+  keeps is each reference's own choice.
+- **The tool's references run as one Postgres session a case (its tables
+  `TEMP`, failures read from psql's `ERROR` and `LAST_ERROR_MESSAGE`) and one
+  DuckDB process a query** (`DESCRIBE` giving its column types, which says
+  when DuckDB computed a DECIMAL in DOUBLE).
+- **`agreed/` joined `LedgerTest.Ports`**: it keeps the references' answers,
+  the engine's only as twins, and pins no ledger rule.
+- **Not done**: no shrinking of a finding's repro beyond the generated case,
+  since there was one new finding and its repro is one line; the generators'
+  own gates (plans/testing/15) are untouched, the feature producers living in
+  `AgreedGen` until that plan folds the shapes in.

@@ -1,0 +1,97 @@
+# Text casts by the grammar CSV reads a value by (plans/robustness/24): to a
+# BOOLEAN from true and false alone, in any case and with no spaces around
+# them, to an INT or BIGINT from an optional sign and ASCII digits, to a FLOAT
+# or DOUBLE from a plain decimal number, or NaN, Infinity and -Infinity as
+# written, and to a DATE from an ISO date, a year past 9999 or before 1 with
+# a sign. Any other text is an error naming it. Postgres reads more spellings
+# of each, which its ports keep as skipped records (postgres/boolean.test,
+# postgres/int4.test, postgres/float8.test, postgres/date.test); these are
+# the pins of the ledger's bool-text, int-text, double-text and date-text-iso
+# (docs/gotchas.md).
+
+onlyif transformer bool-text
+query BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN
+SELECT CAST('true' AS BOOLEAN), CAST('FALSE' AS BOOLEAN), CAST('True' AS BOOLEAN), CAST('fAlSe' AS BOOLEAN)
+----
+true	false	true	false
+
+onlyif transformer bool-text
+statement error
+SELECT CAST('t' AS BOOLEAN)
+----
+Cannot cast 't' to boolean
+
+onlyif transformer bool-text
+statement error
+SELECT CAST(' true' AS BOOLEAN)
+----
+Cannot cast ' true' to boolean
+
+onlyif transformer int-text
+query INT,BIGINT,INT,BIGINT
+SELECT CAST('007' AS INT), CAST('+5' AS BIGINT), CAST('-2147483648' AS INT), CAST('-9223372036854775808' AS BIGINT)
+----
+7	5	-2147483648	-9223372036854775808
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0x42F' AS INT)
+----
+Cannot cast '0x42F' to int
+
+onlyif transformer int-text
+statement error
+SELECT CAST('1_000_000' AS BIGINT)
+----
+Cannot cast '1_000_000' to long
+
+onlyif transformer int-text
+statement error
+SELECT CAST(' 5' AS INT)
+----
+Cannot cast ' 5' to int
+
+onlyif transformer double-text
+query DOUBLE,DOUBLE,DOUBLE,DOUBLE,DOUBLE,FLOAT
+SELECT CAST('NaN' AS DOUBLE), CAST('Infinity' AS DOUBLE), CAST('-Infinity' AS DOUBLE), CAST('-2.5' AS DOUBLE), CAST('1e3' AS DOUBLE), CAST('.5' AS FLOAT)
+----
+NaN	Infinity	-Infinity	-2.5	1000.0	0.5
+
+onlyif transformer double-text
+statement error
+SELECT CAST('nan' AS DOUBLE)
+----
+Cannot cast 'nan' to double
+
+onlyif transformer double-text
+statement error
+SELECT CAST(' 5' AS DOUBLE)
+----
+Cannot cast ' 5' to double
+
+# A string literal beside a value of another type is read as that type when
+# the query is bound: '1' + i over an INT is an INT, beside a FLOAT a FLOAT,
+# beside a BIGINT a BIGINT (Spark reads the text as a BIGINT or a DOUBLE).
+onlyif transformer text-literal-typed
+query INT,FLOAT,BIGINT,BOOLEAN
+SELECT '1' + CAST(1 AS INT), '1' + CAST(1 AS FLOAT), CAST(1 AS BIGINT) * '3', CAST(1 AS INT) < '10'
+----
+2	2.0	3	true
+
+onlyif transformer date-text-iso
+query DATE,DATE,DATE
+SELECT CAST('2026-01-31' AS DATE), CAST('+10000-01-01' AS DATE), CAST('-0001-12-31' AS DATE)
+----
+2026-01-31	+10000-01-01	-0001-12-31
+
+onlyif transformer date-text-iso
+statement error
+SELECT CAST('January 8, 1999' AS DATE)
+----
+Cannot cast 'January 8, 1999' to date
+
+onlyif transformer date-text-iso
+statement error
+SELECT CAST('19990108' AS DATE)
+----
+Cannot cast '19990108' to date

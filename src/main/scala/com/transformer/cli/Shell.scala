@@ -71,7 +71,7 @@ object Shell {
     val cancel = new Cancel
     val io = new Io(gated(out, cancel), gated(err, cancel), cancel)
     session.width = Some(terminal.getColumns).filter(_ > 0)
-    val worker = new Thread(() => { session.runScript(input, io); () }, "transformer-query")
+    val worker = new Thread(() => { val _ = session.runScript(input, io) }, "transformer-query")
     worker.setDaemon(true)
     val interrupts = new AtomicInteger
     val previous = terminal.handle(Terminal.Signal.INT, _ => { interrupts.incrementAndGet(); cancel.cancel() })

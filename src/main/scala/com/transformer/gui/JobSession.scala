@@ -26,6 +26,11 @@ object UiTaskState {
   case object Queued extends UiTaskState
   case object Running extends UiTaskState
   final case class Done(result: TaskResult) extends UiTaskState
+  /** Reopened from a `_run.json` that says `Running`: the run that started
+    * the task at `startedAt` stopped before it finished, or is still running
+    * in another process. It has no duration, no rows and no output to show.
+    * A run in this GUI shows a running task from memory, as `Running`. */
+  final case class Unfinished(startedAt: Instant) extends UiTaskState
 }
 
 /** Per-input UI status. Inputs are now scheduled as DAG nodes alongside tasks
@@ -380,6 +385,10 @@ final class JobSession {
     *      `job.json` missing or unreadable in a run directory that exists is a
     *      line in [[hydrationWarnings]].
     *
+    * A record that says `Running`, by whichever step it is reached, is a run
+    * that never finished, and its task reopens as [[UiTaskState.Unfinished]]:
+    * that record, not `job.json`, says what its directory holds now.
+    *
     * Tasks present in the manifest but no longer in the DAG are silently
     * ignored. */
   private def hydrateRunRecords(dag: TaskDag, job: DataJob): Unit = {
@@ -446,10 +455,10 @@ final class JobSession {
       dag.nodes.iterator.zipWithIndex.map { case (n, idx) => n.task.displayName -> idx }.toMap
 
     def fromRecord(idx: Int, dir: Path, rec: TaskRunRecord): Unit = {
-      val result = taskResultFromRecord(rec, dir)
+      val state = stateFromRecord(rec, dir)
       records(idx) = Some(rec)
-      outputs(idx) = result.outputPath
-      states(idx) = UiTaskState.Done(result)
+      outputs(idx) = outputOf(state)
+      states(idx) = state
     }
 
     // 3. Apply manifest entries where we have one.
@@ -466,9 +475,9 @@ final class JobSession {
             .orElse(historicals(idx).find { case (_, r) => r.executionTime == rec.executionTime }) match {
             case Some((dir, taskRec)) => fromRecord(idx, dir, taskRec)
             case None =>
-              val result = taskResultFromSummary(summary)
-              outputs(idx) = result.outputPath
-              states(idx) = UiTaskState.Done(result)
+              val state = stateFromSummary(summary)
+              outputs(idx) = outputOf(state)
+              states(idx) = state
               reasons(idx) = pointed.left.toOption.flatten
           }
         }
@@ -538,26 +547,39 @@ final class JobSession {
       case NonFatal(e) => Left(s"its _run.json at $runFile cannot be read: ${Option(e.getMessage).getOrElse(e.toString)}")
     }
 
-  /** The statuses after which the runner reports an output path: the task
-    * wrote its output, whatever its validations then said. */
-  private def wroteOutput(status: TaskRunStatus): Boolean = status match {
-    case TaskRunStatus.Succeeded | TaskRunStatus.ValidationFailed => true
-    case TaskRunStatus.Failed | TaskRunStatus.Skipped            => false
+  /** The output path a reopened task shows: its run's, when it wrote one. */
+  private def outputOf(state: UiTaskState): Option[String] = state match {
+    case UiTaskState.Done(result) => result.outputPath
+    case _ => None
   }
 
   /** Rehydrate a full in-memory [[TaskResult]] from an on-disk [[TaskRunRecord]],
     * as the run reported it. For [[TaskRunStatus.ValidationFailed]] this also
     * reads each per-validation `_validation-<slug>.csv` sample file from `dir`
-    * so the validation cards can render the original failure detail.
+    * so the validation cards can render the original failure detail. A
+    * `Running` record is a run that never finished, which reported nothing:
+    * [[UiTaskState.Unfinished]].
     *
     * `dir` is the task's output only when the run wrote output there: a Failed
     * or Skipped task's directory holds nothing but its record, and the run
     * reported no output path for it. A record written before records carried an
     * enqueue time gets the epoch, which [[TaskResult.queueWaitMillis]] reads as
     * unknown. */
-  private def taskResultFromRecord(rec: TaskRunRecord, dir: Path): TaskResult = {
-    val status: TaskStatus = rec.status match {
-      case TaskRunStatus.Succeeded => TaskStatus.Succeeded
+  private def stateFromRecord(rec: TaskRunRecord, dir: Path): UiTaskState = {
+    def done(status: TaskStatus, finishedAt: Instant): UiTaskState = UiTaskState.Done(TaskResult(
+      taskName = rec.taskName,
+      status = status,
+      rowsProduced = rec.rowsProduced,
+      outputPath = if (TaskRunStatus.wroteOutput(rec.status)) Some(dir.toString) else None,
+      startedAt = rec.startedAt,
+      finishedAt = finishedAt,
+      enqueuedAt = rec.enqueuedAt.getOrElse(Instant.EPOCH)
+    ))
+    // Every record but a Running one says when its run finished.
+    val finished = rec.finishedAt.getOrElse(rec.startedAt)
+    rec.status match {
+      case TaskRunStatus.Running => UiTaskState.Unfinished(rec.startedAt)
+      case TaskRunStatus.Succeeded => done(TaskStatus.Succeeded, finished)
       case TaskRunStatus.ValidationFailed =>
         val failures = rec.validations.filterNot(_.passed).map { vr =>
           val sample = vr.sampleFile
@@ -565,21 +587,12 @@ final class JobSession {
             .getOrElse("")
           ValidationFailure(vr.name, vr.failedRowCount, sample)
         }
-        TaskStatus.ValidationFailed(failures)
+        done(TaskStatus.ValidationFailed(failures), finished)
       case TaskRunStatus.Failed =>
-        TaskStatus.Failed(rec.errorMessage.getOrElse("(no error message recorded)"))
+        done(TaskStatus.Failed(rec.errorMessage.getOrElse("(no error message recorded)")), finished)
       case TaskRunStatus.Skipped =>
-        TaskStatus.Skipped(rec.errorMessage.getOrElse("(no reason recorded)"))
+        done(TaskStatus.Skipped(rec.errorMessage.getOrElse("(no reason recorded)")), finished)
     }
-    TaskResult(
-      taskName = rec.taskName,
-      status = status,
-      rowsProduced = rec.rowsProduced,
-      outputPath = if (wroteOutput(rec.status)) Some(dir.toString) else None,
-      startedAt = rec.startedAt,
-      finishedAt = rec.finishedAt,
-      enqueuedAt = rec.enqueuedAt.getOrElse(Instant.EPOCH)
-    )
   }
 
   /** Rebuild a [[TaskResult]] from a `job.json` entry alone, for a task whose
@@ -590,30 +603,34 @@ final class JobSession {
     * directory when the status wrote output — where that directory still
     * exists. An entry from before entries carried timestamps and failed
     * validations gives the epoch (unknown) and `ValidationFailed(Nil)` (which
-    * ones unknown). */
-  private def taskResultFromSummary(s: JobTaskSummary): TaskResult = {
-    val status: TaskStatus = s.status match {
-      case TaskRunStatus.Succeeded => TaskStatus.Succeeded
-      case TaskRunStatus.ValidationFailed =>
-        TaskStatus.ValidationFailed(s.failedValidations.map(v => ValidationFailure(v.name, v.failedRowCount, "")))
-      case TaskRunStatus.Failed  => TaskStatus.Failed(s.errorMessage.getOrElse("(no error message)"))
-      case TaskRunStatus.Skipped => TaskStatus.Skipped(s.errorMessage.getOrElse("(no reason)"))
+    * ones unknown). A runner writes `job.json` once its tasks are done, so no
+    * entry says `Running`; one that does is unfinished, as such a record is. */
+  private def stateFromSummary(s: JobTaskSummary): UiTaskState = {
+    def done(status: TaskStatus): UiTaskState = {
+      val outputDir =
+        if (!TaskRunStatus.wroteOutput(s.status)) None
+        else s.runFile.flatMap { rf =>
+          try Option(Paths.get(rf).getParent).filter(Files.isDirectory(_)).map(_.toString)
+          catch { case NonFatal(_) => None }
+        }
+      UiTaskState.Done(TaskResult(
+        taskName = s.taskName,
+        status = status,
+        rowsProduced = s.rowsProduced,
+        outputPath = outputDir,
+        startedAt = s.startedAt.getOrElse(Instant.EPOCH),
+        finishedAt = s.finishedAt.getOrElse(Instant.EPOCH),
+        enqueuedAt = s.enqueuedAt.getOrElse(Instant.EPOCH)
+      ))
     }
-    val outputDir =
-      if (!wroteOutput(s.status)) None
-      else s.runFile.flatMap { rf =>
-        try Option(Paths.get(rf).getParent).filter(Files.isDirectory(_)).map(_.toString)
-        catch { case NonFatal(_) => None }
-      }
-    TaskResult(
-      taskName = s.taskName,
-      status = status,
-      rowsProduced = s.rowsProduced,
-      outputPath = outputDir,
-      startedAt = s.startedAt.getOrElse(Instant.EPOCH),
-      finishedAt = s.finishedAt.getOrElse(Instant.EPOCH),
-      enqueuedAt = s.enqueuedAt.getOrElse(Instant.EPOCH)
-    )
+    s.status match {
+      case TaskRunStatus.Running => UiTaskState.Unfinished(s.startedAt.getOrElse(Instant.EPOCH))
+      case TaskRunStatus.Succeeded => done(TaskStatus.Succeeded)
+      case TaskRunStatus.ValidationFailed =>
+        done(TaskStatus.ValidationFailed(s.failedValidations.map(v => ValidationFailure(v.name, v.failedRowCount, ""))))
+      case TaskRunStatus.Failed  => done(TaskStatus.Failed(s.errorMessage.getOrElse("(no error message)")))
+      case TaskRunStatus.Skipped => done(TaskStatus.Skipped(s.errorMessage.getOrElse("(no reason)")))
+    }
   }
 
   /** Mark a task as Queued — its deps are satisfied but no worker has picked it

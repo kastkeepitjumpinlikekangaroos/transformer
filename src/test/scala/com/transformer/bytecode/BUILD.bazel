@@ -1,0 +1,66 @@
+load("@rules_scala//scala:scala.bzl", "scala_junit_test", "scala_library")
+
+# The class-file reader every test over compiled classes shares: the constant
+# pool, each method's code decoded an instruction at a time, and each call,
+# field access, string constant and float comparison found in the method that
+# holds it. Hand-written (JVMS chapter 4), no bytecode library. testonly, and
+# needs nothing but the JDK.
+scala_library(
+    name = "classfile",
+    testonly = True,
+    srcs = ["ClassFile.scala"],
+    visibility = ["//src/test/scala/com/transformer:__subpackages__"],
+)
+
+# The reader: a fixture compiled here, each call, comparison and constant found
+# in its method; switch padding and `wide` decoded from hand-assembled code;
+# every method of the Scala library and of java.base decoded to its last byte.
+scala_junit_test(
+    name = "classfile_test",
+    srcs = [
+        "ClassFileFixture.scala",
+        "ClassFileTest.scala",
+    ],
+    suffixes = ["Test"],
+    deps = [
+        ":classfile",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The rules of BytecodeRules.scala, each a convention a compiled class can show,
+# held over the classes of every module a job runs and of the desktop GUI and the
+# data viewer. The modules are read, not called: runtime_deps. Runs under tr-TR,
+# as job:locale_independence_test does.
+scala_junit_test(
+    name = "bytecode_rules_test",
+    srcs = [
+        "BytecodeRules.scala",
+        "BytecodeRulesTest.scala",
+    ],
+    jvm_flags = [
+        "-Duser.language=tr",
+        "-Duser.country=TR",
+    ],
+    suffixes = ["Test"],
+    deps = [
+        ":classfile",
+        "@maven//:junit_junit",
+    ],
+    runtime_deps = [
+        "//src/main/scala/com/transformer/cli",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/gui",
+        "//src/main/scala/com/transformer/gui:session",
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/read/csv",
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/parse",
+        "//src/main/scala/com/transformer/sql/plan",
+        "//src/main/scala/com/transformer/temporal",
+        "//src/main/scala/com/transformer/viewer",
+        "//src/main/scala/com/transformer/write/csv",
+        "//src/main/scala/com/transformer/write/parquet",
+    ],
+)

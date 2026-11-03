@@ -1,0 +1,3887 @@
+# The corpus of answers PostgreSQL and DuckDB agree on (plans/testing/14), written by
+# //src/test/scala/com/transformer/slt:agreed_corpus: regenerate it rather than edit it
+# (docs/testing.md, "The agreed corpus"). Each record's query was drawn by the fuzz
+# generators and run in Postgres, DuckDB and the engine; its answer is the references'.
+# feature: window
+# covers: window frames, ROWS and RANGE with numeric offsets, peers, ROW_NUMBER, RANK, DENSE_RANK, LAG and LEAD with defaults
+# quota: 600 records kept
+# seeds: cases 0 to 78 of 0:2000
+# tool commit: 98e672e
+# references: PostgreSQL 17.11; DuckDB v2.0.0 (d54cbbe3df)
+# normalization: by-value, decimal-exact, decimal-from-double, double-shortest-or-15, float-exact, text-exact, temporal-by-value, binary-bytes, special-floats, row-order
+# records: 604 kept, 0 errors both references and the engine raise, 0 by design
+
+hash-threshold 8
+
+# window case 0
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w1 FROM t AS t
+----
+
+statement ok
+DROP TABLE t
+
+# window case 1
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, -1, 4), (1, 1, 2, 4), (2, 1, 0, 9), (3, 1, 3, 4), (4, 0, 3, 8), (5, 0, 0, 5), (6, 0, -2, 2), (7, 0, 3, -3), (8, NULL, NULL, -1), (9, 0, -2, 0)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to 4837d6cae5e26128ceeb7b5b795ade72
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to 33a13ea8b60e2ebacc709e629d41b155
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS w0 FROM t AS t
+----
+20 values hashing to 1090676f02e5a67cd6e81eafcf006007
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 1 PRECEDING AND 0 PRECEDING) AS w0 FROM t AS t
+----
+20 values hashing to 9efcda00ad5bf9a1fbe5a6f91a1946c5
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+20 values hashing to e24bd134b1be0010afb60445d8b0ff7e
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to 584ff20ad0f999b768ae83c16257425e
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(-1 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to 9e3b42fc7fcdb673abadf6df214c250b
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to 584ff20ad0f999b768ae83c16257425e
+
+statement ok
+DROP TABLE t
+
+# window case 2
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 0.5, 1), (1, 1, -1.5, 5), (2, 1, CAST('NaN' AS DOUBLE PRECISION), 0), (3, 1, 0.5, 3), (4, 0, CAST('Infinity' AS DOUBLE PRECISION), 4)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to baa9e090d7cca88fb4ad5ef4bd744186
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, LAG(t.k) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, MIN(t.x) OVER (PARTITION BY t.g) AS w1 FROM t AS t
+----
+15 values hashing to 530395998f628d46258927a6b4f24ba3
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to 9d3c8aa22d045ec23d21435b4a1ea51d
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST RANGE BETWEEN 0 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+15 values hashing to ea0126d6192f87af497de10ac29d1449
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 1.5 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+10 values hashing to 7651e5c60cdbdc9867894fd1666fdb25
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, LAG(t.k, 2, CAST(0.0 AS DOUBLE PRECISION)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, DENSE_RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+15 values hashing to c5e8a35535314a155c4cac3a328172c9
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, LEAD(t.k) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to 75a15267c7a4db198d4bbbfd2017da86
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 1.5 PRECEDING AND CURRENT ROW) AS w0, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND 0 FOLLOWING) AS w1 FROM t AS t
+----
+15 values hashing to bd8461ac1c8ae9e80a282a06ca00317e
+
+statement ok
+DROP TABLE t
+
+# window case 3
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, NULL, -1.5, 6), (1, 0, CAST('-Infinity' AS DOUBLE PRECISION), NULL), (2, 1, NULL, -2), (3, 1, CAST('NaN' AS DOUBLE PRECISION), 0), (4, 0, CAST('-Infinity' AS DOUBLE PRECISION), 2), (5, 1, NULL, 0), (6, 0, 0.0, 0), (7, 0, 0.5, 4), (8, 1, 0.0, NULL), (9, 1, -1.5, 1), (10, 0, CAST('Infinity' AS DOUBLE PRECISION), 1), (11, NULL, 2.5, NULL), (12, 0, 1.0, 3), (13, 1, 1.0, NULL)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS w0, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w1 FROM t AS t
+----
+42 values hashing to 3b9c35881ac61d71f7b74399e22bbd30
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+28 values hashing to c06430164c6f6504e76dacee980aa934
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+42 values hashing to 0a63a03d81a84ed5d233374cba27c1f4
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 3 FOLLOWING AND 1 FOLLOWING) AS w0, LAG(t.k) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+42 values hashing to 9776f3baf4e8fc7c43e01e279cd6fcfe
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 3 FOLLOWING AND 0 FOLLOWING) AS w0 FROM t AS t
+----
+28 values hashing to 61db9a7b6415fab9cb20b2900aa34093
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+28 values hashing to d60e25ef6e81589fa7b41f162d377c23
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+28 values hashing to fa429ccd3b1273231af199837ecf5fec
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 1 PRECEDING AND 0 PRECEDING) AS w0 FROM t AS t
+----
+28 values hashing to 8c33f25c08aa46efb70d0954b57c0022
+
+statement ok
+DROP TABLE t
+
+# window case 4
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 0.00, -3), (1, 1, 0.00, -3), (2, 0, 0.50, NULL), (3, 1, -1.50, 3), (4, 0, 2.25, -3)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, LAG(t.x) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+15 values hashing to e554038dddf4fcaf155a00abe2d2ea72
+
+query INT,DECIMAL(9,2),BIGINT rowsort
+SELECT t.id AS id, LAG(t.k, 2) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+15 values hashing to dc7986d941103c171f34f019eb145239
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to df844261517aa46377e8b90993df07cc
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, AVG(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 2 FOLLOWING AND 2 FOLLOWING) AS w0, LAG(t.x, 2, NULL) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+15 values hashing to 5cf1ee8ef5aa62d327d13a651138bf8d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to 56c9792dcfae3d450a836687af5ca56f
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to f953dcba95aee5d02709e2bd278af3ac
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+15 values hashing to 3d1b3167fcb0f33b177e68301c67d66d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to e7cd0f680ca2bd5aa00010085ee9cbcd
+
+statement ok
+DROP TABLE t
+
+# window case 5
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 2.25, NULL), (1, 0, 0.00, NULL), (2, 1, 0.00, 5), (3, 0, 0.50, 2), (4, 1, 0.00, 2), (5, NULL, -1.50, 9), (6, 0, 1.00, -3), (7, 1, 2.25, -1), (8, 0, 2.25, 5), (9, 1, 0.00, -3), (10, 1, 0.00, -3), (11, 0, -1.50, -1), (12, 0, 2.25, 1)
+
+query INT,DECIMAL(9,2) rowsort
+SELECT t.id AS id, LAG(t.k, 2, CAST(0.50 AS DECIMAL(2,2))) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 28803f1fcef2d717827a3eca8c1ab9cb
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+26 values hashing to 400e870020c55c003ce41468e0ab93c6
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+39 values hashing to 7c5116609c58d52c41499d4fd5ca2318
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 9902a02b9d802b4091c592a6dae3fc78
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 307eadc25d7c35286152a731e3918473
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 0 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0, RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w1 FROM t AS t
+----
+39 values hashing to 8e9784d6bed33ceaf114a032fe698916
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 0 PRECEDING AND 0 PRECEDING) AS w0 FROM t AS t
+----
+26 values hashing to f5a5b0e78d868fd593959034d9964776
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, COUNT(t.x) OVER () AS w1 FROM t AS t
+----
+39 values hashing to 4a293f4bcbdf18b4ab071b3a84a35843
+
+statement ok
+DROP TABLE t
+
+# window case 6
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w0, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+
+statement ok
+DROP TABLE t
+
+# window case 7
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 1, NULL), (1, 1, 4, 6), (2, 1, 1, NULL), (3, 1, 0, NULL), (4, 1, 2, 5), (5, 0, -1, 3), (6, 0, 1, 0), (7, 1, 1, 1), (8, 1, NULL, -2), (9, 1, -2, 2), (10, 0, NULL, 9), (11, 1, -1, -3), (12, 0, -1, 2), (13, 1, -1, 4), (14, NULL, -1, 4), (15, 1, -1, -1), (16, 0, NULL, 2), (17, 1, 3, 6), (18, 1, 0, -2)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 5315e0cf0aa9c6ae1403c74a61258fc7
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS 1 PRECEDING) AS w0 FROM t AS t
+----
+38 values hashing to b0d14638957571cbbb05f9345bf60d50
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 7feb73f805ffc8f334683c7bde01dd65
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w0 FROM t AS t
+----
+38 values hashing to 039ffab23f77d6ba198cd86f58e324d4
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+38 values hashing to 33dcda6c296aa14d2d431462c4bab7d0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 1 FOLLOWING AND 3 FOLLOWING) AS w0 FROM t AS t
+----
+38 values hashing to 84d442ef5864d0cafe9deff75a87751a
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(0 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to cf224a83cba729292544763b5cb9a012
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST RANGE 0 PRECEDING) AS w0 FROM t AS t
+----
+38 values hashing to 0dfb4803071354badbf2453c5a9c965e
+
+statement ok
+DROP TABLE t
+
+# window case 8
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, -1, 0), (1, 1, -2, 8), (2, NULL, 2, 5), (3, 1, 3, 4), (4, 0, 0, -1), (5, 1, 4, 6), (6, 0, 2, 9), (7, 0, 2, 1), (8, 0, 2, 2), (9, 1, -2, 4), (10, 0, 4, 8), (11, 1, 3, 1), (12, 0, 1, 0), (13, 1, NULL, 9), (14, 1, 3, 3), (15, NULL, -1, 8), (16, 1, NULL, 3), (17, 0, NULL, 3), (18, 1, 4, 8), (19, 1, 3, NULL)
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 2 PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+40 values hashing to 08a0ceb48b1d64edd6507988dfbbf03c
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+40 values hashing to fdfcf9da4a0f3c7eb87e9da8695f9b78
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+40 values hashing to 0e75d684f345e0cc10064dd84254ffab
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g) AS w0, SUM(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 2 PRECEDING AND 1 PRECEDING) AS w1 FROM t AS t
+----
+60 values hashing to f5b1f60d89c7aabdbf93ae3eaf345914
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 2 PRECEDING AND 0 FOLLOWING) AS w0 FROM t AS t
+----
+40 values hashing to 084aa7a7d8360c8a54cf09e951737935
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+40 values hashing to 1723a915a896c75f3202a0fc3f00de94
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 2, CAST(100 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+40 values hashing to 37c06c7881dd64a43cdadd53b31e97bf
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(100 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+40 values hashing to b7ebf516ef5aab1a7c787270bd57f8a4
+
+statement ok
+DROP TABLE t
+
+# window case 9
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, -1.50, 9), (1, 1, 0.50, 6), (2, 1, 1.00, 6), (3, NULL, 2.25, -1), (4, 0, 1.00, -3), (5, 1, 0.00, 5)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+18 values hashing to 28dfe9cf4dfdf85e690a1c424258ed80
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST) AS w1 FROM t AS t
+----
+18 values hashing to 9ddd9e892a106cb6405ba7bb6f22b310
+
+query INT,BIGINT,DECIMAL(9,2) rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, LEAD(t.k, 3) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+18 values hashing to 8b2742a9857ebe6048e514cb8d060986
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 66f205ed941d4d1bdedcd75149ac48a3
+
+query INT,DECIMAL(9,2) rowsort
+SELECT t.id AS id, LAG(t.k, 3) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 1ab2b621109f0aab2e1b5bb050dd6c7a
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k ASC NULLS LAST) AS w0 FROM t AS t
+----
+12 values hashing to d1b368c4572b14e30cca38f6639a80a6
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to c454eacbc6c93425c78af4873d289d14
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+12 values hashing to 9c7abe5bb157874c145a2649fb66425d
+
+statement ok
+DROP TABLE t
+
+# window case 10
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 1, 7), (1, 0, 1, 1), (2, 1, -2, NULL), (3, 0, 4, -3), (4, 1, 4, 2), (5, 1, 0, 3), (6, 1, -2, 4), (7, 1, -2, 6), (8, 1, 0, 5), (9, NULL, 3, 7), (10, 1, 4, 4), (11, NULL, -1, 8), (12, 0, 4, -3), (13, 1, 4, 8), (14, 0, 3, 6), (15, 1, 4, -2), (16, 0, NULL, 1), (17, 0, -2, NULL)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 0 PRECEDING AND UNBOUNDED FOLLOWING) AS w0, LEAD(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+54 values hashing to 788b136a347c99d7379ae50aebf8a70b
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w0 FROM t AS t
+----
+36 values hashing to 424983dae28edae2a56434e8e5d14de6
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0, LEAD(t.k, 2, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+54 values hashing to 4eb08d8ec4a5aba85f26d091618707da
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+36 values hashing to 0a5837a33e385193a05bebce0d28cd60
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS w0, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS CURRENT ROW) AS w1 FROM t AS t
+----
+54 values hashing to 2d968534458c48cc501d0a0c52afb391
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w0 FROM t AS t
+----
+36 values hashing to 424983dae28edae2a56434e8e5d14de6
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0, LEAD(t.k, 2, NULL) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+54 values hashing to 7bd533833313c51334e265f04ea96c9a
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 3, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+36 values hashing to a2ff4a163ca1e4975e1c17d3baeb662d
+
+statement ok
+DROP TABLE t
+
+# window case 11
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, -2, -1), (1, 0, 4, 8), (2, 0, 0, 8), (3, 1, 1, 6), (4, 0, 1, 1), (5, 1, -2, 2)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 419976741dec8fb2dd71e130088ebbe6
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 0 PRECEDING AND 1 PRECEDING) AS w0 FROM t AS t
+----
+12 values hashing to 1ab2b621109f0aab2e1b5bb050dd6c7a
+
+query INT,INT rowsort
+SELECT t.id AS id, LEAD(t.k, 2, 100) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to f18c1018740607191e909941a259c14e
+
+query INT,INT rowsort
+SELECT t.id AS id, LEAD(t.k, 2, 0) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to aa6c517ff3f5bad18c6533533337a6b6
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to d44511ab6e20797d8d56d2492c16326e
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+12 values hashing to 3eda0bcafb8477f33ba63dcfda100eaf
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to a1070ed4fb6c8e6d77bcd86f6be5e0ce
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 5c9bd2b984de3cdf405c356886752eaa
+
+statement ok
+DROP TABLE t
+
+# window case 12
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, NULL, 3, 3), (1, 1, 1, -3), (2, 0, 3, 5), (3, 0, -1, 7)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+0	2
+1	3
+2	2
+3	4
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+0	3
+1	-3
+2	5
+3	7
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 3) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w1 FROM t AS t
+----
+12 values hashing to 88b6861612555542da7a187d25afd6ee
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 0 FOLLOWING AND 0 FOLLOWING) AS w1 FROM t AS t
+----
+12 values hashing to 54e50b60d47ffafcd88b7da1fcf714e5
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+1	1
+2	1
+3	2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	1
+1	1
+2	1
+3	2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+1	1
+2	2
+3	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.k, 2, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	-1
+1	3
+2	-1
+3	3
+
+statement ok
+DROP TABLE t
+
+# window case 13
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, -1, NULL), (1, NULL, 1, -1), (2, 1, -1, 2), (3, 0, 4, 9), (4, 0, 1, -2), (5, NULL, -1, NULL), (6, NULL, 1, NULL), (7, 1, -2, -1)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 1, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+24 values hashing to 0946fafeb0626bce31908c1de7e7eda0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 3 PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+16 values hashing to 8bce631a336744ef53cd9e41b345c07f
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+16 values hashing to 7be14ea86d8c11d49c1023b635260fac
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.k, 3, CAST(-1 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to f6ddfb9450fb791aae92e5603973a0ff
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS w0 FROM t AS t
+----
+16 values hashing to e41aa1644d9c903f47ace4f737ccf008
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS 3 PRECEDING) AS w1 FROM t AS t
+----
+24 values hashing to 259c9d88ce90347b46318769bf8ade82
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+16 values hashing to efa9ce127fbdbdb829dfc318ab41a5c8
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to 48395138881e5428fe126105f28f3536
+
+statement ok
+DROP TABLE t
+
+# window case 14
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, -2, 8), (1, 0, 0, -3), (2, 1, -1, -1), (3, 1, 4, 7), (4, 1, 3, 6), (5, 0, -1, 1), (6, 0, 3, 9), (7, NULL, 4, NULL), (8, 0, -2, 5), (9, 0, 4, 2), (10, 0, -2, -2), (11, 0, 3, 6), (12, 1, 0, -3), (13, 0, 3, -1)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w0, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS 0 PRECEDING) AS w1 FROM t AS t
+----
+42 values hashing to 352aa9501422771bddd305b48b2b02e4
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0, SUM(t.x) OVER (ORDER BY t.k ASC NULLS LAST RANGE BETWEEN 0 FOLLOWING AND 0 FOLLOWING) AS w1 FROM t AS t
+----
+42 values hashing to 80ef88481f3d64c201ccfcf82478dad9
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN CURRENT ROW AND 2 FOLLOWING) AS w0 FROM t AS t
+----
+28 values hashing to 3a365f9a8848af12f41588419195da06
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 0 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+28 values hashing to b7b4bc8af0834c5eb5f8a0f1b3ca535d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w0 FROM t AS t
+----
+28 values hashing to 067c0ab5ba74d18da37d66468a8f21b4
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k ASC NULLS LAST) AS w0 FROM t AS t
+----
+28 values hashing to 89279b243fd818199dfa5f2be93bc195
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+28 values hashing to 08a6df4826cdfca8b0b3588f337f3fde
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+28 values hashing to e119ccb7dac5283ab78361704679976b
+
+statement ok
+DROP TABLE t
+
+# window case 15
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 1.00, -3), (1, 1, NULL, -1), (2, 1, -1.50, NULL), (3, 0, 1.00, 3), (4, 0, 2.25, 8), (5, 1, 2.25, 7), (6, 1, 1.00, 0), (7, 0, 0.00, 5), (8, 1, 0.50, 6)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS w0, LEAD(t.x, 1) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+27 values hashing to 466c8df9a858c92b92f318868befc6a0
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST RANGE BETWEEN 1.5 FOLLOWING AND 1.5 FOLLOWING) AS w0, SUM(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 2 PRECEDING AND CURRENT ROW) AS w1 FROM t AS t
+----
+27 values hashing to a4f064ad09720b5ab624afc555e234e3
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST RANGE BETWEEN 1.5 PRECEDING AND 2 PRECEDING) AS w0 FROM t AS t
+----
+18 values hashing to ca523eb6245079155847b47730341f18
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+18 values hashing to 88fdb0c8fe9d99d05e10d5d2e31ce1a8
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+18 values hashing to 8991ea168e35034ffa66691f2a8a645a
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+18 values hashing to a92271f334c90ad016a79319442cdeb1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 FOLLOWING AND 3 FOLLOWING) AS w0 FROM t AS t
+----
+18 values hashing to dc2687bd99aec8eab91c5396a1200c01
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+18 values hashing to 1c7e515498107003e82d43ccdaf73915
+
+statement ok
+DROP TABLE t
+
+# window case 16
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 2.25, 4), (1, 0, 2.25, 5), (2, 0, NULL, 2), (3, 1, NULL, -3), (4, 0, 0.00, 8), (5, 1, 2.25, 8), (6, 0, 2.25, 1), (7, 1, 2.25, 3)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 2 PRECEDING AND 0 PRECEDING) AS w0 FROM t AS t
+----
+16 values hashing to 7b668d4fead31a8dbcc6e6268d933163
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+16 values hashing to 48f9492e9bd0f37c98bb8570c6c03e13
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to b0bc27c8e4a7c9cc9d5e8d96f2bcb5e7
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, AVG(t.x) OVER (RANGE CURRENT ROW) AS w0, SUM(t.x) OVER (ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+24 values hashing to ba95db46ceece0d1f54aafcf66a732a1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+16 values hashing to 14a5cf1f8099d8f6fb01521aa818063b
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+16 values hashing to 7cb8943e0c186a066d31294d27d3c396
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to 9d3877c0b68aaea732a7f661c21d94b2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to 35a78eec7c9671c22831641501db6324
+
+statement ok
+DROP TABLE t
+
+# window case 17
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, -2, 3)
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS w1 FROM t AS t
+----
+0	1	3.0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN UNBOUNDED PRECEDING AND 2 PRECEDING) AS w0 FROM t AS t
+----
+0	NULL
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w0, LAG(t.x, 1, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+0	3	-1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.k, 3, NULL) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	NULL
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+0	3
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	1
+
+statement ok
+DROP TABLE t
+
+# window case 18
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 2, 5), (1, NULL, 4, 5), (2, 0, 4, 6), (3, NULL, 3, 6), (4, 1, 1, -3), (5, 0, 0, -2), (6, 0, 1, 4), (7, 0, 2, NULL)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to e0ea2a3cf06faed6b53307eda09fc8ce
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+16 values hashing to 5699afd08120b7c44452fddde17f2022
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to e0ea2a3cf06faed6b53307eda09fc8ce
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 1) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to 45b0e3ee36b05cc86a2430f15e61277f
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+16 values hashing to 0fe7ec8ccf8ebb1036bca752798c8919
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS UNBOUNDED PRECEDING) AS w0 FROM t AS t
+----
+16 values hashing to a76300d4e8fba0ab9c1760f3a1726019
+
+query INT,INT rowsort
+SELECT t.id AS id, LAG(t.k, 3, 1) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to a24347c0f68c58e7dd7ec17e5697cb94
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+16 values hashing to 02270482c2edf4c36757a1300b07a27d
+
+statement ok
+DROP TABLE t
+
+# window case 19
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 0.50, 9), (1, 0, NULL, 5), (2, 1, 0.50, 3), (3, 0, 2.25, NULL), (4, 0, -1.50, 3), (5, 0, 2.25, 1), (6, 1, 0.50, 1), (7, 1, 2.25, 8), (8, 0, 1.00, 4), (9, 1, 2.25, 0)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+20 values hashing to 57667ff765580a8549c140ded0d8888b
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to fe6ae1fc6cd052d107031a9bdefceba8
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+20 values hashing to b8dd5058a538426eb829996493790718
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to a176e86481d24b55dd61bf15c9b1245b
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0, RANK() OVER (ORDER BY t.k ASC NULLS LAST) AS w1 FROM t AS t
+----
+30 values hashing to 29c9beb76577f3fc84cf9db36db0233b
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to 84bf45e0015f66e126b17da731c969e5
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, MAX(t.x) OVER () AS w1 FROM t AS t
+----
+30 values hashing to 6e5fa1124e5bb87c179bb719ae648706
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2, CAST(100 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to b3099618e37b6badbf5c72bdbff7ed6e
+
+statement ok
+DROP TABLE t
+
+# window case 20
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 2, 4), (1, NULL, 2, 3), (2, 1, 4, 3), (3, 1, 1, 8), (4, 1, -1, 4)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to 63a6d4805e3cddb6faa5d1b5c98ad30e
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 1 PRECEDING AND 2 PRECEDING) AS w0, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+15 values hashing to f2926c325222e60fc44236baf4594726
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.k, 1, CAST(100 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to 600ac0b74b4ec5c488810a2fa4b310f4
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+10 values hashing to db61ddf0fc31cfa053939028be4056d8
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST RANGE BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+10 values hashing to c8cbfe16cf0056845338f276fe273bc0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(100 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to 14d3993a8da189c44a11e992e0c54f30
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.k, 2, CAST(100 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to 8539a86ffd0026b30c06e3c9140ab635
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE UNBOUNDED PRECEDING) AS w0, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+15 values hashing to c06e629dcf6da1017b28b8b8a281b8dc
+
+statement ok
+DROP TABLE t
+
+# window case 21
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, NULL, -2, NULL), (1, 0, 2, 6), (2, 0, -2, NULL), (3, 0, -2, 5), (4, 1, 3, 0)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to 9fd0b9ec7405d1db0ce7a1d9b19d7dab
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 3, CAST(0 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to 10123e86461293c477e5af004fd8a7dd
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to f953dcba95aee5d02709e2bd278af3ac
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.k, 1, NULL) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, RANK() OVER (ORDER BY t.k DESC NULLS FIRST) AS w1 FROM t AS t
+----
+15 values hashing to 17558593c732c70112e6355e7c920d97
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE CURRENT ROW) AS w1 FROM t AS t
+----
+15 values hashing to 1304126189d320ae81d6a2e6e953437f
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+10 values hashing to 1c2a3ead9df0c5ca51b8e987f49ef634
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+15 values hashing to 6ba985eb0239451394376e81eef60a9b
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to 63c57083f3ad79017101c31cda0fa87f
+
+statement ok
+DROP TABLE t
+
+# window case 22
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 1.00, 4), (1, 0, 0.50, -1), (2, NULL, 1.00, NULL), (3, 0, NULL, 0), (4, 1, 0.50, 2), (5, 0, 1.00, -1), (6, 1, NULL, NULL), (7, NULL, NULL, 9), (8, NULL, 0.50, -3), (9, 0, -1.50, -3), (10, 1, 2.25, 9), (11, 0, 0.50, 3)
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, LAG(t.x, 1, NULL) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0, AVG(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN CURRENT ROW AND 1.5 FOLLOWING) AS w1 FROM t AS t
+----
+36 values hashing to 6b30f7e72bf3ac9183ef3fc4b9856dd7
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS w0 FROM t AS t
+----
+24 values hashing to b3aa68066b065ca5d7d7379a69380e0f
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE 2 PRECEDING) AS w0 FROM t AS t
+----
+24 values hashing to 8ad39877a20c91a3125d7c6bd138438d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER () AS w0 FROM t AS t
+----
+24 values hashing to ee5a5f742d2f18428d7999fe9d5ce876
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+24 values hashing to 9d555cc83354eac662442f6ffe0f42c5
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+24 values hashing to 40f45de1048a816bbe45d222423cea77
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w1 FROM t AS t
+----
+36 values hashing to fa1d990b1d4f996c70975caf20da8ad3
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+24 values hashing to 14f40453bd5b323469d9c514690e1311
+
+statement ok
+DROP TABLE t
+
+# window case 23
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, NULL, 0), (1, 1, -1.50, 4), (2, 0, 0.00, -2), (3, 1, NULL, NULL), (4, 1, 2.25, 5), (5, 1, -1.50, 8), (6, 1, 0.00, 9), (7, 1, 2.25, 4), (8, 1, 0.00, 6), (9, 1, 1.00, 6), (10, 1, 1.00, 1), (11, 0, 2.25, 7), (12, 1, 0.50, 8), (13, 0, 1.00, 1), (14, 0, 0.00, 5), (15, 1, NULL, 5), (16, 1, 1.00, 5), (17, 0, 0.00, 0), (18, 0, -1.50, 9)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 528bd22eeed1f931bbd863ee2254f014
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+38 values hashing to 5969e57a8596ea384a6dff3b9bc06159
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to b08dd13543b627978535919a6e91a82c
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k DESC NULLS FIRST RANGE BETWEEN 2 PRECEDING AND 0 PRECEDING) AS w0 FROM t AS t
+----
+38 values hashing to a302de4d754bb27b791fe33bf97ace06
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 0 FOLLOWING AND 2 FOLLOWING) AS w0 FROM t AS t
+----
+38 values hashing to 6c817c8855b0bf91c6c784e8dce03838
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND 2 PRECEDING) AS w0 FROM t AS t
+----
+38 values hashing to 87064b65ed7aafa5da34654893b5f108
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 14004dd7309d6f553b106426e36d7363
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 2) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 702e2566f70f62ec096e66406b2b9f35
+
+statement ok
+DROP TABLE t
+
+# window case 24
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, NULL, 7), (1, NULL, -2, 3), (2, 1, 0, 6), (3, 1, NULL, 1), (4, 0, 0, 1), (5, 1, 4, -3), (6, 1, 1, 6), (7, 1, NULL, 4), (8, 1, 4, 0), (9, 0, 3, NULL)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to dda7d4668970adafb42c2fbcab9b8161
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.k, 2, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to d70954275b721bbbb8a64e58432d7d0c
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, LAG(t.x, 2, NULL) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, AVG(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING) AS w1 FROM t AS t
+----
+30 values hashing to f168fe85c35abb36c42c1ed59e05c515
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+30 values hashing to 6c5caf56cd175b01fc25d79aa47bdd23
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+20 values hashing to 7388dc2c3fc782e8476c02f301fb2f96
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+20 values hashing to a83ef359c1f713c80c96ebe0e4bf1f77
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+20 values hashing to 118538f168fa8bb28a07709499a1a148
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.k, 3, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to f906b67b2356a8f672a56dce4eeb19cd
+
+statement ok
+DROP TABLE t
+
+# window case 25
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, NULL, 0.50, 8)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	NULL
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 1 PRECEDING AND 2 FOLLOWING) AS w0 FROM t AS t
+----
+0	8
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 1 FOLLOWING AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+0	0
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w0, LEAD(t.x, 2, NULL) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+0	1	NULL
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w0, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+0	1	1
+
+statement ok
+DROP TABLE t
+
+# window case 26
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 4, 8), (1, 0, 4, 3), (2, 1, 4, 4), (3, 0, 3, -1), (4, NULL, 0, -1)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+15 values hashing to 8827b15973bd32f49903d8b6d7f2e2f1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to 5409e9d53e11bc537013e620fa529fc2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 0 FOLLOWING AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+10 values hashing to 1a72e1bb13d1038deaa06e414f9e9d74
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0, SUM(t.x) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w1 FROM t AS t
+----
+15 values hashing to 85fab85d14357362331edec4570bc0b7
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 0 PRECEDING AND UNBOUNDED FOLLOWING) AS w0, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS UNBOUNDED PRECEDING) AS w1 FROM t AS t
+----
+15 values hashing to 6125f408963cc84e58091d33ffcb12d4
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 PRECEDING AND 0 FOLLOWING) AS w0 FROM t AS t
+----
+10 values hashing to db4c518a770e40e933d3a167bc736239
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k ASC NULLS LAST) AS w0 FROM t AS t
+----
+10 values hashing to c5eb41da24135136a92488472334784d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to ec0a72d7c38b1f7de6c56f26f261cd52
+
+statement ok
+DROP TABLE t
+
+# window case 27
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, NULL, NULL, -3), (1, 1, 2, 1), (2, 1, 2, 9), (3, 1, 2, 1), (4, 1, 0, 9), (5, 1, -2, 7), (6, 0, -1, -1), (7, 1, 1, 2), (8, 1, 0, -2), (9, 1, 4, 2), (10, 0, 4, 3), (11, 0, 2, 9), (12, 1, 2, NULL), (13, 0, 3, 4), (14, 0, 1, 7), (15, 0, -1, 4), (16, 1, 4, NULL), (17, 0, 0, 4)
+
+query INT,INT rowsort
+SELECT t.id AS id, LAG(t.k, 2) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+36 values hashing to 2f5bf237c10fa7367cb4cc6816adf02a
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+36 values hashing to 28e68f8ecc640aa625fd27db0c862a53
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+36 values hashing to a314c59b4766419c4c5dd61f2024e240
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+36 values hashing to f8cc37cd990b07dd8d72bd1dfc7b9bbc
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+36 values hashing to d71f1ce038efc5793f9b47c6db0b64a3
+
+query INT,INT rowsort
+SELECT t.id AS id, LAG(t.k, 2, 1) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+36 values hashing to c771702015cf43e9166c4f6cbd9fc614
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (ORDER BY t.k DESC NULLS FIRST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS w0 FROM t AS t
+----
+36 values hashing to 132f25d249a3153069e438a3d4a0307c
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS w0 FROM t AS t
+----
+36 values hashing to 008193ad57454bd905997f30be175f48
+
+statement ok
+DROP TABLE t
+
+# window case 28
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 2, 0), (1, NULL, 4, 7), (2, 0, 4, 1), (3, 1, 1, 8), (4, 1, 4, 5), (5, 1, -1, -2), (6, 0, 4, NULL), (7, 1, -2, 6)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+24 values hashing to 0a3c2e29384902152ecfdb7d05eea8dc
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to bd8a2e0416baebc972114c20c814b77d
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0, RANK() OVER (ORDER BY t.k DESC NULLS FIRST) AS w1 FROM t AS t
+----
+24 values hashing to 588a76ad7f0a0ac2bab000f38233e3a3
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to afd2b096db0349c522c6fd3e79b80f17
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 2 PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+16 values hashing to d08a409b6a520c4d8597c84fbe45a767
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(100 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, LEAD(t.x, 2) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+24 values hashing to 39ac567b03ec4d5dade8c20a406c7a64
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, NULL) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to d51e831e0aaaa50cfc03a2027ec479e2
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST RANGE BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+24 values hashing to f2d3b5ab5e7a318fe3e0274e3b1518d6
+
+statement ok
+DROP TABLE t
+
+# window case 29
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, NULL, 3), (1, 1, -1.50, 4), (2, 0, NULL, 6), (3, 1, NULL, -1), (4, 1, 2.25, 5), (5, 0, 0.50, -1), (6, 0, 1.00, 9), (7, 1, 0.00, 5), (8, 1, 0.50, 3), (9, 1, 0.50, 4), (10, 1, NULL, 9), (11, 1, 0.00, 6), (12, 1, 1.00, -2), (13, 0, 2.25, 3), (14, 0, -1.50, -3), (15, 1, 2.25, 5), (16, 1, -1.50, 6), (17, 1, 2.25, 2), (18, 0, NULL, -2)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(100 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 4bec424415c456c6392b3de8022b1e75
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS UNBOUNDED PRECEDING) AS w0 FROM t AS t
+----
+38 values hashing to 3623ffc342eb75617baeba246a634894
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 3 FOLLOWING AND 0 FOLLOWING) AS w0 FROM t AS t
+----
+38 values hashing to 8cd77455161095a044718563d8476c12
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 1, CAST(100 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 66ddb6e8b227885416159aaedbf46828
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w1 FROM t AS t
+----
+57 values hashing to 09c515c3abe45a73d543851172b09756
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, AVG(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 2 PRECEDING AND 1.5 FOLLOWING) AS w0, MIN(t.x) OVER () AS w1 FROM t AS t
+----
+57 values hashing to 3f00913c793a74362a79087df93b6629
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+57 values hashing to c9264b9891d43793288227010effe3d0
+
+query INT,BIGINT,DECIMAL(9,2) rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0, LEAD(t.k, 3, CAST(0.50 AS DECIMAL(2,2))) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+57 values hashing to 78676f00a3ae8b6e22317668d799fd08
+
+statement ok
+DROP TABLE t
+
+# window case 30
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 0, 4), (1, NULL, -2, -2), (2, 0, 1, 5), (3, 1, 2, NULL), (4, 0, 4, 9), (5, NULL, 0, -3), (6, 0, -2, NULL), (7, 0, -2, 8), (8, 1, -2, 9), (9, 1, -1, -2), (10, 1, 1, 2), (11, 0, -1, 7), (12, 0, 4, 0), (13, 0, 0, 5), (14, 1, -1, -2)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w0, LAG(t.x, 3) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+45 values hashing to a9ebe2ceb52c5cba6a8bd967a3af5e3f
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+30 values hashing to e8707ae6e81e0c1d869c94edc0a1548f
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+30 values hashing to 0b9ee538101548601ffafb9390c1072f
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+30 values hashing to 7888e1fbb4b374c8710a0cce21c45472
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 0 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+30 values hashing to 811feef023bd90c030e1e60e0dca33fe
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.k, 2, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+30 values hashing to 5e8187d482abe7f78123b408539800f4
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS CURRENT ROW) AS w0, RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w1 FROM t AS t
+----
+45 values hashing to afa388d300680fe592912253dbae44a3
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS w0 FROM t AS t
+----
+30 values hashing to 92733f672e37b74188a4a0ebe27d3888
+
+statement ok
+DROP TABLE t
+
+# window case 31
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, NULL, 2.5, 9), (1, 1, 0.0, 9), (2, 0, CAST('NaN' AS DOUBLE PRECISION), 5), (3, 0, 0.0, 1), (4, 1, 1.0, -2), (5, 1, 0.0, 7), (6, NULL, CAST('-Infinity' AS DOUBLE PRECISION), 7), (7, 1, 0.5, NULL), (8, 1, 0.5, 6), (9, 0, 2.5, 9), (10, 0, NULL, 7), (11, 0, NULL, 7), (12, 1, CAST('NaN' AS DOUBLE PRECISION), 8), (13, NULL, -1.5, -2), (14, 1, CAST('Infinity' AS DOUBLE PRECISION), 6), (15, 0, CAST('Infinity' AS DOUBLE PRECISION), 7), (16, 0, NULL, 5), (17, 1, CAST('-Infinity' AS DOUBLE PRECISION), -3)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER () AS w0 FROM t AS t
+----
+36 values hashing to c2eedd7f2056be668122b16f060cd0e8
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+36 values hashing to efc068e6a95b4d64106cc8451e65f9c7
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+36 values hashing to 45085428decf3de76c6939b641b14c99
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0, MAX(t.x) OVER () AS w1 FROM t AS t
+----
+54 values hashing to f832017d575f1d9c65a2742fcaacb0f8
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS FIRST) AS w1 FROM t AS t
+----
+54 values hashing to f0f63080ce6e1fde2b119aec3ff9fd04
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k ASC NULLS LAST RANGE BETWEEN 0 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+36 values hashing to 99bf9aa363a9fcc2d085cf941e887bda
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, LAG(t.k, 2) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+36 values hashing to b9e54c10395e9e358629a7dda707bd2d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 0 FOLLOWING AND 3 FOLLOWING) AS w0 FROM t AS t
+----
+36 values hashing to 70118b74a29aef14bf6bcd35384ec6f4
+
+statement ok
+DROP TABLE t
+
+# window case 32
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+
+statement ok
+DROP TABLE t
+
+# window case 33
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 2, 0), (1, 0, 0, -2), (2, 0, -1, 9), (3, 0, 3, -1), (4, 1, 0, -2), (5, 0, 4, NULL), (6, 1, NULL, -2), (7, 0, 2, 1), (8, 1, 1, 7), (9, 1, 2, -1), (10, 0, NULL, 4), (11, NULL, 0, 1), (12, 0, -2, 9), (13, 0, -1, 6), (14, 0, 1, 7), (15, 0, -2, 0), (16, 1, -1, -2), (17, NULL, -2, 6), (18, 0, 4, -1)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS 3 PRECEDING) AS w1 FROM t AS t
+----
+57 values hashing to cf6211783086594e3fae18cd3b830a12
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS UNBOUNDED PRECEDING) AS w1 FROM t AS t
+----
+57 values hashing to 358b91577167e9d5619467d8be66ece9
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+57 values hashing to 2defa7f80078d20d1344b9f1bd91f1ed
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+38 values hashing to 979e4a5ef93c6b18d61d905fe5cc40e7
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 00de5608d2559433213a8b995b32627f
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.k, 1) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 385131a7b60ace2e5515a7dcf38cbd1a
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+38 values hashing to 1158840aea410edf5bc17e8a49c15b2b
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w0 FROM t AS t
+----
+38 values hashing to 4308c4b99ee4591164ad4cfc01549177
+
+statement ok
+DROP TABLE t
+
+# window case 34
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 2, NULL), (1, NULL, 4, 9), (2, 0, -2, NULL), (3, 1, -1, 2), (4, 0, 1, 5), (5, 0, 4, 6), (6, 0, 2, 5), (7, 0, 0, -2), (8, 1, NULL, -1), (9, 1, -1, 4), (10, 0, 0, 5), (11, 1, 2, 3), (12, 0, NULL, 7), (13, 1, -1, -1), (14, 0, NULL, -2), (15, 0, 4, -1), (16, 0, -1, -2)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+51 values hashing to 922862785da534e51fa51b8186877133
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+34 values hashing to 3210fa2123b9e9699318b877d1e97b86
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE CURRENT ROW) AS w0 FROM t AS t
+----
+34 values hashing to d931038db7ce4fcd056cf7fa87ff8a2e
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+34 values hashing to a39dcf4cd8d33c32b16151c0969773a2
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(0 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+51 values hashing to 23ab198f638363049670d6040fcd835b
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+34 values hashing to d9ba89878ed2895fe32b2332811932a6
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 2, CAST(100 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+34 values hashing to e57b8e9a533f35b5c91b7928acafd340
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER () AS w0 FROM t AS t
+----
+34 values hashing to 4a0024946e5d7557a85a5636510fdacd
+
+statement ok
+DROP TABLE t
+
+# window case 35
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, NULL, 1), (1, 0, NULL, 2), (2, 1, 0.00, 9), (3, 0, 1.00, 5), (4, 0, -1.50, 0), (5, 0, 2.25, -1), (6, 1, 2.25, 8), (7, 1, -1.50, 6), (8, 0, -1.50, NULL), (9, 1, -1.50, 9), (10, 0, 2.25, 1), (11, 0, 0.50, 9), (12, 0, 0.00, -2), (13, 1, -1.50, -1), (14, 1, 1.00, NULL), (15, 0, 2.25, 0)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER () AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+48 values hashing to 82a5a2a543699939b9bb16a602f60223
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0, COUNT(*) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 3 PRECEDING AND 2 PRECEDING) AS w1 FROM t AS t
+----
+48 values hashing to dc6fa0428773c50f8eb5096fa570dd4a
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to df2240faeb46412968662f0f7a21d952
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to e99362d062015176bcb1617d690f8f9e
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to cd33abe4ca922bf0572047e6ce3f3062
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE CURRENT ROW) AS w0 FROM t AS t
+----
+32 values hashing to 0c33824311f2fc60394f4bdb69b55492
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+48 values hashing to 6e54a762f1fc987b3ae33c9fc49d1133
+
+query INT,DECIMAL(9,2),BIGINT rowsort
+SELECT t.id AS id, LAG(t.k, 3, CAST(-1.25 AS DECIMAL(3,2))) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS FIRST) AS w1 FROM t AS t
+----
+48 values hashing to 477c8b6e79921db718574336b943e193
+
+statement ok
+DROP TABLE t
+
+# window case 36
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 1.00, 7), (1, 0, 1.00, 4), (2, 0, 0.00, 3), (3, 0, 2.25, 4), (4, 0, NULL, 8), (5, 1, -1.50, 2), (6, 1, NULL, -3), (7, 0, 2.25, -3), (8, 0, 0.00, 4), (9, 1, 2.25, 2), (10, 1, 2.25, 5), (11, 1, 0.50, 1)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+24 values hashing to 3e01839805247b76282471038139ceb9
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+24 values hashing to b9a45ad41abdf57295aafebad285c65b
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+24 values hashing to bc6055089e4aa7b709fb6680636ea822
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, AVG(t.x) OVER (ORDER BY t.k DESC NULLS FIRST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS w0, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w1 FROM t AS t
+----
+36 values hashing to 2015e7d25b9fa771f6d4e2fcd313bf0a
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+24 values hashing to bc6055089e4aa7b709fb6680636ea822
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+24 values hashing to ae74a018e13dc76f2163eb493626df1e
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+24 values hashing to ff268272680ac24c23234dcfd8a1fdb9
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w0, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w1 FROM t AS t
+----
+36 values hashing to f7927b256c87f0b5c763ff37c4ceddd0
+
+statement ok
+DROP TABLE t
+
+# window case 37
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 0.50, NULL), (1, NULL, 2.25, 8)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	NULL
+1	8
+
+query INT,DECIMAL(9,2),BIGINT rowsort
+SELECT t.id AS id, LAG(t.k, 2, CAST(0.00 AS DECIMAL(2,2))) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, SUM(t.x) OVER (ORDER BY t.k ASC NULLS LAST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS w1 FROM t AS t
+----
+0	0.00	NULL
+1	0.00	8
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER () AS w0 FROM t AS t
+----
+0	8
+1	8
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+1	2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+0	0
+1	0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+1	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+0	NULL
+1	8
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w0, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 0 PRECEDING AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+0	1	0
+1	1	1
+
+statement ok
+DROP TABLE t
+
+# window case 38
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, -1, 6), (1, 0, -2, 8), (2, NULL, 0, 5), (3, 0, 4, NULL), (4, 0, 0, 2), (5, 1, 0, NULL), (6, 0, 3, 1), (7, 0, 3, 4), (8, 1, 2, 5), (9, 1, 1, 6), (10, 1, NULL, 6), (11, 1, 4, -2)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+24 values hashing to becd1cbdeccbd54bfb389a3560668172
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.k, 3, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, LAG(t.x, 3, NULL) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+36 values hashing to 7b46e081f27eccae4eae3068bccc44ac
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 3 FOLLOWING AND 3 FOLLOWING) AS w1 FROM t AS t
+----
+36 values hashing to f53dfe1be2cff2169a330b6ec63cbde8
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 2, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+24 values hashing to 469750d0bced60a83d55791801d8db03
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (ORDER BY t.k DESC NULLS LAST RANGE 1 PRECEDING) AS w0, MAX(t.x) OVER (ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+36 values hashing to d581d98fc417f91d7d2aef961feaa3e1
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0, MAX(t.x) OVER (PARTITION BY t.g) AS w1 FROM t AS t
+----
+36 values hashing to d471ec884a7ca26b48aa7945f37a7f2d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(-1 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+24 values hashing to d5cf4858bccb570465db251c1dbc0a09
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE CURRENT ROW) AS w0, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS w1 FROM t AS t
+----
+36 values hashing to 31932f777de694240ca69e84878112ac
+
+statement ok
+DROP TABLE t
+
+# window case 39
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 1 FOLLOWING AND 1 FOLLOWING) AS w1 FROM t AS t
+----
+
+statement ok
+DROP TABLE t
+
+# window case 40
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 2, -2), (1, 0, 4, 0), (2, 1, NULL, -1)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	2
+1	1
+2	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	2
+1	3
+2	1
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 3) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, MAX(t.x) OVER (RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+9 values hashing to d7fb6726b4d800337fc6e1494bbafdbb
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+1	2
+2	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	2
+1	1
+2	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+1	2
+2	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	-1
+1	0
+2	-1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER () AS w0 FROM t AS t
+----
+0	-2
+1	-2
+2	-2
+
+statement ok
+DROP TABLE t
+
+# window case 41
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, -1, 8), (1, NULL, 0, 9), (2, 1, 2, 2)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 2 PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+0	8
+1	17
+2	11
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 2 PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+0	8
+1	9
+2	2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+0	2
+1	9
+2	2
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (ORDER BY t.k DESC NULLS LAST) AS w0, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+9 values hashing to 1fb9a39ae6daeace06a2cb844700775d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	3
+1	2
+2	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	2
+1	0
+2	0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	2
+1	1
+2	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 1 PRECEDING AND 1 PRECEDING) AS w0 FROM t AS t
+----
+0	0
+1	0
+2	0
+
+statement ok
+DROP TABLE t
+
+# window case 42
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, -1, NULL)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	NULL
+
+query INT,INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.k, 1, NULL) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, LEAD(t.x, 3, CAST(-1 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+0	NULL	-1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST RANGE BETWEEN 1 FOLLOWING AND 0 FOLLOWING) AS w0, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS w1 FROM t AS t
+----
+0	NULL	NULL
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+0	1	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 3 FOLLOWING AND 3 FOLLOWING) AS w0 FROM t AS t
+----
+0	NULL
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g) AS w0, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+0	0	1
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 3 PRECEDING AND 0 PRECEDING) AS w1 FROM t AS t
+----
+0	1	NULL
+
+statement ok
+DROP TABLE t
+
+# window case 43
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 1.0, 2), (1, 0, CAST('NaN' AS DOUBLE PRECISION), NULL), (2, NULL, CAST('-Infinity' AS DOUBLE PRECISION), 2), (3, 0, CAST('-Infinity' AS DOUBLE PRECISION), -2), (4, 1, -1.5, 4), (5, 0, 0.5, 7), (6, 1, CAST('-Infinity' AS DOUBLE PRECISION), 4), (7, 1, 0.5, 5), (8, NULL, CAST('Infinity' AS DOUBLE PRECISION), 3), (9, 1, 0.5, -1), (10, 1, CAST('NaN' AS DOUBLE PRECISION), -3), (11, 0, 0.0, -2), (12, 1, 1.0, 2), (13, 0, -1.5, 9), (14, NULL, NULL, 5), (15, 0, 2.5, NULL), (16, 0, CAST('NaN' AS DOUBLE PRECISION), 8), (17, 0, 1.0, -2), (18, 0, 2.5, -1), (19, 0, CAST('Infinity' AS DOUBLE PRECISION), 1)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST RANGE BETWEEN 2 PRECEDING AND CURRENT ROW) AS w0, MIN(t.x) OVER (PARTITION BY t.g) AS w1 FROM t AS t
+----
+60 values hashing to caa63baec4dff1e3f14dace34e40ffd0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 1) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+40 values hashing to 797c64f2249a76b65b1792982803cf27
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+40 values hashing to 4b1f5440084d4394a3265ecf26ac9f0b
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 0 PRECEDING AND 3 FOLLOWING) AS w1 FROM t AS t
+----
+60 values hashing to 32fd4ff8e04150842026d9d4fd90253b
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+40 values hashing to 4c51dc1ec2535c6faa9d63202836abdc
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+40 values hashing to aa3355e95b805581f560e047f8de8c49
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+40 values hashing to 746abd13a5b0479f8b5a7cfe842ad694
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+60 values hashing to b2eaf9af9fcb7aad6943b87a915b5b33
+
+statement ok
+DROP TABLE t
+
+# window case 44
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 0, -2), (1, NULL, NULL, 3), (2, 0, 3, 2)
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 2 PRECEDING AND 2 PRECEDING) AS w0 FROM t AS t
+----
+0	NULL
+1	NULL
+2	NULL
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	1
+1	1
+2	1
+
+query INT,BIGINT,INT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g RANGE CURRENT ROW) AS w0, LEAD(t.k, 1, 0) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+9 values hashing to 267ebc23887331fb522fcd74200c28d0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+0	-2
+1	3
+2	2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	1
+1	1
+2	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+1	1
+2	1
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, COUNT(*) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 PRECEDING AND 2 PRECEDING) AS w0, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+9 values hashing to c1f17be40092c992dfca37a637a9739d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 FOLLOWING AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+0	NULL
+1	NULL
+2	NULL
+
+statement ok
+DROP TABLE t
+
+# window case 45
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 1, -2)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	NULL
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND 0 FOLLOWING) AS w0 FROM t AS t
+----
+0	-2.0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+0	-2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	-2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+
+statement ok
+DROP TABLE t
+
+# window case 46
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, CAST('-Infinity' AS DOUBLE PRECISION), 0), (1, 0, CAST('Infinity' AS DOUBLE PRECISION), NULL), (2, NULL, 0.0, 8), (3, NULL, CAST('Infinity' AS DOUBLE PRECISION), 5), (4, 1, 1.0, 8), (5, 0, 0.0, NULL), (6, NULL, CAST('NaN' AS DOUBLE PRECISION), 4)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 3, NULL) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to 6d1ae5408c7223a4e63f68d7897dbb8d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN UNBOUNDED PRECEDING AND 2 PRECEDING) AS w0 FROM t AS t
+----
+14 values hashing to dcf2a666c8170ab830ddcca6a6236421
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 3, CAST(100 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to 49719a5e962834372a4bc43d1af5f187
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 3, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to 7efbb650ae8eda22cdf996981540435d
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k DESC NULLS LAST) AS w0, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w1 FROM t AS t
+----
+21 values hashing to baf877284a18840dc9c3772886753709
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w0, COUNT(*) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 1.5 FOLLOWING AND 1.5 FOLLOWING) AS w1 FROM t AS t
+----
+21 values hashing to 4d211e9eeb1c3c6301913ef0c6f0b365
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to 52d19c6a006f64cb184e2849e2a55abf
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to e3a53632fcee7f6862cce26421e73733
+
+statement ok
+DROP TABLE t
+
+# window case 47
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, -2, 8), (1, 0, -2, 9), (2, 0, 1, 4), (3, 0, 3, 5), (4, 1, 2, -1), (5, 0, 0, 9), (6, 0, 0, 2), (7, 0, 4, NULL), (8, 1, 2, 6), (9, 0, 2, 0), (10, 0, 0, 9), (11, 1, 1, 1), (12, 1, 2, 7), (13, 0, NULL, 3), (14, NULL, 0, 2), (15, 0, 1, 0), (16, 0, -1, NULL), (17, 0, -2, -3)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+54 values hashing to b266ee027ed1271ab421d10abd2913ed
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN CURRENT ROW AND 2 FOLLOWING) AS w0 FROM t AS t
+----
+36 values hashing to 180532c6d53d183af82143504b07d560
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS w0 FROM t AS t
+----
+36 values hashing to ced7bcb9a01ffbd18b714da3c42cfa91
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+36 values hashing to b2d8d53c2bb6eb16eb4a462d3314d0bf
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER () AS w0, SUM(t.x) OVER (PARTITION BY t.g) AS w1 FROM t AS t
+----
+54 values hashing to 2c2c4ca257dfa66ed1e5840247c931cd
+
+query INT,BIGINT,INT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0, LAG(t.k, 3, 0) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+54 values hashing to 1ed705580451a5c471d17ea16c0e943d
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+36 values hashing to a57fccb750dcd6499efd96bb93edb7d2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+36 values hashing to 7fcdef812ed39eb5fdb91ea370918a4c
+
+statement ok
+DROP TABLE t
+
+# window case 48
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 3, -1), (1, 1, 4, 1), (2, 1, 3, 6), (3, 1, 3, -2), (4, NULL, -1, -3), (5, 1, 4, -2), (6, 1, -2, NULL), (7, 0, 4, 3), (8, 0, 4, NULL), (9, 0, 2, 7)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k ASC NULLS LAST RANGE CURRENT ROW) AS w0 FROM t AS t
+----
+20 values hashing to 5bf95c15ab10000ffe2c9c1eaf413e2e
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w0, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 0 FOLLOWING AND 1 FOLLOWING) AS w1 FROM t AS t
+----
+30 values hashing to b96242fc42f069301da4825b3b24db91
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w1 FROM t AS t
+----
+30 values hashing to 81c025bf31f81a51e4bdb298b498d832
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to e72f4bcad149bed7a9454c3e31c2d2da
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 0 PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+20 values hashing to 4137af95547d3515336e39e09b80eadb
+
+query INT,INT rowsort
+SELECT t.id AS id, LEAD(t.k) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+20 values hashing to 9a59942d99f03dbe2a784964fa58abd5
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 2 FOLLOWING AND 1 FOLLOWING) AS w0, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+30 values hashing to a4170b86b99210c9330f71b0dc474709
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+20 values hashing to e72f4bcad149bed7a9454c3e31c2d2da
+
+statement ok
+DROP TABLE t
+
+# window case 49
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, CAST('NaN' AS DOUBLE PRECISION), 0), (1, 0, 1.0, 4), (2, 1, CAST('NaN' AS DOUBLE PRECISION), 1), (3, 1, 1.0, 4), (4, 1, CAST('-Infinity' AS DOUBLE PRECISION), -3), (5, 1, 2.5, 9), (6, NULL, 1.0, 7), (7, 0, NULL, 6), (8, 1, CAST('Infinity' AS DOUBLE PRECISION), NULL), (9, 1, CAST('NaN' AS DOUBLE PRECISION), 6), (10, NULL, CAST('-Infinity' AS DOUBLE PRECISION), 3)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (ORDER BY t.k DESC NULLS FIRST RANGE BETWEEN 2 PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+22 values hashing to d4f0c7209b10f6816601b2e386926368
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 2, CAST(-1 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w1 FROM t AS t
+----
+33 values hashing to 0e02cf73786367ee6adcaccf81e742af
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+22 values hashing to 3ae6995d45842950b412aa70a0a854b0
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 1, CAST(100 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w1 FROM t AS t
+----
+33 values hashing to 450e034e0ac05e04e1fd43f636f7f9b6
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 1.5 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w1 FROM t AS t
+----
+33 values hashing to 8cad9413c8cf72d966056bfb813a83b3
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 2 PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+22 values hashing to 13b4cd1edfe7187411d3d46fe93a23be
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, LAG(t.x, 3, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, AVG(t.x) OVER (RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+33 values hashing to cc199fa619d6b9c68aa4c010552a84f5
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g) AS w0, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w1 FROM t AS t
+----
+33 values hashing to bd5dbc967dd295f793c375f9285ea792
+
+statement ok
+DROP TABLE t
+
+# window case 50
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 3, NULL), (1, 1, 0, 9), (2, NULL, 2, 1), (3, 1, 4, NULL), (4, 0, 0, 6)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 1 FOLLOWING AND 0 FOLLOWING) AS w0 FROM t AS t
+----
+10 values hashing to c077ecc6faf448b92d4135a94ca30f4d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+10 values hashing to b7e8937554b61f3131f42efb63729a91
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 3, CAST(100 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+10 values hashing to eff967c026c93705409834b33629e9a0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS 2 PRECEDING) AS w0 FROM t AS t
+----
+10 values hashing to d958e9ce1bc88e9e4b272ef805acc966
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE UNBOUNDED PRECEDING) AS w1 FROM t AS t
+----
+15 values hashing to ef8ed4bfc754473c56d765560d7bdc96
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0, LEAD(t.x, 3, CAST(100 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+15 values hashing to 5de149edcbb110a13c6e2285802fd640
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 1 FOLLOWING AND 1 FOLLOWING) AS w0, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+15 values hashing to ef3c08cfb78bd9c3e66493d96fed1702
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 0 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+10 values hashing to 77f211d1b09cd63e3c3ba86a7fdf3f80
+
+statement ok
+DROP TABLE t
+
+# window case 51
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 0.0, -1)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+0	1	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+0	-1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 3, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	0
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, LEAD(t.k) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	NULL
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS UNBOUNDED PRECEDING) AS w0 FROM t AS t
+----
+0	-1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	NULL
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING) AS w1 FROM t AS t
+----
+0	1	-1
+
+statement ok
+DROP TABLE t
+
+# window case 52
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, -1, 3), (1, 1, 4, 6), (2, 0, -1, -3), (3, 1, 0, 2), (4, 1, 3, -3), (5, 0, 2, 2), (6, 0, -2, NULL), (7, 1, 2, -2), (8, 0, 0, 2), (9, 0, 1, 1), (10, 0, 4, 2)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w1 FROM t AS t
+----
+33 values hashing to e47937af24430899f8d1d7fba30a5fdc
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 0 PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+22 values hashing to 8928a60e3c4cf02ff833d1a30a7ca0d6
+
+query INT,INT rowsort
+SELECT t.id AS id, LAG(t.k, 1, 1) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+22 values hashing to b1973b6aecf0523d3e85959856ae7a56
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+22 values hashing to ce186f621155c81b57a072cc241992f5
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 2, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+22 values hashing to 02518fe7c6ee3b01c77c047e5e9def99
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+22 values hashing to 494c3d53f7d9bfdd72f91e02b26fcb0d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+22 values hashing to 7ff5c6fe5bbaa0cbed50d74f15bfba03
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+22 values hashing to 36132bf36ff3241c6ba95f0aa49c587e
+
+statement ok
+DROP TABLE t
+
+# window case 53
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, -1.50, 3), (1, 0, 2.25, 1), (2, 1, 0.50, -1), (3, 1, 0.00, -3), (4, 0, -1.50, 9), (5, 0, 1.00, NULL), (6, 0, NULL, -3)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w1 FROM t AS t
+----
+21 values hashing to 445db60df080da670ac654679e54e925
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to 6500b47131363004c319350ca53a4245
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k ASC NULLS LAST) AS w0 FROM t AS t
+----
+14 values hashing to 046e8db81847b6ea688c34a2869bedd3
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND 3 PRECEDING) AS w0, LAG(t.x) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+21 values hashing to 2c95a220c6909a8afee03110622e8ef9
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to 2710fb92c324650b3043e0830351ebfc
+
+query INT,DECIMAL(9,2) rowsort
+SELECT t.id AS id, LAG(t.k, 2, CAST(0.50 AS DECIMAL(2,2))) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to f53189b8632c74772c0ff00b41086f5c
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 2, NULL) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+21 values hashing to a5f55dd7c0cd422f6b46c318aaa4cb8d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to 527a83a109c0a892099303189fa78824
+
+statement ok
+DROP TABLE t
+
+# window case 54
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 2.5, 9), (1, 1, CAST('NaN' AS DOUBLE PRECISION), 0), (2, 0, -1.5, NULL), (3, 1, NULL, 7), (4, 1, CAST('Infinity' AS DOUBLE PRECISION), 8), (5, 0, 2.5, 2), (6, NULL, 1.0, 0), (7, 0, NULL, 9), (8, 0, CAST('NaN' AS DOUBLE PRECISION), 3), (9, 1, CAST('NaN' AS DOUBLE PRECISION), 1), (10, 0, -1.5, -3), (11, 1, CAST('-Infinity' AS DOUBLE PRECISION), 5), (12, 0, NULL, 6), (13, 1, CAST('-Infinity' AS DOUBLE PRECISION), 0)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+28 values hashing to abcef133f31fb4821bf5f22d446fb891
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(0 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+28 values hashing to 6ed002d33ef33ab4615b64c600b02036
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+28 values hashing to 3cb54ed8564db1d1118fde0a7217c7e4
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+28 values hashing to 394c8fe1b66f6b86d505d9f768af6ab6
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w0, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+42 values hashing to ca0870cb0545e3316b7c55c50de58c59
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+42 values hashing to 083f301352c7350ea6fac55baf119981
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, LEAD(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, AVG(t.x) OVER (PARTITION BY t.g) AS w1 FROM t AS t
+----
+42 values hashing to fc1862d3b7a790114bb77516a67340df
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k ASC NULLS LAST) AS w0 FROM t AS t
+----
+28 values hashing to d0eac72062dd818805f1c7f841bd45b7
+
+statement ok
+DROP TABLE t
+
+# window case 55
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 3, 7), (1, 0, 2, 4), (2, 0, 3, 4), (3, 0, -1, 4), (4, 0, 3, 3), (5, 0, -1, 8), (6, 0, -1, NULL), (7, 0, 3, 0)
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+24 values hashing to dd6af9d54e8d68a8e2fcb213648216fe
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+16 values hashing to d2a057bf19ffcda774738887736a3484
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to 0f14231bada7179847f2a5bf2403b1d9
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.k, 3) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to 9f8292d88a9c1edcab4f4c23aa01e54c
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to 0f14231bada7179847f2a5bf2403b1d9
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 0 PRECEDING AND 2 FOLLOWING) AS w0 FROM t AS t
+----
+16 values hashing to 367879d1788b02e096856dc65d614c9d
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+24 values hashing to 06d0b3aa438de007b031c465ab17729f
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to 7caea31f9b698eb0bbe46a569b2354d5
+
+statement ok
+DROP TABLE t
+
+# window case 56
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, CAST('-Infinity' AS DOUBLE PRECISION), 1), (1, 0, CAST('-Infinity' AS DOUBLE PRECISION), NULL), (2, 1, CAST('Infinity' AS DOUBLE PRECISION), 7), (3, 1, 2.5, 6), (4, 0, CAST('Infinity' AS DOUBLE PRECISION), -1), (5, 0, 0.0, NULL)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+12 values hashing to 6fb7b336997b3f6049bf2bade1a9bd33
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 2960c0c0c8858fbf59040fd1c56d1fcd
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS w0 FROM t AS t
+----
+12 values hashing to 18d10adfd4e8a4b302634c0cf3094583
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS CURRENT ROW) AS w0, AVG(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+18 values hashing to 6b77c11cec3623ee4e543a6844576ed9
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, MAX(t.x) OVER () AS w0, LAG(t.k, 1, CAST(0.5 AS DOUBLE PRECISION)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+18 values hashing to aa74c06206b5c9cdcad4abbab6809995
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, LEAD(t.k, 2, CAST(100.0 AS DOUBLE PRECISION)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 387311106a9d380015b58990322aea26
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0, RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+18 values hashing to 976a515f8a760832876dfcf3eee294b1
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST) AS w0, LAG(t.x, 3, NULL) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+18 values hashing to 2ba8f9ca0111e4abc5939f91e356b570
+
+statement ok
+DROP TABLE t
+
+# window case 57
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 3, 0), (1, 0, -1, 3), (2, 1, 0, 5), (3, 1, -2, -3), (4, 1, 3, -2), (5, 0, -2, NULL), (6, NULL, 4, 6), (7, 0, NULL, 9)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+16 values hashing to 705b81741f25422ab3d83eb38766c795
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+24 values hashing to 6f6336fa4121ecc86cd79d45949740fb
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER () AS w0 FROM t AS t
+----
+16 values hashing to 5699afd08120b7c44452fddde17f2022
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 3, CAST(100 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to 491ef2313edf0bb892ae62da2c5259e4
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+16 values hashing to 5ba13922dbe27b128fbd8ba6022186fe
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to 471c8219387dd5e4f7153a751b23ad60
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.k, 2) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+16 values hashing to cee78a96543a4c54424fe3b6ed8a3f78
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND 0 PRECEDING) AS w0 FROM t AS t
+----
+16 values hashing to 3b50767c8bc1e4ebee6836c499be118c
+
+statement ok
+DROP TABLE t
+
+# window case 58
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 1.00, 2), (1, 1, 0.00, -3), (2, 1, 0.50, 8), (3, NULL, 1.00, -3), (4, 1, 0.50, 0), (5, 0, 0.50, 0), (6, 1, 0.00, NULL), (7, 0, -1.50, 6), (8, 0, NULL, 4), (9, 0, 0.50, 2), (10, 1, -1.50, -3), (11, 1, 1.00, NULL), (12, 1, 1.00, 2), (13, 1, 0.00, 7), (14, 1, 2.25, 0), (15, NULL, NULL, 9)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 1.5 PRECEDING AND 0 PRECEDING) AS w0 FROM t AS t
+----
+32 values hashing to afd9d11c8e2078684e99dab79a44c31d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to 922c0f3a23dc8e0962bb86c66f8066a9
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to d8c19c88a02c1e9eb636adc3aadbb334
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 2, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to 5ed9e4c4501a34f2d57e2749e3750718
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 3 PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+32 values hashing to dc6a3eea1305ba89eb22cda68048513b
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, MAX(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+48 values hashing to 4223ad4a2ec367fee86fa9cd3eaa6692
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+32 values hashing to d825d0b0f22859677c818e05981a043d
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+32 values hashing to d135a7de4e8b5b4f9097767599da5621
+
+statement ok
+DROP TABLE t
+
+# window case 59
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 1, 9), (1, 1, NULL, 0), (2, 1, 2, 4), (3, 0, 4, -3), (4, 1, 2, 4), (5, 1, -2, 2), (6, 1, -2, 8), (7, 0, 4, 0), (8, 0, NULL, -2), (9, NULL, 4, 0), (10, 1, -2, -2), (11, 0, -1, 2), (12, 0, -2, 6), (13, 0, -2, 2), (14, 1, 0, 2), (15, 0, 3, 1)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+32 values hashing to e1ba458043efbcda8cf851da2e5cd93a
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to e1ba458043efbcda8cf851da2e5cd93a
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0, MIN(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+48 values hashing to fbd231f744c510fbba21baf50b7f8817
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+48 values hashing to c547667c094fbecb936e686e773ba302
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 0 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0, LEAD(t.x, 2, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+48 values hashing to b42e37362ec163fb89a05d221642a67e
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+48 values hashing to 278d5e77ff25c56fbd2b293bd066fefc
+
+query INT,INT rowsort
+SELECT t.id AS id, LEAD(t.k, 3, 100) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to 9a8f9812b15296ed7fa3d3139b815ef1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2, CAST(100 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to 2f171f429a42573028ce86b05532ad90
+
+statement ok
+DROP TABLE t
+
+# window case 60
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, NULL, NULL, 4), (1, 1, 0, 5), (2, 1, NULL, 8), (3, 1, NULL, NULL), (4, 0, 4, -3), (5, 0, 3, 7), (6, 1, 1, 8), (7, 0, 0, 0), (8, 0, NULL, NULL), (9, 1, -1, -1), (10, 0, 2, 0), (11, 0, 2, 8), (12, 0, 1, 7), (13, 1, 1, 6), (14, 1, 2, -1), (15, 1, 1, 0)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0, LEAD(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+48 values hashing to d88bf36f453f3044ea81fdb32942ac2e
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING) AS w0 FROM t AS t
+----
+32 values hashing to 4a66749ecd9da7848e14d24100570690
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 3) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to 327ca979d9d6d713b14caaf2fadc6725
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to 057057a9935ee22d94a938b4c2748608
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 3) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to 133987baabba63c669b267f88ec3d271
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+32 values hashing to dc6a3eea1305ba89eb22cda68048513b
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, LEAD(t.x, 3, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+48 values hashing to 3db4af7c0e4addce5575c8ed78e766d8
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 1 PRECEDING AND 3 PRECEDING) AS w1 FROM t AS t
+----
+48 values hashing to 4247104b0b61b4a4d5eeb09d96f4024c
+
+statement ok
+DROP TABLE t
+
+# window case 61
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, NULL, NULL), (1, NULL, 2.25, NULL), (2, 1, 1.00, 1), (3, 0, 1.00, -1), (4, 1, 2.25, 3), (5, 0, -1.50, 5), (6, 1, 2.25, 1), (7, 0, 0.50, NULL), (8, 0, -1.50, 5), (9, 0, 0.00, 6), (10, 0, 1.00, 1), (11, 1, 2.25, -1), (12, 0, 1.00, 4)
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS w0 FROM t AS t
+----
+26 values hashing to 4272455318f9dfd7212c0020a692c54d
+
+query INT,DECIMAL(9,2) rowsort
+SELECT t.id AS id, LAG(t.k, 3, CAST(0.50 AS DECIMAL(2,2))) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to f054441c35a5cd8ef73448670b29fc87
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 32d3783749f8280b58f478c1504406a3
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 9e65544013f231f64b50cc885e6271c1
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 37a5910a602fd8344c47e3f0ebd3f7a8
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to a863a193a814f19e594f2486fd7ea834
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+26 values hashing to 0f1b86a2ab65e5c44610af3834c1d2cb
+
+query INT,DECIMAL(9,2) rowsort
+SELECT t.id AS id, LEAD(t.k, 1, NULL) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to c137ca74c5c6ea8a19e128be5c86603e
+
+statement ok
+DROP TABLE t
+
+# window case 62
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, -1, NULL), (1, 1, -1, 8), (2, NULL, 3, 0), (3, 1, -1, 2), (4, 0, 3, 6), (5, 0, 1, 0), (6, NULL, -1, 0), (7, 0, 3, -2), (8, 1, -2, 6), (9, 1, NULL, 0), (10, 1, 3, 6), (11, 0, -1, -1), (12, 0, 4, -2)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 4f091111701d47ba01543962cb708201
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 6c8fe944c52c9039406166cda6a76a31
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 7fd4aa079a44eadd0dbdc2ca2b611ecc
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+39 values hashing to f2c2bde35433de7049b1a234080bfe53
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS w0 FROM t AS t
+----
+26 values hashing to 525ab1a6dee227ad46728758f1efbe1f
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+26 values hashing to 6f07f08dbdac3b35d972d01243bda38c
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+26 values hashing to b860700a9c00cee5d640cbcb9b26a172
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+26 values hashing to 79910bbd0e0528bf20758df503bdad52
+
+statement ok
+DROP TABLE t
+
+# window case 63
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 0.0, 9), (1, 1, 0.0, 7), (2, 1, CAST('Infinity' AS DOUBLE PRECISION), 0), (3, NULL, -1.5, 7), (4, 1, 0.5, NULL), (5, 0, -1.5, 3), (6, 1, 2.5, NULL), (7, 1, CAST('Infinity' AS DOUBLE PRECISION), NULL), (8, 0, -1.5, -3), (9, 0, CAST('NaN' AS DOUBLE PRECISION), 6), (10, NULL, CAST('Infinity' AS DOUBLE PRECISION), 0), (11, 1, -1.5, 3), (12, 0, NULL, 2)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST RANGE BETWEEN 2 FOLLOWING AND 2 FOLLOWING) AS w0 FROM t AS t
+----
+26 values hashing to 09d752f50ac2b2ed7daea51a338101ed
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, MIN(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING) AS w1 FROM t AS t
+----
+39 values hashing to 3a940fc6a14c7cbdaa8240e7c594df09
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 2 PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+26 values hashing to 4591a59eb1abada6c1de91db3dd215bc
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, LEAD(t.k) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 1e5201a8c1219d4b15e4396ab8547655
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 6ec5ab56f99108866a20404b508e6ea8
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0, DENSE_RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+39 values hashing to 655cadf2d8145514f7aca2c91f9a4b27
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 160198657fa015a7a4eab55ad16790b1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 FOLLOWING AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+26 values hashing to e6b64b5e0be3881ed1f14bcd97b9ba29
+
+statement ok
+DROP TABLE t
+
+# window case 64
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 1.00, 7), (1, 1, 0.00, 9), (2, 1, 2.25, NULL), (3, 0, 0.50, 9), (4, 1, 0.00, 7), (5, 0, -1.50, 7)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 1.5 PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+12 values hashing to 7536670e8024b9e392940f734fee05e0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST) AS w0 FROM t AS t
+----
+12 values hashing to 3de503aee762b319fae8c29e71b8b280
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 5c9b2d17507cf29d7ad9dbb27e266e95
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 0033729ab3f4ab38f8c6de031bdf9d9e
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w1 FROM t AS t
+----
+18 values hashing to 71b68d4350bc4340e8a122342bb161f5
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS w0, MIN(t.x) OVER (PARTITION BY t.g) AS w1 FROM t AS t
+----
+18 values hashing to 8c333ad03ac968bd83c32509e98010cf
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS 3 PRECEDING) AS w0 FROM t AS t
+----
+12 values hashing to 20e412704a075666af3d8bdb97f66bfa
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 9dbe4f623b76afd7234c68b325624203
+
+statement ok
+DROP TABLE t
+
+# window case 65
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 0, 6), (1, 0, 4, -2), (2, 0, NULL, -2), (3, 1, -1, NULL), (4, 1, -1, NULL), (5, 1, 1, 5), (6, 0, NULL, NULL), (7, 0, 4, 6), (8, 1, 3, -3), (9, 0, -2, -2), (10, 0, 2, 3), (11, 1, 4, 1), (12, 0, 2, 0), (13, 1, 0, 5), (14, 0, 3, -2), (15, 0, -2, 0), (16, 0, 3, 9)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 FOLLOWING AND 3 FOLLOWING) AS w0 FROM t AS t
+----
+34 values hashing to b979d5c1ef9aa6c1657d601088ce9f69
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+34 values hashing to 5bffd7c34354ee7bcb01e9e4927ff3dd
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g) AS w0, LAG(t.x, 3, CAST(100 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+51 values hashing to 7a1e6db99e5feacd97186c40ab0c1899
+
+query INT,BIGINT,INT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0, LAG(t.k, 3, 1) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+51 values hashing to c3efc642228f5e1619357f189c01749e
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+34 values hashing to 5c43d9aceb52bee1c05e8d9486683a86
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 3, CAST(-1 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+34 values hashing to 7171f8eda13afc09a34c91a46efe5dc5
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+34 values hashing to 959524cf46ebce48ec1aaf0ff5573389
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+34 values hashing to 8de6f8b640b284e94275bdc2988bfb75
+
+statement ok
+DROP TABLE t
+
+# window case 66
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 2, 7), (1, 1, 2, -1), (2, 1, 3, 7), (3, 0, 3, NULL), (4, 0, -2, -3), (5, 0, NULL, -2)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 3b49921a0c624b53958e0e327fc6dc62
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER () AS w0 FROM t AS t
+----
+12 values hashing to 65bcba443cdaa742a5da09a384f1fc80
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, LEAD(t.x, 3) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+18 values hashing to 14182875d2c21710f074325b61e1b94c
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 3, CAST(100 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to e682d7002f02e52ee5fcc1ddb4f4e110
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 8f53a2cf611d63a563365180f21928da
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+18 values hashing to 39976c52af4ce6ea675c41ce9ba28160
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 3b49921a0c624b53958e0e327fc6dc62
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE 1 PRECEDING) AS w0 FROM t AS t
+----
+12 values hashing to 4356249bcb0c8edecb4050de8b65e48a
+
+statement ok
+DROP TABLE t
+
+# window case 67
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, -1, -3), (1, 0, -2, -2), (2, 1, -1, NULL), (3, 1, 2, -1), (4, 0, 3, 9), (5, 1, -2, 3), (6, 0, -2, 6), (7, 1, 1, 8), (8, 0, 0, 3), (9, 0, 4, -3), (10, 1, 3, 2), (11, 1, -2, 6), (12, 0, -1, 3), (13, NULL, 0, 5), (14, 0, 1, 6), (15, 1, 4, 5), (16, 0, -2, 0), (17, 1, 3, -1), (18, 0, 4, -2)
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST RANGE BETWEEN 2 PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+38 values hashing to ae2ce28f63ebc1d2640432c5346e4887
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 0235d0d5d032002c639fcf39050a4e21
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 0 PRECEDING AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+38 values hashing to 464e5a605c420df5b5418b3434f5636e
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 95bbe4d936a6e10b8882d2824e818007
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS w0, LAG(t.x, 1) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+57 values hashing to 8b45b9ffeedf10e96a7141975d002ac2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 2 PRECEDING AND 2 FOLLOWING) AS w0 FROM t AS t
+----
+38 values hashing to 62bfeb407a9820c57d0b785dbce37438
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 1, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 3324f0c53815ded2b75ecd0ccda06f17
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 11d2152f6367ad007f353894b38f18f4
+
+statement ok
+DROP TABLE t
+
+# window case 68
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 0, 2), (1, 0, -2, 1), (2, 1, 0, 5), (3, 1, 4, 6), (4, NULL, -1, 3), (5, NULL, 1, 7), (6, NULL, -2, 2), (7, 1, -2, 5), (8, 1, -1, 4), (9, 0, NULL, 5), (10, 0, 0, 1)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS w0 FROM t AS t
+----
+22 values hashing to a35bc4ceda75196fc8f2ce29af4dc871
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+22 values hashing to 7a332c29857c89654e580c4ece5831b4
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+22 values hashing to b7b67943c161146544b5dba2fa60309e
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+22 values hashing to 6c3756757128f18e3b5fea250992f513
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.k) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+33 values hashing to e7454ceafe25f968f2b9007c012a2bad
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+22 values hashing to 4afd0b2dc9604c0014000399d463e669
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.k, 2, CAST(100 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+22 values hashing to a57f5e1ba1600f7dc071d8c4b4a69e00
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2, NULL) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+22 values hashing to 6f632f00d4c143e39bfc413a4e0f1802
+
+statement ok
+DROP TABLE t
+
+# window case 69
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 0.50, NULL), (1, 1, 2.25, -3), (2, 0, -1.50, 4), (3, 0, 2.25, 4), (4, 1, 0.00, -2), (5, 1, 0.00, 3)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 3, CAST(100 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 73ce351b03b020c096828bf5d007572a
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to d186f45ec169c7b1661c45dd4b6b4045
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+12 values hashing to 43a4987b570b4ae96478954d837a48a0
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+18 values hashing to 406d8635ad00512b49782a6aab88d2a7
+
+query INT,DECIMAL(9,2),BIGINT rowsort
+SELECT t.id AS id, LEAD(t.k, 1, CAST(0.50 AS DECIMAL(2,2))) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING) AS w1 FROM t AS t
+----
+18 values hashing to fd01e3d57b432f1b7fa20ab280e5ff0f
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 4fb7787d86e963249de6d2096d605d56
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to 44e925965f1b481b5a9ad93108c80fcc
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+12 values hashing to a8fdd87412da954fb7a957a9aa0ab52c
+
+statement ok
+DROP TABLE t
+
+# window case 70
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k BIGINT, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, -1, 3), (1, 1, 3, 8), (2, 1, 3, 1), (3, 0, NULL, -3), (4, NULL, 2, 9), (5, 0, 4, 3), (6, 1, 0, -1), (7, 1, 1, -3), (8, 0, 4, 5), (9, 1, 2, 9), (10, 1, 1, 7), (11, 0, 3, 7), (12, 1, -1, NULL), (13, 0, 1, 2), (14, 0, 3, 5), (15, NULL, -1, NULL), (16, NULL, 3, 0), (17, 0, 2, -2), (18, 1, 4, 0)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 2 PRECEDING AND 1 PRECEDING) AS w0, SUM(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 FOLLOWING AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+57 values hashing to 61d0e1a2cb7f5ce8f82e2dd2273b2abd
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to e482d0b7b0a21a439f25a11a2563c3c5
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0, MIN(t.x) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS w1 FROM t AS t
+----
+57 values hashing to 8015638204a6ae378cd7cc6bf8eae6ae
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+38 values hashing to 0e57033c931c1937c8681f93245ecfd9
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to 99fa250644974445f4edf9538caa23c6
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+38 values hashing to bf0eff6a38a3f1cf89fc64cdd7f29c36
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS w0 FROM t AS t
+----
+38 values hashing to 1b65fbefa497e9f95476d02d5114db5f
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w1 FROM t AS t
+----
+57 values hashing to 3581e1212c63a0398542d398b12d0004
+
+statement ok
+DROP TABLE t
+
+# window case 71
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, CAST('-Infinity' AS DOUBLE PRECISION), 6), (1, 1, -1.5, 7), (2, 0, CAST('Infinity' AS DOUBLE PRECISION), 5), (3, 1, CAST('-Infinity' AS DOUBLE PRECISION), -2), (4, 1, -1.5, 2), (5, 0, 0.5, 5), (6, 1, 0.0, 9), (7, 0, CAST('Infinity' AS DOUBLE PRECISION), -1), (8, 0, CAST('Infinity' AS DOUBLE PRECISION), 9), (9, 0, CAST('-Infinity' AS DOUBLE PRECISION), 1), (10, 1, NULL, -1), (11, 0, 1.0, -2), (12, 1, NULL, 5), (13, 1, NULL, -2), (14, NULL, NULL, 5), (15, 0, NULL, -2), (16, 0, NULL, -1), (17, 0, NULL, -2)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0, RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w1 FROM t AS t
+----
+54 values hashing to 1536ae91d70639ce286cd65711b677a4
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST RANGE BETWEEN 1.5 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+54 values hashing to 9f085508f10321be4e1337b993321c0f
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k DESC NULLS FIRST) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+54 values hashing to f0407c9579cdd1e8bbc5f51cc0f00843
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS w0 FROM t AS t
+----
+36 values hashing to 06c614a63a770845752a23d1cb2a89e4
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w1 FROM t AS t
+----
+54 values hashing to 9dcb0803a1bdb2ecf0fdd9d26fc04aaa
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g) AS w0, LEAD(t.k) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+54 values hashing to 331ce9a92bd83283c6d7585f617a6662
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 1, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+36 values hashing to b5baf7b81f5e36575ab22e35a7f97d0e
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS w0, MAX(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS w1 FROM t AS t
+----
+54 values hashing to 2291fda100bf7f37a3ca24e01ef881cc
+
+statement ok
+DROP TABLE t
+
+# window case 72
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, CAST('Infinity' AS DOUBLE PRECISION), 1)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0, COUNT(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 3 FOLLOWING AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+0	1	0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST) AS w1 FROM t AS t
+----
+0	1	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+
+query INT,DOUBLE rowsort
+SELECT t.id AS id, LEAD(t.k, 2) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	NULL
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS w0, MAX(t.x) OVER (ORDER BY t.k DESC NULLS FIRST) AS w1 FROM t AS t
+----
+0	1.0	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST RANGE BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	NULL
+
+statement ok
+DROP TABLE t
+
+# window case 73
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DOUBLE PRECISION, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, NULL, NULL, 0), (1, 0, CAST('NaN' AS DOUBLE PRECISION), 6), (2, 1, NULL, 2), (3, 0, 0.0, 1), (4, NULL, 1.0, -2), (5, 0, CAST('Infinity' AS DOUBLE PRECISION), 4), (6, 1, 0.0, -2), (7, NULL, CAST('Infinity' AS DOUBLE PRECISION), NULL), (8, NULL, NULL, 4), (9, 0, CAST('NaN' AS DOUBLE PRECISION), -3), (10, 1, 0.0, 7), (11, 0, CAST('NaN' AS DOUBLE PRECISION), 9), (12, NULL, NULL, 1), (13, 0, CAST('Infinity' AS DOUBLE PRECISION), 8), (14, 1, 2.5, 2), (15, 0, CAST('NaN' AS DOUBLE PRECISION), 6)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (RANGE CURRENT ROW) AS w0 FROM t AS t
+----
+32 values hashing to efa98186336b07a908a34ba4c3fde35b
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 3, NULL) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, RANK() OVER (ORDER BY t.k ASC NULLS LAST) AS w1 FROM t AS t
+----
+48 values hashing to 58967cd02df18d9a177f9cc543b5e84c
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+32 values hashing to fe6eb648d64bf95c7e0556a612669e86
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to 4c633365babb4888c872f3e9186e85f7
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to 4c633365babb4888c872f3e9186e85f7
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to 5c3d011f67ea86bd608c754ddf08ef3c
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 3, CAST(0 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+32 values hashing to 46f4c8ea91d52a19a5411c9fe9f3d8ce
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 0 FOLLOWING AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+32 values hashing to 89215e34689760b4fb5a08d3793c97b4
+
+statement ok
+DROP TABLE t
+
+# window case 74
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 2.25, -1), (1, 1, -1.50, 9), (2, 0, 1.00, NULL), (3, NULL, 1.00, -1), (4, 1, 1.00, 2), (5, 1, -1.50, NULL), (6, 1, 0.50, NULL)
+
+query INT,DECIMAL(9,2) rowsort
+SELECT t.id AS id, LEAD(t.k, 3) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to 66085274838298c171d4ad8f8881f5d2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+14 values hashing to c71642cd1485fda3a052f5a16d21d8b1
+
+query INT,DECIMAL(9,2) rowsort
+SELECT t.id AS id, LAG(t.k, 1, CAST(0.00 AS DECIMAL(2,2))) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to e4d893c81c58dc84dc08456ac3379d22
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 0 FOLLOWING AND 2 FOLLOWING) AS w0 FROM t AS t
+----
+14 values hashing to 997a5245b3caa35df1e7a56939a0be54
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND 0 PRECEDING) AS w1 FROM t AS t
+----
+21 values hashing to ef6e4dbe5e8385b27242347625a712b6
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to d3a045304d294db05c90540956b92b17
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to 01b9db4e10b4ccda1ec437b24264ea40
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+14 values hashing to 9ca721162d48f90afe7946971ee90d3c
+
+statement ok
+DROP TABLE t
+
+# window case 75
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, 0, 8), (1, 0, 0, 8), (2, 1, 0, 4), (3, 1, -1, -1), (4, NULL, -1, 2), (5, 1, 2, 1), (6, 0, 4, 1), (7, 1, 0, 6), (8, 1, 0, 1), (9, 1, 2, 6), (10, 1, 4, 2), (11, 0, -1, 7), (12, 0, 3, 1), (13, 0, 0, 1), (14, 0, -1, 1)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 3 PRECEDING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+30 values hashing to aad4ea4499fea858dd3bfde67cc8fcd3
+
+query INT,INT rowsort
+SELECT t.id AS id, LEAD(t.k) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+30 values hashing to 07d1d3f6f9685738f3129d252c0188b8
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+30 values hashing to 2610e1ab08bc6dd120b4c3ee6c653029
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+30 values hashing to d1f580a956aa2779636cf0f76b53eb01
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0 FROM t AS t
+----
+30 values hashing to 9900a14933cb7548b126a67b0d65ed22
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 2 PRECEDING AND 2 PRECEDING) AS w0 FROM t AS t
+----
+30 values hashing to eca89888a4f7c8a4c32076ebad0dfead
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (ORDER BY t.k DESC NULLS FIRST) AS w0 FROM t AS t
+----
+30 values hashing to c5d97eeb293144f8c2bbfd626127cf2f
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 2, CAST(100 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, DENSE_RANK() OVER (ORDER BY t.k ASC NULLS LAST) AS w1 FROM t AS t
+----
+45 values hashing to 39717768ffd8bb805182f6f23adfb499
+
+statement ok
+DROP TABLE t
+
+# window case 76
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 2.25, 3), (1, 1, 1.00, NULL), (2, 0, 2.25, 6), (3, NULL, 2.25, NULL), (4, 0, 0.00, -3), (5, 1, 1.00, 9), (6, NULL, 1.00, 8), (7, 0, -1.50, -2), (8, 0, 0.00, 6), (9, 0, -1.50, -1), (10, 0, NULL, -2), (11, 1, 0.00, 0), (12, 0, 0.50, -2)
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0, LEAD(t.x, 1, CAST(-1 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+39 values hashing to 09329634da8370042666292c510ccd88
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 2 PRECEDING AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+26 values hashing to 4a4c575e21c65b031026b7e3e2bc231b
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS w0 FROM t AS t
+----
+26 values hashing to c114124a3b7984e3c71304aa5fa386df
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0, LEAD(t.x, 1, CAST(-1 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+39 values hashing to 0405629a68829c329991d0f10a92fa74
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2, CAST(-1 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+26 values hashing to 12d3ddb240aa00b0a4ff4401a7a255a1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MIN(t.x) OVER (PARTITION BY t.g RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS w0 FROM t AS t
+----
+26 values hashing to 8f1c120f850770cc6fd98f6a1d422b55
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 1, CAST(-1 AS BIGINT)) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0, ROW_NUMBER() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+39 values hashing to 4b0e422fd5d896a9d749127da14d4888
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, DENSE_RANK() OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST) AS w0, SUM(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 1 PRECEDING AND 1.5 PRECEDING) AS w1 FROM t AS t
+----
+39 values hashing to d0f64f680d8d6d913dc0491e64171978
+
+statement ok
+DROP TABLE t
+
+# window case 77
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k INTEGER, x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 0, 0, 6)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, SUM(t.x) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+0	6
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS w0 FROM t AS t
+----
+0	NULL
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 2, CAST(0 AS BIGINT)) OVER (ORDER BY t.k ASC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	0
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 1, NULL) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	NULL
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, AVG(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS w0, COUNT(t.x) OVER (ORDER BY t.k DESC NULLS LAST RANGE CURRENT ROW) AS w1 FROM t AS t
+----
+0	6.0	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LEAD(t.x, 3, NULL) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	NULL
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, COUNT(t.x) OVER (PARTITION BY t.g ORDER BY t.k DESC NULLS LAST RANGE BETWEEN 0 FOLLOWING AND 1 FOLLOWING) AS w0 FROM t AS t
+----
+0	1
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING) AS w0 FROM t AS t
+----
+0	6
+
+statement ok
+DROP TABLE t
+
+# window case 78
+statement ok
+CREATE TABLE t (id INTEGER, g INTEGER, k DECIMAL(9,2), x BIGINT)
+
+statement ok
+INSERT INTO t VALUES (0, 1, NULL, 7), (1, 0, 1.00, 7), (2, 1, 1.00, -2), (3, 0, 2.25, 2)
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, MAX(t.x) OVER (PARTITION BY t.g) AS w0 FROM t AS t
+----
+0	7
+1	7
+2	7
+3	7
+
+query INT,BIGINT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST) AS w0, RANK() OVER (ORDER BY t.k ASC NULLS FIRST) AS w1 FROM t AS t
+----
+12 values hashing to abf4b0688e83793fd18b950e898bd3cd
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, LAG(t.x, 1, CAST(100 AS BIGINT)) OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	100
+1	2
+2	7
+3	7
+
+query INT,DOUBLE,BIGINT rowsort
+SELECT t.id AS id, AVG(t.x) OVER (ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS w0, MAX(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE BETWEEN 1 FOLLOWING AND 1.5 FOLLOWING) AS w1 FROM t AS t
+----
+12 values hashing to 45bc41e56d1cedacc93d44e3e4741c71
+
+query INT,BIGINT,DOUBLE rowsort
+SELECT t.id AS id, COUNT(*) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE CURRENT ROW) AS w0, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST, t.id ASC NULLS FIRST ROWS BETWEEN 2 PRECEDING AND UNBOUNDED FOLLOWING) AS w1 FROM t AS t
+----
+12 values hashing to fa9b45b1139184bc01a84a7d42de5ec5
+
+query INT,DOUBLE,DECIMAL(9,2) rowsort
+SELECT t.id AS id, AVG(t.x) OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST RANGE CURRENT ROW) AS w0, LAG(t.k, 1, NULL) OVER (ORDER BY t.k DESC NULLS LAST, t.id ASC NULLS FIRST) AS w1 FROM t AS t
+----
+12 values hashing to 475e15d29a95c103abba30da056c3c54
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, RANK() OVER (PARTITION BY t.g ORDER BY t.k ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+1	1
+2	2
+3	2
+
+query INT,BIGINT rowsort
+SELECT t.id AS id, ROW_NUMBER() OVER (ORDER BY t.k DESC NULLS FIRST, t.id ASC NULLS FIRST) AS w0 FROM t AS t
+----
+0	1
+1	3
+2	4
+3	2
+
+statement ok
+DROP TABLE t
+

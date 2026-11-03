@@ -1,0 +1,15 @@
+{
+ "description": "Quoted fields with line breaks",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   "B\nB",
+   "C\nC\nC"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

@@ -152,7 +152,7 @@ final class ResultsTabPane(
         loadFromPath(initial._1.toString, Some(toChoice(initial._1, initial._2)), nameOpt)
       case None =>
         outputTable.clear()
-        outputStatus.setText(noOutputMessage(nameOpt, state.collect { case UiTaskState.Done(r) => r.status }))
+        outputStatus.setText(noOutputMessage(nameOpt, state))
     }
   }
 
@@ -196,14 +196,15 @@ final class ResultsTabPane(
       label = {
         val wrote = pickerTimeFmt.format(record.writtenAt)
         val exec = pickerTimeFmt.format(record.executionTime)
-        val statusTag = record.status match {
-          case TaskRunStatus.Succeeded        => ""
-          case TaskRunStatus.ValidationFailed => "  •  validation failed"
-          case TaskRunStatus.Failed           => "  •  failed"
-          case TaskRunStatus.Skipped          => "  •  skipped"
-        }
         val pin = if (isPlanned) "  ← current execution time" else ""
-        f"$wrote  •  exec=$exec  •  ${record.rowsProduced}%,d row(s)$statusTag  •  $path$pin"
+        val outcome = record.status match {
+          case TaskRunStatus.Running          => "unfinished"
+          case TaskRunStatus.Succeeded        => f"${record.rowsProduced}%,d row(s)"
+          case TaskRunStatus.ValidationFailed => f"${record.rowsProduced}%,d row(s)  •  validation failed"
+          case TaskRunStatus.Failed           => "failed"
+          case TaskRunStatus.Skipped          => "skipped"
+        }
+        s"$wrote  •  exec=$exec  •  $outcome  •  $path$pin"
       }
     )
 
@@ -213,11 +214,18 @@ final class ResultsTabPane(
     */
   private def loadFromPath(path: String, choice: Option[RunChoice], explicitName: Option[String] = None): Unit = {
     val token = loadToken.incrementAndGet()
-    outputStatus.setText("Loading…")
     outputTable.clear()
     val nameOpt = explicitName.orElse(
       currentTaskIndex.flatMap(i => session.dag.flatMap(_.nodes.lift(i))).map(_.task.displayName)
     )
+    // A run that never finished left nothing a reader can trust: no preview.
+    if (choice.exists(_.record.status == TaskRunStatus.Running)) {
+      val who = nameOpt.map(n => s"'$n'").getOrElse("Task")
+      outputStatus.setText(s"$who • $path • unfinished: the run writing it stopped before it finished, or is " +
+        "still running in another process, so there are no rows to show; the next run clears the directory.")
+      return
+    }
+    outputStatus.setText("Loading…")
     val worker = new Thread(new Runnable {
       def run(): Unit = {
         val outcome =
@@ -258,14 +266,19 @@ final class ResultsTabPane(
     worker.start()
   }
 
-  private def noOutputMessage(name: Option[String], status: Option[TaskStatus]): String = {
+  private def noOutputMessage(name: Option[String], state: Option[UiTaskState]): String = {
     val who = name.map(n => s"'$n'").getOrElse("This task")
-    val why = status match {
-      case Some(TaskStatus.Succeeded) => "succeeded but has no outputFile set"
-      case Some(TaskStatus.Failed(_)) => "failed before producing output"
-      case Some(TaskStatus.ValidationFailed(_)) => "completed but output may be incomplete (see Run log)"
-      case Some(TaskStatus.Skipped(_)) => "was skipped"
-      case Some(TaskStatus.Pending) | None => "hasn't run yet — press Run to produce its output"
+    val why = state match {
+      case Some(UiTaskState.Done(r)) => r.status match {
+        case TaskStatus.Succeeded => "succeeded but has no outputFile set"
+        case TaskStatus.Failed(_) => "failed before producing output"
+        case TaskStatus.ValidationFailed(_) => "completed but output may be incomplete (see Run log)"
+        case TaskStatus.Skipped(_) => "was skipped"
+        case TaskStatus.Pending => "hasn't run yet — press Run to produce its output"
+      }
+      case Some(UiTaskState.Unfinished(_)) => "its run stopped before it finished, or is still running"
+      case Some(UiTaskState.Running) | Some(UiTaskState.Queued) => "it is running"
+      case Some(UiTaskState.Pending) | None => "hasn't run yet — press Run to produce its output"
     }
     s"$who: no persisted output available — $why."
   }
@@ -460,6 +473,7 @@ final class ResultsTabPane(
           case TaskStatus.Pending =>
             ("PENDING", neutral, None)
         }
+      case Some(UiTaskState.Unfinished(_)) => ("NOT RUN (task unfinished)", neutral, None)
       case Some(UiTaskState.Running) => ("RUNNING", running, None)
       case Some(UiTaskState.Queued)  => ("QUEUED", running, None)
       case Some(UiTaskState.Pending) | None => ("PENDING", neutral, None)

@@ -1,10 +1,11 @@
 package com.transformer.slt
 
 import com.transformer.core._
-import com.transformer.fuzz.DataGen
-import com.transformer.fuzz.oracle.PlanRoundTrip
+import com.transformer.fuzz.{DataGen, Rng}
+import com.transformer.fuzz.oracle.{Eet, PlanRoundTrip}
 import com.transformer.read.parquet.ParquetReader
-import com.transformer.sql.exec.{CteResolver, PhysicalPlanner, SqlEngine}
+import com.transformer.sql.exec.{CteResolver, NestedLoopGuardException, PhysicalPlanner, SqlEngine}
+import com.transformer.sql.parse.NestingLimitException
 import com.transformer.sql.plan.{LogicalBuilder, LogicalOptimizer, PlanSql}
 import com.transformer.write.parquet.ParquetWriter
 
@@ -56,7 +57,7 @@ object Modes {
   }
 
   /** The text a mode runs: the query as written, or its plan printed as SQL
-    * ([[PlanSql]]), DuckDB's re-parse verification. */
+    * ([[PlanSql]]), DuckDB's re-parse verification, as it is or rewritten. */
   sealed trait Text
   object Text {
     case object AsWritten extends Text
@@ -66,6 +67,12 @@ object Modes {
     /** The plan the optimizer makes of the query printed, and run with the
       * optimizer off: each pass's rewrite, read afresh by the binder. */
     case object OptimizedReprinted extends Text
+    /** The query's plan with up to three subexpressions in forms that cannot
+      * change their values ([[Eet]], EET's relation), under a seed the query's
+      * text fixes, printed and run in its place. A rewrite can change the
+      * order of rows an ORDER BY leaves tied, so the result is compared as a
+      * multiset ([[Mode.unordered]]); the order is the baseline's to check. */
+    case object Rewritten extends Text
   }
 
   final case class Mode(name: String, layout: Layout, options: ExecutionOptions, optimizer: Optimizer,
@@ -75,6 +82,10 @@ object Modes {
       * stored order, which the permuted layout changes. */
     def runs(sql: String): Boolean =
       !Lexer.explains(sql) && (layout != Layout.Permuted || !Lexer.selectsStar(sql))
+
+    /** Whether this mode's rows are compared with the baseline's as a
+      * multiset rather than in their order. */
+    def unordered: Boolean = text == Text.Rewritten
   }
 
   /** Spill at a one-byte threshold, so each batch an operator holds is a run
@@ -99,7 +110,8 @@ object Modes {
     Mode("filter-pushdown-only", Layout.Split(2, 2, gaps = false), ExecutionOptions.Default, Optimizer.FilterPushdownOnly),
     Mode("projection-pushdown-only", Layout.Split(2, 2, gaps = false), ExecutionOptions.Default, Optimizer.ProjectionPushdownOnly),
     Mode("reprinted", Layout.Split(2, 2, gaps = false), ExecutionOptions.Default, Optimizer.Full, Text.Reprinted),
-    Mode("optimized-reprinted", Layout.Single, ExecutionOptions.Default, Optimizer.Off, Text.OptimizedReprinted))
+    Mode("optimized-reprinted", Layout.Single, ExecutionOptions.Default, Optimizer.Off, Text.OptimizedReprinted),
+    Mode("rewritten", Layout.Split(2, 2, gaps = false), ExecutionOptions.Default, Optimizer.Full, Text.Rewritten))
 
   /** Run `sql` over `catalog` under `mode`. The plan is built eagerly, as
     * `SqlEngine.execute` builds it, so a refusal throws here and a failure on
@@ -118,6 +130,65 @@ object Modes {
       val printed = PlanRoundTrip.optimizedSql(sql, catalog).getOrElse(
         throw new IllegalStateException("The optimized plan has no SQL"))
       executeText(printed, catalog, mode)
+    case Text.Rewritten => executeRewritten(sql, catalog, mode)
+  }
+
+  /** `sql` rewritten ([[Eet.rewrite]]) under a seed its text fixes, and run.
+    * A query that reads RAND() or the clock runs as written, since two runs
+    * of it may answer differently, and so does one whose parentheses nest
+    * [[DeepParentheses]] deep, one whose rewritten text nests past the
+    * parser's limit, and one whose rewritten text JSqlParser does not read
+    * ([[Eet.unparsed]]: it reads three stacked parentheses in some chains and
+    * not in others). A
+    * rewritten condition can move a join off its keys, which the nested-loop
+    * guard may refuse over a script's larger tables: the rewrite is drawn
+    * again with every WHERE and ON condition kept. */
+  private def executeRewritten(sql: String, catalog: Catalog, mode: Mode): ExecutedQuery = {
+    val built = LogicalBuilder.build(sql, catalog)
+    if (Eet.nondeterministic(sql, built) || parenthesesDeep(sql) >= DeepParentheses) return executeText(sql, catalog, mode)
+    def attempt(keepConditions: Boolean): ExecutedQuery = {
+      val rewritten = Eet.rewrite(built, new Rng(RewriteSeed ^ sql.hashCode.toLong), keepConditions = keepConditions)
+      if (rewritten.rewrites.isEmpty) executeText(sql, catalog, mode)
+      else {
+        val printed =
+          try rewritten.printed(catalog)
+          catch {
+            case e: PlanSql.UnprintablePlanException =>
+              throw new IllegalStateException(s"The rewritten plan has no SQL: ${e.getMessage}")
+          }
+        try executeText(printed, catalog, mode)
+        catch {
+          case _: NestingLimitException => executeText(sql, catalog, mode)
+          case e: IllegalArgumentException if Eet.unparsed(e) => executeText(sql, catalog, mode)
+        }
+      }
+    }
+    try attempt(keepConditions = false)
+    catch { case _: NestedLoopGuardException => attempt(keepConditions = true) }
+  }
+
+  /** Mixed with a query's text into the seed its rewrite draws from. */
+  private val RewriteSeed: Long = 0x5eedL
+
+  /** How deep a query's parentheses may nest for the `rewritten` mode to
+    * rewrite it. A form adds a CASE, an IF or a NOT to a condition, and
+    * JSqlParser backtracks over that inside parentheses nested this deep,
+    * for seconds and up to its time limit: SQLite's `index/` scripts' 200
+    * such queries, 3% of those the mode rewrites, cost it a hundred seconds,
+    * and any shallower took a few milliseconds. */
+  private val DeepParentheses = 5
+
+  /** How deep `sql`'s parentheses nest, outside quotes. */
+  private def parenthesesDeep(sql: String): Int = {
+    var depth, most = 0
+    var quote: Char = 0
+    sql.foreach { ch =>
+      if (quote != 0) { if (ch == quote) quote = 0 }
+      else if (ch == '\'' || ch == '"') quote = ch
+      else if (ch == '(') { depth += 1; most = math.max(most, depth) }
+      else if (ch == ')') depth -= 1
+    }
+    most
   }
 
   private def executeText(sql: String, catalog: Catalog, mode: Mode): ExecutedQuery = mode.optimizer match {

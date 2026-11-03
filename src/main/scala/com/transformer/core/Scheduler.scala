@@ -59,21 +59,13 @@ object Scheduler {
     * task is in its I/O phase. Doubling absorbs that — independent DAG
     * branches keep making progress while one branch's writers drain.
     *
-    * Override with the system property `transformer.scheduler.parallelism`
-    * (or the env var `TRANSFORMER_SCHEDULER_PARALLELISM`). Going higher costs
-    * heap (more in-flight `ColumnarBatch`es per writer × per scan) and may
-    * thrash under tight memory; going lower can be useful on shared hosts
-    * where you don't want transformer hogging cores.
+    * Override with [[Settings.Parallelism]]
+    * (`transformer.scheduler.parallelism`). Going higher costs heap (more
+    * in-flight `ColumnarBatch`es per writer × per scan) and may thrash under
+    * tight memory; going lower can be useful on shared hosts where you don't
+    * want transformer hogging cores.
     */
-  val parallelism: Int = {
-    val cores = math.max(1, Runtime.getRuntime.availableProcessors)
-    val configured = Option(System.getProperty("transformer.scheduler.parallelism"))
-      .orElse(Option(System.getenv("TRANSFORMER_SCHEDULER_PARALLELISM")))
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .flatMap(s => try Some(s.toInt) catch { case _: NumberFormatException => None })
-    math.max(1, configured.getOrElse(cores * 2))
-  }
+  val parallelism: Int = Settings.Parallelism.get
 
   /** The pool itself. Lifetime = JVM; threads are daemon so the pool never
     * prevents process exit. Sized to [[parallelism]]. */
@@ -84,6 +76,10 @@ object Scheduler {
     /*asyncMode =*/ false
   )
 
+  // Under `--config=leaks` the exit audit watches every JVM that runs the
+  // engine, whatever it opens.
+  LeakAudit.watch()
+
   /** Submit a `Callable` on the shared pool. [[Submitted.await]] waits for it,
     * and from a pool worker that wait work-helps, so nested submission won't
     * deadlock.
@@ -92,8 +88,10 @@ object Scheduler {
     val failure = new AtomicReference[Throwable]
     val task = pool.submit(new Callable[T] {
       def call(): T =
-        try c.call()
-        catch { case t: Throwable => failure.set(t); throw t }
+        try {
+          Chaos.at(Chaos.Submit)
+          c.call()
+        } catch { case t: Throwable => failure.set(t); throw t }
     })
     new Submitted(task, failure)
   }
@@ -102,14 +100,23 @@ object Scheduler {
     * submission order. Convenience for the common "fan out N partitions, wait
     * for them all" pattern in pipeline-breaking operators.
     *
-    * The first task in submission order that failed throws its own exception
-    * here, as [[Submitted.await]] does, and the tasks after it are not waited
-    * for. Caller is responsible for cleanup ordering; everything else is
-    * best-effort draining.
+    * Every task is waited for, whether or not one failed, and then the first
+    * in submission order that failed throws its own exception here, as
+    * [[Submitted.await]] does: so when it throws, nothing it started still
+    * runs, and the caller can release what the tasks shared (a spill
+    * directory) without a task still writing there. It returned at the first
+    * failure, and a sibling task could hold its input open, or spill into a
+    * directory already deleted, after the query had failed (plans/testing/17).
     */
   def submitAndAwaitAll[T](tasks: Seq[Callable[T]]): IndexedSeq[T] = {
     val submitted = tasks.iterator.map(submit(_)).toIndexedSeq
-    submitted.map(_.await())
+    var failure: Throwable = null
+    val results = submitted.map { s =>
+      try s.await()
+      catch { case t: Throwable => if (failure == null) failure = t; null.asInstanceOf[T] }
+    }
+    if (failure != null) throw failure
+    results
   }
 
   /** A callable running on [[pool]], and what it threw if it failed. */
@@ -131,7 +138,10 @@ object Scheduler {
       * helping mechanism goes away.
       */
     def await(): T =
-      try task.get()
+      try {
+        Chaos.at(Chaos.Await)
+        task.get()
+      }
       catch {
         case e: ExecutionException => throw Option(failure.get).fold[Throwable](e)(rethrowable)
       }

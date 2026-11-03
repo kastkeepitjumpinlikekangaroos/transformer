@@ -215,7 +215,7 @@ object TaskDag {
       case s: Select => cteNames(s)
       case _ => Set.empty[String]
     }
-    new TablesNamesFinder().getTableList(stmt).asScala.iterator
+    new TablesNamesFinder().getTables(stmt).asScala.iterator
       .map(name => SqlParser.unquote(name).toLowerCase(Locale.ROOT)).filterNot(ctes).toSet
   }
 
@@ -260,7 +260,7 @@ object TaskDag {
       false
     }
     val start = remaining.min
-    dfs(start)
+    val _ = dfs(start)
     if (cycleStart < 0) Seq.empty
     else {
       val path = mutable.ArrayBuffer[Int]()

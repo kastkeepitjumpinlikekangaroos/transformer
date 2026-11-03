@@ -113,6 +113,84 @@ scala_junit_test(
     ],
 )
 
+# Value-preserving rewrites (EET): every query QueryGen, MetaQueryGen and
+# SqlTextGen (honoured clauses, spellings) write, its bound plan with up to
+# three subexpressions wrapped in forms that cannot change their values,
+# printed (PlanSql) and run, answers as the query does. Default budget, part
+# of `bazel test //...`.
+scala_junit_test(
+    name = "eet_fuzz_test",
+    srcs = ["EetFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Forced plans (DQP): every plan the engine can be made to choose for one
+# MetaQueryGen query gives one multiset. The leading run of inner joins
+# written in every order of four tables or fewer (24 of a longer run), each
+# run with the optimizer off and on; and every join of the optimized plan
+# respelled on its key, computed keys, two keys or none, the first two with
+# spill on, the sides swapped half the time, printed and run as written.
+# Default budget, part of `bazel test //...`.
+scala_junit_test(
+    name = "forced_plan_fuzz_test",
+    srcs = ["ForcedPlanFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The strategy half of forced_plan_fuzz_test under sharded planning: the
+# jvm_flags open the sharding gates, read at class load, so a join on a key
+# runs per shard and the spelling with no key pairs unsharded, a sharded
+# join held against an unsharded one in one JVM. Part of `bazel test //...`.
+scala_junit_test(
+    name = "sharded_forced_plan_fuzz_test",
+    srcs = [
+        "ForcedPlanFuzzTest.scala",
+        "ShardedForcedPlanFuzzTest.scala",
+    ],
+    jvm_flags = [
+        "-Dtransformer.scheduler.shard_min_size=1",
+        "-Dtransformer.scheduler.broadcast_threshold=1",
+        "-Dtransformer.scheduler.shard_count=4",
+    ],
+    suffixes = ["ShardedForcedPlanFuzzTest"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Known join answers (TQS): a wide table split along its keys into a fact
+# table and dimension tables, NULL keys and dimension rows no fact keys among
+# them; queries walking the keys with every join kind, a WHERE of
+# comparisons with literals, projections and grouped COUNT, SUM, MIN and
+# MAX, each answer worked out without the engine (oracle/JoinTruth). Default
+# budget, part of `bazel test //...`.
+scala_junit_test(
+    name = "join_truth_fuzz_test",
+    srcs = ["JoinTruthFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 # The metamorphic gate re-run under SHARDED planning. The sharding gates
 # (LogicalPlanCardinality.{MinShardableSize, BroadcastBuildThreshold}) are vals
 # read at class load, so they need a separate JVM: jvm_flags set both to 1,
@@ -146,6 +224,7 @@ scala_junit_test(
     deps = [
         ":fuzz",
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/sql/plan",
         "@maven//:junit_junit",
     ],
@@ -167,6 +246,20 @@ scala_junit_test(
         ":fuzz",
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The DAG fuzzer's watchdog under chaos reports a pool wedged on purpose with
+# a thread dump that names each worker's last chaos points.
+scala_junit_test(
+    name = "dag_watchdog_test",
+    srcs = ["DagWatchdogTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = ["-Dtransformer.chaos=3"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
         "@maven//:junit_junit",
     ],
 )
@@ -273,6 +366,45 @@ scala_junit_test(
 )
 
 scala_junit_test(
+    name = "eet_fuzz_campaign",
+    srcs = ["EetFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "forced_plan_fuzz_campaign",
+    srcs = ["ForcedPlanFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "join_truth_fuzz_campaign",
+    srcs = ["JoinTruthFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
     name = "metamorphic_fuzz_campaign",
     srcs = ["MetamorphicFuzzTest.scala"],
     suffixes = ["Test"],
@@ -313,6 +445,7 @@ scala_junit_test(
     deps = [
         ":fuzz",
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/sql/plan",
         "@maven//:junit_junit",
     ],
@@ -418,6 +551,22 @@ scala_junit_test(
         ":fuzz",
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/job",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The DAG fuzzer's crash campaign (plans/testing/06): each generated job has
+# one run halted at a fault point in a child JVM (DagCrashChild, armed with
+# -Dtransformer.fault=<point>:<n>:halt), then checked and rerun in this JVM.
+# A JVM per case, so it runs on demand with FUZZ_SEEDS=N.
+scala_junit_test(
+    name = "dag_crash_fuzz_campaign",
+    srcs = ["DagCrashFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
         "@maven//:junit_junit",
     ],
 )

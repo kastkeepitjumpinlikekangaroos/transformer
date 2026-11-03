@@ -1,0 +1,20 @@
+{
+ "description": "Quoted field at end of row (but not at EOF) has quotes",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   "c\"c\""
+  ],
+  [
+   "d",
+   "e",
+   "f"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

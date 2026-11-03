@@ -1,8 +1,9 @@
 # From SQLite's sqllogictest corpus (https://www.sqlite.org/sqllogictest,
 # mirrored at https://github.com/gregrahn/sqllogictest): test/evidence/in1.test,
 # up to its 105th query this engine runs. Its COPYRIGHT lets it be copied
-# freely. `skipif transformer` marks a record the engine answers otherwise
-# by design, with the reason.
+# freely. `skipif transformer <id>` marks a record the engine answers
+# otherwise by design, with the id of its rule in the ledger in
+# docs/gotchas.md.
 
 # So far, this only runs well on SQLite and MySQL.
 
@@ -78,7 +79,7 @@ SELECT 1 IN t1
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-1
 SELECT 1 IN (SELECT * FROM t1)
 ----
@@ -90,7 +91,7 @@ SELECT 1 NOT IN t1
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-2
 SELECT 1 NOT IN (SELECT * FROM t1)
 ----
@@ -102,7 +103,7 @@ SELECT null IN t1
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-3
 SELECT null IN (SELECT * FROM t1)
 ----
@@ -114,7 +115,7 @@ SELECT null NOT IN t1
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-4
 SELECT null NOT IN (SELECT * FROM t1)
 ----
@@ -129,7 +130,7 @@ SELECT 1 IN t2
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-5
 SELECT 1 IN (SELECT * FROM t2)
 ----
@@ -141,7 +142,7 @@ SELECT 1 NOT IN t2
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-6
 SELECT 1 NOT IN (SELECT * FROM t2)
 ----
@@ -153,7 +154,7 @@ SELECT null IN t2
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-7
 SELECT null IN (SELECT * FROM t2)
 ----
@@ -165,7 +166,7 @@ SELECT null NOT IN t2
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-8
 SELECT null NOT IN (SELECT * FROM t2)
 ----
@@ -180,7 +181,7 @@ SELECT 1 IN t3
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-9
 SELECT 1 IN (SELECT * FROM t3)
 ----
@@ -192,7 +193,7 @@ SELECT 1 NOT IN t3
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-10
 SELECT 1 NOT IN (SELECT * FROM t3)
 ----
@@ -204,7 +205,7 @@ SELECT null IN t3
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-11
 SELECT null IN (SELECT * FROM t3)
 ----
@@ -216,31 +217,31 @@ SELECT null NOT IN t3
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-12
 SELECT null NOT IN (SELECT * FROM t3)
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort
 SELECT 1 IN (SELECT x+y FROM t1, t2)
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort
 SELECT 1 NOT IN (SELECT x+y FROM t1,t2)
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort
 SELECT null IN (SELECT x+y FROM t1,t2)
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort
 SELECT null NOT IN (SELECT x+y FROM t1,t2)
 ----
@@ -264,7 +265,7 @@ SELECT 1.23 IN t1
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-13
 SELECT 1.23 IN (SELECT * FROM t1)
 ----
@@ -276,7 +277,7 @@ SELECT 1.23 NOT IN t1
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-14
 SELECT 1.23 NOT IN (SELECT * FROM t1)
 ----
@@ -300,7 +301,7 @@ SELECT 'hello' IN t1
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-15
 SELECT 'hello' IN (SELECT * FROM t1)
 ----
@@ -312,7 +313,7 @@ SELECT 'hello' NOT IN t1
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-16
 SELECT 'hello' NOT IN (SELECT * FROM t1)
 ----
@@ -336,7 +337,7 @@ SELECT x'303132' IN t1
 ----
 0
 
-skipif transformer # refused: A hexadecimal literal is not supported
+skipif transformer refused-hex-literal
 query I nosort label-17
 SELECT x'303132' IN (SELECT * FROM t1)
 ----
@@ -348,7 +349,7 @@ SELECT x'303132' NOT IN t1
 ----
 1
 
-skipif transformer # refused: A hexadecimal literal is not supported
+skipif transformer refused-hex-literal
 query I nosort label-18
 SELECT x'303132' NOT IN (SELECT * FROM t1)
 ----
@@ -472,7 +473,7 @@ SELECT 1 IN t4
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-19
 SELECT 1 IN (SELECT * FROM t4)
 ----
@@ -484,7 +485,7 @@ SELECT 1 NOT IN t4
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-20
 SELECT 1 NOT IN (SELECT * FROM t4)
 ----
@@ -496,7 +497,7 @@ SELECT 1 IN t5
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-21
 SELECT 1 IN (SELECT * FROM t5)
 ----
@@ -508,7 +509,7 @@ SELECT 1 NOT IN t5
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-22
 SELECT 1 NOT IN (SELECT * FROM t5)
 ----
@@ -520,7 +521,7 @@ SELECT 1 IN t6
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-23
 SELECT 1 IN (SELECT * FROM t6)
 ----
@@ -532,7 +533,7 @@ SELECT 1 NOT IN t6
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-24
 SELECT 1 NOT IN (SELECT * FROM t6)
 ----
@@ -544,7 +545,7 @@ SELECT 'a' IN t7
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-25
 SELECT 'a' IN (SELECT * FROM t7)
 ----
@@ -556,7 +557,7 @@ SELECT 'a' NOT IN t7
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-26
 SELECT 'a' NOT IN (SELECT * FROM t7)
 ----
@@ -568,7 +569,7 @@ SELECT 'a' IN t8
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-27
 SELECT 'a' IN (SELECT * FROM t8)
 ----
@@ -580,7 +581,7 @@ SELECT 'a' NOT IN t8
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-28
 SELECT 'a' NOT IN (SELECT * FROM t8)
 ----
@@ -636,7 +637,7 @@ SELECT 2 IN t4
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-29
 SELECT 2 IN (SELECT * FROM t4)
 ----
@@ -648,7 +649,7 @@ SELECT 3 NOT IN t4
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-30
 SELECT 3 NOT IN (SELECT * FROM t4)
 ----
@@ -660,7 +661,7 @@ SELECT 4 IN t4n
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-31
 SELECT 4 IN (SELECT * FROM t4n)
 ----
@@ -672,7 +673,7 @@ SELECT 2 NOT IN t4n
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-32
 SELECT 2 NOT IN (SELECT * FROM t4n)
 ----
@@ -684,7 +685,7 @@ SELECT 2 IN t5
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-33
 SELECT 2 IN (SELECT * FROM t5)
 ----
@@ -696,7 +697,7 @@ SELECT 3 NOT IN t5
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-34
 SELECT 3 NOT IN (SELECT * FROM t5)
 ----
@@ -708,7 +709,7 @@ SELECT 2 IN t6
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-35
 SELECT 2 IN (SELECT * FROM t6)
 ----
@@ -720,7 +721,7 @@ SELECT 3 NOT IN t6
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-36
 SELECT 3 NOT IN (SELECT * FROM t6)
 ----
@@ -732,7 +733,7 @@ SELECT 4 IN t6n
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-37
 SELECT 4 IN (SELECT * FROM t6n)
 ----
@@ -744,7 +745,7 @@ SELECT 2 NOT IN t6n
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-38
 SELECT 2 NOT IN (SELECT * FROM t6n)
 ----
@@ -756,7 +757,7 @@ SELECT 'b' IN t7
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-39
 SELECT 'b' IN (SELECT * FROM t7)
 ----
@@ -768,7 +769,7 @@ SELECT 'c' NOT IN t7
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-40
 SELECT 'c' NOT IN (SELECT * FROM t7)
 ----
@@ -780,7 +781,7 @@ SELECT 'c' IN t7n
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-41
 SELECT 'c' IN (SELECT * FROM t7n)
 ----
@@ -792,7 +793,7 @@ SELECT 'd' NOT IN t7n
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-42
 SELECT 'd' NOT IN (SELECT * FROM t7n)
 ----
@@ -804,7 +805,7 @@ SELECT 'b' IN t8
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-43
 SELECT 'b' IN (SELECT * FROM t8)
 ----
@@ -816,7 +817,7 @@ SELECT 'c' NOT IN t8
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-44
 SELECT 'c' NOT IN (SELECT * FROM t8)
 ----
@@ -828,7 +829,7 @@ SELECT 'c' IN t8n
 ----
 1
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-45
 SELECT 'c' IN (SELECT * FROM t8n)
 ----
@@ -840,7 +841,7 @@ SELECT 'd' NOT IN t8n
 ----
 0
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-46
 SELECT 'd' NOT IN (SELECT * FROM t8n)
 ----
@@ -874,7 +875,7 @@ SELECT 1 IN t4n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-47
 SELECT 1 IN (SELECT * FROM t4n)
 ----
@@ -886,7 +887,7 @@ SELECT 5 NOT IN t4n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-48
 SELECT 5 NOT IN (SELECT * FROM t4n)
 ----
@@ -898,7 +899,7 @@ SELECT 6 IN t6n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-49
 SELECT 6 IN (SELECT * FROM t6n)
 ----
@@ -910,7 +911,7 @@ SELECT 7 NOT IN t6n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-50
 SELECT 7 NOT IN (SELECT * FROM t6n)
 ----
@@ -922,7 +923,7 @@ SELECT 'a' IN t7n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-51
 SELECT 'a' IN (SELECT * FROM t7n)
 ----
@@ -934,7 +935,7 @@ SELECT 'e' NOT IN t7n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-52
 SELECT 'e' NOT IN (SELECT * FROM t7n)
 ----
@@ -946,7 +947,7 @@ SELECT 'f' IN t8n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-53
 SELECT 'f' IN (SELECT * FROM t8n)
 ----
@@ -958,7 +959,7 @@ SELECT 'g' NOT IN t8n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-54
 SELECT 'g' NOT IN (SELECT * FROM t8n)
 ----
@@ -1013,7 +1014,7 @@ SELECT null IN t4
 NULL
 
 # mysql is failing this one
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 skipif mysql
 query I nosort label-55
 SELECT null IN (SELECT * FROM t4)
@@ -1033,7 +1034,7 @@ SELECT null NOT IN t4
 NULL
 
 # mysql is failing this one
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 skipif mysql
 query I nosort label-56
 SELECT null NOT IN (SELECT * FROM t4)
@@ -1046,7 +1047,7 @@ SELECT null IN t4n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-57
 SELECT null IN (SELECT * FROM t4n)
 ----
@@ -1058,7 +1059,7 @@ SELECT null NOT IN t4n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-58
 SELECT null NOT IN (SELECT * FROM t4n)
 ----
@@ -1071,7 +1072,7 @@ SELECT null IN t5
 NULL
 
 # mysql is failing this one
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 skipif mysql
 query I nosort label-59
 SELECT null IN (SELECT * FROM t5)
@@ -1085,7 +1086,7 @@ SELECT null NOT IN t5
 NULL
 
 # mysql is failing this one
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 skipif mysql
 query I nosort label-60
 SELECT null NOT IN (SELECT * FROM t5)
@@ -1098,7 +1099,7 @@ SELECT null IN t6
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-61
 SELECT null IN (SELECT * FROM t6)
 ----
@@ -1110,7 +1111,7 @@ SELECT null NOT IN t6
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-62
 SELECT null NOT IN (SELECT * FROM t6)
 ----
@@ -1122,7 +1123,7 @@ SELECT null IN t6n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-63
 SELECT null IN (SELECT * FROM t6n)
 ----
@@ -1134,7 +1135,7 @@ SELECT null NOT IN t6n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-64
 SELECT null NOT IN (SELECT * FROM t6n)
 ----
@@ -1146,7 +1147,7 @@ SELECT null IN t7
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-65
 SELECT null IN (SELECT * FROM t7)
 ----
@@ -1158,7 +1159,7 @@ SELECT null NOT IN t7
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-66
 SELECT null NOT IN (SELECT * FROM t7)
 ----
@@ -1170,7 +1171,7 @@ SELECT null IN t7n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-67
 SELECT null IN (SELECT * FROM t7n)
 ----
@@ -1182,7 +1183,7 @@ SELECT null NOT IN t7n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-68
 SELECT null NOT IN (SELECT * FROM t7n)
 ----
@@ -1194,7 +1195,7 @@ SELECT null IN t8
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-69
 SELECT null IN (SELECT * FROM t8)
 ----
@@ -1206,7 +1207,7 @@ SELECT null NOT IN t8
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-70
 SELECT null NOT IN (SELECT * FROM t8)
 ----
@@ -1218,7 +1219,7 @@ SELECT null IN t8n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-71
 SELECT null IN (SELECT * FROM t8n)
 ----
@@ -1230,7 +1231,7 @@ SELECT null NOT IN t8n
 ----
 NULL
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort label-72
 SELECT null NOT IN (SELECT * FROM t8n)
 ----

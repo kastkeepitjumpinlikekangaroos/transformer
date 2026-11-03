@@ -1,12 +1,12 @@
 package com.transformer.fuzz
 
-import com.transformer.core.{Scheduler, Spill}
+import com.transformer.core.{Faults, Scheduler, Spill}
 import com.transformer.fuzz.JobDagGen.JobCase
 import com.transformer.fuzz.oracle.{DagSchedule, Hydration}
 import org.junit.Assert._
-import org.junit.{After, Before, Test}
+import org.junit.{After, Test}
 
-import java.nio.file.{Files, Path}
+import java.nio.file.Path
 
 /** Property-based gate over the job-level DAG scheduler — the layer above SQL
   * execution, where `DataJob.runUnifiedDag` decides what may run and when.
@@ -48,31 +48,12 @@ class DagSchedulerFuzzTest {
     * properties. */
   private val DefaultDagSeeds: Int = 40
 
-  // Generated tasks may enable spill at a 1-byte threshold; keep those files out
-  // of the default spill location.
-  private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
-  private var tmpRoot: Path = _
-
-  @Before def setSpillDir(): Unit = {
-    tmpRoot = Files.createTempDirectory("dag-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmpRoot.resolve("transformer-spill").toString)
-  }
-
-  @After def restoreSpillDir(): Unit = {
-    if (originalDirProp == null) System.clearProperty(Spill.SpillDirProperty)
-    else System.setProperty(Spill.SpillDirProperty, originalDirProp)
-    deleteRecursively(tmpRoot)
-  }
-
-  private def deleteRecursively(p: Path): Unit = {
-    if (p == null || !Files.exists(p)) return
-    if (Files.isDirectory(p)) {
-      val s = Files.list(p)
-      try { val it = s.iterator(); while (it.hasNext) deleteRecursively(it.next()) }
-      finally s.close()
-    }
-    try Files.deleteIfExists(p) catch { case _: java.io.IOException => () }
-  }
+  // This JVM's spill directory is read once (`Spill.baseDir`, under
+  // java.io.tmpdir, which Bazel sets to the target's own TEST_TMPDIR), so a
+  // test cannot move it. Every operator that spills closes its directory once
+  // nothing reads it, so each test leaves none (plans/testing/17).
+  @After def leavesNoSpillDirectory(): Unit =
+    assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
 
   // ---- the property ---------------------------------------------------------
 
@@ -384,6 +365,65 @@ class DagSchedulerFuzzTest {
     }
   }
 
+  /** Coverage guard for the failures after a write starts (plans/testing/06).
+    * The corpus must draw tasks that fail while their parts are written and
+    * tasks whose validation overflows, each where it runs (no upstream skips
+    * it) and has an output directory; and over real runs each must fail for
+    * real, on its overflow, which `DagSchedule` holds it to. */
+  @Test def generatorCoversWriteFailures(): Unit = {
+    val n = Props.seedCountOr(2000)
+    val drawn = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    var i = 0
+    while (i < n) {
+      val jc = JobDagGen.generate(new Rng(Props.baseSeed + i))
+      val statuses = DagSchedule.expectedStatuses(jc)
+      jc.tasks.foreach { t =>
+        if ((t.outcome == JobDagGen.FailsWhileWriting || t.outcome == JobDagGen.FailsInValidation) &&
+          statuses(t.index) == "Failed") drawn(t.outcome.toString) += 1
+      }
+      i += 1
+    }
+    val outcomes = Seq("FailsWhileWriting", "FailsInValidation")
+    val (seen, ran) = sessionsUntil(600, _.tasks.exists(t => outcomes.contains(t.outcome.toString))) { r =>
+      outcomes.forall(r.writeFailures(_) > 0)
+    }
+    println(s"[dag-schedule] write failures drawn where they run over $n seeds: ${drawn.toMap}; failed for real " +
+      s"over $ran runs: ${seen.writeFailures.toMap}")
+    // Bounds near a third of the rates measured over the default 2000 seeds:
+    // 47 tasks failing while writing and 57 failing in a validation.
+    outcomes.foreach { o =>
+      assertTrue(s"$o drawn ${drawn(o)} times over $n", drawn(o) > n / 125)
+      assertTrue(s"$o never failed for real: ${seen.writeFailures.toMap}", seen.writeFailures(o) > 0)
+    }
+  }
+
+  /** Coverage guard for the fault mode (plans/testing/06). Every fault point
+    * is drawn, and over real runs every one is reached, so each stops a run
+    * that then reruns clean; and some stopped run leaves a `Running` record a
+    * session reopens as unfinished. */
+  @Test def generatorCoversFaultPoints(): Unit = {
+    val n = Props.seedCountOr(2000)
+    val drawn = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    var i = 0
+    while (i < n) {
+      JobDagGen.generate(new Rng(Props.baseSeed + i)).faultPlan.foreach(f => drawn(f.arming.point) += 1)
+      i += 1
+    }
+    val (seen, ran) = sessionsUntil(3000, _.faultPlan.isDefined) { r =>
+      Faults.Points.forall(p => r.faults((p, true)) > 0) && r.unfinished > 0
+    }
+    println(s"[dag-schedule] fault points drawn over $n seeds: ${drawn.toMap}")
+    println(s"[dag-schedule] over $ran stopped runs: reached=${Faults.Points.map(p => p -> seen.faults((p, true))).toMap} " +
+      s"notReached=${Faults.Points.map(p => p -> seen.faults((p, false))).toMap} unfinished=${seen.unfinished}")
+    // Bounds near a third of the rates measured over the default 2000 seeds:
+    // each point drawn 47 to 69 times; all ten reached within 57 stopped runs.
+    Faults.Points.foreach { p =>
+      assertTrue(s"fault point $p drawn ${drawn(p)} times over $n", drawn(p) > n / 125)
+      assertTrue(s"fault point $p never reached over $ran stopped runs", seen.faults((p, true)) > 0)
+    }
+    assertTrue(s"no stopped run left a task a session reopened unfinished", seen.unfinished > 0)
+  }
+
   /** The seed is the repro key: the same seed must rebuild the same job. */
   @Test def sameSeedReproduces(): Unit = {
     val a = JobDagGen.generate(new Rng(4242L))
@@ -393,7 +433,7 @@ class DagSchedulerFuzzTest {
 
   /** The shrinker must terminate and strictly reduce, or `Props.minimize` loops
     * until its step cap. Measure = tasks + edges + injected failures + output
-    * config + the run layout. */
+    * config + the run layout + the fault. */
   @Test def shrinkerTerminatesAndReduces(): Unit = {
     def measure(jc: JobCase): Int =
       jc.tasks.length + jc.tasks.map(_.sources).sum +
@@ -401,7 +441,8 @@ class DagSchedulerFuzzTest {
         jc.tasks.count(_.output.isDefined) + jc.tasks.count(_.passingValidation) +
         jc.tasks.count(_.validationTaskSrc.isDefined) + jc.inputs.map(_.rows).sum +
         jc.layout.runs + jc.layout.runDir.size + jc.tasks.count(_.output.exists(_.partitionBy.isDefined)) +
-        jc.corruption.size + jc.tasks.map(t => t.name.size + t.failure.size + t.checks.length).sum
+        jc.corruption.size + jc.tasks.map(t => t.name.size + t.failure.size + t.checks.length).sum +
+        jc.fault.map(f => 1 + (if (f.overEarlier) 1 else 0) + f.arming.nth).getOrElse(0)
     var i = 0
     while (i < 40) {
       val jc = JobDagGen.generate(new Rng(i.toLong))

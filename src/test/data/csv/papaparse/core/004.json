@@ -1,0 +1,15 @@
+{
+ "description": "Whitespace at edges of unquoted field",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "\tb ",
+   "c"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

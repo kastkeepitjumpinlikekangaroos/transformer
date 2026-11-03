@@ -1,0 +1,15 @@
+{
+ "description": "Input is just a string (a single field)",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "Abc def"
+  ]
+ ],
+ "fields": null,
+ "errors": [
+  "UndetectableDelimiter"
+ ]
+}

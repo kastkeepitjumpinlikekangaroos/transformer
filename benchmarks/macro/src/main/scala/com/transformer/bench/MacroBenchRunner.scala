@@ -1,6 +1,8 @@
 package com.transformer.bench
 
-import java.nio.file.{Files, Path, Paths, StandardCopyOption}
+import com.transformer.core.Settings
+
+import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 import scala.collection.mutable
@@ -270,7 +272,7 @@ object MacroBenchRunner {
     val cmd = mutable.ArrayBuffer.empty[String]
     cmd += javaBin
     cmd += s"-Xmx${args.xmx}"
-    if (args.forceSpill) cmd += s"-D${com.transformer.job.DataJob.ForceSpillPropertyName}=true"
+    if (args.forceSpill) cmd += s"-D${Settings.ForceSpill.property}=true"
     cmd += "-jar"
     cmd += args.deployJar.toString
     cmd += args.jobDir.toString
@@ -278,7 +280,7 @@ object MacroBenchRunner {
     args.executionTime.foreach(cmd += _)
     val pb = new ProcessBuilder(cmd.toArray: _*)
     pb.inheritIO()
-    pb.environment().put("TRANSFORMER_METRICS_ENABLED", "1")
+    pb.environment().put(Settings.MetricsEnabled.environmentVariable, "1")
     val proc = pb.start()
     val finished = proc.waitFor(10, TimeUnit.MINUTES)
     if (!finished) {

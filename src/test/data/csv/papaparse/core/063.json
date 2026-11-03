@@ -1,0 +1,20 @@
+{
+ "description": "Duplicate header names with __proto__ field",
+ "options": {
+  "header": "true"
+ },
+ "rows": [
+  [
+   "__proto__",
+   "__proto___1",
+   "__proto___2"
+  ],
+  [
+   "1",
+   "2",
+   "3"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

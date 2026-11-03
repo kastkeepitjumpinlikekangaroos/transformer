@@ -1,6 +1,9 @@
 # Plan 15: the fuzz generators draw what they leave out today
 
-> Status: **not started** · from the 2026-11-01 test survey, category 5 of 9 ·
+> Status: **done** 2026-11-02 (3c8ee89 W1, 394b70e decision 2, 96ca67f W2,
+> 2ba017f W3, 7606c78 W4, 8065a8d W5, 50e67c3 W6, 49b1760 W7; see
+> [Outcome](#outcome); both decisions taken overnight as recommended, not yet
+> confirmed by the user; finding F1 held for the user) · from the 2026-11-01 test survey, category 5 of 9 ·
 > Effort: 3-5 days · Risk: low for the generators; medium for what they find
 > (one finding is already confirmed below) · Depends on: none.
 > [06](06-a-failed-run-leaves-no-partial-output.md) opens the DAG fuzzer's
@@ -223,6 +226,8 @@ third table off by one; W7, one SUM merge path back to plain `+`.
      change.
    - (c) Keep the edges out of the layout corpora; widen only the point
      oracles (`ExactIntegers`, `WindowFrames`).
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 2. **Case rules once text is not ASCII** (W2, the confirmed split).
    - (a) **(recommended)** UPPER and LOWER map one character to one
      character (Unicode's simple case mapping: U+00DF stays U+00DF, U+0130
@@ -235,6 +240,9 @@ third table off by one; W7, one SUM merge path back to plain `+`.
      `SS`.
    - (c) Keep both rules, document the difference, and drop the spelling
      shape's UPPER and LOWER spellings.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
+   One split remains, which (a) does not settle: finding F1 below.
 
 ## Decisions already made
 
@@ -298,3 +306,109 @@ bound instead of growing its seed block.
 Report: which gates are open, each guard's measured rate, the bind-rejection
 tally at 20000 seeds, each detection proof, and every finding with its repro.
 ```
+
+## Findings
+
+| # | Finding | Minimized repro | What became of it |
+|---|---|---|---|
+| D2 | The split the plan confirmed: `UPPER` mapped U+00DF to `SS` and `LOWER` mapped U+0130 to two code points (Java's full case mapping), so `LENGTH(UPPER(s))` changed and `UPPER(s) LIKE UPPER('SS')` matched a sharp s that `s ILIKE 'SS'` did not. | `SELECT UPPER('<U+00DF>'), LENGTH(LOWER('<U+0130>'))`: `SS` and 2 | Decision 2 (a), `394b70e`: `Funcs.upper` and `Funcs.lower` map each code point by Unicode's simple mapping on both paths. `SqlEngineTest.upperAndLowerMapOneCharacterToOne` fails at its base (`SS`, an i with a combining dot, `FI`, 7). Four cells of `src/test/semantics/functions-text.txt` moved: `UPPER('<U+00DF>')` is `<U+00DF>`, not `SS` (STRING and text literal), and `LOWER('<U+0130>i')` is `ii`, not U+0069 U+0307 `i` (STRING and text literal); the record `SELECT LENGTH(...), UPPER('<U+00DF>'), LOWER('<U+0130>'), CONCAT()` of `slt/semantics/functions.test` reads `3 <U+00DF> i (empty)`, not `3 SS i<U+0307> (empty)`. README and gotchas.md say so. |
+| F1 | What decision 2 leaves: `ILIKE` folds a letter to the small form of its capital, where `LOWER` and `UPPER` map it alone, so the three case-insensitive spellings part over a letter whose capital and small forms are not one pair. Over a dotless i (U+0131), `ILIKE 'i'` and the `UPPER` spelling are TRUE and the `LOWER` spelling FALSE; over a dotted capital I (U+0130), `ILIKE 'i'` and the `LOWER` spelling are TRUE and the `UPPER` spelling FALSE. | `SELECT '<U+0131>' ILIKE 'i', LOWER('<U+0131>') LIKE LOWER('i'), UPPER('<U+0131>') LIKE UPPER('i')`: true, false, true; the same over U+0130: true, true, false (the CLI at `49b1760`) | Held for the user: a `SyntaxEquivalence.Known` (`IlikeOverUnpairedCase`) with `onlyWhere`, so the ILIKE shape is excused over such a letter only, and `theIlikeDisagreementIsKnownOnlyOverAnUnpairedLetter` holds it to its own values; README and gotchas.md state the residue. A rule to choose: `ILIKE` as `LOWER(s) LIKE LOWER(p)` (Postgres's), as `UPPER(s) LIKE UPPER(p)`, or the fold kept and stated. |
+
+No other engine finding came up. The generators' own gaps the guards found
+on the way: W3's `everyCatalogFunctionIsDrawn` found `QueryGen` never drew
+`TRUNC` and `MetaQueryGen` never drew `NULLIF` or the rounding functions;
+W7's `AggDecomposition` met a global aggregate's failure on its data thrown
+while its query was planned, which the oracles caught only around the drain
+(now `RelEngine.answer`, gotchas.md).
+
+## Outcome
+
+Landed overnight on `testing-round-3`, 2026-11-02, one commit per workstream
+and one for decision 2, in the plan's order: W1 `3c8ee89`, decision 2
+`394b70e`, W2 `96ca67f`, W3 `2ba017f`, W4 `7606c78`, W5 `8065a8d`, W6
+`50e67c3`, W7 `49b1760`. At each, `bazel test //...` passed (74 targets) and
+the jaffle-shop job gave 15/15 Succeeded with every validation passing (JDK
+21). Every gate of the table is open but G7, kept closed by its reason
+(gotchas.md, "What's intentionally NOT done"), and G16, plan 06's.
+
+**Decisions**, both taken overnight as recommended, not yet confirmed by the
+user: D1 (a), every layout agrees on whether a query fails on its data and on
+its answer, but where a WHERE or ON condition that can fail is there to move
+(`QueryGen.mayFail`, `movableFailure`), TLP checking nothing when the base
+fails; D2 (a), simple case mapping.
+
+**Guards**, measured at `49b1760` (each bound ~3x below; blocks grew where W7
+thinned them, no bound lowered):
+
+| Gate | Guard | Measured |
+|---|---|---|
+| G2, G11 keys (W1) | `tlpPartitionsFloatColumnsHoldingNaNAndNegativeZero`, `floatAndBooleanKeysJoinAndGroupOverNaNAndBothZeros` | 5000 seeds: a float TLP partition 1243, NaN 102, -0.0 56, a special constant 276; 6000 seeds: a float join key 952, NaN both sides 312, -0.0 beside 0.0 404, a boolean key 432, a float GROUP BY key 353 holding NaN 76 and both zeros 50 |
+| G3, G14 IN (W1) | `trimReachesValuesWithSpacesAtAnEnd`, `floatInListsReachNaNAndNegativeZero` | TRIM 709 of 14000, over a spaced value 120; IN over a float 327 of 9000, NaN 117, -0.0 100 |
+| G1 (W2) | three `textReachesEveryStringSite` | thinnest cell: mode-differential 32 of 130000 (floor 9), metamorphic 23 of 150000 (floor 7), frontend 39 of 140000 (floor 12) |
+| G9, G10 (W3) | three `everyCatalogFunctionIsDrawn`, `domainNullsReachATlpPartitionAndAGroupByKey` | rarest function: `PI` 81 of 57000, `E` 66 of 40000, `LN` 30 of 46000; 20000 seeds: a TLP partition over a math function 500, over a domain NULL 157, a GROUP BY key 1010 and 315 |
+| G11-G13 (W4) | `joinsReachJoinOrderAndThePairingPath`, `windowsReachEveryFrameKind`, `ctesReadCtesAndUnionArmsTakeAnyCore` | 3000 seeds: a comma list 534, `CROSS JOIN` 252, four tables or more 171, a run `JoinOrder` reorders 178, the pairing path 444; 12000 seeds: RANGE offsets 112 (95 layout-invariant), ROWS 106, LAG/LEAD with a default 115; 4000 seeds: a CTE over a CTE 498, a UNION arm with a join 373, an aggregate 219, a window 66 |
+| G14 (W5) | `everyTypeOfTheCatalogMeetsItsValues` | thinnest, DISTINCT over a DOUBLE holding NaN and -0.0, 95 of 40000 |
+| G15 (W6) | `negationsAndNotsOverCompoundsAreDrawnAndBind` | a negation of a computed value 221 of 7000, a NOT over AND or OR 181, none refused as text |
+| G4-G6 (W7) | `dataFailuresReachAJoinAWindowAnAggregateAndSpill` | 15000 seeds, 4854 at the edges, 556 failing: an integer overflow in a join 155, a window 42, an aggregate 140, a spill 69; a decimal past its precision 100, 29, 72, 56; a date past a TIMESTAMP's range 105, 29, 81, 33 |
+| G8 (W7) | `failingCastsAreDrawnAndFail`, `failingCastsReachAnInAComparisonAndAnAggregate` | 40000 expression seeds: text drawn 3331, failing 2729; a float to an integer 984 and 204; to a DECIMAL 218 and 38; a DATE to a TIMESTAMP 468 and 73. 4000 query seeds: under an IN 373 and 135, in a comparison 134 and 49, in an aggregate 497 and 205 |
+
+Grown blocks: before W7, `nullScalesAndPositionsReachTheirFunctions` to
+8000, the mode-differential predicate and site tallies to 15000, the
+metamorphic type tally to 30000 and its OFFSET and NULL-placement guards to
+3000; at W7 twelve more (eight mode-differential, the metamorphic text tally,
+three expression-parity), each comment naming the count that thinned.
+
+**Bind rejections at 20000 seeds**: after W6 the mode-differential corpus
+refused 115 queries and after W7 141 (0.71%), every one a branch list mixing
+a DECIMAL and a DOUBLE, the corpus's known refusal; the metamorphic corpus
+refused 6 of 40000 probes, the same; after W5 the frontend refused no
+spelling and no honoured clause. W7's first draft cast literals, which the
+binder folds and fails at bind time (3.7% refused); the text a CAST reads is
+a column's since.
+
+**Detection proofs**, each a defect put back in `src/main`, the new corpus
+failing and the corpus before passing (reset with `git checkout HEAD --`,
+then restored):
+
+- W1, `Ops.floatCompare` made IEEE's: `fuzzTlp` fails at seed 36 on a NaN
+  group key; 2000 seeds of the corpus before pass.
+- W2, the split itself: with Java's full case mapping put back,
+  `fuzzSyntaxEquivalence` fails at seed 1488 (`LENGTH(LOWER(s))` 2 over
+  U+0130); 6000 seeds before pass.
+- W3, `SQRT` of a negative NaN again: `fuzzCatalogNulls` fails at seed 59
+  (`SELECT SQRT(c0)` over -1); 5000 seeds before pass, and the layout, TLP
+  and round-trip properties pass too.
+- W4, `JoinOrder` re-indexing the third table off by one: `fuzzTlp` fails at
+  seed 12 and `fuzzJoinCommutativity` at seed 1, on a comma list whose second
+  table has no equality with the first; 2000 seeds before pass.
+- W7, `IntegerAvgState.merge` adding the low words alone, AVG's sum merge
+  path: over 4000 seeds `fuzzModeDifferential` fails at seed 2261 (`AVG` of
+  two smallest BIGINTs over four partitions) and `fuzzModeAgreement` at seed
+  1521; 4000 seeds of the corpus before pass, `fuzzExactIntegerSums` among
+  them, which pins `LongSumState`'s merge and not AVG's.
+
+**Campaigns**, after W7, one block per target from seed 900000, three JVMs
+at `-Xmx1200m` from the launchers with bazel shut down, each filtered to its
+properties: `mode_differential` 2500 seeds (185 s), `metamorphic` 2500 (85
+s), `sharded_mode` 2500 (91 s), `plan_roundtrip` 2500 (54 s), `frontend`
+2500 (17 s), `expr_parity` 50000 (32 s). All green.
+
+**Calls made overnight**, beyond the two decisions:
+
+- **The edges are a dataset's, not a column's.** 40% of datasets and
+  environments are at the edges, 70% of their columns of a type with edges
+  drawing them, from a stream split after the others, so every other dataset
+  is the one it was; a column at the edges alone was rarely read by a call
+  that fails there (15 failing cases in 6000).
+- **Where a failure is raised is read off its stack.** The W7 guard counts
+  the operator a frame of the failing exception's stack names (a join, a
+  window, an aggregate, a spill method), since a failure in a projection over
+  a join's output is raised with no join on the stack.
+- **The proof's mutant is AVG's merge**, not SUM's: `ExactIntegers` already
+  holds `LongSumState` to the exact sum in every layout, so the corpus before
+  catches a SUM merge mutant too.
+- **Text to INT stays the guarded shapes'.** `ExprGen` draws text read as
+  every other type, so a failure of a CAST of text to INT still means a guard
+  did not keep its rows off (`ExprParity.owned`).
+- **The agreed corpus was not regenerated**: AgreedGen draws from the widened
+  generators the next time it is, and its doc says what it will meet.

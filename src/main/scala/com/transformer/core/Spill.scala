@@ -17,17 +17,21 @@ import scala.jdk.CollectionConverters._
   *   - Every JVM spills into a directory of its own under [[baseDir]],
   *     [[rootDir]], and registers a shutdown hook on first use that deletes
   *     it and nothing else, so JVMs that spill at once leave each other's
-  *     files alone. Process crashes leave stale dirs behind; the next JVM to
-  *     spill deletes those of JVMs no longer running ([[cleanupStaleRoots]]).
-  *   - Each `OperatorSpillDir` deletes its own subtree on `close()` and re-
-  *     registers a cleanup on shutdown.
+  *     files alone (under `--config=leaks` the audit deletes it at exit,
+  *     after it has looked for what was left there, [[LeakAudit]]). Process
+  *     crashes leave stale dirs behind; the next JVM to spill deletes those
+  *     of JVMs no longer running ([[cleanupStaleRoots]]).
+  *   - Each `OperatorSpillDir` deletes its own subtree on `close()`, which
+  *     its operator calls once nothing reads it: when its output is drained or
+  *     closed, or the operator fails ([[Closing]]).
   *
   * Defaults:
   *   - Base dir: `${java.io.tmpdir}/transformer-spill`, overridable via the
-  *     `transformer.spill.dir` system property. The dir is a filesystem
-  *     location, not a behavior toggle — this is the one and only global
-  *     knob spill code reads from system properties. Nothing outside it is
-  *     ever deleted.
+  *     `transformer.spill.dir` system property, read once per JVM. The dir
+  *     is a filesystem location, not a behavior toggle — this is the one and
+  *     only global knob spill code reads from system properties. Nothing
+  *     outside it is ever deleted. A test target's is its own: Bazel sets
+  *     `java.io.tmpdir` to the target's `TEST_TMPDIR`.
   *
   * NOT in scope here: spill thresholds, on-disk encoding, AggState
   * serialization. Those belong in `AggStateSerde` and in the per-operator
@@ -35,21 +39,15 @@ import scala.jdk.CollectionConverters._
   */
 object Spill {
 
-  /** System property holding the override for [[baseDir]]. Defaults to
-    * `${java.io.tmpdir}/transformer-spill`. */
-  val SpillDirProperty: String = "transformer.spill.dir"
-
   /** The name of a JVM's or an operator's spill directory, its pid captured
     * ([[cleanupStaleRoots]]); declared before [[rootDir]], whose first use
     * reads it. */
   private val StaleName = """^[A-Za-z0-9_]+-(\d{1,19})-[0-9a-f]+(?:-[0-9a-f]+)?$""".r
 
-  /** The directory every JVM's spill directory is made in. */
-  lazy val baseDir: Path = {
-    val configured = Option(System.getProperty(SpillDirProperty)).map(_.trim).filter(_.nonEmpty)
-    val tmp = configured.getOrElse(System.getProperty("java.io.tmpdir") + "/transformer-spill")
-    Paths.get(tmp).toAbsolutePath.normalize()
-  }
+  /** The directory every JVM's spill directory is made in,
+    * [[Settings.SpillDir]] (`transformer.spill.dir`), by default
+    * `<java.io.tmpdir>/transformer-spill`. */
+  lazy val baseDir: Path = Paths.get(Settings.SpillDir.get).toAbsolutePath.normalize()
 
   /** This JVM's spill directory, `jvm-<pid>-<suffix>` under [[baseDir]],
     * holding every per-operator subdirectory. Lazy so tests that don't touch
@@ -65,11 +63,39 @@ object Spill {
     val suffix = java.lang.Long.toHexString(System.nanoTime() & 0xFFFFFFFFL)
     val p = base.resolve(s"jvm-$pid-$suffix")
     Files.createDirectories(p)
-    Runtime.getRuntime.addShutdownHook(new Thread(new Runnable {
+    // Under the audit its exit hook deletes the directory, once it has looked
+    // for what was left in it: two hooks run at once.
+    if (!LeakAudit.enabled) Runtime.getRuntime.addShutdownHook(new Thread(new Runnable {
       def run(): Unit = try deleteRecursively(p) catch { case _: Throwable => () }
-    }, "transformer-spill-root-cleanup"))
+    }, CleanupThreadName))
     cleanupStaleRoots(base, p.getFileName.toString)
+    made = p
     p
+  }
+
+  /** The name of the shutdown hook that deletes [[rootDir]]. */
+  val CleanupThreadName: String = "transformer-spill-root-cleanup"
+
+  /** [[rootDir]], once something has made it. */
+  @volatile private var made: Path = null
+
+  /** The operator directories in this JVM's spill directory now: none once
+    * every operator that spilled has closed its own, so a test's `@After`
+    * holds a test to leaving none. Nothing when no operator has spilled. */
+  def operatorDirsLeft: Seq[Path] = {
+    val root = made
+    if (root == null || !Files.isDirectory(root)) Nil
+    else {
+      val s = Files.list(root)
+      try s.iterator().asScala.toVector.sortBy(_.toString) finally s.close()
+    }
+  }
+
+  /** Delete this JVM's spill directory: the audit's exit hook, in place of
+    * the one [[rootDir]] registers without it. */
+  private[core] def deleteRootAtExit(): Unit = {
+    val root = made
+    if (root != null) try deleteRecursively(root) catch { case _: Throwable => () }
   }
 
   private val operatorCounter = new AtomicLong(0L)
@@ -81,13 +107,16 @@ object Spill {
     * something short like `"sort"` or `"agg"`. The full path looks like
     * `${rootDir}/agg-1234-7-abcdef/`. */
   def openOperatorDir(operatorTag: String): OperatorSpillDir = {
+    Chaos.at(Chaos.SpillDir)
     val id = operatorCounter.incrementAndGet()
     val pid = ProcessHandle.current().pid()
     val suffix = java.lang.Long.toHexString(System.nanoTime() & 0xFFFFFFFFL)
     val name = s"${sanitize(operatorTag)}-$pid-$id-$suffix"
     val dir = rootDir.resolve(name)
     Files.createDirectories(dir)
-    new OperatorSpillDir(dir)
+    val opened = new OperatorSpillDir(dir)
+    LeakAudit.opened(opened, s"the spill directory '$dir'")
+    opened
   }
 
   /** Approximate the heap cost of one [[ColumnarBatch]] in bytes. Used by
@@ -232,7 +261,7 @@ object Spill {
 
 /** One operator's allocated subdirectory. Use [[newSpillFile]] to mint
   * unique paths for each spill run; call [[close]] to wipe the subtree when
-  * the operator finishes. */
+  * the operator finishes, or fails, or its output is closed ([[Closing]]). */
 final class OperatorSpillDir private[core] (val dir: java.nio.file.Path) extends AutoCloseable {
   private val fileCounter = new AtomicLong(0L)
   @volatile private var closed: Boolean = false
@@ -249,18 +278,25 @@ final class OperatorSpillDir private[core] (val dir: java.nio.file.Path) extends
     if (closed) return
     closed = true
     try Spill.deleteRecursively(dir) catch { case _: Throwable => () }
+    LeakAudit.closed(this)
   }
 
-  /** Wrap `inner` so this directory is wiped when the consumer drains the
-    * iterator. The [[Spill]] shutdown hook covers the abandoned-iterator
-    * case. Shared by every spill-capable operator's emit path. */
+  /** `inner`, which reads this directory's files, as an iterator that wipes
+    * the directory when it is drained or closed, whichever comes first, and
+    * closes `inner` too ([[Closing]]): the emit path of an operator that
+    * reads its spill files as it emits. */
   def closeOnDrain(inner: Iterator[ColumnarBatch]): Iterator[ColumnarBatch] =
-    new Iterator[ColumnarBatch] {
+    new Iterator[ColumnarBatch] with AutoCloseable {
       def hasNext: Boolean = {
-        val h = inner.hasNext
-        if (!h) close()
+        val h = !closed && inner.hasNext
+        if (!h) shut()
         h
       }
       def next(): ColumnarBatch = inner.next()
+      def close(): Unit = shut()
+      private def shut(): Unit = {
+        Closing.close(inner)
+        OperatorSpillDir.this.close()
+      }
     }
 }

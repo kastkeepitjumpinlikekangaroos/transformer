@@ -1,0 +1,18 @@
+{
+ "description": "Pipe delimiter is guessed correctly when first field are enclosed in quotes and contain delimiter characters",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "Field1,1,1",
+   "Field2",
+   "Field3",
+   "Field4",
+   "Field5",
+   "Field6"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

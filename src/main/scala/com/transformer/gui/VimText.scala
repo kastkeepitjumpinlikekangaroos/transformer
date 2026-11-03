@@ -492,7 +492,7 @@ private[gui] object VimText {
           case '<' | '>' => sb.append("\\b")
           case 'c' => ignoreCase = true
           case 'C' => ignoreCase = false
-          case 's' | 'S' | 'd' | 'D' | 'w' | 'W' | 'n' | 't' | 'r' => sb.append('\\').append(d)
+          case 's' | 'S' | 'd' | 'D' | 'w' | 'W' | 'n' | 't' | 'r' => sb.append('\\'); sb.append(d)
           case 'a' => sb.append("[A-Za-z]")
           case 'l' => sb.append("[a-z]")
           case 'u' => sb.append("[A-Z]")
@@ -502,7 +502,7 @@ private[gui] object VimText {
         i += 2
       } else {
         c match {
-          case '(' | ')' | '|' | '+' | '?' | '{' => sb.append('\\').append(c)
+          case '(' | ')' | '|' | '+' | '?' | '{' => sb.append('\\'); sb.append(c)
           case '}' =>
             if (inBrace) { sb.append('}'); inBrace = false }
             else sb.append("\\}")

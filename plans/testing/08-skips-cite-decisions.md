@@ -1,6 +1,8 @@
 # Plan 08: every skip names its decision, and a stale skip fails
 
-> Status: **not started** · from the 2026-11-01 test survey, category 8 of 9 ·
+> Status: **done** 2026-11-02 (8f51068 W1, 333fcda W4, c05ecaf W2, 140ebbb W3;
+> see [Outcome](#outcome); every open decision taken overnight as recommended,
+> not yet confirmed by the user) · from the 2026-11-01 test survey, category 8 of 9 ·
 > Effort: 1-2 days · Risk: low (test code, the scripts and the docs; no engine
 > change) · Depends on: nothing. Lands before plans 10-14, so the skips their
 > ports add cite a decision from their first record.
@@ -153,6 +155,8 @@ which say the particular case.
      to parse, but two places to keep in step.
    - (c) A Scala object in the slt package: compile-checked, and the docs still
      need their own copy.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 2. **What the engine's own answer at a value skip is held to.**
    - (a) **(recommended)** Each of the 58 value skips (and every one a later
      port adds) is followed by an `onlyif transformer <id>` record with the
@@ -163,11 +167,15 @@ which say the particular case.
      and a regression at one spot shows only if a pin covers it.
    Refusal skips need no twin; W3 checks the refusal and `refused/messages.test`
    its words.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 3. **What a stale skip does.**
    - (a) **(recommended)** Fails `slt_test`, as the known-defect lists fail
      `FrontendFuzzTest`.
    - (b) Is reported by `Corpus` only. Cheaper to live with, and the skip can
      outlive its reason indefinitely.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 
 ## Decisions already made
 
@@ -244,3 +252,131 @@ by id, the stale skips the first run found (each one is news: say what
 changed), the proof-of-detection result, and slt_test's time before and
 after.
 ```
+
+## Outcome
+
+Landed overnight on `testing-round-3`, 2026-11-02, a commit per workstream in
+the order each could be green: W1, then W4 (the rewrite, which the old parser
+read as it read any skip), then W2 and W3. At each, `bazel test //...` passed
+(67, 67, 68 and 68 targets) and the jaffle-shop job gave 15/15 Succeeded with
+every validation passing.
+
+**W1**, `8f51068`: the ledger is the section "Answers that differ from other
+engines by design" in `docs/gotchas.md`, 19 rows with the columns `id | rule |
+refusal | stated in | decided in | pinned by`, read by `slt/Ledger.scala`
+(the root package exports the file to the slt package). The parse is strict
+and names the line it cannot read. A pin is a record after `onlyif
+transformer <id>` in a script of this repo's own: the subquery, `EXCEPT` and
+`INTERSECT` records of `refused/unsupported.test` gained their words, and new
+records pin the rest in `refused/messages.test`, `types/float_equality.test`,
+`types/integer_overflow.test`, `types/decimal.test`, `select/order_by.test`,
+`conditional/case.test` and a new `types/casts.test` (text to `BOOLEAN` and
+`DOUBLE`). README's DECIMAL limitation, which the `double-precision` row
+cites, said `ROUND`, `FLOOR`, `CEIL` and `TRUNC` compute in DOUBLE, stale
+since plans/robustness/19; it is fixed.
+
+**W4**, `333fcda`: the 446 skip lines cite ids; only those lines changed in the
+vendored records. The 388 in SQLite's slices dropped their comment, which was
+the refusal's message; the 58 in the Postgres ports kept theirs. Each value
+skip is followed by its twin, filled by `--complete` on a scratch copy (the
+vendored records came back byte for byte) and checked by hand against its
+rule; `EXP` and `VARIANCE` results compare as SQLite's `T`, since Java's
+`Math.exp` may differ by an ulp between platforms and a variance by its merge
+order.
+
+**W2**, `c05ecaf`: `Script.Condition` carries the rule; a condition on
+transformer with no id or an unknown one, a second one, an `onlyif` on
+another engine beside one, and a value skip with no twin of the same SQL are
+parse errors naming the line (and the nearest id, by edit distance, or for a
+missing id by the words its comment shares with a rule). `Skipped` carries
+the rule, and the corpus report tallies skips by rule. `ledger_test` checks
+the table and, through the parser, that each rule is cited or pinned, each
+pin is no twin, and a port (`LedgerTest.Ports`: `sqlite`, `postgres`) holds
+the engine's answers only in twins. `runner_test` holds the inline cases.
+
+**W3**, `140ebbb`: each skipped record runs once in the baseline; under a
+`refused-` rule it must be refused cleanly with the rule's text, under any
+other it must not pass (a statement error must run), and one that no longer
+diverges is `Stale` and fails its script, naming the comparison that passed.
+An internal error fails a skipped record too. The corpus binary counts stale
+skips and reports them in their own section.
+
+**The ledger's ids, with their skips:** `refused-subquery` 248,
+`refused-except-intersect` 114, `math-domain-null` 22,
+`refused-text-arithmetic` 15, `bool-text` 12, `refused-empty-in` 8,
+`cast-truncates` 5, `div-zero-null` 5, `double-range` 4, `double-text` 4,
+`double-literal` 2, `double-precision` 2, `refused-hex-literal` 2,
+`decimal-result-type` 1, `refused-parenthesized-join` 1, `window-constant-key`
+1, and `int-is-int`, `branch-double` and `nulls-sort-low` none yet (pinned
+only). By script: `sqlite/select1` refused-subquery 85, `sqlite/select4`
+refused-except-intersect 114, `sqlite/evidence/in1` refused-subquery 74 and
+refused-hex-literal 2, `sqlite/evidence/in2` refused-empty-in 8 and
+refused-subquery 1, `sqlite/index/between_10_0` 40, `commute_10_0` 20,
+`in_10_0` 15 and `view_10_1` 13 refused-subquery, `sqlite/index/random_10_0`
+refused-text-arithmetic 15, `sqlite/random/aggregates_0`
+refused-parenthesized-join 1; `postgres/numeric` math-domain-null 18,
+cast-truncates 3, div-zero-null 2, double-literal 2, double-precision 2,
+decimal-result-type 1, double-range 1; `postgres/float8` double-text 4,
+math-domain-null 4, double-range 3, cast-truncates 2, div-zero-null 2;
+`postgres/boolean` bool-text 12; `postgres/case` div-zero-null 1;
+`postgres/window` window-constant-key 1.
+
+**Stale skips on the first run: none.** Every refusal is still refused with
+its rule's text, and every value skip still diverges.
+
+**Proof of detection**, in the work tree after W3, reverted after: with
+`Ops.parseBoolean` reading Postgres's spellings (`t`, `y`, `yes`, `on`, `1`,
+`f`, `n`, `no`, `off`, `of`, `0`, no spaces), `slt_test` failed
+`postgres/boolean.test` with ten stale `bool-text` skips ("line 58: skipped as
+bool-text, but the engine now gives the record's answer, compared as BOOLEAN;
+remove the skip") and their ten twins, the two skips with spaces still
+skipped, and `types/casts.test`, whose pin expects `CAST('t' AS BOOLEAN)` to
+fail. At the base nothing would have seen it: the runner recorded a skipped
+record without running it (`Runner.scala:44` there), and `casts.test` did not
+exist; this was read in the code, not run.
+
+**Time:** `slt_test` took 27.5 s (shards 21.5 to 26.9 s) before and 26.9 s
+(21.8 to 26.4 s) after; 446 baseline runs, most of them refusals at bind
+time, cost nothing measurable.
+
+**Findings.**
+
+- Every skip cites a rule some record covers, so no skip waits for a
+  decision. But the research behind `decided in` found which rules the user
+  did not choose, and the column says so: Claude's calls, reported to the
+  user, are `double-text` (plans/robustness/24), `window-constant-key`
+  (plans/robustness/23) and the part of `math-domain-null` past square roots
+  and logarithms (`POWER`, `ASIN`, `ACOS`, the trigonometric functions,
+  28a51a5); the engine's reading since v1, never asked, is behind the four
+  constructs it never implemented (subqueries and `EXCEPT` / `INTERSECT`,
+  "deliberately NOT planned"; the hexadecimal literal and the parenthesized
+  join, outside the grammar), `nulls-sort-low` (kept by plans/robustness/01),
+  `double-precision` (left by plans/robustness/19), the base of
+  `double-literal` and the `INT` literal of `int-is-int`. Each is documented
+  as intended in README or gotchas.md; the user may want to confirm them.
+- `refused-hex-literal` and `refused-parenthesized-join` are stated in no
+  README or gotchas sentence of their own, only through gotchas' "No SQL
+  beyond the README's grammar" and `UnsupportedClauses.scala`, which the ledger
+  cites.
+- A runner defect, found by reading: a condition followed by a comment line
+  was dropped, and its record ran unconditioned; only a condition at the end
+  of the file was refused. It is a parse error now (no script had one).
+
+**Claude's calls within the decisions** (revisit if the user objects):
+
+- A pin is marked like a twin, `onlyif transformer <id>`, in a script of this
+  repo's own; `pinned by` names the script, and `ledger_test` finds the record.
+- An id names its kind: only a `refused-` rule is checked as a refusal.
+  `window-constant-key` keeps the plan's id, so its one skip is a value skip
+  whose twin pins the refusal's words.
+- Where a skip's comment named two rules, it cites the one the plan's table
+  counted it under: `-9223372036854775808.5` cast to BIGINT under
+  `cast-truncates`, `exp(32.999)` under `double-literal`, `exp(123.456)` under
+  `double-precision`, `exp(1234.5678)` under `double-range`, case.sql's `1/0`
+  under `div-zero-null`.
+- The ledger tests are two targets: `ledger_test` (the table, and the table
+  against the scripts) and `runner_test` (inline scripts).
+- Stricter than the plan asked: a halt or hash-threshold takes no condition on
+  transformer, a skipped record that is no query fails (running it could
+  change a table), and an internal error under a skip fails.
+

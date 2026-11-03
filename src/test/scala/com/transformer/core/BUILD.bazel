@@ -1,5 +1,19 @@
 load("@rules_scala//scala:scala.bzl", "scala_junit_test")
 
+# Settings: each setting read from its property, else its environment twin,
+# the property winning; each value parsed or its default; and README's
+# Settings table listing every one, with its twin and its default.
+scala_junit_test(
+    name = "settings_test",
+    srcs = ["SettingsTest.scala"],
+    data = ["//:README.md"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)
+
 scala_junit_test(
     name = "core_types_test",
     srcs = ["CoreTypesTest.scala"],
@@ -34,6 +48,19 @@ scala_junit_test(
     name = "spill_test",
     srcs = ["SpillTest.scala"],
     suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)
+
+# --config=chaos's points: the seed read once, a third each of nothing, a
+# yield and a sleep of 0 to 2 ms, and each thread's last points kept (Chaos).
+scala_junit_test(
+    name = "chaos_test",
+    srcs = ["ChaosTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = ["-Dtransformer.chaos=42"],
     deps = [
         "//src/main/scala/com/transformer/core",
         "@maven//:junit_junit",

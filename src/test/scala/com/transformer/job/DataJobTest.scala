@@ -1,6 +1,6 @@
 package com.transformer.job
 
-import com.transformer.core.{Catalog, CatalogView, DataType, ExecutedQuery, ExecutionOptions, MaterializedView, SqlExecutor, SqlExecutorRegistry}
+import com.transformer.core.{Catalog, CatalogView, DataType, ExecutedQuery, ExecutionOptions, Faults, MaterializedView, Settings, SqlExecutor, SqlExecutorRegistry}
 import com.transformer.core.metrics.TaskMetricsRecord
 import com.transformer.temporal.TemporalVariables
 import org.junit.Assert._
@@ -20,8 +20,6 @@ class DataJobTest {
     Files.writeString(p, contents)
     p
   }
-
-  private def readCsv(p: Path): String = Files.readString(p)
 
   /** Convenience constructor for the new schema-rich [[TaskRunRecord]] —
     * tests usually only care about a few fields, so this fills in defaults
@@ -44,7 +42,7 @@ class DataJobTest {
     errorMessage = errorMessage,
     executionTime = executionTime,
     startedAt = writtenAt,
-    finishedAt = writtenAt,
+    finishedAt = Some(writtenAt),
     writtenAt = writtenAt,
     rowsProduced = rowsProduced,
     format = format,
@@ -112,6 +110,51 @@ class DataJobTest {
     assertTrue(Files.isDirectory(outDir))
     val out = Files.readString(soleOutputFile(outDir))
     assertEquals("user_id,total\n2,49\n1,17\n", normalizeOrder(out))
+  }
+
+  /** A record promises part files on disk only when its status wrote output
+    * and it names some: a failed run names none it promises, nor a success
+    * that wrote nothing. */
+  @Test def aRecordExpectsDataFilesOnlyWhenItsStatusWroteThem(): Unit = {
+    def record(status: TaskRunStatus, files: Seq[String]) = TaskRunRecord(
+      TaskRunRecord.SchemaVersion, "t", status, None, Instant.EPOCH, Instant.EPOCH, None, Instant.EPOCH, 0L, "csv",
+      files, Nil)
+    assertTrue(record(TaskRunStatus.Succeeded, Seq("part-00000.csv")).expectsDataFiles)
+    assertTrue(record(TaskRunStatus.ValidationFailed, Seq("part-00000.csv")).expectsDataFiles)
+    assertFalse(record(TaskRunStatus.Succeeded, Nil).expectsDataFiles)
+    assertFalse(record(TaskRunStatus.Failed, Seq("part-00000.csv")).expectsDataFiles)
+  }
+
+  /** A run's `_run.json` carries the record format's version, 1, as README's
+    * example shows: what a reader of another release checks. */
+  @Test def aRunRecordSaysItsFormatIsVersionOne(): Unit = {
+    val inDir = tmpDir("dj-in-")
+    writeCsv(inDir, "t.csv", "a\n1\n")
+    val outDir = tmpDir("dj-out-").resolve("out")
+    val result = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(sqlString = Some("SELECT a FROM t"), outputFile = Some(OutputFilePath(outDir.toString))))
+    ).run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+    val json = Files.readString(outDir.resolve(TaskRunRecord.FileName))
+    assertTrue(json, json.contains("\"schemaVersion\": 1,"))
+  }
+
+  /** A cloud output path fails its task as it runs, naming the path: v1
+    * writes no cloud output, nor a local directory in its place. */
+  @Test def aCloudOutputPathFailsItsTask(): Unit = {
+    val inDir = tmpDir("dj-in-")
+    writeCsv(inDir, "t.csv", "a\n1\n")
+    val result = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(sqlString = Some("SELECT a FROM t"), outputFile = Some(OutputFilePath("gs://bucket/out"))))
+    ).run()
+    assertFalse(result.succeeded)
+    result.tasks.head.status match {
+      case TaskStatus.Failed(reason) =>
+        assertTrue(reason, reason.contains("Cloud output paths not yet implemented (v1.1). Got: 'gs://bucket/out'"))
+      case other => fail(s"expected a failed task, got $other")
+    }
   }
 
   /** CSV output for GROUP BY is in hash-map insertion order, which isn't stable
@@ -672,6 +715,10 @@ class DataJobTest {
     val parts = Files.list(outDir).iterator().asScala.toVector
       .filter(_.getFileName.toString.startsWith("part-"))
     assertEquals(s"expected 2 part files, got ${parts.size}", 2, parts.size)
+    // Contiguous chunks of the four source partitions, two in each part.
+    val rowsByPart = parts.sortBy(_.getFileName.toString)
+      .map(p => Files.readString(p).split('\n').toVector.drop(1).filter(_.nonEmpty).sorted)
+    assertEquals(Vector(Vector("1", "2"), Vector("3", "4")), rowsByPart)
   }
 
   @Test def maxPartitionsAboveSourceCountIsNoOp(): Unit = {
@@ -917,7 +964,7 @@ class DataJobTest {
   /** A task with no outputFile (drain-and-discard) runs with default opts —
     * there is no `output.json` to read spill config from. */
   @Test def runOneTaskWithoutOutputFileUsesDefaultExecutionOptions(): Unit = {
-    assumeTrue("requires spill not forced on every task", !DataJob.forceSpillFromSysprop)
+    assumeTrue("requires spill not forced on every task", !DataJob.forceSpill)
     val inDir = tmpDir("dj-opts-noout-")
     writeCsv(inDir, "a.csv", "x\n1\n")
     val seen = new java.util.concurrent.atomic.AtomicReference[ExecutionOptions](null)
@@ -1362,7 +1409,378 @@ class DataJobTest {
     assertEquals("n\n0", count(empty))
   }
 
-  @Test def clearIfMarkedDeletesTopLevelFilesAndRecord(): Unit = {
+  // ---- a failed run leaves no partial output (plans/testing/06) -------------
+  //
+  // A task that failed after its first part was committed (a later partition,
+  // a validation, its record's write, the process) left part files and no
+  // _run.json, and the next run refused the directory as holding part files
+  // no record names until someone deleted them. Each case below runs, then
+  // reruns with the cause fixed: the rerun must succeed with a clean run's
+  // rows, and the failed run must leave no part file.
+
+  /** Every file in `dir`, hidden ones too, by name. */
+  private def filesIn(dir: Path): Seq[String] = {
+    val stream = Files.list(dir)
+    try stream.iterator().asScala.map(_.getFileName.toString).toVector.sorted finally stream.close()
+  }
+
+  /** A job reading every CSV in `in` as `src` into one task, `t`, written to
+    * `out`, with `validations`. */
+  private def oneTaskJob(in: Path, out: Path, sql: String, validations: Seq[Validation] = Nil): DataJob = DataJob(
+    inputs = Seq(InputFilePath(in.toString + "/*.csv", viewName = "src")),
+    sql = Seq(SQLTask(name = Some("t"), viewName = Some("t"), sqlString = Some(sql),
+      outputFile = Some(OutputFilePath(out.toString)), validations = validations)))
+
+  /** `job` run with `executor`, the engine unless given. */
+  private def runWith(job: DataJob, executor: SqlExecutor = null): JobResult = {
+    com.transformer.sql.exec.SqlEngine.init()
+    job.run(Option(executor).getOrElse(SqlExecutorRegistry.get), TaskProgressListener.NoOp)
+  }
+
+  /** The rows a clean run of `sql` over `in` writes, read back. */
+  private def cleanRows(in: Path, sql: String): String = {
+    val out = tmpDir("dj-clean-").resolve("t")
+    val result = runWith(oneTaskJob(in, out, sql))
+    assertTrue(result.tasks.map(_.status).toString, result.succeeded)
+    readOutputDir(out)
+  }
+
+  /** What a failed run must leave in a task's directory: its Failed record
+    * and nothing else, no part file and no staged one. */
+  private def assertOnlyAFailedRecord(out: Path): Unit = {
+    assertEquals(Seq(TaskRunRecord.FileName), filesIn(out))
+    assertEquals(Some(TaskRunStatus.Failed), TaskRunRecord.read(out).map(_.status))
+  }
+
+  /** The rerun with the cause fixed succeeds with a clean run's rows, and its
+    * directory holds its record and the parts it names. */
+  private def assertRerunIsClean(job: DataJob, out: Path, clean: String): Unit = {
+    val rerun = runWith(job)
+    assertTrue(rerun.tasks.map(_.status).toString, rerun.succeeded)
+    assertEquals(clean, readOutputDir(out))
+    val record = TaskRunRecord.read(out).get
+    assertEquals(TaskRunStatus.Succeeded, record.status)
+    assertEquals((TaskRunRecord.FileName +: record.outputFiles).sorted, filesIn(out))
+  }
+
+  private def failure(result: JobResult): String = result.tasks.head.status match {
+    case TaskStatus.Failed(msg) => msg
+    case other => fail(s"expected the task to fail, got $other").asInstanceOf[String]
+  }
+
+  /** A later partition fails: a glob of `a.csv` and `b.csv`, whose last value
+    * doubled is past INT. `a.csv`'s part was committed when its partition
+    * ended and stayed, with no record. */
+  @Test def aTaskThatFailsWhileWritingLeavesNoPartFile(): Unit = {
+    val in = tmpDir("dj-fww-in-")
+    writeCsv(in, "a.csv", "x\n" + (1 to 10).map(i => s"$i\n").mkString)
+    writeCsv(in, "b.csv", "x\n1\n2\n2000000000\n")
+    val sql = "SELECT x * 2 AS y FROM src"
+    val out = tmpDir("dj-fww-out-").resolve("doubled")
+    val failed = runWith(oneTaskJob(in, out, sql))
+    assertTrue(failure(failed), failure(failed).contains("Integer overflow"))
+    assertOnlyAFailedRecord(out)
+
+    writeCsv(in, "b.csv", "x\n1\n2\n7\n")
+    assertRerunIsClean(oneTaskJob(in, out, sql), out, cleanRows(in, sql))
+  }
+
+  /** A validation whose SQL fails at run time, after the one part is
+    * written: the part stayed, with no record. */
+  @Test def aTaskWhoseValidationFailsToRunLeavesNoPartFile(): Unit = {
+    val in = tmpDir("dj-fiv-in-")
+    writeCsv(in, "a.csv", "x\n1\n2000000000\n")
+    val sql = "SELECT x FROM src"
+    val checks = Seq(Validation("no_negative_doubles", sqlString = Some("SELECT x FROM t WHERE x * 2 < 0")))
+    val out = tmpDir("dj-fiv-out-").resolve("t")
+    val failed = runWith(oneTaskJob(in, out, sql, checks))
+    assertTrue(failure(failed), failure(failed).contains("Integer overflow"))
+    assertOnlyAFailedRecord(out)
+
+    writeCsv(in, "a.csv", "x\n1\n7\n")
+    assertRerunIsClean(oneTaskJob(in, out, sql, checks), out, cleanRows(in, sql))
+  }
+
+  /** The final record cannot be written: here a directory stands where its
+    * temp file goes, as a full disk would refuse it, made while the
+    * validation runs. The task reported Succeeded with every part on disk and
+    * no record. It fails now, naming the write, and leaves no part file. */
+  @Test def aTaskWhoseRecordCannotBeWrittenFailsAndLeavesNoPartFile(): Unit = {
+    val in = tmpDir("dj-frw-in-")
+    writeCsv(in, "a.csv", "x\n1\n2\n")
+    val sql = "SELECT x FROM src"
+    val check = "SELECT x FROM t WHERE x < 0"
+    val out = tmpDir("dj-frw-out-").resolve("t")
+    val blocker = out.resolve(TaskRunRecord.FileName + ".tmp")
+    val diskFills = new SqlExecutor {
+      def execute(q: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
+        if (q == check) Files.createDirectories(blocker)
+        SqlExecutorRegistry.get.execute(q, catalog, opts)
+      }
+    }
+    val job = oneTaskJob(in, out, sql, Seq(Validation("no_negatives", sqlString = Some(check))))
+    val failed = runWith(job, diskFills)
+    assertTrue(failure(failed), failure(failed).contains(out.resolve(TaskRunRecord.FileName).toString))
+    assertEquals(Nil, filesIn(out).filter(f => f.startsWith("part-") || f.startsWith(".")))
+
+    Files.delete(blocker)
+    assertRerunIsClean(job, out, cleanRows(in, sql))
+  }
+
+  /** The process dies after the parts are committed, before the record: the
+    * directory as it stood while the validation ran, copied, is what a kill
+    * then leaves. It held every part and no record. */
+  @Test def aRunKilledAfterItsPartsWereWrittenIsClearedByTheNextRun(): Unit = {
+    val in = tmpDir("dj-kill-in-")
+    writeCsv(in, "a.csv", "x\n1\n2\n")
+    writeCsv(in, "b.csv", "x\n3\n")
+    val sql = "SELECT x FROM src"
+    val check = "SELECT x FROM t WHERE x < 0"
+    val checks = Seq(Validation("no_negatives", sqlString = Some(check)))
+    val out = tmpDir("dj-kill-out-").resolve("t")
+    val reached = new java.util.concurrent.CountDownLatch(1)
+    val release = new java.util.concurrent.CountDownLatch(1)
+    val pauses = new SqlExecutor {
+      def execute(q: String, catalog: Catalog, opts: ExecutionOptions): ExecutedQuery = {
+        if (q == check) { reached.countDown(); release.await() }
+        SqlExecutorRegistry.get.execute(q, catalog, opts)
+      }
+    }
+    val runner = new Thread(() => { runWith(oneTaskJob(in, out, sql, checks), pauses); () })
+    runner.setDaemon(true)
+    runner.start()
+    assertTrue("the run never reached its validation", reached.await(60, java.util.concurrent.TimeUnit.SECONDS))
+    val killed = tmpDir("dj-kill-left-").resolve("t")
+    Files.createDirectories(killed)
+    filesIn(out).foreach(f => Files.copy(out.resolve(f), killed.resolve(f)))
+    release.countDown()
+    runner.join(60000)
+    assertTrue("the copy holds the run's parts", filesIn(killed).exists(_.startsWith("part-")))
+
+    assertRerunIsClean(oneTaskJob(in, killed, sql, checks), killed, cleanRows(in, sql))
+  }
+
+  // ---- fault points (plans/testing/06, W2) ------------------------------------
+  //
+  // Every place a run changes the disk is a fault point (core.Faults), which a
+  // test arms to fail that change: FaultJob's job reaches every point in one
+  // run over an earlier run's output. However a run stops — an exception at a
+  // point here, the JVM halting at one in a child — every directory must say
+  // what it holds, and the next run, with nothing armed, must give a clean
+  // run's statuses and rows and leave nothing of the stopped one.
+
+  private def kindOf(s: TaskStatus): String = s match {
+    case TaskStatus.Succeeded => "Succeeded"
+    case _: TaskStatus.Failed => "Failed"
+    case _: TaskStatus.ValidationFailed => "ValidationFailed"
+    case _: TaskStatus.Skipped => "Skipped"
+    case TaskStatus.Pending => "Pending"
+  }
+
+  private def statusOf(rec: TaskRunRecord): String = TaskRunStatus.toJson(rec.status)
+
+  /** Each of FaultJob's tasks' rows, as its record reads them back, sorted. */
+  private def rowsOf(out: Path): Map[String, Seq[String]] = FaultJob.statuses().map { case (name, _) =>
+    val dir = out.resolve(name)
+    name -> (TaskRunRecord.read(dir) match {
+      case Some(rec) if statusOf(rec) == "Succeeded" || statusOf(rec) == "ValidationFailed" =>
+        val view = TaskRunRecord.outputView(dir, rec)
+        (0 until view.numPartitions).flatMap { p =>
+          view.readPartition(p).flatMap { b =>
+            (0 until b.numRows).map(r => (0 until b.schema.length).map(c => String.valueOf(b.column(c).getBoxed(r))).mkString(","))
+          }
+        }.sorted
+      case _ => Nil
+    })
+  }.toMap
+
+  /** What every task directory must say after any run, finished or not: it
+    * is absent or holds a readable record; a Failed or Skipped one holds no
+    * part file and no staged one; a Succeeded or ValidationFailed one holds
+    * exactly the part files its record names, and no staged one. Under a
+    * Running record anything may be left: its run stopped, and the next run
+    * clears it. A halt as a run created the directory for its first record
+    * leaves it with no record, and nothing but that record's temp file. */
+  private def assertDirectoriesSayWhatTheyHold(out: Path, context: String): Unit =
+    FaultJob.statuses().foreach { case (name, _) =>
+      val dir = out.resolve(name)
+      if (Files.isDirectory(dir)) {
+        val files = filesIn(dir)
+        val parts = files.filter(_.startsWith("part-"))
+        val staged = files.filter(_.startsWith("."))
+        // A halt as a run created a fresh directory for its first record
+        // leaves no record, and nothing but the record's temp file.
+        val rec = TaskRunRecord.read(dir)
+        if (rec.isEmpty) assertTrue(s"$context: $dir holds ${files.mkString(", ")} and no readable record",
+          files.forall(_ == TaskRunRecord.FileName + ".tmp"))
+        rec.map(statusOf).getOrElse("") match {
+          case "Failed" | "Skipped" =>
+            assertEquals(s"$context: ${statusOf(rec.get)} $name holds", Nil, parts ++ staged)
+          case "Succeeded" | "ValidationFailed" =>
+            assertEquals(s"$context: ${statusOf(rec.get)} $name's part files", rec.get.outputFiles.sorted, parts)
+            assertEquals(s"$context: ${statusOf(rec.get)} $name's staged files", Nil, staged)
+          case _ => ()
+        }
+      }
+    }
+
+  /** The statuses a run stopped by a fault gives: a clean run's, but where
+    * the fault failed a task (its message is the fault's), that task Failed
+    * and the tasks after it Skipped. A fault in a write that does not fail
+    * its task (a sample, `_perf.json`, `job.json`, a Failed or Skipped
+    * record) fails none. */
+  private def assertStatusesAfterAFault(result: JobResult, broken: Boolean, context: String): Unit = {
+    val got = result.tasks.map(t => t.taskName -> kindOf(t.status))
+    val hit = result.tasks.collect {
+      case t @ TaskResult(_, TaskStatus.Failed(msg), _, _, _, _, _)
+          if msg.contains("Injected fault") || msg.contains("No space left on device") => t.taskName
+    }
+    assertTrue(s"$context: the fault failed ${hit.mkString(", ")}", hit.size <= 1)
+    val after = Map("t" -> Seq("d"))
+    val expected = FaultJob.statuses(broken).map { case (name, st) =>
+      if (hit.contains(name)) name -> "Failed"
+      else if (hit.exists(h => after.getOrElse(h, Nil).contains(name))) name -> "Skipped"
+      else name -> st
+    }
+    assertEquals(context, expected, got)
+  }
+
+  /** A run with nothing armed, over what a stopped run left: a clean run's
+    * statuses and rows, each directory holding its record, the parts it names,
+    * its samples and its metrics and nothing else, and `job.json` saying so. */
+  private def assertRerunMatchesACleanRun(in: Path, out: Path, broken: Boolean, clean: Map[String, Seq[String]],
+      context: String): Unit = {
+    val rerun = FaultJob.job(in, out, broken).run()
+    assertEquals(context, FaultJob.statuses(broken), rerun.tasks.map(t => t.taskName -> kindOf(t.status)))
+    assertEquals(context, clean, rowsOf(out))
+    FaultJob.statuses(broken).foreach { case (name, _) =>
+      val dir = out.resolve(name)
+      val rec = TaskRunRecord.read(dir).get
+      val metrics = if (name == "t" && !broken) Seq(TaskMetricsRecord.FileName) else Nil
+      val expected = (Seq(TaskRunRecord.FileName) ++ rec.outputFiles ++ rec.validations.flatMap(_.sampleFile) ++ metrics)
+      assertEquals(s"$context: $name holds", expected.sorted, filesIn(dir))
+    }
+    val manifest = JobRunRecord.read(out.resolve("job.json")).get
+    assertEquals(context, FaultJob.statuses(broken), manifest.tasks.map(t => t.taskName -> TaskRunStatus.toJson(t.status)))
+  }
+
+  /** The fault points FaultJob's job reaches, each armed at its first reach,
+    * as each case stops a run: over the job, and, `broken`, over the job
+    * where `t` fails before writing and `d` is skipped, each over the parts
+    * the earlier run left it, where a record written before the clear sat
+    * beside parts the clear had not reached yet. */
+  private def faultCases(action: Faults.Action): Seq[(Faults.Arming, Boolean)] =
+    Faults.Points.map(p => (Faults.Arming(p, 1, action), false)) ++
+      Seq(Faults.ClearDelete, Faults.RunningRecord, Faults.FailedRecord, Faults.SkippedRecord)
+        .map(p => (Faults.Arming(p, 1, action), true))
+
+  /** Each case after an earlier clean run into a fresh directory, so the
+    * clear has files to delete: `stop` runs the case's job armed, and the
+    * checks above follow. */
+  private def eachFaultCase(cases: Seq[(Faults.Arming, Boolean)])(stop: (Faults.Arming, Boolean, Path, Path) => Unit): Unit = {
+    val in = tmpDir("dj-faults-in-")
+    FaultJob.writeInputs(in)
+    val clean = Map(false -> tmpDir("dj-faults-clean-"), true -> tmpDir("dj-faults-clean-broken-")).map {
+      case (broken, out) =>
+        val result = FaultJob.job(in, out, broken).run()
+        assertEquals(FaultJob.statuses(broken), result.tasks.map(t => t.taskName -> kindOf(t.status)))
+        broken -> rowsOf(out)
+    }
+    cases.foreach { case (arming, broken) =>
+      val context = s"$arming${if (broken) " (broken)" else ""}"
+      val out = tmpDir("dj-fault-")
+      FaultJob.job(in, out).run()
+      stop(arming, broken, in, out)
+      assertDirectoriesSayWhatTheyHold(out, s"after a fault at $context")
+      assertRerunMatchesACleanRun(in, out, broken, clean(broken), s"the rerun after a fault at $context")
+    }
+  }
+
+  /** Every fault point, armed in this JVM to throw as a failed write does. */
+  @Test def everyFaultPointLeavesDirectoriesThatSayWhatTheyHold(): Unit =
+    eachFaultCase(faultCases(Faults.Action.Throw) :+ ((Faults.Arming(Faults.FinalRecord, 1, Faults.Action.Enospc), false))) {
+      (arming, broken, in, out) =>
+        Faults.arm(arming)
+        val (result, fired) = try (FaultJob.job(in, out, broken).run(), Faults.fired) finally Faults.disarm()
+        assertTrue(s"$arming was never reached", fired)
+        assertStatusesAfterAFault(result, broken, s"a fault at $arming")
+    }
+
+  /** A full disk at the final record fails the task, naming the write: the
+    * record is the commit, and a task without one did not finish. */
+  @Test def aFullDiskAtTheFinalRecordFailsTheTaskNamingTheWrite(): Unit = {
+    val in = tmpDir("dj-enospc-in-")
+    FaultJob.writeInputs(in)
+    val out = tmpDir("dj-enospc-out-")
+    Faults.arm(Faults.Arming(Faults.FinalRecord, 1, Faults.Action.Enospc))
+    val result = try FaultJob.job(in, out).run() finally Faults.disarm()
+    val failed = result.tasks.collect { case TaskResult(name, TaskStatus.Failed(msg), _, _, _, _, _) => name -> msg }
+      .filterNot(_._1 == "f")
+    assertEquals(failed.toString, 1, failed.size)
+    val (name, msg) = failed.head
+    assertEquals(s"Could not write ${out.resolve(name).resolve(TaskRunRecord.FileName)}, which records the run: " +
+      "No space left on device", msg)
+    assertEquals(Seq(TaskRunRecord.FileName), filesIn(out.resolve(name)))
+  }
+
+  /** Every fault point, armed in a child JVM to halt it there, as a kill or
+    * a power cut stops a run: no `finally` block runs. The child runs
+    * FaultJob's main with `-Dtransformer.fault`; this JVM then checks what it
+    * left and reruns the job. A halt at the second commit leaves a part
+    * renamed under the Running record. */
+  @Test(timeout = 600000) def aJvmHaltedAtEveryFaultPointLeavesWhatTheNextRunClears(): Unit = {
+    val javaBin = java.nio.file.Paths.get(System.getProperty("java.home"), "bin", "java").toString
+    val logs = tmpDir("dj-halt-logs-")
+    eachFaultCase(faultCases(Faults.Action.Halt) :+ ((Faults.Arming(Faults.Commit, 2, Faults.Action.Halt), false))) {
+      (arming, broken, in, out) =>
+        val log = logs.resolve(s"${arming.point}-${arming.nth}-$broken.log")
+        val child = new ProcessBuilder(javaBin, "-cp", System.getProperty("java.class.path"),
+          s"-D${Settings.Fault.property}=$arming", FaultJob.getClass.getName.stripSuffix("$"),
+          in.toString, out.toString, if (broken) "broken" else "clean")
+          .redirectErrorStream(true).redirectOutput(log.toFile).start()
+        assertTrue(s"$arming: the child JVM did not end", child.waitFor(120, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals(s"$arming: the child did not halt there:\n${Files.readString(log)}", Faults.HaltStatus, child.exitValue)
+    }
+  }
+
+  /** A `Running` record has no `finishedAt`, which every other status needs;
+    * an older reader takes a status it does not know for no record. */
+  @Test def aRunningRecordReadsBackWithoutFinishedAt(): Unit = {
+    val dir = tmpDir("dj-running-")
+    val t = Instant.parse("2026-11-01T00:00:00Z")
+    val running = TaskRunRecord(
+      schemaVersion = TaskRunRecord.SchemaVersion, taskName = "t", status = TaskRunStatus.Running,
+      errorMessage = None, executionTime = t, startedAt = t, finishedAt = None, writtenAt = t, rowsProduced = 0L,
+      format = "csv", outputFiles = Nil, validations = Nil, enqueuedAt = Some(t), options = Map("delimiter" -> "|"),
+      sql = Some("SELECT 1"))
+    TaskRunRecord.write(dir, running)
+    assertFalse(Files.readString(dir.resolve(TaskRunRecord.FileName)).contains("finishedAt"))
+    assertEquals(Some(running), TaskRunRecord.read(dir))
+    try { TaskRunRecord.outputView(dir, running); fail("read an unfinished output") }
+    catch { case e: IllegalArgumentException => assertTrue(e.getMessage, e.getMessage.contains("unfinished")) }
+    // Any other status without one is no record.
+    val text = Files.readString(dir.resolve(TaskRunRecord.FileName))
+    Files.writeString(dir.resolve(TaskRunRecord.FileName), text.replace("\"Running\"", "\"Succeeded\""))
+    assertEquals(None, TaskRunRecord.read(dir))
+  }
+
+  /** A task that fails before it writes, over an earlier run's output: its
+    * Failed record replaces the earlier record, and then the earlier parts
+    * go. */
+  @Test def aTaskThatFailsBeforeWritingReplacesTheEarlierRun(): Unit = {
+    val in = tmpDir("dj-fbw-in-")
+    writeCsv(in, "a.csv", "x\n1\n")
+    val out = tmpDir("dj-fbw-out-").resolve("t")
+    assertTrue(runWith(oneTaskJob(in, out, "SELECT x FROM src")).succeeded)
+    assertTrue(filesIn(out).exists(_.startsWith("part-")))
+    failure(runWith(oneTaskJob(in, out, "SELECT no_such_column FROM src")))
+    assertOnlyAFailedRecord(out)
+  }
+
+  /** A clear deletes every file a run writes beside the record, staged parts
+    * included, and leaves the record, so a clear stopped part way leaves a
+    * directory still marked as the job's. */
+  @Test def clearDeletesTopLevelFilesAndLeavesTheRecord(): Unit = {
     val dir = tmpDir("dj-cim-")
     Files.writeString(dir.resolve("part-00000.csv"), "a\n1\n")
     Files.writeString(dir.resolve("part-00001.csv"), "a\n2\n")
@@ -1372,34 +1790,38 @@ class DataJobTest {
       outputFiles = Seq("part-00000.csv", "part-00001.csv"))
     Files.writeString(dir.resolve("_validation-check.csv"), "a\n")
     Files.writeString(dir.resolve(".part-00000.csv.crc"), "x")
+    Files.writeString(dir.resolve(".part-00002.csv.123.tmp"), "a\n3\n")
     Files.writeString(dir.resolve("README.md"), "keep")
-    assertTrue(TaskRunRecord.clearIfMarked(dir))
+    assertTrue(TaskRunRecord.clear(dir))
     assertFalse(Files.exists(dir.resolve("part-00000.csv")))
     assertFalse(Files.exists(dir.resolve("part-00001.csv")))
-    assertFalse(Files.exists(dir.resolve(TaskRunRecord.FileName)))
     assertFalse(Files.exists(dir.resolve("_validation-check.csv")))
     assertFalse(Files.exists(dir.resolve(".part-00000.csv.crc")))
+    assertFalse(Files.exists(dir.resolve(".part-00002.csv.123.tmp")))
+    assertTrue("the record stays", Files.isRegularFile(dir.resolve(TaskRunRecord.FileName)))
     // A file a run does not write is not the run's to delete.
     assertEquals("keep", Files.readString(dir.resolve("README.md")))
     assertTrue("the directory itself should still exist", Files.isDirectory(dir))
   }
 
-  @Test def clearIfMarkedNoOpWithoutRecord(): Unit = {
+  @Test def clearIsANoOpWithoutRecord(): Unit = {
     val dir = tmpDir("dj-cim-nomarker-")
     Files.writeString(dir.resolve("user_file.txt"), "keep")
-    assertFalse(TaskRunRecord.clearIfMarked(dir))
+    Files.writeString(dir.resolve("part-00000.csv"), "a\n1\n")
+    assertFalse(TaskRunRecord.clear(dir))
     assertTrue("user file should be untouched when no record is present",
       Files.isRegularFile(dir.resolve("user_file.txt")))
+    assertTrue("a part file no record names is someone else's", Files.isRegularFile(dir.resolve("part-00000.csv")))
   }
 
-  @Test def clearIfMarkedNoOpWhenDirectoryMissing(): Unit = {
+  @Test def clearIsANoOpWhenDirectoryMissing(): Unit = {
     val parent = tmpDir("dj-cim-missing-")
     val dir = parent.resolve("does-not-exist")
-    assertFalse(TaskRunRecord.clearIfMarked(dir))
+    assertFalse(TaskRunRecord.clear(dir))
     assertFalse(Files.exists(dir))
   }
 
-  @Test def clearIfMarkedPreservesSubdirectories(): Unit = {
+  @Test def clearPreservesSubdirectories(): Unit = {
     // The clear is top-level only — any nested directories are not part of
     // our flat output layout, so we don't touch them.
     val dir = tmpDir("dj-cim-subdirs-")
@@ -1411,7 +1833,7 @@ class DataJobTest {
       executionTime = Instant.now(), writtenAt = Instant.now(),
       rowsProduced = 1, format = "csv", outputFiles = Seq("part-00000.csv"))
 
-    assertTrue(TaskRunRecord.clearIfMarked(dir))
+    assertTrue(TaskRunRecord.clear(dir))
     assertFalse(Files.exists(dir.resolve("part-00000.csv")))
     assertTrue("subdirectory should be preserved", Files.isDirectory(sub))
     assertEquals("keep me", Files.readString(sub.resolve("inner.txt")))
@@ -1606,6 +2028,31 @@ class DataJobTest {
       fail(s"job.json expected at $jobFile").asInstanceOf[JobRunRecord])
     assertTrue(rec.succeeded)
     assertEquals(result.warnings, rec.warnings)
+  }
+
+  /** A cloud `jobRunOutput`, where v1 writes no record, is the run's one
+    * warning: the run succeeds, the warning names the path, and nothing is
+    * printed to standard error (plans/testing/18, decision 4). */
+  @Test def aCloudJobRunOutputIsAWarningAndPrintsNothing(): Unit = {
+    val inDir = tmpDir("dj-cloud-record-in-")
+    writeCsv(inDir, "events.csv", "id\n1\n")
+    val outDir = tmpDir("dj-cloud-record-out-")
+    val cloud = "gs://bucket/runs/job.json"
+    val job = DataJob(
+      inputs = Seq(InputFilePath(inDir.resolve("events.csv").toString, viewName = "events")),
+      sql = Seq(SQLTask(name = Some("t"),
+        sqlString = Some("SELECT id FROM events"),
+        outputFile = Some(OutputFilePath(outDir.resolve("t").toString)))),
+      jobRunOutput = Some(OutputFilePath(cloud)))
+    val err = new java.io.ByteArrayOutputStream
+    val previous = System.err
+    System.setErr(new java.io.PrintStream(err, true, java.nio.charset.StandardCharsets.UTF_8))
+    val result = try job.run() finally System.setErr(previous)
+    assertTrue(s"a warning never fails a run: ${result.tasks}", result.succeeded)
+    assertEquals(Seq(TaskStatus.Succeeded), result.tasks.map(_.status))
+    assertEquals(Seq(s"the job-run record was not written: '$cloud' is a cloud path, which v1 does not support"),
+      result.warnings)
+    assertEquals("nothing printed to standard error", "", err.toString(java.nio.charset.StandardCharsets.UTF_8))
   }
 
   /** A task reading two inputs that fail to load is skipped naming the first
@@ -2057,6 +2504,26 @@ class DataJobTest {
       assertTrue(s"manifest runFile '$rf' for '${t.taskName}' does not exist",
         Files.isRegularFile(java.nio.file.Paths.get(rf)))
     }
+  }
+
+  /** A cloud input is recorded as written, never made a local path: v1 reads
+    * none, so the run warns and goes on, and `job.json` still names it. */
+  @Test def jobRunRecordKeepsACloudInputsPathAsWritten(): Unit = {
+    val local = writeCsv(tmpDir("dj-cloud-in-"), "t.csv", "a\n1\n")
+    val out = tmpDir("dj-cloud-out-")
+    val job = DataJob(
+      inputs = Seq(
+        InputFilePath(local.toString, viewName = "t"),
+        InputFilePath("gs://bucket/events/*.csv", viewName = "events"),
+        InputFilePath("s3://bucket/sales/*.csv", viewName = "sales")),
+      sql = Seq(SQLTask(name = Some("q"), sqlString = Some("SELECT a FROM t"),
+        outputFile = Some(OutputFilePath(out.resolve("q").toString)))),
+      jobRunOutput = Some(OutputFilePath(out.resolve("job.json").toString)))
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+    val rec = JobRunRecord.read(out.resolve("job.json")).getOrElse(fail("no job.json").asInstanceOf[JobRunRecord])
+    assertEquals(Seq("events" -> "gs://bucket/events/*.csv", "sales" -> "s3://bucket/sales/*.csv"),
+      rec.inputs.getOrElse(Nil).filter(_.name != "t").map(i => i.name -> i.path))
   }
 
   /** `job.json` records the run's lineage: each input as the run read it (its

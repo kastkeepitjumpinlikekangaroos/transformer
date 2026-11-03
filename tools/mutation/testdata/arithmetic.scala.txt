@@ -1,0 +1,15 @@
+object Arithmetic {
+  def f(a: Int, b: Int): Int = a + b - a * b / 2
+  def g(a: Int): Int = a + 1
+  def h(a: Long): Long = a - 1L
+  def i(s: String): String = "x" + s + "y"
+  def j(a: Int): Int = -a + -1
+  def k(xs: Int*): Int = xs.sum
+  def l(a: Int): Int = {
+    var n = a
+    n += 1
+    n -= 1
+    n
+  }
+  def m(a: Int): Int = if (a > 2) -1 else 3
+}

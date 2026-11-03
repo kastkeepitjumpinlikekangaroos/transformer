@@ -105,3 +105,10 @@ query INT rowsort
 SELECT _agg0 FROM u GROUP BY _agg0 HAVING SUM(x) > 10
 ----
 1
+
+# AVG of integers is a DOUBLE and SUM of them a BIGINT.
+onlyif transformer avg-sum-int
+query DOUBLE,BIGINT
+SELECT AVG(a), SUM(a) FROM t
+----
+3.0	15

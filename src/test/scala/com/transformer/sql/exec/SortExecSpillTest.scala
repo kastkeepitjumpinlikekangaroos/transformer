@@ -4,10 +4,9 @@ import com.transformer.core._
 import com.transformer.core.metrics.MetricsNode
 import com.transformer.sql.plan._
 import org.junit.Assert._
-import org.junit.{After, Before, Test}
+import org.junit.{After, Test}
 import org.junit.Assume.assumeTrue
 
-import java.nio.file.{Files, Path}
 import scala.collection.mutable
 import scala.util.Random
 
@@ -27,31 +26,12 @@ class SortExecSpillTest {
   private val k: Expr = ColRefExpr(0, "k", DataType.IntType)
   private val keysAsc: Seq[SortKey] = Seq(SortKey(k, true))
 
-  private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
-  private var tmpRoot: Path = _
-
-  @Before def setOverride(): Unit = {
-    tmpRoot = Files.createTempDirectory("sort-spill-test-")
-    System.setProperty(Spill.SpillDirProperty, tmpRoot.resolve("transformer-spill").toString)
-  }
-
-  @After def restoreOverride(): Unit = {
-    if (originalDirProp == null) System.clearProperty(Spill.SpillDirProperty)
-    else System.setProperty(Spill.SpillDirProperty, originalDirProp)
-    deleteRecursively(tmpRoot)
-  }
-
-  private def deleteRecursively(p: Path): Unit = {
-    if (!Files.exists(p)) return
-    if (Files.isDirectory(p)) {
-      val s = Files.list(p)
-      try {
-        val it = s.iterator()
-        while (it.hasNext) deleteRecursively(it.next())
-      } finally s.close()
-    }
-    try Files.deleteIfExists(p) catch { case _: java.io.IOException => () }
-  }
+  // This JVM's spill directory is read once (`Spill.baseDir`, under
+  // java.io.tmpdir, which Bazel sets to the target's own TEST_TMPDIR), so a
+  // test cannot move it. Every operator that spills closes its directory once
+  // nothing reads it, so each test leaves none (plans/testing/17).
+  @After def leavesNoSpillDirectory(): Unit =
+    assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
 
   // ---- helpers -------------------------------------------------------------
 
@@ -140,6 +120,37 @@ class SortExecSpillTest {
       if (prev > cur) fail(s"out of order at i=$i: prev=$prev cur=$cur")
       i += 1
     }
+  }
+
+  /** A run longer than a batch is written a batch at a time, the last one
+    * short: a threshold the whole input reaches only at its end makes one run
+    * of a batch and 100 rows more, read back whole and in order. */
+  @Test def aRunLongerThanABatchReadsBackWhole(): Unit = {
+    assumeFullBatches()
+    val n = ColumnarBatch.DefaultCapacity + 100
+    val parts = uniqueKeyedRows(n, parts = 1, seed = 13L)
+    val bytes = new InMemoryPartitionedPlanForSpillTest(schema, parts).execute(0).map(Spill.estimateBytes).sum
+    val opts = ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(bytes))
+    val node = new MetricsNode(0, "SortExec", 0, SortExec.IdxCounterNames)
+    val rows = drainRows(SortExec(new InMemoryPartitionedPlanForSpillTest(schema, parts), keysAsc, opts, node).execute(0))
+    assertEquals("one run, spilled", 1L, node.snapshot().counter("runsWritten"))
+    assertEquals((0 until n).toVector, rows.map(_(0).asInstanceOf[Integer].intValue))
+  }
+
+  /** The merge of spilled runs has nothing after its end: `next` past it, or
+    * after the reader closed it with rows left, is a NoSuchElementException,
+    * never an empty batch or a read of a closed run. */
+  @Test def theMergeHasNothingAfterItsEndOrItsClose(): Unit = {
+    assumeFullBatches()
+    val parts = uniqueKeyedRows(n = 3 * ColumnarBatch.DefaultCapacity, parts = 2, seed = 17L)
+    val drained = SortExec(new InMemoryPartitionedPlanForSpillTest(schema, parts), keysAsc, spillyOpts()).execute(0)
+    assertEquals(3 * ColumnarBatch.DefaultCapacity, drainRows(drained).length)
+    assertThrows(classOf[NoSuchElementException], () => { val _ = drained.next() })
+
+    val stopped = SortExec(new InMemoryPartitionedPlanForSpillTest(schema, parts), keysAsc, spillyOpts()).execute(0)
+    assertEquals(ColumnarBatch.DefaultCapacity, stopped.next().numRows)
+    stopped.asInstanceOf[AutoCloseable].close()
+    assertThrows(classOf[NoSuchElementException], () => { val _ = stopped.next() })
   }
 
   @Test def emptyInputProducesEmptyOutputUnderSpill(): Unit = {

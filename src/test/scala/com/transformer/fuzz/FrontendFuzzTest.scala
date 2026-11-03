@@ -201,6 +201,8 @@ class FrontendFuzzTest {
     val sql = "SELECT x FROM t"
     clean(sql, Phase.Bind, new IllegalArgumentException("Unknown column 'x'. Available: [t.a, t.b, t.s]"))
     clean(sql, Phase.Run, new IllegalArgumentException("Cannot cast 'x' to int"))
+    clean(sql, Phase.Run, new IllegalArgumentException(
+      "Cannot cast '2026-01-01 05:30:21+02:00' to date; cast it to TIMESTAMP first, then to DATE for its date in UTC"))
     clean(sql, Phase.Run, new ArithmeticException("Decimal overflow: 1234.5 does not fit decimal(5,2)"))
     clean(sql, Phase.Run, new ArithmeticException("Integer overflow: 3 - -9223372036854775807 does not fit BIGINT"))
     clean(sql, Phase.Run, new ArithmeticException("Integer overflow: ABS(-2147483648) does not fit INT"))
@@ -289,7 +291,7 @@ class FrontendFuzzTest {
         case None =>
           problems += s"${entry.clause}: an entry on ${SqlTextGen.classesOf(entry).mkString(", ")} needs an example " +
             "written as SELECT <one item> FROM t or SELECT <items> FROM t [, u] WHERE <predicate>, so its clause " +
-            "can be spliced into every position; `${entry.example.get}` is neither"
+            s"can be spliced into every position; `${entry.example.get}` is neither"
         case Some(f) =>
           val sites = for { p <- SqlTextGen.positionsFor(f); c <- contexts if hosts((p.name, c)) } yield (p.name, c)
           val reached = sites.count { case (p, c) => fired.get((entry, p)).exists(_(c)) }
@@ -384,7 +386,7 @@ class FrontendFuzzTest {
     * (counting rows hides a change of values, so the share there is lower).
     * Prints the measured shares. */
   @Test def noSilentDropHonouredClausesAreObservable(): Unit = {
-    val n = 3000
+    val n = Props.probeSeedsOr(3000)
     val byClause = mutable.LinkedHashMap.empty[String, Array[Int]] // generated, refused, observable
     val byContext = mutable.LinkedHashMap.empty[String, Array[Int]] // generated, observable in context
     var seed = 0
@@ -451,7 +453,7 @@ class FrontendFuzzTest {
     * shape that agrees must be observable on a share of its cases, so the
     * data tells the pair's subject from its absence. Prints the shares. */
   @Test def syntaxEquivalenceIsNotVacuous(): Unit = {
-    val n = 3000
+    val n = Props.probeSeedsOr(3000)
     val byShape = mutable.LinkedHashMap.empty[String, Array[Int]] // generated, agreed, observable, refused, known
     var seed = 0
     while (seed < n) {
@@ -475,9 +477,95 @@ class FrontendFuzzTest {
       val a = byShape.getOrElse(shape.shape, new Array[Int](5))
       assertTrue(s"${shape.shape} generated ${a(0)} times", a(0) > n / SqlTextGen.SpellingShapes.size / 3)
       assertEquals(s"${shape.shape} refused", 0, a(3))
-      if (SyntaxEquivalence.known(shape.shape).isEmpty)
+      // A shape known to disagree everywhere has no agreement to observe; one
+      // known to disagree only over some values must still be observable.
+      if (SyntaxEquivalence.known(shape.shape).forall(_.onlyWhere.isDefined))
         assertTrue(s"${shape.shape} observable on ${a(2)} of ${a(1)}", a(2) > a(1) / 10)
     }
+  }
+
+  /** Each class of the text past ASCII (`TextPool`) reaches each string site
+    * of the frontend corpus, in a spelling or an honoured case whose `t.s`
+    * holds it or whose text writes it: `LENGTH`, `SUBSTRING`, `UPPER`, `LOWER`,
+    * `LIKE` and `ILIKE`, an ORDER BY and a GROUP BY over `s`, and `MIN` or
+    * `MAX` of it. The catalog's `s` drew ASCII alone until plans/testing/15.
+    * Read off the text, so generation only. */
+  @Test def textReachesEveryStringSite(): Unit = {
+    val t = TextPool.tally(140000) { seed =>
+      val sc = SqlTextGen.genSpellingCase(new Rng(seed))
+      val hc = SqlTextGen.genHonouredCase(new Rng(seed + 5000000L))
+      FrontendFuzzTest.textSites(Seq(sc.left, sc.right), sc.tables) ++
+        FrontendFuzzTest.textSites(Seq(hc.contextSql, hc.honoured.withoutSql), hc.tables)
+    }
+    println(s"[frontend] text past ASCII ${t.report}")
+    // Measured over these seeds: the thinnest cells are about 40 (MIN/MAX and
+    // GROUP BY over a combining mark, SUBSTRING over U+E000 or U+FFFD beside a
+    // character past U+FFFF), LIKE, ILIKE and ORDER BY hundreds to thousands;
+    // the floor sits about 3x below the thinnest. 140000 seeds of both kinds
+    // of case, generation only, about four seconds: 100000 until the catalog's
+    // other types brought eight more spelling shapes, which left these 28.
+    val low = t.below(TextFloor)
+    assertTrue(s"text past ASCII rarely reaches these sites (at most $TextFloor seeds):\n  ${low.mkString("\n  ")}\n${t.report}",
+      low.isEmpty)
+  }
+
+  private val TextFloor = 12
+
+  /** The catalog's other types meet their breaking values in the spellings
+    * that read them: a DOUBLE holding NaN and -0.0 in the IN and grouping
+    * shapes, a DECIMAL holding one value at two scales in the BETWEEN and
+    * conditional shapes, a DATE holding two dates in the BETWEEN, a
+    * TIMESTAMP holding NULL beside instants under a millisecond apart in the
+    * NULLS LAST shape, and a BINARY holding two arrays of one content in the
+    * grouping shape. Generation only. */
+  @Test def everyTypeOfTheCatalogMeetsItsValues(): Unit = {
+    val n = 40000
+    val met = mutable.LinkedHashMap.empty[String, Int].withDefaultValue(0)
+    (0 until n).foreach { seed =>
+      val sc = SqlTextGen.genSpellingCase(new Rng(seed.toLong))
+      val t = sc.tables.table("t")
+      def cells(col: String): IndexedSeq[Any] = { val i = t.schema.indexOf(col); t.rows.map(_(i)) }
+      def double(p: Double => Boolean): Boolean = cells("f").exists {
+        case d: java.lang.Double => p(d.doubleValue)
+        case _ => false
+      }
+      val holds = sc.shape match {
+        case "IN over a DOUBLE" | "NOT IN over a DOUBLE" | "DISTINCT over a DOUBLE as GROUP BY" =>
+          double(java.lang.Double.isNaN) && double(d => d == 0.0 && 1.0 / d < 0)
+        case "BETWEEN over a DECIMAL" | "conditionals over a DECIMAL beside an INT" =>
+          DataGen.valueTags(cells("d"))(DataGen.ValueTag.DecimalAtTwoScales)
+        case "BETWEEN over a DATE" => cells("dt").filter(_ != null).distinct.size >= 2
+        case "ORDER BY a TIMESTAMP NULLS LAST" =>
+          cells("ts").contains(null) && DataGen.valueTags(cells("ts"))(DataGen.ValueTag.InstantsUnderAMillisecondApart)
+        case "GROUP BY a BINARY as PARTITION BY" => DataGen.valueTags(cells("bn"))(DataGen.ValueTag.BytesOfOneContent)
+        case _ => false
+      }
+      if (holds) met(sc.shape) += 1
+    }
+    println(s"[frontend] the catalog's other types over $n seeds, cases meeting their values: " +
+      met.toSeq.map { case (k, v) => s"$k=$v" }.mkString(", "))
+    // Measured over these seeds: the thinnest, DISTINCT over a DOUBLE with NaN
+    // and -0.0 in it, 95; the others 129 to 408. The bound sits about 3x
+    // below the thinnest.
+    Seq("IN over a DOUBLE", "NOT IN over a DOUBLE", "DISTINCT over a DOUBLE as GROUP BY", "BETWEEN over a DECIMAL",
+      "conditionals over a DECIMAL beside an INT", "BETWEEN over a DATE", "ORDER BY a TIMESTAMP NULLS LAST",
+      "GROUP BY a BINARY as PARTITION BY").foreach(k => assertTrue(s"$k rarely meets its values (${met(k)})", met(k) > 31))
+  }
+
+  /** The disagreement plans/testing/15 holds (finding F1) shows over its own
+    * values and nowhere else: the ILIKE shape over a dotless i or a dotted
+    * capital I is known, and the same shape over values without one is not,
+    * so a split of another kind still fails. */
+  @Test def theIlikeDisagreementIsKnownOnlyOverAnUnpairedLetter(): Unit = {
+    val dotless = TextPool.text(0x131)
+    val ilike = SyntaxEquivalence.known("ILIKE").get
+    val over = SpellingCase(SqlTextGen.ReferenceTables, "ILIKE", s"SELECT a FROM t WHERE '$dotless' ILIKE 'I'",
+      s"SELECT a FROM t WHERE LOWER('$dotless') LIKE LOWER('I')", None)
+    assertEquals(SyntaxEquivalence.KnownDisagreement(ilike), SyntaxEquivalence.check(over))
+    val without = SpellingCase(SqlTextGen.ReferenceTables, "ILIKE", "SELECT a FROM t WHERE 'x' ILIKE 'X'",
+      "SELECT a FROM t WHERE 'x' LIKE 'X'", None)
+    val e = Try(SyntaxEquivalence.check(without)).failed.get
+    assertTrue(e.getMessage, e.getMessage.contains("the spellings disagree"))
   }
 
   /** Every recorded disagreement still disagrees on its repro, so a fix fails
@@ -541,5 +629,32 @@ class FrontendFuzzTest {
     }
     assertTrue(s"terminated (steps=$steps)", steps < 5000)
     assertTrue(s"reduced '${start.sql}' -> '${cur.sql}'", cur.sql.length < start.sql.length)
+  }
+}
+
+object FrontendFuzzTest {
+
+  /** A site's text in a query that reads `s`: the four functions by their
+    * names (only `s` and literals are text in this catalog), `LIKE` apart from
+    * `ILIKE`, and an ORDER BY, a GROUP BY and a `MIN` or `MAX` over `s`. */
+  private val SiteText: Seq[(String, scala.util.matching.Regex)] = Seq(
+    "LENGTH" -> """\bLEN(?:GTH)?\(""".r,
+    "SUBSTRING" -> """\bSUBSTRING\(""".r,
+    "UPPER" -> """\bUPPER\(""".r,
+    "LOWER" -> """\bLOWER\(""".r,
+    "LIKE" -> """(?<![A-Za-z])LIKE\b""".r,
+    "ILIKE" -> """\bILIKE\b""".r,
+    "ORDER BY" -> """ORDER BY [^)]*?\bs\b[^)]*?(?: LIMIT| OFFSET| FETCH|\)|$)""".r,
+    "GROUP BY" -> """GROUP BY [^)]*?\bs\b""".r,
+    "MIN/MAX" -> """\b(?:MIN|MAX)\(s\)""".r)
+
+  /** The (site, class) pairs `texts` reach over `tables`: a site any of them
+    * writes, with each class `t.s` holds or the texts write themselves. */
+  def textSites(texts: Seq[String], tables: SqlTextGen.Tables): Set[(String, TextPool.TextClass)] = {
+    val t = tables.table("t")
+    val i = t.schema.indexOf("s")
+    val classes: Set[TextPool.TextClass] = TextPool.columnClasses(t.rows.map(_(i))) ++ texts.flatMap(TextPool.classesOf)
+    val sites: Set[String] = SiteText.collect { case (site, re) if texts.exists(re.findFirstIn(_).isDefined) => site }.toSet
+    sites.flatMap(site => classes.map(c => (site, c)))
   }
 }

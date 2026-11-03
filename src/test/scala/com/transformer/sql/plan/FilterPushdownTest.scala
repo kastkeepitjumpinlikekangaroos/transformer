@@ -39,9 +39,6 @@ class FilterPushdownTest {
   private def colInt(i: Int, n: String): ColRefExpr =
     ColRefExpr(i, n, DataType.IntType)
 
-  private def colStr(i: Int, n: String): ColRefExpr =
-    ColRefExpr(i, n, DataType.StringType)
-
   private def litInt(v: Int): LitExpr = LitExpr(v, DataType.IntType)
 
   private def bin(op: String, l: Expr, r: Expr): Expr =

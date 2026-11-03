@@ -1,0 +1,20 @@
+{
+ "description": "Two rows, \\r\\n",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "E",
+   "f"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

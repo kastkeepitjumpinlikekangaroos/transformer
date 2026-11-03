@@ -1,6 +1,6 @@
 package com.transformer.viewer
 
-import com.transformer.job.{JobInputRecord, JobRunRecord, JobTaskSummary, TaskRunRecord}
+import com.transformer.job.{JobInputRecord, JobRunRecord, JobTaskSummary, TaskRunRecord, TaskRunStatus}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
 import java.nio.file.{Files, Path, Paths}
@@ -48,6 +48,19 @@ final case class DatasetRun(dir: Path, record: JobRunRecord) {
 final case class TableInfo(name: String, summary: JobTaskSummary, recordedDir: Option[String], dir: Option[Path]) {
   /** Its `_run.json`, read afresh. */
   def record: Option[TaskRunRecord] = dir.flatMap(TaskRunRecord.read)
+
+  /** Whether a run never finished writing it: its `_run.json` says
+    * `Running`, so that run stopped part way, or is writing it still in
+    * another process, and its directory holds nothing a reader can trust,
+    * whatever the `job.json` entry says. Read once. */
+  lazy val unfinished: Boolean = record.exists(_.status == TaskRunStatus.Running)
+
+  /** Its status as the folder shows it: `Running` when [[unfinished]], else
+    * its `job.json` entry's. */
+  def status: TaskRunStatus = if (unfinished) TaskRunStatus.Running else summary.status
+
+  /** Whether it has rows on disk: its run wrote it and finished. */
+  def wrote: Boolean = TaskRunStatus.wroteOutput(status)
 }
 
 object RunFolder {

@@ -4,7 +4,6 @@ import org.junit.Assert._
 import org.junit.Test
 
 import java.nio.file.{Files, Path}
-import scala.jdk.CollectionConverters._
 
 class JobFilesTest {
 

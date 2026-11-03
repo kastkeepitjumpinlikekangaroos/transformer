@@ -1,0 +1,74 @@
+# From CockroachDB's logic tests (https://github.com/cockroachdb/cockroach):
+# pkg/sql/logictest/testdata/logic_test/overflow at tag v23.2.0, commit
+# 8f14432835d667982828b5319cfd130991fbf80c, as it is there but for this header
+# and the condition lines added before records. CockroachDB 23.2's files were
+# under the Business Source License 1.1, whose Change Date, 2026-10-01, put
+# them under the Apache License 2.0: its text is LICENSE beside this file, and
+# NOTICE says whose they are.
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 12 records: 10 run as CockroachDB answers them; 2 held for CockroachDB,
+# `onlyif cockroachdb # needs ...`, by what they need: a function the engine
+# has not 2.
+
+# Test for overflow handling in sum aggregate.
+
+statement ok
+CREATE TABLE large_numbers (a INT8)
+
+statement ok
+INSERT INTO large_numbers VALUES (9223372036854775807),(1)
+
+onlyif cockroachdb # needs sum_int()
+statement error integer out of range
+SELECT sum_int(a) FROM large_numbers
+
+statement ok
+DELETE FROM large_numbers
+
+statement ok
+INSERT INTO large_numbers VALUES (-9223372036854775808),(-1)
+
+onlyif cockroachdb # needs sum_int()
+statement error integer out of range
+SELECT sum_int(a) FROM large_numbers
+
+subtest regression_88128
+
+statement ok
+CREATE TABLE t88128 (i INT)
+
+statement ok
+INSERT INTO t88128 VALUES (100000)
+
+# Ensure that the optimizer does not simplify the filter by adding the constant
+# subtrahend to the right side of the comparison when the addition would
+# overflow.
+query B
+SELECT i - 1000 < 9223372036854775800 FROM t88128
+----
+true
+
+# Ensure that the optimizer does not simplify the filter by adding the constant
+# subtrahend to the right side of the comparison when the addition would
+# underflow.
+query B
+SELECT i - (-1000) > -9223372036854775800 FROM t88128
+----
+true
+
+# Ensure that the optimizer does not simplify the filter by subtracting the
+# constant addend to the right side of the comparison when the subtraction would
+# underflow.
+query B
+SELECT i + 1000 > -9223372036854775800 FROM t88128
+----
+true
+
+# Ensure that the optimizer does not simplify the filter by subtracting the
+# constant addend to the right side of the comparison when the subtraction would
+# overflow.
+query B
+SELECT i + (-1000) < 9223372036854775800 FROM t88128
+----
+true

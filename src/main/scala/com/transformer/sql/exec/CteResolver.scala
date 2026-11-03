@@ -137,5 +137,7 @@ object CteResolver {
 private[exec] final class PhysicalPlanView(p: PhysicalPlan) extends CatalogView {
   def schema: Schema = p.outputSchema
   def numPartitions: Int = p.numPartitions
+  /** A query's strings are text: its scans and literals refuse anything else. */
+  override def stringsAreText: Boolean = true
   def readPartition(part: Int): Iterator[ColumnarBatch] = p.execute(part)
 }

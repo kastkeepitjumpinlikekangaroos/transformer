@@ -1,5 +1,7 @@
 package com.transformer.sql.plan
 
+import com.transformer.core.Settings
+
 /** Plan-time row-count estimation. Used by
   * [[com.transformer.sql.exec.PhysicalPlanner]] to pick the build side of a
   * hash join.
@@ -41,18 +43,11 @@ object LogicalPlanCardinality {
     * have per-key cardinality estimates and/or a streaming exchange (plan
     * 08), the safe default is to leave the historic shape on.
     *
-    * Override per-JVM via the `transformer.scheduler.shard_min_size`
-    * system property or `TRANSFORMER_SCHEDULER_SHARD_MIN_SIZE` env var.
-    * Workloads with provably high distinct-key counts (where the cross-
-    * partition merge actually is the wall) can set this to e.g. 1_000_000
-    * to opt back in. */
-  val MinShardableSize: Long = {
-    val configured = Option(System.getProperty("transformer.scheduler.shard_min_size"))
-      .orElse(Option(System.getenv("TRANSFORMER_SCHEDULER_SHARD_MIN_SIZE")))
-      .map(_.trim).filter(_.nonEmpty)
-      .flatMap(s => try Some(s.toLong) catch { case _: NumberFormatException => None })
-    configured.getOrElse(Long.MaxValue)
-  }
+    * Override per-JVM with [[Settings.ShardMinSize]]
+    * (`transformer.scheduler.shard_min_size`). Workloads with provably high
+    * distinct-key counts (where the cross-partition merge actually is the
+    * wall) can set this to e.g. 1_000_000 to opt back in. */
+  val MinShardableSize: Long = Settings.ShardMinSize.get
 
   /** Threshold for the broadcast-vs-shuffle decision on hash joins. If the
     * smaller side's estimate is below this, the planner refuses to insert
@@ -64,63 +59,66 @@ object LogicalPlanCardinality {
     * 1M is a conservative ceiling on what we'll broadcast — the build map
     * stays well inside the heap (~80MB at 80B/row), and any join above this
     * threshold is large enough that the per-shard parallelism gain
-    * dominates the extra shuffle pass. Override per-JVM via the
-    * `transformer.scheduler.broadcast_threshold` system property or
-    * `TRANSFORMER_SCHEDULER_BROADCAST_THRESHOLD` env var. */
-  val BroadcastBuildThreshold: Long = {
-    val configured = Option(System.getProperty("transformer.scheduler.broadcast_threshold"))
-      .orElse(Option(System.getenv("TRANSFORMER_SCHEDULER_BROADCAST_THRESHOLD")))
-      .map(_.trim).filter(_.nonEmpty)
-      .flatMap(s => try Some(s.toLong) catch { case _: NumberFormatException => None })
-    configured.getOrElse(1_000_000L)
-  }
+    * dominates the extra shuffle pass. Override per-JVM with
+    * [[Settings.BroadcastThreshold]]
+    * (`transformer.scheduler.broadcast_threshold`). */
+  val BroadcastBuildThreshold: Long = Settings.BroadcastThreshold.get
 
   /** Estimate the number of rows produced by `plan`. */
-  def estimate(plan: LogicalPlan): Option[Long] = plan match {
-    case LogicalScan(_, view, _) =>
-      view.exactRowCount
+  def estimate(plan: LogicalPlan): Option[Long] = estimateWith(plan, joinEstimate)
 
-    case LogicalFilter(child, pred) =>
-      estimate(child).map(n => math.max(0L, (n * filterSelectivity(pred)).toLong))
+  /** [[estimate]], each join sized by `join` over its sides' estimates and
+    * its kind rather than by [[joinEstimate]]: how the planner's nested-loop
+    * guard sizes what lies under an aggregate or a union
+    * (`PhysicalPlanner.keyedJoinRows`). */
+  private[sql] def estimateWith(plan: LogicalPlan, join: (Long, Long, JoinKind) => Long): Option[Long] = {
+    def estimate(p: LogicalPlan): Option[Long] = estimateWith(p, join)
+    plan match {
+      case LogicalScan(_, view, _) =>
+        view.exactRowCount
 
-    case LogicalProject(child, _) =>
-      estimate(child)
+      case LogicalFilter(child, pred) =>
+        estimate(child).map(n => math.max(0L, (n * filterSelectivity(pred)).toLong))
 
-    case LogicalLimit(child, n) =>
-      estimate(child) match {
-        case Some(c) => Some(math.min(c, n))
-        case None    => Some(n)
-      }
+      case LogicalProject(child, _) =>
+        estimate(child)
 
-    case LogicalOffset(child, n) =>
-      estimate(child).map(c => math.max(0L, c - n))
+      case LogicalLimit(child, n) =>
+        estimate(child) match {
+          case Some(c) => Some(math.min(c, n))
+          case None    => Some(n)
+        }
 
-    case LogicalDistinct(child) =>
-      estimate(child).map(n => math.max(1L, n / 2))
+      case LogicalOffset(child, n) =>
+        estimate(child).map(c => math.max(0L, c - n))
 
-    case LogicalAggregate(child, gks, _) =>
-      estimate(child).map { n =>
-        if (gks.isEmpty) 1L
-        else math.min(n, ndvHint(gks, n))
-      }
+      case LogicalDistinct(child) =>
+        estimate(child).map(n => math.max(1L, n / 2))
 
-    case LogicalJoin(l, r, _, kind) =>
-      for {
-        lc <- estimate(l)
-        rc <- estimate(r)
-      } yield joinEstimate(lc, rc, kind)
+      case LogicalAggregate(child, gks, _) =>
+        estimate(child).map { n =>
+          if (gks.isEmpty) 1L
+          else math.min(n, ndvHint(gks, n))
+        }
 
-    case LogicalUnion(l, r, _) =>
-      for {
-        lc <- estimate(l)
-        rc <- estimate(r)
-      } yield lc + rc
+      case LogicalJoin(l, r, _, kind) =>
+        for {
+          lc <- estimate(l)
+          rc <- estimate(r)
+        } yield join(lc, rc, kind)
 
-    case LogicalSort(child, _) =>
-      estimate(child)
+      case LogicalUnion(l, r, _) =>
+        for {
+          lc <- estimate(l)
+          rc <- estimate(r)
+        } yield lc + rc
 
-    case LogicalWindow(child, _) =>
-      estimate(child)
+      case LogicalSort(child, _) =>
+        estimate(child)
+
+      case LogicalWindow(child, _) =>
+        estimate(child)
+    }
   }
 
   private[plan] def filterSelectivity(pred: Expr): Double = pred match {
@@ -157,8 +155,11 @@ object LogicalPlanCardinality {
     * fan-out from key overlap, so use a side-aware upper bound: Inner takes
     * the larger side (a 1:1 join produces `max`, a fan-out produces more —
     * but for build-side selection we only need a coarse signal), Left/Right
-    * stay at their preserved-side size, Full is the sum. The planner's
-    * nested-loop guard sizes a join on an equality with it too.
+    * stay at their preserved-side size, Full is the sum. So an outer join can
+    * be sized smaller than the inner join it holds, which picking a build
+    * side does not mind; the planner's nested-loop guard counts a join on an
+    * equality its own way, no smaller for an outer join
+    * (`PhysicalPlanner.keyedJoinRows`, decision 3 of plans/testing/16).
     */
   private[sql] def joinEstimate(l: Long, r: Long, kind: JoinKind): Long = kind match {
     case JoinKind.Inner => math.max(l, r)

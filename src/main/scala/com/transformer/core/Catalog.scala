@@ -40,6 +40,14 @@ trait CatalogView {
     * after a single name → new-index lookup.
     */
   def withProjectedColumns(names: Seq[String]): Option[CatalogView] = None
+
+  /** Whether every STRING this view gives is known to be text, holding no
+    * half of a surrogate pair: the readers decode a file's bytes, and UTF-8
+    * cannot encode half a pair, and a [[MaterializedView]] checks what it is
+    * given. A view of one's own builds its strings in Scala, which can hold
+    * half a pair, so a scan of it checks each STRING it gives and refuses one
+    * that does (decision 2 of plans/testing/17). */
+  def stringsAreText: Boolean = false
 }
 
 /** Registry of named views available to SQL execution. View lookups are case-insensitive. */

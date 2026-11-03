@@ -317,7 +317,8 @@ object Casts {
       // Any other number is read exactly, as the decimal it is, an integer at
       // the target's scale: the analyzer casts one to a DECIMAL to compare it
       // with one, where rounding it would change which rows match, or to a
-      // DECIMAL every value of its type fits.
+      // DECIMAL every value of its type fits. A CAST the query writes is
+      // [[toWrittenDecimal]], which fits every value to its type.
       case t: DataType.DecimalType =>
         v match {
           case d: java.math.BigDecimal => Decimals.fit(d, t)
@@ -340,6 +341,32 @@ object Casts {
     case f: java.lang.Float => new java.math.BigDecimal(java.lang.Float.toString(f.floatValue))
     case i: java.math.BigInteger => new java.math.BigDecimal(i)
     case _ => java.math.BigDecimal.valueOf(n.longValue)
+  }
+
+  /** `v` as a value of `t`, the DECIMAL a query's `CAST(x AS DECIMAL(p,s))`
+    * names ([[DecimalCastExpr]]). Every number is fitted to the type
+    * ([[Decimals.fit]]): rounded half up to its scale, and an error when its
+    * integer part has more digits than the type holds. A FLOAT or DOUBLE is
+    * read as the decimal it prints as, as everywhere a DECIMAL meets one, and
+    * NaN and the infinities, which have no decimal, are errors. Text is read
+    * by the grammar CSV reads a decimal by and then fitted, so text that is no
+    * number, or one too long for the type, is an error naming it, as text
+    * past an INT's range is. A BOOLEAN is 1 or 0, as it is for every number
+    * type. */
+  def toWrittenDecimal(v: Any, t: DataType.DecimalType): java.math.BigDecimal = v match {
+    // A FLOAT or DOUBLE past the type is named as it prints (1.0E300), not by
+    // every digit of its decimal.
+    case n @ (_: java.lang.Double | _: java.lang.Float) if isFinite(n.asInstanceOf[Number]) =>
+      try Decimals.fit(toDecimal(n.asInstanceOf[Number]), t)
+      catch { case _: ArithmeticException => throw new ArithmeticException(s"Decimal overflow: $n does not fit $t") }
+    case n: Number if isFinite(n) => Decimals.fit(toDecimal(n), t)
+    case n: Number => throw new IllegalArgumentException(s"Cannot cast $n to $t")
+    case s: String =>
+      val d = parseNumber(s, t)(NumberText.decimal)
+      try Decimals.fit(d, t)
+      catch { case _: ArithmeticException => throw new IllegalArgumentException(s"Cannot cast '$s' to $t") }
+    case b: Boolean => Decimals.fit(if (b) java.math.BigDecimal.ONE else java.math.BigDecimal.ZERO, t)
+    case other => throw new IllegalArgumentException(s"Cannot cast $other to $t")
   }
 
   /** `n` as a FLOAT, the nearest one, or an error when the FLOAT it would be
@@ -371,10 +398,10 @@ object Casts {
   /** `d`, a date a DATE holds, or an error naming it: on the row path a cast's
     * date stays a `LocalDate`, which reaches further than the column it lands
     * in, so the row and the vector path answered differently past it. */
-  private def storable(d: LocalDate): LocalDate = { DateVector.epochDay(d); d }
+  private def storable(d: LocalDate): LocalDate = { val _ = DateVector.epochDay(d); d }
 
   /** `i`, an instant a TIMESTAMP holds, or an error naming it. */
-  private def storable(i: Instant): Instant = { TimestampVector.epochMicros(i); i }
+  private def storable(i: Instant): Instant = { val _ = TimestampVector.epochMicros(i); i }
 
   /** `true` or `false` in any case, the text CSV inference reads as a
     * BOOLEAN. Any other text is an error rather than false. */
@@ -419,7 +446,7 @@ object Casts {
     catch {
       case _: DateTimeParseException =>
         val advice =
-          try { parseInstant(s); "; cast it to TIMESTAMP first, then to DATE for its date in UTC" }
+          try { val _ = parseInstant(s); "; cast it to TIMESTAMP first, then to DATE for its date in UTC" }
           catch { case _: IllegalArgumentException => "" }
         throw new IllegalArgumentException(s"Cannot cast '$s' to date$advice")
     }

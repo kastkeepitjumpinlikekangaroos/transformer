@@ -8,6 +8,50 @@ scala_junit_test(
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/read/csv",
         "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/write/csv",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The close protocol: a LIMIT over parquet, CSV and a spilled sort, a breaker
+# whose input fails or is stopped, and a query that fails, is stopped or is
+# read in part release every file and spill directory they opened, held to
+# the JVM's open file count, its spill directory and the leak audit, which
+# runs here in every run (--config=leaks runs it over the whole suite).
+scala_junit_test(
+    name = "closing_test",
+    srcs = ["ClosingTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = ["-Dtransformer.audit_leaks=true"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/csv",
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/write/parquet",
+        "@maven//:junit_junit",
+    ],
+)
+
+# --config=verify: each batch invariant fails a hand-built batch, the plan
+# walk wraps every operator the planner builds in a check and refuses one it
+# has no branch for, and a bad batch fails at the operator that emitted it
+# (BatchInvariants). Runs under verify, with every breaker sharded so the
+# planner builds every operator it has.
+scala_junit_test(
+    name = "verify_test",
+    srcs = ["VerifyTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = [
+        "-Dtransformer.verify=true",
+        "-Dtransformer.scheduler.shard_min_size=1",
+        "-Dtransformer.scheduler.broadcast_threshold=1",
+        "-Dtransformer.scheduler.shard_count=4",
+    ],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
         "@maven//:junit_junit",
     ],
 )
@@ -232,7 +276,6 @@ scala_junit_test(
     deps = [
         "//src/main/scala/com/transformer/core",
         "//src/main/scala/com/transformer/sql/exec",
-        "//src/main/scala/com/transformer/sql/plan",
         "@maven//:junit_junit",
     ],
 )

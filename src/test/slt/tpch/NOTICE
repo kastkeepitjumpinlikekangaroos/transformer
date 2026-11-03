@@ -1,0 +1,13 @@
+RisingWave's TPC-H end-to-end tests
+
+The files in this directory are RisingWave's (https://github.com/risingwavelabs/risingwave,
+commit d42d130042f0bf2b4ebaa5b6d84f69c66b997744): create_tables.slt.part and the eight
+insert_*.slt.part files are e2e_test/tpch/ as they are there, and tpch.test holds the
+answers of e2e_test/batch/tpch/q<n>.slt.part for the eleven queries the engine runs,
+each query as RisingWave's file holds it but for the rewrites its record names.
+They are RisingWave Labs's, under the Apache License, Version 2.0, whose text is
+LICENSE beside this file.
+
+The queries and the data's shape are TPC-H's, from the TPC Benchmark H specification
+of the Transaction Processing Performance Council (TPC), as RisingWave ships them; no
+answer set of the TPC's own kit is vendored here.

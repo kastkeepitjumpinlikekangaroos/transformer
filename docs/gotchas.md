@@ -20,6 +20,23 @@ ship a fix or move something from "not done" to "done".
   "(" "("`. Two parse, as do any number around the tested value, after `LIKE`
   or beside `=`. SQLite's corpus writes the shape 13 times in 5.3 million
   records; write fewer parentheses.
+- **JSqlParser 5.2 does not read every chain of conditions it should.** Deep
+  in an AND/OR chain, `(((IF(TRUE, a <= b, NULL) AND ...` is `Encountered
+  unexpected token: "("` and `... OR (a = a) IS NULL)` is `Encountered
+  unexpected token: "IS"`, where the same pieces shallower parse, and a deep
+  condition written twice can run past its time limit, as can a CASE, an IF or
+  a NOT added inside parentheses nested five deep (seconds a query). A plan
+  the binder made from text that parsed prints as text that parses (the
+  `reprinted` modes pass every script), but a plan `oracle/Eet` rewrote holds
+  parentheses no written query had: the `rewritten` slt mode runs a query
+  nested five deep as written, and one whose rewrite does not parse, and the
+  EET properties count the second (`unparsed`); a form that writes its
+  expression twice takes one of twelve nodes or fewer.
+- **JSqlParser 5.2 reads a CAST of a condition only in parentheses.**
+  `CAST((a = b) AS VARCHAR)` parses; `CAST(a = b AS VARCHAR)` is `SQL parse
+  error: Encountered unexpected token: "="`, and so is a CAST whose operand is
+  an IS NULL, an IN, a LIKE, a BETWEEN, an AND or an OR (a NOT parses bare).
+  `PlanSql` writes such an operand in parentheses (`castOperand`).
 - **No JSqlParser 5.2 literal holds a backslash before a quote.** In
   `'a\''b'` the parser reads `'a\'` as the literal and `'b'` as an alias, and
   `'a\'b'` does not parse at all, so text holding `\'` cannot be written as a
@@ -32,12 +49,43 @@ ship a fix or move something from "not done" to "done".
   not have it. `PlanSql.identifier` writes a plain word bare only if a test
   statement using it as a CTE, a table, an alias, a qualifier and a column
   reads it back as each, once a word, and quotes it otherwise.
-- **SQL here writes no cast to DECIMAL or BINARY**, though the binder inserts
-  both (an INT beside a DECIMAL, a NULL beside a BINARY). `PlanSql` prints
-  such a cast as its operand, and the binder casts it again in the same place,
-  since the operand's types are the same; a plan with a DECIMAL literal where no
-  DECIMAL stands beside it, which the binder never makes, would print as a
-  DOUBLE.
+- **The binder's casts to DECIMAL and BINARY print as their operand.** The
+  binder inserts both (an INT beside a DECIMAL, a NULL beside a BINARY), and
+  `PlanSql` prints such a cast as its operand, which the binder casts again in
+  the same place, since the operand's types are the same. SQL cannot write a
+  cast to BINARY, and the cast to DECIMAL it writes, `CAST(x AS DECIMAL(p,s))`,
+  is another node (`DecimalCastExpr`): it rounds its value to the type and
+  fails past its digits, where the binder's reads a number exactly, so printing
+  the binder's as a written one would change what it answers. A string literal
+  under a written one stays the text it is in the plan, so it prints back as
+  the cast it was. A plan with a DECIMAL literal where no DECIMAL stands beside
+  it, which the binder never makes, would print as a DOUBLE.
+- **An INT or BIGINT beside a FLOAT meets it as a DOUBLE** (plans/testing/10,
+  decision 2, taken overnight as recommended, not yet confirmed by the user).
+  `DataType.widerNumeric` ranked a FLOAT above a BIGINT, so all three
+  families (a comparison, a result both become, arithmetic) made such a pair a
+  FLOAT, which holds no odd integer past 16777216:
+  `CAST(16777217 AS INT) = CAST(16777216 AS FLOAT)` was TRUE, and
+  `COALESCE(CAST(NULL AS FLOAT), 2147483647)` was 2.1474836E9. A DOUBLE holds
+  every INT, and it is Spark's type for a comparison and a branch of the two.
+  It changed the type of queries that ran before: `int_col * float_col`, and
+  a FLOAT column times an integer literal, are DOUBLEs, and so is an output
+  column that holds one. A BIGINT past 2^53 still loses its last digits beside
+  a FLOAT or a DOUBLE, as in every engine. Pinned by `types/float_equality.test`
+  and the coercion tables.
+- **A CAST to DECIMAL fails two ways, by what it reads.** A number past the
+  type is `Decimal overflow: ... does not fit decimal(p,s)`, an
+  `ArithmeticException` while the query runs, as arithmetic's is (a FLOAT or
+  DOUBLE named as it prints, `1.0E300`, not by every digit of its decimal).
+  Text past the type is `Cannot cast '...' to decimal(p,s)`, an
+  `IllegalArgumentException`, as text past an INT's range is, because a string
+  literal under the cast is read when the query is bound, where an
+  `ArithmeticException` would be no clean refusal. NaN and the infinities are
+  `Cannot cast NaN to decimal(p,s)`, the binder's own cast's words for them.
+  A number written in the query is read as the decimal it is written as
+  (`decimalConstant`), so `CAST(1.0000000000000000001 AS DECIMAL(20,19))`
+  keeps its last digit, which a DOUBLE would round away; one no DECIMAL holds
+  (`1e-400`) stays the DOUBLE it binds as alone.
 - **`EXPLAIN` is read off the text before JSqlParser sees it.**
   `SqlParser.explained` finds the `EXPLAIN` token and `VERBOSE` after it, and
   the query is the text that follows, bound as any query is, so every check the
@@ -251,8 +299,9 @@ ship a fix or move something from "not done" to "done".
   overflow. Promoting a DATE beside a TIMESTAMP to its midnight, as some engines
   do, would make `d = ts` match only midnight, and a boolean beside a number
   would have to mean 1 and 0, which is why those pairs need a CAST too. The same
-  strictness runs through `CAST`: a string literal under one is folded at bind
-  time, text that is no number fails as `Cannot cast 'x' to int` rather than
+  strictness runs through `CAST`: a string literal under one is read at bind
+  time (folded, or under a CAST to DECIMAL checked and kept as its text), text
+  that is no number fails as `Cannot cast 'x' to int` rather than
   Java's `NumberFormatException`, BOOLEAN reads only `true` and `false` (Java's
   `parseBoolean` read every other text as false, and `WHERE NOT s` returned
   every row), `Analyzer.checkCast` refuses numbers and booleans to or from
@@ -302,9 +351,11 @@ ship a fix or move something from "not done" to "done".
   target (`Decimals.fit`: rounded half up, an error past its digits), so a
   comparison of two decimals reads both as `Decimals.wider`, the holding type
   with no bound on its digits: a comparison's operands are never stored, and a
-  bounded type would round one of them. Any other number cast to a `DECIMAL` is
-  still read exactly (an integer at the target's scale), since a comparison
-  reads an `INT` beside a `DECIMAL(5,2)` as it is. A `UNION` arm that ends in
+  bounded type would round one of them. Any other number the binder casts to a
+  `DECIMAL` is still read exactly (an integer at the target's scale), since a
+  comparison reads an `INT` beside a `DECIMAL(5,2)` as it is; a query's own
+  `CAST(x AS DECIMAL(p,s))` is another node, which fits every value
+  (plans/testing/10). A `UNION` arm that ends in
   its SELECT list is retyped in place, so a literal there is read as the type it
   meets; any other arm is wrapped in a casting projection. NULLIF compares
   through `unify` and returns its first operand as it is, the one place the
@@ -321,13 +372,15 @@ ship a fix or move something from "not done" to "done".
   a join's single ON condition and IF's condition took no cast at all and died
   on their first row with a `ClassCastException` (`IF(NULL, 1, 2)` too, on the
   vector path, where `VecFuncs.iff` casts its condition's vector). A function
-  declares what each argument must be beside its arity, in `Funcs.signature`
-  (`Param.Number`, `Param.Integer` for a scale, a position, a length or a seed,
-  `Param.Text`, and `Param.AnyValue` for the flow functions, whose arguments
+  declares what each argument must be beside its arity, in its
+  `FunctionCatalog` entry (`Param.Number`, `Param.Integer` for a scale, a
+  position, a length or a seed, `Param.Text`, `Param.Condition` for a truth
+  value, and for the flow functions `Param.Branch` and `Param.Compared`, which
   `branches` and `unify` type), and `LogicalBuilder` checks each argument
   against it through `Analyzer.checkArgument`; the aggregates that add their
-  values up check theirs in `bindAgg` and `bindAnalytic`. `Funcs.signature`
-  replaced a `returnType` that matched on the argument count alone, so `SUM(s)`
+  values up check theirs in `bindAgg` and `bindAnalytic`, by the same entries.
+  `Funcs.signature` replaced a `returnType` that matched on the argument count
+  alone, so `SUM(s)`
   and the math functions over a date bound and threw `ClassCastException`
   inside the worker, `ABS` of a date fell through to `case _ => null` and
   answered NULL on every row, `ROUND(x, 1.5)` cut its scale with `intValue`,
@@ -346,9 +399,10 @@ ship a fix or move something from "not done" to "done".
   different strings, and `CURRENT_DATE ()`, with a space, arrives as a
   zero-argument `Function` instead. `UnsupportedClauses.clockKeyword` folds the
   spellings for the audit and the binder alike, and the binder sends the call
-  form to the same place. That place is `LogicalBuilder.clockLiteral`, not
-  `Funcs`: `build` captures one instant per statement and both keywords bind to
-  a `LitExpr` of it, which is what keeps them equal across rows, partitions and
+  form to the same place. That place is `LogicalBuilder.clockLiteral`, which
+  builds the literal by the keyword's `FunctionCatalog` entry (kind `Clock`),
+  not `Funcs`: `build` captures one instant per statement and both keywords
+  bind to a `LitExpr` of it, which is what keeps them equal across rows, partitions and
   CTE references. A `Funcs` entry would read the clock per row and stamp a large
   result with many instants. The instant is truncated to microseconds, the unit
   a `TimestampVector` holds, so the literal also equals a stored copy of itself
@@ -377,6 +431,50 @@ ship a fix or move something from "not done" to "done".
   and a directory holding part files no `_run.json` names is refused before
   a write: such files used to join the output, so a stray `part-00007.csv`
   added its row to a downstream count (plans/robustness/29).
+- **A failed run left part files and no record, and its rerun refused them.**
+  Each part was renamed into place the moment its own partition ended, a
+  failure elsewhere deleted only temp files, a validation that threw or a
+  final record that could not be written (swallowed, so the task said
+  `Succeeded`) came after every part was in place, and `clearIfMarked`
+  deleted the record before the files. So a later partition overflowing, a
+  validation failing to run, a full disk or a kill left `part-*` files that no
+  `_run.json` names, which the next run refused as someone else's until a
+  person deleted them, and a reader outside the job read the partial table.
+  A run now marks the directory `Running` first, stages every part and
+  renames them together, writes the final record last and fails the task when
+  it cannot, and clears a failed run's files under its record
+  (`OutputDirectory`, architecture.md §3a; plans/testing/06). The GUI's Persist
+  had its own copy of the old steps and wrote over stray parts, naming them
+  all in its record; it goes through the same protocol now. The fault
+  matrices then found the order a skipped task (or one failing before it
+  wrote) used, its record first and the earlier parts deleted after, leaving
+  a `Skipped` or `Failed` record beside parts when the clear stopped part
+  way; such a run marks the directory `Running` first now, as decision 1
+  says of any run that deletes a file there.
+- **A kill as a run creates a task's directory leaves it with no record.** A
+  run creates a fresh output directory as it writes the first record there
+  (`TaskRunRecord.write`: the directory, then `_run.json.tmp`, then the
+  rename); a halt in between, in another thread than the one a fault halted,
+  leaves the directory empty or holding only `_run.json.tmp`. That holds
+  nothing a reader takes for output and nothing the next run refuses (no
+  part file), and its mark clears the temp file; closing the window would
+  need the directory and its record created in one rename. The crash
+  campaign found it, and its directory invariant allows exactly that.
+- **Two runs writing one output directory at once are unsupported.** A
+  `Running` record from a live run in another process looks the same as one a
+  killed run left, so a second run started meanwhile clears the first's
+  files. Schedule one run per output directory at a time.
+- **An outside reader of an output directory checks its `_run.json`.** No part
+  file appears before the run commits, and staged parts and records start with
+  `.` or `_`, which Spark, DuckDB and the engine's own `PathGlob` skip; but a
+  crash during the commit's renames leaves some parts under a `Running`
+  record. Read a directory when its record says `Succeeded` or
+  `ValidationFailed`, and then the files it names.
+- **A build from before `Running` reads that record as no record.** Its
+  `TaskRunRecord.read` returns None for a status it does not know, as for any
+  record it cannot read, so it shows the task as not run. `isMarked` asks only
+  whether `_run.json` exists, so its next run still clears the directory
+  rather than refusing it.
 - **Hadoop-common pre-3.4.3 breaks on JDK 24+.** `UserGroupInformation.getCurrentUser()`
   in 3.3.x/3.4.0/.1/.2 calls `Subject.getSubject(AccessControlContext)`, which
   throws `UnsupportedOperationException` once JEP 486 (Security Manager
@@ -396,8 +494,9 @@ ship a fix or move something from "not done" to "done".
 - **JavaFX 21+ ships classes only in platform-classifier jars.** The bare
   `org.openjfx:javafx-{base,controls,graphics}` artifacts are metadata-only —
   depending on them alone gives "not found: type Stage" at compile time. The
-  `gui/` BUILD lists both the bare jars *and* the `mac-aarch64` classifier
-  jars. Add other platforms (`win`, Linux) the same way when building
+  `gui/` BUILD lists the `mac-aarch64` classifier jars and not the bare ones,
+  which hold no class, so the unused-dependency checker refuses them. Add
+  other platforms (`win`, Linux) the same way when building
   cross-platform binaries. The product jar (`//:transformer`) lists the
   `mac-aarch64` and `win` classifiers, so `transformer gui` runs on Apple
   Silicon macOS and Windows only. On Linux and Intel macOS the GUI fails to
@@ -475,6 +574,78 @@ ship a fix or move something from "not done" to "done".
   `GraphicsContext` also keeps what the last paint set (text alignment,
   baseline, line width, caps), so each `ChartCanvas` paint sets them back
   before it starts.
+- **Bazel prints a compiler warning only when its target compiles.** A cached
+  target prints nothing, so a warning that does not fail the build is seen
+  once, by whoever changed the file, if they look. That is why every warning
+  is an error here ([conventions.md](conventions.md)); the ones the toolchain
+  leaves off print with `--extra_toolchains=//:scala_toolchain_all_warnings`,
+  which changes every compile action and so recompiles every target.
+- **A `-Wconf:src=` filter matches a source's real path.** scalac reads the
+  canonical path, which resolves Bazel's sandbox and execroot symlinks to the
+  file in the workspace (or under the output base's `external/` for another
+  repository's source), and with no `-rootdir` the regex need only match a
+  suffix that starts at a path segment. So `src/test/scala/.*` matches every
+  test source wherever the checkout lives, and `execroot/_main/src/.*`
+  matches nothing (Bazel 7.4.1, rules_scala 7.0.0).
+- **The root module's Scala toolchain compiles rules_scala's sources too.**
+  `register_toolchains("//:scala_toolchain")` in MODULE.bazel is tried before
+  the toolchains rules_scala registers, so ours wins resolution, and
+  rules_scala's own Scala targets (the JUnit runner's test discovery, the
+  dependency analyzer) compile with it: its Stream and JavaConverters
+  deprecations would fail the build, hence the toolchain's
+  `-Wconf:src=external/rules_scala[^/]*/.*:s`.
+  `bazel cquery <target> --toolchain_resolution_debug='@@rules_scala~//scala:toolchain_type'`
+  shows the choice (`Selected //:scala_toolchain_impl`); if rules_scala's
+  default won, the options would do nothing and nothing would fail.
+- **An interface jar makes a body-only change cheap to build, not to test.**
+  rules_scala compiles each Scala library to a jar and an interface jar
+  (`plan-ijar.jar`), and dependents compile against the interface. A change
+  inside a method body, such as a mutant (testing.md, "Mutation testing"),
+  recompiles its own library alone; every dependent's compile action is a
+  cache hit. But each test target holds the full jar in its runfiles, so every
+  test that depends on the library runs again. A changed constant (`final val
+  X = 1`) is in the interface and recompiles the dependents too.
+- **Bazel's action cache holds one result per output, not per input.** After
+  a build of a changed file, the cache entry for its library's jar is the
+  changed one's, so putting the file back recompiles the library: the
+  unmutated jar is gone. A disk cache (`--disk_cache`) is keyed by the
+  action's inputs and gives the old outputs back, which is why the mutation
+  runner keeps one: each kill reruns its target on the unmutated file, and the
+  next mutant may be in another library.
+- **JUnit prints its total time in the JVM's locale.** Under tr-TR,
+  `job:locale_independence_test`'s log ends `Time: 0,688`, which a parser
+  reading `,` as a thousands separator takes for 688 seconds. Read a test's
+  duration from its `test.xml` or Bazel's build event protocol
+  (`testAttemptDurationMillis`), as the mutation runner does.
+- **A mutated loop condition can hang a test.** `while (!done)` with its `!`
+  dropped never runs its body, and a reader that returns an empty row instead
+  of the end of its input loops forever. Each stage of a mutation campaign
+  runs under `--test_timeout`, three times its slowest target's baseline (at
+  least 60 s), and such a mutant's outcome is `timeout`.
+- **A constant pool does not say which method calls.** A class file's pool
+  lists every class, field and method the class refers to, and holds no code:
+  a reference is placed in a method only by decoding the method's Code
+  attribute an instruction at a time (`bytecode/ClassFile.scala`), and a raw
+  `<` between two doubles is a `dcmpg` instruction there, no reference at all.
+  A rule read off the pool alone could only allow a whole class, and could not
+  see the comparison.
+- **A lambda's body is a method of its own.** scalac compiles a function
+  literal in method `m` to a static method `$anonfun$m$1` (with a boxing
+  adapter, `$anonfun$m$1$adapted`), and `m` holds only an `invokedynamic`
+  whose bootstrap arguments are a handle on it. A local def `go` in `m`
+  compiles to `go$1`, a default argument to `m$default$1`, a specialized copy
+  to `m$mcD$sp`, and a constructor's default argument, in the companion, to
+  `$lessinit$greater$default$1`. A bytecode rule's allowlist entry names `m`
+  and covers each of them; a lambda in a `val`'s initializer is
+  `$anonfun$<val>$1`.
+- **A string `match` calls `hashCode`.** Scala 2.13 compiles
+  `s match { case "a" => ...; case "b" => ... }` to a `lookupswitch` on
+  `s.hashCode`, then `equals` against each case. So a scan for hash calls finds
+  every string match and every case class's synthesized `hashCode`: when
+  plans/testing/18 measured it, 53 of the 59 classes of `core`, `sql`, `read`
+  and `write` that called a hash function did so only that way. That is why no
+  bytecode rule holds "every key hash goes through `KeyHash`";
+  `--config=hashzero` holds it by behaviour.
 - **`java -jar` ignores a `scala_binary`'s `jvm_flags`.** `//:transformer`
   sets `-XX:MaxRAMPercentage=75.0`, but that only applies to the
   `bazel-bin/transformer` wrapper script. Users running
@@ -701,6 +872,69 @@ ship a fix or move something from "not done" to "done".
   file was opened with; build those per reader, not once, since the codec
   factory they hold is not safe to share. A new `Configuration()` costs the
   same, so the reader and the writer each copy one built once.
+- **parquet-mr fails on a file it cannot read with whatever its code met
+  first**, and none of it names the file: a logical type newer than it (a
+  `GEOMETRY`, a `VARIANT`) is a `NullPointerException`, `Cannot invoke
+  "org.apache.parquet.format.LogicalType$_Fields.ordinal()"`, because its
+  generated Thrift union drops a member it does not know and its converter
+  switches on the missing one; an enum value it does not know (the `ALP`
+  encoding) or a corrupt schema is Thrift's `Required field 'type' was not
+  present! Struct: ...`, the struct and its statistics bytes printed; an
+  annotation on the wrong physical type is its own `UUID can only annotate
+  FIXED_LEN_BYTE_ARRAY(16)`; a missing codec library is a
+  `NoClassDefFoundError`, an `Error`, which `NonFatal` does not catch. So the
+  reader wraps every call into the library (`ParquetReader.libraryFailure`
+  decides what to wrap) and diagnoses a footer again itself
+  (`ParquetFooter`), never matching parquet-mr's text: a library upgrade
+  changes its words, and the tests read the reader's only. The generated
+  Thrift classes cannot say what a newer writer wrote, so the diagnosis
+  walks the footer's compact Thrift as plain values (`CompactThrift`), every
+  length bounded by the bytes left. A row group that fails is pinned to its
+  column by reading each chunk alone: parquet-mr reads a group's chunks
+  together, and its error names none.
+- **parquet's `LZ4` is Hadoop's codec, which needs the lz4 library; `BROTLI`
+  and `LZO` have no codec here.** parquet-mr decompresses `LZ4` through
+  Hadoop's `Lz4Codec`, which calls `net.jpountz.lz4` (lz4-java), a dependency
+  Hadoop leaves optional, so without it every `LZ4` file failed with a
+  `NoClassDefFoundError`, an `Error`. `at.yawk.lz4:lz4-java` is a runtime
+  dependency of `read/parquet` and `read/parquet:external_parquet`: the
+  coordinates `org.lz4:lz4-java` relocate there past 1.8.0, and the release
+  is pinned at one with every published decompression flaw fixed, since a
+  file's pages are untrusted input. Hadoop's codec reads a block framed with
+  its lengths, so an `LZ4` file early parquet-cpp wrote as bare blocks fails
+  as a page that does not decode (pyarrow falls back to bare blocks;
+  parquet-testing's `non_hadoop_lz4_compressed.parquet`). `BROTLI` needs a
+  codec class with a native library, and `LZO` one under the GPL, so neither
+  ships: `ParquetReader.decompresses` asks parquet-mr for a decompressor once
+  a codec, and a column in one it cannot make fails the view as it opens,
+  naming the codec. `LZ4_RAW` is parquet-mr's own and needs nothing.
+- **parquet-mr reads no page's CRC unless asked.** A page header may carry
+  a CRC32 of its bytes (parquet-mr writes one on every page, Arrow none by
+  default), and `parquet.page.verify-checksum.enabled` is off by default, in
+  pyarrow too, so a page whose bytes rotted decoded to whatever they now
+  said: parquet-testing's `datapage_v1-corrupt-checksum.parquet` read as
+  data. `ParquetReader.open` asks for the check (`usePageChecksumVerification`),
+  which parquet-mr makes as it reads a row group's page headers, so a
+  mismatch fails `readNextRowGroup`, and the refusal finds its column by
+  reading each alone, with the check and then without: one that reads
+  without it is the column whose page does not match. CRC32 is an intrinsic,
+  far cheaper than the decompression beside it; on the polymarket job,
+  whose inputs carry none but whose task outputs, read back by the tasks
+  after them, do, it was within the run-to-run spread (plans/testing/13,
+  decision 2).
+- **A footer's sizes are a writer's claim, never a reason to skip rows.**
+  `ParquetReader.packRowGroups` packs a file's row groups into partitions by
+  their bytes. It packed by `total_byte_size` alone and emitted a partition
+  only when its bytes were above 0, so a file whose writer left the field 0
+  (parquet-testing's `nation.dict-malformed.parquet`, 25 rows) read as empty,
+  its `COUNT(*)` 0, and a zero-byte group after a full partition was dropped
+  the same way, silently. A group now counts as the larger of
+  `total_byte_size` and its column chunks' compressed bytes, and one byte at
+  least, and the last partition closes whenever it holds a group, so every
+  group lands in exactly one partition and `exactRowCount` is the footer's
+  row count (`parquet_external_format_test`,
+  `aRowGroupIsReadWhateverBytesItsFooterGivesIt`, edits a footer with
+  `ExternalParquet.rewriteFooter`).
 - **Spill files use positional column names, never the logical schema's.**
   Every spill-capable breaker (`HashJoinExec`, `HashAggregateExec`, `SortExec`,
   `DistinctExec`, `WindowExec`) writes its working set to temp parquet and reads
@@ -739,8 +973,9 @@ ship a fix or move something from "not done" to "done".
   the operator's own schema. `positionalSchema` applies it, so a new write site
   that wraps its schema as above is covered. The six-type fuzz corpora never
   wrote an untyped `NULL` (each typed NULL was a `CAST`), so the defect was
-  unreachable to them; it is the only NULL a DECIMAL or a BINARY has, since the
-  binder reads no CAST target for either, and widening the mode-differential
+  unreachable to them; it is the only NULL a BINARY has, since nothing casts to
+  one, and the only one the generators write for a DECIMAL (a query may write
+  `CAST(NULL AS DECIMAL(p,s))` since plans/testing/10), and widening the mode-differential
   corpus to every type
   ([plan 04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)) found it
   at seed 1796. Pinned by `SqlEngineTest.nullTypedColumnsSpillEndToEnd` (every
@@ -1206,10 +1441,9 @@ ship a fix or move something from "not done" to "done".
   the NULL type, and `VecOps.arith` and `VecOps.negate`, which a projection, a
   WHERE and an aggregate's argument run on, had no case for it: `Arithmetic on
   null not supported` and `Unary - on null`, internal `IllegalStateException`s,
-  where the row path answered NULL. Both now return an all-NULL vector. A
-  `DECIMAL` has no typed NULL (the binder reads no CAST target for one), so
-  decimal arithmetic in a query reaches `NULL * NULL` as soon as both sides are
-  NULL. Pinned by `ExprBatchTest.arithOnNullAloneIsNull` and
+  where the row path answered NULL. Both now return an all-NULL vector. An
+  untyped NULL beside a `DECIMAL` takes its type, so decimal arithmetic in a
+  query reaches `NULL * NULL` as soon as both sides are an untyped NULL. Pinned by `ExprBatchTest.arithOnNullAloneIsNull` and
   `SqlEngineTest.arithmeticOnNullAloneIsNull`.
 
 - **Mode-differential comparison is a multiset with a floating-point tolerance.**
@@ -1283,10 +1517,15 @@ ship a fix or move something from "not done" to "done".
   algebra. Input-level and aggregate-decomposition TLP are deliberately NOT used.
   The same wrap could be a derived-table subquery in FROM, but the binder rejects
   those (see "No subqueries" below), so the CTE form is the only route. The
-  partition column is also restricted to type-reliable non-float output columns:
-  a computed `Int`-labelled column can reparse to `Double` (`-1.0 % c`) and a
-  `NaN` there falls into none of the three partitions, breaking the reassembly
-  through no engine fault.
+  partition column is also restricted to type-reliable output columns (a bare
+  column, a group key, an aggregate, a window): a computed `Int`-labelled column
+  can reparse to `Double` (`-1.0 % c`), so a literal or a column of its
+  declared type may not be what it meets. A FLOAT or DOUBLE column partitions
+  like any other since plans/robustness/21 gave floats one equality and one
+  order: a `NaN` row is TRUE or FALSE under every comparison, where under
+  IEEE's it fell into none of the three partitions (plans/testing/15 removed the
+  gate that kept floats out, and showed TLP catching IEEE comparisons put
+  back).
 
 - **The sharding gates are frozen at class load, so testing the sharded path
   needs a separate JVM.** `LogicalPlanCardinality.MinShardableSize`
@@ -1334,10 +1573,10 @@ ship a fix or move something from "not done" to "done".
   silently: `TRIM(BOTH 'x' FROM 'xxaxx')` returns `x`. `TRIM(x, 'a')` is worse,
   because it sets neither the specification nor the FROM keyword — the remstr
   just lands in `getFromExpression` and gets dropped. So `Funcs` implements the
-  single-argument whitespace trim (`Funcs.scala` gates TRIM on
-  `argTypes.size == 1` in both `returnType` and `applyVec`) and the binder
-  rejects every other form with "Only the single-argument TRIM(x) is
-  supported". `LTRIM`/`RTRIM` parse as ordinary `Function`s and are simply
+  single-argument whitespace trim (TRIM's `FunctionCatalog` entry takes one
+  argument, and `applyVec` gates it on one too) and the binder rejects every
+  other form with "Only the single-argument TRIM(x) is supported", the message
+  its entry gives the arities it refuses. `LTRIM`/`RTRIM` parse as ordinary `Function`s and are simply
   unknown functions.
 
   `QueryGen` / `MetaQueryGen` still render paren-free but for decimal
@@ -1580,7 +1819,7 @@ ship a fix or move something from "not done" to "done".
   `fuzz/dag_scheduler_fuzz_test`.
 
 - **A reopened task is the `TaskResult` its run returned, field for field.**
-  `JobSession.taskResultFromRecord` rebuilds each task from its `_run.json`
+  `JobSession.stateFromRecord` rebuilds each task from its `_run.json`
   when a job directory is opened, and it used to get two fields wrong for every
   reopened run. It dropped the record's `enqueuedAt`, so the task came back
   enqueued at the epoch and `queueWaitMillis` was the start time in epoch
@@ -1790,11 +2029,12 @@ ship a fix or move something from "not done" to "done".
   locale with non-ASCII numerals named part files and `{{ current_month_pad }}`
   in them. Every such call now names `Locale.ROOT`, and
   `job/locale_independence_test` runs under tr-TR (six of its tests failed at
-  the code before) and scans every module's compiled classes for the
-  default-locale forms, so a new one fails the suite. The desktop GUI and the
-  data viewer are scanned for case folding only, since their display text may
-  format a number in the user's locale; they folded keywords and input names in
-  the default locale until plans/testing/04 (below). See
+  the code before), and rule R1 of `bytecode/bytecode_rules_test` reads every
+  module's compiled classes for the default-locale forms, so a new one fails
+  the suite. The desktop GUI and the data viewer are held to case folding
+  only, since their display text may format a number in the user's locale;
+  they folded keywords and input names in the default locale until
+  plans/testing/04 (below). See
   [plans/robustness/16](../plans/robustness/16-locale-dependent-names.md).
 - **A `CASE`, `IF` or `COALESCE` used to evaluate every branch on every row
   — fixed.** `CaseExpr.evalVec` evaluated each branch's value over the whole
@@ -1825,6 +2065,17 @@ ship a fix or move something from "not done" to "done".
   SUMs over edge values to the exact answer worked out in `BigInt`, and failed
   at seed 0 at the code before. See
   [plans/robustness/18](../plans/robustness/18-integer-overflow-wraps.md).
+- **A global aggregate fails on its data while its query is planned, not
+  while it is drained.** `SqlEngine.execute` runs an aggregate with no GROUP BY
+  eagerly (`HashAggregateExec.executeCollapsing`), so a `SUM` past a BIGINT
+  throws from `execute` itself, where a grouped aggregate's or a projection's
+  failure throws from the drain. A test that reads an exception around
+  `execute` as a bind rejection and one around the drain as a failure on the
+  data misfiles the first, and some failures on the data are
+  `IllegalArgumentException`s, as a bind rejection is. The fuzz oracles run a
+  query through `RelEngine.answer`, which takes both in one place and tells a
+  failure on the data (`CleanRejection.isDataError`) by its message
+  (plans/testing/15 W7, where `AggDecomposition` first met it).
 - **RANGE frames, the default frame among them, used to run as ROWS —
   fixed.** `WindowExec.frameBoundsFor` mapped every bound to a row offset
   whatever the frame type, so `SUM(x) OVER (PARTITION BY g ORDER BY k)`, whose
@@ -2017,10 +2268,36 @@ worth carrying:
   RAND() operand once.
 - **Java counts UTF-16 chars, SQL counts characters.** `String.length`,
   `substring` and `trim` (which also strips every char up to U+0020) are not
-  SQL's LENGTH, SUBSTRING and TRIM; half of a surrogate pair is no text, and a
-  spill or a parquet or CSV file writes it as `?`; `Pattern.quote` of half a
-  pair matches nothing, so a LIKE pattern holding an emoji matched no string.
+  SQL's LENGTH, SUBSTRING and TRIM; half of a surrogate pair is no text: a
+  spill or a parquet file writes it as `?`, and `CsvWriter` refuses the write,
+  naming its row and column; `Pattern.quote` of half a pair matches nothing, so
+  a LIKE pattern holding an emoji matched no string. So a STRING never holds
+  one (decision 2 of plans/testing/17, taken overnight as recommended, not yet
+  confirmed by the user): where one can come in it is refused, a string
+  literal (SQL passed through the Scala API as a Java string) at bind time and
+  a view built in Scala, a `MaterializedView` when it is built and a
+  `CatalogView` of one's own when a scan reads it (`stringsAreText`, which the
+  readers and `MaterializedView` say for themselves); no reader gives one, and
+  no function makes one of text, so no writer meets one, and
+  `--config=verify` flags one at the operator that emits it. The SQL fuzzers'
+  `TextPool` draws no half pair.
   String ORDERING is still UTF-16 (see the parquet pushdown entry above).
+- **Java's `toUpperCase` and `toLowerCase` map case in full; SQL's `UPPER` and
+  `LOWER` map one character to one.** The full mapping turns a sharp s
+  (U+00DF) into `SS`, the ligature fi (U+FB01) into `FI` and a capital I with
+  a dot above (U+0130) into `i` and a combining dot, so a string's length
+  changed under `UPPER`, and `UPPER(s) LIKE UPPER('SS')` matched a sharp s
+  that `s ILIKE 'SS'` did not, while `ILIKE`'s regex (`CASE_INSENSITIVE |
+  UNICODE_CASE`) compares one character with one. `Funcs.upper` and
+  `Funcs.lower` apply `Character.toUpperCase` / `toLowerCase` to each code
+  point, Unicode's simple mapping (plans/testing/15, decision 2). What remains:
+  a regex folds a character as the small form of its capital, so `ILIKE`
+  matches a dotless i (U+0131) and a dotted capital I to `i`, where `LOWER`
+  keeps the dotless i and `UPPER` the dotted capital, which is held for a
+  decision (plans/testing/15, finding F1). The frontend fuzzer's ILIKE spelling
+  shape records it as a known disagreement that applies only where the case's
+  text or `t.s` holds such a letter (`SyntaxEquivalence.Known.onlyWhere`,
+  `TextPool.unpairedCase`), so a split of any other kind still fails.
 - **JSqlParser reads `{d '...'}` through `java.sql.Date.valueOf`, which rolls
   `2026-02-30` over to March.** `SqlParser.escapeLiteralText` reads the
   literal's token text, which goes through the same strict CAST `DATE '...'`
@@ -2106,9 +2383,9 @@ globs, the parser, the nested-loop guard and the desktop GUI. Details are in
   the DAG matched an input's name against the job's lowered names in it, so an
   input named with an I showed no task using it; vim's Ctrl-I arrived as
   Ctrl-ı; and the block caret's CSS printed `1,50px`, which CSS cannot read.
-  Every case fold names `Locale.ROOT` and the CSS is formatted in it, and
-  `job/locale_independence_test` scans the GUI's and the viewer's jars for case
-  folding. Found by `--config=zone`, through the highlighter's test, with two
+  Every case fold names `Locale.ROOT` and the CSS is formatted in it, and rule
+  R1 (desktop) of `bytecode/bytecode_rules_test` reads the GUI's and the
+  viewer's jars for case folding. Found by `--config=zone`, through the highlighter's test, with two
   tests that folded or printed a parquet type name in the default locale.
 
 ## Defects the plan round trip found (2026-11-01, all fixed)
@@ -2128,14 +2405,168 @@ output, over every slt script and every query generator. Details are in
   COUNT() FROM t GROUP BY s ORDER BY COUNT(*), s` (`COUNT()` is now refused,
   below).
 
+## Defects the agreed corpus found (2026-11-02, all fixed)
+
+Running the fuzz generators' queries through Postgres, DuckDB and the engine
+under every verification mode
+([plans/testing/14](../plans/testing/14-multi-engine-generated-corpus.md))
+found one defect no other check had, in the printer rather than in an answer:
+
+- **The plan of a BETWEEN over two DECIMAL types did not bind back.**
+  `d2 BETWEEN d18 AND i` over a `DECIMAL(9,2)`, a `DECIMAL(38,18)` and an
+  `INT` compares its three operands as the one DECIMAL that holds them all,
+  `DECIMAL(38,18)`, and binds as `d2 >= d18 AND d2 <= i` with each operand
+  cast to it. `PlanSql` leaves its casts to a DECIMAL to the binder, so it
+  printed the two comparisons bare, and bound again each compared its own
+  pair, `d2 <= i` as a `DECIMAL(12,2)`: another plan, so the `reprinted` modes
+  failed the query and `EXPLAIN` printed SQL that did not bind back to its
+  plan. The answers were the same, a DECIMAL comparison being exact at any
+  type. The printer now writes that expansion as the `BETWEEN` it came from
+  where its operand is cast to a DECIMAL (`PlanSql.DecimalBetween`), which
+  binds to the same casts; two comparisons written over one operand with no
+  such cast stay two. Found on 8 of the decimal feature's first 600 queries,
+  each a `BETWEEN` the corpus's own decimal producer draws over columns of two
+  decimal types and an integer; `types/decimal.test` and `PlanSqlTest` hold
+  it.
+
+## Defects the literature oracles found (2026-11-02, all fixed)
+
+The relations of [plans/testing/16](../plans/testing/16-literature-oracles.md),
+borrowed from the database-testing literature, each hold the engine to an
+answer it should give by construction:
+
+- **The plan of a CAST of a condition did not parse.** `SELECT CAST((a = b)
+  AS VARCHAR) FROM t` binds, and `PlanSql` printed its plan as `CAST(t.a =
+  t.b AS VARCHAR)`, which JSqlParser does not read, so the `reprinted` modes
+  would fail such a query and `EXPLAIN` printed SQL that did not parse. The
+  same held for an operand that is an IS NULL, an IN, a LIKE, a BETWEEN, an
+  AND or an OR. A CAST's operand that binds looser than a concatenation now
+  prints in parentheses. Found by the `rewritten` slt mode, whose rewrite
+  wrapped a boolean under a CAST in a form that cannot change its value;
+  `PlanSqlTest` holds it.
+- **With metrics on, a sharded plan ran unsharded.** A join, an aggregate, a
+  DISTINCT and a window run per shard when the planner put an exchange under
+  them, which each told by its child's class; with metrics on, that child is
+  the wrapper that meters the exchange (`MeteredPlan`), so each ran on one
+  partition, reading every shard: the same answer, the parallelism the
+  exchange was there for gone, and the metrics describing a plan no run
+  without them takes. Each now sees through the wrapper (`ExchangeExec.feeds`).
+  Found reading a join's path off its plan for plan 16's forced-plan guard;
+  `ShardedModeFuzzTest.metricsLeaveAShardedPlanSharded` holds it.
+- **The nested-loop guard sized an outer join smaller than the inner join it
+  holds** (decision 3 of plans/testing/16, taken overnight as recommended,
+  not yet confirmed by the user). The guard counted a join on an equality as
+  the estimator sizes it to pick a build side, a LEFT or RIGHT join by its
+  preserved side, so `a CROSS JOIN d LEFT JOIN b ON a.k = b.k CROSS JOIN c`
+  over 10, 10, 300000 and 100 rows ran while its INNER JOIN, which pairs no
+  more rows, was refused: a restriction of a query refused where the query
+  ran. Under a grouping the same: a CTE grouping a LEFT JOIN beneath two
+  CROSS JOINs ran where its INNER JOIN was refused. The guard now counts a
+  join on an equality by its larger side whatever its kind, both sides for
+  FULL, under an aggregate or a union too, so it refuses the outer join
+  where it refuses the inner one; the estimator's `joinEstimate`, which picks
+  build sides, is unchanged. Found by CERT's guard rule
+  (`fuzzCertOverJoinShapes`, seed 2 before the change); `JoinSwapTest`'s
+  `anOuterJoinCountsNoFewerRowsThanTheInnerJoinItHolds` holds it.
+
+## Defects the whole-suite runtime checks found (2026-11-02, all fixed)
+
+`--config=verify` ([plans/testing/17](../plans/testing/17-whole-suite-runtime-checks.md),
+`core/BatchInvariants`) checks every batch every operator emits against the
+schema it declares, so a value its type cannot hold fails where it was made:
+
+- **A UNION ALL's right side kept its own column names.** `UnionExec` passed
+  the right side's batches through as they were, so they named the right
+  side's columns where the union names the left's, and `CsvWriter`, which
+  checks each batch's names against the output's, refused `SELECT a AS x
+  FROM t UNION ALL SELECT k FROM u` ("Batch schema Schema(k:int?) does not
+  match writer schema Schema(x:int?)"), in a job and in `transformer query
+  --output` alike; a parquet output, which reads by position, wrote it. The
+  union now relabels the right side's batches with its own schema, the same
+  vectors. `SqlEngineTest.aUnionAllsBatchesCarryItsNamesAndWriteAsCsv`.
+- **`ABS(NULL)` was a DOUBLE vector under a column declared NULL.** The
+  vectorized ABS chose its output vector by the result type, with DOUBLE for
+  every type it did not name, NULL among them. Every value was NULL, so no
+  answer changed. `SqlEngineTest.absOfNullIsANullColumn`.
+
+`--config=leaks` (`core/LeakAudit`) reports at each test JVM's exit what it
+left open, and the close protocol (architecture §3h, decision 4) releases it:
+
+- **A query its consumer stopped reading held what it had opened.** A
+  parquet partition closed its file only once its last row group was read, a
+  CSV partition only when it found no next row, and a spilling operator's
+  directory went only when its output was drained, its shutdown hook covering
+  the rest. So `LIMIT` (which stopped pulling), a query that failed or was
+  stopped part way, and the data viewer's preview (`DataGrid.sample`, which
+  reads the first rows of a partition) left files open until garbage
+  collection and spill directories until the JVM exited, which in the GUI,
+  the viewer or the `transformer query` shell accumulates. `sql/exec:closing_test`
+  holds each case to the JVM's open file count and its spill directory.
+- **A failed fan-out returned before its other tasks ended.**
+  `Scheduler.submitAndAwaitAll` threw at the first failure, so a sort's or an
+  aggregate's other partitions went on reading their inputs, and spilling into
+  a directory, after the query had failed. It now waits for every task, then
+  throws the first failure.
+- **A CSV writer whose header could not be written left its staged file open,
+  and on disk.** The header is written as the writer is made, after its staged
+  file is opened; a column name the charset cannot encode threw there, and the
+  partitioned write, which aborts the writers it has, never had this one.
+  `CsvWriterTest.aHeaderTheCharsetCannotEncodeLeavesNoStagedFile`.
+- **The tests' spill isolation held for the first test of a JVM only.** The
+  spill directory is read once per JVM (`Spill.baseDir`), so the per-test
+  `transformer.spill.dir` that fourteen test classes set in `@Before` moved
+  nothing after the first, and their `@After` deleted the directory the next
+  test spilled into. Bazel sets `java.io.tmpdir` to each target's own
+  `TEST_TMPDIR`, under which the default spill directory already lies, so the
+  tests set nothing now, and their `@After` checks that no operator's
+  directory is left (`Spill.operatorDirsLeft`) rather than deleting it.
+
+## What the literature oracles held out (2026-11-02, held for the user)
+
+Three findings of [plans/testing/16](../plans/testing/16-literature-oracles.md)'s
+relations are choices rather than defects, so they are held for the user, each
+with its repro, and the relation that found it reports it rather than failing:
+
+- **T1. A DECIMAL compares with a float as a decimal, and fails on NaN.** An
+  INT or BIGINT beside a FLOAT or DOUBLE column is read as a DOUBLE, so `i >
+  f` over `f = NaN` answers (NaN sorts above every number); a DECIMAL beside
+  one reads the float as a decimal (`Ops`: a decimal against any number as
+  decimals), so `d > f`, `d = f`, `d IN (f)` and `d BETWEEN f AND x` fail
+  while running with `Cannot cast NaN to decimal(10,0)`, and so do the
+  infinities. Arithmetic, CASE, COALESCE and GREATEST refuse a DECIMAL beside
+  a FLOAT as the query binds instead (`a FLOAT has no scale for a DECIMAL
+  result to keep`). The options: refuse the comparison at bind time as the
+  others are, compare as a DOUBLE as the integers do, or keep it. TypeCheck
+  counts it (`float as a decimal`).
+- **G1. The nested-loop guard's bound depends on the order the optimizer
+  joins in.** It counts a join on an equality as its larger side, whatever
+  pairing comes before it, so a key joined before a CROSS JOIN counts their
+  product where joined after it does not, and a restriction that lets
+  `JoinOrder` bring the key forward (an outer join made INNER joins a run; a
+  WHERE equality keys a table) can be refused where the query is not:
+  `SELECT x.k AS a FROM x CROSS JOIN t1 INNER JOIN t2 ON x.k = t2.k CROSS JOIN
+  t3 RIGHT JOIN t4 ON t2.k = t4.k` (x a CTE of five rows, t1 4000, t2 0, t3
+  3, t4 5001 rows) runs, and with the RIGHT JOIN made INNER is refused.
+  Decision 3 made the guard monotone in the query's own join order only. CERT
+  counts it (`refused only in the order the optimizer chose`).
+- **E1. A restriction can be estimated larger once optimized.** The
+  estimator sizes an inner join by its larger side, so a filter the
+  optimizer pushes under one to the smaller side stops counting, where above
+  the join it cut the estimate: a FULL JOIN made LEFT lets a WHERE on the
+  left through, so `... FULL JOIN r0 AS t2 ON t0.c0 = t2.c0 WHERE t0.c1 = 3`
+  over two million-row tables is estimated larger as a LEFT JOIN. The bound
+  plans' estimates stay monotone, which CERT holds; it counts the optimized
+  ones.
+
 ## Answers the PostgreSQL port settled (2026-11-01, all decided)
 
 Porting Postgres's regression tests (`src/test/slt/postgres/`, with
 Postgres's answers) found five answers that no decision covered, four in the
 first four files and one in float8.sql. Their records were held out of the
 scripts until each was decided; they are in the scripts now, a logarithm's
-and an underflow's as `skipif transformer` with the reason. Details are in
-[plans/testing/05](../plans/testing/05-plans-as-sql.md).
+and an underflow's as `skipif transformer` with the id of its rule in the
+[ledger below](#answers-that-differ-from-other-engines-by-design). Details are
+in [plans/testing/05](../plans/testing/05-plans-as-sql.md).
 
 - **`COUNT()` with no argument was `COUNT(*)`**, as SQLite and DuckDB read
   it, on purpose in `LogicalBuilder` and in no doc. Postgres refuses it, and so
@@ -2169,7 +2600,508 @@ and an underflow's as `skipif transformer` with the reason. Details are in
   narrowing `CAST` to `FLOAT` that would be 0. `types/float_equality.test`
   pins it.
 
+## What the Spark port left out (2026-11-02, held for the user)
+
+Porting Spark's SQL query tests (`src/test/slt/spark/`, with Spark's ANSI
+answers, [plans/testing/10](../plans/testing/10-spark-typing-ports.md)) took
+three decisions overnight, as recommended and not yet confirmed by the user: a
+query writes `CAST(x AS DECIMAL(p,s))`; an `INT` or `BIGINT` beside a `FLOAT`
+is a `DOUBLE`; and a `BIGINT` beside a `DECIMAL` stays a `DECIMAL(19,0)`
+(`bigint-decimal`). Every other answer the engine gives otherwise is a rule of
+the ledger below, decided before the port. What the scripts leave out:
+
+- **Records that need what the engine lacks** (1,317 statements):
+  `TINYINT`, `SMALLINT`, `BINARY` and `X''` literals, `INTERVAL` (and text
+  minus a date or a timestamp, an `INTERVAL` in Spark), `TIME`, arrays and
+  maps, Spark's functions and operators (`pmod`, `div`, `<=>`, `date()`,
+  `string()` and the rest), the literal suffixes `Y`, `S`, `L` and `D`, a bare
+  `DECIMAL` (Spark's `DECIMAL(10,0)`), and decimalArithmeticOperations.sql's
+  half under `allowPrecisionLoss=false`, which gives a NULL or an error past 38
+  digits where the engine, like Spark by default, gives way on the scale.
+- **Records both engines refuse, for different reasons** (42), held out as
+  findings, since one engine's refusal for another reason is no agreement. In
+  each the engine refuses by a decided rule before it reaches what Spark
+  refuses. 32 are decimalPrecision.sql's timestamps written with the operator
+  under test for their dashes (`cast('2017*12*11 09:30:00.0' as timestamp) *
+  ...`, as Spark's input has them): Spark refuses the operator's types without
+  reading the text, the engine reads a CAST's string literal when the query is
+  bound and refuses the text first. 7 are `cast('1' as boolean) IN (...)` with a
+  number or a date in the list, where Spark refuses the list's types and the
+  engine `'1'` as no BOOLEAN first (`bool-text`). 3 are RANGE frames ordered by
+  a STRING, a BOOLEAN or a TIMESTAMP, where Spark refuses the frame's type and
+  the engine `PARTITION BY 1` first (`window-constant-key`). No answer differs
+  in any of them, and the recommendation is to leave them out as they are.
+- **Records whose outcome changes with the JVM's locale** (3), held out as a
+  defect: implicitTypeCasts.sql writes `like` in lower case (`select 1 like
+  '%'`), and under a Turkish default locale, as the whole-suite configuration
+  `zone` runs, JSqlParser upper-cases the keyword to `LİKE`, which is no
+  constant of its `LikeExpression.KeyWord`, and the query is a parse error
+  naming the parser's class. Upper-case `LIKE` parses in every locale. The
+  converter runs each record in that locale too and holds out any whose
+  outcome changes. The recommendation is for the parser to read SQL in a
+  locale-independent way (the user's choice how: plans/testing/10's Outcome).
+
+## What the second PostgreSQL port held out (2026-11-02, held for the user)
+
+Porting ten more of Postgres's regression tests (`src/test/slt/postgres/`,
+[plans/testing/11](../plans/testing/11-postgres-ports-round-two.md)) took its
+five decisions overnight, as recommended and not yet confirmed by the user:
+REL_18_6 for every port, a SMALLINT value written as an INT where no answer
+depends on SMALLINT's range, a `CHAR(n)` column a STRING holding each value
+unpadded, Postgres's output vendored and checked in `slt_test`, and the ten
+files of the plan. Every other answer the engine gives otherwise is a rule of
+the ledger below, decided before the port (`int-text` joined it as a row of
+plans/robustness/24's rule). What the scripts hold out:
+
+- **Records both engines refuse, for different reasons**, held out as Spark's
+  were, since one engine's refusal for another reason is no agreement. In
+  each the engine refuses by a decided rule before it reaches what Postgres
+  refuses: int4.sql's and int8.sql's six texts each of a number one past
+  `INT`'s or `BIGINT`'s range in base 2, 8 or 16 (`int4 '0x80000000'`), out of
+  range for Postgres and no integer of the engine's grammar (`int-text`); and
+  date.sql's 31 texts Postgres reads in a DateStyle format and finds a field
+  out of range in (`1/8/1999` under YMD), or a date past one end of its range
+  (`4714-11-23 BC`, `5874898-01-01`), all no ISO date of the engine's grammar
+  (`date-text-iso`). No answer differs. The recommendation is to leave them
+  out.
+- **A number immediately followed by a letter is read as the number and an
+  alias** (numerology.sql:48-52, 78): `SELECT 0.a`, `0.0a`, `.0a`, `0.0e1a`
+  and `0.0e` answer 0.0 in a column named `a` or `e`, where Postgres refuses
+  each (`trailing junk after numeric literal`), and `SELECT .000_005` answers
+  0.0 in a column `_005`, where Postgres reads 0.000005. These are silent
+  misreads: a query that looks like a number gets another one. The
+  recommendation is to refuse a numeric literal immediately followed by a
+  letter or `_`, as Postgres 15 and later do, naming the text.
+- **A number Postgres 16 reads is refused as an unknown column or a parse
+  error** (26 of numerology.sql's statements): binary and octal integer
+  literals (`0b100101`, `0o273`) are `Unknown column '0b100101'. Available:
+  []`, and digits with `_` between them are an unknown column (`1_000_000`,
+  `0x1EEE_FFFF`) or a parse error in the parser's words (`1_000.000_005`,
+  `1_000.`, `1_000.5e0_1`). A hexadecimal integer (`0x42F`) is refused as such
+  (`refused-hex-literal`), and those records are skipped under that rule. No
+  decision says whether the others are numbers. The options: read them as
+  Postgres 16 does, or refuse each by name as the hexadecimal literal is
+  (recommended: a refusal that names the literal, so the text is not taken
+  for a column, with reading them a later choice).
+- **Text Postgres refuses as a malformed number, the engine refuses as
+  something else** (18): `123abc`, `0x0o`, `0b`, `1b`, `0x`, `1x`, `100_`,
+  `1_000._5` and the rest are an unknown column, and `0.0e+a`, `1_000_.5`,
+  `1_000.5_` and `1_000.5e_1` a parse error, where Postgres says `trailing
+  junk after numeric literal` or `invalid binary integer`. Both refuse; the
+  engine's words name a column the text is not. They are held out with the
+  rest of numerology.sql's literals, and settle with the decision above.
+- **`GROUP BY` an output column's name is refused** (numerology.sql:172):
+  `SELECT f1 AS two, ... GROUP BY two` is `Unknown column 'two'`, where
+  Postgres groups by the output column when no input column has the name, as
+  MySQL, SQLite and DuckDB do; SQL-92 does not allow it. The README states
+  how `ORDER BY` reads a name and says nothing of `GROUP BY`. The options:
+  accept it, under `ORDER BY`'s rule (an output column first, refused where
+  it is ambiguous), or keep refusing it and say so in the README, where a
+  `GROUP BY` key is described (recommended: accept it, since the engine
+  already resolves output names in `ORDER BY`).
+- **An alias named `minus` is a parse error.** JSqlParser 5.2 reserves
+  `MINUS`, Oracle's spelling of `EXCEPT`, so `SELECT q1 - q2 AS minus FROM
+  INT8_TBL` (int8.sql:66 and 69), which Postgres runs, fails with `SQL parse
+  error: Encountered unexpected token: "minus" "MINUS"`, the parser's words;
+  `AS "minus"` runs, and the port writes it so, a rewrite that cannot change
+  what the query means. No doc lists the words a name must quote for the
+  parser. The recommendation is to say so where the README describes names
+  (`MINUS` with the words the parser reserves), and to name the word in the
+  refusal rather than the parser's tokens.
+
+## What CockroachDB's logic tests held out (2026-11-02, held for the user)
+
+Vendoring thirty of CockroachDB v23.2.0's logic tests (`src/test/slt/cockroach/`,
+[plans/testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md))
+took the plan's decisions overnight, as recommended and not yet confirmed by
+the user: the files vendored as they are and read through a dialect, a column
+of a type the engine has not left out of its table and a record that reads it
+skipped under a `no-<type>` rule, every record under every mode. Records the
+engine answers otherwise by a decided rule are skipped under it (two rows
+joined the ledger as rows of rules already decided: `avg-sum-int`, since v1,
+and `names-ignore-case`, the user's of 2026-10-30); what the engine or the
+runner lacks is held, `onlyif cockroachdb # needs ...`. What no decision covers
+is held as a finding, `onlyif cockroachdb # held: finding C<n>`, and runs once
+in `slt_test`, which fails once the engine gives CockroachDB's answer:
+
+- **C1. An alias after a qualified star is dropped** (`select`, 1): `SELECT
+  kv.* AS foo FROM kv` returns `kv`'s columns under their own names, where
+  CockroachDB refuses it (`"kv.*" cannot be aliased`). The binder reads no
+  alias there, and nothing refuses it, so the clause vanishes, which
+  plans/robustness/01 set out to stop. The options: refuse `t.* AS x` by name,
+  as `UnsupportedClauses` refuses the other clauses the binder does not read
+  (recommended); or keep it.
+- **C2. A DOUBLE or FLOAT cast to text prints as Java prints it** (`float` 4,
+  `cast` 1): `CAST(f AS STRING)` is `0.0`, `1.2345678901234567E-4`,
+  `1.2345678901234568E22` and, for a FLOAT, `0.33333334`, where CockroachDB
+  and Postgres write `0`, `0.00012345678901234567`, `1.2345678901234568e+22`
+  and the float's shortest decimal. The options: print a float's text as
+  Postgres does, the shortest digits with no trailing `.0` and an exponent only
+  past its range (recommended, since text a CAST makes is compared, joined and
+  written out); or keep Java's and state it with the cast rules.
+- **C3. A TIMESTAMP cast to text prints as an ISO instant** (`datetime`, 1):
+  `CAST(TIMESTAMP '2016-02-10 19:46:33.306157' AS STRING)` is
+  `2016-02-10T19:46:33.306157Z`, where CockroachDB and Postgres write
+  `2016-02-10 19:46:33.306157`. The options as C2's: SQL's form (recommended),
+  or keep it and say so.
+- **C4. Text with a UTC offset cast to TIMESTAMP moves to UTC** (`datetime`, 3):
+  `CAST('2015-08-25 05:45:45-01:00' AS TIMESTAMP)` is `06:45:45`, where
+  CockroachDB and Postgres, whose `TIMESTAMP` has no time zone, drop the offset
+  (`05:45:45`). The options: refuse an offset in text cast to a TIMESTAMP, as a
+  CAST reads its text strictly (recommended: the value is a `TIMESTAMPTZ`'s,
+  which the engine has not); drop it as Postgres does; or keep converting.
+- **C5. A DATE before 4714 BC is a date** (`datetime`, 1): `CAST('-5632-12-26'
+  AS DATE)` answers, where CockroachDB and Postgres refuse it as out of range.
+  The options: keep the wider range and give it a ledger row (recommended); or
+  refuse a date outside Postgres's range.
+- **C6. An unquoted name names its output column as written** (`select` 2,
+  `case_sensitive_names` 1): `SELECT -488 AS OF` names its column `OF` and
+  `SELECT x, X` names them `x` and `X`, where CockroachDB and Postgres fold an
+  unquoted name to lower case (`of`, `x`). The options: keep the written case,
+  as Spark and DuckDB do, beside the user's rule that names match regardless
+  of case, with a ledger row (recommended); or fold unquoted names.
+- **C7. Records both engines refuse, for different reasons** (15): in each the
+  engine refuses by a rule of its own before it reaches CockroachDB's reason:
+  a `LIMIT` or `OFFSET` that is no literal (`LIMIT sum(v)`, `LIMIT x`, 6),
+  `HAVING k` over a `k` outside `GROUP BY` (CockroachDB: not a boolean),
+  `WHERE 'hello'` (a STRING condition), text that is no ISO date of the
+  engine's grammar (`4714-11-24 BC`, `infinity`, `5874897-12-31`,
+  `05-07-2020`, 6, where CockroachDB finds a date out of range), and a BIGINT
+  cast to TIMESTAMP, which the engine has no cast for. No answer differs. The
+  recommendation is to leave them held, as the Spark and Postgres ports did.
+
+## What DataFusion's sqllogictest files held out (2026-11-02, held for the user)
+
+Vendoring 27 of Apache DataFusion's sqllogictest files at `934691e`
+(`src/test/slt/datafusion/`,
+[plans/testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md))
+took the same decisions overnight. DataFusion's answers outside `pg_compat`
+are one engine's, so each difference was read before it was put down to a
+rule: most are the ledger's (`nulls-sort-low`, since DataFusion sorts NULL
+last under `ASC`; `div-zero-null` and `math-domain-null`, where DataFusion
+answers an infinity or NaN or raises an error; `decimal-result-type`), and its
+`EXPLAIN` records print DataFusion's own plans and are held for it. What no
+decision covers, held as `onlyif datafusion # held: finding D<n>`:
+
+- **D1. `ROUND` takes a number of places past INT** (`math`, `scalar`, 2):
+  `round(1.25, 2147483648)` answers 1.25, where DataFusion refuses the places
+  as past its i32. The options: refuse places past INT, naming them
+  (recommended, beside the README's LIMIT and OFFSET past BIGINT); or keep it.
+- **D2. `CONCAT` of no arguments is the empty string** (`scalar`, 1), where
+  DataFusion refuses it. The options: refuse it, as `COUNT()` is refused
+  (recommended); or keep it.
+- **D3. `CONCAT(NULL)` is NULL** (`expr`, 1), where DataFusion, like Postgres's
+  `concat()`, skips a NULL argument and answers the empty string. The engine's
+  `CONCAT` is `||` by another name. The options: keep it and say so where the
+  README lists the string functions (recommended); or skip NULLs as Postgres's
+  `concat()` does.
+- **D4. Two output columns may share a name** (`aggregate`, 1): `SELECT state,
+  sum(salary) AS state ... GROUP BY state` answers, where DataFusion refuses
+  the second `state`. Postgres answers too. The recommendation is to keep it,
+  with a ledger row.
+- **D5. A window frame that starts after it ends is empty** (`window`, 2):
+  `RANGE BETWEEN 1 PRECEDING AND 2 PRECEDING` counts no rows, where DataFusion
+  refuses the frame; Postgres answers as the engine does. The recommendation
+  is to keep it, with a ledger row.
+- **D6. A sliding window's `VAR` and `STDDEV` agree with DataFusion's to 11
+  digits** (`window`, 1), not the 15 a DOUBLE is compared at: the engine's
+  `46721.333333333234` is nearer the exact 46721⅓ than DataFusion's
+  `46721.33333333174`. No change is recommended; the record stays held, as one
+  engine's less exact answer.
+- **D7. Records both engines refuse, for different reasons** (27): the engine
+  refuses by a rule of its own first (a NOT of an integer, a string condition,
+  a `LIMIT` that is no literal, `HAVING` or `GROUP BY` an output name, a LAG
+  offset that is no literal, a RANGE offset written as text, a self-join with
+  no aliases, a numeric literal past `DECIMAL`'s 38 digits), where DataFusion
+  refuses for its own. The recommendation is to leave them held.
+
+## What the external file fixtures held out (2026-11-02, held for the user)
+
+Vendoring apache/parquet-testing's files (`src/test/data/parquet-testing/`)
+and DuckDB's, PapaParse's and csv-spectrum's CSV inputs (`src/test/data/csv/`,
+[plans/testing/13](../plans/testing/13-external-file-fixtures.md)), and
+comparing the engine's reading of each with pyarrow 26's, DuckDB 2.0's and the
+other parsers', found what no decision covers yet. Each is held in its
+manifest with a `# held` comment beside the engine's present answer, so the
+test fails if that answer changes.
+
+- **P1. A column chunk whose stated length leaves out its dictionary page's
+  header is read alone wrong, by parquet-mr** (`nation.dict-malformed.parquet`,
+  written by an old parquet-cpp: the `name` chunk is given 322 bytes, and its
+  pages, from the dictionary page's 15-byte header to the end of its data
+  page, take 337). Read with the file's other columns, parquet-mr fails on
+  the row group, and the engine refuses it cleanly (`row group 0 cannot be
+  read`) where pyarrow reads its 25 rows. Read alone, `SELECT name FROM t`,
+  parquet-mr decodes rows 8 to 24 as `ALGERIA`, with no error, where pyarrow
+  reads `INDIA`, `INDONESIA` and the rest: a silent wrong answer. The options:
+  check each chunk's page headers against its stated length before reading
+  it, and refuse a chunk whose pages run past it, naming the column
+  (recommended: the wrong answer becomes a refusal, at the cost of walking a
+  chunk's page headers, which parquet-mr reads anyway); read past the stated
+  length as pyarrow does; or keep it.
+- **P2. `LZ4` written as bare blocks is refused** (`non_hadoop_lz4_compressed.parquet`):
+  early parquet-cpp wrote `LZ4` pages without Hadoop's framing, which Hadoop's
+  codec reads as a corrupt frame, so the page does not decode; pyarrow tries
+  Hadoop's framing and falls back to a bare block. The options: keep the
+  refusal (recommended: the format's `LZ4` is Hadoop's, and guessing the
+  framing is how pyarrow reads it); or fall back to a bare block as pyarrow
+  does, a decompressor of the reader's own around lz4-java.
+- **P3. A `STRING` column whose bytes are not UTF-8 reads with U+FFFD**: a
+  value `C3 28` reads as `�(`, through parquet-mr's `toStringUsingUTF8`, where
+  a CSV file's bytes that are no text fail the read, naming the line, and so
+  does such a value of a column `binaryAsString` reads. The options: fail the
+  read, naming the column and row, as both of those do (recommended); or keep
+  it, and say so in the README's parquet section.
+
+- **C1. An escape before a character that is not the quote is dropped**
+  (PapaParse's "Custom escape character not used for escaping",
+  `papaparse/parse/076.csv`): with `escape` `\`, the quoted field `"c\d"`
+  reads `cd`, where PapaParse reads `c\d`, an escape escaping only the quote
+  (and itself). The README says an escape that is not the quote "escapes the
+  quote and itself inside quotes", and nothing of the escape before another
+  character. The options: keep the escape before any other character as text,
+  as PapaParse and DuckDB do (recommended: the README's rule, read
+  literally); or say in the README that it escapes any character.
+
+The CSV corpus found nothing else no decision covers: under the engine's
+options DuckDB reads its files as the engine does, value for value, but where
+a ledger rule parts them, and PapaParse's and csv-spectrum's readings differ
+only by the ledger's CSV rules (`csv-empty-null`, `csv-blank-line`,
+`csv-text-after-quote`, `csv-line-ends`, `csv-inference`, and the refusals of
+ragged rows, unclosed quotes and repeated header names). csv-spectrum's
+`location_coordinates` pair is held as a defect of the fixture: its JSON holds
+no row of its CSV.
+
+## What the agreed corpus held out (2026-11-02, held for the user)
+
+The corpus of answers Postgres and DuckDB agree on (`src/test/slt/agreed/`,
+[plans/testing/14](../plans/testing/14-multi-engine-generated-corpus.md)) took
+the plan's five decisions overnight, as recommended and not yet confirmed by
+the user: the fuzz generators through a portable renderer, in a testonly Scala
+tool running `psql` and `duckdb` as subprocesses; about 3,000 records near
+1 MB; a DOUBLE agreeing exactly where both references give the same shortest
+value, else to 15 significant digits as `T`, else not at all; a record both
+references answer one way and the engine another by a decided rule written
+`skipif transformer <id>` with its twin; and Postgres and DuckDB as the
+references. A record the engine answers otherwise by a rule no decision covers
+is held out, unwritten, once Postgres, given the query with the engine's rule
+written in (`PortableSql.HeldRules`), gives the engine's answer; any other
+difference would be a finding of its own, and there was none:
+
+- **A1. A SUBSTRING position before the first character counts from the
+  first** (new; 12 records, 11 of them under D3 too): `SUBSTRING('abc', 0, 2)`
+  is `ab` and `SUBSTRING('abc', 0, 1)` is `a`, where Postgres and DuckDB count
+  the positions before the first character toward the length, `a` and the
+  empty string, as the standard's `SUBSTRING('abc' FROM 0 FOR 2)` does. A
+  negative start parts the two references (Postgres counts it the same way,
+  DuckDB from the string's end), so only a start of 0 is a record. The README
+  states the engine's rule, which is Spark's. The options: keep it, with a
+  ledger row (recommended: it is stated, and the generated queries that meet
+  it are otherwise right); or count the positions before the first character,
+  as the standard and Postgres do.
+- **D3 of [plans/testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md),
+  `CONCAT` of a NULL is NULL** (35 records): `CONCAT('a', NULL, 'b')` is NULL,
+  where both references skip the NULL argument (`ab`, and `CONCAT(NULL)` the
+  empty string). Held there already, with its options.
+- **C3 of plans/testing/12, a TIMESTAMP cast to text is its ISO instant** (9
+  records): `2024-03-10T07:00:00.000001Z`, where both references write
+  `2024-03-10 07:00:00.000001`. Held there already, with its options; the
+  engine's CSV writer writes the same instant text, so the cast is consistent
+  with what the engine writes. C2, a float's text, is a construct the renderer
+  does not draw (each of the three prints a float its own way).
+
+Where the two references disagree with each other the record is dropped, 11
+times in all, each a place where the engine's docs should say which it
+follows: DuckDB computes a DECIMAL quotient in DOUBLE, so the `%`, the
+`ROUND`, the comparison or the `DISTINCT` over one, or its last digits, differ
+from Postgres's exact numeric (4; the engine is exact, as Postgres is, and the
+README says so); a `SUBSTRING` from a negative position (3; A1 above); a
+`STDDEV` past its 15th digit (1; `double-precision`); a `CORR` of no variance,
+NULL in Postgres and the engine and NaN in DuckDB (1; the README does not
+say); and a lone `NULL` beside a `bytea`, which Postgres types as text and
+refuses (2; the engine's NULL takes the type it meets, as the README says). What the
+renderer does not draw because the references part by their rules is counted
+in testing.md ("The agreed corpus"): Postgres has no `MIN` or `MAX` of a
+boolean or a `bytea`, no `%` of a float, no `SUBSTRING` or `ROUND` position
+of a BIGINT and no cast from a boolean but to an integer; it rounds a float
+half to even where DuckDB and the engine round half away; and each engine
+widens a `REAL` in arithmetic its own way.
+
+The by-design records the corpus writes cite their rules: 51
+`decimal-result-type`, a DECIMAL the engine rounds inside a query to the type
+its rules give (a quotient's six places and more under a product, an average,
+a scale given way past 38 digits), each confirmed by Postgres computing the
+query with the engine's types written in; and one `double-precision`, a
+`VAR_SAMP` whose last digits the engine's DOUBLE arithmetic moves. One more
+query, a `STDDEV_SAMP` whose 15th digit moved under the `spill` mode, the order
+its partial results merge in, was not written: no defect, the
+`double-precision` rule again, which the runner's own CockroachDB and
+DataFusion comparisons allow for.
+
+## What the bytecode rules hold out (2026-11-02, held for the user)
+
+[plans/testing/18](../plans/testing/18-one-rule-per-concept-in-bytecode.md)'s
+rules found methods that do what a rule bans and that no decision names. None
+is a defect. Each is allowed in its rule's `held` list in
+`bytecode/BytecodeRules.scala`, saying why, until the user decides:
+
+- **R2: `FunctionCatalog`'s POWER domain.** `math.floor(y) != y`, whether an
+  exponent is whole, in the catalog's description of when POWER is NULL
+  (`FunctionCatalog.Entries`): the test `Funcs.apply` makes, which R2 allows,
+  written a second time by plans/testing/09.
+- **R6: the chaos points' generator.** `Chaos.draw` and the per-thread state
+  it draws from (`Chaos$ThreadState`) make nothing, a yield or a sleep of 0 to
+  2 ms from a `SplittableRandom` seeded per thread from `-Dtransformer.chaos`
+  (plans/testing/17). It moves when a thread runs, never a value, and is off
+  unless the setting is set; it was written after the rule's plan, so no
+  decision names it.
+- **R7: the leak audit's exit report.** `LeakAudit.exit`, under
+  `-Dtransformer.audit_leaks=true` only (plans/testing/17), prints what a JVM
+  left open to standard error and halts it with status 117, so Bazel fails the
+  target: a report at exit that no warning can carry. Written after the rule's
+  plan, so no decision names it.
+
+## What the mutation campaign held out (2026-11-02, held for the user)
+
+[plans/testing/19](../plans/testing/19-mutation-testing.md)'s campaign gave
+every surviving mutant a test or a ledger line where it could
+([testing.md](testing.md#the-2026-11-02-campaign)). Ten are held instead.
+
+**A latent defect.** `TaskRunRecord.discover`, which the GUI's partition
+picker calls, finds its walk's root by `splitAtFirstWildcard`: everything
+before the last `/` ahead of the first `*`. For a pattern whose first
+templated segment sits right under `/`, that is the empty string, which
+`Paths.get("")` reads as the working directory:
+
+```scala
+TaskRunRecord.discover("/day={{ today }}")
+// splitAtFirstWildcard("/day=*") is ("", "day=*"): the walk starts in the
+// working directory, not at /, so /day=20260101/_run.json is never found.
+```
+
+The mutant `lastSep <= 0`, which takes that case for a pattern with no `/`
+at all, gives `"."`, the same directory, and survived every test. Held:
+writing under `/` takes privileges no test has (macOS's system volume is
+read-only), and the fix (the root `/` when the separator is the first
+character) changes what the picker shows.
+
+**Nine survivors believed equivalent**, held out of
+`tools/mutation/equivalent.tsv` by the rule that no more than a quarter of a
+file's survivors go there (conventions.md, "A surviving mutant gets a test or
+a ledger line"): a file with one or two survivors may put none there. Each
+changes no answer, as far as reading the code shows:
+
+- `Funcs.substring`, `length <= 0` as `< 0`: a length of 0 takes the other
+  branch, which takes 0 code points, the same empty string.
+- `WindowExec.rowsBound`, a frame's start at UNBOUNDED PRECEDING as row 1: a
+  frame from UNBOUNDED PRECEDING is aggregated from its first row, reading
+  only each row's end.
+- `LongHashMap`'s first threshold as `math.min(1, ...)`: the map resizes at
+  its second entry, and the resize sets the threshold anew.
+- `CsvValues.classify`'s count of digits with the sign added, or never taken
+  off: the count only decides when to skip an INT or BIGINT parse, whose
+  answer is the same.
+- `DataJob`'s event loop without its chaos point: chaos is off in the suite,
+  and under `chaos_job_test` the other two `JobEvent` points still pass.
+- `DataJob`'s allocation delta with a reading of 0 counted as none (`<= 0`
+  twice, `< 1`): a task thread's allocated bytes are never 0 at its start or
+  its end.
+
+## Answers that differ from other engines by design
+
+The engine answers some queries otherwise than another engine does, on
+purpose: it refuses a construct the other engine runs, or answers by a rule of
+its own. Each such rule is a row of the table below, the ledger, and has an id
+that the [SQL logic tests](testing.md#sql-logic-tests) cite. A record of
+another engine's answer that the engine does not give is `skipif transformer
+<id>` in a script, and `slt_test` still runs it, once, and fails when it no
+longer diverges as its rule says, so a skip cannot outlive its reason. A rule
+whose id starts `refused-` is a construct the engine refuses, and `refusal`
+is the text its refusal must contain. Under any other rule a skipped record is
+followed by its twin, `onlyif transformer <id>` before the same SQL with the
+engine's own answer. `pinned by` names the script of this repo's own that
+holds a record of the engine's answer under the rule, `onlyif transformer
+<id>` before it; a rule about files another program wrote rather than about
+SQL (`refused-parquet-...`, `csv-...`) is pinned by the manifest of a fixture
+directory under `src/test/data`, which lists a file read or refused under it,
+`by-design <id>`, and whose test holds the file to the rule.
+
+The table is the only list of these rules. The build reads it
+(`src/test/scala/com/transformer/slt/Ledger.scala`), so its columns are fixed
+and a row it cannot read fails the tests, naming the line; a `|` in a cell is
+written `\|`. A new rule gets a row and a pin in the commit that decides it.
+In `decided in`, "the user" marks a rule the user chose, "Claude, reported" one
+Claude chose by the same principles and reported to the user, who did not
+choose it, and "since v1" one the engine has had from the start.
+
+| id | rule | refusal | stated in | decided in | pinned by |
+|---|---|---|---|---|---|
+| `refused-subquery` | A subquery is refused, in `IN` or `EXISTS`, in `FROM` or as a value: a `WITH` names it instead. | `subquery` | [README](../README.md#sql-features), "Subqueries"; [not done](#whats-intentionally-not-done), "No subqueries" | Not implemented, by design since v1 ([robustness index](../plans/robustness/README.md), "deliberately NOT planned"); each refusal named by [robustness/10](../plans/robustness/10-error-messages-name-internals.md), 2026-10-17 | `refused/unsupported.test` |
+| `refused-except-intersect` | `EXCEPT` and `INTERSECT` are refused: only `UNION` and `UNION ALL` combine queries. | `only UNION and UNION ALL are supported` | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | Not implemented, by design since v1 ([robustness index](../plans/robustness/README.md), "deliberately NOT planned"); the refusal named by [robustness/10](../plans/robustness/10-error-messages-name-internals.md), 2026-10-17 | `refused/unsupported.test` |
+| `refused-text-arithmetic` | Arithmetic is on numbers only, so a `STRING` operand is refused, where SQLite reads text as a number. | `Arithmetic on STRING is not supported` | [README](../README.md#sql-features), "Values of different types meet only as numbers, or through a string literal" | The user, 2026-10-03: no text is read as a number unasked (584995f) | `refused/messages.test` |
+| `refused-empty-in` | An `IN` or `NOT IN` list holds at least one value, as in standard SQL, so SQLite's `x IN ()` is refused. | `needs at least one value in its list` | [README](../README.md#sql-features), "Operators" | The user, 2026-11-01 ([testing/04](../plans/testing/04-sql-logic-tests-and-whole-suite-configurations.md)) | `refused/messages.test` |
+| `refused-hex-literal` | A hexadecimal literal, `x'303132'`, is refused. | `A hexadecimal literal is not supported` | [not done](#whats-intentionally-not-done), "No SQL beyond the README's grammar", whose `UnsupportedClauses.scala` lists it | Outside the grammar, by design ([robustness/01](../plans/robustness/01-reject-or-honor-every-clause.md), 2026-10-01); the refusal named by [robustness/10](../plans/robustness/10-error-messages-name-internals.md), 2026-10-17 | `refused/messages.test` |
+| `refused-parenthesized-join` | A join written in parentheses in `FROM` is refused: the joins are written without them. | `A parenthesized join in FROM is not supported` | [not done](#whats-intentionally-not-done), "No SQL beyond the README's grammar", whose `UnsupportedClauses.scala` lists it | Outside the grammar, by design ([robustness/01](../plans/robustness/01-reject-or-honor-every-clause.md), 2026-10-01); the refusal named by [robustness/10](../plans/robustness/10-error-messages-name-internals.md), 2026-10-17 | `refused/messages.test` |
+| `div-zero-null` | A division or `%` by zero is NULL, for every number type, where Postgres raises an error. |  | [README](../README.md#sql-features), "`INT` and `BIGINT` arithmetic is exact, or an error" and "`DECIMAL` arithmetic is exact" | Integers since v1; `DECIMAL` by the user, 2026-10-04 ([robustness/04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)); `FLOAT` and `DOUBLE` by the user, 2026-10-31 ([robustness/30](../plans/robustness/30-third-audit.md)) | `types/float_equality.test` |
+| `math-domain-null` | A math function of a number outside its domain is NULL, as a division by zero is: a square root of less than zero, a logarithm of zero or less or to a base of zero or less or of 1, `ASIN` or `ACOS` past 1, the sine, cosine or tangent of an infinity, zero to a negative power, and a negative number to a finite power that is not whole. |  | [README](../README.md#sql-features), "Scalar functions"; [the PostgreSQL port](#answers-the-postgresql-port-settled-2026-11-01-all-decided) | Square roots and logarithms by the user, 2026-11-01 ([testing/05](../plans/testing/05-plans-as-sql.md), W9); the rest by Claude the same day, reported (28a51a5) | `types/float_equality.test` |
+| `cast-truncates` | A `CAST` of a number to `INT` or `BIGINT` truncates its fraction toward zero, where Postgres rounds. |  | [README](../README.md#sql-features), "Types in CAST" | Kept and documented with the overflow rule, by the user, 2026-10-31 ([robustness/18](../plans/robustness/18-integer-overflow-wraps.md)) | `types/integer_overflow.test` |
+| `bool-text` | Text casts to `BOOLEAN` from `true` and `false` alone, in any case and with no spaces around them, where Postgres also reads `t`, `yes`, `on`, `1` and the rest. |  | [README](../README.md#sql-features), "Types in CAST" | The user, 2026-10-03: a CAST reads its text strictly ([robustness/05](../plans/robustness/05-frontend-robustness-fuzzer.md)) | `types/casts.test` |
+| `double-text` | Text casts to `FLOAT` or `DOUBLE` by CSV's number grammar: `NaN`, `Infinity` and `-Infinity` as written, and no spaces around a number. |  | [README](../README.md#sql-features), "Types in CAST" | Claude, reported, 2026-10-31 ([robustness/24](../plans/robustness/24-cast-reads-javas-number-grammar.md)), on the grammar the user chose for CSV, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `types/casts.test` |
+| `int-text` | Text casts to `INT` or `BIGINT` by CSV's integer grammar, an optional sign and ASCII digits with no spaces around them, where Postgres also reads spaces around the number, `0x`, `0o` and `0b` prefixes and `_` between digits. |  | [README](../README.md#sql-features), "Types in CAST" | Claude, reported, 2026-10-31 ([robustness/24](../plans/robustness/24-cast-reads-javas-number-grammar.md)), on the grammar the user chose for CSV, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `types/casts.test` |
+| `date-text-iso` | Text casts to `DATE` from an ISO date alone, `yyyy-MM-dd`, a year past 9999 or before 1 with a sign, where Postgres also reads the formats its `DateStyle` names (`January 8, 1999`, `1/8/1999`, `19990108`, `1999.008`, `J2451187`) and a year followed by `BC`. |  | [README](../README.md#sql-features), "Types in CAST" | The user, 2026-10-03: a CAST reads its text strictly ([robustness/05](../plans/robustness/05-frontend-robustness-fuzzer.md)) | `types/casts.test` |
+| `double-range` | A `FLOAT` or `DOUBLE` result past the type's range is an infinity, and one too small for it 0, not an error. |  | [README](../README.md#sql-features), "`INT` and `BIGINT` arithmetic is exact, or an error"; [the PostgreSQL port](#answers-the-postgresql-port-settled-2026-11-01-all-decided) | Past the range by the user, 2026-10-31 ([robustness/30](../plans/robustness/30-third-audit.md)); too small by the user, 2026-11-01 ([testing/05](../plans/testing/05-plans-as-sql.md)) | `types/float_equality.test` |
+| `double-literal` | A number written with a point or an exponent is a `DOUBLE`, and beside a `DECIMAL` the decimal it is written as, where Postgres reads a numeric. |  | [README](../README.md#sql-features), "Literals and names mean what SQL writes" | Since v1; the decimal beside a `DECIMAL` by the user, 2026-10-30 ([robustness/13](../plans/robustness/13-literals-are-read-as-written.md)) | `types/decimal.test` |
+| `double-precision` | The math functions and the statistics compute in `DOUBLE`, over a `DECIMAL` too, and a `DOUBLE` holds 15 to 17 significant digits, where Postgres computes them in numeric. |  | [README](../README.md#limitations), "`DECIMAL` math functions and statistics compute in `DOUBLE`"; [not done](#whats-intentionally-not-done) | Since v1, and left so by [robustness/19](../plans/robustness/19-rounding-through-double.md), 2026-10-31, which made the rounding functions exact | `types/decimal.test` |
+| `decimal-result-type` | `DECIMAL` arithmetic takes Spark's and SQL Server's result types, so a quotient has `max(6, s1 + p2 + 1)` places, where Postgres keeps as many as each value needs. |  | [README](../README.md#sql-features), "`DECIMAL` arithmetic is exact, and declares a type that holds its result" | The user, 2026-10-04 ([robustness/04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)) | `types/decimal.test` |
+| `window-constant-key` | A window's `ORDER BY` or `PARTITION BY` key that reads no column is refused, as such a key of a query's `ORDER BY` or `GROUP BY` is. |  | [README](../README.md#sql-features), "A key that reads no column orders, groups and partitions nothing" | Claude, reported, 2026-10-31 ([robustness/23](../plans/robustness/23-clauses-that-cannot-change-the-answer.md)) | `refused/messages.test` |
+| `nulls-sort-low` | A NULL sorts as the smallest value, first under `ASC` and last under `DESC`, where Postgres, DataFusion and CockroachDB sort it last under `ASC`. |  | [README](../README.md#sql-features), "A NULL sorts as the smallest value unless the key says otherwise" | Since v1, kept when `NULLS FIRST` and `NULLS LAST` landed ([robustness/01](../plans/robustness/01-reject-or-honor-every-clause.md), 2026-10-01) | `select/order_by.test` |
+| `int-is-int` | A whole number an `INT` holds is an `INT`, and `INT` arithmetic past its range is an error, where SQLite's integers are 64-bit. |  | [README](../README.md#sql-features), "Literals and names mean what SQL writes" and "`INT` and `BIGINT` arithmetic is exact, or an error" | Since v1; an integer past `BIGINT` a `DECIMAL` by the user, 2026-10-30 ([robustness/13](../plans/robustness/13-literals-are-read-as-written.md)), and overflow an error by the user, 2026-10-31 ([robustness/18](../plans/robustness/18-integer-overflow-wraps.md)) | `types/integer_overflow.test` |
+| `branch-double` | The values that become one result take a type that holds each of them, so a `CASE` or `COALESCE` with a `DOUBLE` branch is a `DOUBLE`, where SQLite keeps each value's own type and CockroachDB refuses an integer beside a decimal. |  | [README](../README.md#sql-features), "Values that become one result take a type that holds each of them" | The user, 2026-10-16 ([robustness/09](../plans/robustness/09-branch-result-types.md)) | `conditional/case.test` |
+| `refused-text-comparison` | Text meets a value of another type only as a string literal, read as that type when the query is bound, and a `DECIMAL` reads none (write the number): a `STRING` expression compared with a number, a `BOOLEAN`, a `DATE` or a `TIMESTAMP`, and a string literal beside a `DECIMAL` in a comparison or in arithmetic, are refused, where Spark casts the text. | `with STRING` | [README](../README.md#sql-features), "Values of different types meet only as numbers, or through a string literal" | The user, 2026-10-03: a number or a boolean compares only with its own type (584995f, [robustness/05](../plans/robustness/05-frontend-robustness-fuzzer.md)) | `refused/messages.test` |
+| `refused-text-branch` | Values that become one result meet as a comparison's operands do, so a `STRING` expression beside a value of another type in a `CASE`, `IF`, `COALESCE`, `GREATEST`, `LEAST` or a `UNION` column is refused, where Spark casts the text. | `and STRING` | [README](../README.md#sql-features), "Values that become one result take a type that holds each of them" | The user, 2026-10-16 ([robustness/09](../plans/robustness/09-branch-result-types.md)) | `refused/messages.test` |
+| `refused-date-beside-timestamp` | A `DATE` beside a `TIMESTAMP` takes a `CAST` either way, in a comparison and in a result both become, where Spark reads the date as its midnight. | `a DATE as a TIMESTAMP is its midnight` | [README](../README.md#sql-features), "Values of different types meet only as numbers, or through a string literal" | The user, 2026-10-03 for comparisons (584995f, [robustness/05](../plans/robustness/05-frontend-robustness-fuzzer.md)), and 2026-10-16 for results ([robustness/09](../plans/robustness/09-branch-result-types.md)) | `refused/messages.test` |
+| `refused-decimal-beside-float` | A `DECIMAL` beside a `FLOAT` or `DOUBLE` that is not written in the query is refused in arithmetic and in a result both become, where Spark computes in `DOUBLE`: a `DOUBLE` has no scale for a `DECIMAL` result to keep. The two compare, as the decimal each value prints as. | `has no scale for a DECIMAL result to keep` | [README](../README.md#sql-features), "`DECIMAL` arithmetic is exact, and declares a type that holds its result" | The user, 2026-10-04 for arithmetic ([robustness/04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)), and 2026-10-16 for results ([robustness/09](../plans/robustness/09-branch-result-types.md)) | `refused/messages.test` |
+| `refused-implicit-text` | Only a `STRING` is text: `LIKE`, `ILIKE`, `\|\|`, `CONCAT` and the string functions refuse any other type, where Spark reads its text. | `CAST it to STRING` | [README](../README.md#sql-features), "Every condition is a BOOLEAN, and every function takes the types it computes on" | The user, 2026-10-18 ([robustness/11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md)) | `refused/messages.test` |
+| `refused-implicit-number` | The math functions and the aggregates that add their values up take a number, so text takes a `CAST` to the number type meant, where Spark reads it as a `DOUBLE`. | `CAST it to a number` | [README](../README.md#sql-features), "Every condition is a BOOLEAN, and every function takes the types it computes on" | The user, 2026-10-18 ([robustness/11](../plans/robustness/11-functions-bind-over-arguments-they-cannot-take.md)) | `refused/messages.test` |
+| `division-keeps-type` | `/` keeps its operands' type, as in Postgres: integer division for an `INT` or a `BIGINT` (`10 / 4` is 2), a `FLOAT` for two `FLOAT`s, where Spark's `/` is always a `DOUBLE` or a `DECIMAL`, and CockroachDB's of two integers a `DECIMAL`. |  | [README](../README.md#sql-features), "`DECIMAL` arithmetic is exact, and declares a type that holds its result" ("`10 / 4` is 2 there as anywhere") | Since v1, as Postgres has it; kept for integer constants beside a `DECIMAL` by the user, 2026-10-04 ([robustness/04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)) | `types/integer_overflow.test` |
+| `text-literal-typed` | A string literal beside a value of another type is read as that type when the query is bound, so `'1' + i` over an `INT` is an `INT` and `'1' + f` over a `FLOAT` a `FLOAT`, where Spark reads the text as a `BIGINT` or a `DOUBLE`. |  | [README](../README.md#sql-features), "Values of different types meet only as numbers, or through a string literal" | The user, 2026-10-03 (584995f, [robustness/05](../plans/robustness/05-frontend-robustness-fuzzer.md)) | `types/casts.test` |
+| `bigint-decimal` | A `BIGINT` beside a `DECIMAL` counts as the `DECIMAL(19,0)` its every value fits, as SQL Server has it, where Spark counts it as a `DECIMAL(20,0)`, so each result type has a digit fewer. |  | [README](../README.md#sql-features), "`DECIMAL` arithmetic is exact, and declares a type that holds its result" | The user, 2026-10-04 ([robustness/04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)); kept by [testing/10](../plans/testing/10-spark-typing-ports.md)'s decision 3, taken overnight as recommended, not yet confirmed by the user | `types/decimal.test` |
+| `avg-sum-int` | `AVG` of integers is a `DOUBLE` and `SUM` of integers a `BIGINT`, where Postgres and CockroachDB make each a numeric: the value is the same where a `DOUBLE` holds it, but prints otherwise. | | [README](../README.md#sql-features), "Aggregates" ("`SUM` is a `BIGINT` over integers", "`AVG` is a `DOUBLE`") | Since v1; a `DECIMAL`'s exact `SUM` and `AVG` by the user, 2026-10-04 ([robustness/04](../plans/robustness/04-widen-fuzz-corpus-to-every-type.md)) | `aggregate/group_by.test` |
+| `names-ignore-case` | Every name, quoted or bare, matches regardless of case, so `"A"` names a column `a`, where Postgres and CockroachDB keep a quoted name's case and refuse it. | | [README](../README.md#sql-features), "Literals and names mean what SQL writes" ("Quotes do not make a name case-sensitive") | The user, 2026-10-30 ([robustness/13](../plans/robustness/13-literals-are-read-as-written.md)) | `select/order_by.test` |
+| `no-interval` | The engine has no `INTERVAL` type: an `INTERVAL` literal or a `CAST` to one is refused, and a table of a script of another engine's leaves its `INTERVAL` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `no-array` | The engine has no array types: an array, an array type and a subscript are refused, and a table of a script of another engine's leaves its array columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `no-uuid` | The engine has no `UUID` type: a `CAST` to one is refused, and a table of a script of another engine's leaves its `UUID` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `no-timestamptz` | The engine has no `TIMESTAMPTZ` type, a timestamp with a time zone: a `CAST` to one is refused, and a table of a script of another engine's leaves its `TIMESTAMPTZ` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `no-time` | The engine has no `TIME` type, a time of day: a `CAST` to one is refused, and a table of a script of another engine's leaves its `TIME` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `no-bytes` | The engine has no `BYTES` type of CockroachDB (its `BINARY` takes no `CAST`): a `CAST` to one is refused, and a table of a script of another engine's leaves its `BYTES` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `no-json` | The engine has no `JSON` or `JSONB` type: a `CAST` to one is refused, and a table of a script of another engine's leaves its `JSONB` columns out, so a record that reads one, or selects `*` from its table, answers otherwise. | | [README](../README.md#sql-features), "SQL outside this grammar is rejected, not ignored" | The type, not implemented since v1; its columns left out by [testing/12](../plans/testing/12-cockroachdb-and-datafusion-corpora.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `refused/messages.test` |
+| `csv-empty-null` | A CSV field that is the null string, unquoted, is NULL, in a `STRING` column too, and the null string is empty by default, so an unquoted empty field is NULL; a quoted empty field is the empty string in a `STRING` column, where PapaParse and csv-spectrum read both as the empty string. | | [README](../README.md#csv), "A field is NULL when it is the null string unquoted" | The user, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)): Postgres's rule | `src/test/data/csv/MANIFEST` |
+| `csv-blank-line` | A blank line of a CSV file is a row only in a file of one column, the row whose one field is empty, and is skipped in a wider file; the line break that ends the last line adds no row, where PapaParse reads each blank line, and a last line break, as a row of one empty field. | | [README](../README.md#csv), "A blank line is a row only in a one-column file" | The user, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `src/test/data/csv/MANIFEST` |
+| `csv-text-after-quote` | Text after a CSV field's closing quote joins the field (`"a" b` is `a b`), and a quote inside an unquoted field is a character of it, where PapaParse drops spaces after a closing quote and DuckDB refuses such a file unless told not to be strict. | | [README](../README.md#csv), "Text after a closing quote joins the field" | Claude, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)), not put to the user; reported again by [testing/13](../plans/testing/13-external-file-fixtures.md) | `src/test/data/csv/MANIFEST` |
+| `csv-line-ends` | A CSV line ends at `\n`, `\r\n` or a lone `\r`, each line by itself, where PapaParse ends every line as the file's first line ends and reads any other break as text. | | [README](../README.md#csv), "Malformed text fails the read" (and the parser's lines) | Since v1 | `src/test/data/csv/MANIFEST` |
+| `csv-inference` | A CSV column's type is inferred from its text by the engine's grammar, so `08123` in a column of integers is the `INT` 8123, where csv-spectrum and PapaParse keep each field as text. | | [README](../README.md#csv), "Schema inference" | Inference since v1; its joins by the user, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `src/test/data/csv/MANIFEST` |
+| `refused-csv-ragged` | A CSV row with more or fewer fields than the file has columns (its header, the schema, or its first row) fails the read, naming the file and the line, where PapaParse reads it and reports an error, and DuckDB pads or skips it when told to. | `field` | [README](../README.md#csv), "Malformed text fails the read" | The user, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `src/test/data/csv/MANIFEST` |
+| `refused-csv-unclosed-quote` | A CSV quote that is never closed fails the read, naming the line it opens on, where PapaParse reads the rest of the file as the field and reports an error. | `is never closed` | [README](../README.md#csv), "Malformed text fails the read" | The user, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `src/test/data/csv/MANIFEST` |
+| `refused-csv-header-name` | A CSV header with an empty name, or a name it gives twice regardless of case, fails the read with inferred types, naming the columns, where DuckDB and PapaParse rename them. | `in its header` | [README](../README.md#csv), "Options" (`header`) | [robustness/26](../plans/robustness/26-duplicate-column-names.md), 2026-10-31 | `src/test/data/csv/MANIFEST` |
+| `refused-csv-charset` | Bytes of a CSV file that are no text in its `charset` (UTF-8 by default) fail the read, naming the line, where DuckDB reads the file in the encoding it is told. | `is not valid` | [README](../README.md#csv), "Malformed text fails the read" | The user, 2026-10-14 ([robustness/06](../plans/robustness/06-io-roundtrip-and-external-fixtures.md)) | `src/test/data/csv/MANIFEST` |
+| `refused-csv-compressed` | A CSV file that starts with gzip's magic bytes is refused as compressed, naming the file, where DuckDB decompresses it. | `is compressed with gzip` | [README](../README.md#csv), "Malformed text fails the read" | [testing/13](../plans/testing/13-external-file-fixtures.md)'s finding 6, fixed without asking: it was refused as text that is not UTF-8 | `src/test/data/csv/MANIFEST` |
+| `refused-parquet-nested` | A parquet column that is nested, a group (a struct, a list or a map), or repeated, a list of values in each row, makes its file unreadable, where pyarrow reads lists, maps and structs: a column holds one value a row. | `only flat schemas are supported` | [README](../README.md#parquet), "Types read" | Flat schemas since v1; a repeated column by [robustness/03](../plans/robustness/03-parquet-external-format-fidelity.md), 2026-10-03 | `src/test/data/parquet-testing/MANIFEST` |
+| `refused-parquet-type` | A parquet column whose annotation has no engine type makes its file unreadable, never read as its physical type: `TIME`, `INTERVAL`, and an annotation newer than the reader (`VARIANT`, `GEOMETRY`, `GEOGRAPHY`, or one it has no name for), where pyarrow reads `TIME`, and an annotation it does not know as its physical type. | `which has no transformer type` | [README](../README.md#parquet), "Types read" | `TIME` and `INTERVAL` by [robustness/03](../plans/robustness/03-parquet-external-format-fidelity.md), 2026-10-03; an annotation newer than the reader by [testing/13](../plans/testing/13-external-file-fixtures.md)'s decision 1, taken overnight as recommended, not yet confirmed by the user | `src/test/data/parquet-testing/MANIFEST` |
+| `refused-parquet-annotation` | A parquet annotation the format does not allow on its column's physical type (a `UUID` on an `INT32`, a `TIMESTAMP` on a `FIXED_LEN_BYTE_ARRAY`) makes its file unreadable, as parquet-mr has it, where pyarrow reads the physical type and drops the annotation. | `which the format does not allow` | [README](../README.md#parquet), "Types read" | Claude, reported, 2026-11-02 ([testing/13](../plans/testing/13-external-file-fixtures.md)), by robustness/03's rule that no annotation falls through to its physical type | `src/test/data/parquet-testing/MANIFEST` |
+| `refused-parquet-codec` | A parquet column compressed with a codec the reader does not have, `BROTLI` or `LZO`, fails the view as it opens, naming the file, the column and the codec, where pyarrow reads `BROTLI`. | `which transformer cannot decompress` | [README](../README.md#parquet), "Codecs read" | [testing/13](../plans/testing/13-external-file-fixtures.md)'s decision 4, taken overnight as recommended, not yet confirmed by the user | `src/test/data/parquet-testing/MANIFEST` |
+| `refused-parquet-checksum` | A parquet page whose bytes do not match the CRC its header carries fails the read, naming the file, the column and the row group, where pyarrow and parquet-mr check no CRC unless asked. | `does not match its checksum` | [README](../README.md#parquet), "A page whose header carries a CRC" | [testing/13](../plans/testing/13-external-file-fixtures.md)'s decision 2, taken overnight as recommended, not yet confirmed by the user | `src/test/data/parquet-testing/MANIFEST` |
+| `refused-parquet-timestamp-range` | A parquet `TIMESTAMP(MILLIS)` or `INT96` value with no microsecond value, more than about 292,000 years from 1970, fails the read, naming the file and the column, where pyarrow reads an `INT96` as nanoseconds. | `past the range of a timestamp in microseconds` | [README](../README.md#parquet), "A parquet `TIMESTAMP` reads as the instant it stores" | `MILLIS` by [robustness/03](../plans/robustness/03-parquet-external-format-fidelity.md), 2026-10-03; `INT96` by [robustness/25](../plans/robustness/25-dates-past-the-storable-range.md), 2026-10-31 | `src/test/data/parquet-testing/MANIFEST` |
+
 ## What's intentionally NOT done
+
+- **The fuzz corpora draw no FLOAT or DOUBLE at the ends of its range.**
+  Integers, decimals, dates and timestamps take their types' edges on a share
+  of datasets (`DataGen.Edges`, plans/testing/15 W7), and the layout relations
+  hold every layout to fail alike on them. A float `SUM` near the end of the
+  range overflows to an infinity or not as the rows arrive (`MAX + MAX - MAX`
+  is an infinity in one order and `MAX` in another), and no layout relation
+  can call those equal, so the float pools stay where they are: NaN, -0.0 and
+  the infinities, but no finite value that sums past the range.
 
 - **Join order has no cost model.** `JoinOrder` keeps the written order but
   where the next table has no equality with those joined so far, so it never

@@ -1,7 +1,7 @@
 package com.transformer.gui
 
 import atlantafx.base.theme.Styles
-import com.transformer.core.{CatalogView, ColumnarBatch, DataType, Schema}
+import com.transformer.core.{CatalogView, Closing, ColumnarBatch, DataType, Schema}
 
 import javafx.beans.property.ReadOnlyObjectWrapper
 import javafx.collections.FXCollections
@@ -92,9 +92,9 @@ final class DataGrid extends TableView[Array[Any]] {
     val rows = getSelectionModel.getSelectedItems
     if (rows.isEmpty) return
     val sb = new StringBuilder()
-    sb.append(fieldNames.mkString("\t")).append('\n')
+    sb.append(fieldNames.mkString("", "\t", "\n"))
     rows.forEach { row =>
-      sb.append(row.iterator.map(v => if (v == null) "" else DataGrid.format(v)).mkString("\t")).append('\n')
+      sb.append(row.iterator.map(v => if (v == null) "" else DataGrid.format(v)).mkString("", "\t", "\n"))
     }
     val content = new ClipboardContent()
     content.putString(sb.toString)
@@ -129,9 +129,11 @@ object DataGrid {
     var truncated = false
     var p = 0
     while (p < view.numPartitions && !truncated) {
-      val it = view.readPartition(p)
-      while (it.hasNext && !truncated) truncated = append(it.next(), rows, max)
-      if (rows.size >= max && (it.hasNext || p + 1 < view.numPartitions)) truncated = true
+      // A partition read in part is closed, its file with it ([[Closing]]).
+      Closing.draining(view.readPartition(p)) { it =>
+        while (it.hasNext && !truncated) truncated = append(it.next(), rows, max)
+        if (rows.size >= max && (it.hasNext || p + 1 < view.numPartitions)) truncated = true
+      }
       p += 1
     }
     RowSample(view.schema, rows.toSeq, truncated)

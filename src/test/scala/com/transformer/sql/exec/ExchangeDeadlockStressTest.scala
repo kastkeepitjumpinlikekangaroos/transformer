@@ -6,7 +6,6 @@ import org.junit.Assert._
 import org.junit.Test
 
 import java.util.concurrent.{Callable, TimeUnit, TimeoutException}
-import scala.collection.mutable
 
 /** Regression stress for the K>1 sharded-execution deadlock family
   * (docs/gotchas.md "Sharded execution at K>1"; plans/bugfixes/02e diagnosed

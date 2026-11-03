@@ -114,6 +114,8 @@ class JoinSwapTest {
     */
   private def findHashJoin(p: PhysicalPlan): HashJoinExec = p match {
     case j: HashJoinExec => j
+    // Under `--config=verify` every operator is wrapped in a check.
+    case w: PlanWrapper => findHashJoin(w.underlying)
     case other =>
       fail(s"Expected HashJoinExec at top of plan, got ${other.getClass.getSimpleName}")
       throw new IllegalStateException("unreachable")
@@ -482,6 +484,58 @@ class JoinSwapTest {
       "SELECT x.lk FROM l x JOIN r y ON x.lk = y.rk JOIN l z ON x.lk = z.lk JOIN r w ON x.lv < w.rv", cat))
   }
 
+  /** A join on an equality counts, for the guard, no fewer rows as an outer
+    * join than as the inner join it holds: its larger side for LEFT and
+    * RIGHT, both sides for FULL (decision 3 of plans/testing/16). It counted
+    * an outer join by its preserved side, as the estimator sizes one to pick
+    * a build side, so `a CROSS JOIN d LEFT JOIN b ON a.k = b.k CROSS JOIN c`
+    * over 10, 10, 300000 and 100 rows ran while its INNER JOIN, which pairs
+    * no more rows, was refused: a restriction of a query refused where the
+    * query ran (found by plan 16's CERT property). */
+  @Test def anOuterJoinCountsNoFewerRowsThanTheInnerJoinItHolds(): Unit = {
+    val cat = catalogWith(
+      "a" -> view(LeftSchema, SmallLeftRows, Some(10L)),
+      "d" -> view(LeftSchema, SmallLeftRows, Some(10L)),
+      "b" -> view(RightSchema, SmallRightRows, Some(300000L)),
+      "c" -> view(LeftSchema, SmallLeftRows, Some(100L)))
+    def refusal(kind: String): String =
+      try { SqlEngine.execute(s"SELECT a.lk FROM a CROSS JOIN d $kind JOIN b ON a.lk = b.rk CROSS JOIN c", cat); "ran" }
+      catch { case e: IllegalArgumentException => e.getMessage }
+    val refused = "A join without an equality between its two sides in ON is refused over the output of another " +
+      "such join when the two would pair more than 25000000 rows (left=300000, right=100); add an equality to one " +
+      "of the ON conditions"
+    assertEquals(refused, refusal("LEFT"))
+    assertEquals(refused, refusal("RIGHT"))
+    assertEquals(refused.replace("left=300000", "left=300100"), refusal("FULL"))
+    // The INNER JOIN, which JoinOrder joins on its key first, pairs every row
+    // of the three-way product too.
+    assertTrue(refusal("INNER"), refusal("INNER").startsWith("A join without an equality between its two sides"))
+    // Over a small enough right side all four run.
+    val small = catalogWith(
+      "a" -> view(LeftSchema, SmallLeftRows, Some(10L)),
+      "d" -> view(LeftSchema, SmallLeftRows, Some(10L)),
+      "b" -> view(RightSchema, SmallRightRows, Some(1000L)),
+      "c" -> view(LeftSchema, SmallLeftRows, Some(100L)))
+    Seq("INNER", "LEFT", "RIGHT", "FULL").foreach { kind =>
+      collectAllRows(SqlEngine.execute(s"SELECT a.lk FROM a CROSS JOIN d $kind JOIN b ON a.lk = b.rk CROSS JOIN c", small))
+    }
+    // So is a join under a grouping, which the guard sizes through the
+    // estimator: a CTE grouping a LEFT JOIN beneath two CROSS JOINs ran
+    // where its INNER JOIN was refused.
+    val grouped = catalogWith(
+      "u0" -> view(LeftSchema, SmallLeftRows, Some(100L)),
+      "u1" -> view(RightSchema, SmallRightRows, Some(100000L)),
+      "t1" -> view(LeftSchema, SmallLeftRows, Some(10L)),
+      "t2" -> view(LeftSchema, SmallLeftRows, Some(1000000L)))
+    Seq("INNER", "LEFT").foreach { kind =>
+      val sql = s"WITH x AS (SELECT u0.lk AS k, COUNT(*) AS n FROM u0 $kind JOIN u1 ON u0.lk = u1.rk GROUP BY u0.lk) " +
+        "SELECT COUNT(*) AS n FROM x CROSS JOIN t1 CROSS JOIN t2"
+      val e = try { SqlEngine.execute(sql, grouped); null } catch { case e: IllegalArgumentException => e }
+      assertNotNull(s"$kind: expected refused", e)
+      assertTrue(e.getMessage, e.getMessage.contains("(left=10000, right=1000000)"))
+    }
+  }
+
   /** The guard refuses on sizes it can prove, never on a filter's guess: a
     * CROSS JOIN of two one-row filters over tables of a million rows runs.
     * It was refused as pairing 100000 rows with 100000, a filter on `=`
@@ -512,6 +566,7 @@ class JoinSwapTest {
       case j: HashJoinExec => Seq(j.leftKeys.size)
       case ProjectExec(c, _) => hashKeys(c)
       case FilterExec(c, _) => hashKeys(c)
+      case w: PlanWrapper => hashKeys(w.underlying)
       case _ => Nil
     }
     assertEquals("the WHERE equality is the join's key", Seq(1), hashKeys(physical))
@@ -547,9 +602,9 @@ class JoinSwapTest {
     val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
     val join = findHashJoin(plan)
     assertFalse("left should not be wrapped in ExchangeExec for small × small",
-      join.left.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.left))
     assertFalse("right should not be wrapped in ExchangeExec for small × small",
-      join.right.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.right))
     assertEquals("collapsing join emits one partition", 1, join.numPartitions)
   }
 
@@ -563,9 +618,9 @@ class JoinSwapTest {
     val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
     val join = findHashJoin(plan)
     assertFalse("broadcast-shaped join must not wrap left in ExchangeExec",
-      join.left.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.left))
     assertFalse("broadcast-shaped join must not wrap right in ExchangeExec",
-      join.right.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.right))
   }
 
   /** Both sides above the broadcast threshold → exchange both sides so the
@@ -578,9 +633,9 @@ class JoinSwapTest {
     val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
     val join = findHashJoin(plan)
     assertTrue("sharded join must wrap left in ExchangeExec",
-      join.left.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.left))
     assertTrue("sharded join must wrap right in ExchangeExec",
-      join.right.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.right))
     assertEquals("sharded join numPartitions matches exchange K",
       ExchangeExec.defaultNumShards, join.numPartitions)
   }
@@ -595,9 +650,9 @@ class JoinSwapTest {
     val plan = PhysicalPlanner.plan(buildJoinPlan(l, r, JoinKind.Inner))
     val join = findHashJoin(plan)
     assertFalse("unknown-size side → no exchange wrap on left",
-      join.left.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.left))
     assertFalse("unknown-size side → no exchange wrap on right",
-      join.right.isInstanceOf[ExchangeExec])
+      ExchangeExec.feeds(join.right))
   }
 
   /** Post-impl expectation: a residual non-equi predicate (kept on the join

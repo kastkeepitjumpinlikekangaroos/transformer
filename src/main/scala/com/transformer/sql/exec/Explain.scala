@@ -107,8 +107,15 @@ object Explain {
     out
   }
 
+  /** `plan`'s operators as `EXPLAIN VERBOSE` shows them, one line each, in
+    * the pre-order the plan walk numbers them ([[PhysicalPlanner]]): each
+    * scan reads "a view", as no query names it here. For
+    * [[VerifiedPlan]]'s message. */
+  private[exec] def operatorLines(plan: PhysicalPlan): Vector[String] =
+    describe(plan, new java.util.IdentityHashMap[CatalogView, String]())
+
   /** `plan` as an indented tree of its operators, each with the partitions
-    * it runs in. */
+    * it runs in. A metered or verified operator shows as itself. */
   private def describe(plan: PhysicalPlan, names: java.util.IdentityHashMap[CatalogView, String]): Vector[String] = {
     val out = Vector.newBuilder[String]
     def columns(p: PhysicalPlan): Int => String = {
@@ -120,7 +127,11 @@ object Explain {
       expr(k.expr, p) + (if (k.asc) "" else " DESC") +
         (if (k.nullsFirst == k.asc) "" else if (k.nullsFirst) " NULLS FIRST" else " NULLS LAST")
     }.mkString(", ")
-    def visit(p: PhysicalPlan, depth: Int): Unit = {
+    def visit(p: PhysicalPlan, depth: Int): Unit = p match {
+      case w: PlanWrapper => visit(w.underlying, depth)
+      case _ => operator(p, depth)
+    }
+    def operator(p: PhysicalPlan, depth: Int): Unit = {
       val (line, children) = p match {
         case ScanExec(view, _, _) =>
           val name = Option(names.get(view)).fold("a view")(n => PlanSql.identifier(n))

@@ -1,0 +1,25 @@
+{
+ "description": "Row with enough fields but blank field in the begining",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   "B",
+   "C"
+  ],
+  [
+   "",
+   "b1",
+   "c1"
+  ],
+  [
+   "a2",
+   "b2",
+   "c2"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

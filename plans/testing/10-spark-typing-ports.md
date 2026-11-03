@@ -1,6 +1,9 @@
 # Plan 10: Spark's decimal and type-coercion tests, with Spark's ANSI answers
 
-> Status: **not started** · from the 2026-11-01 test survey, category 2 of 9
+> Status: **done** 2026-11-02 (64b7fa9 W1, d1bf116 decision 2, d5ff49c W2,
+> b01cee5 W3, fdf580d W4, 368c631 W5; see [Outcome](#outcome); the three
+> decisions taken overnight as recommended, not yet confirmed by the user) ·
+> from the 2026-11-01 test survey, category 2 of 9
 > (answers from outside the engine, part 1) · Effort: 3-5 days, plus 1-2 for
 > CAST to DECIMAL · Risk: low for the port; medium for decisions 1 and 2,
 > which change what queries return · Depends on: 08 (every skip cites a
@@ -261,6 +264,11 @@ skipped record still diverges.
      Spark's BIGINT × DECIMAL records are skipped under its id.
    - **(b) Spark's DECIMAL(20,0).** Exact parity with Spark, one digit wider.
 
+**Taken overnight as recommended, not yet confirmed by the user** (2026-11-02):
+decision 1 (a), `CAST(x AS DECIMAL(p,s))` with W1's semantics; decision 2
+(a), an INT or BIGINT beside a FLOAT is a DOUBLE in comparisons, branches and
+arithmetic; decision 3 (a), BIGINT's decimal stays DECIMAL(19,0).
+
 ## Decisions already made
 
 - **Spark's answers are the expected values, never the engine's,** as in the
@@ -338,3 +346,191 @@ to the user, as the Postgres port did); (c) a rewrite the plan does not list;
 Report: per file the records ported, skipped (by decision id) and left out
 (by reason); the disagreements found; W5's result; the commits.
 ```
+
+## Outcome
+
+Landed overnight on `testing-round-3`, 2026-11-02, a commit per workstream
+and one for decision 2. At each, `bazel test //...` passed (70 targets) and
+the jaffle-shop job gave 15/15 Succeeded with every validation passing. The
+finished tree passes the whole suite under `--config=zone` and
+`--config=batch1` too.
+
+**W1**, `64b7fa9`: `CAST(x AS DECIMAL(p,s))` and `NUMERIC(p,s)`, 1 <= p <= 38
+and 0 <= s <= p, bind to `DecimalCastExpr`, a node apart from the binder's own
+`CastExpr` to a DECIMAL, which reads a number exactly, on both evaluation
+paths: any number rounds half up to the scale and is `Decimal overflow: ...
+does not fit decimal(p,s)` past the precision, text is read by CSV's decimal
+grammar and then fitted, NaN and the infinities are errors, a BOOLEAN is 1 or
+0, and DATE, TIMESTAMP and BINARY are refused. A bare `DECIMAL`, `DECIMAL(10)`
+and `DECIMAL(40,2)` are refused, saying what to write (`refused/messages.test`
+pins the words). `PlanSql` prints the written cast as itself and the binder's
+as its operand, and `PlanValidator` holds a written one to a type a query can
+write. `ExprGen`, `QueryGen` and `SqlTextGen` draw the cast, and
+`writtenDecimalCastsRoundAndOverflow` holds its rounding and overflow on both
+paths (over 100000 seeds: the shape on 1043, a rounding on 35, an overflow on
+84). It settles plan 09's finding 12 (the refusal named `DECIMAL (10, 2)`),
+and README's limitation that a query cannot choose a decimal result's type is
+gone.
+
+**Decision 2**, `d1bf116`: an INT or BIGINT beside a FLOAT is a DOUBLE in
+comparisons, branches and arithmetic (`DataType.widerNumeric`), which settles
+plan 09's finding 2: `CAST(16777217 AS INT) = CAST(16777216 AS FLOAT)` is
+false and `COALESCE(CAST(NULL AS FLOAT), 2147483647)` is 2.147483647E9
+(`types/float_equality.test`). `int_col * float_col`, and a FLOAT column times
+an integer literal, are DOUBLEs now, and so is an output column holding one.
+jaffle-shop has no FLOAT column. polymarket's parquet files have many (prices,
+sizes, spreads), but its SQL meets them only with 0 and 1 in comparisons, which
+a FLOAT and a DOUBLE compare alike, and with FLOATs and DOUBLEs in results;
+read in its SQL, not run.
+
+**The tables' changed cells**, each reviewed: `casts.txt` (900 to 1003 lines)
+gained the DECIMAL(10,2) column's values for its 15 refusals: a number fitted
+(`DOUBLE 2.7 -> DECIMAL(10,2) 2.70`, `-0.0 -> 0.00`, `1.0E-300 -> 0.00`), past
+the precision a run error (`Decimal overflow: 2147483647 does not fit
+decimal(10,2)`, a DOUBLE named as it prints, `1.0E300`), NaN and the
+infinities `Cannot cast NaN to decimal(10,2)`, text that is no number or too
+long `Cannot cast '...' to decimal(10,2)` (at bind time for a text literal),
+and DATE, TIMESTAMP and BINARY bind errors. `comparisons.txt`,
+`branches.txt` and `arithmetic.txt` each changed exactly the INT, BIGINT and
+integer-literal x FLOAT rows, both orders, from FLOAT to DOUBLE (6 lines each),
+and `functions-math.txt` `MOD(x, 2)` and `MOD(2, x)` over a FLOAT, from FLOAT to
+DOUBLE (22 lines; `MOD(2.7f, 2)` is 0.7000000476837158, the FLOAT's binary
+value less 2).
+
+**W2**, `d5ff49c`: `SparkImport` (`bazel run //src/test/scala/com/transformer/slt:spark_import`)
+writes `src/test/slt/spark/` from Spark's input and golden files (fetched as a
+shallow sparse clone of `apache/spark` at b981235, read as data);
+`spark/LICENSE` and `spark/NOTICE` hold Spark's Apache License 2.0 text and
+notice; nine rules joined the ledger, each decided before and pinned:
+`refused-text-comparison`, `refused-text-branch`,
+`refused-date-beside-timestamp`, `refused-decimal-beside-float`,
+`refused-implicit-text`, `refused-implicit-number`, `division-keeps-type`,
+`text-literal-typed` and `bigint-decimal` (decision 3). **W3**, `b01cee5`:
+`spark/decimal_arithmetic.test`. **W4**, `fdf580d`: twelve scripts under
+`spark/type_coercion/`. **W5**, `368c631`: the converter also runs every record
+in the `zone` configuration's locale and time zone, which held out three
+records (finding 1), and the checks below.
+
+**Per file**: statements, those in its script, skipped by rule, left out by
+need, and held out.
+
+| source | statements | here | skipped, by rule | left out, by need | held |
+|---|---|---|---|---|---|
+| decimalArithmeticOperations | 55 | 26 | `div-zero-null` 2, `double-literal` 1 | allowPrecisionLoss=false half 26, `pmod` 2, `div` 1 | - |
+| binaryComparison | 265 | 121 | `refused-text-comparison` 72 | BINARY 48, `date()` and `timestamp()` 48, SMALLINT 24, TINYINT 24 | - |
+| booleanEquality | 97 | 37 | `refused-text-comparison` 4 | `<=>` 36, BINARY 8, SMALLINT 8, TINYINT 8 | - |
+| caseWhenCoercion | 145 | 82 | `refused-text-branch` 16, `refused-decimal-beside-float` 4, `refused-date-beside-timestamp` 2, `bigint-decimal` 2 | TINYINT 23, SMALLINT 21, BINARY 19 | - |
+| decimalPrecision | 1145 | 673 | `refused-decimal-beside-float` 80, `bigint-decimal` 27, `refused-text-comparison` 24, `refused-text-arithmetic` 20 | BINARY 104, TINYINT 104, SMALLINT 104, `<=>` 64, `pmod` 64 | 32 |
+| division | 145 | 82 | `refused-text-arithmetic` 10, `division-keeps-type` 5, `refused-decimal-beside-float` 4, `bigint-decimal` 2 | TINYINT 23, SMALLINT 21, BINARY 19 | - |
+| ifCoercion | 145 | 82 | `refused-text-branch` 16, `refused-decimal-beside-float` 4, `refused-date-beside-timestamp` 2, `bigint-decimal` 2 | TINYINT 23, SMALLINT 21, BINARY 19 | - |
+| implicitTypeCasts | 47 | 27 | `refused-implicit-text` 12, `refused-text-comparison` 8, `text-literal-typed` 3, `division-keeps-type` 1 | Spark's date and time functions 13, SMALLINT 2, TIME 2 | 3 |
+| inConversion | 289 | 156 | `refused-text-comparison` 31, `refused-date-beside-timestamp` 4, `bool-text` 2 | TINYINT 46, SMALLINT 42, BINARY 38 | 7 |
+| promoteStrings | 316 | 198 | `refused-text-comparison` 22, `text-literal-typed` 16, `bool-text` 12, `refused-implicit-number` 7, `division-keeps-type` 6, `refused-text-arithmetic` 2 | BINARY 26, TINYINT 26, SMALLINT 26, `pmod`, `skewness` and `kurtosis` 19, `<=>` 17, text minus a date or timestamp (an INTERVAL) 4 | - |
+| stringCastAndExpressions | 32 | 8 | - | Spark's date, JSON and hash functions 17, arrays, structs and maps 3, BINARY, TINYINT, SMALLINT and a bare DECIMAL 1 each | - |
+| widenSetOperationTypes | 145 | 82 | `refused-text-branch` 16, `refused-decimal-beside-float` 4, `refused-date-beside-timestamp` 2, `bigint-decimal` 2 | TINYINT 23, SMALLINT 21, BINARY 19 | - |
+| windowFrameCoercion | 25 | 16 | `window-constant-key` 15 | BINARY, SMALLINT and TINYINT 2 each | 3 |
+| arrayJoin, concat, dateTimeOperations, elt, mapconcat, mapZipWith | 102 | 0 | - | INTERVAL 33, views over arrays and maps 30, Spark's functions 20, BINARY, TINYINT and SMALLINT 9, SETs 4, literal suffixes 4, TIME 1 | - |
+
+In all, 2,953 statements: 1,590 in thirteen scripts (619 queries answering
+as Spark does, type and value; 492 errors both engines raise for one reason,
+each pinned with the engine's words up to its advice; 28 building tables; 464
+skipped by 14 rules, the 98 under a rule that is no refusal each followed by
+its twin), 45 held out, and the other 1,318 left out: 1,317 by what they need,
+and dateTimeOperations' view, which none of its records the engine runs reads.
+`slt_test` runs the thirteen scripts in about 6.5 s.
+
+**W5's re-derivation**: a second reader, a Python script outside the repo
+written apart from the converter (it splits a golden file as Spark's own
+reader does, maps each record to its input line, undoes the converter's
+rewrites checking each decimal literal's type, and re-derives the columns, the
+sort and every value), compared all 1,575 of Spark's records in the scripts,
+1,141 answer cells: no difference. Planted, it caught a changed value, a
+changed column type and a wrong literal type. Every script passes under every
+verification mode and under `--config=batch1`, `sharded`, `zone` and
+`hashzero`, and every skipped record still diverges as its rule says (plan
+08's check, part of `slt_test`).
+
+**Fuzz**, one block each for what changed (the plan's default seeds pass in
+`bazel test //...`): expression parity 200000 seeds, frontend clean rejection
+20000, mode-differential 2500 and key equality, window frames and exact sums
+400, plan round trip 2000, metamorphic 2500 (and 500, to check the budget
+arrived); all green.
+
+**Findings held for the user** (no engine semantics changed for any):
+
+1. **A lowercase `like` does not parse under a Turkish default locale.**
+   JSqlParser 5.2 upper-cases `like`, `ilike`, `not like`, `similar to` and
+   `rlike` with the JVM's default locale to look up `LikeExpression.KeyWord`,
+   and `LİKE` is no constant, so the query fails with `SQL parse error: No
+   enum constant net.sf.jsqlparser...LikeExpression.KeyWord.LİKE`, a message
+   that also leaks the parser's class. Upper-case `LIKE` parses in every
+   locale. Reproduced with the parser alone at 5.2, the version the base
+   commit pins (`sql/parse` is unchanged since it); the `zone` configuration
+   found it, as no script of this repo wrote `like` in lower case. Three
+   records of implicitTypeCasts.sql are held out. Recommendation: have
+   `SqlParser` hand JSqlParser those keywords in upper case, or set the
+   parse's locale another way the user prefers, and keep a lowercase `like`
+   in a script `zone` runs.
+2. **A record both engines refuse, for different reasons** (42), in each the
+   engine refusing by a decided rule before it reaches what Spark refuses: 32
+   timestamps decimalPrecision.sql writes with the operator for their dashes
+   (`cast('2017*12*11 09:30:00.0' as timestamp) * ...`), text Spark's analyzer
+   never reads, refusing the operator's types first; 7 `cast('1' as boolean)
+   IN (...)` beside a number or a date, where Spark refuses the list's types
+   and the engine `'1'` first (`bool-text`); 3 RANGE frames over a STRING, a
+   BOOLEAN or a TIMESTAMP, where Spark refuses the frame and the engine
+   `PARTITION BY 1` first (`window-constant-key`). No answer differs.
+   Recommendation: leave them out.
+3. **Plan 09's finding 11 again**: `'1' + cast(1 as decimal(10, 0))` is
+   refused as `Cannot compare DECIMAL(10,0) with STRING`, a comparison's words
+   for arithmetic, in 18 of Spark's records (`+ - * / %` beside a string
+   literal in promoteStrings.sql and implicitTypeCasts.sql), skipped as
+   `refused-text-comparison`, whose rule names it. Recommendation as there:
+   arithmetic's own words.
+4. **The plan's counts were a first run's**: dateTimeOperations.sql and
+   concat.sql have no record the engine can run (each needs INTERVAL, BINARY,
+   TINYINT, SMALLINT, TIME, `encode()` or `string()`), so twelve
+   type_coercion scripts, not thirteen, and dateTimeOperations adds nothing
+   to binaryComparison's; and Spark's `<=>`, which the first run's 881 seem to
+   have counted, is left out as an operator the engine lacks.
+
+**Decisions, taken overnight as recommended, not yet confirmed by the user**:
+1 (a), 2 (a) and 3 (a), recorded under the decisions above.
+
+**Claude's calls within them** (revisit if the user objects):
+
+- The written cast is a node of its own, `DecimalCastExpr`, rather than a flag
+  on `CastExpr`, so the compiler made every pass that walks an expression
+  name it, and the two kinds cannot be confused by a rewrite that rebuilds a
+  `CastExpr`.
+- A number written in the query under the cast is the decimal it is written
+  as (`decimalConstant`), as beside a DECIMAL, so `CAST(1.0000000000000000001
+  AS DECIMAL(20,19))` keeps its last digit; one no DECIMAL holds stays the
+  DOUBLE it binds as alone. A string literal under it is read when the query
+  is bound and kept as its text in the plan, so the plan prints back as written.
+- Text past the type is `Cannot cast '...' to decimal(p,s)`, an
+  `IllegalArgumentException` as text past an INT is, since a literal's is
+  raised at bind time where an `ArithmeticException` is no clean refusal; a
+  number past it is `Decimal overflow`, its FLOAT or DOUBLE named as it
+  prints. NaN and the infinities take the binder's cast's words, `Cannot cast
+  NaN to decimal(p,s)`. `DECIMAL(10)` is refused like a bare `DECIMAL`.
+- Decision 2 reaches an integer literal too, which is an INT, so a FLOAT
+  column times 2 is a DOUBLE.
+- The converter runs each record on the engine to sort it: an answer like
+  Spark's is kept, a difference a ledger rule explains is skipped with its
+  twin, and anything else is held. A rule other than a refusal reads the SQL
+  and both answers, so a record is put down to it only where its construct is
+  there and the engine answers as it says; a `refused-` rule explains any
+  record the engine refuses in its words, an error Spark raises for another
+  reason too (`cast(1 as string) IN (cast(ts))`, which Spark refuses on the
+  text '1').
+- Text minus a date or a timestamp, Spark's temporal difference, is left out
+  as needing INTERVAL (4 records), as are records reading a view left out.
+- An agreed error pins the engine's words up to its first semicolon, the
+  reason before the advice; the header says the words are the engine's.
+- A timestamp Spark prints in the suite's zone is written as the instant of
+  that local time in UTC: no record moves a time between zones, so every
+  value keeps (and the `zone` configuration passes).
+- `refused-text-comparison`'s rule takes in a string literal beside a DECIMAL
+  (a DECIMAL reads none), refused in the same words; `refused-text-branch` is
+  its own rule, decided on another day in other words.

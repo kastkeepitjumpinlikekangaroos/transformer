@@ -2,12 +2,11 @@ package com.transformer.fuzz
 
 import com.transformer.core._
 import com.transformer.fuzz.QueryGen._
-import com.transformer.fuzz.oracle.{ExactIntegers, KeyEquality, ModeDifferential, RelEngine, WindowFrames}
+import com.transformer.fuzz.oracle.{CatalogNulls, ExactIntegers, KeyEquality, ModeDifferential, RelEngine, WindowFrames}
 import com.transformer.sql.plan._
 import org.junit.Assert._
-import org.junit.{After, Before, Test}
+import org.junit.{After, Test}
 
-import java.nio.file.{Files, Path}
 import scala.util.Try
 
 /** Property-based mode-differential gate over single-table SQL — the generated
@@ -38,31 +37,12 @@ class ModeDifferentialFuzzTest {
     * case executes the engine once per mode; raise via `-Dfuzz.seeds=N`. */
   private val DefaultModeDiffSeeds: Int = 120
 
-  // Isolate spill files in a temp dir (mirrors the *SpillTest setup) so the
-  // 1-byte-threshold spill modes don't litter the default spill location.
-  private val originalDirProp: String = System.getProperty(Spill.SpillDirProperty)
-  private var tmpRoot: Path = _
-
-  @Before def setSpillDir(): Unit = {
-    tmpRoot = Files.createTempDirectory("mode-diff-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmpRoot.resolve("transformer-spill").toString)
-  }
-
-  @After def restoreSpillDir(): Unit = {
-    if (originalDirProp == null) System.clearProperty(Spill.SpillDirProperty)
-    else System.setProperty(Spill.SpillDirProperty, originalDirProp)
-    deleteRecursively(tmpRoot)
-  }
-
-  private def deleteRecursively(p: Path): Unit = {
-    if (p == null || !Files.exists(p)) return
-    if (Files.isDirectory(p)) {
-      val s = Files.list(p)
-      try { val it = s.iterator(); while (it.hasNext) deleteRecursively(it.next()) }
-      finally s.close()
-    }
-    try Files.deleteIfExists(p) catch { case _: java.io.IOException => () }
-  }
+  // This JVM's spill directory is read once (`Spill.baseDir`, under
+  // java.io.tmpdir, which Bazel sets to the target's own TEST_TMPDIR), so a
+  // test cannot move it. Every operator that spills closes its directory once
+  // nothing reads it, so each test leaves none (plans/testing/17).
+  @After def leavesNoSpillDirectory(): Unit =
+    assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
 
   // ---- the property -------------------------------------------------------
 
@@ -152,6 +132,50 @@ class ModeDifferentialFuzzTest {
     }
   }
 
+  /** Every call of a catalog function a generated query makes over its table
+    * answers NULL on a row exactly where its entry's NULL rule or domain
+    * explains it (`oracle/CatalogNulls`), read off the bound plan and
+    * evaluated over the dataset: the layout relations cannot see a function
+    * that answers NaN where its domain says NULL in every layout alike. */
+  @Test def fuzzCatalogNulls(): Unit = {
+    Props.forAll[QueryCase](
+      name = "catalog-nulls-sql",
+      gen = QueryGen.generate,
+      shrink = Shrinker.queryCase,
+      count = Props.seedCountOr(DefaultModeDiffSeeds * 4)
+    ) { qc =>
+      val view = qc.dataset.singlePartition()
+      val catalog = new Catalog
+      catalog.register(QueryGen.ViewName, view)
+      Try(LogicalBuilder.build(qc.sql, catalog)).toOption.foreach { built =>
+        val batches = (0 until view.numPartitions).flatMap(view.readPartition(_).toSeq)
+        oracle.BoundPlan.exprs(built.main).foreach { e =>
+          batches.foreach(b => if (readsOwnColumns(e, b)) CatalogNulls.check(e, b))
+        }
+      }
+    }
+  }
+
+  /** Every function the registry binds as a call, `MOD` among them and the
+    * clock functions apart, is drawn by `QueryGen` on a share of seeds, as
+    * `ExprGen` draws them: the list is `QueryGen.CalledFunctions`, read off
+    * `FunctionCatalog`, so a function the registry gains fails here until
+    * the SQL generators draw it. Generation only. */
+  @Test def everyCatalogFunctionIsDrawn(): Unit = {
+    val n = 57000
+    val drawn = ModeDifferentialFuzzTest.functionTally(n)(seed => QueryGen.generate(new Rng(seed)).query)
+    val counts = QueryGen.CalledFunctions.map(e => e.name -> drawn(e.name))
+    println(s"[mode-differential] catalog functions over $n seeds: " + counts.map { case (f, c) => s"$f=$c" }.mkString(", "))
+    // Measured over these seeds: the rarest are the math functions, each
+    // drawn among 26 that answer a DOUBLE, from 81 (PI) to about 110; the
+    // floor sits about 3x below them. 57000 seeds since the failing CASTs of
+    // plans/testing/15 W7 took a share of the numbers, which left LOG 51 of
+    // 40000.
+    counts.foreach { case (f, c) => assertTrue(s"$f is drawn on $c of $n seeds", c > FunctionFloor) }
+  }
+
+  private val FunctionFloor = 24
+
   @Test def fuzzModeDifferential(): Unit = {
     Props.forAll[QueryCase](
       name = "mode-differential",
@@ -166,17 +190,15 @@ class ModeDifferentialFuzzTest {
     }
   }
 
-  /** Bind-reject rate report + guard. A rejection is the engine refusing the
-    * generator's own SQL — expected to be rare; a spike means the renderer
-    * regressed into emitting malformed SQL. Prints the rate (captured for the PR)
-    * and fails if it crosses a generous ceiling. */
   /** Bind-reject-rate report and guard. A rejection is the engine refusing the
     * generator's own SQL at bind time — expected to be rare (the renderer aims
     * for always-bindable SQL); a spike means a renderer regression. Prints the
     * rate (captured for the PR) plus a per-reason tally on any rejects, and fails
-    * if the rate crosses a generous ceiling. */
+    * if the rate crosses a generous ceiling. `FUZZ_PROBE_SEEDS=20000` probes a
+    * larger block, as a generator change that touches typing or rendering
+    * should be. */
   @Test def bindRejectRateIsLow(): Unit = {
-    val n = 500
+    val n = Props.probeSeedsOr(500)
     val reasons = scala.collection.mutable.LinkedHashMap.empty[String, (Int, String)]
     var rejects = 0
     var seed = 0
@@ -279,7 +301,7 @@ class ModeDifferentialFuzzTest {
     * here. Measured over these 10000 seeds: the shape 421, NaN 55, -0.0 52, an
     * infinity 35; each bound sits ~3x below. */
   @Test def generatorReachesMinMaxOverIeeeSpecialValues(): Unit = {
-    val n = 10000
+    val n = 11000
     var shape, nan, negZero, infinite = 0
     var seed = 0
     while (seed < n) {
@@ -299,8 +321,10 @@ class ModeDifferentialFuzzTest {
     println(s"[mode-differential] over $n seeds: MIN/MAX over a float column in $shape " +
       s"(carrying NaN=$nan, -0.0=$negZero, an infinity=$infinite)")
     assertTrue(s"no MIN/MAX over a float column generated (shape=$shape)", shape > 140)
-    // Each bound sits ~3x below the measured rate, so it separates a corpus that
-    // stopped producing the value from one that merely drifted.
+    // Each bound sits ~3x below the measured rate (the shape 423, NaN 60,
+    // -0.0 52, an infinity 38), so it separates a corpus that stopped
+    // producing the value from one that merely drifted. 11000 seeds since the
+    // failing CASTs of plans/testing/15 W7 took a share of the aggregates.
     assertTrue(s"MIN/MAX never sees a NaN (nan=$nan)", nan > 18)
     assertTrue(s"MIN/MAX never sees a -0.0 (negZero=$negZero)", negZero > 17)
     assertTrue(s"MIN/MAX never sees an infinity (infinite=$infinite)", infinite > 11)
@@ -316,7 +340,7 @@ class ModeDifferentialFuzzTest {
     * from the values under each list's CASTs, the value by evaluating the
     * list over the dataset's rows. */
   @Test def decimalArithmeticReachesBranches(): Unit = {
-    val n = 6000
+    val n = 7500
     var shape, value = 0
     var seed = 0
     while (seed < n) {
@@ -334,9 +358,10 @@ class ModeDifferentialFuzzTest {
     }
     println(s"[mode-differential] over $n seeds: decimal arithmetic beside another DECIMAL in a branch list " +
       s"in $shape, with more fractional digits than the first value's type in $value")
-    // Measured over these seeds: the shape 103, the value 17. Each bound sits
-    // ~3x below; 6000 seeds rather than 4000 keep the value's bound off the
-    // handful where a drift would cross it.
+    // Measured over these seeds: the shape 102, the value 16. Each bound sits
+    // ~3x below; 7500 seeds rather than 4000 keep the value's bound off the
+    // handful where a drift would cross it, and the failing CASTs of
+    // plans/testing/15 W7 took a share of the decimals.
     assertTrue(s"decimal arithmetic rarely meets another DECIMAL in a branch list (shape=$shape)", shape > 34)
     assertTrue(s"its answers rarely outgrow the first value's scale (value=$value)", value > 5)
   }
@@ -347,7 +372,7 @@ class ModeDifferentialFuzzTest {
     * binder builds: the shape from the calls that have one, the value by
     * evaluating them over the dataset's rows. */
   @Test def nullScalesAndPositionsReachTheirFunctions(): Unit = {
-    val n = 6000
+    val n = 11000
     var shape, value = 0
     var seed = 0
     while (seed < n) {
@@ -367,9 +392,212 @@ class ModeDifferentialFuzzTest {
     }
     println(s"[mode-differential] over $n seeds: a ROUND scale or SUBSTRING position or length in $shape, " +
       s"NULL beside a value in $value")
-    // Measured over these seeds: the shape 373, the value 108; bounds ~3x below.
+    // Measured over these seeds: the shape 453, the value 111; bounds ~3x
+    // below. 11000 seeds since plans/testing/15 widened the corpus, which left
+    // the value 78 of 8000.
     assertTrue(s"a scale, position or length is rarely generated (shape=$shape)", shape > 120)
     assertTrue(s"a NULL one rarely meets a value (value=$value)", value > 35)
+  }
+
+  /** `TRIM`, which `QueryGen` never drew while the binder refused it, over a
+    * value with a space at an end, which it strips, beside one without: it
+    * strips U+0020 only (the third audit), and a corpus with no space at an
+    * end could not tell that from no TRIM at all.
+    * Read off what the binder builds: the shape from its calls, the value by
+    * evaluating each one's argument over the dataset's rows. */
+  @Test def trimReachesValuesWithSpacesAtAnEnd(): Unit = {
+    val n = 14000
+    var shape, value = 0
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val view = qc.dataset.singlePartition()
+      val catalog = new Catalog
+      catalog.register(QueryGen.ViewName, view)
+      Try(LogicalBuilder.build(qc.sql, catalog)).toOption.foreach { built =>
+        val calls = oracle.BoundPlan.exprs(built.main).collect { case f @ FuncExpr("TRIM", Seq(_), _) => f }.toSeq
+        if (calls.nonEmpty) shape += 1
+        val batches = (0 until view.numPartitions).flatMap(view.readPartition(_).toSeq)
+        if (calls.exists(f => batches.exists(b => readsOwnColumns(f, b) && (0 until b.numRows).exists { row =>
+            evalAt(f.args.head, b, row) match {
+              case Some(s: String) => s.nonEmpty && (s.head == ' ' || s.last == ' ')
+              case _ => false
+            }
+          }))) value += 1
+      }
+      seed += 1
+    }
+    println(s"[mode-differential] over $n seeds: TRIM in $shape, of a value with a space at an end in $value")
+    // Measured over these seeds: the shape 709, the value 120; bounds ~3x
+    // below. 14000 seeds, since a share of string columns draws text past
+    // ASCII or text a CAST reads, whose values a space ends less often.
+    assertTrue(s"TRIM is rarely generated (shape=$shape)", shape > 195)
+    assertTrue(s"TRIM rarely meets a space at an end (value=$value)", value > 38)
+  }
+
+  /** `IN` over a FLOAT or DOUBLE column, which `QueryGen` never drew, holding
+    * NaN and -0.0 on some row or as an item (`CAST('NaN' AS DOUBLE)`, `-0.0`):
+    * the values `IN`'s hashed membership once keyed by bits, not by `=`.
+    * Generation only. */
+  @Test def floatInListsReachNaNAndNegativeZero(): Unit = {
+    val n = 9000
+    var shape, nan, negZero = 0
+    var seed = 0
+    while (seed < n) {
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val lists = nodesOf(qc.query).collect { case in @ InListExpr(c: ColRefExpr, _, _) if isFloating(c.dataType) => in }
+      if (lists.nonEmpty) shape += 1
+      def meets(p: Double => Boolean): Boolean = lists.exists { case InListExpr(c: ColRefExpr, items, _) =>
+        qc.dataset.rows.exists(r => isDouble(r(c.index), p)) || items.exists {
+          case LitExpr(v, _) => isDouble(v, p)
+          case CastExpr(LitExpr(text: String, _), _) => p(text.toDouble)
+          case ref: ColRefExpr => qc.dataset.rows.exists(r => isDouble(r(ref.index), p))
+          case _ => false
+        }
+      case _ => false
+      }
+      if (meets(java.lang.Double.isNaN)) nan += 1
+      if (meets(d => d == 0.0 && java.lang.Double.compare(d, 0.0) < 0)) negZero += 1
+      seed += 1
+    }
+    println(s"[mode-differential] over $n seeds: IN over a float column in $shape, meeting NaN in $nan, -0.0 in $negZero")
+    // Measured over these seeds: the shape 327, NaN 117, -0.0 100; bounds ~3x
+    // below. 9000 seeds since the failing CASTs of plans/testing/15 W7 took a
+    // share of the conditions, which left -0.0 59 of 6000.
+    assertTrue(s"IN over a float column is rarely generated (shape=$shape)", shape > 86)
+    assertTrue(s"IN over a float column rarely meets NaN (nan=$nan)", nan > 32)
+    assertTrue(s"IN over a float column rarely meets -0.0 (negZero=$negZero)", negZero > 29)
+  }
+
+  /** Each class of the text past ASCII (`TextPool`) reaches each string site
+    * of the corpus: `LENGTH`, `SUBSTRING`, `UPPER`, `LOWER`, `LIKE` and `ILIKE`
+    * over a column holding it or a literal of it, and an ORDER BY key, a GROUP
+    * BY key and a `MIN`/`MAX` argument over a column holding it, where the
+    * corpus drew ASCII alone until plans/testing/15. A character from U+E000
+    * to U+FFFF counts only beside one past U+FFFF, the pair UTF-16 and code
+    * point order disagree on. Generation only. */
+  @Test def textReachesEveryStringSite(): Unit = {
+    val t = TextPool.tally(130000)(seed => ModeDifferentialFuzzTest.textSites(QueryGen.generate(new Rng(seed))))
+    println(s"[mode-differential] text past ASCII ${t.report}")
+    // Measured over these seeds: the thinnest cell is 32 (LENGTH over a
+    // combining mark), most of the function cells 40 to 230, the LIKE and
+    // order cells hundreds; the floor sits about 3x below the thinnest.
+    // 130000 seeds, since a string function over a column of the pool is a
+    // narrow chain, and generation only, a second or two; 60000 left that
+    // cell 13 once string columns held text a CAST reads too.
+    val low = t.below(TextFloor)
+    assertTrue(s"text past ASCII rarely reaches these sites (at most $TextFloor seeds):\n  ${low.mkString("\n  ")}\n${t.report}",
+      low.isEmpty)
+  }
+
+  private val TextFloor = 9
+
+  /** The shapes the renderer could not write paren-free, which `QueryGen`
+    * kept out until plans/testing/15: a negation of a computed value, which
+    * renders `-(x)`, and a NOT over an AND or an OR, which renders `NOT (...)`.
+    * Both must be drawn, and the queries that hold them bind. Generation and
+    * binding only. */
+  @Test def negationsAndNotsOverCompoundsAreDrawnAndBind(): Unit = {
+    val n = 7000
+    var negation, notOverCompound, rejected = 0
+    (0 until n).foreach { seed =>
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val nodes = nodesOf(qc.query)
+      val neg = nodes.exists {
+        case UnaryOpExpr("-", c, _) => !c.isInstanceOf[ColRefExpr] && !c.isInstanceOf[LitExpr]
+        case _ => false
+      }
+      val not = nodes.exists {
+        case UnaryOpExpr("NOT", BinOpExpr("AND" | "OR", _, _, _), _) => true
+        case _ => false
+      }
+      if (neg) negation += 1
+      if (not) notOverCompound += 1
+      // Refused as text: a parse error, or the binder's refusal of two signs
+      // in a row or of a NOT hung on a comparison's left side. A branch list
+      // mixing a DECIMAL and a DOUBLE is the corpus's own known refusal.
+      if (neg || not) ModeDifferential.bindReject(qc).foreach { reason =>
+        if (reason.startsWith("SQL parse error") || reason.contains("NOT")) {
+          rejected += 1
+          println(s"  refused: ${reason.take(160)}  e.g. ${qc.sql.take(300)}")
+        }
+      }
+    }
+    println(s"[mode-differential] over $n seeds: a negation of a computed value in $negation, a NOT over an AND " +
+      s"or an OR in $notOverCompound; of those, $rejected refused as text")
+    // Measured over these seeds: a negation 221, a NOT over an AND or an OR
+    // 181; bounds ~3x below. 7000 seeds since the failing CASTs of
+    // plans/testing/15 W7 took a share of the numbers.
+    assertTrue(s"a computed value is rarely negated ($negation)", negation > 73)
+    assertTrue(s"a NOT rarely takes an AND or an OR ($notOverCompound)", notOverCompound > 49)
+    assertEquals(s"queries refused as text: $rejected", 0, rejected)
+  }
+
+  /** A CAST that can fail on its input (text read as another type, a float
+    * as an integer with no guard, plans/testing/15) sits under an IN, in a
+    * comparison and in an aggregate's argument, and the query fails on its
+    * data there, which every mode must then do alike (decision 1). Each
+    * query with one runs once in the baseline layout. Prints the tally. */
+  @Test def failingCastsReachAnInAComparisonAndAnAggregate(): Unit = {
+    val n = 4000
+    val sites = Seq("IN", "comparison", "aggregate")
+    val shape = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    val failed = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    (0 until n).foreach { seed =>
+      val qc = QueryGen.generate(new Rng(seed.toLong))
+      val found = ModeDifferentialFuzzTest.failingCastSites(qc.query)
+      found.foreach(site => shape(site) += 1)
+      if (found.nonEmpty) {
+        val cat = new Catalog
+        cat.register(QueryGen.ViewName, qc.dataset.singlePartition())
+        val castFailed =
+          Try(RelEngine.answer(cat, qc.sql, ExecutionOptions.Default)).toOption.exists(_.left.exists(_.startsWith("Cannot cast")))
+        if (castFailed) found.foreach(site => failed(site) += 1)
+      }
+    }
+    val report = sites.map(site => s"$site: drawn ${shape(site)}, fails ${failed(site)}").mkString("; ")
+    println(s"[mode-differential] a CAST that can fail over $n seeds: $report")
+    // Measured over these seeds: under an IN drawn 373, failing 135; in a
+    // comparison 134 and 49; in an aggregate 497 and 205. Bounds ~3x below.
+    assertTrue(s"a CAST that can fail rarely sits under an IN, $report", shape("IN") > 126)
+    assertTrue(s"a CAST under an IN rarely fails, $report", failed("IN") > 35)
+    assertTrue(s"a CAST that can fail rarely sits in a comparison, $report", shape("comparison") > 45)
+    assertTrue(s"a CAST in a comparison rarely fails, $report", failed("comparison") > 15)
+    assertTrue(s"a CAST that can fail rarely sits in an aggregate, $report", shape("aggregate") > 170)
+    assertTrue(s"a CAST in an aggregate rarely fails, $report", failed("aggregate") > 45)
+  }
+
+  private def isDouble(v: Any, p: Double => Boolean): Boolean = v match {
+    case x: java.lang.Double => p(x.doubleValue)
+    case x: java.lang.Float => p(x.doubleValue)
+    case _ => false
+  }
+
+  /** Every node of `q`'s expressions: its WHERE, its projection and the
+    * arguments of its aggregates, walked to the leaves. */
+  private def nodesOf(q: QueryGen.GenQuery): Seq[Expr] = {
+    val roots: Seq[Expr] = q match {
+      case p: QueryGen.ProjectQuery => p.projection.map(_._1) ++ p.where.toSeq
+      case a: QueryGen.AggregateQuery => a.where.toSeq ++ a.aggregates.flatMap {
+        case (QueryGen.CountIf(e), _) => Seq(e)
+        case (QueryGen.Count(e, _), _) => Seq(e)
+        case (QueryGen.Sum(e, _), _) => Seq(e)
+        case (QueryGen.Avg(e, _), _) => Seq(e)
+        case _ => Seq.empty
+      }
+    }
+    def walk(e: Expr): Seq[Expr] = e +: Shrinker.childrenOf(e).flatMap(walk)
+    roots.flatMap(walk)
+  }
+
+  /** Whether every column `e` reads is a column of `batch`, of its type, so
+    * `e` can be evaluated over it. */
+  private def readsOwnColumns(e: Expr, batch: ColumnarBatch): Boolean = {
+    val fields = batch.schema.fields
+    oracle.BoundPlan.subtree(e).forall {
+      case c: ColRefExpr => c.index < fields.length && fields(c.index).dataType == c.dataType
+      case _ => true
+    }
   }
 
   /** Whether `f`'s first argument is a value and another is NULL on some row
@@ -381,9 +609,13 @@ class ModeDifferentialFuzzTest {
       case c: ColRefExpr => c.index < fields.length && fields(c.index).dataType == c.dataType
       case _ => true
     } && (0 until batch.numRows).exists { row =>
-      f.args.head.eval(batch, row) != null && f.args.tail.exists(_.eval(batch, row) == null)
+      evalAt(f.args.head, batch, row).exists(_ != null) && f.args.tail.exists(a => evalAt(a, batch, row).contains(null))
     }
   }
+
+  /** `e` on `row` of `batch`, or None where it fails on the row's values. */
+  private def evalAt(e: Expr, batch: ColumnarBatch, row: Int): Option[Any] =
+    try Some(e.eval(batch, row)) catch { case scala.util.control.NonFatal(_) => None }
 
   // ---- DATE, TIMESTAMP, BINARY and DECIMAL coverage ----------------------
   //
@@ -395,25 +627,27 @@ class ModeDifferentialFuzzTest {
   // tallies of the generated corpus, one by predicate and one by site; no
   // query runs.
   //
-  // 10000 seeds, because the thinnest chain (MIN/MAX over a decimal column
-  // holding two values of one double, which only DECIMAL(38,18) has) is 25 of
-  // them; generation only, well under a second. Measured over these seeds:
+  // 15000 seeds, because the thinnest chain (an IN over a decimal column
+  // holding two values of one double, which only DECIMAL(38,18) has) is 32 of
+  // them; generation only, well under a second. The block was 10000 until
+  // plans/testing/15 put float columns in IN lists and text past ASCII in the
+  // data, which left the four fewer draws. Measured over these seeds:
   //
   //                         date  timestamp  binary  decimal
-  //   comparison             495        536     421      685
-  //   IN                     250        281     293      207
-  //   ORDER BY               713        730     675      696
-  //   GROUP BY               612        655     639      658
-  //   MIN/MAX                243        276     244      225   (SUM/AVG decimal 363,
-  //                                                             arithmetic 584)
+  //   comparison             757        790     622     1017
+  //   IN                     336        363     356      278
+  //   ORDER BY              1052       1063     998     1069
+  //   GROUP BY               923        967     929      974
+  //   MIN/MAX                375        409     373      345   (SUM/AVG decimal 528,
+  //                                                             arithmetic 884)
   //
   // and the columns there holding each value pair, at comparison / IN /
-  // ORDER BY / GROUP BY / MIN/MAX: instants under a millisecond apart 272 /
-  // 174 / 425 / 373 / 150; bytes of one content 276 / 194 / 437 / 433 / 165;
-  // bytes one high bit apart 155 / 100 / 229 / 227 / 82; a decimal at two
-  // scales 279 / 90 / 293 / 275 / 96 (148 at SUM/AVG, 244 in arithmetic);
-  // decimals of one double 87 / 31 / 101 / 101 / 25 (44, 74); decimals a
-  // double adds wrong 109 at SUM/AVG and 165 in arithmetic. Each bound sits
+  // ORDER BY / GROUP BY / MIN/MAX: instants under a millisecond apart 386 /
+  // 214 / 631 / 568 / 227; bytes of one content 416 / 242 / 669 / 637 / 261;
+  // bytes one high bit apart 230 / 138 / 340 / 328 / 128; a decimal at two
+  // scales 387 / 119 / 441 / 401 / 147 (215 at SUM/AVG, 357 in arithmetic);
+  // decimals of one double 133 / 32 / 153 / 153 / 39 (64, 120); decimals a
+  // double adds wrong 157 at SUM/AVG and 260 in arithmetic. Each bound sits
   // about 3x below its count.
 
   import DataGen.ValueTag._
@@ -794,6 +1028,54 @@ class ModeDifferentialFuzzTest {
 
 object ModeDifferentialFuzzTest {
 
+  /** Whether `e` is a CAST that can fail on its input: text read as another
+    * type, or a FLOAT or DOUBLE read as an integer with no
+    * `CASE WHEN ABS(x) < 1e9` around it. */
+  private def failingCast(e: Expr): Boolean = e match {
+    case CastExpr(c, t) if c.dataType == DataType.StringType => t != DataType.StringType
+    case DecimalCastExpr(c, _) if c.dataType == DataType.StringType => true
+    case CastExpr(_: CaseExpr, _) => false
+    case CastExpr(c, DataType.IntType | DataType.LongType) =>
+      c.dataType == DataType.FloatType || c.dataType == DataType.DoubleType
+    case _ => false
+  }
+
+  private def holdsFailingCast(e: Expr): Boolean = failingCast(e) || Shrinker.childrenOf(e).exists(holdsFailingCast)
+
+  /** The sites of `q` a CAST that can fail sits at: under an IN (its value
+    * or an item), a comparison's side, an aggregate's argument. */
+  private[fuzz] def failingCastSites(q: QueryGen.GenQuery): Set[String] = {
+    val found = scala.collection.mutable.Set.empty[String]
+    def walk(e: Expr): Unit = {
+      e match {
+        case InListExpr(v, items, _) if (v +: items).exists(holdsFailingCast) => found += "IN"
+        case BinOpExpr("<" | "<=" | ">" | ">=" | "=" | "<>", l, r, _) if holdsFailingCast(l) || holdsFailingCast(r) =>
+          found += "comparison"
+        case _ => ()
+      }
+      Shrinker.childrenOf(e).foreach(walk)
+    }
+    val (roots, aggArgs): (Seq[Expr], Seq[Expr]) = q match {
+      case p: QueryGen.ProjectQuery => (p.projection.map(_._1) ++ p.where.toSeq, Seq.empty)
+      case a: QueryGen.AggregateQuery =>
+        val args = a.aggregates.flatMap {
+          case (QueryGen.Sum(e, _), _) => Seq(e)
+          case (QueryGen.Avg(e, _), _) => Seq(e)
+          case (QueryGen.Min(e), _) => Seq(e)
+          case (QueryGen.Max(e), _) => Seq(e)
+          case (QueryGen.Count(e, _), _) => Seq(e)
+          case (QueryGen.CountIf(e), _) => Seq(e)
+          case (QueryGen.Stat(_, e), _) => Seq(e)
+          case (QueryGen.Bivar(_, x, y), _) => Seq(x, y)
+          case _ => Seq.empty
+        }
+        (a.where.toSeq ++ args, args)
+    }
+    roots.foreach(walk)
+    if (aggArgs.exists(holdsFailingCast)) found += "aggregate"
+    found.toSet
+  }
+
   /** Over a seed block, how many seeds put a column of each kind at each site
     * (`shapes`, keyed by site and `ExprGen.kind`), and how many of those put a
     * column carrying each `DataGen.ValueTag` there (`values`, keyed by site and
@@ -856,8 +1138,81 @@ object ModeDifferentialFuzzTest {
     roots.flatMap(walk)
   }
 
+  /** On how many of seeds `0 until n` the query `query` draws calls each
+    * catalog function, by its canonical name, anywhere in it. */
+  def functionTally(n: Int)(query: Long => QueryGen.GenQuery): Map[String, Int] = {
+    val drawn = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
+    def names(e: Expr): Iterator[String] = (e match {
+      case FuncExpr(name, _, _) => FunctionCatalog.lookup(name).map(_.name).iterator
+      case _ => Iterator.empty
+    }) ++ Shrinker.childrenOf(e).iterator.flatMap(names)
+    (0 until n).foreach { seed =>
+      val roots: Seq[Expr] = query(seed.toLong) match {
+        case p: QueryGen.ProjectQuery => p.projection.map(_._1) ++ p.where.toSeq
+        case a: QueryGen.AggregateQuery => a.where.toSeq ++ a.aggregates.flatMap {
+          case (QueryGen.CountIf(e), _) => Seq(e)
+          case (QueryGen.Count(e, _), _) => Seq(e)
+          case (QueryGen.Sum(e, _), _) => Seq(e)
+          case (QueryGen.Avg(e, _), _) => Seq(e)
+          case (QueryGen.Min(e), _) => Seq(e)
+          case (QueryGen.Max(e), _) => Seq(e)
+          case _ => Seq.empty
+        }
+      }
+      roots.iterator.flatMap(names).toSet.foreach((f: String) => drawn(f) += 1)
+    }
+    drawn.toMap.withDefaultValue(0)
+  }
+
+  /** The (site, class) pairs `qc` reaches with text past ASCII, as
+    * `textReachesEveryStringSite` counts them. */
+  def textSites(qc: QueryGen.QueryCase): Set[(String, TextPool.TextClass)] = {
+    val rows = qc.dataset.rows
+    def classesOf(cols: Seq[Int]): Set[TextPool.TextClass] =
+      cols.distinct.flatMap(c => TextPool.columnClasses(rows.map(_(c)))).toSet
+    def strings(e: Expr): Seq[Int] = e match {
+      case c: ColRefExpr if c.dataType == DataType.StringType => Seq(c.index)
+      case other => Shrinker.childrenOf(other).flatMap(strings)
+    }
+    def literals(e: Expr): Set[TextPool.TextClass] = e match {
+      case LitExpr(s: String, _) => TextPool.classesOf(s)
+      case other => Shrinker.childrenOf(other).flatMap(literals).toSet
+    }
+    def reads(e: Expr): Set[TextPool.TextClass] = classesOf(strings(e)) ++ literals(e)
+    val out = Set.newBuilder[(String, TextPool.TextClass)]
+    def walk(e: Expr): Unit = {
+      e match {
+        case FuncExpr(name @ ("LENGTH" | "SUBSTRING" | "UPPER" | "LOWER"), arg +: _, _) =>
+          reads(arg).foreach(c => out += ((name, c)))
+        case LikeExpr(child, pattern, _, syntax) =>
+          val site = if (syntax.caseInsensitive) "ILIKE" else "LIKE"
+          (reads(child) ++ literals(pattern)).foreach(c => out += ((site, c)))
+        case _ => ()
+      }
+      Shrinker.childrenOf(e).foreach(walk)
+    }
+    val roots: Seq[Expr] = qc.query match {
+      case p: QueryGen.ProjectQuery => p.projection.map(_._1) ++ p.where.toSeq
+      case a: QueryGen.AggregateQuery => a.where.toSeq ++ a.aggregates.flatMap {
+        case (QueryGen.CountIf(e), _) => Seq(e)
+        case (QueryGen.Count(e, _), _) => Seq(e)
+        case (QueryGen.Sum(e, _), _) => Seq(e)
+        case (QueryGen.Avg(e, _), _) => Seq(e)
+        case _ => Seq.empty
+      }
+    }
+    roots.foreach(walk)
+    val fields = qc.dataset.schema.fields
+    sites(qc.query).foreach {
+      case (site @ ("ORDER BY" | "GROUP BY" | "MIN/MAX"), c) if fields(c).dataType == DataType.StringType =>
+        classesOf(Seq(c)).foreach(k => out += ((site, k)))
+      case _ => ()
+    }
+    out.result()
+  }
+
   lazy val predicateTally: SiteTally = {
-    val n = 10000
+    val n = 15000
     val shapes = scala.collection.mutable.Map.empty[(String, String), Int].withDefaultValue(0)
     val values = scala.collection.mutable.Map.empty[(String, DataGen.ValueTag), Int].withDefaultValue(0)
     var seed = 0
@@ -874,7 +1229,7 @@ object ModeDifferentialFuzzTest {
   }
 
   lazy val siteTally: SiteTally = {
-    val n = 10000
+    val n = 15000
     val shapes = scala.collection.mutable.Map.empty[(String, String), Int].withDefaultValue(0)
     val values = scala.collection.mutable.Map.empty[(String, DataGen.ValueTag), Int].withDefaultValue(0)
     var seed = 0

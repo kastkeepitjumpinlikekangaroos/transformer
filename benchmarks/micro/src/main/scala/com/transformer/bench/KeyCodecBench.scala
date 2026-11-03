@@ -53,10 +53,10 @@ class KeyCodecBench {
     // looks at the two key columns; the payload exists so the
     // ColumnarBatch shape matches what an operator would see.
     packedBatch = BenchFixtures.fixedWidthBatch(BatchRows, seed = 0x517L)
-    packedCodec = KeyCodec.forColumns(Array(0, 2), Array(DataType.LongType, DataType.BooleanType))
+    packedCodec = KeyCodec.forColumns(Array(0, 2), Array[DataType](DataType.LongType, DataType.BooleanType))
 
     objBatch = BenchFixtures.variableWidthBatch(BatchRows, seed = 0x517L)
-    objCodec = KeyCodec.forColumns(Array(0, 1), Array(DataType.StringType, DataType.StringType))
+    objCodec = KeyCodec.forColumns(Array(0, 1), Array[DataType](DataType.StringType, DataType.StringType))
 
     // Warm LongHashMap: same key set inserted in @Setup, so the
     // `longHashInsertWarm` benchmark measures the steady-state probe
@@ -68,7 +68,7 @@ class KeyCodecBench {
       // distribution it built on.
       val k = packedBatch.column(0).asInstanceOf[LongVector].values(i)
       val boxed: java.lang.Long = java.lang.Long.valueOf(k)
-      longMapWarm.put(k, boxed)
+      val _ = longMapWarm.put(k, boxed)
       i += 1
     }
   }
@@ -111,7 +111,7 @@ class KeyCodecBench {
     while (r < BatchRows) {
       val k = kCol.values(r)
       val v: java.lang.Long = java.lang.Long.valueOf(k)
-      map.getOrInsert(k, v)
+      val _ = map.getOrInsert(k, v)
       r += 1
     }
     bh.consume(map.size)

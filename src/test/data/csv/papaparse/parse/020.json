@@ -1,0 +1,25 @@
+{
+ "description": "Line ends with quoted field, first field of next line is empty using headers",
+ "options": {
+  "header": "true"
+ },
+ "rows": [
+  {
+   "a": "d",
+   "b": "e",
+   "c": "f"
+  },
+  {
+   "a": "",
+   "b": "h",
+   "c": "i"
+  },
+  {
+   "a": "",
+   "b": "k",
+   "c": "l"
+  }
+ ],
+ "fields": null,
+ "errors": []
+}

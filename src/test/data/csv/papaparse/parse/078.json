@@ -1,0 +1,30 @@
+{
+ "description": "Carriage return in header inside quotes, with line feed endings",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a\r\na",
+   "b"
+  ],
+  [
+   "c",
+   "d"
+  ],
+  [
+   "e",
+   "f"
+  ],
+  [
+   "g",
+   "h"
+  ],
+  [
+   "i",
+   "j"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

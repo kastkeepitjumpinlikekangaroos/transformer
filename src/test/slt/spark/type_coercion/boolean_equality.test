@@ -1,0 +1,266 @@
+# From Apache Spark's SQL query tests (https://github.com/apache/spark):
+# sql/core/src/test/resources/sql-tests/inputs/typeCoercion/native/booleanEquality.sql
+# at commit b98123545915a84403c7fa89e8d977ee0b2f5aed, with every answer from
+# the golden file results/typeCoercion/native/booleanEquality.sql.out at that
+# commit, Spark's answer under ANSI mode, never the engine's. Licensed to the
+# Apache Software Foundation under the Apache License, Version 2.0: LICENSE and
+# NOTICE in src/test/slt/spark/ hold the license and Spark's notice. Written by
+# //src/test/scala/com/transformer/slt:spark_import, which docs/extending.md
+# describes; edit the converter, not this file.
+#
+# TRUE and FALSE compared with a value of each type. 37 of the file's 97
+# statements are here, 4 of them records the engine answers otherwise by a rule
+# of the ledger in docs/gotchas.md, marked skipif transformer <id> and, for a
+# rule that is no refusal, followed by its twin, onlyif transformer <id> with
+# the engine's own answer.
+#
+# A statement is as Spark wrote it but where a rewrite cannot change what it
+# means, which its record names: a temporary view of literals as a table of
+# their types holding one row of them; a timestamp's text cast to DATE as the
+# DATE literal of its date (Spark's cast drops the time; this engine reads only
+# an ISO date as a DATE, and a test of that cast is no test of its subject). A
+# column is the engine's type of the name Spark's schema gives it. A result is
+# compared as rowsort unless its query ends in ORDER BY, as Spark sorts every
+# result its plan does not. An error under ANSI is a statement error, Spark's
+# error class in its comment and after ---- the engine's own words for the same
+# reason.
+#
+# Skipped, by rule:
+#      4  refused-text-comparison
+#
+# Left out (60 statements), by what they need:
+#     36  Spark's operator <=>
+#      8  BINARY, and X'' literals
+#      8  SMALLINT
+#      8  TINYINT
+
+# booleanEquality.sql:18, the temporary view as a table of one row
+statement ok
+CREATE TABLE t (c1 INT)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+# booleanEquality.sql:22; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT true = cast(1 as int) FROM t
+----
+Cannot compare BOOLEAN with INT
+
+# booleanEquality.sql:23; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT true = cast(1 as bigint) FROM t
+----
+Cannot compare BOOLEAN with LONG
+
+# booleanEquality.sql:24; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT true = cast(1 as float) FROM t
+----
+Cannot compare BOOLEAN with FLOAT
+
+# booleanEquality.sql:25; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT true = cast(1 as double) FROM t
+----
+Cannot compare BOOLEAN with DOUBLE
+
+# booleanEquality.sql:26; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT true = cast(1 as decimal(10, 0)) FROM t
+----
+Cannot compare BOOLEAN with DECIMAL(10,0)
+
+# booleanEquality.sql:27
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT true = cast(1 as string) FROM t
+----
+true
+
+# booleanEquality.sql:29
+query BOOLEAN rowsort
+SELECT true = cast(1 as boolean) FROM t
+----
+true
+
+# booleanEquality.sql:30; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT true = cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare BOOLEAN with TIMESTAMP
+
+# booleanEquality.sql:31; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT true = DATE '2017-12-11' FROM t
+----
+Cannot compare BOOLEAN with DATE
+
+# booleanEquality.sql:48; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as int) = true FROM t
+----
+Cannot compare INT with BOOLEAN
+
+# booleanEquality.sql:49; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as bigint) = true FROM t
+----
+Cannot compare LONG with BOOLEAN
+
+# booleanEquality.sql:50; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as float) = true FROM t
+----
+Cannot compare FLOAT with BOOLEAN
+
+# booleanEquality.sql:51; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as double) = true FROM t
+----
+Cannot compare DOUBLE with BOOLEAN
+
+# booleanEquality.sql:52; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) = true FROM t
+----
+Cannot compare DECIMAL(10,0) with BOOLEAN
+
+# booleanEquality.sql:53
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) = true FROM t
+----
+true
+
+# booleanEquality.sql:55
+query BOOLEAN rowsort
+SELECT cast(1 as boolean) = true FROM t
+----
+true
+
+# booleanEquality.sql:56; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) = true FROM t
+----
+Cannot compare TIMESTAMP with BOOLEAN
+
+# booleanEquality.sql:57; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' = true FROM t
+----
+Cannot compare DATE with BOOLEAN
+
+# booleanEquality.sql:74; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT false = cast(0 as int) FROM t
+----
+Cannot compare BOOLEAN with INT
+
+# booleanEquality.sql:75; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT false = cast(0 as bigint) FROM t
+----
+Cannot compare BOOLEAN with LONG
+
+# booleanEquality.sql:76; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT false = cast(0 as float) FROM t
+----
+Cannot compare BOOLEAN with FLOAT
+
+# booleanEquality.sql:77; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT false = cast(0 as double) FROM t
+----
+Cannot compare BOOLEAN with DOUBLE
+
+# booleanEquality.sql:78; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT false = cast(0 as decimal(10, 0)) FROM t
+----
+Cannot compare BOOLEAN with DECIMAL(10,0)
+
+# booleanEquality.sql:79
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT false = cast(0 as string) FROM t
+----
+true
+
+# booleanEquality.sql:81
+query BOOLEAN rowsort
+SELECT false = cast(0 as boolean) FROM t
+----
+true
+
+# booleanEquality.sql:82; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT false = cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot compare BOOLEAN with TIMESTAMP
+
+# booleanEquality.sql:83; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT false = DATE '2017-12-11' FROM t
+----
+Cannot compare BOOLEAN with DATE
+
+# booleanEquality.sql:100; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(0 as int) = false FROM t
+----
+Cannot compare INT with BOOLEAN
+
+# booleanEquality.sql:101; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(0 as bigint) = false FROM t
+----
+Cannot compare LONG with BOOLEAN
+
+# booleanEquality.sql:102; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(0 as float) = false FROM t
+----
+Cannot compare FLOAT with BOOLEAN
+
+# booleanEquality.sql:103; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(0 as double) = false FROM t
+----
+Cannot compare DOUBLE with BOOLEAN
+
+# booleanEquality.sql:104; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(0 as decimal(10, 0)) = false FROM t
+----
+Cannot compare DECIMAL(10,0) with BOOLEAN
+
+# booleanEquality.sql:105
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(0 as string) = false FROM t
+----
+true
+
+# booleanEquality.sql:107
+query BOOLEAN rowsort
+SELECT cast(0 as boolean) = false FROM t
+----
+true
+
+# booleanEquality.sql:108; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) = false FROM t
+----
+Cannot compare TIMESTAMP with BOOLEAN
+
+# booleanEquality.sql:109; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' = false FROM t
+----
+Cannot compare DATE with BOOLEAN

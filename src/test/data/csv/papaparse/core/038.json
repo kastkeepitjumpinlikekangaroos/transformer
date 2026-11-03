@@ -1,0 +1,21 @@
+{
+ "description": "Input is just empty fields",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "",
+   "",
+   ""
+  ],
+  [
+   "",
+   "",
+   "",
+   ""
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

@@ -1,0 +1,18 @@
+{
+ "description": "Custom quote character (single quote)",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n",
+  "quote": "'",
+  "escape": "'"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "a,d",
+   "b",
+   "c"
+  ]
+ ],
+ "text": "'a,d',b,c"
+}

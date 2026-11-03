@@ -1,0 +1,20 @@
+{
+ "description": "Other fields are empty",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "",
+   "c"
+  ],
+  [
+   "",
+   "",
+   ""
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

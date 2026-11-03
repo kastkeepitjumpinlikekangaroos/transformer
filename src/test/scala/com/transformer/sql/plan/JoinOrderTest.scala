@@ -84,6 +84,28 @@ class JoinOrderTest {
     assertSameAnswer("SELECT a.v, d.v FROM a LEFT JOIN b ON a.k = b.k, c, d WHERE c.j = d.j AND d.k = a.k")
   }
 
+  /** A run of inner joins nested on the right as well as the left keeps its
+    * answer: each join's condition reads its tables where the run puts them.
+    * The binder builds no such tree (it refuses a parenthesized join, and a
+    * CTE's join sits under its projection), but the pass takes any run of
+    * inner joins, as a plan built in code may hold. Here `c` has the key to
+    * `a`, so the run reorders to a, c, b. */
+  @Test def aJoinNestedOnTheRightKeepsItsAnswer(): Unit = {
+    def scan(n: String) = LogicalScan(n, catalog.get(n).get, Some(n))
+    def col(i: Int, n: String) = ColRefExpr(i, n, DataType.IntType)
+    def eq(l: Expr, r: Expr) = BinOpExpr("=", l, r, DataType.BooleanType)
+    // a JOIN (b JOIN c ON b.k = c.k) ON a.j = c.j, each table's columns k, j, v.
+    val bc = LogicalJoin(scan("b"), scan("c"), eq(col(0, "k"), col(3, "k")), JoinKind.Inner)
+    val plan = LogicalJoin(scan("a"), bc, eq(col(1, "j"), col(7, "j")), JoinKind.Inner)
+    val reordered = LogicalOptimizer.joinOrder(plan)
+    assertEquals(Seq("a", "c", "b"), order(reordered))
+    def rows(p: LogicalPlan): Vector[Array[Any]] = {
+      val physical = PhysicalPlanner.plan(p, ExecutionOptions.Default)
+      RelEngine.collectRows(new ExecutedQuery(physical.outputSchema, (0 until physical.numPartitions).map(physical.execute)))
+    }
+    RowOracle.multisetEquals(plan.outputSchema, rows(plan), rows(reordered)).foreach(d => fail(d))
+  }
+
   /** A condition that reads RAND() would be drawn for other rows in another
     * order, so its run stays as written. */
   @Test def aRunWhoseConditionsReadRandStaysAsWritten(): Unit =

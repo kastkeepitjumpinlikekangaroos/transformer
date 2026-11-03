@@ -1,0 +1,16 @@
+{
+ "description": "Custom escape character not used for escaping",
+ "options": {
+  "header": "false",
+  "escape": "\\"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   "c\\d"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

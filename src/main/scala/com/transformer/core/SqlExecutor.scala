@@ -39,12 +39,29 @@ trait SqlExecutor {
   * a fresh [[QueryMetrics]] computed from the underlying operator tree —
   * call after the partitions have been drained so the counter values are
   * final. Returns None when metrics were disabled.
+  *
+  * Its consumer closes it ([[close]]) once it stops reading, however it
+  * stops: a query that was read to its end has released what it opened, and a
+  * read that fails or is stopped closes its partition and every partition not
+  * yet read as the failure goes by, but one read in part holds its files and
+  * spill directories until it is closed ([[Closing]]).
   */
 final class ExecutedQuery(
     val schema: Schema,
     partitionSources: IndexedSeq[Iterator[ColumnarBatch]]
-) {
+) extends AutoCloseable {
   private val _rows = new LongAdder()
+
+  /** Whether each partition has been read, or closed unread. */
+  private val started = Array.fill(partitionSources.length)(new java.util.concurrent.atomic.AtomicBoolean(false))
+
+  /** A read of a partition failed or was stopped: the partitions no one has
+    * read yet are closed, as nothing will read them now. One being read on
+    * another thread is its reader's to close, or [[close]]'s. */
+  private def failed(): Unit =
+    partitionSources.indices.foreach { j =>
+      if (started(j).compareAndSet(false, true)) Closing.close(partitionSources(j))
+    }
 
   // Lazy snapshot supplier. The captured operator tree is mutable and only
   // settles after the partition iterators have been drained, so we don't
@@ -58,15 +75,27 @@ final class ExecutedQuery(
     * long as each partition is drained by exactly one thread (the underlying
     * physical-plan iterator is not itself thread-safe).
     */
-  def partition(i: Int): Iterator[ColumnarBatch] = new Iterator[ColumnarBatch] {
+  def partition(i: Int): Iterator[ColumnarBatch] = new Iterator[ColumnarBatch] with AutoCloseable {
     private val src = partitionSources(i)
-    override def hasNext: Boolean = src.hasNext
+    // A read that fails ends the partition, and the query: it is closed, and
+    // so is every partition no one has read yet, and the failure goes on.
+    override def hasNext: Boolean = {
+      started(i).set(true)
+      try src.hasNext catch { case t: Throwable => close(); failed(); throw t }
+    }
     override def next(): ColumnarBatch = {
-      val b = src.next()
+      started(i).set(true)
+      val b = try src.next() catch { case t: Throwable => close(); failed(); throw t }
       _rows.add(b.numRows.toLong)
       b
     }
+    def close(): Unit = Closing.close(src)
   }
+
+  /** Release what every partition holds, read or not: the files its scans
+    * read and the spill directories its operators wrote. Call it once the
+    * query is read, however reading it ended; a second call does nothing. */
+  def close(): Unit = partitionSources.foreach(Closing.close)
 
   /** Flat view across all partitions, in partition order. Useful for callers that
     * don't care about partition boundaries (validation drains, in-memory

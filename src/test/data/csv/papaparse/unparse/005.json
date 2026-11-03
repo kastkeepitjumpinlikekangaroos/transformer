@@ -1,0 +1,25 @@
+{
+ "description": "Array of objects (header row)",
+ "options": {
+  "header": "true",
+  "lineEnding": "\r\n"
+ },
+ "fields": [
+  "Col1",
+  "Col2",
+  "Col3"
+ ],
+ "rows": [
+  [
+   "a",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "e",
+   "f"
+  ]
+ ],
+ "text": "Col1,Col2,Col3\r\na,b,c\r\nd,e,f"
+}

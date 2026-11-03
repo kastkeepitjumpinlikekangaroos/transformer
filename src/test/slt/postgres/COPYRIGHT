@@ -1,6 +1,7 @@
 The scripts in this directory are ported from PostgreSQL's regression suite
 (src/test/regress at REL_18_6, commit 724edf9bde9d356724ad384a2e196edc3c9f80f7),
-whose COPYRIGHT file follows.
+and sql/, expected/ and data/ hold files of that suite as they are at that
+commit. Its COPYRIGHT file follows.
 
 PostgreSQL Database Management System
 (also known as Postgres, formerly known as Postgres95)

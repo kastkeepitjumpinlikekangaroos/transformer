@@ -43,6 +43,17 @@ SELECT a FROM t ORDER BY b NULLS FIRST
 3
 1
 
+# A NULL sorts as the smallest value: first under ASC, last under DESC.
+onlyif transformer nulls-sort-low
+query INT nosort
+SELECT a FROM t ORDER BY b
+----
+4
+2
+3
+1
+
+onlyif transformer nulls-sort-low
 query INT nosort
 SELECT a FROM t ORDER BY b DESC
 ----
@@ -91,3 +102,13 @@ SELECT a FROM t ORDER BY a DESC FETCH FIRST 3 ROWS ONLY
 4
 3
 2
+
+# A quoted name matches regardless of case, as a bare one does.
+onlyif transformer names-ignore-case
+query INT rowsort
+SELECT "A" FROM t
+----
+1
+2
+3
+4

@@ -1,0 +1,422 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/strings.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/strings.out at that commit, never the engine's.
+# Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group;
+# Portions Copyright (c) 1994, The Regents of the University of California.
+# Distributed under the PostgreSQL License, a permissive license whose text
+# travels with every copy: it is COPYRIGHT beside this file.
+#
+# The file's SUBSTRING, LIKE and ILIKE sections: SUBSTRING's start and length
+# past the ends of the string and past INT, a negative length an error in
+# both engines; LIKE and NOT LIKE pairs over % and _, with an ESCAPE character
+# that is unused, used, and itself % or _; ILIKE and NOT ILIKE pairs; % and _
+# combined; and LIKE over an empty table. 64 of the file's 507 statements are
+# here, each record naming the line of strings.sql it comes from, and the
+# engine's answer is Postgres's in each. A statement is as Postgres wrote it
+# but where a rewrite cannot change what it means, which its record says:
+# SUBSTRING(x FROM s FOR n) as SUBSTRING(x, s, n), one function in both
+# engines, as the engine's refusal of the keyword form advises, and text as
+# STRING.
+#
+# Left out (443 statements), by what they need:
+#  146  the regular-expression forms: SIMILAR TO, SUBSTRING with SIMILAR or
+#       FROM a pattern, regexp_*() and the ~ operators
+#  109  bytea values, the functions over them and bytea_output
+#   78  string literal syntax the engine does not read: U&'...' and UESCAPE,
+#       E'...' escapes, unistr(), and the settings standard_conforming_strings
+#       and escape_string_warning
+#   54  string functions the engine lacks: OVERLAY, strpos(), replace(),
+#       split_part(), to_bin(), to_oct(), to_hex(), initcap(), lpad(),
+#       rpad(), ltrim() of given characters, translate(), ascii(), chr(),
+#       repeat(), and TRIM's and POSITION's keyword forms
+#   35  TOAST-ed values and their storage settings
+#   14  the char(n), varchar and name types: casts between the text types,
+#       and LIKE and ILIKE over a name
+#    5  outside the sections ported: length() and four concatenations of
+#       text, char(20) and untyped literals
+#    2  psql's \pset, which changes how NULL prints
+
+# strings.sql:140: E021-06 substring expression, SUBSTRING(x FROM s FOR n)
+# written SUBSTRING(x, s, n), the same function in both engines, as the
+# engine's refusal of the keyword form advises.
+query BOOLEAN nosort
+SELECT SUBSTRING('1234567890', 3) = '34567890' AS "34567890"
+----
+true
+
+# strings.sql:142
+query BOOLEAN nosort
+SELECT SUBSTRING('1234567890', 4, 3) = '456' AS "456"
+----
+true
+
+# strings.sql:145: overflow cases.
+query STRING nosort
+SELECT SUBSTRING('string', 2, 2147483646) AS "tring"
+----
+tring
+
+# strings.sql:146
+query STRING nosort
+SELECT SUBSTRING('string', -10, 2147483646) AS "string"
+----
+string
+
+# strings.sql:147: Postgres: negative substring length not allowed.
+statement error
+SELECT SUBSTRING('string', -10, -2147483646) AS "error"
+
+# strings.sql:415: LIKE, each test a LIKE and NOT LIKE pair; the simplest
+# examples (E061-04).
+query BOOLEAN nosort
+SELECT 'hawkeye' LIKE 'h%' AS "true"
+----
+true
+
+# strings.sql:416
+query BOOLEAN nosort
+SELECT 'hawkeye' NOT LIKE 'h%' AS "false"
+----
+false
+
+# strings.sql:418
+query BOOLEAN nosort
+SELECT 'hawkeye' LIKE 'H%' AS "false"
+----
+false
+
+# strings.sql:419
+query BOOLEAN nosort
+SELECT 'hawkeye' NOT LIKE 'H%' AS "true"
+----
+true
+
+# strings.sql:421
+query BOOLEAN nosort
+SELECT 'hawkeye' LIKE 'indio%' AS "false"
+----
+false
+
+# strings.sql:422
+query BOOLEAN nosort
+SELECT 'hawkeye' NOT LIKE 'indio%' AS "true"
+----
+true
+
+# strings.sql:424
+query BOOLEAN nosort
+SELECT 'hawkeye' LIKE 'h%eye' AS "true"
+----
+true
+
+# strings.sql:425
+query BOOLEAN nosort
+SELECT 'hawkeye' NOT LIKE 'h%eye' AS "false"
+----
+false
+
+# strings.sql:427
+query BOOLEAN nosort
+SELECT 'indio' LIKE '_ndio' AS "true"
+----
+true
+
+# strings.sql:428
+query BOOLEAN nosort
+SELECT 'indio' NOT LIKE '_ndio' AS "false"
+----
+false
+
+# strings.sql:430
+query BOOLEAN nosort
+SELECT 'indio' LIKE 'in__o' AS "true"
+----
+true
+
+# strings.sql:431
+query BOOLEAN nosort
+SELECT 'indio' NOT LIKE 'in__o' AS "false"
+----
+false
+
+# strings.sql:433
+query BOOLEAN nosort
+SELECT 'indio' LIKE 'in_o' AS "false"
+----
+false
+
+# strings.sql:434
+query BOOLEAN nosort
+SELECT 'indio' NOT LIKE 'in_o' AS "true"
+----
+true
+
+# strings.sql:443: an unused escape character.
+query BOOLEAN nosort
+SELECT 'hawkeye' LIKE 'h%' ESCAPE '#' AS "true"
+----
+true
+
+# strings.sql:444
+query BOOLEAN nosort
+SELECT 'hawkeye' NOT LIKE 'h%' ESCAPE '#' AS "false"
+----
+false
+
+# strings.sql:446
+query BOOLEAN nosort
+SELECT 'indio' LIKE 'ind_o' ESCAPE '$' AS "true"
+----
+true
+
+# strings.sql:447
+query BOOLEAN nosort
+SELECT 'indio' NOT LIKE 'ind_o' ESCAPE '$' AS "false"
+----
+false
+
+# strings.sql:451: an escape character (E061-05).
+query BOOLEAN nosort
+SELECT 'h%' LIKE 'h#%' ESCAPE '#' AS "true"
+----
+true
+
+# strings.sql:452
+query BOOLEAN nosort
+SELECT 'h%' NOT LIKE 'h#%' ESCAPE '#' AS "false"
+----
+false
+
+# strings.sql:454
+query BOOLEAN nosort
+SELECT 'h%wkeye' LIKE 'h#%' ESCAPE '#' AS "false"
+----
+false
+
+# strings.sql:455
+query BOOLEAN nosort
+SELECT 'h%wkeye' NOT LIKE 'h#%' ESCAPE '#' AS "true"
+----
+true
+
+# strings.sql:457
+query BOOLEAN nosort
+SELECT 'h%wkeye' LIKE 'h#%%' ESCAPE '#' AS "true"
+----
+true
+
+# strings.sql:458
+query BOOLEAN nosort
+SELECT 'h%wkeye' NOT LIKE 'h#%%' ESCAPE '#' AS "false"
+----
+false
+
+# strings.sql:460
+query BOOLEAN nosort
+SELECT 'h%awkeye' LIKE 'h#%a%k%e' ESCAPE '#' AS "true"
+----
+true
+
+# strings.sql:461
+query BOOLEAN nosort
+SELECT 'h%awkeye' NOT LIKE 'h#%a%k%e' ESCAPE '#' AS "false"
+----
+false
+
+# strings.sql:463
+query BOOLEAN nosort
+SELECT 'indio' LIKE '_ndio' ESCAPE '$' AS "true"
+----
+true
+
+# strings.sql:464
+query BOOLEAN nosort
+SELECT 'indio' NOT LIKE '_ndio' ESCAPE '$' AS "false"
+----
+false
+
+# strings.sql:466
+query BOOLEAN nosort
+SELECT 'i_dio' LIKE 'i$_d_o' ESCAPE '$' AS "true"
+----
+true
+
+# strings.sql:467
+query BOOLEAN nosort
+SELECT 'i_dio' NOT LIKE 'i$_d_o' ESCAPE '$' AS "false"
+----
+false
+
+# strings.sql:469
+query BOOLEAN nosort
+SELECT 'i_dio' LIKE 'i$_nd_o' ESCAPE '$' AS "false"
+----
+false
+
+# strings.sql:470
+query BOOLEAN nosort
+SELECT 'i_dio' NOT LIKE 'i$_nd_o' ESCAPE '$' AS "true"
+----
+true
+
+# strings.sql:472
+query BOOLEAN nosort
+SELECT 'i_dio' LIKE 'i$_d%o' ESCAPE '$' AS "true"
+----
+true
+
+# strings.sql:473
+query BOOLEAN nosort
+SELECT 'i_dio' NOT LIKE 'i$_d%o' ESCAPE '$' AS "false"
+----
+false
+
+# strings.sql:479: an escape character that is also a pattern character.
+query BOOLEAN nosort
+SELECT 'maca' LIKE 'm%aca' ESCAPE '%' AS "true"
+----
+true
+
+# strings.sql:480
+query BOOLEAN nosort
+SELECT 'maca' NOT LIKE 'm%aca' ESCAPE '%' AS "false"
+----
+false
+
+# strings.sql:482
+query BOOLEAN nosort
+SELECT 'ma%a' LIKE 'm%a%%a' ESCAPE '%' AS "true"
+----
+true
+
+# strings.sql:483
+query BOOLEAN nosort
+SELECT 'ma%a' NOT LIKE 'm%a%%a' ESCAPE '%' AS "false"
+----
+false
+
+# strings.sql:485
+query BOOLEAN nosort
+SELECT 'bear' LIKE 'b_ear' ESCAPE '_' AS "true"
+----
+true
+
+# strings.sql:486
+query BOOLEAN nosort
+SELECT 'bear' NOT LIKE 'b_ear' ESCAPE '_' AS "false"
+----
+false
+
+# strings.sql:488
+query BOOLEAN nosort
+SELECT 'be_r' LIKE 'b_e__r' ESCAPE '_' AS "true"
+----
+true
+
+# strings.sql:489
+query BOOLEAN nosort
+SELECT 'be_r' NOT LIKE 'b_e__r' ESCAPE '_' AS "false"
+----
+false
+
+# strings.sql:491
+query BOOLEAN nosort
+SELECT 'be_r' LIKE '__e__r' ESCAPE '_' AS "false"
+----
+false
+
+# strings.sql:492
+query BOOLEAN nosort
+SELECT 'be_r' NOT LIKE '__e__r' ESCAPE '_' AS "true"
+----
+true
+
+# strings.sql:500: ILIKE, the case-insensitive LIKE, each test an ILIKE and
+# NOT ILIKE pair.
+query BOOLEAN nosort
+SELECT 'hawkeye' ILIKE 'h%' AS "true"
+----
+true
+
+# strings.sql:501
+query BOOLEAN nosort
+SELECT 'hawkeye' NOT ILIKE 'h%' AS "false"
+----
+false
+
+# strings.sql:503
+query BOOLEAN nosort
+SELECT 'hawkeye' ILIKE 'H%' AS "true"
+----
+true
+
+# strings.sql:504
+query BOOLEAN nosort
+SELECT 'hawkeye' NOT ILIKE 'H%' AS "false"
+----
+false
+
+# strings.sql:506
+query BOOLEAN nosort
+SELECT 'hawkeye' ILIKE 'H%Eye' AS "true"
+----
+true
+
+# strings.sql:507
+query BOOLEAN nosort
+SELECT 'hawkeye' NOT ILIKE 'H%Eye' AS "false"
+----
+false
+
+# strings.sql:509
+query BOOLEAN nosort
+SELECT 'Hawkeye' ILIKE 'h%' AS "true"
+----
+true
+
+# strings.sql:510
+query BOOLEAN nosort
+SELECT 'Hawkeye' NOT ILIKE 'h%' AS "false"
+----
+false
+
+# strings.sql:519: % and _ combined.
+query BOOLEAN,BOOLEAN,BOOLEAN nosort
+SELECT 'foo' LIKE '_%' as t, 'f' LIKE '_%' as t, '' LIKE '_%' as f
+----
+true	true	false
+
+# strings.sql:520
+query BOOLEAN,BOOLEAN,BOOLEAN nosort
+SELECT 'foo' LIKE '%_' as t, 'f' LIKE '%_' as t, '' LIKE '%_' as f
+----
+true	true	false
+
+# strings.sql:522
+query BOOLEAN,BOOLEAN,BOOLEAN nosort
+SELECT 'foo' LIKE '__%' as t, 'foo' LIKE '___%' as t, 'foo' LIKE '____%' as f
+----
+true	true	false
+
+# strings.sql:523
+query BOOLEAN,BOOLEAN,BOOLEAN nosort
+SELECT 'foo' LIKE '%__' as t, 'foo' LIKE '%___' as t, 'foo' LIKE '%____' as f
+----
+true	true	false
+
+# strings.sql:525
+query BOOLEAN nosort
+SELECT 'jack' LIKE '%____%' AS t
+----
+true
+
+# strings.sql:532: LIKE over a table, which Postgres scans by its primary
+# key's index; text written STRING.
+statement ok
+CREATE TABLE texttest (a STRING PRIMARY KEY, b int)
+
+# strings.sql:533
+query STRING,INT rowsort
+SELECT * FROM texttest WHERE a LIKE '%1%'
+----

@@ -224,8 +224,9 @@ Work proceeds on each recommended answer unless the user says otherwise.
    skips empty partitions (one header-only file when all are), CSV writes a
    header-only file for each empty one. It accepts `parquet_write_parallelism`,
    refuses a non-empty directory, leaves no file when it fails or stops (the
-   CLI removes what it wrote until plans/testing/06 stages parts in the
-   writers), writes no `_run.json` (so `--table` reads it as a directory, in
+   CLI removes what it wrote; plans/testing/06 has since landed, and
+   `job.OutputDirectory` stages parts and commits them together, as the
+   GUI's `ResultPersister` writes through it, so the CLI could too), writes no `_run.json` (so `--table` reads it as a directory, in
    name order, which is partition order) and says `Wrote N rows to dir (18
    files)`; `--output` stays one file. About Kx faster. Or: a trailing `/`
    instead; or no directory form.

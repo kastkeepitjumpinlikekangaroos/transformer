@@ -1,0 +1,16 @@
+{
+ "description": "Quoted field has no closing quote",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "b,c\nd,e,f"
+  ]
+ ],
+ "fields": null,
+ "errors": [
+  "MissingQuotes"
+ ]
+}

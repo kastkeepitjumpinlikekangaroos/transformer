@@ -122,6 +122,12 @@ object PlanValidator {
           throw malformed(stage, at, s"column $i ('$name') is read as $t, but ${columns(input)} holds a ${f.dataType}")
       case LitExpr(_, _) => ()
       case CastExpr(c, _) => go(c)
+      // The binder's own casts may name a DECIMAL of any width (two decimals
+      // compare as the one that holds both); a query's names one it can write.
+      case DecimalCastExpr(c, t) =>
+        go(c)
+        if (!FunctionCatalog.castTarget(s"DECIMAL(${t.precision},${t.scale})").contains(t))
+          throw malformed(stage, at, s"a CAST the query wrote names $t, which no CAST can")
       case UnaryOpExpr(op, c, _) =>
         go(c)
         if (op == "NOT") requireBoolean(c, stage, at)
@@ -134,7 +140,11 @@ object PlanValidator {
         }
       case FuncExpr(name, args, _) =>
         args.foreach(go)
-        if (name.equalsIgnoreCase("IF") && args.size == 3) requireBoolean(args.head, stage, at)
+        // A condition argument (IF's first) is a BOOLEAN, as every condition is.
+        FunctionCatalog.paramsOf(name, args.size).zip(args).foreach {
+          case (Funcs.Param.Condition, arg) => requireBoolean(arg, stage, at)
+          case _ => ()
+        }
       case CaseExpr(branches, elseExpr, _) =>
         branches.foreach { case (w, t) => go(w); requireBoolean(w, stage, at); go(t) }
         elseExpr.foreach(go)

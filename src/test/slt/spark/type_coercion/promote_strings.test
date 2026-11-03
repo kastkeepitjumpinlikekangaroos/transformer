@@ -1,0 +1,1524 @@
+# From Apache Spark's SQL query tests (https://github.com/apache/spark):
+# sql/core/src/test/resources/sql-tests/inputs/typeCoercion/native/promoteStrings.sql
+# at commit b98123545915a84403c7fa89e8d977ee0b2f5aed, with every answer from
+# the golden file results/typeCoercion/native/promoteStrings.sql.out at that
+# commit, Spark's answer under ANSI mode, never the engine's. Licensed to the
+# Apache Software Foundation under the Apache License, Version 2.0: LICENSE and
+# NOTICE in src/test/slt/spark/ hold the license and Spark's notice. Written by
+# //src/test/scala/com/transformer/slt:spark_import, which docs/extending.md
+# describes; edit the converter, not this file.
+#
+# A string literal beside a value of each type under each operator, and under
+# the math functions and the aggregates. 198 of the file's 316 statements are
+# here, 65 of them records the engine answers otherwise by a rule of the ledger
+# in docs/gotchas.md, marked skipif transformer <id> and, for a rule that is no
+# refusal, followed by its twin, onlyif transformer <id> with the engine's own
+# answer.
+#
+# A statement is as Spark wrote it but where a rewrite cannot change what it
+# means, which its record names: a temporary view of literals as a table of
+# their types holding one row of them; a timestamp's text cast to DATE as the
+# DATE literal of its date (Spark's cast drops the time; this engine reads only
+# an ISO date as a DATE, and a test of that cast is no test of its subject). A
+# column is the engine's type of the name Spark's schema gives it. A result is
+# compared as rowsort unless its query ends in ORDER BY, as Spark sorts every
+# result its plan does not. An error under ANSI is a statement error, Spark's
+# error class in its comment and after ---- the engine's own words for the same
+# reason.
+#
+# Skipped, by rule:
+#     22  refused-text-comparison
+#     16  text-literal-typed
+#     12  bool-text
+#      7  refused-implicit-number
+#      6  division-keeps-type
+#      2  refused-text-arithmetic
+#
+# Left out (118 statements), by what they need:
+#     26  BINARY, and X'' literals
+#     26  SMALLINT
+#     26  TINYINT
+#     17  Spark's function pmod()
+#     17  Spark's operator <=>
+#      4  INTERVAL, the type of a DATE's or TIMESTAMP's difference with text
+#         Spark reads as one
+#      1  Spark's function kurtosis()
+#      1  Spark's function skewness()
+
+# promoteStrings.sql:18, the temporary view as a table of one row
+statement ok
+CREATE TABLE t (c1 INT)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+# promoteStrings.sql:23
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query BIGINT rowsort
+SELECT '1' + cast(1 as int)                             FROM t
+----
+2
+
+onlyif transformer text-literal-typed
+query INT rowsort
+SELECT '1' + cast(1 as int)                             FROM t
+----
+2
+
+# promoteStrings.sql:24
+query BIGINT rowsort
+SELECT '1' + cast(1 as bigint)                          FROM t
+----
+2
+
+# promoteStrings.sql:25
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query DOUBLE rowsort
+SELECT '1' + cast(1 as float)                           FROM t
+----
+2.0
+
+onlyif transformer text-literal-typed
+query FLOAT rowsort
+SELECT '1' + cast(1 as float)                           FROM t
+----
+2.0
+
+# promoteStrings.sql:26
+query DOUBLE rowsort
+SELECT '1' + cast(1 as double)                          FROM t
+----
+2.0
+
+# promoteStrings.sql:27
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT '1' + cast(1 as decimal(10, 0))                  FROM t
+----
+2.0
+
+# promoteStrings.sql:28; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' + '1'                                        FROM t
+----
+Arithmetic on STRING is not supported
+
+# promoteStrings.sql:30; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' + cast(1 as boolean)                         FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# promoteStrings.sql:31; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' + cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# promoteStrings.sql:32; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT '1' + DATE '2017-12-11'        FROM t
+----
+Arithmetic on DATE is not supported
+
+# promoteStrings.sql:36
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query BIGINT rowsort
+SELECT '1' - cast(1 as int)                             FROM t
+----
+0
+
+onlyif transformer text-literal-typed
+query INT rowsort
+SELECT '1' - cast(1 as int)                             FROM t
+----
+0
+
+# promoteStrings.sql:37
+query BIGINT rowsort
+SELECT '1' - cast(1 as bigint)                          FROM t
+----
+0
+
+# promoteStrings.sql:38
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query DOUBLE rowsort
+SELECT '1' - cast(1 as float)                           FROM t
+----
+0.0
+
+onlyif transformer text-literal-typed
+query FLOAT rowsort
+SELECT '1' - cast(1 as float)                           FROM t
+----
+0.0
+
+# promoteStrings.sql:39
+query DOUBLE rowsort
+SELECT '1' - cast(1 as double)                          FROM t
+----
+0.0
+
+# promoteStrings.sql:40
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT '1' - cast(1 as decimal(10, 0))                  FROM t
+----
+0.0
+
+# promoteStrings.sql:41; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' - '1'                                        FROM t
+----
+Arithmetic on STRING is not supported
+
+# promoteStrings.sql:43; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' - cast(1 as boolean)                         FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# promoteStrings.sql:49
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query BIGINT rowsort
+SELECT '1' * cast(1 as int)                             FROM t
+----
+1
+
+onlyif transformer text-literal-typed
+query INT rowsort
+SELECT '1' * cast(1 as int)                             FROM t
+----
+1
+
+# promoteStrings.sql:50
+query BIGINT rowsort
+SELECT '1' * cast(1 as bigint)                          FROM t
+----
+1
+
+# promoteStrings.sql:51
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query DOUBLE rowsort
+SELECT '1' * cast(1 as float)                           FROM t
+----
+1.0
+
+onlyif transformer text-literal-typed
+query FLOAT rowsort
+SELECT '1' * cast(1 as float)                           FROM t
+----
+1.0
+
+# promoteStrings.sql:52
+query DOUBLE rowsort
+SELECT '1' * cast(1 as double)                          FROM t
+----
+1.0
+
+# promoteStrings.sql:53
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT '1' * cast(1 as decimal(10, 0))                  FROM t
+----
+1.0
+
+# promoteStrings.sql:54; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' * '1'                                        FROM t
+----
+Arithmetic on STRING is not supported
+
+# promoteStrings.sql:56; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' * cast(1 as boolean)                         FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# promoteStrings.sql:57; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' * cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# promoteStrings.sql:58; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' * DATE '2017-12-11'        FROM t
+----
+Arithmetic on DATE is not supported
+
+# promoteStrings.sql:62
+skipif transformer division-keeps-type # / keeps its operands' type
+query DOUBLE rowsort
+SELECT '1' / cast(1 as int)                             FROM t
+----
+1.0
+
+onlyif transformer division-keeps-type
+query INT rowsort
+SELECT '1' / cast(1 as int)                             FROM t
+----
+1
+
+# promoteStrings.sql:63
+skipif transformer division-keeps-type # / keeps its operands' type
+query DOUBLE rowsort
+SELECT '1' / cast(1 as bigint)                          FROM t
+----
+1.0
+
+onlyif transformer division-keeps-type
+query BIGINT rowsort
+SELECT '1' / cast(1 as bigint)                          FROM t
+----
+1
+
+# promoteStrings.sql:64
+skipif transformer division-keeps-type # / keeps its operands' type
+query DOUBLE rowsort
+SELECT '1' / cast(1 as float)                           FROM t
+----
+1.0
+
+onlyif transformer division-keeps-type
+query FLOAT rowsort
+SELECT '1' / cast(1 as float)                           FROM t
+----
+1.0
+
+# promoteStrings.sql:65
+query DOUBLE rowsort
+SELECT '1' / cast(1 as double)                          FROM t
+----
+1.0
+
+# promoteStrings.sql:66
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT '1' / cast(1 as decimal(10, 0))                  FROM t
+----
+1.0
+
+# promoteStrings.sql:67; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' / '1'                                        FROM t
+----
+Arithmetic on STRING is not supported
+
+# promoteStrings.sql:69; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' / cast(1 as boolean)                         FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# promoteStrings.sql:70; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' / cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# promoteStrings.sql:71; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' / DATE '2017-12-11'        FROM t
+----
+Arithmetic on DATE is not supported
+
+# promoteStrings.sql:75
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query BIGINT rowsort
+SELECT '1' % cast(1 as int)                             FROM t
+----
+0
+
+onlyif transformer text-literal-typed
+query INT rowsort
+SELECT '1' % cast(1 as int)                             FROM t
+----
+0
+
+# promoteStrings.sql:76
+query BIGINT rowsort
+SELECT '1' % cast(1 as bigint)                          FROM t
+----
+0
+
+# promoteStrings.sql:77
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query DOUBLE rowsort
+SELECT '1' % cast(1 as float)                           FROM t
+----
+0.0
+
+onlyif transformer text-literal-typed
+query FLOAT rowsort
+SELECT '1' % cast(1 as float)                           FROM t
+----
+0.0
+
+# promoteStrings.sql:78
+query DOUBLE rowsort
+SELECT '1' % cast(1 as double)                          FROM t
+----
+0.0
+
+# promoteStrings.sql:79
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT '1' % cast(1 as decimal(10, 0))                  FROM t
+----
+0.0
+
+# promoteStrings.sql:80; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' % '1'                                        FROM t
+----
+Arithmetic on STRING is not supported
+
+# promoteStrings.sql:82; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' % cast(1 as boolean)                         FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# promoteStrings.sql:83; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' % cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# promoteStrings.sql:84; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT '1' % DATE '2017-12-11'        FROM t
+----
+Arithmetic on DATE is not supported
+
+# promoteStrings.sql:101
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query BIGINT rowsort
+SELECT cast(1 as int)                             + '1' FROM t
+----
+2
+
+onlyif transformer text-literal-typed
+query INT rowsort
+SELECT cast(1 as int)                             + '1' FROM t
+----
+2
+
+# promoteStrings.sql:102
+query BIGINT rowsort
+SELECT cast(1 as bigint)                          + '1' FROM t
+----
+2
+
+# promoteStrings.sql:103
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query DOUBLE rowsort
+SELECT cast(1 as float)                           + '1' FROM t
+----
+2.0
+
+onlyif transformer text-literal-typed
+query FLOAT rowsort
+SELECT cast(1 as float)                           + '1' FROM t
+----
+2.0
+
+# promoteStrings.sql:104
+query DOUBLE rowsort
+SELECT cast(1 as double)                          + '1' FROM t
+----
+2.0
+
+# promoteStrings.sql:105
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0))                  + '1' FROM t
+----
+2.0
+
+# promoteStrings.sql:107; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast(1 as boolean)                         + '1' FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# promoteStrings.sql:108; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) + '1' FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# promoteStrings.sql:109; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE
+statement error
+SELECT DATE '2017-12-11'        + '1' FROM t
+----
+Arithmetic on DATE is not supported
+
+# promoteStrings.sql:113
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query BIGINT rowsort
+SELECT cast(1 as int)                             - '1' FROM t
+----
+0
+
+onlyif transformer text-literal-typed
+query INT rowsort
+SELECT cast(1 as int)                             - '1' FROM t
+----
+0
+
+# promoteStrings.sql:114
+query BIGINT rowsort
+SELECT cast(1 as bigint)                          - '1' FROM t
+----
+0
+
+# promoteStrings.sql:115
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query DOUBLE rowsort
+SELECT cast(1 as float)                           - '1' FROM t
+----
+0.0
+
+onlyif transformer text-literal-typed
+query FLOAT rowsort
+SELECT cast(1 as float)                           - '1' FROM t
+----
+0.0
+
+# promoteStrings.sql:116
+query DOUBLE rowsort
+SELECT cast(1 as double)                          - '1' FROM t
+----
+0.0
+
+# promoteStrings.sql:117
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0))                  - '1' FROM t
+----
+0.0
+
+# promoteStrings.sql:119; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast(1 as boolean)                         - '1' FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# promoteStrings.sql:125
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query BIGINT rowsort
+SELECT cast(1 as int)                             * '1' FROM t
+----
+1
+
+onlyif transformer text-literal-typed
+query INT rowsort
+SELECT cast(1 as int)                             * '1' FROM t
+----
+1
+
+# promoteStrings.sql:126
+query BIGINT rowsort
+SELECT cast(1 as bigint)                          * '1' FROM t
+----
+1
+
+# promoteStrings.sql:127
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query DOUBLE rowsort
+SELECT cast(1 as float)                           * '1' FROM t
+----
+1.0
+
+onlyif transformer text-literal-typed
+query FLOAT rowsort
+SELECT cast(1 as float)                           * '1' FROM t
+----
+1.0
+
+# promoteStrings.sql:128
+query DOUBLE rowsort
+SELECT cast(1 as double)                          * '1' FROM t
+----
+1.0
+
+# promoteStrings.sql:129
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0))                  * '1' FROM t
+----
+1.0
+
+# promoteStrings.sql:131; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast(1 as boolean)                         * '1' FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# promoteStrings.sql:132; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) * '1' FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# promoteStrings.sql:133; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT DATE '2017-12-11'        * '1' FROM t
+----
+Arithmetic on DATE is not supported
+
+# promoteStrings.sql:137
+skipif transformer division-keeps-type # / keeps its operands' type
+query DOUBLE rowsort
+SELECT cast(1 as int)                             / '1' FROM t
+----
+1.0
+
+onlyif transformer division-keeps-type
+query INT rowsort
+SELECT cast(1 as int)                             / '1' FROM t
+----
+1
+
+# promoteStrings.sql:138
+skipif transformer division-keeps-type # / keeps its operands' type
+query DOUBLE rowsort
+SELECT cast(1 as bigint)                          / '1' FROM t
+----
+1.0
+
+onlyif transformer division-keeps-type
+query BIGINT rowsort
+SELECT cast(1 as bigint)                          / '1' FROM t
+----
+1
+
+# promoteStrings.sql:139
+skipif transformer division-keeps-type # / keeps its operands' type
+query DOUBLE rowsort
+SELECT cast(1 as float)                           / '1' FROM t
+----
+1.0
+
+onlyif transformer division-keeps-type
+query FLOAT rowsort
+SELECT cast(1 as float)                           / '1' FROM t
+----
+1.0
+
+# promoteStrings.sql:140
+query DOUBLE rowsort
+SELECT cast(1 as double)                          / '1' FROM t
+----
+1.0
+
+# promoteStrings.sql:141
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0))                  / '1' FROM t
+----
+1.0
+
+# promoteStrings.sql:143; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast(1 as boolean)                         / '1' FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# promoteStrings.sql:144; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) / '1' FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# promoteStrings.sql:145; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT DATE '2017-12-11'        / '1' FROM t
+----
+Arithmetic on DATE is not supported
+
+# promoteStrings.sql:149
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query BIGINT rowsort
+SELECT cast(1 as int)                             % '1' FROM t
+----
+0
+
+onlyif transformer text-literal-typed
+query INT rowsort
+SELECT cast(1 as int)                             % '1' FROM t
+----
+0
+
+# promoteStrings.sql:150
+query BIGINT rowsort
+SELECT cast(1 as bigint)                          % '1' FROM t
+----
+0
+
+# promoteStrings.sql:151
+skipif transformer text-literal-typed # a string literal is read as the type beside it
+query DOUBLE rowsort
+SELECT cast(1 as float)                           % '1' FROM t
+----
+0.0
+
+onlyif transformer text-literal-typed
+query FLOAT rowsort
+SELECT cast(1 as float)                           % '1' FROM t
+----
+0.0
+
+# promoteStrings.sql:152
+query DOUBLE rowsort
+SELECT cast(1 as double)                          % '1' FROM t
+----
+0.0
+
+# promoteStrings.sql:153
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0))                  % '1' FROM t
+----
+0.0
+
+# promoteStrings.sql:155; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast(1 as boolean)                         % '1' FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# promoteStrings.sql:156; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) % '1' FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# promoteStrings.sql:157; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT DATE '2017-12-11'        % '1' FROM t
+----
+Arithmetic on DATE is not supported
+
+# promoteStrings.sql:174
+query BOOLEAN rowsort
+SELECT '1' = cast(1 as int)                             FROM t
+----
+true
+
+# promoteStrings.sql:175
+query BOOLEAN rowsort
+SELECT '1' = cast(1 as bigint)                          FROM t
+----
+true
+
+# promoteStrings.sql:176
+query BOOLEAN rowsort
+SELECT '1' = cast(1 as float)                           FROM t
+----
+true
+
+# promoteStrings.sql:177
+query BOOLEAN rowsort
+SELECT '1' = cast(1 as double)                          FROM t
+----
+true
+
+# promoteStrings.sql:178
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT '1' = cast(1 as decimal(10, 0))                  FROM t
+----
+true
+
+# promoteStrings.sql:179
+query BOOLEAN rowsort
+SELECT '1' = '1'                                        FROM t
+----
+true
+
+# promoteStrings.sql:181
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT '1' = cast(1 as boolean)                         FROM t
+----
+true
+
+onlyif transformer bool-text
+statement error
+SELECT '1' = cast(1 as boolean)                         FROM t
+----
+Cannot cast '1' to boolean
+
+# promoteStrings.sql:182; Spark: CAST_INVALID_INPUT
+statement error
+SELECT '1' = cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot cast '1' to timestamp
+
+# promoteStrings.sql:183; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+statement error
+SELECT '1' = DATE '2017-12-11'        FROM t
+----
+Cannot cast '1' to date
+
+# promoteStrings.sql:187
+query BOOLEAN rowsort
+SELECT cast(1 as int)                             = '1' FROM t
+----
+true
+
+# promoteStrings.sql:188
+query BOOLEAN rowsort
+SELECT cast(1 as bigint)                          = '1' FROM t
+----
+true
+
+# promoteStrings.sql:189
+query BOOLEAN rowsort
+SELECT cast(1 as float)                           = '1' FROM t
+----
+true
+
+# promoteStrings.sql:190
+query BOOLEAN rowsort
+SELECT cast(1 as double)                          = '1' FROM t
+----
+true
+
+# promoteStrings.sql:191
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0))                  = '1' FROM t
+----
+true
+
+# promoteStrings.sql:193
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT cast(1 as boolean)                         = '1' FROM t
+----
+true
+
+onlyif transformer bool-text
+statement error
+SELECT cast(1 as boolean)                         = '1' FROM t
+----
+Cannot cast '1' to boolean
+
+# promoteStrings.sql:194; Spark: CAST_INVALID_INPUT
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) = '1' FROM t
+----
+Cannot cast '1' to timestamp
+
+# promoteStrings.sql:195; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+statement error
+SELECT DATE '2017-12-11'        = '1' FROM t
+----
+Cannot cast '1' to date
+
+# promoteStrings.sql:225
+query BOOLEAN rowsort
+SELECT '1' < cast(1 as int)                             FROM t
+----
+false
+
+# promoteStrings.sql:226
+query BOOLEAN rowsort
+SELECT '1' < cast(1 as bigint)                          FROM t
+----
+false
+
+# promoteStrings.sql:227
+query BOOLEAN rowsort
+SELECT '1' < cast(1 as float)                           FROM t
+----
+false
+
+# promoteStrings.sql:228
+query BOOLEAN rowsort
+SELECT '1' < cast(1 as double)                          FROM t
+----
+false
+
+# promoteStrings.sql:229
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT '1' < cast(1 as decimal(10, 0))                  FROM t
+----
+false
+
+# promoteStrings.sql:230
+query BOOLEAN rowsort
+SELECT '1' < '1'                                        FROM t
+----
+false
+
+# promoteStrings.sql:232
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT '1' < cast(1 as boolean)                         FROM t
+----
+false
+
+onlyif transformer bool-text
+statement error
+SELECT '1' < cast(1 as boolean)                         FROM t
+----
+Cannot cast '1' to boolean
+
+# promoteStrings.sql:233; Spark: CAST_INVALID_INPUT
+statement error
+SELECT '1' < cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot cast '1' to timestamp
+
+# promoteStrings.sql:234; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+statement error
+SELECT '1' < DATE '2017-12-11'        FROM t
+----
+Cannot cast '1' to date
+
+# promoteStrings.sql:238
+query BOOLEAN rowsort
+SELECT '1' <= cast(1 as int)                             FROM t
+----
+true
+
+# promoteStrings.sql:239
+query BOOLEAN rowsort
+SELECT '1' <= cast(1 as bigint)                          FROM t
+----
+true
+
+# promoteStrings.sql:240
+query BOOLEAN rowsort
+SELECT '1' <= cast(1 as float)                           FROM t
+----
+true
+
+# promoteStrings.sql:241
+query BOOLEAN rowsort
+SELECT '1' <= cast(1 as double)                          FROM t
+----
+true
+
+# promoteStrings.sql:242
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT '1' <= cast(1 as decimal(10, 0))                  FROM t
+----
+true
+
+# promoteStrings.sql:243
+query BOOLEAN rowsort
+SELECT '1' <= '1'                                        FROM t
+----
+true
+
+# promoteStrings.sql:245
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT '1' <= cast(1 as boolean)                         FROM t
+----
+true
+
+onlyif transformer bool-text
+statement error
+SELECT '1' <= cast(1 as boolean)                         FROM t
+----
+Cannot cast '1' to boolean
+
+# promoteStrings.sql:246; Spark: CAST_INVALID_INPUT
+statement error
+SELECT '1' <= cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot cast '1' to timestamp
+
+# promoteStrings.sql:247; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+statement error
+SELECT '1' <= DATE '2017-12-11'        FROM t
+----
+Cannot cast '1' to date
+
+# promoteStrings.sql:251
+query BOOLEAN rowsort
+SELECT '1' > cast(1 as int)                             FROM t
+----
+false
+
+# promoteStrings.sql:252
+query BOOLEAN rowsort
+SELECT '1' > cast(1 as bigint)                          FROM t
+----
+false
+
+# promoteStrings.sql:253
+query BOOLEAN rowsort
+SELECT '1' > cast(1 as float)                           FROM t
+----
+false
+
+# promoteStrings.sql:254
+query BOOLEAN rowsort
+SELECT '1' > cast(1 as double)                          FROM t
+----
+false
+
+# promoteStrings.sql:255
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT '1' > cast(1 as decimal(10, 0))                  FROM t
+----
+false
+
+# promoteStrings.sql:256
+query BOOLEAN rowsort
+SELECT '1' > '1'                                        FROM t
+----
+false
+
+# promoteStrings.sql:258
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT '1' > cast(1 as boolean)                         FROM t
+----
+false
+
+onlyif transformer bool-text
+statement error
+SELECT '1' > cast(1 as boolean)                         FROM t
+----
+Cannot cast '1' to boolean
+
+# promoteStrings.sql:259; Spark: CAST_INVALID_INPUT
+statement error
+SELECT '1' > cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot cast '1' to timestamp
+
+# promoteStrings.sql:260; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+statement error
+SELECT '1' > DATE '2017-12-11'        FROM t
+----
+Cannot cast '1' to date
+
+# promoteStrings.sql:264
+query BOOLEAN rowsort
+SELECT '1' >= cast(1 as int)                             FROM t
+----
+true
+
+# promoteStrings.sql:265
+query BOOLEAN rowsort
+SELECT '1' >= cast(1 as bigint)                          FROM t
+----
+true
+
+# promoteStrings.sql:266
+query BOOLEAN rowsort
+SELECT '1' >= cast(1 as float)                           FROM t
+----
+true
+
+# promoteStrings.sql:267
+query BOOLEAN rowsort
+SELECT '1' >= cast(1 as double)                          FROM t
+----
+true
+
+# promoteStrings.sql:268
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT '1' >= cast(1 as decimal(10, 0))                  FROM t
+----
+true
+
+# promoteStrings.sql:269
+query BOOLEAN rowsort
+SELECT '1' >= '1'                                        FROM t
+----
+true
+
+# promoteStrings.sql:271
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT '1' >= cast(1 as boolean)                         FROM t
+----
+true
+
+onlyif transformer bool-text
+statement error
+SELECT '1' >= cast(1 as boolean)                         FROM t
+----
+Cannot cast '1' to boolean
+
+# promoteStrings.sql:272; Spark: CAST_INVALID_INPUT
+statement error
+SELECT '1' >= cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot cast '1' to timestamp
+
+# promoteStrings.sql:273; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+statement error
+SELECT '1' >= DATE '2017-12-11'        FROM t
+----
+Cannot cast '1' to date
+
+# promoteStrings.sql:277
+query BOOLEAN rowsort
+SELECT '1' <> cast(1 as int)                             FROM t
+----
+false
+
+# promoteStrings.sql:278
+query BOOLEAN rowsort
+SELECT '1' <> cast(1 as bigint)                          FROM t
+----
+false
+
+# promoteStrings.sql:279
+query BOOLEAN rowsort
+SELECT '1' <> cast(1 as float)                           FROM t
+----
+false
+
+# promoteStrings.sql:280
+query BOOLEAN rowsort
+SELECT '1' <> cast(1 as double)                          FROM t
+----
+false
+
+# promoteStrings.sql:281
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT '1' <> cast(1 as decimal(10, 0))                  FROM t
+----
+false
+
+# promoteStrings.sql:282
+query BOOLEAN rowsort
+SELECT '1' <> '1'                                        FROM t
+----
+false
+
+# promoteStrings.sql:284
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT '1' <> cast(1 as boolean)                         FROM t
+----
+false
+
+onlyif transformer bool-text
+statement error
+SELECT '1' <> cast(1 as boolean)                         FROM t
+----
+Cannot cast '1' to boolean
+
+# promoteStrings.sql:285; Spark: CAST_INVALID_INPUT
+statement error
+SELECT '1' <> cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Cannot cast '1' to timestamp
+
+# promoteStrings.sql:286; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+statement error
+SELECT '1' <> DATE '2017-12-11'        FROM t
+----
+Cannot cast '1' to date
+
+# promoteStrings.sql:290
+query BOOLEAN rowsort
+SELECT cast(1 as int)                             < '1' FROM t
+----
+false
+
+# promoteStrings.sql:291
+query BOOLEAN rowsort
+SELECT cast(1 as bigint)                          < '1' FROM t
+----
+false
+
+# promoteStrings.sql:292
+query BOOLEAN rowsort
+SELECT cast(1 as float)                           < '1' FROM t
+----
+false
+
+# promoteStrings.sql:293
+query BOOLEAN rowsort
+SELECT cast(1 as double)                          < '1' FROM t
+----
+false
+
+# promoteStrings.sql:294
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0))                  < '1' FROM t
+----
+false
+
+# promoteStrings.sql:295
+query BOOLEAN rowsort
+SELECT '1'                                        < '1' FROM t
+----
+false
+
+# promoteStrings.sql:297
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT cast(1 as boolean)                         < '1' FROM t
+----
+false
+
+onlyif transformer bool-text
+statement error
+SELECT cast(1 as boolean)                         < '1' FROM t
+----
+Cannot cast '1' to boolean
+
+# promoteStrings.sql:298; Spark: CAST_INVALID_INPUT
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) < '1' FROM t
+----
+Cannot cast '1' to timestamp
+
+# promoteStrings.sql:299; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+statement error
+SELECT DATE '2017-12-11'        < '1' FROM t
+----
+Cannot cast '1' to date
+
+# promoteStrings.sql:303
+query BOOLEAN rowsort
+SELECT cast(1 as int)                             <= '1' FROM t
+----
+true
+
+# promoteStrings.sql:304
+query BOOLEAN rowsort
+SELECT cast(1 as bigint)                          <= '1' FROM t
+----
+true
+
+# promoteStrings.sql:305
+query BOOLEAN rowsort
+SELECT cast(1 as float)                           <= '1' FROM t
+----
+true
+
+# promoteStrings.sql:306
+query BOOLEAN rowsort
+SELECT cast(1 as double)                          <= '1' FROM t
+----
+true
+
+# promoteStrings.sql:307
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0))                  <= '1' FROM t
+----
+true
+
+# promoteStrings.sql:308
+query BOOLEAN rowsort
+SELECT '1'                                        <= '1' FROM t
+----
+true
+
+# promoteStrings.sql:310
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT cast(1 as boolean)                         <= '1' FROM t
+----
+true
+
+onlyif transformer bool-text
+statement error
+SELECT cast(1 as boolean)                         <= '1' FROM t
+----
+Cannot cast '1' to boolean
+
+# promoteStrings.sql:311; Spark: CAST_INVALID_INPUT
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) <= '1' FROM t
+----
+Cannot cast '1' to timestamp
+
+# promoteStrings.sql:312; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+statement error
+SELECT DATE '2017-12-11'        <= '1' FROM t
+----
+Cannot cast '1' to date
+
+# promoteStrings.sql:316
+query BOOLEAN rowsort
+SELECT cast(1 as int)                             > '1' FROM t
+----
+false
+
+# promoteStrings.sql:317
+query BOOLEAN rowsort
+SELECT cast(1 as bigint)                          > '1' FROM t
+----
+false
+
+# promoteStrings.sql:318
+query BOOLEAN rowsort
+SELECT cast(1 as float)                           > '1' FROM t
+----
+false
+
+# promoteStrings.sql:319
+query BOOLEAN rowsort
+SELECT cast(1 as double)                          > '1' FROM t
+----
+false
+
+# promoteStrings.sql:320
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0))                  > '1' FROM t
+----
+false
+
+# promoteStrings.sql:321
+query BOOLEAN rowsort
+SELECT '1'                                        > '1' FROM t
+----
+false
+
+# promoteStrings.sql:323
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT cast(1 as boolean)                         > '1' FROM t
+----
+false
+
+onlyif transformer bool-text
+statement error
+SELECT cast(1 as boolean)                         > '1' FROM t
+----
+Cannot cast '1' to boolean
+
+# promoteStrings.sql:324; Spark: CAST_INVALID_INPUT
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) > '1' FROM t
+----
+Cannot cast '1' to timestamp
+
+# promoteStrings.sql:325; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+statement error
+SELECT DATE '2017-12-11'        > '1' FROM t
+----
+Cannot cast '1' to date
+
+# promoteStrings.sql:329
+query BOOLEAN rowsort
+SELECT cast(1 as int)                             >= '1' FROM t
+----
+true
+
+# promoteStrings.sql:330
+query BOOLEAN rowsort
+SELECT cast(1 as bigint)                          >= '1' FROM t
+----
+true
+
+# promoteStrings.sql:331
+query BOOLEAN rowsort
+SELECT cast(1 as float)                           >= '1' FROM t
+----
+true
+
+# promoteStrings.sql:332
+query BOOLEAN rowsort
+SELECT cast(1 as double)                          >= '1' FROM t
+----
+true
+
+# promoteStrings.sql:333
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0))                  >= '1' FROM t
+----
+true
+
+# promoteStrings.sql:334
+query BOOLEAN rowsort
+SELECT '1'                                        >= '1' FROM t
+----
+true
+
+# promoteStrings.sql:336
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT cast(1 as boolean)                         >= '1' FROM t
+----
+true
+
+onlyif transformer bool-text
+statement error
+SELECT cast(1 as boolean)                         >= '1' FROM t
+----
+Cannot cast '1' to boolean
+
+# promoteStrings.sql:337; Spark: CAST_INVALID_INPUT
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) >= '1' FROM t
+----
+Cannot cast '1' to timestamp
+
+# promoteStrings.sql:338; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+statement error
+SELECT DATE '2017-12-11'        >= '1' FROM t
+----
+Cannot cast '1' to date
+
+# promoteStrings.sql:342
+query BOOLEAN rowsort
+SELECT cast(1 as int)                             <> '1' FROM t
+----
+false
+
+# promoteStrings.sql:343
+query BOOLEAN rowsort
+SELECT cast(1 as bigint)                          <> '1' FROM t
+----
+false
+
+# promoteStrings.sql:344
+query BOOLEAN rowsort
+SELECT cast(1 as float)                           <> '1' FROM t
+----
+false
+
+# promoteStrings.sql:345
+query BOOLEAN rowsort
+SELECT cast(1 as double)                          <> '1' FROM t
+----
+false
+
+# promoteStrings.sql:346
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0))                  <> '1' FROM t
+----
+false
+
+# promoteStrings.sql:347
+query BOOLEAN rowsort
+SELECT '1'                                        <> '1' FROM t
+----
+false
+
+# promoteStrings.sql:349
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT cast(1 as boolean)                         <> '1' FROM t
+----
+false
+
+onlyif transformer bool-text
+statement error
+SELECT cast(1 as boolean)                         <> '1' FROM t
+----
+Cannot cast '1' to boolean
+
+# promoteStrings.sql:350; Spark: CAST_INVALID_INPUT
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) <> '1' FROM t
+----
+Cannot cast '1' to timestamp
+
+# promoteStrings.sql:351; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+statement error
+SELECT DATE '2017-12-11'        <> '1' FROM t
+----
+Cannot cast '1' to date
+
+# promoteStrings.sql:354
+skipif transformer refused-implicit-number # a math function or an aggregate takes a number
+query DOUBLE rowsort
+SELECT abs('1') FROM t
+----
+1.0
+
+# promoteStrings.sql:355
+skipif transformer refused-implicit-number # a math function or an aggregate takes a number
+query DOUBLE rowsort
+SELECT sum('1') FROM t
+----
+1.0
+
+# promoteStrings.sql:356
+skipif transformer refused-implicit-number # a math function or an aggregate takes a number
+query DOUBLE rowsort
+SELECT avg('1') FROM t
+----
+1.0
+
+# promoteStrings.sql:357
+skipif transformer refused-implicit-number # a math function or an aggregate takes a number
+query DOUBLE rowsort
+SELECT stddev_pop('1') FROM t
+----
+0.0
+
+# promoteStrings.sql:358
+skipif transformer refused-implicit-number # a math function or an aggregate takes a number
+query DOUBLE rowsort
+SELECT stddev_samp('1') FROM t
+----
+NULL
+
+# promoteStrings.sql:359
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT - '1' FROM t
+----
+-1.0
+
+# promoteStrings.sql:360
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT + '1' FROM t
+----
+1.0
+
+# promoteStrings.sql:361
+skipif transformer refused-implicit-number # a math function or an aggregate takes a number
+query DOUBLE rowsort
+SELECT var_pop('1') FROM t
+----
+0.0
+
+# promoteStrings.sql:362
+skipif transformer refused-implicit-number # a math function or an aggregate takes a number
+query DOUBLE rowsort
+SELECT var_samp('1') FROM t
+----
+NULL

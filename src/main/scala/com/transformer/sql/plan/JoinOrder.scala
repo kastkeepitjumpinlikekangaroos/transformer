@@ -170,7 +170,7 @@ object JoinOrder {
 
     // Where each table's columns start in the run's output.
     val newStarts = new Array[Int](tables.length)
-    (if (reordered) order else tables.indices).foldLeft(0) { (at, t) => newStarts(t) = at; at + widths(t) }
+    val _ = (if (reordered) order else tables.indices).foldLeft(0) { (at, t) => newStarts(t) = at; at + widths(t) }
     val to: Int => Int = column => { val t = tableOf(column); newStarts(t) + within(t, column - starts(t)) }
     val runMoves: Moves =
       if (!reordered && tableMoves.forall(_.isEmpty)) None

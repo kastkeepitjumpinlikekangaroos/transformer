@@ -1,0 +1,22 @@
+package fixture
+
+/** Every operator character below is inside a string, a character literal,
+  * a comment or a backquoted name, but for the last two lines'. */
+object Lexer {
+  // a < b && c || !d * 2 + 1 == 0 in a line comment
+  /* a block comment with a < b, /* nested: x == y */ and still the comment: 1 + 1 */
+  val plain = "a < b && 0 + 1 // not a comment"
+  val escaped = "a \" < b \\ " + "!"
+  val triple = """a "quoted" <= b
+    || "!" and 0 * 1 """
+  val quotes = """"x"""" + ""
+  val interpolated = s"x ${ if (a < b) "<" else ">" } y ${ Map(1 -> "}") } $a == $$b"
+  val nested = s"outer ${ s"inner ${ a + 1 } }" } done"
+  val raw = raw"\d+ < \w"
+  val lt = '<'
+  val quote = '\''
+  val doubleQuote = '"'
+  val unicode = 'A'
+  val `a < b` = 1
+  def f(x: Int) = x >= 0
+}

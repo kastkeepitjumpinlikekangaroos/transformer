@@ -109,7 +109,7 @@ final case class ExchangeExec(
     * structurally unreachable for planned queries — the pass's calling
     * thread is always the first toucher and the fan-out below it is a pure
     * task tree (every nested exchange is already published). */
-  private[exec] def materializeNow(): Unit = ensureMaterialized()
+  private[exec] def materializeNow(): Unit = { val _ = ensureMaterialized() }
 
   /** CAS-claim + latch — the lazy fallback for DIRECTLY-CONSTRUCTED
     * exchanges; engine-planned ones arrive through [[materializeNow]] with
@@ -156,12 +156,14 @@ final case class ExchangeExec(
   private def ensureMaterialized(): Array[Array[ColumnarBatch]] = {
     val s = shards
     if (s != null) return s
+    Chaos.at(Chaos.ExchangeClaim)
     if (claimed.compareAndSet(false, true)) { // exactly one publishing materializer
       claimer = Thread.currentThread()
       try shards = materialize()
       catch { case t: Throwable => matFailure = t }
       finally {
         claimer = null
+        Chaos.at(Chaos.ExchangePublish)
         ready.countDown()
       }
     } else if (claimer eq Thread.currentThread()) {
@@ -222,10 +224,10 @@ final case class ExchangeExec(
   private def shardChildPartition(p: Int): Array[Array[ColumnarBatch]] = {
     val perShard = Array.fill(numShards)(mutable.ArrayBuffer.empty[ColumnarBatch])
     val it = child.execute(p)
-    while (it.hasNext) {
+    try while (it.hasNext) {
       val batch = it.next()
       if (batch.numRows > 0) routeBatch(batch, perShard)
-    }
+    } finally Closing.close(it)
     Array.tabulate(numShards)(s => perShard(s).toArray)
   }
 
@@ -323,23 +325,28 @@ final case class ExchangeExec(
 }
 
 object ExchangeExec {
+  /** Whether `p` is an exchange, or a wrapper that meters or verifies one:
+    * what a breaker over it reads to run per shard. Metrics and verification
+    * watch a plan and must not change it, so a wrapper is seen through; with
+    * metrics on, a sharded join, aggregate, DISTINCT and window ran on one
+    * partition. */
+  def feeds(p: PhysicalPlan): Boolean = p match {
+    case _: ExchangeExec => true
+    case w: PlanWrapper => feeds(w.underlying)
+    case _ => false
+  }
+
   /** Default shard count used by callers (planner, breakers) that don't have
     * a workload-specific reason to override. Tracks [[Scheduler.parallelism]]
     * so a JVM sized for high concurrency gets proportionally more shards;
-    * override globally via the `transformer.scheduler.shard_count` system
-    * property or `TRANSFORMER_SCHEDULER_SHARD_COUNT` env var.
+    * override globally with [[Settings.ShardCount]]
+    * (`transformer.scheduler.shard_count`).
     *
     * Going higher costs heap (K × in-flight per-batch overhead during
     * materialization) and produces K writer part-files past any sharded
     * breaker; going lower flattens the post-breaker parallelism the whole
     * point of this operator is to unlock. */
-  val defaultNumShards: Int = {
-    val configured = Option(System.getProperty("transformer.scheduler.shard_count"))
-      .orElse(Option(System.getenv("TRANSFORMER_SCHEDULER_SHARD_COUNT")))
-      .map(_.trim).filter(_.nonEmpty)
-      .flatMap(s => try Some(s.toInt) catch { case _: NumberFormatException => None })
-    math.max(1, configured.getOrElse(Scheduler.parallelism))
-  }
+  val defaultNumShards: Int = Settings.ShardCount.get
 
   // ---- Counter indices ------------------------------------------------------
   // ExchangeExec's counter array length depends on the configured shard

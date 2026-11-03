@@ -105,7 +105,7 @@ final class SqlConsolePanel(session: JobSession, owner: () => javafx.stage.Stage
       case ViewKind.Task  => "Task output"
     })
     spec.path.foreach(p => tooltip.append('\n').append(p))
-    if (cols.nonEmpty) tooltip.append("\nColumns: ").append(cols)
+    if (cols.nonEmpty) tooltip.append(s"\nColumns: $cols")
     l.setTooltip(new Tooltip(tooltip.toString))
     l.setOnMouseClicked(_ => console.insertAtCaret(spec.name))
     l

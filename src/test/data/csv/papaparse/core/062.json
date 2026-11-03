@@ -1,0 +1,22 @@
+{
+ "description": "Duplicated header names existing column",
+ "options": {
+  "header": "true"
+ },
+ "rows": [
+  [
+   "c",
+   "c_2",
+   "c_3",
+   "c_1"
+  ],
+  [
+   "1",
+   "2",
+   "3",
+   "4"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

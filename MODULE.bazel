@@ -26,6 +26,12 @@ maven.install(
         # the broken API.
         "org.apache.hadoop:hadoop-common:3.4.3",
         "org.apache.hadoop:hadoop-mapreduce-client-core:3.4.3",
+        # The block compressor Hadoop's LZ4 codec calls, so parquet's legacy
+        # LZ4 codec (older Hadoop and Spark wrote it) reads; LZ4_RAW needs
+        # none. org.lz4:lz4-java's coordinates relocate here past 1.8.0, and
+        # every release before 1.12.1 has a published flaw in decompressing
+        # untrusted input. Pure Java where its native library does not load.
+        "at.yawk.lz4:lz4-java:1.12.1",
         "commons-collections:commons-collections:3.2.2",
         "org.slf4j:slf4j-api:2.0.13",
         "org.slf4j:slf4j-nop:2.0.13",
@@ -93,8 +99,10 @@ scala_deps = use_extension(
 scala_deps.scala()
 scala_deps.junit()
 
-scala_toolchains = use_extension(
-    "@rules_scala//scala/extensions:toolchains.bzl",
-    "scala_toolchains",
-)
-scala_toolchains.testing()
+# The Scala toolchain is the root BUILD.bazel's: rules_scala's Scala jars,
+# from its rules_scala_toolchains repository, with the compiler's warnings as
+# errors. A root module's toolchains are tried before those rules_scala
+# registers.
+use_repo(scala_deps, "rules_scala_toolchains")
+
+register_toolchains("//:scala_toolchain")

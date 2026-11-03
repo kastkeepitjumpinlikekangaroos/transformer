@@ -1,0 +1,17 @@
+{
+ "description": "Custom quoteChar escapes and quotes embedded quoteChar (no escapeChar)",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n",
+  "quote": "+",
+  "escape": "+"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "a",
+   "x+y"
+  ]
+ ],
+ "text": "a,+x++y+"
+}

@@ -1,0 +1,617 @@
+# From Apache Spark's SQL query tests (https://github.com/apache/spark):
+# sql/core/src/test/resources/sql-tests/inputs/typeCoercion/native/widenSetOperationTypes.sql
+# at commit b98123545915a84403c7fa89e8d977ee0b2f5aed, with every answer from
+# the golden file results/typeCoercion/native/widenSetOperationTypes.sql.out at
+# that commit, Spark's answer under ANSI mode, never the engine's. Licensed to
+# the Apache Software Foundation under the Apache License, Version 2.0: LICENSE
+# and NOTICE in src/test/slt/spark/ hold the license and Spark's notice.
+# Written by //src/test/scala/com/transformer/slt:spark_import, which
+# docs/extending.md describes; edit the converter, not this file.
+#
+# UNION of each pair of types. 82 of the file's 145 statements are here, 24 of
+# them records the engine answers otherwise by a rule of the ledger in
+# docs/gotchas.md, marked skipif transformer <id> and, for a rule that is no
+# refusal, followed by its twin, onlyif transformer <id> with the engine's own
+# answer.
+#
+# A statement is as Spark wrote it but where a rewrite cannot change what it
+# means, which its record names: a temporary view of literals as a table of
+# their types holding one row of them; a timestamp's text cast to DATE as the
+# DATE literal of its date (Spark's cast drops the time; this engine reads only
+# an ISO date as a DATE, and a test of that cast is no test of its subject). A
+# column is the engine's type of the name Spark's schema gives it. A TIMESTAMP
+# Spark prints in the suite's zone is the instant of that local time in UTC,
+# the engine's zone, which keeps every value here, since no record moves a time
+# between zones. A result is compared as rowsort unless its query ends in ORDER
+# BY, as Spark sorts every result its plan does not. An error under ANSI is a
+# statement error, Spark's error class in its comment and after ---- the
+# engine's own words for the same reason.
+#
+# Skipped, by rule:
+#     16  refused-text-branch
+#      4  refused-decimal-beside-float
+#      2  bigint-decimal
+#      2  refused-date-beside-timestamp
+#
+# Left out (63 statements), by what they need:
+#     23  TINYINT
+#     21  SMALLINT
+#     19  BINARY, and X'' literals
+
+# widenSetOperationTypes.sql:18, the temporary view as a table of one row
+statement ok
+CREATE TABLE t (c1 INT)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+# widenSetOperationTypes.sql:49
+query INT rowsort
+SELECT cast(1 as int) FROM t UNION SELECT cast(2 as int) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:50
+query BIGINT rowsort
+SELECT cast(1 as int) FROM t UNION SELECT cast(2 as bigint) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:51
+query DOUBLE rowsort
+SELECT cast(1 as int) FROM t UNION SELECT cast(2 as float) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:52
+query DOUBLE rowsort
+SELECT cast(1 as int) FROM t UNION SELECT cast(2 as double) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:53
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as int) FROM t UNION SELECT cast(2 as decimal(10, 0)) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:54
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query BIGINT rowsort
+SELECT cast(1 as int) FROM t UNION SELECT cast(2 as string) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:56; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as int) FROM t UNION SELECT cast(2 as boolean) FROM t
+----
+UNION column 1 (cast(1 as int)) cannot mix INT and BOOLEAN
+
+# widenSetOperationTypes.sql:57; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as int) FROM t UNION SELECT cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+UNION column 1 (cast(1 as int)) cannot mix INT and TIMESTAMP
+
+# widenSetOperationTypes.sql:58; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as int) FROM t UNION SELECT DATE '2017-12-11' FROM t
+----
+UNION column 1 (cast(1 as int)) cannot mix INT and DATE
+
+# widenSetOperationTypes.sql:62
+query BIGINT rowsort
+SELECT cast(1 as bigint) FROM t UNION SELECT cast(2 as int) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:63
+query BIGINT rowsort
+SELECT cast(1 as bigint) FROM t UNION SELECT cast(2 as bigint) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:64
+query DOUBLE rowsort
+SELECT cast(1 as bigint) FROM t UNION SELECT cast(2 as float) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:65
+query DOUBLE rowsort
+SELECT cast(1 as bigint) FROM t UNION SELECT cast(2 as double) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:66
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as bigint) FROM t UNION SELECT cast(2 as decimal(10, 0)) FROM t
+----
+1
+2
+
+onlyif transformer bigint-decimal
+query DECIMAL(19,0) rowsort
+SELECT cast(1 as bigint) FROM t UNION SELECT cast(2 as decimal(10, 0)) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:67
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query BIGINT rowsort
+SELECT cast(1 as bigint) FROM t UNION SELECT cast(2 as string) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:69; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as bigint) FROM t UNION SELECT cast(2 as boolean) FROM t
+----
+UNION column 1 (cast(1 as bigint)) cannot mix LONG and BOOLEAN
+
+# widenSetOperationTypes.sql:70; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as bigint) FROM t UNION SELECT cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+UNION column 1 (cast(1 as bigint)) cannot mix LONG and TIMESTAMP
+
+# widenSetOperationTypes.sql:71; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as bigint) FROM t UNION SELECT DATE '2017-12-11' FROM t
+----
+UNION column 1 (cast(1 as bigint)) cannot mix LONG and DATE
+
+# widenSetOperationTypes.sql:75
+query DOUBLE rowsort
+SELECT cast(1 as float) FROM t UNION SELECT cast(2 as int) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:76
+query DOUBLE rowsort
+SELECT cast(1 as float) FROM t UNION SELECT cast(2 as bigint) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:77
+query FLOAT rowsort
+SELECT cast(1 as float) FROM t UNION SELECT cast(2 as float) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:78
+query DOUBLE rowsort
+SELECT cast(1 as float) FROM t UNION SELECT cast(2 as double) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:79
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) FROM t UNION SELECT cast(2 as decimal(10, 0)) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:80
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DOUBLE rowsort
+SELECT cast(1 as float) FROM t UNION SELECT cast(2 as string) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:82; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as float) FROM t UNION SELECT cast(2 as boolean) FROM t
+----
+UNION column 1 (cast(1 as float)) cannot mix FLOAT and BOOLEAN
+
+# widenSetOperationTypes.sql:83; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as float) FROM t UNION SELECT cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+UNION column 1 (cast(1 as float)) cannot mix FLOAT and TIMESTAMP
+
+# widenSetOperationTypes.sql:84; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as float) FROM t UNION SELECT DATE '2017-12-11' FROM t
+----
+UNION column 1 (cast(1 as float)) cannot mix FLOAT and DATE
+
+# widenSetOperationTypes.sql:88
+query DOUBLE rowsort
+SELECT cast(1 as double) FROM t UNION SELECT cast(2 as int) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:89
+query DOUBLE rowsort
+SELECT cast(1 as double) FROM t UNION SELECT cast(2 as bigint) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:90
+query DOUBLE rowsort
+SELECT cast(1 as double) FROM t UNION SELECT cast(2 as float) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:91
+query DOUBLE rowsort
+SELECT cast(1 as double) FROM t UNION SELECT cast(2 as double) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:92
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) FROM t UNION SELECT cast(2 as decimal(10, 0)) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:93
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DOUBLE rowsort
+SELECT cast(1 as double) FROM t UNION SELECT cast(2 as string) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:95; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as double) FROM t UNION SELECT cast(2 as boolean) FROM t
+----
+UNION column 1 (cast(1 as double)) cannot mix DOUBLE and BOOLEAN
+
+# widenSetOperationTypes.sql:96; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as double) FROM t UNION SELECT cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+UNION column 1 (cast(1 as double)) cannot mix DOUBLE and TIMESTAMP
+
+# widenSetOperationTypes.sql:97; a timestamp's text cast to DATE written as the
+# DATE literal of its date; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as double) FROM t UNION SELECT DATE '2017-12-11' FROM t
+----
+UNION column 1 (cast(1 as double)) cannot mix DOUBLE and DATE
+
+# widenSetOperationTypes.sql:101
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as decimal(10, 0)) FROM t UNION SELECT cast(2 as int) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:102
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(20,0) rowsort
+SELECT cast(1 as decimal(10, 0)) FROM t UNION SELECT cast(2 as bigint) FROM t
+----
+1
+2
+
+onlyif transformer bigint-decimal
+query DECIMAL(19,0) rowsort
+SELECT cast(1 as decimal(10, 0)) FROM t UNION SELECT cast(2 as bigint) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:103
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) FROM t UNION SELECT cast(2 as float) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:104
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) FROM t UNION SELECT cast(2 as double) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:105
+query DECIMAL(10,0) rowsort
+SELECT cast(1 as decimal(10, 0)) FROM t UNION SELECT cast(2 as decimal(10, 0)) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:106
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) FROM t UNION SELECT cast(2 as string) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:108; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as decimal(10, 0)) FROM t UNION SELECT cast(2 as boolean) FROM t
+----
+UNION column 1 (cast(1 as decimal (10, 0))) cannot mix DECIMAL(10,0) and BOOLEAN
+
+# widenSetOperationTypes.sql:109; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as decimal(10, 0)) FROM t UNION SELECT cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+UNION column 1 (cast(1 as decimal (10, 0))) cannot mix DECIMAL(10,0) and TIMESTAMP
+
+# widenSetOperationTypes.sql:110; a timestamp's text cast to DATE written as
+# the DATE literal of its date; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as decimal(10, 0)) FROM t UNION SELECT DATE '2017-12-11' FROM t
+----
+UNION column 1 (cast(1 as decimal (10, 0))) cannot mix DECIMAL(10,0) and DATE
+
+# widenSetOperationTypes.sql:114
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query BIGINT rowsort
+SELECT cast(1 as string) FROM t UNION SELECT cast(2 as int) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:115
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query BIGINT rowsort
+SELECT cast(1 as string) FROM t UNION SELECT cast(2 as bigint) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:116
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DOUBLE rowsort
+SELECT cast(1 as string) FROM t UNION SELECT cast(2 as float) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:117
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DOUBLE rowsort
+SELECT cast(1 as string) FROM t UNION SELECT cast(2 as double) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:118
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query DOUBLE rowsort
+SELECT cast(1 as string) FROM t UNION SELECT cast(2 as decimal(10, 0)) FROM t
+----
+1.0
+2.0
+
+# widenSetOperationTypes.sql:119
+query STRING rowsort
+SELECT cast(1 as string) FROM t UNION SELECT cast(2 as string) FROM t
+----
+1
+2
+
+# widenSetOperationTypes.sql:121
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+query BOOLEAN rowsort
+SELECT cast(1 as string) FROM t UNION SELECT cast(2 as boolean) FROM t
+----
+true
+
+# widenSetOperationTypes.sql:122; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+statement error
+SELECT cast(1 as string) FROM t UNION SELECT cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+
+# widenSetOperationTypes.sql:123; a timestamp's text cast to DATE written as
+# the DATE literal of its date; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+statement error
+SELECT cast(1 as string) FROM t UNION SELECT DATE '2017-12-11' FROM t
+
+# widenSetOperationTypes.sql:140; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as boolean) FROM t UNION SELECT cast(2 as int) FROM t
+----
+UNION column 1 (cast(1 as boolean)) cannot mix BOOLEAN and INT
+
+# widenSetOperationTypes.sql:141; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as boolean) FROM t UNION SELECT cast(2 as bigint) FROM t
+----
+UNION column 1 (cast(1 as boolean)) cannot mix BOOLEAN and LONG
+
+# widenSetOperationTypes.sql:142; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as boolean) FROM t UNION SELECT cast(2 as float) FROM t
+----
+UNION column 1 (cast(1 as boolean)) cannot mix BOOLEAN and FLOAT
+
+# widenSetOperationTypes.sql:143; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as boolean) FROM t UNION SELECT cast(2 as double) FROM t
+----
+UNION column 1 (cast(1 as boolean)) cannot mix BOOLEAN and DOUBLE
+
+# widenSetOperationTypes.sql:144; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as boolean) FROM t UNION SELECT cast(2 as decimal(10, 0)) FROM t
+----
+UNION column 1 (cast(1 as boolean)) cannot mix DECIMAL(10,0) and BOOLEAN
+
+# widenSetOperationTypes.sql:145; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+statement error
+SELECT cast(1 as boolean) FROM t UNION SELECT cast(2 as string) FROM t
+
+# widenSetOperationTypes.sql:147
+query BOOLEAN rowsort
+SELECT cast(1 as boolean) FROM t UNION SELECT cast(2 as boolean) FROM t
+----
+true
+
+# widenSetOperationTypes.sql:148; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as boolean) FROM t UNION SELECT cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+UNION column 1 (cast(1 as boolean)) cannot mix BOOLEAN and TIMESTAMP
+
+# widenSetOperationTypes.sql:149; a timestamp's text cast to DATE written as
+# the DATE literal of its date; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast(1 as boolean) FROM t UNION SELECT DATE '2017-12-11' FROM t
+----
+UNION column 1 (cast(1 as boolean)) cannot mix BOOLEAN and DATE
+
+# widenSetOperationTypes.sql:153; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) FROM t UNION SELECT cast(2 as int) FROM t
+----
+UNION column 1 (cast('2017-12-12 09:30:00.0' as timestamp)) cannot mix TIMESTAMP and INT
+
+# widenSetOperationTypes.sql:154; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) FROM t UNION SELECT cast(2 as bigint) FROM t
+----
+UNION column 1 (cast('2017-12-12 09:30:00.0' as timestamp)) cannot mix TIMESTAMP and LONG
+
+# widenSetOperationTypes.sql:155; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) FROM t UNION SELECT cast(2 as float) FROM t
+----
+UNION column 1 (cast('2017-12-12 09:30:00.0' as timestamp)) cannot mix TIMESTAMP and FLOAT
+
+# widenSetOperationTypes.sql:156; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) FROM t UNION SELECT cast(2 as double) FROM t
+----
+UNION column 1 (cast('2017-12-12 09:30:00.0' as timestamp)) cannot mix TIMESTAMP and DOUBLE
+
+# widenSetOperationTypes.sql:157; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) FROM t UNION SELECT cast(2 as decimal(10, 0)) FROM t
+----
+UNION column 1 (cast('2017-12-12 09:30:00.0' as timestamp)) cannot mix DECIMAL(10,0) and TIMESTAMP
+
+# widenSetOperationTypes.sql:158; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) FROM t UNION SELECT cast(2 as string) FROM t
+
+# widenSetOperationTypes.sql:160; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) FROM t UNION SELECT cast(2 as boolean) FROM t
+----
+UNION column 1 (cast('2017-12-12 09:30:00.0' as timestamp)) cannot mix TIMESTAMP and BOOLEAN
+
+# widenSetOperationTypes.sql:161
+query TIMESTAMP rowsort
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) FROM t UNION SELECT cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+2017-12-11T09:30:00Z
+2017-12-12T09:30:00Z
+
+# widenSetOperationTypes.sql:162; a timestamp's text cast to DATE written as
+# the DATE literal of its date
+skipif transformer refused-date-beside-timestamp # a DATE beside a TIMESTAMP
+query TIMESTAMP rowsort
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) FROM t UNION SELECT DATE '2017-12-11' FROM t
+----
+2017-12-11T00:00:00Z
+2017-12-12T09:30:00Z
+
+# widenSetOperationTypes.sql:166; a timestamp's text cast to DATE written as
+# the DATE literal of its date; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT DATE '2017-12-12' FROM t UNION SELECT cast(2 as int) FROM t
+----
+UNION column 1 (date '2017-12-12') cannot mix DATE and INT
+
+# widenSetOperationTypes.sql:167; a timestamp's text cast to DATE written as
+# the DATE literal of its date; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT DATE '2017-12-12' FROM t UNION SELECT cast(2 as bigint) FROM t
+----
+UNION column 1 (date '2017-12-12') cannot mix DATE and LONG
+
+# widenSetOperationTypes.sql:168; a timestamp's text cast to DATE written as
+# the DATE literal of its date; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT DATE '2017-12-12' FROM t UNION SELECT cast(2 as float) FROM t
+----
+UNION column 1 (date '2017-12-12') cannot mix DATE and FLOAT
+
+# widenSetOperationTypes.sql:169; a timestamp's text cast to DATE written as
+# the DATE literal of its date; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT DATE '2017-12-12' FROM t UNION SELECT cast(2 as double) FROM t
+----
+UNION column 1 (date '2017-12-12') cannot mix DATE and DOUBLE
+
+# widenSetOperationTypes.sql:170; a timestamp's text cast to DATE written as
+# the DATE literal of its date; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT DATE '2017-12-12' FROM t UNION SELECT cast(2 as decimal(10, 0)) FROM t
+----
+UNION column 1 (date '2017-12-12') cannot mix DECIMAL(10,0) and DATE
+
+# widenSetOperationTypes.sql:171; a timestamp's text cast to DATE written as
+# the DATE literal of its date; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-branch # a STRING that is no literal becoming one result with another type
+statement error
+SELECT DATE '2017-12-12' FROM t UNION SELECT cast(2 as string) FROM t
+
+# widenSetOperationTypes.sql:173; a timestamp's text cast to DATE written as
+# the DATE literal of its date; Spark: INCOMPATIBLE_COLUMN_TYPE
+statement error
+SELECT DATE '2017-12-12' FROM t UNION SELECT cast(2 as boolean) FROM t
+----
+UNION column 1 (date '2017-12-12') cannot mix DATE and BOOLEAN
+
+# widenSetOperationTypes.sql:174; a timestamp's text cast to DATE written as
+# the DATE literal of its date
+skipif transformer refused-date-beside-timestamp # a DATE beside a TIMESTAMP
+query TIMESTAMP rowsort
+SELECT DATE '2017-12-12' FROM t UNION SELECT cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+2017-12-11T09:30:00Z
+2017-12-12T00:00:00Z
+
+# widenSetOperationTypes.sql:175; a timestamp's text cast to DATE written as
+# the DATE literal of its date
+query DATE rowsort
+SELECT DATE '2017-12-12' FROM t UNION SELECT DATE '2017-12-11' FROM t
+----
+2017-12-11
+2017-12-12

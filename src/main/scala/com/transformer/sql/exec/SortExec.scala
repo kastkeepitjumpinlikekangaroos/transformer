@@ -58,21 +58,27 @@ final case class SortExec(
 
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     require(partition == 0)
-    // One spill subdirectory per execute() call. Cursors close their own
-    // parquet handles; the directory is wiped when the iterator finishes
-    // (or via JVM shutdown hook if the consumer abandons it).
+    // One spill subdirectory per execute() call. The merge reads its runs as
+    // it emits, so the directory goes when the output is drained or closed,
+    // or when the sort fails before it emits ([[Closing]]).
     val spillDir: Option[OperatorSpillDir] =
       if (maySpill) Some(Spill.openOperatorDir("sort")) else None
     val threshold = if (maySpill) spillThresholdBytes else Long.MaxValue
 
-    val tasks: Seq[Callable[SortExec.PartitionResult]] =
-      (0 until child.numPartitions).map { p =>
-        new Callable[SortExec.PartitionResult] {
-          def call(): SortExec.PartitionResult = sortPartition(p, threshold, spillDir)
+    try {
+      val tasks: Seq[Callable[SortExec.PartitionResult]] =
+        (0 until child.numPartitions).map { p =>
+          new Callable[SortExec.PartitionResult] {
+            def call(): SortExec.PartitionResult = sortPartition(p, threshold, spillDir)
+          }
         }
-      }
-    val partials: IndexedSeq[SortExec.PartitionResult] = Scheduler.submitAndAwaitAll(tasks)
-    mergeEmit(partials, spillDir)
+      val partials: IndexedSeq[SortExec.PartitionResult] = Scheduler.submitAndAwaitAll(tasks)
+      mergeEmit(partials, spillDir)
+    } catch {
+      case t: Throwable =>
+        spillDir.foreach(_.close())
+        throw t
+    }
   }
 
   /** One sort partition. Returns the in-memory tail plus any on-disk run
@@ -90,7 +96,7 @@ final case class SortExec(
     var inputRowsHere: Long = 0L
     val runs = mutable.ArrayBuffer.empty[Path]
     val it = child.execute(p)
-    while (it.hasNext) {
+    try while (it.hasNext) {
       val b = it.next()
       // Only walk the batch counting bytes when spill is actually possible
       // — `Spill.estimateBytes` is O(rows × cols) for variable-width
@@ -123,7 +129,7 @@ final case class SortExec(
             s"spill_max_runs=${opts.spillMaxRuns}. Either raise the threshold or " +
             "investigate skew / unbounded input.")
       }
-    }
+    } finally Closing.close(it)
     val sorted = sortBuffer(buf)
     if (metricsNode != null) metricsNode.counters(SortExec.IdxInputRows).add(inputRowsHere)
     SortExec.PartitionResult(inMemory = sorted, diskRuns = runs.toArray)
@@ -142,7 +148,7 @@ final case class SortExec(
     val batches = SortExec.batches(sorted, schema)
     // Runs are read back by index (see DiskRunCursor); positional names keep a
     // duplicate-named child schema round-trippable. See Spill.positionalSchema.
-    ParquetWriter.writeAll(file, Spill.positionalSchema(schema), batches)
+    val _ = ParquetWriter.writeAll(file, Spill.positionalSchema(schema), batches)
     runs += file
   }
 
@@ -166,19 +172,23 @@ final case class SortExec(
       spillDir: Option[OperatorSpillDir]): Iterator[ColumnarBatch] = {
     val schema = outputSchema
     val cursorList = mutable.ArrayBuffer.empty[SortCursor]
-    val nKeys = keys.length
     var total: Long = 0L
-    partials.foreach { res =>
+    try partials.foreach { res =>
       res.diskRuns.foreach { file =>
         val cur = new DiskRunCursor(file, schema)
-        if (cur.advance()) cursorList += cur
+        cursorList += cur
         // total unknown for disk runs — we'll just bypass the SmallN path
+        if (!cur.advance()) cursorList -= cur
       }
       if (res.inMemory.length > 0) {
         val cur = new InMemoryCursor(res.inMemory)
         if (cur.advance()) cursorList += cur
         total += res.inMemory.length.toLong
       }
+    } catch {
+      case t: Throwable =>
+        cursorList.foreach(_.close())
+        throw t
     }
     val numCursors = cursorList.length
     if (numCursors == 0) {
@@ -225,7 +235,12 @@ final case class SortExec(
 
     val tMergeStart = if (metricsNode != null) System.nanoTime() else 0L
     val capacity = ColumnarBatch.DefaultCapacity
-    val mergedIt = new Iterator[ColumnarBatch] {
+    val mergedIt = new Iterator[ColumnarBatch] with AutoCloseable {
+      /** Close every run still being read: the consumer stopped. */
+      def close(): Unit = {
+        done = true
+        cursors.foreach(_.close())
+      }
       private var done = false
       private var outputRowsLocal: Long = 0L
       def hasNext: Boolean = !done && !heap.isEmpty
@@ -458,7 +473,7 @@ final case class TopNExec(child: PhysicalPlan, keys: Seq[SortKey], n: Int) exten
     // A row's keys, read into this until the row is kept.
     val rowKeys = new Array[Any](nkeys)
     val it = child.execute(p)
-    while (it.hasNext) {
+    try while (it.hasNext) {
       val b = it.next()
       var r = 0
       while (r < b.numRows) {
@@ -477,7 +492,7 @@ final case class TopNExec(child: PhysicalPlan, keys: Seq[SortKey], n: Int) exten
         ordinal += 1
         r += 1
       }
-    }
+    } finally Closing.close(it)
     val out = heap.toArray(new Array[TopNExec.Kept](0))
     java.util.Arrays.sort(out, (a: TopNExec.Kept, b: TopNExec.Kept) => {
       val c = compareKeys(a.keys, b.keys)
@@ -578,6 +593,7 @@ private[exec] final class DiskRunCursor(file: Path, schema: Schema) extends Sort
   def close(): Unit = {
     if (closed) return
     closed = true
+    Closing.close(batchIt)
     currentBatch = null
     rowView = null
   }

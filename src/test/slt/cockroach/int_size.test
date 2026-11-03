@@ -1,0 +1,225 @@
+# From CockroachDB's logic tests (https://github.com/cockroachdb/cockroach):
+# pkg/sql/logictest/testdata/logic_test/int_size at tag v23.2.0, commit
+# 8f14432835d667982828b5319cfd130991fbf80c, as it is there but for this header
+# and the condition lines added before records. CockroachDB 23.2's files were
+# under the Business Source License 1.1, whose Change Date, 2026-10-01, put
+# them under the Apache License 2.0: its text is LICENSE beside this file, and
+# NOTICE says whose they are.
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 32 records: 4 run as CockroachDB answers them; 28 held for CockroachDB,
+# `onlyif cockroachdb # needs ...`, by what they need: a statement the runner
+# does not carry out 22, a clause or construct the engine refuses 6.
+
+subtest defaults
+
+onlyif cockroachdb # needs a statement other than a query
+query T
+SHOW default_int_size
+----
+8
+
+subtest set_int4
+
+onlyif cockroachdb # needs SET statement
+statement ok
+SET default_int_size=4
+
+onlyif cockroachdb # needs a statement other than a query
+query T
+SHOW default_int_size
+----
+4
+
+statement ok
+CREATE TABLE i4 (i4 INT)
+
+onlyif cockroachdb # needs a statement other than a query
+query TT
+SHOW CREATE TABLE i4
+----
+i4  CREATE TABLE public.i4 (
+      i4 INT4 NULL,
+      rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+      CONSTRAINT i4_pkey PRIMARY KEY (rowid ASC)
+    )
+
+subtest set_int8
+
+statement ok
+SET default_int_size=8
+
+onlyif cockroachdb # needs a statement other than a query
+query T
+SHOW default_int_size
+----
+8
+
+statement ok
+CREATE TABLE i8 (i8 INT)
+
+onlyif cockroachdb # needs a statement other than a query
+query TT
+SHOW CREATE TABLE i8
+----
+i8  CREATE TABLE public.i8 (
+      i8 INT8 NULL,
+      rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+      CONSTRAINT i8_pkey PRIMARY KEY (rowid ASC)
+    )
+
+# https://github.com/cockroachdb/cockroach/issues/32846
+subtest issue_32846
+
+statement ok
+SET default_int_size=8
+
+# Parsing and evaluation are async, so the setting won't take
+# effect until the next statement is evaluated.
+onlyif cockroachdb # needs SET statement
+statement ok
+SET default_int_size=4; CREATE TABLE late4 (a INT)
+
+onlyif cockroachdb # needs a statement other than a query
+query TT
+SHOW CREATE TABLE late4
+----
+late4  CREATE TABLE public.late4 (
+         a INT8 NULL,
+         rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+         CONSTRAINT late4_pkey PRIMARY KEY (rowid ASC)
+       )
+
+onlyif cockroachdb # needs a statement other than a query
+query T
+SHOW default_int_size
+----
+4
+
+subtest set_bad_value
+
+onlyif cockroachdb # needs SET statement
+statement error pq: only 4 or 8 are supported by default_int_size
+SET default_int_size=2
+
+# We want to check the combinations of default_int_size and
+# experimental_serialization_normalization.
+
+subtest serial_rowid
+# When using rowid, we should always see INT8, since that's the
+# return type of unique_rowid()
+
+onlyif cockroachdb # needs SET statement
+statement ok
+SET default_int_size=4; SET serial_normalization='rowid';
+
+onlyif cockroachdb # needs the column type 'SERIAL'
+statement ok
+CREATE TABLE i4_rowid (a SERIAL)
+
+onlyif cockroachdb # needs a statement other than a query
+query TT
+SHOW CREATE TABLE i4_rowid
+----
+i4_rowid  CREATE TABLE public.i4_rowid (
+            a INT8 NOT NULL DEFAULT unique_rowid(),
+            rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+            CONSTRAINT i4_rowid_pkey PRIMARY KEY (rowid ASC)
+          )
+
+onlyif cockroachdb # needs SET statement
+statement ok
+SET default_int_size=8; SET serial_normalization='rowid';
+
+onlyif cockroachdb # needs the column type 'SERIAL'
+statement ok
+CREATE TABLE i8_rowid (a SERIAL)
+
+onlyif cockroachdb # needs a statement other than a query
+query TT
+SHOW CREATE TABLE i8_rowid
+----
+i8_rowid  CREATE TABLE public.i8_rowid (
+            a INT8 NOT NULL DEFAULT unique_rowid(),
+            rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+            CONSTRAINT i8_rowid_pkey PRIMARY KEY (rowid ASC)
+          )
+
+subtest serial_sql_sequence
+# When using rowid, we should see an INTx that matches the current size setting.
+
+onlyif cockroachdb # needs SET statement
+statement ok
+SET default_int_size=4; SET serial_normalization='sql_sequence';
+
+onlyif cockroachdb # needs the column type 'SERIAL'
+statement ok
+CREATE TABLE i4_sql_sequence (a SERIAL)
+
+onlyif cockroachdb # needs a statement other than a query
+query TT
+SHOW CREATE TABLE i4_sql_sequence
+----
+i4_sql_sequence  CREATE TABLE public.i4_sql_sequence (
+                   a INT4 NOT NULL DEFAULT nextval('public.i4_sql_sequence_a_seq'::REGCLASS),
+                   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+                   CONSTRAINT i4_sql_sequence_pkey PRIMARY KEY (rowid ASC)
+                 )
+
+onlyif cockroachdb # needs SET statement
+statement ok
+SET default_int_size=8; SET serial_normalization='sql_sequence';
+
+onlyif cockroachdb # needs the column type 'SERIAL'
+statement ok
+CREATE TABLE i8_sql_sequence (a SERIAL)
+
+onlyif cockroachdb # needs a statement other than a query
+query TT
+SHOW CREATE TABLE i8_sql_sequence
+----
+i8_sql_sequence  CREATE TABLE public.i8_sql_sequence (
+                   a INT8 NOT NULL DEFAULT nextval('public.i8_sql_sequence_a_seq'::REGCLASS),
+                   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+                   CONSTRAINT i8_sql_sequence_pkey PRIMARY KEY (rowid ASC)
+                 )
+
+subtest serial_virtual_sequence
+# Virtual sequences are a wrapper around unique_rowid(), so they will also
+# return an INT8 value.
+
+onlyif cockroachdb # needs SET statement
+statement ok
+SET default_int_size=4; SET serial_normalization='virtual_sequence';
+
+onlyif cockroachdb # needs the column type 'SERIAL'
+statement ok
+CREATE TABLE i4_virtual_sequence (a SERIAL)
+
+onlyif cockroachdb # needs a statement other than a query
+query TT
+SHOW CREATE TABLE i4_virtual_sequence
+----
+i4_virtual_sequence  CREATE TABLE public.i4_virtual_sequence (
+                       a INT8 NOT NULL DEFAULT nextval('public.i4_virtual_sequence_a_seq'::REGCLASS),
+                       rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+                       CONSTRAINT i4_virtual_sequence_pkey PRIMARY KEY (rowid ASC)
+                     )
+
+onlyif cockroachdb # needs SET statement
+statement ok
+SET default_int_size=8; SET serial_normalization='virtual_sequence';
+
+onlyif cockroachdb # needs the column type 'SERIAL'
+statement ok
+CREATE TABLE i8_virtual_sequence (a SERIAL)
+
+onlyif cockroachdb # needs a statement other than a query
+query TT
+SHOW CREATE TABLE i8_virtual_sequence
+----
+i8_virtual_sequence  CREATE TABLE public.i8_virtual_sequence (
+                       a INT8 NOT NULL DEFAULT nextval('public.i8_virtual_sequence_a_seq'::REGCLASS),
+                       rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+                       CONSTRAINT i8_virtual_sequence_pkey PRIMARY KEY (rowid ASC)
+                     )

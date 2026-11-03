@@ -54,6 +54,7 @@ SELECT id, price * qty FROM p
 3	NULL
 4	19999999.98
 
+onlyif transformer decimal-result-type
 query INT,DECIMAL(13,6) rowsort
 SELECT id, price / 3 FROM p
 ----
@@ -73,6 +74,21 @@ query DECIMAL(12,2),DOUBLE
 SELECT price - price + 0.1 + 0.2, CAST(0.1 AS DOUBLE) + CAST(0.2 AS DOUBLE) FROM p WHERE id = 1
 ----
 0.30	0.30000000000000004
+
+# On its own a number written with a point is a DOUBLE, so 0.1 + 0.2 is the
+# DOUBLE nearest their sum.
+onlyif transformer double-literal
+query DOUBLE
+SELECT 0.1 + 0.2
+----
+0.30000000000000004
+
+# A math function of a DECIMAL computes in DOUBLE, and returns one.
+onlyif transformer double-precision
+query DOUBLE
+SELECT SQRT(price) FROM p WHERE id = 1
+----
+4.471017781221631
 
 statement error
 SELECT price + rate FROM p
@@ -103,3 +119,36 @@ SELECT id FROM p ORDER BY price DESC NULLS LAST, id
 1
 2
 3
+
+# A BIGINT beside a DECIMAL counts as the DECIMAL(19,0) its every value fits,
+# as SQL Server has it (Spark counts it as a DECIMAL(20,0)), and an INT as a
+# DECIMAL(10,0): DECIMAL(19,0) + DECIMAL(10,0) is a DECIMAL(20,0).
+onlyif transformer bigint-decimal
+query DECIMAL(20,0),DECIMAL(11,0),DECIMAL(30,0)
+SELECT CAST(9223372036854775807 AS BIGINT) + CAST(1 AS DECIMAL(10,0)), CAST(1 AS INT) + CAST(1 AS DECIMAL(10,0)), CAST(-1 AS BIGINT) * CAST(9999999999 AS DECIMAL(10,0))
+----
+9223372036854775808	2	-9999999999
+
+# A BETWEEN over two DECIMAL types compares its three operands as the DECIMAL
+# that holds them all, here DECIMAL(38,18), where its two comparisons alone
+# would each compare their own pair: d2 <= i as a DECIMAL(12,2). The plan
+# printed as SQL (the reprinted modes, EXPLAIN) writes it as the BETWEEN, which
+# binds to the same casts (found by the agreed corpus, plans/testing/14).
+statement ok
+CREATE TABLE b (i INT, d2 DECIMAL(9,2), d18 DECIMAL(38,18))
+
+statement ok
+INSERT INTO b VALUES (0, 0.20, 1), (3, 1.00, -2.5), (1, 1.00, 1.000000000000000001), (2, NULL, 0)
+
+query INT,DECIMAL(9,2) rowsort
+SELECT i, d2 FROM b WHERE d2 BETWEEN d18 AND i
+----
+3	1.00
+
+query INT,BOOLEAN,BOOLEAN rowsort
+SELECT i, d2 NOT BETWEEN i AND d18, d18 BETWEEN d2 AND i FROM b
+----
+0	false	false
+1	false	false
+2	NULL	NULL
+3	true	false

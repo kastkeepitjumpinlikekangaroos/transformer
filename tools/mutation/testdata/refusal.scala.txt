@@ -1,0 +1,14 @@
+object Refusal {
+  def f(a: Int): Unit = if (a < 0) throw new IllegalArgumentException(s"negative $a")
+  def g(a: Int): Int = if (a < 0) throw new IllegalArgumentException("negative") else a
+  def h(a: Int): Unit =
+    if (a > 9)
+      throw new IllegalArgumentException(
+        "too big")
+  def i(a: Option[Int]): Int = a.getOrElse(throw new IllegalStateException("none"))
+  def j(a: Int): Int = a match {
+    case 0 => throw new IllegalArgumentException("zero")
+    case n => n
+  }
+  def k(a: Int): Unit = if (a == 5) throw overflow(a)
+}

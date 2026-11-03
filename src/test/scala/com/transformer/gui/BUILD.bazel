@@ -46,9 +46,7 @@ scala_junit_test(
     deps = [
         "//src/main/scala/com/transformer/gui:components",
         "@maven//:junit_junit",
-        "@maven//:org_openjfx_javafx_base",
         "@maven//:org_openjfx_javafx_base_mac_aarch64",
-        "@maven//:org_openjfx_javafx_graphics",
         "@maven//:org_openjfx_javafx_graphics_mac_aarch64",
     ],
 )

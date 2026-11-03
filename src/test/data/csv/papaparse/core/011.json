@@ -1,0 +1,15 @@
+{
+ "description": "Quoted field with escaped quotes",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   "B\"B\"B",
+   "C"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

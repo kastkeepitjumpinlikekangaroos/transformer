@@ -1,0 +1,16 @@
+{
+ "description": "A simple row",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "A",
+   "b",
+   "c"
+  ]
+ ],
+ "text": "A,b,c"
+}

@@ -1,0 +1,22 @@
+{
+ "description": "Custom delimiter (tab)",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n",
+  "delimiter": "\t"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "Ab",
+   "cd",
+   "ef"
+  ],
+  [
+   "g",
+   "h",
+   "ij"
+  ]
+ ],
+ "text": "Ab\tcd\tef\r\ng\th\tij"
+}

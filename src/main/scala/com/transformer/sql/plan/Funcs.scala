@@ -5,20 +5,34 @@ import com.transformer.core._
 import java.util
 import java.util.Locale
 
-/** Scalar function registry. */
+/** The scalar functions' implementations, by name: [[apply]] on a row and
+  * [[applyVec]] on a batch. Which functions there are, and how a call binds,
+  * is [[FunctionCatalog]]'s. */
 object Funcs {
 
   /** What an argument of a function must be. NULL is every kind. */
   sealed trait Param
   object Param {
-    /** Any value. The flow functions take these: their arguments meet as a
-      * CASE's values do, or are compared as NULLIF's are, before the call is
-      * typed, and IF's first is a condition (`Analyzer.condition`). */
+    /** Any value, which the function reads as it is: `MIN`'s, `MAX`'s and
+      * `COUNT`'s. */
     case object AnyValue extends Param
+    /** A value the call may answer with, as a CASE answers with a THEN: the
+      * call's every Branch argument meets the others as a CASE's values do
+      * (`Analyzer.branches`), before the call is typed. */
+    case object Branch extends Param
+    /** A value compared with the call's other Compared argument, as a
+      * comparison's two sides are (`Analyzer.unify`): NULLIF's. */
+    case object Compared extends Param
+    /** A truth value, bound as every condition is (`Analyzer.condition`):
+      * IF's first argument, COUNT_IF's. */
+    case object Condition extends Param
+    /** An operand of the arithmetic the function is (`Analyzer.arithmetic`):
+      * MOD's. */
+    case object Operand extends Param
     /** A number: an INT, a BIGINT, a FLOAT, a DOUBLE or a DECIMAL. */
     case object Number extends Param
     /** An INT or a BIGINT that counts something, which `role` names: a scale,
-      * a position, a length or a seed. */
+      * a position, a length, a seed or an offset. */
     final case class Integer(role: String) extends Param
     /** A STRING. */
     case object Text extends Param
@@ -28,51 +42,12 @@ object Funcs {
     * of them must be, and the type it returns. */
   final case class Signature(params: Seq[Param], returnType: DataType)
 
-  /** The signature of `name` over `args`, or `None` if no function of that
-    * name takes that many arguments. The analyzer checks each argument against
-    * its [[Param]] (`Analyzer.checkArgument`) and types the call by it; the
-    * executor uses [[apply]] at runtime. Most return types follow the
-    * argument types alone; a `ROUND` or `TRUNC` of a DECIMAL also reads a
-    * scale written as a number ([[Rounding.resultType]]). */
-  def signature(name: String, args: Seq[Expr]): Option[Signature] = {
-    import Param._
-    val argTypes = args.map(_.dataType)
-    val n = argTypes.size
-    def each(param: Param, returns: DataType) = Some(Signature(Seq.fill(n)(param), returns))
-    name.toUpperCase(Locale.ROOT) match {
-      case "LENGTH" | "LEN" if n == 1 => each(Text, DataType.IntType)
-      case "UPPER" | "LOWER" | "TRIM" if n == 1 => each(Text, DataType.StringType)
-      case "SUBSTRING" if n == 2 || n == 3 =>
-        Some(Signature(Seq(Text, Integer("position"), Integer("length")).take(n), DataType.StringType))
-      case "CONCAT" => each(Text, DataType.StringType)
-      case "COALESCE" if n > 0 => each(AnyValue, oneType(argTypes))
-      case "IF" if n == 3 => each(AnyValue, oneType(argTypes.drop(1)))
-      case "NULLIF" if n == 2 => each(AnyValue, argTypes.head)
-      case "ABS" if n == 1 => each(Number, argTypes.head)
-      case "ROUND" | "TRUNC" | "TRUNCATE" if n == 1 || n == 2 =>
-        Some(Signature(Seq(Number, Integer("scale")).take(n), Rounding.resultType(name, args)))
-      case "FLOOR" | "CEIL" | "CEILING" if n == 1 => each(Number, Rounding.resultType(name, args))
-      case "POW" | "POWER" if n == 2 => each(Number, DataType.DoubleType)
-      case "SQRT" | "CBRT" | "EXP" if n == 1 => each(Number, DataType.DoubleType)
-      case "LN" if n == 1 => each(Number, DataType.DoubleType)
-      case "LOG" if n == 2 => each(Number, DataType.DoubleType)
-      case "LOG10" | "LOG2" if n == 1 => each(Number, DataType.DoubleType)
-      case "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" if n == 1 => each(Number, DataType.DoubleType)
-      case "SINH" | "COSH" | "TANH" if n == 1 => each(Number, DataType.DoubleType)
-      case "ATAN2" if n == 2 => each(Number, DataType.DoubleType)
-      case "DEGREES" | "RADIANS" if n == 1 => each(Number, DataType.DoubleType)
-      case "SIGN" if n == 1 => each(Number, DataType.IntType)
-      case "PI" | "E" if n == 0 => Some(Signature(Nil, DataType.DoubleType))
-      case "RAND" | "RANDOM" if n == 0 || n == 1 => each(Integer("seed"), DataType.DoubleType)
-      case "GREATEST" | "LEAST" if n > 0 => each(AnyValue, oneType(argTypes))
-      case _ => None
-    }
-  }
-
-  /** The type of arguments the binder has given one type: theirs, or NULL
-    * when every one is an untyped NULL. */
-  private def oneType(types: Seq[DataType]): DataType =
-    types.find(_ != DataType.NullType).getOrElse(DataType.NullType)
+  /** The signature of the scalar or flow function `name` over `args`, or
+    * `None` if no function of that name takes that many arguments
+    * ([[FunctionCatalog.signature]]). The analyzer checks each argument
+    * against its [[Param]] (`Analyzer.checkArgument`) and types the call by
+    * it; the executor uses [[apply]] at runtime. */
+  def signature(name: String, args: Seq[Expr]): Option[Signature] = FunctionCatalog.signature(name, args)
 
   /** Per-thread RNG so RAND() is safe under parallel execution. Seeded RAND(x) returns
     * a deterministic value (not a per-row stream) — sufficient for tests and tagging. */
@@ -86,9 +61,9 @@ object Funcs {
         val v = args.head
         if (v == null) null else length(v.toString)
       case "UPPER" =>
-        if (args.head == null) null else args.head.toString.toUpperCase(Locale.ROOT)
+        if (args.head == null) null else upper(args.head.toString)
       case "LOWER" =>
-        if (args.head == null) null else args.head.toString.toLowerCase(Locale.ROOT)
+        if (args.head == null) null else lower(args.head.toString)
       case "TRIM" =>
         if (args.head == null) null else trim(args.head.toString)
       case "SUBSTRING" =>
@@ -118,6 +93,7 @@ object Funcs {
             case DataType.FloatType => math.abs(n.doubleValue).toFloat
             case _ => math.abs(n.doubleValue)
           }
+          case other => throw new IllegalStateException(s"ABS of $other, a ${other.getClass.getName}, not a number")
         }
       case "ROUND" | "TRUNC" | "TRUNCATE" | "FLOOR" | "CEIL" | "CEILING" =>
         if (args.exists(_ == null)) null
@@ -251,6 +227,41 @@ object Funcs {
     * spill or a parquet or CSV file wrote it as `?`. */
   private[plan] def length(s: String): Int = s.codePointCount(0, s.length)
 
+  /** `s` in capitals by Unicode's simple case mapping: each character to
+    * one character (`Character.toUpperCase` of its code point), whatever the
+    * JVM's locale. So a string keeps its length, and `UPPER(s) LIKE UPPER(p)`
+    * pairs characters one with one as `s ILIKE p` does: a sharp s (U+00DF)
+    * and the ligature fi (U+FB01) stay as they are, where Java's
+    * `String.toUpperCase`, the full mapping, wrote `SS` and `FI`, which
+    * matched `'SS'` where `ILIKE` never did. */
+  private[plan] def upper(s: String): String = eachCharacter(s, Character.toUpperCase(_: Int))
+
+  /** `s` in small letters by Unicode's simple case mapping, as [[upper]]:
+    * a capital I with a dot above (U+0130) is `i`, where the full mapping
+    * wrote `i` and a combining dot, two characters for one. */
+  private[plan] def lower(s: String): String = eachCharacter(s, Character.toLowerCase(_: Int))
+
+  /** `s` with `f` applied to each code point; half a surrogate pair maps to
+    * itself. A string `f` leaves alone is returned as it is. */
+  private def eachCharacter(s: String, f: Int => Int): String = {
+    var i = 0
+    while (i < s.length) {
+      val c = s.codePointAt(i)
+      if (f(c) != c) {
+        val out = new java.lang.StringBuilder(s.length)
+        out.append(s, 0, i)
+        while (i < s.length) {
+          val d = s.codePointAt(i)
+          out.appendCodePoint(f(d))
+          i += Character.charCount(d)
+        }
+        return out.toString
+      }
+      i += Character.charCount(c)
+    }
+    s
+  }
+
   /** `s` without the spaces (U+0020) it starts and ends with, which is what
     * SQL's TRIM removes; Java's `trim`, which it used, also took tabs, line
     * breaks and every other character up to U+0020. */
@@ -370,7 +381,7 @@ object VecFuncs {
       if (argVec.isNull(i)) values(i) = null
       else {
         val s = argVec.getBoxed(i).toString
-        values(i) = if (lower) s.toLowerCase(Locale.ROOT) else s.toUpperCase(Locale.ROOT)
+        values(i) = if (lower) Funcs.lower(s) else Funcs.upper(s)
       }
       i += 1
     }
@@ -486,6 +497,10 @@ object VecFuncs {
           i += 1
         }
         new FloatVector(values, nulls, cap)
+      // ABS(NULL) is NULL, of the NULL type its argument has: it was a
+      // DOUBLE vector of NULLs under a column declared NULL (found by
+      // `--config=verify`, plans/testing/17).
+      case DataType.NullType => new NullVectorImpl(cap)
       case _ =>
         val values = new Array[Double](cap)
         val nulls = new util.BitSet(cap)
@@ -572,20 +587,20 @@ object VecFuncs {
   * NaN and the infinities their own answer. */
 private[plan] object Rounding {
 
-  /** The type of `name` over `args`: an INT, BIGINT or DECIMAL argument's own
-    * type for FLOOR and CEIL of a whole number, and for ROUND and TRUNC at a
-    * scale that keeps every digit; otherwise a DECIMAL(p,s) loses the digits
-    * past the scale, which is the scale written as a number (0 when there is
-    * none, and none below 0), and ROUND, FLOOR and CEIL keep one more integer
-    * digit for the carry (9.5 rounds to 10). A scale that is not a number
-    * written in the query keeps the DECIMAL's scale, rounding within it. A
-    * FLOAT, a DOUBLE and an untyped NULL are a DOUBLE. */
-  def resultType(name: String, args: Seq[Expr]): DataType = {
-    val fn = name.toUpperCase(Locale.ROOT)
+  /** The type of a rounding function over `args`: an INT, BIGINT or DECIMAL
+    * argument's own type for FLOOR and CEIL of a whole number, and for ROUND
+    * and TRUNC at a scale that keeps every digit; otherwise a DECIMAL(p,s)
+    * loses the digits past the scale, which is the scale written as a number
+    * (0 when there is none, and none below 0), and where `carry` says (ROUND,
+    * FLOOR and CEIL; not TRUNC) keeps one more integer digit for the carry
+    * (9.5 rounds to 10). A scale that is not a number written in the query
+    * keeps the DECIMAL's scale, rounding within it. A FLOAT, a DOUBLE and an
+    * untyped NULL are a DOUBLE. */
+  def resultType(args: Seq[Expr], carry: Boolean): DataType =
     args.head.dataType match {
       case DataType.IntType | DataType.LongType => args.head.dataType
       case d @ DataType.DecimalType(p, s) =>
-        val carry = if (fn == "TRUNC" || fn == "TRUNCATE") 0 else 1
+        val kept = if (carry) 1 else 0
         val scale: Option[Long] =
           if (args.size == 1) Some(0L)
           else args(1) match {
@@ -597,13 +612,12 @@ private[plan] object Rounding {
         scale match {
           case Some(k) if k >= s => d
           case Some(k) =>
-            val kept = math.max(0L, k).toInt
-            DataType.DecimalType(math.min(Decimals.MaxPrecision, math.max(1, p - s + carry + kept)), kept)
-          case None => DataType.DecimalType(math.min(Decimals.MaxPrecision, p + carry), s)
+            val scaleKept = math.max(0L, k).toInt
+            DataType.DecimalType(math.min(Decimals.MaxPrecision, math.max(1, p - s + kept + scaleKept)), scaleKept)
+          case None => DataType.DecimalType(math.min(Decimals.MaxPrecision, p + kept), s)
         }
       case _ => DataType.DoubleType
     }
-  }
 
   /** `x` rounded by `name` at `scale` places, as a value of `resultType`. */
   def apply(name: String, x: java.lang.Number, scale: Long, resultType: DataType): Any = {

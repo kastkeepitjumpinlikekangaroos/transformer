@@ -1,0 +1,88 @@
+# From Apache Spark's SQL query tests (https://github.com/apache/spark):
+# sql/core/src/test/resources/sql-tests/inputs/typeCoercion/native/stringCastAndExpressions.sql
+# at commit b98123545915a84403c7fa89e8d977ee0b2f5aed, with every answer from
+# the golden file results/typeCoercion/native/stringCastAndExpressions.sql.out
+# at that commit, Spark's answer under ANSI mode, never the engine's. Licensed
+# to the Apache Software Foundation under the Apache License, Version 2.0:
+# LICENSE and NOTICE in src/test/slt/spark/ hold the license and Spark's
+# notice. Written by //src/test/scala/com/transformer/slt:spark_import, which
+# docs/extending.md describes; edit the converter, not this file.
+#
+# A STRING column holding 'aa' cast to each type. 8 of the file's 32 statements
+# are here.
+#
+# A statement is as Spark wrote it but where a rewrite cannot change what it
+# means, which its record names: a temporary view of literals as a table of
+# their types holding one row of them. A column is the engine's type of the
+# name Spark's schema gives it. A result is compared as rowsort unless its
+# query ends in ORDER BY, as Spark sorts every result its plan does not. An
+# error under ANSI is a statement error, Spark's error class in its comment and
+# after ---- the engine's own words for the same reason.
+#
+# Left out (24 statements), by what they need:
+#      3  arrays, structs and maps
+#      2  Spark's function from_unixtime()
+#      2  Spark's function next_day()
+#      2  Spark's function to_timestamp()
+#      2  Spark's function to_unix_timestamp()
+#      2  Spark's function trunc()
+#      2  Spark's function unix_timestamp()
+#      1  BINARY, and X'' literals
+#      1  SMALLINT
+#      1  Spark's function from_json()
+#      1  Spark's function get_json_object()
+#      1  Spark's function json_tuple()
+#      1  Spark's function sha2()
+#      1  Spark's function unhex()
+#      1  TINYINT
+#      1  a bare DECIMAL, Spark's DECIMAL(10,0), which the engine's CAST refuses
+#         unnamed
+
+# stringCastAndExpressions.sql:18, the temporary view as a table of one row
+statement ok
+CREATE TABLE t (a STRING)
+
+statement ok
+INSERT INTO t VALUES ('aa')
+
+# stringCastAndExpressions.sql:23; Spark: CAST_INVALID_INPUT
+statement error
+select cast(a as int) from t
+----
+Cannot cast 'aa' to int
+
+# stringCastAndExpressions.sql:24; Spark: CAST_INVALID_INPUT
+statement error
+select cast(a as long) from t
+----
+Cannot cast 'aa' to long
+
+# stringCastAndExpressions.sql:25; Spark: CAST_INVALID_INPUT
+statement error
+select cast(a as float) from t
+----
+Cannot cast 'aa' to float
+
+# stringCastAndExpressions.sql:26; Spark: CAST_INVALID_INPUT
+statement error
+select cast(a as double) from t
+----
+Cannot cast 'aa' to double
+
+# stringCastAndExpressions.sql:28; Spark: CAST_INVALID_INPUT
+statement error
+select cast(a as boolean) from t
+----
+Cannot cast 'aa' to boolean
+
+# stringCastAndExpressions.sql:29; Spark: CAST_INVALID_INPUT
+statement error
+select cast(a as timestamp) from t
+----
+Cannot cast 'aa' to timestamp
+
+# stringCastAndExpressions.sql:30; Spark: CAST_INVALID_INPUT
+statement error
+select cast(a as date) from t
+----
+Cannot cast 'aa' to date

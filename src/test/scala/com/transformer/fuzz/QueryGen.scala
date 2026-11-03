@@ -25,25 +25,34 @@ import com.transformer.sql.plan._
   * this property rather than reusing the bound-`Expr` shapes from [[ExprGen]],
   * for two reasons:
   *
-  *   - '''Paren-free, but for decimal arithmetic.''' Expressions render without
-  *     grouping parentheses and rely on operator precedence, so the generators
-  *     only build trees that stay type-correct under a precedence-only reparse:
-  *     arithmetic operands are numeric, `||` operands are string, comparisons
-  *     are numeric-vs-numeric or string-vs-string (never boolean), and `NOT`
-  *     wraps a single atom — so the reparsed grouping may differ but the result
-  *     type never does. (Every mode runs the identical text, so a regrouped
-  *     reparse is harmless.) Decimal arithmetic is the exception, rendered
-  *     with the parentheses its shape needs (see [[SqlRender]]).
+  *   - '''Paren-free, but for decimal arithmetic, negation and NOT.'''
+  *     Expressions render without grouping parentheses and rely on operator
+  *     precedence, so the generators only build trees that stay type-correct
+  *     under a precedence-only reparse: arithmetic operands are numeric, `||`
+  *     operands are string, comparisons are numeric-vs-numeric or
+  *     string-vs-string (never boolean) — so the reparsed grouping may differ
+  *     but the result type never does. (Every mode runs the identical text, so
+  *     a regrouped reparse is harmless.) Decimal arithmetic, a unary minus and
+  *     a `NOT` over anything but a leaf are the exceptions, rendered with the
+  *     parentheses their shape needs (see [[SqlRender]]).
   *
-  *   - '''Total by construction.''' Like [[ExprGen]], nothing here can throw for
-  *     in-range input: casts are numeric->numeric or anything->string (never the
-  *     string->numeric parse that can throw), and integer divide-by-zero returns
-  *     NULL, as a NULL `ROUND` scale or `SUBSTRING` position does. So a query
-  *     that binds also runs, in every mode.
+  *   - '''Fails only on its data.''' A query that binds also runs, in every
+  *     mode, but where its data makes it fail: a dataset at the edges
+  *     (`DataGen.Edges`) overflows arithmetic, a SUM and a CAST, a float read
+  *     as an integer unguarded fails on NaN and the infinities
+  *     ([[genNumericCast]]), and a column's text read as another type fails
+  *     where the type does not read it ([[genTextCast]]), under an IN, in a
+  *     comparison and in an aggregate (plans/testing/15 W7). Every mode must
+  *     then fail alike, but where a WHERE condition that can fail is there to
+  *     move ([[GenQuery.movableFailure]], decision 1). Integer division by
+  *     zero returns NULL, as a NULL `ROUND` scale or `SUBSTRING` position
+  *     does.
   *
   * Excluded so the result multiset stays mode-invariant: `RAND()` and the clock
   * functions (`CURRENT_DATE`/`CURRENT_TIMESTAMP`) — each execution of a query
-  * reads the clock afresh, so two modes legitimately disagree. `LIMIT` and `OFFSET` ARE generated, but only over a '''total'''
+  * reads the clock afresh, so two modes legitimately disagree. `RAND(k)` with
+  * a literal seed is one value, and is drawn with every other function of the
+  * catalog ([[CalledFunctions]]). `LIMIT` and `OFFSET` ARE generated, but only over a '''total'''
   * ORDER BY (every output column an order key), where rows tied at a cutoff are
   * identical rows and the kept slice is therefore a layout-independent multiset;
   * a bare `LIMIT` or `OFFSET` would keep a different SUBSET of the tied rows per
@@ -89,6 +98,28 @@ object QueryGen {
       * the oracle's sortedness sub-check. Always projected, so present in the
       * output schema by name. */
     def orderBy: Vector[OrderKey]
+    /** The WHERE, the one condition the optimizer may move. */
+    def where: Option[Expr]
+    /** Whether the query's WHERE can fail on its data ([[mayFail]]). Where it
+      * can, the optimizer may evaluate it on rows the written order of its
+      * conditions would not, so layouts may part on whether the query fails
+      * at all; decision 1 of plans/testing/15 holds them to agree on it
+      * everywhere else. */
+    def movableFailure: Boolean = where.exists(mayFail)
+  }
+
+  /** Whether `e` can fail on a value of its data: arithmetic past its type, a
+    * negation, a CAST that cannot read or hold its input, or a function the
+    * catalog says raises an error while running (`ABS` of the smallest
+    * integer, a rounding past its type, a negative `SUBSTRING` length, `SIGN`
+    * of NaN). Over-approximate: a node of these kinds may fail whatever its
+    * operands are. */
+  def mayFail(e: Expr): Boolean = e match {
+    case BinOpExpr("+" | "-" | "*" | "/" | "%", _, _, _) => true
+    case UnaryOpExpr("-", _, _) => true
+    case _: CastExpr | _: DecimalCastExpr => true
+    case FuncExpr(name, _, _) if name == "MOD" || FunctionCatalog.lookup(name).exists(_.errors.nonEmpty) => true
+    case other => Shrinker.childrenOf(other).exists(mayFail)
   }
 
   /** One ORDER BY key. `nullsFirst` is an explicit `NULLS FIRST` /
@@ -209,7 +240,7 @@ object QueryGen {
 
   // ---- query generation ---------------------------------------------------
 
-  private def genQuery(rng: Rng, schema: Schema): GenQuery =
+  private[fuzz] def genQuery(rng: Rng, schema: Schema): GenQuery =
     if (rng.bool(0.5)) genAggregateQuery(rng, schema) else genProjectQuery(rng, schema)
 
   private def genProjectQuery(rng: Rng, schema: Schema): ProjectQuery = {
@@ -335,6 +366,17 @@ object QueryGen {
       options += ((3, () => Sum(numericArg(rng, schema, numeric))))
       options += ((3, () => Avg(numericArg(rng, schema, numeric))))
     }
+    // SUM, MIN or MAX of a CAST that can fail, which the aggregate evaluates
+    // as it reads each row: an INT, a BIGINT or a DECIMAL that a SUM adds
+    // exactly, or any type a CAST reads text as.
+    options += ((1, () => {
+      val target = ExprGen.pick(rng, Seq(DataType.IntType, DataType.LongType) ++ ExprGen.DecimalTypes)
+      Sum(genFailingCast(rng, schema, target, 2))
+    }))
+    options += ((1, () => {
+      val target = ExprGen.pick(rng, TextCastTargets)
+      if (rng.bool()) Min(genFailingCast(rng, schema, target, 2)) else Max(genFailingCast(rng, schema, target, 2))
+    }))
     if (integral.nonEmpty) {
       // Statistical aggregates over integral columns only: exact, well-conditioned
       // inputs keep cross-layout reordering well inside the float tolerance.
@@ -376,7 +418,7 @@ object QueryGen {
     }
   }
 
-  // ---- expression generation (paren-free, total) --------------------------
+  // ---- expression generation (paren-free) ----------------------------------
 
   private def leafProb(depth: Int): Double = if (depth <= 1) 0.5 else 0.25
   private val NullLitProb = 0.1
@@ -404,44 +446,165 @@ object QueryGen {
     else LitExpr(genLitValue(rng, target), target)
   }
 
-  /** `CAST(source AS target)`, which fails on no row of the corpus: a FLOAT
-    * or DOUBLE source meets an integer target only where its magnitude is
-    * finite and in range, `CAST(CASE WHEN ABS(x) < 1e9 THEN x END AS BIGINT)`,
-    * since NaN and an infinity have no integer value (an error since
-    * plans/robustness/18) and DataGen draws both into a quarter of the float
-    * columns. Every other numeric cast holds the corpus's small values. */
+  /** `CAST(source AS target)`. A FLOAT or DOUBLE source meets an integer
+    * target where its magnitude is finite and in range,
+    * `CAST(CASE WHEN ABS(x) < 1e9 THEN x END AS BIGINT)`, since NaN and an
+    * infinity have no integer value (an error since plans/robustness/18) and
+    * DataGen draws both into a quarter of the float columns, but on
+    * [[FailingCastProb]] of them unguarded, which fails on those rows. A
+    * BIGINT cast to an INT fails on a dataset at the edges
+    * (`DataGen.Edges`). */
   private def genNumericCast(rng: Rng, source: Expr, target: DataType): Expr =
-    if (DataType.isIntegral(target) && (source.dataType == DataType.FloatType || source.dataType == DataType.DoubleType)) {
+    if (DataType.isIntegral(target) && (source.dataType == DataType.FloatType || source.dataType == DataType.DoubleType) &&
+        !rng.bool(FailingCastProb)) {
       val inRange = BinOpExpr("<", FuncExpr("ABS", Seq(source), source.dataType), LitExpr(1.0e9, DataType.DoubleType),
         DataType.BooleanType)
       CastExpr(CaseExpr(Seq((inRange, source)), None, source.dataType), target)
     } else CastExpr(source, target)
 
+  /** How often a CAST that can fail on its input is drawn where one that
+    * cannot would be: a float to an integer unguarded ([[genNumericCast]]),
+    * and text read as another type ([[genTextCast]]). */
+  private val FailingCastProb = 0.3
+
+  /** `CAST(s AS target)` of a string, which fails on the rows whose text
+    * `target` does not read: every type but STRING and BINARY, a DECIMAL as
+    * the query writes one. The text is a column's: mostly a value's own,
+    * `CAST(x AS STRING)`, of `target`'s type, which reads back but at the
+    * edges (a year past 9999 is written with its sign), or of another, whose
+    * text may not read (`2.5` as an INT, a TIMESTAMP's as a DATE); else a
+    * string column, which fails on every row but those of a column of
+    * `DataGen.Edges.CastText`, text some types read and others do not. Never
+    * a literal, which the binder would fold, and fail, before any row is
+    * read. Where no column has text, a value of `target` instead. */
+  private def genTextCast(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
+    def columns(p: DataType => Boolean): Vector[Int] = (0 until schema.length).filter(i => p(schema.fields(i).dataType)).toVector
+    val own = columns(_ == target)
+    val other = columns(t => t != target && t != DataType.StringType && t != DataType.BinaryType)
+    val strings = columns(_ == DataType.StringType)
+    val sources = scala.collection.mutable.ArrayBuffer.empty[(Int, () => Expr)]
+    if (own.nonEmpty) sources += ((3, () => CastExpr(colRef(schema, rng.oneOf(own)), DataType.StringType)))
+    if (other.nonEmpty) sources += ((2, () => CastExpr(colRef(schema, rng.oneOf(other)), DataType.StringType)))
+    if (strings.nonEmpty) sources += ((1, () => colRef(schema, rng.oneOf(strings))))
+    if (sources.isEmpty) genValue(rng, schema, target, depth)
+    else {
+      val text = rng.weighted(sources.toSeq: _*)()
+      target match {
+        case d: DataType.DecimalType => DecimalCastExpr(text, d)
+        case t => CastExpr(text, t)
+      }
+    }
+  }
+
+  /** The types [[genTextCast]] reads text as. */
+  private val TextCastTargets: Seq[DataType] =
+    Seq(DataType.IntType, DataType.LongType, DataType.FloatType, DataType.DoubleType, DataType.BooleanType,
+      DataType.DateType, DataType.TimestampType) ++ ExprGen.DecimalTypes
+
+  /** A CAST that can fail on its input, of a type [[TextCastTargets]] holds:
+    * text read as it, or for an integer, a float column unguarded. */
+  private def genFailingCast(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
+    val floats = (0 until schema.length).filter { i =>
+      schema.fields(i).dataType == DataType.FloatType || schema.fields(i).dataType == DataType.DoubleType
+    }.toVector
+    if (DataType.isIntegral(target) && floats.nonEmpty && rng.bool(0.4)) CastExpr(colRef(schema, rng.oneOf(floats)), target)
+    else genTextCast(rng, schema, target, depth)
+  }
+
   private def genNumericExpr(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     def sub(t: DataType): Expr = genValue(rng, schema, t, depth - 1)
     val base: Seq[(Int, () => Expr)] = Seq(
-      // No unary minus: paren-free `- - x` / `- -1` do not parse. Negative values
-      // still arise from column data and subtraction.
       5 -> (() => BinOpExpr(rng.oneOf(ArithOps), sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics)), target)),
+      // A negation of any value, which `SqlRender` writes `-(x)`.
+      2 -> (() => UnaryOpExpr("-", sub(target), target)),
       2 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
       2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(target)), target)),
       2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(target), sub(target)), target)),
       1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
       1 -> (() => genCase(rng, schema, target, depth)),
-      1 -> (() => genNumericCast(rng, sub(rng.oneOf(Numerics)), target)))
+      1 -> (() => genNumericCast(rng, sub(rng.oneOf(Numerics)), target)),
+      1 -> (() => genTextCast(rng, schema, target, depth)),
+      1 -> (() => FuncExpr("MOD", Seq(sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics))), target)),
+      1 -> (() => genExtreme(rng, target, sub)))
     val extra: Seq[(Int, () => Expr)] = target match {
       case DataType.IntType =>
-        Seq(2 -> (() => FuncExpr("LENGTH", Seq(sub(DataType.StringType)), DataType.IntType)))
+        Seq(2 -> (() => FuncExpr("LENGTH", Seq(sub(DataType.StringType)), DataType.IntType)),
+          1 -> (() => FuncExpr("SIGN", Seq(signArg(rng, schema)), DataType.IntType)))
       case DataType.DoubleType =>
         Seq(
           1 -> (() => FuncExpr(rng.oneOf(Seq("FLOOR", "CEIL")), Seq(sub(rng.oneOf(Numerics))), DataType.DoubleType)),
-          1 -> (() => FuncExpr("ROUND", roundArgs(rng, schema, sub(rng.oneOf(Numerics))), DataType.DoubleType)))
+          1 -> (() => FuncExpr(rng.oneOf(Seq("ROUND", "TRUNC")), roundArgs(rng, schema, sub(rng.oneOf(Numerics))),
+            DataType.DoubleType)),
+          4 -> (() => genMathCall(rng, schema, depth)))
       case _ => Seq.empty
     }
     rng.weighted(base ++ extra: _*)()
   }
 
-  /** ROUND args: the value, and half the time a scale. */
+  // ---- the catalog's functions ----------------------------------------------
+
+  /** The functions a query calls by name and binds through `FunctionCatalog`:
+    * its scalar and flow entries and `MOD`, an operator written as a call,
+    * but not the clock functions, which each run reads afresh.
+    * `ModeDifferentialFuzzTest.everyCatalogFunctionIsDrawn` holds this
+    * generator and `MetaQueryGen` to drawing each of them, so a function the
+    * registry gains is drawn in SQL the day it lands, or the test says which. */
+  private[fuzz] val CalledFunctions: Seq[FunctionCatalog.Entry] = FunctionCatalog.Entries.filter(e =>
+    e.kind == FunctionCatalog.Kind.Scalar || e.kind == FunctionCatalog.Kind.Flow || e.kind == FunctionCatalog.Kind.Operator)
+
+  /** The catalog's functions that answer a DOUBLE whatever they are given:
+    * the math functions, `POWER`, two-argument `LOG`, `ATAN2`, `PI`, `E` and
+    * `RAND`, which the generators call with a literal seed only (unseeded,
+    * each row reads a fresh value, which no two runs agree on). */
+  private[fuzz] val DoubleFunctions: Seq[FunctionCatalog.Entry] = CalledFunctions.filter(e =>
+    e.kind == FunctionCatalog.Kind.Scalar && e.result == FunctionCatalog.Result.Fixed(DataType.DoubleType))
+
+  /** A call of one of [[DoubleFunctions]], each number argument drawn at its
+    * domain's edges as often as not ([[numberArg]]), a seed a small literal. */
+  private def genMathCall(rng: Rng, schema: Schema, depth: Int): Expr = {
+    val entry = rng.oneOf(DoubleFunctions)
+    val n = if (entry.name == "RAND") 1 else entry.arity.min
+    val args = entry.paramsAt(n).map {
+      case Funcs.Param.Number => numberArg(rng, schema, depth)
+      case _ => LitExpr(rng.between(0, 9), DataType.IntType)
+    }
+    FuncExpr(rng.oneOf(entry.names), args, DataType.DoubleType)
+  }
+
+  /** A math function's number: a numeric subtree or column, or one of the
+    * values a domain has its edge at (0, 1, -1, a fraction either way of
+    * zero, -0.0, NaN, the infinities), so `SQRT`, `LN`, `LOG`, `ASIN`,
+    * `ACOS` and `POWER` meet the arguments they answer NULL over
+    * (plans/testing/05). A negative number is a direct argument only, where
+    * its sign follows a parenthesis or a comma. */
+  private def numberArg(rng: Rng, schema: Schema, depth: Int): Expr = rng.weighted[() => Expr](
+    (3, () => genValue(rng, schema, rng.oneOf(Numerics), math.max(0, depth - 1))),
+    (2, () => rng.oneOf(MathEdges)),
+    (1, () => MetaQueryGen.floatSpecialLiteral(rng.oneOf(Seq("NaN", "Infinity", "-Infinity")), DataType.DoubleType)))()
+
+  /** Numbers at the edges of the math functions' domains. */
+  private[fuzz] val MathEdges: Seq[LitExpr] =
+    Seq[Any](0, 1, -1, 2, -2).map(v => LitExpr(v, DataType.IntType)) ++
+      Seq[Any](0.5, -0.5, 1.5, -0.0, 10.0).map(v => LitExpr(v, DataType.DoubleType))
+
+  /** `SIGN`'s argument: an INT, BIGINT or DECIMAL leaf, or a FLOAT or DOUBLE
+    * leaf guarded to its finite values (`CASE WHEN ABS(x) < 1e9 THEN x END`),
+    * since `SIGN` of NaN is an error (plans/robustness/30). */
+  private def signArg(rng: Rng, schema: Schema): Expr = {
+    val t = ExprGen.pick(rng, Numerics ++ ExprGen.DecimalTypes)
+    val leaf = genLeafValue(rng, schema, t)
+    if (t == DataType.FloatType || t == DataType.DoubleType) {
+      val finite = BinOpExpr("<", FuncExpr("ABS", Seq(leaf), t), LitExpr(1.0e9, DataType.DoubleType), DataType.BooleanType)
+      CaseExpr(Seq((finite, leaf)), None, t)
+    } else leaf
+  }
+
+  /** `GREATEST` or `LEAST` of one to three values of `target`, whose NULLs
+    * they skip. */
+  private def genExtreme(rng: Rng, target: DataType, sub: DataType => Expr): Expr =
+    FuncExpr(rng.oneOf(Seq("GREATEST", "LEAST")), Seq.fill(rng.between(1, 3))(sub(target)), target)
+
+  /** ROUND and TRUNC args: the value, and half the time a scale. */
   private def roundArgs(rng: Rng, schema: Schema, value: Expr): Seq[Expr] =
     if (rng.bool(0.5)) Seq(value, integerArg(rng, schema, rng.between(-1, 3))) else Seq(value)
 
@@ -462,15 +625,18 @@ object QueryGen {
       // also keeps a precedence reparse from meeting a string with an
       // arithmetic `+`. Other types reach them through a CAST to STRING.
       3 -> (() => BinOpExpr("||", sub(DataType.StringType), sub(DataType.StringType), DataType.StringType)),
-      // UPPER/LOWER only: TRIM parses to a TrimFunction node the binder rejects.
       3 -> (() => FuncExpr(rng.oneOf(Seq("UPPER", "LOWER")), Seq(sub(DataType.StringType)), DataType.StringType)),
+      // TRIM strips spaces only (U+0020), which the pool puts at either end
+      // of a value beside the same value without them.
+      3 -> (() => FuncExpr("TRIM", Seq(sub(DataType.StringType)), DataType.StringType)),
       3 -> (() => FuncExpr("CONCAT", Seq.fill(rng.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
       2 -> (() => FuncExpr("SUBSTRING", substringArgs(rng, schema, sub(DataType.StringType)), DataType.StringType)),
       2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
       2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
       1 -> (() => FuncExpr("NULLIF", Seq(sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
       1 -> (() => genCase(rng, schema, DataType.StringType, depth)),
-      1 -> (() => CastExpr(sub(ExprGen.pick(rng, TextTypes)), DataType.StringType)))
+      1 -> (() => CastExpr(sub(ExprGen.pick(rng, TextTypes)), DataType.StringType)),
+      1 -> (() => genExtreme(rng, DataType.StringType, sub)))
     rng.weighted(producers: _*)()
   }
 
@@ -489,29 +655,52 @@ object QueryGen {
   }
 
   /** A DECIMAL, DATE, TIMESTAMP or BINARY value: the conditional forms every
-    * type has, arithmetic and `ABS` of a DECIMAL, and a CAST between DATE and
-    * TIMESTAMP. The engine has no arithmetic on the last three, and no CAST
-    * into a DECIMAL or a BINARY, since the binder reads no type name for one. */
+    * type has, arithmetic, `ABS` and a CAST into it of a DECIMAL, and a CAST
+    * between DATE and TIMESTAMP. The engine has no arithmetic on the last
+    * three, and no CAST into a BINARY. */
   private def genOtherExpr(rng: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     def sub(t: DataType): Expr = genValue(rng, schema, t, depth - 1)
     val base: Seq[(Int, () => Expr)] = Seq(
       2 -> (() => FuncExpr("COALESCE", Seq.fill(rng.between(1, 3))(sub(target)), target)),
       2 -> (() => FuncExpr("IF", Seq(genPredicate(rng, schema, depth - 1), sub(target), sub(target)), target)),
       1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
-      1 -> (() => genCase(rng, schema, target, depth)))
+      1 -> (() => genCase(rng, schema, target, depth)),
+      1 -> (() => genExtreme(rng, target, sub)))
     val decimalCols = (0 until schema.length).filter(i => schema.fields(i).dataType.isInstanceOf[DataType.DecimalType])
     val extra: Seq[(Int, () => Expr)] = target match {
-      case _: DataType.DecimalType if decimalCols.nonEmpty => Seq(
+      case d: DataType.DecimalType if decimalCols.nonEmpty => Seq(
+        1 -> (() => UnaryOpExpr("-", colRef(schema, rng.oneOf(decimalCols)), target)),
         4 -> (() => genDecimalArith(rng, schema, target, decimalCols, depth)),
         5 -> (() => genDecimalBranches(rng, schema, target, decimalCols, depth)),
-        1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
-      case _: DataType.DecimalType => Seq(1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
-      case DataType.DateType => Seq(1 -> (() => CastExpr(sub(DataType.TimestampType), target)))
-      case DataType.TimestampType => Seq(1 -> (() => CastExpr(sub(DataType.DateType), target)))
+        1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
+        1 -> (() => genWrittenDecimalCast(rng, schema, d)),
+        1 -> (() => genTextCast(rng, schema, target, depth)))
+      case d: DataType.DecimalType => Seq(
+        1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
+        1 -> (() => genWrittenDecimalCast(rng, schema, d)),
+        1 -> (() => genTextCast(rng, schema, target, depth)))
+      case DataType.DateType => Seq(
+        1 -> (() => CastExpr(sub(DataType.TimestampType), target)),
+        1 -> (() => genTextCast(rng, schema, target, depth)))
+      case DataType.TimestampType => Seq(
+        1 -> (() => CastExpr(sub(DataType.DateType), target)),
+        1 -> (() => genTextCast(rng, schema, target, depth)))
       case _ => Seq.empty
     }
     rng.weighted(base ++ extra: _*)()
   }
+
+  /** `CAST(x AS DECIMAL(p,s))`, which fits its value to the type, of a leaf
+    * whose every value the corpus draws fits each generated DECIMAL: an INT, a
+    * BIGINT or a BOOLEAN (1 or 0), or a DECIMAL, the corpus's values being
+    * small. Not a FLOAT or a DOUBLE, whose NaN and infinities have no decimal,
+    * and not a computed value, which could pass a DECIMAL(9,2)'s seven integer
+    * digits. */
+  private def genWrittenDecimalCast(rng: Rng, schema: Schema, target: DataType.DecimalType): Expr =
+    DecimalCastExpr(genLeafValue(rng, schema, ExprGen.pick(rng, WrittenDecimalSources)), target)
+
+  private val WrittenDecimalSources: Seq[DataType] =
+    Seq(DataType.IntType, DataType.LongType, DataType.BooleanType) ++ ExprGen.DecimalTypes
 
   /** `(l op r)` over decimals, for the binder to type (`Analyzer.arithmetic`).
     * One side is an anchor, a DECIMAL column or arithmetic over one, which SQL
@@ -597,17 +786,18 @@ object QueryGen {
     CaseExpr(branches, elseE, target)
   }
 
-  /** A boolean predicate. Paren-free-safe: AND/OR compose by precedence and
-    * comparisons are same-category. `NOT` is applied ONLY to a boolean leaf —
-    * JSqlParser reads `NOT NOT a >= b` as `NOT ((NOT a) >= b)`, which the
-    * binder refuses. A comparison is negated instead by flipping its relop;
-    * IS NULL / IN / LIKE carry their own negation. */
+  /** A boolean predicate. AND/OR compose by precedence and comparisons are
+    * same-category. `NOT` is applied to a boolean leaf, or to any predicate,
+    * an AND and an OR among them, which `SqlRender` writes in parentheses
+    * (JSqlParser reads `NOT NOT a >= b` as `NOT ((NOT a) >= b)`, which the
+    * binder refuses); IS NULL / IN / LIKE carry their own negation too. */
   private def genPredicate(rng: Rng, schema: Schema, depth: Int): Expr = {
     if (depth <= 0 || rng.bool(leafProb(depth))) genAtom(rng, schema, depth)
     else rng.weighted(
       (3, () => BinOpExpr("AND", genPredicate(rng, schema, depth - 1), genPredicate(rng, schema, depth - 1), DataType.BooleanType)),
       (3, () => BinOpExpr("OR", genPredicate(rng, schema, depth - 1), genPredicate(rng, schema, depth - 1), DataType.BooleanType)),
       (2, () => UnaryOpExpr("NOT", genBoolLeaf(rng, schema), DataType.BooleanType)),
+      (2, () => UnaryOpExpr("NOT", genPredicate(rng, schema, depth - 1), DataType.BooleanType)),
       (5, () => genAtom(rng, schema, depth)))()
   }
 
@@ -625,7 +815,7 @@ object QueryGen {
     def colsWhere(p: DataType => Boolean): Vector[Int] =
       (0 until n).filter(i => p(schema.fields(i).dataType)).toVector
     val boolCols = colsWhere(_ == DataType.BooleanType)
-    val inCols = colsWhere(t => t != DataType.BooleanType && !(t == DataType.FloatType || t == DataType.DoubleType))
+    val inCols = colsWhere(_ != DataType.BooleanType)
     val temporalCols = colsWhere(t => t == DataType.DateType || t == DataType.TimestampType)
     val decimalCols = colsWhere(_.isInstanceOf[DataType.DecimalType])
     val binaryCols = colsWhere(_ == DataType.BinaryType)
@@ -634,7 +824,7 @@ object QueryGen {
     options += ((4, () => BinOpExpr(rng.oneOf(RelOps), sub(rng.oneOf(Numerics)), sub(rng.oneOf(Numerics)), DataType.BooleanType)))
     options += ((3, () => BinOpExpr(rng.oneOf(RelOps), sub(DataType.StringType), sub(DataType.StringType), DataType.BooleanType)))
     options += ((2, () => IsNullExpr(sub(ExprGen.pick(rng, ValueTypes)), rng.bool())))
-    options += ((2, () => LikeExpr(sub(DataType.StringType), LitExpr(rng.oneOf(LikePatternPool), DataType.StringType), rng.bool())))
+    options += ((2, () => genLike(rng, sub(DataType.StringType))))
     if (inCols.nonEmpty) options += ((2, () => genInList(rng, schema, rng.oneOf(inCols))))
     if (boolCols.nonEmpty) options += ((2, () => colRef(schema, rng.oneOf(boolCols))))
     // The four types the corpus once lacked, each where a column of it is in
@@ -657,7 +847,21 @@ object QueryGen {
     if (binaryCols.nonEmpty) options += ((2, () =>
       BinOpExpr(rng.oneOf(RelOps), sub(DataType.BinaryType), sub(DataType.BinaryType), DataType.BooleanType)))
     options += ((1, () => LitExpr(rng.bool(), DataType.BooleanType)))
+    // A CAST that can fail, under an IN and read as a condition itself.
+    options += ((1, () => genCastIn(rng, schema, depth)))
+    options += ((1, () => genTextCast(rng, schema, DataType.BooleanType, depth)))
     rng.weighted(options.toSeq: _*)()
+  }
+
+  /** `CAST(...) [NOT] IN (...)` over a CAST that can fail
+    * ([[genFailingCast]]), whose items are literals of its type and now and
+    * then a NULL. */
+  private def genCastIn(rng: Rng, schema: Schema, depth: Int): Expr = {
+    val target = ExprGen.pick(rng, TextCastTargets.filterNot(_ == DataType.BooleanType))
+    val items = (0 until rng.between(1, 3)).map { _ =>
+      if (rng.bool(0.15)) LitExpr(null, target) else LitExpr(genLitValue(rng, target), target)
+    }
+    InListExpr(genFailingCast(rng, schema, target, depth), items, rng.bool())
   }
 
   /** The other side of a comparison with a DATE or TIMESTAMP: an expression of
@@ -686,10 +890,15 @@ object QueryGen {
 
   /** `col [NOT] IN (...)`: literal items, a NULL now and then, and for a
     * BINARY, which has no literal, the BINARY columns in scope. A DATE or
-    * TIMESTAMP item is now and then a quoted ISO string. */
+    * TIMESTAMP item is now and then a quoted ISO string. A FLOAT or DOUBLE
+    * item is now and then NaN, -0.0 or an infinity, as SQL writes them
+    * (`CAST('NaN' AS DOUBLE)`, `-0.0`), or another column of the type, so the
+    * values `IN` once compared by bits rather than by `=` meet in it at the
+    * SQL level too. */
   private def genInList(rng: Rng, schema: Schema, colIdx: Int): Expr = {
     val col = colRef(schema, colIdx)
     val binaryCols = (0 until schema.length).filter(i => schema.fields(i).dataType == DataType.BinaryType).toVector
+    val sameType = (0 until schema.length).filter(i => i != colIdx && schema.fields(i).dataType == col.dataType).toVector
     val nItems = rng.between(1, 4)
     val items = (0 until nItems).map { _ =>
       if (rng.bool(0.15)) LitExpr(null, col.dataType)
@@ -697,15 +906,27 @@ object QueryGen {
         case DataType.BinaryType => colRef(schema, rng.oneOf(binaryCols))
         case t @ (DataType.DateType | DataType.TimestampType) if rng.bool(0.3) =>
           LitExpr(SqlRender.temporalText(genLitValue(rng, t)), DataType.StringType)
+        case t @ (DataType.FloatType | DataType.DoubleType) if rng.bool(0.4) =>
+          if (sameType.nonEmpty && rng.bool(0.3)) colRef(schema, rng.oneOf(sameType))
+          else MetaQueryGen.floatSpecialLiteral(rng.oneOf(Seq("NaN", "-0.0", "Infinity")), t)
         case t => LitExpr(genLitValue(rng, t), t)
       }
     }
     InListExpr(col, items.toSeq, rng.bool())
   }
 
+  /** `s [NOT] LIKE p` or `ILIKE`, a pattern from the ASCII pool or, a third of
+    * the time, from [[TextPool.Patterns]], whose `_` meets a character past
+    * U+FFFF and whose letters meet the pool's case pairs. */
+  private def genLike(rng: Rng, s: Expr): Expr = {
+    val pattern = if (rng.bool(0.35)) rng.oneOf(TextPool.Patterns) else rng.oneOf(LikePatternPool)
+    LikeExpr(s, LitExpr(pattern, DataType.StringType), rng.bool(), LikeSyntax(caseInsensitive = rng.bool(0.4)))
+  }
+
   // ---- literals -----------------------------------------------------------
 
-  private val StringPool = Seq("", "a", "b", "c", "d", "ab", "abc", "x", "y", "z")
+  /** `DataGen`'s values: `a` beside itself with a space at either end. */
+  private val StringPool = Seq("", " ", "a", " a", "a ", "b", "c", "d", "ab", "abc", "x", "y", "z")
   private val LikePatternPool = Seq("%", "_", "a%", "%a", "%a%", "a_c", "%", "ab%", "")
   // Non-negative: a negative numeric literal as an infix operand renders to a
   // `op -lit` sequence that does not parse paren-free. Negative VALUES still
@@ -718,7 +939,7 @@ object QueryGen {
     case DataType.FloatType => rng.oneOf(DoublePool).toFloat: Any
     case DataType.DoubleType => rng.oneOf(DoublePool): Any
     case DataType.BooleanType => rng.bool(): Any
-    case DataType.StringType => rng.oneOf(StringPool): Any
+    case DataType.StringType => (if (rng.bool(0.25)) rng.oneOf(TextPool.Values) else rng.oneOf(StringPool)): Any
     case DataType.DateType => rng.oneOf(ExprGen.DatePool): Any
     case DataType.TimestampType => rng.oneOf(ExprGen.TimestampPool): Any
     case d: DataType.DecimalType => rng.oneOf(decimalLiterals(d)): Any
@@ -818,7 +1039,7 @@ object QueryGen {
     }
   }
 
-  private val WindowKeyDomains: Seq[(DataType, Seq[Any])] = Seq(
+  private[fuzz] val WindowKeyDomains: Seq[(DataType, Seq[Any])] = Seq(
     DataType.IntType -> (-2 to 4).map(i => i: Any),
     DataType.LongType -> (-2 to 4).map(i => i.toLong: Any),
     DataType.DoubleType -> Seq[Any](-1.5, 0.0, 0.5, 1.0, 2.5, Double.NaN, Double.PositiveInfinity, Double.NegativeInfinity),
@@ -852,7 +1073,7 @@ object QueryGen {
   /** Two bounds SQL allows: a start that is not UNBOUNDED FOLLOWING, an end
     * that is not UNBOUNDED PRECEDING, and a start no later in the order of
     * kinds than its end. A RANGE offset needs an ORDER BY (`offsets`). */
-  private def genFrame(r: Rng, rows: Boolean, offsets: Boolean = true): GenFrame = {
+  private[fuzz] def genFrame(r: Rng, rows: Boolean, offsets: Boolean = true): GenFrame = {
     def offset(): java.math.BigDecimal =
       if (rows) java.math.BigDecimal.valueOf(r.between(0, 3).toLong)
       else new java.math.BigDecimal(r.oneOf(Seq("0", "1", "2", "1.5")))
@@ -879,7 +1100,11 @@ object QueryGen {
   * tree. Its type depends on what each side is (`Analyzer.arithmetic`), and a
   * regrouped reparse could join an integer column with a number, a DOUBLE,
   * which the binder refuses beside a DECIMAL. Only the parentheses precedence
-  * needs, since JSqlParser rejects some statements with three stacked ones. */
+  * needs, since JSqlParser rejects some statements with three stacked ones.
+  * A unary minus takes its operand in parentheses, `-(x)`, since two signs in
+  * a row do not parse, and so does a `NOT` over anything but a column or a
+  * literal, `NOT (a AND b)`, since the parser hangs a second `NOT` on a
+  * comparison's left side. */
 object SqlRender {
 
   def expr(e: Expr): String = e match {
@@ -887,8 +1112,15 @@ object SqlRender {
     case LitExpr(v, dt) => lit(v, dt)
     case ColRefExpr(_, name, _) => name
     case CastExpr(c, t) => s"CAST(${expr(c)} AS ${sqlType(t)})"
-    case UnaryOpExpr("NOT", c, _) => s"NOT ${expr(c)}"
-    case UnaryOpExpr("-", c, _) => s"- ${expr(c)}"
+    case DecimalCastExpr(c, t) => s"CAST(${expr(c)} AS DECIMAL(${t.precision},${t.scale}))"
+    // A NOT over anything but a leaf, and every unary minus, takes its operand
+    // in parentheses: the parser reads `NOT NOT a >= b` as `NOT ((NOT a) >=
+    // b)` and refuses `- -3`, two signs in a row.
+    case UnaryOpExpr("NOT", c, _) => c match {
+      case _: ColRefExpr | _: LitExpr => s"NOT ${expr(c)}"
+      case _ => s"NOT (${expr(c)})"
+    }
+    case UnaryOpExpr("-", c, _) => s"-(${expr(c)})"
     case UnaryOpExpr("+", c, _) => s"+ ${expr(c)}"
     case UnaryOpExpr(op, _, _) => throw new IllegalArgumentException(s"SqlRender: unknown unary op '$op'")
     case BinOpExpr(op, l, r, _: DataType.DecimalType) if ArithmeticOps(op) =>
@@ -946,10 +1178,11 @@ object SqlRender {
     case other => throw new IllegalArgumentException(s"SqlRender: no SQL type name for $other")
   }
 
-  /** A typed NULL, `CAST(NULL AS t)`. The binder reads no type name for a
-    * DECIMAL or a BINARY, so their NULL is the untyped one, which takes the type
-    * of what it meets (the other side of a comparison, COALESCE's or CASE's
-    * other values) and is NULL-typed where it meets nothing. */
+  /** A typed NULL, `CAST(NULL AS t)`. A BINARY has no CAST, and a DECIMAL's
+    * NULL is written as the untyped one too, as the generators' decimal shapes
+    * expect: it takes the type of what it meets (the other side of a
+    * comparison or of arithmetic, COALESCE's or CASE's other values) and is
+    * NULL-typed where it meets nothing. */
   private def nullLit(dt: DataType): String = dt match {
     case DataType.NullType | DataType.BinaryType | _: DataType.DecimalType => "NULL"
     case other => s"CAST(NULL AS ${sqlType(other)})"

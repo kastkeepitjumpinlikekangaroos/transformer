@@ -17,8 +17,10 @@ scala_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/csv",
         "//src/main/scala/com/transformer/read/parquet",
         "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/parse",
         "//src/main/scala/com/transformer/sql/plan",
         "//src/main/scala/com/transformer/write/parquet",
         "//src/test/scala/com/transformer/fuzz",
@@ -26,18 +28,131 @@ scala_library(
 )
 
 # Every script under src/test/slt, each a JUnit case, each query under every
-# verification mode. Four shards split the scripts between four JVMs. Part of
+# verification mode, each skipped record once in the baseline to check that
+# it still diverges as the rule its skip cites in docs/gotchas.md's ledger
+# says. Four shards split the scripts between four JVMs. Part of
 # `bazel test //...`.
 scala_junit_test(
     name = "slt_test",
     srcs = ["SltTest.scala"],
     suffixes = ["Test"],
     shard_count = 4,
-    data = ["//src/test/slt:scripts"],
+    data = [
+        "//:docs/gotchas.md",
+        "//src/test/slt:scripts",
+    ],
     deps = [
         ":slt",
         "@maven//:junit_junit",
     ],
+)
+
+# The ledger in docs/gotchas.md: its table read strictly, and against every
+# script each rule cited by a skip or pinned, each pin a record of the
+# engine's own answer in a script of this repo's own, or a file refused under
+# the rule in a fixture manifest.
+scala_junit_test(
+    name = "ledger_test",
+    srcs = ["LedgerTest.scala"],
+    suffixes = ["Test"],
+    data = [
+        "//:docs/gotchas.md",
+        "//src/test/data/csv:manifest",
+        "//src/test/data/parquet-testing:manifest",
+        "//src/test/slt:scripts",
+    ],
+    deps = [
+        ":slt",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The agreed corpus keeps its quotas (plans/testing/14, W6): each feature's
+# scripts under src/test/slt/agreed hold at least the records its quota in
+# fuzz/AgreedGen says, and each says how it was made.
+scala_junit_test(
+    name = "agreed_corpus_test",
+    srcs = ["AgreedCorpusTest.scala"],
+    suffixes = ["Test"],
+    data = [
+        "//:docs/gotchas.md",
+        "//src/test/slt:scripts",
+    ],
+    deps = [
+        ":slt",
+        "//src/test/scala/com/transformer/fuzz",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The runner over scripts written inline: a condition on transformer cites a
+# rule, a skip whose rule is no refusal has its twin, and a skipped record
+# runs once and must still diverge as its rule says; CockroachDB's and
+# DataFusion's formats, dialects and comparisons.
+scala_junit_test(
+    name = "runner_test",
+    srcs = ["RunnerTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":slt",
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The checker that holds each Postgres port to Postgres's output: an edited
+# answer named with both values, a statement error Postgres ran, a query it
+# refused; psql's statements and aligned output read on inline cases.
+scala_junit_test(
+    name = "pg_expected_test",
+    srcs = ["PgExpectedTest.scala"],
+    suffixes = ["Test"],
+    data = [
+        "//:docs/gotchas.md",
+        "//src/test/slt:scripts",
+    ],
+    deps = [
+        ":slt",
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Ports Spark's SQLQueryTestSuite golden files to the scripts under
+# src/test/slt/spark/ (docs/extending.md, "Importing a Spark test file"); the
+# scripts are vendored, so no test runs it.
+scala_binary(
+    name = "spark_import",
+    testonly = True,
+    main_class = "com.transformer.slt.SparkImport",
+    jvm_flags = ["-Xmx2g"],
+    deps = [":slt"],
+)
+
+# Checks a port of a PostgreSQL regression test against what Postgres printed,
+# its directory's expected/<name>.out, and reports every expected block that
+# says otherwise; --fill writes Postgres's values into a new port's blocks
+# (docs/extending.md, "A port of another engine's tests"). slt_test runs the
+# same check over every port under src/test/slt/postgres/.
+scala_binary(
+    name = "pg_expected",
+    testonly = True,
+    main_class = "com.transformer.slt.PgExpected",
+    deps = [":slt"],
+)
+
+# Writes src/test/slt/agreed/, the corpus of answers PostgreSQL and DuckDB
+# agree on (plans/testing/14): the fuzz generators' queries printed in the SQL
+# the three read alike (fuzz/PortableSql), run through psql and duckdb from
+# PATH as subprocesses and through the engine, and kept where the two agree
+# and the engine does too (docs/testing.md, "The agreed corpus"). Regenerating
+# needs a Postgres cluster and DuckDB, so no test runs it.
+scala_binary(
+    name = "agreed_corpus",
+    testonly = True,
+    main_class = "com.transformer.slt.AgreedCorpus",
+    jvm_flags = ["-Xmx2g"],
+    deps = [":slt"],
 )
 
 # Runs scripts given on the command line and reports every record that did

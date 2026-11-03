@@ -22,8 +22,28 @@ specific traps.
   or an escape inside a string literal), never as the raw character:
   `job/Json.scala` once held a raw NUL in a char literal, which made git, `file`
   and editing tools treat the whole file as binary. Build test text past ASCII
-  from code points (`new String(Character.toChars(0x1F600))`) for the same
-  reason.
+  from code points (`new String(Character.toChars(0x1F600))`,
+  `TextPool.text(0xdf)`) for the same reason, and never as a backslash-u
+  escape: the editing tools decode one into the raw character as they write
+  the file. Scan a diff for what slipped through with
+  `git diff -U0 | grep '^+' | perl -ne 'print if /[^\x00-\x7F]/'` (macOS
+  `grep` has no `-P`).
+- **A rule a compiled class can show is held in bytecode.**
+  `bytecode:bytecode_rules_test` reads every compiled class of the modules a
+  job runs and of the desktop GUI and the data viewer through one hand-written
+  class-file reader (`bytecode/ClassFile.scala`: the constant pool, and each
+  method's code decoded an instruction at a time, no bytecode library), and
+  holds each rule of `bytecode/BytecodeRules.scala` over them: what it bans, in
+  which modules, and the advice its failure prints with each site's source
+  line. A rule's exceptions are its allowlist, each a class, a method and the
+  reason: an entry covers the lambdas written in its method
+  (`$anonfun$<method>$1`), its local defs, default arguments and specialized
+  copies, and `*` covers a whole class. Add one only for an exception a
+  decision made, and name the decision; an entry whose method no longer does
+  what its rule bans fails the test, so an exception cannot outlive its reason.
+  A site no decision covers goes in the rule's `held` list, with why, until the
+  user decides. Each bullet here that a rule holds says which one;
+  [extending.md](extending.md#add-a-bytecode-rule) says how to add a rule.
 - **Case folding and formatting name `Locale.ROOT`.** `toLowerCase` and
   `toUpperCase` with no argument, `String.format`, an `f"..."` interpolator and
   `DateTimeFormatter.ofPattern(pattern)` read the JVM's default locale, under
@@ -32,12 +52,13 @@ specific traps.
   are not ASCII (a part file named in Thai numerals). Every such call in a module
   a job runs names `Locale.ROOT`: `name.toLowerCase(Locale.ROOT)`,
   `"part-%05d.csv".formatLocal(Locale.ROOT, i)`.
-  `job:locale_independence_test` runs under tr-TR and fails on any compiled call
-  of the default-locale forms. The desktop GUI and the data viewer fold names,
-  keywords and keys the same way, and the test scans their jars for
-  `toLowerCase()` and `toUpperCase()`; their display text may format a number in
-  the user's locale, but text something parses, such as CSS, names
-  `Locale.ROOT` too.
+  `job:locale_independence_test` runs under tr-TR, and rule R1 of
+  `bytecode:bytecode_rules_test` fails on any compiled call of the
+  default-locale forms in a module a job runs. The desktop GUI and the data
+  viewer fold names, keywords and keys the same way, and R1 (desktop) holds
+  their jars to no `toLowerCase()` or `toUpperCase()`; their display text may
+  format a number in the user's locale, but text something parses, such as
+  CSS, names `Locale.ROOT` too.
 - **No `*/` inside Scaladoc** — the Scala lexer closes the comment at the first
   `*/`. Glob examples like `data/*.csv` inside a `/** */` block are a footgun;
   use `'*'.csv` or move the example to plain prose. We hit this twice.
@@ -52,10 +73,42 @@ specific traps.
   value the writer prints is one the reader reads back; the writer depends on
   `read/csv` for it. A type a format gains gets its print, its parse and its
   inference there together, and `fuzz/csv_fuzz_test` checks they compose.
-- **Prefer dependencies on direct uses.** rules_scala uses strict-deps; if you
-  call into a type that lives in `core`, you must list `//src/main/scala/com/transformer/core`
+- **Prefer dependencies on direct uses.** rules_scala compiles a target
+  against its direct dependencies alone (the toolchain's `dependency_mode`,
+  `"direct"`, under which its strict-deps check is off): if you call into a
+  type that lives in `core`, you must list `//src/main/scala/com/transformer/core`
   even when an indirect dep already brings it in. The error message is "Symbol
-  'term com.transformer.core' is missing from the classpath."
+  'term com.transformer.core' is missing from the classpath." The other way
+  round, a dependency none of the target's sources uses fails its build (the
+  toolchain's unused-dependency checker, `"error"`): "Target ... is specified
+  as a dependency to ... but isn't used, please remove it from the deps". A
+  jar something loads only as it runs (Hadoop's mapreduce classes, slf4j's
+  binding, a launcher's JavaFX natives) goes in `runtime_deps`, with a
+  comment saying what needs it.
+- **The compiler's warnings are errors.** The Scala toolchain in the root
+  `BUILD.bazel`, which every target compiles with, fails the build on a
+  deprecation; an unused import, private member, local, pattern variable or
+  implicit parameter, and an `@nowarn` that silences nothing; a match that
+  may not be exhaustive, over a sealed type or, with no catch-all, over one
+  that is not; a string literal holding `$name` or `${...}` with no
+  interpolator; a pattern variable named as a term already in scope; and, in
+  main code, a statement whose value nothing reads (`-Wnonunit-statement`):
+  drop one on purpose with `val _ = ...`, or in a class body with `: Unit`, as
+  `val _` there makes a field. `-Werror` makes any other warning scalac gives
+  (an unchecked type pattern, a feature) an error too, so a build never
+  prints one: Bazel prints a warning only when its target compiles, which a
+  cached target never does again. To keep one deliberate warning, annotate
+  the site `@nowarn("cat=<category>")` (`scala.annotation.nowarn`) with a
+  comment saying why; the error's "Applicable -Wconf / @nowarn filters" line
+  names the category. Off: unused explicit parameters (one is often part of a
+  call shape, `Ops.apply`'s), and the checks that say nothing about this code
+  — `-Wtostring-interpolated` (numbers in messages), `-Wnumeric-widen`,
+  `-Wvalue-discard`, `-Wperformance` (a `var` a closure captures),
+  `-Xlint:infer-any` (JUnit's `assertEquals(Object, Object)`) and
+  `-Xlint:nonlocal-return` (`getOrElse(return)` in GUI handlers). Tests may
+  drop a value: a fixture made for what making it writes, a drained iterator.
+  `bazel build //... --extra_toolchains=//:scala_toolchain_all_warnings`
+  prints every warning, none fatal ([testing.md](testing.md)).
 - **The GUI's session state builds without JavaFX.** `JobSession` and
   `DagLayout` are their own target, `//src/main/scala/com/transformer/gui:session`,
   with no JavaFX dependency; `gui` exports it, so a panel sees it as before. Keep
@@ -158,8 +211,23 @@ specific traps.
   them when adding a type, or a construct whose answer is one of its values.
   A construct that reads a truth value takes a BOOLEAN through
   `Analyzer.condition`, never an implicit cast to one, and a function declares
-  what each of its arguments must be beside its arity (`Funcs.signature`), so
-  nothing is read as the type a function wanted.
+  what each of its arguments must be beside its arity (its `FunctionCatalog`
+  entry), so nothing is read as the type a function wanted.
+- **A rule change regenerates its semantics tables in the same commit.** The
+  tables under `src/test/semantics/` ([testing.md](testing.md#semantics-tables))
+  list every case of the typing rules and functions; a commit that changes one
+  runs `bazel run //src/test/scala/com/transformer/sql/plan:semantics_tables --
+  --update` and commits the diff with the change, so the review sees every cell
+  the rule reaches and no other. A table's first generation is reviewed cell
+  by cell, never accepted wholesale.
+- **A function is one entry of `FunctionCatalog`, and the binder matches no
+  function's name.** `LogicalBuilder`, `UnsupportedClauses`, `Analyzer` and
+  `PlanValidator` look a call up by name and act on what its entry says (its
+  kind, parameters, arities, result rule, `DISTINCT`, window and random
+  flags), so a function added, renamed or given an alias changes one entry,
+  the README's lists (`function_catalog_test`), and nothing else. A second
+  list of names, in the binder or a generator, is the bug this rule exists to
+  prevent.
 - **A failure the user caused is an `IllegalArgumentException` in SQL's words,
   raised at bind time unless a value causes it.** Never an internal exception
   class (`UnsupportedOperationException`, `IllegalStateException`, a
@@ -177,6 +245,37 @@ specific traps.
   `oracle/CleanRejection` (`fuzz/frontend_fuzz_test`) holds every failure to
   this; its known defects are where the engine does not yet
   ([plans/robustness/14](../plans/robustness/14-pathological-nesting.md)).
+- **The engine is a library: it does not print, exit or sleep.** What a run
+  meets that does not fail it is a warning in its result and its `job.json`
+  (`JobResult.warnings`; a warning never fails a run, plans/robustness/08), and
+  what fails it is an exception or a task's status: never a line on standard
+  output or error, which a program embedding the engine can neither see nor
+  silence. A cloud `jobRunOutput`, which v1 does not write, is such a warning.
+  The engine never ends the JVM and never sleeps to wait for something. Rule
+  R7 of `bytecode:bytecode_rules_test` holds the engine to no `System.out` or
+  `err`, `println`, `printStackTrace`, `System.exit`, `Runtime.halt` or
+  `Thread.sleep`; the fault hook's armed halt (`Faults.fire`, plans/testing/06)
+  is its decided exception, and the leak audit's exit report is held for the
+  user. The CLI and the examples print and exit.
+- **A reader of a file format refuses in its own words, naming the file.**
+  A library's exception never reaches the caller as itself: the reader
+  catches what its library throws, says what is wrong with the file in the
+  file's terms (its column, row group, encoding, codec), names the file
+  first (`Parquet file 'x.parquet' ...`, as `CSV file 'x.csv' line 2 ...`),
+  and keeps the library's exception as the cause, never in the message. Its
+  own refusals are a class of its own (`ParquetReader.Unreadable`, an
+  `IllegalArgumentException`), so a wrapper never wraps them again; a value
+  past what the engine holds stays an `ArithmeticException`
+  (`ParquetReader.OutOfRange`), a failure on the data.
+- **Vendored data says where it came from and how its expectations were
+  made.** A directory of another project's files (`src/test/slt/postgres/`,
+  `src/test/data/parquet-testing/`) carries the upstream licence, and a
+  README or COPYRIGHT naming the repository and the commit, what was taken
+  and what was left out, and how each expected answer was made: copied from
+  the other project, or the engine's own frozen after another reader agreed
+  with it. Nothing in it is edited; what the engine does with each file is
+  said beside it (a script's conditions, a fixture's manifest line), never by
+  changing the file.
 - **A literal is its value and a name is what it names, read from what was
   written, never from a getter that lost part of it.** JSqlParser keeps both as
   text: a string literal with each quote doubled (`StringValue.getValue`; the
@@ -203,7 +302,30 @@ specific traps.
   reads a key to route a row, and the breaker that reads it again, see two
   different values. Keep such a key on a path that reads it once, and bind a
   construct that reads an operand more than once (a simple CASE, BETWEEN) to
-  a node that reads it once when it reads `RAND()`.
+  a node that reads it once when it reads `RAND()`. `RAND()` is the engine's
+  one random source, and rule R6 of `bytecode:bytecode_rules_test` holds it so:
+  no `Random`, `ThreadLocalRandom`, `SplittableRandom`, `Math.random` or
+  `UUID.randomUUID` in a module a job runs but in `Funcs`' `RAND()`, since a
+  second source would not be kept off those paths.
+- **A query's answer does not read the wall clock.** `CURRENT_DATE` and
+  `CURRENT_TIMESTAMP` read the statement's start once, as it binds
+  (`LogicalBuilder.build`), a job's templates read its execution time
+  (`TemporalVariables`, now unless given), and a run's records stamp when
+  things happened (`DataJob`). A clock read anywhere else, inside an operator
+  or a function, would make an answer move with the time it runs; rule R5 of
+  `bytecode_rules_test` holds the modules a job runs to no
+  `System.currentTimeMillis`, `java.time` `now()` or `Clock.system*` but in
+  those places, the CLI's default execution time and the GUI session's.
+  `System.nanoTime`, for a duration, is not a clock read.
+- **Text names its charset, and a time its zone.** A file is read and written
+  in a charset the code names (UTF-8 almost everywhere), and a time is placed
+  in a zone the code names (UTC: every template variable is), never the JVM's
+  default, which is the machine's. Rule R10 of `bytecode_rules_test` holds
+  every module, the desktop's too, to no `String.getBytes()`, `new
+  String(bytes)`, reader, writer or `PrintStream` made without a charset,
+  `Charset.defaultCharset`, `TimeZone.getDefault`, `ZoneId.systemDefault` or
+  `Clock.systemDefaultZone`; `--config=zone` holds the zone only where a test
+  reaches.
 - **A column's type is shown as `DataType.sqlName` spells it** (`BIGINT`,
   `DECIMAL(10,2)`), in every grid, listing and table header: the job GUI's, the
   data viewer's and `transformer query`'s. `DataType.name` (`long`) is the
@@ -276,7 +398,7 @@ specific traps.
   the other way around. On floating-point operands, `NaN` / `-0.0` parity
   too: equality and ordering both go through `Ops.floatCompare`, in both
   paths, so a vectorized helper may not reach for the raw `<` or `==` just
-  because the operands are `double`. Two integers
+  because the operands are `double` (rule R2, below). Two integers
   compare as longs and a decimal exactly, in both paths, so neither may be
   read through `readDouble`. The
   property-based `ExprParityFuzzTest` is the generative net over that gate;
@@ -298,7 +420,15 @@ specific traps.
   at a new sort site), `Funcs.pickByOrdering` and `MinMaxState`'s accumulator
   are all ordering sites,
   and `MinMaxState`'s was the one that reached for the raw `<` because its slot
-  was a primitive. Every comparison against `NaN` is false in both directions,
+  was a primitive. Rule R2 of `bytecode:bytecode_rules_test` holds the float
+  half in the engine: no `Double.compare`, `Float.compare`, `compareTo` or
+  `equals` on a boxed float, and no raw `<`, `<=`, `>`, `>=`, `==` or `!=`
+  between two float or double values (one against a constant, `x > 0.0`, is
+  allowed), but in `Ops.floatCompare` and the decided exceptions in its
+  allowlist: `MinMaxState`'s and `pickByOrdering`'s tie-break, and comparisons
+  of no SQL value (an exponent's integrality, two row estimates, JSON
+  numbers). Rule R4 holds the string half: no `String.compareTo` or `<` on
+  strings in the engine but in `Ops.cmp`. Every comparison against `NaN` is false in both directions,
   so a raw `<` silently makes the answer depend on the order values arrive in.
   An accumulator makes that worse than an expression does: it also depends on
   partition fan-out and spill flush order, which no `eval`/`evalVec` parity gate
@@ -330,7 +460,11 @@ specific traps.
   as surely as a hash map would. A float keys and hashes as
   `KeyCodec.floatKeyBits` / `floatKeyValue`, `-0.0` as `0.0`
   ([architecture.md §2a](architecture.md#2a-keycodec--packed-keys-for-pipeline-breakers));
-  its raw bits and `Double.equals` separate two values `=` calls equal.
+  its raw bits and `Double.equals` separate two values `=` calls equal. Rule R3
+  of `bytecode_rules_test` holds that half: no `doubleToLongBits`,
+  `floatToIntBits` or their raw forms in the engine but in
+  `KeyCodec.floatKeyBits` / `doubleKeyBits` and `HashPartitioner.decimalHash`
+  (a decimal's double, which equal decimals share).
 - **Integer arithmetic goes through `Integers`.** An INT or BIGINT result
   past its type is an error naming the operation (`Integers` in `Ops.scala`),
   on the row path, in `VecOps`' loops, in `ABS` and in every CAST to an
@@ -344,7 +478,10 @@ specific traps.
   `toEpochDay.toInt` and `getEpochSecond * 1000000L` wrap it round to another
   date. A CAST checks its result the same way (`Casts.storable`), since on the
   row path the value stays a `LocalDate` or an `Instant`, which reach further
-  than the column it lands in.
+  than the column it lands in. Rule R9 of `bytecode_rules_test` holds the way
+  in: no `toEpochDay`, `getEpochSecond`, `getNano` or `ChronoUnit.between` in
+  the engine but in those two. The way out (`LocalDate.ofEpochDay` for a
+  value's text) and a duration (`toEpochMilli`) are not banned.
 - **A decimal result is computed exactly and fitted to its declared type,
   once.** An operation or aggregate that produces a `DECIMAL` declares its type
   through `Decimals` (`resultType`, `sumType`, `avgType`, or a rule of the same
@@ -404,7 +541,11 @@ specific traps.
   planning), so no worker ever parks on exchange readiness — the K>1 liveness
   fix (plans/bugfixes/02f). Two obligations follow: (a) a new physical operator
   with children needs a `PhysicalPlanner.childrenOf` branch (a missed branch
-  silently exempts its subtree's exchanges from the pass); (b) a new
+  silently exempts its subtree's exchanges from the pass), and every new
+  operator a branch in the plan walk's `wrapChildren`, which rebuilds it over
+  its metered and verified children (under `--config=verify` an operator with
+  none fails the walk, and `sql/exec:verify_test` fails until a query there
+  builds it); (b) a new
   exchange-like structure — any once-computed result that multiple pool tasks
   might wait on — must either be wired into the pass or be published eagerly
   before pool tasks can reach it (CTE materialization is the in-tree exemplar).
@@ -412,6 +553,31 @@ specific traps.
   the 02e wedge (`sql/exec:exchange_deadlock_stress_test` with `STRESS_LAZY=1`
   demonstrates it on demand).
 
+- **Whatever a query opens it releases, however its reader stops** (the close
+  protocol, architecture §3h). A new resource (a file a reader or writer
+  opens, a directory) registers with `LeakAudit` when it opens and leaves when
+  it closes, and its holder is `AutoCloseable`. A new operator's output closes
+  its inputs (`Closing.over`), an operator that stops reading an input early
+  closes it, a pool task that drains an input does so inside
+  `Closing.draining` or a `try ... finally Closing.close(it)`, and a breaker
+  that fails releases its spill directory. A consumer of an `ExecutedQuery`
+  closes it in a `finally`. `--config=leaks` fails a target whose JVM leaves
+  anything open. A new handoff between threads (a queue, a latch, a
+  submission, a publish) gets a chaos point (`Chaos.at`, architecture §3i), so
+  `--config=chaos` perturbs it.
+
+- **A setting is read through `Settings`.** Everything the engine reads from
+  outside the program, for the whole JVM, is an entry of `core/Settings.scala`:
+  a system property `transformer.<name>` and its environment twin
+  `TRANSFORMER_<NAME>`, the property winning, with its default and how its
+  value parses (a whole number that does not read is the default, a flag is
+  on at `true` or `1`). Its owner reads it once, `Settings.X.get` in an
+  object's `val`, and README's "Settings" table has its row
+  (`core:settings_test` holds the table to `Settings.All`). Rule R8 of
+  `bytecode:bytecode_rules_test` holds the engine to no other
+  `System.getProperty`, `System.getenv`, `Boolean.getBoolean`, `sys.props` or
+  `sys.env`, and no `transformer.*` or `TRANSFORMER_*` name outside
+  `Settings`; [extending.md](extending.md#add-a-setting) has the recipe.
 - **A test that depends on a JVM-wide default says so.** The whole suite also
   runs at a batch capacity of 1 and 2 rows, sharded, on one thread and in
   another time zone and locale (`--config=batch1` and the rest,
@@ -424,11 +590,57 @@ specific traps.
   it decides, with their expected results checked by hand, in
   `src/test/slt/<area>/`, so every mode is held to them (`slt/slt_test`);
   `--complete` fills a new script's results from the engine, for checking.
+- **Every skip cites a rule of the ledger.** A record of another engine's
+  answer that the engine does not give is `skipif transformer <id>`, the id of
+  its rule in the ledger in gotchas.md ("Answers that differ from other engines
+  by design"), never a reason in free text, and one whose rule is no refusal is
+  followed by its twin, the engine's own answer. A rule no decision covers gets
+  no id: its records stay out of the script as a finding. The commit that
+  decides a new rule adds its row and its pin, `onlyif transformer <id>` before
+  a record of the engine's answer in a script of this repo's own. A skip that
+  no longer diverges fails `slt_test`, so it goes when the engine changes.
+- **Vendored tests carry their license and provenance.** A port of another
+  project's tests (`src/test/slt/postgres/`, `src/test/slt/spark/`) keeps the
+  project's license text and notice in its directory (`COPYRIGHT`; `LICENSE`
+  and `NOTICE`), and each script's header names the source file, the commit it
+  was taken at, and that every answer is the other engine's. A script a
+  converter writes (`spark/`, by `slt:spark_import`) says so in its header and
+  is changed by changing the converter and regenerating, never by hand.
 - **Every file of a glob is read by its own column names.** A parquet file by
   its footer's, a CSV file by its header's, matched to the first file's names
   regardless of case; a file that names other columns is refused, naming both.
   Reading by position read one column's values into another wherever two
   files ordered them differently.
+- **A writer never publishes a part file before its task commits.** A part is
+  staged under a hidden name and renamed only once every partition of the
+  write has succeeded, and only after a `Running` record marks the directory
+  (`job/OutputDirectory.scala`, architecture.md §3a). A new writer of an output
+  directory goes through `OutputDirectory`, never straight to
+  `writePartitioned`, and a new output format's writer stages and commits as
+  `CsvWriter` does (extending.md).
+- **A record is replaced before any file it names is deleted.** Every record a
+  run writes replaces the one before it in one rename (`TaskRunRecord.write`),
+  and the files go after: `TaskRunRecord.clear` leaves the record. So a run
+  stopped at any point leaves a record that says what the directory holds, or
+  `Running`, which says to trust none of it, and never a part file that no
+  record names. A final record that cannot be written fails its task; it is
+  the commit. A run that ends without output marks the directory `Running`
+  before it deletes anything there, as one that writes does
+  (`OutputDirectory.settle`).
+- **Every disk change a run makes is a fault point.** A new write or deletion
+  in an output directory calls `Faults.at` first, per file, and joins
+  `Faults.Points` (extending.md "Add a fault point"), so the fault matrices and
+  the DAG fuzzer stop a run there.
+- **A surviving mutant gets a test or a ledger line.** A mutant a campaign
+  runs (testing.md, "Mutation testing") that no test kills gets a test that
+  kills it, in the target nearest the code (a unit test, or an slt record for
+  SQL semantics), which passes at HEAD and fails with the mutant applied; or,
+  when it changes no behaviour, a line in `tools/mutation/equivalent.tsv` with
+  the reason. A survivor is never killed by changing `src/main`: one that
+  reveals a defect is written up with a repro, for a decision, before any
+  test that would fail on it lands. No more than a quarter of a file's
+  survivors go to the ledger; a file that seems to need more is a sign the
+  reasons are wrong.
 
 ## Counter discipline
 

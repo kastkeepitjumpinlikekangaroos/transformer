@@ -103,7 +103,7 @@ object AddValidationDialog {
         } else {
           JobFiles.validateViewName(name).left.foreach(reason =>
             throw new IllegalArgumentException(reason))
-          JobFiles.addValidation(jobDir, tableViewName, name.trim, sql)
+          val _ = JobFiles.addValidation(jobDir, tableViewName, name.trim, sql)
         }
       } catch {
         case NonFatal(e) =>

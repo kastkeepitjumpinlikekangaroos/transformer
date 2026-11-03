@@ -1,6 +1,5 @@
 package com.transformer.slt
 
-import com.transformer.slt.Runner._
 import org.junit.Assert._
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -12,13 +11,19 @@ import scala.jdk.CollectionConverters._
 
 /** Every sqllogictest script under `src/test/slt`, one JUnit case each.
   *
-  * A script under `src/test/slt/sqlite/` is a file of SQLite's corpus, read
-  * in [[Dialect.Sqlite]]; every other script is read in
-  * [[Dialect.Transformer]]: this repo's own, or under `postgres/` a port of
-  * PostgreSQL's regression tests with Postgres's answers. Either way each record must pass: a record the
-  * engine answers differently by design carries `skipif transformer` and a
-  * comment saying why. Every query also runs under each verification mode
-  * ([[Modes.Verification]]) and must print what the baseline printed.
+  * A script is read in the dialect of its directory ([[Dialect.forPath]]):
+  * under `sqlite/` a file of SQLite's corpus, under `cockroach/` one of
+  * CockroachDB's logic tests, under `datafusion/` one of DataFusion's, under
+  * `tpch/` RisingWave's TPC-H queries; every other script in
+  * [[Dialect.Transformer]], this repo's own, or under `postgres/` and `spark/`
+  * a port of PostgreSQL's or Spark's tests with their answers. Either way each record must pass: a record the
+  * engine answers differently by design carries `skipif transformer <id>`,
+  * the id of its rule in the ledger in `docs/gotchas.md` ([[Ledger]]), and
+  * fails the script once it no longer diverges as the rule says. Every query
+  * also runs under each verification mode ([[Modes.Verification]]) and must
+  * print what the baseline printed. A port of Postgres's tests is also held to
+  * Postgres's own output beside it ([[PgExpected]]): an expected block that
+  * says other than Postgres printed fails the script.
   *
   * Set `SLT_FILTER` to a substring of a script's path to run only those
   * scripts.
@@ -27,9 +32,10 @@ import scala.jdk.CollectionConverters._
 class SltTest(name: String, path: Path) {
 
   @Test def scriptPasses(): Unit = {
-    val dialect = if (name.startsWith("sqlite/")) Dialect.Sqlite else Dialect.Transformer
-    val result = new Runner(dialect).run(name, path)
+    val result = new Runner(Dialect.forPath(name), SltTest.ledger).run(name, path)
     val problems = result.problems
+    val differences = if (name.startsWith("postgres/")) PgExpected.check(name, path, SltTest.ledger) else Vector.empty
+    assertTrue(s"$name says other than Postgres printed:\n  ${differences.mkString("\n  ")}", differences.isEmpty)
     if (problems.nonEmpty || result.stoppedAt.isDefined) {
       val shown = problems.take(10).map { r =>
         val sql = r.record match {
@@ -37,7 +43,7 @@ class SltTest(name: String, path: Path) {
           case s: Script.Statement => s.sql
           case _ => ""
         }
-        s"  line ${r.record.line}: ${r.outcome}\n    ${sql.replace("\n", "\n    ")}"
+        s"  line ${r.record.line}: ${Runner.show(r.outcome)}\n    ${sql.replace("\n", "\n    ")}"
       }
       fail(s"${result.summary}\n${shown.mkString("\n")}" +
         (if (problems.length > 10) s"\n  ... and ${problems.length - 10} more" else ""))
@@ -55,6 +61,9 @@ object SltTest {
   /** Where the scripts are: the runfiles tree under Bazel, the source tree
     * otherwise. */
   private val Root: Path = Paths.get("src/test/slt")
+
+  /** The ledger every script's conditions on transformer cite. */
+  private lazy val ledger: Ledger = Ledger.load(Ledger.DefaultPath)
 
   @Parameters(name = "{0}")
   def scripts(): java.util.Collection[Array[AnyRef]] = {

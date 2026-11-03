@@ -37,6 +37,89 @@ class SqlEngineTest {
     buf.toSeq
   }
 
+  // ---- Found by --config=verify and decided by plans/testing/17 ---------
+
+  /** A view built in Scala over `rows` of one column `s` of `t`. */
+  private def scalaView(t: DataType, rows: Any*): Catalog = {
+    val schema = Schema(Vector(Field("s", t)))
+    val b = new ColumnarBatch(schema, math.max(1, rows.size))
+    rows.zipWithIndex.foreach { case (v, r) => b.column(0).setBoxed(r, v) }
+    b.setNumRows(rows.size)
+    catalogWith("v" -> new CatalogView {
+      def schema: Schema = b.schema
+      def numPartitions: Int = 1
+      def readPartition(p: Int): Iterator[ColumnarBatch] = Iterator.single(b)
+    })
+  }
+
+  /** A UNION ALL's result is named as its left side is, and so is every
+    * batch of it: the right side's batches kept the right side's names, so
+    * `CsvWriter` refused them ("Batch schema Schema(k:int?) does not match
+    * writer schema Schema(x:int?)"). */
+  @Test def aUnionAllsBatchesCarryItsNamesAndWriteAsCsv(): Unit = {
+    val t = tmpCsv("t.csv", "a,b\n1,x\n2,y\n")
+    val u = tmpCsv("u.csv", "k,n\n3,z\n")
+    val c = new Catalog
+    c.register("t", CsvReader.fromPath(t.toString, CsvOptions()))
+    c.register("u", CsvReader.fromPath(u.toString, CsvOptions()))
+    val q = SqlEngine.execute("SELECT a AS x FROM t UNION ALL SELECT k FROM u", c)
+    val dir = Files.createTempDirectory("sql-engine-union-")
+    val written = com.transformer.write.csv.CsvWriter.writePartitioned(dir, q.schema,
+      (0 until q.numPartitions).map(q.partition))
+    assertEquals(3L, written.rows)
+    val back = SqlEngine.execute("SELECT x FROM r ORDER BY x",
+      catalogWith("r" -> CsvReader.fromPath(dir.toString, CsvOptions())))
+    assertEquals(Seq(1, 2, 3), collectAllRows(back).map(_("x")))
+    val again = SqlEngine.execute("SELECT a AS x FROM t UNION ALL SELECT k FROM u", c)
+    again.batches.foreach(b => assertEquals(Vector("x"), b.schema.fieldNames))
+  }
+
+  /** ABS(NULL) is NULL of the NULL type, its vector one of NULLs: it was a
+    * DOUBLE vector under a column declared NULL. */
+  @Test def absOfNullIsANullColumn(): Unit = {
+    val q = SqlEngine.execute("SELECT ABS(NULL) AS x", new Catalog)
+    assertEquals(DataType.NullType, q.schema.fields.head.dataType)
+    val b = q.batches.next()
+    assertEquals(DataType.NullType, b.column(0).dataType)
+    assertTrue(b.column(0).isNull(0))
+  }
+
+  /** Half a surrogate pair is no text (decision 2 of plans/testing/17): SQL
+    * passed through the Scala API, as a Java string, can hold one in a
+    * literal, and the literal is refused. */
+  @Test def aStringLiteralHoldingHalfASurrogatePairIsRefused(): Unit = {
+    val half = s"ab${0xd800.toChar}"
+    val e = assertThrows(classOf[IllegalArgumentException], () => { val _ = SqlEngine.execute(s"SELECT '$half' AS s", new Catalog) })
+    assertEquals("The string literal 'ab\\ud800' holds half a surrogate pair, U+D800 at char 2, which is no text",
+      e.getMessage)
+    val esc = assertThrows(classOf[IllegalArgumentException], () => {
+      val _ = SqlEngine.execute(s"SELECT 'x' LIKE 'x' ESCAPE '${0xdc00.toChar}' AS m", new Catalog)
+    })
+    assertTrue(esc.getMessage, esc.getMessage.contains("holds half a surrogate pair, U+DC00"))
+    val whole = s"a${0xd83d.toChar}${0xde00.toChar}"
+    val q = SqlEngine.execute(s"SELECT '$whole' AS s", new Catalog)
+    assertEquals(whole, q.batches.next().column(0).getBoxed(0))
+  }
+
+  /** A view built in Scala can hold half a surrogate pair, and is refused:
+    * a [[MaterializedView]] when it is built, a view of one's own when a
+    * scan reads it, naming the column and row. */
+  @Test def aViewBuiltInScalaHoldingHalfASurrogatePairIsRefused(): Unit = {
+    val half = s"x${0xdbff.toChar}"
+    val schema = Schema(Vector(Field("s", DataType.StringType)))
+    val b = new ColumnarBatch(schema, 2)
+    b.column(0).setBoxed(0, "fine")
+    b.column(0).setBoxed(1, half)
+    b.setNumRows(2)
+    val built = assertThrows(classOf[IllegalArgumentException], () => { val _ = new MaterializedView(schema, IndexedSeq(IndexedSeq(b))) })
+    assertTrue(built.getMessage, built.getMessage.startsWith("Column 's' of a view built in Scala, row 1 of a batch: 'x\\udbff' holds half a surrogate pair, U+DBFF at char 1"))
+    val scanned = assertThrows(classOf[IllegalArgumentException], () =>
+      SqlEngine.execute("SELECT UPPER(s) AS u FROM v", scalaView(DataType.StringType, "ok", half)).batches.foreach(_ => ()))
+    assertTrue(scanned.getMessage, scanned.getMessage.startsWith("Column 's' of a view built in Scala, row 1 of a batch"))
+    val fine = SqlEngine.execute("SELECT s FROM v", scalaView(DataType.StringType, "ok", s"${0xd83d.toChar}${0xde00.toChar}"))
+    assertEquals(2, collectAllRows(fine).size)
+  }
+
   @Test def selectStarReturnsAllRows(): Unit = {
     val p = tmpCsv("a.csv", "id,name\n1,alice\n2,bob\n3,charlie\n")
     val cat = catalogWith("t" -> CsvReader.fromPath(p.toString, CsvOptions()))
@@ -3046,6 +3129,54 @@ class SqlEngineTest {
       overflow("SELECT SUM(b) AS v FROM tb"))
   }
 
+  /** `CAST(x AS DECIMAL(p,s))` and `NUMERIC(p,s)`: a number rounded half up
+    * to the scale and an error past the precision, a number written in the
+    * query read as the decimal it is written as, text read now when it is a
+    * literal, and the cast's type the one arithmetic types its result from.
+    * A DECIMAL short of its precision or scale, or past their range, is
+    * refused, naming what to write; a date is no number. */
+  @Test def castToDecimalFitsTheValueToTheType(): Unit = {
+    val cat = decimalArithCatalog()
+    def typed(expr: String): (DataType, Seq[Any]) = typedColumn(s"SELECT id, $expr AS v FROM ta ORDER BY id", cat)
+    def d(p: Int, s: Int): DataType = DataType.DecimalType(p, s)
+    assertEquals((d(3, 1), Seq(dec("1.3"), dec("-2.5"), null)), typed("CAST(a AS DECIMAL(3,1))"))
+    assertEquals((d(38, 10), Seq(dec("0.0001000000"), dec("3.0000000000"), dec("0.3333000000"))), typed("CAST(c AS NUMERIC(38, 10))"))
+    assertEquals((d(4, 0), Seq(dec("3"), dec("0"), dec("7"))), typed("CAST(i AS DECIMAL(4,0))"))
+    assertEquals((d(5, 2), Seq(dec("0.50"), dec("1.50"), null)), typed("CAST(d AS decimal(5, 2))"))
+    // The cast's type is what arithmetic reads: DECIMAL(4,1) * DECIMAL(10,0),
+    // over 0.881, 30.88 and 4.213 rounded to 0.9, 30.9 and 4.2.
+    assertEquals((d(15, 1), Seq(dec("2.7"), dec("0.0"), dec("29.4"))),
+      typed("CAST(c * 10 + 0.88 AS DECIMAL(4,1)) * i"))
+    // Written numbers keep every digit, where a DOUBLE keeps about seventeen.
+    assertEquals((d(38, 37), Seq.fill(3)(dec("1.0000000000000000000000000000000000001"))),
+      typed("CAST(1.0000000000000000000000000000000000001 AS DECIMAL(38,37))"))
+    assertEquals((d(5, 2), Seq.fill(3)(dec("2.68"))), typed("CAST(2.675 AS DECIMAL(5,2))"))
+    assertEquals((d(3, 2), Seq.fill(3)(dec("-0.01"))), typed("CAST(-0.005 AS DECIMAL(3,2))"))
+    assertEquals((d(5, 1), Seq.fill(3)(dec("-150.0"))), typed("CAST('-1.5e2' AS DECIMAL(5,1))"))
+    assertEquals((d(4, 2), Seq.fill(3)(dec("1.00"))), typed("CAST(TRUE AS DECIMAL(4,2))"))
+    assertEquals((d(4, 2), Seq.fill(3)(null)), typed("CAST(NULL AS DECIMAL(4,2))"))
+    def runError(sql: String): String =
+      try { collectAllRows(SqlEngine.execute(sql, cat)); fail(s"$sql ran"); "" }
+      catch { case e: ArithmeticException => e.getMessage }
+    assertEquals("Decimal overflow: 123.45 does not fit decimal(4,2)", runError("SELECT CAST(123.45 AS DECIMAL(4,2)) AS v FROM ta"))
+    assertEquals("Decimal overflow: 10000000000 does not fit decimal(10,0)", runError("SELECT CAST(l AS DECIMAL(10,0)) AS v FROM ta"))
+    assertEquals("Cannot cast NaN to decimal(4,2)",
+      try { collectAllRows(SqlEngine.execute("SELECT CAST(CAST('NaN' AS DOUBLE) AS DECIMAL(4,2)) AS v FROM ta", cat)); "" }
+      catch { case e: IllegalArgumentException => e.getMessage })
+    // Text that is no number, or too long for the type, fails before the query runs.
+    assertEquals("Cannot cast '1e9' to decimal(5,1)", bindRejection("SELECT CAST('1e9' AS DECIMAL(5,1)) AS v FROM ta", cat))
+    assertEquals("Cannot cast 'ten' to decimal(5,1)", bindRejection("SELECT CAST('ten' AS DECIMAL(5,1)) AS v FROM ta", cat))
+    val bare = "A CAST to DECIMAL names its precision and scale: write DECIMAL(p,s), with p digits in all (1 to 38) " +
+      "and s of them after the point (0 to p)"
+    assertEquals(bare, bindRejection("SELECT CAST(a AS DECIMAL) AS v FROM ta", cat))
+    assertEquals(bare, bindRejection("SELECT CAST(a AS DECIMAL(10)) AS v FROM ta", cat))
+    assertEquals(bare.replace("DECIMAL", "NUMERIC"), bindRejection("SELECT CAST(a AS numeric) AS v FROM ta", cat))
+    for ((p, s) <- Seq((39, 2), (0, 0), (5, 6)))
+      assertEquals(s"DECIMAL($p,$s) is no DECIMAL: one has 1 to 38 digits in all, its precision, and 0 to that many " +
+        "after the point, its scale", bindRejection(s"SELECT CAST(a AS DECIMAL($p,$s)) AS v FROM ta", cat))
+    assertEquals("Cannot cast DATE to DECIMAL(5,2)", bindRejection("SELECT CAST(DATE '2026-01-01' AS DECIMAL(5,2)) AS v FROM ta", cat))
+  }
+
   /** Arithmetic on NULL alone is NULL. A projection or a WHERE, which run on
     * the vector path, threw `IllegalStateException: Arithmetic on null not
     * supported` (and `Unary - on null`), and so did an aggregate over one. A
@@ -3068,9 +3199,6 @@ class SqlEngineTest {
     val queries = Seq(
       "SELECT g, SUM(k) AS s, AVG(k) AS v FROM tm GROUP BY g ORDER BY 2",
       "SELECT id, a * c AS p, a / 3 AS q FROM ta ORDER BY 2, 1")
-    val prevProp = System.getProperty(Spill.SpillDirProperty)
-    val tmp = Files.createTempDirectory("sqlengine-decimal-arith-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
     try {
       for (sql <- queries) {
         def run(opts: ExecutionOptions): Seq[Map[String, Any]] = collectAllRows(SqlEngine.execute(sql, cat, opts))
@@ -3078,10 +3206,7 @@ class SqlEngineTest {
         assertTrue(s"expected a non-empty result: $sql", expected.nonEmpty)
         assertEquals(sql, expected, run(ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))))
       }
-    } finally {
-      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
-      else System.setProperty(Spill.SpillDirProperty, prevProp)
-    }
+    } finally assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
   }
 
   // ---- Values that become one result ----------------------------------------
@@ -3261,9 +3386,6 @@ class SqlEngineTest {
       "SELECT DISTINCT id, COALESCE(k, w * w) AS v FROM t",
       "SELECT i, SUM(IF(id = 1, k, k * w)) AS s, MAX(CASE WHEN id = 3 THEN k ELSE k * w END) AS m FROM t GROUP BY i",
       "SELECT id, LAG(k, 1, 0.125) OVER (PARTITION BY i ORDER BY id) AS v FROM t")
-    val prevProp = System.getProperty(Spill.SpillDirProperty)
-    val tmp = Files.createTempDirectory("sqlengine-branch-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
     try {
       for (sql <- queries) {
         def run(opts: ExecutionOptions): Seq[String] =
@@ -3272,10 +3394,7 @@ class SqlEngineTest {
         assertTrue(s"expected a non-empty result: $sql", expected.nonEmpty)
         assertEquals(sql, expected, run(ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))))
       }
-    } finally {
-      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
-      else System.setProperty(Spill.SpillDirProperty, prevProp)
-    }
+    } finally assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
   }
 
   /** Two BIGINTs compare as longs. They compared as doubles, which cannot
@@ -3369,17 +3488,11 @@ class SqlEngineTest {
     val expected = run(ExecutionOptions.Default).sorted
     // Isolate spill output under a throwaway dir (spill is otherwise unused in
     // this test class, so the lazy Spill.rootDir initializes here).
-    val prevProp = System.getProperty(Spill.SpillDirProperty)
-    val tmp = Files.createTempDirectory("sqlengine-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
     try {
       val actual = run(ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L))).sorted
       assertTrue("expected a non-empty result", expected.nonEmpty)
       assertEquals(expected, actual)
-    } finally {
-      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
-      else System.setProperty(Spill.SpillDirProperty, prevProp)
-    }
+    } finally assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
   }
 
   /** Every spilling operator writes its working set to parquet and reads it
@@ -3414,9 +3527,6 @@ class SqlEngineTest {
       "SELECT DISTINCT d FROM t" -> false,
       "SELECT a.k, b.k AS k2, a.d FROM t a JOIN t b ON a.d = b.d" -> false,
       "SELECT k, d, ROW_NUMBER() OVER (PARTITION BY d ORDER BY k) AS rn FROM t" -> false)
-    val prevProp = System.getProperty(Spill.SpillDirProperty)
-    val tmp = Files.createTempDirectory("sqlengine-decimal-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
     try {
       for ((sql, ordered) <- queries) {
         val expected = run(sql, ExecutionOptions.Default)
@@ -3425,10 +3535,7 @@ class SqlEngineTest {
         if (ordered) assertEquals(sql, expected, actual)
         else assertEquals(sql, expected.sorted, actual.sorted)
       }
-    } finally {
-      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
-      else System.setProperty(Spill.SpillDirProperty, prevProp)
-    }
+    } finally assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
   }
 
   /** A NULL-typed column spills like any other. It is the type of an untyped
@@ -3469,9 +3576,6 @@ class SqlEngineTest {
       "WITH a AS (SELECT k, NULL AS x FROM t WHERE g = 0) SELECT b.k, a.x FROM t b LEFT JOIN a ON a.k = b.k" -> false,
       "SELECT g, NULL AS x FROM t UNION SELECT g, NULL AS x FROM t" -> false,
       "SELECT k, NULL AS x, COUNT(*) OVER (PARTITION BY g) AS n FROM t" -> false)
-    val prevProp = System.getProperty(Spill.SpillDirProperty)
-    val tmp = Files.createTempDirectory("sqlengine-null-spill-")
-    System.setProperty(Spill.SpillDirProperty, tmp.resolve("transformer-spill").toString)
     try {
       for ((sql, ordered) <- queries) {
         val expected = run(sql, ExecutionOptions.Default)
@@ -3480,10 +3584,7 @@ class SqlEngineTest {
         if (ordered) assertEquals(sql, expected, actual)
         else assertEquals(sql, expected.sorted, actual.sorted)
       }
-    } finally {
-      if (prevProp == null) System.clearProperty(Spill.SpillDirProperty)
-      else System.setProperty(Spill.SpillDirProperty, prevProp)
-    }
+    } finally assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
   }
 
   // ---- Failures say what the user wrote -------------------------------------
@@ -5165,6 +5266,40 @@ class SqlEngineTest {
     val spilled = SqlEngine.execute(grouped, cat, ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L)))
     assertEquals(rowsOf(grouped, cat), collectAllRows(spilled).map(r => Seq(r("i"), r("m"))))
     assertEquals(Seq(Seq(1, "x"), Seq(2, "a"), Seq(3, "\uD83D\uDE00")), rowsOf(grouped, cat))
+  }
+
+  /** UPPER and LOWER map each character to one character, by Unicode's
+    * simple case mapping (plans/testing/15, decision 2): a sharp s stays itself
+    * under UPPER, where the full mapping Java's `String.toUpperCase` applies
+    * made it `SS`, and a capital I with a dot above lowers to `i`, where it
+    * became `i` and a combining dot. A string keeps its length, and over the
+    * plan's table `s ILIKE p`, `UPPER(s) LIKE UPPER(p)` and `LOWER(s) LIKE
+    * LOWER(p)` give one answer, where they gave three. */
+  @Test def upperAndLowerMapOneCharacterToOne(): Unit = {
+    def ch(codePoints: Int*): String = new String(codePoints.toArray, 0, codePoints.length)
+    val sharpS = ch(0xdf)
+    val dottedI = ch(0x130)
+    val fi = ch(0xfb01)
+    val street = s"stra${sharpS}e"
+    val cat = new Catalog
+    cat.register("u", memView(Schema(Vector(Field("s", DataType.StringType))),
+      Seq(Seq(Array[Any](sharpS), Array[Any](dottedI), Array[Any](street), Array[Any](fi), Array[Any]("ab")))))
+    assertEquals(Seq(Seq(sharpS, "i", fi, fi, "I", ch(0xff41), ch(0x41, 0x130), 6, 6)), rowsOf(
+      s"SELECT UPPER('$sharpS') AS a, LOWER('$dottedI') AS b, UPPER('$fi') AS c, LOWER('$fi') AS d, " +
+        s"UPPER('${ch(0x131)}') AS e, LOWER('${ch(0xff21)}') AS f, UPPER('a$dottedI') AS g, " +
+        s"LENGTH(UPPER('$street')) AS h, LENGTH(LOWER('$street')) AS i", cat))
+    // The plan's table, each value with ILIKE, UPPER(s) LIKE UPPER(p) and
+    // LOWER(s) LIKE LOWER(p) against 'SS' and against '_', and the lengths.
+    val table = rowsOf("SELECT s, s ILIKE 'SS' AS i1, UPPER(s) LIKE UPPER('SS') AS u1, LOWER(s) LIKE LOWER('SS') AS l1, " +
+      "s ILIKE '_' AS i2, UPPER(s) LIKE UPPER('_') AS u2, LOWER(s) LIKE LOWER('_') AS l2, LENGTH(s) AS n, " +
+      "LENGTH(UPPER(s)) AS nu, LENGTH(LOWER(s)) AS nl FROM u", cat)
+    def row(v: String, one: Boolean, n: Int) = Seq(v, false, false, false, one, one, one, n, n, n)
+    assertEquals(Seq(row(sharpS, one = true, 1), row(dottedI, one = true, 1), row(street, one = false, 6),
+      row(fi, one = true, 1), row("ab", one = false, 2)), table)
+    // Both paths: the vector path over the column and the row path over a
+    // CASE that reads one row at a time.
+    assertEquals(Seq(Seq(sharpS, sharpS)), rowsOf(s"SELECT UPPER(s) AS v, CASE WHEN LENGTH(s) = 1 THEN UPPER(s) END " +
+      s"AS w FROM u WHERE s = '$sharpS'", cat))
   }
 
   /** A simple CASE's operand and a BETWEEN's are read once per row, as in

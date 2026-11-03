@@ -30,7 +30,9 @@ import com.transformer.sql.plan.JoinKind
   *
   * Skipped when there is no join to commute, or when the query is not
   * layout-invariant (a window function's tie-break follows the row order the join
-  * emits, which the swap legitimately changes).
+  * emits, which the swap legitimately changes). Both must fail on their data
+  * or neither, but where a WHERE or ON condition that can fail is there to move
+  * (decision 1 of plans/testing/15).
   */
 object JoinCommutativity {
 
@@ -40,16 +42,21 @@ object JoinCommutativity {
     val body = q.renderBody
     val swappedBody = q.copy(from = commuteFirstJoin(q.from)).renderBody
 
-    val baseQ =
-      try RelEngine.execute(mc.env.catalog(), body, ExecutionOptions.Default)
+    val base =
+      try RelEngine.answer(mc.env.catalog(), body, ExecutionOptions.Default)
       catch { case e: IllegalArgumentException => return RelEngine.Rejected(RelEngine.rejectReason(e)) }
-    val schema = baseQ.schema
-    val baseRows = RelEngine.collectRows(baseQ)
-
     val swapped =
-      try RelEngine.execute(mc.env.catalog(), swappedBody, ExecutionOptions.Default)
+      try RelEngine.answer(mc.env.catalog(), swappedBody, ExecutionOptions.Default)
       catch { case e: IllegalArgumentException => return RelEngine.Rejected(RelEngine.rejectReason(e)) }
-    val swappedRows = RelEngine.collectRows(swapped)
+    val (schema, baseRows, swappedRows) = (base, swapped) match {
+      case (Right(b), Right(s)) => (b.schema, b.rows, s.rows)
+      case (Left(_), Left(_)) => return RelEngine.Held
+      case _ if q.movableFailure => return RelEngine.Skipped
+      case (b, s) => throw new AssertionError(
+        s"[join-commutativity] one fails on its data and the other answers (${b.left.getOrElse("answers")} / " +
+          s"${s.left.getOrElse("answers")}), with no WHERE or ON condition that can fail to move.\n  body    = $body\n" +
+          s"  swapped = $swappedBody")
+    }
 
     RowOracle.multisetEquals(schema, baseRows, swappedRows).foreach { diff =>
       throw new AssertionError(
@@ -61,11 +68,12 @@ object JoinCommutativity {
   /** Swap the FROM root with the first join's leaf, flipping that join's kind.
     * Any further joins keep their kind and ON predicate: they see the same set of
     * aliases in scope, so a left-deep chain stays bindable and its semantics are
-    * unchanged. */
+    * unchanged. A comma list or `CROSS JOIN`s keep their style and their WHERE,
+    * so `JoinOrder` meets the tables in another written order. */
   private def commuteFirstJoin(from: FromClause): FromClause = {
     val first = from.joins.head
     val rest = from.joins.tail
-    FromClause(first.leaf, JoinItem(flip(first.kind), from.root, first.on) +: rest)
+    from.copy(root = first.leaf, joins = JoinItem(flip(first.kind), from.root, first.on) +: rest)
   }
 
   private def flip(k: JoinKind): JoinKind = k match {

@@ -1,0 +1,21 @@
+{
+ "description": "Don't print header if header:false option specified",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "a",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "e",
+   "f"
+  ]
+ ],
+ "text": "a,b,c\r\nd,e,f"
+}

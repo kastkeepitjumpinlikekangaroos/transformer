@@ -64,7 +64,7 @@ scala_binary(
     main_class = "com.transformer.bench.internal.JmhGenerateMain",
     visibility = ["//visibility:private"],
     deps = [
-        "@maven//:org_openjdk_jmh_jmh_core",
+        # Brings jmh-core, which the generator runs with.
         "@maven//:org_openjdk_jmh_jmh_generator_bytecode",
     ],
     runtime_deps = [

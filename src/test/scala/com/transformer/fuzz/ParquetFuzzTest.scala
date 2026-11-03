@@ -229,7 +229,7 @@ class ParquetFuzzTest {
       assertTrue(s"$label on ${shapeCounts(label)} of $n seeds, under $bound", shapeCounts(label) >= bound)
     }
     Seq(CompressionCodecName.UNCOMPRESSED, CompressionCodecName.SNAPPY, CompressionCodecName.GZIP,
-      CompressionCodecName.ZSTD, CompressionCodecName.LZ4_RAW).foreach { codec =>
+      CompressionCodecName.ZSTD, CompressionCodecName.LZ4_RAW, CompressionCodecName.LZ4).foreach { codec =>
       assertTrue(s"codec $codec on ${shapeCounts(s"codec $codec")} of $n seeds", shapeCounts(s"codec $codec") >= n / 100)
     }
     Seq("float NaN", "float -0.0", "double NaN", "double -0.0", "half subnormal", "half NaN", "uint32 past Int.MaxValue",

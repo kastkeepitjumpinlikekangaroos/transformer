@@ -1,0 +1,59 @@
+# From Apache DataFusion's sqllogictest files (https://github.com/apache/datafusion):
+# datafusion/sqllogictest/test_files/pg_compat/pg_compat_type_coercion.slt at commit
+# 934691e9af8f11bf4b629f21bb17795abfb84d93, as it is there but for this header
+# and the condition lines added before records, under the Apache License 2.0
+# (LICENSE beside this file; NOTICE says whose they are).
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 7 records: 7 run as DataFusion answers them.
+
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
+# SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
+
+query BB
+select true and true, false and false;
+----
+true false
+
+
+query BB
+select true or true, false or false;
+----
+true false
+
+
+query BB
+select false and true, true and false;
+----
+false false
+
+
+query BB
+select false or true, true or false;
+----
+true true
+
+
+query BB
+select null and null, null or null;
+----
+NULL NULL
+
+
+query BBBB
+select true and null,
+       false and null,
+       null and true,
+       null and false;
+----
+NULL false NULL false
+
+
+query BBBB
+select true or null,
+       false or null,
+       null or true,
+       null or false;
+----
+true NULL true NULL

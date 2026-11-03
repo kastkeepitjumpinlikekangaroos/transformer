@@ -1,0 +1,831 @@
+# From Apache Spark's SQL query tests (https://github.com/apache/spark):
+# sql/core/src/test/resources/sql-tests/inputs/typeCoercion/native/binaryComparison.sql
+# at commit b98123545915a84403c7fa89e8d977ee0b2f5aed, with every answer from
+# the golden file results/typeCoercion/native/binaryComparison.sql.out at that
+# commit, Spark's answer under ANSI mode, never the engine's. Licensed to the
+# Apache Software Foundation under the Apache License, Version 2.0: LICENSE and
+# NOTICE in src/test/slt/spark/ hold the license and Spark's notice. Written by
+# //src/test/scala/com/transformer/slt:spark_import, which docs/extending.md
+# describes; edit the converter, not this file.
+#
+# Comparisons (= > >= < <= <>) of a value of each type with a string literal
+# and with a STRING NULL. 121 of the file's 265 statements are here, 72 of them
+# records the engine answers otherwise by a rule of the ledger in
+# docs/gotchas.md, marked skipif transformer <id> and, for a rule that is no
+# refusal, followed by its twin, onlyif transformer <id> with the engine's own
+# answer.
+#
+# A statement is as Spark wrote it but where a rewrite cannot change what it
+# means, which its record names: a temporary view of literals as a table of
+# their types holding one row of them. A column is the engine's type of the
+# name Spark's schema gives it. A result is compared as rowsort unless its
+# query ends in ORDER BY, as Spark sorts every result its plan does not.
+#
+# Skipped, by rule:
+#     72  refused-text-comparison
+#
+# Left out (144 statements), by what they need:
+#     48  BINARY, and X'' literals
+#     24  SMALLINT
+#     24  Spark's function date()
+#     24  Spark's function timestamp()
+#     24  TINYINT
+
+# binaryComparison.sql:20, the temporary view as a table of one row
+statement ok
+CREATE TABLE t (c1 INT)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+# binaryComparison.sql:94
+query BOOLEAN rowsort
+SELECT cast(1 as int) = '1' FROM t
+----
+true
+
+# binaryComparison.sql:95
+query BOOLEAN rowsort
+SELECT cast(1 as int) > '2' FROM t
+----
+false
+
+# binaryComparison.sql:96
+query BOOLEAN rowsort
+SELECT cast(1 as int) >= '2' FROM t
+----
+false
+
+# binaryComparison.sql:97
+query BOOLEAN rowsort
+SELECT cast(1 as int) < '2' FROM t
+----
+true
+
+# binaryComparison.sql:98
+query BOOLEAN rowsort
+SELECT cast(1 as int) <= '2' FROM t
+----
+true
+
+# binaryComparison.sql:99
+query BOOLEAN rowsort
+SELECT cast(1 as int) <> '2' FROM t
+----
+true
+
+# binaryComparison.sql:100
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as int) = cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:101
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as int) > cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:102
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as int) >= cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:103
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as int) < cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:104
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as int) <= cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:105
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as int) <> cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:106
+query BOOLEAN rowsort
+SELECT '1' = cast(1 as int) FROM t
+----
+true
+
+# binaryComparison.sql:107
+query BOOLEAN rowsort
+SELECT '2' > cast(1 as int) FROM t
+----
+true
+
+# binaryComparison.sql:108
+query BOOLEAN rowsort
+SELECT '2' >= cast(1 as int) FROM t
+----
+true
+
+# binaryComparison.sql:109
+query BOOLEAN rowsort
+SELECT '2' < cast(1 as int) FROM t
+----
+false
+
+# binaryComparison.sql:110
+query BOOLEAN rowsort
+SELECT '2' <> cast(1 as int) FROM t
+----
+true
+
+# binaryComparison.sql:111
+query BOOLEAN rowsort
+SELECT '2' <= cast(1 as int) FROM t
+----
+false
+
+# binaryComparison.sql:112
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) = cast(1 as int) FROM t
+----
+NULL
+
+# binaryComparison.sql:113
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) > cast(1 as int) FROM t
+----
+NULL
+
+# binaryComparison.sql:114
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) >= cast(1 as int) FROM t
+----
+NULL
+
+# binaryComparison.sql:115
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) < cast(1 as int) FROM t
+----
+NULL
+
+# binaryComparison.sql:116
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) <> cast(1 as int) FROM t
+----
+NULL
+
+# binaryComparison.sql:117
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) <= cast(1 as int) FROM t
+----
+NULL
+
+# binaryComparison.sql:118
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) = '1' FROM t
+----
+true
+
+# binaryComparison.sql:119
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) > '2' FROM t
+----
+false
+
+# binaryComparison.sql:120
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) >= '2' FROM t
+----
+false
+
+# binaryComparison.sql:121
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) < '2' FROM t
+----
+true
+
+# binaryComparison.sql:122
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) <= '2' FROM t
+----
+true
+
+# binaryComparison.sql:123
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) <> '2' FROM t
+----
+true
+
+# binaryComparison.sql:124
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) = cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:125
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) > cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:126
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) >= cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:127
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) < cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:128
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) <= cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:129
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) <> cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:130
+query BOOLEAN rowsort
+SELECT '1' = cast(1 as bigint) FROM t
+----
+true
+
+# binaryComparison.sql:131
+query BOOLEAN rowsort
+SELECT '2' > cast(1 as bigint) FROM t
+----
+true
+
+# binaryComparison.sql:132
+query BOOLEAN rowsort
+SELECT '2' >= cast(1 as bigint) FROM t
+----
+true
+
+# binaryComparison.sql:133
+query BOOLEAN rowsort
+SELECT '2' < cast(1 as bigint) FROM t
+----
+false
+
+# binaryComparison.sql:134
+query BOOLEAN rowsort
+SELECT '2' <= cast(1 as bigint) FROM t
+----
+false
+
+# binaryComparison.sql:135
+query BOOLEAN rowsort
+SELECT '2' <> cast(1 as bigint) FROM t
+----
+true
+
+# binaryComparison.sql:136
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) = cast(1 as bigint) FROM t
+----
+NULL
+
+# binaryComparison.sql:137
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) > cast(1 as bigint) FROM t
+----
+NULL
+
+# binaryComparison.sql:138
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) >= cast(1 as bigint) FROM t
+----
+NULL
+
+# binaryComparison.sql:139
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) < cast(1 as bigint) FROM t
+----
+NULL
+
+# binaryComparison.sql:140
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) <= cast(1 as bigint) FROM t
+----
+NULL
+
+# binaryComparison.sql:141
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) <> cast(1 as bigint) FROM t
+----
+NULL
+
+# binaryComparison.sql:142
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) = '1' FROM t
+----
+true
+
+# binaryComparison.sql:143
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) > '2' FROM t
+----
+false
+
+# binaryComparison.sql:144
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) >= '2' FROM t
+----
+false
+
+# binaryComparison.sql:145
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) < '2' FROM t
+----
+true
+
+# binaryComparison.sql:146
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <> '2' FROM t
+----
+true
+
+# binaryComparison.sql:147
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <= '2' FROM t
+----
+true
+
+# binaryComparison.sql:148
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) = cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:149
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) > cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:150
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) >= cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:151
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) < cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:152
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <> cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:153
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) <= cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:154
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT '1' = cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# binaryComparison.sql:155
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT '2' > cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# binaryComparison.sql:156
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT '2' >= cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# binaryComparison.sql:157
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT '2' < cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# binaryComparison.sql:158
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT '2' <= cast(1 as decimal(10, 0)) FROM t
+----
+false
+
+# binaryComparison.sql:159
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT '2' <> cast(1 as decimal(10, 0)) FROM t
+----
+true
+
+# binaryComparison.sql:160
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) = cast(1 as decimal(10, 0)) FROM t
+----
+NULL
+
+# binaryComparison.sql:161
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) > cast(1 as decimal(10, 0)) FROM t
+----
+NULL
+
+# binaryComparison.sql:162
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) >= cast(1 as decimal(10, 0)) FROM t
+----
+NULL
+
+# binaryComparison.sql:163
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) < cast(1 as decimal(10, 0)) FROM t
+----
+NULL
+
+# binaryComparison.sql:164
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) <= cast(1 as decimal(10, 0)) FROM t
+----
+NULL
+
+# binaryComparison.sql:165
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) <> cast(1 as decimal(10, 0)) FROM t
+----
+NULL
+
+# binaryComparison.sql:166
+query BOOLEAN rowsort
+SELECT cast(1 as double) = '1' FROM t
+----
+true
+
+# binaryComparison.sql:167
+query BOOLEAN rowsort
+SELECT cast(1 as double) > '2' FROM t
+----
+false
+
+# binaryComparison.sql:168
+query BOOLEAN rowsort
+SELECT cast(1 as double) >= '2' FROM t
+----
+false
+
+# binaryComparison.sql:169
+query BOOLEAN rowsort
+SELECT cast(1 as double) < '2' FROM t
+----
+true
+
+# binaryComparison.sql:170
+query BOOLEAN rowsort
+SELECT cast(1 as double) <= '2' FROM t
+----
+true
+
+# binaryComparison.sql:171
+query BOOLEAN rowsort
+SELECT cast(1 as double) <> '2' FROM t
+----
+true
+
+# binaryComparison.sql:172
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as double) = cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:173
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as double) > cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:174
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as double) >= cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:175
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as double) < cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:176
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as double) <= cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:177
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as double) <> cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:178
+query BOOLEAN rowsort
+SELECT '1' = cast(1 as double) FROM t
+----
+true
+
+# binaryComparison.sql:179
+query BOOLEAN rowsort
+SELECT '2' > cast(1 as double) FROM t
+----
+true
+
+# binaryComparison.sql:180
+query BOOLEAN rowsort
+SELECT '2' >= cast(1 as double) FROM t
+----
+true
+
+# binaryComparison.sql:181
+query BOOLEAN rowsort
+SELECT '2' < cast(1 as double) FROM t
+----
+false
+
+# binaryComparison.sql:182
+query BOOLEAN rowsort
+SELECT '2' <= cast(1 as double) FROM t
+----
+false
+
+# binaryComparison.sql:183
+query BOOLEAN rowsort
+SELECT '2' <> cast(1 as double) FROM t
+----
+true
+
+# binaryComparison.sql:184
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) = cast(1 as double) FROM t
+----
+NULL
+
+# binaryComparison.sql:185
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) > cast(1 as double) FROM t
+----
+NULL
+
+# binaryComparison.sql:186
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) >= cast(1 as double) FROM t
+----
+NULL
+
+# binaryComparison.sql:187
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) < cast(1 as double) FROM t
+----
+NULL
+
+# binaryComparison.sql:188
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) <= cast(1 as double) FROM t
+----
+NULL
+
+# binaryComparison.sql:189
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) <> cast(1 as double) FROM t
+----
+NULL
+
+# binaryComparison.sql:190
+query BOOLEAN rowsort
+SELECT cast(1 as float) = '1' FROM t
+----
+true
+
+# binaryComparison.sql:191
+query BOOLEAN rowsort
+SELECT cast(1 as float) > '2' FROM t
+----
+false
+
+# binaryComparison.sql:192
+query BOOLEAN rowsort
+SELECT cast(1 as float) >= '2' FROM t
+----
+false
+
+# binaryComparison.sql:193
+query BOOLEAN rowsort
+SELECT cast(1 as float) < '2' FROM t
+----
+true
+
+# binaryComparison.sql:194
+query BOOLEAN rowsort
+SELECT cast(1 as float) <= '2' FROM t
+----
+true
+
+# binaryComparison.sql:195
+query BOOLEAN rowsort
+SELECT cast(1 as float) <> '2' FROM t
+----
+true
+
+# binaryComparison.sql:196
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as float) = cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:197
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as float) > cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:198
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as float) >= cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:199
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as float) < cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:200
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as float) <= cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:201
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as float) <> cast(null as string) FROM t
+----
+NULL
+
+# binaryComparison.sql:202
+query BOOLEAN rowsort
+SELECT '1' = cast(1 as float) FROM t
+----
+true
+
+# binaryComparison.sql:203
+query BOOLEAN rowsort
+SELECT '2' > cast(1 as float) FROM t
+----
+true
+
+# binaryComparison.sql:204
+query BOOLEAN rowsort
+SELECT '2' >= cast(1 as float) FROM t
+----
+true
+
+# binaryComparison.sql:205
+query BOOLEAN rowsort
+SELECT '2' < cast(1 as float) FROM t
+----
+false
+
+# binaryComparison.sql:206
+query BOOLEAN rowsort
+SELECT '2' <= cast(1 as float) FROM t
+----
+false
+
+# binaryComparison.sql:207
+query BOOLEAN rowsort
+SELECT '2' <> cast(1 as float) FROM t
+----
+true
+
+# binaryComparison.sql:208
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) = cast(1 as float) FROM t
+----
+NULL
+
+# binaryComparison.sql:209
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) > cast(1 as float) FROM t
+----
+NULL
+
+# binaryComparison.sql:210
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) >= cast(1 as float) FROM t
+----
+NULL
+
+# binaryComparison.sql:211
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) < cast(1 as float) FROM t
+----
+NULL
+
+# binaryComparison.sql:212
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) <= cast(1 as float) FROM t
+----
+NULL
+
+# binaryComparison.sql:213
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(null as string) <> cast(1 as float) FROM t
+----
+NULL

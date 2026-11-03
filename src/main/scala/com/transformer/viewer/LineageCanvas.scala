@@ -215,9 +215,8 @@ final class LineageCanvas(session: ViewerSession) extends GraphCanvas {
     * name alone in that font. */
   private def drawTable(gc: GraphicsContext, lineage: Lineage, n: NodeId.Table, b: Box, ringed: Boolean,
       compact: Option[Font]): Unit = {
-    val summary = lineage.shownRuns(n.dataset).table(n.name).map(_.summary)
-    val (accent, line) = summary match {
-      case Some(s) => tableStatus(s.status, s.rowsProduced)
+    val (accent, line) = lineage.shownRuns(n.dataset).table(n.name) match {
+      case Some(t) => tableStatus(t.status, t.summary.rowsProduced)
       case None => (Palette.TextSubtle, "")
     }
     drawCard(gc, b.x, b.y, b.width, b.height, accent, ringed)
@@ -373,6 +372,7 @@ object LineageCanvas {
 
   /** A table's colour and status line. */
   def tableStatus(status: TaskRunStatus, rows: Long): (Color, String) = status match {
+    case TaskRunStatus.Running => (Palette.Warning, "unfinished")
     case TaskRunStatus.Succeeded => (Palette.Success, f"$rows%,d rows")
     case TaskRunStatus.ValidationFailed => (Palette.Warning, f"validation failed · $rows%,d rows")
     case TaskRunStatus.Failed => (Palette.Danger, "failed")
@@ -457,12 +457,13 @@ final class LineageOverlay private (session: ViewerSession, val canvas: LineageC
     for (l <- lineage; s <- subject) {
       if (canvas.wholeFolder) {
         val tables = l.shownRuns.flatMap(_.tables)
-        def inStatus(st: TaskRunStatus): Int = tables.count(_.summary.status == st)
+        def inStatus(st: TaskRunStatus): Int = tables.count(_.status == st)
         count(if (l.shownRuns.size == 1) "dataset" else "datasets", Palette.Accent, l.shownRuns.size)
         count(if (tables.size == 1) "table" else "tables", Palette.Success, tables.size)
         count("failed", Palette.Danger, inStatus(TaskRunStatus.Failed))
         count("validation failed", Palette.Warning, inStatus(TaskRunStatus.ValidationFailed))
         count("skipped", Palette.TextSubtle.darker(), inStatus(TaskRunStatus.Skipped))
+        count("unfinished", Palette.Warning, inStatus(TaskRunStatus.Running))
         count("reads across datasets", Palette.Input, l.edges.count { case (a, b) => a.dataset != b.dataset })
       } else s match {
         case ViewerSelection.OfNode(n) =>

@@ -1,0 +1,20 @@
+{
+ "description": "Pipe delimiter is guessed correctly choose avgFildCount max one",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   "c"
+  ],
+  [
+   "a",
+   "b",
+   "c|d|e|f"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

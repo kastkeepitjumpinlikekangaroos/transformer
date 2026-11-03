@@ -1,0 +1,22 @@
+{
+ "description": "Simple duplicated header names",
+ "options": {
+  "header": "true"
+ },
+ "rows": [
+  [
+   "A",
+   "A_1",
+   "A_2",
+   "A_3"
+  ],
+  [
+   "1",
+   "2",
+   "3",
+   "4"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

@@ -1,0 +1,8 @@
+float,double,half
+1.5,1.5,1.5
+NaN,NaN,NaN
+Infinity,Infinity,Infinity
+-Infinity,-Infinity,-Infinity
+-0.0,-0.0,-0.0
+1.4E-45,4.9E-324,5.9604645E-8
+,,

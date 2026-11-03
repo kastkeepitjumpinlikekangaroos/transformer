@@ -154,9 +154,43 @@ class OperatorCountersTest {
     assertTrue("groupCount must be 1..15", snap.counter("groupCount") >= 1L && snap.counter("groupCount") <= 15L)
   }
 
+  /** A partition that brings no rows buffers none: under spill, the codec
+    * path counts the bytes it holds between flushes from zero, as the
+    * long-key path does. */
+  @Test def hashAggregateExecOverNoRowsBuffersNoBytes(): Unit = {
+    val schema = Schema(Vector(
+      Field("a", DataType.IntType),
+      Field("b", DataType.StringType),
+      Field("v", DataType.LongType)))
+    val plan = new InMemoryPlan(schema, Vector(Vector.empty[Array[Any]]))
+    val a = ColRefExpr(0, "a", DataType.IntType)
+    val b = ColRefExpr(1, "b", DataType.StringType)
+    val v = ColRefExpr(2, "v", DataType.LongType)
+    val node = new MetricsNode(0, "HashAggregateExec", 0, HashAggregateExec.IdxCounterNames)
+    val agg = HashAggregateExec(
+      plan, Seq((a, "a"), (b, "b")), Seq((AggExprSum(v), "sumv")),
+      ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L << 30)), node)
+    drain(agg)
+    val snap = node.snapshot()
+    assertEquals(HashAggregateExec.KeyPathObject, snap.counter("keyCodecPath"))
+    assertEquals(0L, snap.counter("groupCount"))
+    assertEquals(0L, snap.counter("peakInMemoryBytes"))
+  }
+
   // ------------------------------------------------------------------
   // HashJoinExec — populated counters
   // ------------------------------------------------------------------
+
+  /** Built without saying which side, a hash join builds its right one. */
+  @Test def hashJoinExecBuildsItsRightSideByDefault(): Unit = {
+    val schema = Schema(Vector(Field("k", DataType.IntType)))
+    val l = new InMemoryPlan(schema, Vector((0 until 50).map(i => Array[Any](java.lang.Integer.valueOf(i % 10))).toVector))
+    val r = new InMemoryPlan(schema, Vector((0 until 20).map(i => Array[Any](java.lang.Integer.valueOf(i % 10))).toVector))
+    val k = ColRefExpr(0, "k", DataType.IntType)
+    val node = new MetricsNode(0, "HashJoinExec", 0, HashJoinExec.IdxCounterNames)
+    drain(HashJoinExec(l, r, Seq(k), Seq(k), None, JoinKind.Inner, metricsNode = node))
+    assertEquals(20L, node.snapshot().counter("buildSideRows"))
+  }
 
   @Test def hashJoinExecPopulatesInMemoryCounters(): Unit = {
     val leftSchema = Schema(Vector(Field("k", DataType.IntType), Field("lv", DataType.LongType)))
@@ -172,12 +206,16 @@ class OperatorCountersTest {
     val node = new MetricsNode(0, "HashJoinExec", 0, HashJoinExec.IdxCounterNames)
     val j = HashJoinExec(l, r, Seq(lk), Seq(rk), None, JoinKind.Inner,
       buildRight = true, ExecutionOptions.Default, node)
+    val t0 = System.nanoTime()
     drain(j)
+    val elapsed = System.nanoTime() - t0
     val snap = node.snapshot()
     assertEquals(20L, snap.counter("buildSideRows"))     // right side (50 if buildRight=false)
     assertTrue("probeSideRows > 0", snap.counter("probeSideRows") > 0L)
     assertTrue("matchedRows > 0", snap.counter("matchedRows") > 0L)
     assertTrue("buildNanos > 0", snap.counter("buildNanos") > 0L)
+    // A duration within the run, not a reading of the clock.
+    assertTrue(s"buildNanos ${snap.counter("buildNanos")} within the run's $elapsed", snap.counter("buildNanos") <= elapsed)
     assertTrue("probeNanos > 0", snap.counter("probeNanos") > 0L)
     assertEquals(HashJoinExec.KeyPathLong, snap.counter("keyCodecPath"))
     // No grace hash: bucket / spill counters all zero.

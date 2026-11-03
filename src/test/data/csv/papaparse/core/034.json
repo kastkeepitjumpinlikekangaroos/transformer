@@ -1,0 +1,20 @@
+{
+ "description": "Empty quoted field at EOF is empty",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   ""
+  ],
+  [
+   "a",
+   "b",
+   ""
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

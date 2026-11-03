@@ -17,8 +17,13 @@ import java.util.concurrent.Callable
 
 /** Writes a stream of [[ColumnarBatch]]es to a single Parquet file.
   *
-  * Atomic temp-file + rename on close. Compression defaults to UNCOMPRESSED;
-  * override per call site (or per table via `output.json -> options.compression`).
+  * The file is staged: written under a hidden temp name in the same directory
+  * (`.<name>.<nanos>.tmp.parquet`), which [[finish]] closes, and renamed to
+  * the target path by [[commit]]. [[close]] does both, for a file written on
+  * its own; a partitioned write finishes every part first and commits them
+  * together ([[ParquetWriter.writePartitioned]]). Compression defaults to
+  * SNAPPY; override per call site (or per table via
+  * `output.json -> options.compression`).
   *
   * Encode is vectorized at the column-batch level: each batch flows row-by-row
   * to parquet-mr's [[RecordConsumer]] without allocating an intermediate
@@ -68,6 +73,7 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
       .withPageSize(DEFAULT_PAGE_SIZE)
       .withDictionaryEncoding(true)
       .build()
+  LeakAudit.opened(this, s"the parquet file '$tmp', being written")
 
   // Reusable per-row handle. parquet-mr's `ParquetWriter.write(T)` increments
   // its internal `recordCount` by 1 per call (used to decide when to flush row
@@ -90,15 +96,35 @@ final class ParquetWriter(target: Path, schema: Schema, options: Map[String, Str
     rowsWritten += nrows
   }
 
-  def close(): Long = {
+  private var committed = false
+
+  /** Write the footer and close the staged file, still under its temp name.
+    * Returns the rows written. */
+  def finish(): Long = {
     writer.close()
-    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+    LeakAudit.closed(this)
     rowsWritten
   }
 
+  /** Rename the finished file to the target path, atomically. */
+  def commit(): Unit = {
+    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+    committed = true
+  }
+
+  /** Finish and commit: a file written on its own. Returns the rows written. */
+  def close(): Long = {
+    val n = finish()
+    commit()
+    n
+  }
+
+  /** Discard the file: the staged one, or the target once it is committed. */
   def abort(): Unit = {
     try writer.close() catch { case _: Throwable => () }
+    LeakAudit.closed(this)
     try Files.deleteIfExists(tmp) catch { case _: Throwable => () }
+    if (committed) try Files.deleteIfExists(target) catch { case _: Throwable => () }
     ()
   }
 }
@@ -124,7 +150,9 @@ object ParquetWriter {
     * value of its key, as the writer would once a task had run; the map
     * carries the task's execution options too, whose keys the caller checks. */
   def checkOptions(options: Map[String, String]): Unit = {
-    codecOf(options); rowGroupSizeOf(options); writeParallelismOf(options); ()
+    val _ = codecOf(options)
+    val _ = rowGroupSizeOf(options)
+    val _ = writeParallelismOf(options)
   }
 
   /** `compression`: `snappy` (the default), `gzip`, or `uncompressed` and
@@ -192,22 +220,29 @@ object ParquetWriter {
   }
 
   /** Write a sequence of partition iterators into `targetDir` as
-    * `part-00000.parquet`, ... — one file per input partition, each written
-    * in parallel. On any failure, every in-flight writer is aborted.
+    * `part-00000.parquet`, ... — one file per input partition that has rows,
+    * each staged in parallel. Once every partition is written the parts are
+    * committed, renamed to their names in partition order; a result whose
+    * every partition was empty commits one header-only `part-00000.parquet`,
+    * and one of no partitions commits none. If any partition fails, or a
+    * rename does, every part is discarded, staged or committed, and the
+    * failure is rethrown: the directory gains no part file.
+    *
+    * Returns the part files committed and the rows they hold.
     */
   def writePartitioned(
       targetDir: Path,
       schema: Schema,
       partitions: IndexedSeq[Iterator[ColumnarBatch]],
       options: Map[String, String] = Map.empty
-  ): Long = {
+  ): WrittenParts = {
     // A schema parquet cannot store fails here, before any partition runs,
     // rather than in the first partition with a row to write: an empty result
     // would otherwise succeed where any other fails.
-    ParquetSchema.toMessageType(schema)
+    val _ = ParquetSchema.toMessageType(schema)
     Files.createDirectories(targetDir)
     val n = partitions.length
-    if (n == 0) return 0L
+    if (n == 0) return WrittenParts(Vector.empty, 0L)
     // Cap concurrency for parquet: each in-flight writer holds a row-group buffer
     // (32MB) + per-column dictionary pages (≈1MB × column count). On wide schemas a
     // pool of `cores` writers blows past a modest heap before any data flushes;
@@ -216,6 +251,7 @@ object ParquetWriter {
     val cap = writeParallelismOf(options).getOrElse(defaultWriteParallelism())
     val parallelism = math.max(1, math.min(n, cap))
     val writers = new Array[ParquetWriter](n)
+    def partName(i: Int): String = "part-%05d.parquet".formatLocal(Locale.ROOT, i)
 
     def writerTask(i: Int): Callable[Long] = new Callable[Long] {
       def call(): Long = {
@@ -231,11 +267,14 @@ object ParquetWriter {
         // batch (or end-of-stream), so the work is the same — we just skip
         // the file IO when nothing survived.
         if (!it.hasNext) return 0L
-        val target = targetDir.resolve("part-%05d.parquet".formatLocal(Locale.ROOT, i))
-        val w = new ParquetWriter(target, schema, options)
+        val w = new ParquetWriter(targetDir.resolve(partName(i)), schema, options)
         writers(i) = w
-        while (it.hasNext) w.write(it.next())
-        w.close()
+        var first = true
+        while (it.hasNext) {
+          w.write(it.next())
+          if (first) { first = false; Faults.at(Faults.FirstBatch) }
+        }
+        w.finish()
       }
     }
 
@@ -253,43 +292,35 @@ object ParquetWriter {
       submitted += 1
     }
     while (collected < n) {
-      try total += futures(collected).await()
-      catch { case t: Throwable => if (firstError == null) firstError = t }
+      // A partition never submitted, after another failed, has no future.
+      if (futures(collected) != null) {
+        try total += futures(collected).await()
+        catch { case t: Throwable => if (firstError == null) firstError = t }
+      }
       collected += 1
       if (submitted < n && firstError == null) {
         futures(submitted) = Scheduler.submit(writerTask(submitted))
         submitted += 1
       }
     }
+    if (firstError == null) {
+      try {
+        // Every partition empty: a header-only placeholder, so the directory
+        // reads back as the empty table rather than as no file. Cost: a few
+        // hundred bytes of parquet header + footer once per all-empty job.
+        if (writers.forall(_ == null)) {
+          val w = new ParquetWriter(targetDir.resolve(partName(0)), schema, options)
+          writers(0) = w
+          val _ = w.finish()
+        }
+        writers.foreach(w => if (w != null) { Chaos.at(Chaos.WriterCommit); Faults.at(Faults.Commit); w.commit() })
+      } catch { case t: Throwable => firstError = t }
+    }
     if (firstError != null) {
       abortAll(writers)
       throw firstError
     }
-    // Ensure at least one parquet file exists in `targetDir` so downstream
-    // `ParquetReader.fromPath(dir)` (which throws on an empty glob) can
-    // re-open the materialized view. When every partition's iterator was
-    // empty we wrote zero files above; emit a header-only placeholder
-    // here so the materialize path stays uniform. Cost: a few hundred
-    // bytes of parquet header + footer once per all-empty job.
-    if (total == 0L) {
-      var anyWritten = false
-      var k = 0
-      while (k < writers.length && !anyWritten) {
-        if (writers(k) != null) anyWritten = true
-        k += 1
-      }
-      if (!anyWritten) {
-        val placeholder = targetDir.resolve("part-00000.parquet")
-        val w = new ParquetWriter(placeholder, schema, options)
-        try w.close()
-        catch {
-          case e: Throwable =>
-            w.abort()
-            throw e
-        }
-      }
-    }
-    total
+    WrittenParts(writers.indices.collect { case i if writers(i) != null => partName(i) }.toVector, total)
   }
 
   private def abortAll(writers: Array[ParquetWriter]): Unit = {

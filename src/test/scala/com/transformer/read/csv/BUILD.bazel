@@ -20,3 +20,31 @@ scala_junit_test(
         "@maven//:junit_junit",
     ],
 )
+
+# CSV files and cases other programs wrote, under src/test/data/csv: DuckDB's
+# data/csv inputs (its AFL and fuzzing crash inputs among them), PapaParse's
+# parser and writer cases and csv-spectrum's pairs, each held to its line of
+# that directory's MANIFEST: read with that CSV text, read as the other parser
+# reads it, or otherwise by a rule of the ledger in docs/gotchas.md, or
+# refused cleanly, naming the file, within a time limit.
+scala_junit_test(
+    name = "csv_corpus_test",
+    srcs = ["CsvCorpusTest.scala"],
+    suffixes = ["Test"],
+    data = [
+        "//:docs/gotchas.md",
+        "//src/test/data/csv:files",
+    ],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        # Json reads a case's other reading.
+        "//src/main/scala/com/transformer/job",
+        "//src/main/scala/com/transformer/read/csv",
+        "//src/main/scala/com/transformer/write/csv",
+        # CleanRejection's markers of an internal message.
+        "//src/test/scala/com/transformer/fuzz",
+        # The ledger a by-design line cites.
+        "//src/test/scala/com/transformer/slt",
+        "@maven//:junit_junit",
+    ],
+)

@@ -1,6 +1,5 @@
 package com.transformer.bench
 
-import com.transformer.core._
 import com.transformer.sql.plan.Ops
 
 import org.openjdk.jmh.annotations._

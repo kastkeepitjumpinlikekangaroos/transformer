@@ -169,7 +169,9 @@ object CleanRejection {
   /** The run-time failures that are about a value, and so belong at run time:
     * a CAST that cannot read its input (a string, or a float's `NaN` or
     * infinity, which no DECIMAL, INT or BIGINT holds and which a comparison
-    * with a DECIMAL widens to it), a decimal or integer answer that does not
+    * with a DECIMAL widens to it; a timestamp's text cast to DATE also says to
+    * cast it to TIMESTAMP first, which the cast matrix's first generation
+    * found missing here, plans/testing/09), a decimal or integer answer that does not
     * fit its type, each an error by design (plans/robustness/18), and a
     * computed LIKE pattern that ends in its escape character or a computed
     * negative SUBSTRING length, which written as constants are refused at
@@ -177,6 +179,7 @@ object CleanRejection {
     * column stores (plans/robustness/25). */
   private val DataErrors: Vector[Regex] = Vector(
     """^Cannot cast (?:'.*'|NaN|-?Infinity) to [a-z]+(?:\(\d+,\d+\))?$""".r,
+    """^Cannot cast '.*' to date; cast it to TIMESTAMP first, then to DATE for its date in UTC$""".r,
     """^Cannot cast (?:NaN|-?Infinity) to (?:INT|BIGINT): it has no integer value$""".r,
     """^Decimal overflow: \S+ does not fit decimal\(\d+,\d+\)$""".r,
     """^Integer overflow: .+ does not fit (?:INT|BIGINT)$""".r,
@@ -186,6 +189,21 @@ object CleanRejection {
     """^The LIKE pattern '.*' ends in its escape character, .+, which escapes nothing; write .+ to match one$""".r,
     """^SUBSTRING's length -\d+ is negative$""".r,
     """^\S+ is past the range of a (?:DATE|TIMESTAMP), about .+ either side of 1970$""".r)
+
+  /** Whether `message` is a run-time failure about a value ([[DataErrors]]). */
+  def isDataMessage(message: String): Boolean =
+    message != null && DataErrors.exists(_.findFirstIn(message).isDefined)
+
+  /** Whether `t`, or a cause of it, is a failure about a value: an
+    * `IllegalArgumentException` or `ArithmeticException` whose message is one
+    * of [[DataErrors]]. The layout and metamorphic oracles accept such a
+    * failure by decision 1 of plans/testing/15: every layout must agree on
+    * whether a query fails on its data, but where the failure can come from a
+    * WHERE or ON condition the optimizer may move. */
+  def isDataError(t: Throwable): Boolean = causes(t).exists {
+    case e @ (_: IllegalArgumentException | _: ArithmeticException) => isDataMessage(e.getMessage)
+    case _ => false
+  }
 
   /** SQL's own vocabulary, which a message may name a construct by even when
     * the query does not spell it that way (`Only SELECT statements are
@@ -300,6 +318,7 @@ object BoundPlan {
   private def children(e: Expr): Seq[Expr] = e match {
     case _: LitExpr | _: ColRefExpr => Nil
     case CastExpr(c, _) => Seq(c)
+    case DecimalCastExpr(c, _) => Seq(c)
     case UnaryOpExpr(_, c, _) => Seq(c)
     case BinOpExpr(_, l, r, _) => Seq(l, r)
     case FuncExpr(_, args, _) => args

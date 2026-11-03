@@ -1,0 +1,1021 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/int8.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/int8.out at that commit, never the engine's.
+# Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group;
+# Portions Copyright (c) 1994, The Regents of the University of California.
+# Distributed under the PostgreSQL License, a permissive license whose text
+# travels with every copy: it is COPYRIGHT beside this file.
+#
+# The BIGINT, Postgres's int8, at its limits and beside an INT: text no BIGINT
+# holds, comparisons and arithmetic each way between the two, arithmetic past
+# the range (an error in both engines), INT64_MIN negated, made absolute,
+# multiplied and divided by -1, casts to INT, FLOAT and DOUBLE and from DOUBLE
+# and DECIMAL, and the text Postgres reads as an integer. 123 of the file's
+# 174 statements are here, each record naming the line of int8.sql it comes
+# from: 59 queries and 44 statements that must fail, answered as Postgres
+# answers them, and 20 records the engine answers otherwise by design, below.
+#
+# A statement is as Postgres wrote it but where a rewrite cannot change what
+# it means, which its record says: int8 as BIGINT, int4 as INT, float4 as
+# FLOAT, float8 as DOUBLE, x::type, type 'x' and float8(x) as CAST(x AS type),
+# and x::int2 as CAST(x AS INT) where no answer depends on SMALLINT's range
+# (the engine has none); an alias named minus in double quotes, as JSqlParser
+# reserves MINUS (Oracle's EXCEPT) and the query does not parse with it bare;
+# a VALUES list in FROM as a table of its rows, made here; and a string an
+# INSERT stores in INT8_TBL, which Postgres refuses, as CAST('...' AS BIGINT),
+# the conversion Postgres makes of it, so the engine reads the text, not the
+# runner. INT8_TBL is test_setup.sql's, each string it stores written as the
+# number Postgres reads. An overflow's message is each engine's own, so those
+# records are statement error with no text, and a result in no fixed order is
+# compared as rowsort.
+#
+# `skipif transformer <id>` marks what the engine answers otherwise by
+# design, the id naming the rule in the ledger in docs/gotchas.md and the
+# comment the case: a division or remainder by zero is NULL, where Postgres
+# refuses it (div-zero-null, 4); a CAST of a DOUBLE or a DECIMAL to BIGINT
+# truncates toward zero, where Postgres rounds (cast-truncates, 2); and text
+# casts to BIGINT by CSV's grammar, where Postgres reads 0x, 0o and 0b
+# prefixes and _ between digits (int-text, 14). After each, its twin,
+# `onlyif transformer <id>`, is the same statement with the engine's own
+# answer.
+#
+# Left out (45 statements), by what they need:
+#   24  to_char()
+#    6  gcd() and lcm()
+#    4  the bitwise operators &, |, #, ~, << and >>
+#    4  pg_input_is_valid() and pg_input_error_info()
+#    3  generate_series()
+#    2  a CAST to SMALLINT, which tests that type's range
+#    2  oid and pg_class
+#
+# Held out (6 statements), both engines refusing them for different reasons:
+# int8.sql:277, 279, 281, 284, 286 and 288, the text of a number one past
+# BIGINT's range in base 2, 8 or 16 (int8 '0x8000000000000000'), which
+# Postgres refuses as out of range and the engine as no integer of its
+# grammar (int-text).
+
+# test_setup.sql:77-85: INT8_TBL, int8 written BIGINT, each string
+# test_setup.sql stores written as the number Postgres reads it as ('  123   '
+# as 123, '+4567890123456789' as 4567890123456789).
+statement ok
+CREATE TABLE INT8_TBL(q1 BIGINT, q2 BIGINT)
+
+statement ok
+INSERT INTO INT8_TBL VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123), (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+
+# int8.sql:9: bad values, each string written CAST('...' AS BIGINT), the
+# conversion Postgres makes of it as it stores it, so the engine reads the
+# text. Postgres: invalid input syntax for type bigint: "      ".
+statement error
+INSERT INTO INT8_TBL(q1) VALUES (CAST('      ' AS BIGINT))
+
+# int8.sql:10: Postgres: invalid input syntax for type bigint: "xxx".
+statement error
+INSERT INTO INT8_TBL(q1) VALUES (CAST('xxx' AS BIGINT))
+
+# int8.sql:11: Postgres: value "3908203590239580293850293850329485" is out of
+# range for type bigint.
+statement error
+INSERT INTO INT8_TBL(q1) VALUES (CAST('3908203590239580293850293850329485' AS BIGINT))
+
+# int8.sql:12: Postgres: value "-1204982019841029840928340329840934" is out of
+# range for type bigint.
+statement error
+INSERT INTO INT8_TBL(q1) VALUES (CAST('-1204982019841029840928340329840934' AS BIGINT))
+
+# int8.sql:13: Postgres: invalid input syntax for type bigint: "- 123".
+statement error
+INSERT INTO INT8_TBL(q1) VALUES (CAST('- 123' AS BIGINT))
+
+# int8.sql:14: Postgres: invalid input syntax for type bigint: "  345     5".
+statement error
+INSERT INTO INT8_TBL(q1) VALUES (CAST('  345     5' AS BIGINT))
+
+# int8.sql:15: Postgres: invalid input syntax for type bigint: "".
+statement error
+INSERT INTO INT8_TBL(q1) VALUES (CAST('' AS BIGINT))
+
+# int8.sql:17
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL
+----
+123	456
+123	4567890123456789
+4567890123456789	-4567890123456789
+4567890123456789	123
+4567890123456789	4567890123456789
+
+# int8.sql:26: int8/int8 comparisons.
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 = 4567890123456789
+----
+123	4567890123456789
+4567890123456789	4567890123456789
+
+# int8.sql:27
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 <> 4567890123456789
+----
+123	456
+4567890123456789	-4567890123456789
+4567890123456789	123
+
+# int8.sql:28
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 < 4567890123456789
+----
+123	456
+4567890123456789	-4567890123456789
+4567890123456789	123
+
+# int8.sql:29
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 > 4567890123456789
+----
+
+# int8.sql:30
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 <= 4567890123456789
+----
+123	456
+123	4567890123456789
+4567890123456789	-4567890123456789
+4567890123456789	123
+4567890123456789	4567890123456789
+
+# int8.sql:31
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 >= 4567890123456789
+----
+123	4567890123456789
+4567890123456789	4567890123456789
+
+# int8.sql:34: int8/int4 comparisons.
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 = 456
+----
+123	456
+
+# int8.sql:35
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 <> 456
+----
+123	4567890123456789
+4567890123456789	-4567890123456789
+4567890123456789	123
+4567890123456789	4567890123456789
+
+# int8.sql:36
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 < 456
+----
+4567890123456789	-4567890123456789
+4567890123456789	123
+
+# int8.sql:37
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 > 456
+----
+123	4567890123456789
+4567890123456789	4567890123456789
+
+# int8.sql:38
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 <= 456
+----
+123	456
+4567890123456789	-4567890123456789
+4567890123456789	123
+
+# int8.sql:39
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 >= 456
+----
+123	456
+123	4567890123456789
+4567890123456789	4567890123456789
+
+# int8.sql:42: int4/int8 comparisons.
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE 123 = q1
+----
+123	456
+123	4567890123456789
+
+# int8.sql:43
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE 123 <> q1
+----
+4567890123456789	-4567890123456789
+4567890123456789	123
+4567890123456789	4567890123456789
+
+# int8.sql:44
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE 123 < q1
+----
+4567890123456789	-4567890123456789
+4567890123456789	123
+4567890123456789	4567890123456789
+
+# int8.sql:45
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE 123 > q1
+----
+
+# int8.sql:46
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE 123 <= q1
+----
+123	456
+123	4567890123456789
+4567890123456789	-4567890123456789
+4567890123456789	123
+4567890123456789	4567890123456789
+
+# int8.sql:47
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE 123 >= q1
+----
+123	456
+123	4567890123456789
+
+# int8.sql:50: int8/int2 comparisons, each '...'::int2 written CAST('...' AS
+# INT), as every int2 value below is where no answer depends on SMALLINT's
+# range.
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 = CAST('456' AS INT)
+----
+123	456
+
+# int8.sql:51
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 <> CAST('456' AS INT)
+----
+123	4567890123456789
+4567890123456789	-4567890123456789
+4567890123456789	123
+4567890123456789	4567890123456789
+
+# int8.sql:52
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 < CAST('456' AS INT)
+----
+4567890123456789	-4567890123456789
+4567890123456789	123
+
+# int8.sql:53
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 > CAST('456' AS INT)
+----
+123	4567890123456789
+4567890123456789	4567890123456789
+
+# int8.sql:54
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 <= CAST('456' AS INT)
+----
+123	456
+4567890123456789	-4567890123456789
+4567890123456789	123
+
+# int8.sql:55
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE q2 >= CAST('456' AS INT)
+----
+123	456
+123	4567890123456789
+4567890123456789	4567890123456789
+
+# int8.sql:58: int2/int8 comparisons.
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE CAST('123' AS INT) = q1
+----
+123	456
+123	4567890123456789
+
+# int8.sql:59
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE CAST('123' AS INT) <> q1
+----
+4567890123456789	-4567890123456789
+4567890123456789	123
+4567890123456789	4567890123456789
+
+# int8.sql:60
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE CAST('123' AS INT) < q1
+----
+4567890123456789	-4567890123456789
+4567890123456789	123
+4567890123456789	4567890123456789
+
+# int8.sql:61
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE CAST('123' AS INT) > q1
+----
+
+# int8.sql:62
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE CAST('123' AS INT) <= q1
+----
+123	456
+123	4567890123456789
+4567890123456789	-4567890123456789
+4567890123456789	123
+4567890123456789	4567890123456789
+
+# int8.sql:63
+query BIGINT,BIGINT rowsort
+SELECT * FROM INT8_TBL WHERE CAST('123' AS INT) >= q1
+----
+123	456
+123	4567890123456789
+
+# int8.sql:66: the alias minus written in double quotes, as JSqlParser
+# reserves MINUS, Oracle's EXCEPT, and the query does not parse with it bare.
+query BIGINT,BIGINT rowsort
+SELECT q1 AS plus, -q1 AS "minus" FROM INT8_TBL
+----
+123	-123
+123	-123
+4567890123456789	-4567890123456789
+4567890123456789	-4567890123456789
+4567890123456789	-4567890123456789
+
+# int8.sql:68
+query BIGINT,BIGINT,BIGINT rowsort
+SELECT q1, q2, q1 + q2 AS plus FROM INT8_TBL
+----
+123	456	579
+123	4567890123456789	4567890123456912
+4567890123456789	-4567890123456789	0
+4567890123456789	123	4567890123456912
+4567890123456789	4567890123456789	9135780246913578
+
+# int8.sql:69: the alias minus in double quotes, as in the record before.
+query BIGINT,BIGINT,BIGINT rowsort
+SELECT q1, q2, q1 - q2 AS "minus" FROM INT8_TBL
+----
+123	456	-333
+123	4567890123456789	-4567890123456666
+4567890123456789	-4567890123456789	9135780246913578
+4567890123456789	123	4567890123456666
+4567890123456789	4567890123456789	0
+
+# int8.sql:70: Postgres: bigint out of range.
+statement error
+SELECT q1, q2, q1 * q2 AS multiply FROM INT8_TBL
+
+# int8.sql:71
+query BIGINT,BIGINT,BIGINT rowsort
+SELECT q1, q2, q1 * q2 AS multiply FROM INT8_TBL
+ WHERE q1 < 1000 or (q2 > 0 and q2 < 1000)
+----
+123	456	56088
+123	4567890123456789	561850485185185047
+4567890123456789	123	561850485185185047
+
+# int8.sql:73
+query BIGINT,BIGINT,BIGINT,BIGINT rowsort
+SELECT q1, q2, q1 / q2 AS divide, q1 % q2 AS mod FROM INT8_TBL
+----
+123	456	0	123
+123	4567890123456789	0	123
+4567890123456789	-4567890123456789	-1	0
+4567890123456789	123	37137318076884	57
+4567890123456789	4567890123456789	1	0
+
+# int8.sql:75: float8(x), the function form of the cast, written CAST(x AS
+# DOUBLE).
+query BIGINT,DOUBLE rowsort
+SELECT q1, CAST(q1 AS DOUBLE) FROM INT8_TBL
+----
+123	123.0
+123	123.0
+4567890123456789	4.567890123456789E15
+4567890123456789	4.567890123456789E15
+4567890123456789	4.567890123456789E15
+
+# int8.sql:76
+query BIGINT,DOUBLE rowsort
+SELECT q2, CAST(q2 AS DOUBLE) FROM INT8_TBL
+----
+-4567890123456789	-4.567890123456789E15
+123	123.0
+456	456.0
+4567890123456789	4.567890123456789E15
+4567890123456789	4.567890123456789E15
+
+# int8.sql:78
+query BIGINT rowsort
+SELECT 37 + q1 AS plus4 FROM INT8_TBL
+----
+160
+160
+4567890123456826
+4567890123456826
+4567890123456826
+
+# int8.sql:79
+query BIGINT rowsort
+SELECT 37 - q1 AS minus4 FROM INT8_TBL
+----
+-4567890123456752
+-4567890123456752
+-4567890123456752
+-86
+-86
+
+# int8.sql:80
+query BIGINT rowsort
+SELECT 2 * q1 AS "twice int4" FROM INT8_TBL
+----
+246
+246
+9135780246913578
+9135780246913578
+9135780246913578
+
+# int8.sql:81
+query BIGINT rowsort
+SELECT q1 * 2 AS "twice int4" FROM INT8_TBL
+----
+246
+246
+9135780246913578
+9135780246913578
+9135780246913578
+
+# int8.sql:84: int8 op int4, x::int4 written CAST(x AS INT).
+query BIGINT,BIGINT,BIGINT,BIGINT rowsort
+SELECT q1 + CAST(42 AS INT) AS "8plus4", q1 - CAST(42 AS INT) AS "8minus4", q1 * CAST(42 AS INT) AS "8mul4", q1 / CAST(42 AS INT) AS "8div4" FROM INT8_TBL
+----
+165	81	5166	2
+165	81	5166	2
+4567890123456831	4567890123456747	191851385185185138	108759288653733
+4567890123456831	4567890123456747	191851385185185138	108759288653733
+4567890123456831	4567890123456747	191851385185185138	108759288653733
+
+# int8.sql:86: int4 op int8.
+query BIGINT,BIGINT,BIGINT,BIGINT rowsort
+SELECT CAST(246 AS INT) + q1 AS "4plus8", CAST(246 AS INT) - q1 AS "4minus8", CAST(246 AS INT) * q1 AS "4mul8", CAST(246 AS INT) / q1 AS "4div8" FROM INT8_TBL
+----
+369	123	30258	2
+369	123	30258	2
+4567890123457035	-4567890123456543	1123700970370370094	0
+4567890123457035	-4567890123456543	1123700970370370094	0
+4567890123457035	-4567890123456543	1123700970370370094	0
+
+# int8.sql:89: int8 op int2, 42::int2 written CAST(42 AS INT).
+query BIGINT,BIGINT,BIGINT,BIGINT rowsort
+SELECT q1 + CAST(42 AS INT) AS "8plus2", q1 - CAST(42 AS INT) AS "8minus2", q1 * CAST(42 AS INT) AS "8mul2", q1 / CAST(42 AS INT) AS "8div2" FROM INT8_TBL
+----
+165	81	5166	2
+165	81	5166	2
+4567890123456831	4567890123456747	191851385185185138	108759288653733
+4567890123456831	4567890123456747	191851385185185138	108759288653733
+4567890123456831	4567890123456747	191851385185185138	108759288653733
+
+# int8.sql:91: int2 op int8.
+query BIGINT,BIGINT,BIGINT,BIGINT rowsort
+SELECT CAST(246 AS INT) + q1 AS "2plus8", CAST(246 AS INT) - q1 AS "2minus8", CAST(246 AS INT) * q1 AS "2mul8", CAST(246 AS INT) / q1 AS "2div8" FROM INT8_TBL
+----
+369	123	30258	2
+369	123	30258	2
+4567890123457035	-4567890123456543	1123700970370370094	0
+4567890123457035	-4567890123456543	1123700970370370094	0
+4567890123457035	-4567890123456543	1123700970370370094	0
+
+# int8.sql:93
+query BIGINT,BIGINT rowsort
+SELECT q2, abs(q2) FROM INT8_TBL
+----
+-4567890123456789	4567890123456789
+123	123
+456	456
+4567890123456789	4567890123456789
+4567890123456789	4567890123456789
+
+# int8.sql:94
+query BIGINT,BIGINT nosort
+SELECT min(q1), min(q2) FROM INT8_TBL
+----
+123	-4567890123456789
+
+# int8.sql:95
+query BIGINT,BIGINT nosort
+SELECT max(q1), max(q2) FROM INT8_TBL
+----
+4567890123456789	4567890123456789
+
+# int8.sql:136: min and max values and overflow behavior, each '...'::int8
+# written CAST('...' AS BIGINT).
+query BIGINT nosort
+SELECT CAST('-9223372036854775808' AS BIGINT)
+----
+-9223372036854775808
+
+# int8.sql:137: Postgres: value "-9223372036854775809" is out of range for
+# type bigint.
+statement error
+SELECT CAST('-9223372036854775809' AS BIGINT)
+
+# int8.sql:138
+query BIGINT nosort
+SELECT CAST('9223372036854775807' AS BIGINT)
+----
+9223372036854775807
+
+# int8.sql:139: Postgres: value "9223372036854775808" is out of range for type
+# bigint.
+statement error
+SELECT CAST('9223372036854775808' AS BIGINT)
+
+# int8.sql:141
+query BIGINT nosort
+SELECT -(CAST('-9223372036854775807' AS BIGINT))
+----
+9223372036854775807
+
+# int8.sql:142: Postgres: bigint out of range.
+statement error
+SELECT -(CAST('-9223372036854775808' AS BIGINT))
+
+# int8.sql:143: Postgres: bigint out of range.
+statement error
+SELECT CAST(0 AS BIGINT) - CAST('-9223372036854775808' AS BIGINT)
+
+# int8.sql:145: Postgres: bigint out of range.
+statement error
+SELECT CAST('9223372036854775800' AS BIGINT) + CAST('9223372036854775800' AS BIGINT)
+
+# int8.sql:146: Postgres: bigint out of range.
+statement error
+SELECT CAST('-9223372036854775800' AS BIGINT) + CAST('-9223372036854775800' AS BIGINT)
+
+# int8.sql:148: Postgres: bigint out of range.
+statement error
+SELECT CAST('9223372036854775800' AS BIGINT) - CAST('-9223372036854775800' AS BIGINT)
+
+# int8.sql:149: Postgres: bigint out of range.
+statement error
+SELECT CAST('-9223372036854775800' AS BIGINT) - CAST('9223372036854775800' AS BIGINT)
+
+# int8.sql:151: Postgres: bigint out of range.
+statement error
+SELECT CAST('9223372036854775800' AS BIGINT) * CAST('9223372036854775800' AS BIGINT)
+
+# int8.sql:153: Postgres: division by zero.
+skipif transformer div-zero-null # a BIGINT divided by zero is NULL
+statement error
+SELECT CAST('9223372036854775800' AS BIGINT) / CAST('0' AS BIGINT)
+
+onlyif transformer div-zero-null
+query BIGINT nosort
+SELECT CAST('9223372036854775800' AS BIGINT) / CAST('0' AS BIGINT)
+----
+NULL
+
+# int8.sql:154: Postgres: division by zero.
+skipif transformer div-zero-null # a BIGINT's remainder by zero is NULL
+statement error
+SELECT CAST('9223372036854775800' AS BIGINT) % CAST('0' AS BIGINT)
+
+onlyif transformer div-zero-null
+query BIGINT nosort
+SELECT CAST('9223372036854775800' AS BIGINT) % CAST('0' AS BIGINT)
+----
+NULL
+
+# int8.sql:156: Postgres: bigint out of range.
+statement error
+SELECT abs(CAST('-9223372036854775808' AS BIGINT))
+
+# int8.sql:158: Postgres: bigint out of range.
+statement error
+SELECT CAST('9223372036854775800' AS BIGINT) + CAST('100' AS INT)
+
+# int8.sql:159: Postgres: bigint out of range.
+statement error
+SELECT CAST('-9223372036854775800' AS BIGINT) - CAST('100' AS INT)
+
+# int8.sql:160: Postgres: bigint out of range.
+statement error
+SELECT CAST('9223372036854775800' AS BIGINT) * CAST('100' AS INT)
+
+# int8.sql:162: Postgres: bigint out of range.
+statement error
+SELECT CAST('100' AS INT) + CAST('9223372036854775800' AS BIGINT)
+
+# int8.sql:163: Postgres: bigint out of range.
+statement error
+SELECT CAST('-100' AS INT) - CAST('9223372036854775800' AS BIGINT)
+
+# int8.sql:164: Postgres: bigint out of range.
+statement error
+SELECT CAST('100' AS INT) * CAST('9223372036854775800' AS BIGINT)
+
+# int8.sql:166: Postgres: bigint out of range.
+statement error
+SELECT CAST('9223372036854775800' AS BIGINT) + CAST('100' AS INT)
+
+# int8.sql:167: Postgres: bigint out of range.
+statement error
+SELECT CAST('-9223372036854775800' AS BIGINT) - CAST('100' AS INT)
+
+# int8.sql:168: Postgres: bigint out of range.
+statement error
+SELECT CAST('9223372036854775800' AS BIGINT) * CAST('100' AS INT)
+
+# int8.sql:169: Postgres: division by zero.
+skipif transformer div-zero-null # a BIGINT divided by zero is NULL
+statement error
+SELECT CAST('-9223372036854775808' AS BIGINT) / CAST('0' AS INT)
+
+onlyif transformer div-zero-null
+query BIGINT nosort
+SELECT CAST('-9223372036854775808' AS BIGINT) / CAST('0' AS INT)
+----
+NULL
+
+# int8.sql:171: Postgres: bigint out of range.
+statement error
+SELECT CAST('100' AS INT) + CAST('9223372036854775800' AS BIGINT)
+
+# int8.sql:172: Postgres: bigint out of range.
+statement error
+SELECT CAST('-100' AS INT) - CAST('9223372036854775800' AS BIGINT)
+
+# int8.sql:173: Postgres: bigint out of range.
+statement error
+SELECT CAST('100' AS INT) * CAST('9223372036854775800' AS BIGINT)
+
+# int8.sql:174: Postgres: division by zero.
+skipif transformer div-zero-null # an INT divided by a BIGINT zero is NULL
+statement error
+SELECT CAST('100' AS INT) / CAST('0' AS BIGINT)
+
+onlyif transformer div-zero-null
+query BIGINT nosort
+SELECT CAST('100' AS INT) / CAST('0' AS BIGINT)
+----
+NULL
+
+# int8.sql:176: int4 written INT.
+query INT rowsort
+SELECT CAST(q1 AS INT) FROM int8_tbl WHERE q2 = 456
+----
+123
+
+# int8.sql:177: Postgres: integer out of range.
+statement error
+SELECT CAST(q1 AS INT) FROM int8_tbl WHERE q2 <> 456
+
+# int8.sql:182
+query BIGINT,BIGINT nosort
+SELECT CAST(CAST('42' AS INT) AS BIGINT), CAST(CAST('-37' AS INT) AS BIGINT)
+----
+42	-37
+
+# int8.sql:184: float4 written FLOAT, float8 DOUBLE.
+query FLOAT,DOUBLE rowsort
+SELECT CAST(q1 AS FLOAT), CAST(q2 AS DOUBLE) FROM INT8_TBL
+----
+123.0	4.567890123456789E15
+123.0	456.0
+4.56789E15	-4.567890123456789E15
+4.56789E15	123.0
+4.56789E15	4.567890123456789E15
+
+# int8.sql:185
+query BIGINT nosort
+SELECT CAST(CAST('36854775807.0' AS FLOAT) AS BIGINT)
+----
+36854775808
+
+# int8.sql:186: Postgres: bigint out of range.
+statement error
+SELECT CAST(CAST('922337203685477580700.0' AS DOUBLE) AS BIGINT)
+
+# int8.sql:209: INT64_MIN overflow cases, x::int8, x::int4 and x::int2 written
+# CAST(x AS BIGINT) and CAST(x AS INT). Postgres: bigint out of range.
+statement error
+SELECT CAST((-9223372036854775808) AS BIGINT) * CAST((-1) AS BIGINT)
+
+# int8.sql:210: Postgres: bigint out of range.
+statement error
+SELECT CAST((-9223372036854775808) AS BIGINT) / CAST((-1) AS BIGINT)
+
+# int8.sql:211
+query BIGINT nosort
+SELECT CAST((-9223372036854775808) AS BIGINT) % CAST((-1) AS BIGINT)
+----
+0
+
+# int8.sql:212: Postgres: bigint out of range.
+statement error
+SELECT CAST((-9223372036854775808) AS BIGINT) * CAST((-1) AS INT)
+
+# int8.sql:213: Postgres: bigint out of range.
+statement error
+SELECT CAST((-9223372036854775808) AS BIGINT) / CAST((-1) AS INT)
+
+# int8.sql:214
+query BIGINT nosort
+SELECT CAST((-9223372036854775808) AS BIGINT) % CAST((-1) AS INT)
+----
+0
+
+# int8.sql:215: Postgres: bigint out of range.
+statement error
+SELECT CAST((-9223372036854775808) AS BIGINT) * CAST((-1) AS INT)
+
+# int8.sql:216: Postgres: bigint out of range.
+statement error
+SELECT CAST((-9223372036854775808) AS BIGINT) / CAST((-1) AS INT)
+
+# int8.sql:217
+query BIGINT nosort
+SELECT CAST((-9223372036854775808) AS BIGINT) % CAST((-1) AS INT)
+----
+0
+
+# For int8.sql:220: its VALUES list in FROM is the table float8_values of
+# its rows, each x::float8 written as the DOUBLE it is.
+statement ok
+CREATE TABLE float8_values (x DOUBLE)
+
+statement ok
+INSERT INTO float8_values VALUES (-2.5), (-1.5), (-0.5), (0.0), (0.5), (1.5), (2.5)
+
+# int8.sql:220: rounding when casting from float.
+skipif transformer cast-truncates # a CAST of a DOUBLE to BIGINT truncates toward zero, where Postgres rounds half to even
+query DOUBLE,BIGINT rowsort
+SELECT x, CAST(x AS BIGINT) AS int8_value
+FROM float8_values t
+----
+-0.5	0
+-1.5	-2
+-2.5	-2
+0.0	0
+0.5	0
+1.5	2
+2.5	2
+
+onlyif transformer cast-truncates
+query DOUBLE,BIGINT rowsort
+SELECT x, CAST(x AS BIGINT) AS int8_value
+FROM float8_values t
+----
+-0.5	0
+-1.5	-1
+-2.5	-2
+0.0	0
+0.5	0
+1.5	1
+2.5	2
+
+# For int8.sql:230: its VALUES list is the table numeric_values of its rows,
+# each x::numeric written as the DECIMAL(2,1) it is.
+statement ok
+CREATE TABLE numeric_values (x DECIMAL(2,1))
+
+statement ok
+INSERT INTO numeric_values VALUES (-2.5), (-1.5), (-0.5), (0.0), (0.5), (1.5), (2.5)
+
+# int8.sql:230: rounding when casting from numeric.
+skipif transformer cast-truncates # a CAST of a DECIMAL to BIGINT truncates toward zero, where Postgres rounds half away from zero
+query DECIMAL(2,1),BIGINT rowsort
+SELECT x, CAST(x AS BIGINT) AS int8_value
+FROM numeric_values t
+----
+-0.5	-1
+-1.5	-2
+-2.5	-3
+0.0	0
+0.5	1
+1.5	2
+2.5	3
+
+onlyif transformer cast-truncates
+query DECIMAL(2,1),BIGINT rowsort
+SELECT x, CAST(x AS BIGINT) AS int8_value
+FROM numeric_values t
+----
+-0.5	0
+-1.5	-1
+-2.5	-2
+0.0	0
+0.5	0
+1.5	1
+2.5	2
+
+# int8.sql:267: non-decimal literals, int8 '...' written CAST('...' AS
+# BIGINT).
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no 0b prefix
+query BIGINT nosort
+SELECT CAST('0b100101' AS BIGINT)
+----
+37
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0b100101' AS BIGINT)
+----
+Cannot cast '0b100101' to long
+
+# int8.sql:268
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no 0o prefix
+query BIGINT nosort
+SELECT CAST('0o273' AS BIGINT)
+----
+187
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0o273' AS BIGINT)
+----
+Cannot cast '0o273' to long
+
+# int8.sql:269
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no 0x prefix
+query BIGINT nosort
+SELECT CAST('0x42F' AS BIGINT)
+----
+1071
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0x42F' AS BIGINT)
+----
+Cannot cast '0x42F' to long
+
+# int8.sql:271: Postgres: invalid input syntax for type bigint: "0b".
+statement error
+SELECT CAST('0b' AS BIGINT)
+
+# int8.sql:272: Postgres: invalid input syntax for type bigint: "0o".
+statement error
+SELECT CAST('0o' AS BIGINT)
+
+# int8.sql:273: Postgres: invalid input syntax for type bigint: "0x".
+statement error
+SELECT CAST('0x' AS BIGINT)
+
+# int8.sql:276: cases near overflow.
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no 0b prefix
+query BIGINT nosort
+SELECT CAST('0b111111111111111111111111111111111111111111111111111111111111111' AS BIGINT)
+----
+9223372036854775807
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0b111111111111111111111111111111111111111111111111111111111111111' AS BIGINT)
+----
+Cannot cast '0b111111111111111111111111111111111111111111111111111111111111111' to long
+
+# int8.sql:278
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no 0o prefix
+query BIGINT nosort
+SELECT CAST('0o777777777777777777777' AS BIGINT)
+----
+9223372036854775807
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0o777777777777777777777' AS BIGINT)
+----
+Cannot cast '0o777777777777777777777' to long
+
+# int8.sql:280
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no 0x prefix
+query BIGINT nosort
+SELECT CAST('0x7FFFFFFFFFFFFFFF' AS BIGINT)
+----
+9223372036854775807
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0x7FFFFFFFFFFFFFFF' AS BIGINT)
+----
+Cannot cast '0x7FFFFFFFFFFFFFFF' to long
+
+# int8.sql:283
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no 0b prefix
+query BIGINT nosort
+SELECT CAST('-0b1000000000000000000000000000000000000000000000000000000000000000' AS BIGINT)
+----
+-9223372036854775808
+
+onlyif transformer int-text
+statement error
+SELECT CAST('-0b1000000000000000000000000000000000000000000000000000000000000000' AS BIGINT)
+----
+Cannot cast '-0b1000000000000000000000000000000000000000000000000000000000000000' to long
+
+# int8.sql:285
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no 0o prefix
+query BIGINT nosort
+SELECT CAST('-0o1000000000000000000000' AS BIGINT)
+----
+-9223372036854775808
+
+onlyif transformer int-text
+statement error
+SELECT CAST('-0o1000000000000000000000' AS BIGINT)
+----
+Cannot cast '-0o1000000000000000000000' to long
+
+# int8.sql:287
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no 0x prefix
+query BIGINT nosort
+SELECT CAST('-0x8000000000000000' AS BIGINT)
+----
+-9223372036854775808
+
+onlyif transformer int-text
+statement error
+SELECT CAST('-0x8000000000000000' AS BIGINT)
+----
+Cannot cast '-0x8000000000000000' to long
+
+# int8.sql:293: underscores.
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no _ between digits
+query BIGINT nosort
+SELECT CAST('1_000_000' AS BIGINT)
+----
+1000000
+
+onlyif transformer int-text
+statement error
+SELECT CAST('1_000_000' AS BIGINT)
+----
+Cannot cast '1_000_000' to long
+
+# int8.sql:294
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no _ between digits
+query BIGINT nosort
+SELECT CAST('1_2_3' AS BIGINT)
+----
+123
+
+onlyif transformer int-text
+statement error
+SELECT CAST('1_2_3' AS BIGINT)
+----
+Cannot cast '1_2_3' to long
+
+# int8.sql:295
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no 0x prefix or no _ between digits
+query BIGINT nosort
+SELECT CAST('0x1EEE_FFFF' AS BIGINT)
+----
+518979583
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0x1EEE_FFFF' AS BIGINT)
+----
+Cannot cast '0x1EEE_FFFF' to long
+
+# int8.sql:296
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no 0o prefix or no _ between digits
+query BIGINT nosort
+SELECT CAST('0o2_73' AS BIGINT)
+----
+187
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0o2_73' AS BIGINT)
+----
+Cannot cast '0o2_73' to long
+
+# int8.sql:297
+skipif transformer int-text # text casts to BIGINT by CSV's grammar, which has no 0b prefix or no _ between digits
+query BIGINT nosort
+SELECT CAST('0b_10_0101' AS BIGINT)
+----
+37
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0b_10_0101' AS BIGINT)
+----
+Cannot cast '0b_10_0101' to long
+
+# int8.sql:300: error cases. Postgres: invalid input syntax for type bigint:
+# "_100".
+statement error
+SELECT CAST('_100' AS BIGINT)
+
+# int8.sql:301: Postgres: invalid input syntax for type bigint: "100_".
+statement error
+SELECT CAST('100_' AS BIGINT)
+
+# int8.sql:302: Postgres: invalid input syntax for type bigint: "100__000".
+statement error
+SELECT CAST('100__000' AS BIGINT)

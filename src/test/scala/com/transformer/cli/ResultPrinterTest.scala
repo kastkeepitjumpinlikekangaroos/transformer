@@ -6,7 +6,6 @@ import org.junit.Assert._
 import org.junit.Test
 
 import java.io.{ByteArrayOutputStream, PrintStream}
-import java.nio.charset.StandardCharsets
 
 class ResultPrinterTest {
 

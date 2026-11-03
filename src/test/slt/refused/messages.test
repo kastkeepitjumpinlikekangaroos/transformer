@@ -119,6 +119,30 @@ SELECT CAST(a AS INTERVAL) FROM t
 ----
 INTERVAL
 
+# A DECIMAL is named with its precision and scale, which the message says
+# how to write.
+statement error
+SELECT CAST(a AS DECIMAL) FROM t
+----
+A CAST to DECIMAL names its precision and scale: write DECIMAL(p,s), with p digits in all (1 to 38) and s of them after the point (0 to p)
+
+statement error
+SELECT CAST(a AS NUMERIC(12)) FROM t
+----
+A CAST to NUMERIC names its precision and scale: write NUMERIC(p,s)
+
+statement error
+SELECT CAST(a AS DECIMAL(40,2)) FROM t
+----
+DECIMAL(40,2) is no DECIMAL: one has 1 to 38 digits in all, its precision, and 0 to that many after the point, its scale
+
+# Text a CAST to DECIMAL cannot hold is refused before the query runs, as any
+# other text a CAST cannot read is.
+statement error
+SELECT CAST('123.45' AS DECIMAL(4,2)) FROM t
+----
+Cannot cast '123.45' to decimal(4,2)
+
 statement error
 SELECT UPPER(x) FROM t
 ----
@@ -149,3 +173,131 @@ statement error
 SELECT SUM(a) OVER (ORDER BY a ROWS BETWEEN CURRENT ROW AND 9223372036854775808 FOLLOWING) FROM t
 ----
 FOLLOWING offset 9223372036854775808 is larger than the largest BIGINT, 9223372036854775807
+
+# The refusals the ledger's rules name (docs/gotchas.md, "Answers that differ
+# from other engines by design"), each the pin of its rule.
+onlyif transformer refused-text-arithmetic
+statement error
+SELECT s + 1 FROM t
+----
+Arithmetic on STRING is not supported; CAST it to a number, or use || to join text
+
+onlyif transformer refused-empty-in
+statement error
+SELECT a FROM t WHERE a IN ()
+----
+IN needs at least one value in its list
+
+onlyif transformer refused-empty-in
+statement error
+SELECT a FROM t WHERE a NOT IN ()
+----
+NOT IN needs at least one value in its list
+
+onlyif transformer refused-hex-literal
+statement error
+SELECT x'303132' FROM t
+----
+A hexadecimal literal is not supported
+
+onlyif transformer refused-parenthesized-join
+statement error
+SELECT l.a FROM (t AS l CROSS JOIN t AS r)
+----
+A parenthesized join in FROM is not supported; write the joins without the parentheses
+
+onlyif transformer window-constant-key
+statement error
+SELECT a, RANK() OVER (ORDER BY 'b') FROM t
+----
+ORDER BY 'b' reads no column, so it orders nothing
+
+onlyif transformer window-constant-key
+statement error
+SELECT a, SUM(b) OVER (PARTITION BY 1 + 0) FROM t
+----
+PARTITION BY 1 + 0 reads no column, so it partitions nothing
+
+onlyif transformer refused-text-comparison
+statement error
+SELECT a FROM t WHERE a = s
+----
+Cannot compare INT with STRING; only a string literal is read as an INT, so CAST the expression to INT, or the INT to STRING to compare text
+
+onlyif transformer refused-text-comparison
+statement error
+SELECT CAST(a AS DECIMAL(10,0)) = '1' FROM t
+----
+Cannot compare DECIMAL(10,0) with STRING
+
+onlyif transformer refused-text-branch
+statement error
+SELECT CASE WHEN a > 1 THEN a ELSE s END FROM t
+----
+CASE cannot mix INT and STRING; only a string literal is read as an INT, so CAST the STRING to INT, or the INT to STRING
+
+onlyif transformer refused-date-beside-timestamp
+statement error
+SELECT a FROM t WHERE DATE '2026-01-01' = TIMESTAMP '2026-01-01 00:00:00'
+----
+Cannot compare DATE with TIMESTAMP; CAST one side: a DATE as a TIMESTAMP is its midnight, a TIMESTAMP as a DATE its date in UTC
+
+onlyif transformer refused-decimal-beside-float
+statement error
+SELECT CAST(a AS DECIMAL(10,0)) + CAST(b AS DOUBLE) FROM t
+----
+Arithmetic on DECIMAL(10,0) and DOUBLE is not supported: a DOUBLE has no scale for a DECIMAL result to keep; CAST the DECIMAL to DOUBLE to compute in DOUBLE
+
+onlyif transformer refused-implicit-text
+statement error
+SELECT a || 'x' FROM t
+----
+|| on INT is not supported; CAST it to STRING
+
+onlyif transformer refused-implicit-number
+statement error
+SELECT ABS(s) FROM t
+----
+ABS on STRING is not supported; CAST it to a number
+
+onlyif transformer no-interval
+statement error
+SELECT CAST('1 day' AS INTERVAL)
+----
+Unsupported CAST target type: INTERVAL
+
+onlyif transformer no-array
+statement error
+SELECT CAST('{1}' AS INT[])
+----
+An array type in a CAST is not supported
+
+onlyif transformer no-uuid
+statement error
+SELECT CAST('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' AS UUID)
+----
+Unsupported CAST target type: UUID
+
+onlyif transformer no-timestamptz
+statement error
+SELECT CAST('2020-01-01 00:00:00+00' AS TIMESTAMPTZ)
+----
+Unsupported CAST target type: TIMESTAMPTZ
+
+onlyif transformer no-time
+statement error
+SELECT CAST('10:00:00' AS TIME)
+----
+Unsupported CAST target type: TIME
+
+onlyif transformer no-bytes
+statement error
+SELECT CAST('a' AS BYTES)
+----
+Unsupported CAST target type: BYTES
+
+onlyif transformer no-json
+statement error
+SELECT CAST('{}' AS JSONB)
+----
+Unsupported CAST target type: JSONB

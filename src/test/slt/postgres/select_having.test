@@ -1,0 +1,147 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/select_having.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/select_having.out at that commit, never the
+# engine's. Portions Copyright (c) 1996-2026, PostgreSQL Global Development
+# Group; Portions Copyright (c) 1994, The Regents of the University of
+# California. Distributed under the PostgreSQL License, a permissive license
+# whose text travels with every copy: it is COPYRIGHT beside this file.
+#
+# HAVING with GROUP BY and without it: a HAVING with no GROUP BY makes the
+# whole table one group, which it keeps or drops, so a query gives one row or
+# none, aggregates or not; a column outside an aggregate there is an error.
+# All 23 of the file's statements are here, each record naming the line of
+# select_having.sql it comes from, as Postgres wrote it. test_having's c
+# char(8) and d char are STRING columns, as the runner reads CHAR(n), each
+# value stored as written, unpadded: Postgres pads c to eight characters and
+# compares, groups, sorts and lowers it without the pad, so no answer here
+# depends on it, and psql's output does not show it. A result in no fixed
+# order is compared as rowsort. The engine's answer is Postgres's in every
+# record. At select_having.sql:48, 1/a meets a = 0, which is NULL in the
+# engine (div-zero-null) and an error in Postgres had it evaluated the WHERE;
+# both answer one row.
+
+# select_having.sql:6, load test data.
+statement ok
+CREATE TABLE test_having (a int, b int, c char(8), d char)
+
+# select_having.sql:7
+statement ok
+INSERT INTO test_having VALUES (0, 1, 'XXXX', 'A')
+
+# select_having.sql:8
+statement ok
+INSERT INTO test_having VALUES (1, 2, 'AAAA', 'b')
+
+# select_having.sql:9
+statement ok
+INSERT INTO test_having VALUES (2, 2, 'AAAA', 'c')
+
+# select_having.sql:10
+statement ok
+INSERT INTO test_having VALUES (3, 3, 'BBBB', 'D')
+
+# select_having.sql:11
+statement ok
+INSERT INTO test_having VALUES (4, 3, 'BBBB', 'e')
+
+# select_having.sql:12
+statement ok
+INSERT INTO test_having VALUES (5, 3, 'bbbb', 'F')
+
+# select_having.sql:13
+statement ok
+INSERT INTO test_having VALUES (6, 4, 'cccc', 'g')
+
+# select_having.sql:14
+statement ok
+INSERT INTO test_having VALUES (7, 4, 'cccc', 'h')
+
+# select_having.sql:15
+statement ok
+INSERT INTO test_having VALUES (8, 4, 'CCCC', 'I')
+
+# select_having.sql:16
+statement ok
+INSERT INTO test_having VALUES (9, 4, 'CCCC', 'j')
+
+# select_having.sql:18
+query INT,STRING nosort
+SELECT b, c FROM test_having
+	GROUP BY b, c HAVING count(*) = 1 ORDER BY b, c
+----
+1	XXXX
+3	bbbb
+
+# select_having.sql:22: HAVING is effectively equivalent to WHERE in this
+# case.
+query INT,STRING nosort
+SELECT b, c FROM test_having
+	GROUP BY b, c HAVING b = 3 ORDER BY b, c
+----
+3	BBBB
+3	bbbb
+
+# select_having.sql:25
+query STRING,BIGINT nosort
+SELECT lower(c), count(c) FROM test_having
+	GROUP BY lower(c) HAVING count(*) > 2 OR min(a) = max(a)
+	ORDER BY lower(c)
+----
+bbbb	3
+cccc	4
+xxxx	1
+
+# select_having.sql:29
+query STRING,INT nosort
+SELECT c, max(a) FROM test_having
+	GROUP BY c HAVING count(*) > 2 OR min(a) = max(a)
+	ORDER BY c
+----
+XXXX	0
+bbbb	5
+
+# select_having.sql:36: degenerate cases involving HAVING without GROUP BY.
+# Per SQL spec, these should generate 0 or 1 row, even without aggregates.
+query INT,INT nosort
+SELECT min(a), max(a) FROM test_having HAVING min(a) = max(a)
+----
+
+# select_having.sql:37
+query INT,INT nosort
+SELECT min(a), max(a) FROM test_having HAVING min(a) < max(a)
+----
+0	9
+
+# select_having.sql:40: errors, ungrouped column references. Postgres:
+# column "test_having.a" must appear in the GROUP BY clause or be used in an
+# aggregate function.
+statement error
+SELECT a FROM test_having HAVING min(a) < max(a)
+
+# select_having.sql:41. Postgres: as the record before.
+statement error
+SELECT 1 AS one FROM test_having HAVING a > 1
+
+# select_having.sql:44: the really degenerate case, which need not scan the
+# table at all.
+query INT nosort
+SELECT 1 AS one FROM test_having HAVING 1 > 2
+----
+
+# select_having.sql:45
+query INT nosort
+SELECT 1 AS one FROM test_having HAVING 1 < 2
+----
+1
+
+# select_having.sql:48: and just to prove that Postgres is not scanning the
+# table.
+query INT nosort
+SELECT 1 AS one FROM test_having WHERE 1/a = 1 HAVING 1 < 2
+----
+1
+
+# select_having.sql:50
+statement ok
+DROP TABLE test_having

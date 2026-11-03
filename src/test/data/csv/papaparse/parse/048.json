@@ -1,0 +1,20 @@
+{
+ "description": "Last field of a line is empty",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   ""
+  ],
+  [
+   "d",
+   "e",
+   "f"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

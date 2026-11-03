@@ -303,7 +303,6 @@ class SortExecTest {
     assertSortedByKeys("monotonicity", out, schema2, keys)
   }
 
-  private def row(values: Any*): Array[Any] = values.toArray
   private def row(a: Any, b: Any): Array[Any] = Array(a, b)
 }
 

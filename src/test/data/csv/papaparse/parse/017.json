@@ -1,0 +1,15 @@
+{
+ "description": "Row with enough fields but blank field at end",
+ "options": {
+  "header": "true"
+ },
+ "rows": [
+  {
+   "A": "a",
+   "B": "b",
+   "C": ""
+  }
+ ],
+ "fields": null,
+ "errors": []
+}

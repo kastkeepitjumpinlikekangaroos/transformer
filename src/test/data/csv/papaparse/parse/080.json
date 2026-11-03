@@ -1,0 +1,30 @@
+{
+ "description": "Using \\r\\n endings uses \\r\\n linebreak",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "b"
+  ],
+  [
+   "c",
+   "d"
+  ],
+  [
+   "e",
+   "f"
+  ],
+  [
+   "g",
+   "h"
+  ],
+  [
+   "i",
+   "j"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

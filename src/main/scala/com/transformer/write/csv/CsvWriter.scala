@@ -52,9 +52,12 @@ object CsvWriteOptions {
 }
 
 /** Writes a stream of [[ColumnarBatch]]es to a single CSV file, as
-  * [[CsvRowWriter]] writes rows. Writes go to a temp file in the same directory
-  * and are atomically renamed at close, so partial output never appears at the
-  * target path on failure.
+  * [[CsvRowWriter]] writes rows. The file is staged: written under a hidden
+  * temp name in the same directory (`.<name>.<nanos>.tmp`), which [[finish]]
+  * closes, and renamed to the target path by [[commit]]. [[close]] does both,
+  * for a file written on its own; a partitioned write finishes every part
+  * first and commits them together ([[CsvWriter.writePartitioned]]), so no
+  * part appears at its target path unless every part was written.
   */
 final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = CsvWriteOptions()) {
 
@@ -69,23 +72,53 @@ final class CsvWriter(target: Path, schema: Schema, options: CsvWriteOptions = C
   // write rather than reaching the file as `?`.
   private val out = new BufferedWriter(
     new OutputStreamWriter(Files.newOutputStream(tmp), CsvWriter.reportingEncoder(options.charset)))
+  LeakAudit.opened(this, s"the CSV file '$tmp', being written")
 
-  private val rows = new CsvRowWriter(out, schema, options, s"CSV file '$target'")
+  // The header is written here: one a charset cannot encode fails the
+  // writer, and its staged file goes. It was left open, and on disk
+  // (plans/testing/17's leak audit).
+  private val rows =
+    try new CsvRowWriter(out, schema, options, s"CSV file '$target'")
+    catch {
+      case e: Throwable =>
+        try out.close() catch { case _: Throwable => () }
+        LeakAudit.closed(this)
+        try Files.deleteIfExists(tmp) catch { case _: Throwable => () }
+        throw e
+    }
+
+  private var committed = false
 
   def write(batch: ColumnarBatch): Unit = rows.write(batch)
 
-  /** Flush, close, and atomically rename to the target path. */
-  def close(): Long = {
+  /** Flush and close the staged file, still under its temp name. Returns the
+    * rows written. */
+  def finish(): Long = {
     out.flush()
     out.close()
-    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+    LeakAudit.closed(this)
     rows.rowsWritten
   }
 
-  /** Discard any buffered output and remove the temp file. */
+  /** Rename the finished file to the target path, atomically. */
+  def commit(): Unit = {
+    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+    committed = true
+  }
+
+  /** Finish and commit: a file written on its own. Returns the rows written. */
+  def close(): Long = {
+    val n = finish()
+    commit()
+    n
+  }
+
+  /** Discard the file: the staged one, or the target once it is committed. */
   def abort(): Unit = {
     try out.close() catch { case _: Throwable => () }
+    LeakAudit.closed(this)
     try Files.deleteIfExists(tmp) catch { case _: Throwable => () }
+    if (committed) try Files.deleteIfExists(target) catch { case _: Throwable => () }
     ()
   }
 }
@@ -230,35 +263,41 @@ object CsvWriter {
 
   /** Write a sequence of partition iterators into `targetDir` as
     * `part-00000.csv`, `part-00001.csv`, ... — one file per input partition,
-    * each written in parallel via its own [[CsvWriter]] (atomic temp + rename).
-    * With no partitions at all (a query over a parquet file with no row
-    * groups has none), one empty part file is written, so the directory
-    * reads back as the empty table rather than as no file.
+    * each staged in parallel through its own [[CsvWriter]]. With no partitions
+    * at all (a query over a parquet file with no row groups has none), one
+    * empty part file is written, so the directory reads back as the empty
+    * table rather than as no file.
     *
-    * If any partition fails, every in-flight part writer is aborted and the
-    * thrown exception is rethrown.
+    * Once every partition is written the parts are committed, renamed to
+    * their names in partition order. If any partition fails, or a rename
+    * does, every part is discarded, staged or committed, and the failure is
+    * rethrown: the directory gains no part file.
     *
-    * Returns the total number of rows written across all parts.
+    * Returns the part files committed and the rows they hold.
     */
   def writePartitioned(
       targetDir: Path,
       schema: Schema,
       partitions: IndexedSeq[Iterator[ColumnarBatch]],
       options: CsvWriteOptions = CsvWriteOptions()
-  ): Long = {
+  ): WrittenParts = {
     Files.createDirectories(targetDir)
-    val n = partitions.length
-    if (n == 0) return writeAll(targetDir.resolve("part-00000.csv"), schema, Iterator.empty, options)
+    val parts = if (partitions.isEmpty) IndexedSeq(Iterator.empty) else partitions
+    val n = parts.length
+    val names = Vector.tabulate(n)(i => "part-%05d.csv".formatLocal(Locale.ROOT, i))
     val writers = new Array[CsvWriter](n)
     val tasks: Seq[Callable[Long]] = (0 until n).map { i =>
       new Callable[Long] {
         def call(): Long = {
-          val target = targetDir.resolve("part-%05d.csv".formatLocal(Locale.ROOT, i))
-          val w = new CsvWriter(target, schema, options)
+          val w = new CsvWriter(targetDir.resolve(names(i)), schema, options)
           writers(i) = w
-          val it = partitions(i)
-          while (it.hasNext) w.write(it.next())
-          w.close()
+          val it = parts(i)
+          var first = true
+          while (it.hasNext) {
+            w.write(it.next())
+            if (first) { first = false; Faults.at(Faults.FirstBatch) }
+          }
+          w.finish()
         }
       }
     }
@@ -269,11 +308,15 @@ object CsvWriter {
       try total += f.await()
       catch { case t: Throwable => if (firstError == null) firstError = t }
     }
+    if (firstError == null) {
+      try writers.foreach { w => Chaos.at(Chaos.WriterCommit); Faults.at(Faults.Commit); w.commit() }
+      catch { case t: Throwable => firstError = t }
+    }
     if (firstError != null) {
       abortAll(writers)
       throw firstError
     }
-    total
+    WrittenParts(names, total)
   }
 
   private def abortAll(writers: Array[CsvWriter]): Unit = {

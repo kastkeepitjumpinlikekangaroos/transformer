@@ -1,6 +1,9 @@
 # Plan 07: the compiler warns, and a warning fails the build
 
-> Status: **not started** · from the 2026-11-01 test survey, category 9 of 9
+> Status: **done** 2026-11-02 (d4cf5a1, 7519079, 0eff1a9, 029c683, 1c885d5,
+> b8ede39 W2; 9991420 W3; b0cb011, ab3dba2 W4; see [Outcome](#outcome); every open
+> decision taken overnight as recommended, not yet confirmed by the user) ·
+> from the 2026-11-01 test survey, category 9 of 9
 > (part 1; part 2 is [19](19-mutation-testing.md)) · Effort: 2-3 days ·
 > Risk: low (no behaviour changes but the defects the warnings find) ·
 > Depends on: none; land it early, so the plans after it are held to it
@@ -198,6 +201,8 @@ set the checker to `"error"`. Fewer dependencies mean fewer rebuilds, which
      about this code.
    - **(c) Only deprecations, unused code and exhaustivity:** cheaper, but
      leaves out the flag that found a defect.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 2. **Test code.**
    - **(a) The same set (recommended)**, but for `-Wnonunit-statement`
      (405 in tests, mostly fixtures and drained iterators) and `infer-any`
@@ -205,15 +210,24 @@ set the checker to `"error"`. Fewer dependencies mean fewer rebuilds, which
      `-Wconf:src=` filter. The broken coverage-guard message was in a test.
    - **(b) Tests get no new errors.**
    - **(c) Every category the same everywhere.**
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
+   `infer-any` is in no category decision 1 chose, so it is off everywhere,
+   not only in tests.
 3. **Unused BUILD dependencies.**
    - **(a) Error, after W1 measures and W4 removes them (recommended).**
    - **(b) Leave the checker off.**
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 4. **`-Wunused:params`** (4 in main code: `Ops.apply`'s `lt` and `rt` are part
    of a call shape, and two are leftovers).
    - **(a) Off (recommended):** an unused parameter of an API shape needs an
      annotation to say so, and the leftovers are found by reading W1's list
      once.
    - **(b) On, with `@unused` where meant.**
+
+   **(a), taken overnight as recommended, not yet confirmed by the user**:
+   `-Wunused:explicits` is off; `implicits`, which decision 1 names, is on.
 
 ## Decisions already made
 
@@ -301,3 +315,149 @@ Report at the end: the warning counts before and after per category, each
 defect a warning found (with its regression test), the deliberate offences
 that proved W3's errors fire, and the unused BUILD dependencies removed.
 ```
+
+## Outcome
+
+Implemented overnight on 2026-11-01 and 02, on branch `testing-round-3` from
+`31b4bca`. Plan 06 had landed after this plan was written (`5c2c5bc` to
+`31b4bca`), so every count here is measured against it. One commit per
+category in W2, then W3 and W4; each passed `bazel test //...` (66/66) and
+the jaffle-shop job (15/15 Succeeded, exit 0, JDK 21), and the last was
+rerun with `--nocache_test_results`.
+
+**W1, measured through Bazel**, in a scratch worktree with its own output
+base and a toolchain setting every flag the table above names, with
+`-Wconf:any:wv` and `unused_dependency_checker_mode = "warn"`:
+
+- The toolchain resolves to the root module's (`--toolchain_resolution_debug`:
+  `Selected //:scala_toolchain_impl`).
+- 2,159 sites, 2,384 warnings as printed: a source compiled into two targets
+  (a `*_fuzz_test` and its `*_fuzz_campaign`) prints twice. By category,
+  before (at `31b4bca`) and after (at `b0cb011`):
+
+  | category | main | (engine / desktop) | test | other | after: main / test / other |
+  |---|---|---|---|---|---|
+  | `w-flag-tostring-interpolated` | 138 | 100 / 38 | 558 | 22 | 140 / 560 / 22 |
+  | `other-pure-statement` | 62 | 41 / 21 | 450 | 6 | **0** / 452 / **0** |
+  | `w-flag-numeric-widen` | 18 | 3 / 15 | 375 | 0 | 18 / 376 / 0 |
+  | `lint-performance` | 70 | 49 / 21 | 87 | 3 | 70 / 87 / 3 |
+  | `w-flag-value-discard` | 40 | 20 / 20 | 65 | 0 | 40 / 67 / 0 |
+  | `lint-infer-any` | 0 | 0 / 0 | 89 | 0 | 0 / 89 / 0 |
+  | `lint-nonlocal-return` | 45 | 4 / 41 | 2 | 0 | 45 / 2 / 0 |
+  | `lint-universal-methods` | 0 | 0 / 0 | 44 | 0 | 0 / 44 / 0 |
+  | `deprecation` | 2 | 2 / 0 | 26 | 2 | **0** |
+  | `unused-imports` | 2 | 2 / 0 | 12 | 2 | **0** |
+  | `unused-privates` | 2 | 2 / 0 | 9 | 0 | **0** |
+  | `unused-params` (explicit) | 4 | 4 / 0 | 6 | 0 | 2 / 6 / 0 (off) |
+  | `other-match-analysis` | 6 | 6 / 0 | 2 | 0 | **0** |
+  | `unused-locals` | 1 | 1 / 0 | 3 | 0 | **0** |
+  | `unused-pat-vars` | 4 | 2 / 2 | 0 | 0 | **0** |
+  | `other-shadowing` | 1 | 1 / 0 | 0 | 0 | **0** |
+  | `lint-missing-interpolator` | 0 | 0 / 0 | 1 | 0 | **0** |
+  | total | 395 | 237 / 158 | 1,729 | 35 | 2,023 |
+
+  The test unused-value count after is the tests' own, which the build
+  allows. Against the direct-scalac table at `f309205`, test deprecations
+  are 26, not 46 (22 of them HashKeysTest's), `infer-any` 89 not 117 and
+  test numeric widening 375 not 421; plan 06's code and Bazel compiling each
+  target on its own account for the rest.
+- Per target, the refused categories sat in 38 targets: `core:hash_keys_test`
+  22 (deprecations), `sql/exec:exec` 17 (13 dropped values), `job:job` 15
+  (13 values, 2 deprecations), `gui:vim` 8, `sql/plan:plan` 8,
+  `benchmarks/micro:bench_lib` 7, `gui:gui` 7, `core:core` 6 (4 matches),
+  `fuzz:fuzz` 6, `write/parquet` 5, `viewer` 5, and 27 more with one to four.
+- 40 unused BUILD dependencies in 10 targets: `gui:gui` 9, `gui:components`
+  6, `examples/gui_app` 6, `read/parquet` 6, `write/parquet` 5, `viewer` 3,
+  `gui:vim_key_events_test` 2, and `jmh_generate`, `job_files_test` and
+  `distinct_exec_spill_test` one each.
+- `-Wconf:src=` matches the source's canonical path, the workspace file
+  behind Bazel's sandbox and execroot symlinks, by any suffix that starts at
+  a path segment: `src/test/scala/.*` silenced a test's warnings and left
+  main code's, `execroot/_main/src/test/scala/.*` matched nothing, and the
+  worktree's own directory name matched.
+- rules_scala's own Scala targets compile with the registered toolchain:
+  `test_discovery` (the JUnit runner's) and, with the checker on,
+  `dependency_analyzer`. Their deprecations (`Stream`, `JavaConverters`)
+  failed the first W3 build, so the toolchain silences
+  `src=external/rules_scala[^/]*/.*`.
+
+**W2**, one commit per category, each site cleared rather than silenced; no
+`@nowarn` was needed anywhere:
+
+- `d4cf5a1` deprecations (30): `threadId()`, `TablesNamesFinder.getTables`,
+  HashKeysTest and KeyCodecBench passing `Array[DataType]` so the Array
+  overload applies, ExternalParquet's writer naming the three settings the
+  deprecated constructor filled in, slt's `Char + String`.
+- `7519079` unused code (35 sites, and the two parameter leftovers W1 listed,
+  `splitEqualityKeys`' `rightWidth` and `WindowExec.emit`'s `childSchema`).
+- `0eff1a9` unsealed matches (8): `Row`'s four getters, `Funcs`' ABS,
+  `CsvRowParser`'s state and the oracle `WindowFrames`.
+- `029c683` the missing interpolator; `1c885d5` the shadowing pattern.
+- `b8ede39` dropped values: 62 statements in main code and 6 in the
+  benchmarks, each read or dropped with `val _ = ...`.
+
+**W3**, `9991420`: the toolchain in the root `BUILD.bazel`, registered in
+`MODULE.bazel` (whose dead `scala_toolchains` stanza went). Deliberate
+offences in a scratch worktree, not committed, each failed its build: an
+unused import in `core` ("Unused import"), a match over the sealed
+`DataType` missing a case ("match may not be exhaustive. It would fail on
+the following inputs: BinaryType, ..."), a dropped `Set.add` Boolean in
+`core` ("unused value of type Boolean"), and in a test an unchecked
+`List[Int]` pattern ("No warnings can be incurred under -Werror") and a
+missing interpolator; the same dropped Boolean in a test compiled.
+
+**W4**, `b0cb011` (and `ab3dba2`, a comment): the 40 dependencies removed, or moved to `runtime_deps`
+where something loads them only as it runs (commons-collections and
+Hadoop's mapreduce classes for both parquet modules, slf4j-nop for
+read/parquet, the JavaFX mac jars of `gui_app`), and the checker set to
+`"error"`. Every Scala and Java target's runtime classpath
+(`transitive_runtime_jars`, 117 targets) is the same set of jars as before.
+Deliberate offence: `temporal` listed in `core_types_test` fails it ("is
+specified as a dependency ... but isn't used").
+
+**Defects and findings.**
+
+- The `ResultPersister` defect was already fixed: `5c2c5bc` (plan 06) moved
+  `ResultPersister` onto `OutputDirectory`, which refuses a directory of
+  stray parts, and plan 06's three `ResultPersister` tests failed at its
+  base. No Boolean is dropped there now.
+- The coverage-guard message printed `${entry.example.get}` (fixed,
+  `029c683`).
+- `Row.getInt` and its siblings, and the row path's ABS, threw a bare
+  `MatchError` on a value they had no case for; they fail naming it now,
+  pinned by `rowGettersNameAValueTheyCannotRead` and
+  `funcAbsOfANonNumberNamesIt`, which fail at `31b4bca` with the
+  `MatchError` (checked in a scratch worktree there).
+- Found by the deprecation check: ParquetExternalFormatTest's expected
+  `Seq(4294967295L, 1.5f)` was widened to two FLOATs, so the BIGINT was
+  compared at float precision (fixed, `d4cf5a1`).
+- Found by the unused-local check: WindowExecSpillTest built the
+  `(k, row_number)` pairs its comment says it compares, and compared only
+  the keys the unspilled run saw (fixed, `7519079`).
+- **Held out, a behaviour change for the user to decide:** VimEngine's ex
+  `:join` on the last line ignores `join`'s false, so a macro runs on, where
+  normal-mode `J` and visual `J` fail the command and stop it. Neovim 0.11.4
+  (`--clean`) stops the macro for both: over `a\nb`,
+  `qa:join<CR>Ax<Esc>q@a` leaves `a bx` there and `a bxx` in the engine. The
+  drop is explicit (`val _ = join(...)`), behaviour unchanged.
+
+**Claude's calls within the decisions** (revisit if the user objects):
+
+- `-feature` is on and its category an error: feature warnings were already
+  on as a count, which `-Werror` fails; the flag prints each in full.
+- The test exemption is the unused-value message
+  (`msg=^unused value`), not the whole `other-pure-statement` category, so a
+  pure expression in statement position is still an error in a test.
+- `Row`'s getters throw a `ClassCastException`, as `getString`'s cast does;
+  ABS and the CSV parser's state an `IllegalStateException`, as other
+  internal invariants in `sql/plan` do.
+- A deliberate drop is `val _ = ...`; in a class body, where `val _` makes
+  a field (and warns), `: Unit`.
+- An unregistered `//:scala_toolchain_all_warnings`, taken with
+  `--extra_toolchains`, measures the full set (docs/testing.md), so W1 can
+  be rerun without editing the toolchain.
+
+**Not done.** The whole-suite configurations were not rerun (compile options
+change no bytecode), nor polymarket (every runtime classpath is unchanged).
+When `testing-round-3` merges into main, uncommitted work there compiles
+under these errors; the main tree was clean when this landed.

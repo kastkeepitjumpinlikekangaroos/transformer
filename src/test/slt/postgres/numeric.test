@@ -32,11 +32,15 @@
 # where Postgres's numeric keeps the scale each value has, and a number written
 # with a point is a DOUBLE in the engine. EXP, LN, LOG and the statistics,
 # DOUBLEs in the engine and numerics in Postgres, are compared as SQLite's R,
-# to three places. `skipif transformer` marks the 29 records the engine
-# answers otherwise by design, each with the reason: twenty of them are a
-# division by zero, a square root or logarithm outside its domain, and a
-# power with no real answer, which Postgres refuses and the engine answers
-# with NULL.
+# to three places. `skipif transformer <id>` marks the 29 records the engine
+# answers otherwise by design, each with the id of its rule in the ledger in
+# docs/gotchas.md and the reason: twenty of them are a division by zero
+# (div-zero-null), a square root or logarithm outside its domain, and a power
+# with no real answer (math-domain-null), which Postgres refuses and the
+# engine answers with NULL. After each, its twin, `onlyif transformer <id>`, is
+# the same statement with the engine's own answer; EXP and VARIANCE, DOUBLEs
+# whose last digits Java need not share, compare there as SQLite's T, to 15
+# significant digits.
 #
 # Left out (561 statements), by what they need:
 #  101  to_char(), to_number() or lc_numeric
@@ -499,7 +503,7 @@ INSERT INTO num_data VALUES
 (8, 74881),
 (9, -24926804.045047420)
 
-# numeric.sql:518: addition check.
+# numeric.sql:515-521: addition check.
 statement ok
 DELETE FROM num_result
 
@@ -529,7 +533,7 @@ SELECT t1.id1, t1.id2, t1.result, round(t2.expected, 10) as expected
     AND t1.result != round(t2.expected, 10)
 ----
 
-# numeric.sql:537: subtraction check.
+# numeric.sql:534-540: subtraction check.
 statement ok
 DELETE FROM num_result
 
@@ -559,7 +563,7 @@ SELECT t1.id1, t1.id2, t1.result, round(t2.expected, 40)
     AND t1.result != round(t2.expected, 40)
 ----
 
-# numeric.sql:556: multiply check. Postgres rounds each product to ten
+# numeric.sql:553-559: multiply check. Postgres rounds each product to ten
 # places as it stores it in num_result's numeric(210,10) column; the runner
 # stores only a value its column holds exactly, so the INSERT's SELECT says
 # the rounding, ROUND(..., 10), which rounds half away from zero as the
@@ -578,7 +582,7 @@ SELECT t1.id1, t1.id2, t1.result, t2.expected
     AND t1.result != t2.expected
 ----
 
-# numeric.sql:564, the storing rounding said as in the record before.
+# numeric.sql:561-567, the storing rounding said as in the record before.
 statement ok
 DELETE FROM num_result
 
@@ -593,7 +597,7 @@ SELECT t1.id1, t1.id2, t1.result, round(t2.expected, 30) as expected
     AND t1.result != round(t2.expected, 30)
 ----
 
-# numeric.sql:576: division check, the storing rounding said as for
+# numeric.sql:572-579: division check, the storing rounding said as for
 # the products, and '0.0' written 0.0 (a DECIMAL reads no string literal).
 statement ok
 DELETE FROM num_result
@@ -610,7 +614,7 @@ SELECT t1.id1, t1.id2, t1.result, t2.expected
     AND t1.result != t2.expected
 ----
 
-# numeric.sql:585, as the record before.
+# numeric.sql:581-588, as the record before.
 statement ok
 DELETE FROM num_result
 
@@ -630,44 +634,92 @@ SELECT t1.id1, t1.id2, t1.result, round(t2.expected, 80) as expected
 # whose statements over Infinity and NaN no DECIMAL holds; the twelve over
 # finite numbers are here, each 'x'::numeric written as the number x. An
 # integer divided by zero is NULL. Postgres: division by zero.
-skipif transformer # an integer divided by zero is NULL
+skipif transformer div-zero-null # an integer divided by zero is NULL
 statement error
 SELECT 0 / 0
 
+onlyif transformer div-zero-null
+query INT
+SELECT 0 / 0
+----
+NULL
+
 # numeric.sql:666. Postgres: division by zero.
-skipif transformer # an integer's remainder by zero is NULL
+skipif transformer div-zero-null # an integer's remainder by zero is NULL
 statement error
 SELECT 0 % 0
 
+onlyif transformer div-zero-null
+query INT
+SELECT 0 % 0
+----
+NULL
+
 # numeric.sql:695. Postgres: cannot take square root of a negative number.
-skipif transformer # a square root of less than zero is NULL, as a division by zero is
+skipif transformer math-domain-null # a square root of less than zero is NULL, as a division by zero is
 statement error
 SELECT sqrt(-1)
 
+onlyif transformer math-domain-null
+query DOUBLE
+SELECT sqrt(-1)
+----
+NULL
+
 # numeric.sql:706. Postgres: cannot take logarithm of zero.
-skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm of zero or less is NULL, as a division by zero is
 statement error
 SELECT ln(0)
 
+onlyif transformer math-domain-null
+query DOUBLE
+SELECT ln(0)
+----
+NULL
+
 # numeric.sql:707. Postgres: cannot take logarithm of a negative number.
-skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm of zero or less is NULL, as a division by zero is
 statement error
 SELECT ln(-1)
 
+onlyif transformer math-domain-null
+query DOUBLE
+SELECT ln(-1)
+----
+NULL
+
 # numeric.sql:716. Postgres: cannot take logarithm of zero.
-skipif transformer # a logarithm to a base of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm to a base of zero or less is NULL, as a division by zero is
 statement error
 SELECT log(0, 10)
 
+onlyif transformer math-domain-null
+query DOUBLE
+SELECT log(0, 10)
+----
+NULL
+
 # numeric.sql:717. Postgres: cannot take logarithm of zero.
-skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm of zero or less is NULL, as a division by zero is
 statement error
 SELECT log(10, 0)
 
+onlyif transformer math-domain-null
+query DOUBLE
+SELECT log(10, 0)
+----
+NULL
+
 # numeric.sql:730. Postgres: zero raised to a negative power is undefined.
-skipif transformer # zero to a negative power is NULL, as a division by zero is
+skipif transformer math-domain-null # zero to a negative power is NULL, as a division by zero is
 statement error
 SELECT power(0, -1)
+
+onlyif transformer math-domain-null
+query DOUBLE
+SELECT power(0, -1)
+----
+NULL
 
 # numeric.sql:733. POWER is a DOUBLE in the engine and a numeric in Postgres
 # (-8.0000000000000000), compared as SQLite's R, to three places.
@@ -678,9 +730,15 @@ SELECT power(-2, 3)
 
 # numeric.sql:734. Postgres: a negative number raised to a non-integer power
 # yields a complex result.
-skipif transformer # a negative number to a power that is not a whole number is NULL, as a division by zero is
+skipif transformer math-domain-null # a negative number to a power that is not a whole number is NULL, as a division by zero is
 statement error
 SELECT power(-2, 3.3)
+
+onlyif transformer math-domain-null
+query DOUBLE
+SELECT power(-2, 3.3)
+----
+NULL
 
 # numeric.sql:735, compared as the record before (Postgres: -0.5000000000000000).
 query R
@@ -690,9 +748,15 @@ SELECT power(-2, -1)
 
 # numeric.sql:736. Postgres: a negative number raised to a non-integer power
 # yields a complex result.
-skipif transformer # a negative number to a power that is not a whole number is NULL, as a division by zero is
+skipif transformer math-domain-null # a negative number to a power that is not a whole number is NULL, as a division by zero is
 statement error
 SELECT power(-2, -1.5)
+
+onlyif transformer math-domain-null
+query DOUBLE
+SELECT power(-2, -1.5)
+----
+NULL
 
 # numeric.sql:754: numeric AVG used to fail on some platforms. Postgres
 # prints -13430913.592242320700; the engine's AVG of a DECIMAL(18,10) is a
@@ -722,18 +786,30 @@ SELECT STDDEV(val) FROM num_data
 27791203.288
 
 # numeric.sql:758
-skipif transformer # VARIANCE is a DOUBLE, which at 7.7e14 holds no third decimal place (its nearest is 772350980172061.75)
+skipif transformer double-precision # VARIANCE is a DOUBLE, which at 7.7e14 holds no third decimal place (its nearest is 772350980172061.75)
 query R
 SELECT VARIANCE(val) FROM num_data
 ----
 772350980172061.697
 
+onlyif transformer double-precision
+query T
+SELECT VARIANCE(val) FROM num_data
+----
+772350980172062
+
 # numeric.sql:777: conversion to integers, each ::int8 and ::int4 written
 # as a CAST. Postgres reads -9223372036854775808.5 as a numeric and rounds it
 # to -9223372036854775809, past BIGINT.
-skipif transformer # the number is a DOUBLE, -2^63 exactly, and a CAST to an integer truncates, so no error
+skipif transformer cast-truncates # the number is a DOUBLE, -2^63 exactly, and a CAST to an integer truncates, so no error
 statement error
 SELECT CAST((-9223372036854775808.5) AS BIGINT)
+
+onlyif transformer cast-truncates
+query BIGINT
+SELECT CAST((-9223372036854775808.5) AS BIGINT)
+----
+-9223372036854775808
 
 # numeric.sql:778
 query BIGINT
@@ -742,20 +818,32 @@ SELECT CAST((-9223372036854775808.4) AS BIGINT)
 -9223372036854775808
 
 # numeric.sql:779
-skipif transformer # the number is a DOUBLE, and the one nearest 9223372036854775807.4 is 2^63, past BIGINT, so the CAST fails
+skipif transformer double-literal # the number is a DOUBLE, and the one nearest 9223372036854775807.4 is 2^63, past BIGINT, so the CAST fails
 query BIGINT
 SELECT CAST(9223372036854775807.4 AS BIGINT)
 ----
 9223372036854775807
+
+onlyif transformer double-literal
+statement error
+SELECT CAST(9223372036854775807.4 AS BIGINT)
+----
+Integer overflow: 9.223372036854776E18 does not fit BIGINT
 
 # numeric.sql:780. Postgres: bigint out of range.
 statement error
 SELECT CAST(9223372036854775807.5 AS BIGINT)
 
 # numeric.sql:781. Postgres rounds to -2147483649, past INT.
-skipif transformer # a CAST to an integer truncates, so the answer is -2147483648
+skipif transformer cast-truncates # a CAST to an integer truncates, so the answer is -2147483648
 statement error
 SELECT CAST((-2147483648.5) AS INT)
+
+onlyif transformer cast-truncates
+query INT
+SELECT CAST((-2147483648.5) AS INT)
+----
+-2147483648
 
 # numeric.sql:782
 query INT
@@ -770,9 +858,15 @@ SELECT CAST(2147483647.4 AS INT)
 2147483647
 
 # numeric.sql:784. Postgres rounds to 2147483648, past INT.
-skipif transformer # a CAST to an integer truncates, so the answer is 2147483647
+skipif transformer cast-truncates # a CAST to an integer truncates, so the answer is 2147483647
 statement error
 SELECT CAST(2147483647.5 AS INT)
+
+onlyif transformer cast-truncates
+query INT
+SELECT CAST(2147483647.5 AS INT)
+----
+2147483647
 
 # numeric.sql:815: ceil(), floor() and round(). The unconstrained numeric
 # column is a DECIMAL(10,7), the scale of its most precise value, and each
@@ -860,11 +954,17 @@ select 12345678901234567890 % 123
 78
 
 # numeric.sql:1258. Postgres's quotient rounds to an integer.
-skipif transformer # the DECIMAL quotient's type keeps six places: 100371373180768844.634146
+skipif transformer decimal-result-type # the DECIMAL quotient's type keeps six places: 100371373180768844.634146
 query DECIMAL(26,6)
 select 12345678901234567890 / 123
 ----
 100371373180768845.000000
+
+onlyif transformer decimal-result-type
+query DECIMAL(26,6)
+select 12345678901234567890 / 123
+----
+100371373180768844.634146
 
 # numeric.sql:1347: EXP(), LN() and LOG() over numbers written with a point,
 # which are numerics in Postgres and DOUBLEs in the engine, as are the
@@ -881,11 +981,17 @@ select exp(1.0)
 2.718
 
 # numeric.sql:1357
-skipif transformer # 32.999 is a DOUBLE, a little above 32.999, whose exp is 214429043492155.55
+skipif transformer double-literal # 32.999 is a DOUBLE, a little above 32.999, whose exp is 214429043492155.55
 query R
 select exp(32.999)
 ----
 214429043492155.053
+
+onlyif transformer double-literal
+query T
+select exp(32.999)
+----
+214429043492156
 
 # numeric.sql:1358
 query R
@@ -894,11 +1000,17 @@ select exp(-32.999)
 0.000
 
 # numeric.sql:1359
-skipif transformer # EXP is a DOUBLE, which holds 17 of the answer's 54 digits
+skipif transformer double-precision # EXP is a DOUBLE, which holds 17 of the answer's 54 digits
 query R
 select exp(123.456)
 ----
 413294435277809344957685441227343146614594393746575438.725
+
+onlyif transformer double-precision
+query T
+select exp(123.456)
+----
+4.13294435277811e+53
 
 # numeric.sql:1360
 query R
@@ -907,21 +1019,39 @@ select exp(-123.456)
 0.000
 
 # numeric.sql:1363
-skipif transformer # EXP is a DOUBLE, and the answer is past its range: Infinity
+skipif transformer double-range # EXP is a DOUBLE, and the answer is past its range: Infinity
 query R
 select exp(1234.5678)
 ----
 146549072930959479983482138503979804217622199675223653966270157446954995433819741094410764947112047906012815540251009949604426069672532417736057033099274204598385314594846509975629046864798765888104789074984927709616261452461385220475510438783429612447831614003668421849727379202555580791042606170523016207262965336641214601082882495255771621327088265411334088968112458492660609809762865582162764292604697957813514621259353683899630997077707406305730694385703091201347848855199354307506425820147289848677003277208302716466011827836279231.967
 
+onlyif transformer double-range
+query DOUBLE
+select exp(1234.5678)
+----
+Infinity
+
 # numeric.sql:1394. Postgres: cannot take logarithm of a negative number.
-skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm of zero or less is NULL, as a division by zero is
 statement error
 select ln(-12.34)
 
+onlyif transformer math-domain-null
+query DOUBLE
+select ln(-12.34)
+----
+NULL
+
 # numeric.sql:1395. Postgres: cannot take logarithm of zero.
-skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm of zero or less is NULL, as a division by zero is
 statement error
 select ln(0.0)
+
+onlyif transformer math-domain-null
+query DOUBLE
+select ln(0.0)
+----
+NULL
 
 # numeric.sql:1398: LN() over some random values.
 query R
@@ -975,14 +1105,26 @@ select ln(9.342536355e34)
 # base-10 logarithm, which the engine spells LOG10 (it refuses a one-argument
 # LOG, whose base engines disagree on), so log(x) is written log10(x).
 # Postgres: cannot take logarithm of a negative number.
-skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm of zero or less is NULL, as a division by zero is
 statement error
 select log10(-12.34)
 
+onlyif transformer math-domain-null
+query DOUBLE
+select log10(-12.34)
+----
+NULL
+
 # numeric.sql:1413. Postgres: cannot take logarithm of zero.
-skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm of zero or less is NULL, as a division by zero is
 statement error
 select log10(0.0)
+
+onlyif transformer math-domain-null
+query DOUBLE
+select log10(0.0)
+----
+NULL
 
 # numeric.sql:1416: some random values.
 query R
@@ -1021,34 +1163,70 @@ select log10(590489.45235237)
 5.771
 
 # numeric.sql:1428. Postgres: cannot take logarithm of a negative number.
-skipif transformer # a logarithm to a base of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm to a base of zero or less is NULL, as a division by zero is
 statement error
 select log(-12.34, 56.78)
 
+onlyif transformer math-domain-null
+query DOUBLE
+select log(-12.34, 56.78)
+----
+NULL
+
 # numeric.sql:1429. Postgres: cannot take logarithm of a negative number.
-skipif transformer # a logarithm of zero or less, or to a base of zero or less, is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm of zero or less, or to a base of zero or less, is NULL, as a division by zero is
 statement error
 select log(-12.34, -56.78)
 
+onlyif transformer math-domain-null
+query DOUBLE
+select log(-12.34, -56.78)
+----
+NULL
+
 # numeric.sql:1430. Postgres: cannot take logarithm of a negative number.
-skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm of zero or less is NULL, as a division by zero is
 statement error
 select log(12.34, -56.78)
 
+onlyif transformer math-domain-null
+query DOUBLE
+select log(12.34, -56.78)
+----
+NULL
+
 # numeric.sql:1431. Postgres: cannot take logarithm of zero.
-skipif transformer # a logarithm to a base of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm to a base of zero or less is NULL, as a division by zero is
 statement error
 select log(0.0, 12.34)
 
+onlyif transformer math-domain-null
+query DOUBLE
+select log(0.0, 12.34)
+----
+NULL
+
 # numeric.sql:1432. Postgres: cannot take logarithm of zero.
-skipif transformer # a logarithm of zero or less is NULL, as a division by zero is
+skipif transformer math-domain-null # a logarithm of zero or less is NULL, as a division by zero is
 statement error
 select log(12.34, 0.0)
 
+onlyif transformer math-domain-null
+query DOUBLE
+select log(12.34, 0.0)
+----
+NULL
+
 # numeric.sql:1433. Postgres: division by zero.
-skipif transformer # a logarithm to base 1 is NULL: every power of 1 is 1
+skipif transformer math-domain-null # a logarithm to base 1 is NULL: every power of 1 is 1
 statement error
 select log(1.0, 12.34)
+
+onlyif transformer math-domain-null
+query DOUBLE
+select log(1.0, 12.34)
+----
+NULL
 
 # numeric.sql:1436: LOG() with an arbitrary base, some random values.
 query R

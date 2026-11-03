@@ -6,6 +6,7 @@ import org.apache.parquet.column.ParquetProperties
 import org.apache.parquet.column.ParquetProperties.WriterVersion
 import org.apache.parquet.example.data.Group
 import org.apache.parquet.example.data.simple.SimpleGroupFactory
+import org.apache.parquet.format.{FileMetaData, Util}
 import org.apache.parquet.hadoop.{ParquetFileWriter, ParquetReader => MrReader}
 import org.apache.parquet.hadoop.example.{ExampleParquetWriter, GroupReadSupport}
 import org.apache.parquet.hadoop.metadata.CompressionCodecName
@@ -14,6 +15,9 @@ import org.apache.parquet.io.api.Binary
 import org.apache.parquet.schema.{MessageType, MessageTypeParser}
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
+import java.nio.{ByteBuffer, ByteOrder}
+import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
@@ -138,7 +142,9 @@ object ExternalParquet {
         HadoopOutputFile.fromPath(new HPath(path.toUri), conf), schema, ParquetFileWriter.Mode.CREATE,
         // The groups are already cut; this bounds only padding, of which
         // there is none.
-        org.apache.parquet.hadoop.ParquetWriter.DEFAULT_BLOCK_SIZE.toLong, 0)
+        org.apache.parquet.hadoop.ParquetWriter.DEFAULT_BLOCK_SIZE.toLong, 0,
+        ParquetProperties.DEFAULT_COLUMN_INDEX_TRUNCATE_LENGTH, ParquetProperties.DEFAULT_STATISTICS_TRUNCATE_LENGTH,
+        ParquetProperties.DEFAULT_PAGE_WRITE_CHECKSUM_ENABLED)
       writer.start()
       groups.zipWithIndex.foreach { case ((rows, layout), i) =>
         val part = parts.resolve(s"group-$i.parquet")
@@ -187,8 +193,43 @@ object ExternalParquet {
     out.toSeq
   }
 
+  /** Rewrite the footer of the file at `path` in place: `edit` changes the
+    * format's own Thrift record of it (`org.apache.parquet.format`), as a
+    * writer that got a field wrong would have written it. The pages are left
+    * as they are, so every offset the footer gives still holds. */
+  def rewriteFooter(path: Path)(edit: FileMetaData => Unit): Unit =
+    rewriteFooterBytes(path) { bytes =>
+      val metadata = Util.readFileMetaData(new ByteArrayInputStream(bytes))
+      edit(metadata)
+      val footer = new ByteArrayOutputStream
+      Util.writeFileMetaData(metadata, footer)
+      footer.toByteArray
+    }
+
+  /** Rewrite the footer of the file at `path` in place as bytes: `edit`
+    * takes the footer's compact Thrift and gives the footer to write, which
+    * may say what the format's Thrift classes cannot hold, such as a logical
+    * type newer than they are. `magic` ends the file. */
+  def rewriteFooterBytes(path: Path, magic: String = "PAR1")(edit: Array[Byte] => Array[Byte]): Unit = {
+    val bytes = Files.readAllBytes(path)
+    val footerLength = ByteBuffer.wrap(bytes, bytes.length - 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt
+    val footerStart = bytes.length - 8 - footerLength
+    val footer = edit(java.util.Arrays.copyOfRange(bytes, footerStart, footerStart + footerLength))
+    val out = new ByteArrayOutputStream
+    out.write(bytes, 0, footerStart)
+    out.write(footer)
+    out.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(footer.length).array)
+    out.write(magic.getBytes(StandardCharsets.US_ASCII))
+    Files.write(path, out.toByteArray)
+  }
+
   /** The footer schema of `path`, as parquet-mr reads it. */
   def footerSchema(path: Path): MessageType = footer(path).getFileMetaData.getSchema
+
+  /** Where each column chunk's first data page starts, by row group and then
+    * column, in file order. */
+  def dataPageOffsets(path: Path): Seq[Seq[Long]] =
+    footer(path).getBlocks.asScala.map(_.getColumns.asScala.map(_.getFirstDataPageOffset).toSeq).toSeq
 
   /** The number of rows in each row group of `path`, in file order. */
   def rowGroupSizes(path: Path): Seq[Long] = footer(path).getBlocks.asScala.map(_.getRowCount).toSeq

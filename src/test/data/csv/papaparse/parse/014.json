@@ -1,0 +1,26 @@
+{
+ "description": "Row with too many fields",
+ "options": {
+  "header": "true"
+ },
+ "rows": [
+  {
+   "A": "a",
+   "B": "b",
+   "C": "c",
+   "__parsed_extra": [
+    "d",
+    "e"
+   ]
+  },
+  {
+   "A": "f",
+   "B": "g",
+   "C": "h"
+  }
+ ],
+ "fields": null,
+ "errors": [
+  "TooManyFields"
+ ]
+}

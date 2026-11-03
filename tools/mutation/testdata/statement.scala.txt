@@ -1,0 +1,34 @@
+object Statement {
+  def f(w: Writer, dir: Option[Dir]): Unit = {
+    w.write("x")
+    dir.foreach(_.close())
+    if (w.ok)
+      w.flush()
+    val n = w.count()
+    w.abort()
+  }
+  def g(w: Writer): Unit =
+    w.close()
+  def h(w: Writer): Int = {
+    w.reset()
+      .count()
+  }
+  def i(xs: Seq[Int]): Unit = xs match {
+    case Nil =>
+      println("none")
+      println("again")
+    case _ => println("some")
+  }
+  def j(w: Writer): Option[Int] = {
+    w.flush()
+    Some(w.count())
+  }
+  def k(w: Writer): Int = {
+    w.flush()
+    w.count()
+  }
+  def l(w: Writer): Unit = {
+    w.flush()
+    w.close()
+  }
+}

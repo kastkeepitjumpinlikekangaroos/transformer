@@ -1,6 +1,6 @@
 package com.transformer.gui
 
-import com.transformer.gui.SqlHighlighter.{Kind, Token}
+import com.transformer.gui.SqlHighlighter.Kind
 
 import org.junit.Assert._
 import org.junit.Test
@@ -11,9 +11,6 @@ class SqlHighlighterTest {
 
   private def kinds(sql: String): Seq[Kind] =
     SqlHighlighter.tokenize(sql).filterNot(_.kind == Kind.Whitespace).map(_.kind)
-
-  private def texts(sql: String): Seq[String] =
-    SqlHighlighter.tokenize(sql).filterNot(_.kind == Kind.Whitespace).map(_.text)
 
   @Test def emptyAndNull(): Unit = {
     assertTrue(SqlHighlighter.tokenize("").isEmpty)

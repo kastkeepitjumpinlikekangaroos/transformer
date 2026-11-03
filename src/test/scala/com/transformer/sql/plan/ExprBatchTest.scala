@@ -110,7 +110,6 @@ class ExprBatchTest {
   // Null mask predicates.
   // ---------------------------------------------------------------------------
 
-  private val NoNulls: Int => Boolean = _ => false
   private val EveryOther: Int => Boolean = _ % 2 == 0
   private val AllNulls: Int => Boolean = _ => true
 
@@ -372,6 +371,83 @@ class ExprBatchTest {
   @Test def castSameTypeIdentity(): Unit = {
     val b = batch("x" -> intCol(i => i, EveryOther))
     assertParity(CastExpr(ColRefExpr(0, "x", DataType.IntType), DataType.IntType), b)
+  }
+
+  /** `e` over `b` on both paths, which must each fail with an exception of
+    * `cls` and the message `msg`: the vector path over the whole batch, the
+    * row path at `row`. */
+  private def assertFailsBothWays(e: Expr, b: ColumnarBatch, row: Int, cls: Class[_ <: Throwable], msg: String): Unit =
+    for ((path, attempt) <- Seq[(String, () => Any)]("evalVec" -> (() => e.evalVec(b)), "eval" -> (() => e.eval(b, row)))) {
+      val thrown = try { attempt(); null } catch { case t: Throwable => t }
+      assertNotNull(s"$path of $e did not fail", thrown)
+      assertEquals(s"$path of $e", cls, thrown.getClass)
+      assertEquals(s"$path of $e", msg, thrown.getMessage)
+    }
+
+  /** A query's CAST to DECIMAL(p,s) fits every value to the type on both
+    * paths: a number rounded half up to the scale (a FLOAT or DOUBLE as the
+    * decimal it prints as), and an error past the precision; an integer too,
+    * which the binder's own cast reads at any width. */
+  @Test def writtenDecimalCastFitsEveryNumber(): Unit = {
+    val t = DataType.DecimalType(5, 2)
+    val decs = Seq("1.2345", "-1.2355", "0.0050", "-0.0050", "999.994")
+    val fromDecimal = DecimalCastExpr(ColRefExpr(0, "x", DataType.DecimalType(18, 4)), t)
+    val db = batch("x" -> decCol(DataType.DecimalType(18, 4), i => decs(i % decs.length), _ % 7 == 0))
+    assertParity(fromDecimal, db)
+    val expected = Seq("1.23", "-1.24", "0.01", "-0.01", "999.99")
+    (0 until N).filterNot(_ % 7 == 0).foreach { i =>
+      assertEquals(s"row $i", new java.math.BigDecimal(expected(i % decs.length)), fromDecimal.eval(db, i))
+    }
+    val doubles = Seq(2.675, -2.675, 0.1, 1e-300)
+    val fromDouble = DecimalCastExpr(ColRefExpr(0, "d", DataType.DoubleType), t)
+    val dbl = batch("d" -> doubleCol(i => doubles(i % 4), _ % 7 == 0))
+    assertParity(fromDouble, dbl)
+    // Rows 1 to 4 hold -2.675, 0.1, 1e-300 and 2.675.
+    assertEquals(Seq("-2.68", "0.10", "0.00", "2.68").map(new java.math.BigDecimal(_)), (1 to 4).map(fromDouble.eval(dbl, _)))
+    val floats = batch("f" -> floatCol(i => if (i % 2 == 0) 0.1f else 33.335f))
+    assertEquals(new java.math.BigDecimal("33.34"), DecimalCastExpr(ColRefExpr(0, "f", DataType.FloatType), t).eval(floats, 1))
+    assertParity(DecimalCastExpr(ColRefExpr(0, "f", DataType.FloatType), t), floats)
+    val ints = batch("i" -> intCol(i => i * 10 - 300, EveryOther))
+    val fromInt = DecimalCastExpr(ColRefExpr(0, "i", DataType.IntType), t)
+    assertParity(fromInt, ints)
+    assertEquals(new java.math.BigDecimal("-290.00"), fromInt.eval(ints, 1))
+    val longs = batch("l" -> longCol(i => 1000L + i, EveryOther))
+    assertFailsBothWays(DecimalCastExpr(ColRefExpr(0, "l", DataType.LongType), t), longs, 1,
+      Predef.classOf[ArithmeticException], "Decimal overflow: 1001 does not fit decimal(5,2)")
+    val past = batch("d" -> doubleCol(_ => 999.995))
+    assertFailsBothWays(fromDouble, past, 0, Predef.classOf[ArithmeticException], "Decimal overflow: 999.995 does not fit decimal(5,2)")
+  }
+
+  /** NaN and the infinities have no decimal; text is read by CSV's decimal
+    * grammar, then fitted, and is an error naming it when it is no number or
+    * too long for the type; a BOOLEAN is 1 or 0; NULL stays NULL. */
+  @Test def writtenDecimalCastOfOtherValues(): Unit = {
+    val t = DataType.DecimalType(5, 1)
+    for ((v, i) <- SpecialDoubles.zipWithIndex if v.isNaN || v.isInfinite) {
+      val b = batch("d" -> doubleCol(_ => v))
+      assertFailsBothWays(DecimalCastExpr(ColRefExpr(0, "d", DataType.DoubleType), t), b, i,
+        Predef.classOf[IllegalArgumentException], s"Cannot cast $v to decimal(5,1)")
+    }
+    val texts = Seq("-1.5e2", "007.25", ".05", "+3")
+    val fromText = DecimalCastExpr(ColRefExpr(0, "s", DataType.StringType), t)
+    val sb = batch("s" -> stringCol(i => texts(i % texts.length), _ % 5 == 0))
+    assertParity(fromText, sb)
+    // Rows 1 to 4 hold "007.25", ".05", "+3" and "-1.5e2".
+    assertEquals(Seq("7.3", "0.1", "3.0", "-150.0").map(new java.math.BigDecimal(_)), (1 to 4).map(fromText.eval(sb, _)))
+    for (bad <- Seq("1e9", "x", " 1", "NaN", "1d", "")) {
+      assertFailsBothWays(fromText, batch("s" -> stringCol(_ => bad)), 0, Predef.classOf[IllegalArgumentException],
+        s"Cannot cast '$bad' to decimal(5,1)")
+    }
+    val bools = batch("b" -> boolCol(i => i % 3 == 0, _ % 5 == 0))
+    val fromBool = DecimalCastExpr(ColRefExpr(0, "b", DataType.BooleanType), t)
+    assertParity(fromBool, bools)
+    assertEquals(new java.math.BigDecimal("1.0"), fromBool.eval(bools, 3))
+    assertEquals(new java.math.BigDecimal("0.0"), fromBool.eval(bools, 1))
+    assertFailsBothWays(DecimalCastExpr(ColRefExpr(0, "b", DataType.BooleanType), DataType.DecimalType(1, 1)),
+      batch("b" -> boolCol(_ => true)), 0, Predef.classOf[ArithmeticException], "Decimal overflow: 1 does not fit decimal(1,1)")
+    val nulls = batch("i" -> intCol(i => i, AllNulls))
+    assertParity(DecimalCastExpr(ColRefExpr(0, "i", DataType.IntType), t), nulls)
+    assertNull(DecimalCastExpr(LitExpr(null, DataType.NullType), t).eval(nulls, 0))
   }
 
   // ===========================================================================
@@ -1229,6 +1305,15 @@ class ExprBatchTest {
     * both paths. Both computed in DOUBLE, and the vector path returned a
     * DoubleVector under the DECIMAL type: the parity fuzzer's first finding over
     * a decimal column. */
+  /** ABS of a value that is not a number is a binder's mistake, refused
+    * naming the value: the match on the argument had no case for one, so it
+    * threw a bare MatchError. */
+  @Test def funcAbsOfANonNumberNamesIt(): Unit = {
+    val e = assertThrows(scala.Predef.classOf[IllegalStateException],
+      () => Funcs("ABS", Seq("seven"), DataType.IntType, Seq(DataType.StringType)))
+    assertEquals("ABS of seven, a java.lang.String, not a number", e.getMessage)
+  }
+
   @Test def funcAbsDecimal(): Unit = {
     val dt = DataType.DecimalType(38, 3)
     val b = batch("x" -> decCol(dt, i => SpecialDecimals(i % 8), i => i % 13 == 0))

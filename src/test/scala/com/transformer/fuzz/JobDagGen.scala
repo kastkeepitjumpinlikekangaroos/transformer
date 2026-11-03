@@ -1,7 +1,7 @@
 package com.transformer.fuzz
 
-import com.transformer.core.{Catalog, ExecutedQuery, ExecutionOptions, SqlExecutor}
-import com.transformer.job.{DataJob, InputFilePath, JobFiles, JobRunRecord, OutputFilePath, SQLTask, TaskRunRecord, Validation}
+import com.transformer.core.{Catalog, ExecutedQuery, ExecutionOptions, Faults, SqlExecutor}
+import com.transformer.job.{DataJob, InputFilePath, JobFiles, JobInputRecord, JobRunRecord, OutputFilePath, SQLTask, TaskRunRecord, Validation}
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 
 import java.nio.file.{Files, Path, StandardOpenOption}
@@ -36,6 +36,10 @@ import java.time.{Duration, Instant}
   *     to. A broken input points at a path matching no file, so its load fails
   *     the same way. A share of cases also declare an input no task reads,
   *     broken or not, whose failure must fail nothing and show as a warning.
+  *     A share of the failing tasks with an output directory fail after they
+  *     start writing it instead: one on a row of a later partition while its
+  *     parts are written ([[FailsWhileWriting]]), one in a validation that
+  *     overflows after its output is written ([[FailsInValidation]]).
   *
   * Per-task writer/spill/metrics knobs are drawn too, so concurrently running
   * tasks exercise the parquet and CSV writers, the shared spill directory, and
@@ -66,6 +70,30 @@ object JobDagGen {
   case object Fails extends Outcome
   /** Runs, then a validation returns rows. */
   case object ValidationFails extends Outcome
+  /** Fails while its parts are written: a last arm reads [[PoisonView]], an
+    * input of two part files whose second holds a value that doubled is past
+    * INT, and doubles it. */
+  case object FailsWhileWriting extends Outcome
+  /** Fails after its output is written: a validation's SQL overflows INT on
+    * every row. */
+  case object FailsInValidation extends Outcome
+
+  /** Whether a task rigged with `o` fails when it runs. */
+  def fails(o: Outcome): Boolean = o == Fails || o == FailsWhileWriting || o == FailsInValidation
+
+  /** The input a [[FailsWhileWriting]] task reads: two part files, the second
+    * ending in a value whose double is past INT. */
+  val PoisonView: String = "poison"
+
+  /** What [[PoisonView]]'s two files hold, `k,v` as every input. */
+  val PoisonFiles: Vector[(String, String)] = Vector(
+    "part-0.csv" -> "k,v\n0,0\n1,10\n",
+    "part-1.csv" -> "k,v\n2,20\n3,2000000000\n")
+
+  /** The validation a [[FailsInValidation]] task carries: its SQL overflows
+    * INT on the first row it reads. */
+  def overflowingValidation(view: String): GenValidation =
+    GenValidation("overflows", s"SELECT k FROM $view WHERE v + 2147483647 + 1 < 0")
 
   /** One generated input. `broken` points the path at a name that matches no
     * file, so `InputResolver.resolve` throws and the load reports failure. */
@@ -210,7 +238,7 @@ object JobDagGen {
   /** One mutation of a finished case's output tree — what a crash, a bad copy or
     * a hand edit leaves behind. It touches the latest run's files only, and a
     * task it names has an output directory. */
-  sealed abstract class Corruption(val name: String)
+  sealed abstract class Corruption(val name: String) extends Serializable
   object Corruption {
     /** The task's `_run.json` is gone. */
     final case class DeleteRecord(task: Int) extends Corruption("delete a record")
@@ -236,14 +264,47 @@ object JobDagGen {
       "x", "}", "{\"taskName\": \"other\"}", Seq(0, 0).map(_.toChar).mkString, ",\n]")
   }
 
+  /** One run of a case stopped by a fault: before the run at index `run`
+    * (over the outputs the same run left, cleanly, when `overEarlier`, so
+    * clearing has files to delete), an attempt runs with `arming` armed
+    * ([[Faults]]); then the run itself runs clean, the rerun a failed run
+    * gets. In this JVM the action throws; the crash campaign halts a child
+    * JVM. */
+  final case class FaultPlan(run: Int, arming: Faults.Arming, overEarlier: Boolean) {
+    override def toString: String = s"run $run, $arming${if (overEarlier) " over the run's own output" else ""}"
+  }
+
   /** A whole generated job. Rendered to a runnable [[DataJob]] by [[build]],
     * which needs a scratch directory for the input CSVs and task outputs.
-    * `corruption` is applied to the finished tree by [[corrupt]]. */
+    * `corruption` is applied to the finished tree by [[corrupt]]; `fault`
+    * stops one run before it reruns clean ([[FaultPlan]]). */
   final case class JobCase(
       inputs: Vector[GenInput],
       tasks: Vector[GenTask],
       layout: RunLayout,
-      corruption: Option[Corruption] = None) {
+      corruption: Option[Corruption] = None,
+      fault: Option[FaultPlan] = None) {
+
+    /** [[fault]], while it names a run the layout has: a shrink can drop one. */
+    def faultPlan: Option[FaultPlan] = fault.filter(_.run < layout.runs)
+
+    /** Whether a task reads [[PoisonView]]. */
+    def poisoned: Boolean = tasks.exists(_.outcome == FailsWhileWriting)
+
+    /** What `job.json` records task `t`'s main SQL reading from outside the
+      * job: its inputs, and [[PoisonView]] for a [[FailsWhileWriting]] task,
+      * by name, sorted. */
+    def readsInputs(t: GenTask): Vector[String] =
+      (t.inputSrcs.distinct.map(i => inputs(i).view) ++
+        (if (t.outcome == FailsWhileWriting) Vector(PoisonView) else Vector.empty)).sorted
+
+    /** Every input as `job.json` records it: the drawn ones, and
+      * [[PoisonView]] after them when a task reads it. */
+    def inputRecords(root: Path): Vector[JobInputRecord] =
+      inputs.map(in => JobInputRecord(in.view, inputPath(root, in), "csv")) ++
+        (if (poisoned) Vector(JobInputRecord(PoisonView, poisonGlob(root), "csv")) else Vector.empty)
+
+    private def poisonGlob(root: Path): String = root.resolve("in").resolve(PoisonView).toString + "/*.csv"
 
     /** The directory every run writes under, templated if the layout is — what
       * `DirectoryJobLoader` calls `outputDir`. */
@@ -341,15 +402,22 @@ object JobDagGen {
         Files.writeString(inputFile(root, in), sb.toString)
         InputFilePath(inputPath(root, in), viewName = in.view, cache = in.index % 2 == 0)
       }
+      val poison =
+        if (!poisoned) Vector.empty
+        else {
+          val dir = Files.createDirectories(root.resolve("in").resolve(PoisonView))
+          PoisonFiles.foreach { case (name, text) => Files.writeString(dir.resolve(name), text) }
+          Vector(InputFilePath(poisonGlob(root), viewName = PoisonView, cache = false))
+        }
       DataJob(
-        inputs = jobInputs,
+        inputs = jobInputs ++ poison,
         sql = tasks.map(t => sqlTask(t, root)),
         temporalVariables = Some(TemporalVariables(executionTime)),
         jobRunOutput = Some(OutputFilePath(manifestPath(root))))
     }
 
     /** The same job as a job directory, written through `JobFiles` (the GUI's
-      * own authoring path) to `root/job`: one input config per input, and per
+      * own authoring path) to `root/job`, once: one input config per input, and per
       * task its `main.sql`, its validations and an `output.json` with its format
       * and partition. Opened with [[outputDir]] as the output directory, it is
       * the job the runs ran: `DirectoryJobLoader` gives every table the output
@@ -358,10 +426,12 @@ object JobDagGen {
       * ever written to, since a table always has one. */
     def writeDirectoryJob(root: Path): Path = {
       val dir = root.resolve("job")
+      if (Files.isDirectory(dir)) return dir
       inputs.foreach { in =>
         JobFiles.addInput(dir, in.view, inputPath(root, in), format = None,
           cache = in.index % 2 == 0, options = Map.empty)
       }
+      if (poisoned) JobFiles.addInput(dir, PoisonView, poisonGlob(root), format = None, cache = false, options = Map.empty)
       tasks.foreach { t =>
         JobFiles.addTable(dir, t.view, mainSql(t),
           format = t.output.filter(_.parquet).map(_.format),
@@ -393,7 +463,8 @@ object JobDagGen {
            names.zip(Vector("k", "k, v")).map { case (name, cols) =>
              GenValidation(name, s"SELECT $cols FROM ${t.view}")
            }
-         })
+         }) ++
+        (if (t.outcome == FailsInValidation) Vector(overflowingValidation(t.view)) else Vector.empty)
 
     private def sqlTask(t: GenTask, root: Path): SQLTask =
       SQLTask(
@@ -408,14 +479,18 @@ object JobDagGen {
     /** `UNION ALL` over every source. A `Fails` task poisons its first arm with a
       * column that does not exist — the statement still parses, so the DAG keeps
       * the same edges and the failure lands in the worker. A task with an
-      * injected failure names its own column, so [[executor]] knows its SQL. */
+      * injected failure names its own column, so [[executor]] knows its SQL. A
+      * [[FailsWhileWriting]] task's last arm doubles [[PoisonView]]'s `v`,
+      * past INT on the last row of its second file. */
     def mainSql(t: GenTask): String = {
       val srcs = t.inputSrcs.map(i => inputs(i).view) ++ t.taskSrcs.map(j => s"t$j")
       val poison = if (t.failure.isDefined) s"failure_${t.view}" else "no_such_column"
-      srcs.iterator.zipWithIndex.map { case (s, arm) =>
+      val arms = srcs.iterator.zipWithIndex.map { case (s, arm) =>
         if (t.outcome == Fails && arm == 0) s"SELECT k, $poison AS v FROM $s"
         else s"SELECT k, v FROM $s"
-      }.mkString(" UNION ALL ")
+      }.toVector
+      (arms ++ (if (t.outcome == FailsWhileWriting) Vector(s"SELECT k, v * 2 AS v FROM $PoisonView") else Vector.empty))
+        .mkString(" UNION ALL ")
     }
 
     /** The executor a run uses: `engine`, except that a `Fails` task with an
@@ -461,7 +536,8 @@ object JobDagGen {
       }.mkString(", ")
       val dir = layout.runDir.map(d => s"runs/$d").getOrElse("out")
       val corrupt = corruption.map(c => s", corruption=$c").getOrElse("")
-      s"JobCase(inputs=[$ins], tasks=[$ts], dir=$dir, runs=[${layout.executionTimes.mkString(", ")}]$corrupt)"
+      val stopped = faultPlan.map(f => s", fault=$f").getOrElse("")
+      s"JobCase(inputs=[$ins], tasks=[$ts], dir=$dir, runs=[${layout.executionTimes.mkString(", ")}]$corrupt$stopped)"
     }
   }
 
@@ -512,8 +588,41 @@ object JobDagGen {
     val (layout, partitioned) = drawLayout(rng.split(), dag)
     val corruption = drawCorruption(rng.split(), partitioned)
     val named = drawStrings(rng.split(), partitioned)
-    JobCase(inputs ++ drawUnreadInput(rng.split(), nInputs), named, layout, Some(corruption))
+    val unread = drawUnreadInput(rng.split(), nInputs)
+    val rigged = drawWriteFailures(rng.split(), named)
+    JobCase(inputs ++ unread, rigged, layout, Some(corruption), drawFault(rng.split(), layout))
   }
+
+  /** A case of [[generate]] whose fault, if it has one, halts the JVM rather
+    * than throwing, and of which every case has one: the crash campaign's.
+    * Drawn from one more stream, so a seed's case is [[generate]]'s otherwise. */
+  def generateCrash(rng: Rng): JobCase = {
+    val jc = generate(rng)
+    val plan = jc.fault.orElse(drawFault(rng.split(), jc.layout, always = true))
+    jc.copy(fault = plan.map(p => p.copy(arming = p.arming.copy(action = Faults.Action.Halt))))
+  }
+
+  /** Two thirds of the failing tasks with an output directory and no injected
+    * message fail after they start writing it, half while their parts are
+    * written and half in a validation. Their statuses are the ones they had:
+    * only how they fail changes. */
+  private def drawWriteFailures(rng: Rng, tasks: Vector[GenTask]): Vector[GenTask] =
+    tasks.map { t =>
+      if (t.outcome == Fails && t.failure.isEmpty && t.output.isDefined && rng.bool(2.0 / 3))
+        t.copy(outcome = if (rng.bool()) FailsWhileWriting else FailsInValidation)
+      else t
+    }
+
+  /** Three tenths of the cases stop one of their runs with a fault: any
+    * point, reached the first time mostly, thrown as a failed write or a full
+    * disk's, over a fresh directory or the run's own earlier output. */
+  private def drawFault(rng: Rng, layout: RunLayout, always: Boolean = false): Option[FaultPlan] =
+    if (!always && !rng.bool(0.3)) None
+    else {
+      val action = if (rng.bool(0.8)) Faults.Action.Throw else Faults.Action.Enospc
+      val arming = Faults.Arming(rng.oneOf(Faults.Points), rng.weighted((6, 1), (2, 2), (1, 3)), action)
+      Some(FaultPlan(rng.nextInt(layout.runs), arming, overEarlier = rng.bool(0.5)))
+    }
 
   /** A quarter of the cases declare one more input that no task reads, the
     * way a user leaves one declared after they stop using it, and half of

@@ -1,8 +1,9 @@
 # From SQLite's sqllogictest corpus (https://www.sqlite.org/sqllogictest,
 # mirrored at https://github.com/gregrahn/sqllogictest): test/evidence/in2.test,
 # up to its 45th query this engine runs. Its COPYRIGHT lets it be copied
-# freely. `skipif transformer` marks a record the engine answers otherwise
-# by design, with the reason.
+# freely. `skipif transformer <id>` marks a record the engine answers
+# otherwise by design, with the id of its rule in the ledger in
+# docs/gotchas.md.
 
 
 # EVIDENCE-OF: R-52275-55503 When the right operand is an empty set, the
@@ -81,7 +82,7 @@ SELECT 1 FROM t1 WHERE '1' NOT IN ('2')
 #
 # Row 2: empty RHS
 
-skipif transformer # refused: IN needs at least one value in its list
+skipif transformer refused-empty-in
 skipif mysql # empty RHS
 skipif mssql # empty RHS
 skipif oracle # empty RHS
@@ -89,7 +90,7 @@ query I nosort
 SELECT 1 FROM t1 WHERE 1 IN ()
 ----
 
-skipif transformer # refused: IN needs at least one value in its list
+skipif transformer refused-empty-in
 skipif mysql # empty RHS
 skipif mssql # empty RHS
 skipif oracle # empty RHS
@@ -97,7 +98,7 @@ query I nosort
 SELECT 1 FROM t1 WHERE 1.0 IN ()
 ----
 
-skipif transformer # refused: IN needs at least one value in its list
+skipif transformer refused-empty-in
 skipif mysql # empty RHS
 skipif mssql # empty RHS
 skipif oracle # empty RHS
@@ -105,7 +106,7 @@ query I nosort
 SELECT 1 FROM t1 WHERE '1' IN ()
 ----
 
-skipif transformer # refused: IN needs at least one value in its list
+skipif transformer refused-empty-in
 skipif mysql # empty RHS
 skipif mssql # empty RHS
 skipif oracle # empty RHS
@@ -113,7 +114,7 @@ query I nosort
 SELECT 1 FROM t1 WHERE NULL IN ()
 ----
 
-skipif transformer # refused: NOT IN needs at least one value in its list
+skipif transformer refused-empty-in
 skipif mysql # empty RHS
 skipif mssql # empty RHS
 skipif oracle # empty RHS
@@ -124,7 +125,7 @@ SELECT 1 FROM t1 WHERE 1 NOT IN ()
 1
 1
 
-skipif transformer # refused: NOT IN needs at least one value in its list
+skipif transformer refused-empty-in
 skipif mysql # empty RHS
 skipif mssql # empty RHS
 skipif oracle # empty RHS
@@ -135,7 +136,7 @@ SELECT 1 FROM t1 WHERE 1.0 NOT IN ()
 1
 1
 
-skipif transformer # refused: NOT IN needs at least one value in its list
+skipif transformer refused-empty-in
 skipif mysql # empty RHS
 skipif mssql # empty RHS
 skipif oracle # empty RHS
@@ -146,7 +147,7 @@ SELECT 1 FROM t1 WHERE '1' NOT IN ()
 1
 1
 
-skipif transformer # refused: NOT IN needs at least one value in its list
+skipif transformer refused-empty-in
 skipif mysql # empty RHS
 skipif mssql # empty RHS
 skipif oracle # empty RHS
@@ -307,7 +308,7 @@ SELECT 1 FROM t1 WHERE NULL NOT IN ( NULL, '1' )
 # IN operator must be a scalar subquery if the left expression is not a
 # row value expression.
 
-skipif transformer # refused: IN with a subquery is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort
 SELECT 1 FROM t1 WHERE 1 IN (SELECT 1)
 ----

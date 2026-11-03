@@ -2,7 +2,7 @@ package com.transformer.read.csv
 
 import com.transformer.core._
 
-import java.io.{BufferedReader, InputStreamReader, Reader}
+import java.io.{BufferedInputStream, BufferedReader, InputStreamReader, Reader}
 import java.nio.charset.CodingErrorAction
 import java.nio.file.{Files, Path}
 
@@ -55,6 +55,9 @@ final class CsvReader(val files: IndexedSeq[Path], val options: CsvOptions) exte
   }
 
   def numPartitions: Int = files.length
+
+  /** Its strings are decoded text: the decoder refuses half a surrogate pair. */
+  override def stringsAreText: Boolean = true
 
   def readPartition(p: Int): Iterator[ColumnarBatch] = {
     require(p >= 0 && p < files.length, s"partition $p out of range [0,${files.length})")
@@ -128,7 +131,7 @@ object CsvReader {
           }
         } finally parser.close()
       }
-      if (i == 0 && width == 0) throw new IllegalArgumentException(s"CSV file ${files.head} is empty")
+      if (i == 0 && width == 0) throw new IllegalArgumentException(s"CSV file '${files.head}' is empty")
       if (i == 0 || sample.length > before) sampled += file
       i += 1
     }
@@ -179,12 +182,23 @@ object CsvReader {
   }
 
   /** `file` as text in the options' charset, failing on bytes that are no
-    * text in it rather than reading them as U+FFFD. */
-  private[csv] def open(file: Path, options: CsvOptions): Reader =
-    new BufferedReader(new InputStreamReader(Files.newInputStream(file),
-      options.charset.newDecoder()
+    * text in it rather than reading them as U+FFFD. A file that starts with
+    * gzip's magic bytes is refused as compressed, whatever the charset: one
+    * that decodes every byte would read it as text, and UTF-8 said only that
+    * its first line was no text. */
+  private[csv] def open(file: Path, options: CsvOptions): Reader = {
+    val in = new BufferedInputStream(Files.newInputStream(file))
+    try {
+      in.mark(2)
+      val magic = (in.read(), in.read())
+      in.reset()
+      if (magic == ((0x1f, 0x8b))) throw new IllegalArgumentException(
+        s"CSV file '$file' is compressed with gzip, and CSV is read as text: decompress it first")
+      new BufferedReader(new InputStreamReader(in, options.charset.newDecoder()
         .onMalformedInput(CodingErrorAction.REPORT)
         .onUnmappableCharacter(CodingErrorAction.REPORT)))
+    } catch { case e: Throwable => in.close(); throw e }
+  }
 
   /** Run `body` over `file`, naming the line of any bytes in it that are no
     * text in the charset. */
@@ -270,28 +284,35 @@ object CsvReader {
   * the first file's header names and that file, makes this file's own header
   * say where each column is ([[CsvReader.columnOrder]]); without it the
   * header is skipped and fields are read in the schema's order.
+  *
+  * The file is open from construction until the last row is read or
+  * [[close]] is called, whichever comes first, or the construction fails
+  * ([[Closing]]).
   */
 final class CsvPartitionIterator(file: Path, schema: Schema, options: CsvOptions, typeOrigin: Option[String] = None,
     header: Option[(Vector[String], Path)] = None)
-    extends Iterator[ColumnarBatch] {
+    extends Iterator[ColumnarBatch] with AutoCloseable {
 
   private val parser = CsvReader.naming(file, options)(new CsvRowParser(CsvReader.open(file, options), options, file.toString))
+  LeakAudit.opened(this, s"the CSV file '$file'")
   private val width = schema.length
   private val against = if (options.inferSchema) { if (options.header) "its header" else "its first row" } else "the schema"
+  private var closed: Boolean = false
   /** Where each schema column is in this file's rows; null when in order. */
   private val order: Array[Int] =
-    if (!options.header) null
-    else {
-      val names = CsvReader.naming(file, options)(CsvReader.nextNonBlank(parser)).map(CsvReader.headerNames(_, options))
-      header match {
-        case Some((expected, first)) => CsvReader.columnOrder(names, expected, file, first)
-        case None => null
+    try {
+      if (!options.header) null
+      else {
+        val names = CsvReader.naming(file, options)(CsvReader.nextNonBlank(parser)).map(CsvReader.headerNames(_, options))
+        header match {
+          case Some((expected, first)) => CsvReader.columnOrder(names, expected, file, first)
+          case None => null
+        }
       }
-    }
+    } catch { case e: Throwable => close(); throw e }
 
-  private var peeked: Option[Array[String]] = nextRow()
+  private var peeked: Option[Array[String]] = try nextRow() catch { case e: Throwable => close(); throw e }
   private var peekedLine: Long = parser.line
-  private var closed: Boolean = false
 
   /** The next row: in a file of two or more columns a blank line is no row. */
   private def nextRow(): Option[Array[String]] = CsvReader.naming(file, options) {
@@ -309,16 +330,18 @@ final class CsvPartitionIterator(file: Path, schema: Schema, options: CsvOptions
     }
   }
 
+  /** The next batch. A read that fails, on a row or a value the file cannot
+    * give, closes the file: nothing reads it after. */
   override def next(): ColumnarBatch = {
     if (!hasNext) throw new NoSuchElementException("CsvPartitionIterator exhausted")
     val batch = new ColumnarBatch(schema, options.batchSize)
     var rowIdx = 0
-    while (rowIdx < options.batchSize && peeked.isDefined) {
+    try while (rowIdx < options.batchSize && peeked.isDefined) {
       writeRow(batch, rowIdx, peeked.get)
       rowIdx += 1
       peeked = nextRow()
       peekedLine = parser.line
-    }
+    } catch { case e: Throwable => close(); throw e }
     batch.setNumRows(rowIdx)
     batch
   }
@@ -347,6 +370,13 @@ final class CsvPartitionIterator(file: Path, schema: Schema, options: CsvOptions
   private def ensureClosed(): Unit = if (!closed) {
     closed = true
     try parser.close() catch { case _: Throwable => () }
+    LeakAudit.closed(this)
+  }
+
+  /** Close the file, whether or not every row was read. */
+  def close(): Unit = {
+    peeked = None
+    ensureClosed()
   }
 }
 

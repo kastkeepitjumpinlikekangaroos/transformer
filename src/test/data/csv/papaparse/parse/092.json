@@ -1,0 +1,22 @@
+{
+ "description": "Quoted fields with spaces between closing quote and next delimiter and contains delimiter",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   ",B",
+   "C",
+   "D"
+  ],
+  [
+   "E",
+   "F",
+   "G",
+   "H"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

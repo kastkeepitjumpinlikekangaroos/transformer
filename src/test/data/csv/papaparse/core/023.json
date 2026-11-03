@@ -1,0 +1,17 @@
+{
+ "description": "Quoted field has invalid trailing quote before delimiter",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "b\"c,d\ne,f,g"
+  ]
+ ],
+ "fields": null,
+ "errors": [
+  "InvalidQuotes",
+  "MissingQuotes"
+ ]
+}

@@ -1,7 +1,7 @@
 package com.transformer.fuzz
 
 import com.transformer.core._
-import com.transformer.sql.plan.UnsupportedClauses
+import com.transformer.sql.plan.{FunctionCatalog, UnsupportedClauses}
 
 import java.util.Locale
 
@@ -41,11 +41,15 @@ import java.util.Locale
   *     and that is fine: the property over them is about how they fail.
   *
   * The catalog is the one the table's examples are written against, `t(a, b,
-  * s)` and `u(a, b)`, so an entry's own text is a query here. Its data is drawn
-  * small and from narrow pools, so a clause that can change an answer does:
-  * values repeat (DISTINCT), NULLs sit beside values (NULL placement), strings
-  * differ only in case (ILIKE) or hold an underscore and its escaped spelling
-  * (ESCAPE), and rows of `t` miss `u` (a join condition).
+  * s)` and `u(a, b)`, so an entry's own text is a query here, and `t` holds a
+  * column of each other type besides (`d` DECIMAL(9,2), `f` DOUBLE, `dt`
+  * DATE, `ts` TIMESTAMP, `bn` BINARY), which spellings and honoured clauses
+  * read too. Its data is drawn small and from narrow pools, so a clause that
+  * can change an answer does: values repeat (DISTINCT), NULLs sit beside
+  * values (NULL placement), strings differ only in case (ILIKE) or hold an
+  * underscore and its escaped spelling (ESCAPE), a decimal is written at
+  * several scales, a double is NaN or either zero, and rows of `t` miss `u`
+  * (a join condition).
   */
 object SqlTextGen {
 
@@ -53,8 +57,14 @@ object SqlTextGen {
   // The catalog
   // ===========================================================================
 
+  /** `t(a, b, s)`, the columns the clause table's examples read, and one of
+    * each other type the spellings and honoured clauses read too: `d` a
+    * DECIMAL(9,2), `f` a DOUBLE, `dt` a DATE, `ts` a TIMESTAMP and `bn` a
+    * BINARY. */
   val TSchema: Schema = Schema(Vector(
-    Field("a", DataType.IntType), Field("b", DataType.IntType), Field("s", DataType.StringType)))
+    Field("a", DataType.IntType), Field("b", DataType.IntType), Field("s", DataType.StringType),
+    Field("d", DataType.DecimalType(9, 2)), Field("f", DataType.DoubleType), Field("dt", DataType.DateType),
+    Field("ts", DataType.TimestampType), Field("bn", DataType.BinaryType)))
   val USchema: Schema = Schema(Vector(Field("a", DataType.IntType), Field("b", DataType.IntType)))
 
   /** The tables a case runs over, by the name a query uses for each. */
@@ -77,25 +87,48 @@ object SqlTextGen {
     * numbers and a date as text for the casts, and a quote. */
   private val TsPool: IndexedSeq[Any] = IndexedSeq(
     "", "a", "A", "ab", "Ab", "AB", "abc", "a_b", "a!_b", "a%b", "x", "7", "-1", "1.5", "2024-02-29", "it's")
+  /** One decimal at two and three scales beside its neighbours, so `=`, a
+    * BETWEEN and DISTINCT meet the value under several spellings. */
+  private val TdPool: IndexedSeq[Any] =
+    IndexedSeq("-2.50", "0", "0.00", "1", "1.0", "1.00", "2.50", "0.10", "0.20").map(new java.math.BigDecimal(_))
+  /** NaN, both zeros and the infinities beside ordinary doubles: what an IN
+    * list and a comparison of floats are easy to get wrong on. */
+  private val TfPool: IndexedSeq[Any] =
+    IndexedSeq(Double.NaN, -0.0, 0.0, 1.0, 2.5, -1.0, Double.PositiveInfinity, Double.NegativeInfinity)
+  private val TdtPool: IndexedSeq[Any] = ExprGen.DatePool.toIndexedSeq
+  private val TtsPool: IndexedSeq[Any] = ExprGen.TimestampPool.toIndexedSeq
+  private val TbnPool: IndexedSeq[Any] = ExprGen.BinaryPool.toIndexedSeq
   private val UaPool: IndexedSeq[Any] = IndexedSeq(0, 1, 2, 5)
   private val UbPool: IndexedSeq[Any] = IndexedSeq(0, 10, 100)
 
   /** Fixed rows of `t` and `u` for deterministic checks: every column holds a
     * NULL, `t.s` text no number cast reads, `t.a` a repeated value, and a row
     * of each table misses the other. */
-  val ReferenceTables: Tables = Tables(Vector(
+  val ReferenceTables: Tables = {
+    def dec(s: String): Any = new java.math.BigDecimal(s)
+    def date(s: String): Any = java.time.LocalDate.parse(s)
+    def instant(s: String): Any = java.time.Instant.parse(s)
+    def bytes(bs: Int*): Any = bs.map(_.toByte).toArray
+    Tables(Vector(
     "t" -> DataGen.Dataset(TSchema, IndexedSeq[Array[Any]](
-      Array[Any](1, 10, "x"), Array[Any](2, 20, "ab"), Array[Any](2, null, null), Array[Any](null, 30, "Ab"),
-      Array[Any](3, 40, "7"))),
+      Array[Any](1, 10, "x", dec("1.00"), 1.0, date("2024-02-29"), instant("2024-03-10T07:00:00Z"), bytes(1, 2)),
+      Array[Any](2, 20, "ab", dec("1"), Double.NaN, date("1970-01-01"), instant("1970-01-01T00:00:00Z"), bytes(1, 2)),
+      Array[Any](2, null, null, null, -0.0, null, null, null),
+      Array[Any](null, 30, "Ab", dec("2.50"), 0.0, date("2024-03-01"), instant("2024-03-10T07:00:00.000001Z"), bytes(0x81)),
+      Array[Any](3, 40, "7", dec("0.10"), null, date("2024-02-29"), null, bytes(1)))),
     "u" -> DataGen.Dataset(USchema, IndexedSeq[Array[Any]](
       Array[Any](1, 100), Array[Any](2, 200), Array[Any](5, 500), Array[Any](null, 0)))))
+  }
 
   /** `t` and `u`, each 0-16 rows; most of either 2-8. Each column has its own
-    * NULL density, from none to two in five. */
-  def genTables(rng: Rng): Tables =
+    * NULL density, from none to two in five. On two tables in five `t.s` also
+    * draws a slice of [[TextPool]], the text past ASCII, beside its own pool. */
+  def genTables(rng: Rng): Tables = {
+    val sPool = if (rng.bool(0.4)) TsPool ++ TextPool.slice(rng, 12) else TsPool
     Tables(Vector(
-      "t" -> genRows(rng.split(), TSchema, Vector(TaPool, TbPool, TsPool)),
+      "t" -> genRows(rng.split(), TSchema, Vector(TaPool, TbPool, sPool, TdPool, TfPool, TdtPool, TtsPool, TbnPool)),
       "u" -> genRows(rng.split(), USchema, Vector(UaPool, UbPool))))
+  }
 
   private def genRows(rng: Rng, schema: Schema, pools: Vector[IndexedSeq[Any]]): DataGen.Dataset = {
     val n = rng.weighted((1, 0), (2, 1), (9, -1), (3, -2)) match {
@@ -105,7 +138,7 @@ object SqlTextGen {
     }
     val nullProb = pools.map(_ => rng.weighted((3, 0.0), (4, 0.15), (2, 0.4)))
     val rows = IndexedSeq.fill(n)(
-      Array.tabulate[Any](schema.length)(c => if (rng.bool(nullProb(c))) null else rng.oneOf(pools(c))))
+      Array.tabulate[Any](schema.length)(c => if (rng.bool(nullProb(c))) null else DataGen.fresh(rng.oneOf(pools(c)))))
     DataGen.Dataset(schema, rows)
   }
 
@@ -514,7 +547,7 @@ object SqlTextGen {
     "m" -> rng.oneOf(Seq("1", "2", "3")),
     "n" -> rng.oneOf(Seq("1", "2", "3", "5")),
     "k" -> rng.oneOf(Seq("0", "1", "2", "10")),
-    "pat" -> rng.oneOf(Seq("'ab'", "'a%'", "'%B'", "'A_'", "'AB%'", "'_b'")),
+    "pat" -> rng.oneOf(Seq("'ab'", "'a%'", "'%B'", "'A_'", "'AB%'", "'_b'", "'SS'", "'I'", "'%i%'")),
     "epat" -> rng.oneOf(Seq("'a!_b'", "'a!%b'", "'%!_%'", "'!_%'")))
 
   /** Every row of `t` in a total order, so a cutoff between tied rows keeps
@@ -627,7 +660,16 @@ object SqlTextGen {
     Honoured("ROWS frame", "window", s"SELECT a, b, s, SUM(b) OVER ($TOrder ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS w FROM t",
       s"SELECT a, b, s, SUM(b) OVER ($TOrder) AS w FROM t"),
     Honoured("PARTITION BY", "window", "SELECT a, b, COUNT(*) OVER (PARTITION BY b) AS n FROM t",
-      "SELECT a, b, COUNT(*) OVER () AS n FROM t"))
+      "SELECT a, b, COUNT(*) OVER () AS n FROM t"),
+    // Over the catalog's other types, where the clause takes them.
+    Honoured("NULLS LAST", "ORDER BY a TIMESTAMP ... LIMIT", "SELECT ts, a, b, s FROM t ORDER BY ts NULLS LAST, a, b, s LIMIT {n}",
+      "SELECT ts, a, b, s FROM t ORDER BY ts, a, b, s LIMIT {n}"),
+    Honoured("DISTINCT", "over a DECIMAL", "SELECT DISTINCT d FROM t", "SELECT d FROM t"),
+    Honoured("DISTINCT", "over a BINARY", "SELECT DISTINCT bn FROM t", "SELECT bn FROM t"),
+    Honoured("WHERE", "over a DOUBLE", "SELECT a, f FROM t WHERE f > {k}", "SELECT a, f FROM t"),
+    Honoured("HAVING", "on a DATE key", "SELECT dt FROM t GROUP BY dt HAVING dt > DATE '2024-02-28'",
+      "SELECT dt FROM t GROUP BY dt"),
+    Honoured("COUNT(DISTINCT)", "over a DECIMAL", "SELECT COUNT(DISTINCT d) AS x FROM t", "SELECT COUNT(d) AS x FROM t"))
 
   private def fill(template: String, params: Map[String, String]): String =
     params.foldLeft(template) { case (s, (k, v)) => s.replace(s"{$k}", v) }
@@ -669,13 +711,21 @@ object SqlTextGen {
   }
 
   /** `{x}` and `{y}` numbers in `t.a`'s range, `x <= y` more often than not;
-    * `{n}` a row count; `{m}` an OFFSET; `{p}` a LIKE pattern. */
+    * `{n}` a row count; `{m}` an OFFSET; `{p}` a LIKE pattern, a third of the
+    * time one of [[TextPool.Patterns]]. */
   private def spellingParams(rng: Rng): Map[String, String] = {
     val x = rng.between(-1, 3)
     val y = if (rng.bool(0.8)) rng.between(x, 3) else rng.between(-1, 3)
+    val pattern =
+      if (rng.bool(0.35)) "'" + rng.oneOf(TextPool.Patterns).replace("'", "''") + "'"
+      else rng.oneOf(Seq("'ab'", "'a%'", "'%B'", "'A_'", "'_b'"))
+    val dates = ExprGen.DatePool.map(_.toString).sorted
+    val (d1, d2) = { val i = rng.between(0, dates.length - 1); val j = rng.between(0, dates.length - 1); (dates(i), dates(j)) }
     Map("x" -> x.toString, "y" -> y.toString,
-      "n" -> rng.oneOf(Seq("1", "2", "3", "5")), "m" -> rng.oneOf(Seq("1", "2", "3")),
-      "p" -> rng.oneOf(Seq("'ab'", "'a%'", "'%B'", "'A_'", "'_b'")))
+      "n" -> rng.oneOf(Seq("1", "2", "3", "5")), "m" -> rng.oneOf(Seq("1", "2", "3")), "p" -> pattern,
+      "dx" -> rng.oneOf(Seq("-1", "0", "0.1", "1", "1.00", "2.5")), "dy" -> rng.oneOf(Seq("0", "1.0", "2.50", "3")),
+      "fx" -> rng.oneOf(Seq("0.0", "1.0", "2.5", "-1.0")),
+      "date1" -> (if (rng.bool(0.8) && d2 < d1) d2 else d1), "date2" -> (if (rng.bool(0.8) && d2 < d1) d1 else d2))
   }
 
   private def where(p: String): String = s"$TAll WHERE $p"
@@ -794,6 +844,54 @@ object SqlTextGen {
       "SELECT CASE WHEN a = {x} THEN NULL ELSE a END AS v FROM t"), Some("SELECT a AS v FROM t")),
     Spelling("ILIKE", Vector(where("s ILIKE {p}"), where("LOWER(s) LIKE LOWER({p})"), where("UPPER(s) LIKE UPPER({p})")),
       Some(where("s LIKE {p}"))),
+    // The string rules over the pool's text past ASCII: a string's length in
+    // characters (code points) whatever its case, SUBSTRING parting it
+    // between two characters and never inside one, LIKE's `_` matching one
+    // character, and one order for MIN, a window's ORDER BY and RANK, and one
+    // grouping for GROUP BY and PARTITION BY.
+    Spelling("LENGTH", Vector("SELECT LENGTH(s) AS n FROM t", "SELECT LEN(s) AS n FROM t",
+      "SELECT LENGTH(UPPER(s)) AS n FROM t", "SELECT LENGTH(LOWER(s)) AS n FROM t"), None),
+    Spelling("SUBSTRING parts", Vector("SELECT s AS v FROM t", "SELECT SUBSTRING(s, 1, 1) || SUBSTRING(s, 2) AS v FROM t",
+      "SELECT CONCAT(SUBSTRING(s, 1, 2), SUBSTRING(s, 3)) AS v FROM t"), None),
+    Spelling("SUBSTRING to the end", Vector("SELECT SUBSTRING(s, 2) AS v FROM t",
+      "SELECT SUBSTRING(s, 2, LENGTH(s)) AS v FROM t", "SELECT SUBSTRING(s, 2, LENGTH(s) + 1) AS v FROM t"), None),
+    Spelling("LIKE one character", Vector(where("s LIKE '_'"), where("LENGTH(s) = 1"),
+      where("s LIKE '_%' AND NOT s LIKE '__%'")), Some(TAll)),
+    Spelling("LIKE two characters", Vector(where("s LIKE '__'"), where("LENGTH(s) = 2")), Some(TAll)),
+    Spelling("MIN as the first in order", Vector("SELECT b, MIN(s) AS m FROM t WHERE s IS NOT NULL GROUP BY b",
+      "WITH r AS (SELECT b, s, RANK() OVER (PARTITION BY b ORDER BY s) AS k FROM t WHERE s IS NOT NULL) " +
+        "SELECT DISTINCT b, s AS m FROM r WHERE k = 1"), None),
+    Spelling("MAX as the last in order", Vector("SELECT b, MAX(s) AS m FROM t WHERE s IS NOT NULL GROUP BY b",
+      "WITH r AS (SELECT b, s, DENSE_RANK() OVER (PARTITION BY b ORDER BY s DESC) AS k FROM t WHERE s IS NOT NULL) " +
+        "SELECT DISTINCT b, s AS m FROM r WHERE k = 1"), None),
+    Spelling("GROUP BY as PARTITION BY", Vector("SELECT s, COUNT(*) AS n FROM t GROUP BY s",
+      "SELECT DISTINCT s, COUNT(*) OVER (PARTITION BY s) AS n FROM t"), None),
+    Spelling("ORDER BY a string", Vector("SELECT s FROM t ORDER BY s LIMIT {n}", "SELECT s FROM t ORDER BY 1 LIMIT {n}",
+      "SELECT s FROM t ORDER BY s ASC NULLS FIRST LIMIT {n}"), Some("SELECT s FROM t ORDER BY s DESC LIMIT {n}")),
+    // The catalog's other types: a BETWEEN over a DECIMAL at several scales
+    // and over a DATE (its bounds written as DATE literals or as the text a
+    // DATE reads), IN over a DOUBLE holding NaN and both zeros, a conditional
+    // over a DECIMAL beside an INT, NULLS LAST over a TIMESTAMP, and the
+    // groupings over a BINARY and a DOUBLE.
+    Spelling("BETWEEN over a DECIMAL", Vector(where("d BETWEEN {dx} AND {dy}"), where("d >= {dx} AND d <= {dy}"),
+      where("NOT (d < {dx} OR d > {dy})")), Some(TAll)),
+    Spelling("BETWEEN over a DATE", Vector(where("dt BETWEEN DATE '{date1}' AND DATE '{date2}'"),
+      where("dt >= DATE '{date1}' AND dt <= DATE '{date2}'"), where("dt BETWEEN '{date1}' AND '{date2}'")), Some(TAll)),
+    Spelling("IN over a DOUBLE", Vector(where("f IN ({fx}, -0.0, CAST('NaN' AS DOUBLE))"),
+      where("f = {fx} OR f = -0.0 OR f = CAST('NaN' AS DOUBLE)"),
+      where("NOT (f NOT IN ({fx}, -0.0, CAST('NaN' AS DOUBLE)))")), Some(TAll)),
+    Spelling("NOT IN over a DOUBLE", Vector(where("f NOT IN ({fx}, 0.0)"), where("f <> {fx} AND f <> 0.0"),
+      where("NOT (f IN ({fx}, -0.0))")), Some(TAll)),
+    Spelling("conditionals over a DECIMAL beside an INT", Vector("SELECT COALESCE(d, a) AS v FROM t",
+      "SELECT CASE WHEN d IS NOT NULL THEN d ELSE a END AS v FROM t", "SELECT IF(d IS NULL, a, d) AS v FROM t"),
+      Some("SELECT CAST(a AS DECIMAL(12,2)) AS v FROM t")),
+    Spelling("ORDER BY a TIMESTAMP NULLS LAST", Vector("SELECT ts FROM t ORDER BY ts NULLS LAST LIMIT {n}",
+      "SELECT ts FROM t ORDER BY ts IS NULL, ts LIMIT {n}", "SELECT ts FROM t ORDER BY 1 ASC NULLS LAST LIMIT {n}"),
+      Some("SELECT ts FROM t ORDER BY ts LIMIT {n}")),
+    Spelling("GROUP BY a BINARY as PARTITION BY", Vector("SELECT bn, COUNT(*) AS n FROM t GROUP BY bn",
+      "SELECT DISTINCT bn, COUNT(*) OVER (PARTITION BY bn) AS n FROM t"), None),
+    Spelling("DISTINCT over a DOUBLE as GROUP BY", Vector("SELECT DISTINCT f FROM t", "SELECT f FROM t GROUP BY f"),
+      Some("SELECT f FROM t")),
     Spelling("HAVING on a key", Vector("SELECT b, COUNT(*) AS n FROM t GROUP BY b HAVING b > {x}",
       "SELECT b, COUNT(*) AS n FROM t WHERE b > {x} GROUP BY b"), Some("SELECT b, COUNT(*) AS n FROM t GROUP BY b")),
     Spelling("ordinals", Vector(s"$TAll ORDER BY 1, 2, 3 LIMIT {n}", s"$TAll $TOrder LIMIT {n}"), Some(TAll)),
@@ -815,6 +913,18 @@ object SqlTextGen {
       None),
     Spelling("a quote inside a literal", Vector("SELECT a + LENGTH('it''s') AS n FROM t", "SELECT a + 4 AS n FROM t",
       "SELECT a + LENGTH('''') + 3 AS n FROM t"), Some("SELECT a + 5 AS n FROM t")))
+
+  /** Whether a spelling case's text, or the `s` of its tables, holds a
+    * letter whose capital and small forms are not one pair
+    * (`TextPool.unpairedCase`). */
+  def holdsUnpairedCase(sc: SpellingCase): Boolean =
+    Seq(sc.left, sc.right).exists(TextPool.holdsUnpairedCase) || sc.tables.tables.exists { case (_, d) =>
+      val i = d.schema.indexOf("s")
+      i >= 0 && d.rows.exists(r => r(i) match {
+        case s: String => TextPool.holdsUnpairedCase(s)
+        case _ => false
+      })
+    }
 
   def genSpellingCase(rng: Rng): SpellingCase = {
     val tables = genTables(rng.split())
@@ -941,14 +1051,26 @@ object SqlTextGen {
 
   // ---- typing queries -------------------------------------------------------
 
-  private val TypingFunctions1: Vector[String] = Vector("UPPER", "LOWER", "TRIM", "LENGTH", "ABS", "ROUND", "FLOOR",
-    "CEIL", "SQRT", "EXP", "LN", "SIN", "SIGN", "DEGREES", "CONCAT", "RAND")
-  private val TypingFunctions2: Vector[String] = Vector("ROUND", "TRUNC", "POWER", "ATAN2", "LOG", "SUBSTRING",
-    "COALESCE", "NULLIF", "GREATEST", "LEAST", "CONCAT")
-  private val TypingAggregates: Vector[String] = Vector("SUM", "AVG", "MIN", "MAX", "COUNT", "STDDEV", "VARIANCE",
-    "COUNT_IF", "SUM(DISTINCT", "AVG(DISTINCT")
-  private val CastTargets: Vector[String] = Vector("INT", "BIGINT", "FLOAT", "DOUBLE", "STRING", "BOOLEAN", "DATE",
-    "TIMESTAMP")
+  /** Every name of every function `FunctionCatalog` binds as a call outside
+    * OVER that takes `n` arguments, so a function added there is drawn the
+    * day it lands. */
+  private def callsTaking(n: Int): Vector[String] =
+    FunctionCatalog.Entries.filter(e => FunctionCatalog.call(e.name).isDefined && e.arity.admits(n))
+      .flatMap(_.names).toVector
+  private val TypingFunctions1: Vector[String] = callsTaking(1)
+  private val TypingFunctions2: Vector[String] = callsTaking(2)
+  /** Every name of every aggregate of one argument, and the DISTINCT form of
+    * each that takes one. */
+  private val TypingAggregates: Vector[String] = {
+    val oneArgument = FunctionCatalog.Entries.filter(e => e.kind == FunctionCatalog.Kind.Aggregate && e.arity.admits(1))
+    (oneArgument.flatMap(_.names) ++
+      oneArgument.filter(_.distinct != FunctionCatalog.DistinctUse.Refused).flatMap(_.names).map(_ + "(DISTINCT")).toVector
+  }
+  /** Every name a CAST takes a type by, a DECIMAL's at a few precisions and
+    * scales (one too narrow for most values, so its cast fails on the data),
+    * and a DECIMAL short of both, which the binder refuses. */
+  private val CastTargets: Vector[String] = FunctionCatalog.CastTargets.flatMap(_._2).toVector ++
+    FunctionCatalog.DecimalCastNames.flatMap(n => Seq(s"$n(10,2)", s"$n(38,18)", s"$n(3,0)")) :+ "DECIMAL"
   private val TypingLiterals: Vector[String] = Vector("1", "2.5", "'x'", "NULL", "TRUE", "DATE '2024-02-29'", "-1")
 
   /** A function, an aggregate, a CAST, a UNION, a branch list, a condition

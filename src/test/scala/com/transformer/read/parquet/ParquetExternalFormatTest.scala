@@ -3,6 +3,9 @@ package com.transformer.read.parquet
 import com.transformer.core._
 import com.transformer.sql.exec.SqlEngine
 import com.transformer.write.parquet.{ParquetWriter => TParquetWriter}
+import org.apache.parquet.format.{CompressionCodec, LogicalType, UUIDType}
+import org.apache.parquet.column.ParquetProperties
+import org.apache.parquet.hadoop.metadata.{BlockMetaData, CompressionCodecName}
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.junit.Assert._
 import org.junit.Test
@@ -12,6 +15,7 @@ import java.nio.file.{Files, Path}
 import java.time.{Instant, LocalDateTime, ZoneOffset}
 import java.time.temporal.ChronoUnit
 import java.util.Locale
+import scala.jdk.CollectionConverters._
 
 /** Our reader against files parquet-mr wrote, and our writer against
   * parquet-mr's reading of what it wrote.
@@ -579,6 +583,8 @@ class ParquetExternalFormatTest {
     assertNull(got(7))
   }
 
+  /** Each was an `UnsupportedOperationException` that named the column but
+    * not the file. */
   @Test def columnsWithNoEngineTypeFailNamingTheColumn(): Unit = {
     for ((schema, column, kind) <- Seq(
         ("message m { required int32 id; optional int32 t (TIME(MILLIS,true)); }", "t", "TIME"),
@@ -587,16 +593,33 @@ class ParquetExternalFormatTest {
         ("message m { required int32 id; optional fixed_len_byte_array(12) span (INTERVAL); }", "span", "INTERVAL"))) {
       val file = newDir().resolve("unreadable.parquet")
       ExternalParquet.write(file, ExternalParquet.schema(schema), Seq.empty)
-      val msg = failure(read(file))
-      assertTrue(s"$schema: $msg", msg.contains(s"'$column'") && msg.contains(kind))
+      val msg = refusalOf(file)(read(file))
+      assertTrue(s"$schema: $msg", msg.contains(s"column '$column' is") && msg.contains(kind) &&
+        msg.endsWith("which has no transformer type"))
     }
   }
 
   @Test def aRepeatedColumnFailsNamingIt(): Unit = {
     // A repeated primitive is a list per row, which a column cannot hold.
     val file = writeFixture("message m { required int32 id; repeated int32 xs; }", Seq(Seq(1, 7)))
-    val msg = failure(read(file))
-    assertTrue(msg, msg.contains("'xs'") && msg.toLowerCase.contains("repeated"))
+    val msg = refusalOf(file)(read(file))
+    assertTrue(msg, msg.contains("column 'xs' is repeated, a list of values in each row, and only flat schemas are supported"))
+  }
+
+  /** A nested column's refusal printed its whole group as parquet's schema
+    * text, which runs to many lines for a deep one; it says what the group
+    * is. */
+  @Test def aNestedColumnFailsNamingItsGroup(): Unit = {
+    for ((schema, what) <- Seq(
+        ("message m { required int32 id; optional group xs (LIST) { repeated group list { optional int32 element; } } }",
+          "column 'xs' is nested, a group annotated LIST,"),
+        ("message m { required int32 id; optional group xs { optional int32 a; optional binary b; } }",
+          "column 'xs' is nested, a group of 2 fields,"))) {
+      val file = newDir().resolve("nested.parquet")
+      ExternalParquet.write(file, ExternalParquet.schema(schema), Seq.empty)
+      val msg = refusalOf(file)(read(file))
+      assertTrue(s"$schema: $msg", msg.contains(what) && msg.endsWith("and only flat schemas are supported"))
+    }
   }
 
   /** A string column's statistics are in UTF-8 byte order, which is code point
@@ -676,6 +699,288 @@ class ParquetExternalFormatTest {
     assertTrue(view.withPushdownFilter(gt("n", DataType.LongType, java.lang.Long.valueOf(10L))).isDefined)
     assertTrue(view.withPushdownFilter(IsNullExpr(ColRefExpr(0, "u", DataType.LongType), negated = false)).isDefined)
     // Through the planner, the residual filter answers on the engine values.
-    assertEquals(Seq(Seq(4294967295L, 1.5f)), query("SELECT u, h FROM t WHERE u > 10 AND h > 1.0", "t" -> view))
+    assertEquals(Seq(Seq[Any](4294967295L, 1.5f)), query("SELECT u, h FROM t WHERE u > 10 AND h > 1.0", "t" -> view))
+  }
+
+  /** Impala and old Hive stored text as a BINARY with no annotation, which
+    * reads as a `BINARY`, and a `BINARY` casts to nothing, so no query could
+    * use such a column as text (parquet-testing's Impala `alltypes_*` files).
+    * `binaryAsString`, Spark's name, reads each one as a `STRING` of its
+    * UTF-8 bytes (plans/testing/13, decision 3): strictly, a value that is
+    * no UTF-8 failing the read, naming its row of the file, where
+    * `toStringUsingUTF8` would have read it as U+FFFD. Annotated text,
+    * `BSON` and fixed-length bytes keep their types, and no comparison is
+    * pushed to the column's statistics, which an older writer ordered as
+    * signed bytes. */
+  @Test def binaryAsStringReadsUnannotatedBinaryAsText(): Unit = {
+    val file = writeFixture(
+      """message m {
+        |  required int32 id;
+        |  optional binary s;
+        |  optional binary j (BSON);
+        |  optional fixed_len_byte_array(2) f;
+        |  optional binary t (STRING);
+        |}""".stripMargin,
+      Seq(Seq(1, "h\u00e9llo", bytes(1, 2), bytes(3, 4), "x"), Seq(2, null, null, null, null), Seq(3, "", bytes(), bytes(5, 6), "")))
+    assertEquals(DataType.BinaryType, typeOf(read(file), "s"))
+    def asText(f: Path) = ParquetReader.fromPath(f.toString, ColumnarBatch.DefaultCapacity,
+      ParquetReader.DefaultTargetBytesPerPartition, binaryAsString = true)
+    val text = asText(file)
+    assertEquals(Seq(DataType.IntType, DataType.StringType, DataType.BinaryType, DataType.BinaryType, DataType.StringType),
+      text.schema.fields.map(_.dataType))
+    assertEquals(Seq("h\u00e9llo", null, ""), column(text, "s"))
+    assertEquals(Seq(Seq("H\u00c9LLO", 6L)), query("SELECT UPPER(s), LENGTH(s || t) FROM t WHERE id = 1", "t" -> text))
+    import com.transformer.sql.plan._
+    val eq = BinOpExpr("=", ColRefExpr(1, "s", DataType.StringType), LitExpr("", DataType.StringType), DataType.BooleanType)
+    assertEquals(None, text.withPushdownFilter(eq))
+    assertEquals(Seq(Seq(3)), query("SELECT id FROM t WHERE s = ''", "t" -> text))
+
+    val bad = writeFixture("message m { required int32 id; optional binary s; }",
+      Seq(Seq(1, "ok"), Seq(2, null), Seq(3, bytes(0xc3, 0x28))))
+    val msg = refusalOf(bad)(rows(asText(bad)))
+    assertTrue(msg, msg.endsWith("column 's' row 3 is not valid UTF-8, which binaryAsString reads the column as"))
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Refusals: in the reader's words, naming the file.
+  // ─────────────────────────────────────────────────────────────────────
+
+  /** What a library's failure shows: its classes, its code, Thrift's dump of
+    * a struct. */
+  private val LibraryWords = Seq("org.apache", "shaded.", "java.", "Exception", "Cannot invoke", "Struct:")
+
+  /** The message of the refusal `read` meets on `file`, held to the rule
+    * every refusal of a parquet file keeps: an `IllegalArgumentException`,
+    * never a class of parquet-mr's or the JVM's, whose message names the file
+    * first and holds none of [[LibraryWords]] and no bare `null`. */
+  private def refusalOf(file: Path)(read: => Any): String = {
+    val thrown =
+      try { read; null }
+      catch { case e: Throwable if !e.isInstanceOf[AssertionError] => e }
+    assertNotNull(s"$file was read", thrown)
+    assertTrue(s"$file: ${thrown.getClass.getName}: ${thrown.getMessage}", thrown.isInstanceOf[IllegalArgumentException])
+    val msg = thrown.getMessage
+    assertTrue(msg, msg != null && msg.startsWith(s"Parquet file '$file' "))
+    LibraryWords.foreach(w => assertFalse(s"'$w' in: $msg", msg.contains(w)))
+    assertFalse(msg, """\bnull\b""".r.findFirstIn(msg).isDefined)
+    msg
+  }
+
+  /** `bytes` with `from`, which occurs in it exactly once, replaced by `to`. */
+  private def replaceOnce(bytes: Array[Byte], from: Seq[Int], to: Seq[Int]): Array[Byte] = {
+    val pattern = from.map(_.toByte).toArray
+    val at = bytes.indices.filter(i => bytes.length - i >= pattern.length &&
+      java.util.Arrays.equals(bytes, i, i + pattern.length, pattern, 0, pattern.length))
+    assertEquals(s"occurrences of ${from.map(b => f"$b%02x").mkString(" ")}", 1, at.length)
+    bytes.take(at.head) ++ to.map(_.toByte) ++ bytes.drop(at.head + pattern.length)
+  }
+
+  /** A footer that is not parquet's Thrift failed with Thrift's text, `can
+    * not read class org.apache.parquet.format.FileMetaData: ...`. */
+  @Test def aFooterThatIsNotParquetMetadataIsRefusedNamingTheFile(): Unit = {
+    val file = writeFixture("message m { required int32 id; }", Seq(Seq(1)))
+    ExternalParquet.rewriteFooterBytes(file)(bytes => Array.fill(bytes.length)(0x7f.toByte))
+    val msg = refusalOf(file)(read(file))
+    assertTrue(msg, msg.endsWith("has a footer that is not valid parquet metadata"))
+  }
+
+  /** A file that is not parquet at all failed with parquet-mr's
+    * `RuntimeException`, `... is not a Parquet file. Expected magic number at
+    * tail, but found [...]`. */
+  @Test def aFileThatIsNotParquetIsRefusedNamingIt(): Unit = {
+    val file = newDir().resolve("text.parquet")
+    Files.writeString(file, "id,name\n1,a\n")
+    val msg = refusalOf(file)(read(file))
+    assertTrue(msg, msg.contains("is not a parquet file"))
+  }
+
+  /** A footer marked encrypted (`PARE`) failed with parquet-mr's `Trying to
+    * read file with encrypted footer. No keys available`. */
+  @Test def anEncryptedFileIsRefusedNamingIt(): Unit = {
+    val file = writeFixture("message m { required int32 id; }", Seq(Seq(1)))
+    ExternalParquet.rewriteFooterBytes(file, magic = "PARE")(identity)
+    val msg = refusalOf(file)(read(file))
+    assertTrue(msg, msg.endsWith("is encrypted, and transformer reads no encrypted parquet"))
+  }
+
+  /** A logical type newer than parquet-mr failed with a
+    * `NullPointerException`'s text, `Cannot invoke
+    * "org.apache.parquet.format.LogicalType$_Fields.ordinal()" ...`, which
+    * named neither the file nor the column. It is refused naming both and
+    * the annotation (plans/testing/13, decision 1). The footer is written as
+    * a newer writer writes it: the `UUID` member of a column's logical type,
+    * union member 14, an empty struct, becomes member `id`. */
+  @Test def aLogicalTypeTheReaderDoesNotKnowIsRefusedNamingTheColumn(): Unit = {
+    for ((id, annotation) <- Seq(
+        17 -> "is fixed_len_byte_array(16) GEOMETRY, which has no transformer type",
+        18 -> "is fixed_len_byte_array(16) GEOGRAPHY, which has no transformer type",
+        2000 -> "with a logical type this reader does not know (numbered 2000), which has no transformer type")) {
+      val file = writeFixture("message m { required int32 id; optional fixed_len_byte_array(16) u (UUID); }",
+        Seq(Seq(1, null)))
+      // The name 'u', then field 10, the logical type (delta 6, a struct),
+      // holding member 14 (delta 14, a struct), empty, and the union's end.
+      // A member past delta 15 is written long: a struct with no delta, its
+      // id as a zigzag varint.
+      val zigzag = id * 2
+      val varint = if (zigzag < 128) Seq(zigzag) else Seq((zigzag & 0x7f) | 0x80, zigzag >>> 7)
+      ExternalParquet.rewriteFooterBytes(file)(bytes =>
+        replaceOnce(bytes, Seq(0x18, 0x01, 'u'.toInt, 0x6c, 0xec, 0x00, 0x00),
+          Seq(0x18, 0x01, 'u'.toInt, 0x6c, 0x0c) ++ varint ++ Seq(0x00, 0x00)))
+      val msg = refusalOf(file)(read(file))
+      assertTrue(msg, msg.contains("column 'u' ") && msg.endsWith(annotation))
+    }
+  }
+
+  /** An annotation the format does not allow on its physical type failed with
+    * parquet-mr's words, `UUID can only annotate FIXED_LEN_BYTE_ARRAY(16)`. */
+  @Test def anAnnotationTheFormatDoesNotAllowIsRefusedNamingTheColumn(): Unit = {
+    val file = writeFixture("message m { required int32 id; optional int32 n; }", Seq(Seq(1, 2)))
+    ExternalParquet.rewriteFooter(file)(_.getSchema.get(2).setLogicalType(LogicalType.UUID(new UUIDType())))
+    val msg = refusalOf(file)(read(file))
+    assertTrue(msg, msg.endsWith("column 'n' is int32 annotated UUID, which the format does not allow"))
+  }
+
+  /** A codec this classpath does not have failed the scan at its first page,
+    * `Class org.apache.hadoop.io.compress.BrotliCodec was not found`; it fails
+    * the view as it opens, naming the column and the codec (plans/testing/13,
+    * decision 4). */
+  @Test def aCodecTheReaderDoesNotHaveIsRefusedWhenTheViewOpens(): Unit = {
+    for (codec <- Seq(CompressionCodec.BROTLI, CompressionCodec.LZO)) {
+      val file = writeFixture("message m { required int32 id; }", Seq(Seq(1)))
+      ExternalParquet.rewriteFooter(file)(
+        _.getRow_groups.asScala.foreach(_.getColumns.asScala.foreach(_.getMeta_data.setCodec(codec))))
+      val msg = refusalOf(file)(read(file))
+      assertTrue(msg, msg.endsWith(s"column 'id' is compressed with $codec, which transformer cannot decompress"))
+    }
+  }
+
+  /** Hadoop's LZ4 codec, which older Hadoop and Spark wrote (parquet's
+    * `LZ4`, framed as Hadoop frames a block, not `LZ4_RAW`), decompresses
+    * with the lz4 library, which was not on the classpath: such a file failed
+    * with `java.lang.NoClassDefFoundError: net/jpountz/lz4/LZ4Factory`, then
+    * was refused as a codec the reader does not have (plans/testing/13,
+    * decision 4). Every row group of it reads, its pages v1 and v2, a
+    * dictionary or none. */
+  @Test def aHadoopLz4FileReads(): Unit = {
+    val file = newDir().resolve("lz4.parquet")
+    val schema = ExternalParquet.schema("message m { required int32 id; optional binary s (STRING); optional double d; }")
+    def group(from: Int) = (from until from + 300).map(i => Seq[Any](i, if (i % 7 == 0) null else s"v${i % 13}", i * 0.5))
+    ExternalParquet.writeRowGroups(file, schema, Seq(
+      (group(0), ExternalParquet.Layout(codec = CompressionCodecName.LZ4)),
+      (group(300), ExternalParquet.Layout(codec = CompressionCodecName.LZ4, dictionary = false,
+        writerVersion = ParquetProperties.WriterVersion.PARQUET_2_0))))
+    assertEquals((0 until 600).map(i => Seq[Any](i, if (i % 7 == 0) null else s"v${i % 13}", i * 0.5)),
+      rows(read(file)))
+  }
+
+  /** A page header that is not parquet's Thrift failed with Thrift's text,
+    * `can not read class org.apache.parquet.format.PageHeader: ...`. Its
+    * column is found by reading each alone, and named with its row group. */
+  @Test def aPageThatDoesNotDecodeIsRefusedNamingTheColumnAndRowGroup(): Unit = {
+    val file = newDir().resolve("pages.parquet")
+    val schema = ExternalParquet.schema("message m { required int32 id; required int32 n; }")
+    ExternalParquet.writeRowGroups(file, schema, Seq(
+      ((0 until 5).map(i => Seq[Any](i, i)), ExternalParquet.Layout(dictionary = false)),
+      ((5 until 10).map(i => Seq[Any](i, i)), ExternalParquet.Layout(dictionary = false))))
+    val offset = ExternalParquet.dataPageOffsets(file)(1)(1)
+    val bytes = Files.readAllBytes(file)
+    java.util.Arrays.fill(bytes, offset.toInt, offset.toInt + 8, 0xff.toByte)
+    Files.write(file, bytes)
+    val view = read(file)
+    assertEquals(Some(10L), view.exactRowCount)
+    val msg = refusalOf(file)(rows(view))
+    assertTrue(msg, msg.endsWith("column 'n', row group 1: a page does not decode"))
+  }
+
+  /** parquet-mr writes a CRC of each page's bytes into its header, and read
+    * none of them back: a page whose bytes changed after they were written
+    * decoded to whatever they now said, here a value read as another. The
+    * read fails, naming the column and row group (plans/testing/13,
+    * decision 2), for a data page and for a dictionary page alike; a file
+    * whose pages carry no CRC reads as before. */
+  @Test def aPageThatDoesNotMatchItsChecksumFailsTheRead(): Unit = {
+    val schema = ExternalParquet.schema("message m { required int32 id; required int32 n; }")
+    for ((dictionary, what) <- Seq(false -> "a data page", true -> "a dictionary page")) {
+      val file = newDir().resolve("crc.parquet")
+      ExternalParquet.writeRowGroups(file, schema, Seq(
+        ((0 until 5).map(i => Seq[Any](i, i)), ExternalParquet.Layout(dictionary = false)),
+        ((5 until 10).map(i => Seq[Any](i, 1000 + i % 2)), ExternalParquet.Layout(dictionary = dictionary))))
+      // The last byte of the second group's 'n' before its data page: a
+      // value of its dictionary page, or the last value of the first
+      // group's 'n', whose data page ends where the second group starts.
+      val at = if (dictionary) ExternalParquet.dataPageOffsets(file)(1)(1) - 1 else ExternalParquet.dataPageOffsets(file)(1)(0) - 1
+      val bytes = Files.readAllBytes(file)
+      bytes(at.toInt) = (bytes(at.toInt) ^ 0x01).toByte
+      Files.write(file, bytes)
+      val group = if (dictionary) 1 else 0
+      val msg = refusalOf(file)(rows(read(file)))
+      assertTrue(s"$what: $msg",
+        msg.endsWith(s"column 'n', row group $group: a page does not match its checksum, so its bytes are not the ones written"))
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Row groups: each read once, whatever bytes its footer gives it.
+  // ─────────────────────────────────────────────────────────────────────
+
+  /** A file of `n` row groups of ten ids each, counting from 0, with the
+    * groups at `zero` given no bytes in the footer's `total_byte_size`, as a
+    * writer that left the field unset wrote them. */
+  private def zeroByteGroups(n: Int, zero: Set[Int]): Path = {
+    val file = newDir().resolve("groups.parquet")
+    ExternalParquet.writeRowGroups(file, ExternalParquet.schema("message m { required int32 id; }"),
+      (0 until n).map(g => ((0 until 10).map(i => Seq[Any](g * 10 + i)), ExternalParquet.Layout())))
+    ExternalParquet.rewriteFooter(file) { footer =>
+      footer.getRow_groups.asScala.zipWithIndex.foreach { case (g, i) => if (zero(i)) g.setTotal_byte_size(0L) }
+    }
+    file
+  }
+
+  /** The reader packed row groups into partitions by `total_byte_size` alone
+    * and emitted a partition only when its bytes were above 0, so a file of
+    * one group whose footer gave it no bytes read as empty, `COUNT(*)` 0
+    * (parquet-testing's `nation.dict-malformed.parquet`), and so did a
+    * zero-byte group after a full partition. Every group is read once, in
+    * order, and `COUNT(*)` counts every row. */
+  @Test def aRowGroupIsReadWhateverBytesItsFooterGivesIt(): Unit = {
+    val default = ParquetReader.DefaultTargetBytesPerPartition
+    for ((n, zero, target) <- Seq(
+        (1, Set(0), default),
+        (3, Set(0, 1, 2), default),
+        (3, Set(0), 1L),
+        (3, Set(2), 1L),
+        (4, Set(1, 3), 1L))) {
+      val view = ParquetReader.fromPath(zeroByteGroups(n, zero).toString, ColumnarBatch.DefaultCapacity, target)
+      val what = s"$n groups, those at $zero of no bytes, a target of $target bytes"
+      assertEquals(what, (0 until n * 10).toVector, rows(view).map(_.head).toVector)
+      assertEquals(what, Some(n * 10L), view.exactRowCount)
+      assertEquals(what, Seq(Seq(n * 10L)), query("SELECT COUNT(*) FROM t", "t" -> view))
+    }
+  }
+
+  /** The packing itself: every group lands in exactly one partition, the
+    * partitions in order and each holding a group at least, whatever the
+    * groups' bytes, none at all, a negative count, or more than the target. */
+  @Test def everyRowGroupPacksIntoExactlyOnePartition(): Unit = {
+    def block(bytes: Long, rows: Long): BlockMetaData = {
+      val b = new BlockMetaData()
+      b.setTotalByteSize(bytes)
+      b.setRowCount(rows)
+      b
+    }
+    for ((bytes, target) <- Seq(
+        (Seq.empty[Long], 100L), (Seq(0L), 100L), (Seq(0L, 0L, 0L), 100L), (Seq(0L, 0L, 0L), 1L),
+        (Seq(0L, 50L, 50L), 100L), (Seq(100L, 0L), 100L), (Seq(100L, 0L, 0L), 1L),
+        (Seq(60L, 60L, 0L, 60L, 0L), 100L), (Seq(0L, 200L, 0L), 100L), (Seq(-5L, 10L), 1L))) {
+      val blocks = bytes.zipWithIndex.map { case (b, i) => block(b, i + 1L) }
+      val parts = ParquetReader.packRowGroups(null, "groups.parquet", blocks.asJava, target)
+      val what = s"groups of $bytes bytes, a target of $target"
+      assertEquals(what, bytes.indices.toVector, parts.flatMap(p => p.startRowGroup until p.endRowGroup).toVector)
+      parts.foreach { p =>
+        assertTrue(what, p.endRowGroup > p.startRowGroup)
+        assertEquals(what, (p.startRowGroup until p.endRowGroup).map(_ + 1L).sum, p.rowCount)
+      }
+      if (target == 1L) assertEquals(what, bytes.length, parts.length)
+    }
   }
 }

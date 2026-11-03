@@ -1,8 +1,9 @@
 # From SQLite's sqllogictest corpus (https://www.sqlite.org/sqllogictest,
 # mirrored at https://github.com/gregrahn/sqllogictest): test/index/view/10/slt_good_1.test,
 # up to its 150th query this engine runs. Its COPYRIGHT lets it be copied
-# freely. `skipif transformer` marks a record the engine answers otherwise
-# by design, with the reason.
+# freely. `skipif transformer <id>` marks a record the engine answers
+# otherwise by design, with the id of its rule in the ledger in
+# docs/gotchas.md.
 
 hash-threshold 8
 
@@ -185,7 +186,7 @@ SELECT pk, col0 FROM view_1_tab0_153 UNION SELECT pk, col0 FROM view_2_tab0_153
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-0-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab0 WHERE col0 = 49 ) AS tab0_153
 ----
@@ -278,7 +279,7 @@ SELECT pk, col0 FROM view_1_tab1_153 UNION SELECT pk, col0 FROM view_2_tab1_153
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-0-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab1 WHERE col0 = 49 ) AS tab1_153
 ----
@@ -371,7 +372,7 @@ SELECT pk, col0 FROM view_1_tab2_153 UNION SELECT pk, col0 FROM view_2_tab2_153
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-0-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab2 WHERE col0 = 49 ) AS tab2_153
 ----
@@ -464,7 +465,7 @@ SELECT pk, col0 FROM view_1_tab3_153 UNION SELECT pk, col0 FROM view_2_tab3_153
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-0-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab3 WHERE col0 = 49 ) AS tab3_153
 ----
@@ -557,7 +558,7 @@ SELECT pk, col0 FROM view_1_tab4_153 UNION SELECT pk, col0 FROM view_2_tab4_153
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-0-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab4 WHERE col0 = 49 ) AS tab4_153
 ----
@@ -652,7 +653,7 @@ SELECT pk, col0 FROM view_1_tab0_154 UNION SELECT pk, col0 FROM view_2_tab0_154
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-100-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab0 WHERE col0 > 56 ) AS tab0_154
 ----
@@ -762,7 +763,7 @@ SELECT pk, col0 FROM view_1_tab1_154 UNION SELECT pk, col0 FROM view_2_tab1_154
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-100-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab1 WHERE col0 > 56 ) AS tab1_154
 ----
@@ -872,7 +873,7 @@ SELECT pk, col0 FROM view_1_tab2_154 UNION SELECT pk, col0 FROM view_2_tab2_154
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-100-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab2 WHERE col0 > 56 ) AS tab2_154
 ----
@@ -982,7 +983,7 @@ SELECT pk, col0 FROM view_1_tab3_154 UNION SELECT pk, col0 FROM view_2_tab3_154
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-100-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab3 WHERE col0 > 56 ) AS tab3_154
 ----
@@ -1092,7 +1093,7 @@ SELECT pk, col0 FROM view_1_tab4_154 UNION SELECT pk, col0 FROM view_2_tab4_154
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-100-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab4 WHERE col0 > 56 ) AS tab4_154
 ----
@@ -1204,7 +1205,7 @@ SELECT pk, col0 FROM view_1_tab0_155 UNION SELECT pk, col0 FROM view_2_tab0_155
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-200-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab0 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) ) AS tab0_155
 ----
@@ -1304,7 +1305,7 @@ SELECT pk, col0 FROM view_1_tab1_155 UNION SELECT pk, col0 FROM view_2_tab1_155
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-200-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab1 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) ) AS tab1_155
 ----
@@ -1404,7 +1405,7 @@ SELECT pk, col0 FROM view_1_tab2_155 UNION SELECT pk, col0 FROM view_2_tab2_155
 ----
 20 values hashing to 7aa228701de8d21263c44e160305731d
 
-skipif transformer # refused: A subquery in FROM is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I rowsort label-200-3
 SELECT pk FROM ( SELECT pk, col0 FROM tab2 WHERE ((col4 >= 74.79) OR col3 > 93 AND col0 < 27 OR (col0 >= 22)) ) AS tab2_155
 ----

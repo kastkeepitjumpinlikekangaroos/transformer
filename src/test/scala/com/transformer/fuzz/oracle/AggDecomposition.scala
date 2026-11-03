@@ -39,6 +39,11 @@ import com.transformer.sql.plan.{AggExprSum, ColRefExpr}
   * `SUM` adds exactly, so its grouped side drives `DecimalSumState`'s merge
   * and spill serde against the one-shot answer, over values a DOUBLE would
   * add wrong.
+  *
+  * Over values at their types' edges a `SUM` can fail on its data. Where the
+  * one-shot sum fails, so must the grouped one, whose last sum is the same
+  * exact total; where only the grouped one fails, a group's sum passed the
+  * type that the total did not, and the pair checks nothing.
   */
 object AggDecomposition {
 
@@ -69,21 +74,30 @@ object AggDecomposition {
         val b =
           try scalar(mc, p.grouped, opts, p)
           catch { case e: IllegalArgumentException => return RelEngine.Rejected(RelEngine.rejectReason(e)) }
-        if (!RowOracle.scalarEquals(a, b, p.dataType)) {
-          throw new AssertionError(
-            s"[agg-decomposition] $mode ${p.label} disagrees: one-shot=${RowOracle.describe(a)} " +
-              s"grouped=${RowOracle.describe(b)}\n  one-shot = ${p.oneShot}\n  grouped  = ${p.grouped}")
+        (a, b) match {
+          case (Right(x), Right(y)) =>
+            if (!RowOracle.scalarEquals(x, y, p.dataType)) {
+              throw new AssertionError(
+                s"[agg-decomposition] $mode ${p.label} disagrees: one-shot=${RowOracle.describe(x)} " +
+                  s"grouped=${RowOracle.describe(y)}\n  one-shot = ${p.oneShot}\n  grouped  = ${p.grouped}")
+            }
+          case (Left(failure), Right(y)) =>
+            throw new AssertionError(
+              s"[agg-decomposition] $mode ${p.label}: the one-shot aggregate fails on its data ($failure) where " +
+                s"grouping it answers ${RowOracle.describe(y)}\n  one-shot = ${p.oneShot}\n  grouped  = ${p.grouped}")
+          case _ => () // both fail, or only a group's sum passed its type
         }
       }
     }
     RelEngine.Held
   }
 
-  private def scalar(mc: MetaCase, sql: String, opts: ExecutionOptions, p: Pair): Any = {
-    val rows = RelEngine.runRows(mc.env.catalog(), sql, opts)
-    val v = rows.headOption.map(_(0)).orNull
-    if (v == null && p.nullIsZero) java.lang.Long.valueOf(0L) else v
-  }
+  /** The one value `sql` answers, or the failure on its data it stops with. */
+  private def scalar(mc: MetaCase, sql: String, opts: ExecutionOptions, p: Pair): Either[String, Any] =
+    RelEngine.answer(mc.env.catalog(), sql, opts).map { answered =>
+      val v = answered.rows.headOption.map(_(0)).orNull
+      if (v == null && p.nullIsZero) java.lang.Long.valueOf(0L) else v
+    }
 
   /** The columns `rel`'s decompositions aggregate over: the group key itself and
     * the last field, rather than every column — each pair costs two executions per

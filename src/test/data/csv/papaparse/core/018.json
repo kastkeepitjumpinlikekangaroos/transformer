@@ -1,0 +1,15 @@
+{
+ "description": "Quoted field with whitespace around quotes",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   " \"B\" ",
+   "C"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

@@ -53,10 +53,10 @@ object Expr {
     * must not take such a key: `GROUP BY RAND() > 0.5` made four groups of
     * two, as each half of a group went to another shard. */
   def readsRandom(e: Expr): Boolean = e match {
-    case FuncExpr(name, args, _) =>
-      (args.isEmpty && (name.equalsIgnoreCase("RAND") || name.equalsIgnoreCase("RANDOM"))) || args.exists(readsRandom)
+    case FuncExpr(name, args, _) => FunctionCatalog.readsRandom(name, args.size) || args.exists(readsRandom)
     case _: ColRefExpr | _: LitExpr => false
     case CastExpr(c, _) => readsRandom(c)
+    case DecimalCastExpr(c, _) => readsRandom(c)
     case UnaryOpExpr(_, c, _) => readsRandom(c)
     case BinOpExpr(_, l, r, _) => readsRandom(l) || readsRandom(r)
     case CaseExpr(branches, elseExpr, _) =>
@@ -182,6 +182,32 @@ final case class CastExpr(child: Expr, target: DataType) extends Expr {
   override def evalVec(batch: ColumnarBatch): ColumnVector = {
     val c = child.evalVec(batch)
     VecOps.cast(c, child.dataType, target, batch.numRows)
+  }
+}
+
+/** `CAST(x AS DECIMAL(p,s))` as a query writes it: its value as one of the
+  * type, rounded half up to the scale and an error past the precision
+  * ([[Casts.toWrittenDecimal]]). The binder's own casts to a DECIMAL are
+  * [[CastExpr]]s, which read a number exactly, as the comparison or the
+  * result they serve needs; the two stay apart, so a printed plan writes
+  * this one and leaves the binder to insert its own again. */
+final case class DecimalCastExpr(child: Expr, target: DataType.DecimalType) extends Expr {
+  def dataType: DataType = target
+  def eval(batch: ColumnarBatch, row: Int): Any = {
+    val v = child.eval(batch, row)
+    if (v == null) null else Casts.toWrittenDecimal(v, target)
+  }
+
+  override def evalVec(batch: ColumnarBatch): ColumnVector = {
+    val c = child.evalVec(batch)
+    val n = batch.numRows
+    val out = ColumnVector.allocate(target, math.max(1, n))
+    var i = 0
+    while (i < n) {
+      if (c.isNull(i)) out.setNull(i) else out.setBoxed(i, Casts.toWrittenDecimal(c.getBoxed(i), target))
+      i += 1
+    }
+    out
   }
 }
 
@@ -845,24 +871,16 @@ final case class AggExprCount(child: Expr, distinct: Boolean) extends AggExpr {
   val resultType: DataType = DataType.LongType
 }
 /** `SUM`: a BIGINT over integers, a DOUBLE over floats, and over a
-  * DECIMAL(p,s) a DECIMAL(38,s), added exactly ([[Decimals.sumType]]). */
+  * DECIMAL(p,s) a DECIMAL(38,s), added exactly ([[FunctionCatalog.Result.Sum]]). */
 final case class AggExprSum(child: Expr) extends AggExpr {
   val name = "SUM"; val args: Seq[Expr] = Seq(child); val distinct = false
-  val resultType: DataType = child.dataType match {
-    case DataType.IntType | DataType.LongType => DataType.LongType
-    case DataType.FloatType | DataType.DoubleType => DataType.DoubleType
-    case d: DataType.DecimalType => Decimals.sumType(d)
-    case other => other
-  }
+  val resultType: DataType = FunctionCatalog.Result.Sum.of(child.dataType)
 }
 /** `AVG`: a DOUBLE, but over a DECIMAL(p,s) a DECIMAL with four more
-  * fractional digits ([[Decimals.avgType]]), from the exact sum. */
+  * fractional digits ([[FunctionCatalog.Result.Avg]]), from the exact sum. */
 final case class AggExprAvg(child: Expr) extends AggExpr {
   val name = "AVG"; val args: Seq[Expr] = Seq(child); val distinct = false
-  val resultType: DataType = child.dataType match {
-    case d: DataType.DecimalType => Decimals.avgType(d)
-    case _ => DataType.DoubleType
-  }
+  val resultType: DataType = FunctionCatalog.Result.Avg.of(child.dataType)
 }
 final case class AggExprMin(child: Expr) extends AggExpr {
   val name = "MIN"; val args: Seq[Expr] = Seq(child); val distinct = false

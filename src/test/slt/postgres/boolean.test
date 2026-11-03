@@ -16,9 +16,12 @@
 # where the test is of what is done with the value rather than of how it is
 # spelled, and an alias named true or false in double quotes (the engine reads
 # TRUE and FALSE as the literals wherever they are written). A result in no
-# fixed order is compared as rowsort. `skipif transformer` marks the 12
-# records the engine answers otherwise by design: it casts text to BOOLEAN
-# from true and false alone, in any case and with no spaces around them.
+# fixed order is compared as rowsort. `skipif transformer bool-text` marks
+# the 12 records the engine answers otherwise by design, by that rule of the
+# ledger in docs/gotchas.md: it casts text to BOOLEAN from true and false
+# alone, in any case and with no spaces around them. After each, its twin,
+# `onlyif transformer bool-text`, is the same statement with the engine's own
+# answer, an error naming the text.
 #
 # Left out (20 statements), by what they need:
 #   13  IS TRUE, IS NOT TRUE, IS FALSE, IS NOT FALSE, IS UNKNOWN and IS NOT
@@ -54,18 +57,30 @@ false
 # alone, in any case and without spaces around it, so Postgres's other
 # spellings (t, f, y, yes, n, no, on, off, of, 1, 0, and spaces) are errors
 # there by design.
-skipif transformer # text casts to BOOLEAN from true and false alone
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
 query BOOLEAN
 SELECT CAST('t' AS BOOLEAN) AS "true"
 ----
 true
 
+onlyif transformer bool-text
+statement error
+SELECT CAST('t' AS BOOLEAN) AS "true"
+----
+Cannot cast 't' to boolean
+
 # boolean.sql:21
-skipif transformer # text casts to BOOLEAN from true and false alone, with no spaces around
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone, with no spaces around
 query BOOLEAN
 SELECT CAST('   f           ' AS BOOLEAN) AS "false"
 ----
 false
+
+onlyif transformer bool-text
+statement error
+SELECT CAST('   f           ' AS BOOLEAN) AS "false"
+----
+Cannot cast '   f           ' to boolean
 
 # boolean.sql:23
 query BOOLEAN
@@ -88,61 +103,103 @@ statement error
 SELECT CAST('foo' AS BOOLEAN) AS error
 
 # boolean.sql:31
-skipif transformer # text casts to BOOLEAN from true and false alone
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
 query BOOLEAN
 SELECT CAST('y' AS BOOLEAN) AS "true"
 ----
 true
 
+onlyif transformer bool-text
+statement error
+SELECT CAST('y' AS BOOLEAN) AS "true"
+----
+Cannot cast 'y' to boolean
+
 # boolean.sql:33
-skipif transformer # text casts to BOOLEAN from true and false alone
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
 query BOOLEAN
 SELECT CAST('yes' AS BOOLEAN) AS "true"
 ----
 true
+
+onlyif transformer bool-text
+statement error
+SELECT CAST('yes' AS BOOLEAN) AS "true"
+----
+Cannot cast 'yes' to boolean
 
 # boolean.sql:35
 statement error
 SELECT CAST('yeah' AS BOOLEAN) AS error
 
 # boolean.sql:37
-skipif transformer # text casts to BOOLEAN from true and false alone
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
 query BOOLEAN
 SELECT CAST('n' AS BOOLEAN) AS "false"
 ----
 false
 
+onlyif transformer bool-text
+statement error
+SELECT CAST('n' AS BOOLEAN) AS "false"
+----
+Cannot cast 'n' to boolean
+
 # boolean.sql:39
-skipif transformer # text casts to BOOLEAN from true and false alone
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
 query BOOLEAN
 SELECT CAST('no' AS BOOLEAN) AS "false"
 ----
 false
+
+onlyif transformer bool-text
+statement error
+SELECT CAST('no' AS BOOLEAN) AS "false"
+----
+Cannot cast 'no' to boolean
 
 # boolean.sql:41
 statement error
 SELECT CAST('nay' AS BOOLEAN) AS error
 
 # boolean.sql:43
-skipif transformer # text casts to BOOLEAN from true and false alone
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
 query BOOLEAN
 SELECT CAST('on' AS BOOLEAN) AS "true"
 ----
 true
 
+onlyif transformer bool-text
+statement error
+SELECT CAST('on' AS BOOLEAN) AS "true"
+----
+Cannot cast 'on' to boolean
+
 # boolean.sql:45
-skipif transformer # text casts to BOOLEAN from true and false alone
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
 query BOOLEAN
 SELECT CAST('off' AS BOOLEAN) AS "false"
 ----
 false
 
+onlyif transformer bool-text
+statement error
+SELECT CAST('off' AS BOOLEAN) AS "false"
+----
+Cannot cast 'off' to boolean
+
 # boolean.sql:47
-skipif transformer # text casts to BOOLEAN from true and false alone
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
 query BOOLEAN
 SELECT CAST('of' AS BOOLEAN) AS "false"
 ----
 false
+
+onlyif transformer bool-text
+statement error
+SELECT CAST('of' AS BOOLEAN) AS "false"
+----
+Cannot cast 'of' to boolean
 
 # boolean.sql:49
 statement error
@@ -157,22 +214,34 @@ statement error
 SELECT CAST('off_' AS BOOLEAN) AS error
 
 # boolean.sql:55
-skipif transformer # text casts to BOOLEAN from true and false alone
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
 query BOOLEAN
 SELECT CAST('1' AS BOOLEAN) AS "true"
 ----
 true
+
+onlyif transformer bool-text
+statement error
+SELECT CAST('1' AS BOOLEAN) AS "true"
+----
+Cannot cast '1' to boolean
 
 # boolean.sql:57
 statement error
 SELECT CAST('11' AS BOOLEAN) AS error
 
 # boolean.sql:59
-skipif transformer # text casts to BOOLEAN from true and false alone
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
 query BOOLEAN
 SELECT CAST('0' AS BOOLEAN) AS "false"
 ----
 false
+
+onlyif transformer bool-text
+statement error
+SELECT CAST('0' AS BOOLEAN) AS "false"
+----
+Cannot cast '0' to boolean
 
 # boolean.sql:61
 statement error
@@ -246,12 +315,19 @@ SELECT CAST(CAST('TrUe' AS text) AS boolean) AS "true", CAST(CAST('fAlse' AS tex
 true	false
 
 # boolean.sql:92. Postgres trims the spaces.
-skipif transformer # text casts to BOOLEAN from true and false alone, with no spaces around
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone, with no spaces around
 query BOOLEAN,BOOLEAN
 SELECT CAST(CAST('    true   ' AS text) AS boolean) AS "true",
        CAST(CAST('     FALSE' AS text) AS boolean) AS "false"
 ----
 true	false
+
+onlyif transformer bool-text
+statement error
+SELECT CAST(CAST('    true   ' AS text) AS boolean) AS "true",
+       CAST(CAST('     FALSE' AS text) AS boolean) AS "false"
+----
+Cannot cast '    true   ' to boolean
 
 # boolean.sql:94
 query STRING,STRING

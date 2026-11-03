@@ -1,0 +1,610 @@
+# From Apache Spark's SQL query tests (https://github.com/apache/spark):
+# sql/core/src/test/resources/sql-tests/inputs/typeCoercion/native/division.sql
+# at commit b98123545915a84403c7fa89e8d977ee0b2f5aed, with every answer from
+# the golden file results/typeCoercion/native/division.sql.out at that commit,
+# Spark's answer under ANSI mode, never the engine's. Licensed to the Apache
+# Software Foundation under the Apache License, Version 2.0: LICENSE and NOTICE
+# in src/test/slt/spark/ hold the license and Spark's notice. Written by
+# //src/test/scala/com/transformer/slt:spark_import, which docs/extending.md
+# describes; edit the converter, not this file.
+#
+# / of each pair of types. 82 of the file's 145 statements are here, 21 of them
+# records the engine answers otherwise by a rule of the ledger in
+# docs/gotchas.md, marked skipif transformer <id> and, for a rule that is no
+# refusal, followed by its twin, onlyif transformer <id> with the engine's own
+# answer.
+#
+# A statement is as Spark wrote it but where a rewrite cannot change what it
+# means, which its record names: a temporary view of literals as a table of
+# their types holding one row of them; a timestamp's text cast to DATE as the
+# DATE literal of its date (Spark's cast drops the time; this engine reads only
+# an ISO date as a DATE, and a test of that cast is no test of its subject). A
+# column is the engine's type of the name Spark's schema gives it. A result is
+# compared as rowsort unless its query ends in ORDER BY, as Spark sorts every
+# result its plan does not. An error under ANSI is a statement error, Spark's
+# error class in its comment and after ---- the engine's own words for the same
+# reason.
+#
+# Skipped, by rule:
+#     10  refused-text-arithmetic
+#      5  division-keeps-type
+#      4  refused-decimal-beside-float
+#      2  bigint-decimal
+#
+# Left out (63 statements), by what they need:
+#     23  TINYINT
+#     21  SMALLINT
+#     19  BINARY, and X'' literals
+
+# division.sql:18, the temporary view as a table of one row
+statement ok
+CREATE TABLE t (c1 INT)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+# division.sql:48
+skipif transformer division-keeps-type # / keeps its operands' type
+query DOUBLE rowsort
+SELECT cast(1 as int) / cast(1 as int) FROM t
+----
+1.0
+
+onlyif transformer division-keeps-type
+query INT rowsort
+SELECT cast(1 as int) / cast(1 as int) FROM t
+----
+1
+
+# division.sql:49
+skipif transformer division-keeps-type # / keeps its operands' type
+query DOUBLE rowsort
+SELECT cast(1 as int) / cast(1 as bigint) FROM t
+----
+1.0
+
+onlyif transformer division-keeps-type
+query BIGINT rowsort
+SELECT cast(1 as int) / cast(1 as bigint) FROM t
+----
+1
+
+# division.sql:50
+query DOUBLE rowsort
+SELECT cast(1 as int) / cast(1 as float) FROM t
+----
+1.0
+
+# division.sql:51
+query DOUBLE rowsort
+SELECT cast(1 as int) / cast(1 as double) FROM t
+----
+1.0
+
+# division.sql:52
+query DECIMAL(21,11) rowsort
+SELECT cast(1 as int) / cast(1 as decimal(10, 0)) FROM t
+----
+1.00000000000
+
+# division.sql:53
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as int) / cast(1 as string) FROM t
+----
+1.0
+
+# division.sql:55; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as int) / cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:56; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as int) / cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:57; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as int) / DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:61
+skipif transformer division-keeps-type # / keeps its operands' type
+query DOUBLE rowsort
+SELECT cast(1 as bigint) / cast(1 as int) FROM t
+----
+1.0
+
+onlyif transformer division-keeps-type
+query BIGINT rowsort
+SELECT cast(1 as bigint) / cast(1 as int) FROM t
+----
+1
+
+# division.sql:62
+skipif transformer division-keeps-type # / keeps its operands' type
+query DOUBLE rowsort
+SELECT cast(1 as bigint) / cast(1 as bigint) FROM t
+----
+1.0
+
+onlyif transformer division-keeps-type
+query BIGINT rowsort
+SELECT cast(1 as bigint) / cast(1 as bigint) FROM t
+----
+1
+
+# division.sql:63
+query DOUBLE rowsort
+SELECT cast(1 as bigint) / cast(1 as float) FROM t
+----
+1.0
+
+# division.sql:64
+query DOUBLE rowsort
+SELECT cast(1 as bigint) / cast(1 as double) FROM t
+----
+1.0
+
+# division.sql:65
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(31,11) rowsort
+SELECT cast(1 as bigint) / cast(1 as decimal(10, 0)) FROM t
+----
+1.00000000000
+
+onlyif transformer bigint-decimal
+query DECIMAL(30,11) rowsort
+SELECT cast(1 as bigint) / cast(1 as decimal(10, 0)) FROM t
+----
+1.00000000000
+
+# division.sql:66
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as bigint) / cast(1 as string) FROM t
+----
+1.0
+
+# division.sql:68; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as bigint) / cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:69; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as bigint) / cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:70; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as bigint) / DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:74
+query DOUBLE rowsort
+SELECT cast(1 as float) / cast(1 as int) FROM t
+----
+1.0
+
+# division.sql:75
+query DOUBLE rowsort
+SELECT cast(1 as float) / cast(1 as bigint) FROM t
+----
+1.0
+
+# division.sql:76
+skipif transformer division-keeps-type # / keeps its operands' type
+query DOUBLE rowsort
+SELECT cast(1 as float) / cast(1 as float) FROM t
+----
+1.0
+
+onlyif transformer division-keeps-type
+query FLOAT rowsort
+SELECT cast(1 as float) / cast(1 as float) FROM t
+----
+1.0
+
+# division.sql:77
+query DOUBLE rowsort
+SELECT cast(1 as float) / cast(1 as double) FROM t
+----
+1.0
+
+# division.sql:78
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as float) / cast(1 as decimal(10, 0)) FROM t
+----
+1.0
+
+# division.sql:79
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as float) / cast(1 as string) FROM t
+----
+1.0
+
+# division.sql:81; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as float) / cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:82; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as float) / cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:83; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as float) / DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:87
+query DOUBLE rowsort
+SELECT cast(1 as double) / cast(1 as int) FROM t
+----
+1.0
+
+# division.sql:88
+query DOUBLE rowsort
+SELECT cast(1 as double) / cast(1 as bigint) FROM t
+----
+1.0
+
+# division.sql:89
+query DOUBLE rowsort
+SELECT cast(1 as double) / cast(1 as float) FROM t
+----
+1.0
+
+# division.sql:90
+query DOUBLE rowsort
+SELECT cast(1 as double) / cast(1 as double) FROM t
+----
+1.0
+
+# division.sql:91
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as double) / cast(1 as decimal(10, 0)) FROM t
+----
+1.0
+
+# division.sql:92
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as double) / cast(1 as string) FROM t
+----
+1.0
+
+# division.sql:94; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as double) / cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:95; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as double) / cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:96; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as double) / DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:100
+query DECIMAL(21,11) rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as int) FROM t
+----
+1.00000000000
+
+# division.sql:101
+skipif transformer bigint-decimal # a BIGINT beside a DECIMAL counts as a DECIMAL(19,0)
+query DECIMAL(31,21) rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as bigint) FROM t
+----
+1.000000000000000000000
+
+onlyif transformer bigint-decimal
+query DECIMAL(30,20) rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as bigint) FROM t
+----
+1.00000000000000000000
+
+# division.sql:102
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as float) FROM t
+----
+1.0
+
+# division.sql:103
+skipif transformer refused-decimal-beside-float # a DECIMAL beside a FLOAT or DOUBLE that is not written in the query
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as double) FROM t
+----
+1.0
+
+# division.sql:104
+query DECIMAL(21,11) rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as decimal(10, 0)) FROM t
+----
+1.00000000000
+
+# division.sql:105
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as decimal(10, 0)) / cast(1 as string) FROM t
+----
+1.0
+
+# division.sql:107; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) / cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:108; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) / cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:109; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) / DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:113
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as string) / cast(1 as int) FROM t
+----
+1.0
+
+# division.sql:114
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as string) / cast(1 as bigint) FROM t
+----
+1.0
+
+# division.sql:115
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as string) / cast(1 as float) FROM t
+----
+1.0
+
+# division.sql:116
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as string) / cast(1 as double) FROM t
+----
+1.0
+
+# division.sql:117
+skipif transformer refused-text-arithmetic # arithmetic on a STRING
+query DOUBLE rowsort
+SELECT cast(1 as string) / cast(1 as decimal(10, 0)) FROM t
+----
+1.0
+
+# division.sql:118; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast(1 as string) / cast(1 as string) FROM t
+----
+Arithmetic on STRING is not supported
+
+# division.sql:120; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast(1 as string) / cast(1 as boolean) FROM t
+----
+Arithmetic on STRING is not supported
+
+# division.sql:121; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast(1 as string) / cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on STRING is not supported
+
+# division.sql:122; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast(1 as string) / DATE '2017-12-11' FROM t
+----
+Arithmetic on STRING is not supported
+
+# division.sql:139; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as boolean) / cast(1 as int) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:140; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as boolean) / cast(1 as bigint) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:141; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as boolean) / cast(1 as float) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:142; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as boolean) / cast(1 as double) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:143; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as boolean) / cast(1 as decimal(10, 0)) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:144; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast(1 as boolean) / cast(1 as string) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:146; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast(1 as boolean) / cast(1 as boolean) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:147; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as boolean) / cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:148; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast(1 as boolean) / DATE '2017-12-11' FROM t
+----
+Arithmetic on BOOLEAN is not supported
+
+# division.sql:152; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) / cast(1 as int) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:153; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) / cast(1 as bigint) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:154; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) / cast(1 as float) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:155; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) / cast(1 as double) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:156; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) / cast(1 as decimal(10, 0)) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:157; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) / cast(1 as string) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:159; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) / cast(1 as boolean) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:160; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) / cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:161; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT cast('2017-12-11 09:30:00.0' as timestamp) / DATE '2017-12-11' FROM t
+----
+Arithmetic on TIMESTAMP is not supported
+
+# division.sql:165; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' / cast(1 as int) FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:166; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' / cast(1 as bigint) FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:167; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' / cast(1 as float) FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:168; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' / cast(1 as double) FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:169; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' / cast(1 as decimal(10, 0)) FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:170; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT DATE '2017-12-11' / cast(1 as string) FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:172; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' / cast(1 as boolean) FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:173; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-11' / cast('2017-12-11 09:30:00.0' as timestamp) FROM t
+----
+Arithmetic on DATE is not supported
+
+# division.sql:174; a timestamp's text cast to DATE written as the DATE literal
+# of its date; Spark: DATATYPE_MISMATCH.BINARY_OP_WRONG_TYPE
+statement error
+SELECT DATE '2017-12-11' / DATE '2017-12-11' FROM t
+----
+Arithmetic on DATE is not supported

@@ -28,36 +28,58 @@ import com.transformer.fuzz.RowOracle
   * partition-and-re-aggregate step (which would be unsound for AVG / stddev /
   * COUNT DISTINCT). The three partitions cover every output row exactly once: a
   * row where `p` is TRUE, FALSE, or UNKNOWN, and `p IS NULL` captures exactly the
-  * UNKNOWN rows. The partition predicate is restricted to non-float output
-  * columns, so a comparison is UNKNOWN exactly when an operand is NULL (no `NaN`
-  * can fall into none of the three partitions).
+  * UNKNOWN rows. A comparison is UNKNOWN exactly when an operand is NULL, over
+  * every type, floats included: `NaN` equals `NaN` and orders above every other
+  * number, and `-0.0` equals `0.0`, so a `NaN` row falls into a partition like
+  * any other. The partition may compare a float column with `NaN`, `-0.0` or an
+  * infinity itself.
   *
   * All four queries run against ONE fixed single-partition layout, so the
   * comparison is immune to any layout-dependent output ordering (e.g. a window
   * function's tie-break among equal ORDER BY keys) — cross-layout invariance is
   * [[MetaModeDifferential]]'s job, not TLP's. Comparison is a multiset (output
   * order is never assumed) via [[RowOracle.multisetEquals]].
+  *
+  * '''A query that fails on its data''' (decision 1 of plans/testing/15).
+  * When `Q` fails, TLP checks nothing: a partition's filter, pushed into `Q`,
+  * may skip the rows it fails on. When `Q` answers, every partition must
+  * answer and add up to it, but where a WHERE or ON condition of `Q` that
+  * can fail is there to move (`MetaQuery.movableFailure`), since the
+  * partition's filter joins those conditions and the optimizer may then
+  * evaluate the failing one first.
   */
 object Tlp {
 
   def check(mc: MetaCase): RelEngine.Verdict = mc.tlp match {
-    case None => RelEngine.Skipped // no non-float output column to partition on
+    case None => RelEngine.Skipped // no type-reliable output column to partition on
     case Some(pred) =>
       val base = mc.query.tlpBase // WITH [cte defs,] q AS (...) SELECT * FROM q
       val catalog = mc.env.catalog() // one fixed single-partition layout for all four
 
       // The CTE base doubles as the bind/plan probe: a rejection here is the
       // generator's own un-bindable SQL, not a finding.
-      val baseQ =
-        try RelEngine.execute(catalog, base, ExecutionOptions.Default)
+      val baseAnswer =
+        try RelEngine.answer(catalog, base, ExecutionOptions.Default)
         catch { case e: IllegalArgumentException => return RelEngine.Rejected(RelEngine.rejectReason(e)) }
-
-      val schema = baseQ.schema
-      val baseRows = RelEngine.collectRows(baseQ)
-      val partRows =
-        RelEngine.runRows(catalog, s"$base WHERE ${pred.truePred}", ExecutionOptions.Default) ++
-        RelEngine.runRows(catalog, s"$base WHERE ${pred.falsePred}", ExecutionOptions.Default) ++
-        RelEngine.runRows(catalog, s"$base WHERE ${pred.nullPred}", ExecutionOptions.Default)
+      val RelEngine.Answer(schema, baseRows) = baseAnswer match {
+        case Right(answered) => answered
+        case Left(_) => return RelEngine.Skipped
+      }
+      // A partition that does not bind names a column the base no longer
+      // returns, which only a shrink step makes (one that drops the column
+      // the predicate reads): nothing to check, like a base that does not.
+      val partRows = Seq(pred.truePred, pred.falsePred, pred.nullPred).flatMap { p =>
+        val part =
+          try RelEngine.answer(catalog, s"$base WHERE $p", ExecutionOptions.Default)
+          catch { case e: IllegalArgumentException => return RelEngine.Rejected(RelEngine.rejectReason(e)) }
+        part match {
+          case Right(answered) => answered.rows
+          case Left(_) if mc.query.movableFailure => return RelEngine.Skipped
+          case Left(failure) => throw new AssertionError(
+            s"[TLP] the partition WHERE $p fails on its data ($failure) where the base answers, and no WHERE or " +
+              s"ON condition that can fail is there to move.\n  base = $base")
+        }
+      }
 
       RowOracle.multisetEquals(schema, baseRows, partRows).foreach { diff =>
         throw new AssertionError(

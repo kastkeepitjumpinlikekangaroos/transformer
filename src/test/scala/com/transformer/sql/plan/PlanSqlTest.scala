@@ -53,6 +53,11 @@ class PlanSqlTest {
     "SELECT m * 1.05 AS p, m + 5 AS q, m = 3 AS e, COALESCE(m, 0) AS c, m IN (1, 2.5) AS i, " +
       "CASE WHEN f THEN m ELSE 0 END AS w, m - 0.001 AS r, m * -2 AS n FROM t",
     "SELECT CAST(a AS DOUBLE) AS x, CAST(s AS VARCHAR) AS y, CAST(ts AS DATE) AS z, a + b AS w, d > a AS v, a < '10' AS u FROM t",
+    // A written CAST to DECIMAL prints as itself, beside the binder's own,
+    // which prints as its operand; a string literal under one stays text.
+    "SELECT CAST(m AS DECIMAL(4,1)) AS x, CAST(a AS NUMERIC(12,2)) * m AS y, CAST('-1.5e2' AS DECIMAL(5,1)) AS z, " +
+      "CAST(1.0000000000000000001 AS DECIMAL(20,19)) AS w, CAST(NULL AS DECIMAL(3,0)) AS n, " +
+      "CAST(d AS DECIMAL(10,4)) = m AS e, CAST(f AS DECIMAL(1,0)) + 1.5 AS b FROM t",
     "SELECT ABS(a) AS a1, ROUND(d, 2) AS r, COALESCE(a, 0) AS c, IF(f, a, 0) AS i, NULLIF(a, 1) AS n, UPPER(s) AS u, " +
       "TRIM(s) AS tr, SUBSTRING(s, 1, 2) AS sb, CONCAT(s, 'x') AS cc, s || 'x' || s AS cat, LENGTH(s) AS l, " +
       "GREATEST(a, 1) AS g, LEAST(b, 5) AS le FROM t",
@@ -110,6 +115,18 @@ class PlanSqlTest {
     "SELECT a FROM t WHERE NOT (a = 1) AND NOT f AND NOT (NOT f)",
     "SELECT a FROM t WHERE dt < '2024-01-01' AND ts >= '2024-01-01 06:00:00'",
     "SELECT a + NULL AS x, m + NULL AS y, NULL = a AS z FROM t",
+    // A BETWEEN over two DECIMAL types compares its three operands as the
+    // DECIMAL that holds them all, where its two comparisons alone would
+    // each compare a pair as another (found by the agreed corpus,
+    // plans/testing/14).
+    "SELECT a FROM t WHERE m BETWEEN CAST(b AS DECIMAL(25,5)) AND a",
+    "SELECT m BETWEEN a AND CAST(d AS DECIMAL(20,4)) AS x, m NOT BETWEEN CAST(b AS DECIMAL(25,5)) AND 2.5 AS y " +
+      "FROM t WHERE a > 0 AND m BETWEEN CAST(a AS DECIMAL(20,4)) AND b AND f",
+    // A CAST of a condition, whose operand the parser reads only in
+    // parentheses (found by the `rewritten` slt mode, plans/testing/16).
+    "SELECT CAST((a = 1) AS VARCHAR) AS e, CAST((s LIKE 'x%') AS INT) AS l, CAST((f AND a > 1) AS VARCHAR) AS c, " +
+      "CAST((s IS NULL) AS VARCHAR) AS n, CAST((a IN (1, 2)) AS VARCHAR) AS i, CAST((a BETWEEN 1 AND 2) AS VARCHAR) AS b, " +
+      "CAST((f OR NOT f) AS VARCHAR) AS o, CAST((NOT f) AS VARCHAR) AS nf FROM t",
     // A table aliased by a word no keyword list holds but the parser reads as
     // the clock where it qualifies a column (found by the round-trip campaign).
     "SELECT a, COUNT(*) AS n FROM t CURRENT_TIMESTAMP GROUP BY a",
@@ -144,6 +161,9 @@ class PlanSqlTest {
     assertEquals(
       "SELECT CAST('5' AS BIGINT) AS b, -5 AS n, t.m * 1.05 AS p\nFROM t",
       printed("SELECT CAST('5' AS BIGINT) AS b, CAST('-5' AS INT) AS n, m * 1.05 AS p FROM t"))
+    assertEquals(
+      "SELECT CAST(t.m AS DECIMAL(4,1)) AS x, CAST('1.5' AS DECIMAL(2,1)) AS y, t.m = t.a AS z\nFROM t",
+      printed("SELECT CAST(m AS NUMERIC(4, 1)) AS x, CAST('1.5' AS DECIMAL(2,1)) AS y, m = a AS z FROM t"))
     val built = LogicalBuilder.build("SELECT t.a, u.x FROM t JOIN u ON t.a = u.a WHERE u.x = 'two'", catalog)
     assertEquals(
       "WITH q1 AS (\n  SELECT u.a AS a, u.x AS x\n  FROM u\n  WHERE u.x = 'two'\n)\n" +

@@ -1,6 +1,6 @@
 package com.transformer.sql.exec
 
-import com.transformer.core.{CatalogView, ColumnarBatch, DataType, ExecutionOptions, Schema}
+import com.transformer.core.{BatchInvariants, CatalogView, Closing, ColumnarBatch, DataType, ExecutionOptions, Schema}
 import com.transformer.core.metrics.{MeteredIterator, MetricsNode}
 import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.plan._
@@ -24,7 +24,8 @@ import scala.collection.mutable
   * + load (`if (opts.metricsEnabled)`) and the per-row inner loops are
   * untouched. Use [[planWithMetrics]] when the caller wants both the wrapped
   * tree and the root [[MetricsNode]] for snapshotting after the iterator
-  * drains.
+  * drains. Under `--config=verify` ([[BatchInvariants]]) the same walk wraps
+  * every operator in a [[VerifiedPlan]], which checks each batch it emits.
   */
 /** The nested-loop guard's refusal ([[PhysicalPlanner]]): a join with no
   * equality between its sides over inputs too large to pair. Which joins have
@@ -35,10 +36,8 @@ final class NestedLoopGuardException(message: String) extends IllegalArgumentExc
 
 object PhysicalPlanner {
 
-  def plan(logical: LogicalPlan, opts: ExecutionOptions = ExecutionOptions.Default): PhysicalPlan = {
-    val raw = planInner(logical, opts)
-    if (opts.metricsEnabled) wrapWithMetrics(raw)._1 else raw
-  }
+  def plan(logical: LogicalPlan, opts: ExecutionOptions = ExecutionOptions.Default): PhysicalPlan =
+    decorate(planInner(logical, opts), opts.metricsEnabled)._1
 
   /** Variant of [[plan]] that returns both the planned tree and the root
     * [[MetricsNode]] for the operator tree. The `MetricsNode` is `Some` iff
@@ -50,13 +49,20 @@ object PhysicalPlanner {
     * [[MetricsNode]] (threaded in by [[wrapChildren]]) so it can populate its
     * custom counters.
     */
-  def planWithMetrics(logical: LogicalPlan, opts: ExecutionOptions): (PhysicalPlan, Option[MetricsNode]) = {
-    val raw = planInner(logical, opts)
-    if (opts.metricsEnabled) {
-      val (wrapped, node) = wrapWithMetrics(raw)
-      (wrapped, Some(node))
-    } else (raw, None)
-  }
+  def planWithMetrics(logical: LogicalPlan, opts: ExecutionOptions): (PhysicalPlan, Option[MetricsNode]) =
+    decorate(planInner(logical, opts), opts.metricsEnabled)
+
+  /** `raw` as it runs: as it is when neither metrics nor
+    * [[BatchInvariants.enabled]] asks for a wrap, and otherwise rebuilt by
+    * the plan walk ([[Walk]]) with every operator metered when `metrics`
+    * and verified under `--config=verify`. The metrics tree's root comes
+    * back when `metrics`. */
+  private[exec] def decorate(raw: PhysicalPlan, metrics: Boolean): (PhysicalPlan, Option[MetricsNode]) =
+    if (!metrics && !BatchInvariants.enabled) (raw, None)
+    else {
+      val (wrapped, node) = new Walk(raw, metrics, BatchInvariants.enabled)(raw)
+      (wrapped, Option(node))
+    }
 
   /** Materialize every [[ExchangeExec]] in `plan` bottom-up (post-order:
     * children before parents), BEFORE any consumer of the plan runs. Both
@@ -81,7 +87,7 @@ object PhysicalPlanner {
     *
     * Shared subtrees (CTE inlining shares plan nodes, making the tree a DAG)
     * are visited once, by identity, so a diamond-shared exchange
-    * materializes exactly once. [[MeteredPlan]] wrappers are transparent. */
+    * materializes exactly once. [[PlanWrapper]]s are transparent. */
   def preMaterializeExchanges(plan: PhysicalPlan): Unit = {
     val visited = java.util.Collections.newSetFromMap(
       new java.util.IdentityHashMap[PhysicalPlan, java.lang.Boolean])
@@ -103,7 +109,7 @@ object PhysicalPlanner {
     * latch path, whose nesting hazards `ExchangeExec.ensureMaterialized`
     * documents). */
   private def childrenOf(plan: PhysicalPlan): Seq[PhysicalPlan] = plan match {
-    case m: MeteredPlan           => Seq(m.underlying)
+    case w: PlanWrapper           => Seq(w.underlying)
     case f: FilterExec            => Seq(f.child)
     case p: ProjectExec           => Seq(p.child)
     case l: LocalLimitExec        => Seq(l.child)
@@ -122,7 +128,7 @@ object PhysicalPlanner {
 
   private def planInner(logical: LogicalPlan, opts: ExecutionOptions): PhysicalPlan = logical match {
     case LogicalScan(_, view, _) => ScanExec(view, stopped = opts.stopped)
-    case LogicalFilter(LogicalScan(name, view, schema), pred) =>
+    case LogicalFilter(LogicalScan(_, view, _), pred) =>
       // Best-effort: try to push the predicate into the scan view. The original
       // FilterExec stays in place — pushdown only enables row-group skipping
       // (stats can prove non-matching groups, never prove matching ones).
@@ -173,7 +179,7 @@ object PhysicalPlanner {
     case LogicalJoin(l, r, cond, kind) =>
       val left = planInner(l, opts)
       val right = planInner(r, opts)
-      val (leftKeys, rightKeys, extra) = splitEqualityKeys(cond, l.outputSchema.length, r.outputSchema.length)
+      val (leftKeys, rightKeys, extra) = splitEqualityKeys(cond, l.outputSchema.length)
       if (leftKeys.isEmpty && rightKeys.isEmpty) enforceNestedLoopGuard(l, r)
       val buildRight = shouldBuildRight(l, r, kind)
       if (leftKeys.isEmpty || !shouldShardJoin(l, r) || (leftKeys ++ rightKeys).exists(Expr.readsRandom)) {
@@ -401,14 +407,15 @@ object PhysicalPlanner {
     * through a join on an equality. `None` where a size is unknown. */
   private def rowsAtMost(p: LogicalPlan): Option[(Long, Boolean)] = p match {
     case LogicalJoin(l, r, cond, _)
-        if splitEqualityKeys(cond, l.outputSchema.length, r.outputSchema.length)._1.isEmpty =>
+        if splitEqualityKeys(cond, l.outputSchema.length)._1.isEmpty =>
       for ((lc, _) <- rowsAtMost(l); (rc, _) <- rowsAtMost(r)) yield (times(lc, rc), true)
-    // A join on an equality keeps, by its estimate, its larger side's rows, so
-    // it is sized from its sides' bounds: the estimator sizes a pairing below
-    // it as that pairing's larger side.
+    // A join on an equality is sized from its sides' bounds, since the
+    // estimator sizes a pairing below it as that pairing's larger side; and
+    // whatever its kind ([[keyedJoinRows]]), so an outer join is no smaller
+    // than the inner join it holds.
     case LogicalJoin(l, r, _, kind) =>
       for ((lc, lPaired) <- rowsAtMost(l); (rc, rPaired) <- rowsAtMost(r))
-        yield (LogicalPlanCardinality.joinEstimate(lc, rc, kind), lPaired || rPaired)
+        yield (keyedJoinRows(lc, rc, kind), lPaired || rPaired)
     // Each keeps at most the rows it reads.
     case LogicalProject(child, _) => rowsAtMost(child)
     case LogicalFilter(child, _) => rowsAtMost(child)
@@ -417,7 +424,10 @@ object PhysicalPlanner {
     case LogicalDistinct(child) => rowsAtMost(child)
     case LogicalOffset(child, _) => rowsAtMost(child)
     case LogicalLimit(child, n) => rowsAtMost(child).map { case (c, paired) => if (n < c) (n, false) else (c, paired) }
-    case other => LogicalPlanCardinality.estimate(other).map((_, false))
+    // A scan's count, and an aggregate's or a union's estimate, its joins
+    // sized as above, so a join under one is no smaller as an outer join
+    // either.
+    case other => LogicalPlanCardinality.estimateWith(other, keyedJoinRows).map((_, false))
   }
 
   private def times(a: Long, b: Long): Long = if (a != 0 && b > Long.MaxValue / a) Long.MaxValue else a * b
@@ -437,6 +447,24 @@ object PhysicalPlanner {
     case _ => None
   }
 
+  /** How many rows [[rowsAtMost]] counts a join on an equality as keeping,
+    * over sides of `l` and `r`: its larger side's for INNER, LEFT and RIGHT,
+    * both sides' for FULL; and any join under an aggregate or a union, which
+    * it sizes through the estimator. An outer join keeps every row the inner
+    * join it holds does, so it is counted no smaller (decision 3 of
+    * plans/testing/16, taken overnight as recommended): counted by its
+    * preserved side, as the estimator sizes it to pick a build side
+    * ([[LogicalPlanCardinality.joinEstimate]]), `a CROSS JOIN d LEFT JOIN b ON
+    * a.k = b.k CROSS JOIN c` over 10, 10, 300000 and 100 rows ran while its
+    * INNER JOIN, which pairs no more rows, was refused, so a restriction of a
+    * query could be refused where the query was not, and so could one of a
+    * CTE grouping such a join beneath two CROSS JOINs (found by plan 16's
+    * CERT property). */
+  private def keyedJoinRows(l: Long, r: Long, kind: JoinKind): Long = kind match {
+    case JoinKind.Full => if (l > Long.MaxValue - r) Long.MaxValue else l + r
+    case _ => math.max(l, r)
+  }
+
   /** Try to push a bound predicate into the underlying view. Today only
     * [[ParquetReader]] participates — its `withPushdownFilter` translates the
     * expression to a parquet `FilterPredicate` and returns a new view that
@@ -451,7 +479,7 @@ object PhysicalPlanner {
     * residual predicate. References on the right side of the join begin at column
     * index `leftWidth` in the combined schema.
     */
-  private def splitEqualityKeys(cond: Expr, leftWidth: Int, rightWidth: Int): (Seq[Expr], Seq[Expr], Option[Expr]) = {
+  private def splitEqualityKeys(cond: Expr, leftWidth: Int): (Seq[Expr], Seq[Expr], Option[Expr]) = {
     val conjuncts = collectConjuncts(cond)
     val leftKeys = mutable.ArrayBuffer.empty[Expr]
     val rightKeys = mutable.ArrayBuffer.empty[Expr]
@@ -479,37 +507,34 @@ object PhysicalPlanner {
   }
 
   // ----------------------------------------------------------------------
-  // Metrics wrapping.
+  // The plan walk: metrics and verification.
   //
-  // When opts.metricsEnabled is true, [[plan]] runs the raw planner first
-  // (planInner), then post-walks the result to:
+  // When opts.metricsEnabled is true, or under --config=verify, [[plan]] runs
+  // the raw planner first (planInner), then post-walks the result to:
   //   1. Assign each operator a stable pre-order id.
-  //   2. Build a matching MetricsNode tree.
-  //   3. Substitute each operator's children with metered wrappers, so that
-  //      when the parent operator pulls from `child.execute(p)` the iterator
-  //      it sees is a MeteredIterator and the child's counters get populated.
-  //   4. Wrap the operator itself in a MeteredPhysicalPlan so the parent
-  //      (or the SqlEngine, at the root) reads metered output.
+  //   2. With metrics, build a matching MetricsNode tree.
+  //   3. Substitute each operator's children with their wrapped selves, so
+  //      that when the parent operator pulls from `child.execute(p)` the
+  //      iterator it sees is the wrapped one.
+  //   4. Wrap the operator itself, in a MeteredPlan with metrics and a
+  //      VerifiedPlan under verify, so the parent (or the SqlEngine, at the
+  //      root) reads wrapped output.
   //
-  // Disabled-path discipline: the only added cost when metricsEnabled is
-  // false is the single `if (opts.metricsEnabled)` branch in [[plan]] above.
-  // No allocation, no traversal, no override calls on the operator interior.
+  // Disabled-path discipline: with neither on, the only added cost is the
+  // branch in [[decorate]]. No allocation, no traversal, no override calls
+  // on the operator interior.
   // ----------------------------------------------------------------------
 
-  /** Recursively wrap an un-metered plan tree, returning the wrapped root
-    * plus its root metrics node. Mutable accumulator for monotonically
-    * increasing operator ids — pre-order traversal so ids match the natural
-    * read order of `_perf.json`. */
-  private[exec] def wrapWithMetrics(root: PhysicalPlan): (PhysicalPlan, MetricsNode) = {
-    val idCounter = new java.util.concurrent.atomic.AtomicInteger(0)
-    walkAndWrap(root, idCounter)
-  }
+  /** Recursively wrap an un-metered plan tree in metrics alone, returning the
+    * wrapped root plus its root metrics node. Pre-order ids, so they match the
+    * natural read order of `_perf.json`. */
+  private[exec] def wrapWithMetrics(root: PhysicalPlan): (PhysicalPlan, MetricsNode) =
+    new Walk(root, metrics = true, verify = false)(root)
 
   /** Per-operator counter name array used to size [[MetricsNode]] at wrap
     * time. Each operator that owns custom counters exposes an
-    * `IdxCounterNames` constant in its companion object. New operators not
-    * listed here fall back to an empty array — their iterator-level counters
-    * still populate, just no custom slots. */
+    * `IdxCounterNames` constant in its companion object; the rest have only
+    * the iterator-level counters. */
   private def counterNamesFor(plan: PhysicalPlan): Array[String] = plan match {
     case _: HashAggregateExec => HashAggregateExec.IdxCounterNames
     case _: HashJoinExec      => HashJoinExec.IdxCounterNames
@@ -521,93 +546,110 @@ object PhysicalPlanner {
     case _                    => MeteredPlan.EmptyCounterNames
   }
 
-  private def walkAndWrap(
-      plan: PhysicalPlan,
-      idCounter: java.util.concurrent.atomic.AtomicInteger): (PhysicalPlan, MetricsNode) = {
-    val id = idCounter.getAndIncrement()
-    val name = plan.getClass.getSimpleName
-    val node = new MetricsNode(id, name, partition = 0, counterNames = counterNamesFor(plan))
-    // Wrap children first (pre-order id assignment is already done above).
-    // Pass the node down so each rebuilt operator gets a MetricsNode it can
-    // populate custom counters into. The MeteredPlan wrapper still handles
-    // framework-level row/batch counts via MeteredIterator.
-    val (wrappedPlan, childNodes) = wrapChildren(plan, idCounter, node)
-    node.children = childNodes
-    (new MeteredPlan(wrappedPlan, node), node)
-  }
+  /** One walk of a raw plan `root`, wrapping every operator: in a
+    * [[MeteredPlan]] when `metrics`, in a [[VerifiedPlan]] when `verify`.
+    * Applied to an operator, it gives the operator rebuilt over its wrapped
+    * children and wrapped itself, and its metrics node (null without
+    * metrics). Under verify an operator it has no branch for in
+    * [[wrapChildren]] is an error, as its children would run unchecked. */
+  private final class Walk(root: PhysicalPlan, metrics: Boolean, verify: Boolean) {
+    private var nextId = 0
 
-  /** Rebuild a [[PhysicalPlan]] with its immediate children replaced by
-    * metered wrappers AND with `metricsNode = node` threaded into the
-    * operator's constructor so custom counters reach the same node the
-    * wrapping [[MeteredPlan]] reads at snapshot time. Returns the rebuilt
-    * plan plus the child metrics nodes (already populated with their own
-    * subtrees).
-    *
-    * Pattern-matched per operator: each branch knows the operator's
-    * child-arity and reconstructs the case class with new children. New
-    * operators added in the future need a branch here OR a fallback that
-    * leaves them unwrapped (the default below). Leaving an operator
-    * unwrapped is safe — it just means its children's iterators aren't
-    * metered. (New operators with children also need a [[childrenOf]]
-    * branch, where the fallback is NOT safe for exchange-bearing subtrees.)
-    */
-  private def wrapChildren(
-      plan: PhysicalPlan,
-      idCounter: java.util.concurrent.atomic.AtomicInteger,
-      node: MetricsNode): (PhysicalPlan, Vector[MetricsNode]) = plan match {
-    case s: ScanExec =>
-      // Leaf — no children to wrap. Rebuild with the metrics node so
-      // ParquetReader-backed views can populate scan-side counters.
-      (ScanExec(s.view, node, s.stopped), Vector.empty)
-    case _: CountStarMetadataExec =>
-      (plan, Vector.empty)
-    case FilterExec(child, pred) =>
-      val (wc, cn) = walkAndWrap(child, idCounter)
-      (FilterExec(wc, pred), Vector(cn))
-    case ProjectExec(child, projs) =>
-      val (wc, cn) = walkAndWrap(child, idCounter)
-      (ProjectExec(wc, projs), Vector(cn))
-    case LocalLimitExec(child, n) =>
-      val (wc, cn) = walkAndWrap(child, idCounter)
-      (LocalLimitExec(wc, n), Vector(cn))
-    case GlobalLimitExec(child, n) =>
-      val (wc, cn) = walkAndWrap(child, idCounter)
-      (GlobalLimitExec(wc, n), Vector(cn))
-    case OffsetExec(child, n) =>
-      val (wc, cn) = walkAndWrap(child, idCounter)
-      (OffsetExec(wc, n), Vector(cn))
-    case HashAggregateExec(child, gks, aggs, opts, _) =>
-      val (wc, cn) = walkAndWrap(child, idCounter)
-      (HashAggregateExec(wc, gks, aggs, opts, node), Vector(cn))
-    case HashJoinExec(left, right, lk, rk, extra, kind, br, opts, _) =>
-      val (wl, ln) = walkAndWrap(left, idCounter)
-      val (wr, rn) = walkAndWrap(right, idCounter)
-      (HashJoinExec(wl, wr, lk, rk, extra, kind, br, opts, node), Vector(ln, rn))
-    case TopNExec(child, keys, n) =>
-      val (wc, cn) = walkAndWrap(child, idCounter)
-      (TopNExec(wc, keys, n), Vector(cn))
-    case SortExec(child, keys, opts, _) =>
-      val (wc, cn) = walkAndWrap(child, idCounter)
-      (SortExec(wc, keys, opts, node), Vector(cn))
-    case DistinctExec(child, opts, _) =>
-      val (wc, cn) = walkAndWrap(child, idCounter)
-      (DistinctExec(wc, opts, node), Vector(cn))
-    case ExchangeExec(child, keys, k, policy, _) =>
-      val (wc, cn) = walkAndWrap(child, idCounter)
-      (ExchangeExec(wc, keys, k, policy, node), Vector(cn))
-    case WindowExec(child, windows, opts, _) =>
-      val (wc, cn) = walkAndWrap(child, idCounter)
-      (WindowExec(wc, windows, opts, node), Vector(cn))
-    case UnionExec(left, right) =>
-      val (wl, ln) = walkAndWrap(left, idCounter)
-      val (wr, rn) = walkAndWrap(right, idCounter)
-      (UnionExec(wl, wr), Vector(ln, rn))
-    case other =>
-      // Future operators land here until they get an explicit branch. The
-      // iterator they emit is still wrapped (by walkAndWrap above), but
-      // their children are not visible to the metrics tree.
-      (other, Vector.empty)
+    def apply(plan: PhysicalPlan): (PhysicalPlan, MetricsNode) = {
+      val id = nextId
+      nextId += 1
+      val node =
+        if (metrics) new MetricsNode(id, plan.getClass.getSimpleName, partition = 0, counterNames = counterNamesFor(plan))
+        else null
+      // Wrap children first (pre-order id assignment is already done above).
+      // Pass the node down so each rebuilt operator gets a MetricsNode it can
+      // populate custom counters into. The MeteredPlan wrapper still handles
+      // framework-level row/batch counts via MeteredIterator.
+      val (rebuilt, childNodes) = wrapChildren(plan, node)
+      if (node != null) node.children = childNodes
+      val verified = if (verify) new VerifiedPlan(rebuilt, plan, id, root) else rebuilt
+      (if (metrics) new MeteredPlan(verified, node) else verified, node)
+    }
+
+    /** Rebuild `plan` with its immediate children replaced by their wrapped
+      * selves AND with `metricsNode = node` threaded into the operator's
+      * constructor, so custom counters reach the same node the wrapping
+      * [[MeteredPlan]] reads at snapshot time. Returns the rebuilt plan plus
+      * the child metrics nodes (already populated with their own subtrees).
+      *
+      * Pattern-matched per operator: each branch knows the operator's
+      * child-arity and reconstructs the case class with new children. A new
+      * operator needs a branch here, and one in [[childrenOf]] too; under
+      * verify one with none fails the walk, and `sql/exec:plan_walk_test`
+      * holds that every operator the planner builds has one. */
+    private def wrapChildren(plan: PhysicalPlan, node: MetricsNode): (PhysicalPlan, Vector[MetricsNode]) = plan match {
+      case s: ScanExec =>
+        // Leaf — no children to wrap. Rebuild with the metrics node so
+        // ParquetReader-backed views can populate scan-side counters.
+        (ScanExec(s.view, node, s.stopped), Vector.empty)
+      case _: CountStarMetadataExec =>
+        (plan, Vector.empty)
+      case FilterExec(child, pred) =>
+        val (wc, cn) = apply(child)
+        (FilterExec(wc, pred), Vector(cn))
+      case ProjectExec(child, projs) =>
+        val (wc, cn) = apply(child)
+        (ProjectExec(wc, projs), Vector(cn))
+      case LocalLimitExec(child, n) =>
+        val (wc, cn) = apply(child)
+        (LocalLimitExec(wc, n), Vector(cn))
+      case GlobalLimitExec(child, n) =>
+        val (wc, cn) = apply(child)
+        (GlobalLimitExec(wc, n), Vector(cn))
+      case OffsetExec(child, n) =>
+        val (wc, cn) = apply(child)
+        (OffsetExec(wc, n), Vector(cn))
+      case HashAggregateExec(child, gks, aggs, opts, _) =>
+        val (wc, cn) = apply(child)
+        (HashAggregateExec(wc, gks, aggs, opts, node), Vector(cn))
+      case HashJoinExec(left, right, lk, rk, extra, kind, br, opts, _) =>
+        val (wl, ln) = apply(left)
+        val (wr, rn) = apply(right)
+        (HashJoinExec(wl, wr, lk, rk, extra, kind, br, opts, node), Vector(ln, rn))
+      case TopNExec(child, keys, n) =>
+        val (wc, cn) = apply(child)
+        (TopNExec(wc, keys, n), Vector(cn))
+      case SortExec(child, keys, opts, _) =>
+        val (wc, cn) = apply(child)
+        (SortExec(wc, keys, opts, node), Vector(cn))
+      case DistinctExec(child, opts, _) =>
+        val (wc, cn) = apply(child)
+        (DistinctExec(wc, opts, node), Vector(cn))
+      case ExchangeExec(child, keys, k, policy, _) =>
+        val (wc, cn) = apply(child)
+        (ExchangeExec(wc, keys, k, policy, node), Vector(cn))
+      case WindowExec(child, windows, opts, _) =>
+        val (wc, cn) = apply(child)
+        (WindowExec(wc, windows, opts, node), Vector(cn))
+      case UnionExec(left, right) =>
+        val (wl, ln) = apply(left)
+        val (wr, rn) = apply(right)
+        (UnionExec(wl, wr), Vector(ln, rn))
+      case other =>
+        // Under verify no operator may go unchecked. With metrics alone an
+        // operator with no branch is left as it is: its own output is still
+        // metered (by apply above), but its children are not visible to the
+        // metrics tree.
+        if (verify) throw new IllegalStateException(
+          s"The plan walk has no branch for ${other.getClass.getName}, so its children would run unchecked; " +
+            "add one to PhysicalPlanner's wrapChildren and childrenOf")
+        (other, Vector.empty)
+    }
   }
+}
+
+/** What the plan walk puts around an operator: the same plan, its output
+  * watched. Anything that reads a plan's shape sees through one to
+  * `underlying`, as metrics and verification watch a plan and must not change
+  * it ([[ExchangeExec.feeds]], [[PhysicalPlanner.preMaterializeExchanges]],
+  * `EXPLAIN`). */
+sealed trait PlanWrapper extends PhysicalPlan {
+  def underlying: PhysicalPlan
 }
 
 /** Iterator-wrap delegator placed at planner time over every operator when
@@ -624,7 +666,7 @@ object PhysicalPlanner {
   * disabled path stays byte-for-byte the un-wrapped tree, and the wrap pass
   * runs only when the user opted in.
   */
-private[exec] final class MeteredPlan(inner: PhysicalPlan, val node: MetricsNode) extends PhysicalPlan {
+private[exec] final class MeteredPlan(inner: PhysicalPlan, val node: MetricsNode) extends PlanWrapper {
   def outputSchema: Schema = inner.outputSchema
   def numPartitions: Int = inner.numPartitions
   def execute(partition: Int): Iterator[ColumnarBatch] = {
@@ -644,4 +686,47 @@ private[exec] object MeteredPlan {
     * the framework-managed iterator counters are populated. Operators with
     * custom counters supply their own `IdxCounterNames` instead. */
   val EmptyCounterNames: Array[String] = Array.empty
+}
+
+/** The check `--config=verify` puts around every operator the planner builds
+  * ([[BatchInvariants]]): each batch `inner` emits is checked against its
+  * declared schema, and the first one that breaks an invariant fails with an
+  * `AssertionError` naming the operator, the column, the row and the value,
+  * so a test fails where the value was made rather than where it is written.
+  * `raw` is the operator as planned and `id` its place in a pre-order walk of
+  * `root`, the raw plan, for the message, which shows the whole plan with the
+  * operator's line marked ([[Explain.operatorLines]]); both are read only
+  * when a batch fails. */
+private[exec] final class VerifiedPlan(inner: PhysicalPlan, raw: PhysicalPlan, id: Int, root: PhysicalPlan)
+    extends PlanWrapper {
+  def outputSchema: Schema = inner.outputSchema
+  def numPartitions: Int = inner.numPartitions
+  def execute(partition: Int): Iterator[ColumnarBatch] = {
+    val schema = outputSchema
+    val batches = inner.execute(partition)
+    Closing.over(batches.map { batch =>
+      BatchInvariants.violation(batch, schema).foreach(v => throw failure(batch, schema, partition, v))
+      batch
+    }, batches)
+  }
+
+  /** The wrapped plan, as [[MeteredPlan.underlying]] gives its own. */
+  def underlying: PhysicalPlan = inner
+
+  private def failure(batch: ColumnarBatch, schema: Schema, partition: Int, v: BatchInvariants.Violation): AssertionError = {
+    val lines = try Explain.operatorLines(root) catch { case _: Throwable => Vector.empty[String] }
+    val line = if (id < lines.length) s"line ${id + 1} of the plan, `${lines(id).trim}`" else "an operator of the plan"
+    val column =
+      if (v.column < 0) ""
+      else {
+        val name = if (v.column < schema.length) schema.fields(v.column).name else "?"
+        s", column ${v.column} '$name'"
+      }
+    val row =
+      if (v.row < 0 || v.column < 0 || v.column >= batch.columns.length) ""
+      else s", row ${v.row} of a batch of ${batch.numRows}, value ${BatchInvariants.show(batch.columns(v.column).getBoxed(v.row))}"
+    val plan = lines.zipWithIndex.map { case (l, i) => (if (i == id) "> " else "  ") + l }.mkString("\n")
+    new AssertionError(
+      s"${raw.getClass.getSimpleName} ($line), partition $partition$column$row: ${v.what}\nThe plan:\n$plan")
+  }
 }

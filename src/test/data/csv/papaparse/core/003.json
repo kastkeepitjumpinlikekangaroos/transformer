@@ -1,0 +1,25 @@
+{
+ "description": "Three rows",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "E",
+   "f"
+  ],
+  [
+   "G",
+   "h",
+   "i"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

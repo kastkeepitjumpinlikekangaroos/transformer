@@ -572,7 +572,8 @@ object ParquetGen {
       writerVersion = rng.weighted((1, WriterVersion.PARQUET_1_0), (1, WriterVersion.PARQUET_2_0)),
       byteStreamSplit = rng.bool(0.2),
       codec = rng.weighted((3, CompressionCodecName.UNCOMPRESSED), (2, CompressionCodecName.SNAPPY),
-        (1, CompressionCodecName.GZIP), (2, CompressionCodecName.ZSTD), (1, CompressionCodecName.LZ4_RAW)))
+        (1, CompressionCodecName.GZIP), (2, CompressionCodecName.ZSTD), (1, CompressionCodecName.LZ4_RAW),
+        (1, CompressionCodecName.LZ4)))
 
   /** Row groups of one file, possibly none. Each column draws from a small
     * domain shared by the whole file (repeats, so dictionaries pay), a domain

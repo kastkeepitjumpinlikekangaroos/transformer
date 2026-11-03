@@ -22,6 +22,12 @@ import com.transformer.fuzz.RowOracle
   * [[Tlp]] on a fixed layout instead. Comparison tolerates `Double` columns only
   * (order-dependent aggregates accumulate in `double`); every other column is
   * exact — see [[RowOracle.multisetEquals]].
+  *
+  * A query that fails on its data (an overflow, a decimal past its digits, a
+  * date past its range) must fail in every mode, and one that answers must
+  * answer in every mode, but where a WHERE or ON condition that can fail is
+  * there to move (`MetaQuery.movableFailure`): decision 1 of
+  * plans/testing/15, as [[ModeDifferential]] reads it.
   */
 object MetaModeDifferential {
 
@@ -34,19 +40,28 @@ object MetaModeDifferential {
     if (!mc.query.isLayoutInvariant) return RelEngine.Skipped
     val body = mc.query.renderBody
 
-    val baseQ =
-      try RelEngine.execute(mc.env.catalog(), body, ExecutionOptions.Default)
+    val base =
+      try RelEngine.answer(mc.env.catalog(), body, ExecutionOptions.Default)
       catch { case e: IllegalArgumentException => return RelEngine.Rejected(RelEngine.rejectReason(e)) }
-    val schema = baseQ.schema
-    val baseRows = RelEngine.collectRows(baseQ)
+    val movable = mc.query.movableFailure
 
     modes(mc).foreach { case (label, catalog, opts) =>
-      val q = RelEngine.execute(catalog, body, opts)
-      val rows = RelEngine.collectRows(q)
-      if (opts.metricsEnabled) q.metricsSnapshot // exercise the metrics path end to end
-      RowOracle.multisetEquals(schema, baseRows, rows).foreach { diff =>
-        throw new AssertionError(
-          s"[mode-differential] $label disagrees with baseline.\n  body = $body\n$diff")
+      // A drained query's metrics snapshot exercises the metrics path end to end.
+      val other = RelEngine.answer(catalog, body, opts, q => if (opts.metricsEnabled) q.metricsSnapshot)
+      (base, other) match {
+        case (Right(baseAnswer), Right(answer)) =>
+          RowOracle.multisetEquals(baseAnswer.schema, baseAnswer.rows, answer.rows).foreach { diff =>
+            throw new AssertionError(
+              s"[mode-differential] $label disagrees with baseline.\n  body = $body\n$diff")
+          }
+        case (Left(_), Left(_)) => ()
+        case _ if movable => ()
+        case (Left(failure), Right(_)) =>
+          throw new AssertionError(s"[mode-differential] $label answers where the baseline fails on its data " +
+            s"($failure), and no WHERE or ON condition that can fail is there to move.\n  body = $body")
+        case (Right(_), Left(failure)) =>
+          throw new AssertionError(s"[mode-differential] $label fails on its data ($failure) where the baseline " +
+            s"answers, and no WHERE or ON condition that can fail is there to move.\n  body = $body")
       }
     }
     RelEngine.Held

@@ -27,3 +27,14 @@ test:zone "--test_env=JAVA_TOOL_OPTIONS=-Duser.timezone=America/St_Johns -Duser.
 # Every key hash 0 (KeyHash), DuckDB's HASH_ZERO: every hash map meets only
 # collisions, every exchange and spill sends every row to one shard or bucket.
 test:hashzero --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.hash_zero=true
+# Every batch every operator emits checked against the schema it declares
+# (BatchInvariants): a value its type cannot hold fails where it was made.
+test:verify --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.verify=true
+# What a test leaves open at JVM exit, reported with the stack that opened it,
+# fails the target (LeakAudit): files the readers and writers open, operator
+# spill directories, and threads the engine started.
+test:leaks --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.audit_leaks=true
+# Interleavings on purpose (Chaos): at every handoff between threads a thread
+# does nothing, yields or sleeps 0 to 2 ms, by a generator of its own seeded
+# from the seed. Another seed: --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.chaos=<n>.
+test:chaos --test_env=JAVA_TOOL_OPTIONS=-Dtransformer.chaos=1

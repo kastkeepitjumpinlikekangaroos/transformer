@@ -1,0 +1,596 @@
+# From Apache DataFusion's sqllogictest files (https://github.com/apache/datafusion):
+# datafusion/sqllogictest/test_files/coalesce.slt at commit
+# 934691e9af8f11bf4b629f21bb17795abfb84d93, as it is there but for this header
+# and the condition lines added before records, under the Apache License 2.0
+# (LICENSE beside this file; NOTICE says whose they are).
+# transformer: an unconstrained DECIMAL is DECIMAL(38,10)
+#
+# 73 records: 24 run as DataFusion answers them; 49 held for DataFusion,
+# `onlyif datafusion # needs ...`, by what they need: a function the engine has
+# not 26, what a held statement makes 14, a clause or construct the engine
+# refuses 3, a type the engine has not 3, its own plan (EXPLAIN) 2, a value or
+# type the dialect reads otherwise 1.
+
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: See the NOTICE file distributed with this work for additional information regarding copyright ownership
+# SPDX-FileContributor: Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements
+
+# Test coalesce function
+query I
+select coalesce(1, 2, 3);
+----
+1
+
+# test with first null
+onlyif datafusion # needs arrow_typeof()
+query IT
+select coalesce(null, 3, 2, 1), arrow_typeof(coalesce(null, 3, 2, 1));
+----
+3 Int64
+
+# test with null values
+query ?
+select coalesce(null, null);
+----
+NULL
+
+# cast to float
+onlyif datafusion # needs arrow_typeof()
+query RT
+select
+  coalesce(1, 2.0),
+  arrow_typeof(coalesce(1, 2.0))
+;
+----
+1 Float64
+
+onlyif datafusion # needs arrow_typeof()
+query RT
+select
+  coalesce(2.0, 1),
+  arrow_typeof(coalesce(2.0, 1))
+;
+----
+2 Float64
+
+onlyif datafusion # needs arrow_cast()
+query RT
+select
+  coalesce(1, arrow_cast(2.0, 'Float32')),
+  arrow_typeof(coalesce(1, arrow_cast(2.0, 'Float32')))
+;
+----
+1 Float32
+
+# test with empty args
+query error
+select coalesce();
+
+# test with different types
+onlyif datafusion # needs arrow_cast()
+query I
+select coalesce(arrow_cast(1, 'Int32'), arrow_cast(1, 'Int64'));
+----
+1
+
+# test with nulls
+onlyif datafusion # needs arrow_typeof()
+query ?T
+select coalesce(null, null, null), arrow_typeof(coalesce(null, null));
+----
+NULL Null
+
+# i32 and u32, cast to wider type i64
+onlyif datafusion # needs arrow_cast()
+query IT
+select
+  coalesce(arrow_cast(2, 'Int32'), arrow_cast(3, 'UInt32')),
+  arrow_typeof(coalesce(arrow_cast(2, 'Int32'), arrow_cast(3, 'UInt32')));
+----
+2 Int64
+
+onlyif datafusion # needs arrow_cast()
+query IT
+select
+  coalesce(arrow_cast(2, 'Int16'), arrow_cast(3, 'UInt16')),
+  arrow_typeof(coalesce(arrow_cast(2, 'Int16'), arrow_cast(3, 'UInt16')));
+----
+2 Int32
+
+onlyif datafusion # needs arrow_cast()
+query IT
+select
+  coalesce(arrow_cast(2, 'Int8'), arrow_cast(3, 'UInt8')),
+  arrow_typeof(coalesce(arrow_cast(2, 'Int8'), arrow_cast(3, 'UInt8')));
+----
+2 Int16
+
+# i64 and u32, cast to wider type i64
+onlyif datafusion # needs arrow_cast()
+query IT
+select
+  coalesce(2, arrow_cast(3, 'UInt32')),
+  arrow_typeof(coalesce(2, arrow_cast(3, 'UInt32')));
+----
+2 Int64
+
+# i64 and u64, cast to decimal128(20, 0)
+onlyif datafusion # needs arrow_cast()
+query RT
+select
+  coalesce(2, arrow_cast(3, 'UInt64')),
+  arrow_typeof(coalesce(2, arrow_cast(3, 'UInt64')));
+----
+2 Decimal128(20, 0)
+
+statement ok
+create table t1 (a bigint, b int, c int) as values (null, null, 1), (null, 2, null);
+
+# Follow Postgres and DuckDB behavior, since a is bigint, although the value is null, all args are coerced to bigint
+onlyif datafusion # needs arrow_typeof()
+query IT
+select
+  coalesce(a, b, c),
+  arrow_typeof(coalesce(a, b, c))
+from t1;
+----
+1 Int64
+2 Int64
+
+# b, c has the same type int, so the result is int
+onlyif datafusion # needs arrow_typeof()
+query IT
+select
+  coalesce(b, c),
+  arrow_typeof(coalesce(b, c))
+from t1;
+----
+1 Int32
+2 Int32
+
+statement ok
+drop table t1;
+
+# test multi rows
+statement ok
+CREATE TABLE t1(
+  c1 int,
+  c2 int
+) as VALUES
+(1, 2),
+(NULL, 2),
+(1, NULL),
+(NULL, NULL);
+
+query I
+SELECT COALESCE(c1, c2) FROM t1
+----
+1
+2
+1
+NULL
+
+statement ok
+drop table t1;
+
+# Decimal128(7, 2) and int64 are coerced to common wider type Decimal128(22, 2)
+onlyif datafusion # needs arrow_cast()
+query RT
+select
+  coalesce(arrow_cast(2, 'Decimal128(7, 2)'), 0),
+  arrow_typeof(coalesce(arrow_cast(2, 'Decimal128(7, 2)'), 0))
+----
+2.00 Decimal128(22, 2)
+
+onlyif datafusion # needs arrow_cast()
+query RT
+select
+  coalesce(arrow_cast(2, 'Decimal256(7, 2)'), 0),
+  arrow_typeof(coalesce(arrow_cast(2, 'Decimal256(7, 2)'), 0));
+----
+2.00 Decimal256(22, 2)
+
+# coalesce string
+query TT
+select
+  coalesce('', 'test'),
+  coalesce(null, 'test');
+----
+(empty) test
+
+# coalesce utf8 and large utf8
+onlyif datafusion # needs arrow_cast()
+query TT
+select
+  coalesce('a', arrow_cast('b', 'LargeUtf8')),
+  arrow_typeof(coalesce('a', arrow_cast('b', 'LargeUtf8')))
+;
+----
+a LargeUtf8
+
+# coalesce array
+onlyif datafusion # needs An array
+query ?T
+select
+  coalesce(array[1, 2], array[3, 4]),
+  arrow_typeof(coalesce(array[1, 2], array[3, 4]));
+----
+[1, 2] List(Int64)
+
+onlyif datafusion # needs An array
+query ?T
+select
+  coalesce(null, array[3, 4]),
+  arrow_typeof(coalesce(array[1, 2], array[3, 4]));
+----
+[3, 4] List(Int64)
+
+# coalesce with array
+onlyif datafusion # needs An array
+query ?T
+select
+  coalesce(array[1, 2], array[arrow_cast(3, 'Int32'), arrow_cast(4, 'Int32')]),
+  arrow_typeof(coalesce(array[1, 2], array[arrow_cast(3, 'Int32'), arrow_cast(4, 'Int32')]));
+----
+[1, 2] List(Int64)
+
+# test dict(int32, utf8)
+onlyif datafusion # needs arrow_cast()
+statement ok
+create table test1 as values (arrow_cast('foo', 'Dictionary(Int32, Utf8)')), (null);
+
+onlyif datafusion # needs the table test1, which a held statement makes
+query T
+select coalesce(column1, 'none_set') from test1;
+----
+foo
+none_set
+
+onlyif datafusion # needs the table test1, which a held statement makes
+query T
+select coalesce(null, column1, 'none_set') from test1;
+----
+foo
+none_set
+
+# explicitly cast to Utf8
+onlyif datafusion # needs the table test1, which a held statement makes
+query T
+select coalesce(arrow_cast(column1, 'Utf8'), 'none_set') from test1;
+----
+foo
+none_set
+
+onlyif datafusion # needs the table test1, which a held statement makes
+statement ok
+drop table test1
+
+# coalesce with utf8view
+onlyif datafusion # needs arrow_cast()
+query TTT
+select coalesce(arrow_cast(null, 'Utf8View'), arrow_cast('t', 'Utf8')),
+       arrow_typeof(coalesce(arrow_cast(null, 'Utf8View'), arrow_cast('t', 'Utf8'))),
+       arrow_typeof(coalesce(arrow_cast(null, 'Utf8'), arrow_cast('t', 'Utf8View')));
+----
+t Utf8View Utf8View
+
+# test dict coercion with value
+statement ok
+create table t(c varchar) as values ('a'), (null);
+
+onlyif datafusion # needs arrow_cast()
+query TT
+select 
+  coalesce(c, arrow_cast('b', 'Dictionary(Int32, Utf8)')),
+  arrow_typeof(coalesce(c, arrow_cast('b', 'Dictionary(Int32, Utf8)')))
+from t;
+----
+a Utf8View
+b Utf8View
+
+statement ok
+drop table t;
+
+# test dict coercion with dict
+onlyif datafusion # needs arrow_cast()
+statement ok
+create table t as values 
+  (arrow_cast('foo', 'Dictionary(Int32, Utf8)')), 
+  (null);
+
+onlyif datafusion # needs the table t, which a held statement makes
+query TT
+select 
+  coalesce(column1, arrow_cast('bar', 'Dictionary(Int64, LargeUtf8)')),
+  arrow_typeof(coalesce(column1, arrow_cast('bar', 'Dictionary(Int64, LargeUtf8)')))
+from t;
+----
+foo Dictionary(Int64, LargeUtf8)
+bar Dictionary(Int64, LargeUtf8)
+
+onlyif datafusion # needs the table t, which a held statement makes
+query TT
+select 
+  coalesce(column1, arrow_cast('bar', 'Dictionary(Int32, LargeUtf8)')),
+  arrow_typeof(coalesce(column1, arrow_cast('bar', 'Dictionary(Int32, LargeUtf8)')))
+from t;
+----
+foo Dictionary(Int32, LargeUtf8)
+bar Dictionary(Int32, LargeUtf8)
+
+onlyif datafusion # needs the table t, which a held statement makes
+query TT
+select 
+  coalesce(column1, arrow_cast('bar', 'Dictionary(Int64, Utf8)')),
+  arrow_typeof(coalesce(column1, arrow_cast('bar', 'Dictionary(Int64, Utf8)')))
+from t;
+----
+foo Dictionary(Int64, Utf8)
+bar Dictionary(Int64, Utf8)
+
+onlyif datafusion # needs the table t, which a held statement makes
+statement ok
+drop table t;
+
+# test dict(int32, int8)
+onlyif datafusion # needs arrow_cast()
+query ?
+select coalesce(34, arrow_cast(123, 'Dictionary(Int32, Int8)'));
+----
+34
+
+onlyif datafusion # needs arrow_cast()
+query ?
+select coalesce(arrow_cast(123, 'Dictionary(Int32, Int8)'), 34);
+----
+123
+
+onlyif datafusion # needs arrow_cast()
+query ?
+select coalesce(null, 34, arrow_cast(123, 'Dictionary(Int32, Int8)'));
+----
+34
+
+# numeric string coercion
+onlyif datafusion # needs arrow_typeof()
+query RT
+select coalesce(2.0, 1, '3'), arrow_typeof(coalesce(2.0, 1, '3'));
+----
+2 Float64
+
+# explicitly cast to Int8, and it will implicitly cast to Int64
+onlyif datafusion # needs arrow_cast()
+query IT
+select
+  coalesce(arrow_cast(123, 'Int8'), 34),
+  arrow_typeof(coalesce(arrow_cast(123, 'Int8'), 34));
+----
+123 Int64
+
+statement ok
+CREATE TABLE test(
+  c1 INT,
+  c2 INT
+) as VALUES
+(0, 1),
+(NULL, 1),
+(1, 0),
+(NULL, 1),
+(NULL, NULL);
+
+# coalesce result
+query I rowsort
+SELECT COALESCE(c1, c2) FROM test
+----
+0
+1
+1
+1
+NULL
+
+# numeric string is coerced to numeric in both Postgres and DuckDB
+query I
+SELECT COALESCE(c1, c2, '-1') FROM test;
+----
+0
+1
+1
+1
+-1
+
+statement ok
+drop table test
+
+statement ok
+CREATE TABLE test(
+  c1 BIGINT,
+  c2 BIGINT
+) as VALUES
+(1, 2),
+(NULL, 2),
+(1, NULL),
+(NULL, NULL);
+
+# coalesce sum with default value
+query I
+SELECT SUM(COALESCE(c1, c2, 0)) FROM test
+----
+4
+
+# coalesce mul with default value
+query I
+SELECT COALESCE(c1 * c2, 0) FROM test
+----
+2
+0
+0
+0
+
+statement ok
+drop table test
+
+# coalesce date32
+
+onlyif datafusion # needs Text '2022-12-8' could not be parsed at index 8
+statement ok
+CREATE TABLE test(
+  d1_date DATE,
+  d2_date DATE,
+  d3_date DATE
+) as VALUES
+  ('2022-12-12','2022-12-12','2022-12-12'),
+  (NULL,'2022-12-11','2022-12-12'),
+  ('2022-12-12','2022-12-10','2022-12-12'),
+  ('2022-12-12',NULL,'2022-12-12'),
+  ('2022-12-12','2022-12-8','2022-12-12'),
+  ('2022-12-12','2022-12-7',NULL),
+  ('2022-12-12',NULL,'2022-12-12'),
+  (NULL,'2022-12-5','2022-12-12')
+;
+
+onlyif datafusion # needs the table test, which a held statement makes
+query D
+SELECT COALESCE(d1_date, d2_date, d3_date) FROM test
+----
+2022-12-12
+2022-12-11
+2022-12-12
+2022-12-12
+2022-12-12
+2022-12-12
+2022-12-12
+2022-12-05
+
+onlyif datafusion # needs the table test, which a held statement makes
+query T
+SELECT arrow_typeof(COALESCE(d1_date, d2_date, d3_date)) FROM test
+----
+Date32
+Date32
+Date32
+Date32
+Date32
+Date32
+Date32
+Date32
+
+onlyif datafusion # needs the table test, which a held statement makes
+statement ok
+drop table test
+
+onlyif datafusion # needs arrow_cast()
+query T
+select coalesce(arrow_cast('', 'Utf8View'), arrow_cast('', 'Dictionary(UInt32, Utf8)'));
+----
+(empty)
+
+# RunEndEncoded column coalesced with a string literal
+onlyif datafusion # needs VALUES in FROM
+statement ok
+create table ree_t as
+select arrow_cast(c, 'RunEndEncoded("run_ends": non-null Int32, "values": Utf8)') as ree_col
+from (values ('hello'), (NULL), ('world')) as t(c);
+
+onlyif datafusion # needs the table ree_t, which a held statement makes
+query ?
+select coalesce(ree_col, '__null__') from ree_t;
+----
+hello
+__null__
+world
+
+onlyif datafusion # needs the table ree_t, which a held statement makes
+statement ok
+drop table ree_t;
+
+##########
+# Volatile arguments must be evaluated exactly once
+# https://github.com/apache/datafusion/issues/25477
+##########
+
+# The CASE rewrite would name a volatile non-final argument twice (two draws),
+# so a volatile first argument keeps the `coalesce` call.
+onlyif datafusion # needs DataFusion's own plan, an EXPLAIN
+query TT
+explain select coalesce(nullif(floor(random() * 2), 0), -1) as c;
+----
+logical_plan
+01)Projection: coalesce(nullif(floor(random() * Float64(2)), Float64(0)), Float64(-1)) AS c
+02)--EmptyRelation: rows=1
+physical_plan
+01)ProjectionExec: expr=[coalesce(nullif(floor(random() * 2), 0), -1) as c]
+02)--PlaceholderRowExec
+
+# With two draws, about 25% of rows were NULL (and Arrow rejected them because
+# the `-1` fallback makes the result non-nullable). With one draw, every row is
+# either 1 or -1.
+onlyif datafusion # needs A table function in FROM
+statement ok
+create table volatile_t as select * from generate_series(1, 100000) as t(i);
+
+onlyif datafusion # needs FILTER (WHERE ...)
+query III
+select
+  count(coalesce(nullif(floor(random() * 2), 0), -1)),
+  count(nvl(nullif(floor(random() * 2), 0), -1)),
+  count(*) filter (where coalesce(nullif(floor(random() * 2), 0), -1) not in (1, -1))
+from volatile_t;
+----
+100000 100000 0
+
+onlyif datafusion # needs the table volatile_t, which a held statement makes
+statement ok
+drop table volatile_t;
+
+# `case when random() >= 0 then x end` is volatile but always equals `x`, which
+# makes the results of the volatile code path deterministic.
+statement ok
+create table volatile_args(a int, b int, c int, s varchar, x int, y int) as values
+  (1,    9,    8,    null, 0, 1),
+  (null, 2,    8,    'b',  0, 1),
+  (null, null, 3,    null, 0, 1),
+  (null, null, null, null, 0, 1);
+
+query IIIIT
+select
+  coalesce(case when random() >= 0 then a end, b, c),
+  coalesce(case when random() >= 0 then a end, -1),
+  coalesce(case when random() >= 0 then a end, null::int),
+  coalesce(a, case when random() >= 0 then b end, c),
+  coalesce(case when random() >= 0 then s end, 'none')
+from volatile_args;
+----
+1 1 1 1 none
+2 -1 NULL 2 b
+3 -1 NULL 3 none
+NULL -1 NULL NULL none
+
+query TI
+select
+  coalesce(case when random() >= 0 then null::varchar end, 'datafusion', 'unused'),
+  coalesce(case when random() >= 0 then null::int end, null::int);
+----
+datafusion NULL
+
+# Arguments before the first volatile one keep the CASE rewrite; only the rest
+# is left to `coalesce`.
+onlyif datafusion # needs DataFusion's own plan, an EXPLAIN
+query TT
+explain select coalesce(a, case when random() >= 0 then b end, c) from volatile_args;
+----
+logical_plan
+01)Projection: CASE WHEN volatile_args.a IS NOT NULL THEN volatile_args.a ELSE coalesce(CASE WHEN random() >= Float64(0) THEN volatile_args.b END, volatile_args.c) END AS coalesce(volatile_args.a,CASE WHEN random() >= Int64(0) THEN volatile_args.b END,volatile_args.c)
+02)--TableScan: volatile_args projection=[a, b, c]
+physical_plan
+01)ProjectionExec: expr=[CASE WHEN a@0 IS NOT NULL THEN a@0 ELSE coalesce(CASE WHEN random() >= 0 THEN b@1 END, c@2) END as coalesce(volatile_args.a,CASE WHEN random() >= Int64(0) THEN volatile_args.b END,volatile_args.c)]
+02)--DataSourceExec: partitions=1, partition_sizes=[1]
+
+# A volatile last argument is named once, so it keeps the lazy CASE rewrite:
+# `y / x` must not divide by zero when `a` is not null.
+query R
+select coalesce(a, y / x + random()) from volatile_args where a is not null;
+----
+1
+
+statement ok
+drop table volatile_args;

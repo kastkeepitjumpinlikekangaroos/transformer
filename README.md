@@ -349,6 +349,13 @@ Airflow renders `{{ ... }}` in `bash_command` itself, so this example uses
 Airflow's `ds_nodash` for the output path. transformer's own templates in
 `config.json`, `main.sql`, and `output.json` are untouched by Airflow.
 
+A failed run is retried as it is: rerun the same command, with nothing to
+delete first. A failed task leaves its directory holding only its `_run.json`,
+and a run that was killed leaves `Running` records, which the next run clears
+([the order a run writes in](#per-task-_runjson)). Do not start two runs that
+write one output directory at once: a run cannot tell another's `Running`
+record from one a killed run left, and clears it.
+
 ## Working with a coding agent
 
 transformer is designed so that an agent harness such as Claude Code can own
@@ -442,6 +449,7 @@ Node colours:
 | Red | Failed (error message + timing reloaded from disk) |
 | Amber | Validation failed (per-validation pass/fail + sample CSV reloaded from disk) |
 | Dark grey, "skipped" | Skipped (upstream failure) |
+| Amber, "unfinished" | Unfinished: its `_run.json` says `Running`, so its run stopped before it finished, or is still running in another process. No duration, rows or preview |
 | Teal | An input |
 
 ### SQL editors and vim keybindings
@@ -648,8 +656,12 @@ GROUP BY s.segment
 A table reads as the tasks after it read it: the part files its run wrote,
 with the column types it was written with. `jaffle_shop.customers` is refused
 with the name to write instead, and a table whose task failed in the run shown
-says it has no rows. Persist writes a result as part files, under
-`<folder>/interactive` unless you choose another directory.
+says it has no rows. So does an unfinished one, whose `_run.json` says
+`Running` whatever its run's `job.json` says: a later run stopped while
+writing it, or is writing it now. Persist writes a result as part files, under
+`<folder>/interactive` unless you choose another directory, in the order a
+job's task writes its directory: a directory of part files no `_run.json`
+names is refused, and a save that fails leaves no part file.
 
 A run written before records carried lineage (before 2026-10-31) still
 opens: its tables show their rows and query, but nothing in it says what each
@@ -718,8 +730,10 @@ the viewer's dark theme, named after what it draws (`revenue_by_month.png`).
 The runner persists a full run record for every task **at every termination
 status** — Succeeded, ValidationFailed, Failed, Skipped — so reopening the
 GUI against a previous run shows the exact same status, validation
-detail, and error messages it did during the live run. Reruns at the same
-templated output path completely overwrite prior state.
+detail, and error messages it did during the live run. While a run writes a
+task's directory its record says `Running`. Reruns at the same templated
+output path completely overwrite prior state, and a run that failed or was
+killed needs no cleanup before its rerun.
 
 There are two artifacts.
 
@@ -787,16 +801,52 @@ stops the run instead: no task starts after it, each that had not started is
 (...)`, and the run's error (`JobResult.error`, and `errorMessage` in
 `job.json`) says the same.
 
-The underscore prefix means CSV/Parquet readers skip both the record and the
-validation samples when reading the directory as data. The tasks after a task,
-and its validations, read exactly the part files its run wrote, by name, so
-another file in the directory (a README) is never read as data. A run clears a
-directory its earlier run recorded, deleting the files a run writes there
-(`part-*`, `_*`, `.*`) and leaving any other file alone. A directory holding
-`part-*` files that no `_run.json` names, left by a run killed between clearing
-and recording, another job writing there or a copy, fails the task before it
-writes, naming the files: delete them or write elsewhere. Such a directory is
-not marked as the job's either, so no later run deletes those files.
+The record is the commit. A run writes a task's directory in this order:
+
+1. **Check.** A directory holding `part-*` files that no `_run.json` names
+   (another job writing there, a copy) fails the task before it writes,
+   naming the files: delete them or write elsewhere. Such a directory is not
+   marked as the job's, so no run deletes those files.
+2. **Mark.** `_run.json` becomes a `Running` record, replacing the earlier
+   record in one rename. From then on the directory is the job's, whatever
+   the run leaves in it.
+3. **Clear.** The earlier run's files go: every `part-*`, `_*` and `.*` file
+   but the record. Any other file (a README) stays.
+4. **Stage.** Each partition writes its part under a hidden name,
+   `.part-00000.csv.<nanos>.tmp` (`.tmp.parquet` for parquet).
+5. **Commit.** Once every partition has succeeded, the parts are renamed to
+   `part-00000.csv`, ... in partition order.
+6. The output is read back and validated; `_perf.json` and any validation
+   samples are written.
+7. **Record.** The final record, `Succeeded` or `ValidationFailed`, naming
+   exactly the part files the run committed, replaces `Running`: the run's
+   last write in the directory.
+
+A task that fails after step 2 (a later partition, a validation whose SQL
+fails, its record's write) deletes what it wrote, staged and committed, and
+then writes its `Failed` record, so a failed task's directory holds its record
+and nothing else. A final record that cannot be written (a full disk) fails
+the task, naming the write: its output was never published. A run killed
+after step 2 leaves the `Running` record, and the next run clears whatever it
+left, staged files included. A skipped task, or one that failed before step
+2, marks its directory `Running` the same way, clears the earlier run's files
+and then writes its `Skipped` or `Failed` record: nothing deletes a file a
+record names before the record is replaced. A `Running` record has no
+`finishedAt`; a build from before it reads it as no record, and still clears
+the directory next run.
+
+A reader outside the job (Spark, DuckDB, another job's input glob) should read
+a directory only when its `_run.json` says `Succeeded` or `ValidationFailed`,
+and then the part files it names. No part file appears before the commit, and
+the underscore and dot prefixes mean the engine's own CSV/Parquet readers, and
+most others, skip the record, the samples and the staged parts when reading
+the directory as data. After a crash during the renames a reader can see some
+parts under a `Running` record. The tasks after a task, and its validations,
+read exactly the part files its run wrote, by name, so another file in the
+directory (a README) is never read as data. The GUI and the data viewer show
+a task whose record says `Running` as unfinished, with no rows and no
+preview: its run stopped, or is still running in another process.
+
 `TaskRunRecord.discover(templatedPattern)` glob-walks the filesystem and
 returns every directory matching the pattern that contains a `_run.json`,
 sorted newest-first. This is what powers the GUI's partition picker — open
@@ -893,7 +943,11 @@ chosen `job.json` without re-running anything.
   is never closed, a row with more or fewer fields than the file has columns
   (its header, the schema, or its first row), and bytes that are no text in the
   `charset`. Text after a closing quote joins the field (`"a"b` is `ab`), and a
-  quote inside an unquoted field is a character of it.
+  quote inside an unquoted field is a character of it. An empty file is
+  refused (`CSV file 'x.csv' is empty`), and so is a file compressed with gzip
+  (`CSV file 'x.csv.gz' is compressed with gzip, and CSV is read as text:
+  decompress it first`), which was refused as text that is not UTF-8, or under
+  a charset that decodes every byte, read as garbage.
 - **Every field is read strictly as its column's type**, declared or inferred,
   and one that does not read as it fails the read, naming the file, line,
   column and text (for an inferred column, also where its type came from):
@@ -963,6 +1017,7 @@ Options (passed via `InputFilePath.options` / `OutputFilePath.options`):
 | `lineEnding` (output) | `\n` | `\n`, `\r\n` or `\r` |
 | `inferSchema` | `true` | If false, `columns` is required (input) |
 | `read_partition_size_bytes` (input, parquet only) | 256 MB | The bytes of row groups one partition reads, a whole number |
+| `binaryAsString` (input, parquet only) | `false` | Read each `BINARY` column with no annotation as a `STRING` of its UTF-8 bytes (Spark's option of the name), for the text older writers such as Impala and Hive stored unannotated; a value that is not UTF-8 fails the read, naming its column and its row of the file. `BSON`, `FIXED_LEN_BYTE_ARRAY` and annotated columns keep their types |
 | `charset` | `UTF-8` | Bytes it cannot decode, or characters it cannot encode, fail the read or write |
 | `parquet_row_group_size`, `parquet_write_parallelism` (output, parquet only) | 32 MB, by heap | The bytes of a row group, and how many part files are written at once, each a whole number |
 | `compression` (output, parquet only) | `snappy` | `uncompressed` / `snappy` / `gzip` — `none` is an alias for `uncompressed`. Set `uncompressed` on tables whose schema is narrow-numeric (timestamps + prices etc.) where dictionary encoding alone is enough — they pay snappy CPU for negligible disk-size savings. |
@@ -982,7 +1037,9 @@ InputFilePath("data.csv",
 - Read: vectorized — `parquet-hadoop` open + `ColumnReadStoreImpl` decode
   straight into `ColumnarBatch` primitive vectors. No `Group`/`SimpleGroup`
   objects allocated per row. Row groups are packed into ~256MB partitions so a
-  multi-GB single file still saturates worker threads.
+  multi-GB single file still saturates worker threads. A row group counts as
+  the larger of its footer's uncompressed and compressed sizes, so one whose
+  writer left its size 0 is read too (it was skipped, and its rows lost).
 - A glob of parquet files is one view whose schema is the first file's. Every
   other file's columns are found **by name** and decoded as that file declares
   them, so the files may order their columns differently, add columns of their
@@ -1007,14 +1064,43 @@ InputFilePath("data.csv",
   | `FIXED_LEN_BYTE_ARRAY(2) FLOAT16` | `FLOAT`, exactly |
   | `DECIMAL(p,s)` as `INT32`, `INT64`, `FIXED_LEN_BYTE_ARRAY` or `BINARY` | `DECIMAL(p,s)` |
   | `BINARY STRING`, `ENUM` or `JSON` | `STRING` |
-  | `BINARY`, alone or `BSON`; `FIXED_LEN_BYTE_ARRAY`, alone or `UUID` | `BINARY` |
+  | `BINARY`, alone or `BSON`; `FIXED_LEN_BYTE_ARRAY`, alone or `UUID` | `BINARY` (a `BINARY` alone is a `STRING` under the input's `binaryAsString`) |
   | `TIME`, `INTERVAL`, a `REPEATED` column (a list per row), a nested group | none: the file cannot be read |
+  | an annotation newer than the reader (`VARIANT`, `GEOMETRY`, `GEOGRAPHY`, or one it has no name for), or one the format does not allow on its physical type (`UUID` on an `INT32`) | none: the file cannot be read |
 
-  The last row fails when the view is opened, naming the column, even for a
-  query that never mentions it: the view's schema is the file's, and the
-  engine has no type to give it. No annotation falls through to its physical
-  type, which would read a `DECIMAL` as its unscaled integer or an unsigned
-  integer as a negative one.
+  The last two rows fail when the view is opened, naming the file, the column
+  and the annotation, even for a query that never mentions it: the view's
+  schema is the file's, and the engine has no type to give it. No annotation
+  falls through to its physical type, which would read a `DECIMAL` as its
+  unscaled integer or an unsigned integer as a negative one, and a `GEOMETRY`
+  as the bytes it is stored in.
+- Codecs read: `UNCOMPRESSED`, `SNAPPY`, `GZIP`, `ZSTD`, `LZ4_RAW`, and `LZ4`,
+  the legacy codec older Hadoop and Spark wrote (framed as Hadoop frames a
+  block; the lz4 library decompresses it, where such a file failed with a
+  `NoClassDefFoundError`). An `LZ4` file written without Hadoop's framing, as
+  early parquet-cpp wrote one, fails as a page that does not decode. A column
+  compressed with a codec the reader does not have (`BROTLI`, `LZO`) fails the
+  view as it opens, naming the file, the column and the codec, rather than at
+  its first page partway through a scan. An encrypted file is refused as one,
+  whether its footer is encrypted or only its columns: the reader holds no
+  keys.
+- A page whose header carries a CRC is checked against it, and one whose
+  bytes do not match fails the read, naming the file, the column and the row
+  group (`... column 'c', row group 0: a page does not match its checksum`):
+  its bytes changed after they were written, and decoded they would be
+  whatever the change made them. parquet-mr writes a CRC on every page, so
+  every file the engine writes carries them; Arrow writes none unless asked,
+  and a page without one is read as it is. (pyarrow and parquet-mr check
+  none by default.)
+- A file the reader cannot read is refused in its own words, naming the file
+  (`Parquet file 'x.parquet' ...`), and the column and row group where it
+  knows them: a footer that is not valid parquet metadata, a file that does
+  not end in parquet's magic bytes, a column in an encoding the reader does
+  not decode (`ALP`), a page that does not decode
+  (`Parquet file 'x.parquet' column 'c', row group 3: a page does not decode`).
+  parquet-mr's own exception is the error's cause, never its message, which
+  showed its classes and code (`Cannot invoke "...LogicalType$_Fields.ordinal()"`,
+  Thrift's dump of a struct).
 - A parquet `TIMESTAMP` reads as the instant it stores, whatever its unit:
   `MILLIS`, `MICROS` and `NANOS` alike, and the legacy 12-byte `INT96` too. A
   `TIMESTAMP` holds microseconds, so a `NANOS` value is truncated to its
@@ -1076,7 +1162,10 @@ of the box.
 
 v1: any cloud path triggers `UnsupportedOperationException` with a clear v1.1
 message. The cache directory layout (`./.transformer-cache/<sha1(path)>/`) is
-already in the design; v1.1 will populate it from GCS/S3.
+already in the design; v1.1 will populate it from GCS/S3. A cloud path as the
+job's run record (`jobRunOutput`) writes no `job.json`: the run carries a
+warning saying so (`the job-run record was not written: 'gs://...' is a cloud
+path, which v1 does not support`), and a warning never fails a run.
 
 ## SQL features
 
@@ -1236,11 +1325,20 @@ the smallest `BIGINT`. A number written with a point or an exponent is a
 `1e-400`). A `LIMIT`, `OFFSET`, `FETCH`, `TOP` or ordinal past `BIGINT` is an
 error naming it.
 
+**A `STRING` holds text.** Half of a surrogate pair, the two chars Java holds a
+character past U+FFFF in, is no character: UTF-8 has no encoding for it, so no
+file can hold one, and no reader gives one. Where one can come in, it is
+refused: a string literal holding one (SQL passed through the Scala API as a
+Java string can), naming the char, and a view built in Scala, a
+`MaterializedView` when it is built and a `CatalogView` of your own when a
+query reads it, naming the column and row. Every writer then agrees: a spill
+or a parquet file wrote one as `?`, where a CSV file refused it.
+
 **Aggregates:** `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `COUNT_IF(pred)`,
 `SUM`, `AVG`, `MIN`, `MAX` (each of these four also as `SUM(DISTINCT col)` and so
 on, which aggregates each distinct non-NULL value once),
-`STDDEV`/`STDDEV_SAMP`/`STDDEV_POP`, `VARIANCE`/`VAR_SAMP`/`VAR_POP`,
-`COVAR_SAMP`/`COVAR_POP`, `CORR`. Univariate variance/stddev (and `COUNT_IF`)
+`STDDEV`/`STDDEV_SAMP`/`STDEV`, `STDDEV_POP`/`STDEVP`, `VARIANCE`/`VAR_SAMP`/`VAR`,
+`VAR_POP`/`VARP`, `COVAR_SAMP`/`COVAR_POP`, `CORR`. Univariate variance/stddev (and `COUNT_IF`)
 are also available as window aggregates with `OVER (...)`. Variance and stddev
 use Welford + Chan's parallel merge for numerical stability; `*_SAMP` returns
 NULL when fewer than two non-NULL inputs are present. `SUM`, `AVG` and the
@@ -1262,7 +1360,11 @@ partitions or a spill bring it.
 **Window functions:** `<fn>() OVER ([PARTITION BY <exprs>] [ORDER BY <keys>]
 [<frame>])` — `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`/`LEAD` (with the SQL
 `offset` and `default` arguments; the default meets the value it stands in for
-as a `CASE`'s values do, below), and the aggregate forms above. The `ORDER BY`
+as a `CASE`'s values do, below), and the aggregates `COUNT`, `COUNT_IF`, `SUM`,
+`AVG`, `MIN`, `MAX`, `STDDEV`/`STDDEV_SAMP`/`STDEV`, `STDDEV_POP`/`STDEVP`,
+`VARIANCE`/`VAR_SAMP`/`VAR` and `VAR_POP`/`VARP`. `COVAR_SAMP`, `COVAR_POP` and
+`CORR` are aggregates only, and of the aggregates in a window only `COUNT` takes
+`DISTINCT`. The `ORDER BY`
 keys take `ASC`/`DESC` and `NULLS FIRST`/`NULLS LAST` exactly as the outer
 `ORDER BY` does. A frame is `ROWS` or `RANGE`, `BETWEEN <start> AND <end>` or a
 start alone (whose end is `CURRENT ROW`), each bound one of `UNBOUNDED
@@ -1300,7 +1402,8 @@ numeric — `ABS`, `ROUND`, `FLOOR`, `CEIL`/`CEILING`, `TRUNC`/`TRUNCATE`,
 `MOD`, `POW`/`POWER`, `SIGN`; math — `SQRT`, `CBRT`, `EXP`, `LN`,
 `LOG(base, x)`, `LOG10`, `LOG2`; trig — `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`,
 `ATAN`, `ATAN2(y, x)`, `SINH`, `COSH`, `TANH`, `DEGREES`, `RADIANS`;
-constants — `PI()`, `E()`; non-deterministic — `RAND()` / `RAND(seed)`;
+constants — `PI()`, `E()`; non-deterministic — `RAND()` / `RAND(seed)`, also
+spelled `RANDOM`;
 temporal — `CURRENT_DATE`, `CURRENT_TIMESTAMP`. The string functions take a
 `STRING`, the numeric and math functions a number, and `ROUND`'s and `TRUNC`'s
 scale, `SUBSTRING`'s position and length and `RAND`'s seed an `INT` or a
@@ -1343,9 +1446,19 @@ negative length is an error, at bind time when it is written as a constant.
 `TRIM` removes the spaces (U+0020) a string starts and ends with, as SQL's does,
 and keeps a tab or a line break (Java's `trim`, which it used, took every
 character up to U+0020). `UPPER` and `LOWER` map
-case by Unicode's own rules, the same on every machine: the JVM's locale, under
-which a Turkish one would make `UPPER('i')` a dotted capital, plays no part, and
-neither does it in matching a name without regard to case.
+each character to one character, by Unicode's simple case mapping, the same on
+every machine: the JVM's locale, under which a Turkish one would make
+`UPPER('i')` a dotted capital, plays no part, and neither does it in matching a
+name without regard to case. So a string keeps its length: a sharp s (`ß`,
+U+00DF) and the ligature `ﬁ` (U+FB01), which have no one-character capital,
+stay as they are, and a capital I with a dot above (`İ`, U+0130) lowers to
+`i`, where Java's full mapping wrote them as SS, FI and an i with a combining
+dot.
+`s ILIKE p`, `UPPER(s) LIKE UPPER(p)` and `LOWER(s) LIKE LOWER(p)` then pair
+characters one with one and match alike, but for the few letters whose capital
+and small forms are not one pair: `ILIKE` takes a letter as the small form of
+its capital, so `'ı' ILIKE 'i'` and `'İ' ILIKE 'i'` are both true, where
+`LOWER('ı')` is `ı` and `UPPER('İ')` is `İ`.
 
 `CURRENT_DATE` and `CURRENT_TIMESTAMP` take every spelling other engines accept
 (`current_date`, `CURRENT_DATE()`, DB2's `CURRENT DATE`). Both read the wall
@@ -1395,11 +1508,28 @@ and to ordinals (`ORDER BY (1)` is position 1). Row-value constructors
 (`(a, b) = (c, d)`) are not supported.
 
 **Types in CAST:** `INT`, `INTEGER`, `BIGINT`, `LONG`, `FLOAT`, `REAL`,
-`DOUBLE`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`, `BOOLEAN`/`BOOL`, `DATE`,
-`TIMESTAMP`. A `DECIMAL` or `BINARY` column comes from a declared schema or a
-parquet file; neither type is a CAST target. A number
-widens to a `DECIMAL` where the two meet, and a `BINARY` casts to nothing. A
-`BOOLEAN` casts to any number as 1 for true and 0 for false.
+`DOUBLE`/`DOUBLE PRECISION`, `DECIMAL(p,s)`/`NUMERIC(p,s)`, `STRING`/`VARCHAR`/`TEXT`/`CHAR`,
+`BOOLEAN`/`BOOL`, `DATE`, `TIMESTAMP`. A `DECIMAL` is named with its precision
+and scale, p digits in all (1 to 38) and s of them after the point (0 to p), so
+a bare `DECIMAL`, or `DECIMAL(10)`, is an error that says so. A `BINARY` column
+comes from a declared schema or a parquet file; nothing casts to one, and it
+casts to nothing. A `BOOLEAN` casts to any number as 1 for true and 0 for
+false.
+
+A number casts to a `DECIMAL(p,s)` rounded half up to its scale, and one whose
+integer part has more digits than the type holds is an error naming it
+(`Decimal overflow: 123.45 does not fit decimal(4,2)`), never a NULL or a
+rounded answer: `CAST(2.675 AS DECIMAL(5,2))` is 2.68 and `CAST(-0.005 AS
+DECIMAL(3,2))` is -0.01. A number written in the query is the decimal it is
+written as, every digit of it, as it is beside a `DECIMAL` (below), and a
+`FLOAT` or `DOUBLE` value the decimal it prints as; NaN and the infinities,
+which have none, are errors. Text is read by the grammar CSV reads a decimal by
+(see [CSV](#csv)) and then rounded, so `CAST('-1.5e2' AS DECIMAL(5,1))` is
+-150.0, and text that is no number or is too long for the type is an error
+naming it (`Cannot cast '1e9' to decimal(5,1)`), before the query runs when it
+is a string literal. The cast says the type of what it gives, so it chooses a
+decimal result's type: `CAST(price AS DECIMAL(12,2)) * qty` is typed from
+`DECIMAL(12,2)` by the rules below.
 
 A number casts to an `INT` or `BIGINT` as its integer part, a fraction
 truncated toward zero (`CAST(2.7 AS INT)` is 2 and `CAST(-2.7 AS INT)` is -2,
@@ -1442,7 +1572,12 @@ seconds or milliseconds would be a guess.
 
 **Values of different types meet only as numbers, or through a string
 literal.** Wherever values meet — a comparison, `BETWEEN`, an `IN` list, a
-`CASE` switch, arithmetic — numbers widen to the widest among them. A `DECIMAL`
+`CASE` switch, arithmetic — numbers widen to the widest among them, but an
+`INT` or `BIGINT` beside a `FLOAT` meets it as a `DOUBLE`: a `FLOAT` holds no
+odd integer past 16777216, so `CAST(16777217 AS INT) = CAST(16777216 AS FLOAT)`
+is false, and `int_col * float_col` and `float_col * 2` are `DOUBLE`s. A
+`DOUBLE` holds every `INT`, and a `BIGINT` to 2^53, past which it holds no odd
+integer either, as in every engine. A `DECIMAL`
 is the widest: an integer meets one exactly, a number written in the query as
 the decimal it is written as, every digit of it (`price = 0.1` finds a `0.10`,
 and `price = 0.120000000000000000001` no `0.12`), and a `FLOAT` or `DOUBLE`
@@ -1493,10 +1628,13 @@ of a date was NULL, and `SUM(s)` over text failed on its first row.
 `THEN` and `ELSE` values of a `CASE`, the arguments of `COALESCE`, `GREATEST`
 and `LEAST`, `IF`'s two values, `LAG`'s or `LEAD`'s value and default, and each
 column of a `UNION`'s arms meet by the rule above, whatever order they come in:
-`CASE WHEN p THEN 1 ELSE 2.5 END` is the `DOUBLE` 2.5, `COALESCE(i, '0')` reads
+`CASE WHEN p THEN 1 ELSE 2.5 END` is the `DOUBLE` 2.5, `COALESCE(f, i)` over a
+`FLOAT` and an `INT` is a `DOUBLE`, `COALESCE(i, '0')` reads
 the `'0'` as an `INT`, and `COALESCE(s, 1)` over a string column, a `DATE`
 beside a `TIMESTAMP`, a `BOOLEAN` beside a number and a `UNION` of an `INT` arm
-and a `STRING` arm are errors naming the CAST. A `DECIMAL` is held exactly: two
+and a `STRING` arm are errors naming the CAST. The one value a result's type
+may not hold exactly is a `BIGINT` past 2^53 beside a `FLOAT` or `DOUBLE`,
+which becomes the nearest `DOUBLE` (above). A `DECIMAL` is held exactly: two
 meet as the `DECIMAL` with the longer integer part and the larger scale, so
 `COALESCE(price, price * rate)` over a `DECIMAL(9,2)` and a `DECIMAL(18,4)` is
 a `DECIMAL(28,6)`; an `INT` or `BIGINT` counts as the `DECIMAL(10,0)` or
@@ -1556,6 +1694,33 @@ one text for `LIKE`, `||` and the string functions (`LENGTH`, `UPPER`, `LOWER`,
 result that would read one as a string is an error before the query runs. Each
 of these used to read the array's identity, text like `[B@1a96d94c` that changed
 on every run.
+
+**Every case, as a table.** The paragraphs above state the rules; the tables
+under [`src/test/semantics/`](src/test/semantics/) list their every case, one
+line each, which a test generates and holds the engine to.
+[`casts.txt`](src/test/semantics/casts.txt) is every `CAST` of a column of each
+type, of `NULL`, and of a text, an integer and a decimal literal, at the edge
+values of each (the zeros, `NaN`, the infinities, each type's limits, the first
+and last date and timestamp, text that is almost a value), to every type: the
+value it gives, or the error, with whether the query is refused before it runs
+or fails on the value. [`comparisons.txt`](src/test/semantics/comparisons.txt),
+[`branches.txt`](src/test/semantics/branches.txt) and
+[`arithmetic.txt`](src/test/semantics/arithmetic.txt) are every pair of those
+kinds where two values meet: the type they are compared as (`=`, `<`, `BETWEEN`,
+`IN`, `NULLIF`, a `CASE` switch), the type of the one result they become (a
+`CASE`, `COALESCE`, `IF`, `GREATEST`, `LEAST`, `LAG`'s default, a `UNION`
+column), the type of arithmetic on them (`+ - * / %`, `MOD`), or the refusal.
+[`functions-text.txt`](src/test/semantics/functions-text.txt),
+[`functions-math.txt`](src/test/semantics/functions-math.txt) and
+[`functions-flow.txt`](src/test/semantics/functions-flow.txt) are every function
+over every one of those kinds at its edge values, each NULL that no NULL
+argument gives named with the rule that gives it, and
+[`aggregates.txt`](src/test/semantics/aggregates.txt) and
+[`windows.txt`](src/test/semantics/windows.txt) every aggregate and window
+function over each type at the data that decides its answer: no rows, all
+NULL, duplicates, NaN, both zeros, sums past `BIGINT`'s and `DECIMAL(38,s)`'s
+range. The tables are the complete reference, and a change to a rule changes
+them in the same commit.
 
 **CTEs (`WITH`):** supported, non-recursive. `WITH a AS (...), b AS (SELECT ...
 FROM a) SELECT ... FROM b` — later CTEs may reference earlier ones, a CTE can
@@ -1631,7 +1796,10 @@ how many rows a filter keeps). So is
 one over the output of another such join, directly or through joins on an
 equality, when the two would pair more than 25 million rows: a chain
 multiplies where each side alone looks small (three 300-row tables pair 27
-million). One small side against a large one, such as 100 buckets against a
+million). A join on an equality counts as many rows as its larger side,
+both sides for a FULL join, whether it is INNER or outer, so a LEFT JOIN
+over such a chain is refused where its INNER JOIN, which pairs no more, is
+(it counted the LEFT JOIN's left side alone). One small side against a large one, such as 100 buckets against a
 million-row table on `amount BETWEEN lo AND hi`, still runs. Such a join pairs
 its rows a wave at a time, so it holds its smaller side and a wave of pairs
 (a few hundred thousand rows), not every pair it makes: 25 million pairs count
@@ -1903,6 +2071,32 @@ regardless (for debugging), and a sample of failing rows is written to
 records](#run-records-and-historical-runs).
 
 
+### Running a query
+
+`SqlEngine.execute(sql, catalog)` runs one statement over a `Catalog` of views
+and returns an `ExecutedQuery`: its schema, and its rows as partitions of
+`ColumnarBatch`es read lazily. Close it once you stop reading it, however you
+stop:
+
+```scala
+import com.transformer.core.Catalog
+import com.transformer.read.csv.{CsvOptions, CsvReader}
+import com.transformer.sql.exec.SqlEngine
+
+val catalog = new Catalog
+catalog.register("events", CsvReader.fromPath("data/events/*.csv", CsvOptions()))
+
+val q = SqlEngine.execute("SELECT user_id, amount FROM events WHERE amount > 10", catalog)
+try q.batches.take(3).foreach(b => println(s"${b.numRows} rows"))
+finally q.close()
+```
+
+A query read to its end has released what it opened, but one read in part, or
+that failed or was stopped as it was read, holds the files its scans read and
+the spill directories its operators wrote until `close()`. A `LIMIT` closes
+what it stops reading itself. The job runner, the GUI's query console, the
+data viewer and `transformer query` each close every query they run.
+
 ### Plans and SQL
 
 SQL becomes a logical plan in `LogicalBuilder.build`, and `PlanSql.print`
@@ -2022,7 +2216,8 @@ JDK 21 or newer (tested through JDK 25).
   Spill defaults to **off** per task (no overhead when not needed) and is
   not exposed as a global toggle. Temp files land in a directory of each
   JVM's own under `${java.io.tmpdir}/transformer-spill` by default — override
-  the base via the `transformer.spill.dir` system property. A JVM deletes its
+  the base with `transformer.spill.dir` (or `TRANSFORMER_SPILL_DIR`, see
+  [Settings](#settings)). A JVM deletes its
   own directory when it exits, and the next JVM to spill deletes those that
   JVMs no longer running left; nothing outside the base is touched (the sweep
   used to delete whatever stood beside it with a name starting as its did,
@@ -2030,6 +2225,10 @@ JDK 21 or newer (tested through JDK 25).
   deleted the files another was spilling). DISTINCT aggregates
   (`COUNT`, `SUM` and `AVG(DISTINCT …)`) silently disable spill on the whole
   operator (their state doesn't round-trip through a typed schema in v1).
+- **One run per output directory at a time.** Two runs writing one task's
+  directory at once (two schedulers, or the GUI's Run beside a cron run) are
+  not supported: a `Running` record from a live run looks the same as one a
+  killed run left, and the second run clears it.
 - **No subqueries** (scalar, IN/EXISTS, derived tables in FROM): use a `WITH`
   CTE, or chain `SQLTask`s via `viewName`.
 - **Window functions: no `GROUPS` frames or `EXCLUDE`**, which the parser does
@@ -2061,7 +2260,8 @@ JDK 21 or newer (tested through JDK 25).
   row in memory, or on disk with spill on.
 - **Cloud paths recognized but unimplemented**: `gs://` and `s3://` paths are
   accepted by the config, and loading one raises a clear
-  `UnsupportedOperationException`. See [Cloud](#cloud-gs--s3).
+  `UnsupportedOperationException`; a cloud run-record path is a warning in the
+  run's result. See [Cloud](#cloud-gs--s3).
 - **A CSV glob's schema is inferred from its first 1000 rows**, read across its
   files in order. A later value that does not read as its column's type fails
   the read, naming the file, line, column and value; an explicit schema
@@ -2082,10 +2282,10 @@ JDK 21 or newer (tested through JDK 25).
   parser can still take seconds over some balanced nesting: 25 nested `CAST`s
   run it past its time limit, a parse error that says so.
 - **`DECIMAL` math functions and statistics compute in `DOUBLE`.** Comparison,
-  arithmetic, `ABS`, `SUM` and `AVG` keep a `DECIMAL` exact, but `ROUND`,
-  `FLOOR`, `CEIL`, `TRUNC`, `SQRT`, `POWER` and the other math functions, and
-  `STDDEV` / `VARIANCE`, read a decimal as a `DOUBLE` and return one. There is
-  no `CAST` to a `DECIMAL`, so a query cannot choose a decimal result's type.
+  arithmetic, `ABS`, `SUM`, `AVG` and the rounding functions (`ROUND`,
+  `FLOOR`, `CEIL`, `TRUNC`) keep a `DECIMAL` exact, but `SQRT`, `POWER` and the
+  other math functions, and `STDDEV` / `VARIANCE`, read a decimal as a
+  `DOUBLE` and return one, which holds 15 to 17 significant digits.
 
 ## Performance instrumentation
 
@@ -2115,6 +2315,42 @@ See [docs/benchmarking.md](docs/benchmarking.md) for the full counter inventory,
 the JMH microbench harness under `benchmarks/micro/`, the macro-bench runner
 under `benchmarks/macro/`, and the perf-tagged regression test.
 
+## Settings
+
+A few things the engine does are set from outside a job, for the whole JVM:
+each by a system property, `transformer.<name>`, or its environment variable
+twin, `TRANSFORMER_<NAME>` (the property's name upper-cased, its dots
+underscores). So `java -Dtransformer.scheduler.parallelism=4 -jar
+transformer.jar run job/` and `TRANSFORMER_SCHEDULER_PARALLELISM=4 java -jar
+transformer.jar run job/` both run on four threads. The property wins when
+both are set, and a blank value is unset. Each is read once, when the engine
+first needs it. A whole number that does not read is the default, and a flag
+is on at `true` or `1`, in any case; a chaos seed or a fault that does not
+read fails. The last five are for testing, and the test suite runs whole
+under each of the first four of them, as it does at a batch capacity of 1 and
+2, sharded and on one thread ([docs/testing.md](docs/testing.md#whole-suite-configurations)).
+
+| Property | Environment variable | Default | What it sets |
+|---|---|---|---|
+| `transformer.batch_capacity` | `TRANSFORMER_BATCH_CAPACITY` | 8192 | the rows a batch holds, a whole number of 1 or more |
+| `transformer.scheduler.parallelism` | `TRANSFORMER_SCHEDULER_PARALLELISM` | twice the processors | the threads of the pool every query and job runs on, at least 1 |
+| `transformer.scheduler.shard_count` | `TRANSFORMER_SCHEDULER_SHARD_COUNT` | the parallelism | the shards an exchange routes rows to, at least 1 |
+| `transformer.scheduler.shard_min_size` | `TRANSFORMER_SCHEDULER_SHARD_MIN_SIZE` | never | the estimated input rows from which a GROUP BY or a DISTINCT is sharded across the pool |
+| `transformer.scheduler.broadcast_threshold` | `TRANSFORMER_SCHEDULER_BROADCAST_THRESHOLD` | 1000000 | the estimated rows of a hash join's smaller side below which it is built once rather than sharded |
+| `transformer.metrics.enabled` | `TRANSFORMER_METRICS_ENABLED` | false | per-operator metrics for every task whose `output.json` does not say ([Performance instrumentation](#performance-instrumentation)) |
+| `transformer.macro.force_spill` | `TRANSFORMER_MACRO_FORCE_SPILL` | false | spill on for every task, as the macro bench captures its spill-on baseline ([docs/benchmarking.md](docs/benchmarking.md)) |
+| `transformer.spill.dir` | `TRANSFORMER_SPILL_DIR` | `<java.io.tmpdir>/transformer-spill` | the directory each JVM's spill directory is made in |
+| `transformer.hash_zero` | `TRANSFORMER_HASH_ZERO` | false | every key hash 0 (`--config=hashzero`) |
+| `transformer.verify` | `TRANSFORMER_VERIFY` | false | every batch every operator emits checked against the schema it declares (`--config=verify`) |
+| `transformer.audit_leaks` | `TRANSFORMER_AUDIT_LEAKS` | false | what a JVM leaves open at its exit reported, ending it with status 117 (`--config=leaks`) |
+| `transformer.chaos` | `TRANSFORMER_CHAOS` | off | a seed, a whole number: each handoff between threads does nothing, yields or sleeps up to 2 ms (`--config=chaos`) |
+| `transformer.fault` | `TRANSFORMER_FAULT` | none | `<point>:<n>:<action>`, a fault where a run changes the disk ([docs/testing.md](docs/testing.md#fault-points-transformerfault)) |
+
+`core/Settings.scala` reads every one, and no other class of the engine reads
+a system property or an environment variable: rule R8 of
+`bytecode:bytecode_rules_test` holds that, and `core:settings_test` holds this
+table to `Settings`.
+
 ## Development
 
 transformer is Scala 2.13 on JDK 21, built with Bazel (`rules_scala`).
@@ -2127,13 +2363,35 @@ bazel build //:transformer_deploy.jar                # the product jar
 bazel build //:transformer_viewer_deploy.jar         # the data viewer
 ```
 
+The compiler's warnings fail the build: a deprecation, unused code, a match
+that may not be exhaustive, or a value main code computes and never reads is
+an error, and so is a BUILD dependency no source uses
+([docs/conventions.md](docs/conventions.md)).
+
 Each leaf test directory has its own `scala_junit_test` target. SQL's
 semantics are also pinned as sqllogictest scripts under `src/test/slt/`
 (SQLite's format: each query beside its expected result), which
-`slt/slt_test` runs under thirteen execution modes each (two of them run the
-query's plan printed back as SQL), beside a slice of SQLite's own corpus and
-ports of Postgres's regression tests with Postgres's answers. The suite reruns under `--config=batch1`, `batch2`,
-`sharded`, `serial`, `zone` and `hashzero`, one JVM-wide setting each. Before landing a
+`slt/slt_test` runs under fourteen execution modes each (three of them run the
+query's plan printed back as SQL, one with up to three of its expressions
+rewritten in forms that cannot change their values), beside a slice of SQLite's own corpus,
+ports of Postgres's and Spark's tests with their answers, CockroachDB's and
+DataFusion's logic tests with theirs, eleven TPC-H queries with
+RisingWave's, and some 3,000 queries the fuzz generators drew with the answers
+PostgreSQL and DuckDB agree on. Files other programs wrote are each held to a line of a
+manifest under `src/test/data/`: apache/parquet-testing's parquet and files
+pyarrow wrote, read as pyarrow reads them or refused cleanly, naming the file;
+and DuckDB's CSV files (its AFL crash inputs among them), PapaParse's cases
+and csv-spectrum's, read as the other parser reads them, otherwise by a rule
+of the ledger, or refused cleanly. The suite reruns
+under `--config=batch1`, `batch2`,
+`sharded`, `serial`, `zone` and `hashzero`, one JVM-wide setting each, and
+under three runtime checks: `verify` checks every batch every operator emits
+against the schema it declares, `leaks` fails a target whose JVM leaves a
+file, a spill directory or an engine thread behind, and `chaos` perturbs every
+handoff between threads by a seed. A mutation campaign (`//tools/mutation`)
+measures what the suite would catch: it plants small defects in the engine's
+sources, one at a time, and lists each one no test fails on
+([docs/testing.md](docs/testing.md#mutation-testing)). Before landing a
 change, also run the jaffle-shop example (see [Examples](#examples)).
 [docs/testing.md](docs/testing.md) has the details.
 
@@ -2164,7 +2422,8 @@ back here and into `docs/`.
 .
 ├── MODULE.bazel               Bazel deps: rules_scala 7.0.0, scala 2.13.16,
 │                              jsqlparser 5.2, parquet-hadoop 1.14.3 (+ minimal
-│                              hadoop 3.4.3), openjfx 21.0.1, richtextfx
+│                              hadoop 3.4.3, lz4-java 1.12.1 for its LZ4
+│                              codec), openjfx 21.0.1, richtextfx
 │                              0.11.7 and atlantafx 2.0.1 (gui only), jline
 │                              4.4.8 (the query shell), junit
 ├── .bazelrc                   JDK 21 build toolchain (runtime is JDK 21+)
@@ -2175,7 +2434,8 @@ back here and into `docs/`.
 │                              conventions, extending, gotchas, testing).
 ├── examples/                  Bazel-deployable example apps (programmatic,
 │                              directory-driven, jaffle-shop, GUI launcher).
-├── tools/                     Stand-alone CLIs (e.g. `parquet_peek`).
+├── tools/                     Stand-alone CLIs: `parquet_peek`, and `mutation`,
+│                              the mutation-testing tool.
 ├── src/main/scala/com/transformer/
 │   ├── core/                  Shared types: DataType, Schema, ColumnarBatch,
 │   │                          Catalog, SqlExecutor boundary + registry.

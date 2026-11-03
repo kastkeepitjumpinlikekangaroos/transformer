@@ -1,0 +1,20 @@
+{
+ "description": "Misplaced quotes in data twice, not as opening quotes",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   "B\"",
+   "C"
+  ],
+  [
+   "D",
+   "E\"",
+   "F"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

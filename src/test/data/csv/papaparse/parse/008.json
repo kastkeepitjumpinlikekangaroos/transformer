@@ -1,0 +1,28 @@
+{
+ "description": "Quoted fields with spaces after closing quote",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "A",
+   "B",
+   "C",
+   "D"
+  ],
+  [
+   "E",
+   "F",
+   "G",
+   "H"
+  ],
+  [
+   "Q",
+   "W",
+   "E",
+   "R"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

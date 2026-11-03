@@ -1,0 +1,682 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/int4.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/int4.out at that commit, never the engine's.
+# Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group;
+# Portions Copyright (c) 1994, The Regents of the University of California.
+# Distributed under the PostgreSQL License, a permissive license whose text
+# travels with every copy: it is COPYRIGHT beside this file.
+#
+# The INT, Postgres's int4, at its limits: text no INT holds, comparisons,
+# arithmetic past the range, which is an error in both engines, INT_MIN times
+# and divided by -1, integer division, casts from DOUBLE and DECIMAL, and the
+# text Postgres reads as an integer. 76 of the file's 94 statements are here,
+# each record naming the line of int4.sql it comes from: 36 queries and 24
+# statements that must fail, answered as Postgres answers them, and 16
+# records the engine answers otherwise by design, below.
+#
+# A statement is as Postgres wrote it but where a rewrite cannot change what
+# it means, which its record says: int4 as INT, x::int4 and int4 'x' as
+# CAST(x AS INT), and int2 'x' and x::int2 as CAST(x AS INT) too, as no answer
+# here depends on SMALLINT's range (the engine has none, and every value is
+# small), an alias named true or false in double quotes (the engine reads
+# TRUE and FALSE as the literals wherever they are written), a VALUES list in
+# FROM as a table of its rows, made here, and a string an INSERT stores in
+# INT4_TBL, which Postgres refuses, as CAST('...' AS INT), the conversion
+# Postgres makes of it, so the engine reads the text, not the runner, which
+# stores no text in an INT column. INT4_TBL is test_setup.sql's, each string
+# it stores written as the number Postgres reads. An overflow's message is
+# each engine's own, so those records are statement error with no text, and
+# a result in no fixed order is compared as rowsort.
+#
+# `skipif transformer <id>` marks what the engine answers otherwise by
+# design, the id naming the rule in the ledger in docs/gotchas.md and the
+# comment the case: a CAST of a DOUBLE or a DECIMAL to INT truncates toward
+# zero, where Postgres rounds (cast-truncates, 2), and text casts to INT by
+# CSV's grammar, an optional sign and digits, where Postgres reads 0x, 0o and
+# 0b prefixes and _ between digits (int-text, 14). After each, its twin,
+# `onlyif transformer <id>`, is the same statement with the engine's own
+# answer.
+#
+# Left out (12 statements), by what they need:
+#    6  gcd() and lcm()
+#    4  pg_input_is_valid() and pg_input_error_info()
+#    2  the bitwise operator <<
+#
+# Held out (6 statements), both engines refusing them for different reasons:
+# int4.sql:187, 189, 191, 194, 196 and 198, the text of a number one past
+# INT's range in base 2, 8 or 16 (int4 '0x80000000'), which Postgres refuses
+# as out of range and the engine as no integer of its grammar (int-text).
+
+# test_setup.sql:67-75: INT4_TBL, int4 written INT, each string test_setup.sql
+# stores written as the number Postgres reads it as ('   0  ' as 0).
+statement ok
+CREATE TABLE INT4_TBL(f1 INT)
+
+statement ok
+INSERT INTO INT4_TBL(f1) VALUES (0), (123456), (-123456), (2147483647), (-2147483647)
+
+# int4.sql:8: bad values, each string written CAST('...' AS INT), the
+# conversion Postgres makes of it as it stores it, so the engine reads the
+# text. Postgres: invalid input syntax for type integer: "34.5".
+statement error
+INSERT INTO INT4_TBL(f1) VALUES (CAST('34.5' AS INT))
+
+# int4.sql:9: Postgres: value "1000000000000" is out of range for type
+# integer.
+statement error
+INSERT INTO INT4_TBL(f1) VALUES (CAST('1000000000000' AS INT))
+
+# int4.sql:10: Postgres: invalid input syntax for type integer: "asdf".
+statement error
+INSERT INTO INT4_TBL(f1) VALUES (CAST('asdf' AS INT))
+
+# int4.sql:11: Postgres: invalid input syntax for type integer: "     ".
+statement error
+INSERT INTO INT4_TBL(f1) VALUES (CAST('     ' AS INT))
+
+# int4.sql:12: Postgres: invalid input syntax for type integer: "   asdf   ".
+statement error
+INSERT INTO INT4_TBL(f1) VALUES (CAST('   asdf   ' AS INT))
+
+# int4.sql:13: Postgres: invalid input syntax for type integer: "- 1234".
+statement error
+INSERT INTO INT4_TBL(f1) VALUES (CAST('- 1234' AS INT))
+
+# int4.sql:14: Postgres: invalid input syntax for type integer: "123       5".
+statement error
+INSERT INTO INT4_TBL(f1) VALUES (CAST('123       5' AS INT))
+
+# int4.sql:15: Postgres: invalid input syntax for type integer: "".
+statement error
+INSERT INTO INT4_TBL(f1) VALUES (CAST('' AS INT))
+
+# int4.sql:18
+query INT rowsort
+SELECT * FROM INT4_TBL
+----
+-123456
+-2147483647
+0
+123456
+2147483647
+
+# int4.sql:26: int2 '0' written CAST('0' AS INT), as each int2 value below is:
+# no answer here depends on SMALLINT's range.
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE i.f1 <> CAST('0' AS INT)
+----
+-123456
+-2147483647
+123456
+2147483647
+
+# int4.sql:28: int4 '0' written CAST('0' AS INT), as each int4 value below is.
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE i.f1 <> CAST('0' AS INT)
+----
+-123456
+-2147483647
+123456
+2147483647
+
+# int4.sql:30
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE i.f1 = CAST('0' AS INT)
+----
+0
+
+# int4.sql:32
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE i.f1 = CAST('0' AS INT)
+----
+0
+
+# int4.sql:34
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE i.f1 < CAST('0' AS INT)
+----
+-123456
+-2147483647
+
+# int4.sql:36
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE i.f1 < CAST('0' AS INT)
+----
+-123456
+-2147483647
+
+# int4.sql:38
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE i.f1 <= CAST('0' AS INT)
+----
+-123456
+-2147483647
+0
+
+# int4.sql:40
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE i.f1 <= CAST('0' AS INT)
+----
+-123456
+-2147483647
+0
+
+# int4.sql:42
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE i.f1 > CAST('0' AS INT)
+----
+123456
+2147483647
+
+# int4.sql:44
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE i.f1 > CAST('0' AS INT)
+----
+123456
+2147483647
+
+# int4.sql:46
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE i.f1 >= CAST('0' AS INT)
+----
+0
+123456
+2147483647
+
+# int4.sql:48
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE i.f1 >= CAST('0' AS INT)
+----
+0
+123456
+2147483647
+
+# int4.sql:51: positive odds.
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE (i.f1 % CAST('2' AS INT)) = CAST('1' AS INT)
+----
+2147483647
+
+# int4.sql:54: any evens.
+query INT rowsort
+SELECT i.* FROM INT4_TBL i WHERE (i.f1 % CAST('2' AS INT)) = CAST('0' AS INT)
+----
+-123456
+0
+123456
+
+# int4.sql:56: Postgres: integer out of range.
+statement error
+SELECT i.f1, i.f1 * CAST('2' AS INT) AS x FROM INT4_TBL i
+
+# int4.sql:58
+query INT,INT rowsort
+SELECT i.f1, i.f1 * CAST('2' AS INT) AS x FROM INT4_TBL i
+WHERE abs(f1) < 1073741824
+----
+-123456	-246912
+0	0
+123456	246912
+
+# int4.sql:61: Postgres: integer out of range.
+statement error
+SELECT i.f1, i.f1 * CAST('2' AS INT) AS x FROM INT4_TBL i
+
+# int4.sql:63
+query INT,INT rowsort
+SELECT i.f1, i.f1 * CAST('2' AS INT) AS x FROM INT4_TBL i
+WHERE abs(f1) < 1073741824
+----
+-123456	-246912
+0	0
+123456	246912
+
+# int4.sql:66: Postgres: integer out of range.
+statement error
+SELECT i.f1, i.f1 + CAST('2' AS INT) AS x FROM INT4_TBL i
+
+# int4.sql:68
+query INT,INT rowsort
+SELECT i.f1, i.f1 + CAST('2' AS INT) AS x FROM INT4_TBL i
+WHERE f1 < 2147483646
+----
+-123456	-123454
+-2147483647	-2147483645
+0	2
+123456	123458
+
+# int4.sql:71: Postgres: integer out of range.
+statement error
+SELECT i.f1, i.f1 + CAST('2' AS INT) AS x FROM INT4_TBL i
+
+# int4.sql:73
+query INT,INT rowsort
+SELECT i.f1, i.f1 + CAST('2' AS INT) AS x FROM INT4_TBL i
+WHERE f1 < 2147483646
+----
+-123456	-123454
+-2147483647	-2147483645
+0	2
+123456	123458
+
+# int4.sql:76: Postgres: integer out of range.
+statement error
+SELECT i.f1, i.f1 - CAST('2' AS INT) AS x FROM INT4_TBL i
+
+# int4.sql:78
+query INT,INT rowsort
+SELECT i.f1, i.f1 - CAST('2' AS INT) AS x FROM INT4_TBL i
+WHERE f1 > -2147483647
+----
+-123456	-123458
+0	-2
+123456	123454
+2147483647	2147483645
+
+# int4.sql:81: Postgres: integer out of range.
+statement error
+SELECT i.f1, i.f1 - CAST('2' AS INT) AS x FROM INT4_TBL i
+
+# int4.sql:83
+query INT,INT rowsort
+SELECT i.f1, i.f1 - CAST('2' AS INT) AS x FROM INT4_TBL i
+WHERE f1 > -2147483647
+----
+-123456	-123458
+0	-2
+123456	123454
+2147483647	2147483645
+
+# int4.sql:86
+query INT,INT rowsort
+SELECT i.f1, i.f1 / CAST('2' AS INT) AS x FROM INT4_TBL i
+----
+-123456	-61728
+-2147483647	-1073741823
+0	0
+123456	61728
+2147483647	1073741823
+
+# int4.sql:88
+query INT,INT rowsort
+SELECT i.f1, i.f1 / CAST('2' AS INT) AS x FROM INT4_TBL i
+----
+-123456	-61728
+-2147483647	-1073741823
+0	0
+123456	61728
+2147483647	1073741823
+
+# int4.sql:95: more complex expressions: variations on unary minus parsing.
+query INT nosort
+SELECT -2+3 AS one
+----
+1
+
+# int4.sql:97
+query INT nosort
+SELECT 4-2 AS two
+----
+2
+
+# int4.sql:99
+query INT nosort
+SELECT 2- -1 AS three
+----
+3
+
+# int4.sql:101
+query INT nosort
+SELECT 2 - -2 AS four
+----
+4
+
+# int4.sql:103: the alias true written in double quotes, as the engine reads
+# TRUE as the literal wherever it is written.
+query BOOLEAN nosort
+SELECT CAST('2' AS INT) * CAST('2' AS INT) = CAST('16' AS INT) / CAST('4' AS INT) AS "true"
+----
+true
+
+# int4.sql:105
+query BOOLEAN nosort
+SELECT CAST('2' AS INT) * CAST('2' AS INT) = CAST('16' AS INT) / CAST('4' AS INT) AS "true"
+----
+true
+
+# int4.sql:107
+query BOOLEAN nosort
+SELECT CAST('2' AS INT) * CAST('2' AS INT) = CAST('16' AS INT) / CAST('4' AS INT) AS "true"
+----
+true
+
+# int4.sql:109
+query BOOLEAN nosort
+SELECT CAST('1000' AS INT) < CAST('999' AS INT) AS "false"
+----
+false
+
+# int4.sql:111
+query INT nosort
+SELECT 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 AS ten
+----
+10
+
+# int4.sql:113
+query INT nosort
+SELECT 2 + 2 / 2 AS three
+----
+3
+
+# int4.sql:115
+query INT nosort
+SELECT (2 + 2) / 2 AS two
+----
+2
+
+# int4.sql:122: INT_MIN overflow cases, x::int4 and x::int2 written CAST(x AS
+# INT). Postgres: integer out of range.
+statement error
+SELECT CAST((-2147483648) AS INT) * CAST((-1) AS INT)
+
+# int4.sql:123: Postgres: integer out of range.
+statement error
+SELECT CAST((-2147483648) AS INT) / CAST((-1) AS INT)
+
+# int4.sql:124
+query INT nosort
+SELECT CAST((-2147483648) AS INT) % CAST((-1) AS INT)
+----
+0
+
+# int4.sql:125: Postgres: integer out of range.
+statement error
+SELECT CAST((-2147483648) AS INT) * CAST((-1) AS INT)
+
+# int4.sql:126: Postgres: integer out of range.
+statement error
+SELECT CAST((-2147483648) AS INT) / CAST((-1) AS INT)
+
+# int4.sql:127
+query INT nosort
+SELECT CAST((-2147483648) AS INT) % CAST((-1) AS INT)
+----
+0
+
+# For int4.sql:130: its VALUES list in FROM is the table float8_values of
+# its rows, each x::float8 written as the DOUBLE it is.
+statement ok
+CREATE TABLE float8_values (x DOUBLE)
+
+statement ok
+INSERT INTO float8_values VALUES (-2.5), (-1.5), (-0.5), (0.0), (0.5), (1.5), (2.5)
+
+# int4.sql:130: rounding when casting from float.
+skipif transformer cast-truncates # a CAST of a DOUBLE to INT truncates toward zero, where Postgres rounds half to even
+query DOUBLE,INT rowsort
+SELECT x, CAST(x AS INT) AS int4_value
+FROM float8_values t
+----
+-0.5	0
+-1.5	-2
+-2.5	-2
+0.0	0
+0.5	0
+1.5	2
+2.5	2
+
+onlyif transformer cast-truncates
+query DOUBLE,INT rowsort
+SELECT x, CAST(x AS INT) AS int4_value
+FROM float8_values t
+----
+-0.5	0
+-1.5	-1
+-2.5	-2
+0.0	0
+0.5	0
+1.5	1
+2.5	2
+
+# For int4.sql:140: its VALUES list is the table numeric_values of its rows,
+# each x::numeric written as the DECIMAL(2,1) it is.
+statement ok
+CREATE TABLE numeric_values (x DECIMAL(2,1))
+
+statement ok
+INSERT INTO numeric_values VALUES (-2.5), (-1.5), (-0.5), (0.0), (0.5), (1.5), (2.5)
+
+# int4.sql:140: rounding when casting from numeric.
+skipif transformer cast-truncates # a CAST of a DECIMAL to INT truncates toward zero, where Postgres rounds half away from zero
+query DECIMAL(2,1),INT rowsort
+SELECT x, CAST(x AS INT) AS int4_value
+FROM numeric_values t
+----
+-0.5	-1
+-1.5	-2
+-2.5	-3
+0.0	0
+0.5	1
+1.5	2
+2.5	3
+
+onlyif transformer cast-truncates
+query DECIMAL(2,1),INT rowsort
+SELECT x, CAST(x AS INT) AS int4_value
+FROM numeric_values t
+----
+-0.5	0
+-1.5	-1
+-2.5	-2
+0.0	0
+0.5	0
+1.5	1
+2.5	2
+
+# int4.sql:177: non-decimal literals, int4 '...' written CAST('...' AS INT).
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no 0b prefix
+query INT nosort
+SELECT CAST('0b100101' AS INT)
+----
+37
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0b100101' AS INT)
+----
+Cannot cast '0b100101' to int
+
+# int4.sql:178
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no 0o prefix
+query INT nosort
+SELECT CAST('0o273' AS INT)
+----
+187
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0o273' AS INT)
+----
+Cannot cast '0o273' to int
+
+# int4.sql:179
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no 0x prefix
+query INT nosort
+SELECT CAST('0x42F' AS INT)
+----
+1071
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0x42F' AS INT)
+----
+Cannot cast '0x42F' to int
+
+# int4.sql:181: Postgres: invalid input syntax for type integer: "0b".
+statement error
+SELECT CAST('0b' AS INT)
+
+# int4.sql:182: Postgres: invalid input syntax for type integer: "0o".
+statement error
+SELECT CAST('0o' AS INT)
+
+# int4.sql:183: Postgres: invalid input syntax for type integer: "0x".
+statement error
+SELECT CAST('0x' AS INT)
+
+# int4.sql:186: cases near overflow.
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no 0b prefix
+query INT nosort
+SELECT CAST('0b1111111111111111111111111111111' AS INT)
+----
+2147483647
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0b1111111111111111111111111111111' AS INT)
+----
+Cannot cast '0b1111111111111111111111111111111' to int
+
+# int4.sql:188
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no 0o prefix
+query INT nosort
+SELECT CAST('0o17777777777' AS INT)
+----
+2147483647
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0o17777777777' AS INT)
+----
+Cannot cast '0o17777777777' to int
+
+# int4.sql:190
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no 0x prefix
+query INT nosort
+SELECT CAST('0x7FFFFFFF' AS INT)
+----
+2147483647
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0x7FFFFFFF' AS INT)
+----
+Cannot cast '0x7FFFFFFF' to int
+
+# int4.sql:193
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no 0b prefix
+query INT nosort
+SELECT CAST('-0b10000000000000000000000000000000' AS INT)
+----
+-2147483648
+
+onlyif transformer int-text
+statement error
+SELECT CAST('-0b10000000000000000000000000000000' AS INT)
+----
+Cannot cast '-0b10000000000000000000000000000000' to int
+
+# int4.sql:195
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no 0o prefix
+query INT nosort
+SELECT CAST('-0o20000000000' AS INT)
+----
+-2147483648
+
+onlyif transformer int-text
+statement error
+SELECT CAST('-0o20000000000' AS INT)
+----
+Cannot cast '-0o20000000000' to int
+
+# int4.sql:197
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no 0x prefix
+query INT nosort
+SELECT CAST('-0x80000000' AS INT)
+----
+-2147483648
+
+onlyif transformer int-text
+statement error
+SELECT CAST('-0x80000000' AS INT)
+----
+Cannot cast '-0x80000000' to int
+
+# int4.sql:203: underscores.
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no _ between digits
+query INT nosort
+SELECT CAST('1_000_000' AS INT)
+----
+1000000
+
+onlyif transformer int-text
+statement error
+SELECT CAST('1_000_000' AS INT)
+----
+Cannot cast '1_000_000' to int
+
+# int4.sql:204
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no _ between digits
+query INT nosort
+SELECT CAST('1_2_3' AS INT)
+----
+123
+
+onlyif transformer int-text
+statement error
+SELECT CAST('1_2_3' AS INT)
+----
+Cannot cast '1_2_3' to int
+
+# int4.sql:205
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no 0x prefix or _ between digits
+query INT nosort
+SELECT CAST('0x1EEE_FFFF' AS INT)
+----
+518979583
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0x1EEE_FFFF' AS INT)
+----
+Cannot cast '0x1EEE_FFFF' to int
+
+# int4.sql:206
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no 0o prefix or _ between digits
+query INT nosort
+SELECT CAST('0o2_73' AS INT)
+----
+187
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0o2_73' AS INT)
+----
+Cannot cast '0o2_73' to int
+
+# int4.sql:207
+skipif transformer int-text # text casts to INT by CSV's grammar, which has no 0b prefix or _ between digits
+query INT nosort
+SELECT CAST('0b_10_0101' AS INT)
+----
+37
+
+onlyif transformer int-text
+statement error
+SELECT CAST('0b_10_0101' AS INT)
+----
+Cannot cast '0b_10_0101' to int
+
+# int4.sql:210: error cases. Postgres: invalid input syntax for type integer:
+# "_100".
+statement error
+SELECT CAST('_100' AS INT)
+
+# int4.sql:211: Postgres: invalid input syntax for type integer: "100_".
+statement error
+SELECT CAST('100_' AS INT)
+
+# int4.sql:212: Postgres: invalid input syntax for type integer: "100__000".
+statement error
+SELECT CAST('100__000' AS INT)

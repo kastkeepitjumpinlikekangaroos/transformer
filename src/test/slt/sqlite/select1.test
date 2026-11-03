@@ -1,8 +1,9 @@
 # From SQLite's sqllogictest corpus (https://www.sqlite.org/sqllogictest,
 # mirrored at https://github.com/gregrahn/sqllogictest): test/select1.test,
 # up to its 150th query this engine runs. Its COPYRIGHT lets it be copied
-# freely. `skipif transformer` marks a record the engine answers otherwise
-# by design, with the reason.
+# freely. `skipif transformer <id>` marks a record the engine answers
+# otherwise by design, with the id of its rule in the ledger in
+# docs/gotchas.md.
 
 statement ok
 CREATE TABLE t1(a INTEGER, b INTEGER, c INTEGER, d INTEGER, e INTEGER)
@@ -97,7 +98,7 @@ INSERT INTO t1(e,c,b,a,d) VALUES(242,244,240,243,241)
 statement ok
 INSERT INTO t1(e,d,c,b,a) VALUES(246,248,247,249,245)
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I nosort
 SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END
   FROM t1
@@ -113,7 +114,7 @@ SELECT a+b*2+c*3+d*4+e*5,
 ----
 60 values hashing to 808146289313018fce25f1a280bd8c30
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT a+b*2+c*3+d*4+e*5,
        CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
@@ -159,7 +160,7 @@ SELECT a+b*2+c*3+d*4,
 ----
 24 values hashing to 425542fc8d1ec04f89534ae98d59a74d
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIII nosort
 SELECT a+b*2+c*3+d*4,
        CASE a+1 WHEN b THEN 111 WHEN c THEN 222
@@ -180,7 +181,7 @@ SELECT CASE a+1 WHEN b THEN 111 WHEN c THEN 222
 ----
 30 values hashing to f2bf77f8cfb62666ab72c866ed4d4f1a
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b)
   FROM t1
@@ -190,7 +191,7 @@ SELECT (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b)
 ----
 20 values hashing to 1d6b8ed1db696a5f1c8d126facddd077
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT a,
        (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
@@ -206,7 +207,7 @@ SELECT a,
 ----
 145 values hashing to 65042db64d506f67a37c85f825cdd11f
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT CASE a+1 WHEN b THEN 111 WHEN c THEN 222
         WHEN d THEN 333  WHEN e THEN 444 ELSE 555 END,
@@ -225,7 +226,7 @@ SELECT CASE a+1 WHEN b THEN 111 WHEN c THEN 222
 ----
 210 values hashing to a259991ed1248a55a07838ce36a7c257
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
        CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
@@ -242,7 +243,7 @@ SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
 ----
 180 values hashing to 631b9506abcdd5dcea64c7ed2a3799ed
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
        d,
@@ -256,7 +257,7 @@ SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
 ----
 125 values hashing to 58b4ab36ed442f3837188b38cd02486a
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
        a-b,
@@ -293,7 +294,7 @@ SELECT a,
 ----
 60 values hashing to f88a6f6656b30fc5b3c4ede940008ff2
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query III nosort
 SELECT c,
        a-b,
@@ -304,7 +305,7 @@ SELECT c,
 ----
 66 values hashing to 49b01d3ad62fdaa733104a9c70dfb87c
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
        a+b*2+c*3+d*4+e*5,
@@ -336,7 +337,7 @@ SELECT a+b*2+c*3+d*4+e*5,
 ----
 144 values hashing to 1d2ad7123e951f275353001a6879b3c8
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
         WHEN a<b+3 THEN 333 ELSE 444 END,
@@ -352,7 +353,7 @@ SELECT CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
 ----
 210 values hashing to b046dd2378da12da24149ec8171de183
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT a,
        a+b*2+c*3+d*4+e*5,
@@ -397,7 +398,7 @@ SELECT CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
 ----
 154 values hashing to 437f5acfb0bed27efe918cd27dc829cd
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT e,
        (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b),
@@ -412,7 +413,7 @@ SELECT e,
 ----
 132 values hashing to b1b55f05abc1bf86626a186d4b60ea65
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I nosort
 SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END
   FROM t1
@@ -424,7 +425,7 @@ SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END
 1180
 1240
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT a+b*2+c*3,
        abs(b-c),
@@ -441,7 +442,7 @@ SELECT a+b*2+c*3,
 ----
 56 values hashing to 41c19a8a94cbb13f6a1672a654f9ef40
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT a+b*2,
        a+b*2+c*3,
@@ -457,7 +458,7 @@ SELECT a+b*2,
 ----
 25 values hashing to d26c6a15ff9231615a949e9c2412fc2b
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT a+b*2+c*3+d*4+e*5,
        CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
@@ -474,7 +475,7 @@ SELECT a+b*2+c*3+d*4+e*5,
 ----
 196 values hashing to 601e621103e91110c69c4545c08a48c1
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b),
        (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
@@ -488,7 +489,7 @@ SELECT (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b),
 ----
 135 values hashing to 635b37bb69d24a1353243f6975112cea
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b)
   FROM t1
@@ -498,7 +499,7 @@ SELECT (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b)
  ORDER BY 1
 ----
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT CASE a+1 WHEN b THEN 111 WHEN c THEN 222
         WHEN d THEN 333  WHEN e THEN 444 ELSE 555 END,
@@ -527,7 +528,7 @@ SELECT d,
 ----
 180 values hashing to 4cf6744bf5d3826cd98ad853eeb5beba
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT CASE a+1 WHEN b THEN 111 WHEN c THEN 222
         WHEN d THEN 333  WHEN e THEN 444 ELSE 555 END,
@@ -543,7 +544,7 @@ SELECT CASE a+1 WHEN b THEN 111 WHEN c THEN 222
 ----
 154 values hashing to b82f838cd6b2f0034ba34f8069a36b09
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT d,
        CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
@@ -569,7 +570,7 @@ SELECT a-b,
 ----
 24 values hashing to afd55bf27f337fa6f2554d2ae3726e96
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT (a+b+c+d+e)/5,
        a+b*2,
@@ -619,7 +620,7 @@ SELECT CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
 ----
 15 values hashing to 08fa8e3fd6a4743609ebd0354e659bba
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIII nosort
 SELECT a,
        e,
@@ -630,7 +631,7 @@ SELECT a,
 ----
 120 values hashing to c328c1a96813bf1072935593f41667ab
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query III nosort
 SELECT (a+b+c+d+e)/5,
        e,
@@ -642,7 +643,7 @@ SELECT (a+b+c+d+e)/5,
 ----
 90 values hashing to 66be8c935b54646fa54e09d50724c3fc
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIII nosort
 SELECT a-b,
        a+b*2,
@@ -664,7 +665,7 @@ SELECT a+b*2
 ----
 23 values hashing to 58bbff23f68fc8cebb2a4c6436d0b04a
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT CASE a+1 WHEN b THEN 111 WHEN c THEN 222
         WHEN d THEN 333  WHEN e THEN 444 ELSE 555 END,
@@ -708,7 +709,7 @@ SELECT a+b*2+c*3,
 ----
 150 values hashing to b5d3c38c9410c06baec2ae85a2834ffd
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
         WHEN a<b+3 THEN 333 ELSE 444 END,
@@ -738,7 +739,7 @@ SELECT c,
 ----
 24 values hashing to 141c5a5c81089f8c2a8422883e66bae6
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIII nosort
 SELECT CASE a+1 WHEN b THEN 111 WHEN c THEN 222
         WHEN d THEN 333  WHEN e THEN 444 ELSE 555 END,
@@ -752,7 +753,7 @@ SELECT CASE a+1 WHEN b THEN 111 WHEN c THEN 222
 ----
 88 values hashing to d5ef959057259760f6e4ff24af1eb5c9
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIII nosort
 SELECT d-e,
        (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b),
@@ -772,7 +773,7 @@ SELECT a+b*2+c*3
 ----
 30 values hashing to 20bb63abd067ae8ef5a05f08be3b6762
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
         WHEN a<b+3 THEN 333 ELSE 444 END,
@@ -786,7 +787,7 @@ SELECT CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
 ----
 80 values hashing to dda48f2f14d6eef074c866167931274f
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query II nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
        a-b
@@ -809,7 +810,7 @@ SELECT a+b*2+c*3+d*4+e*5,
 ----
 80 values hashing to 36b0bd3c4a5efd58912d89eec64b42fe
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query III nosort
 SELECT a-b,
        a+b*2+c*3+d*4,
@@ -881,7 +882,7 @@ SELECT abs(b-c),
 ----
 56 values hashing to 6d15efe8755229aeadcfc31141690e0c
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIII nosort
 SELECT e,
        d-e,
@@ -917,7 +918,7 @@ SELECT abs(a),
 ----
 50 values hashing to 0d42d0a09548edf4a343fe9e95c98b2c
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT (a+b+c+d+e)/5,
        (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b),
@@ -932,7 +933,7 @@ SELECT (a+b+c+d+e)/5,
 ----
 18 values hashing to 51c5d8e007a143cf3bf858945f677039
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
        d,
@@ -951,7 +952,7 @@ SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
 ----
 210 values hashing to 4abfb880f67a314446d0402a24ae5282
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT a+b*2,
        d,
@@ -971,7 +972,7 @@ SELECT a+b*2,
 -1
 333
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIII nosort
 SELECT c-d,
        (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b),
@@ -992,7 +993,7 @@ SELECT e
 ----
 165
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT abs(b-c),
        a+b*2+c*3+d*4+e*5,
@@ -1024,7 +1025,7 @@ SELECT b-c
 ----
 30 values hashing to 970be304ddec1d2bede8d8e2f14368c6
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
        abs(b-c),
@@ -1038,7 +1039,7 @@ SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
 ----
 174 values hashing to 05379a2f92dfafe9d9f27b43b2da99a1
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT d,
        c,
@@ -1124,7 +1125,7 @@ SELECT b,
 ----
 112 values hashing to 5ae5415105496a1711310d3c42176846
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIII nosort
 SELECT a+b*2+c*3+d*4,
        (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b),
@@ -1137,7 +1138,7 @@ SELECT a+b*2+c*3+d*4,
 ----
 56 values hashing to 5f4a5fcffe6f102f57b56bf2e339dd89
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query II nosort
 SELECT b,
        abs(b-c)
@@ -1149,7 +1150,7 @@ SELECT b,
 ----
 12 values hashing to d33f553dec1000186e0827b36e03a5a0
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
         WHEN a<b+3 THEN 333 ELSE 444 END,
@@ -1164,7 +1165,7 @@ SELECT CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
 ----
 210 values hashing to 8d6b363f389996a9821b4e3809779f76
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT d,
        CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
@@ -1178,7 +1179,7 @@ SELECT d,
 ----
 180 values hashing to 51a0a8497754b6679d3130c947c96360
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query III nosort
 SELECT CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
         WHEN a<b+3 THEN 333 ELSE 444 END,
@@ -1200,7 +1201,7 @@ SELECT a+b*2+c*3+d*4,
 ----
 81 values hashing to 9be3a71635f36f06be72937acb24a74d
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query III nosort
 SELECT a-b,
        abs(a),
@@ -1213,7 +1214,7 @@ SELECT a-b,
 ----
 90 values hashing to 27ca10878c9391decf14b1da14b81a1a
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query II nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
        a+b*2+c*3+d*4+e*5
@@ -1225,7 +1226,7 @@ SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
 ----
 38 values hashing to 6b17e3a64ebbafbdf4ec543abf34d414
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query III nosort
 SELECT (a+b+c+d+e)/5,
        abs(a),
@@ -1252,7 +1253,7 @@ SELECT a+b*2,
 ----
 112 values hashing to 056a2f68932723bbdeb9dc7c26e21ff8
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT a,
        d,
@@ -1267,7 +1268,7 @@ SELECT a,
 ----
 140 values hashing to 3dfb60ce29bfaa3deb2c90771787ae28
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
        a+b*2+c*3,
@@ -1284,7 +1285,7 @@ SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
 ----
 154 values hashing to 7be42f68cbfeb20d2a574569eabc62b8
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT b-c,
        c,
@@ -1299,7 +1300,7 @@ SELECT b-c,
 ----
 130 values hashing to 3872625fdb5d1bd8d2d87c61b2c5d2b9
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT b-c,
        CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
@@ -1317,7 +1318,7 @@ SELECT b-c,
 ----
 203 values hashing to 449a18d19874d7ee976c4c9fc953e3f4
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query III nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
        (a+b+c+d+e)/5,
@@ -1340,7 +1341,7 @@ SELECT CASE a+1 WHEN b THEN 111 WHEN c THEN 222
 ----
 60 values hashing to 1692ce3bd9941e0f21090da530fd3ed8
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT a+b*2+c*3+d*4,
        c,
@@ -1356,7 +1357,7 @@ SELECT a+b*2+c*3+d*4,
 ----
 203 values hashing to 9cc51c802e6d11db1eb947a0431c0898
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT abs(a),
        CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
@@ -1387,7 +1388,7 @@ SELECT (a+b+c+d+e)/5,
 ----
 25 values hashing to 4d716c3a4be4e2c0fcaeb771d9557147
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
        d,
@@ -1433,7 +1434,7 @@ SELECT c-d,
 ----
 130 values hashing to 9873ab86b9fa0eef10810ba4277fd1bf
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT a+b*2+c*3+d*4+e*5,
        a,
@@ -1473,7 +1474,7 @@ SELECT CASE a+1 WHEN b THEN 111 WHEN c THEN 222
 -3
 1000
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT a+b*2,
        CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
@@ -1494,7 +1495,7 @@ SELECT e
 ----
 30 values hashing to 41762f74ba25ab0f9b0448f319f2f292
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT c-d,
        b,
@@ -1508,7 +1509,7 @@ SELECT c-d,
 ----
 84 values hashing to e1b8a5e4a3649a2976b00eaf0962058b
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT abs(b-c),
        c-d,
@@ -1523,7 +1524,7 @@ SELECT abs(b-c),
 ----
 145 values hashing to d7e8eaed9394e826f4fdcccf068acdec
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIII nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b),
        b-c,
@@ -1547,7 +1548,7 @@ SELECT (a+b+c+d+e)/5
 ----
 30 values hashing to 8d2279ba80763220505cecac39786e90
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT a+b*2,
        (a+b+c+d+e)/5,
@@ -1574,7 +1575,7 @@ SELECT a+b*2+c*3+d*4,
 ----
 108 values hashing to e6f51d286e2a4011462e5e862a19f461
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIII nosort
 SELECT a+b*2+c*3,
        a+b*2,
@@ -1588,7 +1589,7 @@ SELECT a+b*2+c*3,
 ----
 120 values hashing to 227ac1db8da88813615a7e008801fba7
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query III nosort
 SELECT (a+b+c+d+e)/5,
        a+b*2,
@@ -1627,7 +1628,7 @@ SELECT c,
 ----
 150 values hashing to 2064f4d12bd17daef2792157a3fa01ac
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT c-d,
        (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b),
@@ -1666,7 +1667,7 @@ SELECT (a+b+c+d+e)/5,
 ----
 20 values hashing to d6130a18387e9029c427520c8fdd0b08
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT c-d,
        CASE WHEN a<b-3 THEN 111 WHEN a<=b THEN 222
@@ -1683,7 +1684,7 @@ SELECT c-d,
 ----
 196 values hashing to ce60e2883fe7a0c41c29c17e9b62bf51
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
        CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
@@ -1700,7 +1701,7 @@ SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
 ----
 150 values hashing to c31247552305ea7108b6c15517e4e50e
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIII nosort
 SELECT b-c,
        a+b*2,
@@ -1716,7 +1717,7 @@ SELECT b-c,
 ----
 18 values hashing to d03c3163674ffb21402396369c50ac14
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query II nosort
 SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
        a+b*2+c*3+d*4+e*5
@@ -1728,7 +1729,7 @@ SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
 ----
 32 values hashing to 274f52e7976f1e1a7151a9a4804ccd13
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query II nosort
 SELECT b,
        abs(a)
@@ -1740,7 +1741,7 @@ SELECT b,
 ----
 60 values hashing to 909ebdb8fc6864d4dffee74235090ed7
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT a+b*2,
        a+b*2+c*3+d*4+e*5,
@@ -1799,7 +1800,7 @@ SELECT e,
 ----
 104 values hashing to 57317371c67d5ca0360d9860ff06b5f6
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b),
        CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
@@ -1812,7 +1813,7 @@ SELECT (SELECT count(*) FROM t1 AS x WHERE x.b<t1.b),
 ----
 150 values hashing to b77fe449c8203b5d18b816d00d4a9229
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT b-c,
        c,
@@ -1849,7 +1850,7 @@ SELECT a+b*2,
 ----
 21 values hashing to 47e5ff2f412981bf5017a3fcd7dcbfce
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT a+b*2+c*3,
        d,
@@ -1908,7 +1909,7 @@ SELECT a-b,
 ----
 14 values hashing to d2bcb971c3fe19befbef456f67ecb854
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query III nosort
 SELECT b,
        d,
@@ -1919,7 +1920,7 @@ SELECT b,
 ----
 42 values hashing to fdf2c9075b2487f82c8ad837755619d7
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort
 SELECT a+b*2+c*3+d*4+e*5
   FROM t1
@@ -1928,7 +1929,7 @@ SELECT a+b*2+c*3+d*4+e*5
 ----
 29 values hashing to 52abcdd72ea8512b37c16f4859ec7416
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query III nosort
 SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
        b-c,
@@ -1939,7 +1940,7 @@ SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END,
 ----
 87 values hashing to ccf71f7ab4716bebd70a7047162430d0
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query I nosort
 SELECT CASE WHEN c>(SELECT avg(c) FROM t1) THEN a*2 ELSE b*10 END
   FROM t1
@@ -1956,7 +1957,7 @@ SELECT a+b*2+c*3+d*4,
 ----
 28 values hashing to 7626a6dc10da4bbb0672aba278414d7f
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT e,
        a,
@@ -1970,7 +1971,7 @@ SELECT e,
 ----
 150 values hashing to 6704b1d160521eabdc6985e64f098711
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query III nosort
 SELECT a+b*2+c*3+d*4+e*5,
        b-c,
@@ -1993,7 +1994,7 @@ SELECT abs(a),
 ----
 150 values hashing to 34ca74f90850eff35ac3a230238544be
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIII nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
        c,
@@ -2018,7 +2019,7 @@ SELECT c,
 ----
 57 values hashing to 25d96795a29f85eafc1253b3af853f3d
 
-skipif transformer # refused: A subquery is not supported; name it in a WITH clause and select from it, or JOIN it
+skipif transformer refused-subquery
 query IIIIIII nosort
 SELECT (SELECT count(*) FROM t1 AS x WHERE x.c>t1.c AND x.d<t1.d),
        c-d,
@@ -2042,7 +2043,7 @@ SELECT a+b*2+c*3+d*4+e*5,
 ----
 45 values hashing to c5572ef5e70213b43133e2248770b61d
 
-skipif transformer # refused: EXISTS is not supported; name the subquery in a WITH clause and JOIN it
+skipif transformer refused-subquery
 query I nosort
 SELECT d
   FROM t1

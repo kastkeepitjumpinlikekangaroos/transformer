@@ -1,0 +1,16 @@
+{
+ "description": "Specifying data only (no field names), properly",
+ "options": {
+  "header": "false",
+  "lineEnding": "\r\n"
+ },
+ "fields": null,
+ "rows": [
+  [
+   "a",
+   "b",
+   "c"
+  ]
+ ],
+ "text": "a,b,c"
+}

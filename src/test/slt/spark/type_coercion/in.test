@@ -1,0 +1,1045 @@
+# From Apache Spark's SQL query tests (https://github.com/apache/spark):
+# sql/core/src/test/resources/sql-tests/inputs/typeCoercion/native/inConversion.sql
+# at commit b98123545915a84403c7fa89e8d977ee0b2f5aed, with every answer from
+# the golden file results/typeCoercion/native/inConversion.sql.out at that
+# commit, Spark's answer under ANSI mode, never the engine's. Licensed to the
+# Apache Software Foundation under the Apache License, Version 2.0: LICENSE and
+# NOTICE in src/test/slt/spark/ hold the license and Spark's notice. Written by
+# //src/test/scala/com/transformer/slt:spark_import, which docs/extending.md
+# describes; edit the converter, not this file.
+#
+# IN with a list of one and of two values, of each pair of types. 156 of the
+# file's 289 statements are here, 37 of them records the engine answers
+# otherwise by a rule of the ledger in docs/gotchas.md, marked skipif
+# transformer <id> and, for a rule that is no refusal, followed by its twin,
+# onlyif transformer <id> with the engine's own answer.
+#
+# A statement is as Spark wrote it but where a rewrite cannot change what it
+# means, which its record names: a temporary view of literals as a table of
+# their types holding one row of them; a timestamp's text cast to DATE as the
+# DATE literal of its date (Spark's cast drops the time; this engine reads only
+# an ISO date as a DATE, and a test of that cast is no test of its subject). A
+# column is the engine's type of the name Spark's schema gives it. A result is
+# compared as rowsort unless its query ends in ORDER BY, as Spark sorts every
+# result its plan does not. An error under ANSI is a statement error, Spark's
+# error class in its comment and after ---- the engine's own words for the same
+# reason.
+#
+# Skipped, by rule:
+#     31  refused-text-comparison
+#      4  refused-date-beside-timestamp
+#      2  bool-text
+#
+# Left out (133 statements), by what they need:
+#     46  TINYINT
+#     42  SMALLINT
+#     38  BINARY, and X'' literals
+#      7  both engines refuse it, for different reasons, which is no
+#         agreement: each is held for the user (plans/testing/10)
+
+# inConversion.sql:18, the temporary view as a table of one row
+statement ok
+CREATE TABLE t (c1 INT)
+
+statement ok
+INSERT INTO t VALUES (1)
+
+# inConversion.sql:48
+query BOOLEAN rowsort
+SELECT cast(1 as int) in (cast(1 as int)) FROM t
+----
+true
+
+# inConversion.sql:49
+query BOOLEAN rowsort
+SELECT cast(1 as int) in (cast(1 as bigint)) FROM t
+----
+true
+
+# inConversion.sql:50
+query BOOLEAN rowsort
+SELECT cast(1 as int) in (cast(1 as float)) FROM t
+----
+true
+
+# inConversion.sql:51
+query BOOLEAN rowsort
+SELECT cast(1 as int) in (cast(1 as double)) FROM t
+----
+true
+
+# inConversion.sql:52
+query BOOLEAN rowsort
+SELECT cast(1 as int) in (cast(1 as decimal(10, 0))) FROM t
+----
+true
+
+# inConversion.sql:53
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as int) in (cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:55; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as int) in (cast(1 as boolean)) FROM t
+----
+Cannot compare INT with BOOLEAN
+
+# inConversion.sql:56; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as int) in (cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+Cannot compare INT with TIMESTAMP
+
+# inConversion.sql:57; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as int) in (DATE '2017-12-11') FROM t
+----
+Cannot compare INT with DATE
+
+# inConversion.sql:61
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) in (cast(1 as int)) FROM t
+----
+true
+
+# inConversion.sql:62
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) in (cast(1 as bigint)) FROM t
+----
+true
+
+# inConversion.sql:63
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) in (cast(1 as float)) FROM t
+----
+true
+
+# inConversion.sql:64
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) in (cast(1 as double)) FROM t
+----
+true
+
+# inConversion.sql:65
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) in (cast(1 as decimal(10, 0))) FROM t
+----
+true
+
+# inConversion.sql:66
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) in (cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:68; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as bigint) in (cast(1 as boolean)) FROM t
+----
+Cannot compare LONG with BOOLEAN
+
+# inConversion.sql:69; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as bigint) in (cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+Cannot compare LONG with TIMESTAMP
+
+# inConversion.sql:70; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as bigint) in (DATE '2017-12-11') FROM t
+----
+Cannot compare LONG with DATE
+
+# inConversion.sql:74
+query BOOLEAN rowsort
+SELECT cast(1 as float) in (cast(1 as int)) FROM t
+----
+true
+
+# inConversion.sql:75
+query BOOLEAN rowsort
+SELECT cast(1 as float) in (cast(1 as bigint)) FROM t
+----
+true
+
+# inConversion.sql:76
+query BOOLEAN rowsort
+SELECT cast(1 as float) in (cast(1 as float)) FROM t
+----
+true
+
+# inConversion.sql:77
+query BOOLEAN rowsort
+SELECT cast(1 as float) in (cast(1 as double)) FROM t
+----
+true
+
+# inConversion.sql:78
+query BOOLEAN rowsort
+SELECT cast(1 as float) in (cast(1 as decimal(10, 0))) FROM t
+----
+true
+
+# inConversion.sql:79
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as float) in (cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:81; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as float) in (cast(1 as boolean)) FROM t
+----
+Cannot compare FLOAT with BOOLEAN
+
+# inConversion.sql:82; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as float) in (cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+Cannot compare FLOAT with TIMESTAMP
+
+# inConversion.sql:83; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as float) in (DATE '2017-12-11') FROM t
+----
+Cannot compare FLOAT with DATE
+
+# inConversion.sql:87
+query BOOLEAN rowsort
+SELECT cast(1 as double) in (cast(1 as int)) FROM t
+----
+true
+
+# inConversion.sql:88
+query BOOLEAN rowsort
+SELECT cast(1 as double) in (cast(1 as bigint)) FROM t
+----
+true
+
+# inConversion.sql:89
+query BOOLEAN rowsort
+SELECT cast(1 as double) in (cast(1 as float)) FROM t
+----
+true
+
+# inConversion.sql:90
+query BOOLEAN rowsort
+SELECT cast(1 as double) in (cast(1 as double)) FROM t
+----
+true
+
+# inConversion.sql:91
+query BOOLEAN rowsort
+SELECT cast(1 as double) in (cast(1 as decimal(10, 0))) FROM t
+----
+true
+
+# inConversion.sql:92
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as double) in (cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:94; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as double) in (cast(1 as boolean)) FROM t
+----
+Cannot compare DOUBLE with BOOLEAN
+
+# inConversion.sql:95; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as double) in (cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+Cannot compare DOUBLE with TIMESTAMP
+
+# inConversion.sql:96; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as double) in (DATE '2017-12-11') FROM t
+----
+Cannot compare DOUBLE with DATE
+
+# inConversion.sql:100
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as int)) FROM t
+----
+true
+
+# inConversion.sql:101
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as bigint)) FROM t
+----
+true
+
+# inConversion.sql:102
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as float)) FROM t
+----
+true
+
+# inConversion.sql:103
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as double)) FROM t
+----
+true
+
+# inConversion.sql:104
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as decimal(10, 0))) FROM t
+----
+true
+
+# inConversion.sql:105
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:107; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as boolean)) FROM t
+----
+Cannot compare DECIMAL(10,0) with BOOLEAN
+
+# inConversion.sql:108; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) in (cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+Cannot compare DECIMAL(10,0) with TIMESTAMP
+
+# inConversion.sql:109; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) in (DATE '2017-12-11') FROM t
+----
+Cannot compare DECIMAL(10,0) with DATE
+
+# inConversion.sql:113
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as int)) FROM t
+----
+true
+
+# inConversion.sql:114
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as bigint)) FROM t
+----
+true
+
+# inConversion.sql:115
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as float)) FROM t
+----
+true
+
+# inConversion.sql:116
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as double)) FROM t
+----
+true
+
+# inConversion.sql:117
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as decimal(10, 0))) FROM t
+----
+true
+
+# inConversion.sql:118
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:120
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as boolean)) FROM t
+----
+true
+
+# inConversion.sql:121; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+statement error
+SELECT cast(1 as string) in (cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+
+# inConversion.sql:122; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+statement error
+SELECT cast(1 as string) in (DATE '2017-12-11') FROM t
+
+# inConversion.sql:139; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT true in (cast(1 as int)) FROM t
+----
+Cannot compare BOOLEAN with INT
+
+# inConversion.sql:140; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT true in (cast(1 as bigint)) FROM t
+----
+Cannot compare BOOLEAN with LONG
+
+# inConversion.sql:141; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT true in (cast(1 as float)) FROM t
+----
+Cannot compare BOOLEAN with FLOAT
+
+# inConversion.sql:142; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT true in (cast(1 as double)) FROM t
+----
+Cannot compare BOOLEAN with DOUBLE
+
+# inConversion.sql:143; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT true in (cast(1 as decimal(10, 0))) FROM t
+----
+Cannot compare BOOLEAN with DECIMAL(10,0)
+
+# inConversion.sql:144
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT true in (cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:146
+query BOOLEAN rowsort
+SELECT true in (cast(1 as boolean)) FROM t
+----
+true
+
+# inConversion.sql:147; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT true in (cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+Cannot compare BOOLEAN with TIMESTAMP
+
+# inConversion.sql:148; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT true in (DATE '2017-12-11') FROM t
+----
+Cannot compare BOOLEAN with DATE
+
+# inConversion.sql:152; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast(2 as int)) FROM t
+----
+Cannot compare TIMESTAMP with INT
+
+# inConversion.sql:153; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast(2 as bigint)) FROM t
+----
+Cannot compare TIMESTAMP with LONG
+
+# inConversion.sql:154; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast(2 as float)) FROM t
+----
+Cannot compare TIMESTAMP with FLOAT
+
+# inConversion.sql:155; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast(2 as double)) FROM t
+----
+Cannot compare TIMESTAMP with DOUBLE
+
+# inConversion.sql:156; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast(2 as decimal(10, 0))) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(10,0)
+
+# inConversion.sql:157; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast(2 as string)) FROM t
+
+# inConversion.sql:159; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast(2 as boolean)) FROM t
+----
+Cannot compare TIMESTAMP with BOOLEAN
+
+# inConversion.sql:160
+query BOOLEAN rowsort
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+false
+
+# inConversion.sql:161; a timestamp's text cast to DATE written as the DATE
+# literal of its date
+skipif transformer refused-date-beside-timestamp # a DATE beside a TIMESTAMP
+query BOOLEAN rowsort
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (DATE '2017-12-11') FROM t
+----
+false
+
+# inConversion.sql:165; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-12' in (cast(2 as int)) FROM t
+----
+Cannot compare DATE with INT
+
+# inConversion.sql:166; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-12' in (cast(2 as bigint)) FROM t
+----
+Cannot compare DATE with LONG
+
+# inConversion.sql:167; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-12' in (cast(2 as float)) FROM t
+----
+Cannot compare DATE with FLOAT
+
+# inConversion.sql:168; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-12' in (cast(2 as double)) FROM t
+----
+Cannot compare DATE with DOUBLE
+
+# inConversion.sql:169; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-12' in (cast(2 as decimal(10, 0))) FROM t
+----
+Cannot compare DATE with DECIMAL(10,0)
+
+# inConversion.sql:170; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+statement error
+SELECT DATE '2017-12-12' in (cast(2 as string)) FROM t
+
+# inConversion.sql:172; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-12' in (cast(2 as boolean)) FROM t
+----
+Cannot compare DATE with BOOLEAN
+
+# inConversion.sql:173; a timestamp's text cast to DATE written as the DATE
+# literal of its date
+skipif transformer refused-date-beside-timestamp # a DATE beside a TIMESTAMP
+query BOOLEAN rowsort
+SELECT DATE '2017-12-12' in (cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+false
+
+# inConversion.sql:174; a timestamp's text cast to DATE written as the DATE
+# literal of its date
+query BOOLEAN rowsort
+SELECT DATE '2017-12-12' in (DATE '2017-12-11') FROM t
+----
+false
+
+# inConversion.sql:204
+query BOOLEAN rowsort
+SELECT cast(1 as int) in (cast(1 as int), cast(1 as int)) FROM t
+----
+true
+
+# inConversion.sql:205
+query BOOLEAN rowsort
+SELECT cast(1 as int) in (cast(1 as int), cast(1 as bigint)) FROM t
+----
+true
+
+# inConversion.sql:206
+query BOOLEAN rowsort
+SELECT cast(1 as int) in (cast(1 as int), cast(1 as float)) FROM t
+----
+true
+
+# inConversion.sql:207
+query BOOLEAN rowsort
+SELECT cast(1 as int) in (cast(1 as int), cast(1 as double)) FROM t
+----
+true
+
+# inConversion.sql:208
+query BOOLEAN rowsort
+SELECT cast(1 as int) in (cast(1 as int), cast(1 as decimal(10, 0))) FROM t
+----
+true
+
+# inConversion.sql:209
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as int) in (cast(1 as int), cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:211; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as int) in (cast(1 as int), cast(1 as boolean)) FROM t
+----
+Cannot compare INT with BOOLEAN
+
+# inConversion.sql:212; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as int) in (cast(1 as int), cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+Cannot compare INT with TIMESTAMP
+
+# inConversion.sql:213; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as int) in (cast(1 as int), DATE '2017-12-11') FROM t
+----
+Cannot compare INT with DATE
+
+# inConversion.sql:217
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) in (cast(1 as bigint), cast(1 as int)) FROM t
+----
+true
+
+# inConversion.sql:218
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) in (cast(1 as bigint), cast(1 as bigint)) FROM t
+----
+true
+
+# inConversion.sql:219
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) in (cast(1 as bigint), cast(1 as float)) FROM t
+----
+true
+
+# inConversion.sql:220
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) in (cast(1 as bigint), cast(1 as double)) FROM t
+----
+true
+
+# inConversion.sql:221
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) in (cast(1 as bigint), cast(1 as decimal(10, 0))) FROM t
+----
+true
+
+# inConversion.sql:222
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as bigint) in (cast(1 as bigint), cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:224; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as bigint) in (cast(1 as bigint), cast(1 as boolean)) FROM t
+----
+Cannot compare LONG with BOOLEAN
+
+# inConversion.sql:225; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as bigint) in (cast(1 as bigint), cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+Cannot compare LONG with TIMESTAMP
+
+# inConversion.sql:226; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as bigint) in (cast(1 as bigint), DATE '2017-12-11') FROM t
+----
+Cannot compare LONG with DATE
+
+# inConversion.sql:230
+query BOOLEAN rowsort
+SELECT cast(1 as float) in (cast(1 as float), cast(1 as int)) FROM t
+----
+true
+
+# inConversion.sql:231
+query BOOLEAN rowsort
+SELECT cast(1 as float) in (cast(1 as float), cast(1 as bigint)) FROM t
+----
+true
+
+# inConversion.sql:232
+query BOOLEAN rowsort
+SELECT cast(1 as float) in (cast(1 as float), cast(1 as float)) FROM t
+----
+true
+
+# inConversion.sql:233
+query BOOLEAN rowsort
+SELECT cast(1 as float) in (cast(1 as float), cast(1 as double)) FROM t
+----
+true
+
+# inConversion.sql:234
+query BOOLEAN rowsort
+SELECT cast(1 as float) in (cast(1 as float), cast(1 as decimal(10, 0))) FROM t
+----
+true
+
+# inConversion.sql:235
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as float) in (cast(1 as float), cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:237; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as float) in (cast(1 as float), cast(1 as boolean)) FROM t
+----
+Cannot compare FLOAT with BOOLEAN
+
+# inConversion.sql:238; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as float) in (cast(1 as float), cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+Cannot compare FLOAT with TIMESTAMP
+
+# inConversion.sql:239; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as float) in (cast(1 as float), DATE '2017-12-11') FROM t
+----
+Cannot compare FLOAT with DATE
+
+# inConversion.sql:243
+query BOOLEAN rowsort
+SELECT cast(1 as double) in (cast(1 as double), cast(1 as int)) FROM t
+----
+true
+
+# inConversion.sql:244
+query BOOLEAN rowsort
+SELECT cast(1 as double) in (cast(1 as double), cast(1 as bigint)) FROM t
+----
+true
+
+# inConversion.sql:245
+query BOOLEAN rowsort
+SELECT cast(1 as double) in (cast(1 as double), cast(1 as float)) FROM t
+----
+true
+
+# inConversion.sql:246
+query BOOLEAN rowsort
+SELECT cast(1 as double) in (cast(1 as double), cast(1 as double)) FROM t
+----
+true
+
+# inConversion.sql:247
+query BOOLEAN rowsort
+SELECT cast(1 as double) in (cast(1 as double), cast(1 as decimal(10, 0))) FROM t
+----
+true
+
+# inConversion.sql:248
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as double) in (cast(1 as double), cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:250; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as double) in (cast(1 as double), cast(1 as boolean)) FROM t
+----
+Cannot compare DOUBLE with BOOLEAN
+
+# inConversion.sql:251; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as double) in (cast(1 as double), cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+Cannot compare DOUBLE with TIMESTAMP
+
+# inConversion.sql:252; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as double) in (cast(1 as double), DATE '2017-12-11') FROM t
+----
+Cannot compare DOUBLE with DATE
+
+# inConversion.sql:256
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as decimal(10, 0)), cast(1 as int)) FROM t
+----
+true
+
+# inConversion.sql:257
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as decimal(10, 0)), cast(1 as bigint)) FROM t
+----
+true
+
+# inConversion.sql:258
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as decimal(10, 0)), cast(1 as float)) FROM t
+----
+true
+
+# inConversion.sql:259
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as decimal(10, 0)), cast(1 as double)) FROM t
+----
+true
+
+# inConversion.sql:260
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as decimal(10, 0)), cast(1 as decimal(10, 0))) FROM t
+----
+true
+
+# inConversion.sql:261
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as decimal(10, 0)), cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:263; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as decimal(10, 0)), cast(1 as boolean)) FROM t
+----
+Cannot compare DECIMAL(10,0) with BOOLEAN
+
+# inConversion.sql:264; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as decimal(10, 0)), cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+Cannot compare DECIMAL(10,0) with TIMESTAMP
+
+# inConversion.sql:265; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast(1 as decimal(10, 0)) in (cast(1 as decimal(10, 0)), DATE '2017-12-11') FROM t
+----
+Cannot compare DECIMAL(10,0) with DATE
+
+# inConversion.sql:269
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as string), cast(1 as int)) FROM t
+----
+true
+
+# inConversion.sql:270
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as string), cast(1 as bigint)) FROM t
+----
+true
+
+# inConversion.sql:271
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as string), cast(1 as float)) FROM t
+----
+true
+
+# inConversion.sql:272
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as string), cast(1 as double)) FROM t
+----
+true
+
+# inConversion.sql:273
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as string), cast(1 as decimal(10, 0))) FROM t
+----
+true
+
+# inConversion.sql:274
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as string), cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:276
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast(1 as string) in (cast(1 as string), cast(1 as boolean)) FROM t
+----
+true
+
+# inConversion.sql:277; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+statement error
+SELECT cast(1 as string) in (cast(1 as string), cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+
+# inConversion.sql:278; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: CAST_INVALID_INPUT
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+statement error
+SELECT cast(1 as string) in (cast(1 as string), DATE '2017-12-11') FROM t
+
+# inConversion.sql:300
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT cast('1' as boolean) in (cast('1' as boolean), cast(1 as string)) FROM t
+----
+true
+
+onlyif transformer bool-text
+statement error
+SELECT cast('1' as boolean) in (cast('1' as boolean), cast(1 as string)) FROM t
+----
+Cannot cast '1' to boolean
+
+# inConversion.sql:302
+skipif transformer bool-text # text casts to BOOLEAN from true and false alone
+query BOOLEAN rowsort
+SELECT cast('1' as boolean) in (cast('1' as boolean), cast(1 as boolean)) FROM t
+----
+true
+
+onlyif transformer bool-text
+statement error
+SELECT cast('1' as boolean) in (cast('1' as boolean), cast(1 as boolean)) FROM t
+----
+Cannot cast '1' to boolean
+
+# inConversion.sql:308; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast('2017-12-12 09:30:00.0' as timestamp), cast(1 as int)) FROM t
+----
+Cannot compare TIMESTAMP with INT
+
+# inConversion.sql:309; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast('2017-12-12 09:30:00.0' as timestamp), cast(1 as bigint)) FROM t
+----
+Cannot compare TIMESTAMP with LONG
+
+# inConversion.sql:310; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast('2017-12-12 09:30:00.0' as timestamp), cast(1 as float)) FROM t
+----
+Cannot compare TIMESTAMP with FLOAT
+
+# inConversion.sql:311; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast('2017-12-12 09:30:00.0' as timestamp), cast(1 as double)) FROM t
+----
+Cannot compare TIMESTAMP with DOUBLE
+
+# inConversion.sql:312; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast('2017-12-12 09:30:00.0' as timestamp), cast(1 as decimal(10, 0))) FROM t
+----
+Cannot compare TIMESTAMP with DECIMAL(10,0)
+
+# inConversion.sql:313
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast('2017-12-12 09:30:00.0' as timestamp), cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:315; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast('2017-12-12 09:30:00.0' as timestamp), cast(1 as boolean)) FROM t
+----
+Cannot compare TIMESTAMP with BOOLEAN
+
+# inConversion.sql:316
+query BOOLEAN rowsort
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast('2017-12-12 09:30:00.0' as timestamp), cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+true
+
+# inConversion.sql:317; a timestamp's text cast to DATE written as the DATE
+# literal of its date
+skipif transformer refused-date-beside-timestamp # a DATE beside a TIMESTAMP
+query BOOLEAN rowsort
+SELECT cast('2017-12-12 09:30:00.0' as timestamp) in (cast('2017-12-12 09:30:00.0' as timestamp), DATE '2017-12-11') FROM t
+----
+true
+
+# inConversion.sql:321; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-12' in (DATE '2017-12-12', cast(1 as int)) FROM t
+----
+Cannot compare DATE with INT
+
+# inConversion.sql:322; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-12' in (DATE '2017-12-12', cast(1 as bigint)) FROM t
+----
+Cannot compare DATE with LONG
+
+# inConversion.sql:323; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-12' in (DATE '2017-12-12', cast(1 as float)) FROM t
+----
+Cannot compare DATE with FLOAT
+
+# inConversion.sql:324; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-12' in (DATE '2017-12-12', cast(1 as double)) FROM t
+----
+Cannot compare DATE with DOUBLE
+
+# inConversion.sql:325; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-12' in (DATE '2017-12-12', cast(1 as decimal(10, 0))) FROM t
+----
+Cannot compare DATE with DECIMAL(10,0)
+
+# inConversion.sql:326; a timestamp's text cast to DATE written as the DATE
+# literal of its date
+skipif transformer refused-text-comparison # text meets another type only as a string literal, which a DECIMAL reads none of
+query BOOLEAN rowsort
+SELECT DATE '2017-12-12' in (DATE '2017-12-12', cast(1 as string)) FROM t
+----
+true
+
+# inConversion.sql:328; a timestamp's text cast to DATE written as the DATE
+# literal of its date; Spark: DATATYPE_MISMATCH.DATA_DIFF_TYPES
+statement error
+SELECT DATE '2017-12-12' in (DATE '2017-12-12', cast(1 as boolean)) FROM t
+----
+Cannot compare DATE with BOOLEAN
+
+# inConversion.sql:329; a timestamp's text cast to DATE written as the DATE
+# literal of its date
+skipif transformer refused-date-beside-timestamp # a DATE beside a TIMESTAMP
+query BOOLEAN rowsort
+SELECT DATE '2017-12-12' in (DATE '2017-12-12', cast('2017-12-11 09:30:00.0' as timestamp)) FROM t
+----
+true
+
+# inConversion.sql:330; a timestamp's text cast to DATE written as the DATE
+# literal of its date
+query BOOLEAN rowsort
+SELECT DATE '2017-12-12' in (DATE '2017-12-12', DATE '2017-12-11') FROM t
+----
+true

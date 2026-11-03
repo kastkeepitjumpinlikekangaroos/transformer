@@ -1,13 +1,16 @@
 package com.transformer.fuzz.oracle
 
-import com.transformer.core.SqlExecutorRegistry
-import com.transformer.fuzz.JobDagGen.{Fails, JobCase, Ok, ValidationFails}
+import com.transformer.core.{Chaos, Faults, Settings, SqlExecutorRegistry}
+import com.transformer.fuzz.DagCrashChild
+import com.transformer.fuzz.JobDagGen.{Fails, FailsInValidation, FailsWhileWriting, FaultPlan, JobCase, Ok, ValidationFails}
 import com.transformer.job.{JobResult, JobRunRecord, TaskProgressListener, TaskResult, TaskRunRecord, TaskRunStatus, TaskStatus}
 import com.transformer.sql.exec.SqlEngine
 
 import java.nio.file.{Files, Path}
 import java.time.Instant
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import scala.jdk.CollectionConverters._
 
 /** Scheduler oracle: run a generated job and decide it against what the DAG
   * alone says must happen.
@@ -52,11 +55,30 @@ import java.util.concurrent.atomic.AtomicReference
   *   8. '''Liveness''' — the run terminates. The job executes on a watchdog
   *      thread; a job still running past [[TimeoutMillis]] fails the property
   *      with a full thread dump, which is how a `Scheduler.pool` starvation
-  *      deadlock surfaces here rather than hanging CI silently.
+  *      deadlock surfaces here rather than hanging CI silently. Under
+  *      `--config=chaos` each thread in the dump carries the last chaos points
+  *      it passed ([[Chaos.lastPoints]]): an interleaving does not replay from
+  *      its seed, so they are its record.
+  *   9. '''Directories say what they hold''' ([[checkDirectories]]) —
+  *      after any run, finished or stopped, each task's directory is absent or
+  *      holds a record; a `Failed` or `Skipped` one holds no part file and no
+  *      staged one; a `Succeeded` or `ValidationFailed` one holds exactly the
+  *      part files its record names, and no staged one. A directory a halt
+  *      caught as a run created it for its first record holds no record, and
+  *      nothing but that record's temp file.
   *
   * A case that runs twice (`JobDagGen.RunLayout`) is decided run by run: the
   * second run answers to the same invariants, over directories the first run
   * may already have written.
+  *
+  * A case with a [[FaultPlan]] stops one run with a fault first, armed in this
+  * JVM to throw (or, `crash`, halting a child JVM); then the same run runs
+  * clean, and must give a clean run's statuses with every invariant above:
+  * the rerun a failed run gets needs no cleanup. The stopped attempt answers
+  * to what a fault allows ([[verifyStopped]]): at most the one task the fault
+  * hit fails, with the tasks after it skipped; its directories say what they
+  * hold; and a session reopening it shows a task whose record says `Running`
+  * as unfinished, never as succeeded ([[Hydration.checkUnfinished]]).
   */
 object DagSchedule {
 
@@ -65,23 +87,72 @@ object DagSchedule {
     * this is a liveness bug, not slowness. */
   val TimeoutMillis: Long = 120000L
 
-  /** One run of a generated job: the execution time it ran at, and what it
-    * returned. */
-  final case class Run(executionTime: Instant, result: JobResult)
+  /** The attempt a [[FaultPlan]] stopped, before its run reran clean: the plan,
+    * whether its point was reached, what the attempt returned (None when a
+    * child JVM ran it), and how many tasks a session reopened unfinished
+    * after it. */
+  final case class Stopped(plan: FaultPlan, fired: Boolean, result: Option[JobResult], unfinished: Int)
+
+  /** One run of a generated job: the execution time it ran at, what it
+    * returned, and the attempt a fault stopped before it, if one did. */
+  final case class Run(executionTime: Instant, result: JobResult, stopped: Option[Stopped] = None)
 
   /** Runs each of `jc`'s runs, in order, in one fresh scratch directory and
-    * asserts every invariant above after each; then hands the runs and the
-    * directory they wrote to `after`, and deletes the directory. */
-  def run[A](jc: JobCase)(after: (Vector[Run], Path) => A): A = {
+    * asserts every invariant above after each, a run a fault stops first
+    * included (in a child JVM that halts, `crash`); then hands the runs and
+    * the directory they wrote to `after`, and deletes the directory. */
+  def run[A](jc: JobCase, crash: Boolean = false)(after: (Vector[Run], Path) => A): A = {
     val root = Files.createTempDirectory("fuzz-dag-")
     try {
-      val runs = jc.layout.executionTimes.map { time =>
+      val runs = jc.layout.executionTimes.zipWithIndex.map { case (time, r) =>
+        val stopped = jc.faultPlan.filter(_.run == r).map { plan =>
+          if (plan.overEarlier) verify(jc, runWithWatchdog(jc, root, time), root, time)
+          val (fired, result) = if (crash) haltChild(jc, root, r, plan) else throwInJvm(jc, root, time, plan)
+          verifyStopped(jc, plan, fired, result, root, time)
+          Stopped(plan, fired, result, Hydration.checkUnfinished(jc, root, time))
+        }
         val result = runWithWatchdog(jc, root, time)
         verify(jc, result, root, time)
-        Run(time, result)
+        Run(time, result, stopped)
       }
       after(runs, root)
     } finally deleteRecursively(root)
+  }
+
+  /** `jc`'s run at `time` with `plan` armed in this JVM. Returns whether its
+    * point was reached, and what the run returned. */
+  private def throwInJvm(jc: JobCase, root: Path, time: Instant, plan: FaultPlan): (Boolean, Option[JobResult]) = {
+    Faults.arm(plan.arming)
+    try {
+      val result = runWithWatchdog(jc, root, time)
+      (Faults.fired, Some(result))
+    } finally Faults.disarm()
+  }
+
+  /** `jc`'s run `r` in a child JVM armed with `plan` (a halt): the case goes
+    * to it as a file ([[DagCrashChild]]), never the property's own JVM, which a
+    * halt would end. Returns whether the child halted; a child that ran to its
+    * end returns nothing this JVM can see. */
+  private def haltChild(jc: JobCase, root: Path, r: Int, plan: FaultPlan): (Boolean, Option[JobResult]) = {
+    val caseFile = root.resolve("case.ser")
+    val out = new java.io.ObjectOutputStream(Files.newOutputStream(caseFile))
+    try out.writeObject(jc) finally out.close()
+    val log = root.resolve(s"child-$r.log")
+    val javaBin = java.nio.file.Paths.get(System.getProperty("java.home"), "bin", "java").toString
+    val child = new ProcessBuilder(javaBin, "-cp", System.getProperty("java.class.path"),
+      s"-D${Settings.Fault.property}=${plan.arming}", DagCrashChild.getClass.getName.stripSuffix("$"),
+      caseFile.toString, root.toString, r.toString)
+      .redirectErrorStream(true).redirectOutput(log.toFile).start()
+    if (!child.waitFor(TimeoutMillis, TimeUnit.MILLISECONDS)) {
+      child.destroyForcibly()
+      throw new AssertionError(s"[dag-crash] the child JVM running $plan did not end\n  case = $jc")
+    }
+    child.exitValue match {
+      case Faults.HaltStatus => (true, None)
+      case 0 => (false, None)
+      case other => throw new AssertionError(
+        s"[dag-crash] the child JVM running $plan exited $other:\n${Files.readString(log)}\n  case = $jc")
+    }
   }
 
   /** Runs `jc` and asserts every invariant above. Returns the runs so callers
@@ -95,21 +166,130 @@ object DagSchedule {
     val job = jc.build(root, time)
     SqlEngine.init()
     val executor = jc.executor(SqlExecutorRegistry.get)
-    val out = new AtomicReference[JobResult](null)
+    watched(s"case = $jc", TimeoutMillis)(job.run(executor, TaskProgressListener.NoOp))
+  }
+
+  /** Run `body` on a thread of its own, and fail with a thread dump, each
+    * thread's last chaos points in it, when it is still running after
+    * `timeoutMillis`; `what` names it in the failure. */
+  def watched[T](what: String, timeoutMillis: Long)(body: => T): T = {
+    val out = new AtomicReference[Option[T]](None)
     val err = new AtomicReference[Throwable](null)
     val t = new Thread(() => {
-      try out.set(job.run(executor, TaskProgressListener.NoOp))
+      try out.set(Some(body))
       catch { case e: Throwable => err.set(e) }
     }, "fuzz-dag-runner")
     t.setDaemon(true)
     t.start()
-    t.join(TimeoutMillis)
+    t.join(timeoutMillis)
     if (t.isAlive) throw new AssertionError(
-      s"[dag-schedule] job did not terminate within ${TimeoutMillis}ms — scheduler liveness bug.\n" +
-        s"  case = $jc\n${threadDump()}")
-    if (err.get != null) throw new AssertionError(s"[dag-schedule] job.run() threw.\n  case = $jc", err.get)
-    out.get
+      s"[dag-schedule] job did not terminate within ${timeoutMillis}ms — scheduler liveness bug.\n" +
+        s"  $what\n${threadDump()}")
+    if (err.get != null) throw new AssertionError(s"[dag-schedule] job.run() threw.\n  $what", err.get)
+    out.get.get
   }
+
+  /** What a run a fault stopped must still be. Its tasks give a clean run's
+    * statuses, but where the fault failed a task — its message is the
+    * fault's — that task is `Failed` and the tasks after it `Skipped`; a
+    * fault in a write whose failure fails no task fails none. Each record in
+    * the run's directories is the run's own and its task's status, or
+    * `Running` for a task that failed or was skipped, or, where the fault
+    * kept the run from writing any, the record that was there before, for a
+    * task that failed or was skipped. Its directories say what they hold
+    * ([[checkDirectories]]). A run in a child JVM returns nothing to check but
+    * its directories. */
+  private def verifyStopped(
+      jc: JobCase, plan: FaultPlan, fired: Boolean, stopped: Option[JobResult], root: Path, time: Instant): Unit = {
+    def ctx = s"\n  fault = $plan (${if (fired) "reached" else "not reached"})\n  case = $jc"
+    stopped.foreach { result =>
+      val tasks = result.tasks.toVector
+      assert(result.error.isEmpty, s"[dag-fault] the stopped run reported a load error: ${result.error.get}$ctx")
+      assert(tasks.map(_.taskName) == jc.tasks.map(_.displayName),
+        s"[dag-fault] the stopped run's results are ${tasks.map(t => shown(t.taskName))}$ctx")
+      val hit = jc.tasks.indices.filter { i =>
+        tasks(i).status match {
+          case TaskStatus.Failed(msg) => isFault(msg)
+          case _ => false
+        }
+      }
+      assert(hit.size <= (if (fired) 1 else 0),
+        s"[dag-fault] the fault failed ${hit.map(i => jc.tasks(i).view).mkString(", ")}$ctx\n${statusTable(jc, tasks)}")
+      val expected = expectedStatuses(jc, failed = hit.toSet)
+      jc.tasks.indices.foreach { i =>
+        assert(kind(tasks(i).status) == expected(i),
+          s"[dag-fault] task ${jc.tasks(i).view}: expected ${expected(i)} after the fault, got " +
+            s"${describe(tasks(i).status)}$ctx\n${statusTable(jc, tasks)}")
+      }
+      checkTimestamps(jc, tasks)
+      checkOrdering(jc, tasks)
+      checkSkipReasons(jc, tasks)
+      checkStoppedRecords(jc, tasks, root, time, ctx)
+      checkWarnings(jc, result)
+      assert(result.succeeded == tasks.forall(_.succeeded), s"[dag-fault] the stopped run's verdict ${result.succeeded}$ctx")
+    }
+    checkDirectories(jc, root, time, ctx)
+  }
+
+  /** A failure's message is a fault's: what [[Faults]] throws, maybe in the
+    * words of the final record's failed write. */
+  def isFault(message: String): Boolean =
+    message.contains("Injected fault at ") || message.contains("No space left on device")
+
+  /** In a stopped run, each task's record is its own run's with its status,
+    * or `Running` for a task that failed or was skipped; a record from before
+    * the run, or none, only for a task that failed or was skipped, whose
+    * record the fault kept from being written. */
+  private def checkStoppedRecords(jc: JobCase, tasks: Vector[TaskResult], root: Path, time: Instant, ctx: => String): Unit =
+    jc.tasks.filter(_.output.isDefined).foreach { t =>
+      val dir = Path.of(jc.render(jc.outputPath(root, t).get, time))
+      val r = tasks(t.index)
+      val endedWithout = kind(r.status) == "Failed" || kind(r.status) == "Skipped"
+      TaskRunRecord.read(dir) match {
+        case Some(rec) if rec.taskName == r.taskName && rec.startedAt == r.startedAt =>
+          val onDisk = runStatusName(rec.status)
+          assert(onDisk == kind(r.status) || (onDisk == "Running" && endedWithout),
+            s"[dag-fault] task ${t.view} ended ${describe(r.status)} but its record in $dir says $onDisk$ctx")
+        case other =>
+          assert(endedWithout && !other.exists(_.status == TaskRunStatus.Running),
+            s"[dag-fault] task ${t.view} ended ${describe(r.status)} and its record in $dir is " +
+              s"${other.map(o => s"an earlier run's ${runStatusName(o.status)}").getOrElse("missing")}$ctx")
+      }
+    }
+
+  /** Invariant 9, in the directories `jc`'s run at `time` renders to. */
+  private def checkDirectories(jc: JobCase, root: Path, time: Instant, ctx: => String): Unit =
+    jc.tasks.filter(_.output.isDefined).foreach { t =>
+      val dir = Path.of(jc.render(jc.outputPath(root, t).get, time))
+      if (Files.isDirectory(dir)) {
+        val files = {
+          val s = Files.list(dir)
+          try s.iterator().asScala.filter(Files.isRegularFile(_)).map(_.getFileName.toString).toVector.sorted
+          finally s.close()
+        }
+        val parts = files.filter(_.startsWith("part-"))
+        val staged = files.filter(_.startsWith("."))
+        TaskRunRecord.read(dir) match {
+          // A run creates a fresh directory as it writes its first record into
+          // it; a halt in between leaves the directory with no record, holding
+          // nothing, or the record's temp file.
+          case None =>
+            assert(files.forall(_ == TaskRunRecord.FileName + ".tmp"),
+              s"[dag-schedule] task ${t.view}'s directory $dir holds ${files.mkString(", ")} and no readable record$ctx")
+          case Some(rec) => runStatusName(rec.status) match {
+            case "Failed" | "Skipped" =>
+              assert(parts.isEmpty && staged.isEmpty,
+                s"[dag-schedule] task ${t.view}'s ${runStatusName(rec.status)} record in $dir sits beside " +
+                  s"${(parts ++ staged).mkString(", ")}$ctx")
+            case "Succeeded" | "ValidationFailed" =>
+              assert(parts == rec.outputFiles.sorted && staged.isEmpty,
+                s"[dag-schedule] task ${t.view}'s ${runStatusName(rec.status)} record in $dir names " +
+                  s"${rec.outputFiles.mkString(", ")} beside ${(parts ++ staged).mkString(", ")}$ctx")
+            case _ => ()
+          }
+        }
+      }
+    }
 
   private def verify(jc: JobCase, result: JobResult, root: Path, time: Instant): Unit = {
     val tasks = result.tasks.toVector
@@ -129,11 +309,13 @@ object DagSchedule {
     }
 
     checkInjectedFailures(jc, tasks)
+    checkWriteFailures(jc, tasks)
     checkTimestamps(jc, tasks)
     checkOrdering(jc, tasks)
     checkSkipReasons(jc, tasks)
     checkRunRecords(jc, tasks, root, time)
     checkJobManifest(jc, tasks, result, root, time)
+    checkDirectories(jc, root, time, s"\n  case = $jc")
 
     val allOk = tasks.forall(_.succeeded)
     assert(result.succeeded == allOk,
@@ -200,6 +382,19 @@ object DagSchedule {
       }
     }
 
+  /** A task rigged to fail after it starts writing fails on the overflow it
+    * was rigged with, whether while its parts are written or in its
+    * validation, never on something else. */
+  private def checkWriteFailures(jc: JobCase, tasks: Vector[TaskResult]): Unit =
+    jc.tasks.filter(t => t.outcome == FailsWhileWriting || t.outcome == FailsInValidation).foreach { t =>
+      tasks(t.index).status match {
+        case TaskStatus.Failed(reason) =>
+          assert(reason.startsWith("Integer overflow: "),
+            s"[dag-schedule] task ${t.view} (${t.outcome}) failed with '${shown(reason)}', not its overflow\n  case = $jc")
+        case _ => ()
+      }
+    }
+
   /** A string for a failure message: control characters spelled out, and a
     * long one cut short with its length. */
   def shown(s: String): String = {
@@ -207,8 +402,9 @@ object DagSchedule {
     if (visible.length <= 120) visible else visible.take(120) + s"...(${s.length} chars)"
   }
 
-  /** The status every task must end in, from the DAG alone. */
-  def expectedStatuses(jc: JobCase): Vector[String] = {
+  /** The status every task must end in, from the DAG alone; `failed`, the
+    * tasks a fault failed, end `Failed` where they run. */
+  def expectedStatuses(jc: JobCase, failed: Set[Int] = Set.empty): Vector[String] = {
     val brokenInput = jc.inputs.map(_.broken)
     val out = Array.fill(jc.tasks.length)("")
     jc.tasks.foreach { t =>
@@ -216,9 +412,10 @@ object DagSchedule {
         t.inputSrcs.exists(brokenInput) || t.taskDeps.exists(j => out(j) != "Succeeded")
       out(t.index) =
         if (upstreamBad) "Skipped"
+        else if (failed.contains(t.index)) "Failed"
         else t.outcome match {
           case Ok => "Succeeded"
-          case Fails => "Failed"
+          case Fails | FailsWhileWriting | FailsInValidation => "Failed"
           case ValidationFails => "ValidationFailed"
         }
     }
@@ -311,7 +508,8 @@ object DagSchedule {
     }
   }
 
-  private def runStatusName(s: TaskRunStatus): String = s match {
+  def runStatusName(s: TaskRunStatus): String = s match {
+    case TaskRunStatus.Running => "Running"
     case TaskRunStatus.Succeeded => "Succeeded"
     case TaskRunStatus.Failed => "Failed"
     case TaskRunStatus.ValidationFailed => "ValidationFailed"
@@ -348,9 +546,12 @@ object DagSchedule {
     all.forEach { (t, st) =>
       if (t.getName.startsWith("transformer-") || t.getName.startsWith("fuzz-dag")) {
         sb.append(s"  ${t.getName} [${t.getState}]\n")
+        val points = Chaos.lastPointsOf(t)
+        if (points.nonEmpty) sb.append(s"    last chaos points: ${points.mkString(", ")}\n")
         st.take(18).foreach(f => sb.append(s"      at $f\n"))
       }
     }
+    if (Chaos.enabled) sb.append(s"  (chaos seed ${Chaos.seed.get}, ${Chaos.passed} points passed)\n")
     sb.toString
   }
 

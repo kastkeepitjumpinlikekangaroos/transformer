@@ -40,7 +40,7 @@ class HashZeroTest {
 
   private def hex(bytes: Seq[Byte]): String = bytes.map(b => f"$b%02x").mkString("x'", "", "'")
 
-  private def rows(sql: String, opts: ExecutionOptions = ExecutionOptions.Default): Vector[Seq[Any]] = {
+  private def rows(sql: String, opts: ExecutionOptions): Vector[Seq[Any]] = {
     val q = SqlEngine.execute(sql, catalog, opts)
     q.batches.flatMap(b => (0 until b.numRows).map(r => (0 until b.schema.length).map { c =>
       if (b.column(c).isNull(r)) null

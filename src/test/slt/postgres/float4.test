@@ -1,0 +1,466 @@
+# From PostgreSQL's regression suite (https://github.com/postgres/postgres):
+# src/test/regress/sql/float4.sql at REL_18_6, commit
+# 724edf9bde9d356724ad384a2e196edc3c9f80f7, with every answer from
+# src/test/regress/expected/float4.out at that commit, never the engine's.
+# Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group;
+# Portions Copyright (c) 1994, The Regents of the University of California.
+# Distributed under the PostgreSQL License, a permissive license whose text
+# travels with every copy: it is COPYRIGHT beside this file.
+#
+# The FLOAT, Postgres's float4, at its edges: text past its range and too
+# small for it, and a DOUBLE that is, which are errors in both engines, text
+# that is no number, NaN and the infinities in arithmetic, comparisons and
+# arithmetic with text read as a FLOAT, how a FLOAT prints, and casts to INT
+# and BIGINT at the ends of their ranges. 63 of the file's 100 statements are
+# here, each record naming the line of float4.sql it comes from: 7 that make,
+# fill or change the table, 22 queries and 27 statements that must fail,
+# answered as Postgres answers them, and 7 records the engine answers
+# otherwise by design, below.
+#
+# A statement is as Postgres wrote it but where a rewrite cannot change what
+# it means, which its record says: float4 as FLOAT, x::float4 and x::float8 as
+# CAST(x AS FLOAT) and CAST(x AS DOUBLE), x::int4 and x::int8 as CAST(x AS INT)
+# and CAST(x AS BIGINT), and @ x as ABS(x). A string an INSERT stores in the
+# float4 column is written as the number it spells, which Postgres reads,
+# spaces and all; one Postgres refuses as CAST('...' AS FLOAT), the conversion
+# Postgres makes of it, so the engine reads the text, not the runner, and a
+# float8 it stores there as CAST(... AS FLOAT), the assignment cast Postgres
+# makes. A string beside a FLOAT in a comparison or arithmetic (f1 * '-10')
+# is a FLOAT in both engines and is kept. A FLOAT Postgres prints in full,
+# the shortest text that reads back as the same float, is compared exactly,
+# as Java's Float.toString prints it (1.2345679E20); a float8 Postgres makes
+# of a FLOAT beside a numeric is a DOUBLE in the engine, beside a DOUBLE. A
+# result in no fixed order is compared as rowsort.
+#
+# `skipif transformer <id>` marks what the engine answers otherwise by
+# design, the id naming the rule in the ledger in docs/gotchas.md and the
+# comment the case: text casts to FLOAT by CSV's grammar, which takes NaN,
+# Infinity and -Infinity as written and no spaces around them (double-text,
+# 6), and a division by zero is NULL, which Postgres refuses (div-zero-null,
+# 1). After each, its twin, `onlyif transformer <id>`, is the same statement
+# with the engine's own answer.
+#
+# Left out (37 statements), by what they need:
+#   17  float4send(), over the inputs Postgres must round correctly
+#   11  a type of the test's own, xfloat4, with its functions and casts, made
+#       to read bit patterns as float4s, the two queries over them, which
+#       also need float4send() and bit strings, and the DROP
+#    4  pg_input_is_valid() and pg_input_error_info()
+#    4  a CAST to SMALLINT, which tests that type's range
+#    1  numeric NaN, which no DECIMAL holds
+
+# float4.sql:5: float4 written FLOAT.
+statement ok
+CREATE TABLE FLOAT4_TBL (f1  FLOAT)
+
+# float4.sql:7: each string of these INSERTs written as the number it spells,
+# which Postgres reads, spaces and all: '    0.0'.
+statement ok
+INSERT INTO FLOAT4_TBL(f1) VALUES (0.0)
+
+# float4.sql:8: '1004.30   '.
+statement ok
+INSERT INTO FLOAT4_TBL(f1) VALUES (1004.30)
+
+# float4.sql:9: '     -34.84    '.
+statement ok
+INSERT INTO FLOAT4_TBL(f1) VALUES (-34.84)
+
+# float4.sql:10
+statement ok
+INSERT INTO FLOAT4_TBL(f1) VALUES (1.2345678901234e+20)
+
+# float4.sql:11
+statement ok
+INSERT INTO FLOAT4_TBL(f1) VALUES (1.2345678901234e-20)
+
+# float4.sql:14: over and under flow, each string Postgres refuses written
+# CAST('...' AS FLOAT), the conversion Postgres makes of it as it stores it,
+# so the engine reads the text, not the runner. Postgres: "10e70" is out of
+# range for type real.
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('10e70' AS FLOAT))
+
+# float4.sql:15: Postgres: "-10e70" is out of range for type real.
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('-10e70' AS FLOAT))
+
+# float4.sql:16: Postgres: "10e-70" is out of range for type real.
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('10e-70' AS FLOAT))
+
+# float4.sql:17: Postgres: "-10e-70" is out of range for type real.
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('-10e-70' AS FLOAT))
+
+# float4.sql:19: a float8 stored in the float4 column, '...'::float8 written
+# CAST('...' AS DOUBLE) and the assignment cast Postgres makes as CAST(... AS
+# FLOAT). Postgres: value out of range: overflow.
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST(CAST('10e70' AS DOUBLE) AS FLOAT))
+
+# float4.sql:20: Postgres: value out of range: overflow.
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST(CAST('-10e70' AS DOUBLE) AS FLOAT))
+
+# float4.sql:21: Postgres: value out of range: underflow.
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST(CAST('10e-70' AS DOUBLE) AS FLOAT))
+
+# float4.sql:22: Postgres: value out of range: underflow.
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST(CAST('-10e-70' AS DOUBLE) AS FLOAT))
+
+# float4.sql:24: Postgres: "10e400" is out of range for type real.
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('10e400' AS FLOAT))
+
+# float4.sql:25: Postgres: "-10e400" is out of range for type real.
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('-10e400' AS FLOAT))
+
+# float4.sql:26: Postgres: "10e-400" is out of range for type real.
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('10e-400' AS FLOAT))
+
+# float4.sql:27: Postgres: "-10e-400" is out of range for type real.
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('-10e-400' AS FLOAT))
+
+# float4.sql:30: bad input. Postgres: invalid input syntax for type real: "".
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('' AS FLOAT))
+
+# float4.sql:31: Postgres: invalid input syntax for type real: "       ".
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('       ' AS FLOAT))
+
+# float4.sql:32: Postgres: invalid input syntax for type real: "xyz".
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('xyz' AS FLOAT))
+
+# float4.sql:33: Postgres: invalid input syntax for type real: "5.0.0".
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('5.0.0' AS FLOAT))
+
+# float4.sql:34: Postgres: invalid input syntax for type real: "5 . 0".
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('5 . 0' AS FLOAT))
+
+# float4.sql:35: Postgres: invalid input syntax for type real: "5.   0".
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('5.   0' AS FLOAT))
+
+# float4.sql:36: Postgres: invalid input syntax for type real: "     - 3.0".
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('     - 3.0' AS FLOAT))
+
+# float4.sql:37: Postgres: invalid input syntax for type real: "123           
+# 5".
+statement error
+INSERT INTO FLOAT4_TBL(f1) VALUES (CAST('123            5' AS FLOAT))
+
+# float4.sql:46: special inputs, each '...'::float4 written CAST('...' AS
+# FLOAT).
+query FLOAT nosort
+SELECT CAST('NaN' AS FLOAT)
+----
+NaN
+
+# float4.sql:47
+skipif transformer double-text # text casts to FLOAT by CSV's grammar, which spells it NaN
+query FLOAT nosort
+SELECT CAST('nan' AS FLOAT)
+----
+NaN
+
+onlyif transformer double-text
+statement error
+SELECT CAST('nan' AS FLOAT)
+----
+Cannot cast 'nan' to float
+
+# float4.sql:48
+skipif transformer double-text # text casts to FLOAT by CSV's grammar, which spells it NaN, with no spaces around
+query FLOAT nosort
+SELECT CAST('   NAN  ' AS FLOAT)
+----
+NaN
+
+onlyif transformer double-text
+statement error
+SELECT CAST('   NAN  ' AS FLOAT)
+----
+Cannot cast '   NAN  ' to float
+
+# float4.sql:49
+skipif transformer double-text # text casts to FLOAT by CSV's grammar, which spells it Infinity
+query FLOAT nosort
+SELECT CAST('infinity' AS FLOAT)
+----
+Infinity
+
+onlyif transformer double-text
+statement error
+SELECT CAST('infinity' AS FLOAT)
+----
+Cannot cast 'infinity' to float
+
+# float4.sql:50
+skipif transformer double-text # text casts to FLOAT by CSV's grammar, which spells it -Infinity, with no spaces around
+query FLOAT nosort
+SELECT CAST('          -INFINiTY   ' AS FLOAT)
+----
+-Infinity
+
+onlyif transformer double-text
+statement error
+SELECT CAST('          -INFINiTY   ' AS FLOAT)
+----
+Cannot cast '          -INFINiTY   ' to float
+
+# float4.sql:52: bad special inputs. Postgres: invalid input syntax for type
+# real: "N A N".
+statement error
+SELECT CAST('N A N' AS FLOAT)
+
+# float4.sql:53: Postgres: invalid input syntax for type real: "NaN x".
+statement error
+SELECT CAST('NaN x' AS FLOAT)
+
+# float4.sql:54: Postgres: invalid input syntax for type real: " INFINITY   
+# x".
+statement error
+SELECT CAST(' INFINITY    x' AS FLOAT)
+
+# float4.sql:56: 100.0 is a numeric in Postgres and a DOUBLE in the engine,
+# and so is the sum, a float8 in Postgres.
+query DOUBLE nosort
+SELECT CAST('Infinity' AS FLOAT) + 100.0
+----
+Infinity
+
+# float4.sql:57
+query FLOAT nosort
+SELECT CAST('Infinity' AS FLOAT) / CAST('Infinity' AS FLOAT)
+----
+NaN
+
+# float4.sql:58
+query FLOAT nosort
+SELECT CAST('42' AS FLOAT) / CAST('Infinity' AS FLOAT)
+----
+0.0
+
+# float4.sql:59
+skipif transformer double-text # text casts to FLOAT by CSV's grammar, which spells it NaN
+query FLOAT nosort
+SELECT CAST('nan' AS FLOAT) / CAST('nan' AS FLOAT)
+----
+NaN
+
+onlyif transformer double-text
+statement error
+SELECT CAST('nan' AS FLOAT) / CAST('nan' AS FLOAT)
+----
+Cannot cast 'nan' to float
+
+# float4.sql:60
+skipif transformer double-text # text casts to FLOAT by CSV's grammar, which spells it NaN
+query FLOAT nosort
+SELECT CAST('nan' AS FLOAT) / CAST('0' AS FLOAT)
+----
+NaN
+
+onlyif transformer double-text
+statement error
+SELECT CAST('nan' AS FLOAT) / CAST('0' AS FLOAT)
+----
+Cannot cast 'nan' to float
+
+# float4.sql:63
+query FLOAT rowsort
+SELECT * FROM FLOAT4_TBL
+----
+-34.84
+0.0
+1.2345679E-20
+1.2345679E20
+1004.3
+
+# float4.sql:65
+query FLOAT rowsort
+SELECT f.* FROM FLOAT4_TBL f WHERE f.f1 <> '1004.3'
+----
+-34.84
+0.0
+1.2345679E-20
+1.2345679E20
+
+# float4.sql:67
+query FLOAT rowsort
+SELECT f.* FROM FLOAT4_TBL f WHERE f.f1 = '1004.3'
+----
+1004.3
+
+# float4.sql:69
+query FLOAT rowsort
+SELECT f.* FROM FLOAT4_TBL f WHERE '1004.3' > f.f1
+----
+-34.84
+0.0
+1.2345679E-20
+
+# float4.sql:71
+query FLOAT rowsort
+SELECT f.* FROM FLOAT4_TBL f WHERE  f.f1 < '1004.3'
+----
+-34.84
+0.0
+1.2345679E-20
+
+# float4.sql:73
+query FLOAT rowsort
+SELECT f.* FROM FLOAT4_TBL f WHERE '1004.3' >= f.f1
+----
+-34.84
+0.0
+1.2345679E-20
+1004.3
+
+# float4.sql:75
+query FLOAT rowsort
+SELECT f.* FROM FLOAT4_TBL f WHERE  f.f1 <= '1004.3'
+----
+-34.84
+0.0
+1.2345679E-20
+1004.3
+
+# float4.sql:77
+query FLOAT,FLOAT rowsort
+SELECT f.f1, f.f1 * '-10' AS x FROM FLOAT4_TBL f
+   WHERE f.f1 > '0.0'
+----
+1.2345679E-20	-1.2345678E-19
+1.2345679E20	-1.2345678E21
+1004.3	-10043.0
+
+# float4.sql:80
+query FLOAT,FLOAT rowsort
+SELECT f.f1, f.f1 + '-10' AS x FROM FLOAT4_TBL f
+   WHERE f.f1 > '0.0'
+----
+1.2345679E-20	-10.0
+1.2345679E20	1.2345679E20
+1004.3	994.3
+
+# float4.sql:83
+query FLOAT,FLOAT rowsort
+SELECT f.f1, f.f1 / '-10' AS x FROM FLOAT4_TBL f
+   WHERE f.f1 > '0.0'
+----
+1.2345679E-20	-1.2345679E-21
+1.2345679E20	-1.2345679E19
+1004.3	-100.43
+
+# float4.sql:86
+query FLOAT,FLOAT rowsort
+SELECT f.f1, f.f1 - '-10' AS x FROM FLOAT4_TBL f
+   WHERE f.f1 > '0.0'
+----
+1.2345679E-20	10.0
+1.2345679E20	1.2345679E20
+1004.3	1014.3
+
+# float4.sql:90: divide by zero. Postgres: division by zero.
+skipif transformer div-zero-null # a FLOAT divided by zero is NULL
+statement error
+SELECT f.f1 / '0.0' from FLOAT4_TBL f
+
+onlyif transformer div-zero-null
+query FLOAT rowsort
+SELECT f.f1 / '0.0' from FLOAT4_TBL f
+----
+NULL
+NULL
+NULL
+NULL
+NULL
+
+# float4.sql:92
+query FLOAT rowsort
+SELECT * FROM FLOAT4_TBL
+----
+-34.84
+0.0
+1.2345679E-20
+1.2345679E20
+1004.3
+
+# float4.sql:95: the unary float4abs operator, @ x written ABS(x).
+query FLOAT,FLOAT rowsort
+SELECT f.f1, ABS(f.f1) AS abs_f1 FROM FLOAT4_TBL f
+----
+-34.84	34.84
+0.0	0.0
+1.2345679E-20	1.2345679E-20
+1.2345679E20	1.2345679E20
+1004.3	1004.3
+
+# float4.sql:97
+statement ok
+UPDATE FLOAT4_TBL
+   SET f1 = FLOAT4_TBL.f1 * '-1'
+   WHERE FLOAT4_TBL.f1 > '0.0'
+
+# float4.sql:101
+query FLOAT nosort
+SELECT * FROM FLOAT4_TBL ORDER BY 1
+----
+-1.2345679E20
+-1004.3
+-34.84
+-1.2345679E-20
+0.0
+
+# float4.sql:108: edge-case coercions to integer, x::float4::int4 written
+# CAST(CAST(x AS FLOAT) AS INT) and ::int8 as BIGINT.
+query INT nosort
+SELECT CAST(CAST('2147483520' AS FLOAT) AS INT)
+----
+2147483520
+
+# float4.sql:109: Postgres: integer out of range.
+statement error
+SELECT CAST(CAST('2147483647' AS FLOAT) AS INT)
+
+# float4.sql:110
+query INT nosort
+SELECT CAST(CAST('-2147483648.5' AS FLOAT) AS INT)
+----
+-2147483648
+
+# float4.sql:111: Postgres: integer out of range.
+statement error
+SELECT CAST(CAST('-2147483900' AS FLOAT) AS INT)
+
+# float4.sql:112
+query BIGINT nosort
+SELECT CAST(CAST('9223369837831520256' AS FLOAT) AS BIGINT)
+----
+9223369837831520256
+
+# float4.sql:113: Postgres: bigint out of range.
+statement error
+SELECT CAST(CAST('9223372036854775807' AS FLOAT) AS BIGINT)
+
+# float4.sql:114
+query BIGINT nosort
+SELECT CAST(CAST('-9223372036854775808.5' AS FLOAT) AS BIGINT)
+----
+-9223372036854775808
+
+# float4.sql:115: Postgres: bigint out of range.
+statement error
+SELECT CAST(CAST('-9223380000000000000' AS FLOAT) AS BIGINT)

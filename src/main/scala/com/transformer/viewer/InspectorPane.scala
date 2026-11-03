@@ -185,12 +185,12 @@ final class InspectorPane(
         n match {
           case t: NodeId.Table =>
             icon.getChildren.setAll(Icons.table)
-            val summary = run.table(t.name).map(_.summary)
-            summary match {
-              case Some(s) =>
-                setPill(DetailsPanel.statusText(s.status), DetailsPanel.tone(s.status))
+            run.table(t.name) match {
+              case Some(info) =>
+                val rows = info.summary.rowsProduced
+                setPill(DetailsPanel.statusText(info.status), DetailsPanel.tone(info.status))
                 crumb(runText(l, n.dataset))
-                if (DetailsPanel.wrote(s.status)) crumb(f"${s.rowsProduced}%,d ${if (s.rowsProduced == 1) "row" else "rows"}")
+                if (info.wrote) crumb(f"$rows%,d ${if (rows == 1) "row" else "rows"}")
               case None => pill.setVisible(false)
             }
           case i: NodeId.Input =>
@@ -321,8 +321,8 @@ final class SamplePane(session: ViewerSession, node: NodeId) extends VBox {
     val catalog = session.queryCatalog
     val name = catalog.sqlName(node).getOrElse(node.name)
     val total = node match {
-      case n: NodeId.Table => session.shownRun(n.dataset).flatMap(_.table(n.name)).map(_.summary)
-        .filter(s => DetailsPanel.wrote(s.status)).map(_.rowsProduced)
+      case n: NodeId.Table => session.shownRun(n.dataset).flatMap(_.table(n.name))
+        .filter(_.wrote).map(_.summary.rowsProduced)
       case _ => None
     }
     status.setText("Reading…")
@@ -456,7 +456,7 @@ final class ColumnsPane(session: ViewerSession, node: NodeId) extends VBox {
     if (!names.isEmpty) {
       val content = new ClipboardContent()
       val sb = new StringBuilder
-      names.forEach(r => sb.append(if (sb.isEmpty) "" else ", ").append(r.name))
+      names.forEach { r => if (sb.nonEmpty) sb.append(", "); sb.append(r.name) }
       content.putString(sb.toString)
       Clipboard.getSystemClipboard.setContent(content)
     }
@@ -479,8 +479,8 @@ final class TablesPane(session: ViewerSession, d: Int, open: ViewerSelection => 
 
   private val lineage = session.lineage
   private val run = session.shownRun(d)
-  private def summary(n: NodeId) = n match {
-    case t: NodeId.Table => run.flatMap(_.table(t.name)).map(_.summary)
+  private def table(n: NodeId): Option[TableInfo] = n match {
+    case t: NodeId.Table => run.flatMap(_.table(t.name))
     case _ => None
   }
 
@@ -502,15 +502,16 @@ final class TablesPane(session: ViewerSession, d: Int, open: ViewerSelection => 
       }
     }
   })
-  private val statusColumn = textColumn("Status", 190, n => summary(n).map(_.status) match {
+  private val statusColumn = textColumn("Status", 190, n => table(n).map(_.status) match {
+    case Some(TaskRunStatus.Running) => "Unfinished"
     case Some(TaskRunStatus.Succeeded) => "Succeeded"
     case Some(TaskRunStatus.ValidationFailed) => "Validation failed"
     case Some(TaskRunStatus.Failed) => "Failed"
     case Some(TaskRunStatus.Skipped) => "Skipped"
     case None => "Input from outside the folder"
-  }, Some(n => summary(n).map(s => LineageCanvas.tableStatus(s.status, s.rowsProduced)._1).getOrElse(Palette.Input)))
-  private val rowsColumn = textColumn("Rows", 120, n => summary(n).filter(s => DetailsPanel.wrote(s.status))
-    .map(s => f"${s.rowsProduced}%,d").getOrElse(""), None, "number-cell")
+  }, Some(n => table(n).map(t => LineageCanvas.tableStatus(t.status, t.summary.rowsProduced)._1).getOrElse(Palette.Input)))
+  private val rowsColumn = textColumn("Rows", 120, n => table(n).filter(_.wrote)
+    .map(t => f"${t.summary.rowsProduced}%,d").getOrElse(""), None, "number-cell")
   private val sqlColumn = textColumn("SQL name", 280, n => session.queryCatalog.sqlName(n).getOrElse(""), None, "mono")
   table.getColumns.addAll(nameColumn, statusColumn, rowsColumn, sqlColumn)
 

@@ -1,25 +1,16 @@
 package com.transformer.job
 
-import com.transformer.cli.Cli
 import com.transformer.core.Catalog
-import com.transformer.gui.JobSession
 import com.transformer.read.csv.{CsvOptions, CsvReader}
-import com.transformer.read.parquet.ParquetReader
 import com.transformer.sql.exec.SqlEngine
-import com.transformer.sql.parse.SqlParser
-import com.transformer.sql.plan.LogicalBuilder
 import com.transformer.temporal.{TemplateRenderer, TemporalVariables}
 import com.transformer.write.csv.CsvWriter
-import com.transformer.write.parquet.ParquetWriter
 import org.junit.Assert._
 import org.junit.Test
 
-import java.io.{ByteArrayInputStream, DataInputStream, File}
-import java.net.JarURLConnection
 import java.nio.file.{Files, Path}
 import java.time.Instant
 import java.util.Locale
-import java.util.jar.JarFile
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
@@ -28,10 +19,10 @@ import scala.jdk.CollectionConverters._
   * `"i".toUpperCase()` a dotted I: every name the engine folds to compare
   * (views, columns, functions, CAST types, template variables, option values)
   * would stop matching, and `UPPER` / `LOWER` would answer differently, if any
-  * of them read the default locale. The last two tests hold the rule for code
-  * not yet written: no compiled class of a module a job runs calls a
-  * default-locale conversion or format, and none of the desktop GUI's or the
-  * data viewer's folds case in the default locale. */
+  * of them read the default locale. Rule R1 of `bytecode:bytecode_rules_test`
+  * holds the rule for code not yet written: no compiled class of a module a job
+  * runs calls a default-locale conversion or format, and none of the desktop
+  * GUI's or the data viewer's folds case in the default locale. */
 class LocaleIndependenceTest {
 
   @Test def runsUnderATurkishLocale(): Unit = {
@@ -125,118 +116,5 @@ class LocaleIndependenceTest {
     assertTrue(s"the job failed: ${result.error.getOrElse("")} ${result.tasks.map(t => s"${t.taskName}: ${t.status}")}",
       result.succeeded)
     assertEquals(Seq(1L, 2L), result.tasks.map(_.rowsProduced).sorted)
-  }
-
-  // ---------------------------------------------------------------------------
-  // The rule, held over the compiled classes
-  // ---------------------------------------------------------------------------
-
-  /** A call that reads the default locale, and what to write instead. */
-  private val DefaultLocaleCalls: Map[(String, String, String), String] = Map(
-    ("java/lang/String", "toLowerCase", "()Ljava/lang/String;") -> "toLowerCase(Locale.ROOT)",
-    ("java/lang/String", "toUpperCase", "()Ljava/lang/String;") -> "toUpperCase(Locale.ROOT)",
-    ("java/lang/String", "format", "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;") -> "String.format(Locale.ROOT, ...)",
-    ("java/lang/String", "formatted", "([Ljava/lang/Object;)Ljava/lang/String;") -> "String.format(Locale.ROOT, ...)",
-    ("scala/collection/StringOps$", "format$extension", "(Ljava/lang/String;Lscala/collection/immutable/Seq;)Ljava/lang/String;") ->
-      "\"...\".formatLocal(Locale.ROOT, ...) (an f\"...\" interpolator formats in the default locale)",
-    ("java/time/format/DateTimeFormatter", "ofPattern", "(Ljava/lang/String;)Ljava/time/format/DateTimeFormatter;") ->
-      "DateTimeFormatter.ofPattern(pattern, Locale.ROOT)",
-    ("java/text/NumberFormat", "getInstance", "()Ljava/text/NumberFormat;") -> "an explicit Locale",
-    ("java/text/NumberFormat", "getNumberInstance", "()Ljava/text/NumberFormat;") -> "an explicit Locale"
-  )
-
-  /** One class from each module a job, the CLI or a reopened run executes. */
-  private val ModuleClasses: Seq[Class[_]] = Seq(
-    classOf[Catalog], LogicalBuilder.getClass, SqlEngine.getClass, SqlParser.getClass,
-    classOf[CsvReader], ParquetReader.getClass, classOf[CsvWriter], classOf[ParquetWriter],
-    classOf[DataJob], TemplateRenderer.getClass, Cli.getClass, classOf[JobSession])
-
-  /** A class file of each module of the desktop GUI and the data viewer, which
-    * the test reads at run time only (BUILD's `runtime_deps`). */
-  private val DesktopClassFiles: Seq[String] = Seq(
-    "com/transformer/gui/VimKey.class", "com/transformer/gui/SqlHighlighter.class",
-    "com/transformer/gui/TaskDetailsPanel.class", "com/transformer/viewer/ViewerSession.class",
-    "com/transformer/viewer/ViewerApp.class")
-
-  @Test def noModuleCallsADefaultLocaleConversionOrFormat(): Unit = {
-    val jars = ModuleClasses.map(c => new File(c.getProtectionDomain.getCodeSource.getLocation.toURI)).distinct
-    assertTrue(s"read ${jars.size} module jars, expected ${ModuleClasses.size}", jars.size == ModuleClasses.size)
-    val offences = calls(jars, DefaultLocaleCalls)
-    assertTrue(offences.mkString("\n"), offences.isEmpty)
-  }
-
-  /** The desktop modules fold the names, keywords and keys they match as a job
-    * does: under tr-TR the SQL highlighter read `PARTITION` as `partıtıon`, no
-    * keyword, and the task panel missed an input named with an I. Their
-    * display text may format a number in the user's locale. */
-  @Test def noDesktopModuleFoldsCaseInTheDefaultLocale(): Unit = {
-    val jars = DesktopClassFiles.map(locationOf).distinct
-    assertTrue(s"read ${jars.size} desktop jars, expected ${DesktopClassFiles.size}", jars.size == DesktopClassFiles.size)
-    val folds = DefaultLocaleCalls.filter { case ((_, name, _), _) => name == "toLowerCase" || name == "toUpperCase" }
-    val offences = calls(jars, folds)
-    assertTrue(offences.mkString("\n"), offences.isEmpty)
-  }
-
-  /** Each call of one of `banned` in the classes of `jars`, with its advice. */
-  private def calls(jars: Seq[File], banned: Map[(String, String, String), String]): Seq[String] =
-    (for {
-      jar <- jars
-      (className, bytes) <- classFiles(jar)
-      ref <- memberRefs(bytes)
-      advice <- banned.get(ref)
-    } yield s"$className calls ${ref._1}.${ref._2}${ref._3}; use $advice").distinct
-
-  /** The jar, or the class directory, that holds `classFile`. */
-  private def locationOf(classFile: String): File = {
-    val url = Option(getClass.getClassLoader.getResource(classFile))
-      .getOrElse(throw new AssertionError(s"$classFile is not on the test's classpath"))
-    url.openConnection match {
-      case jar: JarURLConnection => new File(jar.getJarFileURL.toURI)
-      case _ => classFile.split('/').foldLeft(new File(url.toURI))((f, _) => f.getParentFile)
-    }
-  }
-
-  private def classFiles(location: File): Seq[(String, Array[Byte])] =
-    if (location.isDirectory) {
-      val root = location.toPath
-      Files.walk(root).iterator.asScala.filter(p => Files.isRegularFile(p) && p.toString.endsWith(".class"))
-        .map(p => root.relativize(p).toString -> Files.readAllBytes(p)).toVector
-    } else {
-      val jar = new JarFile(location)
-      try jar.entries.asScala.filter(_.getName.endsWith(".class"))
-        .map(e => e.getName -> jar.getInputStream(e).readAllBytes()).toVector
-      finally jar.close()
-    }
-
-  /** The (owner, name, descriptor) of every method a class file's constant
-    * pool references (JVMS section 4.4), read without a bytecode library. */
-  private def memberRefs(bytes: Array[Byte]): Seq[(String, String, String)] = {
-    val in = new DataInputStream(new ByteArrayInputStream(bytes))
-    require(in.readInt() == 0xCAFEBABE, "not a class file")
-    in.readUnsignedShort(); in.readUnsignedShort()
-    val n = in.readUnsignedShort()
-    val tag = new Array[Int](n)
-    val a = new Array[Int](n)
-    val b = new Array[Int](n)
-    val utf8 = new Array[String](n)
-    var i = 1
-    while (i < n) {
-      tag(i) = in.readUnsignedByte()
-      tag(i) match {
-        case 1                          => utf8(i) = in.readUTF()
-        case 3 | 4                      => in.readInt()
-        case 5 | 6                      => in.readLong(); i += 1
-        case 7 | 8 | 16 | 19 | 20       => a(i) = in.readUnsignedShort()
-        case 9 | 10 | 11 | 12 | 17 | 18 => a(i) = in.readUnsignedShort(); b(i) = in.readUnsignedShort()
-        case 15                         => in.readUnsignedByte(); a(i) = in.readUnsignedShort()
-        case other                      => sys.error(s"unknown constant-pool tag $other")
-      }
-      i += 1
-    }
-    // Methodref and InterfaceMethodref: a Class (its name), then a NameAndType.
-    (1 until n).filter(j => tag(j) == 10 || tag(j) == 11).map { j =>
-      val nameAndType = b(j)
-      (utf8(a(a(j))), utf8(a(nameAndType)), utf8(b(nameAndType)))
-    }
   }
 }

@@ -42,26 +42,32 @@ navigation hint, not a comprehensive directory listing.
   `AggExpr` types with the right `AggState` subtype for round-trip
   serialization. `isSpillable` gates the operator-level switch (false for
   the DISTINCT aggregates, `CountDistinctState` and `DistinctState`).
-- `core/Spill.scala` (~230 LOC) — temp-dir lifecycle, per-operator subdir
+- `core/Spill.scala` (~300 LOC) — temp-dir lifecycle, per-operator subdir
   allocation (`OperatorSpillDir`, whose `closeOnDrain` wipes the subdir
-  when an operator's output iterator drains), `ColumnarBatch` byte
-  estimator, and the `effectiveThresholdBytes` helper that turns
-  `ExecutionOptions` into a concrete flush threshold.
+  when an operator's output iterator drains or is closed), `ColumnarBatch`
+  byte estimator, and the `effectiveThresholdBytes` helper that turns
+  `ExecutionOptions` into a concrete flush threshold. `core/Closing.scala`
+  holds the close protocol's helpers (architecture §3h) and
+  `core/LeakAudit.scala` the `--config=leaks` audit.
 - `core/ExecutionOptions.scala` (~120 LOC) — per-query knobs threaded from
   `DataJob.runOneTask` to spill-capable operators. `fromOutputOptions`
   parses the `output.json` `options` map with tolerance for typos.
-- `job/DataJob.scala` (~920 LOC) — runner orchestration: unified input + task
+- `job/DataJob.scala` (~1090 LOC) — runner orchestration: unified input + task
   DAG scheduler (`runUnifiedDag`), writeOutput, validation re-read, per-status
   `_run.json` writes + per-failure `_validation-<slug>.csv` sample writes +
   per-job `job.json` write + the run's warnings (inputs that failed to load,
-  consistency checks).
-- `sql/plan/Expr.scala` (~910 LOC) — `Expr` ADT plus `eval` and `evalVec`
-  per subtype. `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` each carry
+  consistency checks). The order a task's directory is written in, and what a
+  failure leaves there, is `job/OutputDirectory.scala`'s, which `DataJob` and
+  the GUI's `ResultPersister` both call.
+- `sql/plan/Expr.scala` (~930 LOC) — `Expr` ADT plus `eval` and `evalVec`
+  per subtype (`CastExpr` the binder's casts, `DecimalCastExpr` a query's
+  `CAST(x AS DECIMAL(p,s))`). `FuncExpr`, `CaseExpr`, `InListExpr`, `LikeExpr` each carry
   an `evalVec` override; the rest of the hot subtypes delegate to `VecOps`.
   `SwitchCaseExpr` and `BetweenExpr` read a `RAND()` operand once, and the
   `Expr` companion's `readsRandom` says which expressions read RAND().
-- `sql/plan/Ops.scala` (~1120 LOC) — `Ops` (row-at-a-time binary ops, and
-  `eq` / `cmp`, the engine's one equality and total order), `Casts`,
+- `sql/plan/Ops.scala` (~1280 LOC) — `Ops` (row-at-a-time binary ops, and
+  `eq` / `cmp`, the engine's one equality and total order), `Casts` (the
+  binder's casts, and `toWrittenDecimal`, a query's cast to DECIMAL),
   `Decimals` (the declared type of each decimal result, the type that holds
   two decimals, and the one function both paths compute and fit a value
   with), and `VecOps` (one specialized loop per (op,
@@ -71,9 +77,16 @@ navigation hint, not a comprehensive directory listing.
   `-0.0` rules), anything else through `Ops` (`genericCompare`) — is chosen in
   `VecOps.compare`; see
   [architecture §5a](architecture.md#5a-vectorized-expression-evaluation-evalvec).
-- `sql/plan/Funcs.scala` (~630 LOC) — scalar function registry.
-  `Funcs.signature` declares each function's arities, argument kinds and
-  return type; `Funcs.apply` is the row-form dispatcher; `Funcs.applyVec` +
+- `sql/plan/FunctionCatalog.scala` (~590 LOC) — every function a query can
+  call, one `Entry` each (name, aliases, kind, arities, parameters, result
+  rule, NULL rule, domain, run-time errors, vector path, window and
+  `DISTINCT` use, ledger ids), the builders of what an aggregate, a window
+  function or a clock keyword binds to, and the CAST target names, a
+  DECIMAL's read with its precision and scale. The binder
+  binds by it and matches no name itself.
+- `sql/plan/Funcs.scala` (~620 LOC) — the scalar functions' implementations.
+  `Funcs.signature` is the catalog's lookup of a call's parameters and return
+  type; `Funcs.apply` is the row-form dispatcher; `Funcs.applyVec` +
   the `VecFuncs` object carry the vectorized implementations for the hot
   subset (COALESCE, string ops, ABS/FLOOR/CEIL/ROUND/TRUNC, IF, NULLIF,
   SUBSTRING), sharing `substring`, `length` and `trim` (code points, spaces)
@@ -90,12 +103,15 @@ navigation hint, not a comprehensive directory listing.
   `VimText.scala` (~540 LOC: words, paragraphs, objects, vim regex). A new
   command is an `Action` there and a case in `execute` here; see
   [extending.md](extending.md#extend-the-gui).
-- `read/parquet/ParquetReader.scala` (~735 LOC) — `ParquetReader` (the footer
+- `read/parquet/ParquetReader.scala` (~1000 LOC) — `ParquetReader` (the footer
   pass that packs row groups into partitions and checks every file of a glob
-  against the first), and `ParquetPartitionIterator`, most of whose length is
+  against the first, the reader's own exceptions and what of parquet-mr's it
+  wraps), and `ParquetPartitionIterator`, most of whose length is
   `decodeColumn`: one tight loop per `ParquetColumns.Decoding`. Reading a new
   kind of parquet column is a `Decoding` case in `ParquetColumns.scala` plus
-  its loop here.
+  its loop here. Why a footer parquet-mr refused does not read is
+  `ParquetFooter.scala` (~310 LOC), with the lenient Thrift walker
+  `CompactThrift`.
 - `core/ColumnarBatch.scala` (~390 LOC) — defines ten `ColumnVector`
   subclasses. Adding a new `DataType` requires a new vector + companion case
   in `ColumnVector.allocate`.
@@ -188,15 +204,33 @@ navigation hint, not a comprehensive directory listing.
 
 ### Test suites
 
-- `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` (~1220 LOC)
+- `src/test/scala/com/transformer/sql/plan/ExprBatchTest.scala` (~2000 LOC)
   — the parity gate for every `Expr.evalVec` override. New overrides extend
   this first; see [testing.md](testing.md) for the coverage matrix.
-- `src/test/scala/com/transformer/fuzz/` (~13400 LOC) — the hand-rolled
+- `src/test/scala/com/transformer/slt/Database.scala` (~1100 LOC) — the
+  tables an slt script builds, held as rows, and the `Dialect`s that read
+  them: this repo's own, SQLite's, CockroachDB's, DataFusion's (with its VALUES
+  and CSV-backed external tables) and RisingWave's TPC-H; a column of a type
+  the engine has not left out, a view recomputed when its tables change.
+- `src/test/scala/com/transformer/slt/SparkImport.scala` (~810 LOC) — the
+  converter that writes `src/test/slt/spark/` from Spark's golden files: their
+  parse, the rewrites and what the engine lacks (`Rewrite`), the run of each
+  record on the engine, and the rules that put a difference down to the ledger
+  (`Rules`); see [extending.md](extending.md), "Importing a Spark test file".
+- `src/test/scala/com/transformer/slt/AgreedCorpus.scala` (~870 LOC) — the
+  tool that writes `src/test/slt/agreed/`: each case through `psql`, `duckdb`
+  and the engine, the normalization rules (`Normalize`), the triage
+  (`triage`, `decimalByDesign`, `doublePrecision`), each record run under every
+  mode before it is written, and the scripts and the report; see
+  [testing.md](testing.md#sql-logic-tests), "The agreed corpus".
+- `src/test/scala/com/transformer/fuzz/` (~18700 LOC) — the hand-rolled
   property-based testing harness (`Rng`, `Props`, `Shrinker`, `RowOracle`), the
   generators (`ExprGen`, `DataGen`, `QueryGen`, `MetaQueryGen` for SQL,
   `SqlTextGen` for SQL text, `JobDagGen` for whole jobs, `ParquetGen` (~730 LOC)
-  for parquet files parquet-mr writes, `CsvTextGen` for CSV data and text), and
-  the oracles under `oracle/` (`ExprParity`, `ModeDifferential`,
+  for parquet files parquet-mr writes, `CsvTextGen` for CSV data and text),
+  `PortableSql` (~700 LOC), which prints the generators' queries as SQL the
+  engine, Postgres and DuckDB read alike, `AgreedGen`, the agreed corpus's
+  cases per feature, and the oracles under `oracle/` (`ExprParity`, `ModeDifferential`,
   `MetaModeDifferential`, `Tlp`, `NoRec`, `JoinCommutativity`,
   `AggDecomposition`; `CleanRejection`, `NoSilentDrop` and `SyntaxEquivalence`
   for the frontend; `DagSchedule` for the job-level DAG scheduler; and

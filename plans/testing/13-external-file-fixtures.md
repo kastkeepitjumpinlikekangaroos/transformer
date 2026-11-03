@@ -1,6 +1,9 @@
 # Plan 13: parquet and CSV files other programs wrote
 
-> Status: **not started** · from the 2026-11-01 test survey, category 2 of 9
+> Status: **done** 2026-11-02 (7f53028 W1, e4d87d8 W2, fc32cdd decision 4,
+> 48c3447 decision 2, 9d89d5f decision 3, 0767eca W3, 177b54f W4, 86e6bc7 W5;
+> see [Outcome](#outcome); every open decision taken overnight as recommended,
+> not yet confirmed by the user) · from the 2026-11-01 test survey, category 2 of 9
 > (answers from outside the engine, part 4) · Effort: 3-4 days · Risk: low for
 > the fixtures; medium for the reader fixes they call for (row-group packing,
 > error wrapping, a codec) · Depends on: [08](08-skips-cite-decisions.md), for
@@ -205,27 +208,40 @@ held by the same manifest. The measurement's nine pyarrow files are the start.
      type is a wrong number.
    - (b) Read it as its physical type, as the format allows and pyarrow does
      (a `GEOMETRY` would read as its WKB bytes, a `BINARY`).
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 2. **Page checksums.**
    - (a) Verify a page's CRC when the file carries one, and refuse a page that
      fails, naming the file, column and row group **(recommended)**: malformed
      input fails the read, as it does for CSV; CRC32 costs far less than the
      decompression beside it.
    - (b) Leave verification off, as parquet-mr and pyarrow do by default.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 3. **Text an older writer left unannotated.**
    - (a) An input option, `binaryAsString` (Spark's name), that reads every
      unannotated `BINARY` column as `STRING`, bytes that are no UTF-8 failing
      the read naming the row **(recommended)**: explicit and off by default,
      where today such a column can never be used as text.
    - (b) Leave it: `BINARY`, as the mapping says.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 4. **The Hadoop LZ4 and Brotli codecs.**
    - (a) Add `org.lz4:lz4-java` (Apache-2.0, small, with a pure-Java
      fallback) so the legacy LZ4 codec reads, and refuse Brotli cleanly,
      naming the codec **(recommended)**: older Hadoop and Spark wrote LZ4,
      while Brotli needs a native library.
    - (b) Refuse both cleanly; no dependency.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
 5. **Which writers make W4's files.** (a) pyarrow alone **(recommended)**: one
    install, and Arrow C++'s encodings, the commonest after Spark's; (b)
    pyarrow, DuckDB and Spark, each a separate offline install.
+
+   **(a), taken overnight as recommended, not yet confirmed by the user.**
+   The library is `at.yawk.lz4:lz4-java` 1.12.1, where `org.lz4:lz4-java`'s
+   coordinates relocate past 1.8.0 (Claude's call: every release before
+   1.12.1 has a published flaw in decompressing untrusted input).
 
 ## Decisions already made
 
@@ -298,3 +314,124 @@ a documented CSV or parquet rule to match another parser.
 Report: the tallies again on HEAD after W1 and W2, each finding before and
 after, the repository size added, and the two new targets' time.
 ```
+
+## Outcome
+
+Landed overnight on `testing-round-3`, 2026-11-02, a commit per workstream
+and one per decision that changes the reader: W1 `7f53028`, W2 `e4d87d8`,
+decision 4 `fc32cdd`, decision 2 `48c3447`, decision 3 `9d89d5f`, W3
+`0767eca`, W4 `177b54f`, W5 `86e6bc7`. At each, `bazel test //...` passed (71
+targets, then 72 with W3 and 73 with W5) and the jaffle-shop job gave 15/15
+Succeeded with every validation passing; each fix's test failed at its base
+commit, checked in a temporary worktree. Sources were fetched fresh into the
+scratchpad as data: parquet-testing at `eedfad3`, DuckDB at `71f47d4`
+(sparse), PapaParse at `1fcb83c`, csv-spectrum at `d30e80f`; pyarrow 26.0.0
+and DuckDB 2.0.0 ran from a venv there, never on the test classpath.
+
+**The tallies**, apache/parquet-testing's 118 files read by the engine and by
+pyarrow 26 value by value:
+
+| | 1440326 (base) | e4d87d8 (W1, W2) | HEAD |
+|---|---|---|---|
+| read, every value equal to pyarrow's | 62 | 62 | 62 |
+| read wrong (as empty) | 2 | 0 | 0 |
+| refused by a documented rule, naming the column | 23 (1 naming the file) | | |
+| refused in parquet-mr's words | 15 | 0 | 0 |
+| refused with an internal error's text | 16 | 0 | 0 |
+| refused in the reader's words, naming the file | | 56 | 56 |
+
+At HEAD the two Hadoop-LZ4 files read (decision 4) and the two whose page
+CRC is wrong are refused (decision 2), so the counts stand where they were.
+
+**Each finding**, before and after:
+
+1. A row group whose footer gives it 0 bytes: read as no rows, `COUNT(*)` 0.
+   Now every group lands in one partition (W1). `nation.dict-malformed.parquet`
+   is not read as pyarrow reads it, though: parquet-mr fails on its row group
+   (a chunk whose stated length leaves out its dictionary page header), so it
+   is refused cleanly, and read alone its `name` column comes back wrong
+   (finding P1 below). `ARROW-RS-GH-6229-DICTHEADER.parquet` is refused
+   cleanly.
+2. Internal text (16 files): none; each is named in the reader's words, a
+   logical type newer than parquet-mr by name and column (decision 1).
+3. parquet-mr's words (15 files): none.
+4. Page checksums: verified when a page carries one (decision 2); the two
+   corrupt files are refused, naming column and row group. polymarket, 14
+   Succeeded, 2 ValidationFailed, 1 Skipped as expected: 87 s and 83 s
+   before, 86 s and 83 s after (its inputs carry no CRC; its task outputs do).
+5. Unannotated `BINARY`: an input's `binaryAsString` reads it as text
+   (decision 3); Impala's `alltypes_*` `string_col` reads as a `STRING` under
+   it.
+6. CSV: the empty-file message quotes its path, and a gzipped file is refused
+   as compressed, naming it.
+
+**W3**, `src/test/data/parquet-testing/`: 107 of parquet-testing's files
+(all of `bad_data/`, the 74 of `data/` under 100 KB, the three larger ones the
+plan names, `aes256/`, two geospatial files, the four `*_expect.csv`).
+`MANIFEST`: 59 read (their CSV text frozen, or upstream's expect CSV's values),
+27 refused by five new ledger rules (`refused-parquet-nested`, `-type`,
+`-annotation`, `-checksum`, `-timestamp-range`), 21 refused for what they are
+(16 encrypted). **W4**, `pyarrow/`: 26 files pyarrow wrote for the type
+table, every codec and layout (`make_files.py` beside them); 25 read equal to
+pyarrow, Brotli refused by `refused-parquet-codec`. **W5**,
+`src/test/data/csv/`: DuckDB's 244 AFL and 40 fuzzing inputs (27 read, 257
+refused cleanly naming file and line, none hung) and 60 files of its semantic
+directories, which DuckDB 2.0 reads under the engine's options as the engine
+does but where a ledger rule parts them; 101 PapaParse parser cases and 24
+writer cases whose options the engine has, and csv-spectrum's 12 pairs: 69
+agree with the other parser, 24 differ by five new CSV rules, 38 are refused
+by five more, 24 writer cases write PapaParse's text.
+
+**Size and time**: the fixtures add 3.0 MB (parquet-testing's directory 2.67
+MB: 2.10 MB of upstream parquet, 0.29 MB of its expect CSVs, 0.10 MB of
+pyarrow's files, 0.14 MB of expect files; the CSV directory 0.35 MB), the
+budget the plan set; the deploy jar grows 0.9 MB with lz4-java.
+`parquet_testing_test` takes about 1.5-2 s (133 files) and `csv_corpus_test`
+0.6 s (481 inputs), each green under `batch1`, `batch2`, `zone` and
+`hashzero`. One block of `parquet_fuzz_campaign` (2,000 seeds from 100000)
+ran with Hadoop's LZ4 among the generator's codecs (in 392 of its seeds), green in 3.5 min.
+
+**Calls made overnight**, beyond the five decisions:
+
+- The ledger's `pinned by` may name a fixture manifest, which pins a rule
+  about files with a line `by-design <id>`; `ledger_test` reads the
+  manifests. Sixteen rules joined: six `refused-parquet-...`, five
+  `refused-csv-...`, and `csv-empty-null`, `csv-blank-line`,
+  `csv-text-after-quote`, `csv-line-ends`, `csv-inference`, each a rule the
+  README states. `refused-parquet-annotation` (a `UUID` on an `INT32`
+  refused, where pyarrow drops the annotation) is Claude's, by the README's
+  rule that no annotation falls through.
+- A parquet refusal is `ParquetReader.Unreadable`, an
+  `IllegalArgumentException`: `TIME`, `INTERVAL`, nested and repeated
+  columns were an `UnsupportedOperationException`; a nested column no longer
+  prints its group's schema text; a codec the classpath lacks fails as the
+  view opens; a decode-time refusal names the file as the view was given it.
+- Expect files are the engine's CSV text, gzipped past 8 KB; the four
+  upstream `*_expect.csv` are compared by value, not header.
+- DuckDB's answers for its semantic directories came from DuckDB 2.0 run
+  under the engine's options rather than from each `.test` file, whose
+  options mostly differ; PapaParse's escape defaults to its quote, as
+  PapaParse's does, and a case without a header reads every column as text.
+
+**Findings held for the user** (gotchas.md, "What the external file fixtures
+held out"):
+
+- **P1** (likely defect, silent): parquet-mr reads a column chunk whose stated
+  length leaves out its dictionary page header alone wrong:
+  `SELECT name FROM t` over `nation.dict-malformed.parquet` answers `ALGERIA`
+  for rows 8-24. Recommended: check a chunk's page headers against its
+  length, refusing one that overruns it.
+- **P2**: `LZ4` written as bare blocks (early parquet-cpp) is refused as a page
+  that does not decode; pyarrow falls back to bare blocks. Recommended: keep
+  refusing.
+- **P3**: a `STRING` column whose bytes are not UTF-8 reads with U+FFFD, where
+  CSV and `binaryAsString` fail the read. Recommended: fail the read.
+- **C1**: a CSV escape before a character other than the quote is dropped
+  (`"c\d"` reads `cd`), where PapaParse keeps it. Recommended: keep it as
+  text, as the README's rule reads.
+
+**Left undone**: DuckDB's larger `error/` and `encodings/` files, its
+`rejects/`, `auto/` and other directories (the budget); PapaParse's 46 parse
+and 37 writer cases whose options the engine has not (comments, empty-line
+skipping, typing, previews, functions); the rest of parquet-testing's
+`geospatial/` and its `variant/` and `shredded_variant/` directories.

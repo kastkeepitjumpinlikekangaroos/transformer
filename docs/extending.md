@@ -7,17 +7,37 @@ relevant module lives, and that you'll follow the workflow in
 
 ## Add a scalar SQL function
 
-1. Add it to `Funcs.signature` in `sql/plan/Funcs.scala`: the arities it
-   takes, what each argument must be (`Param.Number`, `Param.Integer` for a
-   count such as a scale or a position, `Param.Text`, or `Param.AnyValue` for
-   one it returns), and the type it returns, from the arguments' types or,
-   where a number written in the query decides it, from the arguments
-   themselves (a `DECIMAL`'s `ROUND` takes the scale it is given, `Rounding.
-   resultType`). The binder checks every argument
-   against its `Param` (`Analyzer.checkArgument`), so the function never meets
-   a value it cannot take while running; a kind none of these say is a new
-   `Param` and a new check in `checkArgument`, not an argument left unchecked.
-2. Add an `apply` case in the same file with the runtime semantics. A NULL
+1. Add an entry to `FunctionCatalog.Entries` in `sql/plan/FunctionCatalog.scala`:
+   its name and aliases, its kind (`Scalar`, or `Flow` for one that answers with
+   one of its arguments), the arities it takes, what each argument must be
+   (`Param.Number`, `Param.Integer` for a count such as a scale or a position,
+   `Param.Text`, `Param.Branch` for a value it may answer with, `Param.Compared`
+   for one it compares, `Param.Condition` for a truth value), the rule its
+   result's type follows (`Result.Fixed`, `FirstArgument`, `Branches`,
+   `Rounded`, which reads a scale written as a number), what a NULL argument
+   does, the arguments outside its domain that answer NULL, the errors it can
+   raise while running (each also in `CleanRejection.DataErrors` and
+   `ExprParity`'s owned set, [testing.md](testing.md)), whether it has a vector
+   path, and the ids of the ledger's rows its rules follow (`docs/gotchas.md`,
+   "Answers that differ from other engines by design"). That entry is the whole
+   of its binding: `LogicalBuilder` binds every call by its entry, checks every
+   argument against its `Param` (`Analyzer.checkArgument`), so the function
+   never meets a value it cannot take while running, and refuses every other
+   arity; a kind none of these say is a new `Param` and a new case in
+   `bindArguments` or `checkArgument`, not an argument left unchecked. No name
+   is matched as a string in the binder. `ExprGen` and `SqlTextGen` draw the new
+   function from the catalog by its parameters, so it is fuzzed the day it
+   lands (`expr_parity_fuzz_test`'s `everyCatalogFunctionIsDrawn` fails if the
+   generator cannot type it), and `oracle/CatalogNulls` holds every call of it
+   to answer NULL exactly where its NULL rule or domain says. The SQL
+   generators, `QueryGen` and `MetaQueryGen`, list the catalog's called
+   functions too (`QueryGen.CalledFunctions`), and their own
+   `everyCatalogFunctionIsDrawn` guards (mode-differential, metamorphic) fail
+   until a producer draws the new one: a function of numbers that answers a
+   DOUBLE is drawn already (`genMathCall`, at its domain's edges); any other
+   needs a producer of its own.
+2. Add an `apply` case in `sql/plan/Funcs.scala` with the runtime semantics, under
+   each of its names. A NULL
    argument answers NULL, a scale or a position included, unless the function
    is a flow function that says otherwise. An argument outside the function's
    domain, which no number answers, answers NULL too, as a division by zero
@@ -34,27 +54,36 @@ relevant module lives, and that you'll follow the workflow in
    vectorized path. Cover no-null / mixed-null / all-null inputs and any
    special branches (variadic args, null arg propagation rules).
 5. Add an end-to-end test in `src/test/scala/com/transformer/sql/exec/SqlEngineTest.scala`.
-6. Update [`README.md`'s "SQL features"](../README.md#sql-features) so users
-   can see the new function in the supported list.
+6. Add each of its names to [`README.md`'s **Scalar functions:** list](../README.md#sql-features):
+   `function_catalog_test` fails until every name the catalog has is there,
+   and every name there is the catalog's.
+7. Regenerate the [semantics tables](testing.md#semantics-tables) (`bazel run
+   //src/test/scala/com/transformer/sql/plan:semantics_tables -- --update`),
+   whose function sweep runs the new entry over every kind of argument, and
+   review every cell it adds, as you would review a test: each NULL its entry
+   does not explain and each error it does not declare fails the test, so the
+   entry's domain and errors are written down before the sweep passes.
 
 A function that returns a `DECIMAL` computes in `BigDecimal` and fits its answer
 to the type it declares with `Decimals.fit`, the way `ABS` keeps a decimal exact
 (see the decimal entry in [conventions.md](conventions.md)); one that reads a
 decimal's `doubleValue` declares a `DOUBLE`, as `ROUND` and `SQRT` do. A function
 that is an operator by another name binds as the operator, the way
-`LogicalBuilder` binds `MOD(a, b)` as `a % b` through `Analyzer.arithmetic`, so
-the two cannot be typed differently. A function that answers with one of its
-arguments, as `COALESCE`, `IF`, `GREATEST` and `LEAST` do, gives those
-arguments one type in `bindScalarFunctionWithAggs` through
-`LogicalBuilder.bindBranches` (`Analyzer.branches`), and `Funcs.signature` then
-reads that type; one that compares two arguments, as `NULLIF` does, types them
-with `Analyzer.unify`; and one that reads a truth value, as `IF`'s first
-argument is, binds it through `Analyzer.condition`, as every condition is.
+`MOD(a, b)`'s entry is of kind `Operator` and binds as `a % b` through
+`Analyzer.arithmetic`, so the two cannot be typed differently. A function that
+answers with one of its arguments, as `COALESCE`, `IF`, `GREATEST` and `LEAST`
+do, declares those arguments `Param.Branch`, and `LogicalBuilder.bindArguments`
+gives them one type through `bindBranches` (`Analyzer.branches`), which
+`Result.Branches` then reads; one that compares two arguments, as `NULLIF` does,
+declares them `Param.Compared`, typed with `Analyzer.unify`; and one that reads
+a truth value, as `IF`'s first argument is, declares it `Param.Condition`, bound
+through `Analyzer.condition`, as every condition is.
 
 A function whose value must hold still for a whole query, as the clock keywords'
-must, does not belong in `Funcs`, which evaluates per row. Bind it to a literal
-instead, the way `LogicalBuilder.clockLiteral` binds `CURRENT_DATE` and
-`CURRENT_TIMESTAMP` to the instant `build` captured for the statement.
+must, does not belong in `Funcs`, which evaluates per row. Give it an entry of
+kind `Clock` whose `clock` builds the literal, the way `CURRENT_DATE` and
+`CURRENT_TIMESTAMP` bind to the instant `build` captured for the statement
+(`LogicalBuilder.clockLiteral`).
 
 ## Add an aggregate function
 
@@ -87,24 +116,29 @@ instead, the way `LogicalBuilder.clockLiteral` binds `CURRENT_DATE` and
    exactly, and fit the answer with `Decimals.fit` in `finish`, so it cannot
    depend on row order, merge order or spill.
 5. Wire it in `AggState.init` (`AggregateExec.scala`), `PlanSql`'s
-   `aggregateCall` if its `name` and `args` are not how it is written, and
-   `LogicalBuilder.bindAgg` (`sql/plan/LogicalBuilder.scala`), checking its
-   argument there as `SUM`'s is (`numberArg` for one it adds up,
-   `Analyzer.condition` for a truth value, as `COUNT_IF`'s), and the same in
-   `bindAnalytic` if it is a window function by name. A one-argument
-   aggregate gets `DISTINCT` by wrapping it in `AggExprDistinct` in `bindAgg`
-   (`DistinctState` replays the distinct values into the aggregate's own state)
-   and adding its name to `UnsupportedClauses.DistinctAggregates`; until then
-   `AGG(DISTINCT x)` is rejected, never bound as plain `AGG(x)`.
+   `aggregateCall` if its `name` and `args` are not how it is written, and give
+   it an entry of kind `Aggregate` in `FunctionCatalog` whose `aggregate`
+   builds the `AggExpr`: its parameters say how each argument is checked
+   (`Param.Number` for one it adds up, `Param.Condition` for a truth value, as
+   `COUNT_IF`'s, `Param.AnyValue` for any), `window = true` makes it a window
+   function by name, and `distinct` and `windowDistinct` say whether
+   `AGG(DISTINCT x)` binds. A one-argument aggregate honours `DISTINCT` by
+   wrapping itself in `AggExprDistinct` when its builder is asked to
+   (`DistinctState` replays the distinct values into the aggregate's own
+   state); until its entry says `DistinctUse.Honoured`, `AGG(DISTINCT x)` is
+   rejected by `UnsupportedClauses`, never bound as plain `AGG(x)`.
 6. Test it.
-7. Update [`README.md`'s "SQL features"](../README.md#sql-features) and (if
-   the change affects window behaviour) the window-fn note in
+7. Add each of its names to [`README.md`'s **Aggregates:** list](../README.md#sql-features),
+   and to the **Window functions:** list if it runs as one (`function_catalog_test`
+   holds both lists to the catalog), and (if the change affects window
+   behaviour) the window-fn note in
    [architecture.md §6](architecture.md#6-window-functions-two-stage-logical-binding).
+   Regenerate the semantics tables, whose aggregate sweep runs it over each
+   type at each data set, and review its cells.
 
-Any new `AggExpr` is automatically usable as a window aggregate too, because
+Any new `AggExpr` can run as a window aggregate too, because
 `WindowExec.computeAggOverPartition` calls `AggState.init(agg)` over the
-frame's rows. To expose it as a window function by name, also add a case to
-`LogicalBuilder.bindAnalytic`'s `fnName match { ... }`.
+frame's rows; its entry's `window` flag is what exposes it by name.
 
 ## Add a window function
 
@@ -114,9 +148,13 @@ as their own `WindowFn` ADT cases in `sql/plan/Window.scala`. To add one:
 1. New `WindowFn*` case in `sql/plan/Window.scala`. Set `name`, `resultType`,
    and `respectsFrame` (false for ranking/offset functions; true only if the
    function's value changes with the frame).
-2. Add a `case` in `LogicalBuilder.bindAnalytic` that recognises the function
-   name and returns the new `WindowFn`, and one in `PlanSql.windowCall` that
-   writes it back.
+2. Add an entry to `FunctionCatalog`, of kind `Ranking` with a `ranking` that
+   builds the new `WindowFn`, or `Offset` with an `offset` builder (an offset
+   function's value and default meet as a CASE's values, and its offset is a
+   constant); `LogicalBuilder.bindAnalytic` binds it by its kind, and
+   `UnsupportedClauses` reads the kind to refuse an argument to a ranking
+   function or a second one to any but an offset function. Add a case in
+   `PlanSql.windowCall` that writes it back.
 3. Add a `case` in `WindowExec.computeFunctions` that implements the per-row
    computation (it gets the sorted partition's row indices, the original
    row buffer, and the output column to populate). **If it has a notion of
@@ -131,20 +169,30 @@ as their own `WindowFn` ADT cases in `sql/plan/Window.scala`. To add one:
 
 Aggregate window functions (SUM/AVG/MIN/MAX/COUNT/COUNT_IF and the univariate
 stats STDDEV*/VAR*) reuse the existing `AggExpr` and `AggState` machinery via
-`WindowFnAgg(agg)` — see the previous section. New `AggExpr`s become available
-as window aggregates automatically once they're wired into both
-`LogicalBuilder.bindAgg` (group context) and `LogicalBuilder.bindAnalytic`
-(window context). Multi-arg aggregates (e.g. `COVAR`, `CORR`) store all their
-operand expressions on `AggExpr.args: Seq[Expr]` so column-projection
-pushdown reaches every referenced column.
+`WindowFnAgg(agg)` — see the previous section. An aggregate whose catalog entry
+says `window = true` binds in a window by the same entry it binds by in a
+group. Multi-arg aggregates (e.g. `COVAR`, `CORR`) store all their operand
+expressions on `AggExpr.args: Seq[Expr]` so column-projection pushdown reaches
+every referenced column; they are no window functions (`window = false`), since
+a window function takes one argument but an offset function's.
 
 ## Add a new file format (e.g., JSON)
 
 1. `read/json/` module with a `JsonReader extends CatalogView` and BUILD file.
-2. `write/json/` with a `JsonWriter` (atomic temp + rename pattern).
+2. `write/json/` with a `JsonWriter` that stages and commits, as `CsvWriter`
+   does: it writes under a hidden temp name (`.<part>.<nanos>.tmp`, a name
+   starting with `.`, which a clear deletes and readers skip), `finish()`
+   closes it without renaming, `commit()` renames it to its part name, and
+   `abort()` deletes it, staged or committed. Its `writePartitioned` finishes
+   every partition, then commits them in partition order, aborts every part
+   when any partition or rename fails, and returns the names it committed
+   (`core.WrittenParts`): no part may appear before the whole write has
+   succeeded (conventions.md).
 3. Add `read/json` + `write/json` to `job/BUILD.bazel`'s deps and extend
-   `InputResolver.resolve`, `DataJob.writeOutput`, and
+   `InputResolver.resolve`, `OutputDirectory.write`, and
    `DataJob.materializeIfNeeded` with the new case (same pattern as parquet).
+   `OutputDirectory` runs the rest of the protocol — the `Running` mark, the
+   clear, the final record — for every format alike.
 4. Update `InputFilePath.detectedFormat` and `OutputFilePath.detectedFormat`
    to recognize the extension.
 5. Update [`README.md`'s "Supported file formats"](../README.md#supported-file-formats)
@@ -175,6 +223,60 @@ pushdown reaches every referenced column.
    differential: the rows a predicate keeps must not change when the reader
    skips parts of the file by their statistics. Two parquet defects were in
    the order the statistics are kept in.
+
+## Add an external fixture
+
+Files another program wrote, vendored so the reader is held to more than its
+own writer and parquet-mr (plans/testing/13): `src/test/data/parquet-testing/`
+is the pattern.
+
+1. Check the licence lets the files be copied (Apache-2.0, MIT, BSD) and copy
+   them as they are into a directory of their own under `src/test/data/`,
+   with the upstream licence beside them and a `README.md` giving the
+   repository, the commit, what was taken and what left out, the size budget
+   and how each expectation was made. Never vendor past the budget the plan
+   sets; raise it in the plan first. Files another program writes for this
+   repo go in a subdirectory of their own beside the script that wrote them,
+   run once outside the build (`pyarrow/make_files.py`), never by a test.
+2. Read each file twice, outside the repo: with the engine (`transformer
+   query --table t=<file> --format jsonl ...`) and with another reader
+   (pyarrow for parquet), and compare value by value, by type. Only a file
+   both read alike gets a `reads` line and an expect file, the engine's CSV
+   text (`--format csv`), gzipped past 8 KB.
+3. Give every file one line of the directory's `MANIFEST`: `reads <rows>
+   <expect>`, `refused by-design <id>` when a rule of the ledger in
+   `docs/gotchas.md` refuses it (add the rule first, pinned by this manifest,
+   if none fits), or `refused <text>`. A file another reader reads that the
+   engine refuses with no rule behind it is a finding: keep it `refused`,
+   mark it `# held: ...`, and list it in gotchas.md for the user.
+4. The test (`read/parquet:parquet_testing_test`, `read/csv:csv_corpus_test`)
+   reads every file under the directory, so a file with no line fails; add
+   the directory's filegroup to its `data`, and the manifest to
+   `slt:ledger_test`'s if a rule cites it. A case with another parser's
+   reading beside it (`papaparse/NNN.json`) is `agrees`, or `differs
+   by-design <id> <expect>` when a ledger rule makes the engine's reading its
+   own; `csv_corpus_test`'s report mode prints the engine's reading of every
+   input to make the line from.
+
+## Add a fault point
+
+A run that gains a new write or deletion in an output directory (a new
+sidecar file, a second record) gets a fault point, so the fault matrices
+reach it:
+
+1. Name it in `core/Faults.scala` beside the others, and add it to
+   `Faults.Points` in the order a run reaches it.
+2. Call `Faults.at(Faults.YourPoint)` just before the change, once per file,
+   never per row. Where the write is best effort (its failure is swallowed),
+   put the call inside the `try`, so the fault takes the same path a failed
+   write does.
+3. Make `job/FaultJob.scala`'s job reach it in one run over an earlier run's
+   output; `job/data_job_test`'s matrices then arm it to throw and to halt a
+   child JVM, and assert it was reached. The DAG fuzzer's fault mode and its
+   crash campaign draw from `Faults.Points` too, and their guard
+   (`generatorCoversFaultPoints`) fails until some generated run reaches it.
+4. Document it in [testing.md's "Fault points"](testing.md#fault-points-transformerfault)
+   and architecture.md §3a.
 
 ## Add a config field to the directory loader
 
@@ -416,8 +518,22 @@ README's [Querying files](../README.md#querying-files-transformer-query).
    round trip in `plan_roundtrip_fuzz_test` and the slt `reprinted` mode holds
    it to binding back as itself).
 2. Logical → physical mapping in `PhysicalPlanner.plan`.
-3. Optionally a new physical operator (one file in `sql/exec/`).
-4. Test against `SqlEngineTest`.
+3. Optionally a new physical operator (one file in `sql/exec/`). Give it a
+   branch in the plan walk's `wrapChildren` in `PhysicalPlanner`, which
+   rebuilds it over its metered and verified children, and in `childrenOf`
+   (the exchange pass), and a line in `Explain.describe`; a reader of a
+   plan's shape sees through a `PlanWrapper`. Under `--config=verify` the
+   walk refuses an operator it has no branch for, and
+   `sql/exec:verify_test` finds the operator classes by reflection and fails
+   until one of its queries builds yours.
+   The operator follows the close protocol (architecture §3h): its output
+   closes its inputs (`Closing.over`), a pool task of it drains an input in
+   `Closing.draining`, and a spill directory it opens is released when its
+   output is drained or closed, or when it fails.
+4. Test against `SqlEngineTest`, and run the suite under `--config=verify`,
+   which checks every batch the operator emits against the schema it declares,
+   and `--config=leaks`, which fails a target that leaves a file or a spill
+   directory open.
 5. Move the feature from "intentionally NOT done" in
    [`docs/gotchas.md`](gotchas.md#whats-intentionally-not-done) to the
    supported list in [`README.md`'s "SQL features"](../README.md#sql-features).
@@ -590,19 +706,136 @@ edge values. Scripts live in `src/test/slt/<area>/<name>.test`; the format is in
 
 The scripts are picked up by glob, so no BUILD change is needed. A slice of
 SQLite's corpus goes under `src/test/slt/sqlite/`, cut at a record boundary with
-a header naming its source; mark each record the engine answers otherwise by
-design with `skipif transformer # <why>` on the line before it. A port of
-another engine's tests (`src/test/slt/postgres/`) keeps that engine's answers,
-never the engine's own: its header names the source file and commit and
-counts what it leaves out by kind, each record names its source line and any
-rewrite (only one that cannot change the meaning), and a query the engine
-answers otherwise with no decision behind it stays out of the script as a
-finding until it is settled. A DOUBLE the other engine printed in full is
+a header naming its source. A port of another engine's tests
+(`src/test/slt/postgres/`, `src/test/slt/spark/`) keeps that engine's answers,
+never the engine's own: its header names the source file and commit and counts
+what it leaves out by kind, and each record names its source line and any
+rewrite (only one that cannot change the meaning). Its directory holds the
+source's license text and notice (`postgres/COPYRIGHT`, `spark/LICENSE` and
+`spark/NOTICE`). A port's new directory joins `LedgerTest.Ports`, which holds
+a port to the engine's answers in twins alone.
+
+**Porting a Postgres test file.** Fetch Postgres at the commit the other ports
+name (`postgres/COPYRIGHT`), shallow and sparse, into a scratch directory as
+data, and copy the file's `src/test/regress/sql/<name>.sql` and
+`expected/<name>.out` to `postgres/sql/` and `postgres/expected/` unchanged.
+Write the port's header (the source, the commit, what it leaves out by kind),
+then its records in the file's order, each query's header naming the engine's
+types of its columns and its sort mode (`rowsort` unless the ORDER BY fixes
+the order), with an empty `----` block, and each record under a comment that
+starts `# <name>.sql:<line>`, the line of the statement it ports (a record of
+the port's own, a table it makes for a VALUES list, takes a comment that cites
+no line, as `# For int4.sql:130: ...` does). Then
+
+```bash
+bazel run //src/test/scala/com/transformer/slt:pg_expected -- --fill src/test/slt/postgres/<name>.test
+```
+
+writes Postgres's values into every block, as each column prints them, and
+lists what it could not fill: a query Postgres refused, which is a `statement
+error`, and a cell psql prints alike for NULL and the empty string. Without
+`--fill` the binary reports every block that says other than Postgres printed,
+as `slt_test` does for every port, and with `--list` it prints each of the
+source's statements as psql cuts it, marked where a record holds it, which
+the header's count of what is left out is made from. Where the engine answers
+otherwise, the record is a skip with its twin, or held out as a finding, as
+above.
+
+Mark each record the engine answers otherwise by design with `skipif
+transformer <id>` on the line before it, the id of the rule it follows in the
+[ledger](gotchas.md#answers-that-differ-from-other-engines-by-design), and
+after a `#` what the particular case is, where the rule does not say it. A rule
+whose id starts `refused-` is a construct the engine refuses, and needs nothing
+more. Any other rule says the engine answers otherwise, so follow the skip with
+its twin: the same SQL under `onlyif transformer <id>`, with the engine's own
+answer, which `--complete` fills and you check by hand against the rule
+(compare a DOUBLE whose last digit Java need not share, from `EXP`, `LN` or a
+statistic, as SQLite's `T`). `slt_test` runs every skipped record once, in the
+baseline, and fails a script whose skip no longer diverges as its rule says:
+then the engine has changed, and the skip (and its twin) goes, or the rule
+changes with a decision. A record the engine answers otherwise with no rule in
+the ledger stays out of the script as a finding until a decision settles it;
+the commit that decides it adds the rule's row (for a `refused-` rule, with
+the text its refusal must contain) and its pin, a record of the engine's
+answer under `onlyif transformer <id>` in a script of this repo's own, then
+the skips that cite it. A DOUBLE the other engine printed in full is
 compared exactly; one it printed to fewer digits (Postgres's float8 under
 `extra_float_digits = 0`, 15 significant digits) as SQLite's `T`, which prints
 a DOUBLE to 15, since `R` prints every integer digit of a large one; and one
 from a C math library function, whose last digit Java's need not share, as
 `R`, to three places.
+
+**Vendoring a file of CockroachDB's or DataFusion's.** These come in as they
+are (plans/testing/12, decision 1), read through their dialect at load time,
+so a later re-sync is a copy and the diff against upstream shows every line
+added. Fetch the source at the tag or commit the directory's other files name
+(`cockroach/NOTICE`, `datafusion/NOTICE`), shallow and sparse, into a scratch
+directory as data, and never run anything in it; never take CockroachDB's
+master or anything under `pkg/ccl/`. Copy the file to
+`src/test/slt/<cockroach|datafusion>/<name>.test` under a header naming its
+source path and commit and, where its tables have unconstrained `DECIMAL`s,
+the line `# transformer: an unconstrained DECIMAL is DECIMAL(p,s)` with the
+scale its values need. Then run it, carrying on past a statement that fails,
+and write what did not pass:
+
+```bash
+bazel run //src/test/scala/com/transformer/slt:corpus -- src/test/slt/cockroach/<name>.test \
+    --dialect cockroach --modes none --keep-going --problems /tmp/<name>.jsonl
+```
+
+Each line is a record that did not pass, with the engine's own answer. Mark
+each with a condition line above its directive, and run again until none is
+left, since a record held now changes what later ones read:
+
+- a construct the engine refuses by a rule of the ledger: `skipif transformer
+  <id>`, and for a rule that is no refusal (`div-zero-null`,
+  `division-keeps-type`, `no-interval`, ...) the twin after the record, the same
+  SQL under `onlyif transformer <id>` with the engine's answer, written as the
+  format writes a result;
+- what the engine or the runner lacks (a function, a clause, a type in a cast,
+  a statement such as `ALTER` or `SET`, a constraint's error, the rows or the
+  table a held statement makes): `onlyif cockroachdb # needs <what>`;
+- an answer no rule covers, or an error both engines raise for different
+  reasons: `onlyif cockroachdb # held: finding <id>, <what>`, listed in the
+  plan's findings for the user until a decision settles it.
+
+`slt_test` then runs the file under every mode; a hold or a skip that no
+longer diverges fails it as stale. Count what each file runs, skips by rule and
+holds by kind in its header.
+
+**Importing a Spark test file.** Spark's `SQLQueryTestSuite` files are ported
+by a converter rather than by hand, since one file can hold over a thousand
+records: `SparkImport` (`//src/test/scala/com/transformer/slt:spark_import`)
+reads each source's input (`inputs/<name>.sql`, for line numbers) and golden
+file (`results/<name>.sql.out`, every statement's schema and output under ANSI
+mode) and writes the scripts under `src/test/slt/spark/`. To add a file, add
+its `Source` to `SparkImport.Sources` (the script it goes to and the sentence
+its header describes it by), then run the converter over a checkout of Spark's
+`sql/core/src/test/resources/sql-tests` at the commit the scripts name:
+
+```bash
+bazel run //src/test/scala/com/transformer/slt:spark_import -- \
+    --sql-tests <spark>/sql/core/src/test/resources/sql-tests \
+    --commit <sha> --report /tmp/spark-report.txt
+```
+
+Clone Spark into a scratch directory as data, shallow and sparse (the
+`sql-tests` directories you need, `LICENSE` and `NOTICE`), and never run
+anything in it. The converter runs each record on the engine in the baseline:
+a record the engine answers as Spark does is kept; one it answers otherwise by
+a rule of the ledger (`SparkImport.Rules`, each reading both the SQL and both
+answers) is skipped under that rule, with its twin; one needing a type, a
+literal or a function the engine lacks is left out and counted
+(`Rewrite.lacks`); and one no rule explains, or that both engines refuse for
+different reasons, is held out and listed in the report, a finding for the
+user rather than a skip. The scripts are vendored, so read the report and the
+diff: each held record is a question, and each new skip should read as its
+rule. A new kind of divergence gets a rule only from a decision, with its
+ledger row and pin. Changing the converter regenerates every script; the
+commit carries the new scripts with it. A file's records keep Spark's answers,
+`slt_test` runs them under every mode, and a rewrite the converter does not
+already make (`SparkImport.Rewrite`) is a change to the converter, named in
+each record it touches and in the script's header.
 
 A **golden plan** pins the plan a query gets, where a planner change could
 keep its answer and lose what makes it fast (a join that stops hashing, a
@@ -613,6 +846,40 @@ alone, since each mode makes another plan, and plain `EXPLAIN`'s sections are
 logical, so the plan holds under every whole-suite configuration; `EXPLAIN
 VERBOSE`'s physical section depends on the sharding settings and is no golden
 plan.
+
+**The agreed corpus** (`src/test/slt/agreed/`, written by
+`//src/test/scala/com/transformer/slt:agreed_corpus`, testing.md's "The agreed
+corpus") is regenerated, never edited by hand. Each change below regenerates
+under review, its diff showing every record it moved:
+
+- **A feature, or a feature's quota**: a `Feature` in
+  `fuzz/AgreedGen.scala`, its id the script's name and its quota the records
+  the tool keeps for it, which `slt/agreed_corpus_test` holds the script to,
+  and a producer in `AgreedGen.draw`.
+  Draw from `QueryGen` and `MetaQueryGen` where they reach the shape (filtered
+  by what the query reaches, as `readsDecimal` does); build it from their pools
+  and node types where they do not, as `window`, `decimal`, `text`, `temporal`
+  and `topN` do; a shape both generators should draw belongs in them (plans/testing/15).
+- **A normalization rule** (what counts as the references' one answer): a
+  named entry of `AgreedCorpus.Normalize.Rules`, which every script's header
+  lists and the guard checks, and its use in `Normalize.read` or
+  `AgreedCorpus.agree`. A looser rule turns a real difference into agreement,
+  so say in its text exactly what it lets through.
+- **A construct the three do not share**: an `Outside` in `fuzz/PortableSql`
+  naming why (Postgres has no such function, or the engines compute it each
+  their own way), which the report counts; never one the references agree on
+  and the engine answers otherwise, which is a finding or a ledger rule.
+- **A finding held for the user**: its id in `PortableSql.HeldRules`, and how
+  the engine-typed variant writes the engine's rule in Postgres's SQL (as
+  `concat-null` writes `CONCAT` as `||`), so the tool holds exactly the records
+  that rule explains and reports any other difference as new. Once the user
+  decides, the rule becomes a ledger row (the tool's by-design classification
+  then cites it, with its twin) or the engine changes; either way the held id
+  goes.
+- **A ledger rule the tool cites**: a refusal is found by its text; a value
+  rule needs a check that confirms it, as `decimalByDesign` asks Postgres for
+  the query with the engine's DECIMAL types written in, and `doublePrecision`
+  holds a statistic to 15 digits.
 
 ## Add a property / generator
 
@@ -643,11 +910,14 @@ engine — the parity fuzzer then guards its `evalVec` override automatically):
    target `DataType` and recurses for children via the local `sub(t)`.
 2. Hold the two invariants `ExprGen` documents: **type-correct** (the node's
    `dataType` must equal the requested target — `generate` asserts this) and
-   **total** (never generate inputs that throw — mirror the existing exclusions
-   for partial casts and NULL `ROUND`/`SUBSTRING` scale args). If your node
-   genuinely composes a new partial shape, extend `oracle/ExprParity` rather
-   than letting the generator throw. Totality is the *only* reason to exclude a
-   shape: a shape held out because the engine diverges on it needs an engine
+   **total but on its values** (a tree may fail only where a value does, with
+   an `ArithmeticException` or one of `CleanRejection.DataErrors`, which
+   `ExprParity.owned` lets through and both paths must raise alike; the CASTs
+   that can fail are drawn on purpose by `genFailingCast`, but text to INT,
+   the guarded shapes' CAST, whose failure means a conditional evaluated an
+   operand it did not need). If your node fails some other way, extend
+   `oracle/ExprParity` rather than letting the generator throw. Totality is
+   the *only* reason to exclude a shape: a shape held out because the engine diverges on it needs an engine
    fix plus a coverage guard on the way back in, not a permanent gate — see
    `generatorReachesIeeeSpecialValues` and the `NaN`/`-0.0` entry in
    [gotchas.md](gotchas.md).
@@ -693,8 +963,9 @@ went unfuzzed until plan 04.
 4. **`MetaQueryGen`.** Add it to `PayloadTypes` (which is `GenTypes`) and, if
    it can key a join, to `KeyTypes`, with a `payloadDomain` /
    `sharedKeyDomain` case and a `genLit` case; give `genAtom` its comparison,
-   and decide whether TLP may partition on it (`isPartitionable`: a comparison
-   of two non-NULL values of it must be TRUE or FALSE) and with what
+   and decide whether TLP may partition on it (`isPartitionable`, every type
+   today: a comparison of two non-NULL values of it must be TRUE or FALSE, as a
+   float's is since `NaN` sorts above every number) and with what
    (`hasLiteral`).
 5. **The guards assert the values, not just the shape.** Name the type's
    breaking pairs as a `DataGen.ValueTag` (`valueTags` reads them off a
@@ -712,6 +983,25 @@ went unfuzzed until plan 04.
    finding the plan-02 way: a deterministic regression, the engine fix, and
    then the guard. Never gate the shape back out of the generator to get green.
 
+**To add a value class to a pool** (a kind of character to `TextPool`, a kind
+of edge value to a type's domain): put its values beside the neighbours they
+are easy to confuse with, since every generator draws a contiguous slice of a
+pool and a class only tests anything where it meets them; write text as code
+points (`TextPool.text(0x131)`), never as a backslash-u escape, which the
+editing tools decode into the raw character. A `TextPool.TextClass` names its
+code points, and the three `textReachesEveryStringSite` guards (mode-differential,
+metamorphic, frontend) tally every class at every string site by
+`TextClass.All`, so a new class is measured the day it lands: read the tallies,
+grow a block whose thinnest cell is under about 3x its floor, and never lower
+the floor. A class that can make a query fail on its data (a value at a type's
+edge) is the new-runtime-error checklist's: its message joins
+`CleanRejection.DataErrors` and `ExprParity.owned`, and the layout and
+metamorphic oracles take it by their failure rule. A class over which two
+spellings the frontend holds equal part by a rule no decision covers is a
+finding: record it as a `SyntaxEquivalence.Known` with `onlyWhere`, recognizing
+the case by what it holds (as the ILIKE shape over a letter whose capital and
+small forms are not one pair is), never by gating the class out of the pool.
+
 **To add a SQL shape to `QueryGen`** (the mode-differential fuzzer's query
 generator): add it to the structured `GenQuery` (a new `AggSpec` for an
 aggregate, a new producer in `genValue` / `genPredicate` for a scalar shape, or a
@@ -719,22 +1009,33 @@ new clause field), render it in the matching `render` / `SqlRender` branch, and
 extend the `Shrinker.queryCase` moves so it still minimizes. Two invariants keep
 the reject rate near zero and the property sound:
 
-- **Total** — never generate SQL that throws at execution (mirror the existing
-  exclusions: numeric->numeric / anything->string casts only, non-null
-  `ROUND`/`SUBSTRING` scales). A query that binds must run, in every mode.
+- **Fails only on its data** — a query that binds must run in every mode, or
+  fail on a value of its data with one of `CleanRejection.DataErrors` (an
+  overflow, a decimal past its precision, a date past its range, text a CAST
+  cannot read), which every mode must then do alike (decision 1 of
+  plans/testing/15). A new node kind that can fail on a value joins
+  `QueryGen.mayFail`, so a WHERE or ON condition holding it is one the
+  optimizer may move; a new failure is the new-runtime-error checklist's (its
+  message in `DataErrors` and `ExprParity.owned`). Never cast a literal that
+  can fail: the binder folds it, and the query fails before it reads a row.
 - **Paren-free-safe** — `SqlRender` emits no grouping parentheses and relies on
   precedence. (The binder rejected them historically; it accepts them now, so
   teaching `SqlRender` to emit them is an open widening opportunity — but until
   it does, the rule below still binds.) Only generate
   trees that stay type-correct under a precedence-only reparse: arithmetic
   operands numeric, `||` operands string, comparisons same-category (never a
-  boolean operand), and `NOT` only over a boolean leaf (the frontend binds `NOT`
-  tighter than comparison). Decimal arithmetic is the exception: its type
-  depends on what each side is, so `SqlRender.decimalSide` gives it the
-  parentheses precedence needs (only those: JSqlParser rejects some statements
-  with three stacked). Confirm with the `bindRejectRateIsLow` guard before
-  merging, and over a large block when the change is to a type rule: 500 seeds
-  missed a reject that 20000 found.
+  boolean operand). Decimal arithmetic is the exception: its type depends on
+  what each side is, so `SqlRender.decimalSide` gives it the parentheses
+  precedence needs (only those: JSqlParser rejects some statements with three
+  stacked). A unary minus renders `-(x)` and a `NOT` over anything but a
+  column or a literal `NOT (...)`, since two signs in a row do not parse and
+  the parser hangs a second `NOT` on a comparison's left side. Confirm with the `bindRejectRateIsLow` guard before
+  merging, and over a large block when the change is to a type rule or to
+  rendering: 500 seeds missed a reject that 20000 found. `FUZZ_PROBE_SEEDS=20000`
+  (or `-Dfuzz.probe_seeds`) sets both guards' block without an edit, e.g.
+  `bazel test //src/test/scala/com/transformer/fuzz:mode_differential_fuzz_test
+  --test_filter='.*#bindRejectRateIsLow' --test_env=FUZZ_PROBE_SEEDS=20000`,
+  and the tally of reasons it prints is what to read.
 
 Exclude anything non-deterministic (`RAND()`, the clock functions) or
 mode-unstable (`LIMIT` and `OFFSET` without a total order — a cutoff among tied
@@ -793,7 +1094,9 @@ run-time failure that can only be told by its plan wants the bound plan passed
 to `CleanRejection.classify` again, which `BoundPlan` walks), never the
 generator's intent; a
 `SyntaxEquivalence.Known` for a shape; or a `knownPlan` on an entry of
-`SqlTextGen.BeyondTheTable`. Each carries a repro over
+`SqlTextGen.BeyondTheTable`. A `Known` that holds only over some values gives
+`onlyWhere`, a test of what the case holds, and the shape stays held to its
+observability guard. Each carries a repro over
 `SqlTextGen.ReferenceTables`, and the matching `FrontendFuzzTest` check fails
 when the repro stops showing the defect, so the entry is removed with the fix,
 the same contract as removing a generator gate. Excuse no more than the defect:
@@ -867,6 +1170,37 @@ shape to be observable against its degenerate query on a share of seeds. A shape
 that disagrees today is a defect: record it in `SyntaxEquivalence.KnownDefects`
 with its plan and a repro, never by leaving the shape out.
 
+**A value-preserving form** (EET, `oracle/Eet`) is a case of `Eet.wrap` and its
+name in `Eet.Forms`, which `rewritesReachEveryPositionAndForm` then holds to a
+share of the corpus. A form must keep its expression's type exactly (the
+binder's one rule for branches, `Analyzer.branches`, refuses a DECIMAL beside a
+DOUBLE no query wrote), must never evaluate what the unwrapped expression would
+not on a row that needs it (a branch it plants that fails must stay unused),
+and must print as text JSqlParser reads: probe a new shape in a CAST, under IS
+NULL and deep in an AND/OR chain, where it reads fewest. A position the binder
+reads a constant at (a ROUND's scale, a number beside a DECIMAL) is no position
+for a form, which is why `eligible` skips every expression that reads no
+column.
+
+**A TQS split** (`oracle/JoinTruth`) grows by a table or a key in `genSplit`, an
+`Edge` naming the column that keys it, and a query shape in `genQuery` that
+`expected` can answer: keep the evaluator to joins along keys, comparisons
+of a column with a literal and the four aggregates, since it is a second
+implementation of join semantics and a richer one would share the engine's
+mistakes. A new shape gets a tally in `queriesReachEveryKindAndBothUnmatchedSides`
+and, where the evaluator learns something new, a case written out by hand in
+`theEvaluatorKnowsEachJoinsAnswer`.
+
+**A forced strategy** (DQP, `oracle/ForcedPlans`) is a `Spelling` case and a
+branch of `ForcedPlans.spell`, which rewrites one join's bound condition into
+another that keeps the same pairs, plus its entry in `ForcedPlans.Strategies`
+with the spill setting it runs under. Read where it lands off the physical
+plan, as `joinPaths` does, and add the path or codec it reaches to the
+assertions of `strategiesReachEveryPathAndCodec`, so a spelling the planner
+stops honouring fails the guard. A strategy that needs a JVM-wide setting (a
+sharding gate, the batch capacity) goes in a target with `jvm_flags`, as
+`sharded_forced_plan_fuzz_test`, never behind a seam in the planner.
+
 **Three rules keep generated SQL sound and bindable** — hold them in any new
 relation or generator extension:
 
@@ -878,11 +1212,13 @@ relation or generator extension:
   stay type-correct under a precedence-only reparse (see
   [gotchas.md](gotchas.md)).
 - **TLP partition keys must be type-reliable.** `QueryCore.tlpCandidates`
-  restricts the partition column to non-float output columns whose runtime type
-  survives a precedence-only reparse. A computed `Int`-labelled column can reparse
-  to `Double` (e.g. `-1.0 % c`); a `NaN` there falls into none of `p` / `NOT p` /
-  `p IS NULL`, breaking the reassembly through no fault of the engine. Float and
-  double keys are excluded for the same reason.
+  restricts the partition column to output columns whose runtime type survives
+  a precedence-only reparse: a bare column, a group key, an aggregate or a
+  window. A computed `Int`-labelled column can reparse to `Double` (e.g. `-1.0 %
+  c`), so a literal of its declared type may not be what it compares with. Every
+  type partitions, FLOAT and DOUBLE included: a comparison of two non-NULL
+  floats is TRUE or FALSE (`NaN` equals `NaN` and sorts above every number), so
+  a `NaN` row lands in exactly one of `p` / `NOT p` / `p IS NULL`.
 - **TLP partitions the OUTPUT, not the input.** The base is a CTE wrapper,
   `WITH [cte defs,] q AS (<body>) SELECT * FROM q [WHERE <partition>]`
   (`MetaQuery.tlpBase`), so the relation holds for aggregates, windows, unions,
@@ -987,8 +1323,9 @@ columns. To add a new pass:
 
 1. New file `sql/plan/<MyPass>.scala` exposing a single
    `def apply(plan: LogicalPlan): LogicalPlan`. The body is a recursive
-   `rewrite` matching every `LogicalPlan` case — Scala's exhaustivity
-   check will flag missed cases. Pass-through nodes (Project, Sort, Limit,
+   `rewrite` matching every `LogicalPlan` case — a missed case is a compile
+   error ("match may not be exhaustive"), as every compiler warning is
+   ([conventions](conventions.md)). Pass-through nodes (Project, Sort, Limit,
    Distinct, Union, Window, …) just recurse on their children; the
    interesting work happens on the shape your pass targets.
 2. **Don't drift `ColRefExpr` indices without remapping.** Any rewrite
@@ -1019,6 +1356,105 @@ columns. To add a new pass:
    end-to-end query correctness is unchanged.
 5. Update [`docs/architecture.md`'s "Logical plan optimization"](architecture.md#9-logical-plan-optimization)
    to describe the new pass and where it sits in the order.
+
+## Add a setting
+
+A knob the engine reads from outside the program, for the whole JVM, is an
+entry of `src/main/scala/com/transformer/core/Settings.scala`:
+
+1. Add a `Setting[T]` beside the others: its property, `transformer.<name>`
+   (the environment twin, `TRANSFORMER_<NAME>`, follows from it), its default
+   as README writes it, and how its value parses, giving the default for none;
+   add it to `Settings.All`.
+2. Read it where it is used, once: `val x: T = Settings.YourSetting.get` in an
+   object, read when the object first loads. Never `System.getProperty` or
+   `System.getenv`: rule R8 of `bytecode:bytecode_rules_test` fails any other
+   engine class that reads a property or the environment, or names a setting.
+3. Add its row to README's "Settings" table, in `All`'s order;
+   `core:settings_test` fails until the property, the twin and the default
+   match.
+4. A test that varies it runs in a JVM of its own: a target's `jvm_flags`, or
+   a `.bazelrc` config for the whole suite ([testing.md](testing.md#whole-suite-configurations)).
+
+## Add a bytecode rule
+
+A convention a compiled class can show (a call no module makes, a call one
+place alone makes, a raw float comparison) is a rule in
+`src/test/scala/com/transformer/bytecode/BytecodeRules.scala`, which
+`bytecode:bytecode_rules_test` holds over every module a job runs and the
+desktop's:
+
+1. Measure first: write the rule with no allowlist and run the target. Its
+   failure lists every site the rule bans, each with its source line.
+2. Write the `Rule`: an id and a title; its scope (`Engine`, `JobModules`,
+   `Desktop` or `AllModules`); its bans, `member(owner, name, descriptor)` for
+   a call or a field access (any descriptor when none is given), each with
+   `instead` when one call replaces it; `anyMember(owner)`, `anyOwner(name)`;
+   `stringConstant(regex, what)`; `RawFloatComparison`, a raw float or double
+   comparison between two values; or a `Ban` of your own over the reader's
+   `Use`s; and the advice its failure prints, which points at the convention
+   in conventions.md.
+3. Give each site that a decision allows an `Allow(cls, method, reason)` in
+   `allowed`: the binary class name (`com.transformer.core.Ops$` for an
+   object), the method as written (it covers its lambdas, local defs, default
+   arguments and specialized copies; `*` a whole class) and the decision. A
+   site no decision covers is a finding: fix it if it is a defect, or put it
+   in `held` with why, for the user to decide. An allowlist past about ten
+   entries says the convention is not one rule; leave such a rule out.
+4. Add the rule to `BytecodeRules.All`, and sabotage it once: a violating call
+   in some module fails the test, naming the rule and its advice.
+5. Say in the convention's bullet in conventions.md that the rule holds it,
+   and add it to `bytecode_rules_test`'s row in testing.md.
+
+A new module joins the scan as a `Module` in `BytecodeRules.scala` and a
+`runtime_deps` entry of the target; `everyTransformerClassAModuleNamesIsInAModuleTheRulesRead`
+fails until it does. A kind of use the reader does not yet find (an opcode
+other than the float comparisons) is a case in `ClassFile.uses`, with a
+method in `ClassFileFixture` that `bytecode:classfile_test` finds it in.
+
+## Add a mutation operator
+
+An operator of the mutation tool (docs/testing.md, "Mutation testing") is a
+kind of small defect `tools/mutation/Mutator.scala` plants:
+
+1. Add its name to `Mutator.Operators`; its place there is its turn when a
+   sample deals out a file's quota.
+2. Find its sites from the lexer's tokens, never the source's characters, so
+   nothing inside a string, a character literal or a comment can change: a
+   one-token change is a case in `Sites.at`, and a construct of several
+   tokens a method of its own, as `checked`, `statement` and `refusal` are.
+   `skipped(i)` marks the tokens no operator touches (types, annotation
+   arguments, imports). A mutant that does not compile costs a build and
+   tells nothing, so leave out the sites where it would not, as `statement`
+   leaves out a block's value.
+3. Add a fixture, `tools/mutation/testdata/<operator>.scala.txt`, holding its
+   sites and the look-alikes it must not take; add it to `MutatorTest`'s
+   `fixtures` and a test listing the sites it finds.
+   `eachMutantDiffersFromItsSourceInItsSiteAlone` then holds every mutant to
+   its site, and `eachOperatorHasAFixture` fails until the fixture is listed.
+4. Add its row to docs/testing.md's operator table.
+
+## Run mutation testing on a new module
+
+A campaign takes any Scala source under a Bazel package; what it needs is
+in the BUILD files:
+
+- The library that compiles the source lists it in `srcs`, and its tests
+  depend on that library. The stages come from `bazel query` over those
+  dependencies, so a test that reaches the module only through a deploy jar or
+  a data file never runs against its mutants.
+- Stage 1 is the source's own package and its twin under `src/test`; a
+  module whose unit tests live elsewhere runs them at stage 3, after the
+  slower suites.
+- Code whose defects show only under a whole-suite configuration gets
+  `--sharded <regex of its paths>`, which adds a stage under
+  `--config=sharded`.
+- Run its files with `mutate sites` first: a file with no sites of an
+  operator gets none in a sample, and a file of many sites of one operator is
+  a reason to raise `--per-file` for it alone.
+
+Then sample, run and triage as docs/testing.md says, and add the file to the
+next campaign's list there.
 
 ## Add cloud support (v1.1 work)
 

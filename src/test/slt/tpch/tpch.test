@@ -1,0 +1,521 @@
+# TPC-H's queries over RisingWave's tiny TPC-H data, with RisingWave's answers
+# (https://github.com/risingwavelabs/risingwave, commit
+# d42d130042f0bf2b4ebaa5b6d84f69c66b997744): e2e_test/tpch/create_tables.slt.part
+# and insert_*.slt.part (the eight tables, at about scale factor 0.001) are
+# beside this file as they are there; each query is e2e_test/batch/tpch/q<n>.slt.part.
+# RisingWave's files are under the Apache License 2.0 (LICENSE and NOTICE beside
+# this file). The queries are TPC-H's, from the TPC Benchmark H specification of
+# the Transaction Processing Performance Council (TPC); RisingWave's text of
+# them is vendored as its files hold it (plans/testing/12, decision 4).
+# transformer: an unconstrained DECIMAL is DECIMAL(15,2)
+#
+# The money and quantity columns, unconstrained NUMERICs there, are TPC-H's
+# DECIMAL(15,2). Eleven of the 22 queries run: Q1, Q3, Q5, Q6, Q10, Q12, Q14 and
+# Q19 as written but with each constant date expression folded to its value
+# (`date '1998-12-01' - interval '71' day` as `date '1998-09-21'`), a rewrite
+# that cannot change the meaning; Q13, whose subquery in FROM is a WITH, as the
+# Postgres ports write one; and Q11 and Q15, whose uncorrelated scalar subquery
+# is an aggregate with no GROUP BY, exactly one row, joined as a one-row WITH,
+# which cannot change the answer. Q7, Q8 and Q9 need EXTRACT(year FROM ...),
+# which the engine has not; Q2, Q4, Q16, Q17, Q18, Q20, Q21 and Q22 need a
+# correlated, IN or EXISTS subquery. Each record says its rewrite; Q13's and
+# Q14's `like` is written `LIKE`, since a lowercase `like` does not parse under
+# a Turkish default locale (the zone configuration), a finding held for the
+# user (plans/testing/10).
+
+include ./create_tables.slt.part
+
+include ./insert_region.slt.part
+
+include ./insert_nation.slt.part
+
+include ./insert_supplier.slt.part
+
+include ./insert_customer.slt.part
+
+include ./insert_part.slt.part
+
+include ./insert_partsupp.slt.part
+
+include ./insert_orders.slt.part
+
+include ./insert_lineitem.slt.part
+
+
+# Q1, the date '1998-12-01' - interval '71' day folded to '1998-09-21'.
+query TTRRRRRRRI
+select
+  l_returnflag,
+  l_linestatus,
+  sum(l_quantity) as sum_qty,
+  sum(l_extendedprice) as sum_base_price,
+  sum(l_extendedprice * (1 - l_discount)) as sum_disc_price,
+  sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) as sum_charge,
+  round(avg(l_quantity), 4) as avg_qty,
+  round(avg(l_extendedprice), 4) as avg_price,
+  round(avg(l_discount), 4) as avg_disc,
+  count(*) as count_order
+from
+  lineitem
+where
+  l_shipdate <= date '1998-09-21'
+group by
+  l_returnflag,
+  l_linestatus
+order by
+  l_returnflag,
+  l_linestatus;
+----
+A  F  37474  37569624.64  35676192.0970  37101416.222424  25.3545  25419.2318  0.0509  1478
+N  F  1041   1041301.07   999060.8980    1036450.802280   27.3947  27402.6597  0.0429  38
+N  O  75823  76040604.76  72270477.1588  75140545.284463  25.5641  25637.4257  0.0498  2966
+R  F  36511  36570841.24  34738472.8758  36169060.112193  25.0590  25100.0969  0.0500  1457
+
+# Q3, as written.
+query IRTI
+select
+	l_orderkey,
+	sum(l_extendedprice * (1 - l_discount)) as revenue,
+	o_orderdate,
+	o_shippriority
+from
+	customer,
+	orders,
+	lineitem
+where
+	c_mktsegment = 'FURNITURE'
+	and c_custkey = o_custkey
+	and l_orderkey = o_orderkey
+	and o_orderdate < date '1995-03-29'
+	and l_shipdate > date '1995-03-29'
+group by
+	l_orderkey,
+	o_orderdate,
+	o_shippriority
+order by
+	revenue desc,
+	o_orderdate
+LIMIT 10;
+----
+3588  199498.4104  1995-03-19  0
+4327  123939.6659  1995-03-16  0
+5347  118914.1310  1995-02-22  0
+450   111508.1186  1995-03-05  0
+1767  109576.4152  1995-03-14  0
+386   86258.3745   1995-01-25  0
+897   54854.6063   1995-03-20  0
+2982  54150.4719   1995-03-19  0
+3526  51178.7043   1995-03-16  0
+2277  42401.7338   1995-01-02  0
+
+# Q5, the date '1994-01-01' + interval '1' year folded to '1995-01-01'.
+query TR
+select
+	n_name,
+	sum(l_extendedprice * (1 - l_discount)) as revenue
+from
+	customer,
+	orders,
+	lineitem,
+	supplier,
+	nation,
+	region
+where
+	c_custkey = o_custkey
+	and l_orderkey = o_orderkey
+	and l_suppkey = s_suppkey
+	and c_nationkey = s_nationkey
+	and s_nationkey = n_nationkey
+	and n_regionkey = r_regionkey
+	and r_name = 'MIDDLE EAST'
+	and o_orderdate >= date '1994-01-01'
+	and o_orderdate < date '1995-01-01'
+group by
+	n_name
+order by
+	revenue desc;
+----
+IRAQ  74391.7890
+IRAN  41912.9640
+
+# Q6, the date '1994-01-01' + interval '1' year folded to '1995-01-01'.
+query R
+select
+  sum(l_extendedprice * l_discount) as revenue
+from
+  lineitem
+where
+  l_shipdate >= date '1994-01-01'
+  and l_shipdate < date '1995-01-01'
+  and l_discount between 0.08 - 0.01 and 0.08 + 0.01
+  and l_quantity < 24;
+----
+90927.6243
+
+# Q10, the date '1994-01-01' + interval '3' month folded to '1994-04-01'.
+query ITRRTTTT
+select
+	c_custkey,
+	c_name,
+	round(sum(l_extendedprice * (1 - l_discount)), 2) as revenue,
+	round(c_acctbal, 1) as c_acctbal,
+	n_name,
+	c_address,
+	c_phone,
+	c_comment
+from
+	customer,
+	orders,
+	lineitem,
+	nation
+where
+	c_custkey = o_custkey
+	and l_orderkey = o_orderkey
+	and o_orderdate >= date '1994-01-01'
+	and o_orderdate < date '1994-04-01'
+	and l_returnflag = 'R'
+	and c_nationkey = n_nationkey
+group by
+	c_custkey,
+	c_name,
+	c_acctbal,
+	c_phone,
+	n_name,
+	c_address,
+	c_comment
+order by
+	revenue desc
+LIMIT 20;
+----
+136  Customer#000000136  359159.49  -842.4  GERMANY     QoLsJ0v5C1IQbh,DS1                       17-501-210-4726  ackages sleep ironic, final courts. even requests above the blithely bold requests g
+70   Customer#000000070  152637.10  4867.5  RUSSIA      mFowIuhnHjp2GjCiYYavkW kUwOjIaTCQ        32-828-107-2832  fter the special asymptotes. ideas after the unusual frets cajole quickly regular pinto be
+127  Customer#000000127  139410.76  9280.7  VIETNAM     Xyge4DX2rXKxXyye1Z47LeLVEYMLf4Bfcj       31-101-672-2951  ic, unusual theodolites nod silently after the final, ironic instructions: pending r
+142  Customer#000000142  129732.17  2209.8  INDONESIA   AnJ5lxtLjioClr2khl9pb8NLxG2,             19-407-425-2584  . even, express theodolites upo
+94   Customer#000000094  109328.44  5500.1  INDONESIA   IfVNIN9KtkScJ9dUjK3Pg5gY1aFeaXewwf       19-953-499-8833  latelets across the bold, final requests sleep according to the fluffily bold accounts. unusual deposits amon
+118  Customer#000000118  108519.06  3582.4  CHINA       OVnFuHygK9wx3xpg8                        28-639-943-7051  uick packages alongside of the furiously final deposits haggle above the fluffily even foxes. blithely dogged dep
+139  Customer#000000139  102799.68  7897.8  INDONESIA   3ElvBwudHKL02732YexGVFVt                 19-140-352-1403  nstructions. quickly ironic ideas are carefully. bold,
+25   Customer#000000025  80561.69   7133.7  JAPAN       Hp8GyFQgGHFYSilH5tBfe                    22-603-468-3533  y. accounts sleep ruthlessly according to the regular theodolites. unusual instructions sleep. ironic, final
+128  Customer#000000128  74326.77   -987.0  EGYPT       AmKUMlJf2NRHcKGmKjLS                     14-280-874-8044  ing packages integrate across the slyly unusual dugouts. blithely silent ideas sublate carefully. blithely expr
+4    Customer#000000004  68199.22   2866.8  EGYPT       XxVSJsLAGtn                              14-128-190-5944   requests. final, regular ideas sleep final accou
+14   Customer#000000014  63310.39   5266.3  ARGENTINA   KXkletMlL2JQEA                           11-845-129-3851  , ironic packages across the unus
+55   Customer#000000055  54376.85   4572.1  IRAN        zIRBR4KNEl HzaiV3a i9n6elrxzDEh8r8pDom   20-180-440-8525  ully unusual packages wake bravely bold packages. unusual requests boost deposits! blithely ironic packages ab
+46   Customer#000000046  46956.60   5744.6  FRANCE      eaTXWWm10L9                              16-357-681-2007  ctions. accounts sleep furiously even requests. regular, regular accounts cajole blithely around the final pa
+23   Customer#000000023  46655.33   3332.0  CANADA      OdY W13N7Be3OC5MpgfmcYss0Wn6TKT          13-312-472-8245  deposits. special deposits cajole slyly. fluffily special deposits about the furiously
+61   Customer#000000061  45467.89   1536.2  PERU        9kndve4EAJxhg3veF BfXr7AqOsT39o gtqjaYE  27-626-559-8599  egular packages shall have to impress along the
+40   Customer#000000040  44161.95   1335.3  CANADA      gOnGWAyhSV1ofv                           13-652-915-8939  rges impress after the slyly ironic courts. foxes are. blithely
+19   Customer#000000019  35730.09   8914.7  CHINA       uc,3bHIx84H,wdrmLOjVsiqXCq2tr            28-396-526-5053   nag. furiously careful packages are slyly at the accounts. furiously regular in
+130  Customer#000000130  31499.41   5073.6  INDONESIA   RKPx2OfZy0Vn 8wGWZ7F2EAvmMORl1k8iH       19-190-993-9281  ix slowly. express packages along the furiously ironic requests integrate daringly deposits. fur
+88   Customer#000000088  29032.13   8031.4  MOZAMBIQUE  wtkjBN9eyrFuENSMmMFlJ3e7jE5KXcg          26-516-273-2566  s are quickly above the quickly ironic instructions; even requests about the carefully final deposi
+85   Customer#000000085  27823.56   3386.6  ETHIOPIA    siRerlDwiolhYR 8FgksoezycLj              15-745-585-8219  ronic ideas use above the slowly pendin
+
+# Q12, the date '1994-01-01' + interval '1' year folded to '1995-01-01'.
+query TII
+select
+    l_shipmode,
+    sum(case
+        when o_orderpriority = '1-URGENT'
+            or o_orderpriority = '2-HIGH'
+            then 1
+        else 0
+    end) as high_line_count,
+    sum(case
+        when o_orderpriority <> '1-URGENT'
+            and o_orderpriority <> '2-HIGH'
+            then 1
+        else 0
+    end) as low_line_count
+from
+    orders,
+    lineitem
+where
+    o_orderkey = l_orderkey
+    and l_shipmode in ('FOB', 'SHIP')
+    and l_commitdate < l_receiptdate
+    and l_shipdate < l_commitdate
+    and l_receiptdate >= date '1994-01-01'
+    and l_receiptdate < date '1995-01-01'
+group by
+    l_shipmode
+order by
+    l_shipmode;
+----
+FOB   4  3
+SHIP  5  10
+
+# Q14, the date '1995-09-01' + interval '1' month folded to '1995-10-01'. Its
+# quotient of two DECIMAL sums keeps six places here (decimal-result-type), so
+# ROUND to 16 places gives RisingWave's value to six.
+skipif transformer decimal-result-type
+query R
+select
+        ROUND(100.00 * sum(case
+                when p_type LIKE 'PROMO%'
+                        then l_extendedprice * (1 - l_discount)
+                else 0
+        end) / sum(l_extendedprice * (1 - l_discount)), 16) as promo_revenue
+from
+        lineitem,
+        part
+where
+        l_partkey = p_partkey
+        and l_shipdate >= date '1995-09-01'
+        and l_shipdate < date '1995-10-01';
+----
+15.2302126115972488
+
+onlyif transformer decimal-result-type
+query R
+select
+        ROUND(100.00 * sum(case
+                when p_type LIKE 'PROMO%'
+                        then l_extendedprice * (1 - l_discount)
+                else 0
+        end) / sum(l_extendedprice * (1 - l_discount)), 16) as promo_revenue
+from
+        lineitem,
+        part
+where
+        l_partkey = p_partkey
+        and l_shipdate >= date '1995-09-01'
+        and l_shipdate < date '1995-10-01';
+----
+15.230213
+
+# Q19, as written.
+query R
+select
+	sum(l_extendedprice* (1 - l_discount)) as revenue
+from
+	lineitem,
+	part
+where
+	(
+		p_partkey = l_partkey
+		and p_brand = 'Brand#52'
+		and p_container in ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
+		and l_quantity >= 1 and l_quantity <= 11
+		and p_size between 1 and 5
+		and l_shipmode in ('AIR', 'AIR REG')
+		and l_shipinstruct = 'DELIVER IN PERSON'
+	)
+	or
+	(
+		p_partkey = l_partkey
+		and p_brand = 'Brand#24'
+		and p_container in ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')
+		and l_quantity >= 30 and l_quantity <= 40
+		and p_size between 1 and 10
+		and l_shipmode in ('AIR', 'AIR REG')
+		and l_shipinstruct = 'DELIVER IN PERSON'
+	)
+	or
+	(
+		p_partkey = l_partkey
+		and p_brand = 'Brand#32'
+		and p_container in ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
+		and l_quantity >= 10 and l_quantity <= 20
+		and p_size between 1 and 15
+		and l_shipmode in ('AIR', 'AIR REG')
+		and l_shipinstruct = 'DELIVER IN PERSON'
+	);
+----
+33530.5144
+
+# Q13, its subquery in FROM, `(...) as c_orders (c_custkey, c_count)`, written as
+# the WITH of that name and those columns.
+query II
+with c_orders (c_custkey, c_count) as (
+	select
+		c_custkey,
+		count(o_orderkey)
+	from
+		customer left outer join orders on
+			c_custkey = o_custkey
+			and o_comment NOT LIKE '%:1%:2%'
+	group by
+		c_custkey
+)
+select
+	c_count,
+	count(*) as custdist
+from
+	c_orders
+group by
+	c_count
+order by
+	custdist desc,
+	c_count desc;
+----
+0 50
+16 8
+17 7
+14 6
+12 6
+20 5
+13 5
+10 5
+9 5
+26 4
+23 4
+22 4
+21 4
+19 4
+11 4
+8 4
+7 4
+6 4
+24 3
+15 3
+4 3
+18 2
+5 2
+30 1
+29 1
+28 1
+3 1
+
+# Q11, the uncorrelated scalar subquery of its HAVING, an aggregate with no GROUP BY
+# and so one row, joined as the one-row WITH threshold (t), and t added to the
+# GROUP BY, where it is one value for every group.
+query IR
+with threshold (t) as (
+	select
+		sum(ps_supplycost * ps_availqty) * 0.0001000000
+	from
+		partsupp,
+		supplier,
+		nation
+	where
+		ps_suppkey = s_suppkey
+		and s_nationkey = n_nationkey
+		and n_name = 'ARGENTINA'
+)
+select
+	ps_partkey,
+	round(sum(ps_supplycost * ps_availqty), 1) as value
+from
+	partsupp,
+	supplier,
+	nation,
+	threshold
+where
+	ps_suppkey = s_suppkey
+	and s_nationkey = n_nationkey
+	and n_name = 'ARGENTINA'
+group by
+	ps_partkey,
+	t
+having
+    sum(ps_supplycost * ps_availqty) > t
+order by
+	value desc;
+----
+175 9253263.4
+142 8273960.3
+124 8203209.3
+116 7520874.2
+51 7264184.5
+168 7244030.2
+73 7115781.1
+130 6530034.1
+199 6339641.5
+166 5445353.3
+182 5191583.7
+82 4979187.2
+72 4900497.3
+75 4808130.4
+74 4702018.3
+100 4642272.6
+30 4638608.8
+24 4180139.5
+44 3997453.7
+158 3737919.4
+68 3690702.4
+108 3469209.3
+22 3467053.8
+2 3366668.6
+13 3185424.5
+91 2951493.4
+155 2924499.5
+200 2895688.3
+12 2381625.3
+99 2353581.3
+151 2298313.0
+10 2245355.5
+19 2217961.9
+8 2172003.9
+132 2125100.7
+58 2118624.6
+92 2091581.4
+42 2073731.3
+55 1998844.2
+144 1963651.4
+50 1854529.6
+28 1825685.6
+172 1812423.0
+64 1811894.6
+128 1706573.0
+110 1635451.6
+137 1470383.5
+62 1232507.6
+102 1213422.0
+66 1148101.4
+6 1130989.3
+37 1080432.4
+119 982887.8
+112 948072.8
+46 909722.4
+32 894484.1
+191 786330.8
+16 667751.1
+113 663824.2
+106 647708.1
+173 583317.5
+146 573455.5
+122 459864.5
+52 358792.4
+162 290757.6
+152 229781.6
+164 179298.7
+192 120406.1
+150 106928.1
+
+# Q15, the date '1993-01-01' + interval '3' month folded to '1993-04-01', and the
+# uncorrelated scalar subquery, the one row of max(total_revenue), joined as the
+# one-row WITH max_revenue (m).
+query ITTTR
+with revenue0 (supplier_no, total_revenue) as (
+  select
+    l_suppkey,
+    sum(l_extendedprice * (1 - l_discount))
+  from
+    lineitem
+  where
+    l_shipdate >= date '1993-01-01'
+    and l_shipdate < date '1993-04-01'
+  group by
+    l_suppkey
+),
+max_revenue (m) as (
+  select
+    max(total_revenue)
+  from
+    revenue0
+)
+select
+  s_suppkey,
+  s_name,
+  s_address,
+  s_phone,
+  total_revenue
+from
+  supplier,
+  revenue0,
+  max_revenue
+where
+  s_suppkey = supplier_no
+  and total_revenue = m
+order by
+  s_suppkey;
+----
+4 Supplier#000000004 Bk7ah4CK8SYQTepEmvMkkgMwg 25-843-787-7479 901304.1506

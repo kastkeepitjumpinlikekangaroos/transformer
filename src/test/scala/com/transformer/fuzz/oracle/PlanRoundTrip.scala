@@ -104,7 +104,8 @@ object PlanRoundTrip {
     *   - a projection of some of a scan's columns, which is a scan of those
     *     columns, as the optimizer prunes one;
     *   - a negation of a number, which is the negative number: the printer
-    *     writes `-5` for the literal -5, and the binder reads the negation.
+    *     writes `-5` for the literal -5, and the binder reads the negation,
+    *     and a negation of that, two the binder reads.
     */
   def normalize(plan: LogicalPlan): LogicalPlan = plan match {
     case LogicalScan(name, view, _) =>
@@ -158,9 +159,10 @@ object PlanRoundTrip {
     case LitExpr(f: java.lang.Float, t) => LitExpr(FloatBits(java.lang.Float.floatToIntBits(f).toLong), t)
     case l: LitExpr => l
     case CastExpr(c, t) => CastExpr(erase(c), t)
-    case UnaryOpExpr("-", c, t) => c match {
-      case LitExpr(v, lt) if lt == t => negated(v, t).map(erase).getOrElse(UnaryOpExpr("-", erase(c), t))
-      case _ => UnaryOpExpr("-", erase(c), t)
+    case DecimalCastExpr(c, t) => DecimalCastExpr(erase(c), t)
+    case u @ UnaryOpExpr("-", _, _) => foldNegations(u) match {
+      case UnaryOpExpr("-", c, t) => UnaryOpExpr("-", erase(c), t)
+      case folded => erase(folded)
     }
     case UnaryOpExpr(op, c, t) => UnaryOpExpr(op, erase(c), t)
     case BinOpExpr(op, l, r, t) => BinOpExpr(op, erase(l), erase(r), t)
@@ -174,6 +176,17 @@ object PlanRoundTrip {
     case IsNullExpr(c, negated) => IsNullExpr(erase(c), negated)
     case InListExpr(c, items, negated) => InListExpr(erase(c), items.map(erase), negated)
     case l: LikeExpr => l.copy(child = erase(l.child), pattern = erase(l.pattern))
+  }
+
+  /** `e` with each negation of a number, innermost first, the negative
+    * number: the printer writes `-(-9223372036854775807)` for the negation
+    * of the literal -9223372036854775807, which binds as two negations. */
+  private def foldNegations(e: Expr): Expr = e match {
+    case UnaryOpExpr("-", c, t) => foldNegations(c) match {
+      case l @ LitExpr(v, lt) if lt == t => negated(v, t).getOrElse(UnaryOpExpr("-", l, t))
+      case other => UnaryOpExpr("-", other, t)
+    }
+    case other => other
   }
 
   /** `-v` as a literal of `t`, where it is one. */

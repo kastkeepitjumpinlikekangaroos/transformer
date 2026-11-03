@@ -1,7 +1,8 @@
 package com.transformer.core.metrics
 
-import java.lang.management.{GarbageCollectorMXBean, ManagementFactory, ThreadMXBean}
-import java.util.Locale
+import com.transformer.core.Settings
+
+import java.lang.management.{ManagementFactory, ThreadMXBean}
 
 import scala.jdk.CollectionConverters._
 
@@ -13,10 +14,9 @@ import scala.jdk.CollectionConverters._
   *
   *   - [[globalDefault]] — the boolean default consulted by
   *     `DataJob.runOneTask` when a task's own `options.metrics` is unset.
-  *     Resolved once at class load from the system property
-  *     `transformer.metrics.enabled` (preferred) or the env var
-  *     `TRANSFORMER_METRICS_ENABLED`. Mirrors the sysprop-then-env pattern
-  *     in `Scheduler.parallelism`.
+  *     Resolved once at class load from
+  *     [[com.transformer.core.Settings.MetricsEnabled]]
+  *     (`transformer.metrics.enabled`).
   *   - Per-thread sampling helpers ([[currentCpuNanos]],
   *     [[currentAllocatedBytes]]) used at task boundaries to capture
   *     ThreadMXBean snapshots. Both fall back gracefully to `-1L` when the
@@ -32,26 +32,13 @@ import scala.jdk.CollectionConverters._
   */
 object MetricsCollector {
 
-  /** Sysprop name read at class load to resolve [[globalDefault]]. Anything
-    * that parses truthy via [[parseBool]] (case-insensitive `"true"` /
-    * `"1"`) flips the default on. */
-  val PropertyName: String = "transformer.metrics.enabled"
-
-  /** Env var read at class load to resolve [[globalDefault]] when the sysprop
-    * is unset. */
-  val EnvVarName: String = "TRANSFORMER_METRICS_ENABLED"
-
   /** Global default applied by `DataJob.runOneTask` when seeding the per-task
     * `ExecutionOptions` and the task's own `options.metrics` is unset.
     *
     * Resolved once at class load. Once set, every task in this JVM picks up
     * the same default — there is no facility for runtime reload because the
     * intended consumer is a single CLI invocation. */
-  val globalDefault: Boolean = {
-    val sys = Option(System.getProperty(PropertyName)).map(_.trim).filter(_.nonEmpty)
-    val env = Option(System.getenv(EnvVarName)).map(_.trim).filter(_.nonEmpty)
-    sys.orElse(env).exists(parseBool)
-  }
+  val globalDefault: Boolean = Settings.MetricsEnabled.get
 
   /** Lazy handle to the JVM's [[ThreadMXBean]]. Cached because `getThreadMXBean`
     * returns a stable singleton; we just want to avoid repeating the lookup in
@@ -112,15 +99,6 @@ object MetricsCollector {
       if (t > 0L) nanos += t * 1000000L // beans return millis
     }
     GcSample(count, nanos)
-  }
-
-  /** Parse `"true"` / `"1"` (case-insensitive) as true. Anything else
-    * — including typos like `"yes"` or `"on"` — is false. Mirrors the
-    * `ExecutionOptions` parse semantics for `options.spill` / `options.metrics`
-    * so the local config and global env/sysprop default behave identically. */
-  private[metrics] def parseBool(s: String): Boolean = {
-    val t = s.trim.toLowerCase(Locale.ROOT)
-    t == "true" || t == "1"
   }
 }
 

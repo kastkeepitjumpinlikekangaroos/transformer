@@ -1,0 +1,30 @@
+{
+ "description": "Line ends with quoted field",
+ "options": {
+  "header": "false"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "e",
+   "f"
+  ],
+  [
+   "g",
+   "h",
+   "i"
+  ],
+  [
+   "j",
+   "k",
+   "l"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

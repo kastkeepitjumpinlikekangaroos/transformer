@@ -33,10 +33,17 @@ class CoreTypesTest {
       assertEquals(n, None, DataType.fromName(n)))
   }
 
+  /** The wider type, but an INT or BIGINT beside a FLOAT is a DOUBLE, which
+    * holds every INT (plans/testing/10, decision 2). */
   @Test def widerNumericPicksWiderRank(): Unit = {
     assertEquals(DataType.DoubleType, DataType.widerNumeric(DataType.IntType, DataType.DoubleType))
     assertEquals(DataType.LongType, DataType.widerNumeric(DataType.LongType, DataType.IntType))
-    assertEquals(DataType.FloatType, DataType.widerNumeric(DataType.FloatType, DataType.IntType))
+    assertEquals(DataType.FloatType, DataType.widerNumeric(DataType.FloatType, DataType.FloatType))
+    assertEquals(DataType.DoubleType, DataType.widerNumeric(DataType.FloatType, DataType.DoubleType))
+    for (i <- Seq(DataType.IntType, DataType.LongType)) {
+      assertEquals(DataType.DoubleType, DataType.widerNumeric(DataType.FloatType, i))
+      assertEquals(DataType.DoubleType, DataType.widerNumeric(i, DataType.FloatType))
+    }
   }
 
   @Test def intVectorNullsRoundtrip(): Unit = {
@@ -51,6 +58,27 @@ class CoreTypesTest {
     assertEquals(Int.MaxValue, v.get(3))
     assertNull(b.rowAt(1)(0))
     assertEquals(java.lang.Integer.valueOf(7), b.rowAt(0)(0))
+  }
+
+  /** A typed getter reads a number or its text, and fails on any other
+    * value as `getString` does, with a cast that names the column and the
+    * value: its match had no case for one, so it threw a bare MatchError. */
+  @Test def rowGettersNameAValueTheyCannotRead(): Unit = {
+    val row = Row(Schema(Field("n", DataType.IntType), Field("flag", DataType.BooleanType), Field("z", DataType.IntType)),
+      Array[Any](java.lang.Integer.valueOf(7), java.lang.Boolean.TRUE, null))
+    assertEquals(7, row.getInt(0))
+    assertEquals(7L, row.getLong(0))
+    assertEquals(7.0, row.getDouble(0), 0.0)
+    assertTrue(row.getBoolean(1))
+    for ((getter, read) <- Seq[(String, Int => Any)](
+        "getInt" -> row.getInt, "getLong" -> row.getLong, "getDouble" -> row.getDouble)) {
+      val e = assertThrows(classOf[ClassCastException], () => read(1))
+      assertEquals(s"Row.$getter: column 1 (flag) holds true, a java.lang.Boolean", e.getMessage)
+    }
+    val e = assertThrows(classOf[ClassCastException], () => row.getBoolean(0))
+    assertEquals("Row.getBoolean: column 0 (n) holds 7, a java.lang.Integer", e.getMessage)
+    val nul = assertThrows(classOf[ClassCastException], () => row.getInt(2))
+    assertEquals("Row.getInt: column 2 (z) holds NULL", nul.getMessage)
   }
 
   @Test def stringVectorNullsUseInlineNull(): Unit = {
@@ -277,7 +305,6 @@ class CoreTypesTest {
   }
 
   @Test def materializeManyInParallelHandlesEmptyView(): Unit = {
-    val schema = Schema(Field("x", DataType.IntType))
     val empty = new CatalogView {
       def schema: Schema = Schema(Field("x", DataType.IntType))
       def numPartitions: Int = 0

@@ -13,22 +13,25 @@ import com.transformer.sql.plan._
   *     `dataType` equals the target, so a generator bug surfaces as its own
   *     error rather than masquerading as an engine divergence.
   *
-  *   - '''Total by construction.''' The generator never builds a tree that can
-  *     throw for in-range, type-correct input, so the property reduces to
-  *     "every row agrees, and neither path throws" (the precedent
-  *     `ExprBatchTest` is likewise total). Concretely it avoids the engine's
-  *     partial shapes: `RAND()` (no parity meaning — excluded entirely), casts
-  *     that parse (`String ->` numeric/boolean/date/timestamp, `Boolean ->`
-  *     float/double), and a cast from FLOAT or DOUBLE to DECIMAL (`NaN` and the
-  *     infinities have no decimal, and the cast refuses them), with one
-  *     exception that is the point of it: a CAST of a batch's guard column
+  *   - '''Total but on its values.''' A tree fails only where a value of its
+  *     data does, with an `ArithmeticException` or one of
+  *     `CleanRejection.DataErrors` (`ExprParity.owned`), which both paths must
+  *     raise alike, so the property is "every row agrees, and neither path
+  *     throws but on a value" (the precedent `ExprBatchTest` is likewise
+  *     total). `RAND()` has no parity meaning and is drawn only with a seed,
+  *     which makes it one value. The CASTs that can fail are drawn on purpose
+  *     ([[genFailingCast]], plans/testing/15): text read as any type but INT
+  *     and STRING, a float read as an integer or a written DECIMAL, and a DATE
+  *     past a TIMESTAMP's range read as one. Text read as INT is the one
+  *     shape kept for another purpose: a CAST of a batch's guard column
   *     ([[GuardPairProb]]) to INT, which fails on some of its rows, built only
   *     under a `CASE`, `IF`, `COALESCE`, `AND`, `OR` or `IN` whose guard
   *     excludes exactly those rows ([[genGuarded]]). Such a tree is total if
   *     and only if each conditional evaluates an operand only on the rows that
-  *     need it, which the vector path did not (plans/robustness/17). A
-  *     `ROUND` or `TRUNC` scale and a `SUBSTRING` position or length are any
-  *     INT or BIGINT, NULL included, since NULL there answers NULL.
+  *     need it, which the vector path did not (plans/robustness/17), and its
+  *     failure is never owned. A `ROUND` or `TRUNC` scale and a `SUBSTRING`
+  *     position or length are any INT or BIGINT, NULL included, since NULL
+  *     there answers NULL.
   *
   * Columns and expressions take every one of the engine's ten value types
   * ([[GenTypes]]). A type takes part in what the engine gives it and nothing
@@ -83,6 +86,7 @@ object ExprGen {
     case LitExpr(v, dt) => s"LitExpr(${RowOracle.show(v)},$dt)"
     case ColRefExpr(_, _, _) => e.toString
     case CastExpr(c, t) => s"CastExpr(${render(c)},$t)"
+    case DecimalCastExpr(c, t) => s"DecimalCastExpr(${render(c)},$t)"
     case UnaryOpExpr(op, c, dt) => s"UnaryOpExpr($op,${render(c)},$dt)"
     case BinOpExpr(op, l, r, dt) => s"BinOpExpr($op,${render(l)},${render(r)},$dt)"
     case FuncExpr(name, args, dt) => s"FuncExpr($name,${args.map(render).mkString("List(", ", ", ")")},$dt)"
@@ -139,6 +143,8 @@ object ExprGen {
   private val OrdOps = Seq("<", "<=", ">", ">=")
 
   private val NullLitProb = 0.12
+  /** How often a string value or LIKE pattern is drawn from [[TextPool]]. */
+  private val TextProb = 0.3
   private val ColRefProb = 0.7
 
   private val StringPool = Seq(
@@ -488,9 +494,9 @@ object ExprGen {
     case DataType.DoubleType =>
       if (r.bool(SpecialFloatProb)) r.oneOf(SpecialDoubles) else genDouble(r)
     case DataType.BooleanType => r.bool()
-    case DataType.StringType => r.oneOf(StringPool)
-    case DataType.DateType => r.oneOf(DatePool)
-    case DataType.TimestampType => r.oneOf(TimestampPool)
+    case DataType.StringType => if (r.bool(TextProb)) r.oneOf(TextPool.Values) else r.oneOf(StringPool)
+    case DataType.DateType => if (r.bool(TemporalEdgeProb)) r.oneOf(DataGen.DateEdges) else r.oneOf(DatePool)
+    case DataType.TimestampType => if (r.bool(TemporalEdgeProb)) r.oneOf(DataGen.TimestampEdges) else r.oneOf(TimestampPool)
     // A fresh array per draw: two cells with one content are two objects, as
     // they are in every vector the engine reads, so a comparison by identity
     // cannot pass for one by content.
@@ -498,6 +504,12 @@ object ExprGen {
     case d: DataType.DecimalType => r.oneOf(DecimalPools(d))
     case other => throw new IllegalArgumentException(s"genValue: unsupported $other")
   }
+
+  /** How often a DATE or TIMESTAMP value is one at the ends of what its type
+    * stores, or in year 1 or before (`DataGen.DateEdges`, `TimestampEdges`):
+    * the dates past a TIMESTAMP's range fail a CAST to one, and the rest meet
+    * the comparisons, `IN`, the conditionals and the CASTs to text. */
+  private val TemporalEdgeProb = 0.1
 
   /** Dates around the US daylight-saving changes of 2024 and the leap day
     * before them, either side of the epoch. Every time in the engine is UTC, so
@@ -629,7 +641,8 @@ object ExprGen {
       2 -> (() => genLike(r, schema, depth)),
       1 -> (() => genCaseExpr(r, schema, DataType.BooleanType, depth)),
       1 -> (() => genBoolFunc(r, schema, depth)),
-      1 -> (() => genCastTo(r, schema, DataType.BooleanType, depth)))
+      1 -> (() => genCastTo(r, schema, DataType.BooleanType, depth)),
+      1 -> (() => genFailingCast(r, schema, DataType.BooleanType, depth)))
     r.weighted(producers: _*)()
   }
 
@@ -680,48 +693,115 @@ object ExprGen {
       5 -> (() => BinOpExpr(r.oneOf(ArithOps), sub(r.oneOf(Arithmetic)), sub(r.oneOf(Arithmetic)), target)),
       2 -> (() => UnaryOpExpr("-", sub(target), target)),
       1 -> (() => UnaryOpExpr("+", sub(target), target)),
-      2 -> (() => FuncExpr("ABS", Seq(sub(target)), target)),
-      2 -> (() => FuncExpr("COALESCE", Seq.fill(r.between(1, 3))(sub(target)), target)),
-      2 -> (() => FuncExpr("IF", Seq(sub(DataType.BooleanType), sub(target), sub(target)), target)),
-      1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
+      2 -> (() => genCall(r, r.oneOf(SameTypeFunctions), target, sub)),
+      6 -> (() => genCall(r, pickFlow(r), target, sub)),
       1 -> (() => genCaseExpr(r, schema, target, depth)),
-      1 -> (() => genCastTo(r, schema, target, depth)))
+      1 -> (() => genCastTo(r, schema, target, depth)),
+      1 -> (() => genFailingCast(r, schema, target, depth)))
     val extra: Seq[(Int, () => Expr)] = target match {
       case DataType.IntType =>
-        Seq(2 -> (() => FuncExpr("LENGTH", Seq(sub(DataType.StringType)), DataType.IntType)),
+        Seq(2 -> (() => genCall(r, r.oneOf(functionsReturning(DataType.IntType)), target, sub)),
           1 -> (() => genRounding(r, target, sub)))
       case DataType.LongType => Seq(1 -> (() => genRounding(r, target, sub)))
       case DataType.DoubleType =>
         Seq(
           // FLOOR, CEIL, ROUND and TRUNC of a FLOAT or DOUBLE are a DOUBLE; of
           // an integer or a DECIMAL, their argument's type (genRounding).
-          1 -> (() => FuncExpr(r.oneOf(Seq("FLOOR", "CEIL", "CEILING")), Seq(sub(r.oneOf(Floatings))), DataType.DoubleType)),
-          1 -> (() => FuncExpr("ROUND", roundlikeArgs(r, sub(r.oneOf(Floatings)), sub), DataType.DoubleType)),
-          1 -> (() => FuncExpr(r.oneOf(Seq("TRUNC", "TRUNCATE")), roundlikeArgs(r, sub(r.oneOf(Floatings)), sub), DataType.DoubleType)),
-          // SQRT/LN/EXP are not in Funcs.applyVec — they exercise the default
-          // evalVec row loop (which routes through eval, so it cannot diverge,
-          // but it proves the fallback path stays correct).
-          1 -> (() => FuncExpr(r.oneOf(Seq("SQRT", "LN", "EXP")), Seq(sub(pick(r, Numerics))), DataType.DoubleType)))
+          3 -> (() => genCall(r, r.oneOf(RoundingFunctions), target, _ => sub(r.oneOf(Floatings)), Some(sub))),
+          // The math functions are not in Funcs.applyVec: they exercise the
+          // default evalVec row loop (which routes through eval, so it cannot
+          // diverge, but it proves the fallback path stays correct).
+          3 -> (() => genCall(r, r.oneOf(functionsReturning(DataType.DoubleType)), target, sub)))
       case _ => Seq.empty
     }
     r.weighted(base ++ extra: _*)()
   }
 
-  /** ROUND/TRUNC args: the value, and most of the time a scale. */
-  /** `FLOOR`, `CEIL`, `ROUND` or `TRUNC` of a `target`-typed value (an INT, a
-    * BIGINT or a DECIMAL), typed as the binder types it
-    * (`Funcs.signature`), under a CAST to `target` where that gives a DECIMAL
-    * another scale. */
+  /** A rounding function of the catalog (`FLOOR`, `CEIL`, `ROUND`, `TRUNC`
+    * under any of their names) of a `target`-typed value (an INT, a BIGINT or
+    * a DECIMAL), typed as the binder types it, under a CAST to `target` where
+    * that gives a DECIMAL another scale. */
   private def genRounding(r: Rng, target: DataType, sub: DataType => Expr): Expr = {
-    val fn = r.oneOf(Seq("FLOOR", "CEIL", "CEILING", "ROUND", "TRUNC", "TRUNCATE"))
-    val value = sub(target)
-    val args = if (fn.startsWith("ROUND") || fn.startsWith("TRUNC")) roundlikeArgs(r, value, sub) else Seq(value)
-    val call = FuncExpr(fn, args, Funcs.signature(fn, args).get.returnType)
+    val call = genCall(r, r.oneOf(RoundingFunctions), target, sub)
     if (call.dataType == target) call else CastExpr(call, target)
   }
 
-  private def roundlikeArgs(r: Rng, value: Expr, sub: DataType => Expr): Seq[Expr] =
-    if (r.bool(0.6)) Seq(value, integerArg(r, r.between(-2, 4), sub)) else Seq(value)
+  // ---- the catalog's functions ----------------------------------------------
+
+  /** Every function a call of which binds as a [[FuncExpr]]: the catalog's
+    * scalar and flow entries. `expr_parity_fuzz_test` holds the generator to
+    * drawing each of them ([[functionsDrawn]]), so a function added to the
+    * catalog is fuzzed the day it lands. */
+  private[fuzz] val CalledFunctions: Seq[FunctionCatalog.Entry] = FunctionCatalog.Entries.filter(e =>
+    e.kind == FunctionCatalog.Kind.Scalar || e.kind == FunctionCatalog.Kind.Flow)
+  /** The flow functions, which answer with a value of any type. */
+  private val FlowFunctions = CalledFunctions.filter(_.kind == FunctionCatalog.Kind.Flow)
+  /** A flow function, one that takes a condition (`IF`) drawn twice as often
+    * as the others: a condition is where comparisons, the densest source of
+    * the shapes this fuzzer exists for, come from. */
+  private def pickFlow(r: Rng): FunctionCatalog.Entry =
+    r.weighted(FlowFunctions.map(e => (if (e.params.contains(Funcs.Param.Condition)) 2 else 1, e)): _*)
+  /** The functions typed as their number argument (`ABS`). */
+  private val SameTypeFunctions = CalledFunctions.filter(e =>
+    e.kind == FunctionCatalog.Kind.Scalar && e.result == FunctionCatalog.Result.FirstArgument)
+  /** The functions typed as their argument when it is an INT, a BIGINT or a
+    * DECIMAL, and a DOUBLE otherwise. */
+  private val RoundingFunctions = CalledFunctions.filter(_.result.isInstanceOf[FunctionCatalog.Result.Rounded])
+  /** The scalar functions that return `t` whatever their arguments. */
+  private def functionsReturning(t: DataType): Seq[FunctionCatalog.Entry] =
+    CalledFunctions.filter(e => e.kind == FunctionCatalog.Kind.Scalar && e.result == FunctionCatalog.Result.Fixed(t))
+
+  /** A call of `entry`, under one of its names, typed `target`, with as many
+    * arguments as it takes (never an arity at which it reads a fresh value
+    * each time, which has no parity to hold), each drawn by its parameter: a
+    * STRING for a text, a truth value for a condition, `target` for a value
+    * it may answer with or compare, an INT or BIGINT for a count
+    * ([[integerArg]]), and for a number `value`'s draw where the result is
+    * typed by it, any number otherwise. A rounding function's scale comes
+    * most of the time; `scaleSub` draws a subtree for a count where it is not
+    * `sub`. */
+  private def genCall(
+      r: Rng,
+      entry: FunctionCatalog.Entry,
+      target: DataType,
+      value: DataType => Expr,
+      scaleSub: Option[DataType => Expr] = None): Expr = {
+    import Funcs.Param._
+    val sub: DataType => Expr = scaleSub.getOrElse(value)
+    val n = entry.result match {
+      case _: FunctionCatalog.Result.Rounded if entry.arity.admits(2) => if (r.bool(0.6)) 2 else 1
+      case _ => r.oneOf((entry.arity.min to entry.arity.max.getOrElse(3)).filterNot(entry.readsRandom))
+    }
+    val typedByArgument = entry.result == FunctionCatalog.Result.FirstArgument ||
+      entry.result.isInstanceOf[FunctionCatalog.Result.Rounded]
+    val args = entry.paramsAt(n).map {
+      case Text => sub(DataType.StringType)
+      case Condition => sub(DataType.BooleanType)
+      case Branch | Compared | AnyValue | Operand => sub(target)
+      case Number => if (typedByArgument) value(target) else sub(pick(r, Numerics))
+      case Integer(role) => integerArg(r, smallCount(r, role), sub)
+    }
+    FuncExpr(r.oneOf(entry.names), args, entry.resultType(args))
+  }
+
+  /** A small value for a count of `role`: a scale a few places either way, a
+    * position from before the start to past a short string's end, a length
+    * up to past its end, a seed. */
+  private def smallCount(r: Rng, role: String): Int = role match {
+    case "scale" => r.between(-2, 4)
+    case "position" => r.between(-2, 8)
+    case "length" => r.between(0, 8)
+    case _ => r.between(0, 9)
+  }
+
+  /** The catalog entries `c`'s tree calls, by their canonical names. */
+  def functionsDrawn(c: ExprCase): Set[String] = {
+    def walk(e: Expr): Iterator[String] = (e match {
+      case FuncExpr(name, _, _) => FunctionCatalog.lookup(name).map(_.name).iterator
+      case _ => Iterator.empty
+    }) ++ Shrinker.childrenOf(e).iterator.flatMap(walk)
+    walk(c.expr).toSet
+  }
 
   /** A scale, a position or a length: mostly `small`, else a NULL, which
     * answers NULL, or an INT or BIGINT subtree, which can be NULL on some rows
@@ -737,20 +817,10 @@ object ExprGen {
     val producers: Seq[(Int, () => Expr)] = Seq(
       4 -> (() => BinOpExpr("||", sub(DataType.StringType), sub(DataType.StringType), DataType.StringType)),
       2 -> (() => CastExpr(sub(pick(r, TextTypes)), DataType.StringType)),
-      3 -> (() => FuncExpr(r.oneOf(Seq("UPPER", "LOWER", "TRIM")), Seq(sub(DataType.StringType)), DataType.StringType)),
-      3 -> (() => FuncExpr("CONCAT", Seq.fill(r.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
-      2 -> (() => FuncExpr("SUBSTRING", substringArgs(r, sub(DataType.StringType), sub), DataType.StringType)),
-      2 -> (() => FuncExpr("COALESCE", Seq.fill(r.between(1, 3))(sub(DataType.StringType)), DataType.StringType)),
-      2 -> (() => FuncExpr("IF", Seq(sub(DataType.BooleanType), sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
-      1 -> (() => FuncExpr("NULLIF", Seq(sub(DataType.StringType), sub(DataType.StringType)), DataType.StringType)),
+      8 -> (() => genCall(r, r.oneOf(functionsReturning(DataType.StringType)), DataType.StringType, sub)),
+      6 -> (() => genCall(r, pickFlow(r), DataType.StringType, sub)),
       1 -> (() => genCaseExpr(r, schema, DataType.StringType, depth)))
     r.weighted(producers: _*)()
-  }
-
-  /** SUBSTRING args: the string, a position, and half the time a length. */
-  private def substringArgs(r: Rng, s: Expr, sub: DataType => Expr): Seq[Expr] = {
-    val start = integerArg(r, r.between(-2, 8), sub)
-    if (r.bool(0.5)) Seq(s, start, integerArg(r, r.between(0, 8), sub)) else Seq(s, start)
   }
 
   /** A CAST of the guard text to INT under a conditional that evaluates it
@@ -840,7 +910,8 @@ object ExprGen {
     def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
     val child = sub(DataType.StringType)
     val pattern = r.weighted(
-      (5, () => LitExpr(r.oneOf(LikePatternPool), DataType.StringType)), // literal fast path
+      (5, () => LitExpr(if (r.bool(TextProb)) r.oneOf(TextPool.Patterns) else r.oneOf(LikePatternPool),
+        DataType.StringType)), // literal fast path
       (1, () => LitExpr(null, DataType.StringType)), // NULL pattern -> all NULL
       (3, () => sub(DataType.StringType)) // column/computed pattern -> slow path
     )()
@@ -850,27 +921,45 @@ object ExprGen {
       LikeSyntax(caseInsensitive = r.bool(0.3), escape = r.weighted((6, Some('\\')), (3, Some('!')), (1, None))))
   }
 
-  private def genBoolFunc(r: Rng, schema: Schema, depth: Int): Expr = {
-    def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
-    r.weighted(
-      (2, () => FuncExpr("IF", Seq(sub(DataType.BooleanType), sub(DataType.BooleanType), sub(DataType.BooleanType)), DataType.BooleanType)),
-      (2, () => FuncExpr("COALESCE", Seq.fill(r.between(1, 3))(sub(DataType.BooleanType)), DataType.BooleanType)),
-      (1, () => FuncExpr("NULLIF", Seq(sub(DataType.BooleanType), sub(DataType.BooleanType)), DataType.BooleanType))
-    )()
-  }
+  private def genBoolFunc(r: Rng, schema: Schema, depth: Int): Expr =
+    genCall(r, pickFlow(r), DataType.BooleanType, genTyped(r, schema, _, depth - 1))
 
   private def genCastTo(r: Rng, schema: Schema, target: DataType, depth: Int): Expr =
     CastExpr(genTyped(r, schema, pick(r, totalCastSources(target)), depth - 1), target)
 
-  /** Source types that cast to `target` without ever throwing (see the totality
-    * note on the object). Into a DECIMAL, the integers and the decimals whose
-    * integer part it holds: a decimal is rounded to the target's scale and is
-    * an error past its integer digits, and an integer, which is read as it
-    * is, would leave a DECIMAL-typed value that a later CAST could not fit. A
-    * FLOAT or DOUBLE is not a total source for a DECIMAL either: `NaN` and the
-    * infinities have none. A DATE and a TIMESTAMP cast to each other (midnight
-    * UTC, the date in UTC); text into either can fail to parse. A BINARY casts
-    * to nothing else and nothing else to it. */
+  /** A CAST that can fail on its input (plans/testing/15): text read as any
+    * type but INT and STRING, a FLOAT or DOUBLE as an INT or a BIGINT (NaN,
+    * the infinities and values past the type have no integer), and a FLOAT
+    * or DOUBLE as a DECIMAL the query writes (NaN and the infinities have
+    * none, and a large value passes its digits). A DATE past a TIMESTAMP's
+    * range ([[TemporalEdgeProb]]) fails the total-looking CAST to one too.
+    * Not text to INT: that is the guarded shapes' CAST ([[genGuarded]]),
+    * whose failure stays the sign that a conditional evaluated it on a row
+    * its guard keeps it off (`ExprParity.owned`). Both paths must fail
+    * alike, which `ExprParity.check` holds them to. */
+  private def genFailingCast(r: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
+    def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
+    val fromFloat = r.bool(0.5)
+    target match {
+      case DataType.IntType => CastExpr(sub(r.oneOf(Floatings)), target)
+      case DataType.LongType if fromFloat => CastExpr(sub(r.oneOf(Floatings)), target)
+      case d: DataType.DecimalType => DecimalCastExpr(sub(if (fromFloat) r.oneOf(Floatings) else DataType.StringType), d)
+      case t => CastExpr(sub(DataType.StringType), t)
+    }
+  }
+
+  /** Source types that cast to `target` without throwing but on a value (see
+    * the totality note on the object). Into an integer, the numbers, whose
+    * NaN, infinities and values past the type fail, as the CASTs of
+    * [[genFailingCast]] mean to. Into a DECIMAL, the integers and the
+    * decimals whose integer part it holds: a decimal is rounded to the
+    * target's scale and is an error past its integer digits, and an integer,
+    * which is read as it is, would leave a DECIMAL-typed value that a later
+    * CAST could not fit. A FLOAT or DOUBLE is not a source for a DECIMAL here
+    * ([[genFailingCast]] draws it). A DATE and a TIMESTAMP cast to each other
+    * (midnight UTC, the date in UTC), a DATE past a TIMESTAMP's range failing
+    * ([[TemporalEdgeProb]]); text into either can fail to parse. A BINARY
+    * casts to nothing else and nothing else to it. */
   private def totalCastSources(target: DataType): Seq[DataType] = target match {
     case DataType.IntType | DataType.LongType => Numerics :+ DataType.BooleanType
     case DataType.FloatType | DataType.DoubleType => Numerics
@@ -888,24 +977,38 @@ object ExprGen {
 
   private def integerDigits(t: DataType.DecimalType): Int = t.precision - t.scale
 
+  /** A query's `CAST(x AS DECIMAL(p,s))`, which fits its value to the type,
+    * from an INT, a BIGINT, a BOOLEAN or any DECIMAL: one with more places
+    * than the target rounds, and one with more integer digits can pass it,
+    * an `ArithmeticException` both paths must raise alike ([[ExprParity]]
+    * owns it). Not a FLOAT or DOUBLE, whose NaN and infinities have no
+    * decimal, which is an error of another kind. */
+  private def genWrittenDecimalCast(r: Rng, schema: Schema, target: DataType.DecimalType, depth: Int): Expr =
+    DecimalCastExpr(genTyped(r, schema, pick(r, WrittenDecimalSources), depth - 1), target)
+
+  private val WrittenDecimalSources: Seq[DataType] =
+    Seq(DataType.IntType, DataType.LongType, DataType.BooleanType) ++ DecimalTypes
+
   /** A DECIMAL, DATE, TIMESTAMP or BINARY expression: the conditional forms
     * every type has, and a CAST in from the types that cast to `target` without
     * throwing. A DECIMAL also takes arithmetic, unary `+` and `-`, and `ABS`. */
   private def genOther(r: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     def sub(t: DataType): Expr = genTyped(r, schema, t, depth - 1)
     val base: Seq[(Int, () => Expr)] = Seq(
-      2 -> (() => FuncExpr("COALESCE", Seq.fill(r.between(1, 3))(sub(target)), target)),
-      2 -> (() => FuncExpr("IF", Seq(sub(DataType.BooleanType), sub(target), sub(target)), target)),
-      1 -> (() => FuncExpr("NULLIF", Seq(sub(target), sub(target)), target)),
+      6 -> (() => genCall(r, pickFlow(r), target, sub)),
       1 -> (() => genCaseExpr(r, schema, target, depth)))
     val extra: Seq[(Int, () => Expr)] = target match {
-      case _: DataType.DecimalType => Seq(
+      case d: DataType.DecimalType => Seq(
         4 -> (() => genDecimalArith(r, schema, target)),
         1 -> (() => genRounding(r, target, sub)),
         1 -> (() => genCastTo(r, schema, target, depth)),
+        1 -> (() => genWrittenDecimalCast(r, schema, d, depth)),
+        1 -> (() => genFailingCast(r, schema, target, depth)),
         1 -> (() => UnaryOpExpr(r.oneOf(Seq("+", "-")), sub(target), target)),
-        1 -> (() => FuncExpr("ABS", Seq(sub(target)), target)))
-      case DataType.DateType | DataType.TimestampType => Seq(1 -> (() => genCastTo(r, schema, target, depth)))
+        1 -> (() => genCall(r, r.oneOf(SameTypeFunctions), target, sub)))
+      case DataType.DateType | DataType.TimestampType => Seq(
+        1 -> (() => genCastTo(r, schema, target, depth)),
+        1 -> (() => genFailingCast(r, schema, target, depth)))
       case _ => Seq.empty
     }
     r.weighted(base ++ extra: _*)()
@@ -1041,6 +1144,71 @@ object ExprGen {
 
     walk(c.expr)
     DecimalArithCoverage(ops.toSet, rounded, byZero)
+  }
+
+  /** The kinds of CAST that can fail on their input ([[genFailingCast]]),
+    * by name: text read as another type, a float as an integer or a DECIMAL,
+    * and a DATE as a TIMESTAMP. */
+  val FailingCastKinds: Seq[String] = Seq("text", "float to integer", "float to decimal", "date to timestamp")
+
+  /** The kind of failing CAST `e` is, if it is one. Text to INT is not: it
+    * is the guarded shapes'. */
+  def failingCastKind(e: Expr): Option[String] = e match {
+    case CastExpr(c, t) if c.dataType == DataType.StringType && t != DataType.StringType && t != DataType.IntType =>
+      Some("text")
+    case DecimalCastExpr(c, _) if c.dataType == DataType.StringType => Some("text")
+    case CastExpr(c, DataType.IntType | DataType.LongType) if Floatings.contains(c.dataType) => Some("float to integer")
+    case DecimalCastExpr(c, _) if Floatings.contains(c.dataType) => Some("float to decimal")
+    case CastExpr(c, DataType.TimestampType) if c.dataType == DataType.DateType => Some("date to timestamp")
+    case _ => None
+  }
+
+  /** For each kind of failing CAST a case holds, whether one fails on some
+    * row of its batch, evaluated on its own. */
+  def failingCastCoverage(c: ExprCase): Map[String, Boolean] = {
+    val found = scala.collection.mutable.Map.empty[String, Boolean]
+    def walk(e: Expr): Unit = {
+      failingCastKind(e).foreach { kind =>
+        val fails = (0 until c.batch.numRows).exists { row =>
+          try { e.eval(c.batch, row); false } catch { case scala.util.control.NonFatal(_) => true }
+        }
+        found(kind) = found.getOrElse(kind, false) || fails
+      }
+      Shrinker.childrenOf(e).foreach(walk)
+    }
+    walk(c.expr)
+    found.toMap
+  }
+
+  /** What a case's written CASTs to DECIMAL meet: whether it has one, and
+    * whether on some row one rounds its value to the target's scale, and one
+    * passes the target's integer digits, both read off every row. */
+  final case class WrittenDecimalCastCoverage(shape: Boolean, rounded: Boolean, overflowed: Boolean)
+
+  def writtenDecimalCastCoverage(c: ExprCase): WrittenDecimalCastCoverage = {
+    var shape, rounded, overflowed = false
+    def walk(e: Expr): Unit = {
+      e match {
+        case DecimalCastExpr(child, t) =>
+          shape = true
+          var row = 0
+          while (row < c.batch.numRows) {
+            valueAt(child, c.batch, row) match {
+              case n: Number if !n.doubleValue.isNaN && !n.doubleValue.isInfinite =>
+                val v = Casts.toDecimal(n)
+                val atScale = v.setScale(t.scale, java.math.RoundingMode.HALF_UP)
+                if (atScale.compareTo(v) != 0) rounded = true
+                if (atScale.precision > t.precision) overflowed = true
+              case _ => ()
+            }
+            row += 1
+          }
+        case _ => ()
+      }
+      Shrinker.childrenOf(e).foreach(walk)
+    }
+    walk(c.expr)
+    WrittenDecimalCastCoverage(shape, rounded, overflowed)
   }
 
   /** What a case's `ROUND`, `TRUNC` and `SUBSTRING` calls give their scale,

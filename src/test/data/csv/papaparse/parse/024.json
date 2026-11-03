@@ -1,0 +1,21 @@
+{
+ "description": "ASCII 31 delimiter",
+ "options": {
+  "header": "false",
+  "delimiter": "\u001f"
+ },
+ "rows": [
+  [
+   "a",
+   "b",
+   "c"
+  ],
+  [
+   "d",
+   "e",
+   "f"
+  ]
+ ],
+ "fields": null,
+ "errors": []
+}

@@ -1,12 +1,12 @@
 package com.transformer.gui
 
-import com.transformer.core.{ColumnarBatch, DataType, Field, IntVector, MaterializedView, Schema, StringVector}
+import com.transformer.core.{ColumnarBatch, DataType, Faults, Field, IntVector, MaterializedView, Schema, StringVector}
 import com.transformer.job.{TaskRunRecord, TaskRunStatus}
 
 import org.junit.Assert._
 import org.junit.{After, Before, Test}
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 import java.util.Comparator
 import scala.jdk.CollectionConverters._
 
@@ -126,7 +126,7 @@ class ResultPersisterTest {
       errorMessage = None,
       executionTime = t,
       startedAt = t,
-      finishedAt = t,
+      finishedAt = Some(t),
       writtenAt = t,
       rowsProduced = 1, format = "csv",
       outputFiles = Seq("part-00099.csv"),
@@ -144,6 +144,84 @@ class ResultPersisterTest {
     assertTrue(Files.isRegularFile(dir.resolve("part-00000.csv")))
     val record = TaskRunRecord.read(dir).getOrElse(fail("expected fresh record").asInstanceOf[TaskRunRecord])
     assertFalse(record.outputFiles.contains("part-00099.csv"))
+  }
+
+  private def filesIn(dir: Path): Seq[String] = {
+    val stream = Files.list(dir)
+    try stream.iterator().asScala.map(_.getFileName.toString).toVector.sorted finally stream.close()
+  }
+
+  private def strays(dir: Path, n: Int): Seq[String] = {
+    Files.createDirectories(dir)
+    (0 until n).map { i =>
+      val name = f"part-$i%05d.csv"
+      Files.writeString(dir.resolve(name), s"id,name\n${100 + i},stray\n")
+      name
+    }
+  }
+
+  /** A directory of part files no record names is someone else's: a save
+    * there is refused before anything is written, as a job's task is. It
+    * wrote over them and stamped a record naming every one (plans/testing/06,
+    * found by plans/testing/07's survey). */
+  @Test def aDirectoryOfStrayPartsIsRefused(): Unit = {
+    val dir = tmpDir.resolve("strays")
+    val before = strays(dir, 4)
+    val cfg = PersistConfig(outputDir = dir.toString, format = "csv", maxPartitions = None, csvHeader = true)
+    val refused = try { ResultPersister.persist(mvOfPartitions(Seq(Seq((1, "alpha")))), cfg); null }
+      catch { case e: IllegalArgumentException => e }
+    assertNotNull("a save over stray part files went ahead", refused)
+    assertTrue(refused.getMessage, refused.getMessage.contains("which no run record names"))
+    assertEquals(before, filesIn(dir))
+    before.zipWithIndex.foreach { case (f, i) =>
+      assertEquals(s"id,name\n${100 + i},stray\n", Files.readString(dir.resolve(f)))
+    }
+  }
+
+  /** A save that fails part way leaves no part file, staged or committed,
+    * only a Failed record. Here the second partition to write a batch fails
+    * there ([[Faults]]); the first partition's part stayed. (It held half a
+    * surrogate pair, which no CSV file can hold, until a view built in Scala
+    * refused one, plans/testing/17.) */
+  @Test def aFailedPersistLeavesNoPartFile(): Unit = {
+    val dir = tmpDir.resolve("failed")
+    val mv = mvOfPartitions(Seq(Seq((1, "alpha")), Seq((2, "beta"))))
+    val cfg = PersistConfig(outputDir = dir.toString, format = "csv", maxPartitions = None, csvHeader = true)
+    Faults.arm(Faults.Arming(Faults.FirstBatch, 2, Faults.Action.Throw))
+    val thrown =
+      try { ResultPersister.persist(mv, cfg); null }
+      catch { case e: java.io.IOException => e }
+      finally Faults.disarm()
+    assertNotNull("the second partition failed", thrown)
+    assertEquals("Injected fault at first-batch:2:throw", thrown.getMessage)
+    assertEquals(Seq(TaskRunRecord.FileName), filesIn(dir))
+    val record = TaskRunRecord.read(dir).get
+    assertEquals(TaskRunStatus.Failed, record.status)
+    assertEquals(Some(thrown.getMessage), record.errorMessage)
+  }
+
+  /** The record names the part files the save wrote, never a listing of the
+    * directory: four stray one-row parts and then one saved row gave a record
+    * naming all four with `rowsProduced` 1. Strays are refused now; over an
+    * earlier save's four parts, a save of one row names its one part, and
+    * the earlier parts are gone. */
+  @Test def theRecordNamesExactlyTheFilesWritten(): Unit = {
+    val one = mvOfPartitions(Seq(Seq((1, "alpha"))))
+    val strayDir = tmpDir.resolve("four-strays")
+    strays(strayDir, 4)
+    val cfg = PersistConfig(outputDir = strayDir.toString, format = "csv", maxPartitions = None, csvHeader = true)
+    try ResultPersister.persist(one, cfg) catch { case _: IllegalArgumentException => () }
+    assertFalse("a record names the strays", TaskRunRecord.read(strayDir).exists(_.outputFiles.nonEmpty))
+
+    val dir = tmpDir.resolve("resaved")
+    val again = cfg.copy(outputDir = dir.toString)
+    assertEquals(4L, ResultPersister.persist(mvOfPartitions(Seq.tabulate(4)(i => Seq((i, "earlier")))), again))
+    assertEquals(1L, ResultPersister.persist(one, again))
+    val record = TaskRunRecord.read(dir).get
+    assertEquals(Seq("part-00000.csv"), record.outputFiles)
+    assertEquals(1L, record.rowsProduced)
+    assertEquals(Seq(TaskRunRecord.FileName, "part-00000.csv"), filesIn(dir))
+    assertEquals("id,name\n1,alpha\n", Files.readString(dir.resolve("part-00000.csv")))
   }
 
   @Test def persistRejectsUnknownFormat(): Unit = {

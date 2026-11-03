@@ -2,11 +2,36 @@
 # sqlite/ holds files of SQLite's corpus (https://www.sqlite.org/sqllogictest,
 # free to copy as its COPYRIGHT says); postgres/ ports of PostgreSQL's
 # regression tests, with Postgres's answers, under the PostgreSQL License
-# (postgres/COPYRIGHT); every other script is this repo's own. A `.data` file
+# (postgres/COPYRIGHT), and in postgres/sql/ and postgres/expected/ each ported
+# file's source and the output psql printed for it, which slt_test checks the
+# ports' answers against; spark/ ports of Spark's SQLQueryTestSuite files, with
+# Spark's ANSI answers, written by //src/test/scala/com/transformer/slt:spark_import,
+# under the Apache License 2.0 (spark/LICENSE and spark/NOTICE); cockroach/
+# files of CockroachDB's logic tests at v23.2.0, vendored with the condition
+# lines that say what the engine does with each record, under the Apache License
+# 2.0 since their BSL's Change Date, 2026-10-01 (cockroach/LICENSE,
+# cockroach/NOTICE; postgresjoin.test also under the PostgreSQL License,
+# cockroach/POSTGRESQL-LICENSE); datafusion/ files of Apache DataFusion's
+# sqllogictest files at 934691e, vendored the same way, and in datafusion/data/
+# the CSV files they read, under the Apache License 2.0 (datafusion/LICENSE,
+# datafusion/NOTICE); tpch/ TPC-H's queries over RisingWave's tiny TPC-H tables
+# with RisingWave's answers, its CREATE TABLE and INSERT files included as they
+# are (tpch/LICENSE, tpch/NOTICE); agreed/ queries the fuzz generators drew with
+# the answers PostgreSQL and DuckDB agree on, written by
+# //src/test/scala/com/transformer/slt:agreed_corpus (plans/testing/14), each
+# script's header naming its seeds, the tool's commit and both references'
+# versions; every other script is this repo's own. A `.data` file
 # is a table's rows, which a script loads with COPY: postgres/data/ holds
 # Postgres's own, as its regression suite loads them.
 filegroup(
     name = "scripts",
-    srcs = glob(["**/*.test", "**/*.data"]),
+    srcs = glob([
+        "**/*.test",
+        "**/*.data",
+        "datafusion/data/*.csv",
+        "tpch/*.slt.part",
+        "postgres/sql/*.sql",
+        "postgres/expected/*.out",
+    ]),
     visibility = ["//visibility:public"],
 )

@@ -1,0 +1,23 @@
+CockroachDB's logic tests
+
+The scripts in this directory are files of CockroachDB's
+pkg/sql/logictest/testdata/logic_test/ at tag v23.2.0, commit
+8f14432835d667982828b5319cfd130991fbf80c (https://github.com/cockroachdb/cockroach),
+Copyright The Cockroach Authors; CockroachDB 23.2 is (c) 2023 Cockroach Labs, Inc.
+Each is as it is there but for its header and the condition lines added before
+its records, `skipif transformer <id>` and `onlyif cockroachdb # ...`, and the
+twins after some of them.
+
+CockroachDB 23.2 was released under the Business Source License 1.1, whose
+parameters (licenses/BSL.txt at the tag) name a Change Date of 2026-10-01 and a
+Change License of the Apache License, Version 2.0: from that date these files
+are under the Apache License 2.0, whose text is LICENSE beside this file
+(licenses/APL.txt at the tag). Nothing here comes from CockroachDB's master
+branch, whose license is another, or from pkg/ccl/.
+
+postgresjoin.test adapts PostgreSQL's regression test
+src/test/regress/sql/join.sql to the sqllogictest format, and carries its
+notice: Portions Copyright (c) 1996-2015, PostgreSQL Global Development Group;
+Portions Copyright (c) 1994, The Regents of the University of California; under
+the PostgreSQL License, whose text is POSTGRESQL-LICENSE beside this file
+(licenses/PostgreSQL.txt at the tag).

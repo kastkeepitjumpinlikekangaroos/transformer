@@ -72,7 +72,7 @@ object JobFiles {
         "2,bob,25.50\n" +
         "3,carol,7.25\n"
     writeAtomic(dir.resolve("data").resolve("example.csv"), csv)
-    addInput(
+    val _ = addInput(
       dir,
       viewName = "example",
       path = "data/example.csv",
@@ -80,7 +80,7 @@ object JobFiles {
       cache = true,
       options = Map.empty
     )
-    addTable(
+    val _ = addTable(
       dir,
       viewName = "example_summary",
       sql = "SELECT\n  name,\n  amount\nFROM example\nORDER BY name\n",
@@ -108,7 +108,7 @@ object JobFiles {
     requireNonEmpty(path, "Input path")
     // The loader refuses a format, an option or a value it cannot read, so
     // they are refused here, before the config is written.
-    InputFilePath(path, viewName, options, cache, format)
+    val _ = InputFilePath(path, viewName, options, cache, format)
     val viewDir = jobDir.resolve("inputs").resolve(viewName)
     if (Files.exists(viewDir))
       throw new IllegalArgumentException(s"Input '$viewName' already exists.")
@@ -131,7 +131,7 @@ object JobFiles {
       options: Map[String, String]
   ): Path = {
     requireNonEmpty(path, "Input path")
-    InputFilePath(path, viewName, options, cache, format)
+    val _ = InputFilePath(path, viewName, options, cache, format)
     val viewDir = jobDir.resolve("inputs").resolve(viewName)
     if (!Files.isDirectory(viewDir))
       throw new IllegalArgumentException(s"Input '$viewName' does not exist.")
