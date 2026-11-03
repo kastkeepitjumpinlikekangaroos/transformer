@@ -112,6 +112,51 @@ class DataJobTest {
     assertEquals("user_id,total\n2,49\n1,17\n", normalizeOrder(out))
   }
 
+  /** A record promises part files on disk only when its status wrote output
+    * and it names some: a failed run names none it promises, nor a success
+    * that wrote nothing. */
+  @Test def aRecordExpectsDataFilesOnlyWhenItsStatusWroteThem(): Unit = {
+    def record(status: TaskRunStatus, files: Seq[String]) = TaskRunRecord(
+      TaskRunRecord.SchemaVersion, "t", status, None, Instant.EPOCH, Instant.EPOCH, None, Instant.EPOCH, 0L, "csv",
+      files, Nil)
+    assertTrue(record(TaskRunStatus.Succeeded, Seq("part-00000.csv")).expectsDataFiles)
+    assertTrue(record(TaskRunStatus.ValidationFailed, Seq("part-00000.csv")).expectsDataFiles)
+    assertFalse(record(TaskRunStatus.Succeeded, Nil).expectsDataFiles)
+    assertFalse(record(TaskRunStatus.Failed, Seq("part-00000.csv")).expectsDataFiles)
+  }
+
+  /** A run's `_run.json` carries the record format's version, 1, as README's
+    * example shows: what a reader of another release checks. */
+  @Test def aRunRecordSaysItsFormatIsVersionOne(): Unit = {
+    val inDir = tmpDir("dj-in-")
+    writeCsv(inDir, "t.csv", "a\n1\n")
+    val outDir = tmpDir("dj-out-").resolve("out")
+    val result = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(sqlString = Some("SELECT a FROM t"), outputFile = Some(OutputFilePath(outDir.toString))))
+    ).run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+    val json = Files.readString(outDir.resolve(TaskRunRecord.FileName))
+    assertTrue(json, json.contains("\"schemaVersion\": 1,"))
+  }
+
+  /** A cloud output path fails its task as it runs, naming the path: v1
+    * writes no cloud output, nor a local directory in its place. */
+  @Test def aCloudOutputPathFailsItsTask(): Unit = {
+    val inDir = tmpDir("dj-in-")
+    writeCsv(inDir, "t.csv", "a\n1\n")
+    val result = DataJob(
+      inputs = Seq(InputFilePath(inDir.toString + "/*.csv", viewName = "t")),
+      sql = Seq(SQLTask(sqlString = Some("SELECT a FROM t"), outputFile = Some(OutputFilePath("gs://bucket/out"))))
+    ).run()
+    assertFalse(result.succeeded)
+    result.tasks.head.status match {
+      case TaskStatus.Failed(reason) =>
+        assertTrue(reason, reason.contains("Cloud output paths not yet implemented (v1.1). Got: 'gs://bucket/out'"))
+      case other => fail(s"expected a failed task, got $other")
+    }
+  }
+
   /** CSV output for GROUP BY is in hash-map insertion order, which isn't stable
     * across runs without ORDER BY. We add ORDER BY in the test above; for safety,
     * normalize by sorting rows by everything before the first occurrence.
@@ -670,6 +715,10 @@ class DataJobTest {
     val parts = Files.list(outDir).iterator().asScala.toVector
       .filter(_.getFileName.toString.startsWith("part-"))
     assertEquals(s"expected 2 part files, got ${parts.size}", 2, parts.size)
+    // Contiguous chunks of the four source partitions, two in each part.
+    val rowsByPart = parts.sortBy(_.getFileName.toString)
+      .map(p => Files.readString(p).split('\n').toVector.drop(1).filter(_.nonEmpty).sorted)
+    assertEquals(Vector(Vector("1", "2"), Vector("3", "4")), rowsByPart)
   }
 
   @Test def maxPartitionsAboveSourceCountIsNoOp(): Unit = {
@@ -2455,6 +2504,26 @@ class DataJobTest {
       assertTrue(s"manifest runFile '$rf' for '${t.taskName}' does not exist",
         Files.isRegularFile(java.nio.file.Paths.get(rf)))
     }
+  }
+
+  /** A cloud input is recorded as written, never made a local path: v1 reads
+    * none, so the run warns and goes on, and `job.json` still names it. */
+  @Test def jobRunRecordKeepsACloudInputsPathAsWritten(): Unit = {
+    val local = writeCsv(tmpDir("dj-cloud-in-"), "t.csv", "a\n1\n")
+    val out = tmpDir("dj-cloud-out-")
+    val job = DataJob(
+      inputs = Seq(
+        InputFilePath(local.toString, viewName = "t"),
+        InputFilePath("gs://bucket/events/*.csv", viewName = "events"),
+        InputFilePath("s3://bucket/sales/*.csv", viewName = "sales")),
+      sql = Seq(SQLTask(name = Some("q"), sqlString = Some("SELECT a FROM t"),
+        outputFile = Some(OutputFilePath(out.resolve("q").toString)))),
+      jobRunOutput = Some(OutputFilePath(out.resolve("job.json").toString)))
+    val result = job.run()
+    assertTrue(result.error.getOrElse("(no error)"), result.succeeded)
+    val rec = JobRunRecord.read(out.resolve("job.json")).getOrElse(fail("no job.json").asInstanceOf[JobRunRecord])
+    assertEquals(Seq("events" -> "gs://bucket/events/*.csv", "sales" -> "s3://bucket/sales/*.csv"),
+      rec.inputs.getOrElse(Nil).filter(_.name != "t").map(i => i.name -> i.path))
   }
 
   /** `job.json` records the run's lineage: each input as the run read it (its
