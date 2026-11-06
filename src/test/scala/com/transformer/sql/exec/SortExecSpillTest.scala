@@ -11,15 +11,11 @@ import scala.collection.mutable
 import scala.util.Random
 
 /** External-sort parity guarantee: with spill enabled at a tiny threshold
-  * (forcing many flushes), [[SortExec]] must produce the *same global sort*
-  * — same row multiset, sorted under the same comparator — as the non-spill
-  * path. We can't assert position-by-position equality because the heap
-  * merge isn't stable, but: the sort key is unique in each test, so a sorted
-  * stable result over unique keys IS positionally determined.
-  *
-  * To pin position-equality we use unique keys; ties would expose the
-  * comparator's stability characteristics, which is out of scope for this
-  * parity check. */
+  * (forcing many flushes), [[SortExec]] returns the same rows in the same
+  * order as the non-spill path, ties included. Every path returns the stable
+  * sort of its input read partition by partition, and the merge breaks a tie
+  * between two runs by run, each partition's runs in the order they were
+  * written, so where the runs end does not show in the output. */
 class SortExecSpillTest {
 
   private val schema = Schema(Vector(Field("k", DataType.IntType), Field("p", DataType.IntType)))
@@ -106,6 +102,27 @@ class SortExecSpillTest {
     assertEquals(expectedMs, actualMs)
   }
 
+  /** Keys of ten values over 5,000 rows: every row ties with hundreds of
+    * others, across runs and partitions. Spilled at a one-byte threshold, a
+    * run a batch, the sort returns what it returns unspilled, row for row:
+    * each key's rows in the order they were read, partition by partition. */
+  @Test def tiedKeysComeBackRowForRowWithAndWithoutSpill(): Unit = {
+    assumeFullBatches()
+    val rng = new Random(15L)
+    val rows = (0 until 5000).map(i => Array[Any](java.lang.Integer.valueOf(rng.nextInt(10)), java.lang.Integer.valueOf(i))).toVector
+    val parts = rows.grouped(1250).toVector
+    for (key <- Seq(SortKey(k, asc = true), SortKey(k, asc = false))) {
+      def run(opts: ExecutionOptions): Vector[Vector[Any]] =
+        drainRows(SortExec(new InMemoryPartitionedPlanForSpillTest(schema, parts, 100), Seq(key), opts).execute(0))
+          .map(_.toVector)
+      val plain = run(ExecutionOptions.Default)
+      val spilled = run(spillyOpts())
+      assertEquals(s"$key: spill on and off, row for row", plain, spilled)
+      val stable = rows.sortBy(r => if (key.asc) r(0).asInstanceOf[Integer].intValue else -r(0).asInstanceOf[Integer].intValue)
+      assertEquals(s"$key: each key's rows in the order read", stable.map(_.toVector), spilled)
+    }
+  }
+
   @Test def manySpillRoundsStillSorted(): Unit = {
     assumeFullBatches()
     // 100k rows × 1-byte threshold → spill every batch.
@@ -123,18 +140,51 @@ class SortExecSpillTest {
   }
 
   /** A run longer than a batch is written a batch at a time, the last one
-    * short: a threshold the whole input reaches only at its end makes one run
-    * of a batch and 100 rows more, read back whole and in order. */
+    * short: a threshold the whole input reaches only at its end (what a run
+    * holding every row counts, [[SortRun.heldBytes]]) makes one run of a batch
+    * and 100 rows more, read back whole and in order. */
   @Test def aRunLongerThanABatchReadsBackWhole(): Unit = {
     assumeFullBatches()
     val n = ColumnarBatch.DefaultCapacity + 100
     val parts = uniqueKeyedRows(n, parts = 1, seed = 13L)
-    val bytes = new InMemoryPartitionedPlanForSpillTest(schema, parts).execute(0).map(Spill.estimateBytes).sum
-    val opts = ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(bytes))
+    val whole = new SortRun(new SortLayout(schema, keysAsc), countsBytes = true)
+    new InMemoryPartitionedPlanForSpillTest(schema, parts).execute(0).foreach(whole.append)
+    val opts = ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(whole.heldBytes))
     val node = new MetricsNode(0, "SortExec", 0, SortExec.IdxCounterNames)
     val rows = drainRows(SortExec(new InMemoryPartitionedPlanForSpillTest(schema, parts), keysAsc, opts, node).execute(0))
     assertEquals("one run, spilled", 1L, node.snapshot().counter("runsWritten"))
     assertEquals((0 until n).toVector, rows.map(_(0).asInstanceOf[Integer].intValue))
+  }
+
+  /** A run counts what it holds: its chunks' arrays by capacity, a string's
+    * payload once for each run of rows holding the same object, and eight
+    * bytes a row for the `Int`s that sort it; nothing when it cannot spill.
+    * So rows repeating one string object flush far later than rows of
+    * strings of their own, which the batch estimate (`Spill.estimateBytes`)
+    * counted alike. */
+  @Test def aRunCountsWhatItHolds(): Unit = {
+    val s = Schema(Vector(Field("k", DataType.IntType), Field("s", DataType.StringType)))
+    val layout = new SortLayout(s, keysAsc)
+    def batch(strings: Int => String): ColumnarBatch = {
+      val b = new ColumnarBatch(s, 1000)
+      (0 until 1000).foreach { r =>
+        b.column(0).asInstanceOf[IntVector].set(r, r)
+        b.column(1).asInstanceOf[StringVector].set(r, strings(r))
+      }
+      b.setNumRows(1000)
+      b
+    }
+    val one = "x" * 66
+    val shared = new SortRun(layout, countsBytes = true)
+    shared.append(batch(_ => one))
+    val own = new SortRun(layout, countsBytes = true)
+    own.append(batch(r => ("x" * 65) + (r % 10)))
+    val chunks = layout.chunkBytes * ((1000 + SortRun.Cap - 1) / SortRun.Cap)
+    assertEquals("one string object, counted once", chunks + (24 + 2 * 66) + 8 * 1000, shared.heldBytes)
+    assertEquals("a string object a row, each counted", chunks + 1000L * (24 + 2 * 66) + 8 * 1000, own.heldBytes)
+    val uncounted = new SortRun(layout, countsBytes = false)
+    uncounted.append(batch(_ => one))
+    assertEquals("nothing counted when the sort cannot spill", 8 * 1000L, uncounted.heldBytes)
   }
 
   /** The merge of spilled runs has nothing after its end: `next` past it, or
@@ -200,7 +250,7 @@ class SortExecSpillTest {
       snap.counter("runsWritten") > 0L)
     assertTrue(s"bytesSpilled must be > 0, got ${snap.counter("bytesSpilled")}",
       snap.counter("bytesSpilled") > 0L)
-    assertEquals(SortExec.PathKWay, snap.counter("path"))
+    assertEquals(SortExec.PathMerge, snap.counter("path"))
     assertEquals(5000L, snap.counter("inputRows"))
     assertEquals(5000L, snap.counter("outputRows"))
   }
@@ -209,9 +259,9 @@ class SortExecSpillTest {
   //
   // A child whose output schema has two columns sharing a name (`[k, k]`, as a
   /** An explicit NULL placement survives the spill path: flushed runs come
-    * back through parquet and heap-merge with the in-memory tails, and a NULL
-    * key has to land where the key says in both. A unique second key makes the
-    * order total, so the spilled output must equal the heap output row for row. */
+    * back through parquet and merge with the in-memory tails, and a NULL key
+    * has to land where the key says in both: the spilled output equals the
+    * unspilled one row for row. */
   @Test def explicitNullPlacementUnderSpill(): Unit = {
     assumeFullBatches()
     val p: Expr = ColRefExpr(1, "p", DataType.IntType)
@@ -228,7 +278,7 @@ class SortExecSpillTest {
       }
       val heap = run(ExecutionOptions.Default)
       val spilled = run(spillyOpts())
-      assertEquals(s"$key: spill must match the heap path row for row", heap, spilled)
+      assertEquals(s"$key: spill must match the unspilled sort row for row", heap, spilled)
       val nullAt = spilled.indices.filter(i => spilled(i)(0) == null)
       assertTrue(s"$key: expected NULL keys in the data", nullAt.nonEmpty)
       val expectedAt = if (key.nullsFirst) nullAt.indices else (spilled.length - nullAt.length until spilled.length)
@@ -287,13 +337,14 @@ class SortExecSpillTest {
   * needed here because the original is `private final class` in that file. */
 private final class InMemoryPartitionedPlanForSpillTest(
     schema: Schema,
-    partitions: Vector[Vector[Array[Any]]]) extends PhysicalPlan {
+    partitions: Vector[Vector[Array[Any]]],
+    batchRows: Int = ColumnarBatch.DefaultCapacity) extends PhysicalPlan {
   def outputSchema: Schema = schema
   def numPartitions: Int = partitions.length
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     val rows = partitions(partition)
     if (rows.isEmpty) return Iterator.empty
-    val batchSize = math.min(ColumnarBatch.DefaultCapacity, rows.length)
+    val batchSize = math.min(batchRows, rows.length)
     rows.grouped(batchSize).map { group =>
       val b = new ColumnarBatch(schema, math.max(1, group.length))
       var r = 0

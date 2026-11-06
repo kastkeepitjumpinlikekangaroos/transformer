@@ -10,7 +10,8 @@ import scala.util.control.NonFatal
   *
   * Two evaluation entry points:
   *   - [[eval]] returns one boxed `Any` for a single row — used by RowBuf-driven
-  *     paths (sort comparators, hash-join key reads, window per-row callbacks).
+  *     paths (window per-row callbacks) and where a conditional evaluates an
+  *     operand on the rows that need it.
   *   - [[evalVec]] returns a column vector for the whole batch — used by
   *     pipeline operators (Project, Filter) where eliminating per-row dispatch
   *     and boxing is the dominant speedup. Hot nodes override; everything else

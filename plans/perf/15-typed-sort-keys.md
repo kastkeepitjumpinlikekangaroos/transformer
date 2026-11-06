@@ -1,11 +1,16 @@
 # Plan 15: Sorts compare typed keys, not boxed rows
 
-> Status: **not started** (written 2026-11-01 against `32e89b1`, which has
-> `TopNExec`) · five decisions for the user below, each with a recommended
-> answer · Effort: 5-8 days · Risk: medium: every sort's comparison moves to a
-> typed twin of `SortKey.compare`, which must order every type exactly as
-> `Ops.cmp` does; one phase changes the order of tied rows on purpose, and only
-> with the user's yes (Q1)
+> Status: **done, Phases 0-5; Phase 6 left out, its gate not met** (landed
+> 2026-11-03 in one commit on `6919a6f`, an overnight run; see "What landed"
+> at the end). Written 2026-11-01 against `32e89b1`, which has `TopNExec`;
+> plans 14 and 13 landed between the writing and the work, so "What the code
+> does now" below is the code before this plan, and plan 13 had added the
+> column gather this plan needed (`ColumnVector.gather`, one source) · five
+> decisions for the user below, each taken overnight on its recommended
+> answer, none yet confirmed by the user · Effort: 5-8 days · Risk: medium:
+> every sort's comparison moves to a typed twin of `SortKey.compare`, which
+> must order every type exactly as `Ops.cmp` does; one phase changes the order
+> of tied rows on purpose (Q1)
 
 ## Goal
 
@@ -72,6 +77,9 @@ an ORDER BY expression that is not an output column there, as Postgres does.
 
 ## What the code does now
 
+(As it was at `6919a6f`, before this plan: "What landed" says what it does
+since.)
+
 | Site | Holds | Compares |
 |---|---|---|
 | `SortExec.sortPartition` | each row as an `Array[Any]` (`getBoxed` per cell) in an `ArrayBuffer`; `bufBytes += Spill.estimateBytes(b)` with spill on | `sortBuffer`: `Arrays.sort` (TimSort, stable) with `rowOrdering` |
@@ -98,10 +106,14 @@ and `SortExecTest`'s header calls the SmallN sort unstable (TimSort is stable).
   (keys once a batch, typed, and no boxed rows); plan 01's status line and
   plans/perf/README.md say so.
 - **Plan 13 Step 6** needs a column gather in `core`; this plan needs it and a
-  range copy. Whichever lands first adds them.
-- **plans/testing/18** (not started) would ban raw float comparisons outside
-  `Ops.floatCompare` (R2), float key bits outside `KeyCodec` (R3) and
-  `String.compareTo` outside `Ops` (R4); the typed order adds no exception.
+  range copy. Whichever lands first adds them. Plan 13 landed first, with
+  `ColumnVector.gather` from one source; a sort's rows leave many chunks, so
+  this plan added `gatherChunks` beside it, and `copyRange`.
+- **plans/testing/18** (landed with the round-3 merge before this plan ran)
+  bans raw float comparisons outside `Ops.floatCompare` (R2), float key bits
+  outside `KeyCodec` (R3) and `String.compareTo` outside `Ops` (R4); the typed
+  order adds no exception, and R4's one allowed site moved from `Ops.cmp` to
+  `Ops.stringCompare`, which `Ops.cmp` and `KeyOrder` both call.
 
 ## Design
 
@@ -425,6 +437,274 @@ sort, read with `$JDK21/bin/jfr view hot-methods sort.jfr`, and
   back at it (gotchas.md), as today.
 - **Concurrent sessions** edit this tree: develop in a git worktree (with a
   local `.bazelignore` naming `.claude` if it lives under `.claude/worktrees`).
+
+## What landed (2026-11-03, overnight)
+
+Phases 0-5 in one commit on `6919a6f` (the overnight run's orchestrator asked
+for one commit for the plan, not one a phase); Phase 6 was built, measured and
+left out, its gate not met. Nothing on the stop-and-ask list was crossed: the
+spill file gained only the computed key columns, `Spill.estimateBytes` is as
+it was for the other breakers, `WindowExec` and the planner (but `topN`'s
+`RAND()` gate) are untouched, and no rows or order changed outside Phase 4.
+
+- **Phase 0.** `SortExecBench` (`benchmarks/micro`): the real `SortExec`
+  (`sort`) and `TopNExec` keeping 3 rows (`topN`) over 8 in-memory partitions
+  of 1M and 4M rows, the four shapes the plan names, spill off and at 16 MiB.
+  The baseline (below) was taken at `6919a6f` before any change to `src/main`.
+- **Phase 1.** `KeyOrder` (`sql/plan/KeyOrder.scala`) and `SortKey.order`;
+  `Ops.stringCompare`, `Ops.binaryCompare` and a public
+  `Ops.decimalCompare(BigDecimal, BigDecimal)`, which `Ops.cmp` calls too
+  (its fallback for other pairs included); `core/IndexSort.scala` with its
+  `IntComparator`; `ColumnVector.copyRange` and `gatherChunks`.
+  `bytecode_rules_test`'s R4 allows `String.compareTo` in
+  `Ops.stringCompare` alone, where it allowed `Ops.cmp`.
+- **Phase 2.** `SortExec` holds a partition's rows in a `SortRun` (chunks of
+  `DefaultCapacity` rows, the input's columns and then a column a computed
+  key, `SortLayout` saying where each key is read), sorts the rows' `Int`
+  names with `IndexSort`, writes a spilled run's computed keys after its
+  columns, and merges cursors that expose their head row's vectors; the
+  merge kept the `PriorityQueue` (its boxes made once) and, below 4096 rows in
+  memory, broke ties by cursor index, which equals concatenating and sorting
+  stably. Same flush rule. `rowOrdering`, the boxed `SortExec.batches` (after
+  Phase 3) and `RowView`, which nothing used then, are gone. It returned row
+  for row what the boxed sort returned (`BoxedSortExec`, today's `SortExec`
+  copied into `fuzz/oracle/`): `sort_parity_fuzz_test` at 3,000 seeds, ties
+  included.
+- **Phase 3.** `TopNExec` keeps a partition's rows in slots (a batch of `n`
+  rows of its columns and computed keys, allocated at its first row), a heap
+  of slot numbers by `KeyOrder` then read order, and sorts every partition's
+  slots together with `IndexSort` (`partition << 14 | slot`, so at most 2^17
+  partitions); `PhysicalPlanner.topN` no longer refuses a key that reads
+  `RAND()`. Row for row the same at 3,000 seeds against the stable sort's
+  first `n`, which the base top-n returned too.
+- **Phase 4 (Q1).** `LoserTree`: a tournament over the cursors, ties by
+  cursor index, `log2 K` comparisons a row. Every path now returns the stable
+  sort of the input read partition by partition, spill on and off row for
+  row. The small-input path went: the tree merges 500 rows over 8 partitions
+  in 39.5 us where Phase 2's small path took 69.1, and 4,000 in 229.5 where it
+  took 357.3 (FLOAT; BIGINT and two keys alike). `BoxedSortExec` went with it,
+  and `sort_parity_fuzz_test`'s oracle is the stable sort (every key evaluated
+  on its row, the boxed values sorted by `SortKey.compare`). The path codes
+  are `PathOneRun` and `PathMerge` (were `PathSmallN` and `PathKWay`), and
+  `SmallNThreshold` is gone.
+- **Phase 5 (Q2).** `SortRun.heldBytes`: chunks' arrays by capacity (a
+  reference 4 bytes under a 32 GB heap, else 8), each string's, byte array's
+  and decimal's payload as `Spill.estimateBytes` sizes it once for each run of
+  rows holding the same object, and eight bytes a row for the names and
+  `IndexSort`'s auxiliary array; counted only when the sort can spill, and a
+  run flushes once it reaches the threshold. Polymarket's full sort writes 30
+  runs where it wrote 333.
+- **Phase 6 (Q3), left out.** Built and measured: `KeyOrder.prefix` for
+  every type but DECIMAL and NULL as the plan's table has it (STRING as the
+  first 8 bytes of its code units written CESU-8 style), the leading keys
+  packed while exact, the first key's NULL rows a block at its NULL end, one
+  exact key of 32 bits or fewer sorted as packed `(prefix, name)` longs by
+  `Arrays.sort(long[])`, and the loser tree comparing heads' prefixes first.
+  It passed `sort_parity_fuzz_test` at 3,000 seeds. Neither branch of the gate
+  was met (Measurements): JFR shows no `KeyOrder` frame of its own after
+  Phase 5 (it is inlined into `IndexSort.mergeSort`, 21.9% of the full sort's
+  samples, and `LoserTree.beats`, 7.8%, together under 30% with the merge
+  sort's own moves in them), and `SortExecBench` gained 1.03x to 1.35x, no
+  shape near 1.5x. So the plan stops at Phase 5.
+- **Tests.** `fuzz:sort_key_order_test`, `core:index_sort_test`, two
+  `core_types_test` cases (`copyRange`, `gatherChunks`),
+  `fuzz:sort_parity_fuzz_test` and its campaign (`sort_parity_fuzz_campaign`),
+  `sql/exec:sort_memory_test` (4M rows in 256 MB; the base sort ran out of it
+  in 3.6 s), `sort_exec_test`'s `tiedRowsComeInTheOrderTheyWereRead` and
+  `aKeyThatReadsRandIsReadOnceARow` (20,588 descents on the base sort, where
+  at most one is right), `sort_exec_spill_test`'s
+  `tiedKeysComeBackRowForRowWithAndWithoutSpill` and `aRunCountsWhatItHolds`,
+  and `top_n_exec_test`'s plan of `SELECT DISTINCT k ... ORDER BY RAND() LIMIT
+  3`. Changed: `sort_exec_test` and `sort_exec_spill_test` assert positions
+  over tied keys against the stable sort; `aRunLongerThanABatchReadsBackWhole`
+  takes its threshold from what a run of every row holds (`heldBytes`), since
+  the batch estimate no longer decides a sort's flush;
+  `operator_counters_test` names `PathOneRun`; `SortComparatorBench` compares
+  through `KeyOrder`.
+
+### Overnight decisions
+
+Taken overnight as recommended, not yet confirmed by the user:
+
+- **Q1** (ties by cursor order): yes, Phase 4. Visible: the full polymarket
+  sort's last rows, all `change_size` 0.0, are now the last rows read (market
+  ids `0xffff...`), where the heap's shape left `0x877b...` there.
+- **Q2** (a sort counts what it holds): yes, `SortExec` only, after Phase 4.
+- **Q3** (normalized prefixes, gated): gated; the gate was not met, so Phase 6
+  is left out.
+- **Q4** (`WindowExec`): out of scope; it keeps `SortKey.compare`.
+- **Q5** (a typed twin of `SortKey.compare`): yes, `SortKey.order`.
+
+Calls of my own, for the user to look at:
+
+- **`gatherChunks` and `copyRange` beside plan 13's `gather`**, a method each
+  on every vector class, since a sorted run's rows come from many chunks.
+- **A dense copy of each key** (the plan's Phase 2 bench question) sorted a
+  run of 1M rows 1.07x (FLOAT), 1.32x (BIGINT), 1.08x (STRING) and 1.19x
+  (two keys) faster than reading keys through the chunks: not adopted, below
+  1.3x on three shapes, and it holds a second copy of each key.
+- **The small-input path went** (Phase 4), the tree being faster below 4096
+  rows, as measured above; `PathSmallN` / `PathKWay` became `PathOneRun` /
+  `PathMerge` and docs/benchmarking.md says what each counts.
+- **`RowView` is gone**, nothing reading it after Phase 2; conventions.md's
+  1-row batch advice names `RowBuf` alone.
+- **A column key whose declared type is not its column's** is computed like
+  any other key, rather than read in place, so its order never reads a vector
+  of another type.
+- **A run counts a reference as 4 bytes under a 32 GB heap, 8 above**, the
+  JVM's default compressed references.
+- **A sort that cannot spill counts nothing**, so the in-memory path pays no
+  per-value scan.
+- **A partition holds at most `SortRun.MaxRows` rows** (`Int.MaxValue`, fewer
+  for a batch capacity that is no power of two) and fails past it, naming the
+  limit; a top-n reads at most 2^17 partitions.
+
+### Held for the user
+
+- **Phase 6**, its gate not met (above). The prototype is not in the tree;
+  its design is the plan's, measured as below.
+- **Shrinking spilled runs' row groups.** The plan measured peak RSS before
+  shrinking them: the full sort at `-Xmx2g` peaks at 2.08 GB after Phase 5,
+  where it peaked at 1.50 GB after Phase 4 and 2.34 GB at the base. A sort now
+  holds the threshold it is given (8 partitions of 64 MiB at `-Xmx2g`, where
+  the batch estimate, 172 bytes a row here against about 8 held, kept runs
+  far below it), and writes runs ten times as long (30, about 6.5 MB each on
+  disk, where there were 333). Changing the spill writer's row group size
+  changes the spill file, stop-and-ask (a), so it is held.
+- **The follow-ups**: `WindowExec` on `KeyOrder` and `IndexSort` (Q4); the
+  one-thread merge (plan 04 Phase 7); and the parquet writer's dictionary
+  hashing of spilled strings, a third of the full sort's CPU after Phase 5
+  (`Binary.hashCode` and `equals`).
+
+### Found on the way
+
+- **The live `SELECT DISTINCT ... ORDER BY RAND()` bug is fixed**: the sort
+  (Phase 2) and the top-n (Phase 3) read each key once a row.
+  `sort_exec_test`'s `aKeyThatReadsRandIsReadOnceARow` proves it over
+  `DISTINCT`, `UNION` and a `LIMIT` of 9,000 (a top-n now); the base sort
+  failed it with 20,588 descents.
+- **A spilled sort evaluated a computed key on the values its runs read
+  back**, so a key whose value depends on a decimal's scale (`CAST(d AS
+  STRING)` over a `DECIMAL(9,2)` holding `1.0`, which a run reads back as
+  `1.00`) could order a spilled run apart from the same rows unspilled. Typed
+  runs store each computed key as evaluated on its row. No test met it; found
+  reading the boxed sort for the parity oracle.
+- **Every forked JMH benchmark failed as it started**, the deploy jar's
+  dnsjava resolver provider being in `META-INF/versions/18/` of a jar not
+  marked multi-release. docs/benchmarking.md gives the workaround these
+  measurements used.
+- **The base full sort took 140 s here, not the 333 s the plan measured** at
+  `32e89b1` on 2026-11-01; its JFR is the plan's picture (below).
+- **`core_types_test` had a doc comment cut from its test** by plan 13's
+  insertion; it is back over `rowGettersNameAValueTheyCannotRead`.
+
+### Measurements
+
+The 2026-03-26 orderbook day (132M rows, 8 partitions), JDK 21 (bazel's
+remotejdk21), Apple M4, 8 cores, 16 GB, `-Xmx2g` unless named, one run at a
+time with nothing else running, the file in the page cache; peak RSS is
+`/usr/bin/time -l`'s maximum resident set size. Base is `6919a6f`'s jar.
+
+| Query | Base | Phase 2 | Phase 3 | Phase 4 | Phase 5 |
+|---|---|---|---|---|---|
+| `... ORDER BY change_size DESC LIMIT 3` (top-n) | 2.67 s, 0.53 GB | 2.83 s, 0.62 GB | 3.09 s, 0.45 GB | 2.62 s, 0.43 GB | 2.76 s, 0.39 GB |
+| the same, three runs alternating with the base jar | 2.84, 2.67, 2.65 s | | | | 2.60, 2.59, 2.59 s |
+| `... ORDER BY change_size DESC`, `--spill` (full sort) | 139.9 s, 2.34 GB | 32.1 s, 1.47 GB | 32.2 s, 1.48 GB | 26.1 s, 1.50 GB | 25.3 s, 2.08 GB |
+| runs it writes | 333 | | | | 30 |
+| `SELECT COUNT(market_id), COUNT(change_size)` (the scan alone) | 2.43 s, 0.49 GB | 2.46 s, 0.55 GB | 2.47 s, 0.47 GB | 2.52 s, 0.75 GB | 2.43 s, 0.64 GB |
+| the full sort without `--spill`, `-Xmx4g` | | | | | 13.0 s, 3.43 GB |
+| the same at `-Xmx2g` | out of heap | | | | out of heap after 6.7 s |
+
+- **H1** (top-n within 1.3x of the scan, RSS no higher): 2.59 s against the
+  scan's 2.43 s, 1.07x, at 0.44 to 0.70 GB as the base's 0.46 to 0.71.
+- **H2** (the full sort 5x faster after Phase 2, under 40 s after Phase 5):
+  4.4x after Phase 2, 25.3 s after Phase 5 (5.5x; DuckDB's 95 s). Every jar's
+  first and last 20 rows are the base's through Phase 3; from Phase 4 the
+  tied rows at the end are the last read.
+- **H3** (`sort_memory_test` in 256 MB; the full sort without spill at
+  `-Xmx4g`): both, 13.0 s.
+- **H4** (`SortExecBench`, 10x on one FLOAT or BIGINT key, 5x on the others):
+  without spill 7.3x and 8.5x (query), 8.5x and 8.4x (BIGINT), 5.6x and 6.7x
+  (STRING), 6.9x and 6.6x (two keys) at 1M and 4M rows after Phase 5; the
+  table below.
+
+JFR hot methods of the full sort (`jfr view hot-methods`), top samples:
+
+| Base | | Phase 5 | |
+|---|---|---|---|
+| `ColumnarBatch` constructor's tabulate | 23.0% | `IndexSort.mergeSort` | 21.9% |
+| `ColumnVector.allocate` | 20.8% | parquet `Binary.hashCode` | 20.4% |
+| `RowView.apply` | 13.4% | parquet `Binary.equals` | 13.8% |
+| `Ops.cmp` | 7.1% | `LoserTree.beats` | 7.8% |
+| `SortKey.compare` | 6.0% | parquet `ColumnReaderBase.skip` | 3.0% |
+| parquet `Binary.hashCode` | 5.1% | parquet `FallbackValuesWriter.writeBytes` | 2.9% |
+| `ClassTag.apply` | 4.1% | parquet `Binary.lexicographicCompare` | 2.8% |
+
+`SortExecBench` `sort`, milliseconds an invocation (`SingleShotTime`, 2
+warm-ups and 5 measured):
+
+| Shape, rows, spill | Base | Phase 2 | Phase 3 | Phase 4 | Phase 5 | Phase 6 prototype |
+|---|---|---|---|---|---|---|
+| query 1M off | 670.0 | 132.4 | 133.3 | 93.0 | 91.9 | 74.9 |
+| query 1M 16 MiB | 1118.5 | 326.7 | 322.3 | 264.4 | 263.5 | 252.5 |
+| query 4M off | 3072.6 | 562.3 | 557.0 | 364.8 | 363.8 | 269.8 |
+| query 4M 16 MiB | 4468.8 | 1357.7 | 1376.8 | 1187.9 | 1190.7 | 1025.3 |
+| BIGINT 1M off | 796.0 | 149.9 | 149.6 | 92.3 | 93.7 | 86.0 |
+| BIGINT 1M 16 MiB | 791.2 | 142.7 | 151.5 | 90.5 | 87.7 | 79.0 |
+| BIGINT 4M off | 3844.3 | 784.8 | 780.5 | 462.3 | 457.0 | 405.0 |
+| BIGINT 4M 16 MiB | 3919.8 | 778.1 | 784.5 | 466.9 | 450.3 | 395.0 |
+| STRING 1M off | 830.0 | 193.9 | 193.8 | 149.4 | 148.3 | 118.2 |
+| STRING 1M 16 MiB | 765.4 | 193.8 | 193.5 | 152.1 | 149.7 | 118.0 |
+| STRING 4M off | 3919.3 | 829.4 | 809.4 | 577.0 | 584.7 | 503.2 |
+| STRING 4M 16 MiB | 4816.0 | 1638.8 | 1617.7 | 1395.7 | 1436.1 | 1222.9 |
+| two keys 1M off | 1106.6 | 209.4 | 210.2 | 153.7 | 159.6 | 147.2 |
+| two keys 1M 16 MiB | 1640.7 | 446.6 | 448.0 | 371.3 | 358.6 | 348.4 |
+| two keys 4M off | 5681.9 | 1073.7 | 1060.6 | 868.9 | 864.6 | 813.2 |
+| two keys 4M 16 MiB | 7372.1 | 2214.6 | 2191.2 | 1837.3 | 1822.6 | 1754.4 |
+
+`SortExecBench` `topN` at the base and after Phase 5, 10 warm-ups and 20
+measured (a single shot is tens of milliseconds, so five say little), in
+milliseconds: query 8.8 and 16.0 against 5.3 and 10.1 (1M and 4M, spill off),
+BIGINT 10.1 and 22.9 against 4.2 and 10.0, STRING 16.4 and 28.0 against 14.2
+and 26.5, two keys 11.4 and 26.4 against 6.5 and 12.2: 1.06x to 2.39x.
+
+The merge of a sort without spill is on one thread: of the Phase 5 merge's
+samples in a profile of the four shapes at 4M rows, `LoserTree.beats` was
+39.5%, `advanceWinner` 25.1% and `KeyOrder` 22.9%, the output's copies under
+6%; the runs' sorts, in parallel, were 84 to 257 ms of totals of 343 to 904.
+
+### Gates
+
+Run on 2026-11-03, and again on 2026-11-05 after a usage limit stopped the
+run before its commit (the tree unchanged between), with the same results:
+
+- **`bazel test //...`**: 97/97 under the default config and under each of
+  `serial`, `verify`, `leaks` and `zone`. The sort targets
+  (`sort_exec_test`, `sort_exec_spill_test`, `top_n_exec_test`,
+  `top_n_memory_test`, `sort_memory_test`, `sql_engine_test`,
+  `closing_test`, `spill_stress_test`, `sort_key_order_test`,
+  `sort_parity_fuzz_test`, `index_sort_test`, `core_types_test`,
+  `operator_counters_test`, `bytecode_rules_test` and `slt_test`): 15/15
+  under `batch1`, `batch2`, `sharded`, `hashzero` and `chaos` too, so green
+  under all nine configs.
+- **Parity**: Phases 2 and 3 row for row against the boxed sort, and the
+  top-n against the stable sort's first `n`, at 3,000 seeds each; Phases 4
+  and 5 (and the Phase 6 prototype) against the stable sort at 3,000.
+- **Campaigns** at `FUZZ_SEEDS=20000` (seeds 0 to 19999, three JVMs at
+  `-Xmx1200m` from the built launchers with bazel shut down, the properties
+  only): `metamorphic_fuzz_campaign` clean in eight blocks of 2,500 (96 to
+  115 s a block), `sort_parity_fuzz_campaign` clean in two of 10,000 (74 to
+  113 s).
+- **The jaffle-shop jar**: exit 0, 15/15 Succeeded, every validation
+  passing.
+- **The polymarket jar** (`-Xmx12g`): exit 0, 14 Succeeded, 2
+  ValidationFailed, 1 Skipped, 0 Failed, in 85.8 and 90.7 s at 6.8 and
+  5.0 GB peak RSS. The base jar's `transformer run` of the job wrote the
+  same rows in the same order (their CSV byte for byte) to its three sorted
+  tables (`final_combined_report`, `mart_high_activity_markets`,
+  `mart_volatility_ranking`) and to the three others compared
+  (`mart_market_overview`, `int_orderbook_market_summary`,
+  `int_markets_categorized`).
 
 ## Launch prompt
 

@@ -170,6 +170,22 @@ sealed trait ColumnVector {
     * with no boxing; any other is copied cell by cell, as [[copyTo]] copies
     * one. */
   def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit
+
+  /** Write rows `from`, ..., `until - 1` of `src` into this vector's rows
+    * `at`, ..., `at + until - from - 1`: a sort copies the rows it reads into
+    * chunks of its own so. `src` of this vector's own class is copied an
+    * `arraycopy` a column, its NULLs with it (a NULL row's value slot holding
+    * what the source's did); any other is copied cell by cell, as [[copyTo]]
+    * copies one. */
+  def copyRange(src: ColumnVector, from: Int, until: Int, at: Int): Unit
+
+  /** Write rows `sel(from)`, ..., `sel(until - 1)` of `chunks` into this
+    * vector's rows `at`, ..., `at + until - from - 1`, each index naming its
+    * chunk in its high bits and its row in the `shift` low ones: a sort's
+    * rows leave its chunks so, in the order it sorted them. A chunk of this
+    * vector's own class is read through its arrays, with no boxing; any other
+    * cell is copied as [[copyTo]] copies one. */
+  def gatherChunks(chunks: Array[ColumnVector], shift: Int, sel: Array[Int], from: Int, until: Int, at: Int): Unit
 }
 
 object ColumnVector {
@@ -185,6 +201,30 @@ object ColumnVector {
       d += 1
     }
   }
+
+  /** [[ColumnVector.copyRange]] a cell at a time: `src` of another class
+    * than `dst`. */
+  private[core] def copyCells(src: ColumnVector, dst: ColumnVector, from: Int, until: Int, at: Int): Unit = {
+    var i = from
+    var d = at
+    while (i < until) {
+      src.copyTo(i, dst, d)
+      i += 1
+      d += 1
+    }
+  }
+
+  /** The NULL bits of rows `from` to `until - 1` of `src` onto rows `at` on of
+    * `dst`, the bits between cleared. */
+  private[core] def copyNulls(src: util.BitSet, from: Int, until: Int, dst: util.BitSet, at: Int): Unit =
+    if (until > from) {
+      dst.clear(at, at + until - from)
+      var i = src.nextSetBit(from)
+      while (i >= 0 && i < until) {
+        dst.set(at + i - from)
+        i = src.nextSetBit(i + 1)
+      }
+    }
 
   def allocate(dt: DataType, capacity: Int): ColumnVector = dt match {
     case DataType.IntType       => new IntVector(new Array[Int](capacity), new util.BitSet(capacity), capacity)
@@ -235,6 +275,29 @@ final class IntVector(val values: Array[Int], val nulls: util.BitSet, val capaci
       }
     case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
   }
+  def copyRange(src: ColumnVector, from: Int, until: Int, at: Int): Unit = src match {
+    case s: IntVector =>
+      System.arraycopy(s.values, from, values, at, until - from)
+      ColumnVector.copyNulls(s.nulls, from, until, nulls, at)
+    case _ => ColumnVector.copyCells(src, this, from, until, at)
+  }
+  def gatherChunks(chunks: Array[ColumnVector], shift: Int, sel: Array[Int], from: Int, until: Int, at: Int): Unit = {
+    val mask = (1 << shift) - 1
+    var i = from
+    var d = at
+    while (i < until) {
+      val e = sel(i)
+      chunks(e >>> shift) match {
+        case s: IntVector =>
+          val r = e & mask
+          if (s.nulls.get(r)) { nulls.set(d); values(d) = 0 }
+          else { nulls.clear(d); values(d) = s.values(r) }
+        case other => other.copyTo(e & mask, this, d)
+      }
+      i += 1
+      d += 1
+    }
+  }
 }
 
 final class LongVector(val values: Array[Long], val nulls: util.BitSet, val capacity: Int) extends ColumnVector {
@@ -270,6 +333,29 @@ final class LongVector(val values: Array[Long], val nulls: util.BitSet, val capa
         d += 1
       }
     case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
+  }
+  def copyRange(src: ColumnVector, from: Int, until: Int, at: Int): Unit = src match {
+    case s: LongVector =>
+      System.arraycopy(s.values, from, values, at, until - from)
+      ColumnVector.copyNulls(s.nulls, from, until, nulls, at)
+    case _ => ColumnVector.copyCells(src, this, from, until, at)
+  }
+  def gatherChunks(chunks: Array[ColumnVector], shift: Int, sel: Array[Int], from: Int, until: Int, at: Int): Unit = {
+    val mask = (1 << shift) - 1
+    var i = from
+    var d = at
+    while (i < until) {
+      val e = sel(i)
+      chunks(e >>> shift) match {
+        case s: LongVector =>
+          val r = e & mask
+          if (s.nulls.get(r)) { nulls.set(d); values(d) = 0L }
+          else { nulls.clear(d); values(d) = s.values(r) }
+        case other => other.copyTo(e & mask, this, d)
+      }
+      i += 1
+      d += 1
+    }
   }
 }
 
@@ -307,6 +393,29 @@ final class FloatVector(val values: Array[Float], val nulls: util.BitSet, val ca
       }
     case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
   }
+  def copyRange(src: ColumnVector, from: Int, until: Int, at: Int): Unit = src match {
+    case s: FloatVector =>
+      System.arraycopy(s.values, from, values, at, until - from)
+      ColumnVector.copyNulls(s.nulls, from, until, nulls, at)
+    case _ => ColumnVector.copyCells(src, this, from, until, at)
+  }
+  def gatherChunks(chunks: Array[ColumnVector], shift: Int, sel: Array[Int], from: Int, until: Int, at: Int): Unit = {
+    val mask = (1 << shift) - 1
+    var i = from
+    var d = at
+    while (i < until) {
+      val e = sel(i)
+      chunks(e >>> shift) match {
+        case s: FloatVector =>
+          val r = e & mask
+          if (s.nulls.get(r)) { nulls.set(d); values(d) = 0f }
+          else { nulls.clear(d); values(d) = s.values(r) }
+        case other => other.copyTo(e & mask, this, d)
+      }
+      i += 1
+      d += 1
+    }
+  }
 }
 
 final class DoubleVector(val values: Array[Double], val nulls: util.BitSet, val capacity: Int) extends ColumnVector {
@@ -343,6 +452,29 @@ final class DoubleVector(val values: Array[Double], val nulls: util.BitSet, val 
       }
     case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
   }
+  def copyRange(src: ColumnVector, from: Int, until: Int, at: Int): Unit = src match {
+    case s: DoubleVector =>
+      System.arraycopy(s.values, from, values, at, until - from)
+      ColumnVector.copyNulls(s.nulls, from, until, nulls, at)
+    case _ => ColumnVector.copyCells(src, this, from, until, at)
+  }
+  def gatherChunks(chunks: Array[ColumnVector], shift: Int, sel: Array[Int], from: Int, until: Int, at: Int): Unit = {
+    val mask = (1 << shift) - 1
+    var i = from
+    var d = at
+    while (i < until) {
+      val e = sel(i)
+      chunks(e >>> shift) match {
+        case s: DoubleVector =>
+          val r = e & mask
+          if (s.nulls.get(r)) { nulls.set(d); values(d) = 0.0 }
+          else { nulls.clear(d); values(d) = s.values(r) }
+        case other => other.copyTo(e & mask, this, d)
+      }
+      i += 1
+      d += 1
+    }
+  }
 }
 
 final class BooleanVector(val values: Array[Boolean], val nulls: util.BitSet, val capacity: Int) extends ColumnVector {
@@ -378,6 +510,29 @@ final class BooleanVector(val values: Array[Boolean], val nulls: util.BitSet, va
       }
     case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
   }
+  def copyRange(src: ColumnVector, from: Int, until: Int, at: Int): Unit = src match {
+    case s: BooleanVector =>
+      System.arraycopy(s.values, from, values, at, until - from)
+      ColumnVector.copyNulls(s.nulls, from, until, nulls, at)
+    case _ => ColumnVector.copyCells(src, this, from, until, at)
+  }
+  def gatherChunks(chunks: Array[ColumnVector], shift: Int, sel: Array[Int], from: Int, until: Int, at: Int): Unit = {
+    val mask = (1 << shift) - 1
+    var i = from
+    var d = at
+    while (i < until) {
+      val e = sel(i)
+      chunks(e >>> shift) match {
+        case s: BooleanVector =>
+          val r = e & mask
+          if (s.nulls.get(r)) { nulls.set(d); values(d) = false }
+          else { nulls.clear(d); values(d) = s.values(r) }
+        case other => other.copyTo(e & mask, this, d)
+      }
+      i += 1
+      d += 1
+    }
+  }
 }
 
 final class StringVector(val values: Array[String], val capacity: Int) extends ColumnVector {
@@ -409,6 +564,24 @@ final class StringVector(val values: Array[String], val capacity: Int) extends C
       }
     case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
   }
+  def copyRange(src: ColumnVector, from: Int, until: Int, at: Int): Unit = src match {
+    case s: StringVector => System.arraycopy(s.values, from, values, at, until - from)
+    case _ => ColumnVector.copyCells(src, this, from, until, at)
+  }
+  def gatherChunks(chunks: Array[ColumnVector], shift: Int, sel: Array[Int], from: Int, until: Int, at: Int): Unit = {
+    val mask = (1 << shift) - 1
+    var i = from
+    var d = at
+    while (i < until) {
+      val e = sel(i)
+      chunks(e >>> shift) match {
+        case s: StringVector => values(d) = s.values(e & mask)
+        case other => other.copyTo(e & mask, this, d)
+      }
+      i += 1
+      d += 1
+    }
+  }
 }
 
 final class BinaryVector(val values: Array[Array[Byte]], val capacity: Int) extends ColumnVector {
@@ -439,6 +612,24 @@ final class BinaryVector(val values: Array[Array[Byte]], val capacity: Int) exte
         d += 1
       }
     case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
+  }
+  def copyRange(src: ColumnVector, from: Int, until: Int, at: Int): Unit = src match {
+    case s: BinaryVector => System.arraycopy(s.values, from, values, at, until - from)
+    case _ => ColumnVector.copyCells(src, this, from, until, at)
+  }
+  def gatherChunks(chunks: Array[ColumnVector], shift: Int, sel: Array[Int], from: Int, until: Int, at: Int): Unit = {
+    val mask = (1 << shift) - 1
+    var i = from
+    var d = at
+    while (i < until) {
+      val e = sel(i)
+      chunks(e >>> shift) match {
+        case s: BinaryVector => values(d) = s.values(e & mask)
+        case other => other.copyTo(e & mask, this, d)
+      }
+      i += 1
+      d += 1
+    }
   }
 }
 
@@ -477,6 +668,29 @@ final class DateVector(val values: Array[Int], val nulls: util.BitSet, val capac
         d += 1
       }
     case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
+  }
+  def copyRange(src: ColumnVector, from: Int, until: Int, at: Int): Unit = src match {
+    case s: DateVector =>
+      System.arraycopy(s.values, from, values, at, until - from)
+      ColumnVector.copyNulls(s.nulls, from, until, nulls, at)
+    case _ => ColumnVector.copyCells(src, this, from, until, at)
+  }
+  def gatherChunks(chunks: Array[ColumnVector], shift: Int, sel: Array[Int], from: Int, until: Int, at: Int): Unit = {
+    val mask = (1 << shift) - 1
+    var i = from
+    var d = at
+    while (i < until) {
+      val e = sel(i)
+      chunks(e >>> shift) match {
+        case s: DateVector =>
+          val r = e & mask
+          if (s.nulls.get(r)) { nulls.set(d); values(d) = 0 }
+          else { nulls.clear(d); values(d) = s.values(r) }
+        case other => other.copyTo(e & mask, this, d)
+      }
+      i += 1
+      d += 1
+    }
   }
 }
 
@@ -531,6 +745,29 @@ final class TimestampVector(val values: Array[Long], val nulls: util.BitSet, val
         d += 1
       }
     case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
+  }
+  def copyRange(src: ColumnVector, from: Int, until: Int, at: Int): Unit = src match {
+    case s: TimestampVector =>
+      System.arraycopy(s.values, from, values, at, until - from)
+      ColumnVector.copyNulls(s.nulls, from, until, nulls, at)
+    case _ => ColumnVector.copyCells(src, this, from, until, at)
+  }
+  def gatherChunks(chunks: Array[ColumnVector], shift: Int, sel: Array[Int], from: Int, until: Int, at: Int): Unit = {
+    val mask = (1 << shift) - 1
+    var i = from
+    var d = at
+    while (i < until) {
+      val e = sel(i)
+      chunks(e >>> shift) match {
+        case s: TimestampVector =>
+          val r = e & mask
+          if (s.nulls.get(r)) { nulls.set(d); values(d) = 0L }
+          else { nulls.clear(d); values(d) = s.values(r) }
+        case other => other.copyTo(e & mask, this, d)
+      }
+      i += 1
+      d += 1
+    }
   }
 }
 
@@ -587,6 +824,24 @@ final class DecimalVector(val values: Array[java.math.BigDecimal], val precision
       }
     case _ => ColumnVector.gatherCells(src, this, sel, from, until, at)
   }
+  def copyRange(src: ColumnVector, from: Int, until: Int, at: Int): Unit = src match {
+    case s: DecimalVector => System.arraycopy(s.values, from, values, at, until - from)
+    case _ => ColumnVector.copyCells(src, this, from, until, at)
+  }
+  def gatherChunks(chunks: Array[ColumnVector], shift: Int, sel: Array[Int], from: Int, until: Int, at: Int): Unit = {
+    val mask = (1 << shift) - 1
+    var i = from
+    var d = at
+    while (i < until) {
+      val e = sel(i)
+      chunks(e >>> shift) match {
+        case s: DecimalVector => values(d) = s.values(e & mask)
+        case other => other.copyTo(e & mask, this, d)
+      }
+      i += 1
+      d += 1
+    }
+  }
 }
 
 /** Column with no data (all nulls). Used for the NULL literal type. */
@@ -598,4 +853,6 @@ final class NullVectorImpl(val capacity: Int) extends ColumnVector {
   def setBoxed(row: Int, value: Any): Unit = ()
   def copyTo(srcRow: Int, dst: ColumnVector, dstRow: Int): Unit = dst.setNull(dstRow)
   def gather(src: ColumnVector, sel: Array[Int], from: Int, until: Int, at: Int): Unit = ()
+  def copyRange(src: ColumnVector, from: Int, until: Int, at: Int): Unit = ()
+  def gatherChunks(chunks: Array[ColumnVector], shift: Int, sel: Array[Int], from: Int, until: Int, at: Int): Unit = ()
 }

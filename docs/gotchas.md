@@ -1298,7 +1298,7 @@ ship a fix or move something from "not done" to "done".
 
   All three sites now advance through `java.lang.Double.compare`, the total
   order the class's own reference-type branch already used (`Ops.cmp`), and the
-  one `ORDER BY` (`SortExec.rowOrdering`) and `GREATEST`/`LEAST`
+  one `ORDER BY` (`SortKey.compare` and its typed twin `SortKey.order`) and `GREATEST`/`LEAST`
   (`Funcs.pickByOrdering`) follow. So **`MAX` of a column containing `NaN` is
   `NaN` and `MIN` of one is the smallest non-`NaN`**, agreeing with
   `ORDER BY x DESC LIMIT 1` and with Postgres; `-0.0` sorts below `0.0` on the
@@ -1484,11 +1484,15 @@ ship a fix or move something from "not done" to "done".
   assert one `(data, query)` gives the same result across spill on/off, metrics
   on/off, and partition/batch layouts. Two comparison gotchas, both in
   `RowOracle.multisetEquals`:
-  - **Multiset, not positional.** The K-way merge in `SortExec` is not stable
-    (`sort_exec_test`) and the collapsing aggregate emits groups in a
-    layout-dependent order, so equality is over multisets, never row positions.
-    For an `ORDER BY` query the oracle additionally checks each run is *sorted*
-    (the multiset check alone would not catch an unsorted result).
+  - **Multiset, not positional.** A sort returns the stable sort of its input
+    read partition by partition, so spill on and off agree row for row
+    (`sort_exec_spill_test`, `sort_parity_fuzz_test`), but two layouts read the
+    same rows in different orders and return rows that tie on every key in
+    those orders, and the collapsing aggregate emits groups in a
+    layout-dependent order, so equality across layouts is over multisets, never
+    row positions. For an `ORDER BY` query the oracle additionally checks each
+    run is *sorted* (the multiset check alone would not catch an unsorted
+    result).
   - **Floating-point (`Double` and `Float`) columns use a `NaN`-aware tolerant
     comparator; every other column compares exactly.** The order-dependent
     aggregates (`SUM`/`AVG`/`STDDEV`/`VAR`/`COVAR`/`CORR`) accumulate in `double`,
@@ -2325,7 +2329,20 @@ worth carrying:
   read a key to choose a bucket and again inside it; a simple CASE read its
   operand once per WHEN and BETWEEN read its operand twice. `Expr.readsRandom`
   keeps such keys off those paths, and `SwitchCaseExpr` / `BetweenExpr` read a
-  RAND() operand once.
+  RAND() operand once. A sort read its keys at every comparison, so over a
+  DISTINCT or a set operation, where the sort reads an `ORDER BY RAND()` key
+  itself (a plain SELECT's binder computes it in a column below), its
+  comparator answered differently each time and TimSort refused it ("Comparison
+  method violates its general contract!") or returned rows in no order. A sort
+  and a top-n now read each key once a row (`SortLayout`) and keep it, in a
+  spilled run too; `sort_exec_test`'s `aKeyThatReadsRandIsReadOnceARow` holds
+  them to it.
+- **A sort evaluates a computed key on every row it reads, at once.** It
+  evaluates a key that is not a column once a batch, as the row arrives, and
+  never again. So a key that fails on some row fails the sort, even one of a
+  single row, which no comparison would have read (the sort that evaluated
+  keys at each comparison never compared a lone row); a top-n has always read
+  every row's keys.
 - **Java counts UTF-16 chars, SQL counts characters.** `String.length`,
   `substring` and `trim` (which also strips every char up to U+0020) are not
   SQL's LENGTH, SUBSTRING and TRIM; half of a surrogate pair is no text: a
@@ -3207,10 +3224,11 @@ choose it, and "since v1" one the engine has had from the start.
   — one call per Expr per batch, primitive-array inner loops, no codegen step.
   `ProjectExec` and `FilterExec` use it, and so does a hash join's residual
   condition, over a chunk of candidate pairs (its output is gathered a column
-  at a time, no row boxed, plans/perf/13); everything else (sort/window
-  per-row callbacks, aggregate state updates over `RowBuf`) still uses boxed
-  `eval(batch, row)` because those are 1-row paths where vectorization gives
-  nothing back.
+  at a time, no row boxed, plans/perf/13), and so does a sort's computed key,
+  once a batch, its rows held and compared typed (plans/perf/15); everything
+  else (window per-row callbacks, aggregate state updates over `RowBuf`) still
+  uses boxed `eval(batch, row)` because those are 1-row paths where
+  vectorization gives nothing back.
 - **No multi-statement SQL.** `SqlParser.parse` takes one statement: a trailing
   `;` is fine, and anything after it is refused (`Only one statement is
   supported; remove the text after ';'`), in a task's SQL when the job builds

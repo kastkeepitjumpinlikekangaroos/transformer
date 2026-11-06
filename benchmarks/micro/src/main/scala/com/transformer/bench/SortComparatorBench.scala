@@ -1,17 +1,17 @@
 package com.transformer.bench
 
-import com.transformer.sql.plan.Ops
+import com.transformer.core._
+import com.transformer.sql.plan.{ColRefExpr, KeyOrder, SortKey}
 
 import org.openjdk.jmh.annotations._
 import org.openjdk.jmh.infra.Blackhole
 
 import java.util.concurrent.TimeUnit
 
-/** Microbenchmarks for the SortExec row comparator. SortExec's production
-  * comparator is package-private; this bench reproduces its semantics
-  * (per-key NULL-handling + asc/desc) over `Array[Any]` rows so the
-  * benchmark sees the same comparison cost without reaching into
-  * package internals.
+/** Microbenchmarks for the comparison a sort makes: each key's typed order
+  * (`SortKey.order`, a [[KeyOrder]]) over two rows of typed vectors, the
+  * first key that differs deciding, as `SortExec`'s run sort, its merge and
+  * `TopNExec`'s heap compare rows.
   *
   * Three benchmark dimensions:
   *
@@ -22,11 +22,10 @@ import java.util.concurrent.TimeUnit
   *   - **multi-key with NULLs** — exercise the NULL-first / NULL-last
   *     branches.
   *
-  * The benchmark performs `BatchRows × CompareCount` comparisons per
-  * invocation; consume each result to defeat dead-code elimination. We
-  * don't go through `java.util.Arrays.sort` here — that would mix
-  * `Arrays.sort`'s internal tournament with the comparator and dilute
-  * the signal.
+  * The benchmark performs `BatchRows - 1` comparisons per invocation (each
+  * row against the next); consume each result to defeat dead-code
+  * elimination. We don't go through a sort here — that would mix the sort's
+  * own work with the comparison and dilute the signal.
   */
 @State(Scope.Benchmark)
 @BenchmarkMode(Array(Mode.AverageTime))
@@ -38,37 +37,37 @@ class SortComparatorBench {
 
   private final val BatchRows: Int = 1024
 
-  // Rows materialized as `Array[Any]` per the SortExec internal format.
-  private var rows: Array[Array[Any]] = _
-  private var rowsWithNulls: Array[Array[Any]] = _
+  // (k: Long, s: String, d: Double), without and with NULLs.
+  private var rows: Array[ColumnVector] = _
+  private var rowsWithNulls: Array[ColumnVector] = _
 
-  private var singleKeyLong: java.util.Comparator[Array[Any]] = _
-  private var multiKeyMixed: java.util.Comparator[Array[Any]] = _
-  private var multiKeyNullsLast: java.util.Comparator[Array[Any]] = _
+  private var singleKeyLong: SortComparatorBench.Keys = _
+  private var multiKeyMixed: SortComparatorBench.Keys = _
+  private var multiKeyNullsLast: SortComparatorBench.Keys = _
 
   @Setup(Level.Trial)
   def setUp(): Unit = {
     val rng = new java.util.SplittableRandom(0xDEC0DEL)
-    rows = Array.fill(BatchRows) {
-      // (k: Long, s: String, d: Double)
-      Array[Any](
-        java.lang.Long.valueOf(rng.nextLong()),
-        SortComparatorBench.Words(rng.nextInt(SortComparatorBench.Words.length)),
-        java.lang.Double.valueOf(rng.nextDouble()))
+    def columns(nullEvery: Int): Array[ColumnVector] = {
+      val k = new LongVector(new Array[Long](BatchRows), new java.util.BitSet(BatchRows), BatchRows)
+      val s = new StringVector(new Array[String](BatchRows), BatchRows)
+      val d = new DoubleVector(new Array[Double](BatchRows), new java.util.BitSet(BatchRows), BatchRows)
+      var r = 0
+      while (r < BatchRows) {
+        if (nullEvery > 0 && rng.nextInt(nullEvery) == 0) k.setNull(r) else k.set(r, rng.nextLong())
+        if (nullEvery > 0 && rng.nextInt(nullEvery) == 0) s.setNull(r)
+        else s.set(r, SortComparatorBench.Words(rng.nextInt(SortComparatorBench.Words.length)))
+        if (nullEvery > 0 && rng.nextInt(nullEvery) == 0) d.setNull(r) else d.set(r, rng.nextDouble())
+        r += 1
+      }
+      Array(k, s, d)
     }
-    rowsWithNulls = Array.fill(BatchRows) {
-      val k: Any = if (rng.nextInt(20) == 0) null else java.lang.Long.valueOf(rng.nextLong())
-      val s: Any = if (rng.nextInt(20) == 0) null else SortComparatorBench.Words(rng.nextInt(SortComparatorBench.Words.length))
-      val d: Any = if (rng.nextInt(20) == 0) null else java.lang.Double.valueOf(rng.nextDouble())
-      Array[Any](k, s, d)
-    }
+    rows = columns(0)
+    rowsWithNulls = columns(20)
 
-    singleKeyLong = SortComparatorBench.comparatorFor(
-      Array((0, true)))                  // ORDER BY col0 ASC
-    multiKeyMixed = SortComparatorBench.comparatorFor(
-      Array((0, true), (1, false), (2, true))) // col0 ASC, col1 DESC, col2 ASC
-    multiKeyNullsLast = SortComparatorBench.comparatorFor(
-      Array((0, true), (2, true)))               // col0 ASC, col2 ASC over null-bearing rows
+    singleKeyLong = SortComparatorBench.keys(Array((0, true)))                       // ORDER BY col0 ASC
+    multiKeyMixed = SortComparatorBench.keys(Array((0, true), (1, false), (2, true))) // col0 ASC, col1 DESC, col2 ASC
+    multiKeyNullsLast = SortComparatorBench.keys(Array((0, true), (2, true)))         // col0 ASC, col2 ASC over NULLs
   }
 
   /** ORDER BY col0 ASC over Long-only keys. The hottest single-key
@@ -78,7 +77,7 @@ class SortComparatorBench {
     val n = BatchRows
     var i = 0
     while (i < n - 1) {
-      bh.consume(singleKeyLong.compare(rows(i), rows(i + 1)))
+      bh.consume(singleKeyLong.compare(rows, i, i + 1))
       i += 1
     }
   }
@@ -92,7 +91,7 @@ class SortComparatorBench {
     val n = BatchRows
     var i = 0
     while (i < n - 1) {
-      bh.consume(multiKeyMixed.compare(rows(i), rows(i + 1)))
+      bh.consume(multiKeyMixed.compare(rows, i, i + 1))
       i += 1
     }
   }
@@ -104,7 +103,7 @@ class SortComparatorBench {
     val n = BatchRows
     var i = 0
     while (i < n - 1) {
-      bh.consume(multiKeyNullsLast.compare(rowsWithNulls(i), rowsWithNulls(i + 1)))
+      bh.consume(multiKeyNullsLast.compare(rowsWithNulls, i, i + 1))
       i += 1
     }
   }
@@ -118,28 +117,23 @@ private[bench] object SortComparatorBench {
     "hotel", "india", "juliet", "kilo", "lima", "mike", "november",
     "oscar", "papa", "quebec", "romeo", "sierra", "tango")
 
-  /** Build a comparator equivalent to `SortExec.rowOrdering` for the
-    * given (columnIndex, ascending) keys. Mirrors the SortExec
-    * implementation so the benchmark sees the same NULL handling and
-    * `Ops.cmp` dispatch the engine would. */
-  def comparatorFor(keys: Array[(Int, Boolean)]): java.util.Comparator[Array[Any]] = {
-    new java.util.Comparator[Array[Any]] {
-      def compare(a: Array[Any], b: Array[Any]): Int = {
-        var i = 0
-        while (i < keys.length) {
-          val (idx, asc) = keys(i)
-          val va = a(idx)
-          val vb = b(idx)
-          val c =
-            if (va == null && vb == null) 0
-            else if (va == null) if (asc) -1 else 1
-            else if (vb == null) if (asc) 1 else -1
-            else if (asc) Ops.cmp(va, vb) else Ops.cmp(vb, va)
-          if (c != 0) return c
-          i += 1
-        }
-        0
+  private val Types: Array[DataType] = Array(DataType.LongType, DataType.StringType, DataType.DoubleType)
+
+  /** The typed orders of (columnIndex, ascending) keys, compared as a sort
+    * compares them: the first key that differs decides. */
+  final class Keys(columns: Array[Int], orders: Array[KeyOrder]) {
+    def compare(cols: Array[ColumnVector], a: Int, b: Int): Int = {
+      var k = 0
+      while (k < orders.length) {
+        val v = cols(columns(k))
+        val c = orders(k).compare(v, a, v, b)
+        if (c != 0) return c
+        k += 1
       }
+      0
     }
   }
+
+  def keys(spec: Array[(Int, Boolean)]): Keys =
+    new Keys(spec.map(_._1), spec.map { case (col, asc) => SortKey(ColRefExpr(col, s"c$col", Types(col)), asc).order })
 }

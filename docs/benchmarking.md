@@ -123,14 +123,14 @@ Grace-hash spill counters:
 
 | Counter | Meaning |
 |---|---|
-| `comparatorCalls` | Total comparator invocations (heap operations × 2). |
+| `comparatorCalls` | Comparisons of two runs' head rows in the merge (`log2 K` a row over `K` runs); the sort within a run is not counted. |
 | `inputRows` | Rows pulled from the child iterator. |
 | `outputRows` | Rows emitted. Should match `inputRows`. |
-| `path` | 0 = small-N concat + `Arrays.sort`, 1 = K-way heap merge. |
-| `runsWritten` | Sorted runs flushed to disk (zero on the in-memory path). |
+| `path` | 0 = one run in memory, gathered out whole; 1 = a merge of several runs, or of one spilled run. |
+| `runsWritten` | Sorted runs flushed to disk (zero on the in-memory path): one each time what a partition's run holds (`SortRun.heldBytes`) reaches the threshold. |
 | `bytesSpilled` | Bytes written to spill files. |
-| `mergeRunsActive` | Number of sources the final K-way merge consumed (in-memory tails + disk runs). |
-| `mergeNanos` | Time inside the K-way merge loop. |
+| `mergeRunsActive` | Number of sources the final merge consumed (in-memory tails + disk runs). |
+| `mergeNanos` | Time inside the merge loop, from its first row to its last. |
 | `runDecodeNanos` | Time decoding spilled parquet runs back into batches during the merge. |
 
 ### Exchange
@@ -187,6 +187,22 @@ Target a single benchmark by glob:
 java -jar bazel-bin/benchmarks/micro/bench_all_deploy.jar 'com.transformer.bench.KeyCodecBench.*'
 ```
 
+**A forked benchmark JVM fails as it starts** (found 2026-11-03), with
+`java.net.spi.InetAddressResolverProvider: Provider
+org.xbill.DNS.spi.DnsjavaInetAddressResolverProvider not found` and no score:
+the deploy jar carries dnsjava's service entry (Hadoop's dependency), but the
+provider class sits only under `META-INF/versions/18/`, which a jar whose
+manifest does not say `Multi-Release: true` never reads, and the fork looks its
+host's address up. Until the build drops that entry, put the provider's classes
+ahead of the jar, and the fork inherits the classpath:
+
+```bash
+JAR=bazel-bin/benchmarks/micro/bench_all_deploy.jar
+mkdir -p /tmp/bench-mr && (cd /tmp/bench-mr && unzip -o -q "$OLDPWD/$JAR" 'META-INF/versions/18/org/xbill/DNS/spi/*' \
+  && mkdir -p cp && cp -R META-INF/versions/18/org cp/)
+java -cp /tmp/bench-mr/cp:$JAR com.transformer.bench.MicroBench 'com.transformer.bench.SortExecBench.*' -wi 2 -i 5
+```
+
 ### Bench inventory
 
 | File | What it measures |
@@ -194,13 +210,14 @@ java -jar bazel-bin/benchmarks/micro/bench_all_deploy.jar 'com.transformer.bench
 | `SmokeBench` | The trivial "is JMH wiring alive" smoke test. |
 | `KeyCodecBench` | `KeyCodec.encode` packed path, object-array path, `LongHashMap.getOrInsert` cold + warm. |
 | `ExprEvalBench` | `Expr.evalVec` for `LitExpr` / `ColRefExpr` / `BinOpExpr` arithmetic / `BinOpExpr` comparison / `IsNullExpr`. |
-| `SortComparatorBench` | Single-key Long, multi-key with mixed ASC/DESC, with NULLs. |
+| `SortComparatorBench` | The comparison a sort makes, each key's typed order (`SortKey.order`) over two rows of typed vectors: single-key Long, multi-key with mixed ASC/DESC, with NULLs. |
+| `SortExecBench` | The real `SortExec` (`sort`) and `TopNExec` keeping 3 rows (`topN`), drained, over 1M and 4M rows in 8 in-memory partitions, spill off and at 16 MiB a partition, one invocation an iteration (`SingleShotTime`): polymarket's `ORDER BY change_size DESC` shape (a FLOAT key, a third 0.0, a payload of 13,000 strings of 66 characters), one BIGINT key, one STRING key, and two keys (INT ASC, STRING DESC NULLS FIRST, 5% NULLs each). A top-n's iteration is tens of milliseconds, so compare its rows over more iterations (`-wi 10 -i 20`). |
 | `ParquetDecodeBench` | 1M-row decode loop from a fixture parquet. |
 | `ColumnarBatchBench` | `ColumnVector.allocate` per-type cost, `selectByBoolean` fast-path vs full-copy. |
 | `DisabledOverheadBench` | Filter→Project pipeline with `metricsEnabled = false` vs an un-wrapped baseline. Gate: diff < 1%. Catches regressions to the disabled-path invariant. |
 | `AggStateSerdeBench` | Round-trip throughput for every spillable `AggState` subtype (Count, Sum, Avg, Min, Max, CountIf, Moment, Covar, Corr). |
 | `SpillEstimateBench` | `Spill.estimateBytes(ColumnarBatch)` overhead across batch shapes. Target: < 5% of a typical aggregate's per-batch work. |
-| `ExternalSortMergeBench` | K-way merge over N sorted runs read from spilled parquet files. |
+| `ExternalSortMergeBench` | K-way merge over N sorted runs read from spilled parquet files, through a heap of its own, not `SortExec`'s loser tree. |
 
 Output format is JMH's standard JSON. The `DisabledOverheadBench` result
 is the most important — a regression there means the disabled-path

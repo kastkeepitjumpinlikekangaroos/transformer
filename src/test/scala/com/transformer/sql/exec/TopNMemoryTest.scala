@@ -6,7 +6,8 @@ import org.junit.Test
 
 /** A top-n holds its rows, not its input's: `ORDER BY ... LIMIT 5` over 20
   * million rows, made as they are read, runs in this target's 256 MB heap,
-  * where a sort of them (each row a boxed array) would need about 1.6 GB. */
+  * where a sort of them would need about 400 MB as it sorted them (an INT
+  * and a BIGINT, and the two `Int`s naming and sorting each row). */
 class TopNMemoryTest {
 
   private val Rows = 20000000

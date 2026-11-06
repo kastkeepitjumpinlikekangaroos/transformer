@@ -263,8 +263,8 @@ class OperatorCountersTest {
     val snap = node.snapshot()
     assertEquals(100L, snap.counter("inputRows"))
     assertEquals(100L, snap.counter("outputRows"))
-    // Single-cursor or small-N fallback fires below 4096 rows.
-    assertEquals(SortExec.PathSmallN, snap.counter("path"))
+    // One partition, one run in memory, gathered out whole.
+    assertEquals(SortExec.PathOneRun, snap.counter("path"))
     // No spill on the default opts.
     assertEquals(0L, snap.counter("runsWritten"))
     assertEquals(0L, snap.counter("bytesSpilled"))

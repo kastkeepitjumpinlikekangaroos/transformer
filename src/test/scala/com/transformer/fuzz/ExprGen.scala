@@ -607,7 +607,7 @@ object ExprGen {
   // termination (a depth-0 call is always a leaf).
   private def leafProb(depth: Int): Double = if (depth <= 1) 0.45 else 0.2
 
-  private def genTyped(r: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
+  private[fuzz] def genTyped(r: Rng, schema: Schema, target: DataType, depth: Int): Expr = {
     if (depth <= 0 || r.bool(leafProb(depth))) genLeaf(r, schema, target)
     else target match {
       case DataType.BooleanType => genBoolean(r, schema, depth)

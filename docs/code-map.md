@@ -38,6 +38,13 @@ navigation hint, not a comprehensive directory listing.
   Each spillable state additionally implements `writeSelf` / `readSelf`;
   the `AggSpiller` helper at the bottom of the file
   handles per-partition parquet flush + fold-back at emit time.
+- `sql/exec/SortExec.scala` (~930 LOC) — `SortExec` and `TopNExec`, and what
+  both build on: `SortLayout` (where each key is read: a column in place, any
+  other computed once a batch), `SortRun` (a partition's rows in typed chunks,
+  what they hold, their sort by `IndexSort` and their gather), the cursors a
+  merge reads runs through (in memory, or a spilled run's parquet file), and
+  `LoserTree`, the stable merge; see
+  [architecture §2e](architecture.md#2e-sorts-typed-runs-a-stable-merge-and-top-n).
 - `sql/exec/AggStateSerde.scala` (~110 LOC) — dispatcher that pairs
   `AggExpr` types with the right `AggState` subtype for round-trip
   serialization. `isSpillable` gates the operator-level switch (false for
@@ -65,8 +72,9 @@ navigation hint, not a comprehensive directory listing.
   an `evalVec` override; the rest of the hot subtypes delegate to `VecOps`.
   `SwitchCaseExpr` and `BetweenExpr` read a `RAND()` operand once, and the
   `Expr` companion's `readsRandom` says which expressions read RAND().
-- `sql/plan/Ops.scala` (~1280 LOC) — `Ops` (row-at-a-time binary ops, and
-  `eq` / `cmp`, the engine's one equality and total order), `Casts` (the
+- `sql/plan/Ops.scala` (~1300 LOC) — `Ops` (row-at-a-time binary ops, and
+  `eq` / `cmp`, the engine's one equality and total order, with the
+  primitives each type orders by, which a sort's `KeyOrder` calls too), `Casts` (the
   binder's casts, and `toWrittenDecimal`, a query's cast to DECIMAL),
   `Decimals` (the declared type of each decimal result, the type that holds
   two decimals, and the one function both paths compute and fit a value
@@ -112,9 +120,11 @@ navigation hint, not a comprehensive directory listing.
   its loop here. Why a footer parquet-mr refused does not read is
   `ParquetFooter.scala` (~310 LOC), with the lenient Thrift walker
   `CompactThrift`.
-- `core/ColumnarBatch.scala` (~390 LOC) — defines ten `ColumnVector`
-  subclasses. Adding a new `DataType` requires a new vector + companion case
-  in `ColumnVector.allocate`.
+- `core/ColumnarBatch.scala` (~860 LOC) — defines ten `ColumnVector`
+  subclasses, each with its typed copies (`copyTo` a cell, `copyRange` a run
+  of rows, `gather` by a selection and `gatherChunks` from a sort's chunks),
+  which are most of the length. Adding a new `DataType` requires a new vector
+  + companion case in `ColumnVector.allocate`, and a `KeyOrder` case.
 - `gui/GraphCanvas.scala` (~345 LOC) — the canvas both GUIs draw graphs on:
   pan/zoom, the dot grid, cards, edges, fitting text, and `GraphOverlay` (the
   zoom controls). `gui/DagCanvas.scala` (~270 LOC) draws the job's DAG on it

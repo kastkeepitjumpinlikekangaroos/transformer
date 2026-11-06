@@ -9,13 +9,11 @@ import scala.collection.mutable
 import scala.util.Random
 
 /** Direct [[SortExec]] coverage. Builds a hand-rolled multi-partition
-  * [[PhysicalPlan]] so each scenario can exercise the K-way heap merge across
-  * specific partition shapes (overlapping ranges, empties, single-partition
-  * fast path, small-N concat fallback). Output ordering is asserted against
-  * a local oracle comparator that mirrors `SortExec.rowOrdering` — neither
-  * the heap merge nor the small-N `Arrays.sort` are stable, so we never
-  * assert position-by-position equality, only that the output is sorted
-  * under the comparator and is a permutation of the input.
+  * [[PhysicalPlan]] so each scenario can exercise the merge across specific
+  * partition shapes (overlapping ranges, empties, one run, many). Every path
+  * returns the stable sort of its input read partition by partition, so the
+  * output is asserted row for row against that, ties included, as well as
+  * sorted under a local oracle comparator that mirrors `SortKey.compare`.
   */
 class SortExecTest {
 
@@ -78,8 +76,8 @@ class SortExecTest {
     assertEquals(s"$label: row multiset", expectedMs, actualMs)
   }
 
-  /** Same null placement + Ops.cmp semantics as `SortExec.rowOrdering` (a
-    * NULL goes where the key's `nullsFirst` says, whatever the direction) —
+  /** Same null placement + Ops.cmp semantics as `SortKey.compare` (a NULL
+    * goes where the key's `nullsFirst` says, whatever the direction) —
     * written out here rather than calling `SortKey.compare`, so we're asserting
     * against a known oracle, not the code under test. */
   private def mirrorOfSortExecComparator(
@@ -107,6 +105,24 @@ class SortExecTest {
       }
     }
   }
+
+  /** The rows of `partitions`, read in order, sorted stably by the oracle
+    * comparator: what the sort returns, ties included. */
+  private def stableSort(
+      partitions: Vector[Vector[Array[Any]]], schema: Schema, keys: Seq[SortKey]): Vector[Array[Any]] = {
+    val rows = partitions.flatten.toArray
+    java.util.Arrays.sort(rows, mirrorOfSortExecComparator(schema, keys))
+    rows.toVector
+  }
+
+  private def assertStable(
+      label: String,
+      partitions: Vector[Vector[Array[Any]]],
+      schema: Schema,
+      keys: Seq[SortKey],
+      actual: Vector[Array[Any]]): Unit =
+    assertEquals(s"$label: the stable sort, row for row", stableSort(partitions, schema, keys).map(_.toVector),
+      actual.map(_.toVector))
 
   private def rowBatch(schema: Schema, row: Array[Any]): ColumnarBatch = {
     val b = new ColumnarBatch(schema, 1)
@@ -146,6 +162,7 @@ class SortExecTest {
     val out = runSort(parts, schema2, keys)
     assertSortedByKeys("multi-key asc/desc", out, schema2, keys)
     assertPermutationOf("multi-key asc/desc", parts, out)
+    assertStable("multi-key asc/desc", parts, schema2, keys, out)
     val ks = out.map(_(0).asInstanceOf[Int])
     assertEquals(Vector(1, 1, 2, 2, 2, 2, 3, 3, 3), ks)
   }
@@ -197,9 +214,8 @@ class SortExecTest {
   }
 
   @Test def nullPlacementSurvivesTheHeapMerge(): Unit = {
-    // Above SmallNThreshold the sorted partials merge through the heap, a
-    // separate path from the small-N Arrays.sort; placement must hold on both
-    // keys there too, including within ties of the first key.
+    // Many partitions of many rows merge through the tree; placement must
+    // hold on both keys, including within ties of the first key.
     val rnd = new Random(0xBADC0DE)
     def maybeNull(v: Int): Any = if (rnd.nextInt(8) == 0) null else v
     val parts = Vector.tabulate(6) { _ =>
@@ -208,8 +224,9 @@ class SortExecTest {
     val keys = Seq(SortKey(k, asc = true, nullsFirst = false), SortKey(p, asc = false, nullsFirst = true))
     val out = runSort(parts, schema2, keys)
     assertEquals(6000, out.length)
-    assertSortedByKeys("heap merge, explicit placement", out, schema2, keys)
-    assertPermutationOf("heap merge, explicit placement", parts, out)
+    assertSortedByKeys("merge, explicit placement", out, schema2, keys)
+    assertPermutationOf("merge, explicit placement", parts, out)
+    assertStable("merge, explicit placement", parts, schema2, keys, out)
     val firstNull = out.indexWhere(_(0) == null)
     assertTrue("expected NULL keys in the data", firstNull > 0)
     assertTrue("NULLS LAST: every NULL k after every non-NULL k", out.drop(firstNull).forall(_(0) == null))
@@ -242,9 +259,8 @@ class SortExecTest {
     assertSortedByKeys("single partition", out, schema2, keys)
   }
 
-  @Test def smallNFastPathSortsCorrectly(): Unit = {
-    // Total rows well below SmallNThreshold (4096) → mergeEmit dispatches
-    // through smallNSortAndEmit. Verify correctness on that branch.
+  @Test def aFewRowsOverSeveralPartitionsSortCorrectly(): Unit = {
+    // A few rows over three partitions: the merge of three short runs.
     val parts = Vector(
       Vector.tabulate(40)(i => row(99 - i, 0)),
       Vector.tabulate(40)(i => row(150 - i * 2, 1)),
@@ -254,11 +270,11 @@ class SortExecTest {
     assertEquals(120, out.length)
     assertSortedByKeys("small-N fast path", out, schema2, keys)
     assertPermutationOf("small-N fast path", parts, out)
+    assertStable("small-N fast path", parts, schema2, keys, out)
   }
 
   @Test def largeMultiPartitionMonotone(): Unit = {
-    // Bigger than SmallNThreshold so the heap-merge branch actually runs.
-    // 12 partitions × 600 rows = 7200 total rows over a random Long key.
+    // 12 partitions × 600 rows = 7200 total rows over a random key.
     val rnd = new Random(0xC0FFEE)
     val parts = Vector.tabulate(12) { _ =>
       Vector.fill(600)(row(rnd.nextInt(1_000_000), rnd.nextInt(10)))
@@ -268,6 +284,7 @@ class SortExecTest {
     assertEquals(7200, out.length)
     assertSortedByKeys("large random", out, schema2, keys)
     assertPermutationOf("large random", parts, out)
+    assertStable("large random", parts, schema2, keys, out)
   }
 
   @Test def emitsBatchesAtDefaultCapacity(): Unit = {
@@ -303,22 +320,85 @@ class SortExecTest {
     assertSortedByKeys("monotonicity", out, schema2, keys)
   }
 
+  /** Rows that tie on every key come in the order they were read, partition
+    * by partition, on every path: one run, a few rows over several runs, more
+    * rows than a batch over many, and spilled at a one-byte threshold, where
+    * runs end at other rows. Spill on and off return the same rows in the
+    * same order. */
+  @Test def tiedRowsComeInTheOrderTheyWereRead(): Unit = {
+    val rnd = new Random(1103)
+    var id = 0
+    def part(n: Int): Vector[Array[Any]] = Vector.fill(n) { id += 1; row(rnd.nextInt(4), id) }
+    val shapes = Seq(
+      Vector(part(50)),
+      Vector(part(30), part(0), part(40), part(5)),
+      Vector.fill(8)(part(700)),
+      Vector(part(5000), part(3)))
+    val spill = ExecutionOptions(spillEnabled = true, spillThresholdBytes = Some(1L), spillMaxRuns = 100000)
+    for (parts <- shapes; keys <- Seq(Seq(SortKey(k, true)), Seq(SortKey(k, false, nullsFirst = true)))) {
+      // Batches of 100 rows: a run a batch when spilling, so a partition's
+      // rows that tie meet from several runs.
+      val plain = drainRows(SortExec(new InMemoryPartitionedPlan(schema2, parts, 100), keys).execute(0), schema2)
+      assertStable(s"${parts.map(_.size)} $keys", parts, schema2, keys, plain)
+      val spilled = drainRows(SortExec(new InMemoryPartitionedPlan(schema2, parts, 100), keys, spill).execute(0), schema2)
+      assertEquals(s"${parts.map(_.size)} $keys: spill on and off", plain.map(_.toVector), spilled.map(_.toVector))
+    }
+    assertEquals("spill directories left", Nil, Spill.operatorDirsLeft)
+  }
+
+  /** A key that reads `RAND()` over a DISTINCT or a set operation is the
+    * sort's own, and the sort reads it once a row: each row draws one value,
+    * so the rows that draw `false` come first, in order of `k`, then those
+    * that draw `true`, in order of `k`: one descent at most. The sort read
+    * such a key at each comparison, so it compared each row with a value of
+    * its own each time, and over 50,000 distinct rows TimSort refused it
+    * ("Comparison method violates its general contract!") or returned rows
+    * in no order (plans/perf/15). */
+  @Test def aKeyThatReadsRandIsReadOnceARow(): Unit = {
+    val n = 50000
+    val t = Schema(Vector(Field("k", DataType.IntType)))
+    val rows = new Random(15).shuffle((0 until n).toVector).map(i => Array[Any](i))
+    val catalog = new Catalog
+    catalog.register("t", new MaterializedView(t, rows.grouped(n / 4).toIndexedSeq.map(part =>
+      part.grouped(1000).map(g => batchOf(t, g)).toIndexedSeq)))
+    for (sql <- Seq(
+        "SELECT DISTINCT k FROM t ORDER BY RAND() < 0.5, k",
+        "SELECT k FROM t UNION SELECT k FROM t ORDER BY RAND() < 0.5, k",
+        "SELECT DISTINCT k FROM t ORDER BY RAND() < 0.5, k LIMIT 9000")) {
+      val ks = drainRows(SqlEngine.execute(sql, catalog).batches, Schema(Vector(Field("k", DataType.IntType))))
+        .map(_(0).asInstanceOf[Int])
+      val descents = ks.indices.count(i => i > 0 && ks(i) < ks(i - 1))
+      assertTrue(s"$sql: $descents descents", descents <= 1)
+      if (!sql.contains("LIMIT")) assertEquals(sql, (0 until n).toVector, ks.sorted)
+      else assertEquals(sql, 9000, ks.distinct.length)
+    }
+  }
+
+  private def batchOf(schema: Schema, rows: Vector[Array[Any]]): ColumnarBatch = {
+    val b = new ColumnarBatch(schema, rows.length)
+    rows.indices.foreach(r => b.column(0).setBoxed(r, rows(r)(0)))
+    b.setNumRows(rows.length)
+    b
+  }
+
   private def row(a: Any, b: Any): Array[Any] = Array(a, b)
 }
 
 /** Minimal [[PhysicalPlan]] that hands back pre-supplied rows partitioned as
-  * given. Each "partition" is split into batches of [[ColumnarBatch.DefaultCapacity]]
-  * so [[SortExec]] sees realistic batch boundaries.
+  * given. Each "partition" is split into batches of `batchRows` rows, by
+  * default [[ColumnarBatch.DefaultCapacity]], so [[SortExec]] sees realistic
+  * batch boundaries.
   */
 private final class InMemoryPartitionedPlan(
     schema: Schema,
-    partitions: Vector[Vector[Array[Any]]]) extends PhysicalPlan {
+    partitions: Vector[Vector[Array[Any]]],
+    batchRows: Int = ColumnarBatch.DefaultCapacity) extends PhysicalPlan {
   def outputSchema: Schema = schema
   def numPartitions: Int = partitions.length
   def execute(partition: Int): Iterator[ColumnarBatch] = {
     val rows = partitions(partition)
     if (rows.isEmpty) return Iterator.empty
-    val batchSize = math.min(ColumnarBatch.DefaultCapacity, rows.length)
+    val batchSize = math.min(batchRows, rows.length)
     rows.grouped(batchSize).map { group =>
       val b = new ColumnarBatch(schema, math.max(1, group.length))
       var r = 0

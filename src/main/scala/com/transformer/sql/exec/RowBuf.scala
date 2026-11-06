@@ -3,7 +3,7 @@ package com.transformer.sql.exec
 import com.transformer.core._
 
 /** Reusable 1-row [[ColumnarBatch]] used as a target for [[Expr.eval]] over a
-  * materialized row (sort comparators, join probes, residual predicates). Avoids
+  * materialized row (a window function's per-row callbacks). Avoids
   * allocating a new batch per row in tight loops.
   *
   * Not thread-safe — each thread that needs a [[RowBuf]] should own one.

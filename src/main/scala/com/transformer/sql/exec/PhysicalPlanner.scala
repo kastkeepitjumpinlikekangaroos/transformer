@@ -439,9 +439,11 @@ object PhysicalPlanner {
     * and the offset and projections run on those. A projection keeps its
     * input's row count, so the rows it sees are the ones the limit would have
     * kept. None for any other shape, for `LIMIT 0`, and past
-    * [[TopNExec.MaxRows]] rows, where the sort, which can spill, runs whole. */
+    * [[TopNExec.MaxRows]] rows, where the sort, which can spill, runs whole.
+    * A key that reads `RAND()` is no reason to sort: the top-n reads each
+    * key once a row, as the sort does. */
   private def topN(child: LogicalPlan, n: Long, opts: ExecutionOptions): Option[PhysicalPlan] = child match {
-    case LogicalSort(c, keys) if n >= 1 && n <= TopNExec.MaxRows && !keys.exists(k => Expr.readsRandom(k.expr)) =>
+    case LogicalSort(c, keys) if n >= 1 && n <= TopNExec.MaxRows =>
       Some(TopNExec(planInner(c, opts), keys, n.toInt))
     case LogicalProject(c, projections) => topN(c, n, opts).map(ProjectExec(_, projections))
     case LogicalOffset(c, m) if m <= TopNExec.MaxRows - n => topN(c, n + m, opts).map(OffsetExec(_, m))

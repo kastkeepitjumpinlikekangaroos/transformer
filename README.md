@@ -1231,7 +1231,15 @@ there and Spark the output: write `t.b` for the one, `-b` for the other. A
 qualified name, and a name inside an aggregate's arguments or a window, is always
 the input's. Past a `DISTINCT` or a `UNION`, `ORDER BY` sees only the output
 columns. A key that names an output column sorts by the values the query
-returns, so `SELECT RAND() AS r FROM t ORDER BY r` comes back sorted.
+returns, so `SELECT RAND() AS r FROM t ORDER BY r` comes back sorted, and any
+other key is evaluated once a row, so `SELECT DISTINCT k FROM t ORDER BY
+RAND()` returns its rows shuffled.
+
+Rows that tie on every key come in the order the query read them, partition by
+partition: a sort is stable, with spill on and off alike. How a query's input
+splits into partitions (files, row groups, a join's probe side) decides that
+order, so a query that needs one order whatever the layout should break its
+ties with another key.
 
 A NULL sorts as the smallest value unless the key says otherwise: first under
 `ASC`, last under `DESC`. That is Spark's, MySQL's and SQLite's default and the
@@ -2304,8 +2312,11 @@ JDK 21 or newer (tested through JDK 25).
   orderbook rows (38 GB) runs in a 2 GB heap.
 - **A sort holds every row it sorts, unless it spills.** `ORDER BY ... LIMIT n`
   with `n` and its `OFFSET` up to 10,000 rows keeps only those rows (a top-n:
-  the first 3 of 132M rows in 3 s and 0.5 GB); any other `ORDER BY` sorts every
-  row in memory, or on disk with spill on.
+  the first 3 of 132M rows in 2.6 s and 0.5 GB); any other `ORDER BY` sorts every
+  row in memory, typed (about 12 bytes a row for a polymarket orderbook day's
+  `ORDER BY change_size DESC`, 16 as it sorts: its 132M rows in 13 s at
+  `-Xmx4g`, past a 2 GB heap), or on disk with spill on (`transformer query
+  --spill`: the same sort in 25 s at `-Xmx2g`, writing 30 sorted runs).
 - **Cloud paths recognized but unimplemented**: `gs://` and `s3://` paths are
   accepted by the config, and loading one raises a clear
   `UnsupportedOperationException`; a cloud run-record path is a warning in the

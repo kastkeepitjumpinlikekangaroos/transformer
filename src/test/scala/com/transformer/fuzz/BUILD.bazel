@@ -47,6 +47,43 @@ scala_junit_test(
     ],
 )
 
+# The typed order a sort compares keys by (SortKey.order) against the boxed
+# one (SortKey.compare): one sign on every pair of each type's pool and on
+# random pairs, ASC and DESC, NULLS FIRST and LAST, again over each pool
+# spilled and read back as a sort's run is.
+scala_junit_test(
+    name = "sort_key_order_test",
+    srcs = ["SortKeyOrderTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/read/parquet",
+        "//src/main/scala/com/transformer/sql/plan",
+        "//src/main/scala/com/transformer/write/parquet",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Sort parity: SortExec over DataGen datasets of every type, 1 to 3 keys in
+# every direction and NULL placement, columns and computed keys, in several
+# layouts, from one run to many, spill off and at one byte, returns the
+# stable sort of its input read partition by partition, row for row, ties
+# included; TopNExec that sort's first n. Default budget, part of
+# `bazel test //...`.
+scala_junit_test(
+    name = "sort_parity_fuzz_test",
+    srcs = ["SortParityFuzzTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
 # eval-vs-evalVec parity fuzzer. Default budget (Props.DefaultSeeds) — part of
 # the normal `bazel test //...` run.
 scala_junit_test(
@@ -333,6 +370,20 @@ scala_junit_test(
     deps = [
         ":fuzz",
         "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/plan",
+        "@maven//:junit_junit",
+    ],
+)
+
+scala_junit_test(
+    name = "sort_parity_fuzz_campaign",
+    srcs = ["SortParityFuzzTest.scala"],
+    suffixes = ["Test"],
+    tags = ["fuzz"],
+    deps = [
+        ":fuzz",
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
         "//src/main/scala/com/transformer/sql/plan",
         "@maven//:junit_junit",
     ],

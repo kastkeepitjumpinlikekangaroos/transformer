@@ -15,8 +15,8 @@ specific traps.
   trait" error. The original `PhysicalPlan` was `sealed`; it's now an open
   trait because the operator implementations are in separate files
   (`PhysicalPlan.scala`, `AggregateExec.scala`, etc.).
-- **`ColumnarBatch` is `final`** — don't subclass it. Use the factory
-  `RowView.apply(schema, values)` or the mutable `RowBuf` for 1-row batches.
+- **`ColumnarBatch` is `final`** — don't subclass it. Use the mutable
+  `RowBuf` for 1-row batches.
 - **No emojis** in code or docs unless explicitly requested.
 - **Source files are plain text.** Spell a control character in code (`0.toChar`,
   or an escape inside a string literal), never as the raw character:
@@ -380,6 +380,15 @@ specific traps.
   whole suite under that config shows whether the site tells keys of one hash
   apart. A test that asserts hashes spread keys says so with
   `assumeFalse(KeyHash.zero)`.
+- **A breaker that holds rows to sort them holds them typed and sorts
+  `Int`s.** `SortExec` and `TopNExec` copy rows into typed chunks
+  (`ColumnVector.copyRange`), name each row by an `Int`, sort those with
+  `IndexSort` through an `IntComparator` over the keys' `KeyOrder`s, and
+  gather rows out by them (`gatherChunks`): never an `Array[Any]` a row, an
+  `Array[Integer]` sorted by a boxed comparator, or a key evaluated at each
+  comparison. A key that is not a column is evaluated once a batch
+  (`SortLayout`). `WindowExec` still sorts boxed rows, a follow-up
+  (plans/perf/15, Q4).
 - **Pipeline-breaking operators that key into a HashMap go through
   `core/HashKeys.scala`'s `KeyCodec`, not raw `Seq[Any]`.** That's the
   shared abstraction `HashAggregateExec`, `HashJoinExec`, `DistinctExec`,
@@ -414,11 +423,17 @@ specific traps.
   `Ops.floatCompare`, the same order without the boxing (`MinMaxState` keeps
   `java.lang.Double.compare`, finer only in ordering `-0.0` below the `0.0` it
   equals, so that of two equal zeros its answer does not move with row order). The
-  rule is not confined to `evalVec` — `SortKey.compare` (the one comparison
-  `SortExec.rowOrdering` and `WindowExec`'s partition sort both call, which is
+  rule is not confined to `evalVec` — a sort key's order (`SortKey`, which is
   also where NULL placement lives — never re-implement a null-aware comparison
   at a new sort site), `Funcs.pickByOrdering` and `MinMaxState`'s accumulator
-  are all ordering sites,
+  are all ordering sites. `SortKey` gives the one rule in two forms:
+  `compare` over two boxed values (`WindowExec`'s partition sort and frames)
+  and `order`, a `KeyOrder` over two typed vectors (`SortExec`, `TopNExec`),
+  whose every type orders through the primitive `Ops.cmp` calls for it
+  (`Ops.floatCompare`, `stringCompare`, `binaryCompare`, `decimalCompare`, or
+  `compare` on the int or long a vector stores), so each type's order is
+  written once; `fuzz:sort_key_order_test` holds the two forms to one sign on
+  every type, and a new type adds its `KeyOrder` case and its pool there.
   and `MinMaxState`'s was the one that reached for the raw `<` because its slot
   was a primitive. Rule R2 of `bytecode:bytecode_rules_test` holds the float
   half in the engine: no `Double.compare`, `Float.compare`, `compareTo` or
@@ -428,7 +443,7 @@ specific traps.
   allowlist: `MinMaxState`'s and `pickByOrdering`'s tie-break, and comparisons
   of no SQL value (an exponent's integrality, two row estimates, JSON
   numbers). Rule R4 holds the string half: no `String.compareTo` or `<` on
-  strings in the engine but in `Ops.cmp`. Every comparison against `NaN` is false in both directions,
+  strings in the engine but in `Ops.stringCompare`. Every comparison against `NaN` is false in both directions,
   so a raw `<` silently makes the answer depend on the order values arrive in.
   An accumulator makes that worse than an expression does: it also depends on
   partition fan-out and spill flush order, which no `eval`/`evalVec` parity gate

@@ -74,9 +74,11 @@ final case class LogicalJoin(
   *
   * Without an explicit `NULLS FIRST` / `NULLS LAST`, a NULL sorts as the
   * smallest value — first under ASC, last under DESC — which is what the
-  * two-argument `SortKey(expr, asc)` builds. [[compare]] is the one comparison
-  * every sort site uses (`SortExec`'s row ordering and `WindowExec`'s partition
-  * sort), so the two cannot drift apart. */
+  * two-argument `SortKey(expr, asc)` builds. The rule comes in two forms:
+  * [[compare]] over two boxed values (`WindowExec`'s partition sort and frames)
+  * and [[order]], its typed twin over two vectors (`SortExec` and `TopNExec`),
+  * held to one sign on every type by `sort_key_order_test`, so no sort site
+  * writes a comparison of its own. */
 final case class SortKey(expr: Expr, asc: Boolean, nullsFirst: Boolean) {
 
   /** Order two values of this key. A NULL goes where `nullsFirst` says,
@@ -87,6 +89,11 @@ final case class SortKey(expr: Expr, asc: Boolean, nullsFirst: Boolean) {
     else if (b == null) { if (nullsFirst) 1 else -1 }
     else if (asc) Ops.cmp(a, b)
     else Ops.cmp(b, a)
+
+  /** [[compare]] over two vectors of this key's type: the same NULL placement
+    * and direction, each value read unboxed and ordered by the primitive
+    * `Ops.cmp` uses for its type ([[KeyOrder]]). */
+  def order: KeyOrder = KeyOrder(expr.dataType, asc, nullsFirst)
 }
 
 object SortKey {

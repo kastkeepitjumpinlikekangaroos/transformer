@@ -957,6 +957,12 @@ went unfuzzed until plan 04.
    it vacuous or falsely red with no way to tell which. Give `normalize` the
    type's equality and `hashCode`, and add a pool for it to `row_oracle_test`'s
    `agreesWithOpsEqOnEveryNonFloatType`, which holds the oracle to `Ops.eq`.
+   A sort orders it twice over, boxed (`SortKey.compare`, through `Ops.cmp`)
+   and typed (`SortKey.order`): give `KeyOrder.apply` its case, comparing its
+   vector's values through the primitive `Ops.cmp` calls for it (the build
+   says so, since the match is over a sealed type), and add its pool,
+   with the values its order is easy to get wrong on, to
+   `sort_key_order_test`, which holds the two forms to one sign.
 2. **`ExprGen`.** Add it to `GenTypes` (draw from that list with `pick`, not
    `oneOf`, so a type with several declared variants such as DECIMAL is drawn
    as one type), give it `genValue` and `sentinel` cases, and route it in
@@ -1268,7 +1274,11 @@ spill-capable. To add spill to another breaker (e.g., a future
 5. **Accumulate `Spill.estimateBytes(batch)`** per input batch; flush
    the current state to a parquet file under `spillDir` when over
    threshold, then reset the in-memory state. Cap total runs at
-   `opts.spillMaxRuns` with a clear error message.
+   `opts.spillMaxRuns` with a clear error message. An operator that holds
+   what it reads in typed arrays of its own can count those instead, as
+   `SortExec` counts its run (`SortRun.heldBytes`: arrays by capacity, each
+   shared object once), which an estimate of each batch overcounts several
+   times for strings a reader shares and undercounts for boxed values.
 6. **Fold spill files back at emit time.** The pattern from
    `AggSpiller.foldCodecSpillFiles` works for any in-memory map:
    `ParquetReader.fromPath(file.toString)`, iterate batches, decode

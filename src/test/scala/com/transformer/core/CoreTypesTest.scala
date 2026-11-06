@@ -60,9 +60,6 @@ class CoreTypesTest {
     assertEquals(java.lang.Integer.valueOf(7), b.rowAt(0)(0))
   }
 
-  /** A typed getter reads a number or its text, and fails on any other
-    * value as `getString` does, with a cast that names the column and the
-    * value: its match had no case for one, so it threw a bare MatchError. */
   /** `gather` writes each selected source row, NULL for a negative index or a
     * NULL source value, into consecutive rows from its offset, a column at a
     * time, and leaves every other row as it was: for every type, NULLs,
@@ -116,6 +113,95 @@ class CoreTypesTest {
     assertEquals(Seq[Any](7L, null, null, 0L), (0 until 4).map(longs.getBoxed))
   }
 
+  private val EveryType: Seq[DataType] = Seq(DataType.IntType, DataType.LongType, DataType.FloatType,
+    DataType.DoubleType, DataType.BooleanType, DataType.StringType, DataType.BinaryType, DataType.DateType,
+    DataType.TimestampType, DataType.DecimalType(10, 2), DataType.NullType)
+
+  /** Row `i`'s value of type `t`, distinct for every `i`. */
+  private def valueOf(t: DataType, i: Int): Any = t match {
+    case DataType.IntType => i * 7
+    case DataType.LongType => i * 1000000007L
+    case DataType.FloatType => i + 0.5f
+    case DataType.DoubleType => i - 0.25
+    case DataType.BooleanType => i % 2 == 0
+    case DataType.StringType => s"s$i"
+    case DataType.BinaryType => Array[Byte](i.toByte, 7)
+    case DataType.DateType => java.time.LocalDate.of(2020, 1, 1).plusDays(i.toLong)
+    case DataType.TimestampType => java.time.Instant.ofEpochSecond(1700000000L + i)
+    case _: DataType.DecimalType => new java.math.BigDecimal(s"$i.25")
+    case DataType.NullType => null
+  }
+
+  /** `n` rows of `t`, row `r` holding `valueOf(t, from + r)` or NULL. */
+  private def filled(t: DataType, n: Int, from: Int, nulls: Int => Boolean): ColumnVector = {
+    val v = ColumnVector.allocate(t, n)
+    (0 until n).foreach(r => if (nulls(r)) v.setNull(r) else v.setBoxed(r, valueOf(t, from + r)))
+    v
+  }
+
+  private def sameValue(a: Any, b: Any): Boolean = (a, b) match {
+    case (x: Array[Byte], y: Array[Byte]) => java.util.Arrays.equals(x, y)
+    case _ => a == b
+  }
+
+  /** `copyRange` writes a run of source rows into consecutive rows from its
+    * offset, a column at a time, NULLs where the source holds them (a NULL
+    * bit cleared where it does not, one row past a byte or a word of the
+    * mask included), and leaves every other row as it was: for every type,
+    * `NullType`, `DECIMAL` and `BINARY` among them. A source of another class
+    * is copied as `copyTo` copies a cell. */
+  @Test def copyRangeWritesARunOfRowsOfEveryType(): Unit = {
+    for (t <- EveryType; (from, until, at) <- Seq((0, 0, 0), (3, 4, 0), (0, 70, 0), (5, 69, 2), (1, 66, 70))) {
+      val src = filled(t, 70, 0, r => r % 3 == 1 || r == 64)
+      val dst = filled(t, 140, 1000, r => r % 2 == 0)
+      val before = (0 until 140).map(dst.getBoxed)
+      dst.copyRange(src, from, until, at)
+      (0 until 140).foreach { r =>
+        val expected = if (r >= at && r < at + until - from) src.getBoxed(from + r - at) else before(r)
+        assertTrue(s"$t [$from, $until) at $at, row $r: ${dst.getBoxed(r)}, expected $expected",
+          sameValue(dst.getBoxed(r), expected))
+        assertEquals(s"$t row $r null", expected == null, dst.isNull(r))
+      }
+    }
+    val ints = filled(DataType.IntType, 6, 0, _ == 2)
+    val longs = ColumnVector.allocate(DataType.LongType, 4)
+    longs.copyRange(ints, 1, 5, 0)
+    assertEquals(Seq[Any](7L, null, 21L, 28L), (0 until 4).map(longs.getBoxed))
+  }
+
+  /** `gatherChunks` writes each selected row of a set of chunks, an index
+    * naming its chunk in its high bits and its row in the `shift` low ones,
+    * into consecutive rows from its offset, NULLs among them, and leaves every
+    * other row as it was: for every type. A chunk of another class is copied
+    * as `copyTo` copies a cell. */
+  @Test def gatherChunksWritesTheSelectedRowsOfEveryType(): Unit = {
+    val shift = 3
+    // Three chunks of up to 8 rows: chunk c's row r holds value 10 * c + r.
+    val sel = Array((2 << shift) | 1, (0 << shift) | 7, (1 << shift) | 0, (0 << shift) | 0, (2 << shift) | 5,
+      (1 << shift) | 3, (0 << shift) | 2)
+    for (t <- EveryType) {
+      val chunks = Array.tabulate[ColumnVector](3)(c => filled(t, 8, 10 * c, r => (r + c) % 4 == 3))
+      val dst = filled(t, 9, 100, _ == 8)
+      val before = (0 until 9).map(dst.getBoxed)
+      // Entries 1 to 5 of the selection, written from row 2.
+      dst.gatherChunks(chunks, shift, sel, 1, 6, 2)
+      (0 until 9).foreach { r =>
+        val expected =
+          if (r >= 2 && r < 7) { val e = sel(r - 1); chunks(e >>> shift).getBoxed(e & 7) }
+          else before(r)
+        assertTrue(s"$t row $r: ${dst.getBoxed(r)}, expected $expected", sameValue(dst.getBoxed(r), expected))
+        assertEquals(s"$t row $r null", expected == null, dst.isNull(r))
+      }
+    }
+    val ints = Array[ColumnVector](filled(DataType.IntType, 4, 0, _ == 1))
+    val longs = ColumnVector.allocate(DataType.LongType, 3)
+    longs.gatherChunks(ints, 2, Array(3, 1, 0), 0, 3, 0)
+    assertEquals(Seq[Any](21L, null, 0L), (0 until 3).map(longs.getBoxed))
+  }
+
+  /** A typed getter reads a number or its text, and fails on any other
+    * value as `getString` does, with a cast that names the column and the
+    * value: its match had no case for one, so it threw a bare MatchError. */
   @Test def rowGettersNameAValueTheyCannotRead(): Unit = {
     val row = Row(Schema(Field("n", DataType.IntType), Field("flag", DataType.BooleanType), Field("z", DataType.IntType)),
       Array[Any](java.lang.Integer.valueOf(7), java.lang.Boolean.TRUE, null))

@@ -223,7 +223,8 @@ object BytecodeRules {
     advice = "Two strings order through Ops.cmp, the one total order ORDER BY, every comparison, MIN and MAX, a " +
       "window's peers and every sorted key follow; a second string order beside it lets two operators disagree " +
       "on which of two strings comes first (docs/conventions.md, \"Anything that ORDERS values\").",
-    allowed = Seq(Allow("com.transformer.sql.plan.Ops$", "cmp", "the one total order, where two strings compare")))
+    allowed = Seq(Allow("com.transformer.sql.plan.Ops$", "stringCompare",
+      "the one total order's comparison of two strings, which Ops.cmp and a sort's typed order (KeyOrder) call")))
 
   val R7Quiet: Rule = Rule("R7", "library code does not print, exit or sleep", Engine,
     Seq(

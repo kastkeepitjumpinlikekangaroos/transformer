@@ -180,6 +180,20 @@ scala_junit_test(
     ],
 )
 
+# A sort holds its rows typed: ORDER BY over 4 million rows of an INT and a
+# BIGINT in a 256 MB heap, which the boxed rows (about 300 MB) could not.
+scala_junit_test(
+    name = "sort_memory_test",
+    srcs = ["SortMemoryTest.scala"],
+    suffixes = ["Test"],
+    jvm_flags = ["-Xmx256m"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "//src/main/scala/com/transformer/sql/exec",
+        "@maven//:junit_junit",
+    ],
+)
+
 scala_junit_test(
     name = "join_swap_test",
     srcs = ["JoinSwapTest.scala"],

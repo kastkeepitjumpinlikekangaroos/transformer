@@ -136,6 +136,11 @@ class TopNExecTest {
     // TOP and FETCH FIRST are a LIMIT.
     assertTrue(physical("SELECT TOP 5 k FROM t ORDER BY k").exists(_.contains("Top 5:")))
     assertTrue(physical("SELECT k FROM t ORDER BY k FETCH FIRST 4 ROWS ONLY").exists(_.contains("Top 4:")))
+    // A key that reads RAND() is read once a row, by the top-n as by the sort:
+    // over a DISTINCT the sort reads it itself (without one, the binder
+    // computes it in a column below the sort).
+    val random = physical("SELECT DISTINCT k FROM t ORDER BY RAND() LIMIT 3")
+    assertTrue(random.mkString("\n"), random.exists(_.trim.startsWith("Top 3: RAND()")))
   }
 
   @Test def otherLimitsAndSortsAreNot(): Unit = {

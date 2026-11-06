@@ -24,6 +24,19 @@ scala_junit_test(
     ],
 )
 
+# IndexSort, the stable sort of the Ints a sort holds: the permutation
+# Arrays.sort of boxed indices gives under the same comparator, ties included,
+# over 0 to 10^5 elements, heavy ties, input in order and reversed.
+scala_junit_test(
+    name = "index_sort_test",
+    srcs = ["IndexSortTest.scala"],
+    suffixes = ["Test"],
+    deps = [
+        "//src/main/scala/com/transformer/core",
+        "@maven//:junit_junit",
+    ],
+)
+
 scala_junit_test(
     name = "hash_keys_test",
     srcs = ["HashKeysTest.scala"],

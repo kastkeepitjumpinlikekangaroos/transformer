@@ -14,19 +14,20 @@ import java.util.concurrent.TimeUnit
   *
   * The benchmark approximates plan 09 Phase 3's external merge-sort
   * merge phase: at flush time SortExec writes K sorted runs to disk
-  * (via parquet); at finish time it does a K-way heap-merge of those
+  * (via parquet); at finish time it does a K-way merge of those
   * runs, emitting one row at a time in sorted order until every run
   * is drained.
   *
   * `SortExec`'s exact merge entry point is `private[exec]` (see
-  * `SortExec.scala` — `DiskRunCursor`, `MergeHeap`). Per the Sub-plan
+  * `SortExec.scala` — `DiskRunCursor`, `LoserTree`). Per the Sub-plan
   * 3 escalation, the benchmark drops down to a minimal direct
   * heap-merge via [[java.util.PriorityQueue]] over the parquet rows
   * we wrote at `@Setup`, rather than open the visibility of SortExec
   * internals. The merge shape (K cursors, primitive Long key compare,
-  * emit min, advance min) is the same — what differs is the comparator
-  * and the row representation, both of which are dominated by the
-  * heap-pop/sift cost the production code pays too.
+  * emit min, advance min) is the same — what differs is the comparator,
+  * the row representation and the tournament: `SortExec` replays a tree
+  * of losers, `log2 K` comparisons a row, where this heap's sift makes up
+  * to twice that.
   *
   * # Parameters
   *

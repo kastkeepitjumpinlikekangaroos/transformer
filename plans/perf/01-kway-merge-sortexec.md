@@ -1,11 +1,11 @@
 # Plan 01: K-way merge in `SortExec`
 
-> Status: **done** — Phases 1-2 landed. `SortExec.mergeEmit` runs a
-> `java.util.PriorityQueue` K-way heap merge over the sorted partials
-> (`SortExec.scala:193-260`). Phase 3 (pre-computed sort-key tuples) is
-> still open and still optional: the comparator calls `Expr.eval` per
-> comparison at `SortExec.scala:322-323`. Plan 15 (typed sort keys)
-> supersedes Phase 3.
+> Status: **done** — Phases 1-2 landed, and Phase 3 is superseded by plan 15
+> (landed 2026-11-03), which went further: a sort evaluates each computed key
+> once a batch into a typed column, holds no boxed row, and its merge is a
+> stable tree of losers (`SortExec.scala`'s `LoserTree`), where this plan's
+> `java.util.PriorityQueue` heap compared rows by evaluating every key at each
+> comparison. The line numbers below are this plan's, not today's code's.
 > · Tier: 2 (quick win) · Effort: ~1 day · Risk: low
 
 ## Goal

@@ -42,8 +42,8 @@ object Ops {
   // matches the same rows whichever join runs it.
 
   def eq(a: Any, b: Any): Boolean = (a, b) match {
-    case (x: java.math.BigDecimal, y: java.lang.Number) => decimalCompare(x, y) == 0
-    case (x: java.lang.Number, y: java.math.BigDecimal) => decimalCompare(y, x) == 0
+    case (x: java.math.BigDecimal, y: java.lang.Number) => decimalAgainst(x, y) == 0
+    case (x: java.lang.Number, y: java.math.BigDecimal) => decimalAgainst(y, x) == 0
     case (x: java.lang.Number, y: java.lang.Number) if isIntegral(x) && isIntegral(y) =>
       x.longValue == y.longValue
     case (x: java.lang.Number, y: java.lang.Number) =>
@@ -55,18 +55,34 @@ object Ops {
   }
 
   def cmp(a: Any, b: Any): Int = (a, b) match {
-    case (x: java.math.BigDecimal, y: java.lang.Number) => decimalCompare(x, y)
-    case (x: java.lang.Number, y: java.math.BigDecimal) => -decimalCompare(y, x)
+    case (x: java.math.BigDecimal, y: java.lang.Number) => decimalAgainst(x, y)
+    case (x: java.lang.Number, y: java.math.BigDecimal) => -decimalAgainst(y, x)
     case (x: java.lang.Number, y: java.lang.Number) if isIntegral(x) && isIntegral(y) =>
       java.lang.Long.compare(x.longValue, y.longValue)
     case (x: java.lang.Number, y: java.lang.Number) =>
       floatCompare(x.doubleValue, y.doubleValue)
-    case (x: String, y: String) => x.compareTo(y)
+    case (x: String, y: String) => stringCompare(x, y)
     case (x: java.lang.Boolean, y: java.lang.Boolean) => x.compareTo(y)
-    case (x: Array[Byte], y: Array[Byte]) => util.Arrays.compareUnsigned(x, y)
+    case (x: Array[Byte], y: Array[Byte]) => binaryCompare(x, y)
     case (x: java.lang.Comparable[Any] @unchecked, y) => x.compareTo(y)
-    case (x, y) => x.toString.compareTo(y.toString)
+    case (x, y) => stringCompare(x.toString, y.toString)
   }
+
+  /** The engine's order of two strings: by UTF-16 code unit, as
+    * `String.compareTo` has it, so a character past U+FFFF, stored as a
+    * surrogate pair below U+E000, sorts below U+E000 to U+FFFF (code points
+    * would put it above them, which is how a parquet file's statistics order
+    * strings: docs/gotchas.md). `cmp` and a sort's typed order (`KeyOrder`)
+    * both order strings here. */
+  def stringCompare(a: String, b: String): Int = a.compareTo(b)
+
+  /** The engine's order of two byte arrays: byte by byte as unsigned values,
+    * so a prefix sorts first and 0x80 sorts above 0x7f. */
+  def binaryCompare(a: Array[Byte], b: Array[Byte]): Int = util.Arrays.compareUnsigned(a, b)
+
+  /** The engine's order of two decimals: by value, whatever their scales,
+    * so 1.0 ties 1.00. */
+  def decimalCompare(a: java.math.BigDecimal, b: java.math.BigDecimal): Int = a.compareTo(b)
 
   /** The engine's one comparison of two floats, as Postgres and Spark have it:
     * NaN equals NaN and sorts above every other number, the infinities
@@ -93,14 +109,14 @@ object Ops {
     * built without the analyzer. The other side is read the way that CAST reads it
     * ([[Casts.toDecimal]]); NaN and the infinities have no decimal and take
     * their places in the total order instead. */
-  private def decimalCompare(x: java.math.BigDecimal, y: java.lang.Number): Int = y match {
-    case d: java.math.BigDecimal => x.compareTo(d)
+  private def decimalAgainst(x: java.math.BigDecimal, y: java.lang.Number): Int = y match {
+    case d: java.math.BigDecimal => decimalCompare(x, d)
     case _: java.lang.Double | _: java.lang.Float =>
       val d = y.doubleValue
       if (java.lang.Double.isNaN(d) || d == Double.PositiveInfinity) -1
       else if (d == Double.NegativeInfinity) 1
-      else x.compareTo(Casts.toDecimal(y))
-    case _ => x.compareTo(Casts.toDecimal(y))
+      else decimalCompare(x, Casts.toDecimal(y))
+    case _ => decimalCompare(x, Casts.toDecimal(y))
   }
 
   private sealed abstract class Arith(val symbol: String)
@@ -1180,9 +1196,8 @@ object VecOps {
     * Equality and ordering both go through [[Ops.floatCompare]], the order
     * `Ops.eq` and `Ops.cmp` use, so the same `Expr` answers the same on either
     * path: `NaN` equals itself and sorts above every other value, and `-0.0`
-    * equals `0.0`. It is a total preorder, which the sort comparators that
-    * share it need (IEEE `<` is not), and it takes primitive `double`s, so
-    * this costs no boxing.
+    * equals `0.0`. It is a total preorder, which a sort's order needs (IEEE
+    * `<` is not), and it takes primitive `double`s, so this costs no boxing.
     *
     * `Float` has no branch of its own: `readDouble` widens `FloatVector` (and
     * `LongVector` / `IntVector`, beside a float) to `double` exactly as

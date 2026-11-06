@@ -29,25 +29,27 @@ of rows with one typed column vector per field. Operators read batches and
 emit batches. Expression evaluation runs in two modes: pipeline operators
 (Project, Filter) drive `Expr.evalVec(batch): ColumnVector` for column-at-a-time
 primitive-array work (no boxing, JIT-friendly inner loops); RowBuf-driven
-paths (sort comparators, window per-row callbacks) still use boxed `Any` via
+paths (window per-row callbacks) still use boxed `Any` via
 `Expr.eval(batch, row)`. A hash join boxes no row: it gathers its output a
 column at a time by selection vectors, and evaluates its residual condition
-with `evalVec` over a chunk of candidate pairs (§8). See
+with `evalVec` over a chunk of candidate pairs (§8). Nor does a sort: it holds
+its rows in typed chunks, evaluates a computed key once a batch, and compares
+keys a type at a time (§2e). See
 [§5a Vectorized expression evaluation (`evalVec`)](#5a-vectorized-expression-evaluation-evalvec).
 
 ## Module map
 
 | Path | Role | Key files |
 |---|---|---|
-| `core/` | Shared types crossed by every module. Zero deps. | `DataType.scala` (`sqlName`, the one spelling every grid and listing shows a type in: `BIGINT`, `DECIMAL(10,2)`), `ExecutionOptions.scala` (per-query knobs: spill, metrics, and `stopped`, §3g), `Schema.scala`, `ColumnarBatch.scala`, `Row.scala`, `Catalog.scala`, `NumberText.scala` (the one grammar text becomes a number by, for a CSV field and a CAST alike), `Scheduler.scala` (the shared `ForkJoinPool` every parallel call site funnels through), `ParallelDrain.scala` (a whole result's partitions read on that pool, each partition's result in partition order (`eachPartition`) or every batch in order with a bounded read-ahead (`inOrder`), with no queue and no pool task waiting for the consumer, §3), `SqlExecutor.scala` (`SqlExecutorRegistry`; `ExecutedQuery`, whose `claim` gives a partition to a reader on several threads), `WrittenParts.scala` (the part files a partitioned write committed, which a run record names), `Settings.scala` (every setting the engine reads from outside the program, a `transformer.*` system property or its `TRANSFORMER_*` environment twin, each with its default and how it parses: the one place that reads a property or the environment, rule R8), `Faults.scala` (the fault points every disk change of a run calls, armed by a test or `-Dtransformer.fault`, §3a) |
+| `core/` | Shared types crossed by every module. Zero deps. | `DataType.scala` (`sqlName`, the one spelling every grid and listing shows a type in: `BIGINT`, `DECIMAL(10,2)`), `ExecutionOptions.scala` (per-query knobs: spill, metrics, and `stopped`, §3g), `Schema.scala`, `ColumnarBatch.scala` (with each vector's `copyRange`, `gather` and `gatherChunks`, the typed copies a sort and a join move rows with), `IndexSort.scala` (the stable sort of the `Int`s naming a sort's rows, by an `IntComparator`, §2e), `Row.scala`, `Catalog.scala`, `NumberText.scala` (the one grammar text becomes a number by, for a CSV field and a CAST alike), `Scheduler.scala` (the shared `ForkJoinPool` every parallel call site funnels through), `ParallelDrain.scala` (a whole result's partitions read on that pool, each partition's result in partition order (`eachPartition`) or every batch in order with a bounded read-ahead (`inOrder`), with no queue and no pool task waiting for the consumer, §3), `SqlExecutor.scala` (`SqlExecutorRegistry`; `ExecutedQuery`, whose `claim` gives a partition to a reader on several threads), `WrittenParts.scala` (the part files a partitioned write committed, which a run record names), `Settings.scala` (every setting the engine reads from outside the program, a `transformer.*` system property or its `TRANSFORMER_*` environment twin, each with its default and how it parses: the one place that reads a property or the environment, rule R8), `Faults.scala` (the fault points every disk change of a run calls, armed by a test or `-Dtransformer.fault`, §3a) |
 | `temporal/` | Date/time template variables. No deps. | `TemporalVariables.scala`, `TemplateRenderer.scala` |
 | `read/csv/` | CSV input. Stdlib only. | `CsvOptions.scala` (also `forWrittenFile`, the options a job reads back its own CSV output with, and `checkSeparators`, which the writer shares), `CsvRowParser.scala` (state machine: an unquoted null string is NULL, a blank line is flagged rather than skipped, an unclosed quote fails), `CsvValues.scala` (the text of each type's values: what the writer prints, what the reader parses strictly, and what inference recognizes and joins), `CsvSchemaInferer.scala`, `PathGlob.scala`, `CsvReader.scala` (inference over the first rows of the glob's files in order, each later file read by its header's names, row width, blank lines as rows in a one-column file, typed parse errors naming file, line and column) |
 | `read/parquet/` | Parquet input. Depends on `parquet-hadoop` + minimal Hadoop. | `ParquetReader.scala`, `ParquetColumns.scala` (the type each parquet column reads as and how its values decode, decided per file from that file's footer; matches a view's columns to each file's by name), `ParquetFooter.scala` (why a footer parquet-mr refused does not read, in the reader's words, from its Thrift walked leniently by `CompactThrift`), `ParquetFilterTranslator.scala` |
 | `write/csv/` | CSV output. Stdlib only; uses `read/csv`'s `CsvValues`, so the writer and reader share one text per type. | `CsvWriter.scala` (`CsvWriter`, one file staged under a hidden temp name and committed by a rename, and `writePartitioned`, which commits every part together once all are written; `CsvRowWriter`, the header and rows' text on any `Writer`, which `transformer query` prints CSV through, so its stdout reads back as a file does) |
 | `write/parquet/` | Parquet output. | `ParquetSchema.scala` (the parquet schema transformer writes for a `Schema`), `ParquetWriter.scala` (staged and committed as `CsvWriter` is) |
 | `sql/parse/` | JSqlParser façade: one statement, none of its text lost on the way to the AST, and no tree too deep to walk. | `SqlParser.scala` (refuses text after the statement's `;` and a repeated tail clause JSqlParser overwrites — see §10; refuses parentheses that do not balance and a tree deeper than `MaxNesting`, 256 levels, once AND / OR chains are regrouped balanced; `unquote` / `quote`, the one rule for the name a quoted identifier names; `escapeLiteralText`, the text a JDBC `{d '...'}` escape was written with, which its node does not keep) |
-| `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala`, `FunctionCatalog.scala` (every function a query can call, one entry each, which the binder binds by and the README's lists, the fuzz generators and the tests read), `Funcs.scala` (the scalar functions' implementations), `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `PendingCteView.scala` (placeholder for an unresolved CTE reference), `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo), `LogicalOptimizer.scala` and its passes (`FilterPushdown`, `JoinOrder`, `ColumnProjectionPushdown`), `PlanValidator.scala` (the check every stage's plan passes, §9), `PlanSql.scala` (a plan printed as SQL the binder reads back, "Plans as SQL"), `PlanTree.scala` (a plan as EXPLAIN's tree), `UnsupportedClauses.scala` (the rejection pass that runs before binding, and its audit of every JSqlParser getter the binder does not read — see §10) |
-| `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala` (the hash join's four paths, every one probing through one resumable cursor, §8), `SortExec.scala` (also `TopNExec`, §2e), `DistinctExec.scala`, `UnionExec.scala`, `WindowExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala` (with `preMaterialize`, the pass that publishes every shared result before a plan runs, §2b), `SharedResult.scala` (the trait an operator holding a result computed once extends, an exchange or a broadcast join, and `SharedOnce`, the publication it is kept in), `CteResolver.scala` (inline-vs-materialize CTE pass + `PhysicalPlanView`), `SqlEngine.scala`, `Explain.scala` (what `EXPLAIN` returns) |
+| `sql/plan/` | Expression types, logical plan, JSqlParser → logical conversion, analyzer. | `Expr.scala`, `Ops.scala` (the one total order: `cmp`, and the primitives each type orders by, `floatCompare`, `stringCompare`, `binaryCompare`, `decimalCompare`), `KeyOrder.scala` (a sort key's typed order, `SortKey.order`, the twin of `SortKey.compare` over two vectors, §2e), `FunctionCatalog.scala` (every function a query can call, one entry each, which the binder binds by and the README's lists, the fuzz generators and the tests read), `Funcs.scala` (the scalar functions' implementations), `Window.scala` (WindowFn / WindowSpec / WindowFrame ADTs), `LogicalPlan.scala`, `PendingCteView.scala` (placeholder for an unresolved CTE reference), `Analyzer.scala`, `LogicalBuilder.scala` (largest file in the repo), `LogicalOptimizer.scala` and its passes (`FilterPushdown`, `JoinOrder`, `ColumnProjectionPushdown`), `PlanValidator.scala` (the check every stage's plan passes, §9), `PlanSql.scala` (a plan printed as SQL the binder reads back, "Plans as SQL"), `PlanTree.scala` (a plan as EXPLAIN's tree), `UnsupportedClauses.scala` (the rejection pass that runs before binding, and its audit of every JSqlParser getter the binder does not read — see §10) |
+| `sql/exec/` | Physical operators + planner + entry point. | `PhysicalPlan.scala`, `AggregateExec.scala`, `JoinExec.scala` (the hash join's four paths, every one probing through one resumable cursor, §8), `SortExec.scala` (also `TopNExec`, and what both build on: `SortLayout`, where each key is read; `SortRun`, a partition's rows in typed chunks; the cursors and the `LoserTree` the merge reads them through, §2e), `DistinctExec.scala`, `UnionExec.scala`, `WindowExec.scala`, `RowBuf.scala`, `PhysicalPlanner.scala` (with `preMaterialize`, the pass that publishes every shared result before a plan runs, §2b), `SharedResult.scala` (the trait an operator holding a result computed once extends, an exchange or a broadcast join, and `SharedOnce`, the publication it is kept in), `CteResolver.scala` (inline-vs-materialize CTE pass + `PhysicalPlanView`), `SqlEngine.scala`, `Explain.scala` (what `EXPLAIN` returns) |
 | `job/` | User-facing API + runner. Depends directly on `read/{csv,parquet}` and `write/{csv,parquet}` — parquet is a first-class format. | `DataJob.scala`, `InputFilePath.scala`, `OutputFilePath.scala`, `SQLTask.scala`, `JobResult.scala`, `InputResolver.scala`, `JobFiles.scala` (filesystem ops for the GUI's edit-validation flow — `writeValidationSql` / `deleteValidation`), `TaskDag.scala` (DAG analyzer/builder from SQL refs; `TaskDag` + `TaskDagNode` are public so the GUI can render without re-implementing), `TaskProgressListener.scala` (per-task callbacks fired from runner worker threads), `TaskRunRecord.scala` (`_run.json` write/read/discover for per-task run records — `Running` while a run writes the directory, then every final status, with `_validation-<slug>.csv` failure samples; `clear`, which deletes what a run wrote beside the record), `OutputDirectory.scala` (the order every writer of an output directory follows — check, mark `Running`, clear, stage, commit, final record — and what a run that ends without output leaves, `settle`; §3a), `JobRunRecord.scala` (`job.json` aggregate manifest pointing at every task's record + the run's warnings), `JobOutputLayout.scala` (classifies an output dir as `SingleRun`/`MultiRun`/`Empty` for the GUI's run picker), `DirectoryJobLoader.scala` (DBT-style directory loader; supports optional per-table `output.json` with `partitionBy`; threads default `<outputDir>/job.json` as `jobRunOutput` so the manifest lives alongside its data), `Json.scala` (stdlib JSON parser used by the loader + record readers) |
 | `gui/` | JavaFX visualizer/runner. Depends on `job/`, `core/`, `read/{csv,parquet}/`, `sql/exec/`, `temporal/` (and on `write/{csv,parquet}/` through `job/`), plus `org.openjfx:javafx-{base,controls,graphics}` (the platform-classifier jars), RichTextFX (the SQL editor, with the flowless / reactfx / undofx / wellbehavedfx jars its API is made of) and AtlantaFX (the theme). `JobSession.scala` and `DagLayout.scala` build separately as `gui:session`, which has no JavaFX dependency; the vim engine (`VimKey`, `VimCommand`, `VimText`, `VimEngine`) builds as `gui:vim`, with no dependency at all. `gui` exports both, so tests and the fuzz harness reach them without the toolkit. What both GUIs (this one and `viewer/`) are built from is `gui:components`: `Theme`, `transformer.css`, `Icons`, `FxHelpers`, `SqlHighlighter`, `SqlEditor`, `VimKeyEvents`, `SqlView`, `SqlErrorDialog`, `ShortcutsDialog`, `PersistDialog`, `ResultPersister`, `DataGrid`, `QueryConsole`, `ChartPane`, `ChartCanvas` and `GraphCanvas`; `gui` exports it too. What a chart draws (`ChartData`, `ChartScale`) builds as `gui:chart`, with no JavaFX. | `GuiApp.scala` (Application boot: installs the theme, then a BorderPane with the menu bar (in the macOS menu bar there) and the header (`ControlsPanel`) above a vertical split of the DAG over the ResultsTabPane; scene-level ⌘R / Ctrl+R accelerator calls `controls.triggerRun()`; File, View (fit, zoom, Vim Keybindings) and Help menus), `Theme.scala` (AtlantaFX Primer Dark as the user-agent stylesheet; `Theme.style` adds `transformer.css` and a generated stylesheet naming the installed monospace family to every scene, dialog and alert; `Palette`, the theme's colours, for the canvas), `transformer.css` (the GUI's own style classes in the theme's looked-up colours, and the SQL token colours; ships in the jar as `com/transformer/gui/transformer.css`), `Icons.scala` (SVG line icons), `JobSession.scala` (mutable FX-thread session state — jobDir, executionTime, outputDir, DAG, per-task UI states, task records, historical runs, job manifest, available run snapshots, selected run; loads `<outputDir>/job.json` (or any sibling snapshot the user picks) and follows each task's `runFile` to reconstruct full `TaskStatus` including `ValidationFailed(failures)` with sample CSVs, and a task whose record says `Running` as `UiTaskState.Unfinished`; `buildInteractiveCatalog` assembles a Catalog over inputs + persisted task outputs for ad-hoc SQL), `DagLayout.scala` (pure-Scala layered DAG layout), `GraphCanvas.scala` (components: `GraphCanvas`, the canvas both GUIs draw graphs on — a dot grid, pan/zoom, cards with a bar in a status colour, curved edges, fitting text; `GraphOverlay`, the zoom controls and a summary row over one), `DagCanvas.scala` (`DagCanvas`: the job's DAG on a `GraphCanvas` — the selection's edges in the accent colour, click/double-click; `DagOverlay`: the per-status task counts over it), `ControlsPanel.scala` (the header: open job, execution date + `HH:mm:ss` time, output-dir field, optional run picker for multi-run output dirs, a status pill with live progress, Run on a worker thread; exposes `triggerRun()` for the keyboard accelerator), `TaskDetailsPanel.scala` (the selected task/input: a header with the actions on it, a column of details — status chips, deps, output, error, validations — and a Source/Rendered SQL column editable in place, where vim's `:w` saves and `:q` cancels), `SqlEditor.scala` (the SQL editor everywhere: RichTextFX `CodeArea`, `SqlHighlighter` styling, line numbers, a status line, and vim through `VimEngine` over a `VimBuffer` on the area while `SqlEditor.vimEnabled` is on, remembered in java.util.prefs), `VimKeyEvents.scala` (a JavaFX key event as an engine key, a platform shortcut, or the window's), `VimKey.scala` / `VimCommand.scala` / `VimText.scala` / `VimEngine.scala` (`gui:vim`: key notation; the normal/visual command grammar and its parser; lines, words, paragraphs, text objects and vim regex over a string; and the engine — modes, operators, registers, undo, `.`, macros, search, ex commands), `SqlHighlighter.scala` (pure-Scala tokenizer: keywords, functions (a word before `(`), types (where one is written), strings, numbers, comments, templates, and each kind's style class — testable, no JavaFX deps), `SqlView.scala` (a read-only `SqlEditor` the host can make editable, with a Copy action for the host's header), `ResultsTabPane.scala` (5 tabs: **Task details**, Output data, Validations — per-validation cards with an Edit… button that pops out the `AddValidationDialog.showEdit` editor (round-trips through `JobFiles.writeValidationSql` / `deleteValidation`) — **SQL console**, Run log), `AddValidationDialog.scala` (the validation editor dialog used by both the task-details chip and the per-card Edit button; supports add + edit + delete; `:w` presses Save, `:q` Cancel), `AddTableDialog.scala`, `AddInputDialog.scala`, `QueryConsole.scala` (components: a `SqlEditor` with Run query and Persist results… beside the result, or above it with `Orientation.VERTICAL`, as the data viewer's query tabs have it: a `DataGrid` of its rows in a Rows tab beside a Chart tab; ⌘⏎ / Ctrl+Enter runs it; the host's `prepare` runs on the FX thread and returns the catalog builder the worker calls; materializes the result, its partitions read at once on the pool with a stop of its own (`ParallelDrain.eachPartition`, a failure in one stopping the rest), so Persist can replay it and the chart read every row), `ChartPane.scala` (components: the Chart tab — the type, X, Y and its aggregation, Split by — over a `ChartCanvas`, worked out on a worker while the tab shows; Save PNG… paints the chart again at twice its size and writes it with `ImageIO`), `ChartCanvas.scala` (components: bars, lines, areas, dots or a pie on a plain `Canvas` — axes, legend, the pointer's reading; below 240px tall, axes untitled to keep the plot's height — and `image`, the same paint at a scale), `ChartData.scala` (`gui:chart`: `ChartSpec`, what to draw, and `ChartSpec.fit`, which suggests one for a result and carries one over to the next; `ChartData.build`, one pass over a result's batches into what each X and series hold, then series in order, folded into Other past eight), `ChartScale.scala` (`gui:chart`: round ticks, calendar ticks in UTC, and how ticks, values and times are written), `DataGrid.scala` (components: rows in a `TableView` — each column's type under its name, NULL in its own style, numbers right, sorting by value, ⌘C copies rows — plus `DataGrid.sample`, a view's first rows), `SqlConsolePanel.scala` (the job's console: chips for the registered views above a `QueryConsole` over `JobSession.buildInteractiveCatalog`), `PersistDialog.scala` (modal: output dir, format, maxPartitions, CSV header — mirrors `OutputFilePath` fields), `ResultPersister.scala` (writes a `MaterializedView` through `job.OutputDirectory`, as a job's task writes its directory: strays refused, a `Running` mark, parts staged and committed, a `Succeeded` record naming them, or a `Failed` one and no part file), `ShortcutsDialog.scala` (Help > Keyboard Shortcuts), `SqlErrorDialog.scala`, `FxHelpers.scala` |
 | `viewer/` | The data viewer, a standalone JavaFX app (`//:transformer_viewer`): every job output in a folder as a dataset, SQL over all of their tables with a chart of each result, and an inspector per table (its rows, columns, recorded details and lineage within and across jobs). Depends on `gui:components`, `job/`, `core/`, `sql/exec/`. `viewer:model` (`RunFolder`, `Lineage`, `LineageLayout`, `ViewerSession` with `QueryCatalog`, `InspectorView` and `InspectorHistory`) has no JavaFX; see §4. | `ViewerApp.scala` (the window, menus and header; `ViewerMain`, the entry point, apart from the `Application` so `java -jar` starts it), `RunFolder.scala` (finding the runs, grouping them into datasets, names; `TableInfo.status`, `Running` for a table whose `_run.json` says so whatever `job.json` says), `Lineage.scala` (nodes, edges, input → table matching, a node's whole lineage), `LineageLayout.scala` (boxes and cards, of the folder or of one lineage), `ViewerSession.scala` (state, selection, the run shown per dataset, finding a selection again in a folder read again, `QueryCatalog`, an inspector's views and Back/Forward history), `ViewerTabs.scala` (the workspace: query tabs, inspector tabs, the preview tab), `InspectorPane.scala` (an inspector's header and views; `SamplePane`, `ColumnsPane`, `TablesPane`), `DetailsPanel.scala` (the Details view), `LineageCanvas.scala` (the Lineage view on a `GraphCanvas`; `LineageOverlay` with its whole-folder switch), `DatasetTree.scala` (the list with its filter) |
@@ -141,8 +143,7 @@ the next begins: no iterator keeps state tied to its thread, and no batch
 changes once `next()` has returned it.
 
 When operators need to evaluate an `Expr` over a *materialized row* (window
-callbacks), they use `RowBuf` (sort comparators read a boxed row through
-`RowView`, which allocates no batch):
+callbacks), they use `RowBuf`:
 a reusable 1-row batch that the surrounding loop refills with `.set(rowArr)`
 or `.setFromBatch(srcBatch, srcRow)`. Don't allocate fresh `ColumnarBatch`es
 per row in tight loops — that defeats the JIT.
@@ -410,9 +411,15 @@ threshold tracking. The GUI's SQL console sets only a query's stop (§3g),
 so spill never activates for exploratory work.
 
 Per-operator format:
-- `SortExec` writes per-partition sorted "runs" as parquet files;
-  the K-way merge heap consumes both in-memory tails and disk-resident
-  runs via a uniform `SortCursor` abstraction.
+- `SortExec` writes per-partition sorted "runs" as parquet files, each
+  run's columns and then its computed keys, so a key is read once whatever
+  reads it; the merge consumes both in-memory tails and disk-resident runs
+  via a uniform `SortCursor` abstraction, a tournament of losers over them
+  (§2e). A sort counts what its run holds (its chunks' arrays, each string,
+  byte array or decimal once for each run of rows holding the same object,
+  and the `Int`s sorting it takes) and flushes when that crosses the
+  threshold; the other breakers estimate each batch they take
+  (`Spill.estimateBytes`).
 - `HashAggregateExec` writes one row per group with `groupKey columns`
   + N `Binary` columns containing serialized `AggState`s (see
   `AggStateSerde`). At emit time every partition's spill files are
@@ -556,26 +563,62 @@ harness documentation lives in [benchmarking.md](benchmarking.md). The
 on-disk `_perf.json` schema is defined in
 `core/metrics/TaskMetricsRecord.scala` (schema version 1).
 
-### 2e. Top-N for ORDER BY ... LIMIT
+### 2e. Sorts: typed runs, a stable merge, and top-N
+
+`SortExec` sorts each partition of its input on the pool, then merges the
+partitions' sorted runs into one stream. A partition copies the rows it reads
+into a `SortRun`, a range of a batch at a time (`ColumnVector.copyRange`):
+chunks of `DefaultCapacity` rows, each a batch of the input's columns and then
+a column for each key that is no plain column reference. `SortLayout` says
+where each key is read: a column in place, any other key evaluated once a batch
+with `evalVec` into its column, so a key is read once a row whatever reads it,
+and a key that reads `RAND()` is one value a row. A row is named by the `Int`
+`chunk << shift | row`; past `SortRun.MaxRows` (`Int.MaxValue`) rows a
+partition fails. `IndexSort` sorts those `Int`s stably, a merge sort through
+an `IntComparator` that compares the rows' keys through each key's typed order
+(`SortKey.order`, a `KeyOrder`: `compare(a, i, b, j)` over two vectors of the
+key's type, `SortKey.compare`'s twin, §5). No row is boxed and no comparison
+evaluates anything; a sorted run leaves through `ColumnVector.gatherChunks`.
+
+The merge reads every run through a `SortCursor`, which exposes the vectors
+holding its head row and that row (an `InMemoryCursor` a chunk of the
+partition's tail, a `DiskRunCursor` the batch it last read from a spilled run),
+and copies each row it takes cell by cell (`copyTo`), unboxed. The cursors are
+a partition's spilled runs in the order written and then its in-memory tail,
+partition by partition, and the merge is a `LoserTree` over them: its winner
+is the head row that sorts first, a tie going to the lower cursor, and only the
+winner's path is played again as it advances, `log2 K` comparisons a row on
+the consumer's thread. So every path returns the stable sort of the input read
+partition by partition: rows that tie on every key come in the order they were
+read, with spill and without it, wherever the runs ended. Another layout of the
+same rows reads them in another order, and returns its ties in that order. A
+single run in memory is gathered out whole.
+
+With spill on (§2c), a partition counts what its run holds as rows come in
+(`SortRun.heldBytes`): each chunk's arrays by capacity, each string, byte array
+or decimal value's payload once for each run of rows holding the same object
+(a parquet row group's values are shared, and a sorted input repeats them), and
+the eight bytes a row the `Int`s sorting it take. Past the threshold the run is
+sorted and written to a parquet file, its computed keys beside its columns, and
+the merge reads it back rather than evaluating a key again. Without spill
+nothing is counted, and a sort holds every row, typed: about 12 bytes a row
+for a `FLOAT` key beside a `STRING` the reader shares (4 a value, 4 a
+reference, and the `Int` naming the row), 16 while it sorts.
 
 `PhysicalPlanner.topN` plans a `LIMIT n` over a sort as a `TopNExec`, through
 the projections the binder puts between them (a key that is not selected) and
 an `OFFSET m`, which makes it keep `n + m` rows and runs above it. Each
-partition keeps, in a heap with the row that sorts last at its head, the `n`
-rows that sort first of those it has read, evaluating each row's keys once as
-it reads it; then the partitions' rows sort together and the first `n` are
-returned. So it holds `n` rows a partition, every partition at once, where a
-sort holds every row: `ORDER BY change_size DESC LIMIT 3` over 132M polymarket
-rows runs in 3 s and 0.5 GB, where the sort ran out of a 2 GB heap.
-
-It returns the first `n` rows of a stable sort: rows that sort alike come in
-the order they were read, partition by partition, as `SortExec` returns them
-below `SmallNThreshold` (its heap merge of larger inputs orders such rows by
-the heap). A later row replaces the one at the head only when it sorts strictly
-before it. `LIMIT 0`, a key that reads `RAND()` (a plain SELECT's binder computes
-one in a column, but over a DISTINCT or a set operation the sort reads it
-itself; plans/perf/15 records what that breaks) and a count past `TopNExec.MaxRows`
-(10,000, with the offset) plan the sort, which can spill, instead.
+partition keeps the `n` rows that sort first of those it has read in slots, a
+batch of `n` rows of its columns and computed keys, read as `SortExec` reads
+them, with a heap of slot numbers whose root is the slot that sorts last. Once
+it holds `n`, a row costs one comparison of typed keys with the root, and is
+copied into the root's slot only when it sorts strictly before it; then every
+partition's slots sort together (`IndexSort`) and the first `n` are gathered.
+So it holds `n` rows a partition, every partition at once, where a sort holds
+every row, and it returns the first `n` rows of the stable sort, as `SortExec`
+returns them. `LIMIT 0` and a count past `TopNExec.MaxRows` (10,000, with the
+offset) plan the sort, which can spill, instead; a key that reads `RAND()` does
+not, since both read it once a row.
 
 ### 3. Parallel execution
 
@@ -1588,8 +1631,10 @@ precision equal on this path and unequal on the row path.
 the raw primitive operator just because the operands are `double`. Equality
 (`= <>`) and ordering (`< <= > >=`) both go through `Ops.floatCompare`, in
 *both* paths: `NaN` equals `NaN` and sorts above every other number, and
-`-0.0` equals `0.0`. It is a total preorder, which the sort comparators that
-share `Ops.cmp` need (IEEE comparison is not one). The same rule reaches `IN`,
+`-0.0` equals `0.0`. It is a total preorder, which a sort needs (IEEE
+comparison is not one): `SortKey.compare` orders boxed values through `Ops.cmp`,
+and its typed twin, `SortKey.order`, orders each type through the primitive
+`Ops.cmp` calls for it. The same rule reaches `IN`,
 where the literal-hoisting `HashSet` would otherwise import
 `java.lang.Double.equals`, which separates the zeros; `InListExpr.setKey`
 reads `-0.0` as `0.0` into the set. See [gotchas.md](gotchas.md).
@@ -1653,6 +1698,11 @@ typed vector for the whole batch instead of N recursive `Expr.eval` calls.
   rank / dense_rank tie detection all read from those pre-computed arrays.
   LAG/LEAD args and aggregate args still go through the per-row path — a
   follow-up that pairs with plan 04 (sharding).
+- **`SortExec` and `TopNExec`** read a key that is a column in place and
+  evaluate any other once per batch into a column of their own beside the
+  row's (`SortLayout`), where they keep it: a sort's run holds it, typed, and
+  writes it to a spilled run, so it is never evaluated again (§2e). Neither
+  boxes a key: they compare through `SortKey.order`.
 
 ### 5c. Vectorized aggregate state updates
 
@@ -2239,6 +2289,14 @@ one over generated text:
 - **Expression parity** (`oracle/ExprParity`) — a generated type-correct `Expr`
   over a random `ColumnarBatch` must evaluate identically through the scalar
   `eval` and the vectorized `evalVec` paths. Guards every `evalVec` override.
+- **Sort order** (`SortKeyOrderTest`, `SortParityFuzzTest`) — a sort key's
+  typed order (`SortKey.order`) has the sign of its boxed one
+  (`SortKey.compare`) on every pair of each type's pool and on random pairs,
+  spilled and read back too; and over `DataGen` datasets in every layout,
+  with spill off and at one byte, a sort returns the stable sort of its input
+  read partition by partition row for row, ties included, and a top-n that
+  sort's first `n`. A positional oracle, where mode-differential compares
+  multisets.
 - **Mode-differential** (`oracle/ModeDifferential`, and its multi-relation
   extension `oracle/MetaModeDifferential`) — one `(data, query)` must produce the
   same result multiset under spill on/off, metrics on/off, and every

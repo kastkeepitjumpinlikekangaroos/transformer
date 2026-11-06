@@ -5,14 +5,15 @@ self-contained: read the file, and if it still has open work, the launch
 prompt at the bottom of that file says how to pick it up.
 
 **Most of this workstream has shipped.** Ten of the first twelve plans
-are landed — four of them (02, 09, 10, 11) with nothing at all left, the
-other six with one optional, evidence-gated phase still open. Plan 06 is
-partial exactly as its own file describes, and plan 08 is deliberately
-unstarted pending profiler evidence. Plans 13-15 were written
-2026-11-01, after `transformer query` over the polymarket files found what
-a 2 GB heap cannot do and how far it trails DuckDB. Plans 14 and 13 landed
-2026-11-03, overnight (14 but for one part held for the user); 15 is
-unstarted, and its evidence is already in its file. Read the status column
+are landed — five of them (01, 02, 09, 10, 11) with nothing at all left,
+plan 01's optional Phase 3 superseded by plan 15, the other five with one
+optional, evidence-gated phase still open. Plan 06 is partial exactly as its
+own file describes, and plan 08 is deliberately unstarted pending profiler
+evidence. Plans 13-15 were written 2026-11-01, after `transformer query`
+over the polymarket files found what a 2 GB heap cannot do and how far it
+trails DuckDB. All three landed 2026-11-03 in overnight runs (14 but for one
+part held for the user; 15 but for its gated Phase 6, whose gate was not
+met). Read the status column
 before starting anything here — the standing failure mode for this
 directory is a session re-implementing work that already exists and is
 covered by tests.
@@ -20,11 +21,12 @@ covered by tests.
 ## Status table
 
 Verified against `src/main` on 2026-09-06; rows 01 and 08 rechecked, and
-13-15 added, on 2026-11-01; rows 08, 13 and 14 rechecked on 2026-11-03.
+13-15 added, on 2026-11-01; rows 01, 08, 13, 14 and 15 rechecked on
+2026-11-03.
 
 | # | Plan | Status | Evidence |
 |---|------|--------|----------|
-| [01](01-kway-merge-sortexec.md) | K-way merge in SortExec | done | `SortExec.mergeEmit` runs a `java.util.PriorityQueue` heap merge over the sorted partials (`SortExec.scala:164`) |
+| [01](01-kway-merge-sortexec.md) | K-way merge in SortExec | done; Phase 3 superseded by 15 | `SortExec.mergeEmit` merges the sorted runs, now through plan 15's `LoserTree` rather than this plan's `PriorityQueue` heap |
 | [02](02-packed-aggregate-keys.md) | Packed hash-aggregate/distinct/join keys | done | `core/HashKeys.scala` (`KeyCodec`, `PackedBytesCodec`, `ObjectArrayCodec`, `SingleObjectKeyCodec`, `LongHashMap`), consumed by `AggregateExec`, `DistinctExec`, `JoinExec`, `WindowExec`, `HashPartitioner` |
 | [03](03-vectorized-expr-eval.md) | Vectorized expression evaluation | done | every `Expr` subtype overrides `evalVec`; `ExprBatchTest` + `expr_parity_fuzz_test` are the parity gate; breakers extract keys batch-at-a-time |
 | [04](04-hash-partition-breakers.md) | Hash-partition between breakers | done | `ExchangeExec` + `HashPartitioner`, inserted by `PhysicalPlanner` above aggregate / join / window / union-distinct |
@@ -38,17 +40,26 @@ Verified against `src/main` on 2026-09-06; rows 01 and 08 rechecked, and
 | [12](12-cte-materialization.md) | Materialize multiply-referenced CTEs once | done | `sql/exec/CteResolver.scala` + `sql/plan/PendingCteView.scala` |
 | [13](13-stream-hash-join-output.md) | Stream a hash join's output | done | `JoinExec`'s four paths (broadcast in the probe side's partitions, its build side a `SharedResult` the pass publishes; in waves; per shard; grace hash) all probe through `ProbeCursor` and stream, gathering output a column at a time (`ColumnVector.gather`); `sql/exec/SharedResult.scala` (`SharedOnce`, the claim and latch `ExchangeExec` shares); `PhysicalPlanner.preMaterialize`; `WindowExec` over a whole input reads partitions through `ParallelDrain.eachPartition`; `sql/exec:streaming_join_test`; the 120M-row polymarket join runs in 6.8 s at 0.7 GB in a 2 GB heap |
 | [14](14-parallel-result-drain.md) | Read a printed result's partitions in parallel | done, but CSV part files (held) | `core/ParallelDrain.scala` (`eachPartition`, `inOrder`, no queue); `ResultPrinter.print(io, q, ...)` reads a table and markdown through `eachPartition` (`TableSlices`) and every other format, `COPY` and `--output` through `inOrder`; `QueryConsole.runQuery` through `eachPartition`; `COPY ... (FORMAT parquet, PER_PARTITION_OUTPUT true)`; `core:parallel_drain_test`, `parallel_drain_serial_test` |
-| [15](15-typed-sort-keys.md) | Sorts compare typed keys, not boxed rows | not started | `SortExec.rowOrdering` builds two `RowView`s and evaluates every key per comparison over `Array[Any]` rows; a spilling sort of 132M rows takes 333 s (DuckDB 95 s) and without spill runs a 2 GB heap out |
+| [15](15-typed-sort-keys.md) | Sorts compare typed keys, not boxed rows | done, Phases 0-5; Phase 6 left out, its gate not met | `SortKey.order` (`sql/plan/KeyOrder.scala`), `core/IndexSort.scala`, `ColumnVector.copyRange` / `gatherChunks`; `SortExec`'s `SortLayout`, `SortRun` (typed chunks, `heldBytes`), `LoserTree` (a stable merge); `TopNExec`'s typed slots; `fuzz:sort_key_order_test`, `fuzz:sort_parity_fuzz_test`, `core:index_sort_test`, `sql/exec:sort_memory_test` |
 
 ## What's actually left
 
-**Ready to start, with the evidence in hand:**
+**Held for the user, from plan 15** (landed 2026-11-03 in an overnight run;
+its file's "What landed" has the measurements and every call taken):
 
-- **15 — sorts compare typed keys.** Typed key columns, an `Int` index
-  sort, row-for-row parity with today's `SortExec` until Q1. Supersedes
-  plan 01 Phase 3. It also records a live bug: `SELECT DISTINCT ... ORDER
-  BY RAND()` can fail with TimSort's "Comparison method violates its
-  general contract!".
+- **The five questions** were each taken on their recommended answer, and
+  wait for the user to confirm: Q1 (a sort's merge breaks ties by run, so
+  rows that tie on every key come in the order read, partition by
+  partition) is the visible one, and Q2 (a sort counts what its run holds)
+  moves where a spilling sort's runs end.
+- **Phase 6, normalized key prefixes,** was built and measured, and left
+  out: its gate (KeyOrder above ~30% of the full sort's CPU, or 1.5x in
+  `SortExecBench` on every shape with none slower) was not met, the
+  prototype gaining 1.03x to 1.35x. The file has its numbers and design;
+  the gate stands for any later attempt.
+- **Its follow-ups**: `WindowExec` on `KeyOrder` and `IndexSort` (Q4), and
+  the one-thread merge, now the largest cost of a spilling sort (plan 04
+  Phase 7's range partitioning).
 
 **Held for the user, from plan 13** (landed 2026-11-03 in an overnight run;
 its file's "What landed" has the measurements and every call taken):
@@ -102,10 +113,6 @@ profile or a workload demands it.
   trap: `ColRefExpr.evalVec` aliases the input column, so pooling a
   vector whose lifetime crosses an operator boundary is a correctness
   bug, not just a leak.
-- **01 Phase 3 — pre-computed sort-key tuples.** Superseded by plan 15,
-  which goes further: typed keys and no boxed rows. `SortExec`'s
-  comparator still calls `Expr.eval` per comparison
-  (`SortExec.scala:293`).
 - **04 Phase 7 / Phase 8 — range-partition SortExec, skew salting.** Both
   optional. Skew handling in particular was explicitly deferred out of
   plan 04's scope.
@@ -146,8 +153,8 @@ Project-wide rules from `CLAUDE.md`:
 
 **Read the status table first.** Most prompts below launched work that
 has since landed; they are kept as a record of how each plan was run, not
-as an invitation to run it again. Each is marked. Only 08 and 15 are
-still live as written, and 08 is gated on profiling — for the optional
+as an invitation to run it again. Each is marked. Only 08 is still live
+as written, and it is gated on profiling — for the optional
 phases listed under "What's actually left", the current prompt lives at
 the bottom of that plan's own file.
 
@@ -643,7 +650,7 @@ Step 1, csv to /dev/null and a COPY before and after Step 2, beside today's
 57 s and 1.0 GB.
 ```
 
-### 15 — Sorts compare typed keys, not boxed rows (not started; live)
+### 15 — Sorts compare typed keys, not boxed rows (landed 2026-11-03; historical — do not re-run. Its held Phase 6 and open questions are in the plan file's "What landed")
 
 ```
 Read plans/perf/15-typed-sort-keys.md and implement it in phase order, one
